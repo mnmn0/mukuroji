@@ -46,6 +46,19 @@ const dictionaries = {
     'footer.terms': '利用規約',
     'footer.support': 'サポート',
     'footer.copyright': '© 2026 mukuroji. All rights reserved.',
+    'placeholder.backToLogin': 'ログインへ戻る',
+    'placeholder.forgotPassword.title': 'パスワード再設定',
+    'placeholder.forgotPassword.description':
+      'パスワード再設定フローは後続の実装で接続します。',
+    'placeholder.privacy.title': 'プライバシーポリシー',
+    'placeholder.privacy.description':
+      'プライバシーポリシーの本文は後続の実装で追加します。',
+    'placeholder.terms.title': '利用規約',
+    'placeholder.terms.description':
+      '利用規約の本文は後続の実装で追加します。',
+    'placeholder.support.title': 'サポート',
+    'placeholder.support.description':
+      'サポートページは後続の実装で追加します。',
   },
   en: {
     'app.title': 'mukuroji',
@@ -85,6 +98,19 @@ const dictionaries = {
     'footer.terms': 'Terms of use',
     'footer.support': 'Support',
     'footer.copyright': '© 2026 mukuroji. All rights reserved.',
+    'placeholder.backToLogin': 'Back to login',
+    'placeholder.forgotPassword.title': 'Reset password',
+    'placeholder.forgotPassword.description':
+      'The password reset flow will be connected in a later implementation.',
+    'placeholder.privacy.title': 'Privacy policy',
+    'placeholder.privacy.description':
+      'The privacy policy content will be added in a later implementation.',
+    'placeholder.terms.title': 'Terms of use',
+    'placeholder.terms.description':
+      'The terms content will be added in a later implementation.',
+    'placeholder.support.title': 'Support',
+    'placeholder.support.description':
+      'The support page will be added in a later implementation.',
   },
 } as const
 
