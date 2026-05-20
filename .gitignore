@@ -26,8 +26,5 @@ bun-debug.log*
 # Local tool state
 .playwright-mcp/
 
-# Nested repositories managed separately
-cdk/
-
 # Generated screenshots
 web-vite-react.png
