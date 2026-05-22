@@ -1,0 +1,21 @@
+{
+  "name": "mukuroji",
+  "private": true,
+  "packageManager": "bun@1.3.10",
+  "workspaces": [
+    "web",
+    "server",
+    "cdk"
+  ],
+  "scripts": {
+    "web:dev": "bun --filter web dev",
+    "web:lint": "bun --filter web lint",
+    "web:build": "bun --filter web build",
+    "web:storybook": "bun --filter web storybook",
+    "web:build-storybook": "bun --filter web build-storybook",
+    "server:dev": "bun --filter server dev",
+    "cdk:build": "bun --filter cdk build",
+    "cdk:test": "bun --filter cdk test",
+    "cdk:synth": "bun --filter cdk cdk synth"
+  }
+}

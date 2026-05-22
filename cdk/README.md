@@ -6,9 +6,11 @@ The `cdk.json` file tells the CDK Toolkit how to execute your app.
 
 ## Useful commands
 
-* `bun run build`        compile typescript to js
-* `bun run watch`        watch for changes and compile
-* `bun run test`         perform the jest unit tests
-* `bun run cdk deploy`   deploy this stack to your default AWS account/region
-* `bun run cdk diff`     compare deployed stack with current state
-* `bun run cdk synth`    emits the synthesized CloudFormation template
+Run these commands from the repository root.
+
+* `bun run cdk:build`              compile typescript to js
+* `bun --filter cdk watch`         watch for changes and compile
+* `bun run cdk:test`               perform the jest unit tests
+* `bun --filter cdk cdk deploy`    deploy this stack to your default AWS account/region
+* `bun --filter cdk cdk diff`      compare deployed stack with current state
+* `bun run cdk:synth`              emits the synthesized CloudFormation template

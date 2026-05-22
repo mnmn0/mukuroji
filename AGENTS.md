@@ -19,7 +19,11 @@
 - `cdk/`: AWS CDK TypeScript プロジェクト。
 - `docs/`: ドキュメント置き場。
 
-各パッケージは独立しているため、コマンドは対象ディレクトリに移動して実行してください。
+このリポジトリは Bun workspaces です。依存管理はルートで行い、lockfile はルートの `bun.lock` に集約します。各パッケージ配下に `bun.lock` を追加しないでください。
+
+```sh
+bun install
+```
 
 ## Web
 
@@ -28,12 +32,11 @@
 主なコマンド:
 
 ```sh
-cd web
-bun run dev
-bun run lint
-bun run build
-bun run storybook
-bun run build-storybook
+bun run web:dev
+bun run web:lint
+bun run web:build
+bun run web:storybook
+bun run web:build-storybook
 ```
 
 実装方針:
@@ -48,7 +51,7 @@ bun run build-storybook
 
 確認:
 
-- UI 変更では少なくとも `bun run lint`, `bun run build`, `bun run build-storybook` を通す。
+- UI 変更では少なくとも `bun run web:lint`, `bun run web:build`, `bun run web:build-storybook` を通す。
 - Storybook を起動できる場合は対象 Story をブラウザまたはスクリーンショットで確認する。
 - Storybook の出力 `storybook-static/` は生成物なのでコミットしない。
 
@@ -59,8 +62,7 @@ bun run build-storybook
 主なコマンド:
 
 ```sh
-cd server
-bun run dev
+bun run server:dev
 ```
 
 サーバー側はまだ小さいため、追加する際はルートの責務、入力検証、レスポンス形式を明確にしてください。
@@ -72,20 +74,19 @@ bun run dev
 主なコマンド:
 
 ```sh
-cd cdk
-bun run build
-bun run test
-bun run cdk synth
+bun run cdk:build
+bun run cdk:test
+bun run cdk:synth
 ```
 
-インフラ変更では `bun run build` と `bun run test` を通し、可能なら `bun run cdk synth` で合成結果を確認してください。デプロイや AWS アカウントへ影響する操作はユーザーの明示確認を取ってください。
+インフラ変更では `bun run cdk:build` と `bun run cdk:test` を通し、可能なら `bun run cdk:synth` で合成結果を確認してください。デプロイや AWS アカウントへ影響する操作はユーザーの明示確認を取ってください。
 
 ## コミット前チェック
 
 作業内容に応じて必要な検証を実行し、結果をユーザーに伝えてください。
 
-- `web` の UI/Storybook 変更: `bun run lint`, `bun run build`, `bun run build-storybook`
-- `cdk` の変更: `bun run build`, `bun run test`
+- `web` の UI/Storybook 変更: `bun run web:lint`, `bun run web:build`, `bun run web:build-storybook`
+- `cdk` の変更: `bun run cdk:build`, `bun run cdk:test`
 - `server` の変更: 利用可能なスクリプトと変更内容に応じて確認
 
 コミット前レビューで指摘が出た場合は、対応してから再度必要な検証を行ってください。
