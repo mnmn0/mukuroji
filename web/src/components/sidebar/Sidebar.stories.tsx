@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { createSidebarLabels } from '../../i18n'
 import { Sidebar } from './Sidebar'
 import type { SidebarTeam } from './Sidebar'
 
@@ -32,6 +33,7 @@ const meta = {
   },
   args: {
     teams,
+    labels: createSidebarLabels('ja'),
     defaultActiveTeamId: 'johns-first-team',
     defaultActiveProjectId: 'refero',
     inboxCount: 3,
@@ -57,8 +59,15 @@ export const Collapsed: Story = {
   },
 }
 
+export const English: Story = {
+  args: {
+    labels: createSidebarLabels('en'),
+  },
+}
+
 export const ProjectListScrolled: Story = {
   args: {
+    labels: createSidebarLabels('ja'),
     defaultActiveTeamId: 'johns-first-team',
     defaultActiveProjectId: 'refero',
     teams: [

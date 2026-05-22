@@ -1,3 +1,5 @@
+import type { SidebarLabels, SidebarNavId } from './components/sidebar'
+
 export const localeOptions = [
   { locale: 'ja', label: '日本語' },
   { locale: 'en', label: 'English' },
@@ -46,6 +48,25 @@ const dictionaries = {
     'footer.terms': '利用規約',
     'footer.support': 'サポート',
     'footer.copyright': '© 2026 mukuroji. All rights reserved.',
+    'sidebar.aria': 'メインサイドバー',
+    'sidebar.globalNavigation': 'グローバルナビゲーション',
+    'sidebar.utilityNavigation': '補助ナビゲーション',
+    'sidebar.collapse': 'サイドバーを折りたたむ',
+    'sidebar.expand': 'サイドバーを展開する',
+    'sidebar.teamProjects': 'チーム / プロジェクト',
+    'sidebar.createTeam': 'チームを追加',
+    'sidebar.teamOverview': 'チーム概要',
+    'sidebar.members': 'メンバー',
+    'sidebar.projectGroup': 'プロジェクト',
+    'sidebar.unreadCount': '{count}件の未読',
+    'sidebar.nav.home': 'ホーム',
+    'sidebar.nav.myTasks': 'マイタスク',
+    'sidebar.nav.inbox': '受信箱',
+    'sidebar.nav.dashboard': 'ダッシュボード',
+    'sidebar.nav.reports': 'レポート',
+    'sidebar.nav.invite': '招待する',
+    'sidebar.nav.help': 'ヘルプ',
+    'sidebar.nav.settings': '設定',
     'placeholder.backToLogin': 'ログインへ戻る',
     'placeholder.forgotPassword.title': 'パスワード再設定',
     'placeholder.forgotPassword.description':
@@ -98,6 +119,25 @@ const dictionaries = {
     'footer.terms': 'Terms of use',
     'footer.support': 'Support',
     'footer.copyright': '© 2026 mukuroji. All rights reserved.',
+    'sidebar.aria': 'Main sidebar',
+    'sidebar.globalNavigation': 'Global navigation',
+    'sidebar.utilityNavigation': 'Utility navigation',
+    'sidebar.collapse': 'Collapse sidebar',
+    'sidebar.expand': 'Expand sidebar',
+    'sidebar.teamProjects': 'Teams / Projects',
+    'sidebar.createTeam': 'Create team',
+    'sidebar.teamOverview': 'Team overview',
+    'sidebar.members': 'Members',
+    'sidebar.projectGroup': 'Projects',
+    'sidebar.unreadCount': '{count} unread',
+    'sidebar.nav.home': 'Home',
+    'sidebar.nav.myTasks': 'My tasks',
+    'sidebar.nav.inbox': 'Inbox',
+    'sidebar.nav.dashboard': 'Dashboard',
+    'sidebar.nav.reports': 'Reports',
+    'sidebar.nav.invite': 'Invite',
+    'sidebar.nav.help': 'Help',
+    'sidebar.nav.settings': 'Settings',
     'placeholder.backToLogin': 'Back to login',
     'placeholder.forgotPassword.title': 'Reset password',
     'placeholder.forgotPassword.description':
@@ -136,4 +176,43 @@ export function setLocalePreference(locale: Locale) {
 
 export function createTranslator(locale: Locale) {
   return (key: MessageKey) => dictionaries[locale][key]
+}
+
+export function createSidebarLabels(locale: Locale): SidebarLabels {
+  const t = createTranslator(locale)
+  const navKeyMap: Record<SidebarNavId, MessageKey> = {
+    home: 'sidebar.nav.home',
+    'my-tasks': 'sidebar.nav.myTasks',
+    inbox: 'sidebar.nav.inbox',
+    dashboard: 'sidebar.nav.dashboard',
+    reports: 'sidebar.nav.reports',
+    invite: 'sidebar.nav.invite',
+    help: 'sidebar.nav.help',
+    settings: 'sidebar.nav.settings',
+  }
+
+  return {
+    ariaLabel: t('sidebar.aria'),
+    globalNavigation: t('sidebar.globalNavigation'),
+    utilityNavigation: t('sidebar.utilityNavigation'),
+    collapse: t('sidebar.collapse'),
+    expand: t('sidebar.expand'),
+    teamProjects: t('sidebar.teamProjects'),
+    createTeam: t('sidebar.createTeam'),
+    teamOverview: t('sidebar.teamOverview'),
+    members: t('sidebar.members'),
+    projectGroup: t('sidebar.projectGroup'),
+    unreadCount: (count) =>
+      t('sidebar.unreadCount').replace('{count}', String(count)),
+    nav: {
+      home: t(navKeyMap.home),
+      'my-tasks': t(navKeyMap['my-tasks']),
+      inbox: t(navKeyMap.inbox),
+      dashboard: t(navKeyMap.dashboard),
+      reports: t(navKeyMap.reports),
+      invite: t(navKeyMap.invite),
+      help: t(navKeyMap.help),
+      settings: t(navKeyMap.settings),
+    },
+  }
 }

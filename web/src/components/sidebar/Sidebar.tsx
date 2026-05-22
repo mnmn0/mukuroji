@@ -33,8 +33,24 @@ export type SidebarNavId =
 
 export type SidebarTeamViewId = 'overview' | 'members'
 
+export type SidebarLabels = {
+  ariaLabel: string
+  globalNavigation: string
+  utilityNavigation: string
+  collapse: string
+  expand: string
+  teamProjects: string
+  createTeam: string
+  teamOverview: string
+  members: string
+  projectGroup: string
+  unreadCount: (count: number) => string
+  nav: Record<SidebarNavId, string>
+}
+
 export type SidebarProps = {
   workspaceName?: string
+  labels?: PartialSidebarLabels
   activeNavId?: SidebarNavId
   defaultActiveNavId?: SidebarNavId
   activeTeamViewId?: SidebarTeamViewId
@@ -61,24 +77,51 @@ export type SidebarProps = {
 
 type MainNavItem = {
   id: SidebarNavId
-  label: string
   icon: ComponentType<SidebarIconProps>
   badge?: number
 }
 
 const mainNavItems: MainNavItem[] = [
-  { id: 'home', label: 'ホーム', icon: HomeIcon },
-  { id: 'my-tasks', label: 'マイタスク', icon: CheckCircleIcon },
-  { id: 'inbox', label: '受信箱', icon: BellIcon },
-  { id: 'dashboard', label: 'ダッシュボード', icon: DashboardIcon },
-  { id: 'reports', label: 'レポート', icon: ReportIcon },
+  { id: 'home', icon: HomeIcon },
+  { id: 'my-tasks', icon: CheckCircleIcon },
+  { id: 'inbox', icon: BellIcon },
+  { id: 'dashboard', icon: DashboardIcon },
+  { id: 'reports', icon: ReportIcon },
 ]
 
 const utilityNavItems: MainNavItem[] = [
-  { id: 'invite', label: '招待する', icon: UserPlusIcon },
-  { id: 'help', label: 'ヘルプ', icon: HelpCircleIcon },
-  { id: 'settings', label: '設定', icon: SettingsIcon },
+  { id: 'invite', icon: UserPlusIcon },
+  { id: 'help', icon: HelpCircleIcon },
+  { id: 'settings', icon: SettingsIcon },
 ]
+
+const defaultLabels: SidebarLabels = {
+  ariaLabel: 'メインサイドバー',
+  globalNavigation: 'グローバルナビゲーション',
+  utilityNavigation: '補助ナビゲーション',
+  collapse: 'サイドバーを折りたたむ',
+  expand: 'サイドバーを展開する',
+  teamProjects: 'チーム / プロジェクト',
+  createTeam: 'チームを追加',
+  teamOverview: 'チーム概要',
+  members: 'メンバー',
+  projectGroup: 'プロジェクト',
+  unreadCount: (count) => `${count}件の未読`,
+  nav: {
+    home: 'ホーム',
+    'my-tasks': 'マイタスク',
+    inbox: '受信箱',
+    dashboard: 'ダッシュボード',
+    reports: 'レポート',
+    invite: '招待する',
+    help: 'ヘルプ',
+    settings: '設定',
+  },
+}
+
+type PartialSidebarLabels = Partial<Omit<SidebarLabels, 'nav'>> & {
+  nav?: Partial<SidebarLabels['nav']>
+}
 
 const projectToneClasses: Record<SidebarProjectTone, string> = {
   blue: 'border-blue-400/70 text-blue-300 bg-blue-500/10',
@@ -89,6 +132,7 @@ const projectToneClasses: Record<SidebarProjectTone, string> = {
 
 export function Sidebar({
   workspaceName = 'mukuroji',
+  labels,
   activeNavId: controlledActiveNavId,
   defaultActiveNavId,
   activeTeamViewId: controlledActiveTeamViewId,
@@ -112,6 +156,7 @@ export function Sidebar({
   onSelectProject,
   onExpandedTeamIdsChange,
 }: SidebarProps) {
+  const resolvedLabels = resolveLabels(labels)
   const defaultProjectTeamId = defaultActiveProjectId
     ? findProjectTeamId(teams, defaultActiveProjectId)
     : undefined
@@ -258,7 +303,7 @@ export function Sidebar({
   return (
     <aside
       className={`flex h-screen flex-none flex-col overflow-hidden bg-[#03172f] py-6 text-white shadow-[18px_0_38px_rgba(5,23,48,0.18)] transition-all duration-200 ${isCollapsed ? 'w-[84px] px-3' : 'w-[320px] px-5'} ${className}`}
-      aria-label="メインサイドバー"
+      aria-label={resolvedLabels.ariaLabel}
       data-collapsed={isCollapsed}
     >
       <div
@@ -275,7 +320,7 @@ export function Sidebar({
         <button
           className="grid h-9 w-9 flex-none place-items-center rounded-lg text-slate-200 transition hover:bg-white/10 hover:text-white"
           type="button"
-          aria-label={isCollapsed ? 'サイドバーを展開する' : 'サイドバーを折りたたむ'}
+          aria-label={isCollapsed ? resolvedLabels.expand : resolvedLabels.collapse}
           aria-expanded={!isCollapsed}
           onClick={() => updateCollapsed(!isCollapsed)}
         >
@@ -287,7 +332,7 @@ export function Sidebar({
         </button>
       </div>
 
-      <nav className="space-y-1" aria-label="グローバルナビゲーション">
+      <nav className="space-y-1" aria-label={resolvedLabels.globalNavigation}>
         {navItems.map((item) => (
           <NavButton
             key={item.id}
@@ -295,8 +340,9 @@ export function Sidebar({
             collapsed={isCollapsed}
             id={item.id}
             icon={item.icon}
-            label={item.label}
+            label={resolvedLabels.nav[item.id]}
             badge={item.badge}
+            unreadCount={resolvedLabels.unreadCount}
             onSelect={updateActiveNav}
           />
         ))}
@@ -304,11 +350,11 @@ export function Sidebar({
 
       {!isCollapsed ? (
         <div className="mt-7 flex items-center justify-between px-1 text-[14px] font-semibold text-slate-200">
-          <span className="truncate">チーム / プロジェクト</span>
+          <span className="truncate">{resolvedLabels.teamProjects}</span>
           <button
             className="grid h-8 w-8 place-items-center rounded-lg text-slate-100 transition hover:bg-white/10"
             type="button"
-            aria-label="チームを追加"
+            aria-label={resolvedLabels.createTeam}
             onClick={onCreateTeam}
           >
             <PlusIcon className="h-5 w-5" />
@@ -326,6 +372,7 @@ export function Sidebar({
               activeTeamViewId={activeTeamViewId}
               activeProjectId={activeProjectId}
               projectTeamId={projectTeamId}
+              labels={resolvedLabels}
               collapsed={isCollapsed}
               expanded={expandedTeamIds.includes(team.id)}
               onToggleTeam={toggleTeam}
@@ -336,7 +383,7 @@ export function Sidebar({
         </div>
       </div>
 
-      <nav className="mt-4 space-y-1 border-t border-white/10 pt-4" aria-label="補助ナビゲーション">
+      <nav className="mt-4 space-y-1 border-t border-white/10 pt-4" aria-label={resolvedLabels.utilityNavigation}>
         {utilityNavItems.map((item) => (
           <NavButton
             key={item.id}
@@ -344,7 +391,8 @@ export function Sidebar({
             collapsed={isCollapsed}
             id={item.id}
             icon={item.icon}
-            label={item.label}
+            label={resolvedLabels.nav[item.id]}
+            unreadCount={resolvedLabels.unreadCount}
             onSelect={updateActiveNav}
           />
         ))}
@@ -360,6 +408,7 @@ function NavButton({
   icon: Icon,
   label,
   badge,
+  unreadCount,
   onSelect,
 }: {
   active: boolean
@@ -368,9 +417,11 @@ function NavButton({
   icon: ComponentType<SidebarIconProps>
   label: string
   badge?: number
+  unreadCount: (count: number) => string
   onSelect: (navId: SidebarNavId) => void
 }) {
-  const accessibleLabel = badge ? `${label} ${badge}件の未読` : label
+  const badgeLabel = badge ? unreadCount(badge) : undefined
+  const accessibleLabel = badgeLabel ? `${label} ${badgeLabel}` : label
 
   return (
     <button
@@ -391,7 +442,7 @@ function NavButton({
       {badge ? (
         <span
           className={`grid h-6 min-w-6 place-items-center rounded-full bg-blue-500 px-2 text-[12px] font-bold leading-none text-white shadow-[0_8px_20px_rgba(37,99,235,0.42)] ${collapsed ? 'absolute right-0 top-0 h-5 min-w-5 px-1 text-[11px]' : ''}`}
-          aria-label={`${badge}件の未読`}
+          aria-label={badgeLabel}
         >
           {badge}
         </span>
@@ -406,6 +457,7 @@ function TeamGroup({
   activeTeamViewId,
   activeProjectId,
   projectTeamId,
+  labels,
   collapsed,
   expanded,
   onToggleTeam,
@@ -417,6 +469,7 @@ function TeamGroup({
   activeTeamViewId?: SidebarTeamViewId
   activeProjectId?: string
   projectTeamId?: string
+  labels: SidebarLabels
   collapsed: boolean
   expanded: boolean
   onToggleTeam: (teamId: string) => void
@@ -465,18 +518,18 @@ function TeamGroup({
           <SubNavButton
             active={isTeamActive && activeTeamViewId === 'overview'}
             icon={PanelIcon}
-            label="チーム概要"
+            label={labels.teamOverview}
             onClick={() => onSelectTeamView(team.id, 'overview')}
           />
           <SubNavButton
             active={isTeamActive && activeTeamViewId === 'members'}
             icon={UsersIcon}
-            label="メンバー"
+            label={labels.members}
             onClick={() => onSelectTeamView(team.id, 'members')}
           />
           <div className="flex h-7 items-center gap-2 px-1 text-[15px] font-medium text-slate-100">
             <ChevronDownIcon className="h-4 w-4 flex-none" />
-            <span className="truncate">プロジェクト</span>
+            <span className="truncate">{labels.projectGroup}</span>
           </div>
           <div className="space-y-1 pl-5">
             {team.projects?.map((project) => (
@@ -565,6 +618,17 @@ function ensureIncludes(values: string[], value: string) {
 
 function findProjectTeamId(teams: SidebarTeam[], projectId: string) {
   return teams.find((team) => team.projects?.some((project) => project.id === projectId))?.id
+}
+
+function resolveLabels(labels: PartialSidebarLabels | undefined): SidebarLabels {
+  return {
+    ...defaultLabels,
+    ...labels,
+    nav: {
+      ...defaultLabels.nav,
+      ...labels?.nav,
+    },
+  }
 }
 
 function SvgBase({
