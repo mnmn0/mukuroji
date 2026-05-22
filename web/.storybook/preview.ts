@@ -7,6 +7,11 @@ const preview: Preview = {
     controls: {
       expanded: true,
     },
+    options: {
+      storySort: {
+        order: ['Introduction', 'Application', 'Design System'],
+      },
+    },
   },
 }
 

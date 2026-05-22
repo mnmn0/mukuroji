@@ -25,7 +25,7 @@ const teams: SidebarTeam[] = [
 ]
 
 const meta = {
-  title: 'Navigation/Sidebar',
+  title: 'Application/Navigation/Sidebar',
   component: Sidebar,
   parameters: {
     layout: 'fullscreen',
