@@ -1,0 +1,141 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+inheritance: true
+language: "ja-JP"
+tone_instructions: "日本語で簡潔に、根拠・影響・修正方針を明確にしてください。軽微な好みの指摘は Nitpick と明示してください。"
+early_access: false
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_instructions: "変更の目的、主な影響範囲、確認したテストや未確認事項を日本語で簡潔にまとめてください。"
+  review_status: true
+  review_details: true
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: false
+  estimate_code_review_effort: true
+  poem: false
+  enable_prompt_for_ai_agents: true
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    ignore_title_keywords:
+      - "wip"
+      - "draft"
+
+  path_filters:
+    - "!**/node_modules/**"
+    - "!**/dist/**"
+    - "!**/build/**"
+    - "!**/coverage/**"
+    - "!**/*.tsbuildinfo"
+    - "!web/storybook-static/**"
+    - "!cdk/cdk.out/**"
+    - "!cdk/bin/*.js"
+    - "!cdk/bin/*.d.ts"
+    - "!cdk/lib/*.js"
+    - "!cdk/lib/*.d.ts"
+    - "!.playwright-mcp/**"
+    - "!.floci/generated/**"
+    - "!web-vite-react.png"
+
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        AGENTS.md の方針を前提にレビューしてください。既存構成と命名への整合、無関係な整形やリファクタリングの混入、テスト/検証不足、セキュリティ、アクセシビリティ、保守性を優先して確認してください。
+    - path: "web/**"
+      instructions: |
+        web は React 19、React Router、Tailwind CSS、Storybook のフロントエンドです。ルーティングは web/src/routes/router.tsx に寄せ、App.tsx を肥大化させない方針です。表示文言は i18n/createTranslator/createSidebarLabels の方針に合わせ、固定文言をコンポーネントに閉じ込めていないか確認してください。コンポーネント変更では Storybook の Story 追加/更新と、bun run web:lint、bun run web:build、bun run web:build-storybook の確認が必要です。
+    - path: "web/src/**"
+      instructions: |
+        TypeScript の exported 宣言には TSDoc が必要です。export 有無にかかわらず type/interface は宣言本体と各プロパティ、class は宣言本体とメンバー変数に TSDoc が必要です。UI 変更ではキーボード操作、ARIA、レスポンシブ時の文字あふれ、BrandMark と mukuroji 表記の一貫性を確認してください。
+    - path: "server/**"
+      instructions: |
+        server は Hono + Bun です。ルートの責務、入力検証、Cognito/API エラーの扱い、レスポンス形式が明確か確認してください。秘密情報や環境依存値をコードに固定していないかも確認してください。
+    - path: "cdk/**"
+      instructions: |
+        cdk は AWS CDK TypeScript プロジェクトです。最小権限、安定した論理 ID、環境依存値の扱い、意図しないデプロイ影響を重点的に確認してください。インフラ変更では bun run cdk:build、bun run cdk:test、可能なら bun run cdk:synth の確認が必要です。AWS アカウントへ影響する操作はユーザーの明示確認が必要です。
+    - path: "docs/**"
+      instructions: |
+        ドキュメント変更は実装と矛盾していないか、後続の作業者が判断できる具体性があるかを確認してください。
+
+  labeling_instructions:
+    - label: "frontend"
+      instructions: "web/ 配下、React UI、ルーティング、i18n、Storybook、Tailwind CSS に関する変更。"
+    - label: "server"
+      instructions: "server/ 配下、Hono API、Cognito 連携、Bun サーバーに関する変更。"
+    - label: "infrastructure"
+      instructions: "cdk/ 配下、AWS CDK、インフラ設定、デプロイ影響に関する変更。"
+    - label: "documentation"
+      instructions: "docs/、README、AGENTS.md などドキュメントに関する変更。"
+  auto_apply_labels: false
+
+  pre_merge_checks:
+    title:
+      mode: "warning"
+      requirements: "PR タイトルは変更内容が分かる簡潔な表現にしてください。"
+    description:
+      mode: "warning"
+    custom_checks:
+      - name: "TypeScript TSDoc policy"
+        mode: "warning"
+        instructions: |
+          変更された TypeScript ファイルで、AGENTS.md の TSDoc 方針に違反していないか確認してください。exported 宣言には TSDoc が必要です。export 有無にかかわらず type/interface は宣言本体と各プロパティ、class は宣言本体とメンバー変数に TSDoc が必要です。
+      - name: "Bun workspace discipline"
+        mode: "warning"
+        instructions: |
+          依存管理はリポジトリルートで行い、lockfile はルートの bun.lock に集約してください。web/、server/、cdk/ 配下に bun.lock など個別 lockfile を追加していないか確認してください。
+
+  tools:
+    eslint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    yamllint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    checkov:
+      enabled: true
+    actionlint:
+      enabled: true
+    hadolint:
+      enabled: true
+    osvScanner:
+      enabled: true
+
+chat:
+  auto_reply: true
+  art: false
+
+knowledge_base:
+  web_search:
+    enabled: true
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "AGENTS.md"
+      - "**/AGENTS.md"
+
+code_generation:
+  docstrings:
+    language: "ja-JP"
+    path_instructions:
+      - path: "**/*.ts"
+        instructions: "このリポジトリの TSDoc 方針に従い、宣言本体と必要なメンバー/プロパティを日本語で簡潔に説明してください。"
+      - path: "**/*.tsx"
+        instructions: "このリポジトリの TSDoc 方針に従い、宣言本体と必要なメンバー/プロパティを日本語で簡潔に説明してください。"
+  unit_tests:
+    path_instructions:
+      - path: "web/**"
+        instructions: "React コンポーネントは Storybook で単体確認できる前提を守り、ユーザー操作、i18n、アクセシビリティ、状態変化を重視してください。"
+      - path: "server/**"
+        instructions: "Hono ルートでは正常系、入力不正、外部 API エラー、認証失敗の分岐を重視してください。"
+      - path: "cdk/**"
+        instructions: "CDK の合成結果、リソース設定、セキュリティ上重要なプロパティの検証を重視してください。"
