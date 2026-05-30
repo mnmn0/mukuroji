@@ -8,11 +8,23 @@ import {
   type MessageKey,
 } from '../i18n'
 
+/**
+ * 未実装ページの共通 placeholder に渡す i18n key です。
+ */
 type PlaceholderPageProps = {
+  /**
+   * ページ見出しとして表示する翻訳キーです。
+   */
   titleKey: MessageKey
+  /**
+   * ページ説明文として表示する翻訳キーです。
+   */
   descriptionKey: MessageKey
 }
 
+/**
+ * 後続実装待ちのページに表示する共通 placeholder 画面です。
+ */
 export function PlaceholderPage({
   titleKey,
   descriptionKey,

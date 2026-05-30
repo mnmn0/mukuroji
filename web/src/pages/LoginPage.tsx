@@ -5,7 +5,9 @@ import {
   type FormEvent,
   type ReactNode,
 } from 'react'
-import { Link } from 'react-router'
+import { Link, useNavigate } from 'react-router'
+import { ApiError, loginWithPassword } from '../auth/api'
+import { getAuthSession, saveAuthSession } from '../auth/session'
 import { BrandMark } from '../components/BrandMark'
 import {
   ChevronIcon,
@@ -21,15 +23,42 @@ import {
   localeOptions,
   setLocalePreference,
   type Locale,
+  type MessageKey,
 } from '../i18n'
 
+/**
+ * ログイン画面フッターリンクの props です。
+ */
+type FooterLinkProps = {
+  /**
+   * リンク内に表示する要素です。
+   */
+  children: ReactNode
+  /**
+   * React Router に渡す遷移先パスです。
+   */
+  to: string
+}
+
+/**
+ * Cognito のパスワード認証に接続したログイン画面です。
+ */
 export function LoginPage() {
+  const navigate = useNavigate()
   const [locale, setLocale] = useState<Locale>(() => getInitialLocale())
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [remember, setRemember] = useState(true)
   const [showPassword, setShowPassword] = useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [errorKey, setErrorKey] = useState<MessageKey | null>(null)
   const t = useMemo(() => createTranslator(locale), [locale])
+
+  useEffect(() => {
+    if (getAuthSession()) {
+      navigate('/dashboard', { replace: true })
+    }
+  }, [navigate])
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -42,8 +71,25 @@ export function LoginPage() {
     setLocalePreference(nextLocale)
   }
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+
+    if (isSubmitting) {
+      return
+    }
+
+    setIsSubmitting(true)
+    setErrorKey(null)
+
+    try {
+      const session = await loginWithPassword({ email, password, remember })
+      saveAuthSession(session)
+      navigate('/dashboard', { replace: true })
+    } catch (error) {
+      setErrorKey(resolveLoginErrorKey(error))
+    } finally {
+      setIsSubmitting(false)
+    }
   }
 
   return (
@@ -99,13 +145,17 @@ export function LoginPage() {
                 <MailIcon />
                 <input
                   className="min-w-0 border-0 bg-transparent text-base font-bold text-[var(--ink)] outline-none placeholder:text-[#8d98a8]"
+                  disabled={isSubmitting}
                   id="email"
                   name="email"
                   type="email"
                   autoComplete="email"
                   placeholder={t('login.emailPlaceholder')}
                   value={email}
-                  onChange={(event) => setEmail(event.target.value)}
+                  onChange={(event) => {
+                    setEmail(event.target.value)
+                    setErrorKey(null)
+                  }}
                   required
                 />
               </span>
@@ -119,13 +169,17 @@ export function LoginPage() {
                 <LockIcon />
                 <input
                   className="min-w-0 border-0 bg-transparent text-base font-bold text-[var(--ink)] outline-none placeholder:text-[#8d98a8]"
+                  disabled={isSubmitting}
                   id="password"
                   name="password"
                   type={showPassword ? 'text' : 'password'}
                   autoComplete="current-password"
                   placeholder={t('login.passwordPlaceholder')}
                   value={password}
-                  onChange={(event) => setPassword(event.target.value)}
+                  onChange={(event) => {
+                    setPassword(event.target.value)
+                    setErrorKey(null)
+                  }}
                   required
                 />
                 <button
@@ -149,6 +203,7 @@ export function LoginPage() {
                   className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[#cfd8e5] bg-white checked:border-[#0063ed] checked:bg-[#0063ed] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(0,101,238,0.18)]"
                   type="checkbox"
                   checked={remember}
+                  disabled={isSubmitting}
                   onChange={(event) => setRemember(event.target.checked)}
                 />
                 <svg
@@ -162,11 +217,21 @@ export function LoginPage() {
               <span>{t('login.remember')}</span>
             </label>
 
+            {errorKey ? (
+              <p
+                className="m-0 rounded-lg border border-[#ffd2d2] bg-[#fff5f5] px-4 py-3 text-sm font-bold leading-6 text-[#b42318]"
+                role="alert"
+              >
+                {t(errorKey)}
+              </p>
+            ) : null}
+
             <button
-              className="min-h-[60px] w-full cursor-pointer rounded-lg border-0 bg-linear-to-br from-[#006cff] to-[#004ec8] text-lg font-black text-white shadow-[0_14px_30px_rgba(0,89,216,0.22)] transition-[transform,box-shadow,filter] duration-150 hover:-translate-y-px hover:saturate-[1.08] hover:shadow-[0_18px_36px_rgba(0,89,216,0.28)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(0,101,238,0.22)]"
+              className="min-h-[60px] w-full cursor-pointer rounded-lg border-0 bg-linear-to-br from-[#006cff] to-[#004ec8] text-lg font-black text-white shadow-[0_14px_30px_rgba(0,89,216,0.22)] transition-[transform,box-shadow,filter] duration-150 hover:-translate-y-px hover:saturate-[1.08] hover:shadow-[0_18px_36px_rgba(0,89,216,0.28)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(0,101,238,0.22)] disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:translate-y-0 disabled:hover:saturate-100"
+              disabled={isSubmitting}
               type="submit"
             >
-              {t('login.submit')}
+              {isSubmitting ? t('login.loading') : t('login.submit')}
             </button>
 
             <Link
@@ -227,13 +292,24 @@ export function LoginPage() {
   )
 }
 
+function resolveLoginErrorKey(error: unknown): MessageKey {
+  if (error instanceof ApiError) {
+    if (error.status === 401) {
+      return 'login.errorInvalid'
+    }
+
+    if (error.status === 503 || error.status === 502) {
+      return 'login.errorUnavailable'
+    }
+  }
+
+  return 'login.errorUnknown'
+}
+
 function FooterLink({
   children,
   to,
-}: {
-  children: ReactNode
-  to: string
-}) {
+}: FooterLinkProps) {
   return (
     <Link
       className="font-bold text-[var(--muted-strong)] no-underline hover:text-[#005fe7] hover:underline focus-visible:text-[#005fe7] focus-visible:underline focus-visible:outline-none"
