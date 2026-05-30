@@ -8,6 +8,8 @@
     "cdk"
   ],
   "scripts": {
+    "floci:up": "docker compose up -d floci",
+    "floci:down": "docker compose down",
     "web:dev": "bun --filter web dev",
     "web:lint": "bun --filter web lint",
     "web:build": "bun --filter web build",

@@ -25,6 +25,7 @@ bun-debug.log*
 
 # Local tool state
 .playwright-mcp/
+.floci/generated/
 
 # Generated screenshots
 web-vite-react.png
