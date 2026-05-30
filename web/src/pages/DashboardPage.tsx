@@ -24,23 +24,6 @@ type DashboardStatProps = {
   value: string
 }
 
-const teams: SidebarTeam[] = [
-  {
-    id: 'core-team',
-    name: 'Core Team',
-    expanded: true,
-    projects: [
-      { id: 'product-roadmap', name: 'Product Roadmap', tone: 'blue' },
-      { id: 'release-plan', name: 'Release Plan', tone: 'green' },
-      { id: 'customer-feedback', name: 'Customer Feedback', tone: 'purple' },
-    ],
-  },
-  {
-    id: 'design-team',
-    name: 'Design Team',
-  },
-]
-
 /**
  * Cognito 認証後に表示するローカル検証用ダッシュボード画面です。
  */
@@ -51,6 +34,37 @@ export function DashboardPage() {
   const [isLoading, setIsLoading] = useState(true)
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
+  const teams = useMemo<SidebarTeam[]>(
+    () => [
+      {
+        id: 'core-team',
+        name: t('dashboard.team.core'),
+        expanded: true,
+        projects: [
+          {
+            id: 'product-roadmap',
+            name: t('dashboard.project.productRoadmap'),
+            tone: 'blue',
+          },
+          {
+            id: 'release-plan',
+            name: t('dashboard.project.releasePlan'),
+            tone: 'green',
+          },
+          {
+            id: 'customer-feedback',
+            name: t('dashboard.project.customerFeedback'),
+            tone: 'purple',
+          },
+        ],
+      },
+      {
+        id: 'design-team',
+        name: t('dashboard.team.design'),
+      },
+    ],
+    [t],
+  )
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -58,20 +72,37 @@ export function DashboardPage() {
   }, [locale, t])
 
   useEffect(() => {
+    let isMounted = true
     const session = getAuthSession()
 
     if (!session) {
       navigate('/', { replace: true })
-      return
+      return () => {
+        isMounted = false
+      }
     }
 
     getCurrentUser(session.accessToken)
-      .then(setUser)
-      .catch(() => {
-        clearAuthSession()
-        navigate('/', { replace: true })
+      .then((currentUser) => {
+        if (isMounted) {
+          setUser(currentUser)
+        }
       })
-      .finally(() => setIsLoading(false))
+      .catch(() => {
+        if (isMounted) {
+          clearAuthSession()
+          navigate('/', { replace: true })
+        }
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsLoading(false)
+        }
+      })
+
+    return () => {
+      isMounted = false
+    }
   }, [navigate])
 
   const handleLogout = () => {

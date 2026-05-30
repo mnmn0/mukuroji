@@ -178,6 +178,15 @@ app.get('/api/health', (c) => {
   return c.json({ ok: true })
 })
 
+/**
+ * メールアドレスとパスワードで Cognito 認証を実行する login endpoint です。
+ *
+ * @remarks
+ * `LoginRequestBody` の `email` は trim し、`email` と `password` の存在を検証します。
+ * 成功時は `accessToken`, `idToken`, `refreshToken`, `expiresAt`, `tokenType` を返します。
+ * 未入力は 400、未対応 challenge は 409、Cognito 由来の認証失敗や upstream failure は
+ * `toAuthErrorResponse` に委譲します。
+ */
 app.post('/api/auth/login', async (c) => {
   const body = await readJson<LoginRequestBody>(c.req)
   const email = typeof body?.email === 'string' ? body.email.trim() : ''
@@ -214,6 +223,14 @@ app.post('/api/auth/login', async (c) => {
   }
 })
 
+/**
+ * Bearer access token から現在の Cognito ユーザー情報を返す endpoint です。
+ *
+ * @remarks
+ * `Authorization: Bearer <accessToken>` header を要求し、形式が合わない場合は 401 を返します。
+ * 成功時は `username` と Cognito user attributes の map を返します。
+ * Cognito の `getUser` 失敗は `toAuthErrorResponse` に委譲します。
+ */
 app.get('/api/auth/me', async (c) => {
   const authorization = c.req.header('Authorization') ?? ''
   const accessToken = authorization.match(/^Bearer\s+(.+)$/i)?.[1]
@@ -252,6 +269,16 @@ function toAuthErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'Unexpected authentication error.' }, 500)
   }
 
+  if (error.code === 'CognitoTimeout') {
+    console.error(error)
+    return c.json({ message: 'Cognito local service timed out.' }, 504)
+  }
+
+  if (error.code === 'InvalidCognitoResponse' || error.status === 200 || !error.code) {
+    console.error(error)
+    return c.json({ message: 'Cognito local service returned an invalid response.' }, 502)
+  }
+
   if (error.code === 'NotAuthorizedException' || error.code === 'UserNotFoundException') {
     return c.json({ message: 'Invalid email or password.' }, 401)
   }
@@ -261,6 +288,7 @@ function toAuthErrorResponse(c: Context, error: unknown) {
   }
 
   if (error.status >= 500) {
+    console.error(error)
     return c.json({ message: 'Cognito local service is unavailable.' }, 502)
   }
 
@@ -277,6 +305,11 @@ class FlociCognitoClient {
   private readonly endpoint = trimTrailingSlash(
     Bun.env.COGNITO_ENDPOINT ?? Bun.env.AWS_ENDPOINT_URL ?? 'http://localhost:4566',
   )
+
+  /**
+   * Cognito HTTP request を abort するまでの milliseconds です。
+   */
+  private readonly requestTimeoutMs = 5000
 
   /**
    * 明示指定された Cognito user pool ID です。
@@ -401,6 +434,8 @@ class FlociCognitoClient {
    */
   private async request<T>(action: string, payload: Record<string, unknown>) {
     let response: Response
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), this.requestTimeoutMs)
 
     try {
       response = await fetch(`${this.endpoint}/`, {
@@ -410,19 +445,42 @@ class FlociCognitoClient {
           'X-Amz-Target': `AWSCognitoIdentityProviderService.${action}`,
         },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       })
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown network error.'
-      throw new CognitoServiceError(503, 'CognitoUnavailable', message)
+      const isAbort = error instanceof Error && error.name === 'AbortError'
+      const message = isAbort
+        ? 'Cognito request timed out.'
+        : error instanceof Error
+          ? error.message
+          : 'Unknown network error.'
+
+      throw new CognitoServiceError(
+        isAbort ? 504 : 503,
+        isAbort ? 'CognitoTimeout' : 'CognitoUnavailable',
+        message,
+      )
+    } finally {
+      clearTimeout(timeoutId)
     }
 
     const data = await parseJsonResponse<T | CognitoErrorPayload>(response)
 
     if (!response.ok) {
       const errorPayload = data as CognitoErrorPayload
+      const errorCode = normalizeCognitoErrorCode(errorPayload.__type)
+
+      if (!errorCode) {
+        throw new CognitoServiceError(
+          response.status,
+          'InvalidCognitoResponse',
+          errorPayload.message ?? errorPayload.Message ?? response.statusText,
+        )
+      }
+
       throw new CognitoServiceError(
         response.status,
-        normalizeCognitoErrorCode(errorPayload.__type) ?? 'CognitoError',
+        errorCode,
         errorPayload.message ?? errorPayload.Message ?? response.statusText,
       )
     }
