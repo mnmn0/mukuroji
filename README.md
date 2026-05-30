@@ -19,7 +19,7 @@ bun install
 
 ## 開発
 
-Floci + Cognito:
+Floci + Cognito + DynamoDB:
 
 ```sh
 bun run floci:up
@@ -38,6 +38,17 @@ Floci の ready hook がローカル Cognito を初期化します。作成さ�
 - パスワード: `Password123!`
 
 API サーバーはデフォルトで `http://localhost:4566` の Floci Cognito に接続し、`mukuroji-local` ユーザープールと `mukuroji-web-local` クライアントを自動検出します。生成された値は `.floci/generated/cognito.env` に出力されます。
+
+同じ ready hook で DynamoDB table `mukuroji-dashboard-local` も作成し、ダッシュボード集計用の `summary` item を投入します。
+
+Floci 上の Lambda + API Gateway に backend をデプロイする場合:
+
+```sh
+bun run floci:up
+bun run floci:deploy-backend
+```
+
+`floci:deploy-backend` は `server/src/index.ts` を Node.js 22 Lambda 用に bundle し、Floci の REST API Gateway から Lambda に proxy します。React から直接 Lambda 経由 API を呼ぶ場合は、生成された `.floci/generated/backend.env` の `VITE_API_BASE_URL` を使います。
 
 停止:
 
@@ -77,6 +88,8 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `VITE_API_PROXY_TARGET`: Vite dev server が proxy する API。未指定時は `http://localhost:3000`
 - `COGNITO_ENDPOINT` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci endpoint。未指定時は `http://localhost:4566`
 - `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`: 明示指定する場合の Cognito リソース ID
+- `DYNAMODB_ENDPOINT` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci DynamoDB endpoint。未指定時は `http://localhost:4566`
+- `MUKUROJI_DASHBOARD_TABLE`: ダッシュボード集計値を保存する DynamoDB table 名。未指定時は `mukuroji-dashboard-local`
 
 ## 検証
 

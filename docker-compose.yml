@@ -5,10 +5,12 @@ services:
       - "${FLOCI_PORT:-4566}:4566"
     environment:
       FLOCI_BASE_URL: "http://localhost:${FLOCI_PORT:-4566}"
+      FLOCI_HOSTNAME: floci
       FLOCI_STORAGE_MODE: persistent
       FLOCI_STORAGE_PERSISTENT_PATH: /app/data
       MUKUROJI_PUBLIC_FLOCI_ENDPOINT: "http://localhost:${FLOCI_PORT:-4566}"
     volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
       - floci-data:/app/data
       - ./floci/init/ready.d:/etc/floci/init/ready.d:ro
       - ./.floci/generated:/app/generated

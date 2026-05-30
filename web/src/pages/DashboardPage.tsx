@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router'
-import { getCurrentUser, type CurrentUser } from '../auth/api'
+import {
+  getCurrentUser,
+  getDashboardSummary,
+  type CurrentUser,
+  type DashboardSummary,
+} from '../auth/api'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import { Sidebar, type SidebarTeam } from '../components/sidebar'
 import {
@@ -24,6 +29,12 @@ type DashboardStatProps = {
   value: string
 }
 
+const fallbackDashboardSummary = {
+  projects: 3,
+  tasks: 18,
+  blocked: 2,
+} as const
+
 /**
  * Cognito 認証後に表示するローカル検証用ダッシュボード画面です。
  */
@@ -31,7 +42,9 @@ export function DashboardPage() {
   const navigate = useNavigate()
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [user, setUser] = useState<CurrentUser | null>(null)
+  const [summary, setSummary] = useState<DashboardSummary | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [isSummaryLoading, setIsSummaryLoading] = useState(true)
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
   const teams = useMemo<SidebarTeam[]>(
@@ -100,6 +113,23 @@ export function DashboardPage() {
         }
       })
 
+    getDashboardSummary(session.accessToken)
+      .then((dashboardSummary) => {
+        if (isMounted) {
+          setSummary(dashboardSummary)
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setSummary(null)
+        }
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsSummaryLoading(false)
+        }
+      })
+
     return () => {
       isMounted = false
     }
@@ -112,6 +142,10 @@ export function DashboardPage() {
 
   const displayName =
     user?.attributes.email ?? user?.attributes.name ?? user?.username ?? ''
+  const dashboardSummary = summary ?? fallbackDashboardSummary
+  const projectCount = isSummaryLoading ? '...' : String(dashboardSummary.projects)
+  const taskCount = isSummaryLoading ? '...' : String(dashboardSummary.tasks)
+  const blockedCount = isSummaryLoading ? '...' : String(dashboardSummary.blocked)
 
   return (
     <main className="flex min-h-svh bg-[var(--surface)]">
@@ -165,9 +199,15 @@ export function DashboardPage() {
             </section>
 
             <div className="grid grid-cols-3 gap-4 max-[760px]:grid-cols-1">
-              <DashboardStat label={t('dashboard.stat.projects')} value="3" />
-              <DashboardStat label={t('dashboard.stat.tasks')} value="18" />
-              <DashboardStat label={t('dashboard.stat.blocked')} value="2" />
+              <DashboardStat
+                label={t('dashboard.stat.projects')}
+                value={projectCount}
+              />
+              <DashboardStat label={t('dashboard.stat.tasks')} value={taskCount} />
+              <DashboardStat
+                label={t('dashboard.stat.blocked')}
+                value={blockedCount}
+              />
             </div>
           </div>
         )}

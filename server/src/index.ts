@@ -1,4 +1,7 @@
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb'
 import { Hono } from 'hono'
+import { handle } from 'hono/aws-lambda'
 import { cors } from 'hono/cors'
 import type { Context } from 'hono'
 
@@ -140,6 +143,58 @@ type LoginRequestBody = {
 }
 
 /**
+ * DynamoDB に保存するダッシュボード集計 item です。
+ */
+type DashboardSummaryItem = {
+  /**
+   * 集計 item の partition key です。
+   */
+  id: string
+  /**
+   * 進行中プロジェクト数です。
+   */
+  projects: number
+  /**
+   * 未完了タスク数です。
+   */
+  tasks: number
+  /**
+   * 要確認タスク数です。
+   */
+  blocked: number
+  /**
+   * 集計値を更新した ISO 8601 timestamp です。
+   */
+  updatedAt: string
+}
+
+/**
+ * ダッシュボード集計 API が返す response body です。
+ */
+type DashboardSummaryResponse = {
+  /**
+   * 進行中プロジェクト数です。
+   */
+  projects: number
+  /**
+   * 未完了タスク数です。
+   */
+  tasks: number
+  /**
+   * 要確認タスク数です。
+   */
+  blocked: number
+  /**
+   * 集計値を更新した ISO 8601 timestamp です。
+   */
+  updatedAt: string
+  /**
+   * 集計値の取得元です。
+   */
+  source: 'dynamodb'
+}
+
+/**
  * API handler から利用する Cognito client の最小 interface です。
  */
 type CognitoClient = {
@@ -153,8 +208,20 @@ type CognitoClient = {
   getUser(accessToken: string): Promise<GetUserResponse>
 }
 
+/**
+ * API handler から利用するダッシュボード集計 client の最小 interface です。
+ */
+type DashboardSummaryClient = {
+  /**
+   * DynamoDB からダッシュボード集計値を取得します。
+   */
+  getSummary(): Promise<DashboardSummaryResponse>
+}
+
 const app = new Hono()
 let cognito: CognitoClient
+let dashboardSummary: DashboardSummaryClient
+const dashboardSummaryItemId = 'summary'
 
 app.use(
   '/api/*',
@@ -232,8 +299,7 @@ app.post('/api/auth/login', async (c) => {
  * Cognito の `getUser` 失敗は `toAuthErrorResponse` に委譲します。
  */
 app.get('/api/auth/me', async (c) => {
-  const authorization = c.req.header('Authorization') ?? ''
-  const accessToken = authorization.match(/^Bearer\s+(.+)$/i)?.[1]
+  const accessToken = readBearerAccessToken(c)
 
   if (!accessToken) {
     return c.json({ message: 'Bearer token is required.' }, 401)
@@ -255,12 +321,45 @@ app.get('/api/auth/me', async (c) => {
   }
 })
 
+/**
+ * DynamoDB に保存されたダッシュボード集計値を返す endpoint です。
+ *
+ * @remarks
+ * `Authorization: Bearer <accessToken>` header を要求し、Cognito で token を検証してから
+ * DynamoDB の集計 item を読みます。React から Lambda/API Gateway 経由で呼ぶ想定の読み取り API です。
+ */
+app.get('/api/dashboard/summary', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    await cognito.getUser(accessToken)
+
+    return c.json(await dashboardSummary.getSummary())
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toDashboardDataErrorResponse(c, error)
+  }
+})
+
 async function readJson<T>(request: { json: () => Promise<T> }) {
   try {
     return await request.json()
   } catch {
     return undefined
   }
+}
+
+function readBearerAccessToken(c: Context) {
+  const authorization = c.req.header('Authorization') ?? ''
+
+  return authorization.match(/^Bearer\s+(.+)$/i)?.[1]
 }
 
 function toAuthErrorResponse(c: Context, error: unknown) {
@@ -295,6 +394,21 @@ function toAuthErrorResponse(c: Context, error: unknown) {
   return c.json({ message: error.message }, 400)
 }
 
+function toDashboardDataErrorResponse(c: Context, error: unknown) {
+  if (!(error instanceof DashboardDataError)) {
+    console.error(error)
+    return c.json({ message: 'Dashboard data is unavailable.' }, 502)
+  }
+
+  if (error.code === 'DashboardSummaryNotFound' || error.code === 'InvalidDashboardSummary') {
+    console.error(error)
+    return c.json({ message: 'Dashboard summary is not initialized.' }, 503)
+  }
+
+  console.error(error)
+  return c.json({ message: 'Dashboard data is unavailable.' }, 502)
+}
+
 /**
  * Floci の Cognito JSON API を呼び出す軽量 client です。
  */
@@ -303,7 +417,7 @@ class FlociCognitoClient {
    * Floci / Cognito の endpoint URL です。
    */
   private readonly endpoint = trimTrailingSlash(
-    Bun.env.COGNITO_ENDPOINT ?? Bun.env.AWS_ENDPOINT_URL ?? 'http://localhost:4566',
+    getEnv('COGNITO_ENDPOINT') ?? getEnv('AWS_ENDPOINT_URL') ?? 'http://localhost:4566',
   )
 
   /**
@@ -314,19 +428,19 @@ class FlociCognitoClient {
   /**
    * 明示指定された Cognito user pool ID です。
    */
-  private readonly userPoolId = Bun.env.COGNITO_USER_POOL_ID
+  private readonly userPoolId = getEnv('COGNITO_USER_POOL_ID')
   /**
    * 自動検出に使う Cognito user pool 名です。
    */
-  private readonly userPoolName = Bun.env.COGNITO_USER_POOL_NAME ?? 'mukuroji-local'
+  private readonly userPoolName = getEnv('COGNITO_USER_POOL_NAME') ?? 'mukuroji-local'
   /**
    * 明示指定された Cognito app client ID です。
    */
-  private readonly clientId = Bun.env.COGNITO_CLIENT_ID
+  private readonly clientId = getEnv('COGNITO_CLIENT_ID')
   /**
    * 自動検出に使う Cognito app client 名です。
    */
-  private readonly clientName = Bun.env.COGNITO_USER_POOL_CLIENT_NAME ?? 'mukuroji-web-local'
+  private readonly clientName = getEnv('COGNITO_USER_POOL_CLIENT_NAME') ?? 'mukuroji-web-local'
   /**
    * 解決済み user pool ID の cache です。
    */
@@ -490,6 +604,62 @@ class FlociCognitoClient {
 }
 
 /**
+ * DynamoDB のダッシュボード集計 item を読み取る client です。
+ */
+class DynamoDbDashboardSummaryClient {
+  /**
+   * 集計 item を保存する DynamoDB table 名です。
+   */
+  private readonly tableName =
+    getEnv('DYNAMODB_DASHBOARD_TABLE') ??
+    getEnv('MUKUROJI_DASHBOARD_TABLE') ??
+    'mukuroji-dashboard-local'
+  /**
+   * DynamoDB DocumentClient です。
+   */
+  private readonly documentClient = createDynamoDbDocumentClient()
+
+  /**
+   * DynamoDB からダッシュボード集計値を取得します。
+   */
+  async getSummary() {
+    try {
+      const response = await this.documentClient.send(
+        new GetCommand({
+          TableName: this.tableName,
+          Key: {
+            id: dashboardSummaryItemId,
+          },
+          ConsistentRead: true,
+        }),
+      )
+
+      if (!isDashboardSummaryItem(response.Item)) {
+        throw new DashboardDataError(
+          503,
+          response.Item ? 'InvalidDashboardSummary' : 'DashboardSummaryNotFound',
+          'Dashboard summary item is missing or invalid.',
+        )
+      }
+
+      return {
+        projects: response.Item.projects,
+        tasks: response.Item.tasks,
+        blocked: response.Item.blocked,
+        updatedAt: response.Item.updatedAt,
+        source: 'dynamodb',
+      } satisfies DashboardSummaryResponse
+    } catch (error) {
+      if (error instanceof DashboardDataError) {
+        throw error
+      }
+
+      throw toDashboardDataError(error)
+    }
+  }
+}
+
+/**
  * Floci Cognito との通信で扱う domain error です。
  */
 class CognitoServiceError extends Error {
@@ -499,6 +669,26 @@ class CognitoServiceError extends Error {
   readonly status: number
   /**
    * Cognito error code またはローカルで付与した error code です。
+   */
+  readonly code: string
+
+  constructor(status: number, code: string, message: string) {
+    super(message)
+    this.status = status
+    this.code = code
+  }
+}
+
+/**
+ * DynamoDB の dashboard data 取得で扱う domain error です。
+ */
+class DashboardDataError extends Error {
+  /**
+   * DynamoDB または proxy 相当の HTTP status code です。
+   */
+  readonly status: number
+  /**
+   * DynamoDB error code またはローカルで付与した error code です。
    */
   readonly code: string
 
@@ -527,6 +717,74 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
   }
 }
 
+function createDynamoDbDocumentClient() {
+  const endpoint = getDynamoDbEndpoint()
+  const client = new DynamoDBClient({
+    region: getAwsRegion(),
+    endpoint,
+    credentials: {
+      accessKeyId: getEnv('AWS_ACCESS_KEY_ID') ?? 'test',
+      secretAccessKey: getEnv('AWS_SECRET_ACCESS_KEY') ?? 'test',
+    },
+  })
+
+  return DynamoDBDocumentClient.from(client, {
+    marshallOptions: {
+      removeUndefinedValues: true,
+    },
+  })
+}
+
+function toDashboardDataError(error: unknown) {
+  const awsError = error as {
+    $metadata?: {
+      httpStatusCode?: number
+    }
+    message?: string
+    name?: string
+  }
+
+  return new DashboardDataError(
+    awsError.$metadata?.httpStatusCode ?? 502,
+    awsError.name ?? 'DynamoDbUnavailable',
+    awsError.message ?? 'DynamoDB request failed.',
+  )
+}
+
+function isDashboardSummaryItem(value: unknown): value is DashboardSummaryItem {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  return (
+    value.id === dashboardSummaryItemId &&
+    typeof value.projects === 'number' &&
+    typeof value.tasks === 'number' &&
+    typeof value.blocked === 'number' &&
+    typeof value.updatedAt === 'string'
+  )
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function getAwsRegion() {
+  return getEnv('AWS_REGION') ?? getEnv('AWS_DEFAULT_REGION') ?? 'us-east-1'
+}
+
+function getDynamoDbEndpoint() {
+  return getEnv('DYNAMODB_ENDPOINT') ?? getEnv('AWS_ENDPOINT_URL') ?? 'http://localhost:4566'
+}
+
+function getEnv(name: string) {
+  if (typeof Bun !== 'undefined') {
+    return Bun.env[name]
+  }
+
+  return process.env[name]
+}
+
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, '')
 }
@@ -536,8 +794,17 @@ function normalizeCognitoErrorCode(value: string | undefined) {
 }
 
 cognito = new FlociCognitoClient()
+dashboardSummary = new DynamoDbDashboardSummaryClient()
 
+/**
+ * AWS Lambda にデプロイする Hono handler です。
+ */
+export const handler = handle(app)
+
+/**
+ * Bun のローカル開発サーバー entrypoint です。
+ */
 export default {
-  port: Number(Bun.env.PORT ?? 3000),
+  port: Number(getEnv('PORT') ?? 3000),
   fetch: app.fetch,
 }
