@@ -2,11 +2,17 @@ import type { AuthSession } from './session'
 
 type LoginResponse = Omit<AuthSession, 'remember'>
 
+/**
+ * Cognito で認証された現在のユーザー情報を表します。
+ */
 export type CurrentUser = {
   username: string
   attributes: Record<string, string>
 }
 
+/**
+ * API からエラーレスポンスが返ったときに投げる例外です。
+ */
 export class ApiError extends Error {
   readonly status: number
 
@@ -18,6 +24,9 @@ export class ApiError extends Error {
 
 const apiBaseUrl = trimTrailingSlash(import.meta.env.VITE_API_BASE_URL ?? '/api')
 
+/**
+ * メールアドレスとパスワードでログインし、保存可能な認証セッションを返します。
+ */
 export async function loginWithPassword({
   email,
   password,
@@ -41,6 +50,9 @@ export async function loginWithPassword({
   }
 }
 
+/**
+ * アクセストークンを使って認証済みユーザー情報を取得します。
+ */
 export function getCurrentUser(accessToken: string) {
   return apiFetch<CurrentUser>('/auth/me', {
     headers: {

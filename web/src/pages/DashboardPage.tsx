@@ -27,6 +27,9 @@ const teams: SidebarTeam[] = [
   },
 ]
 
+/**
+ * Cognito 認証後に表示するローカル検証用ダッシュボード画面です。
+ */
 export function DashboardPage() {
   const navigate = useNavigate()
   const [locale] = useState<Locale>(() => getInitialLocale())

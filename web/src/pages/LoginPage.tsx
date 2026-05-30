@@ -26,6 +26,9 @@ import {
   type MessageKey,
 } from '../i18n'
 
+/**
+ * Cognito のパスワード認証に接続したログイン画面です。
+ */
 export function LoginPage() {
   const navigate = useNavigate()
   const [locale, setLocale] = useState<Locale>(() => getInitialLocale())

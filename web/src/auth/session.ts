@@ -1,3 +1,6 @@
+/**
+ * ブラウザに保存する Cognito 認証セッションです。
+ */
 export type AuthSession = {
   accessToken: string
   idToken?: string
@@ -9,6 +12,9 @@ export type AuthSession = {
 
 const storageKey = 'mukuroji.auth'
 
+/**
+ * localStorage または sessionStorage から有効期限内の認証セッションを取得します。
+ */
 export function getAuthSession() {
   const session = readSession(window.localStorage) ?? readSession(window.sessionStorage)
 
@@ -24,6 +30,9 @@ export function getAuthSession() {
   return session
 }
 
+/**
+ * ユーザーの保持設定に合わせて認証セッションを保存します。
+ */
 export function saveAuthSession(session: AuthSession) {
   const targetStorage = session.remember ? window.localStorage : window.sessionStorage
   const staleStorage = session.remember ? window.sessionStorage : window.localStorage
@@ -32,6 +41,9 @@ export function saveAuthSession(session: AuthSession) {
   targetStorage.setItem(storageKey, JSON.stringify(session))
 }
 
+/**
+ * 保存済みの認証セッションをすべて削除します。
+ */
 export function clearAuthSession() {
   window.localStorage.removeItem(storageKey)
   window.sessionStorage.removeItem(storageKey)
