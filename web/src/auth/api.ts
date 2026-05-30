@@ -116,11 +116,12 @@ export function getCurrentUser(accessToken: string) {
 /**
  * アクセストークンを使ってダッシュボード集計値を取得します。
  */
-export function getDashboardSummary(accessToken: string) {
+export function getDashboardSummary(accessToken: string, signal?: AbortSignal) {
   return apiFetch<DashboardSummary>('/dashboard/summary', {
     headers: {
       Authorization: `Bearer ${accessToken}`,
     },
+    signal,
   })
 }
 

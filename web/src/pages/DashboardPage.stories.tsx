@@ -34,6 +34,9 @@ const defaultArgs = {
   loadCurrentUser: async () => storyUser,
 } satisfies Partial<Parameters<typeof DashboardPage>[0]>
 
+/**
+ * DashboardPage の Storybook meta です。title、component、layout、router wrapper を定義します。
+ */
 const meta = {
   title: 'Application/Pages/DashboardPage',
   component: DashboardPage,

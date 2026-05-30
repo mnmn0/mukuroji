@@ -46,9 +46,12 @@ type DashboardPageProps = {
    */
   loadCurrentUser?: (accessToken: string) => Promise<CurrentUser>
   /**
-   * access token からダッシュボード集計値を取得する関数です。
+   * access token からダッシュボード集計値を取得する関数です。signal で中断できます。
    */
-  loadDashboardSummary?: (accessToken: string) => Promise<DashboardSummary>
+  loadDashboardSummary?: (
+    accessToken: string,
+    signal?: AbortSignal,
+  ) => Promise<DashboardSummary>
   /**
    * Storybook などで固定したい初期 locale です。
    */
@@ -118,6 +121,7 @@ export function DashboardPage({
 
   useEffect(() => {
     let isMounted = true
+    const controller = new AbortController()
     const session = getSession()
 
     if (!session) {
@@ -135,6 +139,7 @@ export function DashboardPage({
       })
       .catch(() => {
         if (isMounted) {
+          controller.abort()
           clearSession()
           navigate('/', { replace: true })
         }
@@ -145,25 +150,26 @@ export function DashboardPage({
         }
       })
 
-    loadDashboardSummary(session.accessToken)
+    loadDashboardSummary(session.accessToken, controller.signal)
       .then((dashboardSummary) => {
-        if (isMounted) {
+        if (isMounted && !controller.signal.aborted) {
           setSummary(dashboardSummary)
         }
       })
       .catch(() => {
-        if (isMounted) {
+        if (isMounted && !controller.signal.aborted) {
           setSummary(null)
         }
       })
       .finally(() => {
-        if (isMounted) {
+        if (isMounted && !controller.signal.aborted) {
           setIsSummaryLoading(false)
         }
       })
 
     return () => {
       isMounted = false
+      controller.abort()
     }
   }, [clearSession, getSession, loadCurrentUser, loadDashboardSummary, navigate])
 
@@ -248,6 +254,12 @@ export function DashboardPage({
   )
 }
 
+/**
+ * ラベル付きの指標カードを描画する DashboardPage 内部コンポーネントです。
+ *
+ * @param props - 表示ラベルと値を持つ `DashboardStatProps` です。
+ * @returns 指標カードの JSX element です。
+ */
 function DashboardStat({ label, value }: DashboardStatProps) {
   return (
     <section className="rounded-lg border border-[#d9e1eb] bg-white p-5 shadow-[0_16px_34px_rgba(28,53,88,0.06)]">
