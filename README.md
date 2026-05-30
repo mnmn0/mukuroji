@@ -17,6 +17,14 @@ mukuroji は、プロジェクトやタスクの進捗をチームで見渡す�
 bun install
 ```
 
+Codex cloud のカスタムセットアップスクリプトには、以下を指定できます。
+
+```sh
+bash scripts/codex-setup.sh
+```
+
+検証まで実行したい場合は `CODEX_VALIDATE=1 bash scripts/codex-setup.sh` を使います。
+
 ## 開発
 
 Floci + Cognito:
