@@ -93,11 +93,32 @@ bun run web:dev
 Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送します。必要に応じて以下の環境変数を上書きできます。
 
 - `VITE_API_BASE_URL`: ブラウザから呼ぶ API の base URL。未指定時は `/api`
+- `VITE_TASKS_API_BASE_URL`: DynamoDB のタスク一覧を取得する Lambda Function URL。CDK デプロイ後の `ProjectTasksApiUrl` 出力値を指定してください。未指定時は `VITE_API_BASE_URL` または `/api` を使います。
 - `VITE_API_PROXY_TARGET`: Vite dev server が proxy する API。未指定時は `http://localhost:3000`
 - `COGNITO_ENDPOINT` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci endpoint。未指定時は `http://localhost:4566`
 - `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`: 明示指定する場合の Cognito リソース ID
 - `DYNAMODB_ENDPOINT` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci DynamoDB endpoint。未指定時は `http://localhost:4566`
 - `MUKUROJI_DASHBOARD_TABLE`: ダッシュボード集計値を保存する DynamoDB table 名。未指定時は `mukuroji-dashboard-local`
+
+プロジェクトタスクデータは CDK stack が DynamoDB に seed し、Lambda Function URL 経由で取得します。AWS 環境で確認する場合は以下の順に実行し、出力された `ProjectTasksApiUrl` を Web の環境変数へ渡してください。
+
+```sh
+bun run cdk:synth
+# デプロイ時は AWS アカウントへ影響するため、事前に内容を確認してください。
+VITE_TASKS_API_BASE_URL=<ProjectTasksApiUrl> bun run web:dev
+```
+
+DynamoDB に seed されたタスクデータを直接確認する場合は、CDK output の
+`ProjectTasksTableName` を指定して以下を実行します。
+
+```sh
+TASKS_TABLE_NAME=<ProjectTasksTableName> bun run tasks:seed-dynamodb
+TASKS_TABLE_NAME=<ProjectTasksTableName> bun run tasks:check-dynamodb
+```
+
+CDK stack も同じ seed を Custom Resource として定義します。ローカル互換
+endpoint を使う場合は `AWS_ENDPOINT_URL` と必要に応じて
+`AWS_NO_SIGN_REQUEST=1` を併用できます。
 
 ## 検証
 

@@ -2,6 +2,7 @@ import { createBrowserRouter, Navigate } from 'react-router'
 import { DashboardPage } from '../pages/DashboardPage'
 import { LoginPage } from '../pages/LoginPage'
 import { PlaceholderPage } from '../pages/PlaceholderPage'
+import { TaskPage } from '../pages/TaskPage'
 
 /**
  * アプリケーション全体の画面ルーティング定義です。
@@ -14,6 +15,10 @@ export const router = createBrowserRouter([
   {
     path: '/dashboard',
     element: <DashboardPage />,
+  },
+  {
+    path: '/projects/:projectId/tasks',
+    element: <TaskPage />,
   },
   {
     path: '/forgot-password',
