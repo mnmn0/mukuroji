@@ -16,6 +16,8 @@
     "web:storybook": "bun --filter web storybook",
     "web:build-storybook": "bun --filter web build-storybook",
     "server:dev": "bun --filter server dev",
+    "server:build:lambda": "bun --filter server build:lambda",
+    "floci:deploy-backend": "sh floci/deploy-backend.sh",
     "cdk:build": "bun --filter cdk build",
     "cdk:test": "bun --filter cdk test",
     "cdk:synth": "bun --filter cdk cdk synth"

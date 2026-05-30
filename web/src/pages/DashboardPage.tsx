@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router'
-import { getCurrentUser, type CurrentUser } from '../auth/api'
-import { clearAuthSession, getAuthSession } from '../auth/session'
+import {
+  getCurrentUser,
+  getDashboardSummary,
+  type CurrentUser,
+  type DashboardSummary,
+} from '../auth/api'
+import { clearAuthSession, getAuthSession, type AuthSession } from '../auth/session'
 import { Sidebar, type SidebarTeam } from '../components/sidebar'
 import {
   createSidebarLabels,
@@ -25,13 +30,56 @@ type DashboardStatProps = {
 }
 
 /**
+ * DashboardPage が外部の認証/session/API へアクセスするための差し替え可能な依存です。
+ */
+type DashboardPageProps = {
+  /**
+   * 保存済み認証セッションを取得する関数です。
+   */
+  getSession?: () => AuthSession | null
+  /**
+   * 保存済み認証セッションを削除する関数です。
+   */
+  clearSession?: () => void
+  /**
+   * access token から現在のユーザー情報を取得する関数です。
+   */
+  loadCurrentUser?: (accessToken: string) => Promise<CurrentUser>
+  /**
+   * access token からダッシュボード集計値を取得する関数です。signal で中断できます。
+   */
+  loadDashboardSummary?: (
+    accessToken: string,
+    signal?: AbortSignal,
+  ) => Promise<DashboardSummary>
+  /**
+   * Storybook などで固定したい初期 locale です。
+   */
+  initialLocale?: Locale
+}
+
+const fallbackDashboardSummary = {
+  projects: 3,
+  tasks: 18,
+  blocked: 2,
+} as const
+
+/**
  * Cognito 認証後に表示するローカル検証用ダッシュボード画面です。
  */
-export function DashboardPage() {
+export function DashboardPage({
+  getSession = getAuthSession,
+  clearSession = clearAuthSession,
+  loadCurrentUser = getCurrentUser,
+  loadDashboardSummary = getDashboardSummary,
+  initialLocale,
+}: DashboardPageProps = {}) {
   const navigate = useNavigate()
-  const [locale] = useState<Locale>(() => getInitialLocale())
+  const [locale] = useState<Locale>(() => initialLocale ?? getInitialLocale())
   const [user, setUser] = useState<CurrentUser | null>(null)
+  const [summary, setSummary] = useState<DashboardSummary | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [isSummaryLoading, setIsSummaryLoading] = useState(true)
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
   const teams = useMemo<SidebarTeam[]>(
@@ -73,7 +121,8 @@ export function DashboardPage() {
 
   useEffect(() => {
     let isMounted = true
-    const session = getAuthSession()
+    const controller = new AbortController()
+    const session = getSession()
 
     if (!session) {
       navigate('/', { replace: true })
@@ -82,7 +131,7 @@ export function DashboardPage() {
       }
     }
 
-    getCurrentUser(session.accessToken)
+    loadCurrentUser(session.accessToken)
       .then((currentUser) => {
         if (isMounted) {
           setUser(currentUser)
@@ -90,7 +139,8 @@ export function DashboardPage() {
       })
       .catch(() => {
         if (isMounted) {
-          clearAuthSession()
+          controller.abort()
+          clearSession()
           navigate('/', { replace: true })
         }
       })
@@ -100,18 +150,40 @@ export function DashboardPage() {
         }
       })
 
+    loadDashboardSummary(session.accessToken, controller.signal)
+      .then((dashboardSummary) => {
+        if (isMounted && !controller.signal.aborted) {
+          setSummary(dashboardSummary)
+        }
+      })
+      .catch(() => {
+        if (isMounted && !controller.signal.aborted) {
+          setSummary(null)
+        }
+      })
+      .finally(() => {
+        if (isMounted && !controller.signal.aborted) {
+          setIsSummaryLoading(false)
+        }
+      })
+
     return () => {
       isMounted = false
+      controller.abort()
     }
-  }, [navigate])
+  }, [clearSession, getSession, loadCurrentUser, loadDashboardSummary, navigate])
 
   const handleLogout = () => {
-    clearAuthSession()
+    clearSession()
     navigate('/', { replace: true })
   }
 
   const displayName =
     user?.attributes.email ?? user?.attributes.name ?? user?.username ?? ''
+  const dashboardSummary = summary ?? fallbackDashboardSummary
+  const projectCount = isSummaryLoading ? '...' : String(dashboardSummary.projects)
+  const taskCount = isSummaryLoading ? '...' : String(dashboardSummary.tasks)
+  const blockedCount = isSummaryLoading ? '...' : String(dashboardSummary.blocked)
 
   return (
     <main className="flex min-h-svh bg-[var(--surface)]">
@@ -165,9 +237,15 @@ export function DashboardPage() {
             </section>
 
             <div className="grid grid-cols-3 gap-4 max-[760px]:grid-cols-1">
-              <DashboardStat label={t('dashboard.stat.projects')} value="3" />
-              <DashboardStat label={t('dashboard.stat.tasks')} value="18" />
-              <DashboardStat label={t('dashboard.stat.blocked')} value="2" />
+              <DashboardStat
+                label={t('dashboard.stat.projects')}
+                value={projectCount}
+              />
+              <DashboardStat label={t('dashboard.stat.tasks')} value={taskCount} />
+              <DashboardStat
+                label={t('dashboard.stat.blocked')}
+                value={blockedCount}
+              />
             </div>
           </div>
         )}
@@ -176,6 +254,12 @@ export function DashboardPage() {
   )
 }
 
+/**
+ * ラベル付きの指標カードを描画する DashboardPage 内部コンポーネントです。
+ *
+ * @param props - 表示ラベルと値を持つ `DashboardStatProps` です。
+ * @returns 指標カードの JSX element です。
+ */
 function DashboardStat({ label, value }: DashboardStatProps) {
   return (
     <section className="rounded-lg border border-[#d9e1eb] bg-white p-5 shadow-[0_16px_34px_rgba(28,53,88,0.06)]">

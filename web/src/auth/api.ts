@@ -38,6 +38,32 @@ export type CurrentUser = {
 }
 
 /**
+ * DynamoDB から取得するダッシュボード集計値です。
+ */
+export type DashboardSummary = {
+  /**
+   * 進行中プロジェクト数です。
+   */
+  projects: number
+  /**
+   * 未完了タスク数です。
+   */
+  tasks: number
+  /**
+   * 要確認タスク数です。
+   */
+  blocked: number
+  /**
+   * 集計値を更新した ISO 8601 timestamp です。
+   */
+  updatedAt: string
+  /**
+   * 集計値の取得元です。
+   */
+  source: 'dynamodb'
+}
+
+/**
  * API からエラーレスポンスが返ったときに投げる例外です。
  */
 export class ApiError extends Error {
@@ -84,6 +110,18 @@ export function getCurrentUser(accessToken: string) {
     headers: {
       Authorization: `Bearer ${accessToken}`,
     },
+  })
+}
+
+/**
+ * アクセストークンを使ってダッシュボード集計値を取得します。
+ */
+export function getDashboardSummary(accessToken: string, signal?: AbortSignal) {
+  return apiFetch<DashboardSummary>('/dashboard/summary', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+    signal,
   })
 }
 

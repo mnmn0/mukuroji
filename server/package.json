@@ -1,9 +1,12 @@
 {
   "name": "server",
   "scripts": {
-    "dev": "bun run --hot src/index.ts"
+    "dev": "bun run --hot src/index.ts",
+    "build:lambda": "bun build src/index.ts --target node --format esm --outfile dist/lambda/index.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1057.0",
+    "@aws-sdk/lib-dynamodb": "^3.1057.0",
     "hono": "^4.12.21"
   },
   "devDependencies": {

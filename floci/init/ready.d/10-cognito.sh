@@ -8,6 +8,8 @@ POOL_NAME="${COGNITO_USER_POOL_NAME:-mukuroji-local}"
 CLIENT_NAME="${COGNITO_USER_POOL_CLIENT_NAME:-mukuroji-web-local}"
 TEST_USERNAME="${COGNITO_TEST_USERNAME:-demo@example.com}"
 TEST_PASSWORD="${COGNITO_TEST_PASSWORD:-Password123!}"
+DASHBOARD_TABLE="${MUKUROJI_DASHBOARD_TABLE:-mukuroji-dashboard-local}"
+DASHBOARD_UPDATED_AT="${MUKUROJI_DASHBOARD_UPDATED_AT:-$(date -u +%Y-%m-%dT%H:%M:%S.000Z)}"
 GENERATED_DIR="${MUKUROJI_GENERATED_DIR:-/app/generated}"
 
 aws_local() {
@@ -58,6 +60,26 @@ aws_local cognito-idp admin-set-user-password \
   --permanent \
   >/dev/null
 
+if ! aws_local dynamodb describe-table --table-name "$DASHBOARD_TABLE" >/dev/null 2>&1; then
+  aws_local dynamodb create-table \
+    --table-name "$DASHBOARD_TABLE" \
+    --attribute-definitions AttributeName=id,AttributeType=S \
+    --key-schema AttributeName=id,KeyType=HASH \
+    --billing-mode PAY_PER_REQUEST \
+    >/dev/null
+fi
+
+aws_local dynamodb put-item \
+  --table-name "$DASHBOARD_TABLE" \
+  --item "{
+    \"id\": {\"S\": \"summary\"},
+    \"projects\": {\"N\": \"3\"},
+    \"tasks\": {\"N\": \"18\"},
+    \"blocked\": {\"N\": \"2\"},
+    \"updatedAt\": {\"S\": \"$DASHBOARD_UPDATED_AT\"}
+  }" \
+  >/dev/null
+
 mkdir -p "$GENERATED_DIR"
 cat >"$GENERATED_DIR/cognito.env" <<EOF
 COGNITO_ENDPOINT=$PUBLIC_ENDPOINT_URL
@@ -67,6 +89,9 @@ COGNITO_USER_POOL_CLIENT_NAME=$CLIENT_NAME
 COGNITO_CLIENT_ID=$CLIENT_ID
 COGNITO_TEST_USERNAME=$TEST_USERNAME
 COGNITO_TEST_PASSWORD=$TEST_PASSWORD
+MUKUROJI_DASHBOARD_TABLE=$DASHBOARD_TABLE
+DYNAMODB_ENDPOINT=$PUBLIC_ENDPOINT_URL
 EOF
 
 echo "mukuroji Cognito ready: userPoolId=$POOL_ID clientId=$CLIENT_ID username=$TEST_USERNAME"
+echo "mukuroji DynamoDB ready: table=$DASHBOARD_TABLE item=summary"
