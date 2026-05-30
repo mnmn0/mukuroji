@@ -10,6 +10,20 @@ import {
   type Locale,
 } from '../i18n'
 
+/**
+ * ダッシュボード上の小さな指標カードに渡す表示値です。
+ */
+type DashboardStatProps = {
+  /**
+   * 指標名として表示する i18n 済みラベルです。
+   */
+  label: string
+  /**
+   * 指標値として表示する短い文字列です。
+   */
+  value: string
+}
+
 const teams: SidebarTeam[] = [
   {
     id: 'core-team',
@@ -131,7 +145,7 @@ export function DashboardPage() {
   )
 }
 
-function DashboardStat({ label, value }: { label: string; value: string }) {
+function DashboardStat({ label, value }: DashboardStatProps) {
   return (
     <section className="rounded-lg border border-[#d9e1eb] bg-white p-5 shadow-[0_16px_34px_rgba(28,53,88,0.06)]">
       <p className="text-sm font-black text-[var(--muted)]">{label}</p>

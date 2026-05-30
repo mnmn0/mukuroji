@@ -9,7 +9,7 @@
 - 手作業の編集は `apply_patch` を使う。
 - 検索はまず `rg` / `rg --files` を使う。
 - 変更は目的に対して小さく保ち、無関係な整形やリファクタリングを混ぜない。
-- TypeScript の exported 宣言には TSDoc を付ける。type / interface / class / function / const / component / hook などを対象にする。
+- TypeScript の exported 宣言には TSDoc を付ける。export 有無にかかわらず type / interface は宣言本体と各プロパティ、class は宣言本体とメンバー変数に TSDoc を付ける。
 - コミット前にはサブエージェントレビューを受ける。
 - コミットは意味のある粒度に分ける。
 

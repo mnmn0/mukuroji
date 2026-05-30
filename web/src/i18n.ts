@@ -1,10 +1,16 @@
 import type { SidebarLabels, SidebarNavId } from './components/sidebar'
 
+/**
+ * ユーザーが選択できる表示言語の一覧です。
+ */
 export const localeOptions = [
   { locale: 'ja', label: '日本語' },
   { locale: 'en', label: 'English' },
 ] as const
 
+/**
+ * mukuroji がサポートする locale code です。
+ */
 export type Locale = (typeof localeOptions)[number]['locale']
 
 const storageKey = 'mukuroji.locale'
@@ -188,12 +194,18 @@ const dictionaries = {
   },
 } as const
 
+/**
+ * i18n dictionary に定義された翻訳キーです。
+ */
 export type MessageKey = keyof (typeof dictionaries)['ja']
 
 function resolveLocale(value: string | null | undefined): Locale {
   return value?.toLowerCase().startsWith('en') ? 'en' : 'ja'
 }
 
+/**
+ * 保存済み設定またはブラウザ言語から初期 locale を解決します。
+ */
 export function getInitialLocale(): Locale {
   const savedLocale = window.localStorage.getItem(storageKey)
 
@@ -204,14 +216,23 @@ export function getInitialLocale(): Locale {
   return resolveLocale(window.navigator.language)
 }
 
+/**
+ * ユーザーが選択した locale をブラウザに保存します。
+ */
 export function setLocalePreference(locale: Locale) {
   window.localStorage.setItem(storageKey, locale)
 }
 
+/**
+ * 指定 locale の翻訳関数を生成します。
+ */
 export function createTranslator(locale: Locale) {
   return (key: MessageKey) => dictionaries[locale][key]
 }
 
+/**
+ * Sidebar コンポーネントへ渡す i18n 済みラベルを生成します。
+ */
 export function createSidebarLabels(locale: Locale): SidebarLabels {
   const t = createTranslator(locale)
   const navKeyMap: Record<SidebarNavId, MessageKey> = {

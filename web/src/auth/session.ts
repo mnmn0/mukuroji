@@ -2,11 +2,29 @@
  * ブラウザに保存する Cognito 認証セッションです。
  */
 export type AuthSession = {
+  /**
+   * Cognito の access token です。
+   */
   accessToken: string
+  /**
+   * Cognito の ID token です。
+   */
   idToken?: string
+  /**
+   * Cognito の refresh token です。
+   */
   refreshToken?: string
+  /**
+   * セッション有効期限の Unix time milliseconds です。
+   */
   expiresAt: number
+  /**
+   * Authorization header に使う token type です。
+   */
   tokenType: string
+  /**
+   * localStorage に保持するかどうかのユーザー選択です。
+   */
   remember: boolean
 }
 

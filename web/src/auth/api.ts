@@ -1,12 +1,39 @@
 import type { AuthSession } from './session'
 
+/**
+ * API から返るログインレスポンスです。
+ */
 type LoginResponse = Omit<AuthSession, 'remember'>
+
+/**
+ * パスワードログインで送信する資格情報です。
+ */
+type LoginWithPasswordParams = {
+  /**
+   * Cognito ユーザーのメールアドレスです。
+   */
+  email: string
+  /**
+   * Cognito ユーザーのパスワードです。
+   */
+  password: string
+  /**
+   * セッションを localStorage に保持するかどうかです。
+   */
+  remember: boolean
+}
 
 /**
  * Cognito で認証された現在のユーザー情報を表します。
  */
 export type CurrentUser = {
+  /**
+   * Cognito のユーザー名です。
+   */
   username: string
+  /**
+   * Cognito から返されたユーザー属性です。
+   */
   attributes: Record<string, string>
 }
 
@@ -14,6 +41,9 @@ export type CurrentUser = {
  * API からエラーレスポンスが返ったときに投げる例外です。
  */
 export class ApiError extends Error {
+  /**
+   * API レスポンスの HTTP status code です。
+   */
   readonly status: number
 
   constructor(status: number, message: string) {
@@ -31,11 +61,7 @@ export async function loginWithPassword({
   email,
   password,
   remember,
-}: {
-  email: string
-  password: string
-  remember: boolean
-}): Promise<AuthSession> {
+}: LoginWithPasswordParams): Promise<AuthSession> {
   const response = await apiFetch<LoginResponse>('/auth/login', {
     method: 'POST',
     headers: {

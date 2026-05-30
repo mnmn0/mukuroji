@@ -27,6 +27,20 @@ import {
 } from '../i18n'
 
 /**
+ * ログイン画面フッターリンクの props です。
+ */
+type FooterLinkProps = {
+  /**
+   * リンク内に表示する要素です。
+   */
+  children: ReactNode
+  /**
+   * React Router に渡す遷移先パスです。
+   */
+  to: string
+}
+
+/**
  * Cognito のパスワード認証に接続したログイン画面です。
  */
 export function LoginPage() {
@@ -295,10 +309,7 @@ function resolveLoginErrorKey(error: unknown): MessageKey {
 function FooterLink({
   children,
   to,
-}: {
-  children: ReactNode
-  to: string
-}) {
+}: FooterLinkProps) {
   return (
     <Link
       className="font-bold text-[var(--muted-strong)] no-underline hover:text-[#005fe7] hover:underline focus-visible:text-[#005fe7] focus-visible:underline focus-visible:outline-none"
