@@ -6,7 +6,7 @@ import {
   type CurrentUser,
   type DashboardSummary,
 } from '../auth/api'
-import { clearAuthSession, getAuthSession } from '../auth/session'
+import { clearAuthSession, getAuthSession, type AuthSession } from '../auth/session'
 import { Sidebar, type SidebarTeam } from '../components/sidebar'
 import {
   createSidebarLabels,
@@ -29,6 +29,32 @@ type DashboardStatProps = {
   value: string
 }
 
+/**
+ * DashboardPage が外部の認証/session/API へアクセスするための差し替え可能な依存です。
+ */
+type DashboardPageProps = {
+  /**
+   * 保存済み認証セッションを取得する関数です。
+   */
+  getSession?: () => AuthSession | null
+  /**
+   * 保存済み認証セッションを削除する関数です。
+   */
+  clearSession?: () => void
+  /**
+   * access token から現在のユーザー情報を取得する関数です。
+   */
+  loadCurrentUser?: (accessToken: string) => Promise<CurrentUser>
+  /**
+   * access token からダッシュボード集計値を取得する関数です。
+   */
+  loadDashboardSummary?: (accessToken: string) => Promise<DashboardSummary>
+  /**
+   * Storybook などで固定したい初期 locale です。
+   */
+  initialLocale?: Locale
+}
+
 const fallbackDashboardSummary = {
   projects: 3,
   tasks: 18,
@@ -38,9 +64,15 @@ const fallbackDashboardSummary = {
 /**
  * Cognito 認証後に表示するローカル検証用ダッシュボード画面です。
  */
-export function DashboardPage() {
+export function DashboardPage({
+  getSession = getAuthSession,
+  clearSession = clearAuthSession,
+  loadCurrentUser = getCurrentUser,
+  loadDashboardSummary = getDashboardSummary,
+  initialLocale,
+}: DashboardPageProps = {}) {
   const navigate = useNavigate()
-  const [locale] = useState<Locale>(() => getInitialLocale())
+  const [locale] = useState<Locale>(() => initialLocale ?? getInitialLocale())
   const [user, setUser] = useState<CurrentUser | null>(null)
   const [summary, setSummary] = useState<DashboardSummary | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -86,7 +118,7 @@ export function DashboardPage() {
 
   useEffect(() => {
     let isMounted = true
-    const session = getAuthSession()
+    const session = getSession()
 
     if (!session) {
       navigate('/', { replace: true })
@@ -95,7 +127,7 @@ export function DashboardPage() {
       }
     }
 
-    getCurrentUser(session.accessToken)
+    loadCurrentUser(session.accessToken)
       .then((currentUser) => {
         if (isMounted) {
           setUser(currentUser)
@@ -103,7 +135,7 @@ export function DashboardPage() {
       })
       .catch(() => {
         if (isMounted) {
-          clearAuthSession()
+          clearSession()
           navigate('/', { replace: true })
         }
       })
@@ -113,7 +145,7 @@ export function DashboardPage() {
         }
       })
 
-    getDashboardSummary(session.accessToken)
+    loadDashboardSummary(session.accessToken)
       .then((dashboardSummary) => {
         if (isMounted) {
           setSummary(dashboardSummary)
@@ -133,10 +165,10 @@ export function DashboardPage() {
     return () => {
       isMounted = false
     }
-  }, [navigate])
+  }, [clearSession, getSession, loadCurrentUser, loadDashboardSummary, navigate])
 
   const handleLogout = () => {
-    clearAuthSession()
+    clearSession()
     navigate('/', { replace: true })
   }
 

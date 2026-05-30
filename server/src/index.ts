@@ -611,7 +611,6 @@ class DynamoDbDashboardSummaryClient {
    * 集計 item を保存する DynamoDB table 名です。
    */
   private readonly tableName =
-    getEnv('DYNAMODB_DASHBOARD_TABLE') ??
     getEnv('MUKUROJI_DASHBOARD_TABLE') ??
     'mukuroji-dashboard-local'
   /**
