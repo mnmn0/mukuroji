@@ -1,41 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { TaskScreen } from './TaskPage'
-import type { ProjectTask } from '../tasks/api'
-
-const storyTasks: ProjectTask[] = [
-  {
-    id: 'wireframe',
-    titleKey: 'tasks.item.wireframe',
-    assigneeKey: 'tasks.assignee.sato',
-    status: 'in-progress',
-    dueDate: '2025/05/26',
-    priority: 'high',
-  },
-  {
-    id: 'brand-guideline',
-    titleKey: 'tasks.item.brandGuideline',
-    assigneeKey: 'tasks.assignee.suzuki',
-    status: 'review',
-    dueDate: '2025/05/27',
-    priority: 'medium',
-  },
-  {
-    id: 'seo-research',
-    titleKey: 'tasks.item.seoResearch',
-    assigneeKey: 'tasks.assignee.yamamoto',
-    status: 'todo',
-    dueDate: '2025/05/29',
-    priority: 'medium',
-  },
-  {
-    id: 'competitor-report',
-    titleKey: 'tasks.item.competitorReport',
-    assigneeKey: 'tasks.assignee.tanaka',
-    status: 'done',
-    dueDate: '2025/06/03',
-    priority: 'low',
-  },
-]
+import { projectDirectoryFixtures } from '../projects/fixtures'
+import { referoTaskFixtures } from '../tasks/fixtures'
 
 const meta = {
   title: 'Application/Projects/Task Page',
@@ -46,11 +12,17 @@ const meta = {
   args: {
     locale: 'ja',
     projectId: 'refero',
-    tasks: storyTasks,
+    projectName: 'Refero',
+    tasks: referoTaskFixtures,
+    teamName: 'コアチーム',
+    teams: projectDirectoryFixtures,
     userInitial: 'J',
   },
 } satisfies Meta<typeof TaskScreen>
 
+/**
+ * TaskScreen を fullscreen layout で確認する Storybook metadata です。
+ */
 export default meta
 
 /**

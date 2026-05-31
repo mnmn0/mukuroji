@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import { useNavigate, useParams } from 'react-router'
-import { getCurrentUser, type CurrentUser } from '../auth/api'
+import { useNavigate, useParams, useSearchParams } from 'react-router'
+import useSWR from 'swr'
+import { getCurrentUser } from '../auth/api'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import { ChevronIcon } from '../components/icons'
-import { Sidebar, type SidebarTeam } from '../components/sidebar'
+import { Sidebar } from '../components/sidebar'
 import {
   createSidebarLabels,
   createTranslator,
@@ -12,6 +13,10 @@ import {
   type Locale,
   type MessageKey,
 } from '../i18n'
+import {
+  getProjectDirectory,
+  type ProjectDirectoryTeam,
+} from '../projects/api'
 import {
   getProjectTasks,
   type ProjectTask,
@@ -21,6 +26,10 @@ import {
 
 const taskTabs = ['table', 'board', 'gantt', 'calendar', 'file'] as const
 const taskStatuses = ['in-progress', 'review', 'todo', 'done'] as const
+const apiSWRConfig = {
+  dedupingInterval: 10_000,
+  shouldRetryOnError: false,
+} as const
 
 /**
  * タスク画面で切り替えられるビュー種別です。
@@ -71,6 +80,22 @@ type TaskScreenProps = {
    */
   userInitial: string
   /**
+   * サイドバーとヘッダーに表示するチーム/プロジェクト階層です。
+   */
+  teams: ProjectDirectoryTeam[]
+  /**
+   * 表示中プロジェクトの名前です。
+   */
+  projectName?: string
+  /**
+   * 表示中プロジェクトが所属する代表チーム名です。
+   */
+  teamName?: string
+  /**
+   * 表示中プロジェクトが選択されたチーム ID です。
+   */
+  activeProjectTeamId?: string
+  /**
    * 認証またはタスク取得中の loading 表示に切り替えるかどうかです。
    */
   isLoading?: boolean
@@ -85,7 +110,7 @@ type TaskScreenProps = {
   /**
    * サイドバーからプロジェクトを選択したときの callback です。
    */
-  onSelectProject?: (projectId: string) => void
+  onSelectProject?: (projectId: string, teamId: string) => void
 }
 
 const viewLabelKeys: Record<TaskTab, MessageKey> = {
@@ -102,14 +127,59 @@ const viewLabelKeys: Record<TaskTab, MessageKey> = {
 export function TaskPage() {
   const navigate = useNavigate()
   const params = useParams()
+  const [searchParams] = useSearchParams()
   const projectId = params.projectId ?? 'refero'
+  const selectedTeamId = searchParams.get('teamId') ?? undefined
+  const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
-  const [user, setUser] = useState<CurrentUser | null>(null)
-  const [tasks, setTasks] = useState<ProjectTask[]>([])
-  const [taskErrorMessage, setTaskErrorMessage] = useState<string | undefined>()
-  const [isLoading, setIsLoading] = useState(true)
   const t = useMemo(() => createTranslator(locale), [locale])
-  const projectName = projectId === 'refero' ? t('tasks.project.refero') : projectId
+  const accessToken = session?.accessToken
+  const currentUserKey = accessToken ? (['current-user', accessToken] as const) : null
+  const {
+    data: user,
+    error: currentUserError,
+    isLoading: isCurrentUserLoading,
+  } = useSWR(currentUserKey, ([, accessToken]) => getCurrentUser(accessToken), apiSWRConfig)
+  const projectDirectoryKey = accessToken && user && !currentUserError
+    ? (['project-directory', accessToken, locale] as const)
+    : null
+  const { data: teams = [] } = useSWR(
+    projectDirectoryKey,
+    ([, accessToken, currentLocale]) =>
+      getProjectDirectory(accessToken, currentLocale),
+    apiSWRConfig,
+  )
+  const projectTasksKey = accessToken && user && !currentUserError
+    ? (['project-tasks', accessToken, projectId] as const)
+    : null
+  const {
+    data: tasks = [],
+    error: taskError,
+    isLoading: isProjectTasksLoading,
+  } = useSWR(
+    projectTasksKey,
+    ([, accessToken, currentProjectId]) =>
+      getProjectTasks(currentProjectId, accessToken),
+    apiSWRConfig,
+  )
+  const activeTeam = findTeamForProject(teams, projectId, selectedTeamId)
+  const activeProject = findProjectInTeams(teams, projectId, activeTeam?.id ?? selectedTeamId)
+  const projectName =
+    activeProject?.name ?? (projectId === 'refero' ? t('tasks.project.refero') : projectId)
+  const taskErrorMessage = useMemo(() => {
+    if (!taskError) {
+      return undefined
+    }
+
+    const message = taskError instanceof Error ? taskError.message : 'tasks.error.loading'
+
+    return message === 'tasks.error.loading' ? t('tasks.error.loading') : message
+  }, [taskError, t])
+  const isLoading =
+    !session ||
+    isCurrentUserLoading ||
+    Boolean(currentUserError) ||
+    Boolean(user && isProjectTasksLoading)
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -117,54 +187,17 @@ export function TaskPage() {
   }, [locale, projectName, t])
 
   useEffect(() => {
-    let isMounted = true
-    const session = getAuthSession()
-
     if (!session) {
       navigate('/', { replace: true })
-      return () => {
-        isMounted = false
-      }
     }
+  }, [navigate, session])
 
-    getCurrentUser(session.accessToken)
-      .then((currentUser) => {
-        if (isMounted) {
-          setUser(currentUser)
-        }
-
-        return getProjectTasks(projectId)
-          .then((projectTasks) => {
-            if (isMounted) {
-              setTasks(projectTasks)
-              setTaskErrorMessage(undefined)
-            }
-          })
-          .catch((error: unknown) => {
-            if (isMounted) {
-              setTasks([])
-              setTaskErrorMessage(
-                error instanceof Error ? error.message : t('tasks.error.loading'),
-              )
-            }
-          })
-      })
-      .catch(() => {
-        if (isMounted) {
-          clearAuthSession()
-          navigate('/', { replace: true })
-        }
-      })
-      .finally(() => {
-        if (isMounted) {
-          setIsLoading(false)
-        }
-      })
-
-    return () => {
-      isMounted = false
+  useEffect(() => {
+    if (currentUserError) {
+      clearAuthSession()
+      navigate('/', { replace: true })
     }
-  }, [navigate, projectId, t])
+  }, [currentUserError, navigate])
 
   const userInitial =
     (user?.attributes.name ?? user?.attributes.email ?? user?.username ?? 'J')
@@ -176,10 +209,16 @@ export function TaskPage() {
     <TaskScreen
       isLoading={isLoading}
       locale={locale}
-      onSelectProject={(nextProjectId) => navigate(`/projects/${nextProjectId}/tasks`)}
+      activeProjectTeamId={activeTeam?.id}
+      onSelectProject={(nextProjectId, teamId) =>
+        navigate(createProjectTasksPath(nextProjectId, teamId))
+      }
       projectId={projectId}
+      projectName={projectName}
       taskErrorMessage={taskErrorMessage}
       tasks={tasks}
+      teamName={activeTeam?.name}
+      teams={teams}
       userInitial={userInitial}
     />
   )
@@ -192,6 +231,10 @@ export function TaskScreen({
   locale,
   projectId,
   userInitial,
+  teams,
+  projectName,
+  teamName,
+  activeProjectTeamId,
   isLoading = false,
   tasks = [],
   taskErrorMessage,
@@ -205,8 +248,10 @@ export function TaskScreen({
   const [isStatusMenuOpen, setIsStatusMenuOpen] = useState(false)
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const projectName = projectId === 'refero' ? t('tasks.project.refero') : projectId
-  const teams = useTaskTeams(t)
+  const resolvedProjectName = projectName ?? projectId
+  const resolvedActiveTeam = findTeamForProject(teams, projectId, activeProjectTeamId)
+  const resolvedActiveTeamId = activeProjectTeamId ?? resolvedActiveTeam?.id
+  const resolvedTeamName = teamName ?? resolvedActiveTeam?.name ?? ''
   const visibleTasks = useMemo(
     () =>
       tasks.filter((task) => {
@@ -244,6 +289,7 @@ export function TaskScreen({
     <main className="flex min-h-svh overflow-hidden bg-[#f6f9fd] text-[#0d1833]">
       <Sidebar
         activeProjectId={projectId}
+        activeProjectTeamId={resolvedActiveTeamId}
         className="max-[980px]:hidden"
         collapsed={sidebarCollapsed}
         inboxCount={3}
@@ -257,9 +303,10 @@ export function TaskScreen({
         <TaskHeader
           activeTab={activeTab}
           onTabChange={setActiveTab}
-          projectName={projectName}
+          projectName={resolvedProjectName}
           t={t}
           tasks={tasks}
+          teamName={resolvedTeamName}
           userInitial={userInitial}
         />
 
@@ -291,39 +338,49 @@ export function TaskScreen({
   )
 }
 
-function useTaskTeams(t: (key: MessageKey) => string) {
-  return useMemo<SidebarTeam[]>(
-    () => [
-      {
-        id: 'johns-first-team',
-        name: t('tasks.team.johnsFirstTeam'),
-        expanded: true,
-        projects: [
-          { id: 'refero', name: t('tasks.project.refero'), tone: 'blue' },
-          { id: 'marketing', name: t('tasks.project.marketing'), tone: 'purple' },
-          {
-            id: 'customer-stories',
-            name: t('tasks.project.customerStories'),
-            tone: 'green',
-          },
-          {
-            id: 'product-roadmap',
-            name: t('tasks.project.productRoadmap'),
-            tone: 'yellow',
-          },
-        ],
-      },
-      {
-        id: 'design-team',
-        name: t('tasks.team.designTeam'),
-      },
-      {
-        id: 'sales-team',
-        name: t('tasks.team.salesTeam'),
-      },
-    ],
-    [t],
-  )
+function findProjectInTeams(
+  teams: ProjectDirectoryTeam[],
+  projectId: string,
+  preferredTeamId?: string,
+) {
+  const preferredTeam = preferredTeamId
+    ? teams.find((team) => team.id === preferredTeamId)
+    : undefined
+  const preferredProject = preferredTeam?.projects.find((candidate) => candidate.id === projectId)
+
+  if (preferredProject) {
+    return preferredProject
+  }
+
+  for (const team of teams) {
+    const project = team.projects.find((candidate) => candidate.id === projectId)
+
+    if (project) {
+      return project
+    }
+  }
+
+  return undefined
+}
+
+function findTeamForProject(
+  teams: ProjectDirectoryTeam[],
+  projectId: string,
+  preferredTeamId?: string,
+) {
+  const preferredTeam = preferredTeamId
+    ? teams.find((team) => team.id === preferredTeamId)
+    : undefined
+
+  if (preferredTeam?.projects.some((project) => project.id === projectId)) {
+    return preferredTeam
+  }
+
+  return teams.find((team) => team.projects.some((project) => project.id === projectId))
+}
+
+function createProjectTasksPath(projectId: string, teamId: string) {
+  return `/projects/${encodeURIComponent(projectId)}/tasks?teamId=${encodeURIComponent(teamId)}`
 }
 
 function TaskHeader({
@@ -332,6 +389,7 @@ function TaskHeader({
   projectName,
   t,
   tasks,
+  teamName,
   userInitial,
 }: {
   activeTab: TaskTab
@@ -339,6 +397,7 @@ function TaskHeader({
   projectName: string
   t: (key: MessageKey) => string
   tasks: ProjectTask[]
+  teamName: string
   userInitial: string
 }) {
   return (
@@ -349,7 +408,7 @@ function TaskHeader({
             aria-label={t('tasks.breadcrumb.aria')}
             className="flex flex-wrap items-center gap-3 text-[15px] font-medium text-[#405174]"
           >
-            <span>{t('tasks.team.johnsFirstTeam')}</span>
+            <span>{teamName || t('sidebar.projectGroup')}</span>
             <ChevronIcon className="h-4 w-4 -rotate-90 text-[#61708f]" />
             <span className="inline-flex items-center gap-2 font-black text-[#0d1833]">
               <ProjectGlyph />
@@ -357,7 +416,10 @@ function TaskHeader({
             </span>
           </nav>
           <div className="mt-3 flex min-w-0 items-center gap-4">
-            <h1 className="truncate text-[clamp(30px,3vw,42px)] font-black leading-none tracking-normal text-[#0d1833]">
+            <h1
+              className="truncate text-[clamp(30px,3vw,42px)] font-black leading-none tracking-normal text-[#0d1833]"
+              data-testid="tasks-heading"
+            >
               {projectName}
             </h1>
             <IconButton label={t('tasks.action.favorite')}>
@@ -454,6 +516,9 @@ function TaskWorkspace({
   taskErrorMessage?: string
   tasks: ProjectTask[]
 }) {
+  const statusFilterButtonId = 'status-filter-button'
+  const statusFilterMenuId = 'status-filter-menu'
+
   return (
     <div className="min-h-0 flex-1 overflow-auto bg-[#fbfdff] px-[clamp(22px,3vw,38px)] py-7">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -474,14 +539,19 @@ function TaskWorkspace({
           <div className="relative">
             <FilterButton
               active={statusFilter !== 'all'}
+              ariaControls={statusFilterMenuId}
+              ariaExpanded={isStatusMenuOpen}
+              ariaHaspopup="menu"
               icon={<StatusIcon />}
+              id={statusFilterButtonId}
               label={t('tasks.filter.status')}
               onClick={() => onStatusMenuOpenChange(!isStatusMenuOpen)}
             />
             {isStatusMenuOpen ? (
               <div
-                aria-label={t('tasks.filter.statusMenu')}
+                aria-labelledby={statusFilterButtonId}
                 className="absolute left-0 z-20 mt-2 w-56 overflow-hidden rounded-lg border border-slate-200 bg-white p-1 shadow-[0_18px_42px_rgba(30,52,88,0.18)]"
+                id={statusFilterMenuId}
                 role="menu"
               >
                 {(['all', ...taskStatuses] as const).map((status) => (
@@ -598,8 +668,14 @@ function TaskTable({
           <tbody>
             {taskErrorMessage ? (
               <tr>
-                <td className="px-7 py-8 text-sm font-bold text-red-600" colSpan={6}>
-                  {t('tasks.error.loading')}: {taskErrorMessage}
+                <td
+                  className="px-7 py-8 text-sm font-bold text-red-600"
+                  colSpan={6}
+                  data-testid="tasks-error"
+                >
+                  {taskErrorMessage === t('tasks.error.loading')
+                    ? taskErrorMessage
+                    : `${t('tasks.error.loading')}: ${taskErrorMessage}`}
                 </td>
               </tr>
             ) : tasks.length > 0 ? (
@@ -614,7 +690,11 @@ function TaskTable({
               ))
             ) : (
               <tr>
-                <td className="px-7 py-8 text-sm font-bold text-[#526381]" colSpan={6}>
+                <td
+                  className="px-7 py-8 text-sm font-bold text-[#526381]"
+                  colSpan={6}
+                  data-testid="tasks-empty"
+                >
                   {t('tasks.empty')}
                 </td>
               </tr>
@@ -630,7 +710,7 @@ function TaskTable({
           <PlusIcon className="h-5 w-5" />
           {t('tasks.addTask')}
         </button>
-        <span className="text-[#526381]">
+        <span className="text-[#526381]" data-testid="tasks-count">
           {t('tasks.count').replace('{count}', String(tasks.length))}
         </span>
       </div>
@@ -694,23 +774,35 @@ function SummaryCard({ t, tasks }: { t: (key: MessageKey) => string; tasks: Proj
 
 function FilterButton({
   active = false,
+  ariaControls,
+  ariaExpanded,
+  ariaHaspopup,
   icon,
+  id,
   label,
   onClick,
 }: {
   active?: boolean
+  ariaControls?: string
+  ariaExpanded?: boolean
+  ariaHaspopup?: 'menu'
   icon: ReactNode
+  id?: string
   label: string
   onClick?: () => void
 }) {
   return (
     <button
+      aria-controls={ariaControls}
+      aria-expanded={ariaExpanded}
+      aria-haspopup={ariaHaspopup}
       aria-label={label}
       className={`inline-flex h-12 min-w-[128px] items-center justify-between gap-3 rounded-lg border bg-white px-4 text-sm font-black shadow-[0_10px_24px_rgba(30,52,88,0.04)] transition ${
         active
           ? 'border-blue-500 text-blue-700'
           : 'border-slate-200 text-[#0d1833] hover:border-blue-500 hover:text-blue-600'
       }`}
+      id={id}
       onClick={onClick}
       type="button"
     >
@@ -746,9 +838,14 @@ function TaskRow({
     low: 'bg-emerald-100 text-emerald-700',
   }
   const taskTitle = t(task.titleKey)
+  const isOverdue = isTaskOverdue(task)
 
   return (
-    <tr className="border-b border-slate-200 text-[15px] font-bold text-[#0d1833] last:border-b-0 hover:bg-blue-50/40">
+    <tr
+      className="border-b border-slate-200 text-[15px] font-bold text-[#0d1833] last:border-b-0 hover:bg-blue-50/40"
+      data-selected={selected ? 'true' : 'false'}
+      data-testid={`task-row-${task.id}`}
+    >
       <td className="px-7 py-3.5">
         <div className="flex min-w-0 items-center gap-4">
           <input
@@ -774,7 +871,7 @@ function TaskRow({
       </td>
       <td
         className={`px-4 py-3.5 ${
-          task.status === 'done' ? 'text-[#405174] line-through' : task.dueDate === '2025/05/26' ? 'text-red-600' : ''
+          task.status === 'done' ? 'text-[#405174] line-through' : isOverdue ? 'text-red-600' : ''
         }`}
       >
         {task.dueDate}
@@ -790,6 +887,32 @@ function TaskRow({
       <td className="px-4 py-3.5" />
     </tr>
   )
+}
+
+function isTaskOverdue(task: ProjectTask) {
+  const dueDate = parseTaskDueDate(task.dueDate)
+
+  if (task.status === 'done' || !dueDate) {
+    return false
+  }
+
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+
+  return dueDate < today
+}
+
+function parseTaskDueDate(value: string) {
+  const [year, month, day] = value.split('/').map(Number)
+
+  if (!year || !month || !day) {
+    return null
+  }
+
+  const date = new Date(year, month - 1, day)
+  date.setHours(0, 0, 0, 0)
+
+  return Number.isNaN(date.getTime()) ? null : date
 }
 
 function IconButton({

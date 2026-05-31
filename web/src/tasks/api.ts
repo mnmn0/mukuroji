@@ -11,6 +11,16 @@ export type TaskStatus = 'in-progress' | 'review' | 'todo' | 'done'
 export type TaskPriority = 'high' | 'medium' | 'low'
 
 /**
+ * API レスポンスとして許容する task status の一覧です。
+ */
+const taskStatuses = ['in-progress', 'review', 'todo', 'done'] as const
+
+/**
+ * API レスポンスとして許容する task priority の一覧です。
+ */
+const taskPriorities = ['high', 'medium', 'low'] as const
+
+/**
  * プロジェクト画面のテーブルへ表示するタスク行です。
  */
 export type ProjectTask = {
@@ -76,11 +86,18 @@ const tasksApiBaseUrl = trimTrailingSlash(
 /**
  * DynamoDB に保存されたプロジェクトタスクを Lambda API 経由で取得します。
  */
-export async function getProjectTasks(projectId: string) {
+export async function getProjectTasks(projectId: string, accessToken?: string) {
   const response = await fetch(
     `${tasksApiBaseUrl}/projects/${encodeURIComponent(projectId)}/tasks`,
+    {
+      headers: accessToken
+        ? {
+            Authorization: `Bearer ${accessToken}`,
+          }
+        : undefined,
+    },
   )
-  const data = await readJson<{ message?: string } | ProjectTasksResponse>(response)
+  const data = await readJson<unknown>(response)
 
   if (!response.ok) {
     const message =
@@ -89,14 +106,21 @@ export async function getProjectTasks(projectId: string) {
       'message' in data &&
       typeof data.message === 'string'
         ? data.message
-        : 'Project tasks request failed.'
+        : 'tasks.error.loading'
 
     throw new ProjectTasksApiError(response.status, message)
   }
 
-  return (data as ProjectTasksResponse).tasks
+  if (!isProjectTasksResponse(data)) {
+    throw new ProjectTasksApiError(response.status, 'tasks.error.loading')
+  }
+
+  return data.tasks
 }
 
+/**
+ * fetch response body を JSON として読み込みます。
+ */
 async function readJson<T>(response: Response): Promise<T> {
   const text = await response.text()
 
@@ -107,6 +131,60 @@ async function readJson<T>(response: Response): Promise<T> {
   return JSON.parse(text) as T
 }
 
+/**
+ * URL 文字列末尾の slash を取り除きます。
+ */
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, '')
+}
+
+/**
+ * Lambda のタスク一覧レスポンスとして扱える形かどうかを判定します。
+ */
+function isProjectTasksResponse(value: unknown): value is ProjectTasksResponse {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'projectId' in value &&
+    typeof value.projectId === 'string' &&
+    'tasks' in value &&
+    Array.isArray(value.tasks) &&
+    value.tasks.every(isProjectTask)
+  )
+}
+
+/**
+ * API から返った値がタスク行として扱えるかどうかを判定します。
+ */
+function isProjectTask(value: unknown): value is ProjectTask {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'id' in value &&
+    typeof value.id === 'string' &&
+    'titleKey' in value &&
+    typeof value.titleKey === 'string' &&
+    'assigneeKey' in value &&
+    typeof value.assigneeKey === 'string' &&
+    'status' in value &&
+    isTaskStatus(value.status) &&
+    'dueDate' in value &&
+    typeof value.dueDate === 'string' &&
+    'priority' in value &&
+    isTaskPriority(value.priority)
+  )
+}
+
+/**
+ * API 値が既知の task status かどうかを判定します。
+ */
+function isTaskStatus(value: unknown): value is TaskStatus {
+  return taskStatuses.includes(value as TaskStatus)
+}
+
+/**
+ * API 値が既知の task priority かどうかを判定します。
+ */
+function isTaskPriority(value: unknown): value is TaskPriority {
+  return taskPriorities.includes(value as TaskPriority)
 }
