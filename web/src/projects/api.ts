@@ -20,6 +20,30 @@ export type ProjectDirectoryProject = {
 }
 
 /**
+ * チーム作成 API に送信する入力です。
+ */
+export type CreateProjectDirectoryTeamInput = {
+  /**
+   * ユーザーが入力したチーム名です。
+   */
+  name: string
+}
+
+/**
+ * プロジェクト作成 API に送信する入力です。
+ */
+export type CreateProjectDirectoryProjectInput = {
+  /**
+   * ユーザーが入力したプロジェクト名です。
+   */
+  name: string
+  /**
+   * サイドバー上のプロジェクト表示色です。
+   */
+  tone: SidebarProjectTone
+}
+
+/**
  * サイドバーに表示するチーム行です。
  */
 export type ProjectDirectoryTeam = {
@@ -49,6 +73,26 @@ type ProjectDirectoryResponse = {
    * DB に登録されているチームとプロジェクトの階層です。
    */
   teams: ProjectDirectoryTeam[]
+}
+
+/**
+ * チーム作成 API が返す response body です。
+ */
+type CreateProjectDirectoryTeamResponse = {
+  /**
+   * 作成されたチーム行です。
+   */
+  team: ProjectDirectoryTeam
+}
+
+/**
+ * プロジェクト作成 API が返す response body です。
+ */
+type CreateProjectDirectoryProjectResponse = {
+  /**
+   * 作成されたプロジェクト行です。
+   */
+  project: ProjectDirectoryProject
 }
 
 /**
@@ -109,6 +153,78 @@ export async function getProjectDirectory(
   }
 
   return data.teams
+}
+
+/**
+ * DynamoDB にチームを作成します。
+ */
+export async function createProjectDirectoryTeam(
+  accessToken: string,
+  input: CreateProjectDirectoryTeamInput,
+) {
+  const data = await sendProjectDirectoryRequest<unknown>('/teams', accessToken, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+
+  if (!isCreateProjectDirectoryTeamResponse(data)) {
+    throw new ProjectDirectoryApiError(502, 'projects.error.loading')
+  }
+
+  return data.team
+}
+
+/**
+ * DynamoDB にチーム配下のプロジェクトを作成します。
+ */
+export async function createProjectDirectoryProject(
+  accessToken: string,
+  teamId: string,
+  input: CreateProjectDirectoryProjectInput,
+) {
+  const data = await sendProjectDirectoryRequest<unknown>(
+    `/teams/${encodeURIComponent(teamId)}/projects`,
+    accessToken,
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+  )
+
+  if (!isCreateProjectDirectoryProjectResponse(data)) {
+    throw new ProjectDirectoryApiError(502, 'projects.error.loading')
+  }
+
+  return data.project
+}
+
+async function sendProjectDirectoryRequest<T>(
+  path: string,
+  accessToken: string,
+  init?: RequestInit,
+) {
+  const response = await fetch(`${projectsApiBaseUrl}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+  })
+  const data = await readJson<unknown>(response)
+
+  if (!response.ok) {
+    const message =
+      typeof data === 'object' &&
+      data !== null &&
+      'message' in data &&
+      typeof data.message === 'string'
+        ? data.message
+        : 'projects.error.loading'
+
+    throw new ProjectDirectoryApiError(response.status, message)
+  }
+
+  return data as T
 }
 
 /**
@@ -174,6 +290,34 @@ function isProjectDirectoryProject(value: unknown): value is ProjectDirectoryPro
     'name' in value &&
     typeof value.name === 'string' &&
     (!('tone' in value) || isProjectTone(value.tone))
+  )
+}
+
+/**
+ * API レスポンスがチーム作成結果として扱えるかどうかを判定します。
+ */
+function isCreateProjectDirectoryTeamResponse(
+  value: unknown,
+): value is CreateProjectDirectoryTeamResponse {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'team' in value &&
+    isProjectDirectoryTeam(value.team)
+  )
+}
+
+/**
+ * API レスポンスがプロジェクト作成結果として扱えるかどうかを判定します。
+ */
+function isCreateProjectDirectoryProjectResponse(
+  value: unknown,
+): value is CreateProjectDirectoryProjectResponse {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'project' in value &&
+    isProjectDirectoryProject(value.project)
   )
 }
 

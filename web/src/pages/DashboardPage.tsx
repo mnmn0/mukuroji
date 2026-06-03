@@ -19,6 +19,7 @@ import {
   getProjectDirectory,
   type ProjectDirectoryTeam,
 } from '../projects/api'
+import { createProjectTasksPath } from '../routes/paths'
 
 /**
  * ダッシュボード上の小さな指標カードに渡す表示値です。
@@ -70,12 +71,6 @@ type DashboardPageProps = {
    */
   initialLocale?: Locale
 }
-
-const fallbackDashboardSummary = {
-  projects: 3,
-  tasks: 18,
-  blocked: 2,
-} as const
 
 const emptyProjectDirectory: ProjectDirectoryTeam[] = []
 
@@ -157,17 +152,16 @@ export function DashboardPage({
 
   const displayName =
     user?.attributes.email ?? user?.attributes.name ?? user?.username ?? ''
-  const dashboardSummary = summary ?? fallbackDashboardSummary
-  const projectCount = isDashboardSummaryLoading ? '...' : String(dashboardSummary.projects)
-  const taskCount = isDashboardSummaryLoading ? '...' : String(dashboardSummary.tasks)
-  const blockedCount = isDashboardSummaryLoading ? '...' : String(dashboardSummary.blocked)
+  const projectCount = isDashboardSummaryLoading ? '...' : String(summary?.projects ?? 0)
+  const taskCount = isDashboardSummaryLoading ? '...' : String(summary?.tasks ?? 0)
+  const blockedCount = isDashboardSummaryLoading ? '...' : String(summary?.blocked ?? 0)
 
   return (
     <main className="flex min-h-svh bg-[var(--surface)]">
       <Sidebar
         activeNavId="dashboard"
         className="max-[900px]:hidden"
-        inboxCount={2}
+        inboxCount={summary?.blocked ?? 0}
         labels={sidebarLabels}
         onSelectProject={(projectId, teamId) =>
           navigate(createProjectTasksPath(projectId, teamId))
@@ -232,10 +226,6 @@ export function DashboardPage({
       </section>
     </main>
   )
-}
-
-function createProjectTasksPath(projectId: string, teamId: string) {
-  return `/projects/${encodeURIComponent(projectId)}/tasks?teamId=${encodeURIComponent(teamId)}`
 }
 
 /**

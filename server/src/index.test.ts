@@ -3,6 +3,7 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   app,
   configureApiClientsForTest,
+  DynamoDbDashboardSummaryClient,
   DynamoDbProjectDirectoryClient,
   DynamoDbProjectTasksClient,
   resetApiClientsForTest,
@@ -39,6 +40,26 @@ test('loads project directory from the authenticated user scoped partition', asy
     ],
   })
   expect(calls.directoryReads).toEqual([{ directoryId: 'user#demo@example.com', locale: 'en' }])
+})
+
+test('loads dashboard summary from the authenticated user scoped directory', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  const response = await app.request('/api/dashboard/summary', {
+    headers: {
+      Authorization: 'Bearer test-token',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    projects: 1,
+    tasks: 1,
+    blocked: 0,
+    updatedAt: '2026-06-03T00:00:00.000Z',
+    source: 'dynamodb',
+  })
+  expect(calls.summaryReads).toEqual(['user#demo@example.com'])
 })
 
 test('denies project tasks when the project is outside the user directory', async () => {
@@ -86,6 +107,212 @@ test('loads project tasks after project access is confirmed', async () => {
   ])
   expect(calls.taskReads).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
+  ])
+})
+
+test('creates a team in the authenticated user scoped directory', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  const response = await app.request('/api/teams', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      name: '新規チーム',
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(await response.json()).toEqual({
+    team: {
+      id: 'new-team',
+      name: '新規チーム',
+      expanded: true,
+      projects: [],
+    },
+  })
+  expect(calls.teamCreates).toEqual([
+    { directoryId: 'user#demo@example.com', name: '新規チーム' },
+  ])
+})
+
+test('creates a project under an authenticated team directory', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  const response = await app.request('/api/teams/core-team/projects', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      name: '新規プロジェクト',
+      tone: 'green',
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(await response.json()).toEqual({
+    project: {
+      id: 'new-project',
+      name: '新規プロジェクト',
+      tone: 'green',
+    },
+  })
+  expect(calls.projectCreates).toEqual([
+    { directoryId: 'user#demo@example.com', teamId: 'core-team', name: '新規プロジェクト' },
+  ])
+})
+
+test('DynamoDB directory client creates duplicate named teams with a unique id suffix', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#新規チーム',
+              entryType: 'team',
+              teamId: '新規チーム',
+              teamSortOrder: 10,
+              nameJa: '新規チーム',
+              nameEn: 'New Team',
+              expanded: true,
+            },
+          ],
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(client.createTeam('user#demo@example.com', { name: '新規チーム' })).resolves.toEqual({
+    team: {
+      id: '新規チーム-2',
+      name: '新規チーム',
+      expanded: true,
+      projects: [],
+    },
+  })
+  expect(sentInputs[1]).toMatchObject({
+    TableName: 'DirectoryTable',
+    Item: {
+      directoryId: 'user#demo@example.com',
+      teamId: '新規チーム-2',
+      teamSortOrder: 20,
+      entryKey: '000020#000000#TEAM#新規チーム-2',
+    },
+    ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+  })
+})
+
+test('DynamoDB directory client creates duplicate named projects with a unique id suffix', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000010#PROJECT#新規プロジェクト',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: '新規プロジェクト',
+              projectSortOrder: 10,
+              nameJa: '新規プロジェクト',
+              nameEn: 'New Project',
+              tone: 'blue',
+            },
+          ],
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(
+    client.createProject('user#demo@example.com', 'core-team', {
+      name: '新規プロジェクト',
+      tone: 'green',
+    }),
+  ).resolves.toEqual({
+    project: {
+      id: '新規プロジェクト-2',
+      name: '新規プロジェクト',
+      tone: 'green',
+    },
+  })
+  expect(sentInputs[1]).toMatchObject({
+    TableName: 'DirectoryTable',
+    Item: {
+      directoryId: 'user#demo@example.com',
+      teamId: 'core-team',
+      projectId: '新規プロジェクト-2',
+      projectSortOrder: 20,
+      entryKey: '000010#000020#PROJECT#新規プロジェクト-2',
+    },
+    ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+  })
+})
+
+test('creates a project task after project access is confirmed', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  const response = await app.request('/api/projects/refero/tasks', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: '新規タスク',
+      assignee: '佐藤 花子',
+      dueDate: '2026/06/20',
+      priority: 'high',
+      status: 'todo',
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(await response.json()).toEqual({
+    task: {
+      id: 'new-task',
+      title: '新規タスク',
+      assignee: '佐藤 花子',
+      status: 'todo',
+      dueDate: '2026/06/20',
+      priority: 'high',
+    },
+  })
+  expect(calls.accessChecks).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+  ])
+  expect(calls.taskCreates).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero', title: '新規タスク' },
   ])
 })
 
@@ -186,6 +413,115 @@ test('DynamoDB task client queries the scoped project partition across pages', a
   ])
 })
 
+test('DynamoDB dashboard summary client derives counts from directory and task data', async () => {
+  const client = new DynamoDbDashboardSummaryClient(
+    {
+      async getProjectDirectory(directoryId, locale) {
+        expect(directoryId).toBe('user#demo@example.com')
+        expect(locale).toBe('ja')
+
+        return {
+          teams: [
+            {
+              id: 'core-team',
+              name: 'コアチーム',
+              expanded: true,
+              projects: [
+                {
+                  id: 'refero',
+                  name: 'Refero',
+                  tone: 'blue',
+                },
+                {
+                  id: 'new-project',
+                  name: '新規プロジェクト',
+                  tone: 'green',
+                },
+              ],
+            },
+          ],
+        }
+      },
+      async hasProjectAccess() {
+        return true
+      },
+      async createTeam() {
+        return {
+          team: {
+            id: 'unused',
+            name: 'unused',
+            projects: [],
+          },
+        }
+      },
+      async createProject() {
+        return {
+          project: {
+            id: 'unused',
+            name: 'unused',
+          },
+        }
+      },
+    },
+    {
+      async getProjectTasks(_directoryId, projectId) {
+        return {
+          projectId,
+          tasks: projectId === 'refero'
+            ? [
+                {
+                  id: 'wireframe',
+                  title: 'ワイヤーフレーム',
+                  assignee: '佐藤 花子',
+                  status: 'in-progress',
+                  dueDate: '2026/06/03',
+                  priority: 'high',
+                },
+                {
+                  id: 'archive',
+                  title: '完了済み',
+                  assignee: '鈴木 太郎',
+                  status: 'done',
+                  dueDate: '2026/06/01',
+                  priority: 'high',
+                },
+              ]
+            : [
+                {
+                  id: 'planning',
+                  title: '計画',
+                  assignee: '田中 一郎',
+                  status: 'todo',
+                  dueDate: '2026/06/12',
+                  priority: 'medium',
+                },
+              ],
+        }
+      },
+      async createProjectTask() {
+        return {
+          task: {
+            id: 'unused',
+            title: 'unused',
+            assignee: 'unused',
+            status: 'todo',
+            dueDate: '2026/06/03',
+            priority: 'medium',
+          },
+        }
+      },
+    },
+  )
+
+  const summary = await client.getSummary('user#demo@example.com')
+
+  expect(summary.projects).toBe(2)
+  expect(summary.tasks).toBe(2)
+  expect(summary.blocked).toBe(1)
+  expect(summary.source).toBe('dynamodb')
+  expect(Date.parse(summary.updatedAt)).not.toBeNaN()
+})
+
 test('DynamoDB directory client reads every page from the user partition', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const documentClient = {
@@ -278,6 +614,10 @@ function configureFakeProjectClients(hasProjectAccess: boolean) {
   const calls = {
     accessChecks: [] as Array<{ directoryId: string; projectId: string }>,
     directoryReads: [] as Array<{ directoryId: string; locale: string }>,
+    projectCreates: [] as Array<{ directoryId: string; teamId: string; name: string }>,
+    summaryReads: [] as string[],
+    teamCreates: [] as Array<{ directoryId: string; name: string }>,
+    taskCreates: [] as Array<{ directoryId: string; projectId: string; title: string }>,
     taskReads: [] as Array<{ directoryId: string; projectId: string }>,
   }
 
@@ -299,7 +639,9 @@ function configureFakeProjectClients(hasProjectAccess: boolean) {
       },
     },
     dashboardSummary: {
-      async getSummary() {
+      async getSummary(directoryId) {
+        calls.summaryReads.push(directoryId)
+
         return {
           projects: 1,
           tasks: 1,
@@ -335,6 +677,29 @@ function configureFakeProjectClients(hasProjectAccess: boolean) {
 
         return hasProjectAccess
       },
+      async createTeam(directoryId, input) {
+        calls.teamCreates.push({ directoryId, name: String(input.name) })
+
+        return {
+          team: {
+            id: 'new-team',
+            name: String(input.name),
+            expanded: true,
+            projects: [],
+          },
+        }
+      },
+      async createProject(directoryId, teamId, input) {
+        calls.projectCreates.push({ directoryId, teamId, name: String(input.name) })
+
+        return {
+          project: {
+            id: 'new-project',
+            name: String(input.name),
+            tone: 'green',
+          },
+        }
+      },
     },
     projectTasks: {
       async getProjectTasks(directoryId, projectId) {
@@ -352,6 +717,20 @@ function configureFakeProjectClients(hasProjectAccess: boolean) {
               priority: 'high',
             },
           ],
+        }
+      },
+      async createProjectTask(directoryId, projectId, input) {
+        calls.taskCreates.push({ directoryId, projectId, title: String(input.title) })
+
+        return {
+          task: {
+            id: 'new-task',
+            title: String(input.title),
+            assignee: String(input.assignee),
+            status: 'todo',
+            dueDate: String(input.dueDate),
+            priority: 'high',
+          },
         }
       },
     },

@@ -211,7 +211,7 @@ export class CdkStack extends cdk.Stack {
       },
       code: lambda.Code.fromInline(`
 const { CognitoIdentityProviderClient, GetUserCommand } = require('@aws-sdk/client-cognito-identity-provider');
-const { DynamoDBClient, QueryCommand } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBClient, PutItemCommand, QueryCommand } = require('@aws-sdk/client-dynamodb');
 
 const cognito = new CognitoIdentityProviderClient({});
 const dynamodb = new DynamoDBClient({});
@@ -242,6 +242,24 @@ exports.handler = async (event) => {
     return json(403, { message: 'Project access is denied.' }, headers);
   }
 
+  if (isCreateTeamRequest(event)) {
+    try {
+      return await createTeam(event, headers, directoryId);
+    } catch (error) {
+      return toProjectDataError(error, headers, 'Failed to create team.');
+    }
+  }
+
+  const createProjectTeamId = readCreateProjectTeamId(event);
+
+  if (createProjectTeamId) {
+    try {
+      return await createProject(event, headers, directoryId, createProjectTeamId);
+    } catch (error) {
+      return toProjectDataError(error, headers, 'Failed to create project.');
+    }
+  }
+
   if (isProjectDirectoryRequest(event)) {
     return listProjectDirectory(event, headers, directoryId);
   }
@@ -252,11 +270,23 @@ exports.handler = async (event) => {
     return json(404, { message: 'Project tasks endpoint was not found.' }, headers);
   }
 
-  const decodedProjectId = decodeURIComponent(projectId);
+  const decodedProjectId = decodePathSegment(projectId);
+
+  if (!decodedProjectId) {
+    return json(400, { message: 'Project ID is invalid.' }, headers);
+  }
 
   try {
     if (!(await hasProjectAccess(directoryId, decodedProjectId))) {
       return json(403, { message: 'Project access is denied.' }, headers);
+    }
+
+    if (event.requestContext?.http?.method === 'POST') {
+      return await createProjectTask(event, headers, directoryId, decodedProjectId);
+    }
+
+    if (event.requestContext?.http?.method !== 'GET') {
+      return json(405, { message: 'Method is not allowed.' }, headers);
     }
 
     const items = await queryAll({
@@ -274,10 +304,166 @@ exports.handler = async (event) => {
       tasks: items.map(toTask),
     }, headers);
   } catch (error) {
-    console.error(error);
-    return json(500, { message: 'Failed to load project tasks.' }, headers);
+    return toProjectDataError(error, headers, 'Failed to load project tasks.');
   }
 };
+
+async function createTeam(event, headers, directoryId) {
+  const body = readJsonBody(event);
+  const names = readLocalizedNames(body);
+
+  if (!names) {
+    return json(400, { message: 'Name is required.' }, headers);
+  }
+
+  const items = await queryAll({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    KeyConditionExpression: 'directoryId = :directoryId',
+    ExpressionAttributeValues: {
+      ':directoryId': { S: directoryId },
+    },
+    ScanIndexForward: true,
+  });
+  const teamId = createUniqueResourceId(names.nameJa, items.filter((item) => item.entryType?.S === 'team').map((item) => item.teamId?.S).filter(Boolean));
+  const teamSortOrder = Math.max(0, ...items.filter((item) => item.entryType?.S === 'team').map((item) => Number(item.teamSortOrder?.N ?? 0))) + 10;
+  const item = {
+    directoryId: { S: directoryId },
+    entryKey: { S: createTeamEntryKey(teamSortOrder, teamId) },
+    entryType: { S: 'team' },
+    teamId: { S: teamId },
+    teamSortOrder: { N: String(teamSortOrder) },
+    nameJa: { S: names.nameJa },
+    nameEn: { S: names.nameEn },
+    expanded: { BOOL: true },
+  };
+
+  await dynamodb.send(new PutItemCommand({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    Item: item,
+    ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+  }));
+
+  return json(201, {
+    team: {
+      id: teamId,
+      name: names.nameJa,
+      expanded: true,
+      projects: [],
+    },
+  }, headers);
+}
+
+async function createProject(event, headers, directoryId, teamId) {
+  const body = readJsonBody(event);
+  const names = readLocalizedNames(body);
+
+  if (!names) {
+    return json(400, { message: 'Name is required.' }, headers);
+  }
+
+  const tone = body.tone === undefined ? 'blue' : body.tone;
+
+  if (!isProjectTone(tone)) {
+    return json(400, { message: 'Project tone is invalid.' }, headers);
+  }
+
+  const items = await queryAll({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    KeyConditionExpression: 'directoryId = :directoryId',
+    ExpressionAttributeValues: {
+      ':directoryId': { S: directoryId },
+    },
+    ScanIndexForward: true,
+  });
+  const team = items.find((item) => item.entryType?.S === 'team' && item.teamId?.S === teamId);
+
+  if (!team) {
+    return json(404, { message: 'Team was not found.' }, headers);
+  }
+
+  const projectId = createUniqueResourceId(names.nameJa, items.filter((item) => item.entryType?.S === 'project').map((item) => item.projectId?.S).filter(Boolean));
+  const teamSortOrder = Number(team.teamSortOrder.N);
+  const projectSortOrder = Math.max(0, ...items.filter((item) => item.entryType?.S === 'project' && item.teamId?.S === teamId).map((item) => Number(item.projectSortOrder?.N ?? 0))) + 10;
+  const item = {
+    directoryId: { S: directoryId },
+    entryKey: { S: createProjectEntryKey(teamSortOrder, projectSortOrder, projectId) },
+    entryType: { S: 'project' },
+    teamId: { S: teamId },
+    teamSortOrder: { N: String(teamSortOrder) },
+    projectId: { S: projectId },
+    projectSortOrder: { N: String(projectSortOrder) },
+    nameJa: { S: names.nameJa },
+    nameEn: { S: names.nameEn },
+    tone: { S: tone },
+  };
+
+  await dynamodb.send(new PutItemCommand({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    Item: item,
+    ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+  }));
+
+  return json(201, {
+    project: {
+      id: projectId,
+      name: names.nameJa,
+      tone,
+    },
+  }, headers);
+}
+
+async function createProjectTask(event, headers, directoryId, projectId) {
+  const body = readJsonBody(event);
+
+  if (
+    typeof body.title !== 'string' ||
+    typeof body.assignee !== 'string' ||
+    typeof body.dueDate !== 'string' ||
+    !body.title.trim() ||
+    !body.assignee.trim() ||
+    !body.dueDate.trim()
+  ) {
+    return json(400, { message: 'Task title, assignee, and due date are required.' }, headers);
+  }
+
+  if (!isTaskStatus(body.status) || !isTaskPriority(body.priority)) {
+    return json(400, { message: 'Task status or priority is invalid.' }, headers);
+  }
+
+  const directoryProjectId = createDirectoryProjectId(directoryId, projectId);
+  const items = await queryAll({
+    TableName: process.env.TASKS_TABLE_NAME,
+    IndexName: 'ProjectSortOrderIndex',
+    KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
+    ExpressionAttributeValues: {
+      ':directoryProjectId': { S: directoryProjectId },
+    },
+    ScanIndexForward: true,
+  });
+  const taskId = createResourceId(body.title);
+  const item = {
+    directoryId: { S: directoryId },
+    directoryProjectId: { S: directoryProjectId },
+    projectId: { S: projectId },
+    taskId: { S: taskId },
+    sortOrder: { N: String((items.length + 1) * 10) },
+    title: { S: body.title.trim() },
+    assignee: { S: body.assignee.trim() },
+    status: { S: body.status },
+    dueDate: { S: body.dueDate.trim() },
+    priority: { S: body.priority },
+  };
+
+  await dynamodb.send(new PutItemCommand({
+    TableName: process.env.TASKS_TABLE_NAME,
+    Item: item,
+    ConditionExpression: 'attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)',
+  }));
+
+  return json(201, {
+    task: toTask(item),
+  }, headers);
+}
 
 async function listProjectDirectory(event, headers, directoryId) {
   const locale = event.queryStringParameters?.locale === 'en' ? 'en' : 'ja';
@@ -304,6 +490,21 @@ async function listProjectDirectory(event, headers, directoryId) {
 function isProjectDirectoryRequest(event) {
   const path = event.rawPath ?? '';
   return path === '/teams/projects' || path === '/api/teams/projects';
+}
+
+function isCreateTeamRequest(event) {
+  const path = event.rawPath ?? '';
+  return event.requestContext?.http?.method === 'POST' && (path === '/teams' || path === '/api/teams');
+}
+
+function readCreateProjectTeamId(event) {
+  if (event.requestContext?.http?.method !== 'POST') {
+    return undefined;
+  }
+
+  const encodedTeamId = event.rawPath?.match(/^\\/(?:api\\/)?teams\\/([^/]+)\\/projects$/)?.[1];
+
+  return encodedTeamId ? decodePathSegment(encodedTeamId) : undefined;
 }
 
 async function hasProjectAccess(directoryId, projectId) {
@@ -340,6 +541,34 @@ function json(statusCode, body, headers) {
   return { statusCode, headers, body: JSON.stringify(body) };
 }
 
+function toProjectDataError(error, headers, fallbackMessage) {
+  console.error(error);
+
+  if (error?.name === 'ConditionalCheckFailedException') {
+    return json(409, { message: 'The same item already exists.' }, headers);
+  }
+
+  if (error?.name === 'ResourceNotFoundException') {
+    return json(503, { message: 'Project data is not initialized.' }, headers);
+  }
+
+  return json(500, { message: fallbackMessage }, headers);
+}
+
+function readJsonBody(event) {
+  if (!event.body) {
+    return {};
+  }
+
+  const text = event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body;
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
+}
+
 function createHeaders(event) {
   const origin = event.headers?.origin ?? event.headers?.Origin;
   const allowedOrigins = parseAllowedOrigins();
@@ -347,7 +576,7 @@ function createHeaders(event) {
 
   return {
     'access-control-allow-origin': allowedOrigin,
-    'access-control-allow-methods': 'GET,OPTIONS',
+    'access-control-allow-methods': 'GET,POST,OPTIONS',
     'access-control-allow-headers': 'authorization,content-type',
     'content-type': 'application/json; charset=utf-8',
     vary: 'origin',
@@ -380,6 +609,70 @@ function toProjectDirectoryId(user) {
 
 function createDirectoryProjectId(directoryId, projectId) {
   return directoryId + '#project#' + projectId;
+}
+
+function decodePathSegment(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function readLocalizedNames(body) {
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  const nameJa = typeof body.nameJa === 'string' ? body.nameJa.trim() : '';
+  const nameEn = typeof body.nameEn === 'string' ? body.nameEn.trim() : '';
+  const primaryName = nameJa || name || nameEn;
+
+  if (!primaryName) {
+    return undefined;
+  }
+
+  return {
+    nameJa: primaryName,
+    nameEn: nameEn || name || primaryName,
+  };
+}
+
+function createResourceId(value) {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .normalize('NFKC')
+    .replace(/[^\\p{Letter}\\p{Number}]+/gu, '-')
+    .replace(/^-+|-+$/g, '');
+
+  return normalized || 'item-' + Date.now();
+}
+
+function createUniqueResourceId(value, existingIds) {
+  const baseId = createResourceId(value);
+  const usedIds = new Set(existingIds);
+
+  if (!usedIds.has(baseId)) {
+    return baseId;
+  }
+
+  let suffix = 2;
+
+  while (usedIds.has(baseId + '-' + suffix)) {
+    suffix += 1;
+  }
+
+  return baseId + '-' + suffix;
+}
+
+function createTeamEntryKey(teamSortOrder, teamId) {
+  return padSortOrder(teamSortOrder) + '#000000#TEAM#' + teamId;
+}
+
+function createProjectEntryKey(teamSortOrder, projectSortOrder, projectId) {
+  return padSortOrder(teamSortOrder) + '#' + padSortOrder(projectSortOrder) + '#PROJECT#' + projectId;
+}
+
+function padSortOrder(value) {
+  return String(value).padStart(6, '0');
 }
 
 function toProjectDirectory(items, locale) {
@@ -426,20 +719,48 @@ function localizedName(item, locale) {
 }
 
 function toTask(item) {
-  return {
+  const task = {
     id: item.taskId.S,
-    titleKey: item.titleKey.S,
-    assigneeKey: item.assigneeKey.S,
     status: item.status.S,
     dueDate: item.dueDate.S,
     priority: item.priority.S,
   };
+
+  if (item.titleKey?.S) {
+    task.titleKey = item.titleKey.S;
+  }
+
+  if (item.title?.S) {
+    task.title = item.title.S;
+  }
+
+  if (item.assigneeKey?.S) {
+    task.assigneeKey = item.assigneeKey.S;
+  }
+
+  if (item.assignee?.S) {
+    task.assignee = item.assignee.S;
+  }
+
+  return task;
+}
+
+function isTaskStatus(value) {
+  return value === 'in-progress' || value === 'review' || value === 'todo' || value === 'done';
+}
+
+function isTaskPriority(value) {
+  return value === 'high' || value === 'medium' || value === 'low';
+}
+
+function isProjectTone(value) {
+  return value === 'blue' || value === 'purple' || value === 'green' || value === 'yellow';
 }
       `),
     });
 
-    tasksTable.grantReadData(listTasksFunction);
-    projectDirectoryTable.grantReadData(listTasksFunction);
+    tasksTable.grantReadWriteData(listTasksFunction);
+    projectDirectoryTable.grantReadWriteData(listTasksFunction);
     listTasksFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['cognito-idp:GetUser'],
@@ -451,7 +772,7 @@ function toTask(item) {
       authType: lambda.FunctionUrlAuthType.NONE,
       cors: {
         allowedOrigins: taskApiAllowedOriginList,
-        allowedMethods: [lambda.HttpMethod.GET],
+        allowedMethods: [lambda.HttpMethod.GET, lambda.HttpMethod.POST],
         allowedHeaders: ['authorization', 'content-type'],
       },
     });

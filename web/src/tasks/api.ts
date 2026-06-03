@@ -33,13 +33,21 @@ export type ProjectTask = {
    */
   id: string
   /**
-   * タスク名を解決する i18n key です。
+   * タスク名を解決する i18n key です。seed 由来のタスクで利用します。
    */
-  titleKey: MessageKey
+  titleKey?: MessageKey
   /**
-   * 担当者名を解決する i18n key です。
+   * API から取得した literal のタスク名です。
    */
-  assigneeKey: MessageKey
+  title?: string
+  /**
+   * 担当者名を解決する i18n key です。seed 由来のタスクで利用します。
+   */
+  assigneeKey?: MessageKey
+  /**
+   * API から取得した literal の担当者名です。
+   */
+  assignee?: string
   /**
    * タスクの状態コードです。
    */
@@ -48,6 +56,32 @@ export type ProjectTask = {
    * 期限日として表示する文字列です。
    */
   dueDate: string
+  /**
+   * 優先度コードです。
+   */
+  priority: TaskPriority
+}
+
+/**
+ * タスク作成 API に送信する入力です。
+ */
+export type CreateProjectTaskInput = {
+  /**
+   * ユーザーが入力したタスク名です。
+   */
+  title: string
+  /**
+   * ユーザーが入力した担当者名です。
+   */
+  assignee: string
+  /**
+   * 期限日として保存する文字列です。
+   */
+  dueDate: string
+  /**
+   * タスクの状態コードです。
+   */
+  status: TaskStatus
   /**
    * 優先度コードです。
    */
@@ -66,6 +100,16 @@ type ProjectTasksResponse = {
    * DynamoDB に保存されたタスク一覧です。
    */
   tasks: ProjectTask[]
+}
+
+/**
+ * タスク作成 API が返す response body です。
+ */
+type CreateProjectTaskResponse = {
+  /**
+   * 作成されたタスク行です。
+   */
+  task: ProjectTask
 }
 
 /**
@@ -123,6 +167,49 @@ export async function getProjectTasks(projectId: string, accessToken?: string) {
 }
 
 /**
+ * DynamoDB にプロジェクトタスクを作成します。
+ */
+export async function createProjectTask(
+  projectId: string,
+  accessToken: string,
+  input: CreateProjectTaskInput,
+) {
+  const response = await fetch(
+    `${tasksApiBaseUrl}/projects/${encodeURIComponent(projectId)}/tasks`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(input),
+    },
+  )
+  const data = await readJson<unknown>(response)
+
+  if (!response.ok) {
+    const message =
+      typeof data === 'object' &&
+      data !== null &&
+      'message' in data &&
+      typeof data.message === 'string'
+        ? data.message
+        : 'tasks.error.loading'
+
+    throw new ProjectTasksApiError(response.status, message)
+  }
+
+  if (!isCreateProjectTaskResponse(data)) {
+    throw new ProjectTasksApiError(response.status, 'tasks.error.loading')
+  }
+
+  return {
+    ...data.task,
+    projectId,
+  }
+}
+
+/**
  * fetch response body を JSON として読み込みます。
  */
 async function readJson<T>(response: Response): Promise<T> {
@@ -167,10 +254,12 @@ function isProjectTask(value: unknown): value is ProjectTask {
     (!('projectId' in value) || typeof value.projectId === 'string') &&
     'id' in value &&
     typeof value.id === 'string' &&
-    'titleKey' in value &&
-    typeof value.titleKey === 'string' &&
-    'assigneeKey' in value &&
-    typeof value.assigneeKey === 'string' &&
+    (!('titleKey' in value) || typeof value.titleKey === 'string') &&
+    (!('title' in value) || typeof value.title === 'string') &&
+    ('titleKey' in value || 'title' in value) &&
+    (!('assigneeKey' in value) || typeof value.assigneeKey === 'string') &&
+    (!('assignee' in value) || typeof value.assignee === 'string') &&
+    ('assigneeKey' in value || 'assignee' in value) &&
     'status' in value &&
     isTaskStatus(value.status) &&
     'dueDate' in value &&
@@ -192,6 +281,18 @@ function isTaskStatus(value: unknown): value is TaskStatus {
  */
 function isTaskPriority(value: unknown): value is TaskPriority {
   return taskPriorities.includes(value as TaskPriority)
+}
+
+/**
+ * API レスポンスがタスク作成結果として扱えるかどうかを判定します。
+ */
+function isCreateProjectTaskResponse(value: unknown): value is CreateProjectTaskResponse {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'task' in value &&
+    isProjectTask(value.task)
+  )
 }
 
 /**

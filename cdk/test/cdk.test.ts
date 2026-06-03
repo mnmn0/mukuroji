@@ -119,6 +119,9 @@ test('project task data store and lambda API are created', () => {
   expect(lambdaCode).toContain('(?:api\\/)?projects\\/([^/]+)\\/tasks');
   expect(lambdaCode).toContain('toProjectDirectoryId');
   expect(lambdaCode).toContain('createDirectoryProjectId');
+  expect(lambdaCode).toContain('decodePathSegment');
+  expect(lambdaCode).toContain('createUniqueResourceId');
+  expect(lambdaCode).toContain('toProjectDataError');
   expect(lambdaCode).toContain('directoryProjectId = :directoryProjectId');
   expect(lambdaCode).toContain('hasProjectAccess');
   expect(lambdaCode).toContain('async function queryAll');

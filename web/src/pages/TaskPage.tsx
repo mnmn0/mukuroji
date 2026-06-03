@@ -27,6 +27,8 @@ import {
   workspaceNavPaths,
 } from '../routes/paths'
 import {
+  createProjectTask,
+  type CreateProjectTaskInput,
   getProjectTasks,
   type ProjectTask,
   type TaskPriority,
@@ -35,40 +37,6 @@ import {
 
 const taskTabs = ['table', 'board', 'gantt', 'calendar', 'file'] as const
 const taskStatuses = ['in-progress', 'review', 'todo', 'done'] as const
-const taskCalendarDays = [
-  { id: 'tue', labelKey: 'tasks.calendar.day.tue', date: '2026/06/02' },
-  { id: 'wed', labelKey: 'tasks.calendar.day.wed', date: '2026/06/03' },
-  { id: 'thu', labelKey: 'tasks.calendar.day.thu', date: '2026/06/04' },
-  { id: 'fri', labelKey: 'tasks.calendar.day.fri', date: '2026/06/05' },
-  { id: 'mon', labelKey: 'tasks.calendar.day.mon', date: '2026/06/08' },
-  { id: 'next-tue', labelKey: 'tasks.calendar.day.tue', date: '2026/06/09' },
-] as const
-const taskFileItems = [
-  {
-    id: 'launch-brief',
-    nameKey: 'tasks.file.item.launchBrief',
-    typeKey: 'tasks.file.type.document',
-    ownerKey: 'tasks.assignee.sato',
-    updatedKey: 'tasks.file.updated.today',
-    statusKey: 'tasks.file.status.approved',
-  },
-  {
-    id: 'brand-kit',
-    nameKey: 'tasks.file.item.brandKit',
-    typeKey: 'tasks.file.type.design',
-    ownerKey: 'tasks.assignee.suzuki',
-    updatedKey: 'tasks.file.updated.yesterday',
-    statusKey: 'tasks.file.status.review',
-  },
-  {
-    id: 'research-notes',
-    nameKey: 'tasks.file.item.researchNotes',
-    typeKey: 'tasks.file.type.sheet',
-    ownerKey: 'tasks.assignee.yamamoto',
-    updatedKey: 'tasks.file.updated.twoDays',
-    statusKey: 'tasks.file.status.draft',
-  },
-] as const
 const apiSWRConfig = {
   dedupingInterval: 10_000,
   shouldRetryOnError: false,
@@ -162,6 +130,10 @@ type TaskScreenProps = {
    * サイドバーのチーム固定ビューを選択したときの callback です。
    */
   onSelectTeamView?: (teamId: string, viewId: SidebarTeamViewId) => void
+  /**
+   * 新規タスクを保存するときの callback です。
+   */
+  onCreateTask?: (input: CreateProjectTaskInput) => Promise<void>
 }
 
 const viewLabelKeys: Record<TaskTab, MessageKey> = {
@@ -207,6 +179,7 @@ export function TaskPage() {
     data: tasks = [],
     error: taskError,
     isLoading: isProjectTasksLoading,
+    mutate: mutateProjectTasks,
   } = useSWR(
     projectTasksKey,
     ([, accessToken, currentProjectId]) =>
@@ -256,6 +229,15 @@ export function TaskPage() {
       .charAt(0)
       .toUpperCase() || 'J'
 
+  const handleCreateTask = async (input: CreateProjectTaskInput) => {
+    if (!accessToken) {
+      return
+    }
+
+    await createProjectTask(projectId, accessToken, input)
+    await mutateProjectTasks()
+  }
+
   return (
     <TaskScreen
       isLoading={isLoading}
@@ -268,6 +250,7 @@ export function TaskPage() {
       onSelectTeamView={(teamId, viewId) =>
         navigate(createTeamViewPath(teamId, viewId))
       }
+      onCreateTask={handleCreateTask}
       projectId={projectId}
       projectName={projectName}
       taskErrorMessage={taskErrorMessage}
@@ -296,6 +279,7 @@ export function TaskScreen({
   onSelectProject,
   onSelectNav,
   onSelectTeamView,
+  onCreateTask,
 }: TaskScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
@@ -305,6 +289,9 @@ export function TaskScreen({
   const [isStatusMenuOpen, setIsStatusMenuOpen] = useState(false)
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false)
+  const [createTaskError, setCreateTaskError] = useState<string | undefined>()
+  const [isCreatingTask, setIsCreatingTask] = useState(false)
   const resolvedProjectName = projectName ?? projectId
   const resolvedActiveTeam = findTeamForProject(teams, projectId, activeProjectTeamId)
   const resolvedActiveTeamId = activeProjectTeamId ?? resolvedActiveTeam?.id
@@ -324,8 +311,8 @@ export function TaskScreen({
         }
 
         return [
-          t(task.titleKey),
-          t(task.assigneeKey),
+          resolveTaskTitle(task, t),
+          resolveTaskAssignee(task, t),
           t(`tasks.status.${task.status}`),
           t(`tasks.priority.${task.priority}`),
           task.dueDate,
@@ -349,7 +336,7 @@ export function TaskScreen({
         activeProjectTeamId={resolvedActiveTeamId}
         className="max-[980px]:hidden"
         collapsed={sidebarCollapsed}
-        inboxCount={3}
+        inboxCount={tasks.filter((task) => task.status === 'review' || task.priority === 'high').length}
         labels={sidebarLabels}
         onSelectNav={onSelectNav}
         onCollapsedChange={setSidebarCollapsed}
@@ -361,6 +348,8 @@ export function TaskScreen({
       <section className="flex min-w-0 flex-1 flex-col bg-white/80">
         <TaskHeader
           activeTab={activeTab}
+          isCreateTaskOpen={isCreateTaskOpen}
+          onCreateTaskOpenChange={setIsCreateTaskOpen}
           onTabChange={setActiveTab}
           projectName={resolvedProjectName}
           t={t}
@@ -374,23 +363,54 @@ export function TaskScreen({
             {t('tasks.loading')}
           </div>
         ) : (
-          <TaskWorkspace
-            activeTab={activeTab}
-            isStatusMenuOpen={isStatusMenuOpen}
-            onSearchQueryChange={setSearchQuery}
-            onStatusFilterChange={(nextStatusFilter) => {
-              setStatusFilter(nextStatusFilter)
-              setIsStatusMenuOpen(false)
-            }}
-            onStatusMenuOpenChange={setIsStatusMenuOpen}
-            onTaskSelectionChange={updateTaskSelection}
-            searchQuery={searchQuery}
-            selectedTaskIds={selectedTaskIds}
-            statusFilter={statusFilter}
-            t={t}
-            taskErrorMessage={taskErrorMessage}
-            tasks={visibleTasks}
-          />
+          <>
+            {isCreateTaskOpen ? (
+              <CreateTaskPanel
+                errorMessage={createTaskError}
+                isSubmitting={isCreatingTask}
+                onCancel={() => {
+                  setCreateTaskError(undefined)
+                  setIsCreateTaskOpen(false)
+                }}
+                onSubmit={async (input) => {
+                  if (!onCreateTask) {
+                    return
+                  }
+
+                  setCreateTaskError(undefined)
+                  setIsCreatingTask(true)
+
+                  try {
+                    await onCreateTask(input)
+                    setIsCreateTaskOpen(false)
+                  } catch (error) {
+                    setCreateTaskError(error instanceof Error ? error.message : t('tasks.create.error'))
+                  } finally {
+                    setIsCreatingTask(false)
+                  }
+                }}
+                t={t}
+              />
+            ) : null}
+            <TaskWorkspace
+              activeTab={activeTab}
+              isStatusMenuOpen={isStatusMenuOpen}
+              onCreateTaskOpen={() => setIsCreateTaskOpen(true)}
+              onSearchQueryChange={setSearchQuery}
+              onStatusFilterChange={(nextStatusFilter) => {
+                setStatusFilter(nextStatusFilter)
+                setIsStatusMenuOpen(false)
+              }}
+              onStatusMenuOpenChange={setIsStatusMenuOpen}
+              onTaskSelectionChange={updateTaskSelection}
+              searchQuery={searchQuery}
+              selectedTaskIds={selectedTaskIds}
+              statusFilter={statusFilter}
+              t={t}
+              taskErrorMessage={taskErrorMessage}
+              tasks={visibleTasks}
+            />
+          </>
         )}
       </section>
     </main>
@@ -440,6 +460,8 @@ function findTeamForProject(
 
 function TaskHeader({
   activeTab,
+  isCreateTaskOpen,
+  onCreateTaskOpenChange,
   onTabChange,
   projectName,
   t,
@@ -448,6 +470,8 @@ function TaskHeader({
   userInitial,
 }: {
   activeTab: TaskTab
+  isCreateTaskOpen: boolean
+  onCreateTaskOpenChange: (isOpen: boolean) => void
   onTabChange: (tab: TaskTab) => void
   projectName: string
   t: (key: MessageKey) => string
@@ -495,7 +519,9 @@ function TaskHeader({
             {t('tasks.action.share')}
           </button>
           <button
+            aria-expanded={isCreateTaskOpen}
             className="inline-flex h-12 items-center gap-3 rounded-lg bg-blue-600 px-5 text-sm font-black text-white shadow-[0_14px_30px_rgba(37,99,235,0.28)] transition hover:bg-blue-500"
+            onClick={() => onCreateTaskOpenChange(!isCreateTaskOpen)}
             type="button"
           >
             <PlusIcon />
@@ -547,6 +573,7 @@ function TaskHeader({
 function TaskWorkspace({
   activeTab,
   isStatusMenuOpen,
+  onCreateTaskOpen,
   onSearchQueryChange,
   onStatusFilterChange,
   onStatusMenuOpenChange,
@@ -560,6 +587,7 @@ function TaskWorkspace({
 }: {
   activeTab: TaskTab
   isStatusMenuOpen: boolean
+  onCreateTaskOpen: () => void
   onSearchQueryChange: (query: string) => void
   onStatusFilterChange: (statusFilter: StatusFilter) => void
   onStatusMenuOpenChange: (isOpen: boolean) => void
@@ -651,9 +679,10 @@ function TaskWorkspace({
       </div>
 
       {activeTab === 'table' ? (
-        <TaskTable
-          selectedTaskIds={selectedTaskIds}
-          onTaskSelectionChange={onTaskSelectionChange}
+          <TaskTable
+            selectedTaskIds={selectedTaskIds}
+            onCreateTaskOpen={onCreateTaskOpen}
+            onTaskSelectionChange={onTaskSelectionChange}
           t={t}
           taskErrorMessage={taskErrorMessage}
           tasks={tasks}
@@ -662,19 +691,142 @@ function TaskWorkspace({
       {activeTab === 'board' ? <TaskBoard t={t} tasks={tasks} /> : null}
       {activeTab === 'gantt' ? <TaskGantt t={t} tasks={tasks} /> : null}
       {activeTab === 'calendar' ? <TaskCalendar t={t} tasks={tasks} /> : null}
-      {activeTab === 'file' ? <TaskFileList t={t} /> : null}
+      {activeTab === 'file' ? <TaskFileList t={t} tasks={tasks} /> : null}
     </div>
+  )
+}
+
+function CreateTaskPanel({
+  errorMessage,
+  isSubmitting,
+  onCancel,
+  onSubmit,
+  t,
+}: {
+  errorMessage?: string
+  isSubmitting: boolean
+  onCancel: () => void
+  onSubmit: (input: CreateProjectTaskInput) => Promise<void>
+  t: (key: MessageKey) => string
+}) {
+  const today = new Date().toISOString().slice(0, 10)
+
+  return (
+    <section className="border-b border-slate-200 bg-[#f8fbff] px-[clamp(22px,3vw,38px)] py-5">
+      <form
+        className="grid gap-4 rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.06)]"
+        onSubmit={(event) => {
+          event.preventDefault()
+
+          const formData = new FormData(event.currentTarget)
+          const title = String(formData.get('title') ?? '').trim()
+          const assignee = String(formData.get('assignee') ?? '').trim()
+          const dueDate = String(formData.get('dueDate') ?? today).replaceAll('-', '/')
+          const status = String(formData.get('status') ?? 'todo') as TaskStatus
+          const priority = String(formData.get('priority') ?? 'medium') as TaskPriority
+
+          void onSubmit({
+            title,
+            assignee,
+            dueDate,
+            status,
+            priority,
+          })
+        }}
+      >
+        <div className="grid grid-cols-[minmax(220px,1.4fr)_minmax(180px,0.9fr)_150px_150px_150px_auto] gap-3 max-[1180px]:grid-cols-2 max-[720px]:grid-cols-1">
+          <label className="grid gap-2 text-sm font-black text-[#263550]">
+            {t('tasks.create.title')}
+            <input
+              className="h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              name="title"
+              placeholder={t('tasks.create.titlePlaceholder')}
+              required
+            />
+          </label>
+          <label className="grid gap-2 text-sm font-black text-[#263550]">
+            {t('tasks.create.assignee')}
+            <input
+              className="h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              name="assignee"
+              placeholder={t('tasks.create.assigneePlaceholder')}
+              required
+            />
+          </label>
+          <label className="grid gap-2 text-sm font-black text-[#263550]">
+            {t('tasks.column.dueDate')}
+            <input
+              className="h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              defaultValue={today}
+              name="dueDate"
+              required
+              type="date"
+            />
+          </label>
+          <label className="grid gap-2 text-sm font-black text-[#263550]">
+            {t('tasks.column.status')}
+            <select
+              className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              defaultValue="todo"
+              name="status"
+            >
+              {taskStatuses.map((status) => (
+                <option key={status} value={status}>
+                  {t(`tasks.status.${status}`)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-2 text-sm font-black text-[#263550]">
+            {t('tasks.column.priority')}
+            <select
+              className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              defaultValue="medium"
+              name="priority"
+            >
+              {(['high', 'medium', 'low'] as const).map((priority) => (
+                <option key={priority} value={priority}>
+                  {t(`tasks.priority.${priority}`)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="flex items-end gap-2">
+            <button
+              className="h-11 rounded-lg bg-blue-600 px-4 text-sm font-black text-white shadow-[0_14px_30px_rgba(37,99,235,0.22)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400"
+              disabled={isSubmitting}
+              type="submit"
+            >
+              {isSubmitting ? t('tasks.create.saving') : t('tasks.create.submit')}
+            </button>
+            <button
+              className="h-11 rounded-lg border border-slate-300 bg-white px-4 text-sm font-black text-[#263550] transition hover:border-blue-500 hover:text-blue-600"
+              disabled={isSubmitting}
+              onClick={onCancel}
+              type="button"
+            >
+              {t('tasks.create.cancel')}
+            </button>
+          </div>
+        </div>
+        {errorMessage ? (
+          <p className="text-sm font-bold text-red-600">{errorMessage}</p>
+        ) : null}
+      </form>
+    </section>
   )
 }
 
 function TaskTable({
   selectedTaskIds,
+  onCreateTaskOpen,
   onTaskSelectionChange,
   t,
   taskErrorMessage,
   tasks,
 }: {
   selectedTaskIds: string[]
+  onCreateTaskOpen: () => void
   onTaskSelectionChange: (taskId: string, selected: boolean) => void
   t: (key: MessageKey) => string
   taskErrorMessage?: string
@@ -730,7 +882,7 @@ function TaskTable({
             ) : tasks.length > 0 ? (
               tasks.map((task) => (
                 <TaskRow
-                  key={task.id}
+                  key={createTaskKey(task)}
                   onTaskSelectionChange={onTaskSelectionChange}
                   selected={selectedTaskIds.includes(task.id)}
                   t={t}
@@ -754,6 +906,7 @@ function TaskTable({
       <div className="grid grid-cols-[1fr_auto] items-center border-t border-slate-200 px-7 py-4 text-sm font-bold">
         <button
           className="inline-flex items-center gap-2 text-blue-600 transition hover:text-blue-500"
+          onClick={onCreateTaskOpen}
           type="button"
         >
           <PlusIcon className="h-5 w-5" />
@@ -798,9 +951,9 @@ function TaskBoard({ t, tasks }: { t: (key: MessageKey) => string; tasks: Projec
                 statusTasks.map((task) => (
                   <article
                     className="rounded-lg border border-slate-200 bg-[#fbfdff] p-4 transition hover:border-blue-300 hover:bg-blue-50/30"
-                    key={task.id}
+                    key={createTaskKey(task)}
                   >
-                    <p className="text-sm font-black leading-6 text-[#0d1833]">{t(task.titleKey)}</p>
+                    <p className="text-sm font-black leading-6 text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
                     <div className="mt-4 flex flex-wrap items-center gap-2">
                       <TaskPriorityBadge priority={task.priority} t={t} />
                       <span className="text-xs font-black text-[#526381]">{task.dueDate}</span>
@@ -842,10 +995,10 @@ function TaskGantt({ t, tasks }: { t: (key: MessageKey) => string; tasks: Projec
       </div>
       <div className="divide-y divide-slate-100">
         {sortedTasks.map((task, index) => (
-          <div className="grid grid-cols-[260px_1fr] items-center max-[820px]:grid-cols-[210px_1fr]" key={task.id}>
+          <div className="grid grid-cols-[260px_1fr] items-center max-[820px]:grid-cols-[210px_1fr]" key={createTaskKey(task)}>
             <div className="min-w-0 px-5 py-4">
-              <p className="truncate text-sm font-black text-[#0d1833]">{t(task.titleKey)}</p>
-              <p className="mt-1 text-xs font-bold text-[#526381]">{t(task.assigneeKey)}</p>
+              <p className="truncate text-sm font-black text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
+              <p className="mt-1 text-xs font-bold text-[#526381]">{resolveTaskAssignee(task, t)}</p>
             </div>
             <div className="px-5 py-4">
               <div className="relative h-10 rounded-lg bg-slate-100">
@@ -869,6 +1022,8 @@ function TaskGantt({ t, tasks }: { t: (key: MessageKey) => string; tasks: Projec
 }
 
 function TaskCalendar({ t, tasks }: { t: (key: MessageKey) => string; tasks: ProjectTask[] }) {
+  const taskCalendarDays = createTaskCalendarDays(tasks)
+
   return (
     <section
       aria-label={t(viewLabelKeys.calendar)}
@@ -886,14 +1041,14 @@ function TaskCalendar({ t, tasks }: { t: (key: MessageKey) => string; tasks: Pro
 
           return (
             <div className="min-h-[250px] border-r border-slate-100 p-4 last:border-r-0" key={`${day.id}-${day.date}`}>
-              <p className="text-sm font-black text-[#0d1833]">{t(day.labelKey)}</p>
+              <p className="text-sm font-black text-[#0d1833]">{day.label}</p>
               <p className="mt-1 text-xs font-bold text-[#526381]">{day.date}</p>
               <div className="mt-4 grid gap-3">
                 {dayTasks.length > 0 ? (
                   dayTasks.map((task) => (
-                    <article className="rounded-lg border border-blue-200 bg-blue-50 p-3" key={task.id}>
-                      <p className="text-sm font-black leading-6 text-blue-900">{t(task.titleKey)}</p>
-                      <p className="mt-2 text-xs font-bold text-blue-700">{t(task.assigneeKey)}</p>
+                    <article className="rounded-lg border border-blue-200 bg-blue-50 p-3" key={createTaskKey(task)}>
+                      <p className="text-sm font-black leading-6 text-blue-900">{resolveTaskTitle(task, t)}</p>
+                      <p className="mt-2 text-xs font-bold text-blue-700">{resolveTaskAssignee(task, t)}</p>
                     </article>
                   ))
                 ) : (
@@ -910,14 +1065,14 @@ function TaskCalendar({ t, tasks }: { t: (key: MessageKey) => string; tasks: Pro
   )
 }
 
-function TaskFileList({ t }: { t: (key: MessageKey) => string }) {
+function TaskFileList({ t, tasks }: { t: (key: MessageKey) => string; tasks: ProjectTask[] }) {
   return (
     <section
       aria-label={t(viewLabelKeys.file)}
       className="mt-6 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_22px_54px_rgba(30,52,88,0.06)]"
     >
       <ViewHeading
-        count={taskFileItems.length}
+        count={tasks.length}
         meta={t('tasks.file.description')}
         t={t}
         titleKey={viewLabelKeys.file}
@@ -927,22 +1082,20 @@ function TaskFileList({ t }: { t: (key: MessageKey) => string }) {
           <thead>
             <tr className="border-b border-slate-200 bg-[#fbfdff] text-sm font-black text-[#263550]">
               <th className="px-5 py-3" scope="col">{t('tasks.file.column.name')}</th>
-              <th className="px-5 py-3" scope="col">{t('tasks.file.column.type')}</th>
               <th className="px-5 py-3" scope="col">{t('tasks.file.column.owner')}</th>
-              <th className="px-5 py-3" scope="col">{t('tasks.file.column.updated')}</th>
+              <th className="px-5 py-3" scope="col">{t('tasks.column.dueDate')}</th>
               <th className="px-5 py-3" scope="col">{t('tasks.file.column.status')}</th>
             </tr>
           </thead>
           <tbody>
-            {taskFileItems.map((file) => (
-              <tr className="border-b border-slate-100 text-sm font-bold text-[#0d1833] last:border-b-0" key={file.id}>
-                <td className="px-5 py-4">{t(file.nameKey)}</td>
-                <td className="px-5 py-4 text-[#526381]">{t(file.typeKey)}</td>
-                <td className="px-5 py-4">{t(file.ownerKey)}</td>
-                <td className="px-5 py-4 text-[#526381]">{t(file.updatedKey)}</td>
+            {tasks.map((task) => (
+              <tr className="border-b border-slate-100 text-sm font-bold text-[#0d1833] last:border-b-0" key={createTaskKey(task)}>
+                <td className="px-5 py-4">{resolveTaskTitle(task, t)}</td>
+                <td className="px-5 py-4">{resolveTaskAssignee(task, t)}</td>
+                <td className="px-5 py-4 text-[#526381]">{task.dueDate}</td>
                 <td className="px-5 py-4">
                   <span className="rounded-lg bg-emerald-100 px-3 py-1.5 text-xs font-black text-emerald-700">
-                    {t(file.statusKey)}
+                    {t(`tasks.status.${task.status}`)}
                   </span>
                 </td>
               </tr>
@@ -1134,7 +1287,7 @@ function TaskRow({
     medium: 'bg-orange-100 text-orange-600',
     low: 'bg-emerald-100 text-emerald-700',
   }
-  const taskTitle = t(task.titleKey)
+  const taskTitle = resolveTaskTitle(task, t)
   const isOverdue = isTaskOverdue(task)
 
   return (
@@ -1160,7 +1313,7 @@ function TaskRow({
           ) : null}
         </div>
       </td>
-      <td className="px-4 py-3.5">{t(task.assigneeKey)}</td>
+      <td className="px-4 py-3.5">{resolveTaskAssignee(task, t)}</td>
       <td className="px-4 py-3.5">
         <span className={`inline-flex rounded-lg px-4 py-2 text-sm font-black ${statusClasses[task.status]}`}>
           {t(`tasks.status.${task.status}`)}
@@ -1210,6 +1363,42 @@ function parseTaskDueDate(value: string) {
   date.setHours(0, 0, 0, 0)
 
   return Number.isNaN(date.getTime()) ? null : date
+}
+
+function resolveTaskTitle(task: ProjectTask, t: (key: MessageKey) => string) {
+  return task.title ?? (task.titleKey ? t(task.titleKey) : task.id)
+}
+
+function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) {
+  return task.assignee ?? (task.assigneeKey ? t(task.assigneeKey) : '')
+}
+
+function createTaskKey(task: ProjectTask) {
+  return task.projectId ? `${task.projectId}:${task.id}` : task.id
+}
+
+function createTaskCalendarDays(tasks: ProjectTask[]) {
+  const dates = Array.from(new Set(tasks.map((task) => task.dueDate)))
+    .filter(Boolean)
+    .sort()
+    .slice(0, 6)
+  const today = new Date().toISOString().slice(0, 10).replaceAll('-', '/')
+
+  if (dates.length === 0) {
+    return [
+      {
+        id: 'empty',
+        label: today,
+        date: today,
+      },
+    ]
+  }
+
+  return dates.map((date) => ({
+    id: date,
+    label: date,
+    date,
+  }))
 }
 
 function IconButton({

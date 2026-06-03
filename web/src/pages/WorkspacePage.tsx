@@ -3,7 +3,6 @@ import { useNavigate, useParams } from 'react-router'
 import useSWR from 'swr'
 import {
   getCurrentUser,
-  getDashboardSummary,
   type DashboardSummary,
 } from '../auth/api'
 import { clearAuthSession, getAuthSession, type AuthSession } from '../auth/session'
@@ -20,6 +19,10 @@ import {
   type MessageKey,
 } from '../i18n'
 import {
+  createProjectDirectoryProject,
+  createProjectDirectoryTeam,
+  type CreateProjectDirectoryProjectInput,
+  type CreateProjectDirectoryTeamInput,
   getProjectDirectory,
   type ProjectDirectoryTeam,
 } from '../projects/api'
@@ -116,6 +119,14 @@ type WorkspaceScreenProps = {
    * サイドバーのプロジェクトが選択されたときの callback です。
    */
   onSelectProject?: (projectId: string, teamId: string) => void
+  /**
+   * チーム新規登録時の callback です。
+   */
+  onCreateTeam?: (input: CreateProjectDirectoryTeamInput) => Promise<void>
+  /**
+   * プロジェクト新規登録時の callback です。
+   */
+  onCreateProject?: (teamId: string, input: CreateProjectDirectoryProjectInput) => Promise<void>
 }
 
 /**
@@ -142,14 +153,6 @@ type WorkspaceViewMetadata = {
    * 画面説明を解決する i18n key です。
    */
   descriptionKey: MessageKey
-}
-
-const fallbackDashboardSummary: DashboardSummary = {
-  projects: 9,
-  tasks: 27,
-  blocked: 3,
-  updatedAt: '2026-06-03T00:00:00.000Z',
-  source: 'dynamodb',
 }
 
 const emptyProjectDirectory: ProjectDirectoryTeam[] = []
@@ -223,84 +226,6 @@ const workspaceViewMetadata: Record<WorkspaceView, WorkspaceViewMetadata> = {
   },
 }
 
-const inboxItems = [
-  {
-    id: 'approval',
-    titleKey: 'workspace.inbox.item.approval',
-    metaKey: 'workspace.inbox.item.approvalMeta',
-    toneClassName: 'border-amber-200 bg-amber-50 text-amber-700',
-  },
-  {
-    id: 'mention',
-    titleKey: 'workspace.inbox.item.mention',
-    metaKey: 'workspace.inbox.item.mentionMeta',
-    toneClassName: 'border-blue-200 bg-blue-50 text-blue-700',
-  },
-  {
-    id: 'risk',
-    titleKey: 'workspace.inbox.item.risk',
-    metaKey: 'workspace.inbox.item.riskMeta',
-    toneClassName: 'border-red-200 bg-red-50 text-red-700',
-  },
-] as const
-
-const activityItems = [
-  {
-    id: 'handoff',
-    titleKey: 'workspace.activity.handoff',
-    metaKey: 'workspace.activity.handoffMeta',
-  },
-  {
-    id: 'approval',
-    titleKey: 'workspace.activity.approval',
-    metaKey: 'workspace.activity.approvalMeta',
-  },
-  {
-    id: 'blocker',
-    titleKey: 'workspace.activity.blocker',
-    metaKey: 'workspace.activity.blockerMeta',
-  },
-] as const
-
-const reportTrendItems = [
-  { id: 'mon', labelKey: 'workspace.reports.day.mon', value: 42 },
-  { id: 'tue', labelKey: 'workspace.reports.day.tue', value: 58 },
-  { id: 'wed', labelKey: 'workspace.reports.day.wed', value: 73 },
-  { id: 'thu', labelKey: 'workspace.reports.day.thu', value: 64 },
-  { id: 'fri', labelKey: 'workspace.reports.day.fri', value: 81 },
-] as const
-
-const teamMemberItems = [
-  {
-    id: 'sato',
-    nameKey: 'tasks.assignee.sato',
-    roleKey: 'workspace.members.role.pm',
-    load: 82,
-    focusKey: 'workspace.members.focus.launch',
-  },
-  {
-    id: 'suzuki',
-    nameKey: 'tasks.assignee.suzuki',
-    roleKey: 'workspace.members.role.design',
-    load: 68,
-    focusKey: 'workspace.members.focus.design',
-  },
-  {
-    id: 'tanaka',
-    nameKey: 'tasks.assignee.tanaka',
-    roleKey: 'workspace.members.role.engineering',
-    load: 74,
-    focusKey: 'workspace.members.focus.delivery',
-  },
-  {
-    id: 'yamamoto',
-    nameKey: 'tasks.assignee.yamamoto',
-    roleKey: 'workspace.members.role.analysis',
-    load: 55,
-    focusKey: 'workspace.members.focus.research',
-  },
-] as const
-
 /**
  * 認証済みワークスペースの固定ナビゲーション画面です。
  */
@@ -317,18 +242,14 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     error: currentUserError,
     isLoading: isCurrentUserLoading,
   } = useSWR(currentUserKey, ([, currentAccessToken]) => getCurrentUser(currentAccessToken), apiSWRConfig)
-  const dashboardSummaryKey = accessToken && user && !currentUserError
-    ? (['dashboard-summary', accessToken] as const)
-    : null
-  const { data: summary = fallbackDashboardSummary } = useSWR(
-    dashboardSummaryKey,
-    ([, currentAccessToken]) => getDashboardSummary(currentAccessToken),
-    apiSWRConfig,
-  )
   const projectDirectoryKey = accessToken && user && !currentUserError
     ? (['project-directory', accessToken, locale] as const)
     : null
-  const { data: teams = emptyProjectDirectory, isLoading: isProjectDirectoryLoading } = useSWR(
+  const {
+    data: teams = emptyProjectDirectory,
+    isLoading: isProjectDirectoryLoading,
+    mutate: mutateProjectDirectory,
+  } = useSWR(
     projectDirectoryKey,
     ([, currentAccessToken, currentLocale]) =>
       getProjectDirectory(currentAccessToken, currentLocale),
@@ -345,6 +266,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       loadProjectTasks(currentProjectIds, currentAccessToken),
     apiSWRConfig,
   )
+  const summary = useMemo(() => createDashboardSummary(teams, tasks), [tasks, teams])
   const metadata = workspaceViewMetadata[view]
   const title = t(metadata.titleKey)
   const userLabel =
@@ -380,6 +302,27 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     navigate('/', { replace: true })
   }
 
+  const handleCreateTeam = async (input: CreateProjectDirectoryTeamInput) => {
+    if (!accessToken) {
+      return
+    }
+
+    await createProjectDirectoryTeam(accessToken, input)
+    await mutateProjectDirectory()
+  }
+
+  const handleCreateProject = async (
+    teamId: string,
+    input: CreateProjectDirectoryProjectInput,
+  ) => {
+    if (!accessToken) {
+      return
+    }
+
+    await createProjectDirectoryProject(accessToken, teamId, input)
+    await mutateProjectDirectory()
+  }
+
   return (
     <WorkspaceScreen
       activeTeamId={params.teamId}
@@ -393,6 +336,8 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       onSelectTeamView={(teamId, viewId) =>
         navigate(createTeamViewPath(teamId, viewId))
       }
+      onCreateProject={handleCreateProject}
+      onCreateTeam={handleCreateTeam}
       summary={summary}
       tasks={tasks}
       teams={teams}
@@ -420,6 +365,8 @@ export function WorkspaceScreen({
   onSelectNav,
   onSelectTeamView,
   onSelectProject,
+  onCreateProject,
+  onCreateTeam,
 }: WorkspaceScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
@@ -433,7 +380,7 @@ export function WorkspaceScreen({
         activeTeamId={metadata.activeTeamViewId ? activeTeam?.id : undefined}
         activeTeamViewId={metadata.activeTeamViewId}
         className="max-[980px]:hidden"
-        inboxCount={3}
+        inboxCount={createInboxTasks(tasks).length}
         labels={sidebarLabels}
         onSelectNav={onSelectNav}
         onSelectProject={onSelectProject}
@@ -491,6 +438,8 @@ export function WorkspaceScreen({
             tasks={tasks}
             teams={teams}
             view={view}
+            onCreateProject={onCreateProject}
+            onCreateTeam={onCreateTeam}
           />
         )}
       </section>
@@ -500,6 +449,8 @@ export function WorkspaceScreen({
 
 function WorkspaceBody({
   activeTeam,
+  onCreateProject,
+  onCreateTeam,
   summary,
   t,
   tasks,
@@ -507,6 +458,8 @@ function WorkspaceBody({
   view,
 }: {
   activeTeam?: ProjectDirectoryTeam
+  onCreateProject?: (teamId: string, input: CreateProjectDirectoryProjectInput) => Promise<void>
+  onCreateTeam?: (input: CreateProjectDirectoryTeamInput) => Promise<void>
   summary: DashboardSummary
   t: (key: MessageKey) => string
   tasks: ProjectTask[]
@@ -517,18 +470,25 @@ function WorkspaceBody({
     <div className="px-[clamp(22px,3vw,40px)] py-7">
       {view === 'home' ? <HomeView summary={summary} t={t} tasks={tasks} teams={teams} /> : null}
       {view === 'my-tasks' ? <MyTasksView t={t} tasks={tasks} /> : null}
-      {view === 'inbox' ? <InboxView t={t} /> : null}
+      {view === 'inbox' ? <InboxView t={t} tasks={tasks} /> : null}
       {view === 'dashboard' ? (
-        <DashboardWorkspaceView summary={summary} t={t} teams={teams} />
+        <DashboardWorkspaceView
+          onCreateProject={onCreateProject}
+          onCreateTeam={onCreateTeam}
+          summary={summary}
+          t={t}
+          tasks={tasks}
+          teams={teams}
+        />
       ) : null}
-      {view === 'reports' ? <ReportsView summary={summary} t={t} /> : null}
+      {view === 'reports' ? <ReportsView summary={summary} t={t} tasks={tasks} /> : null}
       {view === 'invite' ? <InviteView t={t} /> : null}
       {view === 'help' ? <HelpView t={t} /> : null}
       {view === 'settings' ? <SettingsView t={t} /> : null}
       {view === 'team-overview' ? (
         <TeamOverviewView team={activeTeam} t={t} tasks={tasks} />
       ) : null}
-      {view === 'team-members' ? <TeamMembersView team={activeTeam} t={t} /> : null}
+      {view === 'team-members' ? <TeamMembersView team={activeTeam} t={t} tasks={tasks} /> : null}
     </div>
   )
 }
@@ -545,6 +505,7 @@ function HomeView({
   teams: ProjectDirectoryTeam[]
 }) {
   const nextTasks = tasks.slice(0, 3)
+  const activityTasks = createActivityTasks(tasks)
 
   return (
     <div className="grid gap-6">
@@ -568,12 +529,19 @@ function HomeView({
         <section className="rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
           <SectionHeader title={t('workspace.home.activityTitle')} meta={t('workspace.home.activityMeta')} />
           <div className="grid gap-3 px-5 pb-5">
-            {activityItems.map((item) => (
-              <div className="rounded-lg border border-slate-200 bg-[#fbfdff] p-4" key={item.id}>
-                <p className="text-sm font-black text-[#0d1833]">{t(item.titleKey)}</p>
-                <p className="mt-1 text-sm font-bold leading-6 text-[#526381]">{t(item.metaKey)}</p>
+            {activityTasks.map((task) => (
+              <div className="rounded-lg border border-slate-200 bg-[#fbfdff] p-4" key={createWorkspaceTaskKey(task)}>
+                <p className="text-sm font-black text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
+                <p className="mt-1 text-sm font-bold leading-6 text-[#526381]">
+                  {resolveTaskAssignee(task, t)} / {t(`tasks.status.${task.status}`)} / {task.dueDate}
+                </p>
               </div>
             ))}
+            {activityTasks.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-slate-300 px-4 py-8 text-center text-sm font-bold text-[#526381]">
+                {t('workspace.empty.tasks')}
+              </p>
+            ) : null}
           </div>
         </section>
       </div>
@@ -622,25 +590,44 @@ function MyTasksView({ t, tasks }: { t: (key: MessageKey) => string; tasks: Proj
   )
 }
 
-function InboxView({ t }: { t: (key: MessageKey) => string }) {
+function InboxView({
+  t,
+  tasks,
+}: {
+  t: (key: MessageKey) => string
+  tasks: ProjectTask[]
+}) {
+  const inboxTasks = createInboxTasks(tasks)
+  const responseMinutes = Math.max(0, inboxTasks.length * 6)
+
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-6 max-[1080px]:grid-cols-1">
       <section className="rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
-        <SectionHeader title={t('workspace.inbox.queueTitle')} meta={t('workspace.inbox.queueMeta')} />
+        <SectionHeader
+          title={t('workspace.inbox.queueTitle')}
+          meta={t('workspace.inbox.queueMeta').replace('{count}', String(inboxTasks.length))}
+        />
         <div className="divide-y divide-slate-100">
-          {inboxItems.map((item) => (
-            <div className="grid gap-3 p-5" key={item.id}>
+          {inboxTasks.map((task) => (
+            <div className="grid gap-3 p-5" key={createWorkspaceTaskKey(task)}>
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <p className="text-base font-black text-[#0d1833]">{t(item.titleKey)}</p>
-                  <p className="mt-1 text-sm font-bold leading-6 text-[#526381]">{t(item.metaKey)}</p>
+                  <p className="text-base font-black text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
+                  <p className="mt-1 text-sm font-bold leading-6 text-[#526381]">
+                    {resolveTaskAssignee(task, t)} / {task.dueDate}
+                  </p>
                 </div>
-                <span className={`rounded-lg border px-3 py-1.5 text-xs font-black ${item.toneClassName}`}>
-                  {t('workspace.inbox.needsAction')}
+                <span className={`rounded-lg border px-3 py-1.5 text-xs font-black ${resolveInboxToneClassName(task)}`}>
+                  {t(`tasks.priority.${task.priority}`)}
                 </span>
               </div>
             </div>
           ))}
+          {inboxTasks.length === 0 ? (
+            <p className="px-5 py-8 text-sm font-bold text-[#526381]">
+              {t('workspace.empty.tasks')}
+            </p>
+          ) : null}
         </div>
       </section>
 
@@ -648,7 +635,7 @@ function InboxView({ t }: { t: (key: MessageKey) => string }) {
         <p className="text-sm font-black uppercase tracking-normal text-blue-600">
           {t('workspace.inbox.sla')}
         </p>
-        <p className="mt-4 text-5xl font-black leading-none text-[#0d1833]">18m</p>
+        <p className="mt-4 text-5xl font-black leading-none text-[#0d1833]">{responseMinutes}m</p>
         <p className="mt-3 text-sm font-bold leading-6 text-[#526381]">
           {t('workspace.inbox.slaDescription')}
         </p>
@@ -658,21 +645,27 @@ function InboxView({ t }: { t: (key: MessageKey) => string }) {
 }
 
 function DashboardWorkspaceView({
+  onCreateProject,
+  onCreateTeam,
   summary,
   t,
+  tasks,
   teams,
 }: {
+  onCreateProject?: (teamId: string, input: CreateProjectDirectoryProjectInput) => Promise<void>
+  onCreateTeam?: (input: CreateProjectDirectoryTeamInput) => Promise<void>
   summary: DashboardSummary
   t: (key: MessageKey) => string
+  tasks: ProjectTask[]
   teams: ProjectDirectoryTeam[]
 }) {
   const projects = teams.flatMap((team) =>
-    team.projects.map((project, index) => ({
+    team.projects.map((project) => ({
+      progress: calculateProjectProgress(filterTasksByProjectIds(tasks, [project.id])),
       id: `${team.id}-${project.id}`,
       name: project.name,
       teamName: team.name,
-      progress: 88 - index * 13,
-      riskKey: resolvePortfolioRiskKey(index),
+      riskKey: resolvePortfolioRiskKey(filterTasksByProjectIds(tasks, [project.id])),
     })),
   )
 
@@ -682,8 +675,15 @@ function DashboardWorkspaceView({
         <MetricCard label={t('workspace.metric.activeProjects')} value={summary.projects} tone="blue" />
         <MetricCard label={t('workspace.metric.openTasks')} value={summary.tasks} tone="emerald" />
         <MetricCard label={t('workspace.metric.blocked')} value={summary.blocked} tone="red" />
-        <MetricCard label={t('workspace.metric.deliveryRate')} value="84%" tone="amber" />
+        <MetricCard label={t('workspace.metric.deliveryRate')} value={`${calculateProjectProgress(tasks)}%`} tone="amber" />
       </div>
+
+      <WorkspaceRegistrationPanel
+        onCreateProject={onCreateProject}
+        onCreateTeam={onCreateTeam}
+        t={t}
+        teams={teams}
+      />
 
       <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
         <SectionHeader title={t('workspace.dashboard.portfolioTitle')} meta={t('workspace.dashboard.portfolioMeta')} />
@@ -716,17 +716,157 @@ function DashboardWorkspaceView({
   )
 }
 
+function WorkspaceRegistrationPanel({
+  onCreateProject,
+  onCreateTeam,
+  t,
+  teams,
+}: {
+  onCreateProject?: (teamId: string, input: CreateProjectDirectoryProjectInput) => Promise<void>
+  onCreateTeam?: (input: CreateProjectDirectoryTeamInput) => Promise<void>
+  t: (key: MessageKey) => string
+  teams: ProjectDirectoryTeam[]
+}) {
+  const [isSavingTeam, setIsSavingTeam] = useState(false)
+  const [isSavingProject, setIsSavingProject] = useState(false)
+  const [errorMessage, setErrorMessage] = useState<string | undefined>()
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
+      <SectionHeader title={t('workspace.registration.title')} meta={t('workspace.registration.meta')} />
+      <div className="grid grid-cols-2 gap-5 max-[980px]:grid-cols-1">
+        <form
+          className="grid gap-3 rounded-lg border border-slate-200 bg-[#fbfdff] p-4"
+          onSubmit={(event) => {
+            event.preventDefault()
+
+            if (!onCreateTeam) {
+              return
+            }
+
+            const form = event.currentTarget
+            const formData = new FormData(form)
+            const name = String(formData.get('teamName') ?? '').trim()
+
+            setErrorMessage(undefined)
+            setIsSavingTeam(true)
+            void onCreateTeam({ name })
+              .then(() => form.reset())
+              .catch((error: unknown) => {
+                setErrorMessage(error instanceof Error ? error.message : t('workspace.registration.error'))
+              })
+              .finally(() => setIsSavingTeam(false))
+          }}
+        >
+          <label className="grid gap-2 text-sm font-black text-[#263550]">
+            {t('workspace.registration.teamName')}
+            <input
+              className="h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              name="teamName"
+              placeholder={t('workspace.registration.teamPlaceholder')}
+              required
+            />
+          </label>
+          <button
+            className="h-11 w-fit rounded-lg bg-blue-600 px-4 text-sm font-black text-white shadow-[0_14px_30px_rgba(37,99,235,0.22)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400"
+            disabled={isSavingTeam}
+            type="submit"
+          >
+            {isSavingTeam ? t('workspace.registration.saving') : t('workspace.registration.createTeam')}
+          </button>
+        </form>
+
+        <form
+          className="grid gap-3 rounded-lg border border-slate-200 bg-[#fbfdff] p-4"
+          onSubmit={(event) => {
+            event.preventDefault()
+
+            if (!onCreateProject) {
+              return
+            }
+
+            const form = event.currentTarget
+            const formData = new FormData(form)
+            const teamId = String(formData.get('teamId') ?? '')
+            const name = String(formData.get('projectName') ?? '').trim()
+            const tone = String(formData.get('tone') ?? 'blue') as CreateProjectDirectoryProjectInput['tone']
+
+            setErrorMessage(undefined)
+            setIsSavingProject(true)
+            void onCreateProject(teamId, { name, tone })
+              .then(() => form.reset())
+              .catch((error: unknown) => {
+                setErrorMessage(error instanceof Error ? error.message : t('workspace.registration.error'))
+              })
+              .finally(() => setIsSavingProject(false))
+          }}
+        >
+          <div className="grid grid-cols-[1fr_1fr_120px] gap-3 max-[720px]:grid-cols-1">
+            <label className="grid gap-2 text-sm font-black text-[#263550]">
+              {t('workspace.registration.team')}
+              <select
+                className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+                name="teamId"
+                required
+              >
+                {teams.map((team) => (
+                  <option key={team.id} value={team.id}>
+                    {team.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-2 text-sm font-black text-[#263550]">
+              {t('workspace.registration.projectName')}
+              <input
+                className="h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+                name="projectName"
+                placeholder={t('workspace.registration.projectPlaceholder')}
+                required
+              />
+            </label>
+            <label className="grid gap-2 text-sm font-black text-[#263550]">
+              {t('workspace.registration.tone')}
+              <select
+                className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+                name="tone"
+              >
+                {(['blue', 'purple', 'green', 'yellow'] as const).map((tone) => (
+                  <option key={tone} value={tone}>
+                    {t(`workspace.registration.tone.${tone}`)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <button
+            className="h-11 w-fit rounded-lg bg-blue-600 px-4 text-sm font-black text-white shadow-[0_14px_30px_rgba(37,99,235,0.22)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400"
+            disabled={isSavingProject || teams.length === 0}
+            type="submit"
+          >
+            {isSavingProject ? t('workspace.registration.saving') : t('workspace.registration.createProject')}
+          </button>
+        </form>
+      </div>
+      {errorMessage ? <p className="mt-4 text-sm font-bold text-red-600">{errorMessage}</p> : null}
+    </section>
+  )
+}
+
 function ReportsView({
   summary,
   t,
+  tasks,
 }: {
   summary: DashboardSummary
   t: (key: MessageKey) => string
+  tasks: ProjectTask[]
 }) {
   const availableThroughput = Math.max(0, summary.tasks - summary.blocked)
   const blockedRate = summary.tasks > 0
     ? Math.round((summary.blocked / summary.tasks) * 100)
     : 0
+  const reportTrendItems = createReportTrendItems(tasks)
 
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-6 max-[1080px]:grid-cols-1">
@@ -741,7 +881,7 @@ function ReportsView({
                   style={{ height: `${item.value}%` }}
                 />
               </div>
-              <p className="text-center text-sm font-black text-[#526381]">{t(item.labelKey)}</p>
+              <p className="text-center text-sm font-black text-[#526381]">{item.label}</p>
             </div>
           ))}
         </div>
@@ -750,7 +890,7 @@ function ReportsView({
       <aside className="grid gap-4">
         <MetricCard label={t('workspace.reports.throughput')} value={availableThroughput} tone="emerald" />
         <MetricCard label={t('workspace.reports.blockedRate')} value={`${blockedRate}%`} tone="red" />
-        <MetricCard label={t('workspace.reports.cycleTime')} value="3.8d" tone="amber" />
+        <MetricCard label={t('workspace.reports.cycleTime')} value={calculateAverageCycleLabel(tasks)} tone="amber" />
       </aside>
     </div>
   )
@@ -867,13 +1007,15 @@ function TeamOverviewView({
       <section className="rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
         <SectionHeader title={t('workspace.teamOverview.projectsTitle')} meta={team?.name ?? t('workspace.team.missing')} />
         <div className="grid gap-3 p-5">
-          {projects.map((project, index) => (
+          {projects.map((project) => (
             <div className="grid gap-3 rounded-lg border border-slate-200 p-4" key={project.id}>
               <div className="flex items-center justify-between gap-4">
                 <p className="font-black text-[#0d1833]">{project.name}</p>
-                <span className="text-sm font-black text-blue-600">{82 - index * 9}%</span>
+                <span className="text-sm font-black text-blue-600">
+                  {calculateProjectProgress(filterTasksByProjectIds(tasks, [project.id]))}%
+                </span>
               </div>
-              <ProgressBar value={82 - index * 9} />
+              <ProgressBar value={calculateProjectProgress(filterTasksByProjectIds(tasks, [project.id]))} />
             </div>
           ))}
         </div>
@@ -882,16 +1024,29 @@ function TeamOverviewView({
   )
 }
 
-function TeamMembersView({ team, t }: { team?: ProjectDirectoryTeam; t: (key: MessageKey) => string }) {
+function TeamMembersView({
+  team,
+  t,
+  tasks,
+}: {
+  team?: ProjectDirectoryTeam
+  t: (key: MessageKey) => string
+  tasks: ProjectTask[]
+}) {
+  const projects = team?.projects ?? []
+  const members = createTeamMemberRows(filterTasksByProjectIds(tasks, projects.map((project) => project.id)), t)
+
   return (
     <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
       <SectionHeader title={t('workspace.members.directoryTitle')} meta={team?.name ?? t('workspace.team.missing')} />
       <div className="grid divide-y divide-slate-100">
-        {teamMemberItems.map((member) => (
+        {members.map((member) => (
           <div className="grid grid-cols-[1fr_160px_220px] items-center gap-5 p-5 max-[820px]:grid-cols-1" key={member.id}>
             <div className="min-w-0">
-              <p className="text-base font-black text-[#0d1833]">{t(member.nameKey)}</p>
-              <p className="mt-1 text-sm font-bold text-[#526381]">{t(member.roleKey)}</p>
+              <p className="text-base font-black text-[#0d1833]">{member.name}</p>
+              <p className="mt-1 text-sm font-bold text-[#526381]">
+                {t('workspace.members.taskCount').replace('{count}', String(member.taskCount))}
+              </p>
             </div>
             <div>
               <p className="text-xs font-black uppercase tracking-normal text-[#69758a]">
@@ -899,9 +1054,16 @@ function TeamMembersView({ team, t }: { team?: ProjectDirectoryTeam; t: (key: Me
               </p>
               <p className="mt-1 text-2xl font-black text-[#0d1833]">{member.load}%</p>
             </div>
-            <p className="text-sm font-bold leading-6 text-[#526381]">{t(member.focusKey)}</p>
+            <p className="text-sm font-bold leading-6 text-[#526381]">
+              {t('workspace.members.openTaskCount').replace('{count}', String(member.openTaskCount))}
+            </p>
           </div>
         ))}
+        {members.length === 0 ? (
+          <p className="px-5 py-8 text-sm font-bold text-[#526381]">
+            {t('workspace.empty.tasks')}
+          </p>
+        ) : null}
       </div>
     </section>
   )
@@ -949,8 +1111,8 @@ function TaskListRow({ t, task }: { t: (key: MessageKey) => string; task: Projec
   return (
     <div className="grid grid-cols-[1fr_140px_110px] items-center gap-4 p-5 text-sm font-bold max-[760px]:grid-cols-1">
       <div className="min-w-0">
-        <p className="truncate text-base font-black text-[#0d1833]">{t(task.titleKey)}</p>
-        <p className="mt-1 text-[#526381]">{t(task.assigneeKey)}</p>
+        <p className="truncate text-base font-black text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
+        <p className="mt-1 text-[#526381]">{resolveTaskAssignee(task, t)}</p>
       </div>
       <StatusPill status={task.status} t={t} />
       <span className="text-[#526381]">{task.dueDate}</span>
@@ -961,7 +1123,7 @@ function TaskListRow({ t, task }: { t: (key: MessageKey) => string; task: Projec
 function CompactTaskCard({ t, task }: { t: (key: MessageKey) => string; task: ProjectTask }) {
   return (
     <article className="rounded-lg border border-slate-200 bg-[#fbfdff] p-4">
-      <p className="text-sm font-black leading-6 text-[#0d1833]">{t(task.titleKey)}</p>
+      <p className="text-sm font-black leading-6 text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <StatusPill status={task.status} t={t} />
         <PriorityPill priority={task.priority} t={t} />
@@ -1062,16 +1224,123 @@ function filterTasksByProjectIds(tasks: ProjectTask[], projectIds: readonly stri
   return tasks.filter((task) => !task.projectId || projectIdSet.has(task.projectId))
 }
 
-function resolvePortfolioRiskKey(index: number): MessageKey {
-  if (index === 0) {
-    return 'workspace.risk.low'
+function createDashboardSummary(
+  teams: ProjectDirectoryTeam[],
+  tasks: ProjectTask[],
+): DashboardSummary {
+  return {
+    projects: uniqueProjectIds(teams).length,
+    tasks: tasks.filter((task) => task.status !== 'done').length,
+    blocked: tasks.filter((task) => task.priority === 'high' && task.status !== 'done').length,
+    updatedAt: new Date().toISOString(),
+    source: 'dynamodb',
+  }
+}
+
+function resolveTaskTitle(task: ProjectTask, t: (key: MessageKey) => string) {
+  return task.title ?? (task.titleKey ? t(task.titleKey) : task.id)
+}
+
+function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) {
+  return task.assignee ?? (task.assigneeKey ? t(task.assigneeKey) : '')
+}
+
+function createActivityTasks(tasks: ProjectTask[]) {
+  return [...tasks]
+    .sort((firstTask, secondTask) => secondTask.dueDate.localeCompare(firstTask.dueDate))
+    .slice(0, 3)
+}
+
+function createInboxTasks(tasks: ProjectTask[]) {
+  return tasks
+    .filter((task) => task.status !== 'done' && (task.priority === 'high' || task.status === 'review'))
+    .slice(0, 8)
+}
+
+function resolveInboxToneClassName(task: ProjectTask) {
+  if (task.priority === 'high') {
+    return 'border-red-200 bg-red-50 text-red-700'
   }
 
-  if (index === 1) {
+  if (task.status === 'review') {
+    return 'border-amber-200 bg-amber-50 text-amber-700'
+  }
+
+  return 'border-blue-200 bg-blue-50 text-blue-700'
+}
+
+function calculateProjectProgress(tasks: ProjectTask[]) {
+  if (tasks.length === 0) {
+    return 0
+  }
+
+  return Math.round((tasks.filter((task) => task.status === 'done').length / tasks.length) * 100)
+}
+
+function resolvePortfolioRiskKey(tasks: ProjectTask[]): MessageKey {
+  if (tasks.some((task) => task.priority === 'high' && task.status !== 'done')) {
     return 'workspace.risk.watch'
   }
 
+  if (tasks.length === 0 || tasks.every((task) => task.status === 'done')) {
+    return 'workspace.risk.low'
+  }
+
   return 'workspace.risk.clear'
+}
+
+function createReportTrendItems(tasks: ProjectTask[]) {
+  const doneTasks = tasks.filter((task) => task.status === 'done')
+  const groupedByDueDate = new Map<string, number>()
+
+  for (const task of doneTasks) {
+    groupedByDueDate.set(task.dueDate, (groupedByDueDate.get(task.dueDate) ?? 0) + 1)
+  }
+
+  const maxCount = Math.max(1, ...groupedByDueDate.values())
+  const labels = Array.from(groupedByDueDate.entries())
+    .sort(([firstDate], [secondDate]) => firstDate.localeCompare(secondDate))
+    .slice(-5)
+    .map(([date, count]) => ({
+      id: date,
+      label: date,
+      value: Math.max(12, Math.round((count / maxCount) * 100)),
+    }))
+
+  return labels.length > 0
+    ? labels
+    : [{ id: 'empty', label: '-', value: 12 }]
+}
+
+function calculateAverageCycleLabel(tasks: ProjectTask[]) {
+  const doneCount = tasks.filter((task) => task.status === 'done').length
+
+  if (doneCount === 0) {
+    return '0d'
+  }
+
+  return `${Math.max(1, Math.round(tasks.length / doneCount))}d`
+}
+
+function createTeamMemberRows(tasks: ProjectTask[], t: (key: MessageKey) => string) {
+  const tasksByAssignee = new Map<string, ProjectTask[]>()
+
+  for (const task of tasks) {
+    const assignee = resolveTaskAssignee(task, t) || t('workspace.members.unassigned')
+    tasksByAssignee.set(assignee, [...(tasksByAssignee.get(assignee) ?? []), task])
+  }
+
+  return Array.from(tasksByAssignee.entries()).map(([name, assigneeTasks]) => {
+    const openTaskCount = assigneeTasks.filter((task) => task.status !== 'done').length
+
+    return {
+      id: name,
+      name,
+      load: Math.round((openTaskCount / Math.max(1, assigneeTasks.length)) * 100),
+      openTaskCount,
+      taskCount: assigneeTasks.length,
+    }
+  })
 }
 
 function formatTeamText(value: string, teamName?: string) {

@@ -1,5 +1,9 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import { DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb'
+import {
+  DynamoDBDocumentClient,
+  PutCommand,
+  QueryCommand,
+} from '@aws-sdk/lib-dynamodb'
 import { Hono } from 'hono'
 import { handle } from 'hono/aws-lambda'
 import { cors } from 'hono/cors'
@@ -157,32 +161,6 @@ type LoginRequestBody = {
 }
 
 /**
- * DynamoDB に保存するダッシュボード集計 item です。
- */
-type DashboardSummaryItem = {
-  /**
-   * 集計 item の partition key です。
-   */
-  id: string
-  /**
-   * 進行中プロジェクト数です。
-   */
-  projects: number
-  /**
-   * 未完了タスク数です。
-   */
-  tasks: number
-  /**
-   * 要確認タスク数です。
-   */
-  blocked: number
-  /**
-   * 集計値を更新した ISO 8601 timestamp です。
-   */
-  updatedAt: string
-}
-
-/**
  * ダッシュボード集計 API が返す response body です。
  */
 type DashboardSummaryResponse = {
@@ -243,13 +221,21 @@ type ProjectTaskItem = {
    */
   sortOrder: number
   /**
-   * タスク名を解決する i18n key です。
+   * タスク名を解決する i18n key です。seed 由来のタスクで利用します。
    */
-  titleKey: string
+  titleKey?: string
   /**
-   * 担当者名を解決する i18n key です。
+   * 登録画面から入力されたタスク名です。
    */
-  assigneeKey: string
+  title?: string
+  /**
+   * 担当者名を解決する i18n key です。seed 由来のタスクで利用します。
+   */
+  assigneeKey?: string
+  /**
+   * 登録画面から入力された担当者名です。
+   */
+  assignee?: string
   /**
    * タスク状態です。
    */
@@ -275,11 +261,19 @@ type ProjectTaskResponseItem = {
   /**
    * タスク名を解決する i18n key です。
    */
-  titleKey: string
+  titleKey?: string
+  /**
+   * API から返す literal のタスク名です。
+   */
+  title?: string
   /**
    * 担当者名を解決する i18n key です。
    */
-  assigneeKey: string
+  assigneeKey?: string
+  /**
+   * API から返す literal の担当者名です。
+   */
+  assignee?: string
   /**
    * タスク状態です。
    */
@@ -306,6 +300,42 @@ type ProjectTasksResponse = {
    * DynamoDB から取得したタスク一覧です。
    */
   tasks: ProjectTaskResponseItem[]
+}
+
+/**
+ * プロジェクトタスク作成 API が受け取る request body です。
+ */
+type CreateProjectTaskRequestBody = {
+  /**
+   * ユーザーが入力したタスク名です。
+   */
+  title?: unknown
+  /**
+   * ユーザーが入力した担当者名です。
+   */
+  assignee?: unknown
+  /**
+   * タスク状態です。
+   */
+  status?: unknown
+  /**
+   * 期限日として保存する文字列です。
+   */
+  dueDate?: unknown
+  /**
+   * 優先度です。
+   */
+  priority?: unknown
+}
+
+/**
+ * プロジェクトタスク作成 API が返す response body です。
+ */
+type CreateProjectTaskResponse = {
+  /**
+   * 作成したタスク行です。
+   */
+  task: ProjectTaskResponseItem
 }
 
 /**
@@ -414,6 +444,70 @@ type ProjectDirectoryResponse = {
 }
 
 /**
+ * チーム作成 API が受け取る request body です。
+ */
+type CreateTeamRequestBody = {
+  /**
+   * locale 非依存で扱うチーム名です。
+   */
+  name?: unknown
+  /**
+   * 日本語表示名です。
+   */
+  nameJa?: unknown
+  /**
+   * 英語表示名です。
+   */
+  nameEn?: unknown
+  /**
+   * 初期表示時にチーム配下を展開するかどうかです。
+   */
+  expanded?: unknown
+}
+
+/**
+ * チーム作成 API が返す response body です。
+ */
+type CreateTeamResponse = {
+  /**
+   * 作成したチーム行です。
+   */
+  team: ProjectDirectoryTeamResponse
+}
+
+/**
+ * プロジェクト作成 API が受け取る request body です。
+ */
+type CreateProjectRequestBody = {
+  /**
+   * locale 非依存で扱うプロジェクト名です。
+   */
+  name?: unknown
+  /**
+   * 日本語表示名です。
+   */
+  nameJa?: unknown
+  /**
+   * 英語表示名です。
+   */
+  nameEn?: unknown
+  /**
+   * サイドバー上のプロジェクト表示色です。
+   */
+  tone?: unknown
+}
+
+/**
+ * プロジェクト作成 API が返す response body です。
+ */
+type CreateProjectResponse = {
+  /**
+   * 作成したプロジェクト行です。
+   */
+  project: ProjectDirectoryProjectResponse
+}
+
+/**
  * API handler から利用する Cognito client の最小 interface です。
  */
 type CognitoClient = {
@@ -432,9 +526,9 @@ type CognitoClient = {
  */
 type DashboardSummaryClient = {
   /**
-   * DynamoDB からダッシュボード集計値を取得します。
+   * ユーザー directory の DynamoDB data からダッシュボード集計値を取得します。
    */
-  getSummary(): Promise<DashboardSummaryResponse>
+  getSummary(directoryId: string): Promise<DashboardSummaryResponse>
 }
 
 /**
@@ -445,6 +539,14 @@ type ProjectTasksClient = {
    * DynamoDB から指定 project ID のタスク一覧を取得します。
    */
   getProjectTasks(directoryId: string, projectId: string): Promise<ProjectTasksResponse>
+  /**
+   * DynamoDB に指定 project ID のタスクを作成します。
+   */
+  createProjectTask(
+    directoryId: string,
+    projectId: string,
+    input: CreateProjectTaskRequestBody,
+  ): Promise<CreateProjectTaskResponse>
 }
 
 /**
@@ -459,6 +561,18 @@ type ProjectDirectoryClient = {
    * ユーザーの directory に指定 project ID が含まれるかどうかを判定します。
    */
   hasProjectAccess(directoryId: string, projectId: string): Promise<boolean>
+  /**
+   * DynamoDB にチームを作成します。
+   */
+  createTeam(directoryId: string, input: CreateTeamRequestBody): Promise<CreateTeamResponse>
+  /**
+   * DynamoDB に指定チーム配下のプロジェクトを作成します。
+   */
+  createProject(
+    directoryId: string,
+    teamId: string,
+    input: CreateProjectRequestBody,
+  ): Promise<CreateProjectResponse>
 }
 
 /**
@@ -474,7 +588,6 @@ let cognito: CognitoClient
 let dashboardSummary: DashboardSummaryClient
 let projectTasks: ProjectTasksClient
 let projectDirectory: ProjectDirectoryClient
-const dashboardSummaryItemId = 'summary'
 const projectDirectoryIdPrefix = 'user#'
 
 app.use(
@@ -590,15 +703,15 @@ app.get('/api/dashboard/summary', async (c) => {
   }
 
   try {
-    await cognito.getUser(accessToken)
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
 
-    return c.json(await dashboardSummary.getSummary())
+    return c.json(await dashboardSummary.getSummary(principal.directoryId))
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
     }
 
-    return toDashboardDataErrorResponse(c, error)
+    return toProjectDataErrorResponse(c, error)
   }
 })
 
@@ -619,6 +732,59 @@ app.get('/api/teams/projects', async (c) => {
     const principal = toProjectPrincipal(await cognito.getUser(accessToken))
 
     return c.json(await projectDirectory.getProjectDirectory(principal.directoryId, readLocale(c)))
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * DynamoDB にチームを新規作成する endpoint です。
+ */
+app.post('/api/teams', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
+    const body = await readJson<CreateTeamRequestBody>(c.req)
+
+    return c.json(await projectDirectory.createTeam(principal.directoryId, body ?? {}), 201)
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * DynamoDB にチーム配下のプロジェクトを新規作成する endpoint です。
+ */
+app.post('/api/teams/:teamId/projects', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!teamId) {
+    return c.json({ message: 'Team ID is required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
+    const body = await readJson<CreateProjectRequestBody>(c.req)
+
+    return c.json(await projectDirectory.createProject(principal.directoryId, teamId, body ?? {}), 201)
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -658,6 +824,44 @@ app.get('/api/projects/:projectId/tasks', async (c) => {
     }
 
     return c.json(await projectTasks.getProjectTasks(principal.directoryId, projectId))
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * DynamoDB にプロジェクト別タスクを新規作成する endpoint です。
+ */
+app.post('/api/projects/:projectId/tasks', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const projectId = c.req.param('projectId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!projectId) {
+    return c.json({ message: 'Project ID is required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
+
+    if (!(await projectDirectory.hasProjectAccess(principal.directoryId, projectId))) {
+      throw new ProjectDataError(
+        403,
+        'ProjectAccessDenied',
+        `User "${principal.userKey}" cannot access project "${projectId}".`,
+      )
+    }
+
+    const body = await readJson<CreateProjectTaskRequestBody>(c.req)
+
+    return c.json(await projectTasks.createProjectTask(principal.directoryId, projectId, body ?? {}), 201)
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -717,25 +921,22 @@ function toAuthErrorResponse(c: Context, error: unknown) {
   return c.json({ message: error.message }, 400)
 }
 
-function toDashboardDataErrorResponse(c: Context, error: unknown) {
-  if (!(error instanceof DashboardDataError)) {
-    console.error(error)
-    return c.json({ message: 'Dashboard data is unavailable.' }, 502)
-  }
-
-  if (error.code === 'DashboardSummaryNotFound' || error.code === 'InvalidDashboardSummary') {
-    console.error(error)
-    return c.json({ message: 'Dashboard summary is not initialized.' }, 503)
-  }
-
-  console.error(error)
-  return c.json({ message: 'Dashboard data is unavailable.' }, 502)
-}
-
 function toProjectDataErrorResponse(c: Context, error: unknown) {
   if (!(error instanceof ProjectDataError)) {
     console.error(error)
     return c.json({ message: 'Project data is unavailable.' }, 502)
+  }
+
+  if (error.code === 'InvalidProjectWrite') {
+    return c.json({ message: error.message }, 400)
+  }
+
+  if (error.code === 'TeamNotFound') {
+    return c.json({ message: 'Team was not found.' }, 404)
+  }
+
+  if (error.code === 'ConditionalCheckFailedException') {
+    return c.json({ message: 'The same item already exists.' }, 409)
   }
 
   if (error.code === 'ResourceNotFoundException') {
@@ -951,57 +1152,49 @@ class FlociCognitoClient {
 }
 
 /**
- * DynamoDB のダッシュボード集計 item を読み取る client です。
+ * DynamoDB の team/project と task data からダッシュボード集計値を算出する client です。
  */
-class DynamoDbDashboardSummaryClient {
+export class DynamoDbDashboardSummaryClient {
   /**
-   * 集計 item を保存する DynamoDB table 名です。
+   * team/project directory を読み取る client です。
    */
-  private readonly tableName =
-    getEnv('MUKUROJI_DASHBOARD_TABLE') ??
-    'mukuroji-dashboard-local'
-  /**
-   * DynamoDB DocumentClient です。
-   */
-  private readonly documentClient = createDynamoDbDocumentClient()
+  private readonly projectDirectoryClient: ProjectDirectoryClient
 
   /**
-   * DynamoDB からダッシュボード集計値を取得します。
+   * project task を読み取る client です。
    */
-  async getSummary() {
-    try {
-      const response = await this.documentClient.send(
-        new GetCommand({
-          TableName: this.tableName,
-          Key: {
-            id: dashboardSummaryItemId,
-          },
-          ConsistentRead: true,
-        }),
-      )
+  private readonly projectTasksClient: ProjectTasksClient
 
-      if (!isDashboardSummaryItem(response.Item)) {
-        throw new DashboardDataError(
-          503,
-          response.Item ? 'InvalidDashboardSummary' : 'DashboardSummaryNotFound',
-          'Dashboard summary item is missing or invalid.',
-        )
-      }
+  constructor(
+    projectDirectoryClient: ProjectDirectoryClient = new DynamoDbProjectDirectoryClient(),
+    projectTasksClient: ProjectTasksClient = new DynamoDbProjectTasksClient(),
+  ) {
+    this.projectDirectoryClient = projectDirectoryClient
+    this.projectTasksClient = projectTasksClient
+  }
 
-      return {
-        projects: response.Item.projects,
-        tasks: response.Item.tasks,
-        blocked: response.Item.blocked,
-        updatedAt: response.Item.updatedAt,
-        source: 'dynamodb',
-      } satisfies DashboardSummaryResponse
-    } catch (error) {
-      if (error instanceof DashboardDataError) {
-        throw error
-      }
+  /**
+   * ユーザー directory の team/project と task data からダッシュボード集計値を取得します。
+   */
+  async getSummary(directoryId: string) {
+    const directory = await this.projectDirectoryClient.getProjectDirectory(directoryId, 'ja')
+    const projectIds = new Set(
+      directory.teams.flatMap((team) => team.projects.map((project) => project.id)),
+    )
+    const taskResponses = await Promise.all(
+      Array.from(projectIds).map((projectId) =>
+        this.projectTasksClient.getProjectTasks(directoryId, projectId),
+      ),
+    )
+    const tasks = taskResponses.flatMap((response) => response.tasks)
 
-      throw toDashboardDataError(error)
-    }
+    return {
+      projects: projectIds.size,
+      tasks: tasks.filter((task) => task.status !== 'done').length,
+      blocked: tasks.filter((task) => task.priority === 'high' && task.status !== 'done').length,
+      updatedAt: new Date().toISOString(),
+      source: 'dynamodb',
+    } satisfies DashboardSummaryResponse
   }
 }
 
@@ -1061,6 +1254,58 @@ export class DynamoDbProjectTasksClient {
         projectId,
         tasks,
       } satisfies ProjectTasksResponse
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * DynamoDB にプロジェクト別タスクを作成します。
+   */
+  async createProjectTask(
+    directoryId: string,
+    projectId: string,
+    input: CreateProjectTaskRequestBody,
+  ) {
+    const title = readRequiredString(input.title, 'Task title is required.')
+    const assignee = readRequiredString(input.assignee, 'Task assignee is required.')
+    const status = readTaskStatus(input.status)
+    const dueDate = readRequiredString(input.dueDate, 'Task due date is required.')
+    const priority = readTaskPriority(input.priority)
+    const directoryProjectId = createDirectoryProjectId(directoryId, projectId)
+
+    try {
+      const currentTasks = await this.getProjectTasks(directoryId, projectId)
+      const taskId = createResourceId(title)
+      const sortOrder = (currentTasks.tasks.length + 1) * 10
+      const item: ProjectTaskItem = {
+        directoryId,
+        directoryProjectId,
+        projectId,
+        taskId,
+        sortOrder,
+        title,
+        assignee,
+        status,
+        dueDate,
+        priority,
+      }
+
+      await this.documentClient.send(
+        new PutCommand({
+          TableName: this.tableName,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)',
+        }),
+      )
+
+      return {
+        task: toProjectTaskResponseItem(item),
+      } satisfies CreateProjectTaskResponse
     } catch (error) {
       if (error instanceof ProjectDataError) {
         throw error
@@ -1142,6 +1387,143 @@ export class DynamoDbProjectDirectoryClient {
   }
 
   /**
+   * DynamoDB にチームを作成します。
+   */
+  async createTeam(directoryId: string, input: CreateTeamRequestBody) {
+    const names = readLocalizedNames(input)
+
+    try {
+      const items = await this.readValidDirectoryItems(directoryId)
+      const teamId = createUniqueResourceId(
+        names.nameJa,
+        items
+          .filter((item) => item.entryType === 'team')
+          .map((item) => item.teamId),
+      )
+      const teamSortOrder =
+        Math.max(0, ...items.filter((item) => item.entryType === 'team').map((item) => item.teamSortOrder)) +
+        10
+      const item: ProjectDirectoryItem = {
+        directoryId,
+        entryKey: createTeamEntryKey(teamSortOrder, teamId),
+        entryType: 'team',
+        teamId,
+        teamSortOrder,
+        nameJa: names.nameJa,
+        nameEn: names.nameEn,
+        expanded: typeof input.expanded === 'boolean' ? input.expanded : true,
+      }
+
+      await this.documentClient.send(
+        new PutCommand({
+          TableName: this.tableName,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+        }),
+      )
+
+      return {
+        team: {
+          id: item.teamId,
+          name: item.nameJa,
+          expanded: item.expanded ?? false,
+          projects: [],
+        },
+      } satisfies CreateTeamResponse
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * DynamoDB にチーム配下のプロジェクトを作成します。
+   */
+  async createProject(directoryId: string, teamId: string, input: CreateProjectRequestBody) {
+    const names = readLocalizedNames(input)
+    const tone = readProjectTone(input.tone)
+
+    try {
+      const items = await this.readValidDirectoryItems(directoryId)
+      const team = items.find((item) => item.entryType === 'team' && item.teamId === teamId)
+
+      if (!team) {
+        throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+      }
+
+      const projectId = createUniqueResourceId(
+        names.nameJa,
+        items
+          .filter((item) => item.entryType === 'project')
+          .flatMap((item) => (item.projectId ? [item.projectId] : [])),
+      )
+      const projectSortOrder =
+        Math.max(
+          0,
+          ...items
+            .filter((item) => item.entryType === 'project' && item.teamId === teamId)
+            .map((item) => item.projectSortOrder ?? 0),
+        ) + 10
+      const item: ProjectDirectoryItem = {
+        directoryId,
+        entryKey: createProjectEntryKey(team.teamSortOrder, projectSortOrder, projectId),
+        entryType: 'project',
+        teamId,
+        teamSortOrder: team.teamSortOrder,
+        nameJa: names.nameJa,
+        nameEn: names.nameEn,
+        projectId,
+        projectSortOrder,
+        tone,
+      }
+
+      await this.documentClient.send(
+        new PutCommand({
+          TableName: this.tableName,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+        }),
+      )
+
+      return {
+        project: {
+          id: item.projectId,
+          name: item.nameJa,
+          tone: item.tone,
+        },
+      } satisfies CreateProjectResponse
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * directory partition 内の全 item を検証済み item として取得します。
+   */
+  private async readValidDirectoryItems(directoryId: string) {
+    return this.queryDirectoryItems(directoryId).then((items) =>
+      items.map((item) => {
+        if (!isProjectDirectoryItem(item, directoryId)) {
+          throw new ProjectDataError(
+            503,
+            'InvalidProjectDirectory',
+            'Project directory item is missing or invalid.',
+          )
+        }
+
+        return item
+      }),
+    )
+  }
+
+  /**
    * directory partition 内の全 item を LastEvaluatedKey がなくなるまで取得します。
    */
   private async queryDirectoryItems(directoryId: string) {
@@ -1179,26 +1561,6 @@ class CognitoServiceError extends Error {
   readonly status: number
   /**
    * Cognito error code またはローカルで付与した error code です。
-   */
-  readonly code: string
-
-  constructor(status: number, code: string, message: string) {
-    super(message)
-    this.status = status
-    this.code = code
-  }
-}
-
-/**
- * DynamoDB の dashboard data 取得で扱う domain error です。
- */
-class DashboardDataError extends Error {
-  /**
-   * DynamoDB または proxy 相当の HTTP status code です。
-   */
-  readonly status: number
-  /**
-   * DynamoDB error code またはローカルで付与した error code です。
    */
   readonly code: string
 
@@ -1265,22 +1627,6 @@ function createDynamoDbDocumentClient() {
   })
 }
 
-function toDashboardDataError(error: unknown) {
-  const awsError = error as {
-    $metadata?: {
-      httpStatusCode?: number
-    }
-    message?: string
-    name?: string
-  }
-
-  return new DashboardDataError(
-    awsError.$metadata?.httpStatusCode ?? 502,
-    awsError.name ?? 'DynamoDbUnavailable',
-    awsError.message ?? 'DynamoDB request failed.',
-  )
-}
-
 function toProjectDataError(error: unknown) {
   const awsError = error as {
     $metadata?: {
@@ -1297,20 +1643,6 @@ function toProjectDataError(error: unknown) {
   )
 }
 
-function isDashboardSummaryItem(value: unknown): value is DashboardSummaryItem {
-  if (!isRecord(value)) {
-    return false
-  }
-
-  return (
-    value.id === dashboardSummaryItemId &&
-    typeof value.projects === 'number' &&
-    typeof value.tasks === 'number' &&
-    typeof value.blocked === 'number' &&
-    typeof value.updatedAt === 'string'
-  )
-}
-
 function toProjectTaskResponseItem(value: unknown): ProjectTaskResponseItem {
   if (!isProjectTaskItem(value)) {
     throw new ProjectDataError(
@@ -1320,14 +1652,30 @@ function toProjectTaskResponseItem(value: unknown): ProjectTaskResponseItem {
     )
   }
 
-  return {
+  const task: ProjectTaskResponseItem = {
     id: value.taskId,
-    titleKey: value.titleKey,
-    assigneeKey: value.assigneeKey,
     status: value.status,
     dueDate: value.dueDate,
     priority: value.priority,
   }
+
+  if (value.titleKey) {
+    task.titleKey = value.titleKey
+  }
+
+  if (value.title) {
+    task.title = value.title
+  }
+
+  if (value.assigneeKey) {
+    task.assigneeKey = value.assigneeKey
+  }
+
+  if (value.assignee) {
+    task.assignee = value.assignee
+  }
+
+  return task
 }
 
 function toProjectDirectoryResponse(
@@ -1396,8 +1744,8 @@ function isProjectTaskItem(value: unknown): value is ProjectTaskItem {
     value.directoryProjectId === createDirectoryProjectId(value.directoryId, value.projectId) &&
     typeof value.taskId === 'string' &&
     typeof value.sortOrder === 'number' &&
-    typeof value.titleKey === 'string' &&
-    typeof value.assigneeKey === 'string' &&
+    (typeof value.titleKey === 'string' || typeof value.title === 'string') &&
+    (typeof value.assigneeKey === 'string' || typeof value.assignee === 'string') &&
     isProjectTaskStatus(value.status) &&
     typeof value.dueDate === 'string' &&
     isProjectTaskPriority(value.priority)
@@ -1442,6 +1790,110 @@ function isProjectTaskPriority(value: unknown): value is ProjectTaskPriority {
 
 function isProjectTone(value: unknown): value is ProjectTone {
   return value === 'blue' || value === 'purple' || value === 'green' || value === 'yellow'
+}
+
+function readRequiredString(value: unknown, message: string) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', message)
+  }
+
+  return value.trim()
+}
+
+function readLocalizedNames(input: CreateTeamRequestBody | CreateProjectRequestBody) {
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  const nameJa = typeof input.nameJa === 'string' ? input.nameJa.trim() : ''
+  const nameEn = typeof input.nameEn === 'string' ? input.nameEn.trim() : ''
+  const primaryName = nameJa || name || nameEn
+
+  if (!primaryName) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Name is required.')
+  }
+
+  return {
+    nameJa: primaryName,
+    nameEn: nameEn || name || primaryName,
+  }
+}
+
+function readTaskStatus(value: unknown): ProjectTaskStatus {
+  if (value === undefined) {
+    return 'todo'
+  }
+
+  if (!isProjectTaskStatus(value)) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Task status is invalid.')
+  }
+
+  return value
+}
+
+function readTaskPriority(value: unknown): ProjectTaskPriority {
+  if (value === undefined) {
+    return 'medium'
+  }
+
+  if (!isProjectTaskPriority(value)) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Task priority is invalid.')
+  }
+
+  return value
+}
+
+function readProjectTone(value: unknown): ProjectTone {
+  if (value === undefined) {
+    return 'blue'
+  }
+
+  if (!isProjectTone(value)) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Project tone is invalid.')
+  }
+
+  return value
+}
+
+function createResourceId(value: string) {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .normalize('NFKC')
+    .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
+    .replace(/^-+|-+$/g, '')
+
+  return normalized || `item-${Date.now()}`
+}
+
+function createUniqueResourceId(value: string, existingIds: Iterable<string>) {
+  const baseId = createResourceId(value)
+  const usedIds = new Set(existingIds)
+
+  if (!usedIds.has(baseId)) {
+    return baseId
+  }
+
+  let suffix = 2
+
+  while (usedIds.has(`${baseId}-${suffix}`)) {
+    suffix += 1
+  }
+
+  return `${baseId}-${suffix}`
+}
+
+function createTeamEntryKey(teamSortOrder: number, teamId: string) {
+  return `${padSortOrder(teamSortOrder)}#000000#TEAM#${teamId}`
+}
+
+function createProjectEntryKey(
+  teamSortOrder: number,
+  projectSortOrder: number,
+  projectId: string,
+) {
+  return `${padSortOrder(teamSortOrder)}#${padSortOrder(projectSortOrder)}#PROJECT#${projectId}`
+}
+
+function padSortOrder(value: number) {
+  return String(value).padStart(6, '0')
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

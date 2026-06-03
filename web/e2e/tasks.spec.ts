@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
+import type { ProjectDirectoryTeam } from '../src/projects/api'
+import type { ProjectTask } from '../src/tasks/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 
 const authSession = {
@@ -22,6 +24,18 @@ type MockRequestCounts = {
    * プロジェクト別タスク API の request 数です。
    */
   projectTasks: Record<string, number>
+  /**
+   * チーム作成 API の request 数です。
+   */
+  teamCreates: number
+  /**
+   * プロジェクト作成 API の request 数です。
+   */
+  projectCreates: number
+  /**
+   * タスク作成 API の request 数です。
+   */
+  taskCreates: number
 }
 
 const mockRequestCountsByPage = new WeakMap<Page, MockRequestCounts>()
@@ -34,6 +48,19 @@ async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFi
   const requestCounts: MockRequestCounts = {
     projectDirectory: 0,
     projectTasks: {},
+    teamCreates: 0,
+    projectCreates: 0,
+    taskCreates: 0,
+  }
+  const projectDirectory: ProjectDirectoryTeam[] = projectDirectoryFixtures.map((team) => ({
+    ...team,
+    projects: [...team.projects],
+  }))
+  const taskResponsesByProject: Record<string, ProjectTask[]> = {
+    refero: taskResponse.map((task) => ({ ...task })),
+    'product-roadmap': [],
+    'brand-refresh': [],
+    'shared-launch': [],
   }
 
   mockRequestCountsByPage.set(page, requestCounts)
@@ -62,7 +89,58 @@ async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFi
 
     await route.fulfill({
       json: {
-        teams: projectDirectoryFixtures,
+        teams: projectDirectory,
+      },
+    })
+  })
+
+  await page.route('**/api/teams', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.fallback()
+      return
+    }
+
+    requestCounts.teamCreates += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    const body = route.request().postDataJSON() as { name?: string }
+    const name = body.name ?? '新規チーム'
+    const team = {
+      id: 'new-team',
+      name,
+      expanded: true,
+      projects: [],
+    }
+
+    projectDirectory.push(team)
+
+    await route.fulfill({
+      status: 201,
+      json: {
+        team,
+      },
+    })
+  })
+
+  await page.route('**/api/teams/core-team/projects', async (route) => {
+    requestCounts.projectCreates += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    const body = route.request().postDataJSON() as { name?: string; tone?: string }
+    const name = body.name ?? '新規プロジェクト'
+    const project = {
+      id: 'new-project',
+      name,
+      tone: 'green' as const,
+    }
+
+    projectDirectory[0]?.projects.push(project)
+    taskResponsesByProject[project.id] = []
+
+    await route.fulfill({
+      status: 201,
+      json: {
+        project,
       },
     })
   })
@@ -72,10 +150,39 @@ async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFi
 
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
+    if (route.request().method() === 'POST') {
+      requestCounts.taskCreates += 1
+      const body = route.request().postDataJSON() as {
+        assignee?: string
+        dueDate?: string
+        priority?: ProjectTask['priority']
+        status?: ProjectTask['status']
+        title?: string
+      }
+      const task = {
+        id: 'new-task',
+        title: body.title ?? '新規タスク',
+        assignee: body.assignee ?? '佐藤 花子',
+        status: body.status ?? 'todo',
+        dueDate: body.dueDate ?? '2026/06/20',
+        priority: body.priority ?? 'medium',
+      } satisfies ProjectTask
+
+      taskResponsesByProject.refero.push(task)
+
+      await route.fulfill({
+        status: 201,
+        json: {
+          task,
+        },
+      })
+      return
+    }
+
     await route.fulfill({
       json: {
         projectId: 'refero',
-        tasks: taskResponse,
+        tasks: taskResponsesByProject.refero,
       },
     })
   })
@@ -88,7 +195,7 @@ async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFi
     await route.fulfill({
       json: {
         projectId: 'product-roadmap',
-        tasks: [],
+        tasks: taskResponsesByProject['product-roadmap'],
       },
     })
   })
@@ -101,7 +208,7 @@ async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFi
     await route.fulfill({
       json: {
         projectId: 'brand-refresh',
-        tasks: [],
+        tasks: taskResponsesByProject['brand-refresh'],
       },
     })
   })
@@ -114,7 +221,20 @@ async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFi
     await route.fulfill({
       json: {
         projectId: 'shared-launch',
-        tasks: [],
+        tasks: taskResponsesByProject['shared-launch'],
+      },
+    })
+  })
+
+  await page.route('**/api/projects/new-project/tasks', async (route) => {
+    recordProjectTaskRequest(requestCounts, 'new-project')
+
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    await route.fulfill({
+      json: {
+        projectId: 'new-project',
+        tasks: taskResponsesByProject['new-project'] ?? [],
       },
     })
   })
@@ -224,6 +344,23 @@ test.describe('authenticated task page', () => {
     expect(requestCounts.projectDirectory).toBe(1)
   })
 
+  test('ダッシュボードからチームとプロジェクトを新規登録できる', async ({ page }) => {
+    await page.goto('/dashboard')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByLabel('チーム名').fill('新規チーム')
+    await page.getByRole('button', { name: 'チームを登録' }).click()
+
+    await expect(page.getByRole('button', { name: '新規チーム' })).toBeVisible()
+    expect(requestCounts.teamCreates).toBe(1)
+
+    await page.getByLabel('プロジェクト名').fill('新規プロジェクト')
+    await page.getByRole('button', { name: 'プロジェクトを登録' }).click()
+
+    await expect(page.getByRole('button', { name: '新規プロジェクト' })).toBeVisible()
+    expect(requestCounts.projectCreates).toBe(1)
+  })
+
   test('同じプロジェクトが複数チームにある場合、選択元チームをタスク画面へ引き継ぐ', async ({
     page,
   }) => {
@@ -247,6 +384,20 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('team-overview-projects').locator('p').last()).toHaveText('2')
     await expect(page.getByTestId('team-overview-open-tasks').locator('p').last()).toHaveText('0')
     await expect(page.getByTestId('team-overview-blocked').locator('p').last()).toHaveText('0')
+  })
+
+  test('タスク画面から新規タスクを登録できる', async ({ page }) => {
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('button', { name: '新規タスク' }).click()
+    await page.locator('input[name="title"]').fill('新規タスク')
+    await page.locator('input[name="assignee"]').fill('佐藤 花子')
+    await page.locator('input[name="dueDate"]').fill('2026-06-20')
+    await page.getByRole('button', { name: '登録' }).click()
+
+    await expect(page.getByText('新規タスク')).toBeVisible()
+    expect(requestCounts.taskCreates).toBe(1)
   })
 
   test('タスク API 失敗時にエラーを表示する', async ({ page }) => {
