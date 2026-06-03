@@ -13,13 +13,20 @@
     "web:dev": "bun --filter web dev",
     "web:lint": "bun --filter web lint",
     "web:build": "bun --filter web build",
+    "web:e2e": "playwright test",
     "web:storybook": "bun --filter web storybook",
     "web:build-storybook": "bun --filter web build-storybook",
     "server:dev": "bun --filter server dev",
     "server:build:lambda": "bun --filter server build:lambda",
+    "server:test": "bun --filter server test",
     "floci:deploy-backend": "sh floci/deploy-backend.sh",
+    "tasks:seed-dynamodb": "bash scripts/seed-project-tasks-dynamodb.sh",
+    "tasks:check-dynamodb": "bash scripts/check-project-tasks-dynamodb.sh",
     "cdk:build": "bun --filter cdk build",
     "cdk:test": "bun --filter cdk test",
     "cdk:synth": "bun --filter cdk cdk synth"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
   }
 }

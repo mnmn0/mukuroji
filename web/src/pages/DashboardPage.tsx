@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router'
+import useSWR from 'swr'
 import {
   getCurrentUser,
   getDashboardSummary,
@@ -7,13 +8,18 @@ import {
   type DashboardSummary,
 } from '../auth/api'
 import { clearAuthSession, getAuthSession, type AuthSession } from '../auth/session'
-import { Sidebar, type SidebarTeam } from '../components/sidebar'
+import { Sidebar } from '../components/sidebar'
 import {
   createSidebarLabels,
   createTranslator,
   getInitialLocale,
   type Locale,
 } from '../i18n'
+import {
+  getProjectDirectory,
+  type ProjectDirectoryTeam,
+} from '../projects/api'
+import { createProjectTasksPath } from '../routes/paths'
 
 /**
  * ダッシュボード上の小さな指標カードに渡す表示値です。
@@ -46,22 +52,31 @@ type DashboardPageProps = {
    */
   loadCurrentUser?: (accessToken: string) => Promise<CurrentUser>
   /**
-   * access token からダッシュボード集計値を取得する関数です。signal で中断できます。
+   * access token からダッシュボード集計値を取得する関数です。
    */
-  loadDashboardSummary?: (
+  loadDashboardSummary?: (accessToken: string) => Promise<DashboardSummary>
+  /**
+   * access token からチーム/プロジェクト階層を取得する関数です。
+   */
+  loadProjectDirectory?: (
     accessToken: string,
-    signal?: AbortSignal,
-  ) => Promise<DashboardSummary>
+    locale: Locale,
+  ) => Promise<ProjectDirectoryTeam[]>
+  /**
+   * Storybook などで初期表示に使うチーム/プロジェクト階層です。
+   */
+  initialProjectDirectory?: ProjectDirectoryTeam[]
   /**
    * Storybook などで固定したい初期 locale です。
    */
   initialLocale?: Locale
 }
 
-const fallbackDashboardSummary = {
-  projects: 3,
-  tasks: 18,
-  blocked: 2,
+const emptyProjectDirectory: ProjectDirectoryTeam[] = []
+
+const apiSWRConfig = {
+  dedupingInterval: 10_000,
+  shouldRetryOnError: false,
 } as const
 
 /**
@@ -72,47 +87,45 @@ export function DashboardPage({
   clearSession = clearAuthSession,
   loadCurrentUser = getCurrentUser,
   loadDashboardSummary = getDashboardSummary,
+  loadProjectDirectory = getProjectDirectory,
+  initialProjectDirectory = emptyProjectDirectory,
   initialLocale,
 }: DashboardPageProps = {}) {
   const navigate = useNavigate()
+  const [session] = useState<AuthSession | null>(() => getSession())
   const [locale] = useState<Locale>(() => initialLocale ?? getInitialLocale())
-  const [user, setUser] = useState<CurrentUser | null>(null)
-  const [summary, setSummary] = useState<DashboardSummary | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
-  const [isSummaryLoading, setIsSummaryLoading] = useState(true)
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
-  const teams = useMemo<SidebarTeam[]>(
-    () => [
-      {
-        id: 'core-team',
-        name: t('dashboard.team.core'),
-        expanded: true,
-        projects: [
-          {
-            id: 'product-roadmap',
-            name: t('dashboard.project.productRoadmap'),
-            tone: 'blue',
-          },
-          {
-            id: 'release-plan',
-            name: t('dashboard.project.releasePlan'),
-            tone: 'green',
-          },
-          {
-            id: 'customer-feedback',
-            name: t('dashboard.project.customerFeedback'),
-            tone: 'purple',
-          },
-        ],
-      },
-      {
-        id: 'design-team',
-        name: t('dashboard.team.design'),
-      },
-    ],
-    [t],
+  const accessToken = session?.accessToken
+  const currentUserKey = accessToken ? (['current-user', accessToken] as const) : null
+  const {
+    data: user,
+    error: currentUserError,
+    isLoading: isCurrentUserLoading,
+  } = useSWR(
+    currentUserKey,
+    ([, accessToken]) => loadCurrentUser(accessToken),
+    apiSWRConfig,
   )
+  const dashboardSummaryKey = accessToken && user && !currentUserError
+    ? (['dashboard-summary', accessToken] as const)
+    : null
+  const { data: summary, isLoading: isDashboardSummaryLoading } = useSWR(
+    dashboardSummaryKey,
+    ([, accessToken]) => loadDashboardSummary(accessToken),
+    apiSWRConfig,
+  )
+  const projectDirectoryKey = accessToken && user && !currentUserError
+    ? (['project-directory', accessToken, locale] as const)
+    : null
+  const { data: loadedProjectDirectory } = useSWR(
+    projectDirectoryKey,
+    ([, accessToken, currentLocale]) =>
+      loadProjectDirectory(accessToken, currentLocale),
+    apiSWRConfig,
+  )
+  const teams = loadedProjectDirectory ?? initialProjectDirectory
+  const isLoading = !session || isCurrentUserLoading || Boolean(currentUserError)
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -120,58 +133,17 @@ export function DashboardPage({
   }, [locale, t])
 
   useEffect(() => {
-    let isMounted = true
-    const controller = new AbortController()
-    const session = getSession()
-
     if (!session) {
       navigate('/', { replace: true })
-      return () => {
-        isMounted = false
-      }
     }
+  }, [navigate, session])
 
-    loadCurrentUser(session.accessToken)
-      .then((currentUser) => {
-        if (isMounted) {
-          setUser(currentUser)
-        }
-      })
-      .catch(() => {
-        if (isMounted) {
-          controller.abort()
-          clearSession()
-          navigate('/', { replace: true })
-        }
-      })
-      .finally(() => {
-        if (isMounted) {
-          setIsLoading(false)
-        }
-      })
-
-    loadDashboardSummary(session.accessToken, controller.signal)
-      .then((dashboardSummary) => {
-        if (isMounted && !controller.signal.aborted) {
-          setSummary(dashboardSummary)
-        }
-      })
-      .catch(() => {
-        if (isMounted && !controller.signal.aborted) {
-          setSummary(null)
-        }
-      })
-      .finally(() => {
-        if (isMounted && !controller.signal.aborted) {
-          setIsSummaryLoading(false)
-        }
-      })
-
-    return () => {
-      isMounted = false
-      controller.abort()
+  useEffect(() => {
+    if (currentUserError) {
+      clearSession()
+      navigate('/', { replace: true })
     }
-  }, [clearSession, getSession, loadCurrentUser, loadDashboardSummary, navigate])
+  }, [clearSession, currentUserError, navigate])
 
   const handleLogout = () => {
     clearSession()
@@ -180,18 +152,20 @@ export function DashboardPage({
 
   const displayName =
     user?.attributes.email ?? user?.attributes.name ?? user?.username ?? ''
-  const dashboardSummary = summary ?? fallbackDashboardSummary
-  const projectCount = isSummaryLoading ? '...' : String(dashboardSummary.projects)
-  const taskCount = isSummaryLoading ? '...' : String(dashboardSummary.tasks)
-  const blockedCount = isSummaryLoading ? '...' : String(dashboardSummary.blocked)
+  const projectCount = isDashboardSummaryLoading ? '...' : String(summary?.projects ?? 0)
+  const taskCount = isDashboardSummaryLoading ? '...' : String(summary?.tasks ?? 0)
+  const blockedCount = isDashboardSummaryLoading ? '...' : String(summary?.blocked ?? 0)
 
   return (
     <main className="flex min-h-svh bg-[var(--surface)]">
       <Sidebar
         activeNavId="dashboard"
         className="max-[900px]:hidden"
-        inboxCount={2}
+        inboxCount={summary?.blocked ?? 0}
         labels={sidebarLabels}
+        onSelectProject={(projectId, teamId) =>
+          navigate(createProjectTasksPath(projectId, teamId))
+        }
         teams={teams}
       />
 

@@ -9,6 +9,9 @@ CLIENT_NAME="${COGNITO_USER_POOL_CLIENT_NAME:-mukuroji-web-local}"
 TEST_USERNAME="${COGNITO_TEST_USERNAME:-demo@example.com}"
 TEST_PASSWORD="${COGNITO_TEST_PASSWORD:-Password123!}"
 DASHBOARD_TABLE="${MUKUROJI_DASHBOARD_TABLE:-mukuroji-dashboard-local}"
+PROJECT_TASKS_TABLE="${MUKUROJI_PROJECT_TASKS_TABLE:-mukuroji-project-tasks-v2-local}"
+PROJECT_DIRECTORY_TABLE="${MUKUROJI_PROJECT_DIRECTORY_TABLE:-mukuroji-project-directory-local}"
+PROJECT_DIRECTORY_ID="${MUKUROJI_PROJECT_DIRECTORY_ID:-user#$(printf '%s' "$TEST_USERNAME" | tr '[:upper:]' '[:lower:]')}"
 DASHBOARD_UPDATED_AT="${MUKUROJI_DASHBOARD_UPDATED_AT:-$(date -u +%Y-%m-%dT%H:%M:%S.000Z)}"
 GENERATED_DIR="${MUKUROJI_GENERATED_DIR:-/app/generated}"
 
@@ -80,6 +83,86 @@ aws_local dynamodb put-item \
   }" \
   >/dev/null
 
+if ! aws_local dynamodb describe-table --table-name "$PROJECT_TASKS_TABLE" >/dev/null 2>&1; then
+  aws_local dynamodb create-table \
+    --table-name "$PROJECT_TASKS_TABLE" \
+    --attribute-definitions \
+      AttributeName=directoryProjectId,AttributeType=S \
+      AttributeName=taskId,AttributeType=S \
+      AttributeName=sortOrder,AttributeType=N \
+    --key-schema \
+      AttributeName=directoryProjectId,KeyType=HASH \
+      AttributeName=taskId,KeyType=RANGE \
+    --global-secondary-indexes '[
+      {
+        "IndexName": "ProjectSortOrderIndex",
+        "KeySchema": [
+          {"AttributeName": "directoryProjectId", "KeyType": "HASH"},
+          {"AttributeName": "sortOrder", "KeyType": "RANGE"}
+        ],
+        "Projection": {"ProjectionType": "ALL"}
+      }
+    ]' \
+    --billing-mode PAY_PER_REQUEST \
+    >/dev/null
+fi
+
+TASKS_UNPROCESSED_TABLES="$(aws_local dynamodb batch-write-item \
+  --request-items "{
+    \"$PROJECT_TASKS_TABLE\": [
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"wireframe\"},\"sortOrder\":{\"N\":\"10\"},\"titleKey\":{\"S\":\"tasks.item.wireframe\"},\"assigneeKey\":{\"S\":\"tasks.assignee.sato\"},\"status\":{\"S\":\"in-progress\"},\"dueDate\":{\"S\":\"2026/06/03\"},\"priority\":{\"S\":\"high\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"brand-guideline\"},\"sortOrder\":{\"N\":\"20\"},\"titleKey\":{\"S\":\"tasks.item.brandGuideline\"},\"assigneeKey\":{\"S\":\"tasks.assignee.suzuki\"},\"status\":{\"S\":\"review\"},\"dueDate\":{\"S\":\"2026/06/05\"},\"priority\":{\"S\":\"medium\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"pricing-content\"},\"sortOrder\":{\"N\":\"30\"},\"titleKey\":{\"S\":\"tasks.item.pricingContent\"},\"assigneeKey\":{\"S\":\"tasks.assignee.tanaka\"},\"status\":{\"S\":\"in-progress\"},\"dueDate\":{\"S\":\"2026/06/08\"},\"priority\":{\"S\":\"high\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"seo-research\"},\"sortOrder\":{\"N\":\"40\"},\"titleKey\":{\"S\":\"tasks.item.seoResearch\"},\"assigneeKey\":{\"S\":\"tasks.assignee.yamamoto\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/09\"},\"priority\":{\"S\":\"medium\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"hero-design\"},\"sortOrder\":{\"N\":\"50\"},\"titleKey\":{\"S\":\"tasks.item.heroDesign\"},\"assigneeKey\":{\"S\":\"tasks.assignee.sato\"},\"status\":{\"S\":\"review\"},\"dueDate\":{\"S\":\"2026/06/10\"},\"priority\":{\"S\":\"medium\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"analytics-tags\"},\"sortOrder\":{\"N\":\"60\"},\"titleKey\":{\"S\":\"tasks.item.analyticsTags\"},\"assigneeKey\":{\"S\":\"tasks.assignee.suzuki\"},\"status\":{\"S\":\"in-progress\"},\"dueDate\":{\"S\":\"2026/06/11\"},\"priority\":{\"S\":\"low\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"competitor-report\"},\"sortOrder\":{\"N\":\"70\"},\"titleKey\":{\"S\":\"tasks.item.competitorReport\"},\"assigneeKey\":{\"S\":\"tasks.assignee.tanaka\"},\"status\":{\"S\":\"done\"},\"dueDate\":{\"S\":\"2026/06/02\"},\"priority\":{\"S\":\"low\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"terms-page\"},\"sortOrder\":{\"N\":\"80\"},\"titleKey\":{\"S\":\"tasks.item.termsPage\"},\"assigneeKey\":{\"S\":\"tasks.assignee.yamamoto\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/12\"},\"priority\":{\"S\":\"medium\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"faq-content\"},\"sortOrder\":{\"N\":\"90\"},\"titleKey\":{\"S\":\"tasks.item.faqContent\"},\"assigneeKey\":{\"S\":\"tasks.assignee.sato\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/15\"},\"priority\":{\"S\":\"low\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"landing-release\"},\"sortOrder\":{\"N\":\"100\"},\"titleKey\":{\"S\":\"tasks.item.landingRelease\"},\"assigneeKey\":{\"S\":\"tasks.assignee.suzuki\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/16\"},\"priority\":{\"S\":\"high\"}}}}
+    ]
+  }" \
+  --query 'length(UnprocessedItems)' \
+  --output text)"
+
+if [ "$TASKS_UNPROCESSED_TABLES" != "0" ]; then
+  echo "DynamoDB task seed left unprocessed items: table=$PROJECT_TASKS_TABLE" >&2
+  exit 1
+fi
+
+if ! aws_local dynamodb describe-table --table-name "$PROJECT_DIRECTORY_TABLE" >/dev/null 2>&1; then
+  aws_local dynamodb create-table \
+    --table-name "$PROJECT_DIRECTORY_TABLE" \
+    --attribute-definitions \
+      AttributeName=directoryId,AttributeType=S \
+      AttributeName=entryKey,AttributeType=S \
+    --key-schema \
+      AttributeName=directoryId,KeyType=HASH \
+      AttributeName=entryKey,KeyType=RANGE \
+    --billing-mode PAY_PER_REQUEST \
+    >/dev/null
+fi
+
+DIRECTORY_UNPROCESSED_TABLES="$(aws_local dynamodb batch-write-item \
+  --request-items "{
+    \"$PROJECT_DIRECTORY_TABLE\": [
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"000010#000000#TEAM#core-team\"},\"entryType\":{\"S\":\"team\"},\"teamId\":{\"S\":\"core-team\"},\"teamSortOrder\":{\"N\":\"10\"},\"nameJa\":{\"S\":\"コアチーム\"},\"nameEn\":{\"S\":\"Core Team\"},\"expanded\":{\"BOOL\":true}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"000010#000010#PROJECT#refero\"},\"entryType\":{\"S\":\"project\"},\"teamId\":{\"S\":\"core-team\"},\"teamSortOrder\":{\"N\":\"10\"},\"projectId\":{\"S\":\"refero\"},\"projectSortOrder\":{\"N\":\"10\"},\"nameJa\":{\"S\":\"Refero\"},\"nameEn\":{\"S\":\"Refero\"},\"tone\":{\"S\":\"blue\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"000010#000020#PROJECT#product-roadmap\"},\"entryType\":{\"S\":\"project\"},\"teamId\":{\"S\":\"core-team\"},\"teamSortOrder\":{\"N\":\"10\"},\"projectId\":{\"S\":\"product-roadmap\"},\"projectSortOrder\":{\"N\":\"20\"},\"nameJa\":{\"S\":\"プロダクトロードマップ\"},\"nameEn\":{\"S\":\"Product Roadmap\"},\"tone\":{\"S\":\"yellow\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"000010#000030#PROJECT#shared-launch\"},\"entryType\":{\"S\":\"project\"},\"teamId\":{\"S\":\"core-team\"},\"teamSortOrder\":{\"N\":\"10\"},\"projectId\":{\"S\":\"shared-launch\"},\"projectSortOrder\":{\"N\":\"30\"},\"nameJa\":{\"S\":\"共通ローンチ\"},\"nameEn\":{\"S\":\"Shared Launch\"},\"tone\":{\"S\":\"green\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"000020#000000#TEAM#design-team\"},\"entryType\":{\"S\":\"team\"},\"teamId\":{\"S\":\"design-team\"},\"teamSortOrder\":{\"N\":\"20\"},\"nameJa\":{\"S\":\"デザインチーム\"},\"nameEn\":{\"S\":\"Design Team\"},\"expanded\":{\"BOOL\":true}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"000020#000010#PROJECT#shared-launch\"},\"entryType\":{\"S\":\"project\"},\"teamId\":{\"S\":\"design-team\"},\"teamSortOrder\":{\"N\":\"20\"},\"projectId\":{\"S\":\"shared-launch\"},\"projectSortOrder\":{\"N\":\"10\"},\"nameJa\":{\"S\":\"共通ローンチ\"},\"nameEn\":{\"S\":\"Shared Launch\"},\"tone\":{\"S\":\"purple\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"000020#000020#PROJECT#brand-refresh\"},\"entryType\":{\"S\":\"project\"},\"teamId\":{\"S\":\"design-team\"},\"teamSortOrder\":{\"N\":\"20\"},\"projectId\":{\"S\":\"brand-refresh\"},\"projectSortOrder\":{\"N\":\"20\"},\"nameJa\":{\"S\":\"ブランド刷新\"},\"nameEn\":{\"S\":\"Brand Refresh\"},\"tone\":{\"S\":\"yellow\"}}}}
+    ]
+  }" \
+  --query 'length(UnprocessedItems)' \
+  --output text)"
+
+if [ "$DIRECTORY_UNPROCESSED_TABLES" != "0" ]; then
+  echo "DynamoDB directory seed left unprocessed items: table=$PROJECT_DIRECTORY_TABLE directory=$PROJECT_DIRECTORY_ID" >&2
+  exit 1
+fi
+
 mkdir -p "$GENERATED_DIR"
 cat >"$GENERATED_DIR/cognito.env" <<EOF
 COGNITO_ENDPOINT=$PUBLIC_ENDPOINT_URL
@@ -90,8 +173,12 @@ COGNITO_CLIENT_ID=$CLIENT_ID
 COGNITO_TEST_USERNAME=$TEST_USERNAME
 COGNITO_TEST_PASSWORD=$TEST_PASSWORD
 MUKUROJI_DASHBOARD_TABLE=$DASHBOARD_TABLE
+MUKUROJI_PROJECT_TASKS_TABLE=$PROJECT_TASKS_TABLE
+MUKUROJI_PROJECT_DIRECTORY_TABLE=$PROJECT_DIRECTORY_TABLE
 DYNAMODB_ENDPOINT=$PUBLIC_ENDPOINT_URL
 EOF
 
 echo "mukuroji Cognito ready: userPoolId=$POOL_ID clientId=$CLIENT_ID username=$TEST_USERNAME"
 echo "mukuroji DynamoDB ready: table=$DASHBOARD_TABLE item=summary"
+echo "mukuroji DynamoDB ready: table=$PROJECT_TASKS_TABLE project=refero tasks=10"
+echo "mukuroji DynamoDB ready: table=$PROJECT_DIRECTORY_TABLE directory=$PROJECT_DIRECTORY_ID"

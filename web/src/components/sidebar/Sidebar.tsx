@@ -2,25 +2,64 @@ import { useState } from 'react'
 import type { ComponentType, ReactNode } from 'react'
 import { BrandMark } from '../BrandMark'
 
+/**
+ * サイドバー内の SVG アイコンに渡す共通 props です。
+ */
 type SidebarIconProps = {
+  /**
+   * アイコンに適用する CSS class です。
+   */
   className?: string
 }
 
+/**
+ * サイドバー上のプロジェクトを識別しやすくする表示色です。
+ */
 export type SidebarProjectTone = 'blue' | 'purple' | 'green' | 'yellow'
 
+/**
+ * サイドバーに表示するプロジェクトです。
+ */
 export type SidebarProject = {
+  /**
+   * プロジェクトの一意な ID です。
+   */
   id: string
+  /**
+   * サイドバーに表示するプロジェクト名です。
+   */
   name: string
+  /**
+   * プロジェクトアイコンの表示色です。
+   */
   tone?: SidebarProjectTone
 }
 
+/**
+ * サイドバーに表示するチームです。
+ */
 export type SidebarTeam = {
+  /**
+   * チームの一意な ID です。
+   */
   id: string
+  /**
+   * サイドバーに表示するチーム名です。
+   */
   name: string
+  /**
+   * 初期表示時にチーム配下を展開するかどうかです。
+   */
   expanded?: boolean
+  /**
+   * チームに紐づくプロジェクト一覧です。
+   */
   projects?: SidebarProject[]
 }
 
+/**
+ * サイドバーの主要ナビゲーション項目です。
+ */
 export type SidebarNavId =
   | 'home'
   | 'my-tasks'
@@ -31,53 +70,190 @@ export type SidebarNavId =
   | 'help'
   | 'settings'
 
+/**
+ * チーム配下で選択できる固定ビューです。
+ */
 export type SidebarTeamViewId = 'overview' | 'members'
 
+/**
+ * サイドバーで使う表示文言です。
+ */
 export type SidebarLabels = {
+  /**
+   * サイドバー全体の aria-label です。
+   */
   ariaLabel: string
+  /**
+   * 主要ナビゲーションの aria-label です。
+   */
   globalNavigation: string
+  /**
+   * 補助ナビゲーションの aria-label です。
+   */
   utilityNavigation: string
+  /**
+   * 折りたたみボタンの文言です。
+   */
   collapse: string
+  /**
+   * 展開ボタンの文言です。
+   */
   expand: string
+  /**
+   * チーム / プロジェクト見出しの文言です。
+   */
   teamProjects: string
+  /**
+   * チーム作成ボタンの文言です。
+   */
   createTeam: string
+  /**
+   * チーム概要ビューの文言です。
+   */
   teamOverview: string
+  /**
+   * メンバービューの文言です。
+   */
   members: string
+  /**
+   * プロジェクト一覧見出しの文言です。
+   */
   projectGroup: string
+  /**
+   * 未読件数のアクセシブルラベルを返します。
+   */
   unreadCount: (count: number) => string
+  /**
+   * 固定ナビゲーション項目ごとの文言です。
+   */
   nav: Record<SidebarNavId, string>
 }
 
+/**
+ * サイドバーコンポーネントの入力プロパティです。
+ */
 export type SidebarProps = {
+  /**
+   * ワークスペース名です。
+   */
   workspaceName?: string
+  /**
+   * 既定文言を上書きする文言です。
+   */
   labels?: PartialSidebarLabels
+  /**
+   * 制御された現在の主要ナビゲーション ID です。
+   */
   activeNavId?: SidebarNavId
+  /**
+   * 非制御時に初期選択する主要ナビゲーション ID です。
+   */
   defaultActiveNavId?: SidebarNavId
+  /**
+   * 制御された現在のチーム固定ビュー ID です。
+   */
   activeTeamViewId?: SidebarTeamViewId
+  /**
+   * 非制御時に初期選択するチーム固定ビュー ID です。
+   */
   defaultActiveTeamViewId?: SidebarTeamViewId
+  /**
+   * 制御された現在のチーム ID です。
+   */
   activeTeamId?: string
+  /**
+   * 非制御時に初期選択するチーム ID です。
+   */
   defaultActiveTeamId?: string
+  /**
+   * 制御された現在のプロジェクト ID です。
+   */
   activeProjectId?: string
+  /**
+   * 制御された現在のプロジェクトが選択されたチーム ID です。
+   */
+  activeProjectTeamId?: string
+  /**
+   * 非制御時に初期選択するプロジェクト ID です。
+   */
   defaultActiveProjectId?: string
+  /**
+   * 非制御時に初期選択するプロジェクトが所属するチーム ID です。
+   */
+  defaultActiveProjectTeamId?: string
+  /**
+   * 制御された展開中チーム ID 一覧です。
+   */
   expandedTeamIds?: string[]
+  /**
+   * 非制御時に初期展開するチーム ID 一覧です。
+   */
   defaultExpandedTeamIds?: string[]
+  /**
+   * 制御された折りたたみ状態です。
+   */
   collapsed?: boolean
+  /**
+   * 非制御時の初期折りたたみ状態です。
+   */
   defaultCollapsed?: boolean
+  /**
+   * 受信箱の未読件数です。
+   */
   inboxCount?: number
+  /**
+   * サイドバーに表示するチーム一覧です。
+   */
   teams: SidebarTeam[]
+  /**
+   * ルート要素へ追加する CSS class です。
+   */
   className?: string
+  /**
+   * 折りたたみ状態が変わったときに呼ばれます。
+   */
   onCollapsedChange?: (collapsed: boolean) => void
+  /**
+   * チーム作成ボタンが押されたときに呼ばれます。
+   */
   onCreateTeam?: () => void
+  /**
+   * 主要ナビゲーションが選択されたときに呼ばれます。
+   */
   onSelectNav?: (navId: SidebarNavId) => void
+  /**
+   * チーム固定ビューが選択されたときに呼ばれます。
+   */
   onSelectTeamView?: (teamId: string, viewId: SidebarTeamViewId) => void
+  /**
+   * チームが選択されたときに呼ばれます。
+   */
   onSelectTeam?: (teamId: string) => void
-  onSelectProject?: (projectId: string) => void
+  /**
+   * プロジェクトが選択されたときに呼ばれます。
+   */
+  onSelectProject?: (projectId: string, teamId: string) => void
+  /**
+   * 展開中チーム ID 一覧が変わったときに呼ばれます。
+   */
   onExpandedTeamIdsChange?: (teamIds: string[]) => void
 }
 
+/**
+ * 固定ナビゲーション項目の定義です。
+ */
 type MainNavItem = {
+  /**
+   * 固定ナビゲーション項目の ID です。
+   */
   id: SidebarNavId
+  /**
+   * ナビゲーションに表示するアイコンです。
+   */
   icon: ComponentType<SidebarIconProps>
+  /**
+   * 任意で表示するバッジ数です。
+   */
   badge?: number
 }
 
@@ -119,7 +295,13 @@ const defaultLabels: SidebarLabels = {
   },
 }
 
+/**
+ * 既定のサイドバー文言を部分的に上書きする入力です。
+ */
 type PartialSidebarLabels = Partial<Omit<SidebarLabels, 'nav'>> & {
+  /**
+   * 固定ナビゲーション項目ごとの上書き文言です。
+   */
   nav?: Partial<SidebarLabels['nav']>
 }
 
@@ -130,6 +312,9 @@ const projectToneClasses: Record<SidebarProjectTone, string> = {
   yellow: 'border-amber-300/70 text-amber-200 bg-amber-400/15',
 }
 
+/**
+ * チームとプロジェクト階層を含むアプリ共通サイドバーです。
+ */
 export function Sidebar({
   workspaceName = 'mukuroji',
   labels,
@@ -140,7 +325,9 @@ export function Sidebar({
   activeTeamId: controlledActiveTeamId,
   defaultActiveTeamId,
   activeProjectId: controlledActiveProjectId,
+  activeProjectTeamId: controlledActiveProjectTeamId,
   defaultActiveProjectId,
+  defaultActiveProjectTeamId,
   expandedTeamIds: controlledExpandedTeamIds,
   defaultExpandedTeamIds,
   collapsed: controlledCollapsed,
@@ -158,7 +345,7 @@ export function Sidebar({
 }: SidebarProps) {
   const resolvedLabels = resolveLabels(labels)
   const defaultProjectTeamId = defaultActiveProjectId
-    ? findProjectTeamId(teams, defaultActiveProjectId)
+    ? defaultActiveProjectTeamId ?? findProjectTeamId(teams, defaultActiveProjectId)
     : undefined
   const shouldSelectInitialProject =
     controlledActiveNavId === undefined && defaultActiveNavId === undefined
@@ -184,20 +371,32 @@ export function Sidebar({
   const [internalActiveProjectId, setInternalActiveProjectId] = useState<string | undefined>(
     initialProjectId,
   )
+  const [internalActiveProjectTeamId, setInternalActiveProjectTeamId] = useState<
+    string | undefined
+  >(defaultProjectTeamId)
   const [internalExpandedTeamIds, setInternalExpandedTeamIds] = useState(initialExpandedTeamIds)
+  const [internalCollapsedTeamIds, setInternalCollapsedTeamIds] = useState<string[]>([])
 
   const isCollapsed = controlledCollapsed ?? internalCollapsed
   const activeProjectId = controlledActiveProjectId ?? internalActiveProjectId
-  const projectTeamId = activeProjectId ? findProjectTeamId(teams, activeProjectId) : undefined
+  const activeProjectTeamId = controlledActiveProjectTeamId ?? internalActiveProjectTeamId
+  const projectTeamId = activeProjectId
+    ? activeProjectTeamId ?? findProjectTeamId(teams, activeProjectId)
+    : undefined
   const activeTeamViewId = controlledActiveTeamViewId ?? internalActiveTeamViewId
   const activeTeamId = controlledActiveTeamId ?? projectTeamId ?? internalActiveTeamId
   const activeNavId =
     activeProjectId || activeTeamId || activeTeamViewId
       ? undefined
       : controlledActiveNavId ?? internalActiveNavId
+  const expandedTeamIdsFromData = teams.filter((team) => team.expanded).map((team) => team.id)
+  const uncontrolledExpandedTeamIds = mergeUniqueIds(
+    expandedTeamIdsFromData,
+    internalExpandedTeamIds,
+  ).filter((teamId) => !internalCollapsedTeamIds.includes(teamId))
   const expandedTeamIds = projectTeamId
-    ? ensureIncludes(controlledExpandedTeamIds ?? internalExpandedTeamIds, projectTeamId)
-    : controlledExpandedTeamIds ?? internalExpandedTeamIds
+    ? ensureIncludes(controlledExpandedTeamIds ?? uncontrolledExpandedTeamIds, projectTeamId)
+    : controlledExpandedTeamIds ?? uncontrolledExpandedTeamIds
 
   const navItems = mainNavItems.map((item) =>
     item.id === 'inbox' ? { ...item, badge: inboxCount } : item,
@@ -223,6 +422,9 @@ export function Sidebar({
     if (controlledActiveProjectId === undefined) {
       setInternalActiveProjectId(undefined)
     }
+    if (controlledActiveProjectTeamId === undefined) {
+      setInternalActiveProjectTeamId(undefined)
+    }
     onSelectNav?.(navId)
   }
 
@@ -239,13 +441,14 @@ export function Sidebar({
     if (controlledActiveProjectId === undefined) {
       setInternalActiveProjectId(undefined)
     }
+    if (controlledActiveProjectTeamId === undefined) {
+      setInternalActiveProjectTeamId(undefined)
+    }
     onSelectTeam?.(teamId)
   }
 
-  const updateActiveProject = (projectId: string) => {
-    const team = teams.find((candidate) =>
-      candidate.projects?.some((project) => project.id === projectId),
-    )
+  const updateActiveProject = (projectId: string, teamId: string) => {
+    const team = teams.find((candidate) => candidate.id === teamId)
 
     if (team) {
       if (controlledActiveTeamId === undefined) {
@@ -263,7 +466,10 @@ export function Sidebar({
     if (controlledActiveProjectId === undefined) {
       setInternalActiveProjectId(projectId)
     }
-    onSelectProject?.(projectId)
+    if (controlledActiveProjectTeamId === undefined) {
+      setInternalActiveProjectTeamId(teamId)
+    }
+    onSelectProject?.(projectId, teamId)
   }
 
   const updateActiveTeamView = (teamId: string, viewId: SidebarTeamViewId) => {
@@ -279,6 +485,9 @@ export function Sidebar({
     if (controlledActiveProjectId === undefined) {
       setInternalActiveProjectId(undefined)
     }
+    if (controlledActiveProjectTeamId === undefined) {
+      setInternalActiveProjectTeamId(undefined)
+    }
     updateExpandedTeamIds(ensureIncludes(expandedTeamIds, teamId))
     onSelectTeamView?.(teamId, viewId)
   }
@@ -286,6 +495,9 @@ export function Sidebar({
   const updateExpandedTeamIds = (nextTeamIds: string[]) => {
     if (controlledExpandedTeamIds === undefined) {
       setInternalExpandedTeamIds(nextTeamIds)
+      setInternalCollapsedTeamIds((currentTeamIds) =>
+        currentTeamIds.filter((teamId) => !nextTeamIds.includes(teamId)),
+      )
     }
     onExpandedTeamIdsChange?.(nextTeamIds)
   }
@@ -295,6 +507,14 @@ export function Sidebar({
     const nextTeamIds = isExpanded
       ? expandedTeamIds.filter((expandedTeamId) => expandedTeamId !== teamId)
       : [...expandedTeamIds, teamId]
+
+    if (controlledExpandedTeamIds === undefined) {
+      setInternalCollapsedTeamIds((currentTeamIds) =>
+        isExpanded
+          ? ensureIncludes(currentTeamIds, teamId)
+          : currentTeamIds.filter((expandedTeamId) => expandedTeamId !== teamId),
+      )
+    }
 
     updateActiveTeam(teamId)
     updateExpandedTeamIds(nextTeamIds)
@@ -371,6 +591,7 @@ export function Sidebar({
               activeTeamId={activeTeamId}
               activeTeamViewId={activeTeamViewId}
               activeProjectId={activeProjectId}
+              activeProjectTeamId={activeProjectTeamId}
               projectTeamId={projectTeamId}
               labels={resolvedLabels}
               collapsed={isCollapsed}
@@ -456,6 +677,7 @@ function TeamGroup({
   activeTeamId,
   activeTeamViewId,
   activeProjectId,
+  activeProjectTeamId,
   projectTeamId,
   labels,
   collapsed,
@@ -468,13 +690,14 @@ function TeamGroup({
   activeTeamId?: string
   activeTeamViewId?: SidebarTeamViewId
   activeProjectId?: string
+  activeProjectTeamId?: string
   projectTeamId?: string
   labels: SidebarLabels
   collapsed: boolean
   expanded: boolean
   onToggleTeam: (teamId: string) => void
   onSelectTeamView: (teamId: string, viewId: SidebarTeamViewId) => void
-  onSelectProject?: (projectId: string) => void
+  onSelectProject?: (projectId: string, teamId: string) => void
 }) {
   const isTeamActive = activeTeamId === team.id
   const isProjectAncestor = projectTeamId === team.id && activeProjectId !== undefined
@@ -536,8 +759,11 @@ function TeamGroup({
               <ProjectButton
                 key={project.id}
                 project={project}
-                active={project.id === activeProjectId}
-                onSelectProject={onSelectProject}
+                active={
+                  project.id === activeProjectId &&
+                  (activeProjectTeamId === undefined || activeProjectTeamId === team.id)
+                }
+                onSelectProject={(projectId) => onSelectProject?.(projectId, team.id)}
               />
             ))}
           </div>
@@ -614,6 +840,19 @@ function ProjectButton({
 
 function ensureIncludes(values: string[], value: string) {
   return values.includes(value) ? values : [...values, value]
+}
+
+function mergeUniqueIds(currentValues: string[], additionalValues: string[]) {
+  const nextValues = Array.from(new Set([...currentValues, ...additionalValues]))
+
+  if (
+    nextValues.length === currentValues.length &&
+    nextValues.every((value, index) => value === currentValues[index])
+  ) {
+    return currentValues
+  }
+
+  return nextValues
 }
 
 function findProjectTeamId(teams: SidebarTeam[], projectId: string) {

@@ -1,9 +1,11 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, waitFor, within } from 'storybook/test'
 import { createMemoryRouter, RouterProvider } from 'react-router'
+import { SWRConfig } from 'swr'
 import { DashboardPage } from './DashboardPage'
 import type { CurrentUser, DashboardSummary } from '../auth/api'
 import type { AuthSession } from '../auth/session'
+import { projectDirectoryFixtures } from '../projects/fixtures'
 
 const storySession: AuthSession = {
   accessToken: 'storybook-access-token',
@@ -32,6 +34,8 @@ const defaultArgs = {
   getSession: () => storySession,
   clearSession: () => undefined,
   loadCurrentUser: async () => storyUser,
+  loadProjectDirectory: async () => projectDirectoryFixtures,
+  initialProjectDirectory: projectDirectoryFixtures,
 } satisfies Partial<Parameters<typeof DashboardPage>[0]>
 
 /**
@@ -59,7 +63,11 @@ const meta = {
       },
     )
 
-    return <RouterProvider router={router} />
+    return (
+      <SWRConfig value={{ provider: () => new Map(), shouldRetryOnError: false }}>
+        <RouterProvider router={router} />
+      </SWRConfig>
+    )
   },
 } satisfies Meta<typeof DashboardPage>
 
