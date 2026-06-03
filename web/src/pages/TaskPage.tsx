@@ -5,7 +5,11 @@ import useSWR from 'swr'
 import { getCurrentUser } from '../auth/api'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import { ChevronIcon } from '../components/icons'
-import { Sidebar } from '../components/sidebar'
+import {
+  Sidebar,
+  type SidebarNavId,
+  type SidebarTeamViewId,
+} from '../components/sidebar'
 import {
   createSidebarLabels,
   createTranslator,
@@ -18,6 +22,11 @@ import {
   type ProjectDirectoryTeam,
 } from '../projects/api'
 import {
+  createProjectTasksPath,
+  createTeamViewPath,
+  workspaceNavPaths,
+} from '../routes/paths'
+import {
   getProjectTasks,
   type ProjectTask,
   type TaskPriority,
@@ -26,6 +35,40 @@ import {
 
 const taskTabs = ['table', 'board', 'gantt', 'calendar', 'file'] as const
 const taskStatuses = ['in-progress', 'review', 'todo', 'done'] as const
+const taskCalendarDays = [
+  { id: 'tue', labelKey: 'tasks.calendar.day.tue', date: '2026/06/02' },
+  { id: 'wed', labelKey: 'tasks.calendar.day.wed', date: '2026/06/03' },
+  { id: 'thu', labelKey: 'tasks.calendar.day.thu', date: '2026/06/04' },
+  { id: 'fri', labelKey: 'tasks.calendar.day.fri', date: '2026/06/05' },
+  { id: 'mon', labelKey: 'tasks.calendar.day.mon', date: '2026/06/08' },
+  { id: 'next-tue', labelKey: 'tasks.calendar.day.tue', date: '2026/06/09' },
+] as const
+const taskFileItems = [
+  {
+    id: 'launch-brief',
+    nameKey: 'tasks.file.item.launchBrief',
+    typeKey: 'tasks.file.type.document',
+    ownerKey: 'tasks.assignee.sato',
+    updatedKey: 'tasks.file.updated.today',
+    statusKey: 'tasks.file.status.approved',
+  },
+  {
+    id: 'brand-kit',
+    nameKey: 'tasks.file.item.brandKit',
+    typeKey: 'tasks.file.type.design',
+    ownerKey: 'tasks.assignee.suzuki',
+    updatedKey: 'tasks.file.updated.yesterday',
+    statusKey: 'tasks.file.status.review',
+  },
+  {
+    id: 'research-notes',
+    nameKey: 'tasks.file.item.researchNotes',
+    typeKey: 'tasks.file.type.sheet',
+    ownerKey: 'tasks.assignee.yamamoto',
+    updatedKey: 'tasks.file.updated.twoDays',
+    statusKey: 'tasks.file.status.draft',
+  },
+] as const
 const apiSWRConfig = {
   dedupingInterval: 10_000,
   shouldRetryOnError: false,
@@ -111,6 +154,14 @@ type TaskScreenProps = {
    * サイドバーからプロジェクトを選択したときの callback です。
    */
   onSelectProject?: (projectId: string, teamId: string) => void
+  /**
+   * サイドバーの固定ナビを選択したときの callback です。
+   */
+  onSelectNav?: (navId: SidebarNavId) => void
+  /**
+   * サイドバーのチーム固定ビューを選択したときの callback です。
+   */
+  onSelectTeamView?: (teamId: string, viewId: SidebarTeamViewId) => void
 }
 
 const viewLabelKeys: Record<TaskTab, MessageKey> = {
@@ -213,6 +264,10 @@ export function TaskPage() {
       onSelectProject={(nextProjectId, teamId) =>
         navigate(createProjectTasksPath(nextProjectId, teamId))
       }
+      onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
+      onSelectTeamView={(teamId, viewId) =>
+        navigate(createTeamViewPath(teamId, viewId))
+      }
       projectId={projectId}
       projectName={projectName}
       taskErrorMessage={taskErrorMessage}
@@ -239,6 +294,8 @@ export function TaskScreen({
   tasks = [],
   taskErrorMessage,
   onSelectProject,
+  onSelectNav,
+  onSelectTeamView,
 }: TaskScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
@@ -294,8 +351,10 @@ export function TaskScreen({
         collapsed={sidebarCollapsed}
         inboxCount={3}
         labels={sidebarLabels}
+        onSelectNav={onSelectNav}
         onCollapsedChange={setSidebarCollapsed}
         onSelectProject={onSelectProject}
+        onSelectTeamView={onSelectTeamView}
         teams={teams}
       />
 
@@ -379,10 +438,6 @@ function findTeamForProject(
   return teams.find((team) => team.projects.some((project) => project.id === projectId))
 }
 
-function createProjectTasksPath(projectId: string, teamId: string) {
-  return `/projects/${encodeURIComponent(projectId)}/tasks?teamId=${encodeURIComponent(teamId)}`
-}
-
 function TaskHeader({
   activeTab,
   onTabChange,
@@ -460,7 +515,7 @@ function TaskHeader({
       </div>
 
       <div className="flex items-end justify-between gap-5 overflow-x-auto px-[clamp(22px,3vw,38px)]">
-        <div aria-label={t('tasks.view.table')} className="flex min-w-max items-center gap-1" role="tablist">
+        <div aria-label={t('tasks.tabs.aria')} className="flex min-w-max items-center gap-1" role="tablist">
           {taskTabs.map((tab) => (
             <button
               aria-selected={activeTab === tab}
@@ -603,17 +658,11 @@ function TaskWorkspace({
           taskErrorMessage={taskErrorMessage}
           tasks={tasks}
         />
-      ) : (
-        <section
-          aria-live="polite"
-          className="mt-6 rounded-lg border border-dashed border-slate-300 bg-white px-7 py-12 text-center shadow-[0_22px_54px_rgba(30,52,88,0.06)]"
-        >
-          <h2 className="text-2xl font-black text-[#0d1833]">{t(viewLabelKeys[activeTab])}</h2>
-          <p className="mt-3 text-sm font-bold text-[#526381]">
-            {t('tasks.count').replace('{count}', String(tasks.length))}
-          </p>
-        </section>
-      )}
+      ) : null}
+      {activeTab === 'board' ? <TaskBoard t={t} tasks={tasks} /> : null}
+      {activeTab === 'gantt' ? <TaskGantt t={t} tasks={tasks} /> : null}
+      {activeTab === 'calendar' ? <TaskCalendar t={t} tasks={tasks} /> : null}
+      {activeTab === 'file' ? <TaskFileList t={t} /> : null}
     </div>
   )
 }
@@ -715,6 +764,254 @@ function TaskTable({
         </span>
       </div>
     </section>
+  )
+}
+
+function TaskBoard({ t, tasks }: { t: (key: MessageKey) => string; tasks: ProjectTask[] }) {
+  return (
+    <section
+      aria-label={t(viewLabelKeys.board)}
+      className="mt-6 grid grid-cols-4 gap-4 max-[1180px]:grid-cols-2 max-[720px]:grid-cols-1"
+    >
+      <ViewHeading
+        className="col-span-full"
+        count={tasks.length}
+        t={t}
+        titleKey={viewLabelKeys.board}
+      />
+      {taskStatuses.map((status) => {
+        const statusTasks = tasks.filter((task) => task.status === status)
+
+        return (
+          <div
+            className="min-h-[420px] rounded-lg border border-slate-200 bg-white shadow-[0_22px_54px_rgba(30,52,88,0.06)]"
+            key={status}
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+              <TaskStatusBadge status={status} t={t} />
+              <span className="text-sm font-black text-[#526381]">
+                {t('tasks.board.columnCount').replace('{count}', String(statusTasks.length))}
+              </span>
+            </div>
+            <div className="grid gap-3 p-3">
+              {statusTasks.length > 0 ? (
+                statusTasks.map((task) => (
+                  <article
+                    className="rounded-lg border border-slate-200 bg-[#fbfdff] p-4 transition hover:border-blue-300 hover:bg-blue-50/30"
+                    key={task.id}
+                  >
+                    <p className="text-sm font-black leading-6 text-[#0d1833]">{t(task.titleKey)}</p>
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      <TaskPriorityBadge priority={task.priority} t={t} />
+                      <span className="text-xs font-black text-[#526381]">{task.dueDate}</span>
+                    </div>
+                  </article>
+                ))
+              ) : (
+                <p className="rounded-lg border border-dashed border-slate-300 px-4 py-8 text-center text-sm font-bold text-[#526381]">
+                  {t('tasks.board.empty')}
+                </p>
+              )}
+            </div>
+          </div>
+        )
+      })}
+    </section>
+  )
+}
+
+function TaskGantt({ t, tasks }: { t: (key: MessageKey) => string; tasks: ProjectTask[] }) {
+  const sortedTasks = [...tasks].sort((firstTask, secondTask) =>
+    firstTask.dueDate.localeCompare(secondTask.dueDate),
+  )
+
+  return (
+    <section
+      aria-label={t(viewLabelKeys.gantt)}
+      className="mt-6 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_22px_54px_rgba(30,52,88,0.06)]"
+    >
+      <ViewHeading count={tasks.length} t={t} titleKey={viewLabelKeys.gantt} />
+      <div className="grid grid-cols-[260px_1fr] border-b border-slate-200 bg-[#fbfdff] text-sm font-black text-[#263550] max-[820px]:grid-cols-[210px_1fr]">
+        <div className="px-5 py-4">{t('tasks.gantt.owner')}</div>
+        <div className="grid grid-cols-4 px-5 py-4">
+          <span>{t('tasks.gantt.phase.discovery')}</span>
+          <span>{t('tasks.gantt.phase.build')}</span>
+          <span>{t('tasks.gantt.phase.review')}</span>
+          <span>{t('tasks.gantt.phase.release')}</span>
+        </div>
+      </div>
+      <div className="divide-y divide-slate-100">
+        {sortedTasks.map((task, index) => (
+          <div className="grid grid-cols-[260px_1fr] items-center max-[820px]:grid-cols-[210px_1fr]" key={task.id}>
+            <div className="min-w-0 px-5 py-4">
+              <p className="truncate text-sm font-black text-[#0d1833]">{t(task.titleKey)}</p>
+              <p className="mt-1 text-xs font-bold text-[#526381]">{t(task.assigneeKey)}</p>
+            </div>
+            <div className="px-5 py-4">
+              <div className="relative h-10 rounded-lg bg-slate-100">
+                <div
+                  className="absolute top-2 h-6 rounded-lg bg-blue-600 shadow-[0_8px_18px_rgba(37,99,235,0.2)]"
+                  style={{
+                    left: `${Math.min(index * 14, 58)}%`,
+                    width: `${task.priority === 'high' ? 38 : task.priority === 'medium' ? 32 : 24}%`,
+                  }}
+                />
+              </div>
+              <p className="mt-2 text-xs font-black text-[#526381]">
+                {t('tasks.gantt.window').replace('{date}', task.dueDate)}
+              </p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function TaskCalendar({ t, tasks }: { t: (key: MessageKey) => string; tasks: ProjectTask[] }) {
+  return (
+    <section
+      aria-label={t(viewLabelKeys.calendar)}
+      className="mt-6 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_22px_54px_rgba(30,52,88,0.06)]"
+    >
+      <ViewHeading
+        count={tasks.length}
+        meta={t('tasks.calendar.weekTitle')}
+        t={t}
+        titleKey={viewLabelKeys.calendar}
+      />
+      <div className="grid grid-cols-6 max-[1180px]:grid-cols-3 max-[720px]:grid-cols-1">
+        {taskCalendarDays.map((day) => {
+          const dayTasks = tasks.filter((task) => task.dueDate === day.date)
+
+          return (
+            <div className="min-h-[250px] border-r border-slate-100 p-4 last:border-r-0" key={`${day.id}-${day.date}`}>
+              <p className="text-sm font-black text-[#0d1833]">{t(day.labelKey)}</p>
+              <p className="mt-1 text-xs font-bold text-[#526381]">{day.date}</p>
+              <div className="mt-4 grid gap-3">
+                {dayTasks.length > 0 ? (
+                  dayTasks.map((task) => (
+                    <article className="rounded-lg border border-blue-200 bg-blue-50 p-3" key={task.id}>
+                      <p className="text-sm font-black leading-6 text-blue-900">{t(task.titleKey)}</p>
+                      <p className="mt-2 text-xs font-bold text-blue-700">{t(task.assigneeKey)}</p>
+                    </article>
+                  ))
+                ) : (
+                  <p className="rounded-lg border border-dashed border-slate-300 px-3 py-5 text-sm font-bold text-[#526381]">
+                    {t('tasks.calendar.empty')}
+                  </p>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
+function TaskFileList({ t }: { t: (key: MessageKey) => string }) {
+  return (
+    <section
+      aria-label={t(viewLabelKeys.file)}
+      className="mt-6 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_22px_54px_rgba(30,52,88,0.06)]"
+    >
+      <ViewHeading
+        count={taskFileItems.length}
+        meta={t('tasks.file.description')}
+        t={t}
+        titleKey={viewLabelKeys.file}
+      />
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[760px] border-collapse text-left">
+          <thead>
+            <tr className="border-b border-slate-200 bg-[#fbfdff] text-sm font-black text-[#263550]">
+              <th className="px-5 py-3" scope="col">{t('tasks.file.column.name')}</th>
+              <th className="px-5 py-3" scope="col">{t('tasks.file.column.type')}</th>
+              <th className="px-5 py-3" scope="col">{t('tasks.file.column.owner')}</th>
+              <th className="px-5 py-3" scope="col">{t('tasks.file.column.updated')}</th>
+              <th className="px-5 py-3" scope="col">{t('tasks.file.column.status')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {taskFileItems.map((file) => (
+              <tr className="border-b border-slate-100 text-sm font-bold text-[#0d1833] last:border-b-0" key={file.id}>
+                <td className="px-5 py-4">{t(file.nameKey)}</td>
+                <td className="px-5 py-4 text-[#526381]">{t(file.typeKey)}</td>
+                <td className="px-5 py-4">{t(file.ownerKey)}</td>
+                <td className="px-5 py-4 text-[#526381]">{t(file.updatedKey)}</td>
+                <td className="px-5 py-4">
+                  <span className="rounded-lg bg-emerald-100 px-3 py-1.5 text-xs font-black text-emerald-700">
+                    {t(file.statusKey)}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  )
+}
+
+function ViewHeading({
+  className = '',
+  count,
+  meta,
+  t,
+  titleKey,
+}: {
+  className?: string
+  count: number
+  meta?: string
+  t: (key: MessageKey) => string
+  titleKey: MessageKey
+}) {
+  return (
+    <div className={`border-b border-slate-200 bg-white px-5 py-4 ${className}`}>
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+        <h2 className="text-lg font-black text-[#0d1833]">{t(titleKey)}</h2>
+        <p className="text-sm font-bold text-[#526381]">
+          {t('tasks.count').replace('{count}', String(count))}
+        </p>
+      </div>
+      {meta ? <p className="mt-1 text-sm font-bold text-[#526381]">{meta}</p> : null}
+    </div>
+  )
+}
+
+function TaskStatusBadge({ status, t }: { status: TaskStatus; t: (key: MessageKey) => string }) {
+  const statusClasses: Record<TaskStatus, string> = {
+    'in-progress': 'bg-blue-100 text-blue-700',
+    review: 'bg-orange-100 text-orange-600',
+    todo: 'bg-slate-100 text-[#263550]',
+    done: 'bg-emerald-100 text-emerald-700',
+  }
+
+  return (
+    <span className={`inline-flex w-fit rounded-lg px-3 py-1.5 text-xs font-black ${statusClasses[status]}`}>
+      {t(`tasks.status.${status}`)}
+    </span>
+  )
+}
+
+function TaskPriorityBadge({
+  priority,
+  t,
+}: {
+  priority: TaskPriority
+  t: (key: MessageKey) => string
+}) {
+  const priorityClasses: Record<TaskPriority, string> = {
+    high: 'bg-red-100 text-red-600',
+    medium: 'bg-orange-100 text-orange-600',
+    low: 'bg-emerald-100 text-emerald-700',
+  }
+
+  return (
+    <span className={`inline-flex w-fit rounded-lg px-3 py-1.5 text-xs font-black ${priorityClasses[priority]}`}>
+      {t(`tasks.priority.${priority}`)}
+    </span>
   )
 }
 

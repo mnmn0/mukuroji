@@ -9,7 +9,7 @@ export const referoTaskFixtures = [
     titleKey: 'tasks.item.wireframe',
     assigneeKey: 'tasks.assignee.sato',
     status: 'in-progress',
-    dueDate: '2025/05/26',
+    dueDate: '2026/06/03',
     priority: 'high',
   },
   {
@@ -17,7 +17,7 @@ export const referoTaskFixtures = [
     titleKey: 'tasks.item.brandGuideline',
     assigneeKey: 'tasks.assignee.suzuki',
     status: 'review',
-    dueDate: '2025/05/27',
+    dueDate: '2026/06/05',
     priority: 'medium',
   },
   {
@@ -25,7 +25,7 @@ export const referoTaskFixtures = [
     titleKey: 'tasks.item.seoResearch',
     assigneeKey: 'tasks.assignee.yamamoto',
     status: 'todo',
-    dueDate: '2025/05/29',
+    dueDate: '2026/06/09',
     priority: 'medium',
   },
   {
@@ -33,7 +33,7 @@ export const referoTaskFixtures = [
     titleKey: 'tasks.item.competitorReport',
     assigneeKey: 'tasks.assignee.tanaka',
     status: 'done',
-    dueDate: '2025/06/03',
+    dueDate: '2026/06/02',
     priority: 'low',
   },
 ] satisfies ProjectTask[]
