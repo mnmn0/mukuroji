@@ -9,17 +9,26 @@ import { Construct } from 'constructs';
  * Refero プロジェクトに初期投入するタスク seed データです。
  */
 const projectTaskItems = [
-  ['refero', 'wireframe', 10, 'tasks.item.wireframe', 'tasks.assignee.sato', 'in-progress', '2025/05/26', 'high'],
-  ['refero', 'brand-guideline', 20, 'tasks.item.brandGuideline', 'tasks.assignee.suzuki', 'review', '2025/05/27', 'medium'],
-  ['refero', 'pricing-content', 30, 'tasks.item.pricingContent', 'tasks.assignee.tanaka', 'in-progress', '2025/05/28', 'high'],
-  ['refero', 'seo-research', 40, 'tasks.item.seoResearch', 'tasks.assignee.yamamoto', 'todo', '2025/05/29', 'medium'],
-  ['refero', 'hero-design', 50, 'tasks.item.heroDesign', 'tasks.assignee.sato', 'review', '2025/05/30', 'medium'],
-  ['refero', 'analytics-tags', 60, 'tasks.item.analyticsTags', 'tasks.assignee.suzuki', 'in-progress', '2025/06/02', 'low'],
-  ['refero', 'competitor-report', 70, 'tasks.item.competitorReport', 'tasks.assignee.tanaka', 'done', '2025/06/03', 'low'],
-  ['refero', 'terms-page', 80, 'tasks.item.termsPage', 'tasks.assignee.yamamoto', 'todo', '2025/06/04', 'medium'],
-  ['refero', 'faq-content', 90, 'tasks.item.faqContent', 'tasks.assignee.sato', 'todo', '2025/06/05', 'low'],
-  ['refero', 'landing-release', 100, 'tasks.item.landingRelease', 'tasks.assignee.suzuki', 'todo', '2025/06/06', 'high'],
+  ['refero', 'wireframe', 10, 'tasks.item.wireframe', 'tasks.assignee.sato', 'in-progress', '2026/06/03', 'high'],
+  ['refero', 'brand-guideline', 20, 'tasks.item.brandGuideline', 'tasks.assignee.suzuki', 'review', '2026/06/05', 'medium'],
+  ['refero', 'pricing-content', 30, 'tasks.item.pricingContent', 'tasks.assignee.tanaka', 'in-progress', '2026/06/08', 'high'],
+  ['refero', 'seo-research', 40, 'tasks.item.seoResearch', 'tasks.assignee.yamamoto', 'todo', '2026/06/09', 'medium'],
+  ['refero', 'hero-design', 50, 'tasks.item.heroDesign', 'tasks.assignee.sato', 'review', '2026/06/10', 'medium'],
+  ['refero', 'analytics-tags', 60, 'tasks.item.analyticsTags', 'tasks.assignee.suzuki', 'in-progress', '2026/06/11', 'low'],
+  ['refero', 'competitor-report', 70, 'tasks.item.competitorReport', 'tasks.assignee.tanaka', 'done', '2026/06/02', 'low'],
+  ['refero', 'terms-page', 80, 'tasks.item.termsPage', 'tasks.assignee.yamamoto', 'todo', '2026/06/12', 'medium'],
+  ['refero', 'faq-content', 90, 'tasks.item.faqContent', 'tasks.assignee.sato', 'todo', '2026/06/15', 'low'],
+  ['refero', 'landing-release', 100, 'tasks.item.landingRelease', 'tasks.assignee.suzuki', 'todo', '2026/06/16', 'high'],
 ] as const;
+
+/**
+ * CDK seed が作成する demo user 用 directory partition key です。
+ */
+const demoUserDirectoryId = 'user#demo@example.com';
+
+function createDirectoryProjectId(directoryId: string, projectId: string) {
+  return `${directoryId}#project#${projectId}`;
+}
 
 /**
  * サイドバーに表示するチームとプロジェクトの関係 seed データです。
@@ -108,6 +117,8 @@ function createProjectTaskTransactItems(tableName: string) {
     Put: {
       TableName: tableName,
       Item: {
+        directoryId: { S: demoUserDirectoryId },
+        directoryProjectId: { S: createDirectoryProjectId(demoUserDirectoryId, projectId) },
         projectId: { S: projectId },
         taskId: { S: taskId },
         sortOrder: { N: String(sortOrder) },
@@ -127,7 +138,7 @@ function createProjectTaskTransactItems(tableName: string) {
 function createProjectDirectoryTransactItems(tableName: string) {
   return projectDirectoryItems.map((entry) => {
     const item = {
-      directoryId: { S: 'sidebar' },
+      directoryId: { S: demoUserDirectoryId },
       entryKey: { S: entry.entryKey },
       entryType: { S: entry.entryType },
       teamId: { S: entry.teamId },
@@ -169,7 +180,7 @@ export class CdkStack extends cdk.Stack {
     const taskApiAllowedOriginList = cdk.Fn.split(',', taskApiAllowedOrigins.valueAsString);
 
     const tasksTable = new dynamodb.Table(this, 'ProjectTasksTable', {
-      partitionKey: { name: 'projectId', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: 'directoryProjectId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'taskId', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -177,7 +188,7 @@ export class CdkStack extends cdk.Stack {
 
     tasksTable.addGlobalSecondaryIndex({
       indexName: 'ProjectSortOrderIndex',
-      partitionKey: { name: 'projectId', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: 'directoryProjectId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'sortOrder', type: dynamodb.AttributeType.NUMBER },
       projectionType: dynamodb.ProjectionType.ALL,
     });
@@ -218,14 +229,21 @@ exports.handler = async (event) => {
     return json(401, { message: 'Bearer token is required.' }, headers);
   }
 
+  let directoryId;
+
   try {
-    await cognito.send(new GetUserCommand({ AccessToken: accessToken }));
+    const user = await cognito.send(new GetUserCommand({ AccessToken: accessToken }));
+    directoryId = toProjectDirectoryId(user);
   } catch {
     return json(401, { message: 'Authentication failed.' }, headers);
   }
 
+  if (!directoryId) {
+    return json(403, { message: 'Project access is denied.' }, headers);
+  }
+
   if (isProjectDirectoryRequest(event)) {
-    return listProjectDirectory(event, headers);
+    return listProjectDirectory(event, headers, directoryId);
   }
 
   const projectId = event.pathParameters?.projectId ?? event.rawPath?.match(/^\\/(?:api\\/)?projects\\/([^/]+)\\/tasks$/)?.[1];
@@ -234,20 +252,26 @@ exports.handler = async (event) => {
     return json(404, { message: 'Project tasks endpoint was not found.' }, headers);
   }
 
+  const decodedProjectId = decodeURIComponent(projectId);
+
   try {
-    const response = await dynamodb.send(new QueryCommand({
+    if (!(await hasProjectAccess(directoryId, decodedProjectId))) {
+      return json(403, { message: 'Project access is denied.' }, headers);
+    }
+
+    const items = await queryAll({
       TableName: process.env.TASKS_TABLE_NAME,
       IndexName: 'ProjectSortOrderIndex',
-      KeyConditionExpression: 'projectId = :projectId',
+      KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
       ExpressionAttributeValues: {
-        ':projectId': { S: decodeURIComponent(projectId) },
+        ':directoryProjectId': { S: createDirectoryProjectId(directoryId, decodedProjectId) },
       },
       ScanIndexForward: true,
-    }));
+    });
 
     return json(200, {
-      projectId: decodeURIComponent(projectId),
-      tasks: (response.Items ?? []).map(toTask),
+      projectId: decodedProjectId,
+      tasks: items.map(toTask),
     }, headers);
   } catch (error) {
     console.error(error);
@@ -255,21 +279,21 @@ exports.handler = async (event) => {
   }
 };
 
-async function listProjectDirectory(event, headers) {
+async function listProjectDirectory(event, headers, directoryId) {
   const locale = event.queryStringParameters?.locale === 'en' ? 'en' : 'ja';
 
   try {
-    const response = await dynamodb.send(new QueryCommand({
+    const items = await queryAll({
       TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
       KeyConditionExpression: 'directoryId = :directoryId',
       ExpressionAttributeValues: {
-        ':directoryId': { S: 'sidebar' },
+        ':directoryId': { S: directoryId },
       },
       ScanIndexForward: true,
-    }));
+    });
 
     return json(200, {
-      teams: toProjectDirectory(response.Items ?? [], locale),
+      teams: toProjectDirectory(items, locale),
     }, headers);
   } catch (error) {
     console.error(error);
@@ -280,6 +304,36 @@ async function listProjectDirectory(event, headers) {
 function isProjectDirectoryRequest(event) {
   const path = event.rawPath ?? '';
   return path === '/teams/projects' || path === '/api/teams/projects';
+}
+
+async function hasProjectAccess(directoryId, projectId) {
+  const items = await queryAll({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    KeyConditionExpression: 'directoryId = :directoryId',
+    ExpressionAttributeValues: {
+      ':directoryId': { S: directoryId },
+    },
+    ScanIndexForward: true,
+  });
+
+  return items.some((item) => item.entryType?.S === 'project' && item.projectId?.S === projectId);
+}
+
+async function queryAll(input) {
+  const items = [];
+  let ExclusiveStartKey;
+
+  do {
+    const response = await dynamodb.send(new QueryCommand({
+      ...input,
+      ExclusiveStartKey,
+    }));
+
+    items.push(...(response.Items ?? []));
+    ExclusiveStartKey = response.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+
+  return items;
 }
 
 function json(statusCode, body, headers) {
@@ -312,6 +366,20 @@ function parseAllowedOrigins() {
 function readBearerAccessToken(event) {
   const authorization = event.headers?.authorization ?? event.headers?.Authorization ?? '';
   return authorization.match(/^Bearer\\s+(.+)$/i)?.[1];
+}
+
+function toProjectDirectoryId(user) {
+  const userKey = user.UserAttributes?.find((attribute) => attribute.Name === 'email')?.Value ?? user.Username;
+
+  if (!userKey?.trim()) {
+    return undefined;
+  }
+
+  return 'user#' + userKey.trim().toLowerCase();
+}
+
+function createDirectoryProjectId(directoryId, projectId) {
+  return directoryId + '#project#' + projectId;
 }
 
 function toProjectDirectory(items, locale) {
@@ -388,15 +456,17 @@ function toTask(item) {
       },
     });
 
-    const seedTasks = new customResources.AwsCustomResource(this, 'SeedProjectTasks', {
-      onCreate: {
-        service: 'DynamoDB',
-        action: 'transactWriteItems',
-        parameters: {
-          TransactItems: createProjectTaskTransactItems(tasksTable.tableName),
-        },
-        physicalResourceId: customResources.PhysicalResourceId.of('refero-project-tasks-seed-v1'),
+    const seedProjectTasksCall = {
+      service: 'DynamoDB',
+      action: 'transactWriteItems',
+      parameters: {
+        TransactItems: createProjectTaskTransactItems(tasksTable.tableName),
       },
+      physicalResourceId: customResources.PhysicalResourceId.of('refero-project-tasks-seed-v2'),
+    };
+    const seedTasks = new customResources.AwsCustomResource(this, 'SeedProjectTasks', {
+      onCreate: seedProjectTasksCall,
+      onUpdate: seedProjectTasksCall,
       policy: customResources.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({
           actions: ['dynamodb:TransactWriteItems'],
@@ -407,15 +477,17 @@ function toTask(item) {
 
     seedTasks.node.addDependency(tasksTable);
 
-    const seedProjectDirectory = new customResources.AwsCustomResource(this, 'SeedProjectDirectory', {
-      onCreate: {
-        service: 'DynamoDB',
-        action: 'transactWriteItems',
-        parameters: {
-          TransactItems: createProjectDirectoryTransactItems(projectDirectoryTable.tableName),
-        },
-        physicalResourceId: customResources.PhysicalResourceId.of('project-directory-seed-v1'),
+    const seedProjectDirectoryCall = {
+      service: 'DynamoDB',
+      action: 'transactWriteItems',
+      parameters: {
+        TransactItems: createProjectDirectoryTransactItems(projectDirectoryTable.tableName),
       },
+      physicalResourceId: customResources.PhysicalResourceId.of('project-directory-seed-v2'),
+    };
+    const seedProjectDirectory = new customResources.AwsCustomResource(this, 'SeedProjectDirectory', {
+      onCreate: seedProjectDirectoryCall,
+      onUpdate: seedProjectDirectoryCall,
       policy: customResources.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({
           actions: ['dynamodb:TransactWriteItems'],

@@ -18,6 +18,7 @@
     "web:build-storybook": "bun --filter web build-storybook",
     "server:dev": "bun --filter server dev",
     "server:build:lambda": "bun --filter server build:lambda",
+    "server:test": "bun --filter server test",
     "floci:deploy-backend": "sh floci/deploy-backend.sh",
     "tasks:seed-dynamodb": "bash scripts/seed-project-tasks-dynamodb.sh",
     "tasks:check-dynamodb": "bash scripts/check-project-tasks-dynamodb.sh",

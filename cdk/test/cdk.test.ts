@@ -12,7 +12,7 @@ test('project task data store and lambda API are created', () => {
     BillingMode: 'PAY_PER_REQUEST',
     KeySchema: [
       {
-        AttributeName: 'projectId',
+        AttributeName: 'directoryProjectId',
         KeyType: 'HASH',
       },
       {
@@ -88,9 +88,12 @@ test('project task data store and lambda API are created', () => {
   expect(seedPayload).toContain('"service":"DynamoDB"');
   expect(seedPayload).toContain('"action":"transactWriteItems"');
   expect(seedPayload.match(/"Put"/g)).toHaveLength(10);
+  expect(seedPayload).toContain('"directoryId":{"S":"user#demo@example.com"}');
+  expect(seedPayload).toContain('"directoryProjectId":{"S":"user#demo@example.com#project#refero"}');
   expect(seedPayload).toContain('"taskId":{"S":"wireframe"}');
   expect(seedPayload).toContain('"taskId":{"S":"landing-release"}');
-  expect(seedResource?.Properties?.Update).toBeUndefined();
+  expect(seedPayload).toContain('"dueDate":{"S":"2026/06/03"}');
+  expect(seedResource?.Properties?.Update).toBeDefined();
 
   const directorySeedResource = Object.values(customResources).find((resource) =>
     JSON.stringify(resource).includes('shared-launch'),
@@ -100,13 +103,13 @@ test('project task data store and lambda API are created', () => {
     .filter((part: unknown): part is string => typeof part === 'string')
     .join('');
 
-  expect(directorySeedPayload).toContain('"directoryId":{"S":"sidebar"}');
+  expect(directorySeedPayload).toContain('"directoryId":{"S":"user#demo@example.com"}');
   expect(directorySeedPayload).toContain('"entryKey":{"S":"000010#000000#TEAM#core-team"}');
   expect(directorySeedPayload).toContain('"entryKey":{"S":"000010#000010#PROJECT#refero"}');
   expect(directorySeedPayload).toContain('"teamId":{"S":"core-team"}');
   expect(directorySeedPayload).toContain('"teamId":{"S":"design-team"}');
   expect(directorySeedPayload.match(/"projectId":{"S":"shared-launch"}/g)).toHaveLength(2);
-  expect(directorySeedResource?.Properties?.Update).toBeUndefined();
+  expect(directorySeedResource?.Properties?.Update).toBeDefined();
 
   const lambdaResource = Object.values(template.findResources('AWS::Lambda::Function')).find((resource) =>
     JSON.stringify(resource).includes('isProjectDirectoryRequest'),
@@ -114,5 +117,10 @@ test('project task data store and lambda API are created', () => {
   const lambdaCode = lambdaResource?.Properties?.Code?.ZipFile ?? '';
 
   expect(lambdaCode).toContain('(?:api\\/)?projects\\/([^/]+)\\/tasks');
+  expect(lambdaCode).toContain('toProjectDirectoryId');
+  expect(lambdaCode).toContain('createDirectoryProjectId');
+  expect(lambdaCode).toContain('directoryProjectId = :directoryProjectId');
+  expect(lambdaCode).toContain('hasProjectAccess');
+  expect(lambdaCode).toContain('async function queryAll');
   expect(lambdaCode).toContain('const projectItems = [];');
 });

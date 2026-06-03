@@ -8,6 +8,8 @@ fi
 
 PROJECT_ID="${PROJECT_ID:-refero}"
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
+PROJECT_DIRECTORY_ID="${PROJECT_DIRECTORY_ID:-user#demo@example.com}"
+DIRECTORY_PROJECT_ID="${PROJECT_DIRECTORY_ID}#project#${PROJECT_ID}"
 
 endpoint_args=()
 if [[ -n "${AWS_ENDPOINT_URL:-}" ]]; then
@@ -23,8 +25,8 @@ common_args=(
   --region "$AWS_REGION"
   --table-name "$TASKS_TABLE_NAME"
   --index-name ProjectSortOrderIndex
-  --key-condition-expression "projectId = :projectId"
-  --expression-attribute-values "{\":projectId\":{\"S\":\"$PROJECT_ID\"}}"
+  --key-condition-expression "directoryProjectId = :directoryProjectId"
+  --expression-attribute-values "{\":directoryProjectId\":{\"S\":\"$DIRECTORY_PROJECT_ID\"}}"
 )
 
 mapfile -t task_rows < <(
@@ -44,16 +46,16 @@ if [[ "${#task_rows[@]}" != "10" ]]; then
 fi
 
 expected_task_rows=(
-  $'wireframe\t10\ttasks.item.wireframe\ttasks.assignee.sato\tin-progress\t2025/05/26\thigh'
-  $'brand-guideline\t20\ttasks.item.brandGuideline\ttasks.assignee.suzuki\treview\t2025/05/27\tmedium'
-  $'pricing-content\t30\ttasks.item.pricingContent\ttasks.assignee.tanaka\tin-progress\t2025/05/28\thigh'
-  $'seo-research\t40\ttasks.item.seoResearch\ttasks.assignee.yamamoto\ttodo\t2025/05/29\tmedium'
-  $'hero-design\t50\ttasks.item.heroDesign\ttasks.assignee.sato\treview\t2025/05/30\tmedium'
-  $'analytics-tags\t60\ttasks.item.analyticsTags\ttasks.assignee.suzuki\tin-progress\t2025/06/02\tlow'
-  $'competitor-report\t70\ttasks.item.competitorReport\ttasks.assignee.tanaka\tdone\t2025/06/03\tlow'
-  $'terms-page\t80\ttasks.item.termsPage\ttasks.assignee.yamamoto\ttodo\t2025/06/04\tmedium'
-  $'faq-content\t90\ttasks.item.faqContent\ttasks.assignee.sato\ttodo\t2025/06/05\tlow'
-  $'landing-release\t100\ttasks.item.landingRelease\ttasks.assignee.suzuki\ttodo\t2025/06/06\thigh'
+  $'wireframe\t10\ttasks.item.wireframe\ttasks.assignee.sato\tin-progress\t2026/06/03\thigh'
+  $'brand-guideline\t20\ttasks.item.brandGuideline\ttasks.assignee.suzuki\treview\t2026/06/05\tmedium'
+  $'pricing-content\t30\ttasks.item.pricingContent\ttasks.assignee.tanaka\tin-progress\t2026/06/08\thigh'
+  $'seo-research\t40\ttasks.item.seoResearch\ttasks.assignee.yamamoto\ttodo\t2026/06/09\tmedium'
+  $'hero-design\t50\ttasks.item.heroDesign\ttasks.assignee.sato\treview\t2026/06/10\tmedium'
+  $'analytics-tags\t60\ttasks.item.analyticsTags\ttasks.assignee.suzuki\tin-progress\t2026/06/11\tlow'
+  $'competitor-report\t70\ttasks.item.competitorReport\ttasks.assignee.tanaka\tdone\t2026/06/02\tlow'
+  $'terms-page\t80\ttasks.item.termsPage\ttasks.assignee.yamamoto\ttodo\t2026/06/12\tmedium'
+  $'faq-content\t90\ttasks.item.faqContent\ttasks.assignee.sato\ttodo\t2026/06/15\tlow'
+  $'landing-release\t100\ttasks.item.landingRelease\ttasks.assignee.suzuki\ttodo\t2026/06/16\thigh'
 )
 
 for row_index in "${!expected_task_rows[@]}"; do
@@ -65,4 +67,4 @@ for row_index in "${!expected_task_rows[@]}"; do
   fi
 done
 
-echo "DynamoDB task seed OK: table=$TASKS_TABLE_NAME project=$PROJECT_ID count=${#task_rows[@]}"
+echo "DynamoDB task seed OK: table=$TASKS_TABLE_NAME directory=$PROJECT_DIRECTORY_ID project=$PROJECT_ID count=${#task_rows[@]}"

@@ -1,5 +1,5 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb'
+import { DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb'
 import { Hono } from 'hono'
 import { handle } from 'hono/aws-lambda'
 import { cors } from 'hono/cors'
@@ -111,6 +111,20 @@ type GetUserResponse = {
 }
 
 /**
+ * プロジェクトデータへのアクセス範囲を表す認可済み principal です。
+ */
+type ProjectPrincipal = {
+  /**
+   * Cognito user から解決した directory partition key です。
+   */
+  directoryId: string
+  /**
+   * ログやエラー調査で参照するユーザー識別子です。
+   */
+  userKey: string
+}
+
+/**
  * Cognito JSON API のエラーレスポンスです。
  */
 type CognitoErrorPayload = {
@@ -195,6 +209,211 @@ type DashboardSummaryResponse = {
 }
 
 /**
+ * タスクの進捗状態を表す API code です。
+ */
+type ProjectTaskStatus = 'in-progress' | 'review' | 'todo' | 'done'
+
+/**
+ * タスクの優先度を表す API code です。
+ */
+type ProjectTaskPriority = 'high' | 'medium' | 'low'
+
+/**
+ * DynamoDB に保存する project task item です。
+ */
+type ProjectTaskItem = {
+  /**
+   * ユーザーごとの directory partition key です。
+   */
+  directoryId: string
+  /**
+   * タスク一覧 query に使う directory/project 複合 partition key です。
+   */
+  directoryProjectId: string
+  /**
+   * プロジェクト ID です。
+   */
+  projectId: string
+  /**
+   * タスク ID です。
+   */
+  taskId: string
+  /**
+   * プロジェクト内の表示順です。
+   */
+  sortOrder: number
+  /**
+   * タスク名を解決する i18n key です。
+   */
+  titleKey: string
+  /**
+   * 担当者名を解決する i18n key です。
+   */
+  assigneeKey: string
+  /**
+   * タスク状態です。
+   */
+  status: ProjectTaskStatus
+  /**
+   * 期限日として表示する文字列です。
+   */
+  dueDate: string
+  /**
+   * 優先度です。
+   */
+  priority: ProjectTaskPriority
+}
+
+/**
+ * プロジェクト画面のテーブルへ表示するタスク行です。
+ */
+type ProjectTaskResponseItem = {
+  /**
+   * React の key として使う task ID です。
+   */
+  id: string
+  /**
+   * タスク名を解決する i18n key です。
+   */
+  titleKey: string
+  /**
+   * 担当者名を解決する i18n key です。
+   */
+  assigneeKey: string
+  /**
+   * タスク状態です。
+   */
+  status: ProjectTaskStatus
+  /**
+   * 期限日として表示する文字列です。
+   */
+  dueDate: string
+  /**
+   * 優先度です。
+   */
+  priority: ProjectTaskPriority
+}
+
+/**
+ * プロジェクトタスク一覧 API が返す response body です。
+ */
+type ProjectTasksResponse = {
+  /**
+   * 取得対象の project ID です。
+   */
+  projectId: string
+  /**
+   * DynamoDB から取得したタスク一覧です。
+   */
+  tasks: ProjectTaskResponseItem[]
+}
+
+/**
+ * サイドバー上のプロジェクトを識別しやすくする表示色です。
+ */
+type ProjectTone = 'blue' | 'purple' | 'green' | 'yellow'
+
+/**
+ * DynamoDB に保存する team/project directory item です。
+ */
+type ProjectDirectoryItem = {
+  /**
+   * ユーザーごとの directory partition key です。
+   */
+  directoryId: string
+  /**
+   * チームとプロジェクトを並べ替える sort key です。
+   */
+  entryKey: string
+  /**
+   * item 種別です。
+   */
+  entryType: 'team' | 'project'
+  /**
+   * 所属チーム ID です。
+   */
+  teamId: string
+  /**
+   * チームの表示順です。
+   */
+  teamSortOrder: number
+  /**
+   * 日本語表示名です。
+   */
+  nameJa: string
+  /**
+   * 英語表示名です。
+   */
+  nameEn: string
+  /**
+   * チーム配下を初期展開するかどうかです。
+   */
+  expanded?: boolean
+  /**
+   * プロジェクト ID です。
+   */
+  projectId?: string
+  /**
+   * チーム内のプロジェクト表示順です。
+   */
+  projectSortOrder?: number
+  /**
+   * サイドバー上のプロジェクト表示色です。
+   */
+  tone?: ProjectTone
+}
+
+/**
+ * サイドバーに表示するプロジェクト行です。
+ */
+type ProjectDirectoryProjectResponse = {
+  /**
+   * タスク一覧の projectId として使う一意な ID です。
+   */
+  id: string
+  /**
+   * サイドバーと画面タイトルに表示するプロジェクト名です。
+   */
+  name: string
+  /**
+   * サイドバー上のプロジェクトアイコン色です。
+   */
+  tone?: ProjectTone
+}
+
+/**
+ * サイドバーに表示するチーム行です。
+ */
+type ProjectDirectoryTeamResponse = {
+  /**
+   * チームを識別する一意な ID です。
+   */
+  id: string
+  /**
+   * サイドバーに表示するチーム名です。
+   */
+  name: string
+  /**
+   * 初期表示時にチーム配下を展開するかどうかです。
+   */
+  expanded: boolean
+  /**
+   * チームに紐づくプロジェクト一覧です。
+   */
+  projects: ProjectDirectoryProjectResponse[]
+}
+
+/**
+ * チーム/プロジェクト一覧 API が返す response body です。
+ */
+type ProjectDirectoryResponse = {
+  /**
+   * DB に登録されているチームとプロジェクトの階層です。
+   */
+  teams: ProjectDirectoryTeamResponse[]
+}
+
+/**
  * API handler から利用する Cognito client の最小 interface です。
  */
 type CognitoClient = {
@@ -218,10 +437,45 @@ type DashboardSummaryClient = {
   getSummary(): Promise<DashboardSummaryResponse>
 }
 
-const app = new Hono()
+/**
+ * API handler から利用するプロジェクトタスク client の最小 interface です。
+ */
+type ProjectTasksClient = {
+  /**
+   * DynamoDB から指定 project ID のタスク一覧を取得します。
+   */
+  getProjectTasks(directoryId: string, projectId: string): Promise<ProjectTasksResponse>
+}
+
+/**
+ * API handler から利用する team/project directory client の最小 interface です。
+ */
+type ProjectDirectoryClient = {
+  /**
+   * DynamoDB から sidebar 用の team/project 階層を取得します。
+   */
+  getProjectDirectory(directoryId: string, locale: Locale): Promise<ProjectDirectoryResponse>
+  /**
+   * ユーザーの directory に指定 project ID が含まれるかどうかを判定します。
+   */
+  hasProjectAccess(directoryId: string, projectId: string): Promise<boolean>
+}
+
+/**
+ * チーム/プロジェクト階層の表示 locale です。
+ */
+type Locale = 'ja' | 'en'
+
+/**
+ * Lambda handler、Bun dev server、server test で共有する Hono app です。
+ */
+export const app = new Hono()
 let cognito: CognitoClient
 let dashboardSummary: DashboardSummaryClient
+let projectTasks: ProjectTasksClient
+let projectDirectory: ProjectDirectoryClient
 const dashboardSummaryItemId = 'summary'
+const projectDirectoryIdPrefix = 'user#'
 
 app.use(
   '/api/*',
@@ -348,6 +602,71 @@ app.get('/api/dashboard/summary', async (c) => {
   }
 })
 
+/**
+ * DynamoDB に保存されたチーム/プロジェクト階層を返す endpoint です。
+ *
+ * @remarks
+ * サイドバー用の directory table を読み、`locale=en` のときだけ英語名を優先します。
+ */
+app.get('/api/teams/projects', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
+
+    return c.json(await projectDirectory.getProjectDirectory(principal.directoryId, readLocale(c)))
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * DynamoDB に保存されたプロジェクト別タスク一覧を返す endpoint です。
+ *
+ * @remarks
+ * `ProjectSortOrderIndex` で `sortOrder` 昇順に取得し、画面表示用 DTO に変換します。
+ */
+app.get('/api/projects/:projectId/tasks', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const projectId = c.req.param('projectId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!projectId) {
+    return c.json({ message: 'Project ID is required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
+
+    if (!(await projectDirectory.hasProjectAccess(principal.directoryId, projectId))) {
+      throw new ProjectDataError(
+        403,
+        'ProjectAccessDenied',
+        `User "${principal.userKey}" cannot access project "${projectId}".`,
+      )
+    }
+
+    return c.json(await projectTasks.getProjectTasks(principal.directoryId, projectId))
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
 async function readJson<T>(request: { json: () => Promise<T> }) {
   try {
     return await request.json()
@@ -360,6 +679,10 @@ function readBearerAccessToken(c: Context) {
   const authorization = c.req.header('Authorization') ?? ''
 
   return authorization.match(/^Bearer\s+(.+)$/i)?.[1]
+}
+
+function readLocale(c: Context): Locale {
+  return c.req.query('locale') === 'en' ? 'en' : 'ja'
 }
 
 function toAuthErrorResponse(c: Context, error: unknown) {
@@ -407,6 +730,30 @@ function toDashboardDataErrorResponse(c: Context, error: unknown) {
 
   console.error(error)
   return c.json({ message: 'Dashboard data is unavailable.' }, 502)
+}
+
+function toProjectDataErrorResponse(c: Context, error: unknown) {
+  if (!(error instanceof ProjectDataError)) {
+    console.error(error)
+    return c.json({ message: 'Project data is unavailable.' }, 502)
+  }
+
+  if (error.code === 'ResourceNotFoundException') {
+    console.error(error)
+    return c.json({ message: 'Project data is not initialized.' }, 503)
+  }
+
+  if (error.code === 'InvalidProjectTask' || error.code === 'InvalidProjectDirectory') {
+    console.error(error)
+    return c.json({ message: 'Project data is invalid.' }, 503)
+  }
+
+  if (error.code === 'ProjectPrincipalMissing' || error.code === 'ProjectAccessDenied') {
+    return c.json({ message: 'Project access is denied.' }, 403)
+  }
+
+  console.error(error)
+  return c.json({ message: 'Project data is unavailable.' }, 502)
 }
 
 /**
@@ -659,6 +1006,170 @@ class DynamoDbDashboardSummaryClient {
 }
 
 /**
+ * DynamoDB の project task item を読み取る client です。
+ */
+export class DynamoDbProjectTasksClient {
+  /**
+   * project task item を保存する DynamoDB table 名です。
+   */
+  private readonly tableName: string
+  /**
+   * DynamoDB DocumentClient です。
+   */
+  private readonly documentClient: DynamoDBDocumentClient
+
+  constructor(
+    tableName =
+      getEnv('MUKUROJI_PROJECT_TASKS_TABLE') ??
+      getEnv('TASKS_TABLE_NAME') ??
+      'mukuroji-project-tasks-v2-local',
+    documentClient = createDynamoDbDocumentClient(),
+  ) {
+    this.tableName = tableName
+    this.documentClient = documentClient
+  }
+
+  /**
+   * DynamoDB からプロジェクト別タスク一覧を取得します。
+   */
+  async getProjectTasks(directoryId: string, projectId: string) {
+    try {
+      const items: unknown[] = []
+      let exclusiveStartKey: Record<string, unknown> | undefined
+
+      do {
+        const response = await this.documentClient.send(
+          new QueryCommand({
+            TableName: this.tableName,
+            IndexName: 'ProjectSortOrderIndex',
+            KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
+            ExpressionAttributeValues: {
+              ':directoryProjectId': createDirectoryProjectId(directoryId, projectId),
+            },
+            ExclusiveStartKey: exclusiveStartKey,
+            ScanIndexForward: true,
+          }),
+        )
+
+        items.push(...(response.Items ?? []))
+        exclusiveStartKey = response.LastEvaluatedKey
+      } while (exclusiveStartKey)
+
+      const tasks = items.map(toProjectTaskResponseItem)
+
+      return {
+        projectId,
+        tasks,
+      } satisfies ProjectTasksResponse
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+}
+
+/**
+ * DynamoDB の team/project directory item を読み取る client です。
+ */
+export class DynamoDbProjectDirectoryClient {
+  /**
+   * team/project directory item を保存する DynamoDB table 名です。
+   */
+  private readonly tableName: string
+  /**
+   * DynamoDB DocumentClient です。
+   */
+  private readonly documentClient: DynamoDBDocumentClient
+
+  constructor(
+    tableName =
+      getEnv('MUKUROJI_PROJECT_DIRECTORY_TABLE') ??
+      getEnv('PROJECT_DIRECTORY_TABLE_NAME') ??
+      'mukuroji-project-directory-local',
+    documentClient = createDynamoDbDocumentClient(),
+  ) {
+    this.tableName = tableName
+    this.documentClient = documentClient
+  }
+
+  /**
+   * DynamoDB から sidebar 用の team/project 階層を取得します。
+   */
+  async getProjectDirectory(directoryId: string, locale: Locale) {
+    try {
+      const items = await this.queryDirectoryItems(directoryId)
+
+      return {
+        teams: toProjectDirectoryResponse(items, locale, directoryId),
+      } satisfies ProjectDirectoryResponse
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * ユーザーの directory に指定 project ID が含まれるかどうかを判定します。
+   */
+  async hasProjectAccess(directoryId: string, projectId: string) {
+    try {
+      const items = await this.queryDirectoryItems(directoryId)
+
+      return items.some((item) => {
+        if (!isProjectDirectoryItem(item, directoryId)) {
+          throw new ProjectDataError(
+            503,
+            'InvalidProjectDirectory',
+            'Project directory item is missing or invalid.',
+          )
+        }
+
+        return item.entryType === 'project' && item.projectId === projectId
+      })
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * directory partition 内の全 item を LastEvaluatedKey がなくなるまで取得します。
+   */
+  private async queryDirectoryItems(directoryId: string) {
+    const items: unknown[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+
+    do {
+      const response = await this.documentClient.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          KeyConditionExpression: 'directoryId = :directoryId',
+          ExpressionAttributeValues: {
+            ':directoryId': directoryId,
+          },
+          ExclusiveStartKey: exclusiveStartKey,
+          ScanIndexForward: true,
+        }),
+      )
+
+      items.push(...(response.Items ?? []))
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+
+    return items
+  }
+}
+
+/**
  * Floci Cognito との通信で扱う domain error です。
  */
 class CognitoServiceError extends Error {
@@ -682,6 +1193,26 @@ class CognitoServiceError extends Error {
  * DynamoDB の dashboard data 取得で扱う domain error です。
  */
 class DashboardDataError extends Error {
+  /**
+   * DynamoDB または proxy 相当の HTTP status code です。
+   */
+  readonly status: number
+  /**
+   * DynamoDB error code またはローカルで付与した error code です。
+   */
+  readonly code: string
+
+  constructor(status: number, code: string, message: string) {
+    super(message)
+    this.status = status
+    this.code = code
+  }
+}
+
+/**
+ * DynamoDB の project data 取得で扱う domain error です。
+ */
+class ProjectDataError extends Error {
   /**
    * DynamoDB または proxy 相当の HTTP status code です。
    */
@@ -750,6 +1281,22 @@ function toDashboardDataError(error: unknown) {
   )
 }
 
+function toProjectDataError(error: unknown) {
+  const awsError = error as {
+    $metadata?: {
+      httpStatusCode?: number
+    }
+    message?: string
+    name?: string
+  }
+
+  return new ProjectDataError(
+    awsError.$metadata?.httpStatusCode ?? 502,
+    awsError.name ?? 'DynamoDbUnavailable',
+    awsError.message ?? 'DynamoDB request failed.',
+  )
+}
+
 function isDashboardSummaryItem(value: unknown): value is DashboardSummaryItem {
   if (!isRecord(value)) {
     return false
@@ -764,8 +1311,168 @@ function isDashboardSummaryItem(value: unknown): value is DashboardSummaryItem {
   )
 }
 
+function toProjectTaskResponseItem(value: unknown): ProjectTaskResponseItem {
+  if (!isProjectTaskItem(value)) {
+    throw new ProjectDataError(
+      503,
+      'InvalidProjectTask',
+      'Project task item is missing or invalid.',
+    )
+  }
+
+  return {
+    id: value.taskId,
+    titleKey: value.titleKey,
+    assigneeKey: value.assigneeKey,
+    status: value.status,
+    dueDate: value.dueDate,
+    priority: value.priority,
+  }
+}
+
+function toProjectDirectoryResponse(
+  values: unknown[],
+  locale: Locale,
+  directoryId: string,
+): ProjectDirectoryTeamResponse[] {
+  const teams: ProjectDirectoryTeamResponse[] = []
+  const teamById = new Map<string, ProjectDirectoryTeamResponse>()
+  const projectItems: ProjectDirectoryItem[] = []
+
+  for (const value of values) {
+    if (!isProjectDirectoryItem(value, directoryId)) {
+      throw new ProjectDataError(
+        503,
+        'InvalidProjectDirectory',
+        'Project directory item is missing or invalid.',
+      )
+    }
+
+    if (value.entryType === 'team') {
+      const team = {
+        id: value.teamId,
+        name: localizedName(value, locale),
+        expanded: value.expanded ?? false,
+        projects: [],
+      }
+
+      teamById.set(team.id, team)
+      teams.push(team)
+      continue
+    }
+
+    projectItems.push(value)
+  }
+
+  for (const item of projectItems) {
+    const team = teamById.get(item.teamId)
+
+    if (!team || !item.projectId) {
+      continue
+    }
+
+    team.projects.push({
+      id: item.projectId,
+      name: localizedName(item, locale),
+      tone: item.tone,
+    })
+  }
+
+  return teams
+}
+
+function localizedName(item: ProjectDirectoryItem, locale: Locale) {
+  return locale === 'en' ? item.nameEn || item.nameJa : item.nameJa || item.nameEn
+}
+
+function isProjectTaskItem(value: unknown): value is ProjectTaskItem {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  return (
+    typeof value.projectId === 'string' &&
+    typeof value.directoryId === 'string' &&
+    value.directoryProjectId === createDirectoryProjectId(value.directoryId, value.projectId) &&
+    typeof value.taskId === 'string' &&
+    typeof value.sortOrder === 'number' &&
+    typeof value.titleKey === 'string' &&
+    typeof value.assigneeKey === 'string' &&
+    isProjectTaskStatus(value.status) &&
+    typeof value.dueDate === 'string' &&
+    isProjectTaskPriority(value.priority)
+  )
+}
+
+function isProjectDirectoryItem(value: unknown, directoryId: string): value is ProjectDirectoryItem {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  if (
+    value.directoryId !== directoryId ||
+    typeof value.entryKey !== 'string' ||
+    (value.entryType !== 'team' && value.entryType !== 'project') ||
+    typeof value.teamId !== 'string' ||
+    typeof value.teamSortOrder !== 'number' ||
+    typeof value.nameJa !== 'string' ||
+    typeof value.nameEn !== 'string'
+  ) {
+    return false
+  }
+
+  if (value.entryType === 'team') {
+    return value.expanded === undefined || typeof value.expanded === 'boolean'
+  }
+
+  return (
+    typeof value.projectId === 'string' &&
+    typeof value.projectSortOrder === 'number' &&
+    isProjectTone(value.tone)
+  )
+}
+
+function isProjectTaskStatus(value: unknown): value is ProjectTaskStatus {
+  return value === 'in-progress' || value === 'review' || value === 'todo' || value === 'done'
+}
+
+function isProjectTaskPriority(value: unknown): value is ProjectTaskPriority {
+  return value === 'high' || value === 'medium' || value === 'low'
+}
+
+function isProjectTone(value: unknown): value is ProjectTone {
+  return value === 'blue' || value === 'purple' || value === 'green' || value === 'yellow'
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function toProjectPrincipal(user: GetUserResponse): ProjectPrincipal {
+  const userKey = readUserAttribute(user, 'email') ?? user.Username
+
+  if (!userKey?.trim()) {
+    throw new ProjectDataError(
+      403,
+      'ProjectPrincipalMissing',
+      'Cognito user does not have a stable project access identifier.',
+    )
+  }
+
+  const normalizedUserKey = userKey.trim().toLowerCase()
+
+  return {
+    directoryId: `${projectDirectoryIdPrefix}${normalizedUserKey}`,
+    userKey: normalizedUserKey,
+  }
+}
+
+function readUserAttribute(user: GetUserResponse, name: string) {
+  return user.UserAttributes?.find((attribute) => attribute.Name === name)?.Value
+}
+
+function createDirectoryProjectId(directoryId: string, projectId: string) {
+  return `${directoryId}#project#${projectId}`
 }
 
 function getAwsRegion() {
@@ -794,6 +1501,33 @@ function normalizeCognitoErrorCode(value: string | undefined) {
 
 cognito = new FlociCognitoClient()
 dashboardSummary = new DynamoDbDashboardSummaryClient()
+projectTasks = new DynamoDbProjectTasksClient()
+projectDirectory = new DynamoDbProjectDirectoryClient()
+
+/**
+ * Server test で外部 service client を差し替えます。
+ */
+export function configureApiClientsForTest(clients: {
+  cognito?: CognitoClient
+  dashboardSummary?: DashboardSummaryClient
+  projectTasks?: ProjectTasksClient
+  projectDirectory?: ProjectDirectoryClient
+}) {
+  cognito = clients.cognito ?? cognito
+  dashboardSummary = clients.dashboardSummary ?? dashboardSummary
+  projectTasks = clients.projectTasks ?? projectTasks
+  projectDirectory = clients.projectDirectory ?? projectDirectory
+}
+
+/**
+ * Server test 後に外部 service client を実装 client に戻します。
+ */
+export function resetApiClientsForTest() {
+  cognito = new FlociCognitoClient()
+  dashboardSummary = new DynamoDbDashboardSummaryClient()
+  projectTasks = new DynamoDbProjectTasksClient()
+  projectDirectory = new DynamoDbProjectDirectoryClient()
+}
 
 /**
  * AWS Lambda にデプロイする Hono handler です。
