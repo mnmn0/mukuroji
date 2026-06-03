@@ -361,6 +361,23 @@ test.describe('authenticated task page', () => {
     expect(requestCounts.projectCreates).toBe(1)
   })
 
+  test('ダッシュボードの登録フォームは空白のみの名前を API に送信しない', async ({ page }) => {
+    await page.goto('/dashboard')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByLabel('チーム名').fill('   ')
+    await page.getByRole('button', { name: 'チームを登録' }).click()
+
+    await expect(page.getByText('チーム名を入力してください。')).toBeVisible()
+    expect(requestCounts.teamCreates).toBe(0)
+
+    await page.getByLabel('プロジェクト名').fill('   ')
+    await page.getByRole('button', { name: 'プロジェクトを登録' }).click()
+
+    await expect(page.getByText('プロジェクト名を入力してください。')).toBeVisible()
+    expect(requestCounts.projectCreates).toBe(0)
+  })
+
   test('同じプロジェクトが複数チームにある場合、選択元チームをタスク画面へ引き継ぐ', async ({
     page,
   }) => {
@@ -396,7 +413,7 @@ test.describe('authenticated task page', () => {
     await page.locator('input[name="dueDate"]').fill('2026-06-20')
     await page.getByRole('button', { name: '登録' }).click()
 
-    await expect(page.getByText('新規タスク')).toBeVisible()
+    await expect(page.getByTestId('task-row-new-task').getByText('新規タスク')).toBeVisible()
     expect(requestCounts.taskCreates).toBe(1)
   })
 

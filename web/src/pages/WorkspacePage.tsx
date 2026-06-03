@@ -749,11 +749,16 @@ function WorkspaceRegistrationPanel({
             const name = String(formData.get('teamName') ?? '').trim()
 
             setErrorMessage(undefined)
+            if (!name) {
+              setErrorMessage(t('workspace.registration.teamNameRequired'))
+              return
+            }
+
             setIsSavingTeam(true)
             void onCreateTeam({ name })
               .then(() => form.reset())
               .catch((error: unknown) => {
-                setErrorMessage(error instanceof Error ? error.message : t('workspace.registration.error'))
+                setErrorMessage(resolveRegistrationErrorMessage(error, t))
               })
               .finally(() => setIsSavingTeam(false))
           }}
@@ -792,11 +797,16 @@ function WorkspaceRegistrationPanel({
             const tone = String(formData.get('tone') ?? 'blue') as CreateProjectDirectoryProjectInput['tone']
 
             setErrorMessage(undefined)
+            if (!name) {
+              setErrorMessage(t('workspace.registration.projectNameRequired'))
+              return
+            }
+
             setIsSavingProject(true)
             void onCreateProject(teamId, { name, tone })
               .then(() => form.reset())
               .catch((error: unknown) => {
-                setErrorMessage(error instanceof Error ? error.message : t('workspace.registration.error'))
+                setErrorMessage(resolveRegistrationErrorMessage(error, t))
               })
               .finally(() => setIsSavingProject(false))
           }}
@@ -851,6 +861,18 @@ function WorkspaceRegistrationPanel({
       {errorMessage ? <p className="mt-4 text-sm font-bold text-red-600">{errorMessage}</p> : null}
     </section>
   )
+}
+
+const registrationErrorMessageKeys = ['projects.error.loading', 'tasks.error.loading'] as const satisfies readonly MessageKey[]
+
+function resolveRegistrationErrorMessage(error: unknown, t: (key: MessageKey) => string) {
+  const message = error instanceof Error ? error.message : undefined
+
+  if (message && (registrationErrorMessageKeys as readonly string[]).includes(message)) {
+    return t(message as (typeof registrationErrorMessageKeys)[number])
+  }
+
+  return t('workspace.registration.error')
 }
 
 function ReportsView({

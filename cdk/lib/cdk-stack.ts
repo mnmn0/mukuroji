@@ -116,6 +116,7 @@ function createProjectTaskTransactItems(tableName: string) {
   return projectTaskItems.map(([projectId, taskId, sortOrder, titleKey, assigneeKey, status, dueDate, priority]) => ({
     Put: {
       TableName: tableName,
+      ConditionExpression: 'attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)',
       Item: {
         directoryId: { S: demoUserDirectoryId },
         directoryProjectId: { S: createDirectoryProjectId(demoUserDirectoryId, projectId) },
@@ -159,6 +160,7 @@ function createProjectDirectoryTransactItems(tableName: string) {
     return {
       Put: {
         TableName: tableName,
+        ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
         Item: item,
       },
     };
@@ -430,6 +432,9 @@ async function createProjectTask(event, headers, directoryId, projectId) {
     return json(400, { message: 'Task status or priority is invalid.' }, headers);
   }
 
+  const title = body.title.trim();
+  const assignee = body.assignee.trim();
+  const dueDate = body.dueDate.trim();
   const directoryProjectId = createDirectoryProjectId(directoryId, projectId);
   const items = await queryAll({
     TableName: process.env.TASKS_TABLE_NAME,
@@ -440,17 +445,17 @@ async function createProjectTask(event, headers, directoryId, projectId) {
     },
     ScanIndexForward: true,
   });
-  const taskId = createResourceId(body.title);
+  const taskId = createUniqueResourceId(title, items.map((item) => item.taskId?.S).filter(Boolean));
   const item = {
     directoryId: { S: directoryId },
     directoryProjectId: { S: directoryProjectId },
     projectId: { S: projectId },
     taskId: { S: taskId },
     sortOrder: { N: String((items.length + 1) * 10) },
-    title: { S: body.title.trim() },
-    assignee: { S: body.assignee.trim() },
+    title: { S: title },
+    assignee: { S: assignee },
     status: { S: body.status },
-    dueDate: { S: body.dueDate.trim() },
+    dueDate: { S: dueDate },
     priority: { S: body.priority },
   };
 
@@ -787,7 +792,6 @@ function isProjectTone(value) {
     };
     const seedTasks = new customResources.AwsCustomResource(this, 'SeedProjectTasks', {
       onCreate: seedProjectTasksCall,
-      onUpdate: seedProjectTasksCall,
       policy: customResources.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({
           actions: ['dynamodb:TransactWriteItems'],
@@ -808,7 +812,6 @@ function isProjectTone(value) {
     };
     const seedProjectDirectory = new customResources.AwsCustomResource(this, 'SeedProjectDirectory', {
       onCreate: seedProjectDirectoryCall,
-      onUpdate: seedProjectDirectoryCall,
       policy: customResources.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({
           actions: ['dynamodb:TransactWriteItems'],

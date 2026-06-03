@@ -93,7 +93,10 @@ test('project task data store and lambda API are created', () => {
   expect(seedPayload).toContain('"taskId":{"S":"wireframe"}');
   expect(seedPayload).toContain('"taskId":{"S":"landing-release"}');
   expect(seedPayload).toContain('"dueDate":{"S":"2026/06/03"}');
-  expect(seedResource?.Properties?.Update).toBeDefined();
+  expect(seedPayload).toContain(
+    '"ConditionExpression":"attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)"',
+  );
+  expect(seedResource?.Properties?.Update).toBeUndefined();
 
   const directorySeedResource = Object.values(customResources).find((resource) =>
     JSON.stringify(resource).includes('shared-launch'),
@@ -109,7 +112,10 @@ test('project task data store and lambda API are created', () => {
   expect(directorySeedPayload).toContain('"teamId":{"S":"core-team"}');
   expect(directorySeedPayload).toContain('"teamId":{"S":"design-team"}');
   expect(directorySeedPayload.match(/"projectId":{"S":"shared-launch"}/g)).toHaveLength(2);
-  expect(directorySeedResource?.Properties?.Update).toBeDefined();
+  expect(directorySeedPayload).toContain(
+    '"ConditionExpression":"attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)"',
+  );
+  expect(directorySeedResource?.Properties?.Update).toBeUndefined();
 
   const lambdaResource = Object.values(template.findResources('AWS::Lambda::Function')).find((resource) =>
     JSON.stringify(resource).includes('isProjectDirectoryRequest'),
@@ -121,6 +127,7 @@ test('project task data store and lambda API are created', () => {
   expect(lambdaCode).toContain('createDirectoryProjectId');
   expect(lambdaCode).toContain('decodePathSegment');
   expect(lambdaCode).toContain('createUniqueResourceId');
+  expect(lambdaCode).toContain('const taskId = createUniqueResourceId(title');
   expect(lambdaCode).toContain('toProjectDataError');
   expect(lambdaCode).toContain('directoryProjectId = :directoryProjectId');
   expect(lambdaCode).toContain('hasProjectAccess');

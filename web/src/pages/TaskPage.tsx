@@ -37,6 +37,7 @@ import {
 
 const taskTabs = ['table', 'board', 'gantt', 'calendar', 'file'] as const
 const taskStatuses = ['in-progress', 'review', 'todo', 'done'] as const
+const taskPriorities = ['high', 'medium', 'low'] as const
 const apiSWRConfig = {
   dedupingInterval: 10_000,
   shouldRetryOnError: false,
@@ -722,8 +723,8 @@ function CreateTaskPanel({
           const title = String(formData.get('title') ?? '').trim()
           const assignee = String(formData.get('assignee') ?? '').trim()
           const dueDate = String(formData.get('dueDate') ?? today).replaceAll('-', '/')
-          const status = String(formData.get('status') ?? 'todo') as TaskStatus
-          const priority = String(formData.get('priority') ?? 'medium') as TaskPriority
+          const status = resolveTaskStatus(formData.get('status'))
+          const priority = resolveTaskPriority(formData.get('priority'))
 
           void onSubmit({
             title,
@@ -784,7 +785,7 @@ function CreateTaskPanel({
               defaultValue="medium"
               name="priority"
             >
-              {(['high', 'medium', 'low'] as const).map((priority) => (
+              {taskPriorities.map((priority) => (
                 <option key={priority} value={priority}>
                   {t(`tasks.priority.${priority}`)}
                 </option>
@@ -815,6 +816,22 @@ function CreateTaskPanel({
       </form>
     </section>
   )
+}
+
+function resolveTaskStatus(value: FormDataEntryValue | null): TaskStatus {
+  if (typeof value === 'string' && taskStatuses.includes(value as TaskStatus)) {
+    return value as TaskStatus
+  }
+
+  return 'todo'
+}
+
+function resolveTaskPriority(value: FormDataEntryValue | null): TaskPriority {
+  if (typeof value === 'string' && taskPriorities.includes(value as TaskPriority)) {
+    return value as TaskPriority
+  }
+
+  return 'medium'
 }
 
 function TaskTable({

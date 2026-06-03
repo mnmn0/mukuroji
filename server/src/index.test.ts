@@ -630,6 +630,84 @@ test('DynamoDB task client queries the scoped project partition across pages', a
   ])
 })
 
+test('DynamoDB task client creates duplicate titled tasks with unique IDs', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+
+      if (sentInputs.length === 1) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              directoryProjectId: 'user#demo@example.com#project#refero',
+              projectId: 'refero',
+              taskId: '新規タスク',
+              sortOrder: 10,
+              title: '新規タスク',
+              assignee: '佐藤 花子',
+              status: 'todo',
+              dueDate: '2026/06/20',
+              priority: 'high',
+            },
+          ],
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectTasksClient('TasksTable', documentClient)
+
+  await expect(
+    client.createProjectTask('user#demo@example.com', 'refero', {
+      title: '新規タスク',
+      assignee: '鈴木 太郎',
+      status: 'todo',
+      dueDate: '2026/06/21',
+      priority: 'medium',
+    }),
+  ).resolves.toEqual({
+    task: {
+      id: '新規タスク-2',
+      title: '新規タスク',
+      assignee: '鈴木 太郎',
+      status: 'todo',
+      dueDate: '2026/06/21',
+      priority: 'medium',
+    },
+  })
+  expect(sentInputs).toEqual([
+    {
+      TableName: 'TasksTable',
+      IndexName: 'ProjectSortOrderIndex',
+      KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
+      ExpressionAttributeValues: {
+        ':directoryProjectId': 'user#demo@example.com#project#refero',
+      },
+      ExclusiveStartKey: undefined,
+      ScanIndexForward: true,
+    },
+    {
+      TableName: 'TasksTable',
+      Item: {
+        directoryId: 'user#demo@example.com',
+        directoryProjectId: 'user#demo@example.com#project#refero',
+        projectId: 'refero',
+        taskId: '新規タスク-2',
+        sortOrder: 20,
+        title: '新規タスク',
+        assignee: '鈴木 太郎',
+        status: 'todo',
+        dueDate: '2026/06/21',
+        priority: 'medium',
+      },
+      ConditionExpression: 'attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)',
+    },
+  ])
+})
+
 test('DynamoDB dashboard summary client derives counts from directory and task data', async () => {
   const client = new DynamoDbDashboardSummaryClient(
     {

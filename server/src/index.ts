@@ -1277,7 +1277,7 @@ export class DynamoDbProjectTasksClient {
 
     try {
       const currentTasks = await this.getProjectTasks(directoryId, projectId)
-      const taskId = createResourceId(title)
+      const taskId = createUniqueResourceId(title, currentTasks.tasks.map((task) => task.id))
       const sortOrder = (currentTasks.tasks.length + 1) * 10
       const item: ProjectTaskItem = {
         directoryId,
