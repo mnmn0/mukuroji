@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
+import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   app,
@@ -277,6 +278,222 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
     },
     ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
   })
+})
+
+test('DynamoDB directory client initializes a missing local table before creating a team', async () => {
+  const documentInputs: Array<Record<string, unknown>> = []
+  const rawInputs: Array<Record<string, unknown>> = []
+  let queryAttempts = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      documentInputs.push(command.input)
+
+      if ('KeyConditionExpression' in command.input) {
+        queryAttempts += 1
+
+        if (queryAttempts === 1) {
+          const error = new Error('missing table')
+          error.name = 'ResourceNotFoundException'
+          throw error
+        }
+
+        return { Items: [] }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const dynamoDbClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      rawInputs.push({
+        ...command.input,
+        commandName: command.constructor.name,
+      })
+
+      if (command.constructor.name === 'DescribeTableCommand') {
+        return {
+          Table: {
+            KeySchema: [
+              { AttributeName: 'directoryId', KeyType: 'HASH' },
+              { AttributeName: 'entryKey', KeyType: 'RANGE' },
+            ],
+            TableStatus: 'ACTIVE',
+          },
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'MissingDirectoryTable',
+    documentClient,
+    dynamoDbClient,
+    true,
+  )
+
+  await expect(client.createTeam('user#demo@example.com', { name: '復旧チーム' })).resolves.toEqual({
+    team: {
+      id: '復旧チーム',
+      name: '復旧チーム',
+      expanded: true,
+      projects: [],
+    },
+  })
+  expect(rawInputs).toEqual([
+    expect.objectContaining({
+      commandName: 'CreateTableCommand',
+      TableName: 'MissingDirectoryTable',
+      KeySchema: [
+        { AttributeName: 'directoryId', KeyType: 'HASH' },
+        { AttributeName: 'entryKey', KeyType: 'RANGE' },
+      ],
+    }),
+    expect.objectContaining({
+      commandName: 'DescribeTableCommand',
+      TableName: 'MissingDirectoryTable',
+    }),
+  ])
+  expect(documentInputs.at(-1)).toMatchObject({
+    TableName: 'MissingDirectoryTable',
+    Item: {
+      directoryId: 'user#demo@example.com',
+      teamId: '復旧チーム',
+    },
+  })
+})
+
+test('DynamoDB task client initializes a missing local table before reading tasks', async () => {
+  const rawInputs: Array<Record<string, unknown>> = []
+  let queryAttempts = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      if ('KeyConditionExpression' in command.input) {
+        queryAttempts += 1
+
+        if (queryAttempts === 1) {
+          const error = new Error('missing table')
+          error.name = 'ResourceNotFoundException'
+          throw error
+        }
+
+        return { Items: [] }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const dynamoDbClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      rawInputs.push({
+        ...command.input,
+        commandName: command.constructor.name,
+      })
+
+      if (command.constructor.name === 'DescribeTableCommand') {
+        return {
+          Table: {
+            GlobalSecondaryIndexes: [
+              {
+                IndexName: 'ProjectSortOrderIndex',
+                KeySchema: [
+                  { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
+                  { AttributeName: 'sortOrder', KeyType: 'RANGE' },
+                ],
+              },
+            ],
+            KeySchema: [
+              { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
+              { AttributeName: 'taskId', KeyType: 'RANGE' },
+            ],
+            TableStatus: 'ACTIVE',
+          },
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBClient
+  const client = new DynamoDbProjectTasksClient(
+    'MissingTasksTable',
+    documentClient,
+    dynamoDbClient,
+    true,
+  )
+
+  await expect(client.getProjectTasks('user#demo@example.com', 'new-project')).resolves.toEqual({
+    projectId: 'new-project',
+    tasks: [],
+  })
+  expect(rawInputs).toEqual([
+    expect.objectContaining({
+      commandName: 'CreateTableCommand',
+      TableName: 'MissingTasksTable',
+      KeySchema: [
+        { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
+        { AttributeName: 'taskId', KeyType: 'RANGE' },
+      ],
+      GlobalSecondaryIndexes: [
+        expect.objectContaining({
+          IndexName: 'ProjectSortOrderIndex',
+        }),
+      ],
+    }),
+    expect.objectContaining({
+      commandName: 'DescribeTableCommand',
+      TableName: 'MissingTasksTable',
+    }),
+  ])
+})
+
+test('DynamoDB task client fails fast when a local table exists with the wrong schema', async () => {
+  let queryAttempts = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      if ('KeyConditionExpression' in command.input) {
+        queryAttempts += 1
+        const error = new Error('missing index')
+        error.name = 'ResourceNotFoundException'
+        throw error
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const dynamoDbClient = {
+    async send(command: { constructor: { name: string } }) {
+      if (command.constructor.name === 'CreateTableCommand') {
+        const error = new Error('table exists')
+        error.name = 'ResourceInUseException'
+        throw error
+      }
+
+      if (command.constructor.name === 'DescribeTableCommand') {
+        return {
+          Table: {
+            KeySchema: [
+              { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
+              { AttributeName: 'taskId', KeyType: 'RANGE' },
+            ],
+            TableStatus: 'ACTIVE',
+          },
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBClient
+  const client = new DynamoDbProjectTasksClient(
+    'BrokenTasksTable',
+    documentClient,
+    dynamoDbClient,
+    true,
+  )
+
+  await expect(
+    client.getProjectTasks('user#demo@example.com', 'broken-project'),
+  ).rejects.toThrow('does not match the expected schema')
+  expect(queryAttempts).toBe(1)
 })
 
 test('creates a project task after project access is confirmed', async () => {

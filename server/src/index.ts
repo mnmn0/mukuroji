@@ -1,4 +1,9 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import {
+  CreateTableCommand,
+  DescribeTableCommand,
+  DynamoDBClient,
+  type TableDescription,
+} from '@aws-sdk/client-dynamodb'
 import {
   DynamoDBDocumentClient,
   PutCommand,
@@ -1210,6 +1215,14 @@ export class DynamoDbProjectTasksClient {
    * DynamoDB DocumentClient です。
    */
   private readonly documentClient: DynamoDBDocumentClient
+  /**
+   * table 初期化に使う低レベル DynamoDB client です。
+   */
+  private readonly dynamoDbClient: DynamoDBClient
+  /**
+   * ローカル DynamoDB の table 欠落を自動復旧するかどうかです。
+   */
+  private readonly bootstrapLocalTables: boolean
 
   constructor(
     tableName =
@@ -1217,9 +1230,13 @@ export class DynamoDbProjectTasksClient {
       getEnv('TASKS_TABLE_NAME') ??
       'mukuroji-project-tasks-v2-local',
     documentClient = createDynamoDbDocumentClient(),
+    dynamoDbClient?: DynamoDBClient,
+    bootstrapLocalTables = dynamoDbClient === undefined && shouldBootstrapLocalDynamoDb(),
   ) {
     this.tableName = tableName
     this.documentClient = documentClient
+    this.dynamoDbClient = dynamoDbClient ?? createDynamoDbClient()
+    this.bootstrapLocalTables = bootstrapLocalTables
   }
 
   /**
@@ -1227,27 +1244,7 @@ export class DynamoDbProjectTasksClient {
    */
   async getProjectTasks(directoryId: string, projectId: string) {
     try {
-      const items: unknown[] = []
-      let exclusiveStartKey: Record<string, unknown> | undefined
-
-      do {
-        const response = await this.documentClient.send(
-          new QueryCommand({
-            TableName: this.tableName,
-            IndexName: 'ProjectSortOrderIndex',
-            KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
-            ExpressionAttributeValues: {
-              ':directoryProjectId': createDirectoryProjectId(directoryId, projectId),
-            },
-            ExclusiveStartKey: exclusiveStartKey,
-            ScanIndexForward: true,
-          }),
-        )
-
-        items.push(...(response.Items ?? []))
-        exclusiveStartKey = response.LastEvaluatedKey
-      } while (exclusiveStartKey)
-
+      const items = await this.queryProjectTaskItems(directoryId, projectId)
       const tasks = items.map(toProjectTaskResponseItem)
 
       return {
@@ -1314,6 +1311,51 @@ export class DynamoDbProjectTasksClient {
       throw toProjectDataError(error)
     }
   }
+
+  /**
+   * DynamoDB から project partition の task item を全件取得します。
+   */
+  private async queryProjectTaskItems(
+    directoryId: string,
+    projectId: string,
+    canBootstrapLocalTable = true,
+  ) {
+    try {
+      const items: unknown[] = []
+      let exclusiveStartKey: Record<string, unknown> | undefined
+
+      do {
+        const response = await this.documentClient.send(
+          new QueryCommand({
+            TableName: this.tableName,
+            IndexName: 'ProjectSortOrderIndex',
+            KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
+            ExpressionAttributeValues: {
+              ':directoryProjectId': createDirectoryProjectId(directoryId, projectId),
+            },
+            ExclusiveStartKey: exclusiveStartKey,
+            ScanIndexForward: true,
+          }),
+        )
+
+        items.push(...(response.Items ?? []))
+        exclusiveStartKey = response.LastEvaluatedKey
+      } while (exclusiveStartKey)
+
+      return items
+    } catch (error) {
+      if (
+        canBootstrapLocalTable &&
+        this.bootstrapLocalTables &&
+        isResourceNotFoundError(error) &&
+        await ensureLocalProjectTasksTable(this.tableName, this.dynamoDbClient)
+      ) {
+        return this.queryProjectTaskItems(directoryId, projectId, false)
+      }
+
+      throw error
+    }
+  }
 }
 
 /**
@@ -1328,6 +1370,14 @@ export class DynamoDbProjectDirectoryClient {
    * DynamoDB DocumentClient です。
    */
   private readonly documentClient: DynamoDBDocumentClient
+  /**
+   * table 初期化に使う低レベル DynamoDB client です。
+   */
+  private readonly dynamoDbClient: DynamoDBClient
+  /**
+   * ローカル DynamoDB の table 欠落を自動復旧するかどうかです。
+   */
+  private readonly bootstrapLocalTables: boolean
 
   constructor(
     tableName =
@@ -1335,9 +1385,13 @@ export class DynamoDbProjectDirectoryClient {
       getEnv('PROJECT_DIRECTORY_TABLE_NAME') ??
       'mukuroji-project-directory-local',
     documentClient = createDynamoDbDocumentClient(),
+    dynamoDbClient?: DynamoDBClient,
+    bootstrapLocalTables = dynamoDbClient === undefined && shouldBootstrapLocalDynamoDb(),
   ) {
     this.tableName = tableName
     this.documentClient = documentClient
+    this.dynamoDbClient = dynamoDbClient ?? createDynamoDbClient()
+    this.bootstrapLocalTables = bootstrapLocalTables
   }
 
   /**
@@ -1526,28 +1580,41 @@ export class DynamoDbProjectDirectoryClient {
   /**
    * directory partition 内の全 item を LastEvaluatedKey がなくなるまで取得します。
    */
-  private async queryDirectoryItems(directoryId: string) {
-    const items: unknown[] = []
-    let exclusiveStartKey: Record<string, unknown> | undefined
+  private async queryDirectoryItems(directoryId: string, canBootstrapLocalTable = true) {
+    try {
+      const items: unknown[] = []
+      let exclusiveStartKey: Record<string, unknown> | undefined
 
-    do {
-      const response = await this.documentClient.send(
-        new QueryCommand({
-          TableName: this.tableName,
-          KeyConditionExpression: 'directoryId = :directoryId',
-          ExpressionAttributeValues: {
-            ':directoryId': directoryId,
-          },
-          ExclusiveStartKey: exclusiveStartKey,
-          ScanIndexForward: true,
-        }),
-      )
+      do {
+        const response = await this.documentClient.send(
+          new QueryCommand({
+            TableName: this.tableName,
+            KeyConditionExpression: 'directoryId = :directoryId',
+            ExpressionAttributeValues: {
+              ':directoryId': directoryId,
+            },
+            ExclusiveStartKey: exclusiveStartKey,
+            ScanIndexForward: true,
+          }),
+        )
 
-      items.push(...(response.Items ?? []))
-      exclusiveStartKey = response.LastEvaluatedKey
-    } while (exclusiveStartKey)
+        items.push(...(response.Items ?? []))
+        exclusiveStartKey = response.LastEvaluatedKey
+      } while (exclusiveStartKey)
 
-    return items
+      return items
+    } catch (error) {
+      if (
+        canBootstrapLocalTable &&
+        this.bootstrapLocalTables &&
+        isResourceNotFoundError(error) &&
+        await ensureLocalProjectDirectoryTable(this.tableName, this.dynamoDbClient)
+      ) {
+        return this.queryDirectoryItems(directoryId, false)
+      }
+
+      throw error
+    }
   }
 }
 
@@ -1609,9 +1676,10 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
   }
 }
 
-function createDynamoDbDocumentClient() {
+function createDynamoDbClient() {
   const endpoint = getDynamoDbEndpoint()
-  const client = new DynamoDBClient({
+
+  return new DynamoDBClient({
     region: getAwsRegion(),
     endpoint,
     credentials: {
@@ -1619,12 +1687,205 @@ function createDynamoDbDocumentClient() {
       secretAccessKey: getEnv('AWS_SECRET_ACCESS_KEY') ?? 'test',
     },
   })
+}
 
-  return DynamoDBDocumentClient.from(client, {
+function createDynamoDbDocumentClient() {
+  return DynamoDBDocumentClient.from(createDynamoDbClient(), {
     marshallOptions: {
       removeUndefinedValues: true,
     },
   })
+}
+
+const localDynamoDbTableInitializers = new Map<string, Promise<void>>()
+
+async function ensureLocalProjectTasksTable(
+  tableName: string,
+  dynamoDbClient: DynamoDBClient,
+) {
+  return ensureLocalDynamoDbTable(
+    tableName,
+    dynamoDbClient,
+    () =>
+      new CreateTableCommand({
+        TableName: tableName,
+        AttributeDefinitions: [
+          { AttributeName: 'directoryProjectId', AttributeType: 'S' },
+          { AttributeName: 'taskId', AttributeType: 'S' },
+          { AttributeName: 'sortOrder', AttributeType: 'N' },
+        ],
+        KeySchema: [
+          { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
+          { AttributeName: 'taskId', KeyType: 'RANGE' },
+        ],
+        GlobalSecondaryIndexes: [
+          {
+            IndexName: 'ProjectSortOrderIndex',
+            KeySchema: [
+              { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
+              { AttributeName: 'sortOrder', KeyType: 'RANGE' },
+            ],
+            Projection: { ProjectionType: 'ALL' },
+          },
+        ],
+        BillingMode: 'PAY_PER_REQUEST',
+      }),
+    isProjectTasksTableDescription,
+  )
+}
+
+async function ensureLocalProjectDirectoryTable(
+  tableName: string,
+  dynamoDbClient: DynamoDBClient,
+) {
+  return ensureLocalDynamoDbTable(
+    tableName,
+    dynamoDbClient,
+    () =>
+      new CreateTableCommand({
+        TableName: tableName,
+        AttributeDefinitions: [
+          { AttributeName: 'directoryId', AttributeType: 'S' },
+          { AttributeName: 'entryKey', AttributeType: 'S' },
+        ],
+        KeySchema: [
+          { AttributeName: 'directoryId', KeyType: 'HASH' },
+          { AttributeName: 'entryKey', KeyType: 'RANGE' },
+        ],
+        BillingMode: 'PAY_PER_REQUEST',
+      }),
+    isProjectDirectoryTableDescription,
+  )
+}
+
+async function ensureLocalDynamoDbTable(
+  tableName: string,
+  dynamoDbClient: DynamoDBClient,
+  createCommand: () => CreateTableCommand,
+  validateTable: (table: TableDescription | undefined) => boolean,
+) {
+  if (!shouldBootstrapLocalDynamoDb()) {
+    return false
+  }
+
+  const initializerKey = `${getDynamoDbEndpoint()}#${tableName}`
+  const existingInitializer = localDynamoDbTableInitializers.get(initializerKey)
+
+  if (existingInitializer) {
+    await existingInitializer
+    return true
+  }
+
+  const initializer = createLocalDynamoDbTable(tableName, dynamoDbClient, createCommand, validateTable)
+    .finally(() => {
+      localDynamoDbTableInitializers.delete(initializerKey)
+    })
+
+  localDynamoDbTableInitializers.set(initializerKey, initializer)
+  await initializer
+
+  return true
+}
+
+async function createLocalDynamoDbTable(
+  tableName: string,
+  dynamoDbClient: DynamoDBClient,
+  createCommand: () => CreateTableCommand,
+  validateTable: (table: TableDescription | undefined) => boolean,
+) {
+  try {
+    await dynamoDbClient.send(createCommand())
+  } catch (error) {
+    if (!isResourceInUseError(error)) {
+      throw error
+    }
+  }
+
+  await waitForLocalDynamoDbTable(tableName, dynamoDbClient, validateTable)
+}
+
+async function waitForLocalDynamoDbTable(
+  tableName: string,
+  dynamoDbClient: DynamoDBClient,
+  validateTable: (table: TableDescription | undefined) => boolean,
+) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const response = await dynamoDbClient.send(
+      new DescribeTableCommand({
+        TableName: tableName,
+      }),
+    )
+
+    if (response.Table?.TableStatus === 'ACTIVE' && validateTable(response.Table)) {
+      return
+    }
+
+    if (response.Table?.TableStatus === 'ACTIVE') {
+      throw new Error(`Local DynamoDB table "${tableName}" does not match the expected schema.`)
+    }
+
+    await sleep(100)
+  }
+
+  throw new Error(`Local DynamoDB table "${tableName}" did not become active.`)
+}
+
+function isProjectTasksTableDescription(table: TableDescription | undefined) {
+  return (
+    hasKeySchema(table, [
+      ['directoryProjectId', 'HASH'],
+      ['taskId', 'RANGE'],
+    ]) &&
+    Boolean(
+      table?.GlobalSecondaryIndexes?.some((index) =>
+        index.IndexName === 'ProjectSortOrderIndex' &&
+        hasKeySchema(index, [
+          ['directoryProjectId', 'HASH'],
+          ['sortOrder', 'RANGE'],
+        ]),
+      ),
+    )
+  )
+}
+
+function isProjectDirectoryTableDescription(table: TableDescription | undefined) {
+  return hasKeySchema(table, [
+    ['directoryId', 'HASH'],
+    ['entryKey', 'RANGE'],
+  ])
+}
+
+function hasKeySchema(
+  value: { KeySchema?: TableDescription['KeySchema'] } | undefined,
+  expected: Array<[string, 'HASH' | 'RANGE']>,
+) {
+  return expected.every(([attributeName, keyType]) =>
+    value?.KeySchema?.some((schema) =>
+      schema.AttributeName === attributeName && schema.KeyType === keyType,
+    ),
+  )
+}
+
+function shouldBootstrapLocalDynamoDb() {
+  const endpoint = getDynamoDbEndpoint()
+
+  return /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|floci)(?::|\/|$)/.test(endpoint)
+}
+
+function isResourceNotFoundError(error: unknown) {
+  return isAwsNamedError(error, 'ResourceNotFoundException')
+}
+
+function isResourceInUseError(error: unknown) {
+  return isAwsNamedError(error, 'ResourceInUseException')
+}
+
+function isAwsNamedError(error: unknown, name: string) {
+  return typeof error === 'object' && error !== null && 'name' in error && error.name === name
+}
+
+async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function toProjectDataError(error: unknown) {
