@@ -25,7 +25,11 @@ const taskPriorities = ['high', 'medium', 'low'] as const
  */
 export type ProjectTask = {
   /**
-   * React の key として使う一意なタスク ID です。
+   * 取得元プロジェクト ID です。API body の top-level projectId から補完されます。
+   */
+  projectId?: string
+  /**
+   * プロジェクト内でタスクを識別する ID です。
    */
   id: string
   /**
@@ -115,7 +119,7 @@ export async function getProjectTasks(projectId: string, accessToken?: string) {
     throw new ProjectTasksApiError(response.status, 'tasks.error.loading')
   }
 
-  return data.tasks
+  return attachProjectId(data)
 }
 
 /**
@@ -160,6 +164,7 @@ function isProjectTask(value: unknown): value is ProjectTask {
   return (
     typeof value === 'object' &&
     value !== null &&
+    (!('projectId' in value) || typeof value.projectId === 'string') &&
     'id' in value &&
     typeof value.id === 'string' &&
     'titleKey' in value &&
@@ -187,4 +192,14 @@ function isTaskStatus(value: unknown): value is TaskStatus {
  */
 function isTaskPriority(value: unknown): value is TaskPriority {
   return taskPriorities.includes(value as TaskPriority)
+}
+
+/**
+ * top-level の projectId を各タスク行へ補完します。
+ */
+function attachProjectId(response: ProjectTasksResponse) {
+  return response.tasks.map((task) => ({
+    ...task,
+    projectId: response.projectId,
+  }))
 }

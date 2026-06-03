@@ -18,6 +18,10 @@ type MockRequestCounts = {
    * チーム/プロジェクト一覧 API の request 数です。
    */
   projectDirectory: number
+  /**
+   * プロジェクト別タスク API の request 数です。
+   */
+  projectTasks: Record<string, number>
 }
 
 const mockRequestCountsByPage = new WeakMap<Page, MockRequestCounts>()
@@ -29,6 +33,7 @@ const mockRequestCountsByPage = new WeakMap<Page, MockRequestCounts>()
 async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFixtures) {
   const requestCounts: MockRequestCounts = {
     projectDirectory: 0,
+    projectTasks: {},
   }
 
   mockRequestCountsByPage.set(page, requestCounts)
@@ -63,6 +68,8 @@ async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFi
   })
 
   await page.route('**/api/projects/refero/tasks', async (route) => {
+    recordProjectTaskRequest(requestCounts, 'refero')
+
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
     await route.fulfill({
@@ -73,7 +80,22 @@ async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFi
     })
   })
 
+  await page.route('**/api/projects/product-roadmap/tasks', async (route) => {
+    recordProjectTaskRequest(requestCounts, 'product-roadmap')
+
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    await route.fulfill({
+      json: {
+        projectId: 'product-roadmap',
+        tasks: [],
+      },
+    })
+  })
+
   await page.route('**/api/projects/brand-refresh/tasks', async (route) => {
+    recordProjectTaskRequest(requestCounts, 'brand-refresh')
+
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
     await route.fulfill({
@@ -85,6 +107,8 @@ async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFi
   })
 
   await page.route('**/api/projects/shared-launch/tasks', async (route) => {
+    recordProjectTaskRequest(requestCounts, 'shared-launch')
+
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
     await route.fulfill({
@@ -118,6 +142,10 @@ function getMockRequestCounts(page: Page) {
   }
 
   return requestCounts
+}
+
+function recordProjectTaskRequest(requestCounts: MockRequestCounts, projectId: string) {
+  requestCounts.projectTasks[projectId] = (requestCounts.projectTasks[projectId] ?? 0) + 1
 }
 
 test.describe('authenticated task page', () => {
@@ -181,6 +209,12 @@ test.describe('authenticated task page', () => {
     await expect(page.getByRole('button', { name: 'デザインチーム' })).toBeVisible()
     await expect(page.getByRole('button', { name: '共通ローンチ' })).toHaveCount(2)
     expect(requestCounts.projectDirectory).toBe(1)
+    await expect.poll(() => requestCounts.projectTasks).toEqual({
+      refero: 1,
+      'product-roadmap': 1,
+      'shared-launch': 1,
+      'brand-refresh': 1,
+    })
 
     await page.getByRole('button', { name: 'ブランド刷新' }).click()
 
@@ -205,6 +239,14 @@ test.describe('authenticated task page', () => {
     await expect(page.getByLabel('プロジェクトのパンくずリスト')).toContainText(
       'デザインチーム',
     )
+  })
+
+  test('チーム概要では選択チームのプロジェクトタスクだけを集計する', async ({ page }) => {
+    await page.goto('/teams/design-team/overview')
+
+    await expect(page.getByTestId('team-overview-projects').locator('p').last()).toHaveText('2')
+    await expect(page.getByTestId('team-overview-open-tasks').locator('p').last()).toHaveText('0')
+    await expect(page.getByTestId('team-overview-blocked').locator('p').last()).toHaveText('0')
   })
 
   test('タスク API 失敗時にエラーを表示する', async ({ page }) => {

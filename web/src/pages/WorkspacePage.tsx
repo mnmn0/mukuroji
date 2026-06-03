@@ -23,14 +23,17 @@ import {
   getProjectDirectory,
   type ProjectDirectoryTeam,
 } from '../projects/api'
-import { projectDirectoryFixtures } from '../projects/fixtures'
 import {
   createProjectTasksPath,
   createTeamViewPath,
   workspaceNavPaths,
 } from '../routes/paths'
-import type { ProjectTask, TaskPriority, TaskStatus } from '../tasks/api'
-import { referoTaskFixtures } from '../tasks/fixtures'
+import {
+  getProjectTasks,
+  type ProjectTask,
+  type TaskPriority,
+  type TaskStatus,
+} from '../tasks/api'
 
 /**
  * サイドバーまたはチーム配下から表示できるワークスペース画面です。
@@ -148,6 +151,9 @@ const fallbackDashboardSummary: DashboardSummary = {
   updatedAt: '2026-06-03T00:00:00.000Z',
   source: 'dynamodb',
 }
+
+const emptyProjectDirectory: ProjectDirectoryTeam[] = []
+const emptyProjectTasks: ProjectTask[] = []
 
 const apiSWRConfig = {
   dedupingInterval: 10_000,
@@ -322,10 +328,21 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   const projectDirectoryKey = accessToken && user && !currentUserError
     ? (['project-directory', accessToken, locale] as const)
     : null
-  const { data: teams = projectDirectoryFixtures } = useSWR(
+  const { data: teams = emptyProjectDirectory, isLoading: isProjectDirectoryLoading } = useSWR(
     projectDirectoryKey,
     ([, currentAccessToken, currentLocale]) =>
       getProjectDirectory(currentAccessToken, currentLocale),
+    apiSWRConfig,
+  )
+  const projectIds = useMemo(() => uniqueProjectIds(teams), [teams])
+  const projectTasksKey =
+    accessToken && user && !currentUserError && projectIds.length > 0
+      ? (['workspace-project-tasks', accessToken, projectIds] as const)
+      : null
+  const { data: tasks = emptyProjectTasks, isLoading: isProjectTasksLoading } = useSWR(
+    projectTasksKey,
+    ([, currentAccessToken, currentProjectIds]) =>
+      loadProjectTasks(currentProjectIds, currentAccessToken),
     apiSWRConfig,
   )
   const metadata = workspaceViewMetadata[view]
@@ -333,7 +350,12 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   const userLabel =
     user?.attributes.email ?? user?.attributes.name ?? user?.username ?? t('workspace.user.fallback')
   const userInitial = userLabel.trim().charAt(0).toUpperCase() || 'M'
-  const isLoading = !session || isCurrentUserLoading || Boolean(currentUserError)
+  const isLoading =
+    !session ||
+    isCurrentUserLoading ||
+    Boolean(currentUserError) ||
+    Boolean(user && isProjectDirectoryLoading) ||
+    Boolean(user && projectIds.length > 0 && isProjectTasksLoading)
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -372,7 +394,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
         navigate(createTeamViewPath(teamId, viewId))
       }
       summary={summary}
-      tasks={referoTaskFixtures}
+      tasks={tasks}
       teams={teams}
       userInitial={userInitial}
       userLabel={userLabel}
@@ -538,7 +560,7 @@ function HomeView({
           <SectionHeader title={t('workspace.home.focusTitle')} meta={t('workspace.home.focusMeta')} />
           <div className="divide-y divide-slate-100">
             {nextTasks.map((task) => (
-              <TaskListRow key={task.id} t={t} task={task} />
+              <TaskListRow key={createWorkspaceTaskKey(task)} t={t} task={task} />
             ))}
           </div>
         </section>
@@ -591,7 +613,7 @@ function MyTasksView({ t, tasks }: { t: (key: MessageKey) => string; tasks: Proj
           />
           <div className="grid gap-3 px-5 pb-5">
             {group.tasks.map((task) => (
-              <CompactTaskCard key={task.id} t={t} task={task} />
+              <CompactTaskCard key={createWorkspaceTaskKey(task)} t={t} task={task} />
             ))}
           </div>
         </section>
@@ -817,13 +839,30 @@ function TeamOverviewView({
   tasks: ProjectTask[]
 }) {
   const projects = team?.projects ?? []
+  const projectIds = projects.map((project) => project.id)
+  const teamTasks = filterTasksByProjectIds(tasks, projectIds)
 
   return (
     <div className="grid gap-6">
       <div className="grid grid-cols-3 gap-4 max-[900px]:grid-cols-1">
-        <MetricCard label={t('workspace.metric.projects')} value={projects.length} tone="blue" />
-        <MetricCard label={t('workspace.metric.openTasks')} value={tasks.filter((task) => task.status !== 'done').length} tone="emerald" />
-        <MetricCard label={t('workspace.metric.blocked')} value={tasks.filter((task) => task.priority === 'high').length} tone="red" />
+        <MetricCard
+          label={t('workspace.metric.projects')}
+          testId="team-overview-projects"
+          value={projects.length}
+          tone="blue"
+        />
+        <MetricCard
+          label={t('workspace.metric.openTasks')}
+          testId="team-overview-open-tasks"
+          value={teamTasks.filter((task) => task.status !== 'done').length}
+          tone="emerald"
+        />
+        <MetricCard
+          label={t('workspace.metric.blocked')}
+          testId="team-overview-blocked"
+          value={teamTasks.filter((task) => task.priority === 'high').length}
+          tone="red"
+        />
       </div>
       <section className="rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
         <SectionHeader title={t('workspace.teamOverview.projectsTitle')} meta={team?.name ?? t('workspace.team.missing')} />
@@ -870,10 +909,12 @@ function TeamMembersView({ team, t }: { team?: ProjectDirectoryTeam; t: (key: Me
 
 function MetricCard({
   label,
+  testId,
   tone,
   value,
 }: {
   label: string
+  testId?: string
   tone: 'amber' | 'blue' | 'emerald' | 'red'
   value: number | string
 }) {
@@ -885,7 +926,10 @@ function MetricCard({
   } as const
 
   return (
-    <section className={`rounded-lg border bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.05)] ${toneClassNames[tone]}`}>
+    <section
+      className={`rounded-lg border bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.05)] ${toneClassNames[tone]}`}
+      data-testid={testId}
+    >
       <p className="text-sm font-black text-[#263550]">{label}</p>
       <p className="mt-3 text-4xl font-black leading-none text-current">{value}</p>
     </section>
@@ -988,6 +1032,34 @@ function findActiveTeam(teams: ProjectDirectoryTeam[], activeTeamId?: string) {
   }
 
   return teams[0]
+}
+
+async function loadProjectTasks(projectIds: readonly string[], accessToken: string) {
+  const taskGroups = await Promise.all(
+    projectIds.map((projectId) => getProjectTasks(projectId, accessToken)),
+  )
+
+  return taskGroups.flat()
+}
+
+function uniqueProjectIds(teams: ProjectDirectoryTeam[]) {
+  return Array.from(
+    new Set(teams.flatMap((team) => team.projects.map((project) => project.id))),
+  )
+}
+
+function createWorkspaceTaskKey(task: ProjectTask) {
+  return task.projectId ? `${task.projectId}:${task.id}` : task.id
+}
+
+function filterTasksByProjectIds(tasks: ProjectTask[], projectIds: readonly string[]) {
+  const projectIdSet = new Set(projectIds)
+
+  if (projectIdSet.size === 0) {
+    return []
+  }
+
+  return tasks.filter((task) => !task.projectId || projectIdSet.has(task.projectId))
 }
 
 function resolvePortfolioRiskKey(index: number): MessageKey {
