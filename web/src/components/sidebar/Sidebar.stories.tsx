@@ -37,6 +37,8 @@ const meta = {
     defaultActiveTeamId: 'johns-first-team',
     defaultActiveProjectId: 'refero',
     inboxCount: 3,
+    onCreateProject: async () => undefined,
+    onCreateTeam: async () => undefined,
   },
   decorators: [
     (Story) => (
@@ -62,6 +64,12 @@ export const Collapsed: Story = {
 export const English: Story = {
   args: {
     labels: createSidebarLabels('en'),
+  },
+}
+
+export const CreatePanelOpen: Story = {
+  args: {
+    defaultCreatePanelOpen: true,
   },
 }
 

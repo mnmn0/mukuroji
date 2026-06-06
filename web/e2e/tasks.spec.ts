@@ -264,6 +264,14 @@ function getMockRequestCounts(page: Page) {
   return requestCounts
 }
 
+/**
+ * サイドバーの新規登録パネルを開きます。
+ */
+async function openSidebarCreatePanel(page: Page) {
+  await page.getByRole('button', { name: '新規登録' }).click()
+  await expect(page.getByLabel('チーム名')).toBeVisible()
+}
+
 function recordProjectTaskRequest(requestCounts: MockRequestCounts, projectId: string) {
   requestCounts.projectTasks[projectId] = (requestCounts.projectTasks[projectId] ?? 0) + 1
 }
@@ -348,6 +356,7 @@ test.describe('authenticated task page', () => {
     await page.goto('/dashboard')
     const requestCounts = getMockRequestCounts(page)
 
+    await openSidebarCreatePanel(page)
     await page.getByLabel('チーム名').fill('新規チーム')
     await page.getByRole('button', { name: 'チームを登録' }).click()
 
@@ -365,6 +374,7 @@ test.describe('authenticated task page', () => {
     await page.goto('/dashboard')
     const requestCounts = getMockRequestCounts(page)
 
+    await openSidebarCreatePanel(page)
     await page.getByLabel('チーム名').fill('   ')
     await page.getByRole('button', { name: 'チームを登録' }).click()
 
@@ -411,7 +421,7 @@ test.describe('authenticated task page', () => {
     await page.locator('input[name="title"]').fill('新規タスク')
     await page.locator('input[name="assignee"]').fill('佐藤 花子')
     await page.locator('input[name="dueDate"]').fill('2026-06-20')
-    await page.getByRole('button', { name: '登録' }).click()
+    await page.getByRole('button', { name: '登録', exact: true }).click()
 
     await expect(page.getByTestId('task-row-new-task').getByText('新規タスク')).toBeVisible()
     expect(requestCounts.taskCreates).toBe(1)

@@ -1,5 +1,14 @@
+export { MobileSidebarButton } from './MobileSidebarButton'
+export { MobileSidebarDrawer } from './MobileSidebarDrawer'
 export { Sidebar } from './Sidebar'
 export type {
+  MobileSidebarButtonProps,
+} from './MobileSidebarButton'
+export type {
+  MobileSidebarDrawerProps,
+} from './MobileSidebarDrawer'
+export type {
+  SidebarCreateLabels,
   SidebarNavId,
   SidebarLabels,
   SidebarProject,

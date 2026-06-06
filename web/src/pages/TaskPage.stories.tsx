@@ -13,6 +13,8 @@ const meta = {
     locale: 'ja',
     projectId: 'refero',
     projectName: 'Refero',
+    onCreateProject: async () => undefined,
+    onCreateTeam: async () => undefined,
     tasks: referoTaskFixtures,
     teamName: 'コアチーム',
     teams: projectDirectoryFixtures,
