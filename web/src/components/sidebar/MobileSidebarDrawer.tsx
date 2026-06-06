@@ -14,6 +14,10 @@ export type MobileSidebarDrawerProps = {
    */
   closeLabel: string
   /**
+   * ドロワー dialog のアクセシブルネームです。
+   */
+  dialogLabel: string
+  /**
    * ドロワーを表示するかどうかです。
    */
   isOpen: boolean
@@ -38,6 +42,7 @@ const focusableSelector = [
 export function MobileSidebarDrawer({
   children,
   closeLabel,
+  dialogLabel,
   isOpen,
   onClose,
 }: MobileSidebarDrawerProps) {
@@ -54,7 +59,9 @@ export function MobileSidebarDrawer({
         : undefined
     const drawer = drawerRef.current
     const firstFocusableElement = getFocusableElements(drawer)[0]
+    const previousBodyOverflow = document.body.style.overflow
 
+    document.body.style.overflow = 'hidden'
     ;(firstFocusableElement ?? drawer)?.focus()
 
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -96,6 +103,7 @@ export function MobileSidebarDrawer({
 
     return () => {
       document.removeEventListener('keydown', handleKeyDown)
+      document.body.style.overflow = previousBodyOverflow
       previousFocusedElement?.focus()
     }
   }, [isOpen, onClose])
@@ -106,6 +114,7 @@ export function MobileSidebarDrawer({
 
   return (
     <div
+      aria-label={dialogLabel}
       aria-modal="true"
       className="fixed inset-0 z-50 min-[981px]:hidden"
       ref={drawerRef}

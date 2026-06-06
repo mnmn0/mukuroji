@@ -395,6 +395,7 @@ export function WorkspaceScreen({
 
       <MobileSidebarDrawer
         closeLabel={t('sidebar.mobileClose')}
+        dialogLabel={t('sidebar.mobileDialog')}
         isOpen={isMobileSidebarOpen}
         onClose={() => setIsMobileSidebarOpen(false)}
       >
