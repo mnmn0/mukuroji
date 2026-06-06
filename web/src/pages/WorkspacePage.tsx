@@ -21,6 +21,8 @@ import {
   type MessageKey,
 } from '../i18n'
 import {
+  archiveProjectDirectoryProject,
+  archiveProjectDirectoryTeam,
   createProjectDirectoryProject,
   createProjectDirectoryTeam,
   type CreateProjectDirectoryProjectInput,
@@ -129,6 +131,14 @@ type WorkspaceScreenProps = {
    * プロジェクト新規登録時の callback です。
    */
   onCreateProject?: (teamId: string, input: CreateProjectDirectoryProjectInput) => Promise<void>
+  /**
+   * チームアーカイブ時の callback です。
+   */
+  onArchiveTeam?: (teamId: string) => Promise<void>
+  /**
+   * プロジェクトアーカイブ時の callback です。
+   */
+  onArchiveProject?: (teamId: string, projectId: string) => Promise<void>
 }
 
 /**
@@ -325,6 +335,28 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     await mutateProjectDirectory()
   }
 
+  const handleArchiveTeam = async (teamId: string) => {
+    if (!accessToken) {
+      return
+    }
+
+    await archiveProjectDirectoryTeam(accessToken, teamId)
+    await mutateProjectDirectory()
+
+    if (params.teamId === teamId) {
+      navigate(workspaceNavPaths.home)
+    }
+  }
+
+  const handleArchiveProject = async (teamId: string, projectId: string) => {
+    if (!accessToken) {
+      return
+    }
+
+    await archiveProjectDirectoryProject(accessToken, teamId, projectId)
+    await mutateProjectDirectory()
+  }
+
   return (
     <WorkspaceScreen
       activeTeamId={params.teamId}
@@ -340,6 +372,8 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       }
       onCreateProject={handleCreateProject}
       onCreateTeam={handleCreateTeam}
+      onArchiveProject={handleArchiveProject}
+      onArchiveTeam={handleArchiveTeam}
       summary={summary}
       tasks={tasks}
       teams={teams}
@@ -369,6 +403,8 @@ export function WorkspaceScreen({
   onSelectProject,
   onCreateProject,
   onCreateTeam,
+  onArchiveProject,
+  onArchiveTeam,
 }: WorkspaceScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
@@ -385,6 +421,8 @@ export function WorkspaceScreen({
         className="max-[980px]:hidden"
         inboxCount={createInboxTasks(tasks).length}
         labels={sidebarLabels}
+        onArchiveProject={onArchiveProject}
+        onArchiveTeam={onArchiveTeam}
         onCreateProject={onCreateProject}
         onCreateTeam={onCreateTeam}
         onSelectNav={onSelectNav}
@@ -405,6 +443,8 @@ export function WorkspaceScreen({
           activeTeamViewId={metadata.activeTeamViewId}
           inboxCount={createInboxTasks(tasks).length}
           labels={sidebarLabels}
+          onArchiveProject={onArchiveProject}
+          onArchiveTeam={onArchiveTeam}
           onCreateProject={onCreateProject}
           onCreateTeam={onCreateTeam}
           onSelectNav={(navId) => {

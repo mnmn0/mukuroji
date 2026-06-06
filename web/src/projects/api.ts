@@ -96,6 +96,38 @@ type CreateProjectDirectoryProjectResponse = {
 }
 
 /**
+ * チームアーカイブ API が返す response body です。
+ */
+type ArchiveProjectDirectoryTeamResponse = {
+  /**
+   * アーカイブされたチーム ID です。
+   */
+  teamId: string
+  /**
+   * アーカイブ日時の ISO 8601 timestamp です。
+   */
+  archivedAt: string
+}
+
+/**
+ * プロジェクトアーカイブ API が返す response body です。
+ */
+type ArchiveProjectDirectoryProjectResponse = {
+  /**
+   * プロジェクトが所属していたチーム ID です。
+   */
+  teamId: string
+  /**
+   * アーカイブされたプロジェクト ID です。
+   */
+  projectId: string
+  /**
+   * アーカイブ日時の ISO 8601 timestamp です。
+   */
+  archivedAt: string
+}
+
+/**
  * プロジェクト directory API からエラーレスポンスが返ったときに投げる例外です。
  */
 export class ProjectDirectoryApiError extends Error {
@@ -196,6 +228,48 @@ export async function createProjectDirectoryProject(
   }
 
   return data.project
+}
+
+/**
+ * DynamoDB 上のチームをアーカイブします。
+ */
+export async function archiveProjectDirectoryTeam(accessToken: string, teamId: string) {
+  const data = await sendProjectDirectoryRequest<unknown>(
+    `/teams/${encodeURIComponent(teamId)}/archive`,
+    accessToken,
+    {
+      method: 'PATCH',
+    },
+  )
+
+  if (!isArchiveProjectDirectoryTeamResponse(data)) {
+    throw new ProjectDirectoryApiError(502, 'projects.error.loading')
+  }
+
+  return data
+}
+
+/**
+ * DynamoDB 上のチーム配下プロジェクトをアーカイブします。
+ */
+export async function archiveProjectDirectoryProject(
+  accessToken: string,
+  teamId: string,
+  projectId: string,
+) {
+  const data = await sendProjectDirectoryRequest<unknown>(
+    `/teams/${encodeURIComponent(teamId)}/projects/${encodeURIComponent(projectId)}/archive`,
+    accessToken,
+    {
+      method: 'PATCH',
+    },
+  )
+
+  if (!isArchiveProjectDirectoryProjectResponse(data)) {
+    throw new ProjectDirectoryApiError(502, 'projects.error.loading')
+  }
+
+  return data
 }
 
 async function sendProjectDirectoryRequest<T>(
@@ -318,6 +392,40 @@ function isCreateProjectDirectoryProjectResponse(
     value !== null &&
     'project' in value &&
     isProjectDirectoryProject(value.project)
+  )
+}
+
+/**
+ * API レスポンスがチームアーカイブ結果として扱えるかどうかを判定します。
+ */
+function isArchiveProjectDirectoryTeamResponse(
+  value: unknown,
+): value is ArchiveProjectDirectoryTeamResponse {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'teamId' in value &&
+    typeof value.teamId === 'string' &&
+    'archivedAt' in value &&
+    typeof value.archivedAt === 'string'
+  )
+}
+
+/**
+ * API レスポンスがプロジェクトアーカイブ結果として扱えるかどうかを判定します。
+ */
+function isArchiveProjectDirectoryProjectResponse(
+  value: unknown,
+): value is ArchiveProjectDirectoryProjectResponse {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'teamId' in value &&
+    typeof value.teamId === 'string' &&
+    'projectId' in value &&
+    typeof value.projectId === 'string' &&
+    'archivedAt' in value &&
+    typeof value.archivedAt === 'string'
   )
 }
 

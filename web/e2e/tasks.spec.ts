@@ -33,6 +33,14 @@ type MockRequestCounts = {
    */
   projectCreates: number
   /**
+   * チームアーカイブ API の request 数です。
+   */
+  teamArchives: number
+  /**
+   * プロジェクトアーカイブ API の request 数です。
+   */
+  projectArchives: number
+  /**
    * タスク作成 API の request 数です。
    */
   taskCreates: number
@@ -50,6 +58,8 @@ async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFi
     projectTasks: {},
     teamCreates: 0,
     projectCreates: 0,
+    teamArchives: 0,
+    projectArchives: 0,
     taskCreates: 0,
   }
   const projectDirectory: ProjectDirectoryTeam[] = projectDirectoryFixtures.map((team) => ({
@@ -141,6 +151,57 @@ async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFi
       status: 201,
       json: {
         project,
+      },
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/archive$/, async (route) => {
+    if (route.request().method() !== 'PATCH') {
+      await route.fallback()
+      return
+    }
+
+    requestCounts.teamArchives += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    const teamId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[3] ?? '')
+    const teamIndex = projectDirectory.findIndex((team) => team.id === teamId)
+
+    if (teamIndex >= 0) {
+      projectDirectory.splice(teamIndex, 1)
+    }
+
+    await route.fulfill({
+      json: {
+        teamId,
+        archivedAt: '2026-06-06T00:00:00.000Z',
+      },
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/projects\/[^/]+\/archive$/, async (route) => {
+    if (route.request().method() !== 'PATCH') {
+      await route.fallback()
+      return
+    }
+
+    requestCounts.projectArchives += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    const pathSegments = new URL(route.request().url()).pathname.split('/')
+    const teamId = decodeURIComponent(pathSegments[3] ?? '')
+    const projectId = decodeURIComponent(pathSegments[5] ?? '')
+    const team = projectDirectory.find((candidate) => candidate.id === teamId)
+
+    if (team) {
+      team.projects = team.projects.filter((project) => project.id !== projectId)
+    }
+
+    await route.fulfill({
+      json: {
+        teamId,
+        projectId,
+        archivedAt: '2026-06-06T00:00:00.000Z',
       },
     })
   })
@@ -333,9 +394,9 @@ test.describe('authenticated task page', () => {
     await page.goto('/dashboard')
     const requestCounts = getMockRequestCounts(page)
 
-    await expect(page.getByRole('button', { name: 'コアチーム' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'デザインチーム' })).toBeVisible()
-    await expect(page.getByRole('button', { name: '共通ローンチ' })).toHaveCount(2)
+    await expect(page.getByRole('button', { name: 'コアチーム', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'デザインチーム', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(2)
     expect(requestCounts.projectDirectory).toBe(1)
     await expect.poll(() => requestCounts.projectTasks).toEqual({
       refero: 1,
@@ -344,7 +405,7 @@ test.describe('authenticated task page', () => {
       'brand-refresh': 1,
     })
 
-    await page.getByRole('button', { name: 'ブランド刷新' }).click()
+    await page.getByRole('button', { name: 'ブランド刷新', exact: true }).click()
 
     await expect(page).toHaveURL('/projects/brand-refresh/tasks?teamId=design-team')
     await expect(page.getByTestId('tasks-heading')).toHaveText('ブランド刷新')
@@ -360,14 +421,37 @@ test.describe('authenticated task page', () => {
     await page.getByLabel('チーム名').fill('新規チーム')
     await page.getByRole('button', { name: 'チームを登録' }).click()
 
-    await expect(page.getByRole('button', { name: '新規チーム' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '新規チーム', exact: true })).toBeVisible()
     expect(requestCounts.teamCreates).toBe(1)
 
     await page.getByLabel('プロジェクト名').fill('新規プロジェクト')
     await page.getByRole('button', { name: 'プロジェクトを登録' }).click()
 
-    await expect(page.getByRole('button', { name: '新規プロジェクト' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '新規プロジェクト', exact: true })).toBeVisible()
     expect(requestCounts.projectCreates).toBe(1)
+  })
+
+  test('ダッシュボードからプロジェクトをアーカイブできる', async ({ page }) => {
+    await page.goto('/dashboard')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('button', { name: 'Refero をアーカイブ' }).click()
+
+    await expect(page.getByRole('button', { name: 'Refero', exact: true })).toHaveCount(0)
+    expect(requestCounts.projectArchives).toBe(1)
+  })
+
+  test('ダッシュボードからチームをアーカイブできる', async ({ page }) => {
+    await page.goto('/dashboard')
+    const requestCounts = getMockRequestCounts(page)
+
+    await expect(page.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(2)
+
+    await page.getByRole('button', { name: 'デザインチーム をアーカイブ' }).click()
+
+    await expect(page.getByRole('button', { name: 'デザインチーム', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(1)
+    expect(requestCounts.teamArchives).toBe(1)
   })
 
   test('ダッシュボードの登録フォームは空白のみの名前を API に送信しない', async ({ page }) => {
@@ -393,7 +477,7 @@ test.describe('authenticated task page', () => {
   }) => {
     await page.goto('/dashboard')
 
-    const sharedLaunchButtons = page.getByRole('button', { name: '共通ローンチ' })
+    const sharedLaunchButtons = page.getByRole('button', { name: '共通ローンチ', exact: true })
 
     await expect(sharedLaunchButtons).toHaveCount(2)
     await sharedLaunchButtons.nth(1).click()

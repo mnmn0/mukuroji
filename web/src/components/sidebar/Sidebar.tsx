@@ -146,6 +146,28 @@ export type SidebarCreateLabels = {
 }
 
 /**
+ * サイドバー内のアーカイブ操作で使う表示文言です。
+ */
+export type SidebarArchiveLabels = {
+  /**
+   * チームアーカイブボタンのアクセシブルラベルを返します。
+   */
+  team: (name: string) => string
+  /**
+   * プロジェクトアーカイブボタンのアクセシブルラベルを返します。
+   */
+  project: (name: string) => string
+  /**
+   * アーカイブ処理中のアクセシブルラベルです。
+   */
+  archiving: string
+  /**
+   * アーカイブ失敗時のエラーメッセージです。
+   */
+  error: string
+}
+
+/**
  * サイドバーで使う表示文言です。
  */
 export type SidebarLabels = {
@@ -181,6 +203,10 @@ export type SidebarLabels = {
    * チーム/プロジェクト新規登録フォームの文言です。
    */
   create: SidebarCreateLabels
+  /**
+   * チーム/プロジェクトのアーカイブ操作の文言です。
+   */
+  archive: SidebarArchiveLabels
   /**
    * チーム概要ビューの文言です。
    */
@@ -303,6 +329,14 @@ export type SidebarProps = {
     input: { name: string; tone: SidebarProjectTone },
   ) => void | Promise<void>
   /**
+   * チームをアーカイブするときに呼ばれます。
+   */
+  onArchiveTeam?: (teamId: string) => void | Promise<void>
+  /**
+   * プロジェクトをアーカイブするときに呼ばれます。
+   */
+  onArchiveProject?: (teamId: string, projectId: string) => void | Promise<void>
+  /**
    * 主要ナビゲーションが選択されたときに呼ばれます。
    */
   onSelectNav?: (navId: SidebarNavId) => void
@@ -387,6 +421,12 @@ const defaultLabels: SidebarLabels = {
     loadingError: 'チームとプロジェクトを取得できませんでした',
     noTeams: '先にチームを登録してください。',
   },
+  archive: {
+    team: (name) => `${name} をアーカイブ`,
+    project: (name) => `${name} をアーカイブ`,
+    archiving: 'アーカイブ中',
+    error: 'アーカイブできませんでした',
+  },
   teamOverview: 'チーム概要',
   members: 'メンバー',
   projectGroup: 'プロジェクト',
@@ -406,7 +446,11 @@ const defaultLabels: SidebarLabels = {
 /**
  * 既定のサイドバー文言を部分的に上書きする入力です。
  */
-type PartialSidebarLabels = Partial<Omit<SidebarLabels, 'create' | 'nav'>> & {
+type PartialSidebarLabels = Partial<Omit<SidebarLabels, 'archive' | 'create' | 'nav'>> & {
+  /**
+   * アーカイブ操作文言の上書きです。
+   */
+  archive?: Partial<SidebarArchiveLabels>
   /**
    * 新規登録フォーム文言の上書きです。
    */
@@ -470,6 +514,8 @@ export function Sidebar({
   onCollapsedChange,
   onCreateTeam,
   onCreateProject,
+  onArchiveTeam,
+  onArchiveProject,
   onSelectNav,
   onSelectTeamView,
   onSelectTeam,
@@ -510,6 +556,8 @@ export function Sidebar({
   >(defaultProjectTeamId)
   const [internalExpandedTeamIds, setInternalExpandedTeamIds] = useState(initialExpandedTeamIds)
   const [internalCollapsedTeamIds, setInternalCollapsedTeamIds] = useState<string[]>([])
+  const [archivingItemKey, setArchivingItemKey] = useState<string | undefined>()
+  const [archiveErrorMessage, setArchiveErrorMessage] = useState<string | undefined>()
 
   const isCollapsed = controlledCollapsed ?? internalCollapsed
   const activeProjectId = controlledActiveProjectId ?? internalActiveProjectId
@@ -536,6 +584,44 @@ export function Sidebar({
     item.id === 'inbox' ? { ...item, badge: inboxCount } : item,
   )
   const canCreate = Boolean(onCreateTeam || onCreateProject)
+
+  const archiveTeam = (teamId: string) => {
+    if (!onArchiveTeam || archivingItemKey) {
+      return
+    }
+
+    const itemKey = createTeamArchiveKey(teamId)
+
+    setArchiveErrorMessage(undefined)
+    setArchivingItemKey(itemKey)
+    void Promise.resolve()
+      .then(() => onArchiveTeam(teamId))
+      .catch(() => {
+        setArchiveErrorMessage(resolvedLabels.archive.error)
+      })
+      .finally(() => {
+        setArchivingItemKey(undefined)
+      })
+  }
+
+  const archiveProject = (teamId: string, projectId: string) => {
+    if (!onArchiveProject || archivingItemKey) {
+      return
+    }
+
+    const itemKey = createProjectArchiveKey(teamId, projectId)
+
+    setArchiveErrorMessage(undefined)
+    setArchivingItemKey(itemKey)
+    void Promise.resolve()
+      .then(() => onArchiveProject(teamId, projectId))
+      .catch(() => {
+        setArchiveErrorMessage(resolvedLabels.archive.error)
+      })
+      .finally(() => {
+        setArchivingItemKey(undefined)
+      })
+  }
 
   const updateCollapsed = (nextCollapsed: boolean) => {
     if (controlledCollapsed === undefined) {
@@ -742,12 +828,20 @@ export function Sidebar({
               labels={resolvedLabels}
               collapsed={isCollapsed}
               expanded={expandedTeamIds.includes(team.id)}
+              archivingItemKey={archivingItemKey}
+              onArchiveProject={onArchiveProject ? archiveProject : undefined}
+              onArchiveTeam={onArchiveTeam ? archiveTeam : undefined}
               onToggleTeam={toggleTeam}
               onSelectTeamView={updateActiveTeamView}
               onSelectProject={updateActiveProject}
             />
           ))}
         </div>
+        {archiveErrorMessage && !isCollapsed ? (
+          <p className="mt-3 rounded-lg border border-red-300/20 bg-red-500/12 px-3 py-2 text-[12px] font-bold leading-5 text-red-100" role="alert">
+            {archiveErrorMessage}
+          </p>
+        ) : null}
       </div>
 
       <nav className="mt-4 space-y-1 border-t border-white/10 pt-4" aria-label={resolvedLabels.utilityNavigation}>
@@ -1022,6 +1116,9 @@ function TeamGroup({
   labels,
   collapsed,
   expanded,
+  archivingItemKey,
+  onArchiveTeam,
+  onArchiveProject,
   onToggleTeam,
   onSelectTeamView,
   onSelectProject,
@@ -1035,6 +1132,9 @@ function TeamGroup({
   labels: SidebarLabels
   collapsed: boolean
   expanded: boolean
+  archivingItemKey?: string
+  onArchiveTeam?: (teamId: string) => void
+  onArchiveProject?: (teamId: string, projectId: string) => void
   onToggleTeam: (teamId: string) => void
   onSelectTeamView: (teamId: string, viewId: SidebarTeamViewId) => void
   onSelectProject?: (projectId: string, teamId: string) => void
@@ -1049,31 +1149,42 @@ function TeamGroup({
         {isTeamActive || isProjectAncestor ? (
           <span className="absolute inset-y-0 left-0 w-1 rounded-full bg-blue-500" aria-hidden="true" />
         ) : null}
-        <button
-          className={`group flex h-[38px] w-full items-center gap-3 rounded-lg py-2 text-left text-[16px] font-medium transition ${collapsed ? 'justify-center px-0' : 'pl-3 pr-2'} ${
-            isCurrentTeam
-              ? 'bg-blue-500/20 text-white shadow-[inset_0_0_0_1px_rgba(96,165,250,0.12)]'
-              : isTeamActive || isProjectAncestor
-                ? 'bg-white/8 text-white'
-              : 'text-slate-100 hover:bg-white/10 hover:text-white'
-          }`}
-          type="button"
-          aria-current={isCurrentTeam ? 'page' : undefined}
-          aria-expanded={collapsed ? undefined : expanded}
-          aria-label={collapsed ? team.name : undefined}
-          title={collapsed ? team.name : undefined}
-          onClick={() => onToggleTeam(team.id)}
-        >
-          <UsersIcon className="h-5 w-5 flex-none text-slate-100" />
-          <span className={collapsed ? 'sr-only' : 'min-w-0 flex-1 truncate'}>{team.name}</span>
-          {collapsed ? null : isCurrentTeam ? (
-            <MoreHorizontalIcon className="h-5 w-5 flex-none text-slate-200" />
-          ) : (
-            <ChevronDownIcon
-              className={`h-4 w-4 flex-none text-slate-200 transition-transform ${expanded ? 'rotate-0' : '-rotate-90'}`}
+        <div className={`flex items-center gap-1 ${collapsed ? 'justify-center' : ''}`}>
+          <button
+            className={`group flex h-[38px] min-w-0 flex-1 items-center gap-3 rounded-lg py-2 text-left text-[16px] font-medium transition ${collapsed ? 'justify-center px-0' : 'pl-3 pr-2'} ${
+              isCurrentTeam
+                ? 'bg-blue-500/20 text-white shadow-[inset_0_0_0_1px_rgba(96,165,250,0.12)]'
+                : isTeamActive || isProjectAncestor
+                  ? 'bg-white/8 text-white'
+                  : 'text-slate-100 hover:bg-white/10 hover:text-white'
+            }`}
+            type="button"
+            aria-current={isCurrentTeam ? 'page' : undefined}
+            aria-expanded={collapsed ? undefined : expanded}
+            aria-label={collapsed ? team.name : undefined}
+            title={collapsed ? team.name : undefined}
+            onClick={() => onToggleTeam(team.id)}
+          >
+            <UsersIcon className="h-5 w-5 flex-none text-slate-100" />
+            <span className={collapsed ? 'sr-only' : 'min-w-0 flex-1 truncate'}>{team.name}</span>
+            {collapsed ? null : isCurrentTeam ? (
+              <MoreHorizontalIcon className="h-5 w-5 flex-none text-slate-200" />
+            ) : (
+              <ChevronDownIcon
+                className={`h-4 w-4 flex-none text-slate-200 transition-transform ${expanded ? 'rotate-0' : '-rotate-90'}`}
+              />
+            )}
+          </button>
+          {!collapsed && onArchiveTeam ? (
+            <ArchiveButton
+              disabled={Boolean(archivingItemKey)}
+              isArchiving={archivingItemKey === createTeamArchiveKey(team.id)}
+              label={labels.archive.team(team.name)}
+              loadingLabel={labels.archive.archiving}
+              onClick={() => onArchiveTeam(team.id)}
             />
-          )}
-        </button>
+          ) : null}
+        </div>
       </div>
 
       {!collapsed && expanded ? (
@@ -1103,6 +1214,10 @@ function TeamGroup({
                   project.id === activeProjectId &&
                   (activeProjectTeamId === undefined || activeProjectTeamId === team.id)
                 }
+                archivingItemKey={archivingItemKey}
+                archiveLabels={labels.archive}
+                teamId={team.id}
+                onArchiveProject={onArchiveProject}
                 onSelectProject={(projectId) => onSelectProject?.(projectId, team.id)}
               />
             ))}
@@ -1145,37 +1260,93 @@ function SubNavButton({
 function ProjectButton({
   project,
   active,
+  archivingItemKey,
+  archiveLabels,
+  teamId,
+  onArchiveProject,
   onSelectProject,
 }: {
   project: SidebarProject
   active: boolean
+  archivingItemKey?: string
+  archiveLabels: SidebarArchiveLabels
+  teamId: string
+  onArchiveProject?: (teamId: string, projectId: string) => void
   onSelectProject?: (projectId: string) => void
 }) {
   const tone = project.tone ?? 'blue'
 
   return (
-    <button
-      className={`relative flex h-8 w-full items-center gap-3 rounded-lg py-2 pl-3 pr-2 text-left text-[15px] font-medium transition ${
-        active
-          ? 'bg-blue-500/20 text-white shadow-[inset_0_0_0_1px_rgba(96,165,250,0.1)]'
-          : 'text-slate-100 hover:bg-white/10 hover:text-white'
-      }`}
-      type="button"
-      onClick={() => onSelectProject?.(project.id)}
-      aria-current={active ? 'page' : undefined}
-    >
-      {active ? (
-        <span className="absolute inset-y-1 left-0 w-1 rounded-full bg-blue-500" aria-hidden="true" />
-      ) : null}
-      <span
-        className={`grid h-[17px] w-[17px] flex-none place-items-center rounded-[4px] border ${projectToneClasses[tone]}`}
-        aria-hidden="true"
+    <div className="flex items-center gap-1">
+      <button
+        className={`relative flex h-8 min-w-0 flex-1 items-center gap-3 rounded-lg py-2 pl-3 pr-2 text-left text-[15px] font-medium transition ${
+          active
+            ? 'bg-blue-500/20 text-white shadow-[inset_0_0_0_1px_rgba(96,165,250,0.1)]'
+            : 'text-slate-100 hover:bg-white/10 hover:text-white'
+        }`}
+        type="button"
+        onClick={() => onSelectProject?.(project.id)}
+        aria-current={active ? 'page' : undefined}
       >
-        <span className="h-[7px] w-[8px] rounded-[2px] border border-current" />
-      </span>
-      <span className="min-w-0 truncate">{project.name}</span>
+        {active ? (
+          <span className="absolute inset-y-1 left-0 w-1 rounded-full bg-blue-500" aria-hidden="true" />
+        ) : null}
+        <span
+          className={`grid h-[17px] w-[17px] flex-none place-items-center rounded-[4px] border ${projectToneClasses[tone]}`}
+          aria-hidden="true"
+        >
+          <span className="h-[7px] w-[8px] rounded-[2px] border border-current" />
+        </span>
+        <span className="min-w-0 truncate">{project.name}</span>
+      </button>
+      {onArchiveProject ? (
+        <ArchiveButton
+          disabled={Boolean(archivingItemKey)}
+          isArchiving={archivingItemKey === createProjectArchiveKey(teamId, project.id)}
+          label={archiveLabels.project(project.name)}
+          loadingLabel={archiveLabels.archiving}
+          onClick={() => onArchiveProject(teamId, project.id)}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+function ArchiveButton({
+  disabled,
+  isArchiving,
+  label,
+  loadingLabel,
+  onClick,
+}: {
+  disabled: boolean
+  isArchiving: boolean
+  label: string
+  loadingLabel: string
+  onClick: () => void
+}) {
+  const accessibleLabel = isArchiving ? loadingLabel : label
+
+  return (
+    <button
+      className="grid h-8 w-8 flex-none place-items-center rounded-lg text-slate-300 transition hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:text-slate-500"
+      type="button"
+      aria-label={accessibleLabel}
+      title={accessibleLabel}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <ArchiveIcon className={`h-4 w-4 ${isArchiving ? 'animate-pulse' : ''}`} />
     </button>
   )
+}
+
+function createTeamArchiveKey(teamId: string) {
+  return `team:${teamId}`
+}
+
+function createProjectArchiveKey(teamId: string, projectId: string) {
+  return `project:${teamId}:${projectId}`
 }
 
 function ensureIncludes(values: string[], value: string) {
@@ -1215,10 +1386,15 @@ function resolveRegistrationErrorMessage(error: unknown, labels: SidebarCreateLa
 
 function resolveLabels(labels: PartialSidebarLabels | undefined): SidebarLabels {
   const createLabels = labels?.create
+  const archiveLabels = labels?.archive
 
   return {
     ...defaultLabels,
     ...labels,
+    archive: {
+      ...defaultLabels.archive,
+      ...archiveLabels,
+    },
     create: {
       ...defaultLabels.create,
       ...createLabels,
@@ -1392,6 +1568,17 @@ function MoreHorizontalIcon({ className }: SidebarIconProps) {
       <path d="M5 12h.01" />
       <path d="M12 12h.01" />
       <path d="M19 12h.01" />
+    </SvgBase>
+  )
+}
+
+function ArchiveIcon({ className }: SidebarIconProps) {
+  return (
+    <SvgBase className={className}>
+      <path d="M4 7h16" />
+      <path d="M6 7v13h12V7" />
+      <path d="M8 4h8l1 3H7l1-3Z" />
+      <path d="M10 12h4" />
     </SvgBase>
   )
 }
