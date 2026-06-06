@@ -7,6 +7,8 @@ import {
 } from '../auth/api'
 import { clearAuthSession, getAuthSession, type AuthSession } from '../auth/session'
 import {
+  MobileSidebarButton,
+  MobileSidebarDrawer,
   Sidebar,
   type SidebarNavId,
   type SidebarTeamViewId,
@@ -372,6 +374,7 @@ export function WorkspaceScreen({
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
   const metadata = workspaceViewMetadata[view]
   const activeTeam = findActiveTeam(teams, activeTeamId)
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
 
   return (
     <main className="flex min-h-svh overflow-hidden bg-[#f5f8fc] text-[#0d1833]">
@@ -382,25 +385,62 @@ export function WorkspaceScreen({
         className="max-[980px]:hidden"
         inboxCount={createInboxTasks(tasks).length}
         labels={sidebarLabels}
+        onCreateProject={onCreateProject}
+        onCreateTeam={onCreateTeam}
         onSelectNav={onSelectNav}
         onSelectProject={onSelectProject}
         onSelectTeamView={onSelectTeamView}
         teams={teams}
       />
 
+      <MobileSidebarDrawer
+        closeLabel={t('sidebar.mobileClose')}
+        isOpen={isMobileSidebarOpen}
+        onClose={() => setIsMobileSidebarOpen(false)}
+      >
+        <Sidebar
+          activeNavId={metadata.activeNavId}
+          activeTeamId={metadata.activeTeamViewId ? activeTeam?.id : undefined}
+          activeTeamViewId={metadata.activeTeamViewId}
+          inboxCount={createInboxTasks(tasks).length}
+          labels={sidebarLabels}
+          onCreateProject={onCreateProject}
+          onCreateTeam={onCreateTeam}
+          onSelectNav={(navId) => {
+            setIsMobileSidebarOpen(false)
+            onSelectNav?.(navId)
+          }}
+          onSelectProject={(projectId, teamId) => {
+            setIsMobileSidebarOpen(false)
+            onSelectProject?.(projectId, teamId)
+          }}
+          onSelectTeamView={(teamId, viewId) => {
+            setIsMobileSidebarOpen(false)
+            onSelectTeamView?.(teamId, viewId)
+          }}
+          teams={teams}
+        />
+      </MobileSidebarDrawer>
+
       <section className="min-w-0 flex-1 overflow-auto">
         <header className="border-b border-slate-200 bg-white px-[clamp(22px,3vw,40px)] py-6">
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-5">
-            <div className="min-w-0">
-              <p className="text-sm font-black uppercase tracking-normal text-blue-600">
-                {t(metadata.eyebrowKey)}
-              </p>
-              <h1 className="mt-3 text-[clamp(30px,3.2vw,46px)] font-black leading-tight text-[#0d1833]">
-                {formatTeamText(t(metadata.titleKey), activeTeam?.name)}
-              </h1>
-              <p className="mt-3 max-w-[760px] text-base font-bold leading-7 text-[#526381]">
-                {formatTeamText(t(metadata.descriptionKey), activeTeam?.name)}
-              </p>
+            <div className="flex min-w-0 items-start gap-3">
+              <MobileSidebarButton
+                label={t('sidebar.mobileOpen')}
+                onClick={() => setIsMobileSidebarOpen(true)}
+              />
+              <div className="min-w-0">
+                <p className="text-sm font-black uppercase tracking-normal text-blue-600">
+                  {t(metadata.eyebrowKey)}
+                </p>
+                <h1 className="mt-3 text-[clamp(30px,3.2vw,46px)] font-black leading-tight text-[#0d1833]">
+                  {formatTeamText(t(metadata.titleKey), activeTeam?.name)}
+                </h1>
+                <p className="mt-3 max-w-[760px] text-base font-bold leading-7 text-[#526381]">
+                  {formatTeamText(t(metadata.descriptionKey), activeTeam?.name)}
+                </p>
+              </div>
             </div>
 
             <div className="flex flex-none items-center gap-3">
@@ -438,8 +478,6 @@ export function WorkspaceScreen({
             tasks={tasks}
             teams={teams}
             view={view}
-            onCreateProject={onCreateProject}
-            onCreateTeam={onCreateTeam}
           />
         )}
       </section>
@@ -449,8 +487,6 @@ export function WorkspaceScreen({
 
 function WorkspaceBody({
   activeTeam,
-  onCreateProject,
-  onCreateTeam,
   summary,
   t,
   tasks,
@@ -458,8 +494,6 @@ function WorkspaceBody({
   view,
 }: {
   activeTeam?: ProjectDirectoryTeam
-  onCreateProject?: (teamId: string, input: CreateProjectDirectoryProjectInput) => Promise<void>
-  onCreateTeam?: (input: CreateProjectDirectoryTeamInput) => Promise<void>
   summary: DashboardSummary
   t: (key: MessageKey) => string
   tasks: ProjectTask[]
@@ -473,8 +507,6 @@ function WorkspaceBody({
       {view === 'inbox' ? <InboxView t={t} tasks={tasks} /> : null}
       {view === 'dashboard' ? (
         <DashboardWorkspaceView
-          onCreateProject={onCreateProject}
-          onCreateTeam={onCreateTeam}
           summary={summary}
           t={t}
           tasks={tasks}
@@ -645,15 +677,11 @@ function InboxView({
 }
 
 function DashboardWorkspaceView({
-  onCreateProject,
-  onCreateTeam,
   summary,
   t,
   tasks,
   teams,
 }: {
-  onCreateProject?: (teamId: string, input: CreateProjectDirectoryProjectInput) => Promise<void>
-  onCreateTeam?: (input: CreateProjectDirectoryTeamInput) => Promise<void>
   summary: DashboardSummary
   t: (key: MessageKey) => string
   tasks: ProjectTask[]
@@ -677,13 +705,6 @@ function DashboardWorkspaceView({
         <MetricCard label={t('workspace.metric.blocked')} value={summary.blocked} tone="red" />
         <MetricCard label={t('workspace.metric.deliveryRate')} value={`${calculateProjectProgress(tasks)}%`} tone="amber" />
       </div>
-
-      <WorkspaceRegistrationPanel
-        onCreateProject={onCreateProject}
-        onCreateTeam={onCreateTeam}
-        t={t}
-        teams={teams}
-      />
 
       <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
         <SectionHeader title={t('workspace.dashboard.portfolioTitle')} meta={t('workspace.dashboard.portfolioMeta')} />
@@ -714,165 +735,6 @@ function DashboardWorkspaceView({
       </section>
     </div>
   )
-}
-
-function WorkspaceRegistrationPanel({
-  onCreateProject,
-  onCreateTeam,
-  t,
-  teams,
-}: {
-  onCreateProject?: (teamId: string, input: CreateProjectDirectoryProjectInput) => Promise<void>
-  onCreateTeam?: (input: CreateProjectDirectoryTeamInput) => Promise<void>
-  t: (key: MessageKey) => string
-  teams: ProjectDirectoryTeam[]
-}) {
-  const [isSavingTeam, setIsSavingTeam] = useState(false)
-  const [isSavingProject, setIsSavingProject] = useState(false)
-  const [errorMessage, setErrorMessage] = useState<string | undefined>()
-
-  return (
-    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
-      <SectionHeader title={t('workspace.registration.title')} meta={t('workspace.registration.meta')} />
-      <div className="grid grid-cols-2 gap-5 max-[980px]:grid-cols-1">
-        <form
-          className="grid gap-3 rounded-lg border border-slate-200 bg-[#fbfdff] p-4"
-          onSubmit={(event) => {
-            event.preventDefault()
-
-            if (!onCreateTeam) {
-              return
-            }
-
-            const form = event.currentTarget
-            const formData = new FormData(form)
-            const name = String(formData.get('teamName') ?? '').trim()
-
-            setErrorMessage(undefined)
-            if (!name) {
-              setErrorMessage(t('workspace.registration.teamNameRequired'))
-              return
-            }
-
-            setIsSavingTeam(true)
-            void onCreateTeam({ name })
-              .then(() => form.reset())
-              .catch((error: unknown) => {
-                setErrorMessage(resolveRegistrationErrorMessage(error, t))
-              })
-              .finally(() => setIsSavingTeam(false))
-          }}
-        >
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
-            {t('workspace.registration.teamName')}
-            <input
-              className="h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
-              name="teamName"
-              placeholder={t('workspace.registration.teamPlaceholder')}
-              required
-            />
-          </label>
-          <button
-            className="h-11 w-fit rounded-lg bg-blue-600 px-4 text-sm font-black text-white shadow-[0_14px_30px_rgba(37,99,235,0.22)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400"
-            disabled={isSavingTeam}
-            type="submit"
-          >
-            {isSavingTeam ? t('workspace.registration.saving') : t('workspace.registration.createTeam')}
-          </button>
-        </form>
-
-        <form
-          className="grid gap-3 rounded-lg border border-slate-200 bg-[#fbfdff] p-4"
-          onSubmit={(event) => {
-            event.preventDefault()
-
-            if (!onCreateProject) {
-              return
-            }
-
-            const form = event.currentTarget
-            const formData = new FormData(form)
-            const teamId = String(formData.get('teamId') ?? '')
-            const name = String(formData.get('projectName') ?? '').trim()
-            const tone = String(formData.get('tone') ?? 'blue') as CreateProjectDirectoryProjectInput['tone']
-
-            setErrorMessage(undefined)
-            if (!name) {
-              setErrorMessage(t('workspace.registration.projectNameRequired'))
-              return
-            }
-
-            setIsSavingProject(true)
-            void onCreateProject(teamId, { name, tone })
-              .then(() => form.reset())
-              .catch((error: unknown) => {
-                setErrorMessage(resolveRegistrationErrorMessage(error, t))
-              })
-              .finally(() => setIsSavingProject(false))
-          }}
-        >
-          <div className="grid grid-cols-[1fr_1fr_120px] gap-3 max-[720px]:grid-cols-1">
-            <label className="grid gap-2 text-sm font-black text-[#263550]">
-              {t('workspace.registration.team')}
-              <select
-                className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
-                name="teamId"
-                required
-              >
-                {teams.map((team) => (
-                  <option key={team.id} value={team.id}>
-                    {team.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="grid gap-2 text-sm font-black text-[#263550]">
-              {t('workspace.registration.projectName')}
-              <input
-                className="h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
-                name="projectName"
-                placeholder={t('workspace.registration.projectPlaceholder')}
-                required
-              />
-            </label>
-            <label className="grid gap-2 text-sm font-black text-[#263550]">
-              {t('workspace.registration.tone')}
-              <select
-                className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
-                name="tone"
-              >
-                {(['blue', 'purple', 'green', 'yellow'] as const).map((tone) => (
-                  <option key={tone} value={tone}>
-                    {t(`workspace.registration.tone.${tone}`)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <button
-            className="h-11 w-fit rounded-lg bg-blue-600 px-4 text-sm font-black text-white shadow-[0_14px_30px_rgba(37,99,235,0.22)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400"
-            disabled={isSavingProject || teams.length === 0}
-            type="submit"
-          >
-            {isSavingProject ? t('workspace.registration.saving') : t('workspace.registration.createProject')}
-          </button>
-        </form>
-      </div>
-      {errorMessage ? <p className="mt-4 text-sm font-bold text-red-600">{errorMessage}</p> : null}
-    </section>
-  )
-}
-
-const registrationErrorMessageKeys = ['projects.error.loading', 'tasks.error.loading'] as const satisfies readonly MessageKey[]
-
-function resolveRegistrationErrorMessage(error: unknown, t: (key: MessageKey) => string) {
-  const message = error instanceof Error ? error.message : undefined
-
-  if (message && (registrationErrorMessageKeys as readonly string[]).includes(message)) {
-    return t(message as (typeof registrationErrorMessageKeys)[number])
-  }
-
-  return t('workspace.registration.error')
 }
 
 function ReportsView({

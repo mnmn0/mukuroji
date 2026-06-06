@@ -18,6 +18,8 @@ const defaultArgs = {
   summary: storySummary,
   tasks: referoTaskFixtures,
   teams: projectDirectoryFixtures,
+  onCreateProject: async () => undefined,
+  onCreateTeam: async () => undefined,
   userInitial: 'D',
   userLabel: 'demo@example.com',
   view: 'home',

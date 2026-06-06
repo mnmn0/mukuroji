@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import type { ComponentType, ReactNode } from 'react'
+import { useRef, useState } from 'react'
+import type { ComponentType, FormEvent, ReactNode } from 'react'
 import { BrandMark } from '../BrandMark'
 
 /**
@@ -76,6 +76,76 @@ export type SidebarNavId =
 export type SidebarTeamViewId = 'overview' | 'members'
 
 /**
+ * サイドバー内の新規登録フォームで使う表示文言です。
+ */
+export type SidebarCreateLabels = {
+  /**
+   * 新規登録パネルの見出しです。
+   */
+  title: string
+  /**
+   * チーム名入力のラベルです。
+   */
+  teamName: string
+  /**
+   * チーム名入力の placeholder です。
+   */
+  teamPlaceholder: string
+  /**
+   * プロジェクト名入力のラベルです。
+   */
+  projectName: string
+  /**
+   * プロジェクト名入力の placeholder です。
+   */
+  projectPlaceholder: string
+  /**
+   * プロジェクト登録先チーム選択のラベルです。
+   */
+  team: string
+  /**
+   * プロジェクト色選択のラベルです。
+   */
+  tone: string
+  /**
+   * プロジェクト色ごとの表示名です。
+   */
+  toneLabels: Record<SidebarProjectTone, string>
+  /**
+   * チーム登録ボタンの文言です。
+   */
+  createTeam: string
+  /**
+   * プロジェクト登録ボタンの文言です。
+   */
+  createProject: string
+  /**
+   * 保存中のボタン文言です。
+   */
+  saving: string
+  /**
+   * チーム名未入力時のエラーメッセージです。
+   */
+  teamNameRequired: string
+  /**
+   * プロジェクト名未入力時のエラーメッセージです。
+   */
+  projectNameRequired: string
+  /**
+   * 登録失敗時の汎用エラーメッセージです。
+   */
+  error: string
+  /**
+   * チーム/プロジェクト API 由来のエラーメッセージです。
+   */
+  loadingError: string
+  /**
+   * 登録先チームがない場合のメッセージです。
+   */
+  noTeams: string
+}
+
+/**
  * サイドバーで使う表示文言です。
  */
 export type SidebarLabels = {
@@ -107,6 +177,10 @@ export type SidebarLabels = {
    * チーム作成ボタンの文言です。
    */
   createTeam: string
+  /**
+   * チーム/プロジェクト新規登録フォームの文言です。
+   */
+  create: SidebarCreateLabels
   /**
    * チーム概要ビューの文言です。
    */
@@ -198,6 +272,10 @@ export type SidebarProps = {
    */
   defaultCollapsed?: boolean
   /**
+   * 非制御時に初期表示で新規登録パネルを開くかどうかです。
+   */
+  defaultCreatePanelOpen?: boolean
+  /**
    * 受信箱の未読件数です。
    */
   inboxCount?: number
@@ -214,9 +292,16 @@ export type SidebarProps = {
    */
   onCollapsedChange?: (collapsed: boolean) => void
   /**
-   * チーム作成ボタンが押されたときに呼ばれます。
+   * チーム新規登録時に呼ばれます。
    */
-  onCreateTeam?: () => void
+  onCreateTeam?: (input: { name: string }) => void | Promise<void>
+  /**
+   * プロジェクト新規登録時に呼ばれます。
+   */
+  onCreateProject?: (
+    teamId: string,
+    input: { name: string; tone: SidebarProjectTone },
+  ) => void | Promise<void>
   /**
    * 主要ナビゲーションが選択されたときに呼ばれます。
    */
@@ -279,6 +364,29 @@ const defaultLabels: SidebarLabels = {
   expand: 'サイドバーを展開する',
   teamProjects: 'チーム / プロジェクト',
   createTeam: 'チームを追加',
+  create: {
+    title: '新規登録',
+    teamName: 'チーム名',
+    teamPlaceholder: '例: カスタマーサクセス',
+    projectName: 'プロジェクト名',
+    projectPlaceholder: '例: 導入改善',
+    team: '登録先チーム',
+    tone: '色',
+    toneLabels: {
+      blue: '青',
+      purple: '紫',
+      green: '緑',
+      yellow: '黄',
+    },
+    createTeam: 'チームを登録',
+    createProject: 'プロジェクトを登録',
+    saving: '登録中',
+    teamNameRequired: 'チーム名を入力してください。',
+    projectNameRequired: 'プロジェクト名を入力してください。',
+    error: '登録できませんでした',
+    loadingError: 'チームとプロジェクトを取得できませんでした',
+    noTeams: '先にチームを登録してください。',
+  },
   teamOverview: 'チーム概要',
   members: 'メンバー',
   projectGroup: 'プロジェクト',
@@ -298,11 +406,25 @@ const defaultLabels: SidebarLabels = {
 /**
  * 既定のサイドバー文言を部分的に上書きする入力です。
  */
-type PartialSidebarLabels = Partial<Omit<SidebarLabels, 'nav'>> & {
+type PartialSidebarLabels = Partial<Omit<SidebarLabels, 'create' | 'nav'>> & {
+  /**
+   * 新規登録フォーム文言の上書きです。
+   */
+  create?: PartialSidebarCreateLabels
   /**
    * 固定ナビゲーション項目ごとの上書き文言です。
    */
   nav?: Partial<SidebarLabels['nav']>
+}
+
+/**
+ * 新規登録フォームの既定文言を部分的に上書きする入力です。
+ */
+type PartialSidebarCreateLabels = Partial<Omit<SidebarCreateLabels, 'toneLabels'>> & {
+  /**
+   * プロジェクト色ごとの表示名の上書きです。
+   */
+  toneLabels?: Partial<SidebarCreateLabels['toneLabels']>
 }
 
 const projectToneClasses: Record<SidebarProjectTone, string> = {
@@ -311,6 +433,15 @@ const projectToneClasses: Record<SidebarProjectTone, string> = {
   green: 'border-emerald-400/70 text-emerald-300 bg-emerald-500/10',
   yellow: 'border-amber-300/70 text-amber-200 bg-amber-400/15',
 }
+
+const projectToneSwatchClasses: Record<SidebarProjectTone, string> = {
+  blue: 'border-blue-300 bg-blue-500',
+  purple: 'border-violet-300 bg-violet-500',
+  green: 'border-emerald-300 bg-emerald-500',
+  yellow: 'border-amber-200 bg-amber-400',
+}
+
+const projectToneOptions = ['blue', 'purple', 'green', 'yellow'] as const
 
 /**
  * チームとプロジェクト階層を含むアプリ共通サイドバーです。
@@ -332,11 +463,13 @@ export function Sidebar({
   defaultExpandedTeamIds,
   collapsed: controlledCollapsed,
   defaultCollapsed = false,
+  defaultCreatePanelOpen = false,
   inboxCount = 0,
   teams,
   className = '',
   onCollapsedChange,
   onCreateTeam,
+  onCreateProject,
   onSelectNav,
   onSelectTeamView,
   onSelectTeam,
@@ -359,6 +492,7 @@ export function Sidebar({
     teams.filter((team) => team.expanded ?? team.id === initialTeamId).map((team) => team.id)
 
   const [internalCollapsed, setInternalCollapsed] = useState(defaultCollapsed)
+  const [isCreatePanelOpen, setIsCreatePanelOpen] = useState(defaultCreatePanelOpen)
   const [internalActiveNavId, setInternalActiveNavId] = useState<SidebarNavId | undefined>(
     defaultActiveNavId,
   )
@@ -401,6 +535,7 @@ export function Sidebar({
   const navItems = mainNavItems.map((item) =>
     item.id === 'inbox' ? { ...item, badge: inboxCount } : item,
   )
+  const canCreate = Boolean(onCreateTeam || onCreateProject)
 
   const updateCollapsed = (nextCollapsed: boolean) => {
     if (controlledCollapsed === undefined) {
@@ -571,18 +706,29 @@ export function Sidebar({
       {!isCollapsed ? (
         <div className="mt-7 flex items-center justify-between px-1 text-[14px] font-semibold text-slate-200">
           <span className="truncate">{resolvedLabels.teamProjects}</span>
-          <button
-            className="grid h-8 w-8 place-items-center rounded-lg text-slate-100 transition hover:bg-white/10"
-            type="button"
-            aria-label={resolvedLabels.createTeam}
-            onClick={onCreateTeam}
-          >
-            <PlusIcon className="h-5 w-5" />
-          </button>
+          {canCreate ? (
+            <button
+              className={`grid h-8 w-8 place-items-center rounded-lg text-slate-100 transition hover:bg-white/10 ${isCreatePanelOpen ? 'bg-white/10 text-white' : ''}`}
+              type="button"
+              aria-expanded={isCreatePanelOpen}
+              aria-label={resolvedLabels.create.title}
+              onClick={() => setIsCreatePanelOpen((current) => !current)}
+            >
+              <PlusIcon className={`h-5 w-5 transition-transform ${isCreatePanelOpen ? 'rotate-45' : ''}`} />
+            </button>
+          ) : null}
         </div>
       ) : null}
 
       <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
+        {!isCollapsed && canCreate && isCreatePanelOpen ? (
+          <SidebarRegistrationPanel
+            labels={resolvedLabels.create}
+            teams={teams}
+            onCreateProject={onCreateProject}
+            onCreateTeam={onCreateTeam}
+          />
+        ) : null}
         <div className={isCollapsed ? 'space-y-1' : 'space-y-2'}>
           {teams.map((team) => (
             <TeamGroup
@@ -619,6 +765,200 @@ export function Sidebar({
         ))}
       </nav>
     </aside>
+  )
+}
+
+function SidebarRegistrationPanel({
+  labels,
+  teams,
+  onCreateProject,
+  onCreateTeam,
+}: {
+  labels: SidebarCreateLabels
+  teams: SidebarTeam[]
+  onCreateProject?: (
+    teamId: string,
+    input: { name: string; tone: SidebarProjectTone },
+  ) => void | Promise<void>
+  onCreateTeam?: (input: { name: string }) => void | Promise<void>
+}) {
+  const [selectedTone, setSelectedTone] = useState<SidebarProjectTone>('blue')
+  const [isSavingTeam, setIsSavingTeam] = useState(false)
+  const [isSavingProject, setIsSavingProject] = useState(false)
+  const [errorMessage, setErrorMessage] = useState<string | undefined>()
+  const isSavingTeamRef = useRef(false)
+  const isSavingProjectRef = useRef(false)
+
+  const handleCreateTeam = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    if (!onCreateTeam || isSavingTeamRef.current) {
+      return
+    }
+
+    const form = event.currentTarget
+    const formData = new FormData(form)
+    const name = String(formData.get('teamName') ?? '').trim()
+
+    setErrorMessage(undefined)
+    if (!name) {
+      setErrorMessage(labels.teamNameRequired)
+      return
+    }
+
+    isSavingTeamRef.current = true
+    setIsSavingTeam(true)
+    void Promise.resolve()
+      .then(() => onCreateTeam({ name }))
+      .then(() => form.reset())
+      .catch((error: unknown) => {
+        setErrorMessage(resolveRegistrationErrorMessage(error, labels))
+      })
+      .finally(() => {
+        isSavingTeamRef.current = false
+        setIsSavingTeam(false)
+      })
+  }
+
+  const handleCreateProject = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    if (!onCreateProject || isSavingProjectRef.current) {
+      return
+    }
+
+    const form = event.currentTarget
+    const formData = new FormData(form)
+    const teamId = String(formData.get('teamId') ?? '')
+    const name = String(formData.get('projectName') ?? '').trim()
+    const toneValue = String(formData.get('tone') ?? selectedTone)
+    const tone = isProjectTone(toneValue) ? toneValue : 'blue'
+
+    setErrorMessage(undefined)
+    if (!teamId) {
+      setErrorMessage(labels.noTeams)
+      return
+    }
+    if (!name) {
+      setErrorMessage(labels.projectNameRequired)
+      return
+    }
+
+    isSavingProjectRef.current = true
+    setIsSavingProject(true)
+    void Promise.resolve()
+      .then(() => onCreateProject(teamId, { name, tone }))
+      .then(() => {
+        form.reset()
+        setSelectedTone('blue')
+      })
+      .catch((error: unknown) => {
+        setErrorMessage(resolveRegistrationErrorMessage(error, labels))
+      })
+      .finally(() => {
+        isSavingProjectRef.current = false
+        setIsSavingProject(false)
+      })
+  }
+
+  return (
+    <section className="mt-3 rounded-lg border border-white/10 bg-white/[0.06] p-3 shadow-[0_16px_28px_rgba(0,0,0,0.16)]">
+      <p className="text-sm font-black text-white">{labels.title}</p>
+
+      {onCreateTeam ? (
+        <form className="mt-3 grid gap-2" onSubmit={handleCreateTeam}>
+          <label className="grid gap-1.5 text-[12px] font-black text-slate-200">
+            {labels.teamName}
+            <input
+              className="h-9 rounded-lg border border-white/10 bg-white/95 px-3 text-[13px] font-bold text-[#0d1833] outline-none transition placeholder:text-slate-400 focus:border-blue-300 focus:ring-3 focus:ring-blue-400/20"
+              name="teamName"
+              placeholder={labels.teamPlaceholder}
+            />
+          </label>
+          <button
+            className="h-9 rounded-lg bg-blue-500 px-3 text-[13px] font-black text-white shadow-[0_10px_22px_rgba(37,99,235,0.26)] transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-slate-500"
+            disabled={isSavingTeam}
+            type="submit"
+          >
+            {isSavingTeam ? labels.saving : labels.createTeam}
+          </button>
+        </form>
+      ) : null}
+
+      {onCreateProject ? (
+        <form className="mt-3 grid gap-2 border-t border-white/10 pt-3" onSubmit={handleCreateProject}>
+          <label className="grid gap-1.5 text-[12px] font-black text-slate-200">
+            {labels.team}
+            <select
+              className="h-9 rounded-lg border border-white/10 bg-white/95 px-3 text-[13px] font-bold text-[#0d1833] outline-none transition focus:border-blue-300 focus:ring-3 focus:ring-blue-400/20"
+              name="teamId"
+              disabled={teams.length === 0}
+            >
+              {teams.map((team) => (
+                <option key={team.id} value={team.id}>
+                  {team.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-1.5 text-[12px] font-black text-slate-200">
+            {labels.projectName}
+            <input
+              className="h-9 rounded-lg border border-white/10 bg-white/95 px-3 text-[13px] font-bold text-[#0d1833] outline-none transition placeholder:text-slate-400 focus:border-blue-300 focus:ring-3 focus:ring-blue-400/20"
+              name="projectName"
+              placeholder={labels.projectPlaceholder}
+              disabled={teams.length === 0}
+            />
+          </label>
+          <fieldset className="grid gap-2">
+            <legend className="text-[12px] font-black text-slate-200">{labels.tone}</legend>
+            <div className="grid grid-cols-4 gap-2">
+              {projectToneOptions.map((tone) => (
+                <label
+                  className={`grid h-9 cursor-pointer place-items-center rounded-lg border transition focus-within:border-white focus-within:bg-white/18 focus-within:ring-2 focus-within:ring-blue-300/45 ${
+                    selectedTone === tone
+                      ? 'border-white bg-white/18 ring-2 ring-blue-300/45'
+                      : 'border-white/10 bg-white/6 hover:bg-white/10'
+                  }`}
+                  key={tone}
+                  title={labels.toneLabels[tone]}
+                >
+                  <input
+                    checked={selectedTone === tone}
+                    className="sr-only"
+                    name="tone"
+                    type="radio"
+                    value={tone}
+                    onChange={() => setSelectedTone(tone)}
+                  />
+                  <span
+                    className={`h-4 w-4 rounded-[5px] border ${projectToneSwatchClasses[tone]}`}
+                    aria-hidden="true"
+                  />
+                  <span className="sr-only">{labels.toneLabels[tone]}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          {teams.length === 0 ? (
+            <p className="text-[12px] font-bold leading-5 text-slate-300">{labels.noTeams}</p>
+          ) : null}
+          <button
+            className="h-9 rounded-lg bg-blue-500 px-3 text-[13px] font-black text-white shadow-[0_10px_22px_rgba(37,99,235,0.26)] transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-slate-500"
+            disabled={isSavingProject || teams.length === 0}
+            type="submit"
+          >
+            {isSavingProject ? labels.saving : labels.createProject}
+          </button>
+        </form>
+      ) : null}
+
+      {errorMessage ? (
+        <p className="mt-3 text-[12px] font-bold leading-5 text-red-200" role="alert">
+          {errorMessage}
+        </p>
+      ) : null}
+    </section>
   )
 }
 
@@ -859,10 +1199,34 @@ function findProjectTeamId(teams: SidebarTeam[], projectId: string) {
   return teams.find((team) => team.projects?.some((project) => project.id === projectId))?.id
 }
 
+function isProjectTone(value: string): value is SidebarProjectTone {
+  return (projectToneOptions as readonly string[]).includes(value)
+}
+
+function resolveRegistrationErrorMessage(error: unknown, labels: SidebarCreateLabels) {
+  const message = error instanceof Error ? error.message : undefined
+
+  if (message === 'projects.error.loading' || message === 'tasks.error.loading') {
+    return labels.loadingError
+  }
+
+  return labels.error
+}
+
 function resolveLabels(labels: PartialSidebarLabels | undefined): SidebarLabels {
+  const createLabels = labels?.create
+
   return {
     ...defaultLabels,
     ...labels,
+    create: {
+      ...defaultLabels.create,
+      ...createLabels,
+      toneLabels: {
+        ...defaultLabels.create.toneLabels,
+        ...createLabels?.toneLabels,
+      },
+    },
     nav: {
       ...defaultLabels.nav,
       ...labels?.nav,

@@ -6,6 +6,8 @@ import { getCurrentUser } from '../auth/api'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import { ChevronIcon } from '../components/icons'
 import {
+  MobileSidebarButton,
+  MobileSidebarDrawer,
   Sidebar,
   type SidebarNavId,
   type SidebarTeamViewId,
@@ -18,6 +20,10 @@ import {
   type MessageKey,
 } from '../i18n'
 import {
+  createProjectDirectoryProject,
+  createProjectDirectoryTeam,
+  type CreateProjectDirectoryProjectInput,
+  type CreateProjectDirectoryTeamInput,
   getProjectDirectory,
   type ProjectDirectoryTeam,
 } from '../projects/api'
@@ -135,6 +141,14 @@ type TaskScreenProps = {
    * 新規タスクを保存するときの callback です。
    */
   onCreateTask?: (input: CreateProjectTaskInput) => Promise<void>
+  /**
+   * チーム新規登録時の callback です。
+   */
+  onCreateTeam?: (input: CreateProjectDirectoryTeamInput) => Promise<void>
+  /**
+   * プロジェクト新規登録時の callback です。
+   */
+  onCreateProject?: (teamId: string, input: CreateProjectDirectoryProjectInput) => Promise<void>
 }
 
 const viewLabelKeys: Record<TaskTab, MessageKey> = {
@@ -167,7 +181,7 @@ export function TaskPage() {
   const projectDirectoryKey = accessToken && user && !currentUserError
     ? (['project-directory', accessToken, locale] as const)
     : null
-  const { data: teams = [] } = useSWR(
+  const { data: teams = [], mutate: mutateProjectDirectory } = useSWR(
     projectDirectoryKey,
     ([, accessToken, currentLocale]) =>
       getProjectDirectory(accessToken, currentLocale),
@@ -239,6 +253,37 @@ export function TaskPage() {
     await mutateProjectTasks()
   }
 
+  const handleCreateTeam = async (input: CreateProjectDirectoryTeamInput) => {
+    if (!accessToken) {
+      return
+    }
+
+    try {
+      await createProjectDirectoryTeam(accessToken, input)
+      await mutateProjectDirectory()
+    } catch (error) {
+      console.error('Failed to create team:', error)
+      throw error
+    }
+  }
+
+  const handleCreateProject = async (
+    teamId: string,
+    input: CreateProjectDirectoryProjectInput,
+  ) => {
+    if (!accessToken) {
+      return
+    }
+
+    try {
+      await createProjectDirectoryProject(accessToken, teamId, input)
+      await mutateProjectDirectory()
+    } catch (error) {
+      console.error('Failed to create project:', error)
+      throw error
+    }
+  }
+
   return (
     <TaskScreen
       isLoading={isLoading}
@@ -251,6 +296,8 @@ export function TaskPage() {
       onSelectTeamView={(teamId, viewId) =>
         navigate(createTeamViewPath(teamId, viewId))
       }
+      onCreateProject={handleCreateProject}
+      onCreateTeam={handleCreateTeam}
       onCreateTask={handleCreateTask}
       projectId={projectId}
       projectName={projectName}
@@ -280,6 +327,8 @@ export function TaskScreen({
   onSelectProject,
   onSelectNav,
   onSelectTeamView,
+  onCreateProject,
+  onCreateTeam,
   onCreateTask,
 }: TaskScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
@@ -290,6 +339,7 @@ export function TaskScreen({
   const [isStatusMenuOpen, setIsStatusMenuOpen] = useState(false)
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false)
   const [createTaskError, setCreateTaskError] = useState<string | undefined>()
   const [isCreatingTask, setIsCreatingTask] = useState(false)
@@ -339,6 +389,8 @@ export function TaskScreen({
         collapsed={sidebarCollapsed}
         inboxCount={tasks.filter((task) => task.status === 'review' || task.priority === 'high').length}
         labels={sidebarLabels}
+        onCreateProject={onCreateProject}
+        onCreateTeam={onCreateTeam}
         onSelectNav={onSelectNav}
         onCollapsedChange={setSidebarCollapsed}
         onSelectProject={onSelectProject}
@@ -346,11 +398,40 @@ export function TaskScreen({
         teams={teams}
       />
 
+      <MobileSidebarDrawer
+        closeLabel={t('sidebar.mobileClose')}
+        isOpen={isMobileSidebarOpen}
+        onClose={() => setIsMobileSidebarOpen(false)}
+      >
+        <Sidebar
+          activeProjectId={projectId}
+          activeProjectTeamId={resolvedActiveTeamId}
+          inboxCount={tasks.filter((task) => task.status === 'review' || task.priority === 'high').length}
+          labels={sidebarLabels}
+          onCreateProject={onCreateProject}
+          onCreateTeam={onCreateTeam}
+          onSelectNav={(navId) => {
+            setIsMobileSidebarOpen(false)
+            onSelectNav?.(navId)
+          }}
+          onSelectProject={(nextProjectId, teamId) => {
+            setIsMobileSidebarOpen(false)
+            onSelectProject?.(nextProjectId, teamId)
+          }}
+          onSelectTeamView={(teamId, viewId) => {
+            setIsMobileSidebarOpen(false)
+            onSelectTeamView?.(teamId, viewId)
+          }}
+          teams={teams}
+        />
+      </MobileSidebarDrawer>
+
       <section className="flex min-w-0 flex-1 flex-col bg-white/80">
         <TaskHeader
           activeTab={activeTab}
           isCreateTaskOpen={isCreateTaskOpen}
           onCreateTaskOpenChange={setIsCreateTaskOpen}
+          onMobileSidebarOpen={() => setIsMobileSidebarOpen(true)}
           onTabChange={setActiveTab}
           projectName={resolvedProjectName}
           t={t}
@@ -463,6 +544,7 @@ function TaskHeader({
   activeTab,
   isCreateTaskOpen,
   onCreateTaskOpenChange,
+  onMobileSidebarOpen,
   onTabChange,
   projectName,
   t,
@@ -473,6 +555,7 @@ function TaskHeader({
   activeTab: TaskTab
   isCreateTaskOpen: boolean
   onCreateTaskOpenChange: (isOpen: boolean) => void
+  onMobileSidebarOpen: () => void
   onTabChange: (tab: TaskTab) => void
   projectName: string
   t: (key: MessageKey) => string
@@ -483,31 +566,34 @@ function TaskHeader({
   return (
     <header className="border-b border-slate-200/80 bg-white/95 shadow-[0_1px_0_rgba(15,23,42,0.03)]">
       <div className="flex min-h-[90px] items-center justify-between gap-5 px-[clamp(22px,3vw,38px)] py-4">
-        <div className="min-w-0">
-          <nav
-            aria-label={t('tasks.breadcrumb.aria')}
-            className="flex flex-wrap items-center gap-3 text-[15px] font-medium text-[#405174]"
-          >
-            <span>{teamName || t('sidebar.projectGroup')}</span>
-            <ChevronIcon className="h-4 w-4 -rotate-90 text-[#61708f]" />
-            <span className="inline-flex items-center gap-2 font-black text-[#0d1833]">
-              <ProjectGlyph />
-              {projectName}
-            </span>
-          </nav>
-          <div className="mt-3 flex min-w-0 items-center gap-4">
-            <h1
-              className="truncate text-[clamp(30px,3vw,42px)] font-black leading-none tracking-normal text-[#0d1833]"
-              data-testid="tasks-heading"
+        <div className="flex min-w-0 items-start gap-3">
+          <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={onMobileSidebarOpen} />
+          <div className="min-w-0">
+            <nav
+              aria-label={t('tasks.breadcrumb.aria')}
+              className="flex flex-wrap items-center gap-3 text-[15px] font-medium text-[#405174]"
             >
-              {projectName}
-            </h1>
-            <IconButton label={t('tasks.action.favorite')}>
-              <StarIcon />
-            </IconButton>
-            <IconButton label={t('tasks.action.more')}>
-              <MoreIcon />
-            </IconButton>
+              <span>{teamName || t('sidebar.projectGroup')}</span>
+              <ChevronIcon className="h-4 w-4 -rotate-90 text-[#61708f]" />
+              <span className="inline-flex items-center gap-2 font-black text-[#0d1833]">
+                <ProjectGlyph />
+                {projectName}
+              </span>
+            </nav>
+            <div className="mt-3 flex min-w-0 items-center gap-4">
+              <h1
+                className="truncate text-[clamp(30px,3vw,42px)] font-black leading-none tracking-normal text-[#0d1833]"
+                data-testid="tasks-heading"
+              >
+                {projectName}
+              </h1>
+              <IconButton label={t('tasks.action.favorite')}>
+                <StarIcon />
+              </IconButton>
+              <IconButton label={t('tasks.action.more')}>
+                <MoreIcon />
+              </IconButton>
+            </div>
           </div>
         </div>
 
