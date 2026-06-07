@@ -213,7 +213,7 @@ export class CdkStack extends cdk.Stack {
       },
       code: lambda.Code.fromInline(`
 const { CognitoIdentityProviderClient, GetUserCommand } = require('@aws-sdk/client-cognito-identity-provider');
-const { DynamoDBClient, PutItemCommand, QueryCommand } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBClient, PutItemCommand, QueryCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
 
 const cognito = new CognitoIdentityProviderClient({});
 const dynamodb = new DynamoDBClient({});
@@ -259,6 +259,31 @@ exports.handler = async (event) => {
       return await createProject(event, headers, directoryId, createProjectTeamId);
     } catch (error) {
       return toProjectDataError(error, headers, 'Failed to create project.');
+    }
+  }
+
+  const archiveTeamId = readArchiveTeamId(event);
+
+  if (archiveTeamId) {
+    try {
+      return await archiveTeam(headers, directoryId, archiveTeamId);
+    } catch (error) {
+      return toProjectDataError(error, headers, 'Failed to archive team.');
+    }
+  }
+
+  const archiveProjectParams = readArchiveProjectParams(event);
+
+  if (archiveProjectParams) {
+    try {
+      return await archiveProject(
+        headers,
+        directoryId,
+        archiveProjectParams.teamId,
+        archiveProjectParams.projectId,
+      );
+    } catch (error) {
+      return toProjectDataError(error, headers, 'Failed to archive project.');
     }
   }
 
@@ -377,7 +402,7 @@ async function createProject(event, headers, directoryId, teamId) {
     },
     ScanIndexForward: true,
   });
-  const team = items.find((item) => item.entryType?.S === 'team' && item.teamId?.S === teamId);
+  const team = items.find((item) => item.entryType?.S === 'team' && item.teamId?.S === teamId && isActiveDirectoryItem(item));
 
   if (!team) {
     return json(404, { message: 'Team was not found.' }, headers);
@@ -412,6 +437,83 @@ async function createProject(event, headers, directoryId, teamId) {
       tone,
     },
   }, headers);
+}
+
+async function archiveTeam(headers, directoryId, teamId) {
+  const items = await queryAll({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    KeyConditionExpression: 'directoryId = :directoryId',
+    ExpressionAttributeValues: {
+      ':directoryId': { S: directoryId },
+    },
+    ScanIndexForward: true,
+  });
+  const team = items.find((item) => item.entryType?.S === 'team' && item.teamId?.S === teamId && isActiveDirectoryItem(item));
+
+  if (!team) {
+    return json(404, { message: 'Team was not found.' }, headers);
+  }
+
+  const archivedAt = new Date().toISOString();
+
+  await dynamodb.send(new UpdateItemCommand({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    Key: {
+      directoryId: { S: directoryId },
+      entryKey: { S: team.entryKey.S },
+    },
+    UpdateExpression: 'SET archivedAt = :archivedAt',
+    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+    ExpressionAttributeValues: {
+      ':archivedAt': { S: archivedAt },
+    },
+  }));
+
+  return json(200, { teamId, archivedAt }, headers);
+}
+
+async function archiveProject(headers, directoryId, teamId, projectId) {
+  const items = await queryAll({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    KeyConditionExpression: 'directoryId = :directoryId',
+    ExpressionAttributeValues: {
+      ':directoryId': { S: directoryId },
+    },
+    ScanIndexForward: true,
+  });
+  const team = items.find((item) => item.entryType?.S === 'team' && item.teamId?.S === teamId && isActiveDirectoryItem(item));
+
+  if (!team) {
+    return json(404, { message: 'Team was not found.' }, headers);
+  }
+
+  const project = items.find((item) =>
+    item.entryType?.S === 'project' &&
+    item.teamId?.S === teamId &&
+    item.projectId?.S === projectId &&
+    isActiveDirectoryItem(item)
+  );
+
+  if (!project) {
+    return json(404, { message: 'Project was not found.' }, headers);
+  }
+
+  const archivedAt = new Date().toISOString();
+
+  await dynamodb.send(new UpdateItemCommand({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    Key: {
+      directoryId: { S: directoryId },
+      entryKey: { S: project.entryKey.S },
+    },
+    UpdateExpression: 'SET archivedAt = :archivedAt',
+    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+    ExpressionAttributeValues: {
+      ':archivedAt': { S: archivedAt },
+    },
+  }));
+
+  return json(200, { teamId, projectId, archivedAt }, headers);
 }
 
 async function createProjectTask(event, headers, directoryId, projectId) {
@@ -512,6 +614,28 @@ function readCreateProjectTeamId(event) {
   return encodedTeamId ? decodePathSegment(encodedTeamId) : undefined;
 }
 
+function readArchiveTeamId(event) {
+  if (event.requestContext?.http?.method !== 'PATCH') {
+    return undefined;
+  }
+
+  const encodedTeamId = event.rawPath?.match(/^\\/(?:api\\/)?teams\\/([^/]+)\\/archive$/)?.[1];
+
+  return encodedTeamId ? decodePathSegment(encodedTeamId) : undefined;
+}
+
+function readArchiveProjectParams(event) {
+  if (event.requestContext?.http?.method !== 'PATCH') {
+    return undefined;
+  }
+
+  const match = event.rawPath?.match(/^\\/(?:api\\/)?teams\\/([^/]+)\\/projects\\/([^/]+)\\/archive$/);
+  const teamId = match?.[1] ? decodePathSegment(match[1]) : undefined;
+  const projectId = match?.[2] ? decodePathSegment(match[2]) : undefined;
+
+  return teamId && projectId ? { teamId, projectId } : undefined;
+}
+
 async function hasProjectAccess(directoryId, projectId) {
   const items = await queryAll({
     TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
@@ -522,7 +646,19 @@ async function hasProjectAccess(directoryId, projectId) {
     ScanIndexForward: true,
   });
 
-  return items.some((item) => item.entryType?.S === 'project' && item.projectId?.S === projectId);
+  const activeTeamIds = new Set(
+    items
+      .filter((item) => item.entryType?.S === 'team' && isActiveDirectoryItem(item))
+      .map((item) => item.teamId?.S)
+      .filter(Boolean)
+  );
+
+  return items.some((item) =>
+    item.entryType?.S === 'project' &&
+    item.projectId?.S === projectId &&
+    activeTeamIds.has(item.teamId?.S) &&
+    isActiveDirectoryItem(item)
+  );
 }
 
 async function queryAll(input) {
@@ -581,7 +717,7 @@ function createHeaders(event) {
 
   return {
     'access-control-allow-origin': allowedOrigin,
-    'access-control-allow-methods': 'GET,POST,OPTIONS',
+    'access-control-allow-methods': 'GET,POST,PATCH,OPTIONS',
     'access-control-allow-headers': 'authorization,content-type',
     'content-type': 'application/json; charset=utf-8',
     vary: 'origin',
@@ -686,6 +822,10 @@ function toProjectDirectory(items, locale) {
   const projectItems = [];
 
   for (const item of items) {
+    if (!isActiveDirectoryItem(item)) {
+      continue;
+    }
+
     if (item.entryType?.S === 'team') {
       const team = {
         id: item.teamId.S,
@@ -721,6 +861,10 @@ function toProjectDirectory(items, locale) {
 
 function localizedName(item, locale) {
   return locale === 'en' ? item.nameEn?.S ?? item.nameJa.S : item.nameJa?.S ?? item.nameEn.S;
+}
+
+function isActiveDirectoryItem(item) {
+  return !item.archivedAt?.S;
 }
 
 function toTask(item) {
@@ -777,7 +921,7 @@ function isProjectTone(value) {
       authType: lambda.FunctionUrlAuthType.NONE,
       cors: {
         allowedOrigins: taskApiAllowedOriginList,
-        allowedMethods: [lambda.HttpMethod.GET, lambda.HttpMethod.POST],
+        allowedMethods: [lambda.HttpMethod.GET, lambda.HttpMethod.POST, lambda.HttpMethod.PATCH],
         allowedHeaders: ['authorization', 'content-type'],
       },
     });

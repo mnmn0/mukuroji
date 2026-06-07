@@ -167,6 +167,47 @@ test('creates a project under an authenticated team directory', async () => {
   ])
 })
 
+test('archives a team in the authenticated user scoped directory', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  const response = await app.request('/api/teams/core-team/archive', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    teamId: 'core-team',
+    archivedAt: '2026-06-06T00:00:00.000Z',
+  })
+  expect(calls.teamArchives).toEqual([
+    { directoryId: 'user#demo@example.com', teamId: 'core-team' },
+  ])
+})
+
+test('archives a project under an authenticated team directory', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  const response = await app.request('/api/teams/core-team/projects/refero/archive', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    teamId: 'core-team',
+    projectId: 'refero',
+    archivedAt: '2026-06-06T00:00:00.000Z',
+  })
+  expect(calls.projectArchives).toEqual([
+    { directoryId: 'user#demo@example.com', teamId: 'core-team', projectId: 'refero' },
+  ])
+})
+
 test('DynamoDB directory client creates duplicate named teams with a unique id suffix', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const documentClient = {
@@ -757,6 +798,19 @@ test('DynamoDB dashboard summary client derives counts from directory and task d
           },
         }
       },
+      async archiveTeam() {
+        return {
+          teamId: 'unused',
+          archivedAt: '2026-06-06T00:00:00.000Z',
+        }
+      },
+      async archiveProject() {
+        return {
+          teamId: 'unused',
+          projectId: 'unused',
+          archivedAt: '2026-06-06T00:00:00.000Z',
+        }
+      },
     },
     {
       async getProjectTasks(_directoryId, projectId) {
@@ -905,12 +959,185 @@ test('DynamoDB directory client reads every page from the user partition', async
   ])
 })
 
+test('DynamoDB directory client omits archived teams and projects', async () => {
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000010#PROJECT#refero',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'refero',
+              projectSortOrder: 10,
+              nameJa: 'Refero',
+              nameEn: 'Refero',
+              tone: 'blue',
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000020#PROJECT#archived-project',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'archived-project',
+              projectSortOrder: 20,
+              nameJa: 'Archived Project',
+              nameEn: 'Archived Project',
+              tone: 'green',
+              archivedAt: '2026-06-06T00:00:00.000Z',
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000020#000000#TEAM#archived-team',
+              entryType: 'team',
+              teamId: 'archived-team',
+              teamSortOrder: 20,
+              nameJa: 'Archived Team',
+              nameEn: 'Archived Team',
+              expanded: true,
+              archivedAt: '2026-06-06T00:00:00.000Z',
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000020#000010#PROJECT#hidden-project',
+              entryType: 'project',
+              teamId: 'archived-team',
+              teamSortOrder: 20,
+              projectId: 'hidden-project',
+              projectSortOrder: 10,
+              nameJa: 'Hidden Project',
+              nameEn: 'Hidden Project',
+              tone: 'yellow',
+            },
+          ],
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(client.getProjectDirectory('user#demo@example.com', 'ja')).resolves.toEqual({
+    teams: [
+      {
+        id: 'core-team',
+        name: 'コアチーム',
+        expanded: true,
+        projects: [
+          {
+            id: 'refero',
+            name: 'Refero',
+            tone: 'blue',
+          },
+        ],
+      },
+    ],
+  })
+  await expect(client.hasProjectAccess('user#demo@example.com', 'refero')).resolves.toBe(true)
+  await expect(
+    client.hasProjectAccess('user#demo@example.com', 'archived-project'),
+  ).resolves.toBe(false)
+  await expect(
+    client.hasProjectAccess('user#demo@example.com', 'hidden-project'),
+  ).resolves.toBe(false)
+})
+
+test('DynamoDB directory client archives teams and projects with conditional updates', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000010#PROJECT#refero',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'refero',
+              projectSortOrder: 10,
+              nameJa: 'Refero',
+              nameEn: 'Refero',
+              tone: 'blue',
+            },
+          ],
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(client.archiveTeam('user#demo@example.com', 'core-team')).resolves.toEqual({
+    teamId: 'core-team',
+    archivedAt: expect.any(String),
+  })
+  await expect(
+    client.archiveProject('user#demo@example.com', 'core-team', 'refero'),
+  ).resolves.toEqual({
+    teamId: 'core-team',
+    projectId: 'refero',
+    archivedAt: expect.any(String),
+  })
+  expect(sentInputs[1]).toMatchObject({
+    TableName: 'DirectoryTable',
+    Key: {
+      directoryId: 'user#demo@example.com',
+      entryKey: '000010#000000#TEAM#core-team',
+    },
+    UpdateExpression: 'SET archivedAt = :archivedAt',
+    ConditionExpression:
+      'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+  })
+  expect(sentInputs[3]).toMatchObject({
+    TableName: 'DirectoryTable',
+    Key: {
+      directoryId: 'user#demo@example.com',
+      entryKey: '000010#000010#PROJECT#refero',
+    },
+    UpdateExpression: 'SET archivedAt = :archivedAt',
+    ConditionExpression:
+      'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+  })
+})
+
 function configureFakeProjectClients(hasProjectAccess: boolean) {
   const calls = {
     accessChecks: [] as Array<{ directoryId: string; projectId: string }>,
     directoryReads: [] as Array<{ directoryId: string; locale: string }>,
+    projectArchives: [] as Array<{ directoryId: string; teamId: string; projectId: string }>,
     projectCreates: [] as Array<{ directoryId: string; teamId: string; name: string }>,
     summaryReads: [] as string[],
+    teamArchives: [] as Array<{ directoryId: string; teamId: string }>,
     teamCreates: [] as Array<{ directoryId: string; name: string }>,
     taskCreates: [] as Array<{ directoryId: string; projectId: string; title: string }>,
     taskReads: [] as Array<{ directoryId: string; projectId: string }>,
@@ -993,6 +1220,23 @@ function configureFakeProjectClients(hasProjectAccess: boolean) {
             name: String(input.name),
             tone: 'green',
           },
+        }
+      },
+      async archiveTeam(directoryId, teamId) {
+        calls.teamArchives.push({ directoryId, teamId })
+
+        return {
+          teamId,
+          archivedAt: '2026-06-06T00:00:00.000Z',
+        }
+      },
+      async archiveProject(directoryId, teamId, projectId) {
+        calls.projectArchives.push({ directoryId, teamId, projectId })
+
+        return {
+          teamId,
+          projectId,
+          archivedAt: '2026-06-06T00:00:00.000Z',
         }
       },
     },

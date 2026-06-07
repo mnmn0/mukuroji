@@ -1,3 +1,4 @@
+import * as vm from 'node:vm';
 import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { expect, test } from '@jest/globals';
@@ -53,6 +54,7 @@ test('project task data store and lambda API are created', () => {
 
   template.hasResourceProperties('AWS::Lambda::Url', {
     Cors: {
+      AllowMethods: Match.arrayWith(['GET', 'POST', 'PATCH']),
       AllowOrigins: {
         'Fn::Split': [
           ',',
@@ -133,4 +135,290 @@ test('project task data store and lambda API are created', () => {
   expect(lambdaCode).toContain('hasProjectAccess');
   expect(lambdaCode).toContain('async function queryAll');
   expect(lambdaCode).toContain('const projectItems = [];');
+  expect(lambdaCode).toContain('UpdateItemCommand');
+  expect(lambdaCode).toContain('readArchiveTeamId');
+  expect(lambdaCode).toContain('readArchiveProjectParams');
+  expect(lambdaCode).toContain('SET archivedAt = :archivedAt');
+  expect(lambdaCode).toContain('isActiveDirectoryItem');
+  expect(lambdaCode).toContain("'GET,POST,PATCH,OPTIONS'");
 });
+
+test('inline lambda archives a project with a conditional update', async () => {
+  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
+  const lambda = createInlineLambda(async (command) => {
+    commandInputs.push({
+      commandName: command.constructor.name,
+      input: command.input,
+    });
+
+    if (command.constructor.name === 'QueryCommand') {
+      return {
+        Items: [
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: '000010#000000#TEAM#core-team' },
+            entryType: { S: 'team' },
+            teamId: { S: 'core-team' },
+            teamSortOrder: { N: '10' },
+            nameJa: { S: 'コアチーム' },
+            nameEn: { S: 'Core Team' },
+            expanded: { BOOL: true },
+          },
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: '000010#000010#PROJECT#refero' },
+            entryType: { S: 'project' },
+            teamId: { S: 'core-team' },
+            teamSortOrder: { N: '10' },
+            projectId: { S: 'refero' },
+            projectSortOrder: { N: '10' },
+            nameJa: { S: 'Refero' },
+            nameEn: { S: 'Refero' },
+            tone: { S: 'blue' },
+          },
+        ],
+      };
+    }
+
+    return {};
+  });
+
+  const response = await lambda.handler(createLambdaEvent(
+    'PATCH',
+    '/api/teams/core-team/projects/refero/archive',
+  ));
+  const body = JSON.parse(response.body) as Record<string, unknown>;
+
+  expect(response.statusCode).toBe(200);
+  expect(response.headers['access-control-allow-methods']).toBe('GET,POST,PATCH,OPTIONS');
+  expect(body).toEqual({
+    teamId: 'core-team',
+    projectId: 'refero',
+    archivedAt: expect.any(String),
+  });
+  expect(commandInputs).toHaveLength(2);
+  expect(commandInputs[1]).toMatchObject({
+    commandName: 'UpdateItemCommand',
+    input: {
+      TableName: 'DirectoryTable',
+      Key: {
+        directoryId: { S: 'user#demo@example.com' },
+        entryKey: { S: '000010#000010#PROJECT#refero' },
+      },
+      UpdateExpression: 'SET archivedAt = :archivedAt',
+      ConditionExpression:
+        'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+      ExpressionAttributeValues: {
+        ':archivedAt': { S: body.archivedAt },
+      },
+    },
+  });
+});
+
+test('inline lambda archives a team with a conditional update', async () => {
+  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
+  const lambda = createInlineLambda(async (command) => {
+    commandInputs.push({
+      commandName: command.constructor.name,
+      input: command.input,
+    });
+
+    if (command.constructor.name === 'QueryCommand') {
+      return {
+        Items: [
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: '000010#000000#TEAM#core-team' },
+            entryType: { S: 'team' },
+            teamId: { S: 'core-team' },
+            teamSortOrder: { N: '10' },
+            nameJa: { S: 'コアチーム' },
+            nameEn: { S: 'Core Team' },
+            expanded: { BOOL: true },
+          },
+        ],
+      };
+    }
+
+    return {};
+  });
+
+  const response = await lambda.handler(createLambdaEvent('PATCH', '/api/teams/core-team/archive'));
+  const body = JSON.parse(response.body) as Record<string, unknown>;
+
+  expect(response.statusCode).toBe(200);
+  expect(body).toEqual({
+    teamId: 'core-team',
+    archivedAt: expect.any(String),
+  });
+  expect(commandInputs).toHaveLength(2);
+  expect(commandInputs[1]).toMatchObject({
+    commandName: 'UpdateItemCommand',
+    input: {
+      TableName: 'DirectoryTable',
+      Key: {
+        directoryId: { S: 'user#demo@example.com' },
+        entryKey: { S: '000010#000000#TEAM#core-team' },
+      },
+      UpdateExpression: 'SET archivedAt = :archivedAt',
+      ConditionExpression:
+        'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+      ExpressionAttributeValues: {
+        ':archivedAt': { S: body.archivedAt },
+      },
+    },
+  });
+});
+
+test('inline lambda denies task access for archived projects', async () => {
+  const lambda = createInlineLambda(async (command) => {
+    if (command.constructor.name === 'QueryCommand') {
+      return {
+        Items: [
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: '000010#000000#TEAM#core-team' },
+            entryType: { S: 'team' },
+            teamId: { S: 'core-team' },
+            teamSortOrder: { N: '10' },
+            nameJa: { S: 'コアチーム' },
+            nameEn: { S: 'Core Team' },
+            expanded: { BOOL: true },
+          },
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: '000010#000010#PROJECT#refero' },
+            entryType: { S: 'project' },
+            teamId: { S: 'core-team' },
+            teamSortOrder: { N: '10' },
+            projectId: { S: 'refero' },
+            projectSortOrder: { N: '10' },
+            nameJa: { S: 'Refero' },
+            nameEn: { S: 'Refero' },
+            tone: { S: 'blue' },
+            archivedAt: { S: '2026-06-06T00:00:00.000Z' },
+          },
+        ],
+      };
+    }
+
+    return {};
+  });
+
+  const response = await lambda.handler(createLambdaEvent('GET', '/api/projects/refero/tasks'));
+
+  expect(response.statusCode).toBe(403);
+  expect(JSON.parse(response.body)).toEqual({ message: 'Project access is denied.' });
+});
+
+function createInlineLambda(
+  dynamoDbSend: (
+    command: {
+      constructor: { name: string };
+      input: Record<string, unknown>;
+    },
+  ) => Promise<Record<string, unknown>>,
+) {
+  const lambdaCode = readInlineLambdaCode();
+  const exports = {};
+  const context = vm.createContext({
+    Buffer,
+    console,
+    exports,
+    process: {
+      env: {
+        ALLOWED_ORIGINS: 'http://localhost:5173,http://127.0.0.1:5173',
+        PROJECT_DIRECTORY_TABLE_NAME: 'DirectoryTable',
+        TASKS_TABLE_NAME: 'TasksTable',
+      },
+    },
+    require: (moduleName: string) => {
+      if (moduleName === '@aws-sdk/client-cognito-identity-provider') {
+        return {
+          CognitoIdentityProviderClient: function CognitoIdentityProviderClient(
+            this: { send: () => Promise<Record<string, unknown>> },
+          ) {
+            this.send = async () => ({
+              Username: 'demo@example.com',
+              UserAttributes: [
+                {
+                  Name: 'email',
+                  Value: 'demo@example.com',
+                },
+              ],
+            });
+          },
+          GetUserCommand: createCommandConstructor('GetUserCommand'),
+        };
+      }
+
+      if (moduleName === '@aws-sdk/client-dynamodb') {
+        return {
+          DynamoDBClient: function DynamoDBClient(
+            this: {
+              send: typeof dynamoDbSend;
+            },
+          ) {
+            this.send = dynamoDbSend;
+          },
+          PutItemCommand: createCommandConstructor('PutItemCommand'),
+          QueryCommand: createCommandConstructor('QueryCommand'),
+          UpdateItemCommand: createCommandConstructor('UpdateItemCommand'),
+        };
+      }
+
+      throw new Error(`Unsupported module: ${moduleName}`);
+    },
+  });
+
+  vm.runInContext(lambdaCode, context);
+
+  return exports as {
+    handler: (event: Record<string, unknown>) => Promise<{
+      body: string;
+      headers: Record<string, string>;
+      statusCode: number;
+    }>;
+  };
+}
+
+function readInlineLambdaCode() {
+  const app = new cdk.App();
+  const stack = new CdkStack(app, 'InlineLambdaTestStack');
+  const template = Template.fromStack(stack);
+  const lambdaResource = Object.values(template.findResources('AWS::Lambda::Function')).find((resource) =>
+    JSON.stringify(resource).includes('isProjectDirectoryRequest'),
+  );
+
+  return String(lambdaResource?.Properties?.Code?.ZipFile ?? '');
+}
+
+function createCommandConstructor(name: string) {
+  const commandConstructor = function Command(
+    this: { input: Record<string, unknown> },
+    input: Record<string, unknown>,
+  ) {
+    this.input = input;
+  };
+
+  Object.defineProperty(commandConstructor, 'name', { value: name });
+
+  return commandConstructor;
+}
+
+function createLambdaEvent(method: string, rawPath: string) {
+  return {
+    body: undefined,
+    headers: {
+      authorization: 'Bearer test-token',
+      origin: 'http://localhost:5173',
+    },
+    isBase64Encoded: false,
+    rawPath,
+    requestContext: {
+      http: {
+        method,
+      },
+    },
+  };
+}

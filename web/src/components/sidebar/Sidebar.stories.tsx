@@ -37,6 +37,8 @@ const meta = {
     defaultActiveTeamId: 'johns-first-team',
     defaultActiveProjectId: 'refero',
     inboxCount: 3,
+    onArchiveProject: async () => undefined,
+    onArchiveTeam: async () => undefined,
     onCreateProject: async () => undefined,
     onCreateTeam: async () => undefined,
   },

@@ -20,6 +20,8 @@ import {
   type MessageKey,
 } from '../i18n'
 import {
+  archiveProjectDirectoryProject,
+  archiveProjectDirectoryTeam,
   createProjectDirectoryProject,
   createProjectDirectoryTeam,
   type CreateProjectDirectoryProjectInput,
@@ -149,6 +151,14 @@ type TaskScreenProps = {
    * プロジェクト新規登録時の callback です。
    */
   onCreateProject?: (teamId: string, input: CreateProjectDirectoryProjectInput) => Promise<void>
+  /**
+   * チームアーカイブ時の callback です。
+   */
+  onArchiveTeam?: (teamId: string) => Promise<void>
+  /**
+   * プロジェクトアーカイブ時の callback です。
+   */
+  onArchiveProject?: (teamId: string, projectId: string) => Promise<void>
 }
 
 const viewLabelKeys: Record<TaskTab, MessageKey> = {
@@ -284,6 +294,32 @@ export function TaskPage() {
     }
   }
 
+  const handleArchiveTeam = async (teamId: string) => {
+    if (!accessToken) {
+      return
+    }
+
+    await archiveProjectDirectoryTeam(accessToken, teamId)
+    await mutateProjectDirectory()
+
+    if (activeTeam?.id === teamId) {
+      navigate(workspaceNavPaths.dashboard)
+    }
+  }
+
+  const handleArchiveProject = async (teamId: string, archivedProjectId: string) => {
+    if (!accessToken) {
+      return
+    }
+
+    await archiveProjectDirectoryProject(accessToken, teamId, archivedProjectId)
+    await mutateProjectDirectory()
+
+    if (projectId === archivedProjectId && activeTeam?.id === teamId) {
+      navigate(workspaceNavPaths.dashboard)
+    }
+  }
+
   return (
     <TaskScreen
       isLoading={isLoading}
@@ -298,6 +334,8 @@ export function TaskPage() {
       }
       onCreateProject={handleCreateProject}
       onCreateTeam={handleCreateTeam}
+      onArchiveProject={handleArchiveProject}
+      onArchiveTeam={handleArchiveTeam}
       onCreateTask={handleCreateTask}
       projectId={projectId}
       projectName={projectName}
@@ -329,6 +367,8 @@ export function TaskScreen({
   onSelectTeamView,
   onCreateProject,
   onCreateTeam,
+  onArchiveProject,
+  onArchiveTeam,
   onCreateTask,
 }: TaskScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
@@ -389,6 +429,8 @@ export function TaskScreen({
         collapsed={sidebarCollapsed}
         inboxCount={tasks.filter((task) => task.status === 'review' || task.priority === 'high').length}
         labels={sidebarLabels}
+        onArchiveProject={onArchiveProject}
+        onArchiveTeam={onArchiveTeam}
         onCreateProject={onCreateProject}
         onCreateTeam={onCreateTeam}
         onSelectNav={onSelectNav}
@@ -409,6 +451,8 @@ export function TaskScreen({
           activeProjectTeamId={resolvedActiveTeamId}
           inboxCount={tasks.filter((task) => task.status === 'review' || task.priority === 'high').length}
           labels={sidebarLabels}
+          onArchiveProject={onArchiveProject}
+          onArchiveTeam={onArchiveTeam}
           onCreateProject={onCreateProject}
           onCreateTeam={onCreateTeam}
           onSelectNav={(navId) => {

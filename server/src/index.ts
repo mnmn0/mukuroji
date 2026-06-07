@@ -8,6 +8,7 @@ import {
   DynamoDBDocumentClient,
   PutCommand,
   QueryCommand,
+  UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { Hono } from 'hono'
 import { handle } from 'hono/aws-lambda'
@@ -396,6 +397,10 @@ type ProjectDirectoryItem = {
    * サイドバー上のプロジェクト表示色です。
    */
   tone?: ProjectTone
+  /**
+   * アーカイブ済みの場合に設定する ISO 8601 timestamp です。
+   */
+  archivedAt?: string
 }
 
 /**
@@ -513,6 +518,38 @@ type CreateProjectResponse = {
 }
 
 /**
+ * チームアーカイブ API が返す response body です。
+ */
+type ArchiveTeamResponse = {
+  /**
+   * アーカイブしたチーム ID です。
+   */
+  teamId: string
+  /**
+   * アーカイブ日時の ISO 8601 timestamp です。
+   */
+  archivedAt: string
+}
+
+/**
+ * プロジェクトアーカイブ API が返す response body です。
+ */
+type ArchiveProjectResponse = {
+  /**
+   * プロジェクトが所属していたチーム ID です。
+   */
+  teamId: string
+  /**
+   * アーカイブしたプロジェクト ID です。
+   */
+  projectId: string
+  /**
+   * アーカイブ日時の ISO 8601 timestamp です。
+   */
+  archivedAt: string
+}
+
+/**
  * API handler から利用する Cognito client の最小 interface です。
  */
 type CognitoClient = {
@@ -578,6 +615,18 @@ type ProjectDirectoryClient = {
     teamId: string,
     input: CreateProjectRequestBody,
   ): Promise<CreateProjectResponse>
+  /**
+   * DynamoDB 上のチームをアーカイブします。
+   */
+  archiveTeam(directoryId: string, teamId: string): Promise<ArchiveTeamResponse>
+  /**
+   * DynamoDB 上のチーム配下プロジェクトをアーカイブします。
+   */
+  archiveProject(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+  ): Promise<ArchiveProjectResponse>
 }
 
 /**
@@ -604,7 +653,7 @@ app.use(
       'http://localhost:6006',
       'http://127.0.0.1:6006',
     ],
-    allowMethods: ['GET', 'POST', 'OPTIONS'],
+    allowMethods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
     allowHeaders: ['Authorization', 'Content-Type'],
   }),
 )
@@ -800,6 +849,67 @@ app.post('/api/teams/:teamId/projects', async (c) => {
 })
 
 /**
+ * DynamoDB 上のチームをアーカイブする endpoint です。
+ */
+app.patch('/api/teams/:teamId/archive', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!teamId) {
+    return c.json({ message: 'Team ID is required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
+
+    return c.json(await projectDirectory.archiveTeam(principal.directoryId, teamId))
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * DynamoDB 上のチーム配下プロジェクトをアーカイブする endpoint です。
+ */
+app.patch('/api/teams/:teamId/projects/:projectId/archive', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const projectId = c.req.param('projectId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!teamId) {
+    return c.json({ message: 'Team ID is required.' }, 400)
+  }
+
+  if (!projectId) {
+    return c.json({ message: 'Project ID is required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
+
+    return c.json(await projectDirectory.archiveProject(principal.directoryId, teamId, projectId))
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
  * DynamoDB に保存されたプロジェクト別タスク一覧を返す endpoint です。
  *
  * @remarks
@@ -938,6 +1048,10 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
 
   if (error.code === 'TeamNotFound') {
     return c.json({ message: 'Team was not found.' }, 404)
+  }
+
+  if (error.code === 'ProjectNotFound') {
+    return c.json({ message: 'Project was not found.' }, 404)
   }
 
   if (error.code === 'ConditionalCheckFailedException') {
@@ -1418,18 +1532,20 @@ export class DynamoDbProjectDirectoryClient {
    */
   async hasProjectAccess(directoryId: string, projectId: string) {
     try {
-      const items = await this.queryDirectoryItems(directoryId)
+      const items = await this.readValidDirectoryItems(directoryId)
+      const activeTeamIds = new Set(
+        items
+          .filter((item) => item.entryType === 'team' && isActiveDirectoryItem(item))
+          .map((item) => item.teamId),
+      )
 
       return items.some((item) => {
-        if (!isProjectDirectoryItem(item, directoryId)) {
-          throw new ProjectDataError(
-            503,
-            'InvalidProjectDirectory',
-            'Project directory item is missing or invalid.',
-          )
-        }
-
-        return item.entryType === 'project' && item.projectId === projectId
+        return (
+          item.entryType === 'project' &&
+          item.projectId === projectId &&
+          isActiveDirectoryItem(item) &&
+          activeTeamIds.has(item.teamId)
+        )
       })
     } catch (error) {
       if (error instanceof ProjectDataError) {
@@ -1502,7 +1618,9 @@ export class DynamoDbProjectDirectoryClient {
 
     try {
       const items = await this.readValidDirectoryItems(directoryId)
-      const team = items.find((item) => item.entryType === 'team' && item.teamId === teamId)
+      const team = items.find((item) =>
+        item.entryType === 'team' && item.teamId === teamId && isActiveDirectoryItem(item),
+      )
 
       if (!team) {
         throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
@@ -1549,6 +1667,112 @@ export class DynamoDbProjectDirectoryClient {
           tone: item.tone,
         },
       } satisfies CreateProjectResponse
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * DynamoDB 上のチームをアーカイブします。
+   */
+  async archiveTeam(directoryId: string, teamId: string) {
+    try {
+      const items = await this.readValidDirectoryItems(directoryId)
+      const team = items.find((item) =>
+        item.entryType === 'team' && item.teamId === teamId && isActiveDirectoryItem(item),
+      )
+
+      if (!team) {
+        throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+      }
+
+      const archivedAt = new Date().toISOString()
+
+      await this.documentClient.send(
+        new UpdateCommand({
+          TableName: this.tableName,
+          Key: {
+            directoryId,
+            entryKey: team.entryKey,
+          },
+          UpdateExpression: 'SET archivedAt = :archivedAt',
+          ConditionExpression:
+            'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+          ExpressionAttributeValues: {
+            ':archivedAt': archivedAt,
+          },
+        }),
+      )
+
+      return {
+        teamId,
+        archivedAt,
+      } satisfies ArchiveTeamResponse
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * DynamoDB 上のチーム配下プロジェクトをアーカイブします。
+   */
+  async archiveProject(directoryId: string, teamId: string, projectId: string) {
+    try {
+      const items = await this.readValidDirectoryItems(directoryId)
+      const team = items.find((item) =>
+        item.entryType === 'team' && item.teamId === teamId && isActiveDirectoryItem(item),
+      )
+
+      if (!team) {
+        throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+      }
+
+      const project = items.find((item) =>
+        item.entryType === 'project' &&
+        item.teamId === teamId &&
+        item.projectId === projectId &&
+        isActiveDirectoryItem(item),
+      )
+
+      if (!project) {
+        throw new ProjectDataError(
+          404,
+          'ProjectNotFound',
+          `Project "${projectId}" was not found in team "${teamId}".`,
+        )
+      }
+
+      const archivedAt = new Date().toISOString()
+
+      await this.documentClient.send(
+        new UpdateCommand({
+          TableName: this.tableName,
+          Key: {
+            directoryId,
+            entryKey: project.entryKey,
+          },
+          UpdateExpression: 'SET archivedAt = :archivedAt',
+          ConditionExpression:
+            'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+          ExpressionAttributeValues: {
+            ':archivedAt': archivedAt,
+          },
+        }),
+      )
+
+      return {
+        teamId,
+        projectId,
+        archivedAt,
+      } satisfies ArchiveProjectResponse
     } catch (error) {
       if (error instanceof ProjectDataError) {
         throw error
@@ -1957,6 +2181,10 @@ function toProjectDirectoryResponse(
       )
     }
 
+    if (!isActiveDirectoryItem(value)) {
+      continue
+    }
+
     if (value.entryType === 'team') {
       const team = {
         id: value.teamId,
@@ -1994,6 +2222,10 @@ function localizedName(item: ProjectDirectoryItem, locale: Locale) {
   return locale === 'en' ? item.nameEn || item.nameJa : item.nameJa || item.nameEn
 }
 
+function isActiveDirectoryItem(item: ProjectDirectoryItem) {
+  return item.archivedAt === undefined
+}
+
 function isProjectTaskItem(value: unknown): value is ProjectTaskItem {
   if (!isRecord(value)) {
     return false
@@ -2025,7 +2257,8 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
     typeof value.teamId !== 'string' ||
     typeof value.teamSortOrder !== 'number' ||
     typeof value.nameJa !== 'string' ||
-    typeof value.nameEn !== 'string'
+    typeof value.nameEn !== 'string' ||
+    (value.archivedAt !== undefined && typeof value.archivedAt !== 'string')
   ) {
     return false
   }

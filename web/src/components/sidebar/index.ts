@@ -8,6 +8,7 @@ export type {
   MobileSidebarDrawerProps,
 } from './MobileSidebarDrawer'
 export type {
+  SidebarArchiveLabels,
   SidebarCreateLabels,
   SidebarNavId,
   SidebarLabels,
