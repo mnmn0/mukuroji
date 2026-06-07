@@ -44,6 +44,10 @@ type MockRequestCounts = {
    * タスク作成 API の request 数です。
    */
   taskCreates: number
+  /**
+   * タスク状態更新 API の request 数です。
+   */
+  taskStatusUpdates: number
 }
 
 const mockRequestCountsByPage = new WeakMap<Page, MockRequestCounts>()
@@ -61,6 +65,7 @@ async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFi
     teamArchives: 0,
     projectArchives: 0,
     taskCreates: 0,
+    taskStatusUpdates: 0,
   }
   const projectDirectory: ProjectDirectoryTeam[] = projectDirectoryFixtures.map((team) => ({
     ...team,
@@ -248,6 +253,39 @@ async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFi
     })
   })
 
+  await page.route(/.*\/api\/projects\/refero\/tasks\/[^/]+$/, async (route) => {
+    if (route.request().method() !== 'PATCH') {
+      await route.fallback()
+      return
+    }
+
+    requestCounts.taskStatusUpdates += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    const taskId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[5] ?? '')
+    const body = route.request().postDataJSON() as { status?: ProjectTask['status'] }
+    const status = body.status ?? 'todo'
+    const task = taskResponsesByProject.refero.find((candidate) => candidate.id === taskId)
+
+    if (!task) {
+      await route.fulfill({
+        status: 404,
+        json: {
+          message: 'Task was not found.',
+        },
+      })
+      return
+    }
+
+    task.status = status
+
+    await route.fulfill({
+      json: {
+        task,
+      },
+    })
+  })
+
   await page.route('**/api/projects/product-roadmap/tasks', async (route) => {
     recordProjectTaskRequest(requestCounts, 'product-roadmap')
 
@@ -411,6 +449,44 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('tasks-heading')).toHaveText('ブランド刷新')
     await expect(page.getByTestId('tasks-empty')).toBeVisible()
     expect(requestCounts.projectDirectory).toBe(1)
+  })
+
+  test('サイドバーからマイタスクへ移動するとタスクをカンバンで表示する', async ({ page }) => {
+    await page.goto('/dashboard')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('button', { name: 'マイタスク', exact: true }).click()
+
+    await expect(page).toHaveURL('/my-tasks')
+    await expect(page.getByTestId('my-tasks-kanban')).toBeVisible()
+    await expect(page.getByTestId('my-tasks-column-todo')).toContainText('未着手')
+    await expect(page.getByTestId('my-tasks-column-in-progress')).toContainText('進行中')
+    await expect(page.getByTestId('my-tasks-column-review')).toContainText('レビュー中')
+    await expect(page.getByTestId('my-tasks-column-done')).toContainText('完了')
+    await expect(
+      page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
+    ).toBeVisible()
+    await expect(
+      page.getByTestId('my-tasks-column-todo').getByTestId('my-tasks-card-refero-seo-research'),
+    ).toBeVisible()
+    await expect(
+      page.getByTestId('my-tasks-column-review').getByTestId('my-tasks-card-refero-brand-guideline'),
+    ).toBeVisible()
+    await expect(
+      page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-competitor-report'),
+    ).toBeVisible()
+
+    await page
+      .getByTestId('my-tasks-card-refero-wireframe')
+      .dragTo(page.getByTestId('my-tasks-column-done'))
+
+    await expect(
+      page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-wireframe'),
+    ).toBeVisible()
+    await expect(
+      page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
+    ).toHaveCount(0)
+    expect(requestCounts.taskStatusUpdates).toBe(1)
   })
 
   test('ダッシュボードからチームとプロジェクトを新規登録できる', async ({ page }) => {

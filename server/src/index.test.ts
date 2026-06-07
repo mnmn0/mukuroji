@@ -574,6 +574,44 @@ test('creates a project task after project access is confirmed', async () => {
   ])
 })
 
+test('updates a project task status after project access is confirmed', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  const response = await app.request('/api/projects/refero/tasks/wireframe', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      status: 'done',
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    task: {
+      id: 'wireframe',
+      titleKey: 'tasks.item.wireframe',
+      assigneeKey: 'tasks.assignee.sato',
+      status: 'done',
+      dueDate: '2026/06/03',
+      priority: 'high',
+    },
+  })
+  expect(calls.accessChecks).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+  ])
+  expect(calls.taskStatusUpdates).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      projectId: 'refero',
+      status: 'done',
+      taskId: 'wireframe',
+    },
+  ])
+})
+
 test('DynamoDB task client queries the scoped project partition across pages', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const documentClient = {
@@ -749,6 +787,64 @@ test('DynamoDB task client creates duplicate titled tasks with unique IDs', asyn
   ])
 })
 
+test('DynamoDB task client updates a task status with a conditional write', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+
+      return {
+        Attributes: {
+          directoryId: 'user#demo@example.com',
+          directoryProjectId: 'user#demo@example.com#project#refero',
+          projectId: 'refero',
+          taskId: 'wireframe',
+          sortOrder: 10,
+          titleKey: 'tasks.item.wireframe',
+          assigneeKey: 'tasks.assignee.sato',
+          status: 'done',
+          dueDate: '2026/06/03',
+          priority: 'high',
+        },
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectTasksClient('TasksTable', documentClient)
+
+  await expect(
+    client.updateProjectTaskStatus('user#demo@example.com', 'refero', 'wireframe', {
+      status: 'done',
+    }),
+  ).resolves.toEqual({
+    task: {
+      id: 'wireframe',
+      titleKey: 'tasks.item.wireframe',
+      assigneeKey: 'tasks.assignee.sato',
+      status: 'done',
+      dueDate: '2026/06/03',
+      priority: 'high',
+    },
+  })
+  expect(sentInputs).toEqual([
+    {
+      TableName: 'TasksTable',
+      Key: {
+        directoryProjectId: 'user#demo@example.com#project#refero',
+        taskId: 'wireframe',
+      },
+      UpdateExpression: 'SET #status = :status',
+      ExpressionAttributeNames: {
+        '#status': 'status',
+      },
+      ExpressionAttributeValues: {
+        ':status': 'done',
+      },
+      ConditionExpression: 'attribute_exists(directoryProjectId) AND attribute_exists(taskId)',
+      ReturnValues: 'ALL_NEW',
+    },
+  ])
+})
+
 test('DynamoDB dashboard summary client derives counts from directory and task data', async () => {
   const client = new DynamoDbDashboardSummaryClient(
     {
@@ -854,6 +950,18 @@ test('DynamoDB dashboard summary client derives counts from directory and task d
             title: 'unused',
             assignee: 'unused',
             status: 'todo',
+            dueDate: '2026/06/03',
+            priority: 'medium',
+          },
+        }
+      },
+      async updateProjectTaskStatus() {
+        return {
+          task: {
+            id: 'unused',
+            title: 'unused',
+            assignee: 'unused',
+            status: 'done',
             dueDate: '2026/06/03',
             priority: 'medium',
           },
@@ -1141,6 +1249,12 @@ function configureFakeProjectClients(hasProjectAccess: boolean) {
     teamCreates: [] as Array<{ directoryId: string; name: string }>,
     taskCreates: [] as Array<{ directoryId: string; projectId: string; title: string }>,
     taskReads: [] as Array<{ directoryId: string; projectId: string }>,
+    taskStatusUpdates: [] as Array<{
+      directoryId: string
+      projectId: string
+      status: string
+      taskId: string
+    }>,
   }
 
   configureApiClientsForTest({
@@ -1268,6 +1382,25 @@ function configureFakeProjectClients(hasProjectAccess: boolean) {
             assignee: String(input.assignee),
             status: 'todo',
             dueDate: String(input.dueDate),
+            priority: 'high',
+          },
+        }
+      },
+      async updateProjectTaskStatus(directoryId, projectId, taskId, input) {
+        calls.taskStatusUpdates.push({
+          directoryId,
+          projectId,
+          status: String(input.status),
+          taskId,
+        })
+
+        return {
+          task: {
+            id: taskId,
+            titleKey: 'tasks.item.wireframe',
+            assigneeKey: 'tasks.assignee.sato',
+            status: input.status === 'done' ? 'done' : 'todo',
+            dueDate: '2026/06/03',
             priority: 'high',
           },
         }

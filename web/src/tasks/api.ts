@@ -113,6 +113,16 @@ type CreateProjectTaskResponse = {
 }
 
 /**
+ * タスク状態更新 API が返す response body です。
+ */
+type UpdateProjectTaskStatusResponse = {
+  /**
+   * 更新されたタスク行です。
+   */
+  task: ProjectTask
+}
+
+/**
  * Lambda API からエラーレスポンスが返ったときに投げる例外です。
  */
 export class ProjectTasksApiError extends Error {
@@ -210,6 +220,50 @@ export async function createProjectTask(
 }
 
 /**
+ * DynamoDB に保存されたプロジェクトタスクの状態を更新します。
+ */
+export async function updateProjectTaskStatus(
+  projectId: string,
+  taskId: string,
+  accessToken: string,
+  status: TaskStatus,
+) {
+  const response = await fetch(
+    `${tasksApiBaseUrl}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`,
+    {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ status }),
+    },
+  )
+  const data = await readJson<unknown>(response)
+
+  if (!response.ok) {
+    const message =
+      typeof data === 'object' &&
+      data !== null &&
+      'message' in data &&
+      typeof data.message === 'string'
+        ? data.message
+        : 'tasks.error.loading'
+
+    throw new ProjectTasksApiError(response.status, message)
+  }
+
+  if (!isUpdateProjectTaskStatusResponse(data)) {
+    throw new ProjectTasksApiError(response.status, 'tasks.error.loading')
+  }
+
+  return {
+    ...data.task,
+    projectId,
+  }
+}
+
+/**
  * fetch response body を JSON として読み込みます。
  */
 async function readJson<T>(response: Response): Promise<T> {
@@ -287,6 +341,18 @@ function isTaskPriority(value: unknown): value is TaskPriority {
  * API レスポンスがタスク作成結果として扱えるかどうかを判定します。
  */
 function isCreateProjectTaskResponse(value: unknown): value is CreateProjectTaskResponse {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'task' in value &&
+    isProjectTask(value.task)
+  )
+}
+
+/**
+ * API レスポンスがタスク状態更新結果として扱えるかどうかを判定します。
+ */
+function isUpdateProjectTaskStatusResponse(value: unknown): value is UpdateProjectTaskStatusResponse {
   return (
     typeof value === 'object' &&
     value !== null &&

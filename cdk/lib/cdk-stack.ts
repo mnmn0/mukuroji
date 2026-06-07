@@ -291,13 +291,17 @@ exports.handler = async (event) => {
     return listProjectDirectory(event, headers, directoryId);
   }
 
-  const projectId = event.pathParameters?.projectId ?? event.rawPath?.match(/^\\/(?:api\\/)?projects\\/([^/]+)\\/tasks$/)?.[1];
+  const taskStatusParams = readProjectTaskStatusParams(event);
+  const projectId =
+    taskStatusParams?.projectId ??
+    event.pathParameters?.projectId ??
+    event.rawPath?.match(/^\\/(?:api\\/)?projects\\/([^/]+)\\/tasks$/)?.[1];
 
   if (!projectId) {
     return json(404, { message: 'Project tasks endpoint was not found.' }, headers);
   }
 
-  const decodedProjectId = decodePathSegment(projectId);
+  const decodedProjectId = taskStatusParams?.projectId ?? decodePathSegment(projectId);
 
   if (!decodedProjectId) {
     return json(400, { message: 'Project ID is invalid.' }, headers);
@@ -310,6 +314,16 @@ exports.handler = async (event) => {
 
     if (event.requestContext?.http?.method === 'POST') {
       return await createProjectTask(event, headers, directoryId, decodedProjectId);
+    }
+
+    if (taskStatusParams) {
+      return await updateProjectTaskStatus(
+        event,
+        headers,
+        directoryId,
+        decodedProjectId,
+        taskStatusParams.taskId,
+      );
     }
 
     if (event.requestContext?.http?.method !== 'GET') {
@@ -572,6 +586,46 @@ async function createProjectTask(event, headers, directoryId, projectId) {
   }, headers);
 }
 
+async function updateProjectTaskStatus(event, headers, directoryId, projectId, taskId) {
+  const body = readJsonBody(event);
+
+  if (!isTaskStatus(body.status)) {
+    return json(400, { message: 'Task status is invalid.' }, headers);
+  }
+
+  const directoryProjectId = createDirectoryProjectId(directoryId, projectId);
+  let response;
+
+  try {
+    response = await dynamodb.send(new UpdateItemCommand({
+      TableName: process.env.TASKS_TABLE_NAME,
+      Key: {
+        directoryProjectId: { S: directoryProjectId },
+        taskId: { S: taskId },
+      },
+      UpdateExpression: 'SET #status = :status',
+      ExpressionAttributeNames: {
+        '#status': 'status',
+      },
+      ExpressionAttributeValues: {
+        ':status': { S: body.status },
+      },
+      ConditionExpression: 'attribute_exists(directoryProjectId) AND attribute_exists(taskId)',
+      ReturnValues: 'ALL_NEW',
+    }));
+  } catch (error) {
+    if (error?.name === 'ConditionalCheckFailedException') {
+      return json(404, { message: 'Task was not found.' }, headers);
+    }
+
+    throw error;
+  }
+
+  return json(200, {
+    task: toTask(response.Attributes),
+  }, headers);
+}
+
 async function listProjectDirectory(event, headers, directoryId) {
   const locale = event.queryStringParameters?.locale === 'en' ? 'en' : 'ja';
 
@@ -634,6 +688,18 @@ function readArchiveProjectParams(event) {
   const projectId = match?.[2] ? decodePathSegment(match[2]) : undefined;
 
   return teamId && projectId ? { teamId, projectId } : undefined;
+}
+
+function readProjectTaskStatusParams(event) {
+  if (event.requestContext?.http?.method !== 'PATCH') {
+    return undefined;
+  }
+
+  const match = event.rawPath?.match(/^\\/(?:api\\/)?projects\\/([^/]+)\\/tasks\\/([^/]+)$/);
+  const projectId = match?.[1] ? decodePathSegment(match[1]) : undefined;
+  const taskId = match?.[2] ? decodePathSegment(match[2]) : undefined;
+
+  return projectId && taskId ? { projectId, taskId } : undefined;
 }
 
 async function hasProjectAccess(directoryId, projectId) {

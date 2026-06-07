@@ -50,6 +50,15 @@ type Story = StoryObj<typeof meta>
 export const Home: Story = {}
 
 /**
+ * マイタスクのカンバン画面です。
+ */
+export const MyTasks: Story = {
+  args: {
+    view: 'my-tasks',
+  },
+}
+
+/**
  * ポートフォリオダッシュボード画面です。
  */
 export const Dashboard: Story = {

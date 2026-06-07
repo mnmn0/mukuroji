@@ -138,9 +138,107 @@ test('project task data store and lambda API are created', () => {
   expect(lambdaCode).toContain('UpdateItemCommand');
   expect(lambdaCode).toContain('readArchiveTeamId');
   expect(lambdaCode).toContain('readArchiveProjectParams');
+  expect(lambdaCode).toContain('readProjectTaskStatusParams');
+  expect(lambdaCode).toContain('async function updateProjectTaskStatus');
+  expect(lambdaCode).toContain('SET #status = :status');
   expect(lambdaCode).toContain('SET archivedAt = :archivedAt');
   expect(lambdaCode).toContain('isActiveDirectoryItem');
   expect(lambdaCode).toContain("'GET,POST,PATCH,OPTIONS'");
+});
+
+test('inline lambda updates a task status with a conditional update', async () => {
+  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
+  const lambda = createInlineLambda(async (command) => {
+    commandInputs.push({
+      commandName: command.constructor.name,
+      input: command.input,
+    });
+
+    if (command.constructor.name === 'QueryCommand') {
+      return {
+        Items: [
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: '000010#000000#TEAM#core-team' },
+            entryType: { S: 'team' },
+            teamId: { S: 'core-team' },
+            teamSortOrder: { N: '10' },
+            nameJa: { S: 'コアチーム' },
+            nameEn: { S: 'Core Team' },
+            expanded: { BOOL: true },
+          },
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: '000010#000010#PROJECT#refero' },
+            entryType: { S: 'project' },
+            teamId: { S: 'core-team' },
+            teamSortOrder: { N: '10' },
+            projectId: { S: 'refero' },
+            projectSortOrder: { N: '10' },
+            nameJa: { S: 'Refero' },
+            nameEn: { S: 'Refero' },
+            tone: { S: 'blue' },
+          },
+        ],
+      };
+    }
+
+    if (command.constructor.name === 'UpdateItemCommand') {
+      return {
+        Attributes: {
+          directoryId: { S: 'user#demo@example.com' },
+          directoryProjectId: { S: 'user#demo@example.com#project#refero' },
+          projectId: { S: 'refero' },
+          taskId: { S: 'wireframe' },
+          sortOrder: { N: '10' },
+          titleKey: { S: 'tasks.item.wireframe' },
+          assigneeKey: { S: 'tasks.assignee.sato' },
+          status: { S: 'done' },
+          dueDate: { S: '2026/06/03' },
+          priority: { S: 'high' },
+        },
+      };
+    }
+
+    return {};
+  });
+
+  const response = await lambda.handler({
+    ...createLambdaEvent('PATCH', '/api/projects/refero/tasks/wireframe'),
+    body: JSON.stringify({ status: 'done' }),
+  });
+
+  expect(response.statusCode).toBe(200);
+  expect(JSON.parse(response.body)).toEqual({
+    task: {
+      id: 'wireframe',
+      titleKey: 'tasks.item.wireframe',
+      assigneeKey: 'tasks.assignee.sato',
+      status: 'done',
+      dueDate: '2026/06/03',
+      priority: 'high',
+    },
+  });
+  expect(commandInputs).toHaveLength(2);
+  expect(commandInputs[1]).toEqual({
+    commandName: 'UpdateItemCommand',
+    input: {
+      TableName: 'TasksTable',
+      Key: {
+        directoryProjectId: { S: 'user#demo@example.com#project#refero' },
+        taskId: { S: 'wireframe' },
+      },
+      UpdateExpression: 'SET #status = :status',
+      ExpressionAttributeNames: {
+        '#status': 'status',
+      },
+      ExpressionAttributeValues: {
+        ':status': { S: 'done' },
+      },
+      ConditionExpression: 'attribute_exists(directoryProjectId) AND attribute_exists(taskId)',
+      ReturnValues: 'ALL_NEW',
+    },
+  });
 });
 
 test('inline lambda archives a project with a conditional update', async () => {
