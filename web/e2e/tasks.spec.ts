@@ -495,6 +495,16 @@ test.describe('authenticated task page', () => {
     ).toBeVisible()
 
     await page
+      .getByTestId('my-tasks-card-refero-brand-guideline-status-select')
+      .selectOption('todo')
+    await expect(
+      page.getByTestId('my-tasks-column-todo').getByTestId('my-tasks-card-refero-brand-guideline'),
+    ).toBeVisible()
+    await expect(
+      page.getByTestId('my-tasks-column-review').getByTestId('my-tasks-card-refero-brand-guideline'),
+    ).toHaveCount(0)
+
+    await page
       .getByTestId('my-tasks-card-refero-wireframe')
       .dragTo(page.getByTestId('my-tasks-column-done'))
 
@@ -504,7 +514,7 @@ test.describe('authenticated task page', () => {
     await expect(
       page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
     ).toHaveCount(0)
-    expect(requestCounts.taskStatusUpdates).toBe(1)
+    expect(requestCounts.taskStatusUpdates).toBe(2)
   })
 
   test('ダッシュボードからチームとプロジェクトを新規登録できる', async ({ page }) => {
@@ -688,7 +698,7 @@ test('マイタスクの片方の移動が失敗しても別タスクの成功�
   expect(getMockRequestCounts(page).taskStatusUpdates).toBe(2)
 })
 
-test('マイタスクの同一タスク連続移動では古い成功レスポンスを反映しない', async ({ page }) => {
+test('マイタスクでは同一タスクの移動中に追加移動を開始できない', async ({ page }) => {
   let markWireframeDoneUpdateStarted!: () => void
   let releaseWireframeDoneUpdate!: () => void
   const wireframeDoneUpdateStarted = new Promise<void>((resolve) => {
@@ -717,25 +727,17 @@ test('マイタスクの同一タスク連続移動では古い成功レスポ�
   await expect(
     page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-wireframe'),
   ).toBeVisible()
-
-  await page
-    .getByTestId('my-tasks-column-done')
-    .getByTestId('my-tasks-card-refero-wireframe')
-    .dragTo(page.getByTestId('my-tasks-column-review'))
   await expect(
-    page.getByTestId('my-tasks-column-review').getByTestId('my-tasks-card-refero-wireframe'),
-  ).toBeVisible()
+    page.getByTestId('my-tasks-card-refero-wireframe-status-select'),
+  ).toBeDisabled()
+  expect(getMockRequestCounts(page).taskStatusUpdates).toBe(1)
 
   releaseWireframeDoneUpdate()
-  await page.waitForTimeout(100)
 
   await expect(
-    page.getByTestId('my-tasks-column-review').getByTestId('my-tasks-card-refero-wireframe'),
-  ).toBeVisible()
-  await expect(
-    page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-wireframe'),
-  ).toHaveCount(0)
-  expect(getMockRequestCounts(page).taskStatusUpdates).toBe(2)
+    page.getByTestId('my-tasks-card-refero-wireframe-status-select'),
+  ).toBeEnabled()
+  expect(getMockRequestCounts(page).taskStatusUpdates).toBe(1)
   expect(getMockRequestCounts(page).projectTasks.refero).toBe(1)
 })
 

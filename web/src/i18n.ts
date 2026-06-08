@@ -203,6 +203,7 @@ const dictionaries = {
     'workspace.myTasks.description':
       '自分が次に進めるタスク、レビュー待ち、完了済みの作業をひとつの流れで扱えます。',
     'workspace.myTasks.moveError': 'タスクの状態を更新できませんでした。',
+    'workspace.myTasks.moveStatusLabel': '{title} の状態を変更',
     'workspace.myTasks.group.today': '今日処理する',
     'workspace.myTasks.group.upcoming': '次に進める',
     'workspace.myTasks.group.done': '完了済み',
@@ -594,6 +595,7 @@ const dictionaries = {
     'workspace.myTasks.description':
       'Handle next actions, review work, and completed tasks in one flow.',
     'workspace.myTasks.moveError': 'Could not update the task status.',
+    'workspace.myTasks.moveStatusLabel': 'Change status for {title}',
     'workspace.myTasks.group.today': 'Handle today',
     'workspace.myTasks.group.upcoming': 'Move next',
     'workspace.myTasks.group.done': 'Completed',

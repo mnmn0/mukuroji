@@ -293,7 +293,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     apiSWRConfig,
   )
   const [taskMoveErrorMessage, setTaskMoveErrorMessage] = useState<string | undefined>()
-  const taskMoveVersionsRef = useRef(new Map<string, number>())
+  const pendingTaskMoveKeysRef = useRef(new Set<string>())
   const summary = useMemo(() => createDashboardSummary(teams, tasks), [tasks, teams])
   const metadata = workspaceViewMetadata[view]
   const title = t(metadata.titleKey)
@@ -380,36 +380,37 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
 
     setTaskMoveErrorMessage(undefined)
     const taskKey = createWorkspaceTaskKey(task)
-    const nextMoveVersion = (taskMoveVersionsRef.current.get(taskKey) ?? 0) + 1
-    taskMoveVersionsRef.current.set(taskKey, nextMoveVersion)
+    if (pendingTaskMoveKeysRef.current.has(taskKey)) {
+      return
+    }
+
+    pendingTaskMoveKeysRef.current.add(taskKey)
     const nextTasks = updateWorkspaceTaskStatus(tasks, task, status, task.status)
-    await mutateProjectTasks(
-      (currentTasks = tasks) =>
-        updateWorkspaceTaskStatus(currentTasks, task, status, task.status),
-      { revalidate: false },
-    )
 
     try {
+      await mutateProjectTasks(
+        (currentTasks = tasks) =>
+          updateWorkspaceTaskStatus(currentTasks, task, status, task.status),
+        { revalidate: false },
+      )
       const updatedTask = await updateProjectTaskStatus(task.projectId, task.id, accessToken, status)
-      if (taskMoveVersionsRef.current.get(taskKey) === nextMoveVersion) {
-        await mutateProjectTasks(
-          (currentTasks = nextTasks) =>
-            replaceWorkspaceTask(currentTasks, updatedTask),
-          {
-            revalidate: false,
-          },
-        )
-      }
+      await mutateProjectTasks(
+        (currentTasks = nextTasks) =>
+          replaceWorkspaceTask(currentTasks, updatedTask),
+        {
+          revalidate: false,
+        },
+      )
     } catch (error) {
-      if (taskMoveVersionsRef.current.get(taskKey) === nextMoveVersion) {
-        await mutateProjectTasks(
-          (currentTasks = nextTasks) =>
-            updateWorkspaceTaskStatus(currentTasks, task, task.status),
-          { revalidate: false },
-        )
-        setTaskMoveErrorMessage(t('workspace.myTasks.moveError'))
-      }
+      await mutateProjectTasks(
+        (currentTasks = nextTasks) =>
+          updateWorkspaceTaskStatus(currentTasks, task, task.status),
+        { revalidate: false },
+      )
+      setTaskMoveErrorMessage(t('workspace.myTasks.moveError'))
       throw error
+    } finally {
+      pendingTaskMoveKeysRef.current.delete(taskKey)
     }
   }
 
@@ -708,8 +709,30 @@ function MyTasksView({
 }) {
   const [draggedTaskKey, setDraggedTaskKey] = useState<string | undefined>()
   const [dropTargetStatus, setDropTargetStatus] = useState<TaskStatus | undefined>()
-  const [movingTaskKey, setMovingTaskKey] = useState<string | undefined>()
+  const [movingTaskKeys, setMovingTaskKeys] = useState<ReadonlySet<string>>(() => new Set())
   const canMoveTasks = Boolean(onMoveTaskStatus)
+
+  const moveTaskToStatus = (task: ProjectTask, status: TaskStatus) => {
+    if (!onMoveTaskStatus || task.status === status) {
+      return
+    }
+
+    const taskKey = createWorkspaceTaskKey(task)
+
+    setDraggedTaskKey(undefined)
+    setDropTargetStatus(undefined)
+    setMovingTaskKeys((currentTaskKeys) => new Set(currentTaskKeys).add(taskKey))
+    void onMoveTaskStatus(task, status)
+      .catch(() => undefined)
+      .finally(() => {
+        setMovingTaskKeys((currentTaskKeys) => {
+          const nextTaskKeys = new Set(currentTaskKeys)
+
+          nextTaskKeys.delete(taskKey)
+          return nextTaskKeys
+        })
+      })
+  }
 
   const handleDragStart = (event: DragEvent<HTMLElement>, task: ProjectTask) => {
     if (!canMoveTasks) {
@@ -752,19 +775,11 @@ function MyTasksView({
       draggedTaskKey
     const task = taskKey ? findWorkspaceTaskByKey(tasks, taskKey) : undefined
 
-    setDraggedTaskKey(undefined)
-    setDropTargetStatus(undefined)
-
-    if (!task || task.status === status) {
+    if (!task) {
       return
     }
 
-    setMovingTaskKey(taskKey)
-    void onMoveTaskStatus(task, status)
-      .catch(() => undefined)
-      .finally(() => {
-        setMovingTaskKey(undefined)
-      })
+    moveTaskToStatus(task, status)
   }
 
   return (
@@ -806,18 +821,20 @@ function MyTasksView({
               <div className="grid gap-3 px-4 pb-4">
                 {columnTasks.map((task) => {
                   const taskKey = createWorkspaceTaskKey(task)
+                  const isMoving = movingTaskKeys.has(taskKey)
 
                   return (
                     <CompactTaskCard
-                      draggable={canMoveTasks}
+                      draggable={canMoveTasks && !isMoving}
                       isDragging={draggedTaskKey === taskKey}
-                      isMoving={movingTaskKey === taskKey}
+                      isMoving={isMoving}
                       key={taskKey}
                       t={t}
                       task={task}
                       testId={`my-tasks-card-${createWorkspaceTaskTestId(task)}`}
                       onDragEnd={handleDragEnd}
                       onDragStart={(event) => handleDragStart(event, task)}
+                      onStatusChange={(nextStatus) => moveTaskToStatus(task, nextStatus)}
                     />
                   )
                 })}
@@ -1223,6 +1240,7 @@ function CompactTaskCard({
   isMoving = false,
   onDragEnd,
   onDragStart,
+  onStatusChange,
   t,
   task,
   testId,
@@ -1232,10 +1250,16 @@ function CompactTaskCard({
   isMoving?: boolean
   onDragEnd?: () => void
   onDragStart?: (event: DragEvent<HTMLElement>) => void
+  onStatusChange?: (status: TaskStatus) => void
   t: (key: MessageKey) => string
   task: ProjectTask
   testId?: string
 }) {
+  const statusSelectLabel = t('workspace.myTasks.moveStatusLabel').replace(
+    '{title}',
+    resolveTaskTitle(task, t),
+  )
+
   return (
     <article
       aria-grabbed={isDragging || undefined}
@@ -1253,6 +1277,28 @@ function CompactTaskCard({
         <StatusPill status={task.status} t={t} />
         <PriorityPill priority={task.priority} t={t} />
       </div>
+      {onStatusChange ? (
+        <select
+          aria-label={statusSelectLabel}
+          className="mt-3 h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs font-black text-[#263550] outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+          data-testid={testId ? `${testId}-status-select` : undefined}
+          disabled={isMoving}
+          value={task.status}
+          onChange={(event) => {
+            const nextStatus = readMyTaskKanbanStatus(event.target.value)
+
+            if (nextStatus) {
+              onStatusChange(nextStatus)
+            }
+          }}
+        >
+          {myTaskKanbanStatuses.map((status) => (
+            <option key={status} value={status}>
+              {t(`tasks.status.${status}`)}
+            </option>
+          ))}
+        </select>
+      ) : null}
     </article>
   )
 }
@@ -1344,6 +1390,10 @@ function createWorkspaceTaskKey(task: ProjectTask) {
 
 function createWorkspaceTaskTestId(task: ProjectTask) {
   return createWorkspaceTaskKey(task).replaceAll(/[^a-z0-9-]+/gi, '-').toLowerCase()
+}
+
+function readMyTaskKanbanStatus(value: string) {
+  return myTaskKanbanStatuses.find((status) => status === value)
 }
 
 function findWorkspaceTaskByKey(tasks: ProjectTask[], taskKey: string) {
