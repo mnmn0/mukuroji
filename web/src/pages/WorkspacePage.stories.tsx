@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import type { DashboardSummary } from '../auth/api'
+import type { ProjectMember } from '../projects/api'
 import { projectDirectoryFixtures } from '../projects/fixtures'
 import { referoTaskFixtures } from '../tasks/fixtures'
 import { WorkspaceScreen } from './WorkspacePage'
@@ -12,9 +13,35 @@ const storySummary: DashboardSummary = {
   source: 'dynamodb',
 }
 
+const projectMemberFixtures: ProjectMember[] = [
+  {
+    id: 'demo@example.com',
+    email: 'demo@example.com',
+    name: 'Demo User',
+    role: 'manager',
+    updatedAt: '2026-06-08T00:00:00.000Z',
+  },
+  {
+    id: 'sato@example.com',
+    email: 'sato@example.com',
+    name: '佐藤 花子',
+    role: 'member',
+    updatedAt: '2026-06-08T00:00:00.000Z',
+  },
+  {
+    id: 'viewer@example.com',
+    email: 'viewer@example.com',
+    role: 'viewer',
+    updatedAt: '2026-06-08T00:00:00.000Z',
+  },
+]
+
 const defaultArgs = {
   activeTeamId: 'core-team',
+  isSystemAdmin: true,
   locale: 'ja',
+  projectMembers: projectMemberFixtures,
+  selectedPermissionProjectId: 'refero',
   summary: storySummary,
   tasks: referoTaskFixtures,
   teams: projectDirectoryFixtures,
@@ -73,6 +100,15 @@ export const Dashboard: Story = {
 export const Reports: Story = {
   args: {
     view: 'reports',
+  },
+}
+
+/**
+ * プロジェクト権限管理画面です。
+ */
+export const Permissions: Story = {
+  args: {
+    view: 'permissions',
   },
 }
 

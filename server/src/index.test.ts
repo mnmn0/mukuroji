@@ -8,6 +8,7 @@ import {
   DynamoDbProjectDirectoryClient,
   DynamoDbProjectTasksClient,
   resetApiClientsForTest,
+  type ProjectRole,
 } from './index'
 
 afterEach(() => {
@@ -41,6 +42,22 @@ test('loads project directory from the authenticated user scoped partition', asy
     ],
   })
   expect(calls.directoryReads).toEqual([{ directoryId: 'user#demo@example.com', locale: 'en' }])
+})
+
+test('returns Cognito groups and system admin status for the current user', async () => {
+  configureFakeProjectClients(true)
+
+  const response = await app.request('/api/auth/me', {
+    headers: {
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    groups: ['mukuroji-system-admins'],
+    isSystemAdmin: true,
+  })
 })
 
 test('loads dashboard summary from the authenticated user scoped directory', async () => {
@@ -117,7 +134,7 @@ test('creates a team in the authenticated user scoped directory', async () => {
   const response = await app.request('/api/teams', {
     method: 'POST',
     headers: {
-      Authorization: 'Bearer test-token',
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -145,7 +162,7 @@ test('creates a project under an authenticated team directory', async () => {
   const response = await app.request('/api/teams/core-team/projects', {
     method: 'POST',
     headers: {
-      Authorization: 'Bearer test-token',
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -173,7 +190,7 @@ test('archives a team in the authenticated user scoped directory', async () => {
   const response = await app.request('/api/teams/core-team/archive', {
     method: 'PATCH',
     headers: {
-      Authorization: 'Bearer test-token',
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
     },
   })
 
@@ -184,6 +201,95 @@ test('archives a team in the authenticated user scoped directory', async () => {
   })
   expect(calls.teamArchives).toEqual([
     { directoryId: 'user#demo@example.com', teamId: 'core-team' },
+  ])
+})
+
+test('denies project task creation when the project role is viewer', async () => {
+  const calls = configureFakeProjectClients(true, { role: 'viewer' })
+
+  const response = await app.request('/api/projects/refero/tasks', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: '新規タスク',
+      assignee: '佐藤 花子',
+      dueDate: '2026/06/20',
+      priority: 'high',
+      status: 'todo',
+    }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toEqual({ message: 'Project access is denied.' })
+  expect(calls.roleChecks).toEqual([
+    { directoryId: 'user#demo@example.com', memberKey: 'demo@example.com', projectId: 'refero' },
+  ])
+  expect(calls.taskCreates).toEqual([])
+})
+
+test('updates a project member role when the current user is project manager', async () => {
+  const calls = configureFakeProjectClients(true, { role: 'manager' })
+
+  const response = await app.request('/api/projects/refero/members/sato%40example.com', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      email: 'sato@example.com',
+      name: '佐藤 花子',
+      role: 'member',
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    member: {
+      id: 'sato@example.com',
+      email: 'sato@example.com',
+      name: '佐藤 花子',
+      role: 'member',
+      updatedAt: '2026-06-08T00:00:00.000Z',
+    },
+  })
+  expect(calls.memberUpdates).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      memberKey: 'sato@example.com',
+      projectId: 'refero',
+      role: 'member',
+    },
+  ])
+})
+
+test('lets a system admin update project members without a project role', async () => {
+  const calls = configureFakeProjectClients(true, { role: undefined })
+
+  const response = await app.request('/api/projects/refero/members/viewer%40example.com', {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      email: 'viewer@example.com',
+      role: 'viewer',
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(calls.roleChecks).toEqual([])
+  expect(calls.memberUpdates).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      memberKey: 'viewer@example.com',
+      projectId: 'refero',
+      role: 'viewer',
+    },
   ])
 })
 
@@ -877,6 +983,31 @@ test('DynamoDB dashboard summary client derives counts from directory and task d
       async hasProjectAccess() {
         return true
       },
+      async getProjectRole() {
+        return 'manager' as ProjectRole
+      },
+      async getProjectMembers() {
+        return {
+          projectId: 'unused',
+          members: [],
+        }
+      },
+      async updateProjectMember() {
+        return {
+          member: {
+            id: 'unused',
+            email: 'unused@example.com',
+            role: 'viewer',
+            updatedAt: '2026-06-08T00:00:00.000Z',
+          },
+        }
+      },
+      async removeProjectMember() {
+        return {
+          projectId: 'unused',
+          memberId: 'unused@example.com',
+        }
+      },
       async createTeam() {
         return {
           team: {
@@ -1238,12 +1369,138 @@ test('DynamoDB directory client archives teams and projects with conditional upd
   })
 })
 
-function configureFakeProjectClients(hasProjectAccess: boolean) {
+test('DynamoDB directory client manages project member roles', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentInputs.push(command.input)
+
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000010#PROJECT#refero',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'refero',
+              projectSortOrder: 10,
+              nameJa: 'Refero',
+              nameEn: 'Refero',
+              tone: 'blue',
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+              entryType: 'project-member',
+              projectId: 'refero',
+              memberKey: 'demo@example.com',
+              email: 'demo@example.com',
+              name: 'Demo User',
+              role: 'manager',
+              createdAt: '2026-06-08T00:00:00.000Z',
+              updatedAt: '2026-06-08T00:00:00.000Z',
+            },
+          ],
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(
+    client.getProjectMembers('user#demo@example.com', 'refero'),
+  ).resolves.toEqual({
+    projectId: 'refero',
+    members: [
+      {
+        id: 'demo@example.com',
+        email: 'demo@example.com',
+        name: 'Demo User',
+        role: 'manager',
+        updatedAt: '2026-06-08T00:00:00.000Z',
+      },
+    ],
+  })
+  await expect(
+    client.getProjectRole('user#demo@example.com', 'refero', 'DEMO@example.com'),
+  ).resolves.toBe('manager')
+  await expect(
+    client.updateProjectMember('user#demo@example.com', 'refero', 'sato@example.com', {
+      email: 'sato@example.com',
+      name: '佐藤 花子',
+      role: 'member',
+    }),
+  ).resolves.toEqual({
+    member: {
+      id: 'sato@example.com',
+      email: 'sato@example.com',
+      name: '佐藤 花子',
+      role: 'member',
+      updatedAt: expect.any(String),
+    },
+  })
+  await expect(
+    client.removeProjectMember('user#demo@example.com', 'refero', 'demo@example.com'),
+  ).resolves.toEqual({
+    projectId: 'refero',
+    memberId: 'demo@example.com',
+  })
+  expect(sentInputs[3]).toMatchObject({
+    TableName: 'DirectoryTable',
+    Item: {
+      directoryId: 'user#demo@example.com',
+      entryKey: 'PROJECT_MEMBER#refero#sato@example.com',
+      entryType: 'project-member',
+      projectId: 'refero',
+      memberKey: 'sato@example.com',
+      email: 'sato@example.com',
+      name: '佐藤 花子',
+      role: 'member',
+    },
+  })
+  expect(sentInputs[5]).toMatchObject({
+    TableName: 'DirectoryTable',
+    Key: {
+      directoryId: 'user#demo@example.com',
+      entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+    },
+    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
+  })
+})
+
+function configureFakeProjectClients(
+  hasProjectAccess: boolean,
+  options: { role?: ProjectRole } = {},
+) {
+  const role = 'role' in options ? options.role : 'manager'
   const calls = {
     accessChecks: [] as Array<{ directoryId: string; projectId: string }>,
     directoryReads: [] as Array<{ directoryId: string; locale: string }>,
+    memberDeletes: [] as Array<{ directoryId: string; projectId: string; memberKey: string }>,
+    memberReads: [] as Array<{ directoryId: string; projectId: string }>,
+    memberUpdates: [] as Array<{
+      directoryId: string
+      memberKey: string
+      projectId: string
+      role: string
+    }>,
     projectArchives: [] as Array<{ directoryId: string; teamId: string; projectId: string }>,
     projectCreates: [] as Array<{ directoryId: string; teamId: string; name: string }>,
+    roleChecks: [] as Array<{ directoryId: string; memberKey: string; projectId: string }>,
     summaryReads: [] as string[],
     teamArchives: [] as Array<{ directoryId: string; teamId: string }>,
     teamCreates: [] as Array<{ directoryId: string; name: string }>,
@@ -1312,6 +1569,52 @@ function configureFakeProjectClients(hasProjectAccess: boolean) {
         calls.accessChecks.push({ directoryId, projectId })
 
         return hasProjectAccess
+      },
+      async getProjectRole(directoryId, projectId, memberKey) {
+        calls.roleChecks.push({ directoryId, projectId, memberKey })
+
+        return role
+      },
+      async getProjectMembers(directoryId, projectId) {
+        calls.memberReads.push({ directoryId, projectId })
+
+        return {
+          projectId,
+          members: [
+            {
+              id: 'demo@example.com',
+              email: 'demo@example.com',
+              role: 'manager',
+              updatedAt: '2026-06-08T00:00:00.000Z',
+            },
+          ],
+        }
+      },
+      async updateProjectMember(directoryId, projectId, memberKey, input) {
+        calls.memberUpdates.push({
+          directoryId,
+          memberKey,
+          projectId,
+          role: String(input.role),
+        })
+
+        return {
+          member: {
+            id: memberKey,
+            email: String(input.email ?? memberKey),
+            name: typeof input.name === 'string' ? input.name : undefined,
+            role: input.role === 'member' ? 'member' : input.role === 'manager' ? 'manager' : 'viewer',
+            updatedAt: '2026-06-08T00:00:00.000Z',
+          },
+        }
+      },
+      async removeProjectMember(directoryId, projectId, memberKey) {
+        calls.memberDeletes.push({ directoryId, projectId, memberKey })
+
+        return {
+          projectId,
+          memberId: memberKey,
+        }
       },
       async createTeam(directoryId, input) {
         calls.teamCreates.push({ directoryId, name: String(input.name) })
@@ -1409,4 +1712,12 @@ function configureFakeProjectClients(hasProjectAccess: boolean) {
   })
 
   return calls
+}
+
+function createAccessToken(groups: string[] = []) {
+  const payload = Buffer
+    .from(JSON.stringify({ 'cognito:groups': groups }))
+    .toString('base64url')
+
+  return `header.${payload}.signature`
 }

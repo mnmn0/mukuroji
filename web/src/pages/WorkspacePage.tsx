@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import useSWR from 'swr'
 import {
@@ -27,8 +27,14 @@ import {
   createProjectDirectoryTeam,
   type CreateProjectDirectoryProjectInput,
   type CreateProjectDirectoryTeamInput,
+  getProjectMembers,
   getProjectDirectory,
+  removeProjectMember,
+  type ProjectMember,
+  type ProjectMemberRole,
   type ProjectDirectoryTeam,
+  type UpdateProjectMemberInput,
+  updateProjectMember,
 } from '../projects/api'
 import {
   createProjectTasksPath,
@@ -52,7 +58,7 @@ export type WorkspaceView =
   | 'inbox'
   | 'dashboard'
   | 'reports'
-  | 'invite'
+  | 'permissions'
   | 'help'
   | 'settings'
   | 'team-overview'
@@ -105,6 +111,26 @@ type WorkspaceScreenProps = {
    */
   tasks: ProjectTask[]
   /**
+   * 権限管理で選択中の project ID です。
+   */
+  selectedPermissionProjectId?: string
+  /**
+   * 権限管理画面に表示する project member 一覧です。
+   */
+  projectMembers: ProjectMember[]
+  /**
+   * 権限管理の member 一覧を読み込み中かどうかです。
+   */
+  isProjectMembersLoading?: boolean
+  /**
+   * 権限管理の API エラー表示です。
+   */
+  projectMembersErrorMessage?: string
+  /**
+   * システム管理者として扱われるログインユーザーかどうかです。
+   */
+  isSystemAdmin?: boolean
+  /**
    * 認証または API 確認中の loading 表示に切り替えるかどうかです。
    */
   isLoading?: boolean
@@ -141,6 +167,22 @@ type WorkspaceScreenProps = {
    */
   onArchiveProject?: (teamId: string, projectId: string) => Promise<void>
   /**
+   * 権限管理で対象 project を切り替えたときの callback です。
+   */
+  onSelectPermissionProject?: (projectId: string) => void
+  /**
+   * project member role 保存時の callback です。
+   */
+  onUpdateProjectMember?: (
+    projectId: string,
+    memberKey: string,
+    input: UpdateProjectMemberInput,
+  ) => Promise<void>
+  /**
+   * project member role 削除時の callback です。
+   */
+  onRemoveProjectMember?: (projectId: string, memberKey: string) => Promise<void>
+  /**
    * マイタスクの状態列を移動したときの callback です。
    */
   onMoveTaskStatus?: (task: ProjectTask, status: TaskStatus) => Promise<void>
@@ -176,9 +218,127 @@ type WorkspaceViewMetadata = {
   descriptionKey: MessageKey
 }
 
+/**
+ * 権限管理で選択できる project option です。
+ */
+type PermissionProjectOption = {
+  /**
+   * project ID です。
+   */
+  id: string
+  /**
+   * project 表示名です。
+   */
+  name: string
+  /**
+   * 所属チーム表示名です。
+   */
+  teamName: string
+}
+
+/**
+ * PermissionsView が受け取る props です。
+ */
+type PermissionsViewProps = {
+  /**
+   * 権限 API のエラーメッセージです。
+   */
+  errorMessage?: string
+  /**
+   * member 一覧を読み込み中かどうかです。
+   */
+  isLoading?: boolean
+  /**
+   * ログインユーザーがシステム管理者かどうかです。
+   */
+  isSystemAdmin?: boolean
+  /**
+   * 選択中 project の member 一覧です。
+   */
+  members: ProjectMember[]
+  /**
+   * 選択可能な project 一覧です。
+   */
+  projects: PermissionProjectOption[]
+  /**
+   * 選択中の project ID です。
+   */
+  selectedProjectId?: string
+  /**
+   * i18n message 解決関数です。
+   */
+  t: (key: MessageKey) => string
+  /**
+   * member role 削除 callback です。
+   */
+  onRemoveMember?: (projectId: string, memberKey: string) => Promise<void>
+  /**
+   * project 選択 callback です。
+   */
+  onSelectProject?: (projectId: string) => void
+  /**
+   * member role 保存 callback です。
+   */
+  onUpdateMember?: (
+    projectId: string,
+    memberKey: string,
+    input: UpdateProjectMemberInput,
+  ) => Promise<void>
+}
+
+/**
+ * 権限管理フォームの入力状態です。
+ */
+type ProjectMemberFormState = {
+  /**
+   * Cognito user のメールアドレスです。
+   */
+  email: string
+  /**
+   * 表示名です。
+   */
+  name: string
+  /**
+   * 付与するプロジェクトロールです。
+   */
+  role: ProjectMemberRole
+}
+
+/**
+ * RoleSelect が受け取る props です。
+ */
+type RoleSelectProps = {
+  /**
+   * select の id 属性です。
+   */
+  id: string
+  /**
+   * select に表示するラベルです。
+   */
+  label: string
+  /**
+   * i18n message 解決関数です。
+   */
+  t: (key: MessageKey) => string
+  /**
+   * Playwright で参照する test id です。
+   */
+  testId?: string
+  /**
+   * 選択中の project member role です。
+   */
+  value: ProjectMemberRole
+  /**
+   * role 変更 callback です。
+   */
+  onChange: (role: ProjectMemberRole) => void
+}
+
 const emptyProjectDirectory: ProjectDirectoryTeam[] = []
+const emptyProjectMembers: ProjectMember[] = []
 const emptyProjectTasks: ProjectTask[] = []
 const myTaskKanbanStatuses = ['todo', 'in-progress', 'review', 'done'] as const satisfies readonly TaskStatus[]
+const projectMemberRoleOptions = ['manager', 'member', 'viewer'] as const satisfies readonly ProjectMemberRole[]
 
 const apiSWRConfig = {
   dedupingInterval: 10_000,
@@ -216,11 +376,11 @@ const workspaceViewMetadata: Record<WorkspaceView, WorkspaceViewMetadata> = {
     titleKey: 'workspace.reports.title',
     descriptionKey: 'workspace.reports.description',
   },
-  invite: {
-    activeNavId: 'invite',
-    eyebrowKey: 'workspace.invite.eyebrow',
-    titleKey: 'workspace.invite.title',
-    descriptionKey: 'workspace.invite.description',
+  permissions: {
+    activeNavId: 'permissions',
+    eyebrowKey: 'workspace.permissions.eyebrow',
+    titleKey: 'workspace.permissions.title',
+    descriptionKey: 'workspace.permissions.description',
   },
   help: {
     activeNavId: 'help',
@@ -256,6 +416,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   const params = useParams()
   const [session] = useState<AuthSession | null>(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
+  const [selectedPermissionProjectId, setSelectedPermissionProjectId] = useState<string | undefined>()
   const t = useMemo(() => createTranslator(locale), [locale])
   const accessToken = session?.accessToken
   const currentUserKey = accessToken ? (['current-user', accessToken] as const) : null
@@ -278,6 +439,24 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     apiSWRConfig,
   )
   const projectIds = useMemo(() => uniqueProjectIds(teams), [teams])
+  const permissionProjectId = selectedPermissionProjectId && projectIds.includes(selectedPermissionProjectId)
+    ? selectedPermissionProjectId
+    : projectIds[0]
+  const projectMembersKey =
+    accessToken && user && !currentUserError && permissionProjectId
+      ? (['project-members', accessToken, permissionProjectId] as const)
+      : null
+  const {
+    data: projectMembers = emptyProjectMembers,
+    error: projectMembersError,
+    isLoading: isProjectMembersLoading,
+    mutate: mutateProjectMembers,
+  } = useSWR(
+    projectMembersKey,
+    ([, currentAccessToken, currentProjectId]) =>
+      getProjectMembers(currentAccessToken, currentProjectId),
+    apiSWRConfig,
+  )
   const projectTasksKey =
     accessToken && user && !currentUserError && projectIds.length > 0
       ? (['workspace-project-tasks', accessToken, projectIds] as const)
@@ -373,6 +552,28 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     await mutateProjectDirectory()
   }
 
+  const handleUpdateProjectMember = async (
+    projectId: string,
+    memberKey: string,
+    input: UpdateProjectMemberInput,
+  ) => {
+    if (!accessToken) {
+      return
+    }
+
+    await updateProjectMember(accessToken, projectId, memberKey, input)
+    await mutateProjectMembers()
+  }
+
+  const handleRemoveProjectMember = async (projectId: string, memberKey: string) => {
+    if (!accessToken) {
+      return
+    }
+
+    await removeProjectMember(accessToken, projectId, memberKey)
+    await mutateProjectMembers()
+  }
+
   const handleMoveTaskStatus = async (task: ProjectTask, status: TaskStatus) => {
     if (!accessToken || !task.projectId || task.status === status) {
       return
@@ -431,7 +632,15 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       onCreateTeam={handleCreateTeam}
       onArchiveProject={handleArchiveProject}
       onArchiveTeam={handleArchiveTeam}
+      onRemoveProjectMember={handleRemoveProjectMember}
       onMoveTaskStatus={handleMoveTaskStatus}
+      onSelectPermissionProject={setSelectedPermissionProjectId}
+      onUpdateProjectMember={handleUpdateProjectMember}
+      isProjectMembersLoading={isProjectMembersLoading}
+      isSystemAdmin={user?.isSystemAdmin}
+      projectMembers={projectMembers}
+      projectMembersErrorMessage={projectMembersError ? t('workspace.permissions.error') : undefined}
+      selectedPermissionProjectId={permissionProjectId}
       summary={summary}
       taskMoveErrorMessage={taskMoveErrorMessage}
       tasks={tasks}
@@ -455,6 +664,11 @@ export function WorkspaceScreen({
   teams,
   activeTeamId,
   tasks,
+  selectedPermissionProjectId,
+  projectMembers,
+  isProjectMembersLoading,
+  projectMembersErrorMessage,
+  isSystemAdmin,
   isLoading = false,
   onLogout,
   onSelectNav,
@@ -464,6 +678,9 @@ export function WorkspaceScreen({
   onCreateTeam,
   onArchiveProject,
   onArchiveTeam,
+  onSelectPermissionProject,
+  onUpdateProjectMember,
+  onRemoveProjectMember,
   onMoveTaskStatus,
   taskMoveErrorMessage,
 }: WorkspaceScreenProps) {
@@ -575,11 +792,19 @@ export function WorkspaceScreen({
         ) : (
           <WorkspaceBody
             activeTeam={activeTeam}
+            isProjectMembersLoading={isProjectMembersLoading}
+            isSystemAdmin={isSystemAdmin}
+            projectMembers={projectMembers}
+            projectMembersErrorMessage={projectMembersErrorMessage}
+            selectedPermissionProjectId={selectedPermissionProjectId}
             summary={summary}
             t={t}
             taskMoveErrorMessage={taskMoveErrorMessage}
             tasks={tasks}
             teams={teams}
+            onRemoveProjectMember={onRemoveProjectMember}
+            onSelectPermissionProject={onSelectPermissionProject}
+            onUpdateProjectMember={onUpdateProjectMember}
             onMoveTaskStatus={onMoveTaskStatus}
             view={view}
           />
@@ -591,20 +816,40 @@ export function WorkspaceScreen({
 
 function WorkspaceBody({
   activeTeam,
+  isProjectMembersLoading,
+  isSystemAdmin,
+  projectMembers,
+  projectMembersErrorMessage,
+  selectedPermissionProjectId,
   summary,
   t,
   taskMoveErrorMessage,
   tasks,
   teams,
+  onRemoveProjectMember,
+  onSelectPermissionProject,
+  onUpdateProjectMember,
   onMoveTaskStatus,
   view,
 }: {
   activeTeam?: ProjectDirectoryTeam
+  isProjectMembersLoading?: boolean
+  isSystemAdmin?: boolean
+  projectMembers: ProjectMember[]
+  projectMembersErrorMessage?: string
+  selectedPermissionProjectId?: string
   summary: DashboardSummary
   t: (key: MessageKey) => string
   taskMoveErrorMessage?: string
   tasks: ProjectTask[]
   teams: ProjectDirectoryTeam[]
+  onRemoveProjectMember?: (projectId: string, memberKey: string) => Promise<void>
+  onSelectPermissionProject?: (projectId: string) => void
+  onUpdateProjectMember?: (
+    projectId: string,
+    memberKey: string,
+    input: UpdateProjectMemberInput,
+  ) => Promise<void>
   onMoveTaskStatus?: (task: ProjectTask, status: TaskStatus) => Promise<void>
   view: WorkspaceView
 }) {
@@ -629,7 +874,20 @@ function WorkspaceBody({
         />
       ) : null}
       {view === 'reports' ? <ReportsView summary={summary} t={t} tasks={tasks} /> : null}
-      {view === 'invite' ? <InviteView t={t} /> : null}
+      {view === 'permissions' ? (
+        <PermissionsView
+          errorMessage={projectMembersErrorMessage}
+          isLoading={isProjectMembersLoading}
+          isSystemAdmin={isSystemAdmin}
+          members={projectMembers}
+          projects={createPermissionProjectOptions(teams)}
+          selectedProjectId={selectedPermissionProjectId}
+          t={t}
+          onRemoveMember={onRemoveProjectMember}
+          onSelectProject={onSelectPermissionProject}
+          onUpdateMember={onUpdateProjectMember}
+        />
+      ) : null}
       {view === 'help' ? <HelpView t={t} /> : null}
       {view === 'settings' ? <SettingsView t={t} /> : null}
       {view === 'team-overview' ? (
@@ -1010,48 +1268,267 @@ function ReportsView({
   )
 }
 
-function InviteView({ t }: { t: (key: MessageKey) => string }) {
+function PermissionsView({
+  errorMessage,
+  isLoading,
+  isSystemAdmin,
+  members,
+  projects,
+  selectedProjectId,
+  t,
+  onRemoveMember,
+  onSelectProject,
+  onUpdateMember,
+}: PermissionsViewProps) {
+  const [formState, setFormState] = useState<ProjectMemberFormState>({
+    email: '',
+    name: '',
+    role: 'member',
+  })
+  const [savingMemberKey, setSavingMemberKey] = useState<string | undefined>()
+  const [localErrorMessage, setLocalErrorMessage] = useState<string | undefined>()
+  const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0]
+
+  const saveMember = async (memberKey: string, input: UpdateProjectMemberInput) => {
+    if (!selectedProject || !onUpdateMember) {
+      return
+    }
+
+    setSavingMemberKey(memberKey)
+    setLocalErrorMessage(undefined)
+
+    try {
+      await onUpdateMember(selectedProject.id, memberKey, input)
+    } catch {
+      setLocalErrorMessage(t('workspace.permissions.error'))
+    } finally {
+      setSavingMemberKey(undefined)
+    }
+  }
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const email = formState.email.trim().toLowerCase()
+
+    if (!email) {
+      setLocalErrorMessage(t('workspace.permissions.error'))
+      return
+    }
+
+    await saveMember(email, {
+      email,
+      name: formState.name.trim() || undefined,
+      role: formState.role,
+    })
+    setFormState({ email: '', name: '', role: 'member' })
+  }
+
+  const handleRemoveMember = async (member: ProjectMember) => {
+    if (!selectedProject || !onRemoveMember) {
+      return
+    }
+
+    setSavingMemberKey(member.id)
+    setLocalErrorMessage(undefined)
+
+    try {
+      await onRemoveMember(selectedProject.id, member.id)
+    } catch {
+      setLocalErrorMessage(t('workspace.permissions.error'))
+    } finally {
+      setSavingMemberKey(undefined)
+    }
+  }
+
   return (
-    <div className="grid max-w-[920px] gap-6">
-      <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
-        <div className="grid gap-4">
-          <label className="grid gap-2 text-sm font-black text-[#263550]" htmlFor="invite-email">
-            {t('workspace.invite.emailLabel')}
-            <input
-              className="h-12 rounded-lg border border-slate-300 px-4 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
-              id="invite-email"
-              placeholder={t('workspace.invite.emailPlaceholder')}
-              type="email"
-            />
-          </label>
-          <label className="grid gap-2 text-sm font-black text-[#263550]" htmlFor="invite-role">
-            {t('workspace.invite.roleLabel')}
-            <select
-              className="h-12 rounded-lg border border-slate-300 bg-white px-4 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
-              id="invite-role"
-            >
-              <option>{t('workspace.invite.role.member')}</option>
-              <option>{t('workspace.invite.role.manager')}</option>
-              <option>{t('workspace.invite.role.viewer')}</option>
-            </select>
-          </label>
-          <button
-            className="h-12 w-fit rounded-lg bg-blue-600 px-5 text-sm font-black text-white shadow-[0_14px_30px_rgba(37,99,235,0.22)] transition hover:bg-blue-500"
-            type="button"
-          >
-            {t('workspace.invite.send')}
-          </button>
-        </div>
+    <div className="grid gap-6" data-testid="permissions-view">
+      <div className="grid grid-cols-[minmax(0,1fr)_320px] gap-5 max-[1080px]:grid-cols-1">
+        <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
+          <div className="grid gap-5">
+            <div className="flex flex-wrap items-end justify-between gap-4">
+              <label className="grid min-w-[260px] flex-1 gap-2 text-sm font-black text-[#263550]" htmlFor="permissions-project">
+                {t('workspace.permissions.projectLabel')}
+                <select
+                  className="h-12 rounded-lg border border-slate-300 bg-white px-4 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+                  data-testid="permissions-project-select"
+                  id="permissions-project"
+                  value={selectedProject?.id ?? ''}
+                  onChange={(event) => onSelectProject?.(event.target.value)}
+                >
+                  {projects.map((project) => (
+                    <option key={`${project.teamName}-${project.id}`} value={project.id}>
+                      {project.name} / {project.teamName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {isSystemAdmin ? (
+                <span className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-black text-blue-700">
+                  {t('workspace.permissions.systemAdmin')}
+                </span>
+              ) : null}
+            </div>
+
+            {selectedProject ? (
+              <form className="grid grid-cols-2 gap-3 max-[780px]:grid-cols-1" onSubmit={handleSubmit}>
+                <label className="grid gap-2 text-sm font-black text-[#263550]" htmlFor="permissions-member-email">
+                  {t('workspace.permissions.memberEmail')}
+                  <input
+                    className="h-12 rounded-lg border border-slate-300 px-4 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+                    data-testid="permissions-member-email"
+                    id="permissions-member-email"
+                    placeholder={t('workspace.permissions.memberEmailPlaceholder')}
+                    type="email"
+                    value={formState.email}
+                    onChange={(event) => setFormState((current) => ({ ...current, email: event.target.value }))}
+                  />
+                </label>
+                <label className="grid gap-2 text-sm font-black text-[#263550]" htmlFor="permissions-member-name">
+                  {t('workspace.permissions.memberName')}
+                  <input
+                    className="h-12 rounded-lg border border-slate-300 px-4 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+                    id="permissions-member-name"
+                    placeholder={t('workspace.permissions.memberNamePlaceholder')}
+                    type="text"
+                    value={formState.name}
+                    onChange={(event) => setFormState((current) => ({ ...current, name: event.target.value }))}
+                  />
+                </label>
+                <RoleSelect
+                  id="permissions-member-role"
+                  label={t('workspace.permissions.roleLabel')}
+                  t={t}
+                  value={formState.role}
+                  onChange={(role) => setFormState((current) => ({ ...current, role }))}
+                />
+                <button
+                  className="mt-7 min-h-12 rounded-lg bg-blue-600 px-5 text-sm font-black text-white shadow-[0_14px_30px_rgba(37,99,235,0.22)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400 max-[780px]:mt-0"
+                  data-testid="permissions-submit"
+                  disabled={savingMemberKey === formState.email.trim().toLowerCase()}
+                  type="submit"
+                >
+                  {savingMemberKey === formState.email.trim().toLowerCase()
+                    ? t('workspace.permissions.saving')
+                    : t('workspace.permissions.save')}
+                </button>
+              </form>
+            ) : (
+              <p className="rounded-lg border border-dashed border-slate-300 px-4 py-8 text-sm font-bold text-[#526381]">
+                {t('workspace.permissions.projectMissing')}
+              </p>
+            )}
+            {errorMessage || localErrorMessage ? (
+              <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700" role="alert">
+                {localErrorMessage ?? errorMessage}
+              </p>
+            ) : null}
+          </div>
+        </section>
+
+        <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
+          <p className="text-sm font-black uppercase tracking-normal text-blue-600">
+            {t('workspace.permissions.policyTitle')}
+          </p>
+          <div className="mt-4 grid gap-3">
+            {projectMemberRoleOptions.map((role) => (
+              <div className="rounded-lg border border-slate-200 p-3" key={role}>
+                <p className="text-sm font-black text-[#0d1833]">
+                  {t(`workspace.permissions.role.${role}`)}
+                </p>
+                <p className="mt-1 text-sm font-bold leading-6 text-[#526381]">
+                  {t(`workspace.permissions.${role}Policy`)}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+
+      <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
+        <SectionHeader
+          title={t('workspace.permissions.directoryTitle')}
+          meta={selectedProject?.name ?? t('workspace.permissions.projectMissing')}
+        />
+        {isLoading ? (
+          <p className="px-5 py-8 text-sm font-bold text-[#526381]">
+            {t('workspace.permissions.loading')}
+          </p>
+        ) : (
+          <div className="grid divide-y divide-slate-100">
+            {members.map((member) => (
+              <div
+                className="grid grid-cols-[minmax(0,1fr)_180px_110px] items-center gap-4 p-5 max-[820px]:grid-cols-1"
+                data-testid={`permission-member-row-${createProjectMemberTestId(member.id)}`}
+                key={member.id}
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-base font-black text-[#0d1833]">{member.name ?? member.email}</p>
+                  <p className="mt-1 truncate text-sm font-bold text-[#526381]">{member.email}</p>
+                </div>
+                <RoleSelect
+                  id={`permissions-role-${member.id}`}
+                  label={t('workspace.permissions.roleLabel')}
+                  t={t}
+                  testId={`permission-role-select-${createProjectMemberTestId(member.id)}`}
+                  value={member.role}
+                  onChange={(role) =>
+                    saveMember(member.id, {
+                      email: member.email,
+                      name: member.name,
+                      role,
+                    })
+                  }
+                />
+                <button
+                  className="min-h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-black text-[#0d1833] transition hover:border-red-300 hover:text-red-600 disabled:cursor-not-allowed disabled:text-slate-400"
+                  data-testid={`permission-remove-${createProjectMemberTestId(member.id)}`}
+                  disabled={savingMemberKey === member.id}
+                  type="button"
+                  onClick={() => handleRemoveMember(member)}
+                >
+                  {savingMemberKey === member.id
+                    ? t('workspace.permissions.saving')
+                    : t('workspace.permissions.remove')}
+                </button>
+              </div>
+            ))}
+            {members.length === 0 ? (
+              <p className="px-5 py-8 text-sm font-bold text-[#526381]">
+                {t('workspace.permissions.empty')}
+              </p>
+            ) : null}
+          </div>
+        )}
       </section>
-      <InfoGrid
-        items={[
-          ['workspace.invite.policyTitle', 'workspace.invite.policyDescription'],
-          ['workspace.invite.pendingTitle', 'workspace.invite.pendingDescription'],
-          ['workspace.invite.auditTitle', 'workspace.invite.auditDescription'],
-        ]}
-        t={t}
-      />
     </div>
+  )
+}
+
+function RoleSelect({
+  id,
+  label,
+  t,
+  testId,
+  value,
+  onChange,
+}: RoleSelectProps) {
+  return (
+    <label className="grid gap-2 text-sm font-black text-[#263550]" htmlFor={id}>
+      {label}
+      <select
+        className="h-12 rounded-lg border border-slate-300 bg-white px-4 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+        data-testid={testId}
+        id={id}
+        value={value}
+        onChange={(event) => onChange(event.target.value as ProjectMemberRole)}
+      >
+        {projectMemberRoleOptions.map((role) => (
+          <option key={role} value={role}>
+            {t(`workspace.permissions.role.${role}`)}
+          </option>
+        ))}
+      </select>
+    </label>
   )
 }
 
@@ -1382,6 +1859,32 @@ function uniqueProjectIds(teams: ProjectDirectoryTeam[]) {
   return Array.from(
     new Set(teams.flatMap((team) => team.projects.map((project) => project.id))),
   )
+}
+
+function createPermissionProjectOptions(teams: ProjectDirectoryTeam[]) {
+  const options: PermissionProjectOption[] = []
+  const projectIds = new Set<string>()
+
+  for (const team of teams) {
+    for (const project of team.projects) {
+      if (projectIds.has(project.id)) {
+        continue
+      }
+
+      projectIds.add(project.id)
+      options.push({
+        id: project.id,
+        name: project.name,
+        teamName: team.name,
+      })
+    }
+  }
+
+  return options
+}
+
+function createProjectMemberTestId(memberKey: string) {
+  return memberKey.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '')
 }
 
 function createWorkspaceTaskKey(task: ProjectTask) {

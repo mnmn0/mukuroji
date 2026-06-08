@@ -30,6 +30,10 @@ function createDirectoryProjectId(directoryId: string, projectId: string) {
   return `${directoryId}#project#${projectId}`;
 }
 
+function createProjectMemberEntryKey(projectId: string, memberKey: string) {
+  return `PROJECT_MEMBER#${projectId}#${memberKey}`;
+}
+
 /**
  * サイドバーに表示するチームとプロジェクトの関係 seed データです。
  */
@@ -110,6 +114,18 @@ const projectDirectoryItems = [
 ] as const;
 
 /**
+ * CDK seed が作成する demo user 用 project member seed データです。
+ */
+const projectMemberItems = [
+  ['refero', 'demo@example.com', 'demo@example.com', 'Demo User', 'manager'],
+  ['refero', 'sato@example.com', 'sato@example.com', '佐藤 花子', 'member'],
+  ['refero', 'viewer@example.com', 'viewer@example.com', 'Viewer User', 'viewer'],
+  ['product-roadmap', 'demo@example.com', 'demo@example.com', 'Demo User', 'manager'],
+  ['shared-launch', 'demo@example.com', 'demo@example.com', 'Demo User', 'manager'],
+  ['brand-refresh', 'demo@example.com', 'demo@example.com', 'Demo User', 'manager'],
+] as const;
+
+/**
  * DynamoDB の transaction write item payload を作成します。
  */
 function createProjectTaskTransactItems(tableName: string) {
@@ -137,7 +153,7 @@ function createProjectTaskTransactItems(tableName: string) {
  * サイドバー directory 用の transaction write item payload を作成します。
  */
 function createProjectDirectoryTransactItems(tableName: string) {
-  return projectDirectoryItems.map((entry) => {
+  const directoryItems = projectDirectoryItems.map((entry) => {
     const item = {
       directoryId: { S: demoUserDirectoryId },
       entryKey: { S: entry.entryKey },
@@ -165,6 +181,26 @@ function createProjectDirectoryTransactItems(tableName: string) {
       },
     };
   });
+  const memberItems = projectMemberItems.map(([projectId, memberKey, email, name, role]) => ({
+    Put: {
+      TableName: tableName,
+      ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+      Item: {
+        directoryId: { S: demoUserDirectoryId },
+        entryKey: { S: createProjectMemberEntryKey(projectId, memberKey) },
+        entryType: { S: 'project-member' },
+        projectId: { S: projectId },
+        memberKey: { S: memberKey },
+        email: { S: email },
+        name: { S: name },
+        role: { S: role },
+        createdAt: { S: '2026-06-08T00:00:00.000Z' },
+        updatedAt: { S: '2026-06-08T00:00:00.000Z' },
+      },
+    },
+  }));
+
+  return [...directoryItems, ...memberItems];
 }
 
 /**
@@ -180,6 +216,11 @@ export class CdkStack extends cdk.Stack {
       description: 'Comma-separated CORS origins allowed to call the project tasks Lambda Function URL.',
     });
     const taskApiAllowedOriginList = cdk.Fn.split(',', taskApiAllowedOrigins.valueAsString);
+    const systemAdminGroups = new cdk.CfnParameter(this, 'SystemAdminGroups', {
+      type: 'String',
+      default: 'mukuroji-system-admins',
+      description: 'Comma-separated Cognito group names that grant system administrator privileges.',
+    });
 
     const tasksTable = new dynamodb.Table(this, 'ProjectTasksTable', {
       partitionKey: { name: 'directoryProjectId', type: dynamodb.AttributeType.STRING },
@@ -209,11 +250,12 @@ export class CdkStack extends cdk.Stack {
       environment: {
         ALLOWED_ORIGINS: taskApiAllowedOrigins.valueAsString,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+        SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         TASKS_TABLE_NAME: tasksTable.tableName,
       },
       code: lambda.Code.fromInline(`
 const { CognitoIdentityProviderClient, GetUserCommand } = require('@aws-sdk/client-cognito-identity-provider');
-const { DynamoDBClient, PutItemCommand, QueryCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBClient, DeleteItemCommand, PutItemCommand, QueryCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
 
 const cognito = new CognitoIdentityProviderClient({});
 const dynamodb = new DynamoDBClient({});
@@ -231,11 +273,13 @@ exports.handler = async (event) => {
     return json(401, { message: 'Bearer token is required.' }, headers);
   }
 
+  let principal;
   let directoryId;
 
   try {
     const user = await cognito.send(new GetUserCommand({ AccessToken: accessToken }));
-    directoryId = toProjectDirectoryId(user);
+    principal = toProjectPrincipal(user, accessToken);
+    directoryId = principal?.directoryId;
   } catch {
     return json(401, { message: 'Authentication failed.' }, headers);
   }
@@ -245,6 +289,10 @@ exports.handler = async (event) => {
   }
 
   if (isCreateTeamRequest(event)) {
+    if (!principal.isSystemAdmin) {
+      return json(403, { message: 'Project access is denied.' }, headers);
+    }
+
     try {
       return await createTeam(event, headers, directoryId);
     } catch (error) {
@@ -255,6 +303,10 @@ exports.handler = async (event) => {
   const createProjectTeamId = readCreateProjectTeamId(event);
 
   if (createProjectTeamId) {
+    if (!principal.isSystemAdmin) {
+      return json(403, { message: 'Project access is denied.' }, headers);
+    }
+
     try {
       return await createProject(event, headers, directoryId, createProjectTeamId);
     } catch (error) {
@@ -265,6 +317,10 @@ exports.handler = async (event) => {
   const archiveTeamId = readArchiveTeamId(event);
 
   if (archiveTeamId) {
+    if (!principal.isSystemAdmin) {
+      return json(403, { message: 'Project access is denied.' }, headers);
+    }
+
     try {
       return await archiveTeam(headers, directoryId, archiveTeamId);
     } catch (error) {
@@ -276,6 +332,17 @@ exports.handler = async (event) => {
 
   if (archiveProjectParams) {
     try {
+      const permissionError = await enforceProjectPermission(
+        headers,
+        principal,
+        archiveProjectParams.projectId,
+        'manager',
+      );
+
+      if (permissionError) {
+        return permissionError;
+      }
+
       return await archiveProject(
         headers,
         directoryId,
@@ -285,6 +352,44 @@ exports.handler = async (event) => {
     } catch (error) {
       return toProjectDataError(error, headers, 'Failed to archive project.');
     }
+  }
+
+  const projectMembersProjectId = readProjectMembersProjectId(event);
+
+  if (projectMembersProjectId) {
+    const permissionError = await enforceProjectPermission(
+      headers,
+      principal,
+      projectMembersProjectId,
+      'manager',
+    );
+
+    if (permissionError) {
+      return permissionError;
+    }
+
+    return listProjectMembers(headers, directoryId, projectMembersProjectId);
+  }
+
+  const projectMemberParams = readProjectMemberParams(event);
+
+  if (projectMemberParams) {
+    const permissionError = await enforceProjectPermission(
+      headers,
+      principal,
+      projectMemberParams.projectId,
+      'manager',
+    );
+
+    if (permissionError) {
+      return permissionError;
+    }
+
+    if (event.requestContext?.http?.method === 'PATCH') {
+      return updateProjectMember(event, headers, directoryId, projectMemberParams.projectId, projectMemberParams.memberKey);
+    }
+
+    return removeProjectMember(headers, directoryId, projectMemberParams.projectId, projectMemberParams.memberKey);
   }
 
   if (isProjectDirectoryRequest(event)) {
@@ -308,8 +413,15 @@ exports.handler = async (event) => {
   }
 
   try {
-    if (!(await hasProjectAccess(directoryId, decodedProjectId))) {
-      return json(403, { message: 'Project access is denied.' }, headers);
+    const permissionError = await enforceProjectPermission(
+      headers,
+      principal,
+      decodedProjectId,
+      event.requestContext?.http?.method === 'GET' ? 'viewer' : 'member',
+    );
+
+    if (permissionError) {
+      return permissionError;
     }
 
     if (event.requestContext?.http?.method === 'POST') {
@@ -530,6 +642,108 @@ async function archiveProject(headers, directoryId, teamId, projectId) {
   return json(200, { teamId, projectId, archivedAt }, headers);
 }
 
+async function listProjectMembers(headers, directoryId, projectId) {
+  const items = await queryAll({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    KeyConditionExpression: 'directoryId = :directoryId',
+    ExpressionAttributeValues: {
+      ':directoryId': { S: directoryId },
+    },
+    ScanIndexForward: true,
+  });
+  const members = items
+    .filter((item) => item.entryType?.S === 'project-member' && item.projectId?.S === projectId)
+    .sort(compareProjectMembers)
+    .map(toProjectMember);
+
+  return json(200, { projectId, members }, headers);
+}
+
+async function updateProjectMember(event, headers, directoryId, projectId, memberKey) {
+  const body = readJsonBody(event);
+  const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
+  const email = body.email === undefined ? normalizedMemberKey : normalizeProjectMemberKey(body.email);
+  const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : undefined;
+
+  if (!normalizedMemberKey || !email) {
+    return json(400, { message: 'Project member email is required.' }, headers);
+  }
+
+  if (!isProjectRole(body.role)) {
+    return json(400, { message: 'Project role is invalid.' }, headers);
+  }
+
+  const existingMembers = await queryAll({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    KeyConditionExpression: 'directoryId = :directoryId',
+    ExpressionAttributeValues: {
+      ':directoryId': { S: directoryId },
+    },
+    ScanIndexForward: true,
+  });
+  const existingMember = existingMembers.find((item) =>
+    item.entryType?.S === 'project-member' &&
+    item.projectId?.S === projectId &&
+    item.memberKey?.S === normalizedMemberKey
+  );
+  const updatedAt = new Date().toISOString();
+  const item = {
+    directoryId: { S: directoryId },
+    entryKey: { S: createProjectMemberEntryKey(projectId, normalizedMemberKey) },
+    entryType: { S: 'project-member' },
+    projectId: { S: projectId },
+    memberKey: { S: normalizedMemberKey },
+    email: { S: email },
+    role: { S: body.role },
+    createdAt: { S: existingMember?.createdAt?.S ?? updatedAt },
+    updatedAt: { S: updatedAt },
+    ...(name ? { name: { S: name } } : {}),
+  };
+
+  await dynamodb.send(new PutItemCommand({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    Item: item,
+  }));
+
+  return json(200, { member: toProjectMember(item) }, headers);
+}
+
+async function removeProjectMember(headers, directoryId, projectId, memberKey) {
+  const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
+
+  if (!normalizedMemberKey) {
+    return json(400, { message: 'Project member email is required.' }, headers);
+  }
+  const items = await queryAll({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    KeyConditionExpression: 'directoryId = :directoryId',
+    ExpressionAttributeValues: {
+      ':directoryId': { S: directoryId },
+    },
+    ScanIndexForward: true,
+  });
+  const member = items.find((item) =>
+    item.entryType?.S === 'project-member' &&
+    item.projectId?.S === projectId &&
+    item.memberKey?.S === normalizedMemberKey
+  );
+
+  if (!member) {
+    return json(404, { message: 'Project member was not found.' }, headers);
+  }
+
+  await dynamodb.send(new DeleteItemCommand({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    Key: {
+      directoryId: { S: directoryId },
+      entryKey: { S: member.entryKey.S },
+    },
+    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
+  }));
+
+  return json(200, { projectId, memberId: normalizedMemberKey }, headers);
+}
+
 async function createProjectTask(event, headers, directoryId, projectId) {
   const body = readJsonBody(event);
 
@@ -690,6 +904,28 @@ function readArchiveProjectParams(event) {
   return teamId && projectId ? { teamId, projectId } : undefined;
 }
 
+function readProjectMembersProjectId(event) {
+  if (event.requestContext?.http?.method !== 'GET') {
+    return undefined;
+  }
+
+  const encodedProjectId = event.rawPath?.match(/^\\/(?:api\\/)?projects\\/([^/]+)\\/members$/)?.[1];
+
+  return encodedProjectId ? decodePathSegment(encodedProjectId) : undefined;
+}
+
+function readProjectMemberParams(event) {
+  if (event.requestContext?.http?.method !== 'PATCH' && event.requestContext?.http?.method !== 'DELETE') {
+    return undefined;
+  }
+
+  const match = event.rawPath?.match(/^\\/(?:api\\/)?projects\\/([^/]+)\\/members\\/([^/]+)$/);
+  const projectId = match?.[1] ? decodePathSegment(match[1]) : undefined;
+  const memberKey = match?.[2] ? decodePathSegment(match[2]) : undefined;
+
+  return projectId && memberKey ? { projectId, memberKey } : undefined;
+}
+
 function readProjectTaskStatusParams(event) {
   if (event.requestContext?.http?.method !== 'PATCH') {
     return undefined;
@@ -700,6 +936,24 @@ function readProjectTaskStatusParams(event) {
   const taskId = match?.[2] ? decodePathSegment(match[2]) : undefined;
 
   return projectId && taskId ? { projectId, taskId } : undefined;
+}
+
+async function enforceProjectPermission(headers, principal, projectId, minimumRole) {
+  if (!(await hasProjectAccess(principal.directoryId, projectId))) {
+    return json(403, { message: 'Project access is denied.' }, headers);
+  }
+
+  if (principal.isSystemAdmin) {
+    return undefined;
+  }
+
+  const role = await getProjectRole(principal.directoryId, projectId, principal.userKey);
+
+  if (!role || !projectRoleAllows(role, minimumRole)) {
+    return json(403, { message: 'Project access is denied.' }, headers);
+  }
+
+  return undefined;
 }
 
 async function hasProjectAccess(directoryId, projectId) {
@@ -725,6 +979,25 @@ async function hasProjectAccess(directoryId, projectId) {
     activeTeamIds.has(item.teamId?.S) &&
     isActiveDirectoryItem(item)
   );
+}
+
+async function getProjectRole(directoryId, projectId, memberKey) {
+  const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
+  const items = await queryAll({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    KeyConditionExpression: 'directoryId = :directoryId',
+    ExpressionAttributeValues: {
+      ':directoryId': { S: directoryId },
+    },
+    ScanIndexForward: true,
+  });
+  const member = items.find((item) =>
+    item.entryType?.S === 'project-member' &&
+    item.projectId?.S === projectId &&
+    item.memberKey?.S === normalizedMemberKey
+  );
+
+  return member?.role?.S;
 }
 
 async function queryAll(input) {
@@ -783,7 +1056,7 @@ function createHeaders(event) {
 
   return {
     'access-control-allow-origin': allowedOrigin,
-    'access-control-allow-methods': 'GET,POST,PATCH,OPTIONS',
+    'access-control-allow-methods': 'GET,POST,PATCH,DELETE,OPTIONS',
     'access-control-allow-headers': 'authorization,content-type',
     'content-type': 'application/json; charset=utf-8',
     vary: 'origin',
@@ -804,14 +1077,61 @@ function readBearerAccessToken(event) {
   return authorization.match(/^Bearer\\s+(.+)$/i)?.[1];
 }
 
-function toProjectDirectoryId(user) {
+function toProjectPrincipal(user, accessToken) {
   const userKey = user.UserAttributes?.find((attribute) => attribute.Name === 'email')?.Value ?? user.Username;
 
   if (!userKey?.trim()) {
     return undefined;
   }
 
-  return 'user#' + userKey.trim().toLowerCase();
+  const normalizedUserKey = userKey.trim().toLowerCase();
+  const directoryId =
+    readUserAttribute(user, 'custom:directory_id')?.trim() ||
+    readUserAttribute(user, 'custom:workspace_id')?.trim() ||
+    'user#' + normalizedUserKey;
+  const groups = readCognitoGroups(accessToken);
+
+  return {
+    directoryId,
+    userKey: normalizedUserKey,
+    isSystemAdmin: groups.some((group) => getSystemAdminGroups().includes(group)),
+  };
+}
+
+function readUserAttribute(user, name) {
+  return user.UserAttributes?.find((attribute) => attribute.Name === name)?.Value;
+}
+
+function readCognitoGroups(accessToken) {
+  const claims = decodeJwtPayload(accessToken);
+  const groups = claims?.['cognito:groups'];
+
+  return Array.isArray(groups) ? groups.filter((group) => typeof group === 'string' && group) : [];
+}
+
+function decodeJwtPayload(token) {
+  const payload = token.split('.')[1];
+
+  if (!payload) {
+    return undefined;
+  }
+
+  try {
+    const normalizedPayload = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const paddedPayload = normalizedPayload.padEnd(normalizedPayload.length + ((4 - normalizedPayload.length % 4) % 4), '=');
+    return JSON.parse(Buffer.from(paddedPayload, 'base64').toString('utf8'));
+  } catch {
+    return undefined;
+  }
+}
+
+function getSystemAdminGroups() {
+  const groups = (process.env.SYSTEM_ADMIN_GROUPS ?? 'mukuroji-system-admins')
+    .split(',')
+    .map((group) => group.trim())
+    .filter(Boolean);
+
+  return groups.length > 0 ? groups : ['mukuroji-system-admins'];
 }
 
 function createDirectoryProjectId(directoryId, projectId) {
@@ -878,6 +1198,10 @@ function createProjectEntryKey(teamSortOrder, projectSortOrder, projectId) {
   return padSortOrder(teamSortOrder) + '#' + padSortOrder(projectSortOrder) + '#PROJECT#' + projectId;
 }
 
+function createProjectMemberEntryKey(projectId, memberKey) {
+  return 'PROJECT_MEMBER#' + projectId + '#' + memberKey;
+}
+
 function padSortOrder(value) {
   return String(value).padStart(6, '0');
 }
@@ -925,6 +1249,31 @@ function toProjectDirectory(items, locale) {
   return teams;
 }
 
+function toProjectMember(item) {
+  const member = {
+    id: item.memberKey.S,
+    email: item.email.S,
+    role: item.role.S,
+    updatedAt: item.updatedAt.S,
+  };
+
+  if (item.name?.S) {
+    member.name = item.name.S;
+  }
+
+  return member;
+}
+
+function compareProjectMembers(first, second) {
+  const roleDelta = projectRoleWeight(second.role?.S) - projectRoleWeight(first.role?.S);
+
+  if (roleDelta !== 0) {
+    return roleDelta;
+  }
+
+  return (first.name?.S ?? first.email?.S ?? '').localeCompare(second.name?.S ?? second.email?.S ?? '', 'ja');
+}
+
 function localizedName(item, locale) {
   return locale === 'en' ? item.nameEn?.S ?? item.nameJa.S : item.nameJa?.S ?? item.nameEn.S;
 }
@@ -968,6 +1317,30 @@ function isTaskPriority(value) {
   return value === 'high' || value === 'medium' || value === 'low';
 }
 
+function isProjectRole(value) {
+  return value === 'manager' || value === 'member' || value === 'viewer';
+}
+
+function projectRoleAllows(role, minimumRole) {
+  return projectRoleWeight(role) >= projectRoleWeight(minimumRole);
+}
+
+function projectRoleWeight(role) {
+  if (role === 'manager') {
+    return 3;
+  }
+
+  if (role === 'member') {
+    return 2;
+  }
+
+  return role === 'viewer' ? 1 : 0;
+}
+
+function normalizeProjectMemberKey(value) {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
 function isProjectTone(value) {
   return value === 'blue' || value === 'purple' || value === 'green' || value === 'yellow';
 }
@@ -987,7 +1360,7 @@ function isProjectTone(value) {
       authType: lambda.FunctionUrlAuthType.NONE,
       cors: {
         allowedOrigins: taskApiAllowedOriginList,
-        allowedMethods: [lambda.HttpMethod.GET, lambda.HttpMethod.POST, lambda.HttpMethod.PATCH],
+        allowedMethods: [lambda.HttpMethod.GET, lambda.HttpMethod.POST, lambda.HttpMethod.PATCH, lambda.HttpMethod.DELETE],
         allowedHeaders: ['authorization', 'content-type'],
       },
     });

@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
-import type { ProjectDirectoryTeam } from '../src/projects/api'
+import type { ProjectDirectoryTeam, ProjectMember, ProjectMemberRole } from '../src/projects/api'
 import type { ProjectTask } from '../src/tasks/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 
@@ -41,6 +41,18 @@ type MockRequestCounts = {
    */
   projectArchives: number
   /**
+   * プロジェクトメンバー一覧 API の request 数です。
+   */
+  projectMemberReads: number
+  /**
+   * プロジェクトメンバー更新 API の request 数です。
+   */
+  projectMemberUpdates: number
+  /**
+   * プロジェクトメンバー削除 API の request 数です。
+   */
+  projectMemberRemoves: number
+  /**
    * タスク作成 API の request 数です。
    */
   taskCreates: number
@@ -71,6 +83,9 @@ async function mockAuthenticatedTaskPage(
     projectCreates: 0,
     teamArchives: 0,
     projectArchives: 0,
+    projectMemberReads: 0,
+    projectMemberUpdates: 0,
+    projectMemberRemoves: 0,
     taskCreates: 0,
     taskStatusUpdates: 0,
   }
@@ -83,6 +98,24 @@ async function mockAuthenticatedTaskPage(
     'product-roadmap': [],
     'brand-refresh': [],
     'shared-launch': [],
+  }
+  const projectMembersByProject: Record<string, ProjectMember[]> = {
+    refero: [
+      {
+        id: 'demo@example.com',
+        email: 'demo@example.com',
+        name: 'Demo User',
+        role: 'manager',
+        updatedAt: '2026-06-08T00:00:00.000Z',
+      },
+      {
+        id: 'sato@example.com',
+        email: 'sato@example.com',
+        name: '佐藤 花子',
+        role: 'member',
+        updatedAt: '2026-06-08T00:00:00.000Z',
+      },
+    ],
   }
 
   mockRequestCountsByPage.set(page, requestCounts)
@@ -100,6 +133,8 @@ async function mockAuthenticatedTaskPage(
           email: 'demo@example.com',
           name: 'Demo User',
         },
+        groups: ['mukuroji-system-admins'],
+        isSystemAdmin: true,
       },
     })
   })
@@ -302,6 +337,71 @@ async function mockAuthenticatedTaskPage(
         task,
       },
     })
+  })
+
+  await page.route(/.*\/api\/projects\/[^/]+\/members(?:\/[^/]+)?$/, async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    const pathSegments = new URL(route.request().url()).pathname.split('/')
+    const projectId = decodeURIComponent(pathSegments[3] ?? '')
+    const memberKey = pathSegments[5] ? decodeURIComponent(pathSegments[5]) : undefined
+    const members = projectMembersByProject[projectId] ?? []
+
+    if (route.request().method() === 'GET') {
+      requestCounts.projectMemberReads += 1
+      await route.fulfill({
+        json: {
+          projectId,
+          members,
+        },
+      })
+      return
+    }
+
+    if (route.request().method() === 'PATCH' && memberKey) {
+      requestCounts.projectMemberUpdates += 1
+      const body = route.request().postDataJSON() as {
+        email?: string
+        name?: string
+        role?: ProjectMemberRole
+      }
+      const existingMember = members.find((member) => member.id === memberKey)
+      const member = {
+        id: memberKey,
+        email: body.email ?? memberKey,
+        name: body.name,
+        role: body.role ?? 'viewer',
+        updatedAt: '2026-06-08T00:00:00.000Z',
+      } satisfies ProjectMember
+
+      if (existingMember) {
+        Object.assign(existingMember, member)
+      } else {
+        members.push(member)
+        projectMembersByProject[projectId] = members
+      }
+
+      await route.fulfill({
+        json: {
+          member,
+        },
+      })
+      return
+    }
+
+    if (route.request().method() === 'DELETE' && memberKey) {
+      requestCounts.projectMemberRemoves += 1
+      projectMembersByProject[projectId] = members.filter((member) => member.id !== memberKey)
+      await route.fulfill({
+        json: {
+          projectId,
+          memberId: memberKey,
+        },
+      })
+      return
+    }
+
+    await route.fallback()
   })
 
   await page.route('**/api/projects/product-roadmap/tasks', async (route) => {
@@ -515,6 +615,32 @@ test.describe('authenticated task page', () => {
       page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
     ).toHaveCount(0)
     await expect.poll(() => requestCounts.taskStatusUpdates).toBe(2)
+  })
+
+  test('権限管理画面でプロジェクトメンバーのロールを変更できる', async ({ page }) => {
+    await page.goto('/permissions')
+    const requestCounts = getMockRequestCounts(page)
+
+    await expect(page.getByTestId('permissions-view')).toBeVisible()
+    await expect(page.getByTestId('permissions-project-select')).toHaveValue('refero')
+    await expect(page.getByTestId('permission-member-row-sato-example-com')).toBeVisible()
+
+    await page.getByTestId('permission-role-select-sato-example-com').selectOption('manager')
+
+    await expect.poll(() => requestCounts.projectMemberUpdates).toBe(1)
+
+    await page.getByTestId('permissions-member-email').fill('viewer2@example.com')
+    await page.getByLabel('表示名').fill('Viewer Two')
+    await page.locator('#permissions-member-role').selectOption('viewer')
+    await page.getByTestId('permissions-submit').click()
+
+    await expect(page.getByTestId('permission-member-row-viewer2-example-com')).toBeVisible()
+    await expect.poll(() => requestCounts.projectMemberUpdates).toBe(2)
+
+    await page.getByTestId('permission-remove-sato-example-com').click()
+
+    await expect(page.getByTestId('permission-member-row-sato-example-com')).toHaveCount(0)
+    await expect.poll(() => requestCounts.projectMemberRemoves).toBe(1)
   })
 
   test('ダッシュボードからチームとプロジェクトを新規登録できる', async ({ page }) => {

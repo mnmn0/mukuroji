@@ -66,7 +66,7 @@ export type SidebarNavId =
   | 'inbox'
   | 'dashboard'
   | 'reports'
-  | 'invite'
+  | 'permissions'
   | 'help'
   | 'settings'
 
@@ -385,7 +385,7 @@ const mainNavItems: MainNavItem[] = [
 ]
 
 const utilityNavItems: MainNavItem[] = [
-  { id: 'invite', icon: UserPlusIcon },
+  { id: 'permissions', icon: ShieldIcon },
   { id: 'help', icon: HelpCircleIcon },
   { id: 'settings', icon: SettingsIcon },
 ]
@@ -437,7 +437,7 @@ const defaultLabels: SidebarLabels = {
     inbox: '受信箱',
     dashboard: 'ダッシュボード',
     reports: 'レポート',
-    invite: '招待する',
+    permissions: '権限管理',
     help: 'ヘルプ',
     settings: '設定',
   },
@@ -1506,13 +1506,11 @@ function PanelIcon({ className }: SidebarIconProps) {
   )
 }
 
-function UserPlusIcon({ className }: SidebarIconProps) {
+function ShieldIcon({ className }: SidebarIconProps) {
   return (
     <SvgBase className={className}>
-      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-      <circle cx="9" cy="7" r="4" />
-      <path d="M19 8v6" />
-      <path d="M22 11h-6" />
+      <path d="M12 22s8-3.5 8-10V5.5L12 2 4 5.5V12c0 6.5 8 10 8 10Z" />
+      <path d="m9 12 2 2 4-4" />
     </SvgBase>
   )
 }
