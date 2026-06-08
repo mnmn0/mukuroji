@@ -9,6 +9,7 @@
     "cdk": "cdk"
   },
   "devDependencies": {
+    "@jest/globals": "^30",
     "@types/jest": "^30",
     "@types/node": "^24.10.1",
     "jest": "^30",

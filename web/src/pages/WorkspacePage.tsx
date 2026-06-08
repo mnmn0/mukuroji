@@ -27,11 +27,13 @@ import {
   createProjectDirectoryTeam,
   type CreateProjectDirectoryProjectInput,
   type CreateProjectDirectoryTeamInput,
-  getProjectMembers,
   getProjectDirectory,
+  getProjectMembers,
+  getProjectUsers,
   removeProjectMember,
   type ProjectMember,
   type ProjectMemberRole,
+  type ProjectUser,
   type ProjectDirectoryTeam,
   type UpdateProjectMemberInput,
   updateProjectMember,
@@ -119,13 +121,33 @@ type WorkspaceScreenProps = {
    */
   projectMembers: ProjectMember[]
   /**
+   * 権限管理画面で選択できる Cognito user 候補です。
+   */
+  projectUsers: ProjectUser[]
+  /**
    * 権限管理の member 一覧を読み込み中かどうかです。
    */
   isProjectMembersLoading?: boolean
   /**
+   * 権限管理の Cognito user 候補を読み込み中かどうかです。
+   */
+  isProjectUsersLoading?: boolean
+  /**
    * 権限管理の API エラー表示です。
    */
   projectMembersErrorMessage?: string
+  /**
+   * 権限管理の Cognito user 候補取得エラー表示です。
+   */
+  projectUsersErrorMessage?: string
+  /**
+   * Cognito user 一覧の次 page token です。
+   */
+  projectUsersNextToken?: string
+  /**
+   * Cognito user 検索 query です。
+   */
+  projectUserQuery: string
   /**
    * システム管理者として扱われるログインユーザーかどうかです。
    */
@@ -170,6 +192,14 @@ type WorkspaceScreenProps = {
    * 権限管理で対象 project を切り替えたときの callback です。
    */
   onSelectPermissionProject?: (projectId: string) => void
+  /**
+   * 権限管理の Cognito user 検索 query 変更 callback です。
+   */
+  onProjectUserQueryChange?: (query: string) => void
+  /**
+   * Cognito user 一覧の次 page 読み込み callback です。
+   */
+  onLoadMoreProjectUsers?: () => Promise<void>
   /**
    * project member role 保存時の callback です。
    */
@@ -249,6 +279,10 @@ type PermissionsViewProps = {
    */
   isLoading?: boolean
   /**
+   * Cognito user 候補を読み込み中かどうかです。
+   */
+  isUsersLoading?: boolean
+  /**
    * ログインユーザーがシステム管理者かどうかです。
    */
   isSystemAdmin?: boolean
@@ -257,6 +291,10 @@ type PermissionsViewProps = {
    */
   members: ProjectMember[]
   /**
+   * 選択可能な Cognito user 候補です。
+   */
+  users: ProjectUser[]
+  /**
    * 選択可能な project 一覧です。
    */
   projects: PermissionProjectOption[]
@@ -264,6 +302,18 @@ type PermissionsViewProps = {
    * 選択中の project ID です。
    */
   selectedProjectId?: string
+  /**
+   * Cognito user 一覧の次 page token です。
+   */
+  usersNextToken?: string
+  /**
+   * Cognito user 検索 query です。
+   */
+  userQuery: string
+  /**
+   * Cognito user 候補取得エラーです。
+   */
+  usersErrorMessage?: string
   /**
    * i18n message 解決関数です。
    */
@@ -276,6 +326,14 @@ type PermissionsViewProps = {
    * project 選択 callback です。
    */
   onSelectProject?: (projectId: string) => void
+  /**
+   * Cognito user 一覧の次 page 読み込み callback です。
+   */
+  onLoadMoreUsers?: () => Promise<void>
+  /**
+   * Cognito user 検索 query 変更 callback です。
+   */
+  onUserQueryChange?: (query: string) => void
   /**
    * member role 保存 callback です。
    */
@@ -291,13 +349,9 @@ type PermissionsViewProps = {
  */
 type ProjectMemberFormState = {
   /**
-   * Cognito user のメールアドレスです。
+   * 選択中の Cognito user ID です。
    */
-  email: string
-  /**
-   * 表示名です。
-   */
-  name: string
+  userId: string
   /**
    * 付与するプロジェクトロールです。
    */
@@ -336,6 +390,7 @@ type RoleSelectProps = {
 
 const emptyProjectDirectory: ProjectDirectoryTeam[] = []
 const emptyProjectMembers: ProjectMember[] = []
+const emptyProjectUsers: ProjectUser[] = []
 const emptyProjectTasks: ProjectTask[] = []
 const myTaskKanbanStatuses = ['todo', 'in-progress', 'review', 'done'] as const satisfies readonly TaskStatus[]
 const projectMemberRoleOptions = ['manager', 'member', 'viewer'] as const satisfies readonly ProjectMemberRole[]
@@ -417,6 +472,12 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   const [session] = useState<AuthSession | null>(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [selectedPermissionProjectId, setSelectedPermissionProjectId] = useState<string | undefined>()
+  const [projectUserQuery, setProjectUserQuery] = useState('')
+  const [projectUsersExtraPage, setProjectUsersExtraPage] = useState<{
+    key: string
+    nextToken?: string
+    users: ProjectUser[]
+  }>()
   const t = useMemo(() => createTranslator(locale), [locale])
   const accessToken = session?.accessToken
   const currentUserKey = accessToken ? (['current-user', accessToken] as const) : null
@@ -457,6 +518,23 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       getProjectMembers(currentAccessToken, currentProjectId),
     apiSWRConfig,
   )
+  const projectUsersKey =
+    accessToken && user && !currentUserError && permissionProjectId
+      ? (['project-users', accessToken, permissionProjectId, projectUserQuery] as const)
+      : null
+  const {
+    data: projectUsersFirstPage,
+    error: projectUsersError,
+    isLoading: isProjectUsersLoading,
+  } = useSWR(
+    projectUsersKey,
+    ([, currentAccessToken, currentProjectId, currentQuery]) =>
+      getProjectUsers(currentAccessToken, currentProjectId, {
+        limit: 20,
+        query: currentQuery,
+      }),
+    apiSWRConfig,
+  )
   const projectTasksKey =
     accessToken && user && !currentUserError && projectIds.length > 0
       ? (['workspace-project-tasks', accessToken, projectIds] as const)
@@ -473,6 +551,22 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   )
   const [taskMoveErrorMessage, setTaskMoveErrorMessage] = useState<string | undefined>()
   const pendingTaskMoveKeysRef = useRef(new Set<string>())
+  const projectUsersPageKey = createProjectUsersPageKey(permissionProjectId, projectUserQuery)
+  const activeProjectUsersExtraPage = projectUsersExtraPage?.key === projectUsersPageKey
+    ? projectUsersExtraPage
+    : undefined
+  const projectUsers = useMemo(
+    () => mergeProjectUsers(
+      projectUsersFirstPage?.users ?? emptyProjectUsers,
+      activeProjectUsersExtraPage?.users ?? emptyProjectUsers,
+    ),
+    [activeProjectUsersExtraPage?.users, projectUsersFirstPage?.users],
+  )
+  const projectUsersNextToken =
+    activeProjectUsersExtraPage ? activeProjectUsersExtraPage.nextToken : projectUsersFirstPage?.nextToken
+  const projectUsersErrorMessage = projectUsersError
+    ? t('workspace.permissions.usersError')
+    : undefined
   const summary = useMemo(() => createDashboardSummary(teams, tasks), [tasks, teams])
   const metadata = workspaceViewMetadata[view]
   const title = t(metadata.titleKey)
@@ -574,6 +668,28 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     await mutateProjectMembers()
   }
 
+  const handleLoadMoreProjectUsers = async () => {
+    if (!accessToken || !permissionProjectId || !projectUsersNextToken) {
+      return
+    }
+
+    const currentPageKey = createProjectUsersPageKey(permissionProjectId, projectUserQuery)
+    const currentExtraUsers = projectUsersExtraPage?.key === currentPageKey
+      ? projectUsersExtraPage.users
+      : emptyProjectUsers
+    const response = await getProjectUsers(accessToken, permissionProjectId, {
+      limit: 20,
+      nextToken: projectUsersNextToken,
+      query: projectUserQuery,
+    })
+
+    setProjectUsersExtraPage({
+      key: currentPageKey,
+      nextToken: response.nextToken,
+      users: mergeProjectUsers(currentExtraUsers, response.users),
+    })
+  }
+
   const handleMoveTaskStatus = async (task: ProjectTask, status: TaskStatus) => {
     if (!accessToken || !task.projectId || task.status === status) {
       return
@@ -634,12 +750,19 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       onArchiveTeam={handleArchiveTeam}
       onRemoveProjectMember={handleRemoveProjectMember}
       onMoveTaskStatus={handleMoveTaskStatus}
+      onLoadMoreProjectUsers={handleLoadMoreProjectUsers}
+      onProjectUserQueryChange={setProjectUserQuery}
       onSelectPermissionProject={setSelectedPermissionProjectId}
       onUpdateProjectMember={handleUpdateProjectMember}
       isProjectMembersLoading={isProjectMembersLoading}
+      isProjectUsersLoading={isProjectUsersLoading}
       isSystemAdmin={user?.isSystemAdmin}
       projectMembers={projectMembers}
       projectMembersErrorMessage={projectMembersError ? t('workspace.permissions.error') : undefined}
+      projectUserQuery={projectUserQuery}
+      projectUsers={projectUsers}
+      projectUsersErrorMessage={projectUsersErrorMessage}
+      projectUsersNextToken={projectUsersNextToken}
       selectedPermissionProjectId={permissionProjectId}
       summary={summary}
       taskMoveErrorMessage={taskMoveErrorMessage}
@@ -666,8 +789,13 @@ export function WorkspaceScreen({
   tasks,
   selectedPermissionProjectId,
   projectMembers,
+  projectUsers,
   isProjectMembersLoading,
+  isProjectUsersLoading,
   projectMembersErrorMessage,
+  projectUsersErrorMessage,
+  projectUsersNextToken,
+  projectUserQuery,
   isSystemAdmin,
   isLoading = false,
   onLogout,
@@ -679,6 +807,8 @@ export function WorkspaceScreen({
   onArchiveProject,
   onArchiveTeam,
   onSelectPermissionProject,
+  onProjectUserQueryChange,
+  onLoadMoreProjectUsers,
   onUpdateProjectMember,
   onRemoveProjectMember,
   onMoveTaskStatus,
@@ -793,9 +923,14 @@ export function WorkspaceScreen({
           <WorkspaceBody
             activeTeam={activeTeam}
             isProjectMembersLoading={isProjectMembersLoading}
+            isProjectUsersLoading={isProjectUsersLoading}
             isSystemAdmin={isSystemAdmin}
             projectMembers={projectMembers}
             projectMembersErrorMessage={projectMembersErrorMessage}
+            projectUserQuery={projectUserQuery}
+            projectUsers={projectUsers}
+            projectUsersErrorMessage={projectUsersErrorMessage}
+            projectUsersNextToken={projectUsersNextToken}
             selectedPermissionProjectId={selectedPermissionProjectId}
             summary={summary}
             t={t}
@@ -803,7 +938,9 @@ export function WorkspaceScreen({
             tasks={tasks}
             teams={teams}
             onRemoveProjectMember={onRemoveProjectMember}
+            onLoadMoreProjectUsers={onLoadMoreProjectUsers}
             onSelectPermissionProject={onSelectPermissionProject}
+            onProjectUserQueryChange={onProjectUserQueryChange}
             onUpdateProjectMember={onUpdateProjectMember}
             onMoveTaskStatus={onMoveTaskStatus}
             view={view}
@@ -817,16 +954,23 @@ export function WorkspaceScreen({
 function WorkspaceBody({
   activeTeam,
   isProjectMembersLoading,
+  isProjectUsersLoading,
   isSystemAdmin,
   projectMembers,
   projectMembersErrorMessage,
+  projectUserQuery,
+  projectUsers,
+  projectUsersErrorMessage,
+  projectUsersNextToken,
   selectedPermissionProjectId,
   summary,
   t,
   taskMoveErrorMessage,
   tasks,
   teams,
+  onLoadMoreProjectUsers,
   onRemoveProjectMember,
+  onProjectUserQueryChange,
   onSelectPermissionProject,
   onUpdateProjectMember,
   onMoveTaskStatus,
@@ -834,16 +978,23 @@ function WorkspaceBody({
 }: {
   activeTeam?: ProjectDirectoryTeam
   isProjectMembersLoading?: boolean
+  isProjectUsersLoading?: boolean
   isSystemAdmin?: boolean
   projectMembers: ProjectMember[]
   projectMembersErrorMessage?: string
+  projectUserQuery: string
+  projectUsers: ProjectUser[]
+  projectUsersErrorMessage?: string
+  projectUsersNextToken?: string
   selectedPermissionProjectId?: string
   summary: DashboardSummary
   t: (key: MessageKey) => string
   taskMoveErrorMessage?: string
   tasks: ProjectTask[]
   teams: ProjectDirectoryTeam[]
+  onLoadMoreProjectUsers?: () => Promise<void>
   onRemoveProjectMember?: (projectId: string, memberKey: string) => Promise<void>
+  onProjectUserQueryChange?: (query: string) => void
   onSelectPermissionProject?: (projectId: string) => void
   onUpdateProjectMember?: (
     projectId: string,
@@ -878,13 +1029,20 @@ function WorkspaceBody({
         <PermissionsView
           errorMessage={projectMembersErrorMessage}
           isLoading={isProjectMembersLoading}
+          isUsersLoading={isProjectUsersLoading}
           isSystemAdmin={isSystemAdmin}
           members={projectMembers}
           projects={createPermissionProjectOptions(teams)}
           selectedProjectId={selectedPermissionProjectId}
           t={t}
+          users={projectUsers}
+          usersErrorMessage={projectUsersErrorMessage}
+          usersNextToken={projectUsersNextToken}
+          userQuery={projectUserQuery}
+          onLoadMoreUsers={onLoadMoreProjectUsers}
           onRemoveMember={onRemoveProjectMember}
           onSelectProject={onSelectPermissionProject}
+          onUserQueryChange={onProjectUserQueryChange}
           onUpdateMember={onUpdateProjectMember}
         />
       ) : null}
@@ -1271,23 +1429,33 @@ function ReportsView({
 function PermissionsView({
   errorMessage,
   isLoading,
+  isUsersLoading,
   isSystemAdmin,
   members,
   projects,
   selectedProjectId,
   t,
+  users,
+  usersErrorMessage,
+  usersNextToken,
+  userQuery,
+  onLoadMoreUsers,
   onRemoveMember,
   onSelectProject,
+  onUserQueryChange,
   onUpdateMember,
 }: PermissionsViewProps) {
   const [formState, setFormState] = useState<ProjectMemberFormState>({
-    email: '',
-    name: '',
+    userId: '',
     role: 'member',
   })
   const [savingMemberKey, setSavingMemberKey] = useState<string | undefined>()
+  const [isLoadingMoreUsers, setIsLoadingMoreUsers] = useState(false)
   const [localErrorMessage, setLocalErrorMessage] = useState<string | undefined>()
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0]
+  const selectedUserId = formState.userId && users.some((user) => user.id === formState.userId)
+    ? formState.userId
+    : users[0]?.id ?? ''
 
   const saveMember = async (memberKey: string, input: UpdateProjectMemberInput) => {
     if (!selectedProject || !onUpdateMember) {
@@ -1308,19 +1476,33 @@ function PermissionsView({
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const email = formState.email.trim().toLowerCase()
 
-    if (!email) {
+    if (!selectedUserId) {
       setLocalErrorMessage(t('workspace.permissions.error'))
       return
     }
 
-    await saveMember(email, {
-      email,
-      name: formState.name.trim() || undefined,
+    await saveMember(selectedUserId, {
       role: formState.role,
     })
-    setFormState({ email: '', name: '', role: 'member' })
+    setFormState({ userId: '', role: 'member' })
+  }
+
+  const handleLoadMoreUsers = async () => {
+    if (!onLoadMoreUsers) {
+      return
+    }
+
+    setIsLoadingMoreUsers(true)
+    setLocalErrorMessage(undefined)
+
+    try {
+      await onLoadMoreUsers()
+    } catch {
+      setLocalErrorMessage(t('workspace.permissions.usersError'))
+    } finally {
+      setIsLoadingMoreUsers(false)
+    }
   }
 
   const handleRemoveMember = async (member: ProjectMember) => {
@@ -1371,28 +1553,34 @@ function PermissionsView({
 
             {selectedProject ? (
               <form className="grid grid-cols-2 gap-3 max-[780px]:grid-cols-1" onSubmit={handleSubmit}>
-                <label className="grid gap-2 text-sm font-black text-[#263550]" htmlFor="permissions-member-email">
-                  {t('workspace.permissions.memberEmail')}
+                <label className="grid gap-2 text-sm font-black text-[#263550]" htmlFor="permissions-user-search">
+                  {t('workspace.permissions.userSearch')}
                   <input
                     className="h-12 rounded-lg border border-slate-300 px-4 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
-                    data-testid="permissions-member-email"
-                    id="permissions-member-email"
-                    placeholder={t('workspace.permissions.memberEmailPlaceholder')}
-                    type="email"
-                    value={formState.email}
-                    onChange={(event) => setFormState((current) => ({ ...current, email: event.target.value }))}
+                    data-testid="permissions-user-search"
+                    id="permissions-user-search"
+                    placeholder={t('workspace.permissions.userSearchPlaceholder')}
+                    type="search"
+                    value={userQuery}
+                    onChange={(event) => onUserQueryChange?.(event.target.value)}
                   />
                 </label>
-                <label className="grid gap-2 text-sm font-black text-[#263550]" htmlFor="permissions-member-name">
-                  {t('workspace.permissions.memberName')}
-                  <input
-                    className="h-12 rounded-lg border border-slate-300 px-4 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
-                    id="permissions-member-name"
-                    placeholder={t('workspace.permissions.memberNamePlaceholder')}
-                    type="text"
-                    value={formState.name}
-                    onChange={(event) => setFormState((current) => ({ ...current, name: event.target.value }))}
-                  />
+                <label className="grid gap-2 text-sm font-black text-[#263550]" htmlFor="permissions-user-select">
+                  {t('workspace.permissions.memberEmail')}
+                  <select
+                    className="h-12 rounded-lg border border-slate-300 bg-white px-4 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+                    data-testid="permissions-user-select"
+                    disabled={users.length === 0}
+                    id="permissions-user-select"
+                    value={selectedUserId}
+                    onChange={(event) => setFormState((current) => ({ ...current, userId: event.target.value }))}
+                  >
+                    {users.map((user) => (
+                      <option key={user.id} value={user.id}>
+                        {formatProjectUserOption(user)}
+                      </option>
+                    ))}
+                  </select>
                 </label>
                 <RoleSelect
                   id="permissions-member-role"
@@ -1402,15 +1590,33 @@ function PermissionsView({
                   onChange={(role) => setFormState((current) => ({ ...current, role }))}
                 />
                 <button
-                  className="mt-7 min-h-12 rounded-lg bg-blue-600 px-5 text-sm font-black text-white shadow-[0_14px_30px_rgba(37,99,235,0.22)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400 max-[780px]:mt-0"
+                  className="self-end min-h-12 rounded-lg bg-blue-600 px-5 text-sm font-black text-white shadow-[0_14px_30px_rgba(37,99,235,0.22)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400"
                   data-testid="permissions-submit"
-                  disabled={savingMemberKey === formState.email.trim().toLowerCase()}
+                  disabled={!selectedUserId || savingMemberKey === selectedUserId}
                   type="submit"
                 >
-                  {savingMemberKey === formState.email.trim().toLowerCase()
+                  {savingMemberKey === selectedUserId
                     ? t('workspace.permissions.saving')
                     : t('workspace.permissions.save')}
                 </button>
+                <div className="col-span-full flex flex-wrap items-center gap-3 text-sm font-bold text-[#526381]">
+                  {isUsersLoading ? <span>{t('workspace.permissions.usersLoading')}</span> : null}
+                  {usersErrorMessage ? <span className="text-red-600">{usersErrorMessage}</span> : null}
+                  {!isUsersLoading && users.length === 0 ? <span>{t('workspace.permissions.usersEmpty')}</span> : null}
+                  {usersNextToken ? (
+                    <button
+                      className="min-h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-black text-[#263550] transition hover:border-blue-500 hover:text-blue-600 disabled:cursor-not-allowed disabled:text-slate-400"
+                      data-testid="permissions-load-more-users"
+                      disabled={isLoadingMoreUsers}
+                      type="button"
+                      onClick={handleLoadMoreUsers}
+                    >
+                      {isLoadingMoreUsers
+                        ? t('workspace.permissions.saving')
+                        : t('workspace.permissions.loadMoreUsers')}
+                    </button>
+                  ) : null}
+                </div>
               </form>
             ) : (
               <p className="rounded-lg border border-dashed border-slate-300 px-4 py-8 text-sm font-bold text-[#526381]">
@@ -1463,7 +1669,10 @@ function PermissionsView({
               >
                 <div className="min-w-0">
                   <p className="truncate text-base font-black text-[#0d1833]">{member.name ?? member.email}</p>
-                  <p className="mt-1 truncate text-sm font-bold text-[#526381]">{member.email}</p>
+                  <p className="mt-1 truncate text-sm font-bold text-[#526381]">
+                    {member.email}
+                    {member.status ? ` / ${member.status}` : ''}
+                  </p>
                 </div>
                 <RoleSelect
                   id={`permissions-role-${member.id}`}
@@ -1473,8 +1682,6 @@ function PermissionsView({
                   value={member.role}
                   onChange={(role) =>
                     saveMember(member.id, {
-                      email: member.email,
-                      name: member.name,
                       role,
                     })
                   }
@@ -1887,6 +2094,24 @@ function createProjectMemberTestId(memberKey: string) {
   return memberKey.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '')
 }
 
+function formatProjectUserOption(user: ProjectUser) {
+  return `${user.name ?? user.email} / ${user.email}`
+}
+
+function createProjectUsersPageKey(projectId: string | undefined, query: string) {
+  return `${projectId ?? ''}\u0000${query.trim()}`
+}
+
+function mergeProjectUsers(currentUsers: ProjectUser[], nextUsers: ProjectUser[]) {
+  const usersById = new Map(currentUsers.map((user) => [user.id, user]))
+
+  for (const user of nextUsers) {
+    usersById.set(user.id, user)
+  }
+
+  return Array.from(usersById.values())
+}
+
 function createWorkspaceTaskKey(task: ProjectTask) {
   return task.projectId ? `${task.projectId}:${task.id}` : task.id
 }
@@ -1966,7 +2191,11 @@ function resolveTaskTitle(task: ProjectTask, t: (key: MessageKey) => string) {
 }
 
 function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) {
-  return task.assignee ?? (task.assigneeKey ? t(task.assigneeKey) : '')
+  return task.assigneeName ??
+    task.assigneeEmail ??
+    task.assigneeUserId ??
+    task.assignee ??
+    (task.assigneeKey ? t(task.assigneeKey) : '')
 }
 
 function createActivityTasks(tasks: ProjectTask[]) {

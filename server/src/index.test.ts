@@ -128,6 +128,44 @@ test('loads project tasks after project access is confirmed', async () => {
   ])
 })
 
+test('lists Cognito users for project member assignment when the current user is project manager', async () => {
+  const calls = configureFakeProjectClients(true, { role: 'manager' })
+
+  const response = await app.request(
+    '/api/projects/refero/users?query=sato&limit=2&nextToken=next-page-token',
+    {
+      headers: {
+        Authorization: 'Bearer test-token',
+      },
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    users: [
+      {
+        id: 'sato@example.com',
+        username: 'sato@example.com',
+        email: 'sato@example.com',
+        name: '佐藤 花子',
+        enabled: true,
+        status: 'CONFIRMED',
+      },
+    ],
+    nextToken: undefined,
+  })
+  expect(calls.roleChecks).toEqual([
+    { directoryId: 'user#demo@example.com', memberKey: 'demo@example.com', projectId: 'refero' },
+  ])
+  expect(calls.userLists).toEqual([
+    {
+      limit: 2,
+      paginationToken: 'next-page-token',
+      query: 'sato',
+    },
+  ])
+})
+
 test('creates a team in the authenticated user scoped directory', async () => {
   const calls = configureFakeProjectClients(true)
 
@@ -215,7 +253,7 @@ test('denies project task creation when the project role is viewer', async () =>
     },
     body: JSON.stringify({
       title: '新規タスク',
-      assignee: '佐藤 花子',
+      assigneeUserId: 'sato@example.com',
       dueDate: '2026/06/20',
       priority: 'high',
       status: 'todo',
@@ -228,6 +266,23 @@ test('denies project task creation when the project role is viewer', async () =>
     { directoryId: 'user#demo@example.com', memberKey: 'demo@example.com', projectId: 'refero' },
   ])
   expect(calls.taskCreates).toEqual([])
+})
+
+test('denies project member reads when the project role is viewer', async () => {
+  const calls = configureFakeProjectClients(true, { role: 'viewer' })
+
+  const response = await app.request('/api/projects/refero/members', {
+    headers: {
+      Authorization: 'Bearer test-token',
+    },
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toEqual({ message: 'Project access is denied.' })
+  expect(calls.roleChecks).toEqual([
+    { directoryId: 'user#demo@example.com', memberKey: 'demo@example.com', projectId: 'refero' },
+  ])
+  expect(calls.memberReads).toEqual([])
 })
 
 test('updates a project member role when the current user is project manager', async () => {
@@ -251,7 +306,10 @@ test('updates a project member role when the current user is project manager', a
     member: {
       id: 'sato@example.com',
       email: 'sato@example.com',
+      username: 'sato@example.com',
       name: '佐藤 花子',
+      enabled: true,
+      status: 'CONFIRMED',
       role: 'member',
       updatedAt: '2026-06-08T00:00:00.000Z',
     },
@@ -264,10 +322,11 @@ test('updates a project member role when the current user is project manager', a
       role: 'member',
     },
   ])
+  expect(calls.userProfiles).toEqual(['sato@example.com', 'sato@example.com'])
 })
 
 test('lets a system admin update project members without a project role', async () => {
-  const calls = configureFakeProjectClients(true, { role: undefined })
+  const calls = configureFakeProjectClients(false, { role: undefined })
 
   const response = await app.request('/api/projects/refero/members/viewer%40example.com', {
     method: 'PATCH',
@@ -282,7 +341,20 @@ test('lets a system admin update project members without a project role', async 
   })
 
   expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    member: {
+      id: 'viewer@example.com',
+      email: 'viewer@example.com',
+      username: 'viewer@example.com',
+      name: 'Viewer User',
+      enabled: true,
+      status: 'CONFIRMED',
+      role: 'viewer',
+      updatedAt: '2026-06-08T00:00:00.000Z',
+    },
+  })
   expect(calls.roleChecks).toEqual([])
+  expect(calls.accessChecks).toEqual([])
   expect(calls.memberUpdates).toEqual([
     {
       directoryId: 'user#demo@example.com',
@@ -291,6 +363,7 @@ test('lets a system admin update project members without a project role', async 
       role: 'viewer',
     },
   ])
+  expect(calls.userProfiles).toEqual(['viewer@example.com', 'viewer@example.com'])
 })
 
 test('archives a project under an authenticated team directory', async () => {
@@ -654,7 +727,7 @@ test('creates a project task after project access is confirmed', async () => {
     },
     body: JSON.stringify({
       title: '新規タスク',
-      assignee: '佐藤 花子',
+      assigneeUserId: 'sato@example.com',
       dueDate: '2026/06/20',
       priority: 'high',
       status: 'todo',
@@ -666,7 +739,9 @@ test('creates a project task after project access is confirmed', async () => {
     task: {
       id: 'new-task',
       title: '新規タスク',
-      assignee: '佐藤 花子',
+      assigneeUserId: 'sato@example.com',
+      assigneeEmail: 'sato@example.com',
+      assigneeName: '佐藤 花子',
       status: 'todo',
       dueDate: '2026/06/20',
       priority: 'high',
@@ -678,6 +753,7 @@ test('creates a project task after project access is confirmed', async () => {
   expect(calls.taskCreates).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero', title: '新規タスク' },
   ])
+  expect(calls.userProfiles).toEqual(['sato@example.com', 'sato@example.com'])
 })
 
 test('updates a project task status after project access is confirmed', async () => {
@@ -848,7 +924,7 @@ test('DynamoDB task client creates duplicate titled tasks with unique IDs', asyn
   await expect(
     client.createProjectTask('user#demo@example.com', 'refero', {
       title: '新規タスク',
-      assignee: '鈴木 太郎',
+      assigneeUserId: 'suzuki@example.com',
       status: 'todo',
       dueDate: '2026/06/21',
       priority: 'medium',
@@ -857,7 +933,7 @@ test('DynamoDB task client creates duplicate titled tasks with unique IDs', asyn
     task: {
       id: '新規タスク-2',
       title: '新規タスク',
-      assignee: '鈴木 太郎',
+      assigneeUserId: 'suzuki@example.com',
       status: 'todo',
       dueDate: '2026/06/21',
       priority: 'medium',
@@ -883,7 +959,7 @@ test('DynamoDB task client creates duplicate titled tasks with unique IDs', asyn
         taskId: '新規タスク-2',
         sortOrder: 20,
         title: '新規タスク',
-        assignee: '鈴木 太郎',
+        assigneeUserId: 'suzuki@example.com',
         status: 'todo',
         dueDate: '2026/06/21',
         priority: 'medium',
@@ -1512,6 +1588,8 @@ function configureFakeProjectClients(
       status: string
       taskId: string
     }>,
+    userLists: [] as Array<{ limit?: number; paginationToken?: string; query?: string }>,
+    userProfiles: [] as string[],
   }
 
   configureApiClientsForTest({
@@ -1529,6 +1607,19 @@ function configureFakeProjectClients(
             },
           ],
         }
+      },
+      async listUsers(input) {
+        calls.userLists.push(input)
+
+        return {
+          users: [createFakeCognitoProfile('sato@example.com')],
+          nextToken: undefined,
+        }
+      },
+      async getUserProfile(userId) {
+        calls.userProfiles.push(userId)
+
+        return createFakeCognitoProfile(userId)
       },
     },
     dashboardSummary: {
@@ -1682,7 +1773,7 @@ function configureFakeProjectClients(
           task: {
             id: 'new-task',
             title: String(input.title),
-            assignee: String(input.assignee),
+            assigneeUserId: String(input.assigneeUserId),
             status: 'todo',
             dueDate: String(input.dueDate),
             priority: 'high',
@@ -1712,6 +1803,25 @@ function configureFakeProjectClients(
   })
 
   return calls
+}
+
+function createFakeCognitoProfile(userId: string) {
+  const id = userId.trim().toLowerCase()
+  const names: Record<string, string> = {
+    'demo@example.com': 'Demo User',
+    'sato@example.com': '佐藤 花子',
+    'suzuki@example.com': '鈴木 太郎',
+    'viewer@example.com': 'Viewer User',
+  }
+
+  return {
+    id,
+    username: id,
+    email: id,
+    name: names[id],
+    enabled: true,
+    status: 'CONFIRMED',
+  }
 }
 
 function createAccessToken(groups: string[] = []) {

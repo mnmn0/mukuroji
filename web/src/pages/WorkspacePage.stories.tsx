@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import type { DashboardSummary } from '../auth/api'
-import type { ProjectMember } from '../projects/api'
+import type { ProjectMember, ProjectUser } from '../projects/api'
 import { projectDirectoryFixtures } from '../projects/fixtures'
 import { referoTaskFixtures } from '../tasks/fixtures'
 import { WorkspaceScreen } from './WorkspacePage'
@@ -36,11 +36,40 @@ const projectMemberFixtures: ProjectMember[] = [
   },
 ]
 
+const projectUserFixtures: ProjectUser[] = [
+  {
+    id: 'demo@example.com',
+    username: 'demo@example.com',
+    email: 'demo@example.com',
+    name: 'Demo User',
+    enabled: true,
+    status: 'CONFIRMED',
+  },
+  {
+    id: 'sato@example.com',
+    username: 'sato@example.com',
+    email: 'sato@example.com',
+    name: '佐藤 花子',
+    enabled: true,
+    status: 'CONFIRMED',
+  },
+  {
+    id: 'viewer@example.com',
+    username: 'viewer@example.com',
+    email: 'viewer@example.com',
+    name: 'Viewer User',
+    enabled: true,
+    status: 'CONFIRMED',
+  },
+]
+
 const defaultArgs = {
   activeTeamId: 'core-team',
   isSystemAdmin: true,
   locale: 'ja',
   projectMembers: projectMemberFixtures,
+  projectUserQuery: '',
+  projectUsers: projectUserFixtures,
   selectedPermissionProjectId: 'refero',
   summary: storySummary,
   tasks: referoTaskFixtures,

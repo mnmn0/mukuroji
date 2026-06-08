@@ -45,7 +45,19 @@ export type ProjectTask = {
    */
   assigneeKey?: MessageKey
   /**
-   * API から取得した literal の担当者名です。
+   * Cognito user を参照する担当者 ID です。
+   */
+  assigneeUserId?: string
+  /**
+   * Cognito から解決した担当者メールアドレスです。
+   */
+  assigneeEmail?: string
+  /**
+   * Cognito から解決した担当者表示名です。
+   */
+  assigneeName?: string
+  /**
+   * API から取得した literal の担当者名です。旧データ互換で利用します。
    */
   assignee?: string
   /**
@@ -71,9 +83,9 @@ export type CreateProjectTaskInput = {
    */
   title: string
   /**
-   * ユーザーが入力した担当者名です。
+   * Cognito user を参照する担当者 ID です。
    */
-  assignee: string
+  assigneeUserId: string
   /**
    * 期限日として保存する文字列です。
    */
@@ -312,8 +324,11 @@ function isProjectTask(value: unknown): value is ProjectTask {
     (!('title' in value) || typeof value.title === 'string') &&
     ('titleKey' in value || 'title' in value) &&
     (!('assigneeKey' in value) || typeof value.assigneeKey === 'string') &&
+    (!('assigneeUserId' in value) || typeof value.assigneeUserId === 'string') &&
+    (!('assigneeEmail' in value) || typeof value.assigneeEmail === 'string') &&
+    (!('assigneeName' in value) || typeof value.assigneeName === 'string') &&
     (!('assignee' in value) || typeof value.assignee === 'string') &&
-    ('assigneeKey' in value || 'assignee' in value) &&
+    ('assigneeUserId' in value || 'assigneeKey' in value || 'assignee' in value) &&
     'status' in value &&
     isTaskStatus(value.status) &&
     'dueDate' in value &&
