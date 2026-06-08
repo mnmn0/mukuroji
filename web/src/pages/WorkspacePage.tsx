@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type DragEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import useSWR from 'swr'
 import {
@@ -293,6 +293,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     apiSWRConfig,
   )
   const [taskMoveErrorMessage, setTaskMoveErrorMessage] = useState<string | undefined>()
+  const taskMoveVersionsRef = useRef(new Map<string, number>())
   const summary = useMemo(() => createDashboardSummary(teams, tasks), [tasks, teams])
   const metadata = workspaceViewMetadata[view]
   const title = t(metadata.titleKey)
@@ -377,25 +378,37 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       return
     }
 
-    const previousTasks = tasks
-    const nextTasks = updateWorkspaceTaskStatus(tasks, task, status)
-
     setTaskMoveErrorMessage(undefined)
-    await mutateProjectTasks(nextTasks, { revalidate: false })
+    const taskKey = createWorkspaceTaskKey(task)
+    const nextMoveVersion = (taskMoveVersionsRef.current.get(taskKey) ?? 0) + 1
+    taskMoveVersionsRef.current.set(taskKey, nextMoveVersion)
+    const nextTasks = updateWorkspaceTaskStatus(tasks, task, status, task.status)
+    await mutateProjectTasks(
+      (currentTasks = tasks) =>
+        updateWorkspaceTaskStatus(currentTasks, task, status, task.status),
+      { revalidate: false },
+    )
 
     try {
       const updatedTask = await updateProjectTaskStatus(task.projectId, task.id, accessToken, status)
-      await mutateProjectTasks(
-        (currentTasks = nextTasks) =>
-          replaceWorkspaceTask(currentTasks, updatedTask),
-        {
-          revalidate: false,
-        },
-      )
-      void mutateProjectTasks().catch(() => undefined)
+      if (taskMoveVersionsRef.current.get(taskKey) === nextMoveVersion) {
+        await mutateProjectTasks(
+          (currentTasks = nextTasks) =>
+            replaceWorkspaceTask(currentTasks, updatedTask),
+          {
+            revalidate: false,
+          },
+        )
+      }
     } catch (error) {
-      await mutateProjectTasks(previousTasks, { revalidate: false })
-      setTaskMoveErrorMessage(t('workspace.myTasks.moveError'))
+      if (taskMoveVersionsRef.current.get(taskKey) === nextMoveVersion) {
+        await mutateProjectTasks(
+          (currentTasks = nextTasks) =>
+            updateWorkspaceTaskStatus(currentTasks, task, task.status),
+          { revalidate: false },
+        )
+        setTaskMoveErrorMessage(t('workspace.myTasks.moveError'))
+      }
       throw error
     }
   }
@@ -1341,11 +1354,13 @@ function updateWorkspaceTaskStatus<TTask extends ProjectTask>(
   tasks: TTask[],
   targetTask: ProjectTask,
   status: TaskStatus,
+  expectedCurrentStatus?: TaskStatus,
 ) {
   const targetTaskKey = createWorkspaceTaskKey(targetTask)
 
   return tasks.map((task): TTask =>
-    createWorkspaceTaskKey(task) === targetTaskKey
+    createWorkspaceTaskKey(task) === targetTaskKey &&
+    (expectedCurrentStatus === undefined || task.status === expectedCurrentStatus)
       ? {
           ...task,
           status,
