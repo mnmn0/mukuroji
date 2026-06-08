@@ -345,6 +345,26 @@ type CreateProjectTaskResponse = {
 }
 
 /**
+ * プロジェクトタスク状態更新 API が受け取る request body です。
+ */
+type UpdateProjectTaskStatusRequestBody = {
+  /**
+   * 更新後のタスク状態です。
+   */
+  status?: unknown
+}
+
+/**
+ * プロジェクトタスク状態更新 API が返す response body です。
+ */
+type UpdateProjectTaskStatusResponse = {
+  /**
+   * 更新したタスク行です。
+   */
+  task: ProjectTaskResponseItem
+}
+
+/**
  * サイドバー上のプロジェクトを識別しやすくする表示色です。
  */
 type ProjectTone = 'blue' | 'purple' | 'green' | 'yellow'
@@ -589,6 +609,15 @@ type ProjectTasksClient = {
     projectId: string,
     input: CreateProjectTaskRequestBody,
   ): Promise<CreateProjectTaskResponse>
+  /**
+   * DynamoDB に保存された指定 task ID の状態を更新します。
+   */
+  updateProjectTaskStatus(
+    directoryId: string,
+    projectId: string,
+    taskId: string,
+    input: UpdateProjectTaskStatusRequestBody,
+  ): Promise<UpdateProjectTaskStatusResponse>
 }
 
 /**
@@ -986,6 +1015,51 @@ app.post('/api/projects/:projectId/tasks', async (c) => {
   }
 })
 
+/**
+ * DynamoDB に保存されたプロジェクト別タスクの状態を更新する endpoint です。
+ */
+app.patch('/api/projects/:projectId/tasks/:taskId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const projectId = c.req.param('projectId')
+  const taskId = c.req.param('taskId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!projectId) {
+    return c.json({ message: 'Project ID is required.' }, 400)
+  }
+
+  if (!taskId) {
+    return c.json({ message: 'Task ID is required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
+
+    if (!(await projectDirectory.hasProjectAccess(principal.directoryId, projectId))) {
+      throw new ProjectDataError(
+        403,
+        'ProjectAccessDenied',
+        `User "${principal.userKey}" cannot access project "${projectId}".`,
+      )
+    }
+
+    const body = await readJson<UpdateProjectTaskStatusRequestBody>(c.req)
+
+    return c.json(
+      await projectTasks.updateProjectTaskStatus(principal.directoryId, projectId, taskId, body ?? {}),
+    )
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
 async function readJson<T>(request: { json: () => Promise<T> }) {
   try {
     return await request.json()
@@ -1052,6 +1126,10 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
 
   if (error.code === 'ProjectNotFound') {
     return c.json({ message: 'Project was not found.' }, 404)
+  }
+
+  if (error.code === 'ProjectTaskNotFound') {
+    return c.json({ message: 'Task was not found.' }, 404)
   }
 
   if (error.code === 'ConditionalCheckFailedException') {
@@ -1418,6 +1496,54 @@ export class DynamoDbProjectTasksClient {
         task: toProjectTaskResponseItem(item),
       } satisfies CreateProjectTaskResponse
     } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * DynamoDB に保存されたプロジェクト別タスクの状態を更新します。
+   */
+  async updateProjectTaskStatus(
+    directoryId: string,
+    projectId: string,
+    taskId: string,
+    input: UpdateProjectTaskStatusRequestBody,
+  ) {
+    const status = readRequiredTaskStatus(input.status)
+    const directoryProjectId = createDirectoryProjectId(directoryId, projectId)
+
+    try {
+      const response = await this.documentClient.send(
+        new UpdateCommand({
+          TableName: this.tableName,
+          Key: {
+            directoryProjectId,
+            taskId,
+          },
+          UpdateExpression: 'SET #status = :status',
+          ExpressionAttributeNames: {
+            '#status': 'status',
+          },
+          ExpressionAttributeValues: {
+            ':status': status,
+          },
+          ConditionExpression: 'attribute_exists(directoryProjectId) AND attribute_exists(taskId)',
+          ReturnValues: 'ALL_NEW',
+        }),
+      )
+
+      return {
+        task: toProjectTaskResponseItem(response.Attributes),
+      } satisfies UpdateProjectTaskStatusResponse
+    } catch (error) {
+      if (isAwsNamedError(error, 'ConditionalCheckFailedException')) {
+        throw new ProjectDataError(404, 'ProjectTaskNotFound', 'Task was not found.')
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -2315,6 +2441,14 @@ function readTaskStatus(value: unknown): ProjectTaskStatus {
     return 'todo'
   }
 
+  if (!isProjectTaskStatus(value)) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Task status is invalid.')
+  }
+
+  return value
+}
+
+function readRequiredTaskStatus(value: unknown): ProjectTaskStatus {
   if (!isProjectTaskStatus(value)) {
     throw new ProjectDataError(400, 'InvalidProjectWrite', 'Task status is invalid.')
   }

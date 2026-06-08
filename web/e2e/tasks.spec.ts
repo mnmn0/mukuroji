@@ -44,6 +44,10 @@ type MockRequestCounts = {
    * タスク作成 API の request 数です。
    */
   taskCreates: number
+  /**
+   * タスク状態更新 API の request 数です。
+   */
+  taskStatusUpdates: number
 }
 
 const mockRequestCountsByPage = new WeakMap<Page, MockRequestCounts>()
@@ -52,7 +56,14 @@ const mockRequestCountsByPage = new WeakMap<Page, MockRequestCounts>()
  * 認証済みタスク画面を開くため、localStorage に session を注入し、
  * `/api/auth/me` と `/api/projects/refero/tasks` を stub します。
  */
-async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFixtures) {
+async function mockAuthenticatedTaskPage(
+  page: Page,
+  taskResponse = referoTaskFixtures,
+  onTaskStatusUpdate?: (
+    taskId: string,
+    status: ProjectTask['status'],
+  ) => Promise<'fail' | undefined> | 'fail' | undefined,
+) {
   const requestCounts: MockRequestCounts = {
     projectDirectory: 0,
     projectTasks: {},
@@ -61,6 +72,7 @@ async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFi
     teamArchives: 0,
     projectArchives: 0,
     taskCreates: 0,
+    taskStatusUpdates: 0,
   }
   const projectDirectory: ProjectDirectoryTeam[] = projectDirectoryFixtures.map((team) => ({
     ...team,
@@ -248,6 +260,50 @@ async function mockAuthenticatedTaskPage(page: Page, taskResponse = referoTaskFi
     })
   })
 
+  await page.route(/.*\/api\/projects\/refero\/tasks\/[^/]+$/, async (route) => {
+    if (route.request().method() !== 'PATCH') {
+      await route.fallback()
+      return
+    }
+
+    requestCounts.taskStatusUpdates += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    const taskId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[5] ?? '')
+    const body = route.request().postDataJSON() as { status?: ProjectTask['status'] }
+    const status = body.status ?? 'todo'
+    const task = taskResponsesByProject.refero.find((candidate) => candidate.id === taskId)
+    const updateResult = await onTaskStatusUpdate?.(taskId, status)
+
+    if (updateResult === 'fail') {
+      await route.fulfill({
+        status: 500,
+        json: {
+          message: 'tasks.error.loading',
+        },
+      })
+      return
+    }
+
+    if (!task) {
+      await route.fulfill({
+        status: 404,
+        json: {
+          message: 'Task was not found.',
+        },
+      })
+      return
+    }
+
+    task.status = status
+
+    await route.fulfill({
+      json: {
+        task,
+      },
+    })
+  })
+
   await page.route('**/api/projects/product-roadmap/tasks', async (route) => {
     recordProjectTaskRequest(requestCounts, 'product-roadmap')
 
@@ -413,6 +469,54 @@ test.describe('authenticated task page', () => {
     expect(requestCounts.projectDirectory).toBe(1)
   })
 
+  test('サイドバーからマイタスクへ移動するとタスクをカンバンで表示する', async ({ page }) => {
+    await page.goto('/dashboard')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('button', { name: 'マイタスク', exact: true }).click()
+
+    await expect(page).toHaveURL('/my-tasks')
+    await expect(page.getByTestId('my-tasks-kanban')).toBeVisible()
+    await expect(page.getByTestId('my-tasks-column-todo')).toContainText('未着手')
+    await expect(page.getByTestId('my-tasks-column-in-progress')).toContainText('進行中')
+    await expect(page.getByTestId('my-tasks-column-review')).toContainText('レビュー中')
+    await expect(page.getByTestId('my-tasks-column-done')).toContainText('完了')
+    await expect(
+      page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
+    ).toBeVisible()
+    await expect(
+      page.getByTestId('my-tasks-column-todo').getByTestId('my-tasks-card-refero-seo-research'),
+    ).toBeVisible()
+    await expect(
+      page.getByTestId('my-tasks-column-review').getByTestId('my-tasks-card-refero-brand-guideline'),
+    ).toBeVisible()
+    await expect(
+      page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-competitor-report'),
+    ).toBeVisible()
+
+    await page
+      .getByTestId('my-tasks-card-refero-brand-guideline-status-select')
+      .selectOption('todo')
+    await expect(
+      page.getByTestId('my-tasks-column-todo').getByTestId('my-tasks-card-refero-brand-guideline'),
+    ).toBeVisible()
+    await expect(
+      page.getByTestId('my-tasks-column-review').getByTestId('my-tasks-card-refero-brand-guideline'),
+    ).toHaveCount(0)
+
+    await page
+      .getByTestId('my-tasks-card-refero-wireframe')
+      .dragTo(page.getByTestId('my-tasks-column-done'))
+
+    await expect(
+      page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-wireframe'),
+    ).toBeVisible()
+    await expect(
+      page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
+    ).toHaveCount(0)
+    await expect.poll(() => requestCounts.taskStatusUpdates).toBe(2)
+  })
+
   test('ダッシュボードからチームとプロジェクトを新規登録できる', async ({ page }) => {
     await page.goto('/dashboard')
     const requestCounts = getMockRequestCounts(page)
@@ -543,6 +647,98 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('tasks-empty')).toBeVisible()
     await expect(page.getByTestId('tasks-count')).toContainText('0')
   })
+})
+
+test('マイタスクの片方の移動が失敗しても別タスクの成功済み移動を維持する', async ({ page }) => {
+  let markWireframeUpdateStarted!: () => void
+  let releaseWireframeFailure!: () => void
+  const wireframeUpdateStarted = new Promise<void>((resolve) => {
+    markWireframeUpdateStarted = resolve
+  })
+  const wireframeFailureReleased = new Promise<void>((resolve) => {
+    releaseWireframeFailure = resolve
+  })
+
+  await mockAuthenticatedTaskPage(page, referoTaskFixtures, async (taskId) => {
+    if (taskId !== 'wireframe') {
+      return undefined
+    }
+
+    markWireframeUpdateStarted()
+    await wireframeFailureReleased
+    return 'fail'
+  })
+
+  await page.goto('/my-tasks')
+
+  await page
+    .getByTestId('my-tasks-card-refero-wireframe')
+    .dragTo(page.getByTestId('my-tasks-column-done'))
+  await wireframeUpdateStarted
+
+  await page
+    .getByTestId('my-tasks-card-refero-seo-research')
+    .dragTo(page.getByTestId('my-tasks-column-done'))
+  await expect(
+    page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-seo-research'),
+  ).toBeVisible()
+
+  releaseWireframeFailure()
+
+  await expect(page.getByTestId('my-tasks-move-error')).toBeVisible()
+  await expect(
+    page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
+  ).toBeVisible()
+  await expect(
+    page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-seo-research'),
+  ).toBeVisible()
+  await expect(
+    page.getByTestId('my-tasks-column-todo').getByTestId('my-tasks-card-refero-seo-research'),
+  ).toHaveCount(0)
+  expect(getMockRequestCounts(page).taskStatusUpdates).toBe(2)
+})
+
+test('マイタスクでは同一タスクの移動中に追加移動を開始できない', async ({ page }) => {
+  let markWireframeDoneUpdateStarted!: () => void
+  let releaseWireframeDoneUpdate!: () => void
+  const wireframeDoneUpdateStarted = new Promise<void>((resolve) => {
+    markWireframeDoneUpdateStarted = resolve
+  })
+  const wireframeDoneUpdateReleased = new Promise<void>((resolve) => {
+    releaseWireframeDoneUpdate = resolve
+  })
+
+  await mockAuthenticatedTaskPage(page, referoTaskFixtures, async (taskId, status) => {
+    if (taskId !== 'wireframe' || status !== 'done') {
+      return undefined
+    }
+
+    markWireframeDoneUpdateStarted()
+    await wireframeDoneUpdateReleased
+    return undefined
+  })
+
+  await page.goto('/my-tasks')
+
+  await page
+    .getByTestId('my-tasks-card-refero-wireframe')
+    .dragTo(page.getByTestId('my-tasks-column-done'))
+  await wireframeDoneUpdateStarted
+  await expect(
+    page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-wireframe'),
+  ).toBeVisible()
+  await expect(
+    page.getByTestId('my-tasks-card-refero-wireframe-status-select'),
+  ).toBeDisabled()
+  expect(getMockRequestCounts(page).taskStatusUpdates).toBe(1)
+
+  releaseWireframeDoneUpdate()
+
+  await expect(
+    page.getByTestId('my-tasks-card-refero-wireframe-status-select'),
+  ).toBeEnabled()
+  expect(getMockRequestCounts(page).taskStatusUpdates).toBe(1)
+  expect(getMockRequestCounts(page).projectTasks.refero).toBe(1)
 })
 
 test('未認証の場合はログイン画面へ戻す', async ({ page }) => {

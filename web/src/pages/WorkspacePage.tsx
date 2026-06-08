@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import useSWR from 'swr'
 import {
@@ -40,6 +40,7 @@ import {
   type ProjectTask,
   type TaskPriority,
   type TaskStatus,
+  updateProjectTaskStatus,
 } from '../tasks/api'
 
 /**
@@ -139,6 +140,14 @@ type WorkspaceScreenProps = {
    * プロジェクトアーカイブ時の callback です。
    */
   onArchiveProject?: (teamId: string, projectId: string) => Promise<void>
+  /**
+   * マイタスクの状態列を移動したときの callback です。
+   */
+  onMoveTaskStatus?: (task: ProjectTask, status: TaskStatus) => Promise<void>
+  /**
+   * マイタスク状態更新に失敗したときの表示メッセージです。
+   */
+  taskMoveErrorMessage?: string
 }
 
 /**
@@ -169,6 +178,7 @@ type WorkspaceViewMetadata = {
 
 const emptyProjectDirectory: ProjectDirectoryTeam[] = []
 const emptyProjectTasks: ProjectTask[] = []
+const myTaskKanbanStatuses = ['todo', 'in-progress', 'review', 'done'] as const satisfies readonly TaskStatus[]
 
 const apiSWRConfig = {
   dedupingInterval: 10_000,
@@ -272,12 +282,18 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     accessToken && user && !currentUserError && projectIds.length > 0
       ? (['workspace-project-tasks', accessToken, projectIds] as const)
       : null
-  const { data: tasks = emptyProjectTasks, isLoading: isProjectTasksLoading } = useSWR(
+  const {
+    data: tasks = emptyProjectTasks,
+    isLoading: isProjectTasksLoading,
+    mutate: mutateProjectTasks,
+  } = useSWR(
     projectTasksKey,
     ([, currentAccessToken, currentProjectIds]) =>
       loadProjectTasks(currentProjectIds, currentAccessToken),
     apiSWRConfig,
   )
+  const [taskMoveErrorMessage, setTaskMoveErrorMessage] = useState<string | undefined>()
+  const pendingTaskMoveKeysRef = useRef(new Set<string>())
   const summary = useMemo(() => createDashboardSummary(teams, tasks), [tasks, teams])
   const metadata = workspaceViewMetadata[view]
   const title = t(metadata.titleKey)
@@ -357,6 +373,47 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     await mutateProjectDirectory()
   }
 
+  const handleMoveTaskStatus = async (task: ProjectTask, status: TaskStatus) => {
+    if (!accessToken || !task.projectId || task.status === status) {
+      return
+    }
+
+    setTaskMoveErrorMessage(undefined)
+    const taskKey = createWorkspaceTaskKey(task)
+    if (pendingTaskMoveKeysRef.current.has(taskKey)) {
+      return
+    }
+
+    pendingTaskMoveKeysRef.current.add(taskKey)
+    const nextTasks = updateWorkspaceTaskStatus(tasks, task, status, task.status)
+
+    try {
+      await mutateProjectTasks(
+        (currentTasks = tasks) =>
+          updateWorkspaceTaskStatus(currentTasks, task, status, task.status),
+        { revalidate: false },
+      )
+      const updatedTask = await updateProjectTaskStatus(task.projectId, task.id, accessToken, status)
+      await mutateProjectTasks(
+        (currentTasks = nextTasks) =>
+          replaceWorkspaceTask(currentTasks, updatedTask),
+        {
+          revalidate: false,
+        },
+      )
+    } catch (error) {
+      await mutateProjectTasks(
+        (currentTasks = nextTasks) =>
+          updateWorkspaceTaskStatus(currentTasks, task, task.status),
+        { revalidate: false },
+      )
+      setTaskMoveErrorMessage(t('workspace.myTasks.moveError'))
+      throw error
+    } finally {
+      pendingTaskMoveKeysRef.current.delete(taskKey)
+    }
+  }
+
   return (
     <WorkspaceScreen
       activeTeamId={params.teamId}
@@ -374,7 +431,9 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       onCreateTeam={handleCreateTeam}
       onArchiveProject={handleArchiveProject}
       onArchiveTeam={handleArchiveTeam}
+      onMoveTaskStatus={handleMoveTaskStatus}
       summary={summary}
+      taskMoveErrorMessage={taskMoveErrorMessage}
       tasks={tasks}
       teams={teams}
       userInitial={userInitial}
@@ -405,6 +464,8 @@ export function WorkspaceScreen({
   onCreateTeam,
   onArchiveProject,
   onArchiveTeam,
+  onMoveTaskStatus,
+  taskMoveErrorMessage,
 }: WorkspaceScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
@@ -516,8 +577,10 @@ export function WorkspaceScreen({
             activeTeam={activeTeam}
             summary={summary}
             t={t}
+            taskMoveErrorMessage={taskMoveErrorMessage}
             tasks={tasks}
             teams={teams}
+            onMoveTaskStatus={onMoveTaskStatus}
             view={view}
           />
         )}
@@ -530,21 +593,32 @@ function WorkspaceBody({
   activeTeam,
   summary,
   t,
+  taskMoveErrorMessage,
   tasks,
   teams,
+  onMoveTaskStatus,
   view,
 }: {
   activeTeam?: ProjectDirectoryTeam
   summary: DashboardSummary
   t: (key: MessageKey) => string
+  taskMoveErrorMessage?: string
   tasks: ProjectTask[]
   teams: ProjectDirectoryTeam[]
+  onMoveTaskStatus?: (task: ProjectTask, status: TaskStatus) => Promise<void>
   view: WorkspaceView
 }) {
   return (
     <div className="px-[clamp(22px,3vw,40px)] py-7">
       {view === 'home' ? <HomeView summary={summary} t={t} tasks={tasks} teams={teams} /> : null}
-      {view === 'my-tasks' ? <MyTasksView t={t} tasks={tasks} /> : null}
+      {view === 'my-tasks' ? (
+        <MyTasksView
+          t={t}
+          taskMoveErrorMessage={taskMoveErrorMessage}
+          tasks={tasks}
+          onMoveTaskStatus={onMoveTaskStatus}
+        />
+      ) : null}
       {view === 'inbox' ? <InboxView t={t} tasks={tasks} /> : null}
       {view === 'dashboard' ? (
         <DashboardWorkspaceView
@@ -622,43 +696,158 @@ function HomeView({
   )
 }
 
-function MyTasksView({ t, tasks }: { t: (key: MessageKey) => string; tasks: ProjectTask[] }) {
-  const groupedTasks = [
-    {
-      id: 'today',
-      titleKey: 'workspace.myTasks.group.today',
-      tasks: tasks.filter((task) => task.priority === 'high' || task.status === 'review'),
-    },
-    {
-      id: 'upcoming',
-      titleKey: 'workspace.myTasks.group.upcoming',
-      tasks: tasks.filter((task) => task.priority !== 'high' && task.status !== 'done'),
-    },
-    {
-      id: 'done',
-      titleKey: 'workspace.myTasks.group.done',
-      tasks: tasks.filter((task) => task.status === 'done'),
-    },
-  ] as const
+function MyTasksView({
+  t,
+  taskMoveErrorMessage,
+  tasks,
+  onMoveTaskStatus,
+}: {
+  t: (key: MessageKey) => string
+  taskMoveErrorMessage?: string
+  tasks: ProjectTask[]
+  onMoveTaskStatus?: (task: ProjectTask, status: TaskStatus) => Promise<void>
+}) {
+  const [draggedTaskKey, setDraggedTaskKey] = useState<string | undefined>()
+  const [dropTargetStatus, setDropTargetStatus] = useState<TaskStatus | undefined>()
+  const [movingTaskKeys, setMovingTaskKeys] = useState<ReadonlySet<string>>(() => new Set())
+  const canMoveTasks = Boolean(onMoveTaskStatus)
+
+  const moveTaskToStatus = (task: ProjectTask, status: TaskStatus) => {
+    if (!onMoveTaskStatus || task.status === status) {
+      return
+    }
+
+    const taskKey = createWorkspaceTaskKey(task)
+
+    setDraggedTaskKey(undefined)
+    setDropTargetStatus(undefined)
+    setMovingTaskKeys((currentTaskKeys) => new Set(currentTaskKeys).add(taskKey))
+    void onMoveTaskStatus(task, status)
+      .catch(() => undefined)
+      .finally(() => {
+        setMovingTaskKeys((currentTaskKeys) => {
+          const nextTaskKeys = new Set(currentTaskKeys)
+
+          nextTaskKeys.delete(taskKey)
+          return nextTaskKeys
+        })
+      })
+  }
+
+  const handleDragStart = (event: DragEvent<HTMLElement>, task: ProjectTask) => {
+    if (!canMoveTasks) {
+      return
+    }
+
+    const taskKey = createWorkspaceTaskKey(task)
+
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('application/x-mukuroji-task-key', taskKey)
+    event.dataTransfer.setData('text/plain', taskKey)
+    setDraggedTaskKey(taskKey)
+  }
+
+  const handleDragEnd = () => {
+    setDraggedTaskKey(undefined)
+    setDropTargetStatus(undefined)
+  }
+
+  const handleDragOver = (event: DragEvent<HTMLElement>, status: TaskStatus) => {
+    if (!canMoveTasks || !draggedTaskKey) {
+      return
+    }
+
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    setDropTargetStatus(status)
+  }
+
+  const handleDrop = (event: DragEvent<HTMLElement>, status: TaskStatus) => {
+    event.preventDefault()
+
+    if (!onMoveTaskStatus) {
+      return
+    }
+
+    const taskKey =
+      event.dataTransfer.getData('application/x-mukuroji-task-key') ||
+      event.dataTransfer.getData('text/plain') ||
+      draggedTaskKey
+    const task = taskKey ? findWorkspaceTaskByKey(tasks, taskKey) : undefined
+
+    if (!task) {
+      return
+    }
+
+    moveTaskToStatus(task, status)
+  }
 
   return (
-    <div className="grid grid-cols-3 gap-5 max-[1080px]:grid-cols-1">
-      {groupedTasks.map((group) => (
-        <section
-          className="min-h-[360px] rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]"
-          key={group.id}
+    <div className="grid gap-4">
+      {taskMoveErrorMessage ? (
+        <p
+          className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-black text-red-700"
+          data-testid="my-tasks-move-error"
+          role="alert"
         >
-          <SectionHeader
-            title={t(group.titleKey)}
-            meta={t('tasks.count').replace('{count}', String(group.tasks.length))}
-          />
-          <div className="grid gap-3 px-5 pb-5">
-            {group.tasks.map((task) => (
-              <CompactTaskCard key={createWorkspaceTaskKey(task)} t={t} task={task} />
-            ))}
-          </div>
-        </section>
-      ))}
+          {taskMoveErrorMessage}
+        </p>
+      ) : null}
+      <div
+        aria-label={t('workspace.myTasks.title')}
+        className="grid grid-cols-4 gap-4 max-[1240px]:overflow-x-auto max-[1240px]:pb-2 max-[900px]:grid-cols-1 max-[900px]:overflow-visible"
+        data-testid="my-tasks-kanban"
+      >
+        {myTaskKanbanStatuses.map((status) => {
+          const columnTasks = tasks.filter((task) => task.status === status)
+          const isDropTarget = dropTargetStatus === status
+
+          return (
+            <section
+              aria-label={t(`tasks.status.${status}`)}
+              className={`min-h-[420px] min-w-[260px] rounded-lg border bg-slate-50 shadow-[0_18px_42px_rgba(30,52,88,0.05)] transition ${
+                isDropTarget ? 'border-blue-400 bg-blue-50 ring-2 ring-blue-200' : 'border-slate-200'
+              }`}
+              data-testid={`my-tasks-column-${status}`}
+              key={status}
+              onDragLeave={() => setDropTargetStatus(undefined)}
+              onDragOver={(event) => handleDragOver(event, status)}
+              onDrop={(event) => handleDrop(event, status)}
+            >
+              <SectionHeader
+                title={t(`tasks.status.${status}`)}
+                meta={t('tasks.board.columnCount').replace('{count}', String(columnTasks.length))}
+              />
+              <div className="grid gap-3 px-4 pb-4">
+                {columnTasks.map((task) => {
+                  const taskKey = createWorkspaceTaskKey(task)
+                  const isMoving = movingTaskKeys.has(taskKey)
+
+                  return (
+                    <CompactTaskCard
+                      draggable={canMoveTasks && !isMoving}
+                      isDragging={draggedTaskKey === taskKey}
+                      isMoving={isMoving}
+                      key={taskKey}
+                      t={t}
+                      task={task}
+                      testId={`my-tasks-card-${createWorkspaceTaskTestId(task)}`}
+                      onDragEnd={handleDragEnd}
+                      onDragStart={(event) => handleDragStart(event, task)}
+                      onStatusChange={(nextStatus) => moveTaskToStatus(task, nextStatus)}
+                    />
+                  )
+                })}
+                {columnTasks.length === 0 ? (
+                  <p className="rounded-lg border border-dashed border-slate-300 bg-white px-4 py-8 text-center text-sm font-bold text-[#526381]">
+                    {t('tasks.board.empty')}
+                  </p>
+                ) : null}
+              </div>
+            </section>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -1045,14 +1234,71 @@ function TaskListRow({ t, task }: { t: (key: MessageKey) => string; task: Projec
   )
 }
 
-function CompactTaskCard({ t, task }: { t: (key: MessageKey) => string; task: ProjectTask }) {
+function CompactTaskCard({
+  draggable = false,
+  isDragging = false,
+  isMoving = false,
+  onDragEnd,
+  onDragStart,
+  onStatusChange,
+  t,
+  task,
+  testId,
+}: {
+  draggable?: boolean
+  isDragging?: boolean
+  isMoving?: boolean
+  onDragEnd?: () => void
+  onDragStart?: (event: DragEvent<HTMLElement>) => void
+  onStatusChange?: (status: TaskStatus) => void
+  t: (key: MessageKey) => string
+  task: ProjectTask
+  testId?: string
+}) {
+  const statusSelectLabel = t('workspace.myTasks.moveStatusLabel').replace(
+    '{title}',
+    resolveTaskTitle(task, t),
+  )
+
   return (
-    <article className="rounded-lg border border-slate-200 bg-[#fbfdff] p-4">
+    <article
+      aria-grabbed={isDragging || undefined}
+      className={`rounded-lg border border-slate-200 bg-white p-4 transition ${
+        draggable ? 'cursor-grab hover:border-blue-300 hover:shadow-[0_14px_30px_rgba(30,52,88,0.08)] active:cursor-grabbing' : ''
+      } ${isDragging ? 'opacity-50 ring-2 ring-blue-300' : ''} ${isMoving ? 'opacity-70' : ''}`}
+      data-testid={testId}
+      draggable={draggable}
+      onDragEnd={onDragEnd}
+      onDragStart={onDragStart}
+    >
       <p className="text-sm font-black leading-6 text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
+      <p className="mt-2 text-xs font-black uppercase tracking-normal text-[#526381]">{task.dueDate}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <StatusPill status={task.status} t={t} />
         <PriorityPill priority={task.priority} t={t} />
       </div>
+      {onStatusChange ? (
+        <select
+          aria-label={statusSelectLabel}
+          className="mt-3 h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs font-black text-[#263550] outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+          data-testid={testId ? `${testId}-status-select` : undefined}
+          disabled={isMoving}
+          value={task.status}
+          onChange={(event) => {
+            const nextStatus = readMyTaskKanbanStatus(event.target.value)
+
+            if (nextStatus) {
+              onStatusChange(nextStatus)
+            }
+          }}
+        >
+          {myTaskKanbanStatuses.map((status) => (
+            <option key={status} value={status}>
+              {t(`tasks.status.${status}`)}
+            </option>
+          ))}
+        </select>
+      ) : null}
     </article>
   )
 }
@@ -1121,7 +1367,10 @@ function findActiveTeam(teams: ProjectDirectoryTeam[], activeTeamId?: string) {
   return teams[0]
 }
 
-async function loadProjectTasks(projectIds: readonly string[], accessToken: string) {
+async function loadProjectTasks(
+  projectIds: readonly string[],
+  accessToken: string,
+): Promise<ProjectTask[]> {
   const taskGroups = await Promise.all(
     projectIds.map((projectId) => getProjectTasks(projectId, accessToken)),
   )
@@ -1137,6 +1386,53 @@ function uniqueProjectIds(teams: ProjectDirectoryTeam[]) {
 
 function createWorkspaceTaskKey(task: ProjectTask) {
   return task.projectId ? `${task.projectId}:${task.id}` : task.id
+}
+
+function createWorkspaceTaskTestId(task: ProjectTask) {
+  return createWorkspaceTaskKey(task).replaceAll(/[^a-z0-9-]+/gi, '-').toLowerCase()
+}
+
+function readMyTaskKanbanStatus(value: string) {
+  return myTaskKanbanStatuses.find((status) => status === value)
+}
+
+function findWorkspaceTaskByKey(tasks: ProjectTask[], taskKey: string) {
+  return tasks.find((task) => createWorkspaceTaskKey(task) === taskKey)
+}
+
+function updateWorkspaceTaskStatus<TTask extends ProjectTask>(
+  tasks: TTask[],
+  targetTask: ProjectTask,
+  status: TaskStatus,
+  expectedCurrentStatus?: TaskStatus,
+) {
+  const targetTaskKey = createWorkspaceTaskKey(targetTask)
+
+  return tasks.map((task): TTask =>
+    createWorkspaceTaskKey(task) === targetTaskKey &&
+    (expectedCurrentStatus === undefined || task.status === expectedCurrentStatus)
+      ? {
+          ...task,
+          status,
+        }
+      : task,
+  )
+}
+
+function replaceWorkspaceTask<TTask extends ProjectTask>(
+  tasks: TTask[],
+  updatedTask: ProjectTask,
+) {
+  const updatedTaskKey = createWorkspaceTaskKey(updatedTask)
+
+  return tasks.map((task): TTask =>
+    createWorkspaceTaskKey(task) === updatedTaskKey
+      ? {
+          ...task,
+          ...updatedTask,
+        }
+      : task,
+  )
 }
 
 function filterTasksByProjectIds(tasks: ProjectTask[], projectIds: readonly string[]) {
