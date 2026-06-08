@@ -131,6 +131,14 @@ type TaskScreenProps = {
    */
   assigneeOptions?: ProjectMember[]
   /**
+   * タスク担当者候補を取得中かどうかです。
+   */
+  isAssigneeOptionsLoading?: boolean
+  /**
+   * タスク担当者候補の取得失敗時に表示するエラーメッセージです。
+   */
+  assigneeErrorMessage?: string
+  /**
    * タスク一覧の取得失敗時に表示するエラーメッセージです。
    */
   taskErrorMessage?: string
@@ -221,16 +229,34 @@ export function TaskPage() {
   const projectMembersKey = accessToken && user && !currentUserError
     ? (['project-members', accessToken, projectId] as const)
     : null
-  const { data: projectMembers = emptyProjectMembers } = useSWR(
+  const {
+    data: projectMembersData,
+    error: projectMembersError,
+    isLoading: isProjectMembersLoading,
+  } = useSWR(
     projectMembersKey,
     ([, accessToken, currentProjectId]) =>
       getProjectMembers(accessToken, currentProjectId),
     apiSWRConfig,
   )
+  const projectMembers = projectMembersData ?? emptyProjectMembers
   const activeTeam = findTeamForProject(teams, projectId, selectedTeamId)
   const activeProject = findProjectInTeams(teams, projectId, activeTeam?.id ?? selectedTeamId)
   const projectName =
     activeProject?.name ?? (projectId === 'refero' ? t('tasks.project.refero') : projectId)
+  const projectMembersErrorMessage = useMemo(() => {
+    if (!projectMembersError) {
+      return undefined
+    }
+
+    const message = projectMembersError instanceof Error
+      ? projectMembersError.message
+      : 'tasks.create.assigneeLoadError'
+
+    return message === 'tasks.create.assigneeLoadError' || message === 'projects.error.loading'
+      ? t('tasks.create.assigneeLoadError')
+      : message
+  }, [projectMembersError, t])
   const taskErrorMessage = useMemo(() => {
     if (!taskError) {
       return undefined
@@ -353,7 +379,9 @@ export function TaskPage() {
       onArchiveProject={handleArchiveProject}
       onArchiveTeam={handleArchiveTeam}
       onCreateTask={handleCreateTask}
+      assigneeErrorMessage={projectMembersErrorMessage}
       assigneeOptions={projectMembers}
+      isAssigneeOptionsLoading={Boolean(projectMembersKey && isProjectMembersLoading)}
       projectId={projectId}
       projectName={projectName}
       taskErrorMessage={taskErrorMessage}
@@ -376,7 +404,9 @@ export function TaskScreen({
   projectName,
   teamName,
   activeProjectTeamId,
+  assigneeErrorMessage,
   assigneeOptions = [],
+  isAssigneeOptionsLoading = false,
   isLoading = false,
   tasks = [],
   taskErrorMessage,
@@ -511,7 +541,9 @@ export function TaskScreen({
           <>
             {isCreateTaskOpen ? (
               <CreateTaskPanel
+                assigneeErrorMessage={assigneeErrorMessage}
                 assigneeOptions={assigneeOptions}
+                isAssigneeOptionsLoading={isAssigneeOptionsLoading}
                 errorMessage={createTaskError}
                 isSubmitting={isCreatingTask}
                 onCancel={() => {
@@ -848,15 +880,19 @@ function TaskWorkspace({
 }
 
 function CreateTaskPanel({
+  assigneeErrorMessage,
   assigneeOptions,
   errorMessage,
+  isAssigneeOptionsLoading,
   isSubmitting,
   onCancel,
   onSubmit,
   t,
 }: {
+  assigneeErrorMessage?: string
   assigneeOptions: ProjectMember[]
   errorMessage?: string
+  isAssigneeOptionsLoading: boolean
   isSubmitting: boolean
   onCancel: () => void
   onSubmit: (input: CreateProjectTaskInput) => Promise<void>
@@ -877,6 +913,11 @@ function CreateTaskPanel({
           const dueDate = String(formData.get('dueDate') ?? today).replaceAll('-', '/')
           const status = resolveTaskStatus(formData.get('status'))
           const priority = resolveTaskPriority(formData.get('priority'))
+
+          if (!assigneeUserId) {
+            event.currentTarget.reportValidity()
+            return
+          }
 
           void onSubmit({
             title,
@@ -901,9 +942,14 @@ function CreateTaskPanel({
             {t('tasks.create.assignee')}
             <select
               className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              defaultValue=""
+              disabled={isSubmitting || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage)}
               name="assigneeUserId"
               required
             >
+              <option disabled hidden value="">
+                {t('tasks.create.assigneeSelectPlaceholder')}
+              </option>
               {assigneeOptions.map((member) => (
                 <option key={member.id} value={member.id}>
                   {formatProjectMemberOption(member)}
@@ -952,7 +998,12 @@ function CreateTaskPanel({
           <div className="flex items-end gap-2">
             <button
               className="h-11 rounded-lg bg-blue-600 px-4 text-sm font-black text-white shadow-[0_14px_30px_rgba(37,99,235,0.22)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400"
-              disabled={isSubmitting || assigneeOptions.length === 0}
+              disabled={
+                isSubmitting ||
+                isAssigneeOptionsLoading ||
+                Boolean(assigneeErrorMessage) ||
+                assigneeOptions.length === 0
+              }
               type="submit"
             >
               {isSubmitting ? t('tasks.create.saving') : t('tasks.create.submit')}
@@ -970,7 +1021,13 @@ function CreateTaskPanel({
         {errorMessage ? (
           <p className="text-sm font-bold text-red-600">{errorMessage}</p>
         ) : null}
-        {assigneeOptions.length === 0 ? (
+        {isAssigneeOptionsLoading ? (
+          <p className="text-sm font-bold text-[#526381]">{t('tasks.create.assigneeLoading')}</p>
+        ) : null}
+        {assigneeErrorMessage ? (
+          <p className="text-sm font-bold text-red-600">{assigneeErrorMessage}</p>
+        ) : null}
+        {!isAssigneeOptionsLoading && !assigneeErrorMessage && assigneeOptions.length === 0 ? (
           <p className="text-sm font-bold text-[#526381]">{t('tasks.create.assigneeEmpty')}</p>
         ) : null}
       </form>

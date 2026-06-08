@@ -26,9 +26,15 @@ if ! aws_local cognito-idp describe-user-pool --user-pool-id "$POOL_ID" >/dev/nu
     --pool-name "$POOL_NAME" \
     --user-pool-tags "floci:override-id=$POOL_ID" \
     --username-attributes email \
+    --schema Name=directory_id,AttributeDataType=String,Mutable=true,Required=false \
     --policies 'PasswordPolicy={MinimumLength=8,RequireUppercase=true,RequireLowercase=true,RequireNumbers=true,RequireSymbols=true}' \
     >/dev/null
 fi
+
+aws_local cognito-idp add-custom-attributes \
+  --user-pool-id "$POOL_ID" \
+  --custom-attributes Name=directory_id,AttributeDataType=String,Mutable=true \
+  >/dev/null 2>&1 || true
 
 CLIENT_ID="$(aws_local cognito-idp list-user-pool-clients \
   --user-pool-id "$POOL_ID" \
@@ -58,13 +64,13 @@ ensure_cognito_user() {
       --username "$username" \
       --temporary-password "$TEST_PASSWORD" \
       --message-action SUPPRESS \
-      --user-attributes Name=email,Value="$username" Name=email_verified,Value=true Name=name,Value="$display_name" \
+      --user-attributes Name=email,Value="$username" Name=email_verified,Value=true Name=name,Value="$display_name" Name=custom:directory_id,Value="$PROJECT_DIRECTORY_ID" \
       >/dev/null
   else
     aws_local cognito-idp admin-update-user-attributes \
       --user-pool-id "$POOL_ID" \
       --username "$username" \
-      --user-attributes Name=email,Value="$username" Name=email_verified,Value=true Name=name,Value="$display_name" \
+      --user-attributes Name=email,Value="$username" Name=email_verified,Value=true Name=name,Value="$display_name" Name=custom:directory_id,Value="$PROJECT_DIRECTORY_ID" \
       >/dev/null
   fi
 

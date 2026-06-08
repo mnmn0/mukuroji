@@ -221,6 +221,15 @@ export class CdkStack extends cdk.Stack {
       default: 'mukuroji-system-admins',
       description: 'Comma-separated Cognito group names that grant system administrator privileges.',
     });
+    const cognitoUserPoolId = new cdk.CfnParameter(this, 'CognitoUserPoolId', {
+      type: 'String',
+      description: 'Cognito user pool ID trusted by the project tasks Lambda API.',
+    });
+    const cognitoUserPoolArn = cdk.Stack.of(this).formatArn({
+      service: 'cognito-idp',
+      resource: 'userpool',
+      resourceName: cognitoUserPoolId.valueAsString,
+    });
 
     const tasksTable = new dynamodb.Table(this, 'ProjectTasksTable', {
       partitionKey: { name: 'directoryProjectId', type: dynamodb.AttributeType.STRING },
@@ -249,6 +258,7 @@ export class CdkStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(10),
       environment: {
         ALLOWED_ORIGINS: taskApiAllowedOrigins.valueAsString,
+        COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         TASKS_TABLE_NAME: tasksTable.tableName,
@@ -277,8 +287,18 @@ exports.handler = async (event) => {
   let directoryId;
 
   try {
+    const expectedUserPoolId = readConfiguredCognitoUserPoolId();
+
+    if (!expectedUserPoolId) {
+      return json(503, { message: 'Cognito user pool is not available.' }, headers);
+    }
+
+    if (!isExpectedCognitoIssuer(accessToken, expectedUserPoolId)) {
+      return json(401, { message: 'Authentication failed.' }, headers);
+    }
+
     const user = await cognito.send(new GetUserCommand({ AccessToken: accessToken }));
-    principal = toProjectPrincipal(user, accessToken);
+    principal = toProjectPrincipal(user, accessToken, expectedUserPoolId);
     directoryId = principal?.directoryId;
   } catch {
     return json(401, { message: 'Authentication failed.' }, headers);
@@ -390,7 +410,7 @@ exports.handler = async (event) => {
 	    }
 
 	    try {
-	      return await listProjectUsers(event, headers, principal.userPoolId);
+	      return await listProjectUsers(event, headers, principal.userPoolId, directoryId);
 	    } catch (error) {
 	      return toProjectDataError(error, headers, 'Failed to load Cognito users.');
 	    }
@@ -676,24 +696,35 @@ async function archiveProject(headers, directoryId, teamId, projectId) {
 	  return json(200, { teamId, projectId, archivedAt }, headers);
 	}
 
-	async function listProjectUsers(event, headers, userPoolId) {
+	async function listProjectUsers(event, headers, userPoolId, directoryId) {
 	  if (!userPoolId) {
 	    return json(503, { message: 'Cognito user pool is not available.' }, headers);
 	  }
 
 	  const query = event.queryStringParameters?.query?.trim();
 	  const limit = clampCognitoPageLimit(Number(event.queryStringParameters?.limit ?? 20));
-	  const response = await cognito.send(new ListUsersCommand({
-	    UserPoolId: userPoolId,
-	    Limit: limit,
-	    ...(event.queryStringParameters?.nextToken ? { PaginationToken: event.queryStringParameters.nextToken } : {}),
-	    ...(event.queryStringParameters?.paginationToken ? { PaginationToken: event.queryStringParameters.paginationToken } : {}),
-	    ...(query ? { Filter: '"email"^="' + escapeCognitoFilterValue(query.toLowerCase()) + '"' } : {}),
-	  }));
+	  const users = [];
+	  let paginationToken = event.queryStringParameters?.paginationToken ?? event.queryStringParameters?.nextToken;
+
+	  do {
+	    const response = await cognito.send(new ListUsersCommand({
+	      UserPoolId: userPoolId,
+	      Limit: Math.max(1, limit - users.length),
+	      ...(paginationToken ? { PaginationToken: paginationToken } : {}),
+	      ...(query ? { Filter: '"email"^="' + escapeCognitoFilterValue(query.toLowerCase()) + '"' } : {}),
+	    }));
+	    users.push(
+	      ...(response.Users ?? [])
+	        .filter((user) => isCognitoUserInDirectory(user, directoryId))
+	        .map(toCognitoUserProfile)
+	        .filter(Boolean),
+	    );
+	    paginationToken = response.PaginationToken;
+	  } while (users.length < limit && paginationToken);
 
 	  return json(200, {
-	    users: (response.Users ?? []).map(toCognitoUserProfile).filter(Boolean),
-	    nextToken: response.PaginationToken,
+	    users,
+	    nextToken: paginationToken,
 	  }, headers);
 	}
 
@@ -1104,7 +1135,8 @@ async function getProjectAccess(directoryId, projectId, memberKey) {
 	      return member;
 	    }
 
-	    throw error;
+	    console.warn('Failed to hydrate project member from Cognito:', error);
+	    return member;
 	  }
 	}
 
@@ -1117,7 +1149,7 @@ async function getProjectAccess(directoryId, projectId, memberKey) {
 	      profiles.set(userId, await getUserProfile(userPoolId, userId));
 	    } catch (error) {
 	      if (error?.name !== 'UserNotFoundException') {
-	        throw error;
+	        console.warn('Failed to hydrate task assignee from Cognito:', error);
 	      }
 	    }
 	  }));
@@ -1138,7 +1170,8 @@ async function getProjectAccess(directoryId, projectId, memberKey) {
 	      return task;
 	    }
 
-	    throw error;
+	    console.warn('Failed to hydrate task assignee from Cognito:', error);
+	    return task;
 	  }
 	}
 
@@ -1246,7 +1279,7 @@ function readBearerAccessToken(event) {
   return authorization.match(/^Bearer\\s+(.+)$/i)?.[1];
 }
 
-function toProjectPrincipal(user, accessToken) {
+function toProjectPrincipal(user, accessToken, userPoolId) {
   const userKey = user.UserAttributes?.find((attribute) => attribute.Name === 'email')?.Value ?? user.Username;
 
   if (!userKey?.trim()) {
@@ -1263,7 +1296,7 @@ function toProjectPrincipal(user, accessToken) {
 	  return {
 	    directoryId,
 	    userKey: normalizedUserKey,
-	    userPoolId: readCognitoUserPoolId(accessToken),
+	    userPoolId,
 	    isSystemAdmin: groups.some((group) => getSystemAdminGroups().includes(group)),
 	  };
 	}
@@ -1272,14 +1305,26 @@ function toProjectPrincipal(user, accessToken) {
 	  return user.UserAttributes?.find((attribute) => attribute.Name === name)?.Value;
 	}
 
-	function readCognitoUserPoolId(accessToken) {
+	function readConfiguredCognitoUserPoolId() {
+	  return process.env.COGNITO_USER_POOL_ID?.trim();
+	}
+
+	function isExpectedCognitoIssuer(accessToken, userPoolId) {
 	  const issuer = decodeJwtPayload(accessToken)?.iss;
 
 	  if (typeof issuer !== 'string') {
-	    return undefined;
+	    return false;
 	  }
 
-	  return issuer.split('/').filter(Boolean).pop();
+	  return issuer === createCognitoIssuer(userPoolId);
+	}
+
+	function createCognitoIssuer(userPoolId) {
+	  const region = userPoolId.includes('_')
+	    ? userPoolId.split('_')[0]
+	    : process.env.AWS_REGION;
+
+	  return 'https://cognito-idp.' + region + '.amazonaws.com/' + userPoolId;
 	}
 
 	function toCognitoUserProfile(user) {
@@ -1302,6 +1347,16 @@ function toProjectPrincipal(user, accessToken) {
 
 	function readCognitoUserAttribute(user, name) {
 	  return (user.Attributes ?? user.UserAttributes)?.find((attribute) => attribute.Name === name)?.Value;
+	}
+
+	function isCognitoUserInDirectory(user, directoryId) {
+	  if (!directoryId) {
+	    return true;
+	  }
+
+	  return ['custom:directory_id', 'custom:workspace_id'].some((attributeName) =>
+	    readCognitoUserAttribute(user, attributeName)?.trim() === directoryId
+	  );
 	}
 
 function readCognitoGroups(accessToken) {
@@ -1573,7 +1628,7 @@ function projectRoleWeight(role) {
 	    listTasksFunction.addToRolePolicy(
 	      new iam.PolicyStatement({
 	        actions: ['cognito-idp:AdminGetUser', 'cognito-idp:GetUser', 'cognito-idp:ListUsers'],
-	        resources: ['*'],
+	        resources: [cognitoUserPoolArn],
 	      }),
 	    );
 

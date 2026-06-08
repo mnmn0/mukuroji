@@ -236,6 +236,10 @@ type CognitoUsersResponse = {
  */
 type ListCognitoUsersInput = {
   /**
+   * 候補 user を所属 directory に限定するための directory ID です。
+   */
+  directoryId?: string
+  /**
    * Cognito の pagination token です。
    */
   paginationToken?: string
@@ -1453,7 +1457,7 @@ app.get('/api/projects/:projectId/users', async (c) => {
     const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
     await requireProjectPermission(principal, projectId, 'manager')
 
-    return c.json(await cognito.listUsers(readCognitoUsersInput(c)))
+    return c.json(await cognito.listUsers(readCognitoUsersInput(c, principal.directoryId)))
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)
@@ -1684,10 +1688,11 @@ function readLocale(c: Context): Locale {
   return c.req.query('locale') === 'en' ? 'en' : 'ja'
 }
 
-function readCognitoUsersInput(c: Context): ListCognitoUsersInput {
+function readCognitoUsersInput(c: Context, directoryId?: string): ListCognitoUsersInput {
   const limit = Number(c.req.query('limit') ?? 20)
 
   return {
+    directoryId,
     paginationToken: c.req.query('paginationToken') ?? c.req.query('nextToken') ?? undefined,
     limit,
     query: c.req.query('query')?.trim() || undefined,
@@ -1861,7 +1866,8 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem) {
       return member
     }
 
-    throw error
+    console.warn('Failed to hydrate project member from Cognito:', error)
+    return member
   }
 }
 
@@ -1893,7 +1899,7 @@ async function readTaskAssigneeProfiles(tasks: ProjectTaskResponseItem[]) {
         profiles.set(userId, await cognito.getUserProfile(userId))
       } catch (error) {
         if (!isCognitoUserNotFoundError(error)) {
-          throw error
+          console.warn('Failed to hydrate task assignee from Cognito:', error)
         }
       }
     }),
@@ -2027,16 +2033,28 @@ class FlociCognitoClient {
     const userPoolId = await this.resolveUserPoolId()
     const limit = clampCognitoPageLimit(input.limit)
     const query = input.query?.trim()
-    const response = await this.request<ListUsersResponse>('ListUsers', {
-      UserPoolId: userPoolId,
-      Limit: limit,
-      ...(input.paginationToken ? { PaginationToken: input.paginationToken } : {}),
-      ...(query ? { Filter: `"email"^="${escapeCognitoFilterValue(query.toLowerCase())}"` } : {}),
-    })
+    const users: CognitoUserProfile[] = []
+    let paginationToken = input.paginationToken
+
+    do {
+      const response = await this.request<ListUsersResponse>('ListUsers', {
+        UserPoolId: userPoolId,
+        Limit: Math.max(1, limit - users.length),
+        ...(paginationToken ? { PaginationToken: paginationToken } : {}),
+        ...(query ? { Filter: `"email"^="${escapeCognitoFilterValue(query.toLowerCase())}"` } : {}),
+      })
+      const scopedUsers = (response.Users ?? [])
+        .filter((user) => isCognitoUserInDirectory(user, input.directoryId))
+        .map(toCognitoUserProfile)
+        .filter(isDefined)
+
+      users.push(...scopedUsers)
+      paginationToken = response.PaginationToken
+    } while (users.length < limit && paginationToken)
 
     return {
-      users: (response.Users ?? []).map(toCognitoUserProfile).filter(isDefined),
-      nextToken: response.PaginationToken,
+      users,
+      nextToken: paginationToken,
     } satisfies CognitoUsersResponse
   }
 
@@ -2227,17 +2245,15 @@ export class DynamoDbDashboardSummaryClient {
    * ユーザー directory の team/project と task data からダッシュボード集計値を取得します。
    */
   async getSummary(directoryId: string, accessContext: DashboardSummaryAccessContext) {
-    const directory = await this.projectDirectoryClient.getProjectDirectory(directoryId, 'ja')
-    const projectIds = new Set(
-      directory.teams.flatMap((team) => team.projects.map((project) => project.id)),
-    )
     const visibleProjectIds = accessContext.isSystemAdmin
-      ? projectIds
+      ? new Set(
+        (await this.projectDirectoryClient.getProjectDirectory(directoryId, 'ja'))
+          .teams.flatMap((team) => team.projects.map((project) => project.id)),
+      )
       : new Set(
         (await this.projectDirectoryClient.getProjectAccessList(directoryId, accessContext.userKey))
           .filter((access) => projectAccessAllows(access, 'viewer'))
           .map((access) => access.projectId)
-          .filter((projectId) => projectIds.has(projectId)),
       )
     const taskResponses = await Promise.all(
       Array.from(visibleProjectIds).map((projectId) =>
@@ -3120,6 +3136,16 @@ function toCognitoUserProfile(value: CognitoUserRecord): CognitoUserProfile | un
 
 function readCognitoUserAttribute(user: CognitoUserRecord, name: string) {
   return (user.Attributes ?? user.UserAttributes)?.find((attribute) => attribute.Name === name)?.Value
+}
+
+function isCognitoUserInDirectory(user: CognitoUserRecord, directoryId: string | undefined) {
+  if (!directoryId) {
+    return true
+  }
+
+  return projectDirectoryIdAttributeNames.some((attributeName) => {
+    return readCognitoUserAttribute(user, attributeName)?.trim() === directoryId
+  })
 }
 
 function isDefined<T>(value: T | undefined): value is T {

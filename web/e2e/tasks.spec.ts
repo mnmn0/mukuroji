@@ -809,6 +809,37 @@ test.describe('authenticated task page', () => {
     expect(requestCounts.taskCreates).toBe(1)
   })
 
+  test('担当者を選択しない新規タスク登録は送信しない', async ({ page }) => {
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('button', { name: '新規タスク' }).click()
+    await page.locator('input[name="title"]').fill('担当者未選択タスク')
+    await page.locator('input[name="dueDate"]').fill('2026-06-20')
+    await page.getByRole('button', { name: '登録', exact: true }).click()
+
+    await expect(page.locator('select[name="assigneeUserId"]')).toHaveValue('')
+    expect(requestCounts.taskCreates).toBe(0)
+  })
+
+  test('担当者候補 API 失敗時は空状態と分けて表示する', async ({ page }) => {
+    await page.route(/.*\/api\/projects\/refero\/members$/, async (route) => {
+      await route.fulfill({
+        status: 500,
+        json: {
+          message: 'projects.error.loading',
+        },
+      })
+    })
+
+    await page.goto('/projects/refero/tasks')
+    await page.getByRole('button', { name: '新規タスク' }).click()
+
+    await expect(page.getByText('担当者候補を取得できませんでした')).toBeVisible()
+    await expect(page.getByText('担当者にできるプロジェクトメンバーがいません。')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '登録', exact: true })).toBeDisabled()
+  })
+
   test('タスク API 失敗時にエラーを表示する', async ({ page }) => {
     await page.route('**/api/projects/refero/tasks', async (route) => {
       await route.fulfill({

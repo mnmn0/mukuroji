@@ -165,11 +165,68 @@ test('lists Cognito users for project member assignment when the current user is
   ])
   expect(calls.userLists).toEqual([
     {
+      directoryId: 'user#demo@example.com',
       limit: 2,
       paginationToken: 'next-page-token',
       query: 'sato',
     },
   ])
+})
+
+test('keeps project members available when Cognito profile hydration fails', async () => {
+  const calls = configureFakeProjectClients(true, {
+    profileError: new Error('Cognito profile hydration failed.'),
+  })
+
+  const response = await app.request('/api/projects/refero/members', {
+    headers: {
+      Authorization: 'Bearer test-token',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    projectId: 'refero',
+    members: [
+      {
+        id: 'demo@example.com',
+        email: 'demo@example.com',
+        role: 'manager',
+        updatedAt: '2026-06-08T00:00:00.000Z',
+      },
+    ],
+  })
+  expect(calls.userProfiles).toEqual(['demo@example.com'])
+})
+
+test('keeps project tasks available when Cognito assignee hydration fails', async () => {
+  const calls = configureFakeProjectClients(true, {
+    profileError: new Error('Cognito profile hydration failed.'),
+    taskAssigneeUserId: 'sato@example.com',
+  })
+
+  const response = await app.request('/api/projects/refero/tasks', {
+    headers: {
+      Authorization: 'Bearer test-token',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    projectId: 'refero',
+    tasks: [
+      {
+        id: 'wireframe',
+        titleKey: 'tasks.item.wireframe',
+        assigneeKey: 'tasks.assignee.sato',
+        assigneeUserId: 'sato@example.com',
+        status: 'in-progress',
+        dueDate: '2026/06/03',
+        priority: 'high',
+      },
+    ],
+  })
+  expect(calls.userProfiles).toEqual(['sato@example.com'])
 })
 
 test('creates a team in the authenticated user scoped directory', async () => {
@@ -1034,9 +1091,13 @@ test('DynamoDB task client updates a task status with a conditional write', asyn
 })
 
 test('DynamoDB dashboard summary client derives counts from directory and task data', async () => {
+  const accessListReads: Array<{ directoryId: string; memberKey: string }> = []
+  const directoryReads: Array<{ directoryId: string; locale: Locale }> = []
+  const taskReads: Array<{ directoryId: string; projectId: string }> = []
   const client = new DynamoDbDashboardSummaryClient(
     {
       async getProjectDirectory(directoryId, locale) {
+        directoryReads.push({ directoryId, locale })
         expect(directoryId).toBe('user#demo@example.com')
         expect(locale).toBe('ja')
 
@@ -1070,7 +1131,9 @@ test('DynamoDB dashboard summary client derives counts from directory and task d
             }
           : undefined
       },
-      async getProjectAccessList() {
+      async getProjectAccessList(directoryId, memberKey) {
+        accessListReads.push({ directoryId, memberKey })
+
         return [
           {
             projectId: 'refero',
@@ -1138,7 +1201,9 @@ test('DynamoDB dashboard summary client derives counts from directory and task d
       },
     },
     {
-      async getProjectTasks(_directoryId, projectId) {
+      async getProjectTasks(directoryId, projectId) {
+        taskReads.push({ directoryId, projectId })
+
         return {
           projectId,
           tasks: projectId === 'refero'
@@ -1209,6 +1274,14 @@ test('DynamoDB dashboard summary client derives counts from directory and task d
   expect(summary.blocked).toBe(1)
   expect(summary.source).toBe('dynamodb')
   expect(Date.parse(summary.updatedAt)).not.toBeNaN()
+  expect(directoryReads).toEqual([])
+  expect(accessListReads).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      memberKey: 'demo@example.com',
+    },
+  ])
+  expect(taskReads).toEqual([{ directoryId: 'user#demo@example.com', projectId: 'refero' }])
 })
 
 test('DynamoDB directory client reads every page from the user partition', async () => {
@@ -1585,7 +1658,7 @@ test('DynamoDB directory client manages project member roles', async () => {
 
 function configureFakeProjectClients(
   hasProjectAccess: boolean,
-  options: { role?: ProjectRole } = {},
+  options: { profileError?: Error; role?: ProjectRole; taskAssigneeUserId?: string } = {},
 ) {
   const role = 'role' in options ? options.role : 'manager'
   const calls = {
@@ -1617,7 +1690,12 @@ function configureFakeProjectClients(
       status: string
       taskId: string
     }>,
-    userLists: [] as Array<{ limit?: number; paginationToken?: string; query?: string }>,
+    userLists: [] as Array<{
+      directoryId?: string
+      limit?: number
+      paginationToken?: string
+      query?: string
+    }>,
     userProfiles: [] as string[],
   }
 
@@ -1647,6 +1725,10 @@ function configureFakeProjectClients(
       },
       async getUserProfile(userId) {
         calls.userProfiles.push(userId)
+
+        if (options.profileError) {
+          throw options.profileError
+        }
 
         return createFakeCognitoProfile(userId)
       },
@@ -1818,6 +1900,7 @@ function configureFakeProjectClients(
               id: 'wireframe',
               titleKey: 'tasks.item.wireframe',
               assigneeKey: 'tasks.assignee.sato',
+              assigneeUserId: options.taskAssigneeUserId,
               status: 'in-progress',
               dueDate: '2026/06/03',
               priority: 'high',

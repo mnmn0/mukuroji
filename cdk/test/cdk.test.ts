@@ -43,6 +43,9 @@ test('project task data store and lambda API are created', () => {
         ALLOWED_ORIGINS: {
           Ref: 'TaskApiAllowedOrigins',
         },
+        COGNITO_USER_POOL_ID: {
+          Ref: 'CognitoUserPoolId',
+        },
         PROJECT_DIRECTORY_TABLE_NAME: {
           Ref: Match.stringLikeRegexp('ProjectDirectoryTable'),
         },
@@ -79,7 +82,17 @@ test('project task data store and lambda API are created', () => {
             'cognito-idp:ListUsers',
           ]),
           Effect: 'Allow',
-          Resource: '*',
+          Resource: {
+            'Fn::Join': [
+              '',
+              Match.arrayWith([
+                ':userpool/',
+                {
+                  Ref: 'CognitoUserPoolId',
+                },
+              ]),
+            ],
+          },
         }),
       ]),
     },
@@ -153,6 +166,8 @@ test('project task data store and lambda API are created', () => {
   expect(lambdaCode).toContain('readProjectMemberParams');
   expect(lambdaCode).toContain('readProjectUsersProjectId');
   expect(lambdaCode).toContain('readProjectTaskStatusParams');
+  expect(lambdaCode).toContain('isExpectedCognitoIssuer');
+  expect(lambdaCode).toContain('isCognitoUserInDirectory');
   expect(lambdaCode).toContain('AdminGetUserCommand');
   expect(lambdaCode).toContain('ListUsersCommand');
   expect(lambdaCode).toContain('hydrateProjectTasks');
@@ -601,6 +616,25 @@ test('inline lambda lets a system admin update project member roles without proj
   });
 });
 
+test('inline lambda rejects access tokens from unexpected Cognito user pools', async () => {
+  const lambda = createInlineLambda(async () => {
+    throw new Error('DynamoDB should not be called for an unexpected issuer.');
+  });
+  const event = createLambdaEvent('GET', '/api/projects/refero/tasks');
+
+  event.headers.authorization = `Bearer ${createAccessToken(
+    [],
+    'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_other',
+  )}`;
+
+  const response = await lambda.handler(event);
+
+  expect(response.statusCode).toBe(401);
+  expect(JSON.parse(response.body)).toEqual({
+    message: 'Authentication failed.',
+  });
+});
+
 function createInlineLambda(
   dynamoDbSend: (
     command: {
@@ -618,6 +652,7 @@ function createInlineLambda(
     process: {
       env: {
         ALLOWED_ORIGINS: 'http://localhost:5173,http://127.0.0.1:5173',
+        COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
         PROJECT_DIRECTORY_TABLE_NAME: 'DirectoryTable',
         SYSTEM_ADMIN_GROUPS: 'mukuroji-system-admins',
         TASKS_TABLE_NAME: 'TasksTable',
@@ -646,6 +681,10 @@ function createInlineLambda(
                           Name: 'name',
                           Value: '佐藤 花子',
                         },
+                        {
+                          Name: 'custom:directory_id',
+                          Value: 'user#demo@example.com',
+                        },
                       ],
                     },
                   ],
@@ -666,6 +705,10 @@ function createInlineLambda(
                       Name: 'name',
                       Value: '佐藤 花子',
                     },
+                    {
+                      Name: 'custom:directory_id',
+                      Value: 'user#demo@example.com',
+                    },
                   ],
                 };
               }
@@ -676,6 +719,10 @@ function createInlineLambda(
                   {
                     Name: 'email',
                     Value: 'demo@example.com',
+                  },
+                  {
+                    Name: 'custom:directory_id',
+                    Value: 'user#demo@example.com',
                   },
                 ],
               };
@@ -759,11 +806,14 @@ function createLambdaEvent(method: string, rawPath: string, groups: string[] = [
   };
 }
 
-function createAccessToken(groups: string[]) {
+function createAccessToken(
+  groups: string[],
+  issuer = 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+) {
   const payload = Buffer
     .from(JSON.stringify({
       'cognito:groups': groups,
-      iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+      iss: issuer,
     }))
     .toString('base64url');
 
