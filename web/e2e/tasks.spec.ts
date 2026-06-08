@@ -514,7 +514,7 @@ test.describe('authenticated task page', () => {
     await expect(
       page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
     ).toHaveCount(0)
-    expect(requestCounts.taskStatusUpdates).toBe(2)
+    await expect.poll(() => requestCounts.taskStatusUpdates).toBe(2)
   })
 
   test('ダッシュボードからチームとプロジェクトを新規登録できる', async ({ page }) => {
