@@ -143,7 +143,7 @@ test('project task data store and lambda API are created', () => {
   expect(lambdaCode).toContain('const taskId = createUniqueResourceId(title');
   expect(lambdaCode).toContain('toProjectDataError');
   expect(lambdaCode).toContain('directoryProjectId = :directoryProjectId');
-  expect(lambdaCode).toContain('hasProjectAccess');
+  expect(lambdaCode).toContain('getProjectAccess');
   expect(lambdaCode).toContain('async function queryAll');
   expect(lambdaCode).toContain('const projectItems = [];');
   expect(lambdaCode).toContain('UpdateItemCommand');
@@ -250,8 +250,8 @@ test('inline lambda updates a task status with a conditional update', async () =
       priority: 'high',
     },
   });
-  expect(commandInputs).toHaveLength(3);
-  expect(commandInputs[2]).toEqual({
+  expect(commandInputs).toHaveLength(2);
+  expect(commandInputs[1]).toEqual({
     commandName: 'UpdateItemCommand',
     input: {
       TableName: 'TasksTable',
@@ -336,8 +336,8 @@ test('inline lambda archives a project with a conditional update', async () => {
     projectId: 'refero',
     archivedAt: expect.any(String),
   });
-  expect(commandInputs).toHaveLength(4);
-  expect(commandInputs[3]).toMatchObject({
+  expect(commandInputs).toHaveLength(3);
+  expect(commandInputs[2]).toMatchObject({
     commandName: 'UpdateItemCommand',
     input: {
       TableName: 'DirectoryTable',
@@ -526,8 +526,8 @@ test('inline lambda updates project member roles for a project manager', async (
       role: 'member',
     },
   });
-  expect(commandInputs).toHaveLength(4);
-  expect(commandInputs[3]).toMatchObject({
+  expect(commandInputs).toHaveLength(3);
+  expect(commandInputs[2]).toMatchObject({
     commandName: 'PutItemCommand',
     input: {
       TableName: 'DirectoryTable',

@@ -77,7 +77,13 @@ test('loads dashboard summary from the authenticated user scoped directory', asy
     updatedAt: '2026-06-03T00:00:00.000Z',
     source: 'dynamodb',
   })
-  expect(calls.summaryReads).toEqual(['user#demo@example.com'])
+  expect(calls.summaryReads).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      isSystemAdmin: false,
+      userKey: 'demo@example.com',
+    },
+  ])
 })
 
 test('denies project tasks when the project is outside the user directory', async () => {
@@ -154,8 +160,8 @@ test('lists Cognito users for project member assignment when the current user is
     ],
     nextToken: undefined,
   })
-  expect(calls.roleChecks).toEqual([
-    { directoryId: 'user#demo@example.com', memberKey: 'demo@example.com', projectId: 'refero' },
+  expect(calls.accessChecks).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
   expect(calls.userLists).toEqual([
     {
@@ -262,8 +268,8 @@ test('denies project task creation when the project role is viewer', async () =>
 
   expect(response.status).toBe(403)
   expect(await response.json()).toEqual({ message: 'Project access is denied.' })
-  expect(calls.roleChecks).toEqual([
-    { directoryId: 'user#demo@example.com', memberKey: 'demo@example.com', projectId: 'refero' },
+  expect(calls.accessChecks).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
   expect(calls.taskCreates).toEqual([])
 })
@@ -279,8 +285,8 @@ test('denies project member reads when the project role is viewer', async () => 
 
   expect(response.status).toBe(403)
   expect(await response.json()).toEqual({ message: 'Project access is denied.' })
-  expect(calls.roleChecks).toEqual([
-    { directoryId: 'user#demo@example.com', memberKey: 'demo@example.com', projectId: 'refero' },
+  expect(calls.accessChecks).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
   expect(calls.memberReads).toEqual([])
 })
@@ -1056,6 +1062,22 @@ test('DynamoDB dashboard summary client derives counts from directory and task d
           ],
         }
       },
+      async getProjectAccess(_directoryId, projectId) {
+        return projectId === 'refero'
+          ? {
+              projectId,
+              role: 'manager' as ProjectRole,
+            }
+          : undefined
+      },
+      async getProjectAccessList() {
+        return [
+          {
+            projectId: 'refero',
+            role: 'manager' as ProjectRole,
+          },
+        ]
+      },
       async hasProjectAccess() {
         return true
       },
@@ -1177,10 +1199,13 @@ test('DynamoDB dashboard summary client derives counts from directory and task d
     },
   )
 
-  const summary = await client.getSummary('user#demo@example.com')
+  const summary = await client.getSummary('user#demo@example.com', {
+    userKey: 'demo@example.com',
+    isSystemAdmin: false,
+  })
 
-  expect(summary.projects).toBe(2)
-  expect(summary.tasks).toBe(2)
+  expect(summary.projects).toBe(1)
+  expect(summary.tasks).toBe(1)
   expect(summary.blocked).toBe(1)
   expect(summary.source).toBe('dynamodb')
   expect(Date.parse(summary.updatedAt)).not.toBeNaN()
@@ -1577,7 +1602,11 @@ function configureFakeProjectClients(
     projectArchives: [] as Array<{ directoryId: string; teamId: string; projectId: string }>,
     projectCreates: [] as Array<{ directoryId: string; teamId: string; name: string }>,
     roleChecks: [] as Array<{ directoryId: string; memberKey: string; projectId: string }>,
-    summaryReads: [] as string[],
+    summaryReads: [] as Array<{
+      directoryId: string
+      isSystemAdmin: boolean
+      userKey: string
+    }>,
     teamArchives: [] as Array<{ directoryId: string; teamId: string }>,
     teamCreates: [] as Array<{ directoryId: string; name: string }>,
     taskCreates: [] as Array<{ directoryId: string; projectId: string; title: string }>,
@@ -1623,8 +1652,12 @@ function configureFakeProjectClients(
       },
     },
     dashboardSummary: {
-      async getSummary(directoryId) {
-        calls.summaryReads.push(directoryId)
+      async getSummary(directoryId, accessContext) {
+        calls.summaryReads.push({
+          directoryId,
+          isSystemAdmin: accessContext.isSystemAdmin,
+          userKey: accessContext.userKey,
+        })
 
         return {
           projects: 1,
@@ -1655,6 +1688,32 @@ function configureFakeProjectClients(
             },
           ],
         }
+      },
+      async getProjectAccess(directoryId, projectId) {
+        calls.accessChecks.push({ directoryId, projectId })
+
+        if (!hasProjectAccess) {
+          return undefined
+        }
+
+        return {
+          projectId,
+          role,
+        }
+      },
+      async getProjectAccessList(directoryId) {
+        calls.accessChecks.push({ directoryId, projectId: '*' })
+
+        if (!hasProjectAccess) {
+          return []
+        }
+
+        return [
+          {
+            projectId: 'refero',
+            role,
+          },
+        ]
       },
       async hasProjectAccess(directoryId, projectId) {
         calls.accessChecks.push({ directoryId, projectId })

@@ -1459,7 +1459,7 @@ function PermissionsView({
 
   const saveMember = async (memberKey: string, input: UpdateProjectMemberInput) => {
     if (!selectedProject || !onUpdateMember) {
-      return
+      return false
     }
 
     setSavingMemberKey(memberKey)
@@ -1467,8 +1467,10 @@ function PermissionsView({
 
     try {
       await onUpdateMember(selectedProject.id, memberKey, input)
+      return true
     } catch {
       setLocalErrorMessage(t('workspace.permissions.error'))
+      return false
     } finally {
       setSavingMemberKey(undefined)
     }
@@ -1482,10 +1484,13 @@ function PermissionsView({
       return
     }
 
-    await saveMember(selectedUserId, {
+    const saved = await saveMember(selectedUserId, {
       role: formState.role,
     })
-    setFormState({ userId: '', role: 'member' })
+
+    if (saved) {
+      setFormState({ userId: '', role: 'member' })
+    }
   }
 
   const handleLoadMoreUsers = async () => {

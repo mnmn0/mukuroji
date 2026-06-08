@@ -1007,20 +1007,25 @@ async function enforceProjectPermission(headers, principal, projectId, minimumRo
     return undefined;
   }
 
-  if (!(await hasProjectAccess(principal.directoryId, projectId))) {
+  const projectAccess = await getProjectAccess(
+    principal.directoryId,
+    projectId,
+    principal.userKey,
+  );
+
+  if (!projectAccess) {
     return json(403, { message: 'Project access is denied.' }, headers);
   }
 
-  const role = await getProjectRole(principal.directoryId, projectId, principal.userKey);
-
-  if (!role || !projectRoleAllows(role, minimumRole)) {
+  if (!projectAccess.role || !projectRoleAllows(projectAccess.role, minimumRole)) {
     return json(403, { message: 'Project access is denied.' }, headers);
   }
 
   return undefined;
 }
 
-async function hasProjectAccess(directoryId, projectId) {
+async function getProjectAccess(directoryId, projectId, memberKey) {
+  const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
   const items = await queryAll({
     TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
     KeyConditionExpression: 'directoryId = :directoryId',
@@ -1037,31 +1042,27 @@ async function hasProjectAccess(directoryId, projectId) {
       .filter(Boolean)
   );
 
-  return items.some((item) =>
+  const hasProjectAccess = items.some((item) =>
     item.entryType?.S === 'project' &&
     item.projectId?.S === projectId &&
     activeTeamIds.has(item.teamId?.S) &&
     isActiveDirectoryItem(item)
   );
-}
 
-async function getProjectRole(directoryId, projectId, memberKey) {
-  const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
-  const items = await queryAll({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    KeyConditionExpression: 'directoryId = :directoryId',
-    ExpressionAttributeValues: {
-      ':directoryId': { S: directoryId },
-    },
-    ScanIndexForward: true,
-  });
+  if (!hasProjectAccess) {
+    return undefined;
+  }
+
   const member = items.find((item) =>
     item.entryType?.S === 'project-member' &&
     item.projectId?.S === projectId &&
     item.memberKey?.S === normalizedMemberKey
   );
 
-  return member?.role?.S;
+  return {
+    projectId,
+    role: member?.role?.S,
+  };
 }
 
 	async function queryAll(input) {

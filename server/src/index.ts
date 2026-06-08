@@ -355,6 +355,34 @@ type ProjectTaskPriority = 'high' | 'medium' | 'low'
 export type ProjectRole = 'manager' | 'member' | 'viewer'
 
 /**
+ * active project と現在ユーザーの role を 1 directory read で返す行です。
+ */
+type ProjectAccessEntry = {
+  /**
+   * active project ID です。
+   */
+  projectId: string
+  /**
+   * 現在ユーザーに割り当てられた project role です。
+   */
+  role?: ProjectRole
+}
+
+/**
+ * dashboard summary の集計対象を権限で絞り込むための user context です。
+ */
+type DashboardSummaryAccessContext = {
+  /**
+   * Cognito user を正規化した member key です。
+   */
+  userKey: string
+  /**
+   * system admin group に所属しているかどうかです。
+   */
+  isSystemAdmin: boolean
+}
+
+/**
  * DynamoDB に保存する project task item です。
  */
 type ProjectTaskItem = {
@@ -957,7 +985,10 @@ type DashboardSummaryClient = {
   /**
    * ユーザー directory の DynamoDB data からダッシュボード集計値を取得します。
    */
-  getSummary(directoryId: string): Promise<DashboardSummaryResponse>
+  getSummary(
+    directoryId: string,
+    accessContext: DashboardSummaryAccessContext,
+  ): Promise<DashboardSummaryResponse>
 }
 
 /**
@@ -995,6 +1026,18 @@ type ProjectDirectoryClient = {
    * DynamoDB から sidebar 用の team/project 階層を取得します。
    */
   getProjectDirectory(directoryId: string, locale: Locale): Promise<ProjectDirectoryResponse>
+  /**
+   * active project と指定 member の role を 1 directory read で取得します。
+   */
+  getProjectAccess(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+  ): Promise<ProjectAccessEntry | undefined>
+  /**
+   * active project と指定 member の role を 1 directory read で取得します。
+   */
+  getProjectAccessList(directoryId: string, memberKey: string): Promise<ProjectAccessEntry[]>
   /**
    * ユーザーの directory に指定 project ID が含まれるかどうかを判定します。
    */
@@ -1201,7 +1244,7 @@ app.get('/api/dashboard/summary', async (c) => {
   try {
     const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
 
-    return c.json(await dashboardSummary.getSummary(principal.directoryId))
+    return c.json(await dashboardSummary.getSummary(principal.directoryId, principal))
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -1752,7 +1795,13 @@ async function requireProjectPermission(
     return
   }
 
-  if (!(await projectDirectory.hasProjectAccess(principal.directoryId, projectId))) {
+  const projectAccess = await projectDirectory.getProjectAccess(
+    principal.directoryId,
+    projectId,
+    principal.userKey,
+  )
+
+  if (!projectAccess) {
     throw new ProjectDataError(
       403,
       'ProjectAccessDenied',
@@ -1760,19 +1809,17 @@ async function requireProjectPermission(
     )
   }
 
-  const role = await projectDirectory.getProjectRole(
-    principal.directoryId,
-    projectId,
-    principal.userKey,
-  )
-
-  if (!role || !projectRoleAllows(role, minimumRole)) {
+  if (!projectAccessAllows(projectAccess, minimumRole)) {
     throw new ProjectDataError(
       403,
       'ProjectAccessDenied',
-      `User "${principal.userKey}" with role "${role ?? 'none'}" cannot access project "${projectId}".`,
+      `User "${principal.userKey}" with role "${projectAccess.role ?? 'none'}" cannot access project "${projectId}".`,
     )
   }
+}
+
+function projectAccessAllows(access: ProjectAccessEntry, minimumRole: ProjectRole) {
+  return access.role !== undefined && projectRoleAllows(access.role, minimumRole)
 }
 
 function projectRoleAllows(role: ProjectRole, minimumRole: ProjectRole) {
@@ -2179,20 +2226,28 @@ export class DynamoDbDashboardSummaryClient {
   /**
    * ユーザー directory の team/project と task data からダッシュボード集計値を取得します。
    */
-  async getSummary(directoryId: string) {
+  async getSummary(directoryId: string, accessContext: DashboardSummaryAccessContext) {
     const directory = await this.projectDirectoryClient.getProjectDirectory(directoryId, 'ja')
     const projectIds = new Set(
       directory.teams.flatMap((team) => team.projects.map((project) => project.id)),
     )
+    const visibleProjectIds = accessContext.isSystemAdmin
+      ? projectIds
+      : new Set(
+        (await this.projectDirectoryClient.getProjectAccessList(directoryId, accessContext.userKey))
+          .filter((access) => projectAccessAllows(access, 'viewer'))
+          .map((access) => access.projectId)
+          .filter((projectId) => projectIds.has(projectId)),
+      )
     const taskResponses = await Promise.all(
-      Array.from(projectIds).map((projectId) =>
+      Array.from(visibleProjectIds).map((projectId) =>
         this.projectTasksClient.getProjectTasks(directoryId, projectId),
       ),
     )
     const tasks = taskResponses.flatMap((response) => response.tasks)
 
     return {
-      projects: projectIds.size,
+      projects: visibleProjectIds.size,
       tasks: tasks.filter((task) => task.status !== 'done').length,
       blocked: tasks.filter((task) => task.priority === 'high' && task.status !== 'done').length,
       updatedAt: new Date().toISOString(),
@@ -2460,25 +2515,53 @@ export class DynamoDbProjectDirectoryClient {
   }
 
   /**
+   * active project と指定 member の role を 1 directory read で取得します。
+   */
+  async getProjectAccess(directoryId: string, projectId: string, memberKey: string) {
+    try {
+      const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
+      const items = await this.readValidDirectoryItems(directoryId)
+
+      return toProjectAccessEntries(items, normalizedMemberKey).find((access) => {
+        return access.projectId === projectId
+      })
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * active project と指定 member の role を 1 directory read で取得します。
+   */
+  async getProjectAccessList(directoryId: string, memberKey: string) {
+    try {
+      const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
+      const items = await this.readValidDirectoryItems(directoryId)
+
+      return toProjectAccessEntries(items, normalizedMemberKey)
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
    * ユーザーの directory に指定 project ID が含まれるかどうかを判定します。
    */
   async hasProjectAccess(directoryId: string, projectId: string) {
     try {
-      const items = await this.readValidDirectoryItems(directoryId)
-      const activeTeamIds = new Set(
-        items
-          .filter((item) => item.entryType === 'team' && isActiveDirectoryItem(item))
-          .map((item) => item.teamId),
-      )
-
-      return items.some((item) => {
-        return (
-          item.entryType === 'project' &&
-          item.projectId === projectId &&
-          isActiveDirectoryItem(item) &&
-          activeTeamIds.has(item.teamId)
-        )
-      })
+      return await this.getProjectAccess(
+        directoryId,
+        projectId,
+        'project-access-check@example.invalid',
+      ) !== undefined
     } catch (error) {
       if (error instanceof ProjectDataError) {
         throw error
@@ -2493,15 +2576,7 @@ export class DynamoDbProjectDirectoryClient {
    */
   async getProjectRole(directoryId: string, projectId: string, memberKey: string) {
     try {
-      const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
-      const items = await this.readValidDirectoryItems(directoryId)
-      const member = items.find((item) =>
-        item.entryType === 'project-member' &&
-        item.projectId === projectId &&
-        item.memberKey === normalizedMemberKey,
-      )
-
-      return member?.role
+      return (await this.getProjectAccess(directoryId, projectId, memberKey))?.role
     } catch (error) {
       if (error instanceof ProjectDataError) {
         throw error
@@ -3390,6 +3465,42 @@ function toProjectMemberResponseItem(item: ProjectMemberItem): ProjectMemberResp
   }
 
   return member
+}
+
+function toProjectAccessEntries(items: ProjectDirectoryItem[], memberKey: string) {
+  const activeTeamIds = new Set(
+    items
+      .filter((item) => item.entryType === 'team' && isActiveDirectoryItem(item))
+      .map((item) => item.teamId),
+  )
+  const roleByProjectId = new Map(
+    items
+      .filter((item) => {
+        return item.entryType === 'project-member' && item.memberKey === memberKey
+      })
+      .map((item) => [item.projectId, item.role] as const),
+  )
+  const seenProjectIds = new Set<string>()
+  const accessEntries: ProjectAccessEntry[] = []
+
+  for (const item of items) {
+    if (
+      item.entryType !== 'project' ||
+      seenProjectIds.has(item.projectId) ||
+      !isActiveDirectoryItem(item) ||
+      !activeTeamIds.has(item.teamId)
+    ) {
+      continue
+    }
+
+    seenProjectIds.add(item.projectId)
+    accessEntries.push({
+      projectId: item.projectId,
+      role: roleByProjectId.get(item.projectId),
+    })
+  }
+
+  return accessEntries
 }
 
 function compareProjectMemberItems(first: ProjectMemberItem, second: ProjectMemberItem) {
