@@ -34,9 +34,9 @@ mapfile -t task_rows < <(
     "${endpoint_args[@]}" \
     "${auth_args[@]}" \
     "${common_args[@]}" \
-    --projection-expression "taskId,sortOrder,titleKey,assigneeKey,#status,dueDate,priority" \
+    --projection-expression "taskId,sortOrder,titleKey,assigneeUserId,#status,dueDate,priority" \
     --expression-attribute-names '{"#status":"status"}' \
-    --query 'Items[].[taskId.S,sortOrder.N,titleKey.S,assigneeKey.S,status.S,dueDate.S,priority.S]' \
+    --query 'Items[].[taskId.S,sortOrder.N,titleKey.S,assigneeUserId.S,status.S,dueDate.S,priority.S]' \
     --output text
 )
 
@@ -46,16 +46,16 @@ if [[ "${#task_rows[@]}" != "10" ]]; then
 fi
 
 expected_task_rows=(
-  $'wireframe\t10\ttasks.item.wireframe\ttasks.assignee.sato\tin-progress\t2026/06/03\thigh'
-  $'brand-guideline\t20\ttasks.item.brandGuideline\ttasks.assignee.suzuki\treview\t2026/06/05\tmedium'
-  $'pricing-content\t30\ttasks.item.pricingContent\ttasks.assignee.tanaka\tin-progress\t2026/06/08\thigh'
-  $'seo-research\t40\ttasks.item.seoResearch\ttasks.assignee.yamamoto\ttodo\t2026/06/09\tmedium'
-  $'hero-design\t50\ttasks.item.heroDesign\ttasks.assignee.sato\treview\t2026/06/10\tmedium'
-  $'analytics-tags\t60\ttasks.item.analyticsTags\ttasks.assignee.suzuki\tin-progress\t2026/06/11\tlow'
-  $'competitor-report\t70\ttasks.item.competitorReport\ttasks.assignee.tanaka\tdone\t2026/06/02\tlow'
-  $'terms-page\t80\ttasks.item.termsPage\ttasks.assignee.yamamoto\ttodo\t2026/06/12\tmedium'
-  $'faq-content\t90\ttasks.item.faqContent\ttasks.assignee.sato\ttodo\t2026/06/15\tlow'
-  $'landing-release\t100\ttasks.item.landingRelease\ttasks.assignee.suzuki\ttodo\t2026/06/16\thigh'
+  $'wireframe\t10\ttasks.item.wireframe\tsato@example.com\tin-progress\t2026/06/03\thigh'
+  $'brand-guideline\t20\ttasks.item.brandGuideline\tsuzuki@example.com\treview\t2026/06/05\tmedium'
+  $'pricing-content\t30\ttasks.item.pricingContent\ttanaka@example.com\tin-progress\t2026/06/08\thigh'
+  $'seo-research\t40\ttasks.item.seoResearch\tyamamoto@example.com\ttodo\t2026/06/09\tmedium'
+  $'hero-design\t50\ttasks.item.heroDesign\tsato@example.com\treview\t2026/06/10\tmedium'
+  $'analytics-tags\t60\ttasks.item.analyticsTags\tsuzuki@example.com\tin-progress\t2026/06/11\tlow'
+  $'competitor-report\t70\ttasks.item.competitorReport\ttanaka@example.com\tdone\t2026/06/02\tlow'
+  $'terms-page\t80\ttasks.item.termsPage\tyamamoto@example.com\ttodo\t2026/06/12\tmedium'
+  $'faq-content\t90\ttasks.item.faqContent\tsato@example.com\ttodo\t2026/06/15\tlow'
+  $'landing-release\t100\ttasks.item.landingRelease\tsuzuki@example.com\ttodo\t2026/06/16\thigh'
 )
 
 for row_index in "${!expected_task_rows[@]}"; do

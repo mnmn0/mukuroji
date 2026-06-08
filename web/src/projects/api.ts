@@ -150,9 +150,21 @@ export type ProjectMember = {
    */
   email: string
   /**
+   * Cognito user pool 内の username です。
+   */
+  username?: string
+  /**
    * 画面に表示するメンバー名です。
    */
   name?: string
+  /**
+   * Cognito user が有効かどうかです。
+   */
+  enabled?: boolean
+  /**
+   * Cognito user status です。
+   */
+  status?: string
   /**
    * プロジェクト内の権限ロールです。
    */
@@ -164,21 +176,61 @@ export type ProjectMember = {
 }
 
 /**
- * プロジェクト member role 更新 API に送信する入力です。
+ * Cognito を master とする user profile です。
  */
-export type UpdateProjectMemberInput = {
+export type ProjectUser = {
+  /**
+   * アプリ内で user 参照に使う正規化済み ID です。
+   */
+  id: string
+  /**
+   * Cognito user pool 内の username です。
+   */
+  username: string
   /**
    * Cognito user のメールアドレスです。
    */
   email: string
   /**
-   * 表示名です。
+   * Cognito user の表示名です。
    */
   name?: string
+  /**
+   * Cognito user が有効かどうかです。
+   */
+  enabled?: boolean
+  /**
+   * Cognito user status です。
+   */
+  status?: string
+}
+
+/**
+ * プロジェクト member role 更新 API に送信する入力です。
+ */
+export type UpdateProjectMemberInput = {
   /**
    * 付与するプロジェクトロールです。
    */
   role: ProjectMemberRole
+}
+
+/**
+ * Cognito user 一覧 API に渡す検索条件です。
+ */
+export type GetProjectUsersInput = {
+  /**
+   * email prefix 検索に使う query です。
+   */
+  query?: string
+  /**
+   * 1 page で取得する最大件数です。
+   */
+  limit?: number
+  /**
+   * 次 page 取得用の Cognito pagination token です。
+   */
+  nextToken?: string
 }
 
 /**
@@ -193,6 +245,20 @@ type ProjectMembersResponse = {
    * DynamoDB に保存された project member 一覧です。
    */
   members: ProjectMember[]
+}
+
+/**
+ * Cognito user 一覧 API が返す response body です。
+ */
+type ProjectUsersResponse = {
+  /**
+   * Cognito user pool から取得した user 一覧です。
+   */
+  users: ProjectUser[]
+  /**
+   * 次 page 取得用の Cognito pagination token です。
+   */
+  nextToken?: string
 }
 
 /**
@@ -390,6 +456,54 @@ export async function getProjectMembers(accessToken: string, projectId: string, 
   }
 
   return data.members
+}
+
+/**
+ * Cognito user pool から project member 候補を取得します。
+ */
+export async function getProjectUsers(
+  accessToken: string,
+  projectId: string,
+  input: GetProjectUsersInput = {},
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams()
+
+  if (input.query?.trim()) {
+    query.set('query', input.query.trim())
+  }
+
+  if (input.limit !== undefined) {
+    query.set('limit', String(input.limit))
+  }
+
+  if (input.nextToken) {
+    query.set('nextToken', input.nextToken)
+  }
+
+  const queryString = query.toString()
+  const response = await fetch(
+    `${projectsApiBaseUrl}/projects/${encodeURIComponent(projectId)}/users${queryString ? `?${queryString}` : ''}`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+      signal,
+    },
+  )
+  const data = await readJson<unknown>(response)
+
+  if (!response.ok) {
+    const message = readErrorMessage(data)
+
+    throw new ProjectDirectoryApiError(response.status, message)
+  }
+
+  if (!isProjectUsersResponse(data)) {
+    throw new ProjectDirectoryApiError(response.status, 'projects.error.loading')
+  }
+
+  return data
 }
 
 /**
@@ -622,11 +736,47 @@ function isProjectMember(value: unknown): value is ProjectMember {
     typeof value.id === 'string' &&
     'email' in value &&
     typeof value.email === 'string' &&
+    (!('username' in value) || typeof value.username === 'string') &&
     (!('name' in value) || typeof value.name === 'string') &&
+    (!('enabled' in value) || typeof value.enabled === 'boolean') &&
+    (!('status' in value) || typeof value.status === 'string') &&
     'role' in value &&
     isProjectMemberRole(value.role) &&
     'updatedAt' in value &&
     typeof value.updatedAt === 'string'
+  )
+}
+
+/**
+ * API レスポンスが Cognito user 一覧として扱えるかどうかを判定します。
+ */
+function isProjectUsersResponse(value: unknown): value is ProjectUsersResponse {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'users' in value &&
+    Array.isArray(value.users) &&
+    value.users.every(isProjectUser) &&
+    (!('nextToken' in value) || typeof value.nextToken === 'string')
+  )
+}
+
+/**
+ * API から返った値が Cognito user profile として扱えるかどうかを判定します。
+ */
+function isProjectUser(value: unknown): value is ProjectUser {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'id' in value &&
+    typeof value.id === 'string' &&
+    'username' in value &&
+    typeof value.username === 'string' &&
+    'email' in value &&
+    typeof value.email === 'string' &&
+    (!('name' in value) || typeof value.name === 'string') &&
+    (!('enabled' in value) || typeof value.enabled === 'boolean') &&
+    (!('status' in value) || typeof value.status === 'string')
   )
 }
 

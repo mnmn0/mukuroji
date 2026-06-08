@@ -9,16 +9,16 @@ import { Construct } from 'constructs';
  * Refero プロジェクトに初期投入するタスク seed データです。
  */
 const projectTaskItems = [
-  ['refero', 'wireframe', 10, 'tasks.item.wireframe', 'tasks.assignee.sato', 'in-progress', '2026/06/03', 'high'],
-  ['refero', 'brand-guideline', 20, 'tasks.item.brandGuideline', 'tasks.assignee.suzuki', 'review', '2026/06/05', 'medium'],
-  ['refero', 'pricing-content', 30, 'tasks.item.pricingContent', 'tasks.assignee.tanaka', 'in-progress', '2026/06/08', 'high'],
-  ['refero', 'seo-research', 40, 'tasks.item.seoResearch', 'tasks.assignee.yamamoto', 'todo', '2026/06/09', 'medium'],
-  ['refero', 'hero-design', 50, 'tasks.item.heroDesign', 'tasks.assignee.sato', 'review', '2026/06/10', 'medium'],
-  ['refero', 'analytics-tags', 60, 'tasks.item.analyticsTags', 'tasks.assignee.suzuki', 'in-progress', '2026/06/11', 'low'],
-  ['refero', 'competitor-report', 70, 'tasks.item.competitorReport', 'tasks.assignee.tanaka', 'done', '2026/06/02', 'low'],
-  ['refero', 'terms-page', 80, 'tasks.item.termsPage', 'tasks.assignee.yamamoto', 'todo', '2026/06/12', 'medium'],
-  ['refero', 'faq-content', 90, 'tasks.item.faqContent', 'tasks.assignee.sato', 'todo', '2026/06/15', 'low'],
-  ['refero', 'landing-release', 100, 'tasks.item.landingRelease', 'tasks.assignee.suzuki', 'todo', '2026/06/16', 'high'],
+  ['refero', 'wireframe', 10, 'tasks.item.wireframe', 'sato@example.com', 'in-progress', '2026/06/03', 'high'],
+  ['refero', 'brand-guideline', 20, 'tasks.item.brandGuideline', 'suzuki@example.com', 'review', '2026/06/05', 'medium'],
+  ['refero', 'pricing-content', 30, 'tasks.item.pricingContent', 'tanaka@example.com', 'in-progress', '2026/06/08', 'high'],
+  ['refero', 'seo-research', 40, 'tasks.item.seoResearch', 'yamamoto@example.com', 'todo', '2026/06/09', 'medium'],
+  ['refero', 'hero-design', 50, 'tasks.item.heroDesign', 'sato@example.com', 'review', '2026/06/10', 'medium'],
+  ['refero', 'analytics-tags', 60, 'tasks.item.analyticsTags', 'suzuki@example.com', 'in-progress', '2026/06/11', 'low'],
+  ['refero', 'competitor-report', 70, 'tasks.item.competitorReport', 'tanaka@example.com', 'done', '2026/06/02', 'low'],
+  ['refero', 'terms-page', 80, 'tasks.item.termsPage', 'yamamoto@example.com', 'todo', '2026/06/12', 'medium'],
+  ['refero', 'faq-content', 90, 'tasks.item.faqContent', 'sato@example.com', 'todo', '2026/06/15', 'low'],
+  ['refero', 'landing-release', 100, 'tasks.item.landingRelease', 'suzuki@example.com', 'todo', '2026/06/16', 'high'],
 ] as const;
 
 /**
@@ -129,7 +129,7 @@ const projectMemberItems = [
  * DynamoDB の transaction write item payload を作成します。
  */
 function createProjectTaskTransactItems(tableName: string) {
-  return projectTaskItems.map(([projectId, taskId, sortOrder, titleKey, assigneeKey, status, dueDate, priority]) => ({
+  return projectTaskItems.map(([projectId, taskId, sortOrder, titleKey, assigneeUserId, status, dueDate, priority]) => ({
     Put: {
       TableName: tableName,
       ConditionExpression: 'attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)',
@@ -140,7 +140,7 @@ function createProjectTaskTransactItems(tableName: string) {
         taskId: { S: taskId },
         sortOrder: { N: String(sortOrder) },
         titleKey: { S: titleKey },
-        assigneeKey: { S: assigneeKey },
+        assigneeUserId: { S: assigneeUserId },
         status: { S: status },
         dueDate: { S: dueDate },
         priority: { S: priority },
@@ -254,7 +254,7 @@ export class CdkStack extends cdk.Stack {
         TASKS_TABLE_NAME: tasksTable.tableName,
       },
       code: lambda.Code.fromInline(`
-const { CognitoIdentityProviderClient, GetUserCommand } = require('@aws-sdk/client-cognito-identity-provider');
+	const { CognitoIdentityProviderClient, AdminGetUserCommand, GetUserCommand, ListUsersCommand } = require('@aws-sdk/client-cognito-identity-provider');
 const { DynamoDBClient, DeleteItemCommand, PutItemCommand, QueryCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
 
 const cognito = new CognitoIdentityProviderClient({});
@@ -354,22 +354,47 @@ exports.handler = async (event) => {
     }
   }
 
-  const projectMembersProjectId = readProjectMembersProjectId(event);
+	  const projectMembersProjectId = readProjectMembersProjectId(event);
 
-  if (projectMembersProjectId) {
-    const permissionError = await enforceProjectPermission(
-      headers,
-      principal,
-      projectMembersProjectId,
-      'manager',
-    );
+	  if (projectMembersProjectId) {
+	    const permissionError = await enforceProjectPermission(
+	      headers,
+	      principal,
+	      projectMembersProjectId,
+	      'member',
+	    );
 
-    if (permissionError) {
-      return permissionError;
-    }
+	    if (permissionError) {
+	      return permissionError;
+	    }
 
-    return listProjectMembers(headers, directoryId, projectMembersProjectId);
-  }
+	    try {
+	      return await listProjectMembers(headers, directoryId, projectMembersProjectId, principal.userPoolId);
+	    } catch (error) {
+	      return toProjectDataError(error, headers, 'Failed to load project members.');
+	    }
+	  }
+
+	  const projectUsersProjectId = readProjectUsersProjectId(event);
+
+	  if (projectUsersProjectId) {
+	    const permissionError = await enforceProjectPermission(
+	      headers,
+	      principal,
+	      projectUsersProjectId,
+	      'manager',
+	    );
+
+	    if (permissionError) {
+	      return permissionError;
+	    }
+
+	    try {
+	      return await listProjectUsers(event, headers, principal.userPoolId);
+	    } catch (error) {
+	      return toProjectDataError(error, headers, 'Failed to load Cognito users.');
+	    }
+	  }
 
   const projectMemberParams = readProjectMemberParams(event);
 
@@ -385,11 +410,19 @@ exports.handler = async (event) => {
       return permissionError;
     }
 
-    if (event.requestContext?.http?.method === 'PATCH') {
-      return updateProjectMember(event, headers, directoryId, projectMemberParams.projectId, projectMemberParams.memberKey);
-    }
+	    if (event.requestContext?.http?.method === 'PATCH') {
+	      try {
+	        return await updateProjectMember(event, headers, directoryId, projectMemberParams.projectId, projectMemberParams.memberKey, principal.userPoolId);
+	      } catch (error) {
+	        return toProjectDataError(error, headers, 'Failed to update project member.');
+	      }
+	    }
 
-    return removeProjectMember(headers, directoryId, projectMemberParams.projectId, projectMemberParams.memberKey);
+	    try {
+	      return await removeProjectMember(headers, directoryId, projectMemberParams.projectId, projectMemberParams.memberKey);
+	    } catch (error) {
+	      return toProjectDataError(error, headers, 'Failed to remove project member.');
+	    }
   }
 
   if (isProjectDirectoryRequest(event)) {
@@ -424,18 +457,19 @@ exports.handler = async (event) => {
       return permissionError;
     }
 
-    if (event.requestContext?.http?.method === 'POST') {
-      return await createProjectTask(event, headers, directoryId, decodedProjectId);
-    }
+	    if (event.requestContext?.http?.method === 'POST') {
+	      return await createProjectTask(event, headers, directoryId, decodedProjectId, principal.userPoolId);
+	    }
 
     if (taskStatusParams) {
       return await updateProjectTaskStatus(
         event,
-        headers,
-        directoryId,
-        decodedProjectId,
-        taskStatusParams.taskId,
-      );
+	        headers,
+	        directoryId,
+	        decodedProjectId,
+	        taskStatusParams.taskId,
+	        principal.userPoolId,
+	      );
     }
 
     if (event.requestContext?.http?.method !== 'GET') {
@@ -454,7 +488,7 @@ exports.handler = async (event) => {
 
     return json(200, {
       projectId: decodedProjectId,
-      tasks: items.map(toTask),
+	      tasks: await hydrateProjectTasks(items.map(toTask), principal.userPoolId),
     }, headers);
   } catch (error) {
     return toProjectDataError(error, headers, 'Failed to load project tasks.');
@@ -639,11 +673,32 @@ async function archiveProject(headers, directoryId, teamId, projectId) {
     },
   }));
 
-  return json(200, { teamId, projectId, archivedAt }, headers);
-}
+	  return json(200, { teamId, projectId, archivedAt }, headers);
+	}
 
-async function listProjectMembers(headers, directoryId, projectId) {
-  const items = await queryAll({
+	async function listProjectUsers(event, headers, userPoolId) {
+	  if (!userPoolId) {
+	    return json(503, { message: 'Cognito user pool is not available.' }, headers);
+	  }
+
+	  const query = event.queryStringParameters?.query?.trim();
+	  const limit = clampCognitoPageLimit(Number(event.queryStringParameters?.limit ?? 20));
+	  const response = await cognito.send(new ListUsersCommand({
+	    UserPoolId: userPoolId,
+	    Limit: limit,
+	    ...(event.queryStringParameters?.nextToken ? { PaginationToken: event.queryStringParameters.nextToken } : {}),
+	    ...(event.queryStringParameters?.paginationToken ? { PaginationToken: event.queryStringParameters.paginationToken } : {}),
+	    ...(query ? { Filter: '"email"^="' + escapeCognitoFilterValue(query.toLowerCase()) + '"' } : {}),
+	  }));
+
+	  return json(200, {
+	    users: (response.Users ?? []).map(toCognitoUserProfile).filter(Boolean),
+	    nextToken: response.PaginationToken,
+	  }, headers);
+	}
+
+	async function listProjectMembers(headers, directoryId, projectId, userPoolId) {
+	  const items = await queryAll({
     TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
     KeyConditionExpression: 'directoryId = :directoryId',
     ExpressionAttributeValues: {
@@ -651,23 +706,22 @@ async function listProjectMembers(headers, directoryId, projectId) {
     },
     ScanIndexForward: true,
   });
-  const members = items
-    .filter((item) => item.entryType?.S === 'project-member' && item.projectId?.S === projectId)
-    .sort(compareProjectMembers)
-    .map(toProjectMember);
+	  const members = items
+	    .filter((item) => item.entryType?.S === 'project-member' && item.projectId?.S === projectId)
+	    .sort(compareProjectMembers)
+	    .map(toProjectMember);
 
-  return json(200, { projectId, members }, headers);
-}
+	  return json(200, { projectId, members: await hydrateProjectMembers(members, userPoolId) }, headers);
+	}
 
-async function updateProjectMember(event, headers, directoryId, projectId, memberKey) {
-  const body = readJsonBody(event);
-  const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
-  const email = body.email === undefined ? normalizedMemberKey : normalizeProjectMemberKey(body.email);
-  const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : undefined;
+	async function updateProjectMember(event, headers, directoryId, projectId, memberKey, userPoolId) {
+	  const body = readJsonBody(event);
+	  const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
 
-  if (!normalizedMemberKey || !email) {
-    return json(400, { message: 'Project member email is required.' }, headers);
-  }
+	  if (!normalizedMemberKey) {
+	    return json(400, { message: 'Project member email is required.' }, headers);
+	  }
+	  const profile = await getUserProfile(userPoolId, normalizedMemberKey);
 
   if (!isProjectRole(body.role)) {
     return json(400, { message: 'Project role is invalid.' }, headers);
@@ -690,23 +744,23 @@ async function updateProjectMember(event, headers, directoryId, projectId, membe
   const item = {
     directoryId: { S: directoryId },
     entryKey: { S: createProjectMemberEntryKey(projectId, normalizedMemberKey) },
-    entryType: { S: 'project-member' },
-    projectId: { S: projectId },
-    memberKey: { S: normalizedMemberKey },
-    email: { S: email },
-    role: { S: body.role },
-    createdAt: { S: existingMember?.createdAt?.S ?? updatedAt },
-    updatedAt: { S: updatedAt },
-    ...(name ? { name: { S: name } } : {}),
-  };
+	    entryType: { S: 'project-member' },
+	    projectId: { S: projectId },
+	    memberKey: { S: normalizedMemberKey },
+	    email: { S: profile.email },
+	    role: { S: body.role },
+	    createdAt: { S: existingMember?.createdAt?.S ?? updatedAt },
+	    updatedAt: { S: updatedAt },
+	    ...(profile.name ? { name: { S: profile.name } } : {}),
+	  };
 
   await dynamodb.send(new PutItemCommand({
     TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
     Item: item,
   }));
 
-  return json(200, { member: toProjectMember(item) }, headers);
-}
+	  return json(200, { member: await hydrateProjectMember(toProjectMember(item), userPoolId) }, headers);
+	}
 
 async function removeProjectMember(headers, directoryId, projectId, memberKey) {
   const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
@@ -744,28 +798,28 @@ async function removeProjectMember(headers, directoryId, projectId, memberKey) {
   return json(200, { projectId, memberId: normalizedMemberKey }, headers);
 }
 
-async function createProjectTask(event, headers, directoryId, projectId) {
-  const body = readJsonBody(event);
+	async function createProjectTask(event, headers, directoryId, projectId, userPoolId) {
+	  const body = readJsonBody(event);
+	  const assigneeUserId = normalizeProjectMemberKey(body.assigneeUserId ?? body.assignee);
 
-  if (
-    typeof body.title !== 'string' ||
-    typeof body.assignee !== 'string' ||
-    typeof body.dueDate !== 'string' ||
-    !body.title.trim() ||
-    !body.assignee.trim() ||
-    !body.dueDate.trim()
-  ) {
-    return json(400, { message: 'Task title, assignee, and due date are required.' }, headers);
+	  if (
+	    typeof body.title !== 'string' ||
+	    typeof body.dueDate !== 'string' ||
+	    !body.title.trim() ||
+	    !assigneeUserId ||
+	    !body.dueDate.trim()
+	  ) {
+	    return json(400, { message: 'Task title, assignee, and due date are required.' }, headers);
   }
 
   if (!isTaskStatus(body.status) || !isTaskPriority(body.priority)) {
     return json(400, { message: 'Task status or priority is invalid.' }, headers);
   }
 
-  const title = body.title.trim();
-  const assignee = body.assignee.trim();
-  const dueDate = body.dueDate.trim();
-  const directoryProjectId = createDirectoryProjectId(directoryId, projectId);
+	  const title = body.title.trim();
+	  const dueDate = body.dueDate.trim();
+	  await getUserProfile(userPoolId, assigneeUserId);
+	  const directoryProjectId = createDirectoryProjectId(directoryId, projectId);
   const items = await queryAll({
     TableName: process.env.TASKS_TABLE_NAME,
     IndexName: 'ProjectSortOrderIndex',
@@ -780,10 +834,10 @@ async function createProjectTask(event, headers, directoryId, projectId) {
     directoryId: { S: directoryId },
     directoryProjectId: { S: directoryProjectId },
     projectId: { S: projectId },
-    taskId: { S: taskId },
-    sortOrder: { N: String((items.length + 1) * 10) },
-    title: { S: title },
-    assignee: { S: assignee },
+	    taskId: { S: taskId },
+	    sortOrder: { N: String((items.length + 1) * 10) },
+	    title: { S: title },
+	    assigneeUserId: { S: assigneeUserId },
     status: { S: body.status },
     dueDate: { S: dueDate },
     priority: { S: body.priority },
@@ -795,12 +849,12 @@ async function createProjectTask(event, headers, directoryId, projectId) {
     ConditionExpression: 'attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)',
   }));
 
-  return json(201, {
-    task: toTask(item),
-  }, headers);
-}
+	  return json(201, {
+	    task: await hydrateProjectTask(toTask(item), userPoolId),
+	  }, headers);
+	}
 
-async function updateProjectTaskStatus(event, headers, directoryId, projectId, taskId) {
+	async function updateProjectTaskStatus(event, headers, directoryId, projectId, taskId, userPoolId) {
   const body = readJsonBody(event);
 
   if (!isTaskStatus(body.status)) {
@@ -835,10 +889,10 @@ async function updateProjectTaskStatus(event, headers, directoryId, projectId, t
     throw error;
   }
 
-  return json(200, {
-    task: toTask(response.Attributes),
-  }, headers);
-}
+	  return json(200, {
+	    task: await hydrateProjectTask(toTask(response.Attributes), userPoolId),
+	  }, headers);
+	}
 
 async function listProjectDirectory(event, headers, directoryId) {
   const locale = event.queryStringParameters?.locale === 'en' ? 'en' : 'ja';
@@ -904,17 +958,27 @@ function readArchiveProjectParams(event) {
   return teamId && projectId ? { teamId, projectId } : undefined;
 }
 
-function readProjectMembersProjectId(event) {
-  if (event.requestContext?.http?.method !== 'GET') {
-    return undefined;
-  }
+	function readProjectMembersProjectId(event) {
+	  if (event.requestContext?.http?.method !== 'GET') {
+	    return undefined;
+	  }
 
   const encodedProjectId = event.rawPath?.match(/^\\/(?:api\\/)?projects\\/([^/]+)\\/members$/)?.[1];
 
-  return encodedProjectId ? decodePathSegment(encodedProjectId) : undefined;
-}
+	  return encodedProjectId ? decodePathSegment(encodedProjectId) : undefined;
+	}
 
-function readProjectMemberParams(event) {
+	function readProjectUsersProjectId(event) {
+	  if (event.requestContext?.http?.method !== 'GET') {
+	    return undefined;
+	  }
+
+	  const encodedProjectId = event.rawPath?.match(/^\\/(?:api\\/)?projects\\/([^/]+)\\/users$/)?.[1];
+
+	  return encodedProjectId ? decodePathSegment(encodedProjectId) : undefined;
+	}
+
+	function readProjectMemberParams(event) {
   if (event.requestContext?.http?.method !== 'PATCH' && event.requestContext?.http?.method !== 'DELETE') {
     return undefined;
   }
@@ -939,12 +1003,12 @@ function readProjectTaskStatusParams(event) {
 }
 
 async function enforceProjectPermission(headers, principal, projectId, minimumRole) {
-  if (!(await hasProjectAccess(principal.directoryId, projectId))) {
-    return json(403, { message: 'Project access is denied.' }, headers);
-  }
-
   if (principal.isSystemAdmin) {
     return undefined;
+  }
+
+  if (!(await hasProjectAccess(principal.directoryId, projectId))) {
+    return json(403, { message: 'Project access is denied.' }, headers);
   }
 
   const role = await getProjectRole(principal.directoryId, projectId, principal.userKey);
@@ -1000,8 +1064,8 @@ async function getProjectRole(directoryId, projectId, memberKey) {
   return member?.role?.S;
 }
 
-async function queryAll(input) {
-  const items = [];
+	async function queryAll(input) {
+	  const items = [];
   let ExclusiveStartKey;
 
   do {
@@ -1014,21 +1078,125 @@ async function queryAll(input) {
     ExclusiveStartKey = response.LastEvaluatedKey;
   } while (ExclusiveStartKey);
 
-  return items;
-}
+	  return items;
+	}
 
-function json(statusCode, body, headers) {
+	async function hydrateProjectMembers(members, userPoolId) {
+	  return Promise.all(members.map((member) => hydrateProjectMember(member, userPoolId)));
+	}
+
+	async function hydrateProjectMember(member, userPoolId) {
+	  try {
+	    const profile = await getUserProfile(userPoolId, member.id);
+
+	    return {
+	      ...member,
+	      id: profile.id,
+	      email: profile.email,
+	      username: profile.username,
+	      name: profile.name,
+	      enabled: profile.enabled,
+	      status: profile.status,
+	    };
+	  } catch (error) {
+	    if (error?.name === 'UserNotFoundException') {
+	      return member;
+	    }
+
+	    throw error;
+	  }
+	}
+
+	async function hydrateProjectTasks(tasks, userPoolId) {
+	  const profiles = new Map();
+	  const userIds = [...new Set(tasks.map((task) => task.assigneeUserId).filter(Boolean))];
+
+	  await Promise.all(userIds.map(async (userId) => {
+	    try {
+	      profiles.set(userId, await getUserProfile(userPoolId, userId));
+	    } catch (error) {
+	      if (error?.name !== 'UserNotFoundException') {
+	        throw error;
+	      }
+	    }
+	  }));
+
+	  return tasks.map((task) => hydrateProjectTaskFromProfiles(task, profiles));
+	}
+
+	async function hydrateProjectTask(task, userPoolId) {
+	  if (!task.assigneeUserId) {
+	    return task;
+	  }
+
+	  try {
+	    const profile = await getUserProfile(userPoolId, task.assigneeUserId);
+	    return hydrateProjectTaskFromProfiles(task, new Map([[task.assigneeUserId, profile]]));
+	  } catch (error) {
+	    if (error?.name === 'UserNotFoundException') {
+	      return task;
+	    }
+
+	    throw error;
+	  }
+	}
+
+	function hydrateProjectTaskFromProfiles(task, profiles) {
+	  if (!task.assigneeUserId) {
+	    return task;
+	  }
+
+	  const profile = profiles.get(task.assigneeUserId);
+
+	  if (!profile) {
+	    return task;
+	  }
+
+	  return {
+	    ...task,
+	    assigneeEmail: profile.email,
+	    assigneeName: profile.name,
+	  };
+	}
+
+	async function getUserProfile(userPoolId, userId) {
+	  if (!userPoolId) {
+	    const error = new Error('Cognito user pool is not available.');
+	    error.name = 'ResourceNotFoundException';
+	    throw error;
+	  }
+
+	  const normalizedUserId = normalizeProjectMemberKey(userId);
+	  const profile = toCognitoUserProfile(await cognito.send(new AdminGetUserCommand({
+	    UserPoolId: userPoolId,
+	    Username: normalizedUserId,
+	  })));
+
+	  if (!profile) {
+	    const error = new Error('Cognito user was not found.');
+	    error.name = 'UserNotFoundException';
+	    throw error;
+	  }
+
+	  return profile;
+	}
+
+	function json(statusCode, body, headers) {
   return { statusCode, headers, body: JSON.stringify(body) };
 }
 
 function toProjectDataError(error, headers, fallbackMessage) {
   console.error(error);
 
-  if (error?.name === 'ConditionalCheckFailedException') {
-    return json(409, { message: 'The same item already exists.' }, headers);
-  }
+	  if (error?.name === 'ConditionalCheckFailedException') {
+	    return json(409, { message: 'The same item already exists.' }, headers);
+	  }
 
-  if (error?.name === 'ResourceNotFoundException') {
+	  if (error?.name === 'UserNotFoundException') {
+	    return json(404, { message: 'Cognito user was not found.' }, headers);
+	  }
+
+	  if (error?.name === 'ResourceNotFoundException') {
     return json(503, { message: 'Project data is not initialized.' }, headers);
   }
 
@@ -1091,16 +1259,49 @@ function toProjectPrincipal(user, accessToken) {
     'user#' + normalizedUserKey;
   const groups = readCognitoGroups(accessToken);
 
-  return {
-    directoryId,
-    userKey: normalizedUserKey,
-    isSystemAdmin: groups.some((group) => getSystemAdminGroups().includes(group)),
-  };
-}
+	  return {
+	    directoryId,
+	    userKey: normalizedUserKey,
+	    userPoolId: readCognitoUserPoolId(accessToken),
+	    isSystemAdmin: groups.some((group) => getSystemAdminGroups().includes(group)),
+	  };
+	}
 
-function readUserAttribute(user, name) {
-  return user.UserAttributes?.find((attribute) => attribute.Name === name)?.Value;
-}
+	function readUserAttribute(user, name) {
+	  return user.UserAttributes?.find((attribute) => attribute.Name === name)?.Value;
+	}
+
+	function readCognitoUserPoolId(accessToken) {
+	  const issuer = decodeJwtPayload(accessToken)?.iss;
+
+	  if (typeof issuer !== 'string') {
+	    return undefined;
+	  }
+
+	  return issuer.split('/').filter(Boolean).pop();
+	}
+
+	function toCognitoUserProfile(user) {
+	  const email = readCognitoUserAttribute(user, 'email')?.trim().toLowerCase();
+	  const username = user.Username?.trim();
+
+	  if (!email || !username) {
+	    return undefined;
+	  }
+
+	  return {
+	    id: email,
+	    username,
+	    email,
+	    name: readCognitoUserAttribute(user, 'name')?.trim() || undefined,
+	    enabled: user.Enabled,
+	    status: user.UserStatus,
+	  };
+	}
+
+	function readCognitoUserAttribute(user, name) {
+	  return (user.Attributes ?? user.UserAttributes)?.find((attribute) => attribute.Name === name)?.Value;
+	}
 
 function readCognitoGroups(accessToken) {
   const claims = decodeJwtPayload(accessToken);
@@ -1249,13 +1450,13 @@ function toProjectDirectory(items, locale) {
   return teams;
 }
 
-function toProjectMember(item) {
-  const member = {
-    id: item.memberKey.S,
-    email: item.email.S,
-    role: item.role.S,
-    updatedAt: item.updatedAt.S,
-  };
+	function toProjectMember(item) {
+	  const member = {
+	    id: item.memberKey.S,
+	    email: item.email?.S ?? item.memberKey.S,
+	    role: item.role.S,
+	    updatedAt: item.updatedAt.S,
+	  };
 
   if (item.name?.S) {
     member.name = item.name.S;
@@ -1271,7 +1472,10 @@ function compareProjectMembers(first, second) {
     return roleDelta;
   }
 
-  return (first.name?.S ?? first.email?.S ?? '').localeCompare(second.name?.S ?? second.email?.S ?? '', 'ja');
+	  return (first.name?.S ?? first.email?.S ?? first.memberKey?.S ?? '').localeCompare(
+	    second.name?.S ?? second.email?.S ?? second.memberKey?.S ?? '',
+	    'ja',
+	  );
 }
 
 function localizedName(item, locale) {
@@ -1298,11 +1502,15 @@ function toTask(item) {
     task.title = item.title.S;
   }
 
-  if (item.assigneeKey?.S) {
-    task.assigneeKey = item.assigneeKey.S;
-  }
+	  if (item.assigneeKey?.S) {
+	    task.assigneeKey = item.assigneeKey.S;
+	  }
 
-  if (item.assignee?.S) {
+	  if (item.assigneeUserId?.S) {
+	    task.assigneeUserId = item.assigneeUserId.S;
+	  }
+
+	  if (item.assignee?.S) {
     task.assignee = item.assignee.S;
   }
 
@@ -1337,11 +1545,23 @@ function projectRoleWeight(role) {
   return role === 'viewer' ? 1 : 0;
 }
 
-function normalizeProjectMemberKey(value) {
-  return typeof value === 'string' ? value.trim().toLowerCase() : '';
-}
+	function normalizeProjectMemberKey(value) {
+	  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+	}
 
-function isProjectTone(value) {
+	function clampCognitoPageLimit(value) {
+	  if (!Number.isFinite(value)) {
+	    return 20;
+	  }
+
+	  return Math.max(1, Math.min(60, Math.floor(value)));
+	}
+
+	function escapeCognitoFilterValue(value) {
+	  return String(value).replace(/\\\\/g, '\\\\\\\\').replace(/"/g, '\\\\"');
+	}
+
+	function isProjectTone(value) {
   return value === 'blue' || value === 'purple' || value === 'green' || value === 'yellow';
 }
       `),
@@ -1349,12 +1569,12 @@ function isProjectTone(value) {
 
     tasksTable.grantReadWriteData(listTasksFunction);
     projectDirectoryTable.grantReadWriteData(listTasksFunction);
-    listTasksFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['cognito-idp:GetUser'],
-        resources: ['*'],
-      }),
-    );
+	    listTasksFunction.addToRolePolicy(
+	      new iam.PolicyStatement({
+	        actions: ['cognito-idp:AdminGetUser', 'cognito-idp:GetUser', 'cognito-idp:ListUsers'],
+	        resources: ['*'],
+	      }),
+	    );
 
     const tasksFunctionUrl = listTasksFunction.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.NONE,

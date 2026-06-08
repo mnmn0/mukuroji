@@ -46,24 +46,42 @@ if [ "$CLIENT_ID" = "None" ] || [ -z "$CLIENT_ID" ]; then
     --output text)"
 fi
 
-if ! aws_local cognito-idp admin-get-user \
-  --user-pool-id "$POOL_ID" \
-  --username "$TEST_USERNAME" >/dev/null 2>&1; then
-  aws_local cognito-idp admin-create-user \
-    --user-pool-id "$POOL_ID" \
-    --username "$TEST_USERNAME" \
-    --temporary-password "$TEST_PASSWORD" \
-    --message-action SUPPRESS \
-    --user-attributes Name=email,Value="$TEST_USERNAME" Name=email_verified,Value=true \
-    >/dev/null
-fi
+ensure_cognito_user() {
+  username="$1"
+  display_name="$2"
 
-aws_local cognito-idp admin-set-user-password \
-  --user-pool-id "$POOL_ID" \
-  --username "$TEST_USERNAME" \
-  --password "$TEST_PASSWORD" \
-  --permanent \
-  >/dev/null
+  if ! aws_local cognito-idp admin-get-user \
+    --user-pool-id "$POOL_ID" \
+    --username "$username" >/dev/null 2>&1; then
+    aws_local cognito-idp admin-create-user \
+      --user-pool-id "$POOL_ID" \
+      --username "$username" \
+      --temporary-password "$TEST_PASSWORD" \
+      --message-action SUPPRESS \
+      --user-attributes Name=email,Value="$username" Name=email_verified,Value=true Name=name,Value="$display_name" \
+      >/dev/null
+  else
+    aws_local cognito-idp admin-update-user-attributes \
+      --user-pool-id "$POOL_ID" \
+      --username "$username" \
+      --user-attributes Name=email,Value="$username" Name=email_verified,Value=true Name=name,Value="$display_name" \
+      >/dev/null
+  fi
+
+  aws_local cognito-idp admin-set-user-password \
+    --user-pool-id "$POOL_ID" \
+    --username "$username" \
+    --password "$TEST_PASSWORD" \
+    --permanent \
+    >/dev/null
+}
+
+ensure_cognito_user "$TEST_USERNAME" "Demo User"
+ensure_cognito_user "sato@example.com" "佐藤 花子"
+ensure_cognito_user "suzuki@example.com" "鈴木 大輔"
+ensure_cognito_user "tanaka@example.com" "田中 美咲"
+ensure_cognito_user "yamamoto@example.com" "山本 健太"
+ensure_cognito_user "viewer@example.com" "Viewer User"
 
 if ! aws_local cognito-idp get-group \
   --user-pool-id "$POOL_ID" \
@@ -127,16 +145,16 @@ fi
 TASKS_UNPROCESSED_TABLES="$(aws_local dynamodb batch-write-item \
   --request-items "{
     \"$PROJECT_TASKS_TABLE\": [
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"wireframe\"},\"sortOrder\":{\"N\":\"10\"},\"titleKey\":{\"S\":\"tasks.item.wireframe\"},\"assigneeKey\":{\"S\":\"tasks.assignee.sato\"},\"status\":{\"S\":\"in-progress\"},\"dueDate\":{\"S\":\"2026/06/03\"},\"priority\":{\"S\":\"high\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"brand-guideline\"},\"sortOrder\":{\"N\":\"20\"},\"titleKey\":{\"S\":\"tasks.item.brandGuideline\"},\"assigneeKey\":{\"S\":\"tasks.assignee.suzuki\"},\"status\":{\"S\":\"review\"},\"dueDate\":{\"S\":\"2026/06/05\"},\"priority\":{\"S\":\"medium\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"pricing-content\"},\"sortOrder\":{\"N\":\"30\"},\"titleKey\":{\"S\":\"tasks.item.pricingContent\"},\"assigneeKey\":{\"S\":\"tasks.assignee.tanaka\"},\"status\":{\"S\":\"in-progress\"},\"dueDate\":{\"S\":\"2026/06/08\"},\"priority\":{\"S\":\"high\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"seo-research\"},\"sortOrder\":{\"N\":\"40\"},\"titleKey\":{\"S\":\"tasks.item.seoResearch\"},\"assigneeKey\":{\"S\":\"tasks.assignee.yamamoto\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/09\"},\"priority\":{\"S\":\"medium\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"hero-design\"},\"sortOrder\":{\"N\":\"50\"},\"titleKey\":{\"S\":\"tasks.item.heroDesign\"},\"assigneeKey\":{\"S\":\"tasks.assignee.sato\"},\"status\":{\"S\":\"review\"},\"dueDate\":{\"S\":\"2026/06/10\"},\"priority\":{\"S\":\"medium\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"analytics-tags\"},\"sortOrder\":{\"N\":\"60\"},\"titleKey\":{\"S\":\"tasks.item.analyticsTags\"},\"assigneeKey\":{\"S\":\"tasks.assignee.suzuki\"},\"status\":{\"S\":\"in-progress\"},\"dueDate\":{\"S\":\"2026/06/11\"},\"priority\":{\"S\":\"low\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"competitor-report\"},\"sortOrder\":{\"N\":\"70\"},\"titleKey\":{\"S\":\"tasks.item.competitorReport\"},\"assigneeKey\":{\"S\":\"tasks.assignee.tanaka\"},\"status\":{\"S\":\"done\"},\"dueDate\":{\"S\":\"2026/06/02\"},\"priority\":{\"S\":\"low\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"terms-page\"},\"sortOrder\":{\"N\":\"80\"},\"titleKey\":{\"S\":\"tasks.item.termsPage\"},\"assigneeKey\":{\"S\":\"tasks.assignee.yamamoto\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/12\"},\"priority\":{\"S\":\"medium\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"faq-content\"},\"sortOrder\":{\"N\":\"90\"},\"titleKey\":{\"S\":\"tasks.item.faqContent\"},\"assigneeKey\":{\"S\":\"tasks.assignee.sato\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/15\"},\"priority\":{\"S\":\"low\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"landing-release\"},\"sortOrder\":{\"N\":\"100\"},\"titleKey\":{\"S\":\"tasks.item.landingRelease\"},\"assigneeKey\":{\"S\":\"tasks.assignee.suzuki\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/16\"},\"priority\":{\"S\":\"high\"}}}}
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"wireframe\"},\"sortOrder\":{\"N\":\"10\"},\"titleKey\":{\"S\":\"tasks.item.wireframe\"},\"assigneeUserId\":{\"S\":\"sato@example.com\"},\"status\":{\"S\":\"in-progress\"},\"dueDate\":{\"S\":\"2026/06/03\"},\"priority\":{\"S\":\"high\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"brand-guideline\"},\"sortOrder\":{\"N\":\"20\"},\"titleKey\":{\"S\":\"tasks.item.brandGuideline\"},\"assigneeUserId\":{\"S\":\"suzuki@example.com\"},\"status\":{\"S\":\"review\"},\"dueDate\":{\"S\":\"2026/06/05\"},\"priority\":{\"S\":\"medium\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"pricing-content\"},\"sortOrder\":{\"N\":\"30\"},\"titleKey\":{\"S\":\"tasks.item.pricingContent\"},\"assigneeUserId\":{\"S\":\"tanaka@example.com\"},\"status\":{\"S\":\"in-progress\"},\"dueDate\":{\"S\":\"2026/06/08\"},\"priority\":{\"S\":\"high\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"seo-research\"},\"sortOrder\":{\"N\":\"40\"},\"titleKey\":{\"S\":\"tasks.item.seoResearch\"},\"assigneeUserId\":{\"S\":\"yamamoto@example.com\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/09\"},\"priority\":{\"S\":\"medium\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"hero-design\"},\"sortOrder\":{\"N\":\"50\"},\"titleKey\":{\"S\":\"tasks.item.heroDesign\"},\"assigneeUserId\":{\"S\":\"sato@example.com\"},\"status\":{\"S\":\"review\"},\"dueDate\":{\"S\":\"2026/06/10\"},\"priority\":{\"S\":\"medium\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"analytics-tags\"},\"sortOrder\":{\"N\":\"60\"},\"titleKey\":{\"S\":\"tasks.item.analyticsTags\"},\"assigneeUserId\":{\"S\":\"suzuki@example.com\"},\"status\":{\"S\":\"in-progress\"},\"dueDate\":{\"S\":\"2026/06/11\"},\"priority\":{\"S\":\"low\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"competitor-report\"},\"sortOrder\":{\"N\":\"70\"},\"titleKey\":{\"S\":\"tasks.item.competitorReport\"},\"assigneeUserId\":{\"S\":\"tanaka@example.com\"},\"status\":{\"S\":\"done\"},\"dueDate\":{\"S\":\"2026/06/02\"},\"priority\":{\"S\":\"low\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"terms-page\"},\"sortOrder\":{\"N\":\"80\"},\"titleKey\":{\"S\":\"tasks.item.termsPage\"},\"assigneeUserId\":{\"S\":\"yamamoto@example.com\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/12\"},\"priority\":{\"S\":\"medium\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"faq-content\"},\"sortOrder\":{\"N\":\"90\"},\"titleKey\":{\"S\":\"tasks.item.faqContent\"},\"assigneeUserId\":{\"S\":\"sato@example.com\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/15\"},\"priority\":{\"S\":\"low\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"landing-release\"},\"sortOrder\":{\"N\":\"100\"},\"titleKey\":{\"S\":\"tasks.item.landingRelease\"},\"assigneeUserId\":{\"S\":\"suzuki@example.com\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/16\"},\"priority\":{\"S\":\"high\"}}}}
     ]
   }" \
   --query 'length(UnprocessedItems)' \
