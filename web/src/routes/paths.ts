@@ -9,7 +9,7 @@ export const workspaceNavPaths: Record<SidebarNavId, string> = {
   inbox: '/inbox',
   dashboard: '/dashboard',
   reports: '/reports',
-  invite: '/invite',
+  permissions: '/permissions',
   help: '/help',
   settings: '/settings',
 }

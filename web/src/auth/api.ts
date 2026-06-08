@@ -35,6 +35,14 @@ export type CurrentUser = {
    * Cognito から返されたユーザー属性です。
    */
   attributes: Record<string, string>
+  /**
+   * Cognito access token に含まれるグループ名です。
+   */
+  groups: string[]
+  /**
+   * システム管理者として扱われるかどうかです。
+   */
+  isSystemAdmin: boolean
 }
 
 /**

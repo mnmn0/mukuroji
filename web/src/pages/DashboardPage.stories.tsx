@@ -19,6 +19,8 @@ const storyUser: CurrentUser = {
   attributes: {
     email: 'demo@example.com',
   },
+  groups: ['mukuroji-system-admins'],
+  isSystemAdmin: true,
 }
 
 const storySummary: DashboardSummary = {

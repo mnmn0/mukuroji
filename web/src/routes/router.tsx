@@ -33,8 +33,12 @@ export const router = createBrowserRouter([
     element: <WorkspacePage view="reports" />,
   },
   {
+    path: '/permissions',
+    element: <WorkspacePage view="permissions" />,
+  },
+  {
     path: '/invite',
-    element: <WorkspacePage view="invite" />,
+    element: <Navigate to="/permissions" replace />,
   },
   {
     path: '/help',

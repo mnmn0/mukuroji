@@ -8,6 +8,7 @@ import {
   DynamoDbProjectDirectoryClient,
   DynamoDbProjectTasksClient,
   resetApiClientsForTest,
+  type ProjectRole,
 } from './index'
 
 afterEach(() => {
@@ -43,6 +44,22 @@ test('loads project directory from the authenticated user scoped partition', asy
   expect(calls.directoryReads).toEqual([{ directoryId: 'user#demo@example.com', locale: 'en' }])
 })
 
+test('returns Cognito groups and system admin status for the current user', async () => {
+  configureFakeProjectClients(true)
+
+  const response = await app.request('/api/auth/me', {
+    headers: {
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    groups: ['mukuroji-system-admins'],
+    isSystemAdmin: true,
+  })
+})
+
 test('loads dashboard summary from the authenticated user scoped directory', async () => {
   const calls = configureFakeProjectClients(true)
 
@@ -60,7 +77,13 @@ test('loads dashboard summary from the authenticated user scoped directory', asy
     updatedAt: '2026-06-03T00:00:00.000Z',
     source: 'dynamodb',
   })
-  expect(calls.summaryReads).toEqual(['user#demo@example.com'])
+  expect(calls.summaryReads).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      isSystemAdmin: false,
+      userKey: 'demo@example.com',
+    },
+  ])
 })
 
 test('denies project tasks when the project is outside the user directory', async () => {
@@ -111,13 +134,108 @@ test('loads project tasks after project access is confirmed', async () => {
   ])
 })
 
+test('lists Cognito users for project member assignment when the current user is project manager', async () => {
+  const calls = configureFakeProjectClients(true, { role: 'manager' })
+
+  const response = await app.request(
+    '/api/projects/refero/users?query=sato&limit=2&nextToken=next-page-token',
+    {
+      headers: {
+        Authorization: 'Bearer test-token',
+      },
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    users: [
+      {
+        id: 'sato@example.com',
+        username: 'sato@example.com',
+        email: 'sato@example.com',
+        name: '佐藤 花子',
+        enabled: true,
+        status: 'CONFIRMED',
+      },
+    ],
+    nextToken: undefined,
+  })
+  expect(calls.accessChecks).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+  ])
+  expect(calls.userLists).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      limit: 2,
+      paginationToken: 'next-page-token',
+      query: 'sato',
+    },
+  ])
+})
+
+test('keeps project members available when Cognito profile hydration fails', async () => {
+  const calls = configureFakeProjectClients(true, {
+    profileError: new Error('Cognito profile hydration failed.'),
+  })
+
+  const response = await app.request('/api/projects/refero/members', {
+    headers: {
+      Authorization: 'Bearer test-token',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    projectId: 'refero',
+    members: [
+      {
+        id: 'demo@example.com',
+        email: 'demo@example.com',
+        role: 'manager',
+        updatedAt: '2026-06-08T00:00:00.000Z',
+      },
+    ],
+  })
+  expect(calls.userProfiles).toEqual(['demo@example.com'])
+})
+
+test('keeps project tasks available when Cognito assignee hydration fails', async () => {
+  const calls = configureFakeProjectClients(true, {
+    profileError: new Error('Cognito profile hydration failed.'),
+    taskAssigneeUserId: 'sato@example.com',
+  })
+
+  const response = await app.request('/api/projects/refero/tasks', {
+    headers: {
+      Authorization: 'Bearer test-token',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    projectId: 'refero',
+    tasks: [
+      {
+        id: 'wireframe',
+        titleKey: 'tasks.item.wireframe',
+        assigneeKey: 'tasks.assignee.sato',
+        assigneeUserId: 'sato@example.com',
+        status: 'in-progress',
+        dueDate: '2026/06/03',
+        priority: 'high',
+      },
+    ],
+  })
+  expect(calls.userProfiles).toEqual(['sato@example.com'])
+})
+
 test('creates a team in the authenticated user scoped directory', async () => {
   const calls = configureFakeProjectClients(true)
 
   const response = await app.request('/api/teams', {
     method: 'POST',
     headers: {
-      Authorization: 'Bearer test-token',
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -145,7 +263,7 @@ test('creates a project under an authenticated team directory', async () => {
   const response = await app.request('/api/teams/core-team/projects', {
     method: 'POST',
     headers: {
-      Authorization: 'Bearer test-token',
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -173,7 +291,7 @@ test('archives a team in the authenticated user scoped directory', async () => {
   const response = await app.request('/api/teams/core-team/archive', {
     method: 'PATCH',
     headers: {
-      Authorization: 'Bearer test-token',
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
     },
   })
 
@@ -185,6 +303,130 @@ test('archives a team in the authenticated user scoped directory', async () => {
   expect(calls.teamArchives).toEqual([
     { directoryId: 'user#demo@example.com', teamId: 'core-team' },
   ])
+})
+
+test('denies project task creation when the project role is viewer', async () => {
+  const calls = configureFakeProjectClients(true, { role: 'viewer' })
+
+  const response = await app.request('/api/projects/refero/tasks', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: '新規タスク',
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026/06/20',
+      priority: 'high',
+      status: 'todo',
+    }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toEqual({ message: 'Project access is denied.' })
+  expect(calls.accessChecks).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+  ])
+  expect(calls.taskCreates).toEqual([])
+})
+
+test('denies project member reads when the project role is viewer', async () => {
+  const calls = configureFakeProjectClients(true, { role: 'viewer' })
+
+  const response = await app.request('/api/projects/refero/members', {
+    headers: {
+      Authorization: 'Bearer test-token',
+    },
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toEqual({ message: 'Project access is denied.' })
+  expect(calls.accessChecks).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+  ])
+  expect(calls.memberReads).toEqual([])
+})
+
+test('updates a project member role when the current user is project manager', async () => {
+  const calls = configureFakeProjectClients(true, { role: 'manager' })
+
+  const response = await app.request('/api/projects/refero/members/sato%40example.com', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      email: 'sato@example.com',
+      name: '佐藤 花子',
+      role: 'member',
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    member: {
+      id: 'sato@example.com',
+      email: 'sato@example.com',
+      username: 'sato@example.com',
+      name: '佐藤 花子',
+      enabled: true,
+      status: 'CONFIRMED',
+      role: 'member',
+      updatedAt: '2026-06-08T00:00:00.000Z',
+    },
+  })
+  expect(calls.memberUpdates).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      memberKey: 'sato@example.com',
+      projectId: 'refero',
+      role: 'member',
+    },
+  ])
+  expect(calls.userProfiles).toEqual(['sato@example.com', 'sato@example.com'])
+})
+
+test('lets a system admin update project members without a project role', async () => {
+  const calls = configureFakeProjectClients(false, { role: undefined })
+
+  const response = await app.request('/api/projects/refero/members/viewer%40example.com', {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      email: 'viewer@example.com',
+      role: 'viewer',
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    member: {
+      id: 'viewer@example.com',
+      email: 'viewer@example.com',
+      username: 'viewer@example.com',
+      name: 'Viewer User',
+      enabled: true,
+      status: 'CONFIRMED',
+      role: 'viewer',
+      updatedAt: '2026-06-08T00:00:00.000Z',
+    },
+  })
+  expect(calls.roleChecks).toEqual([])
+  expect(calls.accessChecks).toEqual([])
+  expect(calls.memberUpdates).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      memberKey: 'viewer@example.com',
+      projectId: 'refero',
+      role: 'viewer',
+    },
+  ])
+  expect(calls.userProfiles).toEqual(['viewer@example.com', 'viewer@example.com'])
 })
 
 test('archives a project under an authenticated team directory', async () => {
@@ -548,7 +790,7 @@ test('creates a project task after project access is confirmed', async () => {
     },
     body: JSON.stringify({
       title: '新規タスク',
-      assignee: '佐藤 花子',
+      assigneeUserId: 'sato@example.com',
       dueDate: '2026/06/20',
       priority: 'high',
       status: 'todo',
@@ -560,7 +802,9 @@ test('creates a project task after project access is confirmed', async () => {
     task: {
       id: 'new-task',
       title: '新規タスク',
-      assignee: '佐藤 花子',
+      assigneeUserId: 'sato@example.com',
+      assigneeEmail: 'sato@example.com',
+      assigneeName: '佐藤 花子',
       status: 'todo',
       dueDate: '2026/06/20',
       priority: 'high',
@@ -572,6 +816,7 @@ test('creates a project task after project access is confirmed', async () => {
   expect(calls.taskCreates).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero', title: '新規タスク' },
   ])
+  expect(calls.userProfiles).toEqual(['sato@example.com', 'sato@example.com'])
 })
 
 test('updates a project task status after project access is confirmed', async () => {
@@ -742,7 +987,7 @@ test('DynamoDB task client creates duplicate titled tasks with unique IDs', asyn
   await expect(
     client.createProjectTask('user#demo@example.com', 'refero', {
       title: '新規タスク',
-      assignee: '鈴木 太郎',
+      assigneeUserId: 'suzuki@example.com',
       status: 'todo',
       dueDate: '2026/06/21',
       priority: 'medium',
@@ -751,7 +996,7 @@ test('DynamoDB task client creates duplicate titled tasks with unique IDs', asyn
     task: {
       id: '新規タスク-2',
       title: '新規タスク',
-      assignee: '鈴木 太郎',
+      assigneeUserId: 'suzuki@example.com',
       status: 'todo',
       dueDate: '2026/06/21',
       priority: 'medium',
@@ -777,7 +1022,7 @@ test('DynamoDB task client creates duplicate titled tasks with unique IDs', asyn
         taskId: '新規タスク-2',
         sortOrder: 20,
         title: '新規タスク',
-        assignee: '鈴木 太郎',
+        assigneeUserId: 'suzuki@example.com',
         status: 'todo',
         dueDate: '2026/06/21',
         priority: 'medium',
@@ -846,9 +1091,13 @@ test('DynamoDB task client updates a task status with a conditional write', asyn
 })
 
 test('DynamoDB dashboard summary client derives counts from directory and task data', async () => {
+  const accessListReads: Array<{ directoryId: string; memberKey: string }> = []
+  const directoryReads: Array<{ directoryId: string; locale: Locale }> = []
+  const taskReads: Array<{ directoryId: string; projectId: string }> = []
   const client = new DynamoDbDashboardSummaryClient(
     {
       async getProjectDirectory(directoryId, locale) {
+        directoryReads.push({ directoryId, locale })
         expect(directoryId).toBe('user#demo@example.com')
         expect(locale).toBe('ja')
 
@@ -874,8 +1123,51 @@ test('DynamoDB dashboard summary client derives counts from directory and task d
           ],
         }
       },
+      async getProjectAccess(_directoryId, projectId) {
+        return projectId === 'refero'
+          ? {
+              projectId,
+              role: 'manager' as ProjectRole,
+            }
+          : undefined
+      },
+      async getProjectAccessList(directoryId, memberKey) {
+        accessListReads.push({ directoryId, memberKey })
+
+        return [
+          {
+            projectId: 'refero',
+            role: 'manager' as ProjectRole,
+          },
+        ]
+      },
       async hasProjectAccess() {
         return true
+      },
+      async getProjectRole() {
+        return 'manager' as ProjectRole
+      },
+      async getProjectMembers() {
+        return {
+          projectId: 'unused',
+          members: [],
+        }
+      },
+      async updateProjectMember() {
+        return {
+          member: {
+            id: 'unused',
+            email: 'unused@example.com',
+            role: 'viewer',
+            updatedAt: '2026-06-08T00:00:00.000Z',
+          },
+        }
+      },
+      async removeProjectMember() {
+        return {
+          projectId: 'unused',
+          memberId: 'unused@example.com',
+        }
       },
       async createTeam() {
         return {
@@ -909,7 +1201,9 @@ test('DynamoDB dashboard summary client derives counts from directory and task d
       },
     },
     {
-      async getProjectTasks(_directoryId, projectId) {
+      async getProjectTasks(directoryId, projectId) {
+        taskReads.push({ directoryId, projectId })
+
         return {
           projectId,
           tasks: projectId === 'refero'
@@ -970,13 +1264,24 @@ test('DynamoDB dashboard summary client derives counts from directory and task d
     },
   )
 
-  const summary = await client.getSummary('user#demo@example.com')
+  const summary = await client.getSummary('user#demo@example.com', {
+    userKey: 'demo@example.com',
+    isSystemAdmin: false,
+  })
 
-  expect(summary.projects).toBe(2)
-  expect(summary.tasks).toBe(2)
+  expect(summary.projects).toBe(1)
+  expect(summary.tasks).toBe(1)
   expect(summary.blocked).toBe(1)
   expect(summary.source).toBe('dynamodb')
   expect(Date.parse(summary.updatedAt)).not.toBeNaN()
+  expect(directoryReads).toEqual([])
+  expect(accessListReads).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      memberKey: 'demo@example.com',
+    },
+  ])
+  expect(taskReads).toEqual([{ directoryId: 'user#demo@example.com', projectId: 'refero' }])
 })
 
 test('DynamoDB directory client reads every page from the user partition', async () => {
@@ -1238,13 +1543,143 @@ test('DynamoDB directory client archives teams and projects with conditional upd
   })
 })
 
-function configureFakeProjectClients(hasProjectAccess: boolean) {
+test('DynamoDB directory client manages project member roles', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentInputs.push(command.input)
+
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000010#PROJECT#refero',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'refero',
+              projectSortOrder: 10,
+              nameJa: 'Refero',
+              nameEn: 'Refero',
+              tone: 'blue',
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+              entryType: 'project-member',
+              projectId: 'refero',
+              memberKey: 'demo@example.com',
+              email: 'demo@example.com',
+              name: 'Demo User',
+              role: 'manager',
+              createdAt: '2026-06-08T00:00:00.000Z',
+              updatedAt: '2026-06-08T00:00:00.000Z',
+            },
+          ],
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(
+    client.getProjectMembers('user#demo@example.com', 'refero'),
+  ).resolves.toEqual({
+    projectId: 'refero',
+    members: [
+      {
+        id: 'demo@example.com',
+        email: 'demo@example.com',
+        name: 'Demo User',
+        role: 'manager',
+        updatedAt: '2026-06-08T00:00:00.000Z',
+      },
+    ],
+  })
+  await expect(
+    client.getProjectRole('user#demo@example.com', 'refero', 'DEMO@example.com'),
+  ).resolves.toBe('manager')
+  await expect(
+    client.updateProjectMember('user#demo@example.com', 'refero', 'sato@example.com', {
+      email: 'sato@example.com',
+      name: '佐藤 花子',
+      role: 'member',
+    }),
+  ).resolves.toEqual({
+    member: {
+      id: 'sato@example.com',
+      email: 'sato@example.com',
+      name: '佐藤 花子',
+      role: 'member',
+      updatedAt: expect.any(String),
+    },
+  })
+  await expect(
+    client.removeProjectMember('user#demo@example.com', 'refero', 'demo@example.com'),
+  ).resolves.toEqual({
+    projectId: 'refero',
+    memberId: 'demo@example.com',
+  })
+  expect(sentInputs[3]).toMatchObject({
+    TableName: 'DirectoryTable',
+    Item: {
+      directoryId: 'user#demo@example.com',
+      entryKey: 'PROJECT_MEMBER#refero#sato@example.com',
+      entryType: 'project-member',
+      projectId: 'refero',
+      memberKey: 'sato@example.com',
+      email: 'sato@example.com',
+      name: '佐藤 花子',
+      role: 'member',
+    },
+  })
+  expect(sentInputs[5]).toMatchObject({
+    TableName: 'DirectoryTable',
+    Key: {
+      directoryId: 'user#demo@example.com',
+      entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+    },
+    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
+  })
+})
+
+function configureFakeProjectClients(
+  hasProjectAccess: boolean,
+  options: { profileError?: Error; role?: ProjectRole; taskAssigneeUserId?: string } = {},
+) {
+  const role = 'role' in options ? options.role : 'manager'
   const calls = {
     accessChecks: [] as Array<{ directoryId: string; projectId: string }>,
     directoryReads: [] as Array<{ directoryId: string; locale: string }>,
+    memberDeletes: [] as Array<{ directoryId: string; projectId: string; memberKey: string }>,
+    memberReads: [] as Array<{ directoryId: string; projectId: string }>,
+    memberUpdates: [] as Array<{
+      directoryId: string
+      memberKey: string
+      projectId: string
+      role: string
+    }>,
     projectArchives: [] as Array<{ directoryId: string; teamId: string; projectId: string }>,
     projectCreates: [] as Array<{ directoryId: string; teamId: string; name: string }>,
-    summaryReads: [] as string[],
+    roleChecks: [] as Array<{ directoryId: string; memberKey: string; projectId: string }>,
+    summaryReads: [] as Array<{
+      directoryId: string
+      isSystemAdmin: boolean
+      userKey: string
+    }>,
     teamArchives: [] as Array<{ directoryId: string; teamId: string }>,
     teamCreates: [] as Array<{ directoryId: string; name: string }>,
     taskCreates: [] as Array<{ directoryId: string; projectId: string; title: string }>,
@@ -1255,6 +1690,13 @@ function configureFakeProjectClients(hasProjectAccess: boolean) {
       status: string
       taskId: string
     }>,
+    userLists: [] as Array<{
+      directoryId?: string
+      limit?: number
+      paginationToken?: string
+      query?: string
+    }>,
+    userProfiles: [] as string[],
   }
 
   configureApiClientsForTest({
@@ -1273,10 +1715,31 @@ function configureFakeProjectClients(hasProjectAccess: boolean) {
           ],
         }
       },
+      async listUsers(input) {
+        calls.userLists.push(input)
+
+        return {
+          users: [createFakeCognitoProfile('sato@example.com')],
+          nextToken: undefined,
+        }
+      },
+      async getUserProfile(userId) {
+        calls.userProfiles.push(userId)
+
+        if (options.profileError) {
+          throw options.profileError
+        }
+
+        return createFakeCognitoProfile(userId)
+      },
     },
     dashboardSummary: {
-      async getSummary(directoryId) {
-        calls.summaryReads.push(directoryId)
+      async getSummary(directoryId, accessContext) {
+        calls.summaryReads.push({
+          directoryId,
+          isSystemAdmin: accessContext.isSystemAdmin,
+          userKey: accessContext.userKey,
+        })
 
         return {
           projects: 1,
@@ -1308,10 +1771,82 @@ function configureFakeProjectClients(hasProjectAccess: boolean) {
           ],
         }
       },
+      async getProjectAccess(directoryId, projectId) {
+        calls.accessChecks.push({ directoryId, projectId })
+
+        if (!hasProjectAccess) {
+          return undefined
+        }
+
+        return {
+          projectId,
+          role,
+        }
+      },
+      async getProjectAccessList(directoryId) {
+        calls.accessChecks.push({ directoryId, projectId: '*' })
+
+        if (!hasProjectAccess) {
+          return []
+        }
+
+        return [
+          {
+            projectId: 'refero',
+            role,
+          },
+        ]
+      },
       async hasProjectAccess(directoryId, projectId) {
         calls.accessChecks.push({ directoryId, projectId })
 
         return hasProjectAccess
+      },
+      async getProjectRole(directoryId, projectId, memberKey) {
+        calls.roleChecks.push({ directoryId, projectId, memberKey })
+
+        return role
+      },
+      async getProjectMembers(directoryId, projectId) {
+        calls.memberReads.push({ directoryId, projectId })
+
+        return {
+          projectId,
+          members: [
+            {
+              id: 'demo@example.com',
+              email: 'demo@example.com',
+              role: 'manager',
+              updatedAt: '2026-06-08T00:00:00.000Z',
+            },
+          ],
+        }
+      },
+      async updateProjectMember(directoryId, projectId, memberKey, input) {
+        calls.memberUpdates.push({
+          directoryId,
+          memberKey,
+          projectId,
+          role: String(input.role),
+        })
+
+        return {
+          member: {
+            id: memberKey,
+            email: String(input.email ?? memberKey),
+            name: typeof input.name === 'string' ? input.name : undefined,
+            role: input.role === 'member' ? 'member' : input.role === 'manager' ? 'manager' : 'viewer',
+            updatedAt: '2026-06-08T00:00:00.000Z',
+          },
+        }
+      },
+      async removeProjectMember(directoryId, projectId, memberKey) {
+        calls.memberDeletes.push({ directoryId, projectId, memberKey })
+
+        return {
+          projectId,
+          memberId: memberKey,
+        }
       },
       async createTeam(directoryId, input) {
         calls.teamCreates.push({ directoryId, name: String(input.name) })
@@ -1365,6 +1900,7 @@ function configureFakeProjectClients(hasProjectAccess: boolean) {
               id: 'wireframe',
               titleKey: 'tasks.item.wireframe',
               assigneeKey: 'tasks.assignee.sato',
+              assigneeUserId: options.taskAssigneeUserId,
               status: 'in-progress',
               dueDate: '2026/06/03',
               priority: 'high',
@@ -1379,7 +1915,7 @@ function configureFakeProjectClients(hasProjectAccess: boolean) {
           task: {
             id: 'new-task',
             title: String(input.title),
-            assignee: String(input.assignee),
+            assigneeUserId: String(input.assigneeUserId),
             status: 'todo',
             dueDate: String(input.dueDate),
             priority: 'high',
@@ -1409,4 +1945,31 @@ function configureFakeProjectClients(hasProjectAccess: boolean) {
   })
 
   return calls
+}
+
+function createFakeCognitoProfile(userId: string) {
+  const id = userId.trim().toLowerCase()
+  const names: Record<string, string> = {
+    'demo@example.com': 'Demo User',
+    'sato@example.com': '佐藤 花子',
+    'suzuki@example.com': '鈴木 太郎',
+    'viewer@example.com': 'Viewer User',
+  }
+
+  return {
+    id,
+    username: id,
+    email: id,
+    name: names[id],
+    enabled: true,
+    status: 'CONFIRMED',
+  }
+}
+
+function createAccessToken(groups: string[] = []) {
+  const payload = Buffer
+    .from(JSON.stringify({ 'cognito:groups': groups }))
+    .toString('base64url')
+
+  return `header.${payload}.signature`
 }

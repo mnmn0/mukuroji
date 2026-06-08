@@ -6,6 +6,7 @@ import {
 } from '@aws-sdk/client-dynamodb'
 import {
   DynamoDBDocumentClient,
+  DeleteCommand,
   PutCommand,
   QueryCommand,
   UpdateCommand,
@@ -76,6 +77,10 @@ type ListUserPoolsResponse = {
      */
     Name?: string
   }>
+  /**
+   * 次 page 取得用の Cognito pagination token です。
+   */
+  NextToken?: string
 }
 
 /**
@@ -95,6 +100,10 @@ type ListUserPoolClientsResponse = {
      */
     ClientName?: string
   }>
+  /**
+   * 次 page 取得用の Cognito pagination token です。
+   */
+  NextToken?: string
 }
 
 /**
@@ -121,6 +130,140 @@ type GetUserResponse = {
 }
 
 /**
+ * Cognito ListUsers / AdminGetUser 相当の user record です。
+ */
+type CognitoUserRecord = {
+  /**
+   * Cognito user pool 内の username です。
+   */
+  Username?: string
+  /**
+   * Cognito user attributes です。
+   */
+  Attributes?: Array<{
+    /**
+     * 属性名です。
+     */
+    Name?: string
+    /**
+     * 属性値です。
+     */
+    Value?: string
+  }>
+  /**
+   * AdminGetUser が返す Cognito user attributes です。
+   */
+  UserAttributes?: Array<{
+    /**
+     * 属性名です。
+     */
+    Name?: string
+    /**
+     * 属性値です。
+     */
+    Value?: string
+  }>
+  /**
+   * user が有効かどうかです。
+   */
+  Enabled?: boolean
+  /**
+   * Cognito user status です。
+   */
+  UserStatus?: string
+}
+
+/**
+ * Cognito ListUsers のレスポンスです。
+ */
+type ListUsersResponse = {
+  /**
+   * 取得できた Cognito users です。
+   */
+  Users?: CognitoUserRecord[]
+  /**
+   * 次 page 取得用の Cognito pagination token です。
+   */
+  PaginationToken?: string
+}
+
+/**
+ * アプリが参照する Cognito user profile です。
+ */
+type CognitoUserProfile = {
+  /**
+   * アプリ内で user 参照に使う正規化済み ID です。
+   */
+  id: string
+  /**
+   * Cognito user pool 内の username です。
+   */
+  username: string
+  /**
+   * Cognito user のメールアドレスです。
+   */
+  email: string
+  /**
+   * Cognito user の表示名です。
+   */
+  name?: string
+  /**
+   * Cognito user が有効かどうかです。
+   */
+  enabled?: boolean
+  /**
+   * Cognito user status です。
+   */
+  status?: string
+}
+
+/**
+ * Cognito user 一覧 API が返す response body です。
+ */
+type CognitoUsersResponse = {
+  /**
+   * Cognito を master とする user profile 一覧です。
+   */
+  users: CognitoUserProfile[]
+  /**
+   * 次 page 取得用の Cognito pagination token です。
+   */
+  nextToken?: string
+}
+
+/**
+ * Cognito user 一覧 API の入力です。
+ */
+type ListCognitoUsersInput = {
+  /**
+   * 候補 user を所属 directory に限定するための directory ID です。
+   */
+  directoryId?: string
+  /**
+   * Cognito の pagination token です。
+   */
+  paginationToken?: string
+  /**
+   * 1 page で取得する最大件数です。
+   */
+  limit?: number
+  /**
+   * email prefix 検索に使う query です。
+   */
+  query?: string
+}
+
+/**
+ * Cognito access token の payload から読む claims です。
+ */
+type CognitoAccessTokenClaims = {
+  /**
+   * Cognito グループ名の配列です。
+   */
+  'cognito:groups'?: unknown
+}
+
+/**
  * プロジェクトデータへのアクセス範囲を表す認可済み principal です。
  */
 type ProjectPrincipal = {
@@ -132,6 +275,14 @@ type ProjectPrincipal = {
    * ログやエラー調査で参照するユーザー識別子です。
    */
   userKey: string
+  /**
+   * Cognito グループでシステム管理者として扱うかどうかです。
+   */
+  isSystemAdmin: boolean
+  /**
+   * access token に含まれていた Cognito グループ名です。
+   */
+  groups: string[]
 }
 
 /**
@@ -203,6 +354,39 @@ type ProjectTaskStatus = 'in-progress' | 'review' | 'todo' | 'done'
 type ProjectTaskPriority = 'high' | 'medium' | 'low'
 
 /**
+ * プロジェクトごとの権限ロールです。
+ */
+export type ProjectRole = 'manager' | 'member' | 'viewer'
+
+/**
+ * active project と現在ユーザーの role を 1 directory read で返す行です。
+ */
+type ProjectAccessEntry = {
+  /**
+   * active project ID です。
+   */
+  projectId: string
+  /**
+   * 現在ユーザーに割り当てられた project role です。
+   */
+  role?: ProjectRole
+}
+
+/**
+ * dashboard summary の集計対象を権限で絞り込むための user context です。
+ */
+type DashboardSummaryAccessContext = {
+  /**
+   * Cognito user を正規化した member key です。
+   */
+  userKey: string
+  /**
+   * system admin group に所属しているかどうかです。
+   */
+  isSystemAdmin: boolean
+}
+
+/**
  * DynamoDB に保存する project task item です。
  */
 type ProjectTaskItem = {
@@ -239,7 +423,11 @@ type ProjectTaskItem = {
    */
   assigneeKey?: string
   /**
-   * 登録画面から入力された担当者名です。
+   * Cognito user を参照する担当者 ID です。
+   */
+  assigneeUserId?: string
+  /**
+   * 登録画面から入力された担当者名です。旧データ互換で利用します。
    */
   assignee?: string
   /**
@@ -277,7 +465,19 @@ type ProjectTaskResponseItem = {
    */
   assigneeKey?: string
   /**
-   * API から返す literal の担当者名です。
+   * Cognito user を参照する担当者 ID です。
+   */
+  assigneeUserId?: string
+  /**
+   * Cognito から解決した担当者メールアドレスです。
+   */
+  assigneeEmail?: string
+  /**
+   * Cognito から解決した担当者表示名です。
+   */
+  assigneeName?: string
+  /**
+   * API から返す literal の担当者名です。旧データ互換で利用します。
    */
   assignee?: string
   /**
@@ -317,7 +517,11 @@ type CreateProjectTaskRequestBody = {
    */
   title?: unknown
   /**
-   * ユーザーが入力した担当者名です。
+   * Cognito user を参照する担当者 ID です。
+   */
+  assigneeUserId?: unknown
+  /**
+   * ユーザーが入力した担当者名です。旧 client 互換で利用します。
    */
   assignee?: unknown
   /**
@@ -370,9 +574,9 @@ type UpdateProjectTaskStatusResponse = {
 type ProjectTone = 'blue' | 'purple' | 'green' | 'yellow'
 
 /**
- * DynamoDB に保存する team/project directory item です。
+ * DynamoDB に保存する team directory item です。
  */
-type ProjectDirectoryItem = {
+type ProjectDirectoryTeamItem = {
   /**
    * ユーザーごとの directory partition key です。
    */
@@ -384,7 +588,7 @@ type ProjectDirectoryItem = {
   /**
    * item 種別です。
    */
-  entryType: 'team' | 'project'
+  entryType: 'team'
   /**
    * 所属チーム ID です。
    */
@@ -406,13 +610,51 @@ type ProjectDirectoryItem = {
    */
   expanded?: boolean
   /**
+   * アーカイブ済みの場合に設定する ISO 8601 timestamp です。
+   */
+  archivedAt?: string
+}
+
+/**
+ * DynamoDB に保存する project directory item です。
+ */
+type ProjectDirectoryProjectItem = {
+  /**
+   * ユーザーごとの directory partition key です。
+   */
+  directoryId: string
+  /**
+   * チームとプロジェクトを並べ替える sort key です。
+   */
+  entryKey: string
+  /**
+   * item 種別です。
+   */
+  entryType: 'project'
+  /**
+   * 所属チーム ID です。
+   */
+  teamId: string
+  /**
+   * チームの表示順です。
+   */
+  teamSortOrder: number
+  /**
+   * 日本語表示名です。
+   */
+  nameJa: string
+  /**
+   * 英語表示名です。
+   */
+  nameEn: string
+  /**
    * プロジェクト ID です。
    */
-  projectId?: string
+  projectId: string
   /**
    * チーム内のプロジェクト表示順です。
    */
-  projectSortOrder?: number
+  projectSortOrder: number
   /**
    * サイドバー上のプロジェクト表示色です。
    */
@@ -422,6 +664,57 @@ type ProjectDirectoryItem = {
    */
   archivedAt?: string
 }
+
+/**
+ * DynamoDB に保存する project member item です。
+ */
+type ProjectMemberItem = {
+  /**
+   * ユーザーごとの directory partition key です。
+   */
+  directoryId: string
+  /**
+   * project/member を識別する sort key です。
+   */
+  entryKey: string
+  /**
+   * item 種別です。
+   */
+  entryType: 'project-member'
+  /**
+   * 所属プロジェクト ID です。
+   */
+  projectId: string
+  /**
+   * Cognito user を識別する正規化済み member key です。
+   */
+  memberKey: string
+  /**
+   * Cognito user のメールアドレスです。旧 item 互換の cache としてのみ利用します。
+   */
+  email?: string
+  /**
+   * 画面に表示するメンバー名です。旧 item 互換の cache としてのみ利用します。
+   */
+  name?: string
+  /**
+   * プロジェクト内の権限ロールです。
+   */
+  role: ProjectRole
+  /**
+   * member item の作成日時です。
+   */
+  createdAt: string
+  /**
+   * member item の更新日時です。
+   */
+  updatedAt: string
+}
+
+/**
+ * DynamoDB に保存する team/project/member directory item です。
+ */
+type ProjectDirectoryItem = ProjectDirectoryTeamItem | ProjectDirectoryProjectItem | ProjectMemberItem
 
 /**
  * サイドバーに表示するプロジェクト行です。
@@ -570,6 +863,104 @@ type ArchiveProjectResponse = {
 }
 
 /**
+ * プロジェクト権限管理画面に表示する member 行です。
+ */
+type ProjectMemberResponseItem = {
+  /**
+   * 正規化済み member key です。
+   */
+  id: string
+  /**
+   * Cognito user のメールアドレスです。
+   */
+  email: string
+  /**
+   * Cognito user pool 内の username です。
+   */
+  username?: string
+  /**
+   * 画面に表示するメンバー名です。
+   */
+  name?: string
+  /**
+   * Cognito user が有効かどうかです。
+   */
+  enabled?: boolean
+  /**
+   * Cognito user status です。
+   */
+  status?: string
+  /**
+   * プロジェクト内の権限ロールです。
+   */
+  role: ProjectRole
+  /**
+   * member item の更新日時です。
+   */
+  updatedAt: string
+}
+
+/**
+ * プロジェクトメンバー一覧 API が返す response body です。
+ */
+type ProjectMembersResponse = {
+  /**
+   * 取得対象の project ID です。
+   */
+  projectId: string
+  /**
+   * DynamoDB から取得した member 一覧です。
+   */
+  members: ProjectMemberResponseItem[]
+}
+
+/**
+ * プロジェクトメンバー更新 API が受け取る request body です。
+ */
+type UpdateProjectMemberRequestBody = {
+  /**
+   * Cognito user を参照する ID です。
+   */
+  userId?: unknown
+  /**
+   * Cognito user のメールアドレスです。旧 client 互換で userId と同義に扱います。
+   */
+  email?: unknown
+  /**
+   * 表示名です。Cognito master 化後は保存せず無視します。
+   */
+  name?: unknown
+  /**
+   * 付与するプロジェクトロールです。
+   */
+  role?: unknown
+}
+
+/**
+ * プロジェクトメンバー更新 API が返す response body です。
+ */
+type UpdateProjectMemberResponse = {
+  /**
+   * 更新した member 行です。
+   */
+  member: ProjectMemberResponseItem
+}
+
+/**
+ * プロジェクトメンバー削除 API が返す response body です。
+ */
+type RemoveProjectMemberResponse = {
+  /**
+   * 取得対象の project ID です。
+   */
+  projectId: string
+  /**
+   * 削除した member key です。
+   */
+  memberId: string
+}
+
+/**
  * API handler から利用する Cognito client の最小 interface です。
  */
 type CognitoClient = {
@@ -581,6 +972,14 @@ type CognitoClient = {
    * access token から Cognito ユーザー情報を取得します。
    */
   getUser(accessToken: string): Promise<GetUserResponse>
+  /**
+   * Cognito user pool から user 一覧を page 単位で取得します。
+   */
+  listUsers(input: ListCognitoUsersInput): Promise<CognitoUsersResponse>
+  /**
+   * Cognito user ID から user profile を取得します。
+   */
+  getUserProfile(userId: string): Promise<CognitoUserProfile>
 }
 
 /**
@@ -590,7 +989,10 @@ type DashboardSummaryClient = {
   /**
    * ユーザー directory の DynamoDB data からダッシュボード集計値を取得します。
    */
-  getSummary(directoryId: string): Promise<DashboardSummaryResponse>
+  getSummary(
+    directoryId: string,
+    accessContext: DashboardSummaryAccessContext,
+  ): Promise<DashboardSummaryResponse>
 }
 
 /**
@@ -629,9 +1031,50 @@ type ProjectDirectoryClient = {
    */
   getProjectDirectory(directoryId: string, locale: Locale): Promise<ProjectDirectoryResponse>
   /**
+   * active project と指定 member の role を 1 directory read で取得します。
+   */
+  getProjectAccess(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+  ): Promise<ProjectAccessEntry | undefined>
+  /**
+   * active project と指定 member の role を 1 directory read で取得します。
+   */
+  getProjectAccessList(directoryId: string, memberKey: string): Promise<ProjectAccessEntry[]>
+  /**
    * ユーザーの directory に指定 project ID が含まれるかどうかを判定します。
    */
   hasProjectAccess(directoryId: string, projectId: string): Promise<boolean>
+  /**
+   * 指定ユーザーが持つ project role を DynamoDB から取得します。
+   */
+  getProjectRole(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+  ): Promise<ProjectRole | undefined>
+  /**
+   * DynamoDB から project member 一覧を取得します。
+   */
+  getProjectMembers(directoryId: string, projectId: string): Promise<ProjectMembersResponse>
+  /**
+   * DynamoDB の project member role を作成または更新します。
+   */
+  updateProjectMember(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+    input: UpdateProjectMemberRequestBody,
+  ): Promise<UpdateProjectMemberResponse>
+  /**
+   * DynamoDB から project member role を削除します。
+   */
+  removeProjectMember(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+  ): Promise<RemoveProjectMemberResponse>
   /**
    * DynamoDB にチームを作成します。
    */
@@ -672,6 +1115,16 @@ let dashboardSummary: DashboardSummaryClient
 let projectTasks: ProjectTasksClient
 let projectDirectory: ProjectDirectoryClient
 const projectDirectoryIdPrefix = 'user#'
+const projectDirectoryIdAttributeNames = [
+  'custom:directory_id',
+  'custom:workspace_id',
+] as const
+const defaultSystemAdminGroups = ['mukuroji-system-admins']
+const projectRoleWeights = {
+  viewer: 1,
+  member: 2,
+  manager: 3,
+} as const satisfies Record<ProjectRole, number>
 
 app.use(
   '/api/*',
@@ -682,7 +1135,7 @@ app.use(
       'http://localhost:6006',
       'http://127.0.0.1:6006',
     ],
-    allowMethods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+    allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Authorization', 'Content-Type'],
   }),
 )
@@ -757,6 +1210,7 @@ app.get('/api/auth/me', async (c) => {
 
   try {
     const user = await cognito.getUser(accessToken)
+    const principal = toProjectPrincipal(user, accessToken)
 
     return c.json({
       username: user.Username ?? '',
@@ -765,8 +1219,14 @@ app.get('/api/auth/me', async (c) => {
           .filter((attribute) => attribute.Name && attribute.Value !== undefined)
           .map((attribute) => [attribute.Name as string, attribute.Value]),
       ),
+      groups: principal.groups,
+      isSystemAdmin: principal.isSystemAdmin,
     })
   } catch (error) {
+    if (error instanceof ProjectDataError) {
+      return toProjectDataErrorResponse(c, error)
+    }
+
     return toAuthErrorResponse(c, error)
   }
 })
@@ -786,9 +1246,9 @@ app.get('/api/dashboard/summary', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
 
-    return c.json(await dashboardSummary.getSummary(principal.directoryId))
+    return c.json(await dashboardSummary.getSummary(principal.directoryId, principal))
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -812,7 +1272,7 @@ app.get('/api/teams/projects', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
 
     return c.json(await projectDirectory.getProjectDirectory(principal.directoryId, readLocale(c)))
   } catch (error) {
@@ -835,7 +1295,8 @@ app.post('/api/teams', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    requireSystemAdmin(principal)
     const body = await readJson<CreateTeamRequestBody>(c.req)
 
     return c.json(await projectDirectory.createTeam(principal.directoryId, body ?? {}), 201)
@@ -864,7 +1325,8 @@ app.post('/api/teams/:teamId/projects', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    requireSystemAdmin(principal)
     const body = await readJson<CreateProjectRequestBody>(c.req)
 
     return c.json(await projectDirectory.createProject(principal.directoryId, teamId, body ?? {}), 201)
@@ -893,7 +1355,8 @@ app.patch('/api/teams/:teamId/archive', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    requireSystemAdmin(principal)
 
     return c.json(await projectDirectory.archiveTeam(principal.directoryId, teamId))
   } catch (error) {
@@ -926,7 +1389,8 @@ app.patch('/api/teams/:teamId/projects/:projectId/archive', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    await requireProjectPermission(principal, projectId, 'manager')
 
     return c.json(await projectDirectory.archiveProject(principal.directoryId, teamId, projectId))
   } catch (error) {
@@ -957,17 +1421,161 @@ app.get('/api/projects/:projectId/tasks', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    await requireProjectPermission(principal, projectId, 'viewer')
 
-    if (!(await projectDirectory.hasProjectAccess(principal.directoryId, projectId))) {
-      throw new ProjectDataError(
-        403,
-        'ProjectAccessDenied',
-        `User "${principal.userKey}" cannot access project "${projectId}".`,
-      )
+    return c.json(
+      await hydrateProjectTasksResponse(
+        await projectTasks.getProjectTasks(principal.directoryId, projectId),
+      ),
+    )
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toCognitoDirectoryErrorResponse(c, error)
     }
 
-    return c.json(await projectTasks.getProjectTasks(principal.directoryId, projectId))
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * Cognito user pool からプロジェクト権限付与候補 user を検索する endpoint です。
+ */
+app.get('/api/projects/:projectId/users', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const projectId = c.req.param('projectId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!projectId) {
+    return c.json({ message: 'Project ID is required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    await requireProjectPermission(principal, projectId, 'manager')
+
+    return c.json(await cognito.listUsers(readCognitoUsersInput(c, principal.directoryId)))
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toCognitoDirectoryErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * DynamoDB に保存されたプロジェクトメンバー一覧を返す endpoint です。
+ */
+app.get('/api/projects/:projectId/members', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const projectId = c.req.param('projectId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!projectId) {
+    return c.json({ message: 'Project ID is required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    await requireProjectPermission(principal, projectId, 'member')
+
+    return c.json(
+      await hydrateProjectMembersResponse(
+        await projectDirectory.getProjectMembers(principal.directoryId, projectId),
+      ),
+    )
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toCognitoDirectoryErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * DynamoDB に保存されたプロジェクトメンバーの role を作成または更新する endpoint です。
+ */
+app.patch('/api/projects/:projectId/members/:memberKey', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const projectId = c.req.param('projectId')
+  const memberKey = c.req.param('memberKey')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!projectId) {
+    return c.json({ message: 'Project ID is required.' }, 400)
+  }
+
+  if (!memberKey) {
+    return c.json({ message: 'Member key is required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    await requireProjectPermission(principal, projectId, 'manager')
+    const body = await readJson<UpdateProjectMemberRequestBody>(c.req)
+    const profile = await cognito.getUserProfile(memberKey)
+
+    return c.json(
+      await hydrateProjectMemberUpdateResponse(
+        await projectDirectory.updateProjectMember(
+          principal.directoryId,
+          projectId,
+          profile.id,
+          {
+            ...(body ?? {}),
+            email: profile.email,
+            name: profile.name,
+          },
+        ),
+      ),
+    )
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toCognitoDirectoryErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * DynamoDB からプロジェクトメンバーの role を削除する endpoint です。
+ */
+app.delete('/api/projects/:projectId/members/:memberKey', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const projectId = c.req.param('projectId')
+  const memberKey = c.req.param('memberKey')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!projectId) {
+    return c.json({ message: 'Project ID is required.' }, 400)
+  }
+
+  if (!memberKey) {
+    return c.json({ message: 'Member key is required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    await requireProjectPermission(principal, projectId, 'manager')
+
+    return c.json(
+      await projectDirectory.removeProjectMember(principal.directoryId, projectId, memberKey),
+    )
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -993,22 +1601,29 @@ app.post('/api/projects/:projectId/tasks', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
-
-    if (!(await projectDirectory.hasProjectAccess(principal.directoryId, projectId))) {
-      throw new ProjectDataError(
-        403,
-        'ProjectAccessDenied',
-        `User "${principal.userKey}" cannot access project "${projectId}".`,
-      )
-    }
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    await requireProjectPermission(principal, projectId, 'member')
 
     const body = await readJson<CreateProjectTaskRequestBody>(c.req)
+    const assigneeUserId = readTaskAssigneeUserId(body ?? {})
+    await cognito.getUserProfile(assigneeUserId)
 
-    return c.json(await projectTasks.createProjectTask(principal.directoryId, projectId, body ?? {}), 201)
+    return c.json(
+      await hydrateProjectTaskUpdateResponse(
+        await projectTasks.createProjectTask(
+          principal.directoryId,
+          projectId,
+          {
+            ...(body ?? {}),
+            assigneeUserId,
+          },
+        ),
+      ),
+      201,
+    )
   } catch (error) {
     if (error instanceof CognitoServiceError) {
-      return toAuthErrorResponse(c, error)
+      return toCognitoDirectoryErrorResponse(c, error)
     }
 
     return toProjectDataErrorResponse(c, error)
@@ -1036,24 +1651,19 @@ app.patch('/api/projects/:projectId/tasks/:taskId', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken))
-
-    if (!(await projectDirectory.hasProjectAccess(principal.directoryId, projectId))) {
-      throw new ProjectDataError(
-        403,
-        'ProjectAccessDenied',
-        `User "${principal.userKey}" cannot access project "${projectId}".`,
-      )
-    }
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    await requireProjectPermission(principal, projectId, 'member')
 
     const body = await readJson<UpdateProjectTaskStatusRequestBody>(c.req)
 
     return c.json(
-      await projectTasks.updateProjectTaskStatus(principal.directoryId, projectId, taskId, body ?? {}),
+      await hydrateProjectTaskUpdateResponse(
+        await projectTasks.updateProjectTaskStatus(principal.directoryId, projectId, taskId, body ?? {}),
+      ),
     )
   } catch (error) {
     if (error instanceof CognitoServiceError) {
-      return toAuthErrorResponse(c, error)
+      return toCognitoDirectoryErrorResponse(c, error)
     }
 
     return toProjectDataErrorResponse(c, error)
@@ -1076,6 +1686,17 @@ function readBearerAccessToken(c: Context) {
 
 function readLocale(c: Context): Locale {
   return c.req.query('locale') === 'en' ? 'en' : 'ja'
+}
+
+function readCognitoUsersInput(c: Context, directoryId?: string): ListCognitoUsersInput {
+  const limit = Number(c.req.query('limit') ?? 20)
+
+  return {
+    directoryId,
+    paginationToken: c.req.query('paginationToken') ?? c.req.query('nextToken') ?? undefined,
+    limit,
+    query: c.req.query('query')?.trim() || undefined,
+  }
 }
 
 function toAuthErrorResponse(c: Context, error: unknown) {
@@ -1132,6 +1753,10 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'Task was not found.' }, 404)
   }
 
+  if (error.code === 'ProjectMemberNotFound') {
+    return c.json({ message: 'Project member was not found.' }, 404)
+  }
+
   if (error.code === 'ConditionalCheckFailedException') {
     return c.json({ message: 'The same item already exists.' }, 409)
   }
@@ -1152,6 +1777,187 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
 
   console.error(error)
   return c.json({ message: 'Project data is unavailable.' }, 502)
+}
+
+function requireSystemAdmin(principal: ProjectPrincipal) {
+  if (principal.isSystemAdmin) {
+    return
+  }
+
+  throw new ProjectDataError(
+    403,
+    'ProjectAccessDenied',
+    `User "${principal.userKey}" must be a system administrator.`,
+  )
+}
+
+async function requireProjectPermission(
+  principal: ProjectPrincipal,
+  projectId: string,
+  minimumRole: ProjectRole,
+) {
+  if (principal.isSystemAdmin) {
+    return
+  }
+
+  const projectAccess = await projectDirectory.getProjectAccess(
+    principal.directoryId,
+    projectId,
+    principal.userKey,
+  )
+
+  if (!projectAccess) {
+    throw new ProjectDataError(
+      403,
+      'ProjectAccessDenied',
+      `Project "${projectId}" is not active in directory "${principal.directoryId}".`,
+    )
+  }
+
+  if (!projectAccessAllows(projectAccess, minimumRole)) {
+    throw new ProjectDataError(
+      403,
+      'ProjectAccessDenied',
+      `User "${principal.userKey}" with role "${projectAccess.role ?? 'none'}" cannot access project "${projectId}".`,
+    )
+  }
+}
+
+function projectAccessAllows(access: ProjectAccessEntry, minimumRole: ProjectRole) {
+  return access.role !== undefined && projectRoleAllows(access.role, minimumRole)
+}
+
+function projectRoleAllows(role: ProjectRole, minimumRole: ProjectRole) {
+  return projectRoleWeights[role] >= projectRoleWeights[minimumRole]
+}
+
+async function hydrateProjectMembersResponse(response: ProjectMembersResponse) {
+  const members = await Promise.all(
+    response.members.map(async (member) => hydrateProjectMember(member)),
+  )
+
+  return {
+    ...response,
+    members,
+  } satisfies ProjectMembersResponse
+}
+
+async function hydrateProjectMemberUpdateResponse(response: UpdateProjectMemberResponse) {
+  return {
+    member: await hydrateProjectMember(response.member),
+  } satisfies UpdateProjectMemberResponse
+}
+
+async function hydrateProjectMember(member: ProjectMemberResponseItem) {
+  try {
+    const profile = await cognito.getUserProfile(member.id)
+
+    return {
+      ...member,
+      id: profile.id,
+      email: profile.email,
+      username: profile.username,
+      name: profile.name,
+      enabled: profile.enabled,
+      status: profile.status,
+    } satisfies ProjectMemberResponseItem
+  } catch (error) {
+    if (isCognitoUserNotFoundError(error)) {
+      return member
+    }
+
+    console.warn('Failed to hydrate project member from Cognito:', error)
+    return member
+  }
+}
+
+async function hydrateProjectTasksResponse(response: ProjectTasksResponse) {
+  const profiles = await readTaskAssigneeProfiles(response.tasks)
+
+  return {
+    ...response,
+    tasks: response.tasks.map((task) => hydrateProjectTask(task, profiles)),
+  } satisfies ProjectTasksResponse
+}
+
+async function hydrateProjectTaskUpdateResponse<T extends { task: ProjectTaskResponseItem }>(response: T) {
+  const profiles = await readTaskAssigneeProfiles([response.task])
+
+  return {
+    ...response,
+    task: hydrateProjectTask(response.task, profiles),
+  }
+}
+
+async function readTaskAssigneeProfiles(tasks: ProjectTaskResponseItem[]) {
+  const profiles = new Map<string, CognitoUserProfile>()
+  const userIds = new Set(tasks.map((task) => task.assigneeUserId).filter(isDefined))
+
+  await Promise.all(
+    Array.from(userIds).map(async (userId) => {
+      try {
+        profiles.set(userId, await cognito.getUserProfile(userId))
+      } catch (error) {
+        if (!isCognitoUserNotFoundError(error)) {
+          console.warn('Failed to hydrate task assignee from Cognito:', error)
+        }
+      }
+    }),
+  )
+
+  return profiles
+}
+
+function hydrateProjectTask(
+  task: ProjectTaskResponseItem,
+  profiles: Map<string, CognitoUserProfile>,
+) {
+  if (!task.assigneeUserId) {
+    return task
+  }
+
+  const profile = profiles.get(task.assigneeUserId)
+
+  if (!profile) {
+    return task
+  }
+
+  return {
+    ...task,
+    assigneeEmail: profile.email,
+    assigneeName: profile.name,
+  } satisfies ProjectTaskResponseItem
+}
+
+function toCognitoDirectoryErrorResponse(c: Context, error: unknown) {
+  if (!(error instanceof CognitoServiceError)) {
+    console.error(error)
+    return c.json({ message: 'Cognito user data is unavailable.' }, 502)
+  }
+
+  if (error.code === 'UserNotFoundException') {
+    return c.json({ message: 'Cognito user was not found.' }, 404)
+  }
+
+  if (error.code === 'TooManyRequestsException') {
+    return c.json({ message: 'Cognito user data is rate limited.' }, 429)
+  }
+
+  if (error.code === 'InvalidParameterException') {
+    return c.json({ message: error.message }, 400)
+  }
+
+  if (error.code === 'ResourceNotFoundException' || error.code === 'ClientNotFoundException') {
+    console.error(error)
+    return c.json({ message: 'Cognito local resources are not ready.' }, 503)
+  }
+
+  console.error(error)
+  return c.json({ message: 'Cognito user data is unavailable.' }, 502)
+}
+
+function isCognitoUserNotFoundError(error: unknown) {
+  return error instanceof CognitoServiceError && error.code === 'UserNotFoundException'
 }
 
 /**
@@ -1221,6 +2027,59 @@ class FlociCognitoClient {
   }
 
   /**
+   * Cognito user pool から user 一覧を page 単位で取得します。
+   */
+  async listUsers(input: ListCognitoUsersInput) {
+    const userPoolId = await this.resolveUserPoolId()
+    const limit = clampCognitoPageLimit(input.limit)
+    const query = input.query?.trim()
+    const users: CognitoUserProfile[] = []
+    let paginationToken = input.paginationToken
+
+    do {
+      const response = await this.request<ListUsersResponse>('ListUsers', {
+        UserPoolId: userPoolId,
+        Limit: Math.max(1, limit - users.length),
+        ...(paginationToken ? { PaginationToken: paginationToken } : {}),
+        ...(query ? { Filter: `"email"^="${escapeCognitoFilterValue(query.toLowerCase())}"` } : {}),
+      })
+      const scopedUsers = (response.Users ?? [])
+        .filter((user) => isCognitoUserInDirectory(user, input.directoryId))
+        .map(toCognitoUserProfile)
+        .filter(isDefined)
+
+      users.push(...scopedUsers)
+      paginationToken = response.PaginationToken
+    } while (users.length < limit && paginationToken)
+
+    return {
+      users,
+      nextToken: paginationToken,
+    } satisfies CognitoUsersResponse
+  }
+
+  /**
+   * Cognito user ID から user profile を取得します。
+   */
+  async getUserProfile(userId: string) {
+    const normalizedUserId = normalizeCognitoUserId(userId)
+    const profile = toCognitoUserProfile(await this.request<CognitoUserRecord>('AdminGetUser', {
+      UserPoolId: await this.resolveUserPoolId(),
+      Username: normalizedUserId,
+    }))
+
+    if (!profile) {
+      throw new CognitoServiceError(
+        404,
+        'UserNotFoundException',
+        `Cognito user "${normalizedUserId}" was not found.`,
+      )
+    }
+
+    return profile
+  }
+
+  /**
    * 環境変数または Floci 上の一覧から app client ID を解決します。
    */
   private async resolveClientId() {
@@ -1234,25 +2093,31 @@ class FlociCognitoClient {
     }
 
     const userPoolId = await this.resolveUserPoolId()
-    const response = await this.request<ListUserPoolClientsResponse>('ListUserPoolClients', {
-      UserPoolId: userPoolId,
-      MaxResults: 60,
-    })
+    let nextToken: string | undefined
 
-    const client = response.UserPoolClients?.find(
-      (candidate) => candidate.ClientName === this.clientName,
-    )
-
-    if (!client?.ClientId) {
-      throw new CognitoServiceError(
-        404,
-        'ClientNotFoundException',
-        `Cognito user pool client "${this.clientName}" was not found.`,
+    do {
+      const response = await this.request<ListUserPoolClientsResponse>('ListUserPoolClients', {
+        UserPoolId: userPoolId,
+        MaxResults: 60,
+        ...(nextToken ? { NextToken: nextToken } : {}),
+      })
+      const client = response.UserPoolClients?.find(
+        (candidate) => candidate.ClientName === this.clientName,
       )
-    }
 
-    this.resolvedClientId = client.ClientId
-    return this.resolvedClientId
+      if (client?.ClientId) {
+        this.resolvedClientId = client.ClientId
+        return this.resolvedClientId
+      }
+
+      nextToken = response.NextToken
+    } while (nextToken)
+
+    throw new CognitoServiceError(
+      404,
+      'ClientNotFoundException',
+      `Cognito user pool client "${this.clientName}" was not found.`,
+    )
   }
 
   /**
@@ -1268,24 +2133,30 @@ class FlociCognitoClient {
       return this.resolvedUserPoolId
     }
 
-    const response = await this.request<ListUserPoolsResponse>('ListUserPools', {
-      MaxResults: 60,
-    })
+    let nextToken: string | undefined
 
-    const userPool = response.UserPools?.find(
-      (candidate) => candidate.Name === this.userPoolName,
-    )
-
-    if (!userPool?.Id) {
-      throw new CognitoServiceError(
-        404,
-        'ResourceNotFoundException',
-        `Cognito user pool "${this.userPoolName}" was not found.`,
+    do {
+      const response = await this.request<ListUserPoolsResponse>('ListUserPools', {
+        MaxResults: 60,
+        ...(nextToken ? { NextToken: nextToken } : {}),
+      })
+      const userPool = response.UserPools?.find(
+        (candidate) => candidate.Name === this.userPoolName,
       )
-    }
 
-    this.resolvedUserPoolId = userPool.Id
-    return this.resolvedUserPoolId
+      if (userPool?.Id) {
+        this.resolvedUserPoolId = userPool.Id
+        return this.resolvedUserPoolId
+      }
+
+      nextToken = response.NextToken
+    } while (nextToken)
+
+    throw new CognitoServiceError(
+      404,
+      'ResourceNotFoundException',
+      `Cognito user pool "${this.userPoolName}" was not found.`,
+    )
   }
 
   /**
@@ -1373,20 +2244,26 @@ export class DynamoDbDashboardSummaryClient {
   /**
    * ユーザー directory の team/project と task data からダッシュボード集計値を取得します。
    */
-  async getSummary(directoryId: string) {
-    const directory = await this.projectDirectoryClient.getProjectDirectory(directoryId, 'ja')
-    const projectIds = new Set(
-      directory.teams.flatMap((team) => team.projects.map((project) => project.id)),
-    )
+  async getSummary(directoryId: string, accessContext: DashboardSummaryAccessContext) {
+    const visibleProjectIds = accessContext.isSystemAdmin
+      ? new Set(
+        (await this.projectDirectoryClient.getProjectDirectory(directoryId, 'ja'))
+          .teams.flatMap((team) => team.projects.map((project) => project.id)),
+      )
+      : new Set(
+        (await this.projectDirectoryClient.getProjectAccessList(directoryId, accessContext.userKey))
+          .filter((access) => projectAccessAllows(access, 'viewer'))
+          .map((access) => access.projectId)
+      )
     const taskResponses = await Promise.all(
-      Array.from(projectIds).map((projectId) =>
+      Array.from(visibleProjectIds).map((projectId) =>
         this.projectTasksClient.getProjectTasks(directoryId, projectId),
       ),
     )
     const tasks = taskResponses.flatMap((response) => response.tasks)
 
     return {
-      projects: projectIds.size,
+      projects: visibleProjectIds.size,
       tasks: tasks.filter((task) => task.status !== 'done').length,
       blocked: tasks.filter((task) => task.priority === 'high' && task.status !== 'done').length,
       updatedAt: new Date().toISOString(),
@@ -1461,7 +2338,7 @@ export class DynamoDbProjectTasksClient {
     input: CreateProjectTaskRequestBody,
   ) {
     const title = readRequiredString(input.title, 'Task title is required.')
-    const assignee = readRequiredString(input.assignee, 'Task assignee is required.')
+    const assigneeUserId = readTaskAssigneeUserId(input)
     const status = readTaskStatus(input.status)
     const dueDate = readRequiredString(input.dueDate, 'Task due date is required.')
     const priority = readTaskPriority(input.priority)
@@ -1478,7 +2355,7 @@ export class DynamoDbProjectTasksClient {
         taskId,
         sortOrder,
         title,
-        assignee,
+        assigneeUserId,
         status,
         dueDate,
         priority,
@@ -1654,25 +2531,195 @@ export class DynamoDbProjectDirectoryClient {
   }
 
   /**
+   * active project と指定 member の role を 1 directory read で取得します。
+   */
+  async getProjectAccess(directoryId: string, projectId: string, memberKey: string) {
+    try {
+      const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
+      const items = await this.readValidDirectoryItems(directoryId)
+
+      return toProjectAccessEntries(items, normalizedMemberKey).find((access) => {
+        return access.projectId === projectId
+      })
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * active project と指定 member の role を 1 directory read で取得します。
+   */
+  async getProjectAccessList(directoryId: string, memberKey: string) {
+    try {
+      const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
+      const items = await this.readValidDirectoryItems(directoryId)
+
+      return toProjectAccessEntries(items, normalizedMemberKey)
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
    * ユーザーの directory に指定 project ID が含まれるかどうかを判定します。
    */
   async hasProjectAccess(directoryId: string, projectId: string) {
     try {
+      return await this.getProjectAccess(
+        directoryId,
+        projectId,
+        'project-access-check@example.invalid',
+      ) !== undefined
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * ユーザーの project role を取得します。
+   */
+  async getProjectRole(directoryId: string, projectId: string, memberKey: string) {
+    try {
+      return (await this.getProjectAccess(directoryId, projectId, memberKey))?.role
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * DynamoDB から project member 一覧を取得します。
+   */
+  async getProjectMembers(directoryId: string, projectId: string) {
+    try {
       const items = await this.readValidDirectoryItems(directoryId)
-      const activeTeamIds = new Set(
-        items
-          .filter((item) => item.entryType === 'team' && isActiveDirectoryItem(item))
-          .map((item) => item.teamId),
+      this.requireActiveProject(items, projectId)
+      const members = items
+        .filter((item) => item.entryType === 'project-member' && item.projectId === projectId)
+        .sort(compareProjectMemberItems)
+        .map(toProjectMemberResponseItem)
+
+      return {
+        projectId,
+        members,
+      } satisfies ProjectMembersResponse
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * DynamoDB の project member role を作成または更新します。
+   */
+  async updateProjectMember(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+    input: UpdateProjectMemberRequestBody,
+  ) {
+    const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
+    const email = readProjectMemberEmail(input.email, normalizedMemberKey)
+    const name = readOptionalProjectMemberName(input.name)
+    const role = readProjectRole(input.role)
+
+    try {
+      const items = await this.readValidDirectoryItems(directoryId)
+      this.requireActiveProject(items, projectId)
+      const existingMember = items.find((item) =>
+        item.entryType === 'project-member' &&
+        item.projectId === projectId &&
+        item.memberKey === normalizedMemberKey,
+      )
+      const updatedAt = new Date().toISOString()
+      const item: ProjectMemberItem = {
+        directoryId,
+        entryKey: createProjectMemberEntryKey(projectId, normalizedMemberKey),
+        entryType: 'project-member',
+        projectId,
+        memberKey: normalizedMemberKey,
+        email,
+        name,
+        role,
+        createdAt: existingMember?.createdAt ?? updatedAt,
+        updatedAt,
+      }
+
+      await this.documentClient.send(
+        new PutCommand({
+          TableName: this.tableName,
+          Item: item,
+        }),
       )
 
-      return items.some((item) => {
-        return (
-          item.entryType === 'project' &&
-          item.projectId === projectId &&
-          isActiveDirectoryItem(item) &&
-          activeTeamIds.has(item.teamId)
+      return {
+        member: toProjectMemberResponseItem(item),
+      } satisfies UpdateProjectMemberResponse
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * DynamoDB から project member role を削除します。
+   */
+  async removeProjectMember(directoryId: string, projectId: string, memberKey: string) {
+    const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
+
+    try {
+      const items = await this.readValidDirectoryItems(directoryId)
+      this.requireActiveProject(items, projectId)
+      const member = items.find((item) =>
+        item.entryType === 'project-member' &&
+        item.projectId === projectId &&
+        item.memberKey === normalizedMemberKey,
+      )
+
+      if (!member) {
+        throw new ProjectDataError(
+          404,
+          'ProjectMemberNotFound',
+          `Project member "${normalizedMemberKey}" was not found in project "${projectId}".`,
         )
-      })
+      }
+
+      await this.documentClient.send(
+        new DeleteCommand({
+          TableName: this.tableName,
+          Key: {
+            directoryId,
+            entryKey: member.entryKey,
+          },
+          ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
+        }),
+      )
+
+      return {
+        projectId,
+        memberId: normalizedMemberKey,
+      } satisfies RemoveProjectMemberResponse
     } catch (error) {
       if (error instanceof ProjectDataError) {
         throw error
@@ -1928,6 +2975,27 @@ export class DynamoDbProjectDirectoryClient {
   }
 
   /**
+   * 指定 project ID が active な project として存在することを検証します。
+   */
+  private requireActiveProject(items: ProjectDirectoryItem[], projectId: string) {
+    const activeTeamIds = new Set(
+      items
+        .filter((item) => item.entryType === 'team' && isActiveDirectoryItem(item))
+        .map((item) => item.teamId),
+    )
+    const project = items.find((item) =>
+      item.entryType === 'project' &&
+      item.projectId === projectId &&
+      activeTeamIds.has(item.teamId) &&
+      isActiveDirectoryItem(item),
+    )
+
+    if (!project) {
+      throw new ProjectDataError(404, 'ProjectNotFound', `Project "${projectId}" was not found.`)
+    }
+  }
+
+  /**
    * directory partition 内の全 item を LastEvaluatedKey がなくなるまで取得します。
    */
   private async queryDirectoryItems(directoryId: string, canBootstrapLocalTable = true) {
@@ -2024,6 +3092,64 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
       'Cognito returned invalid JSON.',
     )
   }
+}
+
+function clampCognitoPageLimit(value: number | undefined) {
+  if (!Number.isFinite(value)) {
+    return 20
+  }
+
+  return Math.min(60, Math.max(1, Math.floor(value)))
+}
+
+function escapeCognitoFilterValue(value: string) {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+function normalizeCognitoUserId(value: string) {
+  const normalized = value.trim().toLowerCase()
+
+  if (!normalized) {
+    throw new CognitoServiceError(400, 'InvalidParameterException', 'Cognito user ID is required.')
+  }
+
+  return normalized
+}
+
+function toCognitoUserProfile(value: CognitoUserRecord): CognitoUserProfile | undefined {
+  const username = value.Username?.trim()
+  const email = readCognitoUserAttribute(value, 'email')?.trim().toLowerCase()
+
+  if (!username || !email) {
+    return undefined
+  }
+
+  return {
+    id: normalizeCognitoUserId(email),
+    username,
+    email,
+    name: readCognitoUserAttribute(value, 'name')?.trim() || undefined,
+    enabled: value.Enabled,
+    status: value.UserStatus,
+  }
+}
+
+function readCognitoUserAttribute(user: CognitoUserRecord, name: string) {
+  return (user.Attributes ?? user.UserAttributes)?.find((attribute) => attribute.Name === name)?.Value
+}
+
+function isCognitoUserInDirectory(user: CognitoUserRecord, directoryId: string | undefined) {
+  if (!directoryId) {
+    return true
+  }
+
+  return projectDirectoryIdAttributeNames.some((attributeName) => {
+    return readCognitoUserAttribute(user, attributeName)?.trim() === directoryId
+  })
+}
+
+function isDefined<T>(value: T | undefined): value is T {
+  return value !== undefined
 }
 
 function createDynamoDbClient() {
@@ -2282,6 +3408,10 @@ function toProjectTaskResponseItem(value: unknown): ProjectTaskResponseItem {
     task.assigneeKey = value.assigneeKey
   }
 
+  if (value.assigneeUserId) {
+    task.assigneeUserId = value.assigneeUserId
+  }
+
   if (value.assignee) {
     task.assignee = value.assignee
   }
@@ -2305,6 +3435,10 @@ function toProjectDirectoryResponse(
         'InvalidProjectDirectory',
         'Project directory item is missing or invalid.',
       )
+    }
+
+    if (value.entryType === 'project-member') {
+      continue
     }
 
     if (!isActiveDirectoryItem(value)) {
@@ -2344,11 +3478,75 @@ function toProjectDirectoryResponse(
   return teams
 }
 
-function localizedName(item: ProjectDirectoryItem, locale: Locale) {
+function toProjectMemberResponseItem(item: ProjectMemberItem): ProjectMemberResponseItem {
+  const member: ProjectMemberResponseItem = {
+    id: item.memberKey,
+    email: item.email ?? item.memberKey,
+    role: item.role,
+    updatedAt: item.updatedAt,
+  }
+
+  if (item.name) {
+    member.name = item.name
+  }
+
+  return member
+}
+
+function toProjectAccessEntries(items: ProjectDirectoryItem[], memberKey: string) {
+  const activeTeamIds = new Set(
+    items
+      .filter((item) => item.entryType === 'team' && isActiveDirectoryItem(item))
+      .map((item) => item.teamId),
+  )
+  const roleByProjectId = new Map(
+    items
+      .filter((item) => {
+        return item.entryType === 'project-member' && item.memberKey === memberKey
+      })
+      .map((item) => [item.projectId, item.role] as const),
+  )
+  const seenProjectIds = new Set<string>()
+  const accessEntries: ProjectAccessEntry[] = []
+
+  for (const item of items) {
+    if (
+      item.entryType !== 'project' ||
+      seenProjectIds.has(item.projectId) ||
+      !isActiveDirectoryItem(item) ||
+      !activeTeamIds.has(item.teamId)
+    ) {
+      continue
+    }
+
+    seenProjectIds.add(item.projectId)
+    accessEntries.push({
+      projectId: item.projectId,
+      role: roleByProjectId.get(item.projectId),
+    })
+  }
+
+  return accessEntries
+}
+
+function compareProjectMemberItems(first: ProjectMemberItem, second: ProjectMemberItem) {
+  const roleDelta = projectRoleWeights[second.role] - projectRoleWeights[first.role]
+
+  if (roleDelta !== 0) {
+    return roleDelta
+  }
+
+  return (first.name ?? first.email ?? first.memberKey).localeCompare(
+    second.name ?? second.email ?? second.memberKey,
+    'ja',
+  )
+}
+
+function localizedName(item: ProjectDirectoryTeamItem | ProjectDirectoryProjectItem, locale: Locale) {
   return locale === 'en' ? item.nameEn || item.nameJa : item.nameJa || item.nameEn
 }
 
-function isActiveDirectoryItem(item: ProjectDirectoryItem) {
+function isActiveDirectoryItem(item: ProjectDirectoryTeamItem | ProjectDirectoryProjectItem) {
   return item.archivedAt === undefined
 }
 
@@ -2364,7 +3562,11 @@ function isProjectTaskItem(value: unknown): value is ProjectTaskItem {
     typeof value.taskId === 'string' &&
     typeof value.sortOrder === 'number' &&
     (typeof value.titleKey === 'string' || typeof value.title === 'string') &&
-    (typeof value.assigneeKey === 'string' || typeof value.assignee === 'string') &&
+    (
+      typeof value.assigneeUserId === 'string' ||
+      typeof value.assigneeKey === 'string' ||
+      typeof value.assignee === 'string'
+    ) &&
     isProjectTaskStatus(value.status) &&
     typeof value.dueDate === 'string' &&
     isProjectTaskPriority(value.priority)
@@ -2379,7 +3581,28 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
   if (
     value.directoryId !== directoryId ||
     typeof value.entryKey !== 'string' ||
-    (value.entryType !== 'team' && value.entryType !== 'project') ||
+    (
+      value.entryType !== 'team' &&
+      value.entryType !== 'project' &&
+      value.entryType !== 'project-member'
+    )
+  ) {
+    return false
+  }
+
+  if (value.entryType === 'project-member') {
+    return (
+      typeof value.projectId === 'string' &&
+      typeof value.memberKey === 'string' &&
+      (value.email === undefined || typeof value.email === 'string') &&
+      (value.name === undefined || typeof value.name === 'string') &&
+      isProjectRole(value.role) &&
+      typeof value.createdAt === 'string' &&
+      typeof value.updatedAt === 'string'
+    )
+  }
+
+  if (
     typeof value.teamId !== 'string' ||
     typeof value.teamSortOrder !== 'number' ||
     typeof value.nameJa !== 'string' ||
@@ -2406,6 +3629,10 @@ function isProjectTaskStatus(value: unknown): value is ProjectTaskStatus {
 
 function isProjectTaskPriority(value: unknown): value is ProjectTaskPriority {
   return value === 'high' || value === 'medium' || value === 'low'
+}
+
+function isProjectRole(value: unknown): value is ProjectRole {
+  return value === 'manager' || value === 'member' || value === 'viewer'
 }
 
 function isProjectTone(value: unknown): value is ProjectTone {
@@ -2480,6 +3707,60 @@ function readProjectTone(value: unknown): ProjectTone {
   return value
 }
 
+function readProjectRole(value: unknown): ProjectRole {
+  if (!isProjectRole(value)) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Project role is invalid.')
+  }
+
+  return value
+}
+
+function readTaskAssigneeUserId(input: CreateProjectTaskRequestBody) {
+  const value = input.assigneeUserId ?? input.assignee
+
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Task assignee is required.')
+  }
+
+  return normalizeCognitoUserId(value)
+}
+
+function readProjectMemberEmail(value: unknown, fallbackMemberKey: string) {
+  if (value === undefined) {
+    return fallbackMemberKey
+  }
+
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Project member email is required.')
+  }
+
+  return normalizeProjectMemberKey(value)
+}
+
+function readOptionalProjectMemberName(value: unknown) {
+  if (value === undefined) {
+    return undefined
+  }
+
+  if (typeof value !== 'string') {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Project member name is invalid.')
+  }
+
+  const name = value.trim()
+
+  return name || undefined
+}
+
+function normalizeProjectMemberKey(value: string) {
+  const memberKey = value.trim().toLowerCase()
+
+  if (!memberKey) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Project member key is required.')
+  }
+
+  return memberKey
+}
+
 function createResourceId(value: string) {
   const normalized = value
     .trim()
@@ -2520,6 +3801,10 @@ function createProjectEntryKey(
   return `${padSortOrder(teamSortOrder)}#${padSortOrder(projectSortOrder)}#PROJECT#${projectId}`
 }
 
+function createProjectMemberEntryKey(projectId: string, memberKey: string) {
+  return `PROJECT_MEMBER#${projectId}#${memberKey}`
+}
+
 function padSortOrder(value: number) {
   return String(value).padStart(6, '0')
 }
@@ -2528,7 +3813,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function toProjectPrincipal(user: GetUserResponse): ProjectPrincipal {
+function toProjectPrincipal(user: GetUserResponse, accessToken: string): ProjectPrincipal {
   const userKey = readUserAttribute(user, 'email') ?? user.Username
 
   if (!userKey?.trim()) {
@@ -2540,15 +3825,76 @@ function toProjectPrincipal(user: GetUserResponse): ProjectPrincipal {
   }
 
   const normalizedUserKey = userKey.trim().toLowerCase()
+  const directoryId = readProjectDirectoryId(user) ?? `${projectDirectoryIdPrefix}${normalizedUserKey}`
+  const groups = readCognitoGroups(accessToken)
 
   return {
-    directoryId: `${projectDirectoryIdPrefix}${normalizedUserKey}`,
+    directoryId,
     userKey: normalizedUserKey,
+    isSystemAdmin: groups.some((group) => getSystemAdminGroups().includes(group)),
+    groups,
   }
 }
 
 function readUserAttribute(user: GetUserResponse, name: string) {
   return user.UserAttributes?.find((attribute) => attribute.Name === name)?.Value
+}
+
+function readProjectDirectoryId(user: GetUserResponse) {
+  for (const attributeName of projectDirectoryIdAttributeNames) {
+    const value = readUserAttribute(user, attributeName)
+
+    if (value?.trim()) {
+      return value.trim()
+    }
+  }
+
+  return undefined
+}
+
+function readCognitoGroups(accessToken: string) {
+  const claims = decodeJwtPayload<CognitoAccessTokenClaims>(accessToken)
+  const groups = claims?.['cognito:groups']
+
+  if (!Array.isArray(groups)) {
+    return []
+  }
+
+  return groups.filter((group): group is string => typeof group === 'string' && Boolean(group))
+}
+
+function decodeJwtPayload<T>(token: string): T | undefined {
+  const payload = token.split('.')[1]
+
+  if (!payload) {
+    return undefined
+  }
+
+  try {
+    const normalizedPayload = payload.replace(/-/g, '+').replace(/_/g, '/')
+    const paddedPayload = normalizedPayload.padEnd(
+      normalizedPayload.length + ((4 - normalizedPayload.length % 4) % 4),
+      '=',
+    )
+    const json = Buffer.from(paddedPayload, 'base64').toString('utf8')
+
+    return JSON.parse(json) as T
+  } catch {
+    return undefined
+  }
+}
+
+function getSystemAdminGroups() {
+  const configuredGroups = (
+    getEnv('MUKUROJI_SYSTEM_ADMIN_GROUPS') ??
+    getEnv('SYSTEM_ADMIN_GROUPS') ??
+    ''
+  )
+    .split(',')
+    .map((group) => group.trim())
+    .filter(Boolean)
+
+  return configuredGroups.length > 0 ? configuredGroups : defaultSystemAdminGroups
 }
 
 function createDirectoryProjectId(directoryId: string, projectId: string) {

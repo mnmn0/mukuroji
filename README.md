@@ -106,7 +106,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_DASHBOARD_TABLE`: ダッシュボード集計値を保存する DynamoDB table 名。未指定時は `mukuroji-dashboard-local`
 - `MUKUROJI_PROJECT_TASKS_TABLE`: プロジェクト別タスクを保存する DynamoDB table 名。未指定時は `mukuroji-project-tasks-v2-local`
 - `MUKUROJI_PROJECT_DIRECTORY_TABLE`: サイドバー用チーム/プロジェクト階層を保存する DynamoDB table 名。未指定時は `mukuroji-project-directory-local`
-- `MUKUROJI_PROJECT_DIRECTORY_ID`: ready hook が seed する directory partition。未指定時は `user#<COGNITO_TEST_USERNAME の小文字>`
+- `MUKUROJI_PROJECT_DIRECTORY_ID`: ready hook が seed する directory partition。未指定時は `user#<COGNITO_TEST_USERNAME の小文字>`。プロジェクト権限付与候補 user は Cognito の `custom:directory_id` / `custom:workspace_id` がこの値に一致する user に限定されます。
 
 API サーバーは `/api/dashboard/summary`, `/api/teams/projects`,
 `/api/projects/{projectId}/tasks` で DynamoDB を読みます。ローカルでは Vite proxy により、
@@ -123,6 +123,8 @@ VITE_TASKS_API_BASE_URL=<ProjectTasksApiUrl> bun run web:dev
 Lambda Function URL の CORS 許可 origin は CDK parameter
 `TaskApiAllowedOrigins` で指定します。未指定時は
 `http://localhost:5173,http://127.0.0.1:5173` です。
+認証に使う Cognito user pool は CDK parameter `CognitoUserPoolId` で固定し、
+Lambda は access token の issuer がその user pool と一致する場合だけ処理します。
 同じ Function URL から `/teams/projects` と `/projects/{projectId}/tasks` を取得します。
 
 毎回環境変数を指定しない場合は、`web/.env.local` に以下を保存してください。
