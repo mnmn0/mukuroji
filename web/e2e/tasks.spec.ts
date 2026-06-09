@@ -224,6 +224,15 @@ async function mockAuthenticatedTaskPage(
 
     projectDirectory[0]?.projects.push(project)
     taskResponsesByProject[project.id] = []
+    projectMembersByProject[project.id] = [
+      {
+        id: 'demo@example.com',
+        email: 'demo@example.com',
+        name: 'Demo User',
+        role: 'manager',
+        updatedAt: '2026-06-08T00:00:00.000Z',
+      },
+    ]
 
     await route.fulfill({
       status: 201,
@@ -680,12 +689,30 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => requestCounts.taskStatusUpdates).toBe(2)
   })
 
-  test('権限管理画面でプロジェクトメンバーのロールを変更できる', async ({ page }) => {
-    await page.goto('/permissions')
+  test('プロジェクト画面の権限タブでメンバーのロールを変更できる', async ({ page }) => {
+    await page.unroute('**/api/auth/me')
+    await page.route('**/api/auth/me', async (route) => {
+      await route.fulfill({
+        json: {
+          username: 'demo@example.com',
+          attributes: {
+            email: 'demo@example.com',
+            name: 'Demo User',
+          },
+          groups: [],
+          isSystemAdmin: false,
+        },
+      })
+    })
+    await page.goto('/projects/refero/tasks?teamId=core-team')
     const requestCounts = getMockRequestCounts(page)
 
+    await expect(page.getByRole('button', { name: '権限管理', exact: true })).toHaveCount(0)
+    await page.getByRole('tab', { name: /権限/ }).click()
     await expect(page.getByTestId('permissions-view')).toBeVisible()
-    await expect(page.getByTestId('permissions-project-select')).toHaveValue('refero')
+    await expect(page.getByTestId('permissions-project-select')).toHaveCount(0)
+    await expect(page.getByTestId('permission-role-select-demo-example-com')).toBeDisabled()
+    await expect(page.getByTestId('permission-remove-demo-example-com')).toBeDisabled()
     await expect(page.getByTestId('permission-member-row-sato-example-com')).toBeVisible()
     await expect.poll(() => requestCounts.projectUserReads).toBeGreaterThanOrEqual(1)
     await expect(page.getByTestId('permissions-load-more-users')).toBeVisible()
@@ -727,6 +754,14 @@ test.describe('authenticated task page', () => {
 
     await expect(page.getByRole('button', { name: '新規プロジェクト', exact: true })).toBeVisible()
     expect(requestCounts.projectCreates).toBe(1)
+
+    await page.getByRole('button', { name: '新規プロジェクト', exact: true }).click()
+    await expect(page).toHaveURL('/projects/new-project/tasks?teamId=core-team')
+    await page.getByRole('tab', { name: /権限/ }).click()
+    await expect(page.getByTestId('permission-member-row-demo-example-com')).toBeVisible()
+    await expect(page.getByTestId('permission-role-select-demo-example-com')).toHaveValue('manager')
+    await expect(page.getByTestId('permission-role-select-demo-example-com')).toBeDisabled()
+    await expect(page.getByTestId('permission-remove-demo-example-com')).toBeDisabled()
   })
 
   test('ダッシュボードからプロジェクトをアーカイブできる', async ({ page }) => {

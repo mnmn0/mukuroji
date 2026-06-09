@@ -9,6 +9,7 @@ import {
   DeleteCommand,
   PutCommand,
   QueryCommand,
+  TransactWriteCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { Hono } from 'hono'
@@ -370,6 +371,16 @@ type ProjectAccessEntry = {
    * 現在ユーザーに割り当てられた project role です。
    */
   role?: ProjectRole
+}
+
+/**
+ * project 作成者を manager として登録するための context です。
+ */
+type ProjectCreatorContext = {
+  /**
+   * Cognito user を正規化した member key です。
+   */
+  userKey: string
 }
 
 /**
@@ -1086,6 +1097,7 @@ type ProjectDirectoryClient = {
     directoryId: string,
     teamId: string,
     input: CreateProjectRequestBody,
+    creator: ProjectCreatorContext,
   ): Promise<CreateProjectResponse>
   /**
    * DynamoDB 上のチームをアーカイブします。
@@ -1326,10 +1338,17 @@ app.post('/api/teams/:teamId/projects', async (c) => {
 
   try {
     const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
-    requireSystemAdmin(principal)
     const body = await readJson<CreateProjectRequestBody>(c.req)
 
-    return c.json(await projectDirectory.createProject(principal.directoryId, teamId, body ?? {}), 201)
+    return c.json(
+      await projectDirectory.createProject(
+        principal.directoryId,
+        teamId,
+        body ?? {},
+        { userKey: principal.userKey },
+      ),
+      201,
+    )
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -1757,8 +1776,12 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'Project member was not found.' }, 404)
   }
 
-  if (error.code === 'ConditionalCheckFailedException') {
+  if (error.code === 'ConditionalCheckFailedException' || error.code === 'TransactionCanceledException') {
     return c.json({ message: 'The same item already exists.' }, 409)
+  }
+
+  if (error.code === 'ProjectLastManager') {
+    return c.json({ message: 'At least one project manager is required.' }, 409)
   }
 
   if (error.code === 'ResourceNotFoundException') {
@@ -2649,6 +2672,14 @@ export class DynamoDbProjectDirectoryClient {
         item.projectId === projectId &&
         item.memberKey === normalizedMemberKey,
       )
+
+      const guardManager = (
+        existingMember?.role === 'manager' &&
+        role !== 'manager'
+      )
+        ? this.requireAnotherProjectManager(items, projectId, normalizedMemberKey)
+        : undefined
+
       const updatedAt = new Date().toISOString()
       const item: ProjectMemberItem = {
         directoryId,
@@ -2663,12 +2694,38 @@ export class DynamoDbProjectDirectoryClient {
         updatedAt,
       }
 
-      await this.documentClient.send(
-        new PutCommand({
-          TableName: this.tableName,
-          Item: item,
-        }),
-      )
+      if (guardManager) {
+        try {
+          await this.documentClient.send(
+            new TransactWriteCommand({
+              TransactItems: [
+                {
+                  ConditionCheck: this.createProjectManagerConditionCheck(directoryId, guardManager.entryKey),
+                },
+                {
+                  Put: {
+                    TableName: this.tableName,
+                    Item: item,
+                  },
+                },
+              ],
+            }),
+          )
+        } catch (error) {
+          if (isAwsNamedError(error, 'TransactionCanceledException')) {
+            throw this.createProjectLastManagerError()
+          }
+
+          throw error
+        }
+      } else {
+        await this.documentClient.send(
+          new PutCommand({
+            TableName: this.tableName,
+            Item: item,
+          }),
+        )
+      }
 
       return {
         member: toProjectMemberResponseItem(item),
@@ -2705,16 +2762,50 @@ export class DynamoDbProjectDirectoryClient {
         )
       }
 
-      await this.documentClient.send(
-        new DeleteCommand({
-          TableName: this.tableName,
-          Key: {
-            directoryId,
-            entryKey: member.entryKey,
-          },
-          ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
-        }),
-      )
+      const guardManager = member.role === 'manager'
+        ? this.requireAnotherProjectManager(items, projectId, normalizedMemberKey)
+        : undefined
+
+      if (guardManager) {
+        try {
+          await this.documentClient.send(
+            new TransactWriteCommand({
+              TransactItems: [
+                {
+                  ConditionCheck: this.createProjectManagerConditionCheck(directoryId, guardManager.entryKey),
+                },
+                {
+                  Delete: {
+                    TableName: this.tableName,
+                    Key: {
+                      directoryId,
+                      entryKey: member.entryKey,
+                    },
+                    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
+                  },
+                },
+              ],
+            }),
+          )
+        } catch (error) {
+          if (isAwsNamedError(error, 'TransactionCanceledException')) {
+            throw this.createProjectLastManagerError()
+          }
+
+          throw error
+        }
+      } else {
+        await this.documentClient.send(
+          new DeleteCommand({
+            TableName: this.tableName,
+            Key: {
+              directoryId,
+              entryKey: member.entryKey,
+            },
+            ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
+          }),
+        )
+      }
 
       return {
         projectId,
@@ -2785,9 +2876,23 @@ export class DynamoDbProjectDirectoryClient {
   /**
    * DynamoDB にチーム配下のプロジェクトを作成します。
    */
-  async createProject(directoryId: string, teamId: string, input: CreateProjectRequestBody) {
+  async createProject(
+    directoryId: string,
+    teamId: string,
+    input: CreateProjectRequestBody,
+    creator: ProjectCreatorContext,
+  ) {
     const names = readLocalizedNames(input)
     const tone = readProjectTone(input.tone)
+    const creatorMemberKey = normalizeProjectMemberKey(creator.userKey)
+
+    if (!creatorMemberKey) {
+      throw new ProjectDataError(
+        400,
+        'ProjectCreatorInvalid',
+        'Project creator member key is required.',
+      )
+    }
 
     try {
       const items = await this.readValidDirectoryItems(directoryId)
@@ -2824,12 +2929,37 @@ export class DynamoDbProjectDirectoryClient {
         projectSortOrder,
         tone,
       }
+      const updatedAt = new Date().toISOString()
+      const creatorMemberItem: ProjectMemberItem = {
+        directoryId,
+        entryKey: createProjectMemberEntryKey(projectId, creatorMemberKey),
+        entryType: 'project-member',
+        projectId,
+        memberKey: creatorMemberKey,
+        email: creatorMemberKey,
+        role: 'manager',
+        createdAt: updatedAt,
+        updatedAt,
+      }
 
       await this.documentClient.send(
-        new PutCommand({
-          TableName: this.tableName,
-          Item: item,
-          ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: item,
+                ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+              },
+            },
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: creatorMemberItem,
+                ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+              },
+            },
+          ],
         }),
       )
 
@@ -2993,6 +3123,59 @@ export class DynamoDbProjectDirectoryClient {
     if (!project) {
       throw new ProjectDataError(404, 'ProjectNotFound', `Project "${projectId}" was not found.`)
     }
+  }
+
+  /**
+   * 対象 member 以外に残る manager item を取得します。
+   */
+  private requireAnotherProjectManager(
+    items: ProjectDirectoryItem[],
+    projectId: string,
+    memberKey: string,
+  ) {
+    const manager = items.find((item) =>
+        item.entryType === 'project-member' &&
+        item.projectId === projectId &&
+        item.memberKey !== memberKey &&
+        item.role === 'manager',
+    )
+
+    if (!manager) {
+      throw this.createProjectLastManagerError()
+    }
+
+    return manager
+  }
+
+  /**
+   * 他 manager が transaction 時点でも manager のままか検証する condition check を作ります。
+   */
+  private createProjectManagerConditionCheck(directoryId: string, entryKey: string) {
+    return {
+      TableName: this.tableName,
+      Key: {
+        directoryId,
+        entryKey,
+      },
+      ConditionExpression: '#role = :manager',
+      ExpressionAttributeNames: {
+        '#role': 'role',
+      },
+      ExpressionAttributeValues: {
+        ':manager': 'manager',
+      },
+    }
+  }
+
+  /**
+   * project に manager が残らなくなる操作を表す domain error を作ります。
+   */
+  private createProjectLastManagerError() {
+    return new ProjectDataError(
+      409,
+      'ProjectLastManager',
+      'At least one project manager is required.',
+    )
   }
 
   /**

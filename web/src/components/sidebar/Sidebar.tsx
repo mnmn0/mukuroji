@@ -66,7 +66,6 @@ export type SidebarNavId =
   | 'inbox'
   | 'dashboard'
   | 'reports'
-  | 'permissions'
   | 'help'
   | 'settings'
 
@@ -385,7 +384,6 @@ const mainNavItems: MainNavItem[] = [
 ]
 
 const utilityNavItems: MainNavItem[] = [
-  { id: 'permissions', icon: ShieldIcon },
   { id: 'help', icon: HelpCircleIcon },
   { id: 'settings', icon: SettingsIcon },
 ]
@@ -437,7 +435,6 @@ const defaultLabels: SidebarLabels = {
     inbox: '受信箱',
     dashboard: 'ダッシュボード',
     reports: 'レポート',
-    permissions: '権限管理',
     help: 'ヘルプ',
     settings: '設定',
   },
@@ -1502,15 +1499,6 @@ function PanelIcon({ className }: SidebarIconProps) {
       <path d="M8 9h8" />
       <path d="M8 13h5" />
       <path d="M8 17h8" />
-    </SvgBase>
-  )
-}
-
-function ShieldIcon({ className }: SidebarIconProps) {
-  return (
-    <SvgBase className={className}>
-      <path d="M12 22s8-3.5 8-10V5.5L12 2 4 5.5V12c0 6.5 8 10 8 10Z" />
-      <path d="m9 12 2 2 4-4" />
     </SvgBase>
   )
 }

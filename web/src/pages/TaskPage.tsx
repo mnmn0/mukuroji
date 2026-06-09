@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import useSWR from 'swr'
-import { getCurrentUser } from '../auth/api'
+import { getCurrentUser, type CurrentUser } from '../auth/api'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import { ChevronIcon } from '../components/icons'
 import {
@@ -28,9 +28,15 @@ import {
   type CreateProjectDirectoryTeamInput,
   getProjectDirectory,
   getProjectMembers,
+  getProjectUsers,
   type ProjectDirectoryTeam,
   type ProjectMember,
+  type ProjectUser,
+  type UpdateProjectMemberInput,
+  removeProjectMember,
+  updateProjectMember,
 } from '../projects/api'
+import { ProjectPermissionsPanel } from '../projects/ProjectPermissionsPanel'
 import {
   createProjectTasksPath,
   createTeamViewPath,
@@ -45,10 +51,11 @@ import {
   type TaskStatus,
 } from '../tasks/api'
 
-const taskTabs = ['table', 'board', 'gantt', 'calendar', 'file'] as const
+const taskTabs = ['table', 'board', 'gantt', 'calendar', 'file', 'permissions'] as const
 const taskStatuses = ['in-progress', 'review', 'todo', 'done'] as const
 const taskPriorities = ['high', 'medium', 'low'] as const
 const emptyProjectMembers: ProjectMember[] = []
+const emptyProjectUsers: ProjectUser[] = []
 const apiSWRConfig = {
   dedupingInterval: 10_000,
   shouldRetryOnError: false,
@@ -139,6 +146,42 @@ type TaskScreenProps = {
    */
   assigneeErrorMessage?: string
   /**
+   * 権限管理で表示する project member 一覧です。
+   */
+  projectMembers?: ProjectMember[]
+  /**
+   * 権限管理で選択できる Cognito user 候補です。
+   */
+  projectUsers?: ProjectUser[]
+  /**
+   * 権限管理の Cognito user 候補を取得中かどうかです。
+   */
+  isProjectUsersLoading?: boolean
+  /**
+   * 権限管理の Cognito user 候補取得失敗時に表示するエラーです。
+   */
+  projectUsersErrorMessage?: string
+  /**
+   * 権限管理の Cognito user 一覧次 page token です。
+   */
+  projectUsersNextToken?: string
+  /**
+   * 権限管理の Cognito user 検索 query です。
+   */
+  projectUserQuery?: string
+  /**
+   * ログインユーザーが system admin かどうかです。
+   */
+  isSystemAdmin?: boolean
+  /**
+   * ログインユーザーが project member role を管理できるかどうかです。
+   */
+  canManageProjectMembers?: boolean
+  /**
+   * 権限管理 API の失敗時に表示するエラーです。
+   */
+  projectMembersErrorMessage?: string
+  /**
    * タスク一覧の取得失敗時に表示するエラーメッセージです。
    */
   taskErrorMessage?: string
@@ -174,6 +217,26 @@ type TaskScreenProps = {
    * プロジェクトアーカイブ時の callback です。
    */
   onArchiveProject?: (teamId: string, projectId: string) => Promise<void>
+  /**
+   * Cognito user 一覧の次 page 読み込み callback です。
+   */
+  onLoadMoreProjectUsers?: () => Promise<void>
+  /**
+   * Cognito user 検索 query 変更 callback です。
+   */
+  onProjectUserQueryChange?: (query: string) => void
+  /**
+   * project member role 保存時の callback です。
+   */
+  onUpdateProjectMember?: (
+    projectId: string,
+    memberKey: string,
+    input: UpdateProjectMemberInput,
+  ) => Promise<void>
+  /**
+   * project member role 削除時の callback です。
+   */
+  onRemoveProjectMember?: (projectId: string, memberKey: string) => Promise<void>
 }
 
 const viewLabelKeys: Record<TaskTab, MessageKey> = {
@@ -182,6 +245,7 @@ const viewLabelKeys: Record<TaskTab, MessageKey> = {
   gantt: 'tasks.view.gantt',
   calendar: 'tasks.view.calendar',
   file: 'tasks.view.file',
+  permissions: 'tasks.view.permissions',
 }
 
 /**
@@ -195,6 +259,12 @@ export function TaskPage() {
   const selectedTeamId = searchParams.get('teamId') ?? undefined
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
+  const [projectUserQuery, setProjectUserQuery] = useState('')
+  const [projectUsersExtraPage, setProjectUsersExtraPage] = useState<{
+    key: string
+    nextToken?: string
+    users: ProjectUser[]
+  }>()
   const t = useMemo(() => createTranslator(locale), [locale])
   const accessToken = session?.accessToken
   const currentUserKey = accessToken ? (['current-user', accessToken] as const) : null
@@ -233,6 +303,7 @@ export function TaskPage() {
     data: projectMembersData,
     error: projectMembersError,
     isLoading: isProjectMembersLoading,
+    mutate: mutateProjectMembers,
   } = useSWR(
     projectMembersKey,
     ([, accessToken, currentProjectId]) =>
@@ -240,6 +311,45 @@ export function TaskPage() {
     apiSWRConfig,
   )
   const projectMembers = projectMembersData ?? emptyProjectMembers
+  const currentUserProjectKey = resolveCurrentUserProjectKey(user)
+  const canManageProjectMembers =
+    Boolean(user?.isSystemAdmin) ||
+    projectMembers.some((member) =>
+      member.id === currentUserProjectKey && member.role === 'manager',
+    )
+  const projectUsersKey =
+    accessToken && user && projectId && !currentUserError && canManageProjectMembers
+      ? (['project-users', accessToken, projectId, projectUserQuery] as const)
+      : null
+  const {
+    data: projectUsersFirstPage,
+    error: projectUsersError,
+    isLoading: isProjectUsersLoading,
+  } = useSWR(
+    projectUsersKey,
+    ([, accessToken, currentProjectId, currentQuery]) =>
+      getProjectUsers(accessToken, currentProjectId, {
+        limit: 20,
+        query: currentQuery,
+      }),
+    apiSWRConfig,
+  )
+  const projectUsersPageKey = createProjectUsersPageKey(projectId, projectUserQuery)
+  const activeProjectUsersExtraPage = projectUsersExtraPage?.key === projectUsersPageKey
+    ? projectUsersExtraPage
+    : undefined
+  const projectUsers = useMemo(
+    () => mergeProjectUsers(
+      projectUsersFirstPage?.users ?? emptyProjectUsers,
+      activeProjectUsersExtraPage?.users ?? emptyProjectUsers,
+    ),
+    [activeProjectUsersExtraPage?.users, projectUsersFirstPage?.users],
+  )
+  const projectUsersNextToken =
+    activeProjectUsersExtraPage ? activeProjectUsersExtraPage.nextToken : projectUsersFirstPage?.nextToken
+  const projectUsersErrorMessage = projectUsersError
+    ? t('workspace.permissions.usersError')
+    : undefined
   const activeTeam = findTeamForProject(teams, projectId, selectedTeamId)
   const activeProject = findProjectInTeams(teams, projectId, activeTeam?.id ?? selectedTeamId)
   const projectName =
@@ -257,6 +367,9 @@ export function TaskPage() {
       ? t('tasks.create.assigneeLoadError')
       : message
   }, [projectMembersError, t])
+  const projectPermissionsErrorMessage = projectMembersError
+    ? t('workspace.permissions.error')
+    : undefined
   const taskErrorMessage = useMemo(() => {
     if (!taskError) {
       return undefined
@@ -362,6 +475,50 @@ export function TaskPage() {
     }
   }
 
+  const handleUpdateProjectMember = async (
+    currentProjectId: string,
+    memberKey: string,
+    input: UpdateProjectMemberInput,
+  ) => {
+    if (!accessToken) {
+      return
+    }
+
+    await updateProjectMember(accessToken, currentProjectId, memberKey, input)
+    await mutateProjectMembers()
+  }
+
+  const handleRemoveProjectMember = async (currentProjectId: string, memberKey: string) => {
+    if (!accessToken) {
+      return
+    }
+
+    await removeProjectMember(accessToken, currentProjectId, memberKey)
+    await mutateProjectMembers()
+  }
+
+  const handleLoadMoreProjectUsers = async () => {
+    if (!accessToken || !projectUsersNextToken || !canManageProjectMembers) {
+      return
+    }
+
+    const currentPageKey = createProjectUsersPageKey(projectId, projectUserQuery)
+    const currentExtraUsers = projectUsersExtraPage?.key === currentPageKey
+      ? projectUsersExtraPage.users
+      : emptyProjectUsers
+    const response = await getProjectUsers(accessToken, projectId, {
+      limit: 20,
+      nextToken: projectUsersNextToken,
+      query: projectUserQuery,
+    })
+
+    setProjectUsersExtraPage({
+      key: currentPageKey,
+      nextToken: response.nextToken,
+      users: mergeProjectUsers(currentExtraUsers, response.users),
+    })
+  }
+
   return (
     <TaskScreen
       isLoading={isLoading}
@@ -381,9 +538,22 @@ export function TaskPage() {
       onCreateTask={handleCreateTask}
       assigneeErrorMessage={projectMembersErrorMessage}
       assigneeOptions={projectMembers}
+      canManageProjectMembers={canManageProjectMembers}
       isAssigneeOptionsLoading={Boolean(projectMembersKey && isProjectMembersLoading)}
+      isProjectUsersLoading={Boolean(projectUsersKey && isProjectUsersLoading)}
+      isSystemAdmin={user?.isSystemAdmin}
+      onLoadMoreProjectUsers={handleLoadMoreProjectUsers}
+      onProjectUserQueryChange={setProjectUserQuery}
+      onRemoveProjectMember={handleRemoveProjectMember}
+      onUpdateProjectMember={handleUpdateProjectMember}
       projectId={projectId}
+      projectMembers={projectMembers}
+      projectMembersErrorMessage={projectPermissionsErrorMessage}
       projectName={projectName}
+      projectUserQuery={projectUserQuery}
+      projectUsers={projectUsers}
+      projectUsersErrorMessage={projectUsersErrorMessage}
+      projectUsersNextToken={projectUsersNextToken}
       taskErrorMessage={taskErrorMessage}
       tasks={tasks}
       teamName={activeTeam?.name}
@@ -406,10 +576,22 @@ export function TaskScreen({
   activeProjectTeamId,
   assigneeErrorMessage,
   assigneeOptions = [],
+  canManageProjectMembers = false,
   isAssigneeOptionsLoading = false,
+  isProjectUsersLoading = false,
+  isSystemAdmin = false,
   isLoading = false,
+  projectMembers = emptyProjectMembers,
+  projectMembersErrorMessage,
+  projectUserQuery = '',
+  projectUsers = emptyProjectUsers,
+  projectUsersErrorMessage,
+  projectUsersNextToken,
   tasks = [],
   taskErrorMessage,
+  onLoadMoreProjectUsers,
+  onProjectUserQueryChange,
+  onRemoveProjectMember,
   onSelectProject,
   onSelectNav,
   onSelectTeamView,
@@ -418,6 +600,7 @@ export function TaskScreen({
   onArchiveProject,
   onArchiveTeam,
   onCreateTask,
+  onUpdateProjectMember,
 }: TaskScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
@@ -572,8 +755,23 @@ export function TaskScreen({
             ) : null}
             <TaskWorkspace
               activeTab={activeTab}
+              canManageProjectMembers={canManageProjectMembers}
               isStatusMenuOpen={isStatusMenuOpen}
+              isProjectMembersLoading={isAssigneeOptionsLoading}
+              isProjectUsersLoading={isProjectUsersLoading}
+              isSystemAdmin={isSystemAdmin}
+              projectId={projectId}
+              projectMembers={projectMembers}
+              projectMembersErrorMessage={projectMembersErrorMessage}
+              projectName={resolvedProjectName}
+              projectUserQuery={projectUserQuery}
+              projectUsers={projectUsers}
+              projectUsersErrorMessage={projectUsersErrorMessage}
+              projectUsersNextToken={projectUsersNextToken}
+              onLoadMoreProjectUsers={onLoadMoreProjectUsers}
               onCreateTaskOpen={() => setIsCreateTaskOpen(true)}
+              onProjectUserQueryChange={onProjectUserQueryChange}
+              onRemoveProjectMember={onRemoveProjectMember}
               onSearchQueryChange={setSearchQuery}
               onStatusFilterChange={(nextStatusFilter) => {
                 setStatusFilter(nextStatusFilter)
@@ -581,6 +779,7 @@ export function TaskScreen({
               }}
               onStatusMenuOpenChange={setIsStatusMenuOpen}
               onTaskSelectionChange={updateTaskSelection}
+              onUpdateProjectMember={onUpdateProjectMember}
               searchQuery={searchQuery}
               selectedTaskIds={selectedTaskIds}
               statusFilter={statusFilter}
@@ -634,6 +833,24 @@ function findTeamForProject(
   }
 
   return teams.find((team) => team.projects.some((project) => project.id === projectId))
+}
+
+function resolveCurrentUserProjectKey(user: CurrentUser | undefined) {
+  return (user?.attributes.email ?? user?.username ?? '').trim().toLowerCase()
+}
+
+function createProjectUsersPageKey(projectId: string, query: string) {
+  return `${projectId}\u0000${query.trim()}`
+}
+
+function mergeProjectUsers(currentUsers: ProjectUser[], nextUsers: ProjectUser[]) {
+  const usersById = new Map(currentUsers.map((user) => [user.id, user]))
+
+  for (const user of nextUsers) {
+    usersById.set(user.id, user)
+  }
+
+  return Array.from(usersById.values())
 }
 
 function TaskHeader({
@@ -755,12 +972,28 @@ function TaskHeader({
 
 function TaskWorkspace({
   activeTab,
+  canManageProjectMembers,
   isStatusMenuOpen,
+  isProjectMembersLoading,
+  isProjectUsersLoading,
+  isSystemAdmin,
+  projectId,
+  projectMembers,
+  projectMembersErrorMessage,
+  projectName,
+  projectUserQuery,
+  projectUsers,
+  projectUsersErrorMessage,
+  projectUsersNextToken,
+  onLoadMoreProjectUsers,
   onCreateTaskOpen,
+  onProjectUserQueryChange,
+  onRemoveProjectMember,
   onSearchQueryChange,
   onStatusFilterChange,
   onStatusMenuOpenChange,
   onTaskSelectionChange,
+  onUpdateProjectMember,
   searchQuery,
   selectedTaskIds,
   statusFilter,
@@ -769,12 +1002,32 @@ function TaskWorkspace({
   tasks,
 }: {
   activeTab: TaskTab
+  canManageProjectMembers: boolean
   isStatusMenuOpen: boolean
+  isProjectMembersLoading: boolean
+  isProjectUsersLoading: boolean
+  isSystemAdmin: boolean
+  projectId: string
+  projectMembers: ProjectMember[]
+  projectMembersErrorMessage?: string
+  projectName: string
+  projectUserQuery: string
+  projectUsers: ProjectUser[]
+  projectUsersErrorMessage?: string
+  projectUsersNextToken?: string
+  onLoadMoreProjectUsers?: () => Promise<void>
   onCreateTaskOpen: () => void
+  onProjectUserQueryChange?: (query: string) => void
+  onRemoveProjectMember?: (projectId: string, memberKey: string) => Promise<void>
   onSearchQueryChange: (query: string) => void
   onStatusFilterChange: (statusFilter: StatusFilter) => void
   onStatusMenuOpenChange: (isOpen: boolean) => void
   onTaskSelectionChange: (taskId: string, selected: boolean) => void
+  onUpdateProjectMember?: (
+    projectId: string,
+    memberKey: string,
+    input: UpdateProjectMemberInput,
+  ) => Promise<void>
   searchQuery: string
   selectedTaskIds: string[]
   statusFilter: StatusFilter
@@ -784,6 +1037,32 @@ function TaskWorkspace({
 }) {
   const statusFilterButtonId = 'status-filter-button'
   const statusFilterMenuId = 'status-filter-menu'
+
+  if (activeTab === 'permissions') {
+    return (
+      <div className="min-h-0 flex-1 overflow-auto bg-[#fbfdff] px-[clamp(22px,3vw,38px)] py-7">
+        <ProjectPermissionsPanel
+          canManageMembers={canManageProjectMembers}
+          errorMessage={projectMembersErrorMessage}
+          isLoading={isProjectMembersLoading}
+          isSystemAdmin={isSystemAdmin}
+          isUsersLoading={isProjectUsersLoading}
+          members={projectMembers}
+          projectId={projectId}
+          projectName={projectName}
+          t={t}
+          userQuery={projectUserQuery}
+          users={projectUsers}
+          usersErrorMessage={projectUsersErrorMessage}
+          usersNextToken={projectUsersNextToken}
+          onLoadMoreUsers={onLoadMoreProjectUsers}
+          onRemoveMember={onRemoveProjectMember}
+          onUpdateMember={onUpdateProjectMember}
+          onUserQueryChange={onProjectUserQueryChange}
+        />
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-0 flex-1 overflow-auto bg-[#fbfdff] px-[clamp(22px,3vw,38px)] py-7">
@@ -1680,6 +1959,7 @@ function TabIcon({ tab }: { tab: TaskTab }) {
     gantt: 'G',
     calendar: 'C',
     file: 'F',
+    permissions: 'P',
   }
 
   return (

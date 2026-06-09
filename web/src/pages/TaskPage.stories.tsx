@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { TaskScreen } from './TaskPage'
 import { projectDirectoryFixtures } from '../projects/fixtures'
-import type { ProjectMember } from '../projects/api'
+import type { ProjectMember, ProjectUser } from '../projects/api'
 import { referoTaskFixtures } from '../tasks/fixtures'
 
 const assigneeOptions: ProjectMember[] = [
@@ -21,6 +21,25 @@ const assigneeOptions: ProjectMember[] = [
   },
 ]
 
+const projectUsers: ProjectUser[] = [
+  {
+    id: 'sato@example.com',
+    username: 'sato@example.com',
+    email: 'sato@example.com',
+    name: '佐藤 花子',
+    enabled: true,
+    status: 'CONFIRMED',
+  },
+  {
+    id: 'viewer@example.com',
+    username: 'viewer@example.com',
+    email: 'viewer@example.com',
+    name: 'Viewer User',
+    enabled: true,
+    status: 'CONFIRMED',
+  },
+]
+
 const meta = {
   title: 'Application/Projects/Task Page',
   component: TaskScreen,
@@ -30,8 +49,12 @@ const meta = {
   args: {
     locale: 'ja',
     assigneeOptions,
+    canManageProjectMembers: true,
     projectId: 'refero',
+    projectMembers: assigneeOptions,
     projectName: 'Refero',
+    projectUserQuery: '',
+    projectUsers,
     onCreateProject: async () => undefined,
     onCreateTeam: async () => undefined,
     tasks: referoTaskFixtures,

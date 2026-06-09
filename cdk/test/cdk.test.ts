@@ -1,7 +1,7 @@
 import * as vm from 'node:vm';
 import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
-import { expect, test } from '@jest/globals';
+import { expect, jest, test } from '@jest/globals';
 import { CdkStack } from '../lib/cdk-stack';
 
 test('project task data store and lambda API are created', () => {
@@ -160,6 +160,7 @@ test('project task data store and lambda API are created', () => {
   expect(lambdaCode).toContain('async function queryAll');
   expect(lambdaCode).toContain('const projectItems = [];');
   expect(lambdaCode).toContain('UpdateItemCommand');
+  expect(lambdaCode).toContain('TransactWriteItemsCommand');
   expect(lambdaCode).toContain('DeleteItemCommand');
   expect(lambdaCode).toContain('readArchiveTeamId');
   expect(lambdaCode).toContain('readArchiveProjectParams');
@@ -285,6 +286,128 @@ test('inline lambda updates a task status with a conditional update', async () =
       ReturnValues: 'ALL_NEW',
     },
   });
+});
+
+test('inline lambda creates a project and grants the creator manager role', async () => {
+  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
+  const lambda = createInlineLambda(async (command) => {
+    commandInputs.push({
+      commandName: command.constructor.name,
+      input: command.input,
+    });
+
+    if (command.constructor.name === 'QueryCommand') {
+      return {
+        Items: [
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: '000010#000000#TEAM#core-team' },
+            entryType: { S: 'team' },
+            teamId: { S: 'core-team' },
+            teamSortOrder: { N: '10' },
+            nameJa: { S: 'コアチーム' },
+            nameEn: { S: 'Core Team' },
+            expanded: { BOOL: true },
+          },
+        ],
+      };
+    }
+
+    return {};
+  });
+
+  const response = await lambda.handler({
+    ...createLambdaEvent('POST', '/api/teams/core-team/projects'),
+    body: JSON.stringify({ name: '新規プロジェクト', tone: 'green' }),
+  });
+
+  expect(response.statusCode).toBe(201);
+  expect(JSON.parse(response.body)).toEqual({
+    project: {
+      id: '新規プロジェクト',
+      name: '新規プロジェクト',
+      tone: 'green',
+    },
+  });
+  expect(commandInputs).toHaveLength(2);
+  expect(commandInputs[1]).toMatchObject({
+    commandName: 'TransactWriteItemsCommand',
+    input: {
+      TransactItems: [
+        {
+          Put: {
+            TableName: 'DirectoryTable',
+            Item: {
+              directoryId: { S: 'user#demo@example.com' },
+              entryKey: { S: '000010#000010#PROJECT#新規プロジェクト' },
+              entryType: { S: 'project' },
+              teamId: { S: 'core-team' },
+              projectId: { S: '新規プロジェクト' },
+              tone: { S: 'green' },
+            },
+            ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+          },
+        },
+        {
+          Put: {
+            TableName: 'DirectoryTable',
+            Item: {
+              directoryId: { S: 'user#demo@example.com' },
+              entryKey: { S: 'PROJECT_MEMBER#新規プロジェクト#demo@example.com' },
+              entryType: { S: 'project-member' },
+              projectId: { S: '新規プロジェクト' },
+              memberKey: { S: 'demo@example.com' },
+              email: { S: 'demo@example.com' },
+              role: { S: 'manager' },
+            },
+            ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+          },
+        },
+      ],
+    },
+  });
+});
+
+test('inline lambda returns conflict when project creation transaction is canceled', async () => {
+  const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  const lambda = createInlineLambda(async (command) => {
+    if (command.constructor.name === 'QueryCommand') {
+      return {
+        Items: [
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: '000010#000000#TEAM#core-team' },
+            entryType: { S: 'team' },
+            teamId: { S: 'core-team' },
+            teamSortOrder: { N: '10' },
+            nameJa: { S: 'コアチーム' },
+            nameEn: { S: 'Core Team' },
+            expanded: { BOOL: true },
+          },
+        ],
+      };
+    }
+
+    if (command.constructor.name === 'TransactWriteItemsCommand') {
+      const error = new Error('Transaction was canceled.');
+      error.name = 'TransactionCanceledException';
+      throw error;
+    }
+
+    return {};
+  });
+
+  try {
+    const response = await lambda.handler({
+      ...createLambdaEvent('POST', '/api/teams/core-team/projects'),
+      body: JSON.stringify({ name: '新規プロジェクト' }),
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(JSON.parse(response.body)).toEqual({ message: 'The same item already exists.' });
+  } finally {
+    consoleError.mockRestore();
+  }
 });
 
 test('inline lambda archives a project with a conditional update', async () => {
@@ -562,6 +685,154 @@ test('inline lambda updates project member roles for a project manager', async (
   });
 });
 
+test('inline lambda keeps the last project manager from being downgraded', async () => {
+  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
+  const lambda = createInlineLambda(async (command) => {
+    commandInputs.push({
+      commandName: command.constructor.name,
+      input: command.input,
+    });
+
+    if (command.constructor.name === 'QueryCommand') {
+      return {
+        Items: [
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: '000010#000000#TEAM#core-team' },
+            entryType: { S: 'team' },
+            teamId: { S: 'core-team' },
+            teamSortOrder: { N: '10' },
+            nameJa: { S: 'コアチーム' },
+            nameEn: { S: 'Core Team' },
+            expanded: { BOOL: true },
+          },
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: '000010#000010#PROJECT#refero' },
+            entryType: { S: 'project' },
+            teamId: { S: 'core-team' },
+            teamSortOrder: { N: '10' },
+            projectId: { S: 'refero' },
+            projectSortOrder: { N: '10' },
+            nameJa: { S: 'Refero' },
+            nameEn: { S: 'Refero' },
+            tone: { S: 'blue' },
+          },
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: 'PROJECT_MEMBER#refero#demo@example.com' },
+            entryType: { S: 'project-member' },
+            projectId: { S: 'refero' },
+            memberKey: { S: 'demo@example.com' },
+            email: { S: 'demo@example.com' },
+            role: { S: 'manager' },
+            createdAt: { S: '2026-06-08T00:00:00.000Z' },
+            updatedAt: { S: '2026-06-08T00:00:00.000Z' },
+          },
+        ],
+      };
+    }
+
+    return {};
+  });
+
+  const response = await lambda.handler({
+    ...createLambdaEvent('PATCH', '/api/projects/refero/members/demo%40example.com'),
+    body: JSON.stringify({
+      role: 'viewer',
+    }),
+  });
+
+  expect(response.statusCode).toBe(409);
+  expect(JSON.parse(response.body)).toEqual({ message: 'At least one project manager is required.' });
+  expect(commandInputs.map((command) => command.commandName)).toEqual([
+    'QueryCommand',
+    'QueryCommand',
+  ]);
+});
+
+test('inline lambda treats manager guard transaction cancellation as last manager conflict', async () => {
+  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
+  const lambda = createInlineLambda(async (command) => {
+    commandInputs.push({
+      commandName: command.constructor.name,
+      input: command.input,
+    });
+
+    if (command.constructor.name === 'QueryCommand') {
+      return {
+        Items: [
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: '000010#000000#TEAM#core-team' },
+            entryType: { S: 'team' },
+            teamId: { S: 'core-team' },
+            teamSortOrder: { N: '10' },
+            nameJa: { S: 'コアチーム' },
+            nameEn: { S: 'Core Team' },
+            expanded: { BOOL: true },
+          },
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: '000010#000010#PROJECT#refero' },
+            entryType: { S: 'project' },
+            teamId: { S: 'core-team' },
+            teamSortOrder: { N: '10' },
+            projectId: { S: 'refero' },
+            projectSortOrder: { N: '10' },
+            nameJa: { S: 'Refero' },
+            nameEn: { S: 'Refero' },
+            tone: { S: 'blue' },
+          },
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: 'PROJECT_MEMBER#refero#demo@example.com' },
+            entryType: { S: 'project-member' },
+            projectId: { S: 'refero' },
+            memberKey: { S: 'demo@example.com' },
+            email: { S: 'demo@example.com' },
+            role: { S: 'manager' },
+            createdAt: { S: '2026-06-08T00:00:00.000Z' },
+            updatedAt: { S: '2026-06-08T00:00:00.000Z' },
+          },
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            entryKey: { S: 'PROJECT_MEMBER#refero#zmanager@example.com' },
+            entryType: { S: 'project-member' },
+            projectId: { S: 'refero' },
+            memberKey: { S: 'zmanager@example.com' },
+            email: { S: 'zmanager@example.com' },
+            role: { S: 'manager' },
+            createdAt: { S: '2026-06-08T00:00:00.000Z' },
+            updatedAt: { S: '2026-06-08T00:00:00.000Z' },
+          },
+        ],
+      };
+    }
+
+    if (command.constructor.name === 'TransactWriteItemsCommand') {
+      const error = new Error('Transaction was canceled.');
+      error.name = 'TransactionCanceledException';
+      throw error;
+    }
+
+    return {};
+  });
+
+  const response = await lambda.handler(createLambdaEvent(
+    'DELETE',
+    '/api/projects/refero/members/demo%40example.com',
+  ));
+
+  expect(response.statusCode).toBe(409);
+  expect(JSON.parse(response.body)).toEqual({ message: 'At least one project manager is required.' });
+  expect(commandInputs.map((command) => command.commandName)).toEqual([
+    'QueryCommand',
+    'QueryCommand',
+    'TransactWriteItemsCommand',
+  ]);
+});
+
 test('inline lambda lets a system admin update project member roles without project access checks', async () => {
   const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
   const lambda = createInlineLambda(async (command) => {
@@ -746,6 +1017,7 @@ function createInlineLambda(
           DeleteItemCommand: createCommandConstructor('DeleteItemCommand'),
           PutItemCommand: createCommandConstructor('PutItemCommand'),
           QueryCommand: createCommandConstructor('QueryCommand'),
+          TransactWriteItemsCommand: createCommandConstructor('TransactWriteItemsCommand'),
           UpdateItemCommand: createCommandConstructor('UpdateItemCommand'),
         };
       }
