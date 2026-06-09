@@ -265,7 +265,7 @@ export class CdkStack extends cdk.Stack {
       },
       code: lambda.Code.fromInline(`
 	const { CognitoIdentityProviderClient, AdminGetUserCommand, GetUserCommand, ListUsersCommand } = require('@aws-sdk/client-cognito-identity-provider');
-const { DynamoDBClient, DeleteItemCommand, PutItemCommand, QueryCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBClient, DeleteItemCommand, PutItemCommand, QueryCommand, TransactWriteItemsCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
 
 const cognito = new CognitoIdentityProviderClient({});
 const dynamodb = new DynamoDBClient({});
@@ -323,12 +323,8 @@ exports.handler = async (event) => {
   const createProjectTeamId = readCreateProjectTeamId(event);
 
   if (createProjectTeamId) {
-    if (!principal.isSystemAdmin) {
-      return json(403, { message: 'Project access is denied.' }, headers);
-    }
-
     try {
-      return await createProject(event, headers, directoryId, createProjectTeamId);
+      return await createProject(event, headers, directoryId, createProjectTeamId, principal.userKey);
     } catch (error) {
       return toProjectDataError(error, headers, 'Failed to create project.');
     }
@@ -560,7 +556,7 @@ async function createTeam(event, headers, directoryId) {
   }, headers);
 }
 
-async function createProject(event, headers, directoryId, teamId) {
+async function createProject(event, headers, directoryId, teamId, creatorUserKey) {
   const body = readJsonBody(event);
   const names = readLocalizedNames(body);
 
@@ -572,6 +568,11 @@ async function createProject(event, headers, directoryId, teamId) {
 
   if (!isProjectTone(tone)) {
     return json(400, { message: 'Project tone is invalid.' }, headers);
+  }
+  const creatorMemberKey = normalizeProjectMemberKey(creatorUserKey);
+
+  if (!creatorMemberKey) {
+    return json(400, { message: 'Project creator member key is required.' }, headers);
   }
 
   const items = await queryAll({
@@ -603,12 +604,48 @@ async function createProject(event, headers, directoryId, teamId) {
     nameEn: { S: names.nameEn },
     tone: { S: tone },
   };
+  const updatedAt = new Date().toISOString();
+  const creatorMemberItem = {
+    directoryId: { S: directoryId },
+    entryKey: { S: createProjectMemberEntryKey(projectId, creatorMemberKey) },
+    entryType: { S: 'project-member' },
+    projectId: { S: projectId },
+    memberKey: { S: creatorMemberKey },
+    email: { S: creatorMemberKey },
+    role: { S: 'manager' },
+    createdAt: { S: updatedAt },
+    updatedAt: { S: updatedAt },
+  };
 
-  await dynamodb.send(new PutItemCommand({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    Item: item,
-    ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
-  }));
+  try {
+    await dynamodb.send(new TransactWriteItemsCommand({
+      TransactItems: [
+        {
+          ConditionCheck: createActiveTeamConditionCheck(directoryId, team.entryKey.S),
+        },
+        {
+          Put: {
+            TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+            Item: item,
+            ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+          },
+        },
+        {
+          Put: {
+            TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+            Item: creatorMemberItem,
+            ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+          },
+        },
+      ],
+    }));
+  } catch (error) {
+    if (error?.name === 'TransactionCanceledException') {
+      return await handleCreateProjectTransactionCancellation(headers, directoryId, teamId, error);
+    }
+
+    throw error;
+  }
 
   return json(201, {
     project: {
@@ -745,14 +782,14 @@ async function archiveProject(headers, directoryId, teamId, projectId) {
 	  return json(200, { projectId, members: await hydrateProjectMembers(members, userPoolId) }, headers);
 	}
 
-	async function updateProjectMember(event, headers, directoryId, projectId, memberKey, userPoolId) {
-	  const body = readJsonBody(event);
-	  const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
+async function updateProjectMember(event, headers, directoryId, projectId, memberKey, userPoolId) {
+  const body = readJsonBody(event);
+  const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
 
-	  if (!normalizedMemberKey) {
-	    return json(400, { message: 'Project member email is required.' }, headers);
-	  }
-	  const profile = await getUserProfile(userPoolId, normalizedMemberKey);
+  if (!normalizedMemberKey) {
+    return json(400, { message: 'Project member email is required.' }, headers);
+  }
+  const profile = await getUserProfile(userPoolId, normalizedMemberKey);
 
   if (!isProjectRole(body.role)) {
     return json(400, { message: 'Project role is invalid.' }, headers);
@@ -771,27 +808,67 @@ async function archiveProject(headers, directoryId, teamId, projectId) {
     item.projectId?.S === projectId &&
     item.memberKey?.S === normalizedMemberKey
   );
+  if (
+    existingMember?.role?.S === 'manager' &&
+    body.role !== 'manager' &&
+    !findOtherProjectManager(existingMembers, projectId, normalizedMemberKey)
+  ) {
+    return json(409, { message: 'At least one project manager is required.' }, headers);
+  }
+  const guardManager = existingMember?.role?.S === 'manager' && body.role !== 'manager'
+    ? findOtherProjectManager(existingMembers, projectId, normalizedMemberKey)
+    : undefined;
   const updatedAt = new Date().toISOString();
   const item = {
     directoryId: { S: directoryId },
     entryKey: { S: createProjectMemberEntryKey(projectId, normalizedMemberKey) },
-	    entryType: { S: 'project-member' },
-	    projectId: { S: projectId },
-	    memberKey: { S: normalizedMemberKey },
-	    email: { S: profile.email },
-	    role: { S: body.role },
-	    createdAt: { S: existingMember?.createdAt?.S ?? updatedAt },
-	    updatedAt: { S: updatedAt },
-	    ...(profile.name ? { name: { S: profile.name } } : {}),
-	  };
+    entryType: { S: 'project-member' },
+    projectId: { S: projectId },
+    memberKey: { S: normalizedMemberKey },
+    email: { S: profile.email },
+    role: { S: body.role },
+    createdAt: { S: existingMember?.createdAt?.S ?? updatedAt },
+    updatedAt: { S: updatedAt },
+    ...(profile.name ? { name: { S: profile.name } } : {}),
+  };
 
-  await dynamodb.send(new PutItemCommand({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    Item: item,
-  }));
+  if (guardManager) {
+    try {
+      await dynamodb.send(new TransactWriteItemsCommand({
+        TransactItems: [
+          {
+            ConditionCheck: createProjectManagerConditionCheck(directoryId, guardManager.entryKey.S),
+          },
+          {
+            Put: {
+              TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+              Item: item,
+            },
+          },
+        ],
+      }));
+    } catch (error) {
+      if (error?.name === 'TransactionCanceledException') {
+        return await handleProjectMemberTransactionCancellation(
+          headers,
+          directoryId,
+          projectId,
+          normalizedMemberKey,
+          error,
+        );
+      }
 
-	  return json(200, { member: await hydrateProjectMember(toProjectMember(item), userPoolId) }, headers);
-	}
+      throw error;
+    }
+  } else {
+    await dynamodb.send(new PutItemCommand({
+      TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+      Item: item,
+    }));
+  }
+
+  return json(200, { member: await hydrateProjectMember(toProjectMember(item), userPoolId) }, headers);
+}
 
 async function removeProjectMember(headers, directoryId, projectId, memberKey) {
   const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
@@ -817,19 +894,169 @@ async function removeProjectMember(headers, directoryId, projectId, memberKey) {
     return json(404, { message: 'Project member was not found.' }, headers);
   }
 
-  await dynamodb.send(new DeleteItemCommand({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    Key: {
-      directoryId: { S: directoryId },
-      entryKey: { S: member.entryKey.S },
-    },
-    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
-  }));
+  if (
+    member.role?.S === 'manager' &&
+    !findOtherProjectManager(items, projectId, normalizedMemberKey)
+  ) {
+    return json(409, { message: 'At least one project manager is required.' }, headers);
+  }
+  const guardManager = member.role?.S === 'manager'
+    ? findOtherProjectManager(items, projectId, normalizedMemberKey)
+    : undefined;
+
+  if (guardManager) {
+    try {
+      await dynamodb.send(new TransactWriteItemsCommand({
+        TransactItems: [
+          {
+            ConditionCheck: createProjectManagerConditionCheck(directoryId, guardManager.entryKey.S),
+          },
+          {
+            Delete: {
+              TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+              Key: {
+                directoryId: { S: directoryId },
+                entryKey: { S: member.entryKey.S },
+              },
+              ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
+            },
+          },
+        ],
+      }));
+    } catch (error) {
+      if (error?.name === 'TransactionCanceledException') {
+        return await handleProjectMemberTransactionCancellation(
+          headers,
+          directoryId,
+          projectId,
+          normalizedMemberKey,
+          error,
+        );
+      }
+
+      throw error;
+    }
+  } else {
+    await dynamodb.send(new DeleteItemCommand({
+      TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+      Key: {
+        directoryId: { S: directoryId },
+        entryKey: { S: member.entryKey.S },
+      },
+      ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
+    }));
+  }
 
   return json(200, { projectId, memberId: normalizedMemberKey }, headers);
 }
 
-	async function createProjectTask(event, headers, directoryId, projectId, userPoolId) {
+	function findOtherProjectManager(items, projectId, memberKey) {
+	  return items.find((item) =>
+	      item.entryType?.S === 'project-member' &&
+	      item.projectId?.S === projectId &&
+	      item.memberKey?.S !== memberKey &&
+	      item.role?.S === 'manager'
+	    );
+	}
+
+async function handleCreateProjectTransactionCancellation(headers, directoryId, teamId, originalError) {
+  const items = await queryAll({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    KeyConditionExpression: 'directoryId = :directoryId',
+    ExpressionAttributeValues: {
+      ':directoryId': { S: directoryId },
+    },
+    ScanIndexForward: true,
+  });
+  const activeTeam = items.find((item) =>
+    item.entryType?.S === 'team' &&
+    item.teamId?.S === teamId &&
+    isActiveDirectoryItem(item)
+  );
+
+  if (!activeTeam) {
+    return json(404, { message: 'Team was not found.' }, headers);
+  }
+
+  throw originalError;
+}
+
+async function handleProjectMemberTransactionCancellation(headers, directoryId, projectId, memberKey, originalError) {
+  const items = await queryAll({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    KeyConditionExpression: 'directoryId = :directoryId',
+    ExpressionAttributeValues: {
+      ':directoryId': { S: directoryId },
+    },
+    ScanIndexForward: true,
+  });
+
+  if (!hasActiveProject(items, projectId)) {
+    return json(404, { message: 'Project was not found.' }, headers);
+  }
+
+  const member = items.find((item) =>
+    item.entryType?.S === 'project-member' &&
+    item.projectId?.S === projectId &&
+    item.memberKey?.S === memberKey
+  );
+
+  if (!member) {
+    return json(404, { message: 'Project member was not found.' }, headers);
+  }
+
+  if (member.role?.S === 'manager' && !findOtherProjectManager(items, projectId, memberKey)) {
+    return json(409, { message: 'At least one project manager is required.' }, headers);
+  }
+
+  throw originalError;
+}
+
+function hasActiveProject(items, projectId) {
+  const activeTeamIds = new Set(
+    items
+      .filter((item) => item.entryType?.S === 'team' && isActiveDirectoryItem(item))
+      .map((item) => item.teamId?.S)
+      .filter(Boolean)
+  );
+
+  return items.some((item) =>
+    item.entryType?.S === 'project' &&
+    item.projectId?.S === projectId &&
+    activeTeamIds.has(item.teamId?.S) &&
+    isActiveDirectoryItem(item)
+  );
+}
+
+function createActiveTeamConditionCheck(directoryId, entryKey) {
+  return {
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    Key: {
+      directoryId: { S: directoryId },
+      entryKey: { S: entryKey },
+    },
+    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+  };
+}
+
+	function createProjectManagerConditionCheck(directoryId, entryKey) {
+	  return {
+	    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+	    Key: {
+	      directoryId: { S: directoryId },
+	      entryKey: { S: entryKey },
+	    },
+	    ConditionExpression: '#role = :manager',
+	    ExpressionAttributeNames: {
+	      '#role': 'role',
+	    },
+	    ExpressionAttributeValues: {
+	      ':manager': { S: 'manager' },
+	    },
+	  };
+	}
+
+		async function createProjectTask(event, headers, directoryId, projectId, userPoolId) {
 	  const body = readJsonBody(event);
 	  const assigneeUserId = normalizeProjectMemberKey(body.assigneeUserId ?? body.assignee);
 
@@ -1222,9 +1449,9 @@ async function getProjectAccess(directoryId, projectId, memberKey) {
 function toProjectDataError(error, headers, fallbackMessage) {
   console.error(error);
 
-	  if (error?.name === 'ConditionalCheckFailedException') {
-	    return json(409, { message: 'The same item already exists.' }, headers);
-	  }
+		  if (error?.name === 'ConditionalCheckFailedException' || error?.name === 'TransactionCanceledException') {
+		    return json(409, { message: 'The same item already exists.' }, headers);
+		  }
 
 	  if (error?.name === 'UserNotFoundException') {
 	    return json(404, { message: 'Cognito user was not found.' }, headers);
@@ -1625,6 +1852,12 @@ function projectRoleWeight(role) {
 
     tasksTable.grantReadWriteData(listTasksFunction);
     projectDirectoryTable.grantReadWriteData(listTasksFunction);
+    listTasksFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['dynamodb:TransactWriteItems'],
+        resources: [projectDirectoryTable.tableArn],
+      }),
+    );
 	    listTasksFunction.addToRolePolicy(
 	      new iam.PolicyStatement({
 	        actions: ['cognito-idp:AdminGetUser', 'cognito-idp:GetUser', 'cognito-idp:ListUsers'],

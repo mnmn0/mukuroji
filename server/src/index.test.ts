@@ -263,7 +263,7 @@ test('creates a project under an authenticated team directory', async () => {
   const response = await app.request('/api/teams/core-team/projects', {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
+      Authorization: 'Bearer test-token',
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -281,8 +281,117 @@ test('creates a project under an authenticated team directory', async () => {
     },
   })
   expect(calls.projectCreates).toEqual([
-    { directoryId: 'user#demo@example.com', teamId: 'core-team', name: '新規プロジェクト' },
+    {
+      creatorUserKey: 'demo@example.com',
+      directoryId: 'user#demo@example.com',
+      name: '新規プロジェクト',
+      teamId: 'core-team',
+    },
   ])
+})
+
+test('returns conflict when project creation transaction is canceled', async () => {
+  configureFakeProjectClients(true)
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+          ],
+        }
+      }
+
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const error = new Error('Transaction was canceled.')
+        error.name = 'TransactionCanceledException'
+        throw error
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+
+  configureApiClientsForTest({
+    projectDirectory: new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient),
+  })
+
+  const response = await app.request('/api/teams/core-team/projects', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      name: '新規プロジェクト',
+    }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({ message: 'The same item already exists.' })
+})
+
+test('returns not found when project creation transaction loses its active team', async () => {
+  configureFakeProjectClients(true)
+  let queryReads = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if ('KeyConditionExpression' in command.input) {
+        queryReads += 1
+
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+              ...(queryReads >= 2 ? { archivedAt: '2026-06-08T00:00:00.000Z' } : {}),
+            },
+          ],
+        }
+      }
+
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const error = new Error('Transaction was canceled.')
+        error.name = 'TransactionCanceledException'
+        throw error
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+
+  configureApiClientsForTest({
+    projectDirectory: new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient),
+  })
+
+  const response = await app.request('/api/teams/core-team/projects', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      name: '新規プロジェクト',
+    }),
+  })
+
+  expect(response.status).toBe(404)
+  expect(await response.json()).toEqual({ message: 'Team was not found.' })
 })
 
 test('archives a team in the authenticated user scoped directory', async () => {
@@ -539,10 +648,15 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
   const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
 
   await expect(
-    client.createProject('user#demo@example.com', 'core-team', {
-      name: '新規プロジェクト',
-      tone: 'green',
-    }),
+    client.createProject(
+      'user#demo@example.com',
+      'core-team',
+      {
+        name: '新規プロジェクト',
+        tone: 'green',
+      },
+      { userKey: 'demo@example.com' },
+    ),
   ).resolves.toEqual({
     project: {
       id: '新規プロジェクト-2',
@@ -551,15 +665,46 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
     },
   })
   expect(sentInputs[1]).toMatchObject({
-    TableName: 'DirectoryTable',
-    Item: {
-      directoryId: 'user#demo@example.com',
-      teamId: 'core-team',
-      projectId: '新規プロジェクト-2',
-      projectSortOrder: 20,
-      entryKey: '000010#000020#PROJECT#新規プロジェクト-2',
-    },
-    ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+    TransactItems: [
+      {
+        ConditionCheck: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000000#TEAM#core-team',
+          },
+          ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+        },
+      },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: '新規プロジェクト-2',
+            projectSortOrder: 20,
+            entryKey: '000010#000020#PROJECT#新規プロジェクト-2',
+          },
+          ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+        },
+      },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId: 'user#demo@example.com',
+            entryKey: 'PROJECT_MEMBER#新規プロジェクト-2#demo@example.com',
+            entryType: 'project-member',
+            projectId: '新規プロジェクト-2',
+            memberKey: 'demo@example.com',
+            email: 'demo@example.com',
+            role: 'manager',
+          },
+          ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+        },
+      },
+    ],
   })
 })
 
@@ -1586,6 +1731,18 @@ test('DynamoDB directory client manages project member roles', async () => {
               createdAt: '2026-06-08T00:00:00.000Z',
               updatedAt: '2026-06-08T00:00:00.000Z',
             },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: 'PROJECT_MEMBER#refero#zmanager@example.com',
+              entryType: 'project-member',
+              projectId: 'refero',
+              memberKey: 'zmanager@example.com',
+              email: 'zmanager@example.com',
+              name: 'Z Manager',
+              role: 'manager',
+              createdAt: '2026-06-08T00:00:00.000Z',
+              updatedAt: '2026-06-08T00:00:00.000Z',
+            },
           ],
         }
       }
@@ -1604,6 +1761,13 @@ test('DynamoDB directory client manages project member roles', async () => {
         id: 'demo@example.com',
         email: 'demo@example.com',
         name: 'Demo User',
+        role: 'manager',
+        updatedAt: '2026-06-08T00:00:00.000Z',
+      },
+      {
+        id: 'zmanager@example.com',
+        email: 'zmanager@example.com',
+        name: 'Z Manager',
         role: 'manager',
         updatedAt: '2026-06-08T00:00:00.000Z',
       },
@@ -1647,14 +1811,450 @@ test('DynamoDB directory client manages project member roles', async () => {
     },
   })
   expect(sentInputs[5]).toMatchObject({
-    TableName: 'DirectoryTable',
-    Key: {
-      directoryId: 'user#demo@example.com',
-      entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
-    },
-    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
+    TransactItems: [
+      {
+        ConditionCheck: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: 'PROJECT_MEMBER#refero#zmanager@example.com',
+          },
+          ConditionExpression: '#role = :manager',
+          ExpressionAttributeNames: {
+            '#role': 'role',
+          },
+          ExpressionAttributeValues: {
+            ':manager': 'manager',
+          },
+        },
+      },
+      {
+        Delete: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+          },
+          ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
+        },
+      },
+    ],
   })
 })
+
+test('DynamoDB directory client keeps at least one project manager', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000010#PROJECT#refero',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'refero',
+              projectSortOrder: 10,
+              nameJa: 'Refero',
+              nameEn: 'Refero',
+              tone: 'blue',
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+              entryType: 'project-member',
+              projectId: 'refero',
+              memberKey: 'demo@example.com',
+              email: 'demo@example.com',
+              name: 'Demo User',
+              role: 'manager',
+              createdAt: '2026-06-08T00:00:00.000Z',
+              updatedAt: '2026-06-08T00:00:00.000Z',
+            },
+          ],
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(
+    client.updateProjectMember('user#demo@example.com', 'refero', 'demo@example.com', {
+      email: 'demo@example.com',
+      role: 'viewer',
+    }),
+  ).rejects.toMatchObject({
+    code: 'ProjectLastManager',
+  })
+  await expect(
+    client.removeProjectMember('user#demo@example.com', 'refero', 'demo@example.com'),
+  ).rejects.toMatchObject({
+    code: 'ProjectLastManager',
+  })
+  expect(sentInputs).toHaveLength(2)
+})
+
+test('DynamoDB directory client treats manager guard transaction cancellation as last manager conflict', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  let queryReads = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+
+      if ('KeyConditionExpression' in command.input) {
+        queryReads += 1
+
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000010#PROJECT#refero',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'refero',
+              projectSortOrder: 10,
+              nameJa: 'Refero',
+              nameEn: 'Refero',
+              tone: 'blue',
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+              entryType: 'project-member',
+              projectId: 'refero',
+              memberKey: 'demo@example.com',
+              email: 'demo@example.com',
+              role: 'manager',
+              createdAt: '2026-06-08T00:00:00.000Z',
+              updatedAt: '2026-06-08T00:00:00.000Z',
+            },
+            ...(queryReads === 1
+              ? [
+                  {
+                    directoryId: 'user#demo@example.com',
+                    entryKey: 'PROJECT_MEMBER#refero#zmanager@example.com',
+                    entryType: 'project-member',
+                    projectId: 'refero',
+                    memberKey: 'zmanager@example.com',
+                    email: 'zmanager@example.com',
+                    role: 'manager',
+                    createdAt: '2026-06-08T00:00:00.000Z',
+                    updatedAt: '2026-06-08T00:00:00.000Z',
+                  },
+                ]
+              : []),
+          ],
+        }
+      }
+
+      if ('TransactItems' in command.input) {
+        const error = new Error('Transaction was canceled.')
+        error.name = 'TransactionCanceledException'
+        throw error
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(
+    client.removeProjectMember('user#demo@example.com', 'refero', 'demo@example.com'),
+  ).rejects.toMatchObject({
+    code: 'ProjectLastManager',
+  })
+  expect(sentInputs[1]).toMatchObject({
+    TransactItems: [
+      {
+        ConditionCheck: {
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: 'PROJECT_MEMBER#refero#zmanager@example.com',
+          },
+        },
+      },
+      {
+        Delete: {
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+          },
+        },
+      },
+    ],
+  })
+  expect(sentInputs).toHaveLength(3)
+})
+
+test('DynamoDB directory client treats deleted target member transaction cancellation as member not found', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  let queryReads = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+
+      if ('KeyConditionExpression' in command.input) {
+        queryReads += 1
+
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000010#PROJECT#refero',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'refero',
+              projectSortOrder: 10,
+              nameJa: 'Refero',
+              nameEn: 'Refero',
+              tone: 'blue',
+            },
+            ...(queryReads === 1
+              ? [
+                  {
+                    directoryId: 'user#demo@example.com',
+                    entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+                    entryType: 'project-member',
+                    projectId: 'refero',
+                    memberKey: 'demo@example.com',
+                    email: 'demo@example.com',
+                    role: 'manager',
+                    createdAt: '2026-06-08T00:00:00.000Z',
+                    updatedAt: '2026-06-08T00:00:00.000Z',
+                  },
+                ]
+              : []),
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: 'PROJECT_MEMBER#refero#zmanager@example.com',
+              entryType: 'project-member',
+              projectId: 'refero',
+              memberKey: 'zmanager@example.com',
+              email: 'zmanager@example.com',
+              role: 'manager',
+              createdAt: '2026-06-08T00:00:00.000Z',
+              updatedAt: '2026-06-08T00:00:00.000Z',
+            },
+          ],
+        }
+      }
+
+      if ('TransactItems' in command.input) {
+        const error = new Error('Transaction was canceled.')
+        error.name = 'TransactionCanceledException'
+        throw error
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(
+    client.removeProjectMember('user#demo@example.com', 'refero', 'demo@example.com'),
+  ).rejects.toMatchObject({
+    code: 'ProjectMemberNotFound',
+  })
+  expect(sentInputs).toHaveLength(3)
+})
+
+test('DynamoDB directory client treats manager downgrade transaction cancellation as last manager conflict', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  let queryReads = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+
+      if ('KeyConditionExpression' in command.input) {
+        queryReads += 1
+
+        return {
+          Items: createProjectMemberFixtureItems({
+            includeOtherManager: queryReads === 1,
+          }),
+        }
+      }
+
+      if ('TransactItems' in command.input) {
+        const error = new Error('Transaction was canceled.')
+        error.name = 'TransactionCanceledException'
+        throw error
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(
+    client.updateProjectMember('user#demo@example.com', 'refero', 'demo@example.com', {
+      email: 'demo@example.com',
+      role: 'viewer',
+    }),
+  ).rejects.toMatchObject({
+    code: 'ProjectLastManager',
+  })
+  expect(sentInputs[1]).toMatchObject({
+    TransactItems: [
+      {
+        ConditionCheck: {
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: 'PROJECT_MEMBER#refero#zmanager@example.com',
+          },
+        },
+      },
+      {
+        Put: {
+          Item: {
+            directoryId: 'user#demo@example.com',
+            entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+            role: 'viewer',
+          },
+        },
+      },
+    ],
+  })
+  expect(sentInputs).toHaveLength(3)
+})
+
+test('DynamoDB directory client rethrows manager guard transaction cancellation when the latest state is still valid', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: createProjectMemberFixtureItems(),
+        }
+      }
+
+      if ('TransactItems' in command.input) {
+        const error = new Error('Transaction was canceled.')
+        error.name = 'TransactionCanceledException'
+        throw error
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(
+    client.removeProjectMember('user#demo@example.com', 'refero', 'demo@example.com'),
+  ).rejects.toMatchObject({
+    code: 'TransactionCanceledException',
+  })
+  expect(sentInputs).toHaveLength(3)
+})
+
+function createProjectMemberFixtureItems(
+  options: {
+    archivedProject?: boolean
+    archivedTeam?: boolean
+    includeOtherManager?: boolean
+    includeTargetMember?: boolean
+  } = {},
+) {
+  const includeOtherManager = options.includeOtherManager ?? true
+  const includeTargetMember = options.includeTargetMember ?? true
+
+  return [
+    {
+      directoryId: 'user#demo@example.com',
+      entryKey: '000010#000000#TEAM#core-team',
+      entryType: 'team',
+      teamId: 'core-team',
+      teamSortOrder: 10,
+      nameJa: 'コアチーム',
+      nameEn: 'Core Team',
+      expanded: true,
+      ...(options.archivedTeam ? { archivedAt: '2026-06-08T00:00:00.000Z' } : {}),
+    },
+    {
+      directoryId: 'user#demo@example.com',
+      entryKey: '000010#000010#PROJECT#refero',
+      entryType: 'project',
+      teamId: 'core-team',
+      teamSortOrder: 10,
+      projectId: 'refero',
+      projectSortOrder: 10,
+      nameJa: 'Refero',
+      nameEn: 'Refero',
+      tone: 'blue',
+      ...(options.archivedProject ? { archivedAt: '2026-06-08T00:00:00.000Z' } : {}),
+    },
+    ...(includeTargetMember
+      ? [
+          {
+            directoryId: 'user#demo@example.com',
+            entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+            entryType: 'project-member',
+            projectId: 'refero',
+            memberKey: 'demo@example.com',
+            email: 'demo@example.com',
+            role: 'manager',
+            createdAt: '2026-06-08T00:00:00.000Z',
+            updatedAt: '2026-06-08T00:00:00.000Z',
+          },
+        ]
+      : []),
+    ...(includeOtherManager
+      ? [
+          {
+            directoryId: 'user#demo@example.com',
+            entryKey: 'PROJECT_MEMBER#refero#zmanager@example.com',
+            entryType: 'project-member',
+            projectId: 'refero',
+            memberKey: 'zmanager@example.com',
+            email: 'zmanager@example.com',
+            role: 'manager',
+            createdAt: '2026-06-08T00:00:00.000Z',
+            updatedAt: '2026-06-08T00:00:00.000Z',
+          },
+        ]
+      : []),
+  ]
+}
 
 function configureFakeProjectClients(
   hasProjectAccess: boolean,
@@ -1673,7 +2273,12 @@ function configureFakeProjectClients(
       role: string
     }>,
     projectArchives: [] as Array<{ directoryId: string; teamId: string; projectId: string }>,
-    projectCreates: [] as Array<{ directoryId: string; teamId: string; name: string }>,
+    projectCreates: [] as Array<{
+      creatorUserKey: string
+      directoryId: string
+      name: string
+      teamId: string
+    }>,
     roleChecks: [] as Array<{ directoryId: string; memberKey: string; projectId: string }>,
     summaryReads: [] as Array<{
       directoryId: string
@@ -1860,8 +2465,13 @@ function configureFakeProjectClients(
           },
         }
       },
-      async createProject(directoryId, teamId, input) {
-        calls.projectCreates.push({ directoryId, teamId, name: String(input.name) })
+      async createProject(directoryId, teamId, input, creator) {
+        calls.projectCreates.push({
+          creatorUserKey: creator.userKey,
+          directoryId,
+          name: String(input.name),
+          teamId,
+        })
 
         return {
           project: {
