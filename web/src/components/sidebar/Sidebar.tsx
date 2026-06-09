@@ -72,7 +72,7 @@ export type SidebarNavId =
 /**
  * チーム配下で選択できる固定ビューです。
  */
-export type SidebarTeamViewId = 'overview' | 'members'
+export type SidebarTeamViewId = 'overview' | 'issues' | 'members'
 
 /**
  * サイドバー内の新規登録フォームで使う表示文言です。
@@ -210,6 +210,10 @@ export type SidebarLabels = {
    * チーム概要ビューの文言です。
    */
   teamOverview: string
+  /**
+   * Issue ビューの文言です。
+   */
+  issues: string
   /**
    * メンバービューの文言です。
    */
@@ -426,6 +430,7 @@ const defaultLabels: SidebarLabels = {
     error: 'アーカイブできませんでした',
   },
   teamOverview: 'チーム概要',
+  issues: 'Issues',
   members: 'メンバー',
   projectGroup: 'プロジェクト',
   unreadCount: (count) => `${count}件の未読`,
@@ -1191,6 +1196,12 @@ function TeamGroup({
             icon={PanelIcon}
             label={labels.teamOverview}
             onClick={() => onSelectTeamView(team.id, 'overview')}
+          />
+          <SubNavButton
+            active={isTeamActive && activeTeamViewId === 'issues'}
+            icon={CheckCircleIcon}
+            label={labels.issues}
+            onClick={() => onSelectTeamView(team.id, 'issues')}
           />
           <SubNavButton
             active={isTeamActive && activeTeamViewId === 'members'}

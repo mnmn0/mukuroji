@@ -31,7 +31,7 @@ import {
   type ProjectDirectoryTeam,
 } from '../projects/api'
 import {
-  createProjectTasksPath,
+  createProjectIssuesPath,
   createTeamViewPath,
   workspaceNavPaths,
 } from '../routes/paths'
@@ -415,7 +415,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       onLogout={handleLogout}
       onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
       onSelectProject={(projectId, teamId) =>
-        navigate(createProjectTasksPath(projectId, teamId))
+        navigate(createProjectIssuesPath(projectId, teamId))
       }
       onSelectTeamView={(teamId, viewId) =>
         navigate(createTeamViewPath(teamId, viewId))

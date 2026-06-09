@@ -7,6 +7,7 @@ import {
 import {
   DynamoDBDocumentClient,
   DeleteCommand,
+  GetCommand,
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
@@ -517,6 +518,391 @@ type ProjectTasksResponse = {
    * DynamoDB から取得したタスク一覧です。
    */
   tasks: ProjectTaskResponseItem[]
+}
+
+/**
+ * チーム所有 Issue の活動種別です。
+ */
+type TeamIssueActivityType = 'created' | 'updated' | 'commented'
+
+/**
+ * DynamoDB に保存する team issue item です。
+ */
+type TeamIssueItem = {
+  /**
+   * ユーザーごとの directory partition key です。
+   */
+  directoryId: string
+  /**
+   * Issue 一覧 query に使う directory/team 複合 partition key です。
+   */
+  directoryTeamId: string
+  /**
+   * アサイン先 project 一覧 query に使う directory/project 複合 key です。
+   */
+  directoryProjectId?: string
+  /**
+   * Issue 所有元チーム ID です。
+   */
+  teamId: string
+  /**
+   * 遂行先 project ID です。未アサイン Issue では未設定です。
+   */
+  assignedProjectId?: string
+  /**
+   * チーム内の Issue ID です。
+   */
+  issueId: string
+  /**
+   * チーム内の表示順です。
+   */
+  sortOrder: number
+  /**
+   * Issue タイトルです。
+   */
+  title: string
+  /**
+   * Issue 詳細説明です。
+   */
+  description?: string
+  /**
+   * Cognito user を参照する担当者 ID です。
+   */
+  assigneeUserId: string
+  /**
+   * Issue 状態です。
+   */
+  status: ProjectTaskStatus
+  /**
+   * 期限日として表示する文字列です。
+   */
+  dueDate: string
+  /**
+   * 優先度です。
+   */
+  priority: ProjectTaskPriority
+  /**
+   * 作成日時の ISO 8601 timestamp です。
+   */
+  createdAt: string
+  /**
+   * 更新日時の ISO 8601 timestamp です。
+   */
+  updatedAt: string
+}
+
+/**
+ * DynamoDB に保存する team issue event item です。
+ */
+type TeamIssueEventItem = {
+  /**
+   * Issue event 一覧 query に使う directory/team/issue 複合 partition key です。
+   */
+  directoryTeamIssueId: string
+  /**
+   * event ID です。
+   */
+  eventId: string
+  /**
+   * ユーザーごとの directory partition key です。
+   */
+  directoryId: string
+  /**
+   * Issue 所有元チーム ID です。
+   */
+  teamId: string
+  /**
+   * チーム内の Issue ID です。
+   */
+  issueId: string
+  /**
+   * event 種別です。
+   */
+  eventType: TeamIssueActivityType
+  /**
+   * event を起こした actor user key です。
+   */
+  actorUserId: string
+  /**
+   * コメント本文です。comment event のみ設定します。
+   */
+  body?: string
+  /**
+   * 活動履歴に表示する概要です。
+   */
+  summary: string
+  /**
+   * 作成日時の ISO 8601 timestamp です。
+   */
+  createdAt: string
+}
+
+/**
+ * チーム Issue 一覧と詳細で表示する Issue 行です。
+ */
+type TeamIssueResponseItem = {
+  /**
+   * チーム内の Issue ID です。
+   */
+  id: string
+  /**
+   * Issue 所有元チーム ID です。
+   */
+  teamId: string
+  /**
+   * 遂行先 project ID です。未アサイン Issue では未設定です。
+   */
+  assignedProjectId?: string
+  /**
+   * seed 由来の legacy task タイトル i18n key です。
+   */
+  titleKey?: string
+  /**
+   * Issue タイトルです。
+   */
+  title?: string
+  /**
+   * Issue 詳細説明です。
+   */
+  description?: string
+  /**
+   * Cognito user を参照する担当者 ID です。
+   */
+  assigneeUserId: string
+  /**
+   * Cognito から解決した担当者メールアドレスです。
+   */
+  assigneeEmail?: string
+  /**
+   * Cognito から解決した担当者表示名です。
+   */
+  assigneeName?: string
+  /**
+   * Issue 状態です。
+   */
+  status: ProjectTaskStatus
+  /**
+   * 期限日として表示する文字列です。
+   */
+  dueDate: string
+  /**
+   * 優先度です。
+   */
+  priority: ProjectTaskPriority
+  /**
+   * 作成日時の ISO 8601 timestamp です。
+   */
+  createdAt: string
+  /**
+   * 更新日時の ISO 8601 timestamp です。
+   */
+  updatedAt: string
+}
+
+/**
+ * チーム Issue コメントレスポンスです。
+ */
+type TeamIssueCommentResponseItem = {
+  /**
+   * コメント ID です。
+   */
+  id: string
+  /**
+   * コメントした actor user key です。
+   */
+  actorUserId: string
+  /**
+   * コメント本文です。
+   */
+  body: string
+  /**
+   * 作成日時の ISO 8601 timestamp です。
+   */
+  createdAt: string
+}
+
+/**
+ * チーム Issue 活動履歴レスポンスです。
+ */
+type TeamIssueActivityResponseItem = {
+  /**
+   * 活動履歴 ID です。
+   */
+  id: string
+  /**
+   * 活動種別です。
+   */
+  type: TeamIssueActivityType
+  /**
+   * actor user key です。
+   */
+  actorUserId: string
+  /**
+   * 活動概要です。
+   */
+  summary: string
+  /**
+   * 作成日時の ISO 8601 timestamp です。
+   */
+  createdAt: string
+}
+
+/**
+ * チーム Issue 一覧 API が返す response body です。
+ */
+type TeamIssuesResponse = {
+  /**
+   * 取得対象の team ID です。
+   */
+  teamId: string
+  /**
+   * チームに紐づく Issue 一覧です。
+   */
+  issues: TeamIssueResponseItem[]
+}
+
+/**
+ * プロジェクトにアサインされた Issue 一覧 API が返す response body です。
+ */
+type ProjectIssuesResponse = {
+  /**
+   * 取得対象の project ID です。
+   */
+  projectId: string
+  /**
+   * プロジェクトにアサインされた Issue 一覧です。
+   */
+  issues: TeamIssueResponseItem[]
+}
+
+/**
+ * チーム Issue 詳細 API が返す response body です。
+ */
+type TeamIssueDetailResponse = {
+  /**
+   * Issue 本体です。
+   */
+  issue: TeamIssueResponseItem
+  /**
+   * Issue コメント一覧です。
+   */
+  comments: TeamIssueCommentResponseItem[]
+  /**
+   * Issue 活動履歴一覧です。
+   */
+  activity: TeamIssueActivityResponseItem[]
+}
+
+/**
+ * チーム Issue 作成 API が受け取る request body です。
+ */
+type CreateTeamIssueRequestBody = {
+  /**
+   * Issue タイトルです。
+   */
+  title?: unknown
+  /**
+   * Issue 詳細説明です。
+   */
+  description?: unknown
+  /**
+   * 遂行先 project ID です。空文字または null で未アサインです。
+   */
+  assignedProjectId?: unknown
+  /**
+   * Cognito user を参照する担当者 ID です。
+   */
+  assigneeUserId?: unknown
+  /**
+   * Issue 状態です。
+   */
+  status?: unknown
+  /**
+   * 期限日として保存する文字列です。
+   */
+  dueDate?: unknown
+  /**
+   * 優先度です。
+   */
+  priority?: unknown
+}
+
+/**
+ * チーム Issue 更新 API が受け取る request body です。
+ */
+type UpdateTeamIssueRequestBody = {
+  /**
+   * Issue タイトルです。
+   */
+  title?: unknown
+  /**
+   * Issue 詳細説明です。
+   */
+  description?: unknown
+  /**
+   * 遂行先 project ID です。空文字または null で未アサインへ戻します。
+   */
+  assignedProjectId?: unknown
+  /**
+   * Cognito user を参照する担当者 ID です。
+   */
+  assigneeUserId?: unknown
+  /**
+   * Issue 状態です。
+   */
+  status?: unknown
+  /**
+   * 期限日として保存する文字列です。
+   */
+  dueDate?: unknown
+  /**
+   * 優先度です。
+   */
+  priority?: unknown
+}
+
+/**
+ * チーム Issue コメント作成 API が受け取る request body です。
+ */
+type CreateTeamIssueCommentRequestBody = {
+  /**
+   * コメント本文です。
+   */
+  body?: unknown
+}
+
+/**
+ * チーム Issue 作成 API が返す response body です。
+ */
+type CreateTeamIssueResponse = {
+  /**
+   * 作成した Issue 行です。
+   */
+  issue: TeamIssueResponseItem
+}
+
+/**
+ * チーム Issue 更新 API が返す response body です。
+ */
+type UpdateTeamIssueResponse = {
+  /**
+   * 更新した Issue 行です。
+   */
+  issue: TeamIssueResponseItem
+}
+
+/**
+ * チーム Issue コメント作成 API が返す response body です。
+ */
+type CreateTeamIssueCommentResponse = {
+  /**
+   * 作成したコメントです。
+   */
+  comment: TeamIssueCommentResponseItem
+  /**
+   * コメント追加に対応する活動履歴です。
+   */
+  activity: TeamIssueActivityResponseItem
 }
 
 /**
@@ -1034,6 +1420,58 @@ type ProjectTasksClient = {
 }
 
 /**
+ * API handler から利用する team issue client の最小 interface です。
+ */
+type TeamIssuesClient = {
+  /**
+   * DynamoDB から指定 team ID の Issue 一覧を取得します。
+   */
+  getTeamIssues(directoryId: string, teamId: string): Promise<TeamIssuesResponse>
+  /**
+   * DynamoDB から指定 project ID にアサインされた Issue 一覧を取得します。
+   */
+  getProjectIssues(directoryId: string, projectId: string): Promise<ProjectIssuesResponse>
+  /**
+   * DynamoDB から Issue 詳細、コメント、活動履歴を取得します。
+   */
+  getTeamIssueDetail(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+  ): Promise<TeamIssueDetailResponse>
+  /**
+   * DynamoDB に team issue を作成します。
+   */
+  createTeamIssue(
+    directoryId: string,
+    teamId: string,
+    input: CreateTeamIssueRequestBody,
+    actorUserId: string,
+    reservedIssueIds?: string[],
+  ): Promise<CreateTeamIssueResponse>
+  /**
+   * DynamoDB の team issue を更新します。
+   */
+  updateTeamIssue(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    input: UpdateTeamIssueRequestBody,
+    actorUserId: string,
+  ): Promise<UpdateTeamIssueResponse>
+  /**
+   * DynamoDB に team issue コメントを追加します。
+   */
+  createTeamIssueComment(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    input: CreateTeamIssueCommentRequestBody,
+    actorUserId: string,
+  ): Promise<CreateTeamIssueCommentResponse>
+}
+
+/**
  * API handler から利用する team/project directory client の最小 interface です。
  */
 type ProjectDirectoryClient = {
@@ -1125,6 +1563,7 @@ export const app = new Hono()
 let cognito: CognitoClient
 let dashboardSummary: DashboardSummaryClient
 let projectTasks: ProjectTasksClient
+let teamIssues: TeamIssuesClient
 let projectDirectory: ProjectDirectoryClient
 const projectDirectoryIdPrefix = 'user#'
 const projectDirectoryIdAttributeNames = [
@@ -1605,6 +2044,267 @@ app.delete('/api/projects/:projectId/members/:memberKey', async (c) => {
 })
 
 /**
+ * DynamoDB に保存されたチーム所有 Issue 一覧を返す endpoint です。
+ */
+app.get('/api/teams/:teamId/issues', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!teamId) {
+    return c.json({ message: 'Team ID is required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const context = await requireTeamPermission(principal, teamId, 'viewer')
+
+    return c.json(await hydrateTeamIssuesResponse(await readTeamIssues(principal.directoryId, context, principal)))
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toCognitoDirectoryErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * DynamoDB にチーム所有 Issue を新規作成する endpoint です。
+ */
+app.post('/api/teams/:teamId/issues', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!teamId) {
+    return c.json({ message: 'Team ID is required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const context = await requireTeamPermission(principal, teamId, 'member')
+    const body = normalizeTeamIssueInput(
+      await readJson<CreateTeamIssueRequestBody>(c.req) ?? {},
+      context.team,
+    )
+    requireAssignedProjectPermission(principal, context, body.assignedProjectId, 'member')
+    const assigneeUserId = readTeamIssueAssigneeUserId(body)
+    await cognito.getUserProfile(assigneeUserId)
+    const reservedIssueIds = (await readLegacyTeamIssues(principal.directoryId, context, principal))
+      .map((issue) => issue.id)
+
+    return c.json(
+      await hydrateCreateTeamIssueResponse(
+        await teamIssues.createTeamIssue(
+          principal.directoryId,
+          teamId,
+          {
+            ...body,
+            assigneeUserId,
+          },
+          principal.userKey,
+          reservedIssueIds,
+        ),
+      ),
+      201,
+    )
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toCognitoDirectoryErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * DynamoDB に保存されたチーム所有 Issue 詳細を返す endpoint です。
+ */
+app.get('/api/teams/:teamId/issues/:issueId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!teamId || !issueId) {
+    return c.json({ message: 'Team ID and issue ID are required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const context = await requireTeamPermission(principal, teamId, 'viewer')
+
+    try {
+      const detail = await teamIssues.getTeamIssueDetail(principal.directoryId, teamId, issueId)
+      requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
+
+      return c.json(
+        await hydrateTeamIssueDetailResponse(
+          detail,
+        ),
+      )
+    } catch (error) {
+      if (isTeamIssueNotFoundError(error)) {
+        const legacyIssue = await readLegacyTeamIssue(principal.directoryId, context, principal, issueId)
+
+        if (legacyIssue) {
+          return c.json(
+            await hydrateTeamIssueDetailResponse({
+              issue: legacyIssue,
+              comments: [],
+              activity: [],
+            }),
+          )
+        }
+      }
+
+      throw error
+    }
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toCognitoDirectoryErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * DynamoDB に保存されたチーム所有 Issue を更新する endpoint です。
+ */
+app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!teamId || !issueId) {
+    return c.json({ message: 'Team ID and issue ID are required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const context = await requireTeamPermission(principal, teamId, 'member')
+    const body = normalizeTeamIssueInput(
+      await readJson<UpdateTeamIssueRequestBody>(c.req) ?? {},
+      context.team,
+    )
+    const detail = await teamIssues.getTeamIssueDetail(principal.directoryId, teamId, issueId)
+    requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'member')
+    requireAssignedProjectPermission(principal, context, body.assignedProjectId, 'member')
+
+    if ('assigneeUserId' in body) {
+      await cognito.getUserProfile(readTeamIssueAssigneeUserId(body))
+    }
+
+    return c.json(
+      await hydrateUpdateTeamIssueResponse(
+        await teamIssues.updateTeamIssue(
+          principal.directoryId,
+          teamId,
+          issueId,
+          body,
+          principal.userKey,
+        ),
+      ),
+    )
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toCognitoDirectoryErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * DynamoDB にチーム所有 Issue のコメントを作成する endpoint です。
+ */
+app.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!teamId || !issueId) {
+    return c.json({ message: 'Team ID and issue ID are required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const context = await requireTeamPermission(principal, teamId, 'member')
+    const detail = await teamIssues.getTeamIssueDetail(principal.directoryId, teamId, issueId)
+    requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'member')
+
+    return c.json(
+      await teamIssues.createTeamIssueComment(
+        principal.directoryId,
+        teamId,
+        issueId,
+        await readJson<CreateTeamIssueCommentRequestBody>(c.req) ?? {},
+        principal.userKey,
+      ),
+      201,
+    )
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toCognitoDirectoryErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * DynamoDB に保存されたプロジェクト遂行 Issue 一覧を返す endpoint です。
+ */
+app.get('/api/projects/:projectId/issues', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const projectId = c.req.param('projectId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!projectId) {
+    return c.json({ message: 'Project ID is required.' }, 400)
+  }
+
+  try {
+    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    await requireProjectPermission(principal, projectId, 'viewer')
+
+    return c.json(
+      await hydrateProjectIssuesResponse(
+        await readProjectIssues(principal.directoryId, projectId),
+      ),
+    )
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toCognitoDirectoryErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
  * DynamoDB にプロジェクト別タスクを新規作成する endpoint です。
  */
 app.post('/api/projects/:projectId/tasks', async (c) => {
@@ -1772,6 +2472,10 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'Task was not found.' }, 404)
   }
 
+  if (error.code === 'TeamIssueNotFound') {
+    return c.json({ message: 'Issue was not found.' }, 404)
+  }
+
   if (error.code === 'ProjectMemberNotFound') {
     return c.json({ message: 'Project member was not found.' }, 404)
   }
@@ -1789,7 +2493,11 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'Project data is not initialized.' }, 503)
   }
 
-  if (error.code === 'InvalidProjectTask' || error.code === 'InvalidProjectDirectory') {
+  if (
+    error.code === 'InvalidProjectTask' ||
+    error.code === 'InvalidProjectDirectory' ||
+    error.code === 'InvalidTeamIssue'
+  ) {
     console.error(error)
     return c.json({ message: 'Project data is invalid.' }, 503)
   }
@@ -1846,8 +2554,108 @@ async function requireProjectPermission(
   }
 }
 
+/**
+ * チーム Issue 操作で使う directory context です。
+ */
+type TeamPermissionContext = {
+  /**
+   * active team 行です。
+   */
+  team: ProjectDirectoryTeamResponse
+  /**
+   * active team/project 一覧です。
+   */
+  directory: ProjectDirectoryResponse
+  /**
+   * 現在ユーザーが team 配下 project に対して持つ role 一覧です。
+   * system admin の場合は全 project を扱えるため undefined です。
+   */
+  projectAccesses?: ProjectAccessEntry[]
+}
+
+async function requireTeamPermission(
+  principal: ProjectPrincipal,
+  teamId: string,
+  minimumRole: ProjectRole,
+): Promise<TeamPermissionContext> {
+  const directory = await projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
+  const team = directory.teams.find((candidate) => candidate.id === teamId)
+
+  if (!team) {
+    throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+  }
+
+  if (principal.isSystemAdmin) {
+    return { team, directory }
+  }
+
+  const teamProjectIds = new Set(team.projects.map((project) => project.id))
+  const projectAccesses = (await projectDirectory.getProjectAccessList(
+    principal.directoryId,
+    principal.userKey,
+  )).filter((projectAccess) => teamProjectIds.has(projectAccess.projectId))
+
+  for (const projectAccess of projectAccesses) {
+    if (projectAccess && projectAccessAllows(projectAccess, minimumRole)) {
+      return { team, directory, projectAccesses }
+    }
+  }
+
+  throw new ProjectDataError(
+    403,
+    'ProjectAccessDenied',
+    `User "${principal.userKey}" cannot access team "${teamId}".`,
+  )
+}
+
 function projectAccessAllows(access: ProjectAccessEntry, minimumRole: ProjectRole) {
   return access.role !== undefined && projectRoleAllows(access.role, minimumRole)
+}
+
+function requireAssignedProjectPermission(
+  principal: ProjectPrincipal,
+  context: TeamPermissionContext,
+  assignedProjectId: string | null | undefined,
+  minimumRole: ProjectRole,
+) {
+  if (!assignedProjectId || principal.isSystemAdmin) {
+    return
+  }
+
+  const projectAccess = context.projectAccesses?.find((access) => access.projectId === assignedProjectId)
+
+  if (!projectAccess || !projectAccessAllows(projectAccess, minimumRole)) {
+    throw new ProjectDataError(
+      403,
+      'ProjectAccessDenied',
+      `User "${principal.userKey}" cannot access assigned project "${assignedProjectId}".`,
+    )
+  }
+}
+
+function canAccessAssignedProject(
+  principal: ProjectPrincipal,
+  context: TeamPermissionContext,
+  assignedProjectId: string | undefined,
+  minimumRole: ProjectRole,
+) {
+  if (!assignedProjectId || principal.isSystemAdmin) {
+    return true
+  }
+
+  const projectAccess = context.projectAccesses?.find((access) => access.projectId === assignedProjectId)
+
+  return projectAccess !== undefined && projectAccessAllows(projectAccess, minimumRole)
+}
+
+function filterAccessibleTeamIssues(
+  issues: TeamIssueResponseItem[],
+  principal: ProjectPrincipal,
+  context: TeamPermissionContext,
+) {
+  return issues.filter((issue) =>
+    canAccessAssignedProject(principal, context, issue.assignedProjectId, 'viewer'),
+  )
 }
 
 function projectRoleAllows(role: ProjectRole, minimumRole: ProjectRole) {
@@ -1903,6 +2711,152 @@ async function hydrateProjectTasksResponse(response: ProjectTasksResponse) {
   } satisfies ProjectTasksResponse
 }
 
+async function hydrateTeamIssuesResponse(response: TeamIssuesResponse) {
+  const profiles = await readIssueAssigneeProfiles(response.issues)
+
+  return {
+    ...response,
+    issues: response.issues.map((issue) => hydrateTeamIssue(issue, profiles)),
+  } satisfies TeamIssuesResponse
+}
+
+async function hydrateProjectIssuesResponse(response: ProjectIssuesResponse) {
+  const profiles = await readIssueAssigneeProfiles(response.issues)
+
+  return {
+    ...response,
+    issues: response.issues.map((issue) => hydrateTeamIssue(issue, profiles)),
+  } satisfies ProjectIssuesResponse
+}
+
+async function hydrateTeamIssueDetailResponse(response: TeamIssueDetailResponse) {
+  const profiles = await readIssueAssigneeProfiles([response.issue])
+
+  return {
+    ...response,
+    issue: hydrateTeamIssue(response.issue, profiles),
+  } satisfies TeamIssueDetailResponse
+}
+
+async function hydrateCreateTeamIssueResponse(response: CreateTeamIssueResponse) {
+  const profiles = await readIssueAssigneeProfiles([response.issue])
+
+  return {
+    issue: hydrateTeamIssue(response.issue, profiles),
+  } satisfies CreateTeamIssueResponse
+}
+
+async function hydrateUpdateTeamIssueResponse(response: UpdateTeamIssueResponse) {
+  const profiles = await readIssueAssigneeProfiles([response.issue])
+
+  return {
+    issue: hydrateTeamIssue(response.issue, profiles),
+  } satisfies UpdateTeamIssueResponse
+}
+
+async function readTeamIssues(
+  directoryId: string,
+  context: TeamPermissionContext,
+  principal: ProjectPrincipal,
+) {
+  const storedIssues = await teamIssues.getTeamIssues(directoryId, context.team.id)
+  const legacyIssues = await readLegacyTeamIssues(directoryId, context, principal)
+
+  return {
+    teamId: context.team.id,
+    issues: mergeTeamIssues(
+      filterAccessibleTeamIssues(storedIssues.issues, principal, context),
+      legacyIssues,
+    ),
+  } satisfies TeamIssuesResponse
+}
+
+async function readProjectIssues(directoryId: string, projectId: string) {
+  const storedIssues = await teamIssues.getProjectIssues(directoryId, projectId)
+  const directory = await projectDirectory.getProjectDirectory(directoryId, 'ja')
+  const ownerTeamId = findFirstProjectTeamId(directory.teams, projectId)
+  const legacyIssues = ownerTeamId
+    ? (await projectTasks.getProjectTasks(directoryId, projectId)).tasks.map((task) =>
+      toLegacyTeamIssue(task, ownerTeamId, projectId),
+    )
+    : []
+
+  return {
+    projectId,
+    issues: mergeTeamIssues(storedIssues.issues, legacyIssues),
+  } satisfies ProjectIssuesResponse
+}
+
+async function readLegacyTeamIssues(
+  directoryId: string,
+  context: TeamPermissionContext,
+  principal: ProjectPrincipal,
+) {
+  const issues: TeamIssueResponseItem[] = []
+
+  for (const project of context.team.projects) {
+    if (findFirstProjectTeamId(context.directory.teams, project.id) !== context.team.id) {
+      continue
+    }
+
+    if (!canAccessAssignedProject(principal, context, project.id, 'viewer')) {
+      continue
+    }
+
+    const response = await projectTasks.getProjectTasks(directoryId, project.id)
+    issues.push(...response.tasks.map((task) => toLegacyTeamIssue(task, context.team.id, project.id)))
+  }
+
+  return issues
+}
+
+async function readLegacyTeamIssue(
+  directoryId: string,
+  context: TeamPermissionContext,
+  principal: ProjectPrincipal,
+  issueId: string,
+) {
+  return (await readLegacyTeamIssues(directoryId, context, principal)).find((issue) => issue.id === issueId)
+}
+
+function mergeTeamIssues(
+  primaryIssues: TeamIssueResponseItem[],
+  fallbackIssues: TeamIssueResponseItem[],
+) {
+  const issueIds = new Set(primaryIssues.map((issue) => issue.id))
+
+  return [
+    ...primaryIssues,
+    ...fallbackIssues.filter((issue) => !issueIds.has(issue.id)),
+  ]
+}
+
+function toLegacyTeamIssue(
+  task: ProjectTaskResponseItem,
+  teamId: string,
+  assignedProjectId: string,
+): TeamIssueResponseItem {
+  return {
+    id: task.id,
+    teamId,
+    assignedProjectId,
+    titleKey: task.titleKey,
+    title: task.title,
+    assigneeUserId: task.assigneeUserId ?? task.assigneeKey ?? task.assignee ?? 'legacy-assignee@example.invalid',
+    assigneeEmail: task.assigneeEmail,
+    assigneeName: task.assigneeName,
+    status: task.status,
+    dueDate: task.dueDate,
+    priority: task.priority,
+    createdAt: '2026-06-01T00:00:00.000Z',
+    updatedAt: '2026-06-01T00:00:00.000Z',
+  }
+}
+
+function findFirstProjectTeamId(teams: ProjectDirectoryTeamResponse[], projectId: string) {
+  return teams.find((team) => team.projects.some((project) => project.id === projectId))?.id
+}
+
 async function hydrateProjectTaskUpdateResponse<T extends { task: ProjectTaskResponseItem }>(response: T) {
   const profiles = await readTaskAssigneeProfiles([response.task])
 
@@ -1910,6 +2864,42 @@ async function hydrateProjectTaskUpdateResponse<T extends { task: ProjectTaskRes
     ...response,
     task: hydrateProjectTask(response.task, profiles),
   }
+}
+
+async function readIssueAssigneeProfiles(issues: TeamIssueResponseItem[]) {
+  const profiles = new Map<string, CognitoUserProfile>()
+  const userIds = new Set(issues.map((issue) => issue.assigneeUserId).filter(isDefined))
+
+  await Promise.all(
+    Array.from(userIds).map(async (userId) => {
+      try {
+        profiles.set(userId, await cognito.getUserProfile(userId))
+      } catch (error) {
+        if (!isCognitoUserNotFoundError(error)) {
+          console.warn('Failed to hydrate issue assignee from Cognito:', error)
+        }
+      }
+    }),
+  )
+
+  return profiles
+}
+
+function hydrateTeamIssue(
+  issue: TeamIssueResponseItem,
+  profiles: Map<string, CognitoUserProfile>,
+) {
+  const profile = profiles.get(issue.assigneeUserId)
+
+  if (!profile) {
+    return issue
+  }
+
+  return {
+    ...issue,
+    assigneeEmail: profile.email,
+    assigneeName: profile.name,
+  } satisfies TeamIssueResponseItem
 }
 
 async function readTaskAssigneeProfiles(tasks: ProjectTaskResponseItem[]) {
@@ -2495,6 +3485,531 @@ export class DynamoDbProjectTasksClient {
 
       throw error
     }
+  }
+}
+
+/**
+ * DynamoDB の team issue item と event item を読み書きする client です。
+ */
+export class DynamoDbTeamIssuesClient {
+  /**
+   * team issue item を保存する DynamoDB table 名です。
+   */
+  private readonly issueTableName: string
+  /**
+   * team issue event item を保存する DynamoDB table 名です。
+   */
+  private readonly eventTableName: string
+  /**
+   * DynamoDB DocumentClient です。
+   */
+  private readonly documentClient: DynamoDBDocumentClient
+  /**
+   * table 初期化に使う低レベル DynamoDB client です。
+   */
+  private readonly dynamoDbClient: DynamoDBClient
+  /**
+   * ローカル DynamoDB の table 欠落を自動復旧するかどうかです。
+   */
+  private readonly bootstrapLocalTables: boolean
+
+  constructor(
+    issueTableName =
+      getEnv('MUKUROJI_TEAM_ISSUES_TABLE') ??
+      getEnv('TEAM_ISSUES_TABLE_NAME') ??
+      'mukuroji-team-issues-local',
+    eventTableName =
+      getEnv('MUKUROJI_TEAM_ISSUE_EVENTS_TABLE') ??
+      getEnv('TEAM_ISSUE_EVENTS_TABLE_NAME') ??
+      'mukuroji-team-issue-events-local',
+    documentClient = createDynamoDbDocumentClient(),
+    dynamoDbClient?: DynamoDBClient,
+    bootstrapLocalTables = dynamoDbClient === undefined && shouldBootstrapLocalDynamoDb(),
+  ) {
+    this.issueTableName = issueTableName
+    this.eventTableName = eventTableName
+    this.documentClient = documentClient
+    this.dynamoDbClient = dynamoDbClient ?? createDynamoDbClient()
+    this.bootstrapLocalTables = bootstrapLocalTables
+  }
+
+  /**
+   * DynamoDB から指定 team ID の Issue 一覧を取得します。
+   */
+  async getTeamIssues(directoryId: string, teamId: string) {
+    await this.ensureLocalTables()
+
+    try {
+      const items = await this.queryTeamIssueItems(directoryId, teamId)
+
+      return {
+        teamId,
+        issues: items.map(toTeamIssueResponseItem),
+      } satisfies TeamIssuesResponse
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * DynamoDB から指定 project ID にアサインされた Issue 一覧を取得します。
+   */
+  async getProjectIssues(directoryId: string, projectId: string) {
+    await this.ensureLocalTables()
+
+    try {
+      const items = await this.queryProjectIssueItems(directoryId, projectId)
+
+      return {
+        projectId,
+        issues: items.map(toTeamIssueResponseItem),
+      } satisfies ProjectIssuesResponse
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * DynamoDB から Issue 詳細、コメント、活動履歴を取得します。
+   */
+  async getTeamIssueDetail(directoryId: string, teamId: string, issueId: string) {
+    await this.ensureLocalTables()
+
+    try {
+      const issue = await this.getRequiredTeamIssueItem(directoryId, teamId, issueId)
+      const events = await this.queryTeamIssueEventItems(directoryId, teamId, issueId)
+
+      return {
+        issue: toTeamIssueResponseItem(issue),
+        comments: events
+          .filter((event) => event.eventType === 'commented' && event.body)
+          .map(toTeamIssueCommentResponseItem),
+        activity: events.map(toTeamIssueActivityResponseItem),
+      } satisfies TeamIssueDetailResponse
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * DynamoDB に team issue を作成します。
+   */
+  async createTeamIssue(
+    directoryId: string,
+    teamId: string,
+    input: CreateTeamIssueRequestBody,
+    actorUserId: string,
+    reservedIssueIds: string[] = [],
+  ) {
+    await this.ensureLocalTables()
+
+    const title = readRequiredString(input.title, 'Issue title is required.')
+    const description = readOptionalString(input.description, 'Issue description is invalid.')
+    const assigneeUserId = readTeamIssueAssigneeUserId(input)
+    const status = readTaskStatus(input.status)
+    const dueDate = readRequiredString(input.dueDate, 'Issue due date is required.')
+    const priority = readTaskPriority(input.priority)
+    const assignedProjectId = readAssignedProjectId(input.assignedProjectId)
+    const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
+    const now = new Date().toISOString()
+
+    try {
+      const currentIssues = await this.getTeamIssues(directoryId, teamId)
+      const issueId = createUniqueResourceId(
+        title,
+        [...currentIssues.issues.map((issue) => issue.id), ...reservedIssueIds],
+      )
+      const item: TeamIssueItem = {
+        directoryId,
+        directoryTeamId,
+        teamId,
+        issueId,
+        sortOrder: (currentIssues.issues.length + 1) * 10,
+        title,
+        assigneeUserId,
+        status,
+        dueDate,
+        priority,
+        createdAt: now,
+        updatedAt: now,
+      }
+
+      if (description) {
+        item.description = description
+      }
+
+      if (assignedProjectId) {
+        item.assignedProjectId = assignedProjectId
+        item.directoryProjectId = createDirectoryProjectId(directoryId, assignedProjectId)
+      }
+
+      const eventItem = this.createIssueEventItem({
+        directoryId,
+        teamId,
+        issueId,
+        eventType: 'created',
+        actorUserId,
+        summary: 'Issue was created.',
+        createdAt: now,
+      })
+      await this.documentClient.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Put: {
+                TableName: this.issueTableName,
+                Item: item,
+                ConditionExpression: 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)',
+              },
+            },
+            {
+              Put: {
+                TableName: this.eventTableName,
+                Item: eventItem,
+                ConditionExpression: 'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+              },
+            },
+          ],
+        }),
+      )
+
+      return {
+        issue: toTeamIssueResponseItem(item),
+      } satisfies CreateTeamIssueResponse
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * DynamoDB の team issue を更新します。
+   */
+  async updateTeamIssue(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    input: UpdateTeamIssueRequestBody,
+    actorUserId: string,
+  ) {
+    await this.ensureLocalTables()
+    const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
+    const expressionAttributeNames: Record<string, string> = {
+      '#updatedAt': 'updatedAt',
+    }
+    const expressionAttributeValues: Record<string, unknown> = {
+      ':updatedAt': new Date().toISOString(),
+    }
+    const setExpressions = ['#updatedAt = :updatedAt']
+    const removeExpressions: string[] = []
+
+    if ('title' in input) {
+      expressionAttributeNames['#title'] = 'title'
+      expressionAttributeValues[':title'] = readRequiredString(input.title, 'Issue title is required.')
+      setExpressions.push('#title = :title')
+    }
+
+    if ('description' in input) {
+      const description = readOptionalString(input.description, 'Issue description is invalid.')
+      expressionAttributeNames['#description'] = 'description'
+
+      if (description) {
+        expressionAttributeValues[':description'] = description
+        setExpressions.push('#description = :description')
+      } else {
+        removeExpressions.push('#description')
+      }
+    }
+
+    if ('assignedProjectId' in input) {
+      const assignedProjectId = readAssignedProjectId(input.assignedProjectId)
+      expressionAttributeNames['#assignedProjectId'] = 'assignedProjectId'
+      expressionAttributeNames['#directoryProjectId'] = 'directoryProjectId'
+
+      if (assignedProjectId) {
+        expressionAttributeValues[':assignedProjectId'] = assignedProjectId
+        expressionAttributeValues[':directoryProjectId'] = createDirectoryProjectId(directoryId, assignedProjectId)
+        setExpressions.push('#assignedProjectId = :assignedProjectId')
+        setExpressions.push('#directoryProjectId = :directoryProjectId')
+      } else {
+        removeExpressions.push('#assignedProjectId')
+        removeExpressions.push('#directoryProjectId')
+      }
+    }
+
+    if ('assigneeUserId' in input) {
+      expressionAttributeNames['#assigneeUserId'] = 'assigneeUserId'
+      expressionAttributeValues[':assigneeUserId'] = readTeamIssueAssigneeUserId(input)
+      setExpressions.push('#assigneeUserId = :assigneeUserId')
+    }
+
+    if ('status' in input) {
+      expressionAttributeNames['#status'] = 'status'
+      expressionAttributeValues[':status'] = readRequiredTaskStatus(input.status)
+      setExpressions.push('#status = :status')
+    }
+
+    if ('dueDate' in input) {
+      expressionAttributeNames['#dueDate'] = 'dueDate'
+      expressionAttributeValues[':dueDate'] = readRequiredString(input.dueDate, 'Issue due date is required.')
+      setExpressions.push('#dueDate = :dueDate')
+    }
+
+    if ('priority' in input) {
+      expressionAttributeNames['#priority'] = 'priority'
+      expressionAttributeValues[':priority'] = readTaskPriority(input.priority)
+      setExpressions.push('#priority = :priority')
+    }
+
+    const updateExpression = [
+      `SET ${setExpressions.join(', ')}`,
+      removeExpressions.length > 0 ? `REMOVE ${removeExpressions.join(', ')}` : undefined,
+    ].filter(isDefined).join(' ')
+
+    try {
+      const eventItem = this.createIssueEventItem({
+        directoryId,
+        teamId,
+        issueId,
+        eventType: 'updated',
+        actorUserId,
+        summary: 'Issue was updated.',
+        createdAt: expressionAttributeValues[':updatedAt'] as string,
+      })
+      await this.documentClient.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Update: {
+                TableName: this.issueTableName,
+                Key: {
+                  directoryTeamId,
+                  issueId,
+                },
+                UpdateExpression: updateExpression,
+                ExpressionAttributeNames: expressionAttributeNames,
+                ExpressionAttributeValues: expressionAttributeValues,
+                ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
+              },
+            },
+            {
+              Put: {
+                TableName: this.eventTableName,
+                Item: eventItem,
+                ConditionExpression: 'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+              },
+            },
+          ],
+        }),
+      )
+      const issue = toTeamIssueResponseItem(
+        await this.getRequiredTeamIssueItem(directoryId, teamId, issueId),
+      )
+
+      return {
+        issue,
+      } satisfies UpdateTeamIssueResponse
+    } catch (error) {
+      if (isAwsNamedError(error, 'ConditionalCheckFailedException')) {
+        throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
+      }
+
+      if (
+        isAwsNamedError(error, 'TransactionCanceledException') &&
+        !await this.hasTeamIssueItem(directoryId, teamId, issueId)
+      ) {
+        throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
+      }
+
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * DynamoDB に team issue コメントを追加します。
+   */
+  async createTeamIssueComment(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    input: CreateTeamIssueCommentRequestBody,
+    actorUserId: string,
+  ) {
+    await this.ensureLocalTables()
+    await this.getRequiredTeamIssueItem(directoryId, teamId, issueId)
+
+    const createdAt = new Date().toISOString()
+    const item = await this.putIssueEvent({
+      directoryId,
+      teamId,
+      issueId,
+      eventType: 'commented',
+      actorUserId,
+      body: readRequiredCommentBody(input.body),
+      summary: 'Comment was added.',
+      createdAt,
+    })
+
+    return {
+      comment: toTeamIssueCommentResponseItem(item),
+      activity: toTeamIssueActivityResponseItem(item),
+    } satisfies CreateTeamIssueCommentResponse
+  }
+
+  private async hasTeamIssueItem(directoryId: string, teamId: string, issueId: string) {
+    try {
+      await this.getRequiredTeamIssueItem(directoryId, teamId, issueId)
+
+      return true
+    } catch (error) {
+      if (error instanceof ProjectDataError && error.code === 'TeamIssueNotFound') {
+        return false
+      }
+
+      throw error
+    }
+  }
+
+  private async getRequiredTeamIssueItem(directoryId: string, teamId: string, issueId: string) {
+    const response = await this.documentClient.send(
+      new GetCommand({
+        TableName: this.issueTableName,
+        Key: {
+          directoryTeamId: createDirectoryTeamId(directoryId, teamId),
+          issueId,
+        },
+      }),
+    )
+
+    if (!response.Item) {
+      throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
+    }
+
+    return toTeamIssueItem(response.Item)
+  }
+
+  private async queryTeamIssueItems(directoryId: string, teamId: string) {
+    const items: unknown[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+
+    do {
+      const response = await this.documentClient.send(
+        new QueryCommand({
+          TableName: this.issueTableName,
+          IndexName: 'TeamIssueSortOrderIndex',
+          KeyConditionExpression: 'directoryTeamId = :directoryTeamId',
+          ExpressionAttributeValues: {
+            ':directoryTeamId': createDirectoryTeamId(directoryId, teamId),
+          },
+          ExclusiveStartKey: exclusiveStartKey,
+          ScanIndexForward: true,
+        }),
+      )
+
+      items.push(...(response.Items ?? []))
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+
+    return items.map(toTeamIssueItem)
+  }
+
+  private async queryProjectIssueItems(directoryId: string, projectId: string) {
+    const items: unknown[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+
+    do {
+      const response = await this.documentClient.send(
+        new QueryCommand({
+          TableName: this.issueTableName,
+          IndexName: 'AssignedProjectIssueIndex',
+          KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
+          ExpressionAttributeValues: {
+            ':directoryProjectId': createDirectoryProjectId(directoryId, projectId),
+          },
+          ExclusiveStartKey: exclusiveStartKey,
+          ScanIndexForward: true,
+        }),
+      )
+
+      items.push(...(response.Items ?? []))
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+
+    return items.map(toTeamIssueItem)
+  }
+
+  private async queryTeamIssueEventItems(directoryId: string, teamId: string, issueId: string) {
+    const items: unknown[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+
+    do {
+      const response = await this.documentClient.send(
+        new QueryCommand({
+          TableName: this.eventTableName,
+          KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
+          ExpressionAttributeValues: {
+            ':directoryTeamIssueId': createDirectoryTeamIssueId(directoryId, teamId, issueId),
+          },
+          ExclusiveStartKey: exclusiveStartKey,
+          ScanIndexForward: true,
+        }),
+      )
+
+      items.push(...(response.Items ?? []))
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+
+    return items.map(toTeamIssueEventItem)
+  }
+
+  private async putIssueEvent(input: Omit<TeamIssueEventItem, 'directoryTeamIssueId' | 'eventId'>) {
+    const item = this.createIssueEventItem(input)
+
+    await this.documentClient.send(
+      new PutCommand({
+        TableName: this.eventTableName,
+        Item: item,
+        ConditionExpression: 'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+      }),
+    )
+
+    return item
+  }
+
+  private createIssueEventItem(input: Omit<TeamIssueEventItem, 'directoryTeamIssueId' | 'eventId'>) {
+    return {
+      ...input,
+      directoryTeamIssueId: createDirectoryTeamIssueId(input.directoryId, input.teamId, input.issueId),
+      eventId: createTeamIssueEventId(input.createdAt, input.eventType),
+    } satisfies TeamIssueEventItem
+  }
+
+  private async ensureLocalTables() {
+    if (!this.bootstrapLocalTables) {
+      return
+    }
+
+    await ensureLocalTeamIssuesTable(this.issueTableName, this.dynamoDbClient)
+    await ensureLocalTeamIssueEventsTable(this.eventTableName, this.dynamoDbClient)
   }
 }
 
@@ -3458,6 +4973,74 @@ function createDynamoDbDocumentClient() {
 
 const localDynamoDbTableInitializers = new Map<string, Promise<void>>()
 
+async function ensureLocalTeamIssuesTable(
+  tableName: string,
+  dynamoDbClient: DynamoDBClient,
+) {
+  return ensureLocalDynamoDbTable(
+    tableName,
+    dynamoDbClient,
+    () =>
+      new CreateTableCommand({
+        TableName: tableName,
+        AttributeDefinitions: [
+          { AttributeName: 'directoryTeamId', AttributeType: 'S' },
+          { AttributeName: 'issueId', AttributeType: 'S' },
+          { AttributeName: 'sortOrder', AttributeType: 'N' },
+          { AttributeName: 'directoryProjectId', AttributeType: 'S' },
+        ],
+        KeySchema: [
+          { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
+          { AttributeName: 'issueId', KeyType: 'RANGE' },
+        ],
+        GlobalSecondaryIndexes: [
+          {
+            IndexName: 'TeamIssueSortOrderIndex',
+            KeySchema: [
+              { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
+              { AttributeName: 'sortOrder', KeyType: 'RANGE' },
+            ],
+            Projection: { ProjectionType: 'ALL' },
+          },
+          {
+            IndexName: 'AssignedProjectIssueIndex',
+            KeySchema: [
+              { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
+              { AttributeName: 'sortOrder', KeyType: 'RANGE' },
+            ],
+            Projection: { ProjectionType: 'ALL' },
+          },
+        ],
+        BillingMode: 'PAY_PER_REQUEST',
+      }),
+    isTeamIssuesTableDescription,
+  )
+}
+
+async function ensureLocalTeamIssueEventsTable(
+  tableName: string,
+  dynamoDbClient: DynamoDBClient,
+) {
+  return ensureLocalDynamoDbTable(
+    tableName,
+    dynamoDbClient,
+    () =>
+      new CreateTableCommand({
+        TableName: tableName,
+        AttributeDefinitions: [
+          { AttributeName: 'directoryTeamIssueId', AttributeType: 'S' },
+          { AttributeName: 'eventId', AttributeType: 'S' },
+        ],
+        KeySchema: [
+          { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
+          { AttributeName: 'eventId', KeyType: 'RANGE' },
+        ],
+        BillingMode: 'PAY_PER_REQUEST',
+      }),
+    isTeamIssueEventsTableDescription,
+  )
+}
+
 async function ensureLocalProjectTasksTable(
   tableName: string,
   dynamoDbClient: DynamoDBClient,
@@ -3607,6 +5190,40 @@ function isProjectTasksTableDescription(table: TableDescription | undefined) {
   )
 }
 
+function isTeamIssuesTableDescription(table: TableDescription | undefined) {
+  return (
+    hasKeySchema(table, [
+      ['directoryTeamId', 'HASH'],
+      ['issueId', 'RANGE'],
+    ]) &&
+    Boolean(
+      table?.GlobalSecondaryIndexes?.some((index) =>
+        index.IndexName === 'TeamIssueSortOrderIndex' &&
+        hasKeySchema(index, [
+          ['directoryTeamId', 'HASH'],
+          ['sortOrder', 'RANGE'],
+        ]),
+      ),
+    ) &&
+    Boolean(
+      table?.GlobalSecondaryIndexes?.some((index) =>
+        index.IndexName === 'AssignedProjectIssueIndex' &&
+        hasKeySchema(index, [
+          ['directoryProjectId', 'HASH'],
+          ['sortOrder', 'RANGE'],
+        ]),
+      ),
+    )
+  )
+}
+
+function isTeamIssueEventsTableDescription(table: TableDescription | undefined) {
+  return hasKeySchema(table, [
+    ['directoryTeamIssueId', 'HASH'],
+    ['eventId', 'RANGE'],
+  ])
+}
+
 function isProjectDirectoryTableDescription(table: TableDescription | undefined) {
   return hasKeySchema(table, [
     ['directoryId', 'HASH'],
@@ -3661,6 +5278,82 @@ function toProjectDataError(error: unknown) {
     awsError.name ?? 'DynamoDbUnavailable',
     awsError.message ?? 'DynamoDB request failed.',
   )
+}
+
+function isTeamIssueNotFoundError(error: unknown) {
+  if (error instanceof ProjectDataError) {
+    return error.status === 404 && error.code === 'TeamIssueNotFound'
+  }
+
+  return isRecord(error) && error.status === 404 && error.code === 'TeamIssueNotFound'
+}
+
+function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
+  const item = toTeamIssueItem(value)
+  const issue: TeamIssueResponseItem = {
+    id: item.issueId,
+    teamId: item.teamId,
+    title: item.title,
+    assigneeUserId: item.assigneeUserId,
+    status: item.status,
+    dueDate: item.dueDate,
+    priority: item.priority,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+  }
+
+  if (item.assignedProjectId) {
+    issue.assignedProjectId = item.assignedProjectId
+  }
+
+  if (item.description) {
+    issue.description = item.description
+  }
+
+  return issue
+}
+
+function toTeamIssueCommentResponseItem(value: TeamIssueEventItem): TeamIssueCommentResponseItem {
+  return {
+    id: value.eventId,
+    actorUserId: value.actorUserId,
+    body: value.body ?? '',
+    createdAt: value.createdAt,
+  }
+}
+
+function toTeamIssueActivityResponseItem(value: TeamIssueEventItem): TeamIssueActivityResponseItem {
+  return {
+    id: value.eventId,
+    type: value.eventType,
+    actorUserId: value.actorUserId,
+    summary: value.summary,
+    createdAt: value.createdAt,
+  }
+}
+
+function toTeamIssueItem(value: unknown): TeamIssueItem {
+  if (!isTeamIssueItem(value)) {
+    throw new ProjectDataError(
+      503,
+      'InvalidTeamIssue',
+      'Team issue item is missing or invalid.',
+    )
+  }
+
+  return value
+}
+
+function toTeamIssueEventItem(value: unknown): TeamIssueEventItem {
+  if (!isTeamIssueEventItem(value)) {
+    throw new ProjectDataError(
+      503,
+      'InvalidTeamIssue',
+      'Team issue event item is missing or invalid.',
+    )
+  }
+
+  return value
 }
 
 function toProjectTaskResponseItem(value: unknown): ProjectTaskResponseItem {
@@ -3833,6 +5526,58 @@ function isActiveDirectoryItem(item: ProjectDirectoryTeamItem | ProjectDirectory
   return item.archivedAt === undefined
 }
 
+function isTeamIssueItem(value: unknown): value is TeamIssueItem {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  return (
+    typeof value.directoryId === 'string' &&
+    typeof value.teamId === 'string' &&
+    value.directoryTeamId === createDirectoryTeamId(value.directoryId, value.teamId) &&
+    typeof value.issueId === 'string' &&
+    typeof value.sortOrder === 'number' &&
+    typeof value.title === 'string' &&
+    (value.description === undefined || typeof value.description === 'string') &&
+    typeof value.assigneeUserId === 'string' &&
+    isProjectTaskStatus(value.status) &&
+    typeof value.dueDate === 'string' &&
+    isProjectTaskPriority(value.priority) &&
+    typeof value.createdAt === 'string' &&
+    typeof value.updatedAt === 'string' &&
+    (
+      value.assignedProjectId === undefined ||
+      (
+        typeof value.assignedProjectId === 'string' &&
+        value.directoryProjectId === createDirectoryProjectId(value.directoryId, value.assignedProjectId)
+      )
+    )
+  )
+}
+
+function isTeamIssueEventItem(value: unknown): value is TeamIssueEventItem {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  return (
+    typeof value.directoryId === 'string' &&
+    typeof value.teamId === 'string' &&
+    typeof value.issueId === 'string' &&
+    value.directoryTeamIssueId === createDirectoryTeamIssueId(
+      value.directoryId,
+      value.teamId,
+      value.issueId,
+    ) &&
+    typeof value.eventId === 'string' &&
+    isTeamIssueActivityType(value.eventType) &&
+    typeof value.actorUserId === 'string' &&
+    (value.body === undefined || typeof value.body === 'string') &&
+    typeof value.summary === 'string' &&
+    typeof value.createdAt === 'string'
+  )
+}
+
 function isProjectTaskItem(value: unknown): value is ProjectTaskItem {
   if (!isRecord(value)) {
     return false
@@ -3912,6 +5657,10 @@ function isProjectTaskStatus(value: unknown): value is ProjectTaskStatus {
 
 function isProjectTaskPriority(value: unknown): value is ProjectTaskPriority {
   return value === 'high' || value === 'medium' || value === 'low'
+}
+
+function isTeamIssueActivityType(value: unknown): value is TeamIssueActivityType {
+  return value === 'created' || value === 'updated' || value === 'commented'
 }
 
 function isProjectRole(value: unknown): value is ProjectRole {
@@ -3996,6 +5745,85 @@ function readProjectRole(value: unknown): ProjectRole {
   }
 
   return value
+}
+
+function normalizeTeamIssueInput<TInput extends CreateTeamIssueRequestBody | UpdateTeamIssueRequestBody>(
+  input: TInput,
+  team: ProjectDirectoryTeamResponse,
+) {
+  if (!('assignedProjectId' in input)) {
+    return input
+  }
+
+  const assignedProjectId = readAssignedProjectId(input.assignedProjectId)
+
+  if (
+    assignedProjectId &&
+    !team.projects.some((project) => project.id === assignedProjectId)
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      `Assigned project "${assignedProjectId}" is not active in team "${team.id}".`,
+    )
+  }
+
+  return {
+    ...input,
+    assignedProjectId,
+  }
+}
+
+function readAssignedProjectId(value: unknown) {
+  if (value === undefined) {
+    return undefined
+  }
+
+  if (value === null) {
+    return null
+  }
+
+  if (typeof value !== 'string') {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Assigned project is invalid.')
+  }
+
+  const assignedProjectId = value.trim()
+
+  return assignedProjectId || null
+}
+
+function readOptionalString(value: unknown, message: string) {
+  if (value === undefined) {
+    return undefined
+  }
+
+  if (value === null) {
+    return ''
+  }
+
+  if (typeof value !== 'string') {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', message)
+  }
+
+  return value.trim()
+}
+
+function readTeamIssueAssigneeUserId(input: CreateTeamIssueRequestBody | UpdateTeamIssueRequestBody) {
+  const value = input.assigneeUserId
+
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Issue assignee is required.')
+  }
+
+  return normalizeCognitoUserId(value)
+}
+
+function readRequiredCommentBody(value: unknown) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Issue comment body is required.')
+  }
+
+  return value.trim()
 }
 
 function readTaskAssigneeUserId(input: CreateProjectTaskRequestBody) {
@@ -4180,8 +6008,20 @@ function getSystemAdminGroups() {
   return configuredGroups.length > 0 ? configuredGroups : defaultSystemAdminGroups
 }
 
+function createDirectoryTeamId(directoryId: string, teamId: string) {
+  return `${directoryId}#team#${teamId}`
+}
+
+function createDirectoryTeamIssueId(directoryId: string, teamId: string, issueId: string) {
+  return `${createDirectoryTeamId(directoryId, teamId)}#issue#${issueId}`
+}
+
 function createDirectoryProjectId(directoryId: string, projectId: string) {
   return `${directoryId}#project#${projectId}`
+}
+
+function createTeamIssueEventId(createdAt: string, eventType: TeamIssueActivityType) {
+  return `${createdAt}#${eventType}#${Math.random().toString(36).slice(2, 10)}`
 }
 
 function getAwsRegion() {
@@ -4211,6 +6051,7 @@ function normalizeCognitoErrorCode(value: string | undefined) {
 cognito = new FlociCognitoClient()
 dashboardSummary = new DynamoDbDashboardSummaryClient()
 projectTasks = new DynamoDbProjectTasksClient()
+teamIssues = new DynamoDbTeamIssuesClient()
 projectDirectory = new DynamoDbProjectDirectoryClient()
 
 /**
@@ -4220,11 +6061,13 @@ export function configureApiClientsForTest(clients: {
   cognito?: CognitoClient
   dashboardSummary?: DashboardSummaryClient
   projectTasks?: ProjectTasksClient
+  teamIssues?: TeamIssuesClient
   projectDirectory?: ProjectDirectoryClient
 }) {
   cognito = clients.cognito ?? cognito
   dashboardSummary = clients.dashboardSummary ?? dashboardSummary
   projectTasks = clients.projectTasks ?? projectTasks
+  teamIssues = clients.teamIssues ?? teamIssues
   projectDirectory = clients.projectDirectory ?? projectDirectory
 }
 
@@ -4235,6 +6078,7 @@ export function resetApiClientsForTest() {
   cognito = new FlociCognitoClient()
   dashboardSummary = new DynamoDbDashboardSummaryClient()
   projectTasks = new DynamoDbProjectTasksClient()
+  teamIssues = new DynamoDbTeamIssuesClient()
   projectDirectory = new DynamoDbProjectDirectoryClient()
 }
 

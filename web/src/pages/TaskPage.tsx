@@ -36,16 +36,19 @@ import {
   removeProjectMember,
   updateProjectMember,
 } from '../projects/api'
+import {
+  createTeamIssue,
+  getProjectIssues,
+  type TeamIssue,
+} from '../issues/api'
 import { ProjectPermissionsPanel } from '../projects/ProjectPermissionsPanel'
 import {
-  createProjectTasksPath,
+  createProjectIssuesPath,
   createTeamViewPath,
   workspaceNavPaths,
 } from '../routes/paths'
 import {
-  createProjectTask,
   type CreateProjectTaskInput,
-  getProjectTasks,
   type ProjectTask,
   type TaskPriority,
   type TaskStatus,
@@ -293,7 +296,9 @@ export function TaskPage() {
   } = useSWR(
     projectTasksKey,
     ([, accessToken, currentProjectId]) =>
-      getProjectTasks(currentProjectId, accessToken),
+      getProjectIssues(currentProjectId, accessToken).then((issues) =>
+        issues.map((issue) => toProjectTaskFromIssue(issue, currentProjectId)),
+      ),
     apiSWRConfig,
   )
   const projectMembersKey = accessToken && user && !currentUserError
@@ -414,7 +419,14 @@ export function TaskPage() {
       return
     }
 
-    await createProjectTask(projectId, accessToken, input)
+    if (!activeTeam) {
+      throw new Error(t('issues.error.create'))
+    }
+
+    await createTeamIssue(activeTeam.id, accessToken, {
+      ...input,
+      assignedProjectId: projectId,
+    })
     await mutateProjectTasks()
   }
 
@@ -525,7 +537,7 @@ export function TaskPage() {
       locale={locale}
       activeProjectTeamId={activeTeam?.id}
       onSelectProject={(nextProjectId, teamId) =>
-        navigate(createProjectTasksPath(nextProjectId, teamId))
+        navigate(createProjectIssuesPath(nextProjectId, teamId))
       }
       onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
       onSelectTeamView={(teamId, viewId) =>
@@ -851,6 +863,21 @@ function mergeProjectUsers(currentUsers: ProjectUser[], nextUsers: ProjectUser[]
   }
 
   return Array.from(usersById.values())
+}
+
+function toProjectTaskFromIssue(issue: TeamIssue, projectId: string): ProjectTask {
+  return {
+    projectId,
+    id: issue.id,
+    titleKey: issue.titleKey,
+    title: issue.title,
+    assigneeUserId: issue.assigneeUserId,
+    assigneeEmail: issue.assigneeEmail,
+    assigneeName: issue.assigneeName,
+    status: issue.status,
+    dueDate: issue.dueDate,
+    priority: issue.priority,
+  }
 }
 
 function TaskHeader({

@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
+import type { TeamIssue, TeamIssueActivity, TeamIssueComment } from '../src/issues/api'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import type { ProjectDirectoryTeam, ProjectMember, ProjectMemberRole, ProjectUser } from '../src/projects/api'
 import type { ProjectTask } from '../src/tasks/api'
@@ -57,6 +58,22 @@ type MockRequestCounts = {
    */
   projectMemberRemoves: number
   /**
+   * チーム Issue 一覧 API の request 数です。
+   */
+  issueReads: number
+  /**
+   * チーム Issue 作成 API の request 数です。
+   */
+  issueCreates: number
+  /**
+   * チーム Issue 更新 API の request 数です。
+   */
+  issueUpdates: number
+  /**
+   * チーム Issue コメント API の request 数です。
+   */
+  issueComments: number
+  /**
    * タスク作成 API の request 数です。
    */
   taskCreates: number
@@ -91,6 +108,10 @@ async function mockAuthenticatedTaskPage(
     projectUserReads: 0,
     projectMemberUpdates: 0,
     projectMemberRemoves: 0,
+    issueReads: 0,
+    issueCreates: 0,
+    issueUpdates: 0,
+    issueComments: 0,
     taskCreates: 0,
     taskStatusUpdates: 0,
   }
@@ -104,6 +125,12 @@ async function mockAuthenticatedTaskPage(
     'brand-refresh': [],
     'shared-launch': [],
   }
+  const teamIssuesByTeam: Record<string, TeamIssue[]> = {
+    'core-team': [],
+    'design-team': [],
+  }
+  const issueCommentsByIssue: Record<string, TeamIssueComment[]> = {}
+  const issueActivityByIssue: Record<string, TeamIssueActivity[]> = {}
   const projectMembersByProject: Record<string, ProjectMember[]> = {
     refero: [
       {
@@ -382,6 +409,191 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
+  await page.route(/.*\/api\/projects\/[^/]+\/issues$/, async (route) => {
+    const pathSegments = new URL(route.request().url()).pathname.split('/')
+    const projectId = decodeURIComponent(pathSegments[3] ?? '')
+    recordProjectTaskRequest(requestCounts, projectId)
+
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    const legacyIssues = (taskResponsesByProject[projectId] ?? []).map((task) =>
+      toIssueFromTask(task, 'core-team', projectId),
+    )
+    const assignedIssues = Object.values(teamIssuesByTeam)
+      .flat()
+      .filter((issue) => issue.assignedProjectId === projectId)
+
+    await route.fulfill({
+      json: {
+        projectId,
+        issues: [...legacyIssues, ...assignedIssues],
+      },
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/issues$/, async (route) => {
+    const teamId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[3] ?? '')
+    const projects = projectDirectory.find((team) => team.id === teamId)?.projects ?? []
+
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    if (route.request().method() === 'POST') {
+      requestCounts.issueCreates += 1
+      const body = route.request().postDataJSON() as {
+        assignedProjectId?: string
+        assigneeUserId?: string
+        description?: string
+        dueDate?: string
+        priority?: TeamIssue['priority']
+        status?: TeamIssue['status']
+        title?: string
+      }
+      const assigneeUser = projectUsers.find((user) => user.id === body.assigneeUserId)
+      const issue = {
+        id: body.title === '新規タスク' ? 'new-task' : createIssueId(body.title ?? '新規 Issue'),
+        teamId,
+        assignedProjectId: body.assignedProjectId || undefined,
+        title: body.title ?? '新規 Issue',
+        description: body.description,
+        assigneeUserId: assigneeUser?.id ?? 'sato@example.com',
+        assigneeEmail: assigneeUser?.email ?? 'sato@example.com',
+        assigneeName: assigneeUser?.name ?? '佐藤 花子',
+        status: body.status ?? 'todo',
+        dueDate: body.dueDate ?? '2026/06/20',
+        priority: body.priority ?? 'medium',
+        createdAt: '2026-06-08T00:00:00.000Z',
+        updatedAt: '2026-06-08T00:00:00.000Z',
+      } satisfies TeamIssue
+
+      teamIssuesByTeam[teamId] = [...(teamIssuesByTeam[teamId] ?? []), issue]
+
+      await route.fulfill({
+        status: 201,
+        json: {
+          issue,
+        },
+      })
+      return
+    }
+
+    requestCounts.issueReads += 1
+    const legacyIssues = projects.flatMap((project) =>
+      (taskResponsesByProject[project.id] ?? []).map((task) =>
+        toIssueFromTask(task, teamId, project.id),
+      ),
+    )
+
+    await route.fulfill({
+      json: {
+        teamId,
+        issues: [...legacyIssues, ...(teamIssuesByTeam[teamId] ?? [])],
+      },
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+$/, async (route) => {
+    const pathSegments = new URL(route.request().url()).pathname.split('/')
+    const teamId = decodeURIComponent(pathSegments[3] ?? '')
+    const issueId = decodeURIComponent(pathSegments[5] ?? '')
+    const issue = findTeamIssue(teamIssuesByTeam, taskResponsesByProject, projectDirectory, teamId, issueId)
+
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    if (!issue) {
+      await route.fulfill({
+        status: 404,
+        json: {
+          message: 'Issue was not found.',
+        },
+      })
+      return
+    }
+
+    if (route.request().method() === 'PATCH') {
+      requestCounts.issueUpdates += 1
+      const body = route.request().postDataJSON() as Partial<TeamIssue> & {
+        assignedProjectId?: string | null
+      }
+      const updatedIssue = {
+        ...issue,
+        ...body,
+        assignedProjectId: body.assignedProjectId === null
+          ? undefined
+          : body.assignedProjectId ?? issue.assignedProjectId,
+        updatedAt: '2026-06-08T02:00:00.000Z',
+      } satisfies TeamIssue
+      const issues = teamIssuesByTeam[teamId] ?? []
+      const issueIndex = issues.findIndex((candidate) => candidate.id === issueId)
+
+      if (issueIndex >= 0) {
+        issues[issueIndex] = updatedIssue
+      } else {
+        teamIssuesByTeam[teamId] = [...issues, updatedIssue]
+      }
+
+      await route.fulfill({
+        json: {
+          issue: updatedIssue,
+        },
+      })
+      return
+    }
+
+    await route.fulfill({
+      json: {
+        issue,
+        comments: issueCommentsByIssue[issueId] ?? [
+          {
+            id: 'comment-1',
+            actorUserId: 'demo@example.com',
+            body: '背景を確認します。',
+            createdAt: '2026-06-08T01:00:00.000Z',
+          },
+        ],
+        activity: issueActivityByIssue[issueId] ?? [
+          {
+            id: 'activity-1',
+            type: 'created',
+            actorUserId: 'demo@example.com',
+            summary: 'Issue was created.',
+            createdAt: '2026-06-08T00:00:00.000Z',
+          },
+        ],
+      },
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/comments$/, async (route) => {
+    requestCounts.issueComments += 1
+    const pathSegments = new URL(route.request().url()).pathname.split('/')
+    const issueId = decodeURIComponent(pathSegments[5] ?? '')
+    const body = route.request().postDataJSON() as { body?: string }
+    const comment = {
+      id: `comment-${requestCounts.issueComments + 1}`,
+      actorUserId: 'demo@example.com',
+      body: body.body ?? '追加コメント',
+      createdAt: '2026-06-08T02:00:00.000Z',
+    } satisfies TeamIssueComment
+    const activity = {
+      id: `activity-${requestCounts.issueComments + 1}`,
+      type: 'commented',
+      actorUserId: 'demo@example.com',
+      summary: 'Comment was added.',
+      createdAt: '2026-06-08T02:00:00.000Z',
+    } satisfies TeamIssueActivity
+
+    issueCommentsByIssue[issueId] = [...(issueCommentsByIssue[issueId] ?? []), comment]
+    issueActivityByIssue[issueId] = [...(issueActivityByIssue[issueId] ?? []), activity]
+
+    await route.fulfill({
+      status: 201,
+      json: {
+        comment,
+        activity,
+      },
+    })
+  })
+
   await page.route(/.*\/api\/projects\/[^/]+\/users(?:\?.*)?$/, async (route) => {
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
@@ -565,6 +777,59 @@ function recordProjectTaskRequest(requestCounts: MockRequestCounts, projectId: s
   requestCounts.projectTasks[projectId] = (requestCounts.projectTasks[projectId] ?? 0) + 1
 }
 
+function toIssueFromTask(task: ProjectTask, teamId: string, assignedProjectId: string): TeamIssue {
+  return {
+    id: task.id,
+    teamId,
+    assignedProjectId,
+    titleKey: task.titleKey,
+    title: task.title,
+    assigneeUserId: task.assigneeUserId ?? task.assignee ?? 'sato@example.com',
+    assigneeEmail: task.assigneeEmail,
+    assigneeName: task.assigneeName,
+    status: task.status,
+    dueDate: task.dueDate,
+    priority: task.priority,
+    createdAt: '2026-06-08T00:00:00.000Z',
+    updatedAt: '2026-06-08T00:00:00.000Z',
+  }
+}
+
+function createIssueId(title: string) {
+  return title
+    .trim()
+    .toLowerCase()
+    .normalize('NFKC')
+    .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
+    .replace(/^-+|-+$/g, '') || 'new-issue'
+}
+
+function findTeamIssue(
+  teamIssuesByTeam: Record<string, TeamIssue[]>,
+  taskResponsesByProject: Record<string, ProjectTask[]>,
+  projectDirectory: ProjectDirectoryTeam[],
+  teamId: string,
+  issueId: string,
+) {
+  const issue = teamIssuesByTeam[teamId]?.find((candidate) => candidate.id === issueId)
+
+  if (issue) {
+    return issue
+  }
+
+  const team = projectDirectory.find((candidate) => candidate.id === teamId)
+
+  for (const project of team?.projects ?? []) {
+    const task = taskResponsesByProject[project.id]?.find((candidate) => candidate.id === issueId)
+
+    if (task) {
+      return toIssueFromTask(task, teamId, project.id)
+    }
+  }
+
+  return undefined
+}
+
 test.describe('authenticated task page', () => {
   test.beforeEach(async ({ page }) => {
     await mockAuthenticatedTaskPage(page)
@@ -635,10 +900,47 @@ test.describe('authenticated task page', () => {
 
     await page.getByRole('button', { name: 'ブランド刷新', exact: true }).click()
 
-    await expect(page).toHaveURL('/projects/brand-refresh/tasks?teamId=design-team')
+    await expect(page).toHaveURL('/projects/brand-refresh/issues?teamId=design-team')
     await expect(page.getByTestId('tasks-heading')).toHaveText('ブランド刷新')
     await expect(page.getByTestId('tasks-empty')).toBeVisible()
     expect(requestCounts.projectDirectory).toBe(1)
+  })
+
+  test('チーム所有 Issue を作成し、プロジェクトへ割り当ててコメントできる', async ({ page }) => {
+    await page.goto('/dashboard')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('button', { name: 'Issues' }).first().click()
+
+    await expect(page).toHaveURL('/teams/core-team/issues')
+    await expect(page.getByTestId('team-issues-heading')).toHaveText('コアチーム')
+    await expect(page.getByTestId('issue-row-wireframe')).toBeVisible()
+
+    await page.getByRole('button', { name: '新規 Issue' }).click()
+    const createIssueForm = page.getByTestId('create-issue-form')
+    await createIssueForm.locator('input[name="title"]').fill('割当待ち Issue')
+    await createIssueForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
+    await createIssueForm.getByRole('button', { name: 'Issue を作成' }).click()
+
+    await expect(page.getByTestId('issue-row-割当待ち-issue')).toBeVisible()
+    expect(requestCounts.issueCreates).toBe(1)
+
+    await page.getByTestId('issue-row-割当待ち-issue').click()
+    await page.locator('aside select[name="assignedProjectId"]').selectOption('refero')
+    await page.getByRole('button', { name: '変更を保存' }).click()
+
+    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+
+    await page.locator('textarea[name="body"]').fill('プロジェクト側で着手します。')
+    await page.getByRole('button', { name: 'コメントを追加' }).click()
+
+    await expect(page.getByText('プロジェクト側で着手します。')).toBeVisible()
+    await expect(page.getByText('Comment was added.')).toBeVisible()
+    expect(requestCounts.issueComments).toBe(1)
+
+    await page.goto('/projects/refero/issues?teamId=core-team')
+
+    await expect(page.getByText('割当待ち Issue')).toBeVisible()
   })
 
   test('サイドバーからマイタスクへ移動するとタスクをカンバンで表示する', async ({ page }) => {
@@ -756,7 +1058,7 @@ test.describe('authenticated task page', () => {
     expect(requestCounts.projectCreates).toBe(1)
 
     await page.getByRole('button', { name: '新規プロジェクト', exact: true }).click()
-    await expect(page).toHaveURL('/projects/new-project/tasks?teamId=core-team')
+    await expect(page).toHaveURL('/projects/new-project/issues?teamId=core-team')
     await page.getByRole('tab', { name: /権限/ }).click()
     await expect(page.getByTestId('permission-member-row-demo-example-com')).toBeVisible()
     await expect(page.getByTestId('permission-role-select-demo-example-com')).toHaveValue('manager')
@@ -805,7 +1107,7 @@ test.describe('authenticated task page', () => {
     expect(requestCounts.projectCreates).toBe(0)
   })
 
-  test('同じプロジェクトが複数チームにある場合、選択元チームをタスク画面へ引き継ぐ', async ({
+  test('同じプロジェクトが複数チームにある場合、選択元チームを Issue 画面へ引き継ぐ', async ({
     page,
   }) => {
     await page.goto('/dashboard')
@@ -815,7 +1117,7 @@ test.describe('authenticated task page', () => {
     await expect(sharedLaunchButtons).toHaveCount(2)
     await sharedLaunchButtons.nth(1).click()
 
-    await expect(page).toHaveURL('/projects/shared-launch/tasks?teamId=design-team')
+    await expect(page).toHaveURL('/projects/shared-launch/issues?teamId=design-team')
     await expect(page.getByTestId('tasks-heading')).toHaveText('共通ローンチ')
     await expect(page.getByLabel('プロジェクトのパンくずリスト')).toContainText(
       'デザインチーム',
@@ -841,7 +1143,7 @@ test.describe('authenticated task page', () => {
     await page.getByRole('button', { name: '登録', exact: true }).click()
 
     await expect(page.getByTestId('task-row-new-task').getByText('新規タスク')).toBeVisible()
-    expect(requestCounts.taskCreates).toBe(1)
+    expect(requestCounts.issueCreates).toBe(1)
   })
 
   test('担当者を選択しない新規タスク登録は送信しない', async ({ page }) => {
@@ -854,7 +1156,7 @@ test.describe('authenticated task page', () => {
     await page.getByRole('button', { name: '登録', exact: true }).click()
 
     await expect(page.locator('select[name="assigneeUserId"]')).toHaveValue('')
-    expect(requestCounts.taskCreates).toBe(0)
+    expect(requestCounts.issueCreates).toBe(0)
   })
 
   test('担当者候補 API 失敗時は空状態と分けて表示する', async ({ page }) => {
@@ -876,7 +1178,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('タスク API 失敗時にエラーを表示する', async ({ page }) => {
-    await page.route('**/api/projects/refero/tasks', async (route) => {
+    await page.route('**/api/projects/refero/issues', async (route) => {
       await route.fulfill({
         status: 500,
         json: {
@@ -893,11 +1195,11 @@ test.describe('authenticated task page', () => {
   })
 
   test('タスクが空の場合に empty 表示を出す', async ({ page }) => {
-    await page.route('**/api/projects/refero/tasks', async (route) => {
+    await page.route('**/api/projects/refero/issues', async (route) => {
       await route.fulfill({
         json: {
           projectId: 'refero',
-          tasks: [],
+          issues: [],
         },
       })
     })

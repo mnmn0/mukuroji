@@ -1002,6 +1002,336 @@ test('updates a project task status after project access is confirmed', async ()
   ])
 })
 
+test('loads team-owned issues with legacy project tasks after team access is confirmed', async () => {
+  const calls = configureFakeProjectClients(true, { taskAssigneeUserId: 'sato@example.com' })
+
+  const response = await app.request('/api/teams/core-team/issues', {
+    headers: {
+      Authorization: 'Bearer test-token',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.json()
+  expect(body.teamId).toBe('core-team')
+  expect(body.issues).toHaveLength(2)
+  expect(body.issues[0]).toMatchObject({
+    id: 'onboarding-friction',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    title: '初回オンボーディングの離脱要因を減らす',
+    assigneeEmail: 'sato@example.com',
+  })
+  expect(body.issues[1]).toMatchObject({
+    id: 'wireframe',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    titleKey: 'tasks.item.wireframe',
+  })
+  expect(calls.issueReads).toEqual([
+    { directoryId: 'user#demo@example.com', teamId: 'core-team' },
+  ])
+  expect(calls.taskReads).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+  ])
+})
+
+test('loads legacy project task rows as team issue detail fallback', async () => {
+  const calls = configureFakeProjectClients(true, { taskAssigneeUserId: 'sato@example.com' })
+
+  const response = await app.request('/api/teams/core-team/issues/wireframe', {
+    headers: {
+      Authorization: 'Bearer test-token',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    issue: {
+      id: 'wireframe',
+      teamId: 'core-team',
+      assignedProjectId: 'refero',
+      titleKey: 'tasks.item.wireframe',
+      assigneeUserId: 'sato@example.com',
+      assigneeEmail: 'sato@example.com',
+      status: 'in-progress',
+      dueDate: '2026/06/03',
+      priority: 'high',
+    },
+    comments: [],
+    activity: [],
+  })
+  expect(calls.issueDetails).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      teamId: 'core-team',
+      issueId: 'wireframe',
+    },
+  ])
+  expect(calls.taskReads).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+  ])
+})
+
+test('creates a team-owned issue after team access is confirmed', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  const response = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: '新規 Issue',
+      description: 'Issue の説明',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026/06/20',
+      priority: 'medium',
+      status: 'todo',
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(await response.json()).toEqual({
+    issue: {
+      id: 'new-issue',
+      teamId: 'core-team',
+      assignedProjectId: 'refero',
+      title: '新規 Issue',
+      description: 'Issue の説明',
+      assigneeUserId: 'sato@example.com',
+      assigneeEmail: 'sato@example.com',
+      assigneeName: '佐藤 花子',
+      status: 'todo',
+      dueDate: '2026/06/20',
+      priority: 'medium',
+      createdAt: '2026-06-08T00:00:00.000Z',
+      updatedAt: '2026-06-08T00:00:00.000Z',
+    },
+  })
+  expect(calls.issueCreates).toEqual([
+    {
+      actorUserId: 'demo@example.com',
+      assignedProjectId: 'refero',
+      directoryId: 'user#demo@example.com',
+      reservedIssueIds: ['wireframe'],
+      teamId: 'core-team',
+      title: '新規 Issue',
+    },
+  ])
+})
+
+test('rejects a team issue assignment to a project outside the owning team', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  const response = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: '不正な割り当て',
+      assignedProjectId: 'unknown-project',
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026/06/20',
+      priority: 'medium',
+      status: 'todo',
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(calls.issueCreates).toEqual([])
+})
+
+test('rejects a team issue assignment when the user lacks target project member role', async () => {
+  const calls = configureFakeProjectClients(true, {
+    projectAccesses: [
+      {
+        projectId: 'refero',
+        role: 'member',
+      },
+    ],
+    teamProjects: [
+      {
+        id: 'refero',
+        name: 'Refero',
+        tone: 'blue',
+      },
+      {
+        id: 'product-roadmap',
+        name: 'プロダクトロードマップ',
+        tone: 'yellow',
+      },
+    ],
+  })
+
+  const response = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: '権限外プロジェクトへの割り当て',
+      assignedProjectId: 'product-roadmap',
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026/06/20',
+      priority: 'medium',
+      status: 'todo',
+    }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(calls.issueCreates).toEqual([])
+})
+
+test('loads team issue detail and creates comments after team access is confirmed', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  const detailResponse = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    headers: {
+      Authorization: 'Bearer test-token',
+    },
+  })
+
+  expect(detailResponse.status).toBe(200)
+  expect(await detailResponse.json()).toMatchObject({
+    issue: {
+      id: 'onboarding-friction',
+      assigneeEmail: 'sato@example.com',
+    },
+    comments: [
+      {
+        id: 'comment-1',
+        body: '背景を確認します。',
+      },
+    ],
+    activity: [
+      {
+        id: 'activity-1',
+        type: 'created',
+      },
+    ],
+  })
+
+  const commentResponse = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      body: '追加コメント',
+    }),
+  })
+
+  expect(commentResponse.status).toBe(201)
+  expect(await commentResponse.json()).toEqual({
+    comment: {
+      id: 'comment-2',
+      actorUserId: 'demo@example.com',
+      body: '追加コメント',
+      createdAt: '2026-06-08T02:00:00.000Z',
+    },
+    activity: {
+      id: 'activity-2',
+      type: 'commented',
+      actorUserId: 'demo@example.com',
+      summary: 'Comment was added.',
+      createdAt: '2026-06-08T02:00:00.000Z',
+    },
+  })
+  expect(calls.issueDetails).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      teamId: 'core-team',
+      issueId: 'onboarding-friction',
+    },
+    {
+      directoryId: 'user#demo@example.com',
+      teamId: 'core-team',
+      issueId: 'onboarding-friction',
+    },
+  ])
+  expect(calls.issueComments).toEqual([
+    {
+      actorUserId: 'demo@example.com',
+      directoryId: 'user#demo@example.com',
+      teamId: 'core-team',
+      issueId: 'onboarding-friction',
+    },
+  ])
+})
+
+test('updates a team-owned issue after team access is confirmed', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: '更新済み Issue',
+      assignedProjectId: null,
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026/06/22',
+      priority: 'low',
+      status: 'done',
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    issue: {
+      id: 'onboarding-friction',
+      teamId: 'core-team',
+      title: '更新済み Issue',
+      assigneeEmail: 'sato@example.com',
+      status: 'done',
+      dueDate: '2026/06/22',
+      priority: 'low',
+    },
+  })
+  expect(calls.issueUpdates).toEqual([
+    {
+      actorUserId: 'demo@example.com',
+      assignedProjectId: null,
+      directoryId: 'user#demo@example.com',
+      issueId: 'onboarding-friction',
+      teamId: 'core-team',
+    },
+  ])
+})
+
+test('loads project execution issues with legacy task compatibility', async () => {
+  const calls = configureFakeProjectClients(true, { taskAssigneeUserId: 'sato@example.com' })
+
+  const response = await app.request('/api/projects/refero/issues', {
+    headers: {
+      Authorization: 'Bearer test-token',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.json()
+  expect(body.projectId).toBe('refero')
+  expect(body.issues.map((issue: { id: string }) => issue.id)).toEqual([
+    'onboarding-friction',
+    'wireframe',
+  ])
+  expect(calls.projectIssueReads).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+  ])
+  expect(calls.taskReads).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+  ])
+})
+
 test('DynamoDB task client queries the scoped project partition across pages', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const documentClient = {
@@ -2258,7 +2588,13 @@ function createProjectMemberFixtureItems(
 
 function configureFakeProjectClients(
   hasProjectAccess: boolean,
-  options: { profileError?: Error; role?: ProjectRole; taskAssigneeUserId?: string } = {},
+  options: {
+    profileError?: Error
+    projectAccesses?: Array<{ projectId: string; role?: ProjectRole }>
+    role?: ProjectRole
+    taskAssigneeUserId?: string
+    teamProjects?: Array<{ id: string; name: string; tone: 'blue' | 'purple' | 'green' | 'yellow' }>
+  } = {},
 ) {
   const role = 'role' in options ? options.role : 'manager'
   const calls = {
@@ -2287,6 +2623,25 @@ function configureFakeProjectClients(
     }>,
     teamArchives: [] as Array<{ directoryId: string; teamId: string }>,
     teamCreates: [] as Array<{ directoryId: string; name: string }>,
+    issueComments: [] as Array<{ actorUserId: string; directoryId: string; issueId: string; teamId: string }>,
+    issueCreates: [] as Array<{
+      actorUserId: string
+      assignedProjectId?: unknown
+      directoryId: string
+      reservedIssueIds?: string[]
+      teamId: string
+      title: string
+    }>,
+    issueDetails: [] as Array<{ directoryId: string; issueId: string; teamId: string }>,
+    issueReads: [] as Array<{ directoryId: string; teamId: string }>,
+    issueUpdates: [] as Array<{
+      actorUserId: string
+      assignedProjectId?: unknown
+      directoryId: string
+      issueId: string
+      teamId: string
+    }>,
+    projectIssueReads: [] as Array<{ directoryId: string; projectId: string }>,
     taskCreates: [] as Array<{ directoryId: string; projectId: string; title: string }>,
     taskReads: [] as Array<{ directoryId: string; projectId: string }>,
     taskStatusUpdates: [] as Array<{
@@ -2365,7 +2720,7 @@ function configureFakeProjectClients(
               id: 'core-team',
               name: locale === 'en' ? 'Core Team' : 'コアチーム',
               expanded: true,
-              projects: [
+              projects: options.teamProjects ?? [
                 {
                   id: 'refero',
                   name: 'Refero',
@@ -2379,6 +2734,10 @@ function configureFakeProjectClients(
       async getProjectAccess(directoryId, projectId) {
         calls.accessChecks.push({ directoryId, projectId })
 
+        if (options.projectAccesses) {
+          return options.projectAccesses.find((access) => access.projectId === projectId)
+        }
+
         if (!hasProjectAccess) {
           return undefined
         }
@@ -2390,6 +2749,10 @@ function configureFakeProjectClients(
       },
       async getProjectAccessList(directoryId) {
         calls.accessChecks.push({ directoryId, projectId: '*' })
+
+        if (options.projectAccesses) {
+          return options.projectAccesses
+        }
 
         if (!hasProjectAccess) {
           return []
@@ -2409,6 +2772,10 @@ function configureFakeProjectClients(
       },
       async getProjectRole(directoryId, projectId, memberKey) {
         calls.roleChecks.push({ directoryId, projectId, memberKey })
+
+        if (options.projectAccesses) {
+          return options.projectAccesses.find((access) => access.projectId === projectId)?.role
+        }
 
         return role
       },
@@ -2548,6 +2915,168 @@ function configureFakeProjectClients(
             status: input.status === 'done' ? 'done' : 'todo',
             dueDate: '2026/06/03',
             priority: 'high',
+          },
+        }
+      },
+    },
+    teamIssues: {
+      async getTeamIssues(directoryId, teamId) {
+        calls.issueReads.push({ directoryId, teamId })
+
+        return {
+          teamId,
+          issues: [
+            {
+              id: 'onboarding-friction',
+              teamId,
+              assignedProjectId: 'refero',
+              title: '初回オンボーディングの離脱要因を減らす',
+              description: '初回体験の摩擦を下げる。',
+              assigneeUserId: 'sato@example.com',
+              status: 'in-progress',
+              dueDate: '2026/06/18',
+              priority: 'high',
+              createdAt: '2026-06-08T00:00:00.000Z',
+              updatedAt: '2026-06-08T00:00:00.000Z',
+            },
+          ],
+        }
+      },
+      async getProjectIssues(directoryId, projectId) {
+        calls.projectIssueReads.push({ directoryId, projectId })
+
+        return {
+          projectId,
+          issues: [
+            {
+              id: 'onboarding-friction',
+              teamId: 'core-team',
+              assignedProjectId: projectId,
+              title: '初回オンボーディングの離脱要因を減らす',
+              assigneeUserId: 'sato@example.com',
+              status: 'in-progress',
+              dueDate: '2026/06/18',
+              priority: 'high',
+              createdAt: '2026-06-08T00:00:00.000Z',
+              updatedAt: '2026-06-08T00:00:00.000Z',
+            },
+          ],
+        }
+      },
+      async getTeamIssueDetail(directoryId, teamId, issueId) {
+        calls.issueDetails.push({ directoryId, teamId, issueId })
+
+        if (issueId === 'wireframe') {
+          throw {
+            status: 404,
+            code: 'TeamIssueNotFound',
+            message: 'Issue was not found.',
+          }
+        }
+
+        return {
+          issue: {
+            id: issueId,
+            teamId,
+            assignedProjectId: 'refero',
+            title: '初回オンボーディングの離脱要因を減らす',
+            description: '初回体験の摩擦を下げる。',
+            assigneeUserId: 'sato@example.com',
+            status: 'in-progress',
+            dueDate: '2026/06/18',
+            priority: 'high',
+            createdAt: '2026-06-08T00:00:00.000Z',
+            updatedAt: '2026-06-08T00:00:00.000Z',
+          },
+          comments: [
+            {
+              id: 'comment-1',
+              actorUserId: 'demo@example.com',
+              body: '背景を確認します。',
+              createdAt: '2026-06-08T01:00:00.000Z',
+            },
+          ],
+          activity: [
+            {
+              id: 'activity-1',
+              type: 'created',
+              actorUserId: 'demo@example.com',
+              summary: 'Issue was created.',
+              createdAt: '2026-06-08T00:00:00.000Z',
+            },
+          ],
+        }
+      },
+      async createTeamIssue(directoryId, teamId, input, actorUserId, reservedIssueIds = []) {
+        calls.issueCreates.push({
+          actorUserId,
+          assignedProjectId: input.assignedProjectId,
+          directoryId,
+          reservedIssueIds,
+          teamId,
+          title: String(input.title),
+        })
+
+        return {
+          issue: {
+            id: 'new-issue',
+            teamId,
+            assignedProjectId: typeof input.assignedProjectId === 'string'
+              ? input.assignedProjectId
+              : undefined,
+            title: String(input.title),
+            description: typeof input.description === 'string' ? input.description : undefined,
+            assigneeUserId: String(input.assigneeUserId),
+            status: 'todo',
+            dueDate: String(input.dueDate),
+            priority: 'medium',
+            createdAt: '2026-06-08T00:00:00.000Z',
+            updatedAt: '2026-06-08T00:00:00.000Z',
+          },
+        }
+      },
+      async updateTeamIssue(directoryId, teamId, issueId, input, actorUserId) {
+        calls.issueUpdates.push({
+          actorUserId,
+          assignedProjectId: input.assignedProjectId,
+          directoryId,
+          issueId,
+          teamId,
+        })
+
+        return {
+          issue: {
+            id: issueId,
+            teamId,
+            assignedProjectId: typeof input.assignedProjectId === 'string'
+              ? input.assignedProjectId
+              : undefined,
+            title: typeof input.title === 'string' ? input.title : '初回オンボーディングの離脱要因を減らす',
+            assigneeUserId: typeof input.assigneeUserId === 'string' ? input.assigneeUserId : 'sato@example.com',
+            status: input.status === 'done' ? 'done' : 'in-progress',
+            dueDate: typeof input.dueDate === 'string' ? input.dueDate : '2026/06/18',
+            priority: input.priority === 'low' ? 'low' : 'high',
+            createdAt: '2026-06-08T00:00:00.000Z',
+            updatedAt: '2026-06-08T02:00:00.000Z',
+          },
+        }
+      },
+      async createTeamIssueComment(directoryId, teamId, issueId, input, actorUserId) {
+        calls.issueComments.push({ actorUserId, directoryId, issueId, teamId })
+
+        return {
+          comment: {
+            id: 'comment-2',
+            actorUserId,
+            body: String(input.body),
+            createdAt: '2026-06-08T02:00:00.000Z',
+          },
+          activity: {
+            id: 'activity-2',
+            type: 'commented',
+            actorUserId,
+            summary: 'Comment was added.',
+            createdAt: '2026-06-08T02:00:00.000Z',
           },
         }
       },

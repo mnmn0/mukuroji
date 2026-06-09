@@ -37,6 +37,62 @@ test('project task data store and lambda API are created', () => {
     ],
   });
 
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    BillingMode: 'PAY_PER_REQUEST',
+    KeySchema: [
+      {
+        AttributeName: 'directoryTeamId',
+        KeyType: 'HASH',
+      },
+      {
+        AttributeName: 'issueId',
+        KeyType: 'RANGE',
+      },
+    ],
+    GlobalSecondaryIndexes: Match.arrayWith([
+      Match.objectLike({
+        IndexName: 'TeamIssueSortOrderIndex',
+        KeySchema: [
+          {
+            AttributeName: 'directoryTeamId',
+            KeyType: 'HASH',
+          },
+          {
+            AttributeName: 'sortOrder',
+            KeyType: 'RANGE',
+          },
+        ],
+      }),
+      Match.objectLike({
+        IndexName: 'AssignedProjectIssueIndex',
+        KeySchema: [
+          {
+            AttributeName: 'directoryProjectId',
+            KeyType: 'HASH',
+          },
+          {
+            AttributeName: 'sortOrder',
+            KeyType: 'RANGE',
+          },
+        ],
+      }),
+    ]),
+  });
+
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    BillingMode: 'PAY_PER_REQUEST',
+    KeySchema: [
+      {
+        AttributeName: 'directoryTeamIssueId',
+        KeyType: 'HASH',
+      },
+      {
+        AttributeName: 'eventId',
+        KeyType: 'RANGE',
+      },
+    ],
+  });
+
   template.hasResourceProperties('AWS::Lambda::Function', {
     Environment: {
       Variables: {
@@ -51,6 +107,12 @@ test('project task data store and lambda API are created', () => {
         },
         SYSTEM_ADMIN_GROUPS: {
           Ref: 'SystemAdminGroups',
+        },
+        TEAM_ISSUE_EVENTS_TABLE_NAME: {
+          Ref: Match.stringLikeRegexp('TeamIssueEventsTable'),
+        },
+        TEAM_ISSUES_TABLE_NAME: {
+          Ref: Match.stringLikeRegexp('TeamIssuesTable'),
         },
       },
     },
@@ -69,6 +131,18 @@ test('project task data store and lambda API are created', () => {
           },
         ],
       },
+    },
+  });
+
+  template.hasOutput('TeamIssuesTableName', {
+    Value: {
+      Ref: Match.stringLikeRegexp('TeamIssuesTable'),
+    },
+  });
+
+  template.hasOutput('TeamIssueEventsTableName', {
+    Value: {
+      Ref: Match.stringLikeRegexp('TeamIssueEventsTable'),
     },
   });
 
@@ -148,8 +222,11 @@ test('project task data store and lambda API are created', () => {
   const lambdaCode = lambdaResource?.Properties?.Code?.ZipFile ?? '';
 
   expect(lambdaCode).toContain('(?:api\\/)?projects\\/([^/]+)\\/tasks');
+  expect(lambdaCode).toContain('(?:api\\/)?projects\\/([^/]+)\\/issues');
+  expect(lambdaCode).toContain('(?:api\\/)?teams\\/([^/]+)\\/issues');
   expect(lambdaCode).toContain('toProjectPrincipal');
   expect(lambdaCode).toContain('createDirectoryProjectId');
+  expect(lambdaCode).toContain('createDirectoryTeamId');
   expect(lambdaCode).toContain('createProjectMemberEntryKey');
   expect(lambdaCode).toContain('decodePathSegment');
   expect(lambdaCode).toContain('createUniqueResourceId');
@@ -167,13 +244,20 @@ test('project task data store and lambda API are created', () => {
   expect(lambdaCode).toContain('readProjectMemberParams');
   expect(lambdaCode).toContain('readProjectUsersProjectId');
   expect(lambdaCode).toContain('readProjectTaskStatusParams');
+  expect(lambdaCode).toContain('readTeamIssueListParams');
+  expect(lambdaCode).toContain('readTeamIssueCommentParams');
+  expect(lambdaCode).toContain('enforceTeamPermission');
   expect(lambdaCode).toContain('isExpectedCognitoIssuer');
   expect(lambdaCode).toContain('isCognitoUserInDirectory');
   expect(lambdaCode).toContain('AdminGetUserCommand');
   expect(lambdaCode).toContain('ListUsersCommand');
   expect(lambdaCode).toContain('hydrateProjectTasks');
+  expect(lambdaCode).toContain('hydrateTeamIssues');
   expect(lambdaCode).toContain('getUserProfile');
   expect(lambdaCode).toContain('async function updateProjectTaskStatus');
+  expect(lambdaCode).toContain('async function createTeamIssue');
+  expect(lambdaCode).toContain('async function updateTeamIssue');
+  expect(lambdaCode).toContain('async function createTeamIssueComment');
   expect(lambdaCode).toContain('async function updateProjectMember');
   expect(lambdaCode).toContain('async function removeProjectMember');
   expect(lambdaCode).toContain('SET #status = :status');
@@ -1286,6 +1370,8 @@ function createInlineLambda(
         COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
         PROJECT_DIRECTORY_TABLE_NAME: 'DirectoryTable',
         SYSTEM_ADMIN_GROUPS: 'mukuroji-system-admins',
+        TEAM_ISSUE_EVENTS_TABLE_NAME: 'TeamIssueEventsTable',
+        TEAM_ISSUES_TABLE_NAME: 'TeamIssuesTable',
         TASKS_TABLE_NAME: 'TasksTable',
       },
     },

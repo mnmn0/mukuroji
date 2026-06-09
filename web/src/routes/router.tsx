@@ -2,7 +2,9 @@ import { createBrowserRouter, Navigate } from 'react-router'
 import { LoginPage } from '../pages/LoginPage'
 import { PlaceholderPage } from '../pages/PlaceholderPage'
 import { TaskPage } from '../pages/TaskPage'
+import { TeamIssuePage } from '../pages/TeamIssuePage'
 import { WorkspacePage } from '../pages/WorkspacePage'
+import { ProjectTasksRedirect } from './ProjectTasksRedirect'
 
 /**
  * アプリケーション全体の画面ルーティング定義です。
@@ -45,12 +47,20 @@ export const router = createBrowserRouter([
     element: <WorkspacePage view="team-overview" />,
   },
   {
+    path: '/teams/:teamId/issues',
+    element: <TeamIssuePage />,
+  },
+  {
     path: '/teams/:teamId/members',
     element: <WorkspacePage view="team-members" />,
   },
   {
-    path: '/projects/:projectId/tasks',
+    path: '/projects/:projectId/issues',
     element: <TaskPage />,
+  },
+  {
+    path: '/projects/:projectId/tasks',
+    element: <ProjectTasksRedirect />,
   },
   {
     path: '/forgot-password',
