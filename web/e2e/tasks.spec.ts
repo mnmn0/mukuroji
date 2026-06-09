@@ -884,7 +884,15 @@ function findTeamIssue(
   return undefined
 }
 
+/**
+ * チーム Issue 作成フォームと詳細ペインが同じカラム内に収まっていることを検証します。
+ *
+ * @param page - レイアウト検証対象の Playwright page です。
+ */
 async function expectTeamIssueLayoutToStayInsideColumns(page: Page) {
+  await page.waitForSelector('[data-testid="create-issue-form"]', { state: 'visible' })
+  await page.waitForSelector('main > section aside', { state: 'visible' })
+
   const result = await page.evaluate(() => {
     const createForm = document.querySelector('[data-testid="create-issue-form"]')
     const detailPane = document.querySelector('main > section aside')
