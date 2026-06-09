@@ -21,6 +21,11 @@ import {
   type MessageKey,
 } from '../i18n'
 import {
+  getProjectIssues,
+  updateTeamIssue,
+  type TeamIssue,
+} from '../issues/api'
+import {
   archiveProjectDirectoryProject,
   archiveProjectDirectoryTeam,
   createProjectDirectoryProject,
@@ -36,7 +41,6 @@ import {
   workspaceNavPaths,
 } from '../routes/paths'
 import {
-  getProjectTasks,
   type ProjectTask,
   type TaskPriority,
   type TaskStatus,
@@ -386,7 +390,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
           updateWorkspaceTaskStatus(currentTasks, task, status, task.status),
         { revalidate: false },
       )
-      const updatedTask = await updateProjectTaskStatus(task.projectId, task.id, accessToken, status)
+      const updatedTask = await updateWorkspaceTaskRemote(task, accessToken, status)
       await mutateProjectTasks(
         (currentTasks = nextTasks) =>
           replaceWorkspaceTask(currentTasks, updatedTask),
@@ -1319,10 +1323,45 @@ async function loadProjectTasks(
   accessToken: string,
 ): Promise<ProjectTask[]> {
   const taskGroups = await Promise.all(
-    projectIds.map((projectId) => getProjectTasks(projectId, accessToken)),
+    projectIds.map(async (projectId) =>
+      (await getProjectIssues(projectId, accessToken))
+        .map((issue) => toWorkspaceTaskFromIssue(issue, projectId)),
+    ),
   )
 
   return taskGroups.flat()
+}
+
+async function updateWorkspaceTaskRemote(
+  task: ProjectTask,
+  accessToken: string,
+  status: TaskStatus,
+) {
+  if (task.teamId && task.source === 'dynamodb') {
+    return toWorkspaceTaskFromIssue(
+      await updateTeamIssue(task.teamId, task.id, accessToken, { status }),
+      task.projectId,
+    )
+  }
+
+  return updateProjectTaskStatus(task.projectId ?? '', task.id, accessToken, status)
+}
+
+function toWorkspaceTaskFromIssue(issue: TeamIssue, projectId?: string): ProjectTask {
+  return {
+    teamId: issue.teamId,
+    projectId,
+    source: issue.source,
+    id: issue.id,
+    titleKey: issue.titleKey,
+    title: issue.title,
+    assigneeUserId: issue.assigneeUserId,
+    assigneeEmail: issue.assigneeEmail,
+    assigneeName: issue.assigneeName,
+    status: issue.status,
+    dueDate: issue.dueDate,
+    priority: issue.priority,
+  }
 }
 
 function uniqueProjectIds(teams: ProjectDirectoryTeam[]) {

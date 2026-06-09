@@ -697,6 +697,10 @@ type TeamIssueResponseItem = {
    * 更新日時の ISO 8601 timestamp です。
    */
   updatedAt: string
+  /**
+   * Issue の保存元です。legacy は旧 project task table 由来の参照専用行です。
+   */
+  source: 'dynamodb' | 'legacy'
 }
 
 /**
@@ -2097,8 +2101,7 @@ app.post('/api/teams/:teamId/issues', async (c) => {
     requireAssignedProjectPermission(principal, context, body.assignedProjectId, 'member')
     const assigneeUserId = readTeamIssueAssigneeUserId(body)
     await cognito.getUserProfile(assigneeUserId)
-    const reservedIssueIds = (await readLegacyTeamIssues(principal.directoryId, context, principal))
-      .map((issue) => issue.id)
+    const reservedIssueIds = await readLegacyTeamIssueIds(principal.directoryId, context)
 
     return c.json(
       await hydrateCreateTeamIssueResponse(
@@ -2819,6 +2822,24 @@ async function readLegacyTeamIssue(
   return (await readLegacyTeamIssues(directoryId, context, principal)).find((issue) => issue.id === issueId)
 }
 
+async function readLegacyTeamIssueIds(
+  directoryId: string,
+  context: TeamPermissionContext,
+) {
+  const issueIds: string[] = []
+
+  for (const project of context.team.projects) {
+    if (findFirstProjectTeamId(context.directory.teams, project.id) !== context.team.id) {
+      continue
+    }
+
+    const response = await projectTasks.getProjectTasks(directoryId, project.id)
+    issueIds.push(...response.tasks.map((task) => task.id))
+  }
+
+  return issueIds
+}
+
 function mergeTeamIssues(
   primaryIssues: TeamIssueResponseItem[],
   fallbackIssues: TeamIssueResponseItem[],
@@ -2850,6 +2871,7 @@ function toLegacyTeamIssue(
     priority: task.priority,
     createdAt: '2026-06-01T00:00:00.000Z',
     updatedAt: '2026-06-01T00:00:00.000Z',
+    source: 'legacy',
   }
 }
 
@@ -3818,7 +3840,7 @@ export class DynamoDbTeamIssuesClient {
         }),
       )
       const issue = toTeamIssueResponseItem(
-        await this.getRequiredTeamIssueItem(directoryId, teamId, issueId),
+        await this.getRequiredTeamIssueItem(directoryId, teamId, issueId, true),
       )
 
       return {
@@ -3889,7 +3911,12 @@ export class DynamoDbTeamIssuesClient {
     }
   }
 
-  private async getRequiredTeamIssueItem(directoryId: string, teamId: string, issueId: string) {
+  private async getRequiredTeamIssueItem(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    consistentRead = false,
+  ) {
     const response = await this.documentClient.send(
       new GetCommand({
         TableName: this.issueTableName,
@@ -3897,6 +3924,7 @@ export class DynamoDbTeamIssuesClient {
           directoryTeamId: createDirectoryTeamId(directoryId, teamId),
           issueId,
         },
+        ConsistentRead: consistentRead,
       }),
     )
 
@@ -5300,6 +5328,7 @@ function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     priority: item.priority,
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
+    source: 'dynamodb',
   }
 
   if (item.assignedProjectId) {

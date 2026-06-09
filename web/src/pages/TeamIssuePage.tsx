@@ -704,7 +704,7 @@ function CreateIssuePanel({
   projects: ProjectDirectoryTeam['projects']
   t: (key: MessageKey) => string
 }) {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = formatLocalDateInputValue()
 
   return (
     <section className="mb-5 rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.06)]">
@@ -963,6 +963,9 @@ function IssueDetailPane({
     )
   }
 
+  const isLegacyIssue = issue.source === 'legacy'
+  const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === issue.assigneeUserId)
+
   return (
     <aside className="min-h-0 overflow-auto border-l border-slate-200 bg-white px-6 py-7 max-[1080px]:border-l-0 max-[1080px]:border-t">
       <form
@@ -970,76 +973,97 @@ function IssueDetailPane({
         key={issue.id}
         onSubmit={(event) => {
           event.preventDefault()
+
+          if (isLegacyIssue) {
+            return
+          }
+
           const formData = new FormData(event.currentTarget)
           const assignedProjectId = String(formData.get('assignedProjectId') ?? '').trim()
-
-          void onUpdateIssue?.(issue.id, {
+          const selectedAssigneeUserId = String(formData.get('assigneeUserId') ?? '').trim()
+          const nextIssueInput: UpdateTeamIssueInput = {
             assignedProjectId: assignedProjectId || null,
-            assigneeUserId: String(formData.get('assigneeUserId') ?? '').trim(),
             description: String(formData.get('description') ?? '').trim(),
             dueDate: String(formData.get('dueDate') ?? '').replaceAll('-', '/'),
             priority: resolveIssuePriority(formData.get('priority')),
             status: resolveIssueStatus(formData.get('status')),
             title: String(formData.get('title') ?? '').trim(),
-          })
+          }
+
+          if (assigneeOptions.some((member) => member.id === selectedAssigneeUserId)) {
+            nextIssueInput.assigneeUserId = selectedAssigneeUserId
+          }
+
+          void onUpdateIssue?.(issue.id, nextIssueInput)
         }}
       >
-        <label className="grid gap-2 text-sm font-black text-[#263550]">
-          {t('issues.column.title')}
-          <input className="rounded-lg border border-slate-300 px-3 py-2 text-xl font-black outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue={resolveIssueTitle(issue, t)} name="title" required />
-        </label>
-        <label className="grid gap-2 text-sm font-black text-[#263550]">
-          {t('issues.create.description')}
-          <textarea className="min-h-28 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue={issue.description} name="description" />
-        </label>
-        <div className="grid grid-cols-2 gap-3">
+        <fieldset className="contents" disabled={isLegacyIssue}>
           <label className="grid gap-2 text-sm font-black text-[#263550]">
-            {t('issues.create.project')}
-            <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue={issue.assignedProjectId ?? ''} name="assignedProjectId">
-              <option value="">{t('issues.project.unassigned')}</option>
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>{project.name}</option>
-              ))}
-            </select>
+            {t('issues.column.title')}
+            <input className="rounded-lg border border-slate-300 px-3 py-2 text-xl font-black outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={resolveIssueTitle(issue, t)} name="title" required />
           </label>
           <label className="grid gap-2 text-sm font-black text-[#263550]">
-            {t('issues.create.assignee')}
-            <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue={issue.assigneeUserId} name="assigneeUserId">
-              {assigneeOptions.map((member) => (
-                <option key={member.id} value={member.id}>{formatProjectMemberOption(member)}</option>
-              ))}
-            </select>
+            {t('issues.create.description')}
+            <textarea className="min-h-28 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.description} name="description" />
           </label>
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
-            {t('tasks.column.status')}
-            <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue={issue.status} name="status">
-              {issueStatuses.map((status) => (
-                <option key={status} value={status}>{t(`tasks.status.${status}`)}</option>
-              ))}
-            </select>
-          </label>
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
-            {t('tasks.column.priority')}
-            <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue={issue.priority} name="priority">
-              {issuePriorities.map((priority) => (
-                <option key={priority} value={priority}>{t(`tasks.priority.${priority}`)}</option>
-              ))}
-            </select>
-          </label>
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
-            {t('tasks.column.dueDate')}
-            <input className="h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue={issue.dueDate.replaceAll('/', '-')} name="dueDate" type="date" />
-          </label>
-        </div>
-        <button className="h-11 rounded-lg bg-blue-600 px-4 text-sm font-black text-white transition hover:bg-blue-500" type="submit">
+          <div className="grid grid-cols-2 gap-3">
+            <label className="grid gap-2 text-sm font-black text-[#263550]">
+              {t('issues.create.project')}
+              <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.assignedProjectId ?? ''} name="assignedProjectId">
+                <option value="">{t('issues.project.unassigned')}</option>
+                {projects.map((project) => (
+                  <option key={project.id} value={project.id}>{project.name}</option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-2 text-sm font-black text-[#263550]">
+              {t('issues.create.assignee')}
+              <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.assigneeUserId} name="assigneeUserId">
+                {!hasSelectedAssigneeOption ? (
+                  <option value={issue.assigneeUserId}>{resolveIssueAssignee(issue)}</option>
+                ) : null}
+                {assigneeOptions.map((member) => (
+                  <option key={member.id} value={member.id}>{formatProjectMemberOption(member)}</option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-2 text-sm font-black text-[#263550]">
+              {t('tasks.column.status')}
+              <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.status} name="status">
+                {issueStatuses.map((status) => (
+                  <option key={status} value={status}>{t(`tasks.status.${status}`)}</option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-2 text-sm font-black text-[#263550]">
+              {t('tasks.column.priority')}
+              <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.priority} name="priority">
+                {issuePriorities.map((priority) => (
+                  <option key={priority} value={priority}>{t(`tasks.priority.${priority}`)}</option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-2 text-sm font-black text-[#263550]">
+              {t('tasks.column.dueDate')}
+              <input className="h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.dueDate.replaceAll('/', '-')} name="dueDate" type="date" />
+            </label>
+          </div>
+        </fieldset>
+        <button className="h-11 rounded-lg bg-blue-600 px-4 text-sm font-black text-white transition hover:bg-blue-500 disabled:bg-slate-300" disabled={isLegacyIssue} type="submit">
           {t('issues.detail.save')}
         </button>
+        {isLegacyIssue ? <p className="text-sm font-bold text-[#526381]">{t('issues.detail.readOnlyLegacy')}</p> : null}
         {detailErrorMessage ? <p className="text-sm font-bold text-red-600">{detailErrorMessage}</p> : null}
       </form>
       <form
         className="mt-7 grid gap-3 border-t border-slate-200 pt-6"
         onSubmit={(event) => {
           event.preventDefault()
+
+          if (isLegacyIssue) {
+            return
+          }
+
           const form = event.currentTarget
           const formData = new FormData(form)
           const body = String(formData.get('body') ?? '').trim()
@@ -1054,9 +1078,9 @@ function IssueDetailPane({
       >
         <label className="grid gap-2 text-sm font-black text-[#263550]">
           {t('issues.comment.title')}
-          <textarea className="min-h-20 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" name="body" required />
+          <textarea className="min-h-20 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" disabled={isLegacyIssue} name="body" required />
         </label>
-        <button className="h-10 justify-self-start rounded-lg border border-slate-300 bg-white px-4 text-sm font-black text-[#263550] transition hover:border-blue-500 hover:text-blue-600" type="submit">
+        <button className="h-10 justify-self-start rounded-lg border border-slate-300 bg-white px-4 text-sm font-black text-[#263550] transition hover:border-blue-500 hover:text-blue-600 disabled:border-slate-200 disabled:text-slate-400" disabled={isLegacyIssue} type="submit">
           {t('issues.comment.submit')}
         </button>
       </form>
@@ -1104,6 +1128,14 @@ async function loadTeamProjectMembers(accessToken: string, projectIds: string[])
   }
 
   return Array.from(membersById.values())
+}
+
+function formatLocalDateInputValue(date = new Date()) {
+  const year = String(date.getFullYear())
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+
+  return `${year}-${month}-${day}`
 }
 
 function resolveIssueTitle(issue: TeamIssue, t: (key: MessageKey) => string) {

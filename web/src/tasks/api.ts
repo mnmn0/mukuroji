@@ -25,9 +25,17 @@ const taskPriorities = ['high', 'medium', 'low'] as const
  */
 export type ProjectTask = {
   /**
+   * team-owned Issue 由来の互換行で所属 team を識別する ID です。
+   */
+  teamId?: string
+  /**
    * 取得元プロジェクト ID です。API body の top-level projectId から補完されます。
    */
   projectId?: string
+  /**
+   * タスク互換行の保存元です。legacy は旧 project task table 由来です。
+   */
+  source?: 'dynamodb' | 'legacy'
   /**
    * プロジェクト内でタスクを識別する ID です。
    */

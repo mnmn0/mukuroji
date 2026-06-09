@@ -792,6 +792,7 @@ function toIssueFromTask(task: ProjectTask, teamId: string, assignedProjectId: s
     priority: task.priority,
     createdAt: '2026-06-08T00:00:00.000Z',
     updatedAt: '2026-06-08T00:00:00.000Z',
+    source: 'legacy',
   }
 }
 
@@ -915,6 +916,12 @@ test.describe('authenticated task page', () => {
     await expect(page).toHaveURL('/teams/core-team/issues')
     await expect(page.getByTestId('team-issues-heading')).toHaveText('コアチーム')
     await expect(page.getByTestId('issue-row-wireframe')).toBeVisible()
+
+    await page.getByTestId('issue-row-wireframe').click()
+    await expect(page.getByText('旧タスク由来の Issue は参照専用です。')).toBeVisible()
+    await expect(page.getByRole('button', { name: '変更を保存' })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'コメントを追加' })).toBeDisabled()
+    expect(requestCounts.issueUpdates).toBe(0)
 
     await page.getByRole('button', { name: '新規 Issue' }).click()
     const createIssueForm = page.getByTestId('create-issue-form')

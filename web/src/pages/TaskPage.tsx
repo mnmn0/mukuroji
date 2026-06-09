@@ -39,6 +39,7 @@ import {
 import {
   createTeamIssue,
   getProjectIssues,
+  TeamIssuesApiError,
   type TeamIssue,
 } from '../issues/api'
 import { ProjectPermissionsPanel } from '../projects/ProjectPermissionsPanel'
@@ -49,6 +50,7 @@ import {
 } from '../routes/paths'
 import {
   type CreateProjectTaskInput,
+  ProjectTasksApiError,
   type ProjectTask,
   type TaskPriority,
   type TaskStatus,
@@ -298,7 +300,9 @@ export function TaskPage() {
     ([, accessToken, currentProjectId]) =>
       getProjectIssues(currentProjectId, accessToken).then((issues) =>
         issues.map((issue) => toProjectTaskFromIssue(issue, currentProjectId)),
-      ),
+      ).catch((error: unknown) => {
+        throw normalizeProjectIssueError(error)
+      }),
     apiSWRConfig,
   )
   const projectMembersKey = accessToken && user && !currentUserError
@@ -867,7 +871,9 @@ function mergeProjectUsers(currentUsers: ProjectUser[], nextUsers: ProjectUser[]
 
 function toProjectTaskFromIssue(issue: TeamIssue, projectId: string): ProjectTask {
   return {
+    teamId: issue.teamId,
     projectId,
+    source: issue.source,
     id: issue.id,
     titleKey: issue.titleKey,
     title: issue.title,
@@ -878,6 +884,14 @@ function toProjectTaskFromIssue(issue: TeamIssue, projectId: string): ProjectTas
     dueDate: issue.dueDate,
     priority: issue.priority,
   }
+}
+
+function normalizeProjectIssueError(error: unknown) {
+  if (error instanceof TeamIssuesApiError && error.message === 'issues.error.loading') {
+    return new ProjectTasksApiError(error.status, 'tasks.error.loading')
+  }
+
+  return error
 }
 
 function TaskHeader({

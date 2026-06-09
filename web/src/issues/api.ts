@@ -66,6 +66,10 @@ export type TeamIssue = {
    * 更新日時の ISO 8601 timestamp です。
    */
   updatedAt: string
+  /**
+   * Issue の保存元です。legacy は旧 project task table 由来の参照専用行です。
+   */
+  source?: 'dynamodb' | 'legacy'
 }
 
 /**
@@ -431,7 +435,11 @@ async function readJson<T>(response: Response): Promise<T> {
     return {} as T
   }
 
-  return JSON.parse(text) as T
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    return { message: text } as T
+  }
 }
 
 function trimTrailingSlash(value: string) {

@@ -1367,12 +1367,12 @@ async function createTeamIssue(event, headers, directoryId, teamId, actorUserId,
     ScanIndexForward: true,
   });
   const now = new Date().toISOString();
-  const legacyIssues = await readLegacyTeamIssues(directoryId, directoryItems, teamId, principal);
+  const legacyIssueIds = await readLegacyTeamIssueIds(directoryId, directoryItems, teamId);
   const issueId = createUniqueResourceId(
     title,
     [
       ...currentItems.map((item) => item.issueId?.S).filter(Boolean),
-      ...legacyIssues.map((issue) => issue.id),
+      ...legacyIssueIds,
     ],
   );
   const item = {
@@ -1600,7 +1600,7 @@ async function updateTeamIssue(event, headers, directoryId, teamId, issueId, act
     throw error;
   }
 
-  const updatedIssue = await getStoredTeamIssueItem(directoryId, teamId, issueId);
+  const updatedIssue = await getStoredTeamIssueItem(directoryId, teamId, issueId, true);
 
   return json(200, {
     issue: await hydrateTeamIssue(toTeamIssue(updatedIssue), userPoolId),
@@ -1702,6 +1702,31 @@ async function readLegacyTeamIssues(directoryId, directoryItems, teamId, princip
   return issues;
 }
 
+async function readLegacyTeamIssueIds(directoryId, directoryItems, teamId) {
+  const issueIds = [];
+  const projects = directoryItems.filter((item) =>
+    item.entryType?.S === 'project' &&
+    item.teamId?.S === teamId &&
+    isActiveDirectoryItem(item) &&
+    findFirstActiveProjectTeamId(directoryItems, item.projectId?.S) === teamId
+  );
+
+  for (const project of projects) {
+    const items = await queryAll({
+      TableName: process.env.TASKS_TABLE_NAME,
+      IndexName: 'ProjectSortOrderIndex',
+      KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
+      ExpressionAttributeValues: {
+        ':directoryProjectId': { S: createDirectoryProjectId(directoryId, project.projectId.S) },
+      },
+      ScanIndexForward: true,
+    });
+    issueIds.push(...items.map((item) => item.taskId?.S).filter(Boolean));
+  }
+
+  return issueIds;
+}
+
 function mergeTeamIssues(primaryIssues, fallbackIssues) {
   const issueIds = new Set(primaryIssues.map((issue) => issue.id));
 
@@ -1711,7 +1736,7 @@ function mergeTeamIssues(primaryIssues, fallbackIssues) {
   ];
 }
 
-async function getStoredTeamIssueItem(directoryId, teamId, issueId) {
+async function getStoredTeamIssueItem(directoryId, teamId, issueId, consistentRead = false) {
   const items = await queryAll({
     TableName: process.env.TEAM_ISSUES_TABLE_NAME,
     KeyConditionExpression: 'directoryTeamId = :directoryTeamId AND issueId = :issueId',
@@ -1719,6 +1744,7 @@ async function getStoredTeamIssueItem(directoryId, teamId, issueId) {
       ':directoryTeamId': { S: createDirectoryTeamId(directoryId, teamId) },
       ':issueId': { S: issueId },
     },
+    ConsistentRead: consistentRead,
     Limit: 1,
   });
 
@@ -2751,6 +2777,7 @@ function toTeamIssue(item) {
     priority: item.priority.S,
     createdAt: item.createdAt.S,
     updatedAt: item.updatedAt.S,
+    source: 'dynamodb',
   };
 
   if (item.assignedProjectId?.S) {
@@ -2787,6 +2814,7 @@ function toLegacyTeamIssue(task, teamId, assignedProjectId) {
     priority: task.priority,
     createdAt: '2026-06-01T00:00:00.000Z',
     updatedAt: '2026-06-01T00:00:00.000Z',
+    source: 'legacy',
   };
 
   return Object.fromEntries(Object.entries(issue).filter(([, value]) => value !== undefined));
@@ -2906,7 +2934,11 @@ function projectRoleWeight(role) {
     listTasksFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
-        resources: [projectDirectoryTable.tableArn],
+        resources: [
+          projectDirectoryTable.tableArn,
+          teamIssuesTable.tableArn,
+          teamIssueEventsTable.tableArn,
+        ],
       }),
     );
 	    listTasksFunction.addToRolePolicy(
