@@ -884,6 +884,43 @@ function findTeamIssue(
   return undefined
 }
 
+async function expectTeamIssueLayoutToStayInsideColumns(page: Page) {
+  const result = await page.evaluate(() => {
+    const createForm = document.querySelector('[data-testid="create-issue-form"]')
+    const detailPane = document.querySelector('main > section aside')
+
+    if (!createForm || !detailPane) {
+      return {
+        detailOverflows: ['missing detail pane or create form'],
+        formOverflows: ['missing detail pane or create form'],
+      }
+    }
+
+    const detailRect = detailPane.getBoundingClientRect()
+    const formControls = Array.from(createForm.querySelectorAll('input, select, textarea, button'))
+    const detailControls = Array.from(detailPane.querySelectorAll('input, select, textarea, button'))
+    const formOverflows = formControls.flatMap((element) => {
+      const rect = element.getBoundingClientRect()
+
+      return rect.right > detailRect.left + 1
+        ? [`${element.tagName.toLowerCase()} ${Math.round(rect.right)} > ${Math.round(detailRect.left)}`]
+        : []
+    })
+    const detailOverflows = detailControls.flatMap((element) => {
+      const rect = element.getBoundingClientRect()
+
+      return rect.left < detailRect.left - 1 || rect.right > detailRect.right + 1
+        ? [`${element.tagName.toLowerCase()} ${Math.round(rect.left)}-${Math.round(rect.right)} outside ${Math.round(detailRect.left)}-${Math.round(detailRect.right)}`]
+        : []
+    })
+
+    return { detailOverflows, formOverflows }
+  })
+
+  expect(result.formOverflows).toEqual([])
+  expect(result.detailOverflows).toEqual([])
+}
+
 test.describe('authenticated task page', () => {
   test.beforeEach(async ({ page }) => {
     await mockAuthenticatedTaskPage(page)
@@ -978,6 +1015,9 @@ test.describe('authenticated task page', () => {
 
     await page.getByRole('button', { name: '新規 Issue' }).click()
     const createIssueForm = page.getByTestId('create-issue-form')
+    await expectTeamIssueLayoutToStayInsideColumns(page)
+    await page.setViewportSize({ width: 1800, height: 900 })
+    await expectTeamIssueLayoutToStayInsideColumns(page)
     await createIssueForm.locator('input[name="title"]').fill('割当待ち Issue')
     await createIssueForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
     await createIssueForm.getByRole('button', { name: 'Issue を作成' }).click()

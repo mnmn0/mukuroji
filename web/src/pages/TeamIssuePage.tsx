@@ -707,9 +707,9 @@ function CreateIssuePanel({
   const today = formatLocalDateInputValue()
 
   return (
-    <section className="mb-5 rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.06)]">
+    <section className="mb-5 min-w-0 rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.06)]">
       <form
-        className="grid gap-4"
+        className="grid min-w-0 gap-4"
         data-testid="create-issue-form"
         onSubmit={(event) => {
           event.preventDefault()
@@ -731,19 +731,19 @@ function CreateIssuePanel({
           })
         }}
       >
-        <div className="grid grid-cols-[minmax(220px,1.2fr)_minmax(180px,0.8fr)_minmax(180px,0.8fr)_140px_130px_130px] gap-3 max-[1240px]:grid-cols-2 max-[720px]:grid-cols-1">
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
+        <div className="grid grid-cols-1 gap-3 min-[1180px]:grid-cols-2">
+          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
             {t('issues.create.title')}
             <input
-              className="h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              className="h-11 w-full min-w-0 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
               name="title"
               placeholder={t('issues.create.titlePlaceholder')}
               required
             />
           </label>
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
             {t('issues.create.project')}
-            <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" name="assignedProjectId">
+            <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" name="assignedProjectId">
               <option value="">{t('issues.project.unassigned')}</option>
               {projects.map((project) => (
                 <option key={project.id} value={project.id}>
@@ -752,9 +752,9 @@ function CreateIssuePanel({
               ))}
             </select>
           </label>
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
             {t('issues.create.assignee')}
-            <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" name="assigneeUserId" required>
+            <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" name="assigneeUserId" required>
               <option disabled hidden value="">
                 {t('tasks.create.assigneeSelectPlaceholder')}
               </option>
@@ -765,13 +765,13 @@ function CreateIssuePanel({
               ))}
             </select>
           </label>
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
             {t('tasks.column.dueDate')}
-            <input className="h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue={today} name="dueDate" required type="date" />
+            <input className="h-11 w-full min-w-0 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue={today} name="dueDate" required type="date" />
           </label>
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
             {t('tasks.column.status')}
-            <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue="todo" name="status">
+            <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue="todo" name="status">
               {issueStatuses.map((status) => (
                 <option key={status} value={status}>
                   {t(`tasks.status.${status}`)}
@@ -779,9 +779,9 @@ function CreateIssuePanel({
               ))}
             </select>
           </label>
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
             {t('tasks.column.priority')}
-            <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue="medium" name="priority">
+            <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue="medium" name="priority">
               {issuePriorities.map((priority) => (
                 <option key={priority} value={priority}>
                   {t(`tasks.priority.${priority}`)}
@@ -790,10 +790,10 @@ function CreateIssuePanel({
             </select>
           </label>
         </div>
-        <label className="grid gap-2 text-sm font-black text-[#263550]">
+        <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
           {t('issues.create.description')}
           <textarea
-            className="min-h-20 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+            className="min-h-20 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
             name="description"
             placeholder={t('issues.create.descriptionPlaceholder')}
           />
@@ -890,7 +890,7 @@ function IssueBoard({
   t: (key: MessageKey) => string
 }) {
   return (
-    <section className="mt-5 grid grid-cols-4 gap-4 max-[1220px]:grid-cols-2 max-[720px]:grid-cols-1">
+    <section className="mt-5 grid grid-cols-1 gap-4 min-[1280px]:grid-cols-2 min-[1900px]:grid-cols-4">
       {issueStatuses.map((status) => {
         const columnIssues = issues.filter((issue) => issue.status === status)
 
@@ -957,7 +957,7 @@ function IssueDetailPane({
 }) {
   if (!issue) {
     return (
-      <aside className="border-l border-slate-200 bg-white px-6 py-7 max-[1080px]:border-l-0 max-[1080px]:border-t">
+      <aside className="min-w-0 border-l border-slate-200 bg-white px-6 py-7 max-[1080px]:border-l-0 max-[1080px]:border-t">
         <p className="text-sm font-bold text-[#526381]">{t('issues.detail.empty')}</p>
       </aside>
     )
@@ -967,9 +967,9 @@ function IssueDetailPane({
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === issue.assigneeUserId)
 
   return (
-    <aside className="min-h-0 overflow-auto border-l border-slate-200 bg-white px-6 py-7 max-[1080px]:border-l-0 max-[1080px]:border-t">
+    <aside className="min-h-0 min-w-0 overflow-auto border-l border-slate-200 bg-white px-6 py-7 max-[1080px]:border-l-0 max-[1080px]:border-t">
       <form
-        className="grid gap-4"
+        className="grid min-w-0 gap-4"
         key={issue.id}
         onSubmit={(event) => {
           event.preventDefault()
@@ -998,27 +998,27 @@ function IssueDetailPane({
         }}
       >
         <fieldset className="contents" disabled={isLegacyIssue}>
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
             {t('issues.column.title')}
-            <input className="rounded-lg border border-slate-300 px-3 py-2 text-xl font-black outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={resolveIssueTitle(issue, t)} name="title" required />
+            <input className="w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-xl font-black outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={resolveIssueTitle(issue, t)} name="title" required />
           </label>
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
             {t('issues.create.description')}
-            <textarea className="min-h-28 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.description} name="description" />
+            <textarea className="min-h-28 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.description} name="description" />
           </label>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="grid gap-2 text-sm font-black text-[#263550]">
+          <div className="grid grid-cols-1 gap-3">
+            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
               {t('issues.create.project')}
-              <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.assignedProjectId ?? ''} name="assignedProjectId">
+              <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.assignedProjectId ?? ''} name="assignedProjectId">
                 <option value="">{t('issues.project.unassigned')}</option>
                 {projects.map((project) => (
                   <option key={project.id} value={project.id}>{project.name}</option>
                 ))}
               </select>
             </label>
-            <label className="grid gap-2 text-sm font-black text-[#263550]">
+            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
               {t('issues.create.assignee')}
-              <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.assigneeUserId} name="assigneeUserId">
+              <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.assigneeUserId} name="assigneeUserId">
                 {!hasSelectedAssigneeOption ? (
                   <option value={issue.assigneeUserId}>{resolveIssueAssignee(issue)}</option>
                 ) : null}
@@ -1027,25 +1027,25 @@ function IssueDetailPane({
                 ))}
               </select>
             </label>
-            <label className="grid gap-2 text-sm font-black text-[#263550]">
+            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
               {t('tasks.column.status')}
-              <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.status} name="status">
+              <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.status} name="status">
                 {issueStatuses.map((status) => (
                   <option key={status} value={status}>{t(`tasks.status.${status}`)}</option>
                 ))}
               </select>
             </label>
-            <label className="grid gap-2 text-sm font-black text-[#263550]">
+            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
               {t('tasks.column.priority')}
-              <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.priority} name="priority">
+              <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.priority} name="priority">
                 {issuePriorities.map((priority) => (
                   <option key={priority} value={priority}>{t(`tasks.priority.${priority}`)}</option>
                 ))}
               </select>
             </label>
-            <label className="grid gap-2 text-sm font-black text-[#263550]">
+            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
               {t('tasks.column.dueDate')}
-              <input className="h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.dueDate.replaceAll('/', '-')} name="dueDate" type="date" />
+              <input className="h-11 w-full min-w-0 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.dueDate.replaceAll('/', '-')} name="dueDate" type="date" />
             </label>
           </div>
         </fieldset>
@@ -1076,9 +1076,9 @@ function IssueDetailPane({
           void onCreateComment?.(issue.id, body).then(() => form.reset())
         }}
       >
-        <label className="grid gap-2 text-sm font-black text-[#263550]">
+        <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
           {t('issues.comment.title')}
-          <textarea className="min-h-20 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" disabled={isLegacyIssue} name="body" required />
+          <textarea className="min-h-20 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" disabled={isLegacyIssue} name="body" required />
         </label>
         <button className="h-10 justify-self-start rounded-lg border border-slate-300 bg-white px-4 text-sm font-black text-[#263550] transition hover:border-blue-500 hover:text-blue-600 disabled:border-slate-200 disabled:text-slate-400" disabled={isLegacyIssue} type="submit">
           {t('issues.comment.submit')}
