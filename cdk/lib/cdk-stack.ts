@@ -617,24 +617,35 @@ async function createProject(event, headers, directoryId, teamId, creatorUserKey
     updatedAt: { S: updatedAt },
   };
 
-  await dynamodb.send(new TransactWriteItemsCommand({
-    TransactItems: [
-      {
-        Put: {
-          TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-          Item: item,
-          ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+  try {
+    await dynamodb.send(new TransactWriteItemsCommand({
+      TransactItems: [
+        {
+          ConditionCheck: createActiveTeamConditionCheck(directoryId, team.entryKey.S),
         },
-      },
-      {
-        Put: {
-          TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-          Item: creatorMemberItem,
-          ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+        {
+          Put: {
+            TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+            Item: item,
+            ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+          },
         },
-      },
-    ],
-  }));
+        {
+          Put: {
+            TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+            Item: creatorMemberItem,
+            ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+          },
+        },
+      ],
+    }));
+  } catch (error) {
+    if (error?.name === 'TransactionCanceledException') {
+      return await handleCreateProjectTransactionCancellation(headers, directoryId, teamId, error);
+    }
+
+    throw error;
+  }
 
   return json(201, {
     project: {
@@ -771,14 +782,14 @@ async function archiveProject(headers, directoryId, teamId, projectId) {
 	  return json(200, { projectId, members: await hydrateProjectMembers(members, userPoolId) }, headers);
 	}
 
-	async function updateProjectMember(event, headers, directoryId, projectId, memberKey, userPoolId) {
-	  const body = readJsonBody(event);
-	  const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
+async function updateProjectMember(event, headers, directoryId, projectId, memberKey, userPoolId) {
+  const body = readJsonBody(event);
+  const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
 
-	  if (!normalizedMemberKey) {
-	    return json(400, { message: 'Project member email is required.' }, headers);
-	  }
-	  const profile = await getUserProfile(userPoolId, normalizedMemberKey);
+  if (!normalizedMemberKey) {
+    return json(400, { message: 'Project member email is required.' }, headers);
+  }
+  const profile = await getUserProfile(userPoolId, normalizedMemberKey);
 
   if (!isProjectRole(body.role)) {
     return json(400, { message: 'Project role is invalid.' }, headers);
@@ -792,66 +803,72 @@ async function archiveProject(headers, directoryId, teamId, projectId) {
     },
     ScanIndexForward: true,
   });
-	  const existingMember = existingMembers.find((item) =>
-	    item.entryType?.S === 'project-member' &&
-	    item.projectId?.S === projectId &&
-	    item.memberKey?.S === normalizedMemberKey
-	  );
-	  if (
-	    existingMember?.role?.S === 'manager' &&
-	    body.role !== 'manager' &&
-	    !findOtherProjectManager(existingMembers, projectId, normalizedMemberKey)
-	  ) {
-	    return json(409, { message: 'At least one project manager is required.' }, headers);
-	  }
-	  const guardManager = existingMember?.role?.S === 'manager' && body.role !== 'manager'
-	    ? findOtherProjectManager(existingMembers, projectId, normalizedMemberKey)
-	    : undefined;
-	  const updatedAt = new Date().toISOString();
-	  const item = {
+  const existingMember = existingMembers.find((item) =>
+    item.entryType?.S === 'project-member' &&
+    item.projectId?.S === projectId &&
+    item.memberKey?.S === normalizedMemberKey
+  );
+  if (
+    existingMember?.role?.S === 'manager' &&
+    body.role !== 'manager' &&
+    !findOtherProjectManager(existingMembers, projectId, normalizedMemberKey)
+  ) {
+    return json(409, { message: 'At least one project manager is required.' }, headers);
+  }
+  const guardManager = existingMember?.role?.S === 'manager' && body.role !== 'manager'
+    ? findOtherProjectManager(existingMembers, projectId, normalizedMemberKey)
+    : undefined;
+  const updatedAt = new Date().toISOString();
+  const item = {
     directoryId: { S: directoryId },
     entryKey: { S: createProjectMemberEntryKey(projectId, normalizedMemberKey) },
-	    entryType: { S: 'project-member' },
-	    projectId: { S: projectId },
-	    memberKey: { S: normalizedMemberKey },
-	    email: { S: profile.email },
-	    role: { S: body.role },
-	    createdAt: { S: existingMember?.createdAt?.S ?? updatedAt },
-	    updatedAt: { S: updatedAt },
-	    ...(profile.name ? { name: { S: profile.name } } : {}),
-	  };
+    entryType: { S: 'project-member' },
+    projectId: { S: projectId },
+    memberKey: { S: normalizedMemberKey },
+    email: { S: profile.email },
+    role: { S: body.role },
+    createdAt: { S: existingMember?.createdAt?.S ?? updatedAt },
+    updatedAt: { S: updatedAt },
+    ...(profile.name ? { name: { S: profile.name } } : {}),
+  };
 
-	  if (guardManager) {
-	    try {
-	      await dynamodb.send(new TransactWriteItemsCommand({
-	        TransactItems: [
-	          {
-	            ConditionCheck: createProjectManagerConditionCheck(directoryId, guardManager.entryKey.S),
-	          },
-	          {
-	            Put: {
-	              TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-	              Item: item,
-	            },
-	          },
-	        ],
-	      }));
-	    } catch (error) {
-	      if (error?.name === 'TransactionCanceledException') {
-	        return json(409, { message: 'At least one project manager is required.' }, headers);
-	      }
+  if (guardManager) {
+    try {
+      await dynamodb.send(new TransactWriteItemsCommand({
+        TransactItems: [
+          {
+            ConditionCheck: createProjectManagerConditionCheck(directoryId, guardManager.entryKey.S),
+          },
+          {
+            Put: {
+              TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+              Item: item,
+            },
+          },
+        ],
+      }));
+    } catch (error) {
+      if (error?.name === 'TransactionCanceledException') {
+        return await handleProjectMemberTransactionCancellation(
+          headers,
+          directoryId,
+          projectId,
+          normalizedMemberKey,
+          error,
+        );
+      }
 
-	      throw error;
-	    }
-	  } else {
-	    await dynamodb.send(new PutItemCommand({
-	      TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-	      Item: item,
-	    }));
-	  }
+      throw error;
+    }
+  } else {
+    await dynamodb.send(new PutItemCommand({
+      TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+      Item: item,
+    }));
+  }
 
-	  return json(200, { member: await hydrateProjectMember(toProjectMember(item), userPoolId) }, headers);
-	}
+  return json(200, { member: await hydrateProjectMember(toProjectMember(item), userPoolId) }, headers);
+}
 
 async function removeProjectMember(headers, directoryId, projectId, memberKey) {
   const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
@@ -873,59 +890,65 @@ async function removeProjectMember(headers, directoryId, projectId, memberKey) {
     item.memberKey?.S === normalizedMemberKey
   );
 
-	  if (!member) {
-	    return json(404, { message: 'Project member was not found.' }, headers);
-	  }
+  if (!member) {
+    return json(404, { message: 'Project member was not found.' }, headers);
+  }
 
-	  if (
-	    member.role?.S === 'manager' &&
-	    !findOtherProjectManager(items, projectId, normalizedMemberKey)
-	  ) {
-	    return json(409, { message: 'At least one project manager is required.' }, headers);
-	  }
-	  const guardManager = member.role?.S === 'manager'
-	    ? findOtherProjectManager(items, projectId, normalizedMemberKey)
-	    : undefined;
+  if (
+    member.role?.S === 'manager' &&
+    !findOtherProjectManager(items, projectId, normalizedMemberKey)
+  ) {
+    return json(409, { message: 'At least one project manager is required.' }, headers);
+  }
+  const guardManager = member.role?.S === 'manager'
+    ? findOtherProjectManager(items, projectId, normalizedMemberKey)
+    : undefined;
 
-	  if (guardManager) {
-	    try {
-	      await dynamodb.send(new TransactWriteItemsCommand({
-	        TransactItems: [
-	          {
-	            ConditionCheck: createProjectManagerConditionCheck(directoryId, guardManager.entryKey.S),
-	          },
-	          {
-	            Delete: {
-	              TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-	              Key: {
-	                directoryId: { S: directoryId },
-	                entryKey: { S: member.entryKey.S },
-	              },
-	              ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
-	            },
-	          },
-	        ],
-	      }));
-	    } catch (error) {
-	      if (error?.name === 'TransactionCanceledException') {
-	        return json(409, { message: 'At least one project manager is required.' }, headers);
-	      }
+  if (guardManager) {
+    try {
+      await dynamodb.send(new TransactWriteItemsCommand({
+        TransactItems: [
+          {
+            ConditionCheck: createProjectManagerConditionCheck(directoryId, guardManager.entryKey.S),
+          },
+          {
+            Delete: {
+              TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+              Key: {
+                directoryId: { S: directoryId },
+                entryKey: { S: member.entryKey.S },
+              },
+              ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
+            },
+          },
+        ],
+      }));
+    } catch (error) {
+      if (error?.name === 'TransactionCanceledException') {
+        return await handleProjectMemberTransactionCancellation(
+          headers,
+          directoryId,
+          projectId,
+          normalizedMemberKey,
+          error,
+        );
+      }
 
-	      throw error;
-	    }
-	  } else {
-	    await dynamodb.send(new DeleteItemCommand({
-	      TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-	      Key: {
-	        directoryId: { S: directoryId },
-	        entryKey: { S: member.entryKey.S },
-	      },
-	      ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
-	    }));
-	  }
+      throw error;
+    }
+  } else {
+    await dynamodb.send(new DeleteItemCommand({
+      TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+      Key: {
+        directoryId: { S: directoryId },
+        entryKey: { S: member.entryKey.S },
+      },
+      ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
+    }));
+  }
 
-	  return json(200, { projectId, memberId: normalizedMemberKey }, headers);
-	}
+  return json(200, { projectId, memberId: normalizedMemberKey }, headers);
+}
 
 	function findOtherProjectManager(items, projectId, memberKey) {
 	  return items.find((item) =>
@@ -935,6 +958,86 @@ async function removeProjectMember(headers, directoryId, projectId, memberKey) {
 	      item.role?.S === 'manager'
 	    );
 	}
+
+async function handleCreateProjectTransactionCancellation(headers, directoryId, teamId, originalError) {
+  const items = await queryAll({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    KeyConditionExpression: 'directoryId = :directoryId',
+    ExpressionAttributeValues: {
+      ':directoryId': { S: directoryId },
+    },
+    ScanIndexForward: true,
+  });
+  const activeTeam = items.find((item) =>
+    item.entryType?.S === 'team' &&
+    item.teamId?.S === teamId &&
+    isActiveDirectoryItem(item)
+  );
+
+  if (!activeTeam) {
+    return json(404, { message: 'Team was not found.' }, headers);
+  }
+
+  throw originalError;
+}
+
+async function handleProjectMemberTransactionCancellation(headers, directoryId, projectId, memberKey, originalError) {
+  const items = await queryAll({
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    KeyConditionExpression: 'directoryId = :directoryId',
+    ExpressionAttributeValues: {
+      ':directoryId': { S: directoryId },
+    },
+    ScanIndexForward: true,
+  });
+
+  if (!hasActiveProject(items, projectId)) {
+    return json(404, { message: 'Project was not found.' }, headers);
+  }
+
+  const member = items.find((item) =>
+    item.entryType?.S === 'project-member' &&
+    item.projectId?.S === projectId &&
+    item.memberKey?.S === memberKey
+  );
+
+  if (!member) {
+    return json(404, { message: 'Project member was not found.' }, headers);
+  }
+
+  if (member.role?.S === 'manager' && !findOtherProjectManager(items, projectId, memberKey)) {
+    return json(409, { message: 'At least one project manager is required.' }, headers);
+  }
+
+  throw originalError;
+}
+
+function hasActiveProject(items, projectId) {
+  const activeTeamIds = new Set(
+    items
+      .filter((item) => item.entryType?.S === 'team' && isActiveDirectoryItem(item))
+      .map((item) => item.teamId?.S)
+      .filter(Boolean)
+  );
+
+  return items.some((item) =>
+    item.entryType?.S === 'project' &&
+    item.projectId?.S === projectId &&
+    activeTeamIds.has(item.teamId?.S) &&
+    isActiveDirectoryItem(item)
+  );
+}
+
+function createActiveTeamConditionCheck(directoryId, entryKey) {
+  return {
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    Key: {
+      directoryId: { S: directoryId },
+      entryKey: { S: entryKey },
+    },
+    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+  };
+}
 
 	function createProjectManagerConditionCheck(directoryId, entryKey) {
 	  return {

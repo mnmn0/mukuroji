@@ -2713,7 +2713,12 @@ export class DynamoDbProjectDirectoryClient {
           )
         } catch (error) {
           if (isAwsNamedError(error, 'TransactionCanceledException')) {
-            throw this.createProjectLastManagerError()
+            await this.throwProjectManagerTransactionCancellationResult(
+              directoryId,
+              projectId,
+              normalizedMemberKey,
+              error,
+            )
           }
 
           throw error
@@ -2789,7 +2794,12 @@ export class DynamoDbProjectDirectoryClient {
           )
         } catch (error) {
           if (isAwsNamedError(error, 'TransactionCanceledException')) {
-            throw this.createProjectLastManagerError()
+            await this.throwProjectManagerTransactionCancellationResult(
+              directoryId,
+              projectId,
+              normalizedMemberKey,
+              error,
+            )
           }
 
           throw error
@@ -2942,26 +2952,37 @@ export class DynamoDbProjectDirectoryClient {
         updatedAt,
       }
 
-      await this.documentClient.send(
-        new TransactWriteCommand({
-          TransactItems: [
-            {
-              Put: {
-                TableName: this.tableName,
-                Item: item,
-                ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+      try {
+        await this.documentClient.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              {
+                ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey),
               },
-            },
-            {
-              Put: {
-                TableName: this.tableName,
-                Item: creatorMemberItem,
-                ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+              {
+                Put: {
+                  TableName: this.tableName,
+                  Item: item,
+                  ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+                },
               },
-            },
-          ],
-        }),
-      )
+              {
+                Put: {
+                  TableName: this.tableName,
+                  Item: creatorMemberItem,
+                  ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+                },
+              },
+            ],
+          }),
+        )
+      } catch (error) {
+        if (isAwsNamedError(error, 'TransactionCanceledException')) {
+          await this.throwCreateProjectTransactionCancellationResult(directoryId, teamId, error)
+        }
+
+        throw error
+      }
 
       return {
         project: {
@@ -3133,18 +3154,97 @@ export class DynamoDbProjectDirectoryClient {
     projectId: string,
     memberKey: string,
   ) {
-    const manager = items.find((item) =>
-        item.entryType === 'project-member' &&
-        item.projectId === projectId &&
-        item.memberKey !== memberKey &&
-        item.role === 'manager',
-    )
+    const manager = this.findAnotherProjectManager(items, projectId, memberKey)
 
     if (!manager) {
       throw this.createProjectLastManagerError()
     }
 
     return manager
+  }
+
+  /**
+   * 対象 member 以外に残る manager item を検索します。
+   */
+  private findAnotherProjectManager(
+    items: ProjectDirectoryItem[],
+    projectId: string,
+    memberKey: string,
+  ) {
+    return items.find((item) =>
+      item.entryType === 'project-member' &&
+      item.projectId === projectId &&
+      item.memberKey !== memberKey &&
+      item.role === 'manager',
+    )
+  }
+
+  /**
+   * project 作成 transaction 失敗後の最新状態から team archive と重複を切り分けます。
+   */
+  private async throwCreateProjectTransactionCancellationResult(
+    directoryId: string,
+    teamId: string,
+    originalError: unknown,
+  ): Promise<never> {
+    const items = await this.readValidDirectoryItems(directoryId)
+    const activeTeam = items.find((item) =>
+      item.entryType === 'team' &&
+      item.teamId === teamId &&
+      isActiveDirectoryItem(item),
+    )
+
+    if (!activeTeam) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+
+    throw originalError
+  }
+
+  /**
+   * project member transaction 失敗後の最新状態から 404 と last-manager conflict を切り分けます。
+   */
+  private async throwProjectManagerTransactionCancellationResult(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+    originalError: unknown,
+  ): Promise<never> {
+    const items = await this.readValidDirectoryItems(directoryId)
+    this.requireActiveProject(items, projectId)
+    const member = items.find((item) =>
+      item.entryType === 'project-member' &&
+      item.projectId === projectId &&
+      item.memberKey === memberKey,
+    )
+
+    if (!member) {
+      throw new ProjectDataError(
+        404,
+        'ProjectMemberNotFound',
+        `Project member "${memberKey}" was not found in project "${projectId}".`,
+      )
+    }
+
+    if (member.role === 'manager' && !this.findAnotherProjectManager(items, projectId, memberKey)) {
+      throw this.createProjectLastManagerError()
+    }
+
+    throw originalError
+  }
+
+  /**
+   * project 作成時点でも team が active であることを検証する condition check を作ります。
+   */
+  private createActiveTeamConditionCheck(directoryId: string, entryKey: string) {
+    return {
+      TableName: this.tableName,
+      Key: {
+        directoryId,
+        entryKey,
+      },
+      ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+    }
   }
 
   /**
