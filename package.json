@@ -24,6 +24,7 @@
     "floci:deploy-backend": "sh floci/deploy-backend.sh",
     "tasks:seed-dynamodb": "bash scripts/seed-project-tasks-dynamodb.sh",
     "tasks:check-dynamodb": "bash scripts/check-project-tasks-dynamodb.sh",
+    "issues:check-dynamodb": "bash scripts/check-team-issues-dynamodb.sh",
     "cdk:build": "bun --filter cdk build",
     "cdk:test": "bun --filter cdk test",
     "cdk:synth": "bun --filter cdk cdk synth"

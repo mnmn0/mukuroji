@@ -21,6 +21,13 @@ export function createProjectTasksPath(projectId: string, teamId: string) {
 }
 
 /**
+ * プロジェクトの Issue 遂行画面 URL を生成します。
+ */
+export function createProjectIssuesPath(projectId: string, teamId: string) {
+  return `/projects/${encodeURIComponent(projectId)}/issues?teamId=${encodeURIComponent(teamId)}`
+}
+
+/**
  * チーム配下の固定ビュー URL を生成します。
  */
 export function createTeamViewPath(teamId: string, viewId: SidebarTeamViewId) {

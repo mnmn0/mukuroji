@@ -21,6 +21,11 @@ import {
   type MessageKey,
 } from '../i18n'
 import {
+  getProjectIssues,
+  updateTeamIssue,
+  type TeamIssue,
+} from '../issues/api'
+import {
   archiveProjectDirectoryProject,
   archiveProjectDirectoryTeam,
   createProjectDirectoryProject,
@@ -31,12 +36,11 @@ import {
   type ProjectDirectoryTeam,
 } from '../projects/api'
 import {
-  createProjectTasksPath,
+  createProjectIssuesPath,
   createTeamViewPath,
   workspaceNavPaths,
 } from '../routes/paths'
 import {
-  getProjectTasks,
   type ProjectTask,
   type TaskPriority,
   type TaskStatus,
@@ -367,7 +371,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   }
 
   const handleMoveTaskStatus = async (task: ProjectTask, status: TaskStatus) => {
-    if (!accessToken || !task.projectId || task.status === status) {
+    if (!accessToken || !task.projectId || task.status === status || isLegacyWorkspaceTask(task)) {
       return
     }
 
@@ -386,7 +390,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
           updateWorkspaceTaskStatus(currentTasks, task, status, task.status),
         { revalidate: false },
       )
-      const updatedTask = await updateProjectTaskStatus(task.projectId, task.id, accessToken, status)
+      const updatedTask = await updateWorkspaceTaskRemote(task, accessToken, status)
       await mutateProjectTasks(
         (currentTasks = nextTasks) =>
           replaceWorkspaceTask(currentTasks, updatedTask),
@@ -415,7 +419,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       onLogout={handleLogout}
       onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
       onSelectProject={(projectId, teamId) =>
-        navigate(createProjectTasksPath(projectId, teamId))
+        navigate(createProjectIssuesPath(projectId, teamId))
       }
       onSelectTeamView={(teamId, viewId) =>
         navigate(createTeamViewPath(teamId, viewId))
@@ -705,7 +709,7 @@ function MyTasksView({
   const canMoveTasks = Boolean(onMoveTaskStatus)
 
   const moveTaskToStatus = (task: ProjectTask, status: TaskStatus) => {
-    if (!onMoveTaskStatus || task.status === status) {
+    if (!onMoveTaskStatus || task.status === status || isLegacyWorkspaceTask(task)) {
       return
     }
 
@@ -727,7 +731,7 @@ function MyTasksView({
   }
 
   const handleDragStart = (event: DragEvent<HTMLElement>, task: ProjectTask) => {
-    if (!canMoveTasks) {
+    if (!canMoveTasks || isLegacyWorkspaceTask(task)) {
       return
     }
 
@@ -814,10 +818,11 @@ function MyTasksView({
                 {columnTasks.map((task) => {
                   const taskKey = createWorkspaceTaskKey(task)
                   const isMoving = movingTaskKeys.has(taskKey)
+                  const isLegacyTask = isLegacyWorkspaceTask(task)
 
                   return (
                     <CompactTaskCard
-                      draggable={canMoveTasks && !isMoving}
+                      draggable={canMoveTasks && !isMoving && !isLegacyTask}
                       isDragging={draggedTaskKey === taskKey}
                       isMoving={isMoving}
                       key={taskKey}
@@ -826,7 +831,7 @@ function MyTasksView({
                       testId={`my-tasks-card-${createWorkspaceTaskTestId(task)}`}
                       onDragEnd={handleDragEnd}
                       onDragStart={(event) => handleDragStart(event, task)}
-                      onStatusChange={(nextStatus) => moveTaskToStatus(task, nextStatus)}
+                      onStatusChange={isLegacyTask ? undefined : (nextStatus) => moveTaskToStatus(task, nextStatus)}
                     />
                   )
                 })}
@@ -1319,10 +1324,53 @@ async function loadProjectTasks(
   accessToken: string,
 ): Promise<ProjectTask[]> {
   const taskGroups = await Promise.all(
-    projectIds.map((projectId) => getProjectTasks(projectId, accessToken)),
+    projectIds.map(async (projectId) =>
+      (await getProjectIssues(projectId, accessToken))
+        .map((issue) => toWorkspaceTaskFromIssue(issue, projectId)),
+    ),
   )
 
   return taskGroups.flat()
+}
+
+async function updateWorkspaceTaskRemote(
+  task: ProjectTask,
+  accessToken: string,
+  status: TaskStatus,
+) {
+  if (isLegacyWorkspaceTask(task)) {
+    return task
+  }
+
+  if (task.teamId && task.source === 'dynamodb') {
+    return toWorkspaceTaskFromIssue(
+      await updateTeamIssue(task.teamId, task.id, accessToken, { status }),
+      task.projectId,
+    )
+  }
+
+  return updateProjectTaskStatus(task.projectId ?? '', task.id, accessToken, status)
+}
+
+function isLegacyWorkspaceTask(task: ProjectTask) {
+  return task.source === 'legacy'
+}
+
+function toWorkspaceTaskFromIssue(issue: TeamIssue, projectId?: string): ProjectTask {
+  return {
+    teamId: issue.teamId,
+    projectId,
+    source: issue.source,
+    id: issue.id,
+    titleKey: issue.titleKey,
+    title: issue.title,
+    assigneeUserId: issue.assigneeUserId,
+    assigneeEmail: issue.assigneeEmail,
+    assigneeName: issue.assigneeName,
+    status: issue.status,
+    dueDate: issue.dueDate,
+    priority: issue.priority,
+  }
 }
 
 function uniqueProjectIds(teams: ProjectDirectoryTeam[]) {

@@ -37,6 +37,62 @@ test('project task data store and lambda API are created', () => {
     ],
   });
 
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    BillingMode: 'PAY_PER_REQUEST',
+    KeySchema: [
+      {
+        AttributeName: 'directoryTeamId',
+        KeyType: 'HASH',
+      },
+      {
+        AttributeName: 'issueId',
+        KeyType: 'RANGE',
+      },
+    ],
+    GlobalSecondaryIndexes: Match.arrayWith([
+      Match.objectLike({
+        IndexName: 'TeamIssueSortOrderIndex',
+        KeySchema: [
+          {
+            AttributeName: 'directoryTeamId',
+            KeyType: 'HASH',
+          },
+          {
+            AttributeName: 'sortOrder',
+            KeyType: 'RANGE',
+          },
+        ],
+      }),
+      Match.objectLike({
+        IndexName: 'AssignedProjectIssueIndex',
+        KeySchema: [
+          {
+            AttributeName: 'directoryProjectId',
+            KeyType: 'HASH',
+          },
+          {
+            AttributeName: 'sortOrder',
+            KeyType: 'RANGE',
+          },
+        ],
+      }),
+    ]),
+  });
+
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    BillingMode: 'PAY_PER_REQUEST',
+    KeySchema: [
+      {
+        AttributeName: 'directoryTeamIssueId',
+        KeyType: 'HASH',
+      },
+      {
+        AttributeName: 'eventId',
+        KeyType: 'RANGE',
+      },
+    ],
+  });
+
   template.hasResourceProperties('AWS::Lambda::Function', {
     Environment: {
       Variables: {
@@ -51,6 +107,12 @@ test('project task data store and lambda API are created', () => {
         },
         SYSTEM_ADMIN_GROUPS: {
           Ref: 'SystemAdminGroups',
+        },
+        TEAM_ISSUE_EVENTS_TABLE_NAME: {
+          Ref: Match.stringLikeRegexp('TeamIssueEventsTable'),
+        },
+        TEAM_ISSUES_TABLE_NAME: {
+          Ref: Match.stringLikeRegexp('TeamIssuesTable'),
         },
       },
     },
@@ -69,6 +131,18 @@ test('project task data store and lambda API are created', () => {
           },
         ],
       },
+    },
+  });
+
+  template.hasOutput('TeamIssuesTableName', {
+    Value: {
+      Ref: Match.stringLikeRegexp('TeamIssuesTable'),
+    },
+  });
+
+  template.hasOutput('TeamIssueEventsTableName', {
+    Value: {
+      Ref: Match.stringLikeRegexp('TeamIssueEventsTable'),
     },
   });
 
@@ -148,8 +222,11 @@ test('project task data store and lambda API are created', () => {
   const lambdaCode = lambdaResource?.Properties?.Code?.ZipFile ?? '';
 
   expect(lambdaCode).toContain('(?:api\\/)?projects\\/([^/]+)\\/tasks');
+  expect(lambdaCode).toContain('(?:api\\/)?projects\\/([^/]+)\\/issues');
+  expect(lambdaCode).toContain('(?:api\\/)?teams\\/([^/]+)\\/issues');
   expect(lambdaCode).toContain('toProjectPrincipal');
   expect(lambdaCode).toContain('createDirectoryProjectId');
+  expect(lambdaCode).toContain('createDirectoryTeamId');
   expect(lambdaCode).toContain('createProjectMemberEntryKey');
   expect(lambdaCode).toContain('decodePathSegment');
   expect(lambdaCode).toContain('createUniqueResourceId');
@@ -167,13 +244,20 @@ test('project task data store and lambda API are created', () => {
   expect(lambdaCode).toContain('readProjectMemberParams');
   expect(lambdaCode).toContain('readProjectUsersProjectId');
   expect(lambdaCode).toContain('readProjectTaskStatusParams');
+  expect(lambdaCode).toContain('readTeamIssueListParams');
+  expect(lambdaCode).toContain('readTeamIssueCommentParams');
+  expect(lambdaCode).toContain('enforceTeamPermission');
   expect(lambdaCode).toContain('isExpectedCognitoIssuer');
   expect(lambdaCode).toContain('isCognitoUserInDirectory');
   expect(lambdaCode).toContain('AdminGetUserCommand');
   expect(lambdaCode).toContain('ListUsersCommand');
   expect(lambdaCode).toContain('hydrateProjectTasks');
+  expect(lambdaCode).toContain('hydrateTeamIssues');
   expect(lambdaCode).toContain('getUserProfile');
   expect(lambdaCode).toContain('async function updateProjectTaskStatus');
+  expect(lambdaCode).toContain('async function createTeamIssue');
+  expect(lambdaCode).toContain('async function updateTeamIssue');
+  expect(lambdaCode).toContain('async function createTeamIssueComment');
   expect(lambdaCode).toContain('async function updateProjectMember');
   expect(lambdaCode).toContain('async function removeProjectMember');
   expect(lambdaCode).toContain('SET #status = :status');
@@ -182,7 +266,7 @@ test('project task data store and lambda API are created', () => {
   expect(lambdaCode).toContain("'GET,POST,PATCH,DELETE,OPTIONS'");
 });
 
-test('inline lambda updates a task status with a conditional update', async () => {
+test('inline lambda rejects legacy task status updates', async () => {
   const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
   const lambda = createInlineLambda(async (command) => {
     commandInputs.push({
@@ -190,7 +274,7 @@ test('inline lambda updates a task status with a conditional update', async () =
       input: command.input,
     });
 
-    if (command.constructor.name === 'QueryCommand') {
+    if (command.constructor.name === 'QueryCommand' && command.input.TableName === 'DirectoryTable') {
       return {
         Items: [
           {
@@ -230,20 +314,22 @@ test('inline lambda updates a task status with a conditional update', async () =
       };
     }
 
-    if (command.constructor.name === 'UpdateItemCommand') {
+    if (command.constructor.name === 'QueryCommand' && command.input.TableName === 'TasksTable') {
       return {
-        Attributes: {
-          directoryId: { S: 'user#demo@example.com' },
-          directoryProjectId: { S: 'user#demo@example.com#project#refero' },
-          projectId: { S: 'refero' },
-          taskId: { S: 'wireframe' },
-          sortOrder: { N: '10' },
-          titleKey: { S: 'tasks.item.wireframe' },
-          assigneeKey: { S: 'tasks.assignee.sato' },
-          status: { S: 'done' },
-          dueDate: { S: '2026/06/03' },
-          priority: { S: 'high' },
-        },
+        Items: [
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            directoryProjectId: { S: 'user#demo@example.com#project#refero' },
+            projectId: { S: 'refero' },
+            taskId: { S: 'wireframe' },
+            sortOrder: { N: '10' },
+            titleKey: { S: 'tasks.item.wireframe' },
+            assigneeKey: { S: 'tasks.assignee.sato' },
+            status: { S: 'todo' },
+            dueDate: { S: '2026/06/03' },
+            priority: { S: 'high' },
+          },
+        ],
       };
     }
 
@@ -255,37 +341,22 @@ test('inline lambda updates a task status with a conditional update', async () =
     body: JSON.stringify({ status: 'done' }),
   });
 
-  expect(response.statusCode).toBe(200);
-  expect(JSON.parse(response.body)).toEqual({
-    task: {
-      id: 'wireframe',
-      titleKey: 'tasks.item.wireframe',
-      assigneeKey: 'tasks.assignee.sato',
-      status: 'done',
-      dueDate: '2026/06/03',
-      priority: 'high',
-    },
-  });
-  expect(commandInputs).toHaveLength(2);
-  expect(commandInputs[1]).toEqual({
-    commandName: 'UpdateItemCommand',
+  expect(response.statusCode).toBe(409);
+  expect(JSON.parse(response.body)).toEqual({ message: 'Legacy task issues are read-only.' });
+  expect(commandInputs).toHaveLength(3);
+  expect(commandInputs[2]).toEqual({
+    commandName: 'QueryCommand',
     input: {
       TableName: 'TasksTable',
-      Key: {
-        directoryProjectId: { S: 'user#demo@example.com#project#refero' },
-        taskId: { S: 'wireframe' },
-      },
-      UpdateExpression: 'SET #status = :status',
-      ExpressionAttributeNames: {
-        '#status': 'status',
-      },
+      KeyConditionExpression: 'directoryProjectId = :directoryProjectId AND taskId = :taskId',
       ExpressionAttributeValues: {
-        ':status': { S: 'done' },
+        ':directoryProjectId': { S: 'user#demo@example.com#project#refero' },
+        ':taskId': { S: 'wireframe' },
       },
-      ConditionExpression: 'attribute_exists(directoryProjectId) AND attribute_exists(taskId)',
-      ReturnValues: 'ALL_NEW',
+      Limit: 1,
     },
   });
+  expect(commandInputs.some((input) => input.commandName === 'UpdateItemCommand')).toBe(false);
 });
 
 test('inline lambda creates a project and grants the creator manager role', async () => {
@@ -1286,6 +1357,8 @@ function createInlineLambda(
         COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
         PROJECT_DIRECTORY_TABLE_NAME: 'DirectoryTable',
         SYSTEM_ADMIN_GROUPS: 'mukuroji-system-admins',
+        TEAM_ISSUE_EVENTS_TABLE_NAME: 'TeamIssueEventsTable',
+        TEAM_ISSUES_TABLE_NAME: 'TeamIssuesTable',
         TASKS_TABLE_NAME: 'TasksTable',
       },
     },

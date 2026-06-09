@@ -19,7 +19,7 @@ import {
   getProjectDirectory,
   type ProjectDirectoryTeam,
 } from '../projects/api'
-import { createProjectTasksPath } from '../routes/paths'
+import { createProjectIssuesPath } from '../routes/paths'
 
 /**
  * ダッシュボード上の小さな指標カードに渡す表示値です。
@@ -164,7 +164,7 @@ export function DashboardPage({
         inboxCount={summary?.blocked ?? 0}
         labels={sidebarLabels}
         onSelectProject={(projectId, teamId) =>
-          navigate(createProjectTasksPath(projectId, teamId))
+          navigate(createProjectIssuesPath(projectId, teamId))
         }
         teams={teams}
       />
