@@ -37,7 +37,7 @@ bun run oxc:lint
 bun run oxc:lint:github
 ```
 
-`oxc:lint:github` は GitHub Actions の annotation 向けです。CI や oxlint 設定を変更した場合は、ローカルでは通常 `bun run oxc:lint` を確認してください。
+`oxc:lint:github` は GitHub Actions の annotation 向けです。CI / oxlint 設定を変更した場合は、ローカルでは通常 `bun run oxc:lint` を確認してください。
 
 ## Web
 
