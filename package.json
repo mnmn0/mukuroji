@@ -10,6 +10,8 @@
   "scripts": {
     "floci:up": "docker compose up -d floci",
     "floci:down": "docker compose down",
+    "oxc:lint": "oxlint .",
+    "oxc:lint:github": "oxlint . --format=github",
     "web:dev": "bun --filter web dev",
     "web:lint": "bun --filter web lint",
     "web:build": "bun --filter web build",
@@ -27,6 +29,7 @@
     "cdk:synth": "bun --filter cdk cdk synth"
   },
   "devDependencies": {
-    "@playwright/test": "^1.60.0"
+    "@playwright/test": "^1.60.0",
+    "oxlint": "^1.69.0"
   }
 }

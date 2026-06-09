@@ -26,6 +26,19 @@
 bun install
 ```
 
+## 静的解析
+
+Oxc / oxlint はリポジトリルートで設定します。
+
+主なコマンド:
+
+```sh
+bun run oxc:lint
+bun run oxc:lint:github
+```
+
+`oxc:lint:github` は GitHub Actions の annotation 向けです。CI / oxlint 設定を変更した場合は、ローカルでは通常 `bun run oxc:lint` を確認してください。
+
 ## Web
 
 `web/` は React 19, React Router, Tailwind CSS, Storybook を使います。
@@ -87,6 +100,7 @@ bun run cdk:synth
 作業内容に応じて必要な検証を実行し、結果をユーザーに伝えてください。
 
 - `web` の UI/Storybook 変更: `bun run web:lint`, `bun run web:build`, `bun run web:build-storybook`
+- CI / oxlint 設定の変更: `bun run oxc:lint`
 - `cdk` の変更: `bun run cdk:build`, `bun run cdk:test`
 - `server` の変更: 利用可能なスクリプトと変更内容に応じて確認
 
