@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": [
+    "cdk.out/**",
+    "coverage/**",
+    "dist/**",
+    "node_modules/**",
+    "storybook-static/**",
+    "web/dist/**",
+    "web/storybook-static/**"
+  ]
+}

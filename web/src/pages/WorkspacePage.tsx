@@ -1454,7 +1454,7 @@ function resolvePortfolioRiskKey(tasks: ProjectTask[]): MessageKey {
     return 'workspace.risk.watch'
   }
 
-  if (tasks.length === 0 || tasks.every((task) => task.status === 'done')) {
+  if (tasks.every((task) => task.status === 'done')) {
     return 'workspace.risk.low'
   }
 

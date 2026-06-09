@@ -1552,7 +1552,7 @@ app.patch('/api/projects/:projectId/members/:memberKey', async (c) => {
           projectId,
           profile.id,
           {
-            ...(body ?? {}),
+            ...body,
             email: profile.email,
             name: profile.name,
           },
@@ -1633,7 +1633,7 @@ app.post('/api/projects/:projectId/tasks', async (c) => {
           principal.directoryId,
           projectId,
           {
-            ...(body ?? {}),
+            ...body,
             assigneeUserId,
           },
         ),
