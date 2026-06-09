@@ -964,7 +964,7 @@ test('creates a project task after project access is confirmed', async () => {
   expect(calls.userProfiles).toEqual(['sato@example.com', 'sato@example.com'])
 })
 
-test('updates a project task status after project access is confirmed', async () => {
+test('rejects legacy project task status updates through the compatibility endpoint', async () => {
   const calls = configureFakeProjectClients(true)
 
   const response = await app.request('/api/projects/refero/tasks/wireframe', {
@@ -978,28 +978,17 @@ test('updates a project task status after project access is confirmed', async ()
     }),
   })
 
-  expect(response.status).toBe(200)
+  expect(response.status).toBe(409)
   expect(await response.json()).toEqual({
-    task: {
-      id: 'wireframe',
-      titleKey: 'tasks.item.wireframe',
-      assigneeKey: 'tasks.assignee.sato',
-      status: 'done',
-      dueDate: '2026/06/03',
-      priority: 'high',
-    },
+    message: 'Legacy task issues are read-only.',
   })
   expect(calls.accessChecks).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
-  expect(calls.taskStatusUpdates).toEqual([
-    {
-      directoryId: 'user#demo@example.com',
-      projectId: 'refero',
-      status: 'done',
-      taskId: 'wireframe',
-    },
+  expect(calls.taskReads).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
+  expect(calls.taskStatusUpdates).toEqual([])
 })
 
 test('loads team-owned issues with legacy project tasks after team access is confirmed', async () => {

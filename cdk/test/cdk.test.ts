@@ -266,7 +266,7 @@ test('project task data store and lambda API are created', () => {
   expect(lambdaCode).toContain("'GET,POST,PATCH,DELETE,OPTIONS'");
 });
 
-test('inline lambda updates a task status with a conditional update', async () => {
+test('inline lambda rejects legacy task status updates', async () => {
   const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
   const lambda = createInlineLambda(async (command) => {
     commandInputs.push({
@@ -274,7 +274,7 @@ test('inline lambda updates a task status with a conditional update', async () =
       input: command.input,
     });
 
-    if (command.constructor.name === 'QueryCommand') {
+    if (command.constructor.name === 'QueryCommand' && command.input.TableName === 'DirectoryTable') {
       return {
         Items: [
           {
@@ -314,20 +314,22 @@ test('inline lambda updates a task status with a conditional update', async () =
       };
     }
 
-    if (command.constructor.name === 'UpdateItemCommand') {
+    if (command.constructor.name === 'QueryCommand' && command.input.TableName === 'TasksTable') {
       return {
-        Attributes: {
-          directoryId: { S: 'user#demo@example.com' },
-          directoryProjectId: { S: 'user#demo@example.com#project#refero' },
-          projectId: { S: 'refero' },
-          taskId: { S: 'wireframe' },
-          sortOrder: { N: '10' },
-          titleKey: { S: 'tasks.item.wireframe' },
-          assigneeKey: { S: 'tasks.assignee.sato' },
-          status: { S: 'done' },
-          dueDate: { S: '2026/06/03' },
-          priority: { S: 'high' },
-        },
+        Items: [
+          {
+            directoryId: { S: 'user#demo@example.com' },
+            directoryProjectId: { S: 'user#demo@example.com#project#refero' },
+            projectId: { S: 'refero' },
+            taskId: { S: 'wireframe' },
+            sortOrder: { N: '10' },
+            titleKey: { S: 'tasks.item.wireframe' },
+            assigneeKey: { S: 'tasks.assignee.sato' },
+            status: { S: 'todo' },
+            dueDate: { S: '2026/06/03' },
+            priority: { S: 'high' },
+          },
+        ],
       };
     }
 
@@ -339,37 +341,22 @@ test('inline lambda updates a task status with a conditional update', async () =
     body: JSON.stringify({ status: 'done' }),
   });
 
-  expect(response.statusCode).toBe(200);
-  expect(JSON.parse(response.body)).toEqual({
-    task: {
-      id: 'wireframe',
-      titleKey: 'tasks.item.wireframe',
-      assigneeKey: 'tasks.assignee.sato',
-      status: 'done',
-      dueDate: '2026/06/03',
-      priority: 'high',
-    },
-  });
-  expect(commandInputs).toHaveLength(2);
-  expect(commandInputs[1]).toEqual({
-    commandName: 'UpdateItemCommand',
+  expect(response.statusCode).toBe(409);
+  expect(JSON.parse(response.body)).toEqual({ message: 'Legacy task issues are read-only.' });
+  expect(commandInputs).toHaveLength(3);
+  expect(commandInputs[2]).toEqual({
+    commandName: 'QueryCommand',
     input: {
       TableName: 'TasksTable',
-      Key: {
-        directoryProjectId: { S: 'user#demo@example.com#project#refero' },
-        taskId: { S: 'wireframe' },
-      },
-      UpdateExpression: 'SET #status = :status',
-      ExpressionAttributeNames: {
-        '#status': 'status',
-      },
+      KeyConditionExpression: 'directoryProjectId = :directoryProjectId AND taskId = :taskId',
       ExpressionAttributeValues: {
-        ':status': { S: 'done' },
+        ':directoryProjectId': { S: 'user#demo@example.com#project#refero' },
+        ':taskId': { S: 'wireframe' },
       },
-      ConditionExpression: 'attribute_exists(directoryProjectId) AND attribute_exists(taskId)',
-      ReturnValues: 'ALL_NEW',
+      Limit: 1,
     },
   });
+  expect(commandInputs.some((input) => input.commandName === 'UpdateItemCommand')).toBe(false);
 });
 
 test('inline lambda creates a project and grants the creator manager role', async () => {

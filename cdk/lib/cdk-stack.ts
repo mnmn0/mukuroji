@@ -1274,6 +1274,10 @@ function createActiveTeamConditionCheck(directoryId, entryKey) {
     return json(400, { message: 'Task status is invalid.' }, headers);
   }
 
+  if (await isLegacyProjectTaskIssue(directoryId, projectId, taskId)) {
+    return json(409, { message: 'Legacy task issues are read-only.' }, headers);
+  }
+
   const directoryProjectId = createDirectoryProjectId(directoryId, projectId);
   let response;
 
@@ -1725,6 +1729,26 @@ async function readLegacyTeamIssueIds(directoryId, directoryItems, teamId) {
   }
 
   return issueIds;
+}
+
+async function isLegacyProjectTaskIssue(directoryId, projectId, taskId) {
+  const directoryItems = await readDirectoryItems(directoryId);
+
+  if (!findFirstActiveProjectTeamId(directoryItems, projectId)) {
+    return false;
+  }
+
+  const items = await queryAll({
+    TableName: process.env.TASKS_TABLE_NAME,
+    KeyConditionExpression: 'directoryProjectId = :directoryProjectId AND taskId = :taskId',
+    ExpressionAttributeValues: {
+      ':directoryProjectId': { S: createDirectoryProjectId(directoryId, projectId) },
+      ':taskId': { S: taskId },
+    },
+    Limit: 1,
+  });
+
+  return items.length > 0;
 }
 
 function mergeTeamIssues(primaryIssues, fallbackIssues) {

@@ -2377,6 +2377,11 @@ app.patch('/api/projects/:projectId/tasks/:taskId', async (c) => {
     await requireProjectPermission(principal, projectId, 'member')
 
     const body = await readJson<UpdateProjectTaskStatusRequestBody>(c.req)
+    readRequiredTaskStatus(body?.status)
+
+    if (await isLegacyProjectTaskIssue(principal.directoryId, projectId, taskId)) {
+      return c.json({ message: 'Legacy task issues are read-only.' }, 409)
+    }
 
     return c.json(
       await hydrateProjectTaskUpdateResponse(
@@ -2838,6 +2843,22 @@ async function readLegacyTeamIssueIds(
   }
 
   return issueIds
+}
+
+async function isLegacyProjectTaskIssue(
+  directoryId: string,
+  projectId: string,
+  taskId: string,
+) {
+  const directory = await projectDirectory.getProjectDirectory(directoryId, 'ja')
+
+  if (!findFirstProjectTeamId(directory.teams, projectId)) {
+    return false
+  }
+
+  const response = await projectTasks.getProjectTasks(directoryId, projectId)
+
+  return response.tasks.some((task) => task.id === taskId)
 }
 
 function mergeTeamIssues(

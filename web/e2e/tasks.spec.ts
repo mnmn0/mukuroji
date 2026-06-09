@@ -86,6 +86,16 @@ type MockRequestCounts = {
 const mockRequestCountsByPage = new WeakMap<Page, MockRequestCounts>()
 
 /**
+ * 認証済みタスク画面 mock の追加設定です。
+ */
+type MockAuthenticatedTaskPageOptions = {
+  /**
+   * チーム Issue API が初期状態として返す保存済み Issue 一覧です。
+   */
+  teamIssuesByTeam?: Partial<Record<string, TeamIssue[]>>
+}
+
+/**
  * 認証済みタスク画面を開くため、localStorage に session を注入し、
  * `/api/auth/me` と `/api/projects/refero/tasks` を stub します。
  */
@@ -96,6 +106,7 @@ async function mockAuthenticatedTaskPage(
     taskId: string,
     status: ProjectTask['status'],
   ) => Promise<'fail' | undefined> | 'fail' | undefined,
+  options: MockAuthenticatedTaskPageOptions = {},
 ) {
   const requestCounts: MockRequestCounts = {
     projectDirectory: 0,
@@ -126,8 +137,8 @@ async function mockAuthenticatedTaskPage(
     'shared-launch': [],
   }
   const teamIssuesByTeam: Record<string, TeamIssue[]> = {
-    'core-team': [],
-    'design-team': [],
+    'core-team': [...(options.teamIssuesByTeam?.['core-team'] ?? [])],
+    'design-team': [...(options.teamIssuesByTeam?.['design-team'] ?? [])],
   }
   const issueCommentsByIssue: Record<string, TeamIssueComment[]> = {}
   const issueActivityByIssue: Record<string, TeamIssueActivity[]> = {}
@@ -463,6 +474,7 @@ async function mockAuthenticatedTaskPage(
         priority: body.priority ?? 'medium',
         createdAt: '2026-06-08T00:00:00.000Z',
         updatedAt: '2026-06-08T00:00:00.000Z',
+        source: 'dynamodb',
       } satisfies TeamIssue
 
       teamIssuesByTeam[teamId] = [...(teamIssuesByTeam[teamId] ?? []), issue]
@@ -511,9 +523,33 @@ async function mockAuthenticatedTaskPage(
 
     if (route.request().method() === 'PATCH') {
       requestCounts.issueUpdates += 1
+      if (issue.source === 'legacy') {
+        await route.fulfill({
+          status: 409,
+          json: {
+            message: 'Legacy task issues are read-only.',
+          },
+        })
+        return
+      }
+
       const body = route.request().postDataJSON() as Partial<TeamIssue> & {
         assignedProjectId?: string | null
       }
+      const updateResult = body.status
+        ? await onTaskStatusUpdate?.(issueId, body.status)
+        : undefined
+
+      if (updateResult === 'fail') {
+        await route.fulfill({
+          status: 500,
+          json: {
+            message: 'issues.error.update',
+          },
+        })
+        return
+      }
+
       const updatedIssue = {
         ...issue,
         ...body,
@@ -796,6 +832,23 @@ function toIssueFromTask(task: ProjectTask, teamId: string, assignedProjectId: s
   }
 }
 
+function createStoredTeamIssue(overrides: Partial<TeamIssue> & Pick<TeamIssue, 'id' | 'status' | 'title'>): TeamIssue {
+  return {
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    description: 'My Tasks の移動操作を検証する Issue です。',
+    assigneeUserId: 'sato@example.com',
+    assigneeEmail: 'sato@example.com',
+    assigneeName: '佐藤 花子',
+    dueDate: '2026/06/22',
+    priority: 'medium',
+    createdAt: '2026-06-08T00:00:00.000Z',
+    updatedAt: '2026-06-08T00:00:00.000Z',
+    source: 'dynamodb',
+    ...overrides,
+  }
+}
+
 function createIssueId(title: string) {
   return title
     .trim()
@@ -975,27 +1028,19 @@ test.describe('authenticated task page', () => {
       page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-competitor-report'),
     ).toBeVisible()
 
-    await page
-      .getByTestId('my-tasks-card-refero-brand-guideline-status-select')
-      .selectOption('todo')
     await expect(
-      page.getByTestId('my-tasks-column-todo').getByTestId('my-tasks-card-refero-brand-guideline'),
-    ).toBeVisible()
-    await expect(
-      page.getByTestId('my-tasks-column-review').getByTestId('my-tasks-card-refero-brand-guideline'),
+      page.getByTestId('my-tasks-card-refero-brand-guideline-status-select'),
     ).toHaveCount(0)
-
-    await page
-      .getByTestId('my-tasks-card-refero-wireframe')
-      .dragTo(page.getByTestId('my-tasks-column-done'))
+    const legacyWireframeCard = page.getByTestId('my-tasks-card-refero-wireframe')
 
     await expect(
-      page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-wireframe'),
-    ).toBeVisible()
+      page.getByTestId('my-tasks-card-refero-wireframe-status-select'),
+    ).toHaveCount(0)
+    await expect(legacyWireframeCard).toHaveAttribute('draggable', 'false')
     await expect(
       page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
-    ).toHaveCount(0)
-    await expect.poll(() => requestCounts.taskStatusUpdates).toBe(2)
+    ).toBeVisible()
+    expect(requestCounts.taskStatusUpdates).toBe(0)
   })
 
   test('プロジェクト画面の権限タブでメンバーのロールを変更できる', async ({ page }) => {
@@ -1218,95 +1263,124 @@ test.describe('authenticated task page', () => {
   })
 })
 
-test('マイタスクの片方の移動が失敗しても別タスクの成功済み移動を維持する', async ({ page }) => {
-  let markWireframeUpdateStarted!: () => void
-  let releaseWireframeFailure!: () => void
-  const wireframeUpdateStarted = new Promise<void>((resolve) => {
-    markWireframeUpdateStarted = resolve
+test('マイタスクの片方の移動が失敗しても別 Issue の成功済み移動を維持する', async ({ page }) => {
+  let markOnboardingUpdateStarted!: () => void
+  let releaseOnboardingFailure!: () => void
+  const onboardingUpdateStarted = new Promise<void>((resolve) => {
+    markOnboardingUpdateStarted = resolve
   })
-  const wireframeFailureReleased = new Promise<void>((resolve) => {
-    releaseWireframeFailure = resolve
+  const onboardingFailureReleased = new Promise<void>((resolve) => {
+    releaseOnboardingFailure = resolve
   })
 
   await mockAuthenticatedTaskPage(page, referoTaskFixtures, async (taskId) => {
-    if (taskId !== 'wireframe') {
+    if (taskId !== 'onboarding-friction') {
       return undefined
     }
 
-    markWireframeUpdateStarted()
-    await wireframeFailureReleased
+    markOnboardingUpdateStarted()
+    await onboardingFailureReleased
     return 'fail'
+  }, {
+    teamIssuesByTeam: {
+      'core-team': [
+        createStoredTeamIssue({
+          id: 'onboarding-friction',
+          title: '初回オンボーディングの離脱要因を減らす',
+          status: 'in-progress',
+          priority: 'high',
+        }),
+        createStoredTeamIssue({
+          id: 'billing-copy',
+          title: '料金導線の説明不足を解消する',
+          status: 'todo',
+        }),
+      ],
+    },
   })
 
   await page.goto('/my-tasks')
 
   await page
-    .getByTestId('my-tasks-card-refero-wireframe')
+    .getByTestId('my-tasks-card-refero-onboarding-friction')
     .dragTo(page.getByTestId('my-tasks-column-done'))
-  await wireframeUpdateStarted
+  await onboardingUpdateStarted
 
   await page
-    .getByTestId('my-tasks-card-refero-seo-research')
+    .getByTestId('my-tasks-card-refero-billing-copy')
     .dragTo(page.getByTestId('my-tasks-column-done'))
   await expect(
-    page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-seo-research'),
+    page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-billing-copy'),
   ).toBeVisible()
 
-  releaseWireframeFailure()
+  releaseOnboardingFailure()
 
   await expect(page.getByTestId('my-tasks-move-error')).toBeVisible()
   await expect(
-    page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
+    page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-onboarding-friction'),
   ).toBeVisible()
   await expect(
-    page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-seo-research'),
+    page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-billing-copy'),
   ).toBeVisible()
   await expect(
-    page.getByTestId('my-tasks-column-todo').getByTestId('my-tasks-card-refero-seo-research'),
+    page.getByTestId('my-tasks-column-todo').getByTestId('my-tasks-card-refero-billing-copy'),
   ).toHaveCount(0)
-  expect(getMockRequestCounts(page).taskStatusUpdates).toBe(2)
+  expect(getMockRequestCounts(page).issueUpdates).toBe(2)
+  expect(getMockRequestCounts(page).taskStatusUpdates).toBe(0)
 })
 
-test('マイタスクでは同一タスクの移動中に追加移動を開始できない', async ({ page }) => {
-  let markWireframeDoneUpdateStarted!: () => void
-  let releaseWireframeDoneUpdate!: () => void
-  const wireframeDoneUpdateStarted = new Promise<void>((resolve) => {
-    markWireframeDoneUpdateStarted = resolve
+test('マイタスクでは同一 Issue の移動中に追加移動を開始できない', async ({ page }) => {
+  let markOnboardingDoneUpdateStarted!: () => void
+  let releaseOnboardingDoneUpdate!: () => void
+  const onboardingDoneUpdateStarted = new Promise<void>((resolve) => {
+    markOnboardingDoneUpdateStarted = resolve
   })
-  const wireframeDoneUpdateReleased = new Promise<void>((resolve) => {
-    releaseWireframeDoneUpdate = resolve
+  const onboardingDoneUpdateReleased = new Promise<void>((resolve) => {
+    releaseOnboardingDoneUpdate = resolve
   })
 
   await mockAuthenticatedTaskPage(page, referoTaskFixtures, async (taskId, status) => {
-    if (taskId !== 'wireframe' || status !== 'done') {
+    if (taskId !== 'onboarding-friction' || status !== 'done') {
       return undefined
     }
 
-    markWireframeDoneUpdateStarted()
-    await wireframeDoneUpdateReleased
+    markOnboardingDoneUpdateStarted()
+    await onboardingDoneUpdateReleased
     return undefined
+  }, {
+    teamIssuesByTeam: {
+      'core-team': [
+        createStoredTeamIssue({
+          id: 'onboarding-friction',
+          title: '初回オンボーディングの離脱要因を減らす',
+          status: 'in-progress',
+          priority: 'high',
+        }),
+      ],
+    },
   })
 
   await page.goto('/my-tasks')
 
   await page
-    .getByTestId('my-tasks-card-refero-wireframe')
+    .getByTestId('my-tasks-card-refero-onboarding-friction')
     .dragTo(page.getByTestId('my-tasks-column-done'))
-  await wireframeDoneUpdateStarted
+  await onboardingDoneUpdateStarted
   await expect(
-    page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-wireframe'),
+    page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-onboarding-friction'),
   ).toBeVisible()
   await expect(
-    page.getByTestId('my-tasks-card-refero-wireframe-status-select'),
+    page.getByTestId('my-tasks-card-refero-onboarding-friction-status-select'),
   ).toBeDisabled()
-  expect(getMockRequestCounts(page).taskStatusUpdates).toBe(1)
+  expect(getMockRequestCounts(page).issueUpdates).toBe(1)
 
-  releaseWireframeDoneUpdate()
+  releaseOnboardingDoneUpdate()
 
   await expect(
-    page.getByTestId('my-tasks-card-refero-wireframe-status-select'),
+    page.getByTestId('my-tasks-card-refero-onboarding-friction-status-select'),
   ).toBeEnabled()
-  expect(getMockRequestCounts(page).taskStatusUpdates).toBe(1)
+  expect(getMockRequestCounts(page).issueUpdates).toBe(1)
+  expect(getMockRequestCounts(page).taskStatusUpdates).toBe(0)
   expect(getMockRequestCounts(page).projectTasks.refero).toBe(1)
 })
 

@@ -371,7 +371,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   }
 
   const handleMoveTaskStatus = async (task: ProjectTask, status: TaskStatus) => {
-    if (!accessToken || !task.projectId || task.status === status) {
+    if (!accessToken || !task.projectId || task.status === status || isLegacyWorkspaceTask(task)) {
       return
     }
 
@@ -709,7 +709,7 @@ function MyTasksView({
   const canMoveTasks = Boolean(onMoveTaskStatus)
 
   const moveTaskToStatus = (task: ProjectTask, status: TaskStatus) => {
-    if (!onMoveTaskStatus || task.status === status) {
+    if (!onMoveTaskStatus || task.status === status || isLegacyWorkspaceTask(task)) {
       return
     }
 
@@ -731,7 +731,7 @@ function MyTasksView({
   }
 
   const handleDragStart = (event: DragEvent<HTMLElement>, task: ProjectTask) => {
-    if (!canMoveTasks) {
+    if (!canMoveTasks || isLegacyWorkspaceTask(task)) {
       return
     }
 
@@ -818,10 +818,11 @@ function MyTasksView({
                 {columnTasks.map((task) => {
                   const taskKey = createWorkspaceTaskKey(task)
                   const isMoving = movingTaskKeys.has(taskKey)
+                  const isLegacyTask = isLegacyWorkspaceTask(task)
 
                   return (
                     <CompactTaskCard
-                      draggable={canMoveTasks && !isMoving}
+                      draggable={canMoveTasks && !isMoving && !isLegacyTask}
                       isDragging={draggedTaskKey === taskKey}
                       isMoving={isMoving}
                       key={taskKey}
@@ -830,7 +831,7 @@ function MyTasksView({
                       testId={`my-tasks-card-${createWorkspaceTaskTestId(task)}`}
                       onDragEnd={handleDragEnd}
                       onDragStart={(event) => handleDragStart(event, task)}
-                      onStatusChange={(nextStatus) => moveTaskToStatus(task, nextStatus)}
+                      onStatusChange={isLegacyTask ? undefined : (nextStatus) => moveTaskToStatus(task, nextStatus)}
                     />
                   )
                 })}
@@ -1337,6 +1338,10 @@ async function updateWorkspaceTaskRemote(
   accessToken: string,
   status: TaskStatus,
 ) {
+  if (isLegacyWorkspaceTask(task)) {
+    return task
+  }
+
   if (task.teamId && task.source === 'dynamodb') {
     return toWorkspaceTaskFromIssue(
       await updateTeamIssue(task.teamId, task.id, accessToken, { status }),
@@ -1345,6 +1350,10 @@ async function updateWorkspaceTaskRemote(
   }
 
   return updateProjectTaskStatus(task.projectId ?? '', task.id, accessToken, status)
+}
+
+function isLegacyWorkspaceTask(task: ProjectTask) {
+  return task.source === 'legacy'
 }
 
 function toWorkspaceTaskFromIssue(issue: TeamIssue, projectId?: string): ProjectTask {
