@@ -41,6 +41,12 @@ import {
   workspaceNavPaths,
 } from '../routes/paths'
 import {
+  fontSizePreferenceOptions,
+  getInitialFontSizePreference,
+  setFontSizePreference as saveFontSizePreference,
+  type FontSizePreference,
+} from '../preferences/fontSize'
+import {
   type ProjectTask,
   type TaskPriority,
   type TaskStatus,
@@ -108,6 +114,10 @@ type WorkspaceScreenProps = {
    */
   tasks: ProjectTask[]
   /**
+   * 現在選択されているフォントサイズ設定です。
+   */
+  fontSizePreference: FontSizePreference
+  /**
    * 認証または API 確認中の loading 表示に切り替えるかどうかです。
    */
   isLoading?: boolean
@@ -147,6 +157,10 @@ type WorkspaceScreenProps = {
    * マイタスクの状態列を移動したときの callback です。
    */
   onMoveTaskStatus?: (task: ProjectTask, status: TaskStatus) => Promise<void>
+  /**
+   * フォントサイズ設定が変更されたときの callback です。
+   */
+  onFontSizePreferenceChange: (preference: FontSizePreference) => void
   /**
    * マイタスク状態更新に失敗したときの表示メッセージです。
    */
@@ -253,6 +267,9 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   const params = useParams()
   const [session] = useState<AuthSession | null>(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
+  const [fontSizePreference, setFontSizePreferenceState] = useState<FontSizePreference>(() =>
+    getInitialFontSizePreference(),
+  )
   const t = useMemo(() => createTranslator(locale), [locale])
   const accessToken = session?.accessToken
   const currentUserKey = accessToken ? (['current-user', accessToken] as const) : null
@@ -325,6 +342,11 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   const handleLogout = () => {
     clearAuthSession()
     navigate('/', { replace: true })
+  }
+
+  const handleFontSizePreferenceChange = (preference: FontSizePreference) => {
+    setFontSizePreferenceState(preference)
+    saveFontSizePreference(preference)
   }
 
   const handleCreateTeam = async (input: CreateProjectDirectoryTeamInput) => {
@@ -414,8 +436,10 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   return (
     <WorkspaceScreen
       activeTeamId={params.teamId}
+      fontSizePreference={fontSizePreference}
       isLoading={isLoading}
       locale={locale}
+      onFontSizePreferenceChange={handleFontSizePreferenceChange}
       onLogout={handleLogout}
       onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
       onSelectProject={(projectId, teamId) =>
@@ -452,6 +476,7 @@ export function WorkspaceScreen({
   teams,
   activeTeamId,
   tasks,
+  fontSizePreference,
   isLoading = false,
   onLogout,
   onSelectNav,
@@ -462,6 +487,7 @@ export function WorkspaceScreen({
   onArchiveProject,
   onArchiveTeam,
   onMoveTaskStatus,
+  onFontSizePreferenceChange,
   taskMoveErrorMessage,
 }: WorkspaceScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
@@ -522,21 +548,21 @@ export function WorkspaceScreen({
       </MobileSidebarDrawer>
 
       <section className="min-w-0 flex-1 overflow-auto">
-        <header className="border-b border-slate-200 bg-white px-[clamp(22px,3vw,40px)] py-6">
-          <div className="flex min-w-0 flex-wrap items-start justify-between gap-5">
+        <header className="border-b border-slate-200 bg-white px-[clamp(20px,3vw,34px)] py-4">
+          <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
             <div className="flex min-w-0 items-start gap-3">
               <MobileSidebarButton
                 label={t('sidebar.mobileOpen')}
                 onClick={() => setIsMobileSidebarOpen(true)}
               />
               <div className="min-w-0">
-                <p className="text-sm font-black uppercase tracking-normal text-blue-600">
+                <p className="text-xs font-black uppercase tracking-normal text-blue-600">
                   {t(metadata.eyebrowKey)}
                 </p>
-                <h1 className="mt-3 text-[clamp(30px,3.2vw,46px)] font-black leading-tight text-[#0d1833]">
+                <h1 className="mt-2 text-page-title font-black text-[#0d1833]">
                   {formatTeamText(t(metadata.titleKey), activeTeam?.name)}
                 </h1>
-                <p className="mt-3 max-w-[760px] text-base font-bold leading-7 text-[#526381]">
+                <p className="mt-2 max-w-[760px] text-sm font-bold leading-6 text-[#526381]">
                   {formatTeamText(t(metadata.descriptionKey), activeTeam?.name)}
                 </p>
               </div>
@@ -551,11 +577,11 @@ export function WorkspaceScreen({
                   {userLabel}
                 </p>
               </div>
-              <div className="grid h-11 w-11 place-items-center rounded-full bg-blue-100 text-sm font-black text-blue-700">
+              <div className="grid h-10 w-10 place-items-center rounded-full bg-blue-100 text-sm font-black text-blue-700">
                 {userInitial}
               </div>
               <button
-                className="min-h-11 rounded-lg border border-slate-300 bg-white px-4 text-sm font-black text-[#0d1833] shadow-[0_8px_18px_rgba(30,52,88,0.04)] transition hover:border-blue-500 hover:text-blue-600"
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-4 text-sm font-black text-[#0d1833] shadow-[0_8px_18px_rgba(30,52,88,0.04)] transition hover:border-blue-500 hover:text-blue-600"
                 type="button"
                 onClick={onLogout}
               >
@@ -566,17 +592,19 @@ export function WorkspaceScreen({
         </header>
 
         {isLoading ? (
-          <div className="grid min-h-[420px] place-items-center px-6 text-base font-bold text-[#526381]">
+          <div className="grid min-h-[420px] place-items-center px-6 text-sm font-bold text-[#526381]">
             {t('workspace.loading')}
           </div>
         ) : (
           <WorkspaceBody
             activeTeam={activeTeam}
+            fontSizePreference={fontSizePreference}
             summary={summary}
             t={t}
             taskMoveErrorMessage={taskMoveErrorMessage}
             tasks={tasks}
             teams={teams}
+            onFontSizePreferenceChange={onFontSizePreferenceChange}
             onMoveTaskStatus={onMoveTaskStatus}
             view={view}
           />
@@ -588,25 +616,29 @@ export function WorkspaceScreen({
 
 function WorkspaceBody({
   activeTeam,
+  fontSizePreference,
   summary,
   t,
   taskMoveErrorMessage,
   tasks,
   teams,
+  onFontSizePreferenceChange,
   onMoveTaskStatus,
   view,
 }: {
   activeTeam?: ProjectDirectoryTeam
+  fontSizePreference: FontSizePreference
   summary: DashboardSummary
   t: (key: MessageKey) => string
   taskMoveErrorMessage?: string
   tasks: ProjectTask[]
   teams: ProjectDirectoryTeam[]
+  onFontSizePreferenceChange: (preference: FontSizePreference) => void
   onMoveTaskStatus?: (task: ProjectTask, status: TaskStatus) => Promise<void>
   view: WorkspaceView
 }) {
   return (
-    <div className="px-[clamp(22px,3vw,40px)] py-7">
+    <div className="px-[clamp(20px,3vw,34px)] py-6">
       {view === 'home' ? <HomeView summary={summary} t={t} tasks={tasks} teams={teams} /> : null}
       {view === 'my-tasks' ? (
         <MyTasksView
@@ -627,7 +659,13 @@ function WorkspaceBody({
       ) : null}
       {view === 'reports' ? <ReportsView summary={summary} t={t} tasks={tasks} /> : null}
       {view === 'help' ? <HelpView t={t} /> : null}
-      {view === 'settings' ? <SettingsView t={t} /> : null}
+      {view === 'settings' ? (
+        <SettingsView
+          fontSizePreference={fontSizePreference}
+          t={t}
+          onFontSizePreferenceChange={onFontSizePreferenceChange}
+        />
+      ) : null}
       {view === 'team-overview' ? (
         <TeamOverviewView team={activeTeam} t={t} tasks={tasks} />
       ) : null}
@@ -894,7 +932,7 @@ function InboxView({
         <p className="text-sm font-black uppercase tracking-normal text-blue-600">
           {t('workspace.inbox.sla')}
         </p>
-        <p className="mt-4 text-5xl font-black leading-none text-[#0d1833]">{responseMinutes}m</p>
+        <p className="mt-3 text-4xl font-black leading-none text-[#0d1833]">{responseMinutes}m</p>
         <p className="mt-3 text-sm font-bold leading-6 text-[#526381]">
           {t('workspace.inbox.slaDescription')}
         </p>
@@ -1021,17 +1059,76 @@ function HelpView({ t }: { t: (key: MessageKey) => string }) {
   )
 }
 
-function SettingsView({ t }: { t: (key: MessageKey) => string }) {
+const fontSizePreferenceLabelKeys: Record<FontSizePreference, MessageKey> = {
+  compact: 'workspace.settings.fontSize.compact',
+  standard: 'workspace.settings.fontSize.standard',
+  comfortable: 'workspace.settings.fontSize.comfortable',
+}
+
+function SettingsView({
+  fontSizePreference,
+  onFontSizePreferenceChange,
+  t,
+}: {
+  fontSizePreference: FontSizePreference
+  onFontSizePreferenceChange: (preference: FontSizePreference) => void
+  t: (key: MessageKey) => string
+}) {
   return (
-    <InfoGrid
-      items={[
-        ['workspace.settings.profileTitle', 'workspace.settings.profileDescription'],
-        ['workspace.settings.notificationTitle', 'workspace.settings.notificationDescription'],
-        ['workspace.settings.permissionTitle', 'workspace.settings.permissionDescription'],
-        ['workspace.settings.integrationTitle', 'workspace.settings.integrationDescription'],
-      ]}
-      t={t}
-    />
+    <div className="grid gap-5">
+      <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-[0_14px_32px_rgba(30,52,88,0.05)]">
+        <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h2 className="text-base font-black text-[#0d1833]">
+              {t('workspace.settings.displayTitle')}
+            </h2>
+            <p className="mt-2 max-w-[680px] text-sm font-bold leading-6 text-[#526381]">
+              {t('workspace.settings.displayDescription')}
+            </p>
+          </div>
+          <div
+            aria-label={t('workspace.settings.fontSizeTitle')}
+            className="inline-flex min-h-10 overflow-hidden rounded-lg border border-slate-300 bg-white"
+            data-testid="font-size-preference-control"
+            role="group"
+          >
+            {fontSizePreferenceOptions.map((preference) => (
+              <button
+                aria-pressed={fontSizePreference === preference}
+                className={`px-4 text-sm font-black transition ${
+                  fontSizePreference === preference
+                    ? 'bg-blue-600 text-white'
+                    : 'text-[#263550] hover:bg-blue-50 hover:text-blue-700'
+                }`}
+                data-testid={`font-size-preference-${preference}`}
+                key={preference}
+                onClick={() => onFontSizePreferenceChange(preference)}
+                type="button"
+              >
+                {t(fontSizePreferenceLabelKeys[preference])}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="mt-5 rounded-lg border border-slate-200 bg-[#fbfdff] p-4">
+          <p className="text-sm font-black text-[#0d1833]">
+            {t('workspace.settings.fontSizeTitle')}
+          </p>
+          <p className="mt-2 text-sm font-bold leading-6 text-[#526381]">
+            {t('workspace.settings.fontSizeDescription')}
+          </p>
+        </div>
+      </section>
+      <InfoGrid
+        items={[
+          ['workspace.settings.profileTitle', 'workspace.settings.profileDescription'],
+          ['workspace.settings.notificationTitle', 'workspace.settings.notificationDescription'],
+          ['workspace.settings.permissionTitle', 'workspace.settings.permissionDescription'],
+          ['workspace.settings.integrationTitle', 'workspace.settings.integrationDescription'],
+        ]}
+        t={t}
+      />
+    </div>
   )
 }
 
@@ -1109,7 +1206,7 @@ function TeamMembersView({
         {members.map((member) => (
           <div className="grid grid-cols-[1fr_160px_220px] items-center gap-5 p-5 max-[820px]:grid-cols-1" key={member.id}>
             <div className="min-w-0">
-              <p className="text-base font-black text-[#0d1833]">{member.name}</p>
+              <p className="text-sm font-black text-[#0d1833]">{member.name}</p>
               <p className="mt-1 text-sm font-bold text-[#526381]">
                 {t('workspace.members.taskCount').replace('{count}', String(member.taskCount))}
               </p>
@@ -1118,7 +1215,7 @@ function TeamMembersView({
               <p className="text-xs font-black uppercase tracking-normal text-[#69758a]">
                 {t('workspace.members.load')}
               </p>
-              <p className="mt-1 text-2xl font-black text-[#0d1833]">{member.load}%</p>
+              <p className="mt-1 text-xl font-black text-[#0d1833]">{member.load}%</p>
             </div>
             <p className="text-sm font-bold leading-6 text-[#526381]">
               {t('workspace.members.openTaskCount').replace('{count}', String(member.openTaskCount))}
@@ -1155,11 +1252,11 @@ function MetricCard({
 
   return (
     <section
-      className={`rounded-lg border bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.05)] ${toneClassNames[tone]}`}
+      className={`rounded-lg border bg-white p-4 shadow-[0_14px_32px_rgba(30,52,88,0.05)] ${toneClassNames[tone]}`}
       data-testid={testId}
     >
-      <p className="text-sm font-black text-[#263550]">{label}</p>
-      <p className="mt-3 text-4xl font-black leading-none text-current">{value}</p>
+      <p className="text-xs font-black text-[#263550]">{label}</p>
+      <p className="mt-2 text-3xl font-black leading-none text-current">{value}</p>
     </section>
   )
 }
@@ -1167,7 +1264,7 @@ function MetricCard({
 function SectionHeader({ meta, title }: { meta?: string; title: string }) {
   return (
     <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-5 py-4">
-      <h2 className="text-lg font-black text-[#0d1833]">{title}</h2>
+      <h2 className="text-base font-black text-[#0d1833]">{title}</h2>
       {meta ? <p className="text-sm font-bold text-[#526381]">{meta}</p> : null}
     </div>
   )
@@ -1177,7 +1274,7 @@ function TaskListRow({ t, task }: { t: (key: MessageKey) => string; task: Projec
   return (
     <div className="grid grid-cols-[1fr_140px_110px] items-center gap-4 p-5 text-sm font-bold max-[760px]:grid-cols-1">
       <div className="min-w-0">
-        <p className="truncate text-base font-black text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
+        <p className="truncate text-sm font-black text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
         <p className="mt-1 text-[#526381]">{resolveTaskAssignee(task, t)}</p>
       </div>
       <StatusPill status={task.status} t={t} />

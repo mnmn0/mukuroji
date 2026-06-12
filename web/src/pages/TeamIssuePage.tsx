@@ -480,24 +480,24 @@ export function TeamIssueScreen({
       </MobileSidebarDrawer>
 
       <section className="min-w-0 flex-1 overflow-auto bg-[#fbfdff]">
-        <header className="border-b border-slate-200 bg-white px-[clamp(22px,3vw,40px)] py-5">
-          <div className="flex min-w-0 flex-wrap items-start justify-between gap-5">
+        <header className="border-b border-slate-200 bg-white px-[clamp(20px,3vw,34px)] py-4">
+          <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
             <div className="flex min-w-0 items-start gap-3">
               <MobileSidebarButton
                 label={t('sidebar.mobileOpen')}
                 onClick={() => setIsMobileSidebarOpen(true)}
               />
               <div className="min-w-0">
-                <p className="text-sm font-black uppercase tracking-normal text-blue-600">
+                <p className="text-xs font-black uppercase tracking-normal text-blue-600">
                   {t('issues.eyebrow')}
                 </p>
                 <h1
-                  className="mt-3 truncate text-[clamp(30px,3.2vw,46px)] font-black leading-tight text-[#0d1833]"
+                  className="mt-2 truncate text-page-title font-black text-[#0d1833]"
                   data-testid="team-issues-heading"
                 >
                   {teamName ?? t('issues.title')}
                 </h1>
-                <p className="mt-3 max-w-[760px] text-base font-bold leading-7 text-[#526381]">
+                <p className="mt-2 max-w-[760px] text-sm font-bold leading-6 text-[#526381]">
                   {t('issues.description')}
                 </p>
               </div>
@@ -505,13 +505,13 @@ export function TeamIssueScreen({
             <div className="flex flex-none items-center gap-3">
               <button
                 aria-expanded={isCreateOpen}
-                className="inline-flex h-11 items-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-black text-white shadow-[0_14px_30px_rgba(37,99,235,0.24)] transition hover:bg-blue-500"
+                className="inline-flex h-10 items-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-black text-white shadow-[0_12px_24px_rgba(37,99,235,0.22)] transition hover:bg-blue-500"
                 onClick={() => setIsCreateOpen(!isCreateOpen)}
                 type="button"
               >
                 + {t('issues.action.new')}
               </button>
-              <div className="grid h-11 w-11 place-items-center rounded-full bg-blue-100 text-sm font-black text-blue-700">
+              <div className="grid h-10 w-10 place-items-center rounded-full bg-blue-100 text-sm font-black text-blue-700">
                 {userInitial}
               </div>
             </div>
@@ -519,12 +519,12 @@ export function TeamIssueScreen({
         </header>
 
         {isLoading ? (
-          <div className="grid min-h-[420px] place-items-center px-6 text-base font-bold text-[#526381]">
+          <div className="grid min-h-[420px] place-items-center px-6 text-sm font-bold text-[#526381]">
             {t('issues.loading')}
           </div>
         ) : (
           <div className="grid min-h-[calc(100svh-120px)] grid-cols-[minmax(0,1fr)_minmax(340px,430px)] gap-0 max-[1080px]:grid-cols-1">
-            <section className="min-w-0 px-[clamp(22px,3vw,40px)] py-6">
+            <section className="min-w-0 px-[clamp(20px,3vw,34px)] py-5">
               {isCreateOpen ? (
                 <CreateIssuePanel
                   assigneeOptions={assigneeOptions}
@@ -649,7 +649,7 @@ function IssueToolbar({
           <span className="sr-only">{t('issues.search')}</span>
           <input
             aria-label={t('issues.search')}
-            className="h-11 w-[min(280px,calc(100vw-52px))] rounded-lg border border-slate-300 bg-white px-4 text-sm font-bold outline-none transition placeholder:text-[#71809a] focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+            className="h-10 w-[min(260px,calc(100vw-52px))] rounded-lg border border-slate-300 bg-white px-3.5 text-sm font-bold outline-none transition placeholder:text-[#71809a] focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
             onChange={(event) => onSearchQueryChange(event.target.value)}
             placeholder={t('issues.search')}
             type="search"
@@ -658,7 +658,7 @@ function IssueToolbar({
         </label>
         <select
           aria-label={t('issues.filter.status')}
-          className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-black text-[#0d1833] outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+          className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-black text-[#0d1833] outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
           onChange={(event) => onStatusFilterChange(resolveIssueStatusFilter(event.target.value))}
           value={statusFilter}
         >
@@ -670,11 +670,11 @@ function IssueToolbar({
           ))}
         </select>
       </div>
-      <div className="inline-flex h-11 overflow-hidden rounded-lg border border-slate-300 bg-white">
+      <div className="inline-flex h-10 overflow-hidden rounded-lg border border-slate-300 bg-white">
         {(['table', 'board'] as const).map((mode) => (
           <button
             aria-pressed={viewMode === mode}
-            className={`px-4 text-sm font-black transition ${
+            className={`px-3.5 text-sm font-black transition ${
               viewMode === mode ? 'bg-blue-600 text-white' : 'text-[#263550] hover:bg-blue-50'
             }`}
             key={mode}

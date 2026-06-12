@@ -1,6 +1,34 @@
 @import 'tailwindcss';
 
+@theme {
+  --text-app-micro: 0.733333rem;
+  --text-app-micro--line-height: 1rem;
+  --text-app-caption: 0.8rem;
+  --text-app-caption--line-height: 1rem;
+  --text-app-meta: 0.866667rem;
+  --text-app-meta--line-height: 1.25rem;
+  --text-app-body: 0.933333rem;
+  --text-app-body--line-height: 1.5rem;
+  --text-app-preview: 1.133333rem;
+  --text-app-preview--line-height: 1.5rem;
+  --text-app-brand: 1.466667rem;
+  --text-app-brand--line-height: 1;
+  --text-app-preview-stat: 1.733333rem;
+  --text-app-preview-stat--line-height: 1;
+  --text-page-title: clamp(1.6rem, calc(1.066667rem + 1.2vw), 2.266667rem);
+  --text-page-title--line-height: 1.2;
+  --text-dashboard-title: clamp(1.733333rem, calc(1.2rem + 1.6vw), 2.4rem);
+  --text-dashboard-title--line-height: 1.2;
+  --text-login-title: clamp(2rem, calc(1.466667rem + 1.6vw), 2.533333rem);
+  --text-login-title--line-height: 1.15;
+  --text-story-title: clamp(2.133333rem, calc(1.6rem + 1.7vw), 2.933333rem);
+  --text-story-title--line-height: 1.16;
+  --text-placeholder-title: 2.266667rem;
+  --text-placeholder-title--line-height: 1.2;
+}
+
 :root {
+  --app-font-size-base: 15px;
   --surface: #f8fbff;
   --ink: #071b39;
   --muted: #748197;
@@ -9,13 +37,25 @@
     ui-sans-serif, 'Hiragino Sans', 'Yu Gothic UI', 'Yu Gothic', Meiryo,
     system-ui, sans-serif;
 
-  font: 16px/1.5 var(--sans);
+  font: var(--app-font-size-base) / 1.5 var(--sans);
   color: var(--ink);
   background: var(--surface);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+:root[data-font-size='compact'] {
+  --app-font-size-base: 14px;
+}
+
+:root[data-font-size='standard'] {
+  --app-font-size-base: 15px;
+}
+
+:root[data-font-size='comfortable'] {
+  --app-font-size-base: 16px;
 }
 
 * {
