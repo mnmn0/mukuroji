@@ -668,7 +668,7 @@ export function TaskScreen({
   }
 
   return (
-    <main className="flex min-h-svh overflow-hidden bg-[#f6f9fd] text-[#0d1833]">
+    <main className="flex h-svh min-h-0 overflow-hidden bg-[#f6f9fd] text-[#0d1833]">
       <Sidebar
         activeProjectId={projectId}
         activeProjectTeamId={resolvedActiveTeamId}
@@ -718,7 +718,7 @@ export function TaskScreen({
         />
       </MobileSidebarDrawer>
 
-      <section className="flex min-w-0 flex-1 flex-col bg-white/80">
+      <section className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white/80">
         <TaskHeader
           activeTab={activeTab}
           isCreateTaskOpen={isCreateTaskOpen}
@@ -733,11 +733,11 @@ export function TaskScreen({
         />
 
         {isLoading ? (
-          <div className="grid min-h-[360px] place-items-center px-6 text-base font-bold text-slate-500">
+          <div className="grid min-h-0 flex-1 place-items-center px-6 text-base font-bold text-slate-500">
             {t('tasks.loading')}
           </div>
         ) : (
-          <>
+          <div className="min-h-0 flex-1 overflow-auto overscroll-contain bg-[#fbfdff]">
             {isCreateTaskOpen ? (
               <CreateTaskPanel
                 assigneeErrorMessage={assigneeErrorMessage}
@@ -803,7 +803,7 @@ export function TaskScreen({
               taskErrorMessage={taskErrorMessage}
               tasks={visibleTasks}
             />
-          </>
+          </div>
         )}
       </section>
     </main>
@@ -918,8 +918,8 @@ function TaskHeader({
   userInitial: string
 }) {
   return (
-    <header className="border-b border-slate-200/80 bg-white/95 shadow-[0_1px_0_rgba(15,23,42,0.03)]">
-      <div className="flex min-h-[90px] items-center justify-between gap-5 px-[clamp(22px,3vw,38px)] py-4">
+    <header className="flex-none border-b border-slate-200/80 bg-white/95 shadow-[0_1px_0_rgba(15,23,42,0.03)]">
+      <div className="flex min-h-[82px] items-center justify-between gap-5 px-[clamp(22px,3vw,38px)] py-3.5">
         <div className="flex min-w-0 items-start gap-3">
           <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={onMobileSidebarOpen} />
           <div className="min-w-0">
@@ -936,7 +936,7 @@ function TaskHeader({
             </nav>
             <div className="mt-3 flex min-w-0 items-center gap-4">
               <h1
-                className="truncate text-[clamp(30px,3vw,42px)] font-black leading-none tracking-normal text-[#0d1833]"
+                className="truncate text-[clamp(28px,2.6vw,38px)] font-black leading-none tracking-normal text-[#0d1833]"
                 data-testid="tasks-heading"
               >
                 {projectName}
@@ -986,7 +986,7 @@ function TaskHeader({
           {taskTabs.map((tab) => (
             <button
               aria-selected={activeTab === tab}
-              className={`relative inline-flex h-[76px] items-center gap-2 px-5 text-sm font-black transition ${
+              className={`relative inline-flex h-[66px] items-center gap-2 px-5 text-sm font-black transition ${
                 activeTab === tab ? 'text-blue-600' : 'text-[#405174] hover:text-blue-600'
               }`}
               key={tab}
@@ -1081,7 +1081,7 @@ function TaskWorkspace({
 
   if (activeTab === 'permissions') {
     return (
-      <div className="min-h-0 flex-1 overflow-auto bg-[#fbfdff] px-[clamp(22px,3vw,38px)] py-7">
+      <div className="px-[clamp(22px,3vw,38px)] py-7">
         <ProjectPermissionsPanel
           canManageMembers={canManageProjectMembers}
           errorMessage={projectMembersErrorMessage}
@@ -1106,7 +1106,7 @@ function TaskWorkspace({
   }
 
   return (
-    <div className="min-h-0 flex-1 overflow-auto bg-[#fbfdff] px-[clamp(22px,3vw,38px)] py-7">
+    <div className="px-[clamp(22px,3vw,38px)] py-7">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex flex-wrap items-center gap-3">
           <label className="relative block">

@@ -745,17 +745,17 @@ export function Sidebar({
 
   return (
     <aside
-      className={`flex h-screen flex-none flex-col overflow-hidden bg-[#03172f] py-6 text-white shadow-[18px_0_38px_rgba(5,23,48,0.18)] transition-all duration-200 ${isCollapsed ? 'w-[84px] px-3' : 'w-[320px] px-5'} ${className}`}
+      className={`flex h-svh max-h-svh min-h-0 flex-none flex-col overflow-hidden bg-[#03172f] py-5 text-white shadow-[18px_0_38px_rgba(5,23,48,0.18)] transition-all duration-200 ${isCollapsed ? 'w-[80px] px-3' : 'w-[300px] max-w-[calc(100vw-32px)] px-4'} ${className}`}
       aria-label={resolvedLabels.ariaLabel}
       data-collapsed={isCollapsed}
     >
       <div
-        className={`mb-6 flex items-center ${isCollapsed ? 'flex-col gap-3 px-0' : 'justify-between px-1'}`}
+        className={`mb-5 flex flex-none items-center ${isCollapsed ? 'flex-col gap-3 px-0' : 'justify-between px-1'}`}
       >
         <div className={`flex min-w-0 items-center gap-3 ${isCollapsed ? 'justify-center' : ''}`}>
           <BrandMark />
           <span
-            className={`truncate text-[28px] font-bold leading-none tracking-normal transition-opacity ${isCollapsed ? 'sr-only' : ''}`}
+            className={`truncate text-[26px] font-bold leading-none tracking-normal transition-opacity ${isCollapsed ? 'sr-only' : ''}`}
           >
             {workspaceName}
           </span>
@@ -775,7 +775,7 @@ export function Sidebar({
         </button>
       </div>
 
-      <nav className="space-y-1" aria-label={resolvedLabels.globalNavigation}>
+      <nav className="flex-none space-y-1" aria-label={resolvedLabels.globalNavigation}>
         {navItems.map((item) => (
           <NavButton
             key={item.id}
@@ -792,7 +792,7 @@ export function Sidebar({
       </nav>
 
       {!isCollapsed ? (
-        <div className="mt-7 flex items-center justify-between px-1 text-[14px] font-semibold text-slate-200">
+        <div className="mt-6 flex flex-none items-center justify-between px-1 text-[14px] font-semibold text-slate-200">
           <span className="truncate">{resolvedLabels.teamProjects}</span>
           {canCreate ? (
             <button
@@ -808,7 +808,7 @@ export function Sidebar({
         </div>
       ) : null}
 
-      <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
+      <div className="mt-3 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
         {!isCollapsed && canCreate && isCreatePanelOpen ? (
           <SidebarRegistrationPanel
             labels={resolvedLabels.create}
@@ -846,7 +846,7 @@ export function Sidebar({
         ) : null}
       </div>
 
-      <nav className="mt-4 space-y-1 border-t border-white/10 pt-4" aria-label={resolvedLabels.utilityNavigation}>
+      <nav className="mt-3 flex-none space-y-1 border-t border-white/10 pt-3" aria-label={resolvedLabels.utilityNavigation}>
         {utilityNavItems.map((item) => (
           <NavButton
             key={item.id}

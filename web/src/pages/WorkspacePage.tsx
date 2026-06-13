@@ -471,7 +471,7 @@ export function WorkspaceScreen({
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
 
   return (
-    <main className="flex min-h-svh overflow-hidden bg-[#f5f8fc] text-[#0d1833]">
+    <main className="flex h-svh min-h-0 overflow-hidden bg-[#f5f8fc] text-[#0d1833]">
       <Sidebar
         activeNavId={metadata.activeNavId}
         activeTeamId={metadata.activeTeamViewId ? activeTeam?.id : undefined}
@@ -521,8 +521,8 @@ export function WorkspaceScreen({
         />
       </MobileSidebarDrawer>
 
-      <section className="min-w-0 flex-1 overflow-auto">
-        <header className="border-b border-slate-200 bg-white px-[clamp(22px,3vw,40px)] py-6">
+      <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="flex-none border-b border-slate-200 bg-white px-[clamp(22px,3vw,40px)] py-5">
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-5">
             <div className="flex min-w-0 items-start gap-3">
               <MobileSidebarButton
@@ -533,10 +533,10 @@ export function WorkspaceScreen({
                 <p className="text-sm font-black uppercase tracking-normal text-blue-600">
                   {t(metadata.eyebrowKey)}
                 </p>
-                <h1 className="mt-3 text-[clamp(30px,3.2vw,46px)] font-black leading-tight text-[#0d1833]">
+                <h1 className="mt-2 text-[clamp(28px,2.8vw,42px)] font-black leading-tight text-[#0d1833]">
                   {formatTeamText(t(metadata.titleKey), activeTeam?.name)}
                 </h1>
-                <p className="mt-3 max-w-[760px] text-base font-bold leading-7 text-[#526381]">
+                <p className="mt-2 max-w-[760px] text-base font-bold leading-7 text-[#526381]">
                   {formatTeamText(t(metadata.descriptionKey), activeTeam?.name)}
                 </p>
               </div>
@@ -566,20 +566,22 @@ export function WorkspaceScreen({
         </header>
 
         {isLoading ? (
-          <div className="grid min-h-[420px] place-items-center px-6 text-base font-bold text-[#526381]">
+          <div className="grid min-h-0 flex-1 place-items-center px-6 text-base font-bold text-[#526381]">
             {t('workspace.loading')}
           </div>
         ) : (
-          <WorkspaceBody
-            activeTeam={activeTeam}
-            summary={summary}
-            t={t}
-            taskMoveErrorMessage={taskMoveErrorMessage}
-            tasks={tasks}
-            teams={teams}
-            onMoveTaskStatus={onMoveTaskStatus}
-            view={view}
-          />
+          <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
+            <WorkspaceBody
+              activeTeam={activeTeam}
+              summary={summary}
+              t={t}
+              taskMoveErrorMessage={taskMoveErrorMessage}
+              tasks={tasks}
+              teams={teams}
+              onMoveTaskStatus={onMoveTaskStatus}
+              view={view}
+            />
+          </div>
         )}
       </section>
     </main>
