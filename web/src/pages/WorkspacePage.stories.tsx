@@ -14,12 +14,14 @@ const storySummary: DashboardSummary = {
 
 const defaultArgs = {
   activeTeamId: 'core-team',
+  fontSizePreference: 'standard',
   locale: 'ja',
   summary: storySummary,
   tasks: referoTaskFixtures,
   teams: projectDirectoryFixtures,
   onCreateProject: async () => undefined,
   onCreateTeam: async () => undefined,
+  onFontSizePreferenceChange: () => undefined,
   userInitial: 'D',
   userLabel: 'demo@example.com',
   view: 'home',
@@ -73,6 +75,15 @@ export const Dashboard: Story = {
 export const Reports: Story = {
   args: {
     view: 'reports',
+  },
+}
+
+/**
+ * 表示設定を含む設定画面です。
+ */
+export const Settings: Story = {
+  args: {
+    view: 'settings',
   },
 }
 

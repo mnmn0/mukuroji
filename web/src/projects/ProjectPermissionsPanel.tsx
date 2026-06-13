@@ -253,7 +253,7 @@ export function ProjectPermissionsPanel({
                 <p className="text-sm font-black text-[#263550]">
                   {t('workspace.permissions.projectLabel')}
                 </p>
-                <p className="mt-2 text-2xl font-black leading-tight text-[#0d1833]">
+                <p className="mt-2 text-xl font-black leading-tight text-[#0d1833]">
                   {projectName}
                 </p>
               </div>
@@ -269,7 +269,7 @@ export function ProjectPermissionsPanel({
                 <label className="grid gap-2 text-sm font-black text-[#263550]" htmlFor="permissions-user-search">
                   {t('workspace.permissions.userSearch')}
                   <input
-                    className="h-12 rounded-lg border border-slate-300 px-4 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+                    className="h-11 rounded-lg border border-slate-300 px-4 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
                     data-testid="permissions-user-search"
                     id="permissions-user-search"
                     placeholder={t('workspace.permissions.userSearchPlaceholder')}
@@ -281,7 +281,7 @@ export function ProjectPermissionsPanel({
                 <label className="grid gap-2 text-sm font-black text-[#263550]" htmlFor="permissions-user-select">
                   {t('workspace.permissions.memberEmail')}
                   <select
-                    className="h-12 rounded-lg border border-slate-300 bg-white px-4 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+                    className="h-11 rounded-lg border border-slate-300 bg-white px-4 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
                     data-testid="permissions-user-select"
                     disabled={users.length === 0}
                     id="permissions-user-select"
@@ -304,7 +304,7 @@ export function ProjectPermissionsPanel({
                   onChange={(role) => setFormState((current) => ({ ...current, role }))}
                 />
                 <button
-                  className="self-end min-h-12 rounded-lg bg-blue-600 px-5 text-sm font-black text-white shadow-[0_14px_30px_rgba(37,99,235,0.22)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400"
+                  className="self-end min-h-11 rounded-lg bg-blue-600 px-5 text-sm font-black text-white shadow-[0_12px_24px_rgba(37,99,235,0.2)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400"
                   data-testid="permissions-submit"
                   disabled={!selectedUserId || isLastManagerAssignmentBlocked || savingMemberKey === selectedUserId}
                   type="submit"
@@ -385,7 +385,7 @@ export function ProjectPermissionsPanel({
                   key={member.id}
                 >
                   <div className="min-w-0">
-                    <p className="truncate text-base font-black text-[#0d1833]">{member.name ?? member.email}</p>
+                    <p className="truncate text-sm font-black text-[#0d1833]">{member.name ?? member.email}</p>
                     <p className="mt-1 truncate text-sm font-bold text-[#526381]">
                       {member.email}
                       {member.status ? ` / ${member.status}` : ''}
@@ -443,7 +443,7 @@ function RoleSelect({
     <label className="grid gap-2 text-sm font-black text-[#263550]" htmlFor={id}>
       {label}
       <select
-        className="h-12 rounded-lg border border-slate-300 bg-white px-4 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:cursor-not-allowed disabled:text-slate-400"
+        className="h-11 rounded-lg border border-slate-300 bg-white px-4 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:cursor-not-allowed disabled:text-slate-400"
         data-testid={testId}
         disabled={disabled}
         id={id}
@@ -475,7 +475,7 @@ function SectionHeader({
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
-      <h2 className="text-lg font-black text-[#0d1833]">{title}</h2>
+      <h2 className="text-base font-black text-[#0d1833]">{title}</h2>
       <span className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-black text-[#526381]">
         {meta}
       </span>

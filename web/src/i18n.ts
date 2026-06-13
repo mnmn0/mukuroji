@@ -358,6 +358,15 @@ const dictionaries = {
     'workspace.settings.title': '設定',
     'workspace.settings.description':
       'ワークスペースの基本情報、通知、権限、外部連携を管理します。',
+    'workspace.settings.displayTitle': '表示設定',
+    'workspace.settings.displayDescription':
+      'このブラウザで使う文字サイズと画面密度を調整します。',
+    'workspace.settings.fontSizeTitle': 'フォントサイズ',
+    'workspace.settings.fontSizeDescription':
+      'タスク一覧、サイドバー、設定画面などアプリ全体の文字サイズに反映されます。',
+    'workspace.settings.fontSize.compact': '小さめ',
+    'workspace.settings.fontSize.standard': '標準',
+    'workspace.settings.fontSize.comfortable': '大きめ',
     'workspace.settings.profileTitle': 'ワークスペース情報',
     'workspace.settings.profileDescription':
       '名称、ブランド表記、既定言語などの基本設定を変更します。',
@@ -803,6 +812,15 @@ const dictionaries = {
     'workspace.settings.title': 'Settings',
     'workspace.settings.description':
       'Manage workspace profile, notifications, permissions, and integrations.',
+    'workspace.settings.displayTitle': 'Display',
+    'workspace.settings.displayDescription':
+      'Adjust text size and screen density for this browser.',
+    'workspace.settings.fontSizeTitle': 'Font size',
+    'workspace.settings.fontSizeDescription':
+      'Applies to task lists, the sidebar, settings, and the rest of the app.',
+    'workspace.settings.fontSize.compact': 'Compact',
+    'workspace.settings.fontSize.standard': 'Standard',
+    'workspace.settings.fontSize.comfortable': 'Comfortable',
     'workspace.settings.profileTitle': 'Workspace profile',
     'workspace.settings.profileDescription':
       'Change the workspace name, brand display, and default language.',

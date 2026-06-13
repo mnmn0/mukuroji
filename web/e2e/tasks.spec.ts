@@ -1232,6 +1232,36 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('team-overview-blocked').locator('p').last()).toHaveText('0')
   })
 
+  test('設定画面でフォントサイズを変更して保存できる', async ({ page }) => {
+    await page.goto('/settings')
+
+    await expect(page.getByTestId('font-size-preference-control')).toBeVisible()
+    await expect(page.locator('html')).toHaveAttribute('data-font-size', 'standard')
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe('15px')
+    const settingsHeading = page.getByRole('heading', { name: '設定', exact: true })
+    const standardHeadingFontSize = await settingsHeading.evaluate((element) =>
+      Number.parseFloat(getComputedStyle(element).fontSize),
+    )
+
+    await page.getByTestId('font-size-preference-comfortable').click()
+
+    await expect(page.locator('html')).toHaveAttribute('data-font-size', 'comfortable')
+    await expect(page.getByTestId('font-size-preference-comfortable')).toHaveAttribute('aria-pressed', 'true')
+    await expect.poll(() => page.evaluate(() => window.localStorage.getItem('mukuroji.fontSize'))).toBe('comfortable')
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe('16px')
+    await expect.poll(() =>
+      settingsHeading.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize)),
+    ).toBeGreaterThan(standardHeadingFontSize)
+
+    await page.reload()
+
+    await expect(page.locator('html')).toHaveAttribute('data-font-size', 'comfortable')
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe('16px')
+    await page.getByRole('button', { name: 'マイタスク', exact: true }).click()
+    await expect(page).toHaveURL('/my-tasks')
+    await expect(page.getByTestId('my-tasks-kanban')).toBeVisible()
+  })
+
   test('タスク画面から新規タスクを登録できる', async ({ page }) => {
     await page.goto('/projects/refero/tasks')
     const requestCounts = getMockRequestCounts(page)
