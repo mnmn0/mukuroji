@@ -745,7 +745,7 @@ export function Sidebar({
 
   return (
     <aside
-      className={`flex h-svh max-h-svh min-h-0 flex-none flex-col overflow-hidden bg-[#03172f] py-5 text-white shadow-[18px_0_38px_rgba(5,23,48,0.18)] transition-all duration-200 ${isCollapsed ? 'w-[76px] px-3' : 'w-[292px] max-w-[calc(100vw-32px)] px-4'} ${className}`}
+      className={`flex h-dvh max-h-dvh min-h-0 flex-none flex-col overflow-hidden bg-[#03172f] py-5 text-white shadow-[18px_0_38px_rgba(5,23,48,0.18)] transition-all duration-200 min-[981px]:h-svh min-[981px]:max-h-svh ${isCollapsed ? 'w-[76px] px-3' : 'w-[292px] max-w-[calc(100vw-32px)] px-4'} ${className}`}
       aria-label={resolvedLabels.ariaLabel}
       data-collapsed={isCollapsed}
     >

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import useSWR from 'swr'
@@ -630,6 +630,7 @@ export function TaskScreen({
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false)
   const [createTaskError, setCreateTaskError] = useState<string | undefined>()
   const [isCreatingTask, setIsCreatingTask] = useState(false)
+  const taskContentRef = useRef<HTMLDivElement>(null)
   const resolvedProjectName = projectName ?? projectId
   const resolvedActiveTeam = findTeamForProject(teams, projectId, activeProjectTeamId)
   const resolvedActiveTeamId = activeProjectTeamId ?? resolvedActiveTeam?.id
@@ -658,6 +659,12 @@ export function TaskScreen({
       }),
     [searchQuery, statusFilter, t, tasks],
   )
+
+  useEffect(() => {
+    if (isCreateTaskOpen) {
+      taskContentRef.current?.scrollTo({ top: 0 })
+    }
+  }, [isCreateTaskOpen])
 
   const updateTaskSelection = (taskId: string, selected: boolean) => {
     setSelectedTaskIds((currentTaskIds) =>
@@ -737,7 +744,11 @@ export function TaskScreen({
             {t('tasks.loading')}
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-auto overscroll-contain bg-[#fbfdff]">
+          <div
+            className="min-h-0 flex-1 overflow-auto overscroll-contain bg-[#fbfdff]"
+            data-testid="task-main-scroll"
+            ref={taskContentRef}
+          >
             {isCreateTaskOpen ? (
               <CreateTaskPanel
                 assigneeErrorMessage={assigneeErrorMessage}

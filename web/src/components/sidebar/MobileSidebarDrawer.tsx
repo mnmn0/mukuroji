@@ -116,7 +116,7 @@ export function MobileSidebarDrawer({
     <div
       aria-label={dialogLabel}
       aria-modal="true"
-      className="fixed inset-0 z-50 h-svh max-h-svh min-[981px]:hidden"
+      className="fixed inset-0 z-50 h-dvh max-h-dvh min-[981px]:hidden"
       ref={drawerRef}
       role="dialog"
       tabIndex={-1}
@@ -127,7 +127,7 @@ export function MobileSidebarDrawer({
         type="button"
         onClick={onClose}
       />
-      <div className="relative z-10 h-svh max-h-svh w-fit max-w-[calc(100vw-32px)]">
+      <div className="relative z-10 h-dvh max-h-dvh w-fit max-w-[calc(100vw-32px)]">
         {children}
       </div>
     </div>

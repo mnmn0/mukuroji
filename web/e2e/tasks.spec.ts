@@ -1093,7 +1093,7 @@ test.describe('authenticated task page', () => {
       const rect = element.getBoundingClientRect()
 
       return {
-        bodyOverflow: document.body.style.overflow,
+        bodyOverflow: window.getComputedStyle(document.body).overflow,
         height: rect.height,
         top: rect.top,
         viewportHeight: window.innerHeight,
@@ -1407,6 +1407,23 @@ test.describe('authenticated task page', () => {
 
     await expect(page.getByTestId('task-row-new-task').getByText('新規タスク')).toBeVisible()
     expect(requestCounts.issueCreates).toBe(1)
+  })
+
+  test('タスク本文をスクロール後に新規タスクを開いても作成パネルを表示する', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 520 })
+    await page.goto('/projects/refero/tasks')
+
+    const mainScroll = page.getByTestId('task-main-scroll')
+
+    await mainScroll.evaluate((element) => {
+      element.scrollTo({ top: element.scrollHeight })
+    })
+    await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+
+    await page.getByRole('button', { name: '新規タスク' }).click()
+
+    await expect(page.locator('input[name="title"]')).toBeVisible()
+    await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBe(0)
   })
 
   test('担当者を選択しない新規タスク登録は送信しない', async ({ page }) => {
