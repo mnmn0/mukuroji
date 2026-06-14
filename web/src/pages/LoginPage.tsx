@@ -101,7 +101,7 @@ export function LoginPage() {
         <div className="flex min-w-0 items-center gap-2 justify-self-end text-[#4d5868] focus-within:rounded-lg focus-within:outline focus-within:outline-3 focus-within:outline-offset-[5px] focus-within:outline-[rgba(0,101,238,0.18)] max-[720px]:w-[calc(100vw-72px)] max-[720px]:justify-self-start max-[720px]:justify-end">
           <GlobeIcon className="h-[19px] w-[19px] fill-none stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]" />
           <select
-            className="w-auto min-w-0 cursor-pointer appearance-none border-0 bg-transparent text-[15px] font-extrabold text-[var(--ink)] outline-none"
+            className="w-auto min-w-0 cursor-pointer appearance-none border-0 bg-transparent text-base font-extrabold text-[var(--ink)] outline-none"
             aria-label={t('language.aria')}
             value={locale}
             onChange={(event) => handleLocaleChange(event.target.value)}
@@ -115,20 +115,20 @@ export function LoginPage() {
           <ChevronIcon className="h-[19px] w-[19px] fill-none stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]" />
         </div>
 
-        <div className="my-9 w-[min(100%,560px)] min-w-0 self-center justify-self-center rounded-lg border border-[#d9e1eb] bg-[rgba(255,255,255,0.92)] p-[clamp(34px,4.6vw,58px)] shadow-[0_28px_60px_rgba(28,53,88,0.08)] max-[720px]:mb-[34px] max-[720px]:ml-0 max-[720px]:mt-[26px] max-[720px]:w-[calc(100vw-72px)] max-[720px]:max-w-none max-[720px]:justify-self-start max-[720px]:px-5 max-[720px]:py-7">
-          <div className="inline-flex w-full items-center justify-center gap-3 text-3xl font-extrabold text-[var(--ink)] max-[720px]:text-2xl">
+        <div className="my-8 w-[min(100%,520px)] min-w-0 self-center justify-self-center rounded-lg border border-[#d9e1eb] bg-[rgba(255,255,255,0.92)] p-[clamp(30px,4vw,48px)] shadow-[0_24px_52px_rgba(28,53,88,0.07)] max-[720px]:mb-[34px] max-[720px]:ml-0 max-[720px]:mt-[26px] max-[720px]:w-[calc(100vw-72px)] max-[720px]:max-w-none max-[720px]:justify-self-start max-[720px]:px-5 max-[720px]:py-7">
+          <div className="inline-flex w-full items-center justify-center gap-3 text-2xl font-extrabold text-[var(--ink)] max-[720px]:text-xl">
             <BrandMark />
             <span>mukuroji</span>
           </div>
 
-          <div className="mt-[42px] text-center max-[720px]:mt-8">
+          <div className="mt-9 text-center max-[720px]:mt-8">
             <h1
-              className="m-0 text-[clamp(34px,4vw,44px)] font-black leading-[1.15] text-[var(--ink)] max-[720px]:text-[34px]"
+              className="m-0 text-login-title font-black text-[var(--ink)]"
               id="login-title"
             >
               {t('login.title')}
             </h1>
-            <p className="mt-3.5 text-lg font-bold text-[var(--muted)] max-[720px]:text-[15px]">
+            <p className="mt-3 text-base font-bold text-[var(--muted)]">
               {t('login.subtitle')}
             </p>
           </div>
@@ -137,7 +137,7 @@ export function LoginPage() {
             className="mt-9 grid min-w-0 gap-[22px] max-[720px]:gap-[19px]"
             onSubmit={handleSubmit}
           >
-            <div className="grid gap-2.5 text-[15px] font-extrabold text-[var(--ink)]">
+            <div className="grid gap-2.5 text-base font-extrabold text-[var(--ink)]">
               <label className="w-fit" htmlFor="email">
                 {t('login.email')}
               </label>
@@ -161,7 +161,7 @@ export function LoginPage() {
               </span>
             </div>
 
-            <div className="grid gap-2.5 text-[15px] font-extrabold text-[var(--ink)]">
+            <div className="grid gap-2.5 text-base font-extrabold text-[var(--ink)]">
               <label className="w-fit" htmlFor="password">
                 {t('login.password')}
               </label>
@@ -197,7 +197,7 @@ export function LoginPage() {
               </span>
             </div>
 
-            <label className="flex cursor-pointer items-center gap-3 text-base font-extrabold text-[var(--ink)]">
+            <label className="flex cursor-pointer items-center gap-3 text-sm font-extrabold text-[var(--ink)]">
               <span className="relative grid h-6 w-6 place-items-center">
                 <input
                   className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[#cfd8e5] bg-white checked:border-[#0063ed] checked:bg-[#0063ed] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(0,101,238,0.18)]"
@@ -227,7 +227,7 @@ export function LoginPage() {
             ) : null}
 
             <button
-              className="min-h-[60px] w-full cursor-pointer rounded-lg border-0 bg-linear-to-br from-[#006cff] to-[#004ec8] text-lg font-black text-white shadow-[0_14px_30px_rgba(0,89,216,0.22)] transition-[transform,box-shadow,filter] duration-150 hover:-translate-y-px hover:saturate-[1.08] hover:shadow-[0_18px_36px_rgba(0,89,216,0.28)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(0,101,238,0.22)] disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:translate-y-0 disabled:hover:saturate-100"
+              className="min-h-[52px] w-full cursor-pointer rounded-lg border-0 bg-linear-to-br from-[#006cff] to-[#004ec8] text-base font-black text-white shadow-[0_14px_30px_rgba(0,89,216,0.22)] transition-[transform,box-shadow,filter] duration-150 hover:-translate-y-px hover:saturate-[1.08] hover:shadow-[0_18px_36px_rgba(0,89,216,0.28)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(0,101,238,0.22)] disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:translate-y-0 disabled:hover:saturate-100"
               disabled={isSubmitting}
               type="submit"
             >
@@ -235,7 +235,7 @@ export function LoginPage() {
             </button>
 
             <Link
-              className="justify-self-center text-[15px] font-extrabold text-[#0063ed] no-underline hover:text-[#004ab4] hover:underline focus-visible:text-[#004ab4] focus-visible:underline focus-visible:outline-none"
+              className="justify-self-center text-base font-extrabold text-[#0063ed] no-underline hover:text-[#004ab4] hover:underline focus-visible:text-[#004ab4] focus-visible:underline focus-visible:outline-none"
               to="/forgot-password"
             >
               {t('login.forgotPassword')}
@@ -243,7 +243,7 @@ export function LoginPage() {
           </form>
         </div>
 
-        <footer className="self-end text-center text-sm text-[var(--muted)] max-[720px]:w-[calc(100vw-72px)] max-[720px]:justify-self-start max-[720px]:text-[13px]">
+        <footer className="self-end text-center text-sm text-[var(--muted)] max-[720px]:w-[calc(100vw-72px)] max-[720px]:justify-self-start max-[720px]:text-app-meta">
           <nav
             className="flex flex-wrap justify-center gap-[18px]"
             aria-label={t('footer.aria')}
@@ -269,19 +269,19 @@ export function LoginPage() {
           aria-hidden="true"
         ></span>
 
-        <div className="inline-flex items-center gap-3 text-3xl font-extrabold text-[var(--ink)] max-[720px]:text-2xl">
+        <div className="inline-flex items-center gap-3 text-2xl font-extrabold text-[var(--ink)] max-[720px]:text-xl">
           <BrandMark />
           <span>mukuroji</span>
         </div>
 
         <div className="min-w-0 max-w-[560px]">
           <h2
-            className="m-0 text-[clamp(38px,4vw,58px)] font-black leading-[1.16] text-[var(--ink)] max-[720px]:text-[34px]"
+            className="m-0 text-story-title font-black text-[var(--ink)]"
             id="story-title"
           >
             {t('story.title')}
           </h2>
-          <p className="mt-[22px] max-w-[520px] text-lg leading-[1.9] text-[var(--muted-strong)] [overflow-wrap:anywhere] max-[720px]:text-[15px] max-[720px]:leading-[1.75]">
+          <p className="mt-5 max-w-[520px] text-base leading-8 text-[var(--muted-strong)] [overflow-wrap:anywhere] max-[720px]:leading-[1.75]">
             {t('story.description')}
           </p>
         </div>

@@ -825,8 +825,7 @@ async function expectDesktopAppShellScrollsInsideMain(page: Page) {
   expect(Math.abs(initialState.sidebarHeight - initialState.viewportHeight)).toBeLessThanOrEqual(1)
   expect(Math.abs(initialState.mainHeight - initialState.viewportHeight)).toBeLessThanOrEqual(1)
 
-  await page.mouse.move(Math.min(900, initialState.viewportWidth - 80), initialState.viewportHeight - 120)
-  await page.mouse.wheel(0, 900)
+  await scrollDesktopMainContent(page)
 
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0)
   await expect.poll(async () => (await readDesktopAppShellState(page)).mainScrollTop).toBeGreaterThan(0)
@@ -835,6 +834,33 @@ async function expectDesktopAppShellScrollsInsideMain(page: Page) {
 
   expect(Math.abs(scrolledState.sidebarTop)).toBeLessThanOrEqual(1)
   expect(Math.abs(scrolledState.sidebarHeight - scrolledState.viewportHeight)).toBeLessThanOrEqual(1)
+}
+
+async function scrollDesktopMainContent(page: Page) {
+  await page.evaluate(() => {
+    const scrollContainers = Array.from(
+      document.querySelectorAll<HTMLElement>('main section, main div'),
+    ).filter((element) => {
+      const { overflowY } = window.getComputedStyle(element)
+
+      return (
+        (overflowY === 'auto' || overflowY === 'scroll') &&
+        element.scrollHeight > element.clientHeight + 1
+      )
+    })
+    const scrollTarget = scrollContainers.reduce<HTMLElement | undefined>((currentTarget, element) => {
+      if (!currentTarget) {
+        return element
+      }
+
+      const currentScrollableHeight = currentTarget.scrollHeight - currentTarget.clientHeight
+      const nextScrollableHeight = element.scrollHeight - element.clientHeight
+
+      return nextScrollableHeight > currentScrollableHeight ? element : currentTarget
+    }, undefined)
+
+    scrollTarget?.scrollTo({ top: 160 })
+  })
 }
 
 async function readDesktopAppShellState(page: Page) {
@@ -935,6 +961,51 @@ function findTeamIssue(
   }
 
   return undefined
+}
+
+/**
+ * チーム Issue 作成フォームと詳細ペインが同じカラム内に収まっていることを検証します。
+ *
+ * @param page - レイアウト検証対象の Playwright page です。
+ */
+async function expectTeamIssueLayoutToStayInsideColumns(page: Page) {
+  await page.waitForSelector('[data-testid="create-issue-form"]', { state: 'visible' })
+  await page.waitForSelector('main > section aside', { state: 'visible' })
+
+  const result = await page.evaluate(() => {
+    const createForm = document.querySelector('[data-testid="create-issue-form"]')
+    const detailPane = document.querySelector('main > section aside')
+
+    if (!createForm || !detailPane) {
+      return {
+        detailOverflows: ['missing detail pane or create form'],
+        formOverflows: ['missing detail pane or create form'],
+      }
+    }
+
+    const detailRect = detailPane.getBoundingClientRect()
+    const formControls = Array.from(createForm.querySelectorAll('input, select, textarea, button'))
+    const detailControls = Array.from(detailPane.querySelectorAll('input, select, textarea, button'))
+    const formOverflows = formControls.flatMap((element) => {
+      const rect = element.getBoundingClientRect()
+
+      return rect.right > detailRect.left + 1
+        ? [`${element.tagName.toLowerCase()} ${Math.round(rect.right)} > ${Math.round(detailRect.left)}`]
+        : []
+    })
+    const detailOverflows = detailControls.flatMap((element) => {
+      const rect = element.getBoundingClientRect()
+
+      return rect.left < detailRect.left - 1 || rect.right > detailRect.right + 1
+        ? [`${element.tagName.toLowerCase()} ${Math.round(rect.left)}-${Math.round(rect.right)} outside ${Math.round(detailRect.left)}-${Math.round(detailRect.right)}`]
+        : []
+    })
+
+    return { detailOverflows, formOverflows }
+  })
+
+  expect(result.formOverflows).toEqual([])
+  expect(result.detailOverflows).toEqual([])
 }
 
 test.describe('authenticated task page', () => {
@@ -1085,6 +1156,9 @@ test.describe('authenticated task page', () => {
 
     await page.getByRole('button', { name: '新規 Issue' }).click()
     const createIssueForm = page.getByTestId('create-issue-form')
+    await expectTeamIssueLayoutToStayInsideColumns(page)
+    await page.setViewportSize({ width: 1800, height: 900 })
+    await expectTeamIssueLayoutToStayInsideColumns(page)
     await createIssueForm.locator('input[name="title"]').fill('割当待ち Issue')
     await createIssueForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
     await createIssueForm.getByRole('button', { name: 'Issue を作成' }).click()
@@ -1289,6 +1363,36 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('team-overview-projects').locator('p').last()).toHaveText('2')
     await expect(page.getByTestId('team-overview-open-tasks').locator('p').last()).toHaveText('0')
     await expect(page.getByTestId('team-overview-blocked').locator('p').last()).toHaveText('0')
+  })
+
+  test('設定画面でフォントサイズを変更して保存できる', async ({ page }) => {
+    await page.goto('/settings')
+
+    await expect(page.getByTestId('font-size-preference-control')).toBeVisible()
+    await expect(page.locator('html')).toHaveAttribute('data-font-size', 'standard')
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe('15px')
+    const settingsHeading = page.getByRole('heading', { name: '設定', exact: true })
+    const standardHeadingFontSize = await settingsHeading.evaluate((element) =>
+      Number.parseFloat(getComputedStyle(element).fontSize),
+    )
+
+    await page.getByTestId('font-size-preference-comfortable').click()
+
+    await expect(page.locator('html')).toHaveAttribute('data-font-size', 'comfortable')
+    await expect(page.getByTestId('font-size-preference-comfortable')).toHaveAttribute('aria-pressed', 'true')
+    await expect.poll(() => page.evaluate(() => window.localStorage.getItem('mukuroji.fontSize'))).toBe('comfortable')
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe('16px')
+    await expect.poll(() =>
+      settingsHeading.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize)),
+    ).toBeGreaterThan(standardHeadingFontSize)
+
+    await page.reload()
+
+    await expect(page.locator('html')).toHaveAttribute('data-font-size', 'comfortable')
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe('16px')
+    await page.getByRole('button', { name: 'マイタスク', exact: true }).click()
+    await expect(page).toHaveURL('/my-tasks')
+    await expect(page.getByTestId('my-tasks-kanban')).toBeVisible()
   })
 
   test('タスク画面から新規タスクを登録できる', async ({ page }) => {

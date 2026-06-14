@@ -21,28 +21,28 @@ export function DashboardPreview({ t }: DashboardPreviewProps) {
       aria-label={t('preview.aria')}
     >
       <aside className="border-r border-[rgba(214,225,238,0.82)] bg-[rgba(250,253,255,0.7)] px-4 py-6 max-[720px]:hidden">
-        <div className="mb-[26px] inline-flex items-center gap-2 text-[15px] font-extrabold text-[var(--ink)]">
+        <div className="mb-[26px] inline-flex items-center gap-2 text-base font-extrabold text-[var(--ink)]">
           <BrandMark small />
           <span>mukuroji</span>
         </div>
-        <span className="mb-2 block rounded-lg bg-[#e8f2ff] px-3 py-2.5 text-[13px] font-bold text-[#0059db]">
+        <span className="mb-2 block rounded-lg bg-[#e8f2ff] px-3 py-2.5 text-app-meta font-bold text-[#0059db]">
           {t('preview.nav.dashboard')}
         </span>
-        <span className="mb-2 block rounded-lg px-3 py-2.5 text-[13px] font-bold text-[#617086]">
+        <span className="mb-2 block rounded-lg px-3 py-2.5 text-app-meta font-bold text-[#617086]">
           {t('preview.nav.projects')}
         </span>
-        <span className="mb-2 block rounded-lg px-3 py-2.5 text-[13px] font-bold text-[#617086]">
+        <span className="mb-2 block rounded-lg px-3 py-2.5 text-app-meta font-bold text-[#617086]">
           {t('preview.nav.tasks')}
         </span>
-        <span className="mb-2 block rounded-lg px-3 py-2.5 text-[13px] font-bold text-[#617086]">
+        <span className="mb-2 block rounded-lg px-3 py-2.5 text-app-meta font-bold text-[#617086]">
           {t('preview.nav.reports')}
         </span>
       </aside>
 
       <div className="min-w-0 p-[26px] max-[720px]:p-[18px]">
-        <div className="flex items-center justify-between gap-4 text-[17px] font-extrabold text-[var(--ink)]">
+        <div className="flex items-center justify-between gap-4 text-app-preview font-extrabold text-[var(--ink)]">
           <span>{t('preview.heading')}</span>
-          <span className="text-[13px] font-bold text-[#6a778a]">
+          <span className="text-app-meta font-bold text-[#6a778a]">
             {t('preview.period')}
           </span>
         </div>
@@ -103,7 +103,7 @@ function PreviewStat({ label, value }: { label: string; value: string }) {
   return (
     <div className={`${panelCardClass} p-[18px]`}>
       <span className="text-xs font-bold text-[#6b7788]">{label}</span>
-      <strong className="mt-2 block text-[26px] leading-none text-[var(--ink)]">
+      <strong className="mt-2 block text-app-preview-stat text-[var(--ink)]">
         {value}
       </strong>
     </div>

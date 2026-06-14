@@ -745,7 +745,7 @@ export function Sidebar({
 
   return (
     <aside
-      className={`flex h-svh max-h-svh min-h-0 flex-none flex-col overflow-hidden bg-[#03172f] py-5 text-white shadow-[18px_0_38px_rgba(5,23,48,0.18)] transition-all duration-200 ${isCollapsed ? 'w-[80px] px-3' : 'w-[300px] max-w-[calc(100vw-32px)] px-4'} ${className}`}
+      className={`flex h-svh max-h-svh min-h-0 flex-none flex-col overflow-hidden bg-[#03172f] py-5 text-white shadow-[18px_0_38px_rgba(5,23,48,0.18)] transition-all duration-200 ${isCollapsed ? 'w-[76px] px-3' : 'w-[292px] max-w-[calc(100vw-32px)] px-4'} ${className}`}
       aria-label={resolvedLabels.ariaLabel}
       data-collapsed={isCollapsed}
     >
@@ -755,7 +755,7 @@ export function Sidebar({
         <div className={`flex min-w-0 items-center gap-3 ${isCollapsed ? 'justify-center' : ''}`}>
           <BrandMark />
           <span
-            className={`truncate text-[26px] font-bold leading-none tracking-normal transition-opacity ${isCollapsed ? 'sr-only' : ''}`}
+            className={`truncate text-app-brand font-bold tracking-normal transition-opacity ${isCollapsed ? 'sr-only' : ''}`}
           >
             {workspaceName}
           </span>
@@ -792,7 +792,7 @@ export function Sidebar({
       </nav>
 
       {!isCollapsed ? (
-        <div className="mt-6 flex flex-none items-center justify-between px-1 text-[14px] font-semibold text-slate-200">
+        <div className="mt-6 flex flex-none items-center justify-between px-1 text-app-meta font-semibold text-slate-200">
           <span className="truncate">{resolvedLabels.teamProjects}</span>
           {canCreate ? (
             <button
@@ -808,7 +808,7 @@ export function Sidebar({
         </div>
       ) : null}
 
-      <div className="mt-3 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
+      <div className="mt-2 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
         {!isCollapsed && canCreate && isCreatePanelOpen ? (
           <SidebarRegistrationPanel
             labels={resolvedLabels.create}
@@ -840,7 +840,7 @@ export function Sidebar({
           ))}
         </div>
         {archiveErrorMessage && !isCollapsed ? (
-          <p className="mt-3 rounded-lg border border-red-300/20 bg-red-500/12 px-3 py-2 text-[12px] font-bold leading-5 text-red-100" role="alert">
+          <p className="mt-3 rounded-lg border border-red-300/20 bg-red-500/12 px-3 py-2 text-app-caption font-bold leading-5 text-red-100" role="alert">
             {archiveErrorMessage}
           </p>
         ) : null}
@@ -963,16 +963,16 @@ function SidebarRegistrationPanel({
 
       {onCreateTeam ? (
         <form className="mt-3 grid gap-2" onSubmit={handleCreateTeam}>
-          <label className="grid gap-1.5 text-[12px] font-black text-slate-200">
+          <label className="grid gap-1.5 text-app-caption font-black text-slate-200">
             {labels.teamName}
             <input
-              className="h-9 rounded-lg border border-white/10 bg-white/95 px-3 text-[13px] font-bold text-[#0d1833] outline-none transition placeholder:text-slate-400 focus:border-blue-300 focus:ring-3 focus:ring-blue-400/20"
+              className="h-9 rounded-lg border border-white/10 bg-white/95 px-3 text-app-meta font-bold text-[#0d1833] outline-none transition placeholder:text-slate-400 focus:border-blue-300 focus:ring-3 focus:ring-blue-400/20"
               name="teamName"
               placeholder={labels.teamPlaceholder}
             />
           </label>
           <button
-            className="h-9 rounded-lg bg-blue-500 px-3 text-[13px] font-black text-white shadow-[0_10px_22px_rgba(37,99,235,0.26)] transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-slate-500"
+            className="h-9 rounded-lg bg-blue-500 px-3 text-app-meta font-black text-white shadow-[0_10px_22px_rgba(37,99,235,0.26)] transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-slate-500"
             disabled={isSavingTeam}
             type="submit"
           >
@@ -983,10 +983,10 @@ function SidebarRegistrationPanel({
 
       {onCreateProject ? (
         <form className="mt-3 grid gap-2 border-t border-white/10 pt-3" onSubmit={handleCreateProject}>
-          <label className="grid gap-1.5 text-[12px] font-black text-slate-200">
+          <label className="grid gap-1.5 text-app-caption font-black text-slate-200">
             {labels.team}
             <select
-              className="h-9 rounded-lg border border-white/10 bg-white/95 px-3 text-[13px] font-bold text-[#0d1833] outline-none transition focus:border-blue-300 focus:ring-3 focus:ring-blue-400/20"
+              className="h-9 rounded-lg border border-white/10 bg-white/95 px-3 text-app-meta font-bold text-[#0d1833] outline-none transition focus:border-blue-300 focus:ring-3 focus:ring-blue-400/20"
               name="teamId"
               disabled={teams.length === 0}
             >
@@ -997,17 +997,17 @@ function SidebarRegistrationPanel({
               ))}
             </select>
           </label>
-          <label className="grid gap-1.5 text-[12px] font-black text-slate-200">
+          <label className="grid gap-1.5 text-app-caption font-black text-slate-200">
             {labels.projectName}
             <input
-              className="h-9 rounded-lg border border-white/10 bg-white/95 px-3 text-[13px] font-bold text-[#0d1833] outline-none transition placeholder:text-slate-400 focus:border-blue-300 focus:ring-3 focus:ring-blue-400/20"
+              className="h-9 rounded-lg border border-white/10 bg-white/95 px-3 text-app-meta font-bold text-[#0d1833] outline-none transition placeholder:text-slate-400 focus:border-blue-300 focus:ring-3 focus:ring-blue-400/20"
               name="projectName"
               placeholder={labels.projectPlaceholder}
               disabled={teams.length === 0}
             />
           </label>
           <fieldset className="grid gap-2">
-            <legend className="text-[12px] font-black text-slate-200">{labels.tone}</legend>
+            <legend className="text-app-caption font-black text-slate-200">{labels.tone}</legend>
             <div className="grid grid-cols-4 gap-2">
               {projectToneOptions.map((tone) => (
                 <label
@@ -1037,10 +1037,10 @@ function SidebarRegistrationPanel({
             </div>
           </fieldset>
           {teams.length === 0 ? (
-            <p className="text-[12px] font-bold leading-5 text-slate-300">{labels.noTeams}</p>
+            <p className="text-app-caption font-bold leading-5 text-slate-300">{labels.noTeams}</p>
           ) : null}
           <button
-            className="h-9 rounded-lg bg-blue-500 px-3 text-[13px] font-black text-white shadow-[0_10px_22px_rgba(37,99,235,0.26)] transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-slate-500"
+            className="h-9 rounded-lg bg-blue-500 px-3 text-app-meta font-black text-white shadow-[0_10px_22px_rgba(37,99,235,0.26)] transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-slate-500"
             disabled={isSavingProject || teams.length === 0}
             type="submit"
           >
@@ -1050,7 +1050,7 @@ function SidebarRegistrationPanel({
       ) : null}
 
       {errorMessage ? (
-        <p className="mt-3 text-[12px] font-bold leading-5 text-red-200" role="alert">
+        <p className="mt-3 text-app-caption font-bold leading-5 text-red-200" role="alert">
           {errorMessage}
         </p>
       ) : null}
@@ -1082,7 +1082,7 @@ function NavButton({
 
   return (
     <button
-      className={`group relative flex h-[38px] w-full items-center gap-3 rounded-lg text-left text-[16px] font-medium transition hover:bg-white/10 hover:text-white ${collapsed ? 'justify-center px-0' : 'px-2'} ${
+      className={`group relative flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium transition hover:bg-white/10 hover:text-white ${collapsed ? 'justify-center px-0' : 'px-2'} ${
         active ? 'bg-blue-500/20 text-white' : 'text-slate-100'
       }`}
       type="button"
@@ -1098,7 +1098,7 @@ function NavButton({
       <span className={collapsed ? 'sr-only' : 'min-w-0 flex-1 truncate'}>{label}</span>
       {badge ? (
         <span
-          className={`grid h-6 min-w-6 place-items-center rounded-full bg-blue-500 px-2 text-[12px] font-bold leading-none text-white shadow-[0_8px_20px_rgba(37,99,235,0.42)] ${collapsed ? 'absolute right-0 top-0 h-5 min-w-5 px-1 text-[11px]' : ''}`}
+          className={`grid h-6 min-w-6 place-items-center rounded-full bg-blue-500 px-2 text-app-caption font-bold leading-none text-white shadow-[0_8px_20px_rgba(37,99,235,0.42)] ${collapsed ? 'absolute right-0 top-0 h-5 min-w-5 px-1 text-app-micro' : ''}`}
           aria-label={badgeLabel}
         >
           {badge}
@@ -1153,7 +1153,7 @@ function TeamGroup({
         ) : null}
         <div className={`flex items-center gap-1 ${collapsed ? 'justify-center' : ''}`}>
           <button
-            className={`group flex h-[38px] min-w-0 flex-1 items-center gap-3 rounded-lg py-2 text-left text-[16px] font-medium transition ${collapsed ? 'justify-center px-0' : 'pl-3 pr-2'} ${
+            className={`group flex h-9 min-w-0 flex-1 items-center gap-3 rounded-lg py-2 text-left text-app-body font-medium transition ${collapsed ? 'justify-center px-0' : 'pl-3 pr-2'} ${
               isCurrentTeam
                 ? 'bg-blue-500/20 text-white shadow-[inset_0_0_0_1px_rgba(96,165,250,0.12)]'
                 : isTeamActive || isProjectAncestor
@@ -1190,7 +1190,7 @@ function TeamGroup({
       </div>
 
       {!collapsed && expanded ? (
-        <div className="mt-2 space-y-0.5 pl-8">
+        <div className="mt-1.5 space-y-0.5 pl-8">
           <SubNavButton
             active={isTeamActive && activeTeamViewId === 'overview'}
             icon={PanelIcon}
@@ -1209,7 +1209,7 @@ function TeamGroup({
             label={labels.members}
             onClick={() => onSelectTeamView(team.id, 'members')}
           />
-          <div className="flex h-7 items-center gap-2 px-1 text-[15px] font-medium text-slate-100">
+          <div className="flex h-7 items-center gap-2 px-1 text-app-meta font-medium text-slate-100">
             <ChevronDownIcon className="h-4 w-4 flex-none" />
             <span className="truncate">{labels.projectGroup}</span>
           </div>
@@ -1249,7 +1249,7 @@ function SubNavButton({
 }) {
   return (
     <button
-      className={`relative flex h-7 w-full items-center gap-3 rounded-lg px-1 text-left text-[15px] font-medium transition hover:bg-white/10 hover:text-white ${
+      className={`relative flex h-7 w-full items-center gap-3 rounded-lg px-1 text-left text-app-meta font-medium transition hover:bg-white/10 hover:text-white ${
         active ? 'bg-blue-500/20 text-white' : 'text-slate-100'
       }`}
       type="button"
@@ -1287,7 +1287,7 @@ function ProjectButton({
   return (
     <div className="flex items-center gap-1">
       <button
-        className={`relative flex h-8 min-w-0 flex-1 items-center gap-3 rounded-lg py-2 pl-3 pr-2 text-left text-[15px] font-medium transition ${
+        className={`relative flex h-8 min-w-0 flex-1 items-center gap-3 rounded-lg py-2 pl-3 pr-2 text-left text-app-meta font-medium transition ${
           active
             ? 'bg-blue-500/20 text-white shadow-[inset_0_0_0_1px_rgba(96,165,250,0.1)]'
             : 'text-slate-100 hover:bg-white/10 hover:text-white'

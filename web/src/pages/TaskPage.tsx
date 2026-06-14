@@ -733,7 +733,7 @@ export function TaskScreen({
         />
 
         {isLoading ? (
-          <div className="grid min-h-0 flex-1 place-items-center px-6 text-base font-bold text-slate-500">
+          <div className="grid min-h-0 flex-1 place-items-center px-6 text-sm font-bold text-slate-500">
             {t('tasks.loading')}
           </div>
         ) : (
@@ -919,13 +919,13 @@ function TaskHeader({
 }) {
   return (
     <header className="flex-none border-b border-slate-200/80 bg-white/95 shadow-[0_1px_0_rgba(15,23,42,0.03)]">
-      <div className="flex min-h-[82px] items-center justify-between gap-5 px-[clamp(22px,3vw,38px)] py-3.5">
+      <div className="flex min-h-[72px] items-center justify-between gap-4 px-[clamp(20px,3vw,34px)] py-3">
         <div className="flex min-w-0 items-start gap-3">
           <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={onMobileSidebarOpen} />
           <div className="min-w-0">
             <nav
               aria-label={t('tasks.breadcrumb.aria')}
-              className="flex flex-wrap items-center gap-3 text-[15px] font-medium text-[#405174]"
+              className="flex flex-wrap items-center gap-2 text-app-meta font-medium text-[#405174]"
             >
               <span>{teamName || t('sidebar.projectGroup')}</span>
               <ChevronIcon className="h-4 w-4 -rotate-90 text-[#61708f]" />
@@ -934,9 +934,9 @@ function TaskHeader({
                 {projectName}
               </span>
             </nav>
-            <div className="mt-3 flex min-w-0 items-center gap-4">
+            <div className="mt-2 flex min-w-0 items-center gap-3">
               <h1
-                className="truncate text-[clamp(28px,2.6vw,38px)] font-black leading-none tracking-normal text-[#0d1833]"
+                className="truncate text-page-title font-black tracking-normal text-[#0d1833]"
                 data-testid="tasks-heading"
               >
                 {projectName}
@@ -953,7 +953,7 @@ function TaskHeader({
 
         <div className="flex flex-none items-center gap-3 max-[860px]:hidden">
           <button
-            className="inline-flex h-12 items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 text-sm font-black text-[#0d1833] shadow-[0_8px_18px_rgba(30,52,88,0.04)] transition hover:border-blue-500 hover:text-blue-600"
+            className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-300 bg-white px-3.5 text-sm font-black text-[#0d1833] shadow-[0_8px_18px_rgba(30,52,88,0.04)] transition hover:border-blue-500 hover:text-blue-600"
             type="button"
           >
             <UsersMiniIcon />
@@ -961,7 +961,7 @@ function TaskHeader({
           </button>
           <button
             aria-expanded={isCreateTaskOpen}
-            className="inline-flex h-12 items-center gap-3 rounded-lg bg-blue-600 px-5 text-sm font-black text-white shadow-[0_14px_30px_rgba(37,99,235,0.28)] transition hover:bg-blue-500"
+            className="inline-flex h-10 items-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-black text-white shadow-[0_12px_24px_rgba(37,99,235,0.24)] transition hover:bg-blue-500"
             onClick={() => onCreateTaskOpenChange(!isCreateTaskOpen)}
             type="button"
           >
@@ -974,19 +974,19 @@ function TaskHeader({
           </IconButton>
           <div
             aria-label={t('tasks.userAvatar')}
-            className="grid h-12 w-12 place-items-center rounded-full bg-blue-100 text-base font-black text-blue-700"
+            className="grid h-10 w-10 place-items-center rounded-full bg-blue-100 text-sm font-black text-blue-700"
           >
             {userInitial}
           </div>
         </div>
       </div>
 
-      <div className="flex items-end justify-between gap-5 overflow-x-auto px-[clamp(22px,3vw,38px)]">
+      <div className="flex items-end justify-between gap-4 overflow-x-auto px-[clamp(20px,3vw,34px)]">
         <div aria-label={t('tasks.tabs.aria')} className="flex min-w-max items-center gap-1" role="tablist">
           {taskTabs.map((tab) => (
             <button
               aria-selected={activeTab === tab}
-              className={`relative inline-flex h-[66px] items-center gap-2 px-5 text-sm font-black transition ${
+              className={`relative inline-flex h-[54px] items-center gap-2 px-4 text-xs font-black transition ${
                 activeTab === tab ? 'text-blue-600' : 'text-[#405174] hover:text-blue-600'
               }`}
               key={tab}
@@ -1081,7 +1081,7 @@ function TaskWorkspace({
 
   if (activeTab === 'permissions') {
     return (
-      <div className="px-[clamp(22px,3vw,38px)] py-7">
+      <div className="px-[clamp(20px,3vw,34px)] py-6">
         <ProjectPermissionsPanel
           canManageMembers={canManageProjectMembers}
           errorMessage={projectMembersErrorMessage}
@@ -1106,7 +1106,7 @@ function TaskWorkspace({
   }
 
   return (
-    <div className="px-[clamp(22px,3vw,38px)] py-7">
+    <div className="px-[clamp(20px,3vw,34px)] py-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex flex-wrap items-center gap-3">
           <label className="relative block">
@@ -1114,7 +1114,7 @@ function TaskWorkspace({
             <SearchIcon className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-[#526381]" />
             <input
               aria-label={t('tasks.search')}
-              className="h-12 w-[min(280px,calc(100vw-52px))] rounded-lg border border-slate-300 bg-white pl-12 pr-4 text-sm font-bold text-[#0d1833] shadow-[0_8px_18px_rgba(30,52,88,0.04)] outline-none transition placeholder:text-[#71809a] focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              className="h-10 w-[min(260px,calc(100vw-52px))] rounded-lg border border-slate-300 bg-white pl-11 pr-3.5 text-sm font-bold text-[#0d1833] shadow-[0_8px_18px_rgba(30,52,88,0.04)] outline-none transition placeholder:text-[#71809a] focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
               onChange={(event) => onSearchQueryChange(event.target.value)}
               placeholder={t('tasks.search')}
               type="search"
@@ -1172,7 +1172,7 @@ function TaskWorkspace({
             </span>
           </p>
           <button
-            className="inline-flex h-12 items-center gap-3 rounded-lg border border-slate-200 bg-white px-5 text-sm font-black text-[#0d1833] shadow-[0_10px_24px_rgba(30,52,88,0.04)] transition hover:border-blue-500 hover:text-blue-600"
+            className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-black text-[#0d1833] shadow-[0_10px_24px_rgba(30,52,88,0.04)] transition hover:border-blue-500 hover:text-blue-600"
             type="button"
           >
             <SettingsMiniIcon />
@@ -1745,12 +1745,12 @@ function SummaryCard({ t, tasks }: { t: (key: MessageKey) => string; tasks: Proj
   return (
     <section
       aria-label={t('tasks.summary.aria')}
-      className="mb-4 flex min-w-[500px] items-center rounded-lg border border-slate-200 bg-white px-5 py-4 shadow-[0_18px_42px_rgba(30,52,88,0.08)] max-[1280px]:hidden"
+      className="mb-3 flex min-w-[440px] items-center rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-[0_14px_32px_rgba(30,52,88,0.07)] max-[1280px]:hidden"
     >
       {projectMetrics.map((metric) => (
         <div className="min-w-[120px] border-r border-slate-200 px-2" key={metric.labelKey}>
-          <p className="text-sm font-black text-[#263550]">{t(metric.labelKey)}</p>
-          <p className="mt-2 text-3xl font-black leading-none text-blue-600">{metric.value}</p>
+          <p className="text-xs font-black text-[#263550]">{t(metric.labelKey)}</p>
+          <p className="mt-1.5 text-2xl font-black leading-none text-blue-600">{metric.value}</p>
           <div className="mt-3 h-1 rounded-full bg-slate-200">
             <div
               className={`h-1 rounded-full ${metric.accentClassName}`}
@@ -1760,17 +1760,17 @@ function SummaryCard({ t, tasks }: { t: (key: MessageKey) => string; tasks: Proj
         </div>
       ))}
       <div className="px-5">
-        <p className="text-sm font-black text-[#263550]">{t('tasks.metric.completionRate')}</p>
-        <p className="mt-2 text-3xl font-black leading-none text-[#0d1833]">{completionRate}%</p>
+        <p className="text-xs font-black text-[#263550]">{t('tasks.metric.completionRate')}</p>
+        <p className="mt-1.5 text-2xl font-black leading-none text-[#0d1833]">{completionRate}%</p>
       </div>
-      <div className="relative h-[72px] w-[72px]">
+      <div className="relative h-[60px] w-[60px]">
         <div
           className="absolute inset-0 rounded-full"
           style={{
             background: `conic-gradient(#2563eb 0 ${completionRate}%, #dce2ea ${completionRate}% 100%)`,
           }}
         />
-        <div className="absolute inset-[11px] rounded-full bg-white" />
+        <div className="absolute inset-[9px] rounded-full bg-white" />
       </div>
     </section>
   )
@@ -1801,7 +1801,7 @@ function FilterButton({
       aria-expanded={ariaExpanded}
       aria-haspopup={ariaHaspopup}
       aria-label={label}
-      className={`inline-flex h-12 min-w-[128px] items-center justify-between gap-3 rounded-lg border bg-white px-4 text-sm font-black shadow-[0_10px_24px_rgba(30,52,88,0.04)] transition ${
+      className={`inline-flex h-10 min-w-[112px] items-center justify-between gap-2 rounded-lg border bg-white px-3.5 text-sm font-black shadow-[0_10px_24px_rgba(30,52,88,0.04)] transition ${
         active
           ? 'border-blue-500 text-blue-700'
           : 'border-slate-200 text-[#0d1833] hover:border-blue-500 hover:text-blue-600'
@@ -1846,7 +1846,7 @@ function TaskRow({
 
   return (
     <tr
-      className="border-b border-slate-200 text-[15px] font-bold text-[#0d1833] last:border-b-0 hover:bg-blue-50/40"
+      className="border-b border-slate-200 text-app-body font-bold text-[#0d1833] last:border-b-0 hover:bg-blue-50/40"
       data-selected={selected ? 'true' : 'false'}
       data-testid={`task-row-${task.id}`}
     >
@@ -1869,7 +1869,7 @@ function TaskRow({
       </td>
       <td className="px-4 py-3.5">{resolveTaskAssignee(task, t)}</td>
       <td className="px-4 py-3.5">
-        <span className={`inline-flex rounded-lg px-4 py-2 text-sm font-black ${statusClasses[task.status]}`}>
+        <span className={`inline-flex rounded-lg px-3 py-1.5 text-xs font-black ${statusClasses[task.status]}`}>
           {t(`tasks.status.${task.status}`)}
         </span>
       </td>
@@ -1882,7 +1882,7 @@ function TaskRow({
       </td>
       <td className="px-4 py-3.5">
         <span
-          className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-black ${priorityClasses[task.priority]}`}
+          className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-black ${priorityClasses[task.priority]}`}
         >
           <FlagIcon className="h-4 w-4" />
           {t(`tasks.priority.${task.priority}`)}
@@ -1975,7 +1975,7 @@ function IconButton({
   return (
     <button
       aria-label={label}
-      className={`grid h-12 w-12 place-items-center text-[#334463] transition hover:bg-slate-100 hover:text-blue-600 ${
+      className={`grid h-10 w-10 place-items-center text-[#334463] transition hover:bg-slate-100 hover:text-blue-600 ${
         rounded ? 'rounded-full' : 'rounded-lg'
       }`}
       type="button"
@@ -1987,7 +1987,7 @@ function IconButton({
 
 function ProjectGlyph() {
   return (
-    <span className="grid h-5 w-5 place-items-center rounded-md border border-blue-500 text-[11px] font-black text-blue-600">
+    <span className="grid h-5 w-5 place-items-center rounded-md border border-blue-500 text-app-micro font-black text-blue-600">
       P
     </span>
   )

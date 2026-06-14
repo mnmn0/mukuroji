@@ -44,7 +44,7 @@ export function PlaceholderPage({
           <BrandMark />
           <span>mukuroji</span>
         </div>
-        <h1 className="mt-8 text-[34px] font-black leading-tight text-[var(--ink)]">
+        <h1 className="mt-8 text-placeholder-title font-black text-[var(--ink)]">
           {t(titleKey)}
         </h1>
         <p className="mt-4 text-base font-bold leading-relaxed text-[var(--muted)]">
