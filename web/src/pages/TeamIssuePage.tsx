@@ -432,7 +432,7 @@ export function TeamIssueScreen({
   )
 
   return (
-    <main className="flex min-h-svh overflow-hidden bg-[#f6f9fd] text-[#0d1833]">
+    <main className="flex h-svh min-h-0 overflow-hidden bg-[#f6f9fd] text-[#0d1833]">
       <Sidebar
         activeTeamId={teamId}
         activeTeamViewId="issues"
@@ -479,8 +479,8 @@ export function TeamIssueScreen({
         />
       </MobileSidebarDrawer>
 
-      <section className="min-w-0 flex-1 overflow-auto bg-[#fbfdff]">
-        <header className="border-b border-slate-200 bg-white px-[clamp(20px,3vw,34px)] py-4">
+      <section className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[#fbfdff]">
+        <header className="flex-none border-b border-slate-200 bg-white px-[clamp(20px,3vw,34px)] py-4">
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
             <div className="flex min-w-0 items-start gap-3">
               <MobileSidebarButton
@@ -519,105 +519,107 @@ export function TeamIssueScreen({
         </header>
 
         {isLoading ? (
-          <div className="grid min-h-[420px] place-items-center px-6 text-sm font-bold text-[#526381]">
+          <div className="grid min-h-0 flex-1 place-items-center px-6 text-sm font-bold text-[#526381]">
             {t('issues.loading')}
           </div>
         ) : (
-          <div className="grid min-h-[calc(100svh-120px)] grid-cols-[minmax(0,1fr)_minmax(340px,430px)] gap-0 max-[1080px]:grid-cols-1">
-            <section className="min-w-0 px-[clamp(20px,3vw,34px)] py-5">
-              {isCreateOpen ? (
-                <CreateIssuePanel
-                  assigneeOptions={assigneeOptions}
-                  errorMessage={createErrorMessage}
-                  onCancel={() => {
-                    setCreateErrorMessage(undefined)
-                    setIsCreateOpen(false)
-                  }}
-                  onSubmit={async (input) => {
-                    if (!onCreateIssue) {
-                      return
-                    }
-
-                    setCreateErrorMessage(undefined)
-
-                    try {
-                      await onCreateIssue(input)
+          <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
+            <div className="grid min-h-full grid-cols-[minmax(0,1fr)_minmax(340px,430px)] gap-0 max-[1080px]:grid-cols-1">
+              <section className="min-w-0 px-[clamp(20px,3vw,34px)] py-5">
+                {isCreateOpen ? (
+                  <CreateIssuePanel
+                    assigneeOptions={assigneeOptions}
+                    errorMessage={createErrorMessage}
+                    onCancel={() => {
+                      setCreateErrorMessage(undefined)
                       setIsCreateOpen(false)
-                    } catch (error) {
-                      setCreateErrorMessage(error instanceof Error ? error.message : t('issues.error.create'))
-                    }
-                  }}
-                  projects={activeTeam?.projects ?? []}
+                    }}
+                    onSubmit={async (input) => {
+                      if (!onCreateIssue) {
+                        return
+                      }
+
+                      setCreateErrorMessage(undefined)
+
+                      try {
+                        await onCreateIssue(input)
+                        setIsCreateOpen(false)
+                      } catch (error) {
+                        setCreateErrorMessage(error instanceof Error ? error.message : t('issues.error.create'))
+                      }
+                    }}
+                    projects={activeTeam?.projects ?? []}
+                    t={t}
+                  />
+                ) : null}
+                <IssueToolbar
+                  onSearchQueryChange={setSearchQuery}
+                  onStatusFilterChange={setStatusFilter}
+                  onViewModeChange={setViewMode}
+                  searchQuery={searchQuery}
+                  statusFilter={statusFilter}
                   t={t}
+                  viewMode={viewMode}
                 />
-              ) : null}
-              <IssueToolbar
-                onSearchQueryChange={setSearchQuery}
-                onStatusFilterChange={setStatusFilter}
-                onViewModeChange={setViewMode}
-                searchQuery={searchQuery}
-                statusFilter={statusFilter}
+                {issueErrorMessage ? (
+                  <p className="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700">
+                    {issueErrorMessage}
+                  </p>
+                ) : null}
+                {viewMode === 'table' ? (
+                  <IssueTable
+                    activeTeam={activeTeam}
+                    issues={visibleIssues}
+                    onSelectIssue={onSelectIssue}
+                    selectedIssueId={selectedIssueId}
+                    t={t}
+                  />
+                ) : (
+                  <IssueBoard
+                    activeTeam={activeTeam}
+                    issues={visibleIssues}
+                    onSelectIssue={onSelectIssue}
+                    selectedIssueId={selectedIssueId}
+                    t={t}
+                  />
+                )}
+              </section>
+              <IssueDetailPane
+                activity={activity}
+                assigneeOptions={assigneeOptions}
+                comments={comments}
+                detailErrorMessage={detailErrorMessage ?? detailErrorMessageLocal}
+                issue={selectedIssue}
+                onCreateComment={async (issueId, body) => {
+                  if (!onCreateComment) {
+                    return
+                  }
+
+                  setDetailErrorMessageLocal(undefined)
+
+                  try {
+                    await onCreateComment(issueId, body)
+                  } catch (error) {
+                    setDetailErrorMessageLocal(error instanceof Error ? error.message : t('issues.error.comment'))
+                  }
+                }}
+                onUpdateIssue={async (issueId, input) => {
+                  if (!onUpdateIssue) {
+                    return
+                  }
+
+                  setDetailErrorMessageLocal(undefined)
+
+                  try {
+                    await onUpdateIssue(issueId, input)
+                  } catch (error) {
+                    setDetailErrorMessageLocal(error instanceof Error ? error.message : t('issues.error.update'))
+                  }
+                }}
+                projects={activeTeam?.projects ?? []}
                 t={t}
-                viewMode={viewMode}
               />
-              {issueErrorMessage ? (
-                <p className="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700">
-                  {issueErrorMessage}
-                </p>
-              ) : null}
-              {viewMode === 'table' ? (
-                <IssueTable
-                  activeTeam={activeTeam}
-                  issues={visibleIssues}
-                  onSelectIssue={onSelectIssue}
-                  selectedIssueId={selectedIssueId}
-                  t={t}
-                />
-              ) : (
-                <IssueBoard
-                  activeTeam={activeTeam}
-                  issues={visibleIssues}
-                  onSelectIssue={onSelectIssue}
-                  selectedIssueId={selectedIssueId}
-                  t={t}
-                />
-              )}
-            </section>
-            <IssueDetailPane
-              activity={activity}
-              assigneeOptions={assigneeOptions}
-              comments={comments}
-              detailErrorMessage={detailErrorMessage ?? detailErrorMessageLocal}
-              issue={selectedIssue}
-              onCreateComment={async (issueId, body) => {
-                if (!onCreateComment) {
-                  return
-                }
-
-                setDetailErrorMessageLocal(undefined)
-
-                try {
-                  await onCreateComment(issueId, body)
-                } catch (error) {
-                  setDetailErrorMessageLocal(error instanceof Error ? error.message : t('issues.error.comment'))
-                }
-              }}
-              onUpdateIssue={async (issueId, input) => {
-                if (!onUpdateIssue) {
-                  return
-                }
-
-                setDetailErrorMessageLocal(undefined)
-
-                try {
-                  await onUpdateIssue(issueId, input)
-                } catch (error) {
-                  setDetailErrorMessageLocal(error instanceof Error ? error.message : t('issues.error.update'))
-                }
-              }}
-              projects={activeTeam?.projects ?? []}
-              t={t}
-            />
+            </div>
           </div>
         )}
       </section>
@@ -957,7 +959,7 @@ function IssueDetailPane({
 }) {
   if (!issue) {
     return (
-      <aside className="min-w-0 border-l border-slate-200 bg-white px-6 py-7 max-[1080px]:border-l-0 max-[1080px]:border-t">
+      <aside className="min-h-0 min-w-0 border-l border-slate-200 bg-white px-6 py-7 max-[1080px]:border-l-0 max-[1080px]:border-t">
         <p className="text-sm font-bold text-[#526381]">{t('issues.detail.empty')}</p>
       </aside>
     )
@@ -967,7 +969,7 @@ function IssueDetailPane({
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === issue.assigneeUserId)
 
   return (
-    <aside className="min-h-0 min-w-0 overflow-auto border-l border-slate-200 bg-white px-6 py-7 max-[1080px]:border-l-0 max-[1080px]:border-t">
+    <aside className="min-h-0 min-w-0 border-l border-slate-200 bg-white px-6 py-7 max-[1080px]:border-l-0 max-[1080px]:border-t">
       <form
         className="grid min-w-0 gap-4"
         key={issue.id}

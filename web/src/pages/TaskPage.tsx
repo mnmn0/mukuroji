@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import useSWR from 'swr'
@@ -630,6 +630,7 @@ export function TaskScreen({
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false)
   const [createTaskError, setCreateTaskError] = useState<string | undefined>()
   const [isCreatingTask, setIsCreatingTask] = useState(false)
+  const taskContentRef = useRef<HTMLDivElement>(null)
   const resolvedProjectName = projectName ?? projectId
   const resolvedActiveTeam = findTeamForProject(teams, projectId, activeProjectTeamId)
   const resolvedActiveTeamId = activeProjectTeamId ?? resolvedActiveTeam?.id
@@ -659,6 +660,12 @@ export function TaskScreen({
     [searchQuery, statusFilter, t, tasks],
   )
 
+  useEffect(() => {
+    if (isCreateTaskOpen) {
+      taskContentRef.current?.scrollTo({ top: 0 })
+    }
+  }, [isCreateTaskOpen])
+
   const updateTaskSelection = (taskId: string, selected: boolean) => {
     setSelectedTaskIds((currentTaskIds) =>
       selected
@@ -668,7 +675,7 @@ export function TaskScreen({
   }
 
   return (
-    <main className="flex min-h-svh overflow-hidden bg-[#f6f9fd] text-[#0d1833]">
+    <main className="flex h-svh min-h-0 overflow-hidden bg-[#f6f9fd] text-[#0d1833]">
       <Sidebar
         activeProjectId={projectId}
         activeProjectTeamId={resolvedActiveTeamId}
@@ -718,7 +725,7 @@ export function TaskScreen({
         />
       </MobileSidebarDrawer>
 
-      <section className="flex min-w-0 flex-1 flex-col bg-white/80">
+      <section className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white/80">
         <TaskHeader
           activeTab={activeTab}
           isCreateTaskOpen={isCreateTaskOpen}
@@ -733,11 +740,15 @@ export function TaskScreen({
         />
 
         {isLoading ? (
-          <div className="grid min-h-[360px] place-items-center px-6 text-base font-bold text-slate-500">
+          <div className="grid min-h-0 flex-1 place-items-center px-6 text-sm font-bold text-slate-500">
             {t('tasks.loading')}
           </div>
         ) : (
-          <>
+          <div
+            className="min-h-0 flex-1 overflow-auto overscroll-contain bg-[#fbfdff]"
+            data-testid="task-main-scroll"
+            ref={taskContentRef}
+          >
             {isCreateTaskOpen ? (
               <CreateTaskPanel
                 assigneeErrorMessage={assigneeErrorMessage}
@@ -803,7 +814,7 @@ export function TaskScreen({
               taskErrorMessage={taskErrorMessage}
               tasks={visibleTasks}
             />
-          </>
+          </div>
         )}
       </section>
     </main>
@@ -918,7 +929,7 @@ function TaskHeader({
   userInitial: string
 }) {
   return (
-    <header className="border-b border-slate-200/80 bg-white/95 shadow-[0_1px_0_rgba(15,23,42,0.03)]">
+    <header className="flex-none border-b border-slate-200/80 bg-white/95 shadow-[0_1px_0_rgba(15,23,42,0.03)]">
       <div className="flex min-h-[72px] items-center justify-between gap-4 px-[clamp(20px,3vw,34px)] py-3">
         <div className="flex min-w-0 items-start gap-3">
           <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={onMobileSidebarOpen} />
@@ -1081,7 +1092,7 @@ function TaskWorkspace({
 
   if (activeTab === 'permissions') {
     return (
-      <div className="min-h-0 flex-1 overflow-auto bg-[#fbfdff] px-[clamp(22px,3vw,38px)] py-7">
+      <div className="px-[clamp(20px,3vw,34px)] py-6">
         <ProjectPermissionsPanel
           canManageMembers={canManageProjectMembers}
           errorMessage={projectMembersErrorMessage}
@@ -1106,7 +1117,7 @@ function TaskWorkspace({
   }
 
   return (
-    <div className="min-h-0 flex-1 overflow-auto bg-[#fbfdff] px-[clamp(20px,3vw,34px)] py-6">
+    <div className="px-[clamp(20px,3vw,34px)] py-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex flex-wrap items-center gap-3">
           <label className="relative block">

@@ -497,7 +497,7 @@ export function WorkspaceScreen({
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
 
   return (
-    <main className="flex min-h-svh overflow-hidden bg-[#f5f8fc] text-[#0d1833]">
+    <main className="flex h-svh min-h-0 overflow-hidden bg-[#f5f8fc] text-[#0d1833]">
       <Sidebar
         activeNavId={metadata.activeNavId}
         activeTeamId={metadata.activeTeamViewId ? activeTeam?.id : undefined}
@@ -547,8 +547,8 @@ export function WorkspaceScreen({
         />
       </MobileSidebarDrawer>
 
-      <section className="min-w-0 flex-1 overflow-auto">
-        <header className="border-b border-slate-200 bg-white px-[clamp(20px,3vw,34px)] py-4">
+      <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="flex-none border-b border-slate-200 bg-white px-[clamp(20px,3vw,34px)] py-4">
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
             <div className="flex min-w-0 items-start gap-3">
               <MobileSidebarButton
@@ -592,22 +592,24 @@ export function WorkspaceScreen({
         </header>
 
         {isLoading ? (
-          <div className="grid min-h-[420px] place-items-center px-6 text-sm font-bold text-[#526381]">
+          <div className="grid min-h-0 flex-1 place-items-center px-6 text-sm font-bold text-[#526381]">
             {t('workspace.loading')}
           </div>
         ) : (
-          <WorkspaceBody
-            activeTeam={activeTeam}
-            fontSizePreference={fontSizePreference}
-            summary={summary}
-            t={t}
-            taskMoveErrorMessage={taskMoveErrorMessage}
-            tasks={tasks}
-            teams={teams}
-            onFontSizePreferenceChange={onFontSizePreferenceChange}
-            onMoveTaskStatus={onMoveTaskStatus}
-            view={view}
-          />
+          <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
+            <WorkspaceBody
+              activeTeam={activeTeam}
+              fontSizePreference={fontSizePreference}
+              summary={summary}
+              t={t}
+              taskMoveErrorMessage={taskMoveErrorMessage}
+              tasks={tasks}
+              teams={teams}
+              onFontSizePreferenceChange={onFontSizePreferenceChange}
+              onMoveTaskStatus={onMoveTaskStatus}
+              view={view}
+            />
+          </div>
         )}
       </section>
     </main>

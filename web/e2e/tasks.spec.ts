@@ -813,6 +813,85 @@ function recordProjectTaskRequest(requestCounts: MockRequestCounts, projectId: s
   requestCounts.projectTasks[projectId] = (requestCounts.projectTasks[projectId] ?? 0) + 1
 }
 
+async function expectDesktopAppShellScrollsInsideMain(page: Page) {
+  await expect(page.getByLabel('メインサイドバー')).toBeVisible()
+  await expect.poll(
+    async () => (await readDesktopAppShellState(page)).hasScrollableMainContent,
+  ).toBe(true)
+
+  const initialState = await readDesktopAppShellState(page)
+
+  expect(Math.abs(initialState.sidebarTop)).toBeLessThanOrEqual(1)
+  expect(Math.abs(initialState.sidebarHeight - initialState.viewportHeight)).toBeLessThanOrEqual(1)
+  expect(Math.abs(initialState.mainHeight - initialState.viewportHeight)).toBeLessThanOrEqual(1)
+
+  await scrollDesktopMainContent(page)
+
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0)
+  await expect.poll(async () => (await readDesktopAppShellState(page)).mainScrollTop).toBeGreaterThan(0)
+
+  const scrolledState = await readDesktopAppShellState(page)
+
+  expect(Math.abs(scrolledState.sidebarTop)).toBeLessThanOrEqual(1)
+  expect(Math.abs(scrolledState.sidebarHeight - scrolledState.viewportHeight)).toBeLessThanOrEqual(1)
+}
+
+async function scrollDesktopMainContent(page: Page) {
+  await page.evaluate(() => {
+    const scrollContainers = Array.from(
+      document.querySelectorAll<HTMLElement>('main section, main div'),
+    ).filter((element) => {
+      const { overflowY } = window.getComputedStyle(element)
+
+      return (
+        (overflowY === 'auto' || overflowY === 'scroll') &&
+        element.scrollHeight > element.clientHeight + 1
+      )
+    })
+    const scrollTarget = scrollContainers.reduce<HTMLElement | undefined>((currentTarget, element) => {
+      if (!currentTarget) {
+        return element
+      }
+
+      const currentScrollableHeight = currentTarget.scrollHeight - currentTarget.clientHeight
+      const nextScrollableHeight = element.scrollHeight - element.clientHeight
+
+      return nextScrollableHeight > currentScrollableHeight ? element : currentTarget
+    }, undefined)
+
+    scrollTarget?.scrollTo({ top: 160 })
+  })
+}
+
+async function readDesktopAppShellState(page: Page) {
+  return page.evaluate(() => {
+    const sidebar = document.querySelector<HTMLElement>('aside[aria-label="メインサイドバー"]')
+    const main = document.querySelector<HTMLElement>('main')
+    const scrollContainers = Array.from(
+      document.querySelectorAll<HTMLElement>('main section, main div'),
+    ).filter((element) => {
+      const { overflowY } = window.getComputedStyle(element)
+
+      return (
+        (overflowY === 'auto' || overflowY === 'scroll') &&
+        element.scrollHeight > element.clientHeight + 1
+      )
+    })
+    const sidebarRect = sidebar?.getBoundingClientRect()
+    const mainRect = main?.getBoundingClientRect()
+
+    return {
+      hasScrollableMainContent: scrollContainers.length > 0,
+      mainHeight: mainRect?.height ?? 0,
+      mainScrollTop: Math.max(0, ...scrollContainers.map((element) => element.scrollTop)),
+      sidebarHeight: sidebarRect?.height ?? 0,
+      sidebarTop: sidebarRect?.top ?? Number.NaN,
+      viewportHeight: window.innerHeight,
+      viewportWidth: window.innerWidth,
+    }
+  })
+}
+
 function toIssueFromTask(task: ProjectTask, teamId: string, assignedProjectId: string): TeamIssue {
   return {
     id: task.id,
@@ -978,6 +1057,60 @@ test.describe('authenticated task page', () => {
 
     await expect(page.getByLabel('メインサイドバー')).toHaveAttribute('data-collapsed', 'true')
     await expect(page.getByRole('button', { name: 'サイドバーを展開する' })).toBeVisible()
+  })
+
+  test('サイドバーと main 領域のスクロール境界がずれない', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 640 })
+    await page.goto('/dashboard')
+
+    await expectDesktopAppShellScrollsInsideMain(page)
+
+    await page.goto('/projects/refero/tasks')
+    await expect(page.getByTestId('tasks-heading')).toBeVisible()
+
+    await expectDesktopAppShellScrollsInsideMain(page)
+
+    await page.goto('/teams/core-team/issues')
+    await expect(page.getByTestId('team-issues-heading')).toBeVisible()
+    await page.getByTestId('issue-row-wireframe').click()
+
+    await expectDesktopAppShellScrollsInsideMain(page)
+  })
+
+  test('モバイルサイドバーは viewport 内に収まり body をスクロールさせない', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/dashboard')
+
+    await page.getByRole('button', { name: 'サイドバーを開く' }).click()
+
+    const drawer = page.getByRole('dialog', { name: 'モバイルサイドバー' })
+    const sidebar = page.locator('aside[aria-label="メインサイドバー"]:visible')
+
+    await expect(drawer).toBeVisible()
+    await expect(sidebar).toBeVisible()
+
+    const drawerState = await sidebar.evaluate((element) => {
+      const rect = element.getBoundingClientRect()
+
+      return {
+        bodyOverflow: window.getComputedStyle(document.body).overflow,
+        height: rect.height,
+        top: rect.top,
+        viewportHeight: window.innerHeight,
+        viewportWidth: window.innerWidth,
+        width: rect.width,
+      }
+    })
+
+    expect(drawerState.bodyOverflow).toBe('hidden')
+    expect(Math.abs(drawerState.top)).toBeLessThanOrEqual(1)
+    expect(Math.abs(drawerState.height - drawerState.viewportHeight)).toBeLessThanOrEqual(1)
+    expect(drawerState.width).toBeLessThanOrEqual(drawerState.viewportWidth - 32)
+
+    await page.mouse.move(180, 620)
+    await page.mouse.wheel(0, 700)
+
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0)
   })
 
   test('DB のチーム別プロジェクトをサイドバーに表示し、選択したプロジェクトのタスクへ遷移する', async ({
@@ -1274,6 +1407,23 @@ test.describe('authenticated task page', () => {
 
     await expect(page.getByTestId('task-row-new-task').getByText('新規タスク')).toBeVisible()
     expect(requestCounts.issueCreates).toBe(1)
+  })
+
+  test('タスク本文をスクロール後に新規タスクを開いても作成パネルを表示する', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 520 })
+    await page.goto('/projects/refero/tasks')
+
+    const mainScroll = page.getByTestId('task-main-scroll')
+
+    await mainScroll.evaluate((element) => {
+      element.scrollTo({ top: element.scrollHeight })
+    })
+    await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+
+    await page.getByRole('button', { name: '新規タスク' }).click()
+
+    await expect(page.locator('input[name="title"]')).toBeVisible()
+    await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBe(0)
   })
 
   test('担当者を選択しない新規タスク登録は送信しない', async ({ page }) => {
