@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react'
-import type { ComponentType, FormEvent, ReactNode } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
+import type { ComponentType, FormEvent, ReactNode, RefObject } from 'react'
 import { BrandMark } from '../BrandMark'
 
 /**
@@ -75,13 +75,30 @@ export type SidebarNavId =
 export type SidebarTeamViewId = 'overview' | 'issues' | 'members'
 
 /**
- * サイドバー内の新規登録フォームで使う表示文言です。
+ * 新規作成モーダルで選択できる作成対象です。
+ */
+type SidebarCreateMode = 'team' | 'project'
+
+/**
+ * 新規登録モーダルで使う表示文言です。
  */
 export type SidebarCreateLabels = {
   /**
-   * 新規登録パネルの見出しです。
+   * 新規登録モーダルの見出しです。
    */
   title: string
+  /**
+   * 新規登録モーダルを閉じるボタンの文言です。
+   */
+  close: string
+  /**
+   * チーム作成タブの文言です。
+   */
+  teamMode: string
+  /**
+   * プロジェクト作成タブの文言です。
+   */
+  projectMode: string
   /**
    * チーム名入力のラベルです。
    */
@@ -199,7 +216,7 @@ export type SidebarLabels = {
    */
   createTeam: string
   /**
-   * チーム/プロジェクト新規登録フォームの文言です。
+   * チーム/プロジェクト新規登録モーダルの文言です。
    */
   create: SidebarCreateLabels
   /**
@@ -301,7 +318,7 @@ export type SidebarProps = {
    */
   defaultCollapsed?: boolean
   /**
-   * 非制御時に初期表示で新規登録パネルを開くかどうかです。
+   * 非制御時に初期表示で新規登録モーダルを開くかどうかです。
    */
   defaultCreatePanelOpen?: boolean
   /**
@@ -402,6 +419,9 @@ const defaultLabels: SidebarLabels = {
   createTeam: 'チームを追加',
   create: {
     title: '新規登録',
+    close: '閉じる',
+    teamMode: 'チーム',
+    projectMode: 'プロジェクト',
     teamName: 'チーム名',
     teamPlaceholder: '例: カスタマーサクセス',
     projectName: 'プロジェクト名',
@@ -464,7 +484,7 @@ type PartialSidebarLabels = Partial<Omit<SidebarLabels, 'archive' | 'create' | '
 }
 
 /**
- * 新規登録フォームの既定文言を部分的に上書きする入力です。
+ * 新規登録モーダルの既定文言を部分的に上書きする入力です。
  */
 type PartialSidebarCreateLabels = Partial<Omit<SidebarCreateLabels, 'toneLabels'>> & {
   /**
@@ -488,6 +508,22 @@ const projectToneSwatchClasses: Record<SidebarProjectTone, string> = {
 }
 
 const projectToneOptions = ['blue', 'purple', 'green', 'yellow'] as const
+
+function resolveDefaultCreateMode(
+  teams: SidebarTeam[],
+  onCreateTeam: SidebarProps['onCreateTeam'],
+  onCreateProject: SidebarProps['onCreateProject'],
+): SidebarCreateMode {
+  if (onCreateProject && teams.length > 0) {
+    return 'project'
+  }
+
+  if (onCreateTeam) {
+    return 'team'
+  }
+
+  return 'project'
+}
 
 /**
  * チームとプロジェクト階層を含むアプリ共通サイドバーです。
@@ -540,7 +576,10 @@ export function Sidebar({
     teams.filter((team) => team.expanded ?? team.id === initialTeamId).map((team) => team.id)
 
   const [internalCollapsed, setInternalCollapsed] = useState(defaultCollapsed)
-  const [isCreatePanelOpen, setIsCreatePanelOpen] = useState(defaultCreatePanelOpen)
+  const [createModalDefaultMode, setCreateModalDefaultMode] = useState<SidebarCreateMode>(() =>
+    resolveDefaultCreateMode(teams, onCreateTeam, onCreateProject),
+  )
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(defaultCreatePanelOpen)
   const [internalActiveNavId, setInternalActiveNavId] = useState<SidebarNavId | undefined>(
     defaultActiveNavId,
   )
@@ -560,6 +599,7 @@ export function Sidebar({
   const [internalCollapsedTeamIds, setInternalCollapsedTeamIds] = useState<string[]>([])
   const [archivingItemKey, setArchivingItemKey] = useState<string | undefined>()
   const [archiveErrorMessage, setArchiveErrorMessage] = useState<string | undefined>()
+  const createButtonRef = useRef<HTMLButtonElement>(null)
 
   const isCollapsed = controlledCollapsed ?? internalCollapsed
   const activeProjectId = controlledActiveProjectId ?? internalActiveProjectId
@@ -586,6 +626,7 @@ export function Sidebar({
     item.id === 'inbox' ? { ...item, badge: inboxCount } : item,
   )
   const canCreate = Boolean(onCreateTeam || onCreateProject)
+  const createDialogId = useId()
 
   const archiveTeam = (teamId: string) => {
     if (!onArchiveTeam || archivingItemKey) {
@@ -743,147 +784,245 @@ export function Sidebar({
     updateExpandedTeamIds(nextTeamIds)
   }
 
+  const openCreateModal = () => {
+    setCreateModalDefaultMode(resolveDefaultCreateMode(teams, onCreateTeam, onCreateProject))
+    setIsCreateModalOpen(true)
+  }
+
   return (
-    <aside
-      className={`flex h-dvh max-h-dvh min-h-0 flex-none flex-col overflow-hidden bg-[#03172f] py-5 text-white shadow-[18px_0_38px_rgba(5,23,48,0.18)] transition-all duration-200 min-[981px]:h-svh min-[981px]:max-h-svh ${isCollapsed ? 'w-[76px] px-3' : 'w-[292px] max-w-[calc(100vw-32px)] px-4'} ${className}`}
-      aria-label={resolvedLabels.ariaLabel}
-      data-collapsed={isCollapsed}
-    >
-      <div
-        className={`mb-5 flex flex-none items-center ${isCollapsed ? 'flex-col gap-3 px-0' : 'justify-between px-1'}`}
+    <>
+      <aside
+        className={`flex h-dvh max-h-dvh min-h-0 flex-none flex-col overflow-hidden bg-[#03172f] py-5 text-white shadow-[18px_0_38px_rgba(5,23,48,0.18)] transition-all duration-200 min-[981px]:h-svh min-[981px]:max-h-svh ${isCollapsed ? 'w-[76px] px-3' : 'w-[292px] max-w-[calc(100vw-32px)] px-4'} ${className}`}
+        aria-label={resolvedLabels.ariaLabel}
+        data-collapsed={isCollapsed}
+        inert={isCreateModalOpen ? true : undefined}
       >
-        <div className={`flex min-w-0 items-center gap-3 ${isCollapsed ? 'justify-center' : ''}`}>
-          <BrandMark />
-          <span
-            className={`truncate text-app-brand font-bold tracking-normal transition-opacity ${isCollapsed ? 'sr-only' : ''}`}
-          >
-            {workspaceName}
-          </span>
-        </div>
-        <button
-          className="grid h-9 w-9 flex-none place-items-center rounded-lg text-slate-200 transition hover:bg-white/10 hover:text-white"
-          type="button"
-          aria-label={isCollapsed ? resolvedLabels.expand : resolvedLabels.collapse}
-          aria-expanded={!isCollapsed}
-          onClick={() => updateCollapsed(!isCollapsed)}
+        <div
+          className={`mb-5 flex flex-none items-center ${isCollapsed ? 'flex-col gap-3 px-0' : 'justify-between px-1'}`}
         >
-          {isCollapsed ? (
-            <ChevronsRightIcon className="h-5 w-5" />
-          ) : (
-            <ChevronsLeftIcon className="h-5 w-5" />
-          )}
-        </button>
-      </div>
-
-      <nav className="flex-none space-y-1" aria-label={resolvedLabels.globalNavigation}>
-        {navItems.map((item) => (
-          <NavButton
-            key={item.id}
-            active={activeNavId === item.id}
-            collapsed={isCollapsed}
-            id={item.id}
-            icon={item.icon}
-            label={resolvedLabels.nav[item.id]}
-            badge={item.badge}
-            unreadCount={resolvedLabels.unreadCount}
-            onSelect={updateActiveNav}
-          />
-        ))}
-      </nav>
-
-      {!isCollapsed ? (
-        <div className="mt-6 flex flex-none items-center justify-between px-1 text-app-meta font-semibold text-slate-200">
-          <span className="truncate">{resolvedLabels.teamProjects}</span>
-          {canCreate ? (
-            <button
-              className={`grid h-8 w-8 place-items-center rounded-lg text-slate-100 transition hover:bg-white/10 ${isCreatePanelOpen ? 'bg-white/10 text-white' : ''}`}
-              type="button"
-              aria-expanded={isCreatePanelOpen}
-              aria-label={resolvedLabels.create.title}
-              onClick={() => setIsCreatePanelOpen((current) => !current)}
+          <div className={`flex min-w-0 items-center gap-3 ${isCollapsed ? 'justify-center' : ''}`}>
+            <BrandMark />
+            <span
+              className={`truncate text-app-brand font-bold tracking-normal transition-opacity ${isCollapsed ? 'sr-only' : ''}`}
             >
-              <PlusIcon className={`h-5 w-5 transition-transform ${isCreatePanelOpen ? 'rotate-45' : ''}`} />
-            </button>
-          ) : null}
+              {workspaceName}
+            </span>
+          </div>
+          <button
+            className="grid h-9 w-9 flex-none place-items-center rounded-lg text-slate-200 transition hover:bg-white/10 hover:text-white"
+            type="button"
+            aria-label={isCollapsed ? resolvedLabels.expand : resolvedLabels.collapse}
+            aria-expanded={!isCollapsed}
+            onClick={() => updateCollapsed(!isCollapsed)}
+          >
+            {isCollapsed ? (
+              <ChevronsRightIcon className="h-5 w-5" />
+            ) : (
+              <ChevronsLeftIcon className="h-5 w-5" />
+            )}
+          </button>
         </div>
-      ) : null}
 
-      <div className="mt-2 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
-        {!isCollapsed && canCreate && isCreatePanelOpen ? (
-          <SidebarRegistrationPanel
-            labels={resolvedLabels.create}
-            teams={teams}
-            onCreateProject={onCreateProject}
-            onCreateTeam={onCreateTeam}
-          />
-        ) : null}
-        <div className={isCollapsed ? 'space-y-1' : 'space-y-2'}>
-          {teams.map((team) => (
-            <TeamGroup
-              key={team.id}
-              team={team}
-              activeTeamId={activeTeamId}
-              activeTeamViewId={activeTeamViewId}
-              activeProjectId={activeProjectId}
-              activeProjectTeamId={activeProjectTeamId}
-              projectTeamId={projectTeamId}
-              labels={resolvedLabels}
+        <nav className="flex-none space-y-1" aria-label={resolvedLabels.globalNavigation}>
+          {navItems.map((item) => (
+            <NavButton
+              key={item.id}
+              active={activeNavId === item.id}
               collapsed={isCollapsed}
-              expanded={expandedTeamIds.includes(team.id)}
-              archivingItemKey={archivingItemKey}
-              onArchiveProject={onArchiveProject ? archiveProject : undefined}
-              onArchiveTeam={onArchiveTeam ? archiveTeam : undefined}
-              onToggleTeam={toggleTeam}
-              onSelectTeamView={updateActiveTeamView}
-              onSelectProject={updateActiveProject}
+              id={item.id}
+              icon={item.icon}
+              label={resolvedLabels.nav[item.id]}
+              badge={item.badge}
+              unreadCount={resolvedLabels.unreadCount}
+              onSelect={updateActiveNav}
             />
           ))}
-        </div>
-        {archiveErrorMessage && !isCollapsed ? (
-          <p className="mt-3 rounded-lg border border-red-300/20 bg-red-500/12 px-3 py-2 text-app-caption font-bold leading-5 text-red-100" role="alert">
-            {archiveErrorMessage}
-          </p>
-        ) : null}
-      </div>
+        </nav>
 
-      <nav className="mt-3 flex-none space-y-1 border-t border-white/10 pt-3" aria-label={resolvedLabels.utilityNavigation}>
-        {utilityNavItems.map((item) => (
-          <NavButton
-            key={item.id}
-            active={activeNavId === item.id}
-            collapsed={isCollapsed}
-            id={item.id}
-            icon={item.icon}
-            label={resolvedLabels.nav[item.id]}
-            unreadCount={resolvedLabels.unreadCount}
-            onSelect={updateActiveNav}
-          />
-        ))}
-      </nav>
-    </aside>
+        {!isCollapsed ? (
+          <div className="mt-6 flex flex-none items-center justify-between px-1 text-app-meta font-semibold text-slate-200">
+            <span className="truncate">{resolvedLabels.teamProjects}</span>
+            {canCreate ? (
+              <button
+                ref={createButtonRef}
+                className={`grid h-8 w-8 place-items-center rounded-lg text-slate-100 transition hover:bg-white/10 ${isCreateModalOpen ? 'bg-white/10 text-white' : ''}`}
+                type="button"
+                aria-controls={isCreateModalOpen ? createDialogId : undefined}
+                aria-expanded={isCreateModalOpen}
+                aria-haspopup="dialog"
+                aria-label={resolvedLabels.create.title}
+                title={resolvedLabels.create.title}
+                onClick={openCreateModal}
+              >
+                <PlusIcon className="h-5 w-5" />
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
+        <div className="mt-2 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
+          <div className={isCollapsed ? 'space-y-1' : 'space-y-2'}>
+            {teams.map((team) => (
+              <TeamGroup
+                key={team.id}
+                team={team}
+                activeTeamId={activeTeamId}
+                activeTeamViewId={activeTeamViewId}
+                activeProjectId={activeProjectId}
+                activeProjectTeamId={activeProjectTeamId}
+                projectTeamId={projectTeamId}
+                labels={resolvedLabels}
+                collapsed={isCollapsed}
+                expanded={expandedTeamIds.includes(team.id)}
+                archivingItemKey={archivingItemKey}
+                onArchiveProject={onArchiveProject ? archiveProject : undefined}
+                onArchiveTeam={onArchiveTeam ? archiveTeam : undefined}
+                onToggleTeam={toggleTeam}
+                onSelectTeamView={updateActiveTeamView}
+                onSelectProject={updateActiveProject}
+              />
+            ))}
+          </div>
+          {archiveErrorMessage && !isCollapsed ? (
+            <p className="mt-3 rounded-lg border border-red-300/20 bg-red-500/12 px-3 py-2 text-app-caption font-bold leading-5 text-red-100" role="alert">
+              {archiveErrorMessage}
+            </p>
+          ) : null}
+        </div>
+
+        <nav className="mt-3 flex-none space-y-1 border-t border-white/10 pt-3" aria-label={resolvedLabels.utilityNavigation}>
+          {utilityNavItems.map((item) => (
+            <NavButton
+              key={item.id}
+              active={activeNavId === item.id}
+              collapsed={isCollapsed}
+              id={item.id}
+              icon={item.icon}
+              label={resolvedLabels.nav[item.id]}
+              unreadCount={resolvedLabels.unreadCount}
+              onSelect={updateActiveNav}
+            />
+          ))}
+        </nav>
+      </aside>
+      {canCreate && isCreateModalOpen ? (
+        <SidebarRegistrationModal
+          defaultMode={createModalDefaultMode}
+          defaultProjectTeamId={activeTeamId}
+          dialogId={createDialogId}
+          labels={resolvedLabels.create}
+          teams={teams}
+          onCreateProject={onCreateProject}
+          onCreateTeam={onCreateTeam}
+          returnFocusRef={createButtonRef}
+          onRequestClose={() => setIsCreateModalOpen(false)}
+        />
+      ) : null}
+    </>
   )
 }
 
-function SidebarRegistrationPanel({
+function SidebarRegistrationModal({
+  defaultMode,
+  defaultProjectTeamId,
+  dialogId,
   labels,
+  returnFocusRef,
   teams,
   onCreateProject,
   onCreateTeam,
+  onRequestClose,
 }: {
+  defaultMode: SidebarCreateMode
+  defaultProjectTeamId?: string
+  dialogId: string
   labels: SidebarCreateLabels
+  returnFocusRef: RefObject<HTMLButtonElement | null>
   teams: SidebarTeam[]
   onCreateProject?: (
     teamId: string,
     input: { name: string; tone: SidebarProjectTone },
   ) => void | Promise<void>
   onCreateTeam?: (input: { name: string }) => void | Promise<void>
+  onRequestClose: () => void
 }) {
+  const [activeCreateMode, setActiveCreateMode] = useState<SidebarCreateMode>(() =>
+    resolveVisibleCreateMode(defaultMode, onCreateTeam, onCreateProject),
+  )
   const [selectedTone, setSelectedTone] = useState<SidebarProjectTone>('blue')
   const [isSavingTeam, setIsSavingTeam] = useState(false)
   const [isSavingProject, setIsSavingProject] = useState(false)
-  const [errorMessage, setErrorMessage] = useState<string | undefined>()
+  const [teamErrorMessage, setTeamErrorMessage] = useState<string | undefined>()
+  const [projectErrorMessage, setProjectErrorMessage] = useState<string | undefined>()
+  const dialogRef = useRef<HTMLElement>(null)
   const isSavingTeamRef = useRef(false)
   const isSavingProjectRef = useRef(false)
+  const isBusy = isSavingTeam || isSavingProject
+  const visibleCreateMode = resolveVisibleCreateMode(
+    activeCreateMode,
+    onCreateTeam,
+    onCreateProject,
+  )
+  const titleId = `${dialogId}-title`
+  const teamTabId = `${dialogId}-team-tab`
+  const projectTabId = `${dialogId}-project-tab`
+  const teamPanelId = `${dialogId}-team-panel`
+  const projectPanelId = `${dialogId}-project-panel`
+  const projectDefaultTeamId = teams.some((team) => team.id === defaultProjectTeamId)
+    ? defaultProjectTeamId
+    : teams[0]?.id
+  const hasModeTabs = Boolean(onCreateTeam && onCreateProject)
+
+  useEffect(() => {
+    const returnFocusElement = returnFocusRef.current
+
+    findInitialFocusableElement(dialogRef.current)?.focus()
+
+    return () => {
+      returnFocusElement?.focus()
+    }
+  }, [returnFocusRef])
+
+  useEffect(() => {
+    findInitialFocusableElement(dialogRef.current)?.focus()
+  }, [visibleCreateMode])
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const dialog = dialogRef.current
+
+      if (event.key === 'Tab' && dialog) {
+        trapFocus(event, dialog)
+        return
+      }
+
+      if (event.key === 'Escape' && !isBusy) {
+        onRequestClose()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isBusy, onRequestClose])
+
+  const requestClose = () => {
+    if (!isBusy) {
+      onRequestClose()
+    }
+  }
+
+  const updateCreateMode = (nextCreateMode: SidebarCreateMode) => {
+    if (isBusy) {
+      return
+    }
+
+    setActiveCreateMode(nextCreateMode)
+    setTeamErrorMessage(undefined)
+    setProjectErrorMessage(undefined)
+  }
 
   const handleCreateTeam = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -896,9 +1035,9 @@ function SidebarRegistrationPanel({
     const formData = new FormData(form)
     const name = String(formData.get('teamName') ?? '').trim()
 
-    setErrorMessage(undefined)
+    setTeamErrorMessage(undefined)
     if (!name) {
-      setErrorMessage(labels.teamNameRequired)
+      setTeamErrorMessage(labels.teamNameRequired)
       return
     }
 
@@ -906,9 +1045,12 @@ function SidebarRegistrationPanel({
     setIsSavingTeam(true)
     void Promise.resolve()
       .then(() => onCreateTeam({ name }))
-      .then(() => form.reset())
+      .then(() => {
+        form.reset()
+        onRequestClose()
+      })
       .catch((error: unknown) => {
-        setErrorMessage(resolveRegistrationErrorMessage(error, labels))
+        setTeamErrorMessage(resolveRegistrationErrorMessage(error, labels))
       })
       .finally(() => {
         isSavingTeamRef.current = false
@@ -930,13 +1072,13 @@ function SidebarRegistrationPanel({
     const toneValue = String(formData.get('tone') ?? selectedTone)
     const tone = isProjectTone(toneValue) ? toneValue : 'blue'
 
-    setErrorMessage(undefined)
+    setProjectErrorMessage(undefined)
     if (!teamId) {
-      setErrorMessage(labels.noTeams)
+      setProjectErrorMessage(labels.noTeams)
       return
     }
     if (!name) {
-      setErrorMessage(labels.projectNameRequired)
+      setProjectErrorMessage(labels.projectNameRequired)
       return
     }
 
@@ -947,9 +1089,10 @@ function SidebarRegistrationPanel({
       .then(() => {
         form.reset()
         setSelectedTone('blue')
+        onRequestClose()
       })
       .catch((error: unknown) => {
-        setErrorMessage(resolveRegistrationErrorMessage(error, labels))
+        setProjectErrorMessage(resolveRegistrationErrorMessage(error, labels))
       })
       .finally(() => {
         isSavingProjectRef.current = false
@@ -958,104 +1101,289 @@ function SidebarRegistrationPanel({
   }
 
   return (
-    <section className="mt-3 rounded-lg border border-white/10 bg-white/[0.06] p-3 shadow-[0_16px_28px_rgba(0,0,0,0.16)]">
-      <p className="text-sm font-black text-white">{labels.title}</p>
-
-      {onCreateTeam ? (
-        <form className="mt-3 grid gap-2" onSubmit={handleCreateTeam}>
-          <label className="grid gap-1.5 text-app-caption font-black text-slate-200">
-            {labels.teamName}
-            <input
-              className="h-9 rounded-lg border border-white/10 bg-white/95 px-3 text-app-meta font-bold text-[#0d1833] outline-none transition placeholder:text-slate-400 focus:border-blue-300 focus:ring-3 focus:ring-blue-400/20"
-              name="teamName"
-              placeholder={labels.teamPlaceholder}
-            />
-          </label>
-          <button
-            className="h-9 rounded-lg bg-blue-500 px-3 text-app-meta font-black text-white shadow-[0_10px_22px_rgba(37,99,235,0.26)] transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-slate-500"
-            disabled={isSavingTeam}
-            type="submit"
-          >
-            {isSavingTeam ? labels.saving : labels.createTeam}
-          </button>
-        </form>
-      ) : null}
-
-      {onCreateProject ? (
-        <form className="mt-3 grid gap-2 border-t border-white/10 pt-3" onSubmit={handleCreateProject}>
-          <label className="grid gap-1.5 text-app-caption font-black text-slate-200">
-            {labels.team}
-            <select
-              className="h-9 rounded-lg border border-white/10 bg-white/95 px-3 text-app-meta font-bold text-[#0d1833] outline-none transition focus:border-blue-300 focus:ring-3 focus:ring-blue-400/20"
-              name="teamId"
-              disabled={teams.length === 0}
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-[#020b18]/55 px-4 py-6 text-[#0d1833] backdrop-blur-sm"
+      onMouseDown={requestClose}
+    >
+      <section
+        ref={dialogRef}
+        className="w-full max-w-[480px] overflow-hidden rounded-lg bg-white shadow-[0_26px_80px_rgba(3,23,47,0.34)]"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        id={dialogId}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="border-b border-[#dce5f2] bg-[#f8fbff] px-5 py-4">
+          <div className="flex items-center justify-between gap-4">
+            <h2 id={titleId} className="text-[20px] font-black leading-tight text-[#0b1735]">
+              {labels.title}
+            </h2>
+            <button
+              className="grid h-9 w-9 flex-none place-items-center rounded-lg text-[#526381] transition hover:bg-[#eaf1fb] hover:text-[#0b1735] disabled:cursor-not-allowed disabled:opacity-50"
+              type="button"
+              aria-label={labels.close}
+              title={labels.close}
+              disabled={isBusy}
+              onClick={requestClose}
             >
-              {teams.map((team) => (
-                <option key={team.id} value={team.id}>
-                  {team.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="grid gap-1.5 text-app-caption font-black text-slate-200">
-            {labels.projectName}
-            <input
-              className="h-9 rounded-lg border border-white/10 bg-white/95 px-3 text-app-meta font-bold text-[#0d1833] outline-none transition placeholder:text-slate-400 focus:border-blue-300 focus:ring-3 focus:ring-blue-400/20"
-              name="projectName"
-              placeholder={labels.projectPlaceholder}
-              disabled={teams.length === 0}
-            />
-          </label>
-          <fieldset className="grid gap-2">
-            <legend className="text-app-caption font-black text-slate-200">{labels.tone}</legend>
-            <div className="grid grid-cols-4 gap-2">
-              {projectToneOptions.map((tone) => (
-                <label
-                  className={`grid h-9 cursor-pointer place-items-center rounded-lg border transition focus-within:border-white focus-within:bg-white/18 focus-within:ring-2 focus-within:ring-blue-300/45 ${
-                    selectedTone === tone
-                      ? 'border-white bg-white/18 ring-2 ring-blue-300/45'
-                      : 'border-white/10 bg-white/6 hover:bg-white/10'
-                  }`}
-                  key={tone}
-                  title={labels.toneLabels[tone]}
-                >
-                  <input
-                    checked={selectedTone === tone}
-                    className="sr-only"
-                    name="tone"
-                    type="radio"
-                    value={tone}
-                    onChange={() => setSelectedTone(tone)}
-                  />
-                  <span
-                    className={`h-4 w-4 rounded-[5px] border ${projectToneSwatchClasses[tone]}`}
-                    aria-hidden="true"
-                  />
-                  <span className="sr-only">{labels.toneLabels[tone]}</span>
-                </label>
-              ))}
-            </div>
-          </fieldset>
-          {teams.length === 0 ? (
-            <p className="text-app-caption font-bold leading-5 text-slate-300">{labels.noTeams}</p>
-          ) : null}
-          <button
-            className="h-9 rounded-lg bg-blue-500 px-3 text-app-meta font-black text-white shadow-[0_10px_22px_rgba(37,99,235,0.26)] transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-slate-500"
-            disabled={isSavingProject || teams.length === 0}
-            type="submit"
-          >
-            {isSavingProject ? labels.saving : labels.createProject}
-          </button>
-        </form>
-      ) : null}
+              <XIcon className="h-5 w-5" />
+            </button>
+          </div>
 
-      {errorMessage ? (
-        <p className="mt-3 text-app-caption font-bold leading-5 text-red-200" role="alert">
-          {errorMessage}
-        </p>
-      ) : null}
-    </section>
+          {hasModeTabs ? (
+            <div
+              className="mt-4 grid grid-cols-2 rounded-lg bg-[#eaf1fb] p-1"
+              role="group"
+              aria-label={labels.title}
+            >
+              <CreateModeTab
+                active={visibleCreateMode === 'team'}
+                disabled={isBusy}
+                icon={UsersIcon}
+                id={teamTabId}
+                label={labels.teamMode}
+                onSelect={() => updateCreateMode('team')}
+              />
+              <CreateModeTab
+                active={visibleCreateMode === 'project'}
+                disabled={isBusy}
+                icon={PanelIcon}
+                id={projectTabId}
+                label={labels.projectMode}
+                onSelect={() => updateCreateMode('project')}
+              />
+            </div>
+          ) : null}
+        </div>
+
+        <div className="px-5 py-5">
+          {visibleCreateMode === 'team' && onCreateTeam ? (
+            <form
+              className="grid gap-4"
+              id={teamPanelId}
+              aria-labelledby={titleId}
+              onSubmit={handleCreateTeam}
+            >
+              <label className="grid gap-2 text-[13px] font-black text-[#233456]">
+                {labels.teamName}
+                <input
+                  className="h-11 rounded-lg border border-[#cbd8ea] bg-white px-3 text-[14px] font-bold text-[#0d1833] outline-none transition placeholder:text-[#8a9ab3] focus:border-blue-400 focus:ring-3 focus:ring-blue-500/15"
+                  name="teamName"
+                  placeholder={labels.teamPlaceholder}
+                  data-autofocus
+                  autoFocus
+                />
+              </label>
+              {teamErrorMessage ? (
+                <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[13px] font-bold leading-5 text-red-700" role="alert">
+                  {teamErrorMessage}
+                </p>
+              ) : null}
+              <button
+                className="h-11 rounded-lg bg-blue-600 px-4 text-[14px] font-black text-white shadow-[0_12px_28px_rgba(37,99,235,0.22)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400"
+                disabled={isSavingTeam}
+                type="submit"
+              >
+                {isSavingTeam ? labels.saving : labels.createTeam}
+              </button>
+            </form>
+          ) : null}
+
+          {visibleCreateMode === 'project' && onCreateProject ? (
+            <form
+              className="grid gap-4"
+              id={projectPanelId}
+              aria-labelledby={titleId}
+              onSubmit={handleCreateProject}
+            >
+              <label className="grid gap-2 text-[13px] font-black text-[#233456]">
+                {labels.team}
+                <select
+                  className="h-11 rounded-lg border border-[#cbd8ea] bg-white px-3 text-[14px] font-bold text-[#0d1833] outline-none transition focus:border-blue-400 focus:ring-3 focus:ring-blue-500/15 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
+                  name="teamId"
+                  defaultValue={projectDefaultTeamId}
+                  disabled={teams.length === 0}
+                >
+                  {teams.map((team) => (
+                    <option key={team.id} value={team.id}>
+                      {team.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-2 text-[13px] font-black text-[#233456]">
+                {labels.projectName}
+                <input
+                  className="h-11 rounded-lg border border-[#cbd8ea] bg-white px-3 text-[14px] font-bold text-[#0d1833] outline-none transition placeholder:text-[#8a9ab3] focus:border-blue-400 focus:ring-3 focus:ring-blue-500/15 disabled:cursor-not-allowed disabled:bg-slate-100"
+                  name="projectName"
+                  placeholder={labels.projectPlaceholder}
+                  disabled={teams.length === 0}
+                  data-autofocus
+                  autoFocus
+                />
+              </label>
+              <fieldset className="grid gap-2">
+                <legend className="text-[13px] font-black text-[#233456]">{labels.tone}</legend>
+                <div className="grid grid-cols-4 gap-2">
+                  {projectToneOptions.map((tone) => (
+                    <label
+                      className={`grid h-10 cursor-pointer place-items-center rounded-lg border transition focus-within:border-blue-500 focus-within:ring-3 focus-within:ring-blue-500/15 ${
+                        selectedTone === tone
+                          ? 'border-blue-500 bg-blue-50 ring-3 ring-blue-500/15'
+                          : 'border-[#cbd8ea] bg-white hover:bg-[#f5f8fc]'
+                      }`}
+                      key={tone}
+                      title={labels.toneLabels[tone]}
+                    >
+                      <input
+                        checked={selectedTone === tone}
+                        className="sr-only"
+                        name="tone"
+                        type="radio"
+                        value={tone}
+                        onChange={() => setSelectedTone(tone)}
+                      />
+                      <span
+                        className={`h-4 w-4 rounded-[5px] border ${projectToneSwatchClasses[tone]}`}
+                        aria-hidden="true"
+                      />
+                      <span className="sr-only">{labels.toneLabels[tone]}</span>
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+              {teams.length === 0 ? (
+                <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] font-bold leading-5 text-amber-800">
+                  {labels.noTeams}
+                </p>
+              ) : null}
+              {projectErrorMessage ? (
+                <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[13px] font-bold leading-5 text-red-700" role="alert">
+                  {projectErrorMessage}
+                </p>
+              ) : null}
+              <button
+                className="h-11 rounded-lg bg-blue-600 px-4 text-[14px] font-black text-white shadow-[0_12px_28px_rgba(37,99,235,0.22)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400"
+                disabled={isSavingProject || teams.length === 0}
+                type="submit"
+              >
+                {isSavingProject ? labels.saving : labels.createProject}
+              </button>
+            </form>
+          ) : null}
+        </div>
+      </section>
+    </div>
   )
+}
+
+function CreateModeTab({
+  active,
+  disabled,
+  icon: Icon,
+  id,
+  label,
+  onSelect,
+}: {
+  active: boolean
+  disabled: boolean
+  icon: ComponentType<SidebarIconProps>
+  id: string
+  label: string
+  onSelect: () => void
+}) {
+  return (
+    <button
+      className={`flex h-10 items-center justify-center gap-2 rounded-md px-3 text-[13px] font-black transition disabled:cursor-not-allowed ${
+        active
+          ? 'bg-white text-[#0b1735] shadow-[0_8px_22px_rgba(23,44,75,0.12)]'
+          : 'text-[#526381] hover:bg-white/60 hover:text-[#0b1735]'
+      }`}
+      type="button"
+      aria-pressed={active}
+      disabled={disabled}
+      id={id}
+      onClick={onSelect}
+    >
+      <Icon className="h-4 w-4" />
+      <span>{label}</span>
+    </button>
+  )
+}
+
+function resolveVisibleCreateMode(
+  createMode: SidebarCreateMode,
+  onCreateTeam: SidebarProps['onCreateTeam'],
+  onCreateProject: SidebarProps['onCreateProject'],
+) {
+  if (createMode === 'project' && onCreateProject) {
+    return 'project'
+  }
+
+  if (createMode === 'team' && onCreateTeam) {
+    return 'team'
+  }
+
+  return onCreateTeam ? 'team' : 'project'
+}
+
+const focusableSelector = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',')
+
+function findInitialFocusableElement(container: HTMLElement | null) {
+  return (
+    container?.querySelector<HTMLElement>('[data-autofocus]:not([disabled])') ??
+    findFirstFocusableElement(container)
+  )
+}
+
+function findFirstFocusableElement(container: HTMLElement | null) {
+  return getFocusableElements(container)[0]
+}
+
+function getFocusableElements(container: HTMLElement | null) {
+  if (!container) {
+    return []
+  }
+
+  return Array.from(container.querySelectorAll<HTMLElement>(focusableSelector)).filter(
+    (element) => !element.hasAttribute('aria-hidden') && element.tabIndex >= 0,
+  )
+}
+
+function trapFocus(event: KeyboardEvent, container: HTMLElement) {
+  const focusableElements = getFocusableElements(container)
+  const firstFocusableElement = focusableElements[0]
+  const lastFocusableElement = focusableElements[focusableElements.length - 1]
+
+  if (!firstFocusableElement || !lastFocusableElement) {
+    event.preventDefault()
+    return
+  }
+
+  if (!container.contains(document.activeElement)) {
+    event.preventDefault()
+    firstFocusableElement.focus()
+    return
+  }
+
+  if (event.shiftKey && document.activeElement === firstFocusableElement) {
+    event.preventDefault()
+    lastFocusableElement.focus()
+    return
+  }
+
+  if (!event.shiftKey && document.activeElement === lastFocusableElement) {
+    event.preventDefault()
+    firstFocusableElement.focus()
+  }
 }
 
 function NavButton({
@@ -1585,6 +1913,15 @@ function PlusIcon({ className }: SidebarIconProps) {
     <SvgBase className={className}>
       <path d="M12 5v14" />
       <path d="M5 12h14" />
+    </SvgBase>
+  )
+}
+
+function XIcon({ className }: SidebarIconProps) {
+  return (
+    <SvgBase className={className}>
+      <path d="m18 6-12 12" />
+      <path d="m6 6 12 12" />
     </SvgBase>
   )
 }

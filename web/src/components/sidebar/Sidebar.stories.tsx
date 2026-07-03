@@ -69,7 +69,7 @@ export const English: Story = {
   },
 }
 
-export const CreatePanelOpen: Story = {
+export const CreateModalOpen: Story = {
   args: {
     defaultCreatePanelOpen: true,
   },
