@@ -860,7 +860,7 @@ export function TaskScreen({
   }
 
   return (
-    <main className="flex h-svh min-h-0 overflow-hidden bg-[#f6f9fd] text-[#0d1833]">
+    <main className="flex h-svh min-h-0 overflow-hidden bg-[#f4f6f8] text-[#1c1d1f]">
       <Sidebar
         activeProjectId={projectId}
         activeProjectTeamId={resolvedActiveTeamId}
@@ -910,7 +910,7 @@ export function TaskScreen({
         />
       </MobileSidebarDrawer>
 
-      <section className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white/80">
+      <section className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white">
         <TaskHeader
           activeTab={activeTab}
           isCreateTaskOpen={isCreateTaskOpen}
@@ -925,12 +925,12 @@ export function TaskScreen({
         />
 
         {isLoading ? (
-          <div className="grid min-h-0 flex-1 place-items-center px-6 text-sm font-bold text-slate-500">
+          <div className="grid min-h-0 flex-1 place-items-center px-6 text-sm font-semibold text-[#5f6874]">
             {t('tasks.loading')}
           </div>
         ) : (
           <div
-            className="min-h-0 flex-1 overflow-auto overscroll-contain bg-[#fbfdff]"
+            className="min-h-0 flex-1 overflow-auto overscroll-contain bg-[#f4f6f8]"
             data-testid="task-main-scroll"
             ref={taskContentRef}
           >
@@ -965,7 +965,7 @@ export function TaskScreen({
                 t={t}
               />
             ) : null}
-            <div className={`grid min-h-full ${activeTab === 'permissions' ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_minmax(340px,430px)] max-[1180px]:grid-cols-1'}`}>
+            <div className={`grid min-h-full ${activeTab === 'permissions' ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_minmax(340px,380px)] max-[1180px]:grid-cols-1'}`}>
               <TaskWorkspace
                 activeTab={activeTab}
                 allTasks={tasks}
@@ -1187,43 +1187,55 @@ function TaskHeader({
   teamName: string
   userInitial: string
 }) {
+  const openTaskCount = tasks.filter((task) => task.status !== 'done').length
+  const reviewTaskCount = tasks.filter((task) => task.status === 'review').length
+
   return (
-    <header className="flex-none border-b border-slate-200/80 bg-white/95 shadow-[0_1px_0_rgba(15,23,42,0.03)]">
-      <div className="flex min-h-[72px] items-center justify-between gap-4 px-[clamp(20px,3vw,34px)] py-3">
-        <div className="flex min-w-0 items-start gap-3">
+    <header className="flex-none border-b border-[#d3d8df] bg-white">
+      <div className="flex min-h-[68px] items-center justify-between gap-4 px-[clamp(18px,2.5vw,30px)] py-3">
+        <div className="flex min-w-0 items-center gap-3">
           <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={onMobileSidebarOpen} />
           <div className="min-w-0">
             <nav
               aria-label={t('tasks.breadcrumb.aria')}
-              className="flex flex-wrap items-center gap-2 text-app-meta font-medium text-[#405174]"
+              className="flex flex-wrap items-center gap-2 text-app-caption font-semibold text-[#5f6874]"
             >
               <span>{teamName || t('sidebar.projectGroup')}</span>
-              <ChevronIcon className="h-4 w-4 -rotate-90 text-[#61708f]" />
-              <span className="inline-flex items-center gap-2 font-black text-[#0d1833]">
+              <ChevronIcon className="h-4 w-4 -rotate-90 text-[#8f99a8]" />
+              <span className="inline-flex items-center gap-2 font-bold text-[#1c1d1f]">
                 <ProjectGlyph />
                 {projectName}
               </span>
             </nav>
-            <div className="mt-2 flex min-w-0 items-center gap-3">
+            <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
               <h1
-                className="truncate text-page-title font-black tracking-normal text-[#0d1833]"
+                className="truncate text-[1.35rem] font-semibold leading-8 text-[#1c1d1f]"
                 data-testid="tasks-heading"
               >
                 {projectName}
               </h1>
-              <IconButton label={t('tasks.action.favorite')}>
-                <StarIcon />
-              </IconButton>
-              <IconButton label={t('tasks.action.more')}>
-                <MoreIcon />
-              </IconButton>
+              <span className="rounded-full border border-[#d3d8df] px-2.5 py-1 text-app-caption font-semibold text-[#505967]">
+                {t('tasks.count').replace('{count}', String(tasks.length))}
+              </span>
+              <span className="rounded-full border border-[#d3d8df] px-2.5 py-1 text-app-caption font-semibold text-[#505967]">
+                {t('workspace.metric.openTasks')}: {openTaskCount}
+              </span>
+              <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-app-caption font-semibold text-amber-700">
+                {t('tasks.status.review')}: {reviewTaskCount}
+              </span>
             </div>
           </div>
         </div>
 
-        <div className="flex flex-none items-center gap-3 max-[860px]:hidden">
+        <div className="flex flex-none items-center gap-2 max-[860px]:hidden">
+          <IconButton label={t('tasks.action.favorite')}>
+            <StarIcon />
+          </IconButton>
+          <IconButton label={t('tasks.action.more')}>
+            <MoreIcon />
+          </IconButton>
           <button
-            className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-300 bg-white px-3.5 text-sm font-black text-[#0d1833] shadow-[0_8px_18px_rgba(30,52,88,0.04)] transition hover:border-blue-500 hover:text-blue-600"
+            className="inline-flex h-9 items-center gap-2 rounded-md border border-[#d3d8df] bg-white px-3 text-sm font-semibold text-[#1c1d1f] transition hover:border-[#2563eb] hover:text-[#2563eb] focus:outline-none focus:ring-4 focus:ring-[#2563eb]/10"
             type="button"
           >
             <UsersMiniIcon />
@@ -1231,7 +1243,7 @@ function TaskHeader({
           </button>
           <button
             aria-expanded={isCreateTaskOpen}
-            className="inline-flex h-10 items-center gap-2 rounded-lg bg-emerald-600 px-4 text-sm font-black text-white shadow-[0_12px_24px_rgba(5,150,105,0.22)] transition hover:bg-emerald-500"
+            className="inline-flex h-9 items-center gap-2 rounded-md bg-[#1c1d1f] px-3.5 text-sm font-semibold text-white transition hover:bg-[#343941] focus:outline-none focus:ring-4 focus:ring-[#2563eb]/20"
             onClick={() => onCreateTaskOpenChange(!isCreateTaskOpen)}
             type="button"
           >
@@ -1244,20 +1256,20 @@ function TaskHeader({
           </IconButton>
           <div
             aria-label={t('tasks.userAvatar')}
-            className="grid h-10 w-10 place-items-center rounded-full bg-blue-100 text-sm font-black text-blue-700"
+            className="grid h-9 w-9 place-items-center rounded-full border border-[#d3d8df] bg-[#f3f4f6] text-sm font-semibold text-[#1c1d1f]"
           >
             {userInitial}
           </div>
         </div>
       </div>
 
-      <div className="flex items-end justify-between gap-4 overflow-x-auto px-[clamp(20px,3vw,34px)]">
-        <div aria-label={t('tasks.tabs.aria')} className="flex min-w-max items-center gap-1" role="tablist">
+      <div className="flex items-center justify-between gap-4 overflow-x-auto border-t border-[#e4e7ec] px-[clamp(18px,2.5vw,30px)]">
+        <div aria-label={t('tasks.tabs.aria')} className="flex min-w-max items-center gap-0" role="tablist">
           {taskTabs.map((tab) => (
             <button
               aria-selected={activeTab === tab}
-              className={`relative inline-flex h-[54px] items-center gap-2 px-4 text-xs font-black transition ${
-                activeTab === tab ? 'text-blue-600' : 'text-[#405174] hover:text-blue-600'
+              className={`relative inline-flex h-11 items-center gap-2 border-r border-transparent px-3.5 text-app-caption font-semibold transition ${
+                activeTab === tab ? 'text-[#1c1d1f]' : 'text-[#5f6874] hover:text-[#1c1d1f]'
               }`}
               key={tab}
               onClick={() => onTabChange(tab)}
@@ -1269,7 +1281,7 @@ function TaskHeader({
               {activeTab === tab ? (
                 <span
                   aria-hidden="true"
-                  className="absolute inset-x-2 bottom-0 h-1 rounded-t-full bg-blue-600"
+                  className="absolute inset-x-3 bottom-0 h-0.5 rounded-t-full bg-[#1c1d1f]"
                 />
               ) : null}
             </button>
@@ -1398,7 +1410,7 @@ function TaskWorkspace({
 
   if (activeTab === 'permissions') {
     return (
-      <div className="px-[clamp(20px,3vw,34px)] py-6">
+      <div className="px-[clamp(18px,2.5vw,30px)] py-4">
         <ProjectPermissionsPanel
           canManageMembers={canManageProjectMembers}
           errorMessage={projectMembersErrorMessage}
@@ -1423,15 +1435,15 @@ function TaskWorkspace({
   }
 
   return (
-    <div className="px-[clamp(20px,3vw,34px)] py-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex flex-wrap items-center gap-3">
+    <div className="px-[clamp(18px,2.5vw,30px)] py-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#d3d8df] bg-white px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2">
           <label className="relative block">
             <span className="sr-only">{t('tasks.search')}</span>
-            <SearchIcon className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-[#526381]" />
+            <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5f6874]" />
             <input
               aria-label={t('tasks.search')}
-              className="h-10 w-[min(260px,calc(100vw-52px))] rounded-lg border border-slate-300 bg-white pl-11 pr-3.5 text-sm font-bold text-[#0d1833] shadow-[0_8px_18px_rgba(30,52,88,0.04)] outline-none transition placeholder:text-[#71809a] focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              className="h-9 w-[min(250px,calc(100vw-52px))] rounded-md border border-[#d3d8df] bg-white pl-9 pr-3 text-sm font-medium text-[#1c1d1f] outline-none transition placeholder:text-[#8f99a8] focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10"
               onChange={(event) => onSearchQueryChange(event.target.value)}
               placeholder={t('tasks.search')}
               type="search"
@@ -1462,17 +1474,17 @@ function TaskWorkspace({
             {isStatusMenuOpen ? (
               <div
                 aria-labelledby={statusFilterButtonId}
-                className="absolute left-0 z-20 mt-2 w-56 overflow-hidden rounded-lg border border-slate-200 bg-white p-1 shadow-[0_18px_42px_rgba(30,52,88,0.18)]"
+                className="absolute left-0 z-20 mt-2 w-56 overflow-hidden rounded-md border border-[#d3d8df] bg-white p-1 shadow-[0_12px_24px_rgba(28,40,64,0.12)]"
                 id={statusFilterMenuId}
                 role="menu"
               >
                 {(['all', ...taskStatuses] as const).map((status) => (
                   <button
                     aria-checked={statusFilter === status}
-                    className={`flex h-10 w-full items-center justify-between rounded-md px-3 text-left text-sm font-black transition ${
+                    className={`flex h-9 w-full items-center justify-between rounded-md px-3 text-left text-sm font-semibold transition ${
                       statusFilter === status
-                        ? 'bg-blue-50 text-blue-700'
-                        : 'text-[#263550] hover:bg-slate-100'
+                        ? 'bg-blue-50 text-[#2563eb]'
+                        : 'text-[#1c1d1f] hover:bg-[#f3f4f6]'
                     }`}
                     key={status}
                     onClick={() => onStatusFilterChange(status)}
@@ -1500,17 +1512,17 @@ function TaskWorkspace({
             {isAssigneeMenuOpen ? (
               <div
                 aria-labelledby={assigneeFilterButtonId}
-                className="absolute left-0 z-20 mt-2 max-h-80 w-64 overflow-auto rounded-lg border border-slate-200 bg-white p-1 shadow-[0_18px_42px_rgba(30,52,88,0.18)]"
+                className="absolute left-0 z-20 mt-2 max-h-80 w-64 overflow-auto rounded-md border border-[#d3d8df] bg-white p-1 shadow-[0_12px_24px_rgba(28,40,64,0.12)]"
                 id={assigneeFilterMenuId}
                 role="menu"
               >
                 {assigneeOptions.map((option) => (
                   <button
                     aria-checked={assigneeFilter === option.value}
-                    className={`flex h-10 w-full items-center justify-between rounded-md px-3 text-left text-sm font-black transition ${
+                    className={`flex h-9 w-full items-center justify-between rounded-md px-3 text-left text-sm font-semibold transition ${
                       assigneeFilter === option.value
-                        ? 'bg-blue-50 text-blue-700'
-                        : 'text-[#263550] hover:bg-slate-100'
+                        ? 'bg-blue-50 text-[#2563eb]'
+                        : 'text-[#1c1d1f] hover:bg-[#f3f4f6]'
                     }`}
                     key={option.value}
                     onClick={() => onAssigneeFilterChange(option.value)}
@@ -1538,17 +1550,17 @@ function TaskWorkspace({
             {isDueDateMenuOpen ? (
               <div
                 aria-labelledby={dueDateFilterButtonId}
-                className="absolute left-0 z-20 mt-2 w-56 overflow-hidden rounded-lg border border-slate-200 bg-white p-1 shadow-[0_18px_42px_rgba(30,52,88,0.18)]"
+                className="absolute left-0 z-20 mt-2 w-56 overflow-hidden rounded-md border border-[#d3d8df] bg-white p-1 shadow-[0_12px_24px_rgba(28,40,64,0.12)]"
                 id={dueDateFilterMenuId}
                 role="menu"
               >
                 {taskDueDateFilters.map((filter) => (
                   <button
                     aria-checked={dueDateFilter === filter}
-                    className={`flex h-10 w-full items-center justify-between rounded-md px-3 text-left text-sm font-black transition ${
+                    className={`flex h-9 w-full items-center justify-between rounded-md px-3 text-left text-sm font-semibold transition ${
                       dueDateFilter === filter
-                        ? 'bg-blue-50 text-blue-700'
-                        : 'text-[#263550] hover:bg-slate-100'
+                        ? 'bg-blue-50 text-[#2563eb]'
+                        : 'text-[#1c1d1f] hover:bg-[#f3f4f6]'
                     }`}
                     key={filter}
                     onClick={() => onDueDateFilterChange(filter)}
@@ -1576,17 +1588,17 @@ function TaskWorkspace({
             {isPriorityMenuOpen ? (
               <div
                 aria-labelledby={priorityFilterButtonId}
-                className="absolute left-0 z-20 mt-2 w-56 overflow-hidden rounded-lg border border-slate-200 bg-white p-1 shadow-[0_18px_42px_rgba(30,52,88,0.18)]"
+                className="absolute left-0 z-20 mt-2 w-56 overflow-hidden rounded-md border border-[#d3d8df] bg-white p-1 shadow-[0_12px_24px_rgba(28,40,64,0.12)]"
                 id={priorityFilterMenuId}
                 role="menu"
               >
                 {(['all', ...taskPriorities] as const).map((priority) => (
                   <button
                     aria-checked={priorityFilter === priority}
-                    className={`flex h-10 w-full items-center justify-between rounded-md px-3 text-left text-sm font-black transition ${
+                    className={`flex h-9 w-full items-center justify-between rounded-md px-3 text-left text-sm font-semibold transition ${
                       priorityFilter === priority
-                        ? 'bg-blue-50 text-blue-700'
-                        : 'text-[#263550] hover:bg-slate-100'
+                        ? 'bg-blue-50 text-[#2563eb]'
+                        : 'text-[#1c1d1f] hover:bg-[#f3f4f6]'
                     }`}
                     key={priority}
                     onClick={() => onPriorityFilterChange(priority)}
@@ -1601,7 +1613,7 @@ function TaskWorkspace({
             ) : null}
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-6">
+        <div className="flex flex-wrap items-center gap-2">
           <div className="relative">
             <FilterButton
               ariaControls={sortMenuId}
@@ -1615,17 +1627,17 @@ function TaskWorkspace({
             {isSortMenuOpen ? (
               <div
                 aria-labelledby={sortButtonId}
-                className="absolute right-0 z-20 mt-2 w-56 overflow-hidden rounded-lg border border-slate-200 bg-white p-1 shadow-[0_18px_42px_rgba(30,52,88,0.18)]"
+                className="absolute right-0 z-20 mt-2 w-56 overflow-hidden rounded-md border border-[#d3d8df] bg-white p-1 shadow-[0_12px_24px_rgba(28,40,64,0.12)]"
                 id={sortMenuId}
                 role="menu"
               >
                 {taskSortOrders.map((order) => (
                   <button
                     aria-checked={sortOrder === order}
-                    className={`flex h-10 w-full items-center justify-between rounded-md px-3 text-left text-sm font-black transition ${
+                    className={`flex h-9 w-full items-center justify-between rounded-md px-3 text-left text-sm font-semibold transition ${
                       sortOrder === order
-                        ? 'bg-blue-50 text-blue-700'
-                        : 'text-[#263550] hover:bg-slate-100'
+                        ? 'bg-blue-50 text-[#2563eb]'
+                        : 'text-[#1c1d1f] hover:bg-[#f3f4f6]'
                     }`}
                     key={order}
                     onClick={() => onSortOrderChange(order)}
@@ -1640,7 +1652,7 @@ function TaskWorkspace({
             ) : null}
           </div>
           <button
-            className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-black text-[#0d1833] shadow-[0_10px_24px_rgba(30,52,88,0.04)] transition hover:border-blue-500 hover:text-blue-600"
+            className="inline-flex h-9 items-center gap-2 rounded-md border border-[#d3d8df] bg-white px-3 text-sm font-semibold text-[#1c1d1f] transition hover:border-[#2563eb] hover:text-[#2563eb] focus:outline-none focus:ring-4 focus:ring-[#2563eb]/10"
             type="button"
           >
             <SettingsMiniIcon />
@@ -1698,9 +1710,9 @@ function CreateTaskPanel({
   const today = new Date().toISOString().slice(0, 10)
 
   return (
-    <section className="border-b border-slate-200 bg-[#f8fbff] px-[clamp(22px,3vw,38px)] py-5">
+    <section className="border-b border-[#d3d8df] bg-[#f8fafc] px-[clamp(18px,2.5vw,30px)] py-3">
       <form
-        className="grid gap-4 rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.06)]"
+        className="grid gap-3 rounded-md border border-[#d3d8df] bg-white p-4"
         data-testid="create-task-form"
         onSubmit={(event) => {
           event.preventDefault()
@@ -1727,19 +1739,19 @@ function CreateTaskPanel({
         }}
       >
         <div className="grid grid-cols-[minmax(220px,1.4fr)_minmax(180px,0.9fr)_150px_150px_150px_auto] gap-3 max-[1180px]:grid-cols-2 max-[720px]:grid-cols-1">
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
+          <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
             {t('tasks.create.title')}
             <input
-              className="h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              className="h-10 rounded-md border border-[#d3d8df] px-3 text-sm font-medium text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10"
               name="title"
               placeholder={t('tasks.create.titlePlaceholder')}
               required
             />
           </label>
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
+          <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
             {t('tasks.create.assignee')}
             <select
-              className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              className="h-10 rounded-md border border-[#d3d8df] bg-white px-3 text-sm font-medium text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10"
               defaultValue=""
               disabled={isSubmitting || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage)}
               name="assigneeUserId"
@@ -1755,20 +1767,20 @@ function CreateTaskPanel({
               ))}
             </select>
           </label>
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
+          <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
             {t('tasks.column.dueDate')}
             <input
-              className="h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              className="h-10 rounded-md border border-[#d3d8df] px-3 text-sm font-medium text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10"
               defaultValue={today}
               name="dueDate"
               required
               type="date"
             />
           </label>
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
+          <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
             {t('tasks.column.status')}
             <select
-              className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              className="h-10 rounded-md border border-[#d3d8df] bg-white px-3 text-sm font-medium text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10"
               defaultValue="todo"
               name="status"
             >
@@ -1779,10 +1791,10 @@ function CreateTaskPanel({
               ))}
             </select>
           </label>
-          <label className="grid gap-2 text-sm font-black text-[#263550]">
+          <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
             {t('tasks.column.priority')}
             <select
-              className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              className="h-10 rounded-md border border-[#d3d8df] bg-white px-3 text-sm font-medium text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10"
               defaultValue="medium"
               name="priority"
             >
@@ -1795,7 +1807,7 @@ function CreateTaskPanel({
           </label>
           <div className="flex items-end gap-2">
             <button
-              className="h-11 rounded-lg bg-emerald-600 px-4 text-sm font-black text-white shadow-[0_14px_30px_rgba(5,150,105,0.22)] transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-slate-400"
+              className="h-10 rounded-md bg-[#1c1d1f] px-4 text-sm font-semibold text-white transition hover:bg-[#343941] disabled:cursor-not-allowed disabled:bg-[#b5bdc9]"
               disabled={
                 isSubmitting ||
                 isAssigneeOptionsLoading ||
@@ -1807,7 +1819,7 @@ function CreateTaskPanel({
               {isSubmitting ? t('tasks.create.saving') : t('tasks.create.submit')}
             </button>
             <button
-              className="h-11 rounded-lg border border-slate-300 bg-white px-4 text-sm font-black text-[#263550] transition hover:border-blue-500 hover:text-blue-600"
+              className="h-10 rounded-md border border-[#d3d8df] bg-white px-4 text-sm font-semibold text-[#1c1d1f] transition hover:border-[#2563eb] hover:text-[#2563eb]"
               disabled={isSubmitting}
               onClick={onCancel}
               type="button"
@@ -1817,16 +1829,16 @@ function CreateTaskPanel({
           </div>
         </div>
         {errorMessage ? (
-          <p className="text-sm font-bold text-red-600">{errorMessage}</p>
+          <p className="text-sm font-semibold text-red-700">{errorMessage}</p>
         ) : null}
         {isAssigneeOptionsLoading ? (
-          <p className="text-sm font-bold text-[#526381]">{t('tasks.create.assigneeLoading')}</p>
+          <p className="text-sm font-medium text-[#5f6874]">{t('tasks.create.assigneeLoading')}</p>
         ) : null}
         {assigneeErrorMessage ? (
-          <p className="text-sm font-bold text-red-600">{assigneeErrorMessage}</p>
+          <p className="text-sm font-semibold text-red-700">{assigneeErrorMessage}</p>
         ) : null}
         {!isAssigneeOptionsLoading && !assigneeErrorMessage && assigneeOptions.length === 0 ? (
-          <p className="text-sm font-bold text-[#526381]">{t('tasks.create.assigneeEmpty')}</p>
+          <p className="text-sm font-medium text-[#5f6874]">{t('tasks.create.assigneeEmpty')}</p>
         ) : null}
       </form>
     </section>
@@ -1868,45 +1880,59 @@ function TaskTable({
   taskErrorMessage?: string
   tasks: ProjectTask[]
 }) {
+  const hasTaskRows = !taskErrorMessage && tasks.length > 0
+
   return (
     <section
       aria-label={t('tasks.table.aria')}
-      className="mt-6 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_22px_54px_rgba(30,52,88,0.06)]"
+      className="mt-3 overflow-hidden rounded-md border border-[#d3d8df] bg-white"
     >
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[980px] border-collapse">
-          <thead>
-            <tr className="border-b border-slate-200 bg-white text-left text-sm font-black text-[#0d1833]">
-              <th className="px-7 py-4" scope="col">
-                <span className="inline-flex items-center gap-2">
-                  {t('tasks.column.name')}
-                  <span aria-hidden="true" className="text-[#526381]">
-                    ↕
+        <table className={`w-full table-fixed border-collapse ${hasTaskRows ? 'min-w-[720px]' : 'min-w-0'}`}>
+          {hasTaskRows ? (
+            <colgroup>
+              <col className="w-[34%]" />
+              <col className="w-[20%]" />
+              <col className="w-[13%]" />
+              <col className="w-[15%]" />
+              <col className="w-[14%]" />
+              <col className="w-[4%]" />
+            </colgroup>
+          ) : null}
+          {hasTaskRows ? (
+            <thead>
+              <tr className="border-b border-[#d3d8df] bg-[#f8fafc] text-left text-xs font-semibold text-[#505967]">
+                <th className="px-5 py-2.5" scope="col">
+                  <span className="inline-flex items-center gap-2">
+                    {t('tasks.column.name')}
+                    <span aria-hidden="true" className="text-[#8f99a8]">
+                      ↕
+                    </span>
                   </span>
-                </span>
-              </th>
-              <th className="px-4 py-4" scope="col">
-                {t('tasks.column.assignee')}
-              </th>
-              <th className="px-4 py-4" scope="col">
-                {t('tasks.column.status')}
-              </th>
-              <th className="px-4 py-4" scope="col">
-                {t('tasks.column.dueDate')}
-              </th>
-              <th className="px-4 py-4" scope="col">
-                {t('tasks.column.priority')}
-              </th>
-              <th className="px-4 py-4 text-center text-xl text-[#526381]" scope="col">
-                +
-              </th>
-            </tr>
-          </thead>
+                </th>
+                <th className="px-3 py-2.5" scope="col">
+                  {t('tasks.column.assignee')}
+                </th>
+                <th className="px-3 py-2.5" scope="col">
+                  {t('tasks.column.status')}
+                </th>
+                <th className="px-3 py-2.5" scope="col">
+                  {t('tasks.column.dueDate')}
+                </th>
+                <th className="px-3 py-2.5" scope="col">
+                  {t('tasks.column.priority')}
+                </th>
+                <th className="px-3 py-2.5 text-center text-lg text-[#8f99a8]" scope="col">
+                  +
+                </th>
+              </tr>
+            </thead>
+          ) : null}
           <tbody>
             {taskErrorMessage ? (
               <tr>
                 <td
-                  className="px-7 py-8 text-sm font-bold text-red-600"
+                  className="break-words px-5 py-7 text-sm font-semibold text-red-700"
                   colSpan={6}
                   data-testid="tasks-error"
                 >
@@ -1931,7 +1957,7 @@ function TaskTable({
             ) : (
               <tr>
                 <td
-                  className="px-7 py-8 text-sm font-bold text-[#526381]"
+                  className="px-5 py-7 text-sm font-medium text-[#5f6874]"
                   colSpan={6}
                   data-testid="tasks-empty"
                 >
@@ -1942,16 +1968,16 @@ function TaskTable({
           </tbody>
         </table>
       </div>
-      <div className="grid grid-cols-[1fr_auto] items-center border-t border-slate-200 px-7 py-4 text-sm font-bold">
+      <div className="grid grid-cols-[1fr_auto] items-center border-t border-[#e4e7ec] bg-[#fbfcfd] px-5 py-3 text-sm font-medium">
         <button
-          className="inline-flex items-center gap-2 text-blue-600 transition hover:text-blue-500"
+          className="inline-flex items-center gap-2 text-[#2563eb] transition hover:text-[#1f5fd8]"
           onClick={onCreateTaskOpen}
           type="button"
         >
           <PlusIcon className="h-5 w-5" />
           {t('tasks.addTask')}
         </button>
-        <span className="text-[#526381]" data-testid="tasks-count">
+        <span className="text-[#5f6874]" data-testid="tasks-count">
           {t('tasks.count').replace('{count}', String(tasks.length))}
         </span>
       </div>
@@ -1973,7 +1999,7 @@ function TaskBoard({
   return (
     <section
       aria-label={t(viewLabelKeys.board)}
-      className="mt-6 grid grid-cols-4 gap-4 max-[1180px]:grid-cols-2 max-[720px]:grid-cols-1"
+      className="mt-3 grid grid-cols-4 gap-3 max-[1180px]:grid-cols-2 max-[720px]:grid-cols-1"
     >
       <ViewHeading
         className="col-span-full"
@@ -1986,37 +2012,40 @@ function TaskBoard({
 
         return (
           <div
-            className="min-h-[420px] rounded-lg border border-slate-200 bg-white shadow-[0_22px_54px_rgba(30,52,88,0.06)]"
+            className="min-h-[420px] rounded-md border border-[#d3d8df] bg-white"
             key={status}
           >
-            <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+            <div className="flex items-center justify-between gap-3 border-b border-[#e4e7ec] bg-[#f8fafc] px-3 py-2.5">
               <TaskStatusBadge status={status} t={t} />
-              <span className="text-sm font-black text-[#526381]">
+              <span className="text-sm font-semibold text-[#5f6874]">
                 {t('tasks.board.columnCount').replace('{count}', String(statusTasks.length))}
               </span>
             </div>
-            <div className="grid gap-3 p-3">
+            <div className="grid gap-2 p-2.5">
               {statusTasks.length > 0 ? (
                 statusTasks.map((task) => (
                   <button
-                    className={`rounded-lg border p-4 text-left transition ${
+                    className={`rounded-md border p-3 text-left transition focus:outline-none focus:ring-4 focus:ring-[#2563eb]/10 ${
                       selectedDetailTaskId === task.id
-                        ? 'border-blue-400 bg-blue-50 shadow-[inset_3px_0_0_rgba(37,99,235,0.95)]'
-                        : 'border-slate-200 bg-[#fbfdff] hover:border-blue-300 hover:bg-blue-50/30'
+                        ? 'border-[#2563eb] bg-blue-50 shadow-[inset_3px_0_0_#2563eb]'
+                        : 'border-[#e4e7ec] bg-white hover:border-[#94b9ff] hover:bg-[#f8fafc]'
                     }`}
                     key={createTaskKey(task)}
                     onClick={() => onSelectTask(task)}
                     type="button"
                   >
-                    <p className="text-sm font-black leading-6 text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
-                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold leading-5 text-[#1c1d1f]">{resolveTaskTitle(task, t)}</p>
+                    <p className="mt-2 truncate text-xs font-medium text-[#5f6874]">
+                      {resolveTaskAssignee(task, t)}
+                    </p>
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
                       <TaskPriorityBadge priority={task.priority} t={t} />
-                      <span className="text-xs font-black text-[#526381]">{task.dueDate}</span>
+                      <span className="text-xs font-semibold text-[#5f6874]">{task.dueDate}</span>
                     </div>
                   </button>
                 ))
               ) : (
-                <p className="rounded-lg border border-dashed border-slate-300 px-4 py-8 text-center text-sm font-bold text-[#526381]">
+                <p className="rounded-md border border-dashed border-[#d3d8df] px-4 py-8 text-center text-sm font-medium text-[#5f6874]">
                   {t('tasks.board.empty')}
                 </p>
               )}
@@ -2056,10 +2085,12 @@ function TaskDetailPane({
   if (!task) {
     return (
       <aside
-        className="min-h-0 min-w-0 border-l border-slate-200 bg-white px-6 py-7 max-[1180px]:border-l-0 max-[1180px]:border-t"
+        className="min-h-0 min-w-0 border-l border-[#d3d8df] bg-[#fbfcfd] px-5 py-6 max-[1180px]:border-l-0 max-[1180px]:border-t"
         data-testid="task-detail-pane"
       >
-        <p className="text-sm font-bold text-[#526381]">{t('tasks.detail.empty')}</p>
+        <p className="rounded-md border border-dashed border-[#d3d8df] bg-white px-4 py-8 text-center text-sm font-medium text-[#5f6874]">
+          {t('tasks.detail.empty')}
+        </p>
       </aside>
     )
   }
@@ -2078,11 +2109,11 @@ function TaskDetailPane({
 
   return (
     <aside
-      className="min-h-0 min-w-0 border-l border-slate-200 bg-white px-6 py-7 max-[1180px]:border-l-0 max-[1180px]:border-t"
+      className="min-h-0 min-w-0 border-l border-[#d3d8df] bg-[#fbfcfd] max-[1180px]:border-l-0 max-[1180px]:border-t"
       data-testid="task-detail-pane"
     >
       <form
-        className="grid min-w-0 gap-4"
+        className="grid min-w-0 gap-4 border-b border-[#d3d8df] bg-white px-5 py-4"
         key={`${task.teamId ?? ''}:${task.id}:${issue?.updatedAt ?? 'loading'}`}
         onSubmit={(event) => {
           event.preventDefault()
@@ -2112,39 +2143,39 @@ function TaskDetailPane({
       >
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <p className="text-xs font-black uppercase tracking-normal text-[#69758a]">
+            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#5f6874]">
               {t('tasks.detail.title')}
             </p>
-            <h2 className="mt-2 text-xl font-black leading-7 text-[#0d1833]">{title}</h2>
+            <h2 className="mt-1.5 text-lg font-semibold leading-6 text-[#1c1d1f]">{title}</h2>
             {isLoading ? (
-              <p className="mt-2 text-sm font-bold text-[#526381]">{t('tasks.detail.loading')}</p>
+              <p className="mt-2 text-sm font-medium text-[#5f6874]">{t('tasks.detail.loading')}</p>
             ) : null}
           </div>
           <TaskPriorityBadge priority={issue?.priority ?? task.priority} t={t} />
         </div>
         <fieldset className="contents" disabled={isReadOnly}>
-          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[#505967]">
             {t('issues.column.title')}
             <input
-              className="w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-xl font-black outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+              className="w-full min-w-0 rounded-md border border-[#d3d8df] px-3 py-2 text-base font-semibold text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10 disabled:bg-[#f3f4f6] disabled:text-[#5f6874]"
               defaultValue={title}
               name="title"
               required
             />
           </label>
-          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[#505967]">
             {t('tasks.detail.description')}
             <textarea
-              className="min-h-28 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+              className="min-h-24 w-full min-w-0 rounded-md border border-[#d3d8df] px-3 py-2 text-sm font-medium leading-6 text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10 disabled:bg-[#f3f4f6] disabled:text-[#5f6874]"
               defaultValue={issue?.description ?? ''}
               name="description"
             />
           </label>
-          <div className="grid grid-cols-1 gap-3">
-            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+          <div className="grid grid-cols-1 gap-3 rounded-md border border-[#e4e7ec] bg-[#fbfcfd] p-3">
+            <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[#505967]">
               {t('issues.create.project')}
               <select
-                className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+                className="h-9 w-full min-w-0 rounded-md border border-[#d3d8df] bg-white px-3 text-sm font-medium text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10 disabled:bg-[#f3f4f6] disabled:text-[#5f6874]"
                 defaultValue={assignedProjectId}
                 name="assignedProjectId"
               >
@@ -2154,10 +2185,10 @@ function TaskDetailPane({
                 ))}
               </select>
             </label>
-            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+            <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[#505967]">
               {t('issues.create.assignee')}
               <select
-                className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+                className="h-9 w-full min-w-0 rounded-md border border-[#d3d8df] bg-white px-3 text-sm font-medium text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10 disabled:bg-[#f3f4f6] disabled:text-[#5f6874]"
                 defaultValue={assigneeUserId}
                 name="assigneeUserId"
               >
@@ -2169,10 +2200,10 @@ function TaskDetailPane({
                 ))}
               </select>
             </label>
-            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+            <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[#505967]">
               {t('tasks.column.status')}
               <select
-                className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+                className="h-9 w-full min-w-0 rounded-md border border-[#d3d8df] bg-white px-3 text-sm font-medium text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10 disabled:bg-[#f3f4f6] disabled:text-[#5f6874]"
                 defaultValue={issue?.status ?? task.status}
                 name="status"
               >
@@ -2181,10 +2212,10 @@ function TaskDetailPane({
                 ))}
               </select>
             </label>
-            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+            <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[#505967]">
               {t('tasks.column.priority')}
               <select
-                className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+                className="h-9 w-full min-w-0 rounded-md border border-[#d3d8df] bg-white px-3 text-sm font-medium text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10 disabled:bg-[#f3f4f6] disabled:text-[#5f6874]"
                 defaultValue={issue?.priority ?? task.priority}
                 name="priority"
               >
@@ -2193,10 +2224,10 @@ function TaskDetailPane({
                 ))}
               </select>
             </label>
-            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+            <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[#505967]">
               {t('tasks.column.dueDate')}
               <input
-                className="h-11 w-full min-w-0 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+                className="h-9 w-full min-w-0 rounded-md border border-[#d3d8df] px-3 text-sm font-medium text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10 disabled:bg-[#f3f4f6] disabled:text-[#5f6874]"
                 defaultValue={formatDateInputValue(dueDate)}
                 name="dueDate"
                 type="date"
@@ -2205,19 +2236,19 @@ function TaskDetailPane({
           </div>
         </fieldset>
         <button
-          className="h-11 rounded-lg bg-emerald-600 px-4 text-sm font-black text-white transition hover:bg-emerald-500 disabled:bg-slate-300"
+          className="h-10 rounded-md bg-[#1c1d1f] px-4 text-sm font-semibold text-white transition hover:bg-[#343941] disabled:bg-[#b5bdc9]"
           disabled={isReadOnly}
           type="submit"
         >
           {t('issues.detail.save')}
         </button>
         {isReadOnly && !needsDetailBeforeEdit ? (
-          <p className="text-sm font-bold text-[#526381]">{t('tasks.detail.readOnly')}</p>
+          <p className="text-sm font-medium text-[#5f6874]">{t('tasks.detail.readOnly')}</p>
         ) : null}
-        {errorMessage ? <p className="text-sm font-bold text-red-600">{errorMessage}</p> : null}
+        {errorMessage ? <p className="text-sm font-semibold text-red-700">{errorMessage}</p> : null}
       </form>
       <form
-        className="mt-7 grid gap-3 border-t border-slate-200 pt-6"
+        className="grid gap-3 border-b border-[#d3d8df] bg-white px-5 py-4"
         onSubmit={(event) => {
           event.preventDefault()
 
@@ -2237,49 +2268,49 @@ function TaskDetailPane({
           void onCreateIssueComment?.(task.teamId, task.id, body).then(() => form.reset())
         }}
       >
-        <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+        <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[#505967]">
           {t('issues.comment.title')}
           <textarea
-            className="min-h-20 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+            className="min-h-20 w-full min-w-0 rounded-md border border-[#d3d8df] px-3 py-2 text-sm font-medium leading-6 text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10 disabled:bg-[#f3f4f6] disabled:text-[#5f6874]"
             disabled={isReadOnly}
             name="body"
             required
           />
         </label>
         <button
-          className="h-10 justify-self-start rounded-lg border border-slate-300 bg-white px-4 text-sm font-black text-[#263550] transition hover:border-blue-500 hover:text-blue-600 disabled:border-slate-200 disabled:text-slate-400"
+          className="h-9 justify-self-start rounded-md border border-[#d3d8df] bg-white px-3 text-sm font-semibold text-[#1c1d1f] transition hover:border-[#2563eb] hover:text-[#2563eb] disabled:border-[#e4e7ec] disabled:text-[#b5bdc9]"
           disabled={isReadOnly}
           type="submit"
         >
           {t('issues.comment.submit')}
         </button>
       </form>
-      <section className="mt-7 border-t border-slate-200 pt-6">
-        <h2 className="text-sm font-black uppercase tracking-normal text-[#69758a]">{t('issues.comment.title')}</h2>
-        <div className="mt-3 grid gap-3">
+      <section className="px-5 py-4">
+        <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#5f6874]">{t('issues.comment.title')}</h2>
+        <div className="mt-3 grid gap-2">
           {comments.length > 0 ? (
             comments.map((comment) => (
-              <article className="rounded-lg bg-[#f8fbff] p-3" key={comment.id}>
-                <p className="text-xs font-black text-[#526381]">{comment.actorUserId}</p>
-                <p className="mt-2 whitespace-pre-wrap text-sm font-bold leading-6 text-[#263550]">{comment.body}</p>
+              <article className="rounded-md border border-[#e4e7ec] bg-white p-3" key={comment.id}>
+                <p className="text-xs font-semibold text-[#5f6874]">{comment.actorUserId}</p>
+                <p className="mt-2 whitespace-pre-wrap text-sm font-medium leading-6 text-[#1c1d1f]">{comment.body}</p>
               </article>
             ))
           ) : (
-            <p className="text-sm font-bold text-[#526381]">{t('issues.comment.empty')}</p>
+            <p className="text-sm font-medium text-[#5f6874]">{t('issues.comment.empty')}</p>
           )}
         </div>
       </section>
-      <section className="mt-7 border-t border-slate-200 pt-6">
-        <h2 className="text-sm font-black uppercase tracking-normal text-[#69758a]">{t('issues.activity.title')}</h2>
+      <section className="border-t border-[#d3d8df] px-5 py-4">
+        <h2 className="text-xs font-semibold uppercase tracking-[0.08em] text-[#5f6874]">{t('issues.activity.title')}</h2>
         <div className="mt-3 grid gap-2">
           {activity.length > 0 ? (
             activity.map((item) => (
-              <p className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-bold text-[#526381]" key={item.id}>
+              <p className="rounded-md border border-[#e4e7ec] bg-white px-3 py-2 text-sm font-medium text-[#505967]" key={item.id}>
                 {item.summary}
               </p>
             ))
           ) : (
-            <p className="text-sm font-bold text-[#526381]">{t('tasks.detail.activityEmpty')}</p>
+            <p className="text-sm font-medium text-[#5f6874]">{t('tasks.detail.activityEmpty')}</p>
           )}
         </div>
       </section>
@@ -2295,36 +2326,36 @@ function TaskGantt({ t, tasks }: { t: (key: MessageKey) => string; tasks: Projec
   return (
     <section
       aria-label={t(viewLabelKeys.gantt)}
-      className="mt-6 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_22px_54px_rgba(30,52,88,0.06)]"
+      className="mt-3 overflow-hidden rounded-md border border-[#d3d8df] bg-white"
     >
       <ViewHeading count={tasks.length} t={t} titleKey={viewLabelKeys.gantt} />
-      <div className="grid grid-cols-[260px_1fr] border-b border-slate-200 bg-[#fbfdff] text-sm font-black text-[#263550] max-[820px]:grid-cols-[210px_1fr]">
-        <div className="px-5 py-4">{t('tasks.gantt.owner')}</div>
-        <div className="grid grid-cols-4 px-5 py-4">
+      <div className="grid grid-cols-[240px_1fr] border-b border-[#e4e7ec] bg-[#f8fafc] text-xs font-semibold text-[#505967] max-[820px]:grid-cols-[210px_1fr]">
+        <div className="px-4 py-3">{t('tasks.gantt.owner')}</div>
+        <div className="grid grid-cols-4 px-4 py-3">
           <span>{t('tasks.gantt.phase.discovery')}</span>
           <span>{t('tasks.gantt.phase.build')}</span>
           <span>{t('tasks.gantt.phase.review')}</span>
           <span>{t('tasks.gantt.phase.release')}</span>
         </div>
       </div>
-      <div className="divide-y divide-slate-100">
+      <div className="divide-y divide-[#e4e7ec]">
         {sortedTasks.map((task, index) => (
-          <div className="grid grid-cols-[260px_1fr] items-center max-[820px]:grid-cols-[210px_1fr]" key={createTaskKey(task)}>
-            <div className="min-w-0 px-5 py-4">
-              <p className="truncate text-sm font-black text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
-              <p className="mt-1 text-xs font-bold text-[#526381]">{resolveTaskAssignee(task, t)}</p>
+          <div className="grid grid-cols-[240px_1fr] items-center max-[820px]:grid-cols-[210px_1fr]" key={createTaskKey(task)}>
+            <div className="min-w-0 px-4 py-3">
+              <p className="truncate text-sm font-semibold text-[#1c1d1f]">{resolveTaskTitle(task, t)}</p>
+              <p className="mt-1 text-xs font-medium text-[#5f6874]">{resolveTaskAssignee(task, t)}</p>
             </div>
-            <div className="px-5 py-4">
-              <div className="relative h-10 rounded-lg bg-slate-100">
+            <div className="px-4 py-3">
+              <div className="relative h-9 rounded-md bg-[#f3f4f6]">
                 <div
-                  className="absolute top-2 h-6 rounded-lg bg-blue-600 shadow-[0_8px_18px_rgba(37,99,235,0.2)]"
+                  className="absolute top-2 h-5 rounded-md bg-[#2563eb]"
                   style={{
                     left: `${Math.min(index * 14, 58)}%`,
                     width: `${task.priority === 'high' ? 38 : task.priority === 'medium' ? 32 : 24}%`,
                   }}
                 />
               </div>
-              <p className="mt-2 text-xs font-black text-[#526381]">
+              <p className="mt-2 text-xs font-semibold text-[#5f6874]">
                 {t('tasks.gantt.window').replace('{date}', task.dueDate)}
               </p>
             </div>
@@ -2341,7 +2372,7 @@ function TaskCalendar({ t, tasks }: { t: (key: MessageKey) => string; tasks: Pro
   return (
     <section
       aria-label={t(viewLabelKeys.calendar)}
-      className="mt-6 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_22px_54px_rgba(30,52,88,0.06)]"
+      className="mt-3 overflow-hidden rounded-md border border-[#d3d8df] bg-white"
     >
       <ViewHeading
         count={tasks.length}
@@ -2354,19 +2385,19 @@ function TaskCalendar({ t, tasks }: { t: (key: MessageKey) => string; tasks: Pro
           const dayTasks = tasks.filter((task) => task.dueDate === day.date)
 
           return (
-            <div className="min-h-[250px] border-r border-slate-100 p-4 last:border-r-0" key={`${day.id}-${day.date}`}>
-              <p className="text-sm font-black text-[#0d1833]">{day.label}</p>
-              <p className="mt-1 text-xs font-bold text-[#526381]">{day.date}</p>
-              <div className="mt-4 grid gap-3">
+            <div className="min-h-[230px] border-r border-[#e4e7ec] p-3 last:border-r-0" key={`${day.id}-${day.date}`}>
+              <p className="text-sm font-semibold text-[#1c1d1f]">{day.label}</p>
+              <p className="mt-1 text-xs font-medium text-[#5f6874]">{day.date}</p>
+              <div className="mt-3 grid gap-2">
                 {dayTasks.length > 0 ? (
                   dayTasks.map((task) => (
-                    <article className="rounded-lg border border-blue-200 bg-blue-50 p-3" key={createTaskKey(task)}>
-                      <p className="text-sm font-black leading-6 text-blue-900">{resolveTaskTitle(task, t)}</p>
-                      <p className="mt-2 text-xs font-bold text-blue-700">{resolveTaskAssignee(task, t)}</p>
+                    <article className="rounded-md border border-blue-200 bg-blue-50 p-3" key={createTaskKey(task)}>
+                      <p className="text-sm font-semibold leading-5 text-blue-950">{resolveTaskTitle(task, t)}</p>
+                      <p className="mt-2 text-xs font-medium text-blue-700">{resolveTaskAssignee(task, t)}</p>
                     </article>
                   ))
                 ) : (
-                  <p className="rounded-lg border border-dashed border-slate-300 px-3 py-5 text-sm font-bold text-[#526381]">
+                  <p className="rounded-md border border-dashed border-[#d3d8df] px-3 py-5 text-sm font-medium text-[#5f6874]">
                     {t('tasks.calendar.empty')}
                   </p>
                 )}
@@ -2383,7 +2414,7 @@ function TaskFileList({ t, tasks }: { t: (key: MessageKey) => string; tasks: Pro
   return (
     <section
       aria-label={t(viewLabelKeys.file)}
-      className="mt-6 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_22px_54px_rgba(30,52,88,0.06)]"
+      className="mt-3 overflow-hidden rounded-md border border-[#d3d8df] bg-white"
     >
       <ViewHeading
         count={tasks.length}
@@ -2394,21 +2425,21 @@ function TaskFileList({ t, tasks }: { t: (key: MessageKey) => string; tasks: Pro
       <div className="overflow-x-auto">
         <table className="w-full min-w-[760px] border-collapse text-left">
           <thead>
-            <tr className="border-b border-slate-200 bg-[#fbfdff] text-sm font-black text-[#263550]">
-              <th className="px-5 py-3" scope="col">{t('tasks.file.column.name')}</th>
-              <th className="px-5 py-3" scope="col">{t('tasks.file.column.owner')}</th>
-              <th className="px-5 py-3" scope="col">{t('tasks.column.dueDate')}</th>
-              <th className="px-5 py-3" scope="col">{t('tasks.file.column.status')}</th>
+            <tr className="border-b border-[#d3d8df] bg-[#f8fafc] text-xs font-semibold text-[#505967]">
+              <th className="px-4 py-2.5" scope="col">{t('tasks.file.column.name')}</th>
+              <th className="px-4 py-2.5" scope="col">{t('tasks.file.column.owner')}</th>
+              <th className="px-4 py-2.5" scope="col">{t('tasks.column.dueDate')}</th>
+              <th className="px-4 py-2.5" scope="col">{t('tasks.file.column.status')}</th>
             </tr>
           </thead>
           <tbody>
             {tasks.map((task) => (
-              <tr className="border-b border-slate-100 text-sm font-bold text-[#0d1833] last:border-b-0" key={createTaskKey(task)}>
-                <td className="px-5 py-4">{resolveTaskTitle(task, t)}</td>
-                <td className="px-5 py-4">{resolveTaskAssignee(task, t)}</td>
-                <td className="px-5 py-4 text-[#526381]">{task.dueDate}</td>
-                <td className="px-5 py-4">
-                  <span className="rounded-lg bg-emerald-100 px-3 py-1.5 text-xs font-black text-emerald-700">
+              <tr className="border-b border-[#e4e7ec] text-sm font-medium text-[#1c1d1f] last:border-b-0" key={createTaskKey(task)}>
+                <td className="px-4 py-3 font-semibold">{resolveTaskTitle(task, t)}</td>
+                <td className="px-4 py-3 text-[#505967]">{resolveTaskAssignee(task, t)}</td>
+                <td className="px-4 py-3 text-[#5f6874]">{task.dueDate}</td>
+                <td className="px-4 py-3">
+                  <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">
                     {t(`tasks.status.${task.status}`)}
                   </span>
                 </td>
@@ -2435,28 +2466,28 @@ function ViewHeading({
   titleKey: MessageKey
 }) {
   return (
-    <div className={`border-b border-slate-200 bg-white px-5 py-4 ${className}`}>
+    <div className={`border-b border-[#e4e7ec] bg-white px-4 py-3 ${className}`}>
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
-        <h2 className="text-lg font-black text-[#0d1833]">{t(titleKey)}</h2>
-        <p className="text-sm font-bold text-[#526381]">
+        <h2 className="text-base font-semibold text-[#1c1d1f]">{t(titleKey)}</h2>
+        <p className="text-sm font-medium text-[#5f6874]">
           {t('tasks.count').replace('{count}', String(count))}
         </p>
       </div>
-      {meta ? <p className="mt-1 text-sm font-bold text-[#526381]">{meta}</p> : null}
+      {meta ? <p className="mt-1 text-sm font-medium text-[#5f6874]">{meta}</p> : null}
     </div>
   )
 }
 
 function TaskStatusBadge({ status, t }: { status: TaskStatus; t: (key: MessageKey) => string }) {
   const statusClasses: Record<TaskStatus, string> = {
-    'in-progress': 'bg-blue-100 text-blue-700',
-    review: 'bg-orange-100 text-orange-600',
-    todo: 'bg-slate-100 text-[#263550]',
-    done: 'bg-emerald-100 text-emerald-700',
+    'in-progress': 'border-blue-200 bg-blue-50 text-blue-700',
+    review: 'border-amber-200 bg-amber-50 text-amber-700',
+    todo: 'border-[#d3d8df] bg-[#f3f4f6] text-[#505967]',
+    done: 'border-emerald-200 bg-emerald-50 text-emerald-700',
   }
 
   return (
-    <span className={`inline-flex w-fit rounded-lg px-3 py-1.5 text-xs font-black ${statusClasses[status]}`}>
+    <span className={`inline-flex w-fit rounded-md border px-2 py-1 text-xs font-semibold ${statusClasses[status]}`}>
       {t(`tasks.status.${status}`)}
     </span>
   )
@@ -2470,13 +2501,13 @@ function TaskPriorityBadge({
   t: (key: MessageKey) => string
 }) {
   const priorityClasses: Record<TaskPriority, string> = {
-    high: 'bg-red-100 text-red-600',
-    medium: 'bg-orange-100 text-orange-600',
-    low: 'bg-emerald-100 text-emerald-700',
+    high: 'border-red-200 bg-red-50 text-red-700',
+    medium: 'border-amber-200 bg-amber-50 text-amber-700',
+    low: 'border-emerald-200 bg-emerald-50 text-emerald-700',
   }
 
   return (
-    <span className={`inline-flex w-fit rounded-lg px-3 py-1.5 text-xs font-black ${priorityClasses[priority]}`}>
+    <span className={`inline-flex w-fit rounded-md border px-2 py-1 text-xs font-semibold ${priorityClasses[priority]}`}>
       {t(`tasks.priority.${priority}`)}
     </span>
   )
@@ -2492,7 +2523,7 @@ function SummaryCard({ t, tasks }: { t: (key: MessageKey) => string; tasks: Proj
       labelKey: 'tasks.metric.inProgress',
       value: String(inProgressCount),
       progressPercent: totalCount > 0 ? Math.round((inProgressCount / totalCount) * 100) : 0,
-      accentClassName: 'bg-blue-600',
+      accentClassName: 'bg-[#2563eb]',
     },
     {
       labelKey: 'tasks.metric.done',
@@ -2505,13 +2536,13 @@ function SummaryCard({ t, tasks }: { t: (key: MessageKey) => string; tasks: Proj
   return (
     <section
       aria-label={t('tasks.summary.aria')}
-      className="mb-3 flex min-w-[440px] items-center rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-[0_14px_32px_rgba(30,52,88,0.07)] max-[1280px]:hidden"
+      className="flex min-w-[390px] items-center gap-3 border-l border-[#e4e7ec] py-2 pl-4 max-[1280px]:hidden"
     >
       {projectMetrics.map((metric) => (
-        <div className="min-w-[120px] border-r border-slate-200 px-2" key={metric.labelKey}>
-          <p className="text-xs font-black text-[#263550]">{t(metric.labelKey)}</p>
-          <p className="mt-1.5 text-2xl font-black leading-none text-blue-600">{metric.value}</p>
-          <div className="mt-3 h-1 rounded-full bg-slate-200">
+        <div className="min-w-[96px]" key={metric.labelKey}>
+          <p className="text-xs font-semibold text-[#5f6874]">{t(metric.labelKey)}</p>
+          <p className="mt-1 text-lg font-semibold leading-none text-[#1c1d1f]">{metric.value}</p>
+          <div className="mt-2 h-1 rounded-full bg-[#e4e7ec]">
             <div
               className={`h-1 rounded-full ${metric.accentClassName}`}
               style={{ width: `${metric.progressPercent}%` }}
@@ -2519,18 +2550,18 @@ function SummaryCard({ t, tasks }: { t: (key: MessageKey) => string; tasks: Proj
           </div>
         </div>
       ))}
-      <div className="px-5">
-        <p className="text-xs font-black text-[#263550]">{t('tasks.metric.completionRate')}</p>
-        <p className="mt-1.5 text-2xl font-black leading-none text-[#0d1833]">{completionRate}%</p>
+      <div>
+        <p className="text-xs font-semibold text-[#5f6874]">{t('tasks.metric.completionRate')}</p>
+        <p className="mt-1 text-lg font-semibold leading-none text-[#1c1d1f]">{completionRate}%</p>
       </div>
-      <div className="relative h-[60px] w-[60px]">
+      <div className="relative h-10 w-10">
         <div
           className="absolute inset-0 rounded-full"
           style={{
-            background: `conic-gradient(#2563eb 0 ${completionRate}%, #dce2ea ${completionRate}% 100%)`,
+            background: `conic-gradient(#2563eb 0 ${completionRate}%, #e4e7ec ${completionRate}% 100%)`,
           }}
         />
-        <div className="absolute inset-[9px] rounded-full bg-white" />
+        <div className="absolute inset-[6px] rounded-full bg-white" />
       </div>
     </section>
   )
@@ -2561,16 +2592,16 @@ function FilterButton({
       aria-expanded={ariaExpanded}
       aria-haspopup={ariaHaspopup}
       aria-label={label}
-      className={`inline-flex h-10 min-w-[112px] items-center justify-between gap-2 rounded-lg border bg-white px-3.5 text-sm font-black shadow-[0_10px_24px_rgba(30,52,88,0.04)] transition ${
+      className={`inline-flex h-9 min-w-[104px] items-center justify-between gap-2 rounded-md border bg-white px-3 text-sm font-semibold transition focus:outline-none focus:ring-4 focus:ring-[#2563eb]/10 ${
         active
-          ? 'border-blue-500 text-blue-700'
-          : 'border-slate-200 text-[#0d1833] hover:border-blue-500 hover:text-blue-600'
+          ? 'border-[#2563eb] text-[#2563eb]'
+          : 'border-[#d3d8df] text-[#1c1d1f] hover:border-[#2563eb] hover:text-[#2563eb]'
       }`}
       id={id}
       onClick={onClick}
       type="button"
     >
-      <span className="inline-flex items-center gap-3">
+      <span className="inline-flex items-center gap-2">
         {icon}
         {label}
       </span>
@@ -2597,73 +2628,73 @@ function TaskRow({
   t: (key: MessageKey) => string
 }) {
   const statusClasses: Record<TaskStatus, string> = {
-    'in-progress': 'bg-blue-100 text-blue-700',
-    review: 'bg-orange-100 text-orange-600',
-    todo: 'bg-slate-100 text-[#263550]',
-    done: 'bg-emerald-100 text-emerald-700',
+    'in-progress': 'border-blue-200 bg-blue-50 text-blue-700',
+    review: 'border-amber-200 bg-amber-50 text-amber-700',
+    todo: 'border-[#d3d8df] bg-[#f3f4f6] text-[#505967]',
+    done: 'border-emerald-200 bg-emerald-50 text-emerald-700',
   }
   const priorityClasses: Record<TaskPriority, string> = {
-    high: 'bg-red-100 text-red-600',
-    medium: 'bg-orange-100 text-orange-600',
-    low: 'bg-emerald-100 text-emerald-700',
+    high: 'border-red-200 bg-red-50 text-red-700',
+    medium: 'border-amber-200 bg-amber-50 text-amber-700',
+    low: 'border-emerald-200 bg-emerald-50 text-emerald-700',
   }
   const taskTitle = resolveTaskTitle(task, t)
   const isOverdue = isTaskOverdue(task)
 
   return (
     <tr
-      className={`border-b border-slate-200 text-app-body font-bold text-[#0d1833] last:border-b-0 ${
-        selectedForDetail ? 'bg-blue-50/70 shadow-[inset_3px_0_0_rgba(37,99,235,0.95)]' : 'hover:bg-blue-50/40'
+      className={`border-b border-[#e4e7ec] text-sm font-medium text-[#1c1d1f] last:border-b-0 ${
+        selectedForDetail ? 'bg-blue-50 shadow-[inset_3px_0_0_#2563eb]' : 'hover:bg-[#f8fafc]'
       }`}
       data-row-index={rowIndex}
       data-selected={selected ? 'true' : 'false'}
       data-testid={`task-row-${task.id}`}
     >
-      <td className="px-7 py-3.5">
-        <div className="flex min-w-0 items-center gap-4">
+      <td className="px-5 py-2.5">
+        <div className="flex min-w-0 items-center gap-3">
           <input
             aria-label={taskTitle}
             checked={selected}
-            className="h-5 w-5 rounded border-slate-300 text-blue-600"
+            className="h-4 w-4 rounded border-[#d3d8df] text-[#2563eb]"
             onChange={(event) => onTaskSelectionChange(task.id, event.target.checked)}
             type="checkbox"
           />
           <button
-            className="min-w-0 truncate text-left font-black text-[#0d1833] transition hover:text-blue-600"
+            className="min-w-0 truncate text-left font-semibold text-[#1c1d1f] transition hover:text-[#2563eb]"
             onClick={() => onSelectTask(task)}
             type="button"
           >
             {taskTitle}
           </button>
           {selected ? (
-            <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-black text-blue-700">
+            <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-xs font-semibold text-blue-700">
               {t('tasks.row.selected')}
             </span>
           ) : null}
         </div>
       </td>
-      <td className="px-4 py-3.5">{resolveTaskAssignee(task, t)}</td>
-      <td className="px-4 py-3.5">
-        <span className={`inline-flex rounded-lg px-3 py-1.5 text-xs font-black ${statusClasses[task.status]}`}>
+      <td className="truncate px-3 py-2.5 text-[#505967]">{resolveTaskAssignee(task, t)}</td>
+      <td className="px-3 py-2.5">
+        <span className={`inline-flex whitespace-nowrap rounded-md border px-2 py-1 text-xs font-semibold ${statusClasses[task.status]}`}>
           {t(`tasks.status.${task.status}`)}
         </span>
       </td>
       <td
-        className={`px-4 py-3.5 ${
-          task.status === 'done' ? 'text-[#405174] line-through' : isOverdue ? 'text-red-600' : ''
+        className={`whitespace-nowrap px-3 py-2.5 ${
+          task.status === 'done' ? 'text-[#8f99a8] line-through' : isOverdue ? 'text-red-700' : 'text-[#505967]'
         }`}
       >
         {task.dueDate}
       </td>
-      <td className="px-4 py-3.5">
+      <td className="px-3 py-2.5">
         <span
-          className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-black ${priorityClasses[task.priority]}`}
+          className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border px-2 py-1 text-xs font-semibold ${priorityClasses[task.priority]}`}
         >
           <FlagIcon className="h-4 w-4" />
           {t(`tasks.priority.${task.priority}`)}
         </span>
       </td>
-      <td className="px-4 py-3.5" />
+      <td className="px-3 py-2.5" />
     </tr>
   )
 }
@@ -2865,8 +2896,8 @@ function IconButton({
   return (
     <button
       aria-label={label}
-      className={`grid h-10 w-10 place-items-center text-[#334463] transition hover:bg-slate-100 hover:text-blue-600 ${
-        rounded ? 'rounded-full' : 'rounded-lg'
+      className={`grid h-9 w-9 place-items-center text-[#505967] transition hover:bg-[#f3f4f6] hover:text-[#1c1d1f] focus:outline-none focus:ring-4 focus:ring-[#2563eb]/10 ${
+        rounded ? 'rounded-full' : 'rounded-md'
       }`}
       type="button"
     >
@@ -2877,7 +2908,7 @@ function IconButton({
 
 function ProjectGlyph() {
   return (
-    <span className="grid h-5 w-5 place-items-center rounded-md border border-blue-500 text-app-micro font-black text-blue-600">
+    <span className="grid h-5 w-5 place-items-center rounded border border-[#d3d8df] bg-[#f3f4f6] text-app-micro font-semibold text-[#505967]">
       P
     </span>
   )
@@ -2896,7 +2927,7 @@ function TabIcon({ tab }: { tab: TaskTab }) {
   return (
     <span
       aria-hidden="true"
-      className="grid h-6 w-6 place-items-center rounded-md bg-blue-50 text-xs font-black text-blue-700"
+      className="grid h-5 w-5 place-items-center rounded border border-[#d3d8df] bg-white text-[0.65rem] font-semibold text-[#505967]"
     >
       {icons[tab]}
     </span>
