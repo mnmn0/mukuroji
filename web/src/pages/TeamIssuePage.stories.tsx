@@ -61,6 +61,15 @@ type Story = StoryObj<typeof meta>
 export const Default: Story = {}
 
 /**
+ * TaskPage の詳細ペインと視覚密度を比較するための詳細選択状態です。
+ */
+export const DetailPaneAlignment: Story = {
+  args: {
+    selectedIssueId: 'onboarding-friction',
+  },
+}
+
+/**
  * Issue が未登録の空状態です。
  */
 export const Empty: Story = {

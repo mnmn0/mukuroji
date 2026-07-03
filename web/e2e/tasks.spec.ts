@@ -806,6 +806,7 @@ function getMockRequestCounts(page: Page) {
  */
 async function openSidebarCreatePanel(page: Page) {
   await page.getByRole('button', { name: '新規登録' }).click()
+  await page.getByRole('button', { name: 'チーム', exact: true }).click()
   await expect(page.getByLabel('チーム名')).toBeVisible()
 }
 
@@ -892,16 +893,51 @@ async function readDesktopAppShellState(page: Page) {
   })
 }
 
+function resolveLegacyTaskAssignee(task: ProjectTask) {
+  const assigneeByKey = {
+    'tasks.assignee.sato': {
+      id: 'sato@example.com',
+      email: 'sato@example.com',
+      name: '佐藤 花子',
+    },
+    'tasks.assignee.suzuki': {
+      id: 'suzuki@example.com',
+      email: 'suzuki@example.com',
+      name: '鈴木 大輔',
+    },
+    'tasks.assignee.tanaka': {
+      id: 'tanaka@example.com',
+      email: 'tanaka@example.com',
+      name: '田中 美咲',
+    },
+    'tasks.assignee.yamamoto': {
+      id: 'yamamoto@example.com',
+      email: 'yamamoto@example.com',
+      name: '山本 健太',
+    },
+  } as const
+
+  return task.assigneeKey && task.assigneeKey in assigneeByKey
+    ? assigneeByKey[task.assigneeKey as keyof typeof assigneeByKey]
+    : {
+        id: task.assigneeUserId ?? task.assignee ?? 'sato@example.com',
+        email: task.assigneeEmail,
+        name: task.assigneeName,
+      }
+}
+
 function toIssueFromTask(task: ProjectTask, teamId: string, assignedProjectId: string): TeamIssue {
+  const assignee = resolveLegacyTaskAssignee(task)
+
   return {
     id: task.id,
     teamId,
     assignedProjectId,
     titleKey: task.titleKey,
     title: task.title,
-    assigneeUserId: task.assigneeUserId ?? task.assignee ?? 'sato@example.com',
-    assigneeEmail: task.assigneeEmail,
-    assigneeName: task.assigneeName,
+    assigneeUserId: assignee.id,
+    assigneeEmail: assignee.email,
+    assigneeName: assignee.name,
     status: task.status,
     dueDate: task.dueDate,
     priority: task.priority,
@@ -1040,6 +1076,83 @@ test.describe('authenticated task page', () => {
       'data-selected',
       'true',
     )
+  })
+
+  test('タスク画面で担当者、優先度、期限、並び替え、詳細コメントが動作する', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const requestCounts = getMockRequestCounts(page)
+
+    await expect(page.getByTestId('task-detail-pane')).toContainText('新しいランディングページのワイヤーフレーム作成')
+    await expect(page.getByText('背景を確認します。')).toBeVisible()
+
+    await page.getByRole('button', { name: '担当者' }).click()
+    await page.getByRole('menuitemradio', { name: '佐藤 花子' }).click()
+
+    await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
+    await expect(page.getByTestId('task-row-brand-guideline')).toBeHidden()
+    await expect(page.getByTestId('tasks-count')).toContainText('1')
+
+    await page.getByRole('button', { name: '担当者' }).click()
+    await page.getByRole('menuitemradio', { name: 'すべての担当者' }).click()
+    await page.getByRole('button', { name: '優先度' }).click()
+    await page.getByRole('menuitemradio', { name: '高' }).click()
+
+    await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
+    await expect(page.getByTestId('task-row-seo-research')).toBeHidden()
+    await expect(page.getByTestId('tasks-count')).toContainText('1')
+
+    await page.getByRole('button', { name: '優先度' }).click()
+    await page.getByRole('menuitemradio', { name: 'すべての優先度' }).click()
+    await page.getByRole('button', { name: '期限', exact: true }).click()
+    await page.getByRole('menuitemradio', { name: '期限切れ' }).click()
+
+    await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
+    await expect(page.getByTestId('task-row-seo-research')).toBeVisible()
+    await expect(page.getByTestId('task-row-competitor-report')).toBeHidden()
+    await expect(page.getByTestId('tasks-count')).toContainText('3')
+
+    await page.getByRole('button', { name: '期限', exact: true }).click()
+    await page.getByRole('menuitemradio', { name: 'すべての期限' }).click()
+    await page.getByRole('button', { name: /期限が近い順/ }).click()
+    await page.getByRole('menuitemradio', { name: '期限が遠い順' }).click()
+
+    await expect(page.getByTestId('task-row-seo-research')).toBeVisible()
+    await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
+    await expect(page.getByTestId('task-row-seo-research')).toHaveAttribute('data-row-index', '0')
+
+    await page.goto('/teams/core-team/issues')
+    await page.getByRole('button', { name: '新規 Issue' }).click()
+    const createIssueForm = page.getByTestId('create-issue-form')
+
+    await createIssueForm.locator('input[name="title"]').fill('Execution detail check')
+    await createIssueForm.locator('textarea[name="description"]').fill('詳細説明を保持します。')
+    await createIssueForm.locator('select[name="assignedProjectId"]').selectOption('refero')
+    await createIssueForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
+    await createIssueForm.getByRole('button', { name: 'Issue を作成' }).click()
+    await expect(page.getByTestId('issue-row-execution-detail-check')).toBeVisible()
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=execution-detail-check')
+
+    await expect(page.getByTestId('task-detail-pane')).toContainText('Execution detail check')
+    await expect(page.getByRole('button', { name: '変更を保存' })).toBeEnabled()
+    await expect(page.getByTestId('task-detail-pane').locator('textarea[name="description"]')).toHaveValue('詳細説明を保持します。')
+    await page.getByTestId('task-detail-pane').locator('select[name="status"]').selectOption('review')
+    await page.getByRole('button', { name: '変更を保存' }).click()
+    await expect(page.getByTestId('task-detail-pane').locator('textarea[name="description"]')).toHaveValue('詳細説明を保持します。')
+
+    await page.getByTestId('task-row-seo-research').getByRole('button').click()
+
+    await expect(page).toHaveURL(/issueId=seo-research/)
+    await expect(page.getByTestId('task-detail-pane')).toContainText('SEO キーワードリサーチ')
+    await expect(page.getByRole('button', { name: '変更を保存' })).toBeDisabled()
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=execution-detail-check')
+
+    await page.locator('textarea[name="body"]').fill('プロジェクト画面から確認します。')
+    await page.getByRole('button', { name: 'コメントを追加' }).click()
+
+    await expect(page.getByText('プロジェクト画面から確認します。')).toBeVisible()
+    expect(requestCounts.issueComments).toBe(1)
   })
 
   test('タブ切り替えとサイドバーの折りたたみが動作する', async ({ page }) => {
@@ -1284,6 +1397,8 @@ test.describe('authenticated task page', () => {
     await expect(page.getByRole('button', { name: '新規チーム', exact: true })).toBeVisible()
     expect(requestCounts.teamCreates).toBe(1)
 
+    await page.getByRole('button', { name: '新規登録' }).click()
+    await page.getByRole('button', { name: 'プロジェクト', exact: true }).click()
     await page.getByLabel('プロジェクト名').fill('新規プロジェクト')
     await page.getByRole('button', { name: 'プロジェクトを登録' }).click()
 
@@ -1333,6 +1448,7 @@ test.describe('authenticated task page', () => {
     await expect(page.getByText('チーム名を入力してください。')).toBeVisible()
     expect(requestCounts.teamCreates).toBe(0)
 
+    await page.getByRole('button', { name: 'プロジェクト', exact: true }).click()
     await page.getByLabel('プロジェクト名').fill('   ')
     await page.getByRole('button', { name: 'プロジェクトを登録' }).click()
 
@@ -1400,10 +1516,12 @@ test.describe('authenticated task page', () => {
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('button', { name: '新規タスク' }).click()
-    await page.locator('input[name="title"]').fill('新規タスク')
-    await page.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
-    await page.locator('input[name="dueDate"]').fill('2026-06-20')
-    await page.getByRole('button', { name: '登録', exact: true }).click()
+    const createTaskForm = page.getByTestId('create-task-form')
+
+    await createTaskForm.locator('input[name="title"]').fill('新規タスク')
+    await createTaskForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
+    await createTaskForm.locator('input[name="dueDate"]').fill('2026-06-20')
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
 
     await expect(page.getByTestId('task-row-new-task').getByText('新規タスク')).toBeVisible()
     expect(requestCounts.issueCreates).toBe(1)
@@ -1422,7 +1540,7 @@ test.describe('authenticated task page', () => {
 
     await page.getByRole('button', { name: '新規タスク' }).click()
 
-    await expect(page.locator('input[name="title"]')).toBeVisible()
+    await expect(page.getByTestId('create-task-form').locator('input[name="title"]')).toBeVisible()
     await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBe(0)
   })
 
@@ -1431,11 +1549,13 @@ test.describe('authenticated task page', () => {
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('button', { name: '新規タスク' }).click()
-    await page.locator('input[name="title"]').fill('担当者未選択タスク')
-    await page.locator('input[name="dueDate"]').fill('2026-06-20')
-    await page.getByRole('button', { name: '登録', exact: true }).click()
+    const createTaskForm = page.getByTestId('create-task-form')
 
-    await expect(page.locator('select[name="assigneeUserId"]')).toHaveValue('')
+    await createTaskForm.locator('input[name="title"]').fill('担当者未選択タスク')
+    await createTaskForm.locator('input[name="dueDate"]').fill('2026-06-20')
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+
+    await expect(createTaskForm.locator('select[name="assigneeUserId"]')).toHaveValue('')
     expect(requestCounts.issueCreates).toBe(0)
   })
 

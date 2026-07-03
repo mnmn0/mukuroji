@@ -23,8 +23,16 @@ export function createProjectTasksPath(projectId: string, teamId: string) {
 /**
  * プロジェクトの Issue 遂行画面 URL を生成します。
  */
-export function createProjectIssuesPath(projectId: string, teamId: string) {
-  return `/projects/${encodeURIComponent(projectId)}/issues?teamId=${encodeURIComponent(teamId)}`
+export function createProjectIssuesPath(projectId: string, teamId: string, issueId?: string) {
+  const searchParams = new URLSearchParams({
+    teamId,
+  })
+
+  if (issueId) {
+    searchParams.set('issueId', issueId)
+  }
+
+  return `/projects/${encodeURIComponent(projectId)}/issues?${searchParams.toString()}`
 }
 
 /**

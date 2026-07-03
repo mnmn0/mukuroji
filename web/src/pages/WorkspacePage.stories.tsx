@@ -22,6 +22,7 @@ const defaultArgs = {
   onCreateProject: async () => undefined,
   onCreateTeam: async () => undefined,
   onFontSizePreferenceChange: () => undefined,
+  onOpenTask: () => undefined,
   userInitial: 'D',
   userLabel: 'demo@example.com',
   view: 'home',
@@ -61,6 +62,15 @@ export const MyTasks: Story = {
 }
 
 /**
+ * 受信箱の判断キュー画面です。
+ */
+export const Inbox: Story = {
+  args: {
+    view: 'inbox',
+  },
+}
+
+/**
  * ポートフォリオダッシュボード画面です。
  */
 export const Dashboard: Story = {
@@ -88,10 +98,37 @@ export const Settings: Story = {
 }
 
 /**
+ * チーム概要画面です。
+ */
+export const TeamOverview: Story = {
+  args: {
+    view: 'team-overview',
+  },
+}
+
+/**
  * チームメンバー画面です。
  */
 export const TeamMembers: Story = {
   args: {
     view: 'team-members',
+  },
+}
+
+/**
+ * 認証と API 確認中の loading 表示です。
+ */
+export const Loading: Story = {
+  args: {
+    isLoading: true,
+  },
+}
+
+/**
+ * 英語 locale でワークスペースを表示する状態です。
+ */
+export const English: Story = {
+  args: {
+    locale: 'en',
   },
 }

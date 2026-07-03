@@ -38,9 +38,14 @@ import {
 } from '../projects/api'
 import {
   createTeamIssue,
+  createTeamIssueComment,
+  getTeamIssueDetail,
   getProjectIssues,
   TeamIssuesApiError,
   type TeamIssue,
+  type TeamIssueDetail,
+  type UpdateTeamIssueInput,
+  updateTeamIssue,
 } from '../issues/api'
 import { ProjectPermissionsPanel } from '../projects/ProjectPermissionsPanel'
 import {
@@ -59,8 +64,11 @@ import {
 const taskTabs = ['table', 'board', 'gantt', 'calendar', 'file', 'permissions'] as const
 const taskStatuses = ['in-progress', 'review', 'todo', 'done'] as const
 const taskPriorities = ['high', 'medium', 'low'] as const
+const taskDueDateFilters = ['all', 'overdue', 'upcoming', 'no-date'] as const
+const taskSortOrders = ['due-date-asc', 'due-date-desc'] as const
 const emptyProjectMembers: ProjectMember[] = []
 const emptyProjectUsers: ProjectUser[] = []
+const emptyTeamIssues: TeamIssue[] = []
 const apiSWRConfig = {
   dedupingInterval: 10_000,
   shouldRetryOnError: false,
@@ -75,6 +83,26 @@ type TaskTab = (typeof taskTabs)[number]
  * ステータス絞り込みの選択値です。
  */
 type StatusFilter = TaskStatus | 'all'
+
+/**
+ * 担当者絞り込みの選択値です。
+ */
+type AssigneeFilter = string | 'all'
+
+/**
+ * 優先度絞り込みの選択値です。
+ */
+type PriorityFilter = TaskPriority | 'all'
+
+/**
+ * 期限バケット絞り込みの選択値です。
+ */
+type DueDateFilter = (typeof taskDueDateFilters)[number]
+
+/**
+ * タスク一覧の期限並び替え方向です。
+ */
+type TaskSortOrder = (typeof taskSortOrders)[number]
 
 /**
  * 上部の進捗サマリーに表示する指標です。
@@ -96,6 +124,20 @@ type ProjectMetric = {
    * 下線アクセントに使う Tailwind class です。
    */
   accentClassName: string
+}
+
+/**
+ * 担当者絞り込みメニューの選択肢です。
+ */
+type AssigneeFilterOption = {
+  /**
+   * 絞り込みに使う担当者識別値です。
+   */
+  value: AssigneeFilter
+  /**
+   * メニューに表示する担当者名です。
+   */
+  label: string
 }
 
 /**
@@ -191,6 +233,46 @@ type TaskScreenProps = {
    */
   taskErrorMessage?: string
   /**
+   * 初期選択するプロジェクトビューのタブです。
+   */
+  initialTab?: TaskTab
+  /**
+   * 初期表示時にタスク作成パネルを開くかどうかです。
+   */
+  defaultCreateTaskOpen?: boolean
+  /**
+   * 初期表示時に詳細ペインで選択するタスク ID です。
+   */
+  initialSelectedTaskId?: string
+  /**
+   * 選択中 Issue の詳細、コメント、活動履歴です。
+   */
+  selectedIssueDetail?: TeamIssueDetail
+  /**
+   * 選択中 Issue 詳細を取得中かどうかです。
+   */
+  isSelectedIssueDetailLoading?: boolean
+  /**
+   * 選択中 Issue 詳細の取得または更新に失敗したときのエラーメッセージです。
+   */
+  detailErrorMessage?: string
+  /**
+   * 詳細ペインで選択するタスクを変更したときの callback です。
+   */
+  onSelectedIssueChange?: (task: ProjectTask) => void
+  /**
+   * 詳細ペインで Issue を更新するときの callback です。
+   */
+  onUpdateIssue?: (
+    teamId: string,
+    issueId: string,
+    input: UpdateTeamIssueInput,
+  ) => Promise<void>
+  /**
+   * 詳細ペインで Issue コメントを追加するときの callback です。
+   */
+  onCreateIssueComment?: (teamId: string, issueId: string, body: string) => Promise<void>
+  /**
    * サイドバーからプロジェクトを選択したときの callback です。
    */
   onSelectProject?: (projectId: string, teamId: string) => void
@@ -262,6 +344,7 @@ export function TaskPage() {
   const [searchParams] = useSearchParams()
   const projectId = params.projectId ?? 'refero'
   const selectedTeamId = searchParams.get('teamId') ?? undefined
+  const selectedIssueId = searchParams.get('issueId') ?? undefined
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [projectUserQuery, setProjectUserQuery] = useState('')
@@ -291,19 +374,21 @@ export function TaskPage() {
     ? (['project-tasks', accessToken, projectId] as const)
     : null
   const {
-    data: tasks = [],
+    data: projectIssues = emptyTeamIssues,
     error: taskError,
     isLoading: isProjectTasksLoading,
     mutate: mutateProjectTasks,
   } = useSWR(
     projectTasksKey,
     ([, accessToken, currentProjectId]) =>
-      getProjectIssues(currentProjectId, accessToken).then((issues) =>
-        issues.map((issue) => toProjectTaskFromIssue(issue, currentProjectId)),
-      ).catch((error: unknown) => {
+      getProjectIssues(currentProjectId, accessToken).catch((error: unknown) => {
         throw normalizeProjectIssueError(error)
       }),
     apiSWRConfig,
+  )
+  const tasks = useMemo(
+    () => projectIssues.map((issue) => toProjectTaskFromIssue(issue, projectId)),
+    [projectId, projectIssues],
   )
   const projectMembersKey = accessToken && user && !currentUserError
     ? (['project-members', accessToken, projectId] as const)
@@ -361,6 +446,24 @@ export function TaskPage() {
     : undefined
   const activeTeam = findTeamForProject(teams, projectId, selectedTeamId)
   const activeProject = findProjectInTeams(teams, projectId, activeTeam?.id ?? selectedTeamId)
+  const resolvedSelectedIssue =
+    findIssueBySelection(projectIssues, selectedIssueId, selectedTeamId) ??
+    projectIssues.find((issue) => selectedTeamId ? issue.teamId === selectedTeamId : false) ??
+    projectIssues[0]
+  const resolvedSelectedIssueTeamId = resolvedSelectedIssue?.teamId ?? activeTeam?.id
+  const issueDetailKey = accessToken && resolvedSelectedIssue?.id && resolvedSelectedIssueTeamId
+    ? (['project-issue-detail', accessToken, resolvedSelectedIssueTeamId, resolvedSelectedIssue.id] as const)
+    : null
+  const {
+    data: selectedIssueDetail,
+    error: detailError,
+    isLoading: isSelectedIssueDetailLoading,
+    mutate: mutateSelectedIssueDetail,
+  } = useSWR(
+    issueDetailKey,
+    ([, token, teamId, issueId]) => getTeamIssueDetail(teamId, issueId, token),
+    apiSWRConfig,
+  )
   const projectName =
     activeProject?.name ?? (projectId === 'refero' ? t('tasks.project.refero') : projectId)
   const projectMembersErrorMessage = useMemo(() => {
@@ -388,6 +491,9 @@ export function TaskPage() {
 
     return message === 'tasks.error.loading' ? t('tasks.error.loading') : message
   }, [taskError, t])
+  const detailErrorMessage = detailError
+    ? t('tasks.detail.error')
+    : undefined
   const isLoading =
     !session ||
     isCurrentUserLoading ||
@@ -427,11 +533,12 @@ export function TaskPage() {
       throw new Error(t('issues.error.create'))
     }
 
-    await createTeamIssue(activeTeam.id, accessToken, {
+    const issue = await createTeamIssue(activeTeam.id, accessToken, {
       ...input,
       assignedProjectId: projectId,
     })
     await mutateProjectTasks()
+    navigate(createProjectIssuesPath(projectId, activeTeam.id, issue.id))
   }
 
   const handleCreateTeam = async (input: CreateProjectDirectoryTeamInput) => {
@@ -535,6 +642,39 @@ export function TaskPage() {
     })
   }
 
+  const handleSelectedIssueChange = (task: ProjectTask) => {
+    const nextTeamId = task.teamId ?? activeTeam?.id
+
+    if (!nextTeamId) {
+      return
+    }
+
+    navigate(createProjectIssuesPath(task.projectId ?? projectId, nextTeamId, task.id))
+  }
+
+  const handleUpdateIssue = async (
+    teamId: string,
+    issueId: string,
+    input: UpdateTeamIssueInput,
+  ) => {
+    if (!accessToken) {
+      return
+    }
+
+    await updateTeamIssue(teamId, issueId, accessToken, input)
+    await mutateProjectTasks()
+    await mutateSelectedIssueDetail()
+  }
+
+  const handleCreateIssueComment = async (teamId: string, issueId: string, body: string) => {
+    if (!accessToken) {
+      return
+    }
+
+    await createTeamIssueComment(teamId, issueId, accessToken, body)
+    await mutateSelectedIssueDetail()
+  }
+
   return (
     <TaskScreen
       isLoading={isLoading}
@@ -555,12 +695,18 @@ export function TaskPage() {
       assigneeErrorMessage={projectMembersErrorMessage}
       assigneeOptions={projectMembers}
       canManageProjectMembers={canManageProjectMembers}
+      detailErrorMessage={detailErrorMessage}
+      initialSelectedTaskId={resolvedSelectedIssue?.id}
       isAssigneeOptionsLoading={Boolean(projectMembersKey && isProjectMembersLoading)}
       isProjectUsersLoading={Boolean(projectUsersKey && isProjectUsersLoading)}
+      isSelectedIssueDetailLoading={Boolean(issueDetailKey && isSelectedIssueDetailLoading)}
       isSystemAdmin={user?.isSystemAdmin}
+      onCreateIssueComment={handleCreateIssueComment}
       onLoadMoreProjectUsers={handleLoadMoreProjectUsers}
       onProjectUserQueryChange={setProjectUserQuery}
       onRemoveProjectMember={handleRemoveProjectMember}
+      onSelectedIssueChange={handleSelectedIssueChange}
+      onUpdateIssue={handleUpdateIssue}
       onUpdateProjectMember={handleUpdateProjectMember}
       projectId={projectId}
       projectMembers={projectMembers}
@@ -570,6 +716,7 @@ export function TaskPage() {
       projectUsers={projectUsers}
       projectUsersErrorMessage={projectUsersErrorMessage}
       projectUsersNextToken={projectUsersNextToken}
+      selectedIssueDetail={selectedIssueDetail}
       taskErrorMessage={taskErrorMessage}
       tasks={tasks}
       teamName={activeTeam?.name}
@@ -593,8 +740,13 @@ export function TaskScreen({
   assigneeErrorMessage,
   assigneeOptions = [],
   canManageProjectMembers = false,
+  defaultCreateTaskOpen = false,
+  detailErrorMessage,
+  initialSelectedTaskId,
+  initialTab = 'table',
   isAssigneeOptionsLoading = false,
   isProjectUsersLoading = false,
+  isSelectedIssueDetailLoading = false,
   isSystemAdmin = false,
   isLoading = false,
   projectMembers = emptyProjectMembers,
@@ -603,11 +755,14 @@ export function TaskScreen({
   projectUsers = emptyProjectUsers,
   projectUsersErrorMessage,
   projectUsersNextToken,
+  selectedIssueDetail,
   tasks = [],
   taskErrorMessage,
+  onCreateIssueComment,
   onLoadMoreProjectUsers,
   onProjectUserQueryChange,
   onRemoveProjectMember,
+  onSelectedIssueChange,
   onSelectProject,
   onSelectNav,
   onSelectTeamView,
@@ -616,18 +771,28 @@ export function TaskScreen({
   onArchiveProject,
   onArchiveTeam,
   onCreateTask,
+  onUpdateIssue,
   onUpdateProjectMember,
 }: TaskScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
-  const [activeTab, setActiveTab] = useState<TaskTab>('table')
+  const [activeTab, setActiveTab] = useState<TaskTab>(initialTab)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [isStatusMenuOpen, setIsStatusMenuOpen] = useState(false)
+  const [assigneeFilter, setAssigneeFilter] = useState<AssigneeFilter>('all')
+  const [isAssigneeMenuOpen, setIsAssigneeMenuOpen] = useState(false)
+  const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>('all')
+  const [isPriorityMenuOpen, setIsPriorityMenuOpen] = useState(false)
+  const [dueDateFilter, setDueDateFilter] = useState<DueDateFilter>('all')
+  const [isDueDateMenuOpen, setIsDueDateMenuOpen] = useState(false)
+  const [sortOrder, setSortOrder] = useState<TaskSortOrder>('due-date-asc')
+  const [isSortMenuOpen, setIsSortMenuOpen] = useState(false)
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([])
+  const [localSelectedDetailTaskId, setLocalSelectedDetailTaskId] = useState<string | undefined>()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
-  const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false)
+  const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(defaultCreateTaskOpen)
   const [createTaskError, setCreateTaskError] = useState<string | undefined>()
   const [isCreatingTask, setIsCreatingTask] = useState(false)
   const taskContentRef = useRef<HTMLDivElement>(null)
@@ -635,13 +800,18 @@ export function TaskScreen({
   const resolvedActiveTeam = findTeamForProject(teams, projectId, activeProjectTeamId)
   const resolvedActiveTeamId = activeProjectTeamId ?? resolvedActiveTeam?.id
   const resolvedTeamName = teamName ?? resolvedActiveTeam?.name ?? ''
+  const activeTeamProjects = resolvedActiveTeam?.projects ?? []
+  const selectedDetailTaskId = localSelectedDetailTaskId ?? initialSelectedTaskId
   const visibleTasks = useMemo(
-    () =>
-      tasks.filter((task) => {
+    () => {
+      const filteredTasks = tasks.filter((task) => {
         const matchesStatus = statusFilter === 'all' || task.status === statusFilter
+        const matchesAssignee = assigneeFilter === 'all' || resolveTaskAssigneeFilterValue(task, t) === assigneeFilter
+        const matchesPriority = priorityFilter === 'all' || task.priority === priorityFilter
+        const matchesDueDate = matchesTaskDueDateFilter(task, dueDateFilter)
         const normalizedQuery = searchQuery.trim().toLowerCase()
 
-        if (!matchesStatus) {
+        if (!matchesStatus || !matchesAssignee || !matchesPriority || !matchesDueDate) {
           return false
         }
 
@@ -656,9 +826,17 @@ export function TaskScreen({
           t(`tasks.priority.${task.priority}`),
           task.dueDate,
         ].some((value) => value.toLowerCase().includes(normalizedQuery))
-      }),
-    [searchQuery, statusFilter, t, tasks],
+      })
+
+      return sortTasksByDueDate(filteredTasks, sortOrder)
+    },
+    [assigneeFilter, dueDateFilter, priorityFilter, searchQuery, sortOrder, statusFilter, t, tasks],
   )
+  const selectedDetailTask =
+    findTaskBySelection(tasks, selectedDetailTaskId, resolvedActiveTeamId) ??
+    findTaskBySelection(tasks, initialSelectedTaskId, resolvedActiveTeamId) ??
+    visibleTasks[0] ??
+    tasks[0]
 
   useEffect(() => {
     if (isCreateTaskOpen) {
@@ -672,6 +850,13 @@ export function TaskScreen({
         ? [...new Set([...currentTaskIds, taskId])]
         : currentTaskIds.filter((currentTaskId) => currentTaskId !== taskId),
     )
+  }
+
+  const handleSelectDetailTask = (task: ProjectTask) => {
+    if (!onSelectedIssueChange) {
+      setLocalSelectedDetailTaskId(task.id)
+    }
+    onSelectedIssueChange?.(task)
   }
 
   return (
@@ -780,40 +965,86 @@ export function TaskScreen({
                 t={t}
               />
             ) : null}
-            <TaskWorkspace
-              activeTab={activeTab}
-              canManageProjectMembers={canManageProjectMembers}
-              isStatusMenuOpen={isStatusMenuOpen}
-              isProjectMembersLoading={isAssigneeOptionsLoading}
-              isProjectUsersLoading={isProjectUsersLoading}
-              isSystemAdmin={isSystemAdmin}
-              projectId={projectId}
-              projectMembers={projectMembers}
-              projectMembersErrorMessage={projectMembersErrorMessage}
-              projectName={resolvedProjectName}
-              projectUserQuery={projectUserQuery}
-              projectUsers={projectUsers}
-              projectUsersErrorMessage={projectUsersErrorMessage}
-              projectUsersNextToken={projectUsersNextToken}
-              onLoadMoreProjectUsers={onLoadMoreProjectUsers}
-              onCreateTaskOpen={() => setIsCreateTaskOpen(true)}
-              onProjectUserQueryChange={onProjectUserQueryChange}
-              onRemoveProjectMember={onRemoveProjectMember}
-              onSearchQueryChange={setSearchQuery}
-              onStatusFilterChange={(nextStatusFilter) => {
-                setStatusFilter(nextStatusFilter)
-                setIsStatusMenuOpen(false)
-              }}
-              onStatusMenuOpenChange={setIsStatusMenuOpen}
-              onTaskSelectionChange={updateTaskSelection}
-              onUpdateProjectMember={onUpdateProjectMember}
-              searchQuery={searchQuery}
-              selectedTaskIds={selectedTaskIds}
-              statusFilter={statusFilter}
-              t={t}
-              taskErrorMessage={taskErrorMessage}
-              tasks={visibleTasks}
-            />
+            <div className={`grid min-h-full ${activeTab === 'permissions' ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_minmax(340px,430px)] max-[1180px]:grid-cols-1'}`}>
+              <TaskWorkspace
+                activeTab={activeTab}
+                allTasks={tasks}
+                assigneeFilter={assigneeFilter}
+                canManageProjectMembers={canManageProjectMembers}
+                dueDateFilter={dueDateFilter}
+                isAssigneeMenuOpen={isAssigneeMenuOpen}
+                isDueDateMenuOpen={isDueDateMenuOpen}
+                isPriorityMenuOpen={isPriorityMenuOpen}
+                isSortMenuOpen={isSortMenuOpen}
+                isStatusMenuOpen={isStatusMenuOpen}
+                isProjectMembersLoading={isAssigneeOptionsLoading}
+                isProjectUsersLoading={isProjectUsersLoading}
+                isSystemAdmin={isSystemAdmin}
+                priorityFilter={priorityFilter}
+                projectId={projectId}
+                projectMembers={projectMembers}
+                projectMembersErrorMessage={projectMembersErrorMessage}
+                projectName={resolvedProjectName}
+                projectUserQuery={projectUserQuery}
+                projectUsers={projectUsers}
+                projectUsersErrorMessage={projectUsersErrorMessage}
+                projectUsersNextToken={projectUsersNextToken}
+                selectedDetailTaskId={selectedDetailTask?.id}
+                sortOrder={sortOrder}
+                onAssigneeFilterChange={(nextAssigneeFilter) => {
+                  setAssigneeFilter(nextAssigneeFilter)
+                  setIsAssigneeMenuOpen(false)
+                }}
+                onAssigneeMenuOpenChange={setIsAssigneeMenuOpen}
+                onDueDateFilterChange={(nextDueDateFilter) => {
+                  setDueDateFilter(nextDueDateFilter)
+                  setIsDueDateMenuOpen(false)
+                }}
+                onDueDateMenuOpenChange={setIsDueDateMenuOpen}
+                onLoadMoreProjectUsers={onLoadMoreProjectUsers}
+                onCreateTaskOpen={() => setIsCreateTaskOpen(true)}
+                onPriorityFilterChange={(nextPriorityFilter) => {
+                  setPriorityFilter(nextPriorityFilter)
+                  setIsPriorityMenuOpen(false)
+                }}
+                onPriorityMenuOpenChange={setIsPriorityMenuOpen}
+                onProjectUserQueryChange={onProjectUserQueryChange}
+                onRemoveProjectMember={onRemoveProjectMember}
+                onSearchQueryChange={setSearchQuery}
+                onSelectTask={handleSelectDetailTask}
+                onSortMenuOpenChange={setIsSortMenuOpen}
+                onSortOrderChange={(nextSortOrder) => {
+                  setSortOrder(nextSortOrder)
+                  setIsSortMenuOpen(false)
+                }}
+                onStatusFilterChange={(nextStatusFilter) => {
+                  setStatusFilter(nextStatusFilter)
+                  setIsStatusMenuOpen(false)
+                }}
+                onStatusMenuOpenChange={setIsStatusMenuOpen}
+                onTaskSelectionChange={updateTaskSelection}
+                onUpdateProjectMember={onUpdateProjectMember}
+                searchQuery={searchQuery}
+                selectedTaskIds={selectedTaskIds}
+                statusFilter={statusFilter}
+                t={t}
+                taskErrorMessage={taskErrorMessage}
+                tasks={visibleTasks}
+              />
+              {activeTab === 'permissions' ? null : (
+                <TaskDetailPane
+                  assigneeOptions={assigneeOptions}
+                  detail={selectedIssueDetail}
+                  errorMessage={detailErrorMessage}
+                  isLoading={isSelectedIssueDetailLoading}
+                  projects={activeTeamProjects}
+                  t={t}
+                  task={selectedDetailTask}
+                  onCreateIssueComment={onCreateIssueComment}
+                  onUpdateIssue={onUpdateIssue}
+                />
+              )}
+            </div>
           </div>
         )}
       </section>
@@ -905,6 +1136,34 @@ function normalizeProjectIssueError(error: unknown) {
   return error
 }
 
+function findIssueBySelection(
+  issues: TeamIssue[],
+  selectedIssueId?: string,
+  selectedTeamId?: string,
+) {
+  if (!selectedIssueId) {
+    return undefined
+  }
+
+  return issues.find((issue) =>
+    issue.id === selectedIssueId && (!selectedTeamId || issue.teamId === selectedTeamId),
+  )
+}
+
+function findTaskBySelection(
+  tasks: ProjectTask[],
+  selectedTaskId?: string,
+  selectedTeamId?: string,
+) {
+  if (!selectedTaskId) {
+    return undefined
+  }
+
+  return tasks.find((task) =>
+    task.id === selectedTaskId && (!selectedTeamId || task.teamId === selectedTeamId),
+  )
+}
+
 function TaskHeader({
   activeTab,
   isCreateTaskOpen,
@@ -972,7 +1231,7 @@ function TaskHeader({
           </button>
           <button
             aria-expanded={isCreateTaskOpen}
-            className="inline-flex h-10 items-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-black text-white shadow-[0_12px_24px_rgba(37,99,235,0.24)] transition hover:bg-blue-500"
+            className="inline-flex h-10 items-center gap-2 rounded-lg bg-emerald-600 px-4 text-sm font-black text-white shadow-[0_12px_24px_rgba(5,150,105,0.22)] transition hover:bg-emerald-500"
             onClick={() => onCreateTaskOpenChange(!isCreateTaskOpen)}
             type="button"
           >
@@ -1024,11 +1283,19 @@ function TaskHeader({
 
 function TaskWorkspace({
   activeTab,
+  allTasks,
+  assigneeFilter,
   canManageProjectMembers,
+  dueDateFilter,
+  isAssigneeMenuOpen,
+  isDueDateMenuOpen,
+  isPriorityMenuOpen,
+  isSortMenuOpen,
   isStatusMenuOpen,
   isProjectMembersLoading,
   isProjectUsersLoading,
   isSystemAdmin,
+  priorityFilter,
   projectId,
   projectMembers,
   projectMembersErrorMessage,
@@ -1037,11 +1304,22 @@ function TaskWorkspace({
   projectUsers,
   projectUsersErrorMessage,
   projectUsersNextToken,
+  selectedDetailTaskId,
+  sortOrder,
+  onAssigneeFilterChange,
+  onAssigneeMenuOpenChange,
+  onDueDateFilterChange,
+  onDueDateMenuOpenChange,
   onLoadMoreProjectUsers,
   onCreateTaskOpen,
+  onPriorityFilterChange,
+  onPriorityMenuOpenChange,
   onProjectUserQueryChange,
   onRemoveProjectMember,
   onSearchQueryChange,
+  onSelectTask,
+  onSortMenuOpenChange,
+  onSortOrderChange,
   onStatusFilterChange,
   onStatusMenuOpenChange,
   onTaskSelectionChange,
@@ -1054,11 +1332,19 @@ function TaskWorkspace({
   tasks,
 }: {
   activeTab: TaskTab
+  allTasks: ProjectTask[]
+  assigneeFilter: AssigneeFilter
   canManageProjectMembers: boolean
+  dueDateFilter: DueDateFilter
+  isAssigneeMenuOpen: boolean
+  isDueDateMenuOpen: boolean
+  isPriorityMenuOpen: boolean
+  isSortMenuOpen: boolean
   isStatusMenuOpen: boolean
   isProjectMembersLoading: boolean
   isProjectUsersLoading: boolean
   isSystemAdmin: boolean
+  priorityFilter: PriorityFilter
   projectId: string
   projectMembers: ProjectMember[]
   projectMembersErrorMessage?: string
@@ -1067,11 +1353,22 @@ function TaskWorkspace({
   projectUsers: ProjectUser[]
   projectUsersErrorMessage?: string
   projectUsersNextToken?: string
+  selectedDetailTaskId?: string
+  sortOrder: TaskSortOrder
+  onAssigneeFilterChange: (assigneeFilter: AssigneeFilter) => void
+  onAssigneeMenuOpenChange: (isOpen: boolean) => void
+  onDueDateFilterChange: (dueDateFilter: DueDateFilter) => void
+  onDueDateMenuOpenChange: (isOpen: boolean) => void
   onLoadMoreProjectUsers?: () => Promise<void>
   onCreateTaskOpen: () => void
+  onPriorityFilterChange: (priorityFilter: PriorityFilter) => void
+  onPriorityMenuOpenChange: (isOpen: boolean) => void
   onProjectUserQueryChange?: (query: string) => void
   onRemoveProjectMember?: (projectId: string, memberKey: string) => Promise<void>
   onSearchQueryChange: (query: string) => void
+  onSelectTask: (task: ProjectTask) => void
+  onSortMenuOpenChange: (isOpen: boolean) => void
+  onSortOrderChange: (sortOrder: TaskSortOrder) => void
   onStatusFilterChange: (statusFilter: StatusFilter) => void
   onStatusMenuOpenChange: (isOpen: boolean) => void
   onTaskSelectionChange: (taskId: string, selected: boolean) => void
@@ -1089,6 +1386,15 @@ function TaskWorkspace({
 }) {
   const statusFilterButtonId = 'status-filter-button'
   const statusFilterMenuId = 'status-filter-menu'
+  const assigneeFilterButtonId = 'assignee-filter-button'
+  const assigneeFilterMenuId = 'assignee-filter-menu'
+  const priorityFilterButtonId = 'priority-filter-button'
+  const priorityFilterMenuId = 'priority-filter-menu'
+  const dueDateFilterButtonId = 'due-date-filter-button'
+  const dueDateFilterMenuId = 'due-date-filter-menu'
+  const sortButtonId = 'task-sort-button'
+  const sortMenuId = 'task-sort-menu'
+  const assigneeOptions = createAssigneeFilterOptions(allTasks, t)
 
   if (activeTab === 'permissions') {
     return (
@@ -1132,7 +1438,16 @@ function TaskWorkspace({
               value={searchQuery}
             />
           </label>
-          <FilterButton icon={<FilterIcon />} label={t('tasks.filter.all')} />
+          <FilterButton
+            icon={<FilterIcon />}
+            label={t('tasks.filter.all')}
+            onClick={() => {
+              onStatusFilterChange('all')
+              onAssigneeFilterChange('all')
+              onPriorityFilterChange('all')
+              onDueDateFilterChange('all')
+            }}
+          />
           <div className="relative">
             <FilterButton
               active={statusFilter !== 'all'}
@@ -1171,17 +1486,159 @@ function TaskWorkspace({
               </div>
             ) : null}
           </div>
-          <FilterButton icon={<AssigneeIcon />} label={t('tasks.filter.assignee')} />
-          <FilterButton icon={<CalendarIcon />} label={t('tasks.filter.dueDate')} />
-          <FilterButton icon={<FlagIcon />} label={t('tasks.filter.priority')} />
+          <div className="relative">
+            <FilterButton
+              active={assigneeFilter !== 'all'}
+              ariaControls={assigneeFilterMenuId}
+              ariaExpanded={isAssigneeMenuOpen}
+              ariaHaspopup="menu"
+              icon={<AssigneeIcon />}
+              id={assigneeFilterButtonId}
+              label={t('tasks.filter.assignee')}
+              onClick={() => onAssigneeMenuOpenChange(!isAssigneeMenuOpen)}
+            />
+            {isAssigneeMenuOpen ? (
+              <div
+                aria-labelledby={assigneeFilterButtonId}
+                className="absolute left-0 z-20 mt-2 max-h-80 w-64 overflow-auto rounded-lg border border-slate-200 bg-white p-1 shadow-[0_18px_42px_rgba(30,52,88,0.18)]"
+                id={assigneeFilterMenuId}
+                role="menu"
+              >
+                {assigneeOptions.map((option) => (
+                  <button
+                    aria-checked={assigneeFilter === option.value}
+                    className={`flex h-10 w-full items-center justify-between rounded-md px-3 text-left text-sm font-black transition ${
+                      assigneeFilter === option.value
+                        ? 'bg-blue-50 text-blue-700'
+                        : 'text-[#263550] hover:bg-slate-100'
+                    }`}
+                    key={option.value}
+                    onClick={() => onAssigneeFilterChange(option.value)}
+                    role="menuitemradio"
+                    type="button"
+                  >
+                    {option.label}
+                    {assigneeFilter === option.value ? <CheckIcon /> : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <div className="relative">
+            <FilterButton
+              active={dueDateFilter !== 'all'}
+              ariaControls={dueDateFilterMenuId}
+              ariaExpanded={isDueDateMenuOpen}
+              ariaHaspopup="menu"
+              icon={<CalendarIcon />}
+              id={dueDateFilterButtonId}
+              label={t('tasks.filter.dueDate')}
+              onClick={() => onDueDateMenuOpenChange(!isDueDateMenuOpen)}
+            />
+            {isDueDateMenuOpen ? (
+              <div
+                aria-labelledby={dueDateFilterButtonId}
+                className="absolute left-0 z-20 mt-2 w-56 overflow-hidden rounded-lg border border-slate-200 bg-white p-1 shadow-[0_18px_42px_rgba(30,52,88,0.18)]"
+                id={dueDateFilterMenuId}
+                role="menu"
+              >
+                {taskDueDateFilters.map((filter) => (
+                  <button
+                    aria-checked={dueDateFilter === filter}
+                    className={`flex h-10 w-full items-center justify-between rounded-md px-3 text-left text-sm font-black transition ${
+                      dueDateFilter === filter
+                        ? 'bg-blue-50 text-blue-700'
+                        : 'text-[#263550] hover:bg-slate-100'
+                    }`}
+                    key={filter}
+                    onClick={() => onDueDateFilterChange(filter)}
+                    role="menuitemradio"
+                    type="button"
+                  >
+                    {t(resolveDueDateFilterLabelKey(filter))}
+                    {dueDateFilter === filter ? <CheckIcon /> : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <div className="relative">
+            <FilterButton
+              active={priorityFilter !== 'all'}
+              ariaControls={priorityFilterMenuId}
+              ariaExpanded={isPriorityMenuOpen}
+              ariaHaspopup="menu"
+              icon={<FlagIcon />}
+              id={priorityFilterButtonId}
+              label={t('tasks.filter.priority')}
+              onClick={() => onPriorityMenuOpenChange(!isPriorityMenuOpen)}
+            />
+            {isPriorityMenuOpen ? (
+              <div
+                aria-labelledby={priorityFilterButtonId}
+                className="absolute left-0 z-20 mt-2 w-56 overflow-hidden rounded-lg border border-slate-200 bg-white p-1 shadow-[0_18px_42px_rgba(30,52,88,0.18)]"
+                id={priorityFilterMenuId}
+                role="menu"
+              >
+                {(['all', ...taskPriorities] as const).map((priority) => (
+                  <button
+                    aria-checked={priorityFilter === priority}
+                    className={`flex h-10 w-full items-center justify-between rounded-md px-3 text-left text-sm font-black transition ${
+                      priorityFilter === priority
+                        ? 'bg-blue-50 text-blue-700'
+                        : 'text-[#263550] hover:bg-slate-100'
+                    }`}
+                    key={priority}
+                    onClick={() => onPriorityFilterChange(priority)}
+                    role="menuitemradio"
+                    type="button"
+                  >
+                    {priority === 'all' ? t('tasks.filter.priorityAll') : t(`tasks.priority.${priority}`)}
+                    {priorityFilter === priority ? <CheckIcon /> : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-6">
-          <p className="text-sm font-black text-[#0d1833]">
-            {t('tasks.sort.dueDate')}{' '}
-            <span aria-hidden="true" className="text-xl leading-none">
-              ↑
-            </span>
-          </p>
+          <div className="relative">
+            <FilterButton
+              ariaControls={sortMenuId}
+              ariaExpanded={isSortMenuOpen}
+              ariaHaspopup="menu"
+              icon={<CalendarIcon />}
+              id={sortButtonId}
+              label={t(resolveTaskSortOrderLabelKey(sortOrder))}
+              onClick={() => onSortMenuOpenChange(!isSortMenuOpen)}
+            />
+            {isSortMenuOpen ? (
+              <div
+                aria-labelledby={sortButtonId}
+                className="absolute right-0 z-20 mt-2 w-56 overflow-hidden rounded-lg border border-slate-200 bg-white p-1 shadow-[0_18px_42px_rgba(30,52,88,0.18)]"
+                id={sortMenuId}
+                role="menu"
+              >
+                {taskSortOrders.map((order) => (
+                  <button
+                    aria-checked={sortOrder === order}
+                    className={`flex h-10 w-full items-center justify-between rounded-md px-3 text-left text-sm font-black transition ${
+                      sortOrder === order
+                        ? 'bg-blue-50 text-blue-700'
+                        : 'text-[#263550] hover:bg-slate-100'
+                    }`}
+                    key={order}
+                    onClick={() => onSortOrderChange(order)}
+                    role="menuitemradio"
+                    type="button"
+                  >
+                    {t(resolveTaskSortOrderLabelKey(order))}
+                    {sortOrder === order ? <CheckIcon /> : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <button
             className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-black text-[#0d1833] shadow-[0_10px_24px_rgba(30,52,88,0.04)] transition hover:border-blue-500 hover:text-blue-600"
             type="button"
@@ -1193,16 +1650,25 @@ function TaskWorkspace({
       </div>
 
       {activeTab === 'table' ? (
-          <TaskTable
-            selectedTaskIds={selectedTaskIds}
-            onCreateTaskOpen={onCreateTaskOpen}
-            onTaskSelectionChange={onTaskSelectionChange}
+        <TaskTable
+          selectedDetailTaskId={selectedDetailTaskId}
+          selectedTaskIds={selectedTaskIds}
+          onCreateTaskOpen={onCreateTaskOpen}
+          onSelectTask={onSelectTask}
+          onTaskSelectionChange={onTaskSelectionChange}
           t={t}
           taskErrorMessage={taskErrorMessage}
           tasks={tasks}
         />
       ) : null}
-      {activeTab === 'board' ? <TaskBoard t={t} tasks={tasks} /> : null}
+      {activeTab === 'board' ? (
+        <TaskBoard
+          selectedDetailTaskId={selectedDetailTaskId}
+          t={t}
+          tasks={tasks}
+          onSelectTask={onSelectTask}
+        />
+      ) : null}
       {activeTab === 'gantt' ? <TaskGantt t={t} tasks={tasks} /> : null}
       {activeTab === 'calendar' ? <TaskCalendar t={t} tasks={tasks} /> : null}
       {activeTab === 'file' ? <TaskFileList t={t} tasks={tasks} /> : null}
@@ -1235,6 +1701,7 @@ function CreateTaskPanel({
     <section className="border-b border-slate-200 bg-[#f8fbff] px-[clamp(22px,3vw,38px)] py-5">
       <form
         className="grid gap-4 rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.06)]"
+        data-testid="create-task-form"
         onSubmit={(event) => {
           event.preventDefault()
 
@@ -1328,7 +1795,7 @@ function CreateTaskPanel({
           </label>
           <div className="flex items-end gap-2">
             <button
-              className="h-11 rounded-lg bg-blue-600 px-4 text-sm font-black text-white shadow-[0_14px_30px_rgba(37,99,235,0.22)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400"
+              className="h-11 rounded-lg bg-emerald-600 px-4 text-sm font-black text-white shadow-[0_14px_30px_rgba(5,150,105,0.22)] transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-slate-400"
               disabled={
                 isSubmitting ||
                 isAssigneeOptionsLoading ||
@@ -1383,15 +1850,19 @@ function resolveTaskPriority(value: FormDataEntryValue | null): TaskPriority {
 }
 
 function TaskTable({
+  selectedDetailTaskId,
   selectedTaskIds,
   onCreateTaskOpen,
+  onSelectTask,
   onTaskSelectionChange,
   t,
   taskErrorMessage,
   tasks,
 }: {
+  selectedDetailTaskId?: string
   selectedTaskIds: string[]
   onCreateTaskOpen: () => void
+  onSelectTask: (task: ProjectTask) => void
   onTaskSelectionChange: (taskId: string, selected: boolean) => void
   t: (key: MessageKey) => string
   taskErrorMessage?: string
@@ -1445,10 +1916,13 @@ function TaskTable({
                 </td>
               </tr>
             ) : tasks.length > 0 ? (
-              tasks.map((task) => (
+              tasks.map((task, index) => (
                 <TaskRow
                   key={createTaskKey(task)}
+                  rowIndex={index}
                   onTaskSelectionChange={onTaskSelectionChange}
+                  onSelectTask={onSelectTask}
+                  selectedForDetail={selectedDetailTaskId === task.id}
                   selected={selectedTaskIds.includes(task.id)}
                   t={t}
                   task={task}
@@ -1485,7 +1959,17 @@ function TaskTable({
   )
 }
 
-function TaskBoard({ t, tasks }: { t: (key: MessageKey) => string; tasks: ProjectTask[] }) {
+function TaskBoard({
+  selectedDetailTaskId,
+  onSelectTask,
+  t,
+  tasks,
+}: {
+  selectedDetailTaskId?: string
+  onSelectTask: (task: ProjectTask) => void
+  t: (key: MessageKey) => string
+  tasks: ProjectTask[]
+}) {
   return (
     <section
       aria-label={t(viewLabelKeys.board)}
@@ -1514,16 +1998,22 @@ function TaskBoard({ t, tasks }: { t: (key: MessageKey) => string; tasks: Projec
             <div className="grid gap-3 p-3">
               {statusTasks.length > 0 ? (
                 statusTasks.map((task) => (
-                  <article
-                    className="rounded-lg border border-slate-200 bg-[#fbfdff] p-4 transition hover:border-blue-300 hover:bg-blue-50/30"
+                  <button
+                    className={`rounded-lg border p-4 text-left transition ${
+                      selectedDetailTaskId === task.id
+                        ? 'border-blue-400 bg-blue-50 shadow-[inset_3px_0_0_rgba(37,99,235,0.95)]'
+                        : 'border-slate-200 bg-[#fbfdff] hover:border-blue-300 hover:bg-blue-50/30'
+                    }`}
                     key={createTaskKey(task)}
+                    onClick={() => onSelectTask(task)}
+                    type="button"
                   >
                     <p className="text-sm font-black leading-6 text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
                     <div className="mt-4 flex flex-wrap items-center gap-2">
                       <TaskPriorityBadge priority={task.priority} t={t} />
                       <span className="text-xs font-black text-[#526381]">{task.dueDate}</span>
                     </div>
-                  </article>
+                  </button>
                 ))
               ) : (
                 <p className="rounded-lg border border-dashed border-slate-300 px-4 py-8 text-center text-sm font-bold text-[#526381]">
@@ -1535,6 +2025,265 @@ function TaskBoard({ t, tasks }: { t: (key: MessageKey) => string; tasks: Projec
         )
       })}
     </section>
+  )
+}
+
+function TaskDetailPane({
+  assigneeOptions,
+  detail,
+  errorMessage,
+  isLoading,
+  onCreateIssueComment,
+  onUpdateIssue,
+  projects,
+  t,
+  task,
+}: {
+  assigneeOptions: ProjectMember[]
+  detail?: TeamIssueDetail
+  errorMessage?: string
+  isLoading: boolean
+  onCreateIssueComment?: (teamId: string, issueId: string, body: string) => Promise<void>
+  onUpdateIssue?: (
+    teamId: string,
+    issueId: string,
+    input: UpdateTeamIssueInput,
+  ) => Promise<void>
+  projects: ProjectDirectoryTeam['projects']
+  t: (key: MessageKey) => string
+  task?: ProjectTask
+}) {
+  if (!task) {
+    return (
+      <aside
+        className="min-h-0 min-w-0 border-l border-slate-200 bg-white px-6 py-7 max-[1180px]:border-l-0 max-[1180px]:border-t"
+        data-testid="task-detail-pane"
+      >
+        <p className="text-sm font-bold text-[#526381]">{t('tasks.detail.empty')}</p>
+      </aside>
+    )
+  }
+
+  const issue = detail?.issue
+  const comments = detail?.comments ?? []
+  const activity = detail?.activity ?? []
+  const needsDetailBeforeEdit = task.source === 'dynamodb' && !issue
+  const isReadOnly = !task.teamId || task.source !== 'dynamodb' || needsDetailBeforeEdit
+  const title = issue ? resolveTeamIssueTitle(issue, t) : resolveTaskTitle(task, t)
+  const assigneeUserId = issue?.assigneeUserId ?? task.assigneeUserId ?? ''
+  const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === assigneeUserId)
+  const assigneeLabel = issue ? resolveTeamIssueAssignee(issue) : resolveTaskAssignee(task, t)
+  const dueDate = issue?.dueDate ?? task.dueDate
+  const assignedProjectId = issue?.assignedProjectId ?? task.projectId ?? ''
+
+  return (
+    <aside
+      className="min-h-0 min-w-0 border-l border-slate-200 bg-white px-6 py-7 max-[1180px]:border-l-0 max-[1180px]:border-t"
+      data-testid="task-detail-pane"
+    >
+      <form
+        className="grid min-w-0 gap-4"
+        key={`${task.teamId ?? ''}:${task.id}:${issue?.updatedAt ?? 'loading'}`}
+        onSubmit={(event) => {
+          event.preventDefault()
+
+          if (isReadOnly || !task.teamId) {
+            return
+          }
+
+          const formData = new FormData(event.currentTarget)
+          const nextAssignedProjectId = String(formData.get('assignedProjectId') ?? '').trim()
+          const selectedAssigneeUserId = String(formData.get('assigneeUserId') ?? '').trim()
+          const nextIssueInput: UpdateTeamIssueInput = {
+            assignedProjectId: nextAssignedProjectId || null,
+            description: String(formData.get('description') ?? '').trim(),
+            dueDate: String(formData.get('dueDate') ?? '').replaceAll('-', '/'),
+            priority: resolveTaskPriority(formData.get('priority')),
+            status: resolveTaskStatus(formData.get('status')),
+            title: String(formData.get('title') ?? '').trim(),
+          }
+
+          if (assigneeOptions.some((member) => member.id === selectedAssigneeUserId)) {
+            nextIssueInput.assigneeUserId = selectedAssigneeUserId
+          }
+
+          void onUpdateIssue?.(task.teamId, task.id, nextIssueInput)
+        }}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs font-black uppercase tracking-normal text-[#69758a]">
+              {t('tasks.detail.title')}
+            </p>
+            <h2 className="mt-2 text-xl font-black leading-7 text-[#0d1833]">{title}</h2>
+            {isLoading ? (
+              <p className="mt-2 text-sm font-bold text-[#526381]">{t('tasks.detail.loading')}</p>
+            ) : null}
+          </div>
+          <TaskPriorityBadge priority={issue?.priority ?? task.priority} t={t} />
+        </div>
+        <fieldset className="contents" disabled={isReadOnly}>
+          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+            {t('issues.column.title')}
+            <input
+              className="w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-xl font-black outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+              defaultValue={title}
+              name="title"
+              required
+            />
+          </label>
+          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+            {t('tasks.detail.description')}
+            <textarea
+              className="min-h-28 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+              defaultValue={issue?.description ?? ''}
+              name="description"
+            />
+          </label>
+          <div className="grid grid-cols-1 gap-3">
+            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+              {t('issues.create.project')}
+              <select
+                className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+                defaultValue={assignedProjectId}
+                name="assignedProjectId"
+              >
+                <option value="">{t('issues.project.unassigned')}</option>
+                {projects.map((project) => (
+                  <option key={project.id} value={project.id}>{project.name}</option>
+                ))}
+              </select>
+            </label>
+            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+              {t('issues.create.assignee')}
+              <select
+                className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+                defaultValue={assigneeUserId}
+                name="assigneeUserId"
+              >
+                {!hasSelectedAssigneeOption && assigneeUserId ? (
+                  <option value={assigneeUserId}>{assigneeLabel}</option>
+                ) : null}
+                {assigneeOptions.map((member) => (
+                  <option key={member.id} value={member.id}>{formatProjectMemberOption(member)}</option>
+                ))}
+              </select>
+            </label>
+            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+              {t('tasks.column.status')}
+              <select
+                className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+                defaultValue={issue?.status ?? task.status}
+                name="status"
+              >
+                {taskStatuses.map((status) => (
+                  <option key={status} value={status}>{t(`tasks.status.${status}`)}</option>
+                ))}
+              </select>
+            </label>
+            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+              {t('tasks.column.priority')}
+              <select
+                className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+                defaultValue={issue?.priority ?? task.priority}
+                name="priority"
+              >
+                {taskPriorities.map((priority) => (
+                  <option key={priority} value={priority}>{t(`tasks.priority.${priority}`)}</option>
+                ))}
+              </select>
+            </label>
+            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+              {t('tasks.column.dueDate')}
+              <input
+                className="h-11 w-full min-w-0 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+                defaultValue={formatDateInputValue(dueDate)}
+                name="dueDate"
+                type="date"
+              />
+            </label>
+          </div>
+        </fieldset>
+        <button
+          className="h-11 rounded-lg bg-emerald-600 px-4 text-sm font-black text-white transition hover:bg-emerald-500 disabled:bg-slate-300"
+          disabled={isReadOnly}
+          type="submit"
+        >
+          {t('issues.detail.save')}
+        </button>
+        {isReadOnly && !needsDetailBeforeEdit ? (
+          <p className="text-sm font-bold text-[#526381]">{t('tasks.detail.readOnly')}</p>
+        ) : null}
+        {errorMessage ? <p className="text-sm font-bold text-red-600">{errorMessage}</p> : null}
+      </form>
+      <form
+        className="mt-7 grid gap-3 border-t border-slate-200 pt-6"
+        onSubmit={(event) => {
+          event.preventDefault()
+
+          if (isReadOnly || !task.teamId) {
+            return
+          }
+
+          const form = event.currentTarget
+          const formData = new FormData(form)
+          const body = String(formData.get('body') ?? '').trim()
+
+          if (!body) {
+            form.reportValidity()
+            return
+          }
+
+          void onCreateIssueComment?.(task.teamId, task.id, body).then(() => form.reset())
+        }}
+      >
+        <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+          {t('issues.comment.title')}
+          <textarea
+            className="min-h-20 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500"
+            disabled={isReadOnly}
+            name="body"
+            required
+          />
+        </label>
+        <button
+          className="h-10 justify-self-start rounded-lg border border-slate-300 bg-white px-4 text-sm font-black text-[#263550] transition hover:border-blue-500 hover:text-blue-600 disabled:border-slate-200 disabled:text-slate-400"
+          disabled={isReadOnly}
+          type="submit"
+        >
+          {t('issues.comment.submit')}
+        </button>
+      </form>
+      <section className="mt-7 border-t border-slate-200 pt-6">
+        <h2 className="text-sm font-black uppercase tracking-normal text-[#69758a]">{t('issues.comment.title')}</h2>
+        <div className="mt-3 grid gap-3">
+          {comments.length > 0 ? (
+            comments.map((comment) => (
+              <article className="rounded-lg bg-[#f8fbff] p-3" key={comment.id}>
+                <p className="text-xs font-black text-[#526381]">{comment.actorUserId}</p>
+                <p className="mt-2 whitespace-pre-wrap text-sm font-bold leading-6 text-[#263550]">{comment.body}</p>
+              </article>
+            ))
+          ) : (
+            <p className="text-sm font-bold text-[#526381]">{t('issues.comment.empty')}</p>
+          )}
+        </div>
+      </section>
+      <section className="mt-7 border-t border-slate-200 pt-6">
+        <h2 className="text-sm font-black uppercase tracking-normal text-[#69758a]">{t('issues.activity.title')}</h2>
+        <div className="mt-3 grid gap-2">
+          {activity.length > 0 ? (
+            activity.map((item) => (
+              <p className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-bold text-[#526381]" key={item.id}>
+                {item.summary}
+              </p>
+            ))
+          ) : (
+            <p className="text-sm font-bold text-[#526381]">{t('tasks.detail.activityEmpty')}</p>
+          )}
+        </div>
+      </section>
+    </aside>
   )
 }
 
@@ -1831,12 +2580,18 @@ function FilterButton({
 }
 
 function TaskRow({
+  rowIndex,
   selected,
+  selectedForDetail,
+  onSelectTask,
   onTaskSelectionChange,
   task,
   t,
 }: {
+  rowIndex: number
   selected: boolean
+  selectedForDetail: boolean
+  onSelectTask: (task: ProjectTask) => void
   onTaskSelectionChange: (taskId: string, selected: boolean) => void
   task: ProjectTask
   t: (key: MessageKey) => string
@@ -1857,7 +2612,10 @@ function TaskRow({
 
   return (
     <tr
-      className="border-b border-slate-200 text-app-body font-bold text-[#0d1833] last:border-b-0 hover:bg-blue-50/40"
+      className={`border-b border-slate-200 text-app-body font-bold text-[#0d1833] last:border-b-0 ${
+        selectedForDetail ? 'bg-blue-50/70 shadow-[inset_3px_0_0_rgba(37,99,235,0.95)]' : 'hover:bg-blue-50/40'
+      }`}
+      data-row-index={rowIndex}
       data-selected={selected ? 'true' : 'false'}
       data-testid={`task-row-${task.id}`}
     >
@@ -1870,7 +2628,13 @@ function TaskRow({
             onChange={(event) => onTaskSelectionChange(task.id, event.target.checked)}
             type="checkbox"
           />
-          <span className="min-w-0 truncate">{taskTitle}</span>
+          <button
+            className="min-w-0 truncate text-left font-black text-[#0d1833] transition hover:text-blue-600"
+            onClick={() => onSelectTask(task)}
+            type="button"
+          >
+            {taskTitle}
+          </button>
           {selected ? (
             <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-black text-blue-700">
               {t('tasks.row.selected')}
@@ -1930,6 +2694,111 @@ function parseTaskDueDate(value: string) {
   return Number.isNaN(date.getTime()) ? null : date
 }
 
+function createAssigneeFilterOptions(
+  tasks: ProjectTask[],
+  t: (key: MessageKey) => string,
+): AssigneeFilterOption[] {
+  const assigneeOptionsByValue = new Map<string, AssigneeFilterOption>()
+
+  for (const task of tasks) {
+    const value = resolveTaskAssigneeFilterValue(task, t)
+
+    if (!value || assigneeOptionsByValue.has(value)) {
+      continue
+    }
+
+    assigneeOptionsByValue.set(value, {
+      label: resolveTaskAssignee(task, t) || t('tasks.detail.unassigned'),
+      value,
+    })
+  }
+
+  return [
+    {
+      label: t('tasks.filter.assigneeAll'),
+      value: 'all',
+    },
+    ...Array.from(assigneeOptionsByValue.values()).sort((firstOption, secondOption) =>
+      firstOption.label.localeCompare(secondOption.label),
+    ),
+  ]
+}
+
+function resolveTaskAssigneeFilterValue(
+  task: ProjectTask,
+  t: (key: MessageKey) => string,
+) {
+  return task.assigneeUserId ??
+    task.assigneeEmail ??
+    resolveTaskAssignee(task, t) ??
+    t('tasks.detail.unassigned')
+}
+
+function matchesTaskDueDateFilter(task: ProjectTask, filter: DueDateFilter) {
+  if (filter === 'all') {
+    return true
+  }
+
+  const dueDate = parseTaskDueDate(task.dueDate)
+
+  if (filter === 'no-date') {
+    return !dueDate
+  }
+
+  if (task.status === 'done' || !dueDate) {
+    return false
+  }
+
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+
+  if (filter === 'overdue') {
+    return dueDate < today
+  }
+
+  return dueDate >= today
+}
+
+function sortTasksByDueDate(tasks: ProjectTask[], sortOrder: TaskSortOrder) {
+  return [...tasks].sort((firstTask, secondTask) => {
+    const firstTime = parseTaskDueDate(firstTask.dueDate)?.getTime()
+    const secondTime = parseTaskDueDate(secondTask.dueDate)?.getTime()
+    const firstSortTime = firstTime ?? Number.MAX_SAFE_INTEGER
+    const secondSortTime = secondTime ?? Number.MAX_SAFE_INTEGER
+
+    if (firstSortTime === secondSortTime) {
+      return firstTask.id.localeCompare(secondTask.id)
+    }
+
+    if (sortOrder === 'due-date-desc') {
+      return secondSortTime - firstSortTime
+    }
+
+    return firstSortTime - secondSortTime
+  })
+}
+
+function resolveDueDateFilterLabelKey(filter: DueDateFilter): MessageKey {
+  const labelKeys: Record<DueDateFilter, MessageKey> = {
+    all: 'tasks.filter.dueDateAll',
+    overdue: 'tasks.filter.dueDateOverdue',
+    upcoming: 'tasks.filter.dueDateUpcoming',
+    'no-date': 'tasks.filter.dueDateNoDate',
+  }
+
+  return labelKeys[filter]
+}
+
+function resolveTaskSortOrderLabelKey(sortOrder: TaskSortOrder): MessageKey {
+  return sortOrder === 'due-date-desc'
+    ? 'tasks.sort.dueDateDesc'
+    : 'tasks.sort.dueDateAsc'
+}
+
+function formatDateInputValue(value: string) {
+  return value.replaceAll('/', '-')
+}
+
 function resolveTaskTitle(task: ProjectTask, t: (key: MessageKey) => string) {
   return task.title ?? (task.titleKey ? t(task.titleKey) : task.id)
 }
@@ -1942,12 +2811,22 @@ function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) 
     (task.assigneeKey ? t(task.assigneeKey) : '')
 }
 
+function resolveTeamIssueTitle(issue: TeamIssue, t: (key: MessageKey) => string) {
+  return issue.title ?? (issue.titleKey ? t(issue.titleKey) : issue.id)
+}
+
+function resolveTeamIssueAssignee(issue: TeamIssue) {
+  return issue.assigneeName ?? issue.assigneeEmail ?? issue.assigneeUserId
+}
+
 function formatProjectMemberOption(member: ProjectMember) {
   return `${member.name ?? member.email} / ${member.email}`
 }
 
 function createTaskKey(task: ProjectTask) {
-  return task.projectId ? `${task.projectId}:${task.id}` : task.id
+  return task.projectId || task.teamId
+    ? `${task.projectId ?? ''}:${task.teamId ?? ''}:${task.id}`
+    : task.id
 }
 
 function createTaskCalendarDays(tasks: ProjectTask[]) {

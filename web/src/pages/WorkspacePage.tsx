@@ -158,6 +158,10 @@ type WorkspaceScreenProps = {
    */
   onMoveTaskStatus?: (task: ProjectTask, status: TaskStatus) => Promise<void>
   /**
+   * ワークスペースのキュー行から作業詳細へ遷移するときの callback です。
+   */
+  onOpenTask?: (task: ProjectTask) => void
+  /**
    * フォントサイズ設定が変更されたときの callback です。
    */
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
@@ -453,6 +457,13 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       onArchiveProject={handleArchiveProject}
       onArchiveTeam={handleArchiveTeam}
       onMoveTaskStatus={handleMoveTaskStatus}
+      onOpenTask={(task) => {
+        if (!task.projectId || !task.teamId) {
+          return
+        }
+
+        navigate(createProjectIssuesPath(task.projectId, task.teamId, task.id))
+      }}
       summary={summary}
       taskMoveErrorMessage={taskMoveErrorMessage}
       tasks={tasks}
@@ -487,6 +498,7 @@ export function WorkspaceScreen({
   onArchiveProject,
   onArchiveTeam,
   onMoveTaskStatus,
+  onOpenTask,
   onFontSizePreferenceChange,
   taskMoveErrorMessage,
 }: WorkspaceScreenProps) {
@@ -607,6 +619,7 @@ export function WorkspaceScreen({
               teams={teams}
               onFontSizePreferenceChange={onFontSizePreferenceChange}
               onMoveTaskStatus={onMoveTaskStatus}
+              onOpenTask={onOpenTask}
               view={view}
             />
           </div>
@@ -626,6 +639,7 @@ function WorkspaceBody({
   teams,
   onFontSizePreferenceChange,
   onMoveTaskStatus,
+  onOpenTask,
   view,
 }: {
   activeTeam?: ProjectDirectoryTeam
@@ -637,11 +651,20 @@ function WorkspaceBody({
   teams: ProjectDirectoryTeam[]
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
   onMoveTaskStatus?: (task: ProjectTask, status: TaskStatus) => Promise<void>
+  onOpenTask?: (task: ProjectTask) => void
   view: WorkspaceView
 }) {
   return (
     <div className="px-[clamp(20px,3vw,34px)] py-6">
-      {view === 'home' ? <HomeView summary={summary} t={t} tasks={tasks} teams={teams} /> : null}
+      {view === 'home' ? (
+        <HomeView
+          summary={summary}
+          t={t}
+          tasks={tasks}
+          teams={teams}
+          onOpenTask={onOpenTask}
+        />
+      ) : null}
       {view === 'my-tasks' ? (
         <MyTasksView
           t={t}
@@ -650,16 +673,24 @@ function WorkspaceBody({
           onMoveTaskStatus={onMoveTaskStatus}
         />
       ) : null}
-      {view === 'inbox' ? <InboxView t={t} tasks={tasks} /> : null}
+      {view === 'inbox' ? <InboxView t={t} tasks={tasks} onOpenTask={onOpenTask} /> : null}
       {view === 'dashboard' ? (
         <DashboardWorkspaceView
           summary={summary}
           t={t}
           tasks={tasks}
           teams={teams}
+          onOpenTask={onOpenTask}
         />
       ) : null}
-      {view === 'reports' ? <ReportsView summary={summary} t={t} tasks={tasks} /> : null}
+      {view === 'reports' ? (
+        <ReportsView
+          summary={summary}
+          t={t}
+          tasks={tasks}
+          onOpenTask={onOpenTask}
+        />
+      ) : null}
       {view === 'help' ? <HelpView t={t} /> : null}
       {view === 'settings' ? (
         <SettingsView
@@ -677,17 +708,19 @@ function WorkspaceBody({
 }
 
 function HomeView({
+  onOpenTask,
   summary,
   t,
   tasks,
   teams,
 }: {
+  onOpenTask?: (task: ProjectTask) => void
   summary: DashboardSummary
   t: (key: MessageKey) => string
   tasks: ProjectTask[]
   teams: ProjectDirectoryTeam[]
 }) {
-  const nextTasks = tasks.slice(0, 3)
+  const nextTasks = createActionQueueTasks(tasks).slice(0, 3)
   const activityTasks = createActivityTasks(tasks)
 
   return (
@@ -704,7 +737,12 @@ function HomeView({
           <SectionHeader title={t('workspace.home.focusTitle')} meta={t('workspace.home.focusMeta')} />
           <div className="divide-y divide-slate-100">
             {nextTasks.map((task) => (
-              <TaskListRow key={createWorkspaceTaskKey(task)} t={t} task={task} />
+              <TaskListRow
+                key={createWorkspaceTaskKey(task)}
+                t={t}
+                task={task}
+                onOpenTask={onOpenTask}
+              />
             ))}
           </div>
         </section>
@@ -713,12 +751,18 @@ function HomeView({
           <SectionHeader title={t('workspace.home.activityTitle')} meta={t('workspace.home.activityMeta')} />
           <div className="grid gap-3 px-5 pb-5">
             {activityTasks.map((task) => (
-              <div className="rounded-lg border border-slate-200 bg-[#fbfdff] p-4" key={createWorkspaceTaskKey(task)}>
+              <button
+                className="rounded-lg border border-slate-200 bg-[#fbfdff] p-4 text-left transition hover:border-blue-300 hover:bg-blue-50/30 disabled:hover:border-slate-200 disabled:hover:bg-[#fbfdff]"
+                disabled={!onOpenTask || !isOpenableWorkspaceTask(task)}
+                key={createWorkspaceTaskKey(task)}
+                onClick={() => onOpenTask?.(task)}
+                type="button"
+              >
                 <p className="text-sm font-black text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
                 <p className="mt-1 text-sm font-bold leading-6 text-[#526381]">
                   {resolveTaskAssignee(task, t)} / {t(`tasks.status.${task.status}`)} / {task.dueDate}
                 </p>
-              </div>
+              </button>
             ))}
             {activityTasks.length === 0 ? (
               <p className="rounded-lg border border-dashed border-slate-300 px-4 py-8 text-center text-sm font-bold text-[#526381]">
@@ -890,9 +934,11 @@ function MyTasksView({
 }
 
 function InboxView({
+  onOpenTask,
   t,
   tasks,
 }: {
+  onOpenTask?: (task: ProjectTask) => void
   t: (key: MessageKey) => string
   tasks: ProjectTask[]
 }) {
@@ -908,7 +954,13 @@ function InboxView({
         />
         <div className="divide-y divide-slate-100">
           {inboxTasks.map((task) => (
-            <div className="grid gap-3 p-5" key={createWorkspaceTaskKey(task)}>
+            <button
+              className="grid w-full gap-3 p-5 text-left transition hover:bg-blue-50/40 disabled:hover:bg-transparent"
+              disabled={!onOpenTask || !isOpenableWorkspaceTask(task)}
+              key={createWorkspaceTaskKey(task)}
+              onClick={() => onOpenTask?.(task)}
+              type="button"
+            >
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <p className="text-base font-black text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
@@ -916,11 +968,16 @@ function InboxView({
                     {resolveTaskAssignee(task, t)} / {task.dueDate}
                   </p>
                 </div>
-                <span className={`rounded-lg border px-3 py-1.5 text-xs font-black ${resolveInboxToneClassName(task)}`}>
-                  {t(`tasks.priority.${task.priority}`)}
-                </span>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <span className={`rounded-lg border px-3 py-1.5 text-xs font-black ${resolveInboxToneClassName(task)}`}>
+                    {t(resolveInboxReasonKey(task))}
+                  </span>
+                  <span className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-[#526381]">
+                    {t('workspace.action.openTask')}
+                  </span>
+                </div>
               </div>
-            </div>
+            </button>
           ))}
           {inboxTasks.length === 0 ? (
             <p className="px-5 py-8 text-sm font-bold text-[#526381]">
@@ -944,16 +1001,19 @@ function InboxView({
 }
 
 function DashboardWorkspaceView({
+  onOpenTask,
   summary,
   t,
   tasks,
   teams,
 }: {
+  onOpenTask?: (task: ProjectTask) => void
   summary: DashboardSummary
   t: (key: MessageKey) => string
   tasks: ProjectTask[]
   teams: ProjectDirectoryTeam[]
 }) {
+  const decisionTasks = createActionQueueTasks(tasks).slice(0, 5)
   const projects = teams.flatMap((team) =>
     team.projects.map((project) => ({
       progress: calculateProjectProgress(filterTasksByProjectIds(tasks, [project.id])),
@@ -1000,15 +1060,39 @@ function DashboardWorkspaceView({
           </table>
         </div>
       </section>
+
+      <section className="rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
+        <SectionHeader
+          title={t('workspace.dashboard.decisionTitle')}
+          meta={t('workspace.dashboard.decisionMeta').replace('{count}', String(decisionTasks.length))}
+        />
+        <div className="divide-y divide-slate-100">
+          {decisionTasks.map((task) => (
+            <TaskListRow
+              key={createWorkspaceTaskKey(task)}
+              t={t}
+              task={task}
+              onOpenTask={onOpenTask}
+            />
+          ))}
+          {decisionTasks.length === 0 ? (
+            <p className="px-5 py-8 text-sm font-bold text-[#526381]">
+              {t('workspace.empty.tasks')}
+            </p>
+          ) : null}
+        </div>
+      </section>
     </div>
   )
 }
 
 function ReportsView({
+  onOpenTask,
   summary,
   t,
   tasks,
 }: {
+  onOpenTask?: (task: ProjectTask) => void
   summary: DashboardSummary
   t: (key: MessageKey) => string
   tasks: ProjectTask[]
@@ -1018,6 +1102,7 @@ function ReportsView({
     ? Math.round((summary.blocked / summary.tasks) * 100)
     : 0
   const reportTrendItems = createReportTrendItems(tasks)
+  const attentionTasks = createActionQueueTasks(tasks).slice(0, 4)
 
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-6 max-[1080px]:grid-cols-1">
@@ -1042,6 +1127,27 @@ function ReportsView({
         <MetricCard label={t('workspace.reports.throughput')} value={availableThroughput} tone="emerald" />
         <MetricCard label={t('workspace.reports.blockedRate')} value={`${blockedRate}%`} tone="red" />
         <MetricCard label={t('workspace.reports.cycleTime')} value={calculateAverageCycleLabel(tasks)} tone="amber" />
+        <section className="rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
+          <SectionHeader
+            title={t('workspace.reports.attentionTitle')}
+            meta={t('workspace.reports.attentionMeta')}
+          />
+          <div className="divide-y divide-slate-100">
+            {attentionTasks.map((task) => (
+              <TaskListRow
+                key={createWorkspaceTaskKey(task)}
+                t={t}
+                task={task}
+                onOpenTask={onOpenTask}
+              />
+            ))}
+            {attentionTasks.length === 0 ? (
+              <p className="px-5 py-8 text-sm font-bold text-[#526381]">
+                {t('workspace.empty.tasks')}
+              </p>
+            ) : null}
+          </div>
+        </section>
       </aside>
     </div>
   )
@@ -1272,16 +1378,34 @@ function SectionHeader({ meta, title }: { meta?: string; title: string }) {
   )
 }
 
-function TaskListRow({ t, task }: { t: (key: MessageKey) => string; task: ProjectTask }) {
+function TaskListRow({
+  onOpenTask,
+  t,
+  task,
+}: {
+  onOpenTask?: (task: ProjectTask) => void
+  t: (key: MessageKey) => string
+  task: ProjectTask
+}) {
+  const canOpenTask = Boolean(onOpenTask) && isOpenableWorkspaceTask(task)
+
   return (
-    <div className="grid grid-cols-[1fr_140px_110px] items-center gap-4 p-5 text-sm font-bold max-[760px]:grid-cols-1">
+    <button
+      className="grid w-full grid-cols-[1fr_140px_110px_96px] items-center gap-4 p-5 text-left text-sm font-bold transition hover:bg-blue-50/40 disabled:hover:bg-transparent max-[900px]:grid-cols-1"
+      disabled={!canOpenTask}
+      onClick={() => onOpenTask?.(task)}
+      type="button"
+    >
       <div className="min-w-0">
         <p className="truncate text-sm font-black text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
         <p className="mt-1 text-[#526381]">{resolveTaskAssignee(task, t)}</p>
       </div>
       <StatusPill status={task.status} t={t} />
       <span className="text-[#526381]">{task.dueDate}</span>
-    </div>
+      <span className="justify-self-end rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-[#526381] max-[900px]:justify-self-start">
+        {t('workspace.action.openTask')}
+      </span>
+    </button>
   )
 }
 
@@ -1570,13 +1694,36 @@ function createActivityTasks(tasks: ProjectTask[]) {
     .slice(0, 3)
 }
 
+function createActionQueueTasks(tasks: ProjectTask[]) {
+  return [...tasks]
+    .filter((task) => task.status !== 'done')
+    .sort((firstTask, secondTask) => {
+      const firstScore = calculateWorkspaceActionScore(firstTask)
+      const secondScore = calculateWorkspaceActionScore(secondTask)
+
+      if (firstScore !== secondScore) {
+        return secondScore - firstScore
+      }
+
+      return getWorkspaceDueTime(firstTask) - getWorkspaceDueTime(secondTask)
+    })
+}
+
 function createInboxTasks(tasks: ProjectTask[]) {
-  return tasks
-    .filter((task) => task.status !== 'done' && (task.priority === 'high' || task.status === 'review'))
+  return createActionQueueTasks(tasks)
+    .filter((task) =>
+      task.priority === 'high' ||
+      task.status === 'review' ||
+      isWorkspaceTaskOverdue(task),
+    )
     .slice(0, 8)
 }
 
 function resolveInboxToneClassName(task: ProjectTask) {
+  if (isWorkspaceTaskOverdue(task)) {
+    return 'border-red-200 bg-red-50 text-red-700'
+  }
+
   if (task.priority === 'high') {
     return 'border-red-200 bg-red-50 text-red-700'
   }
@@ -1586,6 +1733,62 @@ function resolveInboxToneClassName(task: ProjectTask) {
   }
 
   return 'border-blue-200 bg-blue-50 text-blue-700'
+}
+
+function resolveInboxReasonKey(task: ProjectTask): MessageKey {
+  if (isWorkspaceTaskOverdue(task)) {
+    return 'workspace.inbox.reason.overdue'
+  }
+
+  if (task.priority === 'high') {
+    return 'workspace.inbox.reason.high'
+  }
+
+  if (task.status === 'review') {
+    return 'workspace.inbox.reason.review'
+  }
+
+  return 'workspace.inbox.reason.watch'
+}
+
+function calculateWorkspaceActionScore(task: ProjectTask) {
+  return (isWorkspaceTaskOverdue(task) ? 8 : 0) +
+    (task.priority === 'high' ? 5 : task.priority === 'medium' ? 2 : 0) +
+    (task.status === 'review' ? 4 : task.status === 'in-progress' ? 1 : 0)
+}
+
+function isOpenableWorkspaceTask(task: ProjectTask) {
+  return Boolean(task.projectId && task.teamId)
+}
+
+function isWorkspaceTaskOverdue(task: ProjectTask) {
+  const dueDate = parseWorkspaceTaskDueDate(task.dueDate)
+
+  if (task.status === 'done' || !dueDate) {
+    return false
+  }
+
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+
+  return dueDate < today
+}
+
+function getWorkspaceDueTime(task: ProjectTask) {
+  return parseWorkspaceTaskDueDate(task.dueDate)?.getTime() ?? Number.MAX_SAFE_INTEGER
+}
+
+function parseWorkspaceTaskDueDate(value: string) {
+  const [year, month, day] = value.split('/').map(Number)
+
+  if (!year || !month || !day) {
+    return null
+  }
+
+  const date = new Date(year, month - 1, day)
+  date.setHours(0, 0, 0, 0)
+
+  return Number.isNaN(date.getTime()) ? null : date
 }
 
 function calculateProjectProgress(tasks: ProjectTask[]) {

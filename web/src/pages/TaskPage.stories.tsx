@@ -1,5 +1,10 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { TaskScreen } from './TaskPage'
+import type { TeamIssueDetail } from '../issues/api'
+import {
+  teamIssueActivityFixtures,
+  teamIssueCommentFixtures,
+} from '../issues/fixtures'
 import { projectDirectoryFixtures } from '../projects/fixtures'
 import type { ProjectMember, ProjectUser } from '../projects/api'
 import { referoTaskFixtures } from '../tasks/fixtures'
@@ -40,6 +45,35 @@ const projectUsers: ProjectUser[] = [
   },
 ]
 
+const storyTasks = referoTaskFixtures.map((task, index) => ({
+  ...task,
+  assigneeUserId: index % 2 === 0 ? 'sato@example.com' : 'suzuki@example.com',
+  projectId: 'refero',
+  source: 'dynamodb' as const,
+  teamId: 'core-team',
+}))
+
+const selectedIssueDetail: TeamIssueDetail = {
+  activity: teamIssueActivityFixtures,
+  comments: teamIssueCommentFixtures,
+  issue: {
+    id: 'wireframe',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    titleKey: 'tasks.item.wireframe',
+    description: 'Refero の初回作業面を確認し、次に進める判断材料をそろえます。',
+    assigneeUserId: 'sato@example.com',
+    assigneeEmail: 'sato@example.com',
+    assigneeName: '佐藤 花子',
+    status: 'in-progress',
+    dueDate: '2026/06/03',
+    priority: 'high',
+    createdAt: '2026-06-08T00:00:00.000Z',
+    updatedAt: '2026-06-08T00:00:00.000Z',
+    source: 'dynamodb',
+  },
+}
+
 const meta = {
   title: 'Application/Projects/Task Page',
   component: TaskScreen,
@@ -57,7 +91,9 @@ const meta = {
     projectUsers,
     onCreateProject: async () => undefined,
     onCreateTeam: async () => undefined,
-    tasks: referoTaskFixtures,
+    onCreateIssueComment: async () => undefined,
+    onUpdateIssue: async () => undefined,
+    tasks: storyTasks,
     teamName: 'コアチーム',
     teams: projectDirectoryFixtures,
     userInitial: 'J',
@@ -94,6 +130,70 @@ export const Loading: Story = {
 export const English: Story = {
   args: {
     locale: 'en',
+  },
+}
+
+/**
+ * ボードビューを初期表示する状態です。
+ */
+export const Board: Story = {
+  args: {
+    initialTab: 'board',
+  },
+}
+
+/**
+ * ガントビューを初期表示する状態です。
+ */
+export const Gantt: Story = {
+  args: {
+    initialTab: 'gantt',
+  },
+}
+
+/**
+ * カレンダービューを初期表示する状態です。
+ */
+export const Calendar: Story = {
+  args: {
+    initialTab: 'calendar',
+  },
+}
+
+/**
+ * ファイルビューを初期表示する状態です。
+ */
+export const File: Story = {
+  args: {
+    initialTab: 'file',
+  },
+}
+
+/**
+ * 権限管理ビューを初期表示する状態です。
+ */
+export const Permissions: Story = {
+  args: {
+    initialTab: 'permissions',
+  },
+}
+
+/**
+ * 新規タスク作成パネルを開いた状態です。
+ */
+export const CreateOpen: Story = {
+  args: {
+    defaultCreateTaskOpen: true,
+  },
+}
+
+/**
+ * 詳細ペインでタスクを選択済みにした状態です。
+ */
+export const DetailSelected: Story = {
+  args: {
+    initialSelectedTaskId: 'wireframe',
+    selectedIssueDetail,
   },
 }
 
