@@ -157,7 +157,7 @@ export function DashboardPage({
   const blockedCount = isDashboardSummaryLoading ? '...' : String(summary?.blocked ?? 0)
 
   return (
-    <main className="flex min-h-svh bg-[var(--surface)]">
+    <main className="workbench-shell flex min-h-svh">
       <Sidebar
         activeNavId="dashboard"
         className="max-[900px]:hidden"
@@ -170,21 +170,21 @@ export function DashboardPage({
       />
 
       <section className="min-w-0 flex-1 px-[clamp(20px,4vw,48px)] py-[clamp(20px,4vw,36px)]">
-        <header className="flex min-w-0 flex-wrap items-start justify-between gap-4 border-b border-[#dce5f0] pb-5">
+        <header className="flex min-w-0 flex-wrap items-start justify-between gap-4 border-b border-[var(--workbench-border)] pb-5">
           <div className="min-w-0">
-            <p className="text-xs font-black uppercase tracking-normal text-[#0063ed]">
+            <p className="workbench-eyebrow">
               {t('dashboard.authProvider')}
             </p>
-            <h1 className="mt-2 text-dashboard-title font-black text-[var(--ink)]">
+            <h1 className="workbench-title mt-2 text-dashboard-title">
               {t('dashboard.title')}
             </h1>
-            <p className="mt-2 max-w-[620px] text-sm font-bold leading-6 text-[var(--muted-strong)]">
+            <p className="workbench-description mt-2 max-w-[620px]">
               {t('dashboard.subtitle')}
             </p>
           </div>
 
           <button
-            className="min-h-10 rounded-lg border border-[#cbd8e8] bg-white px-4 text-sm font-black text-[var(--ink)] shadow-[0_10px_22px_rgba(28,53,88,0.07)] hover:border-[#0063ed] hover:text-[#0054ca] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(0,101,238,0.18)]"
+            className="workbench-button-secondary min-h-10 px-4"
             type="button"
             onClick={handleLogout}
           >
@@ -193,19 +193,19 @@ export function DashboardPage({
         </header>
 
         {isLoading ? (
-          <p className="mt-7 text-sm font-bold text-[var(--muted)]">
+          <p className="mt-7 text-sm font-medium text-[var(--workbench-muted)]">
             {t('dashboard.loading')}
           </p>
         ) : (
           <div className="mt-7 grid gap-5">
-            <section className="rounded-lg border border-[#d9e1eb] bg-white p-5 shadow-[0_18px_40px_rgba(28,53,88,0.06)]">
-              <p className="text-xs font-black uppercase tracking-normal text-[#66758a]">
+            <section className="workbench-panel p-5">
+              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
                 {t('dashboard.signedInAs')}
               </p>
-              <p className="mt-2 break-all text-xl font-black text-[var(--ink)]">
+              <p className="mt-2 break-all text-xl font-semibold text-[var(--workbench-text)]">
                 {displayName}
               </p>
-              <p className="mt-2 text-sm font-bold text-[var(--muted)]">
+              <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">
                 {t('dashboard.authProviderValue')}
               </p>
             </section>
@@ -236,9 +236,9 @@ export function DashboardPage({
  */
 function DashboardStat({ label, value }: DashboardStatProps) {
   return (
-    <section className="rounded-lg border border-[#d9e1eb] bg-white p-4 shadow-[0_14px_28px_rgba(28,53,88,0.05)]">
-      <p className="text-xs font-black text-[var(--muted)]">{label}</p>
-      <p className="mt-2 text-3xl font-black leading-none text-[var(--ink)]">
+    <section className="workbench-panel p-4">
+      <p className="text-xs font-semibold text-[var(--workbench-muted)]">{label}</p>
+      <p className="mt-2 text-3xl font-semibold leading-none text-[var(--workbench-text)]">
         {value}
       </p>
     </section>

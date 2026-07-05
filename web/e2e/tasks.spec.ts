@@ -1044,6 +1044,51 @@ async function expectTeamIssueLayoutToStayInsideColumns(page: Page) {
   expect(result.detailOverflows).toEqual([])
 }
 
+/**
+ * タスク作成パネルと詳細ペインが split-pane の範囲内に収まっていることを検証します。
+ *
+ * @param page - レイアウト検証対象の Playwright page です。
+ */
+async function expectTaskSplitPaneLayoutToStayInsideColumns(page: Page) {
+  await page.waitForSelector('[data-testid="create-task-form"]', { state: 'visible' })
+  await page.waitForSelector('[data-testid="task-detail-pane"]', { state: 'visible' })
+
+  const result = await page.evaluate(() => {
+    const createForm = document.querySelector('[data-testid="create-task-form"]')
+    const detailPane = document.querySelector('[data-testid="task-detail-pane"]')
+
+    if (!createForm || !detailPane) {
+      return {
+        detailOverflows: ['missing detail pane or create form'],
+        formOverflows: ['missing detail pane or create form'],
+      }
+    }
+
+    const detailRect = detailPane.getBoundingClientRect()
+    const formControls = Array.from(createForm.querySelectorAll('input, select, textarea, button'))
+    const detailControls = Array.from(detailPane.querySelectorAll('input, select, textarea, button'))
+    const formOverflows = formControls.flatMap((element) => {
+      const rect = element.getBoundingClientRect()
+
+      return rect.right > detailRect.left + 1 && detailRect.top < rect.bottom && rect.top < detailRect.bottom
+        ? [`${element.tagName.toLowerCase()} ${Math.round(rect.right)} > ${Math.round(detailRect.left)}`]
+        : []
+    })
+    const detailOverflows = detailControls.flatMap((element) => {
+      const rect = element.getBoundingClientRect()
+
+      return rect.left < detailRect.left - 1 || rect.right > detailRect.right + 1
+        ? [`${element.tagName.toLowerCase()} ${Math.round(rect.left)}-${Math.round(rect.right)} outside ${Math.round(detailRect.left)}-${Math.round(detailRect.right)}`]
+        : []
+    })
+
+    return { detailOverflows, formOverflows }
+  })
+
+  expect(result.formOverflows).toEqual([])
+  expect(result.detailOverflows).toEqual([])
+}
+
 test.describe('authenticated task page', () => {
   test.beforeEach(async ({ page }) => {
     await mockAuthenticatedTaskPage(page)
@@ -1076,6 +1121,33 @@ test.describe('authenticated task page', () => {
       'data-selected',
       'true',
     )
+  })
+
+  test('Issue toolbar で検索、ステータス絞り込み、テーブル/ボード切替が動作する', async ({ page }) => {
+    await page.goto('/teams/core-team/issues')
+
+    await expect(page.getByTestId('issue-row-wireframe')).toBeVisible()
+    await expect(page.getByTestId('team-issues-count')).toContainText('4')
+
+    await page.getByRole('searchbox', { name: 'Issue を検索...' }).fill('SEO')
+
+    await expect(page.getByTestId('issue-row-seo-research')).toBeVisible()
+    await expect(page.getByTestId('issue-row-wireframe')).toBeHidden()
+    await expect(page.getByTestId('team-issues-count')).toContainText('1')
+
+    await page.getByRole('searchbox', { name: 'Issue を検索...' }).clear()
+    await page.getByRole('combobox', { name: 'Issue ステータス' }).selectOption('review')
+
+    await expect(page.getByTestId('issue-row-brand-guideline')).toBeVisible()
+    await expect(page.getByTestId('issue-row-wireframe')).toBeHidden()
+    await expect(page.getByTestId('team-issues-count')).toContainText('1')
+
+    const boardViewButton = page.getByRole('button', { name: 'ボード', exact: true })
+
+    await boardViewButton.click()
+
+    await expect(boardViewButton).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.getByText('ブランドガイドラインの更新')).toBeVisible()
   })
 
   test('タスク画面で担当者、優先度、期限、並び替え、詳細コメントが動作する', async ({ page }) => {
@@ -1155,6 +1227,24 @@ test.describe('authenticated task page', () => {
     expect(requestCounts.issueComments).toBe(1)
   })
 
+  test('タスク split-pane の作成フォームと詳細ペインが長いラベルでも崩れない', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 860 })
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+
+    await expect(page.getByTestId('task-detail-pane')).toContainText('新しいランディングページのワイヤーフレーム作成')
+    await page.getByRole('button', { name: '新規タスク' }).click()
+    await page.getByTestId('create-task-form').locator('input[name="title"]').fill(
+      '長いラベルでも split pane と詳細プロパティが重ならないことを確認するタスク',
+    )
+
+    await expectTaskSplitPaneLayoutToStayInsideColumns(page)
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    await expect(page.getByTestId('create-task-form')).toBeVisible()
+    await expect(page.getByTestId('task-detail-pane')).toBeVisible()
+    await expectTaskSplitPaneLayoutToStayInsideColumns(page)
+  })
+
   test('タブ切り替えとサイドバーの折りたたみが動作する', async ({ page }) => {
     await page.goto('/projects/refero/tasks')
 
@@ -1224,6 +1314,28 @@ test.describe('authenticated task page', () => {
     await page.mouse.wheel(0, 700)
 
     await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0)
+  })
+
+  test('390px 幅で Task と Issue の主要操作が viewport 内で使える', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    await expect(page.getByTestId('tasks-heading')).toBeVisible()
+    await page.getByTestId('task-row-brand-guideline').getByRole('button').click()
+    await expect(page.getByTestId('task-detail-pane')).toContainText('ブランドガイドラインの更新')
+
+    await page.goto('/teams/core-team/issues')
+    await expect(page.getByTestId('team-issues-heading')).toBeVisible()
+    await page.getByRole('button', { name: 'ボード' }).click()
+    await expect(page.getByRole('button', { name: 'ボード' })).toHaveAttribute('aria-pressed', 'true')
+    await page.getByRole('button', { name: '新規 Issue' }).click()
+    await expect(page.getByTestId('create-issue-form')).toBeVisible()
+
+    const hasDocumentOverflow = await page.evaluate(() =>
+      document.documentElement.scrollWidth > window.innerWidth + 1,
+    )
+
+    expect(hasDocumentOverflow).toBe(false)
   })
 
   test('DB のチーム別プロジェクトをサイドバーに表示し、選択したプロジェクトのタスクへ遷移する', async ({
@@ -1471,6 +1583,44 @@ test.describe('authenticated task page', () => {
     await expect(page.getByLabel('プロジェクトのパンくずリスト')).toContainText(
       'デザインチーム',
     )
+  })
+
+  test('同じ issueId が複数 team にある deep-link でも teamId 側の詳細を選択する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            id: 'duplicate-issue',
+            title: '重複 Issue',
+            description: 'core team detail',
+            assignedProjectId: 'shared-launch',
+            teamId: 'core-team',
+            status: 'in-progress',
+          }),
+        ],
+        'design-team': [
+          createStoredTeamIssue({
+            id: 'duplicate-issue',
+            title: '重複 Issue',
+            description: 'design team detail',
+            assignedProjectId: 'shared-launch',
+            teamId: 'design-team',
+            status: 'review',
+          }),
+        ],
+      },
+    })
+
+    await page.goto('/projects/shared-launch/issues?teamId=design-team&issueId=duplicate-issue')
+
+    await expect(page.getByTestId('tasks-heading')).toHaveText('共通ローンチ')
+    await expect(page.getByLabel('プロジェクトのパンくずリスト')).toContainText('デザインチーム')
+    await expect(page.getByTestId('task-detail-pane').locator('textarea[name="description"]')).toHaveValue('design team detail')
+
+    await page.goto('/projects/shared-launch/issues?teamId=core-team&issueId=duplicate-issue')
+
+    await expect(page.getByLabel('プロジェクトのパンくずリスト')).toContainText('コアチーム')
+    await expect(page.getByTestId('task-detail-pane').locator('textarea[name="description"]')).toHaveValue('core team detail')
   })
 
   test('チーム概要では選択チームのプロジェクトタスクだけを集計する', async ({ page }) => {

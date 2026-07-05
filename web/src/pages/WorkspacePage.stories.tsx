@@ -28,6 +28,21 @@ const defaultArgs = {
   view: 'home',
 } satisfies Partial<Parameters<typeof WorkspaceScreen>[0]>
 
+const crowdedTasks = Array.from({ length: 18 }, (_, index) => {
+  const baseTask = referoTaskFixtures[index % referoTaskFixtures.length]
+
+  return {
+    ...baseTask,
+    id: `${baseTask.id}-${index + 1}`,
+    title: `${index + 1}. ${index % 2 === 0 ? '長い名前の依存関係レビューと承認待ちタスク' : 'Design QA / release queue follow-up'} ${index + 1}`,
+    status: (['todo', 'in-progress', 'review', 'done'] as const)[index % 4],
+    priority: (['high', 'medium', 'low'] as const)[index % 3],
+    projectId: index % 2 === 0 ? 'refero' : 'brand-refresh',
+    source: 'dynamodb' as const,
+    teamId: index % 2 === 0 ? 'core-team' : 'marketing',
+  }
+})
+
 /**
  * WorkspaceScreen の Storybook meta です。ワークスペース各画面の単体確認に使います。
  */
@@ -58,6 +73,46 @@ export const Home: Story = {}
 export const MyTasks: Story = {
   args: {
     view: 'my-tasks',
+  },
+}
+
+/**
+ * 混雑したカンバン列で密度とスクロールを確認する状態です。
+ */
+export const CrowdedKanban: Story = {
+  args: {
+    tasks: crowdedTasks,
+    view: 'my-tasks',
+  },
+}
+
+/**
+ * マイタスク移動失敗時の alert 表示です。
+ */
+export const MoveError: Story = {
+  args: {
+    taskMoveErrorMessage: 'タスクの状態を更新できませんでした。',
+    view: 'my-tasks',
+  },
+}
+
+/**
+ * 長いタスク名とプロジェクト名を含む判断キューです。
+ */
+export const LongNames: Story = {
+  args: {
+    tasks: crowdedTasks.slice(0, 8),
+    view: 'home',
+  },
+}
+
+/**
+ * comfortable font preference で表示する作業台です。
+ */
+export const ComfortableFont: Story = {
+  args: {
+    fontSizePreference: 'comfortable',
+    tasks: crowdedTasks.slice(0, 10),
   },
 }
 

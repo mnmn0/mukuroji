@@ -25,6 +25,24 @@ const assigneeOptions: ProjectMember[] = [
   },
 ]
 
+const legacyIssues = teamIssueFixtures.map((issue) => ({
+  ...issue,
+  source: 'legacy' as const,
+}))
+
+const crowdedIssues = Array.from({ length: 20 }, (_, index) => {
+  const baseIssue = teamIssueFixtures[index % teamIssueFixtures.length]
+
+  return {
+    ...baseIssue,
+    id: `${baseIssue.id}-crowded-${index + 1}`,
+    title: `${index + 1}. ${index % 2 === 0 ? '長い Issue 名の依存関係と担当者確認を完了する' : 'Operational backlog triage with release note follow-up'} ${index + 1}`,
+    assignedProjectId: index % 2 === 0 ? 'refero' : 'brand-refresh',
+    status: (['todo', 'in-progress', 'review', 'done'] as const)[index % 4],
+    priority: (['high', 'medium', 'low'] as const)[index % 3],
+  }
+})
+
 const meta = {
   title: 'Application/Teams/Issue Page',
   component: TeamIssueScreen,
@@ -66,6 +84,62 @@ export const Default: Story = {}
 export const DetailPaneAlignment: Story = {
   args: {
     selectedIssueId: 'onboarding-friction',
+  },
+}
+
+/**
+ * Issue board view の初期表示です。
+ */
+export const Board: Story = {
+  args: {
+    initialViewMode: 'board',
+  },
+}
+
+/**
+ * Issue 作成フォームを開いた状態です。
+ */
+export const CreateOpen: Story = {
+  args: {
+    defaultCreateIssueOpen: true,
+  },
+}
+
+/**
+ * legacy Issue の読み取り専用詳細です。
+ */
+export const LegacyReadOnly: Story = {
+  args: {
+    issues: legacyIssues,
+    selectedIssueId: 'onboarding-friction',
+  },
+}
+
+/**
+ * Issue 詳細取得失敗時の表示です。
+ */
+export const DetailError: Story = {
+  args: {
+    detailErrorMessage: 'Issue 詳細を取得できませんでした。',
+  },
+}
+
+/**
+ * 詳細ペインで Issue が未選択の状態です。
+ */
+export const Unselected: Story = {
+  args: {
+    selectedIssueId: undefined,
+  },
+}
+
+/**
+ * 長い Issue 名と混雑データの表示です。
+ */
+export const LongCrowdedData: Story = {
+  args: {
+    issues: crowdedIssues,
+    selectedIssueId: 'onboarding-friction-crowded-1',
   },
 }
 

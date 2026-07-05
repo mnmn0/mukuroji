@@ -429,8 +429,8 @@ const defaultLabels: SidebarLabels = {
     team: '登録先チーム',
     tone: '色',
     toneLabels: {
-      blue: '青',
-      purple: '紫',
+      blue: 'ティール',
+      purple: 'ニュートラル',
       green: '緑',
       yellow: '黄',
     },
@@ -494,15 +494,15 @@ type PartialSidebarCreateLabels = Partial<Omit<SidebarCreateLabels, 'toneLabels'
 }
 
 const projectToneClasses: Record<SidebarProjectTone, string> = {
-  blue: 'border-blue-400/70 text-blue-300 bg-blue-500/10',
-  purple: 'border-violet-400/70 text-violet-300 bg-violet-500/10',
+  blue: 'border-teal-300/70 text-teal-200 bg-teal-500/10',
+  purple: 'border-slate-300/70 text-slate-200 bg-white/10',
   green: 'border-emerald-400/70 text-emerald-300 bg-emerald-500/10',
   yellow: 'border-amber-300/70 text-amber-200 bg-amber-400/15',
 }
 
 const projectToneSwatchClasses: Record<SidebarProjectTone, string> = {
-  blue: 'border-blue-300 bg-blue-500',
-  purple: 'border-violet-300 bg-violet-500',
+  blue: 'border-teal-300 bg-teal-600',
+  purple: 'border-slate-300 bg-slate-500',
   green: 'border-emerald-300 bg-emerald-500',
   yellow: 'border-amber-200 bg-amber-400',
 }
@@ -792,7 +792,7 @@ export function Sidebar({
   return (
     <>
       <aside
-        className={`flex h-dvh max-h-dvh min-h-0 flex-none flex-col overflow-hidden bg-[#03172f] py-5 text-white shadow-[18px_0_38px_rgba(5,23,48,0.18)] transition-all duration-200 min-[981px]:h-svh min-[981px]:max-h-svh ${isCollapsed ? 'w-[76px] px-3' : 'w-[292px] max-w-[calc(100vw-32px)] px-4'} ${className}`}
+        className={`flex h-dvh max-h-dvh min-h-0 flex-none flex-col overflow-hidden bg-[var(--workbench-sidebar)] py-4 text-white shadow-[1px_0_0_rgba(255,255,255,0.08)] transition-all duration-200 min-[981px]:h-svh min-[981px]:max-h-svh ${isCollapsed ? 'w-[76px] px-3' : 'w-[292px] max-w-[calc(100vw-32px)] px-4'} ${className}`}
         aria-label={resolvedLabels.ariaLabel}
         data-collapsed={isCollapsed}
         inert={isCreateModalOpen ? true : undefined}
@@ -803,7 +803,7 @@ export function Sidebar({
           <div className={`flex min-w-0 items-center gap-3 ${isCollapsed ? 'justify-center' : ''}`}>
             <BrandMark />
             <span
-              className={`truncate text-app-brand font-bold tracking-normal transition-opacity ${isCollapsed ? 'sr-only' : ''}`}
+              className={`truncate text-app-brand font-semibold tracking-[0.01em] transition-opacity ${isCollapsed ? 'sr-only' : ''}`}
             >
               {workspaceName}
             </span>
@@ -1116,7 +1116,7 @@ function SidebarRegistrationModal({
       >
         <div className="border-b border-[#dce5f2] bg-[#f8fbff] px-5 py-4">
           <div className="flex items-center justify-between gap-4">
-            <h2 id={titleId} className="text-[20px] font-black leading-tight text-[#0b1735]">
+            <h2 id={titleId} className="text-[20px] font-semibold leading-tight text-[#0b1735]">
               {labels.title}
             </h2>
             <button
@@ -1165,10 +1165,10 @@ function SidebarRegistrationModal({
               aria-labelledby={titleId}
               onSubmit={handleCreateTeam}
             >
-              <label className="grid gap-2 text-[13px] font-black text-[#233456]">
+              <label className="grid gap-2 text-[13px] font-semibold text-[#233456]">
                 {labels.teamName}
                 <input
-                  className="h-11 rounded-lg border border-[#cbd8ea] bg-white px-3 text-[14px] font-bold text-[#0d1833] outline-none transition placeholder:text-[#8a9ab3] focus:border-blue-400 focus:ring-3 focus:ring-blue-500/15"
+                  className="workbench-input h-11 px-3 text-[14px] placeholder:text-[var(--workbench-muted-soft)]"
                   name="teamName"
                   placeholder={labels.teamPlaceholder}
                   data-autofocus
@@ -1181,7 +1181,7 @@ function SidebarRegistrationModal({
                 </p>
               ) : null}
               <button
-                className="h-11 rounded-lg bg-blue-600 px-4 text-[14px] font-black text-white shadow-[0_12px_28px_rgba(37,99,235,0.22)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400"
+                className="workbench-button-primary h-11 px-4 text-[14px] disabled:cursor-not-allowed disabled:border-slate-400 disabled:bg-slate-400"
                 disabled={isSavingTeam}
                 type="submit"
               >
@@ -1197,10 +1197,10 @@ function SidebarRegistrationModal({
               aria-labelledby={titleId}
               onSubmit={handleCreateProject}
             >
-              <label className="grid gap-2 text-[13px] font-black text-[#233456]">
+              <label className="grid gap-2 text-[13px] font-semibold text-[#233456]">
                 {labels.team}
                 <select
-                  className="h-11 rounded-lg border border-[#cbd8ea] bg-white px-3 text-[14px] font-bold text-[#0d1833] outline-none transition focus:border-blue-400 focus:ring-3 focus:ring-blue-500/15 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
+                  className="workbench-input h-11 px-3 text-[14px] disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
                   name="teamId"
                   defaultValue={projectDefaultTeamId}
                   disabled={teams.length === 0}
@@ -1212,10 +1212,10 @@ function SidebarRegistrationModal({
                   ))}
                 </select>
               </label>
-              <label className="grid gap-2 text-[13px] font-black text-[#233456]">
+              <label className="grid gap-2 text-[13px] font-semibold text-[#233456]">
                 {labels.projectName}
                 <input
-                  className="h-11 rounded-lg border border-[#cbd8ea] bg-white px-3 text-[14px] font-bold text-[#0d1833] outline-none transition placeholder:text-[#8a9ab3] focus:border-blue-400 focus:ring-3 focus:ring-blue-500/15 disabled:cursor-not-allowed disabled:bg-slate-100"
+                  className="workbench-input h-11 px-3 text-[14px] placeholder:text-[var(--workbench-muted-soft)] disabled:cursor-not-allowed disabled:bg-slate-100"
                   name="projectName"
                   placeholder={labels.projectPlaceholder}
                   disabled={teams.length === 0}
@@ -1224,13 +1224,13 @@ function SidebarRegistrationModal({
                 />
               </label>
               <fieldset className="grid gap-2">
-                <legend className="text-[13px] font-black text-[#233456]">{labels.tone}</legend>
+                <legend className="text-[13px] font-semibold text-[#233456]">{labels.tone}</legend>
                 <div className="grid grid-cols-4 gap-2">
                   {projectToneOptions.map((tone) => (
                     <label
-                      className={`grid h-10 cursor-pointer place-items-center rounded-lg border transition focus-within:border-blue-500 focus-within:ring-3 focus-within:ring-blue-500/15 ${
+                      className={`grid h-10 cursor-pointer place-items-center rounded-lg border transition focus-within:border-[var(--workbench-primary)] focus-within:ring-3 focus-within:ring-[#99d7cf]/35 ${
                         selectedTone === tone
-                          ? 'border-blue-500 bg-blue-50 ring-3 ring-blue-500/15'
+                          ? 'border-[var(--workbench-primary)] bg-[#e5f7f4] ring-3 ring-[#99d7cf]/35'
                           : 'border-[#cbd8ea] bg-white hover:bg-[#f5f8fc]'
                       }`}
                       key={tone}
@@ -1264,7 +1264,7 @@ function SidebarRegistrationModal({
                 </p>
               ) : null}
               <button
-                className="h-11 rounded-lg bg-blue-600 px-4 text-[14px] font-black text-white shadow-[0_12px_28px_rgba(37,99,235,0.22)] transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-400"
+                className="workbench-button-primary h-11 px-4 text-[14px] disabled:cursor-not-allowed disabled:border-slate-400 disabled:bg-slate-400"
                 disabled={isSavingProject || teams.length === 0}
                 type="submit"
               >
@@ -1295,7 +1295,7 @@ function CreateModeTab({
 }) {
   return (
     <button
-      className={`flex h-10 items-center justify-center gap-2 rounded-md px-3 text-[13px] font-black transition disabled:cursor-not-allowed ${
+      className={`flex h-10 items-center justify-center gap-2 rounded-md px-3 text-[13px] font-semibold transition disabled:cursor-not-allowed ${
         active
           ? 'bg-white text-[#0b1735] shadow-[0_8px_22px_rgba(23,44,75,0.12)]'
           : 'text-[#526381] hover:bg-white/60 hover:text-[#0b1735]'
@@ -1411,7 +1411,7 @@ function NavButton({
   return (
     <button
       className={`group relative flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium transition hover:bg-white/10 hover:text-white ${collapsed ? 'justify-center px-0' : 'px-2'} ${
-        active ? 'bg-blue-500/20 text-white' : 'text-slate-100'
+        active ? 'bg-teal-500/20 text-white' : 'text-slate-100'
       }`}
       type="button"
       aria-label={collapsed ? accessibleLabel : undefined}
@@ -1420,13 +1420,13 @@ function NavButton({
       onClick={() => onSelect(id)}
     >
       {active ? (
-        <span className="absolute inset-y-1 left-0 w-1 rounded-full bg-blue-500" aria-hidden="true" />
+        <span className="absolute inset-y-1 left-0 w-1 rounded-full bg-teal-400" aria-hidden="true" />
       ) : null}
       <Icon className="h-5 w-5 flex-none text-slate-100 transition group-hover:text-white" />
       <span className={collapsed ? 'sr-only' : 'min-w-0 flex-1 truncate'}>{label}</span>
       {badge ? (
         <span
-          className={`grid h-6 min-w-6 place-items-center rounded-full bg-blue-500 px-2 text-app-caption font-bold leading-none text-white shadow-[0_8px_20px_rgba(37,99,235,0.42)] ${collapsed ? 'absolute right-0 top-0 h-5 min-w-5 px-1 text-app-micro' : ''}`}
+          className={`grid h-6 min-w-6 place-items-center rounded-full bg-teal-500 px-2 text-app-caption font-bold leading-none text-white shadow-[0_8px_20px_rgba(20,184,166,0.28)] ${collapsed ? 'absolute right-0 top-0 h-5 min-w-5 px-1 text-app-micro' : ''}`}
           aria-label={badgeLabel}
         >
           {badge}
@@ -1477,13 +1477,13 @@ function TeamGroup({
     <div>
       <div className="relative">
         {isTeamActive || isProjectAncestor ? (
-          <span className="absolute inset-y-0 left-0 w-1 rounded-full bg-blue-500" aria-hidden="true" />
+          <span className="absolute inset-y-0 left-0 w-1 rounded-full bg-teal-400" aria-hidden="true" />
         ) : null}
         <div className={`flex items-center gap-1 ${collapsed ? 'justify-center' : ''}`}>
           <button
             className={`group flex h-9 min-w-0 flex-1 items-center gap-3 rounded-lg py-2 text-left text-app-body font-medium transition ${collapsed ? 'justify-center px-0' : 'pl-3 pr-2'} ${
               isCurrentTeam
-                ? 'bg-blue-500/20 text-white shadow-[inset_0_0_0_1px_rgba(96,165,250,0.12)]'
+                ? 'bg-teal-500/20 text-white shadow-[inset_0_0_0_1px_rgba(45,212,191,0.14)]'
                 : isTeamActive || isProjectAncestor
                   ? 'bg-white/8 text-white'
                   : 'text-slate-100 hover:bg-white/10 hover:text-white'
@@ -1578,14 +1578,14 @@ function SubNavButton({
   return (
     <button
       className={`relative flex h-7 w-full items-center gap-3 rounded-lg px-1 text-left text-app-meta font-medium transition hover:bg-white/10 hover:text-white ${
-        active ? 'bg-blue-500/20 text-white' : 'text-slate-100'
+        active ? 'bg-teal-500/20 text-white' : 'text-slate-100'
       }`}
       type="button"
       aria-current={active ? 'page' : undefined}
       onClick={onClick}
     >
       {active ? (
-        <span className="absolute inset-y-1 left-0 w-1 rounded-full bg-blue-500" aria-hidden="true" />
+        <span className="absolute inset-y-1 left-0 w-1 rounded-full bg-teal-400" aria-hidden="true" />
       ) : null}
       <Icon className="h-[18px] w-[18px] flex-none text-slate-100" />
       <span className="min-w-0 truncate">{label}</span>
@@ -1617,7 +1617,7 @@ function ProjectButton({
       <button
         className={`relative flex h-8 min-w-0 flex-1 items-center gap-3 rounded-lg py-2 pl-3 pr-2 text-left text-app-meta font-medium transition ${
           active
-            ? 'bg-blue-500/20 text-white shadow-[inset_0_0_0_1px_rgba(96,165,250,0.1)]'
+            ? 'bg-teal-500/20 text-white shadow-[inset_0_0_0_1px_rgba(45,212,191,0.14)]'
             : 'text-slate-100 hover:bg-white/10 hover:text-white'
         }`}
         type="button"
@@ -1625,7 +1625,7 @@ function ProjectButton({
         aria-current={active ? 'page' : undefined}
       >
         {active ? (
-          <span className="absolute inset-y-1 left-0 w-1 rounded-full bg-blue-500" aria-hidden="true" />
+          <span className="absolute inset-y-1 left-0 w-1 rounded-full bg-teal-400" aria-hidden="true" />
         ) : null}
         <span
           className={`grid h-[17px] w-[17px] flex-none place-items-center rounded-[4px] border ${projectToneClasses[tone]}`}

@@ -93,15 +93,15 @@ export function LoginPage() {
   }
 
   return (
-    <main className="grid min-h-svh min-w-0 grid-cols-[minmax(460px,1.02fr)_minmax(520px,0.98fr)] bg-[var(--surface)] max-[1080px]:grid-cols-1">
+    <main className="workbench-shell grid min-h-svh min-w-0 grid-cols-[minmax(460px,1.02fr)_minmax(520px,0.98fr)] max-[1080px]:grid-cols-1">
       <section
-        className="relative order-2 grid min-h-svh min-w-0 grid-rows-[auto_1fr_auto] bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(250,252,255,0.96))] px-[clamp(32px,5.5vw,80px)] pb-[38px] pt-12 max-[1080px]:order-1 max-[1080px]:min-h-svh max-[1080px]:pt-[26px] max-[720px]:px-[18px] max-[720px]:pb-7 max-[720px]:pt-[22px]"
+        className="relative order-2 grid min-h-svh min-w-0 grid-rows-[auto_1fr_auto] bg-[var(--workbench-surface)] px-[clamp(32px,5.5vw,80px)] pb-[38px] pt-12 max-[1080px]:order-1 max-[1080px]:min-h-svh max-[1080px]:pt-[26px] max-[720px]:px-[18px] max-[720px]:pb-7 max-[720px]:pt-[22px]"
         aria-labelledby="login-title"
       >
-        <div className="flex min-w-0 items-center gap-2 justify-self-end text-[#4d5868] focus-within:rounded-lg focus-within:outline focus-within:outline-3 focus-within:outline-offset-[5px] focus-within:outline-[rgba(0,101,238,0.18)] max-[720px]:w-[calc(100vw-72px)] max-[720px]:justify-self-start max-[720px]:justify-end">
+        <div className="flex min-w-0 items-center gap-2 justify-self-end text-[var(--workbench-muted)] focus-within:rounded-lg focus-within:outline focus-within:outline-3 focus-within:outline-offset-[5px] focus-within:outline-[rgba(37,99,235,0.18)] max-[720px]:w-[calc(100vw-72px)] max-[720px]:justify-self-start max-[720px]:justify-end">
           <GlobeIcon className="h-[19px] w-[19px] fill-none stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]" />
           <select
-            className="w-auto min-w-0 cursor-pointer appearance-none border-0 bg-transparent text-base font-extrabold text-[var(--ink)] outline-none"
+            className="w-auto min-w-0 cursor-pointer appearance-none border-0 bg-transparent text-base font-semibold text-[var(--workbench-text)] outline-none"
             aria-label={t('language.aria')}
             value={locale}
             onChange={(event) => handleLocaleChange(event.target.value)}
@@ -115,20 +115,20 @@ export function LoginPage() {
           <ChevronIcon className="h-[19px] w-[19px] fill-none stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]" />
         </div>
 
-        <div className="my-8 w-[min(100%,520px)] min-w-0 self-center justify-self-center rounded-lg border border-[#d9e1eb] bg-[rgba(255,255,255,0.92)] p-[clamp(30px,4vw,48px)] shadow-[0_24px_52px_rgba(28,53,88,0.07)] max-[720px]:mb-[34px] max-[720px]:ml-0 max-[720px]:mt-[26px] max-[720px]:w-[calc(100vw-72px)] max-[720px]:max-w-none max-[720px]:justify-self-start max-[720px]:px-5 max-[720px]:py-7">
-          <div className="inline-flex w-full items-center justify-center gap-3 text-2xl font-extrabold text-[var(--ink)] max-[720px]:text-xl">
+        <div className="workbench-panel my-8 w-[min(100%,520px)] min-w-0 self-center justify-self-center p-[clamp(30px,4vw,48px)] max-[720px]:mb-[34px] max-[720px]:ml-0 max-[720px]:mt-[26px] max-[720px]:w-[calc(100vw-72px)] max-[720px]:max-w-none max-[720px]:justify-self-start max-[720px]:px-5 max-[720px]:py-7">
+          <div className="inline-flex w-full items-center justify-center gap-3 text-2xl font-semibold text-[var(--workbench-text)] max-[720px]:text-xl">
             <BrandMark />
             <span>mukuroji</span>
           </div>
 
           <div className="mt-9 text-center max-[720px]:mt-8">
             <h1
-              className="m-0 text-login-title font-black text-[var(--ink)]"
+              className="workbench-title m-0 text-login-title"
               id="login-title"
             >
               {t('login.title')}
             </h1>
-            <p className="mt-3 text-base font-bold text-[var(--muted)]">
+            <p className="mt-3 text-base font-medium text-[var(--workbench-muted)]">
               {t('login.subtitle')}
             </p>
           </div>
@@ -137,14 +137,14 @@ export function LoginPage() {
             className="mt-9 grid min-w-0 gap-[22px] max-[720px]:gap-[19px]"
             onSubmit={handleSubmit}
           >
-            <div className="grid gap-2.5 text-base font-extrabold text-[var(--ink)]">
+            <div className="grid gap-2.5 text-base font-semibold text-[var(--workbench-text)]">
               <label className="w-fit" htmlFor="email">
                 {t('login.email')}
               </label>
-              <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[#d8e0ea] bg-white px-4 text-[#7b8797] transition-[border-color,box-shadow] duration-150 focus-within:border-[#0065ee] focus-within:shadow-[0_0_0_4px_rgba(0,101,238,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
+              <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-white px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
                 <MailIcon />
                 <input
-                  className="min-w-0 border-0 bg-transparent text-base font-bold text-[var(--ink)] outline-none placeholder:text-[#8d98a8]"
+                  className="min-w-0 border-0 bg-transparent text-base font-medium text-[var(--workbench-text)] outline-none placeholder:text-[var(--workbench-muted-soft)]"
                   disabled={isSubmitting}
                   id="email"
                   name="email"
@@ -161,14 +161,14 @@ export function LoginPage() {
               </span>
             </div>
 
-            <div className="grid gap-2.5 text-base font-extrabold text-[var(--ink)]">
+            <div className="grid gap-2.5 text-base font-semibold text-[var(--workbench-text)]">
               <label className="w-fit" htmlFor="password">
                 {t('login.password')}
               </label>
-              <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[#d8e0ea] bg-white px-4 text-[#7b8797] transition-[border-color,box-shadow] duration-150 focus-within:border-[#0065ee] focus-within:shadow-[0_0_0_4px_rgba(0,101,238,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
+              <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-white px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
                 <LockIcon />
                 <input
-                  className="min-w-0 border-0 bg-transparent text-base font-bold text-[var(--ink)] outline-none placeholder:text-[#8d98a8]"
+                  className="min-w-0 border-0 bg-transparent text-base font-medium text-[var(--workbench-text)] outline-none placeholder:text-[var(--workbench-muted-soft)]"
                   disabled={isSubmitting}
                   id="password"
                   name="password"
@@ -184,7 +184,7 @@ export function LoginPage() {
                 />
                 <button
                   type="button"
-                  className="-mr-2 grid h-[38px] w-[38px] cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-[#718095] outline-none hover:bg-[#edf5ff] hover:text-[#005fe7] focus-visible:bg-[#edf5ff] focus-visible:text-[#005fe7]"
+                  className="-mr-2 grid h-[38px] w-[38px] cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-[var(--workbench-muted)] outline-none hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] focus-visible:bg-[var(--workbench-surface-muted)] focus-visible:text-[var(--workbench-primary)]"
                   aria-label={
                     showPassword
                       ? t('login.hidePassword')
@@ -197,10 +197,10 @@ export function LoginPage() {
               </span>
             </div>
 
-            <label className="flex cursor-pointer items-center gap-3 text-sm font-extrabold text-[var(--ink)]">
+            <label className="flex cursor-pointer items-center gap-3 text-sm font-semibold text-[var(--workbench-text)]">
               <span className="relative grid h-6 w-6 place-items-center">
                 <input
-                  className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[#cfd8e5] bg-white checked:border-[#0063ed] checked:bg-[#0063ed] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(0,101,238,0.18)]"
+                  className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[var(--workbench-border-strong)] bg-white checked:border-[var(--workbench-primary)] checked:bg-[var(--workbench-primary)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(37,99,235,0.18)]"
                   type="checkbox"
                   checked={remember}
                   disabled={isSubmitting}
@@ -227,7 +227,7 @@ export function LoginPage() {
             ) : null}
 
             <button
-              className="min-h-[52px] w-full cursor-pointer rounded-lg border-0 bg-linear-to-br from-[#006cff] to-[#004ec8] text-base font-black text-white shadow-[0_14px_30px_rgba(0,89,216,0.22)] transition-[transform,box-shadow,filter] duration-150 hover:-translate-y-px hover:saturate-[1.08] hover:shadow-[0_18px_36px_rgba(0,89,216,0.28)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(0,101,238,0.22)] disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:translate-y-0 disabled:hover:saturate-100"
+              className="workbench-button-primary min-h-[52px] w-full cursor-pointer text-base disabled:cursor-not-allowed disabled:opacity-70"
               disabled={isSubmitting}
               type="submit"
             >
@@ -235,7 +235,7 @@ export function LoginPage() {
             </button>
 
             <Link
-              className="justify-self-center text-base font-extrabold text-[#0063ed] no-underline hover:text-[#004ab4] hover:underline focus-visible:text-[#004ab4] focus-visible:underline focus-visible:outline-none"
+              className="justify-self-center text-base font-semibold text-[var(--workbench-primary)] no-underline hover:text-[var(--workbench-primary-hover)] hover:underline focus-visible:text-[var(--workbench-primary-hover)] focus-visible:underline focus-visible:outline-none"
               to="/forgot-password"
             >
               {t('login.forgotPassword')}
@@ -257,31 +257,22 @@ export function LoginPage() {
       </section>
 
       <section
-        className="relative isolate order-1 flex min-h-svh min-w-0 flex-col justify-center gap-12 overflow-hidden bg-[radial-gradient(circle_at_88%_8%,rgba(47,115,255,0.15),transparent_27%),linear-gradient(144deg,#f7fbff_0%,#e8f3ff_48%,#d8ebff_100%)] px-[clamp(36px,5vw,72px)] py-14 max-[1080px]:order-2 max-[1080px]:min-h-0 max-[1080px]:pt-[42px] max-[1080px]:pb-[50px] max-[720px]:gap-[30px] max-[720px]:px-[18px] max-[720px]:py-7 max-[720px]:pb-[34px]"
+        className="relative isolate order-1 flex min-h-svh min-w-0 flex-col justify-center gap-12 overflow-hidden bg-[var(--workbench-canvas)] px-[clamp(36px,5vw,72px)] py-14 max-[1080px]:order-2 max-[1080px]:min-h-0 max-[1080px]:pt-[42px] max-[1080px]:pb-[50px] max-[720px]:gap-[30px] max-[720px]:px-[18px] max-[720px]:py-7 max-[720px]:pb-[34px]"
         aria-labelledby="story-title"
       >
-        <span
-          className="pointer-events-none absolute -right-[122px] -top-[70px] -z-10 h-[420px] w-[420px] rotate-[34deg] rounded-[45%] border-[54px] border-white/50"
-          aria-hidden="true"
-        ></span>
-        <span
-          className="pointer-events-none absolute -left-[72px] bottom-[124px] -z-10 h-[210px] w-[210px] bg-[radial-gradient(rgba(255,255,255,0.9)_1.5px,transparent_1.5px)] bg-[length:12px_12px] opacity-95"
-          aria-hidden="true"
-        ></span>
-
-        <div className="inline-flex items-center gap-3 text-2xl font-extrabold text-[var(--ink)] max-[720px]:text-xl">
+        <div className="inline-flex items-center gap-3 text-2xl font-semibold text-[var(--workbench-text)] max-[720px]:text-xl">
           <BrandMark />
           <span>mukuroji</span>
         </div>
 
         <div className="min-w-0 max-w-[560px]">
           <h2
-            className="m-0 text-story-title font-black text-[var(--ink)]"
+            className="workbench-title m-0 text-story-title"
             id="story-title"
           >
             {t('story.title')}
           </h2>
-          <p className="mt-5 max-w-[520px] text-base leading-8 text-[var(--muted-strong)] [overflow-wrap:anywhere] max-[720px]:leading-[1.75]">
+          <p className="mt-5 max-w-[520px] text-base leading-8 text-[var(--workbench-muted)] [overflow-wrap:anywhere] max-[720px]:leading-[1.75]">
             {t('story.description')}
           </p>
         </div>
@@ -312,7 +303,7 @@ function FooterLink({
 }: FooterLinkProps) {
   return (
     <Link
-      className="font-bold text-[var(--muted-strong)] no-underline hover:text-[#005fe7] hover:underline focus-visible:text-[#005fe7] focus-visible:underline focus-visible:outline-none"
+      className="font-medium text-[var(--workbench-muted)] no-underline hover:text-[var(--workbench-primary)] hover:underline focus-visible:text-[var(--workbench-primary)] focus-visible:underline focus-visible:outline-none"
       to={to}
     >
       {children}

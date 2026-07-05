@@ -38,20 +38,20 @@ export function PlaceholderPage({
   }, [locale, t, titleKey])
 
   return (
-    <main className="grid min-h-svh place-items-center bg-[var(--surface)] px-5 py-10">
-      <section className="w-full max-w-[520px] rounded-lg border border-[#d9e1eb] bg-white/95 p-8 text-center shadow-[0_28px_60px_rgba(28,53,88,0.08)]">
-        <div className="inline-flex items-center justify-center gap-3 text-2xl font-extrabold text-[var(--ink)]">
+    <main className="workbench-shell grid min-h-svh place-items-center px-5 py-10">
+      <section className="workbench-panel w-full max-w-[520px] p-8 text-center">
+        <div className="inline-flex items-center justify-center gap-3 text-2xl font-semibold text-[var(--workbench-text)]">
           <BrandMark />
           <span>mukuroji</span>
         </div>
-        <h1 className="mt-8 text-placeholder-title font-black text-[var(--ink)]">
+        <h1 className="workbench-title mt-8 text-placeholder-title">
           {t(titleKey)}
         </h1>
-        <p className="mt-4 text-base font-bold leading-relaxed text-[var(--muted)]">
+        <p className="mt-4 text-base font-medium leading-relaxed text-[var(--workbench-muted)]">
           {t(descriptionKey)}
         </p>
         <Link
-          className="mt-8 inline-flex min-h-12 items-center justify-center rounded-lg bg-linear-to-br from-[#006cff] to-[#004ec8] px-6 font-black text-white no-underline shadow-[0_14px_30px_rgba(0,89,216,0.22)] transition-[transform,box-shadow,filter] duration-150 hover:-translate-y-px hover:saturate-[1.08] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(0,101,238,0.22)]"
+          className="workbench-button-primary mt-8 inline-flex min-h-12 items-center justify-center px-6 no-underline"
           to="/"
         >
           {t('placeholder.backToLogin')}

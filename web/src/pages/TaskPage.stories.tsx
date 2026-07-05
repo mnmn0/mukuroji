@@ -53,6 +53,24 @@ const storyTasks = referoTaskFixtures.map((task, index) => ({
   teamId: 'core-team',
 }))
 
+const denseStoryTasks = Array.from({ length: 24 }, (_, index) => {
+  const baseTask = storyTasks[index % storyTasks.length]
+
+  return {
+    ...baseTask,
+    id: `${baseTask.id}-dense-${index + 1}`,
+    title: `${index + 1}. ${index % 2 === 0 ? '長いラベルのワークストリーム確認と承認依頼' : 'Cross-functional launch readiness checklist'} ${index + 1}`,
+    status: (['todo', 'in-progress', 'review', 'done'] as const)[index % 4],
+    priority: (['high', 'medium', 'low'] as const)[index % 3],
+  }
+})
+
+const legacyTasks = storyTasks.map((task) => ({
+  ...task,
+  source: 'legacy' as const,
+  teamId: undefined,
+}))
+
 const selectedIssueDetail: TeamIssueDetail = {
   activity: teamIssueActivityFixtures,
   comments: teamIssueCommentFixtures,
@@ -194,6 +212,84 @@ export const DetailSelected: Story = {
   args: {
     initialSelectedTaskId: 'wireframe',
     selectedIssueDetail,
+  },
+}
+
+/**
+ * タスクが未登録の空状態です。
+ */
+export const Empty: Story = {
+  args: {
+    tasks: [],
+  },
+}
+
+/**
+ * 作成フォームで担当者候補を読み込み中の状態です。
+ */
+export const AssigneeLoading: Story = {
+  args: {
+    defaultCreateTaskOpen: true,
+    isAssigneeOptionsLoading: true,
+  },
+}
+
+/**
+ * 作成フォームで担当者候補取得に失敗した状態です。
+ */
+export const AssigneeError: Story = {
+  args: {
+    assigneeErrorMessage: '担当者候補を取得できませんでした。',
+    defaultCreateTaskOpen: true,
+  },
+}
+
+/**
+ * 作成フォームで担当者候補が空の状態です。
+ */
+export const NoAssignees: Story = {
+  args: {
+    assigneeOptions: [],
+    defaultCreateTaskOpen: true,
+  },
+}
+
+/**
+ * 詳細ペインが読み込み中の状態です。
+ */
+export const DetailLoading: Story = {
+  args: {
+    initialSelectedTaskId: 'wireframe',
+    isSelectedIssueDetailLoading: true,
+  },
+}
+
+/**
+ * 詳細ペインの取得または保存エラー表示です。
+ */
+export const DetailError: Story = {
+  args: {
+    detailErrorMessage: 'Issue 詳細を取得できませんでした。',
+    initialSelectedTaskId: 'wireframe',
+  },
+}
+
+/**
+ * legacy task の読み取り専用詳細です。
+ */
+export const LegacyReadOnly: Story = {
+  args: {
+    initialSelectedTaskId: 'wireframe',
+    tasks: legacyTasks,
+  },
+}
+
+/**
+ * 行数と長いラベルが多い高密度テーブルです。
+ */
+export const DenseRows: Story = {
+  args: {
+    tasks: denseStoryTasks,
   },
 }
 

@@ -116,6 +116,14 @@ type TeamIssueScreenProps = {
    */
   detailErrorMessage?: string
   /**
+   * Storybook などで初期表示に使う Issue 一覧モードです。
+   */
+  initialViewMode?: IssueViewMode
+  /**
+   * 初期表示時に Issue 作成フォームを開くかどうかです。
+   */
+  defaultCreateIssueOpen?: boolean
+  /**
    * 現在選択中の Issue ID です。
    */
   selectedIssueId?: string
@@ -373,7 +381,9 @@ export function TeamIssueScreen({
   activity = [],
   assigneeOptions = [],
   comments = [],
+  defaultCreateIssueOpen = false,
   detailErrorMessage,
+  initialViewMode = 'table',
   issueErrorMessage,
   issues = [],
   isLoading = false,
@@ -398,10 +408,10 @@ export function TeamIssueScreen({
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
-  const [viewMode, setViewMode] = useState<IssueViewMode>('table')
+  const [viewMode, setViewMode] = useState<IssueViewMode>(initialViewMode)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<TaskStatus | 'all'>('all')
-  const [isCreateOpen, setIsCreateOpen] = useState(false)
+  const [isCreateOpen, setIsCreateOpen] = useState(defaultCreateIssueOpen)
   const [createErrorMessage, setCreateErrorMessage] = useState<string | undefined>()
   const [detailErrorMessageLocal, setDetailErrorMessageLocal] = useState<string | undefined>()
   const activeTeam = teams.find((team) => team.id === teamId)
@@ -432,7 +442,7 @@ export function TeamIssueScreen({
   )
 
   return (
-    <main className="flex h-svh min-h-0 overflow-hidden bg-[#f6f9fd] text-[#0d1833]">
+    <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
       <Sidebar
         activeTeamId={teamId}
         activeTeamViewId="issues"
@@ -479,8 +489,8 @@ export function TeamIssueScreen({
         />
       </MobileSidebarDrawer>
 
-      <section className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[#fbfdff]">
-        <header className="flex-none border-b border-slate-200 bg-white px-[clamp(20px,3vw,34px)] py-4">
+      <section className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-4">
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
             <div className="flex min-w-0 items-start gap-3">
               <MobileSidebarButton
@@ -488,16 +498,16 @@ export function TeamIssueScreen({
                 onClick={() => setIsMobileSidebarOpen(true)}
               />
               <div className="min-w-0">
-                <p className="text-xs font-black uppercase tracking-normal text-blue-600">
+                <p className="workbench-eyebrow">
                   {t('issues.eyebrow')}
                 </p>
                 <h1
-                  className="mt-2 truncate text-page-title font-black text-[#0d1833]"
+                  className="workbench-title mt-2 truncate text-page-title"
                   data-testid="team-issues-heading"
                 >
                   {teamName ?? t('issues.title')}
                 </h1>
-                <p className="mt-2 max-w-[760px] text-sm font-bold leading-6 text-[#526381]">
+                <p className="workbench-description mt-2 max-w-[760px]">
                   {t('issues.description')}
                 </p>
               </div>
@@ -505,13 +515,13 @@ export function TeamIssueScreen({
             <div className="flex flex-none items-center gap-3">
               <button
                 aria-expanded={isCreateOpen}
-                className="inline-flex h-10 items-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-black text-white shadow-[0_12px_24px_rgba(37,99,235,0.22)] transition hover:bg-blue-500"
+                className="workbench-button-primary inline-flex h-10 items-center gap-2 px-4"
                 onClick={() => setIsCreateOpen(!isCreateOpen)}
                 type="button"
               >
                 + {t('issues.action.new')}
               </button>
-              <div className="grid h-10 w-10 place-items-center rounded-full bg-blue-100 text-sm font-black text-blue-700">
+              <div className="grid h-10 w-10 place-items-center rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-sm font-semibold text-[var(--workbench-primary)]">
                 {userInitial}
               </div>
             </div>
@@ -519,12 +529,12 @@ export function TeamIssueScreen({
         </header>
 
         {isLoading ? (
-          <div className="grid min-h-0 flex-1 place-items-center px-6 text-sm font-bold text-[#526381]">
+          <div className="grid min-h-0 flex-1 place-items-center px-6 text-sm font-medium text-[var(--workbench-muted)]">
             {t('issues.loading')}
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
-            <div className="grid min-h-full grid-cols-[minmax(0,1fr)_minmax(340px,430px)] gap-0 max-[1080px]:grid-cols-1">
+            <div className="grid min-h-full grid-cols-[minmax(0,1fr)_minmax(360px,440px)] gap-0 max-[1080px]:grid-cols-1">
               <section className="min-w-0 px-[clamp(20px,3vw,34px)] py-5">
                 {isCreateOpen ? (
                   <CreateIssuePanel
@@ -645,13 +655,13 @@ function IssueToolbar({
   viewMode: IssueViewMode
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="workbench-toolbar flex flex-wrap items-center justify-between gap-3 px-3 py-2">
       <div className="flex flex-wrap items-center gap-3">
         <label className="grid gap-1">
           <span className="sr-only">{t('issues.search')}</span>
           <input
             aria-label={t('issues.search')}
-            className="h-10 w-[min(260px,calc(100vw-52px))] rounded-lg border border-slate-300 bg-white px-3.5 text-sm font-bold outline-none transition placeholder:text-[#71809a] focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+            className="workbench-input h-9 w-[min(260px,calc(100vw-52px))] px-3.5 placeholder:text-[var(--workbench-muted-soft)]"
             onChange={(event) => onSearchQueryChange(event.target.value)}
             placeholder={t('issues.search')}
             type="search"
@@ -660,7 +670,7 @@ function IssueToolbar({
         </label>
         <select
           aria-label={t('issues.filter.status')}
-          className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-black text-[#0d1833] outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+          className="workbench-input h-9 px-3"
           onChange={(event) => onStatusFilterChange(resolveIssueStatusFilter(event.target.value))}
           value={statusFilter}
         >
@@ -672,12 +682,12 @@ function IssueToolbar({
           ))}
         </select>
       </div>
-      <div className="inline-flex h-10 overflow-hidden rounded-lg border border-slate-300 bg-white">
+      <div className="inline-flex h-9 overflow-hidden rounded-[7px] border border-[var(--workbench-border-strong)] bg-white">
         {(['table', 'board'] as const).map((mode) => (
           <button
             aria-pressed={viewMode === mode}
-            className={`px-3.5 text-sm font-black transition ${
-              viewMode === mode ? 'bg-blue-600 text-white' : 'text-[#263550] hover:bg-blue-50'
+            className={`px-3.5 text-sm font-semibold transition ${
+              viewMode === mode ? 'bg-[var(--workbench-primary)] text-white' : 'text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]'
             }`}
             key={mode}
             onClick={() => onViewModeChange(mode)}
@@ -709,7 +719,7 @@ function CreateIssuePanel({
   const today = formatLocalDateInputValue()
 
   return (
-    <section className="mb-5 min-w-0 rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.06)]">
+    <section className="workbench-panel mb-5 min-w-0 p-5">
       <form
         className="grid min-w-0 gap-4"
         data-testid="create-issue-form"
@@ -734,18 +744,18 @@ function CreateIssuePanel({
         }}
       >
         <div className="grid grid-cols-1 gap-3 min-[1180px]:grid-cols-2">
-          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('issues.create.title')}
             <input
-              className="h-11 w-full min-w-0 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+              className="workbench-input h-10 w-full min-w-0 px-3"
               name="title"
               placeholder={t('issues.create.titlePlaceholder')}
               required
             />
           </label>
-          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('issues.create.project')}
-            <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" name="assignedProjectId">
+            <select className="workbench-input h-10 w-full min-w-0 px-3" name="assignedProjectId">
               <option value="">{t('issues.project.unassigned')}</option>
               {projects.map((project) => (
                 <option key={project.id} value={project.id}>
@@ -754,9 +764,9 @@ function CreateIssuePanel({
               ))}
             </select>
           </label>
-          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('issues.create.assignee')}
-            <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" name="assigneeUserId" required>
+            <select className="workbench-input h-10 w-full min-w-0 px-3" name="assigneeUserId" required>
               <option disabled hidden value="">
                 {t('tasks.create.assigneeSelectPlaceholder')}
               </option>
@@ -767,13 +777,13 @@ function CreateIssuePanel({
               ))}
             </select>
           </label>
-          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('tasks.column.dueDate')}
-            <input className="h-11 w-full min-w-0 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue={today} name="dueDate" required type="date" />
+            <input className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={today} name="dueDate" required type="date" />
           </label>
-          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('tasks.column.status')}
-            <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue="todo" name="status">
+            <select className="workbench-input h-10 w-full min-w-0 px-3" defaultValue="todo" name="status">
               {issueStatuses.map((status) => (
                 <option key={status} value={status}>
                   {t(`tasks.status.${status}`)}
@@ -781,9 +791,9 @@ function CreateIssuePanel({
               ))}
             </select>
           </label>
-          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('tasks.column.priority')}
-            <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10" defaultValue="medium" name="priority">
+            <select className="workbench-input h-10 w-full min-w-0 px-3" defaultValue="medium" name="priority">
               {issuePriorities.map((priority) => (
                 <option key={priority} value={priority}>
                   {t(`tasks.priority.${priority}`)}
@@ -792,19 +802,19 @@ function CreateIssuePanel({
             </select>
           </label>
         </div>
-        <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+        <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
           {t('issues.create.description')}
           <textarea
-            className="min-h-20 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+            className="workbench-input min-h-20 w-full min-w-0 px-3 py-2"
             name="description"
             placeholder={t('issues.create.descriptionPlaceholder')}
           />
         </label>
         <div className="flex flex-wrap items-center gap-2">
-          <button className="h-11 rounded-lg bg-blue-600 px-4 text-sm font-black text-white transition hover:bg-blue-500" type="submit">
+          <button className="workbench-button-primary h-10 px-4" type="submit">
             {t('issues.create.submit')}
           </button>
-          <button className="h-11 rounded-lg border border-slate-300 bg-white px-4 text-sm font-black text-[#263550] transition hover:border-blue-500 hover:text-blue-600" onClick={onCancel} type="button">
+          <button className="workbench-button-secondary h-10 px-4" onClick={onCancel} type="button">
             {t('tasks.create.cancel')}
           </button>
           {errorMessage ? <p className="text-sm font-bold text-red-600">{errorMessage}</p> : null}
@@ -828,11 +838,11 @@ function IssueTable({
   t: (key: MessageKey) => string
 }) {
   return (
-    <section className="mt-5 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_22px_54px_rgba(30,52,88,0.06)]">
+    <section className="workbench-table mt-5 overflow-hidden">
       <div className="overflow-x-auto">
         <table className="w-full min-w-[940px] border-collapse">
           <thead>
-            <tr className="border-b border-slate-200 text-left text-sm font-black text-[#0d1833]">
+            <tr className="workbench-table-head text-left">
               <th className="px-5 py-4" scope="col">{t('issues.column.title')}</th>
               <th className="px-4 py-4" scope="col">{t('issues.column.project')}</th>
               <th className="px-4 py-4" scope="col">{t('tasks.column.assignee')}</th>
@@ -847,23 +857,23 @@ function IssueTable({
                 <tr
                   aria-selected={selectedIssueId === issue.id}
                   className={`cursor-pointer border-b border-slate-100 transition last:border-b-0 ${
-                    selectedIssueId === issue.id ? 'bg-blue-50' : 'hover:bg-[#f8fbff]'
+                    selectedIssueId === issue.id ? 'workbench-row-selected' : 'hover:bg-[var(--workbench-surface-muted)]'
                   }`}
                   data-testid={`issue-row-${issue.id}`}
                   key={issue.id}
                   onClick={() => onSelectIssue?.(issue.id)}
                 >
-                  <td className="px-5 py-4 text-sm font-black text-[#0d1833]">{resolveIssueTitle(issue, t)}</td>
-                  <td className="px-4 py-4 text-sm font-bold text-[#526381]">{resolveAssignedProjectName(issue, activeTeam, t)}</td>
-                  <td className="px-4 py-4 text-sm font-bold text-[#526381]">{resolveIssueAssignee(issue)}</td>
+                  <td className="px-5 py-3 text-sm font-semibold text-[var(--workbench-text)]">{resolveIssueTitle(issue, t)}</td>
+                  <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveAssignedProjectName(issue, activeTeam, t)}</td>
+                  <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveIssueAssignee(issue)}</td>
                   <td className="px-4 py-4"><IssueStatusBadge status={issue.status} t={t} /></td>
-                  <td className="px-4 py-4 text-sm font-bold text-[#526381]">{issue.dueDate}</td>
+                  <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{issue.dueDate}</td>
                   <td className="px-4 py-4"><IssuePriorityBadge priority={issue.priority} t={t} /></td>
                 </tr>
               ))
             ) : (
               <tr>
-                <td className="px-5 py-8 text-sm font-bold text-[#526381]" colSpan={6} data-testid="team-issues-empty">
+                <td className="px-5 py-8 text-sm font-medium text-[var(--workbench-muted)]" colSpan={6} data-testid="team-issues-empty">
                   {t('issues.empty')}
                 </td>
               </tr>
@@ -871,7 +881,7 @@ function IssueTable({
           </tbody>
         </table>
       </div>
-      <div className="border-t border-slate-200 px-5 py-4 text-sm font-bold text-[#526381]" data-testid="team-issues-count">
+      <div className="border-t border-[var(--workbench-border)] px-5 py-3 text-sm font-medium text-[var(--workbench-muted)]" data-testid="team-issues-count">
         {t('issues.count').replace('{count}', String(issues.length))}
       </div>
     </section>
@@ -897,10 +907,10 @@ function IssueBoard({
         const columnIssues = issues.filter((issue) => issue.status === status)
 
         return (
-          <div className="min-h-[420px] rounded-lg border border-slate-200 bg-white shadow-[0_22px_54px_rgba(30,52,88,0.06)]" key={status}>
-            <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+          <div className="workbench-panel min-h-[420px]" key={status}>
+            <div className="flex items-center justify-between gap-3 border-b border-[var(--workbench-border)] px-4 py-3">
               <IssueStatusBadge status={status} t={t} />
-              <span className="text-sm font-black text-[#526381]">{columnIssues.length}</span>
+              <span className="text-sm font-semibold text-[var(--workbench-muted)]">{columnIssues.length}</span>
             </div>
             <div className="grid gap-3 p-3">
               {columnIssues.length > 0 ? (
@@ -908,23 +918,23 @@ function IssueBoard({
                   <button
                     className={`rounded-lg border p-4 text-left transition ${
                       selectedIssueId === issue.id
-                        ? 'border-blue-400 bg-blue-50'
-                        : 'border-slate-200 bg-[#fbfdff] hover:border-blue-300 hover:bg-blue-50/30'
+                        ? 'border-[#99d7cf] bg-[#e5f7f4]'
+                        : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)]'
                     }`}
                     key={issue.id}
                     onClick={() => onSelectIssue?.(issue.id)}
                     type="button"
                   >
-                    <p className="text-sm font-black leading-6 text-[#0d1833]">{resolveIssueTitle(issue, t)}</p>
-                    <p className="mt-2 text-xs font-bold text-[#526381]">{resolveAssignedProjectName(issue, activeTeam, t)}</p>
+                    <p className="text-sm font-semibold leading-6 text-[var(--workbench-text)]">{resolveIssueTitle(issue, t)}</p>
+                    <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">{resolveAssignedProjectName(issue, activeTeam, t)}</p>
                     <div className="mt-4 flex flex-wrap items-center gap-2">
                       <IssuePriorityBadge priority={issue.priority} t={t} />
-                      <span className="text-xs font-black text-[#526381]">{issue.dueDate}</span>
+                      <span className="text-xs font-semibold text-[var(--workbench-muted)]">{issue.dueDate}</span>
                     </div>
                   </button>
                 ))
               ) : (
-                <p className="rounded-lg border border-dashed border-slate-300 px-4 py-8 text-center text-sm font-bold text-[#526381]">
+                <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
                   {t('tasks.board.empty')}
                 </p>
               )}
@@ -959,8 +969,8 @@ function IssueDetailPane({
 }) {
   if (!issue) {
     return (
-      <aside className="min-h-0 min-w-0 border-l border-slate-200 bg-white px-6 py-7 max-[1080px]:border-l-0 max-[1080px]:border-t">
-        <p className="text-sm font-bold text-[#526381]">{t('issues.detail.empty')}</p>
+      <aside className="workbench-detail-pane min-h-0 min-w-0 px-6 py-7 max-[1080px]:border-l-0 max-[1080px]:border-t">
+        <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('issues.detail.empty')}</p>
       </aside>
     )
   }
@@ -969,7 +979,7 @@ function IssueDetailPane({
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === issue.assigneeUserId)
 
   return (
-    <aside className="min-h-0 min-w-0 border-l border-slate-200 bg-white px-6 py-7 max-[1080px]:border-l-0 max-[1080px]:border-t">
+    <aside className="workbench-detail-pane min-h-0 min-w-0 px-6 py-7 max-[1080px]:border-l-0 max-[1080px]:border-t">
       <form
         className="grid min-w-0 gap-4"
         key={issue.id}
@@ -999,28 +1009,37 @@ function IssueDetailPane({
           void onUpdateIssue?.(issue.id, nextIssueInput)
         }}
       >
+        <div className="flex min-w-0 items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="workbench-eyebrow">{t('tasks.detail.title')}</p>
+            <p className="mt-1 truncate text-lg font-semibold leading-6 text-[var(--workbench-text)]">
+              {resolveIssueTitle(issue, t)}
+            </p>
+          </div>
+          <IssuePriorityBadge priority={issue.priority} t={t} />
+        </div>
         <fieldset className="contents" disabled={isLegacyIssue}>
-          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('issues.column.title')}
-            <input className="w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-xl font-black outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={resolveIssueTitle(issue, t)} name="title" required />
+            <input className="workbench-input w-full min-w-0 px-3 py-2 text-lg font-semibold disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={resolveIssueTitle(issue, t)} name="title" required />
           </label>
-          <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+          <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('issues.create.description')}
-            <textarea className="min-h-28 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.description} name="description" />
+            <textarea className="workbench-input min-h-28 w-full min-w-0 px-3 py-2 leading-6 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.description} name="description" />
           </label>
-          <div className="grid grid-cols-1 gap-3">
-            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+          <div className="workbench-panel-muted grid grid-cols-1 gap-3 p-3">
+            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
               {t('issues.create.project')}
-              <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.assignedProjectId ?? ''} name="assignedProjectId">
+              <select className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.assignedProjectId ?? ''} name="assignedProjectId">
                 <option value="">{t('issues.project.unassigned')}</option>
                 {projects.map((project) => (
                   <option key={project.id} value={project.id}>{project.name}</option>
                 ))}
               </select>
             </label>
-            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
               {t('issues.create.assignee')}
-              <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.assigneeUserId} name="assigneeUserId">
+              <select className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.assigneeUserId} name="assigneeUserId">
                 {!hasSelectedAssigneeOption ? (
                   <option value={issue.assigneeUserId}>{resolveIssueAssignee(issue)}</option>
                 ) : null}
@@ -1029,36 +1048,36 @@ function IssueDetailPane({
                 ))}
               </select>
             </label>
-            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
               {t('tasks.column.status')}
-              <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.status} name="status">
+              <select className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.status} name="status">
                 {issueStatuses.map((status) => (
                   <option key={status} value={status}>{t(`tasks.status.${status}`)}</option>
                 ))}
               </select>
             </label>
-            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
               {t('tasks.column.priority')}
-              <select className="h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.priority} name="priority">
+              <select className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.priority} name="priority">
                 {issuePriorities.map((priority) => (
                   <option key={priority} value={priority}>{t(`tasks.priority.${priority}`)}</option>
                 ))}
               </select>
             </label>
-            <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
               {t('tasks.column.dueDate')}
-              <input className="h-11 w-full min-w-0 rounded-lg border border-slate-300 px-3 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" defaultValue={issue.dueDate.replaceAll('/', '-')} name="dueDate" type="date" />
+              <input className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.dueDate.replaceAll('/', '-')} name="dueDate" type="date" />
             </label>
           </div>
         </fieldset>
-        <button className="h-11 rounded-lg bg-blue-600 px-4 text-sm font-black text-white transition hover:bg-blue-500 disabled:bg-slate-300" disabled={isLegacyIssue} type="submit">
+        <button className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300" disabled={isLegacyIssue} type="submit">
           {t('issues.detail.save')}
         </button>
-        {isLegacyIssue ? <p className="text-sm font-bold text-[#526381]">{t('issues.detail.readOnlyLegacy')}</p> : null}
+        {isLegacyIssue ? <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('issues.detail.readOnlyLegacy')}</p> : null}
         {detailErrorMessage ? <p className="text-sm font-bold text-red-600">{detailErrorMessage}</p> : null}
       </form>
       <form
-        className="mt-7 grid gap-3 border-t border-slate-200 pt-6"
+        className="mt-7 grid gap-3 border-t border-[var(--workbench-border)] pt-6"
         onSubmit={(event) => {
           event.preventDefault()
 
@@ -1078,34 +1097,34 @@ function IssueDetailPane({
           void onCreateComment?.(issue.id, body).then(() => form.reset())
         }}
       >
-        <label className="grid min-w-0 gap-2 text-sm font-black text-[#263550]">
+        <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
           {t('issues.comment.title')}
-          <textarea className="min-h-20 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:bg-slate-50 disabled:text-slate-500" disabled={isLegacyIssue} name="body" required />
+          <textarea className="workbench-input min-h-20 w-full min-w-0 px-3 py-2 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" disabled={isLegacyIssue} name="body" required />
         </label>
-        <button className="h-10 justify-self-start rounded-lg border border-slate-300 bg-white px-4 text-sm font-black text-[#263550] transition hover:border-blue-500 hover:text-blue-600 disabled:border-slate-200 disabled:text-slate-400" disabled={isLegacyIssue} type="submit">
+        <button className="workbench-button-secondary h-9 justify-self-start px-4 disabled:border-slate-200 disabled:text-slate-400" disabled={isLegacyIssue} type="submit">
           {t('issues.comment.submit')}
         </button>
       </form>
-      <section className="mt-7 border-t border-slate-200 pt-6">
-        <h2 className="text-sm font-black uppercase tracking-normal text-[#69758a]">{t('issues.comment.title')}</h2>
+      <section className="mt-7 border-t border-[var(--workbench-border)] pt-6">
+        <h2 className="workbench-eyebrow text-[var(--workbench-muted)]">{t('issues.comment.title')}</h2>
         <div className="mt-3 grid gap-3">
           {comments.length > 0 ? (
             comments.map((comment) => (
-              <article className="rounded-lg bg-[#f8fbff] p-3" key={comment.id}>
-                <p className="text-xs font-black text-[#526381]">{comment.actorUserId}</p>
-                <p className="mt-2 whitespace-pre-wrap text-sm font-bold leading-6 text-[#263550]">{comment.body}</p>
+              <article className="workbench-panel-muted p-3" key={comment.id}>
+                <p className="text-xs font-semibold text-[var(--workbench-muted)]">{comment.actorUserId}</p>
+                <p className="mt-2 whitespace-pre-wrap text-sm font-medium leading-6 text-[var(--workbench-text)]">{comment.body}</p>
               </article>
             ))
           ) : (
-            <p className="text-sm font-bold text-[#526381]">{t('issues.comment.empty')}</p>
+            <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('issues.comment.empty')}</p>
           )}
         </div>
       </section>
-      <section className="mt-7 border-t border-slate-200 pt-6">
-        <h2 className="text-sm font-black uppercase tracking-normal text-[#69758a]">{t('issues.activity.title')}</h2>
+      <section className="mt-7 border-t border-[var(--workbench-border)] pt-6">
+        <h2 className="workbench-eyebrow text-[var(--workbench-muted)]">{t('issues.activity.title')}</h2>
         <div className="mt-3 grid gap-2">
           {activity.map((item) => (
-            <p className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-bold text-[#526381]" key={item.id}>
+            <p className="rounded-lg border border-[var(--workbench-border)] px-3 py-2 text-sm font-medium text-[var(--workbench-muted)]" key={item.id}>
               {item.summary}
             </p>
           ))}
@@ -1184,14 +1203,14 @@ function formatProjectMemberOption(member: ProjectMember) {
 
 function IssueStatusBadge({ status, t }: { status: TaskStatus; t: (key: MessageKey) => string }) {
   const classes: Record<TaskStatus, string> = {
-    done: 'bg-emerald-50 text-emerald-700 ring-emerald-200',
-    'in-progress': 'bg-blue-50 text-blue-700 ring-blue-200',
-    review: 'bg-amber-50 text-amber-700 ring-amber-200',
-    todo: 'bg-slate-100 text-slate-700 ring-slate-200',
+    done: 'workbench-badge-success',
+    'in-progress': 'workbench-badge-primary',
+    review: 'workbench-badge-warning',
+    todo: 'workbench-badge',
   }
 
   return (
-    <span className={`inline-flex rounded-full px-3 py-1 text-xs font-black ring-1 ${classes[status]}`}>
+    <span className={classes[status]}>
       {t(`tasks.status.${status}`)}
     </span>
   )
@@ -1199,13 +1218,13 @@ function IssueStatusBadge({ status, t }: { status: TaskStatus; t: (key: MessageK
 
 function IssuePriorityBadge({ priority, t }: { priority: TaskPriority; t: (key: MessageKey) => string }) {
   const classes: Record<TaskPriority, string> = {
-    high: 'bg-red-50 text-red-700 ring-red-200',
-    low: 'bg-slate-100 text-slate-700 ring-slate-200',
-    medium: 'bg-indigo-50 text-indigo-700 ring-indigo-200',
+    high: 'workbench-badge-danger',
+    low: 'workbench-badge-success',
+    medium: 'workbench-badge-warning',
   }
 
   return (
-    <span className={`inline-flex rounded-full px-3 py-1 text-xs font-black ring-1 ${classes[priority]}`}>
+    <span className={classes[priority]}>
       {t(`tasks.priority.${priority}`)}
     </span>
   )

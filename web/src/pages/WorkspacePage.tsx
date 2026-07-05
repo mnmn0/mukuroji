@@ -509,7 +509,7 @@ export function WorkspaceScreen({
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
 
   return (
-    <main className="flex h-svh min-h-0 overflow-hidden bg-[#f5f8fc] text-[#0d1833]">
+    <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
       <Sidebar
         activeNavId={metadata.activeNavId}
         activeTeamId={metadata.activeTeamViewId ? activeTeam?.id : undefined}
@@ -559,8 +559,8 @@ export function WorkspaceScreen({
         />
       </MobileSidebarDrawer>
 
-      <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="flex-none border-b border-slate-200 bg-white px-[clamp(20px,3vw,34px)] py-4">
+      <section className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-4">
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
             <div className="flex min-w-0 items-start gap-3">
               <MobileSidebarButton
@@ -568,13 +568,13 @@ export function WorkspaceScreen({
                 onClick={() => setIsMobileSidebarOpen(true)}
               />
               <div className="min-w-0">
-                <p className="text-xs font-black uppercase tracking-normal text-blue-600">
+                <p className="workbench-eyebrow">
                   {t(metadata.eyebrowKey)}
                 </p>
-                <h1 className="mt-2 text-page-title font-black text-[#0d1833]">
+                <h1 className="workbench-title mt-2 text-page-title">
                   {formatTeamText(t(metadata.titleKey), activeTeam?.name)}
                 </h1>
-                <p className="mt-2 max-w-[760px] text-sm font-bold leading-6 text-[#526381]">
+                <p className="workbench-description mt-2 max-w-[760px]">
                   {formatTeamText(t(metadata.descriptionKey), activeTeam?.name)}
                 </p>
               </div>
@@ -582,18 +582,18 @@ export function WorkspaceScreen({
 
             <div className="flex flex-none items-center gap-3">
               <div className="hidden text-right max-[720px]:sr-only min-[721px]:block">
-                <p className="text-xs font-black uppercase tracking-normal text-[#69758a]">
+                <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
                   {t('workspace.user.label')}
                 </p>
-                <p className="mt-1 max-w-[220px] truncate text-sm font-black text-[#0d1833]">
+                <p className="mt-1 max-w-[220px] truncate text-sm font-semibold text-[var(--workbench-text)]">
                   {userLabel}
                 </p>
               </div>
-              <div className="grid h-10 w-10 place-items-center rounded-full bg-blue-100 text-sm font-black text-blue-700">
+              <div className="grid h-10 w-10 place-items-center rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-sm font-semibold text-[var(--workbench-primary)]">
                 {userInitial}
               </div>
               <button
-                className="min-h-10 rounded-lg border border-slate-300 bg-white px-4 text-sm font-black text-[#0d1833] shadow-[0_8px_18px_rgba(30,52,88,0.04)] transition hover:border-blue-500 hover:text-blue-600"
+                className="workbench-button-secondary min-h-10 px-4"
                 type="button"
                 onClick={onLogout}
               >
@@ -604,7 +604,7 @@ export function WorkspaceScreen({
         </header>
 
         {isLoading ? (
-          <div className="grid min-h-0 flex-1 place-items-center px-6 text-sm font-bold text-[#526381]">
+          <div className="grid min-h-0 flex-1 place-items-center px-6 text-sm font-medium text-[var(--workbench-muted)]">
             {t('workspace.loading')}
           </div>
         ) : (
@@ -655,7 +655,7 @@ function WorkspaceBody({
   view: WorkspaceView
 }) {
   return (
-    <div className="px-[clamp(20px,3vw,34px)] py-6">
+    <div className="px-[clamp(20px,3vw,34px)] py-5">
       {view === 'home' ? (
         <HomeView
           summary={summary}
@@ -726,14 +726,14 @@ function HomeView({
   return (
     <div className="grid gap-6">
       <div className="grid grid-cols-4 gap-4 max-[1180px]:grid-cols-2 max-[680px]:grid-cols-1">
-        <MetricCard label={t('workspace.metric.activeProjects')} value={summary.projects} tone="blue" />
+        <MetricCard label={t('workspace.metric.activeProjects')} value={summary.projects} tone="teal" />
         <MetricCard label={t('workspace.metric.openTasks')} value={summary.tasks} tone="emerald" />
         <MetricCard label={t('workspace.metric.blocked')} value={summary.blocked} tone="red" />
         <MetricCard label={t('workspace.metric.teams')} value={teams.length} tone="amber" />
       </div>
 
       <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(320px,0.8fr)] gap-6 max-[1080px]:grid-cols-1">
-        <section className="rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
+        <section className="workbench-panel">
           <SectionHeader title={t('workspace.home.focusTitle')} meta={t('workspace.home.focusMeta')} />
           <div className="divide-y divide-slate-100">
             {nextTasks.map((task) => (
@@ -747,19 +747,19 @@ function HomeView({
           </div>
         </section>
 
-        <section className="rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
+        <section className="workbench-panel">
           <SectionHeader title={t('workspace.home.activityTitle')} meta={t('workspace.home.activityMeta')} />
           <div className="grid gap-3 px-5 pb-5">
             {activityTasks.map((task) => (
               <button
-                className="rounded-lg border border-slate-200 bg-[#fbfdff] p-4 text-left transition hover:border-blue-300 hover:bg-blue-50/30 disabled:hover:border-slate-200 disabled:hover:bg-[#fbfdff]"
+                className="rounded-lg border border-[var(--workbench-border)] bg-white p-4 text-left transition hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)] disabled:hover:border-[var(--workbench-border)] disabled:hover:bg-white"
                 disabled={!onOpenTask || !isOpenableWorkspaceTask(task)}
                 key={createWorkspaceTaskKey(task)}
                 onClick={() => onOpenTask?.(task)}
                 type="button"
               >
-                <p className="text-sm font-black text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
-                <p className="mt-1 text-sm font-bold leading-6 text-[#526381]">
+                <p className="text-sm font-semibold text-[var(--workbench-text)]">{resolveTaskTitle(task, t)}</p>
+                <p className="mt-1 text-sm font-medium leading-6 text-[var(--workbench-muted)]">
                   {resolveTaskAssignee(task, t)} / {t(`tasks.status.${task.status}`)} / {task.dueDate}
                 </p>
               </button>
@@ -866,7 +866,7 @@ function MyTasksView({
     <div className="grid gap-4">
       {taskMoveErrorMessage ? (
         <p
-          className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-black text-red-700"
+          className="workbench-badge-danger rounded-lg px-4 py-3 text-sm"
           data-testid="my-tasks-move-error"
           role="alert"
         >
@@ -885,8 +885,8 @@ function MyTasksView({
           return (
             <section
               aria-label={t(`tasks.status.${status}`)}
-              className={`min-h-[420px] min-w-[260px] rounded-lg border bg-slate-50 shadow-[0_18px_42px_rgba(30,52,88,0.05)] transition ${
-                isDropTarget ? 'border-blue-400 bg-blue-50 ring-2 ring-blue-200' : 'border-slate-200'
+              className={`workbench-panel min-h-[420px] min-w-[260px] transition ${
+                isDropTarget ? 'border-[#99d7cf] bg-[#e5f7f4] ring-2 ring-[#99d7cf]/40' : ''
               }`}
               data-testid={`my-tasks-column-${status}`}
               key={status}
@@ -920,7 +920,7 @@ function MyTasksView({
                   )
                 })}
                 {columnTasks.length === 0 ? (
-                  <p className="rounded-lg border border-dashed border-slate-300 bg-white px-4 py-8 text-center text-sm font-bold text-[#526381]">
+                  <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] bg-white px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
                     {t('tasks.board.empty')}
                   </p>
                 ) : null}
@@ -947,7 +947,7 @@ function InboxView({
 
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-6 max-[1080px]:grid-cols-1">
-      <section className="rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
+      <section className="workbench-panel">
         <SectionHeader
           title={t('workspace.inbox.queueTitle')}
           meta={t('workspace.inbox.queueMeta').replace('{count}', String(inboxTasks.length))}
@@ -955,7 +955,7 @@ function InboxView({
         <div className="divide-y divide-slate-100">
           {inboxTasks.map((task) => (
             <button
-              className="grid w-full gap-3 p-5 text-left transition hover:bg-blue-50/40 disabled:hover:bg-transparent"
+              className="grid w-full gap-3 p-5 text-left transition hover:bg-[var(--workbench-surface-muted)] disabled:hover:bg-transparent"
               disabled={!onOpenTask || !isOpenableWorkspaceTask(task)}
               key={createWorkspaceTaskKey(task)}
               onClick={() => onOpenTask?.(task)}
@@ -963,16 +963,16 @@ function InboxView({
             >
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <p className="text-base font-black text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
-                  <p className="mt-1 text-sm font-bold leading-6 text-[#526381]">
+                  <p className="text-base font-semibold text-[var(--workbench-text)]">{resolveTaskTitle(task, t)}</p>
+                  <p className="mt-1 text-sm font-medium leading-6 text-[var(--workbench-muted)]">
                     {resolveTaskAssignee(task, t)} / {task.dueDate}
                   </p>
                 </div>
                 <div className="flex flex-wrap justify-end gap-2">
-                  <span className={`rounded-lg border px-3 py-1.5 text-xs font-black ${resolveInboxToneClassName(task)}`}>
+                  <span className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${resolveInboxToneClassName(task)}`}>
                     {t(resolveInboxReasonKey(task))}
                   </span>
-                  <span className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-[#526381]">
+                  <span className="workbench-badge">
                     {t('workspace.action.openTask')}
                   </span>
                 </div>
@@ -980,19 +980,19 @@ function InboxView({
             </button>
           ))}
           {inboxTasks.length === 0 ? (
-            <p className="px-5 py-8 text-sm font-bold text-[#526381]">
+            <p className="px-5 py-8 text-sm font-medium text-[var(--workbench-muted)]">
               {t('workspace.empty.tasks')}
             </p>
           ) : null}
         </div>
       </section>
 
-      <aside className="rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
-        <p className="text-sm font-black uppercase tracking-normal text-blue-600">
+      <aside className="workbench-panel p-5">
+        <p className="workbench-eyebrow">
           {t('workspace.inbox.sla')}
         </p>
-        <p className="mt-3 text-4xl font-black leading-none text-[#0d1833]">{responseMinutes}m</p>
-        <p className="mt-3 text-sm font-bold leading-6 text-[#526381]">
+        <p className="mt-3 text-4xl font-semibold leading-none text-[var(--workbench-text)]">{responseMinutes}m</p>
+        <p className="mt-3 text-sm font-medium leading-6 text-[var(--workbench-muted)]">
           {t('workspace.inbox.slaDescription')}
         </p>
       </aside>
@@ -1027,18 +1027,18 @@ function DashboardWorkspaceView({
   return (
     <div className="grid gap-6">
       <div className="grid grid-cols-4 gap-4 max-[1180px]:grid-cols-2 max-[680px]:grid-cols-1">
-        <MetricCard label={t('workspace.metric.activeProjects')} value={summary.projects} tone="blue" />
+        <MetricCard label={t('workspace.metric.activeProjects')} value={summary.projects} tone="teal" />
         <MetricCard label={t('workspace.metric.openTasks')} value={summary.tasks} tone="emerald" />
         <MetricCard label={t('workspace.metric.blocked')} value={summary.blocked} tone="red" />
         <MetricCard label={t('workspace.metric.deliveryRate')} value={`${calculateProjectProgress(tasks)}%`} tone="amber" />
       </div>
 
-      <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
+      <section className="workbench-table overflow-hidden">
         <SectionHeader title={t('workspace.dashboard.portfolioTitle')} meta={t('workspace.dashboard.portfolioMeta')} />
         <div className="overflow-x-auto">
           <table className="w-full min-w-[780px] border-collapse text-left">
             <thead>
-              <tr className="border-y border-slate-200 bg-[#fbfdff] text-sm font-black text-[#263550]">
+              <tr className="workbench-table-head text-left">
                 <th className="px-5 py-3" scope="col">{t('workspace.column.project')}</th>
                 <th className="px-5 py-3" scope="col">{t('workspace.column.team')}</th>
                 <th className="px-5 py-3" scope="col">{t('workspace.column.progress')}</th>
@@ -1047,9 +1047,9 @@ function DashboardWorkspaceView({
             </thead>
             <tbody>
               {projects.slice(0, 6).map((project) => (
-                <tr className="border-b border-slate-100 text-sm font-bold text-[#0d1833]" key={project.id}>
+                <tr className="border-b border-slate-100 text-sm font-medium text-[var(--workbench-text)]" key={project.id}>
                   <td className="px-5 py-4">{project.name}</td>
-                  <td className="px-5 py-4 text-[#526381]">{project.teamName}</td>
+                  <td className="px-5 py-4 text-[var(--workbench-muted)]">{project.teamName}</td>
                   <td className="px-5 py-4">
                     <ProgressBar value={project.progress} />
                   </td>
@@ -1061,7 +1061,7 @@ function DashboardWorkspaceView({
         </div>
       </section>
 
-      <section className="rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
+      <section className="workbench-panel">
         <SectionHeader
           title={t('workspace.dashboard.decisionTitle')}
           meta={t('workspace.dashboard.decisionMeta').replace('{count}', String(decisionTasks.length))}
@@ -1076,7 +1076,7 @@ function DashboardWorkspaceView({
             />
           ))}
           {decisionTasks.length === 0 ? (
-            <p className="px-5 py-8 text-sm font-bold text-[#526381]">
+            <p className="px-5 py-8 text-sm font-medium text-[var(--workbench-muted)]">
               {t('workspace.empty.tasks')}
             </p>
           ) : null}
@@ -1113,11 +1113,11 @@ function ReportsView({
             <div className="grid flex-1 gap-3" key={item.id}>
               <div className="flex h-[240px] items-end rounded-lg bg-slate-100 p-2">
                 <div
-                  className="w-full rounded-md bg-blue-600"
+                  className="w-full rounded-md bg-[var(--workbench-primary)]"
                   style={{ height: `${item.value}%` }}
                 />
               </div>
-              <p className="text-center text-sm font-black text-[#526381]">{item.label}</p>
+              <p className="text-center text-sm font-semibold text-[#526381]">{item.label}</p>
             </div>
           ))}
         </div>
@@ -1187,7 +1187,7 @@ function SettingsView({
       <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-[0_14px_32px_rgba(30,52,88,0.05)]">
         <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">
-            <h2 className="text-base font-black text-[#0d1833]">
+            <h2 className="text-base font-semibold text-[#0d1833]">
               {t('workspace.settings.displayTitle')}
             </h2>
             <p className="mt-2 max-w-[680px] text-sm font-bold leading-6 text-[#526381]">
@@ -1203,10 +1203,10 @@ function SettingsView({
             {fontSizePreferenceOptions.map((preference) => (
               <button
                 aria-pressed={fontSizePreference === preference}
-                className={`px-4 text-sm font-black transition ${
+                className={`px-4 text-sm font-semibold transition ${
                   fontSizePreference === preference
-                    ? 'bg-blue-600 text-white'
-                    : 'text-[#263550] hover:bg-blue-50 hover:text-blue-700'
+                    ? 'bg-[var(--workbench-primary)] text-white'
+                    : 'text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)]'
                 }`}
                 data-testid={`font-size-preference-${preference}`}
                 key={preference}
@@ -1219,7 +1219,7 @@ function SettingsView({
           </div>
         </div>
         <div className="mt-5 rounded-lg border border-slate-200 bg-[#fbfdff] p-4">
-          <p className="text-sm font-black text-[#0d1833]">
+          <p className="text-sm font-semibold text-[#0d1833]">
             {t('workspace.settings.fontSizeTitle')}
           </p>
           <p className="mt-2 text-sm font-bold leading-6 text-[#526381]">
@@ -1260,7 +1260,7 @@ function TeamOverviewView({
           label={t('workspace.metric.projects')}
           testId="team-overview-projects"
           value={projects.length}
-          tone="blue"
+          tone="teal"
         />
         <MetricCard
           label={t('workspace.metric.openTasks')}
@@ -1281,8 +1281,8 @@ function TeamOverviewView({
           {projects.map((project) => (
             <div className="grid gap-3 rounded-lg border border-slate-200 p-4" key={project.id}>
               <div className="flex items-center justify-between gap-4">
-                <p className="font-black text-[#0d1833]">{project.name}</p>
-                <span className="text-sm font-black text-blue-600">
+                <p className="font-semibold text-[#0d1833]">{project.name}</p>
+                <span className="text-sm font-semibold text-[var(--workbench-primary)]">
                   {calculateProjectProgress(filterTasksByProjectIds(tasks, [project.id]))}%
                 </span>
               </div>
@@ -1314,16 +1314,16 @@ function TeamMembersView({
         {members.map((member) => (
           <div className="grid grid-cols-[1fr_160px_220px] items-center gap-5 p-5 max-[820px]:grid-cols-1" key={member.id}>
             <div className="min-w-0">
-              <p className="text-sm font-black text-[#0d1833]">{member.name}</p>
+              <p className="text-sm font-semibold text-[#0d1833]">{member.name}</p>
               <p className="mt-1 text-sm font-bold text-[#526381]">
                 {t('workspace.members.taskCount').replace('{count}', String(member.taskCount))}
               </p>
             </div>
             <div>
-              <p className="text-xs font-black uppercase tracking-normal text-[#69758a]">
+              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#69758a]">
                 {t('workspace.members.load')}
               </p>
-              <p className="mt-1 text-xl font-black text-[#0d1833]">{member.load}%</p>
+              <p className="mt-1 text-xl font-semibold text-[#0d1833]">{member.load}%</p>
             </div>
             <p className="text-sm font-bold leading-6 text-[#526381]">
               {t('workspace.members.openTaskCount').replace('{count}', String(member.openTaskCount))}
@@ -1348,23 +1348,23 @@ function MetricCard({
 }: {
   label: string
   testId?: string
-  tone: 'amber' | 'blue' | 'emerald' | 'red'
+  tone: 'amber' | 'teal' | 'emerald' | 'red'
   value: number | string
 }) {
   const toneClassNames = {
     amber: 'bg-amber-50 text-amber-700 border-amber-200',
-    blue: 'bg-blue-50 text-blue-700 border-blue-200',
+    teal: 'bg-[#e5f7f4] text-[var(--workbench-primary)] border-[#99d7cf]',
     emerald: 'bg-emerald-50 text-emerald-700 border-emerald-200',
     red: 'bg-red-50 text-red-700 border-red-200',
   } as const
 
   return (
     <section
-      className={`rounded-lg border bg-white p-4 shadow-[0_14px_32px_rgba(30,52,88,0.05)] ${toneClassNames[tone]}`}
+      className={`rounded-lg border bg-white p-4 shadow-[0_1px_2px_rgba(23,32,29,0.04)] ${toneClassNames[tone]}`}
       data-testid={testId}
     >
-      <p className="text-xs font-black text-[#263550]">{label}</p>
-      <p className="mt-2 text-3xl font-black leading-none text-current">{value}</p>
+      <p className="text-xs font-semibold text-[var(--workbench-text)]">{label}</p>
+      <p className="mt-2 text-3xl font-semibold leading-none text-current">{value}</p>
     </section>
   )
 }
@@ -1372,8 +1372,8 @@ function MetricCard({
 function SectionHeader({ meta, title }: { meta?: string; title: string }) {
   return (
     <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-5 py-4">
-      <h2 className="text-base font-black text-[#0d1833]">{title}</h2>
-      {meta ? <p className="text-sm font-bold text-[#526381]">{meta}</p> : null}
+      <h2 className="text-base font-semibold text-[var(--workbench-text)]">{title}</h2>
+      {meta ? <p className="text-sm font-medium text-[var(--workbench-muted)]">{meta}</p> : null}
     </div>
   )
 }
@@ -1391,18 +1391,18 @@ function TaskListRow({
 
   return (
     <button
-      className="grid w-full grid-cols-[1fr_140px_110px_96px] items-center gap-4 p-5 text-left text-sm font-bold transition hover:bg-blue-50/40 disabled:hover:bg-transparent max-[900px]:grid-cols-1"
+      className="grid w-full grid-cols-[1fr_140px_110px_96px] items-center gap-4 p-5 text-left text-sm font-medium transition hover:bg-[var(--workbench-surface-muted)] disabled:hover:bg-transparent max-[900px]:grid-cols-1"
       disabled={!canOpenTask}
       onClick={() => onOpenTask?.(task)}
       type="button"
     >
       <div className="min-w-0">
-        <p className="truncate text-sm font-black text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
-        <p className="mt-1 text-[#526381]">{resolveTaskAssignee(task, t)}</p>
+        <p className="truncate text-sm font-semibold text-[var(--workbench-text)]">{resolveTaskTitle(task, t)}</p>
+        <p className="mt-1 text-[var(--workbench-muted)]">{resolveTaskAssignee(task, t)}</p>
       </div>
       <StatusPill status={task.status} t={t} />
-      <span className="text-[#526381]">{task.dueDate}</span>
-      <span className="justify-self-end rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-[#526381] max-[900px]:justify-self-start">
+      <span className="text-[var(--workbench-muted)]">{task.dueDate}</span>
+      <span className="workbench-badge justify-self-end max-[900px]:justify-self-start">
         {t('workspace.action.openTask')}
       </span>
     </button>
@@ -1439,15 +1439,15 @@ function CompactTaskCard({
     <article
       aria-grabbed={isDragging || undefined}
       className={`rounded-lg border border-slate-200 bg-white p-4 transition ${
-        draggable ? 'cursor-grab hover:border-blue-300 hover:shadow-[0_14px_30px_rgba(30,52,88,0.08)] active:cursor-grabbing' : ''
-      } ${isDragging ? 'opacity-50 ring-2 ring-blue-300' : ''} ${isMoving ? 'opacity-70' : ''}`}
+        draggable ? 'cursor-grab hover:border-[#99d7cf] hover:shadow-[0_1px_2px_rgba(23,32,29,0.06)] active:cursor-grabbing' : ''
+      } ${isDragging ? 'opacity-50 ring-2 ring-[#99d7cf]' : ''} ${isMoving ? 'opacity-70' : ''}`}
       data-testid={testId}
       draggable={draggable}
       onDragEnd={onDragEnd}
       onDragStart={onDragStart}
     >
-      <p className="text-sm font-black leading-6 text-[#0d1833]">{resolveTaskTitle(task, t)}</p>
-      <p className="mt-2 text-xs font-black uppercase tracking-normal text-[#526381]">{task.dueDate}</p>
+      <p className="text-sm font-semibold leading-6 text-[var(--workbench-text)]">{resolveTaskTitle(task, t)}</p>
+      <p className="mt-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{task.dueDate}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <StatusPill status={task.status} t={t} />
         <PriorityPill priority={task.priority} t={t} />
@@ -1455,7 +1455,7 @@ function CompactTaskCard({
       {onStatusChange ? (
         <select
           aria-label={statusSelectLabel}
-          className="mt-3 h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs font-black text-[#263550] outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+          className="workbench-input mt-3 h-9 w-full px-3 text-xs disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
           data-testid={testId ? `${testId}-status-select` : undefined}
           disabled={isMoving}
           value={task.status}
@@ -1480,14 +1480,14 @@ function CompactTaskCard({
 
 function StatusPill({ status, t }: { status: TaskStatus; t: (key: MessageKey) => string }) {
   const statusClasses: Record<TaskStatus, string> = {
-    'in-progress': 'bg-blue-100 text-blue-700',
-    review: 'bg-amber-100 text-amber-700',
-    todo: 'bg-slate-100 text-[#263550]',
-    done: 'bg-emerald-100 text-emerald-700',
+    'in-progress': 'workbench-badge-primary',
+    review: 'workbench-badge-warning',
+    todo: 'workbench-badge',
+    done: 'workbench-badge-success',
   }
 
   return (
-    <span className={`inline-flex w-fit rounded-lg px-3 py-1.5 text-xs font-black ${statusClasses[status]}`}>
+    <span className={statusClasses[status]}>
       {t(`tasks.status.${status}`)}
     </span>
   )
@@ -1495,13 +1495,13 @@ function StatusPill({ status, t }: { status: TaskStatus; t: (key: MessageKey) =>
 
 function PriorityPill({ priority, t }: { priority: TaskPriority; t: (key: MessageKey) => string }) {
   const priorityClasses: Record<TaskPriority, string> = {
-    high: 'bg-red-100 text-red-700',
-    medium: 'bg-amber-100 text-amber-700',
-    low: 'bg-emerald-100 text-emerald-700',
+    high: 'workbench-badge-danger',
+    medium: 'workbench-badge-warning',
+    low: 'workbench-badge-success',
   }
 
   return (
-    <span className={`inline-flex w-fit rounded-lg px-3 py-1.5 text-xs font-black ${priorityClasses[priority]}`}>
+    <span className={priorityClasses[priority]}>
       {t(`tasks.priority.${priority}`)}
     </span>
   )
@@ -1510,7 +1510,7 @@ function PriorityPill({ priority, t }: { priority: TaskPriority; t: (key: Messag
 function ProgressBar({ value }: { value: number }) {
   return (
     <div className="h-2 overflow-hidden rounded-full bg-slate-200">
-      <div className="h-full rounded-full bg-blue-600" style={{ width: `${Math.max(0, Math.min(100, value))}%` }} />
+      <div className="h-full rounded-full bg-[var(--workbench-primary)]" style={{ width: `${Math.max(0, Math.min(100, value))}%` }} />
     </div>
   )
 }
@@ -1526,7 +1526,7 @@ function InfoGrid({
     <div className="grid grid-cols-2 gap-5 max-[900px]:grid-cols-1">
       {items.map(([titleKey, descriptionKey]) => (
         <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.05)]" key={titleKey}>
-          <h2 className="text-lg font-black text-[#0d1833]">{t(titleKey)}</h2>
+          <h2 className="text-lg font-semibold text-[#0d1833]">{t(titleKey)}</h2>
           <p className="mt-3 text-sm font-bold leading-6 text-[#526381]">{t(descriptionKey)}</p>
         </section>
       ))}
@@ -1732,7 +1732,7 @@ function resolveInboxToneClassName(task: ProjectTask) {
     return 'border-amber-200 bg-amber-50 text-amber-700'
   }
 
-  return 'border-blue-200 bg-blue-50 text-blue-700'
+  return 'border-[#99d7cf] bg-[#e5f7f4] text-[var(--workbench-primary)]'
 }
 
 function resolveInboxReasonKey(task: ProjectTask): MessageKey {

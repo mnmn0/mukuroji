@@ -258,7 +258,7 @@ export function ProjectPermissionsPanel({
                 </p>
               </div>
               {isSystemAdmin ? (
-                <span className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+                <span className="workbench-badge-primary">
                   {t('workspace.permissions.systemAdmin')}
                 </span>
               ) : null}
@@ -319,7 +319,7 @@ export function ProjectPermissionsPanel({
                   {!isUsersLoading && users.length === 0 ? <span>{t('workspace.permissions.usersEmpty')}</span> : null}
                   {usersNextToken ? (
                     <button
-                      className="min-h-9 rounded-md border border-[#d3d8df] bg-white px-3 text-xs font-semibold text-[#1c1d1f] transition hover:border-[#2563eb] hover:text-[#2563eb] disabled:cursor-not-allowed disabled:text-[#b5bdc9]"
+                      className="min-h-9 rounded-md border border-[#d3d8df] bg-white px-3 text-xs font-semibold text-[#1c1d1f] transition hover:border-[var(--workbench-primary)] hover:text-[var(--workbench-primary)] disabled:cursor-not-allowed disabled:text-[#b5bdc9]"
                       data-testid="permissions-load-more-users"
                       disabled={isLoadingMoreUsers}
                       type="button"
