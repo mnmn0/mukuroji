@@ -15,6 +15,7 @@ fi
 FLOCI_PORT="${FLOCI_PORT:-4566}"
 ENDPOINT_URL="${AWS_ENDPOINT_URL:-${COGNITO_ENDPOINT:-http://localhost:$FLOCI_PORT}}"
 PUBLIC_ENDPOINT_URL="${MUKUROJI_PUBLIC_FLOCI_ENDPOINT:-${COGNITO_ENDPOINT:-http://localhost:$FLOCI_PORT}}"
+PUBLIC_ENDPOINT_URL="${PUBLIC_ENDPOINT_URL%/}"
 LAMBDA_FLOCI_ENDPOINT="${MUKUROJI_LAMBDA_FLOCI_ENDPOINT:-http://floci:4566}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-000000000000}"
@@ -24,8 +25,11 @@ STAGE_NAME="${MUKUROJI_BACKEND_STAGE_NAME:-dev}"
 DASHBOARD_TABLE="${MUKUROJI_DASHBOARD_TABLE:-mukuroji-dashboard-local}"
 PROJECT_TASKS_TABLE="${MUKUROJI_PROJECT_TASKS_TABLE:-mukuroji-project-tasks-v2-local}"
 PROJECT_DIRECTORY_TABLE="${MUKUROJI_PROJECT_DIRECTORY_TABLE:-mukuroji-project-directory-local}"
+WORKSPACE_DIRECTORY_ID="${MUKUROJI_WORKSPACE_DIRECTORY_ID:-${MUKUROJI_PROJECT_DIRECTORY_ID:-workspace#mukuroji-local}}"
 POOL_ID="${COGNITO_USER_POOL_ID:-us-east-1_mukuroji}"
 CLIENT_ID="${COGNITO_CLIENT_ID:-}"
+COGNITO_ISSUER="${COGNITO_ISSUER:-$PUBLIC_ENDPOINT_URL/$POOL_ID}"
+COGNITO_ISSUER="${COGNITO_ISSUER%/}"
 ZIP_PATH="$GENERATED_DIR/backend-lambda.zip"
 BUNDLE_DIR="$ROOT_DIR/server/dist/lambda"
 ROLE_ARN="arn:aws:iam::$AWS_ACCOUNT_ID:role/mukuroji-lambda-local"
@@ -43,16 +47,17 @@ is_missing() {
   [ -z "$1" ] || [ "$1" = "None" ]
 }
 
+if is_missing "$CLIENT_ID"; then
+  echo "COGNITO_CLIENT_ID is required. Run the Floci ready hook before deploying the backend." >&2
+  exit 2
+fi
+
 mkdir -p "$GENERATED_DIR"
 
 (cd "$ROOT_DIR" && bun run server:build:lambda)
 (cd "$BUNDLE_DIR" && zip -q "$ZIP_PATH" index.mjs)
 
-FUNCTION_ENV="Variables={MUKUROJI_DASHBOARD_TABLE=$DASHBOARD_TABLE,MUKUROJI_PROJECT_TASKS_TABLE=$PROJECT_TASKS_TABLE,MUKUROJI_PROJECT_DIRECTORY_TABLE=$PROJECT_DIRECTORY_TABLE,COGNITO_USER_POOL_ID=$POOL_ID,COGNITO_ENDPOINT=$LAMBDA_FLOCI_ENDPOINT,DYNAMODB_ENDPOINT=$LAMBDA_FLOCI_ENDPOINT,AWS_REGION=$AWS_REGION"
-if [ -n "$CLIENT_ID" ]; then
-  FUNCTION_ENV="$FUNCTION_ENV,COGNITO_CLIENT_ID=$CLIENT_ID"
-fi
-FUNCTION_ENV="$FUNCTION_ENV}"
+FUNCTION_ENV="Variables={MUKUROJI_DASHBOARD_TABLE=$DASHBOARD_TABLE,MUKUROJI_PROJECT_TASKS_TABLE=$PROJECT_TASKS_TABLE,MUKUROJI_PROJECT_DIRECTORY_TABLE=$PROJECT_DIRECTORY_TABLE,MUKUROJI_WORKSPACE_DIRECTORY_ID=$WORKSPACE_DIRECTORY_ID,MUKUROJI_PROJECT_DIRECTORY_ID=$WORKSPACE_DIRECTORY_ID,COGNITO_USER_POOL_ID=$POOL_ID,COGNITO_CLIENT_ID=$CLIENT_ID,COGNITO_ENDPOINT=$LAMBDA_FLOCI_ENDPOINT,COGNITO_ISSUER=$COGNITO_ISSUER,DYNAMODB_ENDPOINT=$LAMBDA_FLOCI_ENDPOINT,AWS_REGION=$AWS_REGION}"
 
 if aws_local lambda get-function --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then
   aws_local lambda update-function-code \
@@ -128,22 +133,47 @@ aws_local apigateway put-integration \
   --uri "$INTEGRATION_URI" \
   >/dev/null
 
-aws_local lambda add-permission \
+if ! permission_error="$(aws_local lambda add-permission \
   --function-name "$FUNCTION_NAME" \
   --statement-id "$FUNCTION_NAME-apigateway" \
   --action lambda:InvokeFunction \
   --principal apigateway.amazonaws.com \
-  >/dev/null 2>&1 || true
+  2>&1)"; then
+  case "$permission_error" in
+    *ResourceConflictException* | *"already exists"*) ;;
+    *)
+      echo "$permission_error" >&2
+      exit 1
+      ;;
+  esac
+fi
 
-aws_local apigateway create-deployment \
+DEPLOYMENT_ID="$(aws_local apigateway create-deployment \
   --rest-api-id "$API_ID" \
-  --stage-name "$STAGE_NAME" \
-  >/dev/null
+  --query id \
+  --output text)"
 
-API_BASE_URL="$PUBLIC_ENDPOINT_URL/restapis/$API_ID/$STAGE_NAME/_user_request_/api"
+if aws_local apigateway get-stage \
+  --rest-api-id "$API_ID" \
+  --stage-name "$STAGE_NAME" >/dev/null 2>&1; then
+  aws_local apigateway update-stage \
+    --rest-api-id "$API_ID" \
+    --stage-name "$STAGE_NAME" \
+    --patch-operations "op=replace,path=/deploymentId,value=$DEPLOYMENT_ID" \
+    >/dev/null
+else
+  aws_local apigateway create-stage \
+    --rest-api-id "$API_ID" \
+    --stage-name "$STAGE_NAME" \
+    --deployment-id "$DEPLOYMENT_ID" \
+    >/dev/null
+fi
+
+API_BASE_URL="$PUBLIC_ENDPOINT_URL/restapis/$API_ID/$STAGE_NAME/_user_request_"
 
 cat >"$GENERATED_DIR/backend.env" <<EOF
 VITE_API_BASE_URL=$API_BASE_URL
+MUKUROJI_BACKEND_API_PREFIXED_URL=$API_BASE_URL/api
 MUKUROJI_BACKEND_FUNCTION_NAME=$FUNCTION_NAME
 MUKUROJI_BACKEND_API_ID=$API_ID
 MUKUROJI_BACKEND_STAGE_NAME=$STAGE_NAME

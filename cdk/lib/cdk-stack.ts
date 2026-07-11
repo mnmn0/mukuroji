@@ -1,8 +1,12 @@
+import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
+import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
+import * as apigatewayv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as customResources from 'aws-cdk-lib/custom-resources';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import { Construct } from 'constructs';
 
 /**
@@ -22,17 +26,14 @@ const projectTaskItems = [
 ] as const;
 
 /**
- * CDK seed が作成する demo user 用 directory partition key です。
+ * 初期 owner を manager として登録する seed project ID です。
  */
-const demoUserDirectoryId = 'user#demo@example.com';
+const ownerProjectIds = ['refero', 'product-roadmap', 'shared-launch', 'brand-refresh'] as const;
 
-function createDirectoryProjectId(directoryId: string, projectId: string) {
-  return `${directoryId}#project#${projectId}`;
-}
-
-function createProjectMemberEntryKey(projectId: string, memberKey: string) {
-  return `PROJECT_MEMBER#${projectId}#${memberKey}`;
-}
+/**
+ * 冪等 bootstrap row に使用する決定的な timestamp です。
+ */
+const workspaceBootstrapTimestamp = '2026-07-11T00:00:00.000Z';
 
 /**
  * サイドバーに表示するチームとプロジェクトの関係 seed データです。
@@ -114,28 +115,52 @@ const projectDirectoryItems = [
 ] as const;
 
 /**
- * CDK seed が作成する demo user 用 project member seed データです。
+ * Refero プロジェクトに追加する owner 以外の demo member です。
  */
 const projectMemberItems = [
-  ['refero', 'demo@example.com', 'demo@example.com', 'Demo User', 'manager'],
   ['refero', 'sato@example.com', 'sato@example.com', '佐藤 花子', 'member'],
   ['refero', 'viewer@example.com', 'viewer@example.com', 'Viewer User', 'viewer'],
-  ['product-roadmap', 'demo@example.com', 'demo@example.com', 'Demo User', 'manager'],
-  ['shared-launch', 'demo@example.com', 'demo@example.com', 'Demo User', 'manager'],
-  ['brand-refresh', 'demo@example.com', 'demo@example.com', 'Demo User', 'manager'],
 ] as const;
 
 /**
- * DynamoDB の transaction write item payload を作成します。
+ * DynamoDB に保存する project partition key を作成します。
  */
-function createProjectTaskTransactItems(tableName: string) {
+function createDirectoryProjectId(directoryId: string, projectId: string) {
+  return `${directoryId}#project#${projectId}`;
+}
+
+/**
+ * DynamoDB に保存する project member sort key を作成します。
+ */
+function createProjectMemberEntryKey(projectId: string, memberKey: string) {
+  return `PROJECT_MEMBER#${projectId}#${memberKey}`;
+}
+
+/**
+ * DynamoDB に保存する workspace member sort key を作成します。
+ */
+function createWorkspaceMemberEntryKey(memberKey: string) {
+  return `WORKSPACE_MEMBER#${memberKey}`;
+}
+
+/**
+ * DynamoDB に保存する email alias sort key を作成します。
+ */
+function createEmailAliasEntryKey(email: string) {
+  return `EMAIL_ALIAS#${email}`;
+}
+
+/**
+ * Project task の初回 seed transaction を作成します。
+ */
+function createProjectTaskTransactItems(tableName: string, directoryId: string) {
   return projectTaskItems.map(([projectId, taskId, sortOrder, titleKey, assigneeUserId, status, dueDate, priority]) => ({
     Put: {
       TableName: tableName,
       ConditionExpression: 'attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)',
       Item: {
-        directoryId: { S: demoUserDirectoryId },
-        directoryProjectId: { S: createDirectoryProjectId(demoUserDirectoryId, projectId) },
+        directoryId: { S: directoryId },
+        directoryProjectId: { S: createDirectoryProjectId(directoryId, projectId) },
         projectId: { S: projectId },
         taskId: { S: taskId },
         sortOrder: { N: String(sortOrder) },
@@ -150,43 +175,39 @@ function createProjectTaskTransactItems(tableName: string) {
 }
 
 /**
- * サイドバー directory 用の transaction write item payload を作成します。
+ * Team/project directory の初回 seed transaction を作成します。
  */
-function createProjectDirectoryTransactItems(tableName: string) {
-  const directoryItems = projectDirectoryItems.map((entry) => {
-    const item = {
-      directoryId: { S: demoUserDirectoryId },
-      entryKey: { S: entry.entryKey },
-      entryType: { S: entry.entryType },
-      teamId: { S: entry.teamId },
-      teamSortOrder: { N: String(entry.teamSortOrder) },
-      nameJa: { S: entry.nameJa },
-      nameEn: { S: entry.nameEn },
-      ...(entry.entryType === 'team'
-        ? {
-            expanded: { BOOL: entry.expanded },
-          }
-        : {
-            projectId: { S: entry.projectId },
-            projectSortOrder: { N: String(entry.projectSortOrder) },
-            tone: { S: entry.tone },
-          }),
-    };
-
-    return {
-      Put: {
-        TableName: tableName,
-        ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
-        Item: item,
+function createProjectDirectoryTransactItems(tableName: string, directoryId: string) {
+  const directoryItems = projectDirectoryItems.map((entry) => ({
+    Put: {
+      TableName: tableName,
+      ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+      Item: {
+        directoryId: { S: directoryId },
+        entryKey: { S: entry.entryKey },
+        entryType: { S: entry.entryType },
+        teamId: { S: entry.teamId },
+        teamSortOrder: { N: String(entry.teamSortOrder) },
+        nameJa: { S: entry.nameJa },
+        nameEn: { S: entry.nameEn },
+        ...(entry.entryType === 'team'
+          ? {
+              expanded: { BOOL: entry.expanded },
+            }
+          : {
+              projectId: { S: entry.projectId },
+              projectSortOrder: { N: String(entry.projectSortOrder) },
+              tone: { S: entry.tone },
+            }),
       },
-    };
-  });
+    },
+  }));
   const memberItems = projectMemberItems.map(([projectId, memberKey, email, name, role]) => ({
     Put: {
       TableName: tableName,
       ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
       Item: {
-        directoryId: { S: demoUserDirectoryId },
+        directoryId: { S: directoryId },
         entryKey: { S: createProjectMemberEntryKey(projectId, memberKey) },
         entryType: { S: 'project-member' },
         projectId: { S: projectId },
@@ -204,7 +225,129 @@ function createProjectDirectoryTransactItems(tableName: string) {
 }
 
 /**
- * mukuroji のアプリケーションデータ取得基盤を定義する CDK stack です。
+ * Workspace metadata、owner、email alias と owner project 権限を冪等投入します。
+ */
+function createWorkspaceBootstrapTransactItems(
+  tableName: string,
+  directoryId: string,
+  initialOwnerEmail: string,
+  initialOwnerUsername: string,
+) {
+  const workspaceMetadataItem = {
+    Update: {
+      TableName: tableName,
+      Key: {
+        directoryId: { S: directoryId },
+        entryKey: { S: 'WORKSPACE#METADATA' },
+      },
+      UpdateExpression:
+        'SET #entryType = if_not_exists(#entryType, :entryType), workspaceId = if_not_exists(workspaceId, :workspaceId)',
+      ConditionExpression:
+        'attribute_not_exists(directoryId) OR (#entryType = :entryType AND workspaceId = :workspaceId)',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': { S: 'workspace-metadata' },
+        ':workspaceId': { S: directoryId },
+      },
+    },
+  };
+  const workspaceOwnerItem = {
+    Update: {
+      TableName: tableName,
+      Key: {
+        directoryId: { S: directoryId },
+        entryKey: { S: createWorkspaceMemberEntryKey(initialOwnerEmail) },
+      },
+      UpdateExpression:
+        'SET #entryType = if_not_exists(#entryType, :entryType), workspaceId = if_not_exists(workspaceId, :workspaceId), memberKey = if_not_exists(memberKey, :memberKey), email = :email, username = :username, #role = :role, createdAt = if_not_exists(createdAt, :timestamp), updatedAt = if_not_exists(updatedAt, :timestamp)',
+      ConditionExpression:
+        'attribute_not_exists(directoryId) OR (#entryType = :entryType AND workspaceId = :workspaceId AND memberKey = :memberKey)',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#role': 'role',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': { S: 'workspace-member' },
+        ':workspaceId': { S: directoryId },
+        ':memberKey': { S: initialOwnerEmail },
+        ':email': { S: initialOwnerEmail },
+        ':username': { S: initialOwnerUsername },
+        ':role': { S: 'owner' },
+        ':timestamp': { S: workspaceBootstrapTimestamp },
+      },
+    },
+  };
+  const emailAliasItem = {
+    Update: {
+      TableName: tableName,
+      Key: {
+        directoryId: { S: directoryId },
+        entryKey: { S: createEmailAliasEntryKey(initialOwnerEmail) },
+      },
+      UpdateExpression:
+        'SET #entryType = if_not_exists(#entryType, :entryType), workspaceId = if_not_exists(workspaceId, :workspaceId), memberKey = if_not_exists(memberKey, :memberKey), email = :email, username = :username',
+      ConditionExpression:
+        'attribute_not_exists(directoryId) OR (#entryType = :entryType AND workspaceId = :workspaceId AND memberKey = :memberKey)',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': { S: 'email-alias' },
+        ':workspaceId': { S: directoryId },
+        ':memberKey': { S: initialOwnerEmail },
+        ':email': { S: initialOwnerEmail },
+        ':username': { S: initialOwnerUsername },
+      },
+    },
+  };
+  const ownerProjectMemberItems = ownerProjectIds.map((projectId) => ({
+    Update: {
+      TableName: tableName,
+      Key: {
+        directoryId: { S: directoryId },
+        entryKey: { S: createProjectMemberEntryKey(projectId, initialOwnerEmail) },
+      },
+      UpdateExpression:
+        'SET #entryType = if_not_exists(#entryType, :entryType), projectId = if_not_exists(projectId, :projectId), memberKey = if_not_exists(memberKey, :memberKey), email = :email, #role = :role, createdAt = if_not_exists(createdAt, :timestamp), updatedAt = if_not_exists(updatedAt, :timestamp)',
+      ConditionExpression:
+        'attribute_not_exists(directoryId) OR (#entryType = :entryType AND projectId = :projectId AND memberKey = :memberKey)',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#role': 'role',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': { S: 'project-member' },
+        ':projectId': { S: projectId },
+        ':memberKey': { S: initialOwnerEmail },
+        ':email': { S: initialOwnerEmail },
+        ':role': { S: 'manager' },
+        ':timestamp': { S: workspaceBootstrapTimestamp },
+      },
+    },
+  }));
+
+  return [workspaceMetadataItem, workspaceOwnerItem, emailAliasItem, ...ownerProjectMemberItems];
+}
+
+/**
+ * Create と Update の両方で同じ AWS SDK call を行う custom resource properties を作成します。
+ */
+function createIdempotentAwsCustomResourceProps(
+  call: customResources.AwsSdkCall,
+  policy: customResources.AwsCustomResourcePolicy,
+): customResources.AwsCustomResourceProps {
+  return {
+    onCreate: call,
+    onUpdate: call,
+    policy,
+    installLatestAwsSdk: false,
+  };
+}
+
+/**
+ * mukuroji の本番 API、永続 data store、workspace bootstrap を定義する stack です。
  */
 export class CdkStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -213,7 +356,10 @@ export class CdkStack extends cdk.Stack {
     const taskApiAllowedOrigins = new cdk.CfnParameter(this, 'TaskApiAllowedOrigins', {
       type: 'String',
       default: 'http://localhost:5173,http://127.0.0.1:5173',
-      description: 'Comma-separated CORS origins allowed to call the project tasks Lambda Function URL.',
+      allowedPattern: '^https?://[^,\\s]+(,https?://[^,\\s]+)*$',
+      constraintDescription:
+        'TaskApiAllowedOrigins must be a comma-separated list of HTTP(S) origins without whitespace.',
+      description: 'Comma-separated CORS origins allowed to call the mukuroji API.',
     });
     const taskApiAllowedOriginList = cdk.Fn.split(',', taskApiAllowedOrigins.valueAsString);
     const systemAdminGroups = new cdk.CfnParameter(this, 'SystemAdminGroups', {
@@ -223,19 +369,47 @@ export class CdkStack extends cdk.Stack {
     });
     const cognitoUserPoolId = new cdk.CfnParameter(this, 'CognitoUserPoolId', {
       type: 'String',
-      description: 'Cognito user pool ID trusted by the project tasks Lambda API.',
+      allowedPattern: '^[a-z]{2}(?:-[a-z0-9]+)+_[A-Za-z0-9]+$',
+      description: 'Existing Cognito user pool ID trusted by the mukuroji API.',
+    });
+    const cognitoUserPoolClientId = new cdk.CfnParameter(this, 'CognitoUserPoolClientId', {
+      type: 'String',
+      allowedPattern: '^[A-Za-z0-9]+$',
+      description: 'Existing Cognito app client ID used by the mukuroji API.',
+    });
+    const workspaceDirectoryId = new cdk.CfnParameter(this, 'WorkspaceDirectoryId', {
+      type: 'String',
+      minLength: 1,
+      allowedPattern: '^\\S+$',
+      constraintDescription: 'WorkspaceDirectoryId must not contain whitespace.',
+      description: 'Canonical workspace directory ID shared by Cognito claims and DynamoDB partitions.',
+    });
+    const initialOwnerEmail = new cdk.CfnParameter(this, 'InitialOwnerEmail', {
+      type: 'String',
+      allowedPattern: '^[^A-Z\\s@]+@[^A-Z\\s@]+$',
+      constraintDescription: 'InitialOwnerEmail must be a lowercase email address.',
+      description: 'Canonical lowercase email address stored for the initial workspace owner.',
+    });
+    const initialOwnerUsername = new cdk.CfnParameter(this, 'InitialOwnerUsername', {
+      type: 'String',
+      minLength: 1,
+      allowedPattern: '^\\S+$',
+      constraintDescription: 'InitialOwnerUsername must not contain whitespace.',
+      description: 'Cognito username targeted when bootstrapping the initial owner attributes.',
     });
     const cognitoUserPoolArn = cdk.Stack.of(this).formatArn({
       service: 'cognito-idp',
       resource: 'userpool',
       resourceName: cognitoUserPoolId.valueAsString,
+      arnFormat: cdk.ArnFormat.SLASH_RESOURCE_NAME,
     });
 
     const tasksTable = new dynamodb.Table(this, 'ProjectTasksTable', {
       partitionKey: { name: 'directoryProjectId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'taskId', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
     tasksTable.addGlobalSecondaryIndex({
@@ -249,7 +423,8 @@ export class CdkStack extends cdk.Stack {
       partitionKey: { name: 'directoryTeamId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'issueId', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
     teamIssuesTable.addGlobalSecondaryIndex({
@@ -270,2724 +445,172 @@ export class CdkStack extends cdk.Stack {
       partitionKey: { name: 'directoryTeamIssueId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'eventId', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
     const projectDirectoryTable = new dynamodb.Table(this, 'ProjectDirectoryTable', {
       partitionKey: { name: 'directoryId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'entryKey', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    const listTasksFunction = new lambda.Function(this, 'ListProjectTasksFunction', {
+    const apiFunction = new lambdaNodejs.NodejsFunction(this, 'ListProjectTasksFunction', {
+      entry: path.join(__dirname, '../../server/src/index.ts'),
+      handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      timeout: cdk.Duration.seconds(10),
+      depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+      projectRoot: path.join(__dirname, '../..'),
+      timeout: cdk.Duration.seconds(15),
+      memorySize: 512,
+      description: 'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.',
+      bundling: {
+        bundleAwsSDK: true,
+        minify: true,
+        sourceMap: true,
+        target: 'node22',
+      },
       environment: {
         ALLOWED_ORIGINS: taskApiAllowedOrigins.valueAsString,
+        COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+        MUKUROJI_PROJECT_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
+        MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
+        MUKUROJI_PROJECT_TASKS_TABLE: tasksTable.tableName,
+        MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+        MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
+        MUKUROJI_TEAM_ISSUES_TABLE: teamIssuesTable.tableName,
+        MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+        TASKS_TABLE_NAME: tasksTable.tableName,
         TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
         TEAM_ISSUES_TABLE_NAME: teamIssuesTable.tableName,
-        TASKS_TABLE_NAME: tasksTable.tableName,
       },
-      code: lambda.Code.fromInline(`
-	const { CognitoIdentityProviderClient, AdminGetUserCommand, GetUserCommand, ListUsersCommand } = require('@aws-sdk/client-cognito-identity-provider');
-const { DynamoDBClient, DeleteItemCommand, PutItemCommand, QueryCommand, TransactWriteItemsCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
-
-const cognito = new CognitoIdentityProviderClient({});
-const dynamodb = new DynamoDBClient({});
-
-exports.handler = async (event) => {
-  const headers = createHeaders(event);
-
-  if (event.requestContext?.http?.method === 'OPTIONS') {
-    return { statusCode: 204, headers };
-  }
-
-  const accessToken = readBearerAccessToken(event);
-
-  if (!accessToken) {
-    return json(401, { message: 'Bearer token is required.' }, headers);
-  }
-
-  let principal;
-  let directoryId;
-
-  try {
-    const expectedUserPoolId = readConfiguredCognitoUserPoolId();
-
-    if (!expectedUserPoolId) {
-      return json(503, { message: 'Cognito user pool is not available.' }, headers);
-    }
-
-    if (!isExpectedCognitoIssuer(accessToken, expectedUserPoolId)) {
-      return json(401, { message: 'Authentication failed.' }, headers);
-    }
-
-    const user = await cognito.send(new GetUserCommand({ AccessToken: accessToken }));
-    principal = toProjectPrincipal(user, accessToken, expectedUserPoolId);
-    directoryId = principal?.directoryId;
-  } catch {
-    return json(401, { message: 'Authentication failed.' }, headers);
-  }
-
-  if (!directoryId) {
-    return json(403, { message: 'Project access is denied.' }, headers);
-  }
-
-  if (isCreateTeamRequest(event)) {
-    if (!principal.isSystemAdmin) {
-      return json(403, { message: 'Project access is denied.' }, headers);
-    }
-
-    try {
-      return await createTeam(event, headers, directoryId);
-    } catch (error) {
-      return toProjectDataError(error, headers, 'Failed to create team.');
-    }
-  }
-
-  const createProjectTeamId = readCreateProjectTeamId(event);
-
-  if (createProjectTeamId) {
-    try {
-      return await createProject(event, headers, directoryId, createProjectTeamId, principal.userKey);
-    } catch (error) {
-      return toProjectDataError(error, headers, 'Failed to create project.');
-    }
-  }
-
-  const archiveTeamId = readArchiveTeamId(event);
-
-  if (archiveTeamId) {
-    if (!principal.isSystemAdmin) {
-      return json(403, { message: 'Project access is denied.' }, headers);
-    }
-
-    try {
-      return await archiveTeam(headers, directoryId, archiveTeamId);
-    } catch (error) {
-      return toProjectDataError(error, headers, 'Failed to archive team.');
-    }
-  }
-
-  const archiveProjectParams = readArchiveProjectParams(event);
-
-  if (archiveProjectParams) {
-    try {
-      const permissionError = await enforceProjectPermission(
-        headers,
-        principal,
-        archiveProjectParams.projectId,
-        'manager',
-      );
-
-      if (permissionError) {
-        return permissionError;
-      }
-
-      return await archiveProject(
-        headers,
-        directoryId,
-        archiveProjectParams.teamId,
-        archiveProjectParams.projectId,
-      );
-    } catch (error) {
-      return toProjectDataError(error, headers, 'Failed to archive project.');
-    }
-  }
-
-	  const projectMembersProjectId = readProjectMembersProjectId(event);
-
-	  if (projectMembersProjectId) {
-	    const permissionError = await enforceProjectPermission(
-	      headers,
-	      principal,
-	      projectMembersProjectId,
-	      'member',
-	    );
-
-	    if (permissionError) {
-	      return permissionError;
-	    }
-
-	    try {
-	      return await listProjectMembers(headers, directoryId, projectMembersProjectId, principal.userPoolId);
-	    } catch (error) {
-	      return toProjectDataError(error, headers, 'Failed to load project members.');
-	    }
-	  }
-
-	  const projectUsersProjectId = readProjectUsersProjectId(event);
-
-	  if (projectUsersProjectId) {
-	    const permissionError = await enforceProjectPermission(
-	      headers,
-	      principal,
-	      projectUsersProjectId,
-	      'manager',
-	    );
-
-	    if (permissionError) {
-	      return permissionError;
-	    }
-
-	    try {
-	      return await listProjectUsers(event, headers, principal.userPoolId, directoryId);
-	    } catch (error) {
-	      return toProjectDataError(error, headers, 'Failed to load Cognito users.');
-	    }
-	  }
-
-  const projectMemberParams = readProjectMemberParams(event);
-
-  if (projectMemberParams) {
-    const permissionError = await enforceProjectPermission(
-      headers,
-      principal,
-      projectMemberParams.projectId,
-      'manager',
-    );
-
-    if (permissionError) {
-      return permissionError;
-    }
-
-	    if (event.requestContext?.http?.method === 'PATCH') {
-	      try {
-	        return await updateProjectMember(event, headers, directoryId, projectMemberParams.projectId, projectMemberParams.memberKey, principal.userPoolId);
-	      } catch (error) {
-	        return toProjectDataError(error, headers, 'Failed to update project member.');
-	      }
-	    }
-
-	    try {
-	      return await removeProjectMember(headers, directoryId, projectMemberParams.projectId, projectMemberParams.memberKey);
-	    } catch (error) {
-	      return toProjectDataError(error, headers, 'Failed to remove project member.');
-	    }
-  }
-
-  const teamIssueCommentParams = readTeamIssueCommentParams(event);
-
-  if (teamIssueCommentParams) {
-    const permissionError = await enforceTeamPermission(
-      headers,
-      principal,
-      teamIssueCommentParams.teamId,
-      'member',
-    );
-
-    if (permissionError) {
-      return permissionError;
-    }
-
-    try {
-      return await createTeamIssueComment(
-        event,
-        headers,
-        directoryId,
-        teamIssueCommentParams.teamId,
-        teamIssueCommentParams.issueId,
-        principal.userKey,
-        principal.userPoolId,
-        principal,
-      );
-    } catch (error) {
-      return toProjectDataError(error, headers, 'Failed to create issue comment.');
-    }
-  }
-
-  const teamIssueDetailParams = readTeamIssueDetailParams(event);
-
-  if (teamIssueDetailParams) {
-    const permissionError = await enforceTeamPermission(
-      headers,
-      principal,
-      teamIssueDetailParams.teamId,
-      event.requestContext?.http?.method === 'GET' ? 'viewer' : 'member',
-    );
-
-    if (permissionError) {
-      return permissionError;
-    }
-
-    try {
-      if (event.requestContext?.http?.method === 'PATCH') {
-        return await updateTeamIssue(
-          event,
-          headers,
-          directoryId,
-          teamIssueDetailParams.teamId,
-          teamIssueDetailParams.issueId,
-          principal.userKey,
-          principal.userPoolId,
-          principal,
-        );
-      }
-
-      return await getTeamIssueDetail(
-        headers,
-        directoryId,
-        teamIssueDetailParams.teamId,
-        teamIssueDetailParams.issueId,
-        principal.userPoolId,
-        principal,
-      );
-    } catch (error) {
-      return toProjectDataError(error, headers, 'Failed to load issue detail.');
-    }
-  }
-
-  const teamIssueListParams = readTeamIssueListParams(event);
-
-  if (teamIssueListParams) {
-    const permissionError = await enforceTeamPermission(
-      headers,
-      principal,
-      teamIssueListParams.teamId,
-      event.requestContext?.http?.method === 'GET' ? 'viewer' : 'member',
-    );
-
-    if (permissionError) {
-      return permissionError;
-    }
-
-    try {
-      if (event.requestContext?.http?.method === 'POST') {
-        return await createTeamIssue(
-          event,
-          headers,
-          directoryId,
-        teamIssueListParams.teamId,
-        principal.userKey,
-        principal.userPoolId,
-        principal,
-      );
-      }
-
-      return await listTeamIssues(headers, directoryId, teamIssueListParams.teamId, principal.userPoolId, principal);
-    } catch (error) {
-      return toProjectDataError(error, headers, 'Failed to load team issues.');
-    }
-  }
-
-  const projectIssuesProjectId = readProjectIssuesProjectId(event);
-
-  if (projectIssuesProjectId) {
-    const permissionError = await enforceProjectPermission(
-      headers,
-      principal,
-      projectIssuesProjectId,
-      'viewer',
-    );
-
-    if (permissionError) {
-      return permissionError;
-    }
-
-    try {
-      return await listProjectIssues(headers, directoryId, projectIssuesProjectId, principal.userPoolId);
-    } catch (error) {
-      return toProjectDataError(error, headers, 'Failed to load project issues.');
-    }
-  }
-
-  if (isProjectDirectoryRequest(event)) {
-    return listProjectDirectory(event, headers, directoryId);
-  }
-
-  const taskStatusParams = readProjectTaskStatusParams(event);
-  const projectId =
-    taskStatusParams?.projectId ??
-    event.pathParameters?.projectId ??
-    event.rawPath?.match(/^\\/(?:api\\/)?projects\\/([^/]+)\\/tasks$/)?.[1];
-
-  if (!projectId) {
-    return json(404, { message: 'Project tasks endpoint was not found.' }, headers);
-  }
-
-  const decodedProjectId = taskStatusParams?.projectId ?? decodePathSegment(projectId);
-
-  if (!decodedProjectId) {
-    return json(400, { message: 'Project ID is invalid.' }, headers);
-  }
-
-  try {
-    const permissionError = await enforceProjectPermission(
-      headers,
-      principal,
-      decodedProjectId,
-      event.requestContext?.http?.method === 'GET' ? 'viewer' : 'member',
-    );
-
-    if (permissionError) {
-      return permissionError;
-    }
-
-	    if (event.requestContext?.http?.method === 'POST') {
-	      return await createProjectTask(event, headers, directoryId, decodedProjectId, principal.userPoolId);
-	    }
-
-    if (taskStatusParams) {
-      return await updateProjectTaskStatus(
-        event,
-	        headers,
-	        directoryId,
-	        decodedProjectId,
-	        taskStatusParams.taskId,
-	        principal.userPoolId,
-	      );
-    }
-
-    if (event.requestContext?.http?.method !== 'GET') {
-      return json(405, { message: 'Method is not allowed.' }, headers);
-    }
-
-    const items = await queryAll({
-      TableName: process.env.TASKS_TABLE_NAME,
-      IndexName: 'ProjectSortOrderIndex',
-      KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
-      ExpressionAttributeValues: {
-        ':directoryProjectId': { S: createDirectoryProjectId(directoryId, decodedProjectId) },
-      },
-      ScanIndexForward: true,
     });
 
-    return json(200, {
-      projectId: decodedProjectId,
-	      tasks: await hydrateProjectTasks(items.map(toTask), principal.userPoolId),
-    }, headers);
-  } catch (error) {
-    return toProjectDataError(error, headers, 'Failed to load project tasks.');
-  }
-};
-
-async function createTeam(event, headers, directoryId) {
-  const body = readJsonBody(event);
-  const names = readLocalizedNames(body);
-
-  if (!names) {
-    return json(400, { message: 'Name is required.' }, headers);
-  }
-
-  const items = await queryAll({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    KeyConditionExpression: 'directoryId = :directoryId',
-    ExpressionAttributeValues: {
-      ':directoryId': { S: directoryId },
-    },
-    ScanIndexForward: true,
-  });
-  const teamId = createUniqueResourceId(names.nameJa, items.filter((item) => item.entryType?.S === 'team').map((item) => item.teamId?.S).filter(Boolean));
-  const teamSortOrder = Math.max(0, ...items.filter((item) => item.entryType?.S === 'team').map((item) => Number(item.teamSortOrder?.N ?? 0))) + 10;
-  const item = {
-    directoryId: { S: directoryId },
-    entryKey: { S: createTeamEntryKey(teamSortOrder, teamId) },
-    entryType: { S: 'team' },
-    teamId: { S: teamId },
-    teamSortOrder: { N: String(teamSortOrder) },
-    nameJa: { S: names.nameJa },
-    nameEn: { S: names.nameEn },
-    expanded: { BOOL: true },
-  };
-
-  await dynamodb.send(new PutItemCommand({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    Item: item,
-    ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
-  }));
-
-  return json(201, {
-    team: {
-      id: teamId,
-      name: names.nameJa,
-      expanded: true,
-      projects: [],
-    },
-  }, headers);
-}
-
-async function createProject(event, headers, directoryId, teamId, creatorUserKey) {
-  const body = readJsonBody(event);
-  const names = readLocalizedNames(body);
-
-  if (!names) {
-    return json(400, { message: 'Name is required.' }, headers);
-  }
-
-  const tone = body.tone === undefined ? 'blue' : body.tone;
-
-  if (!isProjectTone(tone)) {
-    return json(400, { message: 'Project tone is invalid.' }, headers);
-  }
-  const creatorMemberKey = normalizeProjectMemberKey(creatorUserKey);
-
-  if (!creatorMemberKey) {
-    return json(400, { message: 'Project creator member key is required.' }, headers);
-  }
-
-  const items = await queryAll({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    KeyConditionExpression: 'directoryId = :directoryId',
-    ExpressionAttributeValues: {
-      ':directoryId': { S: directoryId },
-    },
-    ScanIndexForward: true,
-  });
-  const team = items.find((item) => item.entryType?.S === 'team' && item.teamId?.S === teamId && isActiveDirectoryItem(item));
-
-  if (!team) {
-    return json(404, { message: 'Team was not found.' }, headers);
-  }
-
-  const projectId = createUniqueResourceId(names.nameJa, items.filter((item) => item.entryType?.S === 'project').map((item) => item.projectId?.S).filter(Boolean));
-  const teamSortOrder = Number(team.teamSortOrder.N);
-  const projectSortOrder = Math.max(0, ...items.filter((item) => item.entryType?.S === 'project' && item.teamId?.S === teamId).map((item) => Number(item.projectSortOrder?.N ?? 0))) + 10;
-  const item = {
-    directoryId: { S: directoryId },
-    entryKey: { S: createProjectEntryKey(teamSortOrder, projectSortOrder, projectId) },
-    entryType: { S: 'project' },
-    teamId: { S: teamId },
-    teamSortOrder: { N: String(teamSortOrder) },
-    projectId: { S: projectId },
-    projectSortOrder: { N: String(projectSortOrder) },
-    nameJa: { S: names.nameJa },
-    nameEn: { S: names.nameEn },
-    tone: { S: tone },
-  };
-  const updatedAt = new Date().toISOString();
-  const creatorMemberItem = {
-    directoryId: { S: directoryId },
-    entryKey: { S: createProjectMemberEntryKey(projectId, creatorMemberKey) },
-    entryType: { S: 'project-member' },
-    projectId: { S: projectId },
-    memberKey: { S: creatorMemberKey },
-    email: { S: creatorMemberKey },
-    role: { S: 'manager' },
-    createdAt: { S: updatedAt },
-    updatedAt: { S: updatedAt },
-  };
-
-  try {
-    await dynamodb.send(new TransactWriteItemsCommand({
-      TransactItems: [
-        {
-          ConditionCheck: createActiveTeamConditionCheck(directoryId, team.entryKey.S),
-        },
-        {
-          Put: {
-            TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-            Item: item,
-            ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
-          },
-        },
-        {
-          Put: {
-            TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-            Item: creatorMemberItem,
-            ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
-          },
-        },
-      ],
-    }));
-  } catch (error) {
-    if (error?.name === 'TransactionCanceledException') {
-      return await handleCreateProjectTransactionCancellation(headers, directoryId, teamId, error);
-    }
-
-    throw error;
-  }
-
-  return json(201, {
-    project: {
-      id: projectId,
-      name: names.nameJa,
-      tone,
-    },
-  }, headers);
-}
-
-async function archiveTeam(headers, directoryId, teamId) {
-  const items = await queryAll({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    KeyConditionExpression: 'directoryId = :directoryId',
-    ExpressionAttributeValues: {
-      ':directoryId': { S: directoryId },
-    },
-    ScanIndexForward: true,
-  });
-  const team = items.find((item) => item.entryType?.S === 'team' && item.teamId?.S === teamId && isActiveDirectoryItem(item));
-
-  if (!team) {
-    return json(404, { message: 'Team was not found.' }, headers);
-  }
-
-  const archivedAt = new Date().toISOString();
-
-  await dynamodb.send(new UpdateItemCommand({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    Key: {
-      directoryId: { S: directoryId },
-      entryKey: { S: team.entryKey.S },
-    },
-    UpdateExpression: 'SET archivedAt = :archivedAt',
-    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-    ExpressionAttributeValues: {
-      ':archivedAt': { S: archivedAt },
-    },
-  }));
-
-  return json(200, { teamId, archivedAt }, headers);
-}
-
-async function archiveProject(headers, directoryId, teamId, projectId) {
-  const items = await queryAll({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    KeyConditionExpression: 'directoryId = :directoryId',
-    ExpressionAttributeValues: {
-      ':directoryId': { S: directoryId },
-    },
-    ScanIndexForward: true,
-  });
-  const team = items.find((item) => item.entryType?.S === 'team' && item.teamId?.S === teamId && isActiveDirectoryItem(item));
-
-  if (!team) {
-    return json(404, { message: 'Team was not found.' }, headers);
-  }
-
-  const project = items.find((item) =>
-    item.entryType?.S === 'project' &&
-    item.teamId?.S === teamId &&
-    item.projectId?.S === projectId &&
-    isActiveDirectoryItem(item)
-  );
-
-  if (!project) {
-    return json(404, { message: 'Project was not found.' }, headers);
-  }
-
-  const archivedAt = new Date().toISOString();
-
-  await dynamodb.send(new UpdateItemCommand({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    Key: {
-      directoryId: { S: directoryId },
-      entryKey: { S: project.entryKey.S },
-    },
-    UpdateExpression: 'SET archivedAt = :archivedAt',
-    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-    ExpressionAttributeValues: {
-      ':archivedAt': { S: archivedAt },
-    },
-  }));
-
-	  return json(200, { teamId, projectId, archivedAt }, headers);
-	}
-
-	async function listProjectUsers(event, headers, userPoolId, directoryId) {
-	  if (!userPoolId) {
-	    return json(503, { message: 'Cognito user pool is not available.' }, headers);
-	  }
-
-	  const query = event.queryStringParameters?.query?.trim();
-	  const limit = clampCognitoPageLimit(Number(event.queryStringParameters?.limit ?? 20));
-	  const users = [];
-	  let paginationToken = event.queryStringParameters?.paginationToken ?? event.queryStringParameters?.nextToken;
-
-	  do {
-	    const response = await cognito.send(new ListUsersCommand({
-	      UserPoolId: userPoolId,
-	      Limit: Math.max(1, limit - users.length),
-	      ...(paginationToken ? { PaginationToken: paginationToken } : {}),
-	      ...(query ? { Filter: '"email"^="' + escapeCognitoFilterValue(query.toLowerCase()) + '"' } : {}),
-	    }));
-	    users.push(
-	      ...(response.Users ?? [])
-	        .filter((user) => isCognitoUserInDirectory(user, directoryId))
-	        .map(toCognitoUserProfile)
-	        .filter(Boolean),
-	    );
-	    paginationToken = response.PaginationToken;
-	  } while (users.length < limit && paginationToken);
-
-	  return json(200, {
-	    users,
-	    nextToken: paginationToken,
-	  }, headers);
-	}
-
-	async function listProjectMembers(headers, directoryId, projectId, userPoolId) {
-	  const items = await queryAll({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    KeyConditionExpression: 'directoryId = :directoryId',
-    ExpressionAttributeValues: {
-      ':directoryId': { S: directoryId },
-    },
-    ScanIndexForward: true,
-  });
-	  const members = items
-	    .filter((item) => item.entryType?.S === 'project-member' && item.projectId?.S === projectId)
-	    .sort(compareProjectMembers)
-	    .map(toProjectMember);
-
-	  return json(200, { projectId, members: await hydrateProjectMembers(members, userPoolId) }, headers);
-	}
-
-async function updateProjectMember(event, headers, directoryId, projectId, memberKey, userPoolId) {
-  const body = readJsonBody(event);
-  const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
-
-  if (!normalizedMemberKey) {
-    return json(400, { message: 'Project member email is required.' }, headers);
-  }
-  const profile = await getUserProfile(userPoolId, normalizedMemberKey);
-
-  if (!isProjectRole(body.role)) {
-    return json(400, { message: 'Project role is invalid.' }, headers);
-  }
-
-  const existingMembers = await queryAll({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    KeyConditionExpression: 'directoryId = :directoryId',
-    ExpressionAttributeValues: {
-      ':directoryId': { S: directoryId },
-    },
-    ScanIndexForward: true,
-  });
-  const existingMember = existingMembers.find((item) =>
-    item.entryType?.S === 'project-member' &&
-    item.projectId?.S === projectId &&
-    item.memberKey?.S === normalizedMemberKey
-  );
-  if (
-    existingMember?.role?.S === 'manager' &&
-    body.role !== 'manager' &&
-    !findOtherProjectManager(existingMembers, projectId, normalizedMemberKey)
-  ) {
-    return json(409, { message: 'At least one project manager is required.' }, headers);
-  }
-  const guardManager = existingMember?.role?.S === 'manager' && body.role !== 'manager'
-    ? findOtherProjectManager(existingMembers, projectId, normalizedMemberKey)
-    : undefined;
-  const updatedAt = new Date().toISOString();
-  const item = {
-    directoryId: { S: directoryId },
-    entryKey: { S: createProjectMemberEntryKey(projectId, normalizedMemberKey) },
-    entryType: { S: 'project-member' },
-    projectId: { S: projectId },
-    memberKey: { S: normalizedMemberKey },
-    email: { S: profile.email },
-    role: { S: body.role },
-    createdAt: { S: existingMember?.createdAt?.S ?? updatedAt },
-    updatedAt: { S: updatedAt },
-    ...(profile.name ? { name: { S: profile.name } } : {}),
-  };
-
-  if (guardManager) {
-    try {
-      await dynamodb.send(new TransactWriteItemsCommand({
-        TransactItems: [
-          {
-            ConditionCheck: createProjectManagerConditionCheck(directoryId, guardManager.entryKey.S),
-          },
-          {
-            Put: {
-              TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-              Item: item,
-            },
-          },
-        ],
-      }));
-    } catch (error) {
-      if (error?.name === 'TransactionCanceledException') {
-        return await handleProjectMemberTransactionCancellation(
-          headers,
-          directoryId,
-          projectId,
-          normalizedMemberKey,
-          error,
-        );
-      }
-
-      throw error;
-    }
-  } else {
-    await dynamodb.send(new PutItemCommand({
-      TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-      Item: item,
-    }));
-  }
-
-  return json(200, { member: await hydrateProjectMember(toProjectMember(item), userPoolId) }, headers);
-}
-
-async function removeProjectMember(headers, directoryId, projectId, memberKey) {
-  const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
-
-  if (!normalizedMemberKey) {
-    return json(400, { message: 'Project member email is required.' }, headers);
-  }
-  const items = await queryAll({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    KeyConditionExpression: 'directoryId = :directoryId',
-    ExpressionAttributeValues: {
-      ':directoryId': { S: directoryId },
-    },
-    ScanIndexForward: true,
-  });
-  const member = items.find((item) =>
-    item.entryType?.S === 'project-member' &&
-    item.projectId?.S === projectId &&
-    item.memberKey?.S === normalizedMemberKey
-  );
-
-  if (!member) {
-    return json(404, { message: 'Project member was not found.' }, headers);
-  }
-
-  if (
-    member.role?.S === 'manager' &&
-    !findOtherProjectManager(items, projectId, normalizedMemberKey)
-  ) {
-    return json(409, { message: 'At least one project manager is required.' }, headers);
-  }
-  const guardManager = member.role?.S === 'manager'
-    ? findOtherProjectManager(items, projectId, normalizedMemberKey)
-    : undefined;
-
-  if (guardManager) {
-    try {
-      await dynamodb.send(new TransactWriteItemsCommand({
-        TransactItems: [
-          {
-            ConditionCheck: createProjectManagerConditionCheck(directoryId, guardManager.entryKey.S),
-          },
-          {
-            Delete: {
-              TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-              Key: {
-                directoryId: { S: directoryId },
-                entryKey: { S: member.entryKey.S },
-              },
-              ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
-            },
-          },
-        ],
-      }));
-    } catch (error) {
-      if (error?.name === 'TransactionCanceledException') {
-        return await handleProjectMemberTransactionCancellation(
-          headers,
-          directoryId,
-          projectId,
-          normalizedMemberKey,
-          error,
-        );
-      }
-
-      throw error;
-    }
-  } else {
-    await dynamodb.send(new DeleteItemCommand({
-      TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-      Key: {
-        directoryId: { S: directoryId },
-        entryKey: { S: member.entryKey.S },
-      },
-      ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
-    }));
-  }
-
-  return json(200, { projectId, memberId: normalizedMemberKey }, headers);
-}
-
-	function findOtherProjectManager(items, projectId, memberKey) {
-	  return items.find((item) =>
-	      item.entryType?.S === 'project-member' &&
-	      item.projectId?.S === projectId &&
-	      item.memberKey?.S !== memberKey &&
-	      item.role?.S === 'manager'
-	    );
-	}
-
-async function handleCreateProjectTransactionCancellation(headers, directoryId, teamId, originalError) {
-  const items = await queryAll({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    KeyConditionExpression: 'directoryId = :directoryId',
-    ExpressionAttributeValues: {
-      ':directoryId': { S: directoryId },
-    },
-    ScanIndexForward: true,
-  });
-  const activeTeam = items.find((item) =>
-    item.entryType?.S === 'team' &&
-    item.teamId?.S === teamId &&
-    isActiveDirectoryItem(item)
-  );
-
-  if (!activeTeam) {
-    return json(404, { message: 'Team was not found.' }, headers);
-  }
-
-  throw originalError;
-}
-
-async function handleProjectMemberTransactionCancellation(headers, directoryId, projectId, memberKey, originalError) {
-  const items = await queryAll({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    KeyConditionExpression: 'directoryId = :directoryId',
-    ExpressionAttributeValues: {
-      ':directoryId': { S: directoryId },
-    },
-    ScanIndexForward: true,
-  });
-
-  if (!hasActiveProject(items, projectId)) {
-    return json(404, { message: 'Project was not found.' }, headers);
-  }
-
-  const member = items.find((item) =>
-    item.entryType?.S === 'project-member' &&
-    item.projectId?.S === projectId &&
-    item.memberKey?.S === memberKey
-  );
-
-  if (!member) {
-    return json(404, { message: 'Project member was not found.' }, headers);
-  }
-
-  if (member.role?.S === 'manager' && !findOtherProjectManager(items, projectId, memberKey)) {
-    return json(409, { message: 'At least one project manager is required.' }, headers);
-  }
-
-  throw originalError;
-}
-
-function hasActiveProject(items, projectId) {
-  const activeTeamIds = new Set(
-    items
-      .filter((item) => item.entryType?.S === 'team' && isActiveDirectoryItem(item))
-      .map((item) => item.teamId?.S)
-      .filter(Boolean)
-  );
-
-  return items.some((item) =>
-    item.entryType?.S === 'project' &&
-    item.projectId?.S === projectId &&
-    activeTeamIds.has(item.teamId?.S) &&
-    isActiveDirectoryItem(item)
-  );
-}
-
-function createActiveTeamConditionCheck(directoryId, entryKey) {
-  return {
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    Key: {
-      directoryId: { S: directoryId },
-      entryKey: { S: entryKey },
-    },
-    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-  };
-}
-
-	function createProjectManagerConditionCheck(directoryId, entryKey) {
-	  return {
-	    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-	    Key: {
-	      directoryId: { S: directoryId },
-	      entryKey: { S: entryKey },
-	    },
-	    ConditionExpression: '#role = :manager',
-	    ExpressionAttributeNames: {
-	      '#role': 'role',
-	    },
-	    ExpressionAttributeValues: {
-	      ':manager': { S: 'manager' },
-	    },
-	  };
-	}
-
-		async function createProjectTask(event, headers, directoryId, projectId, userPoolId) {
-	  const body = readJsonBody(event);
-	  const assigneeUserId = normalizeProjectMemberKey(body.assigneeUserId ?? body.assignee);
-
-	  if (
-	    typeof body.title !== 'string' ||
-	    typeof body.dueDate !== 'string' ||
-	    !body.title.trim() ||
-	    !assigneeUserId ||
-	    !body.dueDate.trim()
-	  ) {
-	    return json(400, { message: 'Task title, assignee, and due date are required.' }, headers);
-  }
-
-  if (!isTaskStatus(body.status) || !isTaskPriority(body.priority)) {
-    return json(400, { message: 'Task status or priority is invalid.' }, headers);
-  }
-
-	  const title = body.title.trim();
-	  const dueDate = body.dueDate.trim();
-	  await getUserProfile(userPoolId, assigneeUserId);
-	  const directoryProjectId = createDirectoryProjectId(directoryId, projectId);
-  const items = await queryAll({
-    TableName: process.env.TASKS_TABLE_NAME,
-    IndexName: 'ProjectSortOrderIndex',
-    KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
-    ExpressionAttributeValues: {
-      ':directoryProjectId': { S: directoryProjectId },
-    },
-    ScanIndexForward: true,
-  });
-  const taskId = createUniqueResourceId(title, items.map((item) => item.taskId?.S).filter(Boolean));
-  const item = {
-    directoryId: { S: directoryId },
-    directoryProjectId: { S: directoryProjectId },
-    projectId: { S: projectId },
-	    taskId: { S: taskId },
-	    sortOrder: { N: String((items.length + 1) * 10) },
-	    title: { S: title },
-	    assigneeUserId: { S: assigneeUserId },
-    status: { S: body.status },
-    dueDate: { S: dueDate },
-    priority: { S: body.priority },
-  };
-
-  await dynamodb.send(new PutItemCommand({
-    TableName: process.env.TASKS_TABLE_NAME,
-    Item: item,
-    ConditionExpression: 'attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)',
-  }));
-
-	  return json(201, {
-	    task: await hydrateProjectTask(toTask(item), userPoolId),
-	  }, headers);
-	}
-
-	async function updateProjectTaskStatus(event, headers, directoryId, projectId, taskId, userPoolId) {
-  const body = readJsonBody(event);
-
-  if (!isTaskStatus(body.status)) {
-    return json(400, { message: 'Task status is invalid.' }, headers);
-  }
-
-  if (await isLegacyProjectTaskIssue(directoryId, projectId, taskId)) {
-    return json(409, { message: 'Legacy task issues are read-only.' }, headers);
-  }
-
-  const directoryProjectId = createDirectoryProjectId(directoryId, projectId);
-  let response;
-
-  try {
-    response = await dynamodb.send(new UpdateItemCommand({
-      TableName: process.env.TASKS_TABLE_NAME,
-      Key: {
-        directoryProjectId: { S: directoryProjectId },
-        taskId: { S: taskId },
-      },
-      UpdateExpression: 'SET #status = :status',
-      ExpressionAttributeNames: {
-        '#status': 'status',
-      },
-      ExpressionAttributeValues: {
-        ':status': { S: body.status },
-      },
-      ConditionExpression: 'attribute_exists(directoryProjectId) AND attribute_exists(taskId)',
-      ReturnValues: 'ALL_NEW',
-    }));
-  } catch (error) {
-    if (error?.name === 'ConditionalCheckFailedException') {
-      return json(404, { message: 'Task was not found.' }, headers);
-    }
-
-    throw error;
-  }
-
-	  return json(200, {
-	    task: await hydrateProjectTask(toTask(response.Attributes), userPoolId),
-	  }, headers);
-	}
-
-async function listTeamIssues(headers, directoryId, teamId, userPoolId, principal) {
-  const directoryItems = await readDirectoryItems(directoryId);
-
-  if (!findActiveTeam(directoryItems, teamId)) {
-    return json(404, { message: 'Team was not found.' }, headers);
-  }
-
-  const storedItems = await queryAll({
-    TableName: process.env.TEAM_ISSUES_TABLE_NAME,
-    IndexName: 'TeamIssueSortOrderIndex',
-    KeyConditionExpression: 'directoryTeamId = :directoryTeamId',
-    ExpressionAttributeValues: {
-      ':directoryTeamId': { S: createDirectoryTeamId(directoryId, teamId) },
-    },
-    ScanIndexForward: true,
-  });
-  const legacyIssues = await readLegacyTeamIssues(directoryId, directoryItems, teamId, principal);
-
-  return json(200, {
-    teamId,
-    issues: await hydrateTeamIssues(
-      mergeTeamIssues(
-        storedItems.map(toTeamIssue).filter((issue) => canAccessAssignedProject(directoryItems, principal, issue.assignedProjectId, 'viewer')),
-        legacyIssues,
-      ),
-      userPoolId,
-    ),
-  }, headers);
-}
-
-async function createTeamIssue(event, headers, directoryId, teamId, actorUserId, userPoolId, principal) {
-  const body = readJsonBody(event);
-  const directoryItems = await readDirectoryItems(directoryId);
-
-  if (!findActiveTeam(directoryItems, teamId)) {
-    return json(404, { message: 'Team was not found.' }, headers);
-  }
-
-  const title = readRequiredString(body.title, 'Issue title is required.');
-  const description = readOptionalString(body.description, 'Issue description is invalid.');
-  const assigneeUserId = readTeamIssueAssigneeUserId(body);
-  const status = readTaskStatus(body.status);
-  const dueDate = readRequiredString(body.dueDate, 'Issue due date is required.');
-  const priority = readTaskPriority(body.priority);
-  const assignedProjectId = readAssignedProjectId(body.assignedProjectId);
-  validateAssignedProjectInTeam(directoryItems, teamId, assignedProjectId);
-  requireAssignedProjectPermission(directoryItems, principal, assignedProjectId, 'member');
-  await getUserProfile(userPoolId, assigneeUserId);
-
-  const directoryTeamId = createDirectoryTeamId(directoryId, teamId);
-  const currentItems = await queryAll({
-    TableName: process.env.TEAM_ISSUES_TABLE_NAME,
-    IndexName: 'TeamIssueSortOrderIndex',
-    KeyConditionExpression: 'directoryTeamId = :directoryTeamId',
-    ExpressionAttributeValues: {
-      ':directoryTeamId': { S: directoryTeamId },
-    },
-    ScanIndexForward: true,
-  });
-  const now = new Date().toISOString();
-  const legacyIssueIds = await readLegacyTeamIssueIds(directoryId, directoryItems, teamId);
-  const issueId = createUniqueResourceId(
-    title,
-    [
-      ...currentItems.map((item) => item.issueId?.S).filter(Boolean),
-      ...legacyIssueIds,
-    ],
-  );
-  const item = {
-    directoryId: { S: directoryId },
-    directoryTeamId: { S: directoryTeamId },
-    teamId: { S: teamId },
-    issueId: { S: issueId },
-    sortOrder: { N: String((currentItems.length + 1) * 10) },
-    title: { S: title },
-    assigneeUserId: { S: assigneeUserId },
-    status: { S: status },
-    dueDate: { S: dueDate },
-    priority: { S: priority },
-    createdAt: { S: now },
-    updatedAt: { S: now },
-  };
-
-  if (description) {
-    item.description = { S: description };
-  }
-
-  if (assignedProjectId) {
-    item.assignedProjectId = { S: assignedProjectId };
-    item.directoryProjectId = { S: createDirectoryProjectId(directoryId, assignedProjectId) };
-  }
-
-  const eventItem = createIssueEventItem({
-    directoryId,
-    teamId,
-    issueId,
-    eventType: 'created',
-    actorUserId,
-    summary: 'Issue was created.',
-    createdAt: now,
-  });
-  await dynamodb.send(new TransactWriteItemsCommand({
-    TransactItems: [
-      {
-        Put: {
-          TableName: process.env.TEAM_ISSUES_TABLE_NAME,
-          Item: item,
-          ConditionExpression: 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)',
-        },
-      },
-      {
-        Put: {
-          TableName: process.env.TEAM_ISSUE_EVENTS_TABLE_NAME,
-          Item: eventItem,
-          ConditionExpression: 'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
-        },
-      },
-    ],
-  }));
-
-  return json(201, {
-    issue: await hydrateTeamIssue(toTeamIssue(item), userPoolId),
-  }, headers);
-}
-
-async function getTeamIssueDetail(headers, directoryId, teamId, issueId, userPoolId, principal) {
-  const item = await getStoredTeamIssueItem(directoryId, teamId, issueId);
-
-  if (!item) {
-    const directoryItems = await readDirectoryItems(directoryId);
-    const legacyIssue = (await readLegacyTeamIssues(directoryId, directoryItems, teamId, principal))
-      .find((issue) => issue.id === issueId);
-
-    if (legacyIssue) {
-      return json(200, {
-        issue: await hydrateTeamIssue(legacyIssue, userPoolId),
-        comments: [],
-        activity: [],
-      }, headers);
-    }
-
-    return json(404, { message: 'Issue was not found.' }, headers);
-  }
-
-  const directoryItems = await readDirectoryItems(directoryId);
-  requireAssignedProjectPermission(directoryItems, principal, item.assignedProjectId?.S, 'viewer');
-  const events = await readIssueEvents(directoryId, teamId, issueId);
-
-  return json(200, {
-    issue: await hydrateTeamIssue(toTeamIssue(item), userPoolId),
-    comments: events
-      .filter((event) => event.eventType?.S === 'commented')
-      .map(toTeamIssueComment),
-    activity: events.map(toTeamIssueActivity),
-  }, headers);
-}
-
-async function updateTeamIssue(event, headers, directoryId, teamId, issueId, actorUserId, userPoolId, principal) {
-  const body = readJsonBody(event);
-  const directoryItems = await readDirectoryItems(directoryId);
-
-  if (!findActiveTeam(directoryItems, teamId)) {
-    return json(404, { message: 'Team was not found.' }, headers);
-  }
-
-  const expressionAttributeNames = {
-    '#updatedAt': 'updatedAt',
-  };
-  const expressionAttributeValues = {
-    ':updatedAt': { S: new Date().toISOString() },
-  };
-  const setExpressions = ['#updatedAt = :updatedAt'];
-  const removeExpressions = [];
-  const currentIssue = await getStoredTeamIssueItem(directoryId, teamId, issueId);
-
-  if (!currentIssue) {
-    return json(404, { message: 'Issue was not found.' }, headers);
-  }
-
-  requireAssignedProjectPermission(directoryItems, principal, currentIssue.assignedProjectId?.S, 'member');
-
-  if (Object.prototype.hasOwnProperty.call(body, 'title')) {
-    expressionAttributeNames['#title'] = 'title';
-    expressionAttributeValues[':title'] = { S: readRequiredString(body.title, 'Issue title is required.') };
-    setExpressions.push('#title = :title');
-  }
-
-  if (Object.prototype.hasOwnProperty.call(body, 'description')) {
-    const description = readOptionalString(body.description, 'Issue description is invalid.');
-    expressionAttributeNames['#description'] = 'description';
-
-    if (description) {
-      expressionAttributeValues[':description'] = { S: description };
-      setExpressions.push('#description = :description');
-    } else {
-      removeExpressions.push('#description');
-    }
-  }
-
-  if (Object.prototype.hasOwnProperty.call(body, 'assignedProjectId')) {
-    const assignedProjectId = readAssignedProjectId(body.assignedProjectId);
-    validateAssignedProjectInTeam(directoryItems, teamId, assignedProjectId);
-    requireAssignedProjectPermission(directoryItems, principal, assignedProjectId, 'member');
-    expressionAttributeNames['#assignedProjectId'] = 'assignedProjectId';
-    expressionAttributeNames['#directoryProjectId'] = 'directoryProjectId';
-
-    if (assignedProjectId) {
-      expressionAttributeValues[':assignedProjectId'] = { S: assignedProjectId };
-      expressionAttributeValues[':directoryProjectId'] = { S: createDirectoryProjectId(directoryId, assignedProjectId) };
-      setExpressions.push('#assignedProjectId = :assignedProjectId');
-      setExpressions.push('#directoryProjectId = :directoryProjectId');
-    } else {
-      removeExpressions.push('#assignedProjectId');
-      removeExpressions.push('#directoryProjectId');
-    }
-  }
-
-  if (Object.prototype.hasOwnProperty.call(body, 'assigneeUserId')) {
-    const assigneeUserId = readTeamIssueAssigneeUserId(body);
-    await getUserProfile(userPoolId, assigneeUserId);
-    expressionAttributeNames['#assigneeUserId'] = 'assigneeUserId';
-    expressionAttributeValues[':assigneeUserId'] = { S: assigneeUserId };
-    setExpressions.push('#assigneeUserId = :assigneeUserId');
-  }
-
-  if (Object.prototype.hasOwnProperty.call(body, 'status')) {
-    expressionAttributeNames['#status'] = 'status';
-    expressionAttributeValues[':status'] = { S: readRequiredTaskStatus(body.status) };
-    setExpressions.push('#status = :status');
-  }
-
-  if (Object.prototype.hasOwnProperty.call(body, 'dueDate')) {
-    expressionAttributeNames['#dueDate'] = 'dueDate';
-    expressionAttributeValues[':dueDate'] = { S: readRequiredString(body.dueDate, 'Issue due date is required.') };
-    setExpressions.push('#dueDate = :dueDate');
-  }
-
-  if (Object.prototype.hasOwnProperty.call(body, 'priority')) {
-    expressionAttributeNames['#priority'] = 'priority';
-    expressionAttributeValues[':priority'] = { S: readTaskPriority(body.priority) };
-    setExpressions.push('#priority = :priority');
-  }
-
-  const updateExpression = [
-    'SET ' + setExpressions.join(', '),
-    removeExpressions.length > 0 ? 'REMOVE ' + removeExpressions.join(', ') : undefined,
-  ].filter(Boolean).join(' ');
-  const eventItem = createIssueEventItem({
-    directoryId,
-    teamId,
-    issueId,
-    eventType: 'updated',
-    actorUserId,
-    summary: 'Issue was updated.',
-    createdAt: expressionAttributeValues[':updatedAt'].S,
-  });
-
-  try {
-    await dynamodb.send(new TransactWriteItemsCommand({
-      TransactItems: [
-        {
-          Update: {
-            TableName: process.env.TEAM_ISSUES_TABLE_NAME,
-            Key: {
-              directoryTeamId: { S: createDirectoryTeamId(directoryId, teamId) },
-              issueId: { S: issueId },
-            },
-            UpdateExpression: updateExpression,
-            ExpressionAttributeNames: expressionAttributeNames,
-            ExpressionAttributeValues: expressionAttributeValues,
-            ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
-          },
-        },
-        {
-          Put: {
-            TableName: process.env.TEAM_ISSUE_EVENTS_TABLE_NAME,
-            Item: eventItem,
-            ConditionExpression: 'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
-          },
-        },
-      ],
-    }));
-  } catch (error) {
-    if (
-      error?.name === 'ConditionalCheckFailedException' ||
-      (error?.name === 'TransactionCanceledException' && !await getStoredTeamIssueItem(directoryId, teamId, issueId))
-    ) {
-      return json(404, { message: 'Issue was not found.' }, headers);
-    }
-
-    throw error;
-  }
-
-  const updatedIssue = await getStoredTeamIssueItem(directoryId, teamId, issueId, true);
-
-  return json(200, {
-    issue: await hydrateTeamIssue(toTeamIssue(updatedIssue), userPoolId),
-  }, headers);
-}
-
-async function createTeamIssueComment(event, headers, directoryId, teamId, issueId, actorUserId, userPoolId, principal) {
-  const body = readJsonBody(event);
-  const issue = await getStoredTeamIssueItem(directoryId, teamId, issueId);
-
-  if (!issue) {
-    return json(404, { message: 'Issue was not found.' }, headers);
-  }
-
-  requireAssignedProjectPermission(
-    await readDirectoryItems(directoryId),
-    principal,
-    issue.assignedProjectId?.S,
-    'member',
-  );
-
-  const createdAt = new Date().toISOString();
-  const item = await putIssueEvent({
-    directoryId,
-    teamId,
-    issueId,
-    eventType: 'commented',
-    actorUserId,
-    body: readRequiredCommentBody(body.body),
-    summary: 'Comment was added.',
-    createdAt,
-  });
-
-  return json(201, {
-    comment: toTeamIssueComment(item),
-    activity: toTeamIssueActivity(item),
-  }, headers);
-}
-
-async function listProjectIssues(headers, directoryId, projectId, userPoolId) {
-  const storedItems = await queryAll({
-    TableName: process.env.TEAM_ISSUES_TABLE_NAME,
-    IndexName: 'AssignedProjectIssueIndex',
-    KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
-    ExpressionAttributeValues: {
-      ':directoryProjectId': { S: createDirectoryProjectId(directoryId, projectId) },
-    },
-    ScanIndexForward: true,
-  });
-  const directoryItems = await readDirectoryItems(directoryId);
-  const ownerTeamId = findFirstActiveProjectTeamId(directoryItems, projectId);
-  const legacyTasks = ownerTeamId
-    ? await queryAll({
-        TableName: process.env.TASKS_TABLE_NAME,
-        IndexName: 'ProjectSortOrderIndex',
-        KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
-        ExpressionAttributeValues: {
-          ':directoryProjectId': { S: createDirectoryProjectId(directoryId, projectId) },
-        },
-        ScanIndexForward: true,
-      })
-    : [];
-
-  return json(200, {
-    projectId,
-    issues: await hydrateTeamIssues(
-      mergeTeamIssues(
-        storedItems.map(toTeamIssue),
-        legacyTasks.map((task) => toLegacyTeamIssue(toTask(task), ownerTeamId, projectId)),
-      ),
-      userPoolId,
-    ),
-  }, headers);
-}
-
-async function readLegacyTeamIssues(directoryId, directoryItems, teamId, principal) {
-  const issues = [];
-  const projects = directoryItems.filter((item) =>
-    item.entryType?.S === 'project' &&
-    item.teamId?.S === teamId &&
-    isActiveDirectoryItem(item) &&
-    findFirstActiveProjectTeamId(directoryItems, item.projectId?.S) === teamId &&
-    canAccessAssignedProject(directoryItems, principal, item.projectId?.S, 'viewer')
-  );
-
-  for (const project of projects) {
-    const items = await queryAll({
-      TableName: process.env.TASKS_TABLE_NAME,
-      IndexName: 'ProjectSortOrderIndex',
-      KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
-      ExpressionAttributeValues: {
-        ':directoryProjectId': { S: createDirectoryProjectId(directoryId, project.projectId.S) },
-      },
-      ScanIndexForward: true,
-    });
-    issues.push(...items.map((item) => toLegacyTeamIssue(toTask(item), teamId, project.projectId.S)));
-  }
-
-  return issues;
-}
-
-async function readLegacyTeamIssueIds(directoryId, directoryItems, teamId) {
-  const issueIds = [];
-  const projects = directoryItems.filter((item) =>
-    item.entryType?.S === 'project' &&
-    item.teamId?.S === teamId &&
-    isActiveDirectoryItem(item) &&
-    findFirstActiveProjectTeamId(directoryItems, item.projectId?.S) === teamId
-  );
-
-  for (const project of projects) {
-    const items = await queryAll({
-      TableName: process.env.TASKS_TABLE_NAME,
-      IndexName: 'ProjectSortOrderIndex',
-      KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
-      ExpressionAttributeValues: {
-        ':directoryProjectId': { S: createDirectoryProjectId(directoryId, project.projectId.S) },
-      },
-      ScanIndexForward: true,
-    });
-    issueIds.push(...items.map((item) => item.taskId?.S).filter(Boolean));
-  }
-
-  return issueIds;
-}
-
-async function isLegacyProjectTaskIssue(directoryId, projectId, taskId) {
-  const directoryItems = await readDirectoryItems(directoryId);
-
-  if (!findFirstActiveProjectTeamId(directoryItems, projectId)) {
-    return false;
-  }
-
-  const items = await queryAll({
-    TableName: process.env.TASKS_TABLE_NAME,
-    KeyConditionExpression: 'directoryProjectId = :directoryProjectId AND taskId = :taskId',
-    ExpressionAttributeValues: {
-      ':directoryProjectId': { S: createDirectoryProjectId(directoryId, projectId) },
-      ':taskId': { S: taskId },
-    },
-    Limit: 1,
-  });
-
-  return items.length > 0;
-}
-
-function mergeTeamIssues(primaryIssues, fallbackIssues) {
-  const issueIds = new Set(primaryIssues.map((issue) => issue.id));
-
-  return [
-    ...primaryIssues,
-    ...fallbackIssues.filter((issue) => !issueIds.has(issue.id)),
-  ];
-}
-
-async function getStoredTeamIssueItem(directoryId, teamId, issueId, consistentRead = false) {
-  const items = await queryAll({
-    TableName: process.env.TEAM_ISSUES_TABLE_NAME,
-    KeyConditionExpression: 'directoryTeamId = :directoryTeamId AND issueId = :issueId',
-    ExpressionAttributeValues: {
-      ':directoryTeamId': { S: createDirectoryTeamId(directoryId, teamId) },
-      ':issueId': { S: issueId },
-    },
-    ConsistentRead: consistentRead,
-    Limit: 1,
-  });
-
-  return items[0];
-}
-
-async function readIssueEvents(directoryId, teamId, issueId) {
-  return queryAll({
-    TableName: process.env.TEAM_ISSUE_EVENTS_TABLE_NAME,
-    KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
-    ExpressionAttributeValues: {
-      ':directoryTeamIssueId': { S: createDirectoryTeamIssueId(directoryId, teamId, issueId) },
-    },
-    ScanIndexForward: true,
-  });
-}
-
-async function putIssueEvent(input) {
-  const item = createIssueEventItem(input);
-
-  await dynamodb.send(new PutItemCommand({
-    TableName: process.env.TEAM_ISSUE_EVENTS_TABLE_NAME,
-    Item: item,
-    ConditionExpression: 'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
-  }));
-
-  return item;
-}
-
-function createIssueEventItem(input) {
-  const item = {
-    directoryTeamIssueId: { S: createDirectoryTeamIssueId(input.directoryId, input.teamId, input.issueId) },
-    eventId: { S: createTeamIssueEventId(input.eventType, input.createdAt) },
-    directoryId: { S: input.directoryId },
-    teamId: { S: input.teamId },
-    issueId: { S: input.issueId },
-    eventType: { S: input.eventType },
-    actorUserId: { S: input.actorUserId },
-    summary: { S: input.summary },
-    createdAt: { S: input.createdAt },
-  };
-
-  if (input.body) {
-    item.body = { S: input.body };
-  }
-
-  return item;
-}
-
-async function readDirectoryItems(directoryId) {
-  return queryAll({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    KeyConditionExpression: 'directoryId = :directoryId',
-    ExpressionAttributeValues: {
-      ':directoryId': { S: directoryId },
-    },
-    ScanIndexForward: true,
-  });
-}
-
-function findActiveTeam(items, teamId) {
-  return items.find((item) =>
-    item.entryType?.S === 'team' &&
-    item.teamId?.S === teamId &&
-    isActiveDirectoryItem(item)
-  );
-}
-
-function validateAssignedProjectInTeam(items, teamId, assignedProjectId) {
-  if (!assignedProjectId) {
-    return;
-  }
-
-  const hasAssignedProject = items.some((item) =>
-    item.entryType?.S === 'project' &&
-    item.teamId?.S === teamId &&
-    item.projectId?.S === assignedProjectId &&
-    isActiveDirectoryItem(item)
-  );
-
-  if (!hasAssignedProject) {
-    const error = new Error('Assigned project is not active in team.');
-    error.name = 'InvalidProjectWrite';
-    throw error;
-  }
-}
-
-function requireAssignedProjectPermission(items, principal, assignedProjectId, minimumRole) {
-  if (!assignedProjectId || principal.isSystemAdmin) {
-    return;
-  }
-
-  if (!canAccessAssignedProject(items, principal, assignedProjectId, minimumRole)) {
-    const error = new Error('Project access is denied.');
-    error.name = 'ProjectAccessDenied';
-    throw error;
-  }
-}
-
-function canAccessAssignedProject(items, principal, assignedProjectId, minimumRole) {
-  if (!assignedProjectId || principal.isSystemAdmin) {
-    return true;
-  }
-
-  const normalizedMemberKey = normalizeProjectMemberKey(principal.userKey);
-  const member = items.find((item) =>
-    item.entryType?.S === 'project-member' &&
-    item.projectId?.S === assignedProjectId &&
-    item.memberKey?.S === normalizedMemberKey
-  );
-
-  return isProjectRole(member?.role?.S) && projectRoleAllows(member.role.S, minimumRole);
-}
-
-function findFirstActiveProjectTeamId(items, projectId) {
-  const activeTeamIds = new Set(
-    items
-      .filter((item) => item.entryType?.S === 'team' && isActiveDirectoryItem(item))
-      .map((item) => item.teamId?.S)
-      .filter(Boolean)
-  );
-  const project = items.find((item) =>
-    item.entryType?.S === 'project' &&
-    item.projectId?.S === projectId &&
-    activeTeamIds.has(item.teamId?.S) &&
-    isActiveDirectoryItem(item)
-  );
-
-  return project?.teamId?.S;
-}
-
-async function listProjectDirectory(event, headers, directoryId) {
-  const locale = event.queryStringParameters?.locale === 'en' ? 'en' : 'ja';
-
-  try {
-    const items = await queryAll({
-      TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-      KeyConditionExpression: 'directoryId = :directoryId',
-      ExpressionAttributeValues: {
-        ':directoryId': { S: directoryId },
-      },
-      ScanIndexForward: true,
-    });
-
-    return json(200, {
-      teams: toProjectDirectory(items, locale),
-    }, headers);
-  } catch (error) {
-    console.error(error);
-    return json(500, { message: 'Failed to load project directory.' }, headers);
-  }
-}
-
-function isProjectDirectoryRequest(event) {
-  const path = event.rawPath ?? '';
-  return path === '/teams/projects' || path === '/api/teams/projects';
-}
-
-function isCreateTeamRequest(event) {
-  const path = event.rawPath ?? '';
-  return event.requestContext?.http?.method === 'POST' && (path === '/teams' || path === '/api/teams');
-}
-
-function readCreateProjectTeamId(event) {
-  if (event.requestContext?.http?.method !== 'POST') {
-    return undefined;
-  }
-
-  const encodedTeamId = event.rawPath?.match(/^\\/(?:api\\/)?teams\\/([^/]+)\\/projects$/)?.[1];
-
-  return encodedTeamId ? decodePathSegment(encodedTeamId) : undefined;
-}
-
-function readArchiveTeamId(event) {
-  if (event.requestContext?.http?.method !== 'PATCH') {
-    return undefined;
-  }
-
-  const encodedTeamId = event.rawPath?.match(/^\\/(?:api\\/)?teams\\/([^/]+)\\/archive$/)?.[1];
-
-  return encodedTeamId ? decodePathSegment(encodedTeamId) : undefined;
-}
-
-function readArchiveProjectParams(event) {
-  if (event.requestContext?.http?.method !== 'PATCH') {
-    return undefined;
-  }
-
-  const match = event.rawPath?.match(/^\\/(?:api\\/)?teams\\/([^/]+)\\/projects\\/([^/]+)\\/archive$/);
-  const teamId = match?.[1] ? decodePathSegment(match[1]) : undefined;
-  const projectId = match?.[2] ? decodePathSegment(match[2]) : undefined;
-
-  return teamId && projectId ? { teamId, projectId } : undefined;
-}
-
-	function readProjectMembersProjectId(event) {
-	  if (event.requestContext?.http?.method !== 'GET') {
-	    return undefined;
-	  }
-
-  const encodedProjectId = event.rawPath?.match(/^\\/(?:api\\/)?projects\\/([^/]+)\\/members$/)?.[1];
-
-	  return encodedProjectId ? decodePathSegment(encodedProjectId) : undefined;
-	}
-
-	function readProjectUsersProjectId(event) {
-	  if (event.requestContext?.http?.method !== 'GET') {
-	    return undefined;
-	  }
-
-	  const encodedProjectId = event.rawPath?.match(/^\\/(?:api\\/)?projects\\/([^/]+)\\/users$/)?.[1];
-
-	  return encodedProjectId ? decodePathSegment(encodedProjectId) : undefined;
-	}
-
-	function readProjectMemberParams(event) {
-  if (event.requestContext?.http?.method !== 'PATCH' && event.requestContext?.http?.method !== 'DELETE') {
-    return undefined;
-  }
-
-  const match = event.rawPath?.match(/^\\/(?:api\\/)?projects\\/([^/]+)\\/members\\/([^/]+)$/);
-  const projectId = match?.[1] ? decodePathSegment(match[1]) : undefined;
-  const memberKey = match?.[2] ? decodePathSegment(match[2]) : undefined;
-
-  return projectId && memberKey ? { projectId, memberKey } : undefined;
-}
-
-function readTeamIssueListParams(event) {
-  if (event.requestContext?.http?.method !== 'GET' && event.requestContext?.http?.method !== 'POST') {
-    return undefined;
-  }
-
-  const encodedTeamId = event.rawPath?.match(/^\\/(?:api\\/)?teams\\/([^/]+)\\/issues$/)?.[1];
-  const teamId = encodedTeamId ? decodePathSegment(encodedTeamId) : undefined;
-
-  return teamId ? { teamId } : undefined;
-}
-
-function readTeamIssueDetailParams(event) {
-  if (event.requestContext?.http?.method !== 'GET' && event.requestContext?.http?.method !== 'PATCH') {
-    return undefined;
-  }
-
-  const match = event.rawPath?.match(/^\\/(?:api\\/)?teams\\/([^/]+)\\/issues\\/([^/]+)$/);
-  const teamId = match?.[1] ? decodePathSegment(match[1]) : undefined;
-  const issueId = match?.[2] ? decodePathSegment(match[2]) : undefined;
-
-  return teamId && issueId ? { teamId, issueId } : undefined;
-}
-
-function readTeamIssueCommentParams(event) {
-  if (event.requestContext?.http?.method !== 'POST') {
-    return undefined;
-  }
-
-  const match = event.rawPath?.match(/^\\/(?:api\\/)?teams\\/([^/]+)\\/issues\\/([^/]+)\\/comments$/);
-  const teamId = match?.[1] ? decodePathSegment(match[1]) : undefined;
-  const issueId = match?.[2] ? decodePathSegment(match[2]) : undefined;
-
-  return teamId && issueId ? { teamId, issueId } : undefined;
-}
-
-function readProjectIssuesProjectId(event) {
-  if (event.requestContext?.http?.method !== 'GET') {
-    return undefined;
-  }
-
-  const encodedProjectId = event.rawPath?.match(/^\\/(?:api\\/)?projects\\/([^/]+)\\/issues$/)?.[1];
-
-  return encodedProjectId ? decodePathSegment(encodedProjectId) : undefined;
-}
-
-function readProjectTaskStatusParams(event) {
-  if (event.requestContext?.http?.method !== 'PATCH') {
-    return undefined;
-  }
-
-  const match = event.rawPath?.match(/^\\/(?:api\\/)?projects\\/([^/]+)\\/tasks\\/([^/]+)$/);
-  const projectId = match?.[1] ? decodePathSegment(match[1]) : undefined;
-  const taskId = match?.[2] ? decodePathSegment(match[2]) : undefined;
-
-  return projectId && taskId ? { projectId, taskId } : undefined;
-}
-
-async function enforceProjectPermission(headers, principal, projectId, minimumRole) {
-  if (principal.isSystemAdmin) {
-    return undefined;
-  }
-
-  const projectAccess = await getProjectAccess(
-    principal.directoryId,
-    projectId,
-    principal.userKey,
-  );
-
-  if (!projectAccess) {
-    return json(403, { message: 'Project access is denied.' }, headers);
-  }
-
-  if (!projectAccess.role || !projectRoleAllows(projectAccess.role, minimumRole)) {
-    return json(403, { message: 'Project access is denied.' }, headers);
-  }
-
-  return undefined;
-}
-
-async function enforceTeamPermission(headers, principal, teamId, minimumRole) {
-  if (principal.isSystemAdmin) {
-    return undefined;
-  }
-
-  const teamAccess = await getTeamAccess(
-    principal.directoryId,
-    teamId,
-    principal.userKey,
-  );
-
-  if (!teamAccess) {
-    return json(403, { message: 'Project access is denied.' }, headers);
-  }
-
-  if (!teamAccess.role || !projectRoleAllows(teamAccess.role, minimumRole)) {
-    return json(403, { message: 'Project access is denied.' }, headers);
-  }
-
-  return undefined;
-}
-
-async function getProjectAccess(directoryId, projectId, memberKey) {
-  const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
-  const items = await queryAll({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    KeyConditionExpression: 'directoryId = :directoryId',
-    ExpressionAttributeValues: {
-      ':directoryId': { S: directoryId },
-    },
-    ScanIndexForward: true,
-  });
-
-  const activeTeamIds = new Set(
-    items
-      .filter((item) => item.entryType?.S === 'team' && isActiveDirectoryItem(item))
-      .map((item) => item.teamId?.S)
-      .filter(Boolean)
-  );
-
-  const hasProjectAccess = items.some((item) =>
-    item.entryType?.S === 'project' &&
-    item.projectId?.S === projectId &&
-    activeTeamIds.has(item.teamId?.S) &&
-    isActiveDirectoryItem(item)
-  );
-
-  if (!hasProjectAccess) {
-    return undefined;
-  }
-
-  const member = items.find((item) =>
-    item.entryType?.S === 'project-member' &&
-    item.projectId?.S === projectId &&
-    item.memberKey?.S === normalizedMemberKey
-  );
-
-  return {
-    projectId,
-    role: member?.role?.S,
-  };
-}
-
-async function getTeamAccess(directoryId, teamId, memberKey) {
-  const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
-  const items = await readDirectoryItems(directoryId);
-
-  if (!findActiveTeam(items, teamId)) {
-    return undefined;
-  }
-
-  const projectIds = new Set(
-    items
-      .filter((item) =>
-        item.entryType?.S === 'project' &&
-        item.teamId?.S === teamId &&
-        isActiveDirectoryItem(item)
-      )
-      .map((item) => item.projectId?.S)
-      .filter(Boolean)
-  );
-  const roles = items
-    .filter((item) =>
-      item.entryType?.S === 'project-member' &&
-      item.memberKey?.S === normalizedMemberKey &&
-      projectIds.has(item.projectId?.S)
-    )
-    .map((item) => item.role?.S)
-    .filter(Boolean)
-    .sort((first, second) => projectRoleWeight(second) - projectRoleWeight(first));
-
-  return roles[0] ? { teamId, role: roles[0] } : undefined;
-}
-
-	async function queryAll(input) {
-	  const items = [];
-  let ExclusiveStartKey;
-
-  do {
-    const response = await dynamodb.send(new QueryCommand({
-      ...input,
-      ExclusiveStartKey,
-    }));
-
-    items.push(...(response.Items ?? []));
-    ExclusiveStartKey = response.LastEvaluatedKey;
-  } while (ExclusiveStartKey);
-
-	  return items;
-	}
-
-	async function hydrateProjectMembers(members, userPoolId) {
-	  return Promise.all(members.map((member) => hydrateProjectMember(member, userPoolId)));
-	}
-
-	async function hydrateProjectMember(member, userPoolId) {
-	  try {
-	    const profile = await getUserProfile(userPoolId, member.id);
-
-	    return {
-	      ...member,
-	      id: profile.id,
-	      email: profile.email,
-	      username: profile.username,
-	      name: profile.name,
-	      enabled: profile.enabled,
-	      status: profile.status,
-	    };
-	  } catch (error) {
-	    if (error?.name === 'UserNotFoundException') {
-	      return member;
-	    }
-
-	    console.warn('Failed to hydrate project member from Cognito:', error);
-	    return member;
-	  }
-	}
-
-	async function hydrateProjectTasks(tasks, userPoolId) {
-	  const profiles = new Map();
-	  const userIds = [...new Set(tasks.map((task) => task.assigneeUserId).filter(Boolean))];
-
-	  await Promise.all(userIds.map(async (userId) => {
-	    try {
-	      profiles.set(userId, await getUserProfile(userPoolId, userId));
-	    } catch (error) {
-	      if (error?.name !== 'UserNotFoundException') {
-	        console.warn('Failed to hydrate task assignee from Cognito:', error);
-	      }
-	    }
-	  }));
-
-	  return tasks.map((task) => hydrateProjectTaskFromProfiles(task, profiles));
-	}
-
-	async function hydrateProjectTask(task, userPoolId) {
-	  if (!task.assigneeUserId) {
-	    return task;
-	  }
-
-	  try {
-	    const profile = await getUserProfile(userPoolId, task.assigneeUserId);
-	    return hydrateProjectTaskFromProfiles(task, new Map([[task.assigneeUserId, profile]]));
-	  } catch (error) {
-	    if (error?.name === 'UserNotFoundException') {
-	      return task;
-	    }
-
-	    console.warn('Failed to hydrate task assignee from Cognito:', error);
-	    return task;
-	  }
-	}
-
-	function hydrateProjectTaskFromProfiles(task, profiles) {
-	  if (!task.assigneeUserId) {
-	    return task;
-	  }
-
-	  const profile = profiles.get(task.assigneeUserId);
-
-	  if (!profile) {
-	    return task;
-	  }
-
-	  return {
-	    ...task,
-	    assigneeEmail: profile.email,
-	    assigneeName: profile.name,
-	  };
-	}
-
-async function hydrateTeamIssues(issues, userPoolId) {
-  const profiles = new Map();
-  const userIds = [...new Set(issues.map((issue) => issue.assigneeUserId).filter(Boolean))];
-
-  await Promise.all(userIds.map(async (userId) => {
-    try {
-      profiles.set(userId, await getUserProfile(userPoolId, userId));
-    } catch (error) {
-      if (error?.name !== 'UserNotFoundException') {
-        console.warn('Failed to hydrate issue assignee from Cognito:', error);
-      }
-    }
-  }));
-
-  return issues.map((issue) => hydrateTeamIssueFromProfiles(issue, profiles));
-}
-
-async function hydrateTeamIssue(issue, userPoolId) {
-  if (!issue.assigneeUserId) {
-    return issue;
-  }
-
-  try {
-    const profile = await getUserProfile(userPoolId, issue.assigneeUserId);
-    return hydrateTeamIssueFromProfiles(issue, new Map([[issue.assigneeUserId, profile]]));
-  } catch (error) {
-    if (error?.name === 'UserNotFoundException') {
-      return issue;
-    }
-
-    console.warn('Failed to hydrate issue assignee from Cognito:', error);
-    return issue;
-  }
-}
-
-function hydrateTeamIssueFromProfiles(issue, profiles) {
-  if (!issue.assigneeUserId) {
-    return issue;
-  }
-
-  const profile = profiles.get(issue.assigneeUserId);
-
-  if (!profile) {
-    return issue;
-  }
-
-  return {
-    ...issue,
-    assigneeEmail: profile.email,
-    assigneeName: profile.name,
-  };
-}
-
-	async function getUserProfile(userPoolId, userId) {
-	  if (!userPoolId) {
-	    const error = new Error('Cognito user pool is not available.');
-	    error.name = 'ResourceNotFoundException';
-	    throw error;
-	  }
-
-	  const normalizedUserId = normalizeProjectMemberKey(userId);
-	  const profile = toCognitoUserProfile(await cognito.send(new AdminGetUserCommand({
-	    UserPoolId: userPoolId,
-	    Username: normalizedUserId,
-	  })));
-
-	  if (!profile) {
-	    const error = new Error('Cognito user was not found.');
-	    error.name = 'UserNotFoundException';
-	    throw error;
-	  }
-
-	  return profile;
-	}
-
-	function json(statusCode, body, headers) {
-  return { statusCode, headers, body: JSON.stringify(body) };
-}
-
-function toProjectDataError(error, headers, fallbackMessage) {
-  console.error(error);
-
-		  if (error?.name === 'ConditionalCheckFailedException' || error?.name === 'TransactionCanceledException') {
-		    return json(409, { message: 'The same item already exists.' }, headers);
-		  }
-
-	  if (error?.name === 'UserNotFoundException') {
-	    return json(404, { message: 'Cognito user was not found.' }, headers);
-	  }
-
-  if (error?.name === 'InvalidProjectWrite') {
-    return json(400, { message: error.message || 'Project write is invalid.' }, headers);
-  }
-
-  if (error?.name === 'TeamIssueNotFound') {
-    return json(404, { message: 'Issue was not found.' }, headers);
-  }
-
-  if (error?.name === 'ProjectAccessDenied') {
-    return json(403, { message: 'Project access is denied.' }, headers);
-  }
-
-	  if (error?.name === 'ResourceNotFoundException') {
-    return json(503, { message: 'Project data is not initialized.' }, headers);
-  }
-
-  return json(500, { message: fallbackMessage }, headers);
-}
-
-function readJsonBody(event) {
-  if (!event.body) {
-    return {};
-  }
-
-  const text = event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body;
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    return {};
-  }
-}
-
-function createHeaders(event) {
-  const origin = event.headers?.origin ?? event.headers?.Origin;
-  const allowedOrigins = parseAllowedOrigins();
-  const allowedOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
-
-  return {
-    'access-control-allow-origin': allowedOrigin,
-    'access-control-allow-methods': 'GET,POST,PATCH,DELETE,OPTIONS',
-    'access-control-allow-headers': 'authorization,content-type',
-    'content-type': 'application/json; charset=utf-8',
-    vary: 'origin',
-  };
-}
-
-function parseAllowedOrigins() {
-  const origins = (process.env.ALLOWED_ORIGINS ?? '')
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean);
-
-  return origins.length > 0 ? origins : ['http://localhost:5173'];
-}
-
-function readBearerAccessToken(event) {
-  const authorization = event.headers?.authorization ?? event.headers?.Authorization ?? '';
-  return authorization.match(/^Bearer\\s+(.+)$/i)?.[1];
-}
-
-function toProjectPrincipal(user, accessToken, userPoolId) {
-  const userKey = user.UserAttributes?.find((attribute) => attribute.Name === 'email')?.Value ?? user.Username;
-
-  if (!userKey?.trim()) {
-    return undefined;
-  }
-
-  const normalizedUserKey = userKey.trim().toLowerCase();
-  const directoryId =
-    readUserAttribute(user, 'custom:directory_id')?.trim() ||
-    readUserAttribute(user, 'custom:workspace_id')?.trim() ||
-    'user#' + normalizedUserKey;
-  const groups = readCognitoGroups(accessToken);
-
-	  return {
-	    directoryId,
-	    userKey: normalizedUserKey,
-	    userPoolId,
-	    isSystemAdmin: groups.some((group) => getSystemAdminGroups().includes(group)),
-	  };
-	}
-
-	function readUserAttribute(user, name) {
-	  return user.UserAttributes?.find((attribute) => attribute.Name === name)?.Value;
-	}
-
-	function readConfiguredCognitoUserPoolId() {
-	  return process.env.COGNITO_USER_POOL_ID?.trim();
-	}
-
-	function isExpectedCognitoIssuer(accessToken, userPoolId) {
-	  const issuer = decodeJwtPayload(accessToken)?.iss;
-
-	  if (typeof issuer !== 'string') {
-	    return false;
-	  }
-
-	  return issuer === createCognitoIssuer(userPoolId);
-	}
-
-	function createCognitoIssuer(userPoolId) {
-	  const region = userPoolId.includes('_')
-	    ? userPoolId.split('_')[0]
-	    : process.env.AWS_REGION;
-
-	  return 'https://cognito-idp.' + region + '.amazonaws.com/' + userPoolId;
-	}
-
-	function toCognitoUserProfile(user) {
-	  const email = readCognitoUserAttribute(user, 'email')?.trim().toLowerCase();
-	  const username = user.Username?.trim();
-
-	  if (!email || !username) {
-	    return undefined;
-	  }
-
-	  return {
-	    id: email,
-	    username,
-	    email,
-	    name: readCognitoUserAttribute(user, 'name')?.trim() || undefined,
-	    enabled: user.Enabled,
-	    status: user.UserStatus,
-	  };
-	}
-
-	function readCognitoUserAttribute(user, name) {
-	  return (user.Attributes ?? user.UserAttributes)?.find((attribute) => attribute.Name === name)?.Value;
-	}
-
-	function isCognitoUserInDirectory(user, directoryId) {
-	  if (!directoryId) {
-	    return true;
-	  }
-
-	  return ['custom:directory_id', 'custom:workspace_id'].some((attributeName) =>
-	    readCognitoUserAttribute(user, attributeName)?.trim() === directoryId
-	  );
-	}
-
-function readCognitoGroups(accessToken) {
-  const claims = decodeJwtPayload(accessToken);
-  const groups = claims?.['cognito:groups'];
-
-  return Array.isArray(groups) ? groups.filter((group) => typeof group === 'string' && group) : [];
-}
-
-function decodeJwtPayload(token) {
-  const payload = token.split('.')[1];
-
-  if (!payload) {
-    return undefined;
-  }
-
-  try {
-    const normalizedPayload = payload.replace(/-/g, '+').replace(/_/g, '/');
-    const paddedPayload = normalizedPayload.padEnd(normalizedPayload.length + ((4 - normalizedPayload.length % 4) % 4), '=');
-    return JSON.parse(Buffer.from(paddedPayload, 'base64').toString('utf8'));
-  } catch {
-    return undefined;
-  }
-}
-
-function getSystemAdminGroups() {
-  const groups = (process.env.SYSTEM_ADMIN_GROUPS ?? 'mukuroji-system-admins')
-    .split(',')
-    .map((group) => group.trim())
-    .filter(Boolean);
-
-  return groups.length > 0 ? groups : ['mukuroji-system-admins'];
-}
-
-function createDirectoryProjectId(directoryId, projectId) {
-  return directoryId + '#project#' + projectId;
-}
-
-function createDirectoryTeamId(directoryId, teamId) {
-  return directoryId + '#team#' + teamId;
-}
-
-function createDirectoryTeamIssueId(directoryId, teamId, issueId) {
-  return createDirectoryTeamId(directoryId, teamId) + '#issue#' + issueId;
-}
-
-function createTeamIssueEventId(eventType, createdAt) {
-  return createdAt + '#' + eventType + '#' + Math.random().toString(36).slice(2, 10);
-}
-
-function decodePathSegment(value) {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return undefined;
-  }
-}
-
-function readRequiredString(value, message) {
-  if (typeof value !== 'string' || !value.trim()) {
-    const error = new Error(message);
-    error.name = 'InvalidProjectWrite';
-    throw error;
-  }
-
-  return value.trim();
-}
-
-function readOptionalString(value, message) {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (value === null) {
-    return '';
-  }
-
-  if (typeof value !== 'string') {
-    const error = new Error(message);
-    error.name = 'InvalidProjectWrite';
-    throw error;
-  }
-
-  return value.trim();
-}
-
-function readAssignedProjectId(value) {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (value === null) {
-    return null;
-  }
-
-  if (typeof value !== 'string') {
-    const error = new Error('Assigned project is invalid.');
-    error.name = 'InvalidProjectWrite';
-    throw error;
-  }
-
-  return value.trim() || null;
-}
-
-function readTeamIssueAssigneeUserId(input) {
-  const value = input.assigneeUserId;
-
-  if (typeof value !== 'string' || !value.trim()) {
-    const error = new Error('Issue assignee is required.');
-    error.name = 'InvalidProjectWrite';
-    throw error;
-  }
-
-  return normalizeProjectMemberKey(value);
-}
-
-function readRequiredCommentBody(value) {
-  if (typeof value !== 'string' || !value.trim()) {
-    const error = new Error('Issue comment body is required.');
-    error.name = 'InvalidProjectWrite';
-    throw error;
-  }
-
-  return value.trim();
-}
-
-function readLocalizedNames(body) {
-  const name = typeof body.name === 'string' ? body.name.trim() : '';
-  const nameJa = typeof body.nameJa === 'string' ? body.nameJa.trim() : '';
-  const nameEn = typeof body.nameEn === 'string' ? body.nameEn.trim() : '';
-  const primaryName = nameJa || name || nameEn;
-
-  if (!primaryName) {
-    return undefined;
-  }
-
-  return {
-    nameJa: primaryName,
-    nameEn: nameEn || name || primaryName,
-  };
-}
-
-function createResourceId(value) {
-  const normalized = value
-    .trim()
-    .toLowerCase()
-    .normalize('NFKC')
-    .replace(/[^\\p{Letter}\\p{Number}]+/gu, '-')
-    .replace(/^-+|-+$/g, '');
-
-  return normalized || 'item-' + Date.now();
-}
-
-function createUniqueResourceId(value, existingIds) {
-  const baseId = createResourceId(value);
-  const usedIds = new Set(existingIds);
-
-  if (!usedIds.has(baseId)) {
-    return baseId;
-  }
-
-  let suffix = 2;
-
-  while (usedIds.has(baseId + '-' + suffix)) {
-    suffix += 1;
-  }
-
-  return baseId + '-' + suffix;
-}
-
-function createTeamEntryKey(teamSortOrder, teamId) {
-  return padSortOrder(teamSortOrder) + '#000000#TEAM#' + teamId;
-}
-
-function createProjectEntryKey(teamSortOrder, projectSortOrder, projectId) {
-  return padSortOrder(teamSortOrder) + '#' + padSortOrder(projectSortOrder) + '#PROJECT#' + projectId;
-}
-
-function createProjectMemberEntryKey(projectId, memberKey) {
-  return 'PROJECT_MEMBER#' + projectId + '#' + memberKey;
-}
-
-function padSortOrder(value) {
-  return String(value).padStart(6, '0');
-}
-
-function toProjectDirectory(items, locale) {
-  const teams = [];
-  const teamById = new Map();
-  const projectItems = [];
-
-  for (const item of items) {
-    if (!isActiveDirectoryItem(item)) {
-      continue;
-    }
-
-    if (item.entryType?.S === 'team') {
-      const team = {
-        id: item.teamId.S,
-        name: localizedName(item, locale),
-        expanded: item.expanded?.BOOL ?? false,
-        projects: [],
-      };
-
-      teamById.set(team.id, team);
-      teams.push(team);
-      continue;
-    }
-
-    if (item.entryType?.S === 'project') {
-      projectItems.push(item);
-    }
-  }
-
-  for (const item of projectItems) {
-    const team = teamById.get(item.teamId.S);
-
-    if (team) {
-      team.projects.push({
-        id: item.projectId.S,
-        name: localizedName(item, locale),
-        tone: item.tone?.S,
-      });
-    }
-  }
-
-  return teams;
-}
-
-	function toProjectMember(item) {
-	  const member = {
-	    id: item.memberKey.S,
-	    email: item.email?.S ?? item.memberKey.S,
-	    role: item.role.S,
-	    updatedAt: item.updatedAt.S,
-	  };
-
-  if (item.name?.S) {
-    member.name = item.name.S;
-  }
-
-  return member;
-}
-
-function compareProjectMembers(first, second) {
-  const roleDelta = projectRoleWeight(second.role?.S) - projectRoleWeight(first.role?.S);
-
-  if (roleDelta !== 0) {
-    return roleDelta;
-  }
-
-	  return (first.name?.S ?? first.email?.S ?? first.memberKey?.S ?? '').localeCompare(
-	    second.name?.S ?? second.email?.S ?? second.memberKey?.S ?? '',
-	    'ja',
-	  );
-}
-
-function localizedName(item, locale) {
-  return locale === 'en' ? item.nameEn?.S ?? item.nameJa.S : item.nameJa?.S ?? item.nameEn.S;
-}
-
-function isActiveDirectoryItem(item) {
-  return !item.archivedAt?.S;
-}
-
-function toTask(item) {
-  const task = {
-    id: item.taskId.S,
-    status: item.status.S,
-    dueDate: item.dueDate.S,
-    priority: item.priority.S,
-  };
-
-  if (item.titleKey?.S) {
-    task.titleKey = item.titleKey.S;
-  }
-
-  if (item.title?.S) {
-    task.title = item.title.S;
-  }
-
-	  if (item.assigneeKey?.S) {
-	    task.assigneeKey = item.assigneeKey.S;
-	  }
-
-	  if (item.assigneeUserId?.S) {
-	    task.assigneeUserId = item.assigneeUserId.S;
-	  }
-
-	  if (item.assignee?.S) {
-    task.assignee = item.assignee.S;
-  }
-
-  return task;
-}
-
-function toTeamIssue(item) {
-  const issue = {
-    id: item.issueId.S,
-    teamId: item.teamId.S,
-    assigneeUserId: item.assigneeUserId.S,
-    status: item.status.S,
-    dueDate: item.dueDate.S,
-    priority: item.priority.S,
-    createdAt: item.createdAt.S,
-    updatedAt: item.updatedAt.S,
-    source: 'dynamodb',
-  };
-
-  if (item.assignedProjectId?.S) {
-    issue.assignedProjectId = item.assignedProjectId.S;
-  }
-
-  if (item.titleKey?.S) {
-    issue.titleKey = item.titleKey.S;
-  }
-
-  if (item.title?.S) {
-    issue.title = item.title.S;
-  }
-
-  if (item.description?.S) {
-    issue.description = item.description.S;
-  }
-
-  return issue;
-}
-
-function toLegacyTeamIssue(task, teamId, assignedProjectId) {
-  const issue = {
-    id: task.id,
-    teamId,
-    assignedProjectId,
-    titleKey: task.titleKey,
-    title: task.title,
-    assigneeUserId: task.assigneeUserId ?? task.assigneeKey ?? task.assignee ?? 'legacy-assignee@example.invalid',
-    assigneeEmail: task.assigneeEmail,
-    assigneeName: task.assigneeName,
-    status: task.status,
-    dueDate: task.dueDate,
-    priority: task.priority,
-    createdAt: '2026-06-01T00:00:00.000Z',
-    updatedAt: '2026-06-01T00:00:00.000Z',
-    source: 'legacy',
-  };
-
-  return Object.fromEntries(Object.entries(issue).filter(([, value]) => value !== undefined));
-}
-
-function toTeamIssueComment(item) {
-  return {
-    id: item.eventId.S,
-    actorUserId: item.actorUserId.S,
-    body: item.body?.S ?? '',
-    createdAt: item.createdAt.S,
-  };
-}
-
-function toTeamIssueActivity(item) {
-  return {
-    id: item.eventId.S,
-    type: item.eventType.S,
-    actorUserId: item.actorUserId.S,
-    summary: item.summary.S,
-    createdAt: item.createdAt.S,
-  };
-}
-
-function readTaskStatus(value) {
-  if (value === undefined) {
-    return 'todo';
-  }
-
-  if (!isTaskStatus(value)) {
-    const error = new Error('Task status is invalid.');
-    error.name = 'InvalidProjectWrite';
-    throw error;
-  }
-
-  return value;
-}
-
-function readRequiredTaskStatus(value) {
-  if (!isTaskStatus(value)) {
-    const error = new Error('Task status is invalid.');
-    error.name = 'InvalidProjectWrite';
-    throw error;
-  }
-
-  return value;
-}
-
-function readTaskPriority(value) {
-  if (value === undefined) {
-    return 'medium';
-  }
-
-  if (!isTaskPriority(value)) {
-    const error = new Error('Task priority is invalid.');
-    error.name = 'InvalidProjectWrite';
-    throw error;
-  }
-
-  return value;
-}
-
-function isTaskStatus(value) {
-  return value === 'in-progress' || value === 'review' || value === 'todo' || value === 'done';
-}
-
-function isTaskPriority(value) {
-  return value === 'high' || value === 'medium' || value === 'low';
-}
-
-function isProjectRole(value) {
-  return value === 'manager' || value === 'member' || value === 'viewer';
-}
-
-function projectRoleAllows(role, minimumRole) {
-  return projectRoleWeight(role) >= projectRoleWeight(minimumRole);
-}
-
-function projectRoleWeight(role) {
-  if (role === 'manager') {
-    return 3;
-  }
-
-  if (role === 'member') {
-    return 2;
-  }
-
-  return role === 'viewer' ? 1 : 0;
-}
-
-	function normalizeProjectMemberKey(value) {
-	  return typeof value === 'string' ? value.trim().toLowerCase() : '';
-	}
-
-	function clampCognitoPageLimit(value) {
-	  if (!Number.isFinite(value)) {
-	    return 20;
-	  }
-
-	  return Math.max(1, Math.min(60, Math.floor(value)));
-	}
-
-	function escapeCognitoFilterValue(value) {
-	  return String(value).replace(/\\\\/g, '\\\\\\\\').replace(/"/g, '\\\\"');
-	}
-
-	function isProjectTone(value) {
-  return value === 'blue' || value === 'purple' || value === 'green' || value === 'yellow';
-}
-      `),
-    });
-
-    tasksTable.grantReadWriteData(listTasksFunction);
-    teamIssuesTable.grantReadWriteData(listTasksFunction);
-    teamIssueEventsTable.grantReadWriteData(listTasksFunction);
-    projectDirectoryTable.grantReadWriteData(listTasksFunction);
-    listTasksFunction.addToRolePolicy(
+    tasksTable.grantReadWriteData(apiFunction);
+    teamIssuesTable.grantReadWriteData(apiFunction);
+    teamIssueEventsTable.grantReadWriteData(apiFunction);
+    projectDirectoryTable.grantReadWriteData(apiFunction);
+    apiFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
         resources: [
-          projectDirectoryTable.tableArn,
+          tasksTable.tableArn,
           teamIssuesTable.tableArn,
           teamIssueEventsTable.tableArn,
+          projectDirectoryTable.tableArn,
         ],
       }),
     );
-	    listTasksFunction.addToRolePolicy(
-	      new iam.PolicyStatement({
-	        actions: ['cognito-idp:AdminGetUser', 'cognito-idp:GetUser', 'cognito-idp:ListUsers'],
-	        resources: [cognitoUserPoolArn],
-	      }),
-	    );
+    apiFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['cognito-idp:AdminGetUser', 'cognito-idp:ListUsers'],
+        resources: [cognitoUserPoolArn],
+      }),
+    );
 
-    const tasksFunctionUrl = listTasksFunction.addFunctionUrl({
+    const functionUrl = apiFunction.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.NONE,
       cors: {
         allowedOrigins: taskApiAllowedOriginList,
-        allowedMethods: [lambda.HttpMethod.GET, lambda.HttpMethod.POST, lambda.HttpMethod.PATCH, lambda.HttpMethod.DELETE],
+        allowedMethods: [
+          lambda.HttpMethod.GET,
+          lambda.HttpMethod.POST,
+          lambda.HttpMethod.PATCH,
+          lambda.HttpMethod.DELETE,
+        ],
         allowedHeaders: ['authorization', 'content-type'],
       },
     });
+    const httpApi = new apigatewayv2.HttpApi(this, 'ProjectTasksHttpApi', {
+      description: 'HTTP API backed by the same bundled Hono Lambda as the Function URL.',
+      defaultIntegration: new apigatewayv2Integrations.HttpLambdaIntegration(
+        'SharedHonoHandlerIntegration',
+        apiFunction,
+        {
+          payloadFormatVersion: apigatewayv2.PayloadFormatVersion.VERSION_2_0,
+          scopePermissionToRoute: false,
+        },
+      ),
+      corsPreflight: {
+        allowOrigins: taskApiAllowedOriginList,
+        allowMethods: [
+          apigatewayv2.CorsHttpMethod.GET,
+          apigatewayv2.CorsHttpMethod.POST,
+          apigatewayv2.CorsHttpMethod.PATCH,
+          apigatewayv2.CorsHttpMethod.DELETE,
+          apigatewayv2.CorsHttpMethod.OPTIONS,
+        ],
+        allowHeaders: ['authorization', 'content-type'],
+      },
+    });
 
-    const seedProjectTasksCall = {
+    const cognitoPolicy = customResources.AwsCustomResourcePolicy.fromStatements([
+      new iam.PolicyStatement({
+        actions: [
+          'cognito-idp:AdminUpdateUserAttributes',
+          'cognito-idp:DescribeUserPoolClient',
+        ],
+        resources: [cognitoUserPoolArn],
+      }),
+    ]);
+    const validateCognitoClientCall: customResources.AwsSdkCall = {
+      service: 'CognitoIdentityServiceProvider',
+      action: 'describeUserPoolClient',
+      parameters: {
+        UserPoolId: cognitoUserPoolId.valueAsString,
+        ClientId: cognitoUserPoolClientId.valueAsString,
+      },
+      logging: customResources.Logging.withDataHidden(),
+      physicalResourceId: customResources.PhysicalResourceId.of('mukuroji-cognito-client-validation-v1'),
+    };
+    const validateCognitoClient = new customResources.AwsCustomResource(
+      this,
+      'ValidateCognitoUserPoolClient',
+      createIdempotentAwsCustomResourceProps(validateCognitoClientCall, cognitoPolicy),
+    );
+    const updateInitialOwnerAttributesCall: customResources.AwsSdkCall = {
+      service: 'CognitoIdentityServiceProvider',
+      action: 'adminUpdateUserAttributes',
+      parameters: {
+        UserPoolId: cognitoUserPoolId.valueAsString,
+        Username: initialOwnerUsername.valueAsString,
+        UserAttributes: [
+          {
+            Name: 'custom:directory_id',
+            Value: workspaceDirectoryId.valueAsString,
+          },
+          {
+            Name: 'custom:workspace_id',
+            Value: workspaceDirectoryId.valueAsString,
+          },
+        ],
+      },
+      logging: customResources.Logging.withDataHidden(),
+      physicalResourceId: customResources.PhysicalResourceId.of('mukuroji-initial-owner-attributes-v1'),
+    };
+    const updateInitialOwnerAttributes = new customResources.AwsCustomResource(
+      this,
+      'UpdateInitialOwnerAttributes',
+      createIdempotentAwsCustomResourceProps(updateInitialOwnerAttributesCall, cognitoPolicy),
+    );
+
+    updateInitialOwnerAttributes.node.addDependency(validateCognitoClient);
+
+    const seedProjectTasksCall: customResources.AwsSdkCall = {
       service: 'DynamoDB',
       action: 'transactWriteItems',
       parameters: {
-        TransactItems: createProjectTaskTransactItems(tasksTable.tableName),
+        TransactItems: createProjectTaskTransactItems(
+          tasksTable.tableName,
+          workspaceDirectoryId.valueAsString,
+        ),
       },
-      physicalResourceId: customResources.PhysicalResourceId.of('refero-project-tasks-seed-v2'),
+      physicalResourceId: customResources.PhysicalResourceId.of('refero-project-tasks-seed-v3'),
     };
     const seedTasks = new customResources.AwsCustomResource(this, 'SeedProjectTasks', {
       onCreate: seedProjectTasksCall,
@@ -2997,17 +620,21 @@ function projectRoleWeight(role) {
           resources: [tasksTable.tableArn],
         }),
       ]),
+      installLatestAwsSdk: false,
     });
 
     seedTasks.node.addDependency(tasksTable);
 
-    const seedProjectDirectoryCall = {
+    const seedProjectDirectoryCall: customResources.AwsSdkCall = {
       service: 'DynamoDB',
       action: 'transactWriteItems',
       parameters: {
-        TransactItems: createProjectDirectoryTransactItems(projectDirectoryTable.tableName),
+        TransactItems: createProjectDirectoryTransactItems(
+          projectDirectoryTable.tableName,
+          workspaceDirectoryId.valueAsString,
+        ),
       },
-      physicalResourceId: customResources.PhysicalResourceId.of('project-directory-seed-v2'),
+      physicalResourceId: customResources.PhysicalResourceId.of('project-directory-seed-v3'),
     };
     const seedProjectDirectory = new customResources.AwsCustomResource(this, 'SeedProjectDirectory', {
       onCreate: seedProjectDirectoryCall,
@@ -3017,28 +644,66 @@ function projectRoleWeight(role) {
           resources: [projectDirectoryTable.tableArn],
         }),
       ]),
+      installLatestAwsSdk: false,
     });
 
     seedProjectDirectory.node.addDependency(projectDirectoryTable);
 
+    const bootstrapWorkspaceCall: customResources.AwsSdkCall = {
+      service: 'DynamoDB',
+      action: 'transactWriteItems',
+      parameters: {
+        TransactItems: createWorkspaceBootstrapTransactItems(
+          projectDirectoryTable.tableName,
+          workspaceDirectoryId.valueAsString,
+          initialOwnerEmail.valueAsString,
+          initialOwnerUsername.valueAsString,
+        ),
+      },
+      physicalResourceId: customResources.PhysicalResourceId.of('workspace-bootstrap-v1'),
+    };
+    const bootstrapWorkspace = new customResources.AwsCustomResource(
+      this,
+      'BootstrapWorkspace',
+      createIdempotentAwsCustomResourceProps(
+        bootstrapWorkspaceCall,
+        customResources.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ['dynamodb:TransactWriteItems'],
+            resources: [projectDirectoryTable.tableArn],
+          }),
+        ]),
+      ),
+    );
+
+    bootstrapWorkspace.node.addDependency(seedProjectDirectory);
+    bootstrapWorkspace.node.addDependency(updateInitialOwnerAttributes);
+
     new cdk.CfnOutput(this, 'ProjectTasksTableName', {
       value: tasksTable.tableName,
     });
-
     new cdk.CfnOutput(this, 'ProjectDirectoryTableName', {
       value: projectDirectoryTable.tableName,
     });
-
     new cdk.CfnOutput(this, 'TeamIssuesTableName', {
       value: teamIssuesTable.tableName,
     });
-
     new cdk.CfnOutput(this, 'TeamIssueEventsTableName', {
       value: teamIssueEventsTable.tableName,
     });
-
+    const workspaceDirectoryIdOutput = new cdk.CfnOutput(this, 'WorkspaceDirectoryIdOutput', {
+      value: workspaceDirectoryId.valueAsString,
+    });
+    workspaceDirectoryIdOutput.overrideLogicalId('WorkspaceDirectoryId');
     new cdk.CfnOutput(this, 'ProjectTasksApiUrl', {
-      value: tasksFunctionUrl.url,
+      value: functionUrl.url,
+      description: 'Backward-compatible alias for the Lambda Function URL.',
+    });
+    new cdk.CfnOutput(this, 'ProjectTasksFunctionUrl', {
+      value: functionUrl.url,
+    });
+    new cdk.CfnOutput(this, 'ProjectTasksApiGatewayUrl', {
+      value: httpApi.apiEndpoint,
     });
   }
 }

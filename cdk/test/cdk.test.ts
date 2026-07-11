@@ -1,158 +1,282 @@
-import * as vm from 'node:vm';
 import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
-import { expect, jest, test } from '@jest/globals';
+import { expect, test } from '@jest/globals';
 import { CdkStack } from '../lib/cdk-stack';
 
-test('project task data store and lambda API are created', () => {
+/**
+ * 各 test で使用する synthesized CloudFormation template を作成します。
+ */
+function createTemplate() {
   const app = new cdk.App();
   const stack = new CdkStack(app, 'TestStack');
-  const template = Template.fromStack(stack);
 
-  template.hasResourceProperties('AWS::DynamoDB::Table', {
-    BillingMode: 'PAY_PER_REQUEST',
-    KeySchema: [
-      {
-        AttributeName: 'directoryProjectId',
-        KeyType: 'HASH',
-      },
-      {
-        AttributeName: 'taskId',
-        KeyType: 'RANGE',
-      },
-    ],
-  });
+  return Template.fromStack(stack);
+}
 
-  template.hasResourceProperties('AWS::DynamoDB::Table', {
-    BillingMode: 'PAY_PER_REQUEST',
-    KeySchema: [
-      {
-        AttributeName: 'directoryId',
-        KeyType: 'HASH',
-      },
-      {
-        AttributeName: 'entryKey',
-        KeyType: 'RANGE',
-      },
-    ],
-  });
+/**
+ * 指定した AWS SDK action を実行する custom resource を取得します。
+ */
+function findCustomResource(template: Template, action: string) {
+  const resource = Object.entries(template.findResources('Custom::AWS')).find(([, candidate]) =>
+    JSON.stringify(candidate).includes(action),
+  );
 
-  template.hasResourceProperties('AWS::DynamoDB::Table', {
-    BillingMode: 'PAY_PER_REQUEST',
-    KeySchema: [
-      {
-        AttributeName: 'directoryTeamId',
-        KeyType: 'HASH',
-      },
-      {
-        AttributeName: 'issueId',
-        KeyType: 'RANGE',
-      },
-    ],
-    GlobalSecondaryIndexes: Match.arrayWith([
-      Match.objectLike({
-        IndexName: 'TeamIssueSortOrderIndex',
-        KeySchema: [
-          {
-            AttributeName: 'directoryTeamId',
-            KeyType: 'HASH',
-          },
-          {
-            AttributeName: 'sortOrder',
-            KeyType: 'RANGE',
-          },
-        ],
+  if (!resource) {
+    throw new Error(`Custom resource for ${action} was not found.`);
+  }
+
+  return resource;
+}
+
+/**
+ * CloudFormation intrinsic を含む AWS SDK call を検証用文字列に変換します。
+ */
+function serializeAwsSdkCall(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(serializeAwsSdkCall).join('');
+  }
+
+  if (!value || typeof value !== 'object') {
+    return String(value ?? '');
+  }
+
+  const record = value as Record<string, unknown>;
+  const join = record['Fn::Join'];
+
+  if (Array.isArray(join) && Array.isArray(join[1])) {
+    return join[1].map(serializeAwsSdkCall).join(String(join[0] ?? ''));
+  }
+
+  if (typeof record.Ref === 'string') {
+    return `{{Ref:${record.Ref}}}`;
+  }
+
+  return Object.entries(record)
+    .map(([key, entry]) => `${key}:${serializeAwsSdkCall(entry)}`)
+    .join('');
+}
+
+const synthesizedTemplate = createTemplate();
+
+test('fresh deployment requires explicit external Cognito and workspace parameters', () => {
+  const template = synthesizedTemplate;
+  const parameters = template.toJSON().Parameters;
+
+  expect(parameters.CognitoUserPoolId).toEqual(expect.objectContaining({
+    Type: 'String',
+    AllowedPattern: '^[a-z]{2}(?:-[a-z0-9]+)+_[A-Za-z0-9]+$',
+  }));
+  expect(parameters.CognitoUserPoolClientId).toEqual(expect.objectContaining({
+    Type: 'String',
+    AllowedPattern: '^[A-Za-z0-9]+$',
+  }));
+  expect(parameters.WorkspaceDirectoryId).toEqual(expect.objectContaining({
+    Type: 'String',
+    MinLength: 1,
+    AllowedPattern: '^\\S+$',
+  }));
+  expect(parameters.InitialOwnerEmail).toEqual(expect.objectContaining({
+    Type: 'String',
+    ConstraintDescription: 'InitialOwnerEmail must be a lowercase email address.',
+  }));
+  expect(parameters.InitialOwnerUsername).toEqual(expect.objectContaining({
+    Type: 'String',
+    MinLength: 1,
+    AllowedPattern: '^\\S+$',
+  }));
+  expect(parameters.TaskApiAllowedOrigins).toEqual(expect.objectContaining({
+    Type: 'String',
+    AllowedPattern: '^https?://[^,\\s]+(,https?://[^,\\s]+)*$',
+  }));
+
+  for (const parameterName of [
+    'CognitoUserPoolId',
+    'CognitoUserPoolClientId',
+    'WorkspaceDirectoryId',
+    'InitialOwnerEmail',
+    'InitialOwnerUsername',
+  ]) {
+    expect(parameters[parameterName].Default).toBeUndefined();
+  }
+
+  template.resourceCountIs('AWS::Cognito::UserPool', 0);
+  template.resourceCountIs('AWS::Cognito::UserPoolClient', 0);
+});
+
+test('upgrade keeps stateful resource logical IDs and enables retain with PITR', () => {
+  const template = synthesizedTemplate;
+  const resources = template.toJSON().Resources;
+  const stableResourceIds = [
+    'ProjectTasksTableE21F6637',
+    'TeamIssuesTable189D851D',
+    'TeamIssueEventsTableDD2B0F96',
+    'ProjectDirectoryTable9ED01C01',
+    'ListProjectTasksFunction2134AF4A',
+  ];
+
+  for (const logicalId of stableResourceIds) {
+    expect(resources[logicalId]).toBeDefined();
+  }
+
+  const tables = template.findResources('AWS::DynamoDB::Table');
+
+  expect(Object.keys(tables)).toHaveLength(4);
+
+  for (const table of Object.values(tables)) {
+    expect(table).toEqual(expect.objectContaining({
+      DeletionPolicy: 'Retain',
+      UpdateReplacePolicy: 'Retain',
+      Properties: expect.objectContaining({
+        BillingMode: 'PAY_PER_REQUEST',
+        PointInTimeRecoverySpecification: {
+          PointInTimeRecoveryEnabled: true,
+        },
       }),
-      Match.objectLike({
-        IndexName: 'AssignedProjectIssueIndex',
-        KeySchema: [
-          {
-            AttributeName: 'directoryProjectId',
-            KeyType: 'HASH',
-          },
-          {
-            AttributeName: 'sortOrder',
-            KeyType: 'RANGE',
-          },
-        ],
-      }),
-    ]),
-  });
+    }));
+  }
+});
 
-  template.hasResourceProperties('AWS::DynamoDB::Table', {
-    BillingMode: 'PAY_PER_REQUEST',
-    KeySchema: [
-      {
-        AttributeName: 'directoryTeamIssueId',
-        KeyType: 'HASH',
-      },
-      {
-        AttributeName: 'eventId',
-        KeyType: 'RANGE',
-      },
-    ],
-  });
+test('shared server handler is bundled as a Lambda asset with production environment', () => {
+  const template = synthesizedTemplate;
 
   template.hasResourceProperties('AWS::Lambda::Function', {
+    Code: {
+      S3Bucket: Match.anyValue(),
+      S3Key: Match.stringLikeRegexp('\\.zip$'),
+    },
+    Description: 'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.',
+    Handler: 'index.handler',
+    Runtime: 'nodejs22.x',
     Environment: {
-      Variables: {
-        ALLOWED_ORIGINS: {
-          Ref: 'TaskApiAllowedOrigins',
+      Variables: Match.objectLike({
+        COGNITO_CLIENT_ID: {
+          Ref: 'CognitoUserPoolClientId',
         },
         COGNITO_USER_POOL_ID: {
           Ref: 'CognitoUserPoolId',
         },
-        PROJECT_DIRECTORY_TABLE_NAME: {
-          Ref: Match.stringLikeRegexp('ProjectDirectoryTable'),
+        MUKUROJI_PROJECT_DIRECTORY_ID: {
+          Ref: 'WorkspaceDirectoryId',
         },
-        SYSTEM_ADMIN_GROUPS: {
-          Ref: 'SystemAdminGroups',
+        MUKUROJI_WORKSPACE_DIRECTORY_ID: {
+          Ref: 'WorkspaceDirectoryId',
         },
-        TEAM_ISSUE_EVENTS_TABLE_NAME: {
-          Ref: Match.stringLikeRegexp('TeamIssueEventsTable'),
+        MUKUROJI_PROJECT_DIRECTORY_TABLE: {
+          Ref: 'ProjectDirectoryTable9ED01C01',
         },
-        TEAM_ISSUES_TABLE_NAME: {
-          Ref: Match.stringLikeRegexp('TeamIssuesTable'),
+        MUKUROJI_PROJECT_TASKS_TABLE: {
+          Ref: 'ProjectTasksTableE21F6637',
         },
-      },
+        MUKUROJI_TEAM_ISSUES_TABLE: {
+          Ref: 'TeamIssuesTable189D851D',
+        },
+      }),
     },
-    Handler: 'index.handler',
-    Runtime: 'nodejs22.x',
   });
+
+  const lambdaResource = template.toJSON().Resources.ListProjectTasksFunction2134AF4A;
+
+  expect(lambdaResource.Properties.Code.ZipFile).toBeUndefined();
+});
+
+test('Function URL and API Gateway invoke the same Lambda handler', () => {
+  const template = synthesizedTemplate;
+  const functionLogicalId = 'ListProjectTasksFunction2134AF4A';
+
+  template.hasResourceProperties('AWS::Lambda::Url', {
+    AuthType: 'NONE',
+    TargetFunctionArn: {
+      'Fn::GetAtt': [functionLogicalId, 'Arn'],
+    },
+  });
+  template.hasResourceProperties('AWS::ApiGatewayV2::Integration', {
+    IntegrationType: 'AWS_PROXY',
+    IntegrationUri: {
+      'Fn::GetAtt': [functionLogicalId, 'Arn'],
+    },
+    PayloadFormatVersion: '2.0',
+  });
+  template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
+    AuthorizationType: 'NONE',
+    RouteKey: '$default',
+  });
+  template.hasResourceProperties('AWS::ApiGatewayV2::Stage', {
+    AutoDeploy: true,
+    StageName: '$default',
+  });
+  template.hasResourceProperties('AWS::Lambda::Permission', {
+    Action: 'lambda:InvokeFunction',
+    FunctionName: {
+      'Fn::GetAtt': [functionLogicalId, 'Arn'],
+    },
+    Principal: 'apigateway.amazonaws.com',
+    SourceArn: Match.anyValue(),
+  });
+  template.hasOutput('ProjectTasksFunctionUrl', {});
+  template.hasOutput('ProjectTasksApiGatewayUrl', {});
+  template.hasOutput('WorkspaceDirectoryId', {
+    Value: {
+      Ref: 'WorkspaceDirectoryId',
+    },
+  });
+  template.hasOutput('ProjectTasksApiUrl', {
+    Description: 'Backward-compatible alias for the Lambda Function URL.',
+  });
+});
+
+test('Function URL and API Gateway expose the same restricted CORS contract', () => {
+  const template = synthesizedTemplate;
+  const allowedOrigins = {
+    'Fn::Split': [
+      ',',
+      {
+        Ref: 'TaskApiAllowedOrigins',
+      },
+    ],
+  };
 
   template.hasResourceProperties('AWS::Lambda::Url', {
     Cors: {
+      AllowHeaders: ['authorization', 'content-type'],
       AllowMethods: Match.arrayWith(['GET', 'POST', 'PATCH', 'DELETE']),
-      AllowOrigins: {
-        'Fn::Split': [
-          ',',
-          {
-            Ref: 'TaskApiAllowedOrigins',
-          },
-        ],
-      },
+      AllowOrigins: allowedOrigins,
     },
   });
+  template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
+    CorsConfiguration: {
+      AllowHeaders: ['authorization', 'content-type'],
+      AllowMethods: Match.arrayWith(['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS']),
+      AllowOrigins: allowedOrigins,
+    },
+    ProtocolType: 'HTTP',
+  });
+});
 
-  template.hasOutput('TeamIssuesTableName', {
-    Value: {
-      Ref: Match.stringLikeRegexp('TeamIssuesTable'),
-    },
-  });
-
-  template.hasOutput('TeamIssueEventsTableName', {
-    Value: {
-      Ref: Match.stringLikeRegexp('TeamIssueEventsTable'),
-    },
-  });
+test('API IAM is limited to the data tables and configured Cognito user pool', () => {
+  const template = synthesizedTemplate;
 
   template.hasResourceProperties('AWS::IAM::Policy', {
     PolicyDocument: {
       Statement: Match.arrayWith([
         Match.objectLike({
+          Action: 'dynamodb:TransactWriteItems',
+          Effect: 'Allow',
+          Resource: Match.arrayWith([
+            {
+              'Fn::GetAtt': ['ProjectTasksTableE21F6637', 'Arn'],
+            },
+            {
+              'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'],
+            },
+          ]),
+        }),
+        Match.objectLike({
           Action: Match.arrayWith([
             'cognito-idp:AdminGetUser',
-            'cognito-idp:GetUser',
             'cognito-idp:ListUsers',
           ]),
           Effect: 'Allow',
@@ -171,1356 +295,102 @@ test('project task data store and lambda API are created', () => {
       ]),
     },
   });
+});
 
-  const customResources = template.findResources('Custom::AWS');
-  const seedResource = Object.values(customResources).find((resource) =>
+test('external Cognito client and initial owner attributes are validated on create and update', () => {
+  const template = synthesizedTemplate;
+  const [, clientValidation] = findCustomResource(template, 'describeUserPoolClient');
+  const [, ownerAttributes] = findCustomResource(template, 'adminUpdateUserAttributes');
+  const clientCreate = serializeAwsSdkCall(clientValidation.Properties.Create);
+  const ownerCreate = serializeAwsSdkCall(ownerAttributes.Properties.Create);
+
+  expect(clientCreate).toContain('describeUserPoolClient');
+  expect(clientCreate).toContain('CognitoUserPoolId');
+  expect(clientCreate).toContain('CognitoUserPoolClientId');
+  expect(clientValidation.Properties.Update).toEqual(clientValidation.Properties.Create);
+
+  expect(ownerCreate).toContain('adminUpdateUserAttributes');
+  expect(ownerCreate).toContain('InitialOwnerUsername');
+  expect(ownerCreate).toContain('custom:directory_id');
+  expect(ownerCreate).toContain('custom:workspace_id');
+  expect(ownerCreate.match(/WorkspaceDirectoryId/g)).toHaveLength(2);
+  expect(ownerAttributes.Properties.Update).toEqual(ownerAttributes.Properties.Create);
+
+  template.hasResourceProperties('AWS::IAM::Policy', {
+    PolicyDocument: {
+      Statement: Match.arrayWith([
+        Match.objectLike({
+          Action: Match.arrayWith([
+            'cognito-idp:AdminUpdateUserAttributes',
+            'cognito-idp:DescribeUserPoolClient',
+          ]),
+          Effect: 'Allow',
+          Resource: Match.anyValue(),
+        }),
+      ]),
+    },
+  });
+});
+
+test('workspace metadata owner alias and project manager rows are idempotently bootstrapped', () => {
+  const template = synthesizedTemplate;
+  const [, bootstrap] = Object.entries(template.findResources('Custom::AWS')).find(([, candidate]) =>
+    JSON.stringify(candidate).includes('workspace-bootstrap-v1'),
+  ) ?? [];
+
+  if (!bootstrap) {
+    throw new Error('Workspace bootstrap custom resource was not found.');
+  }
+
+  const createPayload = serializeAwsSdkCall(bootstrap.Properties.Create);
+
+  expect(createPayload).toContain('transactWriteItems');
+  expect(createPayload).toContain('WORKSPACE#METADATA');
+  expect(createPayload).toContain('workspace-metadata');
+  expect(createPayload).toContain('WORKSPACE_MEMBER#');
+  expect(createPayload).toContain('workspace-member');
+  expect(createPayload).toContain('EMAIL_ALIAS#');
+  expect(createPayload).toContain('email-alias');
+  expect(createPayload).toContain('InitialOwnerEmail');
+  expect(createPayload).toContain('InitialOwnerUsername');
+  expect(createPayload).toContain('WorkspaceDirectoryId');
+  expect(createPayload).toContain('PROJECT_MEMBER#refero#');
+  expect(createPayload).toContain('PROJECT_MEMBER#product-roadmap#');
+  expect(createPayload).toContain('PROJECT_MEMBER#shared-launch#');
+  expect(createPayload).toContain('PROJECT_MEMBER#brand-refresh#');
+  expect(createPayload.match(/":role":\{"S":"manager"\}/g)).toHaveLength(4);
+  expect(createPayload.match(/":timestamp":\{"S":"2026-07-11T00:00:00.000Z"\}/g)).toHaveLength(5);
+  expect(createPayload.match(/"Update"/g)).toHaveLength(7);
+  expect(createPayload).not.toContain('"Item"');
+  expect(createPayload).toContain('createdAt = if_not_exists(createdAt, :timestamp)');
+  expect(createPayload).toContain('updatedAt = if_not_exists(updatedAt, :timestamp)');
+  expect(createPayload).toContain('#role = :role');
+  expect(createPayload).toContain('attribute_not_exists(directoryId) OR');
+  expect(bootstrap.Properties.Update).toEqual(bootstrap.Properties.Create);
+});
+
+test('legacy demo seeds use the workspace partition without replacing update-time data', () => {
+  const template = synthesizedTemplate;
+  const transactWriteResources = Object.values(template.findResources('Custom::AWS')).filter((resource) =>
     JSON.stringify(resource).includes('transactWriteItems'),
   );
-  const createJoinParts = seedResource?.Properties?.Create?.['Fn::Join']?.[1] ?? [];
-  const seedPayload = createJoinParts
-    .filter((part: unknown): part is string => typeof part === 'string')
-    .join('');
-
-  expect(seedPayload).toContain('"service":"DynamoDB"');
-  expect(seedPayload).toContain('"action":"transactWriteItems"');
-  expect(seedPayload.match(/"Put"/g)).toHaveLength(10);
-  expect(seedPayload).toContain('"directoryId":{"S":"user#demo@example.com"}');
-  expect(seedPayload).toContain('"directoryProjectId":{"S":"user#demo@example.com#project#refero"}');
-  expect(seedPayload).toContain('"taskId":{"S":"wireframe"}');
-  expect(seedPayload).toContain('"taskId":{"S":"landing-release"}');
-  expect(seedPayload).toContain('"assigneeUserId":{"S":"sato@example.com"}');
-  expect(seedPayload).toContain('"dueDate":{"S":"2026/06/03"}');
-  expect(seedPayload).toContain(
-    '"ConditionExpression":"attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)"',
+  const projectTaskSeed = transactWriteResources.find((resource) =>
+    JSON.stringify(resource).includes('refero-project-tasks-seed-v3'),
   );
-  expect(seedResource?.Properties?.Update).toBeUndefined();
-
-  const directorySeedResource = Object.values(customResources).find((resource) =>
-    JSON.stringify(resource).includes('shared-launch'),
-  );
-  const directoryCreateJoinParts = directorySeedResource?.Properties?.Create?.['Fn::Join']?.[1] ?? [];
-  const directorySeedPayload = directoryCreateJoinParts
-    .filter((part: unknown): part is string => typeof part === 'string')
-    .join('');
-
-  expect(directorySeedPayload).toContain('"directoryId":{"S":"user#demo@example.com"}');
-  expect(directorySeedPayload).toContain('"entryKey":{"S":"000010#000000#TEAM#core-team"}');
-  expect(directorySeedPayload).toContain('"entryKey":{"S":"000010#000010#PROJECT#refero"}');
-  expect(directorySeedPayload).toContain('"teamId":{"S":"core-team"}');
-  expect(directorySeedPayload).toContain('"teamId":{"S":"design-team"}');
-  expect(directorySeedPayload.match(/"projectId":{"S":"shared-launch"}/g)).toHaveLength(3);
-  expect(directorySeedPayload).toContain('"entryKey":{"S":"PROJECT_MEMBER#refero#demo@example.com"}');
-  expect(directorySeedPayload).toContain('"role":{"S":"manager"}');
-  expect(directorySeedPayload).toContain(
-    '"ConditionExpression":"attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)"',
-  );
-  expect(directorySeedResource?.Properties?.Update).toBeUndefined();
-
-  const lambdaResource = Object.values(template.findResources('AWS::Lambda::Function')).find((resource) =>
-    JSON.stringify(resource).includes('isProjectDirectoryRequest'),
-  );
-  const lambdaCode = lambdaResource?.Properties?.Code?.ZipFile ?? '';
-
-  expect(lambdaCode).toContain('(?:api\\/)?projects\\/([^/]+)\\/tasks');
-  expect(lambdaCode).toContain('(?:api\\/)?projects\\/([^/]+)\\/issues');
-  expect(lambdaCode).toContain('(?:api\\/)?teams\\/([^/]+)\\/issues');
-  expect(lambdaCode).toContain('toProjectPrincipal');
-  expect(lambdaCode).toContain('createDirectoryProjectId');
-  expect(lambdaCode).toContain('createDirectoryTeamId');
-  expect(lambdaCode).toContain('createProjectMemberEntryKey');
-  expect(lambdaCode).toContain('decodePathSegment');
-  expect(lambdaCode).toContain('createUniqueResourceId');
-  expect(lambdaCode).toContain('const taskId = createUniqueResourceId(title');
-  expect(lambdaCode).toContain('toProjectDataError');
-  expect(lambdaCode).toContain('directoryProjectId = :directoryProjectId');
-  expect(lambdaCode).toContain('getProjectAccess');
-  expect(lambdaCode).toContain('async function queryAll');
-  expect(lambdaCode).toContain('const projectItems = [];');
-  expect(lambdaCode).toContain('UpdateItemCommand');
-  expect(lambdaCode).toContain('TransactWriteItemsCommand');
-  expect(lambdaCode).toContain('DeleteItemCommand');
-  expect(lambdaCode).toContain('readArchiveTeamId');
-  expect(lambdaCode).toContain('readArchiveProjectParams');
-  expect(lambdaCode).toContain('readProjectMemberParams');
-  expect(lambdaCode).toContain('readProjectUsersProjectId');
-  expect(lambdaCode).toContain('readProjectTaskStatusParams');
-  expect(lambdaCode).toContain('readTeamIssueListParams');
-  expect(lambdaCode).toContain('readTeamIssueCommentParams');
-  expect(lambdaCode).toContain('enforceTeamPermission');
-  expect(lambdaCode).toContain('isExpectedCognitoIssuer');
-  expect(lambdaCode).toContain('isCognitoUserInDirectory');
-  expect(lambdaCode).toContain('AdminGetUserCommand');
-  expect(lambdaCode).toContain('ListUsersCommand');
-  expect(lambdaCode).toContain('hydrateProjectTasks');
-  expect(lambdaCode).toContain('hydrateTeamIssues');
-  expect(lambdaCode).toContain('getUserProfile');
-  expect(lambdaCode).toContain('async function updateProjectTaskStatus');
-  expect(lambdaCode).toContain('async function createTeamIssue');
-  expect(lambdaCode).toContain('async function updateTeamIssue');
-  expect(lambdaCode).toContain('async function createTeamIssueComment');
-  expect(lambdaCode).toContain('async function updateProjectMember');
-  expect(lambdaCode).toContain('async function removeProjectMember');
-  expect(lambdaCode).toContain('SET #status = :status');
-  expect(lambdaCode).toContain('SET archivedAt = :archivedAt');
-  expect(lambdaCode).toContain('isActiveDirectoryItem');
-  expect(lambdaCode).toContain("'GET,POST,PATCH,DELETE,OPTIONS'");
-});
-
-test('inline lambda rejects legacy task status updates', async () => {
-  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
-  const lambda = createInlineLambda(async (command) => {
-    commandInputs.push({
-      commandName: command.constructor.name,
-      input: command.input,
-    });
-
-    if (command.constructor.name === 'QueryCommand' && command.input.TableName === 'DirectoryTable') {
-      return {
-        Items: [
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000000#TEAM#core-team' },
-            entryType: { S: 'team' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            nameJa: { S: 'コアチーム' },
-            nameEn: { S: 'Core Team' },
-            expanded: { BOOL: true },
-          },
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000010#PROJECT#refero' },
-            entryType: { S: 'project' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            projectId: { S: 'refero' },
-            projectSortOrder: { N: '10' },
-            nameJa: { S: 'Refero' },
-            nameEn: { S: 'Refero' },
-            tone: { S: 'blue' },
-          },
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: 'PROJECT_MEMBER#refero#demo@example.com' },
-            entryType: { S: 'project-member' },
-            projectId: { S: 'refero' },
-            memberKey: { S: 'demo@example.com' },
-            email: { S: 'demo@example.com' },
-            role: { S: 'manager' },
-            createdAt: { S: '2026-06-08T00:00:00.000Z' },
-            updatedAt: { S: '2026-06-08T00:00:00.000Z' },
-          },
-        ],
-      };
-    }
-
-    if (command.constructor.name === 'QueryCommand' && command.input.TableName === 'TasksTable') {
-      return {
-        Items: [
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            directoryProjectId: { S: 'user#demo@example.com#project#refero' },
-            projectId: { S: 'refero' },
-            taskId: { S: 'wireframe' },
-            sortOrder: { N: '10' },
-            titleKey: { S: 'tasks.item.wireframe' },
-            assigneeKey: { S: 'tasks.assignee.sato' },
-            status: { S: 'todo' },
-            dueDate: { S: '2026/06/03' },
-            priority: { S: 'high' },
-          },
-        ],
-      };
-    }
-
-    return {};
-  });
-
-  const response = await lambda.handler({
-    ...createLambdaEvent('PATCH', '/api/projects/refero/tasks/wireframe'),
-    body: JSON.stringify({ status: 'done' }),
-  });
-
-  expect(response.statusCode).toBe(409);
-  expect(JSON.parse(response.body)).toEqual({ message: 'Legacy task issues are read-only.' });
-  expect(commandInputs).toHaveLength(3);
-  expect(commandInputs[2]).toEqual({
-    commandName: 'QueryCommand',
-    input: {
-      TableName: 'TasksTable',
-      KeyConditionExpression: 'directoryProjectId = :directoryProjectId AND taskId = :taskId',
-      ExpressionAttributeValues: {
-        ':directoryProjectId': { S: 'user#demo@example.com#project#refero' },
-        ':taskId': { S: 'wireframe' },
-      },
-      Limit: 1,
-    },
-  });
-  expect(commandInputs.some((input) => input.commandName === 'UpdateItemCommand')).toBe(false);
-});
-
-test('inline lambda creates a project and grants the creator manager role', async () => {
-  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
-  const lambda = createInlineLambda(async (command) => {
-    commandInputs.push({
-      commandName: command.constructor.name,
-      input: command.input,
-    });
-
-    if (command.constructor.name === 'QueryCommand') {
-      return {
-        Items: [
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000000#TEAM#core-team' },
-            entryType: { S: 'team' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            nameJa: { S: 'コアチーム' },
-            nameEn: { S: 'Core Team' },
-            expanded: { BOOL: true },
-          },
-        ],
-      };
-    }
-
-    return {};
-  });
-
-  const response = await lambda.handler({
-    ...createLambdaEvent('POST', '/api/teams/core-team/projects'),
-    body: JSON.stringify({ name: '新規プロジェクト', tone: 'green' }),
-  });
-
-  expect(response.statusCode).toBe(201);
-  expect(JSON.parse(response.body)).toEqual({
-    project: {
-      id: '新規プロジェクト',
-      name: '新規プロジェクト',
-      tone: 'green',
-    },
-  });
-  expect(commandInputs).toHaveLength(2);
-  expect(commandInputs[1]).toMatchObject({
-    commandName: 'TransactWriteItemsCommand',
-    input: {
-      TransactItems: [
-        {
-          ConditionCheck: {
-            TableName: 'DirectoryTable',
-            Key: {
-              directoryId: { S: 'user#demo@example.com' },
-              entryKey: { S: '000010#000000#TEAM#core-team' },
-            },
-            ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-          },
-        },
-        {
-          Put: {
-            TableName: 'DirectoryTable',
-            Item: {
-              directoryId: { S: 'user#demo@example.com' },
-              entryKey: { S: '000010#000010#PROJECT#新規プロジェクト' },
-              entryType: { S: 'project' },
-              teamId: { S: 'core-team' },
-              projectId: { S: '新規プロジェクト' },
-              tone: { S: 'green' },
-            },
-            ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
-          },
-        },
-        {
-          Put: {
-            TableName: 'DirectoryTable',
-            Item: {
-              directoryId: { S: 'user#demo@example.com' },
-              entryKey: { S: 'PROJECT_MEMBER#新規プロジェクト#demo@example.com' },
-              entryType: { S: 'project-member' },
-              projectId: { S: '新規プロジェクト' },
-              memberKey: { S: 'demo@example.com' },
-              email: { S: 'demo@example.com' },
-              role: { S: 'manager' },
-            },
-            ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
-          },
-        },
-      ],
-    },
-  });
-});
-
-test('inline lambda returns conflict when project creation transaction is canceled', async () => {
-  const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
-  const lambda = createInlineLambda(async (command) => {
-    if (command.constructor.name === 'QueryCommand') {
-      return {
-        Items: [
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000000#TEAM#core-team' },
-            entryType: { S: 'team' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            nameJa: { S: 'コアチーム' },
-            nameEn: { S: 'Core Team' },
-            expanded: { BOOL: true },
-          },
-        ],
-      };
-    }
-
-    if (command.constructor.name === 'TransactWriteItemsCommand') {
-      const error = new Error('Transaction was canceled.');
-      error.name = 'TransactionCanceledException';
-      throw error;
-    }
-
-    return {};
-  });
-
-  try {
-    const response = await lambda.handler({
-      ...createLambdaEvent('POST', '/api/teams/core-team/projects'),
-      body: JSON.stringify({ name: '新規プロジェクト' }),
-    });
-
-    expect(response.statusCode).toBe(409);
-    expect(JSON.parse(response.body)).toEqual({ message: 'The same item already exists.' });
-  } finally {
-    consoleError.mockRestore();
-  }
-});
-
-test('inline lambda returns not found when project creation transaction loses its active team', async () => {
-  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
-  let queryReads = 0;
-  const lambda = createInlineLambda(async (command) => {
-    commandInputs.push({
-      commandName: command.constructor.name,
-      input: command.input,
-    });
-
-    if (command.constructor.name === 'QueryCommand') {
-      queryReads += 1;
-
-      return {
-        Items: [
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000000#TEAM#core-team' },
-            entryType: { S: 'team' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            nameJa: { S: 'コアチーム' },
-            nameEn: { S: 'Core Team' },
-            expanded: { BOOL: true },
-            ...(queryReads >= 2 ? { archivedAt: { S: '2026-06-08T00:00:00.000Z' } } : {}),
-          },
-        ],
-      };
-    }
-
-    if (command.constructor.name === 'TransactWriteItemsCommand') {
-      const error = new Error('Transaction was canceled.');
-      error.name = 'TransactionCanceledException';
-      throw error;
-    }
-
-    return {};
-  });
-
-  const response = await lambda.handler({
-    ...createLambdaEvent('POST', '/api/teams/core-team/projects'),
-    body: JSON.stringify({ name: '新規プロジェクト' }),
-  });
-
-  expect(response.statusCode).toBe(404);
-  expect(JSON.parse(response.body)).toEqual({ message: 'Team was not found.' });
-  expect(commandInputs.map((command) => command.commandName)).toEqual([
-    'QueryCommand',
-    'TransactWriteItemsCommand',
-    'QueryCommand',
-  ]);
-});
-
-test('inline lambda archives a project with a conditional update', async () => {
-  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
-  const lambda = createInlineLambda(async (command) => {
-    commandInputs.push({
-      commandName: command.constructor.name,
-      input: command.input,
-    });
-
-    if (command.constructor.name === 'QueryCommand') {
-      return {
-        Items: [
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000000#TEAM#core-team' },
-            entryType: { S: 'team' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            nameJa: { S: 'コアチーム' },
-            nameEn: { S: 'Core Team' },
-            expanded: { BOOL: true },
-          },
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000010#PROJECT#refero' },
-            entryType: { S: 'project' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            projectId: { S: 'refero' },
-            projectSortOrder: { N: '10' },
-            nameJa: { S: 'Refero' },
-            nameEn: { S: 'Refero' },
-            tone: { S: 'blue' },
-          },
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: 'PROJECT_MEMBER#refero#demo@example.com' },
-            entryType: { S: 'project-member' },
-            projectId: { S: 'refero' },
-            memberKey: { S: 'demo@example.com' },
-            email: { S: 'demo@example.com' },
-            role: { S: 'manager' },
-            createdAt: { S: '2026-06-08T00:00:00.000Z' },
-            updatedAt: { S: '2026-06-08T00:00:00.000Z' },
-          },
-        ],
-      };
-    }
-
-    return {};
-  });
-
-  const response = await lambda.handler(createLambdaEvent(
-    'PATCH',
-    '/api/teams/core-team/projects/refero/archive',
-  ));
-  const body = JSON.parse(response.body) as Record<string, unknown>;
-
-  expect(response.statusCode).toBe(200);
-  expect(response.headers['access-control-allow-methods']).toBe('GET,POST,PATCH,DELETE,OPTIONS');
-  expect(body).toEqual({
-    teamId: 'core-team',
-    projectId: 'refero',
-    archivedAt: expect.any(String),
-  });
-  expect(commandInputs).toHaveLength(3);
-  expect(commandInputs[2]).toMatchObject({
-    commandName: 'UpdateItemCommand',
-    input: {
-      TableName: 'DirectoryTable',
-      Key: {
-        directoryId: { S: 'user#demo@example.com' },
-        entryKey: { S: '000010#000010#PROJECT#refero' },
-      },
-      UpdateExpression: 'SET archivedAt = :archivedAt',
-      ConditionExpression:
-        'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-      ExpressionAttributeValues: {
-        ':archivedAt': { S: body.archivedAt },
-      },
-    },
-  });
-});
-
-test('inline lambda archives a team with a conditional update', async () => {
-  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
-  const lambda = createInlineLambda(async (command) => {
-    commandInputs.push({
-      commandName: command.constructor.name,
-      input: command.input,
-    });
-
-    if (command.constructor.name === 'QueryCommand') {
-      return {
-        Items: [
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000000#TEAM#core-team' },
-            entryType: { S: 'team' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            nameJa: { S: 'コアチーム' },
-            nameEn: { S: 'Core Team' },
-            expanded: { BOOL: true },
-          },
-        ],
-      };
-    }
-
-    return {};
-  });
-
-  const response = await lambda.handler(createLambdaEvent(
-    'PATCH',
-    '/api/teams/core-team/archive',
-    ['mukuroji-system-admins'],
-  ));
-  const body = JSON.parse(response.body) as Record<string, unknown>;
-
-  expect(response.statusCode).toBe(200);
-  expect(body).toEqual({
-    teamId: 'core-team',
-    archivedAt: expect.any(String),
-  });
-  expect(commandInputs).toHaveLength(2);
-  expect(commandInputs[1]).toMatchObject({
-    commandName: 'UpdateItemCommand',
-    input: {
-      TableName: 'DirectoryTable',
-      Key: {
-        directoryId: { S: 'user#demo@example.com' },
-        entryKey: { S: '000010#000000#TEAM#core-team' },
-      },
-      UpdateExpression: 'SET archivedAt = :archivedAt',
-      ConditionExpression:
-        'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-      ExpressionAttributeValues: {
-        ':archivedAt': { S: body.archivedAt },
-      },
-    },
-  });
-});
-
-test('inline lambda denies task access for archived projects', async () => {
-  const lambda = createInlineLambda(async (command) => {
-    if (command.constructor.name === 'QueryCommand') {
-      return {
-        Items: [
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000000#TEAM#core-team' },
-            entryType: { S: 'team' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            nameJa: { S: 'コアチーム' },
-            nameEn: { S: 'Core Team' },
-            expanded: { BOOL: true },
-          },
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000010#PROJECT#refero' },
-            entryType: { S: 'project' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            projectId: { S: 'refero' },
-            projectSortOrder: { N: '10' },
-            nameJa: { S: 'Refero' },
-            nameEn: { S: 'Refero' },
-            tone: { S: 'blue' },
-            archivedAt: { S: '2026-06-06T00:00:00.000Z' },
-          },
-        ],
-      };
-    }
-
-    return {};
-  });
-
-  const response = await lambda.handler(createLambdaEvent('GET', '/api/projects/refero/tasks'));
-
-  expect(response.statusCode).toBe(403);
-  expect(JSON.parse(response.body)).toEqual({ message: 'Project access is denied.' });
-});
-
-test('inline lambda updates project member roles for a project manager', async () => {
-  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
-  const lambda = createInlineLambda(async (command) => {
-    commandInputs.push({
-      commandName: command.constructor.name,
-      input: command.input,
-    });
-
-    if (command.constructor.name === 'QueryCommand') {
-      return {
-        Items: [
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000000#TEAM#core-team' },
-            entryType: { S: 'team' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            nameJa: { S: 'コアチーム' },
-            nameEn: { S: 'Core Team' },
-            expanded: { BOOL: true },
-          },
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000010#PROJECT#refero' },
-            entryType: { S: 'project' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            projectId: { S: 'refero' },
-            projectSortOrder: { N: '10' },
-            nameJa: { S: 'Refero' },
-            nameEn: { S: 'Refero' },
-            tone: { S: 'blue' },
-          },
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: 'PROJECT_MEMBER#refero#demo@example.com' },
-            entryType: { S: 'project-member' },
-            projectId: { S: 'refero' },
-            memberKey: { S: 'demo@example.com' },
-            email: { S: 'demo@example.com' },
-            role: { S: 'manager' },
-            createdAt: { S: '2026-06-08T00:00:00.000Z' },
-            updatedAt: { S: '2026-06-08T00:00:00.000Z' },
-          },
-        ],
-      };
-    }
-
-    return {};
-  });
-
-  const response = await lambda.handler({
-    ...createLambdaEvent('PATCH', '/api/projects/refero/members/sato%40example.com'),
-    body: JSON.stringify({
-      role: 'member',
-    }),
-  });
-  const body = JSON.parse(response.body) as Record<string, unknown>;
-
-  expect(response.statusCode).toBe(200);
-  expect(body).toMatchObject({
-    member: {
-      id: 'sato@example.com',
-      email: 'sato@example.com',
-      name: '佐藤 花子',
-      username: 'sato@example.com',
-      enabled: true,
-      status: 'CONFIRMED',
-      role: 'member',
-    },
-  });
-  expect(commandInputs).toHaveLength(3);
-  expect(commandInputs[2]).toMatchObject({
-    commandName: 'PutItemCommand',
-    input: {
-      TableName: 'DirectoryTable',
-      Item: {
-        directoryId: { S: 'user#demo@example.com' },
-        entryKey: { S: 'PROJECT_MEMBER#refero#sato@example.com' },
-        entryType: { S: 'project-member' },
-        projectId: { S: 'refero' },
-        memberKey: { S: 'sato@example.com' },
-        email: { S: 'sato@example.com' },
-        name: { S: '佐藤 花子' },
-        role: { S: 'member' },
-        createdAt: { S: body.member && typeof body.member === 'object' && 'updatedAt' in body.member ? String(body.member.updatedAt) : expect.any(String) },
-        updatedAt: { S: body.member && typeof body.member === 'object' && 'updatedAt' in body.member ? String(body.member.updatedAt) : expect.any(String) },
-      },
-    },
-  });
-});
-
-test('inline lambda keeps the last project manager from being downgraded', async () => {
-  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
-  const lambda = createInlineLambda(async (command) => {
-    commandInputs.push({
-      commandName: command.constructor.name,
-      input: command.input,
-    });
-
-    if (command.constructor.name === 'QueryCommand') {
-      return {
-        Items: [
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000000#TEAM#core-team' },
-            entryType: { S: 'team' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            nameJa: { S: 'コアチーム' },
-            nameEn: { S: 'Core Team' },
-            expanded: { BOOL: true },
-          },
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000010#PROJECT#refero' },
-            entryType: { S: 'project' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            projectId: { S: 'refero' },
-            projectSortOrder: { N: '10' },
-            nameJa: { S: 'Refero' },
-            nameEn: { S: 'Refero' },
-            tone: { S: 'blue' },
-          },
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: 'PROJECT_MEMBER#refero#demo@example.com' },
-            entryType: { S: 'project-member' },
-            projectId: { S: 'refero' },
-            memberKey: { S: 'demo@example.com' },
-            email: { S: 'demo@example.com' },
-            role: { S: 'manager' },
-            createdAt: { S: '2026-06-08T00:00:00.000Z' },
-            updatedAt: { S: '2026-06-08T00:00:00.000Z' },
-          },
-        ],
-      };
-    }
-
-    return {};
-  });
-
-  const response = await lambda.handler({
-    ...createLambdaEvent('PATCH', '/api/projects/refero/members/demo%40example.com'),
-    body: JSON.stringify({
-      role: 'viewer',
-    }),
-  });
-
-  expect(response.statusCode).toBe(409);
-  expect(JSON.parse(response.body)).toEqual({ message: 'At least one project manager is required.' });
-  expect(commandInputs.map((command) => command.commandName)).toEqual([
-    'QueryCommand',
-    'QueryCommand',
-  ]);
-});
-
-test('inline lambda treats manager guard transaction cancellation as last manager conflict', async () => {
-  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
-  let queryReads = 0;
-  const lambda = createInlineLambda(async (command) => {
-    commandInputs.push({
-      commandName: command.constructor.name,
-      input: command.input,
-    });
-
-    if (command.constructor.name === 'QueryCommand') {
-      queryReads += 1;
-
-      return {
-        Items: [
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000000#TEAM#core-team' },
-            entryType: { S: 'team' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            nameJa: { S: 'コアチーム' },
-            nameEn: { S: 'Core Team' },
-            expanded: { BOOL: true },
-          },
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000010#PROJECT#refero' },
-            entryType: { S: 'project' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            projectId: { S: 'refero' },
-            projectSortOrder: { N: '10' },
-            nameJa: { S: 'Refero' },
-            nameEn: { S: 'Refero' },
-            tone: { S: 'blue' },
-          },
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: 'PROJECT_MEMBER#refero#demo@example.com' },
-            entryType: { S: 'project-member' },
-            projectId: { S: 'refero' },
-            memberKey: { S: 'demo@example.com' },
-            email: { S: 'demo@example.com' },
-            role: { S: 'manager' },
-            createdAt: { S: '2026-06-08T00:00:00.000Z' },
-            updatedAt: { S: '2026-06-08T00:00:00.000Z' },
-          },
-          ...(queryReads < 3
-            ? [
-                {
-                  directoryId: { S: 'user#demo@example.com' },
-                  entryKey: { S: 'PROJECT_MEMBER#refero#zmanager@example.com' },
-                  entryType: { S: 'project-member' },
-                  projectId: { S: 'refero' },
-                  memberKey: { S: 'zmanager@example.com' },
-                  email: { S: 'zmanager@example.com' },
-                  role: { S: 'manager' },
-                  createdAt: { S: '2026-06-08T00:00:00.000Z' },
-                  updatedAt: { S: '2026-06-08T00:00:00.000Z' },
-                },
-              ]
-            : []),
-        ],
-      };
-    }
-
-    if (command.constructor.name === 'TransactWriteItemsCommand') {
-      const error = new Error('Transaction was canceled.');
-      error.name = 'TransactionCanceledException';
-      throw error;
-    }
-
-    return {};
-  });
-
-  const response = await lambda.handler(createLambdaEvent(
-    'DELETE',
-    '/api/projects/refero/members/demo%40example.com',
-  ));
-
-  expect(response.statusCode).toBe(409);
-  expect(JSON.parse(response.body)).toEqual({ message: 'At least one project manager is required.' });
-  expect(commandInputs.map((command) => command.commandName)).toEqual([
-    'QueryCommand',
-    'QueryCommand',
-    'TransactWriteItemsCommand',
-    'QueryCommand',
-  ]);
-});
-
-test('inline lambda returns not found when the target member is deleted during the guard transaction', async () => {
-  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
-  let queryReads = 0;
-  const lambda = createInlineLambda(async (command) => {
-    commandInputs.push({
-      commandName: command.constructor.name,
-      input: command.input,
-    });
-
-    if (command.constructor.name === 'QueryCommand') {
-      queryReads += 1;
-
-      return {
-        Items: [
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000000#TEAM#core-team' },
-            entryType: { S: 'team' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            nameJa: { S: 'コアチーム' },
-            nameEn: { S: 'Core Team' },
-            expanded: { BOOL: true },
-          },
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: '000010#000010#PROJECT#refero' },
-            entryType: { S: 'project' },
-            teamId: { S: 'core-team' },
-            teamSortOrder: { N: '10' },
-            projectId: { S: 'refero' },
-            projectSortOrder: { N: '10' },
-            nameJa: { S: 'Refero' },
-            nameEn: { S: 'Refero' },
-            tone: { S: 'blue' },
-          },
-          ...(queryReads < 3
-            ? [
-                {
-                  directoryId: { S: 'user#demo@example.com' },
-                  entryKey: { S: 'PROJECT_MEMBER#refero#demo@example.com' },
-                  entryType: { S: 'project-member' },
-                  projectId: { S: 'refero' },
-                  memberKey: { S: 'demo@example.com' },
-                  email: { S: 'demo@example.com' },
-                  role: { S: 'manager' },
-                  createdAt: { S: '2026-06-08T00:00:00.000Z' },
-                  updatedAt: { S: '2026-06-08T00:00:00.000Z' },
-                },
-              ]
-            : []),
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: 'PROJECT_MEMBER#refero#zmanager@example.com' },
-            entryType: { S: 'project-member' },
-            projectId: { S: 'refero' },
-            memberKey: { S: 'zmanager@example.com' },
-            email: { S: 'zmanager@example.com' },
-            role: { S: 'manager' },
-            createdAt: { S: '2026-06-08T00:00:00.000Z' },
-            updatedAt: { S: '2026-06-08T00:00:00.000Z' },
-          },
-        ],
-      };
-    }
-
-    if (command.constructor.name === 'TransactWriteItemsCommand') {
-      const error = new Error('Transaction was canceled.');
-      error.name = 'TransactionCanceledException';
-      throw error;
-    }
-
-    return {};
-  });
-
-  const response = await lambda.handler(createLambdaEvent(
-    'DELETE',
-    '/api/projects/refero/members/demo%40example.com',
-  ));
-
-  expect(response.statusCode).toBe(404);
-  expect(JSON.parse(response.body)).toEqual({ message: 'Project member was not found.' });
-  expect(commandInputs.map((command) => command.commandName)).toEqual([
-    'QueryCommand',
-    'QueryCommand',
-    'TransactWriteItemsCommand',
-    'QueryCommand',
-  ]);
-});
-
-test('inline lambda returns not found when the project is archived during the guard transaction', async () => {
-  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
-  let queryReads = 0;
-  const lambda = createInlineLambda(async (command) => {
-    commandInputs.push({
-      commandName: command.constructor.name,
-      input: command.input,
-    });
-
-    if (command.constructor.name === 'QueryCommand') {
-      queryReads += 1;
-
-      return {
-        Items: createInlineProjectMemberFixtureItems({
-          archivedProject: queryReads >= 3,
-        }),
-      };
-    }
-
-    if (command.constructor.name === 'TransactWriteItemsCommand') {
-      const error = new Error('Transaction was canceled.');
-      error.name = 'TransactionCanceledException';
-      throw error;
-    }
-
-    return {};
-  });
-
-  const response = await lambda.handler(createLambdaEvent(
-    'DELETE',
-    '/api/projects/refero/members/demo%40example.com',
-  ));
-
-  expect(response.statusCode).toBe(404);
-  expect(JSON.parse(response.body)).toEqual({ message: 'Project was not found.' });
-  expect(commandInputs.map((command) => command.commandName)).toEqual([
-    'QueryCommand',
-    'QueryCommand',
-    'TransactWriteItemsCommand',
-    'QueryCommand',
-  ]);
-});
-
-test('inline lambda treats manager downgrade transaction cancellation as last manager conflict', async () => {
-  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
-  let queryReads = 0;
-  const lambda = createInlineLambda(async (command) => {
-    commandInputs.push({
-      commandName: command.constructor.name,
-      input: command.input,
-    });
-
-    if (command.constructor.name === 'QueryCommand') {
-      queryReads += 1;
-
-      return {
-        Items: createInlineProjectMemberFixtureItems({
-          includeOtherManager: queryReads < 3,
-        }),
-      };
-    }
-
-    if (command.constructor.name === 'TransactWriteItemsCommand') {
-      const error = new Error('Transaction was canceled.');
-      error.name = 'TransactionCanceledException';
-      throw error;
-    }
-
-    return {};
-  });
-
-  const response = await lambda.handler({
-    ...createLambdaEvent('PATCH', '/api/projects/refero/members/demo%40example.com'),
-    body: JSON.stringify({
-      role: 'viewer',
-    }),
-  });
-
-  expect(response.statusCode).toBe(409);
-  expect(JSON.parse(response.body)).toEqual({ message: 'At least one project manager is required.' });
-  expect(commandInputs.map((command) => command.commandName)).toEqual([
-    'QueryCommand',
-    'QueryCommand',
-    'TransactWriteItemsCommand',
-    'QueryCommand',
-  ]);
-});
-
-test('inline lambda returns generic conflict when manager guard transaction cancellation remains valid', async () => {
-  const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
-  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
-  const lambda = createInlineLambda(async (command) => {
-    commandInputs.push({
-      commandName: command.constructor.name,
-      input: command.input,
-    });
-
-    if (command.constructor.name === 'QueryCommand') {
-      return {
-        Items: createInlineProjectMemberFixtureItems(),
-      };
-    }
-
-    if (command.constructor.name === 'TransactWriteItemsCommand') {
-      const error = new Error('Transaction was canceled.');
-      error.name = 'TransactionCanceledException';
-      throw error;
-    }
-
-    return {};
-  });
-
-  try {
-    const response = await lambda.handler(createLambdaEvent(
-      'DELETE',
-      '/api/projects/refero/members/demo%40example.com',
-    ));
-
-    expect(response.statusCode).toBe(409);
-    expect(JSON.parse(response.body)).toEqual({ message: 'The same item already exists.' });
-    expect(commandInputs.map((command) => command.commandName)).toEqual([
-      'QueryCommand',
-      'QueryCommand',
-      'TransactWriteItemsCommand',
-      'QueryCommand',
-    ]);
-  } finally {
-    consoleError.mockRestore();
-  }
-});
-
-test('inline lambda lets a system admin update project member roles without project access checks', async () => {
-  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
-  const lambda = createInlineLambda(async (command) => {
-    commandInputs.push({
-      commandName: command.constructor.name,
-      input: command.input,
-    });
-
-    return {};
-  });
-
-  const response = await lambda.handler({
-    ...createLambdaEvent(
-      'PATCH',
-      '/api/projects/refero/members/sato%40example.com',
-      ['mukuroji-system-admins'],
-    ),
-    body: JSON.stringify({
-      role: 'member',
-    }),
-  });
-  const body = JSON.parse(response.body) as Record<string, unknown>;
-
-  expect(response.statusCode).toBe(200);
-  expect(body).toMatchObject({
-    member: {
-      id: 'sato@example.com',
-      email: 'sato@example.com',
-      role: 'member',
-    },
-  });
-  expect(commandInputs).toHaveLength(2);
-  expect(commandInputs[0]).toMatchObject({
-    commandName: 'QueryCommand',
-    input: {
-      TableName: 'DirectoryTable',
-      KeyConditionExpression: 'directoryId = :directoryId',
-    },
-  });
-  expect(commandInputs[1]).toMatchObject({
-    commandName: 'PutItemCommand',
-    input: {
-      TableName: 'DirectoryTable',
-      Item: {
-        directoryId: { S: 'user#demo@example.com' },
-        entryKey: { S: 'PROJECT_MEMBER#refero#sato@example.com' },
-        projectId: { S: 'refero' },
-        memberKey: { S: 'sato@example.com' },
-        role: { S: 'member' },
-      },
-    },
-  });
-});
-
-test('inline lambda rejects access tokens from unexpected Cognito user pools', async () => {
-  const lambda = createInlineLambda(async () => {
-    throw new Error('DynamoDB should not be called for an unexpected issuer.');
-  });
-  const event = createLambdaEvent('GET', '/api/projects/refero/tasks');
-
-  event.headers.authorization = `Bearer ${createAccessToken(
-    [],
-    'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_other',
-  )}`;
-
-  const response = await lambda.handler(event);
-
-  expect(response.statusCode).toBe(401);
-  expect(JSON.parse(response.body)).toEqual({
-    message: 'Authentication failed.',
-  });
-});
-
-function createInlineProjectMemberFixtureItems(
-  options: {
-    archivedProject?: boolean;
-    archivedTeam?: boolean;
-    includeOtherManager?: boolean;
-    includeTargetMember?: boolean;
-  } = {},
-) {
-  const includeOtherManager = options.includeOtherManager ?? true;
-  const includeTargetMember = options.includeTargetMember ?? true;
-
-  return [
-    {
-      directoryId: { S: 'user#demo@example.com' },
-      entryKey: { S: '000010#000000#TEAM#core-team' },
-      entryType: { S: 'team' },
-      teamId: { S: 'core-team' },
-      teamSortOrder: { N: '10' },
-      nameJa: { S: 'コアチーム' },
-      nameEn: { S: 'Core Team' },
-      expanded: { BOOL: true },
-      ...(options.archivedTeam ? { archivedAt: { S: '2026-06-08T00:00:00.000Z' } } : {}),
-    },
-    {
-      directoryId: { S: 'user#demo@example.com' },
-      entryKey: { S: '000010#000010#PROJECT#refero' },
-      entryType: { S: 'project' },
-      teamId: { S: 'core-team' },
-      teamSortOrder: { N: '10' },
-      projectId: { S: 'refero' },
-      projectSortOrder: { N: '10' },
-      nameJa: { S: 'Refero' },
-      nameEn: { S: 'Refero' },
-      tone: { S: 'blue' },
-      ...(options.archivedProject ? { archivedAt: { S: '2026-06-08T00:00:00.000Z' } } : {}),
-    },
-    ...(includeTargetMember
-      ? [
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: 'PROJECT_MEMBER#refero#demo@example.com' },
-            entryType: { S: 'project-member' },
-            projectId: { S: 'refero' },
-            memberKey: { S: 'demo@example.com' },
-            email: { S: 'demo@example.com' },
-            role: { S: 'manager' },
-            createdAt: { S: '2026-06-08T00:00:00.000Z' },
-            updatedAt: { S: '2026-06-08T00:00:00.000Z' },
-          },
-        ]
-      : []),
-    ...(includeOtherManager
-      ? [
-          {
-            directoryId: { S: 'user#demo@example.com' },
-            entryKey: { S: 'PROJECT_MEMBER#refero#zmanager@example.com' },
-            entryType: { S: 'project-member' },
-            projectId: { S: 'refero' },
-            memberKey: { S: 'zmanager@example.com' },
-            email: { S: 'zmanager@example.com' },
-            role: { S: 'manager' },
-            createdAt: { S: '2026-06-08T00:00:00.000Z' },
-            updatedAt: { S: '2026-06-08T00:00:00.000Z' },
-          },
-        ]
-      : []),
-  ];
-}
-
-function createInlineLambda(
-  dynamoDbSend: (
-    command: {
-      constructor: { name: string };
-      input: Record<string, unknown>;
-    },
-  ) => Promise<Record<string, unknown>>,
-) {
-  const lambdaCode = readInlineLambdaCode();
-  const exports = {};
-  const context = vm.createContext({
-    Buffer,
-    console,
-    exports,
-    process: {
-      env: {
-        ALLOWED_ORIGINS: 'http://localhost:5173,http://127.0.0.1:5173',
-        COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
-        PROJECT_DIRECTORY_TABLE_NAME: 'DirectoryTable',
-        SYSTEM_ADMIN_GROUPS: 'mukuroji-system-admins',
-        TEAM_ISSUE_EVENTS_TABLE_NAME: 'TeamIssueEventsTable',
-        TEAM_ISSUES_TABLE_NAME: 'TeamIssuesTable',
-        TASKS_TABLE_NAME: 'TasksTable',
-      },
-    },
-    require: (moduleName: string) => {
-      if (moduleName === '@aws-sdk/client-cognito-identity-provider') {
-        return {
-          CognitoIdentityProviderClient: function CognitoIdentityProviderClient(
-            this: { send: (command: { constructor: { name: string } }) => Promise<Record<string, unknown>> },
-          ) {
-            this.send = async (command) => {
-              if (command.constructor.name === 'ListUsersCommand') {
-                return {
-                  Users: [
-                    {
-                      Username: 'sato@example.com',
-                      Enabled: true,
-                      UserStatus: 'CONFIRMED',
-                      Attributes: [
-                        {
-                          Name: 'email',
-                          Value: 'sato@example.com',
-                        },
-                        {
-                          Name: 'name',
-                          Value: '佐藤 花子',
-                        },
-                        {
-                          Name: 'custom:directory_id',
-                          Value: 'user#demo@example.com',
-                        },
-                      ],
-                    },
-                  ],
-                };
-              }
-
-              if (command.constructor.name === 'AdminGetUserCommand') {
-                return {
-                  Username: 'sato@example.com',
-                  Enabled: true,
-                  UserStatus: 'CONFIRMED',
-                  UserAttributes: [
-                    {
-                      Name: 'email',
-                      Value: 'sato@example.com',
-                    },
-                    {
-                      Name: 'name',
-                      Value: '佐藤 花子',
-                    },
-                    {
-                      Name: 'custom:directory_id',
-                      Value: 'user#demo@example.com',
-                    },
-                  ],
-                };
-              }
-
-              return {
-                Username: 'demo@example.com',
-                UserAttributes: [
-                  {
-                    Name: 'email',
-                    Value: 'demo@example.com',
-                  },
-                  {
-                    Name: 'custom:directory_id',
-                    Value: 'user#demo@example.com',
-                  },
-                ],
-              };
-            };
-          },
-          AdminGetUserCommand: createCommandConstructor('AdminGetUserCommand'),
-          GetUserCommand: createCommandConstructor('GetUserCommand'),
-          ListUsersCommand: createCommandConstructor('ListUsersCommand'),
-        };
-      }
-
-      if (moduleName === '@aws-sdk/client-dynamodb') {
-        return {
-          DynamoDBClient: function DynamoDBClient(
-            this: {
-              send: typeof dynamoDbSend;
-            },
-          ) {
-            this.send = dynamoDbSend;
-          },
-          DeleteItemCommand: createCommandConstructor('DeleteItemCommand'),
-          PutItemCommand: createCommandConstructor('PutItemCommand'),
-          QueryCommand: createCommandConstructor('QueryCommand'),
-          TransactWriteItemsCommand: createCommandConstructor('TransactWriteItemsCommand'),
-          UpdateItemCommand: createCommandConstructor('UpdateItemCommand'),
-        };
-      }
-
-      throw new Error(`Unsupported module: ${moduleName}`);
-    },
-  });
-
-  vm.runInContext(lambdaCode, context);
-
-  return exports as {
-    handler: (event: Record<string, unknown>) => Promise<{
-      body: string;
-      headers: Record<string, string>;
-      statusCode: number;
-    }>;
-  };
-}
-
-function readInlineLambdaCode() {
-  const app = new cdk.App();
-  const stack = new CdkStack(app, 'InlineLambdaTestStack');
-  const template = Template.fromStack(stack);
-  const lambdaResource = Object.values(template.findResources('AWS::Lambda::Function')).find((resource) =>
-    JSON.stringify(resource).includes('isProjectDirectoryRequest'),
+  const projectDirectorySeed = transactWriteResources.find((resource) =>
+    JSON.stringify(resource).includes('project-directory-seed-v3'),
   );
 
-  return String(lambdaResource?.Properties?.Code?.ZipFile ?? '');
-}
+  expect(projectTaskSeed).toBeDefined();
+  expect(projectDirectorySeed).toBeDefined();
 
-function createCommandConstructor(name: string) {
-  const commandConstructor = function Command(
-    this: { input: Record<string, unknown> },
-    input: Record<string, unknown>,
-  ) {
-    this.input = input;
-  };
+  const taskPayload = serializeAwsSdkCall(projectTaskSeed?.Properties.Create);
+  const directoryPayload = serializeAwsSdkCall(projectDirectorySeed?.Properties.Create);
 
-  Object.defineProperty(commandConstructor, 'name', { value: name });
-
-  return commandConstructor;
-}
-
-function createLambdaEvent(method: string, rawPath: string, groups: string[] = []) {
-  return {
-    body: undefined,
-    headers: {
-      authorization: `Bearer ${createAccessToken(groups)}`,
-      origin: 'http://localhost:5173',
-    },
-    isBase64Encoded: false,
-    rawPath,
-    requestContext: {
-      http: {
-        method,
-      },
-    },
-  };
-}
-
-function createAccessToken(
-  groups: string[],
-  issuer = 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
-) {
-  const payload = Buffer
-    .from(JSON.stringify({
-      'cognito:groups': groups,
-      iss: issuer,
-    }))
-    .toString('base64url');
-
-  return `header.${payload}.signature`;
-}
+  expect(taskPayload).toContain('WorkspaceDirectoryId');
+  expect(directoryPayload).toContain('WorkspaceDirectoryId');
+  expect(taskPayload).not.toContain('user#demo@example.com');
+  expect(directoryPayload).not.toContain('user#demo@example.com');
+  expect(projectTaskSeed?.Properties.Update).toBeUndefined();
+  expect(projectDirectorySeed?.Properties.Update).toBeUndefined();
+});

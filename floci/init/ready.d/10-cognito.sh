@@ -3,19 +3,44 @@ set -eu
 
 ENDPOINT_URL="${AWS_ENDPOINT_URL:-http://localhost:4566}"
 PUBLIC_ENDPOINT_URL="${MUKUROJI_PUBLIC_FLOCI_ENDPOINT:-$ENDPOINT_URL}"
+PUBLIC_ENDPOINT_URL="${PUBLIC_ENDPOINT_URL%/}"
 POOL_ID="${COGNITO_USER_POOL_ID:-us-east-1_mukuroji}"
 POOL_NAME="${COGNITO_USER_POOL_NAME:-mukuroji-local}"
 CLIENT_NAME="${COGNITO_USER_POOL_CLIENT_NAME:-mukuroji-web-local}"
 TEST_USERNAME="${COGNITO_TEST_USERNAME:-demo@example.com}"
 TEST_PASSWORD="${COGNITO_TEST_PASSWORD:-Password123!}"
+INITIAL_OWNER_USERNAME="${MUKUROJI_INITIAL_OWNER_USERNAME:-$TEST_USERNAME}"
+INITIAL_OWNER_EMAIL="${MUKUROJI_INITIAL_OWNER_EMAIL:-$TEST_USERNAME}"
 SYSTEM_ADMIN_GROUP="${MUKUROJI_SYSTEM_ADMIN_GROUP:-mukuroji-system-admins}"
 DASHBOARD_TABLE="${MUKUROJI_DASHBOARD_TABLE:-mukuroji-dashboard-local}"
 PROJECT_TASKS_TABLE="${MUKUROJI_PROJECT_TASKS_TABLE:-mukuroji-project-tasks-v2-local}"
 PROJECT_DIRECTORY_TABLE="${MUKUROJI_PROJECT_DIRECTORY_TABLE:-mukuroji-project-directory-local}"
-PROJECT_DIRECTORY_ID="${MUKUROJI_PROJECT_DIRECTORY_ID:-user#$(printf '%s' "$TEST_USERNAME" | tr '[:upper:]' '[:lower:]')}"
-PROJECT_MEMBER_KEY="$(printf '%s' "$TEST_USERNAME" | tr '[:upper:]' '[:lower:]')"
+WORKSPACE_DIRECTORY_ID="${MUKUROJI_WORKSPACE_DIRECTORY_ID:-${MUKUROJI_PROJECT_DIRECTORY_ID:-workspace#mukuroji-local}}"
+PROJECT_DIRECTORY_ID="$WORKSPACE_DIRECTORY_ID"
+PROJECT_MEMBER_KEY="$(printf '%s' "$INITIAL_OWNER_EMAIL" | tr '[:upper:]' '[:lower:]')"
 DASHBOARD_UPDATED_AT="${MUKUROJI_DASHBOARD_UPDATED_AT:-$(date -u +%Y-%m-%dT%H:%M:%S.000Z)}"
 GENERATED_DIR="${MUKUROJI_GENERATED_DIR:-/app/generated}"
+
+case "$WORKSPACE_DIRECTORY_ID" in
+  '' | *[!A-Za-z0-9._:/#@+-]*)
+    echo "MUKUROJI_WORKSPACE_DIRECTORY_ID contains unsupported characters." >&2
+    exit 2
+    ;;
+esac
+
+case "$PROJECT_MEMBER_KEY" in
+  '' | *[!a-z0-9._%+@-]* | @* | *@ | *@*@*)
+    echo "MUKUROJI_INITIAL_OWNER_EMAIL must be an email address." >&2
+    exit 2
+    ;;
+esac
+
+case "$INITIAL_OWNER_USERNAME" in
+  '' | *[!A-Za-z0-9._@+-]*)
+    echo "MUKUROJI_INITIAL_OWNER_USERNAME contains unsupported characters." >&2
+    exit 2
+    ;;
+esac
 
 aws_local() {
   aws --endpoint-url "$ENDPOINT_URL" "$@"
@@ -26,15 +51,40 @@ if ! aws_local cognito-idp describe-user-pool --user-pool-id "$POOL_ID" >/dev/nu
     --pool-name "$POOL_NAME" \
     --user-pool-tags "floci:override-id=$POOL_ID" \
     --username-attributes email \
-    --schema Name=directory_id,AttributeDataType=String,Mutable=true,Required=false \
+    --schema \
+      Name=directory_id,AttributeDataType=String,Mutable=true,Required=false \
+      Name=workspace_id,AttributeDataType=String,Mutable=true,Required=false \
     --policies 'PasswordPolicy={MinimumLength=8,RequireUppercase=true,RequireLowercase=true,RequireNumbers=true,RequireSymbols=true}' \
     >/dev/null
 fi
 
-aws_local cognito-idp add-custom-attributes \
-  --user-pool-id "$POOL_ID" \
-  --custom-attributes Name=directory_id,AttributeDataType=String,Mutable=true \
-  >/dev/null 2>&1 || true
+ensure_cognito_custom_attribute() {
+  attribute_name="$1"
+  existing_count="$(aws_local cognito-idp describe-user-pool \
+    --user-pool-id "$POOL_ID" \
+    --query "length(UserPool.SchemaAttributes[?Name=='custom:$attribute_name'])" \
+    --output text)"
+
+  if [ "$existing_count" = "0" ]; then
+    if ! add_attribute_error="$(aws_local cognito-idp add-custom-attributes \
+      --user-pool-id "$POOL_ID" \
+      --custom-attributes "Name=$attribute_name,AttributeDataType=String,Mutable=true" \
+      2>&1)"; then
+      case "$add_attribute_error" in
+        *UnsupportedOperation* | *"not supported"*)
+          echo "Floci does not expose AddCustomAttributes; validating custom:$attribute_name on the seeded user instead." >&2
+          ;;
+        *)
+          echo "$add_attribute_error" >&2
+          exit 1
+          ;;
+      esac
+    fi
+  fi
+}
+
+ensure_cognito_custom_attribute "directory_id"
+ensure_cognito_custom_attribute "workspace_id"
 
 CLIENT_ID="$(aws_local cognito-idp list-user-pool-clients \
   --user-pool-id "$POOL_ID" \
@@ -54,7 +104,8 @@ fi
 
 ensure_cognito_user() {
   username="$1"
-  display_name="$2"
+  email="$2"
+  display_name="$3"
 
   if ! aws_local cognito-idp admin-get-user \
     --user-pool-id "$POOL_ID" \
@@ -64,13 +115,13 @@ ensure_cognito_user() {
       --username "$username" \
       --temporary-password "$TEST_PASSWORD" \
       --message-action SUPPRESS \
-      --user-attributes Name=email,Value="$username" Name=email_verified,Value=true Name=name,Value="$display_name" Name=custom:directory_id,Value="$PROJECT_DIRECTORY_ID" \
+      --user-attributes Name=email,Value="$email" Name=email_verified,Value=true Name=name,Value="$display_name" Name=custom:directory_id,Value="$WORKSPACE_DIRECTORY_ID" Name=custom:workspace_id,Value="$WORKSPACE_DIRECTORY_ID" \
       >/dev/null
   else
     aws_local cognito-idp admin-update-user-attributes \
       --user-pool-id "$POOL_ID" \
       --username "$username" \
-      --user-attributes Name=email,Value="$username" Name=email_verified,Value=true Name=name,Value="$display_name" Name=custom:directory_id,Value="$PROJECT_DIRECTORY_ID" \
+      --user-attributes Name=email,Value="$email" Name=email_verified,Value=true Name=name,Value="$display_name" Name=custom:directory_id,Value="$WORKSPACE_DIRECTORY_ID" Name=custom:workspace_id,Value="$WORKSPACE_DIRECTORY_ID" \
       >/dev/null
   fi
 
@@ -82,12 +133,12 @@ ensure_cognito_user() {
     >/dev/null
 }
 
-ensure_cognito_user "$TEST_USERNAME" "Demo User"
-ensure_cognito_user "sato@example.com" "佐藤 花子"
-ensure_cognito_user "suzuki@example.com" "鈴木 大輔"
-ensure_cognito_user "tanaka@example.com" "田中 美咲"
-ensure_cognito_user "yamamoto@example.com" "山本 健太"
-ensure_cognito_user "viewer@example.com" "Viewer User"
+ensure_cognito_user "$INITIAL_OWNER_USERNAME" "$INITIAL_OWNER_EMAIL" "Demo User"
+ensure_cognito_user "sato@example.com" "sato@example.com" "佐藤 花子"
+ensure_cognito_user "suzuki@example.com" "suzuki@example.com" "鈴木 大輔"
+ensure_cognito_user "tanaka@example.com" "tanaka@example.com" "田中 美咲"
+ensure_cognito_user "yamamoto@example.com" "yamamoto@example.com" "山本 健太"
+ensure_cognito_user "viewer@example.com" "viewer@example.com" "Viewer User"
 
 if ! aws_local cognito-idp get-group \
   --user-pool-id "$POOL_ID" \
@@ -100,7 +151,7 @@ fi
 
 aws_local cognito-idp admin-add-user-to-group \
   --user-pool-id "$POOL_ID" \
-  --username "$TEST_USERNAME" \
+  --username "$INITIAL_OWNER_USERNAME" \
   --group-name "$SYSTEM_ADMIN_GROUP" \
   >/dev/null
 
@@ -194,12 +245,8 @@ DIRECTORY_UNPROCESSED_TABLES="$(aws_local dynamodb batch-write-item \
       {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"000020#000000#TEAM#design-team\"},\"entryType\":{\"S\":\"team\"},\"teamId\":{\"S\":\"design-team\"},\"teamSortOrder\":{\"N\":\"20\"},\"nameJa\":{\"S\":\"デザインチーム\"},\"nameEn\":{\"S\":\"Design Team\"},\"expanded\":{\"BOOL\":true}}}},
       {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"000020#000010#PROJECT#shared-launch\"},\"entryType\":{\"S\":\"project\"},\"teamId\":{\"S\":\"design-team\"},\"teamSortOrder\":{\"N\":\"20\"},\"projectId\":{\"S\":\"shared-launch\"},\"projectSortOrder\":{\"N\":\"10\"},\"nameJa\":{\"S\":\"共通ローンチ\"},\"nameEn\":{\"S\":\"Shared Launch\"},\"tone\":{\"S\":\"purple\"}}}},
       {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"000020#000020#PROJECT#brand-refresh\"},\"entryType\":{\"S\":\"project\"},\"teamId\":{\"S\":\"design-team\"},\"teamSortOrder\":{\"N\":\"20\"},\"projectId\":{\"S\":\"brand-refresh\"},\"projectSortOrder\":{\"N\":\"20\"},\"nameJa\":{\"S\":\"ブランド刷新\"},\"nameEn\":{\"S\":\"Brand Refresh\"},\"tone\":{\"S\":\"yellow\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"PROJECT_MEMBER#refero#$PROJECT_MEMBER_KEY\"},\"entryType\":{\"S\":\"project-member\"},\"projectId\":{\"S\":\"refero\"},\"memberKey\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"email\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"name\":{\"S\":\"Demo User\"},\"role\":{\"S\":\"manager\"},\"createdAt\":{\"S\":\"2026-06-08T00:00:00.000Z\"},\"updatedAt\":{\"S\":\"2026-06-08T00:00:00.000Z\"}}}},
       {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"PROJECT_MEMBER#refero#sato@example.com\"},\"entryType\":{\"S\":\"project-member\"},\"projectId\":{\"S\":\"refero\"},\"memberKey\":{\"S\":\"sato@example.com\"},\"email\":{\"S\":\"sato@example.com\"},\"name\":{\"S\":\"佐藤 花子\"},\"role\":{\"S\":\"member\"},\"createdAt\":{\"S\":\"2026-06-08T00:00:00.000Z\"},\"updatedAt\":{\"S\":\"2026-06-08T00:00:00.000Z\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"PROJECT_MEMBER#refero#viewer@example.com\"},\"entryType\":{\"S\":\"project-member\"},\"projectId\":{\"S\":\"refero\"},\"memberKey\":{\"S\":\"viewer@example.com\"},\"email\":{\"S\":\"viewer@example.com\"},\"name\":{\"S\":\"Viewer User\"},\"role\":{\"S\":\"viewer\"},\"createdAt\":{\"S\":\"2026-06-08T00:00:00.000Z\"},\"updatedAt\":{\"S\":\"2026-06-08T00:00:00.000Z\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"PROJECT_MEMBER#product-roadmap#$PROJECT_MEMBER_KEY\"},\"entryType\":{\"S\":\"project-member\"},\"projectId\":{\"S\":\"product-roadmap\"},\"memberKey\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"email\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"name\":{\"S\":\"Demo User\"},\"role\":{\"S\":\"manager\"},\"createdAt\":{\"S\":\"2026-06-08T00:00:00.000Z\"},\"updatedAt\":{\"S\":\"2026-06-08T00:00:00.000Z\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"PROJECT_MEMBER#shared-launch#$PROJECT_MEMBER_KEY\"},\"entryType\":{\"S\":\"project-member\"},\"projectId\":{\"S\":\"shared-launch\"},\"memberKey\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"email\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"name\":{\"S\":\"Demo User\"},\"role\":{\"S\":\"manager\"},\"createdAt\":{\"S\":\"2026-06-08T00:00:00.000Z\"},\"updatedAt\":{\"S\":\"2026-06-08T00:00:00.000Z\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"PROJECT_MEMBER#brand-refresh#$PROJECT_MEMBER_KEY\"},\"entryType\":{\"S\":\"project-member\"},\"projectId\":{\"S\":\"brand-refresh\"},\"memberKey\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"email\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"name\":{\"S\":\"Demo User\"},\"role\":{\"S\":\"manager\"},\"createdAt\":{\"S\":\"2026-06-08T00:00:00.000Z\"},\"updatedAt\":{\"S\":\"2026-06-08T00:00:00.000Z\"}}}}
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"PROJECT_MEMBER#refero#viewer@example.com\"},\"entryType\":{\"S\":\"project-member\"},\"projectId\":{\"S\":\"refero\"},\"memberKey\":{\"S\":\"viewer@example.com\"},\"email\":{\"S\":\"viewer@example.com\"},\"name\":{\"S\":\"Viewer User\"},\"role\":{\"S\":\"viewer\"},\"createdAt\":{\"S\":\"2026-06-08T00:00:00.000Z\"},\"updatedAt\":{\"S\":\"2026-06-08T00:00:00.000Z\"}}}}
     ]
   }" \
   --query 'length(UnprocessedItems)' \
@@ -210,23 +257,109 @@ if [ "$DIRECTORY_UNPROCESSED_TABLES" != "0" ]; then
   exit 1
 fi
 
+WORKSPACE_UNPROCESSED_TABLES="$(aws_local dynamodb batch-write-item \
+  --request-items "{
+    \"$PROJECT_DIRECTORY_TABLE\": [
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$WORKSPACE_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"WORKSPACE#METADATA\"},\"entryType\":{\"S\":\"workspace-metadata\"},\"workspaceId\":{\"S\":\"$WORKSPACE_DIRECTORY_ID\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$WORKSPACE_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"WORKSPACE_MEMBER#$PROJECT_MEMBER_KEY\"},\"entryType\":{\"S\":\"workspace-member\"},\"workspaceId\":{\"S\":\"$WORKSPACE_DIRECTORY_ID\"},\"memberKey\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"email\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"username\":{\"S\":\"$INITIAL_OWNER_USERNAME\"},\"role\":{\"S\":\"owner\"},\"createdAt\":{\"S\":\"2026-07-11T00:00:00.000Z\"},\"updatedAt\":{\"S\":\"2026-07-11T00:00:00.000Z\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$WORKSPACE_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"EMAIL_ALIAS#$PROJECT_MEMBER_KEY\"},\"entryType\":{\"S\":\"email-alias\"},\"workspaceId\":{\"S\":\"$WORKSPACE_DIRECTORY_ID\"},\"memberKey\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"email\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"username\":{\"S\":\"$INITIAL_OWNER_USERNAME\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"PROJECT_MEMBER#refero#$PROJECT_MEMBER_KEY\"},\"entryType\":{\"S\":\"project-member\"},\"projectId\":{\"S\":\"refero\"},\"memberKey\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"email\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"name\":{\"S\":\"Initial Owner\"},\"role\":{\"S\":\"manager\"},\"createdAt\":{\"S\":\"2026-07-11T00:00:00.000Z\"},\"updatedAt\":{\"S\":\"2026-07-11T00:00:00.000Z\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"PROJECT_MEMBER#product-roadmap#$PROJECT_MEMBER_KEY\"},\"entryType\":{\"S\":\"project-member\"},\"projectId\":{\"S\":\"product-roadmap\"},\"memberKey\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"email\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"name\":{\"S\":\"Initial Owner\"},\"role\":{\"S\":\"manager\"},\"createdAt\":{\"S\":\"2026-07-11T00:00:00.000Z\"},\"updatedAt\":{\"S\":\"2026-07-11T00:00:00.000Z\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"PROJECT_MEMBER#shared-launch#$PROJECT_MEMBER_KEY\"},\"entryType\":{\"S\":\"project-member\"},\"projectId\":{\"S\":\"shared-launch\"},\"memberKey\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"email\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"name\":{\"S\":\"Initial Owner\"},\"role\":{\"S\":\"manager\"},\"createdAt\":{\"S\":\"2026-07-11T00:00:00.000Z\"},\"updatedAt\":{\"S\":\"2026-07-11T00:00:00.000Z\"}}}},
+      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"PROJECT_MEMBER#brand-refresh#$PROJECT_MEMBER_KEY\"},\"entryType\":{\"S\":\"project-member\"},\"projectId\":{\"S\":\"brand-refresh\"},\"memberKey\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"email\":{\"S\":\"$PROJECT_MEMBER_KEY\"},\"name\":{\"S\":\"Initial Owner\"},\"role\":{\"S\":\"manager\"},\"createdAt\":{\"S\":\"2026-07-11T00:00:00.000Z\"},\"updatedAt\":{\"S\":\"2026-07-11T00:00:00.000Z\"}}}}
+    ]
+  }" \
+  --query 'length(UnprocessedItems)' \
+  --output text)"
+
+if [ "$WORKSPACE_UNPROCESSED_TABLES" != "0" ]; then
+  echo "DynamoDB workspace bootstrap left unprocessed items: table=$PROJECT_DIRECTORY_TABLE workspaceDirectory=$WORKSPACE_DIRECTORY_ID" >&2
+  exit 1
+fi
+
+assert_equal() {
+  actual="$1"
+  expected="$2"
+  description="$3"
+
+  if [ "$actual" != "$expected" ]; then
+    echo "Bootstrap validation failed: $description expected=$expected actual=$actual" >&2
+    exit 1
+  fi
+}
+
+assert_present() {
+  actual="$1"
+  description="$2"
+
+  if [ -z "$actual" ] || [ "$actual" = "None" ]; then
+    echo "Bootstrap validation failed: $description is missing" >&2
+    exit 1
+  fi
+}
+
+read_owner_attribute() {
+  attribute_name="$1"
+  aws_local cognito-idp admin-get-user \
+    --user-pool-id "$POOL_ID" \
+    --username "$INITIAL_OWNER_USERNAME" \
+    --query "UserAttributes[?Name=='$attribute_name'].Value | [0]" \
+    --output text
+}
+
+read_directory_attribute() {
+  entry_key="$1"
+  attribute_name="$2"
+  aws_local dynamodb get-item \
+    --table-name "$PROJECT_DIRECTORY_TABLE" \
+    --consistent-read \
+    --key "{\"directoryId\":{\"S\":\"$WORKSPACE_DIRECTORY_ID\"},\"entryKey\":{\"S\":\"$entry_key\"}}" \
+    --query "Item.$attribute_name.S" \
+    --output text
+}
+
+assert_equal "$(read_owner_attribute 'email' | tr '[:upper:]' '[:lower:]')" "$PROJECT_MEMBER_KEY" "Cognito owner email"
+assert_equal "$(read_owner_attribute 'custom:directory_id')" "$WORKSPACE_DIRECTORY_ID" "Cognito custom:directory_id"
+assert_equal "$(read_owner_attribute 'custom:workspace_id')" "$WORKSPACE_DIRECTORY_ID" "Cognito custom:workspace_id"
+assert_equal "$(read_directory_attribute 'WORKSPACE#METADATA' 'workspaceId')" "$WORKSPACE_DIRECTORY_ID" "workspace metadata"
+assert_equal "$(read_directory_attribute "WORKSPACE_MEMBER#$PROJECT_MEMBER_KEY" 'role')" "owner" "workspace owner role"
+assert_equal "$(read_directory_attribute "WORKSPACE_MEMBER#$PROJECT_MEMBER_KEY" 'email')" "$PROJECT_MEMBER_KEY" "workspace owner email"
+assert_equal "$(read_directory_attribute "WORKSPACE_MEMBER#$PROJECT_MEMBER_KEY" 'username')" "$INITIAL_OWNER_USERNAME" "workspace owner username"
+assert_present "$(read_directory_attribute "WORKSPACE_MEMBER#$PROJECT_MEMBER_KEY" 'createdAt')" "workspace owner createdAt"
+assert_present "$(read_directory_attribute "WORKSPACE_MEMBER#$PROJECT_MEMBER_KEY" 'updatedAt')" "workspace owner updatedAt"
+assert_equal "$(read_directory_attribute "EMAIL_ALIAS#$PROJECT_MEMBER_KEY" 'workspaceId')" "$WORKSPACE_DIRECTORY_ID" "email alias workspace"
+assert_equal "$(read_directory_attribute "EMAIL_ALIAS#$PROJECT_MEMBER_KEY" 'email')" "$PROJECT_MEMBER_KEY" "email alias"
+assert_equal "$(read_directory_attribute "EMAIL_ALIAS#$PROJECT_MEMBER_KEY" 'username')" "$INITIAL_OWNER_USERNAME" "email alias username"
+
+for project_id in refero product-roadmap shared-launch brand-refresh; do
+  project_member_key="PROJECT_MEMBER#$project_id#$PROJECT_MEMBER_KEY"
+  assert_equal "$(read_directory_attribute "$project_member_key" 'role')" "manager" "initial owner project role ($project_id)"
+  assert_present "$(read_directory_attribute "$project_member_key" 'createdAt')" "initial owner project createdAt ($project_id)"
+  assert_present "$(read_directory_attribute "$project_member_key" 'updatedAt')" "initial owner project updatedAt ($project_id)"
+done
+
 mkdir -p "$GENERATED_DIR"
 cat >"$GENERATED_DIR/cognito.env" <<EOF
 COGNITO_ENDPOINT=$PUBLIC_ENDPOINT_URL
+COGNITO_ISSUER=$PUBLIC_ENDPOINT_URL/$POOL_ID
 COGNITO_USER_POOL_ID=$POOL_ID
 COGNITO_USER_POOL_NAME=$POOL_NAME
 COGNITO_USER_POOL_CLIENT_NAME=$CLIENT_NAME
 COGNITO_CLIENT_ID=$CLIENT_ID
-COGNITO_TEST_USERNAME=$TEST_USERNAME
+COGNITO_TEST_USERNAME=$INITIAL_OWNER_USERNAME
 COGNITO_TEST_PASSWORD=$TEST_PASSWORD
+MUKUROJI_INITIAL_OWNER_USERNAME=$INITIAL_OWNER_USERNAME
+MUKUROJI_INITIAL_OWNER_EMAIL=$PROJECT_MEMBER_KEY
 MUKUROJI_SYSTEM_ADMIN_GROUPS=$SYSTEM_ADMIN_GROUP
 MUKUROJI_DASHBOARD_TABLE=$DASHBOARD_TABLE
 MUKUROJI_PROJECT_TASKS_TABLE=$PROJECT_TASKS_TABLE
 MUKUROJI_PROJECT_DIRECTORY_TABLE=$PROJECT_DIRECTORY_TABLE
+MUKUROJI_WORKSPACE_DIRECTORY_ID=$WORKSPACE_DIRECTORY_ID
+MUKUROJI_PROJECT_DIRECTORY_ID=$WORKSPACE_DIRECTORY_ID
 DYNAMODB_ENDPOINT=$PUBLIC_ENDPOINT_URL
 EOF
 
-echo "mukuroji Cognito ready: userPoolId=$POOL_ID clientId=$CLIENT_ID username=$TEST_USERNAME adminGroup=$SYSTEM_ADMIN_GROUP"
+echo "mukuroji Cognito ready: userPoolId=$POOL_ID clientId=$CLIENT_ID username=$INITIAL_OWNER_USERNAME adminGroup=$SYSTEM_ADMIN_GROUP"
 echo "mukuroji DynamoDB ready: table=$DASHBOARD_TABLE item=summary"
 echo "mukuroji DynamoDB ready: table=$PROJECT_TASKS_TABLE project=refero tasks=10"
-echo "mukuroji DynamoDB ready: table=$PROJECT_DIRECTORY_TABLE directory=$PROJECT_DIRECTORY_ID"
+echo "mukuroji DynamoDB ready: table=$PROJECT_DIRECTORY_TABLE workspaceDirectory=$WORKSPACE_DIRECTORY_ID"

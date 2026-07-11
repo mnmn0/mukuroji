@@ -12,6 +12,7 @@
     "@jest/globals": "^30",
     "@types/jest": "^30",
     "@types/node": "^24.10.1",
+    "esbuild": "^0.27.7",
     "jest": "^30",
     "ts-jest": "^29",
     "aws-cdk": "2.1124.0",
