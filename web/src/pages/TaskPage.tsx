@@ -4,6 +4,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router'
 import useSWR from 'swr'
 import { getCurrentUser, type CurrentUser } from '../auth/api'
 import { clearAuthSession, getAuthSession } from '../auth/session'
+import { createMutationRequestRunner } from '../api/mutationHeaders'
 import { ChevronIcon } from '../components/icons'
 import {
   MobileSidebarButton,
@@ -341,6 +342,7 @@ const viewLabelKeys: Record<TaskTab, MessageKey> = {
 export function TaskPage() {
   const navigate = useNavigate()
   const params = useParams()
+  const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   const [searchParams] = useSearchParams()
   const projectId = params.projectId ?? 'refero'
   const selectedTeamId = searchParams.get('teamId') ?? undefined
@@ -533,10 +535,19 @@ export function TaskPage() {
       throw new Error(t('issues.error.create'))
     }
 
-    const issue = await createTeamIssue(activeTeam.id, accessToken, {
-      ...input,
-      assignedProjectId: projectId,
-    })
+    const issue = await mutationRequestRunner.run(
+      'issue:create',
+      JSON.stringify([activeTeam.id, projectId, input]),
+      (context) => createTeamIssue(
+        activeTeam.id,
+        accessToken,
+        {
+          ...input,
+          assignedProjectId: projectId,
+        },
+        context,
+      ),
+    )
     await mutateProjectTasks()
     navigate(createProjectIssuesPath(projectId, activeTeam.id, issue.id))
   }
@@ -547,7 +558,9 @@ export function TaskPage() {
     }
 
     try {
-      await createProjectDirectoryTeam(accessToken, input)
+      await mutationRequestRunner.run('team:create', JSON.stringify(input), (context) =>
+        createProjectDirectoryTeam(accessToken, input, context),
+      )
       await mutateProjectDirectory()
     } catch (error) {
       console.error('Failed to create team:', error)
@@ -564,7 +577,11 @@ export function TaskPage() {
     }
 
     try {
-      await createProjectDirectoryProject(accessToken, teamId, input)
+      await mutationRequestRunner.run(
+        'project:create',
+        JSON.stringify([teamId, input]),
+        (context) => createProjectDirectoryProject(accessToken, teamId, input, context),
+      )
       await mutateProjectDirectory()
     } catch (error) {
       console.error('Failed to create project:', error)
@@ -577,7 +594,9 @@ export function TaskPage() {
       return
     }
 
-    await archiveProjectDirectoryTeam(accessToken, teamId)
+    await mutationRequestRunner.run('team:archive', teamId, (context) =>
+      archiveProjectDirectoryTeam(accessToken, teamId, context),
+    )
     await mutateProjectDirectory()
 
     if (activeTeam?.id === teamId) {
@@ -590,7 +609,16 @@ export function TaskPage() {
       return
     }
 
-    await archiveProjectDirectoryProject(accessToken, teamId, archivedProjectId)
+    await mutationRequestRunner.run(
+      'project:archive',
+      JSON.stringify([teamId, archivedProjectId]),
+      (context) => archiveProjectDirectoryProject(
+        accessToken,
+        teamId,
+        archivedProjectId,
+        context,
+      ),
+    )
     await mutateProjectDirectory()
 
     if (projectId === archivedProjectId && activeTeam?.id === teamId) {
@@ -607,7 +635,11 @@ export function TaskPage() {
       return
     }
 
-    await updateProjectMember(accessToken, currentProjectId, memberKey, input)
+    await mutationRequestRunner.run(
+      `member:update:${currentProjectId}:${memberKey}`,
+      JSON.stringify(input),
+      (context) => updateProjectMember(accessToken, currentProjectId, memberKey, input, context),
+    )
     await mutateProjectMembers()
   }
 
@@ -616,7 +648,11 @@ export function TaskPage() {
       return
     }
 
-    await removeProjectMember(accessToken, currentProjectId, memberKey)
+    await mutationRequestRunner.run(
+      `member:remove:${currentProjectId}:${memberKey}`,
+      memberKey,
+      (context) => removeProjectMember(accessToken, currentProjectId, memberKey, context),
+    )
     await mutateProjectMembers()
   }
 
@@ -661,7 +697,11 @@ export function TaskPage() {
       return
     }
 
-    await updateTeamIssue(teamId, issueId, accessToken, input)
+    await mutationRequestRunner.run(
+      `issue:update:${teamId}:${issueId}`,
+      JSON.stringify(input),
+      (context) => updateTeamIssue(teamId, issueId, accessToken, input, context),
+    )
     await mutateProjectTasks()
     await mutateSelectedIssueDetail()
   }
@@ -671,7 +711,11 @@ export function TaskPage() {
       return
     }
 
-    await createTeamIssueComment(teamId, issueId, accessToken, body)
+    await mutationRequestRunner.run(
+      `issue:comment:${teamId}:${issueId}`,
+      body,
+      (context) => createTeamIssueComment(teamId, issueId, accessToken, body, context),
+    )
     await mutateSelectedIssueDetail()
   }
 

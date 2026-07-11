@@ -6,6 +6,7 @@ import {
   type DashboardSummary,
 } from '../auth/api'
 import { clearAuthSession, getAuthSession, type AuthSession } from '../auth/session'
+import { createMutationRequestRunner, type MutationRequestContext } from '../api/mutationHeaders'
 import {
   MobileSidebarButton,
   MobileSidebarDrawer,
@@ -447,6 +448,7 @@ const workspaceViewMetadata: Record<WorkspaceView, WorkspaceViewMetadata> = {
 export function WorkspacePage({ view }: WorkspacePageProps) {
   const navigate = useNavigate()
   const params = useParams()
+  const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   const [session] = useState<AuthSession | null>(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [fontSizePreference, setFontSizePreferenceState] = useState<FontSizePreference>(() =>
@@ -562,7 +564,9 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       return
     }
 
-    await createProjectDirectoryTeam(accessToken, input)
+    await mutationRequestRunner.run('team:create', JSON.stringify(input), (context) =>
+      createProjectDirectoryTeam(accessToken, input, context),
+    )
     await mutateProjectDirectory()
   }
 
@@ -574,7 +578,11 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       return
     }
 
-    await createProjectDirectoryProject(accessToken, teamId, input)
+    await mutationRequestRunner.run(
+      'project:create',
+      JSON.stringify([teamId, input]),
+      (context) => createProjectDirectoryProject(accessToken, teamId, input, context),
+    )
     await mutateProjectDirectory()
   }
 
@@ -583,7 +591,9 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       return
     }
 
-    await archiveProjectDirectoryTeam(accessToken, teamId)
+    await mutationRequestRunner.run('team:archive', teamId, (context) =>
+      archiveProjectDirectoryTeam(accessToken, teamId, context),
+    )
     await mutateProjectDirectory()
 
     if (params.teamId === teamId) {
@@ -596,7 +606,11 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       return
     }
 
-    await archiveProjectDirectoryProject(accessToken, teamId, projectId)
+    await mutationRequestRunner.run(
+      'project:archive',
+      JSON.stringify([teamId, projectId]),
+      (context) => archiveProjectDirectoryProject(accessToken, teamId, projectId, context),
+    )
     await mutateProjectDirectory()
   }
 
@@ -620,7 +634,11 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
           updateWorkspaceTaskStatus(currentTasks, task, status, task.status),
         { revalidate: false },
       )
-      const updatedTask = await updateWorkspaceTaskRemote(task, accessToken, status)
+      const updatedTask = await mutationRequestRunner.run(
+        `task:status:${taskKey}`,
+        status,
+        (context) => updateWorkspaceTaskRemote(task, accessToken, status, context),
+      )
       await mutateProjectTasks(
         (currentTasks = nextTasks) =>
           replaceWorkspaceTask(currentTasks, updatedTask),
@@ -2428,6 +2446,7 @@ async function updateWorkspaceTaskRemote(
   task: ProjectTask,
   accessToken: string,
   status: TaskStatus,
+  mutationContext: MutationRequestContext,
 ) {
   if (isLegacyWorkspaceTask(task)) {
     return task
@@ -2435,12 +2454,18 @@ async function updateWorkspaceTaskRemote(
 
   if (task.teamId && task.source === 'dynamodb') {
     return toWorkspaceTaskFromIssue(
-      await updateTeamIssue(task.teamId, task.id, accessToken, { status }),
+      await updateTeamIssue(task.teamId, task.id, accessToken, { status }, mutationContext),
       task.projectId,
     )
   }
 
-  return updateProjectTaskStatus(task.projectId ?? '', task.id, accessToken, status)
+  return updateProjectTaskStatus(
+    task.projectId ?? '',
+    task.id,
+    accessToken,
+    status,
+    mutationContext,
+  )
 }
 
 function isLegacyWorkspaceTask(task: ProjectTask) {

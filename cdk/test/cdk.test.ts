@@ -119,7 +119,7 @@ test('project task data store and lambda API are created', () => {
   });
   const auditEventsTableResource = Object.values(
     template.findResources('AWS::DynamoDB::Table'),
-  ).find((resource) => resource.Properties?.PointInTimeRecoverySpecification?.PointInTimeRecoveryEnabled);
+  ).find((resource) => resource.Properties?.StreamSpecification?.StreamViewType === 'NEW_IMAGE');
 
   expect(auditEventsTableResource?.Properties?.GlobalSecondaryIndexes).toHaveLength(4);
 
@@ -341,6 +341,17 @@ test('project task data store and lambda API are created', () => {
       ]),
     },
   });
+  const auditEventsPutItemStatements = Object.values(
+    template.findResources('AWS::IAM::Policy'),
+  ).flatMap((resource) => resource.Properties?.PolicyDocument?.Statement ?? [])
+    .filter((statement) => {
+      const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+
+      return actions.includes('dynamodb:PutItem') &&
+        JSON.stringify(statement.Resource).includes('AuditEventsTable');
+    });
+
+  expect(auditEventsPutItemStatements).toHaveLength(0);
 
   const customResources = template.findResources('Custom::AWS');
   const seedResource = Object.values(customResources).find((resource) =>
@@ -529,6 +540,197 @@ test('inline lambda rejects legacy task status updates', async () => {
   expect(commandInputs.some((input) => input.commandName === 'UpdateItemCommand')).toBe(false);
 });
 
+test('inline lambda returns conflict when a task changes during its status transaction', async () => {
+  let taskReads = 0;
+  const lambda = createInlineLambda(async (command) => {
+    if (command.constructor.name === 'QueryCommand' && command.input.TableName === 'DirectoryTable') {
+      return { Items: [] };
+    }
+
+    if (command.constructor.name === 'QueryCommand' && command.input.TableName === 'TasksTable') {
+      taskReads += 1;
+      return {
+        Items: [createInlineProjectTaskItem(taskReads === 1 ? 'todo' : 'doing')],
+      };
+    }
+
+    if (command.constructor.name === 'TransactWriteItemsCommand') {
+      throw createTransactionCanceledError(['ConditionalCheckFailed', 'None']);
+    }
+
+    return {};
+  }, true);
+
+  const response = await lambda.handler({
+    ...createLambdaEvent(
+      'PATCH',
+      '/api/projects/refero/tasks/wireframe',
+      ['mukuroji-system-admins'],
+    ),
+    body: JSON.stringify({ status: 'done' }),
+  });
+
+  expect(response.statusCode).toBe(409);
+  expect(JSON.parse(response.body)).toEqual({ message: 'Task was modified by another request.' });
+  expect(taskReads).toBe(2);
+});
+
+test('inline lambda returns not found when a task disappears during its status transaction', async () => {
+  let taskReads = 0;
+  const lambda = createInlineLambda(async (command) => {
+    if (command.constructor.name === 'QueryCommand' && command.input.TableName === 'DirectoryTable') {
+      return { Items: [] };
+    }
+
+    if (command.constructor.name === 'QueryCommand' && command.input.TableName === 'TasksTable') {
+      taskReads += 1;
+      return { Items: taskReads === 1 ? [createInlineProjectTaskItem()] : [] };
+    }
+
+    if (command.constructor.name === 'TransactWriteItemsCommand') {
+      throw createTransactionCanceledError(['ConditionalCheckFailed', 'None']);
+    }
+
+    return {};
+  }, true);
+
+  const response = await lambda.handler({
+    ...createLambdaEvent(
+      'PATCH',
+      '/api/projects/refero/tasks/wireframe',
+      ['mukuroji-system-admins'],
+    ),
+    body: JSON.stringify({ status: 'done' }),
+  });
+
+  expect(response.statusCode).toBe(404);
+  expect(JSON.parse(response.body)).toEqual({ message: 'Task was not found.' });
+  expect(taskReads).toBe(2);
+});
+
+test('inline lambda does not map task transaction infrastructure failures to conflict', async () => {
+  const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  const lambda = createInlineTaskStatusFailureLambda(
+    createTransactionCanceledError(['ConditionalCheckFailed', 'ProvisionedThroughputExceeded']),
+    false,
+  );
+
+  try {
+    const response = await lambda.handler({
+      ...createLambdaEvent(
+        'PATCH',
+        '/api/projects/refero/tasks/wireframe',
+        ['mukuroji-system-admins'],
+      ),
+      body: JSON.stringify({ status: 'done' }),
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(JSON.parse(response.body)).toEqual({ message: 'Failed to load project tasks.' });
+  } finally {
+    consoleError.mockRestore();
+  }
+});
+
+test('inline lambda does not map transaction cancellations without reasons to conflict', async () => {
+  const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  const lambda = createInlineTaskStatusFailureLambda(
+    Object.assign(new Error('Transaction was canceled.'), {
+      name: 'TransactionCanceledException',
+    }),
+    false,
+  );
+
+  try {
+    const response = await lambda.handler({
+      ...createLambdaEvent(
+        'PATCH',
+        '/api/projects/refero/tasks/wireframe',
+        ['mukuroji-system-admins'],
+      ),
+      body: JSON.stringify({ status: 'done' }),
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(JSON.parse(response.body)).toEqual({ message: 'Failed to load project tasks.' });
+  } finally {
+    consoleError.mockRestore();
+  }
+});
+
+test('inline lambda does not reread missing task state for an unknown cancellation reason', async () => {
+  const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  const lambda = createInlineTaskStatusFailureLambda(
+    createTransactionCanceledError(['TransactionConflict']),
+    false,
+  );
+
+  try {
+    const response = await lambda.handler({
+      ...createLambdaEvent(
+        'PATCH',
+        '/api/projects/refero/tasks/wireframe',
+        ['mukuroji-system-admins'],
+      ),
+      body: JSON.stringify({ status: 'done' }),
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(JSON.parse(response.body)).toEqual({ message: 'Failed to load project tasks.' });
+  } finally {
+    consoleError.mockRestore();
+  }
+});
+
+test('inline lambda maps an audit-only condition to conflict without rereading task state', async () => {
+  const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  const lambda = createInlineTaskStatusFailureLambda(
+    createTransactionCanceledError(['None', 'ConditionalCheckFailed']),
+    false,
+  );
+
+  try {
+    const response = await lambda.handler({
+      ...createLambdaEvent(
+        'PATCH',
+        '/api/projects/refero/tasks/wireframe',
+        ['mukuroji-system-admins'],
+      ),
+      body: JSON.stringify({ status: 'done' }),
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(JSON.parse(response.body)).toEqual({ message: 'The same item already exists.' });
+  } finally {
+    consoleError.mockRestore();
+  }
+});
+
+test('inline lambda preserves resource-not-found handling for transaction calls', async () => {
+  const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  const lambda = createInlineTaskStatusFailureLambda(
+    Object.assign(new Error('Table was not found.'), {
+      name: 'ResourceNotFoundException',
+    }),
+  );
+
+  try {
+    const response = await lambda.handler({
+      ...createLambdaEvent(
+        'PATCH',
+        '/api/projects/refero/tasks/wireframe',
+        ['mukuroji-system-admins'],
+      ),
+      body: JSON.stringify({ status: 'done' }),
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(JSON.parse(response.body)).toEqual({ message: 'Project data is not initialized.' });
+  } finally {
+    consoleError.mockRestore();
+  }
+});
+
 test('inline lambda creates a project and grants the creator manager role', async () => {
   const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
   const lambda = createInlineLambda(async (command) => {
@@ -640,9 +842,7 @@ test('inline lambda returns conflict when project creation transaction is cancel
     }
 
     if (command.constructor.name === 'TransactWriteItemsCommand') {
-      const error = new Error('Transaction was canceled.');
-      error.name = 'TransactionCanceledException';
-      throw error;
+      throw createTransactionCanceledError(['None', 'ConditionalCheckFailed', 'None']);
     }
 
     return {};
@@ -691,9 +891,7 @@ test('inline lambda returns not found when project creation transaction loses it
     }
 
     if (command.constructor.name === 'TransactWriteItemsCommand') {
-      const error = new Error('Transaction was canceled.');
-      error.name = 'TransactionCanceledException';
-      throw error;
+      throw createTransactionCanceledError(['ConditionalCheckFailed', 'None', 'None']);
     }
 
     return {};
@@ -1178,9 +1376,7 @@ test('inline lambda treats manager guard transaction cancellation as last manage
     }
 
     if (command.constructor.name === 'TransactWriteItemsCommand') {
-      const error = new Error('Transaction was canceled.');
-      error.name = 'TransactionCanceledException';
-      throw error;
+      throw createTransactionCanceledError(['ConditionalCheckFailed', 'None']);
     }
 
     return {};
@@ -1268,9 +1464,7 @@ test('inline lambda returns not found when the target member is deleted during t
     }
 
     if (command.constructor.name === 'TransactWriteItemsCommand') {
-      const error = new Error('Transaction was canceled.');
-      error.name = 'TransactionCanceledException';
-      throw error;
+      throw createTransactionCanceledError(['None', 'ConditionalCheckFailed']);
     }
 
     return {};
@@ -1311,9 +1505,7 @@ test('inline lambda returns not found when the project is archived during the gu
     }
 
     if (command.constructor.name === 'TransactWriteItemsCommand') {
-      const error = new Error('Transaction was canceled.');
-      error.name = 'TransactionCanceledException';
-      throw error;
+      throw createTransactionCanceledError(['ConditionalCheckFailed', 'None']);
     }
 
     return {};
@@ -1354,9 +1546,7 @@ test('inline lambda treats manager downgrade transaction cancellation as last ma
     }
 
     if (command.constructor.name === 'TransactWriteItemsCommand') {
-      const error = new Error('Transaction was canceled.');
-      error.name = 'TransactionCanceledException';
-      throw error;
+      throw createTransactionCanceledError(['ConditionalCheckFailed', 'None']);
     }
 
     return {};
@@ -1395,9 +1585,7 @@ test('inline lambda returns generic conflict when manager guard transaction canc
     }
 
     if (command.constructor.name === 'TransactWriteItemsCommand') {
-      const error = new Error('Transaction was canceled.');
-      error.name = 'TransactionCanceledException';
-      throw error;
+      throw createTransactionCanceledError(['None', 'ConditionalCheckFailed']);
     }
 
     return {};
@@ -1420,6 +1608,95 @@ test('inline lambda returns generic conflict when manager guard transaction canc
   } finally {
     consoleError.mockRestore();
   }
+});
+
+test('inline lambda returns not found when a non-manager update loses its target member', async () => {
+  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
+  let directoryReads = 0;
+  const lambda = createInlineLambda(async (command) => {
+    commandInputs.push({
+      commandName: command.constructor.name,
+      input: command.input,
+    });
+
+    if (command.constructor.name === 'QueryCommand') {
+      directoryReads += 1;
+
+      return {
+        Items: createInlineProjectMemberFixtureItems({
+          includeTargetMember: directoryReads === 1,
+          targetRole: 'member',
+        }),
+      };
+    }
+
+    if (command.constructor.name === 'TransactWriteItemsCommand') {
+      throw createTransactionCanceledError(['ConditionalCheckFailed', 'None']);
+    }
+
+    return {};
+  }, true);
+
+  const response = await lambda.handler({
+    ...createLambdaEvent(
+      'PATCH',
+      '/api/projects/refero/members/demo%40example.com',
+      ['mukuroji-system-admins'],
+    ),
+    body: JSON.stringify({ role: 'viewer' }),
+  });
+
+  expect(response.statusCode).toBe(404);
+  expect(JSON.parse(response.body)).toEqual({ message: 'Project member was not found.' });
+  expect(commandInputs.map((command) => command.commandName)).toEqual([
+    'QueryCommand',
+    'TransactWriteItemsCommand',
+    'QueryCommand',
+  ]);
+  expect(commandInputs.at(-1)?.input).toMatchObject({ ConsistentRead: true });
+});
+
+test('inline lambda returns not found when a non-manager removal loses its target member', async () => {
+  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
+  let directoryReads = 0;
+  const lambda = createInlineLambda(async (command) => {
+    commandInputs.push({
+      commandName: command.constructor.name,
+      input: command.input,
+    });
+
+    if (command.constructor.name === 'QueryCommand') {
+      directoryReads += 1;
+
+      return {
+        Items: createInlineProjectMemberFixtureItems({
+          includeTargetMember: directoryReads === 1,
+          targetRole: 'member',
+        }),
+      };
+    }
+
+    if (command.constructor.name === 'TransactWriteItemsCommand') {
+      throw createTransactionCanceledError(['ConditionalCheckFailed', 'None']);
+    }
+
+    return {};
+  }, true);
+
+  const response = await lambda.handler(createLambdaEvent(
+    'DELETE',
+    '/api/projects/refero/members/demo%40example.com',
+    ['mukuroji-system-admins'],
+  ));
+
+  expect(response.statusCode).toBe(404);
+  expect(JSON.parse(response.body)).toEqual({ message: 'Project member was not found.' });
+  expect(commandInputs.map((command) => command.commandName)).toEqual([
+    'QueryCommand',
+    'TransactWriteItemsCommand',
+    'QueryCommand',
+  ]);
+  expect(commandInputs.at(-1)?.input).toMatchObject({ ConsistentRead: true });
 });
 
 test('inline lambda lets a system admin update project member roles without project access checks', async () => {
@@ -1528,9 +1805,10 @@ test('inline lambda keeps audit event identity stable across create retries', as
       transactions.push(transactItems);
 
       if (storedEventIds.has(eventId)) {
-        const error = new Error('Duplicate audit event.');
-        error.name = 'TransactionCanceledException';
-        throw error;
+        throw createTransactionCanceledError(
+          transactItems.map((_, index) =>
+            index === transactItems.length - 1 ? 'ConditionalCheckFailed' : 'None'),
+        );
       }
 
       storedEventIds.add(eventId);
@@ -1621,9 +1899,10 @@ test('inline lambda keeps audit event identity stable when member retry changes 
       transactions.push(transactItems);
 
       if (storedEventIds.has(eventId)) {
-        const error = new Error('Duplicate audit event.');
-        error.name = 'TransactionCanceledException';
-        throw error;
+        throw createTransactionCanceledError(
+          transactItems.map((_, index) =>
+            index === transactItems.length - 1 ? 'ConditionalCheckFailed' : 'None'),
+        );
       }
 
       storedEventIds.add(eventId);
@@ -1827,6 +2106,7 @@ test('inline lambda scopes issue activity and binds its cursor to the query', as
       IndexName: 'EntityOccurredAtIndex',
       ExpressionAttributeValues: {
         ':partition': { S: entityKey },
+        ':to': { S: '9999-12-31T23:59:59.999Z#\uffff' },
       },
     });
     expect(firstBody.events[0]).toMatchObject({
@@ -1930,10 +2210,12 @@ function createInlineProjectMemberFixtureItems(
     archivedTeam?: boolean;
     includeOtherManager?: boolean;
     includeTargetMember?: boolean;
+    targetRole?: 'manager' | 'member' | 'viewer';
   } = {},
 ) {
   const includeOtherManager = options.includeOtherManager ?? true;
   const includeTargetMember = options.includeTargetMember ?? true;
+  const targetRole = options.targetRole ?? 'manager';
 
   return [
     {
@@ -1969,7 +2251,7 @@ function createInlineProjectMemberFixtureItems(
             projectId: { S: 'refero' },
             memberKey: { S: 'demo@example.com' },
             email: { S: 'demo@example.com' },
-            role: { S: 'manager' },
+            role: { S: targetRole },
             createdAt: { S: '2026-06-08T00:00:00.000Z' },
             updatedAt: { S: '2026-06-08T00:00:00.000Z' },
           },
@@ -2014,6 +2296,55 @@ function readDynamoTransactPutItem(
   }
 
   return item as Record<string, { S?: string }>;
+}
+
+function createInlineProjectTaskItem(status = 'todo') {
+  return {
+    directoryId: { S: 'user#demo@example.com' },
+    directoryProjectId: { S: 'user#demo@example.com#project#refero' },
+    projectId: { S: 'refero' },
+    taskId: { S: 'wireframe' },
+    sortOrder: { N: '10' },
+    title: { S: 'Wireframe' },
+    assigneeUserId: { S: 'sato@example.com' },
+    status: { S: status },
+    dueDate: { S: '2026/06/03' },
+    priority: { S: 'high' },
+  };
+}
+
+function createTransactionCanceledError(cancellationReasonCodes: string[]) {
+  return Object.assign(new Error('Transaction was canceled.'), {
+    name: 'TransactionCanceledException',
+    CancellationReasons: cancellationReasonCodes.map((Code) => ({ Code })),
+  });
+}
+
+function createInlineTaskStatusFailureLambda(
+  transactionError: Error,
+  latestTaskExists = true,
+) {
+  let taskReads = 0;
+
+  return createInlineLambda(async (command) => {
+    if (command.constructor.name === 'QueryCommand' && command.input.TableName === 'DirectoryTable') {
+      return { Items: [] };
+    }
+
+    if (command.constructor.name === 'QueryCommand' && command.input.TableName === 'TasksTable') {
+      taskReads += 1;
+
+      return {
+        Items: taskReads === 1 || latestTaskExists ? [createInlineProjectTaskItem()] : [],
+      };
+    }
+
+    if (command.constructor.name === 'TransactWriteItemsCommand') {
+      throw transactionError;
+    }
+
+    return {};
+  }, true);
 }
 
 function createInlineLambda(

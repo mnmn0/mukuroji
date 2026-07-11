@@ -944,7 +944,7 @@ async function createProject(event, headers, directoryId, teamId, creatorUserKey
       ].filter(Boolean),
     }));
   } catch (error) {
-    if (error?.name === 'TransactionCanceledException') {
+    if (isTransactionCancellationReason(error, 0, 'ConditionalCheckFailed')) {
       return await handleCreateProjectTransactionCancellation(headers, directoryId, teamId, error);
     }
 
@@ -977,33 +977,47 @@ async function archiveTeam(headers, directoryId, teamId, mutationContext) {
 
   const archivedAt = new Date().toISOString();
 
-  await dynamodb.send(new TransactWriteItemsCommand({
-    TransactItems: [
-      {
-        Update: {
-          TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-          Key: {
-            directoryId: { S: directoryId },
-            entryKey: { S: team.entryKey.S },
-          },
-          UpdateExpression: 'SET archivedAt = :archivedAt',
-          ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-          ExpressionAttributeValues: {
-            ':archivedAt': { S: archivedAt },
+  try {
+    await dynamodb.send(new TransactWriteItemsCommand({
+      TransactItems: [
+        {
+          Update: {
+            TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+            Key: {
+              directoryId: { S: directoryId },
+              entryKey: { S: team.entryKey.S },
+            },
+            UpdateExpression: 'SET archivedAt = :archivedAt',
+            ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+            ExpressionAttributeValues: {
+              ':archivedAt': { S: archivedAt },
+            },
           },
         },
-      },
-      createAuditEventPut(directoryId, mutationContext, {
-        eventType: 'project.archived',
-        entityType: 'project',
-        entityId: 'team/' + teamId,
-        action: 'archived',
-        occurredAt: archivedAt,
-        changes: createAuditChanges({ archivedAt: undefined }, { archivedAt }),
-        metadata: { kind: 'team', teamId },
-      }),
-    ].filter(Boolean),
-  }));
+        createAuditEventPut(directoryId, mutationContext, {
+          eventType: 'project.archived',
+          entityType: 'project',
+          entityId: 'team/' + teamId,
+          action: 'archived',
+          occurredAt: archivedAt,
+          changes: createAuditChanges({ archivedAt: undefined }, { archivedAt }),
+          metadata: { kind: 'team', teamId },
+        }),
+      ].filter(Boolean),
+    }));
+  } catch (error) {
+    if (isTransactionCancellationReason(error, 0, 'ConditionalCheckFailed')) {
+      return await handleDirectoryArchiveTransactionCancellation(
+        headers,
+        directoryId,
+        teamId,
+        undefined,
+        error,
+      );
+    }
+
+    throw error;
+  }
 
   return json(200, { teamId, archivedAt }, headers);
 }
@@ -1036,33 +1050,47 @@ async function archiveProject(headers, directoryId, teamId, projectId, mutationC
 
   const archivedAt = new Date().toISOString();
 
-  await dynamodb.send(new TransactWriteItemsCommand({
-    TransactItems: [
-      {
-        Update: {
-          TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-          Key: {
-            directoryId: { S: directoryId },
-            entryKey: { S: project.entryKey.S },
-          },
-          UpdateExpression: 'SET archivedAt = :archivedAt',
-          ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-          ExpressionAttributeValues: {
-            ':archivedAt': { S: archivedAt },
+  try {
+    await dynamodb.send(new TransactWriteItemsCommand({
+      TransactItems: [
+        {
+          Update: {
+            TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+            Key: {
+              directoryId: { S: directoryId },
+              entryKey: { S: project.entryKey.S },
+            },
+            UpdateExpression: 'SET archivedAt = :archivedAt',
+            ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+            ExpressionAttributeValues: {
+              ':archivedAt': { S: archivedAt },
+            },
           },
         },
-      },
-      createAuditEventPut(directoryId, mutationContext, {
-        eventType: 'project.archived',
-        entityType: 'project',
-        entityId: projectId,
-        action: 'archived',
-        occurredAt: archivedAt,
-        changes: createAuditChanges({ archivedAt: undefined }, { archivedAt }),
-        metadata: { kind: 'project', projectId, teamId },
-      }),
-    ].filter(Boolean),
-  }));
+        createAuditEventPut(directoryId, mutationContext, {
+          eventType: 'project.archived',
+          entityType: 'project',
+          entityId: projectId,
+          action: 'archived',
+          occurredAt: archivedAt,
+          changes: createAuditChanges({ archivedAt: undefined }, { archivedAt }),
+          metadata: { kind: 'project', projectId, teamId },
+        }),
+      ].filter(Boolean),
+    }));
+  } catch (error) {
+    if (isTransactionCancellationReason(error, 0, 'ConditionalCheckFailed')) {
+      return await handleDirectoryArchiveTransactionCancellation(
+        headers,
+        directoryId,
+        teamId,
+        projectId,
+        error,
+      );
+    }
+
+    throw error;
+  }
 
 	  return json(200, { teamId, projectId, archivedAt }, headers);
 	}
@@ -1206,7 +1234,10 @@ async function updateProjectMember(event, headers, directoryId, projectId, membe
         ].filter(Boolean),
       }));
     } catch (error) {
-      if (error?.name === 'TransactionCanceledException') {
+      if (
+        isTransactionCancellationReason(error, 0, 'ConditionalCheckFailed') ||
+        isTransactionCancellationReason(error, 1, 'ConditionalCheckFailed')
+      ) {
         return await handleProjectMemberTransactionCancellation(
           headers,
           directoryId,
@@ -1219,14 +1250,29 @@ async function updateProjectMember(event, headers, directoryId, projectId, membe
       throw error;
     }
   } else {
-    await dynamodb.send(new TransactWriteItemsCommand({
-      TransactItems: [
-        {
-          Put: memberPut,
-        },
-        auditEventPut,
-      ].filter(Boolean),
-    }));
+    try {
+      await dynamodb.send(new TransactWriteItemsCommand({
+        TransactItems: [
+          {
+            Put: memberPut,
+          },
+          auditEventPut,
+        ].filter(Boolean),
+      }));
+    } catch (error) {
+      if (isTransactionCancellationReason(error, 0, 'ConditionalCheckFailed')) {
+        return await handleUpdateProjectMemberTransactionCancellation(
+          headers,
+          directoryId,
+          projectId,
+          normalizedMemberKey,
+          Boolean(existingMember),
+          error,
+        );
+      }
+
+      throw error;
+    }
   }
 
   return json(200, { member: await hydrateProjectMember(toProjectMember(item), userPoolId) }, headers);
@@ -1310,7 +1356,10 @@ async function removeProjectMember(headers, directoryId, projectId, memberKey, m
         ].filter(Boolean),
       }));
     } catch (error) {
-      if (error?.name === 'TransactionCanceledException') {
+      if (
+        isTransactionCancellationReason(error, 0, 'ConditionalCheckFailed') ||
+        isTransactionCancellationReason(error, 1, 'ConditionalCheckFailed')
+      ) {
         return await handleProjectMemberTransactionCancellation(
           headers,
           directoryId,
@@ -1323,14 +1372,28 @@ async function removeProjectMember(headers, directoryId, projectId, memberKey, m
       throw error;
     }
   } else {
-    await dynamodb.send(new TransactWriteItemsCommand({
-      TransactItems: [
-        {
-          Delete: memberDelete,
-        },
-        auditEventPut,
-      ].filter(Boolean),
-    }));
+    try {
+      await dynamodb.send(new TransactWriteItemsCommand({
+        TransactItems: [
+          {
+            Delete: memberDelete,
+          },
+          auditEventPut,
+        ].filter(Boolean),
+      }));
+    } catch (error) {
+      if (isTransactionCancellationReason(error, 0, 'ConditionalCheckFailed')) {
+        return await handleProjectMemberTransactionCancellation(
+          headers,
+          directoryId,
+          projectId,
+          normalizedMemberKey,
+          error,
+        );
+      }
+
+      throw error;
+    }
   }
 
   return json(200, { projectId, memberId: normalizedMemberKey }, headers);
@@ -1346,14 +1409,7 @@ async function removeProjectMember(headers, directoryId, projectId, memberKey, m
 	}
 
 async function handleCreateProjectTransactionCancellation(headers, directoryId, teamId, originalError) {
-  const items = await queryAll({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    KeyConditionExpression: 'directoryId = :directoryId',
-    ExpressionAttributeValues: {
-      ':directoryId': { S: directoryId },
-    },
-    ScanIndexForward: true,
-  });
+  const items = await readDirectoryItems(directoryId, true);
   const activeTeam = items.find((item) =>
     item.entryType?.S === 'team' &&
     item.teamId?.S === teamId &&
@@ -1368,14 +1424,7 @@ async function handleCreateProjectTransactionCancellation(headers, directoryId, 
 }
 
 async function handleProjectMemberTransactionCancellation(headers, directoryId, projectId, memberKey, originalError) {
-  const items = await queryAll({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    KeyConditionExpression: 'directoryId = :directoryId',
-    ExpressionAttributeValues: {
-      ':directoryId': { S: directoryId },
-    },
-    ScanIndexForward: true,
-  });
+  const items = await readDirectoryItems(directoryId, true);
 
   if (!hasActiveProject(items, projectId)) {
     return json(404, { message: 'Project was not found.' }, headers);
@@ -1393,6 +1442,66 @@ async function handleProjectMemberTransactionCancellation(headers, directoryId, 
 
   if (member.role?.S === 'manager' && !findOtherProjectManager(items, projectId, memberKey)) {
     return json(409, { message: 'At least one project manager is required.' }, headers);
+  }
+
+  throw originalError;
+}
+
+async function handleUpdateProjectMemberTransactionCancellation(
+  headers,
+  directoryId,
+  projectId,
+  memberKey,
+  existingMemberExpected,
+  originalError,
+) {
+  const items = await readDirectoryItems(directoryId, true);
+
+  if (!hasActiveProject(items, projectId)) {
+    return json(404, { message: 'Project was not found.' }, headers);
+  }
+
+  const member = items.find((item) =>
+    item.entryType?.S === 'project-member' &&
+    item.projectId?.S === projectId &&
+    item.memberKey?.S === memberKey
+  );
+
+  if (existingMemberExpected && !member) {
+    return json(404, { message: 'Project member was not found.' }, headers);
+  }
+
+  throw originalError;
+}
+
+async function handleDirectoryArchiveTransactionCancellation(
+  headers,
+  directoryId,
+  teamId,
+  projectId,
+  originalError,
+) {
+  const items = await readDirectoryItems(directoryId, true);
+  const activeTeam = items.find((item) =>
+    item.entryType?.S === 'team' &&
+    item.teamId?.S === teamId &&
+    isActiveDirectoryItem(item)
+  );
+
+  if (!activeTeam) {
+    return json(404, { message: 'Team was not found.' }, headers);
+  }
+
+  if (
+    projectId &&
+    !items.some((item) =>
+      item.entryType?.S === 'project' &&
+      item.teamId?.S === teamId &&
+      item.projectId?.S === projectId &&
+      isActiveDirectoryItem(item)
+    )
+  ) {
+    return json(404, { message: 'Project was not found.' }, headers);
   }
 
   throw originalError;
@@ -1586,8 +1695,17 @@ function createActiveTeamConditionCheck(directoryId, entryKey) {
       ].filter(Boolean),
     }));
   } catch (error) {
-    if (error?.name === 'ConditionalCheckFailedException' || error?.name === 'TransactionCanceledException') {
+    if (error?.name === 'ConditionalCheckFailedException') {
       return json(409, { message: 'Task was modified by another request.' }, headers);
+    }
+
+    if (isTransactionCancellationReason(error, 0, 'ConditionalCheckFailed')) {
+      return await handleProjectTaskStatusTransactionCancellation(
+        headers,
+        directoryId,
+        projectId,
+        taskId,
+      );
     }
 
     throw error;
@@ -1597,6 +1715,30 @@ function createActiveTeamConditionCheck(directoryId, entryKey) {
 	    task: await hydrateProjectTask(toTask(updatedItem), userPoolId),
 	  }, headers);
 	}
+
+async function handleProjectTaskStatusTransactionCancellation(
+  headers,
+  directoryId,
+  projectId,
+  taskId,
+) {
+  const latestItems = await queryAll({
+    TableName: process.env.TASKS_TABLE_NAME,
+    KeyConditionExpression: 'directoryProjectId = :directoryProjectId AND taskId = :taskId',
+    ExpressionAttributeValues: {
+      ':directoryProjectId': { S: createDirectoryProjectId(directoryId, projectId) },
+      ':taskId': { S: taskId },
+    },
+    ConsistentRead: true,
+    Limit: 1,
+  });
+
+  if (!latestItems[0]) {
+    return json(404, { message: 'Task was not found.' }, headers);
+  }
+
+  return json(409, { message: 'Task was modified by another request.' }, headers);
+}
 
 async function listTeamIssues(headers, directoryId, teamId, userPoolId, principal) {
   const directoryItems = await readDirectoryItems(directoryId);
@@ -1929,11 +2071,18 @@ async function updateTeamIssue(event, headers, directoryId, teamId, issueId, act
       ].filter(Boolean),
     }));
   } catch (error) {
-    if (
-      error?.name === 'ConditionalCheckFailedException' ||
-      (error?.name === 'TransactionCanceledException' && !await getStoredTeamIssueItem(directoryId, teamId, issueId))
-    ) {
+    if (error?.name === 'ConditionalCheckFailedException') {
       return json(404, { message: 'Issue was not found.' }, headers);
+    }
+
+    if (isTransactionCancellationReason(error, 0, 'ConditionalCheckFailed')) {
+      return await handleTeamIssueTransactionCancellation(
+        headers,
+        directoryId,
+        teamId,
+        issueId,
+        error,
+      );
     }
 
     throw error;
@@ -1973,43 +2122,71 @@ async function createTeamIssueComment(event, headers, directoryId, teamId, issue
     summary: 'Comment was added.',
     createdAt,
   });
-  await dynamodb.send(new TransactWriteItemsCommand({
-    TransactItems: [
-      {
-        ConditionCheck: {
-          TableName: process.env.TEAM_ISSUES_TABLE_NAME,
-          Key: {
-            directoryTeamId: { S: createDirectoryTeamId(directoryId, teamId) },
-            issueId: { S: issueId },
+  try {
+    await dynamodb.send(new TransactWriteItemsCommand({
+      TransactItems: [
+        {
+          ConditionCheck: {
+            TableName: process.env.TEAM_ISSUES_TABLE_NAME,
+            Key: {
+              directoryTeamId: { S: createDirectoryTeamId(directoryId, teamId) },
+              issueId: { S: issueId },
+            },
+            ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
           },
-          ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
         },
-      },
-      {
-        Put: {
-          TableName: process.env.TEAM_ISSUE_EVENTS_TABLE_NAME,
-          Item: item,
-          ConditionExpression: 'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+        {
+          Put: {
+            TableName: process.env.TEAM_ISSUE_EVENTS_TABLE_NAME,
+            Item: item,
+            ConditionExpression: 'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+          },
         },
-      },
-      createAuditEventPut(directoryId, mutationContext, {
-        eventType: 'comment.created',
-        entityType: 'work-item',
-        entityId: createTeamIssueAuditEntityId(teamId, issueId),
-        targetType: 'comment',
-        targetId: createTeamIssueCommentAuditTargetId(teamId, issueId, item.eventId.S),
-        action: 'commented',
-        occurredAt: createdAt,
-        changes: createAuditChanges(undefined, { body: commentBody }),
-        metadata: { adapter: 'team-issue', teamId, commentId: item.eventId.S },
-      }),
-    ].filter(Boolean),
-  }));
+        createAuditEventPut(directoryId, mutationContext, {
+          eventType: 'comment.created',
+          entityType: 'work-item',
+          entityId: createTeamIssueAuditEntityId(teamId, issueId),
+          targetType: 'comment',
+          targetId: createTeamIssueCommentAuditTargetId(teamId, issueId, item.eventId.S),
+          action: 'commented',
+          occurredAt: createdAt,
+          changes: createAuditChanges(undefined, { body: commentBody }),
+          metadata: { adapter: 'team-issue', teamId, commentId: item.eventId.S },
+        }),
+      ].filter(Boolean),
+    }));
+  } catch (error) {
+    if (isTransactionCancellationReason(error, 0, 'ConditionalCheckFailed')) {
+      return await handleTeamIssueTransactionCancellation(
+        headers,
+        directoryId,
+        teamId,
+        issueId,
+        error,
+      );
+    }
+
+    throw error;
+  }
 
   return json(201, {
     comment: toTeamIssueComment(item),
     activity: toTeamIssueActivity(item),
   }, headers);
+}
+
+async function handleTeamIssueTransactionCancellation(
+  headers,
+  directoryId,
+  teamId,
+  issueId,
+  originalError,
+) {
+  if (!await getStoredTeamIssueItem(directoryId, teamId, issueId, true)) {
+    return json(404, { message: 'Issue was not found.' }, headers);
+  }
+
+  throw originalError;
 }
 
 async function listProjectIssues(headers, directoryId, projectId, userPoolId) {
@@ -2313,7 +2490,7 @@ async function queryAuditEventPage(directoryId, event, overrides = {}) {
   const expressionAttributeValues = {
     ':partition': { S: partitionValue },
     ':from': { S: from + '#' },
-    ':to': { S: to + '#~' },
+    ':to': { S: to + '#\\uffff' },
   };
 
   if (actorUserId && !useActorIndex) {
@@ -2728,7 +2905,7 @@ function fromDynamoItem(item) {
   return Object.fromEntries(Object.entries(item).map(([key, value]) => [key, fromDynamoValue(value)]));
 }
 
-async function readDirectoryItems(directoryId) {
+async function readDirectoryItems(directoryId, consistentRead = false) {
   return queryAll({
     TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
     KeyConditionExpression: 'directoryId = :directoryId',
@@ -2736,6 +2913,7 @@ async function readDirectoryItems(directoryId) {
       ':directoryId': { S: directoryId },
     },
     ScanIndexForward: true,
+    ...(consistentRead ? { ConsistentRead: true } : {}),
   });
 }
 
@@ -3275,20 +3453,39 @@ function hydrateTeamIssueFromProfiles(issue, profiles) {
 	  return profile;
 	}
 
-	function json(statusCode, body, headers) {
+function json(statusCode, body, headers) {
   return { statusCode, headers, body: JSON.stringify(body) };
+}
+
+function isTransactionCancellationReason(error, index, code) {
+  return hasTransactionCancellationReason(error, code) &&
+    error.CancellationReasons[index]?.Code === code;
+}
+
+function hasTransactionCancellationReason(error, code) {
+  if (error?.name !== 'TransactionCanceledException' || !Array.isArray(error.CancellationReasons)) {
+    return false;
+  }
+
+  const reasonCodes = error.CancellationReasons.map((reason) => reason?.Code);
+
+  return reasonCodes.includes(code) &&
+    reasonCodes.every((reasonCode) => reasonCode === 'None' || reasonCode === code);
 }
 
 function toProjectDataError(error, headers, fallbackMessage) {
   console.error(error);
 
-		  if (error?.name === 'ConditionalCheckFailedException' || error?.name === 'TransactionCanceledException') {
-		    return json(409, { message: 'The same item already exists.' }, headers);
-		  }
+  if (
+    error?.name === 'ConditionalCheckFailedException' ||
+    hasTransactionCancellationReason(error, 'ConditionalCheckFailed')
+  ) {
+    return json(409, { message: 'The same item already exists.' }, headers);
+  }
 
-	  if (error?.name === 'UserNotFoundException') {
-	    return json(404, { message: 'Cognito user was not found.' }, headers);
-	  }
+  if (error?.name === 'UserNotFoundException') {
+    return json(404, { message: 'Cognito user was not found.' }, headers);
+  }
 
   if (error?.name === 'InvalidProjectWrite') {
     return json(400, { message: error.message || 'Project write is invalid.' }, headers);
@@ -3302,7 +3499,7 @@ function toProjectDataError(error, headers, fallbackMessage) {
     return json(403, { message: 'Project access is denied.' }, headers);
   }
 
-	  if (error?.name === 'ResourceNotFoundException') {
+  if (error?.name === 'ResourceNotFoundException') {
     return json(503, { message: 'Project data is not initialized.' }, headers);
   }
 
@@ -3952,12 +4149,6 @@ function projectRoleWeight(role) {
     teamIssueEventsTable.grantReadWriteData(listTasksFunction);
     projectDirectoryTable.grantReadWriteData(listTasksFunction);
     auditEventsTable.grantReadData(listTasksFunction);
-    listTasksFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['dynamodb:PutItem'],
-        resources: [auditEventsTable.tableArn],
-      }),
-    );
     listTasksFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],

@@ -41,7 +41,7 @@
 | `changes` | yes | field 名と `before` / `after` の配列。変更が復元不能な legacy event では空配列を許す。 |
 | `correlationId` | yes | 1 request と、その request から派生した event を関連付ける ID。 |
 | `idempotencyKeyHash` | yes | client key の SHA-256 hash。元の header 値は保存しない。 |
-| `requestFingerprint` | yes | method、path、body から作る request fingerprint。 |
+| `requestFingerprint` | yes | method、path、query、body から作る request fingerprint。 |
 | `source` / `sourceDetails` | yes | `api`、`system`、`migration`、`backfill` と request route 等の発生元 snapshot。 |
 | `summary` | no | activity 表示用の短い説明または変更理由。 |
 | `beforeRevision` / `afterRevision` | no | versioned aggregate の optimistic concurrency 情報。 |
@@ -122,9 +122,9 @@ mutation は次の item を 1 回の `TransactWriteItems` で確定する。
 
 ## Idempotency と retry
 
-mutation client は logical mutation の開始時に `MutationRequestContext` を1回だけ作り、初回 request とすべての retry で同じ `Idempotency-Key` / `X-Correlation-Id` を再利用する。Web API client は context を省略した既存 call では自動生成し、retry を制御する caller には optional context を受け付ける。CORS でも両 header を許可する。互換 client が idempotency header を送らない場合の server 採番は後方互換用であり、response 消失後の再送保証には使わない。
+mutation client は logical mutation の開始時に `MutationRequestContext` を1回だけ作り、初回 request とすべての retry で同じ `Idempotency-Key` / `X-Correlation-Id` を再利用する。Web UI は operation と入力 fingerprint ごとに context を保持し、失敗後に同じ入力を再送した場合だけ再利用する。HTTP mutation 成功時または入力変更時は context を破棄し、別 mutation へ同じ key を流用しない。Web API client は context を必須とし、呼び出し側が retry の境界を明示する。CORS でも両 header を許可する。互換 client が idempotency header を送らない場合の server 採番は後方互換用であり、response 消失後の再送保証には使わない。
 
-server は method、path、body から request fingerprint を計算し、`SHA-256("audit-idempotency-v1\0" + workspaceId + "\0" + actorId + "\0" + idempotencyKey)` を `idempotencyKeyHash` とする。`X-Correlation-Id` がなければ `corr_` と `SHA-256(workspaceId + "\0" + idempotencyKeyHash)` の先頭32桁から決定的に補う。event ID は `workspaceId + idempotencyKeyHash + schemaVersion + sequence` から作り、生成後の resource ID、state、entity、event type を digest に含めない。同じ Workspace/actor で同じ `Idempotency-Key` を再利用した場合:
+server は method、path、query、body から request fingerprint を計算し、`SHA-256("audit-idempotency-v1\0" + workspaceId + "\0" + actorId + "\0" + idempotencyKey)` を `idempotencyKeyHash` とする。`X-Correlation-Id` がなければ `corr_` と `SHA-256(workspaceId + "\0" + idempotencyKeyHash)` の先頭32桁から決定的に補う。event ID は `workspaceId + idempotencyKeyHash + schemaVersion + sequence` から作り、生成後の resource ID、state、entity、event type を digest に含めない。同じ Workspace/actor で同じ `Idempotency-Key` を再利用した場合:
 
 - event `Put` の condition が失敗するため、state write も transaction rollback され、event は増えない。
 - 現行 API は duplicate retry を conflict として返す。将来、元 response の replay が必要になった場合は `MutationRequestsTable` を追加し、fingerprint 一致時だけ保存済み response を返す。
@@ -190,7 +190,7 @@ reader は `schemaVersion` ごとの decoder/upcaster を持ち、未知 version
 - legacy project task: `work-item.backfilled` snapshot を作る。
 - project directory: team、project、project-member の `*.backfilled` snapshot を作る。
 
-source item の key から logical idempotency key を決定的に作り、通常 mutation と同じ schema v1 builder で event ID、nested/flat actor/entity/target、4つの GSI key、`idempotencyKeyHash`、`sourceDetails` を生成する。legacy source/key、adapter、scope は `metadata` に保存し、`AuditEventsTable` の `directoryId/eventId` へ conditional Put する。同じ script を何度実行しても event は増えない。current snapshot の時刻は `updatedAt`、`createdAt` の順で採用し、どちらも存在しない row だけ `1970-01-01T00:00:00.000Z` を「unknown historical time」の sentinel として使う。TTL は backfill 実行時点から `AUDIT_RETENTION_DAYS` 後に設定する。snapshot field の sensitive flag は `[REDACTED]` に変換し、通常 mutation と同じく保存するすべての文字列 payload を最大4,096文字に制限する。
+source item の key から logical idempotency key を決定的に作り、通常 mutation と同じ schema v1 builder で event ID、nested/flat actor/entity/target、4つの GSI key、`idempotencyKeyHash`、`sourceDetails` を生成する。legacy source/key、adapter、scope は `metadata` に保存し、`AuditEventsTable` の `directoryId/eventId` へ conditional Put する。同じ script を何度実行しても event は増えない。current snapshot の時刻は `updatedAt`、`createdAt` の順で採用し、どちらも存在しない row だけ `1970-01-01T00:00:00.000Z` を「unknown historical time」の sentinel として使う。TTL は event の `occurredAt` から `AUDIT_RETENTION_DAYS` 後に設定する。snapshot field の sensitive flag は `[REDACTED]` に変換し、通常 mutation と同じく保存するすべての文字列 payload を最大4,096文字に制限する。
 
 ```sh
 # まず読み取りだけを最大100件確認する
@@ -245,7 +245,7 @@ type MutationAuditContextInput = {
 }
 ```
 
-#19 完了前は既存 Cognito `getUser` を使い、audit actor ID は `sub`、次点で Cognito username、表示名と既存 RBAC key は `principal.userKey` とする `CognitoWorkspaceIdentityAdapter` を置く。#19 完了後は active Workspace member、owner/admin/member/guest、deactivated/revoked 状態を検証する `WorkspaceMembershipIdentityAdapter` に差し替える。event writer と schema は adapter の実装を知らない。
+Issue `#19` 完了前は既存 Cognito `getUser` を使い、audit actor ID は `sub`、次点で Cognito username、表示名と既存 RBAC key は `principal.userKey` とする `CognitoWorkspaceIdentityAdapter` を置く。Issue `#19` 完了後は active Workspace member、owner/admin/member/guest、deactivated/revoked 状態を検証する `WorkspaceMembershipIdentityAdapter` に差し替える。event writer と schema は adapter の実装を知らない。
 
 member event の entity/target ID は、#19 完了前の project member mutation では `<projectId>/<memberId>` とする。Workspace membership を導入するときも scope を ID に含め、同じ user の異なる scope を混同しない。
 
@@ -253,9 +253,9 @@ member event の entity/target ID は、#19 完了前の project member mutation
 
 event builder は Team Issue table と legacy project task table を直接参照せず、各 mutation adapter が entity ID、before/after revision、field changes を返す契約にする。
 
-#20 完了前は Team-owned Issue mutation に `metadata.adapter=team-issue`、legacy project task mutation に `metadata.adapter=legacy-project-task` を付ける。どちらも `entityType=work-item` を使用し、ID はそれぞれ `team/<teamId>/issue/<issueId>` / `project/<projectId>/task/<taskId>` とする。scope は ID と metadata の両方に保持し、別 Team/project の同名 ID を混同しない。comment target ID は `<workItemId>/comment/<commentId>` とする。#20 の migration 後は canonical Work Item ID へ統一し、legacy project task は read compatibility と backfill source に限定する。
+Issue `#20` 完了前は Team-owned Issue mutation に `metadata.adapter=team-issue`、legacy project task mutation に `metadata.adapter=legacy-project-task` を付ける。どちらも `entityType=work-item` を使用し、ID はそれぞれ `team/<teamId>/issue/<issueId>` / `project/<projectId>/task/<taskId>` とする。scope は ID と metadata の両方に保持し、別 Team/project の同名 ID を混同しない。comment target ID は `<workItemId>/comment/<commentId>` とする。`#20` の migration 後は canonical Work Item ID へ統一し、legacy project task は read compatibility と backfill source に限定する。
 
-#20 完了後は `CanonicalWorkItemAdapter` へ差し替え、`expectedRevision` を state transaction condition と event の `beforeRevision` / `afterRevision` に反映する。legacy table への新規 write は停止し、read compatibility を廃止するまで adapter の外へ漏らさない。
+Issue `#20` 完了後は `CanonicalWorkItemAdapter` へ差し替え、`expectedRevision` を state transaction condition と event の `beforeRevision` / `afterRevision` に反映する。legacy table への新規 write は停止し、read compatibility を廃止するまで adapter の外へ漏らさない。
 
 ## 運用確認
 

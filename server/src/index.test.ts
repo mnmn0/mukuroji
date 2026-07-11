@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from 'bun:test'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { createMutationAuditContext } from './audit'
 import {
   app,
   configureApiClientsForTest,
@@ -314,6 +315,13 @@ test('returns conflict when project creation transaction is canceled', async () 
       if (command.constructor.name === 'TransactWriteCommand') {
         const error = new Error('Transaction was canceled.')
         error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: [
+            { Code: 'None' },
+            { Code: 'ConditionalCheckFailed' },
+            { Code: 'None' },
+          ],
+        })
         throw error
       }
 
@@ -338,6 +346,102 @@ test('returns conflict when project creation transaction is canceled', async () 
 
   expect(response.status).toBe(409)
   expect(await response.json()).toEqual({ message: 'The same item already exists.' })
+})
+
+test('returns bad gateway when project creation transaction has no cancellation reasons', async () => {
+  configureFakeProjectClients(true)
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+          ],
+        }
+      }
+
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const error = new Error('Transaction was canceled.')
+        error.name = 'TransactionCanceledException'
+        throw error
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+
+  configureApiClientsForTest({
+    projectDirectory: new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient),
+  })
+
+  const response = await app.request('/api/teams/core-team/projects', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ name: '新規プロジェクト' }),
+  })
+
+  expect(response.status).toBe(502)
+  expect(await response.json()).toEqual({ message: 'Project data is unavailable.' })
+})
+
+test('returns service unavailable when project creation transaction table is missing', async () => {
+  configureFakeProjectClients(true)
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+          ],
+        }
+      }
+
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const error = new Error('missing table')
+        error.name = 'ResourceNotFoundException'
+        throw error
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+
+  configureApiClientsForTest({
+    projectDirectory: new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient),
+  })
+
+  const response = await app.request('/api/teams/core-team/projects', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ name: '新規プロジェクト' }),
+  })
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toEqual({ message: 'Project data is not initialized.' })
 })
 
 test('returns not found when project creation transaction loses its active team', async () => {
@@ -368,6 +472,13 @@ test('returns not found when project creation transaction loses its active team'
       if (command.constructor.name === 'TransactWriteCommand') {
         const error = new Error('Transaction was canceled.')
         error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: [
+            { Code: 'ConditionalCheckFailed' },
+            { Code: 'None' },
+            { Code: 'None' },
+          ],
+        })
         throw error
       }
 
@@ -1554,6 +1665,137 @@ test('DynamoDB task client updates a task status with a conditional write', asyn
   ])
 })
 
+test('DynamoDB task client classifies audited transaction conditions from a consistent base-table read', async () => {
+  const currentTask = {
+    directoryId: 'user#demo@example.com',
+    directoryProjectId: 'user#demo@example.com#project#refero',
+    projectId: 'refero',
+    taskId: 'wireframe',
+    sortOrder: 10,
+    titleKey: 'tasks.item.wireframe',
+    assigneeKey: 'tasks.assignee.sato',
+    status: 'todo',
+    dueDate: '2026/06/03',
+    priority: 'high',
+  }
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'user#demo@example.com',
+    actor: { id: 'demo@example.com', kind: 'user' },
+    idempotencyKey: 'request-1',
+    occurredAt: '2026-07-12T00:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/projects/refero/tasks/wireframe/status' },
+    source: { kind: 'api', requestId: 'request-1' },
+  })
+  const runUpdate = (
+    cancellationReasons: Array<{ Code: string }> | undefined,
+    latestTask: Record<string, unknown> | undefined,
+  ) => {
+    const sentInputs: Array<Record<string, unknown>> = []
+    const documentClient = {
+      async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+        sentInputs.push(command.input)
+
+        if (command.constructor.name === 'QueryCommand') {
+          return { Items: [currentTask] }
+        }
+
+        if (command.constructor.name === 'TransactWriteCommand') {
+          const error = new Error('Transaction was canceled.')
+          error.name = 'TransactionCanceledException'
+
+          if (cancellationReasons) {
+            Object.assign(error, { CancellationReasons: cancellationReasons })
+          }
+
+          throw error
+        }
+
+        if (command.constructor.name === 'GetCommand') {
+          return { Item: latestTask }
+        }
+
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbProjectTasksClient(
+      'TasksTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      'AuditTable',
+    )
+    const result = client.updateProjectTaskStatus(
+      'user#demo@example.com',
+      'refero',
+      'wireframe',
+      { status: 'done' },
+      auditContext,
+    )
+
+    return { result, sentInputs }
+  }
+
+  const stateConflict = runUpdate(
+    [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+    currentTask,
+  )
+  await expect(stateConflict.result).rejects.toMatchObject({
+    code: 'ConditionalCheckFailedException',
+    status: 409,
+  })
+  expect(stateConflict.sentInputs.at(-1)).toEqual({
+    TableName: 'TasksTable',
+    Key: {
+      directoryProjectId: 'user#demo@example.com#project#refero',
+      taskId: 'wireframe',
+    },
+    ConsistentRead: true,
+  })
+
+  const auditConflict = runUpdate(
+    [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }],
+    currentTask,
+  )
+  await expect(auditConflict.result).rejects.toMatchObject({
+    code: 'ConditionalCheckFailedException',
+    status: 409,
+  })
+  expect(auditConflict.sentInputs).toHaveLength(2)
+
+  const deletedTask = runUpdate(
+    [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+    undefined,
+  )
+  await expect(deletedTask.result).rejects.toMatchObject({
+    code: 'ProjectTaskNotFound',
+    status: 404,
+  })
+
+  const missingReasons = runUpdate(undefined, undefined)
+  await expect(missingReasons.result).rejects.toMatchObject({
+    code: 'TransactionCanceledException',
+    status: 502,
+  })
+  expect(missingReasons.sentInputs).toHaveLength(2)
+
+  const unknownReason = runUpdate([{ Code: 'TransactionConflict' }], undefined)
+  await expect(unknownReason.result).rejects.toMatchObject({
+    code: 'TransactionCanceledException',
+    status: 502,
+  })
+  expect(unknownReason.sentInputs).toHaveLength(2)
+
+  const mixedReasons = runUpdate(
+    [{ Code: 'ConditionalCheckFailed' }, { Code: 'ProvisionedThroughputExceeded' }],
+    undefined,
+  )
+  await expect(mixedReasons.result).rejects.toMatchObject({
+    code: 'TransactionCanceledException',
+    status: 502,
+  })
+  expect(mixedReasons.sentInputs).toHaveLength(2)
+})
+
 test('DynamoDB dashboard summary client derives counts from directory and task data', async () => {
   const accessListReads: Array<{ directoryId: string; memberKey: string }> = []
   const directoryReads: Array<{ directoryId: string; locale: Locale }> = []
@@ -2305,6 +2547,12 @@ test('DynamoDB directory client treats manager guard transaction cancellation as
       if ('TransactItems' in command.input) {
         const error = new Error('Transaction was canceled.')
         error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: [
+            { Code: 'ConditionalCheckFailed' },
+            { Code: 'None' },
+          ],
+        })
         throw error
       }
 
@@ -2339,6 +2587,7 @@ test('DynamoDB directory client treats manager guard transaction cancellation as
     ],
   })
   expect(sentInputs).toHaveLength(3)
+  expect(sentInputs[2]).toMatchObject({ ConsistentRead: true })
 })
 
 test('DynamoDB directory client treats deleted target member transaction cancellation as member not found', async () => {
@@ -2408,6 +2657,12 @@ test('DynamoDB directory client treats deleted target member transaction cancell
       if ('TransactItems' in command.input) {
         const error = new Error('Transaction was canceled.')
         error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: [
+            { Code: 'None' },
+            { Code: 'ConditionalCheckFailed' },
+          ],
+        })
         throw error
       }
 
@@ -2422,6 +2677,7 @@ test('DynamoDB directory client treats deleted target member transaction cancell
     code: 'ProjectMemberNotFound',
   })
   expect(sentInputs).toHaveLength(3)
+  expect(sentInputs[2]).toMatchObject({ ConsistentRead: true })
 })
 
 test('DynamoDB directory client treats manager downgrade transaction cancellation as last manager conflict', async () => {
@@ -2444,6 +2700,12 @@ test('DynamoDB directory client treats manager downgrade transaction cancellatio
       if ('TransactItems' in command.input) {
         const error = new Error('Transaction was canceled.')
         error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: [
+            { Code: 'ConditionalCheckFailed' },
+            { Code: 'None' },
+          ],
+        })
         throw error
       }
 
@@ -2482,9 +2744,122 @@ test('DynamoDB directory client treats manager downgrade transaction cancellatio
     ],
   })
   expect(sentInputs).toHaveLength(3)
+  expect(sentInputs[2]).toMatchObject({ ConsistentRead: true })
 })
 
-test('DynamoDB directory client rethrows manager guard transaction cancellation when the latest state is still valid', async () => {
+test('DynamoDB directory client returns not found when a non-manager update loses its target member', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  let queryReads = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+
+      if ('KeyConditionExpression' in command.input) {
+        queryReads += 1
+
+        return {
+          Items: createProjectMemberFixtureItems({
+            includeTargetMember: queryReads === 1,
+            targetRole: 'member',
+          }),
+        }
+      }
+
+      if ('TransactItems' in command.input) {
+        throw Object.assign(new Error('Transaction was canceled.'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [
+            { Code: 'ConditionalCheckFailed' },
+            { Code: 'None' },
+          ],
+        })
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'AuditTable',
+  )
+
+  await expect(
+    client.updateProjectMember(
+      'user#demo@example.com',
+      'refero',
+      'demo@example.com',
+      {
+        email: 'demo@example.com',
+        role: 'viewer',
+      },
+      createDirectoryMutationAuditContext(),
+    ),
+  ).rejects.toMatchObject({
+    code: 'ProjectMemberNotFound',
+    status: 404,
+  })
+  expect(sentInputs).toHaveLength(3)
+  expect(sentInputs[2]).toMatchObject({ ConsistentRead: true })
+})
+
+test('DynamoDB directory client returns not found when a non-manager removal loses its target member', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  let queryReads = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+
+      if ('KeyConditionExpression' in command.input) {
+        queryReads += 1
+
+        return {
+          Items: createProjectMemberFixtureItems({
+            includeTargetMember: queryReads === 1,
+            targetRole: 'member',
+          }),
+        }
+      }
+
+      if ('TransactItems' in command.input) {
+        throw Object.assign(new Error('Transaction was canceled.'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [
+            { Code: 'ConditionalCheckFailed' },
+            { Code: 'None' },
+          ],
+        })
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'AuditTable',
+  )
+
+  await expect(
+    client.removeProjectMember(
+      'user#demo@example.com',
+      'refero',
+      'demo@example.com',
+      createDirectoryMutationAuditContext(),
+    ),
+  ).rejects.toMatchObject({
+    code: 'ProjectMemberNotFound',
+    status: 404,
+  })
+  expect(sentInputs).toHaveLength(3)
+  expect(sentInputs[2]).toMatchObject({ ConsistentRead: true })
+})
+
+test('DynamoDB directory client does not reread manager state when cancellation reasons are missing', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const documentClient = {
     async send(command: { input: Record<string, unknown> }) {
@@ -2512,7 +2887,7 @@ test('DynamoDB directory client rethrows manager guard transaction cancellation 
   ).rejects.toMatchObject({
     code: 'TransactionCanceledException',
   })
-  expect(sentInputs).toHaveLength(3)
+  expect(sentInputs).toHaveLength(2)
 })
 
 function createProjectMemberFixtureItems(
@@ -2521,10 +2896,12 @@ function createProjectMemberFixtureItems(
     archivedTeam?: boolean
     includeOtherManager?: boolean
     includeTargetMember?: boolean
+    targetRole?: ProjectRole
   } = {},
 ) {
   const includeOtherManager = options.includeOtherManager ?? true
   const includeTargetMember = options.includeTargetMember ?? true
+  const targetRole = options.targetRole ?? 'manager'
 
   return [
     {
@@ -2560,7 +2937,7 @@ function createProjectMemberFixtureItems(
             projectId: 'refero',
             memberKey: 'demo@example.com',
             email: 'demo@example.com',
-            role: 'manager',
+            role: targetRole,
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: '2026-06-08T00:00:00.000Z',
           },
@@ -2582,6 +2959,17 @@ function createProjectMemberFixtureItems(
         ]
       : []),
   ]
+}
+
+function createDirectoryMutationAuditContext() {
+  return createMutationAuditContext({
+    workspaceId: 'user#demo@example.com',
+    actor: { id: 'demo-sub', kind: 'user' },
+    idempotencyKey: 'directory-mutation-request',
+    occurredAt: '2026-07-12T00:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/projects/refero/members/demo@example.com' },
+    source: { kind: 'api', requestId: 'directory-mutation-request' },
+  })
 }
 
 function configureFakeProjectClients(

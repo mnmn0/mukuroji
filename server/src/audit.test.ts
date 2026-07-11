@@ -4,6 +4,7 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   AUDIT_TARGET_INDEX_NAME,
   auditEventsToNdjson,
+  calculateAuditExpiresAt,
   createAuditConsumerReceiptTransactPut,
   createAuditEvent,
   createAuditFieldChanges,
@@ -14,6 +15,14 @@ import {
   toAuditEventView,
   upcastAuditEvent,
 } from './audit'
+
+test('calculates audit expiry from the historical event occurrence time', () => {
+  const occurredAt = '2020-01-02T03:04:05.000Z'
+
+  expect(calculateAuditExpiresAt(occurredAt, 30)).toBe(
+    Math.floor(Date.parse(occurredAt) / 1000) + 30 * 86_400,
+  )
+})
 
 test('creates deterministic audit IDs and CDK-compatible DynamoDB keys', () => {
   const context = createMutationAuditContext({

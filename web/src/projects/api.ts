@@ -352,7 +352,7 @@ export async function getProjectDirectory(
 export async function createProjectDirectoryTeam(
   accessToken: string,
   input: CreateProjectDirectoryTeamInput,
-  mutationContext?: MutationRequestContext,
+  mutationContext: MutationRequestContext,
 ) {
   const data = await sendProjectDirectoryRequest<unknown>(
     '/teams',
@@ -378,7 +378,7 @@ export async function createProjectDirectoryProject(
   accessToken: string,
   teamId: string,
   input: CreateProjectDirectoryProjectInput,
-  mutationContext?: MutationRequestContext,
+  mutationContext: MutationRequestContext,
 ) {
   const data = await sendProjectDirectoryRequest<unknown>(
     `/teams/${encodeURIComponent(teamId)}/projects`,
@@ -403,7 +403,7 @@ export async function createProjectDirectoryProject(
 export async function archiveProjectDirectoryTeam(
   accessToken: string,
   teamId: string,
-  mutationContext?: MutationRequestContext,
+  mutationContext: MutationRequestContext,
 ) {
   const data = await sendProjectDirectoryRequest<unknown>(
     `/teams/${encodeURIComponent(teamId)}/archive`,
@@ -428,7 +428,7 @@ export async function archiveProjectDirectoryProject(
   accessToken: string,
   teamId: string,
   projectId: string,
-  mutationContext?: MutationRequestContext,
+  mutationContext: MutationRequestContext,
 ) {
   const data = await sendProjectDirectoryRequest<unknown>(
     `/teams/${encodeURIComponent(teamId)}/projects/${encodeURIComponent(projectId)}/archive`,
@@ -530,7 +530,7 @@ export async function updateProjectMember(
   projectId: string,
   memberKey: string,
   input: UpdateProjectMemberInput,
-  mutationContext?: MutationRequestContext,
+  mutationContext: MutationRequestContext,
 ) {
   const data = await sendProjectDirectoryRequest<unknown>(
     `/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(memberKey)}`,
@@ -556,7 +556,7 @@ export async function removeProjectMember(
   accessToken: string,
   projectId: string,
   memberKey: string,
-  mutationContext?: MutationRequestContext,
+  mutationContext: MutationRequestContext,
 ) {
   const data = await sendProjectDirectoryRequest<unknown>(
     `/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(memberKey)}`,
@@ -577,8 +577,8 @@ export async function removeProjectMember(
 async function sendProjectDirectoryRequest<T>(
   path: string,
   accessToken: string,
-  init?: RequestInit,
-  mutationContext?: MutationRequestContext,
+  init: RequestInit,
+  mutationContext: MutationRequestContext,
 ) {
   const response = await fetch(`${projectsApiBaseUrl}${path}`, {
     ...init,

@@ -204,7 +204,7 @@ export async function createProjectTask(
   projectId: string,
   accessToken: string,
   input: CreateProjectTaskInput,
-  mutationContext?: MutationRequestContext,
+  mutationContext: MutationRequestContext,
 ) {
   const response = await fetch(
     `${tasksApiBaseUrl}/projects/${encodeURIComponent(projectId)}/tasks`,
@@ -250,7 +250,7 @@ export async function updateProjectTaskStatus(
   taskId: string,
   accessToken: string,
   status: TaskStatus,
-  mutationContext?: MutationRequestContext,
+  mutationContext: MutationRequestContext,
 ) {
   const response = await fetch(
     `${tasksApiBaseUrl}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`,

@@ -1115,6 +1115,24 @@ export function createAuditFieldChanges(
 export const createAuditEventTransactPut = createAuditTransactPut
 
 /**
+ * event 発生時刻と保持日数から DynamoDB TTL の epoch seconds を計算します。
+ *
+ * @param occurredAt event が発生した ISO 8601 timestamp です。
+ * @param retentionDays event 発生時刻から保持する日数です。
+ * @returns DynamoDB TTL に使用する epoch seconds です。
+ */
+export function calculateAuditExpiresAt(occurredAt: string, retentionDays: number) {
+  if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
+    throw new RangeError('Audit retention days must be a positive number.')
+  }
+
+  const normalizedOccurredAt = normalizeTimestamp(occurredAt, 'Audit occurredAt')
+
+  return Math.floor(Date.parse(normalizedOccurredAt) / 1000) +
+    Math.max(1, Math.floor(retentionDays)) * 86_400
+}
+
+/**
  * optional audit 設定を扱う既存 mutation client 用の条件付き event Put を作成します。
  */
 export function createMutationAuditEventPut(
@@ -1129,13 +1147,8 @@ export function createMutationAuditEventPut(
   const retentionDays = Number(
     process.env.MUKUROJI_AUDIT_RETENTION_DAYS ?? process.env.AUDIT_RETENTION_DAYS ?? 2555,
   )
-
-  if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
-    throw new RangeError('Audit retention days must be a positive number.')
-  }
-
   const occurredAt = normalizeTimestamp(input.occurredAt ?? context.occurredAt, 'Audit occurredAt')
-  const expiresAt = Math.floor(Date.parse(occurredAt) / 1000) + Math.max(1, Math.floor(retentionDays)) * 86_400
+  const expiresAt = calculateAuditExpiresAt(occurredAt, retentionDays)
   const event = createAuditEvent({
     context: { ...context, workspaceId: input.directoryId, occurredAt },
     eventType: input.eventType,
@@ -1306,6 +1319,9 @@ export async function ensureLocalAuditEventsTable(
   return initializer
 }
 
+/**
+ * 検証・正規化済みの audit event query 条件です。
+ */
 type NormalizedAuditQuery = {
   /**
    * canonical workspace ID です。
@@ -1361,6 +1377,9 @@ type NormalizedAuditQuery = {
   direction: 'ascending' | 'descending'
 }
 
+/**
+ * audit event query が使用する DynamoDB index と partition の計画です。
+ */
 type AuditQueryPlan = {
   /**
    * query 対象 GSI 名です。
@@ -1384,6 +1403,9 @@ type AuditQueryPlan = {
   axis: 'workspace' | 'actor' | 'entity' | 'target'
 }
 
+/**
+ * audit event query の継続位置を保持する opaque cursor の payload です。
+ */
 type AuditCursorPayload = {
   /**
    * cursor schema version です。

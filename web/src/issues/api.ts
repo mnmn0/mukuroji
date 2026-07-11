@@ -333,7 +333,7 @@ export async function createTeamIssue(
   teamId: string,
   accessToken: string,
   input: CreateTeamIssueInput,
-  mutationContext?: MutationRequestContext,
+  mutationContext: MutationRequestContext,
 ) {
   const response = await requestJson<CreateTeamIssueResponse>(
     `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues`,
@@ -359,7 +359,7 @@ export async function updateTeamIssue(
   issueId: string,
   accessToken: string,
   input: UpdateTeamIssueInput,
-  mutationContext?: MutationRequestContext,
+  mutationContext: MutationRequestContext,
 ) {
   const response = await requestJson<UpdateTeamIssueResponse>(
     `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`,
@@ -385,7 +385,7 @@ export async function createTeamIssueComment(
   issueId: string,
   accessToken: string,
   body: string,
-  mutationContext?: MutationRequestContext,
+  mutationContext: MutationRequestContext,
 ) {
   return requestJson<CreateTeamIssueCommentResponse>(
     `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}/comments`,

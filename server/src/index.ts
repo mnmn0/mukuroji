@@ -2801,7 +2801,7 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'Project member was not found.' }, 404)
   }
 
-  if (error.code === 'ConditionalCheckFailedException' || error.code === 'TransactionCanceledException') {
+  if (error.code === 'ConditionalCheckFailedException') {
     return c.json({ message: 'The same item already exists.' }, 409)
   }
 
@@ -3777,6 +3777,13 @@ export class DynamoDbProjectTasksClient {
         task: toProjectTaskResponseItem(item),
       } satisfies CreateProjectTaskResponse
     } catch (error) {
+      if (
+        isAwsNamedError(error, 'TransactionCanceledException') &&
+        hasTransactionConditionalFailure(error)
+      ) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -3876,12 +3883,54 @@ export class DynamoDbProjectTasksClient {
         throw new ProjectDataError(404, 'ProjectTaskNotFound', 'Task was not found.')
       }
 
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        let taskExists: boolean
+
+        try {
+          taskExists = await this.hasProjectTaskItem(directoryId, projectId, taskId)
+        } catch (readError) {
+          if (readError instanceof ProjectDataError) {
+            throw readError
+          }
+
+          throw toProjectDataError(readError)
+        }
+
+        if (!taskExists) {
+          throw new ProjectDataError(404, 'ProjectTaskNotFound', 'Task was not found.')
+        }
+
+        throw createProjectDataConflictError()
+      }
+
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
 
       throw toProjectDataError(error)
     }
+  }
+
+  /**
+   * base table の strongly consistent read で project task の存在を確認します。
+   */
+  private async hasProjectTaskItem(directoryId: string, projectId: string, taskId: string) {
+    const response = await this.documentClient.send(
+      new GetCommand({
+        TableName: this.tableName,
+        Key: {
+          directoryProjectId: createDirectoryProjectId(directoryId, projectId),
+          taskId,
+        },
+        ConsistentRead: true,
+      }),
+    )
+
+    return response.Item !== undefined
   }
 
   /**
@@ -4157,6 +4206,13 @@ export class DynamoDbTeamIssuesClient {
         issue: toTeamIssueResponseItem(item),
       } satisfies CreateTeamIssueResponse
     } catch (error) {
+      if (
+        isAwsNamedError(error, 'TransactionCanceledException') &&
+        hasTransactionConditionalFailure(error)
+      ) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -4345,11 +4401,16 @@ export class DynamoDbTeamIssuesClient {
         throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
       }
 
-      if (
-        isAwsNamedError(error, 'TransactionCanceledException') &&
-        !await this.hasTeamIssueItem(directoryId, teamId, issueId)
-      ) {
-        throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        if (!await this.hasTeamIssueItem(directoryId, teamId, issueId)) {
+          throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
+        }
+
+        throw createProjectDataConflictError()
+      }
+
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
       }
 
       if (error instanceof ProjectDataError) {
@@ -4401,41 +4462,61 @@ export class DynamoDbTeamIssuesClient {
       metadata: { adapter: 'team-issue', teamId, commentId: item.eventId },
     })
 
-    if (auditPut) {
-      await this.documentClient.send(
-        new TransactWriteCommand({
-          TransactItems: [
-            {
-              ConditionCheck: {
-                TableName: this.issueTableName,
-                Key: {
-                  directoryTeamId: createDirectoryTeamId(directoryId, teamId),
-                  issueId,
+    try {
+      if (auditPut) {
+        await this.documentClient.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              {
+                ConditionCheck: {
+                  TableName: this.issueTableName,
+                  Key: {
+                    directoryTeamId: createDirectoryTeamId(directoryId, teamId),
+                    issueId,
+                  },
+                  ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
                 },
-                ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
               },
-            },
-            {
-              Put: {
-                TableName: this.eventTableName,
-                Item: item,
-                ConditionExpression:
-                  'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+              {
+                Put: {
+                  TableName: this.eventTableName,
+                  Item: item,
+                  ConditionExpression:
+                    'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+                },
               },
-            },
-            auditPut,
-          ],
-        }),
-      )
-    } else {
-      await this.documentClient.send(
-        new PutCommand({
-          TableName: this.eventTableName,
-          Item: item,
-          ConditionExpression:
-            'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
-        }),
-      )
+              auditPut,
+            ],
+          }),
+        )
+      } else {
+        await this.documentClient.send(
+          new PutCommand({
+            TableName: this.eventTableName,
+            Item: item,
+            ConditionExpression:
+              'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+          }),
+        )
+      }
+    } catch (error) {
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        if (!await this.hasTeamIssueItem(directoryId, teamId, issueId)) {
+          throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
+        }
+
+        throw createProjectDataConflictError()
+      }
+
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
     }
 
     return {
@@ -4446,7 +4527,7 @@ export class DynamoDbTeamIssuesClient {
 
   private async hasTeamIssueItem(directoryId: string, teamId: string, issueId: string) {
     try {
-      await this.getRequiredTeamIssueItem(directoryId, teamId, issueId)
+      await this.getRequiredTeamIssueItem(directoryId, teamId, issueId, true)
 
       return true
     } catch (error) {
@@ -4454,7 +4535,11 @@ export class DynamoDbTeamIssuesClient {
         return false
       }
 
-      throw error
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
     }
   }
 
@@ -4766,6 +4851,8 @@ export class DynamoDbProjectDirectoryClient {
     const email = readProjectMemberEmail(input.email, normalizedMemberKey)
     const name = readOptionalProjectMemberName(input.name)
     const role = readProjectRole(input.role)
+    let existingMemberExpected = false
+    let managerGuarded = false
 
     try {
       const items = await this.readValidDirectoryItems(directoryId)
@@ -4775,6 +4862,7 @@ export class DynamoDbProjectDirectoryClient {
         item.projectId === projectId &&
         item.memberKey === normalizedMemberKey,
       )
+      existingMemberExpected = existingMember !== undefined
 
       const guardManager = (
         existingMember?.role === 'manager' &&
@@ -4782,6 +4870,7 @@ export class DynamoDbProjectDirectoryClient {
       )
         ? this.requireAnotherProjectManager(items, projectId, normalizedMemberKey)
         : undefined
+      managerGuarded = guardManager !== undefined
 
       const updatedAt = new Date().toISOString()
       const item: ProjectMemberItem = {
@@ -4836,13 +4925,20 @@ export class DynamoDbProjectDirectoryClient {
             }),
           )
         } catch (error) {
-          if (isAwsNamedError(error, 'TransactionCanceledException')) {
+          if (
+            isTransactionConditionalFailureAt(error, 0) ||
+            isTransactionConditionalFailureAt(error, 1)
+          ) {
             await this.throwProjectManagerTransactionCancellationResult(
               directoryId,
               projectId,
               normalizedMemberKey,
               error,
             )
+          }
+
+          if (hasTransactionConditionalFailure(error)) {
+            throw createProjectDataConflictError()
           }
 
           throw error
@@ -4870,6 +4966,20 @@ export class DynamoDbProjectDirectoryClient {
         member: toProjectMemberResponseItem(item),
       } satisfies UpdateProjectMemberResponse
     } catch (error) {
+      if (!managerGuarded && isTransactionConditionalFailureAt(error, 0)) {
+        await this.throwUpdateProjectMemberTransactionCancellationResult(
+          directoryId,
+          projectId,
+          normalizedMemberKey,
+          existingMemberExpected,
+          error,
+        )
+      }
+
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -4889,6 +4999,7 @@ export class DynamoDbProjectDirectoryClient {
   ) {
     await this.ensureLocalAuditTable()
     const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
+    let managerGuarded = false
 
     try {
       const items = await this.readValidDirectoryItems(directoryId)
@@ -4910,6 +5021,7 @@ export class DynamoDbProjectDirectoryClient {
       const guardManager = member.role === 'manager'
         ? this.requireAnotherProjectManager(items, projectId, normalizedMemberKey)
         : undefined
+      managerGuarded = guardManager !== undefined
       const removedAt = new Date().toISOString()
       const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
@@ -4940,32 +5052,19 @@ export class DynamoDbProjectDirectoryClient {
       }
 
       if (guardManager) {
-        try {
-          await this.documentClient.send(
-            new TransactWriteCommand({
-              TransactItems: [
-                {
-                  ConditionCheck: this.createProjectManagerConditionCheck(directoryId, guardManager.entryKey),
-                },
-                {
-                  Delete: memberDelete,
-                },
-                ...(auditPut ? [auditPut] : []),
-              ],
-            }),
-          )
-        } catch (error) {
-          if (isAwsNamedError(error, 'TransactionCanceledException')) {
-            await this.throwProjectManagerTransactionCancellationResult(
-              directoryId,
-              projectId,
-              normalizedMemberKey,
-              error,
-            )
-          }
-
-          throw error
-        }
+        await this.documentClient.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              {
+                ConditionCheck: this.createProjectManagerConditionCheck(directoryId, guardManager.entryKey),
+              },
+              {
+                Delete: memberDelete,
+              },
+              ...(auditPut ? [auditPut] : []),
+            ],
+          }),
+        )
       } else {
         if (auditPut) {
           await this.documentClient.send(
@@ -4992,6 +5091,25 @@ export class DynamoDbProjectDirectoryClient {
         memberId: normalizedMemberKey,
       } satisfies RemoveProjectMemberResponse
     } catch (error) {
+      if (
+        (managerGuarded && (
+          isTransactionConditionalFailureAt(error, 0) ||
+          isTransactionConditionalFailureAt(error, 1)
+        )) ||
+        (!managerGuarded && isTransactionConditionalFailureAt(error, 0))
+      ) {
+        await this.throwProjectManagerTransactionCancellationResult(
+          directoryId,
+          projectId,
+          normalizedMemberKey,
+          error,
+        )
+      }
+
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -5072,6 +5190,13 @@ export class DynamoDbProjectDirectoryClient {
         },
       } satisfies CreateTeamResponse
     } catch (error) {
+      if (
+        isAwsNamedError(error, 'TransactionCanceledException') &&
+        hasTransactionConditionalFailure(error)
+      ) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -5193,8 +5318,12 @@ export class DynamoDbProjectDirectoryClient {
           }),
         )
       } catch (error) {
-        if (isAwsNamedError(error, 'TransactionCanceledException')) {
+        if (isTransactionConditionalFailureAt(error, 0)) {
           await this.throwCreateProjectTransactionCancellationResult(directoryId, teamId, error)
+        }
+
+        if (hasTransactionConditionalFailure(error)) {
+          throw createProjectDataConflictError()
         }
 
         throw error
@@ -5271,6 +5400,14 @@ export class DynamoDbProjectDirectoryClient {
         archivedAt,
       } satisfies ArchiveTeamResponse
     } catch (error) {
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        await this.throwArchiveTeamTransactionCancellationResult(directoryId, teamId, error)
+      }
+
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -5351,6 +5488,19 @@ export class DynamoDbProjectDirectoryClient {
         archivedAt,
       } satisfies ArchiveProjectResponse
     } catch (error) {
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        await this.throwArchiveProjectTransactionCancellationResult(
+          directoryId,
+          teamId,
+          projectId,
+          error,
+        )
+      }
+
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -5373,9 +5523,11 @@ export class DynamoDbProjectDirectoryClient {
   /**
    * directory partition 内の全 item を検証済み item として取得します。
    */
-  private async readValidDirectoryItems(directoryId: string) {
-    return this.queryDirectoryItems(directoryId).then((items) =>
-      items.map((item) => {
+  private async readValidDirectoryItems(directoryId: string, consistentRead = false) {
+    try {
+      const items = await this.queryDirectoryItems(directoryId, true, consistentRead)
+
+      return items.map((item) => {
         if (!isProjectDirectoryItem(item, directoryId)) {
           throw new ProjectDataError(
             503,
@@ -5385,8 +5537,14 @@ export class DynamoDbProjectDirectoryClient {
         }
 
         return item
-      }),
-    )
+      })
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
   }
 
   /**
@@ -5451,7 +5609,7 @@ export class DynamoDbProjectDirectoryClient {
     teamId: string,
     originalError: unknown,
   ): Promise<never> {
-    const items = await this.readValidDirectoryItems(directoryId)
+    const items = await this.readValidDirectoryItems(directoryId, true)
     const activeTeam = items.find((item) =>
       item.entryType === 'team' &&
       item.teamId === teamId &&
@@ -5462,7 +5620,112 @@ export class DynamoDbProjectDirectoryClient {
       throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
     }
 
-    throw originalError
+    if (hasTransactionConditionalFailure(originalError)) {
+      throw createProjectDataConflictError()
+    }
+
+    throw toProjectDataError(originalError)
+  }
+
+  /**
+   * team archive transaction 失敗後の最新状態から not-found と競合を切り分けます。
+   */
+  private async throwArchiveTeamTransactionCancellationResult(
+    directoryId: string,
+    teamId: string,
+    originalError: unknown,
+  ): Promise<never> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const activeTeam = items.find((item) =>
+      item.entryType === 'team' &&
+      item.teamId === teamId &&
+      isActiveDirectoryItem(item),
+    )
+
+    if (!activeTeam) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+
+    if (hasTransactionConditionalFailure(originalError)) {
+      throw createProjectDataConflictError()
+    }
+
+    throw toProjectDataError(originalError)
+  }
+
+  /**
+   * project archive transaction 失敗後の最新状態から not-found と競合を切り分けます。
+   */
+  private async throwArchiveProjectTransactionCancellationResult(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    originalError: unknown,
+  ): Promise<never> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const activeTeam = items.find((item) =>
+      item.entryType === 'team' &&
+      item.teamId === teamId &&
+      isActiveDirectoryItem(item),
+    )
+
+    if (!activeTeam) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+
+    const activeProject = items.find((item) =>
+      item.entryType === 'project' &&
+      item.teamId === teamId &&
+      item.projectId === projectId &&
+      isActiveDirectoryItem(item),
+    )
+
+    if (!activeProject) {
+      throw new ProjectDataError(
+        404,
+        'ProjectNotFound',
+        `Project "${projectId}" was not found in team "${teamId}".`,
+      )
+    }
+
+    if (hasTransactionConditionalFailure(originalError)) {
+      throw createProjectDataConflictError()
+    }
+
+    throw toProjectDataError(originalError)
+  }
+
+  /**
+   * project member upsert transaction 失敗後の最新状態から not-found と競合を切り分けます。
+   */
+  private async throwUpdateProjectMemberTransactionCancellationResult(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+    existingMemberExpected: boolean,
+    originalError: unknown,
+  ): Promise<never> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    this.requireActiveProject(items, projectId)
+    const member = items.find((item) =>
+      item.entryType === 'project-member' &&
+      item.projectId === projectId &&
+      item.memberKey === memberKey,
+    )
+
+    if (existingMemberExpected && !member) {
+      throw new ProjectDataError(
+        404,
+        'ProjectMemberNotFound',
+        `Project member "${memberKey}" was not found in project "${projectId}".`,
+      )
+    }
+
+    if (hasTransactionConditionalFailure(originalError)) {
+      throw createProjectDataConflictError()
+    }
+
+    throw toProjectDataError(originalError)
   }
 
   /**
@@ -5474,7 +5737,7 @@ export class DynamoDbProjectDirectoryClient {
     memberKey: string,
     originalError: unknown,
   ): Promise<never> {
-    const items = await this.readValidDirectoryItems(directoryId)
+    const items = await this.readValidDirectoryItems(directoryId, true)
     this.requireActiveProject(items, projectId)
     const member = items.find((item) =>
       item.entryType === 'project-member' &&
@@ -5494,7 +5757,11 @@ export class DynamoDbProjectDirectoryClient {
       throw this.createProjectLastManagerError()
     }
 
-    throw originalError
+    if (hasTransactionConditionalFailure(originalError)) {
+      throw createProjectDataConflictError()
+    }
+
+    throw toProjectDataError(originalError)
   }
 
   /**
@@ -5545,7 +5812,11 @@ export class DynamoDbProjectDirectoryClient {
   /**
    * directory partition 内の全 item を LastEvaluatedKey がなくなるまで取得します。
    */
-  private async queryDirectoryItems(directoryId: string, canBootstrapLocalTable = true) {
+  private async queryDirectoryItems(
+    directoryId: string,
+    canBootstrapLocalTable = true,
+    consistentRead = false,
+  ) {
     try {
       const items: unknown[] = []
       let exclusiveStartKey: Record<string, unknown> | undefined
@@ -5560,6 +5831,7 @@ export class DynamoDbProjectDirectoryClient {
             },
             ExclusiveStartKey: exclusiveStartKey,
             ScanIndexForward: true,
+            ...(consistentRead ? { ConsistentRead: true } : {}),
           }),
         )
 
@@ -5575,7 +5847,7 @@ export class DynamoDbProjectDirectoryClient {
         isResourceNotFoundError(error) &&
         await ensureLocalProjectDirectoryTable(this.tableName, this.dynamoDbClient)
       ) {
-        return this.queryDirectoryItems(directoryId, false)
+        return this.queryDirectoryItems(directoryId, false, consistentRead)
       }
 
       throw error
@@ -6019,6 +6291,46 @@ function isResourceInUseError(error: unknown) {
 
 function isAwsNamedError(error: unknown, name: string) {
   return typeof error === 'object' && error !== null && 'name' in error && error.name === name
+}
+
+function hasTransactionConditionalFailure(error: unknown) {
+  if (!isAwsNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
+    return false
+  }
+
+  const reasons = error.CancellationReasons
+
+  if (!Array.isArray(reasons)) {
+    return false
+  }
+
+  const reasonCodes = reasons.map((reason) => isRecord(reason) ? reason.Code : undefined)
+
+  if (!reasonCodes.every((code) => code === 'None' || code === 'ConditionalCheckFailed')) {
+    return false
+  }
+
+  return reasonCodes.includes('ConditionalCheckFailed')
+}
+
+function isTransactionConditionalFailureAt(error: unknown, index: number) {
+  if (!hasTransactionConditionalFailure(error) || !isRecord(error)) {
+    return false
+  }
+
+  const reasons = error.CancellationReasons
+
+  return Array.isArray(reasons) &&
+    isRecord(reasons[index]) &&
+    reasons[index].Code === 'ConditionalCheckFailed'
+}
+
+function createProjectDataConflictError() {
+  return new ProjectDataError(
+    409,
+    'ConditionalCheckFailedException',
+    'The transaction condition failed.',
+  )
 }
 
 async function sleep(ms: number) {

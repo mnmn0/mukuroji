@@ -120,9 +120,9 @@ Web から `/api` を呼ぶだけで Floci 上の DynamoDB データを取得で
 append-only event schema、activity/audit API、retention/redaction、consumer dedupe、backfill の契約は
 [`docs/event-audit.md`](docs/event-audit.md) を参照してください。
 
-Web から mutation を retry する場合は、`createMutationRequestContext()` を logical mutation の開始時に
-1回だけ呼び、初回 request と retry の optional context 引数へ同じ object を渡してください。context を
-省略した既存 call は request ごとに新しい key を自動生成します。
+Web の mutation は operation と入力 fingerprint ごとに `MutationRequestContext` を1つ保持し、失敗後に
+同じ入力を retry した場合だけ同じ object を API client へ渡します。HTTP mutation 成功時または
+入力変更時は context を破棄し、別の logical mutation に同じ key を流用しません。Web API client の context 引数は必須です。
 
 ローカル backfill は次の command で実行できます。本実行時は共通 bootstrap が未作成の
 `mukuroji-audit-events` table を本番互換 schema で作成します。

@@ -9,6 +9,7 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import {
   AUDIT_MAX_TEXT_LENGTH,
+  calculateAuditExpiresAt,
   createAuditEvent as createSchemaV1AuditEvent,
   createAuditFieldChanges,
   createMutationAuditContext,
@@ -905,7 +906,7 @@ function createAuditEvent(input: AuditEventInput): AuditEventV1 {
     changes: input.changes,
     sequence: 0,
     summary: input.reason,
-    expiresAt: Math.floor(Date.now() / 1000) + readAuditRetentionDays() * 86_400,
+    expiresAt: calculateAuditExpiresAt(input.occurredAt, readAuditRetentionDays()),
     metadata: {
       ...input.metadata,
       backfilled: true,
