@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import useSWR from 'swr'
 import { getCurrentUser } from '../auth/api'
 import { clearAuthSession, getAuthSession } from '../auth/session'
+import { createMutationRequestRunner } from '../api/mutationHeaders'
 import {
   MobileSidebarButton,
   MobileSidebarDrawer,
@@ -179,6 +180,7 @@ type TeamIssueScreenProps = {
 export function TeamIssuePage() {
   const navigate = useNavigate()
   const params = useParams()
+  const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   const teamId = params.teamId ?? 'core-team'
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
@@ -277,7 +279,11 @@ export function TeamIssuePage() {
       return
     }
 
-    const issue = await createTeamIssue(teamId, accessToken, input)
+    const issue = await mutationRequestRunner.run(
+      `issue:create:${teamId}`,
+      JSON.stringify(input),
+      (context) => createTeamIssue(teamId, accessToken, input, context),
+    )
     setSelectedIssueId(issue.id)
     await mutateIssues()
   }
@@ -287,7 +293,11 @@ export function TeamIssuePage() {
       return
     }
 
-    await updateTeamIssue(teamId, issueId, accessToken, input)
+    await mutationRequestRunner.run(
+      `issue:update:${teamId}:${issueId}`,
+      JSON.stringify(input),
+      (context) => updateTeamIssue(teamId, issueId, accessToken, input, context),
+    )
     await mutateIssues()
     await mutateIssueDetail()
   }
@@ -297,7 +307,11 @@ export function TeamIssuePage() {
       return
     }
 
-    await createTeamIssueComment(teamId, issueId, accessToken, body)
+    await mutationRequestRunner.run(
+      `issue:comment:${teamId}:${issueId}`,
+      body,
+      (context) => createTeamIssueComment(teamId, issueId, accessToken, body, context),
+    )
     await mutateIssueDetail()
   }
 
@@ -306,7 +320,9 @@ export function TeamIssuePage() {
       return
     }
 
-    await createProjectDirectoryTeam(accessToken, input)
+    await mutationRequestRunner.run('team:create', JSON.stringify(input), (context) =>
+      createProjectDirectoryTeam(accessToken, input, context),
+    )
     await mutateProjectDirectory()
   }
 
@@ -318,7 +334,11 @@ export function TeamIssuePage() {
       return
     }
 
-    await createProjectDirectoryProject(accessToken, nextTeamId, input)
+    await mutationRequestRunner.run(
+      'project:create',
+      JSON.stringify([nextTeamId, input]),
+      (context) => createProjectDirectoryProject(accessToken, nextTeamId, input, context),
+    )
     await mutateProjectDirectory()
   }
 
@@ -327,7 +347,9 @@ export function TeamIssuePage() {
       return
     }
 
-    await archiveProjectDirectoryTeam(accessToken, nextTeamId)
+    await mutationRequestRunner.run('team:archive', nextTeamId, (context) =>
+      archiveProjectDirectoryTeam(accessToken, nextTeamId, context),
+    )
     await mutateProjectDirectory()
 
     if (nextTeamId === teamId) {
@@ -340,7 +362,11 @@ export function TeamIssuePage() {
       return
     }
 
-    await archiveProjectDirectoryProject(accessToken, nextTeamId, projectId)
+    await mutationRequestRunner.run(
+      'project:archive',
+      JSON.stringify([nextTeamId, projectId]),
+      (context) => archiveProjectDirectoryProject(accessToken, nextTeamId, projectId, context),
+    )
     await mutateProjectDirectory()
   }
 

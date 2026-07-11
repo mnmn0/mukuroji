@@ -102,18 +102,36 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `VITE_API_PROXY_TARGET`: Vite dev server が proxy する API。未指定時は `http://localhost:3000`
 - `COGNITO_ENDPOINT` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci endpoint。未指定時は `http://localhost:4566`
 - `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`: 明示指定する場合の Cognito リソース ID
-- `DYNAMODB_ENDPOINT` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci DynamoDB endpoint。未指定時は `http://localhost:4566`
+- `DYNAMODB_ENDPOINT` / `AWS_ENDPOINT_URL_DYNAMODB` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci DynamoDB endpoint。未指定時は `http://localhost:4566`
 - `MUKUROJI_DASHBOARD_TABLE`: ダッシュボード集計値を保存する DynamoDB table 名。未指定時は `mukuroji-dashboard-local`
 - `MUKUROJI_PROJECT_TASKS_TABLE`: プロジェクト別タスクを保存する DynamoDB table 名。未指定時は `mukuroji-project-tasks-v2-local`
 - `MUKUROJI_PROJECT_DIRECTORY_TABLE`: サイドバー用チーム/プロジェクト階層を保存する DynamoDB table 名。未指定時は `mukuroji-project-directory-local`
 - `MUKUROJI_TEAM_ISSUES_TABLE`: チーム所有 Issue を保存する DynamoDB table 名。未指定時は `mukuroji-team-issues-local`
 - `MUKUROJI_TEAM_ISSUE_EVENTS_TABLE`: チーム Issue のコメント/活動履歴を保存する DynamoDB table 名。未指定時は `mukuroji-team-issue-events-local`
+- `MUKUROJI_AUDIT_EVENTS_TABLE` / `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
+- `MUKUROJI_AUDIT_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS`: audit event の保持日数。未指定時は 2555 日（7年）
 - `MUKUROJI_PROJECT_DIRECTORY_ID`: ready hook が seed する directory partition。未指定時は `user#<COGNITO_TEST_USERNAME の小文字>`。プロジェクト権限付与候補 user は Cognito の `custom:directory_id` / `custom:workspace_id` がこの値に一致する user に限定されます。
 
 API サーバーは `/api/dashboard/summary`, `/api/teams/projects`,
 `/api/teams/{teamId}/issues`, `/api/projects/{projectId}/issues`,
-`/api/projects/{projectId}/tasks` で DynamoDB を読みます。ローカルでは Vite proxy により、
+`/api/projects/{projectId}/tasks`, `/api/audit/events` で DynamoDB を読みます。ローカルでは Vite proxy により、
 Web から `/api` を呼ぶだけで Floci 上の DynamoDB データを取得できます。
+
+append-only event schema、activity/audit API、retention/redaction、consumer dedupe、backfill の契約は
+[`docs/event-audit.md`](docs/event-audit.md) を参照してください。
+
+Web の mutation は operation と入力 fingerprint ごとに `MutationRequestContext` を1つ保持し、失敗後に
+同じ入力を retry した場合だけ同じ object を API client へ渡します。HTTP mutation 成功時または
+入力変更時は context を破棄し、別の logical mutation に同じ key を流用しません。Web API client の context 引数は必須です。
+
+ローカル backfill は次の command で実行できます。本実行時は共通 bootstrap が未作成の
+`mukuroji-audit-events` table を本番互換 schema で作成します。
+
+```sh
+AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- --dry-run --limit 100
+AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
+  --checkpoint /tmp/mukuroji-audit-backfill.json
+```
 
 CDK stack も同じタスクデータと demo user 用の `user#demo@example.com` チーム/プロジェクト階層を DynamoDB に seed し、Lambda Function URL 経由で取得できます。AWS 環境で確認する場合は以下の順に実行し、出力された `ProjectTasksApiUrl` を Web の環境変数へ渡してください。
 

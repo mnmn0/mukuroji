@@ -1,5 +1,6 @@
 import type { SidebarProjectTone } from '../components/sidebar'
 import type { Locale } from '../i18n'
+import { createMutationHeaders, type MutationRequestContext } from '../api/mutationHeaders'
 
 /**
  * プロジェクトごとの権限ロールです。
@@ -351,11 +352,17 @@ export async function getProjectDirectory(
 export async function createProjectDirectoryTeam(
   accessToken: string,
   input: CreateProjectDirectoryTeamInput,
+  mutationContext: MutationRequestContext,
 ) {
-  const data = await sendProjectDirectoryRequest<unknown>('/teams', accessToken, {
-    method: 'POST',
-    body: JSON.stringify(input),
-  })
+  const data = await sendProjectDirectoryRequest<unknown>(
+    '/teams',
+    accessToken,
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+    mutationContext,
+  )
 
   if (!isCreateProjectDirectoryTeamResponse(data)) {
     throw new ProjectDirectoryApiError(502, 'projects.error.loading')
@@ -371,6 +378,7 @@ export async function createProjectDirectoryProject(
   accessToken: string,
   teamId: string,
   input: CreateProjectDirectoryProjectInput,
+  mutationContext: MutationRequestContext,
 ) {
   const data = await sendProjectDirectoryRequest<unknown>(
     `/teams/${encodeURIComponent(teamId)}/projects`,
@@ -379,6 +387,7 @@ export async function createProjectDirectoryProject(
       method: 'POST',
       body: JSON.stringify(input),
     },
+    mutationContext,
   )
 
   if (!isCreateProjectDirectoryProjectResponse(data)) {
@@ -391,13 +400,18 @@ export async function createProjectDirectoryProject(
 /**
  * DynamoDB 上のチームをアーカイブします。
  */
-export async function archiveProjectDirectoryTeam(accessToken: string, teamId: string) {
+export async function archiveProjectDirectoryTeam(
+  accessToken: string,
+  teamId: string,
+  mutationContext: MutationRequestContext,
+) {
   const data = await sendProjectDirectoryRequest<unknown>(
     `/teams/${encodeURIComponent(teamId)}/archive`,
     accessToken,
     {
       method: 'PATCH',
     },
+    mutationContext,
   )
 
   if (!isArchiveProjectDirectoryTeamResponse(data)) {
@@ -414,6 +428,7 @@ export async function archiveProjectDirectoryProject(
   accessToken: string,
   teamId: string,
   projectId: string,
+  mutationContext: MutationRequestContext,
 ) {
   const data = await sendProjectDirectoryRequest<unknown>(
     `/teams/${encodeURIComponent(teamId)}/projects/${encodeURIComponent(projectId)}/archive`,
@@ -421,6 +436,7 @@ export async function archiveProjectDirectoryProject(
     {
       method: 'PATCH',
     },
+    mutationContext,
   )
 
   if (!isArchiveProjectDirectoryProjectResponse(data)) {
@@ -514,6 +530,7 @@ export async function updateProjectMember(
   projectId: string,
   memberKey: string,
   input: UpdateProjectMemberInput,
+  mutationContext: MutationRequestContext,
 ) {
   const data = await sendProjectDirectoryRequest<unknown>(
     `/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(memberKey)}`,
@@ -522,6 +539,7 @@ export async function updateProjectMember(
       method: 'PATCH',
       body: JSON.stringify(input),
     },
+    mutationContext,
   )
 
   if (!isUpdateProjectMemberResponse(data)) {
@@ -534,13 +552,19 @@ export async function updateProjectMember(
 /**
  * DynamoDB に保存されたプロジェクトメンバー role を削除します。
  */
-export async function removeProjectMember(accessToken: string, projectId: string, memberKey: string) {
+export async function removeProjectMember(
+  accessToken: string,
+  projectId: string,
+  memberKey: string,
+  mutationContext: MutationRequestContext,
+) {
   const data = await sendProjectDirectoryRequest<unknown>(
     `/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(memberKey)}`,
     accessToken,
     {
       method: 'DELETE',
     },
+    mutationContext,
   )
 
   if (!isRemoveProjectMemberResponse(data)) {
@@ -553,13 +577,16 @@ export async function removeProjectMember(accessToken: string, projectId: string
 async function sendProjectDirectoryRequest<T>(
   path: string,
   accessToken: string,
-  init?: RequestInit,
+  init: RequestInit,
+  mutationContext: MutationRequestContext,
 ) {
   const response = await fetch(`${projectsApiBaseUrl}${path}`, {
     ...init,
     headers: {
       Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json',
+      ...init?.headers,
+      ...createMutationHeaders(mutationContext),
     },
   })
   const data = await readJson<unknown>(response)
