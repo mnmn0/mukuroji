@@ -12,6 +12,8 @@ import {
   createMutationAuditContext,
   DynamoDbAuditEventsClient,
   ensureLocalAuditEventsTable,
+  getConfiguredAuditTableName,
+  getConfiguredDynamoDbEndpoint,
   toAuditEventView,
   upcastAuditEvent,
 } from './audit'
@@ -22,6 +24,25 @@ test('calculates audit expiry from the historical event occurrence time', () => 
   expect(calculateAuditExpiresAt(occurredAt, 30)).toBe(
     Math.floor(Date.parse(occurredAt) / 1000) + 30 * 86_400,
   )
+})
+
+test('uses the local audit table default for shared AWS endpoint variables', () => {
+  expect(getConfiguredDynamoDbEndpoint({
+    AWS_ENDPOINT_URL_DYNAMODB: ' http://127.0.0.1:4566 ',
+  })).toBe('http://127.0.0.1:4566')
+  expect(getConfiguredAuditTableName({
+    AWS_ENDPOINT_URL: 'http://localhost:4566',
+  })).toBe('mukuroji-audit-events')
+  expect(getConfiguredAuditTableName({
+    AWS_ENDPOINT_URL_DYNAMODB: 'http://127.0.0.1:4566',
+  })).toBe('mukuroji-audit-events')
+  expect(getConfiguredAuditTableName({
+    DYNAMODB_ENDPOINT: ' ',
+    AWS_ENDPOINT_URL: 'http://floci:4566',
+  })).toBe('mukuroji-audit-events')
+  expect(getConfiguredAuditTableName({
+    AWS_ENDPOINT_URL: 'https://dynamodb.ap-northeast-1.amazonaws.com',
+  })).toBeUndefined()
 })
 
 test('creates deterministic audit IDs and CDK-compatible DynamoDB keys', () => {

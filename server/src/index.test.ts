@@ -1691,12 +1691,14 @@ test('DynamoDB task client classifies audited transaction conditions from a cons
     latestTask: Record<string, unknown> | undefined,
   ) => {
     const sentInputs: Array<Record<string, unknown>> = []
+    let taskReads = 0
     const documentClient = {
       async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
         sentInputs.push(command.input)
 
-        if (command.constructor.name === 'QueryCommand') {
-          return { Items: [currentTask] }
+        if (command.constructor.name === 'GetCommand') {
+          taskReads += 1
+          return { Item: taskReads === 1 ? currentTask : latestTask }
         }
 
         if (command.constructor.name === 'TransactWriteCommand') {
@@ -1708,10 +1710,6 @@ test('DynamoDB task client classifies audited transaction conditions from a cons
           }
 
           throw error
-        }
-
-        if (command.constructor.name === 'GetCommand') {
-          return { Item: latestTask }
         }
 
         return {}
@@ -1742,6 +1740,10 @@ test('DynamoDB task client classifies audited transaction conditions from a cons
   await expect(stateConflict.result).rejects.toMatchObject({
     code: 'ConditionalCheckFailedException',
     status: 409,
+  })
+  expect(stateConflict.sentInputs[0]).toMatchObject({
+    TableName: 'TasksTable',
+    ConsistentRead: true,
   })
   expect(stateConflict.sentInputs.at(-1)).toEqual({
     TableName: 'TasksTable',
@@ -2358,6 +2360,7 @@ test('DynamoDB directory client manages project member roles', async () => {
     projectId: 'refero',
     memberId: 'demo@example.com',
   })
+  expect(sentInputs[2]).toMatchObject({ ConsistentRead: true })
   expect(sentInputs[3]).toMatchObject({
     TableName: 'DirectoryTable',
     Item: {
@@ -2410,6 +2413,7 @@ test('DynamoDB directory client manages project member roles', async () => {
       },
     ],
   })
+  expect(sentInputs[4]).toMatchObject({ ConsistentRead: true })
 })
 
 test('DynamoDB directory client keeps at least one project manager', async () => {
@@ -2587,6 +2591,7 @@ test('DynamoDB directory client treats manager guard transaction cancellation as
     ],
   })
   expect(sentInputs).toHaveLength(3)
+  expect(sentInputs[0]).toMatchObject({ ConsistentRead: true })
   expect(sentInputs[2]).toMatchObject({ ConsistentRead: true })
 })
 
@@ -2677,6 +2682,7 @@ test('DynamoDB directory client treats deleted target member transaction cancell
     code: 'ProjectMemberNotFound',
   })
   expect(sentInputs).toHaveLength(3)
+  expect(sentInputs[0]).toMatchObject({ ConsistentRead: true })
   expect(sentInputs[2]).toMatchObject({ ConsistentRead: true })
 })
 

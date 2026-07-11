@@ -1164,6 +1164,22 @@ export function createMutationAuditEventPut(
 }
 
 /**
+ * process environment から明示設定された DynamoDB endpoint を取得します。
+ *
+ * @param environment endpoint 設定を読む environment です。
+ * @returns 最初に見つかった空でない DynamoDB endpoint です。
+ */
+export function getConfiguredDynamoDbEndpoint(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  return [
+    environment.DYNAMODB_ENDPOINT,
+    environment.AWS_ENDPOINT_URL_DYNAMODB,
+    environment.AWS_ENDPOINT_URL,
+  ].map((value) => value?.trim()).find(Boolean)
+}
+
+/**
  * process environment から audit event table 名を取得します。
  */
 export function getConfiguredAuditTableName(
@@ -1177,7 +1193,7 @@ export function getConfiguredAuditTableName(
     return configuredName
   }
 
-  const endpoint = environment.DYNAMODB_ENDPOINT?.trim()
+  const endpoint = getConfiguredDynamoDbEndpoint(environment)
 
   if (endpoint && /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|floci)(?::|\/|$)/.test(endpoint)) {
     return 'mukuroji-audit-events'

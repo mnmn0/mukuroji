@@ -1164,6 +1164,7 @@ async function updateProjectMember(event, headers, directoryId, projectId, membe
       ':directoryId': { S: directoryId },
     },
     ScanIndexForward: true,
+    ConsistentRead: true,
   });
   const existingMember = existingMembers.find((item) =>
     item.entryType?.S === 'project-member' &&
@@ -1291,6 +1292,7 @@ async function removeProjectMember(headers, directoryId, projectId, memberKey, m
       ':directoryId': { S: directoryId },
     },
     ScanIndexForward: true,
+    ConsistentRead: true,
   });
   const member = items.find((item) =>
     item.entryType?.S === 'project-member' &&

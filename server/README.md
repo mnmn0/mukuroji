@@ -12,7 +12,7 @@ Run these commands from the repository root.
 
 open http://localhost:3000
 
-The local API reads DynamoDB through `DYNAMODB_ENDPOINT` or `AWS_ENDPOINT_URL`.
+The local API reads DynamoDB through `DYNAMODB_ENDPOINT`, `AWS_ENDPOINT_URL_DYNAMODB`, or `AWS_ENDPOINT_URL`.
 Default local table names are:
 
 - `MUKUROJI_DASHBOARD_TABLE=mukuroji-dashboard-local`

@@ -1653,6 +1653,7 @@ test('inline lambda returns not found when a non-manager update loses its target
     'TransactWriteItemsCommand',
     'QueryCommand',
   ]);
+  expect(commandInputs[0].input).toMatchObject({ ConsistentRead: true });
   expect(commandInputs.at(-1)?.input).toMatchObject({ ConsistentRead: true });
 });
 
@@ -1696,6 +1697,7 @@ test('inline lambda returns not found when a non-manager removal loses its targe
     'TransactWriteItemsCommand',
     'QueryCommand',
   ]);
+  expect(commandInputs[0].input).toMatchObject({ ConsistentRead: true });
   expect(commandInputs.at(-1)?.input).toMatchObject({ ConsistentRead: true });
 });
 

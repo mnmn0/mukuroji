@@ -25,6 +25,7 @@ import {
   DynamoDbAuditEventsClient,
   ensureLocalAuditEventsTable,
   getConfiguredAuditTableName,
+  getConfiguredDynamoDbEndpoint,
   toAuditEventView,
   type AuditEventEntityType,
   type AuditEventPage,
@@ -3812,14 +3813,13 @@ export class DynamoDbProjectTasksClient {
 
     try {
       if (this.auditTableName && auditContext) {
-        const currentItem = (await this.queryProjectTaskItems(directoryId, projectId))
-          .map(toProjectTaskResponseItem)
-          .find((task) => task.id === taskId)
+        const currentStoredItem = await this.getProjectTaskItem(directoryId, projectId, taskId)
 
-        if (!currentItem) {
+        if (!currentStoredItem) {
           throw new ProjectDataError(404, 'ProjectTaskNotFound', 'Task was not found.')
         }
 
+        const currentItem = toProjectTaskResponseItem(currentStoredItem)
         const updatedItem = { ...currentItem, status }
         const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
           directoryId,
@@ -3887,7 +3887,7 @@ export class DynamoDbProjectTasksClient {
         let taskExists: boolean
 
         try {
-          taskExists = await this.hasProjectTaskItem(directoryId, projectId, taskId)
+          taskExists = (await this.getProjectTaskItem(directoryId, projectId, taskId)) !== undefined
         } catch (readError) {
           if (readError instanceof ProjectDataError) {
             throw readError
@@ -3916,21 +3916,39 @@ export class DynamoDbProjectTasksClient {
   }
 
   /**
-   * base table の strongly consistent read で project task の存在を確認します。
+   * base table の strongly consistent read で project task を取得します。
    */
-  private async hasProjectTaskItem(directoryId: string, projectId: string, taskId: string) {
-    const response = await this.documentClient.send(
-      new GetCommand({
-        TableName: this.tableName,
-        Key: {
-          directoryProjectId: createDirectoryProjectId(directoryId, projectId),
-          taskId,
-        },
-        ConsistentRead: true,
-      }),
-    )
+  private async getProjectTaskItem(
+    directoryId: string,
+    projectId: string,
+    taskId: string,
+    canBootstrapLocalTable = true,
+  ): Promise<Record<string, unknown> | undefined> {
+    try {
+      const response = await this.documentClient.send(
+        new GetCommand({
+          TableName: this.tableName,
+          Key: {
+            directoryProjectId: createDirectoryProjectId(directoryId, projectId),
+            taskId,
+          },
+          ConsistentRead: true,
+        }),
+      )
 
-    return response.Item !== undefined
+      return response.Item
+    } catch (error) {
+      if (
+        canBootstrapLocalTable &&
+        this.bootstrapLocalTables &&
+        isResourceNotFoundError(error) &&
+        await ensureLocalProjectTasksTable(this.tableName, this.dynamoDbClient)
+      ) {
+        return this.getProjectTaskItem(directoryId, projectId, taskId, false)
+      }
+
+      throw error
+    }
   }
 
   /**
@@ -4855,7 +4873,7 @@ export class DynamoDbProjectDirectoryClient {
     let managerGuarded = false
 
     try {
-      const items = await this.readValidDirectoryItems(directoryId)
+      const items = await this.readValidDirectoryItems(directoryId, true)
       this.requireActiveProject(items, projectId)
       const existingMember = items.find((item) =>
         item.entryType === 'project-member' &&
@@ -5002,7 +5020,7 @@ export class DynamoDbProjectDirectoryClient {
     let managerGuarded = false
 
     try {
-      const items = await this.readValidDirectoryItems(directoryId)
+      const items = await this.readValidDirectoryItems(directoryId, true)
       this.requireActiveProject(items, projectId)
       const member = items.find((item) =>
         item.entryType === 'project-member' &&
@@ -7126,7 +7144,11 @@ function getAwsRegion() {
 }
 
 function getDynamoDbEndpoint() {
-  return getEnv('DYNAMODB_ENDPOINT') ?? getEnv('AWS_ENDPOINT_URL') ?? 'http://localhost:4566'
+  return getConfiguredDynamoDbEndpoint({
+    DYNAMODB_ENDPOINT: getEnv('DYNAMODB_ENDPOINT'),
+    AWS_ENDPOINT_URL_DYNAMODB: getEnv('AWS_ENDPOINT_URL_DYNAMODB'),
+    AWS_ENDPOINT_URL: getEnv('AWS_ENDPOINT_URL'),
+  }) ?? 'http://localhost:4566'
 }
 
 function getEnv(name: string) {
