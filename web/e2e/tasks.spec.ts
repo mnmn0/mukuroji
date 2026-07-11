@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
+import { readFile } from 'node:fs/promises'
 import type { TeamIssue, TeamIssueActivity, TeamIssueComment } from '../src/issues/api'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import type { ProjectDirectoryTeam, ProjectMember, ProjectMemberRole, ProjectUser } from '../src/projects/api'
@@ -156,6 +157,22 @@ async function mockAuthenticatedTaskPage(
         email: 'sato@example.com',
         name: '佐藤 花子',
         role: 'member',
+        updatedAt: '2026-06-08T00:00:00.000Z',
+      },
+    ],
+    'product-roadmap': [
+      {
+        id: 'demo@example.com',
+        email: 'demo@example.com',
+        name: 'Demo User',
+        role: 'manager',
+        updatedAt: '2026-06-08T00:00:00.000Z',
+      },
+      {
+        id: 'viewer2@example.com',
+        email: 'viewer2@example.com',
+        name: 'Viewer Two',
+        role: 'viewer',
         updatedAt: '2026-06-08T00:00:00.000Z',
       },
     ],
@@ -1624,11 +1641,175 @@ test.describe('authenticated task page', () => {
   })
 
   test('チーム概要では選択チームのプロジェクトタスクだけを集計する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            id: 'core-shared-launch-risk',
+            title: 'コアチームだけの共通ローンチ確認',
+            assignedProjectId: 'shared-launch',
+            priority: 'high',
+            status: 'review',
+            teamId: 'core-team',
+          }),
+        ],
+      },
+    })
+
     await page.goto('/teams/design-team/overview')
 
     await expect(page.getByTestId('team-overview-projects').locator('p').last()).toHaveText('2')
     await expect(page.getByTestId('team-overview-open-tasks').locator('p').last()).toHaveText('0')
     await expect(page.getByTestId('team-overview-blocked').locator('p').last()).toHaveText('0')
+    await expect(page.getByTestId('team-overview-project-table')).toBeVisible()
+
+    const brandRefreshRow = page.getByTestId('team-overview-project-brand-refresh')
+
+    await expect(brandRefreshRow).toContainText('ブランド刷新')
+    await expect(brandRefreshRow).toContainText('0%')
+    await expect(brandRefreshRow).toContainText('次の対応はありません')
+
+    await brandRefreshRow.getByRole('button', { name: 'プロジェクトを開く' }).click()
+    await expect(page).toHaveURL(/\/projects\/brand-refresh\/issues\?teamId=design-team$/)
+  })
+
+  test('チームメンバー画面ではプロジェクト横断の権限と負荷を確認できる', async ({ page }) => {
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.goto('/teams/core-team/members')
+
+    await expect(page.getByTestId('team-members-directory')).toBeVisible()
+    await expect.poll(() => requestCounts.projectMemberReads).toBeGreaterThanOrEqual(3)
+
+    const demoRow = page.getByTestId('team-member-row-demo-example-com')
+    const satoRow = page.getByTestId('team-member-row-sato-example-com')
+
+    await expect(demoRow).toContainText('Demo User')
+    await expect(demoRow).toContainText('manager')
+    await expect(demoRow).toContainText('Refero')
+    await expect(demoRow).toContainText('プロダクトロードマップ')
+    await expect(satoRow).toContainText('佐藤 花子')
+    await expect(satoRow).toContainText('未完了 1 件')
+    await expect(satoRow).toContainText('要確認 1 件')
+
+    await page.getByTestId('team-members-search').fill('viewer')
+    await expect(page.getByTestId('team-member-row-viewer2-example-com')).toBeVisible()
+    await expect(page.getByTestId('team-member-row-sato-example-com')).toHaveCount(0)
+
+    await page.getByTestId('team-members-role-filter').selectOption('viewer')
+    await expect(page.getByTestId('team-member-row-viewer2-example-com')).toContainText('viewer')
+
+    await page.getByTestId('team-member-project-viewer2-example-com-product-roadmap').click()
+    await expect(page).toHaveURL(/\/projects\/product-roadmap\/issues\?teamId=core-team$/)
+  })
+
+  test('受信箱で実タスクを要確認理由と検索語から絞り込める', async ({ page }) => {
+    await page.goto('/inbox')
+
+    await expect(page.getByTestId('inbox-workbench')).toBeVisible()
+    await expect(page.getByTestId('inbox-task-core-team-refero-wireframe')).toBeVisible()
+    await expect(page.getByTestId('inbox-task-core-team-refero-brand-guideline')).toBeVisible()
+
+    await page.getByTestId('inbox-filter-review').click()
+
+    await expect(page.getByTestId('inbox-filter-review')).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.getByTestId('inbox-task-core-team-refero-brand-guideline')).toBeVisible()
+    await expect(page.getByTestId('inbox-task-core-team-refero-wireframe')).toHaveCount(0)
+
+    await page.getByTestId('inbox-search').fill('存在しないタスク')
+    await expect(page.getByText('条件に合う対応事項はありません', { exact: true })).toBeVisible()
+
+    await page.getByTestId('inbox-search').clear()
+    await page.getByTestId('inbox-filter-high').click()
+    await expect(page.getByTestId('inbox-task-core-team-refero-wireframe')).toBeVisible()
+    await expect(page.getByTestId('inbox-task-core-team-refero-brand-guideline')).toHaveCount(0)
+  })
+
+  test('受信箱は同じ projectId と issueId を teamId で区別する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            id: 'duplicate-issue',
+            title: '重複 Issue',
+            assignedProjectId: 'shared-launch',
+            assigneeUserId: 'demo@example.com',
+            assigneeEmail: 'demo@example.com',
+            assigneeName: 'Demo User',
+            teamId: 'core-team',
+            status: 'in-progress',
+          }),
+        ],
+        'design-team': [
+          createStoredTeamIssue({
+            id: 'duplicate-issue',
+            title: '重複 Issue',
+            assignedProjectId: 'shared-launch',
+            teamId: 'design-team',
+            status: 'review',
+          }),
+        ],
+      },
+    })
+
+    await page.goto('/inbox')
+
+    const coreTeamRow = page.getByTestId('inbox-task-core-team-shared-launch-duplicate-issue')
+    const designTeamRow = page.getByTestId('inbox-task-design-team-shared-launch-duplicate-issue')
+
+    await expect(coreTeamRow).toBeVisible()
+    await expect(designTeamRow).toBeVisible()
+
+    await page.getByTestId('inbox-filter-mine').click()
+    await expect(coreTeamRow).toBeVisible()
+    await expect(designTeamRow).toHaveCount(0)
+
+    await page.getByTestId('inbox-filter-all').click()
+    await designTeamRow.click()
+    await expect(page).toHaveURL(
+      '/projects/shared-launch/issues?teamId=design-team&issueId=duplicate-issue',
+    )
+  })
+
+  test('レポートでプロジェクト健全性を絞り込み CSV 出力できる', async ({ page }) => {
+    await page.goto('/reports')
+
+    await expect(page.getByTestId('reports-workbench')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'ステータス構成', exact: true })).toBeVisible()
+    await expect(page.getByTestId('reports-project-core-team-refero')).toBeVisible()
+
+    await openSidebarCreatePanel(page)
+    await page.getByRole('button', { name: 'プロジェクト', exact: true }).click()
+    await page.getByLabel('プロジェクト名').fill('=SUM(1,1)')
+    await page.getByRole('button', { name: 'プロジェクトを登録' }).click()
+
+    await expect(page.getByTestId('reports-project-core-team-new-project')).toBeVisible()
+    await page.getByTestId('reports-project-search').fill('=SUM')
+
+    await expect(page.getByTestId('reports-project-core-team-new-project')).toBeVisible()
+    await expect(page.getByTestId('reports-project-core-team-refero')).toHaveCount(0)
+
+    const downloadPromise = page.waitForEvent('download')
+    await page.getByTestId('reports-export-csv').click()
+    const download = await downloadPromise
+    const downloadPath = await download.path()
+
+    expect(download.suggestedFilename()).toBe('mukuroji-project-snapshot.csv')
+    expect(downloadPath).not.toBeNull()
+    if (!downloadPath) {
+      throw new Error('CSV download path was not available.')
+    }
+
+    const csv = await readFile(downloadPath, 'utf8')
+
+    expect(csv).toContain("'=SUM(1,1)")
+    expect(csv).not.toContain('Refero')
+
+    await page.getByTestId('reports-project-search').clear()
+    await page.getByTestId('reports-attention-only').check()
+
+    await expect(page.getByTestId('reports-project-core-team-refero')).toBeVisible()
+    await expect(page.getByTestId('reports-project-core-team-product-roadmap')).toHaveCount(0)
   })
 
   test('設定画面でフォントサイズを変更して保存できる', async ({ page }) => {

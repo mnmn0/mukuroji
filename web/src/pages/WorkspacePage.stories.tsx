@@ -12,17 +12,123 @@ const storySummary: DashboardSummary = {
   source: 'dynamodb',
 }
 
+const storyWorkspaceTasks = [
+  ...referoTaskFixtures.map((task) => ({
+    ...task,
+    projectId: 'refero',
+    source: 'legacy' as const,
+    teamId: 'core-team',
+  })),
+  {
+    assigneeEmail: 'demo@example.com',
+    assigneeName: 'Demo User',
+    assigneeUserId: 'demo@example.com',
+    dueDate: '2026/06/07',
+    id: 'roadmap-risk',
+    priority: 'high',
+    projectId: 'product-roadmap',
+    source: 'dynamodb' as const,
+    status: 'review',
+    teamId: 'core-team',
+    title: 'ロードマップの依存リスクを確認',
+  },
+  {
+    assigneeEmail: 'suzuki@example.com',
+    assigneeName: '鈴木 大輔',
+    assigneeUserId: 'suzuki@example.com',
+    dueDate: '2026/06/10',
+    id: 'launch-approval',
+    priority: 'medium',
+    projectId: 'shared-launch',
+    source: 'dynamodb' as const,
+    status: 'todo',
+    teamId: 'core-team',
+    title: '共通ローンチの承認導線を確認',
+  },
+] satisfies Parameters<typeof WorkspaceScreen>[0]['tasks']
+
+const storyTeamProjectMembers = [
+  {
+    member: {
+      email: 'demo@example.com',
+      id: 'demo@example.com',
+      name: 'Demo User',
+      role: 'manager',
+      updatedAt: '2026-06-08T00:00:00.000Z',
+    },
+    projectId: 'refero',
+    projectName: 'Refero',
+  },
+  {
+    member: {
+      email: 'sato@example.com',
+      id: 'sato@example.com',
+      name: '佐藤 花子',
+      role: 'member',
+      updatedAt: '2026-06-08T00:00:00.000Z',
+    },
+    projectId: 'refero',
+    projectName: 'Refero',
+  },
+  {
+    member: {
+      email: 'suzuki@example.com',
+      id: 'suzuki@example.com',
+      name: '鈴木 大輔',
+      role: 'viewer',
+      updatedAt: '2026-06-08T00:00:00.000Z',
+    },
+    projectId: 'refero',
+    projectName: 'Refero',
+  },
+  {
+    member: {
+      email: 'demo@example.com',
+      id: 'demo@example.com',
+      name: 'Demo User',
+      role: 'manager',
+      updatedAt: '2026-06-08T00:00:00.000Z',
+    },
+    projectId: 'product-roadmap',
+    projectName: 'プロダクトロードマップ',
+  },
+  {
+    member: {
+      email: 'yamada@example.com',
+      id: 'yamada@example.com',
+      name: '山田 太郎',
+      role: 'viewer',
+      updatedAt: '2026-06-08T00:00:00.000Z',
+    },
+    projectId: 'product-roadmap',
+    projectName: 'プロダクトロードマップ',
+  },
+  {
+    member: {
+      email: 'suzuki@example.com',
+      id: 'suzuki@example.com',
+      name: '鈴木 大輔',
+      role: 'member',
+      updatedAt: '2026-06-08T00:00:00.000Z',
+    },
+    projectId: 'shared-launch',
+    projectName: '共通ローンチ',
+  },
+] satisfies NonNullable<Parameters<typeof WorkspaceScreen>[0]['teamProjectMembers']>
+
 const defaultArgs = {
   activeTeamId: 'core-team',
   fontSizePreference: 'standard',
   locale: 'ja',
   summary: storySummary,
-  tasks: referoTaskFixtures,
+  tasks: storyWorkspaceTasks,
+  teamProjectMembers: storyTeamProjectMembers,
   teams: projectDirectoryFixtures,
   onCreateProject: async () => undefined,
   onCreateTeam: async () => undefined,
   onFontSizePreferenceChange: () => undefined,
   onOpenTask: () => undefined,
+  userIdentityAliases: ['demo@example.com'],
   userInitial: 'D',
   userLabel: 'demo@example.com',
   view: 'home',
@@ -126,6 +232,19 @@ export const Inbox: Story = {
 }
 
 /**
+ * 対応条件に該当する未完了タスクがない受信箱です。
+ */
+export const InboxWithoutAttentionItems: Story = {
+  args: {
+    tasks: storyWorkspaceTasks.map((task) => ({
+      ...task,
+      status: 'done' as const,
+    })),
+    view: 'inbox',
+  },
+}
+
+/**
  * ポートフォリオダッシュボード画面です。
  */
 export const Dashboard: Story = {
@@ -139,6 +258,16 @@ export const Dashboard: Story = {
  */
 export const Reports: Story = {
   args: {
+    view: 'reports',
+  },
+}
+
+/**
+ * タスクがまだ登録されていないポートフォリオのレポート画面です。
+ */
+export const ReportsWithoutTasks: Story = {
+  args: {
+    tasks: [],
     view: 'reports',
   },
 }
@@ -171,6 +300,29 @@ export const TeamMembers: Story = {
 }
 
 /**
+ * メンバーはいるが担当タスクがまだない状態です。
+ */
+export const TeamMembersWithoutAssignments: Story = {
+  args: {
+    tasks: [],
+    view: 'team-members',
+  },
+}
+
+/**
+ * 一部プロジェクトのメンバー権限取得に失敗した状態です。
+ */
+export const TeamMembersPartialFailure: Story = {
+  args: {
+    teamProjectMembers: storyTeamProjectMembers.filter(
+      (access) => access.projectId !== 'product-roadmap',
+    ),
+    teamProjectMembersFailedProjectIds: ['product-roadmap'],
+    view: 'team-members',
+  },
+}
+
+/**
  * 認証と API 確認中の loading 表示です。
  */
 export const Loading: Story = {
@@ -185,5 +337,15 @@ export const Loading: Story = {
 export const English: Story = {
   args: {
     locale: 'en',
+  },
+}
+
+/**
+ * 英語 locale のチームメンバー画面です。
+ */
+export const EnglishTeamMembers: Story = {
+  args: {
+    locale: 'en',
+    view: 'team-members',
   },
 }
