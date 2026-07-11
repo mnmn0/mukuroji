@@ -3,7 +3,8 @@
   "scripts": {
     "dev": "bun run --hot src/index.ts",
     "build:lambda": "bun build src/index.ts --target node --format esm --outfile dist/lambda/index.mjs",
-    "test": "bun test src/index.test.ts"
+    "test": "bun test src/index.test.ts src/audit.test.ts src/audit-integration.test.ts",
+    "audit:backfill": "bun run scripts/backfill-audit-events.ts"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1057.0",

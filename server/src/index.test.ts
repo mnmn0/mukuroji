@@ -2154,7 +2154,16 @@ test('DynamoDB directory client manages project member roles', async () => {
             directoryId: 'user#demo@example.com',
             entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
           },
-          ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
+          ConditionExpression:
+            'attribute_exists(directoryId) AND attribute_exists(entryKey) AND #updatedAt = :expectedUpdatedAt AND #role = :expectedRole',
+          ExpressionAttributeNames: {
+            '#updatedAt': 'updatedAt',
+            '#role': 'role',
+          },
+          ExpressionAttributeValues: {
+            ':expectedUpdatedAt': '2026-06-08T00:00:00.000Z',
+            ':expectedRole': 'manager',
+          },
         },
       },
     ],

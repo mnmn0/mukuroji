@@ -1,4 +1,5 @@
 import type { MessageKey } from '../i18n'
+import { createMutationHeaders, type MutationRequestContext } from '../api/mutationHeaders'
 
 /**
  * タスクの進捗状態を表す API code です。
@@ -203,6 +204,7 @@ export async function createProjectTask(
   projectId: string,
   accessToken: string,
   input: CreateProjectTaskInput,
+  mutationContext?: MutationRequestContext,
 ) {
   const response = await fetch(
     `${tasksApiBaseUrl}/projects/${encodeURIComponent(projectId)}/tasks`,
@@ -211,6 +213,7 @@ export async function createProjectTask(
       headers: {
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
+        ...createMutationHeaders(mutationContext),
       },
       body: JSON.stringify(input),
     },
@@ -247,6 +250,7 @@ export async function updateProjectTaskStatus(
   taskId: string,
   accessToken: string,
   status: TaskStatus,
+  mutationContext?: MutationRequestContext,
 ) {
   const response = await fetch(
     `${tasksApiBaseUrl}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`,
@@ -255,6 +259,7 @@ export async function updateProjectTaskStatus(
       headers: {
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
+        ...createMutationHeaders(mutationContext),
       },
       body: JSON.stringify({ status }),
     },

@@ -1,5 +1,6 @@
 import type { MessageKey } from '../i18n'
 import type { TaskPriority, TaskStatus } from '../tasks/api'
+import { createMutationHeaders, type MutationRequestContext } from '../api/mutationHeaders'
 
 /**
  * チーム所有 Issue の活動種別です。
@@ -332,6 +333,7 @@ export async function createTeamIssue(
   teamId: string,
   accessToken: string,
   input: CreateTeamIssueInput,
+  mutationContext?: MutationRequestContext,
 ) {
   const response = await requestJson<CreateTeamIssueResponse>(
     `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues`,
@@ -340,6 +342,7 @@ export async function createTeamIssue(
       body: JSON.stringify(input),
       headers: {
         'Content-Type': 'application/json',
+        ...createMutationHeaders(mutationContext),
       },
       method: 'POST',
     },
@@ -356,6 +359,7 @@ export async function updateTeamIssue(
   issueId: string,
   accessToken: string,
   input: UpdateTeamIssueInput,
+  mutationContext?: MutationRequestContext,
 ) {
   const response = await requestJson<UpdateTeamIssueResponse>(
     `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`,
@@ -364,6 +368,7 @@ export async function updateTeamIssue(
       body: JSON.stringify(input),
       headers: {
         'Content-Type': 'application/json',
+        ...createMutationHeaders(mutationContext),
       },
       method: 'PATCH',
     },
@@ -380,6 +385,7 @@ export async function createTeamIssueComment(
   issueId: string,
   accessToken: string,
   body: string,
+  mutationContext?: MutationRequestContext,
 ) {
   return requestJson<CreateTeamIssueCommentResponse>(
     `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}/comments`,
@@ -388,6 +394,7 @@ export async function createTeamIssueComment(
       body: JSON.stringify({ body }),
       headers: {
         'Content-Type': 'application/json',
+        ...createMutationHeaders(mutationContext),
       },
       method: 'POST',
     },

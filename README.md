@@ -108,12 +108,30 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_PROJECT_DIRECTORY_TABLE`: サイドバー用チーム/プロジェクト階層を保存する DynamoDB table 名。未指定時は `mukuroji-project-directory-local`
 - `MUKUROJI_TEAM_ISSUES_TABLE`: チーム所有 Issue を保存する DynamoDB table 名。未指定時は `mukuroji-team-issues-local`
 - `MUKUROJI_TEAM_ISSUE_EVENTS_TABLE`: チーム Issue のコメント/活動履歴を保存する DynamoDB table 名。未指定時は `mukuroji-team-issue-events-local`
+- `MUKUROJI_AUDIT_EVENTS_TABLE` / `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
+- `MUKUROJI_AUDIT_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS`: audit event の保持日数。未指定時は 2555 日（7年）
 - `MUKUROJI_PROJECT_DIRECTORY_ID`: ready hook が seed する directory partition。未指定時は `user#<COGNITO_TEST_USERNAME の小文字>`。プロジェクト権限付与候補 user は Cognito の `custom:directory_id` / `custom:workspace_id` がこの値に一致する user に限定されます。
 
 API サーバーは `/api/dashboard/summary`, `/api/teams/projects`,
 `/api/teams/{teamId}/issues`, `/api/projects/{projectId}/issues`,
-`/api/projects/{projectId}/tasks` で DynamoDB を読みます。ローカルでは Vite proxy により、
+`/api/projects/{projectId}/tasks`, `/api/audit/events` で DynamoDB を読みます。ローカルでは Vite proxy により、
 Web から `/api` を呼ぶだけで Floci 上の DynamoDB データを取得できます。
+
+append-only event schema、activity/audit API、retention/redaction、consumer dedupe、backfill の契約は
+[`docs/event-audit.md`](docs/event-audit.md) を参照してください。
+
+Web から mutation を retry する場合は、`createMutationRequestContext()` を logical mutation の開始時に
+1回だけ呼び、初回 request と retry の optional context 引数へ同じ object を渡してください。context を
+省略した既存 call は request ごとに新しい key を自動生成します。
+
+ローカル backfill は次の command で実行できます。本実行時は共通 bootstrap が未作成の
+`mukuroji-audit-events` table を本番互換 schema で作成します。
+
+```sh
+AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- --dry-run --limit 100
+AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
+  --checkpoint /tmp/mukuroji-audit-backfill.json
+```
 
 CDK stack も同じタスクデータと demo user 用の `user#demo@example.com` チーム/プロジェクト階層を DynamoDB に seed し、Lambda Function URL 経由で取得できます。AWS 環境で確認する場合は以下の順に実行し、出力された `ProjectTasksApiUrl` を Web の環境変数へ渡してください。
 

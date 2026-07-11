@@ -221,6 +221,12 @@ export class CdkStack extends cdk.Stack {
       default: 'mukuroji-system-admins',
       description: 'Comma-separated Cognito group names that grant system administrator privileges.',
     });
+    const auditRetentionDays = new cdk.CfnParameter(this, 'AuditRetentionDays', {
+      type: 'Number',
+      default: 2555,
+      minValue: 1,
+      description: 'Number of days immutable audit events are retained before DynamoDB TTL expiry.',
+    });
     const cognitoUserPoolId = new cdk.CfnParameter(this, 'CognitoUserPoolId', {
       type: 'String',
       description: 'Cognito user pool ID trusted by the project tasks Lambda API.',
@@ -280,12 +286,65 @@ export class CdkStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    const auditEventsTable = new dynamodb.Table(this, 'AuditEventsTable', {
+      partitionKey: { name: 'directoryId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'eventId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      stream: dynamodb.StreamViewType.NEW_IMAGE,
+      timeToLiveAttribute: 'expiresAt',
+    });
+
+    auditEventsTable.addGlobalSecondaryIndex({
+      indexName: 'WorkspaceOccurredAtIndex',
+      partitionKey: { name: 'workspaceKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'workspaceEventKey', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    auditEventsTable.addGlobalSecondaryIndex({
+      indexName: 'EntityOccurredAtIndex',
+      partitionKey: { name: 'entityKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'entityEventKey', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    auditEventsTable.addGlobalSecondaryIndex({
+      indexName: 'ActorOccurredAtIndex',
+      partitionKey: { name: 'actorKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'actorEventKey', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    auditEventsTable.addGlobalSecondaryIndex({
+      indexName: 'TargetOccurredAtIndex',
+      partitionKey: { name: 'targetKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'targetEventKey', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    const processedAuditEventsTable = new dynamodb.Table(this, 'ProcessedAuditEventsTable', {
+      partitionKey: { name: 'consumerName', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'eventId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      timeToLiveAttribute: 'expiresAt',
+    });
+
     const listTasksFunction = new lambda.Function(this, 'ListProjectTasksFunction', {
       runtime: lambda.Runtime.NODEJS_22_X,
       handler: 'index.handler',
       timeout: cdk.Duration.seconds(10),
       environment: {
         ALLOWED_ORIGINS: taskApiAllowedOrigins.valueAsString,
+        AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
+        AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
@@ -296,6 +355,7 @@ export class CdkStack extends cdk.Stack {
       code: lambda.Code.fromInline(`
 	const { CognitoIdentityProviderClient, AdminGetUserCommand, GetUserCommand, ListUsersCommand } = require('@aws-sdk/client-cognito-identity-provider');
 const { DynamoDBClient, DeleteItemCommand, PutItemCommand, QueryCommand, TransactWriteItemsCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
+const { createHash } = require('node:crypto');
 
 const cognito = new CognitoIdentityProviderClient({});
 const dynamodb = new DynamoDBClient({});
@@ -338,13 +398,61 @@ exports.handler = async (event) => {
     return json(403, { message: 'Project access is denied.' }, headers);
   }
 
+  let mutationContext;
+
+  try {
+    mutationContext = createMutationContext(event, principal, directoryId);
+  } catch (error) {
+    return toProjectDataError(error, headers, 'Mutation request is invalid.');
+  }
+
+  if (isWorkspaceAuditRequest(event)) {
+    if (!principal.isSystemAdmin) {
+      return json(403, { message: 'Project access is denied.' }, headers);
+    }
+
+    try {
+      return await listWorkspaceAuditEvents(event, headers, directoryId);
+    } catch (error) {
+      return toProjectDataError(error, headers, 'Failed to load audit events.');
+    }
+  }
+
+  const teamIssueActivityParams = readTeamIssueActivityParams(event);
+
+  if (teamIssueActivityParams) {
+    const permissionError = await enforceTeamPermission(
+      headers,
+      principal,
+      teamIssueActivityParams.teamId,
+      'viewer',
+    );
+
+    if (permissionError) {
+      return permissionError;
+    }
+
+    try {
+      return await listTeamIssueActivity(
+        event,
+        headers,
+        directoryId,
+        teamIssueActivityParams.teamId,
+        teamIssueActivityParams.issueId,
+        principal,
+      );
+    } catch (error) {
+      return toProjectDataError(error, headers, 'Failed to load issue activity.');
+    }
+  }
+
   if (isCreateTeamRequest(event)) {
     if (!principal.isSystemAdmin) {
       return json(403, { message: 'Project access is denied.' }, headers);
     }
 
     try {
-      return await createTeam(event, headers, directoryId);
+      return await createTeam(event, headers, directoryId, mutationContext);
     } catch (error) {
       return toProjectDataError(error, headers, 'Failed to create team.');
     }
@@ -354,7 +462,7 @@ exports.handler = async (event) => {
 
   if (createProjectTeamId) {
     try {
-      return await createProject(event, headers, directoryId, createProjectTeamId, principal.userKey);
+      return await createProject(event, headers, directoryId, createProjectTeamId, principal.userKey, mutationContext);
     } catch (error) {
       return toProjectDataError(error, headers, 'Failed to create project.');
     }
@@ -368,7 +476,7 @@ exports.handler = async (event) => {
     }
 
     try {
-      return await archiveTeam(headers, directoryId, archiveTeamId);
+      return await archiveTeam(headers, directoryId, archiveTeamId, mutationContext);
     } catch (error) {
       return toProjectDataError(error, headers, 'Failed to archive team.');
     }
@@ -394,6 +502,7 @@ exports.handler = async (event) => {
         directoryId,
         archiveProjectParams.teamId,
         archiveProjectParams.projectId,
+        mutationContext,
       );
     } catch (error) {
       return toProjectDataError(error, headers, 'Failed to archive project.');
@@ -458,14 +567,14 @@ exports.handler = async (event) => {
 
 	    if (event.requestContext?.http?.method === 'PATCH') {
 	      try {
-	        return await updateProjectMember(event, headers, directoryId, projectMemberParams.projectId, projectMemberParams.memberKey, principal.userPoolId);
+	        return await updateProjectMember(event, headers, directoryId, projectMemberParams.projectId, projectMemberParams.memberKey, principal.userPoolId, mutationContext);
 	      } catch (error) {
 	        return toProjectDataError(error, headers, 'Failed to update project member.');
 	      }
 	    }
 
 	    try {
-	      return await removeProjectMember(headers, directoryId, projectMemberParams.projectId, projectMemberParams.memberKey);
+	      return await removeProjectMember(headers, directoryId, projectMemberParams.projectId, projectMemberParams.memberKey, mutationContext);
 	    } catch (error) {
 	      return toProjectDataError(error, headers, 'Failed to remove project member.');
 	    }
@@ -495,6 +604,7 @@ exports.handler = async (event) => {
         principal.userKey,
         principal.userPoolId,
         principal,
+        mutationContext,
       );
     } catch (error) {
       return toProjectDataError(error, headers, 'Failed to create issue comment.');
@@ -526,6 +636,7 @@ exports.handler = async (event) => {
           principal.userKey,
           principal.userPoolId,
           principal,
+          mutationContext,
         );
       }
 
@@ -536,6 +647,7 @@ exports.handler = async (event) => {
         teamIssueDetailParams.issueId,
         principal.userPoolId,
         principal,
+        mutationContext,
       );
     } catch (error) {
       return toProjectDataError(error, headers, 'Failed to load issue detail.');
@@ -566,6 +678,7 @@ exports.handler = async (event) => {
         principal.userKey,
         principal.userPoolId,
         principal,
+        mutationContext,
       );
       }
 
@@ -629,7 +742,7 @@ exports.handler = async (event) => {
     }
 
 	    if (event.requestContext?.http?.method === 'POST') {
-	      return await createProjectTask(event, headers, directoryId, decodedProjectId, principal.userPoolId);
+	      return await createProjectTask(event, headers, directoryId, decodedProjectId, principal.userPoolId, mutationContext);
 	    }
 
     if (taskStatusParams) {
@@ -640,6 +753,7 @@ exports.handler = async (event) => {
 	        decodedProjectId,
 	        taskStatusParams.taskId,
 	        principal.userPoolId,
+	        mutationContext,
 	      );
     }
 
@@ -666,7 +780,7 @@ exports.handler = async (event) => {
   }
 };
 
-async function createTeam(event, headers, directoryId) {
+async function createTeam(event, headers, directoryId, mutationContext) {
   const body = readJsonBody(event);
   const names = readLocalizedNames(body);
 
@@ -695,10 +809,29 @@ async function createTeam(event, headers, directoryId) {
     expanded: { BOOL: true },
   };
 
-  await dynamodb.send(new PutItemCommand({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    Item: item,
-    ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+  await dynamodb.send(new TransactWriteItemsCommand({
+    TransactItems: [
+      {
+        Put: {
+          TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+        },
+      },
+      createAuditEventPut(directoryId, mutationContext, {
+        eventType: 'project.created',
+        entityType: 'project',
+        entityId: 'team/' + teamId,
+        action: 'created',
+        changes: createAuditChanges(undefined, {
+          kind: 'team',
+          teamId,
+          name: names.nameJa,
+          expanded: true,
+        }),
+        metadata: { kind: 'team', teamId },
+      }),
+    ].filter(Boolean),
   }));
 
   return json(201, {
@@ -711,7 +844,7 @@ async function createTeam(event, headers, directoryId) {
   }, headers);
 }
 
-async function createProject(event, headers, directoryId, teamId, creatorUserKey) {
+async function createProject(event, headers, directoryId, teamId, creatorUserKey, mutationContext) {
   const body = readJsonBody(event);
   const names = readLocalizedNames(body);
 
@@ -792,7 +925,23 @@ async function createProject(event, headers, directoryId, teamId, creatorUserKey
             ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
           },
         },
-      ],
+        createAuditEventPut(directoryId, mutationContext, {
+          eventType: 'project.created',
+          entityType: 'project',
+          entityId: projectId,
+          action: 'created',
+          occurredAt: updatedAt,
+          changes: createAuditChanges(undefined, {
+            projectId,
+            teamId,
+            name: names.nameJa,
+            tone,
+            creatorMemberKey,
+            creatorRole: 'manager',
+          }),
+          metadata: { kind: 'project', projectId, teamId },
+        }),
+      ].filter(Boolean),
     }));
   } catch (error) {
     if (error?.name === 'TransactionCanceledException') {
@@ -811,7 +960,7 @@ async function createProject(event, headers, directoryId, teamId, creatorUserKey
   }, headers);
 }
 
-async function archiveTeam(headers, directoryId, teamId) {
+async function archiveTeam(headers, directoryId, teamId, mutationContext) {
   const items = await queryAll({
     TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
     KeyConditionExpression: 'directoryId = :directoryId',
@@ -828,23 +977,38 @@ async function archiveTeam(headers, directoryId, teamId) {
 
   const archivedAt = new Date().toISOString();
 
-  await dynamodb.send(new UpdateItemCommand({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    Key: {
-      directoryId: { S: directoryId },
-      entryKey: { S: team.entryKey.S },
-    },
-    UpdateExpression: 'SET archivedAt = :archivedAt',
-    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-    ExpressionAttributeValues: {
-      ':archivedAt': { S: archivedAt },
-    },
+  await dynamodb.send(new TransactWriteItemsCommand({
+    TransactItems: [
+      {
+        Update: {
+          TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+          Key: {
+            directoryId: { S: directoryId },
+            entryKey: { S: team.entryKey.S },
+          },
+          UpdateExpression: 'SET archivedAt = :archivedAt',
+          ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+          ExpressionAttributeValues: {
+            ':archivedAt': { S: archivedAt },
+          },
+        },
+      },
+      createAuditEventPut(directoryId, mutationContext, {
+        eventType: 'project.archived',
+        entityType: 'project',
+        entityId: 'team/' + teamId,
+        action: 'archived',
+        occurredAt: archivedAt,
+        changes: createAuditChanges({ archivedAt: undefined }, { archivedAt }),
+        metadata: { kind: 'team', teamId },
+      }),
+    ].filter(Boolean),
   }));
 
   return json(200, { teamId, archivedAt }, headers);
 }
 
-async function archiveProject(headers, directoryId, teamId, projectId) {
+async function archiveProject(headers, directoryId, teamId, projectId, mutationContext) {
   const items = await queryAll({
     TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
     KeyConditionExpression: 'directoryId = :directoryId',
@@ -872,17 +1036,32 @@ async function archiveProject(headers, directoryId, teamId, projectId) {
 
   const archivedAt = new Date().toISOString();
 
-  await dynamodb.send(new UpdateItemCommand({
-    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-    Key: {
-      directoryId: { S: directoryId },
-      entryKey: { S: project.entryKey.S },
-    },
-    UpdateExpression: 'SET archivedAt = :archivedAt',
-    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-    ExpressionAttributeValues: {
-      ':archivedAt': { S: archivedAt },
-    },
+  await dynamodb.send(new TransactWriteItemsCommand({
+    TransactItems: [
+      {
+        Update: {
+          TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+          Key: {
+            directoryId: { S: directoryId },
+            entryKey: { S: project.entryKey.S },
+          },
+          UpdateExpression: 'SET archivedAt = :archivedAt',
+          ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+          ExpressionAttributeValues: {
+            ':archivedAt': { S: archivedAt },
+          },
+        },
+      },
+      createAuditEventPut(directoryId, mutationContext, {
+        eventType: 'project.archived',
+        entityType: 'project',
+        entityId: projectId,
+        action: 'archived',
+        occurredAt: archivedAt,
+        changes: createAuditChanges({ archivedAt: undefined }, { archivedAt }),
+        metadata: { kind: 'project', projectId, teamId },
+      }),
+    ].filter(Boolean),
   }));
 
 	  return json(200, { teamId, projectId, archivedAt }, headers);
@@ -937,7 +1116,7 @@ async function archiveProject(headers, directoryId, teamId, projectId) {
 	  return json(200, { projectId, members: await hydrateProjectMembers(members, userPoolId) }, headers);
 	}
 
-async function updateProjectMember(event, headers, directoryId, projectId, memberKey, userPoolId) {
+async function updateProjectMember(event, headers, directoryId, projectId, memberKey, userPoolId, mutationContext) {
   const body = readJsonBody(event);
   const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
 
@@ -986,6 +1165,32 @@ async function updateProjectMember(event, headers, directoryId, projectId, membe
     updatedAt: { S: updatedAt },
     ...(profile.name ? { name: { S: profile.name } } : {}),
   };
+  const auditEventPut = createAuditEventPut(directoryId, mutationContext, {
+    eventType: existingMember ? 'member.updated' : 'member.added',
+    entityType: 'member',
+    entityId: projectId + '/' + normalizedMemberKey,
+    action: existingMember ? 'updated' : 'created',
+    occurredAt: updatedAt,
+    changes: createAuditChanges(
+      existingMember ? fromDynamoItem(existingMember) : undefined,
+      fromDynamoItem(item),
+      ['email', 'name', 'role'],
+    ),
+    metadata: { projectId, memberKey: normalizedMemberKey },
+  });
+  const memberPut = {
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    Item: item,
+    ConditionExpression: existingMember
+      ? '#updatedAt = :expectedUpdatedAt'
+      : 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+    ...(existingMember
+      ? {
+          ExpressionAttributeNames: { '#updatedAt': 'updatedAt' },
+          ExpressionAttributeValues: { ':expectedUpdatedAt': existingMember.updatedAt },
+        }
+      : {}),
+  };
 
   if (guardManager) {
     try {
@@ -995,12 +1200,10 @@ async function updateProjectMember(event, headers, directoryId, projectId, membe
             ConditionCheck: createProjectManagerConditionCheck(directoryId, guardManager.entryKey.S),
           },
           {
-            Put: {
-              TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-              Item: item,
-            },
+            Put: memberPut,
           },
-        ],
+          auditEventPut,
+        ].filter(Boolean),
       }));
     } catch (error) {
       if (error?.name === 'TransactionCanceledException') {
@@ -1016,16 +1219,20 @@ async function updateProjectMember(event, headers, directoryId, projectId, membe
       throw error;
     }
   } else {
-    await dynamodb.send(new PutItemCommand({
-      TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-      Item: item,
+    await dynamodb.send(new TransactWriteItemsCommand({
+      TransactItems: [
+        {
+          Put: memberPut,
+        },
+        auditEventPut,
+      ].filter(Boolean),
     }));
   }
 
   return json(200, { member: await hydrateProjectMember(toProjectMember(item), userPoolId) }, headers);
 }
 
-async function removeProjectMember(headers, directoryId, projectId, memberKey) {
+async function removeProjectMember(headers, directoryId, projectId, memberKey, mutationContext) {
   const normalizedMemberKey = normalizeProjectMemberKey(memberKey);
 
   if (!normalizedMemberKey) {
@@ -1058,6 +1265,36 @@ async function removeProjectMember(headers, directoryId, projectId, memberKey) {
   const guardManager = member.role?.S === 'manager'
     ? findOtherProjectManager(items, projectId, normalizedMemberKey)
     : undefined;
+  const removedAt = new Date().toISOString();
+  const auditEventPut = createAuditEventPut(directoryId, mutationContext, {
+    eventType: 'member.removed',
+    entityType: 'member',
+    entityId: projectId + '/' + normalizedMemberKey,
+    action: 'deleted',
+    occurredAt: removedAt,
+    changes: createAuditChanges(
+      fromDynamoItem(member),
+      undefined,
+      ['email', 'name', 'role'],
+    ),
+    metadata: { projectId, memberKey: normalizedMemberKey },
+  });
+  const memberDelete = {
+    TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
+    Key: {
+      directoryId: { S: directoryId },
+      entryKey: { S: member.entryKey.S },
+    },
+    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND #updatedAt = :expectedUpdatedAt AND #role = :expectedRole',
+    ExpressionAttributeNames: {
+      '#updatedAt': 'updatedAt',
+      '#role': 'role',
+    },
+    ExpressionAttributeValues: {
+      ':expectedUpdatedAt': member.updatedAt,
+      ':expectedRole': member.role,
+    },
+  };
 
   if (guardManager) {
     try {
@@ -1067,16 +1304,10 @@ async function removeProjectMember(headers, directoryId, projectId, memberKey) {
             ConditionCheck: createProjectManagerConditionCheck(directoryId, guardManager.entryKey.S),
           },
           {
-            Delete: {
-              TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-              Key: {
-                directoryId: { S: directoryId },
-                entryKey: { S: member.entryKey.S },
-              },
-              ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
-            },
+            Delete: memberDelete,
           },
-        ],
+          auditEventPut,
+        ].filter(Boolean),
       }));
     } catch (error) {
       if (error?.name === 'TransactionCanceledException') {
@@ -1092,13 +1323,13 @@ async function removeProjectMember(headers, directoryId, projectId, memberKey) {
       throw error;
     }
   } else {
-    await dynamodb.send(new DeleteItemCommand({
-      TableName: process.env.PROJECT_DIRECTORY_TABLE_NAME,
-      Key: {
-        directoryId: { S: directoryId },
-        entryKey: { S: member.entryKey.S },
-      },
-      ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
+    await dynamodb.send(new TransactWriteItemsCommand({
+      TransactItems: [
+        {
+          Delete: memberDelete,
+        },
+        auditEventPut,
+      ].filter(Boolean),
     }));
   }
 
@@ -1211,7 +1442,7 @@ function createActiveTeamConditionCheck(directoryId, entryKey) {
 	  };
 	}
 
-		async function createProjectTask(event, headers, directoryId, projectId, userPoolId) {
+		async function createProjectTask(event, headers, directoryId, projectId, userPoolId, mutationContext) {
 	  const body = readJsonBody(event);
 	  const assigneeUserId = normalizeProjectMemberKey(body.assigneeUserId ?? body.assignee);
 
@@ -1256,10 +1487,30 @@ function createActiveTeamConditionCheck(directoryId, entryKey) {
     priority: { S: body.priority },
   };
 
-  await dynamodb.send(new PutItemCommand({
-    TableName: process.env.TASKS_TABLE_NAME,
-    Item: item,
-    ConditionExpression: 'attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)',
+  await dynamodb.send(new TransactWriteItemsCommand({
+    TransactItems: [
+      {
+        Put: {
+          TableName: process.env.TASKS_TABLE_NAME,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)',
+        },
+      },
+      createAuditEventPut(directoryId, mutationContext, {
+        eventType: 'work-item.created',
+        entityType: 'work-item',
+        entityId: createProjectTaskAuditEntityId(projectId, taskId),
+        action: 'created',
+        changes: createAuditChanges(undefined, fromDynamoItem(item), [
+          'title',
+          'assigneeUserId',
+          'status',
+          'dueDate',
+          'priority',
+        ]),
+        metadata: { adapter: 'legacy-project-task', projectId },
+      }),
+    ].filter(Boolean),
   }));
 
 	  return json(201, {
@@ -1267,7 +1518,7 @@ function createActiveTeamConditionCheck(directoryId, entryKey) {
 	  }, headers);
 	}
 
-	async function updateProjectTaskStatus(event, headers, directoryId, projectId, taskId, userPoolId) {
+	async function updateProjectTaskStatus(event, headers, directoryId, projectId, taskId, userPoolId, mutationContext) {
   const body = readJsonBody(event);
 
   if (!isTaskStatus(body.status)) {
@@ -1279,35 +1530,71 @@ function createActiveTeamConditionCheck(directoryId, entryKey) {
   }
 
   const directoryProjectId = createDirectoryProjectId(directoryId, projectId);
-  let response;
+  const currentItems = await queryAll({
+    TableName: process.env.TASKS_TABLE_NAME,
+    KeyConditionExpression: 'directoryProjectId = :directoryProjectId AND taskId = :taskId',
+    ExpressionAttributeValues: {
+      ':directoryProjectId': { S: directoryProjectId },
+      ':taskId': { S: taskId },
+    },
+    ConsistentRead: true,
+    Limit: 1,
+  });
+  const currentItem = currentItems[0];
+
+  if (!currentItem) {
+    return json(404, { message: 'Task was not found.' }, headers);
+  }
+  const updatedItem = {
+    ...currentItem,
+    status: { S: body.status },
+  };
 
   try {
-    response = await dynamodb.send(new UpdateItemCommand({
-      TableName: process.env.TASKS_TABLE_NAME,
-      Key: {
-        directoryProjectId: { S: directoryProjectId },
-        taskId: { S: taskId },
-      },
-      UpdateExpression: 'SET #status = :status',
-      ExpressionAttributeNames: {
-        '#status': 'status',
-      },
-      ExpressionAttributeValues: {
-        ':status': { S: body.status },
-      },
-      ConditionExpression: 'attribute_exists(directoryProjectId) AND attribute_exists(taskId)',
-      ReturnValues: 'ALL_NEW',
+    await dynamodb.send(new TransactWriteItemsCommand({
+      TransactItems: [
+        {
+          Update: {
+            TableName: process.env.TASKS_TABLE_NAME,
+            Key: {
+              directoryProjectId: { S: directoryProjectId },
+              taskId: { S: taskId },
+            },
+            UpdateExpression: 'SET #status = :status',
+            ExpressionAttributeNames: {
+              '#status': 'status',
+            },
+            ExpressionAttributeValues: {
+              ':status': { S: body.status },
+              ':beforeStatus': currentItem.status,
+            },
+            ConditionExpression: 'attribute_exists(directoryProjectId) AND attribute_exists(taskId) AND #status = :beforeStatus',
+          },
+        },
+        createAuditEventPut(directoryId, mutationContext, {
+          eventType: 'work-item.updated',
+          entityType: 'work-item',
+          entityId: createProjectTaskAuditEntityId(projectId, taskId),
+          action: 'updated',
+          changes: createAuditChanges(
+            fromDynamoItem(currentItem),
+            fromDynamoItem(updatedItem),
+            ['status'],
+          ),
+          metadata: { adapter: 'legacy-project-task', projectId },
+        }),
+      ].filter(Boolean),
     }));
   } catch (error) {
-    if (error?.name === 'ConditionalCheckFailedException') {
-      return json(404, { message: 'Task was not found.' }, headers);
+    if (error?.name === 'ConditionalCheckFailedException' || error?.name === 'TransactionCanceledException') {
+      return json(409, { message: 'Task was modified by another request.' }, headers);
     }
 
     throw error;
   }
 
 	  return json(200, {
-	    task: await hydrateProjectTask(toTask(response.Attributes), userPoolId),
+	    task: await hydrateProjectTask(toTask(updatedItem), userPoolId),
 	  }, headers);
 	}
 
@@ -1341,7 +1628,7 @@ async function listTeamIssues(headers, directoryId, teamId, userPoolId, principa
   }, headers);
 }
 
-async function createTeamIssue(event, headers, directoryId, teamId, actorUserId, userPoolId, principal) {
+async function createTeamIssue(event, headers, directoryId, teamId, actorUserId, userPoolId, principal, mutationContext) {
   const body = readJsonBody(event);
   const directoryItems = await readDirectoryItems(directoryId);
 
@@ -1428,7 +1715,24 @@ async function createTeamIssue(event, headers, directoryId, teamId, actorUserId,
           ConditionExpression: 'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
         },
       },
-    ],
+      createAuditEventPut(directoryId, mutationContext, {
+        eventType: 'work-item.created',
+        entityType: 'work-item',
+        entityId: createTeamIssueAuditEntityId(teamId, issueId),
+        action: 'created',
+        occurredAt: now,
+        changes: createAuditChanges(undefined, fromDynamoItem(item), [
+          'title',
+          'description',
+          'assignedProjectId',
+          'assigneeUserId',
+          'status',
+          'dueDate',
+          'priority',
+        ]),
+        metadata: { adapter: 'team-issue', teamId, projectId: assignedProjectId },
+      }),
+    ].filter(Boolean),
   }));
 
   return json(201, {
@@ -1468,7 +1772,7 @@ async function getTeamIssueDetail(headers, directoryId, teamId, issueId, userPoo
   }, headers);
 }
 
-async function updateTeamIssue(event, headers, directoryId, teamId, issueId, actorUserId, userPoolId, principal) {
+async function updateTeamIssue(event, headers, directoryId, teamId, issueId, actorUserId, userPoolId, principal, mutationContext) {
   const body = readJsonBody(event);
   const directoryItems = await readDirectoryItems(directoryId);
 
@@ -1489,6 +1793,8 @@ async function updateTeamIssue(event, headers, directoryId, teamId, issueId, act
   if (!currentIssue) {
     return json(404, { message: 'Issue was not found.' }, headers);
   }
+
+  expressionAttributeValues[':beforeUpdatedAt'] = currentIssue.updatedAt;
 
   requireAssignedProjectPermission(directoryItems, principal, currentIssue.assignedProjectId?.S, 'member');
 
@@ -1558,6 +1864,18 @@ async function updateTeamIssue(event, headers, directoryId, teamId, issueId, act
     'SET ' + setExpressions.join(', '),
     removeExpressions.length > 0 ? 'REMOVE ' + removeExpressions.join(', ') : undefined,
   ].filter(Boolean).join(' ');
+  const beforeIssue = fromDynamoItem(currentIssue);
+  const afterIssue = { ...beforeIssue, updatedAt: expressionAttributeValues[':updatedAt'].S };
+
+  for (const [placeholder, field] of Object.entries(expressionAttributeNames)) {
+    const value = expressionAttributeValues[':' + field];
+
+    if (value) {
+      afterIssue[field] = fromDynamoValue(value);
+    } else if (removeExpressions.includes(placeholder)) {
+      delete afterIssue[field];
+    }
+  }
   const eventItem = createIssueEventItem({
     directoryId,
     teamId,
@@ -1581,7 +1899,7 @@ async function updateTeamIssue(event, headers, directoryId, teamId, issueId, act
             UpdateExpression: updateExpression,
             ExpressionAttributeNames: expressionAttributeNames,
             ExpressionAttributeValues: expressionAttributeValues,
-            ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
+            ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #updatedAt = :beforeUpdatedAt',
           },
         },
         {
@@ -1591,7 +1909,24 @@ async function updateTeamIssue(event, headers, directoryId, teamId, issueId, act
             ConditionExpression: 'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
           },
         },
-      ],
+        createAuditEventPut(directoryId, mutationContext, {
+          eventType: 'work-item.updated',
+          entityType: 'work-item',
+          entityId: createTeamIssueAuditEntityId(teamId, issueId),
+          action: 'updated',
+          occurredAt: expressionAttributeValues[':updatedAt'].S,
+          changes: createAuditChanges(beforeIssue, afterIssue, [
+            'title',
+            'description',
+            'assignedProjectId',
+            'assigneeUserId',
+            'status',
+            'dueDate',
+            'priority',
+          ]),
+          metadata: { adapter: 'team-issue', teamId, projectId: afterIssue.assignedProjectId },
+        }),
+      ].filter(Boolean),
     }));
   } catch (error) {
     if (
@@ -1611,7 +1946,7 @@ async function updateTeamIssue(event, headers, directoryId, teamId, issueId, act
   }, headers);
 }
 
-async function createTeamIssueComment(event, headers, directoryId, teamId, issueId, actorUserId, userPoolId, principal) {
+async function createTeamIssueComment(event, headers, directoryId, teamId, issueId, actorUserId, userPoolId, principal, mutationContext) {
   const body = readJsonBody(event);
   const issue = await getStoredTeamIssueItem(directoryId, teamId, issueId);
 
@@ -1627,16 +1962,49 @@ async function createTeamIssueComment(event, headers, directoryId, teamId, issue
   );
 
   const createdAt = new Date().toISOString();
-  const item = await putIssueEvent({
+  const commentBody = readRequiredCommentBody(body.body);
+  const item = createIssueEventItem({
     directoryId,
     teamId,
     issueId,
     eventType: 'commented',
     actorUserId,
-    body: readRequiredCommentBody(body.body),
+    body: commentBody,
     summary: 'Comment was added.',
     createdAt,
   });
+  await dynamodb.send(new TransactWriteItemsCommand({
+    TransactItems: [
+      {
+        ConditionCheck: {
+          TableName: process.env.TEAM_ISSUES_TABLE_NAME,
+          Key: {
+            directoryTeamId: { S: createDirectoryTeamId(directoryId, teamId) },
+            issueId: { S: issueId },
+          },
+          ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
+        },
+      },
+      {
+        Put: {
+          TableName: process.env.TEAM_ISSUE_EVENTS_TABLE_NAME,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+        },
+      },
+      createAuditEventPut(directoryId, mutationContext, {
+        eventType: 'comment.created',
+        entityType: 'work-item',
+        entityId: createTeamIssueAuditEntityId(teamId, issueId),
+        targetType: 'comment',
+        targetId: createTeamIssueCommentAuditTargetId(teamId, issueId, item.eventId.S),
+        action: 'commented',
+        occurredAt: createdAt,
+        changes: createAuditChanges(undefined, { body: commentBody }),
+        metadata: { adapter: 'team-issue', teamId, commentId: item.eventId.S },
+      }),
+    ].filter(Boolean),
+  }));
 
   return json(201, {
     comment: toTeamIssueComment(item),
@@ -1786,6 +2154,312 @@ async function readIssueEvents(directoryId, teamId, issueId) {
   });
 }
 
+async function listTeamIssueActivity(event, headers, directoryId, teamId, issueId, principal) {
+  const issue = await getStoredTeamIssueItem(directoryId, teamId, issueId);
+  const directoryItems = await readDirectoryItems(directoryId);
+  let entityId;
+
+  if (issue) {
+    requireAssignedProjectPermission(
+      directoryItems,
+      principal,
+      issue.assignedProjectId?.S,
+      'viewer',
+    );
+    entityId = createTeamIssueAuditEntityId(teamId, issueId);
+  } else {
+    const legacyIssue = (await readLegacyTeamIssues(directoryId, directoryItems, teamId, principal))
+      .find((candidate) => candidate.id === issueId);
+
+    if (!legacyIssue?.assignedProjectId) {
+      return json(404, { message: 'Issue was not found.' }, headers);
+    }
+
+    entityId = createProjectTaskAuditEntityId(legacyIssue.assignedProjectId, issueId);
+  }
+  const page = await queryAuditEventPage(directoryId, event, {
+    entityType: 'work-item',
+    entityId,
+  });
+
+  return json(200, page, headers);
+}
+
+async function listWorkspaceAuditEvents(event, headers, directoryId) {
+  const isExport = (event.rawPath ?? '').endsWith('/export');
+
+  if (!isExport) {
+    return json(200, await queryAuditEventPage(directoryId, event), headers);
+  }
+
+  const events = [];
+  let cursor;
+
+  do {
+    const page = await queryAuditEventPage(directoryId, event, {
+      cursor,
+      limit: Math.min(100, 1000 - events.length),
+    });
+    events.push(...page.events);
+    cursor = page.nextCursor;
+  } while (cursor && events.length < 1000);
+
+  return {
+    statusCode: 200,
+    headers: {
+      ...headers,
+      'content-disposition': 'attachment; filename="mukuroji-audit.ndjson"',
+      'content-type': 'application/x-ndjson; charset=utf-8',
+    },
+    body: events.map((item) => JSON.stringify(item)).join('\\n') + (events.length ? '\\n' : ''),
+  };
+}
+
+async function queryAuditEventPage(directoryId, event, overrides = {}) {
+  if (!process.env.AUDIT_EVENTS_TABLE_NAME) {
+    const error = new Error('Audit event table is not configured.');
+    error.name = 'ResourceNotFoundException';
+    throw error;
+  }
+
+  const query = event.queryStringParameters ?? {};
+  const targetType = overrides.entityType ?? query.targetType;
+  const targetId = overrides.entityId ?? query.targetId;
+  const actorUserId = (query.actorId ?? query.actorUserId)?.trim();
+  const eventType = query.eventType?.trim();
+
+  if ((targetType && !targetId) || (!targetType && targetId)) {
+    const error = new Error('Target type and target ID must be specified together.');
+    error.name = 'InvalidProjectWrite';
+    throw error;
+  }
+
+  const useEntityIndex = Boolean(overrides.entityType);
+  const useTargetIndex = Boolean(targetType && targetId && !useEntityIndex);
+  const useActorIndex = Boolean(actorUserId && !useEntityIndex && !useTargetIndex);
+  const indexName = useEntityIndex
+    ? 'EntityOccurredAtIndex'
+    : useTargetIndex
+      ? 'TargetOccurredAtIndex'
+      : useActorIndex
+        ? 'ActorOccurredAtIndex'
+        : 'WorkspaceOccurredAtIndex';
+  const partitionName = useEntityIndex
+    ? 'entityKey'
+    : useTargetIndex
+      ? 'targetKey'
+      : useActorIndex
+        ? 'actorKey'
+        : 'workspaceKey';
+  const sortName = useEntityIndex
+    ? 'entityEventKey'
+    : useTargetIndex
+      ? 'targetEventKey'
+      : useActorIndex
+        ? 'actorEventKey'
+        : 'workspaceEventKey';
+  const partitionValue = useEntityIndex
+    ? createGenericAuditEntityKey(directoryId, targetType, targetId)
+    : useTargetIndex
+      ? createGenericAuditEntityKey(directoryId, targetType, targetId)
+      : useActorIndex
+        ? directoryId + '#actor#' + actorUserId
+        : directoryId;
+  const from = readAuditDate(query.from, '0000-01-01T00:00:00.000Z');
+  const to = readAuditDate(query.to, '9999-12-31T23:59:59.999Z');
+
+  if (from > to) {
+    const error = new Error('Audit from must be before or equal to to.');
+    error.name = 'InvalidProjectWrite';
+    throw error;
+  }
+
+  const requestedLimit = overrides.limit ?? Number(query.limit ?? 50);
+
+  if (!Number.isFinite(requestedLimit)) {
+    const error = new Error('Audit limit is invalid.');
+    error.name = 'InvalidProjectWrite';
+    throw error;
+  }
+
+  const limit = clampAuditLimit(requestedLimit);
+  const cursor = overrides.cursor ?? query.cursor;
+  const scopeHash = hashAuditValue(canonicalAuditString({
+    actorUserId: actorUserId || undefined,
+    directoryId,
+    eventType: eventType || undefined,
+    from,
+    indexName,
+    partitionName,
+    partitionValue,
+    sortName,
+    targetId: targetId || undefined,
+    targetType: targetType || undefined,
+    to,
+  }));
+  const exclusiveStartKey = cursor
+    ? decodeAuditCursor(cursor, {
+        directoryId,
+        indexName,
+        partitionName,
+        partitionValue,
+        scopeHash,
+        sortName,
+      })
+    : undefined;
+
+  const filterParts = [];
+  const expressionAttributeNames = {};
+  const expressionAttributeValues = {
+    ':partition': { S: partitionValue },
+    ':from': { S: from + '#' },
+    ':to': { S: to + '#~' },
+  };
+
+  if (actorUserId && !useActorIndex) {
+    filterParts.push('#actorUserId = :actorUserId');
+    expressionAttributeNames['#actorUserId'] = 'actorUserId';
+    expressionAttributeValues[':actorUserId'] = { S: actorUserId };
+  }
+
+  if (eventType) {
+    filterParts.push('#eventType = :eventType');
+    expressionAttributeNames['#eventType'] = 'eventType';
+    expressionAttributeValues[':eventType'] = { S: eventType };
+  }
+
+  const response = await dynamodb.send(new QueryCommand({
+    TableName: process.env.AUDIT_EVENTS_TABLE_NAME,
+    IndexName: indexName,
+    KeyConditionExpression: '#partition = :partition AND #sort BETWEEN :from AND :to',
+    ExpressionAttributeNames: {
+      '#partition': partitionName,
+      '#sort': sortName,
+      ...expressionAttributeNames,
+    },
+    ExpressionAttributeValues: expressionAttributeValues,
+    ...(filterParts.length ? { FilterExpression: filterParts.join(' AND ') } : {}),
+    ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+    Limit: limit,
+    ScanIndexForward: false,
+  }));
+
+  return {
+    events: (response.Items ?? []).map(toAuditEventResponse),
+    ...(response.LastEvaluatedKey
+      ? { nextCursor: encodeAuditCursor(indexName, scopeHash, response.LastEvaluatedKey) }
+      : {}),
+  };
+}
+
+function toAuditEventResponse(item) {
+  const value = fromDynamoItem(item);
+  const publicMetadataFields = new Set([
+    'adapter',
+    'backfilled',
+    'commentId',
+    'diffUnavailable',
+    'kind',
+    'legacyEventId',
+    'legacyEventType',
+    'legacySource',
+    'memberKey',
+    'projectId',
+    'teamId',
+  ]);
+
+  if (value.metadata && typeof value.metadata === 'object' && !Array.isArray(value.metadata)) {
+    value.metadata = Object.fromEntries(
+      Object.entries(value.metadata).filter(([field]) => publicMetadataFields.has(field)),
+    );
+
+    if (Object.keys(value.metadata).length === 0) {
+      delete value.metadata;
+    }
+  } else {
+    delete value.metadata;
+  }
+
+  delete value.directoryId;
+  delete value.workspaceKey;
+  delete value.workspaceEventKey;
+  delete value.entityKey;
+  delete value.entityEventKey;
+  delete value.targetKey;
+  delete value.targetEventKey;
+  delete value.actorKey;
+  delete value.actorEventKey;
+  delete value.occurredAtEventId;
+  delete value.requestFingerprint;
+  delete value.idempotencyKeyHash;
+  delete value.expiresAt;
+  delete value.outboxStatus;
+  delete value.sourceDetails;
+
+  return value;
+}
+
+function encodeAuditCursor(indexName, scopeHash, lastEvaluatedKey) {
+  return Buffer.from(JSON.stringify({
+    version: 1,
+    indexName,
+    scopeHash,
+    lastEvaluatedKey,
+  }), 'utf8').toString('base64url');
+}
+
+function decodeAuditCursor(value, expected) {
+  try {
+    const payload = JSON.parse(Buffer.from(String(value), 'base64url').toString('utf8'));
+    const key = payload?.lastEvaluatedKey;
+
+    if (
+      !payload ||
+      typeof payload !== 'object' ||
+      Array.isArray(payload) ||
+      payload.version !== 1 ||
+      payload.indexName !== expected.indexName ||
+      payload.scopeHash !== expected.scopeHash ||
+      !key ||
+      typeof key !== 'object' ||
+      Array.isArray(key) ||
+      key[expected.partitionName]?.S !== expected.partitionValue ||
+      key.directoryId?.S !== expected.directoryId ||
+      typeof key.eventId?.S !== 'string' ||
+      typeof key[expected.sortName]?.S !== 'string' ||
+      (key.workspaceKey !== undefined && key.workspaceKey?.S !== expected.directoryId)
+    ) {
+      throw new Error('invalid cursor');
+    }
+
+    return key;
+  } catch {
+    const error = new Error('Audit cursor is invalid.');
+    error.name = 'InvalidProjectWrite';
+    throw error;
+  }
+}
+
+function readAuditDate(value, fallback) {
+  if (!value) {
+    return fallback;
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    const error = new Error('Audit date range is invalid.');
+    error.name = 'InvalidProjectWrite';
+    throw error;
+  }
+
+  return date.toISOString();
+}
+
+function clampAuditLimit(value) {
+  return Number.isFinite(value) ? Math.max(1, Math.min(100, Math.floor(value))) : 50;
+}
+
 async function putIssueEvent(input) {
   const item = createIssueEventItem(input);
 
@@ -1816,6 +2490,242 @@ function createIssueEventItem(input) {
   }
 
   return item;
+}
+
+function createAuditEventPut(directoryId, context, input) {
+  const tableName = process.env.AUDIT_EVENTS_TABLE_NAME;
+
+  if (!tableName || !context) {
+    return undefined;
+  }
+
+  const occurredAt = input.occurredAt ?? new Date().toISOString();
+  const actorId = context.actorId;
+  const idempotencyKeyHash = context.idempotencyKeyHash ?? hashAuditValue(
+    'audit-idempotency-v1\\0' + directoryId + '\\0' + actorId + '\\0' + context.idempotencyKey,
+  );
+  const eventId = 'evt_' + hashAuditValue(canonicalAuditString({
+    idempotencyKeyHash,
+    schemaVersion: 1,
+    sequence: input.sequence ?? 0,
+    workspaceId: directoryId,
+  })).slice(0, 48);
+  const eventKey = occurredAt + '#' + eventId;
+  const entityKey = createGenericAuditEntityKey(directoryId, input.entityType, input.entityId);
+  const targetType = input.targetType ?? input.entityType;
+  const targetId = input.targetId ?? input.entityId;
+  const targetKey = createGenericAuditEntityKey(directoryId, targetType, targetId);
+  const actorKey = directoryId + '#actor#' + actorId;
+  const configuredRetentionDays = Number(process.env.AUDIT_RETENTION_DAYS ?? 2555);
+
+  if (!Number.isFinite(configuredRetentionDays) || configuredRetentionDays <= 0) {
+    throw new Error('AUDIT_RETENTION_DAYS must be a positive number.');
+  }
+
+  const retentionDays = Math.max(1, Math.floor(configuredRetentionDays));
+  const item = {
+    directoryId: { S: directoryId },
+    workspaceId: { S: directoryId },
+    eventId: { S: eventId },
+    schemaVersion: { N: '1' },
+    eventType: { S: input.eventType },
+    occurredAtEventId: { S: eventKey },
+    workspaceKey: { S: directoryId },
+    workspaceEventKey: { S: eventKey },
+    actor: toDynamoValue({
+      id: actorId,
+      kind: 'user',
+      displayName: context.actorDisplayName,
+    }),
+    entity: toDynamoValue({ type: input.entityType, id: input.entityId }),
+    entityType: { S: input.entityType },
+    entityId: { S: input.entityId },
+    target: toDynamoValue({ type: targetType, id: targetId }),
+    targetType: { S: targetType },
+    targetId: { S: targetId },
+    action: { S: input.action },
+    actorUserId: { S: actorId },
+    occurredAt: { S: occurredAt },
+    correlationId: { S: context.correlationId },
+    idempotencyKeyHash: { S: idempotencyKeyHash },
+    requestFingerprint: { S: context.requestFingerprint },
+    source: { S: context.source },
+    sourceDetails: toDynamoValue({
+      kind: context.source,
+      method: context.method,
+      route: context.path,
+      requestId: context.requestId,
+    }),
+    changes: toDynamoValue(input.changes ?? []),
+    entityKey: { S: entityKey },
+    entityEventKey: { S: eventKey },
+    targetKey: { S: targetKey },
+    targetEventKey: { S: eventKey },
+    actorKey: { S: actorKey },
+    actorEventKey: { S: eventKey },
+    outboxStatus: { S: 'pending' },
+    expiresAt: { N: String(Math.floor(Date.parse(occurredAt) / 1000) + retentionDays * 86400) },
+  };
+
+  if (input.metadata) {
+    item.metadata = toDynamoValue(sanitizeAuditValue(input.metadata));
+  }
+
+  return {
+    Put: {
+      TableName: tableName,
+      Item: item,
+      ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(eventId)',
+    },
+  };
+}
+
+function createGenericAuditEntityKey(workspaceId, entityType, entityId) {
+  return workspaceId + '#' + entityType + '#' + entityId;
+}
+
+function createProjectTaskAuditEntityId(projectId, taskId) {
+  return 'project/' + projectId + '/task/' + taskId;
+}
+
+function createTeamIssueAuditEntityId(teamId, issueId) {
+  return 'team/' + teamId + '/issue/' + issueId;
+}
+
+function createTeamIssueCommentAuditTargetId(teamId, issueId, commentId) {
+  return createTeamIssueAuditEntityId(teamId, issueId) + '/comment/' + commentId;
+}
+
+function canonicalAuditString(value) {
+  if (Array.isArray(value)) {
+    return '[' + value.map(canonicalAuditString).join(',') + ']';
+  }
+
+  if (value && typeof value === 'object') {
+    return '{' + Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort()
+      .map((key) => JSON.stringify(key) + ':' + canonicalAuditString(value[key]))
+      .join(',') + '}';
+  }
+
+  return JSON.stringify(value);
+}
+
+function createAuditChanges(before, after, fields) {
+  const keys = fields ?? Array.from(new Set([
+    ...Object.keys(before ?? {}),
+    ...Object.keys(after ?? {}),
+  ])).sort();
+
+  return keys.flatMap((field) => {
+    const beforeValue = before?.[field];
+    const afterValue = after?.[field];
+    const redacted = isSensitiveAuditField(field);
+
+    if (JSON.stringify(beforeValue) === JSON.stringify(afterValue)) {
+      return [];
+    }
+
+    return [{
+      field,
+      ...(beforeValue !== undefined ? { before: sanitizeAuditValue(beforeValue, field) } : {}),
+      ...(afterValue !== undefined ? { after: sanitizeAuditValue(afterValue, field) } : {}),
+      ...(redacted ? { redacted: true } : {}),
+    }];
+  });
+}
+
+function sanitizeAuditValue(value, fieldName = '') {
+  if (isSensitiveAuditField(fieldName)) {
+    return '[REDACTED]';
+  }
+
+  if (typeof value === 'string') {
+    return value.length > 4096 ? value.slice(0, 4095) + '…' : value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeAuditValue(item));
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, sanitizeAuditValue(item, key)]),
+    );
+  }
+
+  return value;
+}
+
+function isSensitiveAuditField(fieldName) {
+  return /(?:access[-_]?(?:key|token)|api[-_]?key|authorization|cookie|credential|id[-_]?token|password|private[-_]?key|refresh[-_]?token|secret|signed[-_]?url|token)/i.test(fieldName);
+}
+
+function toDynamoValue(value) {
+  if (value === null) {
+    return { NULL: true };
+  }
+
+  if (Array.isArray(value)) {
+    return { L: value.map(toDynamoValue) };
+  }
+
+  if (value && typeof value === 'object') {
+    return {
+      M: Object.fromEntries(
+        Object.entries(value)
+          .filter(([, item]) => item !== undefined)
+          .map(([key, item]) => [key, toDynamoValue(item)]),
+      ),
+    };
+  }
+
+  if (typeof value === 'number') {
+    return { N: String(value) };
+  }
+
+  if (typeof value === 'boolean') {
+    return { BOOL: value };
+  }
+
+  return { S: String(value) };
+}
+
+function fromDynamoValue(value) {
+  if (!value) {
+    return undefined;
+  }
+
+  if ('S' in value) {
+    return value.S;
+  }
+
+  if ('N' in value) {
+    return Number(value.N);
+  }
+
+  if ('BOOL' in value) {
+    return value.BOOL;
+  }
+
+  if ('NULL' in value) {
+    return null;
+  }
+
+  if ('L' in value) {
+    return value.L.map(fromDynamoValue);
+  }
+
+  if ('M' in value) {
+    return Object.fromEntries(Object.entries(value.M).map(([key, item]) => [key, fromDynamoValue(item)]));
+  }
+
+  return undefined;
+}
+
+function fromDynamoItem(item) {
+  return Object.fromEntries(Object.entries(item).map(([key, value]) => [key, fromDynamoValue(value)]));
 }
 
 async function readDirectoryItems(directoryId) {
@@ -1925,6 +2835,30 @@ async function listProjectDirectory(event, headers, directoryId) {
 function isProjectDirectoryRequest(event) {
   const path = event.rawPath ?? '';
   return path === '/teams/projects' || path === '/api/teams/projects';
+}
+
+function isWorkspaceAuditRequest(event) {
+  if (event.requestContext?.http?.method !== 'GET') {
+    return false;
+  }
+
+  const path = event.rawPath ?? '';
+  return path === '/audit/events' ||
+    path === '/api/audit/events' ||
+    path === '/audit/events/export' ||
+    path === '/api/audit/events/export';
+}
+
+function readTeamIssueActivityParams(event) {
+  if (event.requestContext?.http?.method !== 'GET') {
+    return undefined;
+  }
+
+  const match = event.rawPath?.match(/^\\/(?:api\\/)?teams\\/([^/]+)\\/issues\\/([^/]+)\\/activity$/);
+  const teamId = match?.[1] ? decodePathSegment(match[1]) : undefined;
+  const issueId = match?.[2] ? decodePathSegment(match[2]) : undefined;
+
+  return teamId && issueId ? { teamId, issueId } : undefined;
 }
 
 function isCreateTeamRequest(event) {
@@ -2397,7 +3331,7 @@ function createHeaders(event) {
   return {
     'access-control-allow-origin': allowedOrigin,
     'access-control-allow-methods': 'GET,POST,PATCH,DELETE,OPTIONS',
-    'access-control-allow-headers': 'authorization,content-type',
+    'access-control-allow-headers': 'authorization,content-type,idempotency-key,x-correlation-id',
     'content-type': 'application/json; charset=utf-8',
     vary: 'origin',
   };
@@ -2417,6 +3351,67 @@ function readBearerAccessToken(event) {
   return authorization.match(/^Bearer\\s+(.+)$/i)?.[1];
 }
 
+function createMutationContext(event, principal, workspaceId) {
+  const method = event.requestContext?.http?.method ?? 'GET';
+
+  if (!['POST', 'PATCH', 'DELETE'].includes(method)) {
+    return undefined;
+  }
+
+  const path = event.rawPath ?? '/';
+  const requestFingerprint = hashAuditValue(canonicalAuditString({
+    body: readJsonBody(event),
+    method: method.toUpperCase(),
+    path,
+    query: event.queryStringParameters,
+  }));
+  const suppliedIdempotencyKey = readRequestHeader(event, 'idempotency-key')?.trim();
+  const idempotencyKey = suppliedIdempotencyKey || event.requestContext?.requestId || requestFingerprint;
+
+  if (idempotencyKey.length > 256) {
+    const error = new Error('Idempotency-Key must be 256 characters or fewer.');
+    error.name = 'InvalidProjectWrite';
+    throw error;
+  }
+
+  const actorId = principal.actorId;
+  const idempotencyKeyHash = hashAuditValue(
+    'audit-idempotency-v1\\0' + workspaceId + '\\0' + actorId + '\\0' + idempotencyKey,
+  );
+  const correlationId = readRequestHeader(event, 'x-correlation-id')?.trim() ||
+    'corr_' + hashAuditValue(workspaceId + '\\0' + idempotencyKeyHash).slice(0, 32);
+
+  if (correlationId.length > 256) {
+    const error = new Error('X-Correlation-Id must be 256 characters or fewer.');
+    error.name = 'InvalidProjectWrite';
+    throw error;
+  }
+
+  return {
+    actorId,
+    actorDisplayName: principal.userKey,
+    correlationId,
+    idempotencyKey,
+    idempotencyKeyHash,
+    method,
+    path,
+    requestId: event.requestContext?.requestId,
+    requestFingerprint,
+    source: 'api',
+  };
+}
+
+function readRequestHeader(event, name) {
+  const headers = event.headers ?? {};
+  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase());
+
+  return typeof entry?.[1] === 'string' ? entry[1] : undefined;
+}
+
+function hashAuditValue(value) {
+  return createHash('sha256').update(String(value)).digest('hex');
+}
+
 function toProjectPrincipal(user, accessToken, userPoolId) {
   const userKey = user.UserAttributes?.find((attribute) => attribute.Name === 'email')?.Value ?? user.Username;
 
@@ -2432,6 +3427,7 @@ function toProjectPrincipal(user, accessToken, userPoolId) {
   const groups = readCognitoGroups(accessToken);
 
 	  return {
+	    actorId: readUserAttribute(user, 'sub')?.trim() || user.Username?.trim() || normalizedUserKey,
 	    directoryId,
 	    userKey: normalizedUserKey,
 	    userPoolId,
@@ -2955,13 +3951,22 @@ function projectRoleWeight(role) {
     teamIssuesTable.grantReadWriteData(listTasksFunction);
     teamIssueEventsTable.grantReadWriteData(listTasksFunction);
     projectDirectoryTable.grantReadWriteData(listTasksFunction);
+    auditEventsTable.grantReadData(listTasksFunction);
+    listTasksFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['dynamodb:PutItem'],
+        resources: [auditEventsTable.tableArn],
+      }),
+    );
     listTasksFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
         resources: [
+          tasksTable.tableArn,
           projectDirectoryTable.tableArn,
           teamIssuesTable.tableArn,
           teamIssueEventsTable.tableArn,
+          auditEventsTable.tableArn,
         ],
       }),
     );
@@ -2977,7 +3982,7 @@ function projectRoleWeight(role) {
       cors: {
         allowedOrigins: taskApiAllowedOriginList,
         allowedMethods: [lambda.HttpMethod.GET, lambda.HttpMethod.POST, lambda.HttpMethod.PATCH, lambda.HttpMethod.DELETE],
-        allowedHeaders: ['authorization', 'content-type'],
+        allowedHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id'],
       },
     });
 
@@ -3035,6 +4040,18 @@ function projectRoleWeight(role) {
 
     new cdk.CfnOutput(this, 'TeamIssueEventsTableName', {
       value: teamIssueEventsTable.tableName,
+    });
+
+    new cdk.CfnOutput(this, 'AuditEventsTableName', {
+      value: auditEventsTable.tableName,
+    });
+
+    new cdk.CfnOutput(this, 'AuditEventsStreamArn', {
+      value: auditEventsTable.tableStreamArn!,
+    });
+
+    new cdk.CfnOutput(this, 'ProcessedAuditEventsTableName', {
+      value: processedAuditEventsTable.tableName,
     });
 
     new cdk.CfnOutput(this, 'ProjectTasksApiUrl', {
