@@ -181,6 +181,26 @@ export type SidebarArchiveLabels = {
    * アーカイブ失敗時のエラーメッセージです。
    */
   error: string
+  /**
+   * アーカイブ確認 dialog の見出しです。
+   */
+  confirmTitle: string
+  /**
+   * チーム名と配下への影響を含む確認文を返します。
+   */
+  confirmTeamDescription: (name: string) => string
+  /**
+   * プロジェクト名と復元制約を含む確認文を返します。
+   */
+  confirmProjectDescription: (name: string) => string
+  /**
+   * 確認 dialog のキャンセルボタンです。
+   */
+  cancel: string
+  /**
+   * 確認 dialog の実行ボタンです。
+   */
+  confirm: string
 }
 
 /**
@@ -396,6 +416,28 @@ type MainNavItem = {
   badge?: number
 }
 
+/**
+ * アーカイブ確認 dialog で保持する対象です。
+ */
+type SidebarArchiveTarget = {
+  /**
+   * チームかプロジェクトかを識別する種別です。
+   */
+  kind: 'team' | 'project'
+  /**
+   * 確認文に表示する対象名です。
+   */
+  name: string
+  /**
+   * 対象が所属するチーム ID です。
+   */
+  teamId: string
+  /**
+   * プロジェクトを対象とする場合のプロジェクト ID です。
+   */
+  projectId?: string
+}
+
 const mainNavItems: MainNavItem[] = [
   { id: 'home', icon: HomeIcon },
   { id: 'my-tasks', icon: CheckCircleIcon },
@@ -448,6 +490,13 @@ const defaultLabels: SidebarLabels = {
     project: (name) => `${name} をアーカイブ`,
     archiving: 'アーカイブ中',
     error: 'アーカイブできませんでした',
+    confirmTitle: 'アーカイブの確認',
+    confirmTeamDescription: (name) =>
+      `${name} と配下のプロジェクトをアーカイブし、サイドバーから非表示にします。現在この画面からは復元できません。`,
+    confirmProjectDescription: (name) =>
+      `${name} をアーカイブし、サイドバーから非表示にします。現在この画面からは復元できません。`,
+    cancel: 'キャンセル',
+    confirm: 'アーカイブ',
   },
   teamOverview: 'チーム概要',
   issues: 'Issues',
@@ -599,7 +648,10 @@ export function Sidebar({
   const [internalCollapsedTeamIds, setInternalCollapsedTeamIds] = useState<string[]>([])
   const [archivingItemKey, setArchivingItemKey] = useState<string | undefined>()
   const [archiveErrorMessage, setArchiveErrorMessage] = useState<string | undefined>()
+  const [archiveTarget, setArchiveTarget] = useState<SidebarArchiveTarget | undefined>()
+  const archiveReturnFocusElementRef = useRef<HTMLElement | null>(null)
   const createButtonRef = useRef<HTMLButtonElement>(null)
+  const sidebarRef = useRef<HTMLElement>(null)
 
   const isCollapsed = controlledCollapsed ?? internalCollapsed
   const activeProjectId = controlledActiveProjectId ?? internalActiveProjectId
@@ -628,42 +680,58 @@ export function Sidebar({
   const canCreate = Boolean(onCreateTeam || onCreateProject)
   const createDialogId = useId()
 
-  const archiveTeam = (teamId: string) => {
-    if (!onArchiveTeam || archivingItemKey) {
+  const requestArchiveTeam = (teamId: string) => {
+    const team = teams.find((candidate) => candidate.id === teamId)
+
+    if (!onArchiveTeam || !team || archivingItemKey) {
       return
     }
 
-    const itemKey = createTeamArchiveKey(teamId)
-
+    archiveReturnFocusElementRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null
     setArchiveErrorMessage(undefined)
-    setArchivingItemKey(itemKey)
-    void Promise.resolve()
-      .then(() => onArchiveTeam(teamId))
-      .catch(() => {
-        setArchiveErrorMessage(resolvedLabels.archive.error)
-      })
-      .finally(() => {
-        setArchivingItemKey(undefined)
-      })
+    setArchiveTarget({ kind: 'team', name: team.name, teamId })
   }
 
-  const archiveProject = (teamId: string, projectId: string) => {
-    if (!onArchiveProject || archivingItemKey) {
+  const requestArchiveProject = (teamId: string, projectId: string) => {
+    const project = teams
+      .find((candidate) => candidate.id === teamId)
+      ?.projects?.find((candidate) => candidate.id === projectId)
+
+    if (!onArchiveProject || !project || archivingItemKey) {
       return
     }
 
-    const itemKey = createProjectArchiveKey(teamId, projectId)
+    archiveReturnFocusElementRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setArchiveErrorMessage(undefined)
+    setArchiveTarget({ kind: 'project', name: project.name, projectId, teamId })
+  }
+
+  const confirmArchive = async () => {
+    if (!archiveTarget || archivingItemKey) {
+      return
+    }
+
+    const itemKey = archiveTarget.kind === 'team'
+      ? createTeamArchiveKey(archiveTarget.teamId)
+      : createProjectArchiveKey(archiveTarget.teamId, archiveTarget.projectId ?? '')
 
     setArchiveErrorMessage(undefined)
     setArchivingItemKey(itemKey)
-    void Promise.resolve()
-      .then(() => onArchiveProject(teamId, projectId))
-      .catch(() => {
-        setArchiveErrorMessage(resolvedLabels.archive.error)
-      })
-      .finally(() => {
-        setArchivingItemKey(undefined)
-      })
+
+    try {
+      if (archiveTarget.kind === 'team') {
+        await onArchiveTeam?.(archiveTarget.teamId)
+      } else if (archiveTarget.projectId) {
+        await onArchiveProject?.(archiveTarget.teamId, archiveTarget.projectId)
+      }
+      setArchiveTarget(undefined)
+    } catch {
+      setArchiveErrorMessage(resolvedLabels.archive.error)
+    } finally {
+      setArchivingItemKey(undefined)
+    }
   }
 
   const updateCollapsed = (nextCollapsed: boolean) => {
@@ -792,10 +860,12 @@ export function Sidebar({
   return (
     <>
       <aside
-        className={`flex h-dvh max-h-dvh min-h-0 flex-none flex-col overflow-hidden bg-[var(--workbench-sidebar)] py-4 text-white shadow-[1px_0_0_rgba(255,255,255,0.08)] transition-all duration-200 min-[981px]:h-svh min-[981px]:max-h-svh ${isCollapsed ? 'w-[76px] px-3' : 'w-[292px] max-w-[calc(100vw-32px)] px-4'} ${className}`}
+        className={`flex h-dvh max-h-dvh min-h-0 flex-none flex-col overflow-hidden bg-[var(--workbench-sidebar)] py-4 text-white shadow-[1px_0_0_rgba(255,255,255,0.08)] transition-[width,padding] duration-200 min-[981px]:h-svh min-[981px]:max-h-svh ${isCollapsed ? 'w-[76px] px-3' : 'w-[292px] max-w-[calc(100vw-32px)] px-4'} ${className}`}
         aria-label={resolvedLabels.ariaLabel}
         data-collapsed={isCollapsed}
-        inert={isCreateModalOpen ? true : undefined}
+        inert={isCreateModalOpen || archiveTarget ? true : undefined}
+        ref={sidebarRef}
+        tabIndex={-1}
       >
         <div
           className={`mb-5 flex flex-none items-center ${isCollapsed ? 'flex-col gap-3 px-0' : 'justify-between px-1'}`}
@@ -875,8 +945,8 @@ export function Sidebar({
                 collapsed={isCollapsed}
                 expanded={expandedTeamIds.includes(team.id)}
                 archivingItemKey={archivingItemKey}
-                onArchiveProject={onArchiveProject ? archiveProject : undefined}
-                onArchiveTeam={onArchiveTeam ? archiveTeam : undefined}
+                onArchiveProject={onArchiveProject ? requestArchiveProject : undefined}
+                onArchiveTeam={onArchiveTeam ? requestArchiveTeam : undefined}
                 onToggleTeam={toggleTeam}
                 onSelectTeamView={updateActiveTeamView}
                 onSelectProject={updateActiveProject}
@@ -918,7 +988,192 @@ export function Sidebar({
           onRequestClose={() => setIsCreateModalOpen(false)}
         />
       ) : null}
+      {archiveTarget ? (
+        <SidebarArchiveConfirmationModal
+          errorMessage={archiveErrorMessage}
+          isBusy={Boolean(archivingItemKey)}
+          labels={resolvedLabels.archive}
+          fallbackFocusRef={sidebarRef}
+          returnFocusRef={archiveReturnFocusElementRef}
+          target={archiveTarget}
+          onConfirm={confirmArchive}
+          onRequestClose={() => {
+            if (!archivingItemKey) {
+              setArchiveErrorMessage(undefined)
+              setArchiveTarget(undefined)
+            }
+          }}
+        />
+      ) : null}
     </>
+  )
+}
+
+/**
+ * サイドバーのアーカイブ確認 dialog に渡す props です。
+ */
+type SidebarArchiveConfirmationModalProps = {
+  /**
+   * API 失敗時に dialog 内へ表示するメッセージです。
+   */
+  errorMessage?: string
+  /**
+   * 実行後に呼び出し元が消えた場合のフォーカス復帰先です。
+   */
+  fallbackFocusRef: RefObject<HTMLElement | null>
+  /**
+   * アーカイブ API を実行中かどうかです。
+   */
+  isBusy: boolean
+  /**
+   * dialog 内で使う表示文言です。
+   */
+  labels: SidebarArchiveLabels
+  /**
+   * dialog を閉じたあとにフォーカスを戻す操作要素の ref です。
+   */
+  returnFocusRef: RefObject<HTMLElement | null>
+  /**
+   * 確認対象のチームまたはプロジェクトです。
+   */
+  target: SidebarArchiveTarget
+  /**
+   * アーカイブを確定するときの callback です。
+   */
+  onConfirm: () => void | Promise<void>
+  /**
+   * dialog を閉じる callback です。
+   */
+  onRequestClose: () => void
+}
+
+function SidebarArchiveConfirmationModal({
+  errorMessage,
+  fallbackFocusRef,
+  isBusy,
+  labels,
+  returnFocusRef,
+  target,
+  onConfirm,
+  onRequestClose,
+}: SidebarArchiveConfirmationModalProps) {
+  const dialogRef = useRef<HTMLElement>(null)
+  const dialogId = useId()
+  const dialogTitleId = `${dialogId}-title`
+  const dialogDescriptionId = `${dialogId}-description`
+
+  useEffect(() => {
+    const fallbackFocusElement = fallbackFocusRef.current
+    const returnFocusElement = returnFocusRef.current
+
+    findInitialFocusableElement(dialogRef.current)?.focus()
+
+    return () => {
+      window.requestAnimationFrame(() => {
+        if (returnFocusElement?.isConnected) {
+          returnFocusElement.focus()
+          return
+        }
+
+        fallbackFocusElement?.focus()
+      })
+    }
+  }, [fallbackFocusRef, returnFocusRef])
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const dialog = dialogRef.current
+
+      if (event.key === 'Tab' && dialog) {
+        trapFocus(event, dialog)
+        return
+      }
+
+      if (event.key === 'Escape' && !isBusy) {
+        onRequestClose()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [isBusy, onRequestClose])
+
+  useEffect(() => {
+    const dialog = dialogRef.current
+
+    if (!dialog) {
+      return
+    }
+
+    if (isBusy) {
+      dialog.focus()
+      return
+    }
+
+    if (!dialog.contains(document.activeElement) || document.activeElement === dialog) {
+      findInitialFocusableElement(dialog)?.focus()
+    }
+  }, [isBusy])
+
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 px-4 py-6 backdrop-blur-sm"
+      onMouseDown={() => {
+        if (!isBusy) {
+          onRequestClose()
+        }
+      }}
+    >
+      <section
+        aria-busy={isBusy}
+        aria-describedby={dialogDescriptionId}
+        aria-labelledby={dialogTitleId}
+        aria-modal="true"
+        className="workbench-panel w-full max-w-[440px] overflow-hidden shadow-[0_24px_72px_rgba(23,32,29,0.28)]"
+        ref={dialogRef}
+        role="dialog"
+        tabIndex={-1}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-6 py-5">
+          <h2 className="text-xl font-semibold text-[var(--workbench-text)]" id={dialogTitleId}>
+            {labels.confirmTitle}
+          </h2>
+        </div>
+        <div className="p-6">
+          <p className="m-0 text-sm font-medium leading-6 text-[var(--workbench-muted)]" id={dialogDescriptionId}>
+            {target.kind === 'team'
+              ? labels.confirmTeamDescription(target.name)
+              : labels.confirmProjectDescription(target.name)}
+          </p>
+          {errorMessage ? (
+            <p className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+              {errorMessage}
+            </p>
+          ) : null}
+          <div className="mt-6 flex justify-end gap-3">
+            <button
+              className="workbench-button-secondary min-h-10 px-4"
+              data-autofocus
+              disabled={isBusy}
+              onClick={onRequestClose}
+              type="button"
+            >
+              {labels.cancel}
+            </button>
+            <button
+              className="min-h-10 rounded-[7px] border border-red-700 bg-red-700 px-4 text-sm font-semibold text-white transition-colors duration-150 hover:border-red-800 hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={isBusy}
+              onClick={() => void onConfirm()}
+              type="button"
+            >
+              {isBusy ? labels.archiving : labels.confirm}
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
   )
 }
 
@@ -1102,25 +1357,25 @@ function SidebarRegistrationModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 grid place-items-center bg-[#020b18]/55 px-4 py-6 text-[#0d1833] backdrop-blur-sm"
+      className="fixed inset-0 z-50 grid place-items-center bg-slate-950/55 px-4 py-6 text-[var(--workbench-text)] backdrop-blur-sm"
       onMouseDown={requestClose}
     >
       <section
         ref={dialogRef}
-        className="w-full max-w-[480px] overflow-hidden rounded-lg bg-white shadow-[0_26px_80px_rgba(3,23,47,0.34)]"
+        className="w-full max-w-[480px] overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface)] shadow-[0_24px_72px_rgba(23,32,29,0.28)]"
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         id={dialogId}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <div className="border-b border-[#dce5f2] bg-[#f8fbff] px-5 py-4">
+        <div className="border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-5 py-4">
           <div className="flex items-center justify-between gap-4">
-            <h2 id={titleId} className="text-[20px] font-semibold leading-tight text-[#0b1735]">
+            <h2 id={titleId} className="text-[20px] font-semibold leading-tight text-[var(--workbench-text)]">
               {labels.title}
             </h2>
             <button
-              className="grid h-9 w-9 flex-none place-items-center rounded-lg text-[#526381] transition hover:bg-[#eaf1fb] hover:text-[#0b1735] disabled:cursor-not-allowed disabled:opacity-50"
+              className="grid h-9 w-9 flex-none place-items-center rounded-lg text-[var(--workbench-muted)] transition hover:bg-white hover:text-[var(--workbench-text)] disabled:cursor-not-allowed disabled:opacity-50"
               type="button"
               aria-label={labels.close}
               title={labels.close}
@@ -1133,7 +1388,7 @@ function SidebarRegistrationModal({
 
           {hasModeTabs ? (
             <div
-              className="mt-4 grid grid-cols-2 rounded-lg bg-[#eaf1fb] p-1"
+              className="mt-4 grid grid-cols-2 rounded-lg bg-[var(--workbench-border)] p-1"
               role="group"
               aria-label={labels.title}
             >
@@ -1165,7 +1420,7 @@ function SidebarRegistrationModal({
               aria-labelledby={titleId}
               onSubmit={handleCreateTeam}
             >
-              <label className="grid gap-2 text-[13px] font-semibold text-[#233456]">
+              <label className="grid gap-2 text-[13px] font-semibold text-[var(--workbench-text)]">
                 {labels.teamName}
                 <input
                   className="workbench-input h-11 px-3 text-[14px] placeholder:text-[var(--workbench-muted-soft)]"
@@ -1197,7 +1452,7 @@ function SidebarRegistrationModal({
               aria-labelledby={titleId}
               onSubmit={handleCreateProject}
             >
-              <label className="grid gap-2 text-[13px] font-semibold text-[#233456]">
+              <label className="grid gap-2 text-[13px] font-semibold text-[var(--workbench-text)]">
                 {labels.team}
                 <select
                   className="workbench-input h-11 px-3 text-[14px] disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
@@ -1212,7 +1467,7 @@ function SidebarRegistrationModal({
                   ))}
                 </select>
               </label>
-              <label className="grid gap-2 text-[13px] font-semibold text-[#233456]">
+              <label className="grid gap-2 text-[13px] font-semibold text-[var(--workbench-text)]">
                 {labels.projectName}
                 <input
                   className="workbench-input h-11 px-3 text-[14px] placeholder:text-[var(--workbench-muted-soft)] disabled:cursor-not-allowed disabled:bg-slate-100"
@@ -1224,14 +1479,14 @@ function SidebarRegistrationModal({
                 />
               </label>
               <fieldset className="grid gap-2">
-                <legend className="text-[13px] font-semibold text-[#233456]">{labels.tone}</legend>
+                <legend className="text-[13px] font-semibold text-[var(--workbench-text)]">{labels.tone}</legend>
                 <div className="grid grid-cols-4 gap-2">
                   {projectToneOptions.map((tone) => (
                     <label
                       className={`grid h-10 cursor-pointer place-items-center rounded-lg border transition focus-within:border-[var(--workbench-primary)] focus-within:ring-3 focus-within:ring-[#99d7cf]/35 ${
                         selectedTone === tone
                           ? 'border-[var(--workbench-primary)] bg-[#e5f7f4] ring-3 ring-[#99d7cf]/35'
-                          : 'border-[#cbd8ea] bg-white hover:bg-[#f5f8fc]'
+                          : 'border-[var(--workbench-border-strong)] bg-white hover:bg-[var(--workbench-surface-muted)]'
                       }`}
                       key={tone}
                       title={labels.toneLabels[tone]}
@@ -1297,8 +1552,8 @@ function CreateModeTab({
     <button
       className={`flex h-10 items-center justify-center gap-2 rounded-md px-3 text-[13px] font-semibold transition disabled:cursor-not-allowed ${
         active
-          ? 'bg-white text-[#0b1735] shadow-[0_8px_22px_rgba(23,44,75,0.12)]'
-          : 'text-[#526381] hover:bg-white/60 hover:text-[#0b1735]'
+          ? 'bg-white text-[var(--workbench-text)] shadow-[0_3px_10px_rgba(23,32,29,0.1)]'
+          : 'text-[var(--workbench-muted)] hover:bg-white/70 hover:text-[var(--workbench-text)]'
       }`}
       type="button"
       aria-pressed={active}

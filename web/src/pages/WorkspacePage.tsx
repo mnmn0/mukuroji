@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
-import { useNavigate, useParams } from 'react-router'
+import { Link, useNavigate, useParams } from 'react-router'
 import useSWR from 'swr'
 import {
   canManageWorkspaceStructure,
@@ -20,6 +20,8 @@ import {
   createSidebarLabels,
   createTranslator,
   getInitialLocale,
+  localeOptions,
+  setLocalePreference,
   type Locale,
   type MessageKey,
 } from '../i18n'
@@ -113,6 +115,20 @@ type TeamProjectMembersResult = {
   members: TeamProjectMemberAccess[]
   /**
    * member 取得に失敗したプロジェクト ID の一覧です。
+   */
+  failedProjectIds: string[]
+}
+
+/**
+ * ワークスペース横断の project task 取得結果です。
+ */
+type WorkspaceProjectTasksResult = {
+  /**
+   * 取得に成功したプロジェクトのタスク一覧です。
+   */
+  tasks: ProjectTask[]
+  /**
+   * タスク取得に失敗したプロジェクト ID の一覧です。
    */
   failedProjectIds: string[]
 }
@@ -223,9 +239,9 @@ type TeamMemberRow = {
    */
   attentionTaskCount: number
   /**
-   * 未完了タスク比率から計算した負荷表示用の百分率です。
+   * 担当タスクに占める未完了タスクの百分率です。
    */
-  loadPercent: number
+  openPercent: number
   /**
    * 担当タスクのうち最も近い期限日です。
    */
@@ -276,6 +292,10 @@ type WorkspaceScreenProps = {
    * 表示に使うタスク一覧です。
    */
   tasks: ProjectTask[]
+  /**
+   * タスク取得に失敗した projectId の一覧です。
+   */
+  taskLoadFailedProjectIds?: string[]
   /**
    * 選択中チーム配下プロジェクトの member 所属情報です。
    */
@@ -341,6 +361,10 @@ type WorkspaceScreenProps = {
    */
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
   /**
+   * 表示言語が変更されたときの callback です。
+   */
+  onLocaleChange?: (locale: Locale) => void
+  /**
    * マイタスク状態更新に失敗したときの表示メッセージです。
    */
   taskMoveErrorMessage?: string
@@ -374,6 +398,7 @@ type WorkspaceViewMetadata = {
 
 const emptyProjectDirectory: ProjectDirectoryTeam[] = []
 const emptyProjectTasks: ProjectTask[] = []
+const emptyProjectTaskFailures: string[] = []
 const emptyTeamProjectMembers: TeamProjectMemberAccess[] = []
 const emptyTeamProjectMemberFailures: string[] = []
 const emptyUserIdentityAliases: string[] = []
@@ -457,7 +482,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   const params = useParams()
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   const [session] = useState<AuthSession | null>(() => getAuthSession())
-  const [locale] = useState<Locale>(() => getInitialLocale())
+  const [locale, setLocale] = useState<Locale>(() => getInitialLocale())
   const [fontSizePreference, setFontSizePreferenceState] = useState<FontSizePreference>(() =>
     getInitialFontSizePreference(),
   )
@@ -491,7 +516,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       ? (['workspace-project-tasks', accessToken, projectIds] as const)
       : null
   const {
-    data: tasks = emptyProjectTasks,
+    data: projectTasksResult,
     isLoading: isProjectTasksLoading,
     mutate: mutateProjectTasks,
   } = useSWR(
@@ -500,6 +525,9 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       loadProjectTasks(currentProjectIds, currentAccessToken),
     apiSWRConfig,
   )
+  const tasks = projectTasksResult?.tasks ?? emptyProjectTasks
+  const taskLoadFailedProjectIds =
+    projectTasksResult?.failedProjectIds ?? emptyProjectTaskFailures
   const teamProjectMembersKey =
     accessToken && user && !currentUserError && isTeamManagementView && activeTeamProjects.length > 0
       ? ([
@@ -522,7 +550,10 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   const pendingTaskMoveKeysRef = useRef(new Set<string>())
   const summary = useMemo(() => createDashboardSummary(teams, tasks), [tasks, teams])
   const metadata = workspaceViewMetadata[view]
-  const title = t(metadata.titleKey)
+  const title = formatTeamText(
+    t(metadata.titleKey),
+    activeTeam?.name ?? t('workspace.team.missing'),
+  )
   const userLabel =
     user?.attributes.email ?? user?.attributes.name ?? user?.username ?? t('workspace.user.fallback')
   const userIdentityAliases = useMemo(
@@ -566,6 +597,11 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   const handleFontSizePreferenceChange = (preference: FontSizePreference) => {
     setFontSizePreferenceState(preference)
     saveFontSizePreference(preference)
+  }
+
+  const handleLocaleChange = (nextLocale: Locale) => {
+    setLocale(nextLocale)
+    setLocalePreference(nextLocale)
   }
 
   const handleCreateTeam = async (input: CreateProjectDirectoryTeamInput) => {
@@ -636,11 +672,21 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
 
     pendingTaskMoveKeysRef.current.add(taskKey)
     const nextTasks = updateWorkspaceTaskStatus(tasks, task, status, task.status)
+    const currentProjectTasksResult: WorkspaceProjectTasksResult = {
+      failedProjectIds: taskLoadFailedProjectIds,
+      tasks,
+    }
+    const nextProjectTasksResult: WorkspaceProjectTasksResult = {
+      ...currentProjectTasksResult,
+      tasks: nextTasks,
+    }
 
     try {
       await mutateProjectTasks(
-        (currentTasks = tasks) =>
-          updateWorkspaceTaskStatus(currentTasks, task, status, task.status),
+        (currentResult = currentProjectTasksResult) => ({
+          ...currentResult,
+          tasks: updateWorkspaceTaskStatus(currentResult.tasks, task, status, task.status),
+        }),
         { revalidate: false },
       )
       const updatedTask = await mutationRequestRunner.run(
@@ -649,16 +695,20 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
         (context) => updateWorkspaceTaskRemote(task, accessToken, status, context),
       )
       await mutateProjectTasks(
-        (currentTasks = nextTasks) =>
-          replaceWorkspaceTask(currentTasks, updatedTask),
+        (currentResult = nextProjectTasksResult) => ({
+          ...currentResult,
+          tasks: replaceWorkspaceTask(currentResult.tasks, updatedTask),
+        }),
         {
           revalidate: false,
         },
       )
     } catch (error) {
       await mutateProjectTasks(
-        (currentTasks = nextTasks) =>
-          updateWorkspaceTaskStatus(currentTasks, task, task.status),
+        (currentResult = nextProjectTasksResult) => ({
+          ...currentResult,
+          tasks: updateWorkspaceTaskStatus(currentResult.tasks, task, task.status),
+        }),
         { revalidate: false },
       )
       setTaskMoveErrorMessage(t('workspace.myTasks.moveError'))
@@ -677,6 +727,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       isTeamProjectMembersLoading={Boolean(teamProjectMembersKey && isTeamProjectMembersLoading)}
       locale={locale}
       onFontSizePreferenceChange={handleFontSizePreferenceChange}
+      onLocaleChange={handleLocaleChange}
       onLogout={handleLogout}
       onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
       onSelectProject={(projectId, teamId) =>
@@ -699,6 +750,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       }}
       summary={summary}
       taskMoveErrorMessage={taskMoveErrorMessage}
+      taskLoadFailedProjectIds={taskLoadFailedProjectIds}
       tasks={tasks}
       teamProjectMembers={teamProjectMembersResult?.members ?? emptyTeamProjectMembers}
       teamProjectMembersFailedProjectIds={
@@ -727,6 +779,7 @@ export function WorkspaceScreen({
   teams,
   activeTeamId,
   tasks,
+  taskLoadFailedProjectIds = emptyProjectTaskFailures,
   teamProjectMembers = emptyTeamProjectMembers,
   teamProjectMembersFailedProjectIds = emptyTeamProjectMemberFailures,
   isTeamProjectMembersLoading = false,
@@ -743,12 +796,14 @@ export function WorkspaceScreen({
   onMoveTaskStatus,
   onOpenTask,
   onFontSizePreferenceChange,
+  onLocaleChange,
   taskMoveErrorMessage,
 }: WorkspaceScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
   const metadata = workspaceViewMetadata[view]
   const activeTeam = findActiveTeam(teams, activeTeamId)
+  const activeTeamLabel = activeTeam?.name ?? t('workspace.team.missing')
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
 
   return (
@@ -815,10 +870,10 @@ export function WorkspaceScreen({
                   {t(metadata.eyebrowKey)}
                 </p>
                 <h1 className="workbench-title mt-2 text-page-title">
-                  {formatTeamText(t(metadata.titleKey), activeTeam?.name)}
+                  {formatTeamText(t(metadata.titleKey), activeTeamLabel)}
                 </h1>
                 <p className="workbench-description mt-2 max-w-[760px]">
-                  {formatTeamText(t(metadata.descriptionKey), activeTeam?.name)}
+                  {formatTeamText(t(metadata.descriptionKey), activeTeamLabel)}
                 </p>
               </div>
             </div>
@@ -860,15 +915,18 @@ export function WorkspaceScreen({
               summary={summary}
               t={t}
               taskMoveErrorMessage={taskMoveErrorMessage}
+              taskLoadFailedProjectIds={taskLoadFailedProjectIds}
               tasks={tasks}
               teamProjectMembers={teamProjectMembers}
               teamProjectMembersFailedProjectIds={teamProjectMembersFailedProjectIds}
               teams={teams}
               isTeamProjectMembersLoading={isTeamProjectMembersLoading}
               onFontSizePreferenceChange={onFontSizePreferenceChange}
+              onLocaleChange={onLocaleChange}
               onMoveTaskStatus={onMoveTaskStatus}
               onOpenTask={onOpenTask}
               onSelectProject={onSelectProject}
+              userLabel={userLabel}
               userIdentityAliases={userIdentityAliases}
               view={view}
             />
@@ -887,15 +945,18 @@ function WorkspaceBody({
   summary,
   t,
   taskMoveErrorMessage,
+  taskLoadFailedProjectIds,
   tasks,
   teamProjectMembers,
   teamProjectMembersFailedProjectIds,
   teams,
   isTeamProjectMembersLoading,
   onFontSizePreferenceChange,
+  onLocaleChange,
   onMoveTaskStatus,
   onOpenTask,
   onSelectProject,
+  userLabel,
   userIdentityAliases,
   view,
 }: {
@@ -906,20 +967,38 @@ function WorkspaceBody({
   summary: DashboardSummary
   t: (key: MessageKey) => string
   taskMoveErrorMessage?: string
+  taskLoadFailedProjectIds: string[]
   tasks: ProjectTask[]
   teamProjectMembers: TeamProjectMemberAccess[]
   teamProjectMembersFailedProjectIds: string[]
   teams: ProjectDirectoryTeam[]
   isTeamProjectMembersLoading: boolean
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
+  onLocaleChange?: (locale: Locale) => void
   onMoveTaskStatus?: (task: ProjectTask, status: TaskStatus) => Promise<void>
   onOpenTask?: (task: ProjectTask) => void
   onSelectProject?: (projectId: string, teamId: string) => void
+  userLabel: string
   userIdentityAliases: string[]
   view: WorkspaceView
 }) {
+  const myTasks = userIdentityAliases.length === 0
+    ? emptyProjectTasks
+    : tasks.filter((task) =>
+        isWorkspaceTaskAssignedToUser(task, userIdentityAliases),
+      )
+
   return (
-    <div className="px-[clamp(20px,3vw,34px)] py-5">
+    <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
+      {taskLoadFailedProjectIds.length > 0 ? (
+        <p
+          className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800"
+          data-testid="workspace-task-partial-error"
+          role="alert"
+        >
+          {t('tasks.error.loading')} ({taskLoadFailedProjectIds.length})
+        </p>
+      ) : null}
       {view === 'home' ? (
         <HomeView
           summary={summary}
@@ -933,7 +1012,7 @@ function WorkspaceBody({
         <MyTasksView
           t={t}
           taskMoveErrorMessage={taskMoveErrorMessage}
-          tasks={tasks}
+          tasks={myTasks}
           onMoveTaskStatus={onMoveTaskStatus}
         />
       ) : null}
@@ -971,7 +1050,9 @@ function WorkspaceBody({
           fontSizePreference={fontSizePreference}
           locale={locale}
           t={t}
+          userLabel={userLabel}
           onFontSizePreferenceChange={onFontSizePreferenceChange}
+          onLocaleChange={onLocaleChange}
         />
       ) : null}
       {view === 'team-overview' ? (
@@ -1015,7 +1096,7 @@ function HomeView({
   teams: ProjectDirectoryTeam[]
 }) {
   const nextTasks = createActionQueueTasks(tasks).slice(0, 3)
-  const activityTasks = createActivityTasks(tasks)
+  const attentionTasks = createInboxTasks(tasks).slice(0, 3)
 
   return (
     <div className="grid gap-6">
@@ -1042,9 +1123,12 @@ function HomeView({
         </section>
 
         <section className="workbench-panel">
-          <SectionHeader title={t('workspace.home.activityTitle')} meta={t('workspace.home.activityMeta')} />
+          <SectionHeader
+            title={t('workspace.reports.attentionTitle')}
+            meta={t('workspace.reports.attentionMeta')}
+          />
           <div className="grid gap-3 px-5 pb-5">
-            {activityTasks.map((task) => (
+            {attentionTasks.map((task) => (
               <button
                 className="rounded-lg border border-[var(--workbench-border)] bg-white p-4 text-left transition hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)] disabled:hover:border-[var(--workbench-border)] disabled:hover:bg-white"
                 disabled={!onOpenTask || !isOpenableWorkspaceTask(task)}
@@ -1058,7 +1142,7 @@ function HomeView({
                 </p>
               </button>
             ))}
-            {activityTasks.length === 0 ? (
+            {attentionTasks.length === 0 ? (
               <p className="rounded-lg border border-dashed border-slate-300 px-4 py-8 text-center text-sm font-bold text-[#526381]">
                 {t('workspace.empty.tasks')}
               </p>
@@ -1169,7 +1253,7 @@ function MyTasksView({
       ) : null}
       <div
         aria-label={t('workspace.myTasks.title')}
-        className="grid grid-cols-4 gap-4 max-[1240px]:overflow-x-auto max-[1240px]:pb-2 max-[900px]:grid-cols-1 max-[900px]:overflow-visible"
+        className="grid grid-cols-[repeat(4,minmax(260px,1fr))] gap-4 overflow-x-auto pb-2 max-[900px]:grid-cols-1 max-[900px]:overflow-visible max-[900px]:pb-0"
         data-testid="my-tasks-kanban"
       >
         {myTaskKanbanStatuses.map((status) => {
@@ -1432,7 +1516,7 @@ function DashboardWorkspaceView({
         <MetricCard label={t('workspace.metric.activeProjects')} value={summary.projects} tone="teal" />
         <MetricCard label={t('workspace.metric.openTasks')} value={summary.tasks} tone="emerald" />
         <MetricCard label={t('workspace.metric.blocked')} value={summary.blocked} tone="red" />
-        <MetricCard label={t('workspace.metric.deliveryRate')} value={`${calculateProjectProgress(tasks)}%`} tone="amber" />
+        <MetricCard label={t('workspace.reports.metric.completion')} value={`${calculateProjectProgress(tasks)}%`} tone="amber" />
       </div>
 
       <section className="workbench-table overflow-hidden">
@@ -1453,7 +1537,10 @@ function DashboardWorkspaceView({
                   <td className="px-5 py-4">{project.name}</td>
                   <td className="px-5 py-4 text-[var(--workbench-muted)]">{project.teamName}</td>
                   <td className="px-5 py-4">
-                    <ProgressBar value={project.progress} />
+                    <ProgressBar
+                      label={`${project.name} ${t('workspace.column.progress')}`}
+                      value={project.progress}
+                    />
                   </td>
                   <td className="px-5 py-4">{t(project.riskKey)}</td>
                 </tr>
@@ -1675,7 +1762,10 @@ function ReportsView({
                   <td className="min-w-[170px] px-5 py-4">
                     <div className="flex items-center gap-3">
                       <div className="min-w-[110px] flex-1">
-                        <ProgressBar value={project.progress} />
+                        <ProgressBar
+                          label={`${project.name} ${t('workspace.column.progress')}`}
+                          value={project.progress}
+                        />
                       </div>
                       <span className="text-xs font-semibold tabular-nums text-[var(--workbench-muted)]">
                         {project.progress}%
@@ -1767,17 +1857,62 @@ function ReportDistributionRow({
   )
 }
 
+const helpDestinations = [
+  {
+    descriptionKey: 'workspace.help.guideDescription',
+    titleKey: 'workspace.help.guideTitle',
+    to: '/home',
+  },
+  {
+    descriptionKey: 'workspace.help.runbookDescription',
+    titleKey: 'workspace.help.runbookTitle',
+    to: '/reports',
+  },
+  {
+    descriptionKey: 'workspace.help.supportDescription',
+    titleKey: 'workspace.help.supportTitle',
+    to: '/support',
+  },
+  {
+    descriptionKey: 'workspace.help.statusDescription',
+    titleKey: 'workspace.help.statusTitle',
+    to: '/support?topic=work',
+  },
+] as const satisfies ReadonlyArray<{
+  descriptionKey: MessageKey
+  titleKey: MessageKey
+  to: string
+}>
+
 function HelpView({ t }: { t: (key: MessageKey) => string }) {
   return (
-    <InfoGrid
-      items={[
-        ['workspace.help.guideTitle', 'workspace.help.guideDescription'],
-        ['workspace.help.runbookTitle', 'workspace.help.runbookDescription'],
-        ['workspace.help.supportTitle', 'workspace.help.supportDescription'],
-        ['workspace.help.statusTitle', 'workspace.help.statusDescription'],
-      ]}
-      t={t}
-    />
+    <nav
+      aria-label={t('workspace.help.title')}
+      className="grid grid-cols-2 gap-4 max-[820px]:grid-cols-1"
+    >
+      {helpDestinations.map((destination) => (
+        <Link
+          className="group workbench-panel grid min-h-[168px] grid-cols-[1fr_auto] gap-5 p-5 no-underline transition-[border-color,background-color,transform] duration-150 hover:-translate-y-0.5 hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)]"
+          key={destination.titleKey}
+          to={destination.to}
+        >
+          <span>
+            <strong className="block text-lg font-semibold text-[var(--workbench-text)]">
+              {t(destination.titleKey)}
+            </strong>
+            <span className="mt-3 block text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+              {t(destination.descriptionKey)}
+            </span>
+          </span>
+          <span
+            aria-hidden="true"
+            className="grid h-10 w-10 place-items-center self-end rounded-full border border-[var(--workbench-border-strong)] bg-white text-lg text-[var(--workbench-primary)] transition-transform duration-150 group-hover:translate-x-0.5"
+          >
+            →
+          </span>
+        </Link>
+      ))}
+    </nav>
   )
 }
 
@@ -1792,57 +1927,82 @@ function SettingsView({
   fontSizePreference,
   locale,
   onFontSizePreferenceChange,
+  onLocaleChange,
   t,
+  userLabel,
 }: {
   accessToken?: string
   fontSizePreference: FontSizePreference
   locale: Locale
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
+  onLocaleChange?: (locale: Locale) => void
   t: (key: MessageKey) => string
+  userLabel: string
 }) {
   return (
     <div className="grid gap-5">
-      <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-[0_14px_32px_rgba(30,52,88,0.05)]">
-        <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
-          <div className="min-w-0">
-            <h2 className="text-base font-semibold text-[#0d1833]">
-              {t('workspace.settings.displayTitle')}
-            </h2>
-            <p className="mt-2 max-w-[680px] text-sm font-bold leading-6 text-[#526381]">
-              {t('workspace.settings.displayDescription')}
-            </p>
+      <section className="workbench-panel overflow-hidden">
+        <SectionHeader
+          title={t('workspace.settings.displayTitle')}
+          meta={t('workspace.settings.displayDescription')}
+        />
+        <div className="divide-y divide-[var(--workbench-border)] border-t border-[var(--workbench-border)]">
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-4 px-5 py-5">
+            <div className="min-w-0 max-w-[640px]">
+              <h3 className="text-sm font-semibold text-[var(--workbench-text)]">
+                {t('workspace.settings.fontSizeTitle')}
+              </h3>
+              <p className="mt-1 text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+                {t('workspace.settings.fontSizeDescription')}
+              </p>
+            </div>
+            <div
+              aria-label={t('workspace.settings.fontSizeTitle')}
+              className="inline-flex min-h-10 overflow-hidden rounded-lg border border-[var(--workbench-border-strong)] bg-white"
+              data-testid="font-size-preference-control"
+              role="group"
+            >
+              {fontSizePreferenceOptions.map((preference) => (
+                <button
+                  aria-pressed={fontSizePreference === preference}
+                  className={`px-4 text-sm font-semibold transition-colors duration-150 ${
+                    fontSizePreference === preference
+                      ? 'bg-[var(--workbench-primary)] text-white'
+                      : 'text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)]'
+                  }`}
+                  data-testid={`font-size-preference-${preference}`}
+                  key={preference}
+                  onClick={() => onFontSizePreferenceChange(preference)}
+                  type="button"
+                >
+                  {t(fontSizePreferenceLabelKeys[preference])}
+                </button>
+              ))}
+            </div>
           </div>
-          <div
-            aria-label={t('workspace.settings.fontSizeTitle')}
-            className="inline-flex min-h-10 overflow-hidden rounded-lg border border-slate-300 bg-white"
-            data-testid="font-size-preference-control"
-            role="group"
-          >
-            {fontSizePreferenceOptions.map((preference) => (
-              <button
-                aria-pressed={fontSizePreference === preference}
-                className={`px-4 text-sm font-semibold transition ${
-                  fontSizePreference === preference
-                    ? 'bg-[var(--workbench-primary)] text-white'
-                    : 'text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)]'
-                }`}
-                data-testid={`font-size-preference-${preference}`}
-                key={preference}
-                onClick={() => onFontSizePreferenceChange(preference)}
-                type="button"
-              >
-                {t(fontSizePreferenceLabelKeys[preference])}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="mt-5 rounded-lg border border-slate-200 bg-[#fbfdff] p-4">
-          <p className="text-sm font-semibold text-[#0d1833]">
-            {t('workspace.settings.fontSizeTitle')}
-          </p>
-          <p className="mt-2 text-sm font-bold leading-6 text-[#526381]">
-            {t('workspace.settings.fontSizeDescription')}
-          </p>
+
+          <label className="flex min-w-0 flex-wrap items-center justify-between gap-4 px-5 py-5">
+            <span className="min-w-0">
+              <strong className="block text-sm font-semibold text-[var(--workbench-text)]">
+                {t('language.aria')}
+              </strong>
+              <span className="mt-1 block text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+                {t('workspace.settings.languageDescription')}
+              </span>
+            </span>
+            <select
+              className="workbench-input min-h-10 min-w-[168px] px-3 disabled:cursor-not-allowed disabled:bg-[var(--workbench-surface-muted)]"
+              disabled={!onLocaleChange}
+              value={locale}
+              onChange={(event) => onLocaleChange?.(event.target.value === 'en' ? 'en' : 'ja')}
+            >
+              {localeOptions.map((option) => (
+                <option key={option.locale} value={option.locale}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
       </section>
       <InfoGrid
@@ -1858,6 +2018,16 @@ function SettingsView({
       {accessToken ? (
         <WorkspaceAccessPanelContainer accessToken={accessToken} locale={locale} />
       ) : null}
+
+      <section className="workbench-panel p-5">
+        <p className="workbench-eyebrow">{t('workspace.user.label')}</p>
+        <h2 className="mt-2 text-lg font-semibold text-[var(--workbench-text)]">
+          {t('workspace.settings.profileTitle')}
+        </h2>
+        <p className="mt-3 break-all text-sm font-medium text-[var(--workbench-muted)]">
+          {userLabel}
+        </p>
+      </section>
     </div>
   )
 }
@@ -1971,7 +2141,10 @@ function TeamOverviewView({
                           {project.progress}%
                         </span>
                       </div>
-                      <ProgressBar value={project.progress} />
+                      <ProgressBar
+                        label={`${project.name} ${t('workspace.teamOverview.column.progress')}`}
+                        value={project.progress}
+                      />
                     </div>
                   </td>
                   <td className="px-5 py-4">{project.openTaskCount}</td>
@@ -2059,15 +2232,18 @@ function TeamMembersView({
     return matchesRole && matchesSearch
   })
   const managerCount = members.filter((member) => member.role === 'manager').length
-  const loadedCount = members.filter((member) => member.openTaskCount >= 3 || member.loadPercent >= 75).length
   const openTaskCount = members.reduce((total, member) => total + member.openTaskCount, 0)
+  const attentionTaskCount = members.reduce(
+    (total, member) => total + member.attentionTaskCount,
+    0,
+  )
 
   return (
     <div className="grid gap-6">
       <div className="grid grid-cols-4 gap-4 max-[1180px]:grid-cols-2 max-[680px]:grid-cols-1">
         <MetricCard label={t('workspace.members.metric.members')} value={members.length} tone="teal" />
         <MetricCard label={t('workspace.members.metric.managers')} value={managerCount} tone="amber" />
-        <MetricCard label={t('workspace.members.metric.loaded')} value={loadedCount} tone="red" />
+        <MetricCard label={t('workspace.reports.metric.attention')} value={attentionTaskCount} tone="red" />
         <MetricCard label={t('workspace.members.metric.open')} value={openTaskCount} tone="emerald" />
       </div>
 
@@ -2150,11 +2326,14 @@ function TeamMembersView({
               <div className="grid gap-2">
                 <div className="flex items-center justify-between gap-3">
                   <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#69758a]">
-                    {t('workspace.members.load')}
+                    {t('workspace.members.metric.open')}
                   </p>
-                  <p className="text-sm font-semibold text-[#0d1833]">{member.loadPercent}%</p>
+                  <p className="text-sm font-semibold text-[#0d1833]">{member.openPercent}%</p>
                 </div>
-                <ProgressBar value={member.loadPercent} />
+                <ProgressBar
+                  label={`${member.name} ${t('workspace.members.metric.open')}`}
+                  value={member.openPercent}
+                />
                 <p className="text-xs font-semibold text-[var(--workbench-muted)]">
                   {member.nextDueDate
                     ? t('workspace.members.nextDue').replace('{date}', member.nextDueDate)
@@ -2383,10 +2562,38 @@ function PriorityPill({ priority, t }: { priority: TaskPriority; t: (key: Messag
   )
 }
 
-function ProgressBar({ value }: { value: number }) {
+/**
+ * 集計値を百分率で示す進捗バーの props です。
+ */
+type ProgressBarProps = {
+  /**
+   * 進捗バーが表す対象のアクセシブルネームです。
+   */
+  label: string
+  /**
+   * 0 から 100 の範囲へ補正して表示する進捗値です。
+   */
+  value: number
+}
+
+function ProgressBar({ label, value }: ProgressBarProps) {
+  const normalizedValue = Math.max(0, Math.min(100, value))
+
   return (
-    <div className="h-2 overflow-hidden rounded-full bg-slate-200">
-      <div className="h-full rounded-full bg-[var(--workbench-primary)]" style={{ width: `${Math.max(0, Math.min(100, value))}%` }} />
+    <div
+      aria-label={label}
+      aria-valuemax={100}
+      aria-valuemin={0}
+      aria-valuenow={normalizedValue}
+      aria-valuetext={`${normalizedValue}%`}
+      className="h-2 overflow-hidden rounded-full bg-slate-200"
+      role="progressbar"
+    >
+      <div
+        aria-hidden="true"
+        className="h-full rounded-full bg-[var(--workbench-primary)]"
+        style={{ width: `${normalizedValue}%` }}
+      />
     </div>
   )
 }
@@ -2421,15 +2628,34 @@ function findActiveTeam(teams: ProjectDirectoryTeam[], activeTeamId?: string) {
 async function loadProjectTasks(
   projectIds: readonly string[],
   accessToken: string,
-): Promise<ProjectTask[]> {
-  const taskGroups = await Promise.all(
-    projectIds.map(async (projectId) =>
-      (await getProjectIssues(projectId, accessToken))
+): Promise<WorkspaceProjectTasksResult> {
+  const results = await Promise.allSettled(
+    projectIds.map(async (projectId) => ({
+      projectId,
+      tasks: (await getProjectIssues(projectId, accessToken))
         .map((issue) => toWorkspaceTaskFromIssue(issue, projectId)),
-    ),
+    })),
   )
+  const tasks: ProjectTask[] = []
+  const failedProjectIds: string[] = []
 
-  return taskGroups.flat()
+  for (const [index, result] of results.entries()) {
+    if (result.status === 'fulfilled') {
+      tasks.push(...result.value.tasks)
+      continue
+    }
+
+    const failedProjectId = projectIds[index]
+
+    if (failedProjectId) {
+      failedProjectIds.push(failedProjectId)
+    }
+  }
+
+  return {
+    failedProjectIds,
+    tasks,
+  }
 }
 
 async function loadTeamProjectMembers(
@@ -2636,12 +2862,6 @@ function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) 
     task.assigneeUserId ??
     task.assignee ??
     (task.assigneeKey ? t(task.assigneeKey) : '')
-}
-
-function createActivityTasks(tasks: ProjectTask[]) {
-  return [...tasks]
-    .sort((firstTask, secondTask) => secondTask.dueDate.localeCompare(firstTask.dueDate))
-    .slice(0, 3)
 }
 
 function createActionQueueTasks(tasks: ProjectTask[]) {
@@ -3000,15 +3220,16 @@ function createTeamMemberRows(
   return Array.from(rowsByMemberId.values())
     .map((row) => {
       const memberTasks = tasksByMemberId.get(row.id) ?? []
-      const openTaskCount = memberTasks.filter((task) => task.status !== 'done').length
-      const nextDueDate = memberTasks
+      const openTasks = memberTasks.filter((task) => task.status !== 'done')
+      const openTaskCount = openTasks.length
+      const nextDueDate = openTasks
         .map((task) => task.dueDate)
         .sort((firstDate, secondDate) => firstDate.localeCompare(secondDate))[0]
 
       return {
         ...row,
         attentionTaskCount: memberTasks.filter(isAttentionWorkspaceTask).length,
-        loadPercent: Math.round((openTaskCount / Math.max(1, memberTasks.length)) * 100),
+        openPercent: Math.round((openTaskCount / Math.max(1, memberTasks.length)) * 100),
         nextDueDate,
         openTaskCount,
         projectAccess: row.projectAccess.sort(
@@ -3034,7 +3255,7 @@ function createTeamMemberRow(member: ProjectMember): TeamMemberRow {
     attentionTaskCount: 0,
     email: member.email,
     id: createProjectMemberIdentity(member),
-    loadPercent: 0,
+    openPercent: 0,
     name: member.name?.trim() || member.email || member.id,
     openTaskCount: 0,
     projectAccess: [],

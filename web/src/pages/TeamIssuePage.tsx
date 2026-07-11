@@ -73,6 +73,8 @@ const apiSWRConfig = {
  */
 type IssueViewMode = 'table' | 'board'
 
+const issueViewPanelId = 'team-issue-view-panel'
+
 /**
  * チーム所有 Issue 画面を描画する props です。
  */
@@ -617,23 +619,29 @@ export function TeamIssueScreen({
                     {issueErrorMessage}
                   </p>
                 ) : null}
-                {viewMode === 'table' ? (
-                  <IssueTable
-                    activeTeam={activeTeam}
-                    issues={visibleIssues}
-                    onSelectIssue={onSelectIssue}
-                    selectedIssueId={selectedIssueId}
-                    t={t}
-                  />
-                ) : (
-                  <IssueBoard
-                    activeTeam={activeTeam}
-                    issues={visibleIssues}
-                    onSelectIssue={onSelectIssue}
-                    selectedIssueId={selectedIssueId}
-                    t={t}
-                  />
-                )}
+                <div
+                  aria-label={t(`issues.view.${viewMode}`)}
+                  id={issueViewPanelId}
+                  role="region"
+                >
+                  {viewMode === 'table' ? (
+                    <IssueTable
+                      activeTeam={activeTeam}
+                      issues={visibleIssues}
+                      onSelectIssue={onSelectIssue}
+                      selectedIssueId={selectedIssueId}
+                      t={t}
+                    />
+                  ) : (
+                    <IssueBoard
+                      activeTeam={activeTeam}
+                      issues={visibleIssues}
+                      onSelectIssue={onSelectIssue}
+                      selectedIssueId={selectedIssueId}
+                      t={t}
+                    />
+                  )}
+                </div>
               </section>
               <IssueDetailPane
                 assigneeOptions={assigneeOptions}
@@ -711,6 +719,7 @@ function IssueToolbar({
       <div className="inline-flex h-9 overflow-hidden rounded-[7px] border border-[var(--workbench-border-strong)] bg-white">
         {(['table', 'board'] as const).map((mode) => (
           <button
+            aria-controls={issueViewPanelId}
             aria-pressed={viewMode === mode}
             className={`px-3.5 text-sm font-semibold transition ${
               viewMode === mode ? 'bg-[var(--workbench-primary)] text-white' : 'text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]'
@@ -881,15 +890,23 @@ function IssueTable({
             {issues.length > 0 ? (
               issues.map((issue) => (
                 <tr
-                  aria-selected={selectedIssueId === issue.id}
-                  className={`cursor-pointer border-b border-slate-100 transition last:border-b-0 ${
-                    selectedIssueId === issue.id ? 'workbench-row-selected' : 'hover:bg-[var(--workbench-surface-muted)]'
+                  className={`border-b border-slate-100 transition last:border-b-0 ${
+                    selectedIssueId === issue.id ? 'workbench-row-selected' : ''
                   }`}
-                  data-testid={`issue-row-${issue.id}`}
                   key={issue.id}
-                  onClick={() => onSelectIssue?.(issue.id)}
                 >
-                  <td className="px-5 py-3 text-sm font-semibold text-[var(--workbench-text)]">{resolveIssueTitle(issue, t)}</td>
+                  <td className="p-0 text-sm font-semibold text-[var(--workbench-text)]">
+                    <button
+                      aria-pressed={selectedIssueId === issue.id}
+                      className="w-full rounded-sm px-5 py-3 text-left font-semibold transition hover:text-[var(--workbench-primary)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#2563eb]/10 disabled:cursor-default disabled:text-[var(--workbench-text)]"
+                      data-testid={`issue-row-${issue.id}`}
+                      disabled={!onSelectIssue}
+                      onClick={() => onSelectIssue?.(issue.id)}
+                      type="button"
+                    >
+                      {resolveIssueTitle(issue, t)}
+                    </button>
+                  </td>
                   <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveAssignedProjectName(issue, activeTeam, t)}</td>
                   <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveIssueAssignee(issue)}</td>
                   <td className="px-4 py-4"><IssueStatusBadge status={issue.status} t={t} /></td>

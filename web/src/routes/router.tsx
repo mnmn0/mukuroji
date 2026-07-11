@@ -1,8 +1,12 @@
-import { createBrowserRouter, Navigate } from 'react-router'
+import { createBrowserRouter } from 'react-router'
+import { ForgotPasswordPage } from '../pages/ForgotPasswordPage'
 import { LoginPage } from '../pages/LoginPage'
-import { PlaceholderPage } from '../pages/PlaceholderPage'
+import { NotFoundPage } from '../pages/NotFoundPage'
+import { PrivacyPage } from '../pages/PrivacyPage'
+import { SupportPage } from '../pages/SupportPage'
 import { TaskPage } from '../pages/TaskPage'
 import { TeamIssuePage } from '../pages/TeamIssuePage'
+import { TermsPage } from '../pages/TermsPage'
 import { WorkspacePage } from '../pages/WorkspacePage'
 import { ProjectTasksRedirect } from './ProjectTasksRedirect'
 
@@ -64,42 +68,22 @@ export const router = createBrowserRouter([
   },
   {
     path: '/forgot-password',
-    element: (
-      <PlaceholderPage
-        titleKey="placeholder.forgotPassword.title"
-        descriptionKey="placeholder.forgotPassword.description"
-      />
-    ),
+    element: <ForgotPasswordPage />,
   },
   {
     path: '/privacy',
-    element: (
-      <PlaceholderPage
-        titleKey="placeholder.privacy.title"
-        descriptionKey="placeholder.privacy.description"
-      />
-    ),
+    element: <PrivacyPage />,
   },
   {
     path: '/terms',
-    element: (
-      <PlaceholderPage
-        titleKey="placeholder.terms.title"
-        descriptionKey="placeholder.terms.description"
-      />
-    ),
+    element: <TermsPage />,
   },
   {
     path: '/support',
-    element: (
-      <PlaceholderPage
-        titleKey="placeholder.support.title"
-        descriptionKey="placeholder.support.description"
-      />
-    ),
+    element: <SupportPage />,
   },
   {
     path: '*',
-    element: <Navigate to="/" replace />,
+    element: <NotFoundPage />,
   },
 ])

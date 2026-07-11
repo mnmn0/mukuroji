@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { KeyboardEvent, ReactNode } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import useSWR from 'swr'
 import {
@@ -354,6 +354,12 @@ const viewLabelKeys: Record<TaskTab, MessageKey> = {
   calendar: 'tasks.view.calendar',
   file: 'tasks.view.file',
   permissions: 'tasks.view.permissions',
+}
+
+const taskTabPanelId = 'task-tabpanel'
+
+function createTaskTabId(tab: TaskTab) {
+  return `task-tab-${tab}`
 }
 
 /**
@@ -1043,7 +1049,12 @@ export function TaskScreen({
                 t={t}
               />
             ) : null}
-            <div className={`grid min-h-full ${activeTab === 'permissions' ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_minmax(360px,440px)] max-[1180px]:grid-cols-1'}`}>
+            <div
+              aria-labelledby={createTaskTabId(activeTab)}
+              className={`grid min-h-full ${activeTab === 'permissions' || activeTab === 'file' ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_minmax(360px,440px)] max-[1180px]:grid-cols-1'}`}
+              id={taskTabPanelId}
+              role="tabpanel"
+            >
               <TaskWorkspace
                 activeTab={activeTab}
                 allTasks={tasks}
@@ -1109,7 +1120,7 @@ export function TaskScreen({
                 taskErrorMessage={taskErrorMessage}
                 tasks={visibleTasks}
               />
-              {activeTab === 'permissions' ? null : (
+              {activeTab === 'permissions' || activeTab === 'file' ? null : (
                 <TaskDetailPane
                   assigneeOptions={assigneeOptions}
                   collaboration={collaboration}
@@ -1270,6 +1281,30 @@ function TaskHeader({
 }) {
   const openTaskCount = tasks.filter((task) => task.status !== 'done').length
   const reviewTaskCount = tasks.filter((task) => task.status === 'review').length
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: TaskTab) => {
+    const tabIndex = taskTabs.indexOf(tab)
+    let nextTabIndex: number | undefined
+
+    if (event.key === 'ArrowRight') {
+      nextTabIndex = (tabIndex + 1) % taskTabs.length
+    } else if (event.key === 'ArrowLeft') {
+      nextTabIndex = (tabIndex - 1 + taskTabs.length) % taskTabs.length
+    } else if (event.key === 'Home') {
+      nextTabIndex = 0
+    } else if (event.key === 'End') {
+      nextTabIndex = taskTabs.length - 1
+    }
+
+    if (nextTabIndex === undefined) {
+      return
+    }
+
+    event.preventDefault()
+    const nextTab = taskTabs[nextTabIndex]
+
+    onTabChange(nextTab)
+    document.getElementById(createTaskTabId(nextTab))?.focus()
+  }
 
   return (
     <header className="workbench-header flex-none">
@@ -1308,15 +1343,17 @@ function TaskHeader({
           </div>
         </div>
 
-        <div className="flex flex-none items-center gap-2 max-[860px]:hidden">
-          <IconButton label={t('tasks.action.favorite')}>
-            <StarIcon />
-          </IconButton>
-          <IconButton label={t('tasks.action.more')}>
-            <MoreIcon />
-          </IconButton>
+        <div className="flex flex-none items-center gap-2">
+          <span className="contents max-[860px]:hidden">
+            <IconButton label={t('tasks.action.favorite')}>
+              <StarIcon />
+            </IconButton>
+            <IconButton label={t('tasks.action.more')}>
+              <MoreIcon />
+            </IconButton>
+          </span>
           <button
-            className="workbench-button-secondary inline-flex h-9 items-center gap-2 px-3"
+            className="workbench-button-secondary inline-flex h-9 items-center gap-2 px-3 max-[860px]:hidden"
             type="button"
           >
             <UsersMiniIcon />
@@ -1326,21 +1363,23 @@ function TaskHeader({
             <button
               aria-controls={isCreateTaskOpen ? 'create-task-form' : undefined}
               aria-expanded={isCreateTaskOpen}
-              className="workbench-button-primary inline-flex h-9 items-center gap-2 px-3.5"
+              className="workbench-button-primary inline-flex h-10 items-center justify-center gap-2 px-3.5 max-[520px]:w-10 max-[520px]:px-0"
               onClick={() => onCreateTaskOpenChange(!isCreateTaskOpen)}
               type="button"
             >
               <PlusIcon />
-              {t('tasks.action.newTask')}
-              <ChevronIcon className="h-4 w-4" />
+              <span className="max-[520px]:sr-only">{t('tasks.action.newTask')}</span>
+              <ChevronIcon className="h-4 w-4 max-[520px]:hidden" />
             </button>
           ) : null}
-          <IconButton label={t('tasks.action.notifications')} rounded>
-            <BellOutlineIcon />
-          </IconButton>
+          <span className="max-[860px]:hidden">
+            <IconButton label={t('tasks.action.notifications')} rounded>
+              <BellOutlineIcon />
+            </IconButton>
+          </span>
           <div
             aria-label={t('tasks.userAvatar')}
-            className="grid h-9 w-9 place-items-center rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-sm font-semibold text-[var(--workbench-primary)]"
+            className="grid h-9 w-9 place-items-center rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-sm font-semibold text-[var(--workbench-primary)] max-[860px]:hidden"
           >
             {userInitial}
           </div>
@@ -1351,13 +1390,17 @@ function TaskHeader({
         <div aria-label={t('tasks.tabs.aria')} className="flex min-w-max items-center gap-0" role="tablist">
           {taskTabs.map((tab) => (
             <button
+              aria-controls={taskTabPanelId}
               aria-selected={activeTab === tab}
               className={`relative inline-flex h-11 items-center gap-2 border-r border-transparent px-3.5 text-app-caption font-semibold transition ${
                 activeTab === tab ? 'text-[var(--workbench-text)]' : 'text-[var(--workbench-muted)] hover:text-[var(--workbench-text)]'
               }`}
+              id={createTaskTabId(tab)}
               key={tab}
               onClick={() => onTabChange(tab)}
+              onKeyDown={(event) => handleTabKeyDown(event, tab)}
               role="tab"
+              tabIndex={activeTab === tab ? 0 : -1}
               type="button"
             >
               <TabIcon tab={tab} />
@@ -1514,6 +1557,14 @@ function TaskWorkspace({
           onUpdateMember={onUpdateProjectMember}
           onUserQueryChange={onProjectUserQueryChange}
         />
+      </div>
+    )
+  }
+
+  if (activeTab === 'file') {
+    return (
+      <div className="px-[clamp(18px,2.5vw,30px)] py-4">
+        <TaskFileList t={t} tasks={tasks} />
       </div>
     )
   }
@@ -1735,15 +1786,20 @@ function TaskWorkspace({
               </div>
             ) : null}
           </div>
-          <button
-            className="workbench-button-secondary inline-flex h-9 items-center gap-2 px-3"
-            type="button"
-          >
-            <SettingsMiniIcon />
-            {t('tasks.viewSettings')}
-          </button>
         </div>
       </div>
+
+      {taskErrorMessage && activeTab !== 'table' ? (
+        <p
+          className="mt-3 rounded-md border border-red-200 bg-red-50 px-5 py-4 text-sm font-semibold text-red-700"
+          data-testid="tasks-error"
+          role="alert"
+        >
+          {taskErrorMessage === t('tasks.error.loading')
+            ? taskErrorMessage
+            : `${t('tasks.error.loading')}: ${taskErrorMessage}`}
+        </p>
+      ) : null}
 
       {activeTab === 'table' ? (
         <TaskTable
@@ -1757,7 +1813,7 @@ function TaskWorkspace({
           tasks={tasks}
         />
       ) : null}
-      {activeTab === 'board' ? (
+      {activeTab === 'board' && !taskErrorMessage ? (
         <TaskBoard
           selectedDetailTaskId={selectedDetailTaskId}
           t={t}
@@ -1765,9 +1821,8 @@ function TaskWorkspace({
           onSelectTask={onSelectTask}
         />
       ) : null}
-      {activeTab === 'gantt' ? <TaskGantt t={t} tasks={tasks} /> : null}
-      {activeTab === 'calendar' ? <TaskCalendar t={t} tasks={tasks} /> : null}
-      {activeTab === 'file' ? <TaskFileList t={t} tasks={tasks} /> : null}
+      {activeTab === 'gantt' && !taskErrorMessage ? <TaskGantt t={t} tasks={tasks} /> : null}
+      {activeTab === 'calendar' && !taskErrorMessage ? <TaskCalendar t={t} tasks={tasks} /> : null}
     </div>
   )
 }
@@ -1798,6 +1853,7 @@ function CreateTaskPanel({
       <form
         className="workbench-panel grid gap-3 p-4"
         data-testid="create-task-form"
+        id="create-task-form"
         onSubmit={(event) => {
           event.preventDefault()
 
@@ -2020,9 +2076,11 @@ function TaskTable({
                   colSpan={6}
                   data-testid="tasks-error"
                 >
-                  {taskErrorMessage === t('tasks.error.loading')
-                    ? taskErrorMessage
-                    : `${t('tasks.error.loading')}: ${taskErrorMessage}`}
+                  <span role="alert">
+                    {taskErrorMessage === t('tasks.error.loading')
+                      ? taskErrorMessage
+                      : `${t('tasks.error.loading')}: ${taskErrorMessage}`}
+                  </span>
                 </td>
               </tr>
             ) : tasks.length > 0 ? (
@@ -2085,7 +2143,8 @@ function TaskBoard({
   return (
     <section
       aria-label={t(viewLabelKeys.board)}
-      className="mt-3 grid grid-cols-4 gap-3 max-[1180px]:grid-cols-2 max-[720px]:grid-cols-1"
+      className="mt-3 grid min-w-0 gap-3"
+      style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 230px), 1fr))' }}
     >
       <ViewHeading
         className="col-span-full"
@@ -2354,55 +2413,57 @@ function TaskDetailPane({
 }
 
 function TaskGantt({ t, tasks }: { t: (key: MessageKey) => string; tasks: ProjectTask[] }) {
-  const sortedTasks = [...tasks].sort((firstTask, secondTask) =>
-    firstTask.dueDate.localeCompare(secondTask.dueDate),
-  )
+  const sortedTasks = sortTasksByDueDate(tasks, 'due-date-asc')
 
   return (
     <section
       aria-label={t(viewLabelKeys.gantt)}
       className="workbench-table mt-3 overflow-hidden"
     >
-      <ViewHeading count={tasks.length} t={t} titleKey={viewLabelKeys.gantt} />
-      <div className="grid grid-cols-[240px_1fr] border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] text-xs font-semibold text-[var(--workbench-muted)] max-[820px]:grid-cols-[210px_1fr]">
-        <div className="px-4 py-3">{t('tasks.gantt.owner')}</div>
-        <div className="grid grid-cols-4 px-4 py-3">
-          <span>{t('tasks.gantt.phase.discovery')}</span>
-          <span>{t('tasks.gantt.phase.build')}</span>
-          <span>{t('tasks.gantt.phase.review')}</span>
-          <span>{t('tasks.gantt.phase.release')}</span>
-        </div>
-      </div>
-      <div className="divide-y divide-[#e4e7ec]">
-        {sortedTasks.map((task, index) => (
-          <div className="grid grid-cols-[240px_1fr] items-center max-[820px]:grid-cols-[210px_1fr]" key={createTaskKey(task)}>
-            <div className="min-w-0 px-4 py-3">
-              <p className="truncate text-sm font-semibold text-[#1c1d1f]">{resolveTaskTitle(task, t)}</p>
-              <p className="mt-1 text-xs font-medium text-[#5f6874]">{resolveTaskAssignee(task, t)}</p>
-            </div>
-            <div className="px-4 py-3">
-              <div className="relative h-9 rounded-md bg-[var(--workbench-surface-muted)]">
-                <div
-                  className="absolute top-2 h-5 rounded-md bg-[var(--workbench-primary)]"
-                  style={{
-                    left: `${Math.min(index * 14, 58)}%`,
-                    width: `${task.priority === 'high' ? 38 : task.priority === 'medium' ? 32 : 24}%`,
-                  }}
-                />
+      <ViewHeading
+        count={tasks.length}
+        meta={t('tasks.calendar.weekTitle')}
+        t={t}
+        titleKey={viewLabelKeys.gantt}
+      />
+      {sortedTasks.length > 0 ? (
+        <div className="divide-y divide-[#e4e7ec]">
+          {sortedTasks.map((task) => (
+            <article
+              className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-4 py-3 max-[640px]:grid-cols-1"
+              key={createTaskKey(task)}
+            >
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold text-[#1c1d1f]">
+                  {resolveTaskTitle(task, t)}
+                </p>
+                <p className="mt-1 text-xs font-medium text-[#5f6874]">
+                  {resolveTaskAssignee(task, t)}
+                </p>
               </div>
-              <p className="mt-2 text-xs font-semibold text-[#5f6874]">
-                {t('tasks.gantt.window').replace('{date}', task.dueDate)}
-              </p>
-            </div>
-          </div>
-        ))}
-      </div>
+              <div className="flex flex-wrap items-center justify-end gap-2 max-[640px]:justify-start">
+                <TaskStatusBadge status={task.status} t={t} />
+                <span className="text-xs font-semibold text-[#5f6874]">
+                  {task.dueDate
+                    ? t('tasks.gantt.window').replace('{date}', task.dueDate)
+                    : t('tasks.calendar.empty')}
+                </span>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="border-t border-[var(--workbench-border)] px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
+          {t('tasks.empty')}
+        </p>
+      )}
     </section>
   )
 }
 
 function TaskCalendar({ t, tasks }: { t: (key: MessageKey) => string; tasks: ProjectTask[] }) {
   const taskCalendarDays = createTaskCalendarDays(tasks)
+  const unscheduledTasks = tasks.filter((task) => !task.dueDate.trim())
 
   return (
     <section
@@ -2415,32 +2476,47 @@ function TaskCalendar({ t, tasks }: { t: (key: MessageKey) => string; tasks: Pro
         t={t}
         titleKey={viewLabelKeys.calendar}
       />
-      <div className="grid grid-cols-6 max-[1180px]:grid-cols-3 max-[720px]:grid-cols-1">
-        {taskCalendarDays.map((day) => {
-          const dayTasks = tasks.filter((task) => task.dueDate === day.date)
+      {tasks.length > 0 ? (
+        <div
+          className="grid"
+          style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 230px), 1fr))' }}
+        >
+          {taskCalendarDays.map((day) => {
+            const dayTasks = tasks.filter((task) => task.dueDate === day.date)
 
-          return (
-            <div className="min-h-[230px] border-r border-[#e4e7ec] p-3 last:border-r-0" key={`${day.id}-${day.date}`}>
-              <p className="text-sm font-semibold text-[#1c1d1f]">{day.label}</p>
-              <p className="mt-1 text-xs font-medium text-[#5f6874]">{day.date}</p>
-              <div className="mt-3 grid gap-2">
-                {dayTasks.length > 0 ? (
-                  dayTasks.map((task) => (
+            return (
+              <div className="min-h-[190px] border-b border-r border-[#e4e7ec] p-3" key={day.id}>
+                <p className="text-sm font-semibold text-[#1c1d1f]">{day.label}</p>
+                <div className="mt-3 grid gap-2">
+                  {dayTasks.map((task) => (
                     <article className="rounded-md border border-[#99d7cf] bg-[#e5f7f4] p-3" key={createTaskKey(task)}>
                       <p className="text-sm font-semibold leading-5 text-[var(--workbench-text)]">{resolveTaskTitle(task, t)}</p>
                       <p className="mt-2 text-xs font-medium text-[var(--workbench-primary)]">{resolveTaskAssignee(task, t)}</p>
                     </article>
-                  ))
-                ) : (
-                  <p className="rounded-md border border-dashed border-[#d3d8df] px-3 py-5 text-sm font-medium text-[#5f6874]">
-                    {t('tasks.calendar.empty')}
-                  </p>
-                )}
+                  ))}
+                </div>
+              </div>
+            )
+          })}
+          {unscheduledTasks.length > 0 ? (
+            <div className="min-h-[190px] border-b border-r border-[#e4e7ec] p-3">
+              <p className="text-sm font-semibold text-[#1c1d1f]">{t('tasks.calendar.empty')}</p>
+              <div className="mt-3 grid gap-2">
+                {unscheduledTasks.map((task) => (
+                  <article className="rounded-md border border-[var(--workbench-border)] bg-white p-3" key={createTaskKey(task)}>
+                    <p className="text-sm font-semibold leading-5 text-[var(--workbench-text)]">{resolveTaskTitle(task, t)}</p>
+                    <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">{resolveTaskAssignee(task, t)}</p>
+                  </article>
+                ))}
               </div>
             </div>
-          )
-        })}
-      </div>
+          ) : null}
+        </div>
+      ) : (
+        <p className="border-t border-[var(--workbench-border)] px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
+          {t('tasks.empty')}
+        </p>
+      )}
     </section>
   )
 }
@@ -2571,7 +2647,7 @@ function SummaryCard({ t, tasks }: { t: (key: MessageKey) => string; tasks: Proj
   return (
     <section
       aria-label={t('tasks.summary.aria')}
-      className="flex min-w-[390px] items-center gap-3 border-l border-[#e4e7ec] py-2 pl-4 max-[1280px]:hidden"
+      className="flex min-w-[390px] items-center gap-3 border-l border-[#e4e7ec] py-2 pl-4 max-[1400px]:hidden"
     >
       {projectMetrics.map((metric) => (
         <div className="min-w-[96px]" key={metric.labelKey}>
@@ -2899,18 +2975,6 @@ function createTaskCalendarDays(tasks: ProjectTask[]) {
   const dates = Array.from(new Set(tasks.map((task) => task.dueDate)))
     .filter(Boolean)
     .sort()
-    .slice(0, 6)
-  const today = new Date().toISOString().slice(0, 10).replaceAll('-', '/')
-
-  if (dates.length === 0) {
-    return [
-      {
-        id: 'empty',
-        label: today,
-        date: today,
-      },
-    ]
-  }
 
   return dates.map((date) => ({
     id: date,
@@ -2986,15 +3050,6 @@ function IconShell({ children, className = '' }: { children: ReactNode; classNam
   )
 }
 
-function SearchIcon({ className = 'h-5 w-5' }: { className?: string }) {
-  return (
-    <IconShell className={className}>
-      <circle cx="11" cy="11" r="7" />
-      <path d="m20 20-3.5-3.5" />
-    </IconShell>
-  )
-}
-
 function StarIcon() {
   return (
     <IconShell>
@@ -3017,6 +3072,15 @@ function UsersMiniIcon() {
       <path d="M16 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2" />
       <circle cx="9.5" cy="7" r="4" />
       <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+    </IconShell>
+  )
+}
+
+function SearchIcon({ className = 'h-5 w-5' }: { className?: string }) {
+  return (
+    <IconShell className={className}>
+      <circle cx="11" cy="11" r="7" />
+      <path d="m20 20-3.5-3.5" />
     </IconShell>
   )
 }
@@ -3078,15 +3142,6 @@ function FlagIcon({ className = 'h-5 w-5' }: { className?: string }) {
     <IconShell className={className}>
       <path d="M5 21V5" />
       <path d="M5 5h12l-1.5 4L17 13H5" />
-    </IconShell>
-  )
-}
-
-function SettingsMiniIcon() {
-  return (
-    <IconShell>
-      <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
-      <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-.4-1 1.7 1.7 0 0 0-1-.6 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1-.4 1.7 1.7 0 0 0 .6-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 .4 1 1.7 1.7 0 0 0 1 .6 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 .6 1 1.7 1.7 0 0 0 1 .4h.1a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1 .4 1.7 1.7 0 0 0-.6 1Z" />
     </IconShell>
   )
 }

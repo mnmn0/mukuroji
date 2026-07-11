@@ -88,6 +88,30 @@ type MockRequestCounts = {
 const mockRequestCountsByPage = new WeakMap<Page, MockRequestCounts>()
 
 /**
+ * 認証済みユーザー API を指定したユーザーへ差し替えます。
+ *
+ * @param page - API route を差し替える Playwright page です。
+ * @param username - username と email に使う識別子です。
+ * @param name - 画面に表示するユーザー名です。
+ */
+async function mockCurrentUser(page: Page, username: string, name: string) {
+  await page.unroute('**/api/auth/me')
+  await page.route('**/api/auth/me', async (route) => {
+    await route.fulfill({
+      json: {
+        username,
+        attributes: {
+          email: username,
+          name,
+        },
+        groups: ['mukuroji-system-admins'],
+        isSystemAdmin: true,
+      },
+    })
+  })
+}
+
+/**
  * 認証済みタスク画面 mock の追加設定です。
  */
 type MockAuthenticatedTaskPageOptions = {
@@ -442,6 +466,8 @@ async function mockAuthenticatedTaskPage(
     if (team) {
       team.projects = team.projects.filter((project) => project.id !== projectId)
     }
+
+    await new Promise((resolve) => setTimeout(resolve, 150))
 
     await route.fulfill({
       json: {
@@ -1468,6 +1494,14 @@ test.describe('authenticated task page', () => {
     )
     await expect(page.getByText('ボードビュー')).toBeVisible()
 
+    await page.getByRole('tab', { name: '期限順' }).click()
+    await expect(page.getByText('期限順リスト')).toBeVisible()
+
+    await page.getByRole('tab', { name: 'ファイル' }).click()
+    await expect(page.getByRole('heading', { name: 'ファイル機能は準備中です' })).toBeVisible()
+    await expect(page.getByRole('tabpanel').getByRole('searchbox')).toHaveCount(0)
+    await expect(page.getByTestId('task-detail-pane')).toHaveCount(0)
+
     await page.getByRole('button', { name: 'サイドバーを折りたたむ' }).click()
 
     await expect(page.getByLabel('メインサイドバー')).toHaveAttribute('data-collapsed', 'true')
@@ -1521,6 +1555,29 @@ test.describe('authenticated task page', () => {
     expect(Math.abs(drawerState.top)).toBeLessThanOrEqual(1)
     expect(Math.abs(drawerState.height - drawerState.viewportHeight)).toBeLessThanOrEqual(1)
     expect(drawerState.width).toBeLessThanOrEqual(drawerState.viewportWidth - 32)
+
+    const archiveButton = page.getByRole('button', { name: 'Refero をアーカイブ' })
+
+    await archiveButton.click()
+    const archiveDialog = page.getByRole('dialog', { name: 'アーカイブの確認' })
+    const archiveConfirmButton = archiveDialog.getByRole('button', { name: 'アーカイブ' })
+
+    await expect(archiveDialog).toContainText('現在この画面からは復元できません')
+    await expect(archiveDialog.getByRole('button', { name: 'キャンセル' })).toBeFocused()
+    await page.keyboard.press('Shift+Tab')
+    await expect(archiveConfirmButton).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect(archiveDialog).toHaveCount(0)
+    await expect(drawer).toBeVisible()
+    await expect(archiveButton).toBeFocused()
+
+    await archiveButton.click()
+    await archiveDialog.getByRole('button', { name: 'アーカイブ' }).click()
+    await expect(archiveDialog).toHaveCount(0)
+    await expect(drawer).toBeVisible()
+    await expect(sidebar).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(sidebar.getByRole('button', { name: 'サイドバーを折りたたむ' })).toBeFocused()
 
     await page.mouse.move(180, 620)
     await page.mouse.wheel(0, 700)
@@ -1623,6 +1680,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('サイドバーからマイタスクへ移動するとタスクをカンバンで表示する', async ({ page }) => {
+    await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
     await page.goto('/dashboard')
     const requestCounts = getMockRequestCounts(page)
 
@@ -1638,14 +1696,10 @@ test.describe('authenticated task page', () => {
       page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
     ).toBeVisible()
     await expect(
-      page.getByTestId('my-tasks-column-todo').getByTestId('my-tasks-card-refero-seo-research'),
-    ).toBeVisible()
-    await expect(
-      page.getByTestId('my-tasks-column-review').getByTestId('my-tasks-card-refero-brand-guideline'),
-    ).toBeVisible()
-    await expect(
-      page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-competitor-report'),
-    ).toBeVisible()
+      page.getByTestId('my-tasks-card-refero-seo-research'),
+    ).toHaveCount(0)
+    await expect(page.getByTestId('my-tasks-card-refero-brand-guideline')).toHaveCount(0)
+    await expect(page.getByTestId('my-tasks-card-refero-competitor-report')).toHaveCount(0)
 
     await expect(
       page.getByTestId('my-tasks-card-refero-brand-guideline-status-select'),
@@ -1659,6 +1713,17 @@ test.describe('authenticated task page', () => {
     await expect(
       page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
     ).toBeVisible()
+    const boardGeometry = await page.getByTestId('my-tasks-kanban').evaluate((element) => {
+      const columnRects = Array.from(element.children).map((column) => column.getBoundingClientRect())
+
+      return {
+        hasOverlap: columnRects.slice(1).some((rect, index) => columnRects[index].right > rect.left),
+        isScrollable: element.scrollWidth > element.clientWidth,
+      }
+    })
+
+    expect(boardGeometry.hasOverlap).toBe(false)
+    expect(boardGeometry.isScrollable).toBe(true)
     expect(requestCounts.taskStatusUpdates).toBe(0)
   })
 
@@ -1746,6 +1811,18 @@ test.describe('authenticated task page', () => {
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('button', { name: 'Refero をアーカイブ' }).click()
+    await expect(page.getByRole('dialog', { name: 'アーカイブの確認' })).toBeVisible()
+    expect(requestCounts.projectArchives).toBe(0)
+
+    await page.getByRole('button', { name: 'キャンセル', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Refero', exact: true })).toHaveCount(1)
+
+    await page.getByRole('button', { name: 'Refero をアーカイブ' }).click()
+    const archiveDialog = page.getByRole('dialog', { name: 'アーカイブの確認' })
+
+    await archiveDialog.getByRole('button', { name: 'アーカイブ', exact: true }).click()
+    await expect(archiveDialog).toHaveAttribute('aria-busy', 'true')
+    await expect(archiveDialog).toBeFocused()
 
     await expect(page.getByRole('button', { name: 'Refero', exact: true })).toHaveCount(0)
     expect(requestCounts.projectArchives).toBe(1)
@@ -1758,6 +1835,7 @@ test.describe('authenticated task page', () => {
     await expect(page.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(2)
 
     await page.getByRole('button', { name: 'デザインチーム をアーカイブ' }).click()
+    await page.getByRole('button', { name: 'アーカイブ', exact: true }).click()
 
     await expect(page.getByRole('button', { name: 'デザインチーム', exact: true })).toHaveCount(0)
     await expect(page.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(1)
@@ -2278,7 +2356,9 @@ test('マイタスクの片方の移動が失敗しても別 Issue の成功済�
       ],
     },
   })
+  await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
 
+  await page.setViewportSize({ width: 1600, height: 900 })
   await page.goto('/my-tasks')
 
   await page
@@ -2339,7 +2419,9 @@ test('マイタスクでは同一 Issue の移動中に追加移動を開始で�
       ],
     },
   })
+  await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
 
+  await page.setViewportSize({ width: 1600, height: 900 })
   await page.goto('/my-tasks')
 
   await page

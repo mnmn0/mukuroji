@@ -47,6 +47,12 @@ export function MobileSidebarDrawer({
   onClose,
 }: MobileSidebarDrawerProps) {
   const drawerRef = useRef<HTMLDivElement>(null)
+  const drawerContentRef = useRef<HTMLDivElement>(null)
+  const onCloseRef = useRef(onClose)
+
+  useEffect(() => {
+    onCloseRef.current = onClose
+  }, [onClose])
 
   useEffect(() => {
     if (!isOpen) {
@@ -58,16 +64,25 @@ export function MobileSidebarDrawer({
         ? document.activeElement
         : undefined
     const drawer = drawerRef.current
-    const firstFocusableElement = getFocusableElements(drawer)[0]
+    const drawerContent = drawerContentRef.current
+    const firstFocusableElement = getFocusableElements(drawerContent)[0]
     const previousBodyOverflow = document.body.style.overflow
 
     document.body.style.overflow = 'hidden'
     ;(firstFocusableElement ?? drawer)?.focus()
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      const hasNestedModal = Boolean(
+        drawerContent?.querySelector('[role="dialog"][aria-modal="true"]'),
+      )
+
+      if (hasNestedModal) {
+        return
+      }
+
       if (event.key === 'Escape') {
         event.preventDefault()
-        onClose()
+        onCloseRef.current()
         return
       }
 
@@ -75,7 +90,7 @@ export function MobileSidebarDrawer({
         return
       }
 
-      const focusableElements = getFocusableElements(drawer)
+      const focusableElements = getFocusableElements(drawerContent)
 
       if (focusableElements.length === 0) {
         event.preventDefault()
@@ -86,6 +101,12 @@ export function MobileSidebarDrawer({
       const firstElement = focusableElements[0]
       const lastElement = focusableElements[focusableElements.length - 1]
       const activeElement = document.activeElement
+
+      if (!activeElement || !drawerContent?.contains(activeElement)) {
+        event.preventDefault()
+        ;(event.shiftKey ? lastElement : firstElement).focus()
+        return
+      }
 
       if (event.shiftKey && activeElement === firstElement) {
         event.preventDefault()
@@ -106,7 +127,7 @@ export function MobileSidebarDrawer({
       document.body.style.overflow = previousBodyOverflow
       previousFocusedElement?.focus()
     }
-  }, [isOpen, onClose])
+  }, [isOpen])
 
   if (!isOpen) {
     return null
@@ -124,10 +145,14 @@ export function MobileSidebarDrawer({
       <button
         aria-label={closeLabel}
         className="absolute inset-0 bg-slate-950/45"
+        tabIndex={-1}
         type="button"
         onClick={onClose}
       />
-      <div className="relative z-10 h-dvh max-h-dvh w-fit max-w-[calc(100vw-32px)]">
+      <div
+        className="relative z-10 h-dvh max-h-dvh w-fit max-w-[calc(100vw-32px)]"
+        ref={drawerContentRef}
+      >
         {children}
       </div>
     </div>

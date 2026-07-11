@@ -113,14 +113,14 @@ const dictionaries = {
     'tasks.tabs.aria': 'タスクビュー',
     'tasks.tab.table': 'テーブル',
     'tasks.tab.board': 'ボード',
-    'tasks.tab.gantt': 'ガント',
-    'tasks.tab.calendar': 'カレンダー',
+    'tasks.tab.gantt': '期限順',
+    'tasks.tab.calendar': '期限カレンダー',
     'tasks.tab.file': 'ファイル',
     'tasks.tab.permissions': '権限',
     'tasks.view.table': 'テーブルビュー',
     'tasks.view.board': 'ボードビュー',
-    'tasks.view.gantt': 'ガントビュー',
-    'tasks.view.calendar': 'カレンダービュー',
+    'tasks.view.gantt': '期限順リスト',
+    'tasks.view.calendar': '期限カレンダー',
     'tasks.view.file': 'ファイルビュー',
     'tasks.view.permissions': '権限管理',
     'tasks.summary.aria': 'プロジェクトの進捗サマリー',
@@ -171,9 +171,9 @@ const dictionaries = {
     'tasks.calendar.day.thu': '木',
     'tasks.calendar.day.fri': '金',
     'tasks.calendar.empty': '予定なし',
-    'tasks.file.title': 'プロジェクトファイル',
+    'tasks.file.title': 'ファイル機能は準備中です',
     'tasks.file.description':
-      '承認資料、デザイン、調査メモなど、進捗判断に必要なファイルをまとめます。',
+      'ファイル保存先はまだ接続されていません。承認資料やデザインは現在の共有先で管理してください。',
     'tasks.file.column.name': 'ファイル名',
     'tasks.file.column.type': '種別',
     'tasks.file.column.owner': '所有者',
@@ -488,35 +488,37 @@ const dictionaries = {
     'workspace.help.eyebrow': 'サポート',
     'workspace.help.title': 'ヘルプ',
     'workspace.help.description':
-      '運用ルール、トラブル対応、サポート窓口をまとめたチーム向けのヘルプです。',
-    'workspace.help.guideTitle': 'スタートガイド',
+      'ホーム、レポート、トラブル対応、正式な問い合わせ経路へ移動できます。',
+    'workspace.help.guideTitle': 'ホームの使い方',
     'workspace.help.guideDescription':
-      'チーム、プロジェクト、タスク、レポートの基本運用を短く確認できます。',
-    'workspace.help.runbookTitle': '運用ランブック',
+      '担当作業、要確認事項、最近の状況をホームで確認します。',
+    'workspace.help.runbookTitle': 'レポートで進捗を確認',
     'workspace.help.runbookDescription':
-      '進捗会議、遅延検知、承認フローの標準手順を参照できます。',
+      '実データから集計したプロジェクト健全性と期限状況を確認します。',
     'workspace.help.supportTitle': 'サポート窓口',
     'workspace.help.supportDescription':
-      'ワークスペース管理者と mukuroji サポートへの問い合わせ導線です。',
-    'workspace.help.statusTitle': 'サービス状態',
+      '組織管理者や契約上の窓口へ渡す安全な問い合わせメモを準備します。',
+    'workspace.help.statusTitle': 'トラブルシューティング',
     'workspace.help.statusDescription':
-      'API、通知、レポート生成の稼働状態を確認できます。',
+      'Issue・タスクの表示や同期に問題があるときの確認事項を参照します。',
     'workspace.settings.eyebrow': '管理',
     'workspace.settings.title': '設定',
     'workspace.settings.description':
-      'ワークスペースの基本情報、通知、権限、外部連携を管理します。',
+      'このブラウザの表示言語と文字サイズ、ログイン中のアカウントを確認します。',
     'workspace.settings.displayTitle': '表示設定',
     'workspace.settings.displayDescription':
-      'このブラウザで使う文字サイズと画面密度を調整します。',
+      'このブラウザで使う文字サイズと表示言語を調整します。',
     'workspace.settings.fontSizeTitle': 'フォントサイズ',
     'workspace.settings.fontSizeDescription':
       'タスク一覧、サイドバー、設定画面などアプリ全体の文字サイズに反映されます。',
     'workspace.settings.fontSize.compact': '小さめ',
     'workspace.settings.fontSize.standard': '標準',
     'workspace.settings.fontSize.comfortable': '大きめ',
-    'workspace.settings.profileTitle': 'ワークスペース情報',
+    'workspace.settings.profileTitle': 'ログイン中のアカウント',
     'workspace.settings.profileDescription':
-      '名称、ブランド表記、既定言語などの基本設定を変更します。',
+      '現在のセッションで使用しているアカウントです。',
+    'workspace.settings.languageDescription':
+      '画面で使用する表示言語を選択します。変更はこのブラウザに保存されます。',
     'workspace.settings.notificationTitle': '通知設定',
     'workspace.settings.notificationDescription':
       '承認、期限、ブロッカー、週次レポートの通知条件を設定します。',
@@ -714,6 +716,13 @@ const dictionaries = {
     'sidebar.archive.project': '{name} をアーカイブ',
     'sidebar.archive.archiving': 'アーカイブ中',
     'sidebar.archive.error': 'アーカイブできませんでした',
+    'sidebar.archive.confirmTitle': 'アーカイブの確認',
+    'sidebar.archive.confirmTeamDescription':
+      '{name} と配下のプロジェクトをアーカイブし、サイドバーから非表示にします。現在この画面からは復元できません。',
+    'sidebar.archive.confirmProjectDescription':
+      '{name} をアーカイブし、サイドバーから非表示にします。現在この画面からは復元できません。',
+    'sidebar.archive.cancel': 'キャンセル',
+    'sidebar.archive.confirm': 'アーカイブ',
     'sidebar.teamOverview': 'チーム概要',
     'sidebar.issues': 'Issues',
     'sidebar.members': 'メンバー',
@@ -726,19 +735,210 @@ const dictionaries = {
     'sidebar.nav.reports': 'レポート',
     'sidebar.nav.help': 'ヘルプ',
     'sidebar.nav.settings': '設定',
-    'placeholder.backToLogin': 'ログインへ戻る',
-    'placeholder.forgotPassword.title': 'パスワード再設定',
-    'placeholder.forgotPassword.description':
-      'パスワード再設定フローは後続の実装で接続します。',
-    'placeholder.privacy.title': 'プライバシーポリシー',
-    'placeholder.privacy.description':
-      'プライバシーポリシーの本文は後続の実装で追加します。',
-    'placeholder.terms.title': '利用規約',
-    'placeholder.terms.description':
-      '利用規約の本文は後続の実装で追加します。',
-    'placeholder.support.title': 'サポート',
-    'placeholder.support.description':
-      'サポートページは後続の実装で追加します。',
+    'public.nav.aria': '公開ページナビゲーション',
+    'public.nav.mobileAria': 'モバイル公開ページナビゲーション',
+    'public.nav.privacy': 'プライバシー',
+    'public.nav.terms': '利用規約',
+    'public.nav.support': 'サポート',
+    'public.nav.login': 'ログイン',
+    'public.footer.description':
+      'チームの進捗と次の判断を、ひとつの静かな作業面にまとめるプロジェクト管理ツールです。',
+    'public.backToLogin': 'ログインへ戻る',
+    'public.copy.copied': 'コピーしました',
+    'public.copy.error': '自動コピーできませんでした。表示された内容を選択してコピーしてください。',
+    'public.forgot.eyebrow': 'アカウント復旧',
+    'public.forgot.title': '安全な復旧経路を確認する',
+    'public.forgot.intro':
+      '現在、mukuroji からパスワード再設定メールを送る機能は接続されていません。アカウントの有無を画面に漏らさず、所属組織の管理者または正式なサポート窓口へ渡す情報を準備します。',
+    'public.forgot.step.admin.title': '正式な連絡先を確認',
+    'public.forgot.step.admin.description':
+      '社内ポータル、導入案内、契約書に記載されたワークスペース管理者またはサポート窓口を使います。',
+    'public.forgot.step.context.title': '特定に必要な情報だけを共有',
+    'public.forgot.step.context.description':
+      'ログイン用メールアドレス、ワークスペース名、最後に正常利用できた時刻を伝えると確認が早くなります。',
+    'public.forgot.step.safe.title': '秘密情報は送らない',
+    'public.forgot.step.safe.description':
+      'パスワード、認証コード、アクセストークン、画面全体のスクリーンショットは共有しないでください。',
+    'public.forgot.localOnly': 'ブラウザ内だけで処理',
+    'public.forgot.form.title': '復旧依頼の準備',
+    'public.forgot.form.description':
+      '入力内容はサーバーへ送信せず、管理者へ渡すメモの作成にだけ使います。',
+    'public.forgot.email': 'ログイン用メールアドレス',
+    'public.forgot.emailPlaceholder': 'name@example.com',
+    'public.forgot.emailHelp': 'この画面ではアカウントの登録有無を確認しません。',
+    'public.forgot.emailError': '有効なメールアドレスを入力してください。',
+    'public.forgot.reviewAction': '復旧手順を確認',
+    'public.forgot.noSend.title': '再設定メールは送信されません',
+    'public.forgot.noSend.description':
+      '送信が完了したように見せることはありません。次の案内から正式な連絡経路へ進んでください。',
+    'public.forgot.guidance.title': '管理者へ渡す連絡メモ',
+    'public.forgot.guidance.description':
+      '下の内容をコピーし、所属組織が指定した連絡先へ送ってください。',
+    'public.forgot.requestTemplate':
+      'mukuroji のアカウント復旧を依頼します。\nログイン用メールアドレス: {email}\nワークスペース名: \n最後に利用できた日時: \n表示されたメッセージ: \n\n※パスワード、認証コード、アクセストークンは記載していません。',
+    'public.forgot.copyAction': '連絡メモをコピー',
+    'public.forgot.supportAction': 'サポート案内を見る',
+    'public.legal.updatedLabel': 'ドラフト更新日',
+    'public.legal.draftTitle': '法務・セキュリティ確認前のドラフトです',
+    'public.legal.draftDescription':
+      'この画面はUIと情報構成を確認するための草案であり、公開・契約に使える正式文書ではありません。内容は責任者の承認後に確定してください。',
+    'public.legal.contents': 'この文書の内容',
+    'public.legal.contentsAria': '文書内目次',
+    'public.legal.questionTitle': '内容について確認したい場合',
+    'public.legal.questionDescription':
+      '所属組織の管理者または契約上のサポート窓口へ、確認したい章を添えてお問い合わせください。',
+    'public.legal.supportAction': '問い合わせ方法を確認',
+    'public.privacy.eyebrow': '信頼とデータ',
+    'public.privacy.title': 'プライバシーポリシー（ドラフト）',
+    'public.privacy.intro':
+      'mukuroji がサービス提供のために扱う情報と、その利用目的、保護、利用者が選べることを説明します。所属組織との個別契約に異なる定めがある場合は、その契約が優先されます。',
+    'public.privacy.updated': '2026年7月11日',
+    'public.privacy.section.scope.title': '適用範囲',
+    'public.privacy.section.scope.body1':
+      '本ポリシーは、mukuroji のWebアプリケーション、認証、サポートおよびこれらに付随する運用で扱う情報に適用されます。',
+    'public.privacy.section.scope.body2':
+      '所属組織が独自に定める情報管理、外部サービス、組織内の連絡経路には、その組織または外部サービスの方針が適用されます。',
+    'public.privacy.section.data.title': '取り扱う情報',
+    'public.privacy.section.data.body1':
+      'アカウント識別子、氏名、メールアドレス、所属、権限など、認証とアクセス制御に必要な情報を扱います。',
+    'public.privacy.section.data.body2':
+      '利用者が登録するチーム、プロジェクト、Issue、タスク、コメント、担当者、期日などの業務情報と、障害調査や安全確保に必要なアクセス日時、操作結果、端末・ブラウザの技術情報を扱うことがあります。',
+    'public.privacy.section.purpose.title': '利用目的',
+    'public.privacy.section.purpose.body1':
+      '情報は、本人確認、権限に応じた画面提供、共同作業データの保存と同期、問い合わせ対応、障害の検知・復旧のために利用します。',
+    'public.privacy.section.purpose.body2':
+      'また、サービスの安全性と使いやすさを改善するため、必要な範囲で利用状況を集計します。広告目的のプロファイリングや個人情報の販売は行いません。',
+    'public.privacy.section.sharing.title': '組織内表示と外部提供',
+    'public.privacy.section.sharing.body1':
+      'プロジェクトやタスクの情報は、所属組織が設定した権限に従い、同じワークスペースの管理者やメンバーに表示されます。',
+    'public.privacy.section.sharing.body2':
+      '法令上必要な場合、利用者の安全を守る必要がある場合、または認証・保管・運用を担う委託先に必要最小限を預ける場合を除き、組織外へ提供しません。委託先には適切な保護を求めます。',
+    'public.privacy.section.security.title': '保持と安全管理',
+    'public.privacy.section.security.body1':
+      '情報は、サービス提供、契約、監査、法令対応に必要な期間だけ保持し、不要になった情報は運用手順に従って削除または匿名化します。具体的な保持期間は所属組織の契約と設定により異なります。',
+    'public.privacy.section.security.body2':
+      '認証、権限制御、通信経路、ログ監視などの合理的な対策を講じます。ただし、いかなる方法も完全な安全を保証するものではないため、パスワードや認証コードを第三者と共有しないでください。',
+    'public.privacy.section.choices.title': '確認・訂正・削除と連絡先',
+    'public.privacy.section.choices.body1':
+      '自身のアカウント情報や業務データの確認、訂正、削除、利用制限を希望する場合は、まず所属組織の管理者へ連絡してください。管理者権限で対応できない場合は、契約上のサポート窓口へ引き継がれます。',
+    'public.privacy.section.choices.body2':
+      '本人確認のため追加情報をお願いすることがあります。アカウントの登録有無や他の利用者の情報を、本人確認前に開示することはありません。',
+    'public.terms.eyebrow': 'サービス利用条件',
+    'public.terms.title': '利用規約（ドラフト）',
+    'public.terms.intro':
+      'mukuroji を安全に共同利用するための基本条件を定めます。所属組織との個別契約、注文書、社内規程に異なる定めがある場合は、それらが優先されます。',
+    'public.terms.updated': '2026年7月11日',
+    'public.terms.section.scope.title': '同意と適用範囲',
+    'public.terms.section.scope.body1':
+      '利用者は、所属組織から正当な権限を受け、本規約と組織の利用ルールに同意したうえでmukurojiを利用します。',
+    'public.terms.section.scope.body2':
+      '本規約はWebアプリケーション、認証、保存された共同作業データ、サポートなどmukurojiの提供機能に適用されます。',
+    'public.terms.section.account.title': 'アカウントと認証情報',
+    'public.terms.section.account.body1':
+      '利用者は自身に割り当てられたアカウントを使用し、ログイン情報、認証コード、端末を適切に管理します。アカウントの共有や他者へのなりすましはできません。',
+    'public.terms.section.account.body2':
+      '不審なログインや認証情報の漏えいが疑われる場合は、速やかに所属組織の管理者へ連絡し、指示に従って認証情報を更新してください。',
+    'public.terms.section.content.title': 'ワークスペースのデータ',
+    'public.terms.section.content.body1':
+      '利用者または所属組織が登録したプロジェクト、Issue、タスク、コメントなどの権利は、登録前から権利を持つ当事者に留保されます。',
+    'public.terms.section.content.body2':
+      '利用者と所属組織は、サービス提供、保存、表示、バックアップ、障害対応に必要な範囲でmukurojiがデータを処理する権限を有することを確認します。',
+    'public.terms.section.use.title': '許容される利用',
+    'public.terms.section.use.body1':
+      '法令や第三者の権利を侵害する情報、マルウェア、秘密情報を不適切に登録してはなりません。また、権限制御の回避、過度な自動アクセス、サービスへの妨害を行ってはなりません。',
+    'public.terms.section.use.body2':
+      '利用者は、担当する業務に必要な範囲でデータを閲覧・更新し、他のメンバーや顧客の情報を所属組織のルールに従って扱います。',
+    'public.terms.section.operation.title': 'サービスの運用と変更',
+    'public.terms.section.operation.body1':
+      '安全性、性能、法令対応、機能改善のため、機能や表示を変更することがあります。重要な変更は、合理的な方法で所属組織または利用者へ案内します。',
+    'public.terms.section.operation.body2':
+      '保守や障害対応のため一時的に利用できない場合があります。可能な範囲で影響を抑え、復旧と状況共有に努めます。',
+    'public.terms.section.suspension.title': '利用停止と終了',
+    'public.terms.section.suspension.body1':
+      '不正利用、セキュリティ上の危険、本規約への重大な違反がある場合、影響を抑えるためアカウントまたは機能を一時停止することがあります。',
+    'public.terms.section.suspension.body2':
+      '契約終了時のデータ返却、保持、削除は所属組織との契約と運用手順に従います。利用者個人の判断だけで組織データを持ち出すことはできません。',
+    'public.terms.section.responsibility.title': '責任の範囲',
+    'public.terms.section.responsibility.body1':
+      'mukurojiは合理的な注意をもってサービスを提供しますが、すべての利用環境で中断や誤りがないこと、利用者の特定目的に完全に適合することを保証するものではありません。',
+    'public.terms.section.responsibility.body2':
+      '各当事者の責任範囲、補償、損害賠償の上限は、適用法令と所属組織との個別契約に従います。重要な判断には元データや責任者の確認を併用してください。',
+    'public.terms.section.changes.title': '規約の変更と問い合わせ',
+    'public.terms.section.changes.body1':
+      '法令やサービス内容の変更に合わせて本規約を更新することがあります。重要な変更では更新日と変更内容を分かる形で案内します。',
+    'public.terms.section.changes.body2':
+      '本規約の解釈、適用法、紛争解決は所属組織との契約に従います。確認事項は所属組織の管理者または契約上のサポート窓口へお問い合わせください。',
+    'public.support.eyebrow': 'ヘルプセンター',
+    'public.support.title': '困っていることから探す',
+    'public.support.intro':
+      'よくある確認事項を検索し、解決しない場合は所属組織の管理者または契約上のサポート窓口へ、安全な情報だけを渡せます。',
+    'public.support.search.label': 'ヘルプを検索',
+    'public.support.search.placeholder': '例: ログイン、権限、Issue',
+    'public.support.categories.eyebrow': 'カテゴリ',
+    'public.support.categories.title': 'どこで困っていますか',
+    'public.support.category.all': 'すべて',
+    'public.support.category.access.title': 'ログインとアカウント',
+    'public.support.category.access.description': '認証、復旧、セッションを確認',
+    'public.support.category.workspace.title': 'チームと権限',
+    'public.support.category.workspace.description': '表示範囲、メンバー、ロールを確認',
+    'public.support.category.work.title': 'Issueとタスク',
+    'public.support.category.work.description': '作成、更新、同期状態を確認',
+    'public.support.category.security.title': '安全とプライバシー',
+    'public.support.category.security.description': '安全な連絡とデータの扱いを確認',
+    'public.support.answers.title': 'よくある確認事項',
+    'public.support.answers.count': '{count}件',
+    'public.support.answers.countOne': '{count}件',
+    'public.support.article.password.title': 'パスワードを忘れた',
+    'public.support.article.password.body':
+      '現在、再設定メールの自動送信は接続されていません。復旧ページでログイン用メールアドレスを入力し、作成されたメモを所属組織の管理者または正式なサポート窓口へ送ってください。アカウントの有無は公開画面では確認できません。',
+    'public.support.article.signedOut.title': 'ログイン後すぐにログイン画面へ戻る',
+    'public.support.article.signedOut.body':
+      'セッションの期限切れ、認証基盤への接続失敗、ブラウザの保存制限が考えられます。ページを再読み込みし、再度ログインしても続く場合は、発生時刻と表示メッセージを管理者へ伝えてください。認証コードやトークンは送らないでください。',
+    'public.support.article.missingProject.title': 'チームやプロジェクトが表示されない',
+    'public.support.article.missingProject.body':
+      '所属組織の管理者に、対象ワークスペース、チーム、プロジェクト名と、自分に必要なロールを確認してください。サイドバーに名前が見えても、プロジェクト権限がなければ内容を開けない場合があります。',
+    'public.support.article.role.title': 'メンバーの権限を変更したい',
+    'public.support.article.role.body':
+      'プロジェクトのmanagerまたはシステム管理者が権限画面から変更します。最後のmanagerを削除できないなど、安全のために制限される操作があります。権限が足りない場合は現在のmanagerへ依頼してください。',
+    'public.support.article.readOnly.title': 'Issueの詳細が参照専用になっている',
+    'public.support.article.readOnly.body':
+      '旧タスクから表示しているIssueは、履歴を守るため参照専用になることがあります。新しいIssueとして更新を続ける必要がある場合は、チームのIssue画面から作成し、対象プロジェクトへ割り当ててください。',
+    'public.support.article.sync.title': '更新した内容が一覧へ反映されない',
+    'public.support.article.sync.body':
+      '通信状態を確認してページを再読み込みしてください。二重登録を避けるため、同じ操作を何度も繰り返す前に、別画面や担当者の表示で保存結果を確認します。続く場合は操作、発生時刻、対象IDを問い合わせメモへ記載してください。',
+    'public.support.article.safeContact.title': '問い合わせで送ってはいけない情報',
+    'public.support.article.safeContact.body':
+      'パスワード、認証コード、アクセストークン、秘密鍵、個人情報を含む画面全体の画像は送らないでください。必要なのは発生時刻、対象ワークスペースやプロジェクト、操作、表示メッセージです。',
+    'public.support.article.privacy.title': '自分の情報を確認・訂正・削除したい',
+    'public.support.article.privacy.body':
+      'まず所属組織の管理者へ依頼してください。本人確認後、管理者権限で対応できる範囲を確認し、必要な場合は契約上のサポート窓口へ引き継ぎます。他の利用者や組織の情報は開示できません。',
+    'public.support.empty.title': '一致する案内がありません',
+    'public.support.empty.description':
+      '語句を短くするか、カテゴリをすべてに戻してもう一度お試しください。',
+    'public.support.empty.reset': '検索条件をリセット',
+    'public.support.contact.eyebrow': '解決しない場合',
+    'public.support.contact.title': '正式な窓口へ状況を渡す',
+    'public.support.contact.description':
+      'mukurojiはこの公開画面から問い合わせを送信しません。以下のメモを、所属組織が指定した連絡経路で共有してください。',
+    'public.support.contact.admin': 'アクセスや権限は、所属組織のワークスペース管理者へ',
+    'public.support.contact.contract': '障害や契約上の確認は、導入案内や契約書に記載された窓口へ',
+    'public.support.contact.security': '漏えいの疑いがある場合は、通常の問い合わせより先に管理者へ緊急連絡',
+    'public.support.contact.templateLabel': '問い合わせメモ',
+    'public.support.contact.template':
+      '[mukuroji サポート依頼]\nカテゴリ: {category}\n発生日時: \nワークスペース / プロジェクト: \n行った操作: \n表示されたメッセージ: \n期待した結果: \n\n※パスワード、認証コード、アクセストークンは記載していません。',
+    'public.support.contact.copyAction': '問い合わせメモをコピー',
+    'public.support.contact.privacyAction': '情報の扱いを確認',
+    'public.notFound.eyebrow': 'ページが見つかりません',
+    'public.notFound.title': 'この経路は存在しません',
+    'public.notFound.description':
+      'URLが変更されたか、入力された経路が正しくない可能性があります。ログイン画面へ戻るか、公開サポートから目的の情報を探してください。',
+    'public.notFound.requestedPath': '要求されたパス',
+    'public.notFound.loginAction': 'ログインへ戻る',
+    'public.notFound.supportAction': 'サポートを開く',
+    'public.notFound.privacyTitle': 'プライバシー',
+    'public.notFound.privacyDescription': '情報の取り扱いと利用者の選択肢',
+    'public.notFound.termsTitle': '利用規約',
+    'public.notFound.termsDescription': 'サービスを共同利用するための条件',
   },
   en: {
     'app.title': 'mukuroji',
@@ -838,14 +1038,14 @@ const dictionaries = {
     'tasks.tabs.aria': 'Task views',
     'tasks.tab.table': 'Table',
     'tasks.tab.board': 'Board',
-    'tasks.tab.gantt': 'Gantt',
-    'tasks.tab.calendar': 'Calendar',
+    'tasks.tab.gantt': 'Due dates',
+    'tasks.tab.calendar': 'Due calendar',
     'tasks.tab.file': 'File',
     'tasks.tab.permissions': 'Permissions',
     'tasks.view.table': 'Table view',
     'tasks.view.board': 'Board view',
-    'tasks.view.gantt': 'Gantt view',
-    'tasks.view.calendar': 'Calendar view',
+    'tasks.view.gantt': 'Due-date list',
+    'tasks.view.calendar': 'Due-date calendar',
     'tasks.view.file': 'File view',
     'tasks.view.permissions': 'Permissions',
     'tasks.summary.aria': 'Project progress summary',
@@ -896,9 +1096,9 @@ const dictionaries = {
     'tasks.calendar.day.thu': 'Thu',
     'tasks.calendar.day.fri': 'Fri',
     'tasks.calendar.empty': 'No schedule',
-    'tasks.file.title': 'Project files',
+    'tasks.file.title': 'Files are not connected yet',
     'tasks.file.description':
-      'Collect approval materials, designs, and research notes needed for progress decisions.',
+      'No file storage is connected. Keep approval materials and designs in your current shared location.',
     'tasks.file.column.name': 'File name',
     'tasks.file.column.type': 'Type',
     'tasks.file.column.owner': 'Owner',
@@ -1213,35 +1413,37 @@ const dictionaries = {
     'workspace.help.eyebrow': 'Support',
     'workspace.help.title': 'Help',
     'workspace.help.description':
-      'Team help for operating rules, issue response, and support contact points.',
-    'workspace.help.guideTitle': 'Start guide',
+      'Open the home view, reports, troubleshooting guidance, or an official contact path.',
+    'workspace.help.guideTitle': 'Use the home view',
     'workspace.help.guideDescription':
-      'Quickly review teams, projects, tasks, and reports basics.',
-    'workspace.help.runbookTitle': 'Operations runbook',
+      'Review assigned work, items needing attention, and recent context from Home.',
+    'workspace.help.runbookTitle': 'Review progress reports',
     'workspace.help.runbookDescription':
-      'Reference standard steps for progress meetings, delay detection, and approvals.',
+      'Inspect project health and due-date status calculated from live workspace data.',
     'workspace.help.supportTitle': 'Support contact',
     'workspace.help.supportDescription':
-      'Contact workspace admins or mukuroji support from here.',
-    'workspace.help.statusTitle': 'Service status',
+      'Prepare a safe support note for your organization admin or contractual channel.',
+    'workspace.help.statusTitle': 'Troubleshoot work updates',
     'workspace.help.statusDescription':
-      'Check API, notification, and report generation availability.',
+      'Review checks for issue and task visibility or synchronization problems.',
     'workspace.settings.eyebrow': 'Admin',
     'workspace.settings.title': 'Settings',
     'workspace.settings.description':
-      'Manage workspace profile, notifications, permissions, and integrations.',
+      'Manage this browser’s display language and text size, and review the signed-in account.',
     'workspace.settings.displayTitle': 'Display',
     'workspace.settings.displayDescription':
-      'Adjust text size and screen density for this browser.',
+      'Adjust text size and display language for this browser.',
     'workspace.settings.fontSizeTitle': 'Font size',
     'workspace.settings.fontSizeDescription':
       'Applies to task lists, the sidebar, settings, and the rest of the app.',
     'workspace.settings.fontSize.compact': 'Compact',
     'workspace.settings.fontSize.standard': 'Standard',
     'workspace.settings.fontSize.comfortable': 'Comfortable',
-    'workspace.settings.profileTitle': 'Workspace profile',
+    'workspace.settings.profileTitle': 'Signed-in account',
     'workspace.settings.profileDescription':
-      'Change the workspace name, brand display, and default language.',
+      'The account used by the current session.',
+    'workspace.settings.languageDescription':
+      'Choose the display language for this browser. Your preference is saved locally.',
     'workspace.settings.notificationTitle': 'Notifications',
     'workspace.settings.notificationDescription':
       'Set rules for approvals, due dates, blockers, and weekly reports.',
@@ -1440,6 +1642,13 @@ const dictionaries = {
     'sidebar.archive.project': 'Archive {name}',
     'sidebar.archive.archiving': 'Archiving',
     'sidebar.archive.error': 'Could not archive',
+    'sidebar.archive.confirmTitle': 'Confirm archive',
+    'sidebar.archive.confirmTeamDescription':
+      'Archiving {name} hides the team and its projects from the sidebar. They cannot currently be restored from this screen.',
+    'sidebar.archive.confirmProjectDescription':
+      'Archiving {name} hides it from the sidebar. It cannot currently be restored from this screen.',
+    'sidebar.archive.cancel': 'Cancel',
+    'sidebar.archive.confirm': 'Archive',
     'sidebar.teamOverview': 'Team overview',
     'sidebar.issues': 'Issues',
     'sidebar.members': 'Members',
@@ -1452,19 +1661,210 @@ const dictionaries = {
     'sidebar.nav.reports': 'Reports',
     'sidebar.nav.help': 'Help',
     'sidebar.nav.settings': 'Settings',
-    'placeholder.backToLogin': 'Back to login',
-    'placeholder.forgotPassword.title': 'Reset password',
-    'placeholder.forgotPassword.description':
-      'The password reset flow will be connected in a later implementation.',
-    'placeholder.privacy.title': 'Privacy policy',
-    'placeholder.privacy.description':
-      'The privacy policy content will be added in a later implementation.',
-    'placeholder.terms.title': 'Terms of use',
-    'placeholder.terms.description':
-      'The terms content will be added in a later implementation.',
-    'placeholder.support.title': 'Support',
-    'placeholder.support.description':
-      'The support page will be added in a later implementation.',
+    'public.nav.aria': 'Public page navigation',
+    'public.nav.mobileAria': 'Mobile public page navigation',
+    'public.nav.privacy': 'Privacy',
+    'public.nav.terms': 'Terms',
+    'public.nav.support': 'Support',
+    'public.nav.login': 'Log in',
+    'public.footer.description':
+      'A project management tool that brings team progress and the next decision into one calm workspace.',
+    'public.backToLogin': 'Back to login',
+    'public.copy.copied': 'Copied',
+    'public.copy.error': 'Automatic copy failed. Select and copy the displayed text instead.',
+    'public.forgot.eyebrow': 'Account recovery',
+    'public.forgot.title': 'Find a safe path back in',
+    'public.forgot.intro':
+      'Password-reset email delivery is not connected in mukuroji yet. This page prepares the minimum information for your organization admin or official support channel without revealing whether an account exists.',
+    'public.forgot.step.admin.title': 'Confirm the official contact',
+    'public.forgot.step.admin.description':
+      'Use the workspace admin or support channel listed in your internal portal, onboarding guide, or agreement.',
+    'public.forgot.step.context.title': 'Share only useful context',
+    'public.forgot.step.context.description':
+      'Your login email, workspace name, and last successful access time help the team investigate quickly.',
+    'public.forgot.step.safe.title': 'Keep secrets out of the message',
+    'public.forgot.step.safe.description':
+      'Never share a password, verification code, access token, or a full-screen capture containing private data.',
+    'public.forgot.localOnly': 'Handled in this browser',
+    'public.forgot.form.title': 'Prepare a recovery request',
+    'public.forgot.form.description':
+      'Your entry is not sent to a server. It is used only to prepare a note for your admin.',
+    'public.forgot.email': 'Login email address',
+    'public.forgot.emailPlaceholder': 'name@example.com',
+    'public.forgot.emailHelp': 'This page does not check whether an account is registered.',
+    'public.forgot.emailError': 'Enter a valid email address.',
+    'public.forgot.reviewAction': 'Review recovery steps',
+    'public.forgot.noSend.title': 'No reset email will be sent',
+    'public.forgot.noSend.description':
+      'We will not pretend a request was submitted. Continue to the guidance below and use an official contact path.',
+    'public.forgot.guidance.title': 'Message for your administrator',
+    'public.forgot.guidance.description':
+      'Copy the note below and send it through the channel designated by your organization.',
+    'public.forgot.requestTemplate':
+      'I need help recovering my mukuroji account.\nLogin email: {email}\nWorkspace name: \nLast successful access: \nMessage shown: \n\nI have not included a password, verification code, or access token.',
+    'public.forgot.copyAction': 'Copy recovery note',
+    'public.forgot.supportAction': 'View support guidance',
+    'public.legal.updatedLabel': 'Draft updated',
+    'public.legal.draftTitle': 'Draft pending legal and security review',
+    'public.legal.draftDescription':
+      'This screen is a working draft for reviewing the UI and information structure. It is not an approved document for publication or contracting, and must be finalized by the responsible owners.',
+    'public.legal.contents': 'In this document',
+    'public.legal.contentsAria': 'Document table of contents',
+    'public.legal.questionTitle': 'Need clarification?',
+    'public.legal.questionDescription':
+      'Contact your organization admin or contractual support channel and include the section you want to discuss.',
+    'public.legal.supportAction': 'View contact guidance',
+    'public.privacy.eyebrow': 'Trust and data',
+    'public.privacy.title': 'Privacy policy (draft)',
+    'public.privacy.intro':
+      'This policy explains the information mukuroji handles to provide the service, why it is used, how it is protected, and the choices available to users. If an agreement with your organization says otherwise, that agreement takes priority.',
+    'public.privacy.updated': 'July 11, 2026',
+    'public.privacy.section.scope.title': 'Scope',
+    'public.privacy.section.scope.body1':
+      'This policy applies to information handled through the mukuroji web application, authentication, support, and related service operations.',
+    'public.privacy.section.scope.body2':
+      'Your organization’s own information-management rules and any external services are governed by the policies of that organization or provider.',
+    'public.privacy.section.data.title': 'Information we handle',
+    'public.privacy.section.data.body1':
+      'We handle account identifiers, names, email addresses, organization details, and roles needed for authentication and access control.',
+    'public.privacy.section.data.body2':
+      'We also handle work information entered by users, such as teams, projects, issues, tasks, comments, assignees, and due dates. Access times, operation results, and browser or device details may be handled when needed for security and troubleshooting.',
+    'public.privacy.section.purpose.title': 'How information is used',
+    'public.privacy.section.purpose.body1':
+      'Information is used to verify identity, show features according to permissions, store and synchronize collaborative work, answer support requests, and detect or recover from incidents.',
+    'public.privacy.section.purpose.body2':
+      'We may aggregate usage information to improve service safety and usability. We do not sell personal information or build advertising profiles.',
+    'public.privacy.section.sharing.title': 'Workspace visibility and external sharing',
+    'public.privacy.section.sharing.body1':
+      'Project and task information is visible to workspace admins and members according to the permissions configured by your organization.',
+    'public.privacy.section.sharing.body2':
+      'We do not provide information outside the organization except when required by law, needed to protect users, or entrusted in the minimum necessary amount to providers supporting authentication, storage, or operations. Those providers are required to protect the information appropriately.',
+    'public.privacy.section.security.title': 'Retention and security',
+    'public.privacy.section.security.body1':
+      'Information is retained only as long as needed to provide the service, fulfill agreements, support audits, or meet legal obligations. Data that is no longer needed is deleted or de-identified under operational procedures. Specific periods vary by agreement and organization settings.',
+    'public.privacy.section.security.body2':
+      'We apply reasonable safeguards such as authentication, access control, protected communications, and monitoring. No method can guarantee absolute security, so never share passwords or verification codes.',
+    'public.privacy.section.choices.title': 'Access, correction, deletion, and contact',
+    'public.privacy.section.choices.body1':
+      'To access, correct, delete, or restrict your account information or work data, contact your organization admin first. Requests that cannot be handled with admin controls are escalated through the contractual support channel.',
+    'public.privacy.section.choices.body2':
+      'We may request additional details to verify identity. We do not disclose whether an account exists, or disclose another user’s information, before verification.',
+    'public.terms.eyebrow': 'Service conditions',
+    'public.terms.title': 'Terms of use (draft)',
+    'public.terms.intro':
+      'These terms set the baseline for safe collaboration in mukuroji. If an agreement, order form, or internal policy with your organization says otherwise, that document takes priority.',
+    'public.terms.updated': 'July 11, 2026',
+    'public.terms.section.scope.title': 'Agreement and scope',
+    'public.terms.section.scope.body1':
+      'You may use mukuroji after receiving valid authorization from your organization and agreeing to these terms and your organization’s usage rules.',
+    'public.terms.section.scope.body2':
+      'These terms apply to the web application, authentication, stored collaborative data, support, and other mukuroji service features.',
+    'public.terms.section.account.title': 'Accounts and credentials',
+    'public.terms.section.account.body1':
+      'Use the account assigned to you and protect your login details, verification codes, and devices. You may not share accounts or impersonate another person.',
+    'public.terms.section.account.body2':
+      'If you suspect unauthorized access or exposed credentials, contact your organization admin promptly and follow their instructions to update access.',
+    'public.terms.section.content.title': 'Workspace content',
+    'public.terms.section.content.body1':
+      'Rights in projects, issues, tasks, comments, and other content entered by a user or organization remain with the party that held those rights before upload.',
+    'public.terms.section.content.body2':
+      'Users and organizations confirm that mukuroji may process that content as needed to provide storage, display, backup, synchronization, and incident response.',
+    'public.terms.section.use.title': 'Acceptable use',
+    'public.terms.section.use.body1':
+      'Do not enter content that violates law or third-party rights, distribute malware, mishandle confidential information, bypass permissions, generate excessive automated traffic, or interfere with the service.',
+    'public.terms.section.use.body2':
+      'Access and update data only as needed for your work, and handle information about members and customers according to your organization’s rules.',
+    'public.terms.section.operation.title': 'Service operation and changes',
+    'public.terms.section.operation.body1':
+      'Features and presentation may change to improve security, performance, compliance, or usability. Material changes will be communicated to organizations or users through a reasonable channel.',
+    'public.terms.section.operation.body2':
+      'The service may be temporarily unavailable for maintenance or incident response. We work to limit impact, restore service, and share relevant status information.',
+    'public.terms.section.suspension.title': 'Suspension and termination',
+    'public.terms.section.suspension.body1':
+      'An account or feature may be temporarily suspended to contain unauthorized use, security risk, or a material breach of these terms.',
+    'public.terms.section.suspension.body2':
+      'Data return, retention, and deletion after an agreement ends follow the agreement and operational procedure with the organization. An individual user may not remove organization data solely at their own discretion.',
+    'public.terms.section.responsibility.title': 'Responsibility',
+    'public.terms.section.responsibility.body1':
+      'mukuroji is provided with reasonable care, but we do not guarantee uninterrupted or error-free operation in every environment or fitness for every specific purpose.',
+    'public.terms.section.responsibility.body2':
+      'Responsibility, indemnity, and liability limits follow applicable law and the agreement with your organization. Confirm source data and involve the responsible owner for material decisions.',
+    'public.terms.section.changes.title': 'Changes and questions',
+    'public.terms.section.changes.body1':
+      'These terms may be updated as laws or service features change. Material updates will identify the new date and communicate the change clearly.',
+    'public.terms.section.changes.body2':
+      'Interpretation, governing law, and dispute resolution follow the agreement with your organization. Direct questions to your organization admin or contractual support channel.',
+    'public.support.eyebrow': 'Help center',
+    'public.support.title': 'Start with what is blocking you',
+    'public.support.intro':
+      'Search common checks first. If the issue remains, prepare only the safe context your organization admin or contractual support channel needs.',
+    'public.support.search.label': 'Search help',
+    'public.support.search.placeholder': 'Try login, permissions, or issue',
+    'public.support.categories.eyebrow': 'Categories',
+    'public.support.categories.title': 'Where are you stuck?',
+    'public.support.category.all': 'All',
+    'public.support.category.access.title': 'Login and accounts',
+    'public.support.category.access.description': 'Check authentication, recovery, and sessions',
+    'public.support.category.workspace.title': 'Teams and permissions',
+    'public.support.category.workspace.description': 'Check visibility, members, and roles',
+    'public.support.category.work.title': 'Issues and tasks',
+    'public.support.category.work.description': 'Check creation, updates, and synchronization',
+    'public.support.category.security.title': 'Security and privacy',
+    'public.support.category.security.description': 'Check safe contact and data handling',
+    'public.support.answers.title': 'Common checks',
+    'public.support.answers.count': '{count} articles',
+    'public.support.answers.countOne': '{count} article',
+    'public.support.article.password.title': 'I forgot my password',
+    'public.support.article.password.body':
+      'Automatic reset email delivery is not connected yet. Enter your login email on the recovery page, then send the prepared note to your organization admin or official support channel. A public page cannot confirm whether an account exists.',
+    'public.support.article.signedOut.title': 'I return to the login page immediately after signing in',
+    'public.support.article.signedOut.body':
+      'The session may have expired, the identity service may be unavailable, or the browser may be blocking storage. Reload and sign in again. If it continues, share the time and displayed message with your admin. Never send a verification code or token.',
+    'public.support.article.missingProject.title': 'A team or project is missing',
+    'public.support.article.missingProject.body':
+      'Ask your organization admin to confirm the workspace, team, project name, and role you need. A project name may appear in the sidebar even when you do not have permission to open its content.',
+    'public.support.article.role.title': 'I need to change a member role',
+    'public.support.article.role.body':
+      'A project manager or system admin changes roles from the permissions view. Some actions are restricted for safety, including removal of the final manager. Ask the current manager if your role is insufficient.',
+    'public.support.article.readOnly.title': 'Issue details are read-only',
+    'public.support.article.readOnly.body':
+      'Issues shown from legacy tasks can be read-only to preserve history. If work needs to continue in an editable record, create a new issue from the team issue view and assign it to the project.',
+    'public.support.article.sync.title': 'An update is not reflected in the list',
+    'public.support.article.sync.body':
+      'Check your connection and reload the page. Before repeating an action, verify the saved result from another view or with the assignee to avoid duplicates. If it continues, include the action, time, and target ID in the support note.',
+    'public.support.article.safeContact.title': 'Information that must not be included in a support request',
+    'public.support.article.safeContact.body':
+      'Never send a password, verification code, access token, secret key, or full-screen capture containing private data. The useful details are the time, workspace or project, action, and displayed message.',
+    'public.support.article.privacy.title': 'I want to access, correct, or delete my information',
+    'public.support.article.privacy.body':
+      'Contact your organization admin first. After identity verification, the admin checks what can be handled with their controls and escalates to the contractual support channel when needed. Information about other users or organizations cannot be disclosed.',
+    'public.support.empty.title': 'No guidance matches',
+    'public.support.empty.description':
+      'Try a shorter phrase or return to all categories and search again.',
+    'public.support.empty.reset': 'Reset search',
+    'public.support.contact.eyebrow': 'If it is still unresolved',
+    'public.support.contact.title': 'Hand the context to an official channel',
+    'public.support.contact.description':
+      'mukuroji does not submit a support request from this public page. Share the note below through the contact path designated by your organization.',
+    'public.support.contact.admin': 'For access and permissions, contact your workspace admin',
+    'public.support.contact.contract': 'For incidents or contractual questions, use the channel in your onboarding guide or agreement',
+    'public.support.contact.security': 'If exposure is suspected, alert your admin urgently before using a normal support queue',
+    'public.support.contact.templateLabel': 'Support note',
+    'public.support.contact.template':
+      '[mukuroji support request]\nCategory: {category}\nTime observed: \nWorkspace / project: \nAction taken: \nMessage shown: \nExpected result: \n\nI have not included a password, verification code, or access token.',
+    'public.support.contact.copyAction': 'Copy support note',
+    'public.support.contact.privacyAction': 'Review data handling',
+    'public.notFound.eyebrow': 'Page not found',
+    'public.notFound.title': 'This route does not exist',
+    'public.notFound.description':
+      'The URL may have changed or the route may be mistyped. Return to login, or use public support to find the information you need.',
+    'public.notFound.requestedPath': 'Requested path',
+    'public.notFound.loginAction': 'Back to login',
+    'public.notFound.supportAction': 'Open support',
+    'public.notFound.privacyTitle': 'Privacy',
+    'public.notFound.privacyDescription': 'How information is handled and what users can request',
+    'public.notFound.termsTitle': 'Terms of use',
+    'public.notFound.termsDescription': 'Conditions for collaborating in the service',
   },
 } as const
 
@@ -1558,6 +1958,13 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
       project: (name) => t('sidebar.archive.project').replace('{name}', name),
       archiving: t('sidebar.archive.archiving'),
       error: t('sidebar.archive.error'),
+      confirmTitle: t('sidebar.archive.confirmTitle'),
+      confirmTeamDescription: (name) =>
+        t('sidebar.archive.confirmTeamDescription').replace('{name}', name),
+      confirmProjectDescription: (name) =>
+        t('sidebar.archive.confirmProjectDescription').replace('{name}', name),
+      cancel: t('sidebar.archive.cancel'),
+      confirm: t('sidebar.archive.confirm'),
     },
     teamOverview: t('sidebar.teamOverview'),
     issues: t('sidebar.issues'),

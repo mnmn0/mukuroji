@@ -170,9 +170,9 @@ export const Board: Story = {
 }
 
 /**
- * ガントビューを初期表示する状態です。
+ * 期限順リストを初期表示する状態です。
  */
-export const Gantt: Story = {
+export const DueDates: Story = {
   args: {
     initialTab: 'gantt',
   },
