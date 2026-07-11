@@ -149,7 +149,7 @@ GET /api/audit/events?actorId=...&targetType=...&targetId=...&eventType=...&from
 GET /api/audit/events/export?actorId=...&from=...&to=...
 ```
 
-system admin を要求する。target filter がある場合は `TargetOccurredAtIndex`、actor filter がある場合は `ActorOccurredAtIndex`、どちらもない場合は `WorkspaceOccurredAtIndex` を使う。actor と target の両方がある場合は target index を query し、actor を filter する。同期 export は NDJSON を最大 1,000 件まで返し、上限を超える export は将来の非同期 S3 job へ分離する。
+system admin を要求する。target filter がある場合は `TargetOccurredAtIndex`、actor filter がある場合は `ActorOccurredAtIndex`、どちらもない場合は `WorkspaceOccurredAtIndex` を使う。actor と target の両方がある場合は target index を query し、actor を filter する。同期 export は NDJSON を最大 1,000 件まで返す。上限到達時に後続 cursor が残る場合は `X-Audit-Truncated: true` と `X-Audit-Next-Cursor` を返し、呼び出し側が続きの export を取得できるようにする。将来は大規模な export を非同期 S3 job へ分離する。
 
 ### Public response projection
 

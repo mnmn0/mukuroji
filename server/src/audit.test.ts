@@ -7,6 +7,7 @@ import {
   calculateAuditExpiresAt,
   createAuditConsumerReceiptTransactPut,
   createAuditEvent,
+  createAuditFieldDiff,
   createAuditFieldChanges,
   createAuditTransactPut,
   createMutationAuditContext,
@@ -159,6 +160,28 @@ test('creates field changes with default and explicit redaction', () => {
       field: 'status',
       before: 'todo',
       after: 'done',
+    },
+  ])
+})
+
+test('distinguishes missing fields from explicit null values', () => {
+  expect(createAuditFieldDiff(
+    {
+      removed: null,
+      unchanged: null,
+    },
+    {
+      added: null,
+      unchanged: null,
+    },
+  )).toEqual([
+    {
+      field: 'added',
+      after: null,
+    },
+    {
+      field: 'removed',
+      before: null,
     },
   ])
 })

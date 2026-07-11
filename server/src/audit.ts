@@ -825,18 +825,23 @@ export function createAuditFieldDiff(
 
     const beforeValue = beforeFields.get(field)
     const afterValue = afterFields.get(field)
+    const hasBeforeValue = beforeFields.has(field)
+    const hasAfterValue = afterFields.has(field)
 
-    if (canonicalString(beforeValue) === canonicalString(afterValue)) {
+    if (
+      hasBeforeValue === hasAfterValue &&
+      canonicalString(beforeValue) === canonicalString(afterValue)
+    ) {
       continue
     }
 
     const redacted = isRedactedField(field, options.redactFields)
     changes.push({
       field,
-      ...(beforeFields.has(field)
+      ...(hasBeforeValue
         ? { before: redacted ? AUDIT_REDACTED_VALUE : toAuditValue(beforeValue) }
         : {}),
-      ...(afterFields.has(field)
+      ...(hasAfterValue
         ? { after: redacted ? AUDIT_REDACTED_VALUE : toAuditValue(afterValue) }
         : {}),
       ...(redacted ? { redacted: true } : {}),

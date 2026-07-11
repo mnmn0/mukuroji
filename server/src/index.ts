@@ -1640,6 +1640,7 @@ app.use(
     ],
     allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key', 'X-Correlation-Id'],
+    exposeHeaders: ['X-Audit-Truncated', 'X-Audit-Next-Cursor'],
   }),
 )
 
@@ -2702,10 +2703,17 @@ async function handleWorkspaceAuditRequest(c: Context, exportAsNdjson: boolean) 
       cursor = page.nextCursor
     } while (cursor && events.length < 1_000)
 
-    return c.body(await auditEventsToNdjson(events), 200, {
+    const headers: Record<string, string> = {
       'Content-Disposition': 'attachment; filename="mukuroji-audit.ndjson"',
       'Content-Type': 'application/x-ndjson; charset=utf-8',
-    })
+    }
+
+    if (events.length === 1_000 && cursor) {
+      headers['X-Audit-Truncated'] = 'true'
+      headers['X-Audit-Next-Cursor'] = cursor
+    }
+
+    return c.body(await auditEventsToNdjson(events), 200, headers)
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)

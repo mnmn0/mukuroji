@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import { createMutationAuditContext } from './audit'
+import { createAuditEvent, createMutationAuditContext } from './audit'
 import {
   app,
   configureApiClientsForTest,
@@ -85,6 +85,66 @@ test('loads dashboard summary from the authenticated user scoped directory', asy
       userKey: 'demo@example.com',
     },
   ])
+})
+
+test('marks a workspace audit export as truncated when the 1,000 event cap leaves a cursor', async () => {
+  configureFakeProjectClients(true)
+  const event = createFakeAuditEvent()
+  let pageNumber = 0
+
+  configureApiClientsForTest({
+    auditEvents: {
+      async query(input) {
+        pageNumber += 1
+        expect(input.limit).toBe(100)
+
+        return {
+          events: Array.from({ length: 100 }, () => event),
+          nextCursor: `cursor-${pageNumber}`,
+        }
+      },
+    },
+  })
+
+  const response = await app.request('/api/audit/events/export', {
+    headers: {
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
+      Origin: 'http://localhost:5173',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(response.headers.get('Access-Control-Expose-Headers')).toBe(
+    'X-Audit-Truncated,X-Audit-Next-Cursor',
+  )
+  expect(response.headers.get('X-Audit-Truncated')).toBe('true')
+  expect(response.headers.get('X-Audit-Next-Cursor')).toBe('cursor-10')
+  expect((await response.text()).trimEnd().split('\n')).toHaveLength(1_000)
+  expect(pageNumber).toBe(10)
+})
+
+test('omits truncation headers when a workspace audit export reaches the final page', async () => {
+  configureFakeProjectClients(true)
+  const event = createFakeAuditEvent()
+
+  configureApiClientsForTest({
+    auditEvents: {
+      async query() {
+        return { events: [event] }
+      },
+    },
+  })
+
+  const response = await app.request('/api/audit/events/export', {
+    headers: {
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(response.headers.get('X-Audit-Truncated')).toBeNull()
+  expect(response.headers.get('X-Audit-Next-Cursor')).toBeNull()
+  expect((await response.text()).trimEnd().split('\n')).toHaveLength(1)
 })
 
 test('denies project tasks when the project is outside the user directory', async () => {
@@ -2975,6 +3035,23 @@ function createDirectoryMutationAuditContext() {
     occurredAt: '2026-07-12T00:00:00.000Z',
     request: { method: 'PATCH', path: '/api/projects/refero/members/demo@example.com' },
     source: { kind: 'api', requestId: 'directory-mutation-request' },
+  })
+}
+
+function createFakeAuditEvent() {
+  const context = createMutationAuditContext({
+    workspaceId: 'user#demo@example.com',
+    actor: { id: 'demo-sub', kind: 'user' },
+    idempotencyKey: 'audit-export-request',
+    occurredAt: '2026-07-12T00:00:00.000Z',
+    request: { method: 'GET', path: '/api/audit/events/export' },
+    source: { kind: 'api', requestId: 'audit-export-request' },
+  })
+
+  return createAuditEvent({
+    context,
+    eventType: 'project.updated',
+    entity: { type: 'project', id: 'refero' },
   })
 }
 

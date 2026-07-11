@@ -2383,13 +2383,20 @@ async function listWorkspaceAuditEvents(event, headers, directoryId) {
     cursor = page.nextCursor;
   } while (cursor && events.length < 1000);
 
+  const exportHeaders = {
+    ...headers,
+    'content-disposition': 'attachment; filename="mukuroji-audit.ndjson"',
+    'content-type': 'application/x-ndjson; charset=utf-8',
+  };
+
+  if (events.length === 1000 && cursor) {
+    exportHeaders['x-audit-truncated'] = 'true';
+    exportHeaders['x-audit-next-cursor'] = cursor;
+  }
+
   return {
     statusCode: 200,
-    headers: {
-      ...headers,
-      'content-disposition': 'attachment; filename="mukuroji-audit.ndjson"',
-      'content-type': 'application/x-ndjson; charset=utf-8',
-    },
+    headers: exportHeaders,
     body: events.map((item) => JSON.stringify(item)).join('\\n') + (events.length ? '\\n' : ''),
   };
 }
@@ -3531,6 +3538,7 @@ function createHeaders(event) {
     'access-control-allow-origin': allowedOrigin,
     'access-control-allow-methods': 'GET,POST,PATCH,DELETE,OPTIONS',
     'access-control-allow-headers': 'authorization,content-type,idempotency-key,x-correlation-id',
+    'access-control-expose-headers': 'x-audit-truncated,x-audit-next-cursor',
     'content-type': 'application/json; charset=utf-8',
     vary: 'origin',
   };

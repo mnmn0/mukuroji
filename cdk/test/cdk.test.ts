@@ -445,6 +445,58 @@ test('project task data store and lambda API are created', () => {
   expect(lambdaCode).toContain('SET archivedAt = :archivedAt');
   expect(lambdaCode).toContain('isActiveDirectoryItem');
   expect(lambdaCode).toContain("'GET,POST,PATCH,DELETE,OPTIONS'");
+  expect(lambdaCode).toContain(
+    "'access-control-expose-headers': 'x-audit-truncated,x-audit-next-cursor'",
+  );
+  expect(lambdaCode).toContain("exportHeaders['x-audit-truncated'] = 'true'");
+  expect(lambdaCode).toContain("exportHeaders['x-audit-next-cursor'] = cursor");
+});
+
+test('inline lambda marks a capped workspace audit export as truncated', async () => {
+  let pageNumber = 0;
+  const lambda = createInlineLambda(async (command) => {
+    if (command.constructor.name !== 'QueryCommand' || command.input.TableName !== 'AuditEventsTable') {
+      return {};
+    }
+
+    pageNumber += 1;
+    expect(command.input.Limit).toBe(100);
+    const eventId = `event-${pageNumber}`;
+    const occurredAt = `2026-07-11T00:00:${String(pageNumber).padStart(2, '0')}.000Z`;
+    const lastEvaluatedKey = {
+      directoryId: { S: 'user#demo@example.com' },
+      eventId: { S: eventId },
+      workspaceKey: { S: 'user#demo@example.com' },
+      workspaceEventKey: { S: `${occurredAt}#${eventId}` },
+    };
+
+    return {
+      Items: Array.from({ length: 100 }, () => ({
+        ...lastEvaluatedKey,
+        occurredAt: { S: occurredAt },
+      })),
+      LastEvaluatedKey: lastEvaluatedKey,
+    };
+  }, true);
+
+  const response = await lambda.handler(createLambdaEvent(
+    'GET',
+    '/api/audit/events/export',
+    ['mukuroji-system-admins'],
+  ));
+  const nextCursor = response.headers['x-audit-next-cursor'];
+  const cursorPayload = JSON.parse(Buffer.from(nextCursor, 'base64url').toString('utf8')) as {
+    lastEvaluatedKey: Record<string, { S: string }>;
+  };
+
+  expect(response.statusCode).toBe(200);
+  expect(response.headers['access-control-expose-headers']).toBe(
+    'x-audit-truncated,x-audit-next-cursor',
+  );
+  expect(response.headers['x-audit-truncated']).toBe('true');
+  expect(cursorPayload.lastEvaluatedKey.eventId).toEqual({ S: 'event-10' });
+  expect(response.body.trimEnd().split('\n')).toHaveLength(1_000);
+  expect(pageNumber).toBe(10);
 });
 
 test('inline lambda rejects legacy task status updates', async () => {
