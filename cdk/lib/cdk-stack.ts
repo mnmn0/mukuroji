@@ -35,6 +35,108 @@ function createProjectMemberEntryKey(projectId: string, memberKey: string) {
 }
 
 /**
+ * Workspace access table の初期 metadata と owner を作成する transaction payload です。
+ */
+function createWorkspaceAccessTransactItems(
+  tableName: string,
+  workspaceId: string,
+  initialOwnerEmail: string,
+) {
+  const createdAt = '2026-07-11T00:00:00.000Z';
+
+  return [
+    {
+      Update: {
+        TableName: tableName,
+        Key: {
+          workspaceId: { S: workspaceId },
+          recordKey: { S: 'WORKSPACE' },
+        },
+        UpdateExpression:
+          'SET entryType = if_not_exists(entryType, :entryType), activeOwnerCount = if_not_exists(activeOwnerCount, :activeOwnerCount), #version = if_not_exists(#version, :version), createdAt = if_not_exists(createdAt, :createdAt), updatedAt = if_not_exists(updatedAt, :updatedAt)',
+        ExpressionAttributeNames: {
+          '#version': 'version',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': { S: 'workspace-meta' },
+          ':activeOwnerCount': { N: '1' },
+          ':version': { N: '1' },
+          ':createdAt': { S: createdAt },
+          ':updatedAt': { S: createdAt },
+        },
+      },
+    },
+    {
+      Update: {
+        TableName: tableName,
+        Key: {
+          workspaceId: { S: workspaceId },
+          recordKey: { S: `MEMBER#${initialOwnerEmail}` },
+        },
+        UpdateExpression:
+          'SET entryType = if_not_exists(entryType, :entryType), id = if_not_exists(id, :memberKey), memberKey = if_not_exists(memberKey, :memberKey), email = if_not_exists(email, :memberKey), #role = if_not_exists(#role, :role), #status = if_not_exists(#status, :status), #version = if_not_exists(#version, :version), createdAt = if_not_exists(createdAt, :createdAt), updatedAt = if_not_exists(updatedAt, :updatedAt)',
+        ExpressionAttributeNames: {
+          '#role': 'role',
+          '#status': 'status',
+          '#version': 'version',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': { S: 'workspace-member' },
+          ':memberKey': { S: initialOwnerEmail },
+          ':role': { S: 'owner' },
+          ':status': { S: 'active' },
+          ':version': { N: '1' },
+          ':createdAt': { S: createdAt },
+          ':updatedAt': { S: createdAt },
+        },
+      },
+    },
+  ];
+}
+
+/**
+ * CDK demo data が参照する Workspace member を既存 role/status を上書きせず seed します。
+ */
+function createWorkspaceDemoMemberTransactItems(tableName: string, workspaceId: string) {
+  const createdAt = '2026-07-11T00:00:00.000Z';
+  const members = [
+    ['sato@example.com', '佐藤 花子', 'member'],
+    ['suzuki@example.com', '鈴木 太郎', 'member'],
+    ['tanaka@example.com', '田中 美咲', 'member'],
+    ['yamamoto@example.com', '山本 健', 'member'],
+    ['viewer@example.com', 'Viewer User', 'guest'],
+  ] as const;
+
+  return members.map(([memberKey, name, role]) => ({
+    Update: {
+      TableName: tableName,
+      Key: {
+        workspaceId: { S: workspaceId },
+        recordKey: { S: `MEMBER#${memberKey}` },
+      },
+      UpdateExpression:
+        'SET entryType = if_not_exists(entryType, :entryType), id = if_not_exists(id, :memberKey), memberKey = if_not_exists(memberKey, :memberKey), email = if_not_exists(email, :memberKey), #name = if_not_exists(#name, :name), #role = if_not_exists(#role, :role), #status = if_not_exists(#status, :status), #version = if_not_exists(#version, :version), createdAt = if_not_exists(createdAt, :createdAt), updatedAt = if_not_exists(updatedAt, :updatedAt)',
+      ExpressionAttributeNames: {
+        '#name': 'name',
+        '#role': 'role',
+        '#status': 'status',
+        '#version': 'version',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': { S: 'workspace-member' },
+        ':memberKey': { S: memberKey },
+        ':name': { S: name },
+        ':role': { S: role },
+        ':status': { S: 'active' },
+        ':version': { N: '1' },
+        ':createdAt': { S: createdAt },
+        ':updatedAt': { S: createdAt },
+      },
+    },
+  }));
+}
+
+/**
  * サイドバーに表示するチームとプロジェクトの関係 seed データです。
  */
 const projectDirectoryItems = [
@@ -128,14 +230,14 @@ const projectMemberItems = [
 /**
  * DynamoDB の transaction write item payload を作成します。
  */
-function createProjectTaskTransactItems(tableName: string) {
+function createProjectTaskTransactItems(tableName: string, directoryId = demoUserDirectoryId) {
   return projectTaskItems.map(([projectId, taskId, sortOrder, titleKey, assigneeUserId, status, dueDate, priority]) => ({
     Put: {
       TableName: tableName,
       ConditionExpression: 'attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)',
       Item: {
-        directoryId: { S: demoUserDirectoryId },
-        directoryProjectId: { S: createDirectoryProjectId(demoUserDirectoryId, projectId) },
+        directoryId: { S: directoryId },
+        directoryProjectId: { S: createDirectoryProjectId(directoryId, projectId) },
         projectId: { S: projectId },
         taskId: { S: taskId },
         sortOrder: { N: String(sortOrder) },
@@ -152,10 +254,10 @@ function createProjectTaskTransactItems(tableName: string) {
 /**
  * サイドバー directory 用の transaction write item payload を作成します。
  */
-function createProjectDirectoryTransactItems(tableName: string) {
+function createProjectDirectoryTransactItems(tableName: string, directoryId = demoUserDirectoryId) {
   const directoryItems = projectDirectoryItems.map((entry) => {
     const item = {
-      directoryId: { S: demoUserDirectoryId },
+      directoryId: { S: directoryId },
       entryKey: { S: entry.entryKey },
       entryType: { S: entry.entryType },
       teamId: { S: entry.teamId },
@@ -186,7 +288,7 @@ function createProjectDirectoryTransactItems(tableName: string) {
       TableName: tableName,
       ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
       Item: {
-        directoryId: { S: demoUserDirectoryId },
+        directoryId: { S: directoryId },
         entryKey: { S: createProjectMemberEntryKey(projectId, memberKey) },
         entryType: { S: 'project-member' },
         projectId: { S: projectId },
@@ -230,6 +332,18 @@ export class CdkStack extends cdk.Stack {
     const cognitoUserPoolId = new cdk.CfnParameter(this, 'CognitoUserPoolId', {
       type: 'String',
       description: 'Cognito user pool ID trusted by the project tasks Lambda API.',
+    });
+    const workspaceDirectoryId = new cdk.CfnParameter(this, 'WorkspaceDirectoryId', {
+      type: 'String',
+      default: demoUserDirectoryId,
+      description: 'Workspace directory ID shared by Cognito attributes and DynamoDB partitions.',
+    });
+    const initialWorkspaceOwnerEmail = new cdk.CfnParameter(this, 'InitialWorkspaceOwnerEmail', {
+      type: 'String',
+      default: 'demo@example.com',
+      description: 'Lowercase email address seeded as the initial active Workspace owner.',
+      allowedPattern: '^[^A-Z\\s@]+@[^A-Z\\s@]+$',
+      constraintDescription: 'Must be a trimmed lowercase email address.',
     });
     const cognitoUserPoolArn = cdk.Stack.of(this).formatArn({
       service: 'cognito-idp',
@@ -337,6 +451,13 @@ export class CdkStack extends cdk.Stack {
       timeToLiveAttribute: 'expiresAt',
     });
 
+    const workspaceAccessTable = new dynamodb.Table(this, 'WorkspaceAccessTable', {
+      partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     const listTasksFunction = new lambda.Function(this, 'ListProjectTasksFunction', {
       runtime: lambda.Runtime.NODEJS_22_X,
       handler: 'index.handler',
@@ -351,10 +472,12 @@ export class CdkStack extends cdk.Stack {
         TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
         TEAM_ISSUES_TABLE_NAME: teamIssuesTable.tableName,
         TASKS_TABLE_NAME: tasksTable.tableName,
+        WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
+        WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
       },
       code: lambda.Code.fromInline(`
-	const { CognitoIdentityProviderClient, AdminGetUserCommand, GetUserCommand, ListUsersCommand } = require('@aws-sdk/client-cognito-identity-provider');
-const { DynamoDBClient, DeleteItemCommand, PutItemCommand, QueryCommand, TransactWriteItemsCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
+	const { CognitoIdentityProviderClient, AdminCreateUserCommand, AdminDeleteUserCommand, AdminGetUserCommand, AdminUpdateUserAttributesCommand, GetUserCommand, ListUsersCommand } = require('@aws-sdk/client-cognito-identity-provider');
+const { DynamoDBClient, DeleteItemCommand, GetItemCommand, PutItemCommand, QueryCommand, TransactWriteItemsCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
 const { createHash } = require('node:crypto');
 
 const cognito = new CognitoIdentityProviderClient({});
@@ -398,12 +521,62 @@ exports.handler = async (event) => {
     return json(403, { message: 'Project access is denied.' }, headers);
   }
 
+  try {
+    const workspaceMember = await getActiveWorkspaceMember(directoryId, principal.userKey);
+
+    if (!workspaceMember) {
+      return json(403, { message: 'Workspace access is denied.' }, headers);
+    }
+
+    principal.workspaceMember = workspaceMember;
+    principal.workspaceRole = workspaceMember.role;
+  } catch (error) {
+    console.error(error);
+    return json(503, { message: 'Workspace access is unavailable.' }, headers);
+  }
+
   let mutationContext;
 
   try {
     mutationContext = createMutationContext(event, principal, directoryId);
   } catch (error) {
     return toProjectDataError(error, headers, 'Mutation request is invalid.');
+  }
+
+  if (isWorkspaceAccessRequest(event)) {
+    try {
+      return await getWorkspaceAccess(headers, principal);
+    } catch (error) {
+      return toWorkspaceAccessError(error, headers);
+    }
+  }
+
+  if (isCreateWorkspaceInvitationRequest(event)) {
+    try {
+      return await createWorkspaceInvitation(event, headers, principal);
+    } catch (error) {
+      return toWorkspaceAccessError(error, headers);
+    }
+  }
+
+  const workspaceInvitationAction = readWorkspaceInvitationAction(event);
+
+  if (workspaceInvitationAction) {
+    try {
+      return await mutateWorkspaceInvitation(headers, principal, workspaceInvitationAction);
+    } catch (error) {
+      return toWorkspaceAccessError(error, headers);
+    }
+  }
+
+  const workspaceMemberKey = readWorkspaceMemberKey(event);
+
+  if (workspaceMemberKey) {
+    try {
+      return await updateWorkspaceMember(event, headers, principal, workspaceMemberKey);
+    } catch (error) {
+      return toWorkspaceAccessError(error, headers);
+    }
   }
 
   if (isWorkspaceAuditRequest(event)) {
@@ -446,9 +619,13 @@ exports.handler = async (event) => {
     }
   }
 
+  if (isBusinessWriteRequest(event) && principal.workspaceRole === 'guest') {
+    return json(403, { message: 'Workspace access is denied.' }, headers);
+  }
+
   if (isCreateTeamRequest(event)) {
-    if (!principal.isSystemAdmin) {
-      return json(403, { message: 'Project access is denied.' }, headers);
+    if (!canManageWorkspaceStructure(principal)) {
+      return json(403, { message: 'Workspace access is denied.' }, headers);
     }
 
     try {
@@ -461,6 +638,10 @@ exports.handler = async (event) => {
   const createProjectTeamId = readCreateProjectTeamId(event);
 
   if (createProjectTeamId) {
+    if (!canManageWorkspaceStructure(principal)) {
+      return json(403, { message: 'Workspace access is denied.' }, headers);
+    }
+
     try {
       return await createProject(event, headers, directoryId, createProjectTeamId, principal.userKey, mutationContext);
     } catch (error) {
@@ -471,8 +652,8 @@ exports.handler = async (event) => {
   const archiveTeamId = readArchiveTeamId(event);
 
   if (archiveTeamId) {
-    if (!principal.isSystemAdmin) {
-      return json(403, { message: 'Project access is denied.' }, headers);
+    if (!canManageWorkspaceStructure(principal)) {
+      return json(403, { message: 'Workspace access is denied.' }, headers);
     }
 
     try {
@@ -485,18 +666,11 @@ exports.handler = async (event) => {
   const archiveProjectParams = readArchiveProjectParams(event);
 
   if (archiveProjectParams) {
+    if (!canManageWorkspaceStructure(principal)) {
+      return json(403, { message: 'Workspace access is denied.' }, headers);
+    }
+
     try {
-      const permissionError = await enforceProjectPermission(
-        headers,
-        principal,
-        archiveProjectParams.projectId,
-        'manager',
-      );
-
-      if (permissionError) {
-        return permissionError;
-      }
-
       return await archiveProject(
         headers,
         directoryId,
@@ -779,6 +953,965 @@ exports.handler = async (event) => {
     return toProjectDataError(error, headers, 'Failed to load project tasks.');
   }
 };
+
+function isWorkspaceAccessRequest(event) {
+  const path = event.rawPath ?? '';
+  return event.requestContext?.http?.method === 'GET' &&
+    (path === '/workspace/access' || path === '/api/workspace/access');
+}
+
+function isCreateWorkspaceInvitationRequest(event) {
+  const path = event.rawPath ?? '';
+  return event.requestContext?.http?.method === 'POST' &&
+    (path === '/workspace/invitations' || path === '/api/workspace/invitations');
+}
+
+function readWorkspaceInvitationAction(event) {
+  if (event.requestContext?.http?.method !== 'POST') {
+    return undefined;
+  }
+
+  const match = event.rawPath?.match(/^\\/(?:api\\/)?workspace\\/invitations\\/([^/]+)\\/(resend|revoke|reinvite)$/);
+  const invitationId = match?.[1] ? decodePathSegment(match[1]) : undefined;
+
+  return invitationId && match?.[2]
+    ? { action: match[2], invitationId: normalizeWorkspaceMemberKey(invitationId) }
+    : undefined;
+}
+
+function readWorkspaceMemberKey(event) {
+  if (event.requestContext?.http?.method !== 'PATCH') {
+    return undefined;
+  }
+
+  const encodedMemberKey = event.rawPath?.match(/^\\/(?:api\\/)?workspace\\/members\\/([^/]+)$/)?.[1];
+
+  return encodedMemberKey
+    ? normalizeWorkspaceMemberKey(decodePathSegment(encodedMemberKey))
+    : undefined;
+}
+
+function isBusinessWriteRequest(event) {
+  const method = event.requestContext?.http?.method;
+  return method === 'POST' || method === 'PATCH' || method === 'DELETE';
+}
+
+function canManageWorkspaceStructure(principal) {
+  return principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin';
+}
+
+function canBypassProjectPermissions(principal) {
+  return principal.isSystemAdmin;
+}
+
+function workspaceCapabilities(role) {
+  return {
+    canInvite: role === 'owner' || role === 'admin',
+    canManageMembers: role === 'owner' || role === 'admin',
+    canManageAdmins: role === 'owner',
+  };
+}
+
+function normalizeWorkspaceMemberKey(value) {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function workspaceMemberRecordKey(memberKey) {
+  return 'MEMBER#' + normalizeWorkspaceMemberKey(memberKey);
+}
+
+function workspaceInvitationRecordKey(invitationId) {
+  return 'INVITATION#' + normalizeWorkspaceMemberKey(invitationId);
+}
+
+async function getWorkspaceRecord(workspaceId, recordKey) {
+  const response = await dynamodb.send(new GetItemCommand({
+    TableName: process.env.WORKSPACE_ACCESS_TABLE_NAME,
+    Key: {
+      workspaceId: { S: workspaceId },
+      recordKey: { S: recordKey },
+    },
+    ConsistentRead: true,
+  }));
+
+  return response.Item;
+}
+
+async function getActiveWorkspaceMember(workspaceId, memberKey) {
+  const item = await getWorkspaceRecord(workspaceId, workspaceMemberRecordKey(memberKey));
+
+  if (
+    item?.entryType?.S !== 'workspace-member' ||
+    item.status?.S !== 'active' ||
+    !isWorkspaceRole(item.role?.S)
+  ) {
+    return undefined;
+  }
+
+  return toWorkspaceMember(item);
+}
+
+async function requireActiveWorkspaceAssignee(workspaceId, memberKey) {
+  if (!await getActiveWorkspaceMember(workspaceId, memberKey)) {
+    const error = new Error('Assignee must be an active Workspace member.');
+    error.name = 'InvalidProjectWrite';
+    throw error;
+  }
+}
+
+async function listWorkspaceRecords(workspaceId) {
+  return queryAll({
+    TableName: process.env.WORKSPACE_ACCESS_TABLE_NAME,
+    KeyConditionExpression: 'workspaceId = :workspaceId',
+    ExpressionAttributeValues: {
+      ':workspaceId': { S: workspaceId },
+    },
+    ScanIndexForward: true,
+  });
+}
+
+async function getWorkspaceAccess(headers, principal) {
+  const items = await listWorkspaceRecords(principal.directoryId);
+  const members = items
+    .filter((item) => item.entryType?.S === 'workspace-member')
+    .map(toWorkspaceMember)
+    .sort((first, second) => first.email.localeCompare(second.email));
+  const invitations = items
+    .filter((item) => item.entryType?.S === 'workspace-invitation')
+    .map(toWorkspaceInvitation)
+    .sort((first, second) => second.updatedAt.localeCompare(first.updatedAt));
+  const currentMember = members.find((member) => member.memberKey === principal.userKey);
+
+  if (!currentMember || currentMember.status !== 'active') {
+    return json(403, { message: 'Workspace access is denied.' }, headers);
+  }
+
+  return json(200, {
+    currentMember,
+    members,
+    invitations,
+    capabilities: workspaceCapabilities(currentMember.role),
+  }, headers);
+}
+
+function toWorkspaceMember(item) {
+  const memberKey = item.memberKey?.S ?? item.email?.S ?? '';
+  const member = {
+    id: item.id?.S ?? memberKey,
+    memberKey,
+    email: item.email?.S ?? memberKey,
+    role: item.role?.S,
+    status: item.status?.S,
+    version: Number(item.version?.N ?? 1),
+    createdAt: item.createdAt?.S ?? '',
+    updatedAt: item.updatedAt?.S ?? '',
+  };
+
+  if (item.name?.S) {
+    member.name = item.name.S;
+  }
+
+  if (item.deactivatedAt?.S) {
+    member.deactivatedAt = item.deactivatedAt.S;
+  }
+
+  return member;
+}
+
+function toWorkspaceInvitation(item) {
+  const email = item.email?.S ?? item.id?.S ?? '';
+  const storedStatus = item.status?.S ?? 'provisioning';
+  const status = storedStatus !== 'accepted' && storedStatus !== 'revoked' &&
+    Date.parse(item.expiresAt?.S ?? '') <= Date.now()
+    ? 'expired'
+    : storedStatus;
+  const invitation = {
+    id: item.id?.S ?? email,
+    email,
+    role: item.role?.S,
+    status,
+    deliveryStatus: item.deliveryStatus?.S ?? 'pending',
+    identityOwnership: item.identityOwnership?.S ?? 'ambiguous',
+    version: Number(item.version?.N ?? 1),
+    expiresAt: item.expiresAt?.S ?? '',
+    createdAt: item.createdAt?.S ?? '',
+    updatedAt: item.updatedAt?.S ?? '',
+  };
+
+  if (item.name?.S) {
+    invitation.name = item.name.S;
+  }
+
+  if (item.lastSentAt?.S) {
+    invitation.lastSentAt = item.lastSentAt.S;
+  }
+
+  if (item.failureMessage?.S) {
+    invitation.failureMessage = item.failureMessage.S;
+  }
+
+  return invitation;
+}
+
+function isWorkspaceRole(value) {
+  return value === 'owner' || value === 'admin' || value === 'member' || value === 'guest';
+}
+
+function isWorkspaceMemberStatus(value) {
+  return value === 'active' || value === 'deactivated';
+}
+
+function canManageWorkspaceInvitationRole(actorRole, invitationRole) {
+  return actorRole === 'owner' ||
+    (actorRole === 'admin' && invitationRole !== 'owner' && invitationRole !== 'admin');
+}
+
+function requireInvitationManager(principal, role) {
+  if (!canManageWorkspaceInvitationRole(principal.workspaceRole, role)) {
+    throw workspaceError('WorkspaceAccessDenied', 'Workspace access is denied.');
+  }
+}
+
+function createWorkspaceActorConditionCheck(principal) {
+  return {
+    TableName: process.env.WORKSPACE_ACCESS_TABLE_NAME,
+    Key: {
+      workspaceId: { S: principal.directoryId },
+      recordKey: { S: workspaceMemberRecordKey(principal.userKey) },
+    },
+    ConditionExpression:
+      '#entryType = :memberEntryType AND #status = :active AND #role = :actorRole AND #version = :actorVersion',
+    ExpressionAttributeNames: {
+      '#entryType': 'entryType',
+      '#status': 'status',
+      '#role': 'role',
+      '#version': 'version',
+    },
+    ExpressionAttributeValues: {
+      ':memberEntryType': { S: 'workspace-member' },
+      ':active': { S: 'active' },
+      ':actorRole': { S: principal.workspaceRole },
+      ':actorVersion': { N: String(principal.workspaceMember.version) },
+    },
+  };
+}
+
+async function assertWorkspaceInvitationActor(principal, invitation) {
+  try {
+    await dynamodb.send(new TransactWriteItemsCommand({
+      TransactItems: [
+        { ConditionCheck: createWorkspaceActorConditionCheck(principal) },
+        {
+          ConditionCheck: {
+            TableName: process.env.WORKSPACE_ACCESS_TABLE_NAME,
+            Key: {
+              workspaceId: { S: principal.directoryId },
+              recordKey: { S: invitation.recordKey.S },
+            },
+            ConditionExpression: '#version = :expectedVersion AND #status = :expectedStatus',
+            ExpressionAttributeNames: { '#version': 'version', '#status': 'status' },
+            ExpressionAttributeValues: {
+              ':expectedVersion': { N: invitation.version.N },
+              ':expectedStatus': { S: invitation.status.S },
+            },
+          },
+        },
+      ],
+    }));
+  } catch (error) {
+    if (error?.name === 'TransactionCanceledException' || error?.name === 'ConditionalCheckFailedException') {
+      await throwWorkspaceInvitationActorConflict(principal, invitation.role.S);
+    }
+
+    throw error;
+  }
+}
+
+async function throwWorkspaceInvitationActorConflict(principal, invitationRole) {
+  const latestActor = await getActiveWorkspaceMember(principal.directoryId, principal.userKey);
+
+  if (!latestActor || !canManageWorkspaceInvitationRole(latestActor.role, invitationRole)) {
+    throw workspaceError('WorkspaceAccessDenied', 'Workspace access is denied.');
+  }
+
+  throw workspaceError('WorkspaceConflict', 'Workspace access changed. Reload and retry.');
+}
+
+function requireMemberManager(principal, currentRole, nextRole) {
+  if (principal.workspaceRole !== 'owner' && principal.workspaceRole !== 'admin') {
+    throw workspaceError('WorkspaceAccessDenied', 'Workspace access is denied.');
+  }
+
+  if (
+    principal.workspaceRole === 'admin' &&
+    (currentRole === 'owner' || currentRole === 'admin' || nextRole === 'owner' || nextRole === 'admin')
+  ) {
+    throw workspaceError('WorkspaceAccessDenied', 'Only an owner can manage owner or admin members.');
+  }
+}
+
+async function createWorkspaceInvitation(event, headers, principal) {
+  const body = readJsonBody(event);
+  const email = normalizeWorkspaceMemberKey(body.email);
+  const role = body.role;
+  const name = typeof body.name === 'string' ? body.name.trim() : undefined;
+
+  if (!email || !email.includes('@') || !isWorkspaceRole(role)) {
+    throw workspaceError('InvalidWorkspaceWrite', 'Invitation email and role are required.');
+  }
+
+  requireInvitationManager(principal, role);
+
+  if (email === principal.userKey) {
+    throw workspaceError('WorkspaceConflict', 'Workspace member already exists.');
+  }
+
+  const existingMember = await getWorkspaceRecord(
+    principal.directoryId,
+    workspaceMemberRecordKey(email),
+  );
+
+  if (existingMember) {
+    throw workspaceError('WorkspaceConflict', 'Workspace member already exists.');
+  }
+
+  const existingInvitation = await getWorkspaceRecord(
+    principal.directoryId,
+    workspaceInvitationRecordKey(email),
+  );
+
+  if (existingInvitation) {
+    throw workspaceError('WorkspaceConflict', 'Workspace invitation already exists.');
+  }
+
+  const now = new Date().toISOString();
+  const item = {
+    workspaceId: { S: principal.directoryId },
+    recordKey: { S: workspaceInvitationRecordKey(email) },
+    entryType: { S: 'workspace-invitation' },
+    id: { S: email },
+    email: { S: email },
+    ...(name ? { name: { S: name } } : {}),
+    role: { S: role },
+    status: { S: 'provisioning' },
+    deliveryStatus: { S: 'pending' },
+    identityOwnership: { S: 'ambiguous' },
+    version: { N: '1' },
+    expiresAt: { S: createInvitationExpiry() },
+    createdAt: { S: now },
+    updatedAt: { S: now },
+    invitedBy: { S: principal.userKey },
+  };
+
+  await reserveWorkspaceInvitation(item, principal);
+
+  const invitation = await provisionWorkspaceInvitation(item, 1, principal.userPoolId);
+  return json(201, { invitation: toWorkspaceInvitation(invitation) }, headers);
+}
+
+async function reserveWorkspaceInvitation(item, principal) {
+  try {
+    await dynamodb.send(new TransactWriteItemsCommand({
+      TransactItems: [
+        { ConditionCheck: createWorkspaceActorConditionCheck(principal) },
+        {
+          ConditionCheck: {
+            TableName: process.env.WORKSPACE_ACCESS_TABLE_NAME,
+            Key: {
+              workspaceId: { S: principal.directoryId },
+              recordKey: { S: workspaceMemberRecordKey(item.email.S) },
+            },
+            ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+          },
+        },
+        {
+          Put: {
+            TableName: process.env.WORKSPACE_ACCESS_TABLE_NAME,
+            Item: item,
+            ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+          },
+        },
+      ],
+    }));
+  } catch (error) {
+    if (error?.name === 'TransactionCanceledException' || error?.name === 'ConditionalCheckFailedException') {
+      await throwWorkspaceInvitationCreateConflict(principal, item.email.S, item.role.S);
+    }
+
+    throw error;
+  }
+}
+
+async function throwWorkspaceInvitationCreateConflict(principal, email, role) {
+  const latestActor = await getActiveWorkspaceMember(principal.directoryId, principal.userKey);
+
+  if (!latestActor || !canManageWorkspaceInvitationRole(latestActor.role, role)) {
+    throw workspaceError('WorkspaceAccessDenied', 'Workspace access is denied.');
+  }
+
+  const member = await getWorkspaceRecord(principal.directoryId, workspaceMemberRecordKey(email));
+
+  if (member) {
+    throw workspaceError('WorkspaceConflict', 'Workspace member already exists.');
+  }
+
+  const invitation = await getWorkspaceRecord(principal.directoryId, workspaceInvitationRecordKey(email));
+
+  if (invitation) {
+    throw workspaceError('WorkspaceConflict', 'Workspace invitation already exists.');
+  }
+
+  throw workspaceError('WorkspaceConflict', 'Workspace access changed. Reload and retry.');
+}
+
+async function provisionWorkspaceInvitation(item, expectedVersion, userPoolId, preserveOwnership = false) {
+  const email = item.email.S;
+  const priorOwnership = item.identityOwnership?.S ?? 'ambiguous';
+  let ownership = preserveOwnership ? priorOwnership : 'ambiguous';
+  let deliveryStatus = 'not-required';
+
+  try {
+    let existingUser;
+
+    try {
+      existingUser = await cognito.send(new AdminGetUserCommand({
+        UserPoolId: userPoolId,
+        Username: email,
+      }));
+    } catch (error) {
+      if (error?.name !== 'UserNotFoundException') {
+        throw error;
+      }
+    }
+
+    if (existingUser) {
+      await ensureCognitoWorkspaceDirectory(existingUser, userPoolId, email, item.workspaceId.S);
+      ownership = preserveOwnership ? priorOwnership : 'pre-existing';
+
+      if (existingUser.UserStatus === 'FORCE_CHANGE_PASSWORD') {
+        await resendCognitoWorkspaceInvitation(userPoolId, email);
+        deliveryStatus = 'sent';
+      }
+    } else {
+      try {
+        await cognito.send(new AdminCreateUserCommand({
+          UserPoolId: userPoolId,
+          Username: email,
+          DesiredDeliveryMediums: ['EMAIL'],
+          UserAttributes: [
+            { Name: 'email', Value: email },
+            { Name: 'custom:directory_id', Value: item.workspaceId.S },
+          ],
+        }));
+        ownership = preserveOwnership ? priorOwnership : 'workspace-created';
+        deliveryStatus = 'sent';
+      } catch (error) {
+        if (error?.name !== 'UsernameExistsException') {
+          throw error;
+        }
+
+        let racedUser;
+
+        try {
+          racedUser = await cognito.send(new AdminGetUserCommand({
+            UserPoolId: userPoolId,
+            Username: email,
+          }));
+        } catch (raceError) {
+          if (raceError?.name === 'UserNotFoundException') {
+            throw error;
+          }
+
+          throw raceError;
+        }
+
+        ownership = preserveOwnership ? priorOwnership : 'ambiguous';
+        await ensureCognitoWorkspaceDirectory(racedUser, userPoolId, email, item.workspaceId.S);
+
+        if (racedUser.UserStatus === 'FORCE_CHANGE_PASSWORD') {
+          await resendCognitoWorkspaceInvitation(userPoolId, email);
+          deliveryStatus = 'sent';
+        }
+      }
+    }
+
+    const updated = updateInvitationItem(item, {
+      status: 'pending',
+      deliveryStatus,
+      identityOwnership: ownership,
+      lastSentAt: deliveryStatus === 'sent' ? new Date().toISOString() : undefined,
+      failureMessage: undefined,
+    });
+    await putWorkspaceInvitation(updated, expectedVersion);
+    return updated;
+  } catch (error) {
+    console.error(error);
+    const failed = updateInvitationItem(item, {
+      status: 'delivery-failed',
+      deliveryStatus: 'failed',
+      identityOwnership: ownership,
+      failureMessage: 'Invitation delivery failed.',
+    });
+    await putWorkspaceInvitation(failed, expectedVersion);
+    throw error;
+  }
+}
+
+async function resendCognitoWorkspaceInvitation(userPoolId, email) {
+  await cognito.send(new AdminCreateUserCommand({
+    UserPoolId: userPoolId,
+    Username: email,
+    MessageAction: 'RESEND',
+    DesiredDeliveryMediums: ['EMAIL'],
+  }));
+}
+
+async function ensureCognitoWorkspaceDirectory(user, userPoolId, username, workspaceId) {
+  const attributes = user.UserAttributes ?? user.Attributes ?? [];
+  const directoryAttribute = attributes.find((attribute) =>
+    attribute.Name === 'custom:directory_id' || attribute.Name === 'custom:workspace_id'
+  );
+
+  if (directoryAttribute?.Value && directoryAttribute.Value !== workspaceId) {
+    throw workspaceError('WorkspaceConflict', 'Cognito user belongs to another Workspace.');
+  }
+
+  if (!directoryAttribute?.Value) {
+    await cognito.send(new AdminUpdateUserAttributesCommand({
+      UserPoolId: userPoolId,
+      Username: username,
+      UserAttributes: [{ Name: 'custom:directory_id', Value: workspaceId }],
+    }));
+  }
+}
+
+function createInvitationExpiry() {
+  return new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function updateInvitationItem(item, input) {
+  const next = {
+    ...item,
+    status: { S: input.status },
+    deliveryStatus: { S: input.deliveryStatus },
+    identityOwnership: { S: input.identityOwnership },
+    version: { N: String(Number(item.version?.N ?? 0) + 1) },
+    updatedAt: { S: new Date().toISOString() },
+  };
+
+  if (input.expiresAt) {
+    next.expiresAt = { S: input.expiresAt };
+  }
+
+  if (input.lastSentAt) {
+    next.lastSentAt = { S: input.lastSentAt };
+  } else {
+    delete next.lastSentAt;
+  }
+
+  if (input.failureMessage) {
+    next.failureMessage = { S: input.failureMessage };
+  } else {
+    delete next.failureMessage;
+  }
+
+  return next;
+}
+
+async function putWorkspaceInvitation(item, expectedVersion) {
+  await dynamodb.send(new PutItemCommand({
+    TableName: process.env.WORKSPACE_ACCESS_TABLE_NAME,
+    Item: item,
+    ConditionExpression: '#version = :expectedVersion',
+    ExpressionAttributeNames: { '#version': 'version' },
+    ExpressionAttributeValues: { ':expectedVersion': { N: String(expectedVersion) } },
+  }));
+}
+
+async function putWorkspaceInvitationForActor(item, expectedVersion, principal, requireMemberAbsent = false) {
+  try {
+    await dynamodb.send(new TransactWriteItemsCommand({
+      TransactItems: [
+        { ConditionCheck: createWorkspaceActorConditionCheck(principal) },
+        ...(requireMemberAbsent
+          ? [{
+              ConditionCheck: {
+                TableName: process.env.WORKSPACE_ACCESS_TABLE_NAME,
+                Key: {
+                  workspaceId: { S: principal.directoryId },
+                  recordKey: { S: workspaceMemberRecordKey(item.email.S) },
+                },
+                ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+              },
+            }]
+          : []),
+        {
+          Put: {
+            TableName: process.env.WORKSPACE_ACCESS_TABLE_NAME,
+            Item: item,
+            ConditionExpression: '#version = :expectedVersion',
+            ExpressionAttributeNames: { '#version': 'version' },
+            ExpressionAttributeValues: { ':expectedVersion': { N: String(expectedVersion) } },
+          },
+        },
+      ],
+    }));
+  } catch (error) {
+    if (error?.name === 'TransactionCanceledException' || error?.name === 'ConditionalCheckFailedException') {
+      await throwWorkspaceInvitationActorConflict(principal, item.role.S);
+    }
+
+    throw error;
+  }
+}
+
+async function mutateWorkspaceInvitation(headers, principal, params) {
+  const item = await getWorkspaceRecord(
+    principal.directoryId,
+    workspaceInvitationRecordKey(params.invitationId),
+  );
+
+  if (!item || item.entryType?.S !== 'workspace-invitation') {
+    throw workspaceError('WorkspaceInvitationNotFound', 'Workspace invitation was not found.');
+  }
+
+  requireInvitationManager(principal, item.role?.S);
+  const invitation = toWorkspaceInvitation(item);
+
+  if (params.action === 'resend') {
+    if (!['provisioning', 'pending', 'delivery-failed', 'expired'].includes(invitation.status)) {
+      throw workspaceError('WorkspaceConflict', 'Workspace invitation cannot be resent.');
+    }
+
+    const prepared = updateInvitationItem(item, {
+      status: 'provisioning',
+      deliveryStatus: 'pending',
+      identityOwnership: item.identityOwnership?.S ?? 'ambiguous',
+      expiresAt: createInvitationExpiry(),
+      failureMessage: undefined,
+    });
+    await putWorkspaceInvitationForActor(prepared, invitation.version, principal);
+
+    if (prepared.identityOwnership.S === 'workspace-created') {
+      try {
+        await resendCognitoWorkspaceInvitation(principal.userPoolId, invitation.email);
+        const sent = updateInvitationItem(prepared, {
+          status: 'pending',
+          deliveryStatus: 'sent',
+          identityOwnership: 'workspace-created',
+          lastSentAt: new Date().toISOString(),
+          failureMessage: undefined,
+        });
+        await putWorkspaceInvitation(sent, Number(prepared.version.N));
+        return json(200, { invitation: toWorkspaceInvitation(sent) }, headers);
+      } catch (error) {
+        console.error(error);
+        const failed = updateInvitationItem(prepared, {
+          status: 'delivery-failed',
+          deliveryStatus: 'failed',
+          identityOwnership: 'workspace-created',
+          failureMessage: 'Invitation delivery failed.',
+        });
+        await putWorkspaceInvitation(failed, Number(prepared.version.N));
+        throw error;
+      }
+    }
+
+    const recovered = await provisionWorkspaceInvitation(
+      prepared,
+      Number(prepared.version.N),
+      principal.userPoolId,
+      true,
+    );
+    return json(200, { invitation: toWorkspaceInvitation(recovered) }, headers);
+  }
+
+  if (params.action === 'revoke') {
+    if (invitation.status === 'accepted') {
+      throw workspaceError('WorkspaceConflict', 'Workspace invitation cannot be revoked.');
+    }
+
+    let revoked = item;
+    const cleanupPendingMessage = item.identityOwnership?.S === 'workspace-created'
+      ? item.failureMessage?.S ?? 'Cognito cleanup is pending and can be retried safely.'
+      : undefined;
+
+    if (invitation.status !== 'revoked') {
+      revoked = updateInvitationItem(item, {
+        status: 'revoked',
+        deliveryStatus: 'not-required',
+        identityOwnership: item.identityOwnership?.S ?? 'ambiguous',
+        failureMessage: cleanupPendingMessage,
+      });
+      await putWorkspaceInvitationForActor(revoked, invitation.version, principal);
+    } else if (item.identityOwnership?.S === 'workspace-created') {
+      revoked = updateInvitationItem(item, {
+        status: 'revoked',
+        deliveryStatus: 'not-required',
+        identityOwnership: 'workspace-created',
+        failureMessage: cleanupPendingMessage,
+      });
+      await putWorkspaceInvitationForActor(revoked, invitation.version, principal);
+    } else {
+      await assertWorkspaceInvitationActor(principal, item);
+    }
+
+    if (revoked.identityOwnership.S === 'workspace-created') {
+      try {
+        await cognito.send(new AdminDeleteUserCommand({
+          UserPoolId: principal.userPoolId,
+          Username: invitation.email,
+        }));
+      } catch (error) {
+        if (error?.name !== 'UserNotFoundException') {
+          console.error(error);
+          const cleanupFailed = updateInvitationItem(revoked, {
+            status: 'revoked',
+            deliveryStatus: revoked.deliveryStatus.S,
+            identityOwnership: 'workspace-created',
+            failureMessage: 'Cognito cleanup failed and can be retried safely.',
+          });
+          await putWorkspaceInvitation(cleanupFailed, Number(revoked.version.N));
+          throw error;
+        }
+      }
+
+      const cleaned = updateInvitationItem(revoked, {
+        status: 'revoked',
+        deliveryStatus: 'not-required',
+        identityOwnership: 'workspace-created',
+        failureMessage: undefined,
+      });
+      await putWorkspaceInvitation(cleaned, Number(revoked.version.N));
+      revoked = cleaned;
+    }
+
+    return json(200, { invitation: toWorkspaceInvitation(revoked) }, headers);
+  }
+
+  if (params.action === 'reinvite') {
+    if (invitation.status !== 'expired' && invitation.status !== 'revoked') {
+      throw workspaceError('WorkspaceConflict', 'Workspace invitation cannot be recreated.');
+    }
+
+    if (
+      invitation.status === 'revoked' &&
+      item.identityOwnership?.S === 'workspace-created' &&
+      item.failureMessage?.S
+    ) {
+      throw workspaceError(
+        'WorkspaceConflict',
+        'Cognito cleanup must complete before this invitation can be recreated.',
+      );
+    }
+
+    if (invitation.email === principal.userKey) {
+      throw workspaceError('WorkspaceConflict', 'Workspace member already exists.');
+    }
+
+    const member = await getWorkspaceRecord(
+      principal.directoryId,
+      workspaceMemberRecordKey(invitation.email),
+    );
+
+    if (member) {
+      throw workspaceError('WorkspaceConflict', 'Workspace member already exists.');
+    }
+
+    const prepared = {
+      ...item,
+      status: { S: 'provisioning' },
+      deliveryStatus: { S: 'pending' },
+      identityOwnership: { S: 'ambiguous' },
+      version: { N: String(invitation.version + 1) },
+      expiresAt: { S: createInvitationExpiry() },
+      updatedAt: { S: new Date().toISOString() },
+    };
+    delete prepared.lastSentAt;
+    delete prepared.failureMessage;
+    await putWorkspaceInvitationForActor(prepared, invitation.version, principal, true);
+    const recreated = await provisionWorkspaceInvitation(
+      prepared,
+      Number(prepared.version.N),
+      principal.userPoolId,
+    );
+    return json(200, { invitation: toWorkspaceInvitation(recreated) }, headers);
+  }
+
+  throw workspaceError('InvalidWorkspaceWrite', 'Workspace invitation action is invalid.');
+}
+
+async function updateWorkspaceMember(event, headers, principal, memberKey) {
+  const body = readJsonBody(event);
+  const expectedVersion = Number(body.expectedVersion);
+  const currentItem = await getWorkspaceRecord(
+    principal.directoryId,
+    workspaceMemberRecordKey(memberKey),
+  );
+
+  if (!currentItem || currentItem.entryType?.S !== 'workspace-member') {
+    throw workspaceError('WorkspaceMemberNotFound', 'Workspace member was not found.');
+  }
+
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 1) {
+    throw workspaceError('InvalidWorkspaceWrite', 'Expected version is required.');
+  }
+
+  const current = toWorkspaceMember(currentItem);
+  const nextRole = body.role === undefined ? current.role : body.role;
+  const nextStatus = body.status === undefined ? current.status : body.status;
+
+  if (!isWorkspaceRole(nextRole) || !isWorkspaceMemberStatus(nextStatus)) {
+    throw workspaceError('InvalidWorkspaceWrite', 'Workspace member role or status is invalid.');
+  }
+
+  requireMemberManager(principal, current.role, nextRole);
+
+  if (memberKey === principal.userKey && nextStatus === 'deactivated') {
+    throw workspaceError('WorkspaceSelfDeactivation', 'You cannot deactivate your own Workspace access.');
+  }
+
+  const now = new Date().toISOString();
+  const wasActiveOwner = current.role === 'owner' && current.status === 'active';
+  const willBeActiveOwner = nextRole === 'owner' && nextStatus === 'active';
+  const ownerDelta = wasActiveOwner === willBeActiveOwner ? 0 : willBeActiveOwner ? 1 : -1;
+  const updatedItem = {
+    ...currentItem,
+    role: { S: nextRole },
+    status: { S: nextStatus },
+    version: { N: String(current.version + 1) },
+    updatedAt: { S: now },
+  };
+
+  if (nextStatus === 'deactivated') {
+    updatedItem.deactivatedAt = { S: now };
+  } else {
+    delete updatedItem.deactivatedAt;
+  }
+
+  const transactItems = [];
+
+  if (memberKey !== principal.userKey) {
+    transactItems.push({
+      ConditionCheck: {
+        TableName: process.env.WORKSPACE_ACCESS_TABLE_NAME,
+        Key: {
+          workspaceId: { S: principal.directoryId },
+          recordKey: { S: workspaceMemberRecordKey(principal.userKey) },
+        },
+        ConditionExpression: '#status = :active AND #role = :actorRole',
+        ExpressionAttributeNames: { '#status': 'status', '#role': 'role' },
+        ExpressionAttributeValues: {
+          ':active': { S: 'active' },
+          ':actorRole': { S: principal.workspaceRole },
+        },
+      },
+    });
+  }
+
+  transactItems.push({
+    Put: {
+      TableName: process.env.WORKSPACE_ACCESS_TABLE_NAME,
+      Item: updatedItem,
+      ConditionExpression: '#version = :expectedVersion',
+      ExpressionAttributeNames: { '#version': 'version' },
+      ExpressionAttributeValues: { ':expectedVersion': { N: String(expectedVersion) } },
+    },
+  });
+
+  if (ownerDelta !== 0) {
+    transactItems.push({
+      Update: {
+        TableName: process.env.WORKSPACE_ACCESS_TABLE_NAME,
+        Key: {
+          workspaceId: { S: principal.directoryId },
+          recordKey: { S: 'WORKSPACE' },
+        },
+        UpdateExpression: 'SET #version = #version + :one, updatedAt = :updatedAt ADD activeOwnerCount :ownerDelta',
+        ConditionExpression: ownerDelta < 0
+          ? 'attribute_exists(workspaceId) AND activeOwnerCount > :minimumOwnerCount'
+          : 'attribute_exists(workspaceId)',
+        ExpressionAttributeNames: { '#version': 'version' },
+        ExpressionAttributeValues: {
+          ':one': { N: '1' },
+          ':updatedAt': { S: now },
+          ':ownerDelta': { N: String(ownerDelta) },
+          ...(ownerDelta < 0 ? { ':minimumOwnerCount': { N: '1' } } : {}),
+        },
+      },
+    });
+  }
+
+  try {
+    await dynamodb.send(new TransactWriteItemsCommand({ TransactItems: transactItems }));
+  } catch (error) {
+    if (error?.name === 'TransactionCanceledException' || error?.name === 'ConditionalCheckFailedException') {
+      const latestItem = await getWorkspaceRecord(
+        principal.directoryId,
+        workspaceMemberRecordKey(memberKey),
+      );
+
+      if (!latestItem || latestItem.entryType?.S !== 'workspace-member') {
+        throw workspaceError('WorkspaceMemberNotFound', 'Workspace member was not found.');
+      }
+
+      if (Number(latestItem.version?.N ?? 0) !== expectedVersion) {
+        throw workspaceError('WorkspaceConflict', 'Workspace member changed. Reload and retry.');
+      }
+
+      let isLastOwner = false;
+
+      if (ownerDelta < 0) {
+        const metadata = await getWorkspaceRecord(principal.directoryId, 'WORKSPACE');
+        isLastOwner = Number(metadata?.activeOwnerCount?.N ?? 0) <= 1;
+      }
+
+      throw workspaceError(
+        isLastOwner ? 'WorkspaceLastOwner' : 'WorkspaceConflict',
+        isLastOwner
+          ? 'At least one active Workspace owner is required.'
+          : 'Workspace member changed. Reload and retry.',
+      );
+    }
+
+    throw error;
+  }
+
+  return json(200, { member: toWorkspaceMember(updatedItem) }, headers);
+}
+
+function workspaceError(name, message) {
+  const error = new Error(message);
+  error.name = name;
+  return error;
+}
+
+function toWorkspaceAccessError(error, headers) {
+  if (error?.name === 'InvalidWorkspaceWrite') {
+    return json(400, { message: error.message }, headers);
+  }
+
+  if (error?.name === 'WorkspaceAccessDenied') {
+    return json(403, { message: 'Workspace access is denied.' }, headers);
+  }
+
+  if (error?.name === 'WorkspaceMemberNotFound' || error?.name === 'WorkspaceInvitationNotFound') {
+    return json(404, { message: error.message }, headers);
+  }
+
+  if (
+    error?.name === 'WorkspaceConflict' ||
+    error?.name === 'WorkspaceLastOwner' ||
+    error?.name === 'WorkspaceSelfDeactivation' ||
+    error?.name === 'ConditionalCheckFailedException' ||
+    error?.name === 'TransactionCanceledException'
+  ) {
+    return json(409, { message: error.message }, headers);
+  }
+
+  console.error(error);
+  return json(500, { message: 'Workspace access operation failed.' }, headers);
+}
 
 async function createTeam(event, headers, directoryId, mutationContext) {
   const body = readJsonBody(event);
@@ -1103,6 +2236,12 @@ async function archiveProject(headers, directoryId, teamId, projectId, mutationC
 	  const query = event.queryStringParameters?.query?.trim();
 	  const limit = clampCognitoPageLimit(Number(event.queryStringParameters?.limit ?? 20));
 	  const users = [];
+	  const activeWorkspaceMemberKeys = new Set(
+	    (await listWorkspaceRecords(directoryId))
+	      .filter((item) => item.entryType?.S === 'workspace-member' && item.status?.S === 'active')
+	      .map((item) => normalizeWorkspaceMemberKey(item.memberKey?.S ?? item.email?.S))
+	      .filter(Boolean),
+	  );
 	  let paginationToken = event.queryStringParameters?.paginationToken ?? event.queryStringParameters?.nextToken;
 
 	  do {
@@ -1116,7 +2255,8 @@ async function archiveProject(headers, directoryId, teamId, projectId, mutationC
 	      ...(response.Users ?? [])
 	        .filter((user) => isCognitoUserInDirectory(user, directoryId))
 	        .map(toCognitoUserProfile)
-	        .filter(Boolean),
+	        .filter((user) => user && activeWorkspaceMemberKeys.has(normalizeWorkspaceMemberKey(user.email)))
+	        .map((user) => ({ ...user, workspaceStatus: 'active' })),
 	    );
 	    paginationToken = response.PaginationToken;
 	  } while (users.length < limit && paginationToken);
@@ -1140,8 +2280,23 @@ async function archiveProject(headers, directoryId, teamId, projectId, mutationC
 	    .filter((item) => item.entryType?.S === 'project-member' && item.projectId?.S === projectId)
 	    .sort(compareProjectMembers)
 	    .map(toProjectMember);
+	  const workspaceStatusByMemberKey = new Map(
+	    (await listWorkspaceRecords(directoryId))
+	      .filter((item) => item.entryType?.S === 'workspace-member')
+	      .map((item) => [
+	        normalizeWorkspaceMemberKey(item.memberKey?.S ?? item.email?.S),
+	        item.status?.S,
+	      ]),
+	  );
+	  const hydratedMembers = await hydrateProjectMembers(members, userPoolId);
 
-	  return json(200, { projectId, members: await hydrateProjectMembers(members, userPoolId) }, headers);
+	  return json(200, {
+	    projectId,
+	    members: hydratedMembers.map((member) => ({
+	      ...member,
+	      workspaceStatus: workspaceStatusByMemberKey.get(normalizeWorkspaceMemberKey(member.id)) ?? 'deactivated',
+	    })),
+	  }, headers);
 	}
 
 async function updateProjectMember(event, headers, directoryId, projectId, memberKey, userPoolId, mutationContext) {
@@ -1152,6 +2307,7 @@ async function updateProjectMember(event, headers, directoryId, projectId, membe
     return json(400, { message: 'Project member email is required.' }, headers);
   }
   const profile = await getUserProfile(userPoolId, normalizedMemberKey);
+  await requireActiveWorkspaceAssignee(directoryId, profile.id);
 
   if (!isProjectRole(body.role)) {
     return json(400, { message: 'Project role is invalid.' }, headers);
@@ -1574,6 +2730,7 @@ function createActiveTeamConditionCheck(directoryId, entryKey) {
 	  const title = body.title.trim();
 	  const dueDate = body.dueDate.trim();
 	  await getUserProfile(userPoolId, assigneeUserId);
+	  await requireActiveWorkspaceAssignee(directoryId, assigneeUserId);
 	  const directoryProjectId = createDirectoryProjectId(directoryId, projectId);
   const items = await queryAll({
     TableName: process.env.TASKS_TABLE_NAME,
@@ -1790,6 +2947,7 @@ async function createTeamIssue(event, headers, directoryId, teamId, actorUserId,
   validateAssignedProjectInTeam(directoryItems, teamId, assignedProjectId);
   requireAssignedProjectPermission(directoryItems, principal, assignedProjectId, 'member');
   await getUserProfile(userPoolId, assigneeUserId);
+  await requireActiveWorkspaceAssignee(directoryId, assigneeUserId);
 
   const directoryTeamId = createDirectoryTeamId(directoryId, teamId);
   const currentItems = await queryAll({
@@ -1981,6 +3139,7 @@ async function updateTeamIssue(event, headers, directoryId, teamId, issueId, act
   if (Object.prototype.hasOwnProperty.call(body, 'assigneeUserId')) {
     const assigneeUserId = readTeamIssueAssigneeUserId(body);
     await getUserProfile(userPoolId, assigneeUserId);
+    await requireActiveWorkspaceAssignee(directoryId, assigneeUserId);
     expressionAttributeNames['#assigneeUserId'] = 'assigneeUserId';
     expressionAttributeValues[':assigneeUserId'] = { S: assigneeUserId };
     setExpressions.push('#assigneeUserId = :assigneeUserId');
@@ -2954,7 +4113,7 @@ function validateAssignedProjectInTeam(items, teamId, assignedProjectId) {
 }
 
 function requireAssignedProjectPermission(items, principal, assignedProjectId, minimumRole) {
-  if (!assignedProjectId || principal.isSystemAdmin) {
+  if (!assignedProjectId || canBypassProjectPermissions(principal)) {
     return;
   }
 
@@ -2966,8 +4125,12 @@ function requireAssignedProjectPermission(items, principal, assignedProjectId, m
 }
 
 function canAccessAssignedProject(items, principal, assignedProjectId, minimumRole) {
-  if (!assignedProjectId || principal.isSystemAdmin) {
+  if (!assignedProjectId || canBypassProjectPermissions(principal)) {
     return true;
+  }
+
+  if (principal.workspaceRole === 'guest' && minimumRole !== 'viewer') {
+    return false;
   }
 
   const normalizedMemberKey = normalizeProjectMemberKey(principal.userKey);
@@ -3175,8 +4338,12 @@ function readProjectTaskStatusParams(event) {
 }
 
 async function enforceProjectPermission(headers, principal, projectId, minimumRole) {
-  if (principal.isSystemAdmin) {
+  if (canBypassProjectPermissions(principal)) {
     return undefined;
+  }
+
+  if (principal.workspaceRole === 'guest' && minimumRole !== 'viewer') {
+    return json(403, { message: 'Workspace access is denied.' }, headers);
   }
 
   const projectAccess = await getProjectAccess(
@@ -3197,8 +4364,12 @@ async function enforceProjectPermission(headers, principal, projectId, minimumRo
 }
 
 async function enforceTeamPermission(headers, principal, teamId, minimumRole) {
-  if (principal.isSystemAdmin) {
+  if (canBypassProjectPermissions(principal)) {
     return undefined;
+  }
+
+  if (principal.workspaceRole === 'guest' && minimumRole !== 'viewer') {
+    return json(403, { message: 'Workspace access is denied.' }, headers);
   }
 
   const teamAccess = await getTeamAccess(
@@ -4159,6 +5330,7 @@ function projectRoleWeight(role) {
     teamIssueEventsTable.grantReadWriteData(listTasksFunction);
     projectDirectoryTable.grantReadWriteData(listTasksFunction);
     auditEventsTable.grantReadData(listTasksFunction);
+    workspaceAccessTable.grantReadWriteData(listTasksFunction);
     listTasksFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
@@ -4168,12 +5340,20 @@ function projectRoleWeight(role) {
           teamIssuesTable.tableArn,
           teamIssueEventsTable.tableArn,
           auditEventsTable.tableArn,
+          workspaceAccessTable.tableArn,
         ],
       }),
     );
 	    listTasksFunction.addToRolePolicy(
 	      new iam.PolicyStatement({
-	        actions: ['cognito-idp:AdminGetUser', 'cognito-idp:GetUser', 'cognito-idp:ListUsers'],
+	        actions: [
+	          'cognito-idp:AdminCreateUser',
+	          'cognito-idp:AdminDeleteUser',
+	          'cognito-idp:AdminGetUser',
+	          'cognito-idp:AdminUpdateUserAttributes',
+	          'cognito-idp:GetUser',
+	          'cognito-idp:ListUsers',
+	        ],
 	        resources: [cognitoUserPoolArn],
 	      }),
 	    );
@@ -4191,7 +5371,10 @@ function projectRoleWeight(role) {
       service: 'DynamoDB',
       action: 'transactWriteItems',
       parameters: {
-        TransactItems: createProjectTaskTransactItems(tasksTable.tableName),
+        TransactItems: createProjectTaskTransactItems(
+          tasksTable.tableName,
+          workspaceDirectoryId.valueAsString,
+        ),
       },
       physicalResourceId: customResources.PhysicalResourceId.of('refero-project-tasks-seed-v2'),
     };
@@ -4211,7 +5394,10 @@ function projectRoleWeight(role) {
       service: 'DynamoDB',
       action: 'transactWriteItems',
       parameters: {
-        TransactItems: createProjectDirectoryTransactItems(projectDirectoryTable.tableName),
+        TransactItems: createProjectDirectoryTransactItems(
+          projectDirectoryTable.tableName,
+          workspaceDirectoryId.valueAsString,
+        ),
       },
       physicalResourceId: customResources.PhysicalResourceId.of('project-directory-seed-v2'),
     };
@@ -4226,6 +5412,59 @@ function projectRoleWeight(role) {
     });
 
     seedProjectDirectory.node.addDependency(projectDirectoryTable);
+
+    const seedWorkspaceAccessCall = {
+      service: 'DynamoDB',
+      action: 'transactWriteItems',
+      parameters: {
+        TransactItems: createWorkspaceAccessTransactItems(
+          workspaceAccessTable.tableName,
+          workspaceDirectoryId.valueAsString,
+          initialWorkspaceOwnerEmail.valueAsString,
+        ),
+      },
+      physicalResourceId: customResources.PhysicalResourceId.of('workspace-access-seed-v1'),
+    };
+    const seedWorkspaceAccess = new customResources.AwsCustomResource(this, 'SeedWorkspaceAccess', {
+      onCreate: seedWorkspaceAccessCall,
+      policy: customResources.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ['dynamodb:TransactWriteItems'],
+          resources: [workspaceAccessTable.tableArn],
+        }),
+      ]),
+    });
+
+    seedWorkspaceAccess.node.addDependency(workspaceAccessTable);
+
+    const seedWorkspaceDemoMembersCall = {
+      service: 'DynamoDB',
+      action: 'transactWriteItems',
+      parameters: {
+        TransactItems: createWorkspaceDemoMemberTransactItems(
+          workspaceAccessTable.tableName,
+          workspaceDirectoryId.valueAsString,
+        ),
+      },
+      physicalResourceId: customResources.PhysicalResourceId.of(
+        'workspace-access-demo-members-seed-v1',
+      ),
+    };
+    const seedWorkspaceDemoMembers = new customResources.AwsCustomResource(
+      this,
+      'SeedWorkspaceDemoMembers',
+      {
+        onCreate: seedWorkspaceDemoMembersCall,
+        policy: customResources.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ['dynamodb:TransactWriteItems'],
+            resources: [workspaceAccessTable.tableArn],
+          }),
+        ]),
+      },
+    );
+
+    seedWorkspaceDemoMembers.node.addDependency(seedWorkspaceAccess);
 
     new cdk.CfnOutput(this, 'ProjectTasksTableName', {
       value: tasksTable.tableName,
@@ -4253,6 +5492,10 @@ function projectRoleWeight(role) {
 
     new cdk.CfnOutput(this, 'ProcessedAuditEventsTableName', {
       value: processedAuditEventsTable.tableName,
+    });
+
+    new cdk.CfnOutput(this, 'WorkspaceAccessTableName', {
+      value: workspaceAccessTable.tableName,
     });
 
     new cdk.CfnOutput(this, 'ProjectTasksApiUrl', {

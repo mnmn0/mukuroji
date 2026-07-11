@@ -1,6 +1,7 @@
+import { createMutationHeaders, type MutationRequestContext } from '../api/mutationHeaders'
 import type { SidebarProjectTone } from '../components/sidebar'
 import type { Locale } from '../i18n'
-import { createMutationHeaders, type MutationRequestContext } from '../api/mutationHeaders'
+import type { WorkspaceMemberStatus } from '../workspace/api'
 
 /**
  * プロジェクトごとの権限ロールです。
@@ -11,6 +12,20 @@ export type ProjectMemberRole = 'manager' | 'member' | 'viewer'
  * API レスポンスとして許容する project member role の一覧です。
  */
 const projectMemberRoles = ['manager', 'member', 'viewer'] as const
+
+/**
+ * Project assignment candidate の Workspace 利用状態です。
+ */
+type ProjectAssignmentCandidateStatus = {
+  /**
+   * Cognito user が有効かどうかです。
+   */
+  enabled?: boolean
+  /**
+   * Workspace membership の利用状態です。
+   */
+  workspaceStatus?: WorkspaceMemberStatus
+}
 
 /**
  * サイドバーに表示するプロジェクト行です。
@@ -167,6 +182,10 @@ export type ProjectMember = {
    */
   status?: string
   /**
+   * Workspace membership の利用状態です。省略された legacy response は割り当て候補に含めません。
+   */
+  workspaceStatus?: WorkspaceMemberStatus
+  /**
    * プロジェクト内の権限ロールです。
    */
   role: ProjectMemberRole
@@ -204,6 +223,10 @@ export type ProjectUser = {
    * Cognito user status です。
    */
   status?: string
+  /**
+   * Workspace membership の利用状態です。省略された legacy response は割り当て候補に含めません。
+   */
+  workspaceStatus?: WorkspaceMemberStatus
 }
 
 /**
@@ -299,6 +322,13 @@ export class ProjectDirectoryApiError extends Error {
     super(message)
     this.status = status
   }
+}
+
+/**
+ * Project 追加・Issue 担当者候補として active な Workspace member かどうかを判定します。
+ */
+export function isActiveProjectAssignmentCandidate(candidate: ProjectAssignmentCandidateStatus) {
+  return candidate.enabled !== false && candidate.workspaceStatus === 'active'
 }
 
 const projectsApiBaseUrl = trimTrailingSlash(
@@ -767,6 +797,7 @@ function isProjectMember(value: unknown): value is ProjectMember {
     (!('name' in value) || typeof value.name === 'string') &&
     (!('enabled' in value) || typeof value.enabled === 'boolean') &&
     (!('status' in value) || typeof value.status === 'string') &&
+    (!('workspaceStatus' in value) || isWorkspaceMemberStatus(value.workspaceStatus)) &&
     'role' in value &&
     isProjectMemberRole(value.role) &&
     'updatedAt' in value &&
@@ -803,7 +834,8 @@ function isProjectUser(value: unknown): value is ProjectUser {
     typeof value.email === 'string' &&
     (!('name' in value) || typeof value.name === 'string') &&
     (!('enabled' in value) || typeof value.enabled === 'boolean') &&
-    (!('status' in value) || typeof value.status === 'string')
+    (!('status' in value) || typeof value.status === 'string') &&
+    (!('workspaceStatus' in value) || isWorkspaceMemberStatus(value.workspaceStatus))
   )
 }
 
@@ -838,6 +870,13 @@ function isRemoveProjectMemberResponse(value: unknown): value is RemoveProjectMe
  */
 function isProjectMemberRole(value: unknown): value is ProjectMemberRole {
   return projectMemberRoles.includes(value as ProjectMemberRole)
+}
+
+/**
+ * API 値が既知の Workspace member status かどうかを判定します。
+ */
+function isWorkspaceMemberStatus(value: unknown): value is WorkspaceMemberStatus {
+  return value === 'active' || value === 'deactivated'
 }
 
 /**

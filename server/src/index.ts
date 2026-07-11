@@ -33,6 +33,29 @@ import {
   type MutationAuditContext,
   type MutationAuditEventInput,
 } from './audit'
+import {
+  DynamoDbWorkspaceAccessClient,
+  WorkspaceAccessError,
+  isWorkspaceIdentitySafeToDelete,
+  type WorkspaceAccessClient,
+  type WorkspaceInvitation,
+  type WorkspaceMember,
+  type WorkspaceMemberStatus,
+  type WorkspaceRole,
+} from './workspace-access'
+
+export {
+  DynamoDbWorkspaceAccessClient,
+  WorkspaceAccessError,
+} from './workspace-access'
+export type {
+  WorkspaceAccessClient,
+  WorkspaceIdentityOwnership,
+  WorkspaceInvitation,
+  WorkspaceMember,
+  WorkspaceMemberStatus,
+  WorkspaceRole,
+} from './workspace-access'
 
 /**
  * Cognito の認証成功時に返る token set です。
@@ -76,6 +99,28 @@ type InitiateAuthResponse = {
    * challenge 継続用の Cognito session です。
    */
   Session?: string
+  /**
+   * challenge 継続時に Cognito が返す補助 parameter です。
+   */
+  ChallengeParameters?: Record<string, string>
+}
+
+/**
+ * Cognito の NEW_PASSWORD_REQUIRED challenge を完了する入力です。
+ */
+type CompleteNewPasswordChallengeRequestBody = {
+  /**
+   * challenge を開始した Cognito user のメールアドレスです。
+   */
+  email?: unknown
+  /**
+   * Cognito が login challenge とともに返した session です。
+   */
+  session?: unknown
+  /**
+   * user が設定する恒久 password です。
+   */
+  newPassword?: unknown
 }
 
 /**
@@ -206,6 +251,16 @@ type ListUsersResponse = {
 }
 
 /**
+ * Cognito AdminCreateUser のレスポンスです。
+ */
+type AdminCreateUserResponse = {
+  /**
+   * 作成された Cognito user です。
+   */
+  User?: CognitoUserRecord
+}
+
+/**
  * アプリが参照する Cognito user profile です。
  */
 type CognitoUserProfile = {
@@ -233,6 +288,64 @@ type CognitoUserProfile = {
    * Cognito user status です。
    */
   status?: string
+  /**
+   * Workspace membership の利用状態です。assignment candidate response で付与します。
+   */
+  workspaceStatus?: WorkspaceMemberStatus
+}
+
+/**
+ * Workspace invitation provisioning で参照する Cognito user と directory 情報です。
+ */
+type CognitoWorkspaceUser = {
+  /**
+   * 正規化済み Cognito user profile です。
+   */
+  profile: CognitoUserProfile
+  /**
+   * Cognito custom attribute に保存された Workspace directory ID です。
+   */
+  directoryId?: string
+}
+
+/**
+ * Cognito user を Workspace invitation 用に準備する入力です。
+ */
+type ProvisionCognitoWorkspaceUserInput = {
+  /**
+   * invitation の宛先メールアドレスです。
+   */
+  email: string
+  /**
+   * invitation に指定された表示名です。
+   */
+  name?: string
+  /**
+   * Cognito custom attribute に設定する Workspace directory ID です。
+   */
+  directoryId: string
+  /**
+   * reservation 前に確認した既存 Cognito user です。
+   */
+  existingUser?: CognitoWorkspaceUser
+}
+
+/**
+ * Cognito invitation provisioning の結果です。
+ */
+type ProvisionCognitoWorkspaceUserResult = {
+  /**
+   * invitation と紐付く Cognito user profile です。
+   */
+  profile: CognitoUserProfile
+  /**
+   * Cognito identity が Workspace によって新規作成されたかどうかです。
+   */
+  identityOwnership: 'workspace-created' | 'pre-existing' | 'ambiguous'
+  /**
+   * Cognito が invitation message を配信したかどうかです。
+   */
+  deliveryStatus: 'sent' | 'not-required'
 }
 
 /**
@@ -308,6 +421,24 @@ type ProjectPrincipal = {
 }
 
 /**
+ * active Workspace membership を検証済みの principal です。
+ */
+type WorkspacePrincipal = ProjectPrincipal & {
+  /**
+   * DynamoDB から検証した active Workspace member です。
+   */
+  workspaceMember: WorkspaceMember
+  /**
+   * Workspace 全体で付与された role です。
+   */
+  workspaceRole: WorkspaceRole
+  /**
+   * 認証時点の Workspace member status です。
+   */
+  workspaceMemberStatus: WorkspaceMemberStatus
+}
+
+/**
  * Cognito JSON API のエラーレスポンスです。
  */
 type CognitoErrorPayload = {
@@ -337,6 +468,26 @@ type LoginRequestBody = {
    * ユーザーが入力したパスワードです。
    */
   password?: unknown
+}
+
+/** Workspace invitation 作成 API の request body です。 */
+type CreateWorkspaceInvitationRequestBody = {
+  /** 招待先メールアドレスです。 */
+  email?: unknown
+  /** 招待対象の表示名です。 */
+  name?: unknown
+  /** 招待受諾後に付与する Workspace role です。 */
+  role?: unknown
+}
+
+/** Workspace member 更新 API の request body です。 */
+type UpdateWorkspaceAccessMemberRequestBody = {
+  /** 更新後の Workspace role です。 */
+  role?: unknown
+  /** 更新後の member status です。 */
+  status?: unknown
+  /** optimistic locking に使う current version です。 */
+  expectedVersion?: unknown
 }
 
 /**
@@ -1312,6 +1463,10 @@ type ProjectMemberResponseItem = {
    */
   status?: string
   /**
+   * Workspace membership の利用状態です。
+   */
+  workspaceStatus?: WorkspaceMemberStatus
+  /**
    * プロジェクト内の権限ロールです。
    */
   role: ProjectRole
@@ -1390,6 +1545,14 @@ type CognitoClient = {
    */
   initiatePasswordAuth(email: string, password: string): Promise<InitiateAuthResponse>
   /**
+   * NEW_PASSWORD_REQUIRED challenge に恒久 password を応答します。
+   */
+  respondToNewPasswordChallenge(
+    email: string,
+    newPassword: string,
+    session: string,
+  ): Promise<InitiateAuthResponse>
+  /**
    * access token から Cognito ユーザー情報を取得します。
    */
   getUser(accessToken: string): Promise<GetUserResponse>
@@ -1401,6 +1564,24 @@ type CognitoClient = {
    * Cognito user ID から user profile を取得します。
    */
   getUserProfile(userId: string): Promise<CognitoUserProfile>
+  /**
+   * Workspace invitation 対象の Cognito user と directory 属性を検索します。
+   */
+  findWorkspaceUser(userId: string): Promise<CognitoWorkspaceUser | undefined>
+  /**
+   * invitation 対象 user を Cognito に作成または既存 identity と安全に関連付けます。
+   */
+  provisionWorkspaceUser(
+    input: ProvisionCognitoWorkspaceUserInput,
+  ): Promise<ProvisionCognitoWorkspaceUserResult>
+  /**
+   * Workspace が作成した未確定 Cognito user の invitation を再送します。
+   */
+  resendWorkspaceUserInvitation(userId: string): Promise<void>
+  /**
+   * Workspace が所有する未確定 Cognito user を削除します。
+   */
+  deleteWorkspaceUser(userId: string): Promise<void>
 }
 
 /**
@@ -1617,6 +1798,7 @@ let projectTasks: ProjectTasksClient
 let teamIssues: TeamIssuesClient
 let projectDirectory: ProjectDirectoryClient
 let auditEvents: AuditEventsClient
+let workspaceAccess: WorkspaceAccessClient
 const projectDirectoryIdPrefix = 'user#'
 const projectDirectoryIdAttributeNames = [
   'custom:directory_id',
@@ -1675,6 +1857,14 @@ app.post('/api/auth/login', async (c) => {
     const tokens = response.AuthenticationResult
 
     if (!tokens?.AccessToken) {
+      if (response.ChallengeName === 'NEW_PASSWORD_REQUIRED' && response.Session) {
+        return c.json({
+          challenge: 'NEW_PASSWORD_REQUIRED' as const,
+          email,
+          session: response.Session,
+        })
+      }
+
       return c.json(
         {
           message: response.ChallengeName
@@ -1685,15 +1875,230 @@ app.post('/api/auth/login', async (c) => {
       )
     }
 
-    return c.json({
-      accessToken: tokens.AccessToken,
-      idToken: tokens.IdToken,
-      refreshToken: tokens.RefreshToken,
-      expiresAt: Date.now() + (tokens.ExpiresIn ?? 3600) * 1000,
-      tokenType: tokens.TokenType ?? 'Bearer',
-    })
+    return c.json(await createAuthenticationResponse(tokens))
   } catch (error) {
+    if (error instanceof WorkspaceAccessError) {
+      return toWorkspaceAccessErrorResponse(c, error)
+    }
+
     return toAuthErrorResponse(c, error)
+  }
+})
+
+/**
+ * Cognito の NEW_PASSWORD_REQUIRED challenge を完了する endpoint です。
+ *
+ * @remarks
+ * Cognito が password 更新に成功した後の Workspace membership reconcile は通常 login と
+ * 同じ処理を通ります。DynamoDB 更新だけが失敗した場合も、新 password で login し直すと
+ * reconcile を再実行できます。
+ */
+app.post('/api/auth/challenge/new-password', async (c) => {
+  const body = await readJson<CompleteNewPasswordChallengeRequestBody>(c.req)
+  const email = typeof body?.email === 'string' ? body.email.trim() : ''
+  const session = typeof body?.session === 'string' ? body.session.trim() : ''
+  const newPassword = typeof body?.newPassword === 'string' ? body.newPassword : ''
+
+  if (!email || !session || !newPassword) {
+    return c.json({ message: 'Email, session, and new password are required.' }, 400)
+  }
+
+  try {
+    const response = await cognito.respondToNewPasswordChallenge(email, newPassword, session)
+    const tokens = response.AuthenticationResult
+
+    if (!tokens?.AccessToken) {
+      return c.json(
+        {
+          message: response.ChallengeName
+            ? `Unsupported Cognito challenge: ${response.ChallengeName}`
+            : 'Cognito did not return an access token.',
+        },
+        409,
+      )
+    }
+
+    return c.json(await createAuthenticationResponse(tokens))
+  } catch (error) {
+    if (error instanceof WorkspaceAccessError) {
+      return toWorkspaceAccessErrorResponse(c, error)
+    }
+
+    return toNewPasswordChallengeErrorResponse(c, error)
+  }
+})
+
+/** Workspace member、invitation、capability の snapshot を返す endpoint です。 */
+app.get('/api/workspace/access', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    return c.json(await workspaceAccess.getAccessSnapshot(principal.directoryId, principal.userKey))
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toWorkspaceAccessErrorResponse(c, error)
+  }
+})
+
+/** Workspace invitation を reservation して Cognito provisioning を開始する endpoint です。 */
+app.post('/api/workspace/invitations', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
+    const body = await readJson<CreateWorkspaceInvitationRequestBody>(c.req)
+    const email = readWorkspaceEmail(body?.email)
+    const role = readWorkspaceRole(body?.role)
+    const name = readOptionalWorkspaceName(body?.name)
+    const invitation = await workspaceAccess.createInvitation(
+      principal.directoryId,
+      principal.userKey,
+      {
+        email,
+        name,
+        role,
+      },
+    )
+
+    try {
+      const result = await deliverPreparedWorkspaceInvitation(
+        principal.directoryId,
+        invitation,
+      )
+      const deliveredInvitation = await workspaceAccess.markInvitationDelivery(
+        principal.directoryId,
+        invitation.id,
+        {
+          expectedVersion: invitation.version,
+          identityOwnership: result.identityOwnership,
+          deliveryStatus: result.deliveryStatus,
+        },
+      )
+
+      return c.json({ invitation: deliveredInvitation }, 201)
+    } catch (error) {
+      await markWorkspaceInvitationFailure(principal.directoryId, invitation, error)
+      throw error
+    }
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toWorkspaceAccessErrorResponse(c, error)
+  }
+})
+
+/** Workspace invitation を再送する endpoint です。 */
+app.post('/api/workspace/invitations/:invitationId/resend', async (c) => {
+  return handleWorkspaceInvitationDeliveryAction(c, 'resend')
+})
+
+/** Workspace invitation を取り消す endpoint です。 */
+app.post('/api/workspace/invitations/:invitationId/revoke', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
+    const invitationId = readWorkspaceEmail(c.req.param('invitationId'))
+    let invitation = await workspaceAccess.revokeInvitation(
+      principal.directoryId,
+      principal.userKey,
+      invitationId,
+    )
+
+    if (isWorkspaceIdentitySafeToDelete(invitation.identityOwnership)) {
+      try {
+        await cognito.deleteWorkspaceUser(invitation.email)
+      } catch (error) {
+        try {
+          await workspaceAccess.markInvitationCleanupFailure(
+            principal.directoryId,
+            invitation.id,
+            {
+              expectedVersion: invitation.version,
+              failureMessage: 'Cognito cleanup failed and can be retried safely.',
+            },
+          )
+        } catch (markError) {
+          console.error('Failed to persist Workspace invitation cleanup failure:', markError)
+        }
+
+        throw error
+      }
+
+      if (invitation.failureMessage) {
+        invitation = await workspaceAccess.clearInvitationCleanupFailure(
+          principal.directoryId,
+          invitation.id,
+          invitation.version,
+        )
+      }
+    }
+
+    return c.json({ invitation })
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toWorkspaceAccessErrorResponse(c, error)
+  }
+})
+
+/** revoked / expired Workspace invitation を再招待する endpoint です。 */
+app.post('/api/workspace/invitations/:invitationId/reinvite', async (c) => {
+  return handleWorkspaceInvitationDeliveryAction(c, 'reinvite')
+})
+
+/** Workspace member の role または status を version 条件付きで更新する endpoint です。 */
+app.patch('/api/workspace/members/:memberKey', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
+    const memberKey = readWorkspaceEmail(c.req.param('memberKey'))
+    const body = await readJson<UpdateWorkspaceAccessMemberRequestBody>(c.req)
+    const role = body?.role === undefined ? undefined : readWorkspaceRole(body.role)
+    const status = body?.status === undefined ? undefined : readWorkspaceMemberStatus(body.status)
+    const expectedVersion = readWorkspaceVersion(body?.expectedVersion)
+    const member = await workspaceAccess.updateMember(
+      principal.directoryId,
+      principal.userKey,
+      memberKey,
+      { role, status, expectedVersion },
+    )
+
+    return c.json({ member })
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toWorkspaceAccessErrorResponse(c, error)
   }
 })
 
@@ -1714,7 +2119,7 @@ app.get('/api/auth/me', async (c) => {
 
   try {
     const user = await cognito.getUser(accessToken)
-    const principal = toProjectPrincipal(user, accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken, user)
 
     return c.json({
       username: user.Username ?? '',
@@ -1725,8 +2130,14 @@ app.get('/api/auth/me', async (c) => {
       ),
       groups: principal.groups,
       isSystemAdmin: principal.isSystemAdmin,
+      workspaceRole: principal.workspaceRole,
+      workspaceMemberStatus: principal.workspaceMemberStatus,
     })
   } catch (error) {
+    if (error instanceof WorkspaceAccessError) {
+      return toWorkspaceAccessErrorResponse(c, error)
+    }
+
     if (error instanceof ProjectDataError) {
       return toProjectDataErrorResponse(c, error)
     }
@@ -1750,7 +2161,7 @@ app.get('/api/dashboard/summary', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
 
     return c.json(await dashboardSummary.getSummary(principal.directoryId, principal))
   } catch (error) {
@@ -1763,10 +2174,7 @@ app.get('/api/dashboard/summary', async (c) => {
 })
 
 /**
- * DynamoDB に保存されたチーム/プロジェクト階層を返す endpoint です。
- *
- * @remarks
- * サイドバー用の directory table を読み、`locale=en` のときだけ英語名を優先します。
+ * Workspace audit event を filter と cursor 付きで page 取得する endpoint です。
  */
 app.get('/api/audit/events', async (c) => {
   return handleWorkspaceAuditRequest(c, false)
@@ -1779,6 +2187,12 @@ app.get('/api/audit/events/export', async (c) => {
   return handleWorkspaceAuditRequest(c, true)
 })
 
+/**
+ * DynamoDB に保存されたチーム/プロジェクト階層を返す endpoint です。
+ *
+ * @remarks
+ * サイドバー用の directory table を読み、`locale=en` のときだけ英語名を優先します。
+ */
 app.get('/api/teams/projects', async (c) => {
   const accessToken = readBearerAccessToken(c)
 
@@ -1787,7 +2201,7 @@ app.get('/api/teams/projects', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
 
     return c.json(await projectDirectory.getProjectDirectory(principal.directoryId, readLocale(c)))
   } catch (error) {
@@ -1810,8 +2224,8 @@ app.post('/api/teams', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
-    requireSystemAdmin(principal)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
     const body = await readJson<CreateTeamRequestBody>(c.req)
 
     return c.json(
@@ -1847,7 +2261,8 @@ app.post('/api/teams/:teamId/projects', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
     const body = await readJson<CreateProjectRequestBody>(c.req)
 
     return c.json(
@@ -1885,8 +2300,8 @@ app.patch('/api/teams/:teamId/archive', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
-    requireSystemAdmin(principal)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
 
     return c.json(
       await projectDirectory.archiveTeam(
@@ -1925,8 +2340,8 @@ app.patch('/api/teams/:teamId/projects/:projectId/archive', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
-    await requireProjectPermission(principal, projectId, 'manager')
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
 
     return c.json(
       await projectDirectory.archiveProject(
@@ -1964,7 +2379,7 @@ app.get('/api/projects/:projectId/tasks', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
     await requireProjectPermission(principal, projectId, 'viewer')
 
     return c.json(
@@ -1997,10 +2412,10 @@ app.get('/api/projects/:projectId/users', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
     await requireProjectPermission(principal, projectId, 'manager')
 
-    return c.json(await cognito.listUsers(readCognitoUsersInput(c, principal.directoryId)))
+    return c.json(await listActiveWorkspaceCognitoUsers(principal.directoryId, c))
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)
@@ -2026,12 +2441,13 @@ app.get('/api/projects/:projectId/members', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
     await requireProjectPermission(principal, projectId, 'member')
 
     return c.json(
       await hydrateProjectMembersResponse(
         await projectDirectory.getProjectMembers(principal.directoryId, projectId),
+        principal.directoryId,
       ),
     )
   } catch (error) {
@@ -2064,10 +2480,20 @@ app.patch('/api/projects/:projectId/members/:memberKey', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
     await requireProjectPermission(principal, projectId, 'manager')
     const body = await readJson<UpdateProjectMemberRequestBody>(c.req)
     const profile = await cognito.getUserProfile(memberKey)
+    const workspaceMember = await workspaceAccess.getActiveMember(principal.directoryId, profile.id)
+
+    if (!workspaceMember) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceMemberInactive',
+        'Only active Workspace members can be assigned to a project.',
+      )
+    }
 
     return c.json(
       await hydrateProjectMemberUpdateResponse(
@@ -2086,6 +2512,7 @@ app.patch('/api/projects/:projectId/members/:memberKey', async (c) => {
             ...body,
           }),
         ),
+        principal.directoryId,
       ),
     )
   } catch (error) {
@@ -2118,7 +2545,8 @@ app.delete('/api/projects/:projectId/members/:memberKey', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
     await requireProjectPermission(principal, projectId, 'manager')
 
     return c.json(
@@ -2154,7 +2582,7 @@ app.get('/api/teams/:teamId/issues', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
     const context = await requireTeamPermission(principal, teamId, 'viewer')
 
     return c.json(await hydrateTeamIssuesResponse(await readTeamIssues(principal.directoryId, context, principal)))
@@ -2183,7 +2611,8 @@ app.post('/api/teams/:teamId/issues', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
     const context = await requireTeamPermission(principal, teamId, 'member')
     const body = normalizeTeamIssueInput(
       await readJson<CreateTeamIssueRequestBody>(c.req) ?? {},
@@ -2191,7 +2620,7 @@ app.post('/api/teams/:teamId/issues', async (c) => {
     )
     requireAssignedProjectPermission(principal, context, body.assignedProjectId, 'member')
     const assigneeUserId = readTeamIssueAssigneeUserId(body)
-    await cognito.getUserProfile(assigneeUserId)
+    await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
     const reservedIssueIds = await readLegacyTeamIssueIds(principal.directoryId, context)
 
     return c.json(
@@ -2236,7 +2665,7 @@ app.get('/api/teams/:teamId/issues/:issueId/activity', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
     const context = await requireTeamPermission(principal, teamId, 'viewer')
     let entityId = createTeamIssueAuditEntityId(teamId, issueId)
 
@@ -2300,7 +2729,7 @@ app.get('/api/teams/:teamId/issues/:issueId', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
     const context = await requireTeamPermission(principal, teamId, 'viewer')
 
     try {
@@ -2355,7 +2784,8 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
     const context = await requireTeamPermission(principal, teamId, 'member')
     const body = normalizeTeamIssueInput(
       await readJson<UpdateTeamIssueRequestBody>(c.req) ?? {},
@@ -2366,7 +2796,10 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
     requireAssignedProjectPermission(principal, context, body.assignedProjectId, 'member')
 
     if ('assigneeUserId' in body) {
-      await cognito.getUserProfile(readTeamIssueAssigneeUserId(body))
+      await requireActiveWorkspaceAssignee(
+        principal.directoryId,
+        readTeamIssueAssigneeUserId(body),
+      )
     }
 
     return c.json(
@@ -2407,7 +2840,8 @@ app.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
     const context = await requireTeamPermission(principal, teamId, 'member')
     const detail = await teamIssues.getTeamIssueDetail(principal.directoryId, teamId, issueId)
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'member')
@@ -2449,7 +2883,7 @@ app.get('/api/projects/:projectId/issues', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
     await requireProjectPermission(principal, projectId, 'viewer')
 
     return c.json(
@@ -2482,12 +2916,13 @@ app.post('/api/projects/:projectId/tasks', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
     await requireProjectPermission(principal, projectId, 'member')
 
     const body = await readJson<CreateProjectTaskRequestBody>(c.req)
     const assigneeUserId = readTaskAssigneeUserId(body ?? {})
-    await cognito.getUserProfile(assigneeUserId)
+    await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
 
     return c.json(
       await hydrateProjectTaskUpdateResponse(
@@ -2533,7 +2968,8 @@ app.patch('/api/projects/:projectId/tasks/:taskId', async (c) => {
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
     await requireProjectPermission(principal, projectId, 'member')
 
     const body = await readJson<UpdateProjectTaskStatusRequestBody>(c.req)
@@ -2682,7 +3118,7 @@ async function handleWorkspaceAuditRequest(c: Context, exportAsNdjson: boolean) 
   }
 
   try {
-    const principal = toProjectPrincipal(await cognito.getUser(accessToken), accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
     requireSystemAdmin(principal)
     const query = readAuditEventQuery(c, principal.directoryId)
 
@@ -2727,6 +3163,205 @@ async function handleWorkspaceAuditRequest(c: Context, exportAsNdjson: boolean) 
   }
 }
 
+function readWorkspaceEmail(value: unknown) {
+  const email = typeof value === 'string' ? value.trim().toLowerCase() : ''
+
+  if (!email || !email.includes('@')) {
+    throw new WorkspaceAccessError(400, 'InvalidWorkspaceEmail', 'A valid email address is required.')
+  }
+
+  return email
+}
+
+function readOptionalWorkspaceName(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function readWorkspaceRole(value: unknown): WorkspaceRole {
+  if (value === 'owner' || value === 'admin' || value === 'member' || value === 'guest') {
+    return value
+  }
+
+  throw new WorkspaceAccessError(400, 'InvalidWorkspaceRole', 'Workspace role is invalid.')
+}
+
+function readWorkspaceMemberStatus(value: unknown): WorkspaceMemberStatus {
+  if (value === 'active' || value === 'deactivated') {
+    return value
+  }
+
+  throw new WorkspaceAccessError(400, 'InvalidWorkspaceMemberStatus', 'Workspace member status is invalid.')
+}
+
+function readWorkspaceVersion(value: unknown) {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw new WorkspaceAccessError(400, 'InvalidWorkspaceVersion', 'Workspace member version is required.')
+  }
+
+  return value
+}
+
+async function createAuthenticationResponse(tokens: AuthTokenSet) {
+  if (!tokens.AccessToken) {
+    throw new CognitoServiceError(
+      502,
+      'InvalidCognitoResponse',
+      'Cognito did not return an access token.',
+    )
+  }
+
+  const user = await cognito.getUser(tokens.AccessToken)
+  const principal = toProjectPrincipal(user, tokens.AccessToken)
+  await workspaceAccess.reconcileAuthenticatedMember(principal.directoryId, {
+    memberKey: principal.userKey,
+    email: readUserAttribute(user, 'email') ?? principal.userKey,
+    name: readUserAttribute(user, 'name'),
+  })
+
+  return {
+    accessToken: tokens.AccessToken,
+    idToken: tokens.IdToken,
+    refreshToken: tokens.RefreshToken,
+    expiresAt: Date.now() + (tokens.ExpiresIn ?? 3600) * 1000,
+    tokenType: tokens.TokenType ?? 'Bearer',
+  }
+}
+
+async function handleWorkspaceInvitationDeliveryAction(
+  c: Context,
+  action: 'resend' | 'reinvite',
+) {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
+    const invitationId = readWorkspaceEmail(c.req.param('invitationId'))
+    const preparedInvitation = action === 'resend'
+      ? await workspaceAccess.prepareResend(
+          principal.directoryId,
+          principal.userKey,
+          invitationId,
+        )
+      : await workspaceAccess.prepareReinvite(
+          principal.directoryId,
+          principal.userKey,
+          invitationId,
+        )
+
+    try {
+      const result = await deliverPreparedWorkspaceInvitation(
+        principal.directoryId,
+        preparedInvitation,
+        action === 'resend',
+      )
+      const invitation = await workspaceAccess.markInvitationDelivery(
+        principal.directoryId,
+        preparedInvitation.id,
+        {
+          expectedVersion: preparedInvitation.version,
+          identityOwnership: result.identityOwnership,
+          deliveryStatus: result.deliveryStatus,
+        },
+      )
+
+      return c.json({ invitation })
+    } catch (error) {
+      await markWorkspaceInvitationFailure(principal.directoryId, preparedInvitation, error)
+      throw error
+    }
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toWorkspaceAccessErrorResponse(c, error)
+  }
+}
+
+async function deliverPreparedWorkspaceInvitation(
+  directoryId: string,
+  invitation: WorkspaceInvitation,
+  preserveIdentityOwnership = false,
+) {
+  const existingUser = await cognito.findWorkspaceUser(invitation.email)
+
+  if (existingUser?.profile.status === 'FORCE_CHANGE_PASSWORD') {
+    const result = await cognito.provisionWorkspaceUser({
+      directoryId,
+      email: invitation.email,
+      name: invitation.name,
+      existingUser,
+    })
+    await cognito.resendWorkspaceUserInvitation(existingUser.profile.username)
+    return {
+      identityOwnership: preserveIdentityOwnership
+        ? invitation.identityOwnership
+        : result.identityOwnership,
+      deliveryStatus: 'sent' as const,
+    }
+  }
+
+  const result = await cognito.provisionWorkspaceUser({
+    directoryId,
+    email: invitation.email,
+    name: invitation.name,
+    existingUser,
+  })
+
+  return {
+    identityOwnership: preserveIdentityOwnership
+      ? invitation.identityOwnership
+      : result.identityOwnership,
+    deliveryStatus: result.deliveryStatus,
+  }
+}
+
+async function markWorkspaceInvitationFailure(
+  directoryId: string,
+  invitation: WorkspaceInvitation,
+  error: unknown,
+) {
+  console.error('Workspace invitation delivery failed:', error)
+
+  try {
+    await workspaceAccess.markInvitationDelivery(directoryId, invitation.id, {
+      expectedVersion: invitation.version,
+      identityOwnership: invitation.identityOwnership,
+      deliveryStatus: 'failed',
+      failureMessage: 'Invitation delivery failed.',
+    })
+  } catch (markError) {
+    console.error('Failed to persist Workspace invitation delivery failure:', markError)
+  }
+}
+
+async function authenticateWorkspacePrincipal(
+  accessToken: string,
+  user?: GetUserResponse,
+): Promise<WorkspacePrincipal> {
+  const principal = toProjectPrincipal(user ?? await cognito.getUser(accessToken), accessToken)
+  const workspaceMember = await workspaceAccess.getActiveMember(
+    principal.directoryId,
+    principal.userKey,
+  )
+
+  if (!workspaceMember) {
+    throw new WorkspaceAccessError(403, 'WorkspaceAccessDenied', 'Workspace access is denied.')
+  }
+
+  return {
+    ...principal,
+    workspaceMember,
+    workspaceRole: workspaceMember.role,
+    workspaceMemberStatus: workspaceMember.status,
+  }
+}
+
 function readBearerAccessToken(c: Context) {
   const authorization = c.req.header('Authorization') ?? ''
 
@@ -2768,6 +3403,10 @@ function toAuthErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'Invalid email or password.' }, 401)
   }
 
+  if (error.code === 'WorkspaceDirectoryConflict') {
+    return c.json({ message: error.message }, 409)
+  }
+
   if (error.code === 'ResourceNotFoundException' || error.code === 'ClientNotFoundException') {
     return c.json({ message: 'Cognito local resources are not ready.' }, 503)
   }
@@ -2780,7 +3419,88 @@ function toAuthErrorResponse(c: Context, error: unknown) {
   return c.json({ message: error.message }, 400)
 }
 
+function toNewPasswordChallengeErrorResponse(c: Context, error: unknown) {
+  if (
+    error instanceof CognitoServiceError &&
+    (
+      error.code === 'InvalidPasswordException' ||
+      error.code === 'PasswordHistoryPolicyViolationException'
+    )
+  ) {
+    return c.json(
+      {
+        code: 'InvalidNewPassword' as const,
+        message: 'New password does not meet the password policy.',
+      },
+      400,
+    )
+  }
+
+  return toAuthErrorResponse(c, error)
+}
+
+function toWorkspaceAccessErrorResponse(c: Context, error: unknown) {
+  if (!(error instanceof WorkspaceAccessError)) {
+    console.error(error)
+    return c.json({ message: 'Workspace access is unavailable.' }, 502)
+  }
+
+  if (error.status >= 500) {
+    console.error(error)
+  }
+
+  const status = error.status === 400 ||
+    error.status === 403 ||
+    error.status === 404 ||
+    error.status === 409 ||
+    error.status === 503
+    ? error.status
+    : 502
+
+  return c.json({ message: error.message }, status)
+}
+
+function requireSystemAdmin(principal: ProjectPrincipal) {
+  if (principal.isSystemAdmin) {
+    return
+  }
+
+  throw new ProjectDataError(
+    403,
+    'ProjectAccessDenied',
+    `User "${principal.userKey}" must be a system administrator.`,
+  )
+}
+
+function requireWorkspaceBusinessWrite(principal: WorkspacePrincipal) {
+  if (principal.workspaceRole !== 'guest') {
+    return
+  }
+
+  throw new WorkspaceAccessError(
+    403,
+    'WorkspaceRoleDenied',
+    'Guest members have read-only Workspace access.',
+  )
+}
+
+function requireWorkspaceAdministration(principal: WorkspacePrincipal) {
+  if (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
+    return
+  }
+
+  throw new WorkspaceAccessError(
+    403,
+    'WorkspaceRoleDenied',
+    'Workspace owner or admin access is required.',
+  )
+}
+
 function toProjectDataErrorResponse(c: Context, error: unknown) {
+  if (error instanceof WorkspaceAccessError) {
+    return toWorkspaceAccessErrorResponse(c, error)
+  }
+
   if (!(error instanceof ProjectDataError)) {
     console.error(error)
     return c.json({ message: 'Project data is unavailable.' }, 502)
@@ -2838,18 +3558,6 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
 
   console.error(error)
   return c.json({ message: 'Project data is unavailable.' }, 502)
-}
-
-function requireSystemAdmin(principal: ProjectPrincipal) {
-  if (principal.isSystemAdmin) {
-    return
-  }
-
-  throw new ProjectDataError(
-    403,
-    'ProjectAccessDenied',
-    `User "${principal.userKey}" must be a system administrator.`,
-  )
 }
 
 async function requireProjectPermission(
@@ -2992,9 +3700,12 @@ function projectRoleAllows(role: ProjectRole, minimumRole: ProjectRole) {
   return projectRoleWeights[role] >= projectRoleWeights[minimumRole]
 }
 
-async function hydrateProjectMembersResponse(response: ProjectMembersResponse) {
+async function hydrateProjectMembersResponse(
+  response: ProjectMembersResponse,
+  directoryId: string,
+) {
   const members = await Promise.all(
-    response.members.map(async (member) => hydrateProjectMember(member)),
+    response.members.map(async (member) => hydrateProjectMember(member, directoryId)),
   )
 
   return {
@@ -3003,13 +3714,18 @@ async function hydrateProjectMembersResponse(response: ProjectMembersResponse) {
   } satisfies ProjectMembersResponse
 }
 
-async function hydrateProjectMemberUpdateResponse(response: UpdateProjectMemberResponse) {
+async function hydrateProjectMemberUpdateResponse(
+  response: UpdateProjectMemberResponse,
+  directoryId: string,
+) {
   return {
-    member: await hydrateProjectMember(response.member),
+    member: await hydrateProjectMember(response.member, directoryId),
   } satisfies UpdateProjectMemberResponse
 }
 
-async function hydrateProjectMember(member: ProjectMemberResponseItem) {
+async function hydrateProjectMember(member: ProjectMemberResponseItem, directoryId: string) {
+  const workspaceMember = await workspaceAccess.getMember(directoryId, member.id)
+
   try {
     const profile = await cognito.getUserProfile(member.id)
 
@@ -3021,15 +3737,62 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem) {
       name: profile.name,
       enabled: profile.enabled,
       status: profile.status,
+      workspaceStatus: workspaceMember?.status ?? 'deactivated',
     } satisfies ProjectMemberResponseItem
   } catch (error) {
     if (isCognitoUserNotFoundError(error)) {
-      return member
+      return {
+        ...member,
+        workspaceStatus: workspaceMember?.status ?? 'deactivated',
+      }
     }
 
     console.warn('Failed to hydrate project member from Cognito:', error)
-    return member
+    return {
+      ...member,
+      workspaceStatus: workspaceMember?.status ?? 'deactivated',
+    }
   }
+}
+
+async function listActiveWorkspaceCognitoUsers(directoryId: string, c: Context) {
+  const input = readCognitoUsersInput(c, directoryId)
+  const query = input.query?.toLowerCase()
+  const members = (await workspaceAccess.listActiveMembers(directoryId))
+    .filter((member) => !query || member.email.includes(query) || member.name?.toLowerCase().includes(query))
+    .slice(0, clampCognitoPageLimit(input.limit))
+  const users = await Promise.all(
+    members.map(async (member) => {
+      try {
+        return {
+          ...await cognito.getUserProfile(member.memberKey),
+          workspaceStatus: 'active' as const,
+        }
+      } catch (error) {
+        console.warn('Failed to hydrate active Workspace member from Cognito:', error)
+        return undefined
+      }
+    }),
+  )
+
+  return {
+    users: users.filter(isDefined),
+    nextToken: undefined,
+  } satisfies CognitoUsersResponse
+}
+
+async function requireActiveWorkspaceAssignee(directoryId: string, userId: string) {
+  const member = await workspaceAccess.getActiveMember(directoryId, userId)
+
+  if (!member) {
+    throw new WorkspaceAccessError(
+      409,
+      'WorkspaceAssigneeInactive',
+      'Only active Workspace members can be assigned.',
+    )
+  }
+
+  return cognito.getUserProfile(userId)
 }
 
 async function hydrateProjectTasksResponse(response: ProjectTasksResponse) {
@@ -3396,6 +4159,21 @@ class FlociCognitoClient {
   }
 
   /**
+   * NEW_PASSWORD_REQUIRED challenge に恒久 password を応答します。
+   */
+  async respondToNewPasswordChallenge(email: string, newPassword: string, session: string) {
+    return this.request<InitiateAuthResponse>('RespondToAuthChallenge', {
+      ChallengeName: 'NEW_PASSWORD_REQUIRED',
+      ChallengeResponses: {
+        USERNAME: normalizeCognitoUserId(email),
+        NEW_PASSWORD: newPassword,
+      },
+      ClientId: await this.resolveClientId(),
+      Session: session,
+    })
+  }
+
+  /**
    * access token から Cognito ユーザー情報を取得します。
    */
   async getUser(accessToken: string) {
@@ -3455,6 +4233,164 @@ class FlociCognitoClient {
     }
 
     return profile
+  }
+
+  /**
+   * Workspace invitation 対象の Cognito user と directory 属性を検索します。
+   */
+  async findWorkspaceUser(userId: string) {
+    const normalizedUserId = normalizeCognitoUserId(userId)
+
+    try {
+      const user = await this.request<CognitoUserRecord>('AdminGetUser', {
+        UserPoolId: await this.resolveUserPoolId(),
+        Username: normalizedUserId,
+      })
+      const profile = toCognitoUserProfile(user)
+
+      if (!profile) {
+        throw new CognitoServiceError(
+          502,
+          'InvalidCognitoResponse',
+          `Cognito user "${normalizedUserId}" did not include a stable profile.`,
+        )
+      }
+
+      return {
+        profile,
+        directoryId: readCognitoUserDirectoryId(user),
+      } satisfies CognitoWorkspaceUser
+    } catch (error) {
+      if (isCognitoUserNotFoundError(error)) {
+        return undefined
+      }
+
+      throw error
+    }
+  }
+
+  /**
+   * invitation 対象 user を Cognito に作成または既存 identity と安全に関連付けます。
+   */
+  async provisionWorkspaceUser(input: ProvisionCognitoWorkspaceUserInput) {
+    const email = normalizeCognitoUserId(input.email)
+    const existingUser = input.existingUser ?? await this.findWorkspaceUser(email)
+
+    if (existingUser) {
+      this.requireCompatibleWorkspaceDirectory(existingUser, input.directoryId)
+      await this.updateWorkspaceUserAttributes(email, input.directoryId, input.name)
+
+      return {
+        profile: {
+          ...existingUser.profile,
+          name: input.name?.trim() || existingUser.profile.name,
+        },
+        identityOwnership: 'pre-existing',
+        deliveryStatus: 'not-required',
+      } satisfies ProvisionCognitoWorkspaceUserResult
+    }
+
+    try {
+      const response = await this.request<AdminCreateUserResponse>('AdminCreateUser', {
+        UserPoolId: await this.resolveUserPoolId(),
+        Username: email,
+        DesiredDeliveryMediums: ['EMAIL'],
+        UserAttributes: createWorkspaceCognitoUserAttributes(email, input.directoryId, input.name),
+      })
+      const profile = response.User ? toCognitoUserProfile(response.User) : undefined
+
+      return {
+        profile: profile ?? {
+          id: email,
+          username: email,
+          email,
+          name: input.name?.trim() || undefined,
+          enabled: true,
+          status: 'FORCE_CHANGE_PASSWORD',
+        },
+        identityOwnership: 'workspace-created',
+        deliveryStatus: 'sent',
+      } satisfies ProvisionCognitoWorkspaceUserResult
+    } catch (error) {
+      if (!(error instanceof CognitoServiceError) || error.code !== 'UsernameExistsException') {
+        throw error
+      }
+
+      const racedUser = await this.findWorkspaceUser(email)
+
+      if (!racedUser) {
+        throw error
+      }
+
+      this.requireCompatibleWorkspaceDirectory(racedUser, input.directoryId)
+      await this.updateWorkspaceUserAttributes(email, input.directoryId, input.name)
+
+      if (racedUser.profile.status === 'FORCE_CHANGE_PASSWORD') {
+        await this.resendWorkspaceUserInvitation(racedUser.profile.username)
+      }
+
+      return {
+        profile: racedUser.profile,
+        identityOwnership: 'ambiguous',
+        deliveryStatus: racedUser.profile.status === 'FORCE_CHANGE_PASSWORD'
+          ? 'sent'
+          : 'not-required',
+      } satisfies ProvisionCognitoWorkspaceUserResult
+    }
+  }
+
+  /**
+   * Workspace が作成した未確定 Cognito user の invitation を再送します。
+   */
+  async resendWorkspaceUserInvitation(userId: string) {
+    await this.request<AdminCreateUserResponse>('AdminCreateUser', {
+      UserPoolId: await this.resolveUserPoolId(),
+      Username: normalizeCognitoUserId(userId),
+      MessageAction: 'RESEND',
+      DesiredDeliveryMediums: ['EMAIL'],
+    })
+  }
+
+  /**
+   * Workspace が所有する未確定 Cognito user を削除します。
+   */
+  async deleteWorkspaceUser(userId: string) {
+    try {
+      await this.request<Record<string, never>>('AdminDeleteUser', {
+        UserPoolId: await this.resolveUserPoolId(),
+        Username: normalizeCognitoUserId(userId),
+      })
+    } catch (error) {
+      if (!isCognitoUserNotFoundError(error)) {
+        throw error
+      }
+    }
+  }
+
+  /**
+   * 既存 Cognito user が別 Workspace に所属していないことを検証します。
+   */
+  private requireCompatibleWorkspaceDirectory(user: CognitoWorkspaceUser, directoryId: string) {
+    if (!user.directoryId || user.directoryId === directoryId) {
+      return
+    }
+
+    throw new CognitoServiceError(
+      409,
+      'WorkspaceDirectoryConflict',
+      `Cognito user "${user.profile.id}" already belongs to another Workspace.`,
+    )
+  }
+
+  /**
+   * 既存 Cognito user に Workspace directory と表示属性を設定します。
+   */
+  private async updateWorkspaceUserAttributes(userId: string, directoryId: string, name?: string) {
+    await this.request<Record<string, never>>('AdminUpdateUserAttributes', {
+      UserPoolId: await this.resolveUserPoolId(),
+      Username: normalizeCognitoUserId(userId),
+      UserAttributes: createWorkspaceCognitoUserAttributes(userId, directoryId, name),
+    })
   }
 
   /**
@@ -5884,7 +6820,7 @@ export class DynamoDbProjectDirectoryClient {
 /**
  * Floci Cognito との通信で扱う domain error です。
  */
-class CognitoServiceError extends Error {
+export class CognitoServiceError extends Error {
   /**
    * Cognito または proxy 相当の HTTP status code です。
    */
@@ -5981,6 +6917,26 @@ function toCognitoUserProfile(value: CognitoUserRecord): CognitoUserProfile | un
 
 function readCognitoUserAttribute(user: CognitoUserRecord, name: string) {
   return (user.Attributes ?? user.UserAttributes)?.find((attribute) => attribute.Name === name)?.Value
+}
+
+function readCognitoUserDirectoryId(user: CognitoUserRecord) {
+  for (const attributeName of projectDirectoryIdAttributeNames) {
+    const directoryId = readCognitoUserAttribute(user, attributeName)?.trim()
+
+    if (directoryId) {
+      return directoryId
+    }
+  }
+
+  return undefined
+}
+
+function createWorkspaceCognitoUserAttributes(email: string, directoryId: string, name?: string) {
+  return [
+    { Name: 'email', Value: normalizeCognitoUserId(email) },
+    { Name: 'custom:directory_id', Value: directoryId },
+    ...(name?.trim() ? [{ Name: 'name', Value: name.trim() }] : []),
+  ]
 }
 
 function isCognitoUserInDirectory(user: CognitoUserRecord, directoryId: string | undefined) {
@@ -7181,6 +8137,7 @@ projectTasks = new DynamoDbProjectTasksClient()
 teamIssues = new DynamoDbTeamIssuesClient()
 projectDirectory = new DynamoDbProjectDirectoryClient()
 auditEvents = createAuditEventsClient()
+workspaceAccess = new DynamoDbWorkspaceAccessClient()
 
 /**
  * Server test で外部 service client を差し替えます。
@@ -7192,6 +8149,7 @@ export function configureApiClientsForTest(clients: {
   teamIssues?: TeamIssuesClient
   projectDirectory?: ProjectDirectoryClient
   auditEvents?: AuditEventsClient
+  workspaceAccess?: WorkspaceAccessClient
 }) {
   cognito = clients.cognito ?? cognito
   dashboardSummary = clients.dashboardSummary ?? dashboardSummary
@@ -7199,6 +8157,7 @@ export function configureApiClientsForTest(clients: {
   teamIssues = clients.teamIssues ?? teamIssues
   projectDirectory = clients.projectDirectory ?? projectDirectory
   auditEvents = clients.auditEvents ?? auditEvents
+  workspaceAccess = clients.workspaceAccess ?? workspaceAccess
 }
 
 /**
@@ -7211,6 +8170,7 @@ export function resetApiClientsForTest() {
   teamIssues = new DynamoDbTeamIssuesClient()
   projectDirectory = new DynamoDbProjectDirectoryClient()
   auditEvents = createAuditEventsClient()
+  workspaceAccess = new DynamoDbWorkspaceAccessClient()
 }
 
 /**

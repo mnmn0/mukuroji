@@ -21,6 +21,8 @@ const storyUser: CurrentUser = {
   },
   groups: ['mukuroji-system-admins'],
   isSystemAdmin: true,
+  workspaceRole: 'owner',
+  workspaceMemberStatus: 'active',
 }
 
 const storySummary: DashboardSummary = {

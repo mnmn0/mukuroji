@@ -4,12 +4,16 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { createAuditEvent, createMutationAuditContext } from './audit'
 import {
   app,
+  CognitoServiceError,
   configureApiClientsForTest,
   DynamoDbDashboardSummaryClient,
   DynamoDbProjectDirectoryClient,
   DynamoDbProjectTasksClient,
   resetApiClientsForTest,
+  WorkspaceAccessError,
   type ProjectRole,
+  type WorkspaceMemberStatus,
+  type WorkspaceRole,
 } from './index'
 
 afterEach(() => {
@@ -58,6 +62,269 @@ test('returns Cognito groups and system admin status for the current user', asyn
   expect(await response.json()).toMatchObject({
     groups: ['mukuroji-system-admins'],
     isSystemAdmin: true,
+  })
+})
+
+test('returns Workspace role and active status for the current user', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'admin' })
+
+  const response = await app.request('/api/auth/me', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    workspaceRole: 'admin',
+    workspaceMemberStatus: 'active',
+  })
+})
+
+test('blocks a deactivated Workspace member before any business API read', async () => {
+  const calls = configureFakeProjectClients(true, { workspaceStatus: 'deactivated' })
+
+  const response = await app.request('/api/teams/projects', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toEqual({ message: 'Workspace access is denied.' })
+  expect(calls.directoryReads).toEqual([])
+})
+
+test('keeps guest Workspace members read-only even when they have a project role', async () => {
+  const calls = configureFakeProjectClients(true, { workspaceRole: 'guest' })
+
+  const response = await app.request('/api/projects/refero/tasks', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: 'Guest must not create this task',
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026/07/20',
+      priority: 'medium',
+    }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(calls.taskCreates).toEqual([])
+})
+
+test('limits Workspace structure changes to owners and admins', async () => {
+  const calls = configureFakeProjectClients(true, { workspaceRole: 'member' })
+
+  const response = await app.request('/api/teams', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ name: 'Unauthorized team' }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(calls.teamCreates).toEqual([])
+})
+
+test('rejects inactive Workspace members as task assignment candidates', async () => {
+  const calls = configureFakeProjectClients(true, {
+    inactiveWorkspaceMemberKeys: ['sato@example.com'],
+  })
+
+  const response = await app.request('/api/projects/refero/tasks', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: 'Inactive assignee task',
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026/07/20',
+      priority: 'medium',
+    }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(calls.taskCreates).toEqual([])
+})
+
+test('returns a NEW_PASSWORD_REQUIRED challenge without creating a session', async () => {
+  const calls = configureFakeProjectClients(true, { passwordAuthChallenge: true })
+
+  const response = await app.request('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'demo@example.com', password: 'Temporary123!' }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    challenge: 'NEW_PASSWORD_REQUIRED',
+    email: 'demo@example.com',
+    session: 'new-password-session',
+  })
+  expect(calls.workspaceReconciliations).toEqual([])
+})
+
+test('returns a stable error when a new password violates the Cognito policy', async () => {
+  const calls = configureFakeProjectClients(true, {
+    newPasswordChallengeError: new CognitoServiceError(
+      400,
+      'InvalidPasswordException',
+      'Password did not conform with policy.',
+    ),
+  })
+
+  const response = await app.request('/api/auth/challenge/new-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'demo@example.com',
+      newPassword: 'weak',
+      session: 'new-password-session',
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    code: 'InvalidNewPassword',
+    message: 'New password does not meet the password policy.',
+  })
+  expect(calls.workspaceReconciliations).toEqual([])
+})
+
+test('retries membership reconcile on normal login after password completion succeeded alone', async () => {
+  const calls = configureFakeProjectClients(true, {
+    newPasswordChallengeTokens: true,
+    passwordAuthTokens: true,
+    workspaceReconcileFailures: 1,
+  })
+
+  const challengeResponse = await app.request('/api/auth/challenge/new-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'demo@example.com',
+      newPassword: 'Permanent123!',
+      session: 'new-password-session',
+    }),
+  })
+  expect(challengeResponse.status).toBe(503)
+
+  const loginResponse = await app.request('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'demo@example.com', password: 'Permanent123!' }),
+  })
+
+  expect(loginResponse.status).toBe(200)
+  expect(await loginResponse.json()).toMatchObject({ accessToken: 'test-token' })
+  expect(calls.workspaceReconciliations).toEqual([
+    'demo@example.com',
+    'demo@example.com',
+  ])
+})
+
+test('returns owner and admin Workspace capabilities from the API source of truth', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'admin' })
+
+  const response = await app.request('/api/workspace/access', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    currentMember: { role: 'admin', status: 'active' },
+    capabilities: {
+      canInvite: true,
+      canManageMembers: true,
+      canManageAdmins: false,
+    },
+  })
+})
+
+test('resends credentials when inviting an existing unconfirmed Workspace identity', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  const response = await app.request('/api/workspace/invitations', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      email: 'invitee@example.com',
+      name: 'Invitee',
+      role: 'member',
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(calls.workspaceInvitationResends).toEqual(['invitee@example.com'])
+  expect(await response.json()).toMatchObject({
+    invitation: {
+      deliveryStatus: 'sent',
+      email: 'invitee@example.com',
+      identityOwnership: 'pre-existing',
+      status: 'pending',
+    },
+  })
+})
+
+test('records ownership when invitation provisioning creates a new Cognito identity', async () => {
+  const calls = configureFakeProjectClients(true, { workspaceUserMissing: true })
+
+  const response = await app.request('/api/workspace/invitations', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      email: 'new-user@example.com',
+      role: 'member',
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(calls.workspaceInvitationResends).toEqual([])
+  expect(await response.json()).toMatchObject({
+    invitation: {
+      deliveryStatus: 'sent',
+      email: 'new-user@example.com',
+      identityOwnership: 'workspace-created',
+      status: 'pending',
+    },
+  })
+})
+
+test('keeps raced Cognito ownership ambiguous while resending temporary credentials', async () => {
+  const calls = configureFakeProjectClients(true, { workspaceProvisionRace: true })
+
+  const response = await app.request('/api/workspace/invitations', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      email: 'raced-user@example.com',
+      role: 'member',
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(calls.workspaceInvitationResends).toEqual(['raced-user@example.com'])
+  expect(await response.json()).toMatchObject({
+    invitation: {
+      deliveryStatus: 'sent',
+      email: 'raced-user@example.com',
+      identityOwnership: 'ambiguous',
+      status: 'pending',
+    },
   })
 })
 
@@ -217,21 +484,15 @@ test('lists Cognito users for project member assignment when the current user is
         name: '佐藤 花子',
         enabled: true,
         status: 'CONFIRMED',
+        workspaceStatus: 'active',
       },
     ],
-    nextToken: undefined,
   })
   expect(calls.accessChecks).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
-  expect(calls.userLists).toEqual([
-    {
-      directoryId: 'user#demo@example.com',
-      limit: 2,
-      paginationToken: 'next-page-token',
-      query: 'sato',
-    },
-  ])
+  expect(calls.userLists).toEqual([])
+  expect(calls.userProfiles).toEqual(['sato@example.com'])
 })
 
 test('keeps project members available when Cognito profile hydration fails', async () => {
@@ -254,6 +515,7 @@ test('keeps project members available when Cognito profile hydration fails', asy
         email: 'demo@example.com',
         role: 'manager',
         updatedAt: '2026-06-08T00:00:00.000Z',
+        workspaceStatus: 'active',
       },
     ],
   })
@@ -655,6 +917,7 @@ test('updates a project member role when the current user is project manager', a
       status: 'CONFIRMED',
       role: 'member',
       updatedAt: '2026-06-08T00:00:00.000Z',
+      workspaceStatus: 'active',
     },
   })
   expect(calls.memberUpdates).toEqual([
@@ -694,6 +957,7 @@ test('lets a system admin update project members without a project role', async 
       status: 'CONFIRMED',
       role: 'viewer',
       updatedAt: '2026-06-08T00:00:00.000Z',
+      workspaceStatus: 'active',
     },
   })
   expect(calls.roleChecks).toEqual([])
@@ -3059,13 +3323,29 @@ function configureFakeProjectClients(
   hasProjectAccess: boolean,
   options: {
     profileError?: Error
+    inactiveWorkspaceMemberKeys?: string[]
+    /** NEW_PASSWORD_REQUIRED challenge で Cognito が返す error です。 */
+    newPasswordChallengeError?: CognitoServiceError
+    newPasswordChallengeTokens?: boolean
+    passwordAuthChallenge?: boolean
+    passwordAuthTokens?: boolean
     projectAccesses?: Array<{ projectId: string; role?: ProjectRole }>
     role?: ProjectRole
     taskAssigneeUserId?: string
     teamProjects?: Array<{ id: string; name: string; tone: 'blue' | 'purple' | 'green' | 'yellow' }>
+    workspaceRole?: WorkspaceRole
+    workspaceReconcileFailures?: number
+    workspaceStatus?: WorkspaceMemberStatus
+    /** Invitation provisioning 時に Cognito user が存在しない状態を再現します。 */
+    workspaceUserMissing?: boolean
+    /** AdminCreateUser と競合して temporary-password user が作成された状態を再現します。 */
+    workspaceProvisionRace?: boolean
   } = {},
 ) {
   const role = 'role' in options ? options.role : 'manager'
+  const workspaceRole = options.workspaceRole ?? 'owner'
+  const workspaceStatus = options.workspaceStatus ?? 'active'
+  let workspaceReconcileFailures = options.workspaceReconcileFailures ?? 0
   const calls = {
     accessChecks: [] as Array<{ directoryId: string; projectId: string }>,
     directoryReads: [] as Array<{ directoryId: string; locale: string }>,
@@ -3126,11 +3406,50 @@ function configureFakeProjectClients(
       query?: string
     }>,
     userProfiles: [] as string[],
+    workspaceInvitationResends: [] as string[],
+    workspaceReconciliations: [] as string[],
   }
+  const createWorkspaceMember = (memberKey: string) => ({
+    id: memberKey,
+    memberKey,
+    email: memberKey,
+    name: memberKey === 'demo@example.com' ? 'Demo User' : undefined,
+    role: memberKey === 'demo@example.com' ? workspaceRole : 'member' as WorkspaceRole,
+    status: memberKey === 'demo@example.com'
+      ? workspaceStatus
+      : options.inactiveWorkspaceMemberKeys?.includes(memberKey)
+        ? 'deactivated' as WorkspaceMemberStatus
+        : 'active' as WorkspaceMemberStatus,
+    version: 1,
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z',
+  })
 
   configureApiClientsForTest({
     cognito: {
       async initiatePasswordAuth() {
+        if (options.passwordAuthChallenge) {
+          return {
+            ChallengeName: 'NEW_PASSWORD_REQUIRED',
+            Session: 'new-password-session',
+          }
+        }
+
+        if (options.passwordAuthTokens) {
+          return { AuthenticationResult: createFakeAuthTokenSet() }
+        }
+
+        return {}
+      },
+      async respondToNewPasswordChallenge() {
+        if (options.newPasswordChallengeError) {
+          throw options.newPasswordChallengeError
+        }
+
+        if (options.newPasswordChallengeTokens) {
+          return { AuthenticationResult: createFakeAuthTokenSet() }
+        }
+
         return {}
       },
       async getUser() {
@@ -3161,6 +3480,42 @@ function configureFakeProjectClients(
 
         return createFakeCognitoProfile(userId)
       },
+      async findWorkspaceUser(userId) {
+        if (options.workspaceUserMissing || options.workspaceProvisionRace) {
+          return undefined
+        }
+
+        return {
+          profile: {
+            ...createFakeCognitoProfile(userId),
+            status: 'FORCE_CHANGE_PASSWORD',
+          },
+          directoryId: 'user#demo@example.com',
+        }
+      },
+      async provisionWorkspaceUser(input) {
+        if (options.workspaceProvisionRace) {
+          calls.workspaceInvitationResends.push(input.email)
+          return {
+            profile: {
+              ...createFakeCognitoProfile(input.email),
+              status: 'FORCE_CHANGE_PASSWORD',
+            },
+            identityOwnership: 'ambiguous',
+            deliveryStatus: 'sent',
+          }
+        }
+
+        return {
+          profile: createFakeCognitoProfile(input.email),
+          identityOwnership: input.existingUser ? 'pre-existing' : 'workspace-created',
+          deliveryStatus: input.existingUser ? 'not-required' : 'sent',
+        }
+      },
+      async resendWorkspaceUserInvitation(userId) {
+        calls.workspaceInvitationResends.push(userId)
+      },
+      async deleteWorkspaceUser() {},
     },
     dashboardSummary: {
       async getSummary(directoryId, accessContext) {
@@ -3332,6 +3687,128 @@ function configureFakeProjectClients(
           teamId,
           projectId,
           archivedAt: '2026-06-06T00:00:00.000Z',
+        }
+      },
+    },
+    workspaceAccess: {
+      async getMember(_workspaceId, memberKey) {
+        return createWorkspaceMember(memberKey)
+      },
+      async getActiveMember(_workspaceId, memberKey) {
+        const member = createWorkspaceMember(memberKey)
+        return member.status === 'active' ? member : undefined
+      },
+      async listActiveMembers() {
+        return [
+          createWorkspaceMember('demo@example.com'),
+          createWorkspaceMember('sato@example.com'),
+          createWorkspaceMember('suzuki@example.com'),
+          createWorkspaceMember('viewer@example.com'),
+        ].filter((member) => member.status === 'active')
+      },
+      async getAccessSnapshot(_workspaceId, memberKey) {
+        const currentMember = createWorkspaceMember(memberKey)
+        return {
+          currentMember,
+          members: [currentMember, createWorkspaceMember('sato@example.com')],
+          invitations: [],
+          capabilities: {
+            canInvite: currentMember.role === 'owner' || currentMember.role === 'admin',
+            canManageMembers: currentMember.role === 'owner' || currentMember.role === 'admin',
+            canManageAdmins: currentMember.role === 'owner',
+          },
+        }
+      },
+      async getInvitation() {
+        return undefined
+      },
+      async createInvitation(_workspaceId, _actorMemberKey, input) {
+        return {
+          id: input.email,
+          email: input.email,
+          name: input.name,
+          role: input.role,
+          status: 'provisioning',
+          deliveryStatus: 'pending',
+          identityOwnership: 'ambiguous',
+          version: 1,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async markInvitationDelivery(_workspaceId, invitationId, input) {
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: input.deliveryStatus === 'failed' ? 'delivery-failed' : 'pending',
+          deliveryStatus: input.deliveryStatus,
+          identityOwnership: input.identityOwnership,
+          version: input.expectedVersion + 1,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async markInvitationCleanupFailure(_workspaceId, invitationId, input) {
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: 'revoked',
+          deliveryStatus: 'not-required',
+          identityOwnership: 'workspace-created',
+          version: input.expectedVersion + 1,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+          failureMessage: input.failureMessage,
+        }
+      },
+      async clearInvitationCleanupFailure(_workspaceId, invitationId, expectedVersion) {
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: 'revoked',
+          deliveryStatus: 'not-required',
+          identityOwnership: 'workspace-created',
+          version: expectedVersion + 1,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async prepareResend() {
+        throw new Error('Invitation fake is not configured for this test.')
+      },
+      async revokeInvitation() {
+        throw new Error('Invitation fake is not configured for this test.')
+      },
+      async prepareReinvite() {
+        throw new Error('Invitation fake is not configured for this test.')
+      },
+      async reconcileAuthenticatedMember(_workspaceId, input) {
+        calls.workspaceReconciliations.push(input.memberKey)
+
+        if (workspaceReconcileFailures > 0) {
+          workspaceReconcileFailures -= 1
+          throw new WorkspaceAccessError(
+            503,
+            'WorkspaceAccessUnavailable',
+            'Workspace membership update failed.',
+          )
+        }
+
+        return createWorkspaceMember(input.memberKey)
+      },
+      async updateMember(_workspaceId, _actorMemberKey, memberKey, input) {
+        return {
+          ...createWorkspaceMember(memberKey),
+          role: input.role ?? createWorkspaceMember(memberKey).role,
+          status: input.status ?? createWorkspaceMember(memberKey).status,
+          version: input.expectedVersion + 1,
         }
       },
     },
@@ -3571,6 +4048,16 @@ function createFakeCognitoProfile(userId: string) {
     name: names[id],
     enabled: true,
     status: 'CONFIRMED',
+  }
+}
+
+function createFakeAuthTokenSet() {
+  return {
+    AccessToken: 'test-token',
+    IdToken: 'test-id-token',
+    RefreshToken: 'test-refresh-token',
+    ExpiresIn: 3600,
+    TokenType: 'Bearer',
   }
 }
 

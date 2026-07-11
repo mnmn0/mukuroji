@@ -9,14 +9,14 @@ const meta = {
   parameters: {
     layout: 'fullscreen',
   },
-  render: () => {
+  render: (args) => {
     clearAuthSession()
 
     const router = createMemoryRouter(
       [
         {
           path: '/',
-          element: <LoginPage />,
+          element: <LoginPage {...args} />,
         },
         {
           path: '/dashboard',
@@ -46,3 +46,30 @@ type Story = StoryObj<typeof meta>
  * 作業台プレビュー付きログイン画面です。
  */
 export const Default: Story = {}
+
+/**
+ * Cognito が初回ログインの新しいパスワードを要求した状態です。
+ */
+export const NewPasswordRequired: Story = {
+  args: {
+    initialChallenge: {
+      challenge: 'NEW_PASSWORD_REQUIRED',
+      email: 'invited.member@example.com',
+      session: 'storybook-cognito-session',
+    },
+  },
+}
+
+/**
+ * パスワード変更後の Workspace 更新に失敗し、通常ログインから復旧できる案内です。
+ */
+export const ChallengeRecovery: Story = {
+  args: {
+    initialChallenge: {
+      challenge: 'NEW_PASSWORD_REQUIRED',
+      email: 'invited.member@example.com',
+      session: 'storybook-cognito-session',
+    },
+    initialChallengeFailed: true,
+  },
+}
