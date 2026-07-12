@@ -49,6 +49,14 @@ const storyWorkspaceTasks = [
     status: 'todo',
     teamId: 'core-team',
     title: '共通ローンチの承認導線を確認',
+    approvalSummary: {
+      approvedCount: 0,
+      changesRequestedCount: 1,
+      nextDueAt: '2026-07-15T14:59:59.000Z',
+      overdueCount: 1,
+      pendingCount: 2,
+      rejectedCount: 0,
+    },
   },
 ] satisfies Parameters<typeof WorkspaceScreen>[0]['tasks']
 

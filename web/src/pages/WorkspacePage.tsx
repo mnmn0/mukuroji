@@ -393,7 +393,7 @@ const emptyTeamProjectMembers: TeamProjectMemberAccess[] = []
 const emptyTeamProjectMemberFailures: string[] = []
 const emptyUserIdentityAliases: string[] = []
 const myTaskKanbanStatuses = ['todo', 'in-progress', 'review', 'done'] as const satisfies readonly TaskStatus[]
-const inboxFilterOptions = ['all', 'mine', 'overdue', 'review', 'high'] as const
+const inboxFilterOptions = ['all', 'mine', 'overdue', 'review', 'high', 'approval'] as const
 const reportStatusOrder = ['todo', 'in-progress', 'review', 'done'] as const satisfies readonly TaskStatus[]
 const reportPriorityOrder = ['high', 'medium', 'low'] as const satisfies readonly TaskPriority[]
 
@@ -1330,6 +1330,7 @@ function InboxView({
     overdue: inboxTasks.filter(isWorkspaceTaskOverdue).length,
     review: inboxTasks.filter((task) => task.status === 'review').length,
     high: inboxTasks.filter((task) => task.priority === 'high').length,
+    approval: inboxTasks.filter(hasApprovalAttention).length,
   }
   const filteredTasks = inboxTasks.filter((task) => {
     if (!matchesInboxFilter(task, activeFilter, userIdentityAliases)) {
@@ -1456,7 +1457,7 @@ function InboxView({
           <section className="workbench-panel p-5">
             <p className="workbench-eyebrow">{t('workspace.inbox.breakdownTitle')}</p>
             <div className="mt-4 grid divide-y divide-[var(--workbench-border)]">
-              {(['overdue', 'high', 'review', 'mine'] as const).map((filter) => (
+              {(['overdue', 'high', 'review', 'approval', 'mine'] as const).map((filter) => (
                 <div className="flex items-center justify-between gap-4 py-3" key={filter}>
                   <span className="text-sm font-semibold text-[var(--workbench-muted)]">
                     {t(`workspace.inbox.filter.${filter}`)}
@@ -1609,6 +1610,14 @@ function ReportsView({
     label: t(`tasks.priority.${priority}`),
   }))
   const attentionProjectCount = projectRows.filter((project) => project.attentionTaskCount > 0).length
+  const pendingApprovalCount = tasks.reduce(
+    (count, task) => count + (task.approvalSummary?.pendingCount ?? 0),
+    0,
+  )
+  const overdueApprovalCount = tasks.reduce(
+    (count, task) => count + (task.approvalSummary?.overdueCount ?? 0),
+    0,
+  )
 
   return (
     <div className="grid gap-6" data-testid="reports-workbench">
@@ -1631,7 +1640,7 @@ function ReportsView({
         </button>
       </section>
 
-      <div className="grid grid-cols-4 gap-4 max-[1180px]:grid-cols-2 max-[680px]:grid-cols-1">
+      <div className="grid grid-cols-6 gap-4 max-[1380px]:grid-cols-3 max-[980px]:grid-cols-2 max-[680px]:grid-cols-1">
         <MetricCard
           label={t('workspace.reports.metric.open')}
           testId="reports-metric-open"
@@ -1655,6 +1664,18 @@ function ReportsView({
           testId="reports-metric-projects"
           value={attentionProjectCount}
           tone="amber"
+        />
+        <MetricCard
+          label={t('workspace.reports.metric.pendingApprovals')}
+          testId="reports-metric-pending-approvals"
+          value={pendingApprovalCount}
+          tone="teal"
+        />
+        <MetricCard
+          label={t('workspace.reports.metric.overdueApprovals')}
+          testId="reports-metric-overdue-approvals"
+          value={overdueApprovalCount}
+          tone="red"
         />
       </div>
 
@@ -1734,7 +1755,7 @@ function ReportsView({
           </label>
         </div>
         <div className="overflow-x-auto border-t border-[var(--workbench-border)]">
-          <table className="w-full min-w-[980px] border-collapse text-left" data-testid="reports-project-table">
+          <table className="w-full min-w-[1160px] border-collapse text-left" data-testid="reports-project-table">
             <thead>
               <tr className="workbench-table-head text-left">
                 <th className="px-5 py-3" scope="col">{t('workspace.column.project')}</th>
@@ -1743,6 +1764,8 @@ function ReportsView({
                 <th className="px-5 py-3" scope="col">{t('workspace.reports.column.open')}</th>
                 <th className="px-5 py-3" scope="col">{t('workspace.reports.column.review')}</th>
                 <th className="px-5 py-3" scope="col">{t('workspace.reports.column.attention')}</th>
+                <th className="px-5 py-3" scope="col">{t('workspace.reports.column.pendingApprovals')}</th>
+                <th className="px-5 py-3" scope="col">{t('workspace.reports.column.overdueApprovals')}</th>
                 <th className="px-5 py-3 text-right" scope="col">{t('workspace.reports.column.action')}</th>
               </tr>
             </thead>
@@ -1773,6 +1796,12 @@ function ReportsView({
                   <td className="px-5 py-4">
                     <span className={project.attentionTaskCount > 0 ? 'workbench-badge-danger' : 'workbench-badge-success'}>
                       {project.attentionTaskCount}
+                    </span>
+                  </td>
+                  <td className="px-5 py-4 tabular-nums">{project.pendingApprovalCount}</td>
+                  <td className="px-5 py-4">
+                    <span className={project.overdueApprovalCount > 0 ? 'workbench-badge-danger' : 'workbench-badge-success'}>
+                      {project.overdueApprovalCount}
                     </span>
                   </td>
                   <td className="px-5 py-4 text-right">
@@ -2815,7 +2844,7 @@ function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) 
 
 function createActionQueueTasks(tasks: ProjectTask[]) {
   return [...tasks]
-    .filter((task) => task.status !== 'done')
+    .filter((task) => task.status !== 'done' || hasApprovalAttention(task))
     .sort((firstTask, secondTask) => {
       const firstScore = calculateWorkspaceActionScore(firstTask)
       const secondScore = calculateWorkspaceActionScore(secondTask)
@@ -2833,7 +2862,8 @@ function createInboxTasks(tasks: ProjectTask[]) {
     .filter((task) =>
       task.priority === 'high' ||
       task.status === 'review' ||
-      isWorkspaceTaskOverdue(task),
+      isWorkspaceTaskOverdue(task) ||
+      hasApprovalAttention(task),
     )
 }
 
@@ -2856,6 +2886,10 @@ function matchesInboxFilter(
 
   if (filter === 'high') {
     return task.priority === 'high'
+  }
+
+  if (filter === 'approval') {
+    return hasApprovalAttention(task)
   }
 
   return true
@@ -2907,11 +2941,23 @@ function createInboxReasonKeys(task: ProjectTask): MessageKey[] {
     reasonKeys.push('workspace.inbox.reason.review')
   }
 
+  if (task.approvalSummary?.overdueCount) {
+    reasonKeys.push('workspace.inbox.reason.approvalOverdue')
+  } else if (hasApprovalAttention(task)) {
+    reasonKeys.push('workspace.inbox.reason.approval')
+  }
+
   return reasonKeys.length > 0 ? reasonKeys : ['workspace.inbox.reason.watch']
 }
 
 function resolveInboxReasonClassName(reasonKey: MessageKey) {
-  if (reasonKey === 'workspace.inbox.reason.overdue' || reasonKey === 'workspace.inbox.reason.high') {
+  if (
+    reasonKey === 'workspace.inbox.reason.overdue' ||
+    reasonKey === 'workspace.inbox.reason.high' ||
+    reasonKey === 'workspace.inbox.reason.approvalOverdue' ||
+    reasonKey === 'workspace.inbox.reason.approvalChangesRequested' ||
+    reasonKey === 'workspace.inbox.reason.approvalRejected'
+  ) {
     return 'workbench-badge-danger'
   }
 
@@ -2928,12 +2974,23 @@ function normalizeWorkspaceSearchText(value?: string) {
 
 function calculateWorkspaceActionScore(task: ProjectTask) {
   return (isWorkspaceTaskOverdue(task) ? 8 : 0) +
+    ((task.approvalSummary?.overdueCount ?? 0) > 0 ? 8 : 0) +
+    (hasApprovalAttention(task) ? 4 : 0) +
     (task.priority === 'high' ? 5 : task.priority === 'medium' ? 2 : 0) +
     (task.status === 'review' ? 4 : task.status === 'in-progress' ? 1 : 0)
 }
 
 function isOpenableWorkspaceTask(task: ProjectTask) {
   return Boolean(task.teamId)
+}
+
+function hasApprovalAttention(task: ProjectTask) {
+  const summary = task.approvalSummary
+
+  return Boolean(summary && (
+    summary.pendingCount > 0 ||
+    summary.overdueCount > 0
+  ))
 }
 
 function isWorkspaceTaskOverdue(task: ProjectTask) {
@@ -2994,12 +3051,22 @@ function createReportProjectRows(teams: ProjectDirectoryTeam[], tasks: ProjectTa
       const doneTaskCount = projectTasks.filter((task) => task.status === 'done').length
       const reviewTaskCount = projectTasks.filter((task) => task.status === 'review').length
       const attentionTaskCount = createInboxTasks(projectTasks).length
+      const pendingApprovalCount = projectTasks.reduce(
+        (count, task) => count + (task.approvalSummary?.pendingCount ?? 0),
+        0,
+      )
+      const overdueApprovalCount = projectTasks.reduce(
+        (count, task) => count + (task.approvalSummary?.overdueCount ?? 0),
+        0,
+      )
 
       return {
         attentionTaskCount,
         doneTaskCount,
         name: project.name,
         openTaskCount,
+        overdueApprovalCount,
+        pendingApprovalCount,
         progress: calculateProjectProgress(projectTasks),
         projectId: project.id,
         reviewTaskCount,
@@ -3049,6 +3116,8 @@ function downloadWorkspaceReportCsv(
     t('workspace.reports.column.done'),
     t('workspace.reports.column.review'),
     t('workspace.reports.column.attention'),
+    t('workspace.reports.column.pendingApprovals'),
+    t('workspace.reports.column.overdueApprovals'),
     t('workspace.column.progress'),
   ]
   const rows = projectRows.map((project) => [
@@ -3059,6 +3128,8 @@ function downloadWorkspaceReportCsv(
     project.doneTaskCount,
     project.reviewTaskCount,
     project.attentionTaskCount,
+    project.pendingApprovalCount,
+    project.overdueApprovalCount,
     `${project.progress}%`,
   ])
   const csv = [headers, ...rows]

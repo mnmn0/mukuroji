@@ -11,6 +11,13 @@ import {
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import { createMutationRequestRunner } from '../api/mutationHeaders'
 import { ChevronIcon } from '../components/icons'
+import { IssueArtifactsPanel } from '../files/IssueArtifactsPanel'
+import { ProjectFilesPanel } from '../files/ProjectFilesPanel'
+import {
+  type FileArtifactScope,
+  type FileArtifactsController,
+  useFileArtifacts,
+} from '../files/useFileArtifacts'
 import {
   MobileSidebarButton,
   MobileSidebarDrawer,
@@ -270,6 +277,14 @@ type TaskScreenProps = {
    */
   collaboration?: IssueCollaborationController
   /**
+   * 選択中 Work Item の file/version/annotation/approval controller です。
+   */
+  artifacts?: FileArtifactsController
+  /**
+   * Project File tab の file controller です。
+   */
+  projectFiles?: FileArtifactsController
+  /**
    * mention 候補と actor 表示に使う Workspace member 一覧です。
    */
   workspaceMembers?: WorkspaceMember[]
@@ -503,6 +518,28 @@ export function TaskPage() {
     projectId: resolvedSelectedIssue?.assignedProjectId ?? projectId,
     teamId: resolvedSelectedIssueTeamId,
   })
+  const artifactIssueId = resolvedSelectedIssue?.id
+  const artifactProjectTeamId = activeTeam?.id
+  const issueFileScope = useMemo<FileArtifactScope | undefined>(() =>
+    artifactIssueId && resolvedSelectedIssueTeamId
+      ? {
+          kind: 'work-item',
+          issueId: artifactIssueId,
+          teamId: resolvedSelectedIssueTeamId,
+        }
+      : undefined,
+  [artifactIssueId, resolvedSelectedIssueTeamId])
+  const projectFileScope = useMemo<FileArtifactScope | undefined>(() =>
+    artifactProjectTeamId
+      ? { kind: 'project', projectId, teamId: artifactProjectTeamId }
+      : undefined,
+  [artifactProjectTeamId, projectId])
+  const issueArtifacts = useFileArtifacts({
+    accessToken,
+    enabled: resolvedSelectedIssue?.source !== 'legacy',
+    scope: issueFileScope,
+  })
+  const projectFiles = useFileArtifacts({ accessToken, scope: projectFileScope })
   const issueDetailKey = accessToken && resolvedSelectedIssue?.id && resolvedSelectedIssueTeamId
     ? (['project-issue-detail', accessToken, resolvedSelectedIssueTeamId, resolvedSelectedIssue.id] as const)
     : null
@@ -823,6 +860,7 @@ export function TaskPage() {
       assigneeOptions={activeProjectMembers}
       canManageProjectMembers={canManageProjectMembers}
       collaboration={collaboration}
+      artifacts={resolvedSelectedIssue?.source !== 'legacy' ? issueArtifacts : undefined}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}
       initialSelectedTaskId={resolvedSelectedIssue?.id}
@@ -837,6 +875,7 @@ export function TaskPage() {
       onUpdateIssue={canMutateContent ? handleUpdateIssue : undefined}
       onUpdateProjectMember={canManageProjectMembers ? handleUpdateProjectMember : undefined}
       projectId={projectId}
+      projectFiles={projectFiles}
       projectMembers={projectMembers}
       projectMembersErrorMessage={projectPermissionsErrorMessage}
       projectName={projectName}
@@ -870,6 +909,7 @@ export function TaskScreen({
   assigneeOptions = [],
   canManageProjectMembers = false,
   collaboration,
+  artifacts,
   currentWorkspaceMemberKey,
   defaultCreateTaskOpen = false,
   detailErrorMessage,
@@ -881,6 +921,7 @@ export function TaskScreen({
   isSystemAdmin = false,
   isLoading = false,
   projectMembers = emptyProjectMembers,
+  projectFiles,
   projectMembersErrorMessage,
   projectUserQuery = '',
   projectUsers = emptyProjectUsers,
@@ -1118,6 +1159,7 @@ export function TaskScreen({
                 isSystemAdmin={isSystemAdmin}
                 priorityFilter={priorityFilter}
                 projectId={projectId}
+                projectFiles={projectFiles}
                 projectMembers={projectMembers}
                 projectMembersErrorMessage={projectMembersErrorMessage}
                 projectName={resolvedProjectName}
@@ -1166,10 +1208,14 @@ export function TaskScreen({
                 t={t}
                 taskErrorMessage={taskErrorMessage}
                 tasks={visibleTasks}
+                currentWorkspaceMemberKey={currentWorkspaceMemberKey}
+                locale={locale}
+                workspaceMembers={workspaceMembers}
               />
               {activeTab === 'permissions' || activeTab === 'file' ? null : (
                 <TaskDetailPane
                   assigneeOptions={assigneeOptions}
+                  artifacts={artifacts}
                   collaboration={collaboration}
                   currentWorkspaceMemberKey={currentWorkspaceMemberKey}
                   detail={selectedIssueDetail}
@@ -1466,6 +1512,7 @@ function TaskWorkspace({
   isSystemAdmin,
   priorityFilter,
   projectId,
+  projectFiles,
   projectMembers,
   projectMembersErrorMessage,
   projectName,
@@ -1499,6 +1546,9 @@ function TaskWorkspace({
   t,
   taskErrorMessage,
   tasks,
+  currentWorkspaceMemberKey,
+  locale,
+  workspaceMembers,
 }: {
   activeTab: TaskTab
   allTasks: ProjectTask[]
@@ -1515,6 +1565,7 @@ function TaskWorkspace({
   isSystemAdmin: boolean
   priorityFilter: PriorityFilter
   projectId: string
+  projectFiles?: FileArtifactsController
   projectMembers: ProjectMember[]
   projectMembersErrorMessage?: string
   projectName: string
@@ -1552,6 +1603,9 @@ function TaskWorkspace({
   t: (key: MessageKey) => string
   taskErrorMessage?: string
   tasks: ProjectTask[]
+  currentWorkspaceMemberKey?: string
+  locale: Locale
+  workspaceMembers: WorkspaceMember[]
 }) {
   const statusFilterButtonId = 'status-filter-button'
   const statusFilterMenuId = 'status-filter-menu'
@@ -1594,7 +1648,24 @@ function TaskWorkspace({
   if (activeTab === 'file') {
     return (
       <div className="px-[clamp(18px,2.5vw,30px)] py-4">
-        <TaskFileList t={t} tasks={tasks} />
+        {projectFiles ? (
+          <>
+            <ViewHeading
+              count={projectFiles.files.length}
+              meta={t('files.description')}
+              t={t}
+              titleKey={viewLabelKeys.file}
+            />
+            <ProjectFilesPanel
+              controller={projectFiles}
+              currentMemberKey={currentWorkspaceMemberKey}
+              locale={locale}
+              members={workspaceMembers}
+            />
+          </>
+        ) : (
+          <TaskFileList t={t} tasks={tasks} />
+        )}
       </div>
     )
   }
@@ -2234,6 +2305,7 @@ function TaskBoard({
 
 function TaskDetailPane({
   assigneeOptions,
+  artifacts,
   collaboration,
   currentWorkspaceMemberKey,
   detail,
@@ -2247,6 +2319,7 @@ function TaskDetailPane({
   workspaceMembers,
 }: {
   assigneeOptions: ProjectMember[]
+  artifacts?: FileArtifactsController
   collaboration?: IssueCollaborationController
   currentWorkspaceMemberKey?: string
   detail?: TeamIssueDetail
@@ -2428,8 +2501,17 @@ function TaskDetailPane({
         ) : null}
         {errorMessage ? <p className="text-sm font-semibold text-red-700">{errorMessage}</p> : null}
       </form>
+      {artifacts ? (
+        <IssueArtifactsPanel
+          controller={artifacts}
+          currentMemberKey={currentWorkspaceMemberKey}
+          locale={locale}
+          members={workspaceMembers}
+        />
+      ) : null}
       {collaboration ? (
         <IssueCollaborationPanel
+          artifacts={artifacts}
           key={`${task.teamId ?? ''}:${task.id}`}
           controller={collaboration}
           currentMemberKey={currentWorkspaceMemberKey}

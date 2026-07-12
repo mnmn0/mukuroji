@@ -11,6 +11,14 @@ import {
 import { projectDirectoryFixtures } from '../projects/fixtures'
 import type { ProjectMember, ProjectUser } from '../projects/api'
 import { referoTaskFixtures } from '../tasks/fixtures'
+import { fileArtifactsControllerFixture } from '../files/fixtures'
+import type { FileArtifactsController } from '../files/useFileArtifacts'
+
+const projectFilesControllerFixture = {
+  ...fileArtifactsControllerFixture,
+  approvals: [],
+  scope: { kind: 'project', projectId: 'refero', teamId: 'core-team' },
+} satisfies FileArtifactsController
 
 const assigneeOptions: ProjectMember[] = [
   {
@@ -111,8 +119,10 @@ const meta = {
     assigneeOptions,
     canManageProjectMembers: true,
     collaboration: issueCollaborationControllerFixture,
+    artifacts: fileArtifactsControllerFixture,
     currentWorkspaceMemberKey: 'demo@example.com',
     projectId: 'refero',
+    projectFiles: projectFilesControllerFixture,
     projectMembers: assigneeOptions,
     projectName: 'Refero',
     projectUserQuery: '',

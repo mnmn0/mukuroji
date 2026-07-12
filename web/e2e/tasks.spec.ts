@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { WORK_ITEM_SCHEMA_VERSION } from '@mukuroji/contracts'
+import type { ApprovalRequest, FileAnnotation, FileAttachment, FileVersion } from '@mukuroji/contracts'
 import { readFile } from 'node:fs/promises'
 import type { TeamIssue, TeamIssueActivity, TeamIssueComment } from '../src/issues/api'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
@@ -799,6 +800,28 @@ async function mockAuthenticatedTaskPage(
             createdAt: '2026-06-08T00:00:00.000Z',
           },
         ],
+      },
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/files$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      json: {
+        approvals: [],
+        capabilities: { canRequestApproval: true, canUpload: true },
+        files: [],
+      },
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/projects\/[^/]+\/files$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      json: {
+        approvals: [],
+        capabilities: { canRequestApproval: false, canUpload: true },
+        files: [],
       },
     })
   })
@@ -1828,6 +1851,415 @@ test.describe('authenticated task page', () => {
     await expect(page.getByText('割当待ち Issue')).toBeVisible()
   })
 
+  test('成果物を API body 経由せず upload し、annotation と approval を保存できる', async ({ page }) => {
+    const proofingIssue = createStoredTeamIssue({
+      assignedProjectId: 'refero',
+      id: 'proofing-issue',
+      source: 'dynamodb',
+      teamId: 'core-team',
+      title: '成果物レビュー',
+    })
+    const files: FileAttachment[] = []
+    const approvals: ApprovalRequest[] = []
+    const annotations: FileAnnotation[] = []
+    let objectPutCount = 0
+    const version: FileVersion = {
+      contentType: 'image/png',
+      createdAt: '2026-07-12T03:00:00.000Z',
+      createdByMemberKey: 'demo@example.com',
+      fileName: 'proof.png',
+      id: 'version-proof-1',
+      number: 1,
+      previewKind: 'image',
+      scanStatus: 'pending',
+      sizeBytes: 5,
+    }
+    const file: FileAttachment = {
+      capabilities: {
+        canAnnotate: true,
+        canDelete: true,
+        canDownload: true,
+        canRequestApproval: true,
+        canUploadVersion: true,
+      },
+      createdAt: '2026-07-12T03:00:00.000Z',
+      currentVersion: version,
+      id: 'file-proof-1',
+      name: 'proof.png',
+      targetId: proofingIssue.id,
+      targetType: 'work-item',
+      updatedAt: '2026-07-12T03:00:00.000Z',
+      versionCount: 1,
+      versions: [version],
+    }
+    const commentVersion: FileVersion = {
+      ...version,
+      fileName: 'comment-proof.png',
+      id: 'version-comment-proof-1',
+    }
+    const commentFile: FileAttachment = {
+      ...file,
+      currentVersion: commentVersion,
+      id: 'file-comment-proof-1',
+      name: 'comment-proof.png',
+      targetId: 'comment-1',
+      targetType: 'comment',
+      versions: [commentVersion],
+    }
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: { 'core-team': [proofingIssue] },
+    })
+
+    await page.route('**/api/teams/core-team/issues/proofing-issue/files', async (route) => {
+      await route.fulfill({
+        status: 200,
+        json: {
+          approvals,
+          capabilities: { canGrantGuestAccess: true, canRequestApproval: true, canUpload: true },
+          files,
+        },
+      })
+    })
+    await page.route('**/api/teams/core-team/issues/proofing-issue/files/uploads', async (route) => {
+      await route.fulfill({
+        status: 200,
+        json: {
+          file,
+          upload: {
+            expiresAt: '2026-07-12T04:00:00.000Z',
+            headers: { 'Content-Type': 'image/png' },
+            maxSizeBytes: 1_000,
+            method: 'PUT',
+            url: '/mock-object/proof-upload',
+          },
+          version,
+        },
+      })
+    })
+    await page.route('**/mock-object/proof-upload', async (route) => {
+      expect(route.request().method()).toBe('PUT')
+      expect(route.request().headers()).not.toHaveProperty('authorization')
+      objectPutCount += 1
+      await route.fulfill({ status: 200, body: '' })
+    })
+    await page.route(
+      '**/api/teams/core-team/issues/proofing-issue/comments/comment-1/files/uploads',
+      async (route) => {
+        expect(route.request().postDataJSON()).toMatchObject({ guestAccess: true })
+        await route.fulfill({
+          status: 200,
+          json: {
+            file: commentFile,
+            upload: {
+              expiresAt: '2026-07-12T04:00:00.000Z',
+              headers: { 'Content-Type': 'image/png' },
+              maxSizeBytes: 1_000,
+              method: 'PUT',
+              url: '/mock-object/comment-proof-upload',
+            },
+            version: commentVersion,
+          },
+        })
+      },
+    )
+    await page.route('**/mock-object/comment-proof-upload', async (route) => {
+      expect(route.request().method()).toBe('PUT')
+      expect(route.request().headers()).not.toHaveProperty('authorization')
+      objectPutCount += 1
+      await route.fulfill({ status: 200, body: '' })
+    })
+    await page.route(
+      '**/api/teams/core-team/issues/proofing-issue/files/file-proof-1/versions/version-proof-1/complete',
+      async (route) => {
+        const availableVersion = { ...version, scanStatus: 'available' as const }
+        file.currentVersion = availableVersion
+        file.versions = [availableVersion]
+        if (!files.some((candidate) => candidate.id === file.id)) {
+          files.push(file)
+        }
+        await route.fulfill({ status: 200, json: { file, version: availableVersion } })
+      },
+    )
+    await page.route(
+      '**/api/teams/core-team/issues/proofing-issue/files/file-comment-proof-1/versions/version-comment-proof-1/complete',
+      async (route) => {
+        const availableVersion = { ...commentVersion, scanStatus: 'available' as const }
+        commentFile.currentVersion = availableVersion
+        commentFile.versions = [availableVersion]
+        if (!files.some((candidate) => candidate.id === commentFile.id)) {
+          files.push(commentFile)
+        }
+        await route.fulfill({ status: 200, json: { file: commentFile, version: availableVersion } })
+      },
+    )
+    await page.route(
+      /.*\/api\/teams\/core-team\/issues\/proofing-issue\/files\/file-proof-1\/versions\/version-proof-1\/access\?.*/,
+      async (route) => {
+        await route.fulfill({
+          status: 200,
+          json: { expiresAt: '2026-07-12T04:00:00.000Z', url: '/mock-preview/proof.svg' },
+        })
+      },
+    )
+    await page.route('**/mock-preview/proof.svg', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'image/svg+xml',
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450"><rect width="800" height="450" fill="#d9f8ed"/></svg>',
+      })
+    })
+    await page.route(
+      '**/api/teams/core-team/issues/proofing-issue/files/file-proof-1/versions/version-proof-1/annotations',
+      async (route) => {
+        if (route.request().method() === 'POST') {
+          const body = route.request().postDataJSON() as {
+            anchor: FileAnnotation['anchor']
+            bodyMarkdown: string
+          }
+          const annotation = {
+            anchor: body.anchor,
+            authorMemberKey: 'demo@example.com',
+            bodyMarkdown: body.bodyMarkdown,
+            capabilities: { canResolve: true },
+            createdAt: '2026-07-12T03:10:00.000Z',
+            fileId: file.id,
+            id: 'annotation-proof-1',
+            versionId: version.id,
+          } satisfies FileAnnotation
+          annotations.push(annotation)
+          await route.fulfill({ status: 200, json: { annotation } })
+          return
+        }
+
+        await route.fulfill({ status: 200, json: { annotations } })
+      },
+    )
+    await page.route('**/api/teams/core-team/issues/proofing-issue/approvals', async (route) => {
+      const body = route.request().postDataJSON() as {
+        dueAt: string
+        fileId: string
+        reviewerMemberKeys: string[]
+        versionId: string
+      }
+      const approval = {
+        capabilities: { canCancel: false, canDecide: true },
+        createdAt: '2026-07-12T03:20:00.000Z',
+        dueAt: body.dueAt,
+        fileId: body.fileId,
+        id: `approval-proof-${approvals.length + 1}`,
+        requestedByMemberKey: 'demo@example.com',
+        reviewers: body.reviewerMemberKeys.map((memberKey) => ({ memberKey, status: 'pending' as const })),
+        revision: 1,
+        status: 'pending' as const,
+        updatedAt: '2026-07-12T03:20:00.000Z',
+        versionId: body.versionId,
+      } satisfies ApprovalRequest
+      approvals.push(approval)
+      await route.fulfill({ status: 200, json: { approval } })
+    })
+    await page.route(
+      /.*\/api\/teams\/core-team\/issues\/proofing-issue\/approvals\/approval-proof-\d+\/decisions$/,
+      async (route) => {
+        const approvalId = route.request().url().match(/\/approvals\/([^/]+)\/decisions$/)?.[1]
+        const approvalIndex = approvals.findIndex((approval) => approval.id === approvalId)
+        const current = approvals[approvalIndex]
+        if (!current || approvalIndex < 0) {
+          await route.fulfill({ status: 404, json: { message: 'Approval not found.' } })
+          return
+        }
+
+        approvals[approvalIndex] = {
+          ...current,
+          completedAt: '2026-07-12T03:30:00.000Z',
+          reviewers: current.reviewers.map((reviewer) => ({
+            ...reviewer,
+            decidedAt: '2026-07-12T03:30:00.000Z',
+            status: 'approved',
+          })),
+          revision: 2,
+          status: 'approved',
+          updatedAt: '2026-07-12T03:30:00.000Z',
+        }
+        await route.fulfill({ status: 200, json: { approval: approvals[approvalIndex] } })
+      },
+    )
+    await page.route(
+      /.*\/api\/teams\/core-team\/issues\/proofing-issue\/approvals\/approval-proof-\d+\/cancel$/,
+      async (route) => {
+        const approvalId = route.request().url().match(/\/approvals\/([^/]+)\/cancel$/)?.[1]
+        const approvalIndex = approvals.findIndex((approval) => approval.id === approvalId)
+        const current = approvals[approvalIndex]
+        const body = route.request().postDataJSON() as { expectedRevision: number }
+        if (!current || approvalIndex < 0) {
+          await route.fulfill({ status: 404, json: { message: 'Approval not found.' } })
+          return
+        }
+
+        expect(body.expectedRevision).toBe(current.revision)
+        approvals[approvalIndex] = {
+          ...current,
+          completedAt: '2026-07-12T03:25:00.000Z',
+          revision: current.revision + 1,
+          status: 'cancelled',
+          updatedAt: '2026-07-12T03:25:00.000Z',
+        }
+        await route.fulfill({ status: 200, json: { approval: approvals[approvalIndex] } })
+      },
+    )
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=proofing-issue')
+    await page.getByTestId('file-upload-input').setInputFiles({
+      buffer: Buffer.from('proof'),
+      mimeType: 'image/png',
+      name: 'proof.png',
+    })
+
+    await expect.poll(() => objectPutCount).toBe(1)
+    await expect(page.getByTestId('file-row-file-proof-1')).toContainText('利用可能')
+    await page.getByTestId('comment-files-comment-1').getByLabel('Guest 閲覧を許可').check()
+    await page.getByTestId('comment-file-input-comment-1').setInputFiles({
+      buffer: Buffer.from('comment proof'),
+      mimeType: 'image/png',
+      name: 'comment-proof.png',
+    })
+    await expect.poll(() => objectPutCount).toBe(2)
+    await expect(page.getByTestId('comment-files-comment-1')).toContainText('comment-proof.png')
+    await page.getByTestId('file-row-file-proof-1').getByRole('button', { name: 'プレビュー' }).click()
+    await expect(page.getByTestId('file-preview-dialog')).toBeVisible()
+    await page.getByRole('button', { name: '位置を指定' }).click()
+    await page.getByTestId('file-preview-canvas').click({ position: { x: 180, y: 120 } })
+    await page.getByLabel('レビューコメント').fill('CTA の位置を確認してください。')
+    await page.getByRole('button', { name: 'Annotation を追加' }).click()
+    await expect(page.getByTestId('file-preview-dialog')).toContainText('CTA の位置を確認してください。')
+    await page.getByRole('button', { name: 'Preview を閉じる' }).click()
+
+    await page.getByRole('button', { name: '承認を依頼' }).click()
+    await page.getByTestId('approval-request-form').getByText('Demo User').click()
+    await page.getByTestId('approval-request-form').locator('input[name="dueAt"]').fill('2099-12-31')
+    await page.getByRole('button', { name: 'Request を作成' }).click()
+    await expect(page.getByTestId('approval-approval-proof-1')).toBeVisible()
+    await page.getByTestId('approval-approval-proof-1').getByRole('button', { name: 'Request をキャンセル' }).click()
+    await expect(page.getByTestId('approval-approval-proof-1')).toContainText('キャンセル済み')
+
+    await page.getByRole('button', { name: '承認を依頼' }).click()
+    await page.getByTestId('approval-request-form').getByText('Demo User').click()
+    await page.getByTestId('approval-request-form').locator('input[name="dueAt"]').fill('2099-12-31')
+    await page.getByRole('button', { name: 'Request を作成' }).click()
+    await expect(page.getByTestId('approval-approval-proof-2')).toBeVisible()
+    await page.getByTestId('approval-approval-proof-2').getByRole('button', { name: '承認' }).click()
+    await expect(page.getByTestId('approval-approval-proof-2')).toContainText('承認済み')
+  })
+
+  test('Issue 切替後は以前の file mutation 結果と panel state を引き継がない', async ({ page }) => {
+    const firstIssue = createStoredTeamIssue({
+      assignedProjectId: 'refero',
+      id: 'file-scope-first',
+      source: 'dynamodb',
+      teamId: 'core-team',
+      title: '切替前成果物',
+    })
+    const secondIssue = createStoredTeamIssue({
+      assignedProjectId: 'refero',
+      id: 'file-scope-second',
+      source: 'dynamodb',
+      teamId: 'core-team',
+      title: '切替後成果物',
+    })
+    const version = {
+      contentType: 'image/png',
+      createdAt: '2026-07-12T04:00:00.000Z',
+      createdByMemberKey: 'demo@example.com',
+      fileName: 'scope-first.png',
+      id: 'version-scope-first',
+      number: 1,
+      previewKind: 'image',
+      scanStatus: 'available',
+      sizeBytes: 120,
+    } satisfies FileVersion
+    const file = {
+      capabilities: {
+        canAnnotate: true,
+        canDelete: true,
+        canDownload: true,
+        canRequestApproval: true,
+        canUploadVersion: true,
+      },
+      createdAt: '2026-07-12T04:00:00.000Z',
+      currentVersion: version,
+      id: 'file-scope-first',
+      name: 'scope-first.png',
+      targetId: firstIssue.id,
+      targetType: 'work-item',
+      updatedAt: '2026-07-12T04:00:00.000Z',
+      versionCount: 1,
+      versions: [version],
+    } satisfies FileAttachment
+    let startStaleAccess: (() => void) | undefined
+    let releaseStaleAccess: (() => void) | undefined
+    let staleAccessCompleted = false
+    const staleAccessStarted = new Promise<void>((resolve) => {
+      startStaleAccess = resolve
+    })
+    const staleAccessHold = new Promise<void>((resolve) => {
+      releaseStaleAccess = resolve
+    })
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: { 'core-team': [firstIssue, secondIssue] },
+    })
+    await page.route('**/api/teams/core-team/issues/file-scope-first/files', async (route) => {
+      await route.fulfill({
+        status: 200,
+        json: {
+          approvals: [],
+          capabilities: { canGrantGuestAccess: true, canRequestApproval: true, canUpload: true },
+          files: [file],
+        },
+      })
+    })
+    await page.route('**/api/teams/core-team/issues/file-scope-second/files', async (route) => {
+      await route.fulfill({
+        status: 200,
+        json: {
+          approvals: [],
+          capabilities: { canGrantGuestAccess: true, canRequestApproval: true, canUpload: true },
+          files: [],
+        },
+      })
+    })
+    await page.route(
+      /.*\/api\/teams\/core-team\/issues\/file-scope-first\/files\/file-scope-first\/versions\/version-scope-first\/access\?.*/,
+      async (route) => {
+        startStaleAccess?.()
+        await staleAccessHold
+        staleAccessCompleted = true
+        await route.fulfill({
+          status: 409,
+          json: { code: 'FileRevisionConflict', message: 'Stale file scope.' },
+        })
+      },
+    )
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=file-scope-first')
+    const firstPanel = page.getByTestId('issue-artifacts-panel')
+    await expect(firstPanel.getByText('scope-first.png')).toBeVisible()
+    await firstPanel.getByLabel('Guest 閲覧を許可').check()
+    await firstPanel.getByRole('button', { name: 'ダウンロード' }).click()
+    await staleAccessStarted
+
+    await page.getByTestId('task-row-file-scope-second').getByRole('button').click()
+    await expect(page).toHaveURL(/issueId=file-scope-second/)
+    const secondPanel = page.getByTestId('issue-artifacts-panel')
+    await expect(secondPanel.getByText('scope-first.png')).toHaveCount(0)
+    await expect(secondPanel.getByTestId('file-upload-input')).toBeAttached()
+    await expect(secondPanel.getByLabel('Guest 閲覧を許可')).not.toBeChecked()
+
+    releaseStaleAccess?.()
+    await expect.poll(() => staleAccessCompleted).toBe(true)
+    await expect(secondPanel.getByText('別の操作で状態が変わりました。最新の表示を確認してください。')).toHaveCount(0)
+  })
+
   test('サイドバーからマイタスクへ移動するとタスクをカンバンで表示する', async ({ page }) => {
     await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
     await page.goto('/dashboard')
@@ -2240,6 +2672,60 @@ test.describe('authenticated task page', () => {
     await expect(page).toHaveURL(
       '/projects/shared-launch/issues?teamId=design-team&issueId=duplicate-issue',
     )
+  })
+
+  test('approval summary を受信箱の要確認理由とレポート集計へ反映する', async ({ page }) => {
+    const approvalIssue = createStoredTeamIssue({
+      approvalSummary: {
+        approvedCount: 0,
+        changesRequestedCount: 1,
+        nextDueAt: '2026-07-15T14:59:59.000Z',
+        overdueCount: 1,
+        pendingCount: 2,
+        rejectedCount: 0,
+      },
+      assignedProjectId: 'refero',
+      dueDate: '2099/12/31',
+      id: 'approval-proof',
+      priority: 'low',
+      status: 'todo',
+      teamId: 'core-team',
+      title: '承認待ち成果物',
+    })
+    const historicalDecisionIssue = createStoredTeamIssue({
+      approvalSummary: {
+        approvedCount: 1,
+        changesRequestedCount: 1,
+        overdueCount: 0,
+        pendingCount: 0,
+        rejectedCount: 1,
+      },
+      assignedProjectId: 'refero',
+      dueDate: '2099/12/31',
+      id: 'approval-history-only',
+      priority: 'low',
+      status: 'todo',
+      teamId: 'core-team',
+      title: '過去の承認判断だけがある成果物',
+    })
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: { 'core-team': [approvalIssue, historicalDecisionIssue] },
+    })
+
+    await page.goto('/inbox')
+    const approvalRow = page.getByTestId('inbox-task-core-team-refero-approval-proof')
+
+    await expect(approvalRow).toBeVisible()
+    await expect(page.getByTestId('inbox-task-core-team-refero-approval-history-only')).toHaveCount(0)
+    await expect(approvalRow).toContainText('Approval 期限超過')
+    await page.getByTestId('inbox-filter-approval').click()
+    await expect(approvalRow).toBeVisible()
+
+    await page.goto('/reports')
+    await expect(page.getByTestId('reports-metric-pending-approvals').locator('p').last()).toHaveText('2')
+    await expect(page.getByTestId('reports-metric-overdue-approvals').locator('p').last()).toHaveText('1')
+    await expect(page.getByTestId('reports-project-core-team-refero')).toContainText('2')
   })
 
   test('レポートでプロジェクト健全性を絞り込み CSV 出力できる', async ({ page }) => {
