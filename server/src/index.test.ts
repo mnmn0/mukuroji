@@ -57,12 +57,13 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
     false,
   )
 
-  await client.getTeamIssueDetail('workspace-1', 'core-team', 'issue-1', {
+  const detail = await client.getTeamIssueDetail('workspace-1', 'core-team', 'issue-1', {
     consistentIssueRead: true,
     eventLimit: 0,
   })
 
   expect(sentInputs).toHaveLength(1)
+  expect(detail.issue).toMatchObject({ schemaVersion: 1, revision: 1 })
   expect(sentInputs[0]).toMatchObject({
     TableName: 'issues-table',
     ConsistentRead: true,
@@ -957,18 +958,24 @@ test('loads project tasks after project access is confirmed', async () => {
   })
 
   expect(response.status).toBe(200)
-  expect(await response.json()).toEqual({
-    projectId: 'refero',
-    tasks: [
-      {
-        id: 'wireframe',
-        titleKey: 'tasks.item.wireframe',
-        assigneeKey: 'tasks.assignee.sato',
-        status: 'in-progress',
-        dueDate: '2026/06/03',
-        priority: 'high',
-      },
-    ],
+  const body = await response.json()
+  expect(body.projectId).toBe('refero')
+  expect(body.tasks.map((task: { id: string }) => task.id)).toEqual([
+    'onboarding-friction',
+    'wireframe',
+  ])
+  expect(body.tasks[0]).toMatchObject({
+    schemaVersion: 1,
+    revision: 1,
+    teamId: 'core-team',
+    source: 'dynamodb',
+  })
+  expect(body.tasks[1]).toMatchObject({
+    schemaVersion: 1,
+    revision: 1,
+    teamId: 'core-team',
+    source: 'legacy',
+    titleKey: 'tasks.item.wireframe',
   })
   expect(calls.accessChecks).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
@@ -1094,19 +1101,15 @@ test('keeps project tasks available when Cognito assignee hydration fails', asyn
   })
 
   expect(response.status).toBe(200)
-  expect(await response.json()).toEqual({
-    projectId: 'refero',
-    tasks: [
-      {
-        id: 'wireframe',
-        titleKey: 'tasks.item.wireframe',
-        assigneeKey: 'tasks.assignee.sato',
-        assigneeUserId: 'sato@example.com',
-        status: 'in-progress',
-        dueDate: '2026/06/03',
-        priority: 'high',
-      },
-    ],
+  const body = await response.json()
+  expect(body.tasks.map((task: { id: string }) => task.id)).toEqual([
+    'onboarding-friction',
+    'wireframe',
+  ])
+  expect(body.tasks[1]).toMatchObject({
+    id: 'wireframe',
+    assigneeUserId: 'sato@example.com',
+    source: 'legacy',
   })
   expect(calls.userProfiles).toEqual(['sato@example.com'])
 })
@@ -2092,23 +2095,68 @@ test('creates a project task after project access is confirmed', async () => {
   expect(response.status).toBe(201)
   expect(await response.json()).toEqual({
     task: {
-      id: 'new-task',
+      schemaVersion: 1,
+      revision: 1,
+      teamId: 'core-team',
+      source: 'dynamodb',
+      id: 'new-issue',
       title: '新規タスク',
       assigneeUserId: 'sato@example.com',
       assigneeEmail: 'sato@example.com',
       assigneeName: '佐藤 花子',
       status: 'todo',
       dueDate: '2026/06/20',
-      priority: 'high',
+      priority: 'medium',
+      createdAt: '2026-06-08T00:00:00.000Z',
+      updatedAt: '2026-06-08T00:00:00.000Z',
     },
   })
   expect(calls.accessChecks).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
+    { directoryId: 'user#demo@example.com', projectId: '*' },
   ])
-  expect(calls.taskCreates).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero', title: '新規タスク' },
+  expect(calls.taskCreates).toEqual([])
+  expect(calls.issueCreates).toEqual([
+    expect.objectContaining({
+      directoryId: 'user#demo@example.com',
+      teamId: 'core-team',
+      title: '新規タスク',
+    }),
   ])
   expect(calls.userProfiles).toEqual(['sato@example.com', 'sato@example.com'])
+})
+
+test('rejects project task creation when the canonical owner Team is ambiguous', async () => {
+  const calls = configureFakeProjectClients(true, {
+    additionalTeams: [{
+      id: 'design-team',
+      name: 'デザインチーム',
+      projects: [{ id: 'refero', name: 'Refero', tone: 'purple' }],
+    }],
+  })
+
+  const response = await app.request('/api/projects/refero/tasks', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: '曖昧なタスク',
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026/06/20',
+      priority: 'high',
+      status: 'todo',
+    }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'AmbiguousProjectOwnerTeam',
+    message: 'Project "refero" belongs to more than one active Team.',
+  })
+  expect(calls.issueCreates).toEqual([])
+  expect(calls.taskCreates).toEqual([])
 })
 
 test('rejects legacy project task status updates through the compatibility endpoint', async () => {
@@ -2122,12 +2170,14 @@ test('rejects legacy project task status updates through the compatibility endpo
     },
     body: JSON.stringify({
       status: 'done',
+      expectedRevision: 1,
     }),
   })
 
   expect(response.status).toBe(409)
   expect(await response.json()).toEqual({
-    message: 'Legacy task issues are read-only.',
+    code: 'LegacyProjectTaskReadOnly',
+    message: 'Legacy project tasks are read-only.',
   })
   expect(calls.accessChecks).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
@@ -2135,7 +2185,44 @@ test('rejects legacy project task status updates through the compatibility endpo
   expect(calls.taskReads).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
+  expect(calls.projectIssueReads).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+  ])
   expect(calls.taskStatusUpdates).toEqual([])
+})
+
+test('updates a canonical Work Item through the project task compatibility endpoint', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  const response = await app.request('/api/projects/refero/tasks/onboarding-friction', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ status: 'done', expectedRevision: 1 }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    task: {
+      schemaVersion: 1,
+      revision: 2,
+      id: 'onboarding-friction',
+      teamId: 'core-team',
+      source: 'dynamodb',
+      status: 'done',
+    },
+  })
+  expect(calls.taskReads).toEqual([])
+  expect(calls.taskStatusUpdates).toEqual([])
+  expect(calls.issueUpdates).toEqual([
+    expect.objectContaining({
+      directoryId: 'user#demo@example.com',
+      issueId: 'onboarding-friction',
+      teamId: 'core-team',
+    }),
+  ])
 })
 
 test('loads team-owned issues with legacy project tasks after team access is confirmed', async () => {
@@ -2169,6 +2256,65 @@ test('loads team-owned issues with legacy project tasks after team access is con
   ])
   expect(calls.taskReads).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
+  ])
+})
+
+test('loads all accessible canonical and legacy Work Items including unassigned items', async () => {
+  const calls = configureFakeProjectClients(true, {
+    taskAssigneeUserId: 'sato@example.com',
+    unassignedIssue: true,
+  })
+
+  const response = await app.request('/api/work-items', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.json()
+  expect(body.workItems.map((workItem: { id: string }) => workItem.id)).toEqual([
+    'onboarding-friction',
+    'wireframe',
+  ])
+  expect(body.workItems[0]).toMatchObject({
+    schemaVersion: 1,
+    revision: 1,
+    teamId: 'core-team',
+    source: 'dynamodb',
+  })
+  expect(body.workItems[0].assignedProjectId).toBeUndefined()
+  expect(body.workItems[1]).toMatchObject({
+    schemaVersion: 1,
+    revision: 1,
+    assignedProjectId: 'refero',
+    source: 'legacy',
+  })
+  expect(calls.issueReads).toEqual([
+    { directoryId: 'user#demo@example.com', teamId: 'core-team' },
+  ])
+})
+
+test('suppresses a shared project legacy projection after migration to another owner Team', async () => {
+  configureFakeProjectClients(true, {
+    additionalTeams: [{
+      id: 'design-team',
+      name: 'デザインチーム',
+      projects: [{ id: 'refero', name: 'Refero', tone: 'purple' }],
+    }],
+    migratedLegacyOwnerTeamId: 'design-team',
+  })
+
+  const response = await app.request('/api/work-items', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.json()
+  expect(body.workItems.filter((workItem: { id: string }) => workItem.id === 'wireframe')).toEqual([
+    expect.objectContaining({
+      id: 'wireframe',
+      teamId: 'design-team',
+      source: 'dynamodb',
+    }),
   ])
 })
 
@@ -2210,6 +2356,37 @@ test('loads legacy project task rows as team issue detail fallback', async () =>
   ])
 })
 
+test('rejects legacy project task updates through the team Work Item endpoint', async () => {
+  const calls = configureFakeProjectClients(true, { taskAssigneeUserId: 'sato@example.com' })
+
+  const response = await app.request('/api/teams/core-team/issues/wireframe', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ status: 'done', expectedRevision: 1 }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'LegacyProjectTaskReadOnly',
+    message: 'Legacy project tasks are read-only.',
+  })
+  expect(calls.issueDetails).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      teamId: 'core-team',
+      issueId: 'wireframe',
+      readOptions: { consistentIssueRead: true, eventLimit: 0 },
+    },
+  ])
+  expect(calls.taskReads).toEqual([
+    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+  ])
+  expect(calls.issueUpdates).toEqual([])
+})
+
 test('creates a team-owned issue after team access is confirmed', async () => {
   const calls = configureFakeProjectClients(true)
 
@@ -2233,6 +2410,8 @@ test('creates a team-owned issue after team access is confirmed', async () => {
   expect(response.status).toBe(201)
   expect(await response.json()).toEqual({
     issue: {
+      schemaVersion: 1,
+      revision: 1,
       id: 'new-issue',
       teamId: 'core-team',
       assignedProjectId: 'refero',
@@ -2246,6 +2425,7 @@ test('creates a team-owned issue after team access is confirmed', async () => {
       priority: 'medium',
       createdAt: '2026-06-08T00:00:00.000Z',
       updatedAt: '2026-06-08T00:00:00.000Z',
+      source: 'dynamodb',
     },
   })
   expect(calls.issueCreates).toEqual([
@@ -3007,6 +3187,7 @@ test('updates a team-owned issue after team access is confirmed', async () => {
       dueDate: '2026/06/22',
       priority: 'low',
       status: 'done',
+      expectedRevision: 1,
     }),
   })
 
@@ -3022,6 +3203,12 @@ test('updates a team-owned issue after team access is confirmed', async () => {
       priority: 'low',
     },
   })
+  expect(calls.issueDetails).toContainEqual({
+    directoryId: 'user#demo@example.com',
+    teamId: 'core-team',
+    issueId: 'onboarding-friction',
+    readOptions: { consistentIssueRead: true, eventLimit: 0 },
+  })
   expect(calls.issueUpdates).toEqual([
     {
       actorUserId: 'demo@example.com',
@@ -3031,6 +3218,79 @@ test('updates a team-owned issue after team access is confirmed', async () => {
       teamId: 'core-team',
     },
   ])
+})
+
+test('returns a stable conflict code when a Work Item revision is stale', async () => {
+  configureFakeProjectClients(true)
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 2,
+    directoryId: 'user#demo@example.com',
+    directoryTeamId: 'user#demo@example.com#team#core-team',
+    directoryProjectId: 'user#demo@example.com#project#refero',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    issueId: 'onboarding-friction',
+    sortOrder: 10,
+    title: '初回オンボーディングの離脱要因を減らす',
+    assigneeUserId: 'sato@example.com',
+    status: 'in-progress',
+    dueDate: '2026/06/18',
+    priority: 'high',
+    createdAt: '2026-06-08T00:00:00.000Z',
+    updatedAt: '2026-06-08T02:00:00.000Z',
+  }
+  const documentClient = {
+    async send(command: { constructor: { name: string } }) {
+      return command.constructor.name === 'GetCommand'
+        ? { Item: currentIssue }
+        : { Items: [] }
+    },
+  } as unknown as DynamoDBDocumentClient
+  configureApiClientsForTest({
+    teamIssues: new DynamoDbTeamIssuesClient(
+      'IssuesTable',
+      'IssueEventsTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      'AuditTable',
+    ),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ status: 'done', expectedRevision: 1 }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'WorkItemRevisionConflict',
+    message: 'Work Item changed. Reload and try again.',
+  })
+})
+
+test('requires a positive expected revision for Work Item updates', async () => {
+  configureFakeProjectClients(true)
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ status: 'done' }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    code: 'InvalidWorkItemRevision',
+    message: 'Work Item expected revision is required.',
+  })
 })
 
 test('loads project execution issues with legacy task compatibility', async () => {
@@ -3154,31 +3414,11 @@ test('DynamoDB task client queries the scoped project partition across pages', a
   ])
 })
 
-test('DynamoDB task client creates duplicate titled tasks with unique IDs', async () => {
+test('DynamoDB legacy task client rejects mutations without sending writes', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const documentClient = {
     async send(command: { input: Record<string, unknown> }) {
       sentInputs.push(command.input)
-
-      if (sentInputs.length === 1) {
-        return {
-          Items: [
-            {
-              directoryId: 'user#demo@example.com',
-              directoryProjectId: 'user#demo@example.com#project#refero',
-              projectId: 'refero',
-              taskId: '新規タスク',
-              sortOrder: 10,
-              title: '新規タスク',
-              assignee: '佐藤 花子',
-              status: 'todo',
-              dueDate: '2026/06/20',
-              priority: 'high',
-            },
-          ],
-        }
-      }
-
       return {}
     },
   } as unknown as DynamoDBDocumentClient
@@ -3192,138 +3432,131 @@ test('DynamoDB task client creates duplicate titled tasks with unique IDs', asyn
       dueDate: '2026/06/21',
       priority: 'medium',
     }),
-  ).resolves.toEqual({
-    task: {
-      id: '新規タスク-2',
-      title: '新規タスク',
-      assigneeUserId: 'suzuki@example.com',
-      status: 'todo',
-      dueDate: '2026/06/21',
-      priority: 'medium',
-    },
+  ).rejects.toMatchObject({
+    code: 'LegacyProjectTaskReadOnly',
+    status: 409,
   })
-  expect(sentInputs).toEqual([
-    {
-      TableName: 'TasksTable',
-      IndexName: 'ProjectSortOrderIndex',
-      KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
-      ExpressionAttributeValues: {
-        ':directoryProjectId': 'user#demo@example.com#project#refero',
-      },
-      ExclusiveStartKey: undefined,
-      ScanIndexForward: true,
-    },
-    {
-      TableName: 'TasksTable',
-      Item: {
-        directoryId: 'user#demo@example.com',
-        directoryProjectId: 'user#demo@example.com#project#refero',
-        projectId: 'refero',
-        taskId: '新規タスク-2',
-        sortOrder: 20,
-        title: '新規タスク',
-        assigneeUserId: 'suzuki@example.com',
-        status: 'todo',
-        dueDate: '2026/06/21',
-        priority: 'medium',
-      },
-      ConditionExpression: 'attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)',
-    },
-  ])
-})
-
-test('DynamoDB task client updates a task status with a conditional write', async () => {
-  const sentInputs: Array<Record<string, unknown>> = []
-  const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      sentInputs.push(command.input)
-
-      return {
-        Attributes: {
-          directoryId: 'user#demo@example.com',
-          directoryProjectId: 'user#demo@example.com#project#refero',
-          projectId: 'refero',
-          taskId: 'wireframe',
-          sortOrder: 10,
-          titleKey: 'tasks.item.wireframe',
-          assigneeKey: 'tasks.assignee.sato',
-          status: 'done',
-          dueDate: '2026/06/03',
-          priority: 'high',
-        },
-      }
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbProjectTasksClient('TasksTable', documentClient)
-
   await expect(
     client.updateProjectTaskStatus('user#demo@example.com', 'refero', 'wireframe', {
       status: 'done',
+      expectedRevision: 1,
     }),
-  ).resolves.toEqual({
-    task: {
-      id: 'wireframe',
-      titleKey: 'tasks.item.wireframe',
-      assigneeKey: 'tasks.assignee.sato',
-      status: 'done',
-      dueDate: '2026/06/03',
-      priority: 'high',
-    },
+  ).rejects.toMatchObject({
+    code: 'LegacyProjectTaskReadOnly',
+    status: 409,
   })
-  expect(sentInputs).toEqual([
-    {
-      TableName: 'TasksTable',
-      Key: {
-        directoryProjectId: 'user#demo@example.com#project#refero',
-        taskId: 'wireframe',
-      },
-      UpdateExpression: 'SET #status = :status',
-      ExpressionAttributeNames: {
-        '#status': 'status',
-      },
-      ExpressionAttributeValues: {
-        ':status': 'done',
-      },
-      ConditionExpression: 'attribute_exists(directoryProjectId) AND attribute_exists(taskId)',
-      ReturnValues: 'ALL_NEW',
-    },
-  ])
+  expect(sentInputs).toEqual([])
 })
 
-test('DynamoDB task client classifies audited transaction conditions from a consistent base-table read', async () => {
-  const currentTask = {
+test('DynamoDB Work Item client increments revision with an atomic CAS update', async () => {
+  const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
     directoryId: 'user#demo@example.com',
+    directoryTeamId: 'user#demo@example.com#team#core-team',
     directoryProjectId: 'user#demo@example.com#project#refero',
-    projectId: 'refero',
-    taskId: 'wireframe',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    issueId: 'wireframe',
     sortOrder: 10,
-    titleKey: 'tasks.item.wireframe',
-    assigneeKey: 'tasks.assignee.sato',
+    title: 'Wireframe',
+    assigneeUserId: 'sato@example.com',
     status: 'todo',
     dueDate: '2026/06/03',
     priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  let reads = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentCommands.push({ input: command.input, name: command.constructor.name })
+      if (command.constructor.name === 'GetCommand') {
+        reads += 1
+        return {
+          Item: reads === 1
+            ? currentIssue
+            : { ...currentIssue, revision: 2, status: 'done' },
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.updateTeamIssue(
+    'user#demo@example.com',
+    'core-team',
+    'wireframe',
+    { status: 'done', expectedRevision: 1 },
+    'demo@example.com',
+  )).resolves.toMatchObject({
+    issue: { schemaVersion: 1, revision: 2, status: 'done' },
+  })
+  const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
+  const transactItems = transaction?.input.TransactItems
+  expect(Array.isArray(transactItems) ? transactItems[0] : undefined).toMatchObject({
+    Update: {
+      ExpressionAttributeValues: {
+        ':expectedRevision': 1,
+        ':nextRevision': 2,
+      },
+      ConditionExpression:
+        'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
+        '(#revision = :expectedRevision OR ' +
+        '(attribute_not_exists(#revision) AND :expectedRevision = :legacyRevision))',
+    },
+  })
+})
+
+test('DynamoDB Work Item client classifies revision CAS transaction conditions', async () => {
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'user#demo@example.com',
+    directoryTeamId: 'user#demo@example.com#team#core-team',
+    directoryProjectId: 'user#demo@example.com#project#refero',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    issueId: 'wireframe',
+    sortOrder: 10,
+    titleKey: 'tasks.item.wireframe',
+    assigneeUserId: 'sato@example.com',
+    status: 'todo',
+    dueDate: '2026/06/03',
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
   }
   const auditContext = createMutationAuditContext({
     workspaceId: 'user#demo@example.com',
     actor: { id: 'demo@example.com', kind: 'user' },
     idempotencyKey: 'request-1',
     occurredAt: '2026-07-12T00:00:00.000Z',
-    request: { method: 'PATCH', path: '/api/projects/refero/tasks/wireframe/status' },
+    request: { method: 'PATCH', path: '/api/teams/core-team/issues/wireframe' },
     source: { kind: 'api', requestId: 'request-1' },
   })
   const runUpdate = (
     cancellationReasons: Array<{ Code: string }> | undefined,
-    latestTask: Record<string, unknown> | undefined,
+    latestIssue: Record<string, unknown> | undefined,
   ) => {
     const sentInputs: Array<Record<string, unknown>> = []
-    let taskReads = 0
+    let issueReads = 0
     const documentClient = {
       async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
         sentInputs.push(command.input)
 
         if (command.constructor.name === 'GetCommand') {
-          taskReads += 1
-          return { Item: taskReads === 1 ? currentTask : latestTask }
+          issueReads += 1
+          return { Item: issueReads === 1 ? currentIssue : latestIssue }
         }
 
         if (command.constructor.name === 'TransactWriteCommand') {
@@ -3340,18 +3573,20 @@ test('DynamoDB task client classifies audited transaction conditions from a cons
         return {}
       },
     } as unknown as DynamoDBDocumentClient
-    const client = new DynamoDbProjectTasksClient(
-      'TasksTable',
+    const client = new DynamoDbTeamIssuesClient(
+      'IssuesTable',
+      'IssueEventsTable',
       documentClient,
       {} as DynamoDBClient,
       false,
       'AuditTable',
     )
-    const result = client.updateProjectTaskStatus(
+    const result = client.updateTeamIssue(
       'user#demo@example.com',
-      'refero',
+      'core-team',
       'wireframe',
-      { status: 'done' },
+      { status: 'done', expectedRevision: 1 },
+      'demo@example.com',
       auditContext,
     )
 
@@ -3359,29 +3594,29 @@ test('DynamoDB task client classifies audited transaction conditions from a cons
   }
 
   const stateConflict = runUpdate(
-    [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
-    currentTask,
+    [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }, { Code: 'None' }],
+    { ...currentIssue, revision: 2 },
   )
   await expect(stateConflict.result).rejects.toMatchObject({
-    code: 'ConditionalCheckFailedException',
+    code: 'WorkItemRevisionConflict',
     status: 409,
   })
   expect(stateConflict.sentInputs[0]).toMatchObject({
-    TableName: 'TasksTable',
+    TableName: 'IssuesTable',
     ConsistentRead: true,
   })
-  expect(stateConflict.sentInputs.at(-1)).toEqual({
-    TableName: 'TasksTable',
+  expect(stateConflict.sentInputs.at(-1)).toMatchObject({
+    TableName: 'IssuesTable',
     Key: {
-      directoryProjectId: 'user#demo@example.com#project#refero',
-      taskId: 'wireframe',
+      directoryTeamId: 'user#demo@example.com#team#core-team',
+      issueId: 'wireframe',
     },
     ConsistentRead: true,
   })
 
   const auditConflict = runUpdate(
-    [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }],
-    currentTask,
+    [{ Code: 'None' }, { Code: 'None' }, { Code: 'ConditionalCheckFailed' }],
+    currentIssue,
   )
   await expect(auditConflict.result).rejects.toMatchObject({
     code: 'ConditionalCheckFailedException',
@@ -3389,21 +3624,35 @@ test('DynamoDB task client classifies audited transaction conditions from a cons
   })
   expect(auditConflict.sentInputs).toHaveLength(2)
 
-  const deletedTask = runUpdate(
-    [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+  const deletedIssue = runUpdate(
+    [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }, { Code: 'None' }],
     undefined,
   )
-  await expect(deletedTask.result).rejects.toMatchObject({
-    code: 'ProjectTaskNotFound',
+  await expect(deletedIssue.result).rejects.toMatchObject({
+    code: 'TeamIssueNotFound',
     status: 404,
   })
 
-  const missingReasons = runUpdate(undefined, undefined)
+  const missingReasons = runUpdate(undefined, { ...currentIssue, revision: 2 })
   await expect(missingReasons.result).rejects.toMatchObject({
+    code: 'WorkItemRevisionConflict',
+    status: 409,
+  })
+  expect(missingReasons.sentInputs).toHaveLength(3)
+
+  const missingReasonsWithoutRevisionChange = runUpdate(undefined, currentIssue)
+  await expect(missingReasonsWithoutRevisionChange.result).rejects.toMatchObject({
     code: 'TransactionCanceledException',
     status: 502,
   })
-  expect(missingReasons.sentInputs).toHaveLength(2)
+  expect(missingReasonsWithoutRevisionChange.sentInputs).toHaveLength(3)
+
+  const emptyReasons = runUpdate([], { ...currentIssue, revision: 2 })
+  await expect(emptyReasons.result).rejects.toMatchObject({
+    code: 'WorkItemRevisionConflict',
+    status: 409,
+  })
+  expect(emptyReasons.sentInputs).toHaveLength(3)
 
   const unknownReason = runUpdate([{ Code: 'TransactionConflict' }], undefined)
   await expect(unknownReason.result).rejects.toMatchObject({
@@ -3413,7 +3662,11 @@ test('DynamoDB task client classifies audited transaction conditions from a cons
   expect(unknownReason.sentInputs).toHaveLength(2)
 
   const mixedReasons = runUpdate(
-    [{ Code: 'ConditionalCheckFailed' }, { Code: 'ProvisionedThroughputExceeded' }],
+    [
+      { Code: 'ConditionalCheckFailed' },
+      { Code: 'ProvisionedThroughputExceeded' },
+      { Code: 'None' },
+    ],
     undefined,
   )
   await expect(mixedReasons.result).rejects.toMatchObject({
@@ -3595,6 +3848,28 @@ test('DynamoDB dashboard summary client derives counts from directory and task d
         }
       },
     },
+    {
+      async getProjectIssues(_directoryId, projectId) {
+        return {
+          projectId,
+          issues: [{
+            schemaVersion: 1,
+            revision: 1,
+            id: 'canonical-review',
+            teamId: 'core-team',
+            assignedProjectId: projectId,
+            title: 'Canonical review',
+            assigneeUserId: 'sato@example.com',
+            status: 'review' as const,
+            dueDate: '2026/06/10',
+            priority: 'medium' as const,
+            createdAt: '2026-06-01T00:00:00.000Z',
+            updatedAt: '2026-06-01T00:00:00.000Z',
+            source: 'dynamodb' as const,
+          }],
+        }
+      },
+    } as never,
   )
 
   const summary = await client.getSummary('user#demo@example.com', {
@@ -3603,7 +3878,7 @@ test('DynamoDB dashboard summary client derives counts from directory and task d
   })
 
   expect(summary.projects).toBe(1)
-  expect(summary.tasks).toBe(1)
+  expect(summary.tasks).toBe(2)
   expect(summary.blocked).toBe(1)
   expect(summary.source).toBe('dynamodb')
   expect(Date.parse(summary.updatedAt)).not.toBeNaN()
@@ -4611,6 +4886,22 @@ test('DynamoDB directory client does not reread manager state when cancellation 
 
 function createProjectMemberFixtureItems(
   options: {
+    /** owner Team ambiguity を再現する追加 Team です。 */
+    additionalTeams?: Array<{
+      /** Team ID です。 */
+      id: string
+      /** Team 表示名です。 */
+      name: string
+      /** Team 配下 project 一覧です。 */
+      projects: Array<{
+        /** Project ID です。 */
+        id: string
+        /** Project 表示名です。 */
+        name: string
+        /** Project tone です。 */
+        tone: 'blue' | 'purple' | 'green' | 'yellow'
+      }>
+    }>
     archivedProject?: boolean
     archivedTeam?: boolean
     includeOtherManager?: boolean
@@ -4728,6 +5019,24 @@ function configureFakeProjectClients(
     systemAdminMemberKeys?: string[]
     taskAssigneeUserId?: string
     teamProjects?: Array<{ id: string; name: string; tone: 'blue' | 'purple' | 'green' | 'yellow' }>
+    /** owner Team ambiguity を再現する追加 Team です。 */
+    additionalTeams?: Array<{
+      /** Team ID です。 */
+      id: string
+      /** Team 表示名です。 */
+      name: string
+      /** Team 配下 project 一覧です。 */
+      projects: Array<{
+        /** Project ID です。 */
+        id: string
+        /** Project 表示名です。 */
+        name: string
+        /** Project tone です。 */
+        tone: 'blue' | 'purple' | 'green' | 'yellow'
+      }>
+    }>
+    /** Legacy task と同じ ID の canonical row を所有する Team ID です。 */
+    migratedLegacyOwnerTeamId?: string
     unassignedIssue?: boolean
     workspaceRole?: WorkspaceRole
     workspaceReconcileFailures?: number
@@ -4985,6 +5294,7 @@ function configureFakeProjectClients(
                 },
               ],
             },
+            ...(options.additionalTeams ?? []),
           ],
         }
       },
@@ -5314,6 +5624,8 @@ function configureFakeProjectClients(
           teamId,
           issues: [
             {
+              schemaVersion: 1,
+              revision: 1,
               id: 'onboarding-friction',
               teamId,
               assignedProjectId: options.unassignedIssue ? undefined : 'refero',
@@ -5325,7 +5637,25 @@ function configureFakeProjectClients(
               priority: 'high',
               createdAt: '2026-06-08T00:00:00.000Z',
               updatedAt: '2026-06-08T00:00:00.000Z',
+              source: 'dynamodb',
             },
+            ...(options.migratedLegacyOwnerTeamId === teamId
+              ? [{
+                  schemaVersion: 1 as const,
+                  revision: 1,
+                  id: 'wireframe',
+                  teamId,
+                  assignedProjectId: 'refero',
+                  title: 'Migrated wireframe',
+                  assigneeUserId: 'sato@example.com',
+                  status: 'in-progress' as const,
+                  dueDate: '2026/06/03',
+                  priority: 'high' as const,
+                  createdAt: '2026-06-01T00:00:00.000Z',
+                  updatedAt: '2026-06-01T00:00:00.000Z',
+                  source: 'dynamodb' as const,
+                }]
+              : []),
           ],
         }
       },
@@ -5336,6 +5666,8 @@ function configureFakeProjectClients(
           projectId,
           issues: [
             {
+              schemaVersion: 1,
+              revision: 1,
               id: 'onboarding-friction',
               teamId: 'core-team',
               assignedProjectId: projectId,
@@ -5346,7 +5678,25 @@ function configureFakeProjectClients(
               priority: 'high',
               createdAt: '2026-06-08T00:00:00.000Z',
               updatedAt: '2026-06-08T00:00:00.000Z',
+              source: 'dynamodb',
             },
+            ...(options.migratedLegacyOwnerTeamId
+              ? [{
+                  schemaVersion: 1 as const,
+                  revision: 1,
+                  id: 'wireframe',
+                  teamId: options.migratedLegacyOwnerTeamId,
+                  assignedProjectId: projectId,
+                  title: 'Migrated wireframe',
+                  assigneeUserId: 'sato@example.com',
+                  status: 'in-progress' as const,
+                  dueDate: '2026/06/03',
+                  priority: 'high' as const,
+                  createdAt: '2026-06-01T00:00:00.000Z',
+                  updatedAt: '2026-06-01T00:00:00.000Z',
+                  source: 'dynamodb' as const,
+                }]
+              : []),
           ],
         }
       },
@@ -5368,6 +5718,8 @@ function configureFakeProjectClients(
 
         return {
           issue: {
+            schemaVersion: 1,
+            revision: 1,
             id: issueId,
             teamId,
             assignedProjectId: options.unassignedIssue ? undefined : 'refero',
@@ -5379,6 +5731,7 @@ function configureFakeProjectClients(
             priority: 'high',
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: '2026-06-08T00:00:00.000Z',
+            source: 'dynamodb',
           },
           comments: [
             {
@@ -5411,6 +5764,8 @@ function configureFakeProjectClients(
 
         return {
           issue: {
+            schemaVersion: 1,
+            revision: 1,
             id: 'new-issue',
             teamId,
             assignedProjectId: typeof input.assignedProjectId === 'string'
@@ -5424,6 +5779,7 @@ function configureFakeProjectClients(
             priority: 'medium',
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: '2026-06-08T00:00:00.000Z',
+            source: 'dynamodb',
           },
         }
       },
@@ -5438,6 +5794,8 @@ function configureFakeProjectClients(
 
         return {
           issue: {
+            schemaVersion: 1,
+            revision: 2,
             id: issueId,
             teamId,
             assignedProjectId: typeof input.assignedProjectId === 'string'
@@ -5450,6 +5808,7 @@ function configureFakeProjectClients(
             priority: input.priority === 'low' ? 'low' : 'high',
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: '2026-06-08T02:00:00.000Z',
+            source: 'dynamodb',
           },
         }
       },

@@ -23,8 +23,10 @@
 - `ProjectTasksFunctionUrl`: Lambda Function URL
 - `ProjectTasksApiGatewayUrl`: API Gateway HTTP API URL
 - `ProjectTasksApiUrl`: Function URL の後方互換 output
-- `ProjectTasksTableName`, `ProjectDirectoryTableName`
-- `TeamIssuesTableName`, `TeamIssueEventsTableName`
+- `ProjectTasksTableName`（legacy read-only compatibility）
+- `WorkItemsTableName`（既存 `TeamIssuesTable` を昇格した canonical store）
+- `TeamIssuesTableName`（`WorkItemsTableName` と同じ table を指す互換 output）
+- `ProjectDirectoryTableName`, `TeamIssueEventsTableName`
 - `WorkspaceDirectoryId`
 
 Function URL と API Gateway は同じ Lambda を呼びます。いずれも `<base>/teams/projects` と `<base>/api/teams/projects` を同じ canonical `/api` route へ正規化します。
@@ -183,6 +185,23 @@ bootstrap update は同じ key・同じ owner なら再実行できます。既�
 7. rollback window 中は旧 partition を削除しない。
 
 大量 data の migration を shell の `scan | put-item` で即時実行しないでください。pagination、retry、conditional write、件数/内容照合を備えた一時 migration job として review・dry run してから実行します。
+
+## Canonical Work Item cutover
+
+Project task / Team Issue の state migration は Workspace partition migration と分けて実行します。CDK は既存 `TeamIssuesTable` construct と key schema を維持し、`WorkItemsTableName` という canonical alias を追加します。`ProjectTasksTable` は Retain/PITR のまま残しますが、API Lambda には read permission だけを付与します。
+
+安全な順序:
+
+1. `ProjectTasksTable`, `WorkItemsTable`, `ProjectDirectoryTable` の table 名・件数・PITR を記録し、on-demand backup を取得する。
+2. write freeze を設定し、`cdk diff` で table replacement/deletion がなく、legacy task table の write IAM が削除されることを確認する。
+3. この revision を deploy する。
+4. `docs/work-items.md` の `work-items:migrate -- --dry-run` を実行する。複数 Team に属する project は `--project-team` で owner を明示する。
+5. checkpoint 付き apply と `--verify` を完了する。
+6. Team/project/Workspace list、detail update、stale revision の `409 WorkItemRevisionConflict` を Function URL と API Gateway の両方で確認して write を再開する。
+
+Demo seed の custom resource は旧 `SeedProjectTasks` の論理 ID を維持します。fresh stack の create では canonical `WorkItemsTable` だけに seed し、既存 stack の update では `onUpdate` を持たないため seed transaction を再実行しません。同じ論理 ID のまま旧 revision に戻すため、rollback 時にも legacy seed custom resource が新規作成されることはありません。既存 stack の canonical data は上記 migration で投入します。
+
+Rollback window 中はどちらの table も削除しません。rollback は直前 revision を同じ parameter で deploy し、旧 handler が同じ `TeamIssuesTable` の追加属性を無視して読めることを確認します。Migrated row の一括削除は migration 後の正規 write を失うため禁止します。
 
 ## Rollback
 

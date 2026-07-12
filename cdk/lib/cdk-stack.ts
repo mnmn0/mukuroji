@@ -12,20 +12,35 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
 
 /**
- * Refero プロジェクトに初期投入するタスク seed データです。
+ * Project が複数 Team に表示される場合も含めた canonical owner Team です。
  */
-const projectTaskItems = [
-  ['refero', 'wireframe', 10, 'tasks.item.wireframe', 'sato@example.com', 'in-progress', '2026/06/03', 'high'],
-  ['refero', 'brand-guideline', 20, 'tasks.item.brandGuideline', 'suzuki@example.com', 'review', '2026/06/05', 'medium'],
-  ['refero', 'pricing-content', 30, 'tasks.item.pricingContent', 'tanaka@example.com', 'in-progress', '2026/06/08', 'high'],
-  ['refero', 'seo-research', 40, 'tasks.item.seoResearch', 'yamamoto@example.com', 'todo', '2026/06/09', 'medium'],
-  ['refero', 'hero-design', 50, 'tasks.item.heroDesign', 'sato@example.com', 'review', '2026/06/10', 'medium'],
-  ['refero', 'analytics-tags', 60, 'tasks.item.analyticsTags', 'suzuki@example.com', 'in-progress', '2026/06/11', 'low'],
-  ['refero', 'competitor-report', 70, 'tasks.item.competitorReport', 'tanaka@example.com', 'done', '2026/06/02', 'low'],
-  ['refero', 'terms-page', 80, 'tasks.item.termsPage', 'yamamoto@example.com', 'todo', '2026/06/12', 'medium'],
-  ['refero', 'faq-content', 90, 'tasks.item.faqContent', 'sato@example.com', 'todo', '2026/06/15', 'low'],
-  ['refero', 'landing-release', 100, 'tasks.item.landingRelease', 'suzuki@example.com', 'todo', '2026/06/16', 'high'],
+const projectOwnerTeamIds = {
+  refero: 'core-team',
+  'product-roadmap': 'core-team',
+  'shared-launch': 'core-team',
+  'brand-refresh': 'design-team',
+} as const;
+
+/**
+ * Canonical Work Item table に初期投入する Refero の demo データです。
+ */
+const canonicalWorkItemItems = [
+  ['refero', 'wireframe', 10, 'tasks.item.wireframe', '新しいランディングページのワイヤーフレーム作成', 'sato@example.com', 'in-progress', '2026/06/03', 'high'],
+  ['refero', 'brand-guideline', 20, 'tasks.item.brandGuideline', 'ブランドガイドラインの更新', 'suzuki@example.com', 'review', '2026/06/05', 'medium'],
+  ['refero', 'pricing-content', 30, 'tasks.item.pricingContent', '料金ページのコンテンツ作成', 'tanaka@example.com', 'in-progress', '2026/06/08', 'high'],
+  ['refero', 'seo-research', 40, 'tasks.item.seoResearch', 'SEO キーワードリサーチ', 'yamamoto@example.com', 'todo', '2026/06/09', 'medium'],
+  ['refero', 'hero-design', 50, 'tasks.item.heroDesign', 'ヒーロー画像のデザイン作成', 'sato@example.com', 'review', '2026/06/10', 'medium'],
+  ['refero', 'analytics-tags', 60, 'tasks.item.analyticsTags', 'アナリティクスタグの実装', 'suzuki@example.com', 'in-progress', '2026/06/11', 'low'],
+  ['refero', 'competitor-report', 70, 'tasks.item.competitorReport', '競合サイトの分析レポート作成', 'tanaka@example.com', 'done', '2026/06/02', 'low'],
+  ['refero', 'terms-page', 80, 'tasks.item.termsPage', '利用規約ページの作成', 'yamamoto@example.com', 'todo', '2026/06/12', 'medium'],
+  ['refero', 'faq-content', 90, 'tasks.item.faqContent', 'FAQ セクションのコンテンツ作成', 'sato@example.com', 'todo', '2026/06/15', 'low'],
+  ['refero', 'landing-release', 100, 'tasks.item.landingRelease', 'ランディングページの公開', 'suzuki@example.com', 'todo', '2026/06/16', 'high'],
 ] as const;
+
+/**
+ * Legacy task fallback が使用していた決定的な timestamp です。
+ */
+const canonicalWorkItemSeedTimestamp = '2026-06-01T00:00:00.000Z';
 
 /**
  * 初期 owner を manager として登録する seed project ID です。
@@ -263,27 +278,50 @@ function createEmailAliasEntryKey(email: string) {
 }
 
 /**
- * Project task の初回 seed transaction を作成します。
+ * Team-owned canonical Work Item の初回 seed transaction を作成します。
  */
-function createProjectTaskTransactItems(tableName: string, directoryId: string) {
-  return projectTaskItems.map(([projectId, taskId, sortOrder, titleKey, assigneeUserId, status, dueDate, priority]) => ({
-    Put: {
-      TableName: tableName,
-      ConditionExpression: 'attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)',
-      Item: {
-        directoryId: { S: directoryId },
-        directoryProjectId: { S: createDirectoryProjectId(directoryId, projectId) },
-        projectId: { S: projectId },
-        taskId: { S: taskId },
-        sortOrder: { N: String(sortOrder) },
-        titleKey: { S: titleKey },
-        assigneeUserId: { S: assigneeUserId },
-        status: { S: status },
-        dueDate: { S: dueDate },
-        priority: { S: priority },
+function createCanonicalWorkItemTransactItems(tableName: string, directoryId: string) {
+  return canonicalWorkItemItems.map(([
+    projectId,
+    workItemId,
+    sortOrder,
+    titleKey,
+    title,
+    assigneeUserId,
+    status,
+    dueDate,
+    priority,
+  ]) => {
+    const teamId = projectOwnerTeamIds[projectId];
+
+    return {
+      Put: {
+        TableName: tableName,
+        ConditionExpression: 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)',
+        Item: {
+          directoryId: { S: directoryId },
+          directoryTeamId: { S: `${directoryId}#team#${teamId}` },
+          directoryProjectId: { S: createDirectoryProjectId(directoryId, projectId) },
+          teamId: { S: teamId },
+          assignedProjectId: { S: projectId },
+          issueId: { S: workItemId },
+          workItemId: { S: workItemId },
+          schemaVersion: { N: '1' },
+          revision: { N: '1' },
+          sortOrder: { N: String(sortOrder) },
+          titleKey: { S: titleKey },
+          title: { S: title },
+          assigneeUserId: { S: assigneeUserId },
+          status: { S: status },
+          dueDate: { S: dueDate },
+          priority: { S: priority },
+          createdAt: { S: canonicalWorkItemSeedTimestamp },
+          updatedAt: { S: canonicalWorkItemSeedTimestamp },
+          source: { S: 'dynamodb' },
+        },
       },
-    },
-  }));
+    };
+  });
 }
 
 /**
@@ -522,7 +560,7 @@ export class CdkStack extends cdk.Stack {
       arnFormat: cdk.ArnFormat.SLASH_RESOURCE_NAME,
     });
 
-    const tasksTable = new dynamodb.Table(this, 'ProjectTasksTable', {
+    const legacyTasksTable = new dynamodb.Table(this, 'ProjectTasksTable', {
       partitionKey: { name: 'directoryProjectId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'taskId', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -530,14 +568,14 @@ export class CdkStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    tasksTable.addGlobalSecondaryIndex({
+    legacyTasksTable.addGlobalSecondaryIndex({
       indexName: 'ProjectSortOrderIndex',
       partitionKey: { name: 'directoryProjectId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'sortOrder', type: dynamodb.AttributeType.NUMBER },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
-    const teamIssuesTable = new dynamodb.Table(this, 'TeamIssuesTable', {
+    const workItemsTable = new dynamodb.Table(this, 'TeamIssuesTable', {
       partitionKey: { name: 'directoryTeamId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'issueId', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -545,14 +583,14 @@ export class CdkStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    teamIssuesTable.addGlobalSecondaryIndex({
+    workItemsTable.addGlobalSecondaryIndex({
       indexName: 'TeamIssueSortOrderIndex',
       partitionKey: { name: 'directoryTeamId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'sortOrder', type: dynamodb.AttributeType.NUMBER },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
-    teamIssuesTable.addGlobalSecondaryIndex({
+    workItemsTable.addGlobalSecondaryIndex({
       indexName: 'AssignedProjectIssueIndex',
       partitionKey: { name: 'directoryProjectId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'sortOrder', type: dynamodb.AttributeType.NUMBER },
@@ -673,23 +711,25 @@ export class CdkStack extends cdk.Stack {
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
         MUKUROJI_PROJECT_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
         MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
-        MUKUROJI_PROJECT_TASKS_TABLE: tasksTable.tableName,
+        MUKUROJI_PROJECT_TASKS_TABLE: legacyTasksTable.tableName,
         MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
-        MUKUROJI_TEAM_ISSUES_TABLE: teamIssuesTable.tableName,
+        MUKUROJI_TEAM_ISSUES_TABLE: workItemsTable.tableName,
+        MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
         MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
         REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
-        TASKS_TABLE_NAME: tasksTable.tableName,
+        TASKS_TABLE_NAME: legacyTasksTable.tableName,
         TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
-        TEAM_ISSUES_TABLE_NAME: teamIssuesTable.tableName,
+        TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
+        WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
       },
     });
 
-    tasksTable.grantReadWriteData(apiFunction);
-    teamIssuesTable.grantReadWriteData(apiFunction);
+    legacyTasksTable.grantReadData(apiFunction);
+    workItemsTable.grantReadWriteData(apiFunction);
     teamIssueEventsTable.grantReadWriteData(apiFunction);
     projectDirectoryTable.grantReadWriteData(apiFunction);
     auditEventsTable.grantReadWriteData(apiFunction);
@@ -700,8 +740,7 @@ export class CdkStack extends cdk.Stack {
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
         resources: [
-          tasksTable.tableArn,
-          teamIssuesTable.tableArn,
+          workItemsTable.tableArn,
           teamIssueEventsTable.tableArn,
           projectDirectoryTable.tableArn,
           auditEventsTable.tableArn,
@@ -784,7 +823,9 @@ export class CdkStack extends cdk.Stack {
         REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
         REALTIME_SESSION_TTL_SECONDS: '3600',
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
-        TEAM_ISSUES_TABLE_NAME: teamIssuesTable.tableName,
+        MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
+        TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
+        WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       },
     });
@@ -809,7 +850,7 @@ export class CdkStack extends cdk.Stack {
 
     realtimeSessionsTable.grantReadWriteData(realtimeFunction);
     projectDirectoryTable.grantReadData(realtimeFunction);
-    teamIssuesTable.grantReadData(realtimeFunction);
+    workItemsTable.grantReadData(realtimeFunction);
     workspaceAccessTable.grantReadData(realtimeFunction);
     realtimeFunction.addToRolePolicy(
       new iam.PolicyStatement({
@@ -857,7 +898,9 @@ export class CdkStack extends cdk.Stack {
           PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
           REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
           SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
-          TEAM_ISSUES_TABLE_NAME: teamIssuesTable.tableName,
+          MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
+          TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
+          WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
           WEBSOCKET_CALLBACK_ENDPOINT: realtimeWebSocketStage.callbackUrl,
           WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         },
@@ -880,7 +923,7 @@ export class CdkStack extends cdk.Stack {
     processedAuditEventsTable.grantReadWriteData(collaborationProjectionFunction);
     projectDirectoryTable.grantReadData(collaborationProjectionFunction);
     realtimeSessionsTable.grantReadWriteData(collaborationProjectionFunction);
-    teamIssuesTable.grantReadData(collaborationProjectionFunction);
+    workItemsTable.grantReadData(collaborationProjectionFunction);
     workspaceAccessTable.grantReadData(collaborationProjectionFunction);
     collaborationProjectionFunction.addToRolePolicy(
       new iam.PolicyStatement({
@@ -948,29 +991,29 @@ export class CdkStack extends cdk.Stack {
 
     updateInitialOwnerAttributes.node.addDependency(validateCognitoClient);
 
-    const seedProjectTasksCall: customResources.AwsSdkCall = {
+    const seedCanonicalWorkItemsCall: customResources.AwsSdkCall = {
       service: 'DynamoDB',
       action: 'transactWriteItems',
       parameters: {
-        TransactItems: createProjectTaskTransactItems(
-          tasksTable.tableName,
+        TransactItems: createCanonicalWorkItemTransactItems(
+          workItemsTable.tableName,
           workspaceDirectoryId.valueAsString,
         ),
       },
-      physicalResourceId: customResources.PhysicalResourceId.of('refero-project-tasks-seed-v3'),
+      physicalResourceId: customResources.PhysicalResourceId.of('canonical-work-items-seed-v1'),
     };
-    const seedTasks = new customResources.AwsCustomResource(this, 'SeedProjectTasks', {
-      onCreate: seedProjectTasksCall,
+    const seedCanonicalWorkItems = new customResources.AwsCustomResource(this, 'SeedProjectTasks', {
+      onCreate: seedCanonicalWorkItemsCall,
       policy: customResources.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({
           actions: ['dynamodb:TransactWriteItems'],
-          resources: [tasksTable.tableArn],
+          resources: [workItemsTable.tableArn],
         }),
       ]),
       installLatestAwsSdk: false,
     });
 
-    seedTasks.node.addDependency(tasksTable);
+    seedCanonicalWorkItems.node.addDependency(workItemsTable);
 
     const seedProjectDirectoryCall: customResources.AwsSdkCall = {
       service: 'DynamoDB',
@@ -995,6 +1038,7 @@ export class CdkStack extends cdk.Stack {
     });
 
     seedProjectDirectory.node.addDependency(projectDirectoryTable);
+    seedCanonicalWorkItems.node.addDependency(seedProjectDirectory);
 
     const seedWorkspaceAccessCall: customResources.AwsSdkCall = {
       service: 'DynamoDB',
@@ -1083,13 +1127,16 @@ export class CdkStack extends cdk.Stack {
     seedWorkspaceDemoMembers.node.addDependency(seedWorkspaceAccess);
 
     new cdk.CfnOutput(this, 'ProjectTasksTableName', {
-      value: tasksTable.tableName,
+      value: legacyTasksTable.tableName,
     });
     new cdk.CfnOutput(this, 'ProjectDirectoryTableName', {
       value: projectDirectoryTable.tableName,
     });
     new cdk.CfnOutput(this, 'TeamIssuesTableName', {
-      value: teamIssuesTable.tableName,
+      value: workItemsTable.tableName,
+    });
+    new cdk.CfnOutput(this, 'WorkItemsTableName', {
+      value: workItemsTable.tableName,
     });
     new cdk.CfnOutput(this, 'TeamIssueEventsTableName', {
       value: teamIssueEventsTable.tableName,

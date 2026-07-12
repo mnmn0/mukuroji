@@ -26,6 +26,7 @@ import {
   createTeamIssue,
   getTeamIssueDetail,
   getTeamIssues,
+  TeamIssuesApiError,
   type CreateTeamIssueInput,
   type TeamIssue,
   type UpdateTeamIssueInput,
@@ -249,6 +250,7 @@ export function TeamIssuePage() {
     ? (['team-issue-detail', accessToken, teamId, resolvedSelectedIssueId] as const)
     : null
   const {
+    data: issueDetail,
     error: detailError,
     mutate: mutateIssueDetail,
   } = useSWR(
@@ -256,6 +258,9 @@ export function TeamIssuePage() {
     ([, token, currentTeamId, issueId]) => getTeamIssueDetail(currentTeamId, issueId, token),
     apiSWRConfig,
   )
+  const screenIssues = issueDetail?.issue
+    ? issues.map((issue) => issue.id === issueDetail.issue.id ? issueDetail.issue : issue)
+    : issues
   const memberKey = accessToken && activeTeam
     ? (['team-issue-members', accessToken, activeTeam.projects.map((project) => project.id).join('\u0000')] as const)
     : null
@@ -321,13 +326,39 @@ export function TeamIssuePage() {
       return
     }
 
-    await mutationRequestRunner.run(
-      `issue:update:${teamId}:${issueId}`,
-      JSON.stringify(input),
-      (context) => updateTeamIssue(teamId, issueId, accessToken, input, context),
-    )
-    await mutateIssues()
-    await mutateIssueDetail()
+    const currentIssue = issueDetail?.issue.id === issueId
+      ? issueDetail.issue
+      : issues.find((issue) => issue.id === issueId)
+
+    if (!currentIssue || currentIssue.source === 'legacy') {
+      return
+    }
+
+    try {
+      await mutationRequestRunner.run(
+        `issue:update:${teamId}:${issueId}`,
+        JSON.stringify([currentIssue.revision, input]),
+        (context) => updateTeamIssue(
+          teamId,
+          issueId,
+          accessToken,
+          {
+            ...input,
+            expectedRevision: currentIssue.revision,
+          },
+          context,
+        ),
+      )
+      await mutateIssues()
+      await mutateIssueDetail()
+    } catch (error) {
+      if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
+        await Promise.all([mutateIssues(), mutateIssueDetail()])
+        throw new Error(t('issues.error.conflict'), { cause: error })
+      }
+
+      throw error
+    }
   }
 
   const handleCreateTeam = async (input: CreateProjectDirectoryTeamInput) => {
@@ -392,7 +423,7 @@ export function TeamIssuePage() {
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}
       issueErrorMessage={issueErrorMessage}
-      issues={issues}
+      issues={screenIssues}
       isLoading={isLoading}
       locale={locale}
       onArchiveProject={canManageStructure ? handleArchiveProject : undefined}
@@ -454,9 +485,15 @@ export function TeamIssueScreen({
   const [statusFilter, setStatusFilter] = useState<TaskStatus | 'all'>('all')
   const [isCreateOpen, setIsCreateOpen] = useState(defaultCreateIssueOpen)
   const [createErrorMessage, setCreateErrorMessage] = useState<string | undefined>()
-  const [detailErrorMessageLocal, setDetailErrorMessageLocal] = useState<string | undefined>()
+  const [detailUpdateError, setDetailUpdateError] = useState<readonly [string, string] | undefined>()
   const activeTeam = teams.find((team) => team.id === teamId)
   const selectedIssue = issues.find((issue) => issue.id === selectedIssueId)
+  const selectedIssueUpdateErrorKey = selectedIssue
+    ? JSON.stringify([selectedIssue.teamId, selectedIssue.id, selectedIssue.revision])
+    : undefined
+  const detailErrorMessageLocal = detailUpdateError && detailUpdateError[0] === selectedIssueUpdateErrorKey
+    ? detailUpdateError[1]
+    : undefined
   const visibleIssues = useMemo(
     () =>
       issues.filter((issue) => {
@@ -628,7 +665,10 @@ export function TeamIssueScreen({
                     <IssueTable
                       activeTeam={activeTeam}
                       issues={visibleIssues}
-                      onSelectIssue={onSelectIssue}
+                      onSelectIssue={(issueId) => {
+                        setDetailUpdateError(undefined)
+                        onSelectIssue?.(issueId)
+                      }}
                       selectedIssueId={selectedIssueId}
                       t={t}
                     />
@@ -636,7 +676,10 @@ export function TeamIssueScreen({
                     <IssueBoard
                       activeTeam={activeTeam}
                       issues={visibleIssues}
-                      onSelectIssue={onSelectIssue}
+                      onSelectIssue={(issueId) => {
+                        setDetailUpdateError(undefined)
+                        onSelectIssue?.(issueId)
+                      }}
                       selectedIssueId={selectedIssueId}
                       t={t}
                     />
@@ -651,12 +694,17 @@ export function TeamIssueScreen({
                 issue={selectedIssue}
                 locale={locale}
                 onUpdateIssue={onUpdateIssue ? async (issueId, input) => {
-                  setDetailErrorMessageLocal(undefined)
+                  setDetailUpdateError(undefined)
 
                   try {
                     await onUpdateIssue(issueId, input)
                   } catch (error) {
-                    setDetailErrorMessageLocal(error instanceof Error ? error.message : t('issues.error.update'))
+                    if (selectedIssueUpdateErrorKey) {
+                      setDetailUpdateError([
+                        selectedIssueUpdateErrorKey,
+                        error instanceof Error ? error.message : t('issues.error.update'),
+                      ])
+                    }
                   }
                 } : undefined}
                 projects={activeTeam?.projects ?? []}
@@ -1028,7 +1076,7 @@ function IssueDetailPane({
     <aside className="workbench-detail-pane min-h-0 min-w-0 max-[1080px]:border-l-0 max-[1080px]:border-t">
       <form
         className="grid min-w-0 gap-4 px-6 py-7"
-        key={issue.id}
+        key={`${issue.id}:${issue.revision}`}
         onSubmit={(event) => {
           event.preventDefault()
 
@@ -1052,7 +1100,7 @@ function IssueDetailPane({
             nextIssueInput.assigneeUserId = selectedAssigneeUserId
           }
 
-          void onUpdateIssue?.(issue.id, nextIssueInput)
+          void onUpdateIssue?.(issue.id, nextIssueInput).catch(() => undefined)
         }}
       >
         <div className="flex min-w-0 items-start justify-between gap-3">
@@ -1166,11 +1214,16 @@ function formatLocalDateInputValue(date = new Date()) {
 }
 
 function resolveIssueTitle(issue: TeamIssue, t: (key: MessageKey) => string) {
-  return issue.title ?? (issue.titleKey ? t(issue.titleKey) : issue.id)
+  return issue.titleKey ? t(issue.titleKey) : (issue.title ?? issue.id)
 }
 
 function resolveIssueAssignee(issue: TeamIssue) {
-  return issue.assigneeName ?? issue.assigneeEmail ?? issue.assigneeUserId
+  return issue.assigneeName ??
+    issue.assigneeEmail ??
+    issue.assigneeUserId ??
+    issue.assignee ??
+    issue.assigneeKey ??
+    ''
 }
 
 function resolveAssignedProjectName(

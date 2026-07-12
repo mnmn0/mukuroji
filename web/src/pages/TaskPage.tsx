@@ -422,10 +422,7 @@ export function TaskPage() {
       }),
     apiSWRConfig,
   )
-  const tasks = useMemo(
-    () => projectIssues.map((issue) => toProjectTaskFromIssue(issue, projectId)),
-    [projectId, projectIssues],
-  )
+  const tasks = projectIssues
   const projectMembersKey = accessToken && user && !currentUserError
     ? (['project-members', accessToken, projectId] as const)
     : null
@@ -515,6 +512,24 @@ export function TaskPage() {
     ([, token, teamId, issueId]) => getTeamIssueDetail(teamId, issueId, token),
     apiSWRConfig,
   )
+  const [issueUpdateError, setIssueUpdateError] = useState<readonly [string, string] | undefined>()
+  const selectedDetailIssue = selectedIssueDetail?.issue
+  const selectedIssueForUpdateError = selectedDetailIssue &&
+    resolvedSelectedIssue &&
+    selectedDetailIssue.id === resolvedSelectedIssue.id &&
+    selectedDetailIssue.teamId === resolvedSelectedIssue.teamId
+    ? selectedDetailIssue
+    : resolvedSelectedIssue
+  const selectedIssueUpdateErrorKey = selectedIssueForUpdateError
+    ? JSON.stringify([
+        selectedIssueForUpdateError.teamId,
+        selectedIssueForUpdateError.id,
+        selectedIssueForUpdateError.revision,
+      ])
+    : undefined
+  const issueUpdateErrorMessage = issueUpdateError && issueUpdateError[0] === selectedIssueUpdateErrorKey
+    ? issueUpdateError[1]
+    : undefined
   const projectName =
     activeProject?.name ?? (projectId === 'refero' ? t('tasks.project.refero') : projectId)
   const projectMembersErrorMessage = useMemo(() => {
@@ -542,9 +557,9 @@ export function TaskPage() {
 
     return message === 'tasks.error.loading' ? t('tasks.error.loading') : message
   }, [taskError, t])
-  const detailErrorMessage = detailError
-    ? t('tasks.detail.error')
-    : undefined
+  const detailErrorMessage = issueUpdateErrorMessage ?? (
+    detailError ? t('tasks.detail.error') : undefined
+  )
   const isLoading =
     !session ||
     isCurrentUserLoading ||
@@ -734,7 +749,8 @@ export function TaskPage() {
       return
     }
 
-    navigate(createProjectIssuesPath(task.projectId ?? projectId, nextTeamId, task.id))
+    setIssueUpdateError(undefined)
+    navigate(createProjectIssuesPath(task.assignedProjectId ?? projectId, nextTeamId, task.id))
   }
 
   const handleUpdateIssue = async (
@@ -746,13 +762,49 @@ export function TaskPage() {
       return
     }
 
-    await mutationRequestRunner.run(
-      `issue:update:${teamId}:${issueId}`,
-      JSON.stringify(input),
-      (context) => updateTeamIssue(teamId, issueId, accessToken, input, context),
-    )
-    await mutateProjectTasks()
-    await mutateSelectedIssueDetail()
+    const currentIssue = selectedIssueDetail?.issue.id === issueId &&
+      selectedIssueDetail.issue.teamId === teamId
+      ? selectedIssueDetail.issue
+      : projectIssues.find((issue) => issue.id === issueId && issue.teamId === teamId)
+
+    if (!currentIssue || currentIssue.source === 'legacy') {
+      return
+    }
+
+    setIssueUpdateError(undefined)
+    const currentIssueUpdateErrorKey = JSON.stringify([
+      currentIssue.teamId,
+      currentIssue.id,
+      currentIssue.revision,
+    ])
+
+    try {
+      await mutationRequestRunner.run(
+        `issue:update:${teamId}:${issueId}`,
+        JSON.stringify([currentIssue.revision, input]),
+        (context) => updateTeamIssue(
+          teamId,
+          issueId,
+          accessToken,
+          {
+            ...input,
+            expectedRevision: currentIssue.revision,
+          },
+          context,
+        ),
+      )
+      await mutateProjectTasks()
+      await mutateSelectedIssueDetail()
+    } catch (error) {
+      if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
+        setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.detail.conflict')])
+        await Promise.all([mutateProjectTasks(), mutateSelectedIssueDetail()])
+      } else {
+        setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.detail.error')])
+      }
+
+      throw error
+    }
   }
 
   return (
@@ -1201,23 +1253,6 @@ function mergeProjectUsers(currentUsers: ProjectUser[], nextUsers: ProjectUser[]
   }
 
   return Array.from(usersById.values())
-}
-
-function toProjectTaskFromIssue(issue: TeamIssue, projectId: string): ProjectTask {
-  return {
-    teamId: issue.teamId,
-    projectId,
-    source: issue.source,
-    id: issue.id,
-    titleKey: issue.titleKey,
-    title: issue.title,
-    assigneeUserId: issue.assigneeUserId,
-    assigneeEmail: issue.assigneeEmail,
-    assigneeName: issue.assigneeName,
-    status: issue.status,
-    dueDate: issue.dueDate,
-    priority: issue.priority,
-  }
 }
 
 function normalizeProjectIssueError(error: unknown) {
@@ -2254,7 +2289,7 @@ function TaskDetailPane({
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === assigneeUserId)
   const assigneeLabel = issue ? resolveTeamIssueAssignee(issue) : resolveTaskAssignee(task, t)
   const dueDate = issue?.dueDate ?? task.dueDate
-  const assignedProjectId = issue?.assignedProjectId ?? task.projectId ?? ''
+  const assignedProjectId = issue?.assignedProjectId ?? task.assignedProjectId ?? ''
 
   return (
     <aside
@@ -2263,7 +2298,7 @@ function TaskDetailPane({
     >
       <form
         className="grid min-w-0 gap-4 border-b border-[var(--workbench-border)] bg-white px-5 py-4"
-        key={`${task.teamId ?? ''}:${task.id}:${issue?.updatedAt ?? 'loading'}`}
+        key={`${task.teamId}:${task.id}:${issue?.revision ?? 'loading'}`}
         onSubmit={(event) => {
           event.preventDefault()
 
@@ -2287,7 +2322,7 @@ function TaskDetailPane({
             nextIssueInput.assigneeUserId = selectedAssigneeUserId
           }
 
-          void onUpdateIssue?.(task.teamId, task.id, nextIssueInput)
+          void onUpdateIssue?.(task.teamId, task.id, nextIssueInput).catch(() => undefined)
         }}
       >
         <div className="flex items-start justify-between gap-3">
@@ -2942,7 +2977,7 @@ function formatDateInputValue(value: string) {
 }
 
 function resolveTaskTitle(task: ProjectTask, t: (key: MessageKey) => string) {
-  return task.title ?? (task.titleKey ? t(task.titleKey) : task.id)
+  return task.titleKey ? t(task.titleKey) : (task.title ?? task.id)
 }
 
 function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) {
@@ -2954,11 +2989,16 @@ function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) 
 }
 
 function resolveTeamIssueTitle(issue: TeamIssue, t: (key: MessageKey) => string) {
-  return issue.title ?? (issue.titleKey ? t(issue.titleKey) : issue.id)
+  return issue.titleKey ? t(issue.titleKey) : (issue.title ?? issue.id)
 }
 
 function resolveTeamIssueAssignee(issue: TeamIssue) {
-  return issue.assigneeName ?? issue.assigneeEmail ?? issue.assigneeUserId
+  return issue.assigneeName ??
+    issue.assigneeEmail ??
+    issue.assigneeUserId ??
+    issue.assignee ??
+    issue.assigneeKey ??
+    ''
 }
 
 function formatProjectMemberOption(member: ProjectMember) {
@@ -2966,8 +3006,8 @@ function formatProjectMemberOption(member: ProjectMember) {
 }
 
 function createTaskKey(task: ProjectTask) {
-  return task.projectId || task.teamId
-    ? `${task.projectId ?? ''}:${task.teamId ?? ''}:${task.id}`
+  return task.assignedProjectId || task.teamId
+    ? `${task.assignedProjectId ?? ''}:${task.teamId ?? ''}:${task.id}`
     : task.id
 }
 

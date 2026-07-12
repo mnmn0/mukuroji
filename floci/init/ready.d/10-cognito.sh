@@ -15,7 +15,8 @@ SYSTEM_ADMIN_GROUP="${MUKUROJI_SYSTEM_ADMIN_GROUP:-mukuroji-system-admins}"
 DASHBOARD_TABLE="${MUKUROJI_DASHBOARD_TABLE:-mukuroji-dashboard-local}"
 PROJECT_TASKS_TABLE="${MUKUROJI_PROJECT_TASKS_TABLE:-mukuroji-project-tasks-v2-local}"
 PROJECT_DIRECTORY_TABLE="${MUKUROJI_PROJECT_DIRECTORY_TABLE:-mukuroji-project-directory-local}"
-TEAM_ISSUES_TABLE="${MUKUROJI_TEAM_ISSUES_TABLE:-mukuroji-team-issues-local}"
+WORK_ITEMS_TABLE="${MUKUROJI_WORK_ITEMS_TABLE:-${WORK_ITEMS_TABLE_NAME:-${MUKUROJI_TEAM_ISSUES_TABLE:-mukuroji-team-issues-local}}}"
+TEAM_ISSUES_TABLE="$WORK_ITEMS_TABLE"
 TEAM_ISSUE_EVENTS_TABLE="${MUKUROJI_TEAM_ISSUE_EVENTS_TABLE:-mukuroji-team-issue-events-local}"
 COLLABORATION_TABLE="${MUKUROJI_COLLABORATION_TABLE:-${COLLABORATION_TABLE_NAME:-mukuroji-collaboration-local}}"
 NOTIFICATIONS_TABLE="${MUKUROJI_NOTIFICATIONS_TABLE:-${NOTIFICATIONS_TABLE_NAME:-mukuroji-notifications-local}}"
@@ -207,27 +208,106 @@ if ! aws_local dynamodb describe-table --table-name "$PROJECT_TASKS_TABLE" >/dev
     >/dev/null
 fi
 
-TASKS_UNPROCESSED_TABLES="$(aws_local dynamodb batch-write-item \
-  --request-items "{
-    \"$PROJECT_TASKS_TABLE\": [
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"wireframe\"},\"sortOrder\":{\"N\":\"10\"},\"titleKey\":{\"S\":\"tasks.item.wireframe\"},\"assigneeUserId\":{\"S\":\"sato@example.com\"},\"status\":{\"S\":\"in-progress\"},\"dueDate\":{\"S\":\"2026/06/03\"},\"priority\":{\"S\":\"high\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"brand-guideline\"},\"sortOrder\":{\"N\":\"20\"},\"titleKey\":{\"S\":\"tasks.item.brandGuideline\"},\"assigneeUserId\":{\"S\":\"suzuki@example.com\"},\"status\":{\"S\":\"review\"},\"dueDate\":{\"S\":\"2026/06/05\"},\"priority\":{\"S\":\"medium\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"pricing-content\"},\"sortOrder\":{\"N\":\"30\"},\"titleKey\":{\"S\":\"tasks.item.pricingContent\"},\"assigneeUserId\":{\"S\":\"tanaka@example.com\"},\"status\":{\"S\":\"in-progress\"},\"dueDate\":{\"S\":\"2026/06/08\"},\"priority\":{\"S\":\"high\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"seo-research\"},\"sortOrder\":{\"N\":\"40\"},\"titleKey\":{\"S\":\"tasks.item.seoResearch\"},\"assigneeUserId\":{\"S\":\"yamamoto@example.com\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/09\"},\"priority\":{\"S\":\"medium\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"hero-design\"},\"sortOrder\":{\"N\":\"50\"},\"titleKey\":{\"S\":\"tasks.item.heroDesign\"},\"assigneeUserId\":{\"S\":\"sato@example.com\"},\"status\":{\"S\":\"review\"},\"dueDate\":{\"S\":\"2026/06/10\"},\"priority\":{\"S\":\"medium\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"analytics-tags\"},\"sortOrder\":{\"N\":\"60\"},\"titleKey\":{\"S\":\"tasks.item.analyticsTags\"},\"assigneeUserId\":{\"S\":\"suzuki@example.com\"},\"status\":{\"S\":\"in-progress\"},\"dueDate\":{\"S\":\"2026/06/11\"},\"priority\":{\"S\":\"low\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"competitor-report\"},\"sortOrder\":{\"N\":\"70\"},\"titleKey\":{\"S\":\"tasks.item.competitorReport\"},\"assigneeUserId\":{\"S\":\"tanaka@example.com\"},\"status\":{\"S\":\"done\"},\"dueDate\":{\"S\":\"2026/06/02\"},\"priority\":{\"S\":\"low\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"terms-page\"},\"sortOrder\":{\"N\":\"80\"},\"titleKey\":{\"S\":\"tasks.item.termsPage\"},\"assigneeUserId\":{\"S\":\"yamamoto@example.com\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/12\"},\"priority\":{\"S\":\"medium\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"faq-content\"},\"sortOrder\":{\"N\":\"90\"},\"titleKey\":{\"S\":\"tasks.item.faqContent\"},\"assigneeUserId\":{\"S\":\"sato@example.com\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/15\"},\"priority\":{\"S\":\"low\"}}}},
-      {\"PutRequest\":{\"Item\":{\"directoryId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"directoryProjectId\":{\"S\":\"$PROJECT_DIRECTORY_ID#project#refero\"},\"projectId\":{\"S\":\"refero\"},\"taskId\":{\"S\":\"landing-release\"},\"sortOrder\":{\"N\":\"100\"},\"titleKey\":{\"S\":\"tasks.item.landingRelease\"},\"assigneeUserId\":{\"S\":\"suzuki@example.com\"},\"status\":{\"S\":\"todo\"},\"dueDate\":{\"S\":\"2026/06/16\"},\"priority\":{\"S\":\"high\"}}}}
-    ]
-  }" \
-  --query 'length(UnprocessedItems)' \
+aws_local dynamodb wait table-exists --table-name "$PROJECT_TASKS_TABLE"
+
+if ! aws_local dynamodb describe-table --table-name "$WORK_ITEMS_TABLE" >/dev/null 2>&1; then
+  aws_local dynamodb create-table \
+    --table-name "$WORK_ITEMS_TABLE" \
+    --attribute-definitions \
+      AttributeName=directoryTeamId,AttributeType=S \
+      AttributeName=issueId,AttributeType=S \
+      AttributeName=directoryProjectId,AttributeType=S \
+      AttributeName=sortOrder,AttributeType=N \
+    --key-schema \
+      AttributeName=directoryTeamId,KeyType=HASH \
+      AttributeName=issueId,KeyType=RANGE \
+    --global-secondary-indexes '[
+      {
+        "IndexName": "TeamIssueSortOrderIndex",
+        "KeySchema": [
+          {"AttributeName": "directoryTeamId", "KeyType": "HASH"},
+          {"AttributeName": "sortOrder", "KeyType": "RANGE"}
+        ],
+        "Projection": {"ProjectionType": "ALL"}
+      },
+      {
+        "IndexName": "AssignedProjectIssueIndex",
+        "KeySchema": [
+          {"AttributeName": "directoryProjectId", "KeyType": "HASH"},
+          {"AttributeName": "sortOrder", "KeyType": "RANGE"}
+        ],
+        "Projection": {"ProjectionType": "ALL"}
+      }
+    ]' \
+    --billing-mode PAY_PER_REQUEST \
+    >/dev/null
+fi
+
+aws_local dynamodb wait table-exists --table-name "$WORK_ITEMS_TABLE"
+
+WORK_ITEM_SEED_TIMESTAMP="2026-06-01T00:00:00.000Z"
+
+seed_work_item() {
+  work_item_id="$1"
+  sort_order="$2"
+  title_key="$3"
+  assignee_user_id="$4"
+  status="$5"
+  due_date="$6"
+  priority="$7"
+  put_item_error=""
+
+  if ! put_item_error="$(aws_local dynamodb put-item \
+    --table-name "$WORK_ITEMS_TABLE" \
+    --item "{
+      \"directoryId\": {\"S\": \"$PROJECT_DIRECTORY_ID\"},
+      \"directoryTeamId\": {\"S\": \"$PROJECT_DIRECTORY_ID#team#core-team\"},
+      \"directoryProjectId\": {\"S\": \"$PROJECT_DIRECTORY_ID#project#refero\"},
+      \"teamId\": {\"S\": \"core-team\"},
+      \"assignedProjectId\": {\"S\": \"refero\"},
+      \"issueId\": {\"S\": \"$work_item_id\"},
+      \"workItemId\": {\"S\": \"$work_item_id\"},
+      \"schemaVersion\": {\"N\": \"1\"},
+      \"revision\": {\"N\": \"1\"},
+      \"sortOrder\": {\"N\": \"$sort_order\"},
+      \"titleKey\": {\"S\": \"$title_key\"},
+      \"title\": {\"S\": \"$title_key\"},
+      \"assigneeUserId\": {\"S\": \"$assignee_user_id\"},
+      \"status\": {\"S\": \"$status\"},
+      \"dueDate\": {\"S\": \"$due_date\"},
+      \"priority\": {\"S\": \"$priority\"},
+      \"createdAt\": {\"S\": \"$WORK_ITEM_SEED_TIMESTAMP\"},
+      \"updatedAt\": {\"S\": \"$WORK_ITEM_SEED_TIMESTAMP\"},
+      \"source\": {\"S\": \"dynamodb\"}
+    }" \
+    --condition-expression 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)' \
+    2>&1 >/dev/null)"; then
+    case "$put_item_error" in
+      *ConditionalCheckFailedException*) ;;
+      *) printf '%s\n' "$put_item_error" >&2; return 1 ;;
+    esac
+  fi
+}
+
+LEGACY_TASK_COUNT="$(aws_local dynamodb scan \
+  --table-name "$PROJECT_TASKS_TABLE" \
+  --select COUNT \
+  --query Count \
   --output text)"
 
-if [ "$TASKS_UNPROCESSED_TABLES" != "0" ]; then
-  echo "DynamoDB task seed left unprocessed items: table=$PROJECT_TASKS_TABLE" >&2
-  exit 1
+if [ "$LEGACY_TASK_COUNT" = "0" ]; then
+  seed_work_item "wireframe" 10 "tasks.item.wireframe" "sato@example.com" "in-progress" "2026/06/03" "high"
+  seed_work_item "brand-guideline" 20 "tasks.item.brandGuideline" "suzuki@example.com" "review" "2026/06/05" "medium"
+  seed_work_item "pricing-content" 30 "tasks.item.pricingContent" "tanaka@example.com" "in-progress" "2026/06/08" "high"
+  seed_work_item "seo-research" 40 "tasks.item.seoResearch" "yamamoto@example.com" "todo" "2026/06/09" "medium"
+  seed_work_item "hero-design" 50 "tasks.item.heroDesign" "sato@example.com" "review" "2026/06/10" "medium"
+  seed_work_item "analytics-tags" 60 "tasks.item.analyticsTags" "suzuki@example.com" "in-progress" "2026/06/11" "low"
+  seed_work_item "competitor-report" 70 "tasks.item.competitorReport" "tanaka@example.com" "done" "2026/06/02" "low"
+  seed_work_item "terms-page" 80 "tasks.item.termsPage" "yamamoto@example.com" "todo" "2026/06/12" "medium"
+  seed_work_item "faq-content" 90 "tasks.item.faqContent" "sato@example.com" "todo" "2026/06/15" "low"
+  seed_work_item "landing-release" 100 "tasks.item.landingRelease" "suzuki@example.com" "todo" "2026/06/16" "high"
+else
+  echo "mukuroji legacy task rows preserved for explicit Work Item migration: table=$PROJECT_TASKS_TABLE count=$LEGACY_TASK_COUNT"
 fi
 
 if ! aws_local dynamodb describe-table --table-name "$PROJECT_DIRECTORY_TABLE" >/dev/null 2>&1; then
@@ -443,7 +523,11 @@ MUKUROJI_DASHBOARD_TABLE=$DASHBOARD_TABLE
 MUKUROJI_PROJECT_TASKS_TABLE=$PROJECT_TASKS_TABLE
 MUKUROJI_PROJECT_DIRECTORY_TABLE=$PROJECT_DIRECTORY_TABLE
 MUKUROJI_TEAM_ISSUES_TABLE=$TEAM_ISSUES_TABLE
+MUKUROJI_WORK_ITEMS_TABLE=$WORK_ITEMS_TABLE
 MUKUROJI_TEAM_ISSUE_EVENTS_TABLE=$TEAM_ISSUE_EVENTS_TABLE
+PROJECT_TASKS_TABLE_NAME=$PROJECT_TASKS_TABLE
+TEAM_ISSUES_TABLE_NAME=$TEAM_ISSUES_TABLE
+WORK_ITEMS_TABLE_NAME=$WORK_ITEMS_TABLE
 MUKUROJI_COLLABORATION_TABLE=$COLLABORATION_TABLE
 COLLABORATION_TABLE_NAME=$COLLABORATION_TABLE
 MUKUROJI_NOTIFICATIONS_TABLE=$NOTIFICATIONS_TABLE
@@ -460,7 +544,8 @@ EOF
 
 echo "mukuroji Cognito ready: userPoolId=$POOL_ID clientId=$CLIENT_ID username=$INITIAL_OWNER_USERNAME adminGroup=$SYSTEM_ADMIN_GROUP"
 echo "mukuroji DynamoDB ready: table=$DASHBOARD_TABLE item=summary"
-echo "mukuroji DynamoDB ready: table=$PROJECT_TASKS_TABLE project=refero tasks=10"
+echo "mukuroji DynamoDB ready: table=$PROJECT_TASKS_TABLE legacyTasks=read-only"
+echo "mukuroji DynamoDB ready: table=$WORK_ITEMS_TABLE canonicalSeed=ready"
 echo "mukuroji DynamoDB ready: table=$PROJECT_DIRECTORY_TABLE workspaceDirectory=$WORKSPACE_DIRECTORY_ID"
 echo "mukuroji audit configured: table=$AUDIT_EVENTS_TABLE retentionDays=$AUDIT_RETENTION_DAYS"
 echo "mukuroji DynamoDB ready: table=$WORKSPACE_ACCESS_TABLE workspace=$WORKSPACE_DIRECTORY_ID"

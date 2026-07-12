@@ -1,5 +1,10 @@
+import type {
+  CreateWorkItemInput,
+  UpdateWorkItemInput,
+  WorkItem,
+  WorkItemPatch,
+} from '@mukuroji/contracts'
 import type { MessageKey } from '../i18n'
-import type { TaskPriority, TaskStatus } from '../tasks/api'
 import { createMutationHeaders, type MutationRequestContext } from '../api/mutationHeaders'
 
 /**
@@ -8,70 +13,9 @@ import { createMutationHeaders, type MutationRequestContext } from '../api/mutat
 export type TeamIssueActivityType = 'created' | 'updated' | 'commented'
 
 /**
- * チーム所有 Issue の一覧行です。
+ * チーム所有 Issue の互換名で参照する canonical Work Item です。
  */
-export type TeamIssue = {
-  /**
-   * チーム内で Issue を識別する ID です。
-   */
-  id: string
-  /**
-   * Issue の所有元チーム ID です。
-   */
-  teamId: string
-  /**
-   * Issue が遂行先として割り当てられたプロジェクト ID です。
-   */
-  assignedProjectId?: string
-  /**
-   * seed 由来の legacy task タイトルを解決する i18n key です。
-   */
-  titleKey?: MessageKey
-  /**
-   * API から取得した literal の Issue タイトルです。
-   */
-  title?: string
-  /**
-   * Issue 詳細説明です。
-   */
-  description?: string
-  /**
-   * Cognito user を参照する担当者 ID です。
-   */
-  assigneeUserId: string
-  /**
-   * Cognito から解決した担当者メールアドレスです。
-   */
-  assigneeEmail?: string
-  /**
-   * Cognito から解決した担当者表示名です。
-   */
-  assigneeName?: string
-  /**
-   * Issue の状態コードです。
-   */
-  status: TaskStatus
-  /**
-   * 期限日として表示する文字列です。
-   */
-  dueDate: string
-  /**
-   * 優先度コードです。
-   */
-  priority: TaskPriority
-  /**
-   * 作成日時の ISO 8601 timestamp です。
-   */
-  createdAt: string
-  /**
-   * 更新日時の ISO 8601 timestamp です。
-   */
-  updatedAt: string
-  /**
-   * Issue の保存元です。legacy は旧 project task table 由来の参照専用行です。
-   */
-  source?: 'dynamodb' | 'legacy'
-}
+export type TeamIssue = WorkItem<MessageKey>
 
 /**
  * チーム所有 Issue のコメントです。
@@ -456,72 +400,19 @@ export type TeamIssueDetail = {
 }
 
 /**
- * チーム所有 Issue 作成 API へ送信する入力です。
+ * チーム所有 Issue 作成 UI の互換名で参照する canonical Work Item 入力です。
  */
-export type CreateTeamIssueInput = {
-  /**
-   * Issue タイトルです。
-   */
-  title: string
-  /**
-   * Issue 詳細説明です。
-   */
-  description?: string
-  /**
-   * 遂行先 project ID です。未指定なら未アサインです。
-   */
-  assignedProjectId?: string
-  /**
-   * Cognito user を参照する担当者 ID です。
-   */
-  assigneeUserId: string
-  /**
-   * Issue の状態コードです。
-   */
-  status: TaskStatus
-  /**
-   * 期限日として保存する文字列です。
-   */
-  dueDate: string
-  /**
-   * 優先度コードです。
-   */
-  priority: TaskPriority
-}
+export type CreateTeamIssueInput = CreateWorkItemInput
 
 /**
- * チーム所有 Issue 更新 API へ送信する入力です。
+ * 画面で編集する Work Item patch です。API 呼び出し時に expectedRevision を付与します。
  */
-export type UpdateTeamIssueInput = {
-  /**
-   * Issue タイトルです。
-   */
-  title?: string
-  /**
-   * Issue 詳細説明です。
-   */
-  description?: string
-  /**
-   * 遂行先 project ID です。null または空文字で未アサインへ戻します。
-   */
-  assignedProjectId?: string | null
-  /**
-   * Cognito user を参照する担当者 ID です。
-   */
-  assigneeUserId?: string
-  /**
-   * Issue の状態コードです。
-   */
-  status?: TaskStatus
-  /**
-   * 期限日として保存する文字列です。
-   */
-  dueDate?: string
-  /**
-   * 優先度コードです。
-   */
-  priority?: TaskPriority
-}
+export type UpdateTeamIssueInput = WorkItemPatch
+
+/**
+ * optimistic concurrency を伴う Work Item 更新 request です。
+ */
+export type UpdateTeamIssueRequest = UpdateWorkItemInput
 
 /**
  * Lambda が DynamoDB から取得して返すチーム Issue 一覧レスポンスです。
@@ -549,6 +440,16 @@ type ProjectIssuesResponse = {
    * プロジェクトにアサインされた Issue 一覧です。
    */
   issues: TeamIssue[]
+}
+
+/**
+ * Workspace 全体の Work Item 一覧レスポンスです。
+ */
+type WorkspaceWorkItemsResponse = {
+  /**
+   * 未割り当てを含む Workspace 内の Work Item 一覧です。
+   */
+  workItems: TeamIssue[]
 }
 
 /**
@@ -604,9 +505,15 @@ export class TeamIssuesApiError extends Error {
    */
   readonly status: number
 
-  constructor(status: number, message: string) {
+  /**
+   * API が返した安定 error code です。
+   */
+  readonly code?: string
+
+  constructor(status: number, message: string, code?: string) {
     super(message)
     this.status = status
+    this.code = code
   }
 }
 
@@ -636,6 +543,18 @@ export async function getProjectIssues(projectId: string, accessToken?: string) 
   )
 
   return response.issues
+}
+
+/**
+ * 未割り当てを含む Workspace 全体の canonical Work Item を取得します。
+ */
+export async function getWorkspaceWorkItems(accessToken: string) {
+  const response = await requestJson<WorkspaceWorkItemsResponse>(
+    `${issuesApiBaseUrl}/work-items`,
+    accessToken,
+  )
+
+  return response.workItems
 }
 
 /**
@@ -684,7 +603,7 @@ export async function updateTeamIssue(
   teamId: string,
   issueId: string,
   accessToken: string,
-  input: UpdateTeamIssueInput,
+  input: UpdateTeamIssueRequest,
   mutationContext: MutationRequestContext,
 ) {
   const response = await requestJson<UpdateTeamIssueResponse>(
@@ -1150,19 +1069,29 @@ async function requestJson<TResponse>(
   const data = await readJson<unknown>(response)
 
   if (!response.ok) {
-    throw new TeamIssuesApiError(response.status, readErrorMessage(data))
+    const error = readApiError(data)
+
+    throw new TeamIssuesApiError(response.status, error.message, error.code)
   }
 
   return data as TResponse
 }
 
-function readErrorMessage(data: unknown) {
-  return typeof data === 'object' &&
+function readApiError(data: unknown) {
+  const message = typeof data === 'object' &&
     data !== null &&
     'message' in data &&
     typeof data.message === 'string'
     ? data.message
     : 'issues.error.loading'
+  const code = typeof data === 'object' &&
+    data !== null &&
+    'code' in data &&
+    typeof data.code === 'string'
+    ? data.code
+    : undefined
+
+  return { code, message }
 }
 
 async function readJson<T>(response: Response): Promise<T> {

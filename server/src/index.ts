@@ -22,6 +22,13 @@ import {
   type TransactWriteCommandInput,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
+import {
+  WORK_ITEM_SCHEMA_VERSION,
+  type CreateWorkItemInput,
+  type WorkItem,
+  type WorkItemPriority,
+  type WorkItemStatus,
+} from '@mukuroji/contracts'
 import { Hono } from 'hono'
 import { handle, type LambdaContext, type LambdaEvent } from 'hono/aws-lambda'
 import { cors } from 'hono/cors'
@@ -565,12 +572,12 @@ type DashboardSummaryResponse = {
 /**
  * タスクの進捗状態を表す API code です。
  */
-type ProjectTaskStatus = 'in-progress' | 'review' | 'todo' | 'done'
+type ProjectTaskStatus = WorkItemStatus
 
 /**
  * タスクの優先度を表す API code です。
  */
-type ProjectTaskPriority = 'high' | 'medium' | 'low'
+type ProjectTaskPriority = WorkItemPriority
 
 /**
  * プロジェクトごとの権限ロールです。
@@ -681,6 +688,14 @@ type ProjectTaskItem = {
  * プロジェクト画面のテーブルへ表示するタスク行です。
  */
 type ProjectTaskResponseItem = {
+  /** canonical Work Item contract の schema version です。 */
+  schemaVersion?: typeof WORK_ITEM_SCHEMA_VERSION
+  /** canonical Work Item の optimistic concurrency revision です。 */
+  revision?: number
+  /** canonical Work Item を所有する Team ID です。 */
+  teamId?: string
+  /** canonical table または legacy adapter の保存元です。 */
+  source?: 'dynamodb' | 'legacy'
   /**
    * React の key として使う task ID です。
    */
@@ -693,6 +708,10 @@ type ProjectTaskResponseItem = {
    * API から返す literal のタスク名です。
    */
   title?: string
+  /**
+   * canonical Work Item の詳細説明です。
+   */
+  description?: string
   /**
    * 担当者名を解決する i18n key です。
    */
@@ -725,6 +744,14 @@ type ProjectTaskResponseItem = {
    * 優先度です。
    */
   priority: ProjectTaskPriority
+  /**
+   * canonical Work Item の作成日時です。
+   */
+  createdAt?: string
+  /**
+   * canonical Work Item の最終更新日時です。
+   */
+  updatedAt?: string
 }
 
 /**
@@ -750,6 +777,14 @@ type TeamIssueActivityType = 'created' | 'updated' | 'commented'
  * DynamoDB に保存する team issue item です。
  */
 type TeamIssueItem = {
+  /**
+   * canonical Work Item contract の schema version です。
+   */
+  schemaVersion: typeof WORK_ITEM_SCHEMA_VERSION
+  /**
+   * optimistic concurrency に使う単調増加 revision です。
+   */
+  revision: number
   /**
    * ユーザーごとの directory partition key です。
    */
@@ -781,7 +816,11 @@ type TeamIssueItem = {
   /**
    * Issue タイトルです。
    */
-  title: string
+  title?: string
+  /**
+   * legacy seed のタイトルを解決する表示文言 key です。
+   */
+  titleKey?: string
   /**
    * Issue 詳細説明です。
    */
@@ -865,7 +904,7 @@ type TeamIssueEventItem = {
 /**
  * チーム Issue 一覧と詳細で表示する Issue 行です。
  */
-type TeamIssueResponseItem = {
+type TeamIssueResponseItem = WorkItem & {
   /**
    * チーム内の Issue ID です。
    */
@@ -893,7 +932,7 @@ type TeamIssueResponseItem = {
   /**
    * Cognito user を参照する担当者 ID です。
    */
-  assigneeUserId: string
+  assigneeUserId?: string
   /**
    * Issue 作成者の Workspace member key です。旧 row では未設定です。
    */
@@ -930,6 +969,16 @@ type TeamIssueResponseItem = {
    * Issue の保存元です。legacy は旧 project task table 由来の参照専用行です。
    */
   source: 'dynamodb' | 'legacy'
+}
+
+/**
+ * Workspace 横断 Work Item API が返す response body です。
+ */
+type WorkItemsResponse = {
+  /**
+   * 現在ユーザーが参照できる canonical/legacy Work Item 一覧です。
+   */
+  workItems: TeamIssueResponseItem[]
 }
 
 /**
@@ -1066,6 +1115,10 @@ type CreateTeamIssueRequestBody = {
  * チーム Issue 更新 API が受け取る request body です。
  */
 type UpdateTeamIssueRequestBody = {
+  /**
+   * optimistic concurrency に使う読み込み時点の revision です。
+   */
+  expectedRevision?: unknown
   /**
    * Issue タイトルです。
    */
@@ -1256,6 +1309,10 @@ type UpdateProjectTaskStatusRequestBody = {
    * 更新後のタスク状態です。
    */
   status?: unknown
+  /**
+   * canonical Work Item adapter が使う読み込み時点の revision です。
+   */
+  expectedRevision?: unknown
 }
 
 /**
@@ -1738,7 +1795,7 @@ type ProjectTasksClient = {
    */
   getProjectTasks(directoryId: string, projectId: string): Promise<ProjectTasksResponse>
   /**
-   * DynamoDB に指定 project ID のタスクを作成します。
+   * legacy mutation 呼び出しを read-only error として拒否します。
    */
   createProjectTask(
     directoryId: string,
@@ -1747,7 +1804,7 @@ type ProjectTasksClient = {
     auditContext?: MutationAuditContext,
   ): Promise<CreateProjectTaskResponse>
   /**
-   * DynamoDB に保存された指定 task ID の状態を更新します。
+   * legacy mutation 呼び出しを read-only error として拒否します。
    */
   updateProjectTaskStatus(
     directoryId: string,
@@ -2586,10 +2643,29 @@ for (const projectWatchMethod of ['PUT', 'DELETE'] as const) {
 }
 
 /**
- * DynamoDB に保存されたプロジェクト別タスク一覧を返す endpoint です。
- *
- * @remarks
- * `ProjectSortOrderIndex` で `sortOrder` 昇順に取得し、画面表示用 DTO に変換します。
+ * 現在ユーザーが参照できる canonical/legacy Work Item を Workspace 横断で返します。
+ */
+app.get('/api/work-items', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    return c.json(await hydrateWorkItemsResponse(await readAccessibleWorkItems(principal)))
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toCognitoDirectoryErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * canonical Work Item と legacy project task を統合したプロジェクト別一覧を返します。
  */
 app.get('/api/projects/:projectId/tasks', async (c) => {
   const accessToken = readBearerAccessToken(c)
@@ -2607,11 +2683,9 @@ app.get('/api/projects/:projectId/tasks', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     await requireProjectPermission(principal, projectId, 'viewer')
 
-    return c.json(
-      await hydrateProjectTasksResponse(
-        await projectTasks.getProjectTasks(principal.directoryId, projectId),
-      ),
-    )
+    return c.json(await hydrateProjectTasksResponse(
+      await readProjectTasks(principal.directoryId, projectId),
+    ))
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)
@@ -3044,7 +3118,32 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
       await readJson<UpdateTeamIssueRequestBody>(c.req) ?? {},
       context.team,
     )
-    const detail = await teamIssues.getTeamIssueDetail(principal.directoryId, teamId, issueId)
+    const expectedRevision = readWorkItemExpectedRevision(body.expectedRevision)
+    let detail: TeamIssueDetailResponse
+
+    try {
+      detail = await teamIssues.getTeamIssueDetail(
+        principal.directoryId,
+        teamId,
+        issueId,
+        { consistentIssueRead: true, eventLimit: 0 },
+      )
+    } catch (error) {
+      if (isTeamIssueNotFoundError(error)) {
+        const legacyIssue = await readLegacyTeamIssue(
+          principal.directoryId,
+          context,
+          principal,
+          issueId,
+        )
+
+        if (legacyIssue) {
+          throw createLegacyProjectTaskReadOnlyError()
+        }
+      }
+
+      throw error
+    }
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'member')
     requireAssignedProjectPermission(principal, context, body.assignedProjectId, 'member')
 
@@ -3061,9 +3160,14 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
           principal.directoryId,
           teamId,
           issueId,
-          body,
+          { ...body, expectedRevision },
           principal.userKey,
-          createApiMutationContext(c, principal, { teamId, issueId, ...body }),
+          createApiMutationContext(c, principal, {
+            teamId,
+            issueId,
+            ...body,
+            expectedRevision,
+          }),
         ),
       ),
     )
@@ -3757,7 +3861,7 @@ app.get('/api/projects/:projectId/issues', async (c) => {
 })
 
 /**
- * DynamoDB にプロジェクト別タスクを新規作成する endpoint です。
+ * 旧 project task 作成契約を canonical Work Item 作成へ変換する compatibility endpoint です。
  */
 app.post('/api/projects/:projectId/tasks', async (c) => {
   const accessToken = readBearerAccessToken(c)
@@ -3775,23 +3879,35 @@ app.post('/api/projects/:projectId/tasks', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     requireWorkspaceBusinessWrite(principal)
     await requireProjectPermission(principal, projectId, 'member')
-
+    const context = await requireUniqueProjectOwnerContext(principal, projectId, 'member')
     const body = await readJson<CreateProjectTaskRequestBody>(c.req)
     const assigneeUserId = readTaskAssigneeUserId(body ?? {})
     await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
+    const input: CreateWorkItemInput = {
+      title: readRequiredString(body?.title, 'Task title is required.'),
+      assignedProjectId: projectId,
+      assigneeUserId,
+      status: readTaskStatus(body?.status),
+      dueDate: readRequiredString(body?.dueDate, 'Task due date is required.'),
+      priority: readTaskPriority(body?.priority),
+    }
+    const reservedIssueIds = await readLegacyTeamIssueIds(principal.directoryId, context)
+    const response = await teamIssues.createTeamIssue(
+      principal.directoryId,
+      context.team.id,
+      input,
+      principal.userKey,
+      reservedIssueIds,
+      createApiMutationContext(c, principal, {
+        teamId: context.team.id,
+        projectId,
+        ...input,
+      }),
+    )
+    const hydrated = await hydrateCreateTeamIssueResponse(response)
 
     return c.json(
-      await hydrateProjectTaskUpdateResponse(
-        await projectTasks.createProjectTask(
-          principal.directoryId,
-          projectId,
-          {
-            ...body,
-            assigneeUserId,
-          },
-          createApiMutationContext(c, principal, { projectId, ...body, assigneeUserId }),
-        ),
-      ),
+      { task: toProjectTaskFromTeamIssue(hydrated.issue) } satisfies CreateProjectTaskResponse,
       201,
     )
   } catch (error) {
@@ -3804,7 +3920,7 @@ app.post('/api/projects/:projectId/tasks', async (c) => {
 })
 
 /**
- * DynamoDB に保存されたプロジェクト別タスクの状態を更新する endpoint です。
+ * canonical Work Item の状態だけを更新し、legacy project task は read-only とする endpoint です。
  */
 app.patch('/api/projects/:projectId/tasks/:taskId', async (c) => {
   const accessToken = readBearerAccessToken(c)
@@ -3829,22 +3945,46 @@ app.patch('/api/projects/:projectId/tasks/:taskId', async (c) => {
     await requireProjectPermission(principal, projectId, 'member')
 
     const body = await readJson<UpdateProjectTaskStatusRequestBody>(c.req)
-    readRequiredTaskStatus(body?.status)
+    const status = readRequiredTaskStatus(body?.status)
+    const expectedRevision = readWorkItemExpectedRevision(body?.expectedRevision)
+    const canonicalIssues = (await teamIssues.getProjectIssues(
+      principal.directoryId,
+      projectId,
+    )).issues.filter((issue) => issue.id === taskId)
 
-    if (await isLegacyProjectTaskIssue(principal.directoryId, projectId, taskId)) {
-      return c.json({ message: 'Legacy task issues are read-only.' }, 409)
+    if (canonicalIssues.length > 1) {
+      throw new ProjectDataError(
+        409,
+        'AmbiguousProjectWorkItem',
+        'More than one canonical Work Item matches this project task ID.',
+      )
     }
 
+    const canonicalIssue = canonicalIssues[0]
+    if (!canonicalIssue) {
+      if (await isLegacyProjectTaskIssue(principal.directoryId, projectId, taskId)) {
+        throw createLegacyProjectTaskReadOnlyError()
+      }
+
+      throw new ProjectDataError(404, 'ProjectTaskNotFound', 'Task was not found.')
+    }
+    const response = await teamIssues.updateTeamIssue(
+      principal.directoryId,
+      canonicalIssue.teamId,
+      taskId,
+      { status, expectedRevision },
+      principal.userKey,
+      createApiMutationContext(c, principal, {
+        teamId: canonicalIssue.teamId,
+        projectId,
+        taskId,
+        status,
+        expectedRevision,
+      }),
+    )
+    const hydrated = await hydrateUpdateTeamIssueResponse(response)
     return c.json(
-      await hydrateProjectTaskUpdateResponse(
-        await projectTasks.updateProjectTaskStatus(
-          principal.directoryId,
-          projectId,
-          taskId,
-          body ?? {},
-          createApiMutationContext(c, principal, { projectId, taskId, ...body }),
-        ),
-      ),
+      { task: toProjectTaskFromTeamIssue(hydrated.issue) } satisfies UpdateProjectTaskStatusResponse,
     )
   } catch (error) {
     if (error instanceof CognitoServiceError) {
@@ -4426,6 +4566,10 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'Project data is unavailable.' }, 502)
   }
 
+  if (error.code === 'InvalidWorkItemRevision') {
+    return c.json({ code: error.code, message: error.message }, 400)
+  }
+
   if (error.code === 'InvalidProjectWrite' ||
     error.code === 'InvalidAuditQuery' ||
     error.code === 'InvalidCommentMention' ||
@@ -4455,6 +4599,27 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
 
   if (error.code === 'ConditionalCheckFailedException') {
     return c.json({ message: 'The same item already exists.' }, 409)
+  }
+
+  if (error.code === 'WorkItemRevisionConflict') {
+    return c.json({
+      code: error.code,
+      message: 'Work Item changed. Reload and try again.',
+    }, 409)
+  }
+
+  if (error.code === 'LegacyProjectTaskReadOnly') {
+    return c.json({
+      code: error.code,
+      message: 'Legacy project tasks are read-only.',
+    }, 409)
+  }
+
+  if (
+    error.code === 'AmbiguousProjectOwnerTeam' ||
+    error.code === 'AmbiguousProjectWorkItem'
+  ) {
+    return c.json({ code: error.code, message: error.message }, 409)
   }
 
   if (error.code === 'ProjectLastManager') {
@@ -4581,6 +4746,58 @@ async function requireTeamPermission(
   )
 }
 
+/**
+ * 旧 project task 作成を Team-owned Work Item へ変換できる一意な owner Team を解決します。
+ */
+async function requireUniqueProjectOwnerContext(
+  principal: ProjectPrincipal,
+  projectId: string,
+  minimumRole: ProjectRole,
+): Promise<TeamPermissionContext> {
+  const directory = await projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
+  const ownerTeams = directory.teams.filter((team) =>
+    team.projects.some((project) => project.id === projectId)
+  )
+
+  if (ownerTeams.length === 0) {
+    throw new ProjectDataError(404, 'ProjectNotFound', `Project "${projectId}" was not found.`)
+  }
+
+  if (ownerTeams.length > 1) {
+    throw new ProjectDataError(
+      409,
+      'AmbiguousProjectOwnerTeam',
+      `Project "${projectId}" belongs to more than one active Team.`,
+    )
+  }
+
+  const team = ownerTeams[0]
+  if (!team) {
+    throw new ProjectDataError(404, 'ProjectNotFound', `Project "${projectId}" was not found.`)
+  }
+
+  if (principal.isSystemAdmin) {
+    return { team, directory }
+  }
+
+  const teamProjectIds = new Set(team.projects.map((project) => project.id))
+  const projectAccesses = (await projectDirectory.getProjectAccessList(
+    principal.directoryId,
+    principal.userKey,
+  )).filter((access) => teamProjectIds.has(access.projectId))
+  const targetAccess = projectAccesses.find((access) => access.projectId === projectId)
+
+  if (!targetAccess || !projectAccessAllows(targetAccess, minimumRole)) {
+    throw new ProjectDataError(
+      403,
+      'ProjectAccessDenied',
+      `User "${principal.userKey}" cannot access project "${projectId}".`,
+    )
+  }
+
+  return { team, directory, projectAccesses }
+}
+
 async function loadAuthorizedTeamIssue(
   principal: WorkspacePrincipal,
   teamId: string,
@@ -4699,7 +4916,9 @@ function createTeamIssueAutomaticWatcherCandidates(
     ...(issue.creatorMemberKey
       ? [{ memberKey: issue.creatorMemberKey, reason: 'creator' as const }]
       : []),
-    { memberKey: issue.assigneeUserId, reason: 'assignee' as const },
+    ...(issue.assigneeUserId
+      ? [{ memberKey: issue.assigneeUserId, reason: 'assignee' as const }]
+      : []),
   ]
 }
 
@@ -4948,6 +5167,14 @@ async function hydrateProjectIssuesResponse(response: ProjectIssuesResponse) {
   } satisfies ProjectIssuesResponse
 }
 
+async function hydrateWorkItemsResponse(response: WorkItemsResponse) {
+  const profiles = await readIssueAssigneeProfiles(response.workItems)
+
+  return {
+    workItems: response.workItems.map((workItem) => hydrateTeamIssue(workItem, profiles)),
+  } satisfies WorkItemsResponse
+}
+
 async function hydrateTeamIssueDetailResponse(response: TeamIssueDetailResponse) {
   const profiles = await readIssueAssigneeProfiles([response.issue])
 
@@ -5014,6 +5241,52 @@ async function readTeamIssues(
   } satisfies TeamIssuesResponse
 }
 
+async function readAccessibleWorkItems(
+  principal: ProjectPrincipal,
+): Promise<WorkItemsResponse> {
+  const directory = await projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
+  const projectAccesses = principal.isSystemAdmin
+    ? undefined
+    : await projectDirectory.getProjectAccessList(principal.directoryId, principal.userKey)
+  const contexts = directory.teams.flatMap((team) => {
+    if (principal.isSystemAdmin) {
+      return [{ team, directory } satisfies TeamPermissionContext]
+    }
+
+    const teamProjectIds = new Set(team.projects.map((project) => project.id))
+    const teamProjectAccesses = (projectAccesses ?? []).filter((access) =>
+      teamProjectIds.has(access.projectId)
+    )
+    if (!teamProjectAccesses.some((access) => projectAccessAllows(access, 'viewer'))) {
+      return []
+    }
+
+    return [{ team, directory, projectAccesses: teamProjectAccesses } satisfies TeamPermissionContext]
+  })
+  const responses = await Promise.all(
+    contexts.map((context) => readTeamIssues(principal.directoryId, context, principal)),
+  )
+  const workItemsById = new Map<string, TeamIssueResponseItem>()
+
+  for (const workItem of responses.flatMap((response) => response.issues)) {
+    workItemsById.set(`${workItem.teamId}\0${workItem.id}`, workItem)
+  }
+
+  return { workItems: [...workItemsById.values()] }
+}
+
+async function readProjectTasks(
+  directoryId: string,
+  projectId: string,
+): Promise<ProjectTasksResponse> {
+  const response = await readProjectIssues(directoryId, projectId)
+
+  return {
+    projectId,
+    tasks: response.issues.map(toProjectTaskFromTeamIssue),
+  }
+}
+
 async function readProjectIssues(directoryId: string, projectId: string) {
   const storedIssues = await teamIssues.getProjectIssues(directoryId, projectId)
   const directory = await projectDirectory.getProjectDirectory(directoryId, 'ja')
@@ -5046,8 +5319,16 @@ async function readLegacyTeamIssues(
       continue
     }
 
-    const response = await projectTasks.getProjectTasks(directoryId, project.id)
-    issues.push(...response.tasks.map((task) => toLegacyTeamIssue(task, context.team.id, project.id)))
+    const [legacyResponse, canonicalResponse] = await Promise.all([
+      projectTasks.getProjectTasks(directoryId, project.id),
+      teamIssues.getProjectIssues(directoryId, project.id),
+    ])
+    const canonicalIssueIds = new Set(canonicalResponse.issues.map((issue) => issue.id))
+    issues.push(
+      ...legacyResponse.tasks
+        .filter((task) => !canonicalIssueIds.has(task.id))
+        .map((task) => toLegacyTeamIssue(task, context.team.id, project.id)),
+    )
   }
 
   return issues
@@ -5114,12 +5395,16 @@ function toLegacyTeamIssue(
   assignedProjectId: string,
 ): TeamIssueResponseItem {
   return {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
     id: task.id,
     teamId,
     assignedProjectId,
     titleKey: task.titleKey,
     title: task.title,
-    assigneeUserId: task.assigneeUserId ?? task.assigneeKey ?? task.assignee ?? 'legacy-assignee@example.invalid',
+    assigneeUserId: task.assigneeUserId,
+    assigneeKey: task.assigneeKey,
+    assignee: task.assignee,
     assigneeEmail: task.assigneeEmail,
     assigneeName: task.assigneeName,
     status: task.status,
@@ -5131,17 +5416,31 @@ function toLegacyTeamIssue(
   }
 }
 
-function findFirstProjectTeamId(teams: ProjectDirectoryTeamResponse[], projectId: string) {
-  return teams.find((team) => team.projects.some((project) => project.id === projectId))?.id
+function toProjectTaskFromTeamIssue(issue: TeamIssueResponseItem): ProjectTaskResponseItem {
+  return {
+    schemaVersion: issue.schemaVersion,
+    revision: issue.revision,
+    teamId: issue.teamId,
+    source: issue.source,
+    id: issue.id,
+    titleKey: issue.titleKey,
+    title: issue.title,
+    description: issue.description,
+    assigneeUserId: issue.assigneeUserId,
+    assigneeEmail: issue.assigneeEmail,
+    assigneeName: issue.assigneeName,
+    assignee: issue.assignee,
+    assigneeKey: issue.assigneeKey,
+    status: issue.status,
+    dueDate: issue.dueDate,
+    priority: issue.priority,
+    createdAt: issue.createdAt,
+    updatedAt: issue.updatedAt,
+  }
 }
 
-async function hydrateProjectTaskUpdateResponse<T extends { task: ProjectTaskResponseItem }>(response: T) {
-  const profiles = await readTaskAssigneeProfiles([response.task])
-
-  return {
-    ...response,
-    task: hydrateProjectTask(response.task, profiles),
-  }
+function findFirstProjectTeamId(teams: ProjectDirectoryTeamResponse[], projectId: string) {
+  return teams.find((team) => team.projects.some((project) => project.id === projectId))?.id
 }
 
 async function readIssueAssigneeProfiles(issues: TeamIssueResponseItem[]) {
@@ -5167,6 +5466,10 @@ function hydrateTeamIssue(
   issue: TeamIssueResponseItem,
   profiles: Map<string, CognitoUserProfile>,
 ) {
+  if (!issue.assigneeUserId) {
+    return issue
+  }
+
   const profile = profiles.get(issue.assigneeUserId)
 
   if (!profile) {
@@ -5913,7 +6216,7 @@ class FlociCognitoClient {
 }
 
 /**
- * DynamoDB の team/project と task data からダッシュボード集計値を算出する client です。
+ * DynamoDB の team/project、canonical Work Item、legacy task から集計値を算出します。
  */
 export class DynamoDbDashboardSummaryClient {
   /**
@@ -5926,12 +6229,19 @@ export class DynamoDbDashboardSummaryClient {
    */
   private readonly projectTasksClient: ProjectTasksClient
 
+  /**
+   * canonical Work Item を読み取る client です。
+   */
+  private readonly teamIssuesClient: TeamIssuesClient
+
   constructor(
     projectDirectoryClient: ProjectDirectoryClient = new DynamoDbProjectDirectoryClient(),
     projectTasksClient: ProjectTasksClient = new DynamoDbProjectTasksClient(),
+    teamIssuesClient: TeamIssuesClient = new DynamoDbTeamIssuesClient(),
   ) {
     this.projectDirectoryClient = projectDirectoryClient
     this.projectTasksClient = projectTasksClient
+    this.teamIssuesClient = teamIssuesClient
   }
 
   /**
@@ -5949,11 +6259,20 @@ export class DynamoDbDashboardSummaryClient {
           .map((access) => access.projectId)
       )
     const taskResponses = await Promise.all(
-      Array.from(visibleProjectIds).map((projectId) =>
-        this.projectTasksClient.getProjectTasks(directoryId, projectId),
-      ),
+      Array.from(visibleProjectIds).map(async (projectId) => {
+        const [canonical, legacy] = await Promise.all([
+          this.teamIssuesClient.getProjectIssues(directoryId, projectId),
+          this.projectTasksClient.getProjectTasks(directoryId, projectId),
+        ])
+        const canonicalIds = new Set(canonical.issues.map((issue) => issue.id))
+
+        return [
+          ...canonical.issues,
+          ...legacy.tasks.filter((task) => !canonicalIds.has(task.id)),
+        ]
+      }),
     )
-    const tasks = taskResponses.flatMap((response) => response.tasks)
+    const tasks = taskResponses.flat()
 
     return {
       projects: visibleProjectIds.size,
@@ -6029,249 +6348,28 @@ export class DynamoDbProjectTasksClient {
   }
 
   /**
-   * DynamoDB にプロジェクト別タスクを作成します。
+   * legacy project task table への作成を拒否します。
    */
   async createProjectTask(
-    directoryId: string,
-    projectId: string,
-    input: CreateProjectTaskRequestBody,
-    auditContext?: MutationAuditContext,
+    _directoryId: string,
+    _projectId: string,
+    _input: CreateProjectTaskRequestBody,
+    _auditContext?: MutationAuditContext,
   ) {
-    await ensureConfiguredAuditTable(
-      this.auditTableName,
-      this.dynamoDbClient,
-      this.bootstrapLocalTables,
-    )
-    const title = readRequiredString(input.title, 'Task title is required.')
-    const assigneeUserId = readTaskAssigneeUserId(input)
-    const status = readTaskStatus(input.status)
-    const dueDate = readRequiredString(input.dueDate, 'Task due date is required.')
-    const priority = readTaskPriority(input.priority)
-    const directoryProjectId = createDirectoryProjectId(directoryId, projectId)
-
-    try {
-      const currentTasks = await this.getProjectTasks(directoryId, projectId)
-      const taskId = createUniqueResourceId(title, currentTasks.tasks.map((task) => task.id))
-      const sortOrder = (currentTasks.tasks.length + 1) * 10
-      const item: ProjectTaskItem = {
-        directoryId,
-        directoryProjectId,
-        projectId,
-        taskId,
-        sortOrder,
-        title,
-        assigneeUserId,
-        status,
-        dueDate,
-        priority,
-      }
-
-      const statePut = {
-        Put: {
-          TableName: this.tableName,
-          Item: item,
-          ConditionExpression: 'attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)',
-        },
-      }
-      const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
-        directoryId,
-        eventType: 'work-item.created',
-        entityType: 'work-item',
-        entityId: createProjectTaskAuditEntityId(projectId, taskId),
-        action: 'created',
-        changes: createAuditFieldChanges(undefined, item, [
-          'title',
-          'assigneeUserId',
-          'status',
-          'dueDate',
-          'priority',
-        ]),
-        metadata: { adapter: 'legacy-project-task', projectId },
-      })
-
-      if (auditPut) {
-        await this.documentClient.send(
-          new TransactWriteCommand({ TransactItems: [statePut, auditPut] }),
-        )
-      } else {
-        await this.documentClient.send(new PutCommand(statePut.Put))
-      }
-
-      return {
-        task: toProjectTaskResponseItem(item),
-      } satisfies CreateProjectTaskResponse
-    } catch (error) {
-      if (
-        isAwsNamedError(error, 'TransactionCanceledException') &&
-        hasTransactionConditionalFailure(error)
-      ) {
-        throw createProjectDataConflictError()
-      }
-
-      if (error instanceof ProjectDataError) {
-        throw error
-      }
-
-      throw toProjectDataError(error)
-    }
+    throw createLegacyProjectTaskReadOnlyError()
   }
 
   /**
-   * DynamoDB に保存されたプロジェクト別タスクの状態を更新します。
+   * legacy project task table の状態更新を拒否します。
    */
   async updateProjectTaskStatus(
-    directoryId: string,
-    projectId: string,
-    taskId: string,
-    input: UpdateProjectTaskStatusRequestBody,
-    auditContext?: MutationAuditContext,
+    _directoryId: string,
+    _projectId: string,
+    _taskId: string,
+    _input: UpdateProjectTaskStatusRequestBody,
+    _auditContext?: MutationAuditContext,
   ) {
-    await ensureConfiguredAuditTable(
-      this.auditTableName,
-      this.dynamoDbClient,
-      this.bootstrapLocalTables,
-    )
-    const status = readRequiredTaskStatus(input.status)
-    const directoryProjectId = createDirectoryProjectId(directoryId, projectId)
-
-    try {
-      if (this.auditTableName && auditContext) {
-        const currentStoredItem = await this.getProjectTaskItem(directoryId, projectId, taskId)
-
-        if (!currentStoredItem) {
-          throw new ProjectDataError(404, 'ProjectTaskNotFound', 'Task was not found.')
-        }
-
-        const currentItem = toProjectTaskResponseItem(currentStoredItem)
-        const updatedItem = { ...currentItem, status }
-        const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
-          directoryId,
-          eventType: 'work-item.updated',
-          entityType: 'work-item',
-          entityId: createProjectTaskAuditEntityId(projectId, taskId),
-          action: 'updated',
-          changes: createAuditFieldChanges(currentItem, updatedItem, ['status']),
-          metadata: { adapter: 'legacy-project-task', projectId },
-        })
-
-        await this.documentClient.send(
-          new TransactWriteCommand({
-            TransactItems: [
-              {
-                Update: {
-                  TableName: this.tableName,
-                  Key: { directoryProjectId, taskId },
-                  UpdateExpression: 'SET #status = :status',
-                  ExpressionAttributeNames: { '#status': 'status' },
-                  ExpressionAttributeValues: {
-                    ':status': status,
-                    ':beforeStatus': currentItem.status,
-                  },
-                  ConditionExpression:
-                    'attribute_exists(directoryProjectId) AND attribute_exists(taskId) AND #status = :beforeStatus',
-                },
-              },
-              ...(auditPut ? [auditPut] : []),
-            ],
-          }),
-        )
-
-        return { task: updatedItem } satisfies UpdateProjectTaskStatusResponse
-      }
-
-      const response = await this.documentClient.send(
-        new UpdateCommand({
-          TableName: this.tableName,
-          Key: {
-            directoryProjectId,
-            taskId,
-          },
-          UpdateExpression: 'SET #status = :status',
-          ExpressionAttributeNames: {
-            '#status': 'status',
-          },
-          ExpressionAttributeValues: {
-            ':status': status,
-          },
-          ConditionExpression: 'attribute_exists(directoryProjectId) AND attribute_exists(taskId)',
-          ReturnValues: 'ALL_NEW',
-        }),
-      )
-
-      return {
-        task: toProjectTaskResponseItem(response.Attributes),
-      } satisfies UpdateProjectTaskStatusResponse
-    } catch (error) {
-      if (isAwsNamedError(error, 'ConditionalCheckFailedException')) {
-        throw new ProjectDataError(404, 'ProjectTaskNotFound', 'Task was not found.')
-      }
-
-      if (isTransactionConditionalFailureAt(error, 0)) {
-        let taskExists: boolean
-
-        try {
-          taskExists = (await this.getProjectTaskItem(directoryId, projectId, taskId)) !== undefined
-        } catch (readError) {
-          if (readError instanceof ProjectDataError) {
-            throw readError
-          }
-
-          throw toProjectDataError(readError)
-        }
-
-        if (!taskExists) {
-          throw new ProjectDataError(404, 'ProjectTaskNotFound', 'Task was not found.')
-        }
-
-        throw createProjectDataConflictError()
-      }
-
-      if (hasTransactionConditionalFailure(error)) {
-        throw createProjectDataConflictError()
-      }
-
-      if (error instanceof ProjectDataError) {
-        throw error
-      }
-
-      throw toProjectDataError(error)
-    }
-  }
-
-  /**
-   * base table の strongly consistent read で project task を取得します。
-   */
-  private async getProjectTaskItem(
-    directoryId: string,
-    projectId: string,
-    taskId: string,
-    canBootstrapLocalTable = true,
-  ): Promise<Record<string, unknown> | undefined> {
-    try {
-      const response = await this.documentClient.send(
-        new GetCommand({
-          TableName: this.tableName,
-          Key: {
-            directoryProjectId: createDirectoryProjectId(directoryId, projectId),
-            taskId,
-          },
-          ConsistentRead: true,
-        }),
-      )
-
-      return response.Item
-    } catch (error) {
-      if (
-        canBootstrapLocalTable &&
-        this.bootstrapLocalTables &&
-        isResourceNotFoundError(error) &&
-        await ensureLocalProjectTasksTable(this.tableName, this.dynamoDbClient)
-      ) {
-        return this.getProjectTaskItem(directoryId, projectId, taskId, false)
-      }
-
-      throw error
-    }
+    throw createLegacyProjectTaskReadOnlyError()
   }
 
   /**
@@ -6351,6 +6449,8 @@ export class DynamoDbTeamIssuesClient {
 
   constructor(
     issueTableName =
+      getEnv('MUKUROJI_WORK_ITEMS_TABLE') ??
+      getEnv('WORK_ITEMS_TABLE_NAME') ??
       getEnv('MUKUROJI_TEAM_ISSUES_TABLE') ??
       getEnv('TEAM_ISSUES_TABLE_NAME') ??
       'mukuroji-team-issues-local',
@@ -6485,6 +6585,8 @@ export class DynamoDbTeamIssuesClient {
         [...currentIssues.issues.map((issue) => issue.id), ...reservedIssueIds],
       )
       const item: TeamIssueItem = {
+        schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+        revision: 1,
         directoryId,
         directoryTeamId,
         teamId,
@@ -6534,7 +6636,12 @@ export class DynamoDbTeamIssuesClient {
           'dueDate',
           'priority',
         ]),
-        metadata: { adapter: 'team-issue', teamId, projectId: assignedProjectId },
+        metadata: {
+          adapter: 'canonical-work-item',
+          teamId,
+          projectId: assignedProjectId,
+          afterRevision: item.revision,
+        },
       })
       await this.documentClient.send(
         new TransactWriteCommand({
@@ -6589,14 +6696,26 @@ export class DynamoDbTeamIssuesClient {
     auditContext?: MutationAuditContext,
   ) {
     await this.ensureLocalTables()
+    const expectedRevision = readWorkItemExpectedRevision(input.expectedRevision)
+    const nextRevision = expectedRevision + 1
     const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
     const expressionAttributeNames: Record<string, string> = {
+      '#schemaVersion': 'schemaVersion',
+      '#revision': 'revision',
       '#updatedAt': 'updatedAt',
     }
     const expressionAttributeValues: Record<string, unknown> = {
+      ':schemaVersion': WORK_ITEM_SCHEMA_VERSION,
+      ':expectedRevision': expectedRevision,
+      ':legacyRevision': 1,
+      ':nextRevision': nextRevision,
       ':updatedAt': new Date().toISOString(),
     }
-    const setExpressions = ['#updatedAt = :updatedAt']
+    const setExpressions = [
+      '#schemaVersion = :schemaVersion',
+      '#revision = :nextRevision',
+      '#updatedAt = :updatedAt',
+    ]
     const removeExpressions: string[] = []
 
     if ('title' in input) {
@@ -6663,24 +6782,26 @@ export class DynamoDbTeamIssuesClient {
     ].filter(isDefined).join(' ')
 
     try {
-      const beforeIssue = this.auditTableName && auditContext
-        ? await this.getRequiredTeamIssueItem(directoryId, teamId, issueId, true)
-        : undefined
-      const afterIssue = beforeIssue ? { ...beforeIssue } : undefined
-
-      if (beforeIssue) {
-        expressionAttributeValues[':beforeUpdatedAt'] = beforeIssue.updatedAt
+      const beforeIssue = await this.getRequiredTeamIssueItem(directoryId, teamId, issueId, true)
+      if (beforeIssue.revision !== expectedRevision) {
+        throw createWorkItemRevisionConflictError()
       }
+      const afterIssue = {
+        ...beforeIssue,
+        schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+        revision: nextRevision,
+        updatedAt: expressionAttributeValues[':updatedAt'] as string,
+      }
+      for (const [placeholder, field] of Object.entries(expressionAttributeNames)) {
+        if (field === 'schemaVersion' || field === 'revision' || field === 'updatedAt') {
+          continue
+        }
 
-      if (afterIssue) {
-        for (const [placeholder, field] of Object.entries(expressionAttributeNames)) {
-          const value = expressionAttributeValues[`:${field}`]
-
-          if (value !== undefined) {
-            ;(afterIssue as unknown as Record<string, unknown>)[field] = value
-          } else if (removeExpressions.includes(placeholder)) {
-            delete (afterIssue as unknown as Record<string, unknown>)[field]
-          }
+        const value = expressionAttributeValues[`:${field}`]
+        if (value !== undefined) {
+          ;(afterIssue as unknown as Record<string, unknown>)[field] = value
+        } else if (removeExpressions.includes(placeholder)) {
+          delete (afterIssue as unknown as Record<string, unknown>)[field]
         }
       }
       const eventItem = this.createIssueEventItem({
@@ -6692,30 +6813,30 @@ export class DynamoDbTeamIssuesClient {
         summary: 'Issue was updated.',
         createdAt: expressionAttributeValues[':updatedAt'] as string,
       })
-      const auditPut = beforeIssue && afterIssue
-        ? createMutationAuditEventPut(this.auditTableName, auditContext, {
-            directoryId,
-            eventType: 'work-item.updated',
-            entityType: 'work-item',
-            entityId: createTeamIssueAuditEntityId(teamId, issueId),
-            action: 'updated',
-            occurredAt: expressionAttributeValues[':updatedAt'] as string,
-            changes: createAuditFieldChanges(beforeIssue, afterIssue, [
-              'title',
-              'description',
-              'assignedProjectId',
-              'assigneeUserId',
-              'status',
-              'dueDate',
-              'priority',
-            ]),
-            metadata: {
-              adapter: 'team-issue',
-              teamId,
-              projectId: afterIssue.assignedProjectId,
-            },
-          })
-        : undefined
+      const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'work-item.updated',
+        entityType: 'work-item',
+        entityId: createTeamIssueAuditEntityId(teamId, issueId),
+        action: 'updated',
+        occurredAt: expressionAttributeValues[':updatedAt'] as string,
+        changes: createAuditFieldChanges(beforeIssue, afterIssue, [
+          'title',
+          'description',
+          'assignedProjectId',
+          'assigneeUserId',
+          'status',
+          'dueDate',
+          'priority',
+        ]),
+        metadata: {
+          adapter: 'canonical-work-item',
+          teamId,
+          projectId: afterIssue.assignedProjectId,
+          beforeRevision: expectedRevision,
+          afterRevision: nextRevision,
+        },
+      })
       await this.documentClient.send(
         new TransactWriteCommand({
           TransactItems: [
@@ -6729,9 +6850,10 @@ export class DynamoDbTeamIssuesClient {
                 UpdateExpression: updateExpression,
                 ExpressionAttributeNames: expressionAttributeNames,
                 ExpressionAttributeValues: expressionAttributeValues,
-                ConditionExpression: beforeIssue
-                  ? 'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #updatedAt = :beforeUpdatedAt'
-                  : 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
+                ConditionExpression:
+                  'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
+                  '(#revision = :expectedRevision OR ' +
+                  '(attribute_not_exists(#revision) AND :expectedRevision = :legacyRevision))',
               },
             },
             {
@@ -6757,12 +6879,38 @@ export class DynamoDbTeamIssuesClient {
         throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
       }
 
-      if (isTransactionConditionalFailureAt(error, 0)) {
-        if (!await this.hasTeamIssueItem(directoryId, teamId, issueId)) {
-          throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
+      const cancellationReasonsMissing =
+        isAwsNamedError(error, 'TransactionCanceledException') &&
+        (
+          !isRecord(error) ||
+          !Array.isArray(error.CancellationReasons) ||
+          error.CancellationReasons.length === 0
+        )
+
+      if (isTransactionConditionalFailureAt(error, 0) || cancellationReasonsMissing) {
+        let latestIssue: TeamIssueItem
+
+        try {
+          latestIssue = await this.getRequiredTeamIssueItem(directoryId, teamId, issueId, true)
+        } catch (readError) {
+          if (readError instanceof ProjectDataError && readError.code === 'TeamIssueNotFound') {
+            throw readError
+          }
+
+          if (readError instanceof ProjectDataError) {
+            throw readError
+          }
+
+          throw toProjectDataError(readError)
         }
 
-        throw createProjectDataConflictError()
+        if (latestIssue.revision !== expectedRevision) {
+          throw createWorkItemRevisionConflictError()
+        }
+
+        if (isTransactionConditionalFailureAt(error, 0)) {
+          throw createProjectDataConflictError()
+        }
       }
 
       if (hasTransactionConditionalFailure(error)) {
@@ -8858,6 +9006,22 @@ function createProjectDataConflictError() {
   )
 }
 
+function createWorkItemRevisionConflictError() {
+  return new ProjectDataError(
+    409,
+    'WorkItemRevisionConflict',
+    'Work Item revision does not match the expected revision.',
+  )
+}
+
+function createLegacyProjectTaskReadOnlyError() {
+  return new ProjectDataError(
+    409,
+    'LegacyProjectTaskReadOnly',
+    'Legacy project tasks are read-only.',
+  )
+}
+
 async function sleep(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -8889,9 +9053,10 @@ function isTeamIssueNotFoundError(error: unknown) {
 function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
   const item = toTeamIssueItem(value)
   const issue: TeamIssueResponseItem = {
+    schemaVersion: item.schemaVersion,
+    revision: item.revision,
     id: item.issueId,
     teamId: item.teamId,
-    title: item.title,
     assigneeUserId: item.assigneeUserId,
     status: item.status,
     dueDate: item.dueDate,
@@ -8899,6 +9064,14 @@ function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
     source: 'dynamodb',
+  }
+
+  if (item.title) {
+    issue.title = item.title
+  }
+
+  if (item.titleKey) {
+    issue.titleKey = item.titleKey
   }
 
   if (item.assignedProjectId) {
@@ -8936,7 +9109,15 @@ function toTeamIssueActivityResponseItem(value: TeamIssueEventItem): TeamIssueAc
 }
 
 function toTeamIssueItem(value: unknown): TeamIssueItem {
-  if (!isTeamIssueItem(value)) {
+  const candidate = isRecord(value)
+    ? {
+        ...value,
+        schemaVersion: value.schemaVersion ?? WORK_ITEM_SCHEMA_VERSION,
+        revision: value.revision ?? 1,
+      }
+    : value
+
+  if (!isTeamIssueItem(candidate)) {
     throw new ProjectDataError(
       503,
       'InvalidTeamIssue',
@@ -8944,7 +9125,7 @@ function toTeamIssueItem(value: unknown): TeamIssueItem {
     )
   }
 
-  return value
+  return candidate
 }
 
 function toTeamIssueEventItem(value: unknown): TeamIssueEventItem {
@@ -9150,12 +9331,16 @@ function isTeamIssueItem(value: unknown): value is TeamIssueItem {
   }
 
   return (
+    value.schemaVersion === WORK_ITEM_SCHEMA_VERSION &&
+    typeof value.revision === 'number' &&
+    Number.isSafeInteger(value.revision) &&
+    value.revision >= 1 &&
     typeof value.directoryId === 'string' &&
     typeof value.teamId === 'string' &&
     value.directoryTeamId === createDirectoryTeamId(value.directoryId, value.teamId) &&
     typeof value.issueId === 'string' &&
     typeof value.sortOrder === 'number' &&
-    typeof value.title === 'string' &&
+    (typeof value.title === 'string' || typeof value.titleKey === 'string') &&
     (value.description === undefined || typeof value.description === 'string') &&
     typeof value.assigneeUserId === 'string' &&
     (value.creatorMemberKey === undefined || typeof value.creatorMemberKey === 'string') &&
@@ -9367,6 +9552,23 @@ function readTaskStatus(value: unknown): ProjectTaskStatus {
 function readRequiredTaskStatus(value: unknown): ProjectTaskStatus {
   if (!isProjectTaskStatus(value)) {
     throw new ProjectDataError(400, 'InvalidProjectWrite', 'Task status is invalid.')
+  }
+
+  return value
+}
+
+function readWorkItemExpectedRevision(value: unknown) {
+  if (
+    typeof value !== 'number' ||
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value >= Number.MAX_SAFE_INTEGER
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidWorkItemRevision',
+      'Work Item expected revision is required.',
+    )
   }
 
   return value

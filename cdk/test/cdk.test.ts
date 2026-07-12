@@ -177,6 +177,15 @@ test('shared server handler is bundled as a Lambda asset with production environ
         MUKUROJI_TEAM_ISSUES_TABLE: {
           Ref: 'TeamIssuesTable189D851D',
         },
+        MUKUROJI_WORK_ITEMS_TABLE: {
+          Ref: 'TeamIssuesTable189D851D',
+        },
+        TEAM_ISSUES_TABLE_NAME: {
+          Ref: 'TeamIssuesTable189D851D',
+        },
+        WORK_ITEMS_TABLE_NAME: {
+          Ref: 'TeamIssuesTable189D851D',
+        },
         COLLABORATION_TABLE_NAME: {
           Ref: 'WorkItemCollaborationTableFDECF217',
         },
@@ -235,6 +244,15 @@ test('Function URL and API Gateway invoke the same Lambda handler', () => {
   });
   template.hasOutput('ProjectTasksApiUrl', {
     Description: 'Backward-compatible alias for the Lambda Function URL.',
+  });
+  template.hasOutput('ProjectTasksTableName', {
+    Value: { Ref: 'ProjectTasksTableE21F6637' },
+  });
+  template.hasOutput('TeamIssuesTableName', {
+    Value: { Ref: 'TeamIssuesTable189D851D' },
+  });
+  template.hasOutput('WorkItemsTableName', {
+    Value: { Ref: 'TeamIssuesTable189D851D' },
   });
 });
 
@@ -338,7 +356,13 @@ test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () =
         SYSTEM_ADMIN_GROUPS: {
           Ref: 'SystemAdminGroups',
         },
+        MUKUROJI_WORK_ITEMS_TABLE: {
+          Ref: 'TeamIssuesTable189D851D',
+        },
         TEAM_ISSUES_TABLE_NAME: {
+          Ref: 'TeamIssuesTable189D851D',
+        },
+        WORK_ITEMS_TABLE_NAME: {
           Ref: 'TeamIssuesTable189D851D',
         },
         WORKSPACE_ACCESS_TABLE_NAME: {
@@ -424,7 +448,13 @@ test('audit stream projects notifications with retries DLQ and scoped production
         SYSTEM_ADMIN_GROUPS: {
           Ref: 'SystemAdminGroups',
         },
+        MUKUROJI_WORK_ITEMS_TABLE: {
+          Ref: 'TeamIssuesTable189D851D',
+        },
         TEAM_ISSUES_TABLE_NAME: {
+          Ref: 'TeamIssuesTable189D851D',
+        },
+        WORK_ITEMS_TABLE_NAME: {
           Ref: 'TeamIssuesTable189D851D',
         },
         WEBSOCKET_CALLBACK_ENDPOINT: Match.anyValue(),
@@ -501,11 +531,36 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(transactStatement).toEqual(expect.objectContaining({
     Effect: 'Allow',
     Resource: expect.arrayContaining([
-      { 'Fn::GetAtt': ['ProjectTasksTableE21F6637', 'Arn'] },
+      { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
       { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
       { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
     ]),
   }));
+  expect(JSON.stringify(transactStatement)).not.toContain('ProjectTasksTableE21F6637');
+
+  const legacyTaskStatements = statements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes('ProjectTasksTableE21F6637')
+  );
+  const legacyTaskActions = legacyTaskStatements.flatMap((statement) =>
+    Array.isArray(statement.Action) ? statement.Action : [statement.Action]
+  );
+
+  expect(legacyTaskStatements).not.toHaveLength(0);
+  expect(legacyTaskActions).toEqual(expect.arrayContaining([
+    'dynamodb:BatchGetItem',
+    'dynamodb:GetItem',
+    'dynamodb:Query',
+    'dynamodb:Scan',
+  ]));
+  for (const writeAction of [
+    'dynamodb:BatchWriteItem',
+    'dynamodb:DeleteItem',
+    'dynamodb:PutItem',
+    'dynamodb:TransactWriteItems',
+    'dynamodb:UpdateItem',
+  ]) {
+    expect(legacyTaskActions).not.toContain(writeAction);
+  }
   expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:ListUsers');
   expect(JSON.stringify(cognitoPolicy)).toContain('CognitoUserPoolId');
   expect(JSON.stringify(policy)).not.toContain('"Resource":"*"');
@@ -584,28 +639,50 @@ test('workspace metadata owner alias and project manager rows are idempotently b
   expect(bootstrap.Properties.Update).toEqual(bootstrap.Properties.Create);
 });
 
-test('legacy demo seeds use the workspace partition without replacing update-time data', () => {
+test('canonical Work Item seed replaces legacy task writes and preserves demo data', () => {
   const template = synthesizedTemplate;
-  const transactWriteResources = Object.values(template.findResources('Custom::AWS')).filter((resource) =>
+  const customResources = template.findResources('Custom::AWS');
+  const transactWriteResources = Object.values(customResources).filter((resource) =>
     JSON.stringify(resource).includes('transactWriteItems'),
   );
-  const projectTaskSeed = transactWriteResources.find((resource) =>
-    JSON.stringify(resource).includes('refero-project-tasks-seed-v3'),
+  const canonicalWorkItemSeedEntry = Object.entries(customResources).find(([logicalId]) =>
+    logicalId === 'SeedProjectTasks637E8868'
   );
+  const canonicalWorkItemSeed = canonicalWorkItemSeedEntry?.[1];
+  const canonicalWorkItemSeedPolicyEntry = Object.entries(
+    template.findResources('AWS::IAM::Policy'),
+  ).find(([logicalId]) => logicalId === 'SeedProjectTasksCustomResourcePolicy924038FB');
   const projectDirectorySeed = transactWriteResources.find((resource) =>
     JSON.stringify(resource).includes('project-directory-seed-v3'),
   );
 
-  expect(projectTaskSeed).toBeDefined();
+  expect(canonicalWorkItemSeedEntry?.[0]).toBe('SeedProjectTasks637E8868');
+  expect(canonicalWorkItemSeed).toBeDefined();
+  expect(canonicalWorkItemSeedPolicyEntry).toBeDefined();
   expect(projectDirectorySeed).toBeDefined();
+  expect(JSON.stringify(customResources)).not.toContain('refero-project-tasks-seed-v3');
+  expect(Object.keys(customResources).join(',')).not.toContain('SeedCanonicalWorkItems');
 
-  const taskPayload = serializeAwsSdkCall(projectTaskSeed?.Properties.Create);
+  const workItemPayload = serializeAwsSdkCall(canonicalWorkItemSeed?.Properties.Create);
   const directoryPayload = serializeAwsSdkCall(projectDirectorySeed?.Properties.Create);
 
-  expect(taskPayload).toContain('WorkspaceDirectoryId');
+  expect(workItemPayload).toContain('WorkspaceDirectoryId');
+  expect(workItemPayload).toContain('TeamIssuesTable189D851D');
+  expect(workItemPayload).not.toContain('ProjectTasksTableE21F6637');
+  expect(workItemPayload).toContain('attribute_not_exists(directoryTeamId)');
+  expect(workItemPayload).toContain('attribute_not_exists(issueId)');
+  expect(workItemPayload).toContain('core-team');
+  expect(workItemPayload).toContain('assignedProjectId');
+  expect(workItemPayload).toContain('2026-06-01T00:00:00.000Z');
+  expect(workItemPayload).toContain('dynamodb');
+  expect(workItemPayload.match(/schemaVersion/g)).toHaveLength(10);
+  expect(workItemPayload.match(/revision/g)).toHaveLength(10);
+  expect(workItemPayload.match(/workItemId/g)).toHaveLength(10);
+  expect(JSON.stringify(canonicalWorkItemSeedPolicyEntry?.[1])).toContain('TeamIssuesTable189D851D');
+  expect(JSON.stringify(canonicalWorkItemSeedPolicyEntry?.[1])).not.toContain('ProjectTasksTableE21F6637');
   expect(directoryPayload).toContain('WorkspaceDirectoryId');
-  expect(taskPayload).not.toContain('user#demo@example.com');
+  expect(workItemPayload).not.toContain('user#demo@example.com');
   expect(directoryPayload).not.toContain('user#demo@example.com');
-  expect(projectTaskSeed?.Properties.Update).toBeUndefined();
+  expect(canonicalWorkItemSeed?.Properties.Update).toBeUndefined();
   expect(projectDirectorySeed?.Properties.Update).toBeUndefined();
 });

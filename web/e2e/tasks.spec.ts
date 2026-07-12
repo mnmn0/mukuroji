@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
+import { WORK_ITEM_SCHEMA_VERSION } from '@mukuroji/contracts'
 import { readFile } from 'node:fs/promises'
 import type { TeamIssue, TeamIssueActivity, TeamIssueComment } from '../src/issues/api'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
@@ -27,6 +28,10 @@ type MockRequestCounts = {
    * プロジェクト別タスク API の request 数です。
    */
   projectTasks: Record<string, number>
+  /**
+   * Workspace 全体の Work Item 一覧 API request 数です。
+   */
+  workspaceWorkItems: number
   /**
    * チーム作成 API の request 数です。
    */
@@ -106,6 +111,8 @@ async function mockCurrentUser(page: Page, username: string, name: string) {
         },
         groups: ['mukuroji-system-admins'],
         isSystemAdmin: true,
+        workspaceRole: 'owner',
+        workspaceMemberStatus: 'active',
       },
     })
   })
@@ -137,6 +144,7 @@ async function mockAuthenticatedTaskPage(
   const requestCounts: MockRequestCounts = {
     projectDirectory: 0,
     projectTasks: {},
+    workspaceWorkItems: 0,
     teamCreates: 0,
     projectCreates: 0,
     teamArchives: 0,
@@ -494,7 +502,11 @@ async function mockAuthenticatedTaskPage(
       }
       const assigneeUser = projectUsers.find((user) => user.id === body.assigneeUserId)
       const task = {
+        schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+        revision: 1,
         id: 'new-task',
+        teamId: 'core-team',
+        assignedProjectId: 'refero',
         title: body.title ?? '新規タスク',
         assigneeUserId: assigneeUser?.id ?? 'sato@example.com',
         assigneeEmail: assigneeUser?.email ?? 'sato@example.com',
@@ -502,6 +514,7 @@ async function mockAuthenticatedTaskPage(
         status: body.status ?? 'todo',
         dueDate: body.dueDate ?? '2026/06/20',
         priority: body.priority ?? 'medium',
+        source: 'legacy',
       } satisfies ProjectTask
 
       taskResponsesByProject.refero.push(task)
@@ -589,6 +602,23 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
+  await page.route('**/api/work-items', async (route) => {
+    requestCounts.workspaceWorkItems += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    const legacyWorkItems = Object.entries(taskResponsesByProject).flatMap(
+      ([projectId, projectTasks]) => projectTasks.map((task) =>
+        toIssueFromTask(task, task.teamId, projectId),
+      ),
+    )
+
+    await route.fulfill({
+      json: {
+        workItems: [...legacyWorkItems, ...Object.values(teamIssuesByTeam).flat()],
+      },
+    })
+  })
+
   await page.route(/.*\/api\/teams\/[^/]+\/issues$/, async (route) => {
     const teamId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[3] ?? '')
     const projects = projectDirectory.find((team) => team.id === teamId)?.projects ?? []
@@ -608,6 +638,8 @@ async function mockAuthenticatedTaskPage(
       }
       const assigneeUser = projectUsers.find((user) => user.id === body.assigneeUserId)
       const issue = {
+        schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+        revision: 1,
         id: body.title === '新規タスク' ? 'new-task' : createIssueId(body.title ?? '新規 Issue'),
         teamId,
         assignedProjectId: body.assignedProjectId || undefined,
@@ -682,7 +714,11 @@ async function mockAuthenticatedTaskPage(
 
       const body = route.request().postDataJSON() as Partial<TeamIssue> & {
         assignedProjectId?: string | null
+        expectedRevision?: number
       }
+      const { expectedRevision, ...patch } = body
+
+      expect(expectedRevision).toBe(issue.revision)
       const updateResult = body.status
         ? await onTaskStatusUpdate?.(issueId, body.status)
         : undefined
@@ -699,10 +735,11 @@ async function mockAuthenticatedTaskPage(
 
       const updatedIssue = {
         ...issue,
-        ...body,
+        ...patch,
         assignedProjectId: body.assignedProjectId === null
           ? undefined
           : body.assignedProjectId ?? issue.assignedProjectId,
+        revision: issue.revision + 1,
         updatedAt: '2026-06-08T02:00:00.000Z',
       } satisfies TeamIssue
       const issues = teamIssuesByTeam[teamId] ?? []
@@ -1161,6 +1198,8 @@ function toIssueFromTask(task: ProjectTask, teamId: string, assignedProjectId: s
   const assignee = resolveLegacyTaskAssignee(task)
 
   return {
+    schemaVersion: task.schemaVersion,
+    revision: task.revision,
     id: task.id,
     teamId,
     assignedProjectId,
@@ -1180,6 +1219,8 @@ function toIssueFromTask(task: ProjectTask, teamId: string, assignedProjectId: s
 
 function createStoredTeamIssue(overrides: Partial<TeamIssue> & Pick<TeamIssue, 'id' | 'status' | 'title'>): TeamIssue {
   return {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
     teamId: 'core-team',
     assignedProjectId: 'refero',
     description: 'My Tasks の移動操作を検証する Issue です。',
@@ -1461,7 +1502,9 @@ test.describe('authenticated task page', () => {
     await page.locator('textarea[name="body"]').fill('プロジェクト画面から確認します。')
     await page.getByRole('button', { name: 'コメントを追加' }).click()
 
-    await expect(page.getByText('プロジェクト画面から確認します。')).toBeVisible()
+    await expect(
+      page.getByTestId('comment-thread-comment-2').getByText('プロジェクト画面から確認します。'),
+    ).toBeVisible()
     expect(requestCounts.issueComments).toBe(1)
   })
 
@@ -1498,7 +1541,7 @@ test.describe('authenticated task page', () => {
     await expect(page.getByText('期限順リスト')).toBeVisible()
 
     await page.getByRole('tab', { name: 'ファイル' }).click()
-    await expect(page.getByRole('heading', { name: 'ファイル機能は準備中です' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'ファイルビュー' })).toBeVisible()
     await expect(page.getByRole('tabpanel').getByRole('searchbox')).toHaveCount(0)
     await expect(page.getByTestId('task-detail-pane')).toHaveCount(0)
 
@@ -1617,12 +1660,8 @@ test.describe('authenticated task page', () => {
     await expect(page.getByRole('button', { name: 'デザインチーム', exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(2)
     expect(requestCounts.projectDirectory).toBe(1)
-    await expect.poll(() => requestCounts.projectTasks).toEqual({
-      refero: 1,
-      'product-roadmap': 1,
-      'shared-launch': 1,
-      'brand-refresh': 1,
-    })
+    await expect.poll(() => requestCounts.workspaceWorkItems).toBe(1)
+    expect(requestCounts.projectTasks).toEqual({})
 
     await page.getByRole('button', { name: 'ブランド刷新', exact: true }).click()
 
@@ -1670,7 +1709,9 @@ test.describe('authenticated task page', () => {
     await page.locator('textarea[name="body"]').fill('プロジェクト側で着手します。')
     await page.getByRole('button', { name: 'コメントを追加' }).click()
 
-    await expect(page.getByText('プロジェクト側で着手します。')).toBeVisible()
+    await expect(
+      page.getByTestId('comment-thread-comment-2').getByText('プロジェクト側で着手します。'),
+    ).toBeVisible()
     await expect(page.getByText('Demo User がコメントしました。')).toBeVisible()
     expect(requestCounts.issueComments).toBe(1)
 
@@ -2362,13 +2403,13 @@ test('マイタスクの片方の移動が失敗しても別 Issue の成功済�
   await page.goto('/my-tasks')
 
   await page
-    .getByTestId('my-tasks-card-refero-onboarding-friction')
-    .dragTo(page.getByTestId('my-tasks-column-done'))
+    .getByTestId('my-tasks-card-refero-onboarding-friction-status-select')
+    .selectOption('done')
   await onboardingUpdateStarted
 
   await page
-    .getByTestId('my-tasks-card-refero-billing-copy')
-    .dragTo(page.getByTestId('my-tasks-column-done'))
+    .getByTestId('my-tasks-card-refero-billing-copy-status-select')
+    .selectOption('done')
   await expect(
     page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-billing-copy'),
   ).toBeVisible()
@@ -2425,8 +2466,8 @@ test('マイタスクでは同一 Issue の移動中に追加移動を開始で�
   await page.goto('/my-tasks')
 
   await page
-    .getByTestId('my-tasks-card-refero-onboarding-friction')
-    .dragTo(page.getByTestId('my-tasks-column-done'))
+    .getByTestId('my-tasks-card-refero-onboarding-friction-status-select')
+    .selectOption('done')
   await onboardingDoneUpdateStarted
   await expect(
     page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-onboarding-friction'),
@@ -2443,7 +2484,8 @@ test('マイタスクでは同一 Issue の移動中に追加移動を開始で�
   ).toBeEnabled()
   expect(getMockRequestCounts(page).issueUpdates).toBe(1)
   expect(getMockRequestCounts(page).taskStatusUpdates).toBe(0)
-  expect(getMockRequestCounts(page).projectTasks.refero).toBe(1)
+  expect(getMockRequestCounts(page).workspaceWorkItems).toBe(1)
+  expect(getMockRequestCounts(page).projectTasks).toEqual({})
 })
 
 test('未認証の場合はログイン画面へ戻す', async ({ page }) => {

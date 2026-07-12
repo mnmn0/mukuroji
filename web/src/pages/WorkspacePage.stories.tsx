@@ -1,3 +1,4 @@
+import { WORK_ITEM_SCHEMA_VERSION } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import type { DashboardSummary } from '../auth/api'
 import { projectDirectoryFixtures } from '../projects/fixtures'
@@ -15,31 +16,35 @@ const storySummary: DashboardSummary = {
 const storyWorkspaceTasks = [
   ...referoTaskFixtures.map((task) => ({
     ...task,
-    projectId: 'refero',
+    assignedProjectId: 'refero',
     source: 'legacy' as const,
     teamId: 'core-team',
   })),
   {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
     assigneeEmail: 'demo@example.com',
     assigneeName: 'Demo User',
     assigneeUserId: 'demo@example.com',
     dueDate: '2026/06/07',
     id: 'roadmap-risk',
     priority: 'high',
-    projectId: 'product-roadmap',
+    assignedProjectId: 'product-roadmap',
     source: 'dynamodb' as const,
     status: 'review',
     teamId: 'core-team',
     title: 'ロードマップの依存リスクを確認',
   },
   {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
     assigneeEmail: 'suzuki@example.com',
     assigneeName: '鈴木 大輔',
     assigneeUserId: 'suzuki@example.com',
     dueDate: '2026/06/10',
     id: 'launch-approval',
     priority: 'medium',
-    projectId: 'shared-launch',
+    assignedProjectId: 'shared-launch',
     source: 'dynamodb' as const,
     status: 'todo',
     teamId: 'core-team',
@@ -144,7 +149,7 @@ const crowdedTasks = Array.from({ length: 18 }, (_, index) => {
     title: `${index + 1}. ${index % 2 === 0 ? '長い名前の依存関係レビューと承認待ちタスク' : 'Design QA / release queue follow-up'} ${index + 1}`,
     status: (['todo', 'in-progress', 'review', 'done'] as const)[index % 4],
     priority: (['high', 'medium', 'low'] as const)[index % 3],
-    projectId: index % 2 === 0 ? 'refero' : 'brand-refresh',
+    assignedProjectId: index % 2 === 0 ? 'refero' : 'brand-refresh',
     source: 'dynamodb' as const,
     teamId: index % 2 === 0 ? 'core-team' : 'marketing',
   }
