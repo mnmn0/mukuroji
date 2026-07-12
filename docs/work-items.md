@@ -32,7 +32,7 @@ Canonical row は次の field を持つ。
 | `assigneeUserId` | yes | Workspace member/Cognito user の安定 ID。 |
 | `status` | yes | `todo`, `in-progress`, `review`, `done`。 |
 | `priority` | yes | `low`, `medium`, `high`。 |
-| `dueDate` | yes | 現行 UI 互換の `YYYY/MM/DD`。format migration は別 revision で行う。 |
+| `dueDate` | yes | 現行 UI 互換の `YYYY/MM/DD`。時刻を持たない UTC calendar day として期限通知を判定する。format / Workspace time zone migration は別 revision で行う。 |
 | `sortOrder` | yes | Team/project list の安定表示順。 |
 | `createdAt` / `updatedAt` | yes | UTC ISO 8601 timestamp。 |
 

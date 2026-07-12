@@ -22,6 +22,7 @@ import {
   type Locale,
   type MessageKey,
 } from '../i18n'
+import { useUnreadNotificationCount } from '../notifications/useNotifications'
 import {
   createTeamIssue,
   getTeamIssueDetail,
@@ -106,6 +107,10 @@ type TeamIssueScreenProps = {
    */
   issues?: TeamIssue[]
   /**
+   * サイドバーに表示する通知の実未読件数です。
+   */
+  inboxCount?: number
+  /**
    * 選択中 Issue の comment thread、watcher、presence です。
    */
   collaboration?: IssueCollaborationController
@@ -117,6 +122,14 @@ type TeamIssueScreenProps = {
    * 現在の Workspace member key です。
    */
   currentWorkspaceMemberKey?: string
+  /**
+   * notification deep link から focus する comment ID です。
+   */
+  focusedCommentId?: string
+  /**
+   * notification deep link の reply が属する root comment ID です。
+   */
+  focusedRootCommentId?: string
   /**
    * タスク担当者として選択できる project member 一覧です。
    */
@@ -203,6 +216,8 @@ export function TeamIssuePage() {
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const requestedIssueId = searchParams.get('issueId')?.trim() || undefined
+  const focusedCommentId = searchParams.get('commentId')?.trim() || undefined
+  const focusedRootCommentId = searchParams.get('rootCommentId')?.trim() || undefined
   const t = useMemo(() => createTranslator(locale), [locale])
   const accessToken = session?.accessToken
   const currentUserKey = accessToken ? (['current-user', accessToken] as const) : null
@@ -211,6 +226,10 @@ export function TeamIssuePage() {
     error: currentUserError,
     isLoading: isCurrentUserLoading,
   } = useSWR(currentUserKey, ([, token]) => getCurrentUser(token), apiSWRConfig)
+  const inboxCount = useUnreadNotificationCount(
+    accessToken,
+    Boolean(user && !currentUserError),
+  )
   const workspaceAccessKey = accessToken && user && !currentUserError
     ? (['workspace-access', accessToken] as const)
     : null
@@ -428,6 +447,9 @@ export function TeamIssuePage() {
       collaboration={collaboration}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}
+      focusedCommentId={focusedCommentId}
+      focusedRootCommentId={focusedRootCommentId}
+      inboxCount={inboxCount}
       issueErrorMessage={issueErrorMessage}
       issues={screenIssues}
       isLoading={isLoading}
@@ -461,6 +483,9 @@ export function TeamIssueScreen({
   currentWorkspaceMemberKey,
   defaultCreateIssueOpen = false,
   detailErrorMessage,
+  focusedCommentId,
+  focusedRootCommentId,
+  inboxCount = 0,
   initialViewMode = 'table',
   issueErrorMessage,
   issues = [],
@@ -531,7 +556,7 @@ export function TeamIssueScreen({
         activeTeamId={teamId}
         activeTeamViewId="issues"
         className="max-[980px]:hidden"
-        inboxCount={issues.filter((issue) => issue.status === 'review' || issue.priority === 'high').length}
+        inboxCount={inboxCount}
         labels={sidebarLabels}
         onArchiveProject={onArchiveProject}
         onArchiveTeam={onArchiveTeam}
@@ -551,7 +576,7 @@ export function TeamIssueScreen({
         <Sidebar
           activeTeamId={teamId}
           activeTeamViewId="issues"
-          inboxCount={issues.filter((issue) => issue.status === 'review' || issue.priority === 'high').length}
+          inboxCount={inboxCount}
           labels={sidebarLabels}
           onArchiveProject={onArchiveProject}
           onArchiveTeam={onArchiveTeam}
@@ -697,6 +722,8 @@ export function TeamIssueScreen({
                 collaboration={collaboration}
                 currentWorkspaceMemberKey={currentWorkspaceMemberKey}
                 detailErrorMessage={detailErrorMessage ?? detailErrorMessageLocal}
+                focusedCommentId={focusedCommentId}
+                focusedRootCommentId={focusedRootCommentId}
                 issue={selectedIssue}
                 locale={locale}
                 onUpdateIssue={onUpdateIssue ? async (issueId, input) => {
@@ -1048,6 +1075,8 @@ function IssueDetailPane({
   collaboration,
   currentWorkspaceMemberKey,
   detailErrorMessage,
+  focusedCommentId,
+  focusedRootCommentId,
   issue,
   locale,
   onUpdateIssue,
@@ -1059,6 +1088,8 @@ function IssueDetailPane({
   collaboration?: IssueCollaborationController
   currentWorkspaceMemberKey?: string
   detailErrorMessage?: string
+  focusedCommentId?: string
+  focusedRootCommentId?: string
   issue?: TeamIssue
   locale: Locale
   onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
@@ -1185,6 +1216,8 @@ function IssueDetailPane({
           key={`${issue.teamId}:${issue.id}`}
           controller={collaboration}
           currentMemberKey={currentWorkspaceMemberKey}
+          focusedCommentId={focusedCommentId}
+          focusedRootCommentId={focusedRootCommentId}
           locale={locale}
           members={workspaceMembers}
           readOnlyMessage={isLegacyIssue ? t('issues.comment.readOnlyLegacy') : undefined}

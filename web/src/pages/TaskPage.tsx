@@ -25,6 +25,7 @@ import {
   type Locale,
   type MessageKey,
 } from '../i18n'
+import { useUnreadNotificationCount } from '../notifications/useNotifications'
 import {
   archiveProjectDirectoryProject,
   archiveProjectDirectoryTeam,
@@ -198,6 +199,10 @@ type TaskScreenProps = {
    */
   tasks?: ProjectTask[]
   /**
+   * サイドバーに表示する通知の実未読件数です。
+   */
+  inboxCount?: number
+  /**
    * タスク担当者として選択できる project member 一覧です。
    */
   assigneeOptions?: ProjectMember[]
@@ -277,6 +282,14 @@ type TaskScreenProps = {
    * 現在の Workspace member key です。
    */
   currentWorkspaceMemberKey?: string
+  /**
+   * notification deep link から focus する comment ID です。
+   */
+  focusedCommentId?: string
+  /**
+   * notification deep link の reply が属する root comment ID です。
+   */
+  focusedRootCommentId?: string
   /**
    * 選択中 Issue 詳細を取得中かどうかです。
    */
@@ -377,6 +390,8 @@ export function TaskPage() {
   const projectId = params.projectId ?? 'refero'
   const selectedTeamId = searchParams.get('teamId') ?? undefined
   const selectedIssueId = searchParams.get('issueId') ?? undefined
+  const focusedCommentId = searchParams.get('commentId')?.trim() || undefined
+  const focusedRootCommentId = searchParams.get('rootCommentId')?.trim() || undefined
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [projectUserQuery, setProjectUserQuery] = useState('')
@@ -393,6 +408,10 @@ export function TaskPage() {
     error: currentUserError,
     isLoading: isCurrentUserLoading,
   } = useSWR(currentUserKey, ([, accessToken]) => getCurrentUser(accessToken), apiSWRConfig)
+  const inboxCount = useUnreadNotificationCount(
+    accessToken,
+    Boolean(user && !currentUserError),
+  )
   const workspaceAccessKey = accessToken && user && !currentUserError
     ? (['workspace-access', accessToken] as const)
     : null
@@ -825,6 +844,9 @@ export function TaskPage() {
       collaboration={collaboration}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}
+      focusedCommentId={focusedCommentId}
+      focusedRootCommentId={focusedRootCommentId}
+      inboxCount={inboxCount}
       initialSelectedTaskId={resolvedSelectedIssue?.id}
       isAssigneeOptionsLoading={Boolean(projectMembersKey && isProjectMembersLoading)}
       isProjectUsersLoading={Boolean(projectUsersKey && isProjectUsersLoading)}
@@ -873,6 +895,9 @@ export function TaskScreen({
   currentWorkspaceMemberKey,
   defaultCreateTaskOpen = false,
   detailErrorMessage,
+  focusedCommentId,
+  focusedRootCommentId,
+  inboxCount = 0,
   initialSelectedTaskId,
   initialTab = 'table',
   isAssigneeOptionsLoading = false,
@@ -997,7 +1022,7 @@ export function TaskScreen({
         activeProjectTeamId={resolvedActiveTeamId}
         className="max-[980px]:hidden"
         collapsed={sidebarCollapsed}
-        inboxCount={tasks.filter((task) => task.status === 'review' || task.priority === 'high').length}
+        inboxCount={inboxCount}
         labels={sidebarLabels}
         onArchiveProject={onArchiveProject}
         onArchiveTeam={onArchiveTeam}
@@ -1019,7 +1044,7 @@ export function TaskScreen({
         <Sidebar
           activeProjectId={projectId}
           activeProjectTeamId={resolvedActiveTeamId}
-          inboxCount={tasks.filter((task) => task.status === 'review' || task.priority === 'high').length}
+          inboxCount={inboxCount}
           labels={sidebarLabels}
           onArchiveProject={onArchiveProject}
           onArchiveTeam={onArchiveTeam}
@@ -1174,6 +1199,8 @@ export function TaskScreen({
                   currentWorkspaceMemberKey={currentWorkspaceMemberKey}
                   detail={selectedIssueDetail}
                   errorMessage={detailErrorMessage}
+                  focusedCommentId={focusedCommentId}
+                  focusedRootCommentId={focusedRootCommentId}
                   isLoading={isSelectedIssueDetailLoading}
                   locale={locale}
                   projects={activeTeamProjects}
@@ -2238,6 +2265,8 @@ function TaskDetailPane({
   currentWorkspaceMemberKey,
   detail,
   errorMessage,
+  focusedCommentId,
+  focusedRootCommentId,
   isLoading,
   locale,
   onUpdateIssue,
@@ -2251,6 +2280,8 @@ function TaskDetailPane({
   currentWorkspaceMemberKey?: string
   detail?: TeamIssueDetail
   errorMessage?: string
+  focusedCommentId?: string
+  focusedRootCommentId?: string
   isLoading: boolean
   locale: Locale
   onUpdateIssue?: (
@@ -2433,6 +2464,8 @@ function TaskDetailPane({
           key={`${task.teamId ?? ''}:${task.id}`}
           controller={collaboration}
           currentMemberKey={currentWorkspaceMemberKey}
+          focusedCommentId={focusedCommentId}
+          focusedRootCommentId={focusedRootCommentId}
           locale={locale}
           members={workspaceMembers}
           readOnlyMessage={task.source === 'legacy' ? t('tasks.comment.readOnly') : undefined}

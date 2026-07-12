@@ -117,7 +117,8 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_WORK_ITEMS_TABLE` / `WORK_ITEMS_TABLE_NAME`: canonical Work Item store。移行期間は `MUKUROJI_TEAM_ISSUES_TABLE` / `TEAM_ISSUES_TABLE_NAME` と同じ既存 table を指します。
 - `MUKUROJI_TEAM_ISSUE_EVENTS_TABLE`: チーム Issue のコメント/活動履歴を保存する DynamoDB table 名。未指定時は `mukuroji-team-issue-events-local`
 - `MUKUROJI_COLLABORATION_TABLE` / `COLLABORATION_TABLE_NAME`: comment thread、reaction、watcher、presence を保存する DynamoDB table 名。未指定時は `mukuroji-collaboration-local`
-- `MUKUROJI_NOTIFICATIONS_TABLE` / `NOTIFICATIONS_TABLE_NAME`: mention/watch の durable notification projection を保存する DynamoDB table 名。未指定時は `mukuroji-notifications-local`
+- `MUKUROJI_NOTIFICATIONS_TABLE` / `NOTIFICATIONS_TABLE_NAME`: ユーザー別の durable notification timeline と配信設定を保存する DynamoDB table 名。未指定時は `mukuroji-notifications-local`
+- `NOTIFICATIONS_STATUS_INDEX_NAME`: unread/read/archive/snooze ごとの timeline query に使う GSI 名。未指定時は `RecipientStatusIndex`
 - `MUKUROJI_REALTIME_SESSIONS_TABLE` / `REALTIME_SESSIONS_TABLE_NAME`: WebSocket ticket と connection lease を保存する DynamoDB table 名。未指定時は `mukuroji-realtime-sessions-local`
 - `REALTIME_WEBSOCKET_URL`: production の collaboration invalidation/presence 用 WebSocket URL。未指定時は Web が polling fallback を使います。
 - `MUKUROJI_AUDIT_EVENTS_TABLE` / `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
@@ -128,7 +129,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 
 API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/teams/projects`, `/api/work-items`,
 `/api/teams/{teamId}/issues`, `/api/projects/{projectId}/issues`,
-`/api/projects/{projectId}/tasks`, `/api/audit/events` で DynamoDB を読みます。ローカルでは Vite proxy により、
+`/api/projects/{projectId}/tasks`, `/api/audit/events`, `/api/notifications` で DynamoDB を読みます。ローカルでは Vite proxy により、
 Web から `/api` を呼ぶだけで Floci 上の DynamoDB データを取得できます。
 
 Task / Issue の canonical schema、optimistic concurrency、legacy read compatibility、state migration / rollback は
@@ -139,6 +140,9 @@ append-only event schema、activity/audit API、retention/redaction、consumer d
 
 Comment thread、mention/watch 通知、reaction、presence、realtime fallback の契約は
 [`docs/collaboration.md`](docs/collaboration.md) を参照してください。
+
+Notification event、Inbox state、filter/cursor、deep link、配信設定、期限通知の契約は
+[`docs/notifications.md`](docs/notifications.md) を参照してください。
 
 Web の mutation は operation と入力 fingerprint ごとに `MutationRequestContext` を1つ保持し、失敗後に
 同じ入力を retry した場合だけ同じ object を API client へ渡します。HTTP mutation 成功時または

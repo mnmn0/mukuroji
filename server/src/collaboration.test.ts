@@ -569,11 +569,13 @@ test('records comment edits and deletes as redacted append-only audit events', a
     workspaceId: 'workspace#one',
     teamId: 'team-a',
     issueId: 'issue-1',
+    workItemTitle: 'Notification target',
     entityKey,
     actorMemberKey: 'author@example.com',
     commentId: 'comment-1',
     bodyMarkdown: 'After',
     expectedVersion: 1,
+    deepLink: '/teams/team-a/issues?issueId=issue-1',
     auditContext: createContext('edit-comment'),
   })
   await client.deleteComment({
@@ -598,6 +600,12 @@ test('records comment edits and deletes as redacted append-only audit events', a
   expect(auditEvents[0]?.changes).toEqual([
     { field: 'body', before: '[REDACTED]', after: '[REDACTED]', redacted: true },
   ])
+  expect(auditEvents[0]?.metadata).toMatchObject({
+    commentId: 'comment-1',
+    rootCommentId: 'comment-1',
+    notificationTitle: 'Notification target',
+    deepLink: '/teams/team-a/issues?issueId=issue-1&commentId=comment-1&rootCommentId=comment-1',
+  })
   expect(auditEvents[1]?.changes).toEqual([
     { field: 'body', before: '[REDACTED]', after: '[REDACTED]', redacted: true },
     { field: 'deletedAt', after: '2026-07-12T00:01:00.000Z' },

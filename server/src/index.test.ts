@@ -5,6 +5,7 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import { createAuditEvent, createMutationAuditContext } from './audit'
 import { CollaborationError, type CollaborationClient } from './collaboration'
+import type { NotificationClient, NotificationItem } from './notifications'
 import {
   app,
   AwsCognitoClient,
@@ -541,6 +542,312 @@ test('loads project directory from the authenticated user scoped partition', asy
     ],
   })
   expect(calls.directoryReads).toEqual([{ directoryId: 'user#demo@example.com', locale: 'en' }])
+})
+
+/** Notification visibility API test に使う render-ready item を作ります。 */
+function createNotificationItem(
+  overrides: Partial<NotificationItem> = {},
+): NotificationItem {
+  return {
+    id: 'notification-item',
+    eventId: 'notification-event',
+    eventType: 'work-item.updated',
+    reasons: ['status-change'],
+    teamId: 'core-team',
+    projectId: 'refero',
+    issueId: 'notification-item',
+    occurredAt: '2026-07-12T12:00:00.000Z',
+    state: 'unread',
+    ...overrides,
+  }
+}
+
+/** NotificationClient 経由で API の current visibility 判定結果を記録します。 */
+function createNotificationVisibilityProbe(notifications: NotificationItem[]) {
+  const visibility = new Map<string, boolean>()
+  const client: NotificationClient = {
+    async list(input) {
+      const visibleNotifications: NotificationItem[] = []
+      for (const notification of notifications) {
+        const isVisible = !input.isVisible || await input.isVisible(notification)
+        visibility.set(notification.id, isVisible)
+        if (isVisible) {
+          visibleNotifications.push(notification)
+        }
+      }
+      return { notifications: visibleNotifications }
+    },
+    async countUnread(input) {
+      let count = 0
+      for (const notification of notifications) {
+        const isVisible = !input.isVisible || await input.isVisible(notification)
+        visibility.set(notification.id, isVisible)
+        if (isVisible && notification.state === 'unread') {
+          count += 1
+        }
+      }
+      return count
+    },
+    async update() {
+      throw new Error('Notification update is not configured for this visibility test.')
+    },
+    async markAllRead() {
+      return 0
+    },
+    async getPreferences() {
+      return {
+        version: 0,
+        channels: { inApp: true, email: false, push: false },
+        frequency: 'instant',
+        quietHours: { enabled: false, start: '22:00', end: '07:00', timeZone: 'UTC' },
+      }
+    },
+    async savePreferences(input) {
+      return {
+        ...input.preferences,
+        version: input.preferences.version + 1,
+        updatedAt: '2026-07-12T13:00:00.000Z',
+      }
+    },
+  }
+  return { client, visibility }
+}
+
+test('serves permission-filtered notification timeline, state, and preference contracts', async () => {
+  const projectCalls = configureFakeProjectClients(true, {
+    detailAssigneeUserId: 'demo@example.com',
+  })
+  const notification = {
+    id: 'opaque-notification-id',
+    eventId: 'evt-1',
+    eventType: 'work-item.updated',
+    reasons: ['status-change'],
+    title: 'Notification API',
+    deepLink: '/teams/core-team/issues?issueId=notification-api',
+    teamId: 'core-team',
+    projectId: 'refero',
+    issueId: 'notification-api',
+    occurredAt: '2026-07-12T12:00:00.000Z',
+    state: 'unread' as const,
+  }
+  const calls: {
+    filter?: string
+    action?: string
+    savedPreferenceVersion?: number
+  } = {}
+  const notificationClient: NotificationClient = {
+    async list(input) {
+      calls.filter = input.filter
+      expect(input.workspaceId).toBe('user#demo@example.com')
+      expect(input.memberKey).toBe('demo@example.com')
+      expect(await input.isVisible?.(notification)).toBe(true)
+      expect(await input.isVisible?.({ ...notification, issueId: undefined, projectId: 'hidden-project' })).toBe(false)
+      return { notifications: [notification], nextCursor: 'next-page' }
+    },
+    async countUnread() {
+      return calls.action === 'mark-read' ? 0 : 1
+    },
+    async update(input) {
+      calls.action = input.action
+      return { ...notification, state: 'read', readAt: '2026-07-12T13:00:00.000Z' }
+    },
+    async markAllRead() {
+      return 1
+    },
+    async getPreferences() {
+      return {
+        version: 0,
+        channels: { inApp: true, email: false, push: false },
+        frequency: 'instant',
+        quietHours: { enabled: false, start: '22:00', end: '07:00', timeZone: 'UTC' },
+      }
+    },
+    async savePreferences(input) {
+      calls.savedPreferenceVersion = input.preferences.version
+      return {
+        ...input.preferences,
+        version: input.preferences.version + 1,
+        updatedAt: '2026-07-12T13:00:00.000Z',
+      }
+    },
+  }
+  configureApiClientsForTest({ notifications: notificationClient })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+
+  const listResponse = await app.request('/api/notifications?filter=unread&limit=20', { headers })
+  expect(listResponse.status).toBe(200)
+  expect(await listResponse.json()).toMatchObject({
+    notifications: [{ id: 'opaque-notification-id', state: 'unread' }],
+    nextCursor: 'next-page',
+    unreadCount: 1,
+  })
+  expect(calls.filter).toBe('unread')
+  expect(projectCalls.directoryReads).toContainEqual({
+    directoryId: 'user#demo@example.com',
+    locale: 'ja',
+    consistentRead: true,
+  })
+
+  const updateResponse = await app.request('/api/notifications/opaque-notification-id', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ action: 'mark-read' }),
+  })
+  expect(updateResponse.status).toBe(200)
+  expect(await updateResponse.json()).toMatchObject({ state: 'read' })
+  expect(calls.action).toBe('mark-read')
+
+  const preferenceResponse = await app.request('/api/notification-preferences', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({
+      version: 0,
+      channels: { inApp: true, email: true, push: false },
+      frequency: 'daily',
+      quietHours: { enabled: true, start: '22:00', end: '07:00', timeZone: 'Asia/Tokyo' },
+    }),
+  })
+  expect(preferenceResponse.status).toBe(200)
+  expect(await preferenceResponse.json()).toMatchObject({ version: 1, frequency: 'daily' })
+  expect(calls.savedPreferenceVersion).toBe(0)
+})
+
+test('hides a notification after its Work Item moves to an inaccessible project', async () => {
+  configureFakeProjectClients(true, {
+    detailAssignedProjectId: 'private-project',
+    detailAssigneeUserId: 'demo@example.com',
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const notification = {
+    id: 'opaque-notification-id',
+    eventId: 'evt-1',
+    eventType: 'work-item.updated',
+    reasons: ['status-change'],
+    teamId: 'core-team',
+    projectId: 'refero',
+    issueId: 'moved-item',
+    occurredAt: '2026-07-12T12:00:00.000Z',
+    state: 'unread' as const,
+  }
+  let currentlyVisible = true
+  const notificationClient = {
+    async list(input) {
+      currentlyVisible = await input.isVisible?.(notification) ?? true
+      return { notifications: currentlyVisible ? [notification] : [] }
+    },
+    async countUnread(input) {
+      return await input.isVisible?.(notification) ? 1 : 0
+    },
+    async update() {
+      return notification
+    },
+    async markAllRead() {
+      return 0
+    },
+    async getPreferences() {
+      return {
+        version: 0,
+        channels: { inApp: true, email: false, push: false },
+        frequency: 'instant' as const,
+        quietHours: { enabled: false, start: '22:00', end: '07:00', timeZone: 'UTC' },
+      }
+    },
+    async savePreferences(input) {
+      return input.preferences
+    },
+  } as NotificationClient
+  configureApiClientsForTest({ notifications: notificationClient })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(currentlyVisible).toBe(false)
+  expect(notification.projectId).toBe('private-project')
+  expect(await response.json()).toMatchObject({ notifications: [], unreadCount: 0 })
+})
+
+test('keeps a shared-project notification visible under every active owner Team', async () => {
+  configureFakeProjectClients(true, {
+    detailAssignedProjectId: 'shared-launch',
+    detailAssigneeUserId: 'demo@example.com',
+    projectAccesses: [{ projectId: 'shared-launch', role: 'viewer' }],
+    teamProjects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+    additionalTeams: [{
+      id: 'design-team',
+      name: 'Design Team',
+      projects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+    }],
+  })
+  const coreNotification = createNotificationItem({
+    id: 'shared-project-core-notification',
+    issueId: 'shared-project-core-item',
+    projectId: 'shared-launch',
+    reasons: ['watcher'],
+  })
+  const designNotification = createNotificationItem({
+    id: 'shared-project-design-notification',
+    issueId: 'shared-project-design-item',
+    projectId: 'shared-launch',
+    reasons: ['watcher'],
+    teamId: 'design-team',
+  })
+  const probe = createNotificationVisibilityProbe([coreNotification, designNotification])
+  configureApiClientsForTest({ notifications: probe.client })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility.get(coreNotification.id)).toBe(true)
+  expect(probe.visibility.get(designNotification.id)).toBe(true)
+  expect(await response.json()).toMatchObject({
+    notifications: [{ id: coreNotification.id }, { id: designNotification.id }],
+    unreadCount: 2,
+  })
+})
+
+test('hides stale assignee-only notifications after Work Item reassignment', async () => {
+  configureFakeProjectClients(true, {
+    detailAssigneeUserId: 'sato@example.com',
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+  })
+  const staleAssignment = createNotificationItem({
+    id: 'stale-assignment',
+    reasons: ['assignment'],
+  })
+  const staleDue = createNotificationItem({
+    id: 'stale-due',
+    reasons: ['due'],
+  })
+  const retainedMention = createNotificationItem({
+    id: 'retained-mention',
+    reasons: ['assignment', 'mention'],
+  })
+  const probe = createNotificationVisibilityProbe([staleAssignment, staleDue, retainedMention])
+  configureApiClientsForTest({ notifications: probe.client })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility.get(staleAssignment.id)).toBe(false)
+  expect(probe.visibility.get(staleDue.id)).toBe(false)
+  expect(probe.visibility.get(retainedMention.id)).toBe(true)
+  expect(await response.json()).toMatchObject({
+    notifications: [{ id: retainedMention.id }],
+    unreadCount: 1,
+  })
 })
 
 test('returns Cognito groups and system admin status for the current user', async () => {
@@ -4240,6 +4547,101 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
   })
 })
 
+test('DynamoDB Work Item update emits render-ready notification candidates', async () => {
+  const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#refero',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    issueId: 'wireframe',
+    sortOrder: 10,
+    title: 'Notification-ready Work Item',
+    assigneeUserId: 'before@example.com',
+    status: 'todo',
+    dueDate: '2026/07/20',
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  let reads = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentCommands.push({ input: command.input, name: command.constructor.name })
+      if (command.constructor.name === 'GetCommand') {
+        reads += 1
+        return {
+          Item: reads === 1
+            ? currentIssue
+            : {
+                ...currentIssue,
+                revision: 2,
+                assigneeUserId: 'after@example.com',
+                status: 'review',
+              },
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'manager-sub', kind: 'user', displayName: 'manager@example.com' },
+    idempotencyKey: 'notification-update',
+    occurredAt: '2026-07-12T01:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/teams/core-team/issues/wireframe' },
+    source: { kind: 'api', requestId: 'notification-update' },
+  })
+  const client = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'AuditTable',
+  )
+
+  await client.updateTeamIssue(
+    'workspace-1',
+    'core-team',
+    'wireframe',
+    {
+      assigneeUserId: 'after@example.com',
+      status: 'review',
+      expectedRevision: 1,
+    },
+    'manager@example.com',
+    auditContext,
+  )
+
+  const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
+  const transactItems = transaction?.input.TransactItems
+  const auditItem = Array.isArray(transactItems)
+    ? (transactItems[2] as { Put?: { Item?: Record<string, unknown> } })?.Put?.Item
+    : undefined
+
+  expect(auditItem).toMatchObject({
+    eventType: 'work-item.updated',
+    summary: 'Work Item assignment changed.',
+    metadata: {
+      actorMemberKey: 'manager@example.com',
+      teamId: 'core-team',
+      issueId: 'wireframe',
+      projectId: 'refero',
+      deepLink: '/teams/core-team/issues?issueId=wireframe',
+      notificationTitle: 'Notification-ready Work Item',
+      notificationCandidates: [
+        { memberKey: 'after@example.com', reason: 'assignment' },
+        { memberKey: 'after@example.com', reason: 'status-change' },
+      ],
+    },
+  })
+})
+
 test('DynamoDB Work Item client classifies revision CAS transaction conditions', async () => {
   const currentIssue = {
     schemaVersion: 1,
@@ -5907,6 +6309,10 @@ function configureFakeProjectClients(
     role?: ProjectRole
     systemAdminMemberKeys?: string[]
     taskAssigneeUserId?: string
+    /** Notification 認可で再取得する Work Item の現在 assigned Project ID です。 */
+    detailAssignedProjectId?: string
+    /** Notification 認可で再取得する Work Item の現在担当者です。 */
+    detailAssigneeUserId?: string
     teamProjects?: Array<{ id: string; name: string; tone: 'blue' | 'purple' | 'green' | 'yellow' }>
     /** owner Team ambiguity を再現する追加 Team です。 */
     additionalTeams?: Array<{
@@ -5958,7 +6364,11 @@ function configureFakeProjectClients(
   let workspaceReconcileFailures = options.workspaceReconcileFailures ?? 0
   const calls = {
     accessChecks: [] as Array<{ directoryId: string; projectId: string }>,
-    directoryReads: [] as Array<{ directoryId: string; locale: string }>,
+    directoryReads: [] as Array<{
+      directoryId: string
+      locale: string
+      consistentRead?: boolean
+    }>,
     memberDeletes: [] as Array<{ directoryId: string; projectId: string; memberKey: string }>,
     memberReads: [] as Array<{ directoryId: string; projectId: string }>,
     memberUpdates: [] as Array<{
@@ -6186,8 +6596,12 @@ function configureFakeProjectClients(
       },
     },
     projectDirectory: {
-      async getProjectDirectory(directoryId, locale) {
-        calls.directoryReads.push({ directoryId, locale })
+      async getProjectDirectory(directoryId, locale, consistentRead) {
+        calls.directoryReads.push({
+          directoryId,
+          locale,
+          ...(consistentRead === undefined ? {} : { consistentRead }),
+        })
 
         return {
           teams: [
@@ -6705,10 +7119,12 @@ function configureFakeProjectClients(
             revision: 1,
             id: issueId,
             teamId,
-            assignedProjectId: options.unassignedIssue ? undefined : 'refero',
+            assignedProjectId: options.unassignedIssue
+              ? undefined
+              : options.detailAssignedProjectId ?? 'refero',
             title: '初回オンボーディングの離脱要因を減らす',
             description: '初回体験の摩擦を下げる。',
-            assigneeUserId: 'sato@example.com',
+            assigneeUserId: options.detailAssigneeUserId ?? 'sato@example.com',
             status: 'in-progress',
             dueDate: '2026/06/18',
             priority: 'high',

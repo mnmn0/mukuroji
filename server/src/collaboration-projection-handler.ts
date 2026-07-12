@@ -14,6 +14,12 @@ import {
   listScopeConnections,
   postRealtimeMessage,
 } from './realtime-handler'
+import {
+  NOTIFICATION_PREFERENCES_KEY,
+  createNotificationDeliveryPlan,
+  parseStoredNotificationPreferences,
+  type NotificationPreferences,
+} from './notifications'
 
 /**
  * DynamoDB Streams event に含まれる AttributeValue の最小表現です。
@@ -107,6 +113,8 @@ export type AuditProjectionEvent = {
   actorUserId?: string
   /** Workspace membership と同じ namespace の actor member key です。 */
   actorMemberKey?: string
+  /** Inbox で actor を表示する安全なラベルです。 */
+  actorLabel?: string
   /** realtime client が購読する entity scope key です。 */
   scopeKey?: string
   /** entity の公開 ID です。 */
@@ -127,6 +135,14 @@ export type AuditProjectionEvent = {
   projectId?: string
   /** current comment ID です。 */
   commentId?: string
+  /** Reply が属する root comment ID です。 */
+  rootCommentId?: string
+  /** Inbox 行に表示する対象タイトルです。 */
+  notificationTitle?: string
+  /** Audit event の安全な短い概要です。 */
+  summary?: string
+  /** Scheduled due/overdue event が対象にした date-only 期限です。 */
+  dueDate?: string
   /** notification/realtime consumer へ配送する event かどうかです。 */
   outboxStatus: 'pending' | 'suppressed'
 }
@@ -184,6 +200,40 @@ export type NotificationProjectionKeys = {
   consumerName: string
 }
 
+/** Preference を反映した notification projection state です。 */
+export type NotificationProjectionDeliveryState = {
+  /** In-app Inbox に notification を表示するかどうかです。 */
+  inAppVisible: boolean
+  /** Inbox state です。In-app が無効なら archive として投影します。 */
+  inboxState: 'unread' | 'archived'
+  /** RecipientStatusIndex の partition key です。 */
+  recipientStatusKey: string
+  /** In-app 無効時に保存する archive timestamp です。 */
+  archivedAt?: string
+  /** 有効な delivery channel 一覧です。 */
+  deliveryChannels: Array<'inApp' | 'email' | 'push'>
+  /** Digest/quiet hours を反映した最短 delivery 時刻です。 */
+  deliveryAfter: string
+  /** Delivery plan の frequency です。 */
+  deliveryFrequency: NotificationPreferences['frequency']
+}
+
+/** Projection 時点で強整合 read した Work Item scope です。 */
+export type CurrentWorkItemNotificationScope = {
+  /** Work Item read を実施できる event だったかどうかです。 */
+  checked: boolean
+  /** Work Item が現在も存在するかどうかです。 */
+  exists: boolean
+  /** 現在割り当てられている Project ID です。 */
+  projectId?: string
+  /** 現在の担当 Workspace member key です。 */
+  assigneeMemberKey?: string
+  /** 現在の date-only 期限です。 */
+  dueDate?: string
+  /** 現在の Work Item status です。 */
+  status?: string
+}
+
 const dynamoDbClient = new DynamoDBClient({ region: getAwsRegion() })
 const cognitoClient = new CognitoIdentityProviderClient({ region: getAwsRegion() })
 const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
@@ -233,14 +283,22 @@ async function processRecord(
     await markProjectionProcessed(event.eventId)
     return
   }
-  const authorizationEvent = currentScope.checked
+  const scopedEvent = currentScope.checked
     ? { ...event, projectId: currentScope.projectId }
     : event
+  const authorizationEvent = refreshScheduledNotificationEvent(scopedEvent, currentScope)
+  if (!authorizationEvent) {
+    await markProjectionProcessed(event.eventId)
+    return
+  }
 
   const watcherCandidates = await readSubscribedWatcherCandidates(authorizationEvent)
   const candidates = groupNotificationCandidates({
-    ...event,
-    notificationCandidates: [...event.notificationCandidates, ...watcherCandidates],
+    ...authorizationEvent,
+    notificationCandidates: [
+      ...authorizationEvent.notificationCandidates,
+      ...watcherCandidates,
+    ],
   })
   const directoryItems = candidates.length > 0 && (authorizationEvent.projectId || authorizationEvent.teamId)
     ? await readProjectDirectory(authorizationEvent.workspaceId)
@@ -261,7 +319,7 @@ async function processRecord(
   ).filter(isDefined)
 
   await Promise.all(
-    eligibleCandidates.map((candidate) => projectNotification(event, candidate)),
+    eligibleCandidates.map((candidate) => projectNotification(authorizationEvent, candidate)),
   )
   await publishRealtimeInvalidation(event)
   await markProjectionProcessed(event.eventId)
@@ -364,9 +422,20 @@ async function projectNotification(
   event: AuditProjectionEvent,
   candidate: GroupedNotificationCandidate,
 ) {
-  const { recipientKey, notificationKey, consumerName } = createNotificationProjectionKeys(
+  const {
+    recipientKey,
+    consumerName,
+  } = createNotificationProjectionKeys(event, candidate.memberKey)
+  const preferences = await readProjectionNotificationPreferences(recipientKey)
+  const deliveryState = createNotificationProjectionDeliveryState(
+    recipientKey,
+    event.occurredAt,
+    preferences,
+  )
+  const notificationItem = createNotificationProjectionItem(
     event,
-    candidate.memberKey,
+    candidate,
+    deliveryState,
   )
 
   try {
@@ -376,27 +445,7 @@ async function projectNotification(
           {
             Put: {
               TableName: requireEnv('NOTIFICATIONS_TABLE_NAME'),
-              Item: {
-                recipientKey,
-                notificationKey,
-                notificationId: event.eventId,
-                workspaceId: event.workspaceId,
-                recipientMemberKey: candidate.memberKey,
-                eventId: event.eventId,
-                eventType: event.eventType,
-                actorUserId: event.actorUserId,
-                actorMemberKey: event.actorMemberKey,
-                entityId: event.entityId,
-                entityKey: event.scopeKey,
-                targetId: event.targetId,
-                commentId: event.commentId,
-                projectId: event.projectId,
-                teamId: event.teamId,
-                deepLink: event.deepLink,
-                reasons: candidate.reasons,
-                occurredAt: event.occurredAt,
-                createdAt: event.occurredAt,
-              },
+              Item: notificationItem,
               ConditionExpression:
                 'attribute_not_exists(recipientKey) AND attribute_not_exists(notificationKey)',
             },
@@ -498,6 +547,126 @@ export function createNotificationProjectionKeys(
     notificationKey: `${event.occurredAt}#${event.eventId}`,
     consumerName: `collaboration-notification#${normalizedMemberKey}`,
   }
+}
+
+/** In-app channel、digest frequency、quiet hours を notification row へ反映します。 */
+export function createNotificationProjectionDeliveryState(
+  recipientKey: string,
+  occurredAt: string,
+  preferences: NotificationPreferences,
+): NotificationProjectionDeliveryState {
+  const deliveryPlan = createNotificationDeliveryPlan(preferences, occurredAt)
+  const inboxState = preferences.channels.inApp ? 'unread' : 'archived'
+
+  return {
+    inAppVisible: preferences.channels.inApp,
+    inboxState,
+    recipientStatusKey: `${recipientKey}#${inboxState}`,
+    ...(inboxState === 'archived' ? { archivedAt: occurredAt } : {}),
+    deliveryChannels: deliveryPlan.channels,
+    deliveryAfter: deliveryPlan.deliveryAfter,
+    deliveryFrequency: deliveryPlan.frequency,
+  }
+}
+
+/** Audit event と recipient 候補から durable notification row を作成します。 */
+export function createNotificationProjectionItem(
+  event: AuditProjectionEvent,
+  candidate: GroupedNotificationCandidate,
+  deliveryState: NotificationProjectionDeliveryState,
+  expiresAt = currentEpochSeconds() + readPositiveIntegerEnv(
+    'NOTIFICATION_RETENTION_SECONDS',
+    365 * 24 * 60 * 60,
+  ),
+) {
+  const { recipientKey, notificationKey } = createNotificationProjectionKeys(
+    event,
+    candidate.memberKey,
+  )
+
+  return {
+    recipientKey,
+    notificationKey,
+    recipientStatusKey: deliveryState.recipientStatusKey,
+    itemType: 'notification',
+    inboxState: deliveryState.inboxState,
+    inAppVisible: deliveryState.inAppVisible,
+    version: 1,
+    notificationId: event.eventId,
+    workspaceId: event.workspaceId,
+    recipientMemberKey: candidate.memberKey,
+    eventId: event.eventId,
+    eventType: event.eventType,
+    actorUserId: event.actorUserId,
+    actorMemberKey: event.actorMemberKey,
+    actorLabel: event.actorLabel,
+    entityId: event.entityId,
+    entityKey: event.scopeKey,
+    targetId: event.targetId,
+    issueId: event.issueId,
+    commentId: event.commentId,
+    rootCommentId: event.rootCommentId,
+    projectId: event.projectId,
+    teamId: event.teamId,
+    deepLink: event.deepLink,
+    title: event.notificationTitle,
+    summary: event.summary,
+    reasons: candidate.reasons,
+    deliveryChannels: deliveryState.deliveryChannels,
+    deliveryAfter: deliveryState.deliveryAfter,
+    deliveryFrequency: deliveryState.deliveryFrequency,
+    ...(deliveryState.archivedAt ? { archivedAt: deliveryState.archivedAt } : {}),
+    occurredAt: event.occurredAt,
+    createdAt: event.occurredAt,
+    expiresAt,
+  }
+}
+
+/** Scheduled notification を projection 時点の担当者と期限へ再検証します。 */
+export function refreshScheduledNotificationEvent(
+  event: AuditProjectionEvent,
+  scope: CurrentWorkItemNotificationScope,
+): AuditProjectionEvent | undefined {
+  if (event.eventType !== 'work-item.due' && event.eventType !== 'work-item.overdue') {
+    return event
+  }
+
+  const reason = event.eventType === 'work-item.due' ? 'due' : 'overdue'
+  const scheduledMemberKey = normalizeMemberKey(
+    event.notificationCandidates.find((candidate) => candidate.reason === reason)?.memberKey,
+  )
+  if (
+    !scope.checked ||
+    !scope.exists ||
+    !scope.assigneeMemberKey ||
+    scope.status === 'done' ||
+    !event.dueDate ||
+    scope.dueDate !== event.dueDate ||
+    scheduledMemberKey !== scope.assigneeMemberKey
+  ) {
+    return undefined
+  }
+
+  return {
+    ...event,
+    notificationCandidates: [{
+      memberKey: scope.assigneeMemberKey,
+      reason,
+    }],
+  }
+}
+
+async function readProjectionNotificationPreferences(recipientKey: string) {
+  const result = await documentClient.send(new GetCommand({
+    TableName: requireEnv('NOTIFICATIONS_TABLE_NAME'),
+    Key: {
+      recipientKey,
+      notificationKey: NOTIFICATION_PREFERENCES_KEY,
+    },
+    ConsistentRead: true,
+  }))
+
+  return parseStoredNotificationPreferences(result.Item)
 }
 
 /**
@@ -733,7 +902,9 @@ async function readProjectDirectory(directoryId: string) {
   return items
 }
 
-async function readCurrentWorkItemScope(event: AuditProjectionEvent) {
+async function readCurrentWorkItemScope(
+  event: AuditProjectionEvent,
+): Promise<CurrentWorkItemNotificationScope> {
   if (!event.teamId || !event.issueId) {
     return { checked: false, exists: true, projectId: event.projectId }
   }
@@ -754,6 +925,9 @@ async function readCurrentWorkItemScope(event: AuditProjectionEvent) {
     checked: true,
     exists: true,
     projectId: typeof item.assignedProjectId === 'string' ? item.assignedProjectId : undefined,
+    assigneeMemberKey: normalizeMemberKey(readString(item.assigneeUserId)),
+    dueDate: normalizeStoredDateOnly(readString(item.dueDate)),
+    status: readString(item.status),
   }
 }
 
@@ -789,6 +963,7 @@ export function parseAuditProjectionEvent(
     occurredAt,
     actorUserId: readString(value.actorUserId) ?? readString(actor.id),
     actorMemberKey: readString(metadata.actorMemberKey),
+    actorLabel: readString(actor.displayName) ?? readString(metadata.actorMemberKey),
     scopeKey,
     entityId,
     targetId: readString(value.targetId) ?? readString(target.id),
@@ -798,6 +973,10 @@ export function parseAuditProjectionEvent(
     issueId: readString(metadata.issueId),
     projectId: readString(metadata.projectId),
     commentId: readString(metadata.commentId),
+    rootCommentId: readString(metadata.rootCommentId),
+    notificationTitle: readString(metadata.notificationTitle) ?? readString(metadata.title),
+    summary: readString(value.summary),
+    dueDate: normalizeStoredDateOnly(readString(metadata.dueDate)),
     outboxStatus: value.outboxStatus === 'suppressed' ? 'suppressed' : 'pending',
   }
 }
@@ -862,6 +1041,12 @@ function unmarshalAttribute(value: DynamoAttributeValue): unknown {
 
 function normalizeMemberKey(value: string | undefined) {
   return value?.trim().toLowerCase()
+}
+
+function normalizeStoredDateOnly(value: string | undefined) {
+  return value && /^\d{4}[-/]\d{2}[-/]\d{2}$/.test(value)
+    ? value.replaceAll('/', '-')
+    : undefined
 }
 
 function readString(value: unknown) {

@@ -38,6 +38,7 @@ const defaultArgs = {
   getSession: () => storySession,
   clearSession: () => undefined,
   loadCurrentUser: async () => storyUser,
+  loadNotificationUnreadCount: async () => 3,
   loadProjectDirectory: async () => projectDirectoryFixtures,
   initialProjectDirectory: projectDirectoryFixtures,
 } satisfies Partial<Parameters<typeof DashboardPage>[0]>
