@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router'
+import { useNavigate, useParams, useSearchParams } from 'react-router'
 import useSWR from 'swr'
 import {
   canManageWorkspaceStructure,
@@ -26,12 +26,17 @@ import {
   createTeamIssue,
   getTeamIssueDetail,
   getTeamIssues,
+  TeamIssuesApiError,
   type CreateTeamIssueInput,
   type TeamIssue,
   type UpdateTeamIssueInput,
   updateTeamIssue,
 } from '../issues/api'
 import { IssueCollaborationPanel } from '../issues/IssueCollaborationPanel'
+import {
+  resolveWorkItemAssignee,
+  resolveWorkItemTitle,
+} from '../issues/workItemDisplay'
 import {
   type IssueCollaborationController,
   useIssueCollaboration,
@@ -51,6 +56,7 @@ import {
 } from '../projects/api'
 import {
   createProjectIssuesPath,
+  createTeamIssuesPath,
   createTeamViewPath,
   workspaceNavPaths,
 } from '../routes/paths'
@@ -191,11 +197,12 @@ type TeamIssueScreenProps = {
 export function TeamIssuePage() {
   const navigate = useNavigate()
   const params = useParams()
+  const [searchParams] = useSearchParams()
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   const teamId = params.teamId ?? 'core-team'
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
-  const [selectedIssueId, setSelectedIssueId] = useState<string | undefined>()
+  const requestedIssueId = searchParams.get('issueId')?.trim() || undefined
   const t = useMemo(() => createTranslator(locale), [locale])
   const accessToken = session?.accessToken
   const currentUserKey = accessToken ? (['current-user', accessToken] as const) : null
@@ -234,8 +241,8 @@ export function TeamIssuePage() {
     isLoading: isIssuesLoading,
     mutate: mutateIssues,
   } = useSWR(issueKey, ([, token, currentTeamId]) => getTeamIssues(currentTeamId, token), apiSWRConfig)
-  const resolvedSelectedIssueId = selectedIssueId && issues.some((issue) => issue.id === selectedIssueId)
-    ? selectedIssueId
+  const resolvedSelectedIssueId = requestedIssueId && issues.some((issue) => issue.id === requestedIssueId)
+    ? requestedIssueId
     : issues[0]?.id
   const resolvedSelectedIssue = issues.find((issue) => issue.id === resolvedSelectedIssueId)
   const collaboration = useIssueCollaboration({
@@ -249,6 +256,7 @@ export function TeamIssuePage() {
     ? (['team-issue-detail', accessToken, teamId, resolvedSelectedIssueId] as const)
     : null
   const {
+    data: issueDetail,
     error: detailError,
     mutate: mutateIssueDetail,
   } = useSWR(
@@ -256,6 +264,9 @@ export function TeamIssuePage() {
     ([, token, currentTeamId, issueId]) => getTeamIssueDetail(currentTeamId, issueId, token),
     apiSWRConfig,
   )
+  const screenIssues = issueDetail?.issue
+    ? issues.map((issue) => issue.id === issueDetail.issue.id ? issueDetail.issue : issue)
+    : issues
   const memberKey = accessToken && activeTeam
     ? (['team-issue-members', accessToken, activeTeam.projects.map((project) => project.id).join('\u0000')] as const)
     : null
@@ -312,7 +323,7 @@ export function TeamIssuePage() {
       JSON.stringify(input),
       (context) => createTeamIssue(teamId, accessToken, input, context),
     )
-    setSelectedIssueId(issue.id)
+    navigate(createTeamIssuesPath(teamId, issue.id))
     await mutateIssues()
   }
 
@@ -321,13 +332,39 @@ export function TeamIssuePage() {
       return
     }
 
-    await mutationRequestRunner.run(
-      `issue:update:${teamId}:${issueId}`,
-      JSON.stringify(input),
-      (context) => updateTeamIssue(teamId, issueId, accessToken, input, context),
-    )
-    await mutateIssues()
-    await mutateIssueDetail()
+    const currentIssue = issueDetail?.issue.id === issueId
+      ? issueDetail.issue
+      : issues.find((issue) => issue.id === issueId)
+
+    if (!currentIssue || currentIssue.source === 'legacy') {
+      return
+    }
+
+    try {
+      await mutationRequestRunner.run(
+        `issue:update:${teamId}:${issueId}`,
+        JSON.stringify([currentIssue.revision, input]),
+        (context) => updateTeamIssue(
+          teamId,
+          issueId,
+          accessToken,
+          {
+            ...input,
+            expectedRevision: currentIssue.revision,
+          },
+          context,
+        ),
+      )
+      await mutateIssues()
+      await mutateIssueDetail()
+    } catch (error) {
+      if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
+        await Promise.all([mutateIssues(), mutateIssueDetail()])
+        throw new Error(t('issues.error.conflict'), { cause: error })
+      }
+
+      throw error
+    }
   }
 
   const handleCreateTeam = async (input: CreateProjectDirectoryTeamInput) => {
@@ -392,7 +429,7 @@ export function TeamIssuePage() {
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}
       issueErrorMessage={issueErrorMessage}
-      issues={issues}
+      issues={screenIssues}
       isLoading={isLoading}
       locale={locale}
       onArchiveProject={canManageStructure ? handleArchiveProject : undefined}
@@ -400,7 +437,7 @@ export function TeamIssuePage() {
       onCreateIssue={canMutateContent ? handleCreateIssue : undefined}
       onCreateProject={canManageStructure ? handleCreateProject : undefined}
       onCreateTeam={canManageStructure ? handleCreateTeam : undefined}
-      onSelectIssue={setSelectedIssueId}
+      onSelectIssue={(issueId) => navigate(createTeamIssuesPath(teamId, issueId))}
       onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
       onSelectProject={(projectId, nextTeamId) => navigate(createProjectIssuesPath(projectId, nextTeamId))}
       onSelectTeamView={(nextTeamId, viewId) => navigate(createTeamViewPath(nextTeamId, viewId))}
@@ -454,9 +491,15 @@ export function TeamIssueScreen({
   const [statusFilter, setStatusFilter] = useState<TaskStatus | 'all'>('all')
   const [isCreateOpen, setIsCreateOpen] = useState(defaultCreateIssueOpen)
   const [createErrorMessage, setCreateErrorMessage] = useState<string | undefined>()
-  const [detailErrorMessageLocal, setDetailErrorMessageLocal] = useState<string | undefined>()
+  const [detailUpdateError, setDetailUpdateError] = useState<readonly [string, string] | undefined>()
   const activeTeam = teams.find((team) => team.id === teamId)
   const selectedIssue = issues.find((issue) => issue.id === selectedIssueId)
+  const selectedIssueUpdateErrorKey = selectedIssue
+    ? JSON.stringify([selectedIssue.teamId, selectedIssue.id])
+    : undefined
+  const detailErrorMessageLocal = detailUpdateError && detailUpdateError[0] === selectedIssueUpdateErrorKey
+    ? detailUpdateError[1]
+    : undefined
   const visibleIssues = useMemo(
     () =>
       issues.filter((issue) => {
@@ -473,7 +516,7 @@ export function TeamIssueScreen({
 
         return [
           resolveIssueTitle(issue, t),
-          resolveIssueAssignee(issue),
+          resolveWorkItemAssignee(issue, t),
           resolveAssignedProjectName(issue, activeTeam, t),
           t(`tasks.status.${issue.status}`),
           t(`tasks.priority.${issue.priority}`),
@@ -628,7 +671,10 @@ export function TeamIssueScreen({
                     <IssueTable
                       activeTeam={activeTeam}
                       issues={visibleIssues}
-                      onSelectIssue={onSelectIssue}
+                      onSelectIssue={(issueId) => {
+                        setDetailUpdateError(undefined)
+                        onSelectIssue?.(issueId)
+                      }}
                       selectedIssueId={selectedIssueId}
                       t={t}
                     />
@@ -636,7 +682,10 @@ export function TeamIssueScreen({
                     <IssueBoard
                       activeTeam={activeTeam}
                       issues={visibleIssues}
-                      onSelectIssue={onSelectIssue}
+                      onSelectIssue={(issueId) => {
+                        setDetailUpdateError(undefined)
+                        onSelectIssue?.(issueId)
+                      }}
                       selectedIssueId={selectedIssueId}
                       t={t}
                     />
@@ -651,12 +700,17 @@ export function TeamIssueScreen({
                 issue={selectedIssue}
                 locale={locale}
                 onUpdateIssue={onUpdateIssue ? async (issueId, input) => {
-                  setDetailErrorMessageLocal(undefined)
+                  setDetailUpdateError(undefined)
 
                   try {
                     await onUpdateIssue(issueId, input)
                   } catch (error) {
-                    setDetailErrorMessageLocal(error instanceof Error ? error.message : t('issues.error.update'))
+                    if (selectedIssueUpdateErrorKey) {
+                      setDetailUpdateError([
+                        selectedIssueUpdateErrorKey,
+                        error instanceof Error ? error.message : t('issues.error.update'),
+                      ])
+                    }
                   }
                 } : undefined}
                 projects={activeTeam?.projects ?? []}
@@ -908,7 +962,7 @@ function IssueTable({
                     </button>
                   </td>
                   <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveAssignedProjectName(issue, activeTeam, t)}</td>
-                  <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveIssueAssignee(issue)}</td>
+                  <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveWorkItemAssignee(issue, t)}</td>
                   <td className="px-4 py-4"><IssueStatusBadge status={issue.status} t={t} /></td>
                   <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{issue.dueDate}</td>
                   <td className="px-4 py-4"><IssuePriorityBadge priority={issue.priority} t={t} /></td>
@@ -1028,7 +1082,7 @@ function IssueDetailPane({
     <aside className="workbench-detail-pane min-h-0 min-w-0 max-[1080px]:border-l-0 max-[1080px]:border-t">
       <form
         className="grid min-w-0 gap-4 px-6 py-7"
-        key={issue.id}
+        key={`${issue.id}:${issue.revision}`}
         onSubmit={(event) => {
           event.preventDefault()
 
@@ -1052,7 +1106,7 @@ function IssueDetailPane({
             nextIssueInput.assigneeUserId = selectedAssigneeUserId
           }
 
-          void onUpdateIssue?.(issue.id, nextIssueInput)
+          void onUpdateIssue?.(issue.id, nextIssueInput).catch(() => undefined)
         }}
       >
         <div className="flex min-w-0 items-start justify-between gap-3">
@@ -1087,7 +1141,7 @@ function IssueDetailPane({
               {t('issues.create.assignee')}
               <select className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.assigneeUserId} name="assigneeUserId">
                 {!hasSelectedAssigneeOption ? (
-                  <option value={issue.assigneeUserId}>{resolveIssueAssignee(issue)}</option>
+                  <option value={issue.assigneeUserId}>{resolveWorkItemAssignee(issue, t)}</option>
                 ) : null}
                 {assigneeOptions.map((member) => (
                   <option key={member.id} value={member.id}>{formatProjectMemberOption(member)}</option>
@@ -1166,11 +1220,7 @@ function formatLocalDateInputValue(date = new Date()) {
 }
 
 function resolveIssueTitle(issue: TeamIssue, t: (key: MessageKey) => string) {
-  return issue.title ?? (issue.titleKey ? t(issue.titleKey) : issue.id)
-}
-
-function resolveIssueAssignee(issue: TeamIssue) {
-  return issue.assigneeName ?? issue.assigneeEmail ?? issue.assigneeUserId
+  return resolveWorkItemTitle(issue, t)
 }
 
 function resolveAssignedProjectName(

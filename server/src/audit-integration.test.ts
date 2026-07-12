@@ -18,31 +18,8 @@ afterEach(() => {
   resetApiClientsForTest()
 })
 
-test('project task mutations write state and audit atomically with deterministic event IDs', async () => {
-  let taskQueryCount = 0
-  const recording = createRecordingDocumentClient((name) => {
-    if (name !== 'QueryCommand') {
-      return {}
-    }
-
-    taskQueryCount += 1
-    return taskQueryCount === 1
-      ? { Items: [] }
-      : {
-          Items: [{
-            directoryId: workspaceId,
-            directoryProjectId: `${workspaceId}#project#refero`,
-            projectId: 'refero',
-            taskId: 'prepare-audit-launch',
-            sortOrder: 10,
-            title: 'Prepare audit launch',
-            assigneeUserId: actorUserId,
-            status: 'todo',
-            dueDate: '2026/07/31',
-            priority: 'high',
-          }],
-        }
-  })
+test('legacy project task mutations are rejected before state or audit writes', async () => {
+  const recording = createRecordingDocumentClient(() => ({}))
   const client = new DynamoDbProjectTasksClient(
     'TasksTable',
     recording.client,
@@ -50,68 +27,27 @@ test('project task mutations write state and audit atomically with deterministic
     false,
     'AuditTable',
   )
-  const input = {
+  await expect(client.createProjectTask(workspaceId, 'refero', {
     title: 'Prepare audit launch',
     assigneeUserId: actorUserId,
-    status: 'todo' as const,
+    status: 'todo',
     dueDate: '2026/07/31',
-    priority: 'high' as const,
-  }
-
-  await client.createProjectTask(
+    priority: 'high',
+  }, createAuditContext('legacy-create'))).rejects.toMatchObject({
+    code: 'LegacyProjectTaskReadOnly',
+    status: 409,
+  })
+  await expect(client.updateProjectTaskStatus(
     workspaceId,
     'refero',
-    input,
-    createAuditContext('stable-task-request'),
-  )
-  await client.createProjectTask(
-    workspaceId,
-    'refero',
-    input,
-    createAuditContext('stable-task-request'),
-  )
-
-  const transactions = recording.commands.filter((command) => command.name === 'TransactWriteCommand')
-
-  expect(transactions).toHaveLength(2)
-  const firstItems = readTransactItems(transactions[0])
-  const secondItems = readTransactItems(transactions[1])
-
-  expect(firstItems).toHaveLength(2)
-  expect(firstItems[0]).toMatchObject({
-    Put: {
-      TableName: 'TasksTable',
-      Item: {
-        directoryId: workspaceId,
-        projectId: 'refero',
-        taskId: 'prepare-audit-launch',
-      },
-    },
+    'prepare-audit-launch',
+    { status: 'done', expectedRevision: 1 },
+    createAuditContext('legacy-update'),
+  )).rejects.toMatchObject({
+    code: 'LegacyProjectTaskReadOnly',
+    status: 409,
   })
-  expect(firstItems[1]).toMatchObject({
-    Put: {
-      TableName: 'AuditTable',
-      Item: {
-        directoryId: workspaceId,
-        eventType: 'work-item.created',
-        entityType: 'work-item',
-        entityId: 'project/refero/task/prepare-audit-launch',
-        actorUserId,
-        outboxStatus: 'pending',
-      },
-    },
-  })
-  expect(secondItems[0]).toMatchObject({
-    Put: {
-      Item: {
-        taskId: 'prepare-audit-launch-2',
-      },
-    },
-  })
-  expect(readAuditEvent(secondItems[1]).entityId).toBe(
-    'project/refero/task/prepare-audit-launch-2',
-  )
-  expect(readAuditEvent(firstItems[1]).eventId).toBe(readAuditEvent(secondItems[1]).eventId)
+  expect(recording.commands).toEqual([])
 })
 
 test('project directory mutations write state and audit in one transaction', async () => {
@@ -198,6 +134,8 @@ test('team issue mutations keep state, specialized activity, and generic audit a
         directoryId: workspaceId,
         teamId: 'core-team',
         issueId: 'ship-audit-trail',
+        schemaVersion: 1,
+        revision: 1,
       },
     },
   })
@@ -218,12 +156,16 @@ test('team issue mutations keep state, specialized activity, and generic audit a
         entityType: 'work-item',
         entityId: 'team/core-team/issue/ship-audit-trail',
         action: 'created',
+        metadata: {
+          adapter: 'canonical-work-item',
+          afterRevision: 1,
+        },
       },
     },
   })
 })
 
-test('team issue audit diff is guarded by the pre-read updatedAt revision', async () => {
+test('canonical Work Item audit diff is guarded by expected revision CAS', async () => {
   const issueItem = createTeamIssueItem('issue-1')
   const recording = createRecordingDocumentClient((name) =>
     name === 'GetCommand' ? { Item: issueItem } : {},
@@ -241,7 +183,7 @@ test('team issue audit diff is guarded by the pre-read updatedAt revision', asyn
     workspaceId,
     'core-team',
     'issue-1',
-    { status: 'done' },
+    { status: 'done', expectedRevision: 1 },
     actorUserId,
     createAuditContext('update-team-issue'),
   )
@@ -251,9 +193,12 @@ test('team issue audit diff is guarded by the pre-read updatedAt revision', asyn
 
   expect(stateUpdate).toMatchObject({
     ConditionExpression:
-      'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #updatedAt = :beforeUpdatedAt',
+      'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
+      '(#revision = :expectedRevision OR ' +
+      '(attribute_not_exists(#revision) AND :expectedRevision = :legacyRevision))',
     ExpressionAttributeValues: {
-      ':beforeUpdatedAt': occurredAt,
+      ':expectedRevision': 1,
+      ':nextRevision': 2,
     },
   })
 })
@@ -530,19 +475,6 @@ function readPutItem(item: Record<string, unknown> | undefined) {
   }
 
   return put.Item
-}
-
-/**
- * transaction item から汎用 audit event を読み取ります。
- */
-function readAuditEvent(item: Record<string, unknown> | undefined) {
-  const event = readPutItem(item)
-
-  if (typeof event.eventId !== 'string') {
-    throw new TypeError('Expected an audit event ID.')
-  }
-
-  return event
 }
 
 /**

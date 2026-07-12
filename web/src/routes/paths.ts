@@ -36,6 +36,23 @@ export function createProjectIssuesPath(projectId: string, teamId: string, issue
 }
 
 /**
+ * チーム所有 Issue 画面 URL を生成します。
+ *
+ * @param teamId - Issue を所有する Team ID です。
+ * @param issueId - 詳細を初期表示する任意の Issue ID です。
+ * @returns Team Issue 一覧または指定 Issue 詳細への URL です。
+ */
+export function createTeamIssuesPath(teamId: string, issueId?: string) {
+  const path = `/teams/${encodeURIComponent(teamId)}/issues`
+
+  if (!issueId) {
+    return path
+  }
+
+  return `${path}?${new URLSearchParams({ issueId }).toString()}`
+}
+
+/**
  * チーム配下の固定ビュー URL を生成します。
  */
 export function createTeamViewPath(teamId: string, viewId: SidebarTeamViewId) {

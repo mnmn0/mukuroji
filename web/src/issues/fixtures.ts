@@ -4,6 +4,7 @@ import type {
   TeamIssueActivityEvent,
   TeamIssueComment,
 } from './api'
+import { WORK_ITEM_SCHEMA_VERSION } from '@mukuroji/contracts'
 import type { WorkspaceMember } from '../workspace/api'
 import type { IssueCollaborationController } from './useIssueCollaboration'
 
@@ -12,6 +13,8 @@ import type { IssueCollaborationController } from './useIssueCollaboration'
  */
 export const teamIssueFixtures = [
   {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
     id: 'onboarding-friction',
     teamId: 'core-team',
     assignedProjectId: 'refero',
@@ -25,8 +28,11 @@ export const teamIssueFixtures = [
     priority: 'high',
     createdAt: '2026-06-08T00:00:00.000Z',
     updatedAt: '2026-06-08T00:00:00.000Z',
+    source: 'dynamodb',
   },
   {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
     id: 'billing-copy',
     teamId: 'core-team',
     title: '料金導線の説明不足を解消する',
@@ -39,6 +45,7 @@ export const teamIssueFixtures = [
     priority: 'medium',
     createdAt: '2026-06-08T00:00:00.000Z',
     updatedAt: '2026-06-08T00:00:00.000Z',
+    source: 'dynamodb',
   },
 ] satisfies TeamIssue[]
 

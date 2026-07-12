@@ -26,10 +26,14 @@ import {
   type MessageKey,
 } from '../i18n'
 import {
-  getProjectIssues,
+  getWorkspaceWorkItems,
+  TeamIssuesApiError,
   updateTeamIssue,
-  type TeamIssue,
 } from '../issues/api'
+import {
+  resolveWorkItemAssignee,
+  resolveWorkItemTitle,
+} from '../issues/workItemDisplay'
 import {
   archiveProjectDirectoryProject,
   archiveProjectDirectoryTeam,
@@ -46,6 +50,7 @@ import {
 } from '../projects/api'
 import {
   createProjectIssuesPath,
+  createTeamIssuesPath,
   createTeamViewPath,
   workspaceNavPaths,
 } from '../routes/paths'
@@ -59,7 +64,6 @@ import {
   type ProjectTask,
   type TaskPriority,
   type TaskStatus,
-  updateProjectTaskStatus,
 } from '../tasks/api'
 import { WorkspaceAccessPanelContainer } from '../workspace/WorkspaceAccessPanel'
 
@@ -115,20 +119,6 @@ type TeamProjectMembersResult = {
   members: TeamProjectMemberAccess[]
   /**
    * member 取得に失敗したプロジェクト ID の一覧です。
-   */
-  failedProjectIds: string[]
-}
-
-/**
- * ワークスペース横断の project task 取得結果です。
- */
-type WorkspaceProjectTasksResult = {
-  /**
-   * 取得に成功したプロジェクトのタスク一覧です。
-   */
-  tasks: ProjectTask[]
-  /**
-   * タスク取得に失敗したプロジェクト ID の一覧です。
    */
   failedProjectIds: string[]
 }
@@ -511,23 +501,23 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   const activeTeam = useMemo(() => findActiveTeam(teams, params.teamId), [params.teamId, teams])
   const activeTeamProjects = activeTeam?.projects ?? []
   const isTeamManagementView = view === 'team-overview' || view === 'team-members'
-  const projectTasksKey =
-    accessToken && user && !currentUserError && projectIds.length > 0
-      ? (['workspace-project-tasks', accessToken, projectIds] as const)
+  const workspaceWorkItemsKey =
+    accessToken && user && !currentUserError
+      ? (['workspace-work-items', accessToken] as const)
       : null
   const {
-    data: projectTasksResult,
-    isLoading: isProjectTasksLoading,
-    mutate: mutateProjectTasks,
+    data: tasks = emptyProjectTasks,
+    error: workspaceWorkItemsError,
+    isLoading: isWorkspaceWorkItemsLoading,
+    mutate: mutateWorkspaceWorkItems,
   } = useSWR(
-    projectTasksKey,
-    ([, currentAccessToken, currentProjectIds]) =>
-      loadProjectTasks(currentProjectIds, currentAccessToken),
+    workspaceWorkItemsKey,
+    ([, currentAccessToken]) => getWorkspaceWorkItems(currentAccessToken),
     apiSWRConfig,
   )
-  const tasks = projectTasksResult?.tasks ?? emptyProjectTasks
-  const taskLoadFailedProjectIds =
-    projectTasksResult?.failedProjectIds ?? emptyProjectTaskFailures
+  const taskLoadFailedProjectIds = workspaceWorkItemsError
+    ? projectIds
+    : emptyProjectTaskFailures
   const teamProjectMembersKey =
     accessToken && user && !currentUserError && isTeamManagementView && activeTeamProjects.length > 0
       ? ([
@@ -569,7 +559,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     isCurrentUserLoading ||
     Boolean(currentUserError) ||
     Boolean(user && isProjectDirectoryLoading) ||
-    Boolean(user && projectIds.length > 0 && isProjectTasksLoading)
+    Boolean(user && isWorkspaceWorkItemsLoading)
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -660,7 +650,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   }
 
   const handleMoveTaskStatus = async (task: ProjectTask, status: TaskStatus) => {
-    if (!accessToken || !task.projectId || task.status === status || isLegacyWorkspaceTask(task)) {
+    if (!accessToken || task.status === status || isLegacyWorkspaceTask(task)) {
       return
     }
 
@@ -672,46 +662,38 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
 
     pendingTaskMoveKeysRef.current.add(taskKey)
     const nextTasks = updateWorkspaceTaskStatus(tasks, task, status, task.status)
-    const currentProjectTasksResult: WorkspaceProjectTasksResult = {
-      failedProjectIds: taskLoadFailedProjectIds,
-      tasks,
-    }
-    const nextProjectTasksResult: WorkspaceProjectTasksResult = {
-      ...currentProjectTasksResult,
-      tasks: nextTasks,
-    }
 
     try {
-      await mutateProjectTasks(
-        (currentResult = currentProjectTasksResult) => ({
-          ...currentResult,
-          tasks: updateWorkspaceTaskStatus(currentResult.tasks, task, status, task.status),
-        }),
+      await mutateWorkspaceWorkItems(
+        (currentTasks = tasks) =>
+          updateWorkspaceTaskStatus(currentTasks, task, status, task.status),
         { revalidate: false },
       )
       const updatedTask = await mutationRequestRunner.run(
         `task:status:${taskKey}`,
-        status,
+        JSON.stringify([task.revision, status]),
         (context) => updateWorkspaceTaskRemote(task, accessToken, status, context),
       )
-      await mutateProjectTasks(
-        (currentResult = nextProjectTasksResult) => ({
-          ...currentResult,
-          tasks: replaceWorkspaceTask(currentResult.tasks, updatedTask),
-        }),
+      await mutateWorkspaceWorkItems(
+        (currentTasks = nextTasks) => replaceWorkspaceTask(currentTasks, updatedTask),
         {
           revalidate: false,
         },
       )
     } catch (error) {
-      await mutateProjectTasks(
-        (currentResult = nextProjectTasksResult) => ({
-          ...currentResult,
-          tasks: updateWorkspaceTaskStatus(currentResult.tasks, task, task.status),
-        }),
+      await mutateWorkspaceWorkItems(
+        (currentTasks = nextTasks) =>
+          updateWorkspaceTaskStatus(currentTasks, task, task.status, status),
         { revalidate: false },
       )
-      setTaskMoveErrorMessage(t('workspace.myTasks.moveError'))
+
+      if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
+        setTaskMoveErrorMessage(t('workspace.myTasks.conflict'))
+        await mutateWorkspaceWorkItems()
+      } else {
+        setTaskMoveErrorMessage(t('workspace.myTasks.moveError'))
+      }
+
       throw error
     } finally {
       pendingTaskMoveKeysRef.current.delete(taskKey)
@@ -742,11 +724,15 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       onArchiveTeam={canManageStructure ? handleArchiveTeam : undefined}
       onMoveTaskStatus={canMutateContent ? handleMoveTaskStatus : undefined}
       onOpenTask={(task) => {
-        if (!task.projectId || !task.teamId) {
+        if (!task.teamId) {
           return
         }
 
-        navigate(createProjectIssuesPath(task.projectId, task.teamId, task.id))
+        navigate(
+          task.assignedProjectId
+            ? createProjectIssuesPath(task.assignedProjectId, task.teamId, task.id)
+            : createTeamIssuesPath(task.teamId, task.id),
+        )
       }}
       summary={summary}
       taskMoveErrorMessage={taskMoveErrorMessage}
@@ -1010,6 +996,7 @@ function WorkspaceBody({
       ) : null}
       {view === 'my-tasks' ? (
         <MyTasksView
+          onOpenTask={onOpenTask}
           t={t}
           taskMoveErrorMessage={taskMoveErrorMessage}
           tasks={myTasks}
@@ -1155,11 +1142,13 @@ function HomeView({
 }
 
 function MyTasksView({
+  onOpenTask,
   t,
   taskMoveErrorMessage,
   tasks,
   onMoveTaskStatus,
 }: {
+  onOpenTask?: (task: ProjectTask) => void
   t: (key: MessageKey) => string
   taskMoveErrorMessage?: string
   tasks: ProjectTask[]
@@ -1211,7 +1200,11 @@ function MyTasksView({
   }
 
   const handleDragOver = (event: DragEvent<HTMLElement>, status: TaskStatus) => {
-    if (!canMoveTasks || !draggedTaskKey) {
+    const carriesTaskKey = draggedTaskKey ||
+      event.dataTransfer.types.includes('application/x-mukuroji-task-key') ||
+      event.dataTransfer.types.includes('text/plain')
+
+    if (!canMoveTasks || !carriesTaskKey) {
       return
     }
 
@@ -1293,7 +1286,10 @@ function MyTasksView({
                       testId={`my-tasks-card-${createWorkspaceTaskTestId(task)}`}
                       onDragEnd={handleDragEnd}
                       onDragStart={(event) => handleDragStart(event, task)}
-                      onStatusChange={isLegacyTask ? undefined : (nextStatus) => moveTaskToStatus(task, nextStatus)}
+                      onOpenTask={onOpenTask}
+                      onStatusChange={isLegacyTask || !onMoveTaskStatus
+                        ? undefined
+                        : (nextStatus) => moveTaskToStatus(task, nextStatus)}
                     />
                   )
                 })}
@@ -1348,7 +1344,7 @@ function InboxView({
       resolveTaskTitle(task, t),
       resolveTaskAssignee(task, t),
       resolveWorkspaceProjectName(task, teams),
-      task.projectId,
+      task.assignedProjectId,
     ].some((value) => normalizeWorkspaceSearchText(value).includes(normalizedSearchQuery))
   })
 
@@ -2470,6 +2466,7 @@ function CompactTaskCard({
   isMoving = false,
   onDragEnd,
   onDragStart,
+  onOpenTask,
   onStatusChange,
   t,
   task,
@@ -2480,14 +2477,16 @@ function CompactTaskCard({
   isMoving?: boolean
   onDragEnd?: () => void
   onDragStart?: (event: DragEvent<HTMLElement>) => void
+  onOpenTask?: (task: ProjectTask) => void
   onStatusChange?: (status: TaskStatus) => void
   t: (key: MessageKey) => string
   task: ProjectTask
   testId?: string
 }) {
+  const taskTitle = resolveTaskTitle(task, t)
   const statusSelectLabel = t('workspace.myTasks.moveStatusLabel').replace(
     '{title}',
-    resolveTaskTitle(task, t),
+    taskTitle,
   )
 
   return (
@@ -2501,7 +2500,19 @@ function CompactTaskCard({
       onDragEnd={onDragEnd}
       onDragStart={onDragStart}
     >
-      <p className="text-sm font-semibold leading-6 text-[var(--workbench-text)]">{resolveTaskTitle(task, t)}</p>
+      {onOpenTask ? (
+        <button
+          className="w-full text-left text-sm font-semibold leading-6 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)] disabled:hover:text-[var(--workbench-text)]"
+          data-testid={testId ? `${testId}-open` : undefined}
+          disabled={!isOpenableWorkspaceTask(task)}
+          onClick={() => onOpenTask(task)}
+          type="button"
+        >
+          {taskTitle}
+        </button>
+      ) : (
+        <p className="text-sm font-semibold leading-6 text-[var(--workbench-text)]">{taskTitle}</p>
+      )}
       <p className="mt-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{task.dueDate}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <StatusPill status={task.status} t={t} />
@@ -2625,39 +2636,6 @@ function findActiveTeam(teams: ProjectDirectoryTeam[], activeTeamId?: string) {
   return teams[0]
 }
 
-async function loadProjectTasks(
-  projectIds: readonly string[],
-  accessToken: string,
-): Promise<WorkspaceProjectTasksResult> {
-  const results = await Promise.allSettled(
-    projectIds.map(async (projectId) => ({
-      projectId,
-      tasks: (await getProjectIssues(projectId, accessToken))
-        .map((issue) => toWorkspaceTaskFromIssue(issue, projectId)),
-    })),
-  )
-  const tasks: ProjectTask[] = []
-  const failedProjectIds: string[] = []
-
-  for (const [index, result] of results.entries()) {
-    if (result.status === 'fulfilled') {
-      tasks.push(...result.value.tasks)
-      continue
-    }
-
-    const failedProjectId = projectIds[index]
-
-    if (failedProjectId) {
-      failedProjectIds.push(failedProjectId)
-    }
-  }
-
-  return {
-    failedProjectIds,
-    tasks,
-  }
-}
-
 async function loadTeamProjectMembers(
   accessToken: string,
   projects: readonly ProjectDirectoryProject[],
@@ -2705,41 +2683,24 @@ async function updateWorkspaceTaskRemote(
     return task
   }
 
-  if (task.teamId && task.source === 'dynamodb') {
-    return toWorkspaceTaskFromIssue(
-      await updateTeamIssue(task.teamId, task.id, accessToken, { status }, mutationContext),
-      task.projectId,
-    )
+  if (task.source !== 'dynamodb') {
+    return task
   }
 
-  return updateProjectTaskStatus(
-    task.projectId ?? '',
+  return updateTeamIssue(
+    task.teamId,
     task.id,
     accessToken,
-    status,
+    {
+      expectedRevision: task.revision,
+      status,
+    },
     mutationContext,
   )
 }
 
 function isLegacyWorkspaceTask(task: ProjectTask) {
   return task.source === 'legacy'
-}
-
-function toWorkspaceTaskFromIssue(issue: TeamIssue, projectId?: string): ProjectTask {
-  return {
-    teamId: issue.teamId,
-    projectId,
-    source: issue.source,
-    id: issue.id,
-    titleKey: issue.titleKey,
-    title: issue.title,
-    assigneeUserId: issue.assigneeUserId,
-    assigneeEmail: issue.assigneeEmail,
-    assigneeName: issue.assigneeName,
-    status: issue.status,
-    dueDate: issue.dueDate,
-    priority: issue.priority,
-  }
 }
 
 function uniqueProjectIds(teams: ProjectDirectoryTeam[]) {
@@ -2749,16 +2710,16 @@ function uniqueProjectIds(teams: ProjectDirectoryTeam[]) {
 }
 
 function createWorkspaceTaskKey(task: ProjectTask) {
-  return `${task.teamId ?? ''}:${task.projectId ?? ''}:${task.id}`
+  return `${task.teamId}:${task.assignedProjectId ?? ''}:${task.id}`
 }
 
 function createWorkspaceTaskTestId(task: ProjectTask) {
-  return createWorkspaceTaskTestToken(`${task.projectId ?? ''}:${task.id}`)
+  return createWorkspaceTaskTestToken(`${task.assignedProjectId ?? 'unassigned'}:${task.id}`)
 }
 
 function createInboxTaskTestId(task: ProjectTask) {
   return createWorkspaceTaskTestToken(
-    `${task.teamId ?? 'unscoped'}:${task.projectId ?? 'unscoped'}:${task.id}`,
+    `${task.teamId}:${task.assignedProjectId ?? 'unassigned'}:${task.id}`,
   )
 }
 
@@ -2816,17 +2777,9 @@ function filterTasksByProjectIds(tasks: ProjectTask[], projectIds: readonly stri
     return []
   }
 
-  return tasks.filter((task) => !task.projectId || projectIdSet.has(task.projectId))
-}
-
-function filterTasksByProjectIdsStrict(tasks: ProjectTask[], projectIds: readonly string[]) {
-  const projectIdSet = new Set(projectIds)
-
-  if (projectIdSet.size === 0) {
-    return []
-  }
-
-  return tasks.filter((task) => Boolean(task.projectId && projectIdSet.has(task.projectId)))
+  return tasks.filter((task) => Boolean(
+    task.assignedProjectId && projectIdSet.has(task.assignedProjectId),
+  ))
 }
 
 function filterTasksByTeamProjectIds(
@@ -2834,7 +2787,7 @@ function filterTasksByTeamProjectIds(
   projectIds: readonly string[],
   teamId?: string,
 ) {
-  return filterTasksByProjectIdsStrict(tasks, projectIds).filter(
+  return filterTasksByProjectIds(tasks, projectIds).filter(
     (task) => !teamId || !task.teamId || task.teamId === teamId,
   )
 }
@@ -2853,15 +2806,11 @@ function createDashboardSummary(
 }
 
 function resolveTaskTitle(task: ProjectTask, t: (key: MessageKey) => string) {
-  return task.title ?? (task.titleKey ? t(task.titleKey) : task.id)
+  return resolveWorkItemTitle(task, t)
 }
 
 function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) {
-  return task.assigneeName ??
-    task.assigneeEmail ??
-    task.assigneeUserId ??
-    task.assignee ??
-    (task.assigneeKey ? t(task.assigneeKey) : '')
+  return resolveWorkItemAssignee(task, t)
 }
 
 function createActionQueueTasks(tasks: ProjectTask[]) {
@@ -2930,7 +2879,7 @@ function resolveWorkspaceProjectName(task: ProjectTask, teams: ProjectDirectoryT
   const scopedTeam = task.teamId
     ? teams.find((team) => team.id === task.teamId)
     : undefined
-  const scopedProject = scopedTeam?.projects.find((project) => project.id === task.projectId)
+  const scopedProject = scopedTeam?.projects.find((project) => project.id === task.assignedProjectId)
 
   if (scopedProject) {
     return scopedProject.name
@@ -2938,7 +2887,9 @@ function resolveWorkspaceProjectName(task: ProjectTask, teams: ProjectDirectoryT
 
   return teams
     .flatMap((team) => team.projects)
-    .find((project) => project.id === task.projectId)?.name ?? task.projectId ?? '-'
+    .find((project) => project.id === task.assignedProjectId)?.name ??
+      task.assignedProjectId ??
+      '-'
 }
 
 function createInboxReasonKeys(task: ProjectTask): MessageKey[] {
@@ -2982,7 +2933,7 @@ function calculateWorkspaceActionScore(task: ProjectTask) {
 }
 
 function isOpenableWorkspaceTask(task: ProjectTask) {
-  return Boolean(task.projectId && task.teamId)
+  return Boolean(task.teamId)
 }
 
 function isWorkspaceTaskOverdue(task: ProjectTask) {
@@ -3210,7 +3161,11 @@ function createTeamMemberRows(
     const memberId = resolveTaskMemberId(task, memberAliases, t)
     const row = memberId ? rowsByMemberId.get(memberId) : undefined
 
-    if (!row || !task.projectId || !row.projectAccess.some((project) => project.projectId === task.projectId)) {
+    if (
+      !row ||
+      !task.assignedProjectId ||
+      !row.projectAccess.some((project) => project.projectId === task.assignedProjectId)
+    ) {
       continue
     }
 

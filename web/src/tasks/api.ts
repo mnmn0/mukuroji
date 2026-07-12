@@ -1,154 +1,51 @@
+import type {
+  CreateWorkItemInput,
+  WorkItem,
+  WorkItemPriority,
+  WorkItemStatus,
+} from '@mukuroji/contracts'
 import type { MessageKey } from '../i18n'
-import { createMutationHeaders, type MutationRequestContext } from '../api/mutationHeaders'
 
 /**
- * タスクの進捗状態を表す API code です。
+ * タスク画面が表示する canonical Work Item status の互換名です。
  */
-export type TaskStatus = 'in-progress' | 'review' | 'todo' | 'done'
+export type TaskStatus = WorkItemStatus
 
 /**
- * タスクの優先度を表す API code です。
+ * タスク画面が表示する canonical Work Item priority の互換名です。
  */
-export type TaskPriority = 'high' | 'medium' | 'low'
+export type TaskPriority = WorkItemPriority
 
 /**
- * API レスポンスとして許容する task status の一覧です。
+ * タスク画面が表示する canonical Work Item の互換名です。
  */
-const taskStatuses = ['in-progress', 'review', 'todo', 'done'] as const
+export type ProjectTask = WorkItem<MessageKey>
 
 /**
- * API レスポンスとして許容する task priority の一覧です。
+ * タスク作成 form が生成する canonical Work Item 入力の互換名です。
  */
-const taskPriorities = ['high', 'medium', 'low'] as const
+export type CreateProjectTaskInput = CreateWorkItemInput
 
 /**
- * プロジェクト画面のテーブルへ表示するタスク行です。
- */
-export type ProjectTask = {
-  /**
-   * team-owned Issue 由来の互換行で所属 team を識別する ID です。
-   */
-  teamId?: string
-  /**
-   * 取得元プロジェクト ID です。API body の top-level projectId から補完されます。
-   */
-  projectId?: string
-  /**
-   * タスク互換行の保存元です。legacy は旧 project task table 由来です。
-   */
-  source?: 'dynamodb' | 'legacy'
-  /**
-   * プロジェクト内でタスクを識別する ID です。
-   */
-  id: string
-  /**
-   * タスク名を解決する i18n key です。seed 由来のタスクで利用します。
-   */
-  titleKey?: MessageKey
-  /**
-   * API から取得した literal のタスク名です。
-   */
-  title?: string
-  /**
-   * 担当者名を解決する i18n key です。seed 由来のタスクで利用します。
-   */
-  assigneeKey?: MessageKey
-  /**
-   * Cognito user を参照する担当者 ID です。
-   */
-  assigneeUserId?: string
-  /**
-   * Cognito から解決した担当者メールアドレスです。
-   */
-  assigneeEmail?: string
-  /**
-   * Cognito から解決した担当者表示名です。
-   */
-  assigneeName?: string
-  /**
-   * API から取得した literal の担当者名です。旧データ互換で利用します。
-   */
-  assignee?: string
-  /**
-   * タスクの状態コードです。
-   */
-  status: TaskStatus
-  /**
-   * 期限日として表示する文字列です。
-   */
-  dueDate: string
-  /**
-   * 優先度コードです。
-   */
-  priority: TaskPriority
-}
-
-/**
- * タスク作成 API に送信する入力です。
- */
-export type CreateProjectTaskInput = {
-  /**
-   * ユーザーが入力したタスク名です。
-   */
-  title: string
-  /**
-   * Cognito user を参照する担当者 ID です。
-   */
-  assigneeUserId: string
-  /**
-   * 期限日として保存する文字列です。
-   */
-  dueDate: string
-  /**
-   * タスクの状態コードです。
-   */
-  status: TaskStatus
-  /**
-   * 優先度コードです。
-   */
-  priority: TaskPriority
-}
-
-/**
- * Lambda が DynamoDB から取得して返すプロジェクトタスク一覧レスポンスです。
+ * legacy project task read API の response body です。
  */
 type ProjectTasksResponse = {
   /**
-   * 取得対象のプロジェクト ID です。
+   * 取得対象の Project ID です。
    */
   projectId: string
   /**
-   * DynamoDB に保存されたタスク一覧です。
+   * read-only compatibility adapter が返す Work Item 一覧です。
    */
   tasks: ProjectTask[]
 }
 
 /**
- * タスク作成 API が返す response body です。
- */
-type CreateProjectTaskResponse = {
-  /**
-   * 作成されたタスク行です。
-   */
-  task: ProjectTask
-}
-
-/**
- * タスク状態更新 API が返す response body です。
- */
-type UpdateProjectTaskStatusResponse = {
-  /**
-   * 更新されたタスク行です。
-   */
-  task: ProjectTask
-}
-
-/**
- * Lambda API からエラーレスポンスが返ったときに投げる例外です。
+ * legacy project task read API からエラーが返ったときの例外です。
  */
 export class ProjectTasksApiError extends Error {
   /**
-   * API レスポンスの HTTP status code です。
+   * API response の HTTP status code です。
    */
   readonly status: number
 
@@ -163,7 +60,7 @@ const tasksApiBaseUrl = trimTrailingSlash(
 )
 
 /**
- * DynamoDB に保存されたプロジェクトタスクを Lambda API 経由で取得します。
+ * legacy project task compatibility adapter を参照専用で取得します。
  */
 export async function getProjectTasks(projectId: string, accessToken?: string) {
   const response = await fetch(
@@ -179,13 +76,12 @@ export async function getProjectTasks(projectId: string, accessToken?: string) {
   const data = await readJson<unknown>(response)
 
   if (!response.ok) {
-    const message =
-      typeof data === 'object' &&
+    const message = typeof data === 'object' &&
       data !== null &&
       'message' in data &&
       typeof data.message === 'string'
-        ? data.message
-        : 'tasks.error.loading'
+      ? data.message
+      : 'tasks.error.loading'
 
     throw new ProjectTasksApiError(response.status, message)
   }
@@ -194,98 +90,7 @@ export async function getProjectTasks(projectId: string, accessToken?: string) {
     throw new ProjectTasksApiError(response.status, 'tasks.error.loading')
   }
 
-  return attachProjectId(data)
-}
-
-/**
- * DynamoDB にプロジェクトタスクを作成します。
- */
-export async function createProjectTask(
-  projectId: string,
-  accessToken: string,
-  input: CreateProjectTaskInput,
-  mutationContext: MutationRequestContext,
-) {
-  const response = await fetch(
-    `${tasksApiBaseUrl}/projects/${encodeURIComponent(projectId)}/tasks`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        ...createMutationHeaders(mutationContext),
-      },
-      body: JSON.stringify(input),
-    },
-  )
-  const data = await readJson<unknown>(response)
-
-  if (!response.ok) {
-    const message =
-      typeof data === 'object' &&
-      data !== null &&
-      'message' in data &&
-      typeof data.message === 'string'
-        ? data.message
-        : 'tasks.error.loading'
-
-    throw new ProjectTasksApiError(response.status, message)
-  }
-
-  if (!isCreateProjectTaskResponse(data)) {
-    throw new ProjectTasksApiError(response.status, 'tasks.error.loading')
-  }
-
-  return {
-    ...data.task,
-    projectId,
-  }
-}
-
-/**
- * DynamoDB に保存されたプロジェクトタスクの状態を更新します。
- */
-export async function updateProjectTaskStatus(
-  projectId: string,
-  taskId: string,
-  accessToken: string,
-  status: TaskStatus,
-  mutationContext: MutationRequestContext,
-) {
-  const response = await fetch(
-    `${tasksApiBaseUrl}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`,
-    {
-      method: 'PATCH',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        ...createMutationHeaders(mutationContext),
-      },
-      body: JSON.stringify({ status }),
-    },
-  )
-  const data = await readJson<unknown>(response)
-
-  if (!response.ok) {
-    const message =
-      typeof data === 'object' &&
-      data !== null &&
-      'message' in data &&
-      typeof data.message === 'string'
-        ? data.message
-        : 'tasks.error.loading'
-
-    throw new ProjectTasksApiError(response.status, message)
-  }
-
-  if (!isUpdateProjectTaskStatusResponse(data)) {
-    throw new ProjectTasksApiError(response.status, 'tasks.error.loading')
-  }
-
-  return {
-    ...data.task,
-    projectId,
-  }
+  return data.tasks
 }
 
 /**
@@ -309,92 +114,13 @@ function trimTrailingSlash(value: string) {
 }
 
 /**
- * Lambda のタスク一覧レスポンスとして扱える形かどうかを判定します。
+ * legacy compatibility response の最低限の形を検証します。
  */
 function isProjectTasksResponse(value: unknown): value is ProjectTasksResponse {
-  return (
-    typeof value === 'object' &&
+  return typeof value === 'object' &&
     value !== null &&
     'projectId' in value &&
     typeof value.projectId === 'string' &&
     'tasks' in value &&
-    Array.isArray(value.tasks) &&
-    value.tasks.every(isProjectTask)
-  )
-}
-
-/**
- * API から返った値がタスク行として扱えるかどうかを判定します。
- */
-function isProjectTask(value: unknown): value is ProjectTask {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    (!('projectId' in value) || typeof value.projectId === 'string') &&
-    'id' in value &&
-    typeof value.id === 'string' &&
-    (!('titleKey' in value) || typeof value.titleKey === 'string') &&
-    (!('title' in value) || typeof value.title === 'string') &&
-    ('titleKey' in value || 'title' in value) &&
-    (!('assigneeKey' in value) || typeof value.assigneeKey === 'string') &&
-    (!('assigneeUserId' in value) || typeof value.assigneeUserId === 'string') &&
-    (!('assigneeEmail' in value) || typeof value.assigneeEmail === 'string') &&
-    (!('assigneeName' in value) || typeof value.assigneeName === 'string') &&
-    (!('assignee' in value) || typeof value.assignee === 'string') &&
-    ('assigneeUserId' in value || 'assigneeKey' in value || 'assignee' in value) &&
-    'status' in value &&
-    isTaskStatus(value.status) &&
-    'dueDate' in value &&
-    typeof value.dueDate === 'string' &&
-    'priority' in value &&
-    isTaskPriority(value.priority)
-  )
-}
-
-/**
- * API 値が既知の task status かどうかを判定します。
- */
-function isTaskStatus(value: unknown): value is TaskStatus {
-  return taskStatuses.includes(value as TaskStatus)
-}
-
-/**
- * API 値が既知の task priority かどうかを判定します。
- */
-function isTaskPriority(value: unknown): value is TaskPriority {
-  return taskPriorities.includes(value as TaskPriority)
-}
-
-/**
- * API レスポンスがタスク作成結果として扱えるかどうかを判定します。
- */
-function isCreateProjectTaskResponse(value: unknown): value is CreateProjectTaskResponse {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'task' in value &&
-    isProjectTask(value.task)
-  )
-}
-
-/**
- * API レスポンスがタスク状態更新結果として扱えるかどうかを判定します。
- */
-function isUpdateProjectTaskStatusResponse(value: unknown): value is UpdateProjectTaskStatusResponse {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'task' in value &&
-    isProjectTask(value.task)
-  )
-}
-
-/**
- * top-level の projectId を各タスク行へ補完します。
- */
-function attachProjectId(response: ProjectTasksResponse) {
-  return response.tasks.map((task) => ({
-    ...task,
-    projectId: response.projectId,
-  }))
+    Array.isArray(value.tasks)
 }

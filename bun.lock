@@ -28,6 +28,10 @@
         "typescript": "~5.9.3",
       },
     },
+    "contracts": {
+      "name": "@mukuroji/contracts",
+      "version": "0.0.0",
+    },
     "server": {
       "name": "server",
       "dependencies": {
@@ -35,6 +39,7 @@
         "@aws-sdk/client-cognito-identity-provider": "^3.1057.0",
         "@aws-sdk/client-dynamodb": "^3.1057.0",
         "@aws-sdk/lib-dynamodb": "^3.1057.0",
+        "@mukuroji/contracts": "workspace:*",
         "hono": "^4.12.21",
       },
       "devDependencies": {
@@ -45,6 +50,7 @@
       "name": "web",
       "version": "0.0.0",
       "dependencies": {
+        "@mukuroji/contracts": "workspace:*",
         "react": "^19.2.6",
         "react-dom": "^19.2.6",
         "react-markdown": "^10.1.0",
@@ -355,6 +361,8 @@
     "@jridgewell/sourcemap-codec": ["@jridgewell/sourcemap-codec@1.5.5", "", {}, "sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og=="],
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
+
+    "@mukuroji/contracts": ["@mukuroji/contracts@workspace:contracts"],
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.1.4", "", { "dependencies": { "@tybys/wasm-util": "^0.10.1" }, "peerDependencies": { "@emnapi/core": "^1.7.1", "@emnapi/runtime": "^1.7.1" } }, "sha512-3NQNNgA1YSlJb/kMH1ildASP9HW7/7kYnRI2szWJaofaS1hWmbGI4H+d3+22aGzXXN9IJ+n+GiFVcGipJP18ow=="],
 

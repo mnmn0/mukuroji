@@ -25,6 +25,7 @@ bun-debug.log*
 .vscode/
 
 # Local tool state
+.mukuroji/
 .playwright-mcp/
 .floci/generated/
 playwright-report/

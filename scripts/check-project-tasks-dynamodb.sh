@@ -67,4 +67,4 @@ for row_index in "${!expected_task_rows[@]}"; do
   fi
 done
 
-echo "DynamoDB task seed OK: table=$TASKS_TABLE_NAME directory=$PROJECT_DIRECTORY_ID project=$PROJECT_ID count=${#task_rows[@]}"
+echo "DynamoDB legacy task rows OK: table=$TASKS_TABLE_NAME directory=$PROJECT_DIRECTORY_ID project=$PROJECT_ID count=${#task_rows[@]}"

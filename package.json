@@ -3,6 +3,7 @@
   "private": true,
   "packageManager": "bun@1.3.10",
   "workspaces": [
+    "contracts",
     "web",
     "server",
     "cdk"
@@ -14,6 +15,7 @@
     "oxc:lint:github": "oxlint . --format=github",
     "web:dev": "bun --filter web dev",
     "web:lint": "bun --filter web lint",
+    "web:test": "bun --filter web test",
     "web:build": "bun --filter web build",
     "web:e2e": "playwright test",
     "web:storybook": "bun --filter web storybook",
@@ -22,10 +24,11 @@
     "server:build:lambda": "bun --filter server build:lambda",
     "server:test": "bun --filter server test",
     "floci:deploy-backend": "sh floci/deploy-backend.sh",
-    "tasks:seed-dynamodb": "bash scripts/seed-project-tasks-dynamodb.sh",
+    "work-items:seed-dynamodb": "bash scripts/seed-work-items-dynamodb.sh",
     "tasks:check-dynamodb": "bash scripts/check-project-tasks-dynamodb.sh",
     "issues:check-dynamodb": "bash scripts/check-team-issues-dynamodb.sh",
     "audit:backfill": "bun --filter server audit:backfill",
+    "work-items:migrate": "bun --filter server work-items:migrate",
     "cdk:build": "bun --filter cdk build",
     "cdk:test": "bun --filter cdk test",
     "cdk:synth": "bun --filter cdk cdk synth"

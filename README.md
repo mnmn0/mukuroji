@@ -101,7 +101,7 @@ bun run web:dev
 Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送します。必要に応じて以下の環境変数を上書きできます。
 
 - `VITE_API_BASE_URL`: ブラウザから呼ぶ API の base URL。未指定時は `/api`
-- `VITE_TASKS_API_BASE_URL`: DynamoDB のタスク一覧を取得する Lambda Function URL。CDK デプロイ後の `ProjectTasksApiUrl` 出力値を指定してください。未指定時は `VITE_API_BASE_URL` または `/api` を使います。
+- `VITE_TASKS_API_BASE_URL`: Work Item API を取得する Lambda Function URL。環境変数名は旧 client 互換で維持しています。CDK デプロイ後の `ProjectTasksApiUrl` 出力値を指定し、未指定時は `VITE_API_BASE_URL` または `/api` を使います。
 - `VITE_PROJECTS_API_BASE_URL`: DynamoDB のチーム/プロジェクト階層を取得する Lambda Function URL。未指定時は `VITE_TASKS_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。
 - `VITE_WORKSPACE_API_BASE_URL`: 本番環境で Workspace member / invitation API を呼ぶ base URL。未指定時は `VITE_PROJECTS_API_BASE_URL`、`VITE_TASKS_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。
 - `VITE_API_PROXY_TARGET`: Vite dev server が proxy する API。未指定時は `http://localhost:3000`
@@ -114,6 +114,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_PROJECT_DIRECTORY_TABLE`: サイドバー用チーム/プロジェクト階層を保存する DynamoDB table 名。未指定時は `mukuroji-project-directory-local`
 - `MUKUROJI_WORKSPACE_ACCESS_TABLE`: Workspace metadata、member、invitation lifecycle を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-access-local`
 - `MUKUROJI_TEAM_ISSUES_TABLE`: チーム所有 Issue を保存する DynamoDB table 名。未指定時は `mukuroji-team-issues-local`
+- `MUKUROJI_WORK_ITEMS_TABLE` / `WORK_ITEMS_TABLE_NAME`: canonical Work Item store。移行期間は `MUKUROJI_TEAM_ISSUES_TABLE` / `TEAM_ISSUES_TABLE_NAME` と同じ既存 table を指します。
 - `MUKUROJI_TEAM_ISSUE_EVENTS_TABLE`: チーム Issue のコメント/活動履歴を保存する DynamoDB table 名。未指定時は `mukuroji-team-issue-events-local`
 - `MUKUROJI_COLLABORATION_TABLE` / `COLLABORATION_TABLE_NAME`: comment thread、reaction、watcher、presence を保存する DynamoDB table 名。未指定時は `mukuroji-collaboration-local`
 - `MUKUROJI_NOTIFICATIONS_TABLE` / `NOTIFICATIONS_TABLE_NAME`: mention/watch の durable notification projection を保存する DynamoDB table 名。未指定時は `mukuroji-notifications-local`
@@ -125,10 +126,13 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_PROJECT_DIRECTORY_ID`: 旧 local 設定との互換入力。`MUKUROJI_WORKSPACE_DIRECTORY_ID` が優先されます。
 - `MUKUROJI_INITIAL_OWNER_EMAIL` / `MUKUROJI_INITIAL_OWNER_USERNAME`: 初期 owner の email と Cognito username
 
-API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/teams/projects`,
+API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/teams/projects`, `/api/work-items`,
 `/api/teams/{teamId}/issues`, `/api/projects/{projectId}/issues`,
 `/api/projects/{projectId}/tasks`, `/api/audit/events` で DynamoDB を読みます。ローカルでは Vite proxy により、
 Web から `/api` を呼ぶだけで Floci 上の DynamoDB データを取得できます。
+
+Task / Issue の canonical schema、optimistic concurrency、legacy read compatibility、state migration / rollback は
+[`docs/work-items.md`](docs/work-items.md) を参照してください。
 
 append-only event schema、activity/audit API、retention/redaction、consumer dedupe、backfill の契約は
 [`docs/event-audit.md`](docs/event-audit.md) を参照してください。
@@ -223,18 +227,13 @@ VITE_WORKSPACE_API_BASE_URL=<ProjectTasksApiUrl>
 
 fresh deploy、既存 stack upgrade、bootstrap 検証、migration、rollback、PITR recovery の手順は [cdk/README.md](./cdk/README.md) を参照してください。
 
-DynamoDB に seed されたタスクデータを直接確認する場合は、CDK output の
-`ProjectTasksTableName` を指定して以下を実行します。
+`ProjectTasksTableName` は rollback window 中に保持する legacy read-only table です。旧 row を直接確認する場合だけ次を利用します。
 
 ```sh
-TASKS_TABLE_NAME=<ProjectTasksTableName> bun run tasks:seed-dynamodb
 TASKS_TABLE_NAME=<ProjectTasksTableName> bun run tasks:check-dynamodb
 ```
 
-`TASKS_TABLE_NAME` は必須環境変数です。未設定の場合、
-`scripts/seed-project-tasks-dynamodb.sh` と
-`scripts/check-project-tasks-dynamodb.sh` は失敗します。CDK output の
-`ProjectTasksTableName` を `TASKS_TABLE_NAME` に設定してから実行してください。
+`TASKS_TABLE_NAME` は legacy check の必須環境変数です。新しい seed / API mutation はこの table に書き込みません。
 `PROJECT_DIRECTORY_ID` には CDK parameter `WorkspaceDirectoryId` と同じ値を指定します。
 チーム/プロジェクト階層の table 名は CDK output の
 `ProjectDirectoryTableName` で確認できます。
@@ -254,9 +253,13 @@ ISSUE_ID=<IssueId> \
 bun run issues:check-dynamodb
 ```
 
-CDK stack も同じ seed を Custom Resource として定義します。ローカル互換
-endpoint を使う場合は `AWS_ENDPOINT_URL` と必要に応じて
-`AWS_NO_SIGN_REQUEST=1` を併用できます。
+CDK stack の demo seed は `WorkItemsTableName` が指す canonical store へ `schemaVersion=1`, `revision=1` で投入します。手動 seed も canonical store だけを対象とし、既存 row は conditional write で保持します。
+
+```sh
+WORK_ITEMS_TABLE_NAME=<WorkItemsTableName> bun run work-items:seed-dynamodb
+```
+
+既存 legacy row は `work-items:migrate` の dry-run / apply / verify で非破壊移行します。ローカル互換 endpoint を使う場合は `AWS_ENDPOINT_URL` を指定できます。
 
 ## 検証
 

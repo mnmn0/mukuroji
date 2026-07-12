@@ -80,7 +80,7 @@ mutation ごとに許可する field を allowlist 化し、request body 全体�
 - `file`
 - `approval`
 
-event type は resource と operation を組み合わせる。例: `work-item.created`、`work-item.updated`、`comment.created`、`member.role-changed`、`member.removed`、`project.archived`、`workflow.updated`、`file.attached`、`approval.decided`。team は現行 directory model との互換のため `entityType=project`、`entityId=team/<teamId>`、`metadata.kind=team` として扱う。#20 完了前の Work Item ID は Team Issue を `team/<teamId>/issue/<issueId>`、legacy task を `project/<projectId>/task/<taskId>` とし、異なる scope の同名 ID を混同しない。comment target は `<workItemId>/comment/<commentId>` とする。migration が current snapshot だけを復元した event は `*.backfilled` とし、実際の作成時刻や actor を捏造しない。
+event type は resource と operation を組み合わせる。例: `work-item.created`、`work-item.updated`、`comment.created`、`member.role-changed`、`member.removed`、`project.archived`、`workflow.updated`、`file.attached`、`approval.decided`。team は現行 directory model との互換のため `entityType=project`、`entityId=team/<teamId>`、`metadata.kind=team` として扱う。Canonical Work Item ID は既存 activity / collaboration key と互換の `team/<teamId>/issue/<issueId>` とし、comment target は `<workItemId>/comment/<commentId>` とする。過去に legacy task から backfill 済みの `project/<projectId>/task/<taskId>` は historical alias としてだけ読み取り、新しい mutation には使わない。migration が current snapshot だけを復元した event は `*.backfilled` とし、実際の作成時刻や actor を捏造しない。
 
 ## DynamoDB key
 
@@ -249,13 +249,11 @@ Issue `#19` 完了前は既存 Cognito `getUser` を使い、audit actor ID は 
 
 member event の entity/target ID は、#19 完了前の project member mutation では `<projectId>/<memberId>` とする。Workspace membership を導入するときも scope を ID に含め、同じ user の異なる scope を混同しない。
 
-### Canonical Work Item（#20）
+### Canonical Work Item
 
-event builder は Team Issue table と legacy project task table を直接参照せず、各 mutation adapter が entity ID、before/after revision、field changes を返す契約にする。
+event builder は Work Item store と legacy project task table を直接参照せず、canonical mutation adapter が entity ID、before/after revision、field changes を返す。Team-owned Work Item mutation は `metadata.adapter=canonical-work-item` を保存し、公開契約も `WorkItem` に統一する。
 
-Issue `#20` 完了前は Team-owned Issue mutation に `metadata.adapter=team-issue`、legacy project task mutation に `metadata.adapter=legacy-project-task` を付ける。どちらも `entityType=work-item` を使用し、ID はそれぞれ `team/<teamId>/issue/<issueId>` / `project/<projectId>/task/<taskId>` とする。scope は ID と metadata の両方に保持し、別 Team/project の同名 ID を混同しない。comment target ID は `<workItemId>/comment/<commentId>` とする。`#20` の migration 後は canonical Work Item ID へ統一し、legacy project task は read compatibility と backfill source に限定する。
-
-Issue `#20` 完了後は `CanonicalWorkItemAdapter` へ差し替え、`expectedRevision` を state transaction condition と event の `beforeRevision` / `afterRevision` に反映する。legacy table への新規 write は停止し、read compatibility を廃止するまで adapter の外へ漏らさない。
+`expectedRevision` は state transaction condition と event の `beforeRevision` / `afterRevision` に反映する。legacy project task は read compatibility と backfill sourceだけに限定し、新規 write を API code と Lambda IAM の両方で停止する。scope は ID と metadata の両方に保持し、別 Team/project の同名 ID を混同しない。詳細は [`work-items.md`](./work-items.md) を参照する。
 
 ## 運用確認
 

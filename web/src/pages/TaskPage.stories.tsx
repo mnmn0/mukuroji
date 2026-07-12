@@ -1,3 +1,4 @@
+import { WORK_ITEM_SCHEMA_VERSION } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { TaskScreen } from './TaskPage'
 import type { TeamIssueDetail } from '../issues/api'
@@ -54,7 +55,7 @@ const projectUsers: ProjectUser[] = [
 const storyTasks = referoTaskFixtures.map((task, index) => ({
   ...task,
   assigneeUserId: index % 2 === 0 ? 'sato@example.com' : 'suzuki@example.com',
-  projectId: 'refero',
+  assignedProjectId: 'refero',
   source: 'dynamodb' as const,
   teamId: 'core-team',
 }))
@@ -74,13 +75,14 @@ const denseStoryTasks = Array.from({ length: 24 }, (_, index) => {
 const legacyTasks = storyTasks.map((task) => ({
   ...task,
   source: 'legacy' as const,
-  teamId: undefined,
 }))
 
 const selectedIssueDetail: TeamIssueDetail = {
   activity: teamIssueActivityFixtures,
   comments: teamIssueCommentFixtures,
   issue: {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
     id: 'wireframe',
     teamId: 'core-team',
     assignedProjectId: 'refero',
