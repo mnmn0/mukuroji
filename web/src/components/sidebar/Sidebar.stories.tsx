@@ -41,6 +41,7 @@ const meta = {
     onArchiveTeam: async () => undefined,
     onCreateProject: async () => undefined,
     onCreateTeam: async () => undefined,
+    onOpenSearch: () => undefined,
   },
   decorators: [
     (Story) => (

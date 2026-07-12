@@ -77,6 +77,7 @@ import {
   type TaskStatus,
 } from '../tasks/api'
 import { WorkspaceAccessPanelContainer } from '../workspace/WorkspaceAccessPanel'
+import { useWorkspaceCommandMenu } from '../commands/WorkspaceCommandMenuContext'
 
 /**
  * サイドバーまたはチーム配下から表示できるワークスペース画面です。
@@ -833,6 +834,7 @@ export function WorkspaceScreen({
   const activeTeam = findActiveTeam(teams, activeTeamId)
   const activeTeamLabel = activeTeam?.name ?? t('workspace.team.missing')
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
+  const commandMenu = useWorkspaceCommandMenu()
 
   return (
     <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
@@ -847,6 +849,7 @@ export function WorkspaceScreen({
         onArchiveTeam={onArchiveTeam}
         onCreateProject={onCreateProject}
         onCreateTeam={onCreateTeam}
+        onOpenSearch={commandMenu.open}
         onSelectNav={onSelectNav}
         onSelectProject={onSelectProject}
         onSelectTeamView={onSelectTeamView}
@@ -869,6 +872,10 @@ export function WorkspaceScreen({
           onArchiveTeam={onArchiveTeam}
           onCreateProject={onCreateProject}
           onCreateTeam={onCreateTeam}
+          onOpenSearch={() => {
+            setIsMobileSidebarOpen(false)
+            commandMenu.open?.()
+          }}
           onSelectNav={(navId) => {
             setIsMobileSidebarOpen(false)
             onSelectNav?.(navId)

@@ -1687,6 +1687,42 @@ test.describe('authenticated task page', () => {
     await mockAuthenticatedTaskPage(page)
   })
 
+  test('command menuのquick createは同じ画面から繰り返し作成フォームを開く', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team')
+
+    const searchTrigger = page.getByTestId('sidebar-search-trigger')
+    await expect(searchTrigger).toBeVisible()
+    await searchTrigger.focus()
+    await page.keyboard.press('ControlOrMeta+K')
+    await expect(page.getByRole('dialog', { name: 'Workspace command menu' }).getByRole('combobox')).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect(searchTrigger).toBeFocused()
+
+    const openQuickCreate = async () => {
+      await expect(page.getByTestId('sidebar-search-trigger')).toBeVisible()
+      await page.keyboard.press('ControlOrMeta+K')
+      const commandMenu = page.getByRole('dialog', { name: 'Workspace command menu' })
+      await expect(commandMenu.getByRole('combobox')).toBeFocused()
+      await commandMenu.getByRole('option', { name: /この一覧で Work Item を作成/ }).click()
+    }
+
+    await openQuickCreate()
+    const createTaskForm = page.getByTestId('create-task-form')
+    await expect(createTaskForm).toBeVisible()
+    await expect(page).not.toHaveURL(/(?:\?|&)create=1(?:&|$)/)
+
+    await createTaskForm.getByRole('button', { name: 'キャンセル' }).click()
+    await expect(createTaskForm).toHaveCount(0)
+
+    await openQuickCreate()
+    await expect(createTaskForm).toBeVisible()
+
+    await page.goto('/teams/core-team/issues')
+    await openQuickCreate()
+    await expect(page.getByTestId('create-issue-form')).toBeVisible()
+    await expect(page).not.toHaveURL(/(?:\?|&)create=1(?:&|$)/)
+  })
+
   test('タスク画面で検索、ステータス絞り込み、行選択が動作する', async ({ page }) => {
     await page.goto('/projects/refero/tasks')
 

@@ -63,6 +63,7 @@ import {
 } from '../routes/paths'
 import type { TaskPriority, TaskStatus } from '../tasks/api'
 import { getWorkspaceAccess, type WorkspaceMember } from '../workspace/api'
+import { useWorkspaceCommandMenu } from '../commands/WorkspaceCommandMenuContext'
 
 const issueStatuses = ['todo', 'in-progress', 'review', 'done'] as const satisfies readonly TaskStatus[]
 const issuePriorities = ['high', 'medium', 'low'] as const satisfies readonly TaskPriority[]
@@ -210,7 +211,7 @@ type TeamIssueScreenProps = {
 export function TeamIssuePage() {
   const navigate = useNavigate()
   const params = useParams()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   const teamId = params.teamId ?? 'core-team'
   const [session] = useState(() => getAuthSession())
@@ -218,6 +219,7 @@ export function TeamIssuePage() {
   const requestedIssueId = searchParams.get('issueId')?.trim() || undefined
   const focusedCommentId = searchParams.get('commentId')?.trim() || undefined
   const focusedRootCommentId = searchParams.get('rootCommentId')?.trim() || undefined
+  const isCreateIssueRequested = searchParams.get('create') === '1'
   const t = useMemo(() => createTranslator(locale), [locale])
   const accessToken = session?.accessToken
   const currentUserKey = accessToken ? (['current-user', accessToken] as const) : null
@@ -331,6 +333,16 @@ export function TeamIssuePage() {
       navigate('/', { replace: true })
     }
   }, [currentUserError, navigate])
+
+  useEffect(() => {
+    if (!isCreateIssueRequested) {
+      return
+    }
+
+    const nextSearchParams = new URLSearchParams(searchParams)
+    nextSearchParams.delete('create')
+    setSearchParams(nextSearchParams, { replace: true })
+  }, [isCreateIssueRequested, searchParams, setSearchParams])
 
   const handleCreateIssue = async (input: CreateTeamIssueInput) => {
     if (!accessToken) {
@@ -447,6 +459,7 @@ export function TeamIssuePage() {
       collaboration={collaboration}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}
+      defaultCreateIssueOpen={isCreateIssueRequested}
       focusedCommentId={focusedCommentId}
       focusedRootCommentId={focusedRootCommentId}
       inboxCount={inboxCount}
@@ -517,8 +530,16 @@ export function TeamIssueScreen({
   const [isCreateOpen, setIsCreateOpen] = useState(defaultCreateIssueOpen)
   const [createErrorMessage, setCreateErrorMessage] = useState<string | undefined>()
   const [detailUpdateError, setDetailUpdateError] = useState<readonly [string, string] | undefined>()
+  const commandMenu = useWorkspaceCommandMenu()
   const activeTeam = teams.find((team) => team.id === teamId)
   const selectedIssue = issues.find((issue) => issue.id === selectedIssueId)
+
+  useEffect(() => {
+    if (defaultCreateIssueOpen) {
+      queueMicrotask(() => setIsCreateOpen(true))
+    }
+  }, [defaultCreateIssueOpen])
+
   const selectedIssueUpdateErrorKey = selectedIssue
     ? JSON.stringify([selectedIssue.teamId, selectedIssue.id])
     : undefined
@@ -562,6 +583,7 @@ export function TeamIssueScreen({
         onArchiveTeam={onArchiveTeam}
         onCreateProject={onCreateProject}
         onCreateTeam={onCreateTeam}
+        onOpenSearch={commandMenu.open}
         onSelectNav={onSelectNav}
         onSelectProject={onSelectProject}
         onSelectTeamView={onSelectTeamView}
@@ -582,6 +604,10 @@ export function TeamIssueScreen({
           onArchiveTeam={onArchiveTeam}
           onCreateProject={onCreateProject}
           onCreateTeam={onCreateTeam}
+          onOpenSearch={() => {
+            setIsMobileSidebarOpen(false)
+            commandMenu.open?.()
+          }}
           onSelectNav={(navId) => {
             setIsMobileSidebarOpen(false)
             onSelectNav?.(navId)

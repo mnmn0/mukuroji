@@ -9,6 +9,8 @@ import { TeamIssuePage } from '../pages/TeamIssuePage'
 import { TermsPage } from '../pages/TermsPage'
 import { WorkspacePage } from '../pages/WorkspacePage'
 import { ProjectTasksRedirect } from './ProjectTasksRedirect'
+import { WorkspaceCommandMenuLayout } from '../commands/WorkspaceCommandMenu'
+import { SearchPage } from '../search/SearchPage'
 
 /**
  * アプリケーション全体の画面ルーティング定義です。
@@ -19,52 +21,61 @@ export const router = createBrowserRouter([
     element: <LoginPage />,
   },
   {
-    path: '/dashboard',
-    element: <WorkspacePage view="dashboard" />,
-  },
-  {
-    path: '/home',
-    element: <WorkspacePage view="home" />,
-  },
-  {
-    path: '/my-tasks',
-    element: <WorkspacePage view="my-tasks" />,
-  },
-  {
-    path: '/inbox',
-    element: <WorkspacePage view="inbox" />,
-  },
-  {
-    path: '/reports',
-    element: <WorkspacePage view="reports" />,
-  },
-  {
-    path: '/help',
-    element: <WorkspacePage view="help" />,
-  },
-  {
-    path: '/settings',
-    element: <WorkspacePage view="settings" />,
-  },
-  {
-    path: '/teams/:teamId/overview',
-    element: <WorkspacePage view="team-overview" />,
-  },
-  {
-    path: '/teams/:teamId/issues',
-    element: <TeamIssuePage />,
-  },
-  {
-    path: '/teams/:teamId/members',
-    element: <WorkspacePage view="team-members" />,
-  },
-  {
-    path: '/projects/:projectId/issues',
-    element: <TaskPage />,
-  },
-  {
-    path: '/projects/:projectId/tasks',
-    element: <ProjectTasksRedirect />,
+    element: <WorkspaceCommandMenuLayout />,
+    children: [
+      {
+        path: '/dashboard',
+        element: <WorkspacePage view="dashboard" />,
+      },
+      {
+        path: '/home',
+        element: <WorkspacePage view="home" />,
+      },
+      {
+        path: '/my-tasks',
+        element: <WorkspacePage view="my-tasks" />,
+      },
+      {
+        path: '/inbox',
+        element: <WorkspacePage view="inbox" />,
+      },
+      {
+        path: '/search',
+        element: <SearchPage />,
+      },
+      {
+        path: '/reports',
+        element: <WorkspacePage view="reports" />,
+      },
+      {
+        path: '/help',
+        element: <WorkspacePage view="help" />,
+      },
+      {
+        path: '/settings',
+        element: <WorkspacePage view="settings" />,
+      },
+      {
+        path: '/teams/:teamId/overview',
+        element: <WorkspacePage view="team-overview" />,
+      },
+      {
+        path: '/teams/:teamId/issues',
+        element: <TeamIssuePage />,
+      },
+      {
+        path: '/teams/:teamId/members',
+        element: <WorkspacePage view="team-members" />,
+      },
+      {
+        path: '/projects/:projectId/issues',
+        element: <TaskPage />,
+      },
+      {
+        path: '/projects/:projectId/tasks',
+        element: <ProjectTasksRedirect />,
+      },
+    ],
   },
   {
     path: '/forgot-password',
