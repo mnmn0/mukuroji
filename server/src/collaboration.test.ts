@@ -41,6 +41,40 @@ test('creates stable collaboration keys for Work Item and project scopes', () =>
   )
 })
 
+test('reads soft-deleted comment snapshots consistently for search revalidation', async () => {
+  const reads: Array<Record<string, unknown>> = []
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    reads.push(input)
+    return {
+      Item: {
+        entityKey,
+        recordKey: 'COMMENT#comment-1',
+        entryType: 'comment',
+        id: 'comment-1',
+        rootCommentId: 'comment-1',
+        authorMemberKey: 'author@example.com',
+        bodyMarkdown: '',
+        version: 2,
+        mentionMemberKeys: [],
+        createdAt: '2026-07-12T00:00:00.000Z',
+        updatedAt: '2026-07-12T00:01:00.000Z',
+        deletedAt: '2026-07-12T00:01:00.000Z',
+      },
+    }
+  })
+
+  expect(await client.getCommentSnapshot({ entityKey, commentId: 'comment-1' }))
+    .toMatchObject({ id: 'comment-1', deletedAt: '2026-07-12T00:01:00.000Z' })
+  expect(reads).toEqual([
+    expect.objectContaining({
+      Key: { entityKey, recordKey: 'COMMENT#comment-1' },
+      ConsistentRead: true,
+    }),
+  ])
+})
+
 test('pages root comments newest-first and binds cursors to their entity scope', async () => {
   const discussionQueries: Array<Record<string, unknown>> = []
   const client = createClient(async (command) => {

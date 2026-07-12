@@ -28,9 +28,12 @@ import {
 import {
   WORK_ITEM_SCHEMA_VERSION,
   type CreateWorkItemInput,
+  type CreateSavedWorkspaceViewInput,
+  type UpdateSavedWorkspaceViewInput,
   type WorkItem,
   type WorkItemPriority,
   type WorkItemStatus,
+  type WorkspaceSearchFilters,
 } from '@mukuroji/contracts'
 import { Hono } from 'hono'
 import { handle, type LambdaContext, type LambdaEvent } from 'hono/aws-lambda'
@@ -85,6 +88,15 @@ import {
   type NotificationItem,
   type UpdateNotificationPreferencesInput,
 } from './notifications'
+import {
+  DynamoDbWorkspaceSearchClient,
+  WorkspaceSearchError,
+  createWorkspaceSearchDocument,
+  type SavedViewAccessScope,
+  type WorkspaceSearchAccessScope,
+  type WorkspaceSearchClient,
+  type WorkspaceSearchDocument,
+} from './workspace-search'
 
 export {
   DynamoDbWorkspaceAccessClient,
@@ -2119,6 +2131,8 @@ let workspaceAccess: WorkspaceAccessClient
 let realtimeTickets: RealtimeTicketsClient
 let collaboration: CollaborationClient
 let notifications: NotificationClient
+let workspaceSearch: WorkspaceSearchClient
+let workspaceSearchProjectionEnabled: boolean
 const projectDirectoryIdPrefix = 'user#'
 const defaultAllowedOrigins = [
   'http://localhost:5173',
@@ -2698,14 +2712,16 @@ app.post('/api/teams', async (c) => {
     requireWorkspaceAdministration(principal)
     const body = await readJson<CreateTeamRequestBody>(c.req)
 
-    return c.json(
-      await projectDirectory.createTeam(
-        principal.directoryId,
-        body ?? {},
-        createApiMutationContext(c, principal, body ?? {}),
-      ),
-      201,
+    const response = await projectDirectory.createTeam(
+      principal.directoryId,
+      body ?? {},
+      createApiMutationContext(c, principal, body ?? {}),
     )
+    await projectWorkspaceSearchDocumentBestEffort(
+      createTeamSearchDocument(principal.directoryId, response.team, principal.userKey),
+      'team creation',
+    )
+    return c.json(response, 201)
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -2735,19 +2751,26 @@ app.post('/api/teams/:teamId/projects', async (c) => {
     requireWorkspaceAdministration(principal)
     const body = await readJson<CreateProjectRequestBody>(c.req)
 
-    return c.json(
-      await projectDirectory.createProject(
+    const response = await projectDirectory.createProject(
+      principal.directoryId,
+      teamId,
+      body ?? {},
+      {
+        userKey: principal.userKey,
+        workspaceMemberVersion: principal.workspaceMember.version,
+      },
+      createApiMutationContext(c, principal, { teamId, ...body }),
+    )
+    await projectWorkspaceSearchDocumentBestEffort(
+      createProjectSearchDocument(
         principal.directoryId,
         teamId,
-        body ?? {},
-        {
-          userKey: principal.userKey,
-          workspaceMemberVersion: principal.workspaceMember.version,
-        },
-        createApiMutationContext(c, principal, { teamId, ...body }),
+        response.project,
+        principal.userKey,
       ),
-      201,
+      'project creation',
     )
+    return c.json(response, 201)
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -2776,13 +2799,18 @@ app.patch('/api/teams/:teamId/archive', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     requireWorkspaceAdministration(principal)
 
-    return c.json(
-      await projectDirectory.archiveTeam(
-        principal.directoryId,
-        teamId,
-        createApiMutationContext(c, principal, { teamId }),
-      ),
+    const response = await projectDirectory.archiveTeam(
+      principal.directoryId,
+      teamId,
+      createApiMutationContext(c, principal, { teamId }),
     )
+    await deleteWorkspaceSearchDocumentBestEffort(
+      principal.directoryId,
+      'team',
+      `team/${teamId}`,
+      'team archive',
+    )
+    return c.json(response)
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -2816,14 +2844,19 @@ app.patch('/api/teams/:teamId/projects/:projectId/archive', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     requireWorkspaceAdministration(principal)
 
-    return c.json(
-      await projectDirectory.archiveProject(
-        principal.directoryId,
-        teamId,
-        projectId,
-        createApiMutationContext(c, principal, { teamId, projectId }),
-      ),
+    const response = await projectDirectory.archiveProject(
+      principal.directoryId,
+      teamId,
+      projectId,
+      createApiMutationContext(c, principal, { teamId, projectId }),
     )
+    await deleteWorkspaceSearchDocumentBestEffort(
+      principal.directoryId,
+      'project',
+      `team/${teamId}/project/${projectId}`,
+      'project archive',
+    )
+    return c.json(response)
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -2911,6 +2944,135 @@ app.get('/api/work-items', async (c) => {
     }
 
     return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * Workspace 全体の search index を複合 filter と cursor 付きで検索します。
+ */
+app.get('/api/search', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const context = await createWorkspaceSearchContext(principal)
+    const filters = readWorkspaceSearchFilters(c.req.query('filters'))
+    const scopeCache = new Map<string, Promise<TeamIssueDetailResponse | undefined>>()
+
+    return c.json(await workspaceSearch.search({
+      workspaceId: principal.directoryId,
+      filters,
+      limit: readOptionalPositiveQueryInteger(c.req.query('limit'), 'Search limit'),
+      cursor: c.req.query('cursor'),
+      access: context.searchAccess,
+      resolveCurrentScope: (document) => resolveCurrentWorkspaceSearchScope(
+        principal.directoryId,
+        document,
+        context,
+        scopeCache,
+      ),
+    }))
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
+  }
+})
+
+/** Current user が参照できる personal/team/shared saved views を返します。 */
+app.get('/api/saved-views', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const context = await createWorkspaceSearchContext(principal)
+    return c.json(await workspaceSearch.listSavedViews({
+      workspaceId: principal.directoryId,
+      access: context.savedViewAccess,
+      limit: readOptionalPositiveQueryInteger(c.req.query('limit'), 'Saved view limit'),
+      cursor: c.req.query('cursor'),
+    }))
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
+  }
+})
+
+/** Personal/team/shared saved view を作成します。 */
+app.post('/api/saved-views', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const context = await createWorkspaceSearchContext(principal)
+    const input = await readJson<CreateSavedWorkspaceViewInput>(c.req)
+    return c.json(await workspaceSearch.createSavedView({
+      workspaceId: principal.directoryId,
+      access: context.savedViewAccess,
+      idempotencyKey: c.req.header('Idempotency-Key')?.trim() || undefined,
+      input: input ?? {} as CreateSavedWorkspaceViewInput,
+    }), 201)
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
+  }
+})
+
+/** Saved view definition と current user preference を更新します。 */
+app.patch('/api/saved-views/:viewId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const viewId = c.req.param('viewId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const context = await createWorkspaceSearchContext(principal)
+    const input = await readJson<UpdateSavedWorkspaceViewInput>(c.req)
+    return c.json(await workspaceSearch.updateSavedView({
+      workspaceId: principal.directoryId,
+      viewId,
+      access: context.savedViewAccess,
+      input: input ?? {} as UpdateSavedWorkspaceViewInput,
+    }))
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
+  }
+})
+
+/** Saved view definition を revision 条件付きで削除します。 */
+app.delete('/api/saved-views/:viewId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const viewId = c.req.param('viewId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const context = await createWorkspaceSearchContext(principal)
+    return c.json(await workspaceSearch.deleteSavedView({
+      workspaceId: principal.directoryId,
+      viewId,
+      expectedRevision: readRequiredPositiveQueryInteger(
+        c.req.query('expectedRevision'),
+        'Saved view revision',
+      ),
+      access: context.savedViewAccess,
+    }))
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
   }
 })
 
@@ -3173,22 +3335,24 @@ app.post('/api/teams/:teamId/issues', async (c) => {
     await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
     const reservedIssueIds = await readLegacyTeamIssueIds(principal.directoryId, context)
 
-    return c.json(
-      await hydrateCreateTeamIssueResponse(
-        await teamIssues.createTeamIssue(
-          principal.directoryId,
-          teamId,
-          {
-            ...body,
-            assigneeUserId,
-          },
-          principal.userKey,
-          reservedIssueIds,
-          createApiMutationContext(c, principal, { teamId, ...body }),
-        ),
+    const response = await hydrateCreateTeamIssueResponse(
+      await teamIssues.createTeamIssue(
+        principal.directoryId,
+        teamId,
+        {
+          ...body,
+          assigneeUserId,
+        },
+        principal.userKey,
+        reservedIssueIds,
+        createApiMutationContext(c, principal, { teamId, ...body }),
       ),
-      201,
     )
+    await projectWorkspaceSearchDocumentBestEffort(
+      createWorkItemSearchDocument(principal.directoryId, response.issue),
+      'Work Item creation',
+    )
+    return c.json(response, 201)
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)
@@ -3404,23 +3568,26 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
       )
     }
 
-    return c.json(
-      await hydrateUpdateTeamIssueResponse(
-        await teamIssues.updateTeamIssue(
-          principal.directoryId,
+    const response = await hydrateUpdateTeamIssueResponse(
+      await teamIssues.updateTeamIssue(
+        principal.directoryId,
+        teamId,
+        issueId,
+        { ...body, expectedRevision },
+        principal.userKey,
+        createApiMutationContext(c, principal, {
           teamId,
           issueId,
-          { ...body, expectedRevision },
-          principal.userKey,
-          createApiMutationContext(c, principal, {
-            teamId,
-            issueId,
-            ...body,
-            expectedRevision,
-          }),
-        ),
+          ...body,
+          expectedRevision,
+        }),
       ),
     )
+    await projectWorkspaceSearchDocumentBestEffort(
+      createWorkItemSearchDocument(principal.directoryId, response.issue),
+      'Work Item update',
+    )
+    return c.json(response)
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)
@@ -3675,6 +3842,15 @@ app.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       summary: body.parentCommentId ? 'Reply was added.' : 'Comment was added.',
       createdAt: comment.createdAt,
     }
+    await projectWorkspaceSearchDocumentBestEffort(
+      createCommentSearchDocument(
+        principal.directoryId,
+        teamId,
+        detail.issue,
+        comment,
+      ),
+      'comment creation',
+    )
 
     return modernContract
       ? c.json({
@@ -3740,6 +3916,15 @@ app.patch('/api/teams/:teamId/issues/:issueId/comments/:commentId', async (c) =>
       deepLink: createTeamIssueDeepLink(teamId, issueId),
       auditContext: createApiMutationContext(c, principal, { teamId, issueId, commentId, ...body }),
     })
+    await projectWorkspaceSearchDocumentBestEffort(
+      createCommentSearchDocument(
+        principal.directoryId,
+        teamId,
+        detail.issue,
+        comment,
+      ),
+      'comment update',
+    )
 
     return c.json({
       comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
@@ -3785,6 +3970,12 @@ app.delete('/api/teams/:teamId/issues/:issueId/comments/:commentId', async (c) =
       canModerate,
       auditContext: createApiMutationContext(c, principal, { teamId, issueId, commentId, ...body }),
     })
+    await deleteWorkspaceSearchDocumentBestEffort(
+      principal.directoryId,
+      'comment',
+      `${createTeamIssueAuditEntityId(teamId, issueId)}/comment/${commentId}`,
+      'comment deletion',
+    )
 
     return c.json({
       comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
@@ -4157,6 +4348,10 @@ app.post('/api/projects/:projectId/tasks', async (c) => {
       }),
     )
     const hydrated = await hydrateCreateTeamIssueResponse(response)
+    await projectWorkspaceSearchDocumentBestEffort(
+      createWorkItemSearchDocument(principal.directoryId, hydrated.issue),
+      'project task compatibility creation',
+    )
 
     return c.json(
       { task: toProjectTaskFromTeamIssue(hydrated.issue) } satisfies CreateProjectTaskResponse,
@@ -4235,6 +4430,10 @@ app.patch('/api/projects/:projectId/tasks/:taskId', async (c) => {
       }),
     )
     const hydrated = await hydrateUpdateTeamIssueResponse(response)
+    await projectWorkspaceSearchDocumentBestEffort(
+      createWorkItemSearchDocument(principal.directoryId, hydrated.issue),
+      'project task compatibility update',
+    )
     return c.json(
       { task: toProjectTaskFromTeamIssue(hydrated.issue) } satisfies UpdateProjectTaskStatusResponse,
     )
@@ -4766,6 +4965,229 @@ function requireWorkspaceAdministration(principal: WorkspacePrincipal) {
     'WorkspaceRoleDenied',
     'Workspace owner or admin access is required.',
   )
+}
+
+/** Search と saved view authorization に使う current directory snapshot です。 */
+type WorkspaceSearchContext = {
+  /** Active Team/Project hierarchy です。 */
+  directory: ProjectDirectoryResponse
+  /** Search result の current viewer scope です。 */
+  searchAccess: WorkspaceSearchAccessScope
+  /** Saved view の current viewer scope です。 */
+  savedViewAccess: SavedViewAccessScope
+}
+
+async function createWorkspaceSearchContext(
+  principal: WorkspacePrincipal,
+): Promise<WorkspaceSearchContext> {
+  const directory = await projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
+  const projectAccesses = principal.isSystemAdmin
+    ? directory.teams.flatMap((team) => team.projects.map((project) => ({
+        projectId: project.id,
+        role: 'manager' as const,
+      })))
+    : await projectDirectory.getProjectAccessList(principal.directoryId, principal.userKey)
+  const readableProjectIds = new Set(
+    projectAccesses
+      .filter((access) => projectAccessAllows(access, 'viewer'))
+      .map((access) => access.projectId),
+  )
+  const manageableProjectIds = new Set(
+    projectAccesses
+      .filter((access) => projectAccessAllows(access, 'manager'))
+      .map((access) => access.projectId),
+  )
+  const readableTeamIds = new Set(
+    directory.teams
+      .filter((team) => team.projects.some((project) => readableProjectIds.has(project.id)))
+      .map((team) => team.id),
+  )
+  const manageableTeamIds = new Set(
+    directory.teams
+      .filter((team) => team.projects.some((project) => manageableProjectIds.has(project.id)))
+      .map((team) => team.id),
+  )
+
+  return {
+    directory,
+    searchAccess: {
+      viewerUserId: principal.userKey,
+      isSystemAdmin: principal.isSystemAdmin,
+      projectIds: readableProjectIds,
+      teamIds: readableTeamIds,
+    },
+    savedViewAccess: {
+      viewerUserId: principal.userKey,
+      isSystemAdmin: principal.isSystemAdmin,
+      canManageSharedViews:
+        principal.isSystemAdmin ||
+        principal.workspaceRole === 'owner' ||
+        principal.workspaceRole === 'admin',
+      canWrite: principal.workspaceRole !== 'guest',
+      teamIds: readableTeamIds,
+      manageableTeamIds,
+    },
+  }
+}
+
+async function resolveCurrentWorkspaceSearchScope(
+  workspaceId: string,
+  document: WorkspaceSearchDocument,
+  context: WorkspaceSearchContext,
+  scopeCache: Map<string, Promise<TeamIssueDetailResponse | undefined>>,
+) {
+  if (document.entityType === 'team') {
+    const team = context.directory.teams.find((candidate) => candidate.id === document.teamId)
+    return team ? { teamId: team.id } : undefined
+  }
+
+  if (document.entityType === 'project') {
+    const team = context.directory.teams.find((candidate) =>
+      (!document.teamId || candidate.id === document.teamId) &&
+      candidate.projects.some((project) => project.id === document.projectId)
+    )
+    return team && document.projectId
+      ? { teamId: team.id, projectId: document.projectId }
+      : undefined
+  }
+
+  const workItemId = document.entityType === 'work-item'
+    ? document.entityId
+    : document.parentId
+  const parsed = parseSearchWorkItemEntityId(workItemId)
+  if (parsed) {
+    const activeTeam = context.directory.teams.find((team) => team.id === parsed.teamId)
+    if (!activeTeam) return undefined
+    const cacheKey = `${parsed.teamId}\0${parsed.issueId}`
+    let pending = scopeCache.get(cacheKey)
+    if (!pending) {
+      pending = teamIssues.getTeamIssueDetail(
+        workspaceId,
+        parsed.teamId,
+        parsed.issueId,
+        { consistentIssueRead: true, eventLimit: 0 },
+      ).catch((error) => {
+        if (isTeamIssueNotFoundError(error)) return undefined
+        throw error
+      })
+      scopeCache.set(cacheKey, pending)
+    }
+    const detail = await pending
+    if (
+      !detail ||
+      (detail.issue.assignedProjectId &&
+        !activeTeam.projects.some((project) => project.id === detail.issue.assignedProjectId))
+    ) {
+      return undefined
+    }
+    const scope = {
+      teamId: parsed.teamId,
+      ...(detail.issue.assignedProjectId ? { projectId: detail.issue.assignedProjectId } : {}),
+    }
+    if (document.entityType === 'work-item') {
+      return {
+        ...scope,
+        currentDocument: createWorkItemSearchDocument(workspaceId, detail.issue),
+      }
+    }
+    if (document.entityType !== 'comment') return scope
+    const parsedComment = parseSearchCommentEntityId(document.entityId, document.parentId)
+    if (
+      !parsedComment ||
+      parsedComment.teamId !== parsed.teamId ||
+      parsedComment.issueId !== parsed.issueId
+    ) {
+      return undefined
+    }
+    const comment = await collaboration.getCommentSnapshot({
+      entityKey: createWorkItemCollaborationEntityKey(
+        workspaceId,
+        parsed.teamId,
+        parsed.issueId,
+      ),
+      commentId: parsedComment.commentId,
+    })
+    if (!comment || comment.deletedAt) return undefined
+    return {
+      ...scope,
+      currentDocument: createCommentSearchDocument(
+        workspaceId,
+        parsed.teamId,
+        detail.issue,
+        comment,
+      ),
+    }
+  }
+
+  if (document.projectId) {
+    const team = context.directory.teams.find((candidate) =>
+      (!document.teamId || candidate.id === document.teamId) &&
+      candidate.projects.some((project) => project.id === document.projectId)
+    )
+    return team ? { teamId: team.id, projectId: document.projectId } : undefined
+  }
+  if (document.teamId && context.directory.teams.some((team) => team.id === document.teamId)) {
+    return { teamId: document.teamId }
+  }
+  return undefined
+}
+
+function parseSearchWorkItemEntityId(value: string | undefined) {
+  const match = value?.match(/^team\/([^/]+)\/issue\/([^/]+)$/u)
+  return match?.[1] && match[2]
+    ? { teamId: match[1], issueId: match[2] }
+    : undefined
+}
+
+function parseSearchCommentEntityId(
+  value: string,
+  parentId: string | undefined,
+) {
+  const match = value.match(/^team\/([^/]+)\/issue\/([^/]+)\/comment\/([^/]+)$/u)
+  if (!match?.[1] || !match[2] || !match[3]) return undefined
+  const expectedParentId = createTeamIssueAuditEntityId(match[1], match[2])
+  return parentId === expectedParentId
+    ? { teamId: match[1], issueId: match[2], commentId: match[3] }
+    : undefined
+}
+
+function readWorkspaceSearchFilters(value: string | undefined): WorkspaceSearchFilters {
+  if (!value) return {}
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!isRecord(parsed)) throw new TypeError('Search filters must be an object.')
+    return parsed as WorkspaceSearchFilters
+  } catch (error) {
+    throw new WorkspaceSearchError(400, 'InvalidSearchFilters', 'Search filters are invalid.', {
+      cause: error,
+    })
+  }
+}
+
+function readOptionalPositiveQueryInteger(value: string | undefined, label: string) {
+  if (value === undefined) return undefined
+  return readRequiredPositiveQueryInteger(value, label)
+}
+
+function readRequiredPositiveQueryInteger(value: string | undefined, label: string) {
+  const parsed = value ? Number(value) : Number.NaN
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new WorkspaceSearchError(400, 'InvalidWorkspaceSearch', `${label} must be a positive integer.`)
+  }
+  return parsed
+}
+
+function toWorkspaceSearchErrorResponse(c: Context, error: unknown) {
+  if (error instanceof WorkspaceSearchError) {
+    const status = error.status === 400 || error.status === 403 || error.status === 404 ||
+      error.status === 409 || error.status === 503
+      ? error.status
+      : 502
+    return c.json({ code: error.code, message: error.message }, status)
+  }
+  if (error instanceof WorkspaceAccessError) return toWorkspaceAccessErrorResponse(c, error)
+  if (error instanceof CognitoServiceError) return toAuthErrorResponse(c, error)
+  return toProjectDataErrorResponse(c, error)
 }
 
 async function requireWorkspaceMemberHasNoManagedProjects(
@@ -5602,6 +6024,115 @@ async function hydrateWorkItemsResponse(response: WorkItemsResponse) {
   return {
     workItems: response.workItems.map((workItem) => hydrateTeamIssue(workItem, profiles)),
   } satisfies WorkItemsResponse
+}
+
+function createWorkItemSearchDocument(
+  workspaceId: string,
+  issue: TeamIssueResponseItem,
+) {
+  const entityId = createTeamIssueAuditEntityId(issue.teamId, issue.id)
+  return createWorkspaceSearchDocument({
+    workspaceId,
+    entityType: 'work-item',
+    entityId,
+    title: issue.title ?? issue.titleKey ?? issue.id,
+    ...(issue.description ? { body: issue.description } : {}),
+    url: issue.assignedProjectId
+      ? `/projects/${encodeURIComponent(issue.assignedProjectId)}/issues?teamId=${encodeURIComponent(issue.teamId)}&issueId=${encodeURIComponent(issue.id)}`
+      : `/teams/${encodeURIComponent(issue.teamId)}/issues?issueId=${encodeURIComponent(issue.id)}`,
+    teamId: issue.teamId,
+    ...(issue.assignedProjectId ? { projectId: issue.assignedProjectId } : {}),
+    ...(issue.assigneeUserId ? { assigneeUserId: issue.assigneeUserId } : {}),
+    ...(issue.creatorMemberKey ? { creatorUserId: issue.creatorMemberKey } : {}),
+    status: issue.status,
+    dueDate: issue.dueDate,
+    createdAt: issue.createdAt,
+    updatedAt: issue.updatedAt,
+  })
+}
+
+function createCommentSearchDocument(
+  workspaceId: string,
+  teamId: string,
+  issue: TeamIssueResponseItem,
+  comment: CollaborationComment,
+) {
+  const parentId = createTeamIssueAuditEntityId(teamId, issue.id)
+  const entityId = `${parentId}/comment/${comment.id}`
+  return createWorkspaceSearchDocument({
+    workspaceId,
+    entityType: 'comment',
+    entityId,
+    title: issue.title ?? issue.titleKey ?? issue.id,
+    body: comment.bodyMarkdown,
+    url: `/teams/${encodeURIComponent(teamId)}/issues?issueId=${encodeURIComponent(issue.id)}&commentId=${encodeURIComponent(comment.id)}`,
+    teamId,
+    ...(issue.assignedProjectId ? { projectId: issue.assignedProjectId } : {}),
+    parentId,
+    creatorUserId: comment.authorMemberKey,
+    createdAt: comment.createdAt,
+    updatedAt: comment.updatedAt,
+  })
+}
+
+function createTeamSearchDocument(
+  workspaceId: string,
+  team: ProjectDirectoryTeamResponse,
+  creatorUserId: string,
+) {
+  return createWorkspaceSearchDocument({
+    workspaceId,
+    entityType: 'team',
+    entityId: `team/${team.id}`,
+    title: team.name,
+    url: `/teams/${encodeURIComponent(team.id)}/overview`,
+    teamId: team.id,
+    creatorUserId,
+  })
+}
+
+function createProjectSearchDocument(
+  workspaceId: string,
+  teamId: string,
+  project: ProjectDirectoryProjectResponse,
+  creatorUserId: string,
+) {
+  return createWorkspaceSearchDocument({
+    workspaceId,
+    entityType: 'project',
+    entityId: `team/${teamId}/project/${project.id}`,
+    title: project.name,
+    url: `/projects/${encodeURIComponent(project.id)}/issues?teamId=${encodeURIComponent(teamId)}`,
+    teamId,
+    projectId: project.id,
+    creatorUserId,
+  })
+}
+
+async function projectWorkspaceSearchDocumentBestEffort(
+  document: WorkspaceSearchDocument,
+  operation: string,
+) {
+  if (!workspaceSearchProjectionEnabled) return
+  try {
+    await workspaceSearch.upsertDocument(document)
+  } catch (error) {
+    console.error(`Workspace search projection failed after ${operation}.`, error)
+  }
+}
+
+async function deleteWorkspaceSearchDocumentBestEffort(
+  workspaceId: string,
+  entityType: WorkspaceSearchDocument['entityType'],
+  entityId: string,
+  operation: string,
+) {
+  if (!workspaceSearchProjectionEnabled) return
+  try {
+    await workspaceSearch.deleteDocument(workspaceId, entityType, entityId)
+  } catch (error) {
+    console.error(`Workspace search projection delete failed after ${operation}.`, error)
+  }
 }
 
 async function hydrateTeamIssueDetailResponse(response: TeamIssueDetailResponse) {
@@ -11136,6 +11667,12 @@ function getEnv(name: string) {
   return process.env[name]
 }
 
+function shouldEnableWorkspaceSearchProjection() {
+  return getEnv('NODE_ENV') !== 'test' || Boolean(
+    getEnv('WORKSPACE_SEARCH_TABLE_NAME') ?? getEnv('MUKUROJI_WORKSPACE_SEARCH_TABLE'),
+  )
+}
+
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, '')
 }
@@ -11196,6 +11733,8 @@ workspaceAccess = new DynamoDbWorkspaceAccessClient()
 realtimeTickets = new DynamoDbRealtimeTicketsClient()
 collaboration = new DynamoDbCollaborationClient()
 notifications = new DynamoDbNotificationsClient()
+workspaceSearch = new DynamoDbWorkspaceSearchClient()
+workspaceSearchProjectionEnabled = shouldEnableWorkspaceSearchProjection()
 
 /**
  * Server test で外部 service client を差し替えます。
@@ -11211,6 +11750,7 @@ export function configureApiClientsForTest(clients: {
   realtimeTickets?: RealtimeTicketsClient
   collaboration?: CollaborationClient
   notifications?: NotificationClient
+  workspaceSearch?: WorkspaceSearchClient
 }) {
   cognito = clients.cognito ?? cognito
   dashboardSummary = clients.dashboardSummary ?? dashboardSummary
@@ -11222,6 +11762,8 @@ export function configureApiClientsForTest(clients: {
   realtimeTickets = clients.realtimeTickets ?? realtimeTickets
   collaboration = clients.collaboration ?? collaboration
   notifications = clients.notifications ?? notifications
+  workspaceSearch = clients.workspaceSearch ?? workspaceSearch
+  if (clients.workspaceSearch) workspaceSearchProjectionEnabled = true
 }
 
 /**
@@ -11238,6 +11780,8 @@ export function resetApiClientsForTest() {
   realtimeTickets = new DynamoDbRealtimeTicketsClient()
   collaboration = new DynamoDbCollaborationClient()
   notifications = new DynamoDbNotificationsClient()
+  workspaceSearch = new DynamoDbWorkspaceSearchClient()
+  workspaceSearchProjectionEnabled = shouldEnableWorkspaceSearchProjection()
 }
 
 /**

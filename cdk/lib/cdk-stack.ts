@@ -671,6 +671,14 @@ export class CdkStack extends cdk.Stack {
       timeToLiveAttribute: 'expiresAt',
     });
 
+    const workspaceSearchTable = new dynamodb.Table(this, 'WorkspaceSearchTable', {
+      partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     const notificationsTable = new dynamodb.Table(this, 'NotificationsTable', {
       partitionKey: { name: 'recipientKey', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'notificationKey', type: dynamodb.AttributeType.STRING },
@@ -742,6 +750,7 @@ export class CdkStack extends cdk.Stack {
         TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
         TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
+        WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
       },
     });
 
@@ -753,9 +762,10 @@ export class CdkStack extends cdk.Stack {
     workspaceAccessTable.grantReadWriteData(apiFunction);
     collaborationTable.grantReadWriteData(apiFunction);
     notificationsTable.grantReadWriteData(apiFunction);
+    workspaceSearchTable.grantReadWriteData(apiFunction);
     realtimeSessionsTable.grantWriteData(apiFunction);
-    apiFunction.addToRolePolicy(
-      new iam.PolicyStatement({
+    const apiTransactWritePolicy = new iam.Policy(this, 'ApiTransactWritePolicy', {
+      statements: [new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
         resources: [
           workItemsTable.tableArn,
@@ -764,9 +774,14 @@ export class CdkStack extends cdk.Stack {
           auditEventsTable.tableArn,
           workspaceAccessTable.tableArn,
           collaborationTable.tableArn,
+          workspaceSearchTable.tableArn,
         ],
-      }),
-    );
+      })],
+    });
+    if (!apiFunction.role) {
+      throw new Error('API Lambda execution role was not created.');
+    }
+    apiFunction.role.attachInlinePolicy(apiTransactWritePolicy);
     apiFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: [
@@ -1237,6 +1252,9 @@ export class CdkStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'WorkspaceAccessTableName', { value: workspaceAccessTable.tableName });
     new cdk.CfnOutput(this, 'WorkItemCollaborationTableName', {
       value: collaborationTable.tableName,
+    });
+    new cdk.CfnOutput(this, 'WorkspaceSearchTableName', {
+      value: workspaceSearchTable.tableName,
     });
     new cdk.CfnOutput(this, 'NotificationsTableName', { value: notificationsTable.tableName });
     new cdk.CfnOutput(this, 'RealtimeSessionsTableName', {

@@ -19,6 +19,7 @@ WORK_ITEMS_TABLE="${MUKUROJI_WORK_ITEMS_TABLE:-${WORK_ITEMS_TABLE_NAME:-${MUKURO
 TEAM_ISSUES_TABLE="$WORK_ITEMS_TABLE"
 TEAM_ISSUE_EVENTS_TABLE="${MUKUROJI_TEAM_ISSUE_EVENTS_TABLE:-mukuroji-team-issue-events-local}"
 COLLABORATION_TABLE="${MUKUROJI_COLLABORATION_TABLE:-${COLLABORATION_TABLE_NAME:-mukuroji-collaboration-local}}"
+WORKSPACE_SEARCH_TABLE="${MUKUROJI_WORKSPACE_SEARCH_TABLE:-${WORKSPACE_SEARCH_TABLE_NAME:-mukuroji-workspace-search-local}}"
 NOTIFICATIONS_TABLE="${MUKUROJI_NOTIFICATIONS_TABLE:-${NOTIFICATIONS_TABLE_NAME:-mukuroji-notifications-local}}"
 REALTIME_SESSIONS_TABLE="${MUKUROJI_REALTIME_SESSIONS_TABLE:-${REALTIME_SESSIONS_TABLE_NAME:-mukuroji-realtime-sessions-local}}"
 AUDIT_EVENTS_TABLE="${MUKUROJI_AUDIT_EVENTS_TABLE:-${AUDIT_EVENTS_TABLE_NAME:-mukuroji-audit-events}}"
@@ -381,6 +382,21 @@ if ! aws_local dynamodb describe-table --table-name "$WORKSPACE_ACCESS_TABLE" >/
     >/dev/null
 fi
 
+if ! aws_local dynamodb describe-table --table-name "$WORKSPACE_SEARCH_TABLE" >/dev/null 2>&1; then
+  aws_local dynamodb create-table \
+    --table-name "$WORKSPACE_SEARCH_TABLE" \
+    --attribute-definitions \
+      AttributeName=workspaceId,AttributeType=S \
+      AttributeName=recordKey,AttributeType=S \
+    --key-schema \
+      AttributeName=workspaceId,KeyType=HASH \
+      AttributeName=recordKey,KeyType=RANGE \
+    --billing-mode PAY_PER_REQUEST \
+    >/dev/null
+fi
+
+aws_local dynamodb wait table-exists --table-name "$WORKSPACE_SEARCH_TABLE"
+
 WORKSPACE_SEED_CREATED_AT="2026-07-11T00:00:00.000Z"
 
 ensure_workspace_record() {
@@ -533,6 +549,8 @@ TEAM_ISSUES_TABLE_NAME=$TEAM_ISSUES_TABLE
 WORK_ITEMS_TABLE_NAME=$WORK_ITEMS_TABLE
 MUKUROJI_COLLABORATION_TABLE=$COLLABORATION_TABLE
 COLLABORATION_TABLE_NAME=$COLLABORATION_TABLE
+MUKUROJI_WORKSPACE_SEARCH_TABLE=$WORKSPACE_SEARCH_TABLE
+WORKSPACE_SEARCH_TABLE_NAME=$WORKSPACE_SEARCH_TABLE
 MUKUROJI_NOTIFICATIONS_TABLE=$NOTIFICATIONS_TABLE
 NOTIFICATIONS_TABLE_NAME=$NOTIFICATIONS_TABLE
 MUKUROJI_REALTIME_SESSIONS_TABLE=$REALTIME_SESSIONS_TABLE
@@ -552,3 +570,4 @@ echo "mukuroji DynamoDB ready: table=$WORK_ITEMS_TABLE canonicalSeed=ready"
 echo "mukuroji DynamoDB ready: table=$PROJECT_DIRECTORY_TABLE workspaceDirectory=$WORKSPACE_DIRECTORY_ID"
 echo "mukuroji audit configured: table=$AUDIT_EVENTS_TABLE retentionDays=$AUDIT_RETENTION_DAYS"
 echo "mukuroji DynamoDB ready: table=$WORKSPACE_ACCESS_TABLE workspace=$WORKSPACE_DIRECTORY_ID"
+echo "mukuroji DynamoDB ready: table=$WORKSPACE_SEARCH_TABLE searchAndSavedViews=ready"

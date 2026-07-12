@@ -7,6 +7,12 @@ import { createAuditEvent, createMutationAuditContext } from './audit'
 import { CollaborationError, type CollaborationClient } from './collaboration'
 import type { NotificationClient, NotificationItem } from './notifications'
 import {
+  createWorkspaceSearchDocument,
+  type WorkspaceSearchClient,
+  type WorkspaceSearchQueryInput,
+  type WorkspaceSearchResolvedScope,
+} from './workspace-search'
+import {
   app,
   AwsCognitoClient,
   CognitoServiceError,
@@ -3440,6 +3446,19 @@ test('keeps a departed author in history while blocking deactivated member mutat
           presence: [],
         }
       },
+      async getCommentSnapshot(input) {
+        return {
+          id: input.commentId,
+          rootCommentId: input.commentId,
+          authorMemberKey: 'demo@example.com',
+          bodyMarkdown: 'Search body',
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-06-08T01:00:00.000Z',
+          updatedAt: '2026-06-08T01:00:00.000Z',
+          reactions: [],
+        }
+      },
     } as CollaborationClient,
   })
 
@@ -6175,6 +6194,294 @@ test('DynamoDB directory client does not reread manager state when cancellation 
   expect(sentInputs).toHaveLength(2)
 })
 
+test('search endpoint parses filters and revalidates comment scope against current RBAC', async () => {
+  configureFakeProjectClients(true)
+  let capturedInput: WorkspaceSearchQueryInput | undefined
+  let resolvedProjectId: string | undefined
+  configureApiClientsForTest({
+    workspaceSearch: {
+      async search(input) {
+        capturedInput = input
+        const document = createWorkspaceSearchDocument({
+          workspaceId: input.workspaceId,
+          entityType: 'comment',
+          entityId: 'team/core-team/issue/issue-1/comment/comment-1',
+          parentId: 'team/core-team/issue/issue-1',
+          title: 'Current scope comment',
+          body: 'Search body',
+          url: '/teams/core-team/issues?issueId=issue-1&commentId=comment-1',
+          teamId: 'core-team',
+        })
+        resolvedProjectId = (await input.resolveCurrentScope?.(document))?.projectId
+        return { schemaVersion: 1, results: [] }
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  const filters = {
+    keyword: 'scope',
+    projectIds: ['refero'],
+    customFields: [{ fieldId: 'score', operator: 'greater-than', value: 5 }],
+  }
+
+  const response = await app.request(
+    `/api/search?filters=${encodeURIComponent(JSON.stringify(filters))}&limit=25`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect(capturedInput?.filters).toEqual(filters)
+  expect(capturedInput?.limit).toBe(25)
+  expect(capturedInput?.access.projectIds.has('refero')).toBe(true)
+  expect(capturedInput?.access.teamIds.has('core-team')).toBe(true)
+  expect(resolvedProjectId).toBe('refero')
+})
+
+test('search endpoint refreshes comment content from its current source snapshot', async () => {
+  configureFakeProjectClients(true)
+  let resolvedScope: WorkspaceSearchResolvedScope | undefined
+  configureApiClientsForTest({
+    collaboration: {
+      async getCommentSnapshot(input) {
+        return {
+          id: input.commentId,
+          rootCommentId: input.commentId,
+          authorMemberKey: 'sato@example.com',
+          bodyMarkdown: 'Current private decision',
+          version: 2,
+          mentionMemberKeys: [],
+          createdAt: '2026-06-08T01:00:00.000Z',
+          updatedAt: '2026-07-12T02:00:00.000Z',
+          reactions: [],
+        }
+      },
+    } as CollaborationClient,
+    workspaceSearch: {
+      async search(input) {
+        resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
+          workspaceId: input.workspaceId,
+          entityType: 'comment',
+          entityId: 'team/core-team/issue/issue-1/comment/comment-1',
+          parentId: 'team/core-team/issue/issue-1',
+          title: 'Stale title',
+          body: 'Stale private decision',
+          url: '/teams/core-team/issues?issueId=issue-1&commentId=comment-1',
+          teamId: 'core-team',
+          updatedAt: '2026-06-08T01:00:00.000Z',
+        }))
+        return { schemaVersion: 1, results: [] }
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+
+  const response = await app.request('/api/search', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(resolvedScope).toMatchObject({
+    teamId: 'core-team',
+    projectId: 'refero',
+    currentDocument: {
+      body: 'Current private decision',
+      creatorUserId: 'sato@example.com',
+      updatedAt: '2026-07-12T02:00:00.000Z',
+    },
+  })
+})
+
+test('search endpoint fails closed for missing, deleted, or malformed comment sources', async () => {
+  configureFakeProjectClients(true)
+  const resolvedScopes: Array<WorkspaceSearchResolvedScope | undefined> = []
+  let snapshotReads = 0
+  configureApiClientsForTest({
+    collaboration: {
+      async getCommentSnapshot(input) {
+        snapshotReads += 1
+        if (input.commentId === 'missing') return undefined
+        return {
+          id: input.commentId,
+          rootCommentId: input.commentId,
+          authorMemberKey: 'demo@example.com',
+          bodyMarkdown: '',
+          version: 2,
+          mentionMemberKeys: [],
+          createdAt: '2026-06-08T01:00:00.000Z',
+          updatedAt: '2026-07-12T02:00:00.000Z',
+          deletedAt: '2026-07-12T02:00:00.000Z',
+          reactions: [],
+        }
+      },
+    } as CollaborationClient,
+    workspaceSearch: {
+      async search(input) {
+        for (const [commentId, parentId] of [
+          ['missing', 'team/core-team/issue/issue-1'],
+          ['deleted', 'team/core-team/issue/issue-1'],
+          ['malformed', 'team/core-team/issue/other'],
+        ] as const) {
+          resolvedScopes.push(await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
+            workspaceId: input.workspaceId,
+            entityType: 'comment',
+            entityId: `team/core-team/issue/issue-1/comment/${commentId}`,
+            parentId,
+            title: 'Stale title',
+            body: 'Stale body',
+            url: `/teams/core-team/issues?issueId=issue-1&commentId=${commentId}`,
+            teamId: 'core-team',
+          })))
+        }
+        return { schemaVersion: 1, results: [] }
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+
+  const response = await app.request('/api/search', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(resolvedScopes).toEqual([undefined, undefined, undefined])
+  expect(snapshotReads).toBe(2)
+})
+
+test('search endpoint excludes archived Team documents for system administrators', async () => {
+  configureFakeProjectClients(true, { systemAdminMemberKeys: ['demo@example.com'] })
+  let resolvedScope: unknown = 'not-called'
+  configureApiClientsForTest({
+    workspaceSearch: {
+      async search(input) {
+        resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
+          workspaceId: input.workspaceId,
+          entityType: 'work-item',
+          entityId: 'team/archived-team/issue/issue-1',
+          title: 'Archived Team item',
+          url: '/teams/archived-team/issues?issueId=issue-1',
+          teamId: 'archived-team',
+        }))
+        return { schemaVersion: 1, results: [] }
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+
+  const response = await app.request('/api/search', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(resolvedScope).toBeUndefined()
+})
+
+test('saved view endpoints forward create update list and revision delete contracts', async () => {
+  configureFakeProjectClients(true)
+  const calls = {
+    creates: [] as unknown[],
+    deletes: [] as unknown[],
+    lists: [] as unknown[],
+    updates: [] as unknown[],
+  }
+  const view = {
+    schemaVersion: 1 as const,
+    id: 'view-1',
+    name: 'Review queue',
+    visibility: 'personal' as const,
+    ownerUserId: 'demo@example.com',
+    filters: { statuses: ['review'] },
+    layout: { mode: 'table' as const, sort: [], columns: ['title'] },
+    revision: 1,
+    canEdit: true,
+    favorite: false,
+    pinned: false,
+    isDefault: false,
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  configureApiClientsForTest({
+    workspaceSearch: {
+      async listSavedViews(input) {
+        calls.lists.push(input)
+        return { views: [view] }
+      },
+      async createSavedView(input) {
+        calls.creates.push(input)
+        return view
+      },
+      async updateSavedView(input) {
+        calls.updates.push(input)
+        return { ...view, revision: 2, favorite: true }
+      },
+      async deleteSavedView(input) {
+        calls.deletes.push(input)
+        return { id: input.viewId, revision: input.expectedRevision }
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+    'Idempotency-Key': 'saved-view-request-1',
+  }
+  const listResponse = await app.request('/api/saved-views', { headers })
+  const createResponse = await app.request('/api/saved-views', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      name: 'Review queue',
+      visibility: 'personal',
+      filters: { statuses: ['review'] },
+      layout: { mode: 'table', sort: [], columns: ['title'] },
+    }),
+  })
+  const updateResponse = await app.request('/api/saved-views/view-1', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ expectedRevision: 1, favorite: true }),
+  })
+  const deleteResponse = await app.request('/api/saved-views/view-1?expectedRevision=2', {
+    method: 'DELETE',
+    headers,
+  })
+
+  expect([listResponse.status, createResponse.status, updateResponse.status, deleteResponse.status])
+    .toEqual([200, 201, 200, 200])
+  expect(calls.lists).toHaveLength(1)
+  expect(calls.creates).toHaveLength(1)
+  expect(calls.creates[0]).toMatchObject({ idempotencyKey: 'saved-view-request-1' })
+  expect(calls.updates).toHaveLength(1)
+  expect(calls.deletes).toEqual([
+    expect.objectContaining({ viewId: 'view-1', expectedRevision: 2 }),
+  ])
+})
+
+test('keeps a primary mutation successful when search projection fails', async () => {
+  configureFakeProjectClients(true)
+  let projectedTitle: string | undefined
+  configureApiClientsForTest({
+    workspaceSearch: {
+      async upsertDocument(document) {
+        projectedTitle = document.title
+        throw new Error('Search index unavailable')
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  const originalConsoleError = console.error
+  console.error = () => undefined
+  try {
+    const response = await app.request('/api/teams', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'Search resilient Team' }),
+    })
+
+    expect(response.status).toBe(201)
+    expect(projectedTitle).toBe('Search resilient Team')
+  } finally {
+    console.error = originalConsoleError
+  }
+})
+
 function createProjectMemberFixtureItems(
   options: {
     /** owner Team ambiguity を再現する追加 Team です。 */
@@ -6473,6 +6780,19 @@ function configureFakeProjectClients(
             watcherCount: 0,
           },
           presence: [],
+        }
+      },
+      async getCommentSnapshot(input) {
+        return {
+          id: input.commentId,
+          rootCommentId: input.commentId,
+          authorMemberKey: 'demo@example.com',
+          bodyMarkdown: 'Search body',
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-06-08T01:00:00.000Z',
+          updatedAt: '2026-06-08T01:00:00.000Z',
+          reactions: [],
         }
       },
     } as CollaborationClient,

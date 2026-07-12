@@ -117,6 +117,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
     'ProjectDirectoryTable9ED01C01',
     'ListProjectTasksFunction2134AF4A',
     'WorkItemCollaborationTableFDECF217',
+    'WorkspaceSearchTable2575AD6B',
     'NotificationsTable76DCFC6C',
     'RealtimeSessionsTable607096EB',
   ];
@@ -127,7 +128,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(10);
+  expect(Object.keys(tables)).toHaveLength(11);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -185,6 +186,9 @@ test('shared server handler is bundled as a Lambda asset with production environ
         },
         WORK_ITEMS_TABLE_NAME: {
           Ref: 'TeamIssuesTable189D851D',
+        },
+        WORKSPACE_SEARCH_TABLE_NAME: {
+          Ref: 'WorkspaceSearchTable2575AD6B',
         },
         COLLABORATION_TABLE_NAME: {
           Ref: 'WorkItemCollaborationTableFDECF217',
@@ -257,6 +261,9 @@ test('Function URL and API Gateway invoke the same Lambda handler', () => {
   });
   template.hasOutput('WorkItemsTableName', {
     Value: { Ref: 'TeamIssuesTable189D851D' },
+  });
+  template.hasOutput('WorkspaceSearchTableName', {
+    Value: { Ref: 'WorkspaceSearchTable2575AD6B' },
   });
 });
 
@@ -342,6 +349,33 @@ test('collaboration notifications and realtime sessions use production-safe Dyna
   expect(bootstrapPayload).not.toContain('WorkItemCollaborationTableFDECF217');
   expect(bootstrapPayload).not.toContain('NotificationsTable76DCFC6C');
   expect(bootstrapPayload).not.toContain('RealtimeSessionsTable607096EB');
+});
+
+test('workspace search persists documents views and preferences in one retained table', () => {
+  const template = synthesizedTemplate;
+
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    AttributeDefinitions: [
+      { AttributeName: 'workspaceId', AttributeType: 'S' },
+      { AttributeName: 'recordKey', AttributeType: 'S' },
+    ],
+    BillingMode: 'PAY_PER_REQUEST',
+    KeySchema: [
+      { AttributeName: 'workspaceId', KeyType: 'HASH' },
+      { AttributeName: 'recordKey', KeyType: 'RANGE' },
+    ],
+    PointInTimeRecoverySpecification: {
+      PointInTimeRecoveryEnabled: true,
+    },
+  });
+
+  const resource = template.toJSON().Resources.WorkspaceSearchTable2575AD6B;
+
+  expect(resource).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+  }));
+  expect(resource.Properties.GlobalSecondaryIndexes).toBeUndefined();
 });
 
 test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () => {
@@ -602,11 +636,36 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
 
 test('API IAM is limited to the data tables and configured Cognito user pool', () => {
   const template = synthesizedTemplate;
-  const policy = template.toJSON().Resources.ListProjectTasksFunctionServiceRoleDefaultPolicy5F0F81CE;
-  const statements = policy.Properties.PolicyDocument.Statement as Array<Record<string, unknown>>;
-  const transactStatement = statements.find((statement) =>
-    statement.Action === 'dynamodb:TransactWriteItems'
+  const resources = template.toJSON().Resources;
+  const apiRoleLogicalId = Object.entries(resources).find(([logicalId, resource]) =>
+    logicalId.startsWith('ListProjectTasksFunctionServiceRole') &&
+    (resource as { Type?: string }).Type === 'AWS::IAM::Role'
+  )?.[0];
+  expect(apiRoleLogicalId).toBeDefined();
+  if (!apiRoleLogicalId) {
+    throw new Error('API Lambda execution role was not found.');
+  }
+  const apiPolicies = Object.values(resources)
+    .filter((resource) => {
+      if ((resource as { Type?: string }).Type !== 'AWS::IAM::Policy') return false;
+      const roles = (resource as { Properties?: { Roles?: unknown[] } }).Properties?.Roles ?? [];
+      return roles.some((role) =>
+        (role as { Ref?: string }).Ref === apiRoleLogicalId
+      );
+    })
+    .map((resource) => resource as {
+      Properties: { PolicyDocument: { Statement: Array<Record<string, unknown>> } };
+    });
+  expect(apiPolicies).not.toHaveLength(0);
+  const statements = apiPolicies.flatMap((policy) =>
+    policy.Properties.PolicyDocument.Statement
   );
+  const serializedApiPolicies = JSON.stringify(apiPolicies);
+  const transactStatement = statements.find((statement) => {
+    const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+    return actions.includes('dynamodb:TransactWriteItems') &&
+      JSON.stringify(statement.Resource).includes('WorkspaceSearchTable2575AD6B');
+  });
   const cognitoPolicy = Object.values(template.toJSON().Resources).find((resource) =>
     JSON.stringify(resource).includes('cognito-idp:AdminGetUser')
   );
@@ -617,12 +676,30 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
       { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
       { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
       { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
+      { 'Fn::GetAtt': ['WorkspaceSearchTable2575AD6B', 'Arn'] },
     ]),
   }));
+  expect(serializedApiPolicies).toContain('WorkspaceSearchTable2575AD6B');
   expect(JSON.stringify(transactStatement)).not.toContain('ProjectTasksTableE21F6637');
-  expect(JSON.stringify(policy)).toContain('NotificationsTable76DCFC6C');
-  expect(JSON.stringify(policy)).toContain('dynamodb:Query');
-  expect(JSON.stringify(policy)).toContain('dynamodb:PutItem');
+  expect(serializedApiPolicies).toContain('NotificationsTable76DCFC6C');
+  expect(serializedApiPolicies).toContain('dynamodb:Query');
+  expect(serializedApiPolicies).toContain('dynamodb:PutItem');
+
+  const workspaceSearchStatements = statements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes('WorkspaceSearchTable2575AD6B')
+  );
+  const workspaceSearchActions = workspaceSearchStatements.flatMap((statement) =>
+    Array.isArray(statement.Action) ? statement.Action : [statement.Action]
+  );
+
+  expect(workspaceSearchActions).toEqual(expect.arrayContaining([
+    'dynamodb:DeleteItem',
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+    'dynamodb:Query',
+    'dynamodb:TransactWriteItems',
+    'dynamodb:UpdateItem',
+  ]));
 
   const legacyTaskStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('ProjectTasksTableE21F6637')
@@ -649,7 +726,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   }
   expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:ListUsers');
   expect(JSON.stringify(cognitoPolicy)).toContain('CognitoUserPoolId');
-  expect(JSON.stringify(policy)).not.toContain('"Resource":"*"');
+  expect(serializedApiPolicies).not.toContain('"Resource":"*"');
   expect(JSON.stringify(cognitoPolicy)).not.toContain('"Resource":"*"');
 });
 
