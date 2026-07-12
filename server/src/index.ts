@@ -4874,16 +4874,35 @@ function readNotificationPreferencesInput(
   }
 }
 
+const currentAssigneeNotificationReasons = new Set([
+  'assignee',
+  'assignment',
+  'due',
+  'due-date-change',
+  'overdue',
+  'status-change',
+])
+
+/** Notification が現在の担当者であることだけを配信理由にしているか判定します。 */
+function requiresCurrentWorkItemAssignee(notification: NotificationItem) {
+  return notification.reasons.length > 0 && notification.reasons.every(
+    (reason) => currentAssigneeNotificationReasons.has(reason),
+  )
+}
+
 async function createNotificationVisibilityFilter(
   principal: WorkspacePrincipal,
 ) {
   const directory = await projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
   const activeTeamIds = new Set(directory.teams.map((team) => team.id))
-  const projectTeamIds = new Map(
-    directory.teams.flatMap((team) =>
-      team.projects.map((project) => [project.id, team.id] as const)
-    ),
-  )
+  const projectTeamIds = new Map<string, Set<string>>()
+  for (const team of directory.teams) {
+    for (const project of team.projects) {
+      const teamIds = projectTeamIds.get(project.id) ?? new Set<string>()
+      teamIds.add(team.id)
+      projectTeamIds.set(project.id, teamIds)
+    }
+  }
   const accessibleProjectIds = principal.isSystemAdmin
     ? new Set(projectTeamIds.keys())
     : new Set(
@@ -4895,10 +4914,13 @@ async function createNotificationVisibilityFilter(
     ? activeTeamIds
     : new Set(
         [...accessibleProjectIds]
-          .map((projectId) => projectTeamIds.get(projectId))
-          .filter((teamId): teamId is string => Boolean(teamId)),
+          .flatMap((projectId) => [...(projectTeamIds.get(projectId) ?? [])]),
       )
-  const workItemScopes = new Map<string, Promise<{ exists: boolean; projectId?: string }>>()
+  const workItemScopes = new Map<string, Promise<{
+    assigneeMemberKey?: string
+    exists: boolean
+    projectId?: string
+  }>>()
 
   return async (notification: NotificationItem) => {
     if (notification.teamId && notification.issueId) {
@@ -4911,6 +4933,7 @@ async function createNotificationVisibilityFilter(
           notification.issueId,
           { consistentIssueRead: true, eventLimit: 0 },
         ).then((detail) => ({
+          assigneeMemberKey: detail.issue.assigneeUserId.trim().toLowerCase(),
           exists: true,
           ...(detail.issue.assignedProjectId
             ? { projectId: detail.issue.assignedProjectId }
@@ -4927,18 +4950,24 @@ async function createNotificationVisibilityFilter(
       if (!currentScope.exists) {
         return false
       }
+      if (
+        requiresCurrentWorkItemAssignee(notification) &&
+        currentScope.assigneeMemberKey !== principal.userKey
+      ) {
+        return false
+      }
       if (currentScope.projectId) {
         notification.projectId = currentScope.projectId
-        return projectTeamIds.get(currentScope.projectId) === notification.teamId &&
+        return projectTeamIds.get(currentScope.projectId)?.has(notification.teamId) === true &&
           accessibleProjectIds.has(currentScope.projectId)
       }
       delete notification.projectId
       return activeTeamIds.has(notification.teamId) && accessibleTeamIds.has(notification.teamId)
     }
     if (notification.projectId) {
-      const teamId = projectTeamIds.get(notification.projectId)
-      return teamId !== undefined &&
-        (!notification.teamId || notification.teamId === teamId) &&
+      const teamIds = projectTeamIds.get(notification.projectId)
+      return teamIds !== undefined &&
+        (!notification.teamId || teamIds.has(notification.teamId)) &&
         accessibleProjectIds.has(notification.projectId)
     }
     if (notification.teamId) {

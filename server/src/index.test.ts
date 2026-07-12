@@ -5,7 +5,7 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import { createAuditEvent, createMutationAuditContext } from './audit'
 import { CollaborationError, type CollaborationClient } from './collaboration'
-import type { NotificationClient } from './notifications'
+import type { NotificationClient, NotificationItem } from './notifications'
 import {
   app,
   AwsCognitoClient,
@@ -544,8 +544,79 @@ test('loads project directory from the authenticated user scoped partition', asy
   expect(calls.directoryReads).toEqual([{ directoryId: 'user#demo@example.com', locale: 'en' }])
 })
 
+/** Notification visibility API test に使う render-ready item を作ります。 */
+function createNotificationItem(
+  overrides: Partial<NotificationItem> = {},
+): NotificationItem {
+  return {
+    id: 'notification-item',
+    eventId: 'notification-event',
+    eventType: 'work-item.updated',
+    reasons: ['status-change'],
+    teamId: 'core-team',
+    projectId: 'refero',
+    issueId: 'notification-item',
+    occurredAt: '2026-07-12T12:00:00.000Z',
+    state: 'unread',
+    ...overrides,
+  }
+}
+
+/** NotificationClient 経由で API の current visibility 判定結果を記録します。 */
+function createNotificationVisibilityProbe(notifications: NotificationItem[]) {
+  const visibility = new Map<string, boolean>()
+  const client: NotificationClient = {
+    async list(input) {
+      const visibleNotifications: NotificationItem[] = []
+      for (const notification of notifications) {
+        const isVisible = !input.isVisible || await input.isVisible(notification)
+        visibility.set(notification.id, isVisible)
+        if (isVisible) {
+          visibleNotifications.push(notification)
+        }
+      }
+      return { notifications: visibleNotifications }
+    },
+    async countUnread(input) {
+      let count = 0
+      for (const notification of notifications) {
+        const isVisible = !input.isVisible || await input.isVisible(notification)
+        visibility.set(notification.id, isVisible)
+        if (isVisible && notification.state === 'unread') {
+          count += 1
+        }
+      }
+      return count
+    },
+    async update() {
+      throw new Error('Notification update is not configured for this visibility test.')
+    },
+    async markAllRead() {
+      return 0
+    },
+    async getPreferences() {
+      return {
+        version: 0,
+        channels: { inApp: true, email: false, push: false },
+        frequency: 'instant',
+        quietHours: { enabled: false, start: '22:00', end: '07:00', timeZone: 'UTC' },
+      }
+    },
+    async savePreferences(input) {
+      return {
+        ...input.preferences,
+        version: input.preferences.version + 1,
+        updatedAt: '2026-07-12T13:00:00.000Z',
+      }
+    },
+  }
+  return { client, visibility }
+}
+
 test('serves permission-filtered notification timeline, state, and preference contracts', async () => {
-  const projectCalls = configureFakeProjectClients(true)
+  const projectCalls = configureFakeProjectClients(true, {
+    detailAssigneeUserId: 'demo@example.com',
+  })
   const notification = {
     id: 'opaque-notification-id',
     eventId: 'evt-1',
@@ -647,6 +718,7 @@ test('serves permission-filtered notification timeline, state, and preference co
 test('hides a notification after its Work Item moves to an inaccessible project', async () => {
   configureFakeProjectClients(true, {
     detailAssignedProjectId: 'private-project',
+    detailAssigneeUserId: 'demo@example.com',
     projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
     teamProjects: [
       { id: 'refero', name: 'Refero', tone: 'blue' },
@@ -701,6 +773,81 @@ test('hides a notification after its Work Item moves to an inaccessible project'
   expect(currentlyVisible).toBe(false)
   expect(notification.projectId).toBe('private-project')
   expect(await response.json()).toMatchObject({ notifications: [], unreadCount: 0 })
+})
+
+test('keeps a shared-project notification visible under every active owner Team', async () => {
+  configureFakeProjectClients(true, {
+    detailAssignedProjectId: 'shared-launch',
+    detailAssigneeUserId: 'demo@example.com',
+    projectAccesses: [{ projectId: 'shared-launch', role: 'viewer' }],
+    teamProjects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+    additionalTeams: [{
+      id: 'design-team',
+      name: 'Design Team',
+      projects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+    }],
+  })
+  const coreNotification = createNotificationItem({
+    id: 'shared-project-core-notification',
+    issueId: 'shared-project-core-item',
+    projectId: 'shared-launch',
+    reasons: ['watcher'],
+  })
+  const designNotification = createNotificationItem({
+    id: 'shared-project-design-notification',
+    issueId: 'shared-project-design-item',
+    projectId: 'shared-launch',
+    reasons: ['watcher'],
+    teamId: 'design-team',
+  })
+  const probe = createNotificationVisibilityProbe([coreNotification, designNotification])
+  configureApiClientsForTest({ notifications: probe.client })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility.get(coreNotification.id)).toBe(true)
+  expect(probe.visibility.get(designNotification.id)).toBe(true)
+  expect(await response.json()).toMatchObject({
+    notifications: [{ id: coreNotification.id }, { id: designNotification.id }],
+    unreadCount: 2,
+  })
+})
+
+test('hides stale assignee-only notifications after Work Item reassignment', async () => {
+  configureFakeProjectClients(true, {
+    detailAssigneeUserId: 'sato@example.com',
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+  })
+  const staleAssignment = createNotificationItem({
+    id: 'stale-assignment',
+    reasons: ['assignment'],
+  })
+  const staleDue = createNotificationItem({
+    id: 'stale-due',
+    reasons: ['due'],
+  })
+  const retainedMention = createNotificationItem({
+    id: 'retained-mention',
+    reasons: ['assignment', 'mention'],
+  })
+  const probe = createNotificationVisibilityProbe([staleAssignment, staleDue, retainedMention])
+  configureApiClientsForTest({ notifications: probe.client })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility.get(staleAssignment.id)).toBe(false)
+  expect(probe.visibility.get(staleDue.id)).toBe(false)
+  expect(probe.visibility.get(retainedMention.id)).toBe(true)
+  expect(await response.json()).toMatchObject({
+    notifications: [{ id: retainedMention.id }],
+    unreadCount: 1,
+  })
 })
 
 test('returns Cognito groups and system admin status for the current user', async () => {
@@ -6164,6 +6311,8 @@ function configureFakeProjectClients(
     taskAssigneeUserId?: string
     /** Notification 認可で再取得する Work Item の現在 assigned Project ID です。 */
     detailAssignedProjectId?: string
+    /** Notification 認可で再取得する Work Item の現在担当者です。 */
+    detailAssigneeUserId?: string
     teamProjects?: Array<{ id: string; name: string; tone: 'blue' | 'purple' | 'green' | 'yellow' }>
     /** owner Team ambiguity を再現する追加 Team です。 */
     additionalTeams?: Array<{
@@ -6975,7 +7124,7 @@ function configureFakeProjectClients(
               : options.detailAssignedProjectId ?? 'refero',
             title: '初回オンボーディングの離脱要因を減らす',
             description: '初回体験の摩擦を下げる。',
-            assigneeUserId: 'sato@example.com',
+            assigneeUserId: options.detailAssigneeUserId ?? 'sato@example.com',
             status: 'in-progress',
             dueDate: '2026/06/18',
             priority: 'high',
