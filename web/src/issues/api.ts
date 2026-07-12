@@ -82,17 +82,271 @@ export type TeamIssueComment = {
    */
   id: string
   /**
-   * コメントを書いたユーザー ID です。
+   * thread のルートコメント ID です。
    */
-  actorUserId: string
+  rootCommentId?: string
   /**
-   * コメント本文です。
+   * 返信先コメント ID です。root comment では未設定です。
    */
-  body: string
+  parentCommentId?: string
+  /**
+   * コメント作成者の Workspace member key です。
+   */
+  authorMemberKey?: string
+  /**
+   * 旧 comment API が返す actor user ID です。
+   */
+  actorUserId?: string
+  /**
+   * Markdown で保存されたコメント本文です。
+   */
+  bodyMarkdown?: string
+  /**
+   * 移行期間の旧 comment API が返す plain text 本文です。
+   */
+  body?: string
+  /**
+   * optimistic concurrency に使う comment revision です。
+   */
+  version?: number
   /**
    * 作成日時の ISO 8601 timestamp です。
    */
   createdAt: string
+  /**
+   * 最終更新日時の ISO 8601 timestamp です。
+   */
+  updatedAt?: string
+  /**
+   * コメントが編集された日時です。
+   */
+  editedAt?: string
+  /**
+   * コメントが soft delete された日時です。
+   */
+  deletedAt?: string
+  /**
+   * thread が解決された日時です。
+   */
+  resolvedAt?: string
+  /**
+   * thread を解決した Workspace member key です。
+   */
+  resolvedByMemberKey?: string
+  /**
+   * 本文中で mention された Workspace member key の重複除外済み一覧です。
+   */
+  mentionMemberKeys?: string[]
+  /**
+   * コメントに付いた reaction 集計です。
+   */
+  reactions?: TeamIssueCommentReaction[]
+  /**
+   * 現在のユーザーがコメントに行える操作です。
+   */
+  capabilities?: TeamIssueCommentCapabilities
+  /**
+   * collaboration store または移行前データのどちらから取得したかを表します。
+   */
+  source?: 'collaboration' | 'legacy'
+}
+
+/**
+ * コメントに付いた emoji reaction の集計です。
+ */
+export type TeamIssueCommentReaction = {
+  /**
+   * Unicode emoji です。
+   */
+  emoji: string
+  /**
+   * 同じ emoji の reaction 数です。
+   */
+  count: number
+  /**
+   * 現在のユーザーが reaction 済みかどうかです。
+   */
+  reactedByMe: boolean
+}
+
+/**
+ * コメント単位の操作権限です。
+ */
+export type TeamIssueCommentCapabilities = {
+  /**
+   * コメントを編集できるかどうかです。
+   */
+  canEdit: boolean
+  /**
+   * コメントを soft delete できるかどうかです。
+   */
+  canDelete: boolean
+  /**
+   * thread を resolve / reopen できるかどうかです。
+   */
+  canResolve: boolean
+  /**
+   * このコメントへ返信できるかどうかです。
+   */
+  canReply?: boolean
+  /**
+   * このコメントの reaction を変更できるかどうかです。
+   */
+  canReact?: boolean
+}
+
+/**
+ * Work Item の watcher 状態です。
+ */
+export type TeamIssueWatchState = {
+  /**
+   * 現在のユーザーが有効な watcher かどうかです。
+   */
+  subscribed: boolean
+  /**
+   * 明示的な subscribe 設定があるかどうかです。
+   */
+  explicit: boolean
+  /**
+   * 自動 watch 条件で有効になっているかどうかです。
+   */
+  automatic: boolean
+  /**
+   * 自動 watch になった理由です。
+   */
+  reasons: string[]
+  /**
+   * Work Item の watcher 数です。
+   */
+  watcherCount: number
+  /**
+   * 割り当て先 project を現在のユーザーが watch しているかどうかです。
+   */
+  projectSubscribed?: boolean
+  /**
+   * 割り当て先 project の watcher 数です。
+   */
+  projectWatcherCount?: number
+}
+
+/**
+ * Work Item を開いている member の presence です。
+ */
+export type TeamIssuePresence = {
+  /**
+   * Workspace member key です。
+   */
+  memberKey: string
+  /**
+   * コメントを入力中かどうかです。
+   */
+  typing: boolean
+  /**
+   * 最終 heartbeat の ISO 8601 timestamp です。
+   */
+  lastSeenAt: string
+}
+
+/**
+ * Work Item 全体で行える共同作業操作です。
+ */
+export type TeamIssueCollaborationCapabilities = {
+  /**
+   * comment / reply を作成できるかどうかです。
+   */
+  canComment: boolean
+  /**
+   * reaction を変更できるかどうかです。
+   */
+  canReact: boolean
+  /**
+   * watcher 設定を変更できるかどうかです。
+   */
+  canWatch: boolean
+}
+
+/**
+ * Work Item 共同作業 API の cursor page です。
+ */
+export type TeamIssueCollaborationPage = {
+  /**
+   * コメントと reply の一覧です。
+   */
+  comments: TeamIssueComment[]
+  /**
+   * 次 page の opaque cursor です。
+   */
+  nextCursor?: string
+  /**
+   * thread root ID ごとの次 reply page cursor です。
+   */
+  replyNextCursors?: Record<string, string>
+  /**
+   * watcher 状態です。
+   */
+  watch: TeamIssueWatchState
+  /**
+   * 現在の presence 一覧です。
+   */
+  presence: TeamIssuePresence[]
+  /**
+   * 共同作業パネル全体の操作権限です。
+   */
+  capabilities: TeamIssueCollaborationCapabilities
+}
+
+/**
+ * Work Item collaboration page の取得条件です。
+ */
+export type GetTeamIssueCollaborationOptions = {
+  /**
+   * 取得する最大件数です。
+   */
+  limit?: number
+  /**
+   * API が返した opaque cursor です。
+   */
+  cursor?: string
+  /**
+   * 指定した場合は、この thread の reply page を取得します。
+   */
+  rootCommentId?: string
+}
+
+/**
+ * comment / reply 作成 API に送信する入力です。
+ */
+export type CreateTeamIssueCommentInput = {
+  /**
+   * Markdown 本文です。
+   */
+  bodyMarkdown: string
+  /**
+   * reply 先コメント ID です。
+   */
+  parentCommentId?: string
+  /**
+   * mention された Workspace member key です。
+   */
+  mentionMemberKeys?: string[]
+}
+
+/**
+ * comment 更新 API に送信する入力です。
+ */
+export type UpdateTeamIssueCommentInput = {
+  /**
+   * 更新後の Markdown 本文です。
+   */
+  bodyMarkdown?: string
+  /**
+   * 更新後の mention 対象です。
+   */
+  mentionMemberKeys?: string[]
+  /**
+   * 読み込み時点の comment version です。
+   */
+  expectedVersion: number
 }
 
 /**
@@ -119,6 +373,68 @@ export type TeamIssueActivity = {
    * 作成日時の ISO 8601 timestamp です。
    */
   createdAt: string
+}
+
+/**
+ * append-only audit 基盤から取得する Work Item activity です。
+ */
+export type TeamIssueActivityEvent = {
+  /**
+   * audit event ID です。
+   */
+  eventId: string
+  /**
+   * `comment.edited` などの event type です。
+   */
+  eventType: string
+  /**
+   * event 発生日時の ISO 8601 timestamp です。
+   */
+  occurredAt: string
+  /**
+   * event を発生させた Workspace member key です。
+   */
+  actorUserId: string
+  /**
+   * 既知でない event の fallback 表示に使う概要です。
+   */
+  summary?: string
+  /**
+   * UI 表示に許可された event metadata です。
+   */
+  metadata?: Record<string, unknown>
+}
+
+/**
+ * Work Item activity API の cursor page です。
+ */
+export type TeamIssueActivityPage = {
+  /**
+   * activity event 一覧です。
+   */
+  events: TeamIssueActivityEvent[]
+  /**
+   * 次 page の opaque cursor です。
+   */
+  nextCursor?: string
+}
+
+/**
+ * WebSocket 接続用の短命 ticket です。
+ */
+export type TeamIssueRealtimeTicket = {
+  /**
+   * WebSocket authorizer が検証する one-time ticket です。
+   */
+  ticket: string
+  /**
+   * 接続先 WebSocket URL です。
+   */
+  websocketUrl: string
+  /**
+   * ticket の有効期限です。
+   */
+  expiresAt: string
 }
 
 /**
@@ -270,6 +586,16 @@ type CreateTeamIssueCommentResponse = {
 }
 
 /**
+ * watcher API が返す response body です。
+ */
+type TeamIssueWatchResponse = {
+  /**
+   * 更新後の watcher 状態です。
+   */
+  watch: TeamIssueWatchState
+}
+
+/**
  * Lambda API からエラーレスポンスが返ったときに投げる例外です。
  */
 export class TeamIssuesApiError extends Error {
@@ -384,14 +710,14 @@ export async function createTeamIssueComment(
   teamId: string,
   issueId: string,
   accessToken: string,
-  body: string,
+  input: CreateTeamIssueCommentInput,
   mutationContext: MutationRequestContext,
 ) {
   return requestJson<CreateTeamIssueCommentResponse>(
     `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}/comments`,
     accessToken,
     {
-      body: JSON.stringify({ body }),
+      body: JSON.stringify(input),
       headers: {
         'Content-Type': 'application/json',
         ...createMutationHeaders(mutationContext),
@@ -399,6 +725,410 @@ export async function createTeamIssueComment(
       method: 'POST',
     },
   )
+}
+
+/**
+ * Work Item の comment thread、watcher、presence を cursor 付きで取得します。
+ */
+export async function getTeamIssueCollaboration(
+  teamId: string,
+  issueId: string,
+  accessToken: string,
+  options: GetTeamIssueCollaborationOptions = {},
+) {
+  const query = new URLSearchParams()
+
+  if (options.limit !== undefined) {
+    query.set('limit', String(options.limit))
+  }
+
+  if (options.cursor) {
+    query.set('cursor', options.cursor)
+  }
+
+  if (options.rootCommentId) {
+    query.set('rootCommentId', options.rootCommentId)
+  }
+
+  const queryString = query.toString()
+
+  return requestJson<TeamIssueCollaborationPage>(
+    `${createTeamIssuePath(teamId, issueId)}/collaboration${queryString ? `?${queryString}` : ''}`,
+    accessToken,
+  )
+}
+
+/**
+ * append-only audit 基盤から Work Item activity を cursor 付きで取得します。
+ */
+export function getTeamIssueActivity(
+  teamId: string,
+  issueId: string,
+  accessToken: string,
+  options: { limit?: number; cursor?: string } = {},
+) {
+  const query = new URLSearchParams()
+
+  if (options.limit !== undefined) {
+    query.set('limit', String(options.limit))
+  }
+
+  if (options.cursor) {
+    query.set('cursor', options.cursor)
+  }
+
+  const queryString = query.toString()
+
+  return requestJson<TeamIssueActivityPage>(
+    `${createTeamIssuePath(teamId, issueId)}/activity${queryString ? `?${queryString}` : ''}`,
+    accessToken,
+  )
+}
+
+/**
+ * Work Item の realtime channel に接続するための短命 ticket を発行します。
+ */
+export function createTeamIssueRealtimeTicket(
+  teamId: string,
+  issueId: string,
+  accessToken: string,
+) {
+  return requestJson<TeamIssueRealtimeTicket>(
+    `${issuesApiBaseUrl}/realtime/tickets`,
+    accessToken,
+    {
+      body: JSON.stringify({ teamId, issueId }),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+    },
+  )
+}
+
+/**
+ * 保存済み comment の Markdown 本文と mention を更新します。
+ */
+export function updateTeamIssueComment(
+  teamId: string,
+  issueId: string,
+  commentId: string,
+  accessToken: string,
+  input: UpdateTeamIssueCommentInput,
+  mutationContext: MutationRequestContext,
+) {
+  return requestJson<{ comment: TeamIssueComment }>(
+    `${createTeamIssuePath(teamId, issueId)}/comments/${encodeURIComponent(commentId)}`,
+    accessToken,
+    {
+      body: JSON.stringify(input),
+      headers: {
+        'Content-Type': 'application/json',
+        ...createMutationHeaders(mutationContext),
+      },
+      method: 'PATCH',
+    },
+  )
+}
+
+/**
+ * 保存済み comment を soft delete します。
+ */
+export function deleteTeamIssueComment(
+  teamId: string,
+  issueId: string,
+  commentId: string,
+  accessToken: string,
+  expectedVersion: number,
+  mutationContext: MutationRequestContext,
+) {
+  return requestJson<{ comment: TeamIssueComment }>(
+    `${createTeamIssuePath(teamId, issueId)}/comments/${encodeURIComponent(commentId)}`,
+    accessToken,
+    {
+      body: JSON.stringify({ expectedVersion }),
+      headers: {
+        'Content-Type': 'application/json',
+        ...createMutationHeaders(mutationContext),
+      },
+      method: 'DELETE',
+    },
+  )
+}
+
+/**
+ * comment thread を解決済みにします。
+ */
+export function resolveTeamIssueComment(
+  teamId: string,
+  issueId: string,
+  commentId: string,
+  accessToken: string,
+  expectedVersion: number,
+  mutationContext: MutationRequestContext,
+) {
+  return changeTeamIssueCommentResolution(
+    teamId,
+    issueId,
+    commentId,
+    accessToken,
+    'resolve',
+    expectedVersion,
+    mutationContext,
+  )
+}
+
+/**
+ * 解決済み comment thread を再度開きます。
+ */
+export function reopenTeamIssueComment(
+  teamId: string,
+  issueId: string,
+  commentId: string,
+  accessToken: string,
+  expectedVersion: number,
+  mutationContext: MutationRequestContext,
+) {
+  return changeTeamIssueCommentResolution(
+    teamId,
+    issueId,
+    commentId,
+    accessToken,
+    'reopen',
+    expectedVersion,
+    mutationContext,
+  )
+}
+
+/**
+ * comment へ emoji reaction を追加します。
+ */
+export function addTeamIssueCommentReaction(
+  teamId: string,
+  issueId: string,
+  commentId: string,
+  emoji: string,
+  accessToken: string,
+  mutationContext: MutationRequestContext,
+) {
+  return changeTeamIssueCommentReaction(
+    teamId,
+    issueId,
+    commentId,
+    emoji,
+    accessToken,
+    'PUT',
+    mutationContext,
+  )
+}
+
+/**
+ * comment から現在のユーザーの emoji reaction を削除します。
+ */
+export function removeTeamIssueCommentReaction(
+  teamId: string,
+  issueId: string,
+  commentId: string,
+  emoji: string,
+  accessToken: string,
+  mutationContext: MutationRequestContext,
+) {
+  return changeTeamIssueCommentReaction(
+    teamId,
+    issueId,
+    commentId,
+    emoji,
+    accessToken,
+    'DELETE',
+    mutationContext,
+  )
+}
+
+/**
+ * Work Item の現在の watcher 状態を取得します。
+ */
+export async function getTeamIssueWatch(teamId: string, issueId: string, accessToken: string) {
+  const response = await requestJson<TeamIssueWatchResponse>(
+    `${createTeamIssuePath(teamId, issueId)}/watch`,
+    accessToken,
+  )
+
+  return response.watch
+}
+
+/**
+ * 現在のユーザーを Work Item watcher に追加します。
+ */
+export async function subscribeTeamIssueWatch(
+  teamId: string,
+  issueId: string,
+  accessToken: string,
+  mutationContext: MutationRequestContext,
+) {
+  const response = await requestJson<TeamIssueWatchResponse>(
+    `${createTeamIssuePath(teamId, issueId)}/watch`,
+    accessToken,
+    {
+      headers: createMutationHeaders(mutationContext),
+      method: 'PUT',
+    },
+  )
+
+  return response.watch
+}
+
+/**
+ * 現在のユーザーを Work Item watcher から外します。
+ */
+export async function unsubscribeTeamIssueWatch(
+  teamId: string,
+  issueId: string,
+  accessToken: string,
+  mutationContext: MutationRequestContext,
+) {
+  const response = await requestJson<TeamIssueWatchResponse>(
+    `${createTeamIssuePath(teamId, issueId)}/watch`,
+    accessToken,
+    {
+      headers: createMutationHeaders(mutationContext),
+      method: 'DELETE',
+    },
+  )
+
+  return response.watch
+}
+
+/**
+ * 現在のユーザーに対する Project watcher 状態を取得します。
+ */
+export async function getProjectWatch(projectId: string, accessToken: string) {
+  const response = await requestJson<TeamIssueWatchResponse>(
+    `${issuesApiBaseUrl}/projects/${encodeURIComponent(projectId)}/watch`,
+    accessToken,
+  )
+
+  return response.watch
+}
+
+/**
+ * 現在のユーザーを Project watcher に追加します。
+ */
+export async function subscribeProjectWatch(
+  projectId: string,
+  accessToken: string,
+  mutationContext: MutationRequestContext,
+) {
+  const response = await requestJson<TeamIssueWatchResponse>(
+    `${issuesApiBaseUrl}/projects/${encodeURIComponent(projectId)}/watch`,
+    accessToken,
+    {
+      headers: createMutationHeaders(mutationContext),
+      method: 'PUT',
+    },
+  )
+
+  return response.watch
+}
+
+/**
+ * 現在のユーザーを Project watcher から外します。
+ */
+export async function unsubscribeProjectWatch(
+  projectId: string,
+  accessToken: string,
+  mutationContext: MutationRequestContext,
+) {
+  const response = await requestJson<TeamIssueWatchResponse>(
+    `${issuesApiBaseUrl}/projects/${encodeURIComponent(projectId)}/watch`,
+    accessToken,
+    {
+      headers: createMutationHeaders(mutationContext),
+      method: 'DELETE',
+    },
+  )
+
+  return response.watch
+}
+
+/**
+ * Work Item の presence heartbeat と typing 状態を更新します。
+ */
+export function updateTeamIssuePresence(
+  teamId: string,
+  issueId: string,
+  accessToken: string,
+  clientId: string,
+  typing: boolean,
+) {
+  return requestJson<Record<string, never>>(
+    `${createTeamIssuePath(teamId, issueId)}/presence`,
+    accessToken,
+    {
+      body: JSON.stringify({ clientId, typing }),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'PUT',
+    },
+  )
+}
+
+/**
+ * 閉じた browser tab の presence を削除します。
+ */
+export function deleteTeamIssuePresence(
+  teamId: string,
+  issueId: string,
+  accessToken: string,
+  clientId: string,
+) {
+  return requestJson<Record<string, never>>(
+    `${createTeamIssuePath(teamId, issueId)}/presence/${encodeURIComponent(clientId)}`,
+    accessToken,
+    { method: 'DELETE' },
+  )
+}
+
+function changeTeamIssueCommentResolution(
+  teamId: string,
+  issueId: string,
+  commentId: string,
+  accessToken: string,
+  action: 'resolve' | 'reopen',
+  expectedVersion: number,
+  mutationContext: MutationRequestContext,
+) {
+  return requestJson<{ comment: TeamIssueComment }>(
+    `${createTeamIssuePath(teamId, issueId)}/comments/${encodeURIComponent(commentId)}/${action}`,
+    accessToken,
+    {
+      body: JSON.stringify({ expectedVersion }),
+      headers: {
+        'Content-Type': 'application/json',
+        ...createMutationHeaders(mutationContext),
+      },
+      method: 'POST',
+    },
+  )
+}
+
+function changeTeamIssueCommentReaction(
+  teamId: string,
+  issueId: string,
+  commentId: string,
+  emoji: string,
+  accessToken: string,
+  method: 'DELETE' | 'PUT',
+  mutationContext: MutationRequestContext,
+) {
+  return requestJson<Record<string, never>>(
+    `${createTeamIssuePath(teamId, issueId)}/comments/${encodeURIComponent(commentId)}/reactions/${encodeURIComponent(emoji)}`,
+    accessToken,
+    {
+      headers: createMutationHeaders(mutationContext),
+      method,
+    },
+  )
+}
+
+function createTeamIssuePath(teamId: string, issueId: string) {
+  return `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`
 }
 
 async function requestJson<TResponse>(

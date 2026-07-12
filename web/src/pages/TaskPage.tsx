@@ -45,7 +45,6 @@ import {
 } from '../projects/api'
 import {
   createTeamIssue,
-  createTeamIssueComment,
   getTeamIssueDetail,
   getProjectIssues,
   TeamIssuesApiError,
@@ -54,6 +53,11 @@ import {
   type UpdateTeamIssueInput,
   updateTeamIssue,
 } from '../issues/api'
+import { IssueCollaborationPanel } from '../issues/IssueCollaborationPanel'
+import {
+  type IssueCollaborationController,
+  useIssueCollaboration,
+} from '../issues/useIssueCollaboration'
 import { ProjectPermissionsPanel } from '../projects/ProjectPermissionsPanel'
 import {
   createProjectIssuesPath,
@@ -67,6 +71,7 @@ import {
   type TaskPriority,
   type TaskStatus,
 } from '../tasks/api'
+import { getWorkspaceAccess, type WorkspaceMember } from '../workspace/api'
 
 const taskTabs = ['table', 'board', 'gantt', 'calendar', 'file', 'permissions'] as const
 const taskStatuses = ['in-progress', 'review', 'todo', 'done'] as const
@@ -76,6 +81,7 @@ const taskSortOrders = ['due-date-asc', 'due-date-desc'] as const
 const emptyProjectMembers: ProjectMember[] = []
 const emptyProjectUsers: ProjectUser[] = []
 const emptyTeamIssues: TeamIssue[] = []
+const emptyWorkspaceMembers: WorkspaceMember[] = []
 const apiSWRConfig = {
   dedupingInterval: 10_000,
   shouldRetryOnError: false,
@@ -256,6 +262,18 @@ type TaskScreenProps = {
    */
   selectedIssueDetail?: TeamIssueDetail
   /**
+   * 選択中 Issue の comment thread、watcher、presence です。
+   */
+  collaboration?: IssueCollaborationController
+  /**
+   * mention 候補と actor 表示に使う Workspace member 一覧です。
+   */
+  workspaceMembers?: WorkspaceMember[]
+  /**
+   * 現在の Workspace member key です。
+   */
+  currentWorkspaceMemberKey?: string
+  /**
    * 選択中 Issue 詳細を取得中かどうかです。
    */
   isSelectedIssueDetailLoading?: boolean
@@ -275,10 +293,6 @@ type TaskScreenProps = {
     issueId: string,
     input: UpdateTeamIssueInput,
   ) => Promise<void>
-  /**
-   * 詳細ペインで Issue コメントを追加するときの callback です。
-   */
-  onCreateIssueComment?: (teamId: string, issueId: string, body: string) => Promise<void>
   /**
    * サイドバーからプロジェクトを選択したときの callback です。
    */
@@ -369,6 +383,14 @@ export function TaskPage() {
     error: currentUserError,
     isLoading: isCurrentUserLoading,
   } = useSWR(currentUserKey, ([, accessToken]) => getCurrentUser(accessToken), apiSWRConfig)
+  const workspaceAccessKey = accessToken && user && !currentUserError
+    ? (['workspace-access', accessToken] as const)
+    : null
+  const { data: workspaceAccess } = useSWR(
+    workspaceAccessKey,
+    ([, token]) => getWorkspaceAccess(token),
+    apiSWRConfig,
+  )
   const projectDirectoryKey = accessToken && user && !currentUserError
     ? (['project-directory', accessToken, locale] as const)
     : null
@@ -467,6 +489,13 @@ export function TaskPage() {
     projectIssues.find((issue) => selectedTeamId ? issue.teamId === selectedTeamId : false) ??
     projectIssues[0]
   const resolvedSelectedIssueTeamId = resolvedSelectedIssue?.teamId ?? activeTeam?.id
+  const collaboration = useIssueCollaboration({
+    accessToken,
+    enabled: resolvedSelectedIssue?.source !== 'legacy',
+    issueId: resolvedSelectedIssue?.id,
+    projectId: resolvedSelectedIssue?.assignedProjectId ?? projectId,
+    teamId: resolvedSelectedIssueTeamId,
+  })
   const issueDetailKey = accessToken && resolvedSelectedIssue?.id && resolvedSelectedIssueTeamId
     ? (['project-issue-detail', accessToken, resolvedSelectedIssueTeamId, resolvedSelectedIssue.id] as const)
     : null
@@ -720,19 +749,6 @@ export function TaskPage() {
     await mutateSelectedIssueDetail()
   }
 
-  const handleCreateIssueComment = async (teamId: string, issueId: string, body: string) => {
-    if (!accessToken) {
-      return
-    }
-
-    await mutationRequestRunner.run(
-      `issue:comment:${teamId}:${issueId}`,
-      body,
-      (context) => createTeamIssueComment(teamId, issueId, accessToken, body, context),
-    )
-    await mutateSelectedIssueDetail()
-  }
-
   return (
     <TaskScreen
       isLoading={isLoading}
@@ -753,13 +769,14 @@ export function TaskPage() {
       assigneeErrorMessage={projectMembersErrorMessage}
       assigneeOptions={activeProjectMembers}
       canManageProjectMembers={canManageProjectMembers}
+      collaboration={collaboration}
+      currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}
       initialSelectedTaskId={resolvedSelectedIssue?.id}
       isAssigneeOptionsLoading={Boolean(projectMembersKey && isProjectMembersLoading)}
       isProjectUsersLoading={Boolean(projectUsersKey && isProjectUsersLoading)}
       isSelectedIssueDetailLoading={Boolean(issueDetailKey && isSelectedIssueDetailLoading)}
       isSystemAdmin={user?.isSystemAdmin}
-      onCreateIssueComment={canMutateContent ? handleCreateIssueComment : undefined}
       onLoadMoreProjectUsers={canManageProjectMembers ? handleLoadMoreProjectUsers : undefined}
       onProjectUserQueryChange={canManageProjectMembers ? setProjectUserQuery : undefined}
       onRemoveProjectMember={canManageProjectMembers ? handleRemoveProjectMember : undefined}
@@ -780,6 +797,7 @@ export function TaskPage() {
       teamName={activeTeam?.name}
       teams={teams}
       userInitial={userInitial}
+      workspaceMembers={workspaceAccess?.members ?? emptyWorkspaceMembers}
     />
   )
 }
@@ -798,6 +816,8 @@ export function TaskScreen({
   assigneeErrorMessage,
   assigneeOptions = [],
   canManageProjectMembers = false,
+  collaboration,
+  currentWorkspaceMemberKey,
   defaultCreateTaskOpen = false,
   detailErrorMessage,
   initialSelectedTaskId,
@@ -816,7 +836,6 @@ export function TaskScreen({
   selectedIssueDetail,
   tasks = [],
   taskErrorMessage,
-  onCreateIssueComment,
   onLoadMoreProjectUsers,
   onProjectUserQueryChange,
   onRemoveProjectMember,
@@ -831,6 +850,7 @@ export function TaskScreen({
   onCreateTask,
   onUpdateIssue,
   onUpdateProjectMember,
+  workspaceMembers = emptyWorkspaceMembers,
 }: TaskScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
@@ -1092,14 +1112,17 @@ export function TaskScreen({
               {activeTab === 'permissions' ? null : (
                 <TaskDetailPane
                   assigneeOptions={assigneeOptions}
+                  collaboration={collaboration}
+                  currentWorkspaceMemberKey={currentWorkspaceMemberKey}
                   detail={selectedIssueDetail}
                   errorMessage={detailErrorMessage}
                   isLoading={isSelectedIssueDetailLoading}
+                  locale={locale}
                   projects={activeTeamProjects}
                   t={t}
                   task={selectedDetailTask}
-                  onCreateIssueComment={onCreateIssueComment}
                   onUpdateIssue={onUpdateIssue}
+                  workspaceMembers={workspaceMembers}
                 />
               )}
             </div>
@@ -2122,20 +2145,25 @@ function TaskBoard({
 
 function TaskDetailPane({
   assigneeOptions,
+  collaboration,
+  currentWorkspaceMemberKey,
   detail,
   errorMessage,
   isLoading,
-  onCreateIssueComment,
+  locale,
   onUpdateIssue,
   projects,
   t,
   task,
+  workspaceMembers,
 }: {
   assigneeOptions: ProjectMember[]
+  collaboration?: IssueCollaborationController
+  currentWorkspaceMemberKey?: string
   detail?: TeamIssueDetail
   errorMessage?: string
   isLoading: boolean
-  onCreateIssueComment?: (teamId: string, issueId: string, body: string) => Promise<void>
+  locale: Locale
   onUpdateIssue?: (
     teamId: string,
     issueId: string,
@@ -2144,6 +2172,7 @@ function TaskDetailPane({
   projects: ProjectDirectoryTeam['projects']
   t: (key: MessageKey) => string
   task?: ProjectTask
+  workspaceMembers: WorkspaceMember[]
 }) {
   if (!task) {
     return (
@@ -2159,11 +2188,8 @@ function TaskDetailPane({
   }
 
   const issue = detail?.issue
-  const comments = detail?.comments ?? []
-  const activity = detail?.activity ?? []
   const needsDetailBeforeEdit = task.source === 'dynamodb' && !issue
   const isReadOnly = !onUpdateIssue || !task.teamId || task.source !== 'dynamodb' || needsDetailBeforeEdit
-  const isCommentReadOnly = !onCreateIssueComment || !task.teamId || task.source !== 'dynamodb' || needsDetailBeforeEdit
   const title = issue ? resolveTeamIssueTitle(issue, t) : resolveTaskTitle(task, t)
   const assigneeUserId = issue?.assigneeUserId ?? task.assigneeUserId ?? ''
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === assigneeUserId)
@@ -2313,78 +2339,16 @@ function TaskDetailPane({
         ) : null}
         {errorMessage ? <p className="text-sm font-semibold text-red-700">{errorMessage}</p> : null}
       </form>
-      <form
-        className="grid gap-3 border-b border-[var(--workbench-border)] bg-white px-5 py-4"
-        onSubmit={(event) => {
-          event.preventDefault()
-
-          if (isCommentReadOnly || !task.teamId) {
-            return
-          }
-
-          const form = event.currentTarget
-          const formData = new FormData(form)
-          const body = String(formData.get('body') ?? '').trim()
-
-          if (!body) {
-            form.reportValidity()
-            return
-          }
-
-          void onCreateIssueComment?.(task.teamId, task.id, body).then(() => form.reset())
-        }}
-      >
-        <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
-          {t('issues.comment.title')}
-          <textarea
-            className="workbench-input min-h-20 w-full min-w-0 px-3 py-2 leading-6 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-            disabled={isCommentReadOnly}
-            name="body"
-            required
-          />
-        </label>
-        <button
-          className="workbench-button-secondary h-9 justify-self-start px-3 disabled:border-[#e4e7ec] disabled:text-[#b5bdc9]"
-          disabled={isCommentReadOnly}
-          type="submit"
-        >
-          {t('issues.comment.submit')}
-        </button>
-        {isCommentReadOnly && !needsDetailBeforeEdit ? (
-          <p className="text-sm font-medium text-[var(--workbench-muted)]">
-            {t(!onCreateIssueComment ? 'tasks.comment.readOnlyPermission' : 'tasks.comment.readOnly')}
-          </p>
-        ) : null}
-      </form>
-      <section className="px-5 py-4">
-        <h2 className="workbench-eyebrow text-[var(--workbench-muted)]">{t('issues.comment.title')}</h2>
-        <div className="mt-3 grid gap-2">
-          {comments.length > 0 ? (
-            comments.map((comment) => (
-              <article className="rounded-md border border-[var(--workbench-border)] bg-white p-3" key={comment.id}>
-                <p className="text-xs font-semibold text-[#5f6874]">{comment.actorUserId}</p>
-                <p className="mt-2 whitespace-pre-wrap text-sm font-medium leading-6 text-[#1c1d1f]">{comment.body}</p>
-              </article>
-            ))
-          ) : (
-            <p className="text-sm font-medium text-[#5f6874]">{t('issues.comment.empty')}</p>
-          )}
-        </div>
-      </section>
-      <section className="border-t border-[#d3d8df] px-5 py-4">
-        <h2 className="workbench-eyebrow text-[var(--workbench-muted)]">{t('issues.activity.title')}</h2>
-        <div className="mt-3 grid gap-2">
-          {activity.length > 0 ? (
-            activity.map((item) => (
-              <p className="rounded-md border border-[#e4e7ec] bg-white px-3 py-2 text-sm font-medium text-[#505967]" key={item.id}>
-                {item.summary}
-              </p>
-            ))
-          ) : (
-            <p className="text-sm font-medium text-[#5f6874]">{t('tasks.detail.activityEmpty')}</p>
-          )}
-        </div>
-      </section>
+      {collaboration ? (
+        <IssueCollaborationPanel
+          key={`${task.teamId ?? ''}:${task.id}`}
+          controller={collaboration}
+          currentMemberKey={currentWorkspaceMemberKey}
+          locale={locale}
+          members={workspaceMembers}
+          readOnlyMessage={task.source === 'legacy' ? t('tasks.comment.readOnly') : undefined}
+        />
+      ) : null}
     </aside>
   )
 }

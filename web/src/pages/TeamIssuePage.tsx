@@ -24,16 +24,18 @@ import {
 } from '../i18n'
 import {
   createTeamIssue,
-  createTeamIssueComment,
   getTeamIssueDetail,
   getTeamIssues,
   type CreateTeamIssueInput,
   type TeamIssue,
-  type TeamIssueActivity,
-  type TeamIssueComment,
   type UpdateTeamIssueInput,
   updateTeamIssue,
 } from '../issues/api'
+import { IssueCollaborationPanel } from '../issues/IssueCollaborationPanel'
+import {
+  type IssueCollaborationController,
+  useIssueCollaboration,
+} from '../issues/useIssueCollaboration'
 import {
   archiveProjectDirectoryProject,
   archiveProjectDirectoryTeam,
@@ -53,12 +55,14 @@ import {
   workspaceNavPaths,
 } from '../routes/paths'
 import type { TaskPriority, TaskStatus } from '../tasks/api'
+import { getWorkspaceAccess, type WorkspaceMember } from '../workspace/api'
 
 const issueStatuses = ['todo', 'in-progress', 'review', 'done'] as const satisfies readonly TaskStatus[]
 const issuePriorities = ['high', 'medium', 'low'] as const satisfies readonly TaskPriority[]
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyIssues: TeamIssue[] = []
 const emptyMembers: ProjectMember[] = []
+const emptyWorkspaceMembers: WorkspaceMember[] = []
 const apiSWRConfig = {
   dedupingInterval: 10_000,
   shouldRetryOnError: false,
@@ -94,13 +98,17 @@ type TeamIssueScreenProps = {
    */
   issues?: TeamIssue[]
   /**
-   * Issue コメント一覧です。
+   * 選択中 Issue の comment thread、watcher、presence です。
    */
-  comments?: TeamIssueComment[]
+  collaboration?: IssueCollaborationController
   /**
-   * Issue 活動履歴一覧です。
+   * mention 候補と actor 表示に使う Workspace member 一覧です。
    */
-  activity?: TeamIssueActivity[]
+  workspaceMembers?: WorkspaceMember[]
+  /**
+   * 現在の Workspace member key です。
+   */
+  currentWorkspaceMemberKey?: string
   /**
    * タスク担当者として選択できる project member 一覧です。
    */
@@ -145,10 +153,6 @@ type TeamIssueScreenProps = {
    * Issue 更新時の callback です。
    */
   onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
-  /**
-   * Issue コメント作成時の callback です。
-   */
-  onCreateComment?: (issueId: string, body: string) => Promise<void>
   /**
    * サイドバーからプロジェクトを選択したときの callback です。
    */
@@ -198,6 +202,14 @@ export function TeamIssuePage() {
     error: currentUserError,
     isLoading: isCurrentUserLoading,
   } = useSWR(currentUserKey, ([, token]) => getCurrentUser(token), apiSWRConfig)
+  const workspaceAccessKey = accessToken && user && !currentUserError
+    ? (['workspace-access', accessToken] as const)
+    : null
+  const { data: workspaceAccess } = useSWR(
+    workspaceAccessKey,
+    ([, token]) => getWorkspaceAccess(token),
+    apiSWRConfig,
+  )
   const projectDirectoryKey = accessToken && user && !currentUserError
     ? (['project-directory', accessToken, locale] as const)
     : null
@@ -223,11 +235,18 @@ export function TeamIssuePage() {
   const resolvedSelectedIssueId = selectedIssueId && issues.some((issue) => issue.id === selectedIssueId)
     ? selectedIssueId
     : issues[0]?.id
+  const resolvedSelectedIssue = issues.find((issue) => issue.id === resolvedSelectedIssueId)
+  const collaboration = useIssueCollaboration({
+    accessToken,
+    enabled: resolvedSelectedIssue?.source !== 'legacy',
+    issueId: resolvedSelectedIssueId,
+    projectId: resolvedSelectedIssue?.assignedProjectId,
+    teamId,
+  })
   const detailKey = accessToken && resolvedSelectedIssueId
     ? (['team-issue-detail', accessToken, teamId, resolvedSelectedIssueId] as const)
     : null
   const {
-    data: issueDetail,
     error: detailError,
     mutate: mutateIssueDetail,
   } = useSWR(
@@ -309,19 +328,6 @@ export function TeamIssuePage() {
     await mutateIssueDetail()
   }
 
-  const handleCreateComment = async (issueId: string, body: string) => {
-    if (!accessToken) {
-      return
-    }
-
-    await mutationRequestRunner.run(
-      `issue:comment:${teamId}:${issueId}`,
-      body,
-      (context) => createTeamIssueComment(teamId, issueId, accessToken, body, context),
-    )
-    await mutateIssueDetail()
-  }
-
   const handleCreateTeam = async (input: CreateProjectDirectoryTeamInput) => {
     if (!accessToken) {
       return
@@ -379,9 +385,9 @@ export function TeamIssuePage() {
 
   return (
     <TeamIssueScreen
-      activity={issueDetail?.activity}
       assigneeOptions={assigneeOptions}
-      comments={issueDetail?.comments}
+      collaboration={collaboration}
+      currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}
       issueErrorMessage={issueErrorMessage}
       issues={issues}
@@ -389,7 +395,6 @@ export function TeamIssuePage() {
       locale={locale}
       onArchiveProject={canManageStructure ? handleArchiveProject : undefined}
       onArchiveTeam={canManageStructure ? handleArchiveTeam : undefined}
-      onCreateComment={canMutateContent ? handleCreateComment : undefined}
       onCreateIssue={canMutateContent ? handleCreateIssue : undefined}
       onCreateProject={canManageStructure ? handleCreateProject : undefined}
       onCreateTeam={canManageStructure ? handleCreateTeam : undefined}
@@ -403,6 +408,7 @@ export function TeamIssuePage() {
       teamName={activeTeam?.name}
       teams={teams}
       userInitial={userInitial}
+      workspaceMembers={workspaceAccess?.members ?? emptyWorkspaceMembers}
     />
   )
 }
@@ -411,9 +417,9 @@ export function TeamIssuePage() {
  * チーム所有 Issue の管理 UI を描画する Storybook 兼用 screen です。
  */
 export function TeamIssueScreen({
-  activity = [],
   assigneeOptions = [],
-  comments = [],
+  collaboration,
+  currentWorkspaceMemberKey,
   defaultCreateIssueOpen = false,
   detailErrorMessage,
   initialViewMode = 'table',
@@ -423,7 +429,6 @@ export function TeamIssueScreen({
   locale,
   onArchiveProject,
   onArchiveTeam,
-  onCreateComment,
   onCreateIssue,
   onCreateProject,
   onCreateTeam,
@@ -437,6 +442,7 @@ export function TeamIssueScreen({
   teamName,
   teams,
   userInitial,
+  workspaceMembers = emptyWorkspaceMembers,
 }: TeamIssueScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
@@ -630,20 +636,12 @@ export function TeamIssueScreen({
                 )}
               </section>
               <IssueDetailPane
-                activity={activity}
                 assigneeOptions={assigneeOptions}
-                comments={comments}
+                collaboration={collaboration}
+                currentWorkspaceMemberKey={currentWorkspaceMemberKey}
                 detailErrorMessage={detailErrorMessage ?? detailErrorMessageLocal}
                 issue={selectedIssue}
-                onCreateComment={onCreateComment ? async (issueId, body) => {
-                  setDetailErrorMessageLocal(undefined)
-
-                  try {
-                    await onCreateComment(issueId, body)
-                  } catch (error) {
-                    setDetailErrorMessageLocal(error instanceof Error ? error.message : t('issues.error.comment'))
-                  }
-                } : undefined}
+                locale={locale}
                 onUpdateIssue={onUpdateIssue ? async (issueId, input) => {
                   setDetailErrorMessageLocal(undefined)
 
@@ -655,6 +653,7 @@ export function TeamIssueScreen({
                 } : undefined}
                 projects={activeTeam?.projects ?? []}
                 t={t}
+                workspaceMembers={workspaceMembers}
               />
             </div>
           </div>
@@ -974,25 +973,27 @@ function IssueBoard({
 }
 
 function IssueDetailPane({
-  activity,
   assigneeOptions,
-  comments,
+  collaboration,
+  currentWorkspaceMemberKey,
   detailErrorMessage,
   issue,
-  onCreateComment,
+  locale,
   onUpdateIssue,
   projects,
   t,
+  workspaceMembers,
 }: {
-  activity: TeamIssueActivity[]
   assigneeOptions: ProjectMember[]
-  comments: TeamIssueComment[]
+  collaboration?: IssueCollaborationController
+  currentWorkspaceMemberKey?: string
   detailErrorMessage?: string
   issue?: TeamIssue
-  onCreateComment?: (issueId: string, body: string) => Promise<void>
+  locale: Locale
   onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
   projects: ProjectDirectoryTeam['projects']
   t: (key: MessageKey) => string
+  workspaceMembers: WorkspaceMember[]
 }) {
   if (!issue) {
     return (
@@ -1004,13 +1005,12 @@ function IssueDetailPane({
 
   const isLegacyIssue = issue.source === 'legacy'
   const isIssueReadOnly = isLegacyIssue || !onUpdateIssue
-  const isCommentReadOnly = isLegacyIssue || !onCreateComment
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === issue.assigneeUserId)
 
   return (
-    <aside className="workbench-detail-pane min-h-0 min-w-0 px-6 py-7 max-[1080px]:border-l-0 max-[1080px]:border-t">
+    <aside className="workbench-detail-pane min-h-0 min-w-0 max-[1080px]:border-l-0 max-[1080px]:border-t">
       <form
-        className="grid min-w-0 gap-4"
+        className="grid min-w-0 gap-4 px-6 py-7"
         key={issue.id}
         onSubmit={(event) => {
           event.preventDefault()
@@ -1109,65 +1109,16 @@ function IssueDetailPane({
         ) : null}
         {detailErrorMessage ? <p className="text-sm font-bold text-red-600">{detailErrorMessage}</p> : null}
       </form>
-      <form
-        className="mt-7 grid gap-3 border-t border-[var(--workbench-border)] pt-6"
-        onSubmit={(event) => {
-          event.preventDefault()
-
-          if (isCommentReadOnly) {
-            return
-          }
-
-          const form = event.currentTarget
-          const formData = new FormData(form)
-          const body = String(formData.get('body') ?? '').trim()
-
-          if (!body) {
-            form.reportValidity()
-            return
-          }
-
-          void onCreateComment?.(issue.id, body).then(() => form.reset())
-        }}
-      >
-        <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-          {t('issues.comment.title')}
-          <textarea className="workbench-input min-h-20 w-full min-w-0 px-3 py-2 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" disabled={isCommentReadOnly} name="body" required />
-        </label>
-        <button className="workbench-button-secondary h-9 justify-self-start px-4 disabled:border-slate-200 disabled:text-slate-400" disabled={isCommentReadOnly} type="submit">
-          {t('issues.comment.submit')}
-        </button>
-        {isCommentReadOnly ? (
-          <p className="text-sm font-medium text-[var(--workbench-muted)]">
-            {t(isLegacyIssue ? 'issues.comment.readOnlyLegacy' : 'issues.comment.readOnlyPermission')}
-          </p>
-        ) : null}
-      </form>
-      <section className="mt-7 border-t border-[var(--workbench-border)] pt-6">
-        <h2 className="workbench-eyebrow text-[var(--workbench-muted)]">{t('issues.comment.title')}</h2>
-        <div className="mt-3 grid gap-3">
-          {comments.length > 0 ? (
-            comments.map((comment) => (
-              <article className="workbench-panel-muted p-3" key={comment.id}>
-                <p className="text-xs font-semibold text-[var(--workbench-muted)]">{comment.actorUserId}</p>
-                <p className="mt-2 whitespace-pre-wrap text-sm font-medium leading-6 text-[var(--workbench-text)]">{comment.body}</p>
-              </article>
-            ))
-          ) : (
-            <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('issues.comment.empty')}</p>
-          )}
-        </div>
-      </section>
-      <section className="mt-7 border-t border-[var(--workbench-border)] pt-6">
-        <h2 className="workbench-eyebrow text-[var(--workbench-muted)]">{t('issues.activity.title')}</h2>
-        <div className="mt-3 grid gap-2">
-          {activity.map((item) => (
-            <p className="rounded-lg border border-[var(--workbench-border)] px-3 py-2 text-sm font-medium text-[var(--workbench-muted)]" key={item.id}>
-              {item.summary}
-            </p>
-          ))}
-        </div>
-      </section>
+      {collaboration ? (
+        <IssueCollaborationPanel
+          key={`${issue.teamId}:${issue.id}`}
+          controller={collaboration}
+          currentMemberKey={currentWorkspaceMemberKey}
+          locale={locale}
+          members={workspaceMembers}
+          readOnlyMessage={isLegacyIssue ? t('issues.comment.readOnlyLegacy') : undefined}
+        />
+      ) : null}
     </aside>
   )
 }

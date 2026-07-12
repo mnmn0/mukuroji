@@ -6,7 +6,9 @@ import * as customResources from 'aws-cdk-lib/custom-resources';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
 
 /**
@@ -614,6 +616,39 @@ export class CdkStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    const collaborationTable = new dynamodb.Table(this, 'WorkItemCollaborationTable', {
+      partitionKey: { name: 'entityKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      timeToLiveAttribute: 'expiresAt',
+    });
+
+    const notificationsTable = new dynamodb.Table(this, 'NotificationsTable', {
+      partitionKey: { name: 'recipientKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'notificationKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      timeToLiveAttribute: 'expiresAt',
+    });
+
+    const realtimeSessionsTable = new dynamodb.Table(this, 'RealtimeSessionsTable', {
+      partitionKey: { name: 'connectionId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      timeToLiveAttribute: 'expiresAt',
+    });
+
+    realtimeSessionsTable.addGlobalSecondaryIndex({
+      indexName: 'ScopeConnectionsIndex',
+      partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'connectionId', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     const apiFunction = new lambdaNodejs.NodejsFunction(this, 'ListProjectTasksFunction', {
       entry: path.join(__dirname, '../../server/src/index.ts'),
       handler: 'handler',
@@ -631,6 +666,7 @@ export class CdkStack extends cdk.Stack {
       },
       environment: {
         ALLOWED_ORIGINS: taskApiAllowedOrigins.valueAsString,
+        COLLABORATION_TABLE_NAME: collaborationTable.tableName,
         COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
@@ -642,6 +678,7 @@ export class CdkStack extends cdk.Stack {
         MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
         MUKUROJI_TEAM_ISSUES_TABLE: teamIssuesTable.tableName,
         MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
+        REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
@@ -657,6 +694,8 @@ export class CdkStack extends cdk.Stack {
     projectDirectoryTable.grantReadWriteData(apiFunction);
     auditEventsTable.grantReadWriteData(apiFunction);
     workspaceAccessTable.grantReadWriteData(apiFunction);
+    collaborationTable.grantReadWriteData(apiFunction);
+    realtimeSessionsTable.grantWriteData(apiFunction);
     apiFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
@@ -667,6 +706,7 @@ export class CdkStack extends cdk.Stack {
           projectDirectoryTable.tableArn,
           auditEventsTable.tableArn,
           workspaceAccessTable.tableArn,
+          collaborationTable.tableArn,
         ],
       }),
     );
@@ -676,6 +716,7 @@ export class CdkStack extends cdk.Stack {
           'cognito-idp:AdminCreateUser',
           'cognito-idp:AdminDeleteUser',
           'cognito-idp:AdminGetUser',
+          'cognito-idp:AdminListGroupsForUser',
           'cognito-idp:AdminUpdateUserAttributes',
           'cognito-idp:GetUser',
           'cognito-idp:ListUsers',
@@ -691,6 +732,7 @@ export class CdkStack extends cdk.Stack {
         allowedMethods: [
           lambda.HttpMethod.GET,
           lambda.HttpMethod.POST,
+          lambda.HttpMethod.PUT,
           lambda.HttpMethod.PATCH,
           lambda.HttpMethod.DELETE,
         ],
@@ -712,6 +754,7 @@ export class CdkStack extends cdk.Stack {
         allowMethods: [
           apigatewayv2.CorsHttpMethod.GET,
           apigatewayv2.CorsHttpMethod.POST,
+          apigatewayv2.CorsHttpMethod.PUT,
           apigatewayv2.CorsHttpMethod.PATCH,
           apigatewayv2.CorsHttpMethod.DELETE,
           apigatewayv2.CorsHttpMethod.OPTIONS,
@@ -719,6 +762,139 @@ export class CdkStack extends cdk.Stack {
         allowHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id'],
       },
     });
+
+    const realtimeFunction = new lambdaNodejs.NodejsFunction(this, 'RealtimeHandlerFunction', {
+      entry: path.join(__dirname, '../../server/src/realtime-handler.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+      projectRoot: path.join(__dirname, '../..'),
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 256,
+      description: 'Consumes one-time tickets and handles mukuroji WebSocket presence events.',
+      bundling: {
+        bundleAwsSDK: true,
+        minify: true,
+        sourceMap: true,
+        target: 'node22',
+      },
+      environment: {
+        COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+        PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+        REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
+        REALTIME_SESSION_TTL_SECONDS: '3600',
+        SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+        TEAM_ISSUES_TABLE_NAME: teamIssuesTable.tableName,
+        WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
+      },
+    });
+    const realtimeIntegration = new apigatewayv2Integrations.WebSocketLambdaIntegration(
+      'RealtimeLambdaIntegration',
+      realtimeFunction,
+    );
+    const realtimeWebSocketApi = new apigatewayv2.WebSocketApi(this, 'RealtimeWebSocketApi', {
+      connectRouteOptions: { integration: realtimeIntegration },
+      disconnectRouteOptions: { integration: realtimeIntegration },
+      defaultRouteOptions: { integration: realtimeIntegration },
+    });
+    const realtimeWebSocketStage = new apigatewayv2.WebSocketStage(
+      this,
+      'RealtimeWebSocketStage',
+      {
+        webSocketApi: realtimeWebSocketApi,
+        stageName: 'production',
+        autoDeploy: true,
+      },
+    );
+
+    realtimeSessionsTable.grantReadWriteData(realtimeFunction);
+    projectDirectoryTable.grantReadData(realtimeFunction);
+    teamIssuesTable.grantReadData(realtimeFunction);
+    workspaceAccessTable.grantReadData(realtimeFunction);
+    realtimeFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['dynamodb:TransactWriteItems'],
+        resources: [realtimeSessionsTable.tableArn],
+      }),
+    );
+    realtimeFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['cognito-idp:AdminListGroupsForUser'],
+        resources: [cognitoUserPoolArn],
+      }),
+    );
+    realtimeWebSocketStage.grantManagementApiAccess(realtimeFunction);
+
+    apiFunction.addEnvironment('REALTIME_WEBSOCKET_URL', realtimeWebSocketStage.url);
+
+    const collaborationProjectionDlq = new sqs.Queue(this, 'CollaborationProjectionDlq', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(14),
+    });
+    const collaborationProjectionFunction = new lambdaNodejs.NodejsFunction(
+      this,
+      'CollaborationProjectionFunction',
+      {
+        entry: path.join(__dirname, '../../server/src/collaboration-projection-handler.ts'),
+        handler: 'handler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+        projectRoot: path.join(__dirname, '../..'),
+        timeout: cdk.Duration.seconds(30),
+        memorySize: 512,
+        description: 'Projects audit outbox events into notifications and realtime invalidations.',
+        bundling: {
+          bundleAwsSDK: true,
+          minify: true,
+          sourceMap: true,
+          target: 'node22',
+        },
+        environment: {
+          COLLABORATION_TABLE_NAME: collaborationTable.tableName,
+          COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+          NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
+          PROCESSED_AUDIT_EVENTS_TABLE_NAME: processedAuditEventsTable.tableName,
+          PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+          REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
+          SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+          TEAM_ISSUES_TABLE_NAME: teamIssuesTable.tableName,
+          WEBSOCKET_CALLBACK_ENDPOINT: realtimeWebSocketStage.callbackUrl,
+          WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
+        },
+      },
+    );
+
+    collaborationProjectionFunction.addEventSource(
+      new lambdaEventSources.DynamoEventSource(auditEventsTable, {
+        startingPosition: lambda.StartingPosition.TRIM_HORIZON,
+        batchSize: 10,
+        bisectBatchOnError: true,
+        retryAttempts: 3,
+        reportBatchItemFailures: true,
+        onFailure: new lambdaEventSources.SqsDlq(collaborationProjectionDlq),
+      }),
+    );
+    auditEventsTable.grantStreamRead(collaborationProjectionFunction);
+    collaborationTable.grantReadData(collaborationProjectionFunction);
+    notificationsTable.grantWriteData(collaborationProjectionFunction);
+    processedAuditEventsTable.grantReadWriteData(collaborationProjectionFunction);
+    projectDirectoryTable.grantReadData(collaborationProjectionFunction);
+    realtimeSessionsTable.grantReadWriteData(collaborationProjectionFunction);
+    teamIssuesTable.grantReadData(collaborationProjectionFunction);
+    workspaceAccessTable.grantReadData(collaborationProjectionFunction);
+    collaborationProjectionFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['dynamodb:TransactWriteItems'],
+        resources: [notificationsTable.tableArn, processedAuditEventsTable.tableArn],
+      }),
+    );
+    collaborationProjectionFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['cognito-idp:AdminListGroupsForUser'],
+        resources: [cognitoUserPoolArn],
+      }),
+    );
+    realtimeWebSocketStage.grantManagementApiAccess(collaborationProjectionFunction);
 
     const cognitoPolicy = customResources.AwsCustomResourcePolicy.fromStatements([
       new iam.PolicyStatement({
@@ -928,6 +1104,19 @@ export class CdkStack extends cdk.Stack {
       value: processedAuditEventsTable.tableName,
     });
     new cdk.CfnOutput(this, 'WorkspaceAccessTableName', { value: workspaceAccessTable.tableName });
+    new cdk.CfnOutput(this, 'WorkItemCollaborationTableName', {
+      value: collaborationTable.tableName,
+    });
+    new cdk.CfnOutput(this, 'NotificationsTableName', { value: notificationsTable.tableName });
+    new cdk.CfnOutput(this, 'RealtimeSessionsTableName', {
+      value: realtimeSessionsTable.tableName,
+    });
+    new cdk.CfnOutput(this, 'RealtimeWebSocketUrl', {
+      value: realtimeWebSocketStage.url,
+    });
+    new cdk.CfnOutput(this, 'CollaborationProjectionDlqUrl', {
+      value: collaborationProjectionDlq.queueUrl,
+    });
     new cdk.CfnOutput(this, 'ProjectTasksApiUrl', {
       value: functionUrl.url,
       description: 'Backward-compatible alias for the Lambda Function URL.',

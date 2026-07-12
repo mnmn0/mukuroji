@@ -115,6 +115,10 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_WORKSPACE_ACCESS_TABLE`: Workspace metadata、member、invitation lifecycle を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-access-local`
 - `MUKUROJI_TEAM_ISSUES_TABLE`: チーム所有 Issue を保存する DynamoDB table 名。未指定時は `mukuroji-team-issues-local`
 - `MUKUROJI_TEAM_ISSUE_EVENTS_TABLE`: チーム Issue のコメント/活動履歴を保存する DynamoDB table 名。未指定時は `mukuroji-team-issue-events-local`
+- `MUKUROJI_COLLABORATION_TABLE` / `COLLABORATION_TABLE_NAME`: comment thread、reaction、watcher、presence を保存する DynamoDB table 名。未指定時は `mukuroji-collaboration-local`
+- `MUKUROJI_NOTIFICATIONS_TABLE` / `NOTIFICATIONS_TABLE_NAME`: mention/watch の durable notification projection を保存する DynamoDB table 名。未指定時は `mukuroji-notifications-local`
+- `MUKUROJI_REALTIME_SESSIONS_TABLE` / `REALTIME_SESSIONS_TABLE_NAME`: WebSocket ticket と connection lease を保存する DynamoDB table 名。未指定時は `mukuroji-realtime-sessions-local`
+- `REALTIME_WEBSOCKET_URL`: production の collaboration invalidation/presence 用 WebSocket URL。未指定時は Web が polling fallback を使います。
 - `MUKUROJI_AUDIT_EVENTS_TABLE` / `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
 - `MUKUROJI_AUDIT_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS`: audit event の保持日数。未指定時は 2555 日（7年）
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID`: Cognito claim と DynamoDB partition で共有する canonical Workspace ID。未指定時は `workspace#mukuroji-local`
@@ -128,6 +132,9 @@ Web から `/api` を呼ぶだけで Floci 上の DynamoDB データを取得で
 
 append-only event schema、activity/audit API、retention/redaction、consumer dedupe、backfill の契約は
 [`docs/event-audit.md`](docs/event-audit.md) を参照してください。
+
+Comment thread、mention/watch 通知、reaction、presence、realtime fallback の契約は
+[`docs/collaboration.md`](docs/collaboration.md) を参照してください。
 
 Web の mutation は operation と入力 fingerprint ごとに `MutationRequestContext` を1つ保持し、失敗後に
 同じ入力を retry した場合だけ同じ object を API client へ渡します。HTTP mutation 成功時または

@@ -116,6 +116,9 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
     'TeamIssueEventsTableDD2B0F96',
     'ProjectDirectoryTable9ED01C01',
     'ListProjectTasksFunction2134AF4A',
+    'WorkItemCollaborationTableFDECF217',
+    'NotificationsTable76DCFC6C',
+    'RealtimeSessionsTable607096EB',
   ];
 
   for (const logicalId of stableResourceIds) {
@@ -124,7 +127,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(7);
+  expect(Object.keys(tables)).toHaveLength(10);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -174,6 +177,13 @@ test('shared server handler is bundled as a Lambda asset with production environ
         MUKUROJI_TEAM_ISSUES_TABLE: {
           Ref: 'TeamIssuesTable189D851D',
         },
+        COLLABORATION_TABLE_NAME: {
+          Ref: 'WorkItemCollaborationTableFDECF217',
+        },
+        REALTIME_SESSIONS_TABLE_NAME: {
+          Ref: 'RealtimeSessionsTable607096EB',
+        },
+        REALTIME_WEBSOCKET_URL: Match.anyValue(),
       }),
     },
   });
@@ -242,23 +252,207 @@ test('Function URL and API Gateway expose the same restricted CORS contract', ()
   template.hasResourceProperties('AWS::Lambda::Url', {
     Cors: {
       AllowHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id'],
-      AllowMethods: Match.arrayWith(['GET', 'POST', 'PATCH', 'DELETE']),
+      AllowMethods: Match.arrayWith(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']),
       AllowOrigins: allowedOrigins,
     },
   });
   template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
     CorsConfiguration: {
       AllowHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id'],
-      AllowMethods: Match.arrayWith(['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS']),
+      AllowMethods: Match.arrayWith(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']),
       AllowOrigins: allowedOrigins,
     },
     ProtocolType: 'HTTP',
   });
 });
 
-test('API IAM is limited to the data tables and configured Cognito user pool', () => {
+test('collaboration notifications and realtime sessions use production-safe DynamoDB schemas', () => {
+  const template = synthesizedTemplate;
+  const bootstrapPayload = JSON.stringify(template.findResources('Custom::AWS'));
+
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    KeySchema: [
+      { AttributeName: 'entityKey', KeyType: 'HASH' },
+      { AttributeName: 'recordKey', KeyType: 'RANGE' },
+    ],
+    TimeToLiveSpecification: {
+      AttributeName: 'expiresAt',
+      Enabled: true,
+    },
+  });
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    KeySchema: [
+      { AttributeName: 'recipientKey', KeyType: 'HASH' },
+      { AttributeName: 'notificationKey', KeyType: 'RANGE' },
+    ],
+    TimeToLiveSpecification: {
+      AttributeName: 'expiresAt',
+      Enabled: true,
+    },
+  });
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    KeySchema: [{ AttributeName: 'connectionId', KeyType: 'HASH' }],
+    GlobalSecondaryIndexes: Match.arrayWith([
+      Match.objectLike({
+        IndexName: 'ScopeConnectionsIndex',
+        KeySchema: [
+          { AttributeName: 'scopeKey', KeyType: 'HASH' },
+          { AttributeName: 'connectionId', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'ALL' },
+      }),
+    ]),
+    TimeToLiveSpecification: {
+      AttributeName: 'expiresAt',
+      Enabled: true,
+    },
+  });
+  expect(bootstrapPayload).not.toContain('WorkItemCollaborationTableFDECF217');
+  expect(bootstrapPayload).not.toContain('NotificationsTable76DCFC6C');
+  expect(bootstrapPayload).not.toContain('RealtimeSessionsTable607096EB');
+});
+
+test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () => {
   const template = synthesizedTemplate;
 
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Code: {
+      S3Bucket: Match.anyValue(),
+      S3Key: Match.stringLikeRegexp('\\.zip$'),
+    },
+    Description: 'Consumes one-time tickets and handles mukuroji WebSocket presence events.',
+    Handler: 'index.handler',
+    Runtime: 'nodejs22.x',
+    Environment: {
+      Variables: Match.objectLike({
+        COGNITO_USER_POOL_ID: {
+          Ref: 'CognitoUserPoolId',
+        },
+        PROJECT_DIRECTORY_TABLE_NAME: {
+          Ref: 'ProjectDirectoryTable9ED01C01',
+        },
+        REALTIME_SESSIONS_TABLE_NAME: {
+          Ref: 'RealtimeSessionsTable607096EB',
+        },
+        REALTIME_SESSION_TTL_SECONDS: '3600',
+        SYSTEM_ADMIN_GROUPS: {
+          Ref: 'SystemAdminGroups',
+        },
+        TEAM_ISSUES_TABLE_NAME: {
+          Ref: 'TeamIssuesTable189D851D',
+        },
+        WORKSPACE_ACCESS_TABLE_NAME: {
+          Ref: 'WorkspaceAccessTableD7C8D2C7',
+        },
+      }),
+    },
+  });
+  template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
+    ProtocolType: 'WEBSOCKET',
+  });
+  template.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: '$connect' });
+  template.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: '$disconnect' });
+  template.hasResourceProperties('AWS::ApiGatewayV2::Stage', {
+    AutoDeploy: true,
+    StageName: 'production',
+  });
+  template.hasResourceProperties('AWS::IAM::Policy', {
+    PolicyDocument: {
+      Statement: Match.arrayWith([
+        Match.objectLike({
+          Action: 'dynamodb:TransactWriteItems',
+          Effect: 'Allow',
+          Resource: {
+            'Fn::GetAtt': ['RealtimeSessionsTable607096EB', 'Arn'],
+          },
+        }),
+        Match.objectLike({
+          Action: 'execute-api:ManageConnections',
+          Effect: 'Allow',
+          Resource: Match.anyValue(),
+        }),
+      ]),
+    },
+  });
+  template.hasOutput('RealtimeWebSocketUrl', {});
+  template.hasOutput('RealtimeSessionsTableName', {});
+
+  const realtimePolicy = template.toJSON().Resources
+    .RealtimeHandlerFunctionServiceRoleDefaultPolicy58738CCE;
+  const serializedRealtimePolicy = JSON.stringify(realtimePolicy);
+
+  expect(serializedRealtimePolicy).toContain('ProjectDirectoryTable9ED01C01');
+  expect(serializedRealtimePolicy).toContain('TeamIssuesTable189D851D');
+  expect(serializedRealtimePolicy).toContain('WorkspaceAccessTableD7C8D2C7');
+  expect(serializedRealtimePolicy).toContain('cognito-idp:AdminListGroupsForUser');
+  expect(serializedRealtimePolicy).toContain('CognitoUserPoolId');
+  expect(serializedRealtimePolicy).toContain('production/*/@connections/*');
+  expect(serializedRealtimePolicy).not.toContain('/*/*/@connections/*');
+});
+
+test('audit stream projects notifications with retries DLQ and scoped production environment', () => {
+  const template = synthesizedTemplate;
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Code: {
+      S3Bucket: Match.anyValue(),
+      S3Key: Match.stringLikeRegexp('\\.zip$'),
+    },
+    Description: 'Projects audit outbox events into notifications and realtime invalidations.',
+    Handler: 'index.handler',
+    Runtime: 'nodejs22.x',
+    Environment: {
+      Variables: Match.objectLike({
+        COLLABORATION_TABLE_NAME: {
+          Ref: 'WorkItemCollaborationTableFDECF217',
+        },
+        COGNITO_USER_POOL_ID: {
+          Ref: 'CognitoUserPoolId',
+        },
+        NOTIFICATIONS_TABLE_NAME: {
+          Ref: 'NotificationsTable76DCFC6C',
+        },
+        PROCESSED_AUDIT_EVENTS_TABLE_NAME: {
+          Ref: 'ProcessedAuditEventsTableFF485133',
+        },
+        PROJECT_DIRECTORY_TABLE_NAME: {
+          Ref: 'ProjectDirectoryTable9ED01C01',
+        },
+        REALTIME_SESSIONS_TABLE_NAME: {
+          Ref: 'RealtimeSessionsTable607096EB',
+        },
+        SYSTEM_ADMIN_GROUPS: {
+          Ref: 'SystemAdminGroups',
+        },
+        TEAM_ISSUES_TABLE_NAME: {
+          Ref: 'TeamIssuesTable189D851D',
+        },
+        WEBSOCKET_CALLBACK_ENDPOINT: Match.anyValue(),
+        WORKSPACE_ACCESS_TABLE_NAME: {
+          Ref: 'WorkspaceAccessTableD7C8D2C7',
+        },
+      }),
+    },
+  });
+  template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
+    BatchSize: 10,
+    BisectBatchOnFunctionError: true,
+    EventSourceArn: {
+      'Fn::GetAtt': ['AuditEventsTable0723963E', 'StreamArn'],
+    },
+    FunctionResponseTypes: ['ReportBatchItemFailures'],
+    MaximumRetryAttempts: 3,
+    StartingPosition: 'TRIM_HORIZON',
+    DestinationConfig: {
+      OnFailure: {
+        Destination: Match.anyValue(),
+      },
+    },
+  });
+  template.hasResourceProperties('AWS::SQS::Queue', {
+    MessageRetentionPeriod: 1209600,
+    SqsManagedSseEnabled: true,
+  });
   template.hasResourceProperties('AWS::IAM::Policy', {
     PolicyDocument: {
       Statement: Match.arrayWith([
@@ -266,35 +460,56 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
           Action: 'dynamodb:TransactWriteItems',
           Effect: 'Allow',
           Resource: Match.arrayWith([
-            {
-              'Fn::GetAtt': ['ProjectTasksTableE21F6637', 'Arn'],
-            },
-            {
-              'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'],
-            },
+            { 'Fn::GetAtt': ['NotificationsTable76DCFC6C', 'Arn'] },
+            { 'Fn::GetAtt': ['ProcessedAuditEventsTableFF485133', 'Arn'] },
           ]),
         }),
         Match.objectLike({
-          Action: Match.arrayWith([
-            'cognito-idp:AdminGetUser',
-            'cognito-idp:ListUsers',
-          ]),
+          Action: 'execute-api:ManageConnections',
           Effect: 'Allow',
-          Resource: {
-            'Fn::Join': [
-              '',
-              Match.arrayWith([
-                ':userpool/',
-                {
-                  Ref: 'CognitoUserPoolId',
-                },
-              ]),
-            ],
-          },
+          Resource: Match.anyValue(),
         }),
       ]),
     },
   });
+  template.hasOutput('NotificationsTableName', {});
+  template.hasOutput('CollaborationProjectionDlqUrl', {});
+
+  const projectionPolicy = template.toJSON().Resources
+    .CollaborationProjectionFunctionServiceRoleDefaultPolicyDCBB176C;
+  const serializedProjectionPolicy = JSON.stringify(projectionPolicy);
+
+  expect(serializedProjectionPolicy).toContain('production/*/@connections/*');
+  expect(serializedProjectionPolicy).toContain('WorkItemCollaborationTableFDECF217');
+  expect(serializedProjectionPolicy).toContain('cognito-idp:AdminListGroupsForUser');
+  expect(serializedProjectionPolicy).toContain('CognitoUserPoolId');
+  expect(serializedProjectionPolicy).toContain('TeamIssuesTable189D851D');
+  expect(serializedProjectionPolicy).not.toContain('/*/*/@connections/*');
+});
+
+test('API IAM is limited to the data tables and configured Cognito user pool', () => {
+  const template = synthesizedTemplate;
+  const policy = template.toJSON().Resources.ListProjectTasksFunctionServiceRoleDefaultPolicy5F0F81CE;
+  const statements = policy.Properties.PolicyDocument.Statement as Array<Record<string, unknown>>;
+  const transactStatement = statements.find((statement) =>
+    statement.Action === 'dynamodb:TransactWriteItems'
+  );
+  const cognitoPolicy = Object.values(template.toJSON().Resources).find((resource) =>
+    JSON.stringify(resource).includes('cognito-idp:AdminGetUser')
+  );
+
+  expect(transactStatement).toEqual(expect.objectContaining({
+    Effect: 'Allow',
+    Resource: expect.arrayContaining([
+      { 'Fn::GetAtt': ['ProjectTasksTableE21F6637', 'Arn'] },
+      { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
+      { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
+    ]),
+  }));
+  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:ListUsers');
+  expect(JSON.stringify(cognitoPolicy)).toContain('CognitoUserPoolId');
+  expect(JSON.stringify(policy)).not.toContain('"Resource":"*"');
+  expect(JSON.stringify(cognitoPolicy)).not.toContain('"Resource":"*"');
 });
 
 test('external Cognito client and initial owner attributes are validated on create and update', () => {

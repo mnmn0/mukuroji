@@ -2,6 +2,8 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { TaskScreen } from './TaskPage'
 import type { TeamIssueDetail } from '../issues/api'
 import {
+  collaborationWorkspaceMemberFixtures,
+  issueCollaborationControllerFixture,
   teamIssueActivityFixtures,
   teamIssueCommentFixtures,
 } from '../issues/fixtures'
@@ -106,6 +108,8 @@ const meta = {
     locale: 'ja',
     assigneeOptions,
     canManageProjectMembers: true,
+    collaboration: issueCollaborationControllerFixture,
+    currentWorkspaceMemberKey: 'demo@example.com',
     projectId: 'refero',
     projectMembers: assigneeOptions,
     projectName: 'Refero',
@@ -114,12 +118,12 @@ const meta = {
     onCreateProject: async () => undefined,
     onCreateTeam: async () => undefined,
     onCreateTask: async () => undefined,
-    onCreateIssueComment: async () => undefined,
     onUpdateIssue: async () => undefined,
     tasks: storyTasks,
     teamName: 'コアチーム',
     teams: projectDirectoryFixtures,
     userInitial: 'J',
+    workspaceMembers: collaborationWorkspaceMemberFixtures,
   },
 } satisfies Meta<typeof TaskScreen>
 

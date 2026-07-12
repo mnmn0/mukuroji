@@ -1,8 +1,8 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { TeamIssueScreen } from './TeamIssuePage'
 import {
-  teamIssueActivityFixtures,
-  teamIssueCommentFixtures,
+  collaborationWorkspaceMemberFixtures,
+  issueCollaborationControllerFixture,
   teamIssueFixtures,
 } from '../issues/fixtures'
 import type { ProjectMember } from '../projects/api'
@@ -53,11 +53,10 @@ const meta = {
   },
   args: {
     locale: 'ja',
-    activity: teamIssueActivityFixtures,
     assigneeOptions,
-    comments: teamIssueCommentFixtures,
+    collaboration: issueCollaborationControllerFixture,
+    currentWorkspaceMemberKey: 'demo@example.com',
     issues: teamIssueFixtures,
-    onCreateComment: async () => undefined,
     onCreateIssue: async () => undefined,
     onCreateProject: async () => undefined,
     onCreateTeam: async () => undefined,
@@ -67,6 +66,7 @@ const meta = {
     teamName: 'コアチーム',
     teams: projectDirectoryFixtures,
     userInitial: 'J',
+    workspaceMembers: collaborationWorkspaceMemberFixtures,
   },
 } satisfies Meta<typeof TeamIssueScreen>
 
@@ -155,8 +155,6 @@ export const LongCrowdedData: Story = {
  */
 export const Empty: Story = {
   args: {
-    activity: [],
-    comments: [],
     issues: [],
     selectedIssueId: undefined,
   },

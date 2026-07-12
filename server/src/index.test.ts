@@ -4,6 +4,7 @@ import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import { createAuditEvent, createMutationAuditContext } from './audit'
+import { CollaborationError, type CollaborationClient } from './collaboration'
 import {
   app,
   AwsCognitoClient,
@@ -12,6 +13,7 @@ import {
   DynamoDbDashboardSummaryClient,
   DynamoDbProjectDirectoryClient,
   DynamoDbProjectTasksClient,
+  DynamoDbTeamIssuesClient,
   handler,
   resetApiClientsForTest,
   WorkspaceAccessError,
@@ -22,6 +24,134 @@ import {
 
 afterEach(() => {
   resetApiClientsForTest()
+})
+
+test('uses a strongly consistent Work Item read for authorization-sensitive detail loads', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return {
+        Item: {
+          directoryId: 'workspace-1',
+          teamId: 'core-team',
+          directoryTeamId: 'workspace-1#team#core-team',
+          issueId: 'issue-1',
+          sortOrder: 1,
+          title: 'Authorization-sensitive issue',
+          assigneeUserId: 'member@example.com',
+          status: 'todo',
+          dueDate: '2026/07/12',
+          priority: 'medium',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+        },
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    { send: async () => ({}) } as unknown as DynamoDBClient,
+    false,
+  )
+
+  await client.getTeamIssueDetail('workspace-1', 'core-team', 'issue-1', {
+    consistentIssueRead: true,
+    eventLimit: 0,
+  })
+
+  expect(sentInputs).toHaveLength(1)
+  expect(sentInputs[0]).toMatchObject({
+    TableName: 'issues-table',
+    ConsistentRead: true,
+  })
+})
+
+test('pages filtered legacy comments with a scope-bound opaque event cursor', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  let queryPage = 0
+  const issueItem = {
+    directoryId: 'workspace-1',
+    teamId: 'core-team',
+    directoryTeamId: 'workspace-1#team#core-team',
+    issueId: 'issue-1',
+    sortOrder: 1,
+    title: 'Legacy comments',
+    assigneeUserId: 'member@example.com',
+    status: 'todo',
+    dueDate: '2026/07/12',
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      if (!('KeyConditionExpression' in command.input)) {
+        return { Item: issueItem }
+      }
+
+      queryPage += 1
+      const eventId = queryPage === 1 ? '2026-07-12T00:02:00.000Z#newer' : '2026-07-12T00:01:00.000Z#older'
+      return {
+        Items: [{
+          directoryId: 'workspace-1',
+          teamId: 'core-team',
+          issueId: 'issue-1',
+          directoryTeamIssueId: 'workspace-1#team#core-team#issue#issue-1',
+          eventId,
+          eventType: 'commented',
+          actorUserId: 'member@example.com',
+          body: queryPage === 1 ? 'Newer legacy comment' : 'Older legacy comment',
+          summary: 'Comment was added.',
+          createdAt: eventId.slice(0, 24),
+        }],
+        ...(queryPage === 1
+          ? {
+              LastEvaluatedKey: {
+                directoryTeamIssueId: 'workspace-1#team#core-team#issue#issue-1',
+                eventId,
+              },
+            }
+          : {}),
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    { send: async () => ({}) } as unknown as DynamoDBClient,
+    false,
+  )
+  const options = {
+    consistentIssueRead: true,
+    eventLimit: 1,
+    eventType: 'commented' as const,
+    newestEventsFirst: true,
+  }
+
+  const first = await client.getTeamIssueDetail('workspace-1', 'core-team', 'issue-1', options)
+  const second = await client.getTeamIssueDetail('workspace-1', 'core-team', 'issue-1', {
+    ...options,
+    eventCursor: first.nextEventCursor,
+  })
+
+  expect(first.comments.map((comment) => comment.body)).toEqual(['Newer legacy comment'])
+  expect(first.nextEventCursor).toBeString()
+  expect(second.comments.map((comment) => comment.body)).toEqual(['Older legacy comment'])
+  expect(sentInputs[1]).toMatchObject({
+    TableName: 'events-table',
+    FilterExpression: 'eventType = :eventType',
+    Limit: 1,
+    ScanIndexForward: false,
+  })
+  expect(sentInputs[3]?.ExclusiveStartKey).toEqual({
+    directoryTeamIssueId: 'workspace-1#team#core-team#issue#issue-1',
+    eventId: '2026-07-12T00:02:00.000Z#newer',
+  })
 })
 
 test('serves the same authenticated API contract from Function URL root and /api paths', async () => {
@@ -2072,6 +2202,7 @@ test('loads legacy project task rows as team issue detail fallback', async () =>
       directoryId: 'user#demo@example.com',
       teamId: 'core-team',
       issueId: 'wireframe',
+      readOptions: { consistentIssueRead: true },
     },
   ])
   expect(calls.taskReads).toEqual([
@@ -2196,6 +2327,41 @@ test('rejects a team issue assignment when the user lacks target project member 
 
 test('loads team issue detail and creates comments after team access is confirmed', async () => {
   const calls = configureFakeProjectClients(true)
+  const collaborationCreates: Parameters<CollaborationClient['createComment']>[0][] = []
+  const collaborationComments: Awaited<ReturnType<CollaborationClient['createComment']>>[] = []
+  configureApiClientsForTest({
+    collaboration: {
+      async getThread() {
+        return {
+          comments: collaborationComments,
+          watch: {
+            subscribed: false,
+            explicit: false,
+            automatic: false,
+            reasons: [],
+            watcherCount: 0,
+          },
+          presence: [],
+        }
+      },
+      async createComment(input) {
+        collaborationCreates.push(input)
+        const comment = {
+          id: 'comment-2',
+          rootCommentId: 'comment-2',
+          authorMemberKey: input.actorMemberKey,
+          bodyMarkdown: input.bodyMarkdown,
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-06-08T02:00:00.000Z',
+          updatedAt: '2026-06-08T02:00:00.000Z',
+          reactions: [],
+        }
+        collaborationComments.push(comment)
+        return comment
+      },
+    } as CollaborationClient,
+  })
 
   const detailResponse = await app.request('/api/teams/core-team/issues/onboarding-friction', {
     headers: {
@@ -2243,7 +2409,7 @@ test('loads team issue detail and creates comments after team access is confirme
       createdAt: '2026-06-08T02:00:00.000Z',
     },
     activity: {
-      id: 'activity-2',
+      id: 'comment-2',
       type: 'commented',
       actorUserId: 'demo@example.com',
       summary: 'Comment was added.',
@@ -2255,21 +2421,574 @@ test('loads team issue detail and creates comments after team access is confirme
       directoryId: 'user#demo@example.com',
       teamId: 'core-team',
       issueId: 'onboarding-friction',
+      readOptions: { consistentIssueRead: true },
     },
     {
       directoryId: 'user#demo@example.com',
       teamId: 'core-team',
       issueId: 'onboarding-friction',
+      readOptions: { consistentIssueRead: true, eventLimit: 0 },
     },
   ])
-  expect(calls.issueComments).toEqual([
+  expect(calls.issueComments).toEqual([])
+  expect(collaborationCreates).toHaveLength(1)
+  expect(collaborationCreates[0]).toMatchObject({
+    actorMemberKey: 'demo@example.com',
+    bodyMarkdown: '追加コメント',
+    entityKey: 'user#demo@example.com#work-item#team/core-team/issue/onboarding-friction',
+  })
+
+  const refreshedDetailResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(refreshedDetailResponse.status).toBe(200)
+  expect(await refreshedDetailResponse.json()).toMatchObject({
+    comments: [
+      { id: 'comment-1', body: '背景を確認します。' },
+      { id: 'comment-2', body: '追加コメント' },
+    ],
+  })
+})
+
+test('returns persisted collaboration comments together with inert legacy comments and reply cursors', async () => {
+  const calls = configureFakeProjectClients(true)
+  const threadInputs: Parameters<CollaborationClient['getThread']>[0][] = []
+  configureApiClientsForTest({
+    collaboration: {
+      async getThread(input) {
+        threadInputs.push(input)
+        const pageBase = {
+          watch: {
+            subscribed: true,
+            explicit: true,
+            automatic: false,
+            reasons: ['manual'],
+            watcherCount: 2,
+          },
+          presence: [],
+        }
+        if (input.rootCommentId) {
+          return {
+            ...pageBase,
+            comments: [{
+              id: 'stored-reply',
+              rootCommentId: input.rootCommentId,
+              parentCommentId: input.rootCommentId,
+              authorMemberKey: 'sato@example.com',
+              bodyMarkdown: 'Persisted reply',
+              version: 1,
+              mentionMemberKeys: [],
+              createdAt: '2026-07-12T00:01:00.000Z',
+              updatedAt: '2026-07-12T00:01:00.000Z',
+              reactions: [],
+            }],
+            nextCursor: 'older-replies',
+          }
+        }
+        return {
+          ...pageBase,
+          comments: [{
+            id: 'stored-root',
+            rootCommentId: 'stored-root',
+            authorMemberKey: 'demo@example.com',
+            bodyMarkdown: 'Persisted root',
+            version: 2,
+            mentionMemberKeys: [],
+            createdAt: '2026-07-12T00:00:00.000Z',
+            updatedAt: '2026-07-12T00:00:30.000Z',
+            editedAt: '2026-07-12T00:00:30.000Z',
+            reactions: [],
+          }],
+        }
+      },
+    } as CollaborationClient,
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction/collaboration', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    comments: [
+      { id: 'stored-root', source: 'collaboration' },
+      { id: 'stored-reply', source: 'collaboration' },
+      {
+        id: 'comment-1',
+        source: 'legacy',
+        capabilities: { canReply: false, canReact: false },
+      },
+    ],
+    replyNextCursors: { 'stored-root': 'older-replies' },
+  })
+  expect(threadInputs).toHaveLength(2)
+  expect(threadInputs[0]?.rootCommentId).toBeUndefined()
+  expect(threadInputs[0]?.limit).toBe(10)
+  expect(threadInputs[1]).toMatchObject({
+    rootCommentId: 'stored-root',
+    limit: 5,
+    includeScopeState: false,
+  })
+  expect(calls.issueDetails).toContainEqual({
+    directoryId: 'user#demo@example.com',
+    teamId: 'core-team',
+    issueId: 'onboarding-friction',
+    readOptions: {
+      consistentIssueRead: true,
+      eventLimit: 50,
+      newestEventsFirst: true,
+      eventType: 'commented',
+    },
+  })
+})
+
+test('keeps a departed author in history while blocking deactivated member mutations', async () => {
+  configureFakeProjectClients(true, {
+    inactiveWorkspaceMemberKeys: ['departed@example.com'],
+  })
+  configureApiClientsForTest({
+    collaboration: {
+      async getThread(input) {
+        return {
+          comments: input.rootCommentId
+            ? []
+            : [{
+                id: 'departed-comment',
+                rootCommentId: 'departed-comment',
+                authorMemberKey: 'departed@example.com',
+                bodyMarkdown: 'This decision remains in history.',
+                version: 1,
+                mentionMemberKeys: [],
+                createdAt: '2026-07-12T00:00:00.000Z',
+                updatedAt: '2026-07-12T00:00:00.000Z',
+                reactions: [],
+              }],
+          watch: {
+            subscribed: false,
+            explicit: false,
+            automatic: false,
+            reasons: [],
+            watcherCount: 0,
+          },
+          presence: [],
+        }
+      },
+    } as CollaborationClient,
+  })
+
+  const historyResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(historyResponse.status).toBe(200)
+  const history = await historyResponse.json() as { comments: unknown[] }
+  expect(history.comments).toContainEqual(expect.objectContaining({
+    id: 'departed-comment',
+    authorMemberKey: 'departed@example.com',
+    bodyMarkdown: 'This decision remains in history.',
+  }))
+
+  configureFakeProjectClients(true, { workspaceStatus: 'deactivated' })
+  let mutationCalls = 0
+  configureApiClientsForTest({
+    collaboration: {
+      async updateComment() {
+        mutationCalls += 1
+        throw new Error('A deactivated member must not reach the collaboration store.')
+      },
+    } as CollaborationClient,
+  })
+  const mutationResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/comments/departed-comment',
     {
-      actorUserId: 'demo@example.com',
-      directoryId: 'user#demo@example.com',
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ bodyMarkdown: 'Changed', expectedVersion: 1 }),
+    },
+  )
+
+  expect(mutationResponse.status).toBe(403)
+  expect(mutationCalls).toBe(0)
+})
+
+test('marks roots and replies in a resolved thread as non-replyable', async () => {
+  configureFakeProjectClients(true)
+  const root = {
+    id: 'resolved-root',
+    rootCommentId: 'resolved-root',
+    authorMemberKey: 'demo@example.com',
+    bodyMarkdown: 'Resolved decision',
+    version: 2,
+    mentionMemberKeys: [],
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:01:00.000Z',
+    resolvedAt: '2026-07-12T00:01:00.000Z',
+    reactions: [],
+  }
+  configureApiClientsForTest({
+    collaboration: {
+      async getThread(input) {
+        return {
+          comments: input.rootCommentId
+            ? [{
+                ...root,
+                id: 'resolved-reply',
+                parentCommentId: root.id,
+                resolvedAt: undefined,
+              }]
+            : [root],
+          watch: {
+            subscribed: false,
+            explicit: false,
+            automatic: false,
+            reasons: [],
+            watcherCount: 0,
+          },
+          presence: [],
+          ...(input.rootCommentId ? { threadResolved: true } : {}),
+        }
+      },
+    } as CollaborationClient,
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(response.status).toBe(200)
+  const body = await response.json() as {
+    comments: Array<{ id: string; capabilities: { canReply: boolean } }>
+  }
+  expect(body.comments.find((comment) => comment.id === 'resolved-root')?.capabilities.canReply)
+    .toBe(false)
+  expect(body.comments.find((comment) => comment.id === 'resolved-reply')?.capabilities.canReply)
+    .toBe(false)
+})
+
+test('denies collaboration reads without Work Item viewer access', async () => {
+  configureFakeProjectClients(false)
+  let reads = 0
+  configureApiClientsForTest({
+    collaboration: {
+      async getThread() {
+        reads += 1
+        throw new Error('Collaboration store must not be called.')
+      },
+    } as CollaborationClient,
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction/collaboration', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(403)
+  expect(reads).toBe(0)
+})
+
+test('keeps guest members read-only for collaboration mutations', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'guest' })
+  let writes = 0
+  configureApiClientsForTest({
+    collaboration: {
+      async createComment() {
+        writes += 1
+        throw new Error('Collaboration store must not be called.')
+      },
+    } as CollaborationClient,
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ bodyMarkdown: 'Guest comment' }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(writes).toBe(0)
+})
+
+test('returns a client error when a comment mentions an inactive Workspace member', async () => {
+  configureFakeProjectClients(true, { inactiveWorkspaceMemberKeys: ['inactive@example.com'] })
+  let writes = 0
+  configureApiClientsForTest({
+    collaboration: {
+      async createComment() {
+        writes += 1
+        throw new Error('Collaboration store must not be called.')
+      },
+    } as CollaborationClient,
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      bodyMarkdown: 'Please review this, @Inactive.',
+      mentionMemberKeys: ['inactive@example.com'],
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    message: 'Mentioned Workspace member "inactive@example.com" is not active.',
+  })
+  expect(writes).toBe(0)
+})
+
+test('allows active system administrators to be mentioned without project membership', async () => {
+  for (const unassignedIssue of [false, true]) {
+    configureFakeProjectClients(true, {
+      mentionAccessDeniedMemberKeys: ['admin@example.com'],
+      systemAdminMemberKeys: ['admin@example.com'],
+      unassignedIssue,
+    })
+    const writes: Parameters<CollaborationClient['createComment']>[0][] = []
+    configureApiClientsForTest({
+      collaboration: {
+        async createComment(input) {
+          writes.push(input)
+          return {
+            id: `admin-mention-${unassignedIssue ? 'team' : 'project'}`,
+            rootCommentId: `admin-mention-${unassignedIssue ? 'team' : 'project'}`,
+            authorMemberKey: input.actorMemberKey,
+            bodyMarkdown: input.bodyMarkdown,
+            version: 1,
+            mentionMemberKeys: input.mentionMemberKeys ?? [],
+            createdAt: '2026-07-12T00:00:00.000Z',
+            updatedAt: '2026-07-12T00:00:00.000Z',
+            reactions: [],
+          }
+        },
+      } as CollaborationClient,
+    })
+
+    const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        bodyMarkdown: 'Please review this, @Admin.',
+        mentionMemberKeys: ['admin@example.com'],
+      }),
+    })
+
+    expect(response.status).toBe(201)
+    expect(writes).toHaveLength(1)
+    expect(writes[0]?.mentionMemberKeys).toEqual(['admin@example.com'])
+  }
+})
+
+test('allows a Workspace owner with viewer access to moderate a comment', async () => {
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'owner' })
+  const deletes: Parameters<CollaborationClient['deleteComment']>[0][] = []
+  configureApiClientsForTest({
+    collaboration: {
+      async deleteComment(input) {
+        deletes.push(input)
+        return {
+          id: input.commentId,
+          rootCommentId: input.commentId,
+          authorMemberKey: 'sato@example.com',
+          bodyMarkdown: '',
+          version: 2,
+          mentionMemberKeys: [],
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:01:00.000Z',
+          deletedAt: '2026-07-12T00:01:00.000Z',
+          reactions: [],
+        }
+      },
+    } as CollaborationClient,
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/comments/comment-1',
+    {
+      method: 'DELETE',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ expectedVersion: 1 }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(deletes).toHaveLength(1)
+  expect(deletes[0]?.canModerate).toBe(true)
+})
+
+test('allows an assigned project manager to moderate another member comment', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const deletes: Parameters<CollaborationClient['deleteComment']>[0][] = []
+  configureApiClientsForTest({
+    collaboration: {
+      async deleteComment(input) {
+        deletes.push(input)
+        return {
+          id: input.commentId,
+          rootCommentId: input.commentId,
+          authorMemberKey: 'sato@example.com',
+          bodyMarkdown: '',
+          version: 2,
+          mentionMemberKeys: [],
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:01:00.000Z',
+          deletedAt: '2026-07-12T00:01:00.000Z',
+          reactions: [],
+        }
+      },
+    } as CollaborationClient,
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/comments/comment-1',
+    {
+      method: 'DELETE',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ expectedVersion: 1 }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(deletes[0]?.canModerate).toBe(true)
+})
+
+test('denies a project viewer from deleting another member comment', async () => {
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  let deletes = 0
+  configureApiClientsForTest({
+    collaboration: {
+      async deleteComment() {
+        deletes += 1
+        throw new CollaborationError(403, 'CommentDeleteDenied', 'Comment delete permission is required.')
+      },
+    } as CollaborationClient,
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/comments/comment-1',
+    {
+      method: 'DELETE',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ expectedVersion: 1 }),
+    },
+  )
+
+  expect(response.status).toBe(403)
+  expect(deletes).toBe(1)
+})
+
+test('reads and changes project watcher state through the project scope', async () => {
+  configureFakeProjectClients(true)
+  const reads: Parameters<CollaborationClient['getWatcherState']>[0][] = []
+  const writes: Parameters<CollaborationClient['subscribe']>[0][] = []
+  const watch = {
+    subscribed: true,
+    explicit: true,
+    automatic: false,
+    reasons: ['manual'],
+    watcherCount: 3,
+  }
+  configureApiClientsForTest({
+    collaboration: {
+      async getWatcherState(input) {
+        reads.push(input)
+        return watch
+      },
+      async subscribe(input) {
+        writes.push(input)
+        return watch
+      },
+    } as CollaborationClient,
+  })
+
+  const readResponse = await app.request('/api/projects/refero/watch', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const writeResponse = await app.request('/api/projects/refero/watch', {
+    method: 'PUT',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(readResponse.status).toBe(200)
+  expect(writeResponse.status).toBe(200)
+  expect(reads).toEqual([{
+    entityKey: 'user#demo@example.com#project#refero',
+    memberKey: 'demo@example.com',
+  }])
+  expect(writes).toHaveLength(1)
+  expect(writes[0]).toMatchObject({
+    workspaceId: 'user#demo@example.com',
+    entityKey: 'user#demo@example.com#project#refero',
+    projectId: 'refero',
+    memberKey: 'demo@example.com',
+  })
+})
+
+test('issues a one-time realtime ticket only after Work Item viewer access is confirmed', async () => {
+  configureFakeProjectClients(true)
+  const ticketInputs: Array<Record<string, unknown>> = []
+  configureApiClientsForTest({
+    realtimeTickets: {
+      async createTicket(input) {
+        ticketInputs.push(input)
+
+        return {
+          ticket: 'one-time-ticket',
+          websocketUrl: 'wss://realtime.example.com/dev',
+          expiresAt: '2026-07-12T00:01:00.000Z',
+        }
+      },
+    },
+  })
+
+  const response = await app.request('/api/realtime/tickets', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
       teamId: 'core-team',
       issueId: 'onboarding-friction',
-    },
-  ])
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(await response.json()).toEqual({
+    ticket: 'one-time-ticket',
+    websocketUrl: 'wss://realtime.example.com/dev',
+    expiresAt: '2026-07-12T00:01:00.000Z',
+  })
+  expect(ticketInputs).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    memberKey: 'demo@example.com',
+    teamId: 'core-team',
+    issueId: 'onboarding-friction',
+    projectId: 'refero',
+    systemAdmin: false,
+    canWrite: true,
+    scopeKey: 'user#demo@example.com#work-item#team/core-team/issue/onboarding-friction',
+  }])
 })
 
 test('updates a team-owned issue after team access is confirmed', async () => {
@@ -3998,6 +4717,7 @@ function configureFakeProjectClients(
     cognitoUsersNextToken?: string
     profileError?: Error
     inactiveWorkspaceMemberKeys?: string[]
+    mentionAccessDeniedMemberKeys?: string[]
     /** NEW_PASSWORD_REQUIRED challenge で Cognito が返す error です。 */
     newPasswordChallengeError?: CognitoServiceError
     newPasswordChallengeTokens?: boolean
@@ -4005,8 +4725,10 @@ function configureFakeProjectClients(
     passwordAuthTokens?: boolean
     projectAccesses?: Array<{ projectId: string; role?: ProjectRole }>
     role?: ProjectRole
+    systemAdminMemberKeys?: string[]
     taskAssigneeUserId?: string
     teamProjects?: Array<{ id: string; name: string; tone: 'blue' | 'purple' | 'green' | 'yellow' }>
+    unassignedIssue?: boolean
     workspaceRole?: WorkspaceRole
     workspaceReconcileFailures?: number
     workspaceStatus?: WorkspaceMemberStatus
@@ -4055,7 +4777,18 @@ function configureFakeProjectClients(
       teamId: string
       title: string
     }>,
-    issueDetails: [] as Array<{ directoryId: string; issueId: string; teamId: string }>,
+    issueDetails: [] as Array<{
+      directoryId: string
+      issueId: string
+      teamId: string
+      readOptions?: {
+        consistentIssueRead?: boolean
+        eventCursor?: string
+        eventLimit?: number
+        eventType?: string
+        newestEventsFirst?: boolean
+      }
+    }>,
     issueReads: [] as Array<{ directoryId: string; teamId: string }>,
     issueUpdates: [] as Array<{
       actorUserId: string
@@ -4100,6 +4833,21 @@ function configureFakeProjectClients(
   })
 
   configureApiClientsForTest({
+    collaboration: {
+      async getThread() {
+        return {
+          comments: [],
+          watch: {
+            subscribed: false,
+            explicit: false,
+            automatic: false,
+            reasons: [],
+            watcherCount: 0,
+          },
+          presence: [],
+        }
+      },
+    } as CollaborationClient,
     cognito: {
       async initiatePasswordAuth() {
         if (options.passwordAuthChallenge) {
@@ -4161,6 +4909,9 @@ function configureFakeProjectClients(
         }
 
         return createFakeCognitoProfile(userId)
+      },
+      async isSystemAdmin(userId) {
+        return options.systemAdminMemberKeys?.includes(userId.toLowerCase()) ?? false
       },
       async findWorkspaceUser(userId) {
         if (options.workspaceUserMissing || options.workspaceProvisionRace) {
@@ -4237,8 +4988,12 @@ function configureFakeProjectClients(
           ],
         }
       },
-      async getProjectAccess(directoryId, projectId) {
+      async getProjectAccess(directoryId, projectId, memberKey = 'demo@example.com') {
         calls.accessChecks.push({ directoryId, projectId })
+
+        if (options.mentionAccessDeniedMemberKeys?.includes(memberKey)) {
+          return undefined
+        }
 
         if (options.projectAccesses) {
           return options.projectAccesses.find((access) => access.projectId === projectId)
@@ -4253,8 +5008,12 @@ function configureFakeProjectClients(
           role,
         }
       },
-      async getProjectAccessList(directoryId) {
+      async getProjectAccessList(directoryId, memberKey = 'demo@example.com') {
         calls.accessChecks.push({ directoryId, projectId: '*' })
+
+        if (options.mentionAccessDeniedMemberKeys?.includes(memberKey)) {
+          return []
+        }
 
         if (options.projectAccesses) {
           return options.projectAccesses
@@ -4557,7 +5316,7 @@ function configureFakeProjectClients(
             {
               id: 'onboarding-friction',
               teamId,
-              assignedProjectId: 'refero',
+              assignedProjectId: options.unassignedIssue ? undefined : 'refero',
               title: '初回オンボーディングの離脱要因を減らす',
               description: '初回体験の摩擦を下げる。',
               assigneeUserId: 'sato@example.com',
@@ -4591,8 +5350,13 @@ function configureFakeProjectClients(
           ],
         }
       },
-      async getTeamIssueDetail(directoryId, teamId, issueId) {
-        calls.issueDetails.push({ directoryId, teamId, issueId })
+      async getTeamIssueDetail(directoryId, teamId, issueId, readOptions) {
+        calls.issueDetails.push({
+          directoryId,
+          teamId,
+          issueId,
+          ...(readOptions ? { readOptions } : {}),
+        })
 
         if (issueId === 'wireframe') {
           throw {
@@ -4606,7 +5370,7 @@ function configureFakeProjectClients(
           issue: {
             id: issueId,
             teamId,
-            assignedProjectId: 'refero',
+            assignedProjectId: options.unassignedIssue ? undefined : 'refero',
             title: '初回オンボーディングの離脱要因を減らす',
             description: '初回体験の摩擦を下げる。',
             assigneeUserId: 'sato@example.com',

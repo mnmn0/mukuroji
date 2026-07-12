@@ -1,5 +1,6 @@
 import {
   AdminGetUserCommand,
+  AdminListGroupsForUserCommand,
   CognitoIdentityProviderClient,
   GetUserCommand,
   InitiateAuthCommand,
@@ -51,6 +52,20 @@ import {
   type WorkspaceMemberStatus,
   type WorkspaceRole,
 } from './workspace-access'
+import {
+  DynamoDbRealtimeTicketsClient,
+  RealtimeTicketError,
+  type RealtimeTicketsClient,
+} from './realtime-ticket'
+import {
+  CollaborationError,
+  DynamoDbCollaborationClient,
+  createProjectCollaborationEntityKey,
+  createWorkItemCollaborationEntityKey,
+  type CollaborationAutomaticWatcherCandidate,
+  type CollaborationClient,
+  type CollaborationComment,
+} from './collaboration'
 
 export {
   DynamoDbWorkspaceAccessClient,
@@ -256,6 +271,17 @@ type ListUsersResponse = {
    * 次 page 取得用の Cognito pagination token です。
    */
   PaginationToken?: string
+}
+
+/** Cognito AdminListGroupsForUser のレスポンスです。 */
+type AdminListGroupsForUserResponse = {
+  /** User が所属する group 一覧です。 */
+  Groups?: Array<{
+    /** Cognito group 名です。 */
+    GroupName?: string
+  }>
+  /** 次 page 取得用の Cognito pagination token です。 */
+  NextToken?: string
 }
 
 /**
@@ -765,6 +791,10 @@ type TeamIssueItem = {
    */
   assigneeUserId: string
   /**
+   * Issue 作成者の Workspace member key です。旧 row では未設定です。
+   */
+  creatorMemberKey?: string
+  /**
    * Issue 状態です。
    */
   status: ProjectTaskStatus
@@ -864,6 +894,10 @@ type TeamIssueResponseItem = {
    * Cognito user を参照する担当者 ID です。
    */
   assigneeUserId: string
+  /**
+   * Issue 作成者の Workspace member key です。旧 row では未設定です。
+   */
+  creatorMemberKey?: string
   /**
    * Cognito から解決した担当者メールアドレスです。
    */
@@ -990,6 +1024,8 @@ type TeamIssueDetailResponse = {
    * Issue 活動履歴一覧です。
    */
   activity: TeamIssueActivityResponseItem[]
+  /** Bounded event 読み込みの次 page を指す opaque cursor です。 */
+  nextEventCursor?: string
 }
 
 /**
@@ -1065,9 +1101,77 @@ type UpdateTeamIssueRequestBody = {
  */
 type CreateTeamIssueCommentRequestBody = {
   /**
-   * コメント本文です。
+   * 旧 client が送信する plain text コメント本文です。
    */
   body?: unknown
+  /**
+   * Markdown source として保存するコメント本文です。
+   */
+  bodyMarkdown?: unknown
+  /**
+   * reply 先の comment ID です。
+   */
+  parentCommentId?: unknown
+  /**
+   * Composer が解決した安定した Workspace member key です。
+   */
+  mentionMemberKeys?: unknown
+}
+
+/**
+ * チーム Issue コメント更新 API が受け取る request body です。
+ */
+type UpdateTeamIssueCommentRequestBody = {
+  /**
+   * 更新後の Markdown source です。
+   */
+  bodyMarkdown?: unknown
+  /**
+   * Composer が解決した安定した Workspace member key です。
+   */
+  mentionMemberKeys?: unknown
+  /**
+   * 読み込み時点の comment version です。
+   */
+  expectedVersion?: unknown
+}
+
+/**
+ * Comment resolve/reopen/delete API が受け取る request body です。
+ */
+type VersionedTeamIssueCommentRequestBody = {
+  /**
+   * 読み込み時点の comment version です。
+   */
+  expectedVersion?: unknown
+}
+
+/**
+ * Presence heartbeat API が受け取る request body です。
+ */
+type TeamIssuePresenceRequestBody = {
+  /**
+   * Browser tab ごとに作成する安定した client ID です。
+   */
+  clientId?: unknown
+  /**
+   * Comment composer に入力中かどうかです。
+   */
+  typing?: unknown
+}
+
+/**
+ * Realtime WebSocket ticket API が受け取る request body です。
+ */
+type CreateRealtimeTicketRequestBody = {
+  /**
+   * 購読対象 Work Item の team ID です。
+   */
+  teamId?: unknown
+  /**
+   * 購読対象 Work Item の issue ID です。
+   */
+  issueId?: unknown
 }
 
 /**
@@ -1589,6 +1693,10 @@ type CognitoClient = {
    */
   getUserProfile(userId: string): Promise<CognitoUserProfile>
   /**
+   * Cognito user が現在 system administrator group に所属するかを返します。
+   */
+  isSystemAdmin(userId: string): Promise<boolean>
+  /**
    * Workspace invitation 対象の Cognito user と directory 属性を検索します。
    */
   findWorkspaceUser(userId: string): Promise<CognitoWorkspaceUser | undefined>
@@ -1669,6 +1777,7 @@ type TeamIssuesClient = {
     directoryId: string,
     teamId: string,
     issueId: string,
+    options?: TeamIssueDetailReadOptions,
   ): Promise<TeamIssueDetailResponse>
   /**
    * DynamoDB に team issue を作成します。
@@ -1703,6 +1812,30 @@ type TeamIssuesClient = {
     actorUserId: string,
     auditContext?: MutationAuditContext,
   ): Promise<CreateTeamIssueCommentResponse>
+}
+
+/** Team Issue detail の event 読み込み量と順序を制御します。 */
+type TeamIssueDetailReadOptions = {
+  /** Issue 本体を strongly consistent read で認可へ使う場合は true です。 */
+  consistentIssueRead?: boolean
+  /** 読み込む event の最大件数です。0 の場合は event partition を読みません。 */
+  eventLimit?: number
+  /** 新しい event から読み込む場合は true です。 */
+  newestEventsFirst?: boolean
+  /** 指定 event 種別だけを返す DynamoDB filter です。 */
+  eventType?: TeamIssueActivityType
+  /** 前 page が返した event cursor です。 */
+  eventCursor?: string
+}
+
+/** Team Issue event page cursor の署名対象 payload です。 */
+type TeamIssueEventCursor = {
+  /** Cursor schema version です。 */
+  version: 1
+  /** Cursor を別 Issue へ流用できないよう束縛する partition key です。 */
+  directoryTeamIssueId: string
+  /** DynamoDB event sort key です。 */
+  eventId: string
 }
 
 /**
@@ -1824,6 +1957,8 @@ let teamIssues: TeamIssuesClient
 let projectDirectory: ProjectDirectoryClient
 let auditEvents: AuditEventsClient
 let workspaceAccess: WorkspaceAccessClient
+let realtimeTickets: RealtimeTicketsClient
+let collaboration: CollaborationClient
 const projectDirectoryIdPrefix = 'user#'
 const defaultAllowedOrigins = [
   'http://localhost:5173',
@@ -1842,7 +1977,7 @@ app.use(
   '/api/*',
   cors({
     origin: (origin) => getAllowedOrigins().includes(origin) ? origin : undefined,
-    allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key', 'X-Correlation-Id'],
     exposeHeaders: ['X-Audit-Truncated', 'X-Audit-Next-Cursor'],
   }),
@@ -2391,6 +2526,65 @@ app.patch('/api/teams/:teamId/projects/:projectId/archive', async (c) => {
   }
 })
 
+/** 現在 user の project watcher state を返します。 */
+app.get('/api/projects/:projectId/watch', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const projectId = c.req.param('projectId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+  if (!projectId) {
+    return c.json({ message: 'Project ID is required.' }, 400)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    await requireProjectPermission(principal, projectId, 'viewer')
+    const watch = await collaboration.getWatcherState({
+      entityKey: createProjectCollaborationEntityKey(principal.directoryId, projectId),
+      memberKey: principal.userKey,
+    })
+    return c.json({ watch })
+  } catch (error) {
+    return toCollaborationErrorResponse(c, error)
+  }
+})
+
+for (const projectWatchMethod of ['PUT', 'DELETE'] as const) {
+  /** Project watcher の subscribe/unsubscribe endpoint です。 */
+  app.on(projectWatchMethod, '/api/projects/:projectId/watch', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    const projectId = c.req.param('projectId')
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+    if (!projectId) {
+      return c.json({ message: 'Project ID is required.' }, 400)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken)
+      requireWorkspaceBusinessWrite(principal)
+      await requireProjectPermission(principal, projectId, 'viewer')
+      const mutationInput = {
+        workspaceId: principal.directoryId,
+        entityKey: createProjectCollaborationEntityKey(principal.directoryId, projectId),
+        projectId,
+        memberKey: principal.userKey,
+        auditContext: createApiMutationContext(c, principal, { projectId, method: projectWatchMethod }),
+      }
+      const watch = projectWatchMethod === 'PUT'
+        ? await collaboration.subscribe(mutationInput)
+        : await collaboration.unsubscribe(mutationInput)
+      return c.json({ watch })
+    } catch (error) {
+      return toCollaborationErrorResponse(c, error)
+    }
+  })
+}
+
 /**
  * DynamoDB に保存されたプロジェクト別タスク一覧を返す endpoint です。
  *
@@ -2702,7 +2896,12 @@ app.get('/api/teams/:teamId/issues/:issueId/activity', async (c) => {
     let entityId = createTeamIssueAuditEntityId(teamId, issueId)
 
     try {
-      const detail = await teamIssues.getTeamIssueDetail(principal.directoryId, teamId, issueId)
+      const detail = await teamIssues.getTeamIssueDetail(
+        principal.directoryId,
+        teamId,
+        issueId,
+        { consistentIssueRead: true },
+      )
       requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
     } catch (error) {
       if (!isTeamIssueNotFoundError(error)) {
@@ -2765,12 +2964,34 @@ app.get('/api/teams/:teamId/issues/:issueId', async (c) => {
     const context = await requireTeamPermission(principal, teamId, 'viewer')
 
     try {
-      const detail = await teamIssues.getTeamIssueDetail(principal.directoryId, teamId, issueId)
+      const detail = await teamIssues.getTeamIssueDetail(
+        principal.directoryId,
+        teamId,
+        issueId,
+        { consistentIssueRead: true },
+      )
       requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
+      const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId)
+      const projectEntityKey = detail.issue.assignedProjectId
+        ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
+        : undefined
+      const collaborationPreview = await collaboration.getThread({
+        entityKey,
+        viewerMemberKey: principal.userKey,
+        projectEntityKey,
+        limit: 50,
+        includeScopeState: false,
+      })
 
       return c.json(
         await hydrateTeamIssueDetailResponse(
-          detail,
+          {
+            ...detail,
+            comments: mergeLegacyCompatibleComments(
+              detail.comments,
+              collaborationPreview.comments,
+            ),
+          },
         ),
       )
     } catch (error) {
@@ -2855,6 +3076,194 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
   }
 })
 
+/** 一度の legacy collaboration page で評価する旧 event の最大件数です。 */
+const LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT = 50
+/** Root page cursor と legacy event cursor を区別する接頭辞です。 */
+const LEGACY_COLLABORATION_CURSOR_PREFIX = 'legacy.'
+
+/**
+ * Team-owned Work Item の root comments、replies、watch、presence を page 取得します。
+ */
+app.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!teamId || !issueId) {
+    return c.json({ message: 'Team ID and issue ID are required.' }, 400)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+    const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId)
+    const projectEntityKey = detail.issue.assignedProjectId
+      ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
+      : undefined
+    const limitValue = c.req.query('limit')
+    const limit = limitValue === undefined ? undefined : Number(limitValue)
+    const requestedRootCommentId = c.req.query('rootCommentId')
+    const requestedCursor = c.req.query('cursor')
+    const isLegacyPage = !requestedRootCommentId &&
+      requestedCursor?.startsWith(LEGACY_COLLABORATION_CURSOR_PREFIX) === true
+    const legacyEventCursor = isLegacyPage
+      ? requestedCursor.slice(LEGACY_COLLABORATION_CURSOR_PREFIX.length)
+      : undefined
+    if (isLegacyPage && !legacyEventCursor) {
+      throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Legacy comment cursor is invalid.')
+    }
+    const canWrite = canWriteTeamIssue(principal, context, detail.issue.assignedProjectId)
+
+    if (requestedRootCommentId) {
+      const replies = await collaboration.getThread({
+        entityKey,
+        viewerMemberKey: principal.userKey,
+        projectEntityKey,
+        rootCommentId: readOptionalCommentId(requestedRootCommentId, 'Root comment ID'),
+        cursor: requestedCursor,
+        limit: limit === undefined ? 20 : Math.min(limit, 20),
+      })
+      return c.json({
+        // Store は最新順で page し、thread 内は古い順に描画できるよう反転して返す。
+        comments: [...replies.comments].reverse().map((comment) =>
+          toCollaborationCommentResponse(
+            comment,
+            principal,
+            context,
+            detail.issue,
+            replies.threadResolved === true,
+          )
+        ),
+        ...(replies.nextCursor ? { nextCursor: replies.nextCursor } : {}),
+        replyRootCommentId: requestedRootCommentId,
+        watch: replies.watch,
+        presence: replies.presence,
+        capabilities: {
+          canComment: canWrite,
+          canReact: canWrite,
+          canWatch: principal.workspaceRole !== 'guest',
+        },
+      })
+    }
+
+    const roots = await collaboration.getThread({
+      entityKey,
+      viewerMemberKey: principal.userKey,
+      projectEntityKey,
+      cursor: isLegacyPage ? undefined : requestedCursor,
+      limit: isLegacyPage ? 1 : limit === undefined ? 10 : Math.min(limit, 20),
+    })
+    const replyPages = await Promise.all(
+      (isLegacyPage ? [] : roots.comments).map((root) => collaboration.getThread({
+        entityKey,
+        viewerMemberKey: principal.userKey,
+        projectEntityKey,
+        rootCommentId: root.id,
+        limit: 5,
+        includeScopeState: false,
+      })),
+    )
+    const comments = (isLegacyPage ? [] : roots.comments).flatMap((root, index) => [
+      root,
+      ...[...(replyPages[index]?.comments ?? [])].reverse(),
+    ])
+    const storedCommentIds = new Set(comments.map((comment) => comment.id))
+    const legacyDetail = isLegacyPage || !roots.nextCursor
+      ? await teamIssues.getTeamIssueDetail(
+          principal.directoryId,
+          teamId,
+          issueId,
+          {
+            consistentIssueRead: true,
+            eventLimit: LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT,
+            newestEventsFirst: true,
+            eventType: 'commented',
+            eventCursor: legacyEventCursor,
+          },
+        )
+      : undefined
+    if (legacyDetail) {
+      requireAssignedProjectPermission(
+        principal,
+        context,
+        legacyDetail.issue.assignedProjectId,
+        'viewer',
+      )
+      if (legacyDetail.issue.assignedProjectId !== detail.issue.assignedProjectId) {
+        throw new CollaborationError(
+          409,
+          'CollaborationConflict',
+          'Work Item assignment changed while comments were loading.',
+        )
+      }
+    }
+    const legacyComments = (legacyDetail?.comments ?? [])
+      .filter((comment) => !storedCommentIds.has(comment.id)).map((comment) => ({
+          id: comment.id,
+          rootCommentId: comment.id,
+          authorMemberKey: comment.actorUserId,
+          bodyMarkdown: comment.body,
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: comment.createdAt,
+          updatedAt: comment.createdAt,
+          reactions: [],
+          source: 'legacy' as const,
+          capabilities: {
+            canEdit: false,
+            canDelete: false,
+            canResolve: false,
+            canReply: false,
+            canReact: false,
+          },
+        }))
+    const collaborationComments = [
+      ...comments.map((comment) =>
+        toCollaborationCommentResponse(
+          comment,
+          principal,
+          context,
+          detail.issue,
+          replyPages.some((page, index) =>
+            roots.comments[index]?.id === comment.rootCommentId && page.threadResolved === true
+          ),
+        ),
+      ),
+      ...legacyComments,
+    ]
+    const replyNextCursors = Object.fromEntries(
+      (isLegacyPage ? [] : roots.comments).flatMap((root, index) => {
+        const cursor = replyPages[index]?.nextCursor
+        return cursor ? [[root.id, cursor] as const] : []
+      }),
+    )
+    const nextCursor = !isLegacyPage && roots.nextCursor
+      ? roots.nextCursor
+      : legacyDetail?.nextEventCursor
+        ? `${LEGACY_COLLABORATION_CURSOR_PREFIX}${legacyDetail.nextEventCursor}`
+        : undefined
+
+    return c.json({
+      comments: collaborationComments,
+      ...(nextCursor ? { nextCursor } : {}),
+      ...(Object.keys(replyNextCursors).length > 0 ? { replyNextCursors } : {}),
+      watch: roots.watch,
+      presence: roots.presence,
+      capabilities: {
+        canComment: canWrite,
+        canReact: canWrite,
+        canWatch: principal.workspaceRole !== 'guest',
+      },
+    })
+  } catch (error) {
+    return toCollaborationErrorResponse(c, error)
+  }
+})
+
 /**
  * DynamoDB にチーム所有 Issue のコメントを作成する endpoint です。
  */
@@ -2874,25 +3283,440 @@ app.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     requireWorkspaceBusinessWrite(principal)
-    const context = await requireTeamPermission(principal, teamId, 'member')
-    const detail = await teamIssues.getTeamIssueDetail(principal.directoryId, teamId, issueId)
-    requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'member')
     const body = await readJson<CreateTeamIssueCommentRequestBody>(c.req) ?? {}
+    const modernContract = body.bodyMarkdown !== undefined
+    const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'member')
+    const mentionMemberKeys = readCommentMentionMemberKeys(body.mentionMemberKeys)
+    await requireValidCommentMentions(
+      principal.directoryId,
+      mentionMemberKeys,
+      context,
+      detail.issue.assignedProjectId,
+    )
+    const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId)
+    const projectEntityKey = detail.issue.assignedProjectId
+      ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
+      : undefined
+    const automaticWatcherCandidates = createTeamIssueAutomaticWatcherCandidates(detail.issue)
+    const comment = await collaboration.createComment({
+      workspaceId: principal.directoryId,
+      teamId,
+      issueId,
+      entityKey,
+      projectId: detail.issue.assignedProjectId,
+      projectEntityKey,
+      actorMemberKey: principal.userKey,
+      bodyMarkdown: readRequiredCommentBody(modernContract ? body.bodyMarkdown : body.body),
+      parentCommentId: readOptionalCommentId(body.parentCommentId, 'Parent comment ID'),
+      mentionMemberKeys,
+      automaticWatcherCandidates,
+      deepLink: `/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`,
+      auditContext: createApiMutationContext(c, principal, { teamId, issueId, ...body }),
+    })
+    const activity = {
+      id: comment.id,
+      type: 'commented' as const,
+      actorUserId: principal.userKey,
+      summary: body.parentCommentId ? 'Reply was added.' : 'Comment was added.',
+      createdAt: comment.createdAt,
+    }
 
-    return c.json(
-      await teamIssues.createTeamIssueComment(
-        principal.directoryId,
+    return modernContract
+      ? c.json({
+          comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
+          activity,
+        }, 201)
+      : c.json({
+          comment: {
+            id: comment.id,
+            actorUserId: comment.authorMemberKey,
+            body: comment.bodyMarkdown,
+            createdAt: comment.createdAt,
+          },
+          activity,
+        }, 201)
+  } catch (error) {
+    return toCollaborationErrorResponse(c, error)
+  }
+})
+
+/** 保存済み comment の Markdown 本文と mention を更新します。 */
+app.patch('/api/teams/:teamId/issues/:issueId/comments/:commentId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+  const commentId = c.req.param('commentId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const body = await readJson<UpdateTeamIssueCommentRequestBody>(c.req) ?? {}
+    const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+    const mentionMemberKeys = readCommentMentionMemberKeys(body.mentionMemberKeys)
+    await requireValidCommentMentions(
+      principal.directoryId,
+      mentionMemberKeys,
+      context,
+      detail.issue.assignedProjectId,
+    )
+    const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId)
+    const projectEntityKey = detail.issue.assignedProjectId
+      ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
+      : undefined
+    const automaticWatcherCandidates = createTeamIssueAutomaticWatcherCandidates(detail.issue)
+    const comment = await collaboration.updateComment({
+      workspaceId: principal.directoryId,
+      teamId,
+      issueId,
+      entityKey,
+      projectId: detail.issue.assignedProjectId,
+      projectEntityKey,
+      actorMemberKey: principal.userKey,
+      commentId,
+      bodyMarkdown: readRequiredCommentBody(body.bodyMarkdown),
+      mentionMemberKeys,
+      automaticWatcherCandidates,
+      expectedVersion: readCommentExpectedVersion(body.expectedVersion),
+      deepLink: `/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`,
+      auditContext: createApiMutationContext(c, principal, { teamId, issueId, commentId, ...body }),
+    })
+
+    return c.json({
+      comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
+    })
+  } catch (error) {
+    return toCollaborationErrorResponse(c, error)
+  }
+})
+
+/** 保存済み comment を soft delete します。 */
+app.delete('/api/teams/:teamId/issues/:issueId/comments/:commentId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+  const commentId = c.req.param('commentId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+    const body = await readJson<VersionedTeamIssueCommentRequestBody>(c.req) ?? {}
+    const canModerate = canManageTeamIssueCollaboration(
+      principal,
+      context,
+      detail.issue.assignedProjectId,
+    )
+    const comment = await collaboration.deleteComment({
+      workspaceId: principal.directoryId,
+      teamId,
+      issueId,
+      entityKey: createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId),
+      projectId: detail.issue.assignedProjectId,
+      projectEntityKey: detail.issue.assignedProjectId
+        ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
+        : undefined,
+      actorMemberKey: principal.userKey,
+      commentId,
+      expectedVersion: readCommentExpectedVersion(body.expectedVersion),
+      canModerate,
+      auditContext: createApiMutationContext(c, principal, { teamId, issueId, commentId, ...body }),
+    })
+
+    return c.json({
+      comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
+    })
+  } catch (error) {
+    return toCollaborationErrorResponse(c, error)
+  }
+})
+
+for (const resolutionAction of ['resolve', 'reopen'] as const) {
+  /** Root comment thread の resolve/reopen endpoint です。 */
+  app.post(`/api/teams/:teamId/issues/:issueId/comments/:commentId/${resolutionAction}`, async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    const teamId = c.req.param('teamId')
+    const issueId = c.req.param('issueId')
+    const commentId = c.req.param('commentId')
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken)
+      requireWorkspaceBusinessWrite(principal)
+      const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+      const body = await readJson<VersionedTeamIssueCommentRequestBody>(c.req) ?? {}
+      const isAssignee = detail.issue.assigneeUserId === principal.userKey
+      const canModerate = canManageTeamIssueCollaboration(
+        principal,
+        context,
+        detail.issue.assignedProjectId,
+      ) || isAssignee
+      const mutationInput = {
+        workspaceId: principal.directoryId,
         teamId,
         issueId,
-        body,
-        principal.userKey,
-        createApiMutationContext(c, principal, { teamId, issueId, ...body }),
-      ),
+        entityKey: createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId),
+        projectId: detail.issue.assignedProjectId,
+        projectEntityKey: detail.issue.assignedProjectId
+          ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
+          : undefined,
+        assigneeMemberKey: detail.issue.assigneeUserId,
+        actorMemberKey: principal.userKey,
+        commentId,
+        expectedVersion: readCommentExpectedVersion(body.expectedVersion),
+        canModerate,
+        auditContext: createApiMutationContext(c, principal, {
+          teamId,
+          issueId,
+          commentId,
+          action: resolutionAction,
+          ...body,
+        }),
+      }
+      const comment = resolutionAction === 'resolve'
+        ? await collaboration.resolveComment(mutationInput)
+        : await collaboration.reopenComment(mutationInput)
+
+      return c.json({
+        comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
+      })
+    } catch (error) {
+      return toCollaborationErrorResponse(c, error)
+    }
+  })
+}
+
+for (const reactionMethod of ['PUT', 'DELETE'] as const) {
+  /** Emoji reaction の idempotent add/remove endpoint です。 */
+  app.on(reactionMethod, '/api/teams/:teamId/issues/:issueId/comments/:commentId/reactions/:emoji', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    const teamId = c.req.param('teamId')
+    const issueId = c.req.param('issueId')
+    const commentId = c.req.param('commentId')
+    const emoji = c.req.param('emoji')
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken)
+      requireWorkspaceBusinessWrite(principal)
+      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'member')
+      const mutationInput = {
+        workspaceId: principal.directoryId,
+        teamId,
+        issueId,
+        entityKey: createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId),
+        projectId: detail.issue.assignedProjectId,
+        projectEntityKey: detail.issue.assignedProjectId
+          ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
+          : undefined,
+        actorMemberKey: principal.userKey,
+        commentId,
+        emoji,
+        auditContext: createApiMutationContext(c, principal, {
+          teamId,
+          issueId,
+          commentId,
+          emoji,
+          method: reactionMethod,
+        }),
+      }
+
+      if (reactionMethod === 'PUT') {
+        await collaboration.addReaction(mutationInput)
+      } else {
+        await collaboration.removeReaction(mutationInput)
+      }
+
+      return c.json({})
+    } catch (error) {
+      return toCollaborationErrorResponse(c, error)
+    }
+  })
+}
+
+/** 現在 user の Work Item watcher state を返します。 */
+app.get('/api/teams/:teamId/issues/:issueId/watch', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const { detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+    const watch = await collaboration.getWatcherState({
+      entityKey: createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId),
+      memberKey: principal.userKey,
+      projectEntityKey: detail.issue.assignedProjectId
+        ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
+        : undefined,
+    })
+    return c.json({ watch })
+  } catch (error) {
+    return toCollaborationErrorResponse(c, error)
+  }
+})
+
+for (const watchMethod of ['PUT', 'DELETE'] as const) {
+  /** Work Item watcher の subscribe/unsubscribe endpoint です。 */
+  app.on(watchMethod, '/api/teams/:teamId/issues/:issueId/watch', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    const teamId = c.req.param('teamId')
+    const issueId = c.req.param('issueId')
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken)
+      requireWorkspaceBusinessWrite(principal)
+      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+      const mutationInput = {
+        workspaceId: principal.directoryId,
+        teamId,
+        issueId,
+        entityKey: createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId),
+        projectId: detail.issue.assignedProjectId,
+        projectEntityKey: detail.issue.assignedProjectId
+          ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
+          : undefined,
+        memberKey: principal.userKey,
+        auditContext: createApiMutationContext(c, principal, {
+          teamId,
+          issueId,
+          method: watchMethod,
+        }),
+      }
+      const watch = watchMethod === 'PUT'
+        ? await collaboration.subscribe(mutationInput)
+        : await collaboration.unsubscribe(mutationInput)
+      return c.json({ watch })
+    } catch (error) {
+      return toCollaborationErrorResponse(c, error)
+    }
+  })
+}
+
+/** Work Item presence/typing heartbeat を更新します。 */
+app.put('/api/teams/:teamId/issues/:issueId/presence', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+    const body = await readJson<TeamIssuePresenceRequestBody>(c.req) ?? {}
+    const typing = readPresenceTyping(body.typing)
+
+    if (typing && !canWriteTeamIssue(principal, context, detail.issue.assignedProjectId)) {
+      throw new WorkspaceAccessError(403, 'WorkspaceRoleDenied', 'Comment permission is required.')
+    }
+
+    await collaboration.heartbeatPresence({
+      entityKey: createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId),
+      memberKey: principal.userKey,
+      clientId: readPresenceClientId(body.clientId),
+      typing,
+    })
+    return c.json({})
+  } catch (error) {
+    return toCollaborationErrorResponse(c, error)
+  }
+})
+
+/** Browser tab の Work Item presence を削除します。 */
+app.delete('/api/teams/:teamId/issues/:issueId/presence/:clientId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+    await collaboration.leavePresence({
+      entityKey: createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId),
+      memberKey: principal.userKey,
+      clientId: readPresenceClientId(c.req.param('clientId')),
+    })
+    return c.json({})
+  } catch (error) {
+    return toCollaborationErrorResponse(c, error)
+  }
+})
+
+/**
+ * 認証・認可済み Work Item scope 用の one-time Realtime ticket を発行します。
+ */
+app.post('/api/realtime/tickets', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const body = await readJson<CreateRealtimeTicketRequestBody>(c.req) ?? {}
+    const teamId = readRequiredString(body.teamId, 'Team ID is required.')
+    const issueId = readRequiredString(body.issueId, 'Issue ID is required.')
+    const context = await requireTeamPermission(principal, teamId, 'viewer')
+    const detail = await teamIssues.getTeamIssueDetail(principal.directoryId, teamId, issueId)
+    requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
+
+    return c.json(
+      await realtimeTickets.createTicket({
+        workspaceId: principal.directoryId,
+        memberKey: principal.userKey,
+        teamId,
+        issueId,
+        projectId: detail.issue.assignedProjectId,
+        systemAdmin: principal.isSystemAdmin,
+        canWrite: canWriteTeamIssue(principal, context, detail.issue.assignedProjectId),
+        scopeKey: createWorkItemCollaborationEntityKey(
+          principal.directoryId,
+          teamId,
+          issueId,
+        ),
+      }),
       201,
     )
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)
+    }
+
+    if (error instanceof RealtimeTicketError) {
+      const status = error.status === 400 || error.status === 403 || error.status === 503
+        ? error.status
+        : 503
+
+      return c.json({ code: error.code, message: error.message }, status)
     }
 
     return toProjectDataErrorResponse(c, error)
@@ -3568,6 +4392,30 @@ async function requireWorkspaceMemberHasNoManagedProjects(
   }
 }
 
+function toCollaborationErrorResponse(c: Context, error: unknown) {
+  if (error instanceof CognitoServiceError) {
+    return toCognitoDirectoryErrorResponse(c, error)
+  }
+
+  if (!(error instanceof CollaborationError)) {
+    return toProjectDataErrorResponse(c, error)
+  }
+
+  if (error.status >= 500) {
+    console.error(error)
+  }
+
+  const status = error.status === 400 ||
+    error.status === 403 ||
+    error.status === 404 ||
+    error.status === 409 ||
+    error.status === 503
+    ? error.status
+    : 502
+
+  return c.json({ code: error.code, message: error.message }, status)
+}
+
 function toProjectDataErrorResponse(c: Context, error: unknown) {
   if (error instanceof WorkspaceAccessError) {
     return toWorkspaceAccessErrorResponse(c, error)
@@ -3578,7 +4426,10 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'Project data is unavailable.' }, 502)
   }
 
-  if (error.code === 'InvalidProjectWrite' || error.code === 'InvalidAuditQuery') {
+  if (error.code === 'InvalidProjectWrite' ||
+    error.code === 'InvalidAuditQuery' ||
+    error.code === 'InvalidCommentMention' ||
+    error.code === 'InvalidTeamIssueCursor') {
     return c.json({ message: error.message }, 400)
   }
 
@@ -3730,6 +4581,33 @@ async function requireTeamPermission(
   )
 }
 
+async function loadAuthorizedTeamIssue(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  issueId: string,
+  minimumRole: ProjectRole,
+  detailReadOptions: TeamIssueDetailReadOptions = {
+    consistentIssueRead: true,
+    eventLimit: 0,
+  },
+) {
+  const context = await requireTeamPermission(principal, teamId, minimumRole)
+  const detail = await teamIssues.getTeamIssueDetail(
+    principal.directoryId,
+    teamId,
+    issueId,
+    detailReadOptions,
+  )
+  requireAssignedProjectPermission(
+    principal,
+    context,
+    detail.issue.assignedProjectId,
+    minimumRole,
+  )
+
+  return { context, detail }
+}
+
 function projectAccessAllows(access: ProjectAccessEntry, minimumRole: ProjectRole) {
   return access.role !== undefined && projectRoleAllows(access.role, minimumRole)
 }
@@ -3768,6 +4646,166 @@ function canAccessAssignedProject(
   const projectAccess = context.projectAccesses?.find((access) => access.projectId === assignedProjectId)
 
   return projectAccess !== undefined && projectAccessAllows(projectAccess, minimumRole)
+}
+
+function canWriteTeamIssue(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  assignedProjectId: string | undefined,
+) {
+  if (principal.workspaceRole === 'guest') {
+    return false
+  }
+
+  if (principal.isSystemAdmin) {
+    return true
+  }
+
+  if (assignedProjectId) {
+    const access = context.projectAccesses?.find((entry) => entry.projectId === assignedProjectId)
+    return access !== undefined && projectAccessAllows(access, 'member')
+  }
+
+  return context.projectAccesses?.some((access) => projectAccessAllows(access, 'member')) ?? false
+}
+
+function canModerateCollaboration(principal: WorkspacePrincipal) {
+  return principal.isSystemAdmin ||
+    principal.workspaceRole === 'owner' ||
+    principal.workspaceRole === 'admin'
+}
+
+function canManageTeamIssueCollaboration(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  assignedProjectId: string | undefined,
+) {
+  if (canModerateCollaboration(principal)) {
+    return true
+  }
+
+  if (!assignedProjectId) {
+    return context.projectAccesses?.some((access) => projectAccessAllows(access, 'manager')) ?? false
+  }
+
+  const access = context.projectAccesses?.find((entry) => entry.projectId === assignedProjectId)
+  return access !== undefined && projectAccessAllows(access, 'manager')
+}
+
+function createTeamIssueAutomaticWatcherCandidates(
+  issue: TeamIssueResponseItem,
+): CollaborationAutomaticWatcherCandidate[] {
+  return [
+    ...(issue.creatorMemberKey
+      ? [{ memberKey: issue.creatorMemberKey, reason: 'creator' as const }]
+      : []),
+    { memberKey: issue.assigneeUserId, reason: 'assignee' as const },
+  ]
+}
+
+function toCollaborationCommentResponse(
+  comment: CollaborationComment,
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  issue: TeamIssueResponseItem,
+  threadResolved = false,
+) {
+  const canWrite = canWriteTeamIssue(principal, context, issue.assignedProjectId)
+  const canManage = canManageTeamIssueCollaboration(principal, context, issue.assignedProjectId)
+  const isAuthor = comment.authorMemberKey === principal.userKey
+  const isRoot = !comment.parentCommentId && comment.rootCommentId === comment.id
+  const authorCanMutate = principal.workspaceRole !== 'guest' && isAuthor
+  const canResolve = isRoot && !comment.deletedAt && (
+    authorCanMutate ||
+    canManage ||
+    (principal.workspaceRole !== 'guest' && issue.assigneeUserId === principal.userKey)
+  )
+
+  return {
+    id: comment.id,
+    source: 'collaboration' as const,
+    rootCommentId: comment.rootCommentId,
+    ...(comment.parentCommentId ? { parentCommentId: comment.parentCommentId } : {}),
+    authorMemberKey: comment.authorMemberKey,
+    bodyMarkdown: comment.bodyMarkdown,
+    version: comment.version,
+    mentionMemberKeys: comment.mentionMemberKeys,
+    createdAt: comment.createdAt,
+    updatedAt: comment.updatedAt,
+    ...(comment.editedAt ? { editedAt: comment.editedAt } : {}),
+    ...(comment.deletedAt ? { deletedAt: comment.deletedAt } : {}),
+    ...(comment.resolvedAt ? { resolvedAt: comment.resolvedAt } : {}),
+    ...(comment.resolvedByMemberKey
+      ? { resolvedByMemberKey: comment.resolvedByMemberKey }
+      : {}),
+    reactions: comment.reactions,
+    capabilities: {
+      canEdit: authorCanMutate && !comment.deletedAt,
+      canDelete: (authorCanMutate || canManage) && !comment.deletedAt,
+      canResolve,
+      canReply: canWrite && !comment.deletedAt && !comment.resolvedAt && !threadResolved,
+      canReact: canWrite && !comment.deletedAt,
+    },
+  }
+}
+
+async function requireValidCommentMentions(
+  workspaceId: string,
+  memberKeys: string[],
+  context: TeamPermissionContext,
+  assignedProjectId: string | undefined,
+) {
+  const activeTeamProjectIds = new Set(context.team.projects.map((project) => project.id))
+
+  await Promise.all(
+    memberKeys.map(async (memberKey) => {
+      const member = await workspaceAccess.getActiveMember(workspaceId, memberKey)
+
+      if (!member) {
+        throw new ProjectDataError(
+          400,
+          'InvalidCommentMention',
+          `Mentioned Workspace member "${memberKey}" is not active.`,
+        )
+      }
+
+      if (assignedProjectId) {
+        const access = await projectDirectory.getProjectAccess(
+          workspaceId,
+          assignedProjectId,
+          memberKey,
+        )
+
+        if (
+          (!access || !projectAccessAllows(access, 'viewer')) &&
+          !(await cognito.isSystemAdmin(memberKey))
+        ) {
+          throw new ProjectDataError(
+            400,
+            'InvalidCommentMention',
+            `Mentioned Workspace member "${memberKey}" cannot view the assigned project.`,
+          )
+        }
+
+        return
+      }
+
+      const canViewOwningTeam = (await projectDirectory.getProjectAccessList(workspaceId, memberKey))
+        .some((access) =>
+          activeTeamProjectIds.has(access.projectId) && projectAccessAllows(access, 'viewer'),
+        )
+
+      if (!canViewOwningTeam && !(await cognito.isSystemAdmin(memberKey))) {
+        throw new ProjectDataError(
+          400,
+          'InvalidCommentMention',
+          `Mentioned Workspace member "${memberKey}" cannot view the owning team.`,
+        )
+      }
+    }),
+  )
+
+  return memberKeys
 }
 
 function filterAccessibleTeamIssues(
@@ -3917,6 +4955,30 @@ async function hydrateTeamIssueDetailResponse(response: TeamIssueDetailResponse)
     ...response,
     issue: hydrateTeamIssue(response.issue, profiles),
   } satisfies TeamIssueDetailResponse
+}
+
+function mergeLegacyCompatibleComments(
+  legacyComments: TeamIssueCommentResponseItem[],
+  collaborationComments: CollaborationComment[],
+) {
+  const commentsById = new Map(legacyComments.map((comment) => [comment.id, comment]))
+
+  for (const comment of collaborationComments) {
+    if (comment.deletedAt) {
+      commentsById.delete(comment.id)
+      continue
+    }
+    commentsById.set(comment.id, {
+      id: comment.id,
+      actorUserId: comment.authorMemberKey,
+      body: comment.bodyMarkdown,
+      createdAt: comment.createdAt,
+    })
+  }
+
+  return [...commentsById.values()].sort((left, right) =>
+    left.createdAt.localeCompare(right.createdAt)
+  )
 }
 
 async function hydrateCreateTeamIssueResponse(response: CreateTeamIssueResponse) {
@@ -4333,6 +5395,37 @@ export class AwsCognitoClient {
     }
   }
 
+  /** Cognito の現在 group membership から system administrator 判定を返します。 */
+  async isSystemAdmin(userId: string) {
+    const { userPoolId } = this.readRequiredConfiguration()
+    const normalizedUserId = normalizeCognitoUserId(userId)
+    const configuredGroups = new Set(getSystemAdminGroups())
+    let nextToken: string | undefined
+
+    try {
+      do {
+        const response = await this.client.send(new AdminListGroupsForUserCommand({
+          UserPoolId: userPoolId,
+          Username: normalizedUserId,
+          ...(nextToken ? { NextToken: nextToken } : {}),
+        }))
+        if ((response.Groups ?? []).some((group) =>
+          typeof group.GroupName === 'string' && configuredGroups.has(group.GroupName)
+        )) {
+          return true
+        }
+        nextToken = response.NextToken
+      } while (nextToken)
+
+      return false
+    } catch (error) {
+      if (isCognitoUserNotFoundError(error)) {
+        return false
+      }
+      throw toCognitoSdkError(error)
+    }
+  }
+
   /**
    * 本番 Cognito client に必須の user pool / app client 設定を検証します。
    */
@@ -4486,6 +5579,39 @@ class FlociCognitoClient {
     }
 
     return profile
+  }
+
+  /** Cognito の現在 group membership から system administrator 判定を返します。 */
+  async isSystemAdmin(userId: string) {
+    const normalizedUserId = normalizeCognitoUserId(userId)
+    const configuredGroups = new Set(getSystemAdminGroups())
+    let nextToken: string | undefined
+
+    try {
+      do {
+        const response = await this.request<AdminListGroupsForUserResponse>(
+          'AdminListGroupsForUser',
+          {
+            UserPoolId: await this.resolveUserPoolId(),
+            Username: normalizedUserId,
+            ...(nextToken ? { NextToken: nextToken } : {}),
+          },
+        )
+        if ((response.Groups ?? []).some((group) =>
+          typeof group.GroupName === 'string' && configuredGroups.has(group.GroupName)
+        )) {
+          return true
+        }
+        nextToken = response.NextToken
+      } while (nextToken)
+
+      return false
+    } catch (error) {
+      if (isCognitoUserNotFoundError(error)) {
+        return false
+      }
+      throw error
+    }
   }
 
   /**
@@ -5292,12 +6418,25 @@ export class DynamoDbTeamIssuesClient {
   /**
    * DynamoDB から Issue 詳細、コメント、活動履歴を取得します。
    */
-  async getTeamIssueDetail(directoryId: string, teamId: string, issueId: string) {
+  async getTeamIssueDetail(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    options: TeamIssueDetailReadOptions = {},
+  ) {
     await this.ensureLocalTables()
 
     try {
-      const issue = await this.getRequiredTeamIssueItem(directoryId, teamId, issueId)
-      const events = await this.queryTeamIssueEventItems(directoryId, teamId, issueId)
+      const issue = await this.getRequiredTeamIssueItem(
+        directoryId,
+        teamId,
+        issueId,
+        options.consistentIssueRead === true,
+      )
+      const eventPage = options.eventLimit === 0
+        ? { items: [] as TeamIssueEventItem[] }
+        : await this.queryTeamIssueEventItems(directoryId, teamId, issueId, options)
+      const events = eventPage.items
 
       return {
         issue: toTeamIssueResponseItem(issue),
@@ -5305,6 +6444,7 @@ export class DynamoDbTeamIssuesClient {
           .filter((event) => event.eventType === 'commented' && event.body)
           .map(toTeamIssueCommentResponseItem),
         activity: events.map(toTeamIssueActivityResponseItem),
+        ...(eventPage.nextCursor ? { nextEventCursor: eventPage.nextCursor } : {}),
       } satisfies TeamIssueDetailResponse
     } catch (error) {
       if (error instanceof ProjectDataError) {
@@ -5352,6 +6492,7 @@ export class DynamoDbTeamIssuesClient {
         sortOrder: (currentIssues.issues.length + 1) * 10,
         title,
         assigneeUserId,
+        creatorMemberKey: actorUserId,
         status,
         dueDate,
         priority,
@@ -5673,7 +6814,7 @@ export class DynamoDbTeamIssuesClient {
       },
       action: 'commented',
       occurredAt: createdAt,
-      changes: createAuditFieldChanges(undefined, { body }),
+      changes: createAuditFieldChanges(undefined, { body }, ['body'], ['body']),
       metadata: { adapter: 'team-issue', teamId, commentId: item.eventId },
     })
 
@@ -5832,28 +6973,52 @@ export class DynamoDbTeamIssuesClient {
     return items.map(toTeamIssueItem)
   }
 
-  private async queryTeamIssueEventItems(directoryId: string, teamId: string, issueId: string) {
+  private async queryTeamIssueEventItems(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    options: TeamIssueDetailReadOptions = {},
+  ) {
     const items: unknown[] = []
-    let exclusiveStartKey: Record<string, unknown> | undefined
+    const eventLimit = options.eventLimit === undefined
+      ? undefined
+      : Math.max(1, Math.floor(options.eventLimit))
+    const directoryTeamIssueId = createDirectoryTeamIssueId(directoryId, teamId, issueId)
+    let exclusiveStartKey = decodeTeamIssueEventCursor(
+      options.eventCursor,
+      directoryTeamIssueId,
+    )
 
     do {
+      const remaining = eventLimit === undefined ? undefined : eventLimit - items.length
       const response = await this.documentClient.send(
         new QueryCommand({
           TableName: this.eventTableName,
           KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
           ExpressionAttributeValues: {
-            ':directoryTeamIssueId': createDirectoryTeamIssueId(directoryId, teamId, issueId),
+            ':directoryTeamIssueId': directoryTeamIssueId,
+            ...(options.eventType ? { ':eventType': options.eventType } : {}),
           },
+          ...(options.eventType ? { FilterExpression: 'eventType = :eventType' } : {}),
           ExclusiveStartKey: exclusiveStartKey,
-          ScanIndexForward: true,
+          ScanIndexForward: options.newestEventsFirst !== true,
+          ...(remaining === undefined ? {} : { Limit: remaining }),
         }),
       )
 
       items.push(...(response.Items ?? []))
       exclusiveStartKey = response.LastEvaluatedKey
+      if (eventLimit !== undefined) {
+        break
+      }
     } while (exclusiveStartKey)
 
-    return items.map(toTeamIssueEventItem)
+    return {
+      items: items.map(toTeamIssueEventItem),
+      ...(exclusiveStartKey
+        ? { nextCursor: encodeTeamIssueEventCursor(directoryTeamIssueId, exclusiveStartKey) }
+        : {}),
+    }
   }
 
   private async putIssueEvent(input: Omit<TeamIssueEventItem, 'directoryTeamIssueId' | 'eventId'>) {
@@ -7744,6 +8909,10 @@ function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     issue.description = item.description
   }
 
+  if (item.creatorMemberKey) {
+    issue.creatorMemberKey = item.creatorMemberKey
+  }
+
   return issue
 }
 
@@ -7989,6 +9158,7 @@ function isTeamIssueItem(value: unknown): value is TeamIssueItem {
     typeof value.title === 'string' &&
     (value.description === undefined || typeof value.description === 'string') &&
     typeof value.assigneeUserId === 'string' &&
+    (value.creatorMemberKey === undefined || typeof value.creatorMemberKey === 'string') &&
     isProjectTaskStatus(value.status) &&
     typeof value.dueDate === 'string' &&
     isProjectTaskPriority(value.priority) &&
@@ -8313,6 +9483,70 @@ function readRequiredCommentBody(value: unknown) {
   return value.trim()
 }
 
+function readOptionalCommentId(value: unknown, label: string) {
+  if (value === undefined || value === null || value === '') {
+    return undefined
+  }
+
+  if (typeof value !== 'string' || !value.trim() || value.length > 512) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', `${label} is invalid.`)
+  }
+
+  return value.trim()
+}
+
+function readCommentMentionMemberKeys(value: unknown) {
+  if (value === undefined) {
+    return []
+  }
+
+  if (!Array.isArray(value) || value.length > 20) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Issue comment mentions must contain at most 20 Workspace members.',
+    )
+  }
+
+  const memberKeys = value.map((memberKey) => {
+    if (typeof memberKey !== 'string') {
+      throw new ProjectDataError(400, 'InvalidProjectWrite', 'Issue comment mention is invalid.')
+    }
+
+    return normalizeProjectMemberKey(memberKey)
+  })
+
+  return [...new Set(memberKeys)]
+}
+
+function readCommentExpectedVersion(value: unknown) {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'A positive expectedVersion is required.',
+    )
+  }
+
+  return value as number
+}
+
+function readPresenceClientId(value: unknown) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9._:-]{8,128}$/.test(value.trim())) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Presence client ID is invalid.')
+  }
+
+  return value.trim()
+}
+
+function readPresenceTyping(value: unknown) {
+  if (typeof value !== 'boolean') {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Presence typing state is invalid.')
+  }
+
+  return value
+}
+
 function readTaskAssigneeUserId(input: CreateProjectTaskRequestBody) {
   const value = input.assigneeUserId ?? input.assignee
 
@@ -8589,6 +9823,62 @@ function createDirectoryTeamIssueId(directoryId: string, teamId: string, issueId
   return `${createDirectoryTeamId(directoryId, teamId)}#issue#${issueId}`
 }
 
+/** Team Issue event の DynamoDB key を scope-bound opaque cursor に変換します。 */
+function encodeTeamIssueEventCursor(
+  directoryTeamIssueId: string,
+  key: Record<string, unknown>,
+) {
+  const eventId = typeof key.eventId === 'string' ? key.eventId : undefined
+  if (!eventId) {
+    throw new ProjectDataError(
+      503,
+      'InvalidTeamIssue',
+      'Team Issue event page did not include a valid continuation key.',
+    )
+  }
+
+  const cursor: TeamIssueEventCursor = {
+    version: 1,
+    directoryTeamIssueId,
+    eventId,
+  }
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+/** Team Issue event cursor を検証し DynamoDB key に戻します。 */
+function decodeTeamIssueEventCursor(
+  value: string | undefined,
+  directoryTeamIssueId: string,
+) {
+  if (!value) {
+    return undefined
+  }
+
+  try {
+    const cursor = JSON.parse(
+      Buffer.from(value, 'base64url').toString('utf8'),
+    ) as Partial<TeamIssueEventCursor>
+    if (
+      cursor.version !== 1 ||
+      cursor.directoryTeamIssueId !== directoryTeamIssueId ||
+      typeof cursor.eventId !== 'string' ||
+      !cursor.eventId
+    ) {
+      throw new TypeError('Invalid cursor payload.')
+    }
+    return {
+      directoryTeamIssueId,
+      eventId: cursor.eventId,
+    }
+  } catch {
+    throw new ProjectDataError(
+      400,
+      'InvalidTeamIssueCursor',
+      'Team Issue event cursor is invalid.',
+    )
+  }
+}
+
 /**
  * Team-local Issue ID を Workspace 内で一意な audit Work Item ID に変換します。
  */
@@ -8724,6 +10014,8 @@ teamIssues = new DynamoDbTeamIssuesClient()
 projectDirectory = new DynamoDbProjectDirectoryClient()
 auditEvents = createAuditEventsClient()
 workspaceAccess = new DynamoDbWorkspaceAccessClient()
+realtimeTickets = new DynamoDbRealtimeTicketsClient()
+collaboration = new DynamoDbCollaborationClient()
 
 /**
  * Server test で外部 service client を差し替えます。
@@ -8736,6 +10028,8 @@ export function configureApiClientsForTest(clients: {
   projectDirectory?: ProjectDirectoryClient
   auditEvents?: AuditEventsClient
   workspaceAccess?: WorkspaceAccessClient
+  realtimeTickets?: RealtimeTicketsClient
+  collaboration?: CollaborationClient
 }) {
   cognito = clients.cognito ?? cognito
   dashboardSummary = clients.dashboardSummary ?? dashboardSummary
@@ -8744,6 +10038,8 @@ export function configureApiClientsForTest(clients: {
   projectDirectory = clients.projectDirectory ?? projectDirectory
   auditEvents = clients.auditEvents ?? auditEvents
   workspaceAccess = clients.workspaceAccess ?? workspaceAccess
+  realtimeTickets = clients.realtimeTickets ?? realtimeTickets
+  collaboration = clients.collaboration ?? collaboration
 }
 
 /**
@@ -8757,6 +10053,8 @@ export function resetApiClientsForTest() {
   projectDirectory = new DynamoDbProjectDirectoryClient()
   auditEvents = createAuditEventsClient()
   workspaceAccess = new DynamoDbWorkspaceAccessClient()
+  realtimeTickets = new DynamoDbRealtimeTicketsClient()
+  collaboration = new DynamoDbCollaborationClient()
 }
 
 /**

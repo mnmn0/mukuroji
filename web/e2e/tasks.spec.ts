@@ -699,7 +699,7 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({
       json: {
         issue,
-        comments: issueCommentsByIssue[issueId] ?? [
+        comments: issueCommentsByIssue[createIssueCollaborationKey(teamId, issueId)] ?? [
           {
             id: 'comment-1',
             actorUserId: 'demo@example.com',
@@ -707,7 +707,7 @@ async function mockAuthenticatedTaskPage(
             createdAt: '2026-06-08T01:00:00.000Z',
           },
         ],
-        activity: issueActivityByIssue[issueId] ?? [
+        activity: issueActivityByIssue[createIssueCollaborationKey(teamId, issueId)] ?? [
           {
             id: 'activity-1',
             type: 'created',
@@ -720,16 +720,100 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/collaboration(?:\?.*)?$/, async (route) => {
+    const pathSegments = new URL(route.request().url()).pathname.split('/')
+    const teamId = decodeURIComponent(pathSegments[3] ?? '')
+    const issueId = decodeURIComponent(pathSegments[5] ?? '')
+    const collaborationKey = createIssueCollaborationKey(teamId, issueId)
+
+    await route.fulfill({
+      json: {
+        comments: issueCommentsByIssue[collaborationKey] ?? [
+          {
+            id: 'comment-1',
+            rootCommentId: 'comment-1',
+            authorMemberKey: 'demo@example.com',
+            bodyMarkdown: '背景を確認します。',
+            version: 1,
+            createdAt: '2026-06-08T01:00:00.000Z',
+            updatedAt: '2026-06-08T01:00:00.000Z',
+            mentionMemberKeys: [],
+            reactions: [],
+            capabilities: { canEdit: true, canDelete: true, canResolve: true },
+          },
+        ],
+        watch: {
+          subscribed: false,
+          explicit: false,
+          automatic: false,
+          reasons: [],
+          watcherCount: 0,
+        },
+        presence: [],
+        capabilities: { canComment: true, canReact: true, canWatch: true },
+      },
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/activity(?:\?.*)?$/, async (route) => {
+    const pathSegments = new URL(route.request().url()).pathname.split('/')
+    const teamId = decodeURIComponent(pathSegments[3] ?? '')
+    const issueId = decodeURIComponent(pathSegments[5] ?? '')
+    const collaborationKey = createIssueCollaborationKey(teamId, issueId)
+
+    await route.fulfill({
+      json: {
+        events: (issueActivityByIssue[collaborationKey] ?? []).map((activity) => ({
+          eventId: activity.id,
+          eventType: activity.type === 'commented' ? 'comment.created' : `work-item.${activity.type}`,
+          occurredAt: activity.createdAt,
+          actorUserId: activity.actorUserId,
+          summary: activity.summary,
+        })),
+      },
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/watch$/, async (route) => {
+    await route.fulfill({
+      json: {
+        watch: {
+          subscribed: route.request().method() === 'PUT',
+          explicit: route.request().method() === 'PUT',
+          automatic: false,
+          reasons: [],
+          watcherCount: route.request().method() === 'PUT' ? 1 : 0,
+        },
+      },
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/presence(?:\/[^/?]+)?$/, async (route) => {
+    await route.fulfill({ json: {} })
+  })
+
+  await page.route('**/api/realtime/tickets', async (route) => {
+    await route.fulfill({ status: 503, json: { message: 'Use polling fallback.' } })
+  })
+
   await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/comments$/, async (route) => {
     requestCounts.issueComments += 1
     const pathSegments = new URL(route.request().url()).pathname.split('/')
+    const teamId = decodeURIComponent(pathSegments[3] ?? '')
     const issueId = decodeURIComponent(pathSegments[5] ?? '')
-    const body = route.request().postDataJSON() as { body?: string }
+    const collaborationKey = createIssueCollaborationKey(teamId, issueId)
+    const body = route.request().postDataJSON() as { body?: string; bodyMarkdown?: string }
     const comment = {
       id: `comment-${requestCounts.issueComments + 1}`,
-      actorUserId: 'demo@example.com',
-      body: body.body ?? '追加コメント',
+      rootCommentId: `comment-${requestCounts.issueComments + 1}`,
+      authorMemberKey: 'demo@example.com',
+      bodyMarkdown: body.bodyMarkdown ?? body.body ?? '追加コメント',
+      version: 1,
       createdAt: '2026-06-08T02:00:00.000Z',
+      updatedAt: '2026-06-08T02:00:00.000Z',
+      mentionMemberKeys: [],
+      reactions: [],
+      capabilities: { canEdit: true, canDelete: true, canResolve: true },
     } satisfies TeamIssueComment
     const activity = {
       id: `activity-${requestCounts.issueComments + 1}`,
@@ -739,8 +823,8 @@ async function mockAuthenticatedTaskPage(
       createdAt: '2026-06-08T02:00:00.000Z',
     } satisfies TeamIssueActivity
 
-    issueCommentsByIssue[issueId] = [...(issueCommentsByIssue[issueId] ?? []), comment]
-    issueActivityByIssue[issueId] = [...(issueActivityByIssue[issueId] ?? []), activity]
+    issueCommentsByIssue[collaborationKey] = [...(issueCommentsByIssue[collaborationKey] ?? []), comment]
+    issueActivityByIssue[collaborationKey] = [...(issueActivityByIssue[collaborationKey] ?? []), activity]
 
     await route.fulfill({
       status: 201,
@@ -1094,6 +1178,13 @@ function createIssueId(title: string) {
     .replace(/^-+|-+$/g, '') || 'new-issue'
 }
 
+/**
+ * 同じ issue ID を持つ別 team の collaboration state を分離します。
+ */
+function createIssueCollaborationKey(teamId: string, issueId: string) {
+  return `${teamId}\u0000${issueId}`
+}
+
 function findTeamIssue(
   teamIssuesByTeam: Record<string, TeamIssue[]>,
   taskResponsesByProject: Record<string, ProjectTask[]>,
@@ -1276,7 +1367,7 @@ test.describe('authenticated task page', () => {
     const requestCounts = getMockRequestCounts(page)
 
     await expect(page.getByTestId('task-detail-pane')).toContainText('新しいランディングページのワイヤーフレーム作成')
-    await expect(page.getByText('背景を確認します。')).toBeVisible()
+    await expect(page.getByText('旧タスク由来または詳細 API に接続されていない行にはコメントを追加できません。')).toBeVisible()
 
     await page.getByRole('button', { name: '担当者' }).click()
     await page.getByRole('menuitemradio', { name: '佐藤 花子' }).click()
@@ -1497,7 +1588,8 @@ test.describe('authenticated task page', () => {
     await page.getByTestId('issue-row-wireframe').click()
     await expect(page.getByText('旧タスク由来の Issue は参照専用です。')).toBeVisible()
     await expect(page.getByRole('button', { name: '変更を保存' })).toBeDisabled()
-    await expect(page.getByRole('button', { name: 'コメントを追加' })).toBeDisabled()
+    await expect(page.getByText('旧タスク由来の Issue にはコメントを追加できません。')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'コメントを追加' })).toHaveCount(0)
     expect(requestCounts.issueUpdates).toBe(0)
 
     await page.getByRole('button', { name: '新規 Issue' }).click()
@@ -1522,7 +1614,7 @@ test.describe('authenticated task page', () => {
     await page.getByRole('button', { name: 'コメントを追加' }).click()
 
     await expect(page.getByText('プロジェクト側で着手します。')).toBeVisible()
-    await expect(page.getByText('Comment was added.')).toBeVisible()
+    await expect(page.getByText('Demo User がコメントしました。')).toBeVisible()
     expect(requestCounts.issueComments).toBe(1)
 
     await page.goto('/projects/refero/issues?teamId=core-team')
