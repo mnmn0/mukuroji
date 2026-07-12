@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import useSWR from 'swr'
 import {
+  canManageWorkspaceStructure,
+  canMutateWorkspaceContent,
   getCurrentUser,
   type DashboardSummary,
 } from '../auth/api'
@@ -57,6 +59,7 @@ import {
   type TaskStatus,
   updateProjectTaskStatus,
 } from '../tasks/api'
+import { WorkspaceAccessPanelContainer } from '../workspace/WorkspaceAccessPanel'
 
 /**
  * サイドバーまたはチーム配下から表示できるワークスペース画面です。
@@ -233,6 +236,10 @@ type TeamMemberRow = {
  * WorkspaceScreen に渡す描画済みのアプリ状態です。
  */
 type WorkspaceScreenProps = {
+  /**
+   * Workspace access API の Authorization header に使う access token です。
+   */
+  accessToken?: string
   /**
    * 表示 locale です。
    */
@@ -524,6 +531,8 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     [user],
   )
   const userInitial = userLabel.trim().charAt(0).toUpperCase() || 'M'
+  const canManageStructure = canManageWorkspaceStructure(user)
+  const canMutateContent = canMutateWorkspaceContent(user)
   const isLoading =
     !session ||
     isCurrentUserLoading ||
@@ -661,6 +670,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
 
   return (
     <WorkspaceScreen
+      accessToken={accessToken}
       activeTeamId={params.teamId}
       fontSizePreference={fontSizePreference}
       isLoading={isLoading}
@@ -675,11 +685,11 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       onSelectTeamView={(teamId, viewId) =>
         navigate(createTeamViewPath(teamId, viewId))
       }
-      onCreateProject={handleCreateProject}
-      onCreateTeam={handleCreateTeam}
-      onArchiveProject={handleArchiveProject}
-      onArchiveTeam={handleArchiveTeam}
-      onMoveTaskStatus={handleMoveTaskStatus}
+      onCreateProject={canManageStructure ? handleCreateProject : undefined}
+      onCreateTeam={canManageStructure ? handleCreateTeam : undefined}
+      onArchiveProject={canManageStructure ? handleArchiveProject : undefined}
+      onArchiveTeam={canManageStructure ? handleArchiveTeam : undefined}
+      onMoveTaskStatus={canMutateContent ? handleMoveTaskStatus : undefined}
       onOpenTask={(task) => {
         if (!task.projectId || !task.teamId) {
           return
@@ -707,6 +717,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
  * 認証済みワークスペース UI を描画する Storybook 兼用 screen です。
  */
 export function WorkspaceScreen({
+  accessToken,
   locale,
   view,
   userLabel,
@@ -842,8 +853,10 @@ export function WorkspaceScreen({
         ) : (
           <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
             <WorkspaceBody
+              accessToken={accessToken}
               activeTeam={activeTeam}
               fontSizePreference={fontSizePreference}
+              locale={locale}
               summary={summary}
               t={t}
               taskMoveErrorMessage={taskMoveErrorMessage}
@@ -867,8 +880,10 @@ export function WorkspaceScreen({
 }
 
 function WorkspaceBody({
+  accessToken,
   activeTeam,
   fontSizePreference,
+  locale,
   summary,
   t,
   taskMoveErrorMessage,
@@ -884,8 +899,10 @@ function WorkspaceBody({
   userIdentityAliases,
   view,
 }: {
+  accessToken?: string
   activeTeam?: ProjectDirectoryTeam
   fontSizePreference: FontSizePreference
+  locale: Locale
   summary: DashboardSummary
   t: (key: MessageKey) => string
   taskMoveErrorMessage?: string
@@ -950,7 +967,9 @@ function WorkspaceBody({
       {view === 'help' ? <HelpView t={t} /> : null}
       {view === 'settings' ? (
         <SettingsView
+          accessToken={accessToken}
           fontSizePreference={fontSizePreference}
+          locale={locale}
           t={t}
           onFontSizePreferenceChange={onFontSizePreferenceChange}
         />
@@ -1769,11 +1788,15 @@ const fontSizePreferenceLabelKeys: Record<FontSizePreference, MessageKey> = {
 }
 
 function SettingsView({
+  accessToken,
   fontSizePreference,
+  locale,
   onFontSizePreferenceChange,
   t,
 }: {
+  accessToken?: string
   fontSizePreference: FontSizePreference
+  locale: Locale
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
   t: (key: MessageKey) => string
 }) {
@@ -1831,6 +1854,10 @@ function SettingsView({
         ]}
         t={t}
       />
+
+      {accessToken ? (
+        <WorkspaceAccessPanelContainer accessToken={accessToken} locale={locale} />
+      ) : null}
     </div>
   )
 }

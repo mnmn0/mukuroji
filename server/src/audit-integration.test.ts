@@ -325,6 +325,7 @@ test('workspace audit requires system admin and forwards pagination filters', as
   const queries: Array<Record<string, unknown>> = []
   configureApiClientsForTest({
     cognito: createCognitoClient(),
+    workspaceAccess: createWorkspaceAccessClient(),
     auditEvents: {
       async query(input) {
         queries.push({ ...input })
@@ -409,6 +410,7 @@ test('issue activity authorizes the parent and forwards its pagination cursor', 
   } as unknown as NonNullable<Parameters<typeof configureApiClientsForTest>[0]['teamIssues']>
   configureApiClientsForTest({
     cognito: createCognitoClient(),
+    workspaceAccess: createWorkspaceAccessClient(),
     projectDirectory,
     teamIssues,
     auditEvents: {
@@ -591,6 +593,28 @@ function createCognitoClient() {
       }
     },
   }
+}
+
+/**
+ * app integration test で active Workspace membership を返す client stub を作成します。
+ */
+function createWorkspaceAccessClient() {
+  return {
+    async getActiveMember(_workspaceId: string, memberKey: string) {
+      return {
+        id: memberKey,
+        memberKey,
+        email: memberKey,
+        role: 'member' as const,
+        status: 'active' as const,
+        version: 1,
+        createdAt: occurredAt,
+        updatedAt: occurredAt,
+      }
+    },
+  } as unknown as NonNullable<
+    Parameters<typeof configureApiClientsForTest>[0]['workspaceAccess']
+  >
 }
 
 /**

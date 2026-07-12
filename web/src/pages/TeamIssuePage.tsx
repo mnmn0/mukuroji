@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import useSWR from 'swr'
-import { getCurrentUser } from '../auth/api'
+import {
+  canManageWorkspaceStructure,
+  canMutateWorkspaceContent,
+  getCurrentUser,
+} from '../auth/api'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import { createMutationRequestRunner } from '../api/mutationHeaders'
 import {
@@ -37,6 +41,7 @@ import {
   createProjectDirectoryTeam,
   getProjectDirectory,
   getProjectMembers,
+  isActiveProjectAssignmentCandidate,
   type CreateProjectDirectoryProjectInput,
   type CreateProjectDirectoryTeamInput,
   type ProjectDirectoryTeam,
@@ -243,6 +248,8 @@ export function TeamIssuePage() {
       .trim()
       .charAt(0)
       .toUpperCase() || 'J'
+  const canManageStructure = canManageWorkspaceStructure(user)
+  const canMutateContent = canMutateWorkspaceContent(user)
   const isLoading =
     !session ||
     isCurrentUserLoading ||
@@ -380,17 +387,17 @@ export function TeamIssuePage() {
       issues={issues}
       isLoading={isLoading}
       locale={locale}
-      onArchiveProject={handleArchiveProject}
-      onArchiveTeam={handleArchiveTeam}
-      onCreateComment={handleCreateComment}
-      onCreateIssue={handleCreateIssue}
-      onCreateProject={handleCreateProject}
-      onCreateTeam={handleCreateTeam}
+      onArchiveProject={canManageStructure ? handleArchiveProject : undefined}
+      onArchiveTeam={canManageStructure ? handleArchiveTeam : undefined}
+      onCreateComment={canMutateContent ? handleCreateComment : undefined}
+      onCreateIssue={canMutateContent ? handleCreateIssue : undefined}
+      onCreateProject={canManageStructure ? handleCreateProject : undefined}
+      onCreateTeam={canManageStructure ? handleCreateTeam : undefined}
       onSelectIssue={setSelectedIssueId}
       onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
       onSelectProject={(projectId, nextTeamId) => navigate(createProjectIssuesPath(projectId, nextTeamId))}
       onSelectTeamView={(nextTeamId, viewId) => navigate(createTeamViewPath(nextTeamId, viewId))}
-      onUpdateIssue={handleUpdateIssue}
+      onUpdateIssue={canMutateContent ? handleUpdateIssue : undefined}
       selectedIssueId={resolvedSelectedIssueId}
       teamId={teamId}
       teamName={activeTeam?.name}
@@ -539,14 +546,16 @@ export function TeamIssueScreen({
               </div>
             </div>
             <div className="flex flex-none items-center gap-3">
-              <button
-                aria-expanded={isCreateOpen}
-                className="workbench-button-primary inline-flex h-10 items-center gap-2 px-4"
-                onClick={() => setIsCreateOpen(!isCreateOpen)}
-                type="button"
-              >
-                + {t('issues.action.new')}
-              </button>
+              {onCreateIssue ? (
+                <button
+                  aria-expanded={isCreateOpen}
+                  className="workbench-button-primary inline-flex h-10 items-center gap-2 px-4"
+                  onClick={() => setIsCreateOpen(!isCreateOpen)}
+                  type="button"
+                >
+                  + {t('issues.action.new')}
+                </button>
+              ) : null}
               <div className="grid h-10 w-10 place-items-center rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-sm font-semibold text-[var(--workbench-primary)]">
                 {userInitial}
               </div>
@@ -562,7 +571,7 @@ export function TeamIssueScreen({
           <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
             <div className="grid min-h-full grid-cols-[minmax(0,1fr)_minmax(360px,440px)] gap-0 max-[1080px]:grid-cols-1">
               <section className="min-w-0 px-[clamp(20px,3vw,34px)] py-5">
-                {isCreateOpen ? (
+                {isCreateOpen && onCreateIssue ? (
                   <CreateIssuePanel
                     assigneeOptions={assigneeOptions}
                     errorMessage={createErrorMessage}
@@ -626,11 +635,7 @@ export function TeamIssueScreen({
                 comments={comments}
                 detailErrorMessage={detailErrorMessage ?? detailErrorMessageLocal}
                 issue={selectedIssue}
-                onCreateComment={async (issueId, body) => {
-                  if (!onCreateComment) {
-                    return
-                  }
-
+                onCreateComment={onCreateComment ? async (issueId, body) => {
                   setDetailErrorMessageLocal(undefined)
 
                   try {
@@ -638,12 +643,8 @@ export function TeamIssueScreen({
                   } catch (error) {
                     setDetailErrorMessageLocal(error instanceof Error ? error.message : t('issues.error.comment'))
                   }
-                }}
-                onUpdateIssue={async (issueId, input) => {
-                  if (!onUpdateIssue) {
-                    return
-                  }
-
+                } : undefined}
+                onUpdateIssue={onUpdateIssue ? async (issueId, input) => {
                   setDetailErrorMessageLocal(undefined)
 
                   try {
@@ -651,7 +652,7 @@ export function TeamIssueScreen({
                   } catch (error) {
                     setDetailErrorMessageLocal(error instanceof Error ? error.message : t('issues.error.update'))
                   }
-                }}
+                } : undefined}
                 projects={activeTeam?.projects ?? []}
                 t={t}
               />
@@ -1002,6 +1003,8 @@ function IssueDetailPane({
   }
 
   const isLegacyIssue = issue.source === 'legacy'
+  const isIssueReadOnly = isLegacyIssue || !onUpdateIssue
+  const isCommentReadOnly = isLegacyIssue || !onCreateComment
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === issue.assigneeUserId)
 
   return (
@@ -1012,7 +1015,7 @@ function IssueDetailPane({
         onSubmit={(event) => {
           event.preventDefault()
 
-          if (isLegacyIssue) {
+          if (isIssueReadOnly) {
             return
           }
 
@@ -1044,7 +1047,7 @@ function IssueDetailPane({
           </div>
           <IssuePriorityBadge priority={issue.priority} t={t} />
         </div>
-        <fieldset className="contents" disabled={isLegacyIssue}>
+        <fieldset className="contents" disabled={isIssueReadOnly}>
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('issues.column.title')}
             <input className="workbench-input w-full min-w-0 px-3 py-2 text-lg font-semibold disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={resolveIssueTitle(issue, t)} name="title" required />
@@ -1096,10 +1099,14 @@ function IssueDetailPane({
             </label>
           </div>
         </fieldset>
-        <button className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300" disabled={isLegacyIssue} type="submit">
+        <button className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300" disabled={isIssueReadOnly} type="submit">
           {t('issues.detail.save')}
         </button>
-        {isLegacyIssue ? <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('issues.detail.readOnlyLegacy')}</p> : null}
+        {isIssueReadOnly ? (
+          <p className="text-sm font-medium text-[var(--workbench-muted)]">
+            {t(isLegacyIssue ? 'issues.detail.readOnlyLegacy' : 'issues.detail.readOnlyPermission')}
+          </p>
+        ) : null}
         {detailErrorMessage ? <p className="text-sm font-bold text-red-600">{detailErrorMessage}</p> : null}
       </form>
       <form
@@ -1107,7 +1114,7 @@ function IssueDetailPane({
         onSubmit={(event) => {
           event.preventDefault()
 
-          if (isLegacyIssue) {
+          if (isCommentReadOnly) {
             return
           }
 
@@ -1125,11 +1132,16 @@ function IssueDetailPane({
       >
         <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
           {t('issues.comment.title')}
-          <textarea className="workbench-input min-h-20 w-full min-w-0 px-3 py-2 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" disabled={isLegacyIssue} name="body" required />
+          <textarea className="workbench-input min-h-20 w-full min-w-0 px-3 py-2 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" disabled={isCommentReadOnly} name="body" required />
         </label>
-        <button className="workbench-button-secondary h-9 justify-self-start px-4 disabled:border-slate-200 disabled:text-slate-400" disabled={isLegacyIssue} type="submit">
+        <button className="workbench-button-secondary h-9 justify-self-start px-4 disabled:border-slate-200 disabled:text-slate-400" disabled={isCommentReadOnly} type="submit">
           {t('issues.comment.submit')}
         </button>
+        {isCommentReadOnly ? (
+          <p className="text-sm font-medium text-[var(--workbench-muted)]">
+            {t(isLegacyIssue ? 'issues.comment.readOnlyLegacy' : 'issues.comment.readOnlyPermission')}
+          </p>
+        ) : null}
       </form>
       <section className="mt-7 border-t border-[var(--workbench-border)] pt-6">
         <h2 className="workbench-eyebrow text-[var(--workbench-muted)]">{t('issues.comment.title')}</h2>
@@ -1174,7 +1186,7 @@ async function loadTeamProjectMembers(accessToken: string, projectIds: string[])
     }
   }
 
-  return Array.from(membersById.values())
+  return Array.from(membersById.values()).filter(isActiveProjectAssignmentCandidate)
 }
 
 function formatLocalDateInputValue(date = new Date()) {

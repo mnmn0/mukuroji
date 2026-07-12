@@ -127,6 +127,7 @@ const defaultArgs = {
   onCreateProject: async () => undefined,
   onCreateTeam: async () => undefined,
   onFontSizePreferenceChange: () => undefined,
+  onMoveTaskStatus: async () => undefined,
   onOpenTask: () => undefined,
   userIdentityAliases: ['demo@example.com'],
   userInitial: 'D',

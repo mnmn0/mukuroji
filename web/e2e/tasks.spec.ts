@@ -5,6 +5,7 @@ import type { TeamIssue, TeamIssueActivity, TeamIssueComment } from '../src/issu
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import type { ProjectDirectoryTeam, ProjectMember, ProjectMemberRole, ProjectUser } from '../src/projects/api'
 import type { ProjectTask } from '../src/tasks/api'
+import type { WorkspaceAccess } from '../src/workspace/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 
 const authSession = {
@@ -151,6 +152,7 @@ async function mockAuthenticatedTaskPage(
         name: 'Demo User',
         role: 'manager',
         updatedAt: '2026-06-08T00:00:00.000Z',
+        workspaceStatus: 'active',
       },
       {
         id: 'sato@example.com',
@@ -158,6 +160,16 @@ async function mockAuthenticatedTaskPage(
         name: '佐藤 花子',
         role: 'member',
         updatedAt: '2026-06-08T00:00:00.000Z',
+        workspaceStatus: 'active',
+      },
+      {
+        id: 'inactive@example.com',
+        email: 'inactive@example.com',
+        enabled: false,
+        name: 'Inactive User',
+        role: 'member',
+        updatedAt: '2026-07-11T00:00:00.000Z',
+        workspaceStatus: 'deactivated',
       },
     ],
     'product-roadmap': [
@@ -167,6 +179,7 @@ async function mockAuthenticatedTaskPage(
         name: 'Demo User',
         role: 'manager',
         updatedAt: '2026-06-08T00:00:00.000Z',
+        workspaceStatus: 'active',
       },
       {
         id: 'viewer2@example.com',
@@ -174,6 +187,7 @@ async function mockAuthenticatedTaskPage(
         name: 'Viewer Two',
         role: 'viewer',
         updatedAt: '2026-06-08T00:00:00.000Z',
+        workspaceStatus: 'active',
       },
     ],
   }
@@ -185,6 +199,7 @@ async function mockAuthenticatedTaskPage(
       name: 'Demo User',
       enabled: true,
       status: 'CONFIRMED',
+      workspaceStatus: 'active',
     },
     {
       id: 'sato@example.com',
@@ -193,6 +208,7 @@ async function mockAuthenticatedTaskPage(
       name: '佐藤 花子',
       enabled: true,
       status: 'CONFIRMED',
+      workspaceStatus: 'active',
     },
     {
       id: 'viewer2@example.com',
@@ -201,8 +217,88 @@ async function mockAuthenticatedTaskPage(
       name: 'Viewer Two',
       enabled: true,
       status: 'CONFIRMED',
+      workspaceStatus: 'active',
+    },
+    {
+      id: 'inactive@example.com',
+      username: 'inactive@example.com',
+      email: 'inactive@example.com',
+      name: 'Inactive User',
+      enabled: false,
+      status: 'CONFIRMED',
+      workspaceStatus: 'deactivated',
     },
   ]
+  const workspaceAccess = {
+    capabilities: {
+      canInvite: true,
+      canManageAdmins: true,
+      canManageMembers: true,
+    },
+    currentMember: {
+      createdAt: '2026-07-01T00:00:00.000Z',
+      email: 'demo@example.com',
+      id: 'workspace-member-demo',
+      memberKey: 'demo@example.com',
+      name: 'Demo User',
+      role: 'owner',
+      status: 'active',
+      updatedAt: '2026-07-11T00:00:00.000Z',
+      version: 4,
+    },
+    invitations: [
+      {
+        createdAt: '2026-07-11T01:00:00.000Z',
+        deliveryStatus: 'failed',
+        email: 'failed@example.com',
+        expiresAt: '2026-07-18T01:00:00.000Z',
+        failureMessage: 'Delivery failed.',
+        id: 'invitation-failed',
+        identityOwnership: 'workspace-created',
+        role: 'member',
+        status: 'delivery-failed',
+        updatedAt: '2026-07-11T01:01:00.000Z',
+        version: 2,
+      },
+      {
+        createdAt: '2026-07-01T01:00:00.000Z',
+        deliveryStatus: 'sent',
+        email: 'expired@example.com',
+        expiresAt: '2026-07-08T01:00:00.000Z',
+        id: 'invitation-expired',
+        identityOwnership: 'ambiguous',
+        lastSentAt: '2026-07-01T01:01:00.000Z',
+        role: 'guest',
+        status: 'expired',
+        updatedAt: '2026-07-08T01:00:00.000Z',
+        version: 3,
+      },
+    ],
+    members: [
+      {
+        createdAt: '2026-07-01T00:00:00.000Z',
+        email: 'demo@example.com',
+        id: 'workspace-member-demo',
+        memberKey: 'demo@example.com',
+        name: 'Demo User',
+        role: 'owner',
+        status: 'active',
+        updatedAt: '2026-07-11T00:00:00.000Z',
+        version: 4,
+      },
+      {
+        createdAt: '2026-07-02T00:00:00.000Z',
+        email: 'sato@example.com',
+        id: 'workspace-member-sato',
+        memberKey: 'sato@example.com',
+        name: '佐藤 花子',
+        role: 'member',
+        status: 'active',
+        updatedAt: '2026-07-10T00:00:00.000Z',
+        version: 2,
+      },
+    ],
+  } satisfies WorkspaceAccess
 
   mockRequestCountsByPage.set(page, requestCounts)
 
@@ -221,8 +317,15 @@ async function mockAuthenticatedTaskPage(
         },
         groups: ['mukuroji-system-admins'],
         isSystemAdmin: true,
+        workspaceMemberStatus: 'active',
+        workspaceRole: 'owner',
       },
     })
+  })
+
+  await page.route('**/api/workspace/access', async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    await route.fulfill({ json: workspaceAccess })
   })
 
   await page.route('**/api/teams/projects**', async (route) => {
@@ -286,6 +389,7 @@ async function mockAuthenticatedTaskPage(
         name: 'Demo User',
         role: 'manager',
         updatedAt: '2026-06-08T00:00:00.000Z',
+        workspaceStatus: 'active',
       },
     ]
 
@@ -1478,6 +1582,8 @@ test.describe('authenticated task page', () => {
           },
           groups: [],
           isSystemAdmin: false,
+          workspaceMemberStatus: 'active',
+          workspaceRole: 'member',
         },
       })
     })
@@ -1842,6 +1948,95 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('my-tasks-kanban')).toBeVisible()
   })
 
+  test('設定画面で Workspace member と invitation lifecycle を確認付きで管理できる', async ({ page }) => {
+    let invitationCreates = 0
+    let invitationActions = 0
+    let memberUpdateAttempts = 0
+
+    await page.route('**/api/workspace/invitations', async (route) => {
+      invitationCreates += 1
+      expect(route.request().method()).toBe('POST')
+      expect(route.request().postDataJSON()).toEqual({
+        email: 'new.member@example.com',
+        name: 'New Member',
+        role: 'member',
+      })
+      await route.fulfill({
+        status: 201,
+        json: {
+          invitation: {
+            createdAt: '2026-07-11T04:00:00.000Z',
+            deliveryStatus: 'pending',
+            email: 'new.member@example.com',
+            expiresAt: '2026-07-18T04:00:00.000Z',
+            id: 'invitation-new',
+            identityOwnership: 'workspace-created',
+            name: 'New Member',
+            role: 'member',
+            status: 'pending',
+            updatedAt: '2026-07-11T04:00:00.000Z',
+            version: 1,
+          },
+        },
+      })
+    })
+    await page.route(/.*\/api\/workspace\/invitations\/[^/]+\/(?:resend|revoke|reinvite)$/, async (route) => {
+      invitationActions += 1
+      expect(route.request().method()).toBe('POST')
+      await route.fulfill({ json: { invitation: {} } })
+    })
+    await page.route(/.*\/api\/workspace\/members\/[^/]+$/, async (route) => {
+      memberUpdateAttempts += 1
+      expect(route.request().method()).toBe('PATCH')
+      expect(route.request().postDataJSON()).toEqual({
+        expectedVersion: 2,
+        role: 'guest',
+      })
+
+      if (memberUpdateAttempts === 1) {
+        await route.fulfill({ status: 409, json: { message: 'workspace.member.version_conflict' } })
+        return
+      }
+
+      await route.fulfill({ json: { member: {} } })
+    })
+
+    await page.goto('/settings')
+
+    await expect(page.getByTestId('workspace-access-panel')).toBeVisible()
+    await expect(page.getByTestId('workspace-invitation-invitation-failed')).toContainText('配信失敗')
+    await expect(page.getByTestId('workspace-invitation-invitation-expired')).toContainText('期限切れ')
+    await expect(page.getByTestId('workspace-member-demo-example-com').getByRole('button', { name: '利用停止' })).toBeDisabled()
+
+    const inviteForm = page.getByTestId('workspace-invite-form')
+    await inviteForm.locator('input[name="email"]').fill('new.member@example.com')
+    await inviteForm.locator('input[name="name"]').fill('New Member')
+    await inviteForm.getByRole('button', { name: '招待を作成' }).click()
+    await expect.poll(() => invitationCreates).toBe(1)
+
+    await page.getByTestId('workspace-member-role-sato-example-com').selectOption('guest')
+    const roleDialog = page.getByRole('dialog', { name: 'Workspace ロールを変更しますか？' })
+    await expect(roleDialog).toBeVisible()
+    await roleDialog.getByRole('button', { name: 'ロールを変更' }).click()
+    await expect(roleDialog.getByRole('alert')).toContainText('別の管理者が先に更新しました')
+    await roleDialog.getByRole('button', { name: 'ロールを変更' }).click()
+    await expect(roleDialog).toHaveCount(0)
+    expect(memberUpdateAttempts).toBe(2)
+
+    const failedInvitation = page.getByTestId('workspace-invitation-invitation-failed')
+    await failedInvitation.getByRole('button', { name: '再送' }).click()
+    const resendDialog = page.getByRole('dialog', { name: '招待を再送しますか？' })
+    await resendDialog.getByRole('button', { name: '再送' }).click()
+    await expect(resendDialog).toHaveCount(0)
+
+    const expiredInvitation = page.getByTestId('workspace-invitation-invitation-expired')
+    await expiredInvitation.getByRole('button', { name: '再招待' }).click()
+    const reinviteDialog = page.getByRole('dialog', { name: '新しい招待を作成しますか？' })
+    await reinviteDialog.getByRole('button', { name: '再招待' }).click()
+    await expect(reinviteDialog).toHaveCount(0)
+    expect(invitationActions).toBe(2)
+  })
+
   test('タスク画面から新規タスクを登録できる', async ({ page }) => {
     await page.goto('/projects/refero/tasks')
     const requestCounts = getMockRequestCounts(page)
@@ -1906,6 +2101,20 @@ test.describe('authenticated task page', () => {
     await expect(page.getByText('担当者候補を取得できませんでした')).toBeVisible()
     await expect(page.getByText('担当者にできるプロジェクトメンバーがいません。')).toHaveCount(0)
     await expect(page.getByRole('button', { name: '登録', exact: true })).toBeDisabled()
+  })
+
+  test('利用停止中の Workspace member を project と担当者の追加候補から除外する', async ({ page }) => {
+    await page.goto('/projects/refero/tasks?teamId=core-team')
+    await page.getByRole('button', { name: '新規タスク' }).click()
+
+    const assigneeSelect = page.getByTestId('create-task-form').locator('select[name="assigneeUserId"]')
+
+    await expect(assigneeSelect.locator('option[value="inactive@example.com"]')).toHaveCount(0)
+
+    await page.getByRole('tab', { name: /権限/ }).click()
+    await expect(page.getByTestId('permission-member-row-inactive-example-com')).toBeVisible()
+    await page.getByTestId('permissions-user-search').fill('inactive')
+    await expect(page.getByTestId('permissions-user-select').locator('option[value="inactive@example.com"]')).toHaveCount(0)
   })
 
   test('タスク API 失敗時にエラーを表示する', async ({ page }) => {
