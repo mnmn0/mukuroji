@@ -1013,6 +1013,15 @@ export class CdkStack extends cdk.Stack {
           actions: ['dynamodb:TransactWriteItems'],
           resources: [workItemsTable.tableArn],
         }),
+        new iam.PolicyStatement({
+          actions: ['dynamodb:PutItem'],
+          resources: [workItemsTable.tableArn],
+          conditions: {
+            'ForAnyValue:StringEquals': {
+              'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+            },
+          },
+        }),
       ]),
       installLatestAwsSdk: false,
     });

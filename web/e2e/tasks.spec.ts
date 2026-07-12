@@ -2065,6 +2065,52 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-detail-pane').locator('textarea[name="description"]')).toHaveValue('core team detail')
   })
 
+  test('未割り当て Work Item を My Tasks カードと受信箱の行から Team 詳細へ開ける', async ({ page }) => {
+    const issueId = 'unassigned-work-item'
+    const issueDescription = '未割り当て Work Item の詳細です。'
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            assignedProjectId: undefined,
+            assigneeEmail: 'demo@example.com',
+            assigneeName: 'Demo User',
+            assigneeUserId: 'demo@example.com',
+            description: issueDescription,
+            id: issueId,
+            priority: 'high',
+            status: 'review',
+            title: '未割り当て Work Item',
+          }),
+        ],
+      },
+    })
+
+    await page.goto('/my-tasks')
+    const card = page.getByTestId(`my-tasks-card-unassigned-${issueId}`)
+
+    await expect(card).toBeVisible()
+    await card.getByTestId(`my-tasks-card-unassigned-${issueId}-open`).click()
+    await expect(page).toHaveURL(`/teams/core-team/issues?issueId=${issueId}`)
+    await expect(page.locator('aside textarea[name="description"]')).toHaveValue(issueDescription)
+    await expect(page.getByTestId('issue-collaboration-panel')).toContainText('背景を確認します。')
+
+    await page.getByTestId('issue-row-wireframe').click()
+    await expect(page).toHaveURL('/teams/core-team/issues?issueId=wireframe')
+    await page.goBack()
+    await expect(page).toHaveURL(`/teams/core-team/issues?issueId=${issueId}`)
+    await expect(page.locator('aside textarea[name="description"]')).toHaveValue(issueDescription)
+
+    await page.goto('/inbox')
+    const inboxRow = page.getByTestId(`inbox-task-core-team-unassigned-${issueId}`)
+
+    await expect(inboxRow).toBeEnabled()
+    await inboxRow.click()
+    await expect(page).toHaveURL(`/teams/core-team/issues?issueId=${issueId}`)
+    await expect(page.locator('aside textarea[name="description"]')).toHaveValue(issueDescription)
+  })
+
   test('チーム概要では選択チームのプロジェクトタスクだけを集計する', async ({ page }) => {
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
       teamIssuesByTeam: {

@@ -684,8 +684,33 @@ test('canonical Work Item seed replaces legacy task writes and preserves demo da
   expect(workItemPayload.match(/workItemId/g)).toHaveLength(10);
   expect(workItemPayload.match(/migrationSourceKey/g)).toHaveLength(10);
   expect(workItemPayload.match(/migrationSource/g)).toHaveLength(20);
-  expect(JSON.stringify(canonicalWorkItemSeedPolicyEntry?.[1])).toContain('TeamIssuesTable189D851D');
-  expect(JSON.stringify(canonicalWorkItemSeedPolicyEntry?.[1])).not.toContain('ProjectTasksTableE21F6637');
+  const canonicalWorkItemSeedPolicy = canonicalWorkItemSeedPolicyEntry?.[1] as {
+    Properties?: {
+      PolicyDocument?: {
+        Statement?: unknown[];
+      };
+    };
+  } | undefined;
+  expect(canonicalWorkItemSeedPolicy?.Properties?.PolicyDocument?.Statement).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        Action: 'dynamodb:TransactWriteItems',
+        Effect: 'Allow',
+        Resource: { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+      }),
+      expect.objectContaining({
+        Action: 'dynamodb:PutItem',
+        Condition: {
+          'ForAnyValue:StringEquals': {
+            'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+          },
+        },
+        Effect: 'Allow',
+        Resource: { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+      }),
+    ]),
+  );
+  expect(JSON.stringify(canonicalWorkItemSeedPolicy)).not.toContain('ProjectTasksTableE21F6637');
   expect(directoryPayload).toContain('WorkspaceDirectoryId');
   expect(workItemPayload).not.toContain('user#demo@example.com');
   expect(directoryPayload).not.toContain('user#demo@example.com');

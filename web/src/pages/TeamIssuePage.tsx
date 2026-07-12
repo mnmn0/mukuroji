@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router'
+import { useNavigate, useParams, useSearchParams } from 'react-router'
 import useSWR from 'swr'
 import {
   canManageWorkspaceStructure,
@@ -56,6 +56,7 @@ import {
 } from '../projects/api'
 import {
   createProjectIssuesPath,
+  createTeamIssuesPath,
   createTeamViewPath,
   workspaceNavPaths,
 } from '../routes/paths'
@@ -196,11 +197,12 @@ type TeamIssueScreenProps = {
 export function TeamIssuePage() {
   const navigate = useNavigate()
   const params = useParams()
+  const [searchParams] = useSearchParams()
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   const teamId = params.teamId ?? 'core-team'
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
-  const [selectedIssueId, setSelectedIssueId] = useState<string | undefined>()
+  const requestedIssueId = searchParams.get('issueId')?.trim() || undefined
   const t = useMemo(() => createTranslator(locale), [locale])
   const accessToken = session?.accessToken
   const currentUserKey = accessToken ? (['current-user', accessToken] as const) : null
@@ -239,8 +241,8 @@ export function TeamIssuePage() {
     isLoading: isIssuesLoading,
     mutate: mutateIssues,
   } = useSWR(issueKey, ([, token, currentTeamId]) => getTeamIssues(currentTeamId, token), apiSWRConfig)
-  const resolvedSelectedIssueId = selectedIssueId && issues.some((issue) => issue.id === selectedIssueId)
-    ? selectedIssueId
+  const resolvedSelectedIssueId = requestedIssueId && issues.some((issue) => issue.id === requestedIssueId)
+    ? requestedIssueId
     : issues[0]?.id
   const resolvedSelectedIssue = issues.find((issue) => issue.id === resolvedSelectedIssueId)
   const collaboration = useIssueCollaboration({
@@ -321,7 +323,7 @@ export function TeamIssuePage() {
       JSON.stringify(input),
       (context) => createTeamIssue(teamId, accessToken, input, context),
     )
-    setSelectedIssueId(issue.id)
+    navigate(createTeamIssuesPath(teamId, issue.id))
     await mutateIssues()
   }
 
@@ -435,7 +437,7 @@ export function TeamIssuePage() {
       onCreateIssue={canMutateContent ? handleCreateIssue : undefined}
       onCreateProject={canManageStructure ? handleCreateProject : undefined}
       onCreateTeam={canManageStructure ? handleCreateTeam : undefined}
-      onSelectIssue={setSelectedIssueId}
+      onSelectIssue={(issueId) => navigate(createTeamIssuesPath(teamId, issueId))}
       onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
       onSelectProject={(projectId, nextTeamId) => navigate(createProjectIssuesPath(projectId, nextTeamId))}
       onSelectTeamView={(nextTeamId, viewId) => navigate(createTeamViewPath(nextTeamId, viewId))}

@@ -50,6 +50,7 @@ import {
 } from '../projects/api'
 import {
   createProjectIssuesPath,
+  createTeamIssuesPath,
   createTeamViewPath,
   workspaceNavPaths,
 } from '../routes/paths'
@@ -723,11 +724,15 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       onArchiveTeam={canManageStructure ? handleArchiveTeam : undefined}
       onMoveTaskStatus={canMutateContent ? handleMoveTaskStatus : undefined}
       onOpenTask={(task) => {
-        if (!task.assignedProjectId || !task.teamId) {
+        if (!task.teamId) {
           return
         }
 
-        navigate(createProjectIssuesPath(task.assignedProjectId, task.teamId, task.id))
+        navigate(
+          task.assignedProjectId
+            ? createProjectIssuesPath(task.assignedProjectId, task.teamId, task.id)
+            : createTeamIssuesPath(task.teamId, task.id),
+        )
       }}
       summary={summary}
       taskMoveErrorMessage={taskMoveErrorMessage}
@@ -991,6 +996,7 @@ function WorkspaceBody({
       ) : null}
       {view === 'my-tasks' ? (
         <MyTasksView
+          onOpenTask={onOpenTask}
           t={t}
           taskMoveErrorMessage={taskMoveErrorMessage}
           tasks={myTasks}
@@ -1136,11 +1142,13 @@ function HomeView({
 }
 
 function MyTasksView({
+  onOpenTask,
   t,
   taskMoveErrorMessage,
   tasks,
   onMoveTaskStatus,
 }: {
+  onOpenTask?: (task: ProjectTask) => void
   t: (key: MessageKey) => string
   taskMoveErrorMessage?: string
   tasks: ProjectTask[]
@@ -1278,6 +1286,7 @@ function MyTasksView({
                       testId={`my-tasks-card-${createWorkspaceTaskTestId(task)}`}
                       onDragEnd={handleDragEnd}
                       onDragStart={(event) => handleDragStart(event, task)}
+                      onOpenTask={onOpenTask}
                       onStatusChange={isLegacyTask || !onMoveTaskStatus
                         ? undefined
                         : (nextStatus) => moveTaskToStatus(task, nextStatus)}
@@ -2457,6 +2466,7 @@ function CompactTaskCard({
   isMoving = false,
   onDragEnd,
   onDragStart,
+  onOpenTask,
   onStatusChange,
   t,
   task,
@@ -2467,14 +2477,16 @@ function CompactTaskCard({
   isMoving?: boolean
   onDragEnd?: () => void
   onDragStart?: (event: DragEvent<HTMLElement>) => void
+  onOpenTask?: (task: ProjectTask) => void
   onStatusChange?: (status: TaskStatus) => void
   t: (key: MessageKey) => string
   task: ProjectTask
   testId?: string
 }) {
+  const taskTitle = resolveTaskTitle(task, t)
   const statusSelectLabel = t('workspace.myTasks.moveStatusLabel').replace(
     '{title}',
-    resolveTaskTitle(task, t),
+    taskTitle,
   )
 
   return (
@@ -2488,7 +2500,19 @@ function CompactTaskCard({
       onDragEnd={onDragEnd}
       onDragStart={onDragStart}
     >
-      <p className="text-sm font-semibold leading-6 text-[var(--workbench-text)]">{resolveTaskTitle(task, t)}</p>
+      {onOpenTask ? (
+        <button
+          className="w-full text-left text-sm font-semibold leading-6 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)] disabled:hover:text-[var(--workbench-text)]"
+          data-testid={testId ? `${testId}-open` : undefined}
+          disabled={!isOpenableWorkspaceTask(task)}
+          onClick={() => onOpenTask(task)}
+          type="button"
+        >
+          {taskTitle}
+        </button>
+      ) : (
+        <p className="text-sm font-semibold leading-6 text-[var(--workbench-text)]">{taskTitle}</p>
+      )}
       <p className="mt-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{task.dueDate}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <StatusPill status={task.status} t={t} />
@@ -2909,7 +2933,7 @@ function calculateWorkspaceActionScore(task: ProjectTask) {
 }
 
 function isOpenableWorkspaceTask(task: ProjectTask) {
-  return Boolean(task.assignedProjectId && task.teamId)
+  return Boolean(task.teamId)
 }
 
 function isWorkspaceTaskOverdue(task: ProjectTask) {
