@@ -251,10 +251,11 @@ seed_work_item() {
   work_item_id="$1"
   sort_order="$2"
   title_key="$3"
-  assignee_user_id="$4"
-  status="$5"
-  due_date="$6"
-  priority="$7"
+  title="$4"
+  assignee_user_id="$5"
+  status="$6"
+  due_date="$7"
+  priority="$8"
   put_item_error=""
 
   if ! put_item_error="$(aws_local dynamodb put-item \
@@ -271,14 +272,16 @@ seed_work_item() {
       \"revision\": {\"N\": \"1\"},
       \"sortOrder\": {\"N\": \"$sort_order\"},
       \"titleKey\": {\"S\": \"$title_key\"},
-      \"title\": {\"S\": \"$title_key\"},
+      \"title\": {\"S\": \"$title\"},
       \"assigneeUserId\": {\"S\": \"$assignee_user_id\"},
       \"status\": {\"S\": \"$status\"},
       \"dueDate\": {\"S\": \"$due_date\"},
       \"priority\": {\"S\": \"$priority\"},
       \"createdAt\": {\"S\": \"$WORK_ITEM_SEED_TIMESTAMP\"},
       \"updatedAt\": {\"S\": \"$WORK_ITEM_SEED_TIMESTAMP\"},
-      \"source\": {\"S\": \"dynamodb\"}
+      \"source\": {\"S\": \"dynamodb\"},
+      \"migrationSource\": {\"S\": \"legacy-project-task\"},
+      \"migrationSourceKey\": {\"S\": \"$PROJECT_DIRECTORY_ID#project#refero#task#$work_item_id\"}
     }" \
     --condition-expression 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)' \
     2>&1 >/dev/null)"; then
@@ -296,16 +299,16 @@ LEGACY_TASK_COUNT="$(aws_local dynamodb scan \
   --output text)"
 
 if [ "$LEGACY_TASK_COUNT" = "0" ]; then
-  seed_work_item "wireframe" 10 "tasks.item.wireframe" "sato@example.com" "in-progress" "2026/06/03" "high"
-  seed_work_item "brand-guideline" 20 "tasks.item.brandGuideline" "suzuki@example.com" "review" "2026/06/05" "medium"
-  seed_work_item "pricing-content" 30 "tasks.item.pricingContent" "tanaka@example.com" "in-progress" "2026/06/08" "high"
-  seed_work_item "seo-research" 40 "tasks.item.seoResearch" "yamamoto@example.com" "todo" "2026/06/09" "medium"
-  seed_work_item "hero-design" 50 "tasks.item.heroDesign" "sato@example.com" "review" "2026/06/10" "medium"
-  seed_work_item "analytics-tags" 60 "tasks.item.analyticsTags" "suzuki@example.com" "in-progress" "2026/06/11" "low"
-  seed_work_item "competitor-report" 70 "tasks.item.competitorReport" "tanaka@example.com" "done" "2026/06/02" "low"
-  seed_work_item "terms-page" 80 "tasks.item.termsPage" "yamamoto@example.com" "todo" "2026/06/12" "medium"
-  seed_work_item "faq-content" 90 "tasks.item.faqContent" "sato@example.com" "todo" "2026/06/15" "low"
-  seed_work_item "landing-release" 100 "tasks.item.landingRelease" "suzuki@example.com" "todo" "2026/06/16" "high"
+  seed_work_item "wireframe" 10 "tasks.item.wireframe" "新しいランディングページのワイヤーフレーム作成" "sato@example.com" "in-progress" "2026/06/03" "high"
+  seed_work_item "brand-guideline" 20 "tasks.item.brandGuideline" "ブランドガイドラインの更新" "suzuki@example.com" "review" "2026/06/05" "medium"
+  seed_work_item "pricing-content" 30 "tasks.item.pricingContent" "料金ページのコンテンツ作成" "tanaka@example.com" "in-progress" "2026/06/08" "high"
+  seed_work_item "seo-research" 40 "tasks.item.seoResearch" "SEO キーワードリサーチ" "yamamoto@example.com" "todo" "2026/06/09" "medium"
+  seed_work_item "hero-design" 50 "tasks.item.heroDesign" "ヒーロー画像のデザイン作成" "sato@example.com" "review" "2026/06/10" "medium"
+  seed_work_item "analytics-tags" 60 "tasks.item.analyticsTags" "アナリティクスタグの実装" "suzuki@example.com" "in-progress" "2026/06/11" "low"
+  seed_work_item "competitor-report" 70 "tasks.item.competitorReport" "競合サイトの分析レポート作成" "tanaka@example.com" "done" "2026/06/02" "low"
+  seed_work_item "terms-page" 80 "tasks.item.termsPage" "利用規約ページの作成" "yamamoto@example.com" "todo" "2026/06/12" "medium"
+  seed_work_item "faq-content" 90 "tasks.item.faqContent" "FAQ セクションのコンテンツ作成" "sato@example.com" "todo" "2026/06/15" "low"
+  seed_work_item "landing-release" 100 "tasks.item.landingRelease" "ランディングページの公開" "suzuki@example.com" "todo" "2026/06/16" "high"
 else
   echo "mukuroji legacy task rows preserved for explicit Work Item migration: table=$PROJECT_TASKS_TABLE count=$LEGACY_TASK_COUNT"
 fi

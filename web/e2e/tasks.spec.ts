@@ -15,6 +15,8 @@ const authSession = {
   tokenType: 'Bearer',
   remember: true,
 }
+const workItemConflictMessage =
+  '別のメンバーが先に更新しました。最新の内容を確認してから、もう一度保存してください。'
 
 /**
  * API stub が受けた request 数です。
@@ -126,6 +128,10 @@ type MockAuthenticatedTaskPageOptions = {
    * チーム Issue API が初期状態として返す保存済み Issue 一覧です。
    */
   teamIssuesByTeam?: Partial<Record<string, TeamIssue[]>>
+  /**
+   * 初回更新を revision conflict にする `teamId\0issueId` key の一覧です。
+   */
+  revisionConflictIssueKeys?: readonly string[]
 }
 
 /**
@@ -174,6 +180,7 @@ async function mockAuthenticatedTaskPage(
     'core-team': [...(options.teamIssuesByTeam?.['core-team'] ?? [])],
     'design-team': [...(options.teamIssuesByTeam?.['design-team'] ?? [])],
   }
+  const pendingRevisionConflictIssueKeys = new Set(options.revisionConflictIssueKeys ?? [])
   const issueCommentsByIssue: Record<string, TeamIssueComment[]> = {}
   const issueActivityByIssue: Record<string, TeamIssueActivity[]> = {}
   const projectMembersByProject: Record<string, ProjectMember[]> = {
@@ -719,6 +726,26 @@ async function mockAuthenticatedTaskPage(
       const { expectedRevision, ...patch } = body
 
       expect(expectedRevision).toBe(issue.revision)
+      const conflictIssueKey = createIssueCollaborationKey(teamId, issueId)
+
+      if (pendingRevisionConflictIssueKeys.delete(conflictIssueKey)) {
+        replaceStoredTeamIssue(teamIssuesByTeam, teamId, {
+          ...issue,
+          description: '別のメンバーが更新した最新内容です。',
+          revision: issue.revision + 1,
+          status: 'review',
+          updatedAt: '2026-06-08T02:30:00.000Z',
+        })
+        await route.fulfill({
+          status: 409,
+          json: {
+            code: 'WorkItemRevisionConflict',
+            message: 'Work Item changed after it was loaded.',
+          },
+        })
+        return
+      }
+
       const updateResult = body.status
         ? await onTaskStatusUpdate?.(issueId, body.status)
         : undefined
@@ -742,14 +769,7 @@ async function mockAuthenticatedTaskPage(
         revision: issue.revision + 1,
         updatedAt: '2026-06-08T02:00:00.000Z',
       } satisfies TeamIssue
-      const issues = teamIssuesByTeam[teamId] ?? []
-      const issueIndex = issues.findIndex((candidate) => candidate.id === issueId)
-
-      if (issueIndex >= 0) {
-        issues[issueIndex] = updatedIssue
-      } else {
-        teamIssuesByTeam[teamId] = [...issues, updatedIssue]
-      }
+      replaceStoredTeamIssue(teamIssuesByTeam, teamId, updatedIssue)
 
       await route.fulfill({
         json: {
@@ -1279,6 +1299,29 @@ function findTeamIssue(
 }
 
 /**
+ * E2E mock の Team Issue を同じ team/id の最新 revision へ置き換えます。
+ *
+ * @param teamIssuesByTeam - team ごとの保存済み Issue mock です。
+ * @param teamId - 更新対象の team ID です。
+ * @param issue - 保存する最新 Issue です。
+ */
+function replaceStoredTeamIssue(
+  teamIssuesByTeam: Record<string, TeamIssue[]>,
+  teamId: string,
+  issue: TeamIssue,
+) {
+  const issues = teamIssuesByTeam[teamId] ?? []
+  const issueIndex = issues.findIndex((candidate) => candidate.id === issue.id)
+
+  if (issueIndex >= 0) {
+    issues[issueIndex] = issue
+    return
+  }
+
+  teamIssuesByTeam[teamId] = [...issues, issue]
+}
+
+/**
  * チーム Issue 作成フォームと詳細ペインが同じカラム内に収まっていることを検証します。
  *
  * @param page - レイアウト検証対象の Playwright page です。
@@ -1427,6 +1470,71 @@ test.describe('authenticated task page', () => {
 
     await expect(boardViewButton).toHaveAttribute('aria-pressed', 'true')
     await expect(page.getByText('ブランドガイドラインの更新')).toBeVisible()
+  })
+
+  test('Task 詳細は競合後の revision 再取得後も競合メッセージを維持する', async ({ page }) => {
+    const issueId = 'task-revision-conflict'
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      revisionConflictIssueKeys: [createIssueCollaborationKey('core-team', issueId)],
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            id: issueId,
+            title: 'Task 競合確認',
+            status: 'todo',
+          }),
+        ],
+      },
+    })
+    await page.goto(`/projects/refero/issues?teamId=core-team&issueId=${issueId}`)
+    const requestCounts = getMockRequestCounts(page)
+    const detailPane = page.getByTestId('task-detail-pane')
+
+    await expect(detailPane.getByRole('button', { name: '変更を保存' })).toBeEnabled()
+    await detailPane.locator('select[name="status"]').selectOption('done')
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+
+    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+    await expect.poll(() => requestCounts.projectTasks.refero).toBeGreaterThanOrEqual(2)
+    await expect(detailPane.locator('select[name="status"]')).toHaveValue('review')
+    await expect(detailPane.locator('textarea[name="description"]')).toHaveValue(
+      '別のメンバーが更新した最新内容です。',
+    )
+    await expect(detailPane.getByText(workItemConflictMessage)).toBeVisible()
+  })
+
+  test('Team Issue 詳細は競合後の revision 再取得後も競合メッセージを維持する', async ({ page }) => {
+    const issueId = 'team-revision-conflict'
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      revisionConflictIssueKeys: [createIssueCollaborationKey('core-team', issueId)],
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            id: issueId,
+            title: 'Team Issue 競合確認',
+            status: 'todo',
+          }),
+        ],
+      },
+    })
+    await page.goto('/teams/core-team/issues')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByTestId(`issue-row-${issueId}`).click()
+    const statusSelect = page.locator('aside select[name="status"]')
+    const description = page.locator('aside textarea[name="description"]')
+
+    await expect(page.getByRole('button', { name: '変更を保存' })).toBeEnabled()
+    await statusSelect.selectOption('done')
+    await page.getByRole('button', { name: '変更を保存' }).click()
+
+    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+    await expect.poll(() => requestCounts.issueReads).toBeGreaterThanOrEqual(2)
+    await expect(statusSelect).toHaveValue('review')
+    await expect(description).toHaveValue('別のメンバーが更新した最新内容です。')
+    await expect(page.getByText(workItemConflictMessage)).toBeVisible()
   })
 
   test('タスク画面で担当者、優先度、期限、並び替え、詳細コメントが動作する', async ({ page }) => {

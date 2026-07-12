@@ -13,6 +13,9 @@ import {
   type TableDescription,
 } from '@aws-sdk/client-dynamodb'
 import {
+  BatchGetCommand,
+  type BatchGetCommandInput,
+  type BatchGetCommandOutput,
   DynamoDBDocumentClient,
   DeleteCommand,
   GetCommand,
@@ -834,6 +837,10 @@ type TeamIssueItem = {
    */
   creatorMemberKey?: string
   /**
+   * legacy project task migration の安定した source key です。
+   */
+  migrationSourceKey?: string
+  /**
    * Issue 状態です。
    */
   status: ProjectTaskStatus
@@ -981,6 +988,41 @@ type WorkItemsResponse = {
   workItems: TeamIssueResponseItem[]
 }
 
+/** Work Item 一覧 client の読み込み量を制御します。 */
+type WorkItemListReadOptions = {
+  /** DynamoDB から読み込む最大 item 数です。 */
+  limit?: number
+}
+
+/** Team 一覧を legacy compatibility と統合するときの読み込み量を制御します。 */
+type TeamIssueListReadOptions = {
+  /** 各 DynamoDB partition で評価する最大 item 数です。 */
+  scanLimit?: number
+  /** Aggregate API が legacy read を許可した project ID です。 */
+  legacyProjectIds?: ReadonlySet<string>
+  /** canonical migration が取り込み済みの legacy source key です。 */
+  migrationSourceKeys?: ReadonlySet<string>
+  /** Detail fallback が必要とする legacy Issue ID です。 */
+  legacyIssueId?: string
+}
+
+/**
+ * `/api/work-items` は既存の `{ workItems }` 契約を維持するため cursor を追加せず、
+ * pagination 契約を導入するまで hard cap 超過を 413 で fail-closed にします。
+ * この値は一度に返す Work Item の最大件数です。
+ */
+const WORK_ITEMS_RESPONSE_LIMIT = 200
+/** `/api/work-items` が一度に読む Team partition の最大数です。 */
+const WORK_ITEMS_TEAM_READ_LIMIT = 20
+/** `/api/work-items` が legacy compatibility のために読む project の最大数です。 */
+const WORK_ITEMS_LEGACY_PROJECT_READ_LIMIT = 100
+/** `/api/work-items` が 1 partition で filter/dedupe 前に評価する最大 item 数です。 */
+const WORK_ITEMS_PARTITION_SCAN_LIMIT = 1_000
+/** DynamoDB BatchGetItem の 1 request あたりの最大 key 数です。 */
+const DYNAMODB_BATCH_GET_KEY_LIMIT = 100
+/** UnprocessedKeys を同じ bounded read 内で再試行する最大回数です。 */
+const DYNAMODB_BATCH_GET_ATTEMPT_LIMIT = 3
+
 /**
  * チーム Issue コメントレスポンスです。
  */
@@ -1041,6 +1083,24 @@ type TeamIssuesResponse = {
    * チームに紐づく Issue 一覧です。
    */
   issues: TeamIssueResponseItem[]
+}
+
+/** Aggregate Work Item read 専用の canonical Team partition 取得結果です。 */
+type AggregateTeamIssuesRead = {
+  /** 取得対象の Team ID です。 */
+  teamId: string
+  /** 公開 API と同じ canonical Work Item 表現です。 */
+  issues: TeamIssueResponseItem[]
+  /** legacy projection の抑止にだけ使う migration source key です。 */
+  migrationSourceKeys: string[]
+}
+
+/** BatchGet で migration source を確認する Team / Issue key です。 */
+type TeamIssueMigrationLookupKey = {
+  /** Canonical Work Item を所有する Team ID です。 */
+  teamId: string
+  /** Canonical Work Item の Issue ID です。 */
+  issueId: string
 }
 
 /**
@@ -1793,7 +1853,11 @@ type ProjectTasksClient = {
   /**
    * DynamoDB から指定 project ID のタスク一覧を取得します。
    */
-  getProjectTasks(directoryId: string, projectId: string): Promise<ProjectTasksResponse>
+  getProjectTasks(
+    directoryId: string,
+    projectId: string,
+    options?: WorkItemListReadOptions,
+  ): Promise<ProjectTasksResponse>
   /**
    * legacy mutation 呼び出しを read-only error として拒否します。
    */
@@ -1822,11 +1886,34 @@ type TeamIssuesClient = {
   /**
    * DynamoDB から指定 team ID の Issue 一覧を取得します。
    */
-  getTeamIssues(directoryId: string, teamId: string): Promise<TeamIssuesResponse>
+  getTeamIssues(
+    directoryId: string,
+    teamId: string,
+    options?: WorkItemListReadOptions,
+  ): Promise<TeamIssuesResponse>
+  /**
+   * Aggregate API 用に canonical Issue と非公開 migration metadata を取得します。
+   */
+  getTeamIssuesForAggregate(
+    directoryId: string,
+    teamId: string,
+    options?: WorkItemListReadOptions,
+  ): Promise<AggregateTeamIssuesRead>
+  /**
+   * Team / Issue base key 候補を一括取得し、stable migration source key を返します。
+   */
+  getTeamIssueMigrationSourceKeys(
+    directoryId: string,
+    keys: readonly TeamIssueMigrationLookupKey[],
+  ): Promise<ReadonlySet<string>>
   /**
    * DynamoDB から指定 project ID にアサインされた Issue 一覧を取得します。
    */
-  getProjectIssues(directoryId: string, projectId: string): Promise<ProjectIssuesResponse>
+  getProjectIssues(
+    directoryId: string,
+    projectId: string,
+    options?: WorkItemListReadOptions,
+  ): Promise<ProjectIssuesResponse>
   /**
    * DynamoDB から Issue 詳細、コメント、活動履歴を取得します。
    */
@@ -4561,6 +4648,10 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return toWorkspaceAccessErrorResponse(c, error)
   }
 
+  if (isTeamIssueNotFoundError(error)) {
+    return c.json({ message: 'Issue was not found.' }, 404)
+  }
+
   if (!(error instanceof ProjectDataError)) {
     console.error(error)
     return c.json({ message: 'Project data is unavailable.' }, 502)
@@ -4568,6 +4659,14 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
 
   if (error.code === 'InvalidWorkItemRevision') {
     return c.json({ code: error.code, message: error.message }, 400)
+  }
+
+  if (error.code === 'WorkItemListLimitExceeded') {
+    return c.json({ code: error.code, message: error.message }, 413)
+  }
+
+  if (error.code === 'TeamIssueMigrationLookupIncomplete') {
+    return c.json({ code: error.code, message: error.message }, 503)
   }
 
   if (error.code === 'InvalidProjectWrite' ||
@@ -4587,10 +4686,6 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
 
   if (error.code === 'ProjectTaskNotFound') {
     return c.json({ message: 'Task was not found.' }, 404)
-  }
-
-  if (error.code === 'TeamIssueNotFound') {
-    return c.json({ message: 'Issue was not found.' }, 404)
   }
 
   if (error.code === 'ProjectMemberNotFound') {
@@ -5228,17 +5323,55 @@ async function readTeamIssues(
   directoryId: string,
   context: TeamPermissionContext,
   principal: ProjectPrincipal,
+  options: TeamIssueListReadOptions = {},
 ) {
-  const storedIssues = await teamIssues.getTeamIssues(directoryId, context.team.id)
-  const legacyIssues = await readLegacyTeamIssues(directoryId, context, principal)
+  const scanLimit = normalizeWorkItemListReadLimit(options.scanLimit)
+  const clientReadLimit = createWorkItemListProbeLimit(scanLimit)
+  const storedIssues = await teamIssues.getTeamIssues(
+    directoryId,
+    context.team.id,
+    clientReadLimit === undefined ? undefined : { limit: clientReadLimit },
+  )
+  assertWorkItemListWithinLimit(
+    storedIssues.issues,
+    scanLimit,
+    `Team "${context.team.id}" canonical partition`,
+  )
+  const accessibleStoredIssues = filterAccessibleTeamIssues(
+    storedIssues.issues,
+    principal,
+    context,
+  )
+  const legacyIssues = await readLegacyTeamIssues(directoryId, context, principal, options)
 
   return {
     teamId: context.team.id,
-    issues: mergeTeamIssues(
-      filterAccessibleTeamIssues(storedIssues.issues, principal, context),
-      legacyIssues,
-    ),
+    issues: mergeTeamIssues(accessibleStoredIssues, legacyIssues),
   } satisfies TeamIssuesResponse
+}
+
+async function readCanonicalTeamIssuesForAggregate(
+  directoryId: string,
+  context: TeamPermissionContext,
+  principal: ProjectPrincipal,
+) {
+  const clientReadLimit = createWorkItemListProbeLimit(WORK_ITEMS_PARTITION_SCAN_LIMIT)
+  const storedIssues = await teamIssues.getTeamIssuesForAggregate(
+    directoryId,
+    context.team.id,
+    { limit: clientReadLimit },
+  )
+  assertWorkItemListWithinLimit(
+    storedIssues.issues,
+    WORK_ITEMS_PARTITION_SCAN_LIMIT,
+    `Team "${context.team.id}" canonical partition`,
+  )
+
+  return {
+    teamId: context.team.id,
+    issues: filterAccessibleTeamIssues(storedIssues.issues, principal, context),
+    migrationSourceKeys: storedIssues.migrationSourceKeys,
+  } satisfies AggregateTeamIssuesRead
 }
 
 async function readAccessibleWorkItems(
@@ -5263,16 +5396,99 @@ async function readAccessibleWorkItems(
 
     return [{ team, directory, projectAccesses: teamProjectAccesses } satisfies TeamPermissionContext]
   })
-  const responses = await Promise.all(
-    contexts.map((context) => readTeamIssues(principal.directoryId, context, principal)),
-  )
-  const workItemsById = new Map<string, TeamIssueResponseItem>()
+  if (contexts.length > WORK_ITEMS_TEAM_READ_LIMIT) {
+    throw createWorkItemListLimitExceededError(
+      `Workspace has more than ${WORK_ITEMS_TEAM_READ_LIMIT} accessible Teams.`,
+    )
+  }
 
-  for (const workItem of responses.flatMap((response) => response.issues)) {
-    workItemsById.set(`${workItem.teamId}\0${workItem.id}`, workItem)
+  const legacyProjectIds = selectAggregateLegacyProjectIds(contexts, principal)
+  const workItemsById = new Map<string, TeamIssueResponseItem>()
+  const migrationSourceKeys = new Set<string>()
+  const canonicalResponses: AggregateTeamIssuesRead[] = []
+
+  for (const context of contexts) {
+    const response = await readCanonicalTeamIssuesForAggregate(
+      principal.directoryId,
+      context,
+      principal,
+    )
+    canonicalResponses.push(response)
+    for (const migrationSourceKey of response.migrationSourceKeys) {
+      migrationSourceKeys.add(migrationSourceKey)
+    }
+  }
+
+  for (const response of canonicalResponses) {
+    for (const workItem of response.issues) {
+      addAggregateWorkItem(workItemsById, workItem)
+    }
+  }
+
+  for (const context of contexts) {
+    const legacyIssues = await readLegacyTeamIssues(
+      principal.directoryId,
+      context,
+      principal,
+      {
+        scanLimit: WORK_ITEMS_PARTITION_SCAN_LIMIT,
+        legacyProjectIds,
+        migrationSourceKeys,
+      },
+    )
+
+    for (const workItem of legacyIssues) {
+      if (workItemsById.has(`${workItem.teamId}\0${workItem.id}`)) {
+        continue
+      }
+      addAggregateWorkItem(workItemsById, workItem)
+    }
   }
 
   return { workItems: [...workItemsById.values()] }
+}
+
+function addAggregateWorkItem(
+  workItemsById: Map<string, TeamIssueResponseItem>,
+  workItem: TeamIssueResponseItem,
+) {
+  workItemsById.set(`${workItem.teamId}\0${workItem.id}`, workItem)
+  if (workItemsById.size > WORK_ITEMS_RESPONSE_LIMIT) {
+    throw createWorkItemListLimitExceededError(
+      `Workspace has more than ${WORK_ITEMS_RESPONSE_LIMIT} accessible Work Items.`,
+    )
+  }
+}
+
+function selectAggregateLegacyProjectIds(
+  contexts: readonly TeamPermissionContext[],
+  principal: ProjectPrincipal,
+) {
+  const projectIds = new Set<string>()
+
+  for (const context of contexts) {
+    for (const project of context.team.projects) {
+      if (findFirstProjectTeamId(context.directory.teams, project.id) !== context.team.id) {
+        continue
+      }
+      if (!canAccessAssignedProject(principal, context, project.id, 'viewer')) {
+        continue
+      }
+
+      if (
+        !projectIds.has(project.id) &&
+        projectIds.size >= WORK_ITEMS_LEGACY_PROJECT_READ_LIMIT
+      ) {
+        throw createWorkItemListLimitExceededError(
+          `Workspace has more than ${WORK_ITEMS_LEGACY_PROJECT_READ_LIMIT} accessible legacy projects.`,
+        )
+      }
+
+      projectIds.add(project.id)
+    }
+  }
+
+  return projectIds
 }
 
 async function readProjectTasks(
@@ -5291,11 +5507,25 @@ async function readProjectIssues(directoryId: string, projectId: string) {
   const storedIssues = await teamIssues.getProjectIssues(directoryId, projectId)
   const directory = await projectDirectory.getProjectDirectory(directoryId, 'ja')
   const ownerTeamId = findFirstProjectTeamId(directory.teams, projectId)
-  const legacyIssues = ownerTeamId
-    ? (await projectTasks.getProjectTasks(directoryId, projectId)).tasks.map((task) =>
-      toLegacyTeamIssue(task, ownerTeamId, projectId),
+  const legacyIssues: TeamIssueResponseItem[] = []
+  if (ownerTeamId) {
+    const canonicalIssueIds = new Set(storedIssues.issues.map((issue) => issue.id))
+    const legacyTasks = (await projectTasks.getProjectTasks(directoryId, projectId)).tasks
+    const candidates = legacyTasks.filter((task) => !canonicalIssueIds.has(task.id))
+    const migrationSourceKeys = await readLegacyMigrationSourceKeys(
+      directoryId,
+      directory.teams,
+      projectId,
+      candidates,
     )
-    : []
+
+    for (const task of candidates) {
+      const sourceKey = createLegacyTaskMigrationSourceKey(directoryId, projectId, task.id)
+      if (!migrationSourceKeys.has(sourceKey)) {
+        legacyIssues.push(toLegacyTeamIssue(task, ownerTeamId, projectId))
+      }
+    }
+  }
 
   return {
     projectId,
@@ -5307,10 +5537,16 @@ async function readLegacyTeamIssues(
   directoryId: string,
   context: TeamPermissionContext,
   principal: ProjectPrincipal,
+  options: TeamIssueListReadOptions = {},
 ) {
   const issues: TeamIssueResponseItem[] = []
+  const scanLimit = normalizeWorkItemListReadLimit(options.scanLimit)
+  const clientReadLimit = createWorkItemListProbeLimit(scanLimit)
 
   for (const project of context.team.projects) {
+    if (options.legacyProjectIds && !options.legacyProjectIds.has(project.id)) {
+      continue
+    }
     if (findFirstProjectTeamId(context.directory.teams, project.id) !== context.team.id) {
       continue
     }
@@ -5320,15 +5556,46 @@ async function readLegacyTeamIssues(
     }
 
     const [legacyResponse, canonicalResponse] = await Promise.all([
-      projectTasks.getProjectTasks(directoryId, project.id),
-      teamIssues.getProjectIssues(directoryId, project.id),
+      projectTasks.getProjectTasks(
+        directoryId,
+        project.id,
+        clientReadLimit === undefined ? undefined : { limit: clientReadLimit },
+      ),
+      teamIssues.getProjectIssues(
+        directoryId,
+        project.id,
+        clientReadLimit === undefined ? undefined : { limit: clientReadLimit },
+      ),
     ])
-    const canonicalIssueIds = new Set(canonicalResponse.issues.map((issue) => issue.id))
-    issues.push(
-      ...legacyResponse.tasks
-        .filter((task) => !canonicalIssueIds.has(task.id))
-        .map((task) => toLegacyTeamIssue(task, context.team.id, project.id)),
+    assertWorkItemListWithinLimit(
+      legacyResponse.tasks,
+      scanLimit,
+      `Project "${project.id}" legacy partition`,
     )
+    assertWorkItemListWithinLimit(
+      canonicalResponse.issues,
+      scanLimit,
+      `Project "${project.id}" canonical partition`,
+    )
+    const canonicalIssueIds = new Set(canonicalResponse.issues.map((issue) => issue.id))
+    const candidates = legacyResponse.tasks.filter((task) =>
+      (!options.legacyIssueId || task.id === options.legacyIssueId) &&
+      !canonicalIssueIds.has(task.id)
+    )
+    const migrationSourceKeys = options.migrationSourceKeys ??
+      await readLegacyMigrationSourceKeys(
+        directoryId,
+        context.directory.teams,
+        project.id,
+        candidates,
+      )
+
+    for (const task of candidates) {
+      const sourceKey = createLegacyTaskMigrationSourceKey(directoryId, project.id, task.id)
+      if (!migrationSourceKeys.has(sourceKey)) {
+        issues.push(toLegacyTeamIssue(task, context.team.id, project.id))
+      }
+    }
   }
 
   return issues
@@ -5340,7 +5607,12 @@ async function readLegacyTeamIssue(
   principal: ProjectPrincipal,
   issueId: string,
 ) {
-  return (await readLegacyTeamIssues(directoryId, context, principal)).find((issue) => issue.id === issueId)
+  return (await readLegacyTeamIssues(
+    directoryId,
+    context,
+    principal,
+    { legacyIssueId: issueId },
+  )).find((issue) => issue.id === issueId)
 }
 
 async function readLegacyTeamIssueIds(
@@ -5387,6 +5659,38 @@ function mergeTeamIssues(
     ...primaryIssues,
     ...fallbackIssues.filter((issue) => !issueIds.has(issue.id)),
   ]
+}
+
+function normalizeWorkItemListReadLimit(value: number | undefined) {
+  if (value === undefined) {
+    return undefined
+  }
+
+  return Math.max(0, Math.floor(value))
+}
+
+function createWorkItemListProbeLimit(limit: number | undefined) {
+  return limit === undefined ? undefined : limit + 1
+}
+
+function assertWorkItemListWithinLimit(
+  items: readonly unknown[],
+  limit: number | undefined,
+  scope: string,
+) {
+  if (limit !== undefined && items.length > limit) {
+    throw createWorkItemListLimitExceededError(
+      `${scope} has more than ${limit} Work Items.`,
+    )
+  }
+}
+
+function createWorkItemListLimitExceededError(reason: string) {
+  return new ProjectDataError(
+    413,
+    'WorkItemListLimitExceeded',
+    `${reason} Refine the Workspace before loading the aggregate Work Item list.`,
+  )
 }
 
 function toLegacyTeamIssue(
@@ -5439,8 +5743,32 @@ function toProjectTaskFromTeamIssue(issue: TeamIssueResponseItem): ProjectTaskRe
   }
 }
 
-function findFirstProjectTeamId(teams: ProjectDirectoryTeamResponse[], projectId: string) {
+function findFirstProjectTeamId(
+  teams: readonly ProjectDirectoryTeamResponse[],
+  projectId: string,
+) {
   return teams.find((team) => team.projects.some((project) => project.id === projectId))?.id
+}
+
+async function readLegacyMigrationSourceKeys(
+  directoryId: string,
+  teams: readonly ProjectDirectoryTeamResponse[],
+  projectId: string,
+  tasks: readonly Pick<ProjectTaskResponseItem, 'id'>[],
+  client: TeamIssuesClient = teamIssues,
+) {
+  const teamIds = teams
+    .filter((team) => team.projects.some((project) => project.id === projectId))
+    .map((team) => team.id)
+  const keys = teamIds.flatMap((teamId) =>
+    tasks.map((task) => ({ teamId, issueId: task.id }))
+  )
+
+  if (keys.length === 0) {
+    return new Set<string>()
+  }
+
+  return client.getTeamIssueMigrationSourceKeys(directoryId, keys)
 }
 
 async function readIssueAssigneeProfiles(issues: TeamIssueResponseItem[]) {
@@ -6248,10 +6576,10 @@ export class DynamoDbDashboardSummaryClient {
    * ユーザー directory の team/project と task data からダッシュボード集計値を取得します。
    */
   async getSummary(directoryId: string, accessContext: DashboardSummaryAccessContext) {
+    const directory = await this.projectDirectoryClient.getProjectDirectory(directoryId, 'ja')
     const visibleProjectIds = accessContext.isSystemAdmin
       ? new Set(
-        (await this.projectDirectoryClient.getProjectDirectory(directoryId, 'ja'))
-          .teams.flatMap((team) => team.projects.map((project) => project.id)),
+        directory.teams.flatMap((team) => team.projects.map((project) => project.id)),
       )
       : new Set(
         (await this.projectDirectoryClient.getProjectAccessList(directoryId, accessContext.userKey))
@@ -6265,10 +6593,23 @@ export class DynamoDbDashboardSummaryClient {
           this.projectTasksClient.getProjectTasks(directoryId, projectId),
         ])
         const canonicalIds = new Set(canonical.issues.map((issue) => issue.id))
+        const candidates = legacy.tasks.filter((task) => !canonicalIds.has(task.id))
+        const migrationSourceKeys = await readLegacyMigrationSourceKeys(
+          directoryId,
+          directory.teams,
+          projectId,
+          candidates,
+          this.teamIssuesClient,
+        )
+        const compatibleLegacyTasks = candidates.filter((task) =>
+          !migrationSourceKeys.has(
+            createLegacyTaskMigrationSourceKey(directoryId, projectId, task.id),
+          )
+        )
 
         return [
           ...canonical.issues,
-          ...legacy.tasks.filter((task) => !canonicalIds.has(task.id)),
+          ...compatibleLegacyTasks,
         ]
       }),
     )
@@ -6329,9 +6670,13 @@ export class DynamoDbProjectTasksClient {
   /**
    * DynamoDB からプロジェクト別タスク一覧を取得します。
    */
-  async getProjectTasks(directoryId: string, projectId: string) {
+  async getProjectTasks(
+    directoryId: string,
+    projectId: string,
+    options: WorkItemListReadOptions = {},
+  ) {
     try {
-      const items = await this.queryProjectTaskItems(directoryId, projectId)
+      const items = await this.queryProjectTaskItems(directoryId, projectId, options)
       const tasks = items.map(toProjectTaskResponseItem)
 
       return {
@@ -6373,18 +6718,25 @@ export class DynamoDbProjectTasksClient {
   }
 
   /**
-   * DynamoDB から project partition の task item を全件取得します。
+   * DynamoDB から project partition の task item を全件または指定上限まで取得します。
    */
   private async queryProjectTaskItems(
     directoryId: string,
     projectId: string,
+    options: WorkItemListReadOptions = {},
     canBootstrapLocalTable = true,
   ) {
     try {
       const items: unknown[] = []
+      const limit = normalizeWorkItemListReadLimit(options.limit)
       let exclusiveStartKey: Record<string, unknown> | undefined
 
+      if (limit === 0) {
+        return items
+      }
+
       do {
+        const remaining = limit === undefined ? undefined : limit - items.length
         const response = await this.documentClient.send(
           new QueryCommand({
             TableName: this.tableName,
@@ -6395,10 +6747,18 @@ export class DynamoDbProjectTasksClient {
             },
             ExclusiveStartKey: exclusiveStartKey,
             ScanIndexForward: true,
+            ...(remaining === undefined ? {} : { Limit: remaining }),
           }),
         )
 
-        items.push(...(response.Items ?? []))
+        items.push(...(
+          remaining === undefined
+            ? response.Items ?? []
+            : (response.Items ?? []).slice(0, remaining)
+        ))
+        if (limit !== undefined && items.length >= limit) {
+          break
+        }
         exclusiveStartKey = response.LastEvaluatedKey
       } while (exclusiveStartKey)
 
@@ -6410,7 +6770,7 @@ export class DynamoDbProjectTasksClient {
         isResourceNotFoundError(error) &&
         await ensureLocalProjectTasksTable(this.tableName, this.dynamoDbClient)
       ) {
-        return this.queryProjectTaskItems(directoryId, projectId, false)
+        return this.queryProjectTaskItems(directoryId, projectId, options, false)
       }
 
       throw error
@@ -6474,16 +6834,113 @@ export class DynamoDbTeamIssuesClient {
   /**
    * DynamoDB から指定 team ID の Issue 一覧を取得します。
    */
-  async getTeamIssues(directoryId: string, teamId: string) {
+  async getTeamIssues(
+    directoryId: string,
+    teamId: string,
+    options: WorkItemListReadOptions = {},
+  ) {
+    const response = await this.getTeamIssuesForAggregate(directoryId, teamId, options)
+
+    return {
+      teamId: response.teamId,
+      issues: response.issues,
+    } satisfies TeamIssuesResponse
+  }
+
+  /**
+   * DynamoDB から aggregate 用の Issue 一覧と非公開 migration metadata を取得します。
+   */
+  async getTeamIssuesForAggregate(
+    directoryId: string,
+    teamId: string,
+    options: WorkItemListReadOptions = {},
+  ) {
     await this.ensureLocalTables()
 
     try {
-      const items = await this.queryTeamIssueItems(directoryId, teamId)
+      const items = await this.queryTeamIssueItems(directoryId, teamId, options)
 
       return {
         teamId,
         issues: items.map(toTeamIssueResponseItem),
-      } satisfies TeamIssuesResponse
+        migrationSourceKeys: items.flatMap((item) =>
+          item.migrationSourceKey ? [item.migrationSourceKey] : []
+        ),
+      } satisfies AggregateTeamIssuesRead
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Team / Issue base key の canonical row 存在と migration identity を確認します。
+   */
+  async getTeamIssueMigrationSourceKeys(
+    directoryId: string,
+    keys: readonly TeamIssueMigrationLookupKey[],
+  ) {
+    await this.ensureLocalTables()
+
+    try {
+      const uniqueKeys = [...new Map(keys.map((key) => [
+        createTeamIssueLookupKey(key.teamId, key.issueId),
+        {
+          directoryTeamId: createDirectoryTeamId(directoryId, key.teamId),
+          issueId: key.issueId,
+        },
+      ])).values()]
+      const migrationSourceKeys = new Set<string>()
+
+      for (let offset = 0; offset < uniqueKeys.length; offset += DYNAMODB_BATCH_GET_KEY_LIMIT) {
+        let pendingKeys: NonNullable<
+          NonNullable<NonNullable<BatchGetCommandInput['RequestItems']>[string]>['Keys']
+        > = uniqueKeys.slice(offset, offset + DYNAMODB_BATCH_GET_KEY_LIMIT)
+
+        for (
+          let attempt = 0;
+          pendingKeys.length > 0 && attempt < DYNAMODB_BATCH_GET_ATTEMPT_LIMIT;
+          attempt += 1
+        ) {
+          const response: BatchGetCommandOutput = await this.documentClient.send(
+            new BatchGetCommand({
+              RequestItems: {
+                [this.issueTableName]: {
+                  Keys: pendingKeys,
+                  ConsistentRead: true,
+                },
+              },
+            }),
+          )
+          for (const value of response.Responses?.[this.issueTableName] ?? []) {
+            const item = toTeamIssueItem(value)
+            if (item.directoryId !== directoryId) {
+              throw new ProjectDataError(
+                503,
+                'InvalidTeamIssue',
+                'Team issue migration lookup returned another Workspace.',
+              )
+            }
+            if (item.migrationSourceKey) {
+              migrationSourceKeys.add(item.migrationSourceKey)
+            }
+          }
+          pendingKeys = response.UnprocessedKeys?.[this.issueTableName]?.Keys ?? []
+        }
+
+        if (pendingKeys.length > 0) {
+          throw new ProjectDataError(
+            503,
+            'TeamIssueMigrationLookupIncomplete',
+            'Work Item migration identity lookup could not process every key.',
+          )
+        }
+      }
+
+      return migrationSourceKeys
     } catch (error) {
       if (error instanceof ProjectDataError) {
         throw error
@@ -6496,11 +6953,15 @@ export class DynamoDbTeamIssuesClient {
   /**
    * DynamoDB から指定 project ID にアサインされた Issue 一覧を取得します。
    */
-  async getProjectIssues(directoryId: string, projectId: string) {
+  async getProjectIssues(
+    directoryId: string,
+    projectId: string,
+    options: WorkItemListReadOptions = {},
+  ) {
     await this.ensureLocalTables()
 
     try {
-      const items = await this.queryProjectIssueItems(directoryId, projectId)
+      const items = await this.queryProjectIssueItems(directoryId, projectId, options)
 
       return {
         projectId,
@@ -7071,11 +7532,21 @@ export class DynamoDbTeamIssuesClient {
     return toTeamIssueItem(response.Item)
   }
 
-  private async queryTeamIssueItems(directoryId: string, teamId: string) {
+  private async queryTeamIssueItems(
+    directoryId: string,
+    teamId: string,
+    options: WorkItemListReadOptions = {},
+  ) {
     const items: unknown[] = []
+    const limit = normalizeWorkItemListReadLimit(options.limit)
     let exclusiveStartKey: Record<string, unknown> | undefined
 
+    if (limit === 0) {
+      return []
+    }
+
     do {
+      const remaining = limit === undefined ? undefined : limit - items.length
       const response = await this.documentClient.send(
         new QueryCommand({
           TableName: this.issueTableName,
@@ -7086,21 +7557,39 @@ export class DynamoDbTeamIssuesClient {
           },
           ExclusiveStartKey: exclusiveStartKey,
           ScanIndexForward: true,
+          ...(remaining === undefined ? {} : { Limit: remaining }),
         }),
       )
 
-      items.push(...(response.Items ?? []))
+      items.push(...(
+        remaining === undefined
+          ? response.Items ?? []
+          : (response.Items ?? []).slice(0, remaining)
+      ))
+      if (limit !== undefined && items.length >= limit) {
+        break
+      }
       exclusiveStartKey = response.LastEvaluatedKey
     } while (exclusiveStartKey)
 
     return items.map(toTeamIssueItem)
   }
 
-  private async queryProjectIssueItems(directoryId: string, projectId: string) {
+  private async queryProjectIssueItems(
+    directoryId: string,
+    projectId: string,
+    options: WorkItemListReadOptions = {},
+  ) {
     const items: unknown[] = []
+    const limit = normalizeWorkItemListReadLimit(options.limit)
     let exclusiveStartKey: Record<string, unknown> | undefined
 
+    if (limit === 0) {
+      return []
+    }
+
     do {
+      const remaining = limit === undefined ? undefined : limit - items.length
       const response = await this.documentClient.send(
         new QueryCommand({
           TableName: this.issueTableName,
@@ -7111,10 +7600,18 @@ export class DynamoDbTeamIssuesClient {
           },
           ExclusiveStartKey: exclusiveStartKey,
           ScanIndexForward: true,
+          ...(remaining === undefined ? {} : { Limit: remaining }),
         }),
       )
 
-      items.push(...(response.Items ?? []))
+      items.push(...(
+        remaining === undefined
+          ? response.Items ?? []
+          : (response.Items ?? []).slice(0, remaining)
+      ))
+      if (limit !== undefined && items.length >= limit) {
+        break
+      }
       exclusiveStartKey = response.LastEvaluatedKey
     } while (exclusiveStartKey)
 
@@ -9344,6 +9841,14 @@ function isTeamIssueItem(value: unknown): value is TeamIssueItem {
     (value.description === undefined || typeof value.description === 'string') &&
     typeof value.assigneeUserId === 'string' &&
     (value.creatorMemberKey === undefined || typeof value.creatorMemberKey === 'string') &&
+    (
+      value.migrationSourceKey === undefined ||
+      isLegacyTaskMigrationSourceKey(
+        value.migrationSourceKey,
+        value.directoryId,
+        value.issueId,
+      )
+    ) &&
     isProjectTaskStatus(value.status) &&
     typeof value.dueDate === 'string' &&
     isProjectTaskPriority(value.priority) &&
@@ -10021,6 +10526,10 @@ function createDirectoryTeamId(directoryId: string, teamId: string) {
   return `${directoryId}#team#${teamId}`
 }
 
+function createTeamIssueLookupKey(teamId: string, issueId: string) {
+  return JSON.stringify([teamId, issueId])
+}
+
 function createDirectoryTeamIssueId(directoryId: string, teamId: string, issueId: string) {
   return `${createDirectoryTeamId(directoryId, teamId)}#issue#${issueId}`
 }
@@ -10097,6 +10606,33 @@ function createTeamIssueAuditCommentId(teamId: string, issueId: string, commentI
 
 function createDirectoryProjectId(directoryId: string, projectId: string) {
   return `${directoryId}#project#${projectId}`
+}
+
+function createLegacyTaskMigrationSourceKey(
+  directoryId: string,
+  projectId: string,
+  taskId: string,
+) {
+  return `${createDirectoryProjectId(directoryId, projectId)}#task#${taskId}`
+}
+
+function isLegacyTaskMigrationSourceKey(
+  value: unknown,
+  directoryId: string,
+  issueId: string,
+) {
+  if (typeof value !== 'string') {
+    return false
+  }
+
+  const prefix = `${directoryId}#project#`
+  if (!value.startsWith(prefix)) {
+    return false
+  }
+
+  const [projectId, taskId, ...unexpectedParts] = value.slice(prefix.length).split('#task#')
+
+  return Boolean(projectId) && taskId === issueId && unexpectedParts.length === 0
 }
 
 /**

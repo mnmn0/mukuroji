@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, setSystemTime, test } from 'bun:test'
 import {
   createMigratedWorkItem,
   createProjectOwnership,
@@ -6,8 +6,14 @@ import {
   createWorkItemMigrationFingerprint,
   hasEquivalentWorkItemState,
   hasCurrentWorkItemVersion,
+  planWorkItemMigrationMetadataBackfill,
   resolveProjectOwnerTeam,
 } from './work-item-migration'
+import { processLegacyTask } from '../scripts/migrate-work-items'
+
+afterEach(() => {
+  setSystemTime()
+})
 
 describe('Work Item state migration', () => {
   test('resolves a project with one active owner team', () => {
@@ -171,7 +177,7 @@ describe('Work Item state migration', () => {
   })
 
   test('creates a deterministic fingerprint for idempotent reruns', () => {
-    const first = createMigratedWorkItem({
+    const input = {
       teamId: 'core-team',
       task: {
         directoryId: 'workspace-1',
@@ -184,16 +190,26 @@ describe('Work Item state migration', () => {
         dueDate: '2026/06/03',
         priority: 'high',
       },
-    })
-    const second = structuredClone(first)
+    }
+    setSystemTime(new Date('2026-07-12T00:00:00.000Z'))
+    const firstGenerationTime = Date.now()
+    const first = createMigratedWorkItem(input)
+    setSystemTime(new Date('2026-07-13T00:00:00.000Z'))
+    const secondGenerationTime = Date.now()
+    const second = createMigratedWorkItem(input)
 
+    expect(firstGenerationTime).not.toBe(secondGenerationTime)
     expect(first.ok).toBe(true)
     expect(second.ok).toBe(true)
     if (!first.ok || !second.ok) {
       throw new Error('Expected migrated Work Items.')
     }
+    const fingerprint = first.item.migrationFingerprint
+    if (typeof fingerprint !== 'string') {
+      throw new Error('Expected a migration fingerprint.')
+    }
     expect(first.item.migrationFingerprint).toBe(second.item.migrationFingerprint)
-    expect(createWorkItemMigrationFingerprint(first.item)).toBe(first.item.migrationFingerprint)
+    expect(createWorkItemMigrationFingerprint(first.item)).toBe(fingerprint)
   })
 
   test('rejects legacy rows with unsupported canonical values', () => {
@@ -254,5 +270,286 @@ describe('Work Item state migration', () => {
 
     expect(hasEquivalentWorkItemState(canonicalSeed, migrated)).toBe(true)
     expect(hasEquivalentWorkItemState({ ...canonicalSeed, status: 'done' }, migrated)).toBe(false)
+  })
+
+  test('plans a metadata-only backfill for an equivalent canonical seed', () => {
+    const migrated = {
+      directoryId: 'workspace-1',
+      directoryTeamId: 'workspace-1#team#core-team',
+      directoryProjectId: 'workspace-1#project#refero',
+      teamId: 'core-team',
+      assignedProjectId: 'refero',
+      issueId: 'wireframe',
+      sortOrder: 10,
+      title: 'tasks.item.wireframe',
+      titleKey: 'tasks.item.wireframe',
+      assigneeUserId: 'sato@example.com',
+      status: 'todo',
+      dueDate: '2026/06/03',
+      priority: 'high',
+      schemaVersion: 1,
+      revision: 1,
+      migrationSource: 'legacy-project-task',
+      migrationSourceKey: 'workspace-1#project#refero#task#wireframe',
+      migrationTitleFallback: true,
+    }
+    const canonicalSeed = {
+      ...migrated,
+      title: 'Wireframe',
+      migrationSource: undefined,
+      migrationSourceKey: undefined,
+      migrationTitleFallback: undefined,
+    }
+    const before = structuredClone(canonicalSeed)
+
+    expect(planWorkItemMigrationMetadataBackfill(canonicalSeed, migrated)).toEqual({
+      action: 'backfill',
+      expectedRevision: 1,
+      metadata: {
+        migrationSource: 'legacy-project-task',
+        migrationSourceKey: 'workspace-1#project#refero#task#wireframe',
+      },
+    })
+    expect(canonicalSeed).toEqual(before)
+  })
+
+  test('keeps a metadata backfill idempotent without comparing later business edits', () => {
+    const migrated = {
+      directoryId: 'workspace-1',
+      directoryTeamId: 'workspace-1#team#core-team',
+      directoryProjectId: 'workspace-1#project#refero',
+      teamId: 'core-team',
+      assignedProjectId: 'refero',
+      issueId: 'wireframe',
+      sortOrder: 10,
+      title: 'Wireframe',
+      assigneeUserId: 'sato@example.com',
+      status: 'todo',
+      dueDate: '2026/06/03',
+      priority: 'high',
+      schemaVersion: 1,
+      revision: 1,
+      migrationSource: 'legacy-project-task',
+      migrationSourceKey: 'workspace-1#project#refero#task#wireframe',
+    }
+
+    expect(planWorkItemMigrationMetadataBackfill({
+      ...migrated,
+      revision: 4,
+      status: 'done',
+    }, migrated)).toEqual({ action: 'unchanged' })
+    expect(planWorkItemMigrationMetadataBackfill({
+      ...migrated,
+      migrationSource: undefined,
+    }, migrated)).toEqual({ action: 'unchanged' })
+    expect(planWorkItemMigrationMetadataBackfill({
+      ...migrated,
+      migrationSourceKey: 'workspace-1#project#other#task#wireframe',
+    }, migrated)).toMatchObject({ action: 'conflict' })
+    expect(planWorkItemMigrationMetadataBackfill({
+      ...migrated,
+      migrationSource: ' legacy-project-task ',
+    }, migrated)).toMatchObject({ action: 'conflict' })
+    expect(planWorkItemMigrationMetadataBackfill({
+      ...migrated,
+      migrationSourceKey: ' workspace-1#project#refero#task#wireframe ',
+    }, migrated)).toMatchObject({ action: 'conflict' })
+  })
+
+  test('rejects metadata backfill when equivalent seed business state changed', () => {
+    const migrated = {
+      directoryId: 'workspace-1',
+      directoryTeamId: 'workspace-1#team#core-team',
+      directoryProjectId: 'workspace-1#project#refero',
+      teamId: 'core-team',
+      assignedProjectId: 'refero',
+      issueId: 'wireframe',
+      sortOrder: 10,
+      title: 'Wireframe',
+      assigneeUserId: 'sato@example.com',
+      status: 'todo',
+      dueDate: '2026/06/03',
+      priority: 'high',
+      schemaVersion: 1,
+      revision: 1,
+      migrationSource: 'legacy-project-task',
+      migrationSourceKey: 'workspace-1#project#refero#task#wireframe',
+    }
+    const canonical = {
+      ...migrated,
+      migrationSource: undefined,
+      migrationSourceKey: undefined,
+      status: 'done',
+    }
+
+    expect(planWorkItemMigrationMetadataBackfill(canonical, migrated))
+      .toMatchObject({ action: 'conflict' })
+  })
+
+  test('maps dry-run, verify, and apply modes for a metadata-only backfill', async () => {
+    const task = {
+      directoryId: 'workspace-1',
+      projectId: 'refero',
+      taskId: 'wireframe',
+      sortOrder: 10,
+      titleKey: 'tasks.item.wireframe',
+      assigneeUserId: 'sato@example.com',
+      status: 'todo',
+      dueDate: '2026/06/03',
+      priority: 'high',
+    }
+    const canonicalSeed = {
+      directoryId: 'workspace-1',
+      directoryTeamId: 'workspace-1#team#core-team',
+      directoryProjectId: 'workspace-1#project#refero',
+      teamId: 'core-team',
+      assignedProjectId: 'refero',
+      issueId: 'wireframe',
+      sortOrder: 10,
+      title: 'Wireframe',
+      titleKey: 'tasks.item.wireframe',
+      assigneeUserId: 'sato@example.com',
+      status: 'todo',
+      dueDate: '2026/06/03',
+      priority: 'high',
+      schemaVersion: 1,
+      revision: 1,
+    }
+    const ownership = createProjectOwnership([
+      { directoryId: 'workspace-1', entryType: 'team', teamId: 'core-team' },
+      {
+        directoryId: 'workspace-1',
+        entryType: 'project',
+        projectId: 'refero',
+        teamId: 'core-team',
+      },
+    ])
+    const createOptions = (mode: 'apply' | 'dry-run' | 'verify') => ({
+      checkpointPath: 'unused',
+      dryRun: mode === 'dry-run',
+      help: false,
+      projectTeamMappings: new Map<string, string>(),
+      verify: mode === 'verify',
+    })
+    const run = async (mode: 'apply' | 'dry-run' | 'verify') => {
+      const sentInputs: Array<Record<string, unknown>> = []
+      const client = {
+        async send(command: { input: Record<string, unknown> }) {
+          sentInputs.push(command.input)
+          return 'Key' in command.input ? { Item: canonicalSeed } : {}
+        },
+      }
+      const result = await processLegacyTask(
+        task,
+        ownership,
+        client as never,
+        'WorkItemsTable',
+        createOptions(mode),
+      )
+
+      return { result, sentInputs }
+    }
+
+    const dryRun = await run('dry-run')
+    const verify = await run('verify')
+    const apply = await run('apply')
+
+    expect(dryRun.result).toBe('written')
+    expect(dryRun.sentInputs).toHaveLength(1)
+    expect(verify.result).toBe('conflict')
+    expect(verify.sentInputs).toHaveLength(1)
+    expect(apply.result).toBe('written')
+    expect(apply.sentInputs).toHaveLength(2)
+    expect(apply.sentInputs[1]).toMatchObject({
+      ConditionExpression:
+        'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
+        '#schemaVersion = :schemaVersion AND #revision = :expectedRevision AND ' +
+        'attribute_not_exists(#migrationSourceKey) AND ' +
+        'attribute_not_exists(#migrationSource)',
+      ExpressionAttributeValues: {
+        ':expectedRevision': 1,
+        ':migrationSource': 'legacy-project-task',
+        ':migrationSourceKey': 'workspace-1#project#refero#task#wireframe',
+        ':schemaVersion': 1,
+      },
+      UpdateExpression:
+        'SET #migrationSource = :migrationSource, #migrationSourceKey = :migrationSourceKey',
+    })
+    expect(apply.sentInputs[1]).not.toHaveProperty('title')
+    expect(canonicalSeed).not.toHaveProperty('migrationSourceKey')
+  })
+
+  test('classifies only the same metadata as a duplicate after a conditional race', async () => {
+    const task = {
+      directoryId: 'workspace-1',
+      projectId: 'refero',
+      taskId: 'wireframe',
+      sortOrder: 10,
+      title: 'Wireframe',
+      assigneeUserId: 'sato@example.com',
+      status: 'todo',
+      dueDate: '2026/06/03',
+      priority: 'high',
+    }
+    const canonicalSeed = {
+      ...task,
+      directoryTeamId: 'workspace-1#team#core-team',
+      directoryProjectId: 'workspace-1#project#refero',
+      teamId: 'core-team',
+      assignedProjectId: 'refero',
+      issueId: 'wireframe',
+      schemaVersion: 1,
+      revision: 1,
+    }
+    const ownership = createProjectOwnership([
+      { directoryId: 'workspace-1', entryType: 'team', teamId: 'core-team' },
+      {
+        directoryId: 'workspace-1',
+        entryType: 'project',
+        projectId: 'refero',
+        teamId: 'core-team',
+      },
+    ])
+    const options = {
+      checkpointPath: 'unused',
+      dryRun: false,
+      help: false,
+      projectTeamMappings: new Map<string, string>(),
+      verify: false,
+    }
+    const runRace = async (migrationSourceKey: string) => {
+      let readCount = 0
+      const client = {
+        async send(command: { input: Record<string, unknown> }) {
+          if ('UpdateExpression' in command.input) {
+            throw { name: 'ConditionalCheckFailedException' }
+          }
+
+          readCount += 1
+          return {
+            Item: readCount === 1
+              ? canonicalSeed
+              : {
+                  ...canonicalSeed,
+                  migrationSource: 'legacy-project-task',
+                  migrationSourceKey,
+                },
+          }
+        },
+      }
+
+      return processLegacyTask(
+        task,
+        ownership,
+        client as never,
+        'WorkItemsTable',
+        options,
+      )
+    }
+
+    await expect(runRace('workspace-1#project#refero#task#wireframe'))
+      .resolves.toBe('duplicate')
+    await expect(runRace('workspace-1#project#other#task#wireframe'))
+      .resolves.toBe('conflict')
   })
 })

@@ -34,6 +34,10 @@ import {
 } from '../issues/api'
 import { IssueCollaborationPanel } from '../issues/IssueCollaborationPanel'
 import {
+  resolveWorkItemAssignee,
+  resolveWorkItemTitle,
+} from '../issues/workItemDisplay'
+import {
   type IssueCollaborationController,
   useIssueCollaboration,
 } from '../issues/useIssueCollaboration'
@@ -489,7 +493,7 @@ export function TeamIssueScreen({
   const activeTeam = teams.find((team) => team.id === teamId)
   const selectedIssue = issues.find((issue) => issue.id === selectedIssueId)
   const selectedIssueUpdateErrorKey = selectedIssue
-    ? JSON.stringify([selectedIssue.teamId, selectedIssue.id, selectedIssue.revision])
+    ? JSON.stringify([selectedIssue.teamId, selectedIssue.id])
     : undefined
   const detailErrorMessageLocal = detailUpdateError && detailUpdateError[0] === selectedIssueUpdateErrorKey
     ? detailUpdateError[1]
@@ -510,7 +514,7 @@ export function TeamIssueScreen({
 
         return [
           resolveIssueTitle(issue, t),
-          resolveIssueAssignee(issue),
+          resolveWorkItemAssignee(issue, t),
           resolveAssignedProjectName(issue, activeTeam, t),
           t(`tasks.status.${issue.status}`),
           t(`tasks.priority.${issue.priority}`),
@@ -956,7 +960,7 @@ function IssueTable({
                     </button>
                   </td>
                   <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveAssignedProjectName(issue, activeTeam, t)}</td>
-                  <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveIssueAssignee(issue)}</td>
+                  <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveWorkItemAssignee(issue, t)}</td>
                   <td className="px-4 py-4"><IssueStatusBadge status={issue.status} t={t} /></td>
                   <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{issue.dueDate}</td>
                   <td className="px-4 py-4"><IssuePriorityBadge priority={issue.priority} t={t} /></td>
@@ -1135,7 +1139,7 @@ function IssueDetailPane({
               {t('issues.create.assignee')}
               <select className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.assigneeUserId} name="assigneeUserId">
                 {!hasSelectedAssigneeOption ? (
-                  <option value={issue.assigneeUserId}>{resolveIssueAssignee(issue)}</option>
+                  <option value={issue.assigneeUserId}>{resolveWorkItemAssignee(issue, t)}</option>
                 ) : null}
                 {assigneeOptions.map((member) => (
                   <option key={member.id} value={member.id}>{formatProjectMemberOption(member)}</option>
@@ -1214,16 +1218,7 @@ function formatLocalDateInputValue(date = new Date()) {
 }
 
 function resolveIssueTitle(issue: TeamIssue, t: (key: MessageKey) => string) {
-  return issue.titleKey ? t(issue.titleKey) : (issue.title ?? issue.id)
-}
-
-function resolveIssueAssignee(issue: TeamIssue) {
-  return issue.assigneeName ??
-    issue.assigneeEmail ??
-    issue.assigneeUserId ??
-    issue.assignee ??
-    issue.assigneeKey ??
-    ''
+  return resolveWorkItemTitle(issue, t)
 }
 
 function resolveAssignedProjectName(

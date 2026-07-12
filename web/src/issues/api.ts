@@ -520,6 +520,7 @@ export class TeamIssuesApiError extends Error {
 const issuesApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_TASKS_API_BASE_URL ?? import.meta.env.VITE_API_BASE_URL ?? '/api',
 )
+const defaultIssuesApiErrorMessage = 'Unable to complete the Work Item request.'
 
 /**
  * DynamoDB に保存されたチーム所有 Issue を Lambda API 経由で取得します。
@@ -1081,9 +1082,10 @@ function readApiError(data: unknown) {
   const message = typeof data === 'object' &&
     data !== null &&
     'message' in data &&
-    typeof data.message === 'string'
+    typeof data.message === 'string' &&
+    data.message.trim().length > 0
     ? data.message
-    : 'issues.error.loading'
+    : defaultIssuesApiErrorMessage
   const code = typeof data === 'object' &&
     data !== null &&
     'code' in data &&
@@ -1104,7 +1106,7 @@ async function readJson<T>(response: Response): Promise<T> {
   try {
     return JSON.parse(text) as T
   } catch {
-    return { message: text } as T
+    return {} as T
   }
 }
 

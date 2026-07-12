@@ -31,6 +31,10 @@ import {
   updateTeamIssue,
 } from '../issues/api'
 import {
+  resolveWorkItemAssignee,
+  resolveWorkItemTitle,
+} from '../issues/workItemDisplay'
+import {
   archiveProjectDirectoryProject,
   archiveProjectDirectoryTeam,
   createProjectDirectoryProject,
@@ -2754,24 +2758,12 @@ function filterTasksByProjectIds(tasks: ProjectTask[], projectIds: readonly stri
   ))
 }
 
-function filterTasksByProjectIdsStrict(tasks: ProjectTask[], projectIds: readonly string[]) {
-  const projectIdSet = new Set(projectIds)
-
-  if (projectIdSet.size === 0) {
-    return []
-  }
-
-  return tasks.filter((task) => Boolean(
-    task.assignedProjectId && projectIdSet.has(task.assignedProjectId),
-  ))
-}
-
 function filterTasksByTeamProjectIds(
   tasks: ProjectTask[],
   projectIds: readonly string[],
   teamId?: string,
 ) {
-  return filterTasksByProjectIdsStrict(tasks, projectIds).filter(
+  return filterTasksByProjectIds(tasks, projectIds).filter(
     (task) => !teamId || !task.teamId || task.teamId === teamId,
   )
 }
@@ -2790,15 +2782,11 @@ function createDashboardSummary(
 }
 
 function resolveTaskTitle(task: ProjectTask, t: (key: MessageKey) => string) {
-  return task.titleKey ? t(task.titleKey) : (task.title ?? task.id)
+  return resolveWorkItemTitle(task, t)
 }
 
 function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) {
-  return task.assigneeName ??
-    task.assigneeEmail ??
-    task.assigneeUserId ??
-    task.assignee ??
-    (task.assigneeKey ? t(task.assigneeKey) : '')
+  return resolveWorkItemAssignee(task, t)
 }
 
 function createActionQueueTasks(tasks: ProjectTask[]) {

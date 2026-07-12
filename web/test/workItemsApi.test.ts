@@ -85,6 +85,36 @@ describe('canonical Work Item API', () => {
       })
     }
   })
+
+  test('uses readable fallback text for a non-JSON error response', async () => {
+    globalThis.fetch = (async () => new Response('<html>Bad Gateway</html>', {
+      headers: { 'Content-Type': 'text/html' },
+      status: 502,
+    })) as typeof fetch
+
+    const error = await getWorkspaceWorkItems('access-token').catch((reason: unknown) => reason)
+
+    expect(error).toBeInstanceOf(TeamIssuesApiError)
+    expect(error).toMatchObject({
+      message: 'Unable to complete the Work Item request.',
+      status: 502,
+    })
+  })
+
+  test('uses readable fallback text when the JSON error message is invalid', async () => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({ message: '  ' }), {
+      headers: { 'Content-Type': 'application/json' },
+      status: 500,
+    })) as typeof fetch
+
+    const error = await getWorkspaceWorkItems('access-token').catch((reason: unknown) => reason)
+
+    expect(error).toBeInstanceOf(TeamIssuesApiError)
+    expect(error).toMatchObject({
+      message: 'Unable to complete the Work Item request.',
+      status: 500,
+    })
+  })
 })
 
 function createWorkItem(overrides: Record<string, unknown> = {}) {

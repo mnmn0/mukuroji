@@ -55,6 +55,10 @@ import {
 } from '../issues/api'
 import { IssueCollaborationPanel } from '../issues/IssueCollaborationPanel'
 import {
+  resolveWorkItemAssignee,
+  resolveWorkItemTitle,
+} from '../issues/workItemDisplay'
+import {
   type IssueCollaborationController,
   useIssueCollaboration,
 } from '../issues/useIssueCollaboration'
@@ -513,18 +517,10 @@ export function TaskPage() {
     apiSWRConfig,
   )
   const [issueUpdateError, setIssueUpdateError] = useState<readonly [string, string] | undefined>()
-  const selectedDetailIssue = selectedIssueDetail?.issue
-  const selectedIssueForUpdateError = selectedDetailIssue &&
-    resolvedSelectedIssue &&
-    selectedDetailIssue.id === resolvedSelectedIssue.id &&
-    selectedDetailIssue.teamId === resolvedSelectedIssue.teamId
-    ? selectedDetailIssue
-    : resolvedSelectedIssue
-  const selectedIssueUpdateErrorKey = selectedIssueForUpdateError
+  const selectedIssueUpdateErrorKey = resolvedSelectedIssue
     ? JSON.stringify([
-        selectedIssueForUpdateError.teamId,
-        selectedIssueForUpdateError.id,
-        selectedIssueForUpdateError.revision,
+        resolvedSelectedIssue.teamId,
+        resolvedSelectedIssue.id,
       ])
     : undefined
   const issueUpdateErrorMessage = issueUpdateError && issueUpdateError[0] === selectedIssueUpdateErrorKey
@@ -775,7 +771,6 @@ export function TaskPage() {
     const currentIssueUpdateErrorKey = JSON.stringify([
       currentIssue.teamId,
       currentIssue.id,
-      currentIssue.revision,
     ])
 
     try {
@@ -2287,7 +2282,7 @@ function TaskDetailPane({
   const title = issue ? resolveTeamIssueTitle(issue, t) : resolveTaskTitle(task, t)
   const assigneeUserId = issue?.assigneeUserId ?? task.assigneeUserId ?? ''
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === assigneeUserId)
-  const assigneeLabel = issue ? resolveTeamIssueAssignee(issue) : resolveTaskAssignee(task, t)
+  const assigneeLabel = issue ? resolveWorkItemAssignee(issue, t) : resolveTaskAssignee(task, t)
   const dueDate = issue?.dueDate ?? task.dueDate
   const assignedProjectId = issue?.assignedProjectId ?? task.assignedProjectId ?? ''
 
@@ -2977,28 +2972,15 @@ function formatDateInputValue(value: string) {
 }
 
 function resolveTaskTitle(task: ProjectTask, t: (key: MessageKey) => string) {
-  return task.titleKey ? t(task.titleKey) : (task.title ?? task.id)
+  return resolveWorkItemTitle(task, t)
 }
 
 function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) {
-  return task.assigneeName ??
-    task.assigneeEmail ??
-    task.assigneeUserId ??
-    task.assignee ??
-    (task.assigneeKey ? t(task.assigneeKey) : '')
+  return resolveWorkItemAssignee(task, t)
 }
 
 function resolveTeamIssueTitle(issue: TeamIssue, t: (key: MessageKey) => string) {
-  return issue.titleKey ? t(issue.titleKey) : (issue.title ?? issue.id)
-}
-
-function resolveTeamIssueAssignee(issue: TeamIssue) {
-  return issue.assigneeName ??
-    issue.assigneeEmail ??
-    issue.assigneeUserId ??
-    issue.assignee ??
-    issue.assigneeKey ??
-    ''
+  return resolveWorkItemTitle(issue, t)
 }
 
 function formatProjectMemberOption(member: ProjectMember) {

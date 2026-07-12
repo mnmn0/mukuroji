@@ -675,9 +675,15 @@ test('canonical Work Item seed replaces legacy task writes and preserves demo da
   expect(workItemPayload).toContain('assignedProjectId');
   expect(workItemPayload).toContain('2026-06-01T00:00:00.000Z');
   expect(workItemPayload).toContain('dynamodb');
+  expect(workItemPayload).toContain('legacy-project-task');
+  expect(workItemPayload).toContain(
+    '{{Ref:WorkspaceDirectoryId}}#project#refero#task#wireframe',
+  );
   expect(workItemPayload.match(/schemaVersion/g)).toHaveLength(10);
   expect(workItemPayload.match(/revision/g)).toHaveLength(10);
   expect(workItemPayload.match(/workItemId/g)).toHaveLength(10);
+  expect(workItemPayload.match(/migrationSourceKey/g)).toHaveLength(10);
+  expect(workItemPayload.match(/migrationSource/g)).toHaveLength(20);
   expect(JSON.stringify(canonicalWorkItemSeedPolicyEntry?.[1])).toContain('TeamIssuesTable189D851D');
   expect(JSON.stringify(canonicalWorkItemSeedPolicyEntry?.[1])).not.toContain('ProjectTasksTableE21F6637');
   expect(directoryPayload).toContain('WorkspaceDirectoryId');

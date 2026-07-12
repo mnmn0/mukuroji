@@ -14,9 +14,9 @@ import {
   createMigratedWorkItem,
   createProjectOwnership,
   createProjectOwnershipKey,
-  hasEquivalentWorkItemState,
   hasCurrentWorkItemVersion,
   hasUnsupportedWorkItemVersion,
+  planWorkItemMigrationMetadataBackfill,
   resolveProjectOwnerTeam,
   type MigrationItem,
 } from '../src/work-item-migration'
@@ -71,7 +71,7 @@ type MigrationOptions = {
 type MigrationCounters = {
   /** Scan した item 数です。 */
   scanned: number
-  /** 新規作成または version 補完した item 数です。 */
+  /** 新規作成、version または migration metadata を補完した item 数です。 */
   written: number
   /** 既に同じ状態だった item 数です。 */
   unchanged: number
@@ -326,7 +326,10 @@ async function processWorkItem(
   }
 }
 
-async function processLegacyTask(
+/**
+ * Legacy task を新規 canonical row または metadata-only backfill として処理します。
+ */
+export async function processLegacyTask(
   task: MigrationItem,
   ownership: ReturnType<typeof createProjectOwnership>,
   client: DynamoDBDocumentClient,
@@ -361,14 +364,76 @@ async function processLegacyTask(
   const issueId = converted.item.issueId as string
   const current = await readWorkItem(client, workItemsTableName, directoryTeamId, issueId)
   if (current) {
-    if (
-      current.migrationFingerprint === converted.item.migrationFingerprint ||
-      hasEquivalentWorkItemState(current, converted.item)
-    ) {
+    const metadataPlan = planWorkItemMigrationMetadataBackfill(current, converted.item)
+    if (metadataPlan.action === 'unchanged') {
       return 'unchanged'
     }
-    console.error(`Work Item collision: ${directoryTeamId}/${issueId}`)
-    return 'conflict'
+    if (metadataPlan.action === 'conflict') {
+      console.error(
+        `Work Item collision: ${directoryTeamId}/${issueId}: ${metadataPlan.reason}`,
+      )
+      return 'conflict'
+    }
+    if (options.verify) {
+      console.error(`Work Item migration metadata is missing: ${directoryTeamId}/${issueId}`)
+      return 'conflict'
+    }
+    if (options.dryRun) {
+      return 'written'
+    }
+
+    const names = {
+      '#migrationSource': 'migrationSource',
+      '#migrationSourceKey': 'migrationSourceKey',
+      '#revision': 'revision',
+      '#schemaVersion': 'schemaVersion',
+    }
+    const values = {
+      ':expectedRevision': metadataPlan.expectedRevision,
+      ':migrationSource': metadataPlan.metadata.migrationSource,
+      ':migrationSourceKey': metadataPlan.metadata.migrationSourceKey,
+      ':schemaVersion': WORK_ITEM_SCHEMA_VERSION,
+    }
+    const migrationSourceCondition = current.migrationSource === undefined
+      ? 'attribute_not_exists(#migrationSource)'
+      : '#migrationSource = :migrationSource'
+
+    try {
+      await client.send(
+        new UpdateCommand({
+          TableName: workItemsTableName,
+          Key: { directoryTeamId, issueId },
+          UpdateExpression:
+            'SET #migrationSource = :migrationSource, #migrationSourceKey = :migrationSourceKey',
+          ConditionExpression: [
+            'attribute_exists(directoryTeamId)',
+            'attribute_exists(issueId)',
+            '#schemaVersion = :schemaVersion',
+            '#revision = :expectedRevision',
+            'attribute_not_exists(#migrationSourceKey)',
+            migrationSourceCondition,
+          ].join(' AND '),
+          ExpressionAttributeNames: names,
+          ExpressionAttributeValues: values,
+        }),
+      )
+      return 'written'
+    } catch (error) {
+      if (!isNamedError(error, 'ConditionalCheckFailedException')) {
+        throw error
+      }
+
+      const racedItem = await readWorkItem(
+        client,
+        workItemsTableName,
+        directoryTeamId,
+        issueId,
+      )
+      return racedItem &&
+        planWorkItemMigrationMetadataBackfill(racedItem, converted.item).action === 'unchanged'
+        ? 'duplicate'
+        : 'conflict'
+    }
   }
 
   if (options.verify) {
@@ -394,10 +459,8 @@ async function processLegacyTask(
     }
 
     const racedItem = await readWorkItem(client, workItemsTableName, directoryTeamId, issueId)
-    return racedItem && (
-      racedItem.migrationFingerprint === converted.item.migrationFingerprint ||
-      hasEquivalentWorkItemState(racedItem, converted.item)
-    )
+    return racedItem &&
+      planWorkItemMigrationMetadataBackfill(racedItem, converted.item).action === 'unchanged'
       ? 'duplicate'
       : 'conflict'
   }
@@ -715,7 +778,9 @@ function printHelp() {
     `  --help                            Show this help`)
 }
 
-main().catch((error: unknown) => {
-  console.error(error)
-  process.exitCode = 1
-})
+if (import.meta.main) {
+  main().catch((error: unknown) => {
+    console.error(error)
+    process.exitCode = 1
+  })
+}

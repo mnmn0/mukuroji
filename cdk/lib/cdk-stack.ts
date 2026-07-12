@@ -318,6 +318,10 @@ function createCanonicalWorkItemTransactItems(tableName: string, directoryId: st
           createdAt: { S: canonicalWorkItemSeedTimestamp },
           updatedAt: { S: canonicalWorkItemSeedTimestamp },
           source: { S: 'dynamodb' },
+          migrationSource: { S: 'legacy-project-task' },
+          migrationSourceKey: {
+            S: `${createDirectoryProjectId(directoryId, projectId)}#task#${workItemId}`,
+          },
         },
       },
     };

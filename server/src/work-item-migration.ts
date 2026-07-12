@@ -33,6 +33,35 @@ export type LegacyWorkItemMigrationResult =
       reason: string
     }
 
+/** Existing canonical row に安全に補完する migration metadata です。 */
+export type WorkItemMigrationMetadata = {
+  /** Legacy project task migration の種別です。 */
+  migrationSource: string
+  /** Workspace / source project / task に scope-bound な安定 key です。 */
+  migrationSourceKey: string
+}
+
+/** Existing canonical row の migration metadata 補完判定です。 */
+export type WorkItemMigrationMetadataPlan =
+  | {
+      /** 同じ source metadata がすでに存在することを表します。 */
+      action: 'unchanged'
+    }
+  | {
+      /** Metadata だけを conditional update で補完できることを表します。 */
+      action: 'backfill'
+      /** Race を検出する canonical row の現在 revision です。 */
+      expectedRevision: number
+      /** 業務 field を含まない補完対象 metadata です。 */
+      metadata: WorkItemMigrationMetadata
+    }
+  | {
+      /** 安全に補完できない衝突を表します。 */
+      action: 'conflict'
+      /** Operator が確認する衝突理由です。 */
+      reason: string
+    }
+
 /**
  * Workspace / Project を一意に識別する内部 key を作成します。
  */
@@ -296,6 +325,97 @@ export function hasEquivalentWorkItemState(
     optionalSourceFields.every((field) =>
       migrated[field] === undefined || current[field] === migrated[field],
     )
+}
+
+/**
+ * Existing canonical row と legacy projection を比較し、metadata だけの補完を計画します。
+ *
+ * @remarks
+ * `migrationSourceKey` が同じ row は再実行済みとします。key が未設定の場合だけ業務 state の
+ * 等価性を確認し、revision と metadata の conditional update 用情報を返します。
+ */
+export function planWorkItemMigrationMetadataBackfill(
+  current: MigrationItem,
+  migrated: MigrationItem,
+): WorkItemMigrationMetadataPlan {
+  const migrationSource = readString(migrated.migrationSource)
+  const migrationSourceKey = readString(migrated.migrationSourceKey)
+  if (
+    !migrationSource ||
+    migrated.migrationSource !== migrationSource ||
+    !migrationSourceKey ||
+    migrated.migrationSourceKey !== migrationSourceKey
+  ) {
+    return {
+      action: 'conflict',
+      reason: 'Migrated Work Item is missing source metadata.',
+    }
+  }
+
+  const currentMigrationSource = readString(current.migrationSource)
+  const currentMigrationSourceKey = readString(current.migrationSourceKey)
+  if (
+    current.migrationSource !== undefined &&
+    current.migrationSource !== currentMigrationSource
+  ) {
+    return {
+      action: 'conflict',
+      reason: 'Existing Work Item has invalid migrationSource metadata.',
+    }
+  }
+  if (
+    current.migrationSourceKey !== undefined &&
+    current.migrationSourceKey !== currentMigrationSourceKey
+  ) {
+    return {
+      action: 'conflict',
+      reason: 'Existing Work Item has invalid migrationSourceKey metadata.',
+    }
+  }
+
+  if (currentMigrationSourceKey) {
+    if (currentMigrationSourceKey !== migrationSourceKey) {
+      return {
+        action: 'conflict',
+        reason: 'Existing Work Item belongs to another migration source.',
+      }
+    }
+    if (currentMigrationSource && currentMigrationSource !== migrationSource) {
+      return {
+        action: 'conflict',
+        reason: 'Existing Work Item has conflicting migrationSource metadata.',
+      }
+    }
+
+    return { action: 'unchanged' }
+  }
+
+  if (currentMigrationSource && currentMigrationSource !== migrationSource) {
+    return {
+      action: 'conflict',
+      reason: 'Existing Work Item has conflicting migrationSource metadata.',
+    }
+  }
+  if (!hasEquivalentWorkItemState(current, migrated)) {
+    return {
+      action: 'conflict',
+      reason: 'Existing Work Item business state differs from the legacy source.',
+    }
+  }
+
+  const expectedRevision = current.revision
+  if (!Number.isSafeInteger(expectedRevision) || (expectedRevision as number) < 1) {
+    return {
+      action: 'conflict',
+      reason: 'Existing Work Item revision cannot guard a metadata backfill.',
+    }
+  }
+
+  return {
+    action: 'backfill',
+    expectedRevision: expectedRevision as number,
+    metadata: { migrationSource, migrationSourceKey },
+  }
 }
 
 /** Canonical Work Item schema metadata が有効かを判定します。 */
