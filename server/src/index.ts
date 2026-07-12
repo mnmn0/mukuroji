@@ -7278,21 +7278,25 @@ function readCognitoUserAttribute(user: CognitoUserRecord, name: string) {
 }
 
 function readCognitoUserDirectoryId(user: CognitoUserRecord) {
-  for (const attributeName of projectDirectoryIdAttributeNames) {
-    const directoryId = readCognitoUserAttribute(user, attributeName)?.trim()
+  const directoryId = readCognitoUserAttribute(user, 'custom:directory_id')?.trim() || undefined
+  const workspaceId = readCognitoUserAttribute(user, 'custom:workspace_id')?.trim() || undefined
 
-    if (directoryId) {
-      return directoryId
-    }
+  if (directoryId && workspaceId && directoryId !== workspaceId) {
+    throw new CognitoServiceError(
+      409,
+      'WorkspaceDirectoryConflict',
+      'Cognito user has conflicting Workspace directory attributes.',
+    )
   }
 
-  return undefined
+  return directoryId ?? workspaceId
 }
 
 function createWorkspaceCognitoUserAttributes(email: string, directoryId: string, name?: string) {
   return [
     { Name: 'email', Value: normalizeCognitoUserId(email) },
     { Name: 'custom:directory_id', Value: directoryId },
+    { Name: 'custom:workspace_id', Value: directoryId },
     ...(name?.trim() ? [{ Name: 'name', Value: name.trim() }] : []),
   ]
 }
