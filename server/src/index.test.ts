@@ -1,14 +1,18 @@
 import { afterEach, expect, test } from 'bun:test'
+import type { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import type { LambdaEvent } from 'hono/aws-lambda'
 import { createAuditEvent, createMutationAuditContext } from './audit'
 import {
   app,
+  AwsCognitoClient,
   CognitoServiceError,
   configureApiClientsForTest,
   DynamoDbDashboardSummaryClient,
   DynamoDbProjectDirectoryClient,
   DynamoDbProjectTasksClient,
+  handler,
   resetApiClientsForTest,
   WorkspaceAccessError,
   type ProjectRole,
@@ -18,6 +22,365 @@ import {
 
 afterEach(() => {
   resetApiClientsForTest()
+})
+
+test('serves the same authenticated API contract from Function URL root and /api paths', async () => {
+  await withTestEnvironment(
+    {
+      AWS_LAMBDA_FUNCTION_NAME: 'mukuroji-api-test',
+      COGNITO_CLIENT_ID: 'mukuroji-client',
+      COGNITO_ISSUER: '   ',
+      COGNITO_USER_POOL_ID: 'us-east-1_mukuroji',
+      MUKUROJI_WORKSPACE_DIRECTORY_ID: 'workspace#production',
+    },
+    async () => {
+      const calls = configureFakeProjectClients(true)
+      configureFakeAuthenticatedUser({
+        email: 'Demo@Example.com',
+        'custom:directory_id': 'workspace#production',
+        'custom:workspace_id': 'workspace#production',
+      })
+      const accessToken = createAccessToken([], {
+        client_id: 'mukuroji-client',
+        iss: 'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_mukuroji',
+        token_use: 'access',
+      })
+
+      const directResponse = await handler(createLambdaHttpEvent('/teams/projects', accessToken))
+      const prefixedResponse = await handler(createLambdaHttpEvent('/api/teams/projects', accessToken))
+
+      expect(directResponse.statusCode).toBe(200)
+      expect(prefixedResponse.statusCode).toBe(200)
+      expect(JSON.parse(directResponse.body)).toEqual(JSON.parse(prefixedResponse.body))
+      expect(calls.directoryReads).toEqual([
+        { directoryId: 'workspace#production', locale: 'ja' },
+        { directoryId: 'workspace#production', locale: 'ja' },
+      ])
+    },
+  )
+})
+
+test('rejects conflicting Cognito directory attributes on auth me', async () => {
+  configureFakeProjectClients(true)
+  configureFakeAuthenticatedUser({
+    email: 'demo@example.com',
+    'custom:directory_id': 'workspace#one',
+    'custom:workspace_id': 'workspace#two',
+  })
+
+  const response = await app.request('/api/auth/me', {
+    headers: {
+      Authorization: 'Bearer test-token',
+    },
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toEqual({
+    message: 'Cognito workspace does not match the configured workspace.',
+  })
+})
+
+test('rejects a Cognito directory that differs from the configured DynamoDB workspace partition', async () => {
+  await withTestEnvironment(
+    { MUKUROJI_WORKSPACE_DIRECTORY_ID: 'workspace#production' },
+    async () => {
+      const calls = configureFakeProjectClients(true)
+      configureFakeAuthenticatedUser({
+        email: 'demo@example.com',
+        'custom:directory_id': 'workspace#other',
+      })
+
+      const response = await app.request('/api/teams/projects', {
+        headers: {
+          Authorization: 'Bearer test-token',
+        },
+      })
+
+      expect(response.status).toBe(403)
+      expect(await response.json()).toEqual({
+        message: 'Cognito workspace does not match the configured workspace.',
+      })
+      expect(calls.directoryReads).toEqual([])
+    },
+  )
+})
+
+test('accepts one Cognito workspace attribute with the legacy directory environment fallback', async () => {
+  await withTestEnvironment(
+    {
+      MUKUROJI_PROJECT_DIRECTORY_ID: 'workspace#legacy',
+      MUKUROJI_WORKSPACE_DIRECTORY_ID: undefined,
+    },
+    async () => {
+      const calls = configureFakeProjectClients(true)
+      configureFakeAuthenticatedUser({
+        email: 'demo@example.com',
+        'custom:workspace_id': 'workspace#legacy',
+      })
+
+      const response = await app.request('/api/teams/projects', {
+        headers: {
+          Authorization: 'Bearer test-token',
+        },
+      })
+
+      expect(response.status).toBe(200)
+      expect(calls.directoryReads).toEqual([
+        { directoryId: 'workspace#legacy', locale: 'ja' },
+      ])
+    },
+  )
+})
+
+test('rejects a token from another Cognito pool before calling GetUser', async () => {
+  await withTestEnvironment(
+    {
+      AWS_LAMBDA_FUNCTION_NAME: 'mukuroji-api-test',
+      COGNITO_CLIENT_ID: 'mukuroji-client',
+      COGNITO_ISSUER: undefined,
+      COGNITO_USER_POOL_ID: 'us-east-1_mukuroji',
+    },
+    async () => {
+      configureFakeProjectClients(true)
+      let getUserCalls = 0
+      configureFakeAuthenticatedUser(
+        { email: 'demo@example.com' },
+        () => {
+          getUserCalls += 1
+        },
+      )
+      const accessToken = createAccessToken([], {
+        client_id: 'other-client',
+        iss: 'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_other',
+        token_use: 'access',
+      })
+
+      const response = await app.request('/api/auth/me', {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      })
+
+      expect(response.status).toBe(401)
+      expect(await response.json()).toEqual({ message: 'Authentication failed.' })
+      expect(getUserCalls).toBe(0)
+    },
+  )
+})
+
+test('uses an explicit Floci public issuer and rejects other issuers before GetUser', async () => {
+  await withTestEnvironment(
+    {
+      AWS_LAMBDA_FUNCTION_NAME: 'mukuroji-api-test',
+      COGNITO_CLIENT_ID: 'mukuroji-client',
+      COGNITO_ISSUER: '  http://localhost:4567/us-east-1_mukuroji/  ',
+      COGNITO_USER_POOL_ID: 'us-east-1_mukuroji',
+    },
+    async () => {
+      configureFakeProjectClients(true)
+      let getUserCalls = 0
+      configureFakeAuthenticatedUser(
+        { email: 'demo@example.com' },
+        () => {
+          getUserCalls += 1
+        },
+      )
+      const validAccessToken = createAccessToken([], {
+        client_id: 'mukuroji-client',
+        iss: 'http://localhost:4567/us-east-1_mukuroji',
+        token_use: 'access',
+      })
+      const wrongIssuerToken = createAccessToken([], {
+        client_id: 'mukuroji-client',
+        iss: 'http://localhost:4567/us-east-1_other',
+        token_use: 'access',
+      })
+
+      const validResponse = await app.request('/api/auth/me', {
+        headers: { Authorization: `Bearer ${validAccessToken}` },
+      })
+      const wrongIssuerResponse = await app.request('/api/auth/me', {
+        headers: { Authorization: `Bearer ${wrongIssuerToken}` },
+      })
+
+      expect(validResponse.status).toBe(200)
+      expect(wrongIssuerResponse.status).toBe(401)
+      expect(await wrongIssuerResponse.json()).toEqual({ message: 'Authentication failed.' })
+      expect(getUserCalls).toBe(1)
+    },
+  )
+})
+
+test('fails closed when production Cognito pool or client configuration is missing', async () => {
+  await withTestEnvironment(
+    {
+      AWS_LAMBDA_FUNCTION_NAME: 'mukuroji-api-test',
+      COGNITO_CLIENT_ID: undefined,
+      COGNITO_USER_POOL_ID: undefined,
+    },
+    async () => {
+      configureFakeProjectClients(true)
+      let getUserCalls = 0
+      configureFakeAuthenticatedUser(
+        { email: 'demo@example.com' },
+        () => {
+          getUserCalls += 1
+        },
+      )
+
+      const response = await app.request('/api/auth/me', {
+        headers: {
+          Authorization: 'Bearer test-token',
+        },
+      })
+
+      expect(response.status).toBe(503)
+      expect(await response.json()).toEqual({ message: 'Cognito is not configured.' })
+      expect(getUserCalls).toBe(0)
+    },
+  )
+})
+
+test('uses AWS Cognito SDK commands and excludes users with conflicting workspace attributes', async () => {
+  const commandNames: string[] = []
+  const sdkClient = {
+    async send(command: object) {
+      const commandName = command.constructor.name
+      commandNames.push(commandName)
+
+      if (commandName === 'InitiateAuthCommand') {
+        return { AuthenticationResult: { AccessToken: 'access-token' } }
+      }
+
+      if (commandName === 'GetUserCommand') {
+        return {
+          Username: 'demo@example.com',
+          UserAttributes: [{ Name: 'email', Value: 'demo@example.com' }],
+        }
+      }
+
+      if (commandName === 'ListUsersCommand') {
+        return {
+          Users: [
+            {
+              Username: 'valid@example.com',
+              Attributes: [
+                { Name: 'email', Value: 'valid@example.com' },
+                { Name: 'custom:directory_id', Value: 'workspace#production' },
+                { Name: 'custom:workspace_id', Value: 'workspace#production' },
+              ],
+            },
+            {
+              Username: 'conflicting@example.com',
+              Attributes: [
+                { Name: 'email', Value: 'conflicting@example.com' },
+                { Name: 'custom:directory_id', Value: 'workspace#production' },
+                { Name: 'custom:workspace_id', Value: 'workspace#other' },
+              ],
+            },
+          ],
+        }
+      }
+
+      return {
+        Username: 'valid@example.com',
+        UserAttributes: [{ Name: 'email', Value: 'valid@example.com' }],
+      }
+    },
+  } as unknown as CognitoIdentityProviderClient
+  const client = new AwsCognitoClient(sdkClient, 'us-east-1_mukuroji', 'mukuroji-client')
+
+  await expect(client.initiatePasswordAuth('demo@example.com', 'password')).resolves.toMatchObject({
+    AuthenticationResult: { AccessToken: 'access-token' },
+  })
+  await expect(client.getUser('access-token')).resolves.toMatchObject({
+    Username: 'demo@example.com',
+  })
+  await expect(client.listUsers({ directoryId: 'workspace#production' })).resolves.toEqual({
+    users: [
+      {
+        id: 'valid@example.com',
+        username: 'valid@example.com',
+        email: 'valid@example.com',
+        name: undefined,
+        enabled: undefined,
+        status: undefined,
+      },
+    ],
+    nextToken: undefined,
+  })
+  await expect(client.getUserProfile('valid@example.com')).resolves.toMatchObject({
+    id: 'valid@example.com',
+  })
+  expect(commandNames).toEqual([
+    'InitiateAuthCommand',
+    'GetUserCommand',
+    'ListUsersCommand',
+    'AdminGetUserCommand',
+  ])
+})
+
+test('keeps the Bun development Cognito default on local Floci', async () => {
+  await withTestEnvironment(
+    {
+      AWS_ENDPOINT_URL: undefined,
+      AWS_LAMBDA_FUNCTION_NAME: undefined,
+      COGNITO_CLIENT_ID: 'local-client',
+      COGNITO_ENDPOINT: undefined,
+      COGNITO_USER_POOL_ID: 'us-east-1_local',
+    },
+    async () => {
+      const originalFetch = globalThis.fetch
+      const requestedUrls: string[] = []
+      globalThis.fetch = (async (input) => {
+        requestedUrls.push(String(input))
+
+        return new Response(JSON.stringify({
+          AuthenticationResult: { AccessToken: 'local-access-token' },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }) as typeof fetch
+      resetApiClientsForTest()
+
+      try {
+        const response = await app.request('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: 'demo@example.com',
+            password: 'password',
+          }),
+        })
+
+        expect(response.status).toBe(200)
+        expect(await response.json()).toMatchObject({ accessToken: 'local-access-token' })
+        expect(requestedUrls).toEqual(['http://localhost:4566/'])
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    },
+  )
+})
+
+test('uses ALLOWED_ORIGINS for shared Hono CORS responses', async () => {
+  await withTestEnvironment(
+    { ALLOWED_ORIGINS: 'https://app.example.com, https://admin.example.com' },
+    async () => {
+      const allowedResponse = await app.request('/api/health', {
+        headers: { Origin: 'https://admin.example.com' },
+      })
+      const deniedResponse = await app.request('/api/health', {
+        headers: { Origin: 'https://other.example.com' },
+      })
+
+      expect(allowedResponse.headers.get('access-control-allow-origin')).toBe(
+        'https://admin.example.com',
+      )
+      expect(deniedResponse.headers.get('access-control-allow-origin')).toBeNull()
+    },
+  )
 })
 
 test('loads project directory from the authenticated user scoped partition', async () => {
@@ -1072,6 +1435,108 @@ test('archives a project under an authenticated team directory', async () => {
   expect(calls.projectArchives).toEqual([
     { directoryId: 'user#demo@example.com', teamId: 'core-team', projectId: 'refero' },
   ])
+})
+
+test('DynamoDB directory client validates and ignores workspace bootstrap rows for reads and writes', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            ...createWorkspaceBootstrapItems(),
+            {
+              directoryId: 'workspace#production',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'workspace#production',
+              entryKey: '000010#000010#PROJECT#refero',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'refero',
+              projectSortOrder: 10,
+              nameJa: 'Refero',
+              nameEn: 'Refero',
+              tone: 'blue',
+            },
+            {
+              directoryId: 'workspace#production',
+              entryKey: 'PROJECT_MEMBER#refero#owner@example.com',
+              entryType: 'project-member',
+              projectId: 'refero',
+              memberKey: 'owner@example.com',
+              email: 'owner@example.com',
+              role: 'manager',
+              createdAt: '2026-07-11T00:00:00.000Z',
+              updatedAt: '2026-07-11T00:00:00.000Z',
+            },
+          ],
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(client.getProjectDirectory('workspace#production', 'en')).resolves.toEqual({
+    teams: [
+      {
+        id: 'core-team',
+        name: 'Core Team',
+        expanded: true,
+        projects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+      },
+    ],
+  })
+  await expect(client.createTeam('workspace#production', { name: 'New Team' })).resolves.toEqual({
+    team: {
+      id: 'new-team',
+      name: 'New Team',
+      expanded: true,
+      projects: [],
+    },
+  })
+  expect(sentInputs[2]).toMatchObject({
+    Item: {
+      directoryId: 'workspace#production',
+      entryType: 'team',
+      teamId: 'new-team',
+    },
+  })
+})
+
+test('DynamoDB directory client rejects malformed workspace bootstrap rows', async () => {
+  const documentClient = {
+    async send() {
+      return {
+        Items: [
+          {
+            directoryId: 'workspace#production',
+            entryKey: 'WORKSPACE#METADATA',
+            entryType: 'workspace-metadata',
+            workspaceId: 'workspace#other',
+          },
+        ],
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(client.getProjectDirectory('workspace#production', 'en')).rejects.toMatchObject({
+    status: 503,
+    code: 'InvalidProjectDirectory',
+  })
 })
 
 test('DynamoDB directory client creates duplicate named teams with a unique id suffix', async () => {
@@ -4249,6 +4714,97 @@ function configureFakeProjectClients(
   return calls
 }
 
+function configureFakeAuthenticatedUser(
+  attributes: Record<string, string>,
+  onGetUser: () => void = () => undefined,
+) {
+  configureApiClientsForTest({
+    cognito: {
+      async initiatePasswordAuth() {
+        return {}
+      },
+      async getUser() {
+        onGetUser()
+
+        return {
+          Username: attributes.email ?? 'demo@example.com',
+          UserAttributes: Object.entries(attributes).map(([Name, Value]) => ({ Name, Value })),
+        }
+      },
+      async listUsers() {
+        return { users: [] }
+      },
+      async getUserProfile(userId) {
+        return createFakeCognitoProfile(userId)
+      },
+    },
+  })
+}
+
+function createLambdaHttpEvent(rawPath: string, accessToken: string) {
+  return {
+    version: '2.0',
+    routeKey: '$default',
+    rawPath,
+    rawQueryString: '',
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      host: 'example.lambda-url.us-east-1.on.aws',
+    },
+    body: null,
+    isBase64Encoded: false,
+    requestContext: {
+      accountId: 'anonymous',
+      apiId: 'function-url',
+      authentication: null,
+      authorizer: {},
+      domainName: 'example.lambda-url.us-east-1.on.aws',
+      domainPrefix: 'example',
+      http: {
+        method: 'GET',
+        path: rawPath,
+        protocol: 'HTTP/1.1',
+        sourceIp: '127.0.0.1',
+        userAgent: 'bun:test',
+      },
+      requestId: 'request-id',
+      routeKey: '$default',
+      stage: '$default',
+      time: '11/Jul/2026:00:00:00 +0000',
+      timeEpoch: 1_783_728_000_000,
+    },
+  } satisfies Extract<LambdaEvent, { rawPath: string }>
+}
+
+async function withTestEnvironment(
+  values: Record<string, string | undefined>,
+  callback: () => Promise<void>,
+) {
+  const originalValues = new Map(
+    Object.keys(values).map((name) => [name, Bun.env[name]]),
+  )
+
+  for (const [name, value] of Object.entries(values)) {
+    if (value === undefined) {
+      delete Bun.env[name]
+    } else {
+      Bun.env[name] = value
+    }
+  }
+
+  try {
+    await callback()
+  } finally {
+    for (const [name, value] of originalValues) {
+      if (value === undefined) {
+        delete Bun.env[name]
+      } else {
+        Bun.env[name] = value
+      }
+    }
+  }
+}
+
 function createFakeCognitoProfile(userId: string) {
   const id = userId.trim().toLowerCase()
   const names: Record<string, string> = {
@@ -4278,9 +4834,39 @@ function createFakeAuthTokenSet() {
   }
 }
 
-function createAccessToken(groups: string[] = []) {
+function createWorkspaceBootstrapItems() {
+  return [
+    {
+      directoryId: 'workspace#production',
+      entryKey: 'WORKSPACE#METADATA',
+      entryType: 'workspace-metadata',
+      workspaceId: 'workspace#production',
+    },
+    {
+      directoryId: 'workspace#production',
+      entryKey: 'WORKSPACE_MEMBER#owner@example.com',
+      entryType: 'workspace-member',
+      workspaceId: 'workspace#production',
+      memberKey: 'owner@example.com',
+      email: 'owner@example.com',
+      username: 'owner-cognito-id',
+      role: 'owner',
+    },
+    {
+      directoryId: 'workspace#production',
+      entryKey: 'EMAIL_ALIAS#owner@example.com',
+      entryType: 'email-alias',
+      workspaceId: 'workspace#production',
+      memberKey: 'owner@example.com',
+      email: 'owner@example.com',
+      username: 'owner-cognito-id',
+    },
+  ]
+}
+
+function createAccessToken(groups: string[] = [], claims: Record<string, unknown> = {}) {
   const payload = Buffer
-    .from(JSON.stringify({ 'cognito:groups': groups }))
+    .from(JSON.stringify({ ...claims, 'cognito:groups': groups }))
     .toString('base64url')
 
   return `header.${payload}.signature`

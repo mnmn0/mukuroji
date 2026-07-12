@@ -1,4 +1,11 @@
 import {
+  AdminGetUserCommand,
+  CognitoIdentityProviderClient,
+  GetUserCommand,
+  InitiateAuthCommand,
+  ListUsersCommand,
+} from '@aws-sdk/client-cognito-identity-provider'
+import {
   CreateTableCommand,
   DescribeTableCommand,
   DynamoDBClient,
@@ -15,7 +22,7 @@ import {
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { Hono } from 'hono'
-import { handle } from 'hono/aws-lambda'
+import { handle, type LambdaContext, type LambdaEvent } from 'hono/aws-lambda'
 import { cors } from 'hono/cors'
 import type { Context } from 'hono'
 import {
@@ -393,6 +400,18 @@ type CognitoAccessTokenClaims = {
    * Cognito グループ名の配列です。
    */
   'cognito:groups'?: unknown
+  /**
+   * token を発行した Cognito user pool の issuer です。
+   */
+  iss?: unknown
+  /**
+   * token を発行した Cognito app client ID です。
+   */
+  client_id?: unknown
+  /**
+   * Cognito token の用途です。
+   */
+  token_use?: unknown
 }
 
 /**
@@ -1806,9 +1825,11 @@ let projectDirectory: ProjectDirectoryClient
 let auditEvents: AuditEventsClient
 let workspaceAccess: WorkspaceAccessClient
 const projectDirectoryIdPrefix = 'user#'
-const projectDirectoryIdAttributeNames = [
-  'custom:directory_id',
-  'custom:workspace_id',
+const defaultAllowedOrigins = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:6006',
+  'http://127.0.0.1:6006',
 ] as const
 const defaultSystemAdminGroups = ['mukuroji-system-admins']
 const projectRoleWeights = {
@@ -1820,12 +1841,7 @@ const projectRoleWeights = {
 app.use(
   '/api/*',
   cors({
-    origin: [
-      'http://localhost:5173',
-      'http://127.0.0.1:5173',
-      'http://localhost:6006',
-      'http://127.0.0.1:6006',
-    ],
+    origin: (origin) => getAllowedOrigins().includes(origin) ? origin : undefined,
     allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key', 'X-Correlation-Id'],
     exposeHeaders: ['X-Audit-Truncated', 'X-Audit-Next-Cursor'],
@@ -2129,6 +2145,7 @@ app.get('/api/auth/me', async (c) => {
   }
 
   try {
+    validateConfiguredCognitoAccessToken(accessToken)
     const user = await cognito.getUser(accessToken)
     const principal = await authenticateWorkspacePrincipal(accessToken, user)
 
@@ -3225,13 +3242,27 @@ async function createAuthenticationResponse(tokens: AuthTokenSet) {
     )
   }
 
+  if (cognito instanceof FlociCognitoClient && tokens.AccessToken.split('.').length !== 3) {
+    return {
+      accessToken: tokens.AccessToken,
+      idToken: tokens.IdToken,
+      refreshToken: tokens.RefreshToken,
+      expiresAt: Date.now() + (tokens.ExpiresIn ?? 3600) * 1000,
+      tokenType: tokens.TokenType ?? 'Bearer',
+    }
+  }
+
   const user = await cognito.getUser(tokens.AccessToken)
-  const principal = toProjectPrincipal(user, tokens.AccessToken)
-  await workspaceAccess.reconcileAuthenticatedMember(principal.directoryId, {
-    memberKey: principal.userKey,
-    email: readUserAttribute(user, 'email') ?? principal.userKey,
-    name: readUserAttribute(user, 'name'),
-  })
+  const userKey = readUserAttribute(user, 'email') ?? user.Username
+
+  if (userKey?.trim()) {
+    const principal = toProjectPrincipal(user, tokens.AccessToken)
+    await workspaceAccess.reconcileAuthenticatedMember(principal.directoryId, {
+      memberKey: principal.userKey,
+      email: readUserAttribute(user, 'email') ?? principal.userKey,
+      name: readUserAttribute(user, 'name'),
+    })
+  }
 
   return {
     accessToken: tokens.AccessToken,
@@ -3359,6 +3390,7 @@ async function authenticateWorkspacePrincipal(
   accessToken: string,
   user?: GetUserResponse,
 ): Promise<WorkspacePrincipal> {
+  validateConfiguredCognitoAccessToken(accessToken)
   const principal = toProjectPrincipal(user ?? await cognito.getUser(accessToken), accessToken)
   const workspaceMember = await workspaceAccess.getActiveMember(
     principal.directoryId,
@@ -3416,6 +3448,15 @@ function toAuthErrorResponse(c: Context, error: unknown) {
 
   if (error.code === 'NotAuthorizedException' || error.code === 'UserNotFoundException') {
     return c.json({ message: 'Invalid email or password.' }, 401)
+  }
+
+  if (error.code === 'CognitoAccessTokenInvalid') {
+    return c.json({ message: 'Authentication failed.' }, 401)
+  }
+
+  if (error.code === 'CognitoConfigurationMissing') {
+    console.error(error)
+    return c.json({ message: 'Cognito is not configured.' }, 503)
   }
 
   if (error.code === 'WorkspaceDirectoryConflict') {
@@ -3589,6 +3630,10 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
   ) {
     console.error(error)
     return c.json({ message: 'Project data is invalid.' }, 503)
+  }
+
+  if (error.code === 'ProjectDirectoryMismatch') {
+    return c.json({ message: 'Cognito workspace does not match the configured workspace.' }, 403)
   }
 
   if (error.code === 'ProjectPrincipalMissing' || error.code === 'ProjectAccessDenied') {
@@ -4123,6 +4168,15 @@ function toCognitoDirectoryErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'Cognito user was not found.' }, 404)
   }
 
+  if (error.code === 'NotAuthorizedException' || error.code === 'CognitoAccessTokenInvalid') {
+    return c.json({ message: 'Authentication failed.' }, 401)
+  }
+
+  if (error.code === 'CognitoConfigurationMissing') {
+    console.error(error)
+    return c.json({ message: 'Cognito is not configured.' }, 503)
+  }
+
   if (error.code === 'TooManyRequestsException') {
     return c.json({ message: 'Cognito user data is rate limited.' }, 429)
   }
@@ -4145,15 +4199,167 @@ function isCognitoUserNotFoundError(error: unknown) {
 }
 
 /**
+ * AWS Cognito Identity Provider SDK を使う本番用 client です。
+ */
+export class AwsCognitoClient {
+  /**
+   * SigV4 署名と AWS endpoint 解決を委譲する SDK client です。
+   */
+  private readonly client: CognitoIdentityProviderClient
+  /**
+   * API が信頼する Cognito user pool ID です。
+   */
+  private readonly userPoolId: string | undefined
+  /**
+   * API が信頼する Cognito app client ID です。
+   */
+  private readonly clientId: string | undefined
+
+  constructor(
+    client = new CognitoIdentityProviderClient({ region: getAwsRegion() }),
+    userPoolId = getEnv('COGNITO_USER_POOL_ID'),
+    clientId = getEnv('COGNITO_CLIENT_ID'),
+  ) {
+    this.client = client
+    this.userPoolId = userPoolId?.trim() || undefined
+    this.clientId = clientId?.trim() || undefined
+  }
+
+  /**
+   * USER_PASSWORD_AUTH flow で Cognito 認証を実行します。
+   */
+  async initiatePasswordAuth(email: string, password: string): Promise<InitiateAuthResponse> {
+    const { clientId } = this.readRequiredConfiguration()
+
+    try {
+      const response = await this.client.send(new InitiateAuthCommand({
+        AuthFlow: 'USER_PASSWORD_AUTH',
+        ClientId: clientId,
+        AuthParameters: {
+          USERNAME: email,
+          PASSWORD: password,
+        },
+      }))
+
+      return {
+        AuthenticationResult: response.AuthenticationResult,
+        ChallengeName: response.ChallengeName,
+        Session: response.Session,
+      }
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * access token から Cognito ユーザー情報を取得します。
+   */
+  async getUser(accessToken: string): Promise<GetUserResponse> {
+    this.readRequiredConfiguration()
+
+    try {
+      const response = await this.client.send(new GetUserCommand({ AccessToken: accessToken }))
+
+      return {
+        Username: response.Username,
+        UserAttributes: response.UserAttributes,
+      }
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Cognito user pool から所属 workspace が一致する user 一覧を取得します。
+   */
+  async listUsers(input: ListCognitoUsersInput): Promise<CognitoUsersResponse> {
+    const { userPoolId } = this.readRequiredConfiguration()
+    const limit = clampCognitoPageLimit(input.limit)
+    const query = input.query?.trim()
+    const users: CognitoUserProfile[] = []
+    let paginationToken = input.paginationToken
+
+    try {
+      do {
+        const response = await this.client.send(new ListUsersCommand({
+          UserPoolId: userPoolId,
+          Limit: Math.max(1, limit - users.length),
+          ...(paginationToken ? { PaginationToken: paginationToken } : {}),
+          ...(query ? { Filter: `"email"^="${escapeCognitoFilterValue(query.toLowerCase())}"` } : {}),
+        }))
+        const scopedUsers = (response.Users ?? [])
+          .filter((user) => isCognitoUserInDirectory(user, input.directoryId))
+          .map(toCognitoUserProfile)
+          .filter(isDefined)
+
+        users.push(...scopedUsers)
+        paginationToken = response.PaginationToken
+      } while (users.length < limit && paginationToken)
+
+      return {
+        users,
+        nextToken: paginationToken,
+      }
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Cognito user ID から user profile を取得します。
+   */
+  async getUserProfile(userId: string): Promise<CognitoUserProfile> {
+    const { userPoolId } = this.readRequiredConfiguration()
+    const normalizedUserId = normalizeCognitoUserId(userId)
+
+    try {
+      const response = await this.client.send(new AdminGetUserCommand({
+        UserPoolId: userPoolId,
+        Username: normalizedUserId,
+      }))
+      const profile = toCognitoUserProfile(response)
+
+      if (!profile) {
+        throw new CognitoServiceError(
+          404,
+          'UserNotFoundException',
+          `Cognito user "${normalizedUserId}" was not found.`,
+        )
+      }
+
+      return profile
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * 本番 Cognito client に必須の user pool / app client 設定を検証します。
+   */
+  private readRequiredConfiguration() {
+    if (!this.userPoolId || !this.clientId) {
+      throw new CognitoServiceError(
+        503,
+        'CognitoConfigurationMissing',
+        'COGNITO_USER_POOL_ID and COGNITO_CLIENT_ID are required.',
+      )
+    }
+
+    return {
+      userPoolId: this.userPoolId,
+      clientId: this.clientId,
+    }
+  }
+}
+
+/**
  * Floci の Cognito JSON API を呼び出す軽量 client です。
  */
 class FlociCognitoClient {
   /**
    * Floci / Cognito の endpoint URL です。
    */
-  private readonly endpoint = trimTrailingSlash(
-    getEnv('COGNITO_ENDPOINT') ?? getEnv('AWS_ENDPOINT_URL') ?? 'http://localhost:4566',
-  )
+  private readonly endpoint: string
 
   /**
    * Cognito HTTP request を abort するまでの milliseconds です。
@@ -4184,6 +4390,10 @@ class FlociCognitoClient {
    * 解決済み app client ID の cache です。
    */
   private resolvedClientId: string | undefined
+
+  constructor(endpoint: string) {
+    this.endpoint = trimTrailingSlash(endpoint)
+  }
 
   /**
    * USER_PASSWORD_AUTH flow で Cognito 認証を実行します。
@@ -6560,17 +6770,7 @@ export class DynamoDbProjectDirectoryClient {
     try {
       const items = await this.queryDirectoryItems(directoryId, true, consistentRead)
 
-      return items.map((item) => {
-        if (!isProjectDirectoryItem(item, directoryId)) {
-          throw new ProjectDataError(
-            503,
-            'InvalidProjectDirectory',
-            'Project directory item is missing or invalid.',
-          )
-        }
-
-        return item
-      })
+      return readProjectDirectoryItems(items, directoryId)
     } catch (error) {
       if (error instanceof ProjectDataError) {
         throw error
@@ -6974,6 +7174,27 @@ export class CognitoServiceError extends Error {
   }
 }
 
+function toCognitoSdkError(error: unknown) {
+  if (error instanceof CognitoServiceError) {
+    return error
+  }
+
+  const metadata = isRecord(error) && isRecord(error.$metadata)
+    ? error.$metadata
+    : undefined
+  const status = typeof metadata?.httpStatusCode === 'number'
+    ? metadata.httpStatusCode
+    : 502
+  const code = isRecord(error) && typeof error.name === 'string'
+    ? error.name
+    : 'CognitoUnavailable'
+  const message = isRecord(error) && typeof error.message === 'string'
+    ? error.message
+    : 'Cognito request failed.'
+
+  return new CognitoServiceError(status, code, message)
+}
+
 /**
  * DynamoDB の project data 取得で扱う domain error です。
  */
@@ -7057,21 +7278,25 @@ function readCognitoUserAttribute(user: CognitoUserRecord, name: string) {
 }
 
 function readCognitoUserDirectoryId(user: CognitoUserRecord) {
-  for (const attributeName of projectDirectoryIdAttributeNames) {
-    const directoryId = readCognitoUserAttribute(user, attributeName)?.trim()
+  const directoryId = readCognitoUserAttribute(user, 'custom:directory_id')?.trim() || undefined
+  const workspaceId = readCognitoUserAttribute(user, 'custom:workspace_id')?.trim() || undefined
 
-    if (directoryId) {
-      return directoryId
-    }
+  if (directoryId && workspaceId && directoryId !== workspaceId) {
+    throw new CognitoServiceError(
+      409,
+      'WorkspaceDirectoryConflict',
+      'Cognito user has conflicting Workspace directory attributes.',
+    )
   }
 
-  return undefined
+  return directoryId ?? workspaceId
 }
 
 function createWorkspaceCognitoUserAttributes(email: string, directoryId: string, name?: string) {
   return [
     { Name: 'email', Value: normalizeCognitoUserId(email) },
     { Name: 'custom:directory_id', Value: directoryId },
+    { Name: 'custom:workspace_id', Value: directoryId },
     ...(name?.trim() ? [{ Name: 'name', Value: name.trim() }] : []),
   ]
 }
@@ -7081,9 +7306,18 @@ function isCognitoUserInDirectory(user: CognitoUserRecord, directoryId: string |
     return true
   }
 
-  return projectDirectoryIdAttributeNames.some((attributeName) => {
-    return readCognitoUserAttribute(user, attributeName)?.trim() === directoryId
-  })
+  const claimedDirectoryId = readCognitoUserAttribute(user, 'custom:directory_id')?.trim() || undefined
+  const claimedWorkspaceId = readCognitoUserAttribute(user, 'custom:workspace_id')?.trim() || undefined
+
+  if (
+    claimedDirectoryId &&
+    claimedWorkspaceId &&
+    claimedDirectoryId !== claimedWorkspaceId
+  ) {
+    return false
+  }
+
+  return (claimedDirectoryId ?? claimedWorkspaceId) === directoryId
 }
 
 function isDefined<T>(value: T | undefined): value is T {
@@ -7095,11 +7329,15 @@ function createDynamoDbClient() {
 
   return new DynamoDBClient({
     region: getAwsRegion(),
-    endpoint,
-    credentials: {
-      accessKeyId: getEnv('AWS_ACCESS_KEY_ID') ?? 'test',
-      secretAccessKey: getEnv('AWS_SECRET_ACCESS_KEY') ?? 'test',
-    },
+    ...(endpoint
+      ? {
+          endpoint,
+          credentials: {
+            accessKeyId: getEnv('AWS_ACCESS_KEY_ID') ?? 'test',
+            secretAccessKey: getEnv('AWS_SECRET_ACCESS_KEY') ?? 'test',
+          },
+        }
+      : {}),
   })
 }
 
@@ -7397,7 +7635,10 @@ function hasKeySchema(
 function shouldBootstrapLocalDynamoDb() {
   const endpoint = getDynamoDbEndpoint()
 
-  return /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|floci)(?::|\/|$)/.test(endpoint)
+  return Boolean(
+    endpoint &&
+    /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|floci)(?::|\/|$)/.test(endpoint),
+  )
 }
 
 function isResourceNotFoundError(error: unknown) {
@@ -7588,6 +7829,29 @@ function toProjectTaskResponseItem(value: unknown): ProjectTaskResponseItem {
   return task
 }
 
+function readProjectDirectoryItems(values: unknown[], directoryId: string) {
+  const directoryItems: ProjectDirectoryItem[] = []
+
+  for (const value of values) {
+    if (isProjectDirectoryItem(value, directoryId)) {
+      directoryItems.push(value)
+      continue
+    }
+
+    if (isWorkspaceBootstrapItem(value, directoryId)) {
+      continue
+    }
+
+    throw new ProjectDataError(
+      503,
+      'InvalidProjectDirectory',
+      'Project directory item is missing or invalid.',
+    )
+  }
+
+  return directoryItems
+}
+
 function toProjectDirectoryResponse(
   values: unknown[],
   locale: Locale,
@@ -7597,15 +7861,7 @@ function toProjectDirectoryResponse(
   const teamById = new Map<string, ProjectDirectoryTeamResponse>()
   const projectItems: ProjectDirectoryItem[] = []
 
-  for (const value of values) {
-    if (!isProjectDirectoryItem(value, directoryId)) {
-      throw new ProjectDataError(
-        503,
-        'InvalidProjectDirectory',
-        'Project directory item is missing or invalid.',
-      )
-    }
-
+  for (const value of readProjectDirectoryItems(values, directoryId)) {
     if (value.entryType === 'project-member') {
       continue
     }
@@ -7792,6 +8048,44 @@ function isProjectTaskItem(value: unknown): value is ProjectTaskItem {
     typeof value.dueDate === 'string' &&
     isProjectTaskPriority(value.priority)
   )
+}
+
+function isWorkspaceBootstrapItem(value: unknown, directoryId: string) {
+  if (
+    !isRecord(value) ||
+    value.directoryId !== directoryId ||
+    value.workspaceId !== directoryId ||
+    typeof value.entryKey !== 'string'
+  ) {
+    return false
+  }
+
+  if (value.entryType === 'workspace-metadata') {
+    return value.entryKey === 'WORKSPACE#METADATA'
+  }
+
+  if (value.entryType === 'workspace-member') {
+    return (
+      typeof value.memberKey === 'string' &&
+      typeof value.email === 'string' &&
+      value.email === value.memberKey &&
+      typeof value.username === 'string' &&
+      value.role === 'owner' &&
+      value.entryKey === `WORKSPACE_MEMBER#${value.memberKey}`
+    )
+  }
+
+  if (value.entryType === 'email-alias') {
+    return (
+      typeof value.memberKey === 'string' &&
+      typeof value.email === 'string' &&
+      value.email === value.memberKey &&
+      typeof value.username === 'string' &&
+      value.entryKey === `EMAIL_ALIAS#${value.email}`
+    )
+  }
+
+  return false
 }
 
 function isProjectDirectoryItem(value: unknown, directoryId: string): value is ProjectDirectoryItem {
@@ -8142,20 +8436,104 @@ function toProjectPrincipal(user: GetUserResponse, accessToken: string): Project
   }
 }
 
+function validateConfiguredCognitoAccessToken(accessToken: string) {
+  const userPoolId = getEnv('COGNITO_USER_POOL_ID')?.trim()
+  const clientId = getEnv('COGNITO_CLIENT_ID')?.trim()
+
+  if ((!userPoolId || !clientId) && !canAutoDiscoverLocalCognitoConfiguration()) {
+    throw new CognitoServiceError(
+      503,
+      'CognitoConfigurationMissing',
+      'COGNITO_USER_POOL_ID and COGNITO_CLIENT_ID are required.',
+    )
+  }
+
+  if (!userPoolId && !clientId) {
+    return
+  }
+
+  const claims = decodeJwtPayload<CognitoAccessTokenClaims>(accessToken)
+  const expectedIssuer = userPoolId ? getConfiguredCognitoIssuer(userPoolId) : undefined
+  const tokenIssuer = typeof claims?.iss === 'string'
+    ? normalizeCognitoIssuer(claims.iss)
+    : undefined
+
+  if (
+    !claims ||
+    claims.token_use !== 'access' ||
+    (expectedIssuer && tokenIssuer !== expectedIssuer) ||
+    (clientId && claims.client_id !== clientId)
+  ) {
+    throw new CognitoServiceError(
+      401,
+      'CognitoAccessTokenInvalid',
+      'Access token does not match the configured Cognito user pool and app client.',
+    )
+  }
+}
+
+function getConfiguredCognitoIssuer(userPoolId: string) {
+  const configuredIssuer = normalizeCognitoIssuer(getEnv('COGNITO_ISSUER') ?? '')
+
+  return configuredIssuer || createCognitoIssuer(userPoolId)
+}
+
+function normalizeCognitoIssuer(value: string) {
+  return trimTrailingSlash(value.trim())
+}
+
+function createCognitoIssuer(userPoolId: string) {
+  const poolRegion = userPoolId.split('_')[0] || getAwsRegion()
+  const domainSuffix = poolRegion.startsWith('cn-') ? 'amazonaws.com.cn' : 'amazonaws.com'
+
+  return `https://cognito-idp.${poolRegion}.${domainSuffix}/${userPoolId}`
+}
+
+function canAutoDiscoverLocalCognitoConfiguration() {
+  return Boolean(getCognitoEndpoint()) || (
+    typeof Bun !== 'undefined' && !getEnv('AWS_LAMBDA_FUNCTION_NAME')
+  )
+}
+
 function readUserAttribute(user: GetUserResponse, name: string) {
   return user.UserAttributes?.find((attribute) => attribute.Name === name)?.Value
 }
 
-function readProjectDirectoryId(user: GetUserResponse) {
-  for (const attributeName of projectDirectoryIdAttributeNames) {
-    const value = readUserAttribute(user, attributeName)
+function getConfiguredWorkspaceDirectoryId() {
+  return (
+    getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID')?.trim() ||
+    getEnv('MUKUROJI_PROJECT_DIRECTORY_ID')?.trim() ||
+    undefined
+  )
+}
 
-    if (value?.trim()) {
-      return value.trim()
-    }
+function readProjectDirectoryId(user: GetUserResponse) {
+  const directoryId = readUserAttribute(user, 'custom:directory_id')?.trim() || undefined
+  const workspaceId = readUserAttribute(user, 'custom:workspace_id')?.trim() || undefined
+  const configuredWorkspaceDirectoryId = getConfiguredWorkspaceDirectoryId()
+
+  if (directoryId && workspaceId && directoryId !== workspaceId) {
+    throw new ProjectDataError(
+      403,
+      'ProjectDirectoryMismatch',
+      'Cognito directory attributes do not identify the same workspace.',
+    )
   }
 
-  return undefined
+  const claimedDirectoryId = directoryId ?? workspaceId
+
+  if (
+    configuredWorkspaceDirectoryId &&
+    claimedDirectoryId !== configuredWorkspaceDirectoryId
+  ) {
+    throw new ProjectDataError(
+      403,
+      'ProjectDirectoryMismatch',
+      `Cognito workspace "${claimedDirectoryId ?? 'missing'}" does not match configured workspace "${configuredWorkspaceDirectoryId}".`,
+    )
+  }
+
+  return claimedDirectoryId
 }
 
 function readCognitoGroups(accessToken: string) {
@@ -8245,11 +8623,40 @@ function getAwsRegion() {
 }
 
 function getDynamoDbEndpoint() {
-  return getConfiguredDynamoDbEndpoint({
+  const configuredEndpoint = getConfiguredDynamoDbEndpoint({
     DYNAMODB_ENDPOINT: getEnv('DYNAMODB_ENDPOINT'),
     AWS_ENDPOINT_URL_DYNAMODB: getEnv('AWS_ENDPOINT_URL_DYNAMODB'),
     AWS_ENDPOINT_URL: getEnv('AWS_ENDPOINT_URL'),
-  }) ?? 'http://localhost:4566'
+  })
+
+  if (configuredEndpoint) {
+    return configuredEndpoint
+  }
+
+  return typeof Bun !== 'undefined' && !getEnv('AWS_LAMBDA_FUNCTION_NAME')
+    ? 'http://localhost:4566'
+    : undefined
+}
+
+function getAllowedOrigins() {
+  const configuredOrigins = (getEnv('ALLOWED_ORIGINS') ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+
+  return configuredOrigins.length > 0 ? configuredOrigins : [...defaultAllowedOrigins]
+}
+
+function getCognitoEndpoint() {
+  const configuredEndpoint = getEnv('COGNITO_ENDPOINT') ?? getEnv('AWS_ENDPOINT_URL')
+
+  if (configuredEndpoint?.trim()) {
+    return trimTrailingSlash(configuredEndpoint.trim())
+  }
+
+  return typeof Bun !== 'undefined' && !getEnv('AWS_LAMBDA_FUNCTION_NAME')
+    ? 'http://localhost:4566'
+    : undefined
 }
 
 function getEnv(name: string) {
@@ -8268,7 +8675,49 @@ function normalizeCognitoErrorCode(value: string | undefined) {
   return value?.split('#').pop()
 }
 
-cognito = new FlociCognitoClient()
+function createCognitoClient(): CognitoClient {
+  const endpoint = getCognitoEndpoint()
+
+  return endpoint
+    ? new FlociCognitoClient(endpoint)
+    : new AwsCognitoClient()
+}
+
+function normalizeLambdaApiEvent(event: LambdaEvent): LambdaEvent {
+  if ('rawPath' in event) {
+    const rawPath = normalizeApiRequestPath(event.rawPath)
+
+    if (rawPath === event.rawPath) {
+      return event
+    }
+
+    return {
+      ...event,
+      rawPath,
+      requestContext: {
+        ...event.requestContext,
+        http: {
+          ...event.requestContext.http,
+          path: rawPath,
+        },
+      },
+    }
+  }
+
+  const path = normalizeApiRequestPath(event.path)
+
+  return path === event.path ? event : { ...event, path }
+}
+
+function normalizeApiRequestPath(path: string) {
+  if (path === '/' || path === '/api' || path.startsWith('/api/')) {
+    return path
+  }
+
+  return `/api${path.startsWith('/') ? path : `/${path}`}`
+}
+
+cognito = createCognitoClient()
 dashboardSummary = new DynamoDbDashboardSummaryClient()
 projectTasks = new DynamoDbProjectTasksClient()
 teamIssues = new DynamoDbTeamIssuesClient()
@@ -8301,7 +8750,7 @@ export function configureApiClientsForTest(clients: {
  * Server test 後に外部 service client を実装 client に戻します。
  */
 export function resetApiClientsForTest() {
-  cognito = new FlociCognitoClient()
+  cognito = createCognitoClient()
   dashboardSummary = new DynamoDbDashboardSummaryClient()
   projectTasks = new DynamoDbProjectTasksClient()
   teamIssues = new DynamoDbTeamIssuesClient()
@@ -8313,7 +8762,14 @@ export function resetApiClientsForTest() {
 /**
  * AWS Lambda にデプロイする Hono handler です。
  */
-export const handler = handle(app)
+const lambdaHandler = handle(app)
+
+/**
+ * Function URL 直下と `/api` prefix 付き event を同じ Hono route へ渡す Lambda handler です。
+ */
+export const handler = (event: LambdaEvent, lambdaContext?: LambdaContext) => {
+  return lambdaHandler(normalizeLambdaApiEvent(event), lambdaContext)
+}
 
 /**
  * Bun のローカル開発サーバー entrypoint です。

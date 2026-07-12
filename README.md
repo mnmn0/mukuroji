@@ -40,19 +40,18 @@ FLOCI_PORT=4567 bun run floci:up
 COGNITO_ENDPOINT=http://localhost:4567 bun run server:dev
 ```
 
-Floci の ready hook がローカル Cognito を初期化します。作成されるテストユーザーは以下です。
+Floci の ready hook がローカル Cognito と Workspace を初期化します。作成される初期 owner は以下です。
 
 - メールアドレス: `demo@example.com`
 - パスワード: `Password123!`
 
-API サーバーはデフォルトで `http://localhost:4566` の Floci Cognito に接続し、`mukuroji-local` ユーザープールと `mukuroji-web-local` クライアントを自動検出します。生成された値は `.floci/generated/cognito.env` に出力されます。
+API サーバーはデフォルトで `http://localhost:4566` の Floci Cognito に接続し、`mukuroji-local` user pool と `mukuroji-web-local` client を自動検出します。初期 owner を含む local user の `custom:directory_id` と `custom:workspace_id` は、どちらも `workspace#mukuroji-local` に設定されます。生成された値は `.floci/generated/cognito.env` に出力されます。
 
 同じ ready hook で DynamoDB table `mukuroji-dashboard-local`,
 `mukuroji-project-tasks-v2-local`, `mukuroji-project-directory-local`,
 `mukuroji-workspace-access-local` も作成し、ダッシュボード集計、Refero のタスク、
 サイドバー用チーム/プロジェクト階層、Workspace metadata/member を投入します。
-チーム/プロジェクト階層は Cognito の `email` から作る `user#demo@example.com`
-partition に seed され、タスク API はその directory に含まれる project だけを返します。
+チーム/プロジェクト階層は `workspace#mukuroji-local` partition に seed され、タスク API はその directory に含まれる project だけを返します。
 Workspace access table では `demo@example.com` を active owner、既存の project user を
 active member、`viewer@example.com` を active guest として初回だけ seed します。
 ready hook の再実行は既存 role/status を上書きしないため、利用停止した member が
@@ -65,7 +64,7 @@ bun run floci:up
 bun run floci:deploy-backend
 ```
 
-`floci:deploy-backend` は `server/src/index.ts` を Node.js 22 Lambda 用に bundle し、Floci の REST API Gateway から Lambda に proxy します。React から直接 Lambda 経由 API を呼ぶ場合は、生成された `.floci/generated/backend.env` の `VITE_API_BASE_URL` を使います。
+`floci:deploy-backend` は `server/src/index.ts` を Node.js 22 Lambda 用に bundle し、Floci の REST API Gateway から Lambda に proxy します。React から Lambda 経由 API を呼ぶ場合は、生成された `.floci/generated/backend.env` の `VITE_API_BASE_URL` を使います。Lambda adapter は `/teams/projects` のような直下パスと `/api/teams/projects` の両方を同じ Hono route へ正規化します。
 
 停止:
 
@@ -107,6 +106,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `VITE_WORKSPACE_API_BASE_URL`: 本番環境で Workspace member / invitation API を呼ぶ base URL。未指定時は `VITE_PROJECTS_API_BASE_URL`、`VITE_TASKS_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。
 - `VITE_API_PROXY_TARGET`: Vite dev server が proxy する API。未指定時は `http://localhost:3000`
 - `COGNITO_ENDPOINT` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci endpoint。未指定時は `http://localhost:4566`
+- `COGNITO_ISSUER`: access token の expected issuer。local ready hook が生成する値を利用します。本番では CDK の user pool から解決します。
 - `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`: 明示指定する場合の Cognito リソース ID
 - `DYNAMODB_ENDPOINT` / `AWS_ENDPOINT_URL_DYNAMODB` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci DynamoDB endpoint。未指定時は `http://localhost:4566`
 - `MUKUROJI_DASHBOARD_TABLE`: ダッシュボード集計値を保存する DynamoDB table 名。未指定時は `mukuroji-dashboard-local`
@@ -117,7 +117,9 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_TEAM_ISSUE_EVENTS_TABLE`: チーム Issue のコメント/活動履歴を保存する DynamoDB table 名。未指定時は `mukuroji-team-issue-events-local`
 - `MUKUROJI_AUDIT_EVENTS_TABLE` / `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
 - `MUKUROJI_AUDIT_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS`: audit event の保持日数。未指定時は 2555 日（7年）
-- `MUKUROJI_PROJECT_DIRECTORY_ID`: ready hook が seed する directory partition。未指定時は `user#<COGNITO_TEST_USERNAME の小文字>`。プロジェクト権限付与候補 user は Cognito の `custom:directory_id` / `custom:workspace_id` がこの値に一致する user に限定されます。
+- `MUKUROJI_WORKSPACE_DIRECTORY_ID`: Cognito claim と DynamoDB partition で共有する canonical Workspace ID。未指定時は `workspace#mukuroji-local`
+- `MUKUROJI_PROJECT_DIRECTORY_ID`: 旧 local 設定との互換入力。`MUKUROJI_WORKSPACE_DIRECTORY_ID` が優先されます。
+- `MUKUROJI_INITIAL_OWNER_EMAIL` / `MUKUROJI_INITIAL_OWNER_USERNAME`: 初期 owner の email と Cognito username
 
 API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/teams/projects`,
 `/api/teams/{teamId}/issues`, `/api/projects/{projectId}/issues`,
@@ -140,16 +142,29 @@ AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
   --checkpoint /tmp/mukuroji-audit-backfill.json
 ```
 
-CDK stack も同じタスクデータと demo user 用の `user#demo@example.com`
+CDK stack も同じタスクデータと指定した Workspace 用の
 チーム/プロジェクト階層に加え、Workspace metadata と初期 active owner を
 DynamoDB に idempotent に seed し、Lambda Function URL 経由で取得できます。
 AWS 環境で確認する場合は以下の順に実行し、出力された `ProjectTasksApiUrl` を
 Web の環境変数へ渡してください。
 
 ```sh
+export COGNITO_USER_POOL_ID=<user-pool-id>
+export COGNITO_USER_POOL_CLIENT_ID=<public-app-client-id>
+export MUKUROJI_WORKSPACE_DIRECTORY_ID=<workspace-directory-id>
+export MUKUROJI_INITIAL_OWNER_EMAIL=<owner@example.com>
+export MUKUROJI_INITIAL_OWNER_USERNAME=<cognito-username>
+
+bash scripts/prepare-workspace-cognito.sh
+bun run cdk:build
+bun run cdk:test
 bun run cdk:synth
-# デプロイ時は AWS アカウントへ影響するため、事前に内容を確認してください。
-VITE_TASKS_API_BASE_URL=<ProjectTasksApiUrl> bun run web:dev
+bun --filter cdk cdk diff \
+  --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
+  --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
+  --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
+  --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
+  --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME"
 ```
 
 Lambda Function URL の CORS 許可 origin は CDK parameter
@@ -158,8 +173,7 @@ Lambda Function URL の CORS 許可 origin は CDK parameter
 認証に使う Cognito user pool は CDK parameter `CognitoUserPoolId` で固定し、
 Lambda は access token の issuer がその user pool と一致する場合だけ処理します。
 Workspace partition は `WorkspaceDirectoryId`、初期 owner の小文字メールアドレスは
-`InitialWorkspaceOwnerEmail` で指定します。既定値はそれぞれ
-`user#demo@example.com` と `demo@example.com` です。Cognito の
+`InitialOwnerEmail` で指定します。Cognito の
 `custom:directory_id` / `custom:workspace_id` は `WorkspaceDirectoryId` と一致させてください。
 同じ Function URL から `/teams/projects`, `/teams/{teamId}/issues`,
 `/projects/{projectId}/issues`, `/projects/{projectId}/tasks`,
@@ -193,12 +207,14 @@ membership 確定失敗は通常ログイン時にも再照合されるため、
 復旧できます。owner の降格・利用停止は metadata の active owner count と member version を
 同じ DynamoDB transaction で更新し、最後の active owner と自己停止を拒否します。
 
-毎回環境変数を指定しない場合は、`web/.env.local` に以下を保存してください。
+deploy 後は Function URL または API Gateway URL の output を Web に設定します。どちらも base URL の直下パスと `/api` prefix を受け付けます。
 
 ```sh
 VITE_TASKS_API_BASE_URL=<ProjectTasksApiUrl>
 VITE_WORKSPACE_API_BASE_URL=<ProjectTasksApiUrl>
 ```
+
+fresh deploy、既存 stack upgrade、bootstrap 検証、migration、rollback、PITR recovery の手順は [cdk/README.md](./cdk/README.md) を参照してください。
 
 DynamoDB に seed されたタスクデータを直接確認する場合は、CDK output の
 `ProjectTasksTableName` を指定して以下を実行します。
@@ -212,8 +228,7 @@ TASKS_TABLE_NAME=<ProjectTasksTableName> bun run tasks:check-dynamodb
 `scripts/seed-project-tasks-dynamodb.sh` と
 `scripts/check-project-tasks-dynamodb.sh` は失敗します。CDK output の
 `ProjectTasksTableName` を `TASKS_TABLE_NAME` に設定してから実行してください。
-`PROJECT_DIRECTORY_ID` を省略した場合は `user#demo@example.com` のタスクとして
-seed/check します。
+`PROJECT_DIRECTORY_ID` には CDK parameter `WorkspaceDirectoryId` と同じ値を指定します。
 チーム/プロジェクト階層の table 名は CDK output の
 `ProjectDirectoryTableName` で確認できます。
 
