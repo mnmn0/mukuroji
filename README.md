@@ -162,7 +162,8 @@ Workspace partition は `WorkspaceDirectoryId`、初期 owner の小文字メー
 `user#demo@example.com` と `demo@example.com` です。Cognito の
 `custom:directory_id` / `custom:workspace_id` は `WorkspaceDirectoryId` と一致させてください。
 同じ Function URL から `/teams/projects`, `/teams/{teamId}/issues`,
-`/projects/{projectId}/issues`, `/projects/{projectId}/tasks` を取得します。
+`/projects/{projectId}/issues`, `/projects/{projectId}/tasks`,
+`/api/workspace/access` などの Workspace invitation API も取得できます。
 
 ### Workspace invitation lifecycle
 

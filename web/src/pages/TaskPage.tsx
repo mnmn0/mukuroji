@@ -2307,7 +2307,9 @@ function TaskDetailPane({
           {t('issues.detail.save')}
         </button>
         {isReadOnly && !needsDetailBeforeEdit ? (
-          <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('tasks.detail.readOnly')}</p>
+          <p className="text-sm font-medium text-[var(--workbench-muted)]">
+            {t(!onUpdateIssue ? 'tasks.detail.readOnlyPermission' : 'tasks.detail.readOnly')}
+          </p>
         ) : null}
         {errorMessage ? <p className="text-sm font-semibold text-red-700">{errorMessage}</p> : null}
       </form>
@@ -2348,6 +2350,11 @@ function TaskDetailPane({
         >
           {t('issues.comment.submit')}
         </button>
+        {isCommentReadOnly && !needsDetailBeforeEdit ? (
+          <p className="text-sm font-medium text-[var(--workbench-muted)]">
+            {t(!onCreateIssueComment ? 'tasks.comment.readOnlyPermission' : 'tasks.comment.readOnly')}
+          </p>
+        ) : null}
       </form>
       <section className="px-5 py-4">
         <h2 className="workbench-eyebrow text-[var(--workbench-muted)]">{t('issues.comment.title')}</h2>

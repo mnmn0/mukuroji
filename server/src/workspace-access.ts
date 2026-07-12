@@ -683,7 +683,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           UpdateExpression:
             'SET #status = :accepted, deliveryStatus = :notRequired, acceptedAt = :now, updatedAt = :now, version = version + :one REMOVE failureMessage',
           ConditionExpression:
-            'version = :expectedVersion AND #status IN (:pending, :provisioning, :deliveryFailed)',
+            'version = :expectedVersion AND #status IN (:pending, :provisioning, :deliveryFailed) AND expiresAt > :now',
           ExpressionAttributeNames: { '#status': 'status' },
           ExpressionAttributeValues: {
             ':accepted': 'accepted',

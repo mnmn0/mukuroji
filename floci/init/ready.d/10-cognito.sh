@@ -229,9 +229,9 @@ fi
 WORKSPACE_SEED_CREATED_AT="2026-07-11T00:00:00.000Z"
 
 ensure_workspace_record() {
-  record_key="$1"
-  item="$2"
-  existing_record_key="$(aws_local dynamodb get-item \
+  local record_key="$1"
+  local item="$2"
+  local existing_record_key="$(aws_local dynamodb get-item \
     --table-name "$WORKSPACE_ACCESS_TABLE" \
     --key "{\"workspaceId\":{\"S\":\"$PROJECT_DIRECTORY_ID\"},\"recordKey\":{\"S\":\"$record_key\"}}" \
     --consistent-read \
@@ -239,20 +239,29 @@ ensure_workspace_record() {
     --output text)"
 
   if [ "$existing_record_key" = "None" ] || [ -z "$existing_record_key" ]; then
-    aws_local dynamodb put-item \
-      --table-name "$WORKSPACE_ACCESS_TABLE" \
-      --item "$item" \
-      --condition-expression 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)' \
-      >/dev/null
+    local put_item_error
+    if ! put_item_error="$(aws_local dynamodb put-item \
+        --table-name "$WORKSPACE_ACCESS_TABLE" \
+        --item "$item" \
+        --condition-expression 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)' \
+        2>&1 >/dev/null)"; then
+      case "$put_item_error" in
+        *ConditionalCheckFailedException*) ;;
+        *)
+          printf '%s\n' "$put_item_error" >&2
+          return 1
+          ;;
+      esac
+    fi
   fi
 }
 
 seed_workspace_member() {
-  email="$1"
-  display_name="$2"
-  role="$3"
-  member_key="$(printf '%s' "$email" | tr '[:upper:]' '[:lower:]')"
-  record_key="MEMBER#$member_key"
+  local email="$1"
+  local display_name="$2"
+  local role="$3"
+  local member_key="$(printf '%s' "$email" | tr '[:upper:]' '[:lower:]')"
+  local record_key="MEMBER#$member_key"
 
   ensure_workspace_record "$record_key" "{
     \"workspaceId\": {\"S\": \"$PROJECT_DIRECTORY_ID\"},

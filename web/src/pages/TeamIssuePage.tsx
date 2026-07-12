@@ -1102,7 +1102,11 @@ function IssueDetailPane({
         <button className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300" disabled={isIssueReadOnly} type="submit">
           {t('issues.detail.save')}
         </button>
-        {isLegacyIssue ? <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('issues.detail.readOnlyLegacy')}</p> : null}
+        {isIssueReadOnly ? (
+          <p className="text-sm font-medium text-[var(--workbench-muted)]">
+            {t(isLegacyIssue ? 'issues.detail.readOnlyLegacy' : 'issues.detail.readOnlyPermission')}
+          </p>
+        ) : null}
         {detailErrorMessage ? <p className="text-sm font-bold text-red-600">{detailErrorMessage}</p> : null}
       </form>
       <form
@@ -1133,6 +1137,11 @@ function IssueDetailPane({
         <button className="workbench-button-secondary h-9 justify-self-start px-4 disabled:border-slate-200 disabled:text-slate-400" disabled={isCommentReadOnly} type="submit">
           {t('issues.comment.submit')}
         </button>
+        {isCommentReadOnly ? (
+          <p className="text-sm font-medium text-[var(--workbench-muted)]">
+            {t(isLegacyIssue ? 'issues.comment.readOnlyLegacy' : 'issues.comment.readOnlyPermission')}
+          </p>
+        ) : null}
       </form>
       <section className="mt-7 border-t border-[var(--workbench-border)] pt-6">
         <h2 className="workbench-eyebrow text-[var(--workbench-muted)]">{t('issues.comment.title')}</h2>

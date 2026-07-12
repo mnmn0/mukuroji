@@ -523,6 +523,7 @@ test('classifies concurrent member updates through optimistic version checks', a
 test('resumes authentication after a reconcile transaction committed but its response failed', async () => {
   const member = createWorkspaceMember('sato@example.com', 'member')
   let getCount = 0
+  const transactionInputs: Array<Record<string, unknown>> = []
   const client = new DynamoDbWorkspaceAccessClient(
     'WorkspaceAccessTable',
     createDocumentClient((command) => {
@@ -540,6 +541,7 @@ test('resumes authentication after a reconcile transaction committed but its res
         return { Item: toMemberItem(member) }
       }
 
+      transactionInputs.push(command.input)
       const error = new Error('unknown transaction outcome')
       error.name = 'TransactionCanceledException'
       throw error
@@ -556,6 +558,17 @@ test('resumes authentication after a reconcile transaction committed but its res
   })).resolves.toMatchObject({
     memberKey: 'sato@example.com',
     status: 'active',
+  })
+  expect(transactionInputs[0]).toMatchObject({
+    TransactItems: [
+      {},
+      {
+        Update: {
+          ConditionExpression:
+            'version = :expectedVersion AND #status IN (:pending, :provisioning, :deliveryFailed) AND expiresAt > :now',
+        },
+      },
+    ],
   })
 })
 

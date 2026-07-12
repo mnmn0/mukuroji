@@ -240,6 +240,7 @@ export class WorkspaceAccessApiError extends Error {
 
   constructor(status: number, message: string) {
     super(message)
+    this.name = 'WorkspaceAccessApiError'
     this.status = status
   }
 }
