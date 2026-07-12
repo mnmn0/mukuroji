@@ -19,6 +19,7 @@ import {
   getProjectDirectory,
   type ProjectDirectoryTeam,
 } from '../projects/api'
+import { getNotificationUnreadCount } from '../notifications/api'
 import { createProjectIssuesPath } from '../routes/paths'
 
 /**
@@ -56,6 +57,10 @@ type DashboardPageProps = {
    */
   loadDashboardSummary?: (accessToken: string) => Promise<DashboardSummary>
   /**
+   * access token から通知の実未読件数を取得する関数です。
+   */
+  loadNotificationUnreadCount?: (accessToken: string) => Promise<number>
+  /**
    * access token からチーム/プロジェクト階層を取得する関数です。
    */
   loadProjectDirectory?: (
@@ -87,6 +92,7 @@ export function DashboardPage({
   clearSession = clearAuthSession,
   loadCurrentUser = getCurrentUser,
   loadDashboardSummary = getDashboardSummary,
+  loadNotificationUnreadCount = getNotificationUnreadCount,
   loadProjectDirectory = getProjectDirectory,
   initialProjectDirectory = emptyProjectDirectory,
   initialLocale,
@@ -113,6 +119,14 @@ export function DashboardPage({
   const { data: summary, isLoading: isDashboardSummaryLoading } = useSWR(
     dashboardSummaryKey,
     ([, accessToken]) => loadDashboardSummary(accessToken),
+    apiSWRConfig,
+  )
+  const notificationUnreadCountKey = accessToken && user && !currentUserError
+    ? (['notification-unread-count', accessToken] as const)
+    : null
+  const { data: inboxCount = 0 } = useSWR(
+    notificationUnreadCountKey,
+    ([, currentAccessToken]) => loadNotificationUnreadCount(currentAccessToken),
     apiSWRConfig,
   )
   const projectDirectoryKey = accessToken && user && !currentUserError
@@ -161,7 +175,7 @@ export function DashboardPage({
       <Sidebar
         activeNavId="dashboard"
         className="max-[900px]:hidden"
-        inboxCount={summary?.blocked ?? 0}
+        inboxCount={inboxCount}
         labels={sidebarLabels}
         onSelectProject={(projectId, teamId) =>
           navigate(createProjectIssuesPath(projectId, teamId))
