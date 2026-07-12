@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import {
   createDynamoBatchItemFailure,
+  createNotificationProjectionDeliveryState,
+  createNotificationProjectionItem,
   createNotificationProjectionKeys,
   groupNotificationCandidates,
   hasActiveNotificationScope,
@@ -8,6 +10,7 @@ import {
   hasCurrentSystemAdminMembership,
   hasEligibleProjectAccess,
   parseAuditProjectionEvent,
+  refreshScheduledNotificationEvent,
   toSubscribedWatcherCandidates,
   type AuditProjectionEvent,
   type ProjectDirectoryItem,
@@ -87,12 +90,17 @@ describe('collaboration projection pure helpers', () => {
       workspaceId: 'workspace-1',
       occurredAt: '2026-07-12T12:00:00.000Z',
       actorUserId: 'cognito-sub-1',
+      actor: { displayName: 'Author Example' },
       entityKey: 'workspace-1#work-item#team/core/issue/example',
       entityId: 'team/core/issue/example',
+      summary: 'A reply mentioned you.',
       outboxStatus: 'suppressed',
       metadata: {
         actorMemberKey: 'author@example.com',
         issueId: 'example',
+        commentId: 'reply-1',
+        rootCommentId: 'root-1',
+        notificationTitle: 'Inbox foundations',
         notificationCandidates: [
           { memberKey: 'member@example.com', reason: 'mention' },
           { memberKey: 42, reason: 'invalid' },
@@ -102,7 +110,12 @@ describe('collaboration projection pure helpers', () => {
 
     expect(event).toMatchObject({
       actorMemberKey: 'author@example.com',
+      actorLabel: 'Author Example',
       issueId: 'example',
+      commentId: 'reply-1',
+      rootCommentId: 'root-1',
+      notificationTitle: 'Inbox foundations',
+      summary: 'A reply mentioned you.',
       outboxStatus: 'suppressed',
       notificationCandidates: [
         { memberKey: 'member@example.com', reason: 'mention' },
@@ -119,8 +132,115 @@ describe('collaboration projection pure helpers', () => {
     expect(first).toEqual({
       recipientKey: 'workspace-1#member@example.com',
       notificationKey: '2026-07-12T12:00:00.000Z#evt-1',
+      recipientStatusKey: 'workspace-1#member@example.com#unread',
       consumerName: 'collaboration-notification#member@example.com',
     })
+  })
+
+  test('applies in-app channel, digest frequency, and quiet hours to projection state', () => {
+    const state = createNotificationProjectionDeliveryState(
+      'workspace-1#member@example.com',
+      '2026-07-12T23:00:00.000Z',
+      {
+        version: 1,
+        channels: { inApp: false, email: true, push: false },
+        frequency: 'instant',
+        quietHours: {
+          enabled: true,
+          start: '22:00',
+          end: '07:00',
+          timeZone: 'UTC',
+        },
+      },
+    )
+
+    expect(state).toEqual({
+      inAppVisible: false,
+      inboxState: 'archived',
+      recipientStatusKey: 'workspace-1#member@example.com#archived',
+      archivedAt: '2026-07-12T23:00:00.000Z',
+      deliveryChannels: ['email'],
+      deliveryAfter: '2026-07-13T07:00:00.000Z',
+      deliveryFrequency: 'instant',
+    })
+  })
+
+  test('persists the Work Item identity required by current-permission reads', () => {
+    const event = createProjectionEvent({
+      issueId: 'notification-api',
+      projectId: 'refero',
+      teamId: 'core-team',
+    })
+    const deliveryState = createNotificationProjectionDeliveryState(
+      'workspace-1#member@example.com',
+      event.occurredAt,
+      {
+        version: 0,
+        channels: { inApp: true, email: false, push: false },
+        frequency: 'instant',
+        quietHours: {
+          enabled: false,
+          start: '22:00',
+          end: '07:00',
+          timeZone: 'UTC',
+        },
+      },
+    )
+
+    expect(createNotificationProjectionItem(
+      event,
+      { memberKey: 'member@example.com', reasons: ['status-change'] },
+      deliveryState,
+      1_800_000_000,
+    )).toMatchObject({
+      issueId: 'notification-api',
+      projectId: 'refero',
+      recipientKey: 'workspace-1#member@example.com',
+      recipientStatusKey: 'workspace-1#member@example.com#unread',
+      teamId: 'core-team',
+    })
+  })
+
+  test('refreshes scheduled candidates from the current assignee and suppresses stale due state', () => {
+    const scheduledEvent = createProjectionEvent({
+      dueDate: '2026-07-12',
+      eventType: 'work-item.due',
+      issueId: 'release-checklist',
+      notificationCandidates: [{ memberKey: 'old-owner@example.com', reason: 'due' }],
+      teamId: 'core-team',
+    })
+
+    expect(refreshScheduledNotificationEvent(scheduledEvent, {
+      assigneeMemberKey: 'new-owner@example.com',
+      checked: true,
+      dueDate: '2026-07-12',
+      exists: true,
+      status: 'in-progress',
+    })).toBeUndefined()
+    expect(refreshScheduledNotificationEvent(scheduledEvent, {
+      assigneeMemberKey: 'old-owner@example.com',
+      checked: true,
+      dueDate: '2026-07-12',
+      exists: true,
+      status: 'in-progress',
+    })?.notificationCandidates).toEqual([{
+      memberKey: 'old-owner@example.com',
+      reason: 'due',
+    }])
+    expect(refreshScheduledNotificationEvent(scheduledEvent, {
+      assigneeMemberKey: 'new-owner@example.com',
+      checked: true,
+      dueDate: '2026-07-13',
+      exists: true,
+      status: 'in-progress',
+    })).toBeUndefined()
+    expect(refreshScheduledNotificationEvent(scheduledEvent, {
+      assigneeMemberKey: 'new-owner@example.com',
+      checked: true,
+      dueDate: '2026-07-12',
+      exists: true,
+      status: 'done',
+    })).toBeUndefined()
   })
 
   test('tolerates legacy events without collaboration metadata', () => {
@@ -138,6 +258,34 @@ describe('collaboration projection pure helpers', () => {
       outboxStatus: 'pending',
       scopeKey: 'workspace-1#work-item#team/core/issue/example',
     })
+  })
+
+  test('accepts future approval and automation notification producers through the generic contract', () => {
+    for (const [eventType, reason] of [
+      ['approval.decided', 'approval'],
+      ['automation.failed', 'automation-failure'],
+    ] as const) {
+      const event = parseAuditProjectionEvent({
+        eventId: `${eventType}-1`,
+        eventType,
+        workspaceId: 'workspace-1',
+        occurredAt: '2026-07-12T12:00:00.000Z',
+        actorUserId: 'system',
+        entityType: 'work-item',
+        entityId: 'team/core/issue/example',
+        metadata: {
+          teamId: 'core',
+          issueId: 'example',
+          deepLink: '/teams/core/issues?issueId=example',
+          notificationCandidates: [{ memberKey: 'owner@example.com', reason }],
+        },
+      })
+
+      expect(event).toBeDefined()
+      expect(groupNotificationCandidates(event as AuditProjectionEvent)).toEqual([
+        { memberKey: 'owner@example.com', reasons: [reason] },
+      ])
+    }
   })
 
   test('uses the DynamoDB sequence number for partial batch failures', () => {

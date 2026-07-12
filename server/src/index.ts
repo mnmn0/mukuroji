@@ -76,6 +76,15 @@ import {
   type CollaborationClient,
   type CollaborationComment,
 } from './collaboration'
+import {
+  DynamoDbNotificationsClient,
+  NotificationError,
+  type NotificationAction,
+  type NotificationClient,
+  type NotificationFilter,
+  type NotificationItem,
+  type UpdateNotificationPreferencesInput,
+} from './notifications'
 
 export {
   DynamoDbWorkspaceAccessClient,
@@ -1991,7 +2000,11 @@ type ProjectDirectoryClient = {
   /**
    * DynamoDB から sidebar 用の team/project 階層を取得します。
    */
-  getProjectDirectory(directoryId: string, locale: Locale): Promise<ProjectDirectoryResponse>
+  getProjectDirectory(
+    directoryId: string,
+    locale: Locale,
+    consistentRead?: boolean,
+  ): Promise<ProjectDirectoryResponse>
   /**
    * active project と指定 member の role を 1 directory read で取得します。
    */
@@ -2105,6 +2118,7 @@ let auditEvents: AuditEventsClient
 let workspaceAccess: WorkspaceAccessClient
 let realtimeTickets: RealtimeTicketsClient
 let collaboration: CollaborationClient
+let notifications: NotificationClient
 const projectDirectoryIdPrefix = 'user#'
 const defaultAllowedOrigins = [
   'http://localhost:5173',
@@ -2494,6 +2508,153 @@ app.get('/api/audit/events', async (c) => {
  */
 app.get('/api/audit/events/export', async (c) => {
   return handleWorkspaceAuditRequest(c, true)
+})
+
+/** Recipient の durable notification timeline を cursor 付きで返します。 */
+app.get('/api/notifications', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const isVisible = await createNotificationVisibilityFilter(principal)
+    const filter = c.req.query('filter') as NotificationFilter | undefined
+    const limitValue = c.req.query('limit')
+    const input = {
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+      filter,
+      eventType: c.req.query('type')?.trim() || undefined,
+      limit: limitValue === undefined ? undefined : Number(limitValue),
+      cursor: c.req.query('cursor')?.trim() || undefined,
+      isVisible,
+    }
+    const [page, unreadCount] = await Promise.all([
+      notifications.list(input),
+      notifications.countUnread({
+        workspaceId: principal.directoryId,
+        memberKey: principal.userKey,
+        isVisible,
+      }),
+    ])
+
+    return c.json({ ...page, unreadCount })
+  } catch (error) {
+    return toNotificationErrorResponse(c, error)
+  }
+})
+
+/** Recipient の現在表示可能な unread notification 件数を返します。 */
+app.get('/api/notifications/unread-count', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const isVisible = await createNotificationVisibilityFilter(principal)
+    const unreadCount = await notifications.countUnread({
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+      isVisible,
+    })
+    return c.json({ unreadCount })
+  } catch (error) {
+    return toNotificationErrorResponse(c, error)
+  }
+})
+
+/** Recipient のすべての active unread notification を read にします。 */
+app.post('/api/notifications/mark-all-read', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const isVisible = await createNotificationVisibilityFilter(principal)
+    const updatedCount = await notifications.markAllRead({
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+      isVisible,
+    })
+    const unreadCount = await notifications.countUnread({
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+      isVisible,
+    })
+    return c.json({ updatedCount, unreadCount })
+  } catch (error) {
+    return toNotificationErrorResponse(c, error)
+  }
+})
+
+/** Recipient の notification を read、archive、snooze state へ遷移させます。 */
+app.patch('/api/notifications/:notificationId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const isVisible = await createNotificationVisibilityFilter(principal)
+    const body = await readJson<Record<string, unknown>>(c.req) ?? {}
+    const notification = await notifications.update({
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+      notificationId: c.req.param('notificationId'),
+      action: readNotificationAction(body.action),
+      snoozedUntil: readOptionalNotificationTimestamp(body.snoozedUntil),
+      isVisible,
+    })
+    return c.json(notification)
+  } catch (error) {
+    return toNotificationErrorResponse(c, error)
+  }
+})
+
+/** Recipient の notification channel、digest、quiet hours 設定を返します。 */
+app.get('/api/notification-preferences', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    return c.json(await notifications.getPreferences({
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+    }))
+  } catch (error) {
+    return toNotificationErrorResponse(c, error)
+  }
+})
+
+/** Recipient の notification preference を version 条件付きで保存します。 */
+app.put('/api/notification-preferences', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const body = await readJson<Record<string, unknown>>(c.req) ?? {}
+    const preferences = await notifications.savePreferences({
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+      preferences: readNotificationPreferencesInput(body),
+    })
+    return c.json(preferences)
+  } catch (error) {
+    return toNotificationErrorResponse(c, error)
+  }
 })
 
 /**
@@ -3495,6 +3656,7 @@ app.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       workspaceId: principal.directoryId,
       teamId,
       issueId,
+      workItemTitle: detail.issue.title ?? detail.issue.titleKey ?? issueId,
       entityKey,
       projectId: detail.issue.assignedProjectId,
       projectEntityKey,
@@ -3503,7 +3665,7 @@ app.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       parentCommentId: readOptionalCommentId(body.parentCommentId, 'Parent comment ID'),
       mentionMemberKeys,
       automaticWatcherCandidates,
-      deepLink: `/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`,
+      deepLink: createTeamIssueDeepLink(teamId, issueId),
       auditContext: createApiMutationContext(c, principal, { teamId, issueId, ...body }),
     })
     const activity = {
@@ -3565,6 +3727,7 @@ app.patch('/api/teams/:teamId/issues/:issueId/comments/:commentId', async (c) =>
       workspaceId: principal.directoryId,
       teamId,
       issueId,
+      workItemTitle: detail.issue.title ?? detail.issue.titleKey ?? issueId,
       entityKey,
       projectId: detail.issue.assignedProjectId,
       projectEntityKey,
@@ -3574,7 +3737,7 @@ app.patch('/api/teams/:teamId/issues/:issueId/comments/:commentId', async (c) =>
       mentionMemberKeys,
       automaticWatcherCandidates,
       expectedVersion: readCommentExpectedVersion(body.expectedVersion),
-      deepLink: `/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`,
+      deepLink: createTeamIssueDeepLink(teamId, issueId),
       auditContext: createApiMutationContext(c, principal, { teamId, issueId, commentId, ...body }),
     })
 
@@ -4643,6 +4806,146 @@ function toCollaborationErrorResponse(c: Context, error: unknown) {
     : 502
 
   return c.json({ code: error.code, message: error.message }, status)
+}
+
+function toNotificationErrorResponse(c: Context, error: unknown) {
+  if (error instanceof CognitoServiceError) {
+    return toAuthErrorResponse(c, error)
+  }
+  if (!(error instanceof NotificationError)) {
+    return toProjectDataErrorResponse(c, error)
+  }
+  if (error.status >= 500) {
+    console.error(error)
+  }
+  const status = error.status === 400 ||
+    error.status === 403 ||
+    error.status === 404 ||
+    error.status === 409 ||
+    error.status === 503
+    ? error.status
+    : 502
+  return c.json({ code: error.code, message: error.message }, status)
+}
+
+function readNotificationAction(value: unknown): NotificationAction {
+  if (
+    value === 'mark-read' ||
+    value === 'mark-unread' ||
+    value === 'archive' ||
+    value === 'restore' ||
+    value === 'snooze'
+  ) {
+    return value
+  }
+  throw new NotificationError(400, 'InvalidNotificationAction', 'Notification action is invalid.')
+}
+
+function readOptionalNotificationTimestamp(value: unknown) {
+  if (value === undefined || value === null) {
+    return undefined
+  }
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new NotificationError(400, 'InvalidNotificationSnooze', 'Snooze time is invalid.')
+  }
+  return value.trim()
+}
+
+function readNotificationPreferencesInput(
+  value: Record<string, unknown>,
+): UpdateNotificationPreferencesInput {
+  const channels = isRecord(value.channels) ? value.channels : {}
+  const quietHours = isRecord(value.quietHours) ? value.quietHours : {}
+
+  return {
+    version: Number(value.version),
+    channels: {
+      inApp: channels.inApp as boolean,
+      email: channels.email as boolean,
+      push: channels.push as boolean,
+    },
+    frequency: value.frequency as UpdateNotificationPreferencesInput['frequency'],
+    quietHours: {
+      enabled: quietHours.enabled as boolean,
+      start: quietHours.start as string,
+      end: quietHours.end as string,
+      timeZone: quietHours.timeZone as string,
+    },
+  }
+}
+
+async function createNotificationVisibilityFilter(
+  principal: WorkspacePrincipal,
+) {
+  const directory = await projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
+  const activeTeamIds = new Set(directory.teams.map((team) => team.id))
+  const projectTeamIds = new Map(
+    directory.teams.flatMap((team) =>
+      team.projects.map((project) => [project.id, team.id] as const)
+    ),
+  )
+  const accessibleProjectIds = principal.isSystemAdmin
+    ? new Set(projectTeamIds.keys())
+    : new Set(
+        (await projectDirectory.getProjectAccessList(principal.directoryId, principal.userKey))
+          .filter((access) => projectAccessAllows(access, 'viewer') && projectTeamIds.has(access.projectId))
+          .map((access) => access.projectId),
+      )
+  const accessibleTeamIds = principal.isSystemAdmin
+    ? activeTeamIds
+    : new Set(
+        [...accessibleProjectIds]
+          .map((projectId) => projectTeamIds.get(projectId))
+          .filter((teamId): teamId is string => Boolean(teamId)),
+      )
+  const workItemScopes = new Map<string, Promise<{ exists: boolean; projectId?: string }>>()
+
+  return async (notification: NotificationItem) => {
+    if (notification.teamId && notification.issueId) {
+      const scopeKey = `${notification.teamId}\0${notification.issueId}`
+      let scope = workItemScopes.get(scopeKey)
+      if (!scope) {
+        scope = teamIssues.getTeamIssueDetail(
+          principal.directoryId,
+          notification.teamId,
+          notification.issueId,
+          { consistentIssueRead: true, eventLimit: 0 },
+        ).then((detail) => ({
+          exists: true,
+          ...(detail.issue.assignedProjectId
+            ? { projectId: detail.issue.assignedProjectId }
+            : {}),
+        })).catch((error: unknown) => {
+          if (isTeamIssueNotFoundError(error)) {
+            return { exists: false }
+          }
+          throw error
+        })
+        workItemScopes.set(scopeKey, scope)
+      }
+      const currentScope = await scope
+      if (!currentScope.exists) {
+        return false
+      }
+      if (currentScope.projectId) {
+        notification.projectId = currentScope.projectId
+        return projectTeamIds.get(currentScope.projectId) === notification.teamId &&
+          accessibleProjectIds.has(currentScope.projectId)
+      }
+      delete notification.projectId
+      return activeTeamIds.has(notification.teamId) && accessibleTeamIds.has(notification.teamId)
+    }
+    if (notification.projectId) {
+      const teamId = projectTeamIds.get(notification.projectId)
+      return teamId !== undefined &&
+        (!notification.teamId || notification.teamId === teamId) &&
+        accessibleProjectIds.has(notification.projectId)
+    }
+    if (notification.teamId) {
+      return activeTeamIds.has(notification.teamId) && accessibleTeamIds.has(notification.teamId)
+    }
+    return true
+  }
 }
 
 function toProjectDataErrorResponse(c: Context, error: unknown) {
@@ -7120,6 +7423,7 @@ export class DynamoDbTeamIssuesClient {
         entityId: createTeamIssueAuditEntityId(teamId, issueId),
         action: 'created',
         occurredAt: now,
+        summary: 'Work Item was created and assigned.',
         changes: createAuditFieldChanges(undefined, item, [
           'title',
           'description',
@@ -7131,8 +7435,15 @@ export class DynamoDbTeamIssuesClient {
         ]),
         metadata: {
           adapter: 'canonical-work-item',
+          actorMemberKey: actorUserId,
           teamId,
+          issueId,
           projectId: assignedProjectId,
+          deepLink: createTeamIssueDeepLink(teamId, issueId),
+          notificationTitle: title,
+          notificationCandidates: [
+            { memberKey: assigneeUserId, reason: 'assignment' },
+          ],
           afterRevision: item.revision,
         },
       })
@@ -7313,6 +7624,7 @@ export class DynamoDbTeamIssuesClient {
         entityId: createTeamIssueAuditEntityId(teamId, issueId),
         action: 'updated',
         occurredAt: expressionAttributeValues[':updatedAt'] as string,
+        summary: createWorkItemNotificationSummary(beforeIssue, afterIssue),
         changes: createAuditFieldChanges(beforeIssue, afterIssue, [
           'title',
           'description',
@@ -7324,8 +7636,13 @@ export class DynamoDbTeamIssuesClient {
         ]),
         metadata: {
           adapter: 'canonical-work-item',
+          actorMemberKey: actorUserId,
           teamId,
+          issueId,
           projectId: afterIssue.assignedProjectId,
+          deepLink: createTeamIssueDeepLink(teamId, issueId),
+          notificationTitle: afterIssue.title ?? afterIssue.titleKey ?? issueId,
+          notificationCandidates: createWorkItemNotificationCandidates(beforeIssue, afterIssue),
           beforeRevision: expectedRevision,
           afterRevision: nextRevision,
         },
@@ -7789,9 +8106,13 @@ export class DynamoDbProjectDirectoryClient {
   /**
    * DynamoDB から sidebar 用の team/project 階層を取得します。
    */
-  async getProjectDirectory(directoryId: string, locale: Locale) {
+  async getProjectDirectory(
+    directoryId: string,
+    locale: Locale,
+    consistentRead = false,
+  ) {
     try {
-      const items = await this.queryDirectoryItems(directoryId)
+      const items = await this.queryDirectoryItems(directoryId, true, consistentRead)
 
       return {
         teams: toProjectDirectoryResponse(items, locale, directoryId),
@@ -10639,6 +10960,56 @@ function createTeamIssueAuditEntityId(teamId: string, issueId: string) {
 }
 
 /**
+ * Team Issue 一覧 route で指定 Work Item を直接開く deep link を作成します。
+ */
+function createTeamIssueDeepLink(teamId: string, issueId: string) {
+  return `/teams/${encodeURIComponent(teamId)}/issues?${new URLSearchParams({ issueId }).toString()}`
+}
+
+/**
+ * Work Item の担当・状態・期限変更から通知対象と理由を組み立てます。
+ */
+function createWorkItemNotificationCandidates(
+  before: TeamIssueItem,
+  after: TeamIssueItem,
+) {
+  const candidates: Array<{ memberKey: string; reason: string }> = []
+
+  if (before.assigneeUserId !== after.assigneeUserId) {
+    candidates.push({ memberKey: after.assigneeUserId, reason: 'assignment' })
+  }
+
+  if (before.status !== after.status) {
+    candidates.push({ memberKey: after.assigneeUserId, reason: 'status-change' })
+  }
+
+  if (before.dueDate !== after.dueDate) {
+    candidates.push({ memberKey: after.assigneeUserId, reason: 'due-date-change' })
+  }
+
+  return candidates
+}
+
+/**
+ * Work Item 更新通知と activity に使う最も具体的な概要を選びます。
+ */
+function createWorkItemNotificationSummary(before: TeamIssueItem, after: TeamIssueItem) {
+  if (before.assigneeUserId !== after.assigneeUserId) {
+    return 'Work Item assignment changed.'
+  }
+
+  if (before.status !== after.status) {
+    return 'Work Item status changed.'
+  }
+
+  if (before.dueDate !== after.dueDate) {
+    return 'Work Item due date changed.'
+  }
+
+  return 'Work Item was updated.'
+}
+
+/**
  * Team Issue comment を Workspace 内で一意な audit target ID に変換します。
  */
 function createTeamIssueAuditCommentId(teamId: string, issueId: string, commentId: string) {
@@ -10795,6 +11166,7 @@ auditEvents = createAuditEventsClient()
 workspaceAccess = new DynamoDbWorkspaceAccessClient()
 realtimeTickets = new DynamoDbRealtimeTicketsClient()
 collaboration = new DynamoDbCollaborationClient()
+notifications = new DynamoDbNotificationsClient()
 
 /**
  * Server test で外部 service client を差し替えます。
@@ -10809,6 +11181,7 @@ export function configureApiClientsForTest(clients: {
   workspaceAccess?: WorkspaceAccessClient
   realtimeTickets?: RealtimeTicketsClient
   collaboration?: CollaborationClient
+  notifications?: NotificationClient
 }) {
   cognito = clients.cognito ?? cognito
   dashboardSummary = clients.dashboardSummary ?? dashboardSummary
@@ -10819,6 +11192,7 @@ export function configureApiClientsForTest(clients: {
   workspaceAccess = clients.workspaceAccess ?? workspaceAccess
   realtimeTickets = clients.realtimeTickets ?? realtimeTickets
   collaboration = clients.collaboration ?? collaboration
+  notifications = clients.notifications ?? notifications
 }
 
 /**
@@ -10834,6 +11208,7 @@ export function resetApiClientsForTest() {
   workspaceAccess = new DynamoDbWorkspaceAccessClient()
   realtimeTickets = new DynamoDbRealtimeTicketsClient()
   collaboration = new DynamoDbCollaborationClient()
+  notifications = new DynamoDbNotificationsClient()
 }
 
 /**

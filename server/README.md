@@ -38,6 +38,7 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 - `/api/teams/{teamId}/issues`
 - `/api/teams/{teamId}/issues/{issueId}/collaboration`, `/comments`, `/watch`, `/presence`
 - `/api/projects/{projectId}/tasks`, `/issues`, `/members`, `/users`, `/watch`
+- `/api/notifications`, `/api/notifications/unread-count`, `/api/notification-preferences`
 
 The local API reads DynamoDB through `DYNAMODB_ENDPOINT`, `AWS_ENDPOINT_URL_DYNAMODB`, or `AWS_ENDPOINT_URL`.
 Default local table names are:
@@ -47,6 +48,7 @@ Default local table names are:
 - `MUKUROJI_PROJECT_DIRECTORY_TABLE=mukuroji-project-directory-local`
 - `MUKUROJI_COLLABORATION_TABLE=mukuroji-collaboration-local`
 - `MUKUROJI_NOTIFICATIONS_TABLE=mukuroji-notifications-local`
+- `NOTIFICATIONS_STATUS_INDEX_NAME=RecipientStatusIndex`
 - `MUKUROJI_REALTIME_SESSIONS_TABLE=mukuroji-realtime-sessions-local`
 - `MUKUROJI_AUDIT_EVENTS_TABLE=mukuroji-audit-events`
 - `MUKUROJI_AUDIT_RETENTION_DAYS=2555`

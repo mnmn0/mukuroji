@@ -189,6 +189,10 @@ test('shared server handler is bundled as a Lambda asset with production environ
         COLLABORATION_TABLE_NAME: {
           Ref: 'WorkItemCollaborationTableFDECF217',
         },
+        NOTIFICATIONS_TABLE_NAME: {
+          Ref: 'NotificationsTable76DCFC6C',
+        },
+        NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
         REALTIME_SESSIONS_TABLE_NAME: {
           Ref: 'RealtimeSessionsTable607096EB',
         },
@@ -303,6 +307,16 @@ test('collaboration notifications and realtime sessions use production-safe Dyna
       { AttributeName: 'recipientKey', KeyType: 'HASH' },
       { AttributeName: 'notificationKey', KeyType: 'RANGE' },
     ],
+    GlobalSecondaryIndexes: Match.arrayWith([
+      Match.objectLike({
+        IndexName: 'RecipientStatusIndex',
+        KeySchema: [
+          { AttributeName: 'recipientStatusKey', KeyType: 'HASH' },
+          { AttributeName: 'notificationKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'ALL' },
+      }),
+    ]),
     TimeToLiveSpecification: {
       AttributeName: 'expiresAt',
       Enabled: true,
@@ -517,6 +531,47 @@ test('audit stream projects notifications with retries DLQ and scoped production
   expect(serializedProjectionPolicy).not.toContain('/*/*/@connections/*');
 });
 
+test('hourly schedule emits deterministic due and overdue audit outbox events', () => {
+  const template = synthesizedTemplate;
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: 'Emits deterministic due and overdue Work Item notification events.',
+    Handler: 'index.handler',
+    Runtime: 'nodejs22.x',
+    Timeout: 300,
+    Environment: {
+      Variables: Match.objectLike({
+        AUDIT_EVENTS_TABLE_NAME: { Ref: 'AuditEventsTable0723963E' },
+        AUDIT_RETENTION_DAYS: { Ref: 'AuditRetentionDays' },
+        NOTIFICATION_SCHEDULE_MAX_PAGES: '1000',
+        NOTIFICATION_SCHEDULE_SCAN_PAGE_SIZE: '100',
+        WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
+      }),
+    },
+  });
+  template.hasResourceProperties('AWS::Events::Rule', {
+    Description: 'Checks canonical Work Items for due and overdue notifications.',
+    ScheduleExpression: 'rate(1 hour)',
+    State: 'ENABLED',
+    Targets: Match.arrayWith([
+      Match.objectLike({
+        Arn: Match.anyValue(),
+        Id: Match.anyValue(),
+      }),
+    ]),
+  });
+
+  const schedulePolicy = Object.entries(template.toJSON().Resources).find(([logicalId]) =>
+    logicalId.startsWith('NotificationScheduleFunctionServiceRoleDefaultPolicy')
+  )?.[1];
+  const serializedSchedulePolicy = JSON.stringify(schedulePolicy);
+
+  expect(serializedSchedulePolicy).toContain('TeamIssuesTable189D851D');
+  expect(serializedSchedulePolicy).toContain('AuditEventsTable0723963E');
+  expect(serializedSchedulePolicy).toContain('dynamodb:Scan');
+  expect(serializedSchedulePolicy).toContain('dynamodb:PutItem');
+});
+
 test('API IAM is limited to the data tables and configured Cognito user pool', () => {
   const template = synthesizedTemplate;
   const policy = template.toJSON().Resources.ListProjectTasksFunctionServiceRoleDefaultPolicy5F0F81CE;
@@ -537,6 +592,9 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     ]),
   }));
   expect(JSON.stringify(transactStatement)).not.toContain('ProjectTasksTableE21F6637');
+  expect(JSON.stringify(policy)).toContain('NotificationsTable76DCFC6C');
+  expect(JSON.stringify(policy)).toContain('dynamodb:Query');
+  expect(JSON.stringify(policy)).toContain('dynamodb:PutItem');
 
   const legacyTaskStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('ProjectTasksTableE21F6637')

@@ -27,6 +27,9 @@
 - `WorkItemsTableName`（既存 `TeamIssuesTable` を昇格した canonical store）
 - `TeamIssuesTableName`（`WorkItemsTableName` と同じ table を指す互換 output）
 - `ProjectDirectoryTableName`, `TeamIssueEventsTableName`
+- `NotificationsTableName`, `CollaborationProjectionDlqUrl`
+- `AuditEventsTableName`, `ProcessedAuditEventsTableName`
+- `WorkItemCollaborationTableName`, `RealtimeSessionsTableName`, `RealtimeWebSocketUrl`
 - `WorkspaceDirectoryId`
 
 Function URL と API Gateway は同じ Lambda を呼びます。いずれも `<base>/teams/projects` と `<base>/api/teams/projects` を同じ canonical `/api` route へ正規化します。
@@ -155,13 +158,15 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
 既存 data をそのまま利用する upgrade では、現在使われている directory partition ID を `WorkspaceDirectoryId` に指定します。例えば既存 user partition が `user#owner@example.com` なら、その値を初回 upgrade でも維持します。新しい `workspace#...` へ同時に変更しないでください。
 
 1. 現在の stack template、parameters、outputs と table 名を記録する。
-2. 4 table すべてで PITR が有効か確認する。未有効なら on-demand backup も取得する。
+2. stack が管理する全 stateful table で PITR が有効か確認する。未有効なら on-demand backup も取得する。
 3. lowercase owner email と、既存 project で manager 権限を持つ owner を選ぶ。
 4. 既存 partition ID を使って `prepare-workspace-cognito.sh` を実行する。
 5. `cdk diff` で table replacement / deletion がないこと、Lambda / custom resource / Retain / PITR の更新だけであることを確認する。
 6. deploy 後に `validate-workspace-bootstrap.sh` と Function URL / API Gateway の 4 経路を確認する。
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
+
+通知 upgrade では `NotificationsTable` に `RecipientStatusIndex` が追加されます。deploy 前に GSI backfill の所要時間と table throttling を確認し、deploy 後は `CollaborationProjectionDlqUrl` の滞留、`NotificationScheduleFunction` の失敗、Inbox の unread count を監視してください。期限 schedule は UTC date-only で1時間ごとに走査し、同じ Work Item / due date / reason の event を決定的に重複排除します。
 
 `InitialOwnerEmail` / `InitialOwnerUsername` の変更は通常 deploy と分けて owner rotation として扱います。新 owner の検証後、旧 owner の Cognito attributes、system-admin group、workspace/member/alias row、各 project role を明示的に棚卸ししてください。parameter 変更だけでは旧 owner の row や group membership は削除されません。
 
