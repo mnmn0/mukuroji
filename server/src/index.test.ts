@@ -2485,6 +2485,38 @@ test('suppresses a shared project legacy projection after migration to another o
   ])
 })
 
+test('does not assign shared-project legacy rows to an arbitrary Team in compatibility reads', async () => {
+  const calls = configureFakeProjectClients(true, {
+    additionalTeams: [{
+      id: 'design-team',
+      name: 'デザインチーム',
+      projects: [{ id: 'refero', name: 'Refero', tone: 'purple' }],
+    }],
+    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
+  })
+  const headers = { Authorization: 'Bearer test-token' }
+
+  const projectResponse = await app.request('/api/projects/refero/tasks', { headers })
+  const teamResponse = await app.request('/api/teams/core-team/issues', { headers })
+  const detailResponse = await app.request('/api/teams/core-team/issues/wireframe', { headers })
+  const aggregateResponse = await app.request('/api/work-items', { headers })
+
+  expect(projectResponse.status).toBe(200)
+  expect(teamResponse.status).toBe(200)
+  expect(detailResponse.status).toBe(404)
+  expect(aggregateResponse.status).toBe(200)
+  expect((await projectResponse.json()).tasks).toEqual([
+    expect.objectContaining({ id: 'onboarding-friction', source: 'dynamodb' }),
+  ])
+  expect((await teamResponse.json()).issues).toEqual([
+    expect.objectContaining({ id: 'onboarding-friction', source: 'dynamodb' }),
+  ])
+  expect((await aggregateResponse.json()).workItems)
+    .not.toContainEqual(expect.objectContaining({ id: 'wireframe' }))
+  expect(calls.taskReads).toEqual([])
+  expect(calls.migrationSourceBatchReads).toEqual([])
+})
+
 test('keeps a migrated legacy source suppressed after reassignment to an inaccessible project', async () => {
   const calls = configureFakeProjectClients(true, {
     additionalTeams: [{
@@ -2513,9 +2545,7 @@ test('keeps a migrated legacy source suppressed after reassignment to an inacces
     { directoryId: 'user#demo@example.com', limit: 1001, teamId: 'core-team' },
     { directoryId: 'user#demo@example.com', limit: 1001, teamId: 'design-team' },
   ])
-  expect(calls.projectIssueReads).toEqual([
-    { directoryId: 'user#demo@example.com', limit: 1001, projectId: 'refero' },
-  ])
+  expect(calls.projectIssueReads).toEqual([])
   expect(calls.migrationSourceBatchReads).toEqual([])
 })
 
@@ -2620,6 +2650,8 @@ test('maps an incomplete migration BatchGet lookup to service unavailable', asyn
       documentClient,
       {} as DynamoDBClient,
       false,
+      undefined,
+      async () => {},
     ) as never,
   })
 
@@ -2636,18 +2668,14 @@ test('maps an incomplete migration BatchGet lookup to service unavailable', asyn
 
 test('suppresses reassigned migrations in project, Team, and detail compatibility reads', async () => {
   const calls = configureFakeProjectClients(true, {
-    additionalTeams: [{
-      id: 'design-team',
-      name: 'デザインチーム',
-      projects: [
-        { id: 'refero', name: 'Refero', tone: 'purple' },
-        { id: 'private-project', name: 'Private', tone: 'purple' },
-      ],
-    }],
     migratedLegacyAssignedProjectId: 'private-project',
-    migratedLegacyOwnerTeamId: 'design-team',
+    migratedLegacyOwnerTeamId: 'core-team',
     migratedLegacySourceProjectId: 'refero',
     projectAccesses: [{ projectId: 'refero', role: 'manager' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
   })
   const headers = { Authorization: 'Bearer test-token' }
 
@@ -2665,10 +2693,7 @@ test('suppresses reassigned migrations in project, Team, and detail compatibilit
   expect(calls.migrationSourceBatchReads).toHaveLength(3)
   expect(calls.migrationSourceBatchReads).toContainEqual({
     directoryId: 'user#demo@example.com',
-    keys: [
-      { issueId: 'wireframe', teamId: 'core-team' },
-      { issueId: 'wireframe', teamId: 'design-team' },
-    ],
+    keys: [{ issueId: 'wireframe', teamId: 'core-team' }],
   })
 })
 
@@ -4021,6 +4046,7 @@ test('DynamoDB migration source lookup chunks strongly consistent BatchGet reque
 
 test('DynamoDB migration source lookup retries UnprocessedKeys and returns exact metadata', async () => {
   let attempt = 0
+  const retryDelays: number[] = []
   const canonicalWorkItem = {
     schemaVersion: 1,
     revision: 1,
@@ -4059,6 +4085,11 @@ test('DynamoDB migration source lookup retries UnprocessedKeys and returns exact
     documentClient,
     {} as DynamoDBClient,
     false,
+    undefined,
+    async (ms) => {
+      retryDelays.push(ms)
+    },
+    () => 0.5,
   )
 
   await expect(client.getTeamIssueMigrationSourceKeys(
@@ -4068,10 +4099,12 @@ test('DynamoDB migration source lookup retries UnprocessedKeys and returns exact
     'user#demo@example.com#project#refero#task#wireframe',
   ]))
   expect(attempt).toBe(2)
+  expect(retryDelays).toEqual([37])
 })
 
 test('DynamoDB migration source lookup fails closed when UnprocessedKeys remain', async () => {
   let attempts = 0
+  const retryDelays: number[] = []
   const documentClient = {
     async send(command: { input: Record<string, unknown> }) {
       attempts += 1
@@ -4086,6 +4119,11 @@ test('DynamoDB migration source lookup fails closed when UnprocessedKeys remain'
     documentClient,
     {} as DynamoDBClient,
     false,
+    undefined,
+    async (ms) => {
+      retryDelays.push(ms)
+    },
+    () => 0.5,
   )
 
   await expect(client.getTeamIssueMigrationSourceKeys(
@@ -4096,6 +4134,7 @@ test('DynamoDB migration source lookup fails closed when UnprocessedKeys remain'
     status: 503,
   })
   expect(attempts).toBe(3)
+  expect(retryDelays).toEqual([37, 75])
 })
 
 test('DynamoDB legacy task client rejects mutations without sending writes', async () => {
@@ -4658,6 +4697,88 @@ test('DynamoDB dashboard keeps same-ID legacy tasks isolated by migration source
   })
   expect(exactSourceSummary.tasks).toBe(0)
   expect(exactSourceSummary.blocked).toBe(0)
+})
+
+test('DynamoDB dashboard omits legacy fallback when a project has multiple owner Teams', async () => {
+  let legacyReads = 0
+  let migrationSourceReads = 0
+  const client = new DynamoDbDashboardSummaryClient(
+    {
+      async getProjectDirectory(_directoryId: string, _locale: 'ja' | 'en') {
+        return {
+          teams: [
+            {
+              id: 'core-team',
+              name: 'Core Team',
+              expanded: true,
+              projects: [{ id: 'refero', name: 'Refero', tone: 'blue' as const }],
+            },
+            {
+              id: 'design-team',
+              name: 'Design Team',
+              expanded: true,
+              projects: [{ id: 'refero', name: 'Refero', tone: 'purple' as const }],
+            },
+          ],
+        }
+      },
+      async getProjectAccessList(_directoryId: string, _memberKey: string) {
+        return [{ projectId: 'refero', role: 'viewer' as ProjectRole }]
+      },
+    } as never,
+    {
+      async getProjectTasks(_directoryId: string, projectId: string) {
+        legacyReads += 1
+        return {
+          projectId,
+          tasks: [{
+            id: 'wireframe',
+            title: 'Wireframe',
+            assignee: '佐藤 花子',
+            status: 'in-progress' as const,
+            dueDate: '2026/06/03',
+            priority: 'high' as const,
+          }],
+        }
+      },
+    } as never,
+    {
+      async getProjectIssues(_directoryId: string, projectId: string) {
+        return {
+          projectId,
+          issues: [{
+            schemaVersion: 1 as const,
+            revision: 1,
+            id: 'canonical-review',
+            teamId: 'core-team',
+            assignedProjectId: projectId,
+            title: 'Canonical review',
+            status: 'review' as const,
+            dueDate: '2026/06/10',
+            priority: 'medium' as const,
+            createdAt: '2026-06-01T00:00:00.000Z',
+            updatedAt: '2026-06-01T00:00:00.000Z',
+            source: 'dynamodb' as const,
+          }],
+        }
+      },
+      async getTeamIssueMigrationSourceKeys() {
+        migrationSourceReads += 1
+        return new Set<string>()
+      },
+    } as never,
+  )
+
+  const summary = await client.getSummary('user#demo@example.com', {
+    userKey: 'demo@example.com',
+    isSystemAdmin: false,
+  })
+
+  expect(summary.projects).toBe(1)
+  expect(summary.tasks).toBe(1)
+  expect(summary.blocked).toBe(0)
+  expect(legacyReads).toBe(0)
+  expect(migrationSourceReads).toBe(0)
 })
 
 test('DynamoDB directory client reads project access consistently for Workspace guards', async () => {

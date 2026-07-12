@@ -1022,6 +1022,8 @@ const WORK_ITEMS_PARTITION_SCAN_LIMIT = 1_000
 const DYNAMODB_BATCH_GET_KEY_LIMIT = 100
 /** UnprocessedKeys を同じ bounded read 内で再試行する最大回数です。 */
 const DYNAMODB_BATCH_GET_ATTEMPT_LIMIT = 3
+/** DynamoDB BatchGetItem retry の指数バックオフ基準時間です。 */
+const DYNAMODB_BATCH_GET_RETRY_BASE_DELAY_MS = 25
 
 /**
  * チーム Issue コメントレスポンスです。
@@ -5747,7 +5749,14 @@ function findFirstProjectTeamId(
   teams: readonly ProjectDirectoryTeamResponse[],
   projectId: string,
 ) {
-  return teams.find((team) => team.projects.some((project) => project.id === projectId))?.id
+  const teamIds = new Set(
+    teams
+      .filter((team) => team.projects.some((project) => project.id === projectId))
+      .map((team) => team.id),
+  )
+  const [teamId] = teamIds
+
+  return teamIds.size === 1 ? teamId : undefined
 }
 
 async function readLegacyMigrationSourceKeys(
@@ -6588,10 +6597,17 @@ export class DynamoDbDashboardSummaryClient {
       )
     const taskResponses = await Promise.all(
       Array.from(visibleProjectIds).map(async (projectId) => {
+        const ownerTeamId = findFirstProjectTeamId(directory.teams, projectId)
         const [canonical, legacy] = await Promise.all([
           this.teamIssuesClient.getProjectIssues(directoryId, projectId),
-          this.projectTasksClient.getProjectTasks(directoryId, projectId),
+          ownerTeamId
+            ? this.projectTasksClient.getProjectTasks(directoryId, projectId)
+            : Promise.resolve({ projectId, tasks: [] }),
         ])
+        if (!ownerTeamId) {
+          return canonical.issues
+        }
+
         const canonicalIds = new Set(canonical.issues.map((issue) => issue.id))
         const candidates = legacy.tasks.filter((task) => !canonicalIds.has(task.id))
         const migrationSourceKeys = await readLegacyMigrationSourceKeys(
@@ -6806,6 +6822,10 @@ export class DynamoDbTeamIssuesClient {
    * immutable audit event を保存する DynamoDB table 名です。
    */
   private readonly auditTableName?: string
+  /** BatchGetItem retry 前に待機する関数です。 */
+  private readonly batchGetRetrySleep: (ms: number) => Promise<void>
+  /** BatchGetItem retry の jitter 値を生成する関数です。 */
+  private readonly batchGetRetryRandom: () => number
 
   constructor(
     issueTableName =
@@ -6822,6 +6842,8 @@ export class DynamoDbTeamIssuesClient {
     dynamoDbClient?: DynamoDBClient,
     bootstrapLocalTables = dynamoDbClient === undefined && shouldBootstrapLocalDynamoDb(),
     auditTableName = getConfiguredAuditTableName(),
+    batchGetRetrySleep: (ms: number) => Promise<void> = sleep,
+    batchGetRetryRandom: () => number = Math.random,
   ) {
     this.issueTableName = issueTableName
     this.eventTableName = eventTableName
@@ -6829,6 +6851,8 @@ export class DynamoDbTeamIssuesClient {
     this.dynamoDbClient = dynamoDbClient ?? createDynamoDbClient()
     this.bootstrapLocalTables = bootstrapLocalTables
     this.auditTableName = auditTableName
+    this.batchGetRetrySleep = batchGetRetrySleep
+    this.batchGetRetryRandom = batchGetRetryRandom
   }
 
   /**
@@ -6929,6 +6953,14 @@ export class DynamoDbTeamIssuesClient {
             }
           }
           pendingKeys = response.UnprocessedKeys?.[this.issueTableName]?.Keys ?? []
+          if (
+            pendingKeys.length > 0 &&
+            attempt + 1 < DYNAMODB_BATCH_GET_ATTEMPT_LIMIT
+          ) {
+            await this.batchGetRetrySleep(
+              createDynamoDbBatchGetRetryDelayMs(attempt, this.batchGetRetryRandom),
+            )
+          }
         }
 
         if (pendingKeys.length > 0) {
@@ -9517,6 +9549,15 @@ function createLegacyProjectTaskReadOnlyError() {
     'LegacyProjectTaskReadOnly',
     'Legacy project tasks are read-only.',
   )
+}
+
+function createDynamoDbBatchGetRetryDelayMs(
+  attempt: number,
+  random: () => number,
+) {
+  const exponentialDelay = DYNAMODB_BATCH_GET_RETRY_BASE_DELAY_MS * 2 ** attempt
+
+  return exponentialDelay + Math.floor(exponentialDelay * random())
 }
 
 async function sleep(ms: number) {
