@@ -27,6 +27,7 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import {
   WORK_ITEM_SCHEMA_VERSION,
+  type ApprovalSummary,
   type CreateWorkItemInput,
   type WorkItem,
   type WorkItemPriority,
@@ -76,6 +77,20 @@ import {
   type CollaborationClient,
   type CollaborationComment,
 } from './collaboration'
+import {
+  FILE_APPROVAL_MAX_REVIEWERS,
+  FileProofingError,
+  createDefaultFileProofingClient,
+  createFileProofingScopeKey,
+  type CancelFileApprovalInput,
+  type CreateFileApprovalDecisionInput,
+  type CreateFileApprovalInput,
+  type CreateFileAnnotationInput,
+  type CreateFileUploadInput,
+  type FileProofingActor,
+  type FileProofingClient,
+  type FileProofingScope,
+} from './file-proofing'
 
 export {
   DynamoDbWorkspaceAccessClient,
@@ -2105,6 +2120,7 @@ let auditEvents: AuditEventsClient
 let workspaceAccess: WorkspaceAccessClient
 let realtimeTickets: RealtimeTicketsClient
 let collaboration: CollaborationClient
+let fileProofing: FileProofingClient
 const projectDirectoryIdPrefix = 'user#'
 const defaultAllowedOrigins = [
   'http://localhost:5173',
@@ -2743,7 +2759,10 @@ app.get('/api/work-items', async (c) => {
 
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken)
-    return c.json(await hydrateWorkItemsResponse(await readAccessibleWorkItems(principal)))
+    return c.json(await hydrateWorkItemsResponse(
+      await readAccessibleWorkItems(principal),
+      principal.directoryId,
+    ))
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)
@@ -3155,6 +3174,7 @@ app.get('/api/teams/:teamId/issues/:issueId', async (c) => {
               collaborationPreview.comments,
             ),
           },
+          principal.directoryId,
         ),
       )
     } catch (error) {
@@ -3163,11 +3183,14 @@ app.get('/api/teams/:teamId/issues/:issueId', async (c) => {
 
         if (legacyIssue) {
           return c.json(
-            await hydrateTeamIssueDetailResponse({
-              issue: legacyIssue,
-              comments: [],
-              activity: [],
-            }),
+            await hydrateTeamIssueDetailResponse(
+              {
+                issue: legacyIssue,
+                comments: [],
+                activity: [],
+              },
+              principal.directoryId,
+            ),
           )
         }
       }
@@ -3916,6 +3939,488 @@ app.post('/api/realtime/tickets', async (c) => {
   }
 })
 
+const fileCollectionRoutes = [
+  {
+    basePath: '/api/teams/:teamId/issues/:issueId/files',
+    kind: 'work-item',
+  },
+  {
+    basePath: '/api/teams/:teamId/projects/:projectId/files',
+    kind: 'project',
+  },
+] as const
+
+for (const fileRoute of fileCollectionRoutes) {
+  /** Work Item または Team scoped Project の file/approval 一覧 endpoint です。 */
+  app.get(fileRoute.basePath, async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken)
+      const { scope, actor } = await loadFileProofingRequestContext(c, principal, fileRoute.kind)
+      return c.json(await fileProofing.list(scope, actor))
+    } catch (error) {
+      return toFileProofingErrorResponse(c, error)
+    }
+  })
+
+  /** Work Item または Project へ新規 file upload session を作成する endpoint です。 */
+  app.post(`${fileRoute.basePath}/uploads`, async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken)
+      const { scope, actor } = await loadFileProofingRequestContext(c, principal, fileRoute.kind)
+      const body = await readFileProofingJson<CreateFileUploadInput>(c.req)
+      return c.json(
+        await fileProofing.createUpload(
+          scope,
+          actor,
+          body,
+          createApiMutationContext(c, principal, body),
+        ),
+        201,
+      )
+    } catch (error) {
+      return toFileProofingErrorResponse(c, error)
+    }
+  })
+
+  /** 既存 file の新 version upload session を作成する endpoint です。 */
+  app.post(`${fileRoute.basePath}/:fileId/versions`, async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken)
+      const { scope, actor } = await loadFileProofingRequestContext(c, principal, fileRoute.kind)
+      const body = await readFileProofingJson<CreateFileUploadInput>(c.req)
+      return c.json(
+        await fileProofing.createVersionUpload(
+          scope,
+          actor,
+          readRequiredRouteId(c.req.param('fileId'), 'File ID'),
+          body,
+          createApiMutationContext(c, principal, body),
+        ),
+        201,
+      )
+    } catch (error) {
+      return toFileProofingErrorResponse(c, error)
+    }
+  })
+
+  /** Direct upload 完了後に object metadata と scan state を検証する endpoint です。 */
+  app.post(`${fileRoute.basePath}/:fileId/versions/:versionId/complete`, async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken)
+      const { scope, actor } = await loadFileProofingRequestContext(c, principal, fileRoute.kind)
+      const input = {
+        fileId: readRequiredRouteId(c.req.param('fileId'), 'File ID'),
+        versionId: readRequiredRouteId(c.req.param('versionId'), 'Version ID'),
+      }
+      return c.json(await fileProofing.completeUpload(
+        scope,
+        actor,
+        input.fileId,
+        input.versionId,
+        createApiMutationContext(c, principal, input),
+      ))
+    } catch (error) {
+      return toFileProofingErrorResponse(c, error)
+    }
+  })
+
+  /** Clean version の短命 preview/download URL を発行する endpoint です。 */
+  app.get(`${fileRoute.basePath}/:fileId/versions/:versionId/access`, async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken)
+      const { scope, actor } = await loadFileProofingRequestContext(c, principal, fileRoute.kind)
+      const disposition = c.req.query('disposition') === 'attachment' ? 'attachment' : 'inline'
+      const input = {
+        fileId: readRequiredRouteId(c.req.param('fileId'), 'File ID'),
+        versionId: readRequiredRouteId(c.req.param('versionId'), 'Version ID'),
+        disposition,
+      } as const
+      return c.json(await fileProofing.createAccess(
+        scope,
+        actor,
+        input.fileId,
+        input.versionId,
+        disposition,
+        createApiMutationContext(c, principal, input),
+      ))
+    } catch (error) {
+      return toFileProofingErrorResponse(c, error)
+    }
+  })
+
+  /** Version の位置 annotation 一覧 endpoint です。 */
+  app.get(`${fileRoute.basePath}/:fileId/versions/:versionId/annotations`, async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken)
+      const { scope, actor } = await loadFileProofingRequestContext(c, principal, fileRoute.kind)
+      return c.json({
+        annotations: await fileProofing.listAnnotations(
+          scope,
+          actor,
+          readRequiredRouteId(c.req.param('fileId'), 'File ID'),
+          readRequiredRouteId(c.req.param('versionId'), 'Version ID'),
+        ),
+      })
+    } catch (error) {
+      return toFileProofingErrorResponse(c, error)
+    }
+  })
+
+  /** Version preview 上へ位置 annotation を作成する endpoint です。 */
+  app.post(`${fileRoute.basePath}/:fileId/versions/:versionId/annotations`, async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken)
+      const { scope, actor } = await loadFileProofingRequestContext(c, principal, fileRoute.kind)
+      const body = await readFileProofingJson<CreateFileAnnotationInput>(c.req)
+      return c.json({
+        annotation: await fileProofing.createAnnotation(
+          scope,
+          actor,
+          readRequiredRouteId(c.req.param('fileId'), 'File ID'),
+          readRequiredRouteId(c.req.param('versionId'), 'Version ID'),
+          body,
+          createApiMutationContext(c, principal, body),
+        ),
+      }, 201)
+    } catch (error) {
+      return toFileProofingErrorResponse(c, error)
+    }
+  })
+
+  /** File を retention 付きで soft delete する endpoint です。 */
+  app.delete(`${fileRoute.basePath}/:fileId`, async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken)
+      const { scope, actor } = await loadFileProofingRequestContext(c, principal, fileRoute.kind)
+      const fileId = readRequiredRouteId(c.req.param('fileId'), 'File ID')
+      await fileProofing.deleteFile(
+        scope,
+        actor,
+        fileId,
+        createApiMutationContext(c, principal, { fileId }),
+      )
+      return c.body(null, 204)
+    } catch (error) {
+      return toFileProofingErrorResponse(c, error)
+    }
+  })
+}
+
+/** 保存済み comment へ file を添付する direct upload session endpoint です。 */
+app.post('/api/teams/:teamId/issues/:issueId/comments/:commentId/files/uploads', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const context = await loadFileProofingRequestContext(c, principal, 'work-item')
+    const commentId = readRequiredRouteId(c.req.param('commentId'), 'Comment ID')
+    const hasAttachableComment = collaboration.hasAttachableComment
+    if (!hasAttachableComment) {
+      throw new FileProofingError(
+        503,
+        'CommentAttachmentUnavailable',
+        'Comment attachment validation is unavailable.',
+      )
+    }
+    const commentExists = await hasAttachableComment.call(
+      collaboration,
+      createWorkItemCollaborationEntityKey(
+        principal.directoryId,
+        context.scope.teamId,
+        context.scope.issueId!,
+      ),
+      commentId,
+    )
+    if (!commentExists) {
+      throw new FileProofingError(
+        404,
+        'CommentNotFound',
+        'The attachment target comment was not found.',
+      )
+    }
+    const scope = {
+      ...context.scope,
+      commentId,
+    }
+    const body = await readFileProofingJson<CreateFileUploadInput>(c.req)
+    return c.json(
+      await fileProofing.createUpload(
+        scope,
+        context.actor,
+        body,
+        createApiMutationContext(c, principal, { ...body, commentId: scope.commentId }),
+      ),
+      201,
+    )
+  } catch (error) {
+    return toFileProofingErrorResponse(c, error)
+  }
+})
+
+/** Work Item file version の approval request を作成する endpoint です。 */
+app.post('/api/teams/:teamId/issues/:issueId/approvals', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const { scope, actor } = await loadFileProofingRequestContext(
+      c,
+      principal,
+      'work-item',
+    )
+    const body = await readFileProofingJson<CreateFileApprovalInput>(c.req)
+    if (
+      !Array.isArray(body.reviewerMemberKeys) ||
+      body.reviewerMemberKeys.length === 0 ||
+      body.reviewerMemberKeys.length > FILE_APPROVAL_MAX_REVIEWERS ||
+      body.reviewerMemberKeys.some((memberKey) =>
+        typeof memberKey !== 'string' || !memberKey.trim() || memberKey.length > 320
+      )
+    ) {
+      throw new FileProofingError(400, 'InvalidApprovalReviewers', 'Approval reviewers are required.')
+    }
+    const reviewerMemberKeys = [...new Set(
+      body.reviewerMemberKeys.map((memberKey) => memberKey.trim().toLowerCase()),
+    )]
+    if (reviewerMemberKeys.length > FILE_APPROVAL_MAX_REVIEWERS) {
+      throw new FileProofingError(400, 'InvalidApprovalReviewers', 'Too many approval reviewers.')
+    }
+    const collection = await fileProofing.list(scope, actor)
+    const targetFile = collection.files.find((file) => file.id === body.fileId)
+    if (!targetFile || targetFile.currentVersion.id !== body.versionId) {
+      throw new FileProofingError(
+        409,
+        'ApprovalVersionStale',
+        'Approval must target the current file version.',
+      )
+    }
+    const reviewerMembers = await Promise.all(reviewerMemberKeys.map(async (memberKey) => {
+      const member = await workspaceAccess.getActiveMember(principal.directoryId, memberKey)
+      if (!member) {
+        throw new FileProofingError(
+          409,
+          'ApprovalReviewerInactive',
+          `Reviewer "${memberKey}" is not an active Workspace member.`,
+        )
+      }
+      const reviewerIsSystemAdmin = await cognito.isSystemAdmin(member.memberKey)
+      if (scope.projectId && !reviewerIsSystemAdmin) {
+        const projectAccess = await projectDirectory.getProjectAccess(
+          principal.directoryId,
+          scope.projectId,
+          member.memberKey,
+        )
+        if (!projectAccess || !projectAccessAllows(projectAccess, 'viewer')) {
+          throw new FileProofingError(
+            409,
+            'ApprovalReviewerAccessDenied',
+            `Reviewer "${memberKey}" cannot view the assigned project.`,
+          )
+        }
+      } else if (!scope.projectId && !reviewerIsSystemAdmin) {
+        const directory = await projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
+        const teamProjectIds = new Set(
+          directory.teams.find((team) => team.id === scope.teamId)?.projects
+            .map((project) => project.id) ?? [],
+        )
+        const projectAccesses = await projectDirectory.getProjectAccessList(
+          principal.directoryId,
+          member.memberKey,
+        )
+        if (!projectAccesses.some((access) =>
+          teamProjectIds.has(access.projectId) && projectAccessAllows(access, 'viewer')
+        )) {
+          throw new FileProofingError(
+            409,
+            'ApprovalReviewerAccessDenied',
+            `Reviewer "${memberKey}" cannot view the Work Item team.`,
+          )
+        }
+      }
+      return member
+    }))
+    if (reviewerMembers.some((member) => member.role === 'guest')) {
+      if (!targetFile?.guestAccess) {
+        throw new FileProofingError(
+          409,
+          'ApprovalGuestFileAccessDenied',
+          'Guest reviewers require an explicitly guest-shared file.',
+        )
+      }
+    }
+    const input = {
+      ...body,
+      reviewerMemberKeys,
+      completionTransition: body.completionTransition ?? 'done',
+    } satisfies CreateFileApprovalInput
+    return c.json({
+      approval: await fileProofing.createApproval(
+        scope,
+        actor,
+        input,
+        createApiMutationContext(c, principal, input),
+      ),
+    }, 201)
+  } catch (error) {
+    return toFileProofingErrorResponse(c, error)
+  }
+})
+
+/** Assigned reviewer の approval decision を保存する endpoint です。 */
+app.post('/api/teams/:teamId/issues/:issueId/approvals/:approvalId/decisions', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const { scope, actor, workItemRevision } = await loadFileProofingRequestContext(
+      c,
+      principal,
+      'work-item',
+    )
+    const body = await readFileProofingJson<CreateFileApprovalDecisionInput>(c.req)
+    const input = { ...body, workItemRevision } satisfies CreateFileApprovalDecisionInput
+    return c.json({
+      approval: await fileProofing.decideApproval(
+        scope,
+        actor,
+        readRequiredRouteId(c.req.param('approvalId'), 'Approval ID'),
+        input,
+        createApiMutationContext(c, principal, input),
+      ),
+    })
+  } catch (error) {
+    return toFileProofingErrorResponse(c, error)
+  }
+})
+
+/** Requester または manager が pending approval を取り消す endpoint です。 */
+app.post('/api/teams/:teamId/issues/:issueId/approvals/:approvalId/cancel', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const { scope, actor } = await loadFileProofingRequestContext(
+      c,
+      principal,
+      'work-item',
+    )
+    const body = await readFileProofingJson<CancelFileApprovalInput>(c.req)
+    const input = {
+      expectedRevision: body.expectedRevision,
+    } satisfies CancelFileApprovalInput
+    return c.json({
+      approval: await fileProofing.cancelApproval(
+        scope,
+        actor,
+        readRequiredRouteId(c.req.param('approvalId'), 'Approval ID'),
+        input,
+        createApiMutationContext(c, principal, input),
+      ),
+    })
+  } catch (error) {
+    return toFileProofingErrorResponse(c, error)
+  }
+})
+
+/** 現在 reviewer の未完了 approval を Workspace 横断で返す endpoint です。 */
+app.get('/api/approvals/reviewer', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const page = await fileProofing.listReviewerApprovals(
+      principal.directoryId,
+      {
+        memberKey: principal.userKey,
+        guest: principal.workspaceRole === 'guest',
+        canWrite: false,
+        canManage: false,
+      },
+      {
+        ...(c.req.query('cursor') ? { cursor: c.req.query('cursor') } : {}),
+        ...(c.req.query('limit') ? { limit: Number(c.req.query('limit')) } : {}),
+      },
+    )
+    const authorized = await Promise.all(page.approvals.map(async (approval) => {
+      if (!approval.teamId || !approval.issueId) {
+        return undefined
+      }
+      try {
+        await loadAuthorizedTeamIssue(
+          principal,
+          approval.teamId,
+          approval.issueId,
+          'viewer',
+        )
+        return approval
+      } catch {
+        return undefined
+      }
+    }))
+    return c.json({
+      approvals: authorized.filter((approval) => approval !== undefined),
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+    })
+  } catch (error) {
+    return toFileProofingErrorResponse(c, error)
+  }
+})
+
 /**
  * DynamoDB に保存されたプロジェクト遂行 Issue 一覧を返す endpoint です。
  */
@@ -4090,6 +4595,18 @@ async function readJson<T>(request: { json: () => Promise<T> }) {
   } catch {
     return undefined
   }
+}
+
+async function readFileProofingJson<T>(request: { json: () => Promise<unknown> }) {
+  const body = await readJson<unknown>(request)
+  if (!isRecord(body)) {
+    throw new FileProofingError(
+      400,
+      'InvalidFileProofingInput',
+      'A JSON object request body is required.',
+    )
+  }
+  return body as T
 }
 
 function createApiMutationContext(
@@ -4645,6 +5162,39 @@ function toCollaborationErrorResponse(c: Context, error: unknown) {
   return c.json({ code: error.code, message: error.message }, status)
 }
 
+function toFileProofingErrorResponse(c: Context, error: unknown) {
+  if (error instanceof CognitoServiceError) {
+    return toCognitoDirectoryErrorResponse(c, error)
+  }
+  if (error instanceof WorkspaceAccessError) {
+    return toWorkspaceAccessErrorResponse(c, error)
+  }
+  if (error instanceof ProjectDataError) {
+    return toProjectDataErrorResponse(c, error)
+  }
+  if (!(error instanceof FileProofingError)) {
+    console.error(error)
+    return c.json({ message: 'File proofing data is unavailable.' }, 502)
+  }
+  if (error.status >= 500) {
+    console.error(error)
+  }
+  const status = error.status === 400 ||
+    error.status === 403 ||
+    error.status === 404 ||
+    error.status === 409 ||
+    error.status === 410 ||
+    error.status === 413 ||
+    error.status === 415 ||
+    error.status === 422 ||
+    error.status === 423 ||
+    error.status === 503
+    ? error.status
+    : 502
+
+  return c.json({ code: error.code, message: error.message }, status)
+}
+
 function toProjectDataErrorResponse(c: Context, error: unknown) {
   if (error instanceof WorkspaceAccessError) {
     return toWorkspaceAccessErrorResponse(c, error)
@@ -4920,6 +5470,86 @@ async function loadAuthorizedTeamIssue(
   )
 
   return { context, detail }
+}
+
+async function loadFileProofingRequestContext(
+  c: Context,
+  principal: WorkspacePrincipal,
+  kind: FileProofingScope['kind'],
+): Promise<{
+  scope: FileProofingScope
+  actor: FileProofingActor
+  workItemRevision?: number
+}> {
+  const teamId = readRequiredRouteId(c.req.param('teamId'), 'Team ID')
+
+  if (kind === 'work-item') {
+    const issueId = readRequiredRouteId(c.req.param('issueId'), 'Work Item ID')
+    const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+    return {
+      scope: {
+        workspaceId: principal.directoryId,
+        teamId,
+        kind,
+        issueId,
+        ...(detail.issue.assignedProjectId
+          ? { projectId: detail.issue.assignedProjectId }
+          : {}),
+      },
+      actor: {
+        memberKey: principal.userKey,
+        guest: principal.workspaceRole === 'guest',
+        canWrite: canWriteTeamIssue(principal, context, detail.issue.assignedProjectId),
+        canManage: canManageTeamIssueCollaboration(
+          principal,
+          context,
+          detail.issue.assignedProjectId,
+        ),
+      },
+      workItemRevision: detail.issue.revision,
+    }
+  }
+
+  const projectId = readRequiredRouteId(c.req.param('projectId'), 'Project ID')
+  const context = await requireTeamPermission(principal, teamId, 'viewer')
+  if (!context.team.projects.some((project) => project.id === projectId)) {
+    throw new ProjectDataError(
+      404,
+      'ProjectNotFound',
+      `Project "${projectId}" was not found in team "${teamId}".`,
+    )
+  }
+  requireAssignedProjectPermission(principal, context, projectId, 'viewer')
+  const projectAccess = context.projectAccesses?.find((access) => access.projectId === projectId)
+  const canWrite = principal.workspaceRole !== 'guest' && (
+    principal.isSystemAdmin ||
+    (projectAccess !== undefined && projectAccessAllows(projectAccess, 'member'))
+  )
+  const canManage = canModerateCollaboration(principal) ||
+    (projectAccess !== undefined && projectAccessAllows(projectAccess, 'manager'))
+
+  return {
+    scope: {
+      workspaceId: principal.directoryId,
+      teamId,
+      kind,
+      projectId,
+    },
+    actor: {
+      memberKey: principal.userKey,
+      guest: principal.workspaceRole === 'guest',
+      canWrite,
+      canManage,
+    },
+  }
+}
+
+function readRequiredRouteId(value: string | undefined, label: string) {
+  const normalized = value?.trim()
+  if (!normalized) {
+    throw new FileProofingError(400, 'InvalidFileScope', `${label} is required.`)
+  }
+  return normalized
 }
 
 function projectAccessAllows(access: ProjectAccessEntry, minimumRole: ProjectRole) {
@@ -5264,21 +5894,74 @@ async function hydrateProjectIssuesResponse(response: ProjectIssuesResponse) {
   } satisfies ProjectIssuesResponse
 }
 
-async function hydrateWorkItemsResponse(response: WorkItemsResponse) {
+async function hydrateWorkItemsResponse(response: WorkItemsResponse, directoryId: string) {
   const profiles = await readIssueAssigneeProfiles(response.workItems)
+  const hydratedItems = response.workItems.map((workItem) => hydrateTeamIssue(workItem, profiles))
+  const scopes = hydratedItems.flatMap((workItem) => workItem.source === 'dynamodb'
+    ? [{
+        workspaceId: directoryId,
+        teamId: workItem.teamId,
+        kind: 'work-item' as const,
+        issueId: workItem.id,
+      }]
+    : [])
+  const summaries = scopes.length > 0 &&
+    (getEnv('FILE_PROOFING_TABLE_NAME') || getConfiguredDynamoDbEndpoint())
+    ? await fileProofing.getApprovalSummaries(scopes)
+    : new Map<string, ApprovalSummary>()
+  const workItems = hydratedItems.map((workItem) => {
+    if (workItem.source !== 'dynamodb') {
+      return workItem
+    }
+    const summary = summaries.get(createFileProofingScopeKey({
+      workspaceId: directoryId,
+      teamId: workItem.teamId,
+      kind: 'work-item',
+      issueId: workItem.id,
+    }))
+    return summary && hasApprovalSummaryContent(summary)
+      ? { ...workItem, approvalSummary: summary }
+      : workItem
+  })
 
   return {
-    workItems: response.workItems.map((workItem) => hydrateTeamIssue(workItem, profiles)),
+    workItems,
   } satisfies WorkItemsResponse
 }
 
-async function hydrateTeamIssueDetailResponse(response: TeamIssueDetailResponse) {
+async function hydrateTeamIssueDetailResponse(
+  response: TeamIssueDetailResponse,
+  directoryId: string,
+) {
   const profiles = await readIssueAssigneeProfiles([response.issue])
+  const issue = hydrateTeamIssue(response.issue, profiles)
+  const approvalSummary = await readWorkItemApprovalSummary(directoryId, issue)
 
   return {
     ...response,
-    issue: hydrateTeamIssue(response.issue, profiles),
+    issue: approvalSummary ? { ...issue, approvalSummary } : issue,
   } satisfies TeamIssueDetailResponse
+}
+
+async function readWorkItemApprovalSummary(directoryId: string, workItem: TeamIssueResponseItem) {
+  if (
+    workItem.source !== 'dynamodb' ||
+    (!getEnv('FILE_PROOFING_TABLE_NAME') && !getConfiguredDynamoDbEndpoint())
+  ) {
+    return undefined
+  }
+  const summary = await fileProofing.getApprovalSummary({
+    workspaceId: directoryId,
+    teamId: workItem.teamId,
+    kind: 'work-item',
+    issueId: workItem.id,
+  })
+  return hasApprovalSummaryContent(summary) ? summary : undefined
+}
+
+function hasApprovalSummaryContent(summary: ApprovalSummary) {
+  return summary.pendingCount + summary.approvedCount + summary.rejectedCount +
+    summary.changesRequestedCount > 0
 }
 
 function mergeLegacyCompatibleComments(
@@ -10795,6 +11478,7 @@ auditEvents = createAuditEventsClient()
 workspaceAccess = new DynamoDbWorkspaceAccessClient()
 realtimeTickets = new DynamoDbRealtimeTicketsClient()
 collaboration = new DynamoDbCollaborationClient()
+fileProofing = createDefaultFileProofingClient()
 
 /**
  * Server test で外部 service client を差し替えます。
@@ -10809,6 +11493,7 @@ export function configureApiClientsForTest(clients: {
   workspaceAccess?: WorkspaceAccessClient
   realtimeTickets?: RealtimeTicketsClient
   collaboration?: CollaborationClient
+  fileProofing?: FileProofingClient
 }) {
   cognito = clients.cognito ?? cognito
   dashboardSummary = clients.dashboardSummary ?? dashboardSummary
@@ -10819,6 +11504,7 @@ export function configureApiClientsForTest(clients: {
   workspaceAccess = clients.workspaceAccess ?? workspaceAccess
   realtimeTickets = clients.realtimeTickets ?? realtimeTickets
   collaboration = clients.collaboration ?? collaboration
+  fileProofing = clients.fileProofing ?? fileProofing
 }
 
 /**
@@ -10834,6 +11520,7 @@ export function resetApiClientsForTest() {
   workspaceAccess = new DynamoDbWorkspaceAccessClient()
   realtimeTickets = new DynamoDbRealtimeTicketsClient()
   collaboration = new DynamoDbCollaborationClient()
+  fileProofing = createDefaultFileProofingClient()
 }
 
 /**

@@ -6,6 +6,10 @@ import type { LambdaEvent } from 'hono/aws-lambda'
 import { createAuditEvent, createMutationAuditContext } from './audit'
 import { CollaborationError, type CollaborationClient } from './collaboration'
 import {
+  FileProofingError,
+  type FileProofingClient,
+} from './file-proofing'
+import {
   app,
   AwsCognitoClient,
   CognitoServiceError,
@@ -24,6 +28,298 @@ import {
 
 afterEach(() => {
   resetApiClientsForTest()
+})
+
+test('authorizes Work Item file list reads and returns server capabilities', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const reads: Array<{ actor: string; issueId?: string; teamId: string }> = []
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async list(scope, actor) {
+        reads.push({ actor: actor.memberKey, issueId: scope.issueId, teamId: scope.teamId })
+        return {
+          files: [],
+          approvals: [],
+          capabilities: {
+            canUpload: actor.canWrite,
+            canRequestApproval: actor.canWrite,
+            canGrantGuestAccess: actor.canManage,
+          },
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/files', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    files: [],
+    approvals: [],
+    capabilities: {
+      canUpload: true,
+      canRequestApproval: true,
+      canGrantGuestAccess: true,
+    },
+  })
+  expect(reads).toEqual([{
+    actor: 'demo@example.com',
+    issueId: 'issue-1',
+    teamId: 'core-team',
+  }])
+})
+
+test('creates a direct object upload session without accepting file bytes in the API body', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const creates: Array<{ contentType: string; fileName: string; sizeBytes: number }> = []
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createUpload(_scope, _actor, input) {
+        creates.push(input)
+        return createFileUploadSessionFixture()
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/files/uploads', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'upload-session-1',
+    },
+    body: JSON.stringify({
+      contentType: 'application/pdf',
+      fileName: 'proof.pdf',
+      sizeBytes: 4096,
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  const body = await response.json() as ReturnType<typeof createFileUploadSessionFixture>
+  expect(body.upload).toMatchObject({ method: 'PUT', maxSizeBytes: 2_147_483_648 })
+  expect(body.upload.url).toBe('https://objects.example.test/upload')
+  expect(creates).toEqual([{
+    contentType: 'application/pdf',
+    fileName: 'proof.pdf',
+    sizeBytes: 4096,
+  }])
+})
+
+test('does not issue file access URLs without authentication or a clean scan', async () => {
+  configureFakeProjectClients(true, { role: 'viewer' })
+  let accessCalls = 0
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createAccess() {
+        accessCalls += 1
+        throw new FileProofingError(423, 'FileScanPending', 'File scanning is still in progress.')
+      },
+    }),
+  })
+
+  const unauthenticated = await app.request(
+    '/api/teams/core-team/issues/issue-1/files/file-1/versions/version-1/access',
+  )
+  expect(unauthenticated.status).toBe(401)
+  expect(accessCalls).toBe(0)
+
+  const pending = await app.request(
+    '/api/teams/core-team/issues/issue-1/files/file-1/versions/version-1/access?disposition=inline',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(pending.status).toBe(423)
+  expect(await pending.json()).toEqual({
+    code: 'FileScanPending',
+    message: 'File scanning is still in progress.',
+  })
+  expect(accessCalls).toBe(1)
+})
+
+test('keeps guest file uploads read-only at the API authorization boundary', async () => {
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'guest' })
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createUpload(_scope, actor) {
+        expect(actor).toMatchObject({ guest: true, canWrite: false })
+        throw new FileProofingError(403, 'FileWriteDenied', 'File write access is required.')
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/files/uploads', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ contentType: 'image/png', fileName: 'guest.png', sizeBytes: 10 }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'FileWriteDenied' })
+})
+
+test('returns 400 for malformed file JSON before calling the domain client', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  let createCalls = 0
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createUpload() {
+        createCalls += 1
+        return createFileUploadSessionFixture()
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/files/uploads', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: '{',
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({ code: 'InvalidFileProofingInput' })
+  expect(createCalls).toBe(0)
+})
+
+test('rejects excessive approval reviewers before external member fan-out', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/approvals', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      dueAt: '2099-07-20T00:00:00.000Z',
+      fileId: 'file-1',
+      reviewerMemberKeys: Array.from({ length: 21 }, (_, index) => `reviewer-${index}@example.com`),
+      versionId: 'version-1',
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({ code: 'InvalidApprovalReviewers' })
+})
+
+test('cancels a pending approval through the authenticated Work Item scope', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  let receivedRevision: number | undefined
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async cancelApproval(_scope, _actor, _approvalId, input) {
+        receivedRevision = input.expectedRevision
+        return {
+          id: 'approval-1',
+          teamId: 'core-team',
+          issueId: 'issue-1',
+          revision: input.expectedRevision + 1,
+          fileId: 'file-1',
+          versionId: 'version-1',
+          status: 'cancelled',
+          reviewers: [{ memberKey: 'reviewer@example.com', status: 'pending' }],
+          dueAt: '2099-07-20T00:00:00.000Z',
+          requestedByMemberKey: 'demo@example.com',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T01:00:00.000Z',
+          completedAt: '2026-07-12T01:00:00.000Z',
+          capabilities: { canCancel: false, canDecide: false },
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/approvals/approval-1/cancel',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ expectedRevision: 3 }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(receivedRevision).toBe(3)
+  expect(await response.json()).toMatchObject({
+    approval: { id: 'approval-1', revision: 4, status: 'cancelled' },
+  })
+})
+
+test('rejects a comment attachment when the saved comment does not exist', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  let uploadCalls = 0
+  configureApiClientsForTest({
+    collaboration: createCollaborationStub({
+      async hasAttachableComment() {
+        return false
+      },
+    }),
+    fileProofing: createFileProofingStub({
+      async createUpload() {
+        uploadCalls += 1
+        return createFileUploadSessionFixture()
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/comments/missing-comment/files/uploads',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ contentType: 'application/pdf', fileName: 'proof.pdf', sizeBytes: 10 }),
+    },
+  )
+
+  expect(response.status).toBe(404)
+  expect(await response.json()).toMatchObject({ code: 'CommentNotFound' })
+  expect(uploadCalls).toBe(0)
+})
+
+test('filters reviewer Inbox approvals after current project access is revoked', async () => {
+  configureFakeProjectClients(false, { role: 'viewer' })
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async listReviewerApprovals() {
+        return { approvals: [{
+          id: 'approval-1',
+          teamId: 'core-team',
+          issueId: 'issue-1',
+          projectId: 'refero',
+          revision: 1,
+          fileId: 'file-1',
+          versionId: 'version-1',
+          status: 'pending',
+          reviewers: [{ memberKey: 'demo@example.com', status: 'pending' }],
+          dueAt: '2099-07-20T00:00:00.000Z',
+          requestedByMemberKey: 'manager@example.com',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+          capabilities: { canCancel: false, canDecide: true },
+        }] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/approvals/reviewer', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ approvals: [] })
 })
 
 test('uses a strongly consistent Work Item read for authorization-sensitive detail loads', async () => {
@@ -5886,6 +6182,110 @@ function createFakeAuditEvent() {
     eventType: 'project.updated',
     entity: { type: 'project', id: 'refero' },
   })
+}
+
+function createFileProofingStub(
+  overrides: Partial<FileProofingClient> = {},
+): FileProofingClient {
+  const unsupported = async () => {
+    throw new Error('Unexpected file proofing client call.')
+  }
+  return {
+    list: unsupported,
+    createUpload: unsupported,
+    createVersionUpload: unsupported,
+    completeUpload: unsupported,
+    createAccess: unsupported,
+    listAnnotations: unsupported,
+    createAnnotation: unsupported,
+    deleteFile: unsupported,
+    createApproval: unsupported,
+    decideApproval: unsupported,
+    cancelApproval: unsupported,
+    async getApprovalSummary() {
+      return {
+        pendingCount: 0,
+        overdueCount: 0,
+        approvedCount: 0,
+        rejectedCount: 0,
+        changesRequestedCount: 0,
+      }
+    },
+    async getApprovalSummaries() {
+      return new Map()
+    },
+    listReviewerApprovals: unsupported,
+    ...overrides,
+  } as FileProofingClient
+}
+
+function createCollaborationStub(
+  overrides: Partial<CollaborationClient> = {},
+): CollaborationClient {
+  const unsupported = async () => {
+    throw new Error('Unexpected collaboration client call.')
+  }
+  return {
+    getThread: unsupported,
+    createComment: unsupported,
+    updateComment: unsupported,
+    deleteComment: unsupported,
+    resolveComment: unsupported,
+    reopenComment: unsupported,
+    addReaction: unsupported,
+    removeReaction: unsupported,
+    getWatcherState: unsupported,
+    subscribe: unsupported,
+    unsubscribe: unsupported,
+    heartbeatPresence: unsupported,
+    leavePresence: unsupported,
+    ...overrides,
+  } as CollaborationClient
+}
+
+function createFileUploadSessionFixture() {
+  const version = {
+    id: 'version-1',
+    number: 1,
+    fileName: 'proof.pdf',
+    contentType: 'application/pdf',
+    sizeBytes: 4096,
+    scanStatus: 'pending' as const,
+    previewKind: 'pdf' as const,
+    createdByMemberKey: 'demo@example.com',
+    createdAt: '2026-07-12T00:00:00.000Z',
+  }
+  return {
+    file: {
+      id: 'file-1',
+      name: 'proof.pdf',
+      targetType: 'work-item' as const,
+      targetId: 'issue-1',
+      versionCount: 1,
+      versions: [version],
+      currentVersion: version,
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedAt: '2026-07-12T00:00:00.000Z',
+      capabilities: {
+        canDownload: false,
+        canUploadVersion: true,
+        canDelete: true,
+        canAnnotate: true,
+        canRequestApproval: true,
+      },
+    },
+    version,
+    upload: {
+      url: 'https://objects.example.test/upload',
+      method: 'PUT' as const,
+      headers: {
+        'content-length': '4096',
+        'content-type': 'application/pdf',
+      },
+      expiresAt: '2026-07-12T00:10:00.000Z',
+      maxSizeBytes: 2_147_483_648,
+    },
+  }
 }
 
 function configureFakeProjectClients(

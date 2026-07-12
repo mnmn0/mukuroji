@@ -92,6 +92,23 @@ test('fresh deployment requires explicit external Cognito and workspace paramete
     Type: 'String',
     AllowedPattern: '^https?://[^,\\s]+(,https?://[^,\\s]+)*$',
   }));
+  expect(parameters.FileRetentionDays).toEqual(expect.objectContaining({
+    Type: 'Number',
+    Default: 30,
+    MinValue: 1,
+  }));
+  expect(parameters.FileUploadUrlTtlSeconds).toEqual(expect.objectContaining({
+    Type: 'Number',
+    Default: 600,
+    MinValue: 60,
+    MaxValue: 3600,
+  }));
+  expect(parameters.FileDownloadUrlTtlSeconds).toEqual(expect.objectContaining({
+    Type: 'Number',
+    Default: 300,
+    MinValue: 60,
+    MaxValue: 3600,
+  }));
 
   for (const parameterName of [
     'CognitoUserPoolId',
@@ -127,7 +144,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(10);
+  expect(Object.keys(tables)).toHaveLength(11);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -141,6 +158,41 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
       }),
     }));
   }
+});
+
+test('file proofing metadata uses a retained point-in-time recoverable table', () => {
+  const template = synthesizedTemplate;
+  const fileProofingTableEntry = Object.entries(template.findResources('AWS::DynamoDB::Table'))
+    .find(([, resource]) => {
+      const serializedResource = JSON.stringify(resource);
+
+      return serializedResource.includes('scopeKey') && serializedResource.includes('recordKey');
+    });
+
+  expect(fileProofingTableEntry).toBeDefined();
+  expect(fileProofingTableEntry?.[1]).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+    Properties: expect.objectContaining({
+      AttributeDefinitions: expect.arrayContaining([
+        { AttributeName: 'scopeKey', AttributeType: 'S' },
+        { AttributeName: 'recordKey', AttributeType: 'S' },
+      ]),
+      BillingMode: 'PAY_PER_REQUEST',
+      KeySchema: [
+        { AttributeName: 'scopeKey', KeyType: 'HASH' },
+        { AttributeName: 'recordKey', KeyType: 'RANGE' },
+      ],
+      PointInTimeRecoverySpecification: {
+        PointInTimeRecoveryEnabled: true,
+      },
+      TimeToLiveSpecification: {
+        AttributeName: 'expiresAt',
+        Enabled: true,
+      },
+    }),
+  }));
+  template.hasOutput('FileProofingTableName', {});
 });
 
 test('shared server handler is bundled as a Lambda asset with production environment', () => {
@@ -193,6 +245,17 @@ test('shared server handler is bundled as a Lambda asset with production environ
           Ref: 'RealtimeSessionsTable607096EB',
         },
         REALTIME_WEBSOCKET_URL: Match.anyValue(),
+        FILE_BUCKET_NAME: Match.anyValue(),
+        FILE_DOWNLOAD_URL_TTL_SECONDS: {
+          Ref: 'FileDownloadUrlTtlSeconds',
+        },
+        FILE_PROOFING_TABLE_NAME: Match.anyValue(),
+        FILE_RETENTION_DAYS: {
+          Ref: 'FileRetentionDays',
+        },
+        FILE_UPLOAD_URL_TTL_SECONDS: {
+          Ref: 'FileUploadUrlTtlSeconds',
+        },
       }),
     },
   });
@@ -282,6 +345,291 @@ test('Function URL and API Gateway expose the same restricted CORS contract', ()
     },
     ProtocolType: 'HTTP',
   });
+});
+
+test('file bucket is private durable and scoped for direct browser transfers', () => {
+  const template = synthesizedTemplate;
+  const allowedOrigins = {
+    'Fn::Split': [
+      ',',
+      {
+        Ref: 'TaskApiAllowedOrigins',
+      },
+    ],
+  };
+
+  template.hasResourceProperties('AWS::S3::Bucket', {
+    BucketEncryption: {
+      ServerSideEncryptionConfiguration: [{
+        ServerSideEncryptionByDefault: {
+          SSEAlgorithm: 'AES256',
+        },
+      }],
+    },
+    CorsConfiguration: {
+      CorsRules: [{
+        AllowedHeaders: [
+          'content-length',
+          'content-type',
+          'if-none-match',
+          'x-amz-checksum-*',
+          'x-amz-meta-*',
+          'x-amz-server-side-encryption',
+          'x-amz-tagging',
+        ],
+        AllowedMethods: ['GET', 'HEAD', 'PUT'],
+        AllowedOrigins: allowedOrigins,
+        ExposedHeaders: ['ETag', 'x-amz-checksum-sha256', 'x-amz-version-id'],
+        MaxAge: 600,
+      }],
+    },
+    LifecycleConfiguration: {
+      Rules: Match.arrayWith([
+        Match.objectLike({
+          AbortIncompleteMultipartUpload: {
+            DaysAfterInitiation: 1,
+          },
+          Id: 'AbortIncompleteUploads',
+          Status: 'Enabled',
+        }),
+        Match.objectLike({
+          ExpirationInDays: 1,
+          Id: 'ExpireAbandonedUploads',
+          Status: 'Enabled',
+          TagFilters: [{
+            Key: 'mukuroji-upload',
+            Value: 'pending',
+          }],
+        }),
+        Match.objectLike({
+          ExpirationInDays: 1,
+          Id: 'ExpireDeletedCurrentObjects',
+          Status: 'Enabled',
+          TagFilters: [{
+            Key: 'mukuroji-deleted',
+            Value: 'true',
+          }],
+        }),
+        Match.objectLike({
+          Id: 'ExpireDeletedFileVersions',
+          NoncurrentVersionExpiration: {
+            NoncurrentDays: {
+              Ref: 'FileRetentionDays',
+            },
+          },
+          Status: 'Enabled',
+        }),
+        Match.objectLike({
+          ExpiredObjectDeleteMarker: true,
+          Id: 'DeleteExpiredMarkers',
+          Status: 'Enabled',
+        }),
+      ]),
+    },
+    OwnershipControls: {
+      Rules: [{ ObjectOwnership: 'BucketOwnerEnforced' }],
+    },
+    PublicAccessBlockConfiguration: {
+      BlockPublicAcls: true,
+      BlockPublicPolicy: true,
+      IgnorePublicAcls: true,
+      RestrictPublicBuckets: true,
+    },
+    VersioningConfiguration: {
+      Status: 'Enabled',
+    },
+  });
+  template.hasResourceProperties('Custom::S3BucketNotifications', {
+    BucketName: Match.anyValue(),
+    Managed: true,
+    NotificationConfiguration: {
+      EventBridgeConfiguration: {},
+    },
+  });
+
+  const [, fileBucket] = Object.entries(template.findResources('AWS::S3::Bucket'))[0] ?? [];
+  expect(fileBucket).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+  }));
+  template.hasOutput('FileBucketName', {});
+});
+
+test('GuardDuty scanning and bucket policy quarantine files until a clean result', () => {
+  const template = synthesizedTemplate;
+  const serializedBucketPolicy = JSON.stringify(
+    Object.values(template.findResources('AWS::S3::BucketPolicy'))[0],
+  );
+
+  expect(serializedBucketPolicy).toContain('ListProjectTasksFunctionServiceRole');
+
+  template.hasResourceProperties('AWS::IAM::Role', {
+    AssumeRolePolicyDocument: {
+      Statement: Match.arrayWith([
+        Match.objectLike({
+          Action: 'sts:AssumeRole',
+          Effect: 'Allow',
+          Principal: {
+            Service: 'malware-protection-plan.guardduty.amazonaws.com',
+          },
+        }),
+      ]),
+    },
+  });
+  template.hasResourceProperties('AWS::GuardDuty::MalwareProtectionPlan', {
+    Actions: {
+      Tagging: {
+        Status: 'ENABLED',
+      },
+    },
+    ProtectedResource: {
+      S3Bucket: {
+        BucketName: Match.anyValue(),
+        ObjectPrefixes: ['workspaces/'],
+      },
+    },
+    Role: Match.anyValue(),
+  });
+
+  const malwarePolicy = Object.values(template.findResources('AWS::IAM::Policy'))
+    .find((resource) => JSON.stringify(resource).includes('events:ManagedBy'));
+  const serializedMalwarePolicy = JSON.stringify(malwarePolicy);
+
+  expect(malwarePolicy).toBeDefined();
+  expect(serializedMalwarePolicy).toContain('DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3');
+  expect(serializedMalwarePolicy).toContain('malware-protection-plan.guardduty.amazonaws.com');
+  expect(serializedMalwarePolicy).toContain('s3:GetBucketNotification');
+  expect(serializedMalwarePolicy).toContain('s3:GetObjectVersion');
+  expect(serializedMalwarePolicy).toContain('s3:PutObjectVersionTagging');
+
+  template.hasResourceProperties('AWS::S3::BucketPolicy', {
+    PolicyDocument: {
+      Statement: Match.arrayWith([
+        Match.objectLike({
+          Condition: {
+            Bool: {
+              'aws:SecureTransport': 'false',
+            },
+          },
+          Effect: 'Deny',
+          Principal: { AWS: '*' },
+        }),
+        Match.objectLike({
+          Action: 's3:PutObject',
+          Condition: {
+            ArnNotEquals: {
+              'aws:PrincipalArn': Match.anyValue(),
+            },
+            'ForAnyValue:StringEquals': {
+              's3:RequestObjectTagKeys': 'GuardDutyMalwareScanStatus',
+            },
+          },
+          Effect: 'Deny',
+          Principal: { AWS: '*' },
+          Sid: 'OnlyGuardDutyCanUploadScanStatus',
+        }),
+        Match.objectLike({
+          Action: ['s3:PutObjectTagging', 's3:PutObjectVersionTagging'],
+          Condition: {
+            ArnNotEquals: {
+              'aws:PrincipalArn': Match.anyValue(),
+            },
+            Null: {
+              's3:ExistingObjectTag/GuardDutyMalwareScanStatus': 'true',
+              's3:RequestObjectTag/GuardDutyMalwareScanStatus': 'false',
+            },
+          },
+          Effect: 'Deny',
+          Principal: { AWS: '*' },
+          Sid: 'OnlyGuardDutyCanSetScanStatus',
+        }),
+        Match.objectLike({
+          Action: ['s3:PutObjectTagging', 's3:PutObjectVersionTagging'],
+          Condition: {
+            ArnNotEquals: {
+              'aws:PrincipalArn': Match.anyValue(),
+            },
+            Null: {
+              's3:ExistingObjectTag/GuardDutyMalwareScanStatus': 'false',
+            },
+            StringNotEquals: {
+              's3:RequestObjectTag/GuardDutyMalwareScanStatus':
+                '${s3:ExistingObjectTag/GuardDutyMalwareScanStatus}',
+            },
+          },
+          Effect: 'Deny',
+          Principal: { AWS: '*' },
+          Sid: 'GuardDutyScanStatusCannotBeChanged',
+        }),
+        Match.objectLike({
+          Action: 's3:PutObject',
+          Condition: {
+            NumericGreaterThan: {
+              's3:signatureAge': {
+                'Fn::Join': ['', [{ Ref: 'FileUploadUrlTtlSeconds' }, '000']],
+              },
+            },
+          },
+          Effect: 'Deny',
+          Principal: { AWS: '*' },
+          Sid: 'RejectStalePresignedFileUploads',
+        }),
+        Match.objectLike({
+          Action: ['s3:GetObject', 's3:GetObjectVersion'],
+          Condition: {
+            NumericGreaterThan: {
+              's3:signatureAge': {
+                'Fn::Join': ['', [{ Ref: 'FileDownloadUrlTtlSeconds' }, '000']],
+              },
+            },
+          },
+          Effect: 'Deny',
+          Principal: { AWS: '*' },
+          Sid: 'RejectStalePresignedFileDownloads',
+        }),
+        Match.objectLike({
+          Action: ['s3:GetObject', 's3:GetObjectVersion'],
+          Condition: {
+            ArnNotEquals: {
+              'aws:PrincipalArn': Match.anyValue(),
+            },
+            StringNotEquals: {
+              's3:ExistingObjectTag/GuardDutyMalwareScanStatus': 'NO_THREATS_FOUND',
+            },
+          },
+          Effect: 'Deny',
+          Principal: { AWS: '*' },
+          Sid: 'NoReadUnlessGuardDutyClean',
+        }),
+        Match.objectLike({
+          Action: ['s3:GetObject', 's3:GetObjectVersion'],
+          Condition: {
+            StringEquals: {
+              's3:ExistingObjectTag/mukuroji-deleted': 'true',
+            },
+          },
+          Effect: 'Deny',
+          Principal: { AWS: '*' },
+          Sid: 'DeletedObjectsCannotBeRead',
+        }),
+        Match.objectLike({
+          Action: ['s3:PutObjectTagging', 's3:PutObjectVersionTagging'],
+          Condition: {
+            StringEquals: {
+              's3:ExistingObjectTag/mukuroji-deleted': 'true',
+            },
+            StringNotEquals: {
+              's3:RequestObjectTag/mukuroji-deleted': 'true',
+            },
+          },
+          Effect: 'Deny',
+          Principal: { AWS: '*' },
+          Sid: 'DeletedObjectQuarantineCannotBeRemoved',
+        }),
+      ]),
+    },
+  });
+  template.hasOutput('FileMalwareProtectionPlanId', {});
 });
 
 test('collaboration notifications and realtime sessions use production-safe DynamoDB schemas', () => {
@@ -433,6 +781,8 @@ test('audit stream projects notifications with retries DLQ and scoped production
         COGNITO_USER_POOL_ID: {
           Ref: 'CognitoUserPoolId',
         },
+        FILE_BUCKET_NAME: Match.anyValue(),
+        FILE_PROOFING_TABLE_NAME: Match.anyValue(),
         NOTIFICATIONS_TABLE_NAME: {
           Ref: 'NotificationsTable76DCFC6C',
         },
@@ -508,13 +858,56 @@ test('audit stream projects notifications with retries DLQ and scoped production
   const projectionPolicy = template.toJSON().Resources
     .CollaborationProjectionFunctionServiceRoleDefaultPolicyDCBB176C;
   const serializedProjectionPolicy = JSON.stringify(projectionPolicy);
+  const projectionStatements = projectionPolicy.Properties.PolicyDocument.Statement as Array<
+    Record<string, unknown>
+  >;
+  const fileCleanupDynamoStatement = projectionStatements.find((statement) =>
+    JSON.stringify(statement.Resource).includes('FileProofingTable') &&
+    JSON.stringify(statement.Action).includes('dynamodb:UpdateItem')
+  );
+  const fileCleanupS3Statement = projectionStatements.find((statement) =>
+    JSON.stringify(statement.Action).includes('s3:PutObjectVersionTagging')
+  );
 
   expect(serializedProjectionPolicy).toContain('production/*/@connections/*');
   expect(serializedProjectionPolicy).toContain('WorkItemCollaborationTableFDECF217');
   expect(serializedProjectionPolicy).toContain('cognito-idp:AdminListGroupsForUser');
   expect(serializedProjectionPolicy).toContain('CognitoUserPoolId');
   expect(serializedProjectionPolicy).toContain('TeamIssuesTable189D851D');
+  expect(serializedProjectionPolicy).toContain('FileProofingTable');
+  expect(serializedProjectionPolicy).toContain('dynamodb:GetItem');
+  expect(serializedProjectionPolicy).toContain('dynamodb:Query');
+  expect(serializedProjectionPolicy).toContain('dynamodb:UpdateItem');
+  expect(serializedProjectionPolicy).toContain('s3:GetObjectVersionTagging');
+  expect(serializedProjectionPolicy).toContain('s3:PutObjectVersionTagging');
+  expect(serializedProjectionPolicy).not.toContain('s3:DeleteObjectVersion');
   expect(serializedProjectionPolicy).not.toContain('/*/*/@connections/*');
+  expect(fileCleanupDynamoStatement).toEqual(expect.objectContaining({
+    Action: 'dynamodb:UpdateItem',
+    Condition: {
+      'ForAllValues:StringEquals': {
+        'dynamodb:Attributes': ['scopeKey', 'recordKey', 'expiresAt', 'retentionUntil'],
+      },
+    },
+    Effect: 'Allow',
+  }));
+  expect(fileCleanupS3Statement).toEqual(expect.objectContaining({
+    Action: 's3:PutObjectVersionTagging',
+    Condition: {
+      'ForAllValues:StringEquals': {
+        's3:RequestObjectTagKeys': [
+          'GuardDutyMalwareScanStatus',
+          'mukuroji-deleted',
+          'mukuroji-upload',
+        ],
+      },
+      StringEquals: {
+        's3:RequestObjectTag/mukuroji-deleted': 'true',
+      },
+    },
+    Effect: 'Allow',
+  }));
+  expect(JSON.stringify(fileCleanupS3Statement)).toContain('workspaces/*');
 });
 
 test('API IAM is limited to the data tables and configured Cognito user pool', () => {
@@ -523,6 +916,9 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   const statements = policy.Properties.PolicyDocument.Statement as Array<Record<string, unknown>>;
   const transactStatement = statements.find((statement) =>
     statement.Action === 'dynamodb:TransactWriteItems'
+  );
+  const fileObjectStatement = statements.find((statement) =>
+    Array.isArray(statement.Action) && statement.Action.includes('s3:PutObject')
   );
   const cognitoPolicy = Object.values(template.toJSON().Resources).find((resource) =>
     JSON.stringify(resource).includes('cognito-idp:AdminGetUser')
@@ -537,6 +933,23 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     ]),
   }));
   expect(JSON.stringify(transactStatement)).not.toContain('ProjectTasksTableE21F6637');
+  expect(JSON.stringify(transactStatement)).toContain('FileProofingTable');
+  expect(fileObjectStatement).toEqual(expect.objectContaining({
+    Effect: 'Allow',
+    Action: expect.arrayContaining([
+      's3:DeleteObject',
+      's3:GetObject',
+      's3:GetObjectAttributes',
+      's3:GetObjectVersion',
+      's3:GetObjectVersionTagging',
+      's3:PutObject',
+      's3:PutObjectVersionTagging',
+    ]),
+  }));
+  expect(JSON.stringify(fileObjectStatement)).toContain('workspaces/*');
+  expect(JSON.stringify(fileObjectStatement)).not.toContain('s3:ListBucket');
+  expect(JSON.stringify(fileObjectStatement)).not.toContain('s3:DeleteObjectVersion');
+  expect(JSON.stringify(fileObjectStatement)).not.toContain('s3:DeleteObjectTagging');
 
   const legacyTaskStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('ProjectTasksTableE21F6637')
@@ -564,6 +977,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:ListUsers');
   expect(JSON.stringify(cognitoPolicy)).toContain('CognitoUserPoolId');
   expect(JSON.stringify(policy)).not.toContain('"Resource":"*"');
+  expect(JSON.stringify(policy)).not.toContain('"Action":"s3:*"');
   expect(JSON.stringify(cognitoPolicy)).not.toContain('"Resource":"*"');
 });
 

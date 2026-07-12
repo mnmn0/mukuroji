@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  cleanupDeletedFileProjection,
   createDynamoBatchItemFailure,
   createNotificationProjectionKeys,
   groupNotificationCandidates,
@@ -7,9 +8,14 @@ import {
   isActiveWorkspaceNotificationMember,
   hasCurrentSystemAdminMembership,
   hasEligibleProjectAccess,
+  mergeDeletedObjectTags,
   parseAuditProjectionEvent,
+  processCollaborationProjectionBatch,
   toSubscribedWatcherCandidates,
   type AuditProjectionEvent,
+  type DeletedFileCleanupDependencies,
+  type DeletedFileMetadataKey,
+  type DeletedFileObjectVersion,
   type ProjectDirectoryItem,
 } from './collaboration-projection-handler'
 import {
@@ -93,6 +99,7 @@ describe('collaboration projection pure helpers', () => {
       metadata: {
         actorMemberKey: 'author@example.com',
         issueId: 'example',
+        fileId: 'file-1',
         notificationCandidates: [
           { memberKey: 'member@example.com', reason: 'mention' },
           { memberKey: 42, reason: 'invalid' },
@@ -103,10 +110,157 @@ describe('collaboration projection pure helpers', () => {
     expect(event).toMatchObject({
       actorMemberKey: 'author@example.com',
       issueId: 'example',
+      fileId: 'file-1',
       outboxStatus: 'suppressed',
       notificationCandidates: [
         { memberKey: 'member@example.com', reason: 'mention' },
       ],
+    })
+  })
+
+  test('durably quarantines immutable versions and expires related file metadata', async () => {
+    const taggedVersions: DeletedFileObjectVersion[] = []
+    const expiredKeys: DeletedFileMetadataKey[] = []
+    const dependencies: DeletedFileCleanupDependencies = {
+      async readFile(scopeKey, fileId) {
+        return {
+          scopeKey,
+          recordKey: `FILE#${fileId}`,
+          entryType: 'file',
+          fileId,
+          deletedAt: '2026-07-13T00:00:00.000Z',
+          retentionUntil: '2026-08-12T00:00:00.000Z',
+          expiresAt: 1_786_492_800,
+          versions: [
+            {
+              objectKey: 'workspaces/workspace-1/files/file-1/version-1/proof.png',
+              objectVersionId: 's3-version-1',
+            },
+            {
+              objectKey: 'workspaces/workspace-1/files/file-1/version-pending/proof.png',
+            },
+          ],
+        }
+      },
+      async queryRows(_scopeKey, recordPrefix) {
+        if (recordPrefix.startsWith('ANNOTATION#')) {
+          return [{
+            scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
+            recordKey: 'ANNOTATION#file-1#version-1#annotation-1',
+            entryType: 'annotation',
+          }]
+        }
+        return [
+          {
+            scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
+            recordKey: 'APPROVAL#approval-1',
+            entryType: 'approval',
+            id: 'approval-1',
+            fileId: 'file-1',
+            dueAt: '2026-07-20T00:00:00.000Z',
+            reviewers: [{ memberKey: 'Reviewer@Example.com' }],
+          },
+          {
+            scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
+            recordKey: 'APPROVAL#approval-other',
+            entryType: 'approval',
+            id: 'approval-other',
+            fileId: 'file-other',
+            dueAt: '2026-07-20T00:00:00.000Z',
+            reviewers: [{ memberKey: 'other@example.com' }],
+          },
+        ]
+      },
+      async tagDeletedObjectVersion(target) {
+        taggedVersions.push(target)
+      },
+      async expireMetadata(keys, expiresAt, retentionUntil) {
+        expiredKeys.push(...keys)
+        expect(expiresAt).toBe(1_786_492_800)
+        expect(retentionUntil).toBe('2026-08-12T00:00:00.000Z')
+      },
+    }
+
+    await cleanupDeletedFileProjection(createProjectionEvent({
+      eventType: 'file.deleted',
+      workspaceId: 'workspace-1',
+      teamId: 'core',
+      issueId: 'example',
+      fileId: 'file-1',
+      targetId: 'file-1',
+    }), dependencies)
+
+    expect(taggedVersions).toEqual([{
+      objectKey: 'workspaces/workspace-1/files/file-1/version-1/proof.png',
+      objectVersionId: 's3-version-1',
+    }])
+    expect(expiredKeys).toEqual([
+      {
+        scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
+        recordKey: 'ANNOTATION#file-1#version-1#annotation-1',
+      },
+      {
+        scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
+        recordKey: 'APPROVAL#approval-1',
+      },
+      {
+        scopeKey: 'WORKSPACE#workspace-1#REVIEWER#reviewer@example.com',
+        recordKey: 'APPROVAL#2026-07-20T00:00:00.000Z#approval-1',
+      },
+    ])
+  })
+
+  test('preserves scan and completion tags while applying deleted quarantine', () => {
+    expect(mergeDeletedObjectTags([
+      { Key: 'GuardDutyMalwareScanStatus', Value: 'NO_THREATS_FOUND' },
+      { Key: 'mukuroji-upload', Value: 'completed' },
+      { Key: 'mukuroji-deleted', Value: 'false' },
+    ])).toEqual([
+      { Key: 'GuardDutyMalwareScanStatus', Value: 'NO_THREATS_FOUND' },
+      { Key: 'mukuroji-upload', Value: 'completed' },
+      { Key: 'mukuroji-deleted', Value: 'true' },
+    ])
+  })
+
+  test('returns a partial batch failure when durable file cleanup fails', async () => {
+    const failure = new Error('S3 tagging unavailable')
+    const dependencies: DeletedFileCleanupDependencies = {
+      async readFile() {
+        throw failure
+      },
+      async queryRows() {
+        return []
+      },
+      async tagDeletedObjectVersion() {},
+      async expireMetadata() {},
+    }
+    const response = await processCollaborationProjectionBatch({
+      Records: [{
+        eventID: 'event-1',
+        eventName: 'INSERT',
+        dynamodb: {
+          SequenceNumber: 'stream-sequence-1',
+          NewImage: {
+            eventId: { S: 'evt-file-delete' },
+            eventType: { S: 'file.deleted' },
+            workspaceId: { S: 'workspace-1' },
+            occurredAt: { S: '2026-07-13T00:00:00.000Z' },
+            targetId: { S: 'file-1' },
+            outboxStatus: { S: 'suppressed' },
+            metadata: {
+              M: {
+                teamId: { S: 'core' },
+                issueId: { S: 'example' },
+                fileId: { S: 'file-1' },
+              },
+            },
+          },
+        },
+      }],
+    }, dependencies)
+
+    expect(response).toEqual({
+      batchItemFailures: [{ itemIdentifier: 'stream-sequence-1' }],
     })
   })
 
