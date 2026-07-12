@@ -55,7 +55,9 @@ function createWorkspaceAccessTransactItems(
         },
         UpdateExpression:
           'SET entryType = if_not_exists(entryType, :entryType), activeOwnerCount = if_not_exists(activeOwnerCount, :activeOwnerCount), #version = if_not_exists(#version, :version), createdAt = if_not_exists(createdAt, :createdAt), updatedAt = if_not_exists(updatedAt, :updatedAt)',
+        ConditionExpression: 'attribute_not_exists(workspaceId) OR #entryType = :entryType',
         ExpressionAttributeNames: {
+          '#entryType': 'entryType',
           '#version': 'version',
         },
         ExpressionAttributeValues: {
@@ -76,7 +78,10 @@ function createWorkspaceAccessTransactItems(
         },
         UpdateExpression:
           'SET entryType = if_not_exists(entryType, :entryType), id = if_not_exists(id, :memberKey), memberKey = if_not_exists(memberKey, :memberKey), email = if_not_exists(email, :memberKey), #role = if_not_exists(#role, :role), #status = if_not_exists(#status, :status), #version = if_not_exists(#version, :version), createdAt = if_not_exists(createdAt, :createdAt), updatedAt = if_not_exists(updatedAt, :updatedAt)',
+        ConditionExpression:
+          'attribute_not_exists(workspaceId) OR (#entryType = :entryType AND memberKey = :memberKey)',
         ExpressionAttributeNames: {
+          '#entryType': 'entryType',
           '#role': 'role',
           '#status': 'status',
           '#version': 'version',
@@ -117,7 +122,10 @@ function createWorkspaceDemoMemberTransactItems(tableName: string, workspaceId: 
       },
       UpdateExpression:
         'SET entryType = if_not_exists(entryType, :entryType), id = if_not_exists(id, :memberKey), memberKey = if_not_exists(memberKey, :memberKey), email = if_not_exists(email, :memberKey), #name = if_not_exists(#name, :name), #role = if_not_exists(#role, :role), #status = if_not_exists(#status, :status), #version = if_not_exists(#version, :version), createdAt = if_not_exists(createdAt, :createdAt), updatedAt = if_not_exists(updatedAt, :updatedAt)',
+      ConditionExpression:
+        'attribute_not_exists(workspaceId) OR (#entryType = :entryType AND memberKey = :memberKey)',
       ExpressionAttributeNames: {
+        '#entryType': 'entryType',
         '#name': 'name',
         '#role': 'role',
         '#status': 'status',
