@@ -2,12 +2,14 @@ import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as apigatewayv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as customResources from 'aws-cdk-lib/custom-resources';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as lambdaDestinations from 'aws-cdk-lib/aws-lambda-destinations';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
@@ -956,6 +958,10 @@ export class CdkStack extends cdk.Stack {
     );
     realtimeWebSocketStage.grantManagementApiAccess(collaborationProjectionFunction);
 
+    const notificationScheduleDlq = new sqs.Queue(this, 'NotificationScheduleDlq', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(14),
+    });
     const notificationScheduleFunction = new lambdaNodejs.NodejsFunction(
       this,
       'NotificationScheduleFunction',
@@ -968,6 +974,8 @@ export class CdkStack extends cdk.Stack {
         timeout: cdk.Duration.minutes(5),
         memorySize: 512,
         description: 'Emits deterministic due and overdue Work Item notification events.',
+        onFailure: new lambdaDestinations.SqsDestination(notificationScheduleDlq),
+        retryAttempts: 2,
         bundling: {
           bundleAwsSDK: true,
           minify: true,
@@ -985,6 +993,20 @@ export class CdkStack extends cdk.Stack {
     );
     workItemsTable.grantReadData(notificationScheduleFunction);
     auditEventsTable.grantWriteData(notificationScheduleFunction);
+
+    new cloudwatch.Alarm(this, 'NotificationScheduleDlqAlarm', {
+      alarmDescription:
+        'Detects notification schedule failures after asynchronous retries, including scan page limit exhaustion.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: notificationScheduleDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
 
     new events.Rule(this, 'NotificationScheduleRule', {
       description: 'Checks canonical Work Items for due and overdue notifications.',
@@ -1225,6 +1247,9 @@ export class CdkStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'CollaborationProjectionDlqUrl', {
       value: collaborationProjectionDlq.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'NotificationScheduleDlqUrl', {
+      value: notificationScheduleDlq.queueUrl,
     });
     new cdk.CfnOutput(this, 'ProjectTasksApiUrl', {
       value: functionUrl.url,

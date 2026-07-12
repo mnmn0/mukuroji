@@ -531,7 +531,7 @@ test('audit stream projects notifications with retries DLQ and scoped production
   expect(serializedProjectionPolicy).not.toContain('/*/*/@connections/*');
 });
 
-test('hourly schedule emits deterministic due and overdue audit outbox events', () => {
+test('hourly schedule emits deterministic events and surfaces bounded scan failures', () => {
   const template = synthesizedTemplate;
 
   template.hasResourceProperties('AWS::Lambda::Function', {
@@ -548,6 +548,32 @@ test('hourly schedule emits deterministic due and overdue audit outbox events', 
         WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
       }),
     },
+  });
+  template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', {
+    DestinationConfig: {
+      OnFailure: {
+        Destination: Match.anyValue(),
+      },
+    },
+    MaximumRetryAttempts: 2,
+  });
+  template.resourceCountIs('AWS::SQS::Queue', 2);
+  template.hasResourceProperties('AWS::SQS::Queue', {
+    MessageRetentionPeriod: 1209600,
+    SqsManagedSseEnabled: true,
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects notification schedule failures after asynchronous retries, including scan page limit exhaustion.',
+    ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+    DatapointsToAlarm: 1,
+    EvaluationPeriods: 1,
+    MetricName: 'ApproximateNumberOfMessagesVisible',
+    Namespace: 'AWS/SQS',
+    Period: 300,
+    Statistic: 'Maximum',
+    Threshold: 1,
+    TreatMissingData: 'notBreaching',
   });
   template.hasResourceProperties('AWS::Events::Rule', {
     Description: 'Checks canonical Work Items for due and overdue notifications.',
@@ -570,6 +596,8 @@ test('hourly schedule emits deterministic due and overdue audit outbox events', 
   expect(serializedSchedulePolicy).toContain('AuditEventsTable0723963E');
   expect(serializedSchedulePolicy).toContain('dynamodb:Scan');
   expect(serializedSchedulePolicy).toContain('dynamodb:PutItem');
+  expect(serializedSchedulePolicy).toContain('sqs:SendMessage');
+  template.hasOutput('NotificationScheduleDlqUrl', {});
 });
 
 test('API IAM is limited to the data tables and configured Cognito user pool', () => {

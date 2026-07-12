@@ -18,6 +18,7 @@ const authSession = {
 }
 const workItemConflictMessage =
   '別のメンバーが先に更新しました。最新の内容を確認してから、もう一度保存してください。'
+const notificationFixtureNow = new Date('2026-07-12T12:00:00.000Z')
 
 /**
  * API stub が受けた request 数です。
@@ -1342,7 +1343,7 @@ function resolveMockNotificationState(
   }
   if (
     notification.snoozedUntil &&
-    new Date(notification.snoozedUntil).getTime() > Date.now()
+    new Date(notification.snoozedUntil).getTime() > notificationFixtureNow.getTime()
   ) {
     return 'snoozed'
   }
@@ -2458,6 +2459,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('通知 Inbox で既読・archive・snooze を永続化し実未読件数へ反映する', async ({ page }) => {
+    await page.clock.setFixedTime(notificationFixtureNow)
     const requestCounts = getMockRequestCounts(page)
 
     await page.goto('/inbox')
@@ -2558,7 +2560,23 @@ test.describe('authenticated task page', () => {
     await expect(page).toHaveURL(
       `/projects/refero/issues?teamId=core-team&issueId=${issueId}&commentId=comment-1&rootCommentId=comment-1`,
     )
-    await expect(page.locator('#comment-comment-1')).toHaveAttribute('data-focused', 'true')
+    const focusedComment = page.locator('#comment-comment-1')
+
+    await expect(focusedComment).toHaveAttribute('data-focused', 'true')
+    await expect(focusedComment).toBeFocused()
+
+    const watchButton = page.getByRole('button', { name: /ウォッチ/ }).first()
+    const collaborationRefresh = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname.endsWith(`/teams/core-team/issues/${issueId}/collaboration`),
+    )
+
+    await watchButton.click()
+    await collaborationRefresh
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+    await expect(watchButton).toBeFocused()
   })
 
   test('通知 Inbox は opaque cursor の次 page を追記する', async ({ page }) => {

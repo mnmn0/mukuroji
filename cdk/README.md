@@ -27,7 +27,7 @@
 - `WorkItemsTableName`（既存 `TeamIssuesTable` を昇格した canonical store）
 - `TeamIssuesTableName`（`WorkItemsTableName` と同じ table を指す互換 output）
 - `ProjectDirectoryTableName`, `TeamIssueEventsTableName`
-- `NotificationsTableName`, `CollaborationProjectionDlqUrl`
+- `NotificationsTableName`, `CollaborationProjectionDlqUrl`, `NotificationScheduleDlqUrl`
 - `AuditEventsTableName`, `ProcessedAuditEventsTableName`
 - `WorkItemCollaborationTableName`, `RealtimeSessionsTableName`, `RealtimeWebSocketUrl`
 - `WorkspaceDirectoryId`
@@ -166,7 +166,7 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 
-通知 upgrade では `NotificationsTable` に `RecipientStatusIndex` が追加されます。deploy 前に GSI backfill の所要時間と table throttling を確認し、deploy 後は `CollaborationProjectionDlqUrl` の滞留、`NotificationScheduleFunction` の失敗、Inbox の unread count を監視してください。期限 schedule は UTC date-only で1時間ごとに走査し、同じ Work Item / due date / reason の event を決定的に重複排除します。
+通知 upgrade では `NotificationsTable` に `RecipientStatusIndex` が追加されます。deploy 前に GSI backfill の所要時間と table throttling を確認し、deploy 後は `CollaborationProjectionDlqUrl` と `NotificationScheduleDlqUrl` の滞留、Inbox の unread count を監視してください。期限 schedule は UTC date-only で1時間ごとに走査し、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として非同期 retry され、最終失敗は schedule DLQ に保存されます。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。
 
 `InitialOwnerEmail` / `InitialOwnerUsername` の変更は通常 deploy と分けて owner rotation として扱います。新 owner の検証後、旧 owner の Cognito attributes、system-admin group、workspace/member/alias row、各 project role を明示的に棚卸ししてください。parameter 変更だけでは旧 owner の row や group membership は削除されません。
 
@@ -245,7 +245,7 @@ aws dynamodb wait table-exists \
 - Function URL の edge auth は `NONE` ですが、Hono API が Cognito Bearer token の issuer / client / token use を検証します。
 - Function URL、HTTP API、Hono CORS は同じ `TaskApiAllowedOrigins` に揃えます。本番で local default を使いません。
 - Lambda IAM は stack table と指定 user pool に限定します。
-- 4 DynamoDB table は `Retain` + PITR enabled です。
+- stack が管理するすべての DynamoDB table は `Retain` + PITR enabled です。
 - Lambda は `server/src/index.ts` を deploy 時に bundle します。旧 inline Lambda copy はありません。
 
 ## Commands

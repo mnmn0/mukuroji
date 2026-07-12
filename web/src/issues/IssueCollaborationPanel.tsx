@@ -70,6 +70,7 @@ export function IssueCollaborationPanel({
   const [deleteConfirmationId, setDeleteConfirmationId] = useState<string | undefined>()
   const [reactionMenuId, setReactionMenuId] = useState<string | undefined>()
   const focusLoadRequestRef = useRef<string | undefined>(undefined)
+  const focusedCommentTargetRef = useRef<string | undefined>(undefined)
   const threads = useMemo(() => createCommentThreads(controller.comments), [controller.comments])
   const uniquePresence = useMemo(
     () => Array.from(new Map(controller.presence.map((presence) => [presence.memberKey, presence])).values()),
@@ -90,7 +91,17 @@ export function IssueCollaborationPanel({
   const focusReplyPagination = controller.replyPagination
 
   useEffect(() => {
-    if (!focusedCommentId || focusIsLoading || focusHasLoadError) {
+    if (!focusedCommentId) {
+      focusLoadRequestRef.current = undefined
+      focusedCommentTargetRef.current = undefined
+      return
+    }
+
+    if (
+      focusedCommentTargetRef.current === focusedCommentId ||
+      focusIsLoading ||
+      focusHasLoadError
+    ) {
       return
     }
 
@@ -132,6 +143,7 @@ export function IssueCollaborationPanel({
     const frameId = window.requestAnimationFrame(() => {
       target.scrollIntoView({ behavior: 'smooth', block: 'center' })
       target.focus({ preventScroll: true })
+      focusedCommentTargetRef.current = focusedCommentId
     })
 
     return () => window.cancelAnimationFrame(frameId)

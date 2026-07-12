@@ -378,6 +378,11 @@ describe('notification store', () => {
       inboxState: 'read',
       recipientStatusKey: 'workspace-1#member@example.com#read',
     })
+    expect(recording.commands.filter(({ input, name }) =>
+      name === 'GetCommand' &&
+      (input.Key as Record<string, unknown> | undefined)?.notificationKey ===
+        NOTIFICATION_STATUS_MIGRATION_KEY
+    )).toHaveLength(1)
   })
 
   test('wakes an expired snooze back into the unread timeline', async () => {

@@ -132,7 +132,6 @@ describe('collaboration projection pure helpers', () => {
     expect(first).toEqual({
       recipientKey: 'workspace-1#member@example.com',
       notificationKey: '2026-07-12T12:00:00.000Z#evt-1',
-      recipientStatusKey: 'workspace-1#member@example.com#unread',
       consumerName: 'collaboration-notification#member@example.com',
     })
   })

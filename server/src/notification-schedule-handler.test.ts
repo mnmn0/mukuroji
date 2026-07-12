@@ -145,6 +145,30 @@ describe('notification schedule handler', () => {
     })
   })
 
+  test('changes a date-only Work Item from future to due at the UTC day boundary', async () => {
+    const beforeBoundary = createRecordingDocumentClient((name) =>
+      name === 'ScanCommand' ? { Items: [createWorkItem()] } : {},
+    )
+    const atBoundary = createRecordingDocumentClient((name) =>
+      name === 'ScanCommand' ? { Items: [createWorkItem()] } : {},
+    )
+
+    await expect(runNotificationSchedule(createRunOptions(beforeBoundary.client, {
+      now: new Date('2026-07-11T23:59:59.999Z'),
+    }))).resolves.toMatchObject({
+      emittedEvents: 0,
+      skippedItems: 1,
+    })
+    await expect(runNotificationSchedule(createRunOptions(atBoundary.client, {
+      now: new Date('2026-07-12T00:00:00.000Z'),
+    }))).resolves.toMatchObject({
+      emittedEvents: 1,
+      skippedItems: 0,
+    })
+    expect(atBoundary.commands.find(({ name }) => name === 'PutCommand')?.input.Item)
+      .toMatchObject({ eventType: 'work-item.due' })
+  })
+
   test('paginates a bounded strongly consistent Work Item scan', async () => {
     let scanCount = 0
     const recording = createRecordingDocumentClient((name) => {

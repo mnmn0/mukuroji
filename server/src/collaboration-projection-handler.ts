@@ -196,8 +196,6 @@ export type NotificationProjectionKeys = {
   recipientKey: string
   /** NotificationsTable の sort key です。 */
   notificationKey: string
-  /** RecipientStatusIndex の unread partition key です。 */
-  recipientStatusKey: string
   /** ProcessedAuditEventsTable の recipient-scoped consumer name です。 */
   consumerName: string
 }
@@ -547,7 +545,6 @@ export function createNotificationProjectionKeys(
   return {
     recipientKey: `${event.workspaceId}#${normalizedMemberKey}`,
     notificationKey: `${event.occurredAt}#${event.eventId}`,
-    recipientStatusKey: `${event.workspaceId}#${normalizedMemberKey}#unread`,
     consumerName: `collaboration-notification#${normalizedMemberKey}`,
   }
 }

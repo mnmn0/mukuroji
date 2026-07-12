@@ -443,9 +443,18 @@ export class DynamoDbNotificationsClient implements NotificationClient {
   async update(input: UpdateNotificationInput) {
     await this.ensureTable()
     const recipientKey = createNotificationRecipientKey(input.workspaceId, input.memberKey)
-    const identifier = decodeNotificationIdentifier(input.notificationId, recipientKey)
     const now = normalizeDate(input.now ?? new Date(), 'Notification update time')
     await this.ensureLegacyRowsMigrated(recipientKey, now)
+    return this.updateAfterMigration(input, recipientKey, now)
+  }
+
+  /** Migration 済み recipient の notification state を version 条件付きで更新します。 */
+  private async updateAfterMigration(
+    input: UpdateNotificationInput,
+    recipientKey: string,
+    now: Date,
+  ) {
+    const identifier = decodeNotificationIdentifier(input.notificationId, recipientKey)
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
       Key: {
@@ -535,12 +544,11 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     let updatedCount = 0
     for (const notificationId of notificationIds) {
       try {
-        await this.update({
+        await this.updateAfterMigration({
           ...input,
           notificationId,
           action: 'mark-read',
-          now,
-        })
+        }, recipientKey, now)
         updatedCount += 1
       } catch (error) {
         if (!(error instanceof NotificationError && error.code === 'NotificationVersionConflict')) {
