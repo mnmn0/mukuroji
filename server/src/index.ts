@@ -18,12 +18,52 @@ import {
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
+  type TransactWriteCommandInput,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { Hono } from 'hono'
 import { handle, type LambdaContext, type LambdaEvent } from 'hono/aws-lambda'
 import { cors } from 'hono/cors'
 import type { Context } from 'hono'
+import {
+  auditEventsToNdjson,
+  createAuditFieldChanges,
+  createMutationAuditContext,
+  createMutationAuditEventPut,
+  DynamoDbAuditEventsClient,
+  ensureLocalAuditEventsTable,
+  getConfiguredAuditTableName,
+  getConfiguredDynamoDbEndpoint,
+  toAuditEventView,
+  type AuditEventEntityType,
+  type AuditEventPage,
+  type AuditEventQuery,
+  type MutationAuditContext,
+  type MutationAuditEventInput,
+} from './audit'
+import {
+  DynamoDbWorkspaceAccessClient,
+  WorkspaceAccessError,
+  isWorkspaceIdentitySafeToDelete,
+  type WorkspaceAccessClient,
+  type WorkspaceInvitation,
+  type WorkspaceMember,
+  type WorkspaceMemberStatus,
+  type WorkspaceRole,
+} from './workspace-access'
+
+export {
+  DynamoDbWorkspaceAccessClient,
+  WorkspaceAccessError,
+} from './workspace-access'
+export type {
+  WorkspaceAccessClient,
+  WorkspaceIdentityOwnership,
+  WorkspaceInvitation,
+  WorkspaceMember,
+  WorkspaceMemberStatus,
+  WorkspaceRole,
+} from './workspace-access'
 
 /**
  * Cognito の認証成功時に返る token set です。
@@ -67,6 +107,28 @@ type InitiateAuthResponse = {
    * challenge 継続用の Cognito session です。
    */
   Session?: string
+  /**
+   * challenge 継続時に Cognito が返す補助 parameter です。
+   */
+  ChallengeParameters?: Record<string, string>
+}
+
+/**
+ * Cognito の NEW_PASSWORD_REQUIRED challenge を完了する入力です。
+ */
+type CompleteNewPasswordChallengeRequestBody = {
+  /**
+   * challenge を開始した Cognito user のメールアドレスです。
+   */
+  email?: unknown
+  /**
+   * Cognito が login challenge とともに返した session です。
+   */
+  session?: unknown
+  /**
+   * user が設定する恒久 password です。
+   */
+  newPassword?: unknown
 }
 
 /**
@@ -197,6 +259,16 @@ type ListUsersResponse = {
 }
 
 /**
+ * Cognito AdminCreateUser のレスポンスです。
+ */
+type AdminCreateUserResponse = {
+  /**
+   * 作成された Cognito user です。
+   */
+  User?: CognitoUserRecord
+}
+
+/**
  * アプリが参照する Cognito user profile です。
  */
 type CognitoUserProfile = {
@@ -224,6 +296,64 @@ type CognitoUserProfile = {
    * Cognito user status です。
    */
   status?: string
+  /**
+   * Workspace membership の利用状態です。assignment candidate response で付与します。
+   */
+  workspaceStatus?: WorkspaceMemberStatus
+}
+
+/**
+ * Workspace invitation provisioning で参照する Cognito user と directory 情報です。
+ */
+type CognitoWorkspaceUser = {
+  /**
+   * 正規化済み Cognito user profile です。
+   */
+  profile: CognitoUserProfile
+  /**
+   * Cognito custom attribute に保存された Workspace directory ID です。
+   */
+  directoryId?: string
+}
+
+/**
+ * Cognito user を Workspace invitation 用に準備する入力です。
+ */
+type ProvisionCognitoWorkspaceUserInput = {
+  /**
+   * invitation の宛先メールアドレスです。
+   */
+  email: string
+  /**
+   * invitation に指定された表示名です。
+   */
+  name?: string
+  /**
+   * Cognito custom attribute に設定する Workspace directory ID です。
+   */
+  directoryId: string
+  /**
+   * reservation 前に確認した既存 Cognito user です。
+   */
+  existingUser?: CognitoWorkspaceUser
+}
+
+/**
+ * Cognito invitation provisioning の結果です。
+ */
+type ProvisionCognitoWorkspaceUserResult = {
+  /**
+   * invitation と紐付く Cognito user profile です。
+   */
+  profile: CognitoUserProfile
+  /**
+   * Cognito identity が Workspace によって新規作成されたかどうかです。
+   */
+  identityOwnership: 'workspace-created' | 'pre-existing' | 'ambiguous'
+  /**
+   * Cognito が invitation message を配信したかどうかです。
+   */
+  deliveryStatus: 'sent' | 'not-required'
 }
 
 /**
@@ -297,6 +427,10 @@ type ProjectPrincipal = {
    */
   userKey: string
   /**
+   * Audit actor に使う Cognito sub または immutable username です。
+   */
+  actorId: string
+  /**
    * Cognito グループでシステム管理者として扱うかどうかです。
    */
   isSystemAdmin: boolean
@@ -304,6 +438,24 @@ type ProjectPrincipal = {
    * access token に含まれていた Cognito グループ名です。
    */
   groups: string[]
+}
+
+/**
+ * active Workspace membership を検証済みの principal です。
+ */
+type WorkspacePrincipal = ProjectPrincipal & {
+  /**
+   * DynamoDB から検証した active Workspace member です。
+   */
+  workspaceMember: WorkspaceMember
+  /**
+   * Workspace 全体で付与された role です。
+   */
+  workspaceRole: WorkspaceRole
+  /**
+   * 認証時点の Workspace member status です。
+   */
+  workspaceMemberStatus: WorkspaceMemberStatus
 }
 
 /**
@@ -336,6 +488,26 @@ type LoginRequestBody = {
    * ユーザーが入力したパスワードです。
    */
   password?: unknown
+}
+
+/** Workspace invitation 作成 API の request body です。 */
+type CreateWorkspaceInvitationRequestBody = {
+  /** 招待先メールアドレスです。 */
+  email?: unknown
+  /** 招待対象の表示名です。 */
+  name?: unknown
+  /** 招待受諾後に付与する Workspace role です。 */
+  role?: unknown
+}
+
+/** Workspace member 更新 API の request body です。 */
+type UpdateWorkspaceAccessMemberRequestBody = {
+  /** 更新後の Workspace role です。 */
+  role?: unknown
+  /** 更新後の member status です。 */
+  status?: unknown
+  /** optimistic locking に使う current version です。 */
+  expectedVersion?: unknown
 }
 
 /**
@@ -401,6 +573,10 @@ type ProjectCreatorContext = {
    * Cognito user を正規化した member key です。
    */
   userKey: string
+  /**
+   * project manager row 作成と競合させる Workspace member version です。
+   */
+  workspaceMemberVersion: number
 }
 
 /**
@@ -1311,6 +1487,10 @@ type ProjectMemberResponseItem = {
    */
   status?: string
   /**
+   * Workspace membership の利用状態です。
+   */
+  workspaceStatus?: WorkspaceMemberStatus
+  /**
    * プロジェクト内の権限ロールです。
    */
   role: ProjectRole
@@ -1389,6 +1569,14 @@ type CognitoClient = {
    */
   initiatePasswordAuth(email: string, password: string): Promise<InitiateAuthResponse>
   /**
+   * NEW_PASSWORD_REQUIRED challenge に恒久 password を応答します。
+   */
+  respondToNewPasswordChallenge(
+    email: string,
+    newPassword: string,
+    session: string,
+  ): Promise<InitiateAuthResponse>
+  /**
    * access token から Cognito ユーザー情報を取得します。
    */
   getUser(accessToken: string): Promise<GetUserResponse>
@@ -1400,6 +1588,24 @@ type CognitoClient = {
    * Cognito user ID から user profile を取得します。
    */
   getUserProfile(userId: string): Promise<CognitoUserProfile>
+  /**
+   * Workspace invitation 対象の Cognito user と directory 属性を検索します。
+   */
+  findWorkspaceUser(userId: string): Promise<CognitoWorkspaceUser | undefined>
+  /**
+   * invitation 対象 user を Cognito に作成または既存 identity と安全に関連付けます。
+   */
+  provisionWorkspaceUser(
+    input: ProvisionCognitoWorkspaceUserInput,
+  ): Promise<ProvisionCognitoWorkspaceUserResult>
+  /**
+   * Workspace が作成した未確定 Cognito user の invitation を再送します。
+   */
+  resendWorkspaceUserInvitation(userId: string): Promise<void>
+  /**
+   * Workspace が所有する未確定 Cognito user を削除します。
+   */
+  deleteWorkspaceUser(userId: string): Promise<void>
 }
 
 /**
@@ -1430,6 +1636,7 @@ type ProjectTasksClient = {
     directoryId: string,
     projectId: string,
     input: CreateProjectTaskRequestBody,
+    auditContext?: MutationAuditContext,
   ): Promise<CreateProjectTaskResponse>
   /**
    * DynamoDB に保存された指定 task ID の状態を更新します。
@@ -1439,6 +1646,7 @@ type ProjectTasksClient = {
     projectId: string,
     taskId: string,
     input: UpdateProjectTaskStatusRequestBody,
+    auditContext?: MutationAuditContext,
   ): Promise<UpdateProjectTaskStatusResponse>
 }
 
@@ -1471,6 +1679,7 @@ type TeamIssuesClient = {
     input: CreateTeamIssueRequestBody,
     actorUserId: string,
     reservedIssueIds?: string[],
+    auditContext?: MutationAuditContext,
   ): Promise<CreateTeamIssueResponse>
   /**
    * DynamoDB の team issue を更新します。
@@ -1481,6 +1690,7 @@ type TeamIssuesClient = {
     issueId: string,
     input: UpdateTeamIssueRequestBody,
     actorUserId: string,
+    auditContext?: MutationAuditContext,
   ): Promise<UpdateTeamIssueResponse>
   /**
    * DynamoDB に team issue コメントを追加します。
@@ -1491,6 +1701,7 @@ type TeamIssuesClient = {
     issueId: string,
     input: CreateTeamIssueCommentRequestBody,
     actorUserId: string,
+    auditContext?: MutationAuditContext,
   ): Promise<CreateTeamIssueCommentResponse>
 }
 
@@ -1538,6 +1749,8 @@ type ProjectDirectoryClient = {
     projectId: string,
     memberKey: string,
     input: UpdateProjectMemberRequestBody,
+    expectedWorkspaceMemberVersion: number,
+    auditContext?: MutationAuditContext,
   ): Promise<UpdateProjectMemberResponse>
   /**
    * DynamoDB から project member role を削除します。
@@ -1546,11 +1759,16 @@ type ProjectDirectoryClient = {
     directoryId: string,
     projectId: string,
     memberKey: string,
+    auditContext?: MutationAuditContext,
   ): Promise<RemoveProjectMemberResponse>
   /**
    * DynamoDB にチームを作成します。
    */
-  createTeam(directoryId: string, input: CreateTeamRequestBody): Promise<CreateTeamResponse>
+  createTeam(
+    directoryId: string,
+    input: CreateTeamRequestBody,
+    auditContext?: MutationAuditContext,
+  ): Promise<CreateTeamResponse>
   /**
    * DynamoDB に指定チーム配下のプロジェクトを作成します。
    */
@@ -1559,11 +1777,16 @@ type ProjectDirectoryClient = {
     teamId: string,
     input: CreateProjectRequestBody,
     creator: ProjectCreatorContext,
+    auditContext?: MutationAuditContext,
   ): Promise<CreateProjectResponse>
   /**
    * DynamoDB 上のチームをアーカイブします。
    */
-  archiveTeam(directoryId: string, teamId: string): Promise<ArchiveTeamResponse>
+  archiveTeam(
+    directoryId: string,
+    teamId: string,
+    auditContext?: MutationAuditContext,
+  ): Promise<ArchiveTeamResponse>
   /**
    * DynamoDB 上のチーム配下プロジェクトをアーカイブします。
    */
@@ -1571,7 +1794,18 @@ type ProjectDirectoryClient = {
     directoryId: string,
     teamId: string,
     projectId: string,
+    auditContext?: MutationAuditContext,
   ): Promise<ArchiveProjectResponse>
+}
+
+/**
+ * API handler から利用する append-only audit event query client です。
+ */
+type AuditEventsClient = {
+  /**
+   * workspace、actor、entity、target、期間で event を page 取得します。
+   */
+  query(input: AuditEventQuery): Promise<AuditEventPage>
 }
 
 /**
@@ -1588,6 +1822,8 @@ let dashboardSummary: DashboardSummaryClient
 let projectTasks: ProjectTasksClient
 let teamIssues: TeamIssuesClient
 let projectDirectory: ProjectDirectoryClient
+let auditEvents: AuditEventsClient
+let workspaceAccess: WorkspaceAccessClient
 const projectDirectoryIdPrefix = 'user#'
 const defaultAllowedOrigins = [
   'http://localhost:5173',
@@ -1607,7 +1843,8 @@ app.use(
   cors({
     origin: (origin) => getAllowedOrigins().includes(origin) ? origin : undefined,
     allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowHeaders: ['Authorization', 'Content-Type'],
+    allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key', 'X-Correlation-Id'],
+    exposeHeaders: ['X-Audit-Truncated', 'X-Audit-Next-Cursor'],
   }),
 )
 
@@ -1642,6 +1879,14 @@ app.post('/api/auth/login', async (c) => {
     const tokens = response.AuthenticationResult
 
     if (!tokens?.AccessToken) {
+      if (response.ChallengeName === 'NEW_PASSWORD_REQUIRED' && response.Session) {
+        return c.json({
+          challenge: 'NEW_PASSWORD_REQUIRED' as const,
+          email,
+          session: response.Session,
+        })
+      }
+
       return c.json(
         {
           message: response.ChallengeName
@@ -1652,15 +1897,235 @@ app.post('/api/auth/login', async (c) => {
       )
     }
 
-    return c.json({
-      accessToken: tokens.AccessToken,
-      idToken: tokens.IdToken,
-      refreshToken: tokens.RefreshToken,
-      expiresAt: Date.now() + (tokens.ExpiresIn ?? 3600) * 1000,
-      tokenType: tokens.TokenType ?? 'Bearer',
-    })
+    return c.json(await createAuthenticationResponse(tokens))
   } catch (error) {
+    if (error instanceof WorkspaceAccessError) {
+      return toWorkspaceAccessErrorResponse(c, error)
+    }
+
     return toAuthErrorResponse(c, error)
+  }
+})
+
+/**
+ * Cognito の NEW_PASSWORD_REQUIRED challenge を完了する endpoint です。
+ *
+ * @remarks
+ * Cognito が password 更新に成功した後の Workspace membership reconcile は通常 login と
+ * 同じ処理を通ります。DynamoDB 更新だけが失敗した場合も、新 password で login し直すと
+ * reconcile を再実行できます。
+ */
+app.post('/api/auth/challenge/new-password', async (c) => {
+  const body = await readJson<CompleteNewPasswordChallengeRequestBody>(c.req)
+  const email = typeof body?.email === 'string' ? body.email.trim() : ''
+  const session = typeof body?.session === 'string' ? body.session.trim() : ''
+  const newPassword = typeof body?.newPassword === 'string' ? body.newPassword : ''
+
+  if (!email || !session || !newPassword) {
+    return c.json({ message: 'Email, session, and new password are required.' }, 400)
+  }
+
+  try {
+    const response = await cognito.respondToNewPasswordChallenge(email, newPassword, session)
+    const tokens = response.AuthenticationResult
+
+    if (!tokens?.AccessToken) {
+      return c.json(
+        {
+          message: response.ChallengeName
+            ? `Unsupported Cognito challenge: ${response.ChallengeName}`
+            : 'Cognito did not return an access token.',
+        },
+        409,
+      )
+    }
+
+    return c.json(await createAuthenticationResponse(tokens))
+  } catch (error) {
+    if (error instanceof WorkspaceAccessError) {
+      return toWorkspaceAccessErrorResponse(c, error)
+    }
+
+    return toNewPasswordChallengeErrorResponse(c, error)
+  }
+})
+
+/** Workspace member、invitation、capability の snapshot を返す endpoint です。 */
+app.get('/api/workspace/access', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    return c.json(await workspaceAccess.getAccessSnapshot(principal.directoryId, principal.userKey))
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toWorkspaceAccessErrorResponse(c, error)
+  }
+})
+
+/** Workspace invitation を reservation して Cognito provisioning を開始する endpoint です。 */
+app.post('/api/workspace/invitations', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
+    const body = await readJson<CreateWorkspaceInvitationRequestBody>(c.req)
+    const email = readWorkspaceEmail(body?.email)
+    const role = readWorkspaceRole(body?.role)
+    const name = readOptionalWorkspaceName(body?.name)
+    const invitation = await workspaceAccess.createInvitation(
+      principal.directoryId,
+      principal.userKey,
+      {
+        email,
+        name,
+        role,
+      },
+    )
+
+    try {
+      const result = await deliverPreparedWorkspaceInvitation(
+        principal.directoryId,
+        invitation,
+      )
+      const deliveredInvitation = await workspaceAccess.markInvitationDelivery(
+        principal.directoryId,
+        invitation.id,
+        {
+          expectedVersion: invitation.version,
+          identityOwnership: result.identityOwnership,
+          deliveryStatus: result.deliveryStatus,
+        },
+      )
+
+      return c.json({ invitation: deliveredInvitation }, 201)
+    } catch (error) {
+      await markWorkspaceInvitationFailure(principal.directoryId, invitation, error)
+      throw error
+    }
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toWorkspaceAccessErrorResponse(c, error)
+  }
+})
+
+/** Workspace invitation を再送する endpoint です。 */
+app.post('/api/workspace/invitations/:invitationId/resend', async (c) => {
+  return handleWorkspaceInvitationDeliveryAction(c, 'resend')
+})
+
+/** Workspace invitation を取り消す endpoint です。 */
+app.post('/api/workspace/invitations/:invitationId/revoke', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
+    const invitationId = readWorkspaceEmail(c.req.param('invitationId'))
+    let invitation = await workspaceAccess.revokeInvitation(
+      principal.directoryId,
+      principal.userKey,
+      invitationId,
+    )
+
+    if (isWorkspaceIdentitySafeToDelete(invitation.identityOwnership)) {
+      try {
+        await cognito.deleteWorkspaceUser(invitation.email)
+      } catch (error) {
+        try {
+          await workspaceAccess.markInvitationCleanupFailure(
+            principal.directoryId,
+            invitation.id,
+            {
+              expectedVersion: invitation.version,
+              failureMessage: 'Cognito cleanup failed and can be retried safely.',
+            },
+          )
+        } catch (markError) {
+          console.error('Failed to persist Workspace invitation cleanup failure:', markError)
+        }
+
+        throw error
+      }
+
+      if (invitation.failureMessage) {
+        invitation = await workspaceAccess.clearInvitationCleanupFailure(
+          principal.directoryId,
+          invitation.id,
+          invitation.version,
+        )
+      }
+    }
+
+    return c.json({ invitation })
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toWorkspaceAccessErrorResponse(c, error)
+  }
+})
+
+/** revoked / expired Workspace invitation を再招待する endpoint です。 */
+app.post('/api/workspace/invitations/:invitationId/reinvite', async (c) => {
+  return handleWorkspaceInvitationDeliveryAction(c, 'reinvite')
+})
+
+/** Workspace member の role または status を version 条件付きで更新する endpoint です。 */
+app.patch('/api/workspace/members/:memberKey', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
+    const memberKey = readWorkspaceEmail(c.req.param('memberKey'))
+    const body = await readJson<UpdateWorkspaceAccessMemberRequestBody>(c.req)
+    const role = body?.role === undefined ? undefined : readWorkspaceRole(body.role)
+    const status = body?.status === undefined ? undefined : readWorkspaceMemberStatus(body.status)
+    const expectedVersion = readWorkspaceVersion(body?.expectedVersion)
+
+    if (status === 'deactivated') {
+      await requireWorkspaceMemberHasNoManagedProjects(principal.directoryId, memberKey)
+    }
+
+    const member = await workspaceAccess.updateMember(
+      principal.directoryId,
+      principal.userKey,
+      memberKey,
+      { role, status, expectedVersion },
+    )
+
+    return c.json({ member })
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toWorkspaceAccessErrorResponse(c, error)
   }
 })
 
@@ -1680,8 +2145,9 @@ app.get('/api/auth/me', async (c) => {
   }
 
   try {
-    const user = await readAuthenticatedCognitoUser(accessToken)
-    const principal = toProjectPrincipal(user, accessToken)
+    validateConfiguredCognitoAccessToken(accessToken)
+    const user = await cognito.getUser(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken, user)
 
     return c.json({
       username: user.Username ?? '',
@@ -1692,8 +2158,14 @@ app.get('/api/auth/me', async (c) => {
       ),
       groups: principal.groups,
       isSystemAdmin: principal.isSystemAdmin,
+      workspaceRole: principal.workspaceRole,
+      workspaceMemberStatus: principal.workspaceMemberStatus,
     })
   } catch (error) {
+    if (error instanceof WorkspaceAccessError) {
+      return toWorkspaceAccessErrorResponse(c, error)
+    }
+
     if (error instanceof ProjectDataError) {
       return toProjectDataErrorResponse(c, error)
     }
@@ -1717,7 +2189,7 @@ app.get('/api/dashboard/summary', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
 
     return c.json(await dashboardSummary.getSummary(principal.directoryId, principal))
   } catch (error) {
@@ -1727,6 +2199,20 @@ app.get('/api/dashboard/summary', async (c) => {
 
     return toProjectDataErrorResponse(c, error)
   }
+})
+
+/**
+ * Workspace audit event を filter と cursor 付きで page 取得する endpoint です。
+ */
+app.get('/api/audit/events', async (c) => {
+  return handleWorkspaceAuditRequest(c, false)
+})
+
+/**
+ * Workspace audit event を NDJSON で同期 export する endpoint です。
+ */
+app.get('/api/audit/events/export', async (c) => {
+  return handleWorkspaceAuditRequest(c, true)
 })
 
 /**
@@ -1743,7 +2229,7 @@ app.get('/api/teams/projects', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
 
     return c.json(await projectDirectory.getProjectDirectory(principal.directoryId, readLocale(c)))
   } catch (error) {
@@ -1766,11 +2252,18 @@ app.post('/api/teams', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
-    requireSystemAdmin(principal)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
     const body = await readJson<CreateTeamRequestBody>(c.req)
 
-    return c.json(await projectDirectory.createTeam(principal.directoryId, body ?? {}), 201)
+    return c.json(
+      await projectDirectory.createTeam(
+        principal.directoryId,
+        body ?? {},
+        createApiMutationContext(c, principal, body ?? {}),
+      ),
+      201,
+    )
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -1796,7 +2289,8 @@ app.post('/api/teams/:teamId/projects', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
     const body = await readJson<CreateProjectRequestBody>(c.req)
 
     return c.json(
@@ -1804,7 +2298,11 @@ app.post('/api/teams/:teamId/projects', async (c) => {
         principal.directoryId,
         teamId,
         body ?? {},
-        { userKey: principal.userKey },
+        {
+          userKey: principal.userKey,
+          workspaceMemberVersion: principal.workspaceMember.version,
+        },
+        createApiMutationContext(c, principal, { teamId, ...body }),
       ),
       201,
     )
@@ -1833,10 +2331,16 @@ app.patch('/api/teams/:teamId/archive', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
-    requireSystemAdmin(principal)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
 
-    return c.json(await projectDirectory.archiveTeam(principal.directoryId, teamId))
+    return c.json(
+      await projectDirectory.archiveTeam(
+        principal.directoryId,
+        teamId,
+        createApiMutationContext(c, principal, { teamId }),
+      ),
+    )
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -1867,10 +2371,17 @@ app.patch('/api/teams/:teamId/projects/:projectId/archive', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
-    await requireProjectPermission(principal, projectId, 'manager')
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
 
-    return c.json(await projectDirectory.archiveProject(principal.directoryId, teamId, projectId))
+    return c.json(
+      await projectDirectory.archiveProject(
+        principal.directoryId,
+        teamId,
+        projectId,
+        createApiMutationContext(c, principal, { teamId, projectId }),
+      ),
+    )
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -1899,7 +2410,7 @@ app.get('/api/projects/:projectId/tasks', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
     await requireProjectPermission(principal, projectId, 'viewer')
 
     return c.json(
@@ -1932,10 +2443,10 @@ app.get('/api/projects/:projectId/users', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
     await requireProjectPermission(principal, projectId, 'manager')
 
-    return c.json(await cognito.listUsers(readCognitoUsersInput(c, principal.directoryId)))
+    return c.json(await listActiveWorkspaceCognitoUsers(principal.directoryId, c))
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)
@@ -1961,12 +2472,13 @@ app.get('/api/projects/:projectId/members', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
     await requireProjectPermission(principal, projectId, 'member')
 
     return c.json(
       await hydrateProjectMembersResponse(
         await projectDirectory.getProjectMembers(principal.directoryId, projectId),
+        principal.directoryId,
       ),
     )
   } catch (error) {
@@ -1999,10 +2511,20 @@ app.patch('/api/projects/:projectId/members/:memberKey', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
     await requireProjectPermission(principal, projectId, 'manager')
     const body = await readJson<UpdateProjectMemberRequestBody>(c.req)
     const profile = await cognito.getUserProfile(memberKey)
+    const workspaceMember = await workspaceAccess.getActiveMember(principal.directoryId, profile.id)
+
+    if (!workspaceMember) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceMemberInactive',
+        'Only active Workspace members can be assigned to a project.',
+      )
+    }
 
     return c.json(
       await hydrateProjectMemberUpdateResponse(
@@ -2015,7 +2537,14 @@ app.patch('/api/projects/:projectId/members/:memberKey', async (c) => {
             email: profile.email,
             name: profile.name,
           },
+          workspaceMember.version,
+          createApiMutationContext(c, principal, {
+            projectId,
+            memberKey: profile.id,
+            ...body,
+          }),
         ),
+        principal.directoryId,
       ),
     )
   } catch (error) {
@@ -2048,11 +2577,17 @@ app.delete('/api/projects/:projectId/members/:memberKey', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
     await requireProjectPermission(principal, projectId, 'manager')
 
     return c.json(
-      await projectDirectory.removeProjectMember(principal.directoryId, projectId, memberKey),
+      await projectDirectory.removeProjectMember(
+        principal.directoryId,
+        projectId,
+        memberKey,
+        createApiMutationContext(c, principal, { projectId, memberKey }),
+      ),
     )
   } catch (error) {
     if (error instanceof CognitoServiceError) {
@@ -2079,7 +2614,7 @@ app.get('/api/teams/:teamId/issues', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
     const context = await requireTeamPermission(principal, teamId, 'viewer')
 
     return c.json(await hydrateTeamIssuesResponse(await readTeamIssues(principal.directoryId, context, principal)))
@@ -2108,7 +2643,8 @@ app.post('/api/teams/:teamId/issues', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
     const context = await requireTeamPermission(principal, teamId, 'member')
     const body = normalizeTeamIssueInput(
       await readJson<CreateTeamIssueRequestBody>(c.req) ?? {},
@@ -2116,7 +2652,7 @@ app.post('/api/teams/:teamId/issues', async (c) => {
     )
     requireAssignedProjectPermission(principal, context, body.assignedProjectId, 'member')
     const assigneeUserId = readTeamIssueAssigneeUserId(body)
-    await cognito.getUserProfile(assigneeUserId)
+    await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
     const reservedIssueIds = await readLegacyTeamIssueIds(principal.directoryId, context)
 
     return c.json(
@@ -2130,6 +2666,7 @@ app.post('/api/teams/:teamId/issues', async (c) => {
           },
           principal.userKey,
           reservedIssueIds,
+          createApiMutationContext(c, principal, { teamId, ...body }),
         ),
       ),
       201,
@@ -2137,6 +2674,70 @@ app.post('/api/teams/:teamId/issues', async (c) => {
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * DynamoDB に保存されたチーム所有 Issue の paginated activity を返す endpoint です。
+ */
+app.get('/api/teams/:teamId/issues/:issueId/activity', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!teamId || !issueId) {
+    return c.json({ message: 'Team ID and issue ID are required.' }, 400)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const context = await requireTeamPermission(principal, teamId, 'viewer')
+    let entityId = createTeamIssueAuditEntityId(teamId, issueId)
+
+    try {
+      const detail = await teamIssues.getTeamIssueDetail(principal.directoryId, teamId, issueId)
+      requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
+    } catch (error) {
+      if (!isTeamIssueNotFoundError(error)) {
+        throw error
+      }
+
+      const legacyIssue = await readLegacyTeamIssue(
+        principal.directoryId,
+        context,
+        principal,
+        issueId,
+      )
+
+      if (!legacyIssue?.assignedProjectId) {
+        throw error
+      }
+
+      entityId = createProjectTaskAuditEntityId(legacyIssue.assignedProjectId, issueId)
+    }
+
+    const page = await auditEvents.query(
+      readAuditEventQuery(c, principal.directoryId, {
+        type: 'work-item',
+        id: entityId,
+      }),
+    )
+
+    return c.json(toAuditEventPageView(page))
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toCognitoDirectoryErrorResponse(c, error)
+    }
+
+    if (error instanceof TypeError || error instanceof RangeError) {
+      return c.json({ message: error.message }, 400)
     }
 
     return toProjectDataErrorResponse(c, error)
@@ -2160,7 +2761,7 @@ app.get('/api/teams/:teamId/issues/:issueId', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
     const context = await requireTeamPermission(principal, teamId, 'viewer')
 
     try {
@@ -2215,7 +2816,8 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
     const context = await requireTeamPermission(principal, teamId, 'member')
     const body = normalizeTeamIssueInput(
       await readJson<UpdateTeamIssueRequestBody>(c.req) ?? {},
@@ -2226,7 +2828,10 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
     requireAssignedProjectPermission(principal, context, body.assignedProjectId, 'member')
 
     if ('assigneeUserId' in body) {
-      await cognito.getUserProfile(readTeamIssueAssigneeUserId(body))
+      await requireActiveWorkspaceAssignee(
+        principal.directoryId,
+        readTeamIssueAssigneeUserId(body),
+      )
     }
 
     return c.json(
@@ -2237,6 +2842,7 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
           issueId,
           body,
           principal.userKey,
+          createApiMutationContext(c, principal, { teamId, issueId, ...body }),
         ),
       ),
     )
@@ -2266,18 +2872,21 @@ app.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
     const context = await requireTeamPermission(principal, teamId, 'member')
     const detail = await teamIssues.getTeamIssueDetail(principal.directoryId, teamId, issueId)
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'member')
+    const body = await readJson<CreateTeamIssueCommentRequestBody>(c.req) ?? {}
 
     return c.json(
       await teamIssues.createTeamIssueComment(
         principal.directoryId,
         teamId,
         issueId,
-        await readJson<CreateTeamIssueCommentRequestBody>(c.req) ?? {},
+        body,
         principal.userKey,
+        createApiMutationContext(c, principal, { teamId, issueId, ...body }),
       ),
       201,
     )
@@ -2306,7 +2915,7 @@ app.get('/api/projects/:projectId/issues', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
     await requireProjectPermission(principal, projectId, 'viewer')
 
     return c.json(
@@ -2339,12 +2948,13 @@ app.post('/api/projects/:projectId/tasks', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
     await requireProjectPermission(principal, projectId, 'member')
 
     const body = await readJson<CreateProjectTaskRequestBody>(c.req)
     const assigneeUserId = readTaskAssigneeUserId(body ?? {})
-    await cognito.getUserProfile(assigneeUserId)
+    await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
 
     return c.json(
       await hydrateProjectTaskUpdateResponse(
@@ -2355,6 +2965,7 @@ app.post('/api/projects/:projectId/tasks', async (c) => {
             ...body,
             assigneeUserId,
           },
+          createApiMutationContext(c, principal, { projectId, ...body, assigneeUserId }),
         ),
       ),
       201,
@@ -2389,7 +3000,8 @@ app.patch('/api/projects/:projectId/tasks/:taskId', async (c) => {
   }
 
   try {
-    const principal = await readProjectPrincipal(accessToken)
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
     await requireProjectPermission(principal, projectId, 'member')
 
     const body = await readJson<UpdateProjectTaskStatusRequestBody>(c.req)
@@ -2401,7 +3013,13 @@ app.patch('/api/projects/:projectId/tasks/:taskId', async (c) => {
 
     return c.json(
       await hydrateProjectTaskUpdateResponse(
-        await projectTasks.updateProjectTaskStatus(principal.directoryId, projectId, taskId, body ?? {}),
+        await projectTasks.updateProjectTaskStatus(
+          principal.directoryId,
+          projectId,
+          taskId,
+          body ?? {},
+          createApiMutationContext(c, principal, { projectId, taskId, ...body }),
+        ),
       ),
     )
   } catch (error) {
@@ -2421,23 +3039,380 @@ async function readJson<T>(request: { json: () => Promise<T> }) {
   }
 }
 
+function createApiMutationContext(
+  c: Context,
+  principal: ProjectPrincipal,
+  body: unknown,
+): MutationAuditContext {
+  const idempotencyKey = c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()
+  const correlationId = c.req.header('X-Correlation-Id')?.trim()
+  const path = new URL(c.req.url).pathname
+
+  try {
+    return createMutationAuditContext({
+      workspaceId: principal.directoryId,
+      actor: {
+        id: principal.actorId,
+        kind: 'user',
+        displayName: principal.userKey,
+      },
+      idempotencyKey,
+      ...(correlationId ? { correlationId } : {}),
+      request: {
+        method: c.req.method,
+        path,
+        body,
+      },
+      source: {
+        kind: 'api',
+        requestId: c.req.header('X-Request-Id'),
+        method: c.req.method,
+        route: path,
+        ipAddress: c.req.header('X-Forwarded-For')?.split(',')[0]?.trim(),
+        userAgent: c.req.header('User-Agent'),
+      },
+    })
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof RangeError) {
+      throw new ProjectDataError(400, 'InvalidProjectWrite', error.message)
+    }
+
+    throw error
+  }
+}
+
+function createOptionalAuditTransactItems(
+  tableName: string | undefined,
+  context: MutationAuditContext | undefined,
+  input: MutationAuditEventInput,
+) {
+  const item = createMutationAuditEventPut(tableName, context, input)
+
+  return item ? [item] : []
+}
+
+async function ensureConfiguredAuditTable(
+  tableName: string | undefined,
+  dynamoDbClient: DynamoDBClient,
+  bootstrapLocalTables: boolean,
+) {
+  if (tableName && bootstrapLocalTables) {
+    await ensureLocalAuditEventsTable(tableName, dynamoDbClient)
+  }
+}
+
+function readAuditEventQuery(
+  c: Context,
+  workspaceId: string,
+  entity?: { type: AuditEventEntityType; id: string },
+): AuditEventQuery {
+  const limitValue = c.req.query('limit')
+  const limit = limitValue ? Number(limitValue) : undefined
+  const eventTypes = c.req.query('eventType')
+    ?.split(',')
+    .map((eventType) => eventType.trim())
+    .filter(Boolean)
+
+  if (limit !== undefined && !Number.isFinite(limit)) {
+    throw new ProjectDataError(400, 'InvalidAuditQuery', 'Audit limit is invalid.')
+  }
+
+  return {
+    workspaceId,
+    actorId: c.req.query('actorUserId') ?? c.req.query('actorId'),
+    targetType: c.req.query('targetType'),
+    targetId: c.req.query('targetId'),
+    eventTypes,
+    from: c.req.query('from'),
+    to: c.req.query('to'),
+    limit,
+    cursor: c.req.query('cursor'),
+    direction: c.req.query('direction') === 'ascending' ? 'ascending' : 'descending',
+    ...(entity ? { entityType: entity.type, entityId: entity.id } : {}),
+  }
+}
+
+/**
+ * Storage schema の内部属性を除いた paginated audit response を作成します。
+ */
+function toAuditEventPageView(page: AuditEventPage) {
+  return {
+    events: page.events.map(toAuditEventView),
+    ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+  }
+}
+
+async function handleWorkspaceAuditRequest(c: Context, exportAsNdjson: boolean) {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireSystemAdmin(principal)
+    const query = readAuditEventQuery(c, principal.directoryId)
+
+    if (!exportAsNdjson) {
+      return c.json(toAuditEventPageView(await auditEvents.query(query)))
+    }
+
+    const events = []
+    let cursor = query.cursor
+
+    do {
+      const page = await auditEvents.query({
+        ...query,
+        cursor,
+        limit: Math.min(100, 1_000 - events.length),
+      })
+      events.push(...page.events)
+      cursor = page.nextCursor
+    } while (cursor && events.length < 1_000)
+
+    const headers: Record<string, string> = {
+      'Content-Disposition': 'attachment; filename="mukuroji-audit.ndjson"',
+      'Content-Type': 'application/x-ndjson; charset=utf-8',
+    }
+
+    if (events.length === 1_000 && cursor) {
+      headers['X-Audit-Truncated'] = 'true'
+      headers['X-Audit-Next-Cursor'] = cursor
+    }
+
+    return c.body(await auditEventsToNdjson(events), 200, headers)
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toCognitoDirectoryErrorResponse(c, error)
+    }
+
+    if (error instanceof TypeError || error instanceof RangeError) {
+      return c.json({ message: error.message }, 400)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+}
+
+function readWorkspaceEmail(value: unknown) {
+  const email = typeof value === 'string' ? value.trim().toLowerCase() : ''
+
+  if (!email || !email.includes('@')) {
+    throw new WorkspaceAccessError(400, 'InvalidWorkspaceEmail', 'A valid email address is required.')
+  }
+
+  return email
+}
+
+function readOptionalWorkspaceName(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function readWorkspaceRole(value: unknown): WorkspaceRole {
+  if (value === 'owner' || value === 'admin' || value === 'member' || value === 'guest') {
+    return value
+  }
+
+  throw new WorkspaceAccessError(400, 'InvalidWorkspaceRole', 'Workspace role is invalid.')
+}
+
+function readWorkspaceMemberStatus(value: unknown): WorkspaceMemberStatus {
+  if (value === 'active' || value === 'deactivated') {
+    return value
+  }
+
+  throw new WorkspaceAccessError(400, 'InvalidWorkspaceMemberStatus', 'Workspace member status is invalid.')
+}
+
+function readWorkspaceVersion(value: unknown) {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw new WorkspaceAccessError(400, 'InvalidWorkspaceVersion', 'Workspace member version is required.')
+  }
+
+  return value
+}
+
+async function createAuthenticationResponse(tokens: AuthTokenSet) {
+  if (!tokens.AccessToken) {
+    throw new CognitoServiceError(
+      502,
+      'InvalidCognitoResponse',
+      'Cognito did not return an access token.',
+    )
+  }
+
+  if (cognito instanceof FlociCognitoClient && tokens.AccessToken.split('.').length !== 3) {
+    return {
+      accessToken: tokens.AccessToken,
+      idToken: tokens.IdToken,
+      refreshToken: tokens.RefreshToken,
+      expiresAt: Date.now() + (tokens.ExpiresIn ?? 3600) * 1000,
+      tokenType: tokens.TokenType ?? 'Bearer',
+    }
+  }
+
+  const user = await cognito.getUser(tokens.AccessToken)
+  const userKey = readUserAttribute(user, 'email') ?? user.Username
+
+  if (userKey?.trim()) {
+    const principal = toProjectPrincipal(user, tokens.AccessToken)
+    await workspaceAccess.reconcileAuthenticatedMember(principal.directoryId, {
+      memberKey: principal.userKey,
+      email: readUserAttribute(user, 'email') ?? principal.userKey,
+      name: readUserAttribute(user, 'name'),
+    })
+  }
+
+  return {
+    accessToken: tokens.AccessToken,
+    idToken: tokens.IdToken,
+    refreshToken: tokens.RefreshToken,
+    expiresAt: Date.now() + (tokens.ExpiresIn ?? 3600) * 1000,
+    tokenType: tokens.TokenType ?? 'Bearer',
+  }
+}
+
+async function handleWorkspaceInvitationDeliveryAction(
+  c: Context,
+  action: 'resend' | 'reinvite',
+) {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
+    const invitationId = readWorkspaceEmail(c.req.param('invitationId'))
+    const preparedInvitation = action === 'resend'
+      ? await workspaceAccess.prepareResend(
+          principal.directoryId,
+          principal.userKey,
+          invitationId,
+        )
+      : await workspaceAccess.prepareReinvite(
+          principal.directoryId,
+          principal.userKey,
+          invitationId,
+        )
+
+    try {
+      const result = await deliverPreparedWorkspaceInvitation(
+        principal.directoryId,
+        preparedInvitation,
+        action === 'resend',
+      )
+      const invitation = await workspaceAccess.markInvitationDelivery(
+        principal.directoryId,
+        preparedInvitation.id,
+        {
+          expectedVersion: preparedInvitation.version,
+          identityOwnership: result.identityOwnership,
+          deliveryStatus: result.deliveryStatus,
+        },
+      )
+
+      return c.json({ invitation })
+    } catch (error) {
+      await markWorkspaceInvitationFailure(principal.directoryId, preparedInvitation, error)
+      throw error
+    }
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toWorkspaceAccessErrorResponse(c, error)
+  }
+}
+
+async function deliverPreparedWorkspaceInvitation(
+  directoryId: string,
+  invitation: WorkspaceInvitation,
+  preserveIdentityOwnership = false,
+) {
+  const existingUser = await cognito.findWorkspaceUser(invitation.email)
+
+  if (existingUser?.profile.status === 'FORCE_CHANGE_PASSWORD') {
+    const result = await cognito.provisionWorkspaceUser({
+      directoryId,
+      email: invitation.email,
+      name: invitation.name,
+      existingUser,
+    })
+    await cognito.resendWorkspaceUserInvitation(existingUser.profile.username)
+    return {
+      identityOwnership: preserveIdentityOwnership
+        ? invitation.identityOwnership
+        : result.identityOwnership,
+      deliveryStatus: 'sent' as const,
+    }
+  }
+
+  const result = await cognito.provisionWorkspaceUser({
+    directoryId,
+    email: invitation.email,
+    name: invitation.name,
+    existingUser,
+  })
+
+  return {
+    identityOwnership: preserveIdentityOwnership
+      ? invitation.identityOwnership
+      : result.identityOwnership,
+    deliveryStatus: result.deliveryStatus,
+  }
+}
+
+async function markWorkspaceInvitationFailure(
+  directoryId: string,
+  invitation: WorkspaceInvitation,
+  error: unknown,
+) {
+  console.error('Workspace invitation delivery failed:', error)
+
+  try {
+    await workspaceAccess.markInvitationDelivery(directoryId, invitation.id, {
+      expectedVersion: invitation.version,
+      identityOwnership: invitation.identityOwnership,
+      deliveryStatus: 'failed',
+      failureMessage: 'Invitation delivery failed.',
+    })
+  } catch (markError) {
+    console.error('Failed to persist Workspace invitation delivery failure:', markError)
+  }
+}
+
+async function authenticateWorkspacePrincipal(
+  accessToken: string,
+  user?: GetUserResponse,
+): Promise<WorkspacePrincipal> {
+  validateConfiguredCognitoAccessToken(accessToken)
+  const principal = toProjectPrincipal(user ?? await cognito.getUser(accessToken), accessToken)
+  const workspaceMember = await workspaceAccess.getActiveMember(
+    principal.directoryId,
+    principal.userKey,
+  )
+
+  if (!workspaceMember) {
+    throw new WorkspaceAccessError(403, 'WorkspaceAccessDenied', 'Workspace access is denied.')
+  }
+
+  return {
+    ...principal,
+    workspaceMember,
+    workspaceRole: workspaceMember.role,
+    workspaceMemberStatus: workspaceMember.status,
+  }
+}
+
 function readBearerAccessToken(c: Context) {
   const authorization = c.req.header('Authorization') ?? ''
 
   return authorization.match(/^Bearer\s+(.+)$/i)?.[1]
-}
-
-async function readAuthenticatedCognitoUser(accessToken: string) {
-  validateConfiguredCognitoAccessToken(accessToken)
-
-  return cognito.getUser(accessToken)
-}
-
-async function readProjectPrincipal(accessToken: string) {
-  return toProjectPrincipal(
-    await readAuthenticatedCognitoUser(accessToken),
-    accessToken,
-  )
 }
 
 function readLocale(c: Context): Locale {
@@ -2484,6 +3459,10 @@ function toAuthErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'Cognito is not configured.' }, 503)
   }
 
+  if (error.code === 'WorkspaceDirectoryConflict') {
+    return c.json({ message: error.message }, 409)
+  }
+
   if (error.code === 'ResourceNotFoundException' || error.code === 'ClientNotFoundException') {
     return c.json({ message: 'Cognito local resources are not ready.' }, 503)
   }
@@ -2496,13 +3475,110 @@ function toAuthErrorResponse(c: Context, error: unknown) {
   return c.json({ message: error.message }, 400)
 }
 
+function toNewPasswordChallengeErrorResponse(c: Context, error: unknown) {
+  if (
+    error instanceof CognitoServiceError &&
+    (
+      error.code === 'InvalidPasswordException' ||
+      error.code === 'PasswordHistoryPolicyViolationException'
+    )
+  ) {
+    return c.json(
+      {
+        code: 'InvalidNewPassword' as const,
+        message: 'New password does not meet the password policy.',
+      },
+      400,
+    )
+  }
+
+  return toAuthErrorResponse(c, error)
+}
+
+function toWorkspaceAccessErrorResponse(c: Context, error: unknown) {
+  if (!(error instanceof WorkspaceAccessError)) {
+    console.error(error)
+    return c.json({ message: 'Workspace access is unavailable.' }, 502)
+  }
+
+  if (error.status >= 500) {
+    console.error(error)
+  }
+
+  const status = error.status === 400 ||
+    error.status === 403 ||
+    error.status === 404 ||
+    error.status === 409 ||
+    error.status === 503
+    ? error.status
+    : 502
+
+  return c.json({ message: error.message }, status)
+}
+
+function requireSystemAdmin(principal: ProjectPrincipal) {
+  if (principal.isSystemAdmin) {
+    return
+  }
+
+  throw new ProjectDataError(
+    403,
+    'ProjectAccessDenied',
+    `User "${principal.userKey}" must be a system administrator.`,
+  )
+}
+
+function requireWorkspaceBusinessWrite(principal: WorkspacePrincipal) {
+  if (principal.workspaceRole !== 'guest') {
+    return
+  }
+
+  throw new WorkspaceAccessError(
+    403,
+    'WorkspaceRoleDenied',
+    'Guest members have read-only Workspace access.',
+  )
+}
+
+function requireWorkspaceAdministration(principal: WorkspacePrincipal) {
+  if (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
+    return
+  }
+
+  throw new WorkspaceAccessError(
+    403,
+    'WorkspaceRoleDenied',
+    'Workspace owner or admin access is required.',
+  )
+}
+
+async function requireWorkspaceMemberHasNoManagedProjects(
+  directoryId: string,
+  memberKey: string,
+) {
+  const managedProject = (await projectDirectory.getProjectAccessList(directoryId, memberKey))
+    .find((access) => access.role === 'manager')
+
+  if (managedProject) {
+    throw new WorkspaceAccessError(
+      409,
+      'WorkspaceMemberManagesProjects',
+      'Transfer or remove all active project manager roles before deactivating this member.',
+    )
+  }
+}
+
 function toProjectDataErrorResponse(c: Context, error: unknown) {
+  if (error instanceof WorkspaceAccessError) {
+    return toWorkspaceAccessErrorResponse(c, error)
+  }
+
   if (!(error instanceof ProjectDataError)) {
     console.error(error)
     return c.json({ message: 'Project data is unavailable.' }, 502)
   }
 
-  if (error.code === 'InvalidProjectWrite') {
+  if (error.code === 'InvalidProjectWrite' || error.code === 'InvalidAuditQuery') {
     return c.json({ message: error.message }, 400)
   }
 
@@ -2526,12 +3602,20 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'Project member was not found.' }, 404)
   }
 
-  if (error.code === 'ConditionalCheckFailedException' || error.code === 'TransactionCanceledException') {
+  if (error.code === 'ConditionalCheckFailedException') {
     return c.json({ message: 'The same item already exists.' }, 409)
   }
 
   if (error.code === 'ProjectLastManager') {
     return c.json({ message: 'At least one project manager is required.' }, 409)
+  }
+
+  if (error.code === 'WorkspaceMemberInactive') {
+    return c.json({ message: 'Only active Workspace members can be assigned to a project.' }, 409)
+  }
+
+  if (error.code === 'WorkspaceMemberVersionConflict') {
+    return c.json({ message: 'Workspace member changed. Reload and try again.' }, 409)
   }
 
   if (error.code === 'ResourceNotFoundException') {
@@ -2558,18 +3642,6 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
 
   console.error(error)
   return c.json({ message: 'Project data is unavailable.' }, 502)
-}
-
-function requireSystemAdmin(principal: ProjectPrincipal) {
-  if (principal.isSystemAdmin) {
-    return
-  }
-
-  throw new ProjectDataError(
-    403,
-    'ProjectAccessDenied',
-    `User "${principal.userKey}" must be a system administrator.`,
-  )
 }
 
 async function requireProjectPermission(
@@ -2712,9 +3784,12 @@ function projectRoleAllows(role: ProjectRole, minimumRole: ProjectRole) {
   return projectRoleWeights[role] >= projectRoleWeights[minimumRole]
 }
 
-async function hydrateProjectMembersResponse(response: ProjectMembersResponse) {
+async function hydrateProjectMembersResponse(
+  response: ProjectMembersResponse,
+  directoryId: string,
+) {
   const members = await Promise.all(
-    response.members.map(async (member) => hydrateProjectMember(member)),
+    response.members.map(async (member) => hydrateProjectMember(member, directoryId)),
   )
 
   return {
@@ -2723,13 +3798,18 @@ async function hydrateProjectMembersResponse(response: ProjectMembersResponse) {
   } satisfies ProjectMembersResponse
 }
 
-async function hydrateProjectMemberUpdateResponse(response: UpdateProjectMemberResponse) {
+async function hydrateProjectMemberUpdateResponse(
+  response: UpdateProjectMemberResponse,
+  directoryId: string,
+) {
   return {
-    member: await hydrateProjectMember(response.member),
+    member: await hydrateProjectMember(response.member, directoryId),
   } satisfies UpdateProjectMemberResponse
 }
 
-async function hydrateProjectMember(member: ProjectMemberResponseItem) {
+async function hydrateProjectMember(member: ProjectMemberResponseItem, directoryId: string) {
+  const workspaceMember = await workspaceAccess.getMember(directoryId, member.id)
+
   try {
     const profile = await cognito.getUserProfile(member.id)
 
@@ -2741,15 +3821,66 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem) {
       name: profile.name,
       enabled: profile.enabled,
       status: profile.status,
+      workspaceStatus: workspaceMember?.status ?? 'deactivated',
     } satisfies ProjectMemberResponseItem
   } catch (error) {
     if (isCognitoUserNotFoundError(error)) {
-      return member
+      return {
+        ...member,
+        workspaceStatus: workspaceMember?.status ?? 'deactivated',
+      }
     }
 
     console.warn('Failed to hydrate project member from Cognito:', error)
-    return member
+    return {
+      ...member,
+      workspaceStatus: workspaceMember?.status ?? 'deactivated',
+    }
   }
+}
+
+async function listActiveWorkspaceCognitoUsers(directoryId: string, c: Context) {
+  const input = readCognitoUsersInput(c, directoryId)
+  const limit = clampCognitoPageLimit(input.limit)
+  const activeMemberKeys = new Set(
+    (await workspaceAccess.listActiveMembers(directoryId)).map((member) => member.memberKey),
+  )
+  const users: CognitoUserProfile[] = []
+  let paginationToken = input.paginationToken
+
+  do {
+    const response = await cognito.listUsers({
+      ...input,
+      limit: Math.max(1, limit - users.length),
+      paginationToken,
+    })
+
+    users.push(
+      ...response.users
+        .filter((user) => activeMemberKeys.has(user.id))
+        .map((user) => ({ ...user, workspaceStatus: 'active' as const })),
+    )
+    paginationToken = response.nextToken
+  } while (users.length < limit && paginationToken)
+
+  return {
+    users,
+    nextToken: paginationToken,
+  } satisfies CognitoUsersResponse
+}
+
+async function requireActiveWorkspaceAssignee(directoryId: string, userId: string) {
+  const member = await workspaceAccess.getActiveMember(directoryId, userId)
+
+  if (!member) {
+    throw new WorkspaceAccessError(
+      409,
+      'WorkspaceAssigneeInactive',
+      'Only active Workspace members can be assigned.',
+    )
+  }
+
+  return cognito.getUserProfile(userId)
 }
 
 async function hydrateProjectTasksResponse(response: ProjectTasksResponse) {
@@ -3281,6 +4412,21 @@ class FlociCognitoClient {
   }
 
   /**
+   * NEW_PASSWORD_REQUIRED challenge に恒久 password を応答します。
+   */
+  async respondToNewPasswordChallenge(email: string, newPassword: string, session: string) {
+    return this.request<InitiateAuthResponse>('RespondToAuthChallenge', {
+      ChallengeName: 'NEW_PASSWORD_REQUIRED',
+      ChallengeResponses: {
+        USERNAME: normalizeCognitoUserId(email),
+        NEW_PASSWORD: newPassword,
+      },
+      ClientId: await this.resolveClientId(),
+      Session: session,
+    })
+  }
+
+  /**
    * access token から Cognito ユーザー情報を取得します。
    */
   async getUser(accessToken: string) {
@@ -3340,6 +4486,164 @@ class FlociCognitoClient {
     }
 
     return profile
+  }
+
+  /**
+   * Workspace invitation 対象の Cognito user と directory 属性を検索します。
+   */
+  async findWorkspaceUser(userId: string) {
+    const normalizedUserId = normalizeCognitoUserId(userId)
+
+    try {
+      const user = await this.request<CognitoUserRecord>('AdminGetUser', {
+        UserPoolId: await this.resolveUserPoolId(),
+        Username: normalizedUserId,
+      })
+      const profile = toCognitoUserProfile(user)
+
+      if (!profile) {
+        throw new CognitoServiceError(
+          502,
+          'InvalidCognitoResponse',
+          `Cognito user "${normalizedUserId}" did not include a stable profile.`,
+        )
+      }
+
+      return {
+        profile,
+        directoryId: readCognitoUserDirectoryId(user),
+      } satisfies CognitoWorkspaceUser
+    } catch (error) {
+      if (isCognitoUserNotFoundError(error)) {
+        return undefined
+      }
+
+      throw error
+    }
+  }
+
+  /**
+   * invitation 対象 user を Cognito に作成または既存 identity と安全に関連付けます。
+   */
+  async provisionWorkspaceUser(input: ProvisionCognitoWorkspaceUserInput) {
+    const email = normalizeCognitoUserId(input.email)
+    const existingUser = input.existingUser ?? await this.findWorkspaceUser(email)
+
+    if (existingUser) {
+      this.requireCompatibleWorkspaceDirectory(existingUser, input.directoryId)
+      await this.updateWorkspaceUserAttributes(email, input.directoryId, input.name)
+
+      return {
+        profile: {
+          ...existingUser.profile,
+          name: input.name?.trim() || existingUser.profile.name,
+        },
+        identityOwnership: 'pre-existing',
+        deliveryStatus: 'not-required',
+      } satisfies ProvisionCognitoWorkspaceUserResult
+    }
+
+    try {
+      const response = await this.request<AdminCreateUserResponse>('AdminCreateUser', {
+        UserPoolId: await this.resolveUserPoolId(),
+        Username: email,
+        DesiredDeliveryMediums: ['EMAIL'],
+        UserAttributes: createWorkspaceCognitoUserAttributes(email, input.directoryId, input.name),
+      })
+      const profile = response.User ? toCognitoUserProfile(response.User) : undefined
+
+      return {
+        profile: profile ?? {
+          id: email,
+          username: email,
+          email,
+          name: input.name?.trim() || undefined,
+          enabled: true,
+          status: 'FORCE_CHANGE_PASSWORD',
+        },
+        identityOwnership: 'workspace-created',
+        deliveryStatus: 'sent',
+      } satisfies ProvisionCognitoWorkspaceUserResult
+    } catch (error) {
+      if (!(error instanceof CognitoServiceError) || error.code !== 'UsernameExistsException') {
+        throw error
+      }
+
+      const racedUser = await this.findWorkspaceUser(email)
+
+      if (!racedUser) {
+        throw error
+      }
+
+      this.requireCompatibleWorkspaceDirectory(racedUser, input.directoryId)
+      await this.updateWorkspaceUserAttributes(email, input.directoryId, input.name)
+
+      if (racedUser.profile.status === 'FORCE_CHANGE_PASSWORD') {
+        await this.resendWorkspaceUserInvitation(racedUser.profile.username)
+      }
+
+      return {
+        profile: racedUser.profile,
+        identityOwnership: 'ambiguous',
+        deliveryStatus: racedUser.profile.status === 'FORCE_CHANGE_PASSWORD'
+          ? 'sent'
+          : 'not-required',
+      } satisfies ProvisionCognitoWorkspaceUserResult
+    }
+  }
+
+  /**
+   * Workspace が作成した未確定 Cognito user の invitation を再送します。
+   */
+  async resendWorkspaceUserInvitation(userId: string) {
+    await this.request<AdminCreateUserResponse>('AdminCreateUser', {
+      UserPoolId: await this.resolveUserPoolId(),
+      Username: normalizeCognitoUserId(userId),
+      MessageAction: 'RESEND',
+      DesiredDeliveryMediums: ['EMAIL'],
+    })
+  }
+
+  /**
+   * Workspace が所有する未確定 Cognito user を削除します。
+   */
+  async deleteWorkspaceUser(userId: string) {
+    try {
+      await this.request<Record<string, never>>('AdminDeleteUser', {
+        UserPoolId: await this.resolveUserPoolId(),
+        Username: normalizeCognitoUserId(userId),
+      })
+    } catch (error) {
+      if (!isCognitoUserNotFoundError(error)) {
+        throw error
+      }
+    }
+  }
+
+  /**
+   * 既存 Cognito user が別 Workspace に所属していないことを検証します。
+   */
+  private requireCompatibleWorkspaceDirectory(user: CognitoWorkspaceUser, directoryId: string) {
+    if (!user.directoryId || user.directoryId === directoryId) {
+      return
+    }
+
+    throw new CognitoServiceError(
+      409,
+      'WorkspaceDirectoryConflict',
+      `Cognito user "${user.profile.id}" already belongs to another Workspace.`,
+    )
+  }
+
+  /**
+   * 既存 Cognito user に Workspace directory と表示属性を設定します。
+   */
+  private async updateWorkspaceUserAttributes(userId: string, directoryId: string, name?: string) {
+    await this.request<Record<string, never>>('AdminUpdateUserAttributes', {
+      UserPoolId: await this.resolveUserPoolId(),
+      Username: normalizeCognitoUserId(userId),
+      UserAttributes: createWorkspaceCognitoUserAttributes(userId, directoryId, name),
+    })
   }
 
   /**
@@ -3555,6 +4859,10 @@ export class DynamoDbProjectTasksClient {
    * ローカル DynamoDB の table 欠落を自動復旧するかどうかです。
    */
   private readonly bootstrapLocalTables: boolean
+  /**
+   * immutable audit event を保存する DynamoDB table 名です。
+   */
+  private readonly auditTableName?: string
 
   constructor(
     tableName =
@@ -3564,11 +4872,13 @@ export class DynamoDbProjectTasksClient {
     documentClient = createDynamoDbDocumentClient(),
     dynamoDbClient?: DynamoDBClient,
     bootstrapLocalTables = dynamoDbClient === undefined && shouldBootstrapLocalDynamoDb(),
+    auditTableName = getConfiguredAuditTableName(),
   ) {
     this.tableName = tableName
     this.documentClient = documentClient
     this.dynamoDbClient = dynamoDbClient ?? createDynamoDbClient()
     this.bootstrapLocalTables = bootstrapLocalTables
+    this.auditTableName = auditTableName
   }
 
   /**
@@ -3599,7 +4909,13 @@ export class DynamoDbProjectTasksClient {
     directoryId: string,
     projectId: string,
     input: CreateProjectTaskRequestBody,
+    auditContext?: MutationAuditContext,
   ) {
+    await ensureConfiguredAuditTable(
+      this.auditTableName,
+      this.dynamoDbClient,
+      this.bootstrapLocalTables,
+    )
     const title = readRequiredString(input.title, 'Task title is required.')
     const assigneeUserId = readTaskAssigneeUserId(input)
     const status = readTaskStatus(input.status)
@@ -3624,18 +4940,48 @@ export class DynamoDbProjectTasksClient {
         priority,
       }
 
-      await this.documentClient.send(
-        new PutCommand({
+      const statePut = {
+        Put: {
           TableName: this.tableName,
           Item: item,
           ConditionExpression: 'attribute_not_exists(directoryProjectId) AND attribute_not_exists(taskId)',
-        }),
-      )
+        },
+      }
+      const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'work-item.created',
+        entityType: 'work-item',
+        entityId: createProjectTaskAuditEntityId(projectId, taskId),
+        action: 'created',
+        changes: createAuditFieldChanges(undefined, item, [
+          'title',
+          'assigneeUserId',
+          'status',
+          'dueDate',
+          'priority',
+        ]),
+        metadata: { adapter: 'legacy-project-task', projectId },
+      })
+
+      if (auditPut) {
+        await this.documentClient.send(
+          new TransactWriteCommand({ TransactItems: [statePut, auditPut] }),
+        )
+      } else {
+        await this.documentClient.send(new PutCommand(statePut.Put))
+      }
 
       return {
         task: toProjectTaskResponseItem(item),
       } satisfies CreateProjectTaskResponse
     } catch (error) {
+      if (
+        isAwsNamedError(error, 'TransactionCanceledException') &&
+        hasTransactionConditionalFailure(error)
+      ) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -3652,11 +4998,61 @@ export class DynamoDbProjectTasksClient {
     projectId: string,
     taskId: string,
     input: UpdateProjectTaskStatusRequestBody,
+    auditContext?: MutationAuditContext,
   ) {
+    await ensureConfiguredAuditTable(
+      this.auditTableName,
+      this.dynamoDbClient,
+      this.bootstrapLocalTables,
+    )
     const status = readRequiredTaskStatus(input.status)
     const directoryProjectId = createDirectoryProjectId(directoryId, projectId)
 
     try {
+      if (this.auditTableName && auditContext) {
+        const currentStoredItem = await this.getProjectTaskItem(directoryId, projectId, taskId)
+
+        if (!currentStoredItem) {
+          throw new ProjectDataError(404, 'ProjectTaskNotFound', 'Task was not found.')
+        }
+
+        const currentItem = toProjectTaskResponseItem(currentStoredItem)
+        const updatedItem = { ...currentItem, status }
+        const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
+          directoryId,
+          eventType: 'work-item.updated',
+          entityType: 'work-item',
+          entityId: createProjectTaskAuditEntityId(projectId, taskId),
+          action: 'updated',
+          changes: createAuditFieldChanges(currentItem, updatedItem, ['status']),
+          metadata: { adapter: 'legacy-project-task', projectId },
+        })
+
+        await this.documentClient.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              {
+                Update: {
+                  TableName: this.tableName,
+                  Key: { directoryProjectId, taskId },
+                  UpdateExpression: 'SET #status = :status',
+                  ExpressionAttributeNames: { '#status': 'status' },
+                  ExpressionAttributeValues: {
+                    ':status': status,
+                    ':beforeStatus': currentItem.status,
+                  },
+                  ConditionExpression:
+                    'attribute_exists(directoryProjectId) AND attribute_exists(taskId) AND #status = :beforeStatus',
+                },
+              },
+              ...(auditPut ? [auditPut] : []),
+            ],
+          }),
+        )
+
+        return { task: updatedItem } satisfies UpdateProjectTaskStatusResponse
+      }
+
       const response = await this.documentClient.send(
         new UpdateCommand({
           TableName: this.tableName,
@@ -3684,11 +5080,71 @@ export class DynamoDbProjectTasksClient {
         throw new ProjectDataError(404, 'ProjectTaskNotFound', 'Task was not found.')
       }
 
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        let taskExists: boolean
+
+        try {
+          taskExists = (await this.getProjectTaskItem(directoryId, projectId, taskId)) !== undefined
+        } catch (readError) {
+          if (readError instanceof ProjectDataError) {
+            throw readError
+          }
+
+          throw toProjectDataError(readError)
+        }
+
+        if (!taskExists) {
+          throw new ProjectDataError(404, 'ProjectTaskNotFound', 'Task was not found.')
+        }
+
+        throw createProjectDataConflictError()
+      }
+
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
 
       throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * base table の strongly consistent read で project task を取得します。
+   */
+  private async getProjectTaskItem(
+    directoryId: string,
+    projectId: string,
+    taskId: string,
+    canBootstrapLocalTable = true,
+  ): Promise<Record<string, unknown> | undefined> {
+    try {
+      const response = await this.documentClient.send(
+        new GetCommand({
+          TableName: this.tableName,
+          Key: {
+            directoryProjectId: createDirectoryProjectId(directoryId, projectId),
+            taskId,
+          },
+          ConsistentRead: true,
+        }),
+      )
+
+      return response.Item
+    } catch (error) {
+      if (
+        canBootstrapLocalTable &&
+        this.bootstrapLocalTables &&
+        isResourceNotFoundError(error) &&
+        await ensureLocalProjectTasksTable(this.tableName, this.dynamoDbClient)
+      ) {
+        return this.getProjectTaskItem(directoryId, projectId, taskId, false)
+      }
+
+      throw error
     }
   }
 
@@ -3762,6 +5218,10 @@ export class DynamoDbTeamIssuesClient {
    * ローカル DynamoDB の table 欠落を自動復旧するかどうかです。
    */
   private readonly bootstrapLocalTables: boolean
+  /**
+   * immutable audit event を保存する DynamoDB table 名です。
+   */
+  private readonly auditTableName?: string
 
   constructor(
     issueTableName =
@@ -3775,12 +5235,14 @@ export class DynamoDbTeamIssuesClient {
     documentClient = createDynamoDbDocumentClient(),
     dynamoDbClient?: DynamoDBClient,
     bootstrapLocalTables = dynamoDbClient === undefined && shouldBootstrapLocalDynamoDb(),
+    auditTableName = getConfiguredAuditTableName(),
   ) {
     this.issueTableName = issueTableName
     this.eventTableName = eventTableName
     this.documentClient = documentClient
     this.dynamoDbClient = dynamoDbClient ?? createDynamoDbClient()
     this.bootstrapLocalTables = bootstrapLocalTables
+    this.auditTableName = auditTableName
   }
 
   /**
@@ -3862,6 +5324,7 @@ export class DynamoDbTeamIssuesClient {
     input: CreateTeamIssueRequestBody,
     actorUserId: string,
     reservedIssueIds: string[] = [],
+    auditContext?: MutationAuditContext,
   ) {
     await this.ensureLocalTables()
 
@@ -3914,6 +5377,24 @@ export class DynamoDbTeamIssuesClient {
         summary: 'Issue was created.',
         createdAt: now,
       })
+      const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'work-item.created',
+        entityType: 'work-item',
+        entityId: createTeamIssueAuditEntityId(teamId, issueId),
+        action: 'created',
+        occurredAt: now,
+        changes: createAuditFieldChanges(undefined, item, [
+          'title',
+          'description',
+          'assignedProjectId',
+          'assigneeUserId',
+          'status',
+          'dueDate',
+          'priority',
+        ]),
+        metadata: { adapter: 'team-issue', teamId, projectId: assignedProjectId },
+      })
       await this.documentClient.send(
         new TransactWriteCommand({
           TransactItems: [
@@ -3931,6 +5412,7 @@ export class DynamoDbTeamIssuesClient {
                 ConditionExpression: 'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
               },
             },
+            ...(auditPut ? [auditPut] : []),
           ],
         }),
       )
@@ -3939,6 +5421,13 @@ export class DynamoDbTeamIssuesClient {
         issue: toTeamIssueResponseItem(item),
       } satisfies CreateTeamIssueResponse
     } catch (error) {
+      if (
+        isAwsNamedError(error, 'TransactionCanceledException') &&
+        hasTransactionConditionalFailure(error)
+      ) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -3956,6 +5445,7 @@ export class DynamoDbTeamIssuesClient {
     issueId: string,
     input: UpdateTeamIssueRequestBody,
     actorUserId: string,
+    auditContext?: MutationAuditContext,
   ) {
     await this.ensureLocalTables()
     const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
@@ -4032,6 +5522,26 @@ export class DynamoDbTeamIssuesClient {
     ].filter(isDefined).join(' ')
 
     try {
+      const beforeIssue = this.auditTableName && auditContext
+        ? await this.getRequiredTeamIssueItem(directoryId, teamId, issueId, true)
+        : undefined
+      const afterIssue = beforeIssue ? { ...beforeIssue } : undefined
+
+      if (beforeIssue) {
+        expressionAttributeValues[':beforeUpdatedAt'] = beforeIssue.updatedAt
+      }
+
+      if (afterIssue) {
+        for (const [placeholder, field] of Object.entries(expressionAttributeNames)) {
+          const value = expressionAttributeValues[`:${field}`]
+
+          if (value !== undefined) {
+            ;(afterIssue as unknown as Record<string, unknown>)[field] = value
+          } else if (removeExpressions.includes(placeholder)) {
+            delete (afterIssue as unknown as Record<string, unknown>)[field]
+          }
+        }
+      }
       const eventItem = this.createIssueEventItem({
         directoryId,
         teamId,
@@ -4041,6 +5551,30 @@ export class DynamoDbTeamIssuesClient {
         summary: 'Issue was updated.',
         createdAt: expressionAttributeValues[':updatedAt'] as string,
       })
+      const auditPut = beforeIssue && afterIssue
+        ? createMutationAuditEventPut(this.auditTableName, auditContext, {
+            directoryId,
+            eventType: 'work-item.updated',
+            entityType: 'work-item',
+            entityId: createTeamIssueAuditEntityId(teamId, issueId),
+            action: 'updated',
+            occurredAt: expressionAttributeValues[':updatedAt'] as string,
+            changes: createAuditFieldChanges(beforeIssue, afterIssue, [
+              'title',
+              'description',
+              'assignedProjectId',
+              'assigneeUserId',
+              'status',
+              'dueDate',
+              'priority',
+            ]),
+            metadata: {
+              adapter: 'team-issue',
+              teamId,
+              projectId: afterIssue.assignedProjectId,
+            },
+          })
+        : undefined
       await this.documentClient.send(
         new TransactWriteCommand({
           TransactItems: [
@@ -4054,7 +5588,9 @@ export class DynamoDbTeamIssuesClient {
                 UpdateExpression: updateExpression,
                 ExpressionAttributeNames: expressionAttributeNames,
                 ExpressionAttributeValues: expressionAttributeValues,
-                ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
+                ConditionExpression: beforeIssue
+                  ? 'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #updatedAt = :beforeUpdatedAt'
+                  : 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
               },
             },
             {
@@ -4064,6 +5600,7 @@ export class DynamoDbTeamIssuesClient {
                 ConditionExpression: 'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
               },
             },
+            ...(auditPut ? [auditPut] : []),
           ],
         }),
       )
@@ -4079,11 +5616,16 @@ export class DynamoDbTeamIssuesClient {
         throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
       }
 
-      if (
-        isAwsNamedError(error, 'TransactionCanceledException') &&
-        !await this.hasTeamIssueItem(directoryId, teamId, issueId)
-      ) {
-        throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        if (!await this.hasTeamIssueItem(directoryId, teamId, issueId)) {
+          throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
+        }
+
+        throw createProjectDataConflictError()
+      }
+
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
       }
 
       if (error instanceof ProjectDataError) {
@@ -4103,21 +5645,94 @@ export class DynamoDbTeamIssuesClient {
     issueId: string,
     input: CreateTeamIssueCommentRequestBody,
     actorUserId: string,
+    auditContext?: MutationAuditContext,
   ) {
     await this.ensureLocalTables()
     await this.getRequiredTeamIssueItem(directoryId, teamId, issueId)
 
     const createdAt = new Date().toISOString()
-    const item = await this.putIssueEvent({
+    const body = readRequiredCommentBody(input.body)
+    const item = this.createIssueEventItem({
       directoryId,
       teamId,
       issueId,
       eventType: 'commented',
       actorUserId,
-      body: readRequiredCommentBody(input.body),
+      body,
       summary: 'Comment was added.',
       createdAt,
     })
+    const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
+      directoryId,
+      eventType: 'comment.created',
+      entityType: 'work-item',
+      entityId: createTeamIssueAuditEntityId(teamId, issueId),
+      target: {
+        type: 'comment',
+        id: createTeamIssueAuditCommentId(teamId, issueId, item.eventId),
+      },
+      action: 'commented',
+      occurredAt: createdAt,
+      changes: createAuditFieldChanges(undefined, { body }),
+      metadata: { adapter: 'team-issue', teamId, commentId: item.eventId },
+    })
+
+    try {
+      if (auditPut) {
+        await this.documentClient.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              {
+                ConditionCheck: {
+                  TableName: this.issueTableName,
+                  Key: {
+                    directoryTeamId: createDirectoryTeamId(directoryId, teamId),
+                    issueId,
+                  },
+                  ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
+                },
+              },
+              {
+                Put: {
+                  TableName: this.eventTableName,
+                  Item: item,
+                  ConditionExpression:
+                    'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+                },
+              },
+              auditPut,
+            ],
+          }),
+        )
+      } else {
+        await this.documentClient.send(
+          new PutCommand({
+            TableName: this.eventTableName,
+            Item: item,
+            ConditionExpression:
+              'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+          }),
+        )
+      }
+    } catch (error) {
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        if (!await this.hasTeamIssueItem(directoryId, teamId, issueId)) {
+          throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
+        }
+
+        throw createProjectDataConflictError()
+      }
+
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
 
     return {
       comment: toTeamIssueCommentResponseItem(item),
@@ -4127,7 +5742,7 @@ export class DynamoDbTeamIssuesClient {
 
   private async hasTeamIssueItem(directoryId: string, teamId: string, issueId: string) {
     try {
-      await this.getRequiredTeamIssueItem(directoryId, teamId, issueId)
+      await this.getRequiredTeamIssueItem(directoryId, teamId, issueId, true)
 
       return true
     } catch (error) {
@@ -4135,7 +5750,11 @@ export class DynamoDbTeamIssuesClient {
         return false
       }
 
-      throw error
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
     }
   }
 
@@ -4266,6 +5885,11 @@ export class DynamoDbTeamIssuesClient {
 
     await ensureLocalTeamIssuesTable(this.issueTableName, this.dynamoDbClient)
     await ensureLocalTeamIssueEventsTable(this.eventTableName, this.dynamoDbClient)
+    await ensureConfiguredAuditTable(
+      this.auditTableName,
+      this.dynamoDbClient,
+      this.bootstrapLocalTables,
+    )
   }
 }
 
@@ -4289,6 +5913,14 @@ export class DynamoDbProjectDirectoryClient {
    * ローカル DynamoDB の table 欠落を自動復旧するかどうかです。
    */
   private readonly bootstrapLocalTables: boolean
+  /**
+   * immutable audit event を保存する DynamoDB table 名です。
+   */
+  private readonly auditTableName?: string
+  /**
+   * project member mutation と競合させる Workspace access table 名です。
+   */
+  private readonly workspaceAccessTableName: string
 
   constructor(
     tableName =
@@ -4298,11 +5930,18 @@ export class DynamoDbProjectDirectoryClient {
     documentClient = createDynamoDbDocumentClient(),
     dynamoDbClient?: DynamoDBClient,
     bootstrapLocalTables = dynamoDbClient === undefined && shouldBootstrapLocalDynamoDb(),
+    auditTableName = getConfiguredAuditTableName(),
+    workspaceAccessTableName =
+      getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
+      getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
+      'mukuroji-workspace-access-local',
   ) {
     this.tableName = tableName
     this.documentClient = documentClient
     this.dynamoDbClient = dynamoDbClient ?? createDynamoDbClient()
     this.bootstrapLocalTables = bootstrapLocalTables
+    this.auditTableName = auditTableName
+    this.workspaceAccessTableName = workspaceAccessTableName
   }
 
   /**
@@ -4350,7 +5989,7 @@ export class DynamoDbProjectDirectoryClient {
   async getProjectAccessList(directoryId: string, memberKey: string) {
     try {
       const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
-      const items = await this.readValidDirectoryItems(directoryId)
+      const items = await this.readValidDirectoryItems(directoryId, true)
 
       return toProjectAccessEntries(items, normalizedMemberKey)
     } catch (error) {
@@ -4429,20 +6068,26 @@ export class DynamoDbProjectDirectoryClient {
     projectId: string,
     memberKey: string,
     input: UpdateProjectMemberRequestBody,
+    expectedWorkspaceMemberVersion: number,
+    auditContext?: MutationAuditContext,
   ) {
+    await this.ensureLocalAuditTable()
     const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
     const email = readProjectMemberEmail(input.email, normalizedMemberKey)
     const name = readOptionalProjectMemberName(input.name)
     const role = readProjectRole(input.role)
+    let existingMemberExpected = false
+    let managerGuarded = false
 
     try {
-      const items = await this.readValidDirectoryItems(directoryId)
+      const items = await this.readValidDirectoryItems(directoryId, true)
       this.requireActiveProject(items, projectId)
       const existingMember = items.find((item) =>
         item.entryType === 'project-member' &&
         item.projectId === projectId &&
         item.memberKey === normalizedMemberKey,
       )
+      existingMemberExpected = existingMember !== undefined
 
       const guardManager = (
         existingMember?.role === 'manager' &&
@@ -4450,6 +6095,7 @@ export class DynamoDbProjectDirectoryClient {
       )
         ? this.requireAnotherProjectManager(items, projectId, normalizedMemberKey)
         : undefined
+      managerGuarded = guardManager !== undefined
 
       const updatedAt = new Date().toISOString()
       const item: ProjectMemberItem = {
@@ -4464,49 +6110,103 @@ export class DynamoDbProjectDirectoryClient {
         createdAt: existingMember?.createdAt ?? updatedAt,
         updatedAt,
       }
+      const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: existingMember ? 'member.updated' : 'member.added',
+        entityType: 'member',
+        entityId: `${projectId}/${normalizedMemberKey}`,
+        action: existingMember ? 'updated' : 'created',
+        occurredAt: updatedAt,
+        changes: createAuditFieldChanges(existingMember, item, ['email', 'name', 'role']),
+        metadata: { projectId, memberKey: normalizedMemberKey },
+      })
+      const memberPut = {
+        TableName: this.tableName,
+        Item: item,
+        ConditionExpression: existingMember
+          ? '#updatedAt = :expectedUpdatedAt'
+          : 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+        ...(existingMember
+          ? {
+              ExpressionAttributeNames: { '#updatedAt': 'updatedAt' },
+              ExpressionAttributeValues: { ':expectedUpdatedAt': existingMember.updatedAt },
+            }
+          : {}),
+      }
+
+      const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = []
 
       if (guardManager) {
-        try {
-          await this.documentClient.send(
-            new TransactWriteCommand({
-              TransactItems: [
-                {
-                  ConditionCheck: this.createProjectManagerConditionCheck(directoryId, guardManager.entryKey),
-                },
-                {
-                  Put: {
-                    TableName: this.tableName,
-                    Item: item,
-                  },
-                },
-              ],
-            }),
-          )
-        } catch (error) {
-          if (isAwsNamedError(error, 'TransactionCanceledException')) {
-            await this.throwProjectManagerTransactionCancellationResult(
-              directoryId,
-              projectId,
-              normalizedMemberKey,
-              error,
-            )
-          }
+        transactItems.push({
+          ConditionCheck: this.createProjectManagerConditionCheck(directoryId, guardManager.entryKey),
+        })
+      }
 
-          throw error
-        }
-      } else {
+      transactItems.push(
+        {
+          Put: memberPut,
+        },
+        {
+          Update: this.createActiveWorkspaceMemberVersionUpdate(
+            directoryId,
+            normalizedMemberKey,
+            expectedWorkspaceMemberVersion,
+            updatedAt,
+          ),
+        },
+        ...(auditPut ? [auditPut] : []),
+      )
+      const workspaceUpdateIndex = guardManager ? 2 : 1
+
+      try {
         await this.documentClient.send(
-          new PutCommand({
-            TableName: this.tableName,
-            Item: item,
-          }),
+          new TransactWriteCommand({ TransactItems: transactItems }),
         )
+      } catch (error) {
+        if (isTransactionConditionalFailureAt(error, workspaceUpdateIndex)) {
+          await this.requireUnchangedActiveWorkspaceMember(
+            directoryId,
+            normalizedMemberKey,
+            expectedWorkspaceMemberVersion,
+          )
+        }
+
+        if (
+          guardManager &&
+          (
+            isTransactionConditionalFailureAt(error, 0) ||
+            isTransactionConditionalFailureAt(error, 1)
+          )
+        ) {
+          await this.throwProjectManagerTransactionCancellationResult(
+            directoryId,
+            projectId,
+            normalizedMemberKey,
+            error,
+          )
+        }
+
+        throw error
       }
 
       return {
         member: toProjectMemberResponseItem(item),
       } satisfies UpdateProjectMemberResponse
     } catch (error) {
+      if (!managerGuarded && isTransactionConditionalFailureAt(error, 0)) {
+        await this.throwUpdateProjectMemberTransactionCancellationResult(
+          directoryId,
+          projectId,
+          normalizedMemberKey,
+          existingMemberExpected,
+          error,
+        )
+      }
+
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -4518,11 +6218,18 @@ export class DynamoDbProjectDirectoryClient {
   /**
    * DynamoDB から project member role を削除します。
    */
-  async removeProjectMember(directoryId: string, projectId: string, memberKey: string) {
+  async removeProjectMember(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+    auditContext?: MutationAuditContext,
+  ) {
+    await this.ensureLocalAuditTable()
     const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
+    let managerGuarded = false
 
     try {
-      const items = await this.readValidDirectoryItems(directoryId)
+      const items = await this.readValidDirectoryItems(directoryId, true)
       this.requireActiveProject(items, projectId)
       const member = items.find((item) =>
         item.entryType === 'project-member' &&
@@ -4541,51 +6248,69 @@ export class DynamoDbProjectDirectoryClient {
       const guardManager = member.role === 'manager'
         ? this.requireAnotherProjectManager(items, projectId, normalizedMemberKey)
         : undefined
+      managerGuarded = guardManager !== undefined
+      const removedAt = new Date().toISOString()
+      const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'member.removed',
+        entityType: 'member',
+        entityId: `${projectId}/${normalizedMemberKey}`,
+        action: 'deleted',
+        occurredAt: removedAt,
+        changes: createAuditFieldChanges(member, undefined, ['email', 'name', 'role']),
+        metadata: { projectId, memberKey: normalizedMemberKey },
+      })
+      const memberDelete = {
+        TableName: this.tableName,
+        Key: {
+          directoryId,
+          entryKey: member.entryKey,
+        },
+        ConditionExpression:
+          'attribute_exists(directoryId) AND attribute_exists(entryKey) AND #updatedAt = :expectedUpdatedAt AND #role = :expectedRole',
+        ExpressionAttributeNames: {
+          '#updatedAt': 'updatedAt',
+          '#role': 'role',
+        },
+        ExpressionAttributeValues: {
+          ':expectedUpdatedAt': member.updatedAt,
+          ':expectedRole': member.role,
+        },
+      }
 
       if (guardManager) {
-        try {
+        await this.documentClient.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              {
+                ConditionCheck: this.createProjectManagerConditionCheck(directoryId, guardManager.entryKey),
+              },
+              {
+                Delete: memberDelete,
+              },
+              ...(auditPut ? [auditPut] : []),
+            ],
+          }),
+        )
+      } else {
+        if (auditPut) {
           await this.documentClient.send(
             new TransactWriteCommand({
               TransactItems: [
                 {
-                  ConditionCheck: this.createProjectManagerConditionCheck(directoryId, guardManager.entryKey),
+                  Delete: memberDelete,
                 },
-                {
-                  Delete: {
-                    TableName: this.tableName,
-                    Key: {
-                      directoryId,
-                      entryKey: member.entryKey,
-                    },
-                    ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
-                  },
-                },
+                auditPut,
               ],
             }),
           )
-        } catch (error) {
-          if (isAwsNamedError(error, 'TransactionCanceledException')) {
-            await this.throwProjectManagerTransactionCancellationResult(
-              directoryId,
-              projectId,
-              normalizedMemberKey,
-              error,
-            )
-          }
-
-          throw error
+        } else {
+          await this.documentClient.send(
+            new DeleteCommand({
+              ...memberDelete,
+            }),
+          )
         }
-      } else {
-        await this.documentClient.send(
-          new DeleteCommand({
-            TableName: this.tableName,
-            Key: {
-              directoryId,
-              entryKey: member.entryKey,
-            },
-            ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey)',
-          }),
-        )
       }
 
       return {
@@ -4593,6 +6318,25 @@ export class DynamoDbProjectDirectoryClient {
         memberId: normalizedMemberKey,
       } satisfies RemoveProjectMemberResponse
     } catch (error) {
+      if (
+        (managerGuarded && (
+          isTransactionConditionalFailureAt(error, 0) ||
+          isTransactionConditionalFailureAt(error, 1)
+        )) ||
+        (!managerGuarded && isTransactionConditionalFailureAt(error, 0))
+      ) {
+        await this.throwProjectManagerTransactionCancellationResult(
+          directoryId,
+          projectId,
+          normalizedMemberKey,
+          error,
+        )
+      }
+
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -4604,7 +6348,12 @@ export class DynamoDbProjectDirectoryClient {
   /**
    * DynamoDB にチームを作成します。
    */
-  async createTeam(directoryId: string, input: CreateTeamRequestBody) {
+  async createTeam(
+    directoryId: string,
+    input: CreateTeamRequestBody,
+    auditContext?: MutationAuditContext,
+  ) {
+    await this.ensureLocalAuditTable()
     const names = readLocalizedNames(input)
 
     try {
@@ -4629,13 +6378,35 @@ export class DynamoDbProjectDirectoryClient {
         expanded: typeof input.expanded === 'boolean' ? input.expanded : true,
       }
 
-      await this.documentClient.send(
-        new PutCommand({
+      const statePut = {
+        Put: {
           TableName: this.tableName,
           Item: item,
           ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+        },
+      }
+      const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'project.created',
+        entityType: 'project',
+        entityId: `team/${teamId}`,
+        action: 'created',
+        changes: createAuditFieldChanges(undefined, {
+          kind: 'team',
+          teamId,
+          name: names.nameJa,
+          expanded: item.expanded ?? false,
         }),
-      )
+        metadata: { kind: 'team', teamId },
+      })
+
+      if (auditPut) {
+        await this.documentClient.send(
+          new TransactWriteCommand({ TransactItems: [statePut, auditPut] }),
+        )
+      } else {
+        await this.documentClient.send(new PutCommand(statePut.Put))
+      }
 
       return {
         team: {
@@ -4646,6 +6417,13 @@ export class DynamoDbProjectDirectoryClient {
         },
       } satisfies CreateTeamResponse
     } catch (error) {
+      if (
+        isAwsNamedError(error, 'TransactionCanceledException') &&
+        hasTransactionConditionalFailure(error)
+      ) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -4662,7 +6440,9 @@ export class DynamoDbProjectDirectoryClient {
     teamId: string,
     input: CreateProjectRequestBody,
     creator: ProjectCreatorContext,
+    auditContext?: MutationAuditContext,
   ) {
+    await this.ensureLocalAuditTable()
     const names = readLocalizedNames(input)
     const tone = readProjectTone(input.tone)
     const creatorMemberKey = normalizeProjectMemberKey(creator.userKey)
@@ -4744,12 +6524,49 @@ export class DynamoDbProjectDirectoryClient {
                   ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
                 },
               },
+              {
+                Update: this.createActiveWorkspaceMemberVersionUpdate(
+                  directoryId,
+                  creatorMemberKey,
+                  creator.workspaceMemberVersion,
+                  updatedAt,
+                ),
+              },
+              ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+                directoryId,
+                eventType: 'project.created',
+                entityType: 'project',
+                entityId: projectId,
+                action: 'created',
+                occurredAt: updatedAt,
+                changes: createAuditFieldChanges(undefined, {
+                  projectId,
+                  teamId,
+                  name: names.nameJa,
+                  tone,
+                  creatorMemberKey,
+                  creatorRole: 'manager',
+                }),
+                metadata: { kind: 'project', projectId, teamId },
+              }),
             ],
           }),
         )
       } catch (error) {
-        if (isAwsNamedError(error, 'TransactionCanceledException')) {
+        if (isTransactionConditionalFailureAt(error, 3)) {
+          await this.requireUnchangedActiveWorkspaceMember(
+            directoryId,
+            creatorMemberKey,
+            creator.workspaceMemberVersion,
+          )
+        }
+
+        if (isTransactionConditionalFailureAt(error, 0)) {
           await this.throwCreateProjectTransactionCancellationResult(directoryId, teamId, error)
+        }
+
+        if (hasTransactionConditionalFailure(error)) {
+          throw createProjectDataConflictError()
         }
 
         throw error
@@ -4774,7 +6591,12 @@ export class DynamoDbProjectDirectoryClient {
   /**
    * DynamoDB 上のチームをアーカイブします。
    */
-  async archiveTeam(directoryId: string, teamId: string) {
+  async archiveTeam(
+    directoryId: string,
+    teamId: string,
+    auditContext?: MutationAuditContext,
+  ) {
+    await this.ensureLocalAuditTable()
     try {
       const items = await this.readValidDirectoryItems(directoryId)
       const team = items.find((item) =>
@@ -4787,27 +6609,48 @@ export class DynamoDbProjectDirectoryClient {
 
       const archivedAt = new Date().toISOString()
 
-      await this.documentClient.send(
-        new UpdateCommand({
+      const stateUpdate = {
+        Update: {
           TableName: this.tableName,
-          Key: {
-            directoryId,
-            entryKey: team.entryKey,
-          },
+          Key: { directoryId, entryKey: team.entryKey },
           UpdateExpression: 'SET archivedAt = :archivedAt',
           ConditionExpression:
             'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-          ExpressionAttributeValues: {
-            ':archivedAt': archivedAt,
-          },
-        }),
-      )
+          ExpressionAttributeValues: { ':archivedAt': archivedAt },
+        },
+      }
+      const auditItems = createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'project.archived',
+        entityType: 'project',
+        entityId: `team/${teamId}`,
+        action: 'archived',
+        occurredAt: archivedAt,
+        changes: createAuditFieldChanges(team, { ...team, archivedAt }, ['archivedAt']),
+        metadata: { kind: 'team', teamId },
+      })
+
+      if (auditItems.length) {
+        await this.documentClient.send(
+          new TransactWriteCommand({ TransactItems: [stateUpdate, ...auditItems] }),
+        )
+      } else {
+        await this.documentClient.send(new UpdateCommand(stateUpdate.Update))
+      }
 
       return {
         teamId,
         archivedAt,
       } satisfies ArchiveTeamResponse
     } catch (error) {
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        await this.throwArchiveTeamTransactionCancellationResult(directoryId, teamId, error)
+      }
+
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -4819,7 +6662,13 @@ export class DynamoDbProjectDirectoryClient {
   /**
    * DynamoDB 上のチーム配下プロジェクトをアーカイブします。
    */
-  async archiveProject(directoryId: string, teamId: string, projectId: string) {
+  async archiveProject(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    auditContext?: MutationAuditContext,
+  ) {
+    await this.ensureLocalAuditTable()
     try {
       const items = await this.readValidDirectoryItems(directoryId)
       const team = items.find((item) =>
@@ -4847,21 +6696,34 @@ export class DynamoDbProjectDirectoryClient {
 
       const archivedAt = new Date().toISOString()
 
-      await this.documentClient.send(
-        new UpdateCommand({
+      const stateUpdate = {
+        Update: {
           TableName: this.tableName,
-          Key: {
-            directoryId,
-            entryKey: project.entryKey,
-          },
+          Key: { directoryId, entryKey: project.entryKey },
           UpdateExpression: 'SET archivedAt = :archivedAt',
           ConditionExpression:
             'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-          ExpressionAttributeValues: {
-            ':archivedAt': archivedAt,
-          },
-        }),
-      )
+          ExpressionAttributeValues: { ':archivedAt': archivedAt },
+        },
+      }
+      const auditItems = createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'project.archived',
+        entityType: 'project',
+        entityId: projectId,
+        action: 'archived',
+        occurredAt: archivedAt,
+        changes: createAuditFieldChanges(project, { ...project, archivedAt }, ['archivedAt']),
+        metadata: { kind: 'project', projectId, teamId },
+      })
+
+      if (auditItems.length) {
+        await this.documentClient.send(
+          new TransactWriteCommand({ TransactItems: [stateUpdate, ...auditItems] }),
+        )
+      } else {
+        await this.documentClient.send(new UpdateCommand(stateUpdate.Update))
+      }
 
       return {
         teamId,
@@ -4869,6 +6731,19 @@ export class DynamoDbProjectDirectoryClient {
         archivedAt,
       } satisfies ArchiveProjectResponse
     } catch (error) {
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        await this.throwArchiveProjectTransactionCancellationResult(
+          directoryId,
+          teamId,
+          projectId,
+          error,
+        )
+      }
+
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -4878,12 +6753,31 @@ export class DynamoDbProjectDirectoryClient {
   }
 
   /**
+   * local runtime で audit table が未作成なら mutation 前に初期化します。
+   */
+  private async ensureLocalAuditTable() {
+    await ensureConfiguredAuditTable(
+      this.auditTableName,
+      this.dynamoDbClient,
+      this.bootstrapLocalTables,
+    )
+  }
+
+  /**
    * directory partition 内の全 item を検証済み item として取得します。
    */
-  private async readValidDirectoryItems(directoryId: string) {
-    return this.queryDirectoryItems(directoryId).then((items) =>
-      readProjectDirectoryItems(items, directoryId),
-    )
+  private async readValidDirectoryItems(directoryId: string, consistentRead = false) {
+    try {
+      const items = await this.queryDirectoryItems(directoryId, true, consistentRead)
+
+      return readProjectDirectoryItems(items, directoryId)
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
   }
 
   /**
@@ -4948,7 +6842,7 @@ export class DynamoDbProjectDirectoryClient {
     teamId: string,
     originalError: unknown,
   ): Promise<never> {
-    const items = await this.readValidDirectoryItems(directoryId)
+    const items = await this.readValidDirectoryItems(directoryId, true)
     const activeTeam = items.find((item) =>
       item.entryType === 'team' &&
       item.teamId === teamId &&
@@ -4959,7 +6853,112 @@ export class DynamoDbProjectDirectoryClient {
       throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
     }
 
-    throw originalError
+    if (hasTransactionConditionalFailure(originalError)) {
+      throw createProjectDataConflictError()
+    }
+
+    throw toProjectDataError(originalError)
+  }
+
+  /**
+   * team archive transaction 失敗後の最新状態から not-found と競合を切り分けます。
+   */
+  private async throwArchiveTeamTransactionCancellationResult(
+    directoryId: string,
+    teamId: string,
+    originalError: unknown,
+  ): Promise<never> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const activeTeam = items.find((item) =>
+      item.entryType === 'team' &&
+      item.teamId === teamId &&
+      isActiveDirectoryItem(item),
+    )
+
+    if (!activeTeam) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+
+    if (hasTransactionConditionalFailure(originalError)) {
+      throw createProjectDataConflictError()
+    }
+
+    throw toProjectDataError(originalError)
+  }
+
+  /**
+   * project archive transaction 失敗後の最新状態から not-found と競合を切り分けます。
+   */
+  private async throwArchiveProjectTransactionCancellationResult(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    originalError: unknown,
+  ): Promise<never> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const activeTeam = items.find((item) =>
+      item.entryType === 'team' &&
+      item.teamId === teamId &&
+      isActiveDirectoryItem(item),
+    )
+
+    if (!activeTeam) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+
+    const activeProject = items.find((item) =>
+      item.entryType === 'project' &&
+      item.teamId === teamId &&
+      item.projectId === projectId &&
+      isActiveDirectoryItem(item),
+    )
+
+    if (!activeProject) {
+      throw new ProjectDataError(
+        404,
+        'ProjectNotFound',
+        `Project "${projectId}" was not found in team "${teamId}".`,
+      )
+    }
+
+    if (hasTransactionConditionalFailure(originalError)) {
+      throw createProjectDataConflictError()
+    }
+
+    throw toProjectDataError(originalError)
+  }
+
+  /**
+   * project member upsert transaction 失敗後の最新状態から not-found と競合を切り分けます。
+   */
+  private async throwUpdateProjectMemberTransactionCancellationResult(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+    existingMemberExpected: boolean,
+    originalError: unknown,
+  ): Promise<never> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    this.requireActiveProject(items, projectId)
+    const member = items.find((item) =>
+      item.entryType === 'project-member' &&
+      item.projectId === projectId &&
+      item.memberKey === memberKey,
+    )
+
+    if (existingMemberExpected && !member) {
+      throw new ProjectDataError(
+        404,
+        'ProjectMemberNotFound',
+        `Project member "${memberKey}" was not found in project "${projectId}".`,
+      )
+    }
+
+    if (hasTransactionConditionalFailure(originalError)) {
+      throw createProjectDataConflictError()
+    }
+
+    throw toProjectDataError(originalError)
   }
 
   /**
@@ -4971,7 +6970,7 @@ export class DynamoDbProjectDirectoryClient {
     memberKey: string,
     originalError: unknown,
   ): Promise<never> {
-    const items = await this.readValidDirectoryItems(directoryId)
+    const items = await this.readValidDirectoryItems(directoryId, true)
     this.requireActiveProject(items, projectId)
     const member = items.find((item) =>
       item.entryType === 'project-member' &&
@@ -4991,7 +6990,11 @@ export class DynamoDbProjectDirectoryClient {
       throw this.createProjectLastManagerError()
     }
 
-    throw originalError
+    if (hasTransactionConditionalFailure(originalError)) {
+      throw createProjectDataConflictError()
+    }
+
+    throw toProjectDataError(originalError)
   }
 
   /**
@@ -5029,6 +7032,72 @@ export class DynamoDbProjectDirectoryClient {
   }
 
   /**
+   * project member 書き込みと同時に active Workspace member の version を進めます。
+   */
+  private createActiveWorkspaceMemberVersionUpdate(
+    workspaceId: string,
+    memberKey: string,
+    expectedVersion: number,
+    updatedAt: string,
+  ) {
+    return {
+      TableName: this.workspaceAccessTableName,
+      Key: {
+        workspaceId,
+        recordKey: `MEMBER#${normalizeProjectMemberKey(memberKey)}`,
+      },
+      UpdateExpression: 'SET updatedAt = :updatedAt ADD #version :one',
+      ConditionExpression:
+        '#entryType = :memberEntryType AND #status = :active AND #version = :expectedVersion',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#status': 'status',
+        '#version': 'version',
+      },
+      ExpressionAttributeValues: {
+        ':memberEntryType': 'workspace-member',
+        ':active': 'active',
+        ':expectedVersion': expectedVersion,
+        ':updatedAt': updatedAt,
+        ':one': 1,
+      },
+    }
+  }
+
+  /** transaction cancel 後に対象 Workspace member の active/version を再確認します。 */
+  private async requireUnchangedActiveWorkspaceMember(
+    workspaceId: string,
+    memberKey: string,
+    expectedVersion: number,
+  ) {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.workspaceAccessTableName,
+      Key: {
+        workspaceId,
+        recordKey: `MEMBER#${normalizeProjectMemberKey(memberKey)}`,
+      },
+      ConsistentRead: true,
+    }))
+    const item = response.Item
+
+    if (item?.entryType !== 'workspace-member' || item.status !== 'active') {
+      throw new ProjectDataError(
+        409,
+        'WorkspaceMemberInactive',
+        'Only active Workspace members can be assigned to a project.',
+      )
+    }
+
+    if (item.version !== expectedVersion) {
+      throw new ProjectDataError(
+        409,
+        'WorkspaceMemberVersionConflict',
+        'Workspace member changed. Reload and try again.',
+      )
+    }
+  }
+
+  /**
    * project に manager が残らなくなる操作を表す domain error を作ります。
    */
   private createProjectLastManagerError() {
@@ -5042,7 +7111,11 @@ export class DynamoDbProjectDirectoryClient {
   /**
    * directory partition 内の全 item を LastEvaluatedKey がなくなるまで取得します。
    */
-  private async queryDirectoryItems(directoryId: string, canBootstrapLocalTable = true) {
+  private async queryDirectoryItems(
+    directoryId: string,
+    canBootstrapLocalTable = true,
+    consistentRead = false,
+  ) {
     try {
       const items: unknown[] = []
       let exclusiveStartKey: Record<string, unknown> | undefined
@@ -5057,6 +7130,7 @@ export class DynamoDbProjectDirectoryClient {
             },
             ExclusiveStartKey: exclusiveStartKey,
             ScanIndexForward: true,
+            ...(consistentRead ? { ConsistentRead: true } : {}),
           }),
         )
 
@@ -5072,7 +7146,7 @@ export class DynamoDbProjectDirectoryClient {
         isResourceNotFoundError(error) &&
         await ensureLocalProjectDirectoryTable(this.tableName, this.dynamoDbClient)
       ) {
-        return this.queryDirectoryItems(directoryId, false)
+        return this.queryDirectoryItems(directoryId, false, consistentRead)
       }
 
       throw error
@@ -5083,7 +7157,7 @@ export class DynamoDbProjectDirectoryClient {
 /**
  * Floci Cognito との通信で扱う domain error です。
  */
-class CognitoServiceError extends Error {
+export class CognitoServiceError extends Error {
   /**
    * Cognito または proxy 相当の HTTP status code です。
    */
@@ -5203,6 +7277,26 @@ function readCognitoUserAttribute(user: CognitoUserRecord, name: string) {
   return (user.Attributes ?? user.UserAttributes)?.find((attribute) => attribute.Name === name)?.Value
 }
 
+function readCognitoUserDirectoryId(user: CognitoUserRecord) {
+  for (const attributeName of projectDirectoryIdAttributeNames) {
+    const directoryId = readCognitoUserAttribute(user, attributeName)?.trim()
+
+    if (directoryId) {
+      return directoryId
+    }
+  }
+
+  return undefined
+}
+
+function createWorkspaceCognitoUserAttributes(email: string, directoryId: string, name?: string) {
+  return [
+    { Name: 'email', Value: normalizeCognitoUserId(email) },
+    { Name: 'custom:directory_id', Value: directoryId },
+    ...(name?.trim() ? [{ Name: 'name', Value: name.trim() }] : []),
+  ]
+}
+
 function isCognitoUserInDirectory(user: CognitoUserRecord, directoryId: string | undefined) {
   if (!directoryId) {
     return true
@@ -5243,12 +7337,24 @@ function createDynamoDbClient() {
   })
 }
 
-function createDynamoDbDocumentClient() {
-  return DynamoDBDocumentClient.from(createDynamoDbClient(), {
+function createDynamoDbDocumentClient(dynamoDbClient = createDynamoDbClient()) {
+  return DynamoDBDocumentClient.from(dynamoDbClient, {
     marshallOptions: {
       removeUndefinedValues: true,
     },
   })
+}
+
+function createAuditEventsClient() {
+  const dynamoDbClient = createDynamoDbClient()
+
+  return new DynamoDbAuditEventsClient(
+    createDynamoDbDocumentClient(dynamoDbClient),
+    getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+    {},
+    dynamoDbClient,
+    shouldBootstrapLocalDynamoDb(),
+  )
 }
 
 const localDynamoDbTableInitializers = new Map<string, Promise<void>>()
@@ -5541,6 +7647,46 @@ function isResourceInUseError(error: unknown) {
 
 function isAwsNamedError(error: unknown, name: string) {
   return typeof error === 'object' && error !== null && 'name' in error && error.name === name
+}
+
+function hasTransactionConditionalFailure(error: unknown) {
+  if (!isAwsNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
+    return false
+  }
+
+  const reasons = error.CancellationReasons
+
+  if (!Array.isArray(reasons)) {
+    return false
+  }
+
+  const reasonCodes = reasons.map((reason) => isRecord(reason) ? reason.Code : undefined)
+
+  if (!reasonCodes.every((code) => code === 'None' || code === 'ConditionalCheckFailed')) {
+    return false
+  }
+
+  return reasonCodes.includes('ConditionalCheckFailed')
+}
+
+function isTransactionConditionalFailureAt(error: unknown, index: number) {
+  if (!hasTransactionConditionalFailure(error) || !isRecord(error)) {
+    return false
+  }
+
+  const reasons = error.CancellationReasons
+
+  return Array.isArray(reasons) &&
+    isRecord(reasons[index]) &&
+    reasons[index].Code === 'ConditionalCheckFailed'
+}
+
+function createProjectDataConflictError() {
+  return new ProjectDataError(
+    409,
+    'ConditionalCheckFailedException',
+    'The transaction condition failed.',
+  )
 }
 
 async function sleep(ms: number) {
@@ -6273,12 +8419,14 @@ function toProjectPrincipal(user: GetUserResponse, accessToken: string): Project
   }
 
   const normalizedUserKey = userKey.trim().toLowerCase()
+  const actorId = readUserAttribute(user, 'sub')?.trim() || user.Username?.trim() || normalizedUserKey
   const directoryId = readProjectDirectoryId(user) ?? `${projectDirectoryIdPrefix}${normalizedUserKey}`
   const groups = readCognitoGroups(accessToken)
 
   return {
     directoryId,
     userKey: normalizedUserKey,
+    actorId,
     isSystemAdmin: groups.some((group) => getSystemAdminGroups().includes(group)),
     groups,
   }
@@ -6345,6 +8493,14 @@ function canAutoDiscoverLocalCognitoConfiguration() {
 
 function readUserAttribute(user: GetUserResponse, name: string) {
   return user.UserAttributes?.find((attribute) => attribute.Name === name)?.Value
+}
+
+function getConfiguredWorkspaceDirectoryId() {
+  return (
+    getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID')?.trim() ||
+    getEnv('MUKUROJI_PROJECT_DIRECTORY_ID')?.trim() ||
+    undefined
+  )
 }
 
 function readProjectDirectoryId(user: GetUserResponse) {
@@ -6429,8 +8585,29 @@ function createDirectoryTeamIssueId(directoryId: string, teamId: string, issueId
   return `${createDirectoryTeamId(directoryId, teamId)}#issue#${issueId}`
 }
 
+/**
+ * Team-local Issue ID を Workspace 内で一意な audit Work Item ID に変換します。
+ */
+function createTeamIssueAuditEntityId(teamId: string, issueId: string) {
+  return `team/${teamId}/issue/${issueId}`
+}
+
+/**
+ * Team Issue comment を Workspace 内で一意な audit target ID に変換します。
+ */
+function createTeamIssueAuditCommentId(teamId: string, issueId: string, commentId: string) {
+  return `${createTeamIssueAuditEntityId(teamId, issueId)}/comment/${commentId}`
+}
+
 function createDirectoryProjectId(directoryId: string, projectId: string) {
   return `${directoryId}#project#${projectId}`
+}
+
+/**
+ * Project-local Task ID を Workspace 内で一意な audit Work Item ID に変換します。
+ */
+function createProjectTaskAuditEntityId(projectId: string, taskId: string) {
+  return `project/${projectId}/task/${taskId}`
 }
 
 function createTeamIssueEventId(createdAt: string, eventType: TeamIssueActivityType) {
@@ -6442,15 +8619,28 @@ function getAwsRegion() {
 }
 
 function getDynamoDbEndpoint() {
-  const configuredEndpoint = getEnv('DYNAMODB_ENDPOINT') ?? getEnv('AWS_ENDPOINT_URL')
+  const configuredEndpoint = getConfiguredDynamoDbEndpoint({
+    DYNAMODB_ENDPOINT: getEnv('DYNAMODB_ENDPOINT'),
+    AWS_ENDPOINT_URL_DYNAMODB: getEnv('AWS_ENDPOINT_URL_DYNAMODB'),
+    AWS_ENDPOINT_URL: getEnv('AWS_ENDPOINT_URL'),
+  })
 
-  if (configuredEndpoint?.trim()) {
-    return trimTrailingSlash(configuredEndpoint.trim())
+  if (configuredEndpoint) {
+    return configuredEndpoint
   }
 
   return typeof Bun !== 'undefined' && !getEnv('AWS_LAMBDA_FUNCTION_NAME')
     ? 'http://localhost:4566'
     : undefined
+}
+
+function getAllowedOrigins() {
+  const configuredOrigins = (getEnv('ALLOWED_ORIGINS') ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+
+  return configuredOrigins.length > 0 ? configuredOrigins : [...defaultAllowedOrigins]
 }
 
 function getCognitoEndpoint() {
@@ -6463,23 +8653,6 @@ function getCognitoEndpoint() {
   return typeof Bun !== 'undefined' && !getEnv('AWS_LAMBDA_FUNCTION_NAME')
     ? 'http://localhost:4566'
     : undefined
-}
-
-function getConfiguredWorkspaceDirectoryId() {
-  return (
-    getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID')?.trim() ||
-    getEnv('MUKUROJI_PROJECT_DIRECTORY_ID')?.trim() ||
-    undefined
-  )
-}
-
-function getAllowedOrigins() {
-  const configuredOrigins = (getEnv('ALLOWED_ORIGINS') ?? '')
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean)
-
-  return configuredOrigins.length > 0 ? configuredOrigins : [...defaultAllowedOrigins]
 }
 
 function getEnv(name: string) {
@@ -6545,6 +8718,8 @@ dashboardSummary = new DynamoDbDashboardSummaryClient()
 projectTasks = new DynamoDbProjectTasksClient()
 teamIssues = new DynamoDbTeamIssuesClient()
 projectDirectory = new DynamoDbProjectDirectoryClient()
+auditEvents = createAuditEventsClient()
+workspaceAccess = new DynamoDbWorkspaceAccessClient()
 
 /**
  * Server test で外部 service client を差し替えます。
@@ -6555,12 +8730,16 @@ export function configureApiClientsForTest(clients: {
   projectTasks?: ProjectTasksClient
   teamIssues?: TeamIssuesClient
   projectDirectory?: ProjectDirectoryClient
+  auditEvents?: AuditEventsClient
+  workspaceAccess?: WorkspaceAccessClient
 }) {
   cognito = clients.cognito ?? cognito
   dashboardSummary = clients.dashboardSummary ?? dashboardSummary
   projectTasks = clients.projectTasks ?? projectTasks
   teamIssues = clients.teamIssues ?? teamIssues
   projectDirectory = clients.projectDirectory ?? projectDirectory
+  auditEvents = clients.auditEvents ?? auditEvents
+  workspaceAccess = clients.workspaceAccess ?? workspaceAccess
 }
 
 /**
@@ -6572,6 +8751,8 @@ export function resetApiClientsForTest() {
   projectTasks = new DynamoDbProjectTasksClient()
   teamIssues = new DynamoDbTeamIssuesClient()
   projectDirectory = new DynamoDbProjectDirectoryClient()
+  auditEvents = createAuditEventsClient()
+  workspaceAccess = new DynamoDbWorkspaceAccessClient()
 }
 
 /**

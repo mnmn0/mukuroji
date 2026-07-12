@@ -1,9 +1,33 @@
 import type { AuthSession } from './session'
+import type { WorkspaceMemberStatus, WorkspaceRole } from '../workspace/api'
 
 /**
  * API から返るログインレスポンスです。
  */
 type LoginResponse = Omit<AuthSession, 'remember'>
+
+/**
+ * Cognito が初回パスワード変更を要求したときのログイン結果です。
+ */
+export type NewPasswordRequiredChallenge = {
+  /**
+   * LoginPage が切り替える Cognito challenge 名です。
+   */
+  challenge: 'NEW_PASSWORD_REQUIRED'
+  /**
+   * challenge 完了 API に返す Cognito session です。
+   */
+  session: string
+  /**
+   * challenge 対象の正規化済みメールアドレスです。
+   */
+  email: string
+}
+
+/**
+ * 通常 token または初回パスワード変更 challenge を返すログイン結果です。
+ */
+export type LoginResult = AuthSession | NewPasswordRequiredChallenge
 
 /**
  * パスワードログインで送信する資格情報です。
@@ -19,6 +43,28 @@ type LoginWithPasswordParams = {
   password: string
   /**
    * セッションを localStorage に保持するかどうかです。
+   */
+  remember: boolean
+}
+
+/**
+ * NEW_PASSWORD_REQUIRED challenge 完了 API の入力です。
+ */
+type CompleteNewPasswordChallengeParams = {
+  /**
+   * challenge 対象のメールアドレスです。
+   */
+  email: string
+  /**
+   * ユーザーが設定する新しいパスワードです。
+   */
+  newPassword: string
+  /**
+   * login API から受け取った Cognito session です。
+   */
+  session: string
+  /**
+   * 完了後の token を localStorage に保持するかどうかです。
    */
   remember: boolean
 }
@@ -43,6 +89,28 @@ export type CurrentUser = {
    * システム管理者として扱われるかどうかです。
    */
   isSystemAdmin: boolean
+  /**
+   * Workspace 全体で現在のユーザーに付与された role です。
+   */
+  workspaceRole: WorkspaceRole
+  /**
+   * Workspace membership の利用状態です。
+   */
+  workspaceMemberStatus: WorkspaceMemberStatus
+}
+
+/**
+ * 現在の Workspace role がチームとプロジェクトの構成を管理できるか判定します。
+ */
+export function canManageWorkspaceStructure(user?: CurrentUser | null) {
+  return user?.workspaceRole === 'owner' || user?.workspaceRole === 'admin'
+}
+
+/**
+ * 現在の Workspace role が Issue、タスク、コメント、project member を更新できるか判定します。
+ */
+export function canMutateWorkspaceContent(user?: CurrentUser | null) {
+  return user?.workspaceRole !== undefined && user.workspaceRole !== 'guest'
 }
 
 /**
@@ -79,10 +147,15 @@ export class ApiError extends Error {
    * API レスポンスの HTTP status code です。
    */
   readonly status: number
+  /**
+   * API が返した機械判定用の安定した error code です。
+   */
+  readonly code?: string
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code?: string) {
     super(message)
     this.status = status
+    this.code = code
   }
 }
 
@@ -95,13 +168,40 @@ export async function loginWithPassword({
   email,
   password,
   remember,
-}: LoginWithPasswordParams): Promise<AuthSession> {
-  const response = await apiFetch<LoginResponse>('/auth/login', {
+}: LoginWithPasswordParams): Promise<LoginResult> {
+  const response = await apiFetch<LoginResponse | NewPasswordRequiredChallenge>('/auth/login', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ email, password }),
+  })
+
+  if (isNewPasswordRequiredChallenge(response)) {
+    return response
+  }
+
+  return {
+    ...response,
+    remember,
+  }
+}
+
+/**
+ * NEW_PASSWORD_REQUIRED challenge を完了し、保存可能な認証セッションを返します。
+ */
+export async function completeNewPasswordChallenge({
+  email,
+  newPassword,
+  remember,
+  session,
+}: CompleteNewPasswordChallengeParams): Promise<AuthSession> {
+  const response = await apiFetch<LoginResponse>('/auth/challenge/new-password', {
+    body: JSON.stringify({ email, newPassword, session }),
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    method: 'POST',
   })
 
   return {
@@ -135,7 +235,7 @@ export function getDashboardSummary(accessToken: string, signal?: AbortSignal) {
 
 async function apiFetch<T>(path: string, init?: RequestInit) {
   const response = await fetch(`${apiBaseUrl}${path}`, init)
-  const data = await readJson<{ message?: string } | T>(response)
+  const data = await readJson<{ code?: string; message?: string } | T>(response)
 
   if (!response.ok) {
     const message =
@@ -146,7 +246,15 @@ async function apiFetch<T>(path: string, init?: RequestInit) {
         ? data.message
         : 'API request failed.'
 
-    throw new ApiError(response.status, message)
+    const code =
+      typeof data === 'object' &&
+      data !== null &&
+      'code' in data &&
+      typeof data.code === 'string'
+        ? data.code
+        : undefined
+
+    throw new ApiError(response.status, message, code)
   }
 
   return data as T
@@ -160,6 +268,12 @@ async function readJson<T>(response: Response): Promise<T> {
   }
 
   return JSON.parse(text) as T
+}
+
+function isNewPasswordRequiredChallenge(
+  response: LoginResponse | NewPasswordRequiredChallenge,
+): response is NewPasswordRequiredChallenge {
+  return 'challenge' in response && response.challenge === 'NEW_PASSWORD_REQUIRED'
 }
 
 function trimTrailingSlash(value: string) {

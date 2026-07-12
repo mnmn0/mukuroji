@@ -124,7 +124,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(4);
+  expect(Object.keys(tables)).toHaveLength(7);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -241,14 +241,14 @@ test('Function URL and API Gateway expose the same restricted CORS contract', ()
 
   template.hasResourceProperties('AWS::Lambda::Url', {
     Cors: {
-      AllowHeaders: ['authorization', 'content-type'],
+      AllowHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id'],
       AllowMethods: Match.arrayWith(['GET', 'POST', 'PATCH', 'DELETE']),
       AllowOrigins: allowedOrigins,
     },
   });
   template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
     CorsConfiguration: {
-      AllowHeaders: ['authorization', 'content-type'],
+      AllowHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id'],
       AllowMethods: Match.arrayWith(['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS']),
       AllowOrigins: allowedOrigins,
     },

@@ -2,8 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import useSWR from 'swr'
-import { getCurrentUser, type CurrentUser } from '../auth/api'
+import {
+  canManageWorkspaceStructure,
+  canMutateWorkspaceContent,
+  getCurrentUser,
+  type CurrentUser,
+} from '../auth/api'
 import { clearAuthSession, getAuthSession } from '../auth/session'
+import { createMutationRequestRunner } from '../api/mutationHeaders'
 import { ChevronIcon } from '../components/icons'
 import {
   MobileSidebarButton,
@@ -29,6 +35,7 @@ import {
   getProjectDirectory,
   getProjectMembers,
   getProjectUsers,
+  isActiveProjectAssignmentCandidate,
   type ProjectDirectoryTeam,
   type ProjectMember,
   type ProjectUser,
@@ -341,6 +348,7 @@ const viewLabelKeys: Record<TaskTab, MessageKey> = {
 export function TaskPage() {
   const navigate = useNavigate()
   const params = useParams()
+  const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   const [searchParams] = useSearchParams()
   const projectId = params.projectId ?? 'refero'
   const selectedTeamId = searchParams.get('teamId') ?? undefined
@@ -405,11 +413,19 @@ export function TaskPage() {
     apiSWRConfig,
   )
   const projectMembers = projectMembersData ?? emptyProjectMembers
+  const activeProjectMembers = useMemo(
+    () => projectMembers.filter(isActiveProjectAssignmentCandidate),
+    [projectMembers],
+  )
   const currentUserProjectKey = resolveCurrentUserProjectKey(user)
+  const canManageStructure = canManageWorkspaceStructure(user)
+  const canMutateContent = canMutateWorkspaceContent(user)
   const canManageProjectMembers =
-    Boolean(user?.isSystemAdmin) ||
-    projectMembers.some((member) =>
-      member.id === currentUserProjectKey && member.role === 'manager',
+    canMutateContent && (
+      Boolean(user?.isSystemAdmin) ||
+      projectMembers.some((member) =>
+        member.id === currentUserProjectKey && member.role === 'manager',
+      )
     )
   const projectUsersKey =
     accessToken && user && projectId && !currentUserError && canManageProjectMembers
@@ -533,10 +549,19 @@ export function TaskPage() {
       throw new Error(t('issues.error.create'))
     }
 
-    const issue = await createTeamIssue(activeTeam.id, accessToken, {
-      ...input,
-      assignedProjectId: projectId,
-    })
+    const issue = await mutationRequestRunner.run(
+      'issue:create',
+      JSON.stringify([activeTeam.id, projectId, input]),
+      (context) => createTeamIssue(
+        activeTeam.id,
+        accessToken,
+        {
+          ...input,
+          assignedProjectId: projectId,
+        },
+        context,
+      ),
+    )
     await mutateProjectTasks()
     navigate(createProjectIssuesPath(projectId, activeTeam.id, issue.id))
   }
@@ -547,7 +572,9 @@ export function TaskPage() {
     }
 
     try {
-      await createProjectDirectoryTeam(accessToken, input)
+      await mutationRequestRunner.run('team:create', JSON.stringify(input), (context) =>
+        createProjectDirectoryTeam(accessToken, input, context),
+      )
       await mutateProjectDirectory()
     } catch (error) {
       console.error('Failed to create team:', error)
@@ -564,7 +591,11 @@ export function TaskPage() {
     }
 
     try {
-      await createProjectDirectoryProject(accessToken, teamId, input)
+      await mutationRequestRunner.run(
+        'project:create',
+        JSON.stringify([teamId, input]),
+        (context) => createProjectDirectoryProject(accessToken, teamId, input, context),
+      )
       await mutateProjectDirectory()
     } catch (error) {
       console.error('Failed to create project:', error)
@@ -577,7 +608,9 @@ export function TaskPage() {
       return
     }
 
-    await archiveProjectDirectoryTeam(accessToken, teamId)
+    await mutationRequestRunner.run('team:archive', teamId, (context) =>
+      archiveProjectDirectoryTeam(accessToken, teamId, context),
+    )
     await mutateProjectDirectory()
 
     if (activeTeam?.id === teamId) {
@@ -590,7 +623,16 @@ export function TaskPage() {
       return
     }
 
-    await archiveProjectDirectoryProject(accessToken, teamId, archivedProjectId)
+    await mutationRequestRunner.run(
+      'project:archive',
+      JSON.stringify([teamId, archivedProjectId]),
+      (context) => archiveProjectDirectoryProject(
+        accessToken,
+        teamId,
+        archivedProjectId,
+        context,
+      ),
+    )
     await mutateProjectDirectory()
 
     if (projectId === archivedProjectId && activeTeam?.id === teamId) {
@@ -607,7 +649,11 @@ export function TaskPage() {
       return
     }
 
-    await updateProjectMember(accessToken, currentProjectId, memberKey, input)
+    await mutationRequestRunner.run(
+      `member:update:${currentProjectId}:${memberKey}`,
+      JSON.stringify(input),
+      (context) => updateProjectMember(accessToken, currentProjectId, memberKey, input, context),
+    )
     await mutateProjectMembers()
   }
 
@@ -616,7 +662,11 @@ export function TaskPage() {
       return
     }
 
-    await removeProjectMember(accessToken, currentProjectId, memberKey)
+    await mutationRequestRunner.run(
+      `member:remove:${currentProjectId}:${memberKey}`,
+      memberKey,
+      (context) => removeProjectMember(accessToken, currentProjectId, memberKey, context),
+    )
     await mutateProjectMembers()
   }
 
@@ -661,7 +711,11 @@ export function TaskPage() {
       return
     }
 
-    await updateTeamIssue(teamId, issueId, accessToken, input)
+    await mutationRequestRunner.run(
+      `issue:update:${teamId}:${issueId}`,
+      JSON.stringify(input),
+      (context) => updateTeamIssue(teamId, issueId, accessToken, input, context),
+    )
     await mutateProjectTasks()
     await mutateSelectedIssueDetail()
   }
@@ -671,7 +725,11 @@ export function TaskPage() {
       return
     }
 
-    await createTeamIssueComment(teamId, issueId, accessToken, body)
+    await mutationRequestRunner.run(
+      `issue:comment:${teamId}:${issueId}`,
+      body,
+      (context) => createTeamIssueComment(teamId, issueId, accessToken, body, context),
+    )
     await mutateSelectedIssueDetail()
   }
 
@@ -687,13 +745,13 @@ export function TaskPage() {
       onSelectTeamView={(teamId, viewId) =>
         navigate(createTeamViewPath(teamId, viewId))
       }
-      onCreateProject={handleCreateProject}
-      onCreateTeam={handleCreateTeam}
-      onArchiveProject={handleArchiveProject}
-      onArchiveTeam={handleArchiveTeam}
-      onCreateTask={handleCreateTask}
+      onCreateProject={canManageStructure ? handleCreateProject : undefined}
+      onCreateTeam={canManageStructure ? handleCreateTeam : undefined}
+      onArchiveProject={canManageStructure ? handleArchiveProject : undefined}
+      onArchiveTeam={canManageStructure ? handleArchiveTeam : undefined}
+      onCreateTask={canMutateContent ? handleCreateTask : undefined}
       assigneeErrorMessage={projectMembersErrorMessage}
-      assigneeOptions={projectMembers}
+      assigneeOptions={activeProjectMembers}
       canManageProjectMembers={canManageProjectMembers}
       detailErrorMessage={detailErrorMessage}
       initialSelectedTaskId={resolvedSelectedIssue?.id}
@@ -701,13 +759,13 @@ export function TaskPage() {
       isProjectUsersLoading={Boolean(projectUsersKey && isProjectUsersLoading)}
       isSelectedIssueDetailLoading={Boolean(issueDetailKey && isSelectedIssueDetailLoading)}
       isSystemAdmin={user?.isSystemAdmin}
-      onCreateIssueComment={handleCreateIssueComment}
-      onLoadMoreProjectUsers={handleLoadMoreProjectUsers}
-      onProjectUserQueryChange={setProjectUserQuery}
-      onRemoveProjectMember={handleRemoveProjectMember}
+      onCreateIssueComment={canMutateContent ? handleCreateIssueComment : undefined}
+      onLoadMoreProjectUsers={canManageProjectMembers ? handleLoadMoreProjectUsers : undefined}
+      onProjectUserQueryChange={canManageProjectMembers ? setProjectUserQuery : undefined}
+      onRemoveProjectMember={canManageProjectMembers ? handleRemoveProjectMember : undefined}
       onSelectedIssueChange={handleSelectedIssueChange}
-      onUpdateIssue={handleUpdateIssue}
-      onUpdateProjectMember={handleUpdateProjectMember}
+      onUpdateIssue={canMutateContent ? handleUpdateIssue : undefined}
+      onUpdateProjectMember={canManageProjectMembers ? handleUpdateProjectMember : undefined}
       projectId={projectId}
       projectMembers={projectMembers}
       projectMembersErrorMessage={projectPermissionsErrorMessage}
@@ -914,7 +972,7 @@ export function TaskScreen({
         <TaskHeader
           activeTab={activeTab}
           isCreateTaskOpen={isCreateTaskOpen}
-          onCreateTaskOpenChange={setIsCreateTaskOpen}
+          onCreateTaskOpenChange={onCreateTask ? setIsCreateTaskOpen : undefined}
           onMobileSidebarOpen={() => setIsMobileSidebarOpen(true)}
           onTabChange={setActiveTab}
           projectName={resolvedProjectName}
@@ -934,7 +992,7 @@ export function TaskScreen({
             data-testid="task-main-scroll"
             ref={taskContentRef}
           >
-            {isCreateTaskOpen ? (
+            {isCreateTaskOpen && onCreateTask ? (
               <CreateTaskPanel
                 assigneeErrorMessage={assigneeErrorMessage}
                 assigneeOptions={assigneeOptions}
@@ -1002,7 +1060,7 @@ export function TaskScreen({
                 }}
                 onDueDateMenuOpenChange={setIsDueDateMenuOpen}
                 onLoadMoreProjectUsers={onLoadMoreProjectUsers}
-                onCreateTaskOpen={() => setIsCreateTaskOpen(true)}
+                onCreateTaskOpen={onCreateTask ? () => setIsCreateTaskOpen(true) : undefined}
                 onPriorityFilterChange={(nextPriorityFilter) => {
                   setPriorityFilter(nextPriorityFilter)
                   setIsPriorityMenuOpen(false)
@@ -1178,7 +1236,7 @@ function TaskHeader({
 }: {
   activeTab: TaskTab
   isCreateTaskOpen: boolean
-  onCreateTaskOpenChange: (isOpen: boolean) => void
+  onCreateTaskOpenChange?: (isOpen: boolean) => void
   onMobileSidebarOpen: () => void
   onTabChange: (tab: TaskTab) => void
   projectName: string
@@ -1241,16 +1299,19 @@ function TaskHeader({
             <UsersMiniIcon />
             {t('tasks.action.share')}
           </button>
-          <button
-            aria-expanded={isCreateTaskOpen}
-            className="workbench-button-primary inline-flex h-9 items-center gap-2 px-3.5"
-            onClick={() => onCreateTaskOpenChange(!isCreateTaskOpen)}
-            type="button"
-          >
-            <PlusIcon />
-            {t('tasks.action.newTask')}
-            <ChevronIcon className="h-4 w-4" />
-          </button>
+          {onCreateTaskOpenChange ? (
+            <button
+              aria-controls={isCreateTaskOpen ? 'create-task-form' : undefined}
+              aria-expanded={isCreateTaskOpen}
+              className="workbench-button-primary inline-flex h-9 items-center gap-2 px-3.5"
+              onClick={() => onCreateTaskOpenChange(!isCreateTaskOpen)}
+              type="button"
+            >
+              <PlusIcon />
+              {t('tasks.action.newTask')}
+              <ChevronIcon className="h-4 w-4" />
+            </button>
+          ) : null}
           <IconButton label={t('tasks.action.notifications')} rounded>
             <BellOutlineIcon />
           </IconButton>
@@ -1372,7 +1433,7 @@ function TaskWorkspace({
   onDueDateFilterChange: (dueDateFilter: DueDateFilter) => void
   onDueDateMenuOpenChange: (isOpen: boolean) => void
   onLoadMoreProjectUsers?: () => Promise<void>
-  onCreateTaskOpen: () => void
+  onCreateTaskOpen?: () => void
   onPriorityFilterChange: (priorityFilter: PriorityFilter) => void
   onPriorityMenuOpenChange: (isOpen: boolean) => void
   onProjectUserQueryChange?: (query: string) => void
@@ -1873,7 +1934,7 @@ function TaskTable({
 }: {
   selectedDetailTaskId?: string
   selectedTaskIds: string[]
-  onCreateTaskOpen: () => void
+  onCreateTaskOpen?: () => void
   onSelectTask: (task: ProjectTask) => void
   onTaskSelectionChange: (taskId: string, selected: boolean) => void
   t: (key: MessageKey) => string
@@ -1969,14 +2030,16 @@ function TaskTable({
         </table>
       </div>
       <div className="grid grid-cols-[1fr_auto] items-center border-t border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-5 py-3 text-sm font-medium">
-        <button
-          className="inline-flex items-center gap-2 text-[var(--workbench-primary)] transition hover:text-[var(--workbench-primary-hover)]"
-          onClick={onCreateTaskOpen}
-          type="button"
-        >
-          <PlusIcon className="h-5 w-5" />
-          {t('tasks.addTask')}
-        </button>
+        {onCreateTaskOpen ? (
+          <button
+            className="inline-flex items-center gap-2 text-[var(--workbench-primary)] transition hover:text-[var(--workbench-primary-hover)]"
+            onClick={onCreateTaskOpen}
+            type="button"
+          >
+            <PlusIcon className="h-5 w-5" />
+            {t('tasks.addTask')}
+          </button>
+        ) : <span />}
         <span className="text-[#5f6874]" data-testid="tasks-count">
           {t('tasks.count').replace('{count}', String(tasks.length))}
         </span>
@@ -2099,7 +2162,8 @@ function TaskDetailPane({
   const comments = detail?.comments ?? []
   const activity = detail?.activity ?? []
   const needsDetailBeforeEdit = task.source === 'dynamodb' && !issue
-  const isReadOnly = !task.teamId || task.source !== 'dynamodb' || needsDetailBeforeEdit
+  const isReadOnly = !onUpdateIssue || !task.teamId || task.source !== 'dynamodb' || needsDetailBeforeEdit
+  const isCommentReadOnly = !onCreateIssueComment || !task.teamId || task.source !== 'dynamodb' || needsDetailBeforeEdit
   const title = issue ? resolveTeamIssueTitle(issue, t) : resolveTaskTitle(task, t)
   const assigneeUserId = issue?.assigneeUserId ?? task.assigneeUserId ?? ''
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === assigneeUserId)
@@ -2243,7 +2307,9 @@ function TaskDetailPane({
           {t('issues.detail.save')}
         </button>
         {isReadOnly && !needsDetailBeforeEdit ? (
-          <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('tasks.detail.readOnly')}</p>
+          <p className="text-sm font-medium text-[var(--workbench-muted)]">
+            {t(!onUpdateIssue ? 'tasks.detail.readOnlyPermission' : 'tasks.detail.readOnly')}
+          </p>
         ) : null}
         {errorMessage ? <p className="text-sm font-semibold text-red-700">{errorMessage}</p> : null}
       </form>
@@ -2252,7 +2318,7 @@ function TaskDetailPane({
         onSubmit={(event) => {
           event.preventDefault()
 
-          if (isReadOnly || !task.teamId) {
+          if (isCommentReadOnly || !task.teamId) {
             return
           }
 
@@ -2272,18 +2338,23 @@ function TaskDetailPane({
           {t('issues.comment.title')}
           <textarea
             className="workbench-input min-h-20 w-full min-w-0 px-3 py-2 leading-6 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-            disabled={isReadOnly}
+            disabled={isCommentReadOnly}
             name="body"
             required
           />
         </label>
         <button
           className="workbench-button-secondary h-9 justify-self-start px-3 disabled:border-[#e4e7ec] disabled:text-[#b5bdc9]"
-          disabled={isReadOnly}
+          disabled={isCommentReadOnly}
           type="submit"
         >
           {t('issues.comment.submit')}
         </button>
+        {isCommentReadOnly && !needsDetailBeforeEdit ? (
+          <p className="text-sm font-medium text-[var(--workbench-muted)]">
+            {t(!onCreateIssueComment ? 'tasks.comment.readOnlyPermission' : 'tasks.comment.readOnly')}
+          </p>
+        ) : null}
       </form>
       <section className="px-5 py-4">
         <h2 className="workbench-eyebrow text-[var(--workbench-muted)]">{t('issues.comment.title')}</h2>

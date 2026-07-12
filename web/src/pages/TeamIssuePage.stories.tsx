@@ -15,6 +15,7 @@ const assigneeOptions: ProjectMember[] = [
     name: '佐藤 花子',
     role: 'member',
     updatedAt: '2026-06-08T00:00:00.000Z',
+    workspaceStatus: 'active',
   },
   {
     id: 'suzuki@example.com',
@@ -22,6 +23,7 @@ const assigneeOptions: ProjectMember[] = [
     name: '鈴木 大輔',
     role: 'member',
     updatedAt: '2026-06-08T00:00:00.000Z',
+    workspaceStatus: 'active',
   },
 ]
 
@@ -55,6 +57,11 @@ const meta = {
     assigneeOptions,
     comments: teamIssueCommentFixtures,
     issues: teamIssueFixtures,
+    onCreateComment: async () => undefined,
+    onCreateIssue: async () => undefined,
+    onCreateProject: async () => undefined,
+    onCreateTeam: async () => undefined,
+    onUpdateIssue: async () => undefined,
     selectedIssueId: 'onboarding-friction',
     teamId: 'core-team',
     teamName: 'コアチーム',

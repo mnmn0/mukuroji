@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import type { MessageKey } from '../i18n'
+import { isActiveProjectAssignmentCandidate } from './api'
 import type {
   ProjectMember,
   ProjectMemberRole,
@@ -164,10 +165,11 @@ export function ProjectPermissionsPanel({
   const [savingMemberKey, setSavingMemberKey] = useState<string | undefined>()
   const [isLoadingMoreUsers, setIsLoadingMoreUsers] = useState(false)
   const [localErrorMessage, setLocalErrorMessage] = useState<string | undefined>()
-  const selectedUserId = formState.userId && users.some((user) => user.id === formState.userId)
+  const assignmentCandidates = users.filter(isActiveProjectAssignmentCandidate)
+  const selectedUserId = formState.userId && assignmentCandidates.some((user) => user.id === formState.userId)
     ? formState.userId
-    : users[0]?.id ?? ''
-  const isManagementEnabled = Boolean(canManageMembers)
+    : assignmentCandidates[0]?.id ?? ''
+  const isManagementEnabled = Boolean(canManageMembers && onUpdateMember)
   const managerMemberIds = members.filter((member) => member.role === 'manager').map((member) => member.id)
   const lastManagerId = managerMemberIds.length === 1 ? managerMemberIds[0] : undefined
   const isSelectedUserLastManager = selectedUserId === lastManagerId
@@ -283,12 +285,12 @@ export function ProjectPermissionsPanel({
                   <select
                     className="h-10 rounded-md border border-[#d3d8df] bg-white px-3 text-sm font-medium text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10"
                     data-testid="permissions-user-select"
-                    disabled={users.length === 0}
+                    disabled={assignmentCandidates.length === 0}
                     id="permissions-user-select"
                     value={selectedUserId}
                     onChange={(event) => setFormState((current) => ({ ...current, userId: event.target.value }))}
                   >
-                    {users.map((user) => (
+                    {assignmentCandidates.map((user) => (
                       <option key={user.id} value={user.id}>
                         {formatProjectUserOption(user)}
                       </option>
@@ -316,8 +318,8 @@ export function ProjectPermissionsPanel({
                 <div className="col-span-full flex flex-wrap items-center gap-3 text-sm font-medium text-[#5f6874]">
                   {isUsersLoading ? <span>{t('workspace.permissions.usersLoading')}</span> : null}
                   {usersErrorMessage ? <span className="font-semibold text-red-700">{usersErrorMessage}</span> : null}
-                  {!isUsersLoading && users.length === 0 ? <span>{t('workspace.permissions.usersEmpty')}</span> : null}
-                  {usersNextToken ? (
+                  {!isUsersLoading && assignmentCandidates.length === 0 ? <span>{t('workspace.permissions.usersEmpty')}</span> : null}
+                  {usersNextToken && onLoadMoreUsers ? (
                     <button
                       className="min-h-9 rounded-md border border-[#d3d8df] bg-white px-3 text-xs font-semibold text-[#1c1d1f] transition hover:border-[var(--workbench-primary)] hover:text-[var(--workbench-primary)] disabled:cursor-not-allowed disabled:text-[#b5bdc9]"
                       data-testid="permissions-load-more-users"
@@ -407,7 +409,7 @@ export function ProjectPermissionsPanel({
                   <button
                     className="min-h-10 rounded-md border border-[#d3d8df] bg-white px-3 text-sm font-semibold text-[#1c1d1f] transition hover:border-red-300 hover:text-red-700 disabled:cursor-not-allowed disabled:text-[#b5bdc9]"
                     data-testid={`permission-remove-${createProjectMemberTestId(member.id)}`}
-                    disabled={!isManagementEnabled || isLastManager || savingMemberKey === member.id}
+                    disabled={!isManagementEnabled || !onRemoveMember || isLastManager || savingMemberKey === member.id}
                     type="button"
                     onClick={() => handleRemoveMember(member)}
                   >

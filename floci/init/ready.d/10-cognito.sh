@@ -15,6 +15,9 @@ SYSTEM_ADMIN_GROUP="${MUKUROJI_SYSTEM_ADMIN_GROUP:-mukuroji-system-admins}"
 DASHBOARD_TABLE="${MUKUROJI_DASHBOARD_TABLE:-mukuroji-dashboard-local}"
 PROJECT_TASKS_TABLE="${MUKUROJI_PROJECT_TASKS_TABLE:-mukuroji-project-tasks-v2-local}"
 PROJECT_DIRECTORY_TABLE="${MUKUROJI_PROJECT_DIRECTORY_TABLE:-mukuroji-project-directory-local}"
+AUDIT_EVENTS_TABLE="${MUKUROJI_AUDIT_EVENTS_TABLE:-${AUDIT_EVENTS_TABLE_NAME:-mukuroji-audit-events}}"
+AUDIT_RETENTION_DAYS="${MUKUROJI_AUDIT_RETENTION_DAYS:-${AUDIT_RETENTION_DAYS:-2555}}"
+WORKSPACE_ACCESS_TABLE="${MUKUROJI_WORKSPACE_ACCESS_TABLE:-mukuroji-workspace-access-local}"
 WORKSPACE_DIRECTORY_ID="${MUKUROJI_WORKSPACE_DIRECTORY_ID:-${MUKUROJI_PROJECT_DIRECTORY_ID:-workspace#mukuroji-local}}"
 PROJECT_DIRECTORY_ID="$WORKSPACE_DIRECTORY_ID"
 PROJECT_MEMBER_KEY="$(printf '%s' "$INITIAL_OWNER_EMAIL" | tr '[:upper:]' '[:lower:]')"
@@ -277,6 +280,86 @@ if [ "$WORKSPACE_UNPROCESSED_TABLES" != "0" ]; then
   exit 1
 fi
 
+if ! aws_local dynamodb describe-table --table-name "$WORKSPACE_ACCESS_TABLE" >/dev/null 2>&1; then
+  aws_local dynamodb create-table \
+    --table-name "$WORKSPACE_ACCESS_TABLE" \
+    --attribute-definitions \
+      AttributeName=workspaceId,AttributeType=S \
+      AttributeName=recordKey,AttributeType=S \
+    --key-schema \
+      AttributeName=workspaceId,KeyType=HASH \
+      AttributeName=recordKey,KeyType=RANGE \
+    --billing-mode PAY_PER_REQUEST \
+    >/dev/null
+fi
+
+WORKSPACE_SEED_CREATED_AT="2026-07-11T00:00:00.000Z"
+
+ensure_workspace_record() {
+  record_key="$1"
+  item="$2"
+  existing_record_key="$(aws_local dynamodb get-item \
+    --table-name "$WORKSPACE_ACCESS_TABLE" \
+    --key "{\"workspaceId\":{\"S\":\"$WORKSPACE_DIRECTORY_ID\"},\"recordKey\":{\"S\":\"$record_key\"}}" \
+    --consistent-read \
+    --query 'Item.recordKey.S' \
+    --output text)"
+
+  if [ "$existing_record_key" = "None" ] || [ -z "$existing_record_key" ]; then
+    put_item_error=""
+    if ! put_item_error="$(aws_local dynamodb put-item \
+      --table-name "$WORKSPACE_ACCESS_TABLE" \
+      --item "$item" \
+      --condition-expression 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)' \
+      2>&1 >/dev/null)"; then
+      case "$put_item_error" in
+        *ConditionalCheckFailedException*) ;;
+        *) printf '%s\n' "$put_item_error" >&2; return 1 ;;
+      esac
+    fi
+  fi
+}
+
+seed_workspace_member() {
+  email="$1"
+  display_name="$2"
+  role="$3"
+  member_key="$(printf '%s' "$email" | tr '[:upper:]' '[:lower:]')"
+  record_key="MEMBER#$member_key"
+
+  ensure_workspace_record "$record_key" "{
+    \"workspaceId\": {\"S\": \"$WORKSPACE_DIRECTORY_ID\"},
+    \"recordKey\": {\"S\": \"$record_key\"},
+    \"entryType\": {\"S\": \"workspace-member\"},
+    \"id\": {\"S\": \"$member_key\"},
+    \"memberKey\": {\"S\": \"$member_key\"},
+    \"email\": {\"S\": \"$member_key\"},
+    \"name\": {\"S\": \"$display_name\"},
+    \"role\": {\"S\": \"$role\"},
+    \"status\": {\"S\": \"active\"},
+    \"version\": {\"N\": \"1\"},
+    \"createdAt\": {\"S\": \"$WORKSPACE_SEED_CREATED_AT\"},
+    \"updatedAt\": {\"S\": \"$WORKSPACE_SEED_CREATED_AT\"}
+  }"
+}
+
+ensure_workspace_record "WORKSPACE" "{
+  \"workspaceId\": {\"S\": \"$WORKSPACE_DIRECTORY_ID\"},
+  \"recordKey\": {\"S\": \"WORKSPACE\"},
+  \"entryType\": {\"S\": \"workspace-meta\"},
+  \"activeOwnerCount\": {\"N\": \"1\"},
+  \"version\": {\"N\": \"1\"},
+  \"createdAt\": {\"S\": \"$WORKSPACE_SEED_CREATED_AT\"},
+  \"updatedAt\": {\"S\": \"$WORKSPACE_SEED_CREATED_AT\"}
+}"
+
+seed_workspace_member "$PROJECT_MEMBER_KEY" "Initial Owner" "owner"
+seed_workspace_member "sato@example.com" "佐藤 花子" "member"
+seed_workspace_member "suzuki@example.com" "鈴木 太郎" "member"
+seed_workspace_member "tanaka@example.com" "田中 美咲" "member"
+seed_workspace_member "yamamoto@example.com" "山本 健" "member"
+seed_workspace_member "viewer@example.com" "Viewer User" "guest"
+
 assert_equal() {
   actual="$1"
   expected="$2"
@@ -356,6 +439,9 @@ MUKUROJI_PROJECT_TASKS_TABLE=$PROJECT_TASKS_TABLE
 MUKUROJI_PROJECT_DIRECTORY_TABLE=$PROJECT_DIRECTORY_TABLE
 MUKUROJI_WORKSPACE_DIRECTORY_ID=$WORKSPACE_DIRECTORY_ID
 MUKUROJI_PROJECT_DIRECTORY_ID=$WORKSPACE_DIRECTORY_ID
+MUKUROJI_AUDIT_EVENTS_TABLE=$AUDIT_EVENTS_TABLE
+MUKUROJI_AUDIT_RETENTION_DAYS=$AUDIT_RETENTION_DAYS
+MUKUROJI_WORKSPACE_ACCESS_TABLE=$WORKSPACE_ACCESS_TABLE
 DYNAMODB_ENDPOINT=$PUBLIC_ENDPOINT_URL
 EOF
 
@@ -363,3 +449,5 @@ echo "mukuroji Cognito ready: userPoolId=$POOL_ID clientId=$CLIENT_ID username=$
 echo "mukuroji DynamoDB ready: table=$DASHBOARD_TABLE item=summary"
 echo "mukuroji DynamoDB ready: table=$PROJECT_TASKS_TABLE project=refero tasks=10"
 echo "mukuroji DynamoDB ready: table=$PROJECT_DIRECTORY_TABLE workspaceDirectory=$WORKSPACE_DIRECTORY_ID"
+echo "mukuroji audit configured: table=$AUDIT_EVENTS_TABLE retentionDays=$AUDIT_RETENTION_DAYS"
+echo "mukuroji DynamoDB ready: table=$WORKSPACE_ACCESS_TABLE workspace=$WORKSPACE_DIRECTORY_ID"

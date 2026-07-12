@@ -36,6 +36,108 @@ const ownerProjectIds = ['refero', 'product-roadmap', 'shared-launch', 'brand-re
 const workspaceBootstrapTimestamp = '2026-07-11T00:00:00.000Z';
 
 /**
+ * Workspace access table の初期 metadata と owner を作成する transaction payload です。
+ */
+function createWorkspaceAccessTransactItems(
+  tableName: string,
+  workspaceId: string,
+  initialOwnerEmail: string,
+) {
+  const createdAt = '2026-07-11T00:00:00.000Z';
+
+  return [
+    {
+      Update: {
+        TableName: tableName,
+        Key: {
+          workspaceId: { S: workspaceId },
+          recordKey: { S: 'WORKSPACE' },
+        },
+        UpdateExpression:
+          'SET entryType = if_not_exists(entryType, :entryType), activeOwnerCount = if_not_exists(activeOwnerCount, :activeOwnerCount), #version = if_not_exists(#version, :version), createdAt = if_not_exists(createdAt, :createdAt), updatedAt = if_not_exists(updatedAt, :updatedAt)',
+        ExpressionAttributeNames: {
+          '#version': 'version',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': { S: 'workspace-meta' },
+          ':activeOwnerCount': { N: '1' },
+          ':version': { N: '1' },
+          ':createdAt': { S: createdAt },
+          ':updatedAt': { S: createdAt },
+        },
+      },
+    },
+    {
+      Update: {
+        TableName: tableName,
+        Key: {
+          workspaceId: { S: workspaceId },
+          recordKey: { S: `MEMBER#${initialOwnerEmail}` },
+        },
+        UpdateExpression:
+          'SET entryType = if_not_exists(entryType, :entryType), id = if_not_exists(id, :memberKey), memberKey = if_not_exists(memberKey, :memberKey), email = if_not_exists(email, :memberKey), #role = if_not_exists(#role, :role), #status = if_not_exists(#status, :status), #version = if_not_exists(#version, :version), createdAt = if_not_exists(createdAt, :createdAt), updatedAt = if_not_exists(updatedAt, :updatedAt)',
+        ExpressionAttributeNames: {
+          '#role': 'role',
+          '#status': 'status',
+          '#version': 'version',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': { S: 'workspace-member' },
+          ':memberKey': { S: initialOwnerEmail },
+          ':role': { S: 'owner' },
+          ':status': { S: 'active' },
+          ':version': { N: '1' },
+          ':createdAt': { S: createdAt },
+          ':updatedAt': { S: createdAt },
+        },
+      },
+    },
+  ];
+}
+
+/**
+ * CDK demo data が参照する Workspace member を既存 role/status を上書きせず seed します。
+ */
+function createWorkspaceDemoMemberTransactItems(tableName: string, workspaceId: string) {
+  const createdAt = '2026-07-11T00:00:00.000Z';
+  const members = [
+    ['sato@example.com', '佐藤 花子', 'member'],
+    ['suzuki@example.com', '鈴木 太郎', 'member'],
+    ['tanaka@example.com', '田中 美咲', 'member'],
+    ['yamamoto@example.com', '山本 健', 'member'],
+    ['viewer@example.com', 'Viewer User', 'guest'],
+  ] as const;
+
+  return members.map(([memberKey, name, role]) => ({
+    Update: {
+      TableName: tableName,
+      Key: {
+        workspaceId: { S: workspaceId },
+        recordKey: { S: `MEMBER#${memberKey}` },
+      },
+      UpdateExpression:
+        'SET entryType = if_not_exists(entryType, :entryType), id = if_not_exists(id, :memberKey), memberKey = if_not_exists(memberKey, :memberKey), email = if_not_exists(email, :memberKey), #name = if_not_exists(#name, :name), #role = if_not_exists(#role, :role), #status = if_not_exists(#status, :status), #version = if_not_exists(#version, :version), createdAt = if_not_exists(createdAt, :createdAt), updatedAt = if_not_exists(updatedAt, :updatedAt)',
+      ExpressionAttributeNames: {
+        '#name': 'name',
+        '#role': 'role',
+        '#status': 'status',
+        '#version': 'version',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': { S: 'workspace-member' },
+        ':memberKey': { S: memberKey },
+        ':name': { S: name },
+        ':role': { S: role },
+        ':status': { S: 'active' },
+        ':version': { N: '1' },
+        ':createdAt': { S: createdAt },
+        ':updatedAt': { S: createdAt },
+      },
+    },
+  }));
+}
+
+/**
  * サイドバーに表示するチームとプロジェクトの関係 seed データです。
  */
 const projectDirectoryItems = [
@@ -367,6 +469,12 @@ export class CdkStack extends cdk.Stack {
       default: 'mukuroji-system-admins',
       description: 'Comma-separated Cognito group names that grant system administrator privileges.',
     });
+    const auditRetentionDays = new cdk.CfnParameter(this, 'AuditRetentionDays', {
+      type: 'Number',
+      default: 2555,
+      minValue: 1,
+      description: 'Number of days immutable audit events are retained before DynamoDB TTL expiry.',
+    });
     const cognitoUserPoolId = new cdk.CfnParameter(this, 'CognitoUserPoolId', {
       type: 'String',
       allowedPattern: '^[a-z]{2}(?:-[a-z0-9]+)+_[A-Za-z0-9]+$',
@@ -457,6 +565,47 @@ export class CdkStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    const auditEventsTable = new dynamodb.Table(this, 'AuditEventsTable', {
+      partitionKey: { name: 'directoryId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'eventId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      stream: dynamodb.StreamViewType.NEW_IMAGE,
+      timeToLiveAttribute: 'expiresAt',
+    });
+
+    for (const [id, partitionKey, sortKey] of [
+      ['WorkspaceOccurredAtIndex', 'workspaceKey', 'workspaceEventKey'],
+      ['EntityOccurredAtIndex', 'entityKey', 'entityEventKey'],
+      ['ActorOccurredAtIndex', 'actorKey', 'actorEventKey'],
+      ['TargetOccurredAtIndex', 'targetKey', 'targetEventKey'],
+    ] as const) {
+      auditEventsTable.addGlobalSecondaryIndex({
+        indexName: id,
+        partitionKey: { name: partitionKey, type: dynamodb.AttributeType.STRING },
+        sortKey: { name: sortKey, type: dynamodb.AttributeType.STRING },
+        projectionType: dynamodb.ProjectionType.ALL,
+      });
+    }
+
+    const processedAuditEventsTable = new dynamodb.Table(this, 'ProcessedAuditEventsTable', {
+      partitionKey: { name: 'consumerName', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'eventId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      timeToLiveAttribute: 'expiresAt',
+    });
+
+    const workspaceAccessTable = new dynamodb.Table(this, 'WorkspaceAccessTable', {
+      partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     const apiFunction = new lambdaNodejs.NodejsFunction(this, 'ListProjectTasksFunction', {
       entry: path.join(__dirname, '../../server/src/index.ts'),
       handler: 'handler',
@@ -476,6 +625,8 @@ export class CdkStack extends cdk.Stack {
         ALLOWED_ORIGINS: taskApiAllowedOrigins.valueAsString,
         COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+        AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
+        AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
         MUKUROJI_PROJECT_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
         MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
         MUKUROJI_PROJECT_TASKS_TABLE: tasksTable.tableName,
@@ -483,6 +634,7 @@ export class CdkStack extends cdk.Stack {
         MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
         MUKUROJI_TEAM_ISSUES_TABLE: teamIssuesTable.tableName,
         MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
+        WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         TASKS_TABLE_NAME: tasksTable.tableName,
@@ -495,6 +647,8 @@ export class CdkStack extends cdk.Stack {
     teamIssuesTable.grantReadWriteData(apiFunction);
     teamIssueEventsTable.grantReadWriteData(apiFunction);
     projectDirectoryTable.grantReadWriteData(apiFunction);
+    auditEventsTable.grantReadWriteData(apiFunction);
+    workspaceAccessTable.grantReadWriteData(apiFunction);
     apiFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
@@ -503,12 +657,21 @@ export class CdkStack extends cdk.Stack {
           teamIssuesTable.tableArn,
           teamIssueEventsTable.tableArn,
           projectDirectoryTable.tableArn,
+          auditEventsTable.tableArn,
+          workspaceAccessTable.tableArn,
         ],
       }),
     );
     apiFunction.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ['cognito-idp:AdminGetUser', 'cognito-idp:ListUsers'],
+        actions: [
+          'cognito-idp:AdminCreateUser',
+          'cognito-idp:AdminDeleteUser',
+          'cognito-idp:AdminGetUser',
+          'cognito-idp:AdminUpdateUserAttributes',
+          'cognito-idp:GetUser',
+          'cognito-idp:ListUsers',
+        ],
         resources: [cognitoUserPoolArn],
       }),
     );
@@ -523,7 +686,7 @@ export class CdkStack extends cdk.Stack {
           lambda.HttpMethod.PATCH,
           lambda.HttpMethod.DELETE,
         ],
-        allowedHeaders: ['authorization', 'content-type'],
+        allowedHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id'],
       },
     });
     const httpApi = new apigatewayv2.HttpApi(this, 'ProjectTasksHttpApi', {
@@ -545,7 +708,7 @@ export class CdkStack extends cdk.Stack {
           apigatewayv2.CorsHttpMethod.DELETE,
           apigatewayv2.CorsHttpMethod.OPTIONS,
         ],
-        allowHeaders: ['authorization', 'content-type'],
+        allowHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id'],
       },
     });
 
@@ -649,6 +812,33 @@ export class CdkStack extends cdk.Stack {
 
     seedProjectDirectory.node.addDependency(projectDirectoryTable);
 
+    const seedWorkspaceAccessCall: customResources.AwsSdkCall = {
+      service: 'DynamoDB',
+      action: 'transactWriteItems',
+      parameters: {
+        TransactItems: createWorkspaceAccessTransactItems(
+          workspaceAccessTable.tableName,
+          workspaceDirectoryId.valueAsString,
+          initialOwnerEmail.valueAsString,
+        ),
+      },
+      physicalResourceId: customResources.PhysicalResourceId.of('workspace-access-seed-v1'),
+    };
+    const seedWorkspaceAccess = new customResources.AwsCustomResource(
+      this,
+      'SeedWorkspaceAccess',
+      createIdempotentAwsCustomResourceProps(
+        seedWorkspaceAccessCall,
+        customResources.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ['dynamodb:TransactWriteItems'],
+            resources: [workspaceAccessTable.tableArn],
+          }),
+        ]),
+      ),
+    );
+    seedWorkspaceAccess.node.addDependency(workspaceAccessTable);
+
     const bootstrapWorkspaceCall: customResources.AwsSdkCall = {
       service: 'DynamoDB',
       action: 'transactWriteItems',
@@ -679,6 +869,35 @@ export class CdkStack extends cdk.Stack {
     bootstrapWorkspace.node.addDependency(seedProjectDirectory);
     bootstrapWorkspace.node.addDependency(updateInitialOwnerAttributes);
 
+    const seedWorkspaceDemoMembersCall: customResources.AwsSdkCall = {
+      service: 'DynamoDB',
+      action: 'transactWriteItems',
+      parameters: {
+        TransactItems: createWorkspaceDemoMemberTransactItems(
+          workspaceAccessTable.tableName,
+          workspaceDirectoryId.valueAsString,
+        ),
+      },
+      physicalResourceId: customResources.PhysicalResourceId.of(
+        'workspace-access-demo-members-seed-v1',
+      ),
+    };
+    const seedWorkspaceDemoMembers = new customResources.AwsCustomResource(
+      this,
+      'SeedWorkspaceDemoMembers',
+      createIdempotentAwsCustomResourceProps(
+        seedWorkspaceDemoMembersCall,
+        customResources.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ['dynamodb:TransactWriteItems'],
+            resources: [workspaceAccessTable.tableArn],
+          }),
+        ]),
+      ),
+    );
+
+    seedWorkspaceDemoMembers.node.addDependency(seedWorkspaceAccess);
+
     new cdk.CfnOutput(this, 'ProjectTasksTableName', {
       value: tasksTable.tableName,
     });
@@ -695,6 +914,12 @@ export class CdkStack extends cdk.Stack {
       value: workspaceDirectoryId.valueAsString,
     });
     workspaceDirectoryIdOutput.overrideLogicalId('WorkspaceDirectoryId');
+    new cdk.CfnOutput(this, 'AuditEventsTableName', { value: auditEventsTable.tableName });
+    new cdk.CfnOutput(this, 'AuditEventsStreamArn', { value: auditEventsTable.tableStreamArn! });
+    new cdk.CfnOutput(this, 'ProcessedAuditEventsTableName', {
+      value: processedAuditEventsTable.tableName,
+    });
+    new cdk.CfnOutput(this, 'WorkspaceAccessTableName', { value: workspaceAccessTable.tableName });
     new cdk.CfnOutput(this, 'ProjectTasksApiUrl', {
       value: functionUrl.url,
       description: 'Backward-compatible alias for the Lambda Function URL.',

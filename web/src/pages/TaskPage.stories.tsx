@@ -16,6 +16,7 @@ const assigneeOptions: ProjectMember[] = [
     name: '佐藤 花子',
     role: 'member',
     updatedAt: '2026-06-08T00:00:00.000Z',
+    workspaceStatus: 'active',
   },
   {
     id: 'suzuki@example.com',
@@ -23,6 +24,7 @@ const assigneeOptions: ProjectMember[] = [
     name: '鈴木 大輔',
     role: 'member',
     updatedAt: '2026-06-08T00:00:00.000Z',
+    workspaceStatus: 'active',
   },
 ]
 
@@ -34,6 +36,7 @@ const projectUsers: ProjectUser[] = [
     name: '佐藤 花子',
     enabled: true,
     status: 'CONFIRMED',
+    workspaceStatus: 'active',
   },
   {
     id: 'viewer@example.com',
@@ -42,6 +45,7 @@ const projectUsers: ProjectUser[] = [
     name: 'Viewer User',
     enabled: true,
     status: 'CONFIRMED',
+    workspaceStatus: 'active',
   },
 ]
 
@@ -109,6 +113,7 @@ const meta = {
     projectUsers,
     onCreateProject: async () => undefined,
     onCreateTeam: async () => undefined,
+    onCreateTask: async () => undefined,
     onCreateIssueComment: async () => undefined,
     onUpdateIssue: async () => undefined,
     tasks: storyTasks,
