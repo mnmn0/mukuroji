@@ -52,6 +52,7 @@ const meta = {
   ],
 } satisfies Meta<typeof Sidebar>
 
+/** Sidebar stories の metadata です。 */
 export default meta
 
 /** Storybook story type for Sidebar examples. */
