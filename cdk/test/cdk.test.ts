@@ -633,6 +633,189 @@ test.each([
   expect(businessCommands).toEqual([]);
 });
 
+test.each([
+  'provisioning',
+  'pending',
+  'delivery-failed',
+] as const)('inline lambda atomically accepts a %s invitation before serving business APIs', async (status) => {
+  const commands: Array<{ commandName: string; input: Record<string, unknown> }> = [];
+  const invitation = createWorkspaceInvitationFixture({
+    email: 'demo@example.com',
+    identityOwnership: 'workspace-created',
+    status,
+  });
+  const lambda = createInlineLambda(async (command) => {
+    commands.push({ commandName: command.constructor.name, input: command.input });
+    return command.constructor.name === 'QueryCommand' ? { Items: [] } : {};
+  }, {
+    omitCurrentWorkspaceMember: true,
+    workspaceRecords: [invitation],
+  });
+
+  const response = await lambda.handler(createLambdaEvent('GET', '/api/teams/projects'));
+
+  expect(response.statusCode).toBe(200);
+  expect(commands[0]).toMatchObject({
+    commandName: 'TransactWriteItemsCommand',
+    input: {
+      TransactItems: [
+        {
+          Put: {
+            TableName: 'WorkspaceAccessTable',
+            Item: {
+              workspaceId: { S: 'user#demo@example.com' },
+              recordKey: { S: 'MEMBER#demo@example.com' },
+              entryType: { S: 'workspace-member' },
+              memberKey: { S: 'demo@example.com' },
+              email: { S: 'demo@example.com' },
+              role: { S: 'member' },
+              status: { S: 'active' },
+              identityOwnership: { S: 'workspace-created' },
+              version: { N: '1' },
+            },
+            ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+          },
+        },
+        {
+          Update: expect.objectContaining({
+            TableName: 'WorkspaceAccessTable',
+            Key: {
+              workspaceId: { S: 'user#demo@example.com' },
+              recordKey: { S: 'INVITATION#demo@example.com' },
+            },
+            ConditionExpression: expect.stringContaining('expiresAt > :now'),
+            ExpressionAttributeValues: expect.objectContaining({
+              ':accepted': { S: 'accepted' },
+              ':expectedVersion': { N: '1' },
+            }),
+          }),
+        },
+      ],
+    },
+  });
+});
+
+test('inline lambda increments the active owner count when an owner invitation is accepted', async () => {
+  const commands: Array<{ commandName: string; input: Record<string, unknown> }> = [];
+  const lambda = createInlineLambda(async (command) => {
+    commands.push({ commandName: command.constructor.name, input: command.input });
+    return command.constructor.name === 'QueryCommand' ? { Items: [] } : {};
+  }, {
+    omitCurrentWorkspaceMember: true,
+    workspaceRecords: [createWorkspaceInvitationFixture({
+      email: 'demo@example.com',
+      identityOwnership: 'pre-existing',
+      role: 'owner',
+      status: 'pending',
+    })],
+  });
+
+  const response = await lambda.handler(createLambdaEvent('GET', '/api/teams/projects'));
+  const transaction = commands.find((command) => command.commandName === 'TransactWriteItemsCommand');
+  const transactItems = transaction?.input.TransactItems as Array<Record<string, unknown>>;
+
+  expect(response.statusCode).toBe(200);
+  expect(transactItems).toHaveLength(3);
+  expect(transactItems[2]).toMatchObject({
+    Update: {
+      TableName: 'WorkspaceAccessTable',
+      Key: {
+        workspaceId: { S: 'user#demo@example.com' },
+        recordKey: { S: 'WORKSPACE' },
+      },
+      UpdateExpression: expect.stringContaining('ADD activeOwnerCount :one'),
+    },
+  });
+});
+
+test.each([
+  { name: 'revoked', status: 'revoked' as const, expiresAt: '2099-01-01T00:00:00.000Z' },
+  { name: 'expired', status: 'pending' as const, expiresAt: '2020-01-01T00:00:00.000Z' },
+])('inline lambda denies a missing member with a $name invitation', async ({ status, expiresAt }) => {
+  const businessCommands: string[] = [];
+  const lambda = createInlineLambda(async (command) => {
+    businessCommands.push(command.constructor.name);
+    return {};
+  }, {
+    omitCurrentWorkspaceMember: true,
+    workspaceRecords: [createWorkspaceInvitationFixture({
+      email: 'demo@example.com',
+      expiresAt,
+      identityOwnership: 'workspace-created',
+      status,
+    })],
+  });
+
+  const response = await lambda.handler(createLambdaEvent('GET', '/api/teams/projects'));
+
+  expect(response.statusCode).toBe(403);
+  expect(JSON.parse(response.body)).toEqual({ message: 'Workspace access is denied.' });
+  expect(businessCommands).toEqual([]);
+});
+
+test('inline lambda never reactivates a deactivated member from a pending invitation', async () => {
+  const businessCommands: string[] = [];
+  const lambda = createInlineLambda(async (command) => {
+    businessCommands.push(command.constructor.name);
+    return {};
+  }, {
+    workspaceStatus: 'deactivated',
+    workspaceRecords: [createWorkspaceInvitationFixture({
+      email: 'demo@example.com',
+      identityOwnership: 'workspace-created',
+      status: 'pending',
+    })],
+  });
+
+  const response = await lambda.handler(createLambdaEvent('GET', '/api/teams/projects'));
+
+  expect(response.statusCode).toBe(403);
+  expect(JSON.parse(response.body)).toEqual({ message: 'Workspace access is denied.' });
+  expect(businessCommands).toEqual([]);
+});
+
+test.each([
+  {
+    failure: 'transaction cancellation',
+    createError: () => createTransactionCanceledError(['ConditionalCheckFailed', 'None']),
+  },
+  {
+    failure: 'transport timeout',
+    createError: () => Object.assign(new Error('Transaction response timed out.'), { name: 'TimeoutError' }),
+  },
+])('inline lambda recovers after a committed invitation acceptance with $failure', async ({ createError }) => {
+  let memberReads = 0;
+  const lambda = createInlineLambda(async (command) => {
+    if (command.constructor.name === 'TransactWriteItemsCommand') {
+      throw createError();
+    }
+
+    return command.constructor.name === 'QueryCommand' ? { Items: [] } : {};
+  }, {
+    omitCurrentWorkspaceMember: true,
+    workspaceRecords: [createWorkspaceInvitationFixture({
+      email: 'demo@example.com',
+      identityOwnership: 'workspace-created',
+      status: 'pending',
+    })],
+    workspaceRecordResolver(key, fallback) {
+      if (key?.recordKey?.S !== 'MEMBER#demo@example.com') {
+        return fallback;
+      }
+
+      memberReads += 1;
+      return memberReads === 1
+        ? undefined
+        : createWorkspaceMemberFixture('demo@example.com', 'Demo User', 'member', 'active');
+    },
+  });
+
+  const response = await lambda.handler(createLambdaEvent('GET', '/api/teams/projects'));
+
+  expect(response.statusCode).toBe(200);
+  expect(memberReads).toBe(2);
+});
+
 test('inline lambda prevents guest members from calling write APIs', async () => {
   const businessCommands: string[] = [];
   const lambda = createInlineLambda(async (command) => {
@@ -730,6 +913,49 @@ test('inline lambda preserves the last active Workspace owner during a concurren
   expect(JSON.parse(response.body)).toEqual({
     message: 'At least one active Workspace owner is required.',
   });
+});
+
+test('inline lambda blocks Workspace deactivation while the member manages an active project', async () => {
+  const commandNames: string[] = [];
+  const lambda = createInlineLambda(async (command) => {
+    commandNames.push(command.constructor.name);
+
+    if (command.constructor.name === 'QueryCommand') {
+      return { Items: createProjectManagerAssignmentFixture('sato@example.com') };
+    }
+
+    return {};
+  }, { workspaceRole: 'owner' });
+  const response = await lambda.handler({
+    ...createLambdaEvent('PATCH', '/api/workspace/members/sato%40example.com'),
+    body: JSON.stringify({ expectedVersion: 1, status: 'deactivated' }),
+  });
+
+  expect(response.statusCode).toBe(409);
+  expect(JSON.parse(response.body)).toEqual({
+    message: 'Remove active project manager roles before deactivating Workspace access.',
+  });
+  expect(commandNames).toEqual(['QueryCommand']);
+});
+
+test('inline lambda allows Workspace deactivation when manager roles belong only to archived projects', async () => {
+  const commandNames: string[] = [];
+  const lambda = createInlineLambda(async (command) => {
+    commandNames.push(command.constructor.name);
+
+    if (command.constructor.name === 'QueryCommand') {
+      return { Items: createProjectManagerAssignmentFixture('sato@example.com', true) };
+    }
+
+    return {};
+  }, { workspaceRole: 'owner' });
+  const response = await lambda.handler({
+    ...createLambdaEvent('PATCH', '/api/workspace/members/sato%40example.com'),
+    body: JSON.stringify({ expectedVersion: 1, status: 'deactivated' }),
+  });
+
+  expect(response.statusCode).toBe(200);
+  expect(commandNames).toEqual(['QueryCommand', 'TransactWriteItemsCommand']);
 });
 
 test('inline lambda never deletes a pre-existing Cognito user when an invitation is revoked', async () => {
@@ -1790,6 +2016,22 @@ test('inline lambda creates a project and grants the creator manager role', asyn
           },
         },
         {
+          Update: {
+            TableName: 'WorkspaceAccessTable',
+            Key: {
+              workspaceId: { S: 'user#demo@example.com' },
+              recordKey: { S: 'MEMBER#demo@example.com' },
+            },
+            UpdateExpression: 'SET #version = #version + :one',
+            ConditionExpression:
+              '#entryType = :memberEntryType AND #status = :active AND #version = :expectedVersion',
+            ExpressionAttributeValues: expect.objectContaining({
+              ':active': { S: 'active' },
+              ':expectedVersion': { N: '1' },
+            }),
+          },
+        },
+        {
           Put: {
             TableName: 'DirectoryTable',
             Item: {
@@ -1844,7 +2086,7 @@ test('inline lambda returns conflict when project creation transaction is cancel
     }
 
     if (command.constructor.name === 'TransactWriteItemsCommand') {
-      throw createTransactionCanceledError(['None', 'ConditionalCheckFailed', 'None']);
+      throw createTransactionCanceledError(['None', 'None', 'ConditionalCheckFailed', 'None']);
     }
 
     return {};
@@ -2210,8 +2452,24 @@ test('inline lambda updates project member roles for a project manager', async (
   expect(commandInputs[2].commandName).toBe('TransactWriteItemsCommand');
   const transactItems = commandInputs[2].input.TransactItems as Array<Record<string, unknown>>;
 
-  expect(transactItems).toHaveLength(2);
+  expect(transactItems).toHaveLength(3);
   expect(transactItems[0]).toMatchObject({
+    Update: {
+      TableName: 'WorkspaceAccessTable',
+      Key: {
+        workspaceId: { S: 'user#demo@example.com' },
+        recordKey: { S: 'MEMBER#sato@example.com' },
+      },
+      UpdateExpression: 'SET #version = #version + :one',
+      ConditionExpression:
+        '#entryType = :memberEntryType AND #status = :active AND #version = :expectedVersion',
+      ExpressionAttributeValues: expect.objectContaining({
+        ':active': { S: 'active' },
+        ':expectedVersion': { N: '1' },
+      }),
+    },
+  });
+  expect(transactItems[1]).toMatchObject({
     Put: {
       TableName: 'DirectoryTable',
       Item: {
@@ -2228,7 +2486,7 @@ test('inline lambda updates project member roles for a project manager', async (
       },
     },
   });
-  expect(transactItems[1]).toMatchObject({
+  expect(transactItems[2]).toMatchObject({
     Put: {
       TableName: 'AuditEventsTable',
       Item: {
@@ -2241,6 +2499,47 @@ test('inline lambda updates project member roles for a project manager', async (
         outboxStatus: { S: 'pending' },
       },
       ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(eventId)',
+    },
+  });
+});
+
+test('inline lambda rejects a project manager grant when Workspace access changes concurrently', async () => {
+  const commandInputs: Array<{ commandName: string; input: Record<string, unknown> }> = [];
+  const lambda = createInlineLambda(async (command) => {
+    commandInputs.push({ commandName: command.constructor.name, input: command.input });
+
+    if (command.constructor.name === 'QueryCommand') {
+      return { Items: createInlineProjectMemberFixtureItems() };
+    }
+
+    if (command.constructor.name === 'TransactWriteItemsCommand') {
+      throw createTransactionCanceledError(['ConditionalCheckFailed', 'None', 'None']);
+    }
+
+    return {};
+  }, { workspaceRole: 'owner' });
+  const response = await lambda.handler({
+    ...createLambdaEvent('PATCH', '/api/projects/refero/members/sato%40example.com'),
+    body: JSON.stringify({ role: 'manager' }),
+  });
+
+  expect(response.statusCode).toBe(409);
+  expect(JSON.parse(response.body)).toEqual({
+    message: 'Workspace access changed. Reload and retry.',
+  });
+  expect(commandInputs.at(-1)).toMatchObject({
+    commandName: 'TransactWriteItemsCommand',
+    input: {
+      TransactItems: [
+        {
+          Update: expect.objectContaining({
+            TableName: 'WorkspaceAccessTable',
+            ConditionExpression:
+              '#entryType = :memberEntryType AND #status = :active AND #version = :expectedVersion',
+          }),
+        },
+        expect.objectContaining({ Put: expect.any(Object) }),
+      ],
     },
   });
 });
@@ -2548,7 +2847,7 @@ test('inline lambda treats manager downgrade transaction cancellation as last ma
     }
 
     if (command.constructor.name === 'TransactWriteItemsCommand') {
-      throw createTransactionCanceledError(['ConditionalCheckFailed', 'None']);
+      throw createTransactionCanceledError(['None', 'ConditionalCheckFailed', 'None']);
     }
 
     return {};
@@ -2633,7 +2932,7 @@ test('inline lambda returns not found when a non-manager update loses its target
     }
 
     if (command.constructor.name === 'TransactWriteItemsCommand') {
-      throw createTransactionCanceledError(['ConditionalCheckFailed', 'None']);
+      throw createTransactionCanceledError(['None', 'ConditionalCheckFailed', 'None']);
     }
 
     return {};
@@ -2745,8 +3044,18 @@ test('inline lambda lets a system admin update project member roles without proj
   expect(commandInputs[1].commandName).toBe('TransactWriteItemsCommand');
   const transactItems = commandInputs[1].input.TransactItems as Array<Record<string, unknown>>;
 
-  expect(transactItems).toHaveLength(2);
+  expect(transactItems).toHaveLength(3);
   expect(transactItems[0]).toMatchObject({
+    Update: {
+      TableName: 'WorkspaceAccessTable',
+      Key: {
+        workspaceId: { S: 'user#demo@example.com' },
+        recordKey: { S: 'MEMBER#sato@example.com' },
+      },
+      UpdateExpression: 'SET #version = #version + :one',
+    },
+  });
+  expect(transactItems[1]).toMatchObject({
     Put: {
       TableName: 'DirectoryTable',
       Item: {
@@ -2758,7 +3067,7 @@ test('inline lambda lets a system admin update project member roles without proj
       },
     },
   });
-  expect(transactItems[1]).toMatchObject({
+  expect(transactItems[2]).toMatchObject({
     Put: {
       TableName: 'AuditEventsTable',
       Item: {
@@ -2900,7 +3209,7 @@ test('inline lambda keeps audit event identity stable when member retry changes 
 
     if (command.constructor.name === 'TransactWriteItemsCommand') {
       const transactItems = command.input.TransactItems as Array<Record<string, unknown>>;
-      const memberItem = readDynamoTransactPutItem(transactItems, 0);
+      const memberItem = readDynamoTransactPutItem(transactItems, 1);
       const auditItem = readDynamoTransactPutItem(transactItems, -1);
       const eventId = String(auditItem.eventId.S);
 
@@ -3283,6 +3592,45 @@ function createInlineProjectMemberFixtureItems(
   ];
 }
 
+function createProjectManagerAssignmentFixture(memberKey: string, archivedProject = false) {
+  return [
+    {
+      directoryId: { S: 'user#demo@example.com' },
+      entryKey: { S: '000010#000000#TEAM#core-team' },
+      entryType: { S: 'team' },
+      teamId: { S: 'core-team' },
+      teamSortOrder: { N: '10' },
+      nameJa: { S: 'コアチーム' },
+      nameEn: { S: 'Core Team' },
+      expanded: { BOOL: true },
+    },
+    {
+      directoryId: { S: 'user#demo@example.com' },
+      entryKey: { S: '000010#000010#PROJECT#refero' },
+      entryType: { S: 'project' },
+      teamId: { S: 'core-team' },
+      teamSortOrder: { N: '10' },
+      projectId: { S: 'refero' },
+      projectSortOrder: { N: '10' },
+      nameJa: { S: 'Refero' },
+      nameEn: { S: 'Refero' },
+      tone: { S: 'blue' },
+      ...(archivedProject ? { archivedAt: { S: '2026-06-08T00:00:00.000Z' } } : {}),
+    },
+    {
+      directoryId: { S: 'user#demo@example.com' },
+      entryKey: { S: `PROJECT_MEMBER#refero#${memberKey}` },
+      entryType: { S: 'project-member' },
+      projectId: { S: 'refero' },
+      memberKey: { S: memberKey },
+      email: { S: memberKey },
+      role: { S: 'manager' },
+      createdAt: { S: '2026-06-08T00:00:00.000Z' },
+      updatedAt: { S: '2026-06-08T00:00:00.000Z' },
+    },
+  ];
+}
+
 /**
  * DynamoDB transaction fixture から指定位置の Put item を取得します。
  */
@@ -3635,26 +3983,33 @@ function createWorkspaceMemberFixture(
 
 function createWorkspaceInvitationFixture(
   input: {
+    /** 招待対象として保存する正規化済み email です。 */
+    email?: string;
+    /** 招待の有効期限です。 */
+    expiresAt?: string;
     /** Cognito identity の provisioning ownership です。 */
     identityOwnership: 'workspace-created' | 'pre-existing' | 'ambiguous';
+    /** 受諾後に作成する Workspace role です。 */
+    role?: 'owner' | 'admin' | 'member' | 'guest';
     /** invitation lifecycle の状態です。 */
     status: 'provisioning' | 'pending' | 'delivery-failed' | 'expired' | 'revoked' | 'accepted';
   },
 ) {
   const createdAt = '2026-07-11T00:00:00.000Z';
+  const email = input.email ?? 'invited@example.com';
 
   return {
     workspaceId: { S: 'user#demo@example.com' },
-    recordKey: { S: 'INVITATION#invited@example.com' },
+    recordKey: { S: `INVITATION#${email}` },
     entryType: { S: 'workspace-invitation' },
-    id: { S: 'invited@example.com' },
-    email: { S: 'invited@example.com' },
-    role: { S: 'member' },
+    id: { S: email },
+    email: { S: email },
+    role: { S: input.role ?? 'member' },
     status: { S: input.status },
     deliveryStatus: { S: 'not-required' },
     identityOwnership: { S: input.identityOwnership },
     version: { N: '1' },
-    expiresAt: { S: '2026-07-18T00:00:00.000Z' },
+    expiresAt: { S: input.expiresAt ?? '2099-01-01T00:00:00.000Z' },
     createdAt: { S: createdAt },
     updatedAt: { S: createdAt },
     invitedBy: { S: 'demo@example.com' },

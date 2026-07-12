@@ -11,6 +11,7 @@ import {
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
+  type TransactWriteCommandInput,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { Hono } from 'hono'
@@ -553,6 +554,10 @@ type ProjectCreatorContext = {
    * Cognito user を正規化した member key です。
    */
   userKey: string
+  /**
+   * project manager row 作成と競合させる Workspace member version です。
+   */
+  workspaceMemberVersion: number
 }
 
 /**
@@ -1725,6 +1730,7 @@ type ProjectDirectoryClient = {
     projectId: string,
     memberKey: string,
     input: UpdateProjectMemberRequestBody,
+    expectedWorkspaceMemberVersion: number,
     auditContext?: MutationAuditContext,
   ): Promise<UpdateProjectMemberResponse>
   /**
@@ -2085,6 +2091,11 @@ app.patch('/api/workspace/members/:memberKey', async (c) => {
     const role = body?.role === undefined ? undefined : readWorkspaceRole(body.role)
     const status = body?.status === undefined ? undefined : readWorkspaceMemberStatus(body.status)
     const expectedVersion = readWorkspaceVersion(body?.expectedVersion)
+
+    if (status === 'deactivated') {
+      await requireWorkspaceMemberHasNoManagedProjects(principal.directoryId, memberKey)
+    }
+
     const member = await workspaceAccess.updateMember(
       principal.directoryId,
       principal.userKey,
@@ -2270,7 +2281,10 @@ app.post('/api/teams/:teamId/projects', async (c) => {
         principal.directoryId,
         teamId,
         body ?? {},
-        { userKey: principal.userKey },
+        {
+          userKey: principal.userKey,
+          workspaceMemberVersion: principal.workspaceMember.version,
+        },
         createApiMutationContext(c, principal, { teamId, ...body }),
       ),
       201,
@@ -2506,6 +2520,7 @@ app.patch('/api/projects/:projectId/members/:memberKey', async (c) => {
             email: profile.email,
             name: profile.name,
           },
+          workspaceMember.version,
           createApiMutationContext(c, principal, {
             projectId,
             memberKey: profile.id,
@@ -3496,6 +3511,22 @@ function requireWorkspaceAdministration(principal: WorkspacePrincipal) {
   )
 }
 
+async function requireWorkspaceMemberHasNoManagedProjects(
+  directoryId: string,
+  memberKey: string,
+) {
+  const managedProject = (await projectDirectory.getProjectAccessList(directoryId, memberKey))
+    .find((access) => access.role === 'manager')
+
+  if (managedProject) {
+    throw new WorkspaceAccessError(
+      409,
+      'WorkspaceMemberManagesProjects',
+      'Transfer or remove all active project manager roles before deactivating this member.',
+    )
+  }
+}
+
 function toProjectDataErrorResponse(c: Context, error: unknown) {
   if (error instanceof WorkspaceAccessError) {
     return toWorkspaceAccessErrorResponse(c, error)
@@ -3536,6 +3567,14 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
 
   if (error.code === 'ProjectLastManager') {
     return c.json({ message: 'At least one project manager is required.' }, 409)
+  }
+
+  if (error.code === 'WorkspaceMemberInactive') {
+    return c.json({ message: 'Only active Workspace members can be assigned to a project.' }, 409)
+  }
+
+  if (error.code === 'WorkspaceMemberVersionConflict') {
+    return c.json({ message: 'Workspace member changed. Reload and try again.' }, 409)
   }
 
   if (error.code === 'ResourceNotFoundException') {
@@ -3757,27 +3796,31 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem, directory
 
 async function listActiveWorkspaceCognitoUsers(directoryId: string, c: Context) {
   const input = readCognitoUsersInput(c, directoryId)
-  const query = input.query?.toLowerCase()
-  const members = (await workspaceAccess.listActiveMembers(directoryId))
-    .filter((member) => !query || member.email.includes(query) || member.name?.toLowerCase().includes(query))
-    .slice(0, clampCognitoPageLimit(input.limit))
-  const users = await Promise.all(
-    members.map(async (member) => {
-      try {
-        return {
-          ...await cognito.getUserProfile(member.memberKey),
-          workspaceStatus: 'active' as const,
-        }
-      } catch (error) {
-        console.warn('Failed to hydrate active Workspace member from Cognito:', error)
-        return undefined
-      }
-    }),
+  const limit = clampCognitoPageLimit(input.limit)
+  const activeMemberKeys = new Set(
+    (await workspaceAccess.listActiveMembers(directoryId)).map((member) => member.memberKey),
   )
+  const users: CognitoUserProfile[] = []
+  let paginationToken = input.paginationToken
+
+  do {
+    const response = await cognito.listUsers({
+      ...input,
+      limit: Math.max(1, limit - users.length),
+      paginationToken,
+    })
+
+    users.push(
+      ...response.users
+        .filter((user) => activeMemberKeys.has(user.id))
+        .map((user) => ({ ...user, workspaceStatus: 'active' as const })),
+    )
+    paginationToken = response.nextToken
+  } while (users.length < limit && paginationToken)
 
   return {
-    users: users.filter(isDefined),
-    nextToken: undefined,
+    users,
+    nextToken: paginationToken,
   } satisfies CognitoUsersResponse
 }
 
@@ -5664,6 +5707,10 @@ export class DynamoDbProjectDirectoryClient {
    * immutable audit event を保存する DynamoDB table 名です。
    */
   private readonly auditTableName?: string
+  /**
+   * project member mutation と競合させる Workspace access table 名です。
+   */
+  private readonly workspaceAccessTableName: string
 
   constructor(
     tableName =
@@ -5674,12 +5721,17 @@ export class DynamoDbProjectDirectoryClient {
     dynamoDbClient?: DynamoDBClient,
     bootstrapLocalTables = dynamoDbClient === undefined && shouldBootstrapLocalDynamoDb(),
     auditTableName = getConfiguredAuditTableName(),
+    workspaceAccessTableName =
+      getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
+      getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
+      'mukuroji-workspace-access-local',
   ) {
     this.tableName = tableName
     this.documentClient = documentClient
     this.dynamoDbClient = dynamoDbClient ?? createDynamoDbClient()
     this.bootstrapLocalTables = bootstrapLocalTables
     this.auditTableName = auditTableName
+    this.workspaceAccessTableName = workspaceAccessTableName
   }
 
   /**
@@ -5727,7 +5779,7 @@ export class DynamoDbProjectDirectoryClient {
   async getProjectAccessList(directoryId: string, memberKey: string) {
     try {
       const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
-      const items = await this.readValidDirectoryItems(directoryId)
+      const items = await this.readValidDirectoryItems(directoryId, true)
 
       return toProjectAccessEntries(items, normalizedMemberKey)
     } catch (error) {
@@ -5806,6 +5858,7 @@ export class DynamoDbProjectDirectoryClient {
     projectId: string,
     memberKey: string,
     input: UpdateProjectMemberRequestBody,
+    expectedWorkspaceMemberVersion: number,
     auditContext?: MutationAuditContext,
   ) {
     await this.ensureLocalAuditTable()
@@ -5871,57 +5924,59 @@ export class DynamoDbProjectDirectoryClient {
           : {}),
       }
 
+      const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = []
+
       if (guardManager) {
-        try {
-          await this.documentClient.send(
-            new TransactWriteCommand({
-              TransactItems: [
-                {
-                  ConditionCheck: this.createProjectManagerConditionCheck(directoryId, guardManager.entryKey),
-                },
-                {
-                  Put: memberPut,
-                },
-                ...(auditPut ? [auditPut] : []),
-              ],
-            }),
+        transactItems.push({
+          ConditionCheck: this.createProjectManagerConditionCheck(directoryId, guardManager.entryKey),
+        })
+      }
+
+      transactItems.push(
+        {
+          Put: memberPut,
+        },
+        {
+          Update: this.createActiveWorkspaceMemberVersionUpdate(
+            directoryId,
+            normalizedMemberKey,
+            expectedWorkspaceMemberVersion,
+            updatedAt,
+          ),
+        },
+        ...(auditPut ? [auditPut] : []),
+      )
+      const workspaceUpdateIndex = guardManager ? 2 : 1
+
+      try {
+        await this.documentClient.send(
+          new TransactWriteCommand({ TransactItems: transactItems }),
+        )
+      } catch (error) {
+        if (isTransactionConditionalFailureAt(error, workspaceUpdateIndex)) {
+          await this.requireUnchangedActiveWorkspaceMember(
+            directoryId,
+            normalizedMemberKey,
+            expectedWorkspaceMemberVersion,
           )
-        } catch (error) {
-          if (
+        }
+
+        if (
+          guardManager &&
+          (
             isTransactionConditionalFailureAt(error, 0) ||
             isTransactionConditionalFailureAt(error, 1)
-          ) {
-            await this.throwProjectManagerTransactionCancellationResult(
-              directoryId,
-              projectId,
-              normalizedMemberKey,
-              error,
-            )
-          }
-
-          if (hasTransactionConditionalFailure(error)) {
-            throw createProjectDataConflictError()
-          }
-
-          throw error
-        }
-      } else {
-        if (auditPut) {
-          await this.documentClient.send(
-            new TransactWriteCommand({
-              TransactItems: [
-                { Put: memberPut },
-                auditPut,
-              ],
-            }),
           )
-        } else {
-          await this.documentClient.send(
-            new PutCommand({
-              ...memberPut,
-            }),
+        ) {
+          await this.throwProjectManagerTransactionCancellationResult(
+            directoryId,
+            projectId,
+            normalizedMemberKey,
+            error,
           )
         }
+
+        throw error
       }
 
       return {
@@ -6259,6 +6314,14 @@ export class DynamoDbProjectDirectoryClient {
                   ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
                 },
               },
+              {
+                Update: this.createActiveWorkspaceMemberVersionUpdate(
+                  directoryId,
+                  creatorMemberKey,
+                  creator.workspaceMemberVersion,
+                  updatedAt,
+                ),
+              },
               ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
                 directoryId,
                 eventType: 'project.created',
@@ -6280,6 +6343,14 @@ export class DynamoDbProjectDirectoryClient {
           }),
         )
       } catch (error) {
+        if (isTransactionConditionalFailureAt(error, 3)) {
+          await this.requireUnchangedActiveWorkspaceMember(
+            directoryId,
+            creatorMemberKey,
+            creator.workspaceMemberVersion,
+          )
+        }
+
         if (isTransactionConditionalFailureAt(error, 0)) {
           await this.throwCreateProjectTransactionCancellationResult(directoryId, teamId, error)
         }
@@ -6757,6 +6828,72 @@ export class DynamoDbProjectDirectoryClient {
       ExpressionAttributeValues: {
         ':manager': 'manager',
       },
+    }
+  }
+
+  /**
+   * project member 書き込みと同時に active Workspace member の version を進めます。
+   */
+  private createActiveWorkspaceMemberVersionUpdate(
+    workspaceId: string,
+    memberKey: string,
+    expectedVersion: number,
+    updatedAt: string,
+  ) {
+    return {
+      TableName: this.workspaceAccessTableName,
+      Key: {
+        workspaceId,
+        recordKey: `MEMBER#${normalizeProjectMemberKey(memberKey)}`,
+      },
+      UpdateExpression: 'SET updatedAt = :updatedAt ADD #version :one',
+      ConditionExpression:
+        '#entryType = :memberEntryType AND #status = :active AND #version = :expectedVersion',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#status': 'status',
+        '#version': 'version',
+      },
+      ExpressionAttributeValues: {
+        ':memberEntryType': 'workspace-member',
+        ':active': 'active',
+        ':expectedVersion': expectedVersion,
+        ':updatedAt': updatedAt,
+        ':one': 1,
+      },
+    }
+  }
+
+  /** transaction cancel 後に対象 Workspace member の active/version を再確認します。 */
+  private async requireUnchangedActiveWorkspaceMember(
+    workspaceId: string,
+    memberKey: string,
+    expectedVersion: number,
+  ) {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.workspaceAccessTableName,
+      Key: {
+        workspaceId,
+        recordKey: `MEMBER#${normalizeProjectMemberKey(memberKey)}`,
+      },
+      ConsistentRead: true,
+    }))
+    const item = response.Item
+
+    if (item?.entryType !== 'workspace-member' || item.status !== 'active') {
+      throw new ProjectDataError(
+        409,
+        'WorkspaceMemberInactive',
+        'Only active Workspace members can be assigned to a project.',
+      )
+    }
+
+    if (item.version !== expectedVersion) {
+      throw new ProjectDataError(
+        409,
+        'WorkspaceMemberVersionConflict',
+        'Workspace member changed. Reload and try again.',
+      )
     }
   }
 
