@@ -478,6 +478,168 @@ export function createWorkspaceSearchDocument(
   return document
 }
 
+/** Team source を runtime/backfill 共通の search document へ変換します。 */
+export function createTeamWorkspaceSearchDocument(input: {
+  /** Canonical Workspace ID です。 */
+  workspaceId: string
+  /** Canonical Team ID です。 */
+  teamId: string
+  /** Team の現在表示名です。 */
+  title: string
+  /** Team の補助表示名です。 */
+  subtitle?: string
+  /** Team row を作成した user ID です。 */
+  creatorUserId?: string
+  /** Team row の作成日時です。 */
+  createdAt?: string
+  /** Team row の最終更新日時です。 */
+  updatedAt?: string
+}) {
+  return createWorkspaceSearchDocument({
+    workspaceId: input.workspaceId,
+    entityType: 'team',
+    entityId: `team/${input.teamId}`,
+    title: input.title,
+    ...(input.subtitle ? { subtitle: input.subtitle } : {}),
+    url: `/teams/${encodeURIComponent(input.teamId)}/overview`,
+    teamId: input.teamId,
+    ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
+    ...(input.createdAt ? { createdAt: input.createdAt } : {}),
+    ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+  })
+}
+
+/** Project source を runtime/backfill 共通の search document へ変換します。 */
+export function createProjectWorkspaceSearchDocument(input: {
+  /** Canonical Workspace ID です。 */
+  workspaceId: string
+  /** Project owner の Team ID です。 */
+  teamId: string
+  /** Canonical Project ID です。 */
+  projectId: string
+  /** Project の現在表示名です。 */
+  title: string
+  /** Project の補助表示名です。 */
+  subtitle?: string
+  /** Project row を作成した user ID です。 */
+  creatorUserId?: string
+  /** Project row の作成日時です。 */
+  createdAt?: string
+  /** Project row の最終更新日時です。 */
+  updatedAt?: string
+}) {
+  const query = new URLSearchParams({ teamId: input.teamId })
+  return createWorkspaceSearchDocument({
+    workspaceId: input.workspaceId,
+    entityType: 'project',
+    entityId: `team/${input.teamId}/project/${input.projectId}`,
+    title: input.title,
+    ...(input.subtitle ? { subtitle: input.subtitle } : {}),
+    url: `/projects/${encodeURIComponent(input.projectId)}/issues?${query.toString()}`,
+    teamId: input.teamId,
+    projectId: input.projectId,
+    ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
+    ...(input.createdAt ? { createdAt: input.createdAt } : {}),
+    ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+  })
+}
+
+/** Canonical Work Item source を runtime/backfill 共通の search document へ変換します。 */
+export function createWorkItemWorkspaceSearchDocument(input: {
+  /** Canonical Workspace ID です。 */
+  workspaceId: string
+  /** Work Item owner の Team ID です。 */
+  teamId: string
+  /** Team 内の Work Item ID です。 */
+  issueId: string
+  /** Work Item の現在タイトルです。 */
+  title: string
+  /** Work Item の現在説明です。 */
+  body?: string
+  /** Work Item の現在 assigned Project ID です。 */
+  projectId?: string
+  /** Work Item の現在 assignee user ID です。 */
+  assigneeUserId?: string
+  /** Work Item の creator user ID です。 */
+  creatorUserId?: string
+  /** Work Item の現在 status です。 */
+  status?: string
+  /** Work Item の custom field values です。 */
+  customFields?: Record<string, SearchCustomFieldValue>
+  /** Work Item の relation IDs です。 */
+  relationIds?: string[]
+  /** Work Item の現在 due date です。 */
+  dueDate?: string
+  /** Work Item の作成日時です。 */
+  createdAt?: string
+  /** Work Item の最終更新日時です。 */
+  updatedAt?: string
+}) {
+  const entityId = `team/${input.teamId}/issue/${input.issueId}`
+  const query = new URLSearchParams({
+    ...(input.projectId ? { teamId: input.teamId } : {}),
+    issueId: input.issueId,
+  })
+  return createWorkspaceSearchDocument({
+    workspaceId: input.workspaceId,
+    entityType: 'work-item',
+    entityId,
+    title: input.title,
+    subtitle: input.issueId,
+    ...(input.body ? { body: input.body } : {}),
+    url: input.projectId
+      ? `/projects/${encodeURIComponent(input.projectId)}/issues?${query.toString()}`
+      : `/teams/${encodeURIComponent(input.teamId)}/issues?${query.toString()}`,
+    teamId: input.teamId,
+    ...(input.projectId ? { projectId: input.projectId } : {}),
+    ...(input.assigneeUserId ? { assigneeUserId: input.assigneeUserId } : {}),
+    ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
+    ...(input.status ? { status: input.status } : {}),
+    ...(input.customFields ? { customFields: input.customFields } : {}),
+    ...(input.relationIds ? { relationIds: input.relationIds } : {}),
+    ...(input.dueDate ? { dueDate: input.dueDate } : {}),
+    ...(input.createdAt ? { createdAt: input.createdAt } : {}),
+    ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+  })
+}
+
+/** Collaboration comment source を runtime/backfill 共通の search document へ変換します。 */
+export function createCommentWorkspaceSearchDocument(input: {
+  /** Canonical Workspace ID です。 */
+  workspaceId: string
+  /** Parent Work Item owner の Team ID です。 */
+  teamId: string
+  /** Parent Work Item ID です。 */
+  issueId: string
+  /** Canonical Comment ID です。 */
+  commentId: string
+  /** Comment の現在 Markdown 本文です。 */
+  body: string
+  /** Comment author の Workspace member key です。 */
+  creatorUserId?: string
+  /** Comment の作成日時です。 */
+  createdAt?: string
+  /** Comment の最終更新日時です。 */
+  updatedAt?: string
+}) {
+  const parentId = `team/${input.teamId}/issue/${input.issueId}`
+  const query = new URLSearchParams({ issueId: input.issueId, commentId: input.commentId })
+  return createWorkspaceSearchDocument({
+    workspaceId: input.workspaceId,
+    entityType: 'comment',
+    entityId: `${parentId}/comment/${input.commentId}`,
+    title: createCommentSearchTitle(input.body),
+    ...(input.creatorUserId ? { subtitle: input.creatorUserId } : {}),
+    body: input.body,
+    url: `/teams/${encodeURIComponent(input.teamId)}/issues?${query.toString()}`,
+    teamId: input.teamId,
+    parentId,
+    ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
+    ...(input.createdAt ? { createdAt: input.createdAt } : {}),
+    ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+  })
+}
+
 /**
  * DynamoDB-backed Workspace search と saved view client です。
  */
@@ -568,11 +730,15 @@ export class DynamoDbWorkspaceSearchClient {
         ScanIndexForward: true,
         Limit: Math.min(100, WORKSPACE_SEARCH_EVALUATION_LIMIT - evaluated),
       }))
-      const documents = (response.Items ?? []).map(readWorkspaceSearchDocument)
+      const documentRows = (response.Items ?? []).map((item) => ({
+        document: readWorkspaceSearchDocumentSafely(item),
+        recordKey: typeof item.recordKey === 'string' ? item.recordKey : undefined,
+      }))
       const currentDocuments = await mapWithConcurrency(
-        documents,
+        documentRows,
         WORKSPACE_SEARCH_SCOPE_CONCURRENCY,
-        async (storedDocument) => {
+        async ({ document: storedDocument }) => {
+          if (!storedDocument) return undefined
           const resolvedScope = input.resolveCurrentScope
             ? await input.resolveCurrentScope(storedDocument)
             : {
@@ -594,12 +760,12 @@ export class DynamoDbWorkspaceSearchClient {
       let processedDocumentCount = 0
       let lastProcessedRecordKey: string | undefined
 
-      for (let index = 0; index < documents.length; index += 1) {
-        const storedDocument = documents[index]
-        if (!storedDocument) continue
+      for (let index = 0; index < documentRows.length; index += 1) {
+        const row = documentRows[index]
+        if (!row) continue
         processedDocumentCount += 1
         evaluated += 1
-        lastProcessedRecordKey = storedDocument.recordKey
+        if (row.recordKey) lastProcessedRecordKey = row.recordKey
         const document = currentDocuments[index]
         if (!document) continue
         results.push(toWorkspaceSearchResult(document, filters.keyword))
@@ -613,7 +779,7 @@ export class DynamoDbWorkspaceSearchClient {
         ? response.LastEvaluatedKey.recordKey
         : undefined
       if (reachedLimit) {
-        const hasUnprocessedRows = processedDocumentCount < documents.length || Boolean(responseLastRecordKey)
+        const hasUnprocessedRows = processedDocumentCount < documentRows.length || Boolean(responseLastRecordKey)
         nextRecordKey = hasUnprocessedRows ? lastProcessedRecordKey : undefined
         break
       }
@@ -1521,6 +1687,15 @@ function readWorkspaceSearchDocument(value: Record<string, unknown>) {
   }
 }
 
+function readWorkspaceSearchDocumentSafely(value: Record<string, unknown>) {
+  try {
+    return readWorkspaceSearchDocument(value)
+  } catch (error) {
+    console.error('Workspace search skipped an invalid index document.', error)
+    return undefined
+  }
+}
+
 function readStoredSavedWorkspaceView(value: Record<string, unknown>) {
   if (
     value.entryType !== 'saved-view' ||
@@ -1895,6 +2070,14 @@ function normalizeSearchText(value: string) {
   return value.normalize('NFKC').toLocaleLowerCase().replace(/\s+/gu, ' ').trim()
 }
 
+function createCommentSearchTitle(body: string) {
+  const firstLine = body
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find(Boolean)
+  return (firstLine ?? 'Comment').slice(0, 160)
+}
+
 function canonicalizeSearchDate(value: string) {
   const match = value.match(/^(\d{4})\/(\d{2})\/(\d{2})(.*)$/u)
   return match ? `${match[1]}-${match[2]}-${match[3]}${match[4]}` : value
@@ -1982,6 +2165,9 @@ function copyOptionalResultFields(result: WorkspaceSearchResult, document: Works
   ] as const) {
     const value = document[key]
     if (value !== undefined) result[key] = value
+  }
+  if (document.customFields) {
+    result.customFields = document.customFields
   }
 }
 

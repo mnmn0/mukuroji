@@ -54,28 +54,34 @@ const meta = {
 
 export default meta
 
+/** Storybook story type for Sidebar examples. */
 type Story = StoryObj<typeof meta>
 
+/** Default expanded sidebar state. */
 export const Default: Story = {}
 
+/** Collapsed sidebar state. */
 export const Collapsed: Story = {
   args: {
     defaultCollapsed: true,
   },
 }
 
+/** English sidebar labels. */
 export const English: Story = {
   args: {
     labels: createSidebarLabels('en'),
   },
 }
 
+/** Sidebar with the create modal open. */
 export const CreateModalOpen: Story = {
   args: {
     defaultCreatePanelOpen: true,
   },
 }
 
+/** Sidebar with enough projects to exercise list scrolling. */
 export const ProjectListScrolled: Story = {
   args: {
     labels: createSidebarLabels('ja'),

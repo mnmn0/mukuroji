@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
 import {
   CreateTableCommand,
   DescribeTableCommand,
@@ -8,6 +8,8 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   DynamoDbWorkspaceSearchClient,
   WorkspaceSearchError,
+  createCommentWorkspaceSearchDocument,
+  createWorkItemWorkspaceSearchDocument,
   createWorkspaceSearchDocument,
   ensureLocalWorkspaceSearchTable,
   migrateSavedWorkspaceView,
@@ -53,6 +55,48 @@ test('keeps the unprocessed DynamoDB page behind the opaque search cursor', asyn
   })).rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
 })
 
+test('skips an invalid index row without failing or skipping the remaining page', async () => {
+  const createDocument = (id: string) => createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: `team/core/issue/${id}`,
+    title: `${id} title`,
+    url: `/teams/core/issues?issueId=${id}`,
+    teamId: 'core',
+  })
+  const alpha = createDocument('alpha')
+  const malformed = { ...createDocument('beta'), schemaVersion: 999 }
+  const gamma = createDocument('gamma')
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([alpha, malformed, gamma]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const input = {
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set<string>(),
+      teamIds: new Set(['core']),
+    },
+    limit: 1,
+  }
+  const errorSpy = spyOn(console, 'error').mockImplementation(() => {})
+
+  try {
+    const first = await client.search(input)
+    const second = await client.search({ ...input, cursor: first.nextCursor })
+
+    expect(first.results.map((result) => result.id)).toEqual([alpha.entityId])
+    expect(second.results.map((result) => result.id)).toEqual([gamma.entityId])
+    expect(errorSpy).toHaveBeenCalledTimes(2)
+  } finally {
+    errorSpy.mockRestore()
+  }
+})
+
 test('derives document keys from entity identity instead of trusting producer input', () => {
   expect(() => createWorkspaceSearchDocument({
     workspaceId: 'workspace-1',
@@ -62,6 +106,37 @@ test('derives document keys from entity identity instead of trusting producer in
     title: 'Document',
     url: '/documents/document-1',
   })).toThrow('record key does not match')
+})
+
+test('normalizes realtime and backfill Work Item and comment projection fields consistently', () => {
+  const workItem = createWorkItemWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    issueId: 'issue-1',
+    title: 'Release readiness',
+    body: 'Coordinate the final launch.',
+    customFields: { effort: 8 },
+    relationIds: ['blocks:issue-2'],
+  })
+  const comment = createCommentWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    issueId: 'issue-1',
+    commentId: 'comment-1',
+    body: 'Approved for release.\nProceed with rollout.',
+    creatorUserId: 'owner@example.com',
+  })
+
+  expect(workItem).toMatchObject({
+    subtitle: 'issue-1',
+    customFields: { effort: 8 },
+    relationIds: ['blocks:issue-2'],
+  })
+  expect(comment).toMatchObject({
+    title: 'Approved for release.',
+    subtitle: 'owner@example.com',
+    parentId: 'team/core/issue/issue-1',
+  })
 })
 
 test('applies current resolved scope before RBAC and composite project filters', async () => {
@@ -115,6 +190,10 @@ test('applies current resolved scope before RBAC and composite project filters',
   expect(response.results).toHaveLength(1)
   expect(response.results[0]?.projectId).toBe('project-current')
   expect(response.results[0]?.dueDate).toBe('2026-07-20')
+  expect(response.results[0]?.customFields).toEqual({
+    score: 8,
+    channel: ['web', 'mobile'],
+  })
   expect(response.results[0]?.highlights).toEqual(expect.arrayContaining([
     expect.objectContaining({ field: 'body' }),
   ]))

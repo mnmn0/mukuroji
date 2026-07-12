@@ -470,7 +470,7 @@ const defaultLabels: SidebarLabels = {
   collapse: 'サイドバーを折りたたむ',
   expand: 'サイドバーを展開する',
   search: 'Workspace を検索',
-  searchShortcut: '⌘K',
+  searchShortcut: 'Ctrl/⌘ K',
   teamProjects: 'チーム / プロジェクト',
   createTeam: 'チームを追加',
   create: {

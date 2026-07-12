@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { SearchViewLayout, WorkspaceSearchResult } from '@mukuroji/contracts'
 import { sortWorkspaceSearchResults } from '../src/search/sortResults'
 import {
+  deduplicateSearchMigrationWarnings,
   getSearchColumns,
   getSearchCustomFields,
   getSearchDateField,
@@ -16,6 +17,17 @@ import {
 } from '../src/search/queryState'
 
 describe('Workspace search URL state', () => {
+  test('migration warnings keep first-seen order without duplicates', () => {
+    expect(deduplicateSearchMigrationWarnings(
+      ['URL schema migrated', 'Deleted field: risk'],
+      ['Deleted field: risk', 'Deleted field: score'],
+    )).toEqual([
+      'URL schema migrated',
+      'Deleted field: risk',
+      'Deleted field: score',
+    ])
+  })
+
   test('keyword, filters, layout, sort, group, and columns round-trip canonically', () => {
     const source = new URLSearchParams(
       'q=launch&type=comment&type=work-item&status=review&assignee=demo%40example.com&creator=owner%40example.com&team=core-team&project=shared-launch&dateField=dueDate&dateFrom=2026-07-01&dateTo=2026-07-31&relation=blocks%3A42&customField=%7B%22fieldId%22%3A%22risk%22%2C%22operator%22%3A%22equals%22%2C%22value%22%3A%22high%22%7D&layout=board&sort=updatedAt%3Adesc&sort=title%3Aasc&sort=custom%3Arisk%3Aasc&group=status&columns=title%2Cstatus%2Cassignee&view=review-view&v=1',
@@ -95,6 +107,21 @@ describe('Workspace search result sorting', () => {
       results.map((result) => result.id),
     )
   })
+
+  test('custom field sort reads the stored result value and keeps missing values last', () => {
+    const customResults = [
+      createResult('high-risk', 'work-item', undefined, undefined, { risk: 10 }),
+      createResult('missing-risk', 'work-item'),
+      createResult('low-risk', 'work-item', undefined, undefined, { risk: 2 }),
+    ]
+    const prefixedLayout = createLayout([{ field: 'custom:risk', direction: 'asc' }])
+
+    expect(sortWorkspaceSearchResults(customResults, prefixedLayout).map((result) => result.id)).toEqual([
+      'low-risk',
+      'high-risk',
+      'missing-risk',
+    ])
+  })
 })
 
 function createLayout(sort: SearchViewLayout['sort']): SearchViewLayout {
@@ -110,8 +137,10 @@ function createResult(
   entityType: WorkspaceSearchResult['entityType'],
   updatedAt?: string,
   status?: string,
+  customFields?: WorkspaceSearchResult['customFields'],
 ): WorkspaceSearchResult {
   return {
+    customFields,
     entityType,
     highlights: [],
     id,

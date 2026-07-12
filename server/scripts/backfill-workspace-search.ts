@@ -11,7 +11,10 @@ import {
   type SearchEntityType,
 } from '@mukuroji/contracts'
 import {
-  createWorkspaceSearchDocument,
+  createCommentWorkspaceSearchDocument,
+  createProjectWorkspaceSearchDocument,
+  createTeamWorkspaceSearchDocument,
+  createWorkItemWorkspaceSearchDocument,
   createWorkspaceSearchDocumentRecordKey,
   ensureLocalWorkspaceSearchTable,
   type WorkspaceSearchDocument,
@@ -551,13 +554,10 @@ function mapTeamDirectoryItem(
 
   return {
     action: 'put',
-    document: createSearchDocument({
+    document: createTeamWorkspaceSearchDocument({
       workspaceId,
-      entityType: 'team',
-      entityId,
       title,
       subtitle,
-      url: `/teams/${encodeURIComponent(teamId)}/overview`,
       teamId,
       createdAt: readOptionalString(item.createdAt),
       updatedAt: readOptionalString(item.updatedAt),
@@ -590,13 +590,10 @@ function mapProjectDirectoryItemRow(
 
   return {
     action: 'put',
-    document: createSearchDocument({
+    document: createProjectWorkspaceSearchDocument({
       workspaceId,
-      entityType: 'project',
-      entityId,
       title,
       subtitle,
-      url: createProjectUrl(projectId, teamId),
       teamId,
       projectId,
       createdAt: readOptionalString(item.createdAt),
@@ -632,15 +629,12 @@ export function mapWorkItem(item: Record<string, unknown>): SearchProjectionOper
 
   return {
     action: 'put',
-    document: createSearchDocument({
+    document: createWorkItemWorkspaceSearchDocument({
       workspaceId,
-      entityType: 'work-item',
-      entityId,
-      title,
-      subtitle: issueId,
-      body: readOptionalString(item.description),
-      url: createWorkItemUrl(teamId, issueId, projectId),
       teamId,
+      issueId,
+      title,
+      body: readOptionalString(item.description),
       projectId,
       assigneeUserId: readOptionalString(item.assigneeUserId),
       creatorUserId: readOptionalString(item.creatorMemberKey),
@@ -689,27 +683,17 @@ export function mapCollaborationItem(
 
   return {
     action: 'put',
-    document: createSearchDocument({
+    document: createCommentWorkspaceSearchDocument({
       workspaceId: scope.workspaceId,
-      entityType: 'comment',
-      entityId,
-      title: createCommentTitle(body),
-      subtitle: authorMemberKey,
-      body,
-      url: createCommentUrl(scope.teamId, scope.issueId, commentId),
       teamId: scope.teamId,
-      parentId: createWorkItemEntityId(scope.teamId, scope.issueId),
+      issueId: scope.issueId,
+      commentId,
+      body,
       creatorUserId: authorMemberKey,
       createdAt: readOptionalString(item.createdAt),
       updatedAt: readOptionalString(item.updatedAt) ?? readOptionalString(item.createdAt),
     }),
   }
-}
-
-function createSearchDocument(
-  input: Omit<WorkspaceSearchDocument, 'schemaVersion' | 'recordKey' | 'entryType'>,
-): WorkspaceSearchDocument {
-  return createWorkspaceSearchDocument(input)
 }
 
 function createDeleteOperation(
@@ -777,35 +761,6 @@ function createWorkItemEntityId(teamId: string, issueId: string) {
 
 function createCommentEntityId(teamId: string, issueId: string, commentId: string) {
   return `${createWorkItemEntityId(teamId, issueId)}/comment/${commentId}`
-}
-
-function createProjectUrl(projectId: string, teamId: string) {
-  const query = new URLSearchParams({ teamId })
-  return `/projects/${encodeURIComponent(projectId)}/issues?${query.toString()}`
-}
-
-function createWorkItemUrl(teamId: string, issueId: string, projectId: string | undefined) {
-  if (!projectId) {
-    const query = new URLSearchParams({ issueId })
-    return `/teams/${encodeURIComponent(teamId)}/issues?${query.toString()}`
-  }
-
-  const query = new URLSearchParams({ teamId, issueId })
-  return `/projects/${encodeURIComponent(projectId)}/issues?${query.toString()}`
-}
-
-function createCommentUrl(teamId: string, issueId: string, commentId: string) {
-  const query = new URLSearchParams({ issueId, commentId })
-  return `/teams/${encodeURIComponent(teamId)}/issues?${query.toString()}`
-}
-
-function createCommentTitle(body: string) {
-  const firstLine = body
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .find(Boolean)
-
-  return (firstLine ?? 'Comment').slice(0, 160)
 }
 
 function readLocalizedTitle(item: Record<string, unknown>) {

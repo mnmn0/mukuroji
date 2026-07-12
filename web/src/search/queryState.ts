@@ -203,6 +203,15 @@ export function updateSearchRouteState(
 }
 
 /**
+ * URL と saved view 由来の migration warning を表示順を保って一意化します。
+ */
+export function deduplicateSearchMigrationWarnings(
+  ...warningGroups: readonly (readonly string[])[]
+) {
+  return [...new Set(warningGroups.flat())]
+}
+
+/**
  * URL state から keyword を安全に読み取ります。
  */
 export function getSearchKeyword(filters: WorkspaceSearchFilters) {

@@ -211,6 +211,10 @@ export type WorkspaceSearchResult = {
    */
   status?: string
   /**
+   * Entity の custom field value map です。
+   */
+  customFields?: Record<string, SearchCustomFieldValue>
+  /**
    * Entity の期限日です。
    */
   dueDate?: string
@@ -261,7 +265,7 @@ export type SearchViewSortDirection = 'asc' | 'desc'
  */
 export type SearchViewSort = {
   /**
-   * Built-in field または custom field ID です。
+   * Built-in field または `custom:<field ID>` 形式の custom field です。
    */
   field: string
   /**

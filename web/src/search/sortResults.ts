@@ -1,5 +1,13 @@
 import type { SearchViewLayout, WorkspaceSearchResult } from '@mukuroji/contracts'
 
+const resultFieldAliases: Record<string, string> = {
+  assignee: 'assigneeUserId',
+  creator: 'creatorUserId',
+  project: 'projectId',
+  team: 'teamId',
+  type: 'entityType',
+}
+
 /**
  * Saved viewのmulti-sortを全layoutで共有できるようsearch resultへ安定適用します。
  *
@@ -22,8 +30,8 @@ export function sortWorkspaceSearchResults(
         continue
       }
 
-      const leftValue = resolveSearchResultSortValue(left, rule.field)
-      const rightValue = resolveSearchResultSortValue(right, rule.field)
+      const leftValue = resolveWorkspaceSearchResultFieldValue(left, rule.field)
+      const rightValue = resolveWorkspaceSearchResultFieldValue(right, rule.field)
       const leftMissing = isMissingSearchResultValue(leftValue)
       const rightMissing = isMissingSearchResultValue(rightValue)
 
@@ -43,8 +51,21 @@ export function sortWorkspaceSearchResults(
   })
 }
 
-function resolveSearchResultSortValue(result: WorkspaceSearchResult, field: string) {
-  return (result as unknown as Record<string, unknown>)[field]
+/**
+ * Built-in alias と custom field ID を同じ saved layout field から解決します。
+ */
+export function resolveWorkspaceSearchResultFieldValue(
+  result: WorkspaceSearchResult,
+  field: string,
+) {
+  const customFieldId = field.startsWith('custom:') ? field.slice('custom:'.length) : undefined
+  if (customFieldId) {
+    return result.customFields?.[customFieldId]
+  }
+
+  const resultField = resultFieldAliases[field] ?? field
+  const builtInValue = (result as unknown as Record<string, unknown>)[resultField]
+  return builtInValue ?? result.customFields?.[field]
 }
 
 function compareSearchResultValues(left: unknown, right: unknown) {

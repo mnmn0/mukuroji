@@ -3,7 +3,10 @@ import { useMemo, type ReactNode } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../i18n'
 import { resolveSearchResultPath } from './api'
 import { getSearchColumns, getSearchGroup, getSearchLayoutMode } from './queryState'
-import { sortWorkspaceSearchResults } from './sortResults'
+import {
+  resolveWorkspaceSearchResultFieldValue,
+  sortWorkspaceSearchResults,
+} from './sortResults'
 
 /**
  * SearchResultCollectionへ渡すpropsです。
@@ -328,7 +331,7 @@ function HighlightedField({
 }) {
   const highlight = result.highlights.find((candidate) => candidate.field === field)
 
-  if (!highlight) {
+  if (!highlight || highlight.fragments.length === 0) {
     return fallback
   }
 
@@ -343,7 +346,9 @@ function groupResults(results: WorkspaceSearchResult[], field: string) {
   const groups = new Map<string, WorkspaceSearchResult[]>()
 
   for (const result of results) {
-    const value = resolveResultField(result, field) || '—'
+    const value = formatResultFieldValue(
+      resolveWorkspaceSearchResultFieldValue(result, field),
+    ) ?? '—'
     groups.set(value, [...(groups.get(value) ?? []), result])
   }
 
@@ -352,11 +357,6 @@ function groupResults(results: WorkspaceSearchResult[], field: string) {
     label,
     results: groupedResults,
   }))
-}
-
-function resolveResultField(result: WorkspaceSearchResult, field: string) {
-  const value = (result as unknown as Record<string, unknown>)[field]
-  return typeof value === 'string' ? value : undefined
 }
 
 function resolveResultDate(result: WorkspaceSearchResult) {
@@ -379,7 +379,7 @@ function formatColumnLabel(column: string, t: (key: MessageKey) => string) {
     updatedAt: t('search.columns.updatedAt'),
   }
 
-  return labels[column] ?? column
+  return labels[column] ?? (column.startsWith('custom:') ? column.slice('custom:'.length) : column)
 }
 
 function renderColumnValue(
@@ -398,24 +398,23 @@ function renderColumnValue(
       : '—'
   }
 
-  const fieldByColumn: Record<string, keyof WorkspaceSearchResult> = {
-    assignee: 'assigneeUserId',
-    creator: 'creatorUserId',
-    project: 'projectId',
-    team: 'teamId',
-    dueDate: 'dueDate',
-    updatedAt: 'updatedAt',
-  }
-  const field = fieldByColumn[column]
-  const value = field ? result[field] : undefined
+  const value = resolveWorkspaceSearchResultFieldValue(result, column)
+  const formattedValue = formatResultFieldValue(value)
 
-  if (typeof value !== 'string') {
-    return '—'
-  }
-
+  if (formattedValue === undefined) return '—'
   return column === 'dueDate' || column === 'updatedAt'
-    ? formatSearchDate(value, locale)
-    : value
+    ? formatSearchDate(formattedValue, locale)
+    : formattedValue
+}
+
+function formatResultFieldValue(value: unknown) {
+  if (typeof value === 'string') return value || undefined
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  if (typeof value === 'boolean') return String(value)
+  if (Array.isArray(value) && value.every((entry) => typeof entry === 'string')) {
+    return value.length > 0 ? value.join(', ') : undefined
+  }
+  return undefined
 }
 
 function formatSearchDate(value: string, locale: Locale) {

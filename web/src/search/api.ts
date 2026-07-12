@@ -7,7 +7,24 @@ import {
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../api/mutationHeaders'
 
-const searchApiBaseUrl = trimTrailingSlash(import.meta.env.VITE_API_BASE_URL ?? '/api')
+const searchApiBaseUrl = resolveSearchApiBaseUrl(import.meta.env)
+
+/**
+ * Workspace search API の base URL を既存 Workspace API と同じ優先順で解決します。
+ */
+export function resolveSearchApiBaseUrl(environment: Record<string, string | boolean | undefined>) {
+  return trimTrailingSlash(
+    typeof environment.VITE_WORKSPACE_API_BASE_URL === 'string'
+      ? environment.VITE_WORKSPACE_API_BASE_URL
+      : typeof environment.VITE_PROJECTS_API_BASE_URL === 'string'
+        ? environment.VITE_PROJECTS_API_BASE_URL
+        : typeof environment.VITE_TASKS_API_BASE_URL === 'string'
+          ? environment.VITE_TASKS_API_BASE_URL
+          : typeof environment.VITE_API_BASE_URL === 'string'
+            ? environment.VITE_API_BASE_URL
+            : '/api',
+  )
+}
 
 /**
  * Workspace search / saved view API が失敗したときの例外です。

@@ -604,10 +604,12 @@ export function TeamIssueScreen({
           onArchiveTeam={onArchiveTeam}
           onCreateProject={onCreateProject}
           onCreateTeam={onCreateTeam}
-          onOpenSearch={() => {
-            setIsMobileSidebarOpen(false)
-            commandMenu.open?.()
-          }}
+          onOpenSearch={commandMenu.open
+            ? () => {
+                setIsMobileSidebarOpen(false)
+                commandMenu.open?.()
+              }
+            : undefined}
           onSelectNav={(navId) => {
             setIsMobileSidebarOpen(false)
             onSelectNav?.(navId)

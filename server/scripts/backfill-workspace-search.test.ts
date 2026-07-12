@@ -81,6 +81,7 @@ describe('Workspace search backfill mapping', () => {
       teamId: 'core-team',
       title: 'コアチーム',
     }))
+    expect(team.document.subtitle).toBe('Core team')
     expect(project.document).toEqual(expect.objectContaining({
       entityId: 'team/design-team/project/shared-launch',
       entityType: 'project',
@@ -88,6 +89,7 @@ describe('Workspace search backfill mapping', () => {
       teamId: 'design-team',
       title: '共通ローンチ',
     }))
+    expect(project.document.subtitle).toBe('Shared launch')
   })
 
   test('uses different document keys for the same Work Item ID in different Teams', () => {
@@ -133,6 +135,7 @@ describe('Workspace search backfill mapping', () => {
     expect(first.document.entityId).toBe('team/core-team/issue/release-check')
     expect(second.document.entityId).toBe('team/design-team/issue/release-check')
     expect(first.document.recordKey).not.toBe(second.document.recordKey)
+    expect(first.document.subtitle).toBe('release-check')
     expect(first.document.customFields).toEqual({ effort: 8, approved: true })
     expect(first.document.relationIds).toEqual(['blocks:launch'])
     expect(first.document.dueDate).toBe('2026-07-20')
@@ -206,7 +209,9 @@ describe('Workspace search backfill mapping', () => {
       entityId: 'team/core-team/issue/release-check/comment/comment-1',
       parentId: 'team/core-team/issue/release-check',
       creatorUserId: 'sato@example.com',
+      subtitle: 'sato@example.com',
       teamId: 'core-team',
+      title: '確認しました。',
     }))
     expect(deleted.entityId).toBe(comment.document.entityId)
     expect(deleted.recordKey).toBe(comment.document.recordKey)

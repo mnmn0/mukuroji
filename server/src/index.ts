@@ -29,6 +29,7 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
   type CreateWorkItemInput,
   type CreateSavedWorkspaceViewInput,
+  type SearchCustomFieldValue,
   type UpdateSavedWorkspaceViewInput,
   type WorkItem,
   type WorkItemPriority,
@@ -89,9 +90,12 @@ import {
   type UpdateNotificationPreferencesInput,
 } from './notifications'
 import {
+  createCommentWorkspaceSearchDocument,
   DynamoDbWorkspaceSearchClient,
   WorkspaceSearchError,
-  createWorkspaceSearchDocument,
+  createProjectWorkspaceSearchDocument,
+  createTeamWorkspaceSearchDocument,
+  createWorkItemWorkspaceSearchDocument,
   type SavedViewAccessScope,
   type WorkspaceSearchAccessScope,
   type WorkspaceSearchClient,
@@ -857,6 +861,10 @@ type TeamIssueItem = {
    * Issue 作成者の Workspace member key です。旧 row では未設定です。
    */
   creatorMemberKey?: string
+  /** Search/filter へ投影する custom field values です。 */
+  customFields?: Record<string, SearchCustomFieldValue>
+  /** Search/filter へ投影する relation IDs です。 */
+  relationIds?: string[]
   /**
    * legacy project task migration の安定した source key です。
    */
@@ -965,6 +973,10 @@ type TeamIssueResponseItem = WorkItem & {
    * Issue 作成者の Workspace member key です。旧 row では未設定です。
    */
   creatorMemberKey?: string
+  /** Search/filter へ投影する custom field values です。 */
+  customFields?: Record<string, SearchCustomFieldValue>
+  /** Search/filter へ投影する relation IDs です。 */
+  relationIds?: string[]
   /**
    * Cognito から解決した担当者メールアドレスです。
    */
@@ -2718,7 +2730,15 @@ app.post('/api/teams', async (c) => {
       createApiMutationContext(c, principal, body ?? {}),
     )
     await projectWorkspaceSearchDocumentBestEffort(
-      createTeamSearchDocument(principal.directoryId, response.team, principal.userKey),
+      () => {
+        const names = readLocalizedNames(body ?? {})
+        return createTeamSearchDocument(
+          principal.directoryId,
+          response.team,
+          principal.userKey,
+          names.nameEn === response.team.name ? undefined : names.nameEn,
+        )
+      },
       'team creation',
     )
     return c.json(response, 201)
@@ -2762,12 +2782,16 @@ app.post('/api/teams/:teamId/projects', async (c) => {
       createApiMutationContext(c, principal, { teamId, ...body }),
     )
     await projectWorkspaceSearchDocumentBestEffort(
-      createProjectSearchDocument(
-        principal.directoryId,
-        teamId,
-        response.project,
-        principal.userKey,
-      ),
+      () => {
+        const names = readLocalizedNames(body ?? {})
+        return createProjectSearchDocument(
+          principal.directoryId,
+          teamId,
+          response.project,
+          principal.userKey,
+          names.nameEn === response.project.name ? undefined : names.nameEn,
+        )
+      },
       'project creation',
     )
     return c.json(response, 201)
@@ -3349,7 +3373,7 @@ app.post('/api/teams/:teamId/issues', async (c) => {
       ),
     )
     await projectWorkspaceSearchDocumentBestEffort(
-      createWorkItemSearchDocument(principal.directoryId, response.issue),
+      () => createWorkItemSearchDocument(principal.directoryId, response.issue),
       'Work Item creation',
     )
     return c.json(response, 201)
@@ -3584,7 +3608,7 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
       ),
     )
     await projectWorkspaceSearchDocumentBestEffort(
-      createWorkItemSearchDocument(principal.directoryId, response.issue),
+      () => createWorkItemSearchDocument(principal.directoryId, response.issue),
       'Work Item update',
     )
     return c.json(response)
@@ -3843,7 +3867,7 @@ app.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       createdAt: comment.createdAt,
     }
     await projectWorkspaceSearchDocumentBestEffort(
-      createCommentSearchDocument(
+      () => createCommentSearchDocument(
         principal.directoryId,
         teamId,
         detail.issue,
@@ -3917,7 +3941,7 @@ app.patch('/api/teams/:teamId/issues/:issueId/comments/:commentId', async (c) =>
       auditContext: createApiMutationContext(c, principal, { teamId, issueId, commentId, ...body }),
     })
     await projectWorkspaceSearchDocumentBestEffort(
-      createCommentSearchDocument(
+      () => createCommentSearchDocument(
         principal.directoryId,
         teamId,
         detail.issue,
@@ -4349,7 +4373,7 @@ app.post('/api/projects/:projectId/tasks', async (c) => {
     )
     const hydrated = await hydrateCreateTeamIssueResponse(response)
     await projectWorkspaceSearchDocumentBestEffort(
-      createWorkItemSearchDocument(principal.directoryId, hydrated.issue),
+      () => createWorkItemSearchDocument(principal.directoryId, hydrated.issue),
       'project task compatibility creation',
     )
 
@@ -4431,7 +4455,7 @@ app.patch('/api/projects/:projectId/tasks/:taskId', async (c) => {
     )
     const hydrated = await hydrateUpdateTeamIssueResponse(response)
     await projectWorkspaceSearchDocumentBestEffort(
-      createWorkItemSearchDocument(principal.directoryId, hydrated.issue),
+      () => createWorkItemSearchDocument(principal.directoryId, hydrated.issue),
       'project task compatibility update',
     )
     return c.json(
@@ -6030,21 +6054,18 @@ function createWorkItemSearchDocument(
   workspaceId: string,
   issue: TeamIssueResponseItem,
 ) {
-  const entityId = createTeamIssueAuditEntityId(issue.teamId, issue.id)
-  return createWorkspaceSearchDocument({
+  return createWorkItemWorkspaceSearchDocument({
     workspaceId,
-    entityType: 'work-item',
-    entityId,
+    teamId: issue.teamId,
+    issueId: issue.id,
     title: issue.title ?? issue.titleKey ?? issue.id,
     ...(issue.description ? { body: issue.description } : {}),
-    url: issue.assignedProjectId
-      ? `/projects/${encodeURIComponent(issue.assignedProjectId)}/issues?teamId=${encodeURIComponent(issue.teamId)}&issueId=${encodeURIComponent(issue.id)}`
-      : `/teams/${encodeURIComponent(issue.teamId)}/issues?issueId=${encodeURIComponent(issue.id)}`,
-    teamId: issue.teamId,
     ...(issue.assignedProjectId ? { projectId: issue.assignedProjectId } : {}),
     ...(issue.assigneeUserId ? { assigneeUserId: issue.assigneeUserId } : {}),
     ...(issue.creatorMemberKey ? { creatorUserId: issue.creatorMemberKey } : {}),
     status: issue.status,
+    ...(issue.customFields ? { customFields: issue.customFields } : {}),
+    ...(issue.relationIds ? { relationIds: issue.relationIds } : {}),
     dueDate: issue.dueDate,
     createdAt: issue.createdAt,
     updatedAt: issue.updatedAt,
@@ -6057,18 +6078,12 @@ function createCommentSearchDocument(
   issue: TeamIssueResponseItem,
   comment: CollaborationComment,
 ) {
-  const parentId = createTeamIssueAuditEntityId(teamId, issue.id)
-  const entityId = `${parentId}/comment/${comment.id}`
-  return createWorkspaceSearchDocument({
+  return createCommentWorkspaceSearchDocument({
     workspaceId,
-    entityType: 'comment',
-    entityId,
-    title: issue.title ?? issue.titleKey ?? issue.id,
-    body: comment.bodyMarkdown,
-    url: `/teams/${encodeURIComponent(teamId)}/issues?issueId=${encodeURIComponent(issue.id)}&commentId=${encodeURIComponent(comment.id)}`,
     teamId,
-    ...(issue.assignedProjectId ? { projectId: issue.assignedProjectId } : {}),
-    parentId,
+    issueId: issue.id,
+    commentId: comment.id,
+    body: comment.bodyMarkdown,
     creatorUserId: comment.authorMemberKey,
     createdAt: comment.createdAt,
     updatedAt: comment.updatedAt,
@@ -6078,16 +6093,15 @@ function createCommentSearchDocument(
 function createTeamSearchDocument(
   workspaceId: string,
   team: ProjectDirectoryTeamResponse,
-  creatorUserId: string,
+  creatorUserId?: string,
+  subtitle?: string,
 ) {
-  return createWorkspaceSearchDocument({
+  return createTeamWorkspaceSearchDocument({
     workspaceId,
-    entityType: 'team',
-    entityId: `team/${team.id}`,
-    title: team.name,
-    url: `/teams/${encodeURIComponent(team.id)}/overview`,
     teamId: team.id,
-    creatorUserId,
+    title: team.name,
+    ...(subtitle ? { subtitle } : {}),
+    ...(creatorUserId ? { creatorUserId } : {}),
   })
 }
 
@@ -6095,27 +6109,26 @@ function createProjectSearchDocument(
   workspaceId: string,
   teamId: string,
   project: ProjectDirectoryProjectResponse,
-  creatorUserId: string,
+  creatorUserId?: string,
+  subtitle?: string,
 ) {
-  return createWorkspaceSearchDocument({
+  return createProjectWorkspaceSearchDocument({
     workspaceId,
-    entityType: 'project',
-    entityId: `team/${teamId}/project/${project.id}`,
-    title: project.name,
-    url: `/projects/${encodeURIComponent(project.id)}/issues?teamId=${encodeURIComponent(teamId)}`,
     teamId,
     projectId: project.id,
-    creatorUserId,
+    title: project.name,
+    ...(subtitle ? { subtitle } : {}),
+    ...(creatorUserId ? { creatorUserId } : {}),
   })
 }
 
 async function projectWorkspaceSearchDocumentBestEffort(
-  document: WorkspaceSearchDocument,
+  createDocument: () => WorkspaceSearchDocument,
   operation: string,
 ) {
   if (!workspaceSearchProjectionEnabled) return
   try {
-    await workspaceSearch.upsertDocument(document)
+    await workspaceSearch.upsertDocument(createDocument())
   } catch (error) {
     console.error(`Workspace search projection failed after ${operation}.`, error)
   }
@@ -10505,6 +10518,14 @@ function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     issue.creatorMemberKey = item.creatorMemberKey
   }
 
+  if (item.customFields) {
+    issue.customFields = item.customFields
+  }
+
+  if (item.relationIds) {
+    issue.relationIds = item.relationIds
+  }
+
   return issue
 }
 
@@ -10763,6 +10784,8 @@ function isTeamIssueItem(value: unknown): value is TeamIssueItem {
     (value.description === undefined || typeof value.description === 'string') &&
     typeof value.assigneeUserId === 'string' &&
     (value.creatorMemberKey === undefined || typeof value.creatorMemberKey === 'string') &&
+    (value.customFields === undefined || isSearchCustomFieldValues(value.customFields)) &&
+    (value.relationIds === undefined || isSearchRelationIds(value.relationIds)) &&
     (
       value.migrationSourceKey === undefined ||
       isLegacyTaskMigrationSourceKey(
@@ -10922,6 +10945,30 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
 
 function isProjectTaskStatus(value: unknown): value is ProjectTaskStatus {
   return value === 'in-progress' || value === 'review' || value === 'todo' || value === 'done'
+}
+
+function isSearchCustomFieldValues(
+  value: unknown,
+): value is Record<string, SearchCustomFieldValue> {
+  if (!isRecord(value)) return false
+  const entries = Object.entries(value)
+  return entries.length <= 100 && entries.every(([fieldId, fieldValue]) =>
+    Boolean(fieldId.trim()) && isSearchCustomFieldValue(fieldValue)
+  )
+}
+
+function isSearchCustomFieldValue(value: unknown): value is SearchCustomFieldValue {
+  return value === null ||
+    typeof value === 'boolean' ||
+    typeof value === 'string' ||
+    typeof value === 'number' && Number.isFinite(value) ||
+    Array.isArray(value) && value.length <= 100 &&
+      value.every((entry) => typeof entry === 'string')
+}
+
+function isSearchRelationIds(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= 100 &&
+    value.every((entry) => typeof entry === 'string' && Boolean(entry.trim()))
 }
 
 function isProjectTaskPriority(value: unknown): value is ProjectTaskPriority {

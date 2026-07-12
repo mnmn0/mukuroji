@@ -46,6 +46,7 @@ import {
   updateSavedWorkspaceView,
 } from './api'
 import {
+  deduplicateSearchMigrationWarnings,
   getSearchColumns,
   getSearchCustomFields,
   getSearchDateField,
@@ -174,6 +175,10 @@ export function SearchPage() {
   const routeSignature = serializeSearchRouteState(routeState).toString()
   const isNextPageLoading = nextPageLoadingSignature === routeSignature
   const selectedSavedView = savedViews.find((view) => view.id === routeState.savedViewId)
+  const migrationWarnings = deduplicateSearchMigrationWarnings(
+    routeState.migrationWarnings,
+    selectedSavedView ? formatSavedViewMigrationWarnings(selectedSavedView) : [],
+  )
   const canWriteSavedViews = Boolean(user && user.workspaceRole !== 'guest')
   const canManageSharedViews = Boolean(
     user && (user.isSystemAdmin || user.workspaceRole === 'owner' || user.workspaceRole === 'admin'),
@@ -554,8 +559,8 @@ export function SearchPage() {
                       })
                     : undefined}
                 />
-                {[...routeState.migrationWarnings, ...(selectedSavedView ? formatSavedViewMigrationWarnings(selectedSavedView) : [])].map((warning, warningIndex) => (
-                  <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800" key={`${warning}-${warningIndex}`} role="status">
+                {migrationWarnings.map((warning) => (
+                  <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800" key={warning} role="status">
                     {t('search.saved.migration')} {warning}
                   </p>
                 ))}

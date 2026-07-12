@@ -6464,7 +6464,10 @@ test('keeps a primary mutation successful when search projection fails', async (
     } as unknown as WorkspaceSearchClient,
   })
   const originalConsoleError = console.error
-  console.error = () => undefined
+  let projectionErrors = 0
+  console.error = () => {
+    projectionErrors += 1
+  }
   try {
     const response = await app.request('/api/teams', {
       method: 'POST',
@@ -6477,6 +6480,41 @@ test('keeps a primary mutation successful when search projection fails', async (
 
     expect(response.status).toBe(201)
     expect(projectedTitle).toBe('Search resilient Team')
+    expect(projectionErrors).toBe(1)
+  } finally {
+    console.error = originalConsoleError
+  }
+})
+
+test('keeps a committed mutation successful when search document construction fails', async () => {
+  configureFakeProjectClients(true)
+  let projectionWrites = 0
+  configureApiClientsForTest({
+    workspaceSearch: {
+      async upsertDocument(document) {
+        projectionWrites += 1
+        return createWorkspaceSearchDocument(document)
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  const originalConsoleError = console.error
+  let projectionErrors = 0
+  console.error = () => {
+    projectionErrors += 1
+  }
+  try {
+    const response = await app.request('/api/teams', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'x'.repeat(501) }),
+    })
+
+    expect(response.status).toBe(201)
+    expect(projectionWrites).toBe(0)
+    expect(projectionErrors).toBe(1)
   } finally {
     console.error = originalConsoleError
   }
