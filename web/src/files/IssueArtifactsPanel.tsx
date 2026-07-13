@@ -6,6 +6,9 @@ import { FilePreviewDialog } from './FilePreviewDialog'
 import type { ApprovalDecision } from './api'
 import type { FileArtifactsController } from './useFileArtifacts'
 
+const maximumApprovalReviewerCount = 20
+const maximumApprovalCommentLength = 2_000
+
 /**
  * IssueArtifactsPanel の props です。
  */
@@ -475,7 +478,12 @@ function ApprovalRequestForm({
         const dueDate = String(formData.get('dueAt') ?? '')
         const completionTransition = String(formData.get('completionTransition') ?? '')
 
-        if (!file || selectedMemberKeys.length === 0 || !dueDate) {
+        if (
+          !file ||
+          selectedMemberKeys.length === 0 ||
+          selectedMemberKeys.length > maximumApprovalReviewerCount ||
+          !dueDate
+        ) {
           onErrorChange(true)
           return
         }
@@ -515,9 +523,20 @@ function ApprovalRequestForm({
               <input
                 checked={selectedMemberKeys.includes(member.memberKey)}
                 className="h-4 w-4 accent-[var(--workbench-primary)]"
-                onChange={(event) => setSelectedMemberKeys((current) => event.target.checked
-                  ? [...current, member.memberKey]
-                  : current.filter((key) => key !== member.memberKey))}
+                disabled={
+                  !selectedMemberKeys.includes(member.memberKey) &&
+                  selectedMemberKeys.length >= maximumApprovalReviewerCount
+                }
+                onChange={(event) => setSelectedMemberKeys((current) => {
+                  if (!event.target.checked) {
+                    return current.filter((key) => key !== member.memberKey)
+                  }
+
+                  return current.length < maximumApprovalReviewerCount &&
+                    !current.includes(member.memberKey)
+                    ? [...current, member.memberKey]
+                    : current
+                })}
                 type="checkbox"
               />
               {member.name ?? member.email ?? member.memberKey}
@@ -624,6 +643,7 @@ function ApprovalCard({
             {t('approval.comment')}
             <textarea
               className="workbench-input min-h-16 px-3 py-2 text-sm"
+              maxLength={maximumApprovalCommentLength}
               onChange={(event) => setComment(event.target.value)}
               value={comment}
             />
@@ -724,5 +744,9 @@ function formatApprovalDate(value: string) {
 }
 
 function formatDateInput(date = new Date()) {
-  return date.toISOString().slice(0, 10)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+
+  return `${year}-${month}-${day}`
 }

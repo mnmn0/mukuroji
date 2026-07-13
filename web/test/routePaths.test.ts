@@ -17,4 +17,13 @@ describe('Work Item detail paths', () => {
     )
     expect(createTeamIssuesPath('core/team')).toBe('/teams/core%2Fteam/issues')
   })
+
+  test('keeps a notification comment focus inside the selected Work Item', () => {
+    expect(createProjectIssuesPath('project', 'team', 'issue', 'comment/1', 'root/1')).toBe(
+      '/projects/project/issues?teamId=team&issueId=issue&commentId=comment%2F1&rootCommentId=root%2F1',
+    )
+    expect(createTeamIssuesPath('team', 'issue', 'comment/1', 'root/1')).toBe(
+      '/teams/team/issues?issueId=issue&commentId=comment%2F1&rootCommentId=root%2F1',
+    )
+  })
 })

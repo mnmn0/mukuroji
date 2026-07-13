@@ -26,11 +26,12 @@ scopeKey  = WORKSPACE#<workspaceId>#TEAM#<teamId>#WORKITEM#<workItemId>
 recordKey = FILE#<fileId>
           | ANNOTATION#<fileId>#<versionId>#<annotationId>
           | APPROVAL#<approvalId>
+          | FILE_APPROVAL#<fileId>#<approvalId>
           | APPROVAL_SUMMARY
           | DOWNLOAD#<downloadId>
 ```
 
-Comment attachment は親 Work Item partition に保存し、`targetType=comment` / `targetId=<commentId>` で区別する。File row は全 version の immutable object key、scan state、現在 version、guest access、soft-delete retention を保持する。download URL の発行は URL 自体ではなく actor/file/version/time だけを履歴に残す。
+Comment attachment は親 Work Item partition に保存し、`targetType=comment` / `targetId=<commentId>` で区別する。File row は全 version の immutable object key、scan state、現在 version、guest access、soft-delete retention を保持する。`FILE_APPROVAL` row は file delete 時に関連 approval/reviewer metadata を file prefix の強整合 Query だけで列挙する逆引き projection で、approval state と同じ transaction で保存する。download URL の発行は URL 自体ではなく actor/file/version/time だけを履歴に残す。
 
 Reviewer Inbox 用 projection は `WORKSPACE#<workspaceId>#REVIEWER#<memberKey>` partition に main approval への pointer、期限、reviewer/aggregate status だけを同じ transaction で保存する。comment を含む approval 全体は複製せず、bounded Query 後に BatchGet する。`APPROVAL_SUMMARY` は status count と `dueAt#approvalId` の pending set を原子的に増減し、read 時点の `overdueCount` / `nextDueAt` を算出する。`/api/work-items` は summary rows を最大 100 件ずつ BatchGet し、Inbox と report が同じ正本を利用する。
 

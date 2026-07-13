@@ -300,6 +300,7 @@ export function useFileArtifacts({
 
     setMutatingToken(operationToken)
     setMutationError(undefined)
+    let hasCreatedUploadSession = false
 
     try {
       for (const selectedFile of selectedFiles) {
@@ -351,6 +352,7 @@ export function useFileArtifacts({
               : createWorkItemFileUpload(scope.teamId, scope.issueId, accessToken, input, context)
           },
         )
+        hasCreatedUploadSession = true
 
         await putPresignedFile(session.upload, selectedFile)
         await runMutation(
@@ -377,7 +379,6 @@ export function useFileArtifacts({
         )
       }
 
-      await refresh()
       return true
     } catch (uploadError) {
       console.error('File upload failed:', uploadError)
@@ -388,6 +389,11 @@ export function useFileArtifacts({
       }
       return false
     } finally {
+      if (hasCreatedUploadSession) {
+        await refresh().catch((refreshError) => {
+          console.error('File refresh failed:', refreshError)
+        })
+      }
       setMutatingToken((current) => current === operationToken ? undefined : current)
     }
   }, [accessToken, isMutating, operationToken, refresh, runMutation, scope, scopeKey])

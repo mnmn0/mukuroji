@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, userEvent, within } from 'storybook/test'
 import { TeamIssueScreen } from './TeamIssuePage'
 import {
   collaborationWorkspaceMemberFixtures,
@@ -86,6 +87,24 @@ type Story = StoryObj<typeof meta>
  * チーム所有 Issue を一覧と詳細ペインで表示する標準状態です。
  */
 export const Default: Story = {}
+
+/**
+ * Command menu provider 外では desktop/mobile とも検索導線を表示しない状態です。
+ */
+export const WithoutCommandMenu: Story = {
+  parameters: {
+    viewport: {
+      defaultViewport: 'mobile1',
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    expect(canvas.queryByTestId('sidebar-search-trigger')).toBeNull()
+    await userEvent.click(canvas.getByRole('button', { name: 'サイドバーを開く' }))
+    expect(canvas.queryByTestId('sidebar-search-trigger')).toBeNull()
+  },
+}
 
 /**
  * TaskPage の詳細ペインと視覚密度を比較するための詳細選択状態です。

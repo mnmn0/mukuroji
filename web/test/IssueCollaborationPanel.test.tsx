@@ -166,11 +166,22 @@ describe('IssueCollaborationPanel', () => {
       />,
     )
 
-    expect(html).toContain('Demo User started adding a file.')
-    expect(html).toContain('Demo User completed a file upload.')
-    expect(html).toContain('Demo User downloaded a file.')
-    expect(html).toContain('Demo User previewed a file.')
-    expect(html).toContain('Demo User completed the approval.')
-    expect(html).toContain('Demo User cancelled the approval request.')
+    for (const message of [
+      'Demo User started adding a file.',
+      'Demo User added a new file version.',
+      'Demo User completed a file upload.',
+      'Demo User downloaded a file.',
+      'Demo User previewed a file.',
+      'Demo User deleted a file.',
+      'Demo User added a positional annotation.',
+      'Demo User requested approval.',
+      'Demo User approved the version.',
+      'Demo User completed the approval.',
+      'Demo User rejected the version.',
+      'Demo User requested changes.',
+      'Demo User cancelled the approval request.',
+    ]) {
+      expect(html).toContain(message)
+    }
   })
 })

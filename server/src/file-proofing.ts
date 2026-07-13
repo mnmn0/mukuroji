@@ -48,6 +48,7 @@ import {
   getConfiguredDynamoDbEndpoint,
   type MutationAuditContext,
 } from './audit'
+import { isMissingFileObjectVersionError } from './file-object-errors'
 
 /** Browser から直接 upload できる既定の最大 byte 数です。 */
 export const FILE_UPLOAD_MAX_SIZE_BYTES = 2 * 1024 * 1024 * 1024
@@ -301,6 +302,28 @@ type StoredApprovalItem = ApprovalRequest & {
   requestFingerprint?: string
 }
 
+/** File ID から approval metadata を直接列挙する逆引き projection row です。 */
+type StoredFileApprovalIndexItem = {
+  /** DynamoDB partition key です。 */
+  scopeKey: string
+  /** DynamoDB sort key です。 */
+  recordKey: string
+  /** Row discriminator です。 */
+  entryType: 'file-approval-index'
+  /** 対象 file ID です。 */
+  fileId: string
+  /** Main approval row の ID です。 */
+  approvalId: string
+  /** Reviewer projection の sort key に使う期限です。 */
+  dueAt: string
+  /** Reviewer projection の partition keys に使う member keys です。 */
+  reviewerMemberKeys: string[]
+  /** Soft delete retention 終了 timestamp です。 */
+  retentionUntil?: string
+  /** DynamoDB TTL epoch seconds です。 */
+  expiresAt?: number
+}
+
 /** Reviewer 別 Inbox query 用の approval projection row です。 */
 type StoredReviewerApprovalItem = {
   /** DynamoDB partition key です。 */
@@ -444,6 +467,8 @@ export interface FileObjectClient {
     /** Inline または attachment です。 */
     disposition: 'inline' | 'attachment'
   }): Promise<FileVersionAccess>
+  /** Immutable object version を deleted quarantine tag で即時無効化します。 */
+  quarantineDeletedVersion(objectKey: string, objectVersionId: string): Promise<void>
   /** Versioned object へ delete marker を作成して retention lifecycle を開始します。 */
   softDelete(objectKey: string): Promise<void>
 }
@@ -699,6 +724,35 @@ export class S3FileObjectClient implements FileObjectClient {
     }
   }
 
+  /** Immutable object version を deleted quarantine tag で即時無効化します。 */
+  async quarantineDeletedVersion(objectKey: string, objectVersionId: string): Promise<void> {
+    try {
+      const response = await this.client.send(new GetObjectTaggingCommand({
+        Bucket: this.bucketName,
+        Key: objectKey,
+        VersionId: objectVersionId,
+      }))
+      if (response.TagSet?.some((tag) => tag.Key === 'mukuroji-deleted' && tag.Value === 'true')) {
+        return
+      }
+      const tagSet = (response.TagSet ?? [])
+        .filter((tag): tag is Required<Pick<Tag, 'Key' | 'Value'>> =>
+          typeof tag.Key === 'string' && typeof tag.Value === 'string' && tag.Key !== 'mukuroji-deleted'
+        )
+      tagSet.push({ Key: 'mukuroji-deleted', Value: 'true' })
+      await this.client.send(new PutObjectTaggingCommand({
+        Bucket: this.bucketName,
+        Key: objectKey,
+        VersionId: objectVersionId,
+        Tagging: { TagSet: tagSet },
+      }))
+    } catch (error) {
+      if (!isMissingFileObjectVersionError(error)) {
+        throw error
+      }
+    }
+  }
+
   /** Versioned object へ delete marker を作成して retention lifecycle を開始します。 */
   async softDelete(objectKey: string) {
     await this.client.send(new DeleteObjectCommand({
@@ -769,8 +823,11 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
   async list(scope: FileProofingScope, actor: FileProofingActor): Promise<FileProofingCollection> {
     await this.ensureReady()
     const scopeKey = createFileProofingScopeKey(scope)
-    const items = await this.queryScope(scopeKey)
-    const storedFiles = items.filter(isStoredFileItem)
+    const [fileItems, approvalItems] = await Promise.all([
+      this.queryScope(scopeKey, 'FILE#'),
+      this.queryScope(scopeKey, 'APPROVAL#'),
+    ])
+    const storedFiles = fileItems.filter(isStoredFileItem)
     const refreshedFiles = await Promise.all(storedFiles.map((file) => this.refreshScanStatuses(file)))
     const files = refreshedFiles
       .filter((file) => !file.deletedAt)
@@ -778,7 +835,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       .map((file) => toFileAttachment(file, actor))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
     const visibleFileIds = new Set(files.map((file) => file.id))
-    const approvals = items.filter(isStoredApprovalItem)
+    const approvals = approvalItems.filter(isStoredApprovalItem)
       .filter((approval) => visibleFileIds.has(approval.fileId))
       .map((approval) => toApprovalRequest(approval, actor))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
@@ -915,7 +972,6 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       ...current,
       revision: current.revision + 1,
       versions: [...current.versions, version],
-      currentVersionId: versionId,
       updatedAt: now,
     }
     await this.putFileWithAudit(next, current.revision, auditContext, {
@@ -948,6 +1004,17 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     const current = await this.getFile(createFileProofingScopeKey(scope), fileId)
     requireFileNotDeleted(current)
     const version = requireStoredVersion(current, versionId)
+    if (version.objectVersionId && version.verifiedAt) {
+      return { file: toFileAttachment(current, actor), version: toFileVersion(version) }
+    }
+    const promotesReplacement = current.currentVersionId !== versionId
+    if (promotesReplacement && current.pendingApprovalCount !== 0) {
+      throw new FileProofingError(
+        409,
+        'FileApprovalPending',
+        'A new version cannot replace a file while approval is pending.',
+      )
+    }
     const verified = await this.objectClient.verifyUpload(version.objectKey, {
       contentType: version.contentType,
       sizeBytes: version.sizeBytes,
@@ -969,12 +1036,15 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         : verified.scanStatus,
       verifiedAt: auditContext?.occurredAt ?? new Date().toISOString(),
     }
-    const staged = replaceStoredVersion(current, stagedVersion)
+    const staged = {
+      ...replaceStoredVersion(current, stagedVersion),
+      currentVersionId: versionId,
+    }
     await this.putFileWithAudit(staged, current.revision, auditContext, {
       eventType: 'file.upload-completed',
       action: 'upload-completed',
       metadata: createFileAuditMetadata(scope, actor, fileId, versionId),
-    })
+    }, promotesReplacement ? 0 : undefined)
     if (verified.scanStatus !== 'available') {
       return { file: toFileAttachment(staged, actor), version: toFileVersion(stagedVersion) }
     }
@@ -1113,6 +1183,13 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     const file = await this.getFile(scopeKey, fileId)
     requireFileNotDeleted(file)
     const version = requireStoredVersion(file, versionId)
+    const objectVersionId = requireStoredObjectVersionId(version)
+    requireAvailableScanStatus(version.scanStatus)
+    const scanStatus = await this.objectClient.getScanStatus(
+      version.objectKey,
+      objectVersionId,
+    )
+    requireAvailableScanStatus(scanStatus)
     if (version.previewKind === 'none') {
       throw new FileProofingError(415, 'FilePreviewUnsupported', 'This media type cannot be annotated.')
     }
@@ -1186,12 +1263,16 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     fileId: string,
     auditContext?: MutationAuditContext,
   ): Promise<void> {
+    if (actor.guest) {
+      throw new FileProofingError(403, 'FileDeleteDenied', 'File manager or uploader access is required.')
+    }
     await this.ensureReady()
     const current = await this.getFile(createFileProofingScopeKey(scope), fileId)
     if (!actor.canManage && current.createdByMemberKey !== actor.memberKey) {
       throw new FileProofingError(403, 'FileDeleteDenied', 'File manager or uploader access is required.')
     }
     if (current.deletedAt) {
+      await this.quarantineDeletedVersions(current)
       await Promise.all(current.versions.map((version) => this.objectClient.softDelete(version.objectKey)))
       if (current.expiresAt && current.retentionUntil) {
         await this.scheduleRelatedMetadataExpiry(
@@ -1226,6 +1307,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       action: 'deleted',
       metadata: createFileAuditMetadata(scope, actor, fileId, current.currentVersionId),
     })
+    await this.quarantineDeletedVersions(next)
     await Promise.all(current.versions.map((version) => this.objectClient.softDelete(version.objectKey)))
     await this.scheduleRelatedMetadataExpiry(next, next.expiresAt!, next.retentionUntil!)
   }
@@ -1359,6 +1441,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     auditContext?: MutationAuditContext,
   ): Promise<ApprovalRequest> {
     requireWorkItemScope(scope)
+    const expectedRevision = requireApprovalRevision(input.expectedRevision)
     await this.ensureReady()
     const scopeKey = createFileProofingScopeKey(scope)
     const current = await this.getApproval(scopeKey, approvalId)
@@ -1372,7 +1455,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         'The approved file version is no longer current.',
       )
     }
-    if (current.revision !== input.expectedRevision) {
+    if (current.revision !== expectedRevision) {
       throw new FileProofingError(409, 'ApprovalRevisionConflict', 'Approval changed. Reload and try again.')
     }
     if (current.status !== 'pending') {
@@ -1387,37 +1470,37 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     }
     const now = auditContext?.occurredAt ?? new Date().toISOString()
     const reviewerStatus = mapApprovalDecision(input.decision)
+    const comment = input.comment === undefined ||
+        (typeof input.comment === 'string' && !input.comment.trim())
+      ? undefined
+      : requireLimitedText(
+          input.comment,
+          'Approval comment',
+          FILE_APPROVAL_COMMENT_MAX_LENGTH,
+        )
     const reviewers = current.reviewers.map((candidate, index) => index === reviewerIndex
       ? {
           ...candidate,
           status: reviewerStatus,
           decidedAt: now,
-          ...(input.comment?.trim()
-            ? {
-                comment: requireLimitedText(
-                  input.comment,
-                  'Approval comment',
-                  FILE_APPROVAL_COMMENT_MAX_LENGTH,
-                ),
-              }
-            : {}),
+          ...(comment ? { comment } : {}),
         }
       : candidate)
     const status = aggregateApprovalStatus(reviewers)
+    const isCompleted = status !== 'pending'
     const next: StoredApprovalItem = {
       ...current,
       revision: current.revision + 1,
       status,
       reviewers,
       updatedAt: now,
-      ...(status === 'approved' ? { completedAt: now } : {}),
+      ...(isCompleted ? { completedAt: now } : {}),
     }
     const transactionItems = createApprovalProjectionPutItems(
       this.tableName,
       next,
       current.revision,
     )
-    const isCompleted = status !== 'pending'
     transactionItems.push(isCompleted
       ? createFilePendingApprovalUpdate(
           this.tableName,
@@ -1527,6 +1610,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     auditContext?: MutationAuditContext,
   ): Promise<ApprovalRequest> {
     requireWorkItemScope(scope)
+    const expectedRevision = requireApprovalRevision(input.expectedRevision)
     await this.ensureReady()
     const scopeKey = createFileProofingScopeKey(scope)
     const current = await this.getApproval(scopeKey, approvalId)
@@ -1540,7 +1624,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         'Approval requester or manager access is required.',
       )
     }
-    if (current.revision !== requirePositiveInteger(input.expectedRevision, 'Approval revision')) {
+    if (current.revision !== expectedRevision) {
       throw new FileProofingError(409, 'ApprovalRevisionConflict', 'Approval changed. Reload and try again.')
     }
     if (current.status !== 'pending') {
@@ -1784,7 +1868,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     }
   }
 
-  /** Existing file row を revision 条件付きで保存します。 */
+  /** Existing file row を revision と任意の pending approval count 条件付きで保存します。 */
   private async putFileWithAudit(
     item: StoredFileItem,
     expectedRevision: number,
@@ -1797,13 +1881,26 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       /** Audit metadata です。 */
       metadata: Readonly<Record<string, unknown>>
     },
+    expectedPendingApprovalCount?: number,
   ) {
+    const guardsPendingApprovals = expectedPendingApprovalCount !== undefined
     const transactionItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
       Put: {
         TableName: this.tableName,
         Item: item,
-        ConditionExpression: 'revision = :expectedRevision',
-        ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+        ConditionExpression: 'revision = :expectedRevision' +
+          (guardsPendingApprovals
+            ? ' AND #pendingApprovalCount = :expectedPendingApprovalCount'
+            : ''),
+        ...(guardsPendingApprovals
+          ? { ExpressionAttributeNames: { '#pendingApprovalCount': 'pendingApprovalCount' } }
+          : {}),
+        ExpressionAttributeValues: {
+          ':expectedRevision': expectedRevision,
+          ...(guardsPendingApprovals
+            ? { ':expectedPendingApprovalCount': expectedPendingApprovalCount }
+            : {}),
+        },
       },
     }]
     addAuditItem(transactionItems, this.auditTableName, auditContext, {
@@ -1866,7 +1963,13 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         version.objectVersionId,
       ).catch(() => version.scanStatus)
       if (status === 'available') {
-        await this.objectClient.markCompleted(version.objectKey, version.objectVersionId)
+        const completed = await this.objectClient.markCompleted(
+          version.objectKey,
+          version.objectVersionId,
+        ).then(() => true, () => false)
+        if (!completed) {
+          return { versionId: version.id, status: version.scanStatus }
+        }
       }
       return { versionId: version.id, status }
     }))
@@ -1967,28 +2070,40 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     return items
   }
 
+  /** 保存済み immutable object versions を同期的に deleted quarantine へ移します。 */
+  private async quarantineDeletedVersions(file: StoredFileItem) {
+    await Promise.all(file.versions.flatMap((version) => version.objectVersionId
+      ? [this.objectClient.quarantineDeletedVersion(version.objectKey, version.objectVersionId)]
+      : []))
+  }
+
   /** File に従属する review metadata を tombstone と同じ期限でTTL削除します。 */
   private async scheduleRelatedMetadataExpiry(
     file: StoredFileItem,
     expiresAt: number,
     retentionUntil: string,
   ) {
-    const [annotations, approvals] = await Promise.all([
+    const [annotations, approvalIndexes] = await Promise.all([
       this.queryScope(file.scopeKey, `ANNOTATION#${file.fileId}#`),
-      this.queryScope(file.scopeKey, 'APPROVAL#'),
+      this.queryScope(file.scopeKey, createFileApprovalIndexPrefix(file.fileId)),
     ])
-    const relatedApprovals = approvals.filter(isStoredApprovalItem)
-      .filter((approval) => approval.fileId === file.fileId)
+    const relatedApprovalIndexes = approvalIndexes
+      .filter(isStoredFileApprovalIndexItem)
+      .filter((approvalIndex) => approvalIndex.fileId === file.fileId)
     const keys = [
       ...annotations.filter(isStoredAnnotationItem).map((annotation) => ({
         scopeKey: annotation.scopeKey,
         recordKey: annotation.recordKey,
       })),
-      ...relatedApprovals.flatMap((approval) => [
-        { scopeKey: approval.scopeKey, recordKey: approval.recordKey },
-        ...approval.reviewers.map((reviewer) => ({
-          scopeKey: createReviewerScopeKey(approval.workspaceId, reviewer.memberKey),
-          recordKey: `APPROVAL#${approval.dueAt}#${approval.id}`,
+      ...relatedApprovalIndexes.flatMap((approvalIndex) => [
+        { scopeKey: approvalIndex.scopeKey, recordKey: approvalIndex.recordKey },
+        {
+          scopeKey: approvalIndex.scopeKey,
+          recordKey: createApprovalRecordKey(approvalIndex.approvalId),
+        },
+        ...approvalIndex.reviewerMemberKeys.map((reviewerMemberKey) => ({
+          scopeKey: createReviewerScopeKey(file.workspaceId, reviewerMemberKey),
+          recordKey: `APPROVAL#${approvalIndex.dueAt}#${approvalIndex.approvalId}`,
         })),
       ]),
     ]
@@ -2194,6 +2309,16 @@ function createApprovalRecordKey(approvalId: string) {
   return `APPROVAL#${requireText(approvalId, 'Approval ID')}`
 }
 
+/** File approval reverse projection の record key prefix を作成します。 */
+function createFileApprovalIndexPrefix(fileId: string) {
+  return `FILE_APPROVAL#${requireText(fileId, 'File ID')}#`
+}
+
+/** File approval reverse projection の record key を作成します。 */
+function createFileApprovalIndexRecordKey(fileId: string, approvalId: string) {
+  return `${createFileApprovalIndexPrefix(fileId)}${requireText(approvalId, 'Approval ID')}`
+}
+
 /** Annotation record prefix を作成します。 */
 function createAnnotationRecordPrefix(fileId: string, versionId: string) {
   return `ANNOTATION#${requireText(fileId, 'File ID')}#${requireText(versionId, 'Version ID')}#`
@@ -2371,10 +2496,13 @@ function toFileAttachment(item: StoredFileItem, actor: FileProofingActor): FileA
   const versions = [...item.versions].sort((left, right) => right.number - left.number)
   const current = requireStoredVersion(item, item.currentVersionId)
   const canRead = !actor.guest || item.guestAccess
+  const hasPendingApproval = item.pendingApprovalCount > 0
   const capabilities: FileAttachmentCapabilities = {
     canDownload: canRead,
-    canUploadVersion: actor.canWrite,
-    canDelete: actor.canManage || item.createdByMemberKey === actor.memberKey,
+    canUploadVersion: actor.canWrite && !hasPendingApproval,
+    canDelete: !actor.guest && !hasPendingApproval && (
+      actor.canManage || item.createdByMemberKey === actor.memberKey
+    ),
     canAnnotate: actor.canWrite,
     canRequestApproval: actor.canWrite && item.issueId !== undefined,
   }
@@ -2468,7 +2596,7 @@ function requireStoredObjectVersionId(version: StoredFileVersion) {
     throw new FileProofingError(
       423,
       'FileUploadIncomplete',
-      'File upload must be completed before access can be issued.',
+      'File upload must be completed before this operation is allowed.',
     )
   }
   return version.objectVersionId
@@ -2626,6 +2754,16 @@ function createApprovalProjectionPutItems(
         : { ExpressionAttributeValues: { ':expectedRevision': expectedRevision } }),
     },
   }]
+  const fileApprovalIndex: StoredFileApprovalIndexItem = {
+    scopeKey: approval.scopeKey,
+    recordKey: createFileApprovalIndexRecordKey(approval.fileId, approval.id),
+    entryType: 'file-approval-index',
+    fileId: approval.fileId,
+    approvalId: approval.id,
+    dueAt: approval.dueAt,
+    reviewerMemberKeys: approval.reviewers.map((reviewer) => reviewer.memberKey),
+  }
+  transactionItems.push({ Put: { TableName: tableName, Item: fileApprovalIndex } })
   for (const reviewer of approval.reviewers) {
     const projection: StoredReviewerApprovalItem = {
       scopeKey: createReviewerScopeKey(approval.workspaceId, reviewer.memberKey),
@@ -2920,6 +3058,18 @@ function requirePositiveInteger(value: number, label: string) {
   return value
 }
 
+/** Approval revision を API domain error として検証します。 */
+function requireApprovalRevision(value: number) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new FileProofingError(
+      400,
+      'InvalidFileProofingInput',
+      'Approval revision must be a positive integer.',
+    )
+  }
+  return value
+}
+
 /** Environment string を trim して取得します。 */
 function readEnvironment(name: string) {
   return process.env[name]?.trim() || undefined
@@ -2954,8 +3104,25 @@ function epochSecondsAfterDays(timestamp: string, days: number) {
 
 /** DynamoDB conditional transaction error かどうかを判定します。 */
 function isConditionalTransactionError(error: unknown) {
-  return typeof error === 'object' && error !== null &&
-    'name' in error && error.name === 'TransactionCanceledException'
+  if (
+    typeof error !== 'object' || error === null ||
+    !('name' in error) || error.name !== 'TransactionCanceledException' ||
+    !('CancellationReasons' in error) || !Array.isArray(error.CancellationReasons)
+  ) {
+    return false
+  }
+  const reasonCodes = error.CancellationReasons.map((reason) =>
+    typeof reason === 'object' && reason !== null &&
+      'Code' in reason && typeof reason.Code === 'string'
+      ? reason.Code
+      : undefined
+  )
+  if (reasonCodes.some((code) => code === undefined)) {
+    return false
+  }
+  const failureCodes = reasonCodes.filter((code) => code !== 'None')
+  return failureCodes.length > 0 &&
+    failureCodes.every((code) => code === 'ConditionalCheckFailed')
 }
 
 /** DynamoDB single-item conditional write error かどうかを判定します。 */
@@ -2980,6 +3147,12 @@ function isStoredAnnotationItem(value: unknown): value is StoredAnnotationItem {
 function isStoredApprovalItem(value: unknown): value is StoredApprovalItem {
   return typeof value === 'object' && value !== null &&
     'entryType' in value && value.entryType === 'approval'
+}
+
+/** File approval reverse projection row を判定します。 */
+function isStoredFileApprovalIndexItem(value: unknown): value is StoredFileApprovalIndexItem {
+  return typeof value === 'object' && value !== null &&
+    'entryType' in value && value.entryType === 'file-approval-index'
 }
 
 /** Approval summary projection row を判定します。 */

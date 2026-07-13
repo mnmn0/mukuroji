@@ -25,6 +25,17 @@ import {
   type Locale,
   type MessageKey,
 } from '../i18n'
+import { NotificationInbox } from '../notifications/NotificationInbox'
+import { NotificationSettingsPanel } from '../notifications/NotificationSettingsPanel'
+import type { InboxNotification } from '../notifications/api'
+import { resolveNotificationPath } from '../notifications/paths'
+import {
+  type NotificationInboxController,
+  type NotificationPreferencesController,
+  useNotificationInbox,
+  useNotificationPreferences,
+  useUnreadNotificationCount,
+} from '../notifications/useNotifications'
 import {
   getWorkspaceWorkItems,
   TeamIssuesApiError,
@@ -66,6 +77,7 @@ import {
   type TaskStatus,
 } from '../tasks/api'
 import { WorkspaceAccessPanelContainer } from '../workspace/WorkspaceAccessPanel'
+import { useWorkspaceCommandMenu } from '../commands/WorkspaceCommandMenuContext'
 
 /**
  * サイドバーまたはチーム配下から表示できるワークスペース画面です。
@@ -283,6 +295,18 @@ type WorkspaceScreenProps = {
    */
   tasks: ProjectTask[]
   /**
+   * サイドバーに表示する通知の実未読件数です。
+   */
+  inboxCount?: number
+  /**
+   * notification-backed Inbox の data と action です。
+   */
+  notificationInbox?: NotificationInboxController
+  /**
+   * 通知配信設定の data と保存 action です。
+   */
+  notificationPreferences?: NotificationPreferencesController
+  /**
    * タスク取得に失敗した projectId の一覧です。
    */
   taskLoadFailedProjectIds?: string[]
@@ -347,6 +371,10 @@ type WorkspaceScreenProps = {
    */
   onOpenTask?: (task: ProjectTask) => void
   /**
+   * Inbox の通知対象へ遷移するときの callback です。
+   */
+  onOpenNotification?: (notification: InboxNotification) => void
+  /**
    * フォントサイズ設定が変更されたときの callback です。
    */
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
@@ -393,14 +421,8 @@ const emptyTeamProjectMembers: TeamProjectMemberAccess[] = []
 const emptyTeamProjectMemberFailures: string[] = []
 const emptyUserIdentityAliases: string[] = []
 const myTaskKanbanStatuses = ['todo', 'in-progress', 'review', 'done'] as const satisfies readonly TaskStatus[]
-const inboxFilterOptions = ['all', 'mine', 'overdue', 'review', 'high', 'approval'] as const
 const reportStatusOrder = ['todo', 'in-progress', 'review', 'done'] as const satisfies readonly TaskStatus[]
 const reportPriorityOrder = ['high', 'medium', 'low'] as const satisfies readonly TaskPriority[]
-
-/**
- * 受信箱の要確認タスクを絞り込む条件です。
- */
-type InboxFilter = (typeof inboxFilterOptions)[number]
 
 const apiSWRConfig = {
   dedupingInterval: 10_000,
@@ -478,6 +500,8 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   )
   const t = useMemo(() => createTranslator(locale), [locale])
   const accessToken = session?.accessToken
+  const notificationInbox = useNotificationInbox(accessToken, view === 'inbox')
+  const notificationPreferences = useNotificationPreferences(accessToken, view === 'settings')
   const currentUserKey = accessToken ? (['current-user', accessToken] as const) : null
   const {
     data: user,
@@ -501,8 +525,9 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   const activeTeam = useMemo(() => findActiveTeam(teams, params.teamId), [params.teamId, teams])
   const activeTeamProjects = activeTeam?.projects ?? []
   const isTeamManagementView = view === 'team-overview' || view === 'team-members'
+  const needsWorkspaceWorkItems = !['help', 'settings'].includes(view)
   const workspaceWorkItemsKey =
-    accessToken && user && !currentUserError
+    accessToken && user && !currentUserError && needsWorkspaceWorkItems
       ? (['workspace-work-items', accessToken] as const)
       : null
   const {
@@ -552,6 +577,10 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     [user],
   )
   const userInitial = userLabel.trim().charAt(0).toUpperCase() || 'M'
+  const inboxCount = useUnreadNotificationCount(
+    accessToken,
+    Boolean(user && !currentUserError),
+  )
   const canManageStructure = canManageWorkspaceStructure(user)
   const canMutateContent = canMutateWorkspaceContent(user)
   const isLoading =
@@ -559,7 +588,12 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     isCurrentUserLoading ||
     Boolean(currentUserError) ||
     Boolean(user && isProjectDirectoryLoading) ||
-    Boolean(user && isWorkspaceWorkItemsLoading)
+    Boolean(
+      user &&
+      view !== 'inbox' &&
+      workspaceWorkItemsKey &&
+      isWorkspaceWorkItemsLoading,
+    )
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -705,9 +739,12 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       accessToken={accessToken}
       activeTeamId={params.teamId}
       fontSizePreference={fontSizePreference}
+      inboxCount={inboxCount}
       isLoading={isLoading}
       isTeamProjectMembersLoading={Boolean(teamProjectMembersKey && isTeamProjectMembersLoading)}
       locale={locale}
+      notificationInbox={notificationInbox}
+      notificationPreferences={notificationPreferences}
       onFontSizePreferenceChange={handleFontSizePreferenceChange}
       onLocaleChange={handleLocaleChange}
       onLogout={handleLogout}
@@ -733,6 +770,13 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
             ? createProjectIssuesPath(task.assignedProjectId, task.teamId, task.id)
             : createTeamIssuesPath(task.teamId, task.id),
         )
+      }}
+      onOpenNotification={(notification) => {
+        const path = resolveNotificationPath(notification)
+
+        if (path) {
+          navigate(path)
+        }
       }}
       summary={summary}
       taskMoveErrorMessage={taskMoveErrorMessage}
@@ -765,6 +809,9 @@ export function WorkspaceScreen({
   teams,
   activeTeamId,
   tasks,
+  inboxCount = 0,
+  notificationInbox,
+  notificationPreferences,
   taskLoadFailedProjectIds = emptyProjectTaskFailures,
   teamProjectMembers = emptyTeamProjectMembers,
   teamProjectMembersFailedProjectIds = emptyTeamProjectMemberFailures,
@@ -780,6 +827,7 @@ export function WorkspaceScreen({
   onArchiveProject,
   onArchiveTeam,
   onMoveTaskStatus,
+  onOpenNotification,
   onOpenTask,
   onFontSizePreferenceChange,
   onLocaleChange,
@@ -791,6 +839,7 @@ export function WorkspaceScreen({
   const activeTeam = findActiveTeam(teams, activeTeamId)
   const activeTeamLabel = activeTeam?.name ?? t('workspace.team.missing')
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
+  const commandMenu = useWorkspaceCommandMenu()
 
   return (
     <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
@@ -799,12 +848,13 @@ export function WorkspaceScreen({
         activeTeamId={metadata.activeTeamViewId ? activeTeam?.id : undefined}
         activeTeamViewId={metadata.activeTeamViewId}
         className="max-[980px]:hidden"
-        inboxCount={createInboxTasks(tasks).length}
+        inboxCount={inboxCount}
         labels={sidebarLabels}
         onArchiveProject={onArchiveProject}
         onArchiveTeam={onArchiveTeam}
         onCreateProject={onCreateProject}
         onCreateTeam={onCreateTeam}
+        onOpenSearch={commandMenu.open}
         onSelectNav={onSelectNav}
         onSelectProject={onSelectProject}
         onSelectTeamView={onSelectTeamView}
@@ -821,12 +871,16 @@ export function WorkspaceScreen({
           activeNavId={metadata.activeNavId}
           activeTeamId={metadata.activeTeamViewId ? activeTeam?.id : undefined}
           activeTeamViewId={metadata.activeTeamViewId}
-          inboxCount={createInboxTasks(tasks).length}
+          inboxCount={inboxCount}
           labels={sidebarLabels}
           onArchiveProject={onArchiveProject}
           onArchiveTeam={onArchiveTeam}
           onCreateProject={onCreateProject}
           onCreateTeam={onCreateTeam}
+          onOpenSearch={() => {
+            setIsMobileSidebarOpen(false)
+            commandMenu.open?.()
+          }}
           onSelectNav={(navId) => {
             setIsMobileSidebarOpen(false)
             onSelectNav?.(navId)
@@ -898,6 +952,8 @@ export function WorkspaceScreen({
               activeTeam={activeTeam}
               fontSizePreference={fontSizePreference}
               locale={locale}
+              notificationInbox={notificationInbox}
+              notificationPreferences={notificationPreferences}
               summary={summary}
               t={t}
               taskMoveErrorMessage={taskMoveErrorMessage}
@@ -910,6 +966,7 @@ export function WorkspaceScreen({
               onFontSizePreferenceChange={onFontSizePreferenceChange}
               onLocaleChange={onLocaleChange}
               onMoveTaskStatus={onMoveTaskStatus}
+              onOpenNotification={onOpenNotification}
               onOpenTask={onOpenTask}
               onSelectProject={onSelectProject}
               userLabel={userLabel}
@@ -928,6 +985,8 @@ function WorkspaceBody({
   activeTeam,
   fontSizePreference,
   locale,
+  notificationInbox,
+  notificationPreferences,
   summary,
   t,
   taskMoveErrorMessage,
@@ -940,6 +999,7 @@ function WorkspaceBody({
   onFontSizePreferenceChange,
   onLocaleChange,
   onMoveTaskStatus,
+  onOpenNotification,
   onOpenTask,
   onSelectProject,
   userLabel,
@@ -950,6 +1010,8 @@ function WorkspaceBody({
   activeTeam?: ProjectDirectoryTeam
   fontSizePreference: FontSizePreference
   locale: Locale
+  notificationInbox?: NotificationInboxController
+  notificationPreferences?: NotificationPreferencesController
   summary: DashboardSummary
   t: (key: MessageKey) => string
   taskMoveErrorMessage?: string
@@ -962,6 +1024,7 @@ function WorkspaceBody({
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
   onLocaleChange?: (locale: Locale) => void
   onMoveTaskStatus?: (task: ProjectTask, status: TaskStatus) => Promise<void>
+  onOpenNotification?: (notification: InboxNotification) => void
   onOpenTask?: (task: ProjectTask) => void
   onSelectProject?: (projectId: string, teamId: string) => void
   userLabel: string
@@ -1004,13 +1067,17 @@ function WorkspaceBody({
         />
       ) : null}
       {view === 'inbox' ? (
-        <InboxView
-          onOpenTask={onOpenTask}
-          t={t}
-          tasks={tasks}
-          teams={teams}
-          userIdentityAliases={userIdentityAliases}
-        />
+        notificationInbox ? (
+          <InboxWorkspaceView
+            locale={locale}
+            notificationInbox={notificationInbox}
+            onOpenNotification={onOpenNotification}
+            onOpenTask={onOpenTask}
+            t={t}
+            tasks={tasks}
+            teams={teams}
+          />
+        ) : null
       ) : null}
       {view === 'dashboard' ? (
         <DashboardWorkspaceView
@@ -1036,6 +1103,7 @@ function WorkspaceBody({
           accessToken={accessToken}
           fontSizePreference={fontSizePreference}
           locale={locale}
+          notificationPreferences={notificationPreferences}
           t={t}
           userLabel={userLabel}
           onFontSizePreferenceChange={onFontSizePreferenceChange}
@@ -1307,179 +1375,164 @@ function MyTasksView({
   )
 }
 
-function InboxView({
+function InboxWorkspaceView({
+  locale,
+  notificationInbox,
+  onOpenNotification,
   onOpenTask,
   t,
   tasks,
   teams,
-  userIdentityAliases,
+}: {
+  locale: Locale
+  notificationInbox: NotificationInboxController
+  onOpenNotification?: (notification: InboxNotification) => void
+  onOpenTask?: (task: ProjectTask) => void
+  t: (key: MessageKey) => string
+  tasks: ProjectTask[]
+  teams: ProjectDirectoryTeam[]
+}) {
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'approval'>('all')
+  const inboxTasks = createInboxTasks(tasks)
+  const approvalTaskCount = inboxTasks.filter(hasApprovalAttention).length
+  const filteredTasks = sourceFilter === 'approval'
+    ? inboxTasks.filter(hasApprovalAttention)
+    : inboxTasks
+  const showAttentionQueue = inboxTasks.length > 0 || sourceFilter === 'approval'
+
+  return (
+    <div className="grid gap-5" data-testid="inbox-workbench">
+      <section className="workbench-toolbar flex min-w-0 flex-wrap items-center justify-between gap-3 p-4">
+        <div
+          aria-label={t('workspace.inbox.scopeTitle')}
+          className="inline-flex min-w-0 flex-wrap gap-1 rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-1"
+          role="group"
+        >
+          <button
+            aria-pressed={sourceFilter === 'all'}
+            className={`min-h-9 rounded-md px-3 text-sm font-semibold tracking-[0.01em] transition ${
+              sourceFilter === 'all'
+                ? 'bg-white text-[var(--workbench-text)] shadow-[0_1px_2px_rgba(23,32,29,0.08)]'
+                : 'text-[var(--workbench-muted)] hover:bg-white/70 hover:text-[var(--workbench-text)]'
+            }`}
+            data-testid="inbox-filter-all"
+            onClick={() => setSourceFilter('all')}
+            type="button"
+          >
+            {t('workspace.inbox.filter.all')}
+          </button>
+          <button
+            aria-pressed={sourceFilter === 'approval'}
+            className={`min-h-9 rounded-md px-3 text-sm font-semibold tracking-[0.01em] transition ${
+              sourceFilter === 'approval'
+                ? 'bg-white text-[var(--workbench-text)] shadow-[0_1px_2px_rgba(23,32,29,0.08)]'
+                : 'text-[var(--workbench-muted)] hover:bg-white/70 hover:text-[var(--workbench-text)]'
+            }`}
+            data-testid="inbox-filter-approval"
+            onClick={() => setSourceFilter('approval')}
+            type="button"
+          >
+            {t('workspace.inbox.filter.approval')}
+            {approvalTaskCount > 0 ? (
+              <span className="ml-2 rounded-full bg-[var(--workbench-primary)] px-2 py-0.5 text-xs font-bold text-white">
+                {approvalTaskCount}
+              </span>
+            ) : null}
+          </button>
+        </div>
+        <p className="text-sm font-semibold text-[var(--workbench-muted)]">
+          {t('workspace.inbox.scopeDescription')}
+        </p>
+      </section>
+
+      {showAttentionQueue ? (
+        <InboxAttentionQueue
+          onOpenTask={onOpenTask}
+          t={t}
+          tasks={filteredTasks}
+          teams={teams}
+        />
+      ) : null}
+
+      <NotificationInbox
+        controller={notificationInbox}
+        locale={locale}
+        onOpenNotification={onOpenNotification}
+      />
+    </div>
+  )
+}
+
+function InboxAttentionQueue({
+  onOpenTask,
+  t,
+  tasks,
+  teams,
 }: {
   onOpenTask?: (task: ProjectTask) => void
   t: (key: MessageKey) => string
   tasks: ProjectTask[]
   teams: ProjectDirectoryTeam[]
-  userIdentityAliases: string[]
 }) {
-  const [activeFilter, setActiveFilter] = useState<InboxFilter>('all')
-  const [searchQuery, setSearchQuery] = useState('')
-  const inboxTasks = createInboxTasks(tasks)
-  const normalizedSearchQuery = normalizeWorkspaceSearchText(searchQuery)
-  const filterCounts: Record<InboxFilter, number> = {
-    all: inboxTasks.length,
-    mine: inboxTasks.filter((task) => isWorkspaceTaskAssignedToUser(task, userIdentityAliases)).length,
-    overdue: inboxTasks.filter(isWorkspaceTaskOverdue).length,
-    review: inboxTasks.filter((task) => task.status === 'review').length,
-    high: inboxTasks.filter((task) => task.priority === 'high').length,
-    approval: inboxTasks.filter(hasApprovalAttention).length,
-  }
-  const filteredTasks = inboxTasks.filter((task) => {
-    if (!matchesInboxFilter(task, activeFilter, userIdentityAliases)) {
-      return false
-    }
-
-    if (!normalizedSearchQuery) {
-      return true
-    }
-
-    return [
-      resolveTaskTitle(task, t),
-      resolveTaskAssignee(task, t),
-      resolveWorkspaceProjectName(task, teams),
-      task.assignedProjectId,
-    ].some((value) => normalizeWorkspaceSearchText(value).includes(normalizedSearchQuery))
-  })
-
   return (
-    <div className="grid gap-5" data-testid="inbox-workbench">
-      <section className="workbench-toolbar grid gap-4 p-4">
-        <div className="flex min-w-0 flex-wrap items-end justify-between gap-4">
-          <label className="grid min-w-[260px] flex-1 gap-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
-            {t('workspace.inbox.searchLabel')}
-            <input
-              aria-label={t('workspace.inbox.searchLabel')}
-              className="workbench-input min-h-11 w-full px-3 normal-case tracking-normal"
-              data-testid="inbox-search"
-              placeholder={t('workspace.inbox.searchPlaceholder')}
-              type="search"
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-            />
-          </label>
-          <p className="text-sm font-semibold text-[var(--workbench-muted)]" role="status">
-            {t('workspace.inbox.filteredMeta')
-              .replace('{visible}', String(filteredTasks.length))
-              .replace('{total}', String(inboxTasks.length))}
-          </p>
-        </div>
+    <section className="workbench-panel overflow-hidden">
+      <SectionHeader
+        title={t('workspace.inbox.queueTitle')}
+        meta={t('workspace.inbox.queueMeta').replace('{count}', String(tasks.length))}
+      />
+      <div className="divide-y divide-[var(--workbench-border)]" data-testid="inbox-task-list">
+        {tasks.map((task) => {
+          const reasonKeys = createInboxReasonKeys(task)
 
-        <div
-          aria-label={t('workspace.inbox.filterLabel')}
-          className="flex flex-wrap gap-2"
-          role="group"
-        >
-          {inboxFilterOptions.map((filter) => (
+          return (
             <button
-              aria-pressed={activeFilter === filter}
-              className={`inline-flex min-h-9 items-center gap-2 rounded-lg border px-3 text-sm font-semibold transition ${
-                activeFilter === filter
-                  ? 'border-[var(--workbench-primary)] bg-[#e5f7f4] text-[var(--workbench-primary)]'
-                  : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-muted)] hover:border-[var(--workbench-border-strong)] hover:text-[var(--workbench-text)]'
-              }`}
-              data-testid={`inbox-filter-${filter}`}
-              key={filter}
-              onClick={() => setActiveFilter(filter)}
+              className="grid w-full grid-cols-[minmax(220px,1fr)_minmax(170px,0.7fr)_auto] items-center gap-5 p-5 text-left transition hover:bg-[var(--workbench-surface-muted)] disabled:hover:bg-transparent max-[860px]:grid-cols-1"
+              data-testid={`inbox-task-${createInboxTaskTestId(task)}`}
+              disabled={!onOpenTask || !isOpenableWorkspaceTask(task)}
+              key={createWorkspaceTaskKey(task)}
+              onClick={() => onOpenTask?.(task)}
               type="button"
             >
-              <span>{t(`workspace.inbox.filter.${filter}`)}</span>
-              <span className="rounded-full bg-black/5 px-2 py-0.5 text-xs tabular-nums">
-                {filterCounts[filter]}
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-semibold text-[var(--workbench-text)]">
+                  {resolveTaskTitle(task, t)}
+                </span>
+                <span className="mt-1 block truncate text-sm font-medium text-[var(--workbench-muted)]">
+                  {resolveWorkspaceProjectName(task, teams)} · {resolveTaskAssignee(task, t)}
+                </span>
+                <span className="mt-3 flex flex-wrap gap-2">
+                  {reasonKeys.map((reasonKey) => (
+                    <span className={resolveInboxReasonClassName(reasonKey)} key={reasonKey}>
+                      {t(reasonKey)}
+                    </span>
+                  ))}
+                </span>
+              </span>
+              <span className="flex flex-wrap items-center gap-2">
+                <StatusPill status={task.status} t={t} />
+                <PriorityPill priority={task.priority} t={t} />
+                <span className="text-sm font-semibold text-[var(--workbench-muted)]">
+                  {task.dueDate}
+                </span>
+              </span>
+              <span className="workbench-badge justify-self-end max-[860px]:justify-self-start">
+                {t('workspace.action.openTask')}
               </span>
             </button>
-          ))}
-        </div>
-      </section>
-
-      <div className="grid grid-cols-[minmax(0,1fr)_320px] gap-5 max-[1080px]:grid-cols-1">
-        <section className="workbench-panel overflow-hidden">
-          <SectionHeader
-            title={t('workspace.inbox.queueTitle')}
-            meta={t('workspace.inbox.queueMeta').replace('{count}', String(filteredTasks.length))}
-          />
-          <div className="divide-y divide-[var(--workbench-border)]" data-testid="inbox-task-list">
-            {filteredTasks.map((task) => (
-              <button
-                className="grid w-full grid-cols-[minmax(220px,1fr)_minmax(170px,0.7fr)_auto] items-center gap-5 p-5 text-left transition hover:bg-[var(--workbench-surface-muted)] disabled:hover:bg-transparent max-[860px]:grid-cols-1"
-                data-testid={`inbox-task-${createInboxTaskTestId(task)}`}
-                disabled={!onOpenTask || !isOpenableWorkspaceTask(task)}
-                key={createWorkspaceTaskKey(task)}
-                onClick={() => onOpenTask?.(task)}
-                type="button"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-semibold text-[var(--workbench-text)]">
-                    {resolveTaskTitle(task, t)}
-                  </p>
-                  <p className="mt-1 truncate text-sm font-medium text-[var(--workbench-muted)]">
-                    {resolveWorkspaceProjectName(task, teams)} · {resolveTaskAssignee(task, t)}
-                  </p>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {createInboxReasonKeys(task).map((reasonKey) => (
-                      <span className={resolveInboxReasonClassName(reasonKey)} key={reasonKey}>
-                        {t(reasonKey)}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <StatusPill status={task.status} t={t} />
-                  <PriorityPill priority={task.priority} t={t} />
-                  <span className="text-sm font-semibold text-[var(--workbench-muted)]">{task.dueDate}</span>
-                </div>
-                <span className="workbench-badge justify-self-end max-[860px]:justify-self-start">
-                  {t('workspace.action.openTask')}
-                </span>
-              </button>
-            ))}
-            {filteredTasks.length === 0 ? (
-              <div className="px-5 py-10 text-center">
-                <p className="text-sm font-semibold text-[var(--workbench-text)]">
-                  {t('workspace.inbox.emptyTitle')}
-                </p>
-                <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">
-                  {t('workspace.inbox.emptyDescription')}
-                </p>
-              </div>
-            ) : null}
-          </div>
-        </section>
-
-        <aside className="grid content-start gap-4">
-          <section className="workbench-panel p-5">
-            <p className="workbench-eyebrow">{t('workspace.inbox.breakdownTitle')}</p>
-            <div className="mt-4 grid divide-y divide-[var(--workbench-border)]">
-              {(['overdue', 'high', 'review', 'approval', 'mine'] as const).map((filter) => (
-                <div className="flex items-center justify-between gap-4 py-3" key={filter}>
-                  <span className="text-sm font-semibold text-[var(--workbench-muted)]">
-                    {t(`workspace.inbox.filter.${filter}`)}
-                  </span>
-                  <span className="text-lg font-semibold tabular-nums text-[var(--workbench-text)]">
-                    {filterCounts[filter]}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </section>
-          <section className="workbench-panel p-5">
+          )
+        })}
+        {tasks.length === 0 ? (
+          <div className="px-5 py-10 text-center">
             <p className="text-sm font-semibold text-[var(--workbench-text)]">
-              {t('workspace.inbox.scopeTitle')}
+              {t('workspace.inbox.emptyTitle')}
             </p>
-            <p className="mt-2 text-sm font-medium leading-6 text-[var(--workbench-muted)]">
-              {t('workspace.inbox.scopeDescription')}
+            <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">
+              {t('workspace.inbox.emptyDescription')}
             </p>
-          </section>
-        </aside>
+          </div>
+        ) : null}
       </div>
-    </div>
+    </section>
   )
 }
 
@@ -1951,6 +2004,7 @@ function SettingsView({
   accessToken,
   fontSizePreference,
   locale,
+  notificationPreferences,
   onFontSizePreferenceChange,
   onLocaleChange,
   t,
@@ -1959,6 +2013,7 @@ function SettingsView({
   accessToken?: string
   fontSizePreference: FontSizePreference
   locale: Locale
+  notificationPreferences?: NotificationPreferencesController
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
   onLocaleChange?: (locale: Locale) => void
   t: (key: MessageKey) => string
@@ -2030,10 +2085,16 @@ function SettingsView({
           </label>
         </div>
       </section>
+      {notificationPreferences ? (
+        <NotificationSettingsPanel
+          controller={notificationPreferences}
+          key={notificationPreferences.preferences?.version ?? 'notification-settings-loading'}
+          locale={locale}
+        />
+      ) : null}
       <InfoGrid
         items={[
           ['workspace.settings.profileTitle', 'workspace.settings.profileDescription'],
-          ['workspace.settings.notificationTitle', 'workspace.settings.notificationDescription'],
           ['workspace.settings.permissionTitle', 'workspace.settings.permissionDescription'],
           ['workspace.settings.integrationTitle', 'workspace.settings.integrationDescription'],
         ]}
@@ -2867,34 +2928,6 @@ function createInboxTasks(tasks: ProjectTask[]) {
     )
 }
 
-function matchesInboxFilter(
-  task: ProjectTask,
-  filter: InboxFilter,
-  userIdentityAliases: readonly string[],
-) {
-  if (filter === 'mine') {
-    return isWorkspaceTaskAssignedToUser(task, userIdentityAliases)
-  }
-
-  if (filter === 'overdue') {
-    return isWorkspaceTaskOverdue(task)
-  }
-
-  if (filter === 'review') {
-    return task.status === 'review'
-  }
-
-  if (filter === 'high') {
-    return task.priority === 'high'
-  }
-
-  if (filter === 'approval') {
-    return hasApprovalAttention(task)
-  }
-
-  return true
-}
-
 function isWorkspaceTaskAssignedToUser(
   task: ProjectTask,
   userIdentityAliases: readonly string[],
@@ -2954,9 +2987,7 @@ function resolveInboxReasonClassName(reasonKey: MessageKey) {
   if (
     reasonKey === 'workspace.inbox.reason.overdue' ||
     reasonKey === 'workspace.inbox.reason.high' ||
-    reasonKey === 'workspace.inbox.reason.approvalOverdue' ||
-    reasonKey === 'workspace.inbox.reason.approvalChangesRequested' ||
-    reasonKey === 'workspace.inbox.reason.approvalRejected'
+    reasonKey === 'workspace.inbox.reason.approvalOverdue'
   ) {
     return 'workbench-badge-danger'
   }

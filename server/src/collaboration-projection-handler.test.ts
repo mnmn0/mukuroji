@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test'
+import { S3Client } from '@aws-sdk/client-s3'
 import {
   cleanupDeletedFileProjection,
   createDynamoBatchItemFailure,
+  createNotificationProjectionDeliveryState,
+  createNotificationProjectionItem,
   createNotificationProjectionKeys,
   groupNotificationCandidates,
   hasActiveNotificationScope,
@@ -11,6 +14,8 @@ import {
   mergeDeletedObjectTags,
   parseAuditProjectionEvent,
   processCollaborationProjectionBatch,
+  refreshScheduledNotificationEvent,
+  tagDeletedFileObjectVersion,
   toSubscribedWatcherCandidates,
   type AuditProjectionEvent,
   type DeletedFileCleanupDependencies,
@@ -93,13 +98,18 @@ describe('collaboration projection pure helpers', () => {
       workspaceId: 'workspace-1',
       occurredAt: '2026-07-12T12:00:00.000Z',
       actorUserId: 'cognito-sub-1',
+      actor: { displayName: 'Author Example' },
       entityKey: 'workspace-1#work-item#team/core/issue/example',
       entityId: 'team/core/issue/example',
+      summary: 'A reply mentioned you.',
       outboxStatus: 'suppressed',
       metadata: {
         actorMemberKey: 'author@example.com',
         issueId: 'example',
         fileId: 'file-1',
+        commentId: 'reply-1',
+        rootCommentId: 'root-1',
+        notificationTitle: 'Inbox foundations',
         notificationCandidates: [
           { memberKey: 'member@example.com', reason: 'mention' },
           { memberKey: 42, reason: 'invalid' },
@@ -109,8 +119,13 @@ describe('collaboration projection pure helpers', () => {
 
     expect(event).toMatchObject({
       actorMemberKey: 'author@example.com',
+      actorLabel: 'Author Example',
       issueId: 'example',
       fileId: 'file-1',
+      commentId: 'reply-1',
+      rootCommentId: 'root-1',
+      notificationTitle: 'Inbox foundations',
+      summary: 'A reply mentioned you.',
       outboxStatus: 'suppressed',
       notificationCandidates: [
         { memberKey: 'member@example.com', reason: 'mention' },
@@ -121,6 +136,7 @@ describe('collaboration projection pure helpers', () => {
   test('durably quarantines immutable versions and expires related file metadata', async () => {
     const taggedVersions: DeletedFileObjectVersion[] = []
     const expiredKeys: DeletedFileMetadataKey[] = []
+    const queriedPrefixes: string[] = []
     const dependencies: DeletedFileCleanupDependencies = {
       async readFile(scopeKey, fileId) {
         return {
@@ -143,6 +159,7 @@ describe('collaboration projection pure helpers', () => {
         }
       },
       async queryRows(_scopeKey, recordPrefix) {
+        queriedPrefixes.push(recordPrefix)
         if (recordPrefix.startsWith('ANNOTATION#')) {
           return [{
             scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
@@ -153,21 +170,12 @@ describe('collaboration projection pure helpers', () => {
         return [
           {
             scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
-            recordKey: 'APPROVAL#approval-1',
-            entryType: 'approval',
-            id: 'approval-1',
+            recordKey: 'FILE_APPROVAL#file-1#approval-1',
+            entryType: 'file-approval-index',
+            approvalId: 'approval-1',
             fileId: 'file-1',
             dueAt: '2026-07-20T00:00:00.000Z',
-            reviewers: [{ memberKey: 'Reviewer@Example.com' }],
-          },
-          {
-            scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
-            recordKey: 'APPROVAL#approval-other',
-            entryType: 'approval',
-            id: 'approval-other',
-            fileId: 'file-other',
-            dueAt: '2026-07-20T00:00:00.000Z',
-            reviewers: [{ memberKey: 'other@example.com' }],
+            reviewerMemberKeys: ['Reviewer@Example.com'],
           },
         ]
       },
@@ -194,10 +202,18 @@ describe('collaboration projection pure helpers', () => {
       objectKey: 'workspaces/workspace-1/files/file-1/version-1/proof.png',
       objectVersionId: 's3-version-1',
     }])
+    expect(queriedPrefixes).toEqual([
+      'ANNOTATION#file-1#',
+      'FILE_APPROVAL#file-1#',
+    ])
     expect(expiredKeys).toEqual([
       {
         scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
         recordKey: 'ANNOTATION#file-1#version-1#annotation-1',
+      },
+      {
+        scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
+        recordKey: 'FILE_APPROVAL#file-1#approval-1',
       },
       {
         scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
@@ -220,6 +236,40 @@ describe('collaboration projection pure helpers', () => {
       { Key: 'mukuroji-upload', Value: 'completed' },
       { Key: 'mukuroji-deleted', Value: 'true' },
     ])
+  })
+
+  test('treats only missing immutable versions as completed deleted-file tagging', async () => {
+    const target: DeletedFileObjectVersion = {
+      objectKey: 'workspaces/workspace-1/files/file-1/version-1/proof.png',
+      objectVersionId: 's3-version-1',
+    }
+    const s3Client = new S3Client({
+      credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+      region: 'us-east-1',
+    })
+    let failure = Object.assign(new Error('Object key is gone.'), { name: 'NoSuchKey' })
+    let sendCount = 0
+    ;(s3Client as unknown as { send(command: unknown): Promise<Record<string, unknown>> }).send =
+      async () => {
+        sendCount += 1
+        if (failure.name === 'NoSuchVersion' && sendCount === 1) {
+          return { TagSet: [] }
+        }
+        throw failure
+      }
+
+    await expect(tagDeletedFileObjectVersion(s3Client, 'files', target)).resolves.toBeUndefined()
+
+    failure = Object.assign(new Error('Object version is gone.'), { name: 'NoSuchVersion' })
+    sendCount = 0
+    await expect(tagDeletedFileObjectVersion(s3Client, 'files', target)).resolves.toBeUndefined()
+
+    failure = Object.assign(new Error('S3 is unavailable.'), { name: 'ServiceUnavailable' })
+    sendCount = 0
+    await expect(tagDeletedFileObjectVersion(s3Client, 'files', target)).rejects.toMatchObject({
+      message: 'S3 is unavailable.',
+      name: 'ServiceUnavailable',
+    })
   })
 
   test('returns a partial batch failure when durable file cleanup fails', async () => {
@@ -277,6 +327,112 @@ describe('collaboration projection pure helpers', () => {
     })
   })
 
+  test('applies in-app channel, digest frequency, and quiet hours to projection state', () => {
+    const state = createNotificationProjectionDeliveryState(
+      'workspace-1#member@example.com',
+      '2026-07-12T23:00:00.000Z',
+      {
+        version: 1,
+        channels: { inApp: false, email: true, push: false },
+        frequency: 'instant',
+        quietHours: {
+          enabled: true,
+          start: '22:00',
+          end: '07:00',
+          timeZone: 'UTC',
+        },
+      },
+    )
+
+    expect(state).toEqual({
+      inAppVisible: false,
+      inboxState: 'archived',
+      recipientStatusKey: 'workspace-1#member@example.com#archived',
+      archivedAt: '2026-07-12T23:00:00.000Z',
+      deliveryChannels: ['email'],
+      deliveryAfter: '2026-07-13T07:00:00.000Z',
+      deliveryFrequency: 'instant',
+    })
+  })
+
+  test('persists the Work Item identity required by current-permission reads', () => {
+    const event = createProjectionEvent({
+      issueId: 'notification-api',
+      projectId: 'refero',
+      teamId: 'core-team',
+    })
+    const deliveryState = createNotificationProjectionDeliveryState(
+      'workspace-1#member@example.com',
+      event.occurredAt,
+      {
+        version: 0,
+        channels: { inApp: true, email: false, push: false },
+        frequency: 'instant',
+        quietHours: {
+          enabled: false,
+          start: '22:00',
+          end: '07:00',
+          timeZone: 'UTC',
+        },
+      },
+    )
+
+    expect(createNotificationProjectionItem(
+      event,
+      { memberKey: 'member@example.com', reasons: ['status-change'] },
+      deliveryState,
+      1_800_000_000,
+    )).toMatchObject({
+      issueId: 'notification-api',
+      projectId: 'refero',
+      recipientKey: 'workspace-1#member@example.com',
+      recipientStatusKey: 'workspace-1#member@example.com#unread',
+      teamId: 'core-team',
+    })
+  })
+
+  test('refreshes scheduled candidates from the current assignee and suppresses stale due state', () => {
+    const scheduledEvent = createProjectionEvent({
+      dueDate: '2026-07-12',
+      eventType: 'work-item.due',
+      issueId: 'release-checklist',
+      notificationCandidates: [{ memberKey: 'old-owner@example.com', reason: 'due' }],
+      teamId: 'core-team',
+    })
+
+    expect(refreshScheduledNotificationEvent(scheduledEvent, {
+      assigneeMemberKey: 'new-owner@example.com',
+      checked: true,
+      dueDate: '2026-07-12',
+      exists: true,
+      status: 'in-progress',
+    })).toBeUndefined()
+    expect(refreshScheduledNotificationEvent(scheduledEvent, {
+      assigneeMemberKey: 'old-owner@example.com',
+      checked: true,
+      dueDate: '2026-07-12',
+      exists: true,
+      status: 'in-progress',
+    })?.notificationCandidates).toEqual([{
+      memberKey: 'old-owner@example.com',
+      reason: 'due',
+    }])
+    expect(refreshScheduledNotificationEvent(scheduledEvent, {
+      assigneeMemberKey: 'new-owner@example.com',
+      checked: true,
+      dueDate: '2026-07-13',
+      exists: true,
+      status: 'in-progress',
+    })).toBeUndefined()
+    expect(refreshScheduledNotificationEvent(scheduledEvent, {
+      assigneeMemberKey: 'new-owner@example.com',
+      checked: true,
+      dueDate: '2026-07-12',
+      exists: true,
+      status: 'done',
+    })).toBeUndefined()
+  })
+
   test('tolerates legacy events without collaboration metadata', () => {
     const event = parseAuditProjectionEvent({
       eventId: 'evt-legacy',
@@ -292,6 +448,34 @@ describe('collaboration projection pure helpers', () => {
       outboxStatus: 'pending',
       scopeKey: 'workspace-1#work-item#team/core/issue/example',
     })
+  })
+
+  test('accepts future approval and automation notification producers through the generic contract', () => {
+    for (const [eventType, reason] of [
+      ['approval.decided', 'approval'],
+      ['automation.failed', 'automation-failure'],
+    ] as const) {
+      const event = parseAuditProjectionEvent({
+        eventId: `${eventType}-1`,
+        eventType,
+        workspaceId: 'workspace-1',
+        occurredAt: '2026-07-12T12:00:00.000Z',
+        actorUserId: 'system',
+        entityType: 'work-item',
+        entityId: 'team/core/issue/example',
+        metadata: {
+          teamId: 'core',
+          issueId: 'example',
+          deepLink: '/teams/core/issues?issueId=example',
+          notificationCandidates: [{ memberKey: 'owner@example.com', reason }],
+        },
+      })
+
+      expect(event).toBeDefined()
+      expect(groupNotificationCandidates(event as AuditProjectionEvent)).toEqual([
+        { memberKey: 'owner@example.com', reasons: [reason] },
+      ])
+    }
   })
 
   test('uses the DynamoDB sequence number for partial batch failures', () => {

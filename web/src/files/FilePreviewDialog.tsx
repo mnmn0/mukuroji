@@ -68,6 +68,27 @@ export function FilePreviewDialog({
   const [isLoading, setIsLoading] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [loadFailed, setLoadFailed] = useState(false)
+  const [saveFailed, setSaveFailed] = useState(false)
+  const annotationSaveOperationRef = useRef(0)
+  const selectedVersionKey = `${file.id}:${selectedVersion.id}`
+  const selectedVersionKeyRef = useRef(selectedVersionKey)
+  const getAnnotations = controller.getAnnotations
+  const getVersionAccess = controller.getVersionAccess
+
+  useEffect(() => () => {
+    annotationSaveOperationRef.current += 1
+  }, [])
+
+  useEffect(() => {
+    if (selectedVersionKeyRef.current === selectedVersionKey) {
+      return
+    }
+
+    annotationSaveOperationRef.current += 1
+    selectedVersionKeyRef.current = selectedVersionKey
+    setIsSaving(false)
+    setSaveFailed(false)
+  }, [selectedVersionKey])
 
   useEffect(() => {
     const previouslyFocused = document.activeElement instanceof HTMLElement
@@ -129,6 +150,7 @@ export function FilePreviewDialog({
       setAnnotations([])
       setPendingAnchor(undefined)
       setIsPinning(false)
+      setIsLoading(false)
       setLoadFailed(false)
 
       if (selectedVersion.scanStatus !== 'available') {
@@ -139,8 +161,8 @@ export function FilePreviewDialog({
 
       try {
         const [access, nextAnnotations] = await Promise.all([
-          controller.getVersionAccess(file, selectedVersion, 'inline'),
-          controller.getAnnotations(file, selectedVersion),
+          getVersionAccess(file, selectedVersion, 'inline'),
+          getAnnotations(file, selectedVersion),
         ])
 
         if (!cancelled) {
@@ -162,10 +184,15 @@ export function FilePreviewDialog({
     return () => {
       cancelled = true
     }
-  }, [controller, file, selectedVersion])
+  }, [file, getAnnotations, getVersionAccess, selectedVersion])
 
   const createAnchorAt = (x: number, y: number, pageNumber?: number) => {
-    if (!file.capabilities.canAnnotate || selectedVersion.previewKind === 'none') {
+    if (
+      !file.capabilities.canAnnotate ||
+      isSaving ||
+      selectedVersion.previewKind === 'none' ||
+      selectedVersion.scanStatus !== 'available'
+    ) {
       return
     }
 
@@ -175,6 +202,7 @@ export function FilePreviewDialog({
       y: clampCoordinate(y),
     } satisfies AnnotationAnchor
 
+    setSaveFailed(false)
     setPendingAnchor(selectedVersion.previewKind === 'pdf'
       ? { ...baseAnchor, pageNumber: pageNumber ?? 1 }
       : selectedVersion.previewKind === 'video'
@@ -188,22 +216,62 @@ export function FilePreviewDialog({
   const saveAnnotation = async () => {
     const bodyMarkdown = annotationBody.trim()
 
-    if (!pendingAnchor || !bodyMarkdown || isSaving) {
+    if (
+      !pendingAnchor ||
+      !bodyMarkdown ||
+      isSaving ||
+      selectedVersion.scanStatus !== 'available'
+    ) {
       return
     }
 
-    setIsSaving(true)
-    const annotation = await controller.createAnnotation(file, selectedVersion, {
-      anchor: pendingAnchor,
-      bodyMarkdown,
-    })
-    setIsSaving(false)
+    const operationId = annotationSaveOperationRef.current + 1
+    const operationFile = file
+    const operationVersion = selectedVersion
+    const operationAnchor = pendingAnchor
+    const operationVersionKey = selectedVersionKey
 
-    if (annotation) {
+    annotationSaveOperationRef.current = operationId
+    setIsSaving(true)
+    setSaveFailed(false)
+
+    try {
+      const annotation = await controller.createAnnotation(operationFile, operationVersion, {
+        anchor: operationAnchor,
+        bodyMarkdown,
+      })
+
+      if (
+        annotationSaveOperationRef.current !== operationId ||
+        selectedVersionKeyRef.current !== operationVersionKey
+      ) {
+        return
+      }
+
+      if (!annotation) {
+        setSaveFailed(true)
+        return
+      }
+
       setAnnotations((current) => [...current, annotation])
       setPendingAnchor(undefined)
       setAnnotationBody('')
       setIsPinning(false)
+    } catch (saveError) {
+      console.error('File annotation save failed:', saveError)
+      if (
+        annotationSaveOperationRef.current === operationId &&
+        selectedVersionKeyRef.current === operationVersionKey
+      ) {
+        setSaveFailed(true)
+      }
+    } finally {
+      if (
+        annotationSaveOperationRef.current === operationId &&
+        selectedVersionKeyRef.current === operationVersionKey
+      ) {
+        setIsSaving(false)
+      }
     }
   }
 
@@ -243,8 +311,17 @@ export function FilePreviewDialog({
             <label className="sr-only" htmlFor="file-preview-version">{t('files.version.select')}</label>
             <select
               className="h-9 rounded-md border border-white/20 bg-white/10 px-3 text-xs font-semibold text-white"
+              disabled={isSaving}
               id="file-preview-version"
-              onChange={(event) => setSelectedVersionId(event.target.value)}
+              onChange={(event) => {
+                const nextVersionId = event.target.value
+
+                annotationSaveOperationRef.current += 1
+                selectedVersionKeyRef.current = `${file.id}:${nextVersionId}`
+                setIsSaving(false)
+                setSaveFailed(false)
+                setSelectedVersionId(nextVersionId)
+              }}
               value={selectedVersion.id}
             >
               {file.versions.map((version) => (
@@ -266,9 +343,10 @@ export function FilePreviewDialog({
             selectedVersion.scanStatus === 'available' ? (
               <button
                 aria-pressed={isPinning}
-                className={`h-9 rounded-md border px-3 text-xs font-semibold text-white ${
+                className={`h-9 rounded-md border px-3 text-xs font-semibold text-white disabled:opacity-50 ${
                   isPinning ? 'border-amber-300 bg-amber-500/30' : 'border-white/20 hover:bg-white/10'
                 }`}
+                disabled={isSaving}
                 onClick={() => {
                   setIsPinning((current) => !current)
                   setPendingAnchor(undefined)
@@ -300,7 +378,7 @@ export function FilePreviewDialog({
             ) : (
               <PreviewMedia
                 annotations={annotations}
-                canAnnotate={file.capabilities.canAnnotate}
+                canAnnotate={file.capabilities.canAnnotate && !isSaving}
                 fileName={selectedVersion.fileName}
                 isPinning={isPinning}
                 kind={selectedVersion.previewKind}
@@ -325,6 +403,7 @@ export function FilePreviewDialog({
                   <textarea
                     autoFocus
                     className="workbench-input min-h-20 px-3 py-2 text-sm"
+                    disabled={isSaving}
                     onChange={(event) => setAnnotationBody(event.target.value)}
                     value={annotationBody}
                   />
@@ -336,11 +415,13 @@ export function FilePreviewDialog({
                 ) : null}
                 <div className="flex justify-end gap-2">
                   <button
-                    className="workbench-button-secondary h-8 px-3 text-xs"
+                    className="workbench-button-secondary h-8 px-3 text-xs disabled:opacity-50"
+                    disabled={isSaving}
                     onClick={() => {
                       setPendingAnchor(undefined)
                       setAnnotationBody('')
                       setIsPinning(false)
+                      setSaveFailed(false)
                     }}
                     type="button"
                   >
@@ -355,11 +436,17 @@ export function FilePreviewDialog({
                     {t(isSaving ? 'files.annotation.saving' : 'files.annotation.submit')}
                   </button>
                 </div>
+                {saveFailed ? (
+                  <p className="text-xs font-semibold text-red-700" role="alert">
+                    {t('files.error.request')}
+                  </p>
+                ) : null}
               </div>
             ) : file.capabilities.canAnnotate ? (
               <div className="mt-3 rounded-lg border border-dashed border-[var(--workbench-border-strong)] bg-[var(--workbench-surface-muted)] p-3 text-xs font-medium leading-5 text-[var(--workbench-muted)]">
                 <p>{t('files.annotation.hint')}</p>
-                {selectedVersion.previewKind !== 'pdf' ? (
+                {selectedVersion.previewKind !== 'pdf' &&
+                selectedVersion.scanStatus === 'available' ? (
                   <button
                     className="mt-2 text-xs font-semibold text-[var(--workbench-primary)] underline underline-offset-2"
                     onClick={() => createAnchorAt(0.5, 0.5)}

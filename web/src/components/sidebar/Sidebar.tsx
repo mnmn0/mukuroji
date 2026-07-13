@@ -228,6 +228,14 @@ export type SidebarLabels = {
    */
   expand: string
   /**
+   * Workspace search と command menu を開く操作の文言です。
+   */
+  search: string
+  /**
+   * Workspace search の keyboard shortcut 表示です。
+   */
+  searchShortcut: string
+  /**
    * チーム / プロジェクト見出しの文言です。
    */
   teamProjects: string
@@ -358,6 +366,10 @@ export type SidebarProps = {
    */
   onCollapsedChange?: (collapsed: boolean) => void
   /**
+   * Workspace search または command menu を開くときに呼ばれます。
+   */
+  onOpenSearch?: () => void
+  /**
    * チーム新規登録時に呼ばれます。
    */
   onCreateTeam?: (input: { name: string }) => void | Promise<void>
@@ -457,6 +469,8 @@ const defaultLabels: SidebarLabels = {
   utilityNavigation: '補助ナビゲーション',
   collapse: 'サイドバーを折りたたむ',
   expand: 'サイドバーを展開する',
+  search: 'Workspace を検索',
+  searchShortcut: 'Ctrl/⌘ K',
   teamProjects: 'チーム / プロジェクト',
   createTeam: 'チームを追加',
   create: {
@@ -599,6 +613,7 @@ export function Sidebar({
   teams,
   className = '',
   onCollapsedChange,
+  onOpenSearch,
   onCreateTeam,
   onCreateProject,
   onArchiveTeam,
@@ -892,6 +907,29 @@ export function Sidebar({
             )}
           </button>
         </div>
+
+        {onOpenSearch ? (
+          <button
+            aria-keyshortcuts="Control+K Meta+K"
+            className={`mb-4 flex h-10 flex-none items-center rounded-lg border border-white/12 bg-white/[0.06] text-sm font-semibold text-slate-100 transition hover:border-white/20 hover:bg-white/10 focus-visible:bg-white/10 ${
+              isCollapsed ? 'w-full justify-center px-0' : 'w-full justify-between gap-3 px-3'
+            }`}
+            data-testid="sidebar-search-trigger"
+            onClick={onOpenSearch}
+            title={resolvedLabels.search}
+            type="button"
+          >
+            <span className="flex min-w-0 items-center gap-3">
+              <SearchIcon className="h-[18px] w-[18px] flex-none" />
+              <span className={isCollapsed ? 'sr-only' : 'truncate'}>{resolvedLabels.search}</span>
+            </span>
+            {isCollapsed ? null : (
+              <kbd className="rounded border border-white/15 bg-black/10 px-1.5 py-0.5 text-[10px] font-semibold tracking-[0.04em] text-slate-300">
+                {resolvedLabels.searchShortcut}
+              </kbd>
+            )}
+          </button>
+        ) : null}
 
         <nav className="flex-none space-y-1" aria-label={resolvedLabels.globalNavigation}>
           {navItems.map((item) => (
@@ -2029,6 +2067,15 @@ function HomeIcon({ className }: SidebarIconProps) {
       <path d="M3 10.5 12 3l9 7.5" />
       <path d="M5 9.5V21h14V9.5" />
       <path d="M9.5 21v-6h5v6" />
+    </SvgBase>
+  )
+}
+
+function SearchIcon({ className }: SidebarIconProps) {
+  return (
+    <SvgBase className={className}>
+      <circle cx="11" cy="11" r="7" />
+      <path d="m20 20-4-4" />
     </SvgBase>
   )
 }

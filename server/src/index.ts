@@ -29,9 +29,13 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
   type ApprovalSummary,
   type CreateWorkItemInput,
+  type CreateSavedWorkspaceViewInput,
+  type SearchCustomFieldValue,
+  type UpdateSavedWorkspaceViewInput,
   type WorkItem,
   type WorkItemPriority,
   type WorkItemStatus,
+  type WorkspaceSearchFilters,
 } from '@mukuroji/contracts'
 import { Hono } from 'hono'
 import { handle, type LambdaContext, type LambdaEvent } from 'hono/aws-lambda'
@@ -90,12 +94,38 @@ import {
   type FileProofingActor,
   type FileProofingClient,
   type FileProofingScope,
+  type ListReviewerApprovalsOptions,
+  type ReviewerApprovalPage,
 } from './file-proofing'
+import {
+  DynamoDbNotificationsClient,
+  NotificationError,
+  type NotificationAction,
+  type NotificationClient,
+  type NotificationFilter,
+  type NotificationItem,
+  type UpdateNotificationPreferencesInput,
+} from './notifications'
+import {
+  createCommentWorkspaceSearchDocument,
+  DynamoDbWorkspaceSearchClient,
+  WorkspaceSearchError,
+  createProjectWorkspaceSearchDocument,
+  createTeamWorkspaceSearchDocument,
+  createWorkItemWorkspaceSearchDocument,
+  type SavedViewAccessScope,
+  type WorkspaceSearchAccessScope,
+  type WorkspaceSearchClient,
+  type WorkspaceSearchDocument,
+} from './workspace-search'
 
 export {
   DynamoDbWorkspaceAccessClient,
   WorkspaceAccessError,
 } from './workspace-access'
+/**
+ * Workspace access API で公開する型です。
+ */
 export type {
   WorkspaceAccessClient,
   WorkspaceIdentityOwnership,
@@ -851,6 +881,10 @@ type TeamIssueItem = {
    * Issue 作成者の Workspace member key です。旧 row では未設定です。
    */
   creatorMemberKey?: string
+  /** Search/filter へ投影する custom field values です。 */
+  customFields?: Record<string, SearchCustomFieldValue>
+  /** Search/filter へ投影する relation IDs です。 */
+  relationIds?: string[]
   /**
    * legacy project task migration の安定した source key です。
    */
@@ -959,6 +993,10 @@ type TeamIssueResponseItem = WorkItem & {
    * Issue 作成者の Workspace member key です。旧 row では未設定です。
    */
   creatorMemberKey?: string
+  /** Search/filter へ投影する custom field values です。 */
+  customFields?: Record<string, SearchCustomFieldValue>
+  /** Search/filter へ投影する relation IDs です。 */
+  relationIds?: string[]
   /**
    * Cognito から解決した担当者メールアドレスです。
    */
@@ -2006,7 +2044,11 @@ type ProjectDirectoryClient = {
   /**
    * DynamoDB から sidebar 用の team/project 階層を取得します。
    */
-  getProjectDirectory(directoryId: string, locale: Locale): Promise<ProjectDirectoryResponse>
+  getProjectDirectory(
+    directoryId: string,
+    locale: Locale,
+    consistentRead?: boolean,
+  ): Promise<ProjectDirectoryResponse>
   /**
    * active project と指定 member の role を 1 directory read で取得します。
    */
@@ -2121,6 +2163,9 @@ let workspaceAccess: WorkspaceAccessClient
 let realtimeTickets: RealtimeTicketsClient
 let collaboration: CollaborationClient
 let fileProofing: FileProofingClient
+let notifications: NotificationClient
+let workspaceSearch: WorkspaceSearchClient
+let workspaceSearchProjectionEnabled: boolean
 const projectDirectoryIdPrefix = 'user#'
 const defaultAllowedOrigins = [
   'http://localhost:5173',
@@ -2512,6 +2557,153 @@ app.get('/api/audit/events/export', async (c) => {
   return handleWorkspaceAuditRequest(c, true)
 })
 
+/** Recipient の durable notification timeline を cursor 付きで返します。 */
+app.get('/api/notifications', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const isVisible = await createNotificationVisibilityFilter(principal)
+    const filter = c.req.query('filter') as NotificationFilter | undefined
+    const limitValue = c.req.query('limit')
+    const input = {
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+      filter,
+      eventType: c.req.query('type')?.trim() || undefined,
+      limit: limitValue === undefined ? undefined : Number(limitValue),
+      cursor: c.req.query('cursor')?.trim() || undefined,
+      isVisible,
+    }
+    const [page, unreadCount] = await Promise.all([
+      notifications.list(input),
+      notifications.countUnread({
+        workspaceId: principal.directoryId,
+        memberKey: principal.userKey,
+        isVisible,
+      }),
+    ])
+
+    return c.json({ ...page, unreadCount })
+  } catch (error) {
+    return toNotificationErrorResponse(c, error)
+  }
+})
+
+/** Recipient の現在表示可能な unread notification 件数を返します。 */
+app.get('/api/notifications/unread-count', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const isVisible = await createNotificationVisibilityFilter(principal)
+    const unreadCount = await notifications.countUnread({
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+      isVisible,
+    })
+    return c.json({ unreadCount })
+  } catch (error) {
+    return toNotificationErrorResponse(c, error)
+  }
+})
+
+/** Recipient のすべての active unread notification を read にします。 */
+app.post('/api/notifications/mark-all-read', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const isVisible = await createNotificationVisibilityFilter(principal)
+    const updatedCount = await notifications.markAllRead({
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+      isVisible,
+    })
+    const unreadCount = await notifications.countUnread({
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+      isVisible,
+    })
+    return c.json({ updatedCount, unreadCount })
+  } catch (error) {
+    return toNotificationErrorResponse(c, error)
+  }
+})
+
+/** Recipient の notification を read、archive、snooze state へ遷移させます。 */
+app.patch('/api/notifications/:notificationId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const isVisible = await createNotificationVisibilityFilter(principal)
+    const body = await readJson<Record<string, unknown>>(c.req) ?? {}
+    const notification = await notifications.update({
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+      notificationId: c.req.param('notificationId'),
+      action: readNotificationAction(body.action),
+      snoozedUntil: readOptionalNotificationTimestamp(body.snoozedUntil),
+      isVisible,
+    })
+    return c.json(notification)
+  } catch (error) {
+    return toNotificationErrorResponse(c, error)
+  }
+})
+
+/** Recipient の notification channel、digest、quiet hours 設定を返します。 */
+app.get('/api/notification-preferences', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    return c.json(await notifications.getPreferences({
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+    }))
+  } catch (error) {
+    return toNotificationErrorResponse(c, error)
+  }
+})
+
+/** Recipient の notification preference を version 条件付きで保存します。 */
+app.put('/api/notification-preferences', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const body = await readJson<Record<string, unknown>>(c.req) ?? {}
+    const preferences = await notifications.savePreferences({
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+      preferences: readNotificationPreferencesInput(body),
+    })
+    return c.json(preferences)
+  } catch (error) {
+    return toNotificationErrorResponse(c, error)
+  }
+})
+
 /**
  * DynamoDB に保存されたチーム/プロジェクト階層を返す endpoint です。
  *
@@ -2553,14 +2745,24 @@ app.post('/api/teams', async (c) => {
     requireWorkspaceAdministration(principal)
     const body = await readJson<CreateTeamRequestBody>(c.req)
 
-    return c.json(
-      await projectDirectory.createTeam(
-        principal.directoryId,
-        body ?? {},
-        createApiMutationContext(c, principal, body ?? {}),
-      ),
-      201,
+    const response = await projectDirectory.createTeam(
+      principal.directoryId,
+      body ?? {},
+      createApiMutationContext(c, principal, body ?? {}),
     )
+    await projectWorkspaceSearchDocumentBestEffort(
+      () => {
+        const names = readLocalizedNames(body ?? {})
+        return createTeamSearchDocument(
+          principal.directoryId,
+          response.team,
+          principal.userKey,
+          names.nameEn === response.team.name ? undefined : names.nameEn,
+        )
+      },
+      'team creation',
+    )
+    return c.json(response, 201)
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -2590,19 +2792,30 @@ app.post('/api/teams/:teamId/projects', async (c) => {
     requireWorkspaceAdministration(principal)
     const body = await readJson<CreateProjectRequestBody>(c.req)
 
-    return c.json(
-      await projectDirectory.createProject(
-        principal.directoryId,
-        teamId,
-        body ?? {},
-        {
-          userKey: principal.userKey,
-          workspaceMemberVersion: principal.workspaceMember.version,
-        },
-        createApiMutationContext(c, principal, { teamId, ...body }),
-      ),
-      201,
+    const response = await projectDirectory.createProject(
+      principal.directoryId,
+      teamId,
+      body ?? {},
+      {
+        userKey: principal.userKey,
+        workspaceMemberVersion: principal.workspaceMember.version,
+      },
+      createApiMutationContext(c, principal, { teamId, ...body }),
     )
+    await projectWorkspaceSearchDocumentBestEffort(
+      () => {
+        const names = readLocalizedNames(body ?? {})
+        return createProjectSearchDocument(
+          principal.directoryId,
+          teamId,
+          response.project,
+          principal.userKey,
+          names.nameEn === response.project.name ? undefined : names.nameEn,
+        )
+      },
+      'project creation',
+    )
+    return c.json(response, 201)
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -2631,13 +2844,18 @@ app.patch('/api/teams/:teamId/archive', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     requireWorkspaceAdministration(principal)
 
-    return c.json(
-      await projectDirectory.archiveTeam(
-        principal.directoryId,
-        teamId,
-        createApiMutationContext(c, principal, { teamId }),
-      ),
+    const response = await projectDirectory.archiveTeam(
+      principal.directoryId,
+      teamId,
+      createApiMutationContext(c, principal, { teamId }),
     )
+    await deleteWorkspaceSearchDocumentBestEffort(
+      principal.directoryId,
+      'team',
+      `team/${teamId}`,
+      'team archive',
+    )
+    return c.json(response)
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -2671,14 +2889,19 @@ app.patch('/api/teams/:teamId/projects/:projectId/archive', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     requireWorkspaceAdministration(principal)
 
-    return c.json(
-      await projectDirectory.archiveProject(
-        principal.directoryId,
-        teamId,
-        projectId,
-        createApiMutationContext(c, principal, { teamId, projectId }),
-      ),
+    const response = await projectDirectory.archiveProject(
+      principal.directoryId,
+      teamId,
+      projectId,
+      createApiMutationContext(c, principal, { teamId, projectId }),
     )
+    await deleteWorkspaceSearchDocumentBestEffort(
+      principal.directoryId,
+      'project',
+      `team/${teamId}/project/${projectId}`,
+      'project archive',
+    )
+    return c.json(response)
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toAuthErrorResponse(c, error)
@@ -2769,6 +2992,135 @@ app.get('/api/work-items', async (c) => {
     }
 
     return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/**
+ * Workspace 全体の search index を複合 filter と cursor 付きで検索します。
+ */
+app.get('/api/search', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const context = await createWorkspaceSearchContext(principal)
+    const filters = readWorkspaceSearchFilters(c.req.query('filters'))
+    const scopeCache = new Map<string, Promise<TeamIssueDetailResponse | undefined>>()
+
+    return c.json(await workspaceSearch.search({
+      workspaceId: principal.directoryId,
+      filters,
+      limit: readOptionalPositiveQueryInteger(c.req.query('limit'), 'Search limit'),
+      cursor: c.req.query('cursor'),
+      access: context.searchAccess,
+      resolveCurrentScope: (document) => resolveCurrentWorkspaceSearchScope(
+        principal.directoryId,
+        document,
+        context,
+        scopeCache,
+      ),
+    }))
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
+  }
+})
+
+/** Current user が参照できる personal/team/shared saved views を返します。 */
+app.get('/api/saved-views', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const context = await createWorkspaceSearchContext(principal)
+    return c.json(await workspaceSearch.listSavedViews({
+      workspaceId: principal.directoryId,
+      access: context.savedViewAccess,
+      limit: readOptionalPositiveQueryInteger(c.req.query('limit'), 'Saved view limit'),
+      cursor: c.req.query('cursor'),
+    }))
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
+  }
+})
+
+/** Personal/team/shared saved view を作成します。 */
+app.post('/api/saved-views', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const context = await createWorkspaceSearchContext(principal)
+    const input = await readJson<CreateSavedWorkspaceViewInput>(c.req)
+    return c.json(await workspaceSearch.createSavedView({
+      workspaceId: principal.directoryId,
+      access: context.savedViewAccess,
+      idempotencyKey: c.req.header('Idempotency-Key')?.trim() || undefined,
+      input: input ?? {} as CreateSavedWorkspaceViewInput,
+    }), 201)
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
+  }
+})
+
+/** Saved view definition と current user preference を更新します。 */
+app.patch('/api/saved-views/:viewId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const viewId = c.req.param('viewId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const context = await createWorkspaceSearchContext(principal)
+    const input = await readJson<UpdateSavedWorkspaceViewInput>(c.req)
+    return c.json(await workspaceSearch.updateSavedView({
+      workspaceId: principal.directoryId,
+      viewId,
+      access: context.savedViewAccess,
+      input: input ?? {} as UpdateSavedWorkspaceViewInput,
+    }))
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
+  }
+})
+
+/** Saved view definition を revision 条件付きで削除します。 */
+app.delete('/api/saved-views/:viewId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const viewId = c.req.param('viewId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const context = await createWorkspaceSearchContext(principal)
+    return c.json(await workspaceSearch.deleteSavedView({
+      workspaceId: principal.directoryId,
+      viewId,
+      expectedRevision: readRequiredPositiveQueryInteger(
+        c.req.query('expectedRevision'),
+        'Saved view revision',
+      ),
+      access: context.savedViewAccess,
+    }))
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
   }
 })
 
@@ -3031,22 +3383,24 @@ app.post('/api/teams/:teamId/issues', async (c) => {
     await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
     const reservedIssueIds = await readLegacyTeamIssueIds(principal.directoryId, context)
 
-    return c.json(
-      await hydrateCreateTeamIssueResponse(
-        await teamIssues.createTeamIssue(
-          principal.directoryId,
-          teamId,
-          {
-            ...body,
-            assigneeUserId,
-          },
-          principal.userKey,
-          reservedIssueIds,
-          createApiMutationContext(c, principal, { teamId, ...body }),
-        ),
+    const response = await hydrateCreateTeamIssueResponse(
+      await teamIssues.createTeamIssue(
+        principal.directoryId,
+        teamId,
+        {
+          ...body,
+          assigneeUserId,
+        },
+        principal.userKey,
+        reservedIssueIds,
+        createApiMutationContext(c, principal, { teamId, ...body }),
       ),
-      201,
     )
+    await projectWorkspaceSearchDocumentBestEffort(
+      () => createWorkItemSearchDocument(principal.directoryId, response.issue),
+      'Work Item creation',
+    )
+    return c.json(response, 201)
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)
@@ -3266,23 +3620,26 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
       )
     }
 
-    return c.json(
-      await hydrateUpdateTeamIssueResponse(
-        await teamIssues.updateTeamIssue(
-          principal.directoryId,
+    const response = await hydrateUpdateTeamIssueResponse(
+      await teamIssues.updateTeamIssue(
+        principal.directoryId,
+        teamId,
+        issueId,
+        { ...body, expectedRevision },
+        principal.userKey,
+        createApiMutationContext(c, principal, {
           teamId,
           issueId,
-          { ...body, expectedRevision },
-          principal.userKey,
-          createApiMutationContext(c, principal, {
-            teamId,
-            issueId,
-            ...body,
-            expectedRevision,
-          }),
-        ),
+          ...body,
+          expectedRevision,
+        }),
       ),
     )
+    await projectWorkspaceSearchDocumentBestEffort(
+      () => createWorkItemSearchDocument(principal.directoryId, response.issue),
+      'Work Item update',
+    )
+    return c.json(response)
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)
@@ -3518,6 +3875,7 @@ app.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       workspaceId: principal.directoryId,
       teamId,
       issueId,
+      workItemTitle: detail.issue.title ?? detail.issue.titleKey ?? issueId,
       entityKey,
       projectId: detail.issue.assignedProjectId,
       projectEntityKey,
@@ -3526,7 +3884,7 @@ app.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       parentCommentId: readOptionalCommentId(body.parentCommentId, 'Parent comment ID'),
       mentionMemberKeys,
       automaticWatcherCandidates,
-      deepLink: `/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`,
+      deepLink: createTeamIssueDeepLink(teamId, issueId),
       auditContext: createApiMutationContext(c, principal, { teamId, issueId, ...body }),
     })
     const activity = {
@@ -3536,6 +3894,15 @@ app.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       summary: body.parentCommentId ? 'Reply was added.' : 'Comment was added.',
       createdAt: comment.createdAt,
     }
+    await projectWorkspaceSearchDocumentBestEffort(
+      () => createCommentSearchDocument(
+        principal.directoryId,
+        teamId,
+        detail.issue,
+        comment,
+      ),
+      'comment creation',
+    )
 
     return modernContract
       ? c.json({
@@ -3588,6 +3955,7 @@ app.patch('/api/teams/:teamId/issues/:issueId/comments/:commentId', async (c) =>
       workspaceId: principal.directoryId,
       teamId,
       issueId,
+      workItemTitle: detail.issue.title ?? detail.issue.titleKey ?? issueId,
       entityKey,
       projectId: detail.issue.assignedProjectId,
       projectEntityKey,
@@ -3597,9 +3965,18 @@ app.patch('/api/teams/:teamId/issues/:issueId/comments/:commentId', async (c) =>
       mentionMemberKeys,
       automaticWatcherCandidates,
       expectedVersion: readCommentExpectedVersion(body.expectedVersion),
-      deepLink: `/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`,
+      deepLink: createTeamIssueDeepLink(teamId, issueId),
       auditContext: createApiMutationContext(c, principal, { teamId, issueId, commentId, ...body }),
     })
+    await projectWorkspaceSearchDocumentBestEffort(
+      () => createCommentSearchDocument(
+        principal.directoryId,
+        teamId,
+        detail.issue,
+        comment,
+      ),
+      'comment update',
+    )
 
     return c.json({
       comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
@@ -3645,6 +4022,12 @@ app.delete('/api/teams/:teamId/issues/:issueId/comments/:commentId', async (c) =
       canModerate,
       auditContext: createApiMutationContext(c, principal, { teamId, issueId, commentId, ...body }),
     })
+    await deleteWorkspaceSearchDocumentBestEffort(
+      principal.directoryId,
+      'comment',
+      `${createTeamIssueAuditEntityId(teamId, issueId)}/comment/${commentId}`,
+      'comment deletion',
+    )
 
     return c.json({
       comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
@@ -4157,16 +4540,7 @@ app.post('/api/teams/:teamId/issues/:issueId/comments/:commentId/files/uploads',
     const principal = await authenticateWorkspacePrincipal(accessToken)
     const context = await loadFileProofingRequestContext(c, principal, 'work-item')
     const commentId = readRequiredRouteId(c.req.param('commentId'), 'Comment ID')
-    const hasAttachableComment = collaboration.hasAttachableComment
-    if (!hasAttachableComment) {
-      throw new FileProofingError(
-        503,
-        'CommentAttachmentUnavailable',
-        'Comment attachment validation is unavailable.',
-      )
-    }
-    const commentExists = await hasAttachableComment.call(
-      collaboration,
+    const commentExists = await collaboration.hasAttachableComment(
       createWorkItemCollaborationEntityKey(
         principal.directoryId,
         context.scope.teamId,
@@ -4214,6 +4588,9 @@ app.post('/api/teams/:teamId/issues/:issueId/approvals', async (c) => {
       principal,
       'work-item',
     )
+    if (!actor.canWrite || actor.guest) {
+      throw new FileProofingError(403, 'FileWriteDenied', 'File write access is required.')
+    }
     const body = await readFileProofingJson<CreateFileApprovalInput>(c.req)
     if (
       !Array.isArray(body.reviewerMemberKeys) ||
@@ -4383,6 +4760,25 @@ app.get('/api/approvals/reviewer', async (c) => {
 
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken)
+    return c.json(await listAuthorizedReviewerApprovals(principal, {
+      ...(c.req.query('cursor') ? { cursor: c.req.query('cursor') } : {}),
+      ...(c.req.query('limit') ? { limit: Number(c.req.query('limit')) } : {}),
+    }))
+  } catch (error) {
+    return toFileProofingErrorResponse(c, error)
+  }
+})
+
+async function listAuthorizedReviewerApprovals(
+  principal: WorkspacePrincipal,
+  options: ListReviewerApprovalsOptions,
+): Promise<ReviewerApprovalPage> {
+  const limit = options.limit ?? 50
+  const approvals: ReviewerApprovalPage['approvals'] = []
+  let cursor = options.cursor
+  const visitedCursors = new Set<string>()
+
+  do {
     const page = await fileProofing.listReviewerApprovals(
       principal.directoryId,
       {
@@ -4392,8 +4788,8 @@ app.get('/api/approvals/reviewer', async (c) => {
         canManage: false,
       },
       {
-        ...(c.req.query('cursor') ? { cursor: c.req.query('cursor') } : {}),
-        ...(c.req.query('limit') ? { limit: Number(c.req.query('limit')) } : {}),
+        ...(cursor ? { cursor } : {}),
+        limit: limit - approvals.length,
       },
     )
     const authorized = await Promise.all(page.approvals.map(async (approval) => {
@@ -4408,18 +4804,38 @@ app.get('/api/approvals/reviewer', async (c) => {
           'viewer',
         )
         return approval
-      } catch {
-        return undefined
+      } catch (error) {
+        if (isReviewerApprovalAuthorizationMiss(error)) {
+          return undefined
+        }
+        throw error
       }
     }))
-    return c.json({
-      approvals: authorized.filter((approval) => approval !== undefined),
-      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-    })
-  } catch (error) {
-    return toFileProofingErrorResponse(c, error)
+    approvals.push(...authorized.filter((approval) => approval !== undefined))
+
+    if (page.nextCursor && (page.nextCursor === cursor || visitedCursors.has(page.nextCursor))) {
+      throw new FileProofingError(
+        503,
+        'ReviewerApprovalCursorStalled',
+        'Reviewer approvals could not advance to the next page.',
+      )
+    }
+    if (cursor) {
+      visitedCursors.add(cursor)
+    }
+    cursor = page.nextCursor
+  } while (approvals.length < limit && cursor)
+
+  return {
+    approvals,
+    ...(cursor ? { nextCursor: cursor } : {}),
   }
-})
+}
+
+function isReviewerApprovalAuthorizationMiss(error: unknown) {
+  return (error instanceof ProjectDataError || isRecord(error)) &&
+    (error.status === 403 || error.status === 404)
+}
 
 /**
  * DynamoDB に保存されたプロジェクト遂行 Issue 一覧を返す endpoint です。
@@ -4499,6 +4915,10 @@ app.post('/api/projects/:projectId/tasks', async (c) => {
       }),
     )
     const hydrated = await hydrateCreateTeamIssueResponse(response)
+    await projectWorkspaceSearchDocumentBestEffort(
+      () => createWorkItemSearchDocument(principal.directoryId, hydrated.issue),
+      'project task compatibility creation',
+    )
 
     return c.json(
       { task: toProjectTaskFromTeamIssue(hydrated.issue) } satisfies CreateProjectTaskResponse,
@@ -4577,6 +4997,10 @@ app.patch('/api/projects/:projectId/tasks/:taskId', async (c) => {
       }),
     )
     const hydrated = await hydrateUpdateTeamIssueResponse(response)
+    await projectWorkspaceSearchDocumentBestEffort(
+      () => createWorkItemSearchDocument(principal.directoryId, hydrated.issue),
+      'project task compatibility update',
+    )
     return c.json(
       { task: toProjectTaskFromTeamIssue(hydrated.issue) } satisfies UpdateProjectTaskStatusResponse,
     )
@@ -5122,6 +5546,229 @@ function requireWorkspaceAdministration(principal: WorkspacePrincipal) {
   )
 }
 
+/** Search と saved view authorization に使う current directory snapshot です。 */
+type WorkspaceSearchContext = {
+  /** Active Team/Project hierarchy です。 */
+  directory: ProjectDirectoryResponse
+  /** Search result の current viewer scope です。 */
+  searchAccess: WorkspaceSearchAccessScope
+  /** Saved view の current viewer scope です。 */
+  savedViewAccess: SavedViewAccessScope
+}
+
+async function createWorkspaceSearchContext(
+  principal: WorkspacePrincipal,
+): Promise<WorkspaceSearchContext> {
+  const directory = await projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
+  const projectAccesses = principal.isSystemAdmin
+    ? directory.teams.flatMap((team) => team.projects.map((project) => ({
+        projectId: project.id,
+        role: 'manager' as const,
+      })))
+    : await projectDirectory.getProjectAccessList(principal.directoryId, principal.userKey)
+  const readableProjectIds = new Set(
+    projectAccesses
+      .filter((access) => projectAccessAllows(access, 'viewer'))
+      .map((access) => access.projectId),
+  )
+  const manageableProjectIds = new Set(
+    projectAccesses
+      .filter((access) => projectAccessAllows(access, 'manager'))
+      .map((access) => access.projectId),
+  )
+  const readableTeamIds = new Set(
+    directory.teams
+      .filter((team) => team.projects.some((project) => readableProjectIds.has(project.id)))
+      .map((team) => team.id),
+  )
+  const manageableTeamIds = new Set(
+    directory.teams
+      .filter((team) => team.projects.some((project) => manageableProjectIds.has(project.id)))
+      .map((team) => team.id),
+  )
+
+  return {
+    directory,
+    searchAccess: {
+      viewerUserId: principal.userKey,
+      isSystemAdmin: principal.isSystemAdmin,
+      projectIds: readableProjectIds,
+      teamIds: readableTeamIds,
+    },
+    savedViewAccess: {
+      viewerUserId: principal.userKey,
+      isSystemAdmin: principal.isSystemAdmin,
+      canManageSharedViews:
+        principal.isSystemAdmin ||
+        principal.workspaceRole === 'owner' ||
+        principal.workspaceRole === 'admin',
+      canWrite: principal.workspaceRole !== 'guest',
+      teamIds: readableTeamIds,
+      manageableTeamIds,
+    },
+  }
+}
+
+async function resolveCurrentWorkspaceSearchScope(
+  workspaceId: string,
+  document: WorkspaceSearchDocument,
+  context: WorkspaceSearchContext,
+  scopeCache: Map<string, Promise<TeamIssueDetailResponse | undefined>>,
+) {
+  if (document.entityType === 'team') {
+    const team = context.directory.teams.find((candidate) => candidate.id === document.teamId)
+    return team ? { teamId: team.id } : undefined
+  }
+
+  if (document.entityType === 'project') {
+    const team = context.directory.teams.find((candidate) =>
+      (!document.teamId || candidate.id === document.teamId) &&
+      candidate.projects.some((project) => project.id === document.projectId)
+    )
+    return team && document.projectId
+      ? { teamId: team.id, projectId: document.projectId }
+      : undefined
+  }
+
+  const workItemId = document.entityType === 'work-item'
+    ? document.entityId
+    : document.parentId
+  const parsed = parseSearchWorkItemEntityId(workItemId)
+  if (parsed) {
+    const activeTeam = context.directory.teams.find((team) => team.id === parsed.teamId)
+    if (!activeTeam) return undefined
+    const cacheKey = `${parsed.teamId}\0${parsed.issueId}`
+    let pending = scopeCache.get(cacheKey)
+    if (!pending) {
+      pending = teamIssues.getTeamIssueDetail(
+        workspaceId,
+        parsed.teamId,
+        parsed.issueId,
+        { consistentIssueRead: true, eventLimit: 0 },
+      ).catch((error) => {
+        if (isTeamIssueNotFoundError(error)) return undefined
+        throw error
+      })
+      scopeCache.set(cacheKey, pending)
+    }
+    const detail = await pending
+    if (
+      !detail ||
+      (detail.issue.assignedProjectId &&
+        !activeTeam.projects.some((project) => project.id === detail.issue.assignedProjectId))
+    ) {
+      return undefined
+    }
+    const scope = {
+      teamId: parsed.teamId,
+      ...(detail.issue.assignedProjectId ? { projectId: detail.issue.assignedProjectId } : {}),
+    }
+    if (document.entityType === 'work-item') {
+      return {
+        ...scope,
+        currentDocument: createWorkItemSearchDocument(workspaceId, detail.issue),
+      }
+    }
+    if (document.entityType !== 'comment') return scope
+    const parsedComment = parseSearchCommentEntityId(document.entityId, document.parentId)
+    if (
+      !parsedComment ||
+      parsedComment.teamId !== parsed.teamId ||
+      parsedComment.issueId !== parsed.issueId
+    ) {
+      return undefined
+    }
+    const comment = await collaboration.getCommentSnapshot({
+      entityKey: createWorkItemCollaborationEntityKey(
+        workspaceId,
+        parsed.teamId,
+        parsed.issueId,
+      ),
+      commentId: parsedComment.commentId,
+    })
+    if (!comment || comment.deletedAt) return undefined
+    return {
+      ...scope,
+      currentDocument: createCommentSearchDocument(
+        workspaceId,
+        parsed.teamId,
+        detail.issue,
+        comment,
+      ),
+    }
+  }
+
+  if (document.projectId) {
+    const team = context.directory.teams.find((candidate) =>
+      (!document.teamId || candidate.id === document.teamId) &&
+      candidate.projects.some((project) => project.id === document.projectId)
+    )
+    return team ? { teamId: team.id, projectId: document.projectId } : undefined
+  }
+  if (document.teamId && context.directory.teams.some((team) => team.id === document.teamId)) {
+    return { teamId: document.teamId }
+  }
+  return undefined
+}
+
+function parseSearchWorkItemEntityId(value: string | undefined) {
+  const match = value?.match(/^team\/([^/]+)\/issue\/([^/]+)$/u)
+  return match?.[1] && match[2]
+    ? { teamId: match[1], issueId: match[2] }
+    : undefined
+}
+
+function parseSearchCommentEntityId(
+  value: string,
+  parentId: string | undefined,
+) {
+  const match = value.match(/^team\/([^/]+)\/issue\/([^/]+)\/comment\/([^/]+)$/u)
+  if (!match?.[1] || !match[2] || !match[3]) return undefined
+  const expectedParentId = createTeamIssueAuditEntityId(match[1], match[2])
+  return parentId === expectedParentId
+    ? { teamId: match[1], issueId: match[2], commentId: match[3] }
+    : undefined
+}
+
+function readWorkspaceSearchFilters(value: string | undefined): WorkspaceSearchFilters {
+  if (!value) return {}
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!isRecord(parsed)) throw new TypeError('Search filters must be an object.')
+    return parsed as WorkspaceSearchFilters
+  } catch (error) {
+    throw new WorkspaceSearchError(400, 'InvalidSearchFilters', 'Search filters are invalid.', {
+      cause: error,
+    })
+  }
+}
+
+function readOptionalPositiveQueryInteger(value: string | undefined, label: string) {
+  if (value === undefined) return undefined
+  return readRequiredPositiveQueryInteger(value, label)
+}
+
+function readRequiredPositiveQueryInteger(value: string | undefined, label: string) {
+  const parsed = value ? Number(value) : Number.NaN
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new WorkspaceSearchError(400, 'InvalidWorkspaceSearch', `${label} must be a positive integer.`)
+  }
+  return parsed
+}
+
+function toWorkspaceSearchErrorResponse(c: Context, error: unknown) {
+  if (error instanceof WorkspaceSearchError) {
+    const status = error.status === 400 || error.status === 403 || error.status === 404 ||
+      error.status === 409 || error.status === 503
+      ? error.status
+      : 502
+    return c.json({ code: error.code, message: error.message }, status)
+  }
+  if (error instanceof WorkspaceAccessError) return toWorkspaceAccessErrorResponse(c, error)
+  if (error instanceof CognitoServiceError) return toAuthErrorResponse(c, error)
+  return toProjectDataErrorResponse(c, error)
+}
+
 async function requireWorkspaceMemberHasNoManagedProjects(
   directoryId: string,
   memberKey: string,
@@ -5193,6 +5840,175 @@ function toFileProofingErrorResponse(c: Context, error: unknown) {
     : 502
 
   return c.json({ code: error.code, message: error.message }, status)
+}
+
+function toNotificationErrorResponse(c: Context, error: unknown) {
+  if (error instanceof CognitoServiceError) {
+    return toAuthErrorResponse(c, error)
+  }
+  if (!(error instanceof NotificationError)) {
+    return toProjectDataErrorResponse(c, error)
+  }
+  if (error.status >= 500) {
+    console.error(error)
+  }
+  const status = error.status === 400 ||
+    error.status === 403 ||
+    error.status === 404 ||
+    error.status === 409 ||
+    error.status === 503
+    ? error.status
+    : 502
+  return c.json({ code: error.code, message: error.message }, status)
+}
+
+function readNotificationAction(value: unknown): NotificationAction {
+  if (
+    value === 'mark-read' ||
+    value === 'mark-unread' ||
+    value === 'archive' ||
+    value === 'restore' ||
+    value === 'snooze'
+  ) {
+    return value
+  }
+  throw new NotificationError(400, 'InvalidNotificationAction', 'Notification action is invalid.')
+}
+
+function readOptionalNotificationTimestamp(value: unknown) {
+  if (value === undefined || value === null) {
+    return undefined
+  }
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new NotificationError(400, 'InvalidNotificationSnooze', 'Snooze time is invalid.')
+  }
+  return value.trim()
+}
+
+function readNotificationPreferencesInput(
+  value: Record<string, unknown>,
+): UpdateNotificationPreferencesInput {
+  const channels = isRecord(value.channels) ? value.channels : {}
+  const quietHours = isRecord(value.quietHours) ? value.quietHours : {}
+
+  return {
+    version: Number(value.version),
+    channels: {
+      inApp: channels.inApp as boolean,
+      email: channels.email as boolean,
+      push: channels.push as boolean,
+    },
+    frequency: value.frequency as UpdateNotificationPreferencesInput['frequency'],
+    quietHours: {
+      enabled: quietHours.enabled as boolean,
+      start: quietHours.start as string,
+      end: quietHours.end as string,
+      timeZone: quietHours.timeZone as string,
+    },
+  }
+}
+
+const currentAssigneeNotificationReasons = new Set([
+  'assignee',
+  'assignment',
+  'due',
+  'due-date-change',
+  'overdue',
+  'status-change',
+])
+
+/** Notification が現在の担当者であることだけを配信理由にしているか判定します。 */
+function requiresCurrentWorkItemAssignee(notification: NotificationItem) {
+  return notification.reasons.length > 0 && notification.reasons.every(
+    (reason) => currentAssigneeNotificationReasons.has(reason),
+  )
+}
+
+async function createNotificationVisibilityFilter(
+  principal: WorkspacePrincipal,
+) {
+  const directory = await projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
+  const activeTeamIds = new Set(directory.teams.map((team) => team.id))
+  const projectTeamIds = new Map<string, Set<string>>()
+  for (const team of directory.teams) {
+    for (const project of team.projects) {
+      const teamIds = projectTeamIds.get(project.id) ?? new Set<string>()
+      teamIds.add(team.id)
+      projectTeamIds.set(project.id, teamIds)
+    }
+  }
+  const accessibleProjectIds = principal.isSystemAdmin
+    ? new Set(projectTeamIds.keys())
+    : new Set(
+        (await projectDirectory.getProjectAccessList(principal.directoryId, principal.userKey))
+          .filter((access) => projectAccessAllows(access, 'viewer') && projectTeamIds.has(access.projectId))
+          .map((access) => access.projectId),
+      )
+  const accessibleTeamIds = principal.isSystemAdmin
+    ? activeTeamIds
+    : new Set(
+        [...accessibleProjectIds]
+          .flatMap((projectId) => [...(projectTeamIds.get(projectId) ?? [])]),
+      )
+  const workItemScopes = new Map<string, Promise<{
+    assigneeMemberKey?: string
+    exists: boolean
+    projectId?: string
+  }>>()
+
+  return async (notification: NotificationItem) => {
+    if (notification.teamId && notification.issueId) {
+      const scopeKey = `${notification.teamId}\0${notification.issueId}`
+      let scope = workItemScopes.get(scopeKey)
+      if (!scope) {
+        scope = teamIssues.getTeamIssueDetail(
+          principal.directoryId,
+          notification.teamId,
+          notification.issueId,
+          { consistentIssueRead: true, eventLimit: 0 },
+        ).then((detail) => ({
+          assigneeMemberKey: detail.issue.assigneeUserId.trim().toLowerCase(),
+          exists: true,
+          ...(detail.issue.assignedProjectId
+            ? { projectId: detail.issue.assignedProjectId }
+            : {}),
+        })).catch((error: unknown) => {
+          if (isTeamIssueNotFoundError(error)) {
+            return { exists: false }
+          }
+          throw error
+        })
+        workItemScopes.set(scopeKey, scope)
+      }
+      const currentScope = await scope
+      if (!currentScope.exists) {
+        return false
+      }
+      if (
+        requiresCurrentWorkItemAssignee(notification) &&
+        currentScope.assigneeMemberKey !== principal.userKey
+      ) {
+        return false
+      }
+      if (currentScope.projectId) {
+        notification.projectId = currentScope.projectId
+        return projectTeamIds.get(currentScope.projectId)?.has(notification.teamId) === true &&
+          accessibleProjectIds.has(currentScope.projectId)
+      }
+      delete notification.projectId
+      return activeTeamIds.has(notification.teamId) && accessibleTeamIds.has(notification.teamId)
+    }
+    if (notification.projectId) {
+      const teamIds = projectTeamIds.get(notification.projectId)
+      return teamIds !== undefined &&
+        (!notification.teamId || teamIds.has(notification.teamId)) &&
+        accessibleProjectIds.has(notification.projectId)
+    }
+    if (notification.teamId) {
+      return activeTeamIds.has(notification.teamId) && accessibleTeamIds.has(notification.teamId)
+    }
+    return true
+  }
 }
 
 function toProjectDataErrorResponse(c: Context, error: unknown) {
@@ -5500,11 +6316,12 @@ async function loadFileProofingRequestContext(
         memberKey: principal.userKey,
         guest: principal.workspaceRole === 'guest',
         canWrite: canWriteTeamIssue(principal, context, detail.issue.assignedProjectId),
-        canManage: canManageTeamIssueCollaboration(
-          principal,
-          context,
-          detail.issue.assignedProjectId,
-        ),
+        canManage: principal.workspaceRole !== 'guest' &&
+          canManageTeamIssueCollaboration(
+            principal,
+            context,
+            detail.issue.assignedProjectId,
+          ),
       },
       workItemRevision: detail.issue.revision,
     }
@@ -5525,8 +6342,10 @@ async function loadFileProofingRequestContext(
     principal.isSystemAdmin ||
     (projectAccess !== undefined && projectAccessAllows(projectAccess, 'member'))
   )
-  const canManage = canModerateCollaboration(principal) ||
+  const canManage = principal.workspaceRole !== 'guest' && (
+    canModerateCollaboration(principal) ||
     (projectAccess !== undefined && projectAccessAllows(projectAccess, 'manager'))
+  )
 
   return {
     scope: {
@@ -5927,6 +6746,104 @@ async function hydrateWorkItemsResponse(response: WorkItemsResponse, directoryId
   return {
     workItems,
   } satisfies WorkItemsResponse
+}
+
+function createWorkItemSearchDocument(
+  workspaceId: string,
+  issue: TeamIssueResponseItem,
+) {
+  return createWorkItemWorkspaceSearchDocument({
+    workspaceId,
+    teamId: issue.teamId,
+    issueId: issue.id,
+    title: issue.title ?? issue.titleKey ?? issue.id,
+    ...(issue.description ? { body: issue.description } : {}),
+    ...(issue.assignedProjectId ? { projectId: issue.assignedProjectId } : {}),
+    ...(issue.assigneeUserId ? { assigneeUserId: issue.assigneeUserId } : {}),
+    ...(issue.creatorMemberKey ? { creatorUserId: issue.creatorMemberKey } : {}),
+    status: issue.status,
+    ...(issue.customFields ? { customFields: issue.customFields } : {}),
+    ...(issue.relationIds ? { relationIds: issue.relationIds } : {}),
+    dueDate: issue.dueDate,
+    createdAt: issue.createdAt,
+    updatedAt: issue.updatedAt,
+  })
+}
+
+function createCommentSearchDocument(
+  workspaceId: string,
+  teamId: string,
+  issue: TeamIssueResponseItem,
+  comment: CollaborationComment,
+) {
+  return createCommentWorkspaceSearchDocument({
+    workspaceId,
+    teamId,
+    issueId: issue.id,
+    commentId: comment.id,
+    body: comment.bodyMarkdown,
+    creatorUserId: comment.authorMemberKey,
+    createdAt: comment.createdAt,
+    updatedAt: comment.updatedAt,
+  })
+}
+
+function createTeamSearchDocument(
+  workspaceId: string,
+  team: ProjectDirectoryTeamResponse,
+  creatorUserId?: string,
+  subtitle?: string,
+) {
+  return createTeamWorkspaceSearchDocument({
+    workspaceId,
+    teamId: team.id,
+    title: team.name,
+    ...(subtitle ? { subtitle } : {}),
+    ...(creatorUserId ? { creatorUserId } : {}),
+  })
+}
+
+function createProjectSearchDocument(
+  workspaceId: string,
+  teamId: string,
+  project: ProjectDirectoryProjectResponse,
+  creatorUserId?: string,
+  subtitle?: string,
+) {
+  return createProjectWorkspaceSearchDocument({
+    workspaceId,
+    teamId,
+    projectId: project.id,
+    title: project.name,
+    ...(subtitle ? { subtitle } : {}),
+    ...(creatorUserId ? { creatorUserId } : {}),
+  })
+}
+
+async function projectWorkspaceSearchDocumentBestEffort(
+  createDocument: () => WorkspaceSearchDocument,
+  operation: string,
+) {
+  if (!workspaceSearchProjectionEnabled) return
+  try {
+    await workspaceSearch.upsertDocument(createDocument())
+  } catch (error) {
+    console.error(`Workspace search projection failed after ${operation}.`, error)
+  }
+}
+
+async function deleteWorkspaceSearchDocumentBestEffort(
+  workspaceId: string,
+  entityType: WorkspaceSearchDocument['entityType'],
+  entityId: string,
+  operation: string,
+) {
+  if (!workspaceSearchProjectionEnabled) return
+  try {
+    await workspaceSearch.deleteDocument(workspaceId, entityType, entityId)
+  } catch (error) {
+    console.error(`Workspace search projection delete failed after ${operation}.`, error)
+  }
 }
 
 async function hydrateTeamIssueDetailResponse(
@@ -7803,6 +8720,7 @@ export class DynamoDbTeamIssuesClient {
         entityId: createTeamIssueAuditEntityId(teamId, issueId),
         action: 'created',
         occurredAt: now,
+        summary: 'Work Item was created and assigned.',
         changes: createAuditFieldChanges(undefined, item, [
           'title',
           'description',
@@ -7814,8 +8732,15 @@ export class DynamoDbTeamIssuesClient {
         ]),
         metadata: {
           adapter: 'canonical-work-item',
+          actorMemberKey: actorUserId,
           teamId,
+          issueId,
           projectId: assignedProjectId,
+          deepLink: createTeamIssueDeepLink(teamId, issueId),
+          notificationTitle: title,
+          notificationCandidates: [
+            { memberKey: assigneeUserId, reason: 'assignment' },
+          ],
           afterRevision: item.revision,
         },
       })
@@ -7996,6 +8921,7 @@ export class DynamoDbTeamIssuesClient {
         entityId: createTeamIssueAuditEntityId(teamId, issueId),
         action: 'updated',
         occurredAt: expressionAttributeValues[':updatedAt'] as string,
+        summary: createWorkItemNotificationSummary(beforeIssue, afterIssue),
         changes: createAuditFieldChanges(beforeIssue, afterIssue, [
           'title',
           'description',
@@ -8007,8 +8933,13 @@ export class DynamoDbTeamIssuesClient {
         ]),
         metadata: {
           adapter: 'canonical-work-item',
+          actorMemberKey: actorUserId,
           teamId,
+          issueId,
           projectId: afterIssue.assignedProjectId,
+          deepLink: createTeamIssueDeepLink(teamId, issueId),
+          notificationTitle: afterIssue.title ?? afterIssue.titleKey ?? issueId,
+          notificationCandidates: createWorkItemNotificationCandidates(beforeIssue, afterIssue),
           beforeRevision: expectedRevision,
           afterRevision: nextRevision,
         },
@@ -8472,9 +9403,13 @@ export class DynamoDbProjectDirectoryClient {
   /**
    * DynamoDB から sidebar 用の team/project 階層を取得します。
    */
-  async getProjectDirectory(directoryId: string, locale: Locale) {
+  async getProjectDirectory(
+    directoryId: string,
+    locale: Locale,
+    consistentRead = false,
+  ) {
     try {
-      const items = await this.queryDirectoryItems(directoryId)
+      const items = await this.queryDirectoryItems(directoryId, true, consistentRead)
 
       return {
         teams: toProjectDirectoryResponse(items, locale, directoryId),
@@ -10307,6 +11242,14 @@ function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     issue.creatorMemberKey = item.creatorMemberKey
   }
 
+  if (item.customFields) {
+    issue.customFields = item.customFields
+  }
+
+  if (item.relationIds) {
+    issue.relationIds = item.relationIds
+  }
+
   return issue
 }
 
@@ -10565,6 +11508,8 @@ function isTeamIssueItem(value: unknown): value is TeamIssueItem {
     (value.description === undefined || typeof value.description === 'string') &&
     typeof value.assigneeUserId === 'string' &&
     (value.creatorMemberKey === undefined || typeof value.creatorMemberKey === 'string') &&
+    (value.customFields === undefined || isSearchCustomFieldValues(value.customFields)) &&
+    (value.relationIds === undefined || isSearchRelationIds(value.relationIds)) &&
     (
       value.migrationSourceKey === undefined ||
       isLegacyTaskMigrationSourceKey(
@@ -10724,6 +11669,30 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
 
 function isProjectTaskStatus(value: unknown): value is ProjectTaskStatus {
   return value === 'in-progress' || value === 'review' || value === 'todo' || value === 'done'
+}
+
+function isSearchCustomFieldValues(
+  value: unknown,
+): value is Record<string, SearchCustomFieldValue> {
+  if (!isRecord(value)) return false
+  const entries = Object.entries(value)
+  return entries.length <= 100 && entries.every(([fieldId, fieldValue]) =>
+    Boolean(fieldId.trim()) && isSearchCustomFieldValue(fieldValue)
+  )
+}
+
+function isSearchCustomFieldValue(value: unknown): value is SearchCustomFieldValue {
+  return value === null ||
+    typeof value === 'boolean' ||
+    typeof value === 'string' ||
+    typeof value === 'number' && Number.isFinite(value) ||
+    Array.isArray(value) && value.length <= 100 &&
+      value.every((entry) => typeof entry === 'string')
+}
+
+function isSearchRelationIds(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= 100 &&
+    value.every((entry) => typeof entry === 'string' && Boolean(entry.trim()))
 }
 
 function isProjectTaskPriority(value: unknown): value is ProjectTaskPriority {
@@ -11322,6 +12291,56 @@ function createTeamIssueAuditEntityId(teamId: string, issueId: string) {
 }
 
 /**
+ * Team Issue 一覧 route で指定 Work Item を直接開く deep link を作成します。
+ */
+function createTeamIssueDeepLink(teamId: string, issueId: string) {
+  return `/teams/${encodeURIComponent(teamId)}/issues?${new URLSearchParams({ issueId }).toString()}`
+}
+
+/**
+ * Work Item の担当・状態・期限変更から通知対象と理由を組み立てます。
+ */
+function createWorkItemNotificationCandidates(
+  before: TeamIssueItem,
+  after: TeamIssueItem,
+) {
+  const candidates: Array<{ memberKey: string; reason: string }> = []
+
+  if (before.assigneeUserId !== after.assigneeUserId) {
+    candidates.push({ memberKey: after.assigneeUserId, reason: 'assignment' })
+  }
+
+  if (before.status !== after.status) {
+    candidates.push({ memberKey: after.assigneeUserId, reason: 'status-change' })
+  }
+
+  if (before.dueDate !== after.dueDate) {
+    candidates.push({ memberKey: after.assigneeUserId, reason: 'due-date-change' })
+  }
+
+  return candidates
+}
+
+/**
+ * Work Item 更新通知と activity に使う最も具体的な概要を選びます。
+ */
+function createWorkItemNotificationSummary(before: TeamIssueItem, after: TeamIssueItem) {
+  if (before.assigneeUserId !== after.assigneeUserId) {
+    return 'Work Item assignment changed.'
+  }
+
+  if (before.status !== after.status) {
+    return 'Work Item status changed.'
+  }
+
+  if (before.dueDate !== after.dueDate) {
+    return 'Work Item due date changed.'
+  }
+
+  return 'Work Item was updated.'
+}
+
+/**
  * Team Issue comment を Workspace 内で一意な audit target ID に変換します。
  */
 function createTeamIssueAuditCommentId(teamId: string, issueId: string, commentId: string) {
@@ -11419,6 +12438,12 @@ function getEnv(name: string) {
   return process.env[name]
 }
 
+function shouldEnableWorkspaceSearchProjection() {
+  return getEnv('NODE_ENV') !== 'test' || Boolean(
+    getEnv('WORKSPACE_SEARCH_TABLE_NAME') ?? getEnv('MUKUROJI_WORKSPACE_SEARCH_TABLE'),
+  )
+}
+
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, '')
 }
@@ -11479,6 +12504,9 @@ workspaceAccess = new DynamoDbWorkspaceAccessClient()
 realtimeTickets = new DynamoDbRealtimeTicketsClient()
 collaboration = new DynamoDbCollaborationClient()
 fileProofing = createDefaultFileProofingClient()
+notifications = new DynamoDbNotificationsClient()
+workspaceSearch = new DynamoDbWorkspaceSearchClient()
+workspaceSearchProjectionEnabled = shouldEnableWorkspaceSearchProjection()
 
 /**
  * Server test で外部 service client を差し替えます。
@@ -11494,6 +12522,8 @@ export function configureApiClientsForTest(clients: {
   realtimeTickets?: RealtimeTicketsClient
   collaboration?: CollaborationClient
   fileProofing?: FileProofingClient
+  notifications?: NotificationClient
+  workspaceSearch?: WorkspaceSearchClient
 }) {
   cognito = clients.cognito ?? cognito
   dashboardSummary = clients.dashboardSummary ?? dashboardSummary
@@ -11505,6 +12535,9 @@ export function configureApiClientsForTest(clients: {
   realtimeTickets = clients.realtimeTickets ?? realtimeTickets
   collaboration = clients.collaboration ?? collaboration
   fileProofing = clients.fileProofing ?? fileProofing
+  notifications = clients.notifications ?? notifications
+  workspaceSearch = clients.workspaceSearch ?? workspaceSearch
+  if (clients.workspaceSearch) workspaceSearchProjectionEnabled = true
 }
 
 /**
@@ -11521,6 +12554,9 @@ export function resetApiClientsForTest() {
   realtimeTickets = new DynamoDbRealtimeTicketsClient()
   collaboration = new DynamoDbCollaborationClient()
   fileProofing = createDefaultFileProofingClient()
+  notifications = new DynamoDbNotificationsClient()
+  workspaceSearch = new DynamoDbWorkspaceSearchClient()
+  workspaceSearchProjectionEnabled = shouldEnableWorkspaceSearchProjection()
 }
 
 /**

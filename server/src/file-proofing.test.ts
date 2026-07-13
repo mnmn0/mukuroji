@@ -38,6 +38,12 @@ class MemoryDocumentClient {
   /** DynamoDB pagination を再現する任意 page size です。 */
   queryPageSize?: number
 
+  /** 次の transaction request で返す任意 error です。 */
+  nextTransactionError?: Error
+
+  /** 実行した scope query の record key prefixes です。 */
+  readonly queryPrefixes: Array<string | undefined> = []
+
   async send(command: unknown) {
     if (command instanceof BatchGetCommand) {
       const responses = Object.fromEntries(Object.entries(command.input.RequestItems).map(
@@ -60,6 +66,7 @@ class MemoryDocumentClient {
       const values = input.ExpressionAttributeValues as Record<string, string>
       const scopeKey = values[':scopeKey']
       const prefix = values[':recordPrefix']
+      this.queryPrefixes.push(prefix)
       const matchingItems = [...this.items.values()].filter((item) =>
         item.scopeKey === scopeKey &&
         (!prefix || String(item.recordKey).startsWith(prefix))
@@ -108,6 +115,11 @@ class MemoryDocumentClient {
       return {}
     }
     if (command instanceof TransactWriteCommand) {
+      if (this.nextTransactionError) {
+        const error = this.nextTransactionError
+        this.nextTransactionError = undefined
+        throw error
+      }
       const puts = (command.input.TransactItems ?? []).flatMap((entry) => entry.Put ? [entry.Put] : [])
       const updates = (command.input.TransactItems ?? [])
         .flatMap((entry) => entry.Update ? [entry.Update] : [])
@@ -244,6 +256,13 @@ class MemoryDocumentClient {
     if (condition.includes('#pending >= :one') && Number(existing?.pendingApprovalCount ?? 0) < 1) {
       throw createTransactionCancelledError()
     }
+    if (
+      condition.includes('#pendingApprovalCount = :expectedPendingApprovalCount') &&
+      Number(existing?.pendingApprovalCount ?? 0) !==
+        Number(values?.[':expectedPendingApprovalCount'])
+    ) {
+      throw createTransactionCancelledError()
+    }
   }
 }
 
@@ -258,14 +277,29 @@ class FakeFileObjectClient implements FileObjectClient {
   /** Verify 中の競合を再現する hook です。 */
   beforeVerify?: () => Promise<void>
 
+  /** 検証した object key 一覧です。 */
+  readonly verifiedObjectKeys: string[] = []
+
   /** 最後に access URL へ固定した immutable object version ID です。 */
   lastAccessObjectVersionId?: string
+
+  /** 最後に scan status を読んだ immutable object version ID です。 */
+  lastScanStatusObjectVersionId?: string
 
   /** Abandoned upload lifecycle から除外した immutable object version ID 一覧です。 */
   readonly completedObjectVersionIds: string[] = []
 
   /** 次の completed tag 更新だけを失敗させる error です。 */
   markCompletedFailure?: Error
+
+  /** Deleted quarantine tag 更新を試行した immutable object version ID 一覧です。 */
+  readonly quarantineAttempts: string[] = []
+
+  /** 成功した delete 操作の順序です。 */
+  readonly deletionOperations: string[] = []
+
+  /** 次の deleted quarantine tag 更新だけを失敗させる error です。 */
+  quarantineDeletedFailure?: Error
 
   async createUpload(input: {
     objectKey: string
@@ -292,11 +326,13 @@ class FakeFileObjectClient implements FileObjectClient {
 
   async verifyUpload(objectKey: string, _expected: { contentType: string; sizeBytes: number }) {
     const object = this.requireObject(objectKey)
+    this.verifiedObjectKeys.push(objectKey)
     await this.beforeVerify?.()
     return object
   }
 
-  async getScanStatus(objectKey: string, _objectVersionId?: string) {
+  async getScanStatus(objectKey: string, objectVersionId?: string) {
+    this.lastScanStatusObjectVersionId = objectVersionId
     return this.requireObject(objectKey).scanStatus
   }
 
@@ -327,7 +363,19 @@ class FakeFileObjectClient implements FileObjectClient {
     }
   }
 
+  async quarantineDeletedVersion(objectKey: string, objectVersionId: string) {
+    this.quarantineAttempts.push(objectVersionId)
+    if (this.quarantineDeletedFailure) {
+      const failure = this.quarantineDeletedFailure
+      this.quarantineDeletedFailure = undefined
+      throw failure
+    }
+    this.requireObject(objectKey)
+    this.deletionOperations.push(`quarantine:${objectVersionId}`)
+  }
+
   async softDelete(objectKey: string) {
+    this.deletionOperations.push(`soft-delete:${objectKey}`)
     this.objects.delete(objectKey)
   }
 
@@ -497,6 +545,81 @@ describe('file proofing domain', () => {
     })
   })
 
+  test('quarantines the exact immutable S3 version while preserving existing tags', async () => {
+    const sentCommands: unknown[] = []
+    const s3Client = new S3Client({
+      credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+      region: 'us-east-1',
+      requestChecksumCalculation: 'WHEN_REQUIRED',
+    })
+    ;(s3Client as unknown as { send(command: unknown): Promise<Record<string, unknown>> }).send =
+      async (command) => {
+        sentCommands.push(command)
+        if (command instanceof GetObjectTaggingCommand) {
+          return {
+            TagSet: [
+              { Key: 'mukuroji-upload', Value: 'completed' },
+              { Key: 'GuardDutyMalwareScanStatus', Value: 'NO_THREATS_FOUND' },
+            ],
+          }
+        }
+        if (command instanceof PutObjectTaggingCommand) {
+          return {}
+        }
+        throw new Error('Unexpected S3 command.')
+      }
+    const client = new S3FileObjectClient(s3Client, 'mukuroji-files-test')
+
+    await client.quarantineDeletedVersion(
+      'workspaces/workspace-1/files/file-1/version-1/proof.png',
+      'immutable-s3-version-1',
+    )
+
+    expect(sentCommands[0]).toBeInstanceOf(GetObjectTaggingCommand)
+    expect((sentCommands[0] as GetObjectTaggingCommand).input.VersionId)
+      .toBe('immutable-s3-version-1')
+    expect(sentCommands[1]).toBeInstanceOf(PutObjectTaggingCommand)
+    expect((sentCommands[1] as PutObjectTaggingCommand).input).toMatchObject({
+      VersionId: 'immutable-s3-version-1',
+      Tagging: {
+        TagSet: [
+          { Key: 'mukuroji-upload', Value: 'completed' },
+          { Key: 'GuardDutyMalwareScanStatus', Value: 'NO_THREATS_FOUND' },
+          { Key: 'mukuroji-deleted', Value: 'true' },
+        ],
+      },
+    })
+  })
+
+  test('treats only missing immutable versions as completed synchronous quarantine', async () => {
+    const s3Client = new S3Client({
+      credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+      region: 'us-east-1',
+      requestChecksumCalculation: 'WHEN_REQUIRED',
+    })
+    let failure = Object.assign(new Error('Object key is gone.'), { name: 'NoSuchKey' })
+    ;(s3Client as unknown as { send(command: unknown): Promise<Record<string, unknown>> }).send =
+      async () => {
+        throw failure
+      }
+    const client = new S3FileObjectClient(s3Client, 'mukuroji-files-test')
+    const quarantine = () => client.quarantineDeletedVersion(
+      'workspaces/workspace-1/files/file-1/version-1/proof.png',
+      'immutable-s3-version-1',
+    )
+
+    await expect(quarantine()).resolves.toBeUndefined()
+
+    failure = Object.assign(new Error('Object version is gone.'), { name: 'NoSuchVersion' })
+    await expect(quarantine()).resolves.toBeUndefined()
+
+    failure = Object.assign(new Error('S3 is unavailable.'), { name: 'ServiceUnavailable' })
+    await expect(quarantine()).rejects.toMatchObject({
+      message: 'S3 is unavailable.',
+      name: 'ServiceUnavailable',
+    })
+  })
+
   test('maps GuardDuty tags without treating missing scans as clean', () => {
     expect(mapGuardDutyScanStatus(undefined)).toBe('scanning')
     expect(mapGuardDutyScanStatus([{ Key: 'GuardDutyMalwareScanStatus', Value: 'NO_THREATS_FOUND' }]))
@@ -592,9 +715,50 @@ describe('file proofing domain', () => {
       }),
     ]))
 
+    objectClient.markCompletedFailure = new Error('Second transient object tagging failure.')
+    const deferred = await client.list(scope, manager)
+    expect(deferred.files[0]?.currentVersion.scanStatus).toBe('scanning')
+
     const repaired = await client.list(scope, manager)
     expect(repaired.files[0]?.currentVersion.scanStatus).toBe('available')
     expect(objectClient.completedObjectVersionIds).toContain('immutable-repair-version-1')
+  })
+
+  test('returns a completed upload idempotently without re-verifying or duplicating audit', async () => {
+    const { client, documentClient, objectClient } = createClient(undefined, 'audit-events')
+    const session = await client.createUpload(
+      scope,
+      manager,
+      { contentType: 'image/png', fileName: 'idempotent.png', sizeBytes: 12 },
+      createAuditContext('idempotent-complete-upload'),
+    )
+    objectClient.objects.set(objectClient.lastObjectKey!, {
+      contentType: 'image/png',
+      objectVersionId: 'immutable-idempotent-version-1',
+      sizeBytes: 12,
+      scanStatus: 'available',
+    })
+
+    const first = await client.completeUpload(
+      scope,
+      manager,
+      session.file.id,
+      session.version.id,
+      createAuditContext('idempotent-complete-first'),
+    )
+    const retry = await client.completeUpload(
+      scope,
+      manager,
+      session.file.id,
+      session.version.id,
+      createAuditContext('idempotent-complete-retry'),
+    )
+
+    expect(retry).toEqual(first)
+    expect(objectClient.verifiedObjectKeys).toHaveLength(1)
+    expect([...documentClient.items.values()].filter((item) =>
+      item.eventType === 'file.upload-completed'
+    )).toHaveLength(1)
   })
 
   test('rejects reusing one idempotency key with a different upload payload', async () => {
@@ -614,6 +778,36 @@ describe('file proofing domain', () => {
     )).rejects.toMatchObject({ code: 'IdempotencyKeyReused', status: 409 })
   })
 
+  test('does not misclassify non-conditional transaction cancellation as a conflict', async () => {
+    const { client, documentClient } = createClient()
+    const throttled = createTransactionCancelledError([{ Code: 'ProvisionedThroughputExceeded' }])
+    documentClient.nextTransactionError = throttled
+
+    await expect(client.createUpload(
+      scope,
+      manager,
+      { contentType: 'image/png', fileName: 'throttled.png', sizeBytes: 10 },
+      createAuditContext('throttled-upload'),
+    )).rejects.toMatchObject({
+      message: 'Conditional transaction failed.',
+      name: 'TransactionCanceledException',
+    })
+
+    documentClient.nextTransactionError = createTransactionCancelledError([
+      { Code: 'ConditionalCheckFailed' },
+      { Code: 'ProvisionedThroughputExceeded' },
+    ])
+    await expect(client.createUpload(
+      scope,
+      manager,
+      { contentType: 'image/png', fileName: 'mixed-failure.png', sizeBytes: 10 },
+      createAuditContext('mixed-failure-upload'),
+    )).rejects.toMatchObject({
+      message: 'Conditional transaction failed.',
+      name: 'TransactionCanceledException',
+    })
+  })
+
   test('reads every DynamoDB page in a file scope', async () => {
     const { client, documentClient } = createClient()
     await client.createUpload(
@@ -629,8 +823,14 @@ describe('file proofing domain', () => {
       createAuditContext('page-two'),
     )
     documentClient.queryPageSize = 1
+    documentClient.queryPrefixes.length = 0
 
     expect((await client.list(scope, manager)).files).toHaveLength(2)
+    expect([...documentClient.queryPrefixes].sort()).toEqual([
+      'APPROVAL#',
+      'FILE#',
+      'FILE#',
+    ])
   })
 
   test('rejects unsupported or oversized upload metadata before signing', async () => {
@@ -674,6 +874,7 @@ describe('file proofing domain', () => {
     )
     expect(replacement.version.number).toBe(2)
     expect(replacement.file.versionCount).toBe(2)
+    expect(replacement.file.currentVersion.id).toBe(session.version.id)
 
     objectClient.objects.set(objectClient.lastObjectKey!, {
       contentType: 'image/png',
@@ -689,6 +890,7 @@ describe('file proofing domain', () => {
       createAuditContext('complete-blocked'),
     )
     expect(completed.version.scanStatus).toBe('blocked')
+    expect(completed.file.currentVersion.id).toBe(replacement.version.id)
     await expect(client.createAccess(
       scope,
       manager,
@@ -696,6 +898,110 @@ describe('file proofing domain', () => {
       replacement.version.id,
       'attachment',
     )).rejects.toMatchObject({ code: 'FileThreatDetected', status: 423 })
+  })
+
+  test('does not promote a replacement session while the current version has an approval', async () => {
+    const { client, objectClient, session } = await createAvailableFile()
+    const replacement = await client.createVersionUpload(
+      scope,
+      manager,
+      session.file.id,
+      { contentType: 'image/png', fileName: 'pending-approval-v2.png', sizeBytes: 2048 },
+      createAuditContext('pending-approval-replacement'),
+    )
+    const replacementObjectKey = objectClient.lastObjectKey!
+    objectClient.objects.set(replacementObjectKey, {
+      contentType: 'image/png',
+      objectVersionId: 'immutable-pending-approval-version-2',
+      sizeBytes: 2048,
+      scanStatus: 'available',
+    })
+    const approval = await client.createApproval(
+      scope,
+      manager,
+      {
+        fileId: session.file.id,
+        versionId: session.version.id,
+        reviewerMemberKeys: ['reviewer@example.com'],
+        dueAt: '2099-07-20T00:00:00.000Z',
+      },
+      createAuditContext('pending-current-version-approval'),
+    )
+
+    await expect(client.completeUpload(
+      scope,
+      manager,
+      session.file.id,
+      replacement.version.id,
+      createAuditContext('blocked-replacement-completion'),
+    )).rejects.toMatchObject({ code: 'FileApprovalPending', status: 409 })
+    expect(objectClient.verifiedObjectKeys).not.toContain(replacementObjectKey)
+    const blockedFile = (await client.list(scope, manager)).files.find(
+      (file) => file.id === session.file.id,
+    )
+    expect(blockedFile?.currentVersion.id).toBe(session.version.id)
+
+    const decided = await client.decideApproval(
+      scope,
+      { memberKey: 'reviewer@example.com', guest: false, canWrite: false, canManage: false },
+      approval.id,
+      { decision: 'approve', expectedRevision: approval.revision },
+      createAuditContext('approve-current-version'),
+    )
+    expect(decided.status).toBe('approved')
+
+    const completed = await client.completeUpload(
+      scope,
+      manager,
+      session.file.id,
+      replacement.version.id,
+      createAuditContext('complete-replacement-after-approval'),
+    )
+    expect(completed.file.currentVersion.id).toBe(replacement.version.id)
+  })
+
+  test('keeps replacement promotion CAS-bound when an approval starts during verification', async () => {
+    const { client, objectClient, session } = await createAvailableFile()
+    const replacement = await client.createVersionUpload(
+      scope,
+      manager,
+      session.file.id,
+      { contentType: 'image/png', fileName: 'racing-approval-v2.png', sizeBytes: 2048 },
+      createAuditContext('racing-approval-replacement'),
+    )
+    objectClient.objects.set(objectClient.lastObjectKey!, {
+      contentType: 'image/png',
+      objectVersionId: 'immutable-racing-approval-version-2',
+      sizeBytes: 2048,
+      scanStatus: 'available',
+    })
+    objectClient.beforeVerify = async () => {
+      objectClient.beforeVerify = undefined
+      await client.createApproval(
+        scope,
+        manager,
+        {
+          fileId: session.file.id,
+          versionId: session.version.id,
+          reviewerMemberKeys: ['reviewer@example.com'],
+          dueAt: '2099-07-20T00:00:00.000Z',
+        },
+        createAuditContext('racing-current-version-approval'),
+      )
+    }
+
+    await expect(client.completeUpload(
+      scope,
+      manager,
+      session.file.id,
+      replacement.version.id,
+      createAuditContext('racing-replacement-completion'),
+    )).rejects.toMatchObject({ code: 'FileVersionConflict', status: 409 })
+    const current = (await client.list(scope, manager)).files.find(
+      (file) => file.id === session.file.id,
+    )
+    expect(current?.currentVersion.id).toBe(session.version.id)
+    expect(current?.capabilities.canDelete).toBeFalse()
   })
 
   test('projects download access into the parent Work Item activity audit', async () => {
@@ -772,6 +1078,33 @@ describe('file proofing domain', () => {
     )).rejects.toMatchObject({ code: 'FileDeleted', status: 410 })
   })
 
+  test('quarantines immutable versions before delete returns and retries after tag failure', async () => {
+    const { client, objectClient, session } = await createAvailableFile()
+    const objectKey = objectClient.lastObjectKey!
+    objectClient.quarantineDeletedFailure = new Error('Deleted tag update failed.')
+
+    await expect(client.deleteFile(
+      scope,
+      manager,
+      session.file.id,
+      createAuditContext('delete-tag-failure'),
+    )).rejects.toThrow('Deleted tag update failed.')
+    expect((await client.list(scope, manager)).files).toEqual([])
+    expect(objectClient.objects.has(objectKey)).toBeTrue()
+    expect(objectClient.quarantineAttempts).toEqual(['immutable-object-version-1'])
+    expect(objectClient.deletionOperations).toEqual([])
+
+    await client.deleteFile(scope, manager, session.file.id)
+    expect(objectClient.quarantineAttempts).toEqual([
+      'immutable-object-version-1',
+      'immutable-object-version-1',
+    ])
+    expect(objectClient.deletionOperations).toEqual([
+      'quarantine:immutable-object-version-1',
+      `soft-delete:${objectKey}`,
+    ])
+  })
+
   test('keeps private files hidden from guests and honors explicit guest access', async () => {
     const { client } = createClient()
     await client.createUpload(
@@ -795,8 +1128,43 @@ describe('file proofing domain', () => {
     expect(guestFiles.files.map((file) => file.name)).toEqual(['guest.png'])
   })
 
-  test('persists positioned annotations and validates preview anchors', async () => {
-    const { client, documentClient, session } = await createAvailableFile()
+  test('keeps a downgraded guest uploader from deleting its shared file', async () => {
+    const { client } = createClient()
+    const session = await client.createUpload(
+      scope,
+      manager,
+      {
+        contentType: 'image/png',
+        fileName: 'downgraded-uploader.png',
+        sizeBytes: 10,
+        guestAccess: true,
+      },
+      createAuditContext('downgraded-uploader-file'),
+    )
+    const downgradedGuest: FileProofingActor = {
+      memberKey: manager.memberKey,
+      guest: true,
+      canWrite: false,
+      canManage: false,
+    }
+
+    const visibleFile = (await client.list(scope, downgradedGuest)).files.find(
+      (file) => file.id === session.file.id,
+    )
+    expect(visibleFile?.capabilities.canDelete).toBeFalse()
+    await expect(client.deleteFile(
+      scope,
+      downgradedGuest,
+      session.file.id,
+      createAuditContext('downgraded-uploader-delete'),
+    )).rejects.toMatchObject({ code: 'FileDeleteDenied', status: 403 })
+    expect((await client.list(scope, manager)).files.map((file) => file.id))
+      .toContain(session.file.id)
+  })
+
+  test('persists positioned annotations only against the clean immutable object version', async () => {
+    const { client, documentClient, objectClient, session } = await createAvailableFile()
+    objectClient.lastScanStatusObjectVersionId = undefined
     const annotation = await client.createAnnotation(
       scope,
       manager,
@@ -806,6 +1174,7 @@ describe('file proofing domain', () => {
       createAuditContext('annotation'),
     )
     expect(annotation.anchor).toEqual({ kind: 'image', x: 0.25, y: 0.75 })
+    expect(objectClient.lastScanStatusObjectVersionId).toBe('immutable-object-version-1')
     expect(await client.listAnnotations(scope, manager, session.file.id, session.version.id))
       .toHaveLength(1)
     await expect(client.createAnnotation(
@@ -815,12 +1184,38 @@ describe('file proofing domain', () => {
       session.version.id,
       { anchor: { kind: 'image', x: 2, y: 0 }, bodyMarkdown: 'Invalid.' },
     )).rejects.toMatchObject({ code: 'InvalidAnnotationAnchor', status: 400 })
+    objectClient.objects.get(objectClient.lastObjectKey!)!.scanStatus = 'blocked'
+    await expect(client.createAnnotation(
+      scope,
+      manager,
+      session.file.id,
+      session.version.id,
+      { anchor: { kind: 'image', x: 0.5, y: 0.5 }, bodyMarkdown: 'Blocked.' },
+    )).rejects.toMatchObject({ code: 'FileThreatDetected', status: 423 })
     await client.deleteFile(scope, manager, session.file.id, createAuditContext('delete-annotation-file'))
     await expect(client.listAnnotations(scope, manager, session.file.id, session.version.id))
       .rejects.toMatchObject({ code: 'FileDeleted', status: 410 })
     const storedAnnotation = [...documentClient.items.values()]
       .find((item) => item.entryType === 'annotation')
     expect(storedAnnotation?.expiresAt).toBeNumber()
+  })
+
+  test('rejects annotations before upload completion pins an immutable object version', async () => {
+    const { client } = createClient()
+    const session = await client.createUpload(
+      scope,
+      manager,
+      { contentType: 'image/png', fileName: 'pending-annotation.png', sizeBytes: 10 },
+      createAuditContext('pending-annotation-upload'),
+    )
+
+    await expect(client.createAnnotation(
+      scope,
+      manager,
+      session.file.id,
+      session.version.id,
+      { anchor: { kind: 'image', x: 0.5, y: 0.5 }, bodyMarkdown: 'Not yet.' },
+    )).rejects.toMatchObject({ code: 'FileUploadIncomplete', status: 423 })
   })
 
   test('aggregates reviewer decisions and exposes approval Inbox projections', async () => {
@@ -837,6 +1232,21 @@ describe('file proofing domain', () => {
       },
       createAuditContext('approval'),
     )
+    expect([...documentClient.items.values()].find((item) =>
+      item.entryType === 'file-approval-index' && item.approvalId === approval.id
+    )).toMatchObject({
+      fileId: session.file.id,
+      dueAt: approval.dueAt,
+      reviewerMemberKeys: ['first@example.com', 'second@example.com'],
+      recordKey: `FILE_APPROVAL#${session.file.id}#${approval.id}`,
+    })
+    const pendingFile = (await client.list(scope, manager)).files.find(
+      (file) => file.id === session.file.id,
+    )
+    expect(pendingFile?.capabilities).toMatchObject({
+      canDelete: false,
+      canUploadVersion: false,
+    })
     await expect(client.createVersionUpload(
       scope,
       manager,
@@ -850,6 +1260,12 @@ describe('file proofing domain', () => {
       { memberKey: 'first@example.com', guest: false, canWrite: false, canManage: false },
       approval.id,
       { decision: 'approve', expectedRevision: approval.revision, comment: 'あ'.repeat(2_001) },
+    )).rejects.toMatchObject({ code: 'InvalidFileProofingInput', status: 400 })
+    await expect(client.decideApproval(
+      scope,
+      { memberKey: 'first@example.com', guest: false, canWrite: false, canManage: false },
+      approval.id,
+      { decision: 'approve', expectedRevision: approval.revision, comment: 123 as unknown as string },
     )).rejects.toMatchObject({ code: 'InvalidFileProofingInput', status: 400 })
     const first = await client.decideApproval(
       scope,
@@ -874,12 +1290,19 @@ describe('file proofing domain', () => {
       canWrite: false,
       canManage: false,
     })).approvals).toEqual([])
+    documentClient.queryPrefixes.length = 0
     await client.deleteFile(scope, manager, session.file.id, createAuditContext('delete-approved-file'))
     const reviewRows = [...documentClient.items.values()].filter((item) =>
-      item.entryType === 'approval' || item.entryType === 'reviewer-approval'
+      item.entryType === 'approval' ||
+      item.entryType === 'file-approval-index' ||
+      item.entryType === 'reviewer-approval'
     )
     expect(reviewRows).not.toHaveLength(0)
     expect(reviewRows.every((item) => typeof item.expiresAt === 'number')).toBeTrue()
+    expect(documentClient.queryPrefixes).toEqual([
+      `ANNOTATION#${session.file.id}#`,
+      `FILE_APPROVAL#${session.file.id}#`,
+    ])
   })
 
   test('lets the requester cancel a pending approval and unblock file changes', async () => {
@@ -919,6 +1342,13 @@ describe('file proofing domain', () => {
       canWrite: false,
       canManage: false,
     })).approvals).toEqual([])
+    const unblockedFile = (await client.list(scope, manager)).files.find(
+      (file) => file.id === session.file.id,
+    )
+    expect(unblockedFile?.capabilities).toMatchObject({
+      canDelete: true,
+      canUploadVersion: true,
+    })
 
     const replacement = await client.createVersionUpload(
       scope,
@@ -929,6 +1359,95 @@ describe('file proofing domain', () => {
     )
     expect(replacement.version.number).toBe(2)
     await client.deleteFile(scope, manager, session.file.id, createAuditContext('delete-after-cancel'))
+  })
+
+  test('rejects invalid approval revisions consistently as domain input errors', async () => {
+    const { client, session } = await createAvailableFile()
+    const approval = await client.createApproval(
+      scope,
+      manager,
+      {
+        fileId: session.file.id,
+        versionId: session.version.id,
+        reviewerMemberKeys: ['reviewer@example.com'],
+        dueAt: '2099-07-20T00:00:00.000Z',
+      },
+      createAuditContext('invalid-revision-approval'),
+    )
+    const reviewer = {
+      memberKey: 'reviewer@example.com',
+      guest: false,
+      canWrite: false,
+      canManage: false,
+    }
+
+    await expect(client.decideApproval(
+      scope,
+      reviewer,
+      approval.id,
+      { decision: 'approve', expectedRevision: 0 },
+    )).rejects.toMatchObject({ code: 'InvalidFileProofingInput', status: 400 })
+    await expect(client.cancelApproval(
+      scope,
+      manager,
+      approval.id,
+      { expectedRevision: -1 },
+    )).rejects.toMatchObject({ code: 'InvalidFileProofingInput', status: 400 })
+  })
+
+  test('sets completedAt for rejected and changes-requested approval outcomes', async () => {
+    const { client, session } = await createAvailableFile()
+    const reviewer = {
+      memberKey: 'reviewer@example.com',
+      guest: false,
+      canWrite: false,
+      canManage: false,
+    }
+    const rejectedRequest = await client.createApproval(
+      scope,
+      manager,
+      {
+        fileId: session.file.id,
+        versionId: session.version.id,
+        reviewerMemberKeys: [reviewer.memberKey],
+        dueAt: '2099-07-20T00:00:00.000Z',
+      },
+      createAuditContext('rejected-approval'),
+    )
+    const rejected = await client.decideApproval(
+      scope,
+      reviewer,
+      rejectedRequest.id,
+      { decision: 'reject', expectedRevision: rejectedRequest.revision },
+      createAuditContext('reject-decision'),
+    )
+    expect(rejected).toMatchObject({
+      completedAt: '2026-07-13T00:00:00.000Z',
+      status: 'rejected',
+    })
+
+    const changesRequest = await client.createApproval(
+      scope,
+      manager,
+      {
+        fileId: session.file.id,
+        versionId: session.version.id,
+        reviewerMemberKeys: [reviewer.memberKey],
+        dueAt: '2099-07-21T00:00:00.000Z',
+      },
+      createAuditContext('changes-requested-approval'),
+    )
+    const changesRequested = await client.decideApproval(
+      scope,
+      reviewer,
+      changesRequest.id,
+      { decision: 'request-changes', expectedRevision: changesRequest.revision },
+      createAuditContext('request-changes-decision'),
+    )
+    expect(changesRequested).toMatchObject({
+      completedAt: '2026-07-13T00:00:00.000Z',
+      status: 'changes-requested',
+    })
   })
 
   test('keeps duplicate due dates accurate and pages compact reviewer projections', async () => {
@@ -1176,8 +1695,11 @@ function createMemoryKey(item: Record<string, unknown>) {
   return `${String(partition)}\u0000${String(sort)}`
 }
 
-function createTransactionCancelledError() {
+function createTransactionCancelledError(
+  cancellationReasons: readonly Record<string, unknown>[] = [{ Code: 'ConditionalCheckFailed' }],
+) {
   return Object.assign(new Error('Conditional transaction failed.'), {
     name: 'TransactionCanceledException',
+    CancellationReasons: cancellationReasons,
   })
 }

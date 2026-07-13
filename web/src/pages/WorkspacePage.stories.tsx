@@ -1,6 +1,10 @@
 import { WORK_ITEM_SCHEMA_VERSION } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import type { DashboardSummary } from '../auth/api'
+import {
+  notificationInboxControllerFixture,
+  notificationPreferencesControllerFixture,
+} from '../notifications/fixtures'
 import { projectDirectoryFixtures } from '../projects/fixtures'
 import { referoTaskFixtures } from '../tasks/fixtures'
 import { WorkspaceScreen } from './WorkspacePage'
@@ -132,9 +136,12 @@ const storyTeamProjectMembers = [
 const defaultArgs = {
   activeTeamId: 'core-team',
   fontSizePreference: 'standard',
+  inboxCount: 2,
   locale: 'ja',
   summary: storySummary,
   tasks: storyWorkspaceTasks,
+  notificationInbox: notificationInboxControllerFixture,
+  notificationPreferences: notificationPreferencesControllerFixture,
   teamProjectMembers: storyTeamProjectMembers,
   teams: projectDirectoryFixtures,
   onCreateProject: async () => undefined,
@@ -246,14 +253,44 @@ export const Inbox: Story = {
 }
 
 /**
- * 対応条件に該当する未完了タスクがない受信箱です。
+ * 通知がまだない受信箱です。
  */
-export const InboxWithoutAttentionItems: Story = {
+export const InboxWithoutNotifications: Story = {
   args: {
-    tasks: storyWorkspaceTasks.map((task) => ({
-      ...task,
-      status: 'done' as const,
-    })),
+    notificationInbox: {
+      ...notificationInboxControllerFixture,
+      hasMore: false,
+      notifications: [],
+      unreadCount: 0,
+    },
+    view: 'inbox',
+  },
+}
+
+/**
+ * 通知 API の初回 page を読み込み中の受信箱です。
+ */
+export const InboxLoading: Story = {
+  args: {
+    notificationInbox: {
+      ...notificationInboxControllerFixture,
+      isLoading: true,
+      notifications: [],
+    },
+    view: 'inbox',
+  },
+}
+
+/**
+ * 通知 API の読み込みに失敗した受信箱です。
+ */
+export const InboxLoadError: Story = {
+  args: {
+    notificationInbox: {
+      ...notificationInboxControllerFixture,
+      hasLoadError: true,
+      notifications: [],
+    },
     view: 'inbox',
   },
 }

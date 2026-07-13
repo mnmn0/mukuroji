@@ -598,6 +598,10 @@ export type MutationAuditEventInput = {
    */
   changes?: AuditFieldChange[]
   /**
+   * Activity と notification に表示できる短い概要です。
+   */
+  summary?: string
+  /**
    * schema の必須項目に含めない付加情報です。
    */
   metadata?: Readonly<Record<string, unknown>>
@@ -1161,6 +1165,7 @@ export function createMutationAuditEventPut(
     target: input.target,
     action: input.action,
     changes: input.changes,
+    ...(input.summary ? { summary: input.summary } : {}),
     ...(input.metadata ? { metadata: input.metadata } : {}),
     expiresAt,
   })

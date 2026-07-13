@@ -41,6 +41,74 @@ test('creates stable collaboration keys for Work Item and project scopes', () =>
   )
 })
 
+test('reads soft-deleted comment snapshots consistently for search revalidation', async () => {
+  const reads: Array<Record<string, unknown>> = []
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    reads.push(input)
+    return {
+      Item: {
+        entityKey,
+        recordKey: 'COMMENT#comment-1',
+        entryType: 'comment',
+        id: 'comment-1',
+        rootCommentId: 'comment-1',
+        authorMemberKey: 'author@example.com',
+        bodyMarkdown: '',
+        version: 2,
+        mentionMemberKeys: [],
+        createdAt: '2026-07-12T00:00:00.000Z',
+        updatedAt: '2026-07-12T00:01:00.000Z',
+        deletedAt: '2026-07-12T00:01:00.000Z',
+      },
+    }
+  })
+
+  expect(await client.getCommentSnapshot({ entityKey, commentId: 'comment-1' }))
+    .toMatchObject({ id: 'comment-1', deletedAt: '2026-07-12T00:01:00.000Z' })
+  expect(reads).toEqual([
+    expect.objectContaining({
+      Key: { entityKey, recordKey: 'COMMENT#comment-1' },
+      ConsistentRead: true,
+    }),
+  ])
+})
+
+test('accepts only saved non-deleted comments as file attachment targets', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    const commentId = String((input.Key as { recordKey?: string } | undefined)?.recordKey ?? '')
+      .replace('COMMENT#', '')
+    if (commentId === 'missing') {
+      return {}
+    }
+    return {
+      Item: {
+        entityKey,
+        recordKey: `COMMENT#${commentId}`,
+        entryType: 'comment',
+        id: commentId,
+        rootCommentId: commentId,
+        authorMemberKey: 'author@example.com',
+        bodyMarkdown: commentId === 'deleted' ? '' : 'Current comment',
+        version: commentId === 'deleted' ? 2 : 1,
+        mentionMemberKeys: [],
+        createdAt: '2026-07-12T00:00:00.000Z',
+        updatedAt: '2026-07-12T00:01:00.000Z',
+        ...(commentId === 'deleted'
+          ? { deletedAt: '2026-07-12T00:01:00.000Z' }
+          : {}),
+      },
+    }
+  })
+
+  expect(await client.hasAttachableComment(entityKey, 'current')).toBe(true)
+  expect(await client.hasAttachableComment(entityKey, 'deleted')).toBe(false)
+  expect(await client.hasAttachableComment(entityKey, 'missing')).toBe(false)
+})
+
 test('pages root comments newest-first and binds cursors to their entity scope', async () => {
   const discussionQueries: Array<Record<string, unknown>> = []
   const client = createClient(async (command) => {
@@ -569,11 +637,13 @@ test('records comment edits and deletes as redacted append-only audit events', a
     workspaceId: 'workspace#one',
     teamId: 'team-a',
     issueId: 'issue-1',
+    workItemTitle: 'Notification target',
     entityKey,
     actorMemberKey: 'author@example.com',
     commentId: 'comment-1',
     bodyMarkdown: 'After',
     expectedVersion: 1,
+    deepLink: '/teams/team-a/issues?issueId=issue-1',
     auditContext: createContext('edit-comment'),
   })
   await client.deleteComment({
@@ -598,6 +668,12 @@ test('records comment edits and deletes as redacted append-only audit events', a
   expect(auditEvents[0]?.changes).toEqual([
     { field: 'body', before: '[REDACTED]', after: '[REDACTED]', redacted: true },
   ])
+  expect(auditEvents[0]?.metadata).toMatchObject({
+    commentId: 'comment-1',
+    rootCommentId: 'comment-1',
+    notificationTitle: 'Notification target',
+    deepLink: '/teams/team-a/issues?issueId=issue-1&commentId=comment-1&rootCommentId=comment-1',
+  })
   expect(auditEvents[1]?.changes).toEqual([
     { field: 'body', before: '[REDACTED]', after: '[REDACTED]', redacted: true },
     { field: 'deletedAt', after: '2026-07-12T00:01:00.000Z' },

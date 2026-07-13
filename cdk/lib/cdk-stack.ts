@@ -2,11 +2,15 @@ import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as apigatewayv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as customResources from 'aws-cdk-lib/custom-resources';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as guardduty from 'aws-cdk-lib/aws-guardduty';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as lambdaDestinations from 'aws-cdk-lib/aws-lambda-destinations';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -690,6 +694,14 @@ export class CdkStack extends cdk.Stack {
       timeToLiveAttribute: 'expiresAt',
     });
 
+    const workspaceSearchTable = new dynamodb.Table(this, 'WorkspaceSearchTable', {
+      partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     const notificationsTable = new dynamodb.Table(this, 'NotificationsTable', {
       partitionKey: { name: 'recipientKey', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'notificationKey', type: dynamodb.AttributeType.STRING },
@@ -697,6 +709,13 @@ export class CdkStack extends cdk.Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       timeToLiveAttribute: 'expiresAt',
+    });
+
+    notificationsTable.addGlobalSecondaryIndex({
+      indexName: 'RecipientStatusIndex',
+      partitionKey: { name: 'recipientStatusKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'notificationKey', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
     });
 
     const realtimeSessionsTable = new dynamodb.Table(this, 'RealtimeSessionsTable', {
@@ -963,6 +982,8 @@ export class CdkStack extends cdk.Stack {
         MUKUROJI_TEAM_ISSUES_TABLE: workItemsTable.tableName,
         MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
         MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
+        NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
+        NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
         REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
@@ -971,6 +992,7 @@ export class CdkStack extends cdk.Stack {
         TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
         TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
+        WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
       },
     });
 
@@ -1025,9 +1047,11 @@ export class CdkStack extends cdk.Stack {
     workspaceAccessTable.grantReadWriteData(apiFunction);
     collaborationTable.grantReadWriteData(apiFunction);
     fileProofingTable.grantReadWriteData(apiFunction);
+    notificationsTable.grantReadWriteData(apiFunction);
+    workspaceSearchTable.grantReadWriteData(apiFunction);
     realtimeSessionsTable.grantWriteData(apiFunction);
-    apiFunction.addToRolePolicy(
-      new iam.PolicyStatement({
+    const apiTransactWritePolicy = new iam.Policy(this, 'ApiTransactWritePolicy', {
+      statements: [new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
         resources: [
           workItemsTable.tableArn,
@@ -1037,9 +1061,14 @@ export class CdkStack extends cdk.Stack {
           workspaceAccessTable.tableArn,
           collaborationTable.tableArn,
           fileProofingTable.tableArn,
+          workspaceSearchTable.tableArn,
         ],
-      }),
-    );
+      })],
+    });
+    if (!apiFunction.role) {
+      throw new Error('API Lambda execution role was not created.');
+    }
+    apiFunction.role.attachInlinePolicy(apiTransactWritePolicy);
     apiFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: [
@@ -1201,6 +1230,7 @@ export class CdkStack extends cdk.Stack {
           FILE_BUCKET_NAME: fileBucket.bucketName,
           FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
           NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
+          NOTIFICATION_RETENTION_SECONDS: String(365 * 24 * 60 * 60),
           PROCESSED_AUDIT_EVENTS_TABLE_NAME: processedAuditEventsTable.tableName,
           PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
           REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
@@ -1226,7 +1256,7 @@ export class CdkStack extends cdk.Stack {
     );
     auditEventsTable.grantStreamRead(collaborationProjectionFunction);
     collaborationTable.grantReadData(collaborationProjectionFunction);
-    notificationsTable.grantWriteData(collaborationProjectionFunction);
+    notificationsTable.grantReadWriteData(collaborationProjectionFunction);
     processedAuditEventsTable.grantReadWriteData(collaborationProjectionFunction);
     projectDirectoryTable.grantReadData(collaborationProjectionFunction);
     realtimeSessionsTable.grantReadWriteData(collaborationProjectionFunction);
@@ -1286,6 +1316,62 @@ export class CdkStack extends cdk.Stack {
       }),
     );
     realtimeWebSocketStage.grantManagementApiAccess(collaborationProjectionFunction);
+
+    const notificationScheduleDlq = new sqs.Queue(this, 'NotificationScheduleDlq', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(14),
+    });
+    const notificationScheduleFunction = new lambdaNodejs.NodejsFunction(
+      this,
+      'NotificationScheduleFunction',
+      {
+        entry: path.join(__dirname, '../../server/src/notification-schedule-handler.ts'),
+        handler: 'handler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+        projectRoot: path.join(__dirname, '../..'),
+        timeout: cdk.Duration.minutes(5),
+        memorySize: 512,
+        description: 'Emits deterministic due and overdue Work Item notification events.',
+        onFailure: new lambdaDestinations.SqsDestination(notificationScheduleDlq),
+        retryAttempts: 2,
+        bundling: {
+          bundleAwsSDK: true,
+          minify: true,
+          sourceMap: true,
+          target: 'node22',
+        },
+        environment: {
+          AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
+          AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
+          NOTIFICATION_SCHEDULE_MAX_PAGES: '1000',
+          NOTIFICATION_SCHEDULE_SCAN_PAGE_SIZE: '100',
+          WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
+        },
+      },
+    );
+    workItemsTable.grantReadData(notificationScheduleFunction);
+    auditEventsTable.grantWriteData(notificationScheduleFunction);
+
+    new cloudwatch.Alarm(this, 'NotificationScheduleDlqAlarm', {
+      alarmDescription:
+        'Detects notification schedule failures after asynchronous retries, including scan page limit exhaustion.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: notificationScheduleDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    new events.Rule(this, 'NotificationScheduleRule', {
+      description: 'Checks canonical Work Items for due and overdue notifications.',
+      schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+      targets: [new eventsTargets.LambdaFunction(notificationScheduleFunction)],
+    });
 
     const cognitoPolicy = customResources.AwsCustomResourcePolicy.fromStatements([
       new iam.PolicyStatement({
@@ -1511,6 +1597,9 @@ export class CdkStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'WorkItemCollaborationTableName', {
       value: collaborationTable.tableName,
     });
+    new cdk.CfnOutput(this, 'WorkspaceSearchTableName', {
+      value: workspaceSearchTable.tableName,
+    });
     new cdk.CfnOutput(this, 'NotificationsTableName', { value: notificationsTable.tableName });
     new cdk.CfnOutput(this, 'RealtimeSessionsTableName', {
       value: realtimeSessionsTable.tableName,
@@ -1529,6 +1618,9 @@ export class CdkStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'CollaborationProjectionDlqUrl', {
       value: collaborationProjectionDlq.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'NotificationScheduleDlqUrl', {
+      value: notificationScheduleDlq.queueUrl,
     });
     new cdk.CfnOutput(this, 'ProjectTasksApiUrl', {
       value: functionUrl.url,

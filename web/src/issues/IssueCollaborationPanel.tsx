@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../i18n'
 import type { WorkspaceMember } from '../workspace/api'
@@ -43,6 +43,14 @@ export type IssueCollaborationPanelProps = {
    */
   readOnlyMessage?: string
   /**
+   * notification deep link から focus する comment ID です。
+   */
+  focusedCommentId?: string
+  /**
+   * notification deep link の reply が属する root comment ID です。
+   */
+  focusedRootCommentId?: string
+  /**
    * 外側の layout から追加する class name です。
    */
   className?: string
@@ -56,6 +64,8 @@ export function IssueCollaborationPanel({
   className = '',
   controller,
   currentMemberKey,
+  focusedCommentId,
+  focusedRootCommentId,
   locale,
   members,
   readOnlyMessage,
@@ -65,6 +75,8 @@ export function IssueCollaborationPanel({
   const [editingId, setEditingId] = useState<string | undefined>()
   const [deleteConfirmationId, setDeleteConfirmationId] = useState<string | undefined>()
   const [reactionMenuId, setReactionMenuId] = useState<string | undefined>()
+  const focusLoadRequestRef = useRef<string | undefined>(undefined)
+  const focusedCommentTargetRef = useRef<string | undefined>(undefined)
   const threads = useMemo(() => createCommentThreads(controller.comments), [controller.comments])
   const uniquePresence = useMemo(
     () => Array.from(new Map(controller.presence.map((presence) => [presence.memberKey, presence])).values()),
@@ -75,6 +87,84 @@ export function IssueCollaborationPanel({
   )
   const visiblePresence = uniquePresence.filter((presence) => presence.memberKey !== currentMemberKey)
   const canCreateComment = controller.capabilities.canComment && !readOnlyMessage
+  const focusComments = controller.comments
+  const focusHasLoadError = controller.hasLoadError
+  const focusHasMore = controller.hasMore
+  const focusIsLoading = controller.isLoading
+  const focusIsLoadingMore = controller.isLoadingMore
+  const focusLoadMore = controller.loadMore
+  const focusLoadMoreReplies = controller.loadMoreReplies
+  const focusReplyPagination = controller.replyPagination
+
+  useEffect(() => {
+    if (!focusedCommentId) {
+      focusLoadRequestRef.current = undefined
+      focusedCommentTargetRef.current = undefined
+      return
+    }
+
+    if (
+      focusedCommentTargetRef.current === focusedCommentId ||
+      focusIsLoading ||
+      focusHasLoadError
+    ) {
+      return
+    }
+
+    const target = document.getElementById(createCommentAnchorId(focusedCommentId))
+
+    if (!target) {
+      const rootLoaded = focusedRootCommentId
+        ? focusComments.some((comment) => comment.id === focusedRootCommentId)
+        : false
+      const replyPagination = focusedRootCommentId
+        ? focusReplyPagination[focusedRootCommentId]
+        : undefined
+
+      if (
+        focusedRootCommentId &&
+        rootLoaded &&
+        replyPagination?.hasMore &&
+        !replyPagination.isLoading
+      ) {
+        const requestKey = `reply:${focusedCommentId}:${focusedRootCommentId}:${focusComments.length}`
+
+        if (focusLoadRequestRef.current !== requestKey) {
+          focusLoadRequestRef.current = requestKey
+          void focusLoadMoreReplies(focusedRootCommentId)
+        }
+      } else if (!rootLoaded && focusHasMore && !focusIsLoadingMore) {
+        const requestKey = `root:${focusedCommentId}:${focusComments.length}`
+
+        if (focusLoadRequestRef.current !== requestKey) {
+          focusLoadRequestRef.current = requestKey
+          void focusLoadMore()
+        }
+      }
+
+      return
+    }
+
+    focusLoadRequestRef.current = undefined
+    const frameId = window.requestAnimationFrame(() => {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      target.focus({ preventScroll: true })
+      focusedCommentTargetRef.current = focusedCommentId
+    })
+
+    return () => window.cancelAnimationFrame(frameId)
+  }, [
+    focusComments,
+    focusHasLoadError,
+    focusHasMore,
+    focusIsLoading,
+    focusIsLoadingMore,
+    focusLoadMore,
+    focusLoadMoreReplies,
+    focusReplyPagination,
+    focusedCommentId,
+    focusedRootCommentId,
+  ])
 
   return (
     <section
@@ -237,6 +327,7 @@ export function IssueCollaborationPanel({
                 controller={controller}
                 deleteConfirmationId={deleteConfirmationId}
                 editingId={editingId}
+                focused={focusedCommentId === thread.root.id}
                 locale={locale}
                 members={members}
                 onDeleteConfirmationChange={setDeleteConfirmationId}
@@ -257,6 +348,7 @@ export function IssueCollaborationPanel({
                       controller={controller}
                       deleteConfirmationId={deleteConfirmationId}
                       editingId={editingId}
+                      focused={focusedCommentId === reply.id}
                       isReply
                       key={reply.id}
                       locale={locale}
@@ -409,6 +501,10 @@ type CommentCardProps = {
    */
   editingId?: string
   /**
+   * notification deep link の focus 対象かどうかです。
+   */
+  focused?: boolean
+  /**
    * reply composer を開いている comment ID です。
    */
   replyingToId?: string
@@ -448,6 +544,7 @@ function CommentCard({
   controller,
   deleteConfirmationId,
   editingId,
+  focused = false,
   isReply = false,
   locale,
   members,
@@ -477,7 +574,14 @@ function CommentCard({
   const bodyMarkdown = resolveCommentBody(comment)
 
   return (
-    <div className={`min-w-0 p-3 ${isReply ? 'border-t border-[var(--workbench-border)] first:border-t-0' : ''}`}>
+    <div
+      className={`min-w-0 p-3 outline-none transition ${
+        isReply ? 'border-t border-[var(--workbench-border)] first:border-t-0' : ''
+      } ${focused ? 'bg-[#e5f7f4] ring-2 ring-inset ring-[#72c9bf]' : ''}`}
+      data-focused={focused || undefined}
+      id={createCommentAnchorId(comment.id)}
+      tabIndex={-1}
+    >
       <div className="flex min-w-0 items-start gap-2.5">
         <MemberAvatar memberKey={authorMemberKey} members={members} />
         <div className="min-w-0 flex-1">
@@ -1196,6 +1300,10 @@ function createCommentThreads(comments: TeamIssueComment[]) {
       .filter((comment) => comment.parentCommentId && (comment.rootCommentId ?? comment.parentCommentId) === root.id)
       .sort((first, second) => first.createdAt.localeCompare(second.createdAt)),
   })) satisfies CommentThread[]
+}
+
+function createCommentAnchorId(commentId: string) {
+  return `comment-${encodeURIComponent(commentId)}`
 }
 
 function resolveCommentAuthorKey(comment: TeamIssueComment) {

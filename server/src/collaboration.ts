@@ -151,6 +151,8 @@ export type WorkItemCollaborationScope = {
   teamId: string
   /** Issue ID です。 */
   issueId: string
+  /** Notification の件名に使う Work Item title です。 */
+  workItemTitle?: string
   /** Work Item の collaboration entity key です。 */
   entityKey: string
   /** Assigned project ID です。 */
@@ -177,6 +179,14 @@ export type GetCollaborationThreadInput = {
   projectEntityKey?: string
   /** Watcher/presence を同時に返すかどうかです。内部 preview 取得では false にします。 */
   includeScopeState?: boolean
+}
+
+/** Search projection の再検証に使う comment snapshot 読み込み入力です。 */
+export type GetCollaborationCommentSnapshotInput = {
+  /** Work Item の collaboration entity key です。 */
+  entityKey: string
+  /** 読み込む Comment ID です。 */
+  commentId: string
 }
 
 /** Comment 作成入力です。 */
@@ -324,7 +334,11 @@ export interface CollaborationClient {
   /** Root comments または replies を page 取得します。 */
   getThread(input: GetCollaborationThreadInput): Promise<CollaborationThreadPage>
   /** File 添付先として保存済み・未削除の comment が存在するか確認します。 */
-  hasAttachableComment?(entityKey: string, commentId: string): Promise<boolean>
+  hasAttachableComment(entityKey: string, commentId: string): Promise<boolean>
+  /** Comment の current snapshot を consistent read します。 */
+  getCommentSnapshot(
+    input: GetCollaborationCommentSnapshotInput,
+  ): Promise<CollaborationComment | undefined>
   /** Root comment または reply を作成します。 */
   createComment(input: CreateCollaborationCommentInput): Promise<CollaborationComment>
   /** Comment 本文と mention を version 条件付きで更新します。 */
@@ -549,12 +563,17 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
 
   /** File 添付先として保存済み・未削除の comment が存在するか確認します。 */
   async hasAttachableComment(entityKey: string, commentId: string) {
-    await this.ensureLocalTable()
-    const comment = await this.getStoredComment(
-      requireIdentifier(entityKey, 'Collaboration entity key'),
-      requireIdentifier(commentId, 'Comment ID'),
-    )
+    const comment = await this.getCommentSnapshot({ entityKey, commentId })
     return Boolean(comment && !comment.deletedAt)
+  }
+
+  /** Comment の current snapshot を consistent read します。 */
+  async getCommentSnapshot(input: GetCollaborationCommentSnapshotInput) {
+    await this.ensureLocalTable()
+    return this.getStoredComment(
+      requireIdentifier(input.entityKey, 'Collaboration entity key'),
+      requireIdentifier(input.commentId, 'Comment ID'),
+    )
   }
 
   /** Root comment または reply を作成します。 */
@@ -615,7 +634,13 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       action: parent ? 'replied' : 'created',
       occurredAt,
       changes: createAuditFieldChanges(undefined, { body: bodyMarkdown }, ['body'], ['body']),
-      metadata: createAuditMetadata(input, actorMemberKey, commentId, notificationCandidates),
+      metadata: createAuditMetadata(
+        input,
+        actorMemberKey,
+        commentId,
+        notificationCandidates,
+        rootCommentId,
+      ),
     })
     const items: NonNullable<TransactWriteCommandInput['TransactItems']> = [
       parentIssueCondition(this.parentIssueTableName, input),
@@ -1016,7 +1041,13 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       target: { type: 'comment', id: `${workItemEntityId(input.teamId, input.issueId)}/comment/${input.commentId}` },
       action: adding ? 'added' : 'removed',
       occurredAt,
-      metadata: createAuditMetadata(input, actorMemberKey, input.commentId, []),
+      metadata: createAuditMetadata(
+        input,
+        actorMemberKey,
+        input.commentId,
+        [],
+        comment.rootCommentId,
+      ),
     })
     const reactionMutation = adding
       ? {
@@ -1089,7 +1120,13 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       action,
       occurredAt: after.updatedAt,
       changes,
-      metadata: createAuditMetadata(input, input.actorMemberKey, before.id, notificationCandidates),
+      metadata: createAuditMetadata(
+        input,
+        input.actorMemberKey,
+        before.id,
+        notificationCandidates,
+        before.rootCommentId,
+      ),
     })
 
     try {
@@ -1523,16 +1560,39 @@ function createAuditMetadata(
   actorMemberKey: string,
   commentId: string,
   notificationCandidates: CollaborationNotificationCandidate[],
+  rootCommentId?: string,
 ) {
   return {
     actorMemberKey: normalizeMemberKey(actorMemberKey),
     commentId,
+    rootCommentId,
     teamId: input.teamId,
     issueId: input.issueId,
     projectId: input.projectId,
-    deepLink: input.deepLink,
+    notificationTitle: input.workItemTitle,
+    deepLink: appendCommentDeepLink(input.deepLink, commentId, rootCommentId),
     notificationCandidates,
   }
+}
+
+function appendCommentDeepLink(
+  deepLink: string | undefined,
+  commentId: string,
+  rootCommentId: string | undefined,
+) {
+  if (!deepLink) {
+    return undefined
+  }
+
+  const [pathAndQuery, fragment] = deepLink.split('#', 2)
+  const separator = pathAndQuery.includes('?') ? '&' : '?'
+  const search = new URLSearchParams({
+    commentId,
+    ...(rootCommentId ? { rootCommentId } : {}),
+  })
+  const focusedPath = `${pathAndQuery}${separator}${search.toString()}`
+
+  return fragment ? `${focusedPath}#${fragment}` : focusedPath
 }
 
 function dedupeNotificationCandidates(

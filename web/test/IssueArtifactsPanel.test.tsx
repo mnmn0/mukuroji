@@ -74,9 +74,20 @@ describe('IssueArtifactsPanel', () => {
       />,
     )
 
-    expect(html).toContain('disabled=""')
-    expect(html).toContain('Scanning')
-    expect(html).toContain('Blocked')
+    for (const [fileId, status] of [
+      [scanningPdfFileFixture.id, 'Scanning'],
+      [blockedVideoFileFixture.id, 'Blocked'],
+    ] as const) {
+      const rowStart = html.indexOf(`data-testid="file-row-${fileId}"`)
+      const rowEnd = html.indexOf('</article>', rowStart)
+      const rowHtml = html.slice(rowStart, rowEnd)
+
+      expect(rowStart).toBeGreaterThanOrEqual(0)
+      expect(rowEnd).toBeGreaterThan(rowStart)
+      expect(rowHtml).toContain(status)
+      expect(rowHtml).toMatch(/<button[^>]*disabled=""[^>]*>Preview<\/button>/)
+      expect(rowHtml).toMatch(/<button[^>]*disabled=""[^>]*>Download<\/button>/)
+    }
   })
 
   test('opens and downloads a clean older version while the latest version is blocked', () => {

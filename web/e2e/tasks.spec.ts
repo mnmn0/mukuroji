@@ -4,6 +4,7 @@ import { WORK_ITEM_SCHEMA_VERSION } from '@mukuroji/contracts'
 import type { ApprovalRequest, FileAnnotation, FileAttachment, FileVersion } from '@mukuroji/contracts'
 import { readFile } from 'node:fs/promises'
 import type { TeamIssue, TeamIssueActivity, TeamIssueComment } from '../src/issues/api'
+import type { InboxNotification, NotificationPreferences } from '../src/notifications/api'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import type { ProjectDirectoryTeam, ProjectMember, ProjectMemberRole, ProjectUser } from '../src/projects/api'
 import type { ProjectTask } from '../src/tasks/api'
@@ -18,6 +19,7 @@ const authSession = {
 }
 const workItemConflictMessage =
   '別のメンバーが先に更新しました。最新の内容を確認してから、もう一度保存してください。'
+const notificationFixtureNow = new Date('2026-07-12T12:00:00.000Z')
 
 /**
  * API stub が受けた request 数です。
@@ -35,6 +37,18 @@ type MockRequestCounts = {
    * Workspace 全体の Work Item 一覧 API request 数です。
    */
   workspaceWorkItems: number
+  /**
+   * 通知一覧 API の request 数です。
+   */
+  notificationReads: number
+  /**
+   * 通知状態 mutation API の request 数です。
+   */
+  notificationUpdates: number
+  /**
+   * 通知設定保存 API の request 数です。
+   */
+  notificationPreferenceUpdates: number
   /**
    * チーム作成 API の request 数です。
    */
@@ -133,6 +147,14 @@ type MockAuthenticatedTaskPageOptions = {
    * 初回更新を revision conflict にする `teamId\0issueId` key の一覧です。
    */
   revisionConflictIssueKeys?: readonly string[]
+  /**
+   * Notification API が初期状態として返す recipient 通知です。
+   */
+  notifications?: InboxNotification[]
+  /**
+   * Notification preferences API が初期状態として返す設定です。
+   */
+  notificationPreferences?: NotificationPreferences
 }
 
 /**
@@ -152,6 +174,9 @@ async function mockAuthenticatedTaskPage(
     projectDirectory: 0,
     projectTasks: {},
     workspaceWorkItems: 0,
+    notificationReads: 0,
+    notificationUpdates: 0,
+    notificationPreferenceUpdates: 0,
     teamCreates: 0,
     projectCreates: 0,
     teamArchives: 0,
@@ -184,6 +209,13 @@ async function mockAuthenticatedTaskPage(
   const pendingRevisionConflictIssueKeys = new Set(options.revisionConflictIssueKeys ?? [])
   const issueCommentsByIssue: Record<string, TeamIssueComment[]> = {}
   const issueActivityByIssue: Record<string, TeamIssueActivity[]> = {}
+  let notifications = (options.notifications ?? createDefaultNotifications()).map((notification) => ({
+    ...notification,
+    reasons: [...notification.reasons],
+  }))
+  let notificationPreferences = cloneNotificationPreferences(
+    options.notificationPreferences ?? createDefaultNotificationPreferences(),
+  )
   const projectMembersByProject: Record<string, ProjectMember[]> = {
     refero: [
       {
@@ -627,6 +659,143 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
+  await page.route('**/api/notifications/unread-count', async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    await route.fulfill({
+      json: {
+        unreadCount: countUnreadNotifications(notifications),
+      },
+    })
+  })
+
+  await page.route('**/api/notifications/mark-all-read', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.fallback()
+      return
+    }
+
+    requestCounts.notificationUpdates += 1
+    const updatedCount = countUnreadNotifications(notifications)
+    const readAt = new Date().toISOString()
+    notifications = notifications.map((notification) =>
+      notification.state === 'unread'
+        ? { ...notification, readAt, state: 'read' }
+        : notification,
+    )
+    await route.fulfill({
+      json: {
+        unreadCount: countUnreadNotifications(notifications),
+        updatedCount,
+      },
+    })
+  })
+
+  await page.route(/.*\/api\/notifications\/[^/?]+$/, async (route) => {
+    if (route.request().method() !== 'PATCH') {
+      await route.fallback()
+      return
+    }
+
+    requestCounts.notificationUpdates += 1
+    const notificationId = decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-1) ?? '')
+    const body = route.request().postDataJSON() as {
+      action?: 'archive' | 'mark-read' | 'mark-unread' | 'restore' | 'snooze'
+      snoozedUntil?: string
+    }
+    const notification = notifications.find((candidate) => candidate.id === notificationId)
+
+    if (!notification || !body.action) {
+      await route.fulfill({ status: 404, json: { message: 'Notification not found.' } })
+      return
+    }
+
+    const updatedStateFields = {
+      ...notification,
+      ...(body.action === 'mark-read' ? { readAt: new Date().toISOString() } : {}),
+      ...(body.action === 'mark-unread' ? { readAt: undefined } : {}),
+      ...(body.action === 'archive'
+        ? { archivedAt: new Date().toISOString(), snoozedUntil: undefined }
+        : {}),
+      ...(body.action === 'restore'
+        ? { archivedAt: undefined, snoozedUntil: undefined }
+        : {}),
+      ...(body.action === 'snooze'
+        ? { archivedAt: undefined, snoozedUntil: body.snoozedUntil }
+        : {}),
+    }
+    const updatedNotification: InboxNotification = {
+      ...updatedStateFields,
+      state: resolveMockNotificationState(updatedStateFields),
+    }
+    notifications = notifications.map((candidate) =>
+      candidate.id === notificationId ? updatedNotification : candidate,
+    )
+    await route.fulfill({ json: updatedNotification })
+  })
+
+  await page.route(/.*\/api\/notifications(?:\?.*)?$/, async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback()
+      return
+    }
+
+    requestCounts.notificationReads += 1
+    const url = new URL(route.request().url())
+    const filter = url.searchParams.get('filter') ?? 'all'
+    const eventType = url.searchParams.get('type')
+    const limit = Number.parseInt(url.searchParams.get('limit') ?? '30', 10)
+    const cursor = url.searchParams.get('cursor')
+    const offset = cursor?.startsWith('offset:')
+      ? Number.parseInt(cursor.slice('offset:'.length), 10)
+      : 0
+    const filteredNotifications = notifications.filter((notification) => {
+      if (eventType && notification.eventType !== eventType) {
+        return false
+      }
+
+      if (filter === 'archived') {
+        return notification.state === 'archived'
+      }
+      if (filter === 'snoozed') {
+        return notification.state === 'snoozed'
+      }
+      if (filter === 'unread') {
+        return notification.state === 'unread'
+      }
+      if (filter === 'read') {
+        return notification.state === 'read'
+      }
+
+      return notification.state === 'unread' || notification.state === 'read'
+    })
+    const pageNotifications = filteredNotifications.slice(offset, offset + limit)
+    const nextOffset = offset + pageNotifications.length
+
+    await route.fulfill({
+      json: {
+        notifications: pageNotifications,
+        ...(nextOffset < filteredNotifications.length ? { nextCursor: `offset:${nextOffset}` } : {}),
+        unreadCount: countUnreadNotifications(notifications),
+      },
+    })
+  })
+
+  await page.route('**/api/notification-preferences', async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    if (route.request().method() === 'PUT') {
+      requestCounts.notificationPreferenceUpdates += 1
+      const input = route.request().postDataJSON() as NotificationPreferences
+      notificationPreferences = {
+        ...cloneNotificationPreferences(input),
+        updatedAt: new Date().toISOString(),
+        version: notificationPreferences.version + 1,
+      }
+    }
+
+    await route.fulfill({ json: notificationPreferences })
+  })
+
   await page.route(/.*\/api\/teams\/[^/]+\/issues$/, async (route) => {
     const teamId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[3] ?? '')
     const projects = projectDirectory.find((team) => team.id === teamId)?.projects ?? []
@@ -805,6 +974,7 @@ async function mockAuthenticatedTaskPage(
   })
 
   await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/files$/, async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
     await route.fulfill({
       status: 200,
       json: {
@@ -816,6 +986,7 @@ async function mockAuthenticatedTaskPage(
   })
 
   await page.route(/.*\/api\/teams\/[^/]+\/projects\/[^/]+\/files$/, async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
     await route.fulfill({
       status: 200,
       json: {
@@ -1100,6 +1271,108 @@ async function mockAuthenticatedTaskPage(
       },
     })
   })
+}
+
+function createDefaultNotifications(): InboxNotification[] {
+  return [
+    {
+      actorLabel: '佐藤 花子',
+      commentId: 'comment-1',
+      eventType: 'comment.mentioned',
+      id: 'notification-wireframe',
+      issueId: 'wireframe',
+      occurredAt: '2026-07-12T03:20:00.000Z',
+      projectId: 'refero',
+      reasons: ['mention'],
+      summary: 'コメントであなたに確認を依頼しました。',
+      teamId: 'core-team',
+      title: 'ワイヤーフレームを作成',
+      state: 'unread',
+    },
+    {
+      actorLabel: 'Demo User',
+      eventType: 'work-item.updated',
+      id: 'notification-brand-guideline',
+      issueId: 'brand-guideline',
+      occurredAt: '2026-07-11T05:00:00.000Z',
+      projectId: 'refero',
+      readAt: '2026-07-11T05:05:00.000Z',
+      reasons: ['watcher'],
+      summary: '状態がレビュー待ちに更新されました。',
+      teamId: 'core-team',
+      title: 'ブランドガイドラインを整理',
+      state: 'read',
+    },
+    {
+      archivedAt: '2026-07-10T02:00:00.000Z',
+      eventType: 'comment.created',
+      id: 'notification-archived-unread',
+      occurredAt: '2026-07-10T02:00:00.000Z',
+      reasons: ['watcher'],
+      state: 'archived',
+      title: 'アーカイブ済みの未読通知',
+    },
+    {
+      eventType: 'comment.created',
+      id: 'notification-snoozed-unread',
+      occurredAt: '2026-07-10T01:00:00.000Z',
+      reasons: ['watcher'],
+      snoozedUntil: '2099-07-12T09:00:00.000Z',
+      state: 'snoozed',
+      title: 'スヌーズ中の未読通知',
+    },
+  ]
+}
+
+function createDefaultNotificationPreferences(): NotificationPreferences {
+  return {
+    channels: {
+      email: true,
+      inApp: true,
+      push: false,
+    },
+    frequency: 'instant',
+    quietHours: {
+      enabled: true,
+      end: '08:00',
+      start: '22:00',
+      timeZone: 'Asia/Tokyo',
+    },
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    version: 2,
+  }
+}
+
+function cloneNotificationPreferences(
+  preferences: NotificationPreferences,
+): NotificationPreferences {
+  return {
+    ...preferences,
+    channels: { ...preferences.channels },
+    quietHours: { ...preferences.quietHours },
+  }
+}
+
+function countUnreadNotifications(notifications: InboxNotification[]) {
+  return notifications.filter((notification) => notification.state === 'unread').length
+}
+
+function resolveMockNotificationState(
+  notification: Pick<
+    InboxNotification,
+    'archivedAt' | 'readAt' | 'snoozedUntil'
+  >,
+): InboxNotification['state'] {
+  if (notification.archivedAt) {
+    return 'archived'
+  }
+  if (
+    notification.snoozedUntil &&
+    new Date(notification.snoozedUntil).getTime() > notificationFixtureNow.getTime()
+  ) {
+    return 'snoozed'
+  }
+  return notification.readAt ? 'read' : 'unread'
 }
 
 function getMockRequestCounts(page: Page) {
@@ -1437,6 +1710,42 @@ async function expectTaskSplitPaneLayoutToStayInsideColumns(page: Page) {
 test.describe('authenticated task page', () => {
   test.beforeEach(async ({ page }) => {
     await mockAuthenticatedTaskPage(page)
+  })
+
+  test('command menuのquick createは同じ画面から繰り返し作成フォームを開く', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team')
+
+    const searchTrigger = page.getByTestId('sidebar-search-trigger')
+    await expect(searchTrigger).toBeVisible()
+    await searchTrigger.focus()
+    await page.keyboard.press('ControlOrMeta+K')
+    await expect(page.getByRole('dialog', { name: 'Workspace command menu' }).getByRole('combobox')).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect(searchTrigger).toBeFocused()
+
+    const openQuickCreate = async () => {
+      await expect(page.getByTestId('sidebar-search-trigger')).toBeVisible()
+      await page.keyboard.press('ControlOrMeta+K')
+      const commandMenu = page.getByRole('dialog', { name: 'Workspace command menu' })
+      await expect(commandMenu.getByRole('combobox')).toBeFocused()
+      await commandMenu.getByRole('option', { name: /この一覧で Work Item を作成/ }).click()
+    }
+
+    await openQuickCreate()
+    const createTaskForm = page.getByTestId('create-task-form')
+    await expect(createTaskForm).toBeVisible()
+    await expect(page).not.toHaveURL(/(?:\?|&)create=1(?:&|$)/)
+
+    await createTaskForm.getByRole('button', { name: 'キャンセル' }).click()
+    await expect(createTaskForm).toHaveCount(0)
+
+    await openQuickCreate()
+    await expect(createTaskForm).toBeVisible()
+
+    await page.goto('/teams/core-team/issues')
+    await openQuickCreate()
+    await expect(page.getByTestId('create-issue-form')).toBeVisible()
+    await expect(page).not.toHaveURL(/(?:\?|&)create=1(?:&|$)/)
   })
 
   test('タスク画面で検索、ステータス絞り込み、行選択が動作する', async ({ page }) => {
@@ -1863,6 +2172,24 @@ test.describe('authenticated task page', () => {
     const approvals: ApprovalRequest[] = []
     const annotations: FileAnnotation[] = []
     let objectPutCount = 0
+    let startAnnotationSave: (() => void) | undefined
+    let releaseAnnotationSave: (() => void) | undefined
+    const annotationSaveStarted = new Promise<void>((resolve) => {
+      startAnnotationSave = resolve
+    })
+    const annotationSaveHold = new Promise<void>((resolve) => {
+      releaseAnnotationSave = resolve
+    })
+    let startPreviewAccess: (() => void) | undefined
+    let releasePreviewAccess: (() => void) | undefined
+    const previewAccessStarted = new Promise<void>((resolve) => {
+      startPreviewAccess = resolve
+    })
+    const previewAccessHold = new Promise<void>((resolve) => {
+      releasePreviewAccess = resolve
+    })
+    let previewAccessRequestCount = 0
+    let workItemUploadSessionCount = 0
     const version: FileVersion = {
       contentType: 'image/png',
       createdAt: '2026-07-12T03:00:00.000Z',
@@ -1873,6 +2200,14 @@ test.describe('authenticated task page', () => {
       previewKind: 'image',
       scanStatus: 'pending',
       sizeBytes: 5,
+    }
+    const blockedVersion: FileVersion = {
+      ...version,
+      createdAt: '2026-07-12T03:05:00.000Z',
+      fileName: 'proof-blocked.png',
+      id: 'version-proof-blocked',
+      number: 2,
+      scanStatus: 'blocked',
     }
     const file: FileAttachment = {
       capabilities: {
@@ -1891,6 +2226,19 @@ test.describe('authenticated task page', () => {
       updatedAt: '2026-07-12T03:00:00.000Z',
       versionCount: 1,
       versions: [version],
+    }
+    const failedUploadVersion: FileVersion = {
+      ...version,
+      fileName: 'later-failure.png',
+      id: 'version-upload-failure',
+      scanStatus: 'pending',
+    }
+    const failedUploadFile: FileAttachment = {
+      ...file,
+      currentVersion: failedUploadVersion,
+      id: 'file-upload-failure',
+      name: failedUploadVersion.fileName,
+      versions: [failedUploadVersion],
     }
     const commentVersion: FileVersion = {
       ...version,
@@ -1922,6 +2270,26 @@ test.describe('authenticated task page', () => {
       })
     })
     await page.route('**/api/teams/core-team/issues/proofing-issue/files/uploads', async (route) => {
+      workItemUploadSessionCount += 1
+      if (workItemUploadSessionCount > 1) {
+        files.push(failedUploadFile)
+        await route.fulfill({
+          status: 200,
+          json: {
+            file: failedUploadFile,
+            upload: {
+              expiresAt: '2026-07-12T04:00:00.000Z',
+              headers: { 'Content-Type': 'image/png' },
+              maxSizeBytes: 1_000,
+              method: 'PUT',
+              url: '/mock-object/failed-upload',
+            },
+            version: failedUploadVersion,
+          },
+        })
+        return
+      }
+
       await route.fulfill({
         status: 200,
         json: {
@@ -1942,6 +2310,10 @@ test.describe('authenticated task page', () => {
       expect(route.request().headers()).not.toHaveProperty('authorization')
       objectPutCount += 1
       await route.fulfill({ status: 200, body: '' })
+    })
+    await page.route('**/mock-object/failed-upload', async (route) => {
+      expect(route.request().method()).toBe('PUT')
+      await route.fulfill({ status: 500, body: 'Object upload failed.' })
     })
     await page.route(
       '**/api/teams/core-team/issues/proofing-issue/comments/comment-1/files/uploads',
@@ -1974,7 +2346,8 @@ test.describe('authenticated task page', () => {
       async (route) => {
         const availableVersion = { ...version, scanStatus: 'available' as const }
         file.currentVersion = availableVersion
-        file.versions = [availableVersion]
+        file.versionCount = 2
+        file.versions = [availableVersion, blockedVersion]
         if (!files.some((candidate) => candidate.id === file.id)) {
           files.push(file)
         }
@@ -1996,6 +2369,11 @@ test.describe('authenticated task page', () => {
     await page.route(
       /.*\/api\/teams\/core-team\/issues\/proofing-issue\/files\/file-proof-1\/versions\/version-proof-1\/access\?.*/,
       async (route) => {
+        previewAccessRequestCount += 1
+        if (previewAccessRequestCount === 1) {
+          startPreviewAccess?.()
+          await previewAccessHold
+        }
         await route.fulfill({
           status: 200,
           json: { expiresAt: '2026-07-12T04:00:00.000Z', url: '/mock-preview/proof.svg' },
@@ -2013,6 +2391,13 @@ test.describe('authenticated task page', () => {
       '**/api/teams/core-team/issues/proofing-issue/files/file-proof-1/versions/version-proof-1/annotations',
       async (route) => {
         if (route.request().method() === 'POST') {
+          if (annotations.length > 0) {
+            await route.fulfill({ status: 500, json: { message: 'Annotation save failed.' } })
+            return
+          }
+
+          startAnnotationSave?.()
+          await annotationSaveHold
           const body = route.request().postDataJSON() as {
             anchor: FileAnnotation['anchor']
             bodyMarkdown: string
@@ -2069,6 +2454,14 @@ test.describe('authenticated task page', () => {
           return
         }
 
+        const body = route.request().postDataJSON() as {
+          decision?: string
+          expectedRevision?: number
+        }
+
+        expect(body.decision).toBe('approve')
+        expect(body.expectedRevision).toBe(current.revision)
+
         approvals[approvalIndex] = {
           ...current,
           completedAt: '2026-07-12T03:30:00.000Z',
@@ -2109,14 +2502,22 @@ test.describe('authenticated task page', () => {
     )
 
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=proofing-issue')
-    await page.getByTestId('file-upload-input').setInputFiles({
-      buffer: Buffer.from('proof'),
-      mimeType: 'image/png',
-      name: 'proof.png',
-    })
+    await page.getByTestId('file-upload-input').setInputFiles([
+      {
+        buffer: Buffer.from('proof'),
+        mimeType: 'image/png',
+        name: 'proof.png',
+      },
+      {
+        buffer: Buffer.from('later failure'),
+        mimeType: 'image/png',
+        name: 'later-failure.png',
+      },
+    ])
 
     await expect.poll(() => objectPutCount).toBe(1)
     await expect(page.getByTestId('file-row-file-proof-1')).toContainText('利用可能')
+    await expect(page.getByTestId('file-row-file-upload-failure')).toContainText('later-failure.png')
     await page.getByTestId('comment-files-comment-1').getByLabel('Guest 閲覧を許可').check()
     await page.getByTestId('comment-file-input-comment-1').setInputFiles({
       buffer: Buffer.from('comment proof'),
@@ -2127,16 +2528,48 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('comment-files-comment-1')).toContainText('comment-proof.png')
     await page.getByTestId('file-row-file-proof-1').getByRole('button', { name: 'プレビュー' }).click()
     await expect(page.getByTestId('file-preview-dialog')).toBeVisible()
+    await previewAccessStarted
+    await page.locator('#file-preview-version').selectOption(blockedVersion.id)
+    await expect(page.getByTestId('file-preview-dialog')).toContainText('ブロック済み')
+    releasePreviewAccess?.()
+    await page.locator('#file-preview-version').selectOption(version.id)
+    await expect(page.getByTestId('file-preview-canvas')).toBeVisible()
     await page.getByRole('button', { name: '位置を指定' }).click()
     await page.getByTestId('file-preview-canvas').click({ position: { x: 180, y: 120 } })
     await page.getByLabel('レビューコメント').fill('CTA の位置を確認してください。')
     await page.getByRole('button', { name: 'Annotation を追加' }).click()
+    await annotationSaveStarted
+    await expect(page.locator('#file-preview-version')).toBeDisabled()
+    await expect(page.getByRole('button', { name: '位置指定中' })).toBeDisabled()
+    await expect(page.getByLabel('レビューコメント')).toBeDisabled()
+    releaseAnnotationSave?.()
     await expect(page.getByTestId('file-preview-dialog')).toContainText('CTA の位置を確認してください。')
+    await expect(page.locator('#file-preview-version')).toBeEnabled()
+
+    await page.getByRole('button', { name: '位置を指定' }).click()
+    await page.getByTestId('file-preview-canvas').click({ position: { x: 240, y: 160 } })
+    await page.getByLabel('レビューコメント').fill('保存失敗を表示します。')
+    await page.getByRole('button', { name: 'Annotation を追加' }).click()
+    await expect(page.getByTestId('file-preview-dialog').getByRole('alert')).toContainText(
+      'ファイル操作を完了できませんでした。',
+    )
+    await expect(page.locator('#file-preview-version')).toBeEnabled()
     await page.getByRole('button', { name: 'Preview を閉じる' }).click()
 
     await page.getByRole('button', { name: '承認を依頼' }).click()
     await page.getByTestId('approval-request-form').getByText('Demo User').click()
-    await page.getByTestId('approval-request-form').locator('input[name="dueAt"]').fill('2099-12-31')
+    const firstDueAtInput = page.getByTestId('approval-request-form').locator('input[name="dueAt"]')
+    const localToday = await page.evaluate(() => {
+      const today = new Date()
+      const year = today.getFullYear()
+      const month = String(today.getMonth() + 1).padStart(2, '0')
+      const day = String(today.getDate()).padStart(2, '0')
+
+      return `${year}-${month}-${day}`
+    })
+
+    await expect(firstDueAtInput).toHaveAttribute('min', localToday)
+    await firstDueAtInput.fill('2099-12-31')
     await page.getByRole('button', { name: 'Request を作成' }).click()
     await expect(page.getByTestId('approval-approval-proof-1')).toBeVisible()
     await page.getByTestId('approval-approval-proof-1').getByRole('button', { name: 'Request をキャンセル' }).click()
@@ -2147,7 +2580,10 @@ test.describe('authenticated task page', () => {
     await page.getByTestId('approval-request-form').locator('input[name="dueAt"]').fill('2099-12-31')
     await page.getByRole('button', { name: 'Request を作成' }).click()
     await expect(page.getByTestId('approval-approval-proof-2')).toBeVisible()
-    await page.getByTestId('approval-approval-proof-2').getByRole('button', { name: '承認' }).click()
+    const secondApproval = page.getByTestId('approval-approval-proof-2')
+
+    await expect(secondApproval.locator('textarea')).toHaveAttribute('maxlength', '2000')
+    await secondApproval.getByRole('button', { name: '承認' }).click()
     await expect(page.getByTestId('approval-approval-proof-2')).toContainText('承認済み')
   })
 
@@ -2497,7 +2933,7 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-detail-pane').locator('textarea[name="description"]')).toHaveValue('core team detail')
   })
 
-  test('未割り当て Work Item を My Tasks カードと受信箱の行から Team 詳細へ開ける', async ({ page }) => {
+  test('未割り当て Work Item を My Tasks と通知 Inbox から Team 詳細へ開ける', async ({ page }) => {
     const issueId = 'unassigned-work-item'
     const issueDescription = '未割り当て Work Item の詳細です。'
 
@@ -2517,6 +2953,19 @@ test.describe('authenticated task page', () => {
           }),
         ],
       },
+      notifications: [
+        {
+          eventType: 'work-item.assigned',
+          id: 'notification-unassigned-work-item',
+          issueId,
+          occurredAt: '2026-07-12T02:00:00.000Z',
+          reasons: ['assignee'],
+          state: 'unread',
+          summary: 'この Work Item の担当者に設定されました。',
+          teamId: 'core-team',
+          title: '未割り当て Work Item',
+        },
+      ],
     })
 
     await page.goto('/my-tasks')
@@ -2535,10 +2984,10 @@ test.describe('authenticated task page', () => {
     await expect(page.locator('aside textarea[name="description"]')).toHaveValue(issueDescription)
 
     await page.goto('/inbox')
-    const inboxRow = page.getByTestId(`inbox-task-core-team-unassigned-${issueId}`)
+    const inboxRow = page.getByTestId('notification-row-notification-unassigned-work-item')
 
-    await expect(inboxRow).toBeEnabled()
-    await inboxRow.click()
+    await expect(inboxRow).toBeVisible()
+    await inboxRow.getByRole('button').first().click()
     await expect(page).toHaveURL(`/teams/core-team/issues?issueId=${issueId}`)
     await expect(page.locator('aside textarea[name="description"]')).toHaveValue(issueDescription)
   })
@@ -2606,26 +3055,153 @@ test.describe('authenticated task page', () => {
     await expect(page).toHaveURL(/\/projects\/product-roadmap\/issues\?teamId=core-team$/)
   })
 
-  test('受信箱で実タスクを要確認理由と検索語から絞り込める', async ({ page }) => {
+  test('通知 Inbox で既読・archive・snooze を永続化し実未読件数へ反映する', async ({ page }) => {
+    await page.clock.setFixedTime(notificationFixtureNow)
+    const requestCounts = getMockRequestCounts(page)
+
     await page.goto('/inbox')
 
-    await expect(page.getByTestId('inbox-workbench')).toBeVisible()
-    await expect(page.getByTestId('inbox-task-core-team-refero-wireframe')).toBeVisible()
-    await expect(page.getByTestId('inbox-task-core-team-refero-brand-guideline')).toBeVisible()
+    await expect(page.getByTestId('notification-inbox')).toBeVisible()
+    const wireframeNotification = page.getByTestId('notification-row-notification-wireframe')
+    const brandNotification = page.getByTestId('notification-row-notification-brand-guideline')
 
-    await page.getByTestId('inbox-filter-review').click()
+    await expect(wireframeNotification).toBeVisible()
+    await expect(brandNotification).toBeVisible()
+    await expect(page.getByLabel('1件の未読')).toBeVisible()
+    await expect(page.getByRole('heading', { name: '今日', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '昨日', exact: true })).toBeVisible()
 
-    await expect(page.getByTestId('inbox-filter-review')).toHaveAttribute('aria-pressed', 'true')
-    await expect(page.getByTestId('inbox-task-core-team-refero-brand-guideline')).toBeVisible()
-    await expect(page.getByTestId('inbox-task-core-team-refero-wireframe')).toHaveCount(0)
+    await page.getByTestId('notification-type-filter').selectOption('work-item.updated')
+    await expect(brandNotification).toBeVisible()
+    await expect(wireframeNotification).toHaveCount(0)
+    await page.getByTestId('notification-type-filter').selectOption('')
 
-    await page.getByTestId('inbox-search').fill('存在しないタスク')
-    await expect(page.getByText('条件に合う対応事項はありません', { exact: true })).toBeVisible()
+    await page.getByTestId('notification-filter-unread').click()
+    await expect(wireframeNotification).toBeVisible()
+    await expect(brandNotification).toHaveCount(0)
+    await wireframeNotification.getByRole('button', { name: '既読にする' }).click()
+    await expect(wireframeNotification).toHaveCount(0)
+    await expect(page.getByTestId('notification-mark-all-read')).toBeDisabled()
 
-    await page.getByTestId('inbox-search').clear()
-    await page.getByTestId('inbox-filter-high').click()
-    await expect(page.getByTestId('inbox-task-core-team-refero-wireframe')).toBeVisible()
-    await expect(page.getByTestId('inbox-task-core-team-refero-brand-guideline')).toHaveCount(0)
+    await page.getByTestId('notification-filter-read').click()
+    await expect(wireframeNotification).toBeVisible()
+    await expect(brandNotification).toBeVisible()
+
+    await page.getByTestId('notification-filter-all').click()
+    await brandNotification.getByRole('button', { name: 'アーカイブ' }).click()
+    await expect(brandNotification).toHaveCount(0)
+    await page.getByTestId('notification-filter-archived').click()
+    await expect(brandNotification).toBeVisible()
+    const archivedUnreadNotification = page.getByTestId(
+      'notification-row-notification-archived-unread',
+    )
+    await expect(archivedUnreadNotification).toBeVisible()
+    await expect(archivedUnreadNotification.getByLabel('未読')).toHaveCount(0)
+    await expect(
+      archivedUnreadNotification.getByRole('button', { name: '既読にする' }),
+    ).toBeVisible()
+
+    await page.reload()
+    await page.getByTestId('notification-filter-archived').click()
+    await expect(brandNotification).toBeVisible()
+    await brandNotification.getByRole('button', { name: '戻す', exact: true }).click()
+
+    await page.getByTestId('notification-filter-all').click()
+    await page.getByTestId('notification-snooze-notification-wireframe').selectOption('one-hour')
+    await expect(wireframeNotification).toHaveCount(0)
+    await page.getByTestId('notification-filter-snoozed').click()
+    await expect(wireframeNotification).toBeVisible()
+    const snoozedUnreadNotification = page.getByTestId(
+      'notification-row-notification-snoozed-unread',
+    )
+    await expect(snoozedUnreadNotification).toBeVisible()
+    await expect(snoozedUnreadNotification.getByLabel('未読')).toHaveCount(0)
+    await expect.poll(() => requestCounts.notificationUpdates).toBeGreaterThanOrEqual(4)
+  })
+
+  test('コメント通知から Work Item と対象コメントへ deep link できる', async ({ page }) => {
+    const issueId = 'notification-comment-target'
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            id: issueId,
+            status: 'in-progress',
+            title: '通知のコメント確認',
+          }),
+        ],
+      },
+      notifications: [
+        {
+          commentId: 'comment-1',
+          eventType: 'comment.mentioned',
+          id: 'notification-comment-deep-link',
+          issueId,
+          occurredAt: '2026-07-12T03:20:00.000Z',
+          projectId: 'refero',
+          reasons: ['mention'],
+          rootCommentId: 'comment-1',
+          state: 'unread',
+          summary: 'コメントであなたに確認を依頼しました。',
+          teamId: 'core-team',
+          title: '通知のコメント確認',
+        },
+      ],
+    })
+    await page.goto('/inbox')
+
+    const notification = page.getByTestId('notification-row-notification-comment-deep-link')
+
+    await notification.getByRole('button').first().click()
+    await expect(page).toHaveURL(
+      `/projects/refero/issues?teamId=core-team&issueId=${issueId}&commentId=comment-1&rootCommentId=comment-1`,
+    )
+    const focusedComment = page.locator('#comment-comment-1')
+
+    await expect(focusedComment).toHaveAttribute('data-focused', 'true')
+    await expect(focusedComment).toBeFocused()
+
+    const watchButton = page.getByRole('button', { name: /ウォッチ/ }).first()
+    const collaborationRefresh = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname.endsWith(`/teams/core-team/issues/${issueId}/collaboration`),
+    )
+
+    await watchButton.click()
+    await collaborationRefresh
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+    await expect(watchButton).toBeFocused()
+  })
+
+  test('通知 Inbox は opaque cursor の次 page を追記する', async ({ page }) => {
+    const notifications = Array.from({ length: 31 }, (_, index): InboxNotification => ({
+      eventType: index % 2 === 0 ? 'comment.created' : 'work-item.updated',
+      id: `pagination-${index + 1}`,
+      occurredAt: new Date(Date.UTC(2026, 6, 12, 2, 0, 0) - index * 60_000).toISOString(),
+      reasons: ['watcher'],
+      state: 'unread',
+      summary: `${index + 1}件目の通知`,
+      title: `Cursor notification ${index + 1}`,
+    }))
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, { notifications })
+    await page.goto('/inbox')
+
+    await expect(page.getByTestId('notification-row-pagination-30')).toBeVisible()
+    await expect(page.getByTestId('notification-row-pagination-31')).toHaveCount(0)
+    await page.getByTestId('notification-load-more').click()
+    await expect(page.getByTestId('notification-row-pagination-31')).toBeVisible()
+  })
+
+  test('Project と Team 画面のサイドバーも同じ実未読件数を表示する', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    await expect(page.getByLabel('1件の未読')).toBeVisible()
+
+    await page.goto('/teams/core-team/issues?issueId=wireframe')
+    await expect(page.getByLabel('1件の未読')).toBeVisible()
   })
 
   test('受信箱は同じ projectId と issueId を teamId で区別する', async ({ page }) => {
@@ -2653,22 +3229,41 @@ test.describe('authenticated task page', () => {
           }),
         ],
       },
+      notifications: [
+        {
+          eventType: 'work-item.updated',
+          id: 'notification-core-duplicate',
+          issueId: 'duplicate-issue',
+          occurredAt: '2026-07-12T03:00:00.000Z',
+          projectId: 'shared-launch',
+          reasons: ['watcher'],
+          state: 'unread',
+          teamId: 'core-team',
+          title: 'コアチームの重複 Issue',
+        },
+        {
+          eventType: 'work-item.updated',
+          id: 'notification-design-duplicate',
+          issueId: 'duplicate-issue',
+          occurredAt: '2026-07-12T02:00:00.000Z',
+          projectId: 'shared-launch',
+          reasons: ['watcher'],
+          state: 'unread',
+          teamId: 'design-team',
+          title: 'デザインチームの重複 Issue',
+        },
+      ],
     })
 
     await page.goto('/inbox')
 
-    const coreTeamRow = page.getByTestId('inbox-task-core-team-shared-launch-duplicate-issue')
-    const designTeamRow = page.getByTestId('inbox-task-design-team-shared-launch-duplicate-issue')
+    const coreTeamRow = page.getByTestId('notification-row-notification-core-duplicate')
+    const designTeamRow = page.getByTestId('notification-row-notification-design-duplicate')
 
     await expect(coreTeamRow).toBeVisible()
     await expect(designTeamRow).toBeVisible()
 
-    await page.getByTestId('inbox-filter-mine').click()
-    await expect(coreTeamRow).toBeVisible()
-    await expect(designTeamRow).toHaveCount(0)
-
-    await page.getByTestId('inbox-filter-all').click()
-    await designTeamRow.click()
+    await designTeamRow.getByRole('button').first().click()
     await expect(page).toHaveURL(
       '/projects/shared-launch/issues?teamId=design-team&issueId=duplicate-issue',
     )
@@ -2797,6 +3392,32 @@ test.describe('authenticated task page', () => {
     await page.getByRole('button', { name: 'マイタスク', exact: true }).click()
     await expect(page).toHaveURL('/my-tasks')
     await expect(page.getByTestId('my-tasks-kanban')).toBeVisible()
+  })
+
+  test('設定画面で通知 channel・frequency・quiet hours を保存できる', async ({ page }) => {
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.goto('/settings')
+    await expect(page.getByTestId('notification-settings')).toBeVisible()
+    await expect(page.getByTestId('notification-channel-inApp')).toBeChecked()
+    await expect(page.getByTestId('notification-channel-email')).toBeChecked()
+    await expect(page.getByTestId('notification-channel-push')).not.toBeChecked()
+
+    await page.getByTestId('notification-channel-push').check()
+    await page.getByTestId('notification-frequency').selectOption('daily')
+    await page.getByTestId('notification-quiet-hours-start').fill('21:30')
+    await page.getByTestId('notification-quiet-hours-end').fill('07:30')
+    await page.getByTestId('notification-time-zone').fill('Asia/Tokyo')
+    await page.getByTestId('notification-settings-save').click()
+
+    await expect.poll(() => requestCounts.notificationPreferenceUpdates).toBe(1)
+    await expect(page.getByText('通知設定を保存しました。')).toBeVisible()
+
+    await page.reload()
+    await expect(page.getByTestId('notification-channel-push')).toBeChecked()
+    await expect(page.getByTestId('notification-frequency')).toHaveValue('daily')
+    await expect(page.getByTestId('notification-quiet-hours-start')).toHaveValue('21:30')
+    await expect(page.getByTestId('notification-quiet-hours-end')).toHaveValue('07:30')
   })
 
   test('設定画面で Workspace member と invitation lifecycle を確認付きで管理できる', async ({ page }) => {

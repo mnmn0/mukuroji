@@ -5,8 +5,16 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import { createAuditEvent, createMutationAuditContext } from './audit'
 import { CollaborationError, type CollaborationClient } from './collaboration'
+import type { NotificationClient, NotificationItem } from './notifications'
+import {
+  createWorkspaceSearchDocument,
+  type WorkspaceSearchClient,
+  type WorkspaceSearchQueryInput,
+  type WorkspaceSearchResolvedScope,
+} from './workspace-search'
 import {
   FileProofingError,
+  type FileProofingActor,
   type FileProofingClient,
 } from './file-proofing'
 import {
@@ -138,28 +146,98 @@ test('does not issue file access URLs without authentication or a clean scan', a
   expect(accessCalls).toBe(1)
 })
 
-test('keeps guest file uploads read-only at the API authorization boundary', async () => {
-  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'guest' })
+test('keeps guest file uploads and management read-only at the API authorization boundary', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'guest' })
+  const actors: FileProofingActor[] = []
   configureApiClientsForTest({
     fileProofing: createFileProofingStub({
       async createUpload(_scope, actor) {
-        expect(actor).toMatchObject({ guest: true, canWrite: false })
+        actors.push(actor)
         throw new FileProofingError(403, 'FileWriteDenied', 'File write access is required.')
       },
     }),
   })
 
-  const response = await app.request('/api/teams/core-team/issues/issue-1/files/uploads', {
+  const responses = await Promise.all([
+    '/api/teams/core-team/issues/issue-1/files/uploads',
+    '/api/teams/core-team/projects/refero/files/uploads',
+  ].map((path) => app.request(path, {
     method: 'POST',
     headers: {
       Authorization: 'Bearer test-token',
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ contentType: 'image/png', fileName: 'guest.png', sizeBytes: 10 }),
+  })))
+
+  for (const response of responses) {
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ code: 'FileWriteDenied' })
+  }
+  expect(actors).toHaveLength(2)
+  for (const actor of actors) {
+    expect(actor).toMatchObject({ guest: true, canManage: false, canWrite: false })
+  }
+})
+
+test('keeps a downgraded guest uploader from deleting files through the API', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'guest' })
+  let receivedActor: FileProofingActor | undefined
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async deleteFile(_scope, actor) {
+        receivedActor = actor
+        throw new FileProofingError(
+          403,
+          'FileDeleteDenied',
+          'File manager or uploader access is required.',
+        )
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/files/file-created-before-downgrade',
+    {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer test-token' },
+    },
+  )
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'FileDeleteDenied' })
+  expect(receivedActor).toMatchObject({ guest: true, canManage: false, canWrite: false })
+})
+
+test('rejects a read-only approval requester before reviewer or file fan-out', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'guest' })
+  let fileListCalls = 0
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async list() {
+        fileListCalls += 1
+        throw new Error('File list must not be called for a read-only requester.')
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/approvals', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      dueAt: '2099-07-20T00:00:00.000Z',
+      fileId: 'file-1',
+      reviewerMemberKeys: ['reviewer@example.com'],
+      versionId: 'version-1',
+    }),
   })
 
   expect(response.status).toBe(403)
   expect(await response.json()).toMatchObject({ code: 'FileWriteDenied' })
+  expect(fileListCalls).toBe(0)
 })
 
 test('returns 400 for malformed file JSON before calling the domain client', async () => {
@@ -258,9 +336,11 @@ test('cancels a pending approval through the authenticated Work Item scope', asy
 test('rejects a comment attachment when the saved comment does not exist', async () => {
   configureFakeProjectClients(true, { role: 'member' })
   let uploadCalls = 0
+  const attachmentChecks: Array<{ entityKey: string; commentId: string }> = []
   configureApiClientsForTest({
     collaboration: createCollaborationStub({
-      async hasAttachableComment() {
+      async hasAttachableComment(entityKey, commentId) {
+        attachmentChecks.push({ entityKey, commentId })
         return false
       },
     }),
@@ -287,6 +367,10 @@ test('rejects a comment attachment when the saved comment does not exist', async
   expect(response.status).toBe(404)
   expect(await response.json()).toMatchObject({ code: 'CommentNotFound' })
   expect(uploadCalls).toBe(0)
+  expect(attachmentChecks).toEqual([{
+    entityKey: 'user#demo@example.com#work-item#team/core-team/issue/issue-1',
+    commentId: 'missing-comment',
+  }])
 })
 
 test('filters reviewer Inbox approvals after current project access is revoked', async () => {
@@ -320,6 +404,100 @@ test('filters reviewer Inbox approvals after current project access is revoked',
 
   expect(response.status).toBe(200)
   expect(await response.json()).toEqual({ approvals: [] })
+})
+
+test('continues reviewer Inbox pagination after filtering an unauthorized scope', async () => {
+  configureFakeProjectClients(true, { role: 'viewer' })
+  const cursors: Array<string | undefined> = []
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async listReviewerApprovals(_workspaceId, _actor, options) {
+        cursors.push(options?.cursor)
+        const commonApproval = {
+          revision: 1,
+          fileId: 'file-1',
+          versionId: 'version-1',
+          status: 'pending' as const,
+          reviewers: [{ memberKey: 'demo@example.com', status: 'pending' as const }],
+          dueAt: '2099-07-20T00:00:00.000Z',
+          requestedByMemberKey: 'manager@example.com',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+          capabilities: { canCancel: false, canDecide: true },
+        }
+
+        return options?.cursor
+          ? {
+              approvals: [{
+                ...commonApproval,
+                id: 'approval-visible',
+                teamId: 'core-team',
+                issueId: 'issue-visible',
+                projectId: 'refero',
+              }],
+            }
+          : {
+              approvals: [{
+                ...commonApproval,
+                id: 'approval-stale',
+                teamId: 'missing-team',
+                issueId: 'issue-stale',
+                projectId: 'refero',
+              }],
+              nextCursor: 'page-2',
+            }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/approvals/reviewer?limit=1', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    approvals: [{ id: 'approval-visible' }],
+  })
+  expect(cursors).toEqual([undefined, 'page-2'])
+})
+
+test('does not hide reviewer Inbox authorization read failures as an empty page', async () => {
+  configureFakeProjectClients(true, {
+    detailReadError: Object.assign(new Error('Work Item read is unavailable.'), {
+      code: 'DynamoDbUnavailable',
+      status: 503,
+    }),
+    role: 'viewer',
+  })
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async listReviewerApprovals() {
+        return { approvals: [{
+          id: 'approval-1',
+          teamId: 'core-team',
+          issueId: 'issue-1',
+          projectId: 'refero',
+          revision: 1,
+          fileId: 'file-1',
+          versionId: 'version-1',
+          status: 'pending',
+          reviewers: [{ memberKey: 'demo@example.com', status: 'pending' }],
+          dueAt: '2099-07-20T00:00:00.000Z',
+          requestedByMemberKey: 'manager@example.com',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+          capabilities: { canCancel: false, canDecide: true },
+        }] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/approvals/reviewer', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(502)
+  expect(await response.json()).toEqual({ message: 'File proofing data is unavailable.' })
 })
 
 test('uses a strongly consistent Work Item read for authorization-sensitive detail loads', async () => {
@@ -837,6 +1015,312 @@ test('loads project directory from the authenticated user scoped partition', asy
     ],
   })
   expect(calls.directoryReads).toEqual([{ directoryId: 'user#demo@example.com', locale: 'en' }])
+})
+
+/** Notification visibility API test に使う render-ready item を作ります。 */
+function createNotificationItem(
+  overrides: Partial<NotificationItem> = {},
+): NotificationItem {
+  return {
+    id: 'notification-item',
+    eventId: 'notification-event',
+    eventType: 'work-item.updated',
+    reasons: ['status-change'],
+    teamId: 'core-team',
+    projectId: 'refero',
+    issueId: 'notification-item',
+    occurredAt: '2026-07-12T12:00:00.000Z',
+    state: 'unread',
+    ...overrides,
+  }
+}
+
+/** NotificationClient 経由で API の current visibility 判定結果を記録します。 */
+function createNotificationVisibilityProbe(notifications: NotificationItem[]) {
+  const visibility = new Map<string, boolean>()
+  const client: NotificationClient = {
+    async list(input) {
+      const visibleNotifications: NotificationItem[] = []
+      for (const notification of notifications) {
+        const isVisible = !input.isVisible || await input.isVisible(notification)
+        visibility.set(notification.id, isVisible)
+        if (isVisible) {
+          visibleNotifications.push(notification)
+        }
+      }
+      return { notifications: visibleNotifications }
+    },
+    async countUnread(input) {
+      let count = 0
+      for (const notification of notifications) {
+        const isVisible = !input.isVisible || await input.isVisible(notification)
+        visibility.set(notification.id, isVisible)
+        if (isVisible && notification.state === 'unread') {
+          count += 1
+        }
+      }
+      return count
+    },
+    async update() {
+      throw new Error('Notification update is not configured for this visibility test.')
+    },
+    async markAllRead() {
+      return 0
+    },
+    async getPreferences() {
+      return {
+        version: 0,
+        channels: { inApp: true, email: false, push: false },
+        frequency: 'instant',
+        quietHours: { enabled: false, start: '22:00', end: '07:00', timeZone: 'UTC' },
+      }
+    },
+    async savePreferences(input) {
+      return {
+        ...input.preferences,
+        version: input.preferences.version + 1,
+        updatedAt: '2026-07-12T13:00:00.000Z',
+      }
+    },
+  }
+  return { client, visibility }
+}
+
+test('serves permission-filtered notification timeline, state, and preference contracts', async () => {
+  const projectCalls = configureFakeProjectClients(true, {
+    detailAssigneeUserId: 'demo@example.com',
+  })
+  const notification = {
+    id: 'opaque-notification-id',
+    eventId: 'evt-1',
+    eventType: 'work-item.updated',
+    reasons: ['status-change'],
+    title: 'Notification API',
+    deepLink: '/teams/core-team/issues?issueId=notification-api',
+    teamId: 'core-team',
+    projectId: 'refero',
+    issueId: 'notification-api',
+    occurredAt: '2026-07-12T12:00:00.000Z',
+    state: 'unread' as const,
+  }
+  const calls: {
+    filter?: string
+    action?: string
+    savedPreferenceVersion?: number
+  } = {}
+  const notificationClient: NotificationClient = {
+    async list(input) {
+      calls.filter = input.filter
+      expect(input.workspaceId).toBe('user#demo@example.com')
+      expect(input.memberKey).toBe('demo@example.com')
+      expect(await input.isVisible?.(notification)).toBe(true)
+      expect(await input.isVisible?.({ ...notification, issueId: undefined, projectId: 'hidden-project' })).toBe(false)
+      return { notifications: [notification], nextCursor: 'next-page' }
+    },
+    async countUnread() {
+      return calls.action === 'mark-read' ? 0 : 1
+    },
+    async update(input) {
+      calls.action = input.action
+      return { ...notification, state: 'read', readAt: '2026-07-12T13:00:00.000Z' }
+    },
+    async markAllRead() {
+      return 1
+    },
+    async getPreferences() {
+      return {
+        version: 0,
+        channels: { inApp: true, email: false, push: false },
+        frequency: 'instant',
+        quietHours: { enabled: false, start: '22:00', end: '07:00', timeZone: 'UTC' },
+      }
+    },
+    async savePreferences(input) {
+      calls.savedPreferenceVersion = input.preferences.version
+      return {
+        ...input.preferences,
+        version: input.preferences.version + 1,
+        updatedAt: '2026-07-12T13:00:00.000Z',
+      }
+    },
+  }
+  configureApiClientsForTest({ notifications: notificationClient })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+
+  const listResponse = await app.request('/api/notifications?filter=unread&limit=20', { headers })
+  expect(listResponse.status).toBe(200)
+  expect(await listResponse.json()).toMatchObject({
+    notifications: [{ id: 'opaque-notification-id', state: 'unread' }],
+    nextCursor: 'next-page',
+    unreadCount: 1,
+  })
+  expect(calls.filter).toBe('unread')
+  expect(projectCalls.directoryReads).toContainEqual({
+    directoryId: 'user#demo@example.com',
+    locale: 'ja',
+    consistentRead: true,
+  })
+
+  const updateResponse = await app.request('/api/notifications/opaque-notification-id', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ action: 'mark-read' }),
+  })
+  expect(updateResponse.status).toBe(200)
+  expect(await updateResponse.json()).toMatchObject({ state: 'read' })
+  expect(calls.action).toBe('mark-read')
+
+  const preferenceResponse = await app.request('/api/notification-preferences', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({
+      version: 0,
+      channels: { inApp: true, email: true, push: false },
+      frequency: 'daily',
+      quietHours: { enabled: true, start: '22:00', end: '07:00', timeZone: 'Asia/Tokyo' },
+    }),
+  })
+  expect(preferenceResponse.status).toBe(200)
+  expect(await preferenceResponse.json()).toMatchObject({ version: 1, frequency: 'daily' })
+  expect(calls.savedPreferenceVersion).toBe(0)
+})
+
+test('hides a notification after its Work Item moves to an inaccessible project', async () => {
+  configureFakeProjectClients(true, {
+    detailAssignedProjectId: 'private-project',
+    detailAssigneeUserId: 'demo@example.com',
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const notification = {
+    id: 'opaque-notification-id',
+    eventId: 'evt-1',
+    eventType: 'work-item.updated',
+    reasons: ['status-change'],
+    teamId: 'core-team',
+    projectId: 'refero',
+    issueId: 'moved-item',
+    occurredAt: '2026-07-12T12:00:00.000Z',
+    state: 'unread' as const,
+  }
+  let currentlyVisible = true
+  const notificationClient = {
+    async list(input) {
+      currentlyVisible = await input.isVisible?.(notification) ?? true
+      return { notifications: currentlyVisible ? [notification] : [] }
+    },
+    async countUnread(input) {
+      return await input.isVisible?.(notification) ? 1 : 0
+    },
+    async update() {
+      return notification
+    },
+    async markAllRead() {
+      return 0
+    },
+    async getPreferences() {
+      return {
+        version: 0,
+        channels: { inApp: true, email: false, push: false },
+        frequency: 'instant' as const,
+        quietHours: { enabled: false, start: '22:00', end: '07:00', timeZone: 'UTC' },
+      }
+    },
+    async savePreferences(input) {
+      return input.preferences
+    },
+  } as NotificationClient
+  configureApiClientsForTest({ notifications: notificationClient })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(currentlyVisible).toBe(false)
+  expect(notification.projectId).toBe('private-project')
+  expect(await response.json()).toMatchObject({ notifications: [], unreadCount: 0 })
+})
+
+test('keeps a shared-project notification visible under every active owner Team', async () => {
+  configureFakeProjectClients(true, {
+    detailAssignedProjectId: 'shared-launch',
+    detailAssigneeUserId: 'demo@example.com',
+    projectAccesses: [{ projectId: 'shared-launch', role: 'viewer' }],
+    teamProjects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+    additionalTeams: [{
+      id: 'design-team',
+      name: 'Design Team',
+      projects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+    }],
+  })
+  const coreNotification = createNotificationItem({
+    id: 'shared-project-core-notification',
+    issueId: 'shared-project-core-item',
+    projectId: 'shared-launch',
+    reasons: ['watcher'],
+  })
+  const designNotification = createNotificationItem({
+    id: 'shared-project-design-notification',
+    issueId: 'shared-project-design-item',
+    projectId: 'shared-launch',
+    reasons: ['watcher'],
+    teamId: 'design-team',
+  })
+  const probe = createNotificationVisibilityProbe([coreNotification, designNotification])
+  configureApiClientsForTest({ notifications: probe.client })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility.get(coreNotification.id)).toBe(true)
+  expect(probe.visibility.get(designNotification.id)).toBe(true)
+  expect(await response.json()).toMatchObject({
+    notifications: [{ id: coreNotification.id }, { id: designNotification.id }],
+    unreadCount: 2,
+  })
+})
+
+test('hides stale assignee-only notifications after Work Item reassignment', async () => {
+  configureFakeProjectClients(true, {
+    detailAssigneeUserId: 'sato@example.com',
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+  })
+  const staleAssignment = createNotificationItem({
+    id: 'stale-assignment',
+    reasons: ['assignment'],
+  })
+  const staleDue = createNotificationItem({
+    id: 'stale-due',
+    reasons: ['due'],
+  })
+  const retainedMention = createNotificationItem({
+    id: 'retained-mention',
+    reasons: ['assignment', 'mention'],
+  })
+  const probe = createNotificationVisibilityProbe([staleAssignment, staleDue, retainedMention])
+  configureApiClientsForTest({ notifications: probe.client })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility.get(staleAssignment.id)).toBe(false)
+  expect(probe.visibility.get(staleDue.id)).toBe(false)
+  expect(probe.visibility.get(retainedMention.id)).toBe(true)
+  expect(await response.json()).toMatchObject({
+    notifications: [{ id: retainedMention.id }],
+    unreadCount: 1,
+  })
 })
 
 test('returns Cognito groups and system admin status for the current user', async () => {
@@ -3185,7 +3669,7 @@ test('loads team issue detail and creates comments after team access is confirme
   const collaborationCreates: Parameters<CollaborationClient['createComment']>[0][] = []
   const collaborationComments: Awaited<ReturnType<CollaborationClient['createComment']>>[] = []
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread() {
         return {
           comments: collaborationComments,
@@ -3215,7 +3699,7 @@ test('loads team issue detail and creates comments after team access is confirme
         collaborationComments.push(comment)
         return comment
       },
-    } as CollaborationClient,
+    }),
   })
 
   const detailResponse = await app.request('/api/teams/core-team/issues/onboarding-friction', {
@@ -3310,7 +3794,7 @@ test('returns persisted collaboration comments together with inert legacy commen
   const calls = configureFakeProjectClients(true)
   const threadInputs: Parameters<CollaborationClient['getThread']>[0][] = []
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread(input) {
         threadInputs.push(input)
         const pageBase = {
@@ -3357,7 +3841,7 @@ test('returns persisted collaboration comments together with inert legacy commen
           }],
         }
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request('/api/teams/core-team/issues/onboarding-friction/collaboration', {
@@ -3403,7 +3887,7 @@ test('keeps a departed author in history while blocking deactivated member mutat
     inactiveWorkspaceMemberKeys: ['departed@example.com'],
   })
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread(input) {
         return {
           comments: input.rootCommentId
@@ -3429,7 +3913,20 @@ test('keeps a departed author in history while blocking deactivated member mutat
           presence: [],
         }
       },
-    } as CollaborationClient,
+      async getCommentSnapshot(input) {
+        return {
+          id: input.commentId,
+          rootCommentId: input.commentId,
+          authorMemberKey: 'demo@example.com',
+          bodyMarkdown: 'Search body',
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-06-08T01:00:00.000Z',
+          updatedAt: '2026-06-08T01:00:00.000Z',
+          reactions: [],
+        }
+      },
+    }),
   })
 
   const historyResponse = await app.request(
@@ -3447,12 +3944,12 @@ test('keeps a departed author in history while blocking deactivated member mutat
   configureFakeProjectClients(true, { workspaceStatus: 'deactivated' })
   let mutationCalls = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async updateComment() {
         mutationCalls += 1
         throw new Error('A deactivated member must not reach the collaboration store.')
       },
-    } as CollaborationClient,
+    }),
   })
   const mutationResponse = await app.request(
     '/api/teams/core-team/issues/onboarding-friction/comments/departed-comment',
@@ -3485,7 +3982,7 @@ test('marks roots and replies in a resolved thread as non-replyable', async () =
     reactions: [],
   }
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread(input) {
         return {
           comments: input.rootCommentId
@@ -3507,7 +4004,7 @@ test('marks roots and replies in a resolved thread as non-replyable', async () =
           ...(input.rootCommentId ? { threadResolved: true } : {}),
         }
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request(
@@ -3528,12 +4025,12 @@ test('denies collaboration reads without Work Item viewer access', async () => {
   configureFakeProjectClients(false)
   let reads = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread() {
         reads += 1
         throw new Error('Collaboration store must not be called.')
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request('/api/teams/core-team/issues/onboarding-friction/collaboration', {
@@ -3548,12 +4045,12 @@ test('keeps guest members read-only for collaboration mutations', async () => {
   configureFakeProjectClients(true, { workspaceRole: 'guest' })
   let writes = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async createComment() {
         writes += 1
         throw new Error('Collaboration store must not be called.')
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
@@ -3573,12 +4070,12 @@ test('returns a client error when a comment mentions an inactive Workspace membe
   configureFakeProjectClients(true, { inactiveWorkspaceMemberKeys: ['inactive@example.com'] })
   let writes = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async createComment() {
         writes += 1
         throw new Error('Collaboration store must not be called.')
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
@@ -3609,7 +4106,7 @@ test('allows active system administrators to be mentioned without project member
     })
     const writes: Parameters<CollaborationClient['createComment']>[0][] = []
     configureApiClientsForTest({
-      collaboration: {
+      collaboration: createCollaborationStub({
         async createComment(input) {
           writes.push(input)
           return {
@@ -3624,7 +4121,7 @@ test('allows active system administrators to be mentioned without project member
             reactions: [],
           }
         },
-      } as CollaborationClient,
+      }),
     })
 
     const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
@@ -3649,7 +4146,7 @@ test('allows a Workspace owner with viewer access to moderate a comment', async 
   configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'owner' })
   const deletes: Parameters<CollaborationClient['deleteComment']>[0][] = []
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async deleteComment(input) {
         deletes.push(input)
         return {
@@ -3665,7 +4162,7 @@ test('allows a Workspace owner with viewer access to moderate a comment', async 
           reactions: [],
         }
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request(
@@ -3689,7 +4186,7 @@ test('allows an assigned project manager to moderate another member comment', as
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
   const deletes: Parameters<CollaborationClient['deleteComment']>[0][] = []
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async deleteComment(input) {
         deletes.push(input)
         return {
@@ -3705,7 +4202,7 @@ test('allows an assigned project manager to moderate another member comment', as
           reactions: [],
         }
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request(
@@ -3728,12 +4225,12 @@ test('denies a project viewer from deleting another member comment', async () =>
   configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
   let deletes = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async deleteComment() {
         deletes += 1
         throw new CollaborationError(403, 'CommentDeleteDenied', 'Comment delete permission is required.')
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request(
@@ -3764,7 +4261,7 @@ test('reads and changes project watcher state through the project scope', async 
     watcherCount: 3,
   }
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getWatcherState(input) {
         reads.push(input)
         return watch
@@ -3773,7 +4270,7 @@ test('reads and changes project watcher state through the project scope', async 
         writes.push(input)
         return watch
       },
-    } as CollaborationClient,
+    }),
   })
 
   const readResponse = await app.request('/api/projects/refero/watch', {
@@ -4532,6 +5029,101 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
         'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
         '(#revision = :expectedRevision OR ' +
         '(attribute_not_exists(#revision) AND :expectedRevision = :legacyRevision))',
+    },
+  })
+})
+
+test('DynamoDB Work Item update emits render-ready notification candidates', async () => {
+  const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#refero',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    issueId: 'wireframe',
+    sortOrder: 10,
+    title: 'Notification-ready Work Item',
+    assigneeUserId: 'before@example.com',
+    status: 'todo',
+    dueDate: '2026/07/20',
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  let reads = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentCommands.push({ input: command.input, name: command.constructor.name })
+      if (command.constructor.name === 'GetCommand') {
+        reads += 1
+        return {
+          Item: reads === 1
+            ? currentIssue
+            : {
+                ...currentIssue,
+                revision: 2,
+                assigneeUserId: 'after@example.com',
+                status: 'review',
+              },
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'manager-sub', kind: 'user', displayName: 'manager@example.com' },
+    idempotencyKey: 'notification-update',
+    occurredAt: '2026-07-12T01:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/teams/core-team/issues/wireframe' },
+    source: { kind: 'api', requestId: 'notification-update' },
+  })
+  const client = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'AuditTable',
+  )
+
+  await client.updateTeamIssue(
+    'workspace-1',
+    'core-team',
+    'wireframe',
+    {
+      assigneeUserId: 'after@example.com',
+      status: 'review',
+      expectedRevision: 1,
+    },
+    'manager@example.com',
+    auditContext,
+  )
+
+  const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
+  const transactItems = transaction?.input.TransactItems
+  const auditItem = Array.isArray(transactItems)
+    ? (transactItems[2] as { Put?: { Item?: Record<string, unknown> } })?.Put?.Item
+    : undefined
+
+  expect(auditItem).toMatchObject({
+    eventType: 'work-item.updated',
+    summary: 'Work Item assignment changed.',
+    metadata: {
+      actorMemberKey: 'manager@example.com',
+      teamId: 'core-team',
+      issueId: 'wireframe',
+      projectId: 'refero',
+      deepLink: '/teams/core-team/issues?issueId=wireframe',
+      notificationTitle: 'Notification-ready Work Item',
+      notificationCandidates: [
+        { memberKey: 'after@example.com', reason: 'assignment' },
+        { memberKey: 'after@example.com', reason: 'status-change' },
+      ],
     },
   })
 })
@@ -6069,6 +6661,332 @@ test('DynamoDB directory client does not reread manager state when cancellation 
   expect(sentInputs).toHaveLength(2)
 })
 
+test('search endpoint parses filters and revalidates comment scope against current RBAC', async () => {
+  configureFakeProjectClients(true)
+  let capturedInput: WorkspaceSearchQueryInput | undefined
+  let resolvedProjectId: string | undefined
+  configureApiClientsForTest({
+    workspaceSearch: {
+      async search(input) {
+        capturedInput = input
+        const document = createWorkspaceSearchDocument({
+          workspaceId: input.workspaceId,
+          entityType: 'comment',
+          entityId: 'team/core-team/issue/issue-1/comment/comment-1',
+          parentId: 'team/core-team/issue/issue-1',
+          title: 'Current scope comment',
+          body: 'Search body',
+          url: '/teams/core-team/issues?issueId=issue-1&commentId=comment-1',
+          teamId: 'core-team',
+        })
+        resolvedProjectId = (await input.resolveCurrentScope?.(document))?.projectId
+        return { schemaVersion: 1, results: [] }
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  const filters = {
+    keyword: 'scope',
+    projectIds: ['refero'],
+    customFields: [{ fieldId: 'score', operator: 'greater-than', value: 5 }],
+  }
+
+  const response = await app.request(
+    `/api/search?filters=${encodeURIComponent(JSON.stringify(filters))}&limit=25`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect(capturedInput?.filters).toEqual(filters)
+  expect(capturedInput?.limit).toBe(25)
+  expect(capturedInput?.access.projectIds.has('refero')).toBe(true)
+  expect(capturedInput?.access.teamIds.has('core-team')).toBe(true)
+  expect(resolvedProjectId).toBe('refero')
+})
+
+test('search endpoint refreshes comment content from its current source snapshot', async () => {
+  configureFakeProjectClients(true)
+  let resolvedScope: WorkspaceSearchResolvedScope | undefined
+  configureApiClientsForTest({
+    collaboration: createCollaborationStub({
+      async getCommentSnapshot(input) {
+        return {
+          id: input.commentId,
+          rootCommentId: input.commentId,
+          authorMemberKey: 'sato@example.com',
+          bodyMarkdown: 'Current private decision',
+          version: 2,
+          mentionMemberKeys: [],
+          createdAt: '2026-06-08T01:00:00.000Z',
+          updatedAt: '2026-07-12T02:00:00.000Z',
+          reactions: [],
+        }
+      },
+    }),
+    workspaceSearch: {
+      async search(input) {
+        resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
+          workspaceId: input.workspaceId,
+          entityType: 'comment',
+          entityId: 'team/core-team/issue/issue-1/comment/comment-1',
+          parentId: 'team/core-team/issue/issue-1',
+          title: 'Stale title',
+          body: 'Stale private decision',
+          url: '/teams/core-team/issues?issueId=issue-1&commentId=comment-1',
+          teamId: 'core-team',
+          updatedAt: '2026-06-08T01:00:00.000Z',
+        }))
+        return { schemaVersion: 1, results: [] }
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+
+  const response = await app.request('/api/search', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(resolvedScope).toMatchObject({
+    teamId: 'core-team',
+    projectId: 'refero',
+    currentDocument: {
+      body: 'Current private decision',
+      creatorUserId: 'sato@example.com',
+      updatedAt: '2026-07-12T02:00:00.000Z',
+    },
+  })
+})
+
+test('search endpoint fails closed for missing, deleted, or malformed comment sources', async () => {
+  configureFakeProjectClients(true)
+  const resolvedScopes: Array<WorkspaceSearchResolvedScope | undefined> = []
+  let snapshotReads = 0
+  configureApiClientsForTest({
+    collaboration: createCollaborationStub({
+      async getCommentSnapshot(input) {
+        snapshotReads += 1
+        if (input.commentId === 'missing') return undefined
+        return {
+          id: input.commentId,
+          rootCommentId: input.commentId,
+          authorMemberKey: 'demo@example.com',
+          bodyMarkdown: '',
+          version: 2,
+          mentionMemberKeys: [],
+          createdAt: '2026-06-08T01:00:00.000Z',
+          updatedAt: '2026-07-12T02:00:00.000Z',
+          deletedAt: '2026-07-12T02:00:00.000Z',
+          reactions: [],
+        }
+      },
+    }),
+    workspaceSearch: {
+      async search(input) {
+        for (const [commentId, parentId] of [
+          ['missing', 'team/core-team/issue/issue-1'],
+          ['deleted', 'team/core-team/issue/issue-1'],
+          ['malformed', 'team/core-team/issue/other'],
+        ] as const) {
+          resolvedScopes.push(await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
+            workspaceId: input.workspaceId,
+            entityType: 'comment',
+            entityId: `team/core-team/issue/issue-1/comment/${commentId}`,
+            parentId,
+            title: 'Stale title',
+            body: 'Stale body',
+            url: `/teams/core-team/issues?issueId=issue-1&commentId=${commentId}`,
+            teamId: 'core-team',
+          })))
+        }
+        return { schemaVersion: 1, results: [] }
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+
+  const response = await app.request('/api/search', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(resolvedScopes).toEqual([undefined, undefined, undefined])
+  expect(snapshotReads).toBe(2)
+})
+
+test('search endpoint excludes archived Team documents for system administrators', async () => {
+  configureFakeProjectClients(true, { systemAdminMemberKeys: ['demo@example.com'] })
+  let resolvedScope: unknown = 'not-called'
+  configureApiClientsForTest({
+    workspaceSearch: {
+      async search(input) {
+        resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
+          workspaceId: input.workspaceId,
+          entityType: 'work-item',
+          entityId: 'team/archived-team/issue/issue-1',
+          title: 'Archived Team item',
+          url: '/teams/archived-team/issues?issueId=issue-1',
+          teamId: 'archived-team',
+        }))
+        return { schemaVersion: 1, results: [] }
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+
+  const response = await app.request('/api/search', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(resolvedScope).toBeUndefined()
+})
+
+test('saved view endpoints forward create update list and revision delete contracts', async () => {
+  configureFakeProjectClients(true)
+  const calls = {
+    creates: [] as unknown[],
+    deletes: [] as unknown[],
+    lists: [] as unknown[],
+    updates: [] as unknown[],
+  }
+  const view = {
+    schemaVersion: 1 as const,
+    id: 'view-1',
+    name: 'Review queue',
+    visibility: 'personal' as const,
+    ownerUserId: 'demo@example.com',
+    filters: { statuses: ['review'] },
+    layout: { mode: 'table' as const, sort: [], columns: ['title'] },
+    revision: 1,
+    canEdit: true,
+    favorite: false,
+    pinned: false,
+    isDefault: false,
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  configureApiClientsForTest({
+    workspaceSearch: {
+      async listSavedViews(input) {
+        calls.lists.push(input)
+        return { views: [view] }
+      },
+      async createSavedView(input) {
+        calls.creates.push(input)
+        return view
+      },
+      async updateSavedView(input) {
+        calls.updates.push(input)
+        return { ...view, revision: 2, favorite: true }
+      },
+      async deleteSavedView(input) {
+        calls.deletes.push(input)
+        return { id: input.viewId, revision: input.expectedRevision }
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+    'Idempotency-Key': 'saved-view-request-1',
+  }
+  const listResponse = await app.request('/api/saved-views', { headers })
+  const createResponse = await app.request('/api/saved-views', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      name: 'Review queue',
+      visibility: 'personal',
+      filters: { statuses: ['review'] },
+      layout: { mode: 'table', sort: [], columns: ['title'] },
+    }),
+  })
+  const updateResponse = await app.request('/api/saved-views/view-1', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ expectedRevision: 1, favorite: true }),
+  })
+  const deleteResponse = await app.request('/api/saved-views/view-1?expectedRevision=2', {
+    method: 'DELETE',
+    headers,
+  })
+
+  expect([listResponse.status, createResponse.status, updateResponse.status, deleteResponse.status])
+    .toEqual([200, 201, 200, 200])
+  expect(calls.lists).toHaveLength(1)
+  expect(calls.creates).toHaveLength(1)
+  expect(calls.creates[0]).toMatchObject({ idempotencyKey: 'saved-view-request-1' })
+  expect(calls.updates).toHaveLength(1)
+  expect(calls.deletes).toEqual([
+    expect.objectContaining({ viewId: 'view-1', expectedRevision: 2 }),
+  ])
+})
+
+test('keeps a primary mutation successful when search projection fails', async () => {
+  configureFakeProjectClients(true)
+  let projectedTitle: string | undefined
+  configureApiClientsForTest({
+    workspaceSearch: {
+      async upsertDocument(document) {
+        projectedTitle = document.title
+        throw new Error('Search index unavailable')
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  const originalConsoleError = console.error
+  let projectionErrors = 0
+  console.error = () => {
+    projectionErrors += 1
+  }
+  try {
+    const response = await app.request('/api/teams', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'Search resilient Team' }),
+    })
+
+    expect(response.status).toBe(201)
+    expect(projectedTitle).toBe('Search resilient Team')
+    expect(projectionErrors).toBe(1)
+  } finally {
+    console.error = originalConsoleError
+  }
+})
+
+test('keeps a committed mutation successful when search document construction fails', async () => {
+  configureFakeProjectClients(true)
+  let projectionWrites = 0
+  configureApiClientsForTest({
+    workspaceSearch: {
+      async upsertDocument(document) {
+        projectionWrites += 1
+        return createWorkspaceSearchDocument(document)
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  const originalConsoleError = console.error
+  let projectionErrors = 0
+  console.error = () => {
+    projectionErrors += 1
+  }
+  try {
+    const response = await app.request('/api/teams', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'x'.repeat(501) }),
+    })
+
+    expect(response.status).toBe(201)
+    expect(projectionWrites).toBe(0)
+    expect(projectionErrors).toBe(1)
+  } finally {
+    console.error = originalConsoleError
+  }
+})
+
 function createProjectMemberFixtureItems(
   options: {
     /** owner Team ambiguity を再現する追加 Team です。 */
@@ -6227,6 +7145,8 @@ function createCollaborationStub(
   }
   return {
     getThread: unsupported,
+    hasAttachableComment: unsupported,
+    getCommentSnapshot: unsupported,
     createComment: unsupported,
     updateComment: unsupported,
     deleteComment: unsupported,
@@ -6240,7 +7160,7 @@ function createCollaborationStub(
     heartbeatPresence: unsupported,
     leavePresence: unsupported,
     ...overrides,
-  } as CollaborationClient
+  } satisfies CollaborationClient
 }
 
 function createFileUploadSessionFixture() {
@@ -6307,6 +7227,12 @@ function configureFakeProjectClients(
     role?: ProjectRole
     systemAdminMemberKeys?: string[]
     taskAssigneeUserId?: string
+    /** Notification 認可で再取得する Work Item の現在 assigned Project ID です。 */
+    detailAssignedProjectId?: string
+    /** Notification 認可で再取得する Work Item の現在担当者です。 */
+    detailAssigneeUserId?: string
+    /** Work Item detail read の障害を再現する error です。 */
+    detailReadError?: Error
     teamProjects?: Array<{ id: string; name: string; tone: 'blue' | 'purple' | 'green' | 'yellow' }>
     /** owner Team ambiguity を再現する追加 Team です。 */
     additionalTeams?: Array<{
@@ -6358,7 +7284,11 @@ function configureFakeProjectClients(
   let workspaceReconcileFailures = options.workspaceReconcileFailures ?? 0
   const calls = {
     accessChecks: [] as Array<{ directoryId: string; projectId: string }>,
-    directoryReads: [] as Array<{ directoryId: string; locale: string }>,
+    directoryReads: [] as Array<{
+      directoryId: string
+      locale: string
+      consistentRead?: boolean
+    }>,
     memberDeletes: [] as Array<{ directoryId: string; projectId: string; memberKey: string }>,
     memberReads: [] as Array<{ directoryId: string; projectId: string }>,
     memberUpdates: [] as Array<{
@@ -6451,7 +7381,7 @@ function configureFakeProjectClients(
   })
 
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread() {
         return {
           comments: [],
@@ -6465,7 +7395,20 @@ function configureFakeProjectClients(
           presence: [],
         }
       },
-    } as CollaborationClient,
+      async getCommentSnapshot(input) {
+        return {
+          id: input.commentId,
+          rootCommentId: input.commentId,
+          authorMemberKey: 'demo@example.com',
+          bodyMarkdown: 'Search body',
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-06-08T01:00:00.000Z',
+          updatedAt: '2026-06-08T01:00:00.000Z',
+          reactions: [],
+        }
+      },
+    }),
     cognito: {
       async initiatePasswordAuth() {
         if (options.passwordAuthChallenge) {
@@ -6586,8 +7529,12 @@ function configureFakeProjectClients(
       },
     },
     projectDirectory: {
-      async getProjectDirectory(directoryId, locale) {
-        calls.directoryReads.push({ directoryId, locale })
+      async getProjectDirectory(directoryId, locale, consistentRead) {
+        calls.directoryReads.push({
+          directoryId,
+          locale,
+          ...(consistentRead === undefined ? {} : { consistentRead }),
+        })
 
         return {
           teams: [
@@ -7091,6 +8038,10 @@ function configureFakeProjectClients(
           ...(readOptions ? { readOptions } : {}),
         })
 
+        if (options.detailReadError) {
+          throw options.detailReadError
+        }
+
         if (issueId === 'wireframe') {
           throw {
             status: 404,
@@ -7105,10 +8056,12 @@ function configureFakeProjectClients(
             revision: 1,
             id: issueId,
             teamId,
-            assignedProjectId: options.unassignedIssue ? undefined : 'refero',
+            assignedProjectId: options.unassignedIssue
+              ? undefined
+              : options.detailAssignedProjectId ?? 'refero',
             title: '初回オンボーディングの離脱要因を減らす',
             description: '初回体験の摩擦を下げる。',
-            assigneeUserId: 'sato@example.com',
+            assigneeUserId: options.detailAssigneeUserId ?? 'sato@example.com',
             status: 'in-progress',
             dueDate: '2026/06/18',
             priority: 'high',
