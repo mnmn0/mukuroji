@@ -1132,6 +1132,15 @@ export class CdkStack extends cdk.Stack {
           actions: ['dynamodb:TransactWriteItems'],
           resources: [projectDirectoryTable.tableArn],
         }),
+        new iam.PolicyStatement({
+          actions: ['dynamodb:PutItem'],
+          resources: [projectDirectoryTable.tableArn],
+          conditions: {
+            'ForAnyValue:StringEquals': {
+              'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+            },
+          },
+        }),
       ]),
       installLatestAwsSdk: false,
     });
@@ -1149,7 +1158,7 @@ export class CdkStack extends cdk.Stack {
           initialOwnerEmail.valueAsString,
         ),
       },
-      physicalResourceId: customResources.PhysicalResourceId.of('workspace-access-seed-v1'),
+      physicalResourceId: customResources.PhysicalResourceId.of('workspace-access-seed-v2'),
     };
     const seedWorkspaceAccess = new customResources.AwsCustomResource(
       this,
@@ -1160,6 +1169,15 @@ export class CdkStack extends cdk.Stack {
           new iam.PolicyStatement({
             actions: ['dynamodb:TransactWriteItems'],
             resources: [workspaceAccessTable.tableArn],
+          }),
+          new iam.PolicyStatement({
+            actions: ['dynamodb:UpdateItem'],
+            resources: [workspaceAccessTable.tableArn],
+            conditions: {
+              'ForAnyValue:StringEquals': {
+                'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+              },
+            },
           }),
         ]),
       ),
@@ -1177,7 +1195,7 @@ export class CdkStack extends cdk.Stack {
           initialOwnerUsername.valueAsString,
         ),
       },
-      physicalResourceId: customResources.PhysicalResourceId.of('workspace-bootstrap-v1'),
+      physicalResourceId: customResources.PhysicalResourceId.of('workspace-bootstrap-v2'),
     };
     const bootstrapWorkspace = new customResources.AwsCustomResource(
       this,
@@ -1188,6 +1206,15 @@ export class CdkStack extends cdk.Stack {
           new iam.PolicyStatement({
             actions: ['dynamodb:TransactWriteItems'],
             resources: [projectDirectoryTable.tableArn],
+          }),
+          new iam.PolicyStatement({
+            actions: ['dynamodb:UpdateItem'],
+            resources: [projectDirectoryTable.tableArn],
+            conditions: {
+              'ForAnyValue:StringEquals': {
+                'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+              },
+            },
           }),
         ]),
       ),
@@ -1206,7 +1233,7 @@ export class CdkStack extends cdk.Stack {
         ),
       },
       physicalResourceId: customResources.PhysicalResourceId.of(
-        'workspace-access-demo-members-seed-v1',
+        'workspace-access-demo-members-seed-v2',
       ),
     };
     const seedWorkspaceDemoMembers = new customResources.AwsCustomResource(
@@ -1218,6 +1245,15 @@ export class CdkStack extends cdk.Stack {
           new iam.PolicyStatement({
             actions: ['dynamodb:TransactWriteItems'],
             resources: [workspaceAccessTable.tableArn],
+          }),
+          new iam.PolicyStatement({
+            actions: ['dynamodb:UpdateItem'],
+            resources: [workspaceAccessTable.tableArn],
+            conditions: {
+              'ForAnyValue:StringEquals': {
+                'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+              },
+            },
           }),
         ]),
       ),

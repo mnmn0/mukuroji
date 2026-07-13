@@ -768,7 +768,7 @@ test('external Cognito client and initial owner attributes are validated on crea
 test('workspace metadata owner alias and project manager rows are idempotently bootstrapped', () => {
   const template = synthesizedTemplate;
   const [, bootstrap] = Object.entries(template.findResources('Custom::AWS')).find(([, candidate]) =>
-    JSON.stringify(candidate).includes('workspace-bootstrap-v1'),
+    JSON.stringify(candidate).includes('workspace-bootstrap-v2'),
   ) ?? [];
 
   if (!bootstrap) {
@@ -800,6 +800,91 @@ test('workspace metadata owner alias and project manager rows are idempotently b
   expect(createPayload).toContain('#role = :role');
   expect(createPayload).toContain('attribute_not_exists(directoryId) OR');
   expect(bootstrap.Properties.Update).toEqual(bootstrap.Properties.Create);
+});
+
+test('bootstrap transactions synthesize enclosed DynamoDB write permissions for create and update', () => {
+  const template = synthesizedTemplate;
+  const customResources = template.findResources('Custom::AWS');
+  const policies = template.findResources('AWS::IAM::Policy');
+  const transactionCases = [
+    {
+      customResourcePrefix: 'SeedProjectDirectory',
+      policyPrefix: 'SeedProjectDirectoryCustomResourcePolicy',
+      itemAction: 'dynamodb:PutItem',
+      tableLogicalId: 'ProjectDirectoryTable9ED01C01',
+      physicalResourceId: 'project-directory-seed-v3',
+      runsOnUpdate: false,
+    },
+    {
+      customResourcePrefix: 'SeedWorkspaceAccess',
+      policyPrefix: 'SeedWorkspaceAccessCustomResourcePolicy',
+      itemAction: 'dynamodb:UpdateItem',
+      tableLogicalId: 'WorkspaceAccessTableD7C8D2C7',
+      physicalResourceId: 'workspace-access-seed-v2',
+      runsOnUpdate: true,
+    },
+    {
+      customResourcePrefix: 'BootstrapWorkspace',
+      policyPrefix: 'BootstrapWorkspaceCustomResourcePolicy',
+      itemAction: 'dynamodb:UpdateItem',
+      tableLogicalId: 'ProjectDirectoryTable9ED01C01',
+      physicalResourceId: 'workspace-bootstrap-v2',
+      runsOnUpdate: true,
+    },
+    {
+      customResourcePrefix: 'SeedWorkspaceDemoMembers',
+      policyPrefix: 'SeedWorkspaceDemoMembersCustomResourcePolicy',
+      itemAction: 'dynamodb:UpdateItem',
+      tableLogicalId: 'WorkspaceAccessTableD7C8D2C7',
+      physicalResourceId: 'workspace-access-demo-members-seed-v2',
+      runsOnUpdate: true,
+    },
+  ] as const;
+
+  for (const transactionCase of transactionCases) {
+    const customResource = Object.entries(customResources).find(([logicalId]) =>
+      logicalId.startsWith(transactionCase.customResourcePrefix),
+    )?.[1];
+    const policy = Object.entries(policies).find(([logicalId]) =>
+      logicalId.startsWith(transactionCase.policyPrefix),
+    )?.[1] as {
+      Properties?: {
+        PolicyDocument?: {
+          Statement?: Array<Record<string, unknown>>;
+        };
+      };
+    } | undefined;
+
+    expect(customResource).toBeDefined();
+    expect(customResource?.Properties.Create).toBeDefined();
+    expect(serializeAwsSdkCall(customResource?.Properties.Create)).toContain(
+      transactionCase.physicalResourceId,
+    );
+    if (transactionCase.runsOnUpdate) {
+      expect(customResource?.Properties.Update).toEqual(customResource?.Properties.Create);
+    } else {
+      expect(customResource?.Properties.Update).toBeUndefined();
+    }
+
+    const statements = policy?.Properties?.PolicyDocument?.Statement ?? [];
+    const tableArn = { 'Fn::GetAtt': [transactionCase.tableLogicalId, 'Arn'] };
+    const itemActionStatements = statements.filter((statement) =>
+      statement.Action === transactionCase.itemAction,
+    );
+
+    expect(itemActionStatements).toEqual([
+      {
+        Action: transactionCase.itemAction,
+        Condition: {
+          'ForAnyValue:StringEquals': {
+            'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+          },
+        },
+        Effect: 'Allow',
+        Resource: tableArn,
+      },
+    ]);
+  }
 });
 
 test('canonical Work Item seed replaces legacy task writes and preserves demo data', () => {
