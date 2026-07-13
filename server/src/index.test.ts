@@ -25,6 +25,7 @@ import {
   resetApiClientsForTest,
   WorkspaceAccessError,
   type ProjectRole,
+  type WorkspaceAccessClient,
   type WorkspaceMemberStatus,
   type WorkspaceRole,
 } from './index'
@@ -390,6 +391,10 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
         return { AuthenticationResult: { AccessToken: 'access-token' } }
       }
 
+      if (commandName === 'RespondToAuthChallengeCommand') {
+        return { AuthenticationResult: { AccessToken: 'challenge-access-token' } }
+      }
+
       if (commandName === 'GetUserCommand') {
         return {
           Username: 'demo@example.com',
@@ -431,6 +436,13 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
   await expect(client.initiatePasswordAuth('demo@example.com', 'password')).resolves.toMatchObject({
     AuthenticationResult: { AccessToken: 'access-token' },
   })
+  await expect(client.respondToNewPasswordChallenge(
+    'demo@example.com',
+    'Permanent123!',
+    'new-password-session',
+  )).resolves.toMatchObject({
+    AuthenticationResult: { AccessToken: 'challenge-access-token' },
+  })
   await expect(client.getUser('access-token')).resolves.toMatchObject({
     Username: 'demo@example.com',
   })
@@ -452,9 +464,298 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
   })
   expect(commandNames).toEqual([
     'InitiateAuthCommand',
+    'RespondToAuthChallengeCommand',
     'GetUserCommand',
     'ListUsersCommand',
     'AdminGetUserCommand',
+  ])
+})
+
+test('runs the Workspace identity lifecycle through the production AWS Cognito adapter', async () => {
+  const sentCommands: Array<{ name: string; input: Record<string, unknown> }> = []
+  const adminGetAttempts = new Map<string, number>()
+  const sdkClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      const name = command.constructor.name
+      const input = command.input
+      sentCommands.push({ name, input })
+
+      if (name === 'RespondToAuthChallengeCommand') {
+        return { AuthenticationResult: createFakeAuthTokenSet() }
+      }
+
+      if (name === 'GetUserCommand') {
+        return {
+          Username: 'demo@example.com',
+          UserAttributes: [{ Name: 'email', Value: 'demo@example.com' }],
+        }
+      }
+
+      const username = typeof input.Username === 'string' ? input.Username : ''
+
+      if (name === 'AdminGetUserCommand') {
+        const attempt = (adminGetAttempts.get(username) ?? 0) + 1
+        adminGetAttempts.set(username, attempt)
+
+        if (
+          username === 'new-user@example.com' ||
+          (username === 'raced-user@example.com' && attempt <= 2)
+        ) {
+          throw createCognitoSdkTestError('UserNotFoundException', 400)
+        }
+
+        const directoryId = username === 'other-workspace@example.com'
+          ? 'workspace#other'
+          : 'user#demo@example.com'
+
+        return {
+          Username: username,
+          UserAttributes: [
+            { Name: 'email', Value: username },
+            { Name: 'custom:directory_id', Value: directoryId },
+            { Name: 'custom:workspace_id', Value: directoryId },
+          ],
+          Enabled: true,
+          UserStatus: 'FORCE_CHANGE_PASSWORD',
+        }
+      }
+
+      if (name === 'AdminCreateUserCommand') {
+        if (username === 'raced-user@example.com' && input.MessageAction !== 'RESEND') {
+          throw createCognitoSdkTestError('UsernameExistsException', 400)
+        }
+
+        return {
+          User: {
+            Username: username,
+            Attributes: [
+              { Name: 'email', Value: username },
+              { Name: 'custom:directory_id', Value: 'user#demo@example.com' },
+              { Name: 'custom:workspace_id', Value: 'user#demo@example.com' },
+            ],
+            Enabled: true,
+            UserStatus: 'FORCE_CHANGE_PASSWORD',
+          },
+        }
+      }
+
+      if (name === 'AdminDeleteUserCommand' && username === 'missing@example.com') {
+        throw createCognitoSdkTestError('UserNotFoundException', 400)
+      }
+
+      if (name === 'AdminDeleteUserCommand' && username === 'forbidden@example.com') {
+        throw createCognitoSdkTestError('AccessDeniedException', 403)
+      }
+
+      return {}
+    },
+  } as unknown as CognitoIdentityProviderClient
+  const client = new AwsCognitoClient(
+    sdkClient,
+    'us-east-1_mukuroji',
+    'mukuroji-client',
+  )
+  const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({ cognito: client })
+
+  const challengeResponse = await app.request('/api/auth/challenge/new-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'Demo@Example.com',
+      newPassword: 'Permanent123!',
+      session: 'new-password-session',
+    }),
+  })
+  expect(challengeResponse.status).toBe(200)
+  expect(await challengeResponse.json()).toMatchObject({ accessToken: 'test-token' })
+  expect(calls.workspaceReconciliations).toEqual(['demo@example.com'])
+
+  const invite = async (email: string) => {
+    const response = await app.request('/api/workspace/invitations', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ email, name: 'Invitee', role: 'member' }),
+    })
+
+    expect(response.status).toBe(201)
+    return response.json()
+  }
+
+  await expect(invite('existing@example.com')).resolves.toMatchObject({
+    invitation: {
+      deliveryStatus: 'sent',
+      identityOwnership: 'pre-existing',
+    },
+  })
+  await expect(invite('new-user@example.com')).resolves.toMatchObject({
+    invitation: {
+      deliveryStatus: 'sent',
+      identityOwnership: 'workspace-created',
+    },
+  })
+  await expect(invite('raced-user@example.com')).resolves.toMatchObject({
+    invitation: {
+      deliveryStatus: 'sent',
+      identityOwnership: 'ambiguous',
+    },
+  })
+  await expect(client.provisionWorkspaceUser({
+    email: 'other-workspace@example.com',
+    directoryId: 'user#demo@example.com',
+  })).rejects.toMatchObject({
+    code: 'WorkspaceDirectoryConflict',
+    status: 409,
+  })
+
+  configureApiClientsForTest({
+    workspaceAccess: {
+      async getActiveMember(_workspaceId: string, memberKey: string) {
+        return {
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: 'owner',
+          status: 'active',
+          version: 1,
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async revokeInvitation(
+        _workspaceId: string,
+        _actorMemberKey: string,
+        invitationId: string,
+      ) {
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: 'revoked',
+          deliveryStatus: 'not-required',
+          identityOwnership: 'workspace-created',
+          version: 2,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+  const revokeResponse = await app.request(
+    '/api/workspace/invitations/new-user%40example.com/revoke',
+    {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token' },
+    },
+  )
+  expect(revokeResponse.status).toBe(200)
+  expect(await revokeResponse.json()).toMatchObject({
+    invitation: { identityOwnership: 'workspace-created', status: 'revoked' },
+  })
+  await expect(client.deleteWorkspaceUser('missing@example.com')).resolves.toBeUndefined()
+  await expect(client.deleteWorkspaceUser('forbidden@example.com')).rejects.toMatchObject({
+    code: 'AccessDeniedException',
+    status: 403,
+  })
+
+  expect(adminGetAttempts).toEqual(new Map([
+    ['existing@example.com', 1],
+    ['new-user@example.com', 2],
+    ['raced-user@example.com', 3],
+    ['other-workspace@example.com', 1],
+  ]))
+  expect(sentCommands
+    .filter(({ name }) => name !== 'GetUserCommand')
+    .map(({ name }) => name)).toEqual([
+    'RespondToAuthChallengeCommand',
+    'AdminGetUserCommand',
+    'AdminUpdateUserAttributesCommand',
+    'AdminCreateUserCommand',
+    'AdminGetUserCommand',
+    'AdminGetUserCommand',
+    'AdminCreateUserCommand',
+    'AdminGetUserCommand',
+    'AdminGetUserCommand',
+    'AdminCreateUserCommand',
+    'AdminGetUserCommand',
+    'AdminUpdateUserAttributesCommand',
+    'AdminCreateUserCommand',
+    'AdminGetUserCommand',
+    'AdminDeleteUserCommand',
+    'AdminDeleteUserCommand',
+    'AdminDeleteUserCommand',
+  ])
+  expect(sentCommands[0]?.input).toEqual({
+    ChallengeName: 'NEW_PASSWORD_REQUIRED',
+    ChallengeResponses: {
+      USERNAME: 'demo@example.com',
+      NEW_PASSWORD: 'Permanent123!',
+    },
+    ClientId: 'mukuroji-client',
+    Session: 'new-password-session',
+  })
+  expect(sentCommands.filter(({ name }) =>
+    name === 'AdminGetUserCommand'
+  ).every(({ input }) => input.UserPoolId === 'us-east-1_mukuroji')).toBe(true)
+  expect(sentCommands.find(({ name, input }) =>
+    name === 'AdminUpdateUserAttributesCommand' &&
+    input.Username === 'existing@example.com'
+  )?.input).toEqual({
+    UserPoolId: 'us-east-1_mukuroji',
+    Username: 'existing@example.com',
+    UserAttributes: [
+      { Name: 'email', Value: 'existing@example.com' },
+      { Name: 'custom:directory_id', Value: 'user#demo@example.com' },
+      { Name: 'custom:workspace_id', Value: 'user#demo@example.com' },
+      { Name: 'name', Value: 'Invitee' },
+    ],
+  })
+  expect(sentCommands.find(({ name, input }) =>
+    name === 'AdminCreateUserCommand' &&
+    input.Username === 'new-user@example.com' &&
+    input.MessageAction === undefined
+  )?.input).toEqual({
+    UserPoolId: 'us-east-1_mukuroji',
+    Username: 'new-user@example.com',
+    DesiredDeliveryMediums: ['EMAIL'],
+    UserAttributes: [
+      { Name: 'email', Value: 'new-user@example.com' },
+      { Name: 'custom:directory_id', Value: 'user#demo@example.com' },
+      { Name: 'custom:workspace_id', Value: 'user#demo@example.com' },
+      { Name: 'name', Value: 'Invitee' },
+    ],
+  })
+  expect(sentCommands.filter(({ name, input }) =>
+    name === 'AdminCreateUserCommand' && input.MessageAction === 'RESEND'
+  ).map(({ input }) => input.Username)).toEqual([
+    'existing@example.com',
+    'raced-user@example.com',
+  ])
+  expect(sentCommands.some(({ name, input }) =>
+    (
+      name === 'AdminUpdateUserAttributesCommand' ||
+      name === 'AdminCreateUserCommand'
+    ) && input.Username === 'other-workspace@example.com'
+  )).toBe(false)
+  expect(sentCommands.filter(({ name }) =>
+    name === 'AdminDeleteUserCommand'
+  ).map(({ input }) => input)).toEqual([
+    {
+      UserPoolId: 'us-east-1_mukuroji',
+      Username: 'new-user@example.com',
+    },
+    {
+      UserPoolId: 'us-east-1_mukuroji',
+      Username: 'missing@example.com',
+    },
+    {
+      UserPoolId: 'us-east-1_mukuroji',
+      Username: 'forbidden@example.com',
+    },
   ])
 })
 
@@ -7712,6 +8013,15 @@ function createFakeAuthTokenSet() {
     ExpiresIn: 3600,
     TokenType: 'Bearer',
   }
+}
+
+function createCognitoSdkTestError(name: string, status: number) {
+  const error = new Error(`${name} from the Cognito SDK test double.`)
+  error.name = name
+
+  return Object.assign(error, {
+    $metadata: { httpStatusCode: status },
+  })
 }
 
 function createWorkspaceBootstrapItems() {
