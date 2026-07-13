@@ -49,7 +49,7 @@ API サーバーはデフォルトで `http://localhost:4566` の Floci Cognito 
 
 同じ ready hook で DynamoDB table `mukuroji-dashboard-local`,
 `mukuroji-project-tasks-v2-local`, `mukuroji-project-directory-local`,
-`mukuroji-workspace-access-local` も作成し、ダッシュボード集計、Refero のタスク、
+`mukuroji-workspace-access-local`, `mukuroji-workspace-search-local` も作成し、ダッシュボード集計、Refero のタスク、
 サイドバー用チーム/プロジェクト階層、Workspace metadata/member を投入します。
 チーム/プロジェクト階層は `workspace#mukuroji-local` partition に seed され、タスク API はその directory に含まれる project だけを返します。
 Workspace access table では `demo@example.com` を active owner、既存の project user を
@@ -117,6 +117,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_WORK_ITEMS_TABLE` / `WORK_ITEMS_TABLE_NAME`: canonical Work Item store。移行期間は `MUKUROJI_TEAM_ISSUES_TABLE` / `TEAM_ISSUES_TABLE_NAME` と同じ既存 table を指します。
 - `MUKUROJI_TEAM_ISSUE_EVENTS_TABLE`: チーム Issue のコメント/活動履歴を保存する DynamoDB table 名。未指定時は `mukuroji-team-issue-events-local`
 - `MUKUROJI_COLLABORATION_TABLE` / `COLLABORATION_TABLE_NAME`: comment thread、reaction、watcher、presence を保存する DynamoDB table 名。未指定時は `mukuroji-collaboration-local`
+- `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`: Workspace search document、saved view、ユーザー別 view preference を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-search-local`
 - `MUKUROJI_NOTIFICATIONS_TABLE` / `NOTIFICATIONS_TABLE_NAME`: ユーザー別の durable notification timeline と配信設定を保存する DynamoDB table 名。未指定時は `mukuroji-notifications-local`
 - `NOTIFICATIONS_STATUS_INDEX_NAME`: unread/read/archive/snooze ごとの timeline query に使う GSI 名。未指定時は `RecipientStatusIndex`
 - `MUKUROJI_REALTIME_SESSIONS_TABLE` / `REALTIME_SESSIONS_TABLE_NAME`: WebSocket ticket と connection lease を保存する DynamoDB table 名。未指定時は `mukuroji-realtime-sessions-local`
@@ -129,7 +130,8 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 
 API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/teams/projects`, `/api/work-items`,
 `/api/teams/{teamId}/issues`, `/api/projects/{projectId}/issues`,
-`/api/projects/{projectId}/tasks`, `/api/audit/events`, `/api/notifications` で DynamoDB を読みます。ローカルでは Vite proxy により、
+`/api/projects/{projectId}/tasks`, `/api/search`, `/api/saved-views`, `/api/audit/events`,
+`/api/notifications` で DynamoDB を読みます。ローカルでは Vite proxy により、
 Web から `/api` を呼ぶだけで Floci 上の DynamoDB データを取得できます。
 
 Task / Issue の canonical schema、optimistic concurrency、legacy read compatibility、state migration / rollback は

@@ -77,6 +77,7 @@ import {
   type TaskStatus,
 } from '../tasks/api'
 import { getWorkspaceAccess, type WorkspaceMember } from '../workspace/api'
+import { useWorkspaceCommandMenu } from '../commands/WorkspaceCommandMenuContext'
 
 const taskTabs = ['table', 'board', 'gantt', 'calendar', 'file', 'permissions'] as const
 const taskStatuses = ['in-progress', 'review', 'todo', 'done'] as const
@@ -386,12 +387,13 @@ export function TaskPage() {
   const navigate = useNavigate()
   const params = useParams()
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const projectId = params.projectId ?? 'refero'
   const selectedTeamId = searchParams.get('teamId') ?? undefined
   const selectedIssueId = searchParams.get('issueId') ?? undefined
   const focusedCommentId = searchParams.get('commentId')?.trim() || undefined
   const focusedRootCommentId = searchParams.get('rootCommentId')?.trim() || undefined
+  const isCreateTaskRequested = searchParams.get('create') === '1'
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [projectUserQuery, setProjectUserQuery] = useState('')
@@ -598,6 +600,16 @@ export function TaskPage() {
       navigate('/', { replace: true })
     }
   }, [currentUserError, navigate])
+
+  useEffect(() => {
+    if (!isCreateTaskRequested) {
+      return
+    }
+
+    const nextSearchParams = new URLSearchParams(searchParams)
+    nextSearchParams.delete('create')
+    setSearchParams(nextSearchParams, { replace: true })
+  }, [isCreateTaskRequested, searchParams, setSearchParams])
 
   const userInitial =
     (user?.attributes.name ?? user?.attributes.email ?? user?.username ?? 'J')
@@ -844,6 +856,7 @@ export function TaskPage() {
       collaboration={collaboration}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}
+      defaultCreateTaskOpen={isCreateTaskRequested}
       focusedCommentId={focusedCommentId}
       focusedRootCommentId={focusedRootCommentId}
       inboxCount={inboxCount}
@@ -951,6 +964,7 @@ export function TaskScreen({
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(defaultCreateTaskOpen)
   const [createTaskError, setCreateTaskError] = useState<string | undefined>()
   const [isCreatingTask, setIsCreatingTask] = useState(false)
+  const commandMenu = useWorkspaceCommandMenu()
   const taskContentRef = useRef<HTMLDivElement>(null)
   const resolvedProjectName = projectName ?? projectId
   const resolvedActiveTeam = findTeamForProject(teams, projectId, activeProjectTeamId)
@@ -958,6 +972,13 @@ export function TaskScreen({
   const resolvedTeamName = teamName ?? resolvedActiveTeam?.name ?? ''
   const activeTeamProjects = resolvedActiveTeam?.projects ?? []
   const selectedDetailTaskId = localSelectedDetailTaskId ?? initialSelectedTaskId
+
+  useEffect(() => {
+    if (defaultCreateTaskOpen) {
+      queueMicrotask(() => setIsCreateTaskOpen(true))
+    }
+  }, [defaultCreateTaskOpen])
+
   const visibleTasks = useMemo(
     () => {
       const filteredTasks = tasks.filter((task) => {
@@ -1028,6 +1049,7 @@ export function TaskScreen({
         onArchiveTeam={onArchiveTeam}
         onCreateProject={onCreateProject}
         onCreateTeam={onCreateTeam}
+        onOpenSearch={commandMenu.open}
         onSelectNav={onSelectNav}
         onCollapsedChange={setSidebarCollapsed}
         onSelectProject={onSelectProject}
@@ -1050,6 +1072,10 @@ export function TaskScreen({
           onArchiveTeam={onArchiveTeam}
           onCreateProject={onCreateProject}
           onCreateTeam={onCreateTeam}
+          onOpenSearch={() => {
+            setIsMobileSidebarOpen(false)
+            commandMenu.open?.()
+          }}
           onSelectNav={(navId) => {
             setIsMobileSidebarOpen(false)
             onSelectNav?.(navId)

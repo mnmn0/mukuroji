@@ -181,6 +181,14 @@ export type GetCollaborationThreadInput = {
   includeScopeState?: boolean
 }
 
+/** Search projection の再検証に使う comment snapshot 読み込み入力です。 */
+export type GetCollaborationCommentSnapshotInput = {
+  /** Work Item の collaboration entity key です。 */
+  entityKey: string
+  /** 読み込む Comment ID です。 */
+  commentId: string
+}
+
 /** Comment 作成入力です。 */
 export type CreateCollaborationCommentInput = WorkItemCollaborationScope & {
   /** Comment を作成する Workspace member key です。 */
@@ -325,6 +333,10 @@ export type PresenceLeaveInput = {
 export interface CollaborationClient {
   /** Root comments または replies を page 取得します。 */
   getThread(input: GetCollaborationThreadInput): Promise<CollaborationThreadPage>
+  /** Comment の current snapshot を consistent read します。 */
+  getCommentSnapshot(
+    input: GetCollaborationCommentSnapshotInput,
+  ): Promise<CollaborationComment | undefined>
   /** Root comment または reply を作成します。 */
   createComment(input: CreateCollaborationCommentInput): Promise<CollaborationComment>
   /** Comment 本文と mention を version 条件付きで更新します。 */
@@ -545,6 +557,15 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       presence,
       ...(replyRoot?.resolvedAt ? { threadResolved: true } : {}),
     } satisfies CollaborationThreadPage
+  }
+
+  /** Comment の current snapshot を consistent read します。 */
+  async getCommentSnapshot(input: GetCollaborationCommentSnapshotInput) {
+    await this.ensureLocalTable()
+    return this.getStoredComment(
+      requireText(input.entityKey, 'Collaboration entity key'),
+      requireIdentifier(input.commentId, 'Comment ID'),
+    )
   }
 
   /** Root comment または reply を作成します。 */
