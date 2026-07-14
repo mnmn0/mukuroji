@@ -2349,6 +2349,15 @@ async function acquireNewPasswordChallengeInvitationLock(email: string) {
     return undefined
   }
 
+  const activeMember = await workspaceAccess.getActiveMember(
+    workspaceUser.directoryId,
+    workspaceUser.profile.id,
+  )
+
+  if (activeMember) {
+    return undefined
+  }
+
   const invitation = await workspaceAccess.acquireInvitationAcceptanceLock(
     workspaceUser.directoryId,
     email,
@@ -7397,11 +7406,12 @@ export class AwsCognitoClient implements CognitoClient {
     input: CognitoWorkspaceUserCleanupInput,
   ): Promise<DeleteCognitoWorkspaceUserResult> {
     const { userPoolId } = this.readRequiredConfiguration()
-    const stableUsername = requireCognitoIdentityId(input.cognitoIdentityId)
+    // Cognito sub を stable lookup key として Username parameter へ意図的に渡します。
+    const stableIdentityUsername = requireCognitoIdentityId(input.cognitoIdentityId)
     const canonicalUsername = requireCognitoUsername(input.cognitoUsername)
-    const currentUser = await this.findWorkspaceUserByUsername(stableUsername)
+    const currentUser = await this.findWorkspaceUserByUsername(stableIdentityUsername)
 
-    if (!currentUser && canonicalUsername !== stableUsername) {
+    if (!currentUser && canonicalUsername !== stableIdentityUsername) {
       const canonicalUser = await this.findWorkspaceUserByUsername(canonicalUsername)
 
       if (!canonicalUser) {
@@ -7444,7 +7454,7 @@ export class AwsCognitoClient implements CognitoClient {
     try {
       await this.client.send(new AdminDeleteUserCommand({
         UserPoolId: userPoolId,
-        Username: stableUsername,
+        Username: stableIdentityUsername,
       }))
       return 'deleted'
     } catch (error) {
@@ -7463,11 +7473,12 @@ export class AwsCognitoClient implements CognitoClient {
     input: CognitoWorkspaceUserCleanupInput,
   ): Promise<UnlinkCognitoWorkspaceUserResult> {
     const { userPoolId } = this.readRequiredConfiguration()
-    const stableUsername = requireCognitoIdentityId(input.cognitoIdentityId)
+    // Cognito sub を stable lookup key として Username parameter へ意図的に渡します。
+    const stableIdentityUsername = requireCognitoIdentityId(input.cognitoIdentityId)
     const canonicalUsername = requireCognitoUsername(input.cognitoUsername)
-    const currentUser = await this.findWorkspaceUserByUsername(stableUsername)
+    const currentUser = await this.findWorkspaceUserByUsername(stableIdentityUsername)
 
-    if (!currentUser && canonicalUsername !== stableUsername) {
+    if (!currentUser && canonicalUsername !== stableIdentityUsername) {
       const canonicalUser = await this.findWorkspaceUserByUsername(canonicalUsername)
 
       if (!canonicalUser) {
@@ -7503,7 +7514,7 @@ export class AwsCognitoClient implements CognitoClient {
     try {
       await this.client.send(new AdminDeleteUserAttributesCommand({
         UserPoolId: userPoolId,
-        Username: stableUsername,
+        Username: stableIdentityUsername,
         UserAttributeNames: ['custom:directory_id', 'custom:workspace_id'],
       }))
     } catch (error) {
@@ -7908,11 +7919,12 @@ export class FlociCognitoClient implements CognitoClient {
   async deleteWorkspaceUser(
     input: CognitoWorkspaceUserCleanupInput,
   ): Promise<DeleteCognitoWorkspaceUserResult> {
-    const stableUsername = requireCognitoIdentityId(input.cognitoIdentityId)
+    // Cognito sub を stable lookup key として Username parameter へ意図的に渡します。
+    const stableIdentityUsername = requireCognitoIdentityId(input.cognitoIdentityId)
     const canonicalUsername = requireCognitoUsername(input.cognitoUsername)
-    const currentUser = await this.findWorkspaceUserByUsername(stableUsername)
+    const currentUser = await this.findWorkspaceUserByUsername(stableIdentityUsername)
 
-    if (!currentUser && canonicalUsername !== stableUsername) {
+    if (!currentUser && canonicalUsername !== stableIdentityUsername) {
       const canonicalUser = await this.findWorkspaceUserByUsername(canonicalUsername)
 
       if (!canonicalUser) {
@@ -7955,7 +7967,7 @@ export class FlociCognitoClient implements CognitoClient {
     try {
       await this.request<Record<string, never>>('AdminDeleteUser', {
         UserPoolId: await this.resolveUserPoolId(),
-        Username: stableUsername,
+        Username: stableIdentityUsername,
       })
       return 'deleted'
     } catch (error) {
@@ -7971,11 +7983,12 @@ export class FlociCognitoClient implements CognitoClient {
   async unlinkWorkspaceUser(
     input: CognitoWorkspaceUserCleanupInput,
   ): Promise<UnlinkCognitoWorkspaceUserResult> {
-    const stableUsername = requireCognitoIdentityId(input.cognitoIdentityId)
+    // Cognito sub を stable lookup key として Username parameter へ意図的に渡します。
+    const stableIdentityUsername = requireCognitoIdentityId(input.cognitoIdentityId)
     const canonicalUsername = requireCognitoUsername(input.cognitoUsername)
-    const currentUser = await this.findWorkspaceUserByUsername(stableUsername)
+    const currentUser = await this.findWorkspaceUserByUsername(stableIdentityUsername)
 
-    if (!currentUser && canonicalUsername !== stableUsername) {
+    if (!currentUser && canonicalUsername !== stableIdentityUsername) {
       const canonicalUser = await this.findWorkspaceUserByUsername(canonicalUsername)
 
       if (!canonicalUser) {
@@ -8011,7 +8024,7 @@ export class FlociCognitoClient implements CognitoClient {
     try {
       await this.request<Record<string, never>>('AdminDeleteUserAttributes', {
         UserPoolId: await this.resolveUserPoolId(),
-        Username: stableUsername,
+        Username: stableIdentityUsername,
         UserAttributeNames: ['custom:directory_id', 'custom:workspace_id'],
       })
     } catch (error) {

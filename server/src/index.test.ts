@@ -2342,6 +2342,10 @@ test('holds the invitation acceptance lock across the Cognito password challenge
       Parameters<typeof configureApiClientsForTest>[0]['cognito']
     >,
     workspaceAccess: {
+      async getActiveMember() {
+        sequence.push('get-active-member')
+        return undefined
+      },
       async acquireInvitationAcceptanceLock() {
         sequence.push('acquire-lock')
         return invitation
@@ -2383,11 +2387,98 @@ test('holds the invitation acceptance lock across the Cognito password challenge
   expect(response.status).toBe(200)
   expect(sequence).toEqual([
     'find-user',
+    'get-active-member',
     'acquire-lock',
     'complete-challenge',
     'get-user',
     'reconcile-member',
     'release-lock',
+  ])
+})
+
+test('lets an active Workspace member complete a new password challenge without an invitation lock', async () => {
+  const sequence: string[] = []
+  const activeMember = {
+    id: 'member@example.com',
+    memberKey: 'member@example.com',
+    email: 'member@example.com',
+    role: 'member' as const,
+    status: 'active' as const,
+    version: 1,
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z',
+  }
+  configureApiClientsForTest({
+    cognito: {
+      async findWorkspaceUser() {
+        sequence.push('find-user')
+        return {
+          profile: {
+            id: 'member@example.com',
+            username: 'ExistingMemberIdentity',
+            email: 'member@example.com',
+            enabled: true,
+            status: 'FORCE_CHANGE_PASSWORD',
+          },
+          identityId: 'sub-existing-member',
+          directoryId: 'workspace#production',
+        }
+      },
+      async respondToNewPasswordChallenge() {
+        sequence.push('complete-challenge')
+        return { AuthenticationResult: createFakeAuthTokenSet() }
+      },
+      async getUser() {
+        sequence.push('get-user')
+        return {
+          Username: 'ExistingMemberIdentity',
+          UserAttributes: [
+            { Name: 'email', Value: 'member@example.com' },
+            { Name: 'custom:directory_id', Value: 'workspace#production' },
+            { Name: 'custom:workspace_id', Value: 'workspace#production' },
+          ],
+        }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['cognito']
+    >,
+    workspaceAccess: {
+      async getActiveMember() {
+        sequence.push('get-active-member')
+        return activeMember
+      },
+      async acquireInvitationAcceptanceLock() {
+        sequence.push('acquire-lock')
+        throw new Error('Active members must not acquire an invitation acceptance lock.')
+      },
+      async releaseInvitationAcceptanceLock() {
+        sequence.push('release-lock')
+        throw new Error('No invitation acceptance lock should be released.')
+      },
+      async reconcileAuthenticatedMember() {
+        sequence.push('reconcile-member')
+        return activeMember
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request('/api/auth/challenge/new-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'member@example.com',
+      newPassword: 'Permanent123!',
+      session: 'new-password-session',
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(sequence).toEqual([
+    'find-user',
+    'get-active-member',
+    'complete-challenge',
+    'get-user',
+    'reconcile-member',
   ])
 })
 
