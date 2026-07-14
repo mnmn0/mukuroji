@@ -1,3 +1,9 @@
+import type {
+  CustomFieldDefinition,
+  ResolvedWorkItemConfiguration,
+  WorkflowStatusCategory,
+  WorkItemConfiguration,
+} from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import useSWR from 'swr'
@@ -78,6 +84,22 @@ import {
 } from '../tasks/api'
 import { WorkspaceAccessPanelContainer } from '../workspace/WorkspaceAccessPanel'
 import { useWorkspaceCommandMenu } from '../commands/WorkspaceCommandMenuContext'
+import {
+  getWorkItemConfiguration,
+  putWorkItemConfiguration,
+  type WorkItemConfigurationScope,
+} from '../work-items/api'
+import {
+  WorkItemConfigurationPanel,
+  type WorkItemConfigurationScopeOption,
+} from '../work-items/WorkItemConfigurationPanel'
+import { isCustomFieldApplicable } from '../work-items/customFields'
+import {
+  formatWorkItemCustomFieldValue,
+  isCompletedWorkItem,
+  isOpenWorkItem,
+  resolveWorkflowStatusCategory,
+} from '../work-items/workItemDisplay'
 
 /**
  * サイドバーまたはチーム配下から表示できるワークスペース画面です。
@@ -175,6 +197,30 @@ type TeamProjectSummary = {
    * 次に開くべきタスクです。
    */
   nextTask?: ProjectTask
+}
+
+/**
+ * Workspace report で選択できる Team-scoped custom field です。
+ */
+type ReportCustomFieldOption = {
+  /** Selector value に使う Team と field の複合 key です。 */
+  key: string
+  /** Definition を所有する Team ID です。 */
+  teamId: string
+  /** Selector に表示する Team 名です。 */
+  teamName: string
+  /** 値の表示と filter に使う field definition です。 */
+  definition: CustomFieldDefinition
+}
+
+/**
+ * Report 用 configuration の一括取得結果です。
+ */
+type TeamWorkItemConfigurationLoadResult = {
+  /** Team ID ごとに取得できた resolved configuration です。 */
+  configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
+  /** 取得に失敗した Team ID です。 */
+  failedTeamIds: string[]
 }
 
 /**
@@ -286,6 +332,14 @@ type WorkspaceScreenProps = {
    * サイドバーとチーム画面に表示するチーム/プロジェクト階層です。
    */
   teams: ProjectDirectoryTeam[]
+  /**
+   * Workspace 既定の Work Item configuration を編集できるかどうかです。
+   */
+  canManageWorkspaceConfiguration?: boolean
+  /**
+   * Team manager 権限の server 判定を受ける configuration mutation を開始できるかどうかです。
+   */
+  canMutateTeamConfiguration?: boolean
   /**
    * チーム画面で選択中のチーム ID です。
    */
@@ -420,8 +474,19 @@ const emptyProjectTaskFailures: string[] = []
 const emptyTeamProjectMembers: TeamProjectMemberAccess[] = []
 const emptyTeamProjectMemberFailures: string[] = []
 const emptyUserIdentityAliases: string[] = []
+const emptyResolvedWorkItemConfigurations: Record<string, ResolvedWorkItemConfiguration> = {}
+const emptyTeamWorkItemConfigurationLoadResult: TeamWorkItemConfigurationLoadResult = {
+  configurationsByTeam: emptyResolvedWorkItemConfigurations,
+  failedTeamIds: [],
+}
 const myTaskKanbanStatuses = ['todo', 'in-progress', 'review', 'done'] as const satisfies readonly TaskStatus[]
-const reportStatusOrder = ['todo', 'in-progress', 'review', 'done'] as const satisfies readonly TaskStatus[]
+const reportStatusOrder = [
+  'backlog',
+  'unstarted',
+  'started',
+  'completed',
+  'canceled',
+] as const satisfies readonly WorkflowStatusCategory[]
 const reportPriorityOrder = ['high', 'medium', 'low'] as const satisfies readonly TaskPriority[]
 
 const apiSWRConfig = {
@@ -738,6 +803,8 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     <WorkspaceScreen
       accessToken={accessToken}
       activeTeamId={params.teamId}
+      canManageWorkspaceConfiguration={canManageStructure}
+      canMutateTeamConfiguration={canMutateContent}
       fontSizePreference={fontSizePreference}
       inboxCount={inboxCount}
       isLoading={isLoading}
@@ -800,6 +867,8 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
  */
 export function WorkspaceScreen({
   accessToken,
+  canManageWorkspaceConfiguration = false,
+  canMutateTeamConfiguration = false,
   locale,
   view,
   userLabel,
@@ -950,6 +1019,8 @@ export function WorkspaceScreen({
             <WorkspaceBody
               accessToken={accessToken}
               activeTeam={activeTeam}
+              canManageWorkspaceConfiguration={canManageWorkspaceConfiguration}
+              canMutateTeamConfiguration={canMutateTeamConfiguration}
               fontSizePreference={fontSizePreference}
               locale={locale}
               notificationInbox={notificationInbox}
@@ -983,6 +1054,8 @@ export function WorkspaceScreen({
 function WorkspaceBody({
   accessToken,
   activeTeam,
+  canManageWorkspaceConfiguration,
+  canMutateTeamConfiguration,
   fontSizePreference,
   locale,
   notificationInbox,
@@ -1008,6 +1081,8 @@ function WorkspaceBody({
 }: {
   accessToken?: string
   activeTeam?: ProjectDirectoryTeam
+  canManageWorkspaceConfiguration: boolean
+  canMutateTeamConfiguration: boolean
   fontSizePreference: FontSizePreference
   locale: Locale
   notificationInbox?: NotificationInboxController
@@ -1090,6 +1165,8 @@ function WorkspaceBody({
       ) : null}
       {view === 'reports' ? (
         <ReportsView
+          accessToken={accessToken}
+          locale={locale}
           onSelectProject={onSelectProject}
           t={t}
           tasks={tasks}
@@ -1101,10 +1178,13 @@ function WorkspaceBody({
       {view === 'settings' ? (
         <SettingsView
           accessToken={accessToken}
+          canManageWorkspaceConfiguration={canManageWorkspaceConfiguration}
+          canMutateTeamConfiguration={canMutateTeamConfiguration}
           fontSizePreference={fontSizePreference}
           locale={locale}
           notificationPreferences={notificationPreferences}
           t={t}
+          teams={teams}
           userLabel={userLabel}
           onFontSizePreferenceChange={onFontSizePreferenceChange}
           onLocaleChange={onLocaleChange}
@@ -1626,12 +1706,16 @@ function DashboardWorkspaceView({
 }
 
 function ReportsView({
+  accessToken,
+  locale,
   onOpenTask,
   onSelectProject,
   t,
   tasks,
   teams,
 }: {
+  accessToken?: string
+  locale: Locale
   onOpenTask?: (task: ProjectTask) => void
   onSelectProject?: (projectId: string, teamId: string) => void
   t: (key: MessageKey) => string
@@ -1640,9 +1724,55 @@ function ReportsView({
 }) {
   const [projectSearchQuery, setProjectSearchQuery] = useState('')
   const [showAttentionOnly, setShowAttentionOnly] = useState(false)
-  const openTasks = tasks.filter((task) => task.status !== 'done')
-  const attentionTasks = createInboxTasks(tasks)
-  const projectRows = createReportProjectRows(teams, tasks)
+  const [selectedCustomFieldKey, setSelectedCustomFieldKey] = useState('')
+  const [customFieldValueQuery, setCustomFieldValueQuery] = useState('')
+  const teamIds = useMemo(() => teams.map((team) => team.id).sort(), [teams])
+  const configurationKey = accessToken && teamIds.length > 0
+    ? ['report-work-item-configurations', accessToken, teamIds.join('\0')] as const
+    : null
+  const { data: configurationLoadResult = emptyTeamWorkItemConfigurationLoadResult } = useSWR(
+    configurationKey,
+    ([, currentAccessToken]) => loadTeamWorkItemConfigurations(currentAccessToken, teamIds),
+    apiSWRConfig,
+  )
+  const { configurationsByTeam, failedTeamIds } = configurationLoadResult
+  const customFieldOptions = useMemo<ReportCustomFieldOption[]>(() =>
+    teams.flatMap((team) =>
+      (configurationsByTeam[team.id]?.configuration.customFields ?? []).map((definition) => ({
+        definition,
+        key: `${team.id}:${definition.id}`,
+        teamId: team.id,
+        teamName: team.name,
+      })),
+    ), [configurationsByTeam, teams])
+  const selectedCustomField = customFieldOptions.find(
+    (option) => option.key === selectedCustomFieldKey,
+  )
+  const normalizedCustomFieldValueQuery = normalizeWorkspaceSearchText(customFieldValueQuery)
+  const reportTasks = selectedCustomField
+    ? tasks.filter((task) => {
+        if (task.teamId !== selectedCustomField.teamId) {
+          return false
+        }
+        if (!isCustomFieldApplicable(
+          selectedCustomField.definition,
+          task.assignedProjectId,
+        )) {
+          return false
+        }
+        if (!normalizedCustomFieldValueQuery) {
+          return true
+        }
+        return normalizeWorkspaceSearchText(formatReportCustomFieldValue(
+          task,
+          selectedCustomField.definition,
+          locale,
+        )).includes(normalizedCustomFieldValueQuery)
+      })
+    : tasks
+  const openTasks = reportTasks.filter((task) => isOpenWorkItem(task))
+  const attentionTasks = createInboxTasks(reportTasks)
+  const projectRows = createReportProjectRows(teams, reportTasks)
   const normalizedProjectSearchQuery = normalizeWorkspaceSearchText(projectSearchQuery)
   const filteredProjectRows = projectRows.filter((project) => {
     if (showAttentionOnly && project.attentionTaskCount === 0) {
@@ -1652,10 +1782,12 @@ function ReportsView({
     return !normalizedProjectSearchQuery ||
       normalizeWorkspaceSearchText(`${project.name} ${project.teamName}`).includes(normalizedProjectSearchQuery)
   })
-  const statusItems = reportStatusOrder.map((status) => ({
-    count: tasks.filter((task) => task.status === status).length,
-    id: status,
-    label: t(`tasks.status.${status}`),
+  const statusItems = reportStatusOrder.map((category) => ({
+    count: reportTasks.filter(
+      (task) => resolveWorkflowStatusCategory(task) === category,
+    ).length,
+    id: category,
+    label: t(`workItems.statusCategory.${category}`),
   }))
   const priorityItems = reportPriorityOrder.map((priority) => ({
     count: openTasks.filter((task) => task.priority === priority).length,
@@ -1663,18 +1795,29 @@ function ReportsView({
     label: t(`tasks.priority.${priority}`),
   }))
   const attentionProjectCount = projectRows.filter((project) => project.attentionTaskCount > 0).length
-  const pendingApprovalCount = tasks.reduce(
+  const pendingApprovalCount = reportTasks.reduce(
     (count, task) => count + (task.approvalSummary?.pendingCount ?? 0),
     0,
   )
-  const overdueApprovalCount = tasks.reduce(
+  const overdueApprovalCount = reportTasks.reduce(
     (count, task) => count + (task.approvalSummary?.overdueCount ?? 0),
     0,
   )
+  const customFieldDistribution = selectedCustomField
+    ? createCustomFieldDistribution(reportTasks, selectedCustomField.definition, locale)
+    : []
 
   return (
     <div className="grid gap-6" data-testid="reports-workbench">
-      <section className="workbench-toolbar flex flex-wrap items-center justify-between gap-4 p-4">
+      {failedTeamIds.length > 0 ? (
+        <p
+          className="rounded-md border border-amber-300 bg-amber-50 px-5 py-4 text-sm font-semibold text-amber-900"
+          role="alert"
+        >
+          {t('workspace.reports.configurationPartialError')}
+        </p>
+      ) : null}
+      <section className="workbench-toolbar grid grid-cols-[minmax(0,1fr)_minmax(260px,340px)_minmax(220px,300px)_auto] items-end gap-4 p-4 max-[1120px]:grid-cols-2 max-[680px]:grid-cols-1">
         <div>
           <p className="text-sm font-semibold text-[var(--workbench-text)]">
             {t('workspace.reports.snapshotTitle')}
@@ -1683,6 +1826,37 @@ function ReportsView({
             {t('workspace.reports.snapshotDescription')}
           </p>
         </div>
+        <label className="grid min-w-0 gap-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
+          {t('workspace.reports.customFieldFilterLabel')}
+          <select
+            className="workbench-input min-h-10 min-w-0 px-3 normal-case tracking-normal"
+            data-testid="reports-custom-field-filter"
+            value={selectedCustomFieldKey}
+            onChange={(event) => {
+              setSelectedCustomFieldKey(event.target.value)
+              setCustomFieldValueQuery('')
+            }}
+          >
+            <option value="">{t('workspace.reports.customFieldFilterAll')}</option>
+            {customFieldOptions.map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.teamName} · {option.definition.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="grid min-w-0 gap-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
+          {t('workspace.reports.customFieldValueLabel')}
+          <input
+            className="workbench-input min-h-10 min-w-0 px-3 normal-case tracking-normal"
+            data-testid="reports-custom-field-value-filter"
+            disabled={!selectedCustomField}
+            placeholder={t('workspace.reports.customFieldValuePlaceholder')}
+            type="search"
+            value={customFieldValueQuery}
+            onChange={(event) => setCustomFieldValueQuery(event.target.value)}
+          />
+        </label>
         <button
           className="workbench-button-secondary min-h-10 px-4"
           data-testid="reports-export-csv"
@@ -1703,7 +1877,7 @@ function ReportsView({
         <MetricCard
           label={t('workspace.reports.metric.completion')}
           testId="reports-metric-completion"
-          value={`${calculateProjectProgress(tasks)}%`}
+          value={`${calculateProjectProgress(reportTasks)}%`}
           tone="emerald"
         />
         <MetricCard
@@ -1745,7 +1919,7 @@ function ReportsView({
                 key={item.id}
                 label={item.label}
                 toneClassName={resolveReportStatusToneClassName(item.id)}
-                total={tasks.length}
+                total={reportTasks.length}
               />
             ))}
           </div>
@@ -1769,6 +1943,37 @@ function ReportsView({
           </div>
         </section>
       </div>
+
+      {selectedCustomField ? (
+        <section className="workbench-panel overflow-hidden" data-testid="reports-custom-field-distribution">
+          <SectionHeader
+            title={t('workspace.reports.customFieldDistributionTitle').replace(
+              '{field}',
+              selectedCustomField.definition.name,
+            )}
+            meta={t('workspace.reports.customFieldDistributionMeta').replace(
+              '{team}',
+              selectedCustomField.teamName,
+            )}
+          />
+          <div className="grid gap-4 border-t border-[var(--workbench-border)] p-5">
+            {customFieldDistribution.map((item) => (
+              <ReportDistributionRow
+                count={item.count}
+                key={item.label}
+                label={item.label}
+                toneClassName="bg-[var(--workbench-primary)]"
+                total={reportTasks.length}
+              />
+            ))}
+            {customFieldDistribution.length === 0 ? (
+              <p className="text-sm font-medium text-[var(--workbench-muted)]">
+                {t('workspace.empty.tasks')}
+              </p>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
 
       <section className="workbench-table overflow-hidden">
         <div className="grid gap-4 p-4">
@@ -2002,21 +2207,27 @@ const fontSizePreferenceLabelKeys: Record<FontSizePreference, MessageKey> = {
 
 function SettingsView({
   accessToken,
+  canManageWorkspaceConfiguration,
+  canMutateTeamConfiguration,
   fontSizePreference,
   locale,
   notificationPreferences,
   onFontSizePreferenceChange,
   onLocaleChange,
   t,
+  teams,
   userLabel,
 }: {
   accessToken?: string
+  canManageWorkspaceConfiguration: boolean
+  canMutateTeamConfiguration: boolean
   fontSizePreference: FontSizePreference
   locale: Locale
   notificationPreferences?: NotificationPreferencesController
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
   onLocaleChange?: (locale: Locale) => void
   t: (key: MessageKey) => string
+  teams: ProjectDirectoryTeam[]
   userLabel: string
 }) {
   return (
@@ -2105,6 +2316,16 @@ function SettingsView({
         <WorkspaceAccessPanelContainer accessToken={accessToken} locale={locale} />
       ) : null}
 
+      {accessToken ? (
+        <WorkItemConfigurationPanelContainer
+          accessToken={accessToken}
+          canManageWorkspaceConfiguration={canManageWorkspaceConfiguration}
+          canMutateTeamConfiguration={canMutateTeamConfiguration}
+          locale={locale}
+          teams={teams}
+        />
+      ) : null}
+
       <section className="workbench-panel p-5">
         <p className="workbench-eyebrow">{t('workspace.user.label')}</p>
         <h2 className="mt-2 text-lg font-semibold text-[var(--workbench-text)]">
@@ -2115,6 +2336,106 @@ function SettingsView({
         </p>
       </section>
     </div>
+  )
+}
+
+function WorkItemConfigurationPanelContainer({
+  accessToken,
+  canManageWorkspaceConfiguration,
+  canMutateTeamConfiguration,
+  locale,
+  teams,
+}: {
+  /** Configuration API の Authorization header に使う access token です。 */
+  accessToken: string
+  /** Workspace default を編集できるかどうかです。 */
+  canManageWorkspaceConfiguration: boolean
+  /** Team manager 権限の server 判定を受ける mutation を開始できるかどうかです。 */
+  canMutateTeamConfiguration: boolean
+  /** 表示 locale です。 */
+  locale: Locale
+  /** Scope selector に表示する Team 一覧です。 */
+  teams: ProjectDirectoryTeam[]
+}) {
+  const t = useMemo(() => createTranslator(locale), [locale])
+  const mutationRequestRunner = useRef(createMutationRequestRunner()).current
+  const [selectedScopeValue, setSelectedScopeValue] = useState('workspace')
+  const selectedTeamId = selectedScopeValue.startsWith('team:')
+    ? selectedScopeValue.slice('team:'.length)
+    : undefined
+  const selectedScope: WorkItemConfigurationScope = selectedTeamId
+    ? { kind: 'team', teamId: selectedTeamId }
+    : { kind: 'workspace' }
+  const scopeOptions = useMemo<WorkItemConfigurationScopeOption[]>(() => [
+    {
+      description: t('workItems.configuration.scopeWorkspaceDescription'),
+      label: t('workItems.configuration.scopeWorkspace'),
+      value: 'workspace',
+    },
+    ...teams.map((team) => ({
+      description: t('workItems.configuration.scopeTeamDescription').replace('{team}', team.name),
+      label: t('workItems.configuration.scopeTeam').replace('{team}', team.name),
+      value: `team:${team.id}`,
+    })),
+  ], [t, teams])
+  const configurationKey = [
+    'work-item-configuration-settings',
+    accessToken,
+    selectedScope.kind,
+    selectedTeamId ?? '',
+  ] as const
+  const {
+    data: resolvedConfiguration,
+    error,
+    isLoading,
+    mutate,
+  } = useSWR(
+    configurationKey,
+    () => getWorkItemConfiguration(accessToken, selectedScope),
+    apiSWRConfig,
+  )
+  const readOnly = selectedScope.kind === 'workspace'
+    ? !canManageWorkspaceConfiguration
+    : !canMutateTeamConfiguration
+
+  const handleSave = async (configuration: WorkItemConfiguration) => {
+    const isCreatingTeamOverride =
+      selectedScope.kind === 'team' && Boolean(resolvedConfiguration?.inheritedFrom)
+    const payload: WorkItemConfiguration = {
+      ...configuration,
+      revision: isCreatingTeamOverride ? 0 : configuration.revision,
+      scopeId: selectedScope.kind === 'team'
+        ? selectedScope.teamId
+        : configuration.scopeId,
+      scopeType: selectedScope.kind,
+      ...(isCreatingTeamOverride ? { updatedAt: undefined } : {}),
+    }
+    const saved = await mutationRequestRunner.run(
+      `work-item-configuration:${selectedScopeValue}`,
+      JSON.stringify(payload),
+      (context) => putWorkItemConfiguration(
+        accessToken,
+        selectedScope,
+        payload,
+        context,
+      ),
+    )
+    await mutate(saved, { revalidate: false })
+  }
+
+  return (
+    <WorkItemConfigurationPanel
+      configuration={resolvedConfiguration?.configuration}
+      errorMessage={error instanceof Error ? error.message : undefined}
+      inheritedFrom={resolvedConfiguration?.inheritedFrom}
+      isLoading={isLoading}
+      locale={locale}
+      readOnly={readOnly}
+      scopeOptions={scopeOptions}
+      selectedScopeValue={selectedScopeValue}
+      onSave={readOnly ? undefined : handleSave}
+      onScopeChange={setSelectedScopeValue}
+    />
   )
 }
 
@@ -2156,7 +2477,7 @@ function TeamOverviewView({
         <MetricCard
           label={t('workspace.metric.openTasks')}
           testId="team-overview-open-tasks"
-          value={teamTasks.filter((task) => task.status !== 'done').length}
+          value={teamTasks.filter((task) => isOpenWorkItem(task)).length}
           tone="emerald"
         />
         <MetricCard
@@ -2799,6 +3120,27 @@ function uniqueProjectIds(teams: ProjectDirectoryTeam[]) {
   )
 }
 
+async function loadTeamWorkItemConfigurations(
+  accessToken: string,
+  teamIds: readonly string[],
+): Promise<TeamWorkItemConfigurationLoadResult> {
+  const results = await Promise.allSettled(teamIds.map(async (teamId) => ({
+    configuration: await getWorkItemConfiguration(accessToken, { kind: 'team', teamId }),
+    teamId,
+  })))
+
+  return {
+    configurationsByTeam: Object.fromEntries(results.flatMap((result) =>
+      result.status === 'fulfilled'
+        ? [[result.value.teamId, result.value.configuration]]
+        : [],
+    )) as Record<string, ResolvedWorkItemConfiguration>,
+    failedTeamIds: results.flatMap((result, index) =>
+      result.status === 'rejected' ? [teamIds[index] ?? ''] : [],
+    ).filter(Boolean),
+  }
+}
+
 function createWorkspaceTaskKey(task: ProjectTask) {
   return `${task.teamId}:${task.assignedProjectId ?? ''}:${task.id}`
 }
@@ -2888,8 +3230,8 @@ function createDashboardSummary(
 ): DashboardSummary {
   return {
     projects: uniqueProjectIds(teams).length,
-    tasks: tasks.filter((task) => task.status !== 'done').length,
-    blocked: tasks.filter((task) => task.priority === 'high' && task.status !== 'done').length,
+    tasks: tasks.filter((task) => isOpenWorkItem(task)).length,
+    blocked: tasks.filter((task) => task.priority === 'high' && isOpenWorkItem(task)).length,
     updatedAt: new Date().toISOString(),
     source: 'dynamodb',
   }
@@ -2905,7 +3247,7 @@ function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) 
 
 function createActionQueueTasks(tasks: ProjectTask[]) {
   return [...tasks]
-    .filter((task) => task.status !== 'done' || hasApprovalAttention(task))
+    .filter((task) => isOpenWorkItem(task) || hasApprovalAttention(task))
     .sort((firstTask, secondTask) => {
       const firstScore = calculateWorkspaceActionScore(firstTask)
       const secondScore = calculateWorkspaceActionScore(secondTask)
@@ -2918,16 +3260,19 @@ function createActionQueueTasks(tasks: ProjectTask[]) {
     })
 }
 
+function isWorkspaceTaskInReview(task: ProjectTask) {
+  return (task.workflowStatusId ?? task.status) === 'review'
+}
+
 function createInboxTasks(tasks: ProjectTask[]) {
   return createActionQueueTasks(tasks)
     .filter((task) =>
       task.priority === 'high' ||
-      task.status === 'review' ||
+      isWorkspaceTaskInReview(task) ||
       isWorkspaceTaskOverdue(task) ||
       hasApprovalAttention(task),
     )
 }
-
 function isWorkspaceTaskAssignedToUser(
   task: ProjectTask,
   userIdentityAliases: readonly string[],
@@ -2970,7 +3315,7 @@ function createInboxReasonKeys(task: ProjectTask): MessageKey[] {
     reasonKeys.push('workspace.inbox.reason.high')
   }
 
-  if (task.status === 'review') {
+  if (isWorkspaceTaskInReview(task)) {
     reasonKeys.push('workspace.inbox.reason.review')
   }
 
@@ -3008,7 +3353,7 @@ function calculateWorkspaceActionScore(task: ProjectTask) {
     ((task.approvalSummary?.overdueCount ?? 0) > 0 ? 8 : 0) +
     (hasApprovalAttention(task) ? 4 : 0) +
     (task.priority === 'high' ? 5 : task.priority === 'medium' ? 2 : 0) +
-    (task.status === 'review' ? 4 : task.status === 'in-progress' ? 1 : 0)
+    (isWorkspaceTaskInReview(task) ? 4 : task.status === 'in-progress' ? 1 : 0)
 }
 
 function isOpenableWorkspaceTask(task: ProjectTask) {
@@ -3027,7 +3372,7 @@ function hasApprovalAttention(task: ProjectTask) {
 function isWorkspaceTaskOverdue(task: ProjectTask) {
   const dueDate = parseWorkspaceTaskDueDate(task.dueDate)
 
-  if (task.status === 'done' || !dueDate) {
+  if (!isOpenWorkItem(task) || !dueDate) {
     return false
   }
 
@@ -3059,15 +3404,15 @@ function calculateProjectProgress(tasks: ProjectTask[]) {
     return 0
   }
 
-  return Math.round((tasks.filter((task) => task.status === 'done').length / tasks.length) * 100)
+  return Math.round((tasks.filter((task) => isCompletedWorkItem(task)).length / tasks.length) * 100)
 }
 
 function resolvePortfolioRiskKey(tasks: ProjectTask[]): MessageKey {
-  if (tasks.some((task) => task.priority === 'high' && task.status !== 'done')) {
+  if (tasks.some((task) => task.priority === 'high' && isOpenWorkItem(task))) {
     return 'workspace.risk.watch'
   }
 
-  if (tasks.every((task) => task.status === 'done')) {
+  if (tasks.every((task) => isCompletedWorkItem(task))) {
     return 'workspace.risk.low'
   }
 
@@ -3078,9 +3423,11 @@ function createReportProjectRows(teams: ProjectDirectoryTeam[], tasks: ProjectTa
   return teams
     .flatMap((team) => team.projects.map((project) => {
       const projectTasks = filterTasksByTeamProjectIds(tasks, [project.id], team.id)
-      const openTaskCount = projectTasks.filter((task) => task.status !== 'done').length
-      const doneTaskCount = projectTasks.filter((task) => task.status === 'done').length
-      const reviewTaskCount = projectTasks.filter((task) => task.status === 'review').length
+      const openTaskCount = projectTasks.filter((task) => isOpenWorkItem(task)).length
+      const doneTaskCount = projectTasks.filter((task) => isCompletedWorkItem(task)).length
+      const reviewTaskCount = projectTasks.filter(
+        isWorkspaceTaskInReview,
+      ).length
       const attentionTaskCount = createInboxTasks(projectTasks).length
       const pendingApprovalCount = projectTasks.reduce(
         (count, task) => count + (task.approvalSummary?.pendingCount ?? 0),
@@ -3114,15 +3461,16 @@ function createReportProjectRows(teams: ProjectDirectoryTeam[], tasks: ProjectTa
     )
 }
 
-function resolveReportStatusToneClassName(status: TaskStatus) {
-  const toneClassNames: Record<TaskStatus, string> = {
-    todo: 'bg-slate-400',
-    'in-progress': 'bg-[var(--workbench-primary)]',
-    review: 'bg-amber-500',
-    done: 'bg-emerald-600',
+function resolveReportStatusToneClassName(category: WorkflowStatusCategory) {
+  const toneClassNames: Record<WorkflowStatusCategory, string> = {
+    backlog: 'bg-slate-400',
+    unstarted: 'bg-slate-500',
+    started: 'bg-[var(--workbench-primary)]',
+    completed: 'bg-emerald-600',
+    canceled: 'bg-red-600',
   }
 
-  return toneClassNames[status]
+  return toneClassNames[category]
 }
 
 function resolveReportPriorityToneClassName(priority: TaskPriority) {
@@ -3133,6 +3481,46 @@ function resolveReportPriorityToneClassName(priority: TaskPriority) {
   }
 
   return toneClassNames[priority]
+}
+
+function formatReportCustomFieldValue(
+  task: ProjectTask,
+  definition: CustomFieldDefinition,
+  locale: Locale,
+) {
+  const t = createTranslator(locale)
+
+  return formatWorkItemCustomFieldValue(task, definition, {
+    durationUnitLabels: {
+      days: t('workItems.durationUnit.days'),
+      hours: t('workItems.durationUnit.hours'),
+      minutes: t('workItems.durationUnit.minutes'),
+    },
+    emptyLabel: '',
+    falseLabel: t('workItems.fields.booleanFalse'),
+    locale,
+    trueLabel: t('workItems.fields.booleanTrue'),
+  })
+}
+
+function createCustomFieldDistribution(
+  tasks: readonly ProjectTask[],
+  definition: CustomFieldDefinition,
+  locale: Locale,
+) {
+  const counts = new Map<string, number>()
+  for (const task of tasks) {
+    const label = formatReportCustomFieldValue(task, definition, locale)
+    if (!label) {
+      continue
+    }
+    counts.set(label, (counts.get(label) ?? 0) + 1)
+  }
+
+  return [...counts.entries()]
+    .map(([label, count]) => ({ count, label }))
+    .sort((first, second) => second.count - first.count || first.label.localeCompare(second.label))
+    .slice(0, 8)
 }
 
 function downloadWorkspaceReportCsv(
@@ -3214,9 +3602,11 @@ function createTeamProjectSummaries(
       memberCount: memberIds.size,
       name: project.name,
       nextTask: createActionQueueTasks(projectTasks)[0],
-      openTaskCount: projectTasks.filter((task) => task.status !== 'done').length,
+      openTaskCount: projectTasks.filter((task) => isOpenWorkItem(task)).length,
       progress: calculateProjectProgress(projectTasks),
-      reviewTaskCount: projectTasks.filter((task) => task.status === 'review').length,
+      reviewTaskCount: projectTasks.filter(
+        isWorkspaceTaskInReview,
+      ).length,
     }
   })
 }
@@ -3277,7 +3667,7 @@ function createTeamMemberRows(
   return Array.from(rowsByMemberId.values())
     .map((row) => {
       const memberTasks = tasksByMemberId.get(row.id) ?? []
-      const openTasks = memberTasks.filter((task) => task.status !== 'done')
+      const openTasks = memberTasks.filter((task) => isOpenWorkItem(task))
       const openTaskCount = openTasks.length
       const nextDueDate = openTasks
         .map((task) => task.dueDate)
@@ -3295,7 +3685,9 @@ function createTeamMemberRows(
               (projectOrder.get(secondProject.projectId) ?? Number.MAX_SAFE_INTEGER) ||
             firstProject.projectName.localeCompare(secondProject.projectName),
         ),
-        reviewTaskCount: memberTasks.filter((task) => task.status === 'review').length,
+        reviewTaskCount: memberTasks.filter(
+          isWorkspaceTaskInReview,
+        ).length,
         taskCount: memberTasks.length,
       }
     })
@@ -3390,7 +3782,7 @@ function getProjectMemberRoleWeight(role?: ProjectMemberRole) {
 }
 
 function isAttentionWorkspaceTask(task: ProjectTask) {
-  return task.status !== 'done' && (task.priority === 'high' || isWorkspaceTaskOverdue(task))
+  return isOpenWorkItem(task) && (task.priority === 'high' || isWorkspaceTaskOverdue(task))
 }
 
 function formatTeamText(value: string, teamName?: string) {

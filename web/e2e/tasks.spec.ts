@@ -1,7 +1,17 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
-import { WORK_ITEM_SCHEMA_VERSION } from '@mukuroji/contracts'
-import type { ApprovalRequest, FileAnnotation, FileAttachment, FileVersion } from '@mukuroji/contracts'
+import {
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEMA_VERSION,
+  type ApprovalRequest,
+  type CustomFieldValue,
+  type FileAnnotation,
+  type FileAttachment,
+  type FileVersion,
+  type WorkItemConfiguration,
+  type WorkItemRelation,
+  type WorkItemRelationType,
+} from '@mukuroji/contracts'
 import { readFile } from 'node:fs/promises'
 import type { TeamIssue, TeamIssueActivity, TeamIssueComment } from '../src/issues/api'
 import type { InboxNotification, NotificationPreferences } from '../src/notifications/api'
@@ -10,6 +20,10 @@ import type { ProjectDirectoryTeam, ProjectMember, ProjectMemberRole, ProjectUse
 import type { ProjectTask } from '../src/tasks/api'
 import type { WorkspaceAccess } from '../src/workspace/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
+import {
+  teamWorkItemConfigurationFixture,
+  workspaceWorkItemConfigurationFixture,
+} from '../src/work-items/fixtures'
 
 const authSession = {
   accessToken: 'test-access-token',
@@ -20,6 +34,49 @@ const authSession = {
 const workItemConflictMessage =
   '別のメンバーが先に更新しました。最新の内容を確認してから、もう一度保存してください。'
 const notificationFixtureNow = new Date('2026-07-12T12:00:00.000Z')
+
+const legacyWorkItemConfiguration = {
+  scopeType: 'workspace',
+  scopeId: 'workspace-demo',
+  schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  revision: 1,
+  updatedAt: '2026-07-12T00:00:00.000Z',
+  workflow: {
+    id: 'legacy-workflow',
+    name: 'Default workflow',
+    initialStatusId: 'todo',
+    statuses: [
+      { id: 'todo', name: '未着手', category: 'unstarted', sortOrder: 0 },
+      { id: 'in-progress', name: '進行中', category: 'started', sortOrder: 1 },
+      { id: 'review', name: 'レビュー', category: 'started', sortOrder: 2 },
+      { id: 'done', name: '完了', category: 'completed', sortOrder: 3 },
+    ],
+    transitions: [
+      { fromStatusId: 'todo', toStatusId: 'in-progress' },
+      { fromStatusId: 'todo', toStatusId: 'review' },
+      { fromStatusId: 'todo', toStatusId: 'done' },
+      { fromStatusId: 'in-progress', toStatusId: 'todo' },
+      { fromStatusId: 'in-progress', toStatusId: 'review' },
+      { fromStatusId: 'in-progress', toStatusId: 'done' },
+      { fromStatusId: 'review', toStatusId: 'todo' },
+      { fromStatusId: 'review', toStatusId: 'in-progress' },
+      { fromStatusId: 'review', toStatusId: 'done' },
+      { fromStatusId: 'done', toStatusId: 'todo' },
+      { fromStatusId: 'done', toStatusId: 'in-progress' },
+      { fromStatusId: 'done', toStatusId: 'review' },
+    ],
+  },
+  customFields: [],
+} satisfies WorkItemConfiguration
+
+const reciprocalWorkItemRelationTypes = {
+  parent: 'child',
+  child: 'parent',
+  blocks: 'blockedBy',
+  blockedBy: 'blocks',
+  related: 'related',
+  duplicate: 'duplicate',
+} as const satisfies Record<WorkItemRelationType, WorkItemRelationType>
 
 /**
  * API stub が受けた request 数です。
@@ -105,6 +162,22 @@ type MockRequestCounts = {
    * タスク状態更新 API の request 数です。
    */
   taskStatusUpdates: number
+  /**
+   * Work Item configuration 取得 API の request 数です。
+   */
+  workItemConfigurationReads: number
+  /**
+   * Work Item configuration 保存 API の request 数です。
+   */
+  workItemConfigurationWrites: number
+  /**
+   * Work Item relation 作成 API の request 数です。
+   */
+  workItemRelationCreates: number
+  /**
+   * Work Item relation 削除 API の request 数です。
+   */
+  workItemRelationDeletes: number
 }
 
 const mockRequestCountsByPage = new WeakMap<Page, MockRequestCounts>()
@@ -155,6 +228,22 @@ type MockAuthenticatedTaskPageOptions = {
    * Notification preferences API が初期状態として返す設定です。
    */
   notificationPreferences?: NotificationPreferences
+  /**
+   * Workspace scope で取得・保存する Work Item configuration です。
+   */
+  workspaceWorkItemConfiguration?: WorkItemConfiguration
+  /**
+   * Team scope の override として取得・保存する configuration です。
+   */
+  teamWorkItemConfigurations?: Partial<Record<string, WorkItemConfiguration>>
+  /**
+   * Work Item configuration 取得を 500 にする Team ID です。
+   */
+  failedWorkItemConfigurationTeamIds?: readonly string[]
+  /**
+   * `teamId\0issueId` ごとの初期 Work Item relation です。
+   */
+  workItemRelationsByIssue?: Partial<Record<string, readonly WorkItemRelation[]>>
 }
 
 /**
@@ -191,6 +280,10 @@ async function mockAuthenticatedTaskPage(
     issueComments: 0,
     taskCreates: 0,
     taskStatusUpdates: 0,
+    workItemConfigurationReads: 0,
+    workItemConfigurationWrites: 0,
+    workItemRelationCreates: 0,
+    workItemRelationDeletes: 0,
   }
   const projectDirectory: ProjectDirectoryTeam[] = projectDirectoryFixtures.map((team) => ({
     ...team,
@@ -207,6 +300,9 @@ async function mockAuthenticatedTaskPage(
     'design-team': [...(options.teamIssuesByTeam?.['design-team'] ?? [])],
   }
   const pendingRevisionConflictIssueKeys = new Set(options.revisionConflictIssueKeys ?? [])
+  const failedWorkItemConfigurationTeamIds = new Set(
+    options.failedWorkItemConfigurationTeamIds ?? [],
+  )
   const issueCommentsByIssue: Record<string, TeamIssueComment[]> = {}
   const issueActivityByIssue: Record<string, TeamIssueActivity[]> = {}
   let notifications = (options.notifications ?? createDefaultNotifications()).map((notification) => ({
@@ -216,6 +312,26 @@ async function mockAuthenticatedTaskPage(
   let notificationPreferences = cloneNotificationPreferences(
     options.notificationPreferences ?? createDefaultNotificationPreferences(),
   )
+  let workspaceWorkItemConfiguration = structuredClone(
+    options.workspaceWorkItemConfiguration ?? legacyWorkItemConfiguration,
+  )
+  const teamWorkItemConfigurations: Partial<Record<string, WorkItemConfiguration>> =
+    Object.fromEntries(
+      Object.entries(options.teamWorkItemConfigurations ?? {}).map(([teamId, configuration]) => [
+        teamId,
+        structuredClone(configuration),
+      ]),
+    )
+  const workItemRelationsByIssue: Record<string, WorkItemRelation[]> = Object.fromEntries(
+    Object.entries(options.workItemRelationsByIssue ?? {}).map(([issueKey, relations]) => [
+      issueKey,
+      structuredClone([...(relations ?? [])]),
+    ]),
+  )
+  const relationGraphRevisionByTeam: Record<string, number> = {
+    'core-team': 1,
+    'design-team': 1,
+  }
   const projectMembersByProject: Record<string, ProjectMember[]> = {
     refero: [
       {
@@ -398,6 +514,87 @@ async function mockAuthenticatedTaskPage(
   await page.route('**/api/workspace/access', async (route) => {
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
     await route.fulfill({ json: workspaceAccess })
+  })
+
+  await page.route('**/api/work-item-configuration', async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    if (route.request().method() === 'GET') {
+      requestCounts.workItemConfigurationReads += 1
+      await route.fulfill({
+        json: {
+          configuration: structuredClone(workspaceWorkItemConfiguration),
+        },
+      })
+      return
+    }
+
+    if (route.request().method() === 'PUT') {
+      requestCounts.workItemConfigurationWrites += 1
+      const body = route.request().postDataJSON() as WorkItemConfiguration
+
+      workspaceWorkItemConfiguration = {
+        ...structuredClone(body),
+        scopeType: 'workspace',
+        scopeId: workspaceWorkItemConfiguration.scopeId,
+        revision: body.revision + 1,
+        updatedAt: '2026-07-12T12:00:00.000Z',
+      }
+      await route.fulfill({
+        json: {
+          configuration: structuredClone(workspaceWorkItemConfiguration),
+        },
+      })
+      return
+    }
+
+    await route.fallback()
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/work-item-configuration$/, async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    const teamId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[3] ?? '')
+    const teamConfiguration = teamWorkItemConfigurations[teamId]
+
+    if (route.request().method() === 'GET') {
+      requestCounts.workItemConfigurationReads += 1
+      if (failedWorkItemConfigurationTeamIds.has(teamId)) {
+        await route.fulfill({ json: { message: 'configuration unavailable' }, status: 500 })
+        return
+      }
+      await route.fulfill({
+        json: teamConfiguration
+          ? { configuration: structuredClone(teamConfiguration) }
+          : {
+              configuration: structuredClone(workspaceWorkItemConfiguration),
+              inheritedFrom: 'workspace',
+            },
+      })
+      return
+    }
+
+    if (route.request().method() === 'PUT') {
+      requestCounts.workItemConfigurationWrites += 1
+      const body = route.request().postDataJSON() as WorkItemConfiguration
+      const savedConfiguration = {
+        ...structuredClone(body),
+        scopeType: 'team',
+        scopeId: teamId,
+        revision: body.revision + 1,
+        updatedAt: '2026-07-12T12:00:00.000Z',
+      } satisfies WorkItemConfiguration
+
+      teamWorkItemConfigurations[teamId] = savedConfiguration
+      await route.fulfill({
+        json: {
+          configuration: structuredClone(savedConfiguration),
+        },
+      })
+      return
+    }
+
+    await route.fallback()
   })
 
   await page.route('**/api/teams/projects**', async (route) => {
@@ -807,13 +1004,19 @@ async function mockAuthenticatedTaskPage(
       const body = route.request().postDataJSON() as {
         assignedProjectId?: string
         assigneeUserId?: string
+        customFieldValues?: Record<string, CustomFieldValue>
         description?: string
         dueDate?: string
         priority?: TeamIssue['priority']
         status?: TeamIssue['status']
         title?: string
+        workflowStatusId?: string
       }
       const assigneeUser = projectUsers.find((user) => user.id === body.assigneeUserId)
+      const configuration = teamWorkItemConfigurations[teamId] ?? workspaceWorkItemConfiguration
+      const workflowStatus = configuration.workflow.statuses.find(
+        (status) => status.id === body.workflowStatusId,
+      )
       const issue = {
         schemaVersion: WORK_ITEM_SCHEMA_VERSION,
         revision: 1,
@@ -826,6 +1029,10 @@ async function mockAuthenticatedTaskPage(
         assigneeEmail: assigneeUser?.email ?? 'sato@example.com',
         assigneeName: assigneeUser?.name ?? '佐藤 花子',
         status: body.status ?? 'todo',
+        workflowStatusId: workflowStatus?.id ?? body.workflowStatusId ?? body.status ?? 'todo',
+        statusCategory: workflowStatus?.category,
+        workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        customFieldValues: structuredClone(body.customFieldValues ?? {}),
         dueDate: body.dueDate ?? '2026/06/20',
         priority: body.priority ?? 'medium',
         createdAt: '2026-06-08T00:00:00.000Z',
@@ -930,12 +1137,17 @@ async function mockAuthenticatedTaskPage(
         return
       }
 
+      const updatedWorkflowStatus = (
+        teamWorkItemConfigurations[teamId] ?? workspaceWorkItemConfiguration
+      ).workflow.statuses.find((status) => status.id === body.workflowStatusId)
       const updatedIssue = {
         ...issue,
         ...patch,
         assignedProjectId: body.assignedProjectId === null
           ? undefined
           : body.assignedProjectId ?? issue.assignedProjectId,
+        statusCategory: updatedWorkflowStatus?.category ?? issue.statusCategory,
+        workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
         revision: issue.revision + 1,
         updatedAt: '2026-06-08T02:00:00.000Z',
       } satisfies TeamIssue
@@ -948,6 +1160,9 @@ async function mockAuthenticatedTaskPage(
       })
       return
     }
+
+    const teamConfiguration = teamWorkItemConfigurations[teamId]
+    const collaborationKey = createIssueCollaborationKey(teamId, issueId)
 
     await route.fulfill({
       json: {
@@ -969,6 +1184,14 @@ async function mockAuthenticatedTaskPage(
             createdAt: '2026-06-08T00:00:00.000Z',
           },
         ],
+        resolvedConfiguration: teamConfiguration
+          ? { configuration: structuredClone(teamConfiguration) }
+          : {
+              configuration: structuredClone(workspaceWorkItemConfiguration),
+              inheritedFrom: 'workspace',
+            },
+        relations: structuredClone(workItemRelationsByIssue[collaborationKey] ?? []),
+        relationGraphRevision: relationGraphRevisionByTeam[teamId] ?? 0,
       },
     })
   })
@@ -985,6 +1208,71 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/relations$/, async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.fallback()
+      return
+    }
+
+    requestCounts.workItemRelationCreates += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    const pathSegments = new URL(route.request().url()).pathname.split('/')
+    const teamId = decodeURIComponent(pathSegments[3] ?? '')
+    const sourceWorkItemId = decodeURIComponent(pathSegments[5] ?? '')
+    const body = route.request().postDataJSON() as {
+      expectedGraphRevision?: number
+      targetWorkItemId?: string
+      type?: WorkItemRelationType
+    }
+    const targetWorkItemId = body.targetWorkItemId ?? ''
+    const relationType = body.type ?? 'related'
+    const currentGraphRevision = relationGraphRevisionByTeam[teamId] ?? 0
+
+    expect(body.expectedGraphRevision).toBe(currentGraphRevision)
+
+    const relation = {
+      sourceWorkItemId,
+      targetWorkItemId,
+      type: relationType,
+      createdAt: '2026-07-12T12:30:00.000Z',
+    } satisfies WorkItemRelation
+    const reciprocalRelation = {
+      sourceWorkItemId: targetWorkItemId,
+      targetWorkItemId: sourceWorkItemId,
+      type: reciprocalWorkItemRelationTypes[relationType],
+      createdAt: relation.createdAt,
+    } satisfies WorkItemRelation
+    const sourceKey = createIssueCollaborationKey(teamId, sourceWorkItemId)
+    const targetKey = createIssueCollaborationKey(teamId, targetWorkItemId)
+
+    workItemRelationsByIssue[sourceKey] = [
+      ...(workItemRelationsByIssue[sourceKey] ?? []).filter(
+        (candidate) =>
+          candidate.type !== relation.type || candidate.targetWorkItemId !== targetWorkItemId,
+      ),
+      relation,
+    ]
+    workItemRelationsByIssue[targetKey] = [
+      ...(workItemRelationsByIssue[targetKey] ?? []).filter(
+        (candidate) =>
+          candidate.type !== reciprocalRelation.type ||
+          candidate.targetWorkItemId !== sourceWorkItemId,
+      ),
+      reciprocalRelation,
+    ]
+    relationGraphRevisionByTeam[teamId] = currentGraphRevision + 1
+
+    await route.fulfill({
+      status: 201,
+      json: {
+        relation,
+        reciprocalRelation,
+        graphRevision: relationGraphRevisionByTeam[teamId],
+      },
+    })
+  })
+
   await page.route(/.*\/api\/teams\/[^/]+\/projects\/[^/]+\/files$/, async (route) => {
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
     await route.fulfill({
@@ -996,6 +1284,61 @@ async function mockAuthenticatedTaskPage(
       },
     })
   })
+
+  await page.route(
+    /.*\/api\/teams\/[^/]+\/issues\/[^/]+\/relations\/[^/]+\/[^/]+$/,
+    async (route) => {
+      if (route.request().method() !== 'DELETE') {
+        await route.fallback()
+        return
+      }
+
+      requestCounts.workItemRelationDeletes += 1
+      expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+      const pathSegments = new URL(route.request().url()).pathname.split('/')
+      const teamId = decodeURIComponent(pathSegments[3] ?? '')
+      const sourceWorkItemId = decodeURIComponent(pathSegments[5] ?? '')
+      const targetWorkItemId = decodeURIComponent(pathSegments[7] ?? '')
+      const relationType = decodeURIComponent(pathSegments[8] ?? '') as WorkItemRelationType
+      const body = route.request().postDataJSON() as { expectedGraphRevision?: number }
+      const currentGraphRevision = relationGraphRevisionByTeam[teamId] ?? 0
+
+      expect(body.expectedGraphRevision).toBe(currentGraphRevision)
+
+      const relation = {
+        sourceWorkItemId,
+        targetWorkItemId,
+        type: relationType,
+      } satisfies WorkItemRelation
+      const reciprocalRelation = {
+        sourceWorkItemId: targetWorkItemId,
+        targetWorkItemId: sourceWorkItemId,
+        type: reciprocalWorkItemRelationTypes[relationType],
+      } satisfies WorkItemRelation
+      const sourceKey = createIssueCollaborationKey(teamId, sourceWorkItemId)
+      const targetKey = createIssueCollaborationKey(teamId, targetWorkItemId)
+
+      workItemRelationsByIssue[sourceKey] = (workItemRelationsByIssue[sourceKey] ?? []).filter(
+        (candidate) =>
+          candidate.type !== relation.type || candidate.targetWorkItemId !== targetWorkItemId,
+      )
+      workItemRelationsByIssue[targetKey] = (workItemRelationsByIssue[targetKey] ?? []).filter(
+        (candidate) =>
+          candidate.type !== reciprocalRelation.type ||
+          candidate.targetWorkItemId !== sourceWorkItemId,
+      )
+      relationGraphRevisionByTeam[teamId] = currentGraphRevision + 1
+
+      await route.fulfill({
+        json: {
+          relation,
+          reciprocalRelation,
+          graphRevision: relationGraphRevisionByTeam[teamId],
+        },
+      })
+    },
+  )
 
   await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/collaboration(?:\?.*)?$/, async (route) => {
     const pathSegments = new URL(route.request().url()).pathname.split('/')
@@ -1804,6 +2147,160 @@ test.describe('authenticated task page', () => {
     await expect(page.getByText('ブランドガイドラインの更新')).toBeVisible()
   })
 
+  test('Issue #21: 動的 workflow status と custom field で Team Issue を作成・表示できる', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamWorkItemConfigurations: {
+        'core-team': teamWorkItemConfigurationFixture,
+      },
+    })
+    await page.goto('/teams/core-team/issues')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('button', { name: '新規 Issue' }).click()
+    const createIssueForm = page.getByTestId('create-issue-form')
+
+    await createIssueForm.locator('input[name="title"]').fill('Configurable delivery')
+    await createIssueForm.locator('select[name="assignedProjectId"]').selectOption('refero')
+    await createIssueForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
+    await createIssueForm.locator('select[name="workflowStatusId"]').selectOption('active')
+    await createIssueForm.getByLabel('Customer impact').fill(
+      'Enterprise-customer-impact',
+    )
+    await createIssueForm.getByLabel('Story points').fill('8')
+    await createIssueForm.getByLabel('Budget').fill('1200000')
+    await createIssueForm.getByRole('button', { name: 'Issue を作成' }).click()
+
+    const issueRow = page.getByTestId('issue-row-configurable-delivery').locator('..').locator('..')
+
+    await expect(issueRow).toContainText('In progress')
+    await expect(issueRow).toContainText(
+      'Customer impact: Enterprise-customer-impact',
+    )
+    await expect(issueRow).toContainText('Story points: 8')
+    await page.getByTestId('team-issues-category-filter').selectOption('started')
+    await expect(issueRow).toBeVisible()
+    await page.getByTestId('team-issues-custom-field-filter').selectOption('customer-impact')
+    await page.locator('#team-issues-custom-field-value-filter').fill('enterprise-customer')
+    await expect(issueRow).toBeVisible()
+    await page.locator('#team-issues-custom-field-value-filter').fill('does-not-match')
+    await expect(issueRow).toBeHidden()
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=configurable-delivery')
+    await page.getByTestId('project-tasks-category-filter').selectOption('started')
+    await page.getByTestId('project-tasks-custom-field-filter').selectOption('story-points')
+    await page.locator('#project-tasks-custom-field-value-filter').fill('8')
+    await expect(page.getByTestId('task-row-configurable-delivery')).toBeVisible()
+    await page.locator('#project-tasks-custom-field-value-filter').fill('5')
+    await expect(page.getByTestId('task-row-configurable-delivery')).toBeHidden()
+    expect(requestCounts.issueCreates).toBe(1)
+    expect(requestCounts.workItemConfigurationReads).toBeGreaterThan(0)
+  })
+
+  test('Issue #21: configuration 取得失敗時はエラーを表示し更新を無効化する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      failedWorkItemConfigurationTeamIds: ['core-team'],
+      teamIssuesByTeam: {
+        'core-team': [createStoredTeamIssue({
+          id: 'configuration-failure',
+          title: 'Configuration failure',
+          status: 'in-progress',
+        })],
+      },
+    })
+    await page.goto('/teams/core-team/issues?issueId=configuration-failure')
+
+    await expect(page.getByRole('alert')).toContainText(
+      'Work Item 設定を取得できませんでした。',
+    )
+    await expect(page.getByRole('button', { name: '新規 Issue' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '変更を保存' })).toBeDisabled()
+  })
+
+  test('Issue #21: Team 内 Work Item relation を追加・解除できる', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            id: 'relation-source',
+            title: 'Relation source',
+            status: 'in-progress',
+          }),
+          createStoredTeamIssue({
+            assignedProjectId: 'product-roadmap',
+            id: 'relation-target',
+            title: 'Relation target',
+            status: 'todo',
+          }),
+        ],
+      },
+    })
+    await page.goto('/teams/core-team/issues?issueId=relation-source')
+    const requestCounts = getMockRequestCounts(page)
+    const relationEditor = page.getByTestId('work-item-relations-editor')
+
+    await expect(relationEditor).toBeVisible()
+    await expect(
+      relationEditor.getByLabel('対象 Work Item').locator('option[value="wireframe"]'),
+    ).toHaveCount(0)
+    await relationEditor.getByRole('combobox', { name: '関係', exact: true }).selectOption('related')
+    await relationEditor.getByLabel('対象 Work Item').selectOption('relation-target')
+    await relationEditor.getByRole('button', { name: '関係を追加' }).click()
+
+    const relationRow = page.getByTestId('work-item-relation-related-relation-target')
+
+    await expect(relationRow).toContainText('関連')
+    await expect(relationRow).toContainText('Relation target')
+    await expect.poll(() => requestCounts.workItemRelationCreates).toBe(1)
+
+    await relationRow.getByRole('button', { name: 'Relation target との関係を解除' }).click()
+
+    await expect(relationRow).toHaveCount(0)
+    await expect(relationEditor).toContainText('関連付けられた Work Item はありません。')
+    await expect.poll(() => requestCounts.workItemRelationDeletes).toBe(1)
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=relation-source')
+    await expect(
+      page.getByTestId('work-item-relations-editor').getByLabel('対象 Work Item'),
+    ).toHaveValue('relation-target')
+  })
+
+  test('Issue #21: 設定画面で Team scope を選び configuration override を保存できる', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workspaceWorkItemConfiguration: workspaceWorkItemConfigurationFixture,
+    })
+    await page.goto('/settings')
+    const requestCounts = getMockRequestCounts(page)
+    const configurationPanel = page.getByTestId('work-item-configuration-panel')
+
+    await expect(configurationPanel).toBeVisible()
+    await page.getByTestId('work-item-configuration-scope').selectOption('team:core-team')
+    await expect(page.getByTestId('work-item-configuration-inherited')).toContainText(
+      'Workspace の設定を継承しています。',
+    )
+
+    await configurationPanel.getByLabel('ワークフロー名').fill('Core team delivery')
+    const riskOptionRows = configurationPanel.locator(
+      '[data-testid^="custom-field-option-risk-level-"]',
+    )
+
+    await configurationPanel
+      .getByTestId('custom-field-option-risk-level-high')
+      .getByRole('button', { name: 'High を上へ移動' })
+      .click()
+    await expect(riskOptionRows).toHaveCount(3)
+    await expect(riskOptionRows.nth(1)).toHaveAttribute(
+      'data-testid',
+      'custom-field-option-risk-level-high',
+    )
+    await configurationPanel.getByRole('button', { name: '設定を保存' }).click()
+
+    await expect.poll(() => requestCounts.workItemConfigurationWrites).toBe(1)
+    await expect(page.getByTestId('work-item-configuration-inherited')).toHaveCount(0)
+    await expect(configurationPanel.getByLabel('ワークフロー名')).toHaveValue(
+      'Core team delivery',
+    )
+    await expect(configurationPanel.getByTestId('custom-field-option-risk-level-high')).toBeVisible()
+  })
+
   test('Task 詳細は競合後の revision 再取得後も競合メッセージを維持する', async ({ page }) => {
     const issueId = 'task-revision-conflict'
 
@@ -1824,12 +2321,12 @@ test.describe('authenticated task page', () => {
     const detailPane = page.getByTestId('task-detail-pane')
 
     await expect(detailPane.getByRole('button', { name: '変更を保存' })).toBeEnabled()
-    await detailPane.locator('select[name="status"]').selectOption('done')
+    await detailPane.locator('select[name="workflowStatusId"]').selectOption('done')
     await detailPane.getByRole('button', { name: '変更を保存' }).click()
 
     await expect.poll(() => requestCounts.issueUpdates).toBe(1)
     await expect.poll(() => requestCounts.projectTasks.refero).toBeGreaterThanOrEqual(2)
-    await expect(detailPane.locator('select[name="status"]')).toHaveValue('review')
+    await expect(detailPane.locator('select[name="workflowStatusId"]')).toHaveValue('review')
     await expect(detailPane.locator('textarea[name="description"]')).toHaveValue(
       '別のメンバーが更新した最新内容です。',
     )
@@ -1855,7 +2352,7 @@ test.describe('authenticated task page', () => {
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByTestId(`issue-row-${issueId}`).click()
-    const statusSelect = page.locator('aside select[name="status"]')
+    const statusSelect = page.locator('aside select[name="workflowStatusId"]')
     const description = page.locator('aside textarea[name="description"]')
 
     await expect(page.getByRole('button', { name: '変更を保存' })).toBeEnabled()
@@ -1927,9 +2424,14 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-detail-pane')).toContainText('Execution detail check')
     await expect(page.getByRole('button', { name: '変更を保存' })).toBeEnabled()
     await expect(page.getByTestId('task-detail-pane').locator('textarea[name="description"]')).toHaveValue('詳細説明を保持します。')
-    await page.getByTestId('task-detail-pane').locator('select[name="status"]').selectOption('review')
+    await page.locator('textarea[name="body"]').fill('保存中も残すコメント下書き')
+    await page.getByTestId('task-detail-pane').locator('select[name="workflowStatusId"]').selectOption('review')
     await page.getByRole('button', { name: '変更を保存' }).click()
     await expect(page.getByTestId('task-detail-pane').locator('textarea[name="description"]')).toHaveValue('詳細説明を保持します。')
+    await expect(page.locator('textarea[name="body"]')).toHaveValue(
+      '保存中も残すコメント下書き',
+    )
+    await page.locator('textarea[name="body"]').fill('')
 
     await page.getByTestId('task-row-seo-research').getByRole('button').click()
 
@@ -3362,6 +3864,43 @@ test.describe('authenticated task page', () => {
 
     await expect(page.getByTestId('reports-project-core-team-refero')).toBeVisible()
     await expect(page.getByTestId('reports-project-core-team-product-roadmap')).toHaveCount(0)
+  })
+
+  test('Issue #21: レポートの custom field は project scope 外の Work Item を除外する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      failedWorkItemConfigurationTeamIds: ['design-team'],
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'refero',
+            customFieldValues: { budget: 1_200_000 },
+            id: 'scoped-budget',
+            title: 'Scoped budget',
+            status: 'in-progress',
+          }),
+          createStoredTeamIssue({
+            assignedProjectId: 'product-roadmap',
+            customFieldValues: { budget: 2_400_000 },
+            id: 'out-of-scope-budget',
+            title: 'Out of scope budget',
+            status: 'todo',
+          }),
+        ],
+      },
+      teamWorkItemConfigurations: {
+        'core-team': teamWorkItemConfigurationFixture,
+      },
+    })
+    await page.goto('/reports')
+
+    await expect(page.getByRole('alert')).toContainText(
+      '一部 Team の Work Item 設定を取得できないため',
+    )
+    await page.getByTestId('reports-custom-field-filter').selectOption('core-team:budget')
+    await expect(page.getByTestId('reports-project-core-team-refero')).toBeVisible()
+    await expect(
+      page.getByTestId('reports-project-core-team-product-roadmap').getByRole('cell').nth(3),
+    ).toHaveText('0')
   })
 
   test('設定画面でフォントサイズを変更して保存できる', async ({ page }) => {

@@ -1,8 +1,10 @@
 import type {
   CreateWorkItemInput,
+  ResolvedWorkItemConfiguration,
   UpdateWorkItemInput,
   WorkItem,
   WorkItemPatch,
+  WorkItemRelation,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../i18n'
 import { createMutationHeaders, type MutationRequestContext } from '../api/mutationHeaders'
@@ -397,6 +399,18 @@ export type TeamIssueDetail = {
    * Issue 活動履歴一覧です。
    */
   activity: TeamIssueActivity[]
+  /**
+   * Work Item に適用される Team / Workspace workflow configuration です。
+   */
+  resolvedConfiguration?: ResolvedWorkItemConfiguration
+  /**
+   * Work Item から見た reciprocal relation 一覧です。
+   */
+  relations?: WorkItemRelation[]
+  /**
+   * Relation mutation の optimistic concurrency に使う Team graph revision です。
+   */
+  relationGraphRevision?: number
 }
 
 /**
