@@ -3,7 +3,7 @@
   "scripts": {
     "dev": "bun run --hot src/index.ts",
     "build:lambda": "bun build src/index.ts --target node --format esm --outfile dist/lambda/index.mjs",
-    "test": "bun test --max-concurrency 1 src/index.test.ts src/workspace-access.test.ts src/audit.test.ts src/audit-integration.test.ts src/collaboration.test.ts src/collaboration-projection-handler.test.ts src/notification-schedule-handler.test.ts src/notifications.test.ts src/realtime-ticket.test.ts src/work-item-migration.test.ts src/workspace-search.test.ts scripts/backfill-workspace-search.test.ts",
+    "test": "bun test --max-concurrency 1 src/index.test.ts src/workspace-access.test.ts src/audit.test.ts src/audit-integration.test.ts src/collaboration.test.ts src/collaboration-projection-handler.test.ts src/file-proofing.test.ts src/notification-schedule-handler.test.ts src/notifications.test.ts src/realtime-ticket.test.ts src/work-item-migration.test.ts src/workspace-search.test.ts scripts/backfill-workspace-search.test.ts",
     "audit:backfill": "bun run scripts/backfill-audit-events.ts",
     "search:backfill": "bun run scripts/backfill-workspace-search.ts",
     "work-items:migrate": "bun run scripts/migrate-work-items.ts"
@@ -13,7 +13,9 @@
     "@aws-sdk/client-apigatewaymanagementapi": "^3.1057.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.1057.0",
     "@aws-sdk/client-dynamodb": "^3.1057.0",
+    "@aws-sdk/client-s3": "^3.1057.0",
     "@aws-sdk/lib-dynamodb": "^3.1057.0",
+    "@aws-sdk/s3-request-presigner": "^3.1057.0",
     "hono": "^4.12.21"
   },
   "devDependencies": {

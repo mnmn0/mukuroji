@@ -13,6 +13,11 @@ import {
   type WorkspaceSearchResolvedScope,
 } from './workspace-search'
 import {
+  FileProofingError,
+  type FileProofingActor,
+  type FileProofingClient,
+} from './file-proofing'
+import {
   app,
   AwsCognitoClient,
   CognitoServiceError,
@@ -31,6 +36,468 @@ import {
 
 afterEach(() => {
   resetApiClientsForTest()
+})
+
+test('authorizes Work Item file list reads and returns server capabilities', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const reads: Array<{ actor: string; issueId?: string; teamId: string }> = []
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async list(scope, actor) {
+        reads.push({ actor: actor.memberKey, issueId: scope.issueId, teamId: scope.teamId })
+        return {
+          files: [],
+          approvals: [],
+          capabilities: {
+            canUpload: actor.canWrite,
+            canRequestApproval: actor.canWrite,
+            canGrantGuestAccess: actor.canManage,
+          },
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/files', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    files: [],
+    approvals: [],
+    capabilities: {
+      canUpload: true,
+      canRequestApproval: true,
+      canGrantGuestAccess: true,
+    },
+  })
+  expect(reads).toEqual([{
+    actor: 'demo@example.com',
+    issueId: 'issue-1',
+    teamId: 'core-team',
+  }])
+})
+
+test('creates a direct object upload session without accepting file bytes in the API body', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const creates: Array<{ contentType: string; fileName: string; sizeBytes: number }> = []
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createUpload(_scope, _actor, input) {
+        creates.push(input)
+        return createFileUploadSessionFixture()
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/files/uploads', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'upload-session-1',
+    },
+    body: JSON.stringify({
+      contentType: 'application/pdf',
+      fileName: 'proof.pdf',
+      sizeBytes: 4096,
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  const body = await response.json() as ReturnType<typeof createFileUploadSessionFixture>
+  expect(body.upload).toMatchObject({ method: 'PUT', maxSizeBytes: 2_147_483_648 })
+  expect(body.upload.url).toBe('https://objects.example.test/upload')
+  expect(creates).toEqual([{
+    contentType: 'application/pdf',
+    fileName: 'proof.pdf',
+    sizeBytes: 4096,
+  }])
+})
+
+test('does not issue file access URLs without authentication or a clean scan', async () => {
+  configureFakeProjectClients(true, { role: 'viewer' })
+  let accessCalls = 0
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createAccess() {
+        accessCalls += 1
+        throw new FileProofingError(423, 'FileScanPending', 'File scanning is still in progress.')
+      },
+    }),
+  })
+
+  const unauthenticated = await app.request(
+    '/api/teams/core-team/issues/issue-1/files/file-1/versions/version-1/access',
+  )
+  expect(unauthenticated.status).toBe(401)
+  expect(accessCalls).toBe(0)
+
+  const pending = await app.request(
+    '/api/teams/core-team/issues/issue-1/files/file-1/versions/version-1/access?disposition=inline',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(pending.status).toBe(423)
+  expect(await pending.json()).toEqual({
+    code: 'FileScanPending',
+    message: 'File scanning is still in progress.',
+  })
+  expect(accessCalls).toBe(1)
+})
+
+test('keeps guest file uploads and management read-only at the API authorization boundary', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'guest' })
+  const actors: FileProofingActor[] = []
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createUpload(_scope, actor) {
+        actors.push(actor)
+        throw new FileProofingError(403, 'FileWriteDenied', 'File write access is required.')
+      },
+    }),
+  })
+
+  const responses = await Promise.all([
+    '/api/teams/core-team/issues/issue-1/files/uploads',
+    '/api/teams/core-team/projects/refero/files/uploads',
+  ].map((path) => app.request(path, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ contentType: 'image/png', fileName: 'guest.png', sizeBytes: 10 }),
+  })))
+
+  for (const response of responses) {
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ code: 'FileWriteDenied' })
+  }
+  expect(actors).toHaveLength(2)
+  for (const actor of actors) {
+    expect(actor).toMatchObject({ guest: true, canManage: false, canWrite: false })
+  }
+})
+
+test('keeps a downgraded guest uploader from deleting files through the API', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'guest' })
+  let receivedActor: FileProofingActor | undefined
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async deleteFile(_scope, actor) {
+        receivedActor = actor
+        throw new FileProofingError(
+          403,
+          'FileDeleteDenied',
+          'File manager or uploader access is required.',
+        )
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/files/file-created-before-downgrade',
+    {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer test-token' },
+    },
+  )
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'FileDeleteDenied' })
+  expect(receivedActor).toMatchObject({ guest: true, canManage: false, canWrite: false })
+})
+
+test('rejects a read-only approval requester before reviewer or file fan-out', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'guest' })
+  let fileListCalls = 0
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async list() {
+        fileListCalls += 1
+        throw new Error('File list must not be called for a read-only requester.')
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/approvals', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      dueAt: '2099-07-20T00:00:00.000Z',
+      fileId: 'file-1',
+      reviewerMemberKeys: ['reviewer@example.com'],
+      versionId: 'version-1',
+    }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'FileWriteDenied' })
+  expect(fileListCalls).toBe(0)
+})
+
+test('returns 400 for malformed file JSON before calling the domain client', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  let createCalls = 0
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createUpload() {
+        createCalls += 1
+        return createFileUploadSessionFixture()
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/files/uploads', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: '{',
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({ code: 'InvalidFileProofingInput' })
+  expect(createCalls).toBe(0)
+})
+
+test('rejects excessive approval reviewers before external member fan-out', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/approvals', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      dueAt: '2099-07-20T00:00:00.000Z',
+      fileId: 'file-1',
+      reviewerMemberKeys: Array.from({ length: 21 }, (_, index) => `reviewer-${index}@example.com`),
+      versionId: 'version-1',
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({ code: 'InvalidApprovalReviewers' })
+})
+
+test('cancels a pending approval through the authenticated Work Item scope', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  let receivedRevision: number | undefined
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async cancelApproval(_scope, _actor, _approvalId, input) {
+        receivedRevision = input.expectedRevision
+        return {
+          id: 'approval-1',
+          teamId: 'core-team',
+          issueId: 'issue-1',
+          revision: input.expectedRevision + 1,
+          fileId: 'file-1',
+          versionId: 'version-1',
+          status: 'cancelled',
+          reviewers: [{ memberKey: 'reviewer@example.com', status: 'pending' }],
+          dueAt: '2099-07-20T00:00:00.000Z',
+          requestedByMemberKey: 'demo@example.com',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T01:00:00.000Z',
+          completedAt: '2026-07-12T01:00:00.000Z',
+          capabilities: { canCancel: false, canDecide: false },
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/approvals/approval-1/cancel',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ expectedRevision: 3 }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(receivedRevision).toBe(3)
+  expect(await response.json()).toMatchObject({
+    approval: { id: 'approval-1', revision: 4, status: 'cancelled' },
+  })
+})
+
+test('rejects a comment attachment when the saved comment does not exist', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  let uploadCalls = 0
+  const attachmentChecks: Array<{ entityKey: string; commentId: string }> = []
+  configureApiClientsForTest({
+    collaboration: createCollaborationStub({
+      async hasAttachableComment(entityKey, commentId) {
+        attachmentChecks.push({ entityKey, commentId })
+        return false
+      },
+    }),
+    fileProofing: createFileProofingStub({
+      async createUpload() {
+        uploadCalls += 1
+        return createFileUploadSessionFixture()
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/comments/missing-comment/files/uploads',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ contentType: 'application/pdf', fileName: 'proof.pdf', sizeBytes: 10 }),
+    },
+  )
+
+  expect(response.status).toBe(404)
+  expect(await response.json()).toMatchObject({ code: 'CommentNotFound' })
+  expect(uploadCalls).toBe(0)
+  expect(attachmentChecks).toEqual([{
+    entityKey: 'user#demo@example.com#work-item#team/core-team/issue/issue-1',
+    commentId: 'missing-comment',
+  }])
+})
+
+test('filters reviewer Inbox approvals after current project access is revoked', async () => {
+  configureFakeProjectClients(false, { role: 'viewer' })
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async listReviewerApprovals() {
+        return { approvals: [{
+          id: 'approval-1',
+          teamId: 'core-team',
+          issueId: 'issue-1',
+          projectId: 'refero',
+          revision: 1,
+          fileId: 'file-1',
+          versionId: 'version-1',
+          status: 'pending',
+          reviewers: [{ memberKey: 'demo@example.com', status: 'pending' }],
+          dueAt: '2099-07-20T00:00:00.000Z',
+          requestedByMemberKey: 'manager@example.com',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+          capabilities: { canCancel: false, canDecide: true },
+        }] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/approvals/reviewer', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ approvals: [] })
+})
+
+test('continues reviewer Inbox pagination after filtering an unauthorized scope', async () => {
+  configureFakeProjectClients(true, { role: 'viewer' })
+  const cursors: Array<string | undefined> = []
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async listReviewerApprovals(_workspaceId, _actor, options) {
+        cursors.push(options?.cursor)
+        const commonApproval = {
+          revision: 1,
+          fileId: 'file-1',
+          versionId: 'version-1',
+          status: 'pending' as const,
+          reviewers: [{ memberKey: 'demo@example.com', status: 'pending' as const }],
+          dueAt: '2099-07-20T00:00:00.000Z',
+          requestedByMemberKey: 'manager@example.com',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+          capabilities: { canCancel: false, canDecide: true },
+        }
+
+        return options?.cursor
+          ? {
+              approvals: [{
+                ...commonApproval,
+                id: 'approval-visible',
+                teamId: 'core-team',
+                issueId: 'issue-visible',
+                projectId: 'refero',
+              }],
+            }
+          : {
+              approvals: [{
+                ...commonApproval,
+                id: 'approval-stale',
+                teamId: 'missing-team',
+                issueId: 'issue-stale',
+                projectId: 'refero',
+              }],
+              nextCursor: 'page-2',
+            }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/approvals/reviewer?limit=1', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    approvals: [{ id: 'approval-visible' }],
+  })
+  expect(cursors).toEqual([undefined, 'page-2'])
+})
+
+test('does not hide reviewer Inbox authorization read failures as an empty page', async () => {
+  configureFakeProjectClients(true, {
+    detailReadError: Object.assign(new Error('Work Item read is unavailable.'), {
+      code: 'DynamoDbUnavailable',
+      status: 503,
+    }),
+    role: 'viewer',
+  })
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async listReviewerApprovals() {
+        return { approvals: [{
+          id: 'approval-1',
+          teamId: 'core-team',
+          issueId: 'issue-1',
+          projectId: 'refero',
+          revision: 1,
+          fileId: 'file-1',
+          versionId: 'version-1',
+          status: 'pending',
+          reviewers: [{ memberKey: 'demo@example.com', status: 'pending' }],
+          dueAt: '2099-07-20T00:00:00.000Z',
+          requestedByMemberKey: 'manager@example.com',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+          capabilities: { canCancel: false, canDecide: true },
+        }] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/approvals/reviewer', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(502)
+  expect(await response.json()).toEqual({ message: 'File proofing data is unavailable.' })
 })
 
 test('uses a strongly consistent Work Item read for authorization-sensitive detail loads', async () => {
@@ -3202,7 +3669,7 @@ test('loads team issue detail and creates comments after team access is confirme
   const collaborationCreates: Parameters<CollaborationClient['createComment']>[0][] = []
   const collaborationComments: Awaited<ReturnType<CollaborationClient['createComment']>>[] = []
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread() {
         return {
           comments: collaborationComments,
@@ -3232,7 +3699,7 @@ test('loads team issue detail and creates comments after team access is confirme
         collaborationComments.push(comment)
         return comment
       },
-    } as CollaborationClient,
+    }),
   })
 
   const detailResponse = await app.request('/api/teams/core-team/issues/onboarding-friction', {
@@ -3327,7 +3794,7 @@ test('returns persisted collaboration comments together with inert legacy commen
   const calls = configureFakeProjectClients(true)
   const threadInputs: Parameters<CollaborationClient['getThread']>[0][] = []
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread(input) {
         threadInputs.push(input)
         const pageBase = {
@@ -3374,7 +3841,7 @@ test('returns persisted collaboration comments together with inert legacy commen
           }],
         }
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request('/api/teams/core-team/issues/onboarding-friction/collaboration', {
@@ -3420,7 +3887,7 @@ test('keeps a departed author in history while blocking deactivated member mutat
     inactiveWorkspaceMemberKeys: ['departed@example.com'],
   })
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread(input) {
         return {
           comments: input.rootCommentId
@@ -3459,7 +3926,7 @@ test('keeps a departed author in history while blocking deactivated member mutat
           reactions: [],
         }
       },
-    } as CollaborationClient,
+    }),
   })
 
   const historyResponse = await app.request(
@@ -3477,12 +3944,12 @@ test('keeps a departed author in history while blocking deactivated member mutat
   configureFakeProjectClients(true, { workspaceStatus: 'deactivated' })
   let mutationCalls = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async updateComment() {
         mutationCalls += 1
         throw new Error('A deactivated member must not reach the collaboration store.')
       },
-    } as CollaborationClient,
+    }),
   })
   const mutationResponse = await app.request(
     '/api/teams/core-team/issues/onboarding-friction/comments/departed-comment',
@@ -3515,7 +3982,7 @@ test('marks roots and replies in a resolved thread as non-replyable', async () =
     reactions: [],
   }
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread(input) {
         return {
           comments: input.rootCommentId
@@ -3537,7 +4004,7 @@ test('marks roots and replies in a resolved thread as non-replyable', async () =
           ...(input.rootCommentId ? { threadResolved: true } : {}),
         }
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request(
@@ -3558,12 +4025,12 @@ test('denies collaboration reads without Work Item viewer access', async () => {
   configureFakeProjectClients(false)
   let reads = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread() {
         reads += 1
         throw new Error('Collaboration store must not be called.')
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request('/api/teams/core-team/issues/onboarding-friction/collaboration', {
@@ -3578,12 +4045,12 @@ test('keeps guest members read-only for collaboration mutations', async () => {
   configureFakeProjectClients(true, { workspaceRole: 'guest' })
   let writes = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async createComment() {
         writes += 1
         throw new Error('Collaboration store must not be called.')
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
@@ -3603,12 +4070,12 @@ test('returns a client error when a comment mentions an inactive Workspace membe
   configureFakeProjectClients(true, { inactiveWorkspaceMemberKeys: ['inactive@example.com'] })
   let writes = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async createComment() {
         writes += 1
         throw new Error('Collaboration store must not be called.')
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
@@ -3639,7 +4106,7 @@ test('allows active system administrators to be mentioned without project member
     })
     const writes: Parameters<CollaborationClient['createComment']>[0][] = []
     configureApiClientsForTest({
-      collaboration: {
+      collaboration: createCollaborationStub({
         async createComment(input) {
           writes.push(input)
           return {
@@ -3654,7 +4121,7 @@ test('allows active system administrators to be mentioned without project member
             reactions: [],
           }
         },
-      } as CollaborationClient,
+      }),
     })
 
     const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
@@ -3679,7 +4146,7 @@ test('allows a Workspace owner with viewer access to moderate a comment', async 
   configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'owner' })
   const deletes: Parameters<CollaborationClient['deleteComment']>[0][] = []
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async deleteComment(input) {
         deletes.push(input)
         return {
@@ -3695,7 +4162,7 @@ test('allows a Workspace owner with viewer access to moderate a comment', async 
           reactions: [],
         }
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request(
@@ -3719,7 +4186,7 @@ test('allows an assigned project manager to moderate another member comment', as
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
   const deletes: Parameters<CollaborationClient['deleteComment']>[0][] = []
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async deleteComment(input) {
         deletes.push(input)
         return {
@@ -3735,7 +4202,7 @@ test('allows an assigned project manager to moderate another member comment', as
           reactions: [],
         }
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request(
@@ -3758,12 +4225,12 @@ test('denies a project viewer from deleting another member comment', async () =>
   configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
   let deletes = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async deleteComment() {
         deletes += 1
         throw new CollaborationError(403, 'CommentDeleteDenied', 'Comment delete permission is required.')
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request(
@@ -3794,7 +4261,7 @@ test('reads and changes project watcher state through the project scope', async 
     watcherCount: 3,
   }
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getWatcherState(input) {
         reads.push(input)
         return watch
@@ -3803,7 +4270,7 @@ test('reads and changes project watcher state through the project scope', async 
         writes.push(input)
         return watch
       },
-    } as CollaborationClient,
+    }),
   })
 
   const readResponse = await app.request('/api/projects/refero/watch', {
@@ -6240,7 +6707,7 @@ test('search endpoint refreshes comment content from its current source snapshot
   configureFakeProjectClients(true)
   let resolvedScope: WorkspaceSearchResolvedScope | undefined
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getCommentSnapshot(input) {
         return {
           id: input.commentId,
@@ -6254,7 +6721,7 @@ test('search endpoint refreshes comment content from its current source snapshot
           reactions: [],
         }
       },
-    } as CollaborationClient,
+    }),
     workspaceSearch: {
       async search(input) {
         resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
@@ -6294,7 +6761,7 @@ test('search endpoint fails closed for missing, deleted, or malformed comment so
   const resolvedScopes: Array<WorkspaceSearchResolvedScope | undefined> = []
   let snapshotReads = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getCommentSnapshot(input) {
         snapshotReads += 1
         if (input.commentId === 'missing') return undefined
@@ -6311,7 +6778,7 @@ test('search endpoint fails closed for missing, deleted, or malformed comment so
           reactions: [],
         }
       },
-    } as CollaborationClient,
+    }),
     workspaceSearch: {
       async search(input) {
         for (const [commentId, parentId] of [
@@ -6635,6 +7102,112 @@ function createFakeAuditEvent() {
   })
 }
 
+function createFileProofingStub(
+  overrides: Partial<FileProofingClient> = {},
+): FileProofingClient {
+  const unsupported = async () => {
+    throw new Error('Unexpected file proofing client call.')
+  }
+  return {
+    list: unsupported,
+    createUpload: unsupported,
+    createVersionUpload: unsupported,
+    completeUpload: unsupported,
+    createAccess: unsupported,
+    listAnnotations: unsupported,
+    createAnnotation: unsupported,
+    deleteFile: unsupported,
+    createApproval: unsupported,
+    decideApproval: unsupported,
+    cancelApproval: unsupported,
+    async getApprovalSummary() {
+      return {
+        pendingCount: 0,
+        overdueCount: 0,
+        approvedCount: 0,
+        rejectedCount: 0,
+        changesRequestedCount: 0,
+      }
+    },
+    async getApprovalSummaries() {
+      return new Map()
+    },
+    listReviewerApprovals: unsupported,
+    ...overrides,
+  } as FileProofingClient
+}
+
+function createCollaborationStub(
+  overrides: Partial<CollaborationClient> = {},
+): CollaborationClient {
+  const unsupported = async () => {
+    throw new Error('Unexpected collaboration client call.')
+  }
+  return {
+    getThread: unsupported,
+    hasAttachableComment: unsupported,
+    getCommentSnapshot: unsupported,
+    createComment: unsupported,
+    updateComment: unsupported,
+    deleteComment: unsupported,
+    resolveComment: unsupported,
+    reopenComment: unsupported,
+    addReaction: unsupported,
+    removeReaction: unsupported,
+    getWatcherState: unsupported,
+    subscribe: unsupported,
+    unsubscribe: unsupported,
+    heartbeatPresence: unsupported,
+    leavePresence: unsupported,
+    ...overrides,
+  } satisfies CollaborationClient
+}
+
+function createFileUploadSessionFixture() {
+  const version = {
+    id: 'version-1',
+    number: 1,
+    fileName: 'proof.pdf',
+    contentType: 'application/pdf',
+    sizeBytes: 4096,
+    scanStatus: 'pending' as const,
+    previewKind: 'pdf' as const,
+    createdByMemberKey: 'demo@example.com',
+    createdAt: '2026-07-12T00:00:00.000Z',
+  }
+  return {
+    file: {
+      id: 'file-1',
+      name: 'proof.pdf',
+      targetType: 'work-item' as const,
+      targetId: 'issue-1',
+      versionCount: 1,
+      versions: [version],
+      currentVersion: version,
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedAt: '2026-07-12T00:00:00.000Z',
+      capabilities: {
+        canDownload: false,
+        canUploadVersion: true,
+        canDelete: true,
+        canAnnotate: true,
+        canRequestApproval: true,
+      },
+    },
+    version,
+    upload: {
+      url: 'https://objects.example.test/upload',
+      method: 'PUT' as const,
+      headers: {
+        'content-length': '4096',
+        'content-type': 'application/pdf',
+      },
+      expiresAt: '2026-07-12T00:10:00.000Z',
+      maxSizeBytes: 2_147_483_648,
+    },
+  }
+}
+
 function configureFakeProjectClients(
   hasProjectAccess: boolean,
   options: {
@@ -6658,6 +7231,8 @@ function configureFakeProjectClients(
     detailAssignedProjectId?: string
     /** Notification 認可で再取得する Work Item の現在担当者です。 */
     detailAssigneeUserId?: string
+    /** Work Item detail read の障害を再現する error です。 */
+    detailReadError?: Error
     teamProjects?: Array<{ id: string; name: string; tone: 'blue' | 'purple' | 'green' | 'yellow' }>
     /** owner Team ambiguity を再現する追加 Team です。 */
     additionalTeams?: Array<{
@@ -6806,7 +7381,7 @@ function configureFakeProjectClients(
   })
 
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread() {
         return {
           comments: [],
@@ -6833,7 +7408,7 @@ function configureFakeProjectClients(
           reactions: [],
         }
       },
-    } as CollaborationClient,
+    }),
     cognito: {
       async initiatePasswordAuth() {
         if (options.passwordAuthChallenge) {
@@ -7462,6 +8037,10 @@ function configureFakeProjectClients(
           issueId,
           ...(readOptions ? { readOptions } : {}),
         })
+
+        if (options.detailReadError) {
+          throw options.detailReadError
+        }
 
         if (issueId === 'wireframe') {
           throw {

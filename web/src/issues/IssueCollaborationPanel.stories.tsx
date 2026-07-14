@@ -4,6 +4,7 @@ import {
   issueCollaborationControllerFixture,
 } from './fixtures'
 import { IssueCollaborationPanel } from './IssueCollaborationPanel'
+import { fileArtifactsControllerFixture, imageFileFixture } from '../files/fixtures'
 
 const meta = {
   title: 'Application/Issues/Collaboration Panel',
@@ -110,6 +111,24 @@ export const DeletedRoot: Story = {
               version: 3,
             },
       ),
+    },
+  },
+}
+
+/**
+ * 保存済み comment に file が添付された状態です。
+ */
+export const WithFileAttachment: Story = {
+  args: {
+    artifacts: {
+      ...fileArtifactsControllerFixture,
+      files: [
+        {
+          ...imageFileFixture,
+          targetId: 'comment-1',
+          targetType: 'comment',
+        },
+      ],
     },
   },
 }

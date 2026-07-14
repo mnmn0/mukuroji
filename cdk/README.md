@@ -1,6 +1,6 @@
 # mukuroji AWS deployment
 
-この CDK stack は shared Hono handler を Node.js 22 Lambda に bundle し、Lambda Function URL と API Gateway HTTP API の両方へ接続します。DynamoDB table、CORS / IAM、外部 Cognito 設定、Workspace bootstrap も同じ stack で管理します。
+この CDK stack は shared Hono handler を Node.js 22 Lambda に bundle し、Lambda Function URL と API Gateway HTTP API の両方へ接続します。DynamoDB table、private file bucket、GuardDuty malware scan、CORS / IAM、外部 Cognito 設定、Workspace bootstrap も同じ stack で管理します。
 
 コマンドは repository root から実行してください。AWS account を変更する `deploy`、Cognito 更新、data migration / recovery は、対象 account・region と `cdk diff` を確認してから実行します。
 
@@ -15,6 +15,9 @@
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
 | `TaskApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
+| `FileRetentionDays` | no | soft delete 後の metadata と S3 noncurrent version の保持日数。既定値は 30 日です。live current object の有効期限ではありません。 |
+| `FileUploadUrlTtlSeconds` | no | direct upload URL の有効秒数。既定値 600、範囲 60–3600 秒です。bucket policy もこの上限より古い upload 署名を拒否します。 |
+| `FileDownloadUrlTtlSeconds` | no | malware scan 済み file の download URL 有効秒数。既定値 300、範囲 60–3600 秒です。bucket policy もこの上限より古い download 署名を拒否します。 |
 
 `WorkspaceDirectoryId`、owner email / username は data key と認可境界に使います。環境ごとに固定し、通常の application deploy で変更しないでください。
 
@@ -27,6 +30,7 @@
 - `WorkItemsTableName`（既存 `TeamIssuesTable` を昇格した canonical store）
 - `TeamIssuesTableName`（`WorkItemsTableName` と同じ table を指す互換 output）
 - `ProjectDirectoryTableName`, `TeamIssueEventsTableName`
+- `FileProofingTableName`, `FileBucketName`, `FileMalwareProtectionPlanId`
 - `NotificationsTableName`, `CollaborationProjectionDlqUrl`, `NotificationScheduleDlqUrl`
 - `AuditEventsTableName`, `ProcessedAuditEventsTableName`
 - `WorkItemCollaborationTableName`, `RealtimeSessionsTableName`, `RealtimeWebSocketUrl`
@@ -34,6 +38,23 @@
 - `WorkspaceDirectoryId`
 
 Function URL と API Gateway は同じ Lambda を呼びます。いずれも `<base>/teams/projects` と `<base>/api/teams/projects` を同じ canonical `/api` route へ正規化します。
+
+## File storage security and retention
+
+File body は API request body に通さず、認証・認可済み API が発行する短命 URL で `workspaces/<workspaceId>/...` の object key へ直接 upload / download します。client が任意の bucket key を指定する方式ではありません。
+
+- S3 bucket は Block Public Access、Bucket owner enforced、SSE-S3、TLS 強制、versioning、`Retain` を有効にします。
+- browser CORS は `TaskApiAllowedOrigins` と揃え、direct `PUT` / `GET` / `HEAD` と checksum / metadata header だけを許可します。
+- GuardDuty Malware Protection for S3 は `workspaces/` prefix を scan し、`GuardDutyMalwareScanStatus` tag を付けます。
+- bucket policy は GuardDuty 以外による scan status tag の追加・変更・削除を拒否し、API と cleanup consumer は既存 status を同値のまま保持する tag 更新だけを行います。
+- bucket policy は GuardDuty scan role と metadata/scan 検証を行う API execution role を除き、`NO_THREATS_FOUND` tag がない object の `GetObject` / `GetObjectVersion` を拒否します。API は clean scan を確認した immutable S3 VersionId だけを署名するため、別 version へ URL が付け替わることはありません。
+- upload / download の各 TTL より古い SigV4 query 署名は bucket policy でも拒否します。署名 URL は bearer token として log、audit event、永続 metadata に保存しません。
+- delete は S3 delete marker と metadata の soft delete を先に確定し、noncurrent object version と metadata TTL を `FileRetentionDays` 後に失効させます。`file.deleted` audit stream consumer は immutable VersionId に `mukuroji-deleted=true` を冪等に付けて全 principal の read を bucket policy で拒否し、この quarantine tag 自体の削除も拒否します。annotation / approval / reviewer metadata の TTL も補完し、失敗時は stream retry / DLQ で同期 cleanup の取りこぼしを回復します。
+- delete marker が作れず deleted-tagged object が current のまま残った場合は 1 日後に lifecycle で非現行化します。scan 完了済みの通常の live current object は lifecycle で期限切れにしません。
+- direct upload は `mukuroji-upload=pending` tag で開始し、clean scan 確認後だけ API が `completed` へ更新します。未使用または削除後に再利用された旧 PUT URL による孤立 current object は 1 日後に delete marker で非現行化し、通常の retention 後に物理削除します。
+- incomplete multipart upload は 1 日後に破棄します。
+
+GuardDuty plan の作成は Malware Protection for S3 の利用条件と課金対象です。deploy 前の `cdk diff` で `AWS::GuardDuty::MalwareProtectionPlan`、専用 IAM role、S3 bucket policy を確認してください。scan result が `THREATS_FOUND`、`UNSUPPORTED`、`ACCESS_DENIED`、`FAILED` または tag 未設定の間は download できない fail-closed contract です。
 
 ## Fresh deployment
 
@@ -245,8 +266,9 @@ aws dynamodb wait table-exists \
 
 - Function URL の edge auth は `NONE` ですが、Hono API が Cognito Bearer token の issuer / client / token use を検証します。
 - Function URL、HTTP API、Hono CORS は同じ `TaskApiAllowedOrigins` に揃えます。本番で local default を使いません。
-- Lambda IAM は stack table と指定 user pool に限定します。
-- stack が管理するすべての DynamoDB table は `Retain` + PITR enabled です。
+- Lambda IAM は stack table、`workspaces/` file object prefix、指定 user pool に限定します。API role に bucket-wide `ListBucket` は付与しません。
+- stack が管理するすべての DynamoDB table は `Retain` + PITR enabled です。FileProofing table は `expiresAt` TTL も有効です。
+- File bucket は public access を遮断し、TLS / SSE-S3 / versioning / `Retain` / malware tag-based download deny を有効にします。
 - Lambda は `server/src/index.ts` を deploy 時に bundle します。旧 inline Lambda copy はありません。
 
 ## Commands

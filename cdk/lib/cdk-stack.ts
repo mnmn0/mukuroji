@@ -5,6 +5,7 @@ import * as apigatewayv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrat
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as customResources from 'aws-cdk-lib/custom-resources';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as guardduty from 'aws-cdk-lib/aws-guardduty';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -12,6 +13,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaDestinations from 'aws-cdk-lib/aws-lambda-destinations';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
 
@@ -531,6 +533,27 @@ export class CdkStack extends cdk.Stack {
       minValue: 1,
       description: 'Number of days immutable audit events are retained before DynamoDB TTL expiry.',
     });
+    const fileRetentionDays = new cdk.CfnParameter(this, 'FileRetentionDays', {
+      type: 'Number',
+      default: 30,
+      minValue: 1,
+      description:
+        'Number of days deleted file metadata and noncurrent S3 object versions are retained.',
+    });
+    const fileUploadUrlTtlSeconds = new cdk.CfnParameter(this, 'FileUploadUrlTtlSeconds', {
+      type: 'Number',
+      default: 600,
+      minValue: 60,
+      maxValue: 3600,
+      description: 'Lifetime in seconds for direct-to-S3 upload URLs.',
+    });
+    const fileDownloadUrlTtlSeconds = new cdk.CfnParameter(this, 'FileDownloadUrlTtlSeconds', {
+      type: 'Number',
+      default: 300,
+      minValue: 60,
+      maxValue: 3600,
+      description: 'Lifetime in seconds for clean-file download URLs.',
+    });
     const cognitoUserPoolId = new cdk.CfnParameter(this, 'CognitoUserPoolId', {
       type: 'String',
       allowedPattern: '^[a-z]{2}(?:-[a-z0-9]+)+_[A-Za-z0-9]+$',
@@ -703,6 +726,220 @@ export class CdkStack extends cdk.Stack {
       timeToLiveAttribute: 'expiresAt',
     });
 
+    const fileProofingTable = new dynamodb.Table(this, 'FileProofingTable', {
+      partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      timeToLiveAttribute: 'expiresAt',
+    });
+
+    const fileBucket = new s3.Bucket(this, 'FileBucket', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      cors: [{
+        allowedHeaders: [
+          'content-length',
+          'content-type',
+          'if-none-match',
+          'x-amz-checksum-*',
+          'x-amz-meta-*',
+          'x-amz-server-side-encryption',
+          'x-amz-tagging',
+        ],
+        allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.HEAD, s3.HttpMethods.PUT],
+        allowedOrigins: taskApiAllowedOriginList,
+        exposedHeaders: ['ETag', 'x-amz-checksum-sha256', 'x-amz-version-id'],
+        maxAge: 600,
+      }],
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      eventBridgeEnabled: true,
+      lifecycleRules: [
+        {
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+          id: 'AbortIncompleteUploads',
+        },
+        {
+          expiration: cdk.Duration.days(1),
+          id: 'ExpireAbandonedUploads',
+          tagFilters: { 'mukuroji-upload': 'pending' },
+        },
+        {
+          expiration: cdk.Duration.days(1),
+          id: 'ExpireDeletedCurrentObjects',
+          tagFilters: { 'mukuroji-deleted': 'true' },
+        },
+        {
+          id: 'ExpireDeletedFileVersions',
+          noncurrentVersionExpiration: cdk.Duration.days(fileRetentionDays.valueAsNumber),
+        },
+        {
+          expiredObjectDeleteMarker: true,
+          id: 'DeleteExpiredMarkers',
+        },
+      ],
+      objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      versioned: true,
+    });
+
+    const malwareProtectionRole = new iam.Role(this, 'FileMalwareProtectionRole', {
+      assumedBy: new iam.ServicePrincipal('malware-protection-plan.guardduty.amazonaws.com'),
+      description: 'Allows GuardDuty Malware Protection to scan and tag mukuroji files.',
+    });
+    const guardDutyManagedRuleArn = cdk.Stack.of(this).formatArn({
+      service: 'events',
+      resource: 'rule',
+      resourceName: 'DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*',
+      arnFormat: cdk.ArnFormat.SLASH_RESOURCE_NAME,
+    });
+    const malwareProtectionPolicy = new iam.Policy(this, 'FileMalwareProtectionPolicy', {
+      statements: [
+        new iam.PolicyStatement({
+          actions: ['events:DeleteRule', 'events:PutRule', 'events:PutTargets', 'events:RemoveTargets'],
+          resources: [guardDutyManagedRuleArn],
+          conditions: {
+            StringLike: {
+              'events:ManagedBy': 'malware-protection-plan.guardduty.amazonaws.com',
+            },
+          },
+        }),
+        new iam.PolicyStatement({
+          actions: ['events:DescribeRule', 'events:ListTargetsByRule'],
+          resources: [guardDutyManagedRuleArn],
+        }),
+        new iam.PolicyStatement({
+          actions: [
+            's3:GetObjectTagging',
+            's3:GetObjectVersionTagging',
+            's3:PutObjectTagging',
+            's3:PutObjectVersionTagging',
+          ],
+          resources: [
+            fileBucket.arnForObjects('malware-protection-resource-validation-object'),
+            fileBucket.arnForObjects('workspaces/*'),
+          ],
+        }),
+        new iam.PolicyStatement({
+          actions: ['s3:GetBucketNotification', 's3:PutBucketNotification'],
+          resources: [fileBucket.bucketArn],
+        }),
+        new iam.PolicyStatement({
+          actions: ['s3:PutObject'],
+          resources: [fileBucket.arnForObjects('malware-protection-resource-validation-object')],
+        }),
+        new iam.PolicyStatement({
+          actions: ['s3:ListBucket'],
+          resources: [fileBucket.bucketArn],
+        }),
+        new iam.PolicyStatement({
+          actions: ['s3:GetObject', 's3:GetObjectVersion'],
+          resources: [
+            fileBucket.arnForObjects('malware-protection-resource-validation-object'),
+            fileBucket.arnForObjects('workspaces/*'),
+          ],
+        }),
+      ],
+    });
+    malwareProtectionRole.attachInlinePolicy(malwareProtectionPolicy);
+
+    const malwareProtectionPlan = new guardduty.CfnMalwareProtectionPlan(
+      this,
+      'FileMalwareProtectionPlan',
+      {
+        actions: {
+          tagging: {
+            status: 'ENABLED',
+          },
+        },
+        protectedResource: {
+          s3Bucket: {
+            bucketName: fileBucket.bucketName,
+            objectPrefixes: ['workspaces/'],
+          },
+        },
+        role: malwareProtectionRole.roleArn,
+      },
+    );
+    malwareProtectionPlan.node.addDependency(fileBucket);
+    malwareProtectionPlan.node.addDependency(malwareProtectionPolicy);
+
+    fileBucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'OnlyGuardDutyCanUploadScanStatus',
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['s3:PutObject'],
+      resources: [fileBucket.arnForObjects('workspaces/*')],
+      conditions: {
+        ArnNotEquals: {
+          'aws:PrincipalArn': malwareProtectionRole.roleArn,
+        },
+        'ForAnyValue:StringEquals': {
+          's3:RequestObjectTagKeys': 'GuardDutyMalwareScanStatus',
+        },
+      },
+    }));
+    fileBucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'OnlyGuardDutyCanSetScanStatus',
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['s3:PutObjectTagging', 's3:PutObjectVersionTagging'],
+      resources: [fileBucket.arnForObjects('workspaces/*')],
+      conditions: {
+        ArnNotEquals: {
+          'aws:PrincipalArn': malwareProtectionRole.roleArn,
+        },
+        Null: {
+          's3:ExistingObjectTag/GuardDutyMalwareScanStatus': 'true',
+          's3:RequestObjectTag/GuardDutyMalwareScanStatus': 'false',
+        },
+      },
+    }));
+    fileBucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'GuardDutyScanStatusCannotBeChanged',
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['s3:PutObjectTagging', 's3:PutObjectVersionTagging'],
+      resources: [fileBucket.arnForObjects('workspaces/*')],
+      conditions: {
+        ArnNotEquals: {
+          'aws:PrincipalArn': malwareProtectionRole.roleArn,
+        },
+        Null: {
+          's3:ExistingObjectTag/GuardDutyMalwareScanStatus': 'false',
+        },
+        StringNotEquals: {
+          's3:RequestObjectTag/GuardDutyMalwareScanStatus':
+            '${s3:ExistingObjectTag/GuardDutyMalwareScanStatus}',
+        },
+      },
+    }));
+    fileBucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'RejectStalePresignedFileUploads',
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['s3:PutObject'],
+      resources: [fileBucket.arnForObjects('workspaces/*')],
+      conditions: {
+        NumericGreaterThan: {
+          's3:signatureAge': cdk.Fn.join('', [fileUploadUrlTtlSeconds.valueAsString, '000']),
+        },
+      },
+    }));
+    fileBucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'RejectStalePresignedFileDownloads',
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['s3:GetObject', 's3:GetObjectVersion'],
+      resources: [fileBucket.arnForObjects('workspaces/*')],
+      conditions: {
+        NumericGreaterThan: {
+          's3:signatureAge': cdk.Fn.join('', [fileDownloadUrlTtlSeconds.valueAsString, '000']),
+        },
+      },
+    }));
+
     realtimeSessionsTable.addGlobalSecondaryIndex({
       indexName: 'ScopeConnectionsIndex',
       partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
@@ -732,6 +969,11 @@ export class CdkStack extends cdk.Stack {
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
+        FILE_BUCKET_NAME: fileBucket.bucketName,
+        FILE_DOWNLOAD_URL_TTL_SECONDS: fileDownloadUrlTtlSeconds.valueAsString,
+        FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
+        FILE_RETENTION_DAYS: fileRetentionDays.valueAsString,
+        FILE_UPLOAD_URL_TTL_SECONDS: fileUploadUrlTtlSeconds.valueAsString,
         MUKUROJI_PROJECT_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
         MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
         MUKUROJI_PROJECT_TASKS_TABLE: legacyTasksTable.tableName,
@@ -754,6 +996,49 @@ export class CdkStack extends cdk.Stack {
       },
     });
 
+    fileBucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'NoReadUnlessGuardDutyClean',
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['s3:GetObject', 's3:GetObjectVersion'],
+      resources: [fileBucket.arnForObjects('workspaces/*')],
+      conditions: {
+        ArnNotEquals: {
+          'aws:PrincipalArn': [malwareProtectionRole.roleArn, apiFunction.role!.roleArn],
+        },
+        StringNotEquals: {
+          's3:ExistingObjectTag/GuardDutyMalwareScanStatus': 'NO_THREATS_FOUND',
+        },
+      },
+    }));
+    fileBucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'DeletedObjectsCannotBeRead',
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['s3:GetObject', 's3:GetObjectVersion'],
+      resources: [fileBucket.arnForObjects('workspaces/*')],
+      conditions: {
+        StringEquals: {
+          's3:ExistingObjectTag/mukuroji-deleted': 'true',
+        },
+      },
+    }));
+    fileBucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'DeletedObjectQuarantineCannotBeRemoved',
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['s3:PutObjectTagging', 's3:PutObjectVersionTagging'],
+      resources: [fileBucket.arnForObjects('workspaces/*')],
+      conditions: {
+        StringEquals: {
+          's3:ExistingObjectTag/mukuroji-deleted': 'true',
+        },
+        StringNotEquals: {
+          's3:RequestObjectTag/mukuroji-deleted': 'true',
+        },
+      },
+    }));
+
     legacyTasksTable.grantReadData(apiFunction);
     workItemsTable.grantReadWriteData(apiFunction);
     teamIssueEventsTable.grantReadWriteData(apiFunction);
@@ -761,6 +1046,7 @@ export class CdkStack extends cdk.Stack {
     auditEventsTable.grantReadWriteData(apiFunction);
     workspaceAccessTable.grantReadWriteData(apiFunction);
     collaborationTable.grantReadWriteData(apiFunction);
+    fileProofingTable.grantReadWriteData(apiFunction);
     notificationsTable.grantReadWriteData(apiFunction);
     workspaceSearchTable.grantReadWriteData(apiFunction);
     realtimeSessionsTable.grantWriteData(apiFunction);
@@ -774,6 +1060,7 @@ export class CdkStack extends cdk.Stack {
           auditEventsTable.tableArn,
           workspaceAccessTable.tableArn,
           collaborationTable.tableArn,
+          fileProofingTable.tableArn,
           workspaceSearchTable.tableArn,
         ],
       })],
@@ -782,6 +1069,20 @@ export class CdkStack extends cdk.Stack {
       throw new Error('API Lambda execution role was not created.');
     }
     apiFunction.role.attachInlinePolicy(apiTransactWritePolicy);
+    apiFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          's3:DeleteObject',
+          's3:GetObject',
+          's3:GetObjectAttributes',
+          's3:GetObjectVersion',
+          's3:GetObjectVersionTagging',
+          's3:PutObject',
+          's3:PutObjectVersionTagging',
+        ],
+        resources: [fileBucket.arnForObjects('workspaces/*')],
+      }),
+    );
     apiFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: [
@@ -926,6 +1227,8 @@ export class CdkStack extends cdk.Stack {
         environment: {
           COLLABORATION_TABLE_NAME: collaborationTable.tableName,
           COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+          FILE_BUCKET_NAME: fileBucket.bucketName,
+          FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
           NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
           NOTIFICATION_RETENTION_SECONDS: String(365 * 24 * 60 * 60),
           PROCESSED_AUDIT_EVENTS_TABLE_NAME: processedAuditEventsTable.tableName,
@@ -959,6 +1262,47 @@ export class CdkStack extends cdk.Stack {
     realtimeSessionsTable.grantReadWriteData(collaborationProjectionFunction);
     workItemsTable.grantReadData(collaborationProjectionFunction);
     workspaceAccessTable.grantReadData(collaborationProjectionFunction);
+    collaborationProjectionFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+        resources: [fileProofingTable.tableArn],
+      }),
+    );
+    collaborationProjectionFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['dynamodb:UpdateItem'],
+        resources: [fileProofingTable.tableArn],
+        conditions: {
+          'ForAllValues:StringEquals': {
+            'dynamodb:Attributes': ['scopeKey', 'recordKey', 'expiresAt', 'retentionUntil'],
+          },
+        },
+      }),
+    );
+    collaborationProjectionFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:GetObjectVersionTagging'],
+        resources: [fileBucket.arnForObjects('workspaces/*')],
+      }),
+    );
+    collaborationProjectionFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:PutObjectVersionTagging'],
+        resources: [fileBucket.arnForObjects('workspaces/*')],
+        conditions: {
+          'ForAllValues:StringEquals': {
+            's3:RequestObjectTagKeys': [
+              'GuardDutyMalwareScanStatus',
+              'mukuroji-deleted',
+              'mukuroji-upload',
+            ],
+          },
+          StringEquals: {
+            's3:RequestObjectTag/mukuroji-deleted': 'true',
+          },
+        },
+      }),
+    );
     collaborationProjectionFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
@@ -1259,6 +1603,15 @@ export class CdkStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'NotificationsTableName', { value: notificationsTable.tableName });
     new cdk.CfnOutput(this, 'RealtimeSessionsTableName', {
       value: realtimeSessionsTable.tableName,
+    });
+    new cdk.CfnOutput(this, 'FileProofingTableName', {
+      value: fileProofingTable.tableName,
+    });
+    new cdk.CfnOutput(this, 'FileBucketName', {
+      value: fileBucket.bucketName,
+    });
+    new cdk.CfnOutput(this, 'FileMalwareProtectionPlanId', {
+      value: malwareProtectionPlan.attrMalwareProtectionPlanId,
     });
     new cdk.CfnOutput(this, 'RealtimeWebSocketUrl', {
       value: realtimeWebSocketStage.url,

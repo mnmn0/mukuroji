@@ -8,6 +8,7 @@ import {
 } from '../issues/fixtures'
 import type { ProjectMember } from '../projects/api'
 import { projectDirectoryFixtures } from '../projects/fixtures'
+import { fileArtifactsControllerFixture } from '../files/fixtures'
 
 const assigneeOptions: ProjectMember[] = [
   {
@@ -55,6 +56,7 @@ const meta = {
   args: {
     locale: 'ja',
     assigneeOptions,
+    artifacts: fileArtifactsControllerFixture,
     collaboration: issueCollaborationControllerFixture,
     currentWorkspaceMemberKey: 'demo@example.com',
     issues: teamIssueFixtures,

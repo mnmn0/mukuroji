@@ -525,7 +525,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   const activeTeam = useMemo(() => findActiveTeam(teams, params.teamId), [params.teamId, teams])
   const activeTeamProjects = activeTeam?.projects ?? []
   const isTeamManagementView = view === 'team-overview' || view === 'team-members'
-  const needsWorkspaceWorkItems = !['help', 'inbox', 'settings'].includes(view)
+  const needsWorkspaceWorkItems = !['help', 'settings'].includes(view)
   const workspaceWorkItemsKey =
     accessToken && user && !currentUserError && needsWorkspaceWorkItems
       ? (['workspace-work-items', accessToken] as const)
@@ -588,7 +588,12 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     isCurrentUserLoading ||
     Boolean(currentUserError) ||
     Boolean(user && isProjectDirectoryLoading) ||
-    Boolean(user && workspaceWorkItemsKey && isWorkspaceWorkItemsLoading)
+    Boolean(
+      user &&
+      view !== 'inbox' &&
+      workspaceWorkItemsKey &&
+      isWorkspaceWorkItemsLoading,
+    )
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -1063,10 +1068,14 @@ function WorkspaceBody({
       ) : null}
       {view === 'inbox' ? (
         notificationInbox ? (
-          <NotificationInbox
-            controller={notificationInbox}
+          <InboxWorkspaceView
             locale={locale}
+            notificationInbox={notificationInbox}
             onOpenNotification={onOpenNotification}
+            onOpenTask={onOpenTask}
+            t={t}
+            tasks={tasks}
+            teams={teams}
           />
         ) : null
       ) : null}
@@ -1366,6 +1375,167 @@ function MyTasksView({
   )
 }
 
+function InboxWorkspaceView({
+  locale,
+  notificationInbox,
+  onOpenNotification,
+  onOpenTask,
+  t,
+  tasks,
+  teams,
+}: {
+  locale: Locale
+  notificationInbox: NotificationInboxController
+  onOpenNotification?: (notification: InboxNotification) => void
+  onOpenTask?: (task: ProjectTask) => void
+  t: (key: MessageKey) => string
+  tasks: ProjectTask[]
+  teams: ProjectDirectoryTeam[]
+}) {
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'approval'>('all')
+  const inboxTasks = createInboxTasks(tasks)
+  const approvalTaskCount = inboxTasks.filter(hasApprovalAttention).length
+  const filteredTasks = sourceFilter === 'approval'
+    ? inboxTasks.filter(hasApprovalAttention)
+    : inboxTasks
+  const showAttentionQueue = inboxTasks.length > 0 || sourceFilter === 'approval'
+
+  return (
+    <div className="grid gap-5" data-testid="inbox-workbench">
+      <section className="workbench-toolbar flex min-w-0 flex-wrap items-center justify-between gap-3 p-4">
+        <div
+          aria-label={t('workspace.inbox.scopeTitle')}
+          className="inline-flex min-w-0 flex-wrap gap-1 rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-1"
+          role="group"
+        >
+          <button
+            aria-pressed={sourceFilter === 'all'}
+            className={`min-h-9 rounded-md px-3 text-sm font-semibold tracking-[0.01em] transition ${
+              sourceFilter === 'all'
+                ? 'bg-white text-[var(--workbench-text)] shadow-[0_1px_2px_rgba(23,32,29,0.08)]'
+                : 'text-[var(--workbench-muted)] hover:bg-white/70 hover:text-[var(--workbench-text)]'
+            }`}
+            data-testid="inbox-filter-all"
+            onClick={() => setSourceFilter('all')}
+            type="button"
+          >
+            {t('workspace.inbox.filter.all')}
+          </button>
+          <button
+            aria-pressed={sourceFilter === 'approval'}
+            className={`min-h-9 rounded-md px-3 text-sm font-semibold tracking-[0.01em] transition ${
+              sourceFilter === 'approval'
+                ? 'bg-white text-[var(--workbench-text)] shadow-[0_1px_2px_rgba(23,32,29,0.08)]'
+                : 'text-[var(--workbench-muted)] hover:bg-white/70 hover:text-[var(--workbench-text)]'
+            }`}
+            data-testid="inbox-filter-approval"
+            onClick={() => setSourceFilter('approval')}
+            type="button"
+          >
+            {t('workspace.inbox.filter.approval')}
+            {approvalTaskCount > 0 ? (
+              <span className="ml-2 rounded-full bg-[var(--workbench-primary)] px-2 py-0.5 text-xs font-bold text-white">
+                {approvalTaskCount}
+              </span>
+            ) : null}
+          </button>
+        </div>
+        <p className="text-sm font-semibold text-[var(--workbench-muted)]">
+          {t('workspace.inbox.scopeDescription')}
+        </p>
+      </section>
+
+      {showAttentionQueue ? (
+        <InboxAttentionQueue
+          onOpenTask={onOpenTask}
+          t={t}
+          tasks={filteredTasks}
+          teams={teams}
+        />
+      ) : null}
+
+      <NotificationInbox
+        controller={notificationInbox}
+        locale={locale}
+        onOpenNotification={onOpenNotification}
+      />
+    </div>
+  )
+}
+
+function InboxAttentionQueue({
+  onOpenTask,
+  t,
+  tasks,
+  teams,
+}: {
+  onOpenTask?: (task: ProjectTask) => void
+  t: (key: MessageKey) => string
+  tasks: ProjectTask[]
+  teams: ProjectDirectoryTeam[]
+}) {
+  return (
+    <section className="workbench-panel overflow-hidden">
+      <SectionHeader
+        title={t('workspace.inbox.queueTitle')}
+        meta={t('workspace.inbox.queueMeta').replace('{count}', String(tasks.length))}
+      />
+      <div className="divide-y divide-[var(--workbench-border)]" data-testid="inbox-task-list">
+        {tasks.map((task) => {
+          const reasonKeys = createInboxReasonKeys(task)
+
+          return (
+            <button
+              className="grid w-full grid-cols-[minmax(220px,1fr)_minmax(170px,0.7fr)_auto] items-center gap-5 p-5 text-left transition hover:bg-[var(--workbench-surface-muted)] disabled:hover:bg-transparent max-[860px]:grid-cols-1"
+              data-testid={`inbox-task-${createInboxTaskTestId(task)}`}
+              disabled={!onOpenTask || !isOpenableWorkspaceTask(task)}
+              key={createWorkspaceTaskKey(task)}
+              onClick={() => onOpenTask?.(task)}
+              type="button"
+            >
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-semibold text-[var(--workbench-text)]">
+                  {resolveTaskTitle(task, t)}
+                </span>
+                <span className="mt-1 block truncate text-sm font-medium text-[var(--workbench-muted)]">
+                  {resolveWorkspaceProjectName(task, teams)} · {resolveTaskAssignee(task, t)}
+                </span>
+                <span className="mt-3 flex flex-wrap gap-2">
+                  {reasonKeys.map((reasonKey) => (
+                    <span className={resolveInboxReasonClassName(reasonKey)} key={reasonKey}>
+                      {t(reasonKey)}
+                    </span>
+                  ))}
+                </span>
+              </span>
+              <span className="flex flex-wrap items-center gap-2">
+                <StatusPill status={task.status} t={t} />
+                <PriorityPill priority={task.priority} t={t} />
+                <span className="text-sm font-semibold text-[var(--workbench-muted)]">
+                  {task.dueDate}
+                </span>
+              </span>
+              <span className="workbench-badge justify-self-end max-[860px]:justify-self-start">
+                {t('workspace.action.openTask')}
+              </span>
+            </button>
+          )
+        })}
+        {tasks.length === 0 ? (
+          <div className="px-5 py-10 text-center">
+            <p className="text-sm font-semibold text-[var(--workbench-text)]">
+              {t('workspace.inbox.emptyTitle')}
+            </p>
+            <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">
+              {t('workspace.inbox.emptyDescription')}
+            </p>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  )
+}
+
 function DashboardWorkspaceView({
   onOpenTask,
   summary,
@@ -1493,6 +1663,14 @@ function ReportsView({
     label: t(`tasks.priority.${priority}`),
   }))
   const attentionProjectCount = projectRows.filter((project) => project.attentionTaskCount > 0).length
+  const pendingApprovalCount = tasks.reduce(
+    (count, task) => count + (task.approvalSummary?.pendingCount ?? 0),
+    0,
+  )
+  const overdueApprovalCount = tasks.reduce(
+    (count, task) => count + (task.approvalSummary?.overdueCount ?? 0),
+    0,
+  )
 
   return (
     <div className="grid gap-6" data-testid="reports-workbench">
@@ -1515,7 +1693,7 @@ function ReportsView({
         </button>
       </section>
 
-      <div className="grid grid-cols-4 gap-4 max-[1180px]:grid-cols-2 max-[680px]:grid-cols-1">
+      <div className="grid grid-cols-6 gap-4 max-[1380px]:grid-cols-3 max-[980px]:grid-cols-2 max-[680px]:grid-cols-1">
         <MetricCard
           label={t('workspace.reports.metric.open')}
           testId="reports-metric-open"
@@ -1539,6 +1717,18 @@ function ReportsView({
           testId="reports-metric-projects"
           value={attentionProjectCount}
           tone="amber"
+        />
+        <MetricCard
+          label={t('workspace.reports.metric.pendingApprovals')}
+          testId="reports-metric-pending-approvals"
+          value={pendingApprovalCount}
+          tone="teal"
+        />
+        <MetricCard
+          label={t('workspace.reports.metric.overdueApprovals')}
+          testId="reports-metric-overdue-approvals"
+          value={overdueApprovalCount}
+          tone="red"
         />
       </div>
 
@@ -1618,7 +1808,7 @@ function ReportsView({
           </label>
         </div>
         <div className="overflow-x-auto border-t border-[var(--workbench-border)]">
-          <table className="w-full min-w-[980px] border-collapse text-left" data-testid="reports-project-table">
+          <table className="w-full min-w-[1160px] border-collapse text-left" data-testid="reports-project-table">
             <thead>
               <tr className="workbench-table-head text-left">
                 <th className="px-5 py-3" scope="col">{t('workspace.column.project')}</th>
@@ -1627,6 +1817,8 @@ function ReportsView({
                 <th className="px-5 py-3" scope="col">{t('workspace.reports.column.open')}</th>
                 <th className="px-5 py-3" scope="col">{t('workspace.reports.column.review')}</th>
                 <th className="px-5 py-3" scope="col">{t('workspace.reports.column.attention')}</th>
+                <th className="px-5 py-3" scope="col">{t('workspace.reports.column.pendingApprovals')}</th>
+                <th className="px-5 py-3" scope="col">{t('workspace.reports.column.overdueApprovals')}</th>
                 <th className="px-5 py-3 text-right" scope="col">{t('workspace.reports.column.action')}</th>
               </tr>
             </thead>
@@ -1657,6 +1849,12 @@ function ReportsView({
                   <td className="px-5 py-4">
                     <span className={project.attentionTaskCount > 0 ? 'workbench-badge-danger' : 'workbench-badge-success'}>
                       {project.attentionTaskCount}
+                    </span>
+                  </td>
+                  <td className="px-5 py-4 tabular-nums">{project.pendingApprovalCount}</td>
+                  <td className="px-5 py-4">
+                    <span className={project.overdueApprovalCount > 0 ? 'workbench-badge-danger' : 'workbench-badge-success'}>
+                      {project.overdueApprovalCount}
                     </span>
                   </td>
                   <td className="px-5 py-4 text-right">
@@ -2609,6 +2807,12 @@ function createWorkspaceTaskTestId(task: ProjectTask) {
   return createWorkspaceTaskTestToken(`${task.assignedProjectId ?? 'unassigned'}:${task.id}`)
 }
 
+function createInboxTaskTestId(task: ProjectTask) {
+  return createWorkspaceTaskTestToken(
+    `${task.teamId}:${task.assignedProjectId ?? 'unassigned'}:${task.id}`,
+  )
+}
+
 function createWorkspaceTaskTestToken(value: string) {
   return value.replaceAll(/[^a-z0-9-]+/gi, '-').toLowerCase()
 }
@@ -2701,7 +2905,7 @@ function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) 
 
 function createActionQueueTasks(tasks: ProjectTask[]) {
   return [...tasks]
-    .filter((task) => task.status !== 'done')
+    .filter((task) => task.status !== 'done' || hasApprovalAttention(task))
     .sort((firstTask, secondTask) => {
       const firstScore = calculateWorkspaceActionScore(firstTask)
       const secondScore = calculateWorkspaceActionScore(secondTask)
@@ -2719,7 +2923,8 @@ function createInboxTasks(tasks: ProjectTask[]) {
     .filter((task) =>
       task.priority === 'high' ||
       task.status === 'review' ||
-      isWorkspaceTaskOverdue(task),
+      isWorkspaceTaskOverdue(task) ||
+      hasApprovalAttention(task),
     )
 }
 
@@ -2737,18 +2942,86 @@ function isWorkspaceTaskAssignedToUser(
   ].some((value) => normalizedUserAliases.has(normalizeWorkspaceSearchText(value)))
 }
 
+function resolveWorkspaceProjectName(task: ProjectTask, teams: ProjectDirectoryTeam[]) {
+  const scopedTeam = task.teamId
+    ? teams.find((team) => team.id === task.teamId)
+    : undefined
+  const scopedProject = scopedTeam?.projects.find((project) => project.id === task.assignedProjectId)
+
+  if (scopedProject) {
+    return scopedProject.name
+  }
+
+  return teams
+    .flatMap((team) => team.projects)
+    .find((project) => project.id === task.assignedProjectId)?.name ??
+      task.assignedProjectId ??
+      '-'
+}
+
+function createInboxReasonKeys(task: ProjectTask): MessageKey[] {
+  const reasonKeys: MessageKey[] = []
+
+  if (isWorkspaceTaskOverdue(task)) {
+    reasonKeys.push('workspace.inbox.reason.overdue')
+  }
+
+  if (task.priority === 'high') {
+    reasonKeys.push('workspace.inbox.reason.high')
+  }
+
+  if (task.status === 'review') {
+    reasonKeys.push('workspace.inbox.reason.review')
+  }
+
+  if (task.approvalSummary?.overdueCount) {
+    reasonKeys.push('workspace.inbox.reason.approvalOverdue')
+  } else if (hasApprovalAttention(task)) {
+    reasonKeys.push('workspace.inbox.reason.approval')
+  }
+
+  return reasonKeys.length > 0 ? reasonKeys : ['workspace.inbox.reason.watch']
+}
+
+function resolveInboxReasonClassName(reasonKey: MessageKey) {
+  if (
+    reasonKey === 'workspace.inbox.reason.overdue' ||
+    reasonKey === 'workspace.inbox.reason.high' ||
+    reasonKey === 'workspace.inbox.reason.approvalOverdue'
+  ) {
+    return 'workbench-badge-danger'
+  }
+
+  if (reasonKey === 'workspace.inbox.reason.review') {
+    return 'workbench-badge-warning'
+  }
+
+  return 'workbench-badge-primary'
+}
+
 function normalizeWorkspaceSearchText(value?: string) {
   return value?.trim().toLocaleLowerCase() ?? ''
 }
 
 function calculateWorkspaceActionScore(task: ProjectTask) {
   return (isWorkspaceTaskOverdue(task) ? 8 : 0) +
+    ((task.approvalSummary?.overdueCount ?? 0) > 0 ? 8 : 0) +
+    (hasApprovalAttention(task) ? 4 : 0) +
     (task.priority === 'high' ? 5 : task.priority === 'medium' ? 2 : 0) +
     (task.status === 'review' ? 4 : task.status === 'in-progress' ? 1 : 0)
 }
 
 function isOpenableWorkspaceTask(task: ProjectTask) {
   return Boolean(task.teamId)
+}
+
+function hasApprovalAttention(task: ProjectTask) {
+  const summary = task.approvalSummary
+
+  return Boolean(summary && (
+    summary.pendingCount > 0 ||
+    summary.overdueCount > 0
+  ))
 }
 
 function isWorkspaceTaskOverdue(task: ProjectTask) {
@@ -2809,12 +3082,22 @@ function createReportProjectRows(teams: ProjectDirectoryTeam[], tasks: ProjectTa
       const doneTaskCount = projectTasks.filter((task) => task.status === 'done').length
       const reviewTaskCount = projectTasks.filter((task) => task.status === 'review').length
       const attentionTaskCount = createInboxTasks(projectTasks).length
+      const pendingApprovalCount = projectTasks.reduce(
+        (count, task) => count + (task.approvalSummary?.pendingCount ?? 0),
+        0,
+      )
+      const overdueApprovalCount = projectTasks.reduce(
+        (count, task) => count + (task.approvalSummary?.overdueCount ?? 0),
+        0,
+      )
 
       return {
         attentionTaskCount,
         doneTaskCount,
         name: project.name,
         openTaskCount,
+        overdueApprovalCount,
+        pendingApprovalCount,
         progress: calculateProjectProgress(projectTasks),
         projectId: project.id,
         reviewTaskCount,
@@ -2864,6 +3147,8 @@ function downloadWorkspaceReportCsv(
     t('workspace.reports.column.done'),
     t('workspace.reports.column.review'),
     t('workspace.reports.column.attention'),
+    t('workspace.reports.column.pendingApprovals'),
+    t('workspace.reports.column.overdueApprovals'),
     t('workspace.column.progress'),
   ]
   const rows = projectRows.map((project) => [
@@ -2874,6 +3159,8 @@ function downloadWorkspaceReportCsv(
     project.doneTaskCount,
     project.reviewTaskCount,
     project.attentionTaskCount,
+    project.pendingApprovalCount,
+    project.overdueApprovalCount,
     `${project.progress}%`,
   ])
   const csv = [headers, ...rows]

@@ -8,6 +8,12 @@ import {
 } from '../auth/api'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import { createMutationRequestRunner } from '../api/mutationHeaders'
+import { IssueArtifactsPanel } from '../files/IssueArtifactsPanel'
+import {
+  type FileArtifactScope,
+  type FileArtifactsController,
+  useFileArtifacts,
+} from '../files/useFileArtifacts'
 import {
   MobileSidebarButton,
   MobileSidebarDrawer,
@@ -115,6 +121,10 @@ type TeamIssueScreenProps = {
    * 選択中 Issue の comment thread、watcher、presence です。
    */
   collaboration?: IssueCollaborationController
+  /**
+   * 選択中 Work Item の file/version/annotation/approval controller です。
+   */
+  artifacts?: FileArtifactsController
   /**
    * mention 候補と actor 表示に使う Workspace member 一覧です。
    */
@@ -272,6 +282,17 @@ export function TeamIssuePage() {
     issueId: resolvedSelectedIssueId,
     projectId: resolvedSelectedIssue?.assignedProjectId,
     teamId,
+  })
+  const artifactIssueId = resolvedSelectedIssueId
+  const issueFileScope = useMemo<FileArtifactScope | undefined>(() =>
+    artifactIssueId
+      ? { issueId: artifactIssueId, kind: 'work-item', teamId }
+      : undefined,
+  [artifactIssueId, teamId])
+  const artifacts = useFileArtifacts({
+    accessToken,
+    enabled: resolvedSelectedIssue?.source !== 'legacy',
+    scope: issueFileScope,
   })
   const detailKey = accessToken && resolvedSelectedIssueId
     ? (['team-issue-detail', accessToken, teamId, resolvedSelectedIssueId] as const)
@@ -456,6 +477,7 @@ export function TeamIssuePage() {
   return (
     <TeamIssueScreen
       assigneeOptions={assigneeOptions}
+      artifacts={resolvedSelectedIssue?.source !== 'legacy' ? artifacts : undefined}
       collaboration={collaboration}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}
@@ -492,6 +514,7 @@ export function TeamIssuePage() {
  */
 export function TeamIssueScreen({
   assigneeOptions = [],
+  artifacts,
   collaboration,
   currentWorkspaceMemberKey,
   defaultCreateIssueOpen = false,
@@ -747,6 +770,7 @@ export function TeamIssueScreen({
               </section>
               <IssueDetailPane
                 assigneeOptions={assigneeOptions}
+                artifacts={artifacts}
                 collaboration={collaboration}
                 currentWorkspaceMemberKey={currentWorkspaceMemberKey}
                 detailErrorMessage={detailErrorMessage ?? detailErrorMessageLocal}
@@ -1100,6 +1124,7 @@ function IssueBoard({
 
 function IssueDetailPane({
   assigneeOptions,
+  artifacts,
   collaboration,
   currentWorkspaceMemberKey,
   detailErrorMessage,
@@ -1113,6 +1138,7 @@ function IssueDetailPane({
   workspaceMembers,
 }: {
   assigneeOptions: ProjectMember[]
+  artifacts?: FileArtifactsController
   collaboration?: IssueCollaborationController
   currentWorkspaceMemberKey?: string
   detailErrorMessage?: string
@@ -1239,8 +1265,17 @@ function IssueDetailPane({
         ) : null}
         {detailErrorMessage ? <p className="text-sm font-bold text-red-600">{detailErrorMessage}</p> : null}
       </form>
+      {artifacts ? (
+        <IssueArtifactsPanel
+          controller={artifacts}
+          currentMemberKey={currentWorkspaceMemberKey}
+          locale={locale}
+          members={workspaceMembers}
+        />
+      ) : null}
       {collaboration ? (
         <IssueCollaborationPanel
+          artifacts={artifacts}
           key={`${issue.teamId}:${issue.id}`}
           controller={collaboration}
           currentMemberKey={currentWorkspaceMemberKey}

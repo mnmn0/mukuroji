@@ -9,7 +9,14 @@ import {
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
+  UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
+import {
+  GetObjectTaggingCommand,
+  PutObjectTaggingCommand,
+  S3Client,
+  type Tag,
+} from '@aws-sdk/client-s3'
 import {
   listScopeConnections,
   postRealtimeMessage,
@@ -20,6 +27,7 @@ import {
   parseStoredNotificationPreferences,
   type NotificationPreferences,
 } from './notifications'
+import { isMissingFileObjectVersionError } from './file-object-errors'
 
 /**
  * DynamoDB Streams event に含まれる AttributeValue の最小表現です。
@@ -68,7 +76,7 @@ export type DynamoStreamRecord = {
 /**
  * AuditEventsTable stream Lambda event です。
  */
-type DynamoStreamEvent = {
+export type DynamoStreamEvent = {
   /** 同じ batch で配送された stream records です。 */
   Records?: DynamoStreamRecord[]
 }
@@ -84,7 +92,7 @@ export type BatchItemFailure = {
 /**
  * Lambda partial batch failure response です。
  */
-type BatchResponse = {
+export type BatchResponse = {
   /** 処理に失敗した stream records です。 */
   batchItemFailures: BatchItemFailure[]
 }
@@ -135,6 +143,8 @@ export type AuditProjectionEvent = {
   projectId?: string
   /** current comment ID です。 */
   commentId?: string
+  /** File proofing cleanup の対象 file ID です。 */
+  fileId?: string
   /** Reply が属する root comment ID です。 */
   rootCommentId?: string
   /** Inbox 行に表示する対象タイトルです。 */
@@ -145,6 +155,38 @@ export type AuditProjectionEvent = {
   dueDate?: string
   /** notification/realtime consumer へ配送する event かどうかです。 */
   outboxStatus: 'pending' | 'suppressed'
+}
+
+/** File delete cleanup が更新する DynamoDB key です。 */
+export type DeletedFileMetadataKey = {
+  /** FileProofingTable の partition key です。 */
+  scopeKey: string
+  /** FileProofingTable の sort key です。 */
+  recordKey: string
+}
+
+/** File delete cleanup の object storage target です。 */
+export type DeletedFileObjectVersion = {
+  /** File bucket 内の immutable object key です。 */
+  objectKey: string
+  /** Versioned S3 object の immutable VersionId です。 */
+  objectVersionId: string
+}
+
+/** Durable file delete cleanup の外部 I/O contract です。 */
+export interface DeletedFileCleanupDependencies {
+  /** File metadata row を強整合 read します。 */
+  readFile(scopeKey: string, fileId: string): Promise<Record<string, unknown> | undefined>
+  /** File scope 内の関連 rows を prefix query します。 */
+  queryRows(scopeKey: string, recordPrefix: string): Promise<Array<Record<string, unknown>>>
+  /** Immutable object version を deleted quarantine へ移します。 */
+  tagDeletedObjectVersion(target: DeletedFileObjectVersion): Promise<void>
+  /** 関連 metadata に tombstone と同じ retention を設定します。 */
+  expireMetadata(
+    keys: DeletedFileMetadataKey[],
+    expiresAt: number,
+    retentionUntil: string,
+  ): Promise<void>
 }
 
 /**
@@ -239,18 +281,29 @@ const cognitoClient = new CognitoIdentityProviderClient({ region: getAwsRegion()
 const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
   marshallOptions: { removeUndefinedValues: true },
 })
+const s3Client = new S3Client({ region: getAwsRegion() })
 const projectionConsumerName = 'collaboration-projection-v1'
 
 /**
  * AuditEventsTable の pending outbox records を通知と realtime invalidation に projection します。
  */
 export async function handler(event: DynamoStreamEvent): Promise<BatchResponse> {
+  return processCollaborationProjectionBatch(event, defaultDeletedFileCleanupDependencies)
+}
+
+/**
+ * Audit stream batch を処理し、cleanup 失敗を record 単位の retry response に変換します。
+ */
+export async function processCollaborationProjectionBatch(
+  event: DynamoStreamEvent,
+  deletedFileCleanupDependencies: DeletedFileCleanupDependencies,
+): Promise<BatchResponse> {
   const records = event.Records ?? []
   const currentSystemAdminCache = new Map<string, Promise<boolean>>()
   const results = await Promise.all(
     records.map(async (record) => {
       try {
-        await processRecord(record, currentSystemAdminCache)
+        await processRecord(record, currentSystemAdminCache, deletedFileCleanupDependencies)
         return undefined
       } catch (error) {
         console.error('Collaboration projection failed:', error)
@@ -267,6 +320,7 @@ export async function handler(event: DynamoStreamEvent): Promise<BatchResponse> 
 async function processRecord(
   record: DynamoStreamRecord,
   currentSystemAdminCache: Map<string, Promise<boolean>>,
+  deletedFileCleanupDependencies: DeletedFileCleanupDependencies,
 ) {
   if (record.eventName !== 'INSERT' || !record.dynamodb?.NewImage) {
     return
@@ -274,7 +328,13 @@ async function processRecord(
 
   const event = parseAuditProjectionEvent(unmarshalMap(record.dynamodb.NewImage))
 
-  if (!event || event.outboxStatus !== 'pending' || await isProjectionProcessed(event.eventId)) {
+  if (!event) {
+    return
+  }
+
+  await cleanupDeletedFileProjection(event, deletedFileCleanupDependencies)
+
+  if (event.outboxStatus !== 'pending' || await isProjectionProcessed(event.eventId)) {
     return
   }
 
@@ -323,6 +383,224 @@ async function processRecord(
   )
   await publishRealtimeInvalidation(event)
   await markProjectionProcessed(event.eventId)
+}
+
+/**
+ * file.deleted outbox event から同期 delete の durable fallback cleanup を実行します。
+ */
+export async function cleanupDeletedFileProjection(
+  event: AuditProjectionEvent,
+  dependencies: DeletedFileCleanupDependencies,
+): Promise<void> {
+  if (event.eventType !== 'file.deleted') {
+    return
+  }
+
+  const fileId = event.fileId ?? event.targetId
+  if (!fileId || !event.teamId || (!event.issueId && !event.projectId)) {
+    throw new Error('file.deleted cleanup metadata is incomplete.')
+  }
+
+  const scopeKey = event.issueId
+    ? `WORKSPACE#${event.workspaceId}#TEAM#${event.teamId}#WORKITEM#${event.issueId}`
+    : `WORKSPACE#${event.workspaceId}#TEAM#${event.teamId}#PROJECT#${event.projectId}`
+  const file = await dependencies.readFile(scopeKey, fileId)
+  if (
+    !file ||
+    file.entryType !== 'file' ||
+    readString(file.scopeKey) !== scopeKey ||
+    readString(file.fileId) !== fileId ||
+    !readString(file.deletedAt)
+  ) {
+    throw new Error('Deleted file metadata row is unavailable or invalid.')
+  }
+
+  const expiresAt = readPositiveInteger(file.expiresAt)
+  const retentionUntil = readString(file.retentionUntil)
+  if (!expiresAt || !retentionUntil) {
+    throw new Error('Deleted file retention metadata is unavailable or invalid.')
+  }
+
+  const expectedObjectPrefix = [
+    'workspaces',
+    encodeURIComponent(event.workspaceId),
+    'files',
+    encodeURIComponent(fileId),
+    '',
+  ].join('/')
+  if (!Array.isArray(file.versions)) {
+    throw new Error('Deleted file version metadata is invalid.')
+  }
+  const versions = file.versions
+  const immutableVersions = versions.flatMap((version) => {
+    if (!isRecord(version)) {
+      throw new Error('Deleted file version metadata is invalid.')
+    }
+
+    const objectVersionId = readString(version.objectVersionId)
+    if (!objectVersionId) {
+      return []
+    }
+
+    const objectKey = readString(version.objectKey)
+    if (!objectKey || !objectKey.startsWith(expectedObjectPrefix)) {
+      throw new Error('Deleted file object key is unavailable or outside its file prefix.')
+    }
+
+    return [{ objectKey, objectVersionId } satisfies DeletedFileObjectVersion]
+  })
+
+  await Promise.all(immutableVersions.map((target) =>
+    dependencies.tagDeletedObjectVersion(target)
+  ))
+
+  const [annotations, approvalIndexes] = await Promise.all([
+    dependencies.queryRows(scopeKey, `ANNOTATION#${fileId}#`),
+    dependencies.queryRows(scopeKey, `FILE_APPROVAL#${fileId}#`),
+  ])
+  const keys: DeletedFileMetadataKey[] = annotations
+    .filter((item) => item.entryType === 'annotation')
+    .map(readDeletedFileMetadataKey)
+
+  for (const approvalIndex of approvalIndexes) {
+    if (
+      approvalIndex.entryType !== 'file-approval-index' ||
+      readString(approvalIndex.fileId) !== fileId
+    ) {
+      continue
+    }
+
+    keys.push(readDeletedFileMetadataKey(approvalIndex))
+    const approvalId = readString(approvalIndex.approvalId)
+    const dueAt = readString(approvalIndex.dueAt)
+    const reviewerMemberKeys = Array.isArray(approvalIndex.reviewerMemberKeys)
+      ? approvalIndex.reviewerMemberKeys
+      : undefined
+    if (!approvalId || !dueAt || !reviewerMemberKeys) {
+      throw new Error('Deleted file approval index metadata is invalid.')
+    }
+    keys.push({ scopeKey, recordKey: `APPROVAL#${approvalId}` })
+
+    for (const reviewerMemberKey of reviewerMemberKeys) {
+      const memberKey = normalizeMemberKey(readString(reviewerMemberKey))
+      if (!memberKey) {
+        throw new Error('Deleted file approval index reviewer metadata is invalid.')
+      }
+      keys.push({
+        scopeKey: `WORKSPACE#${event.workspaceId}#REVIEWER#${memberKey}`,
+        recordKey: `APPROVAL#${dueAt}#${approvalId}`,
+      })
+    }
+  }
+
+  await dependencies.expireMetadata(deduplicateMetadataKeys(keys), expiresAt, retentionUntil)
+}
+
+/** Existing S3 tags を保持したまま deleted quarantine tag を上書きします。 */
+export function mergeDeletedObjectTags(tags: Tag[] | undefined): Tag[] {
+  const preservedTags = (tags ?? []).filter((tag): tag is Required<Pick<Tag, 'Key' | 'Value'>> =>
+    typeof tag.Key === 'string' &&
+    typeof tag.Value === 'string' &&
+    tag.Key !== 'mukuroji-deleted'
+  )
+  return [...preservedTags, { Key: 'mukuroji-deleted', Value: 'true' }]
+}
+
+/** Immutable file object version に deleted quarantine tag を冪等に付与します。 */
+export async function tagDeletedFileObjectVersion(
+  client: S3Client,
+  bucketName: string,
+  target: DeletedFileObjectVersion,
+) {
+  try {
+    const current = await client.send(new GetObjectTaggingCommand({
+      Bucket: bucketName,
+      Key: target.objectKey,
+      VersionId: target.objectVersionId,
+    }))
+    if (current.TagSet?.some((tag) => tag.Key === 'mukuroji-deleted' && tag.Value === 'true')) {
+      return
+    }
+    await client.send(new PutObjectTaggingCommand({
+      Bucket: bucketName,
+      Key: target.objectKey,
+      VersionId: target.objectVersionId,
+      Tagging: { TagSet: mergeDeletedObjectTags(current.TagSet) },
+    }))
+  } catch (error) {
+    if (!isMissingFileObjectVersionError(error)) {
+      throw error
+    }
+  }
+}
+
+const defaultDeletedFileCleanupDependencies: DeletedFileCleanupDependencies = {
+  async readFile(scopeKey, fileId) {
+    const response = await documentClient.send(new GetCommand({
+      TableName: requireEnv('FILE_PROOFING_TABLE_NAME'),
+      Key: { scopeKey, recordKey: `FILE#${fileId}` },
+      ConsistentRead: true,
+    }))
+    return response.Item
+  },
+  async queryRows(scopeKey, recordPrefix) {
+    const items: Array<Record<string, unknown>> = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await documentClient.send(new QueryCommand({
+        TableName: requireEnv('FILE_PROOFING_TABLE_NAME'),
+        KeyConditionExpression: 'scopeKey = :scopeKey AND begins_with(recordKey, :recordPrefix)',
+        ExpressionAttributeValues: {
+          ':scopeKey': scopeKey,
+          ':recordPrefix': recordPrefix,
+        },
+        ConsistentRead: true,
+        ExclusiveStartKey: exclusiveStartKey,
+      }))
+      items.push(...(response.Items ?? []))
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return items
+  },
+  async tagDeletedObjectVersion(target) {
+    await tagDeletedFileObjectVersion(
+      s3Client,
+      requireEnv('FILE_BUCKET_NAME'),
+      target,
+    )
+  },
+  async expireMetadata(keys, expiresAt, retentionUntil) {
+    for (let index = 0; index < keys.length; index += 20) {
+      await Promise.all(keys.slice(index, index + 20).map(async (key) => {
+        try {
+          await documentClient.send(new UpdateCommand({
+            TableName: requireEnv('FILE_PROOFING_TABLE_NAME'),
+            Key: key,
+            UpdateExpression: 'SET expiresAt = :expiresAt, retentionUntil = :retentionUntil',
+            ConditionExpression: 'attribute_exists(scopeKey) AND attribute_exists(recordKey)',
+            ExpressionAttributeValues: { ':expiresAt': expiresAt, ':retentionUntil': retentionUntil },
+          }))
+        } catch (error) {
+          if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) {
+            throw error
+          }
+        }
+      }))
+    }
+  },
+}
+
+function readDeletedFileMetadataKey(item: Record<string, unknown>): DeletedFileMetadataKey {
+  const scopeKey = readString(item.scopeKey)
+  const recordKey = readString(item.recordKey)
+  if (!scopeKey || !recordKey) {
+    throw new Error('Deleted file related metadata key is invalid.')
+  }
+  return { scopeKey, recordKey }
+}
+
+function deduplicateMetadataKeys(keys: DeletedFileMetadataKey[]) {
+  return [...new Map(keys.map((key) => [`${key.scopeKey}\0${key.recordKey}`, key])).values()]
 }
 
 async function readSubscribedWatcherCandidates(event: AuditProjectionEvent) {
@@ -973,6 +1251,7 @@ export function parseAuditProjectionEvent(
     issueId: readString(metadata.issueId),
     projectId: readString(metadata.projectId),
     commentId: readString(metadata.commentId),
+    fileId: readString(metadata.fileId),
     rootCommentId: readString(metadata.rootCommentId),
     notificationTitle: readString(metadata.notificationTitle) ?? readString(metadata.title),
     summary: readString(value.summary),
@@ -1051,6 +1330,10 @@ function normalizeStoredDateOnly(value: string | undefined) {
 
 function readString(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function readPositiveInteger(value: unknown) {
+  return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : undefined
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
