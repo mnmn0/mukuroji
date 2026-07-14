@@ -797,7 +797,8 @@ test('workspace metadata owner alias and project manager rows are idempotently b
   expect(createPayload).not.toContain('"Item"');
   expect(createPayload).toContain('createdAt = if_not_exists(createdAt, :timestamp)');
   expect(createPayload).toContain('updatedAt = if_not_exists(updatedAt, :timestamp)');
-  expect(createPayload).toContain('#role = :role');
+  expect(createPayload.match(/#role = :role/g)).toHaveLength(1);
+  expect(createPayload.match(/#role = if_not_exists\(#role, :role\)/g)).toHaveLength(4);
   expect(createPayload).toContain('attribute_not_exists(directoryId) OR');
   expect(bootstrap.Properties.Update).toEqual(bootstrap.Properties.Create);
 });
@@ -806,12 +807,14 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
   const template = synthesizedTemplate;
   const customResources = template.findResources('Custom::AWS');
   const policies = template.findResources('AWS::IAM::Policy');
+  const tables = template.findResources('AWS::DynamoDB::Table');
+  const outputs = template.toJSON().Outputs;
   const transactionCases = [
     {
       customResourcePrefix: 'SeedProjectDirectory',
       policyPrefix: 'SeedProjectDirectoryCustomResourcePolicy',
       itemAction: 'dynamodb:PutItem',
-      tableLogicalId: 'ProjectDirectoryTable9ED01C01',
+      tableOutputName: 'ProjectDirectoryTableName',
       physicalResourceId: 'project-directory-seed-v3',
       runsOnUpdate: false,
     },
@@ -819,7 +822,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
       customResourcePrefix: 'SeedWorkspaceAccess',
       policyPrefix: 'SeedWorkspaceAccessCustomResourcePolicy',
       itemAction: 'dynamodb:UpdateItem',
-      tableLogicalId: 'WorkspaceAccessTableD7C8D2C7',
+      tableOutputName: 'WorkspaceAccessTableName',
       physicalResourceId: 'workspace-access-seed-v2',
       runsOnUpdate: true,
     },
@@ -827,7 +830,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
       customResourcePrefix: 'BootstrapWorkspace',
       policyPrefix: 'BootstrapWorkspaceCustomResourcePolicy',
       itemAction: 'dynamodb:UpdateItem',
-      tableLogicalId: 'ProjectDirectoryTable9ED01C01',
+      tableOutputName: 'ProjectDirectoryTableName',
       physicalResourceId: 'workspace-bootstrap-v2',
       runsOnUpdate: true,
     },
@@ -835,7 +838,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
       customResourcePrefix: 'SeedWorkspaceDemoMembers',
       policyPrefix: 'SeedWorkspaceDemoMembersCustomResourcePolicy',
       itemAction: 'dynamodb:UpdateItem',
-      tableLogicalId: 'WorkspaceAccessTableD7C8D2C7',
+      tableOutputName: 'WorkspaceAccessTableName',
       physicalResourceId: 'workspace-access-demo-members-seed-v2',
       runsOnUpdate: true,
     },
@@ -857,9 +860,17 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
 
     expect(customResource).toBeDefined();
     expect(customResource?.Properties.Create).toBeDefined();
-    expect(serializeAwsSdkCall(customResource?.Properties.Create)).toContain(
-      transactionCase.physicalResourceId,
-    );
+    const createPayload = serializeAwsSdkCall(customResource?.Properties.Create);
+    const tableLogicalId = outputs[transactionCase.tableOutputName]?.Value?.Ref;
+
+    expect(createPayload).toContain(transactionCase.physicalResourceId);
+    if (typeof tableLogicalId !== 'string') {
+      throw new Error(
+        `DynamoDB table output ${transactionCase.tableOutputName} was not found.`,
+      );
+    }
+    expect(tables[tableLogicalId]).toBeDefined();
+    expect(createPayload).toContain(`{{Ref:${tableLogicalId}}}`);
     if (transactionCase.runsOnUpdate) {
       expect(customResource?.Properties.Update).toEqual(customResource?.Properties.Create);
     } else {
@@ -867,7 +878,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
     }
 
     const statements = policy?.Properties?.PolicyDocument?.Statement ?? [];
-    const tableArn = { 'Fn::GetAtt': [transactionCase.tableLogicalId, 'Arn'] };
+    const tableArn = { 'Fn::GetAtt': [tableLogicalId, 'Arn'] };
     const itemActionStatements = statements.filter((statement) =>
       statement.Action === transactionCase.itemAction,
     );
