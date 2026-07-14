@@ -13,6 +13,12 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 
+const INVITATION_ACCEPTANCE_LOCK_MS = 5 * 60_000
+const INVITATION_PROVISIONING_LEASE_MS = 5 * 60_000
+const WORKSPACE_IDENTITY_LIFECYCLE_VERSION = 2
+const MANUAL_COGNITO_CLEANUP_MESSAGE =
+  'Manual Cognito cleanup is required. After removing the user or Workspace claims in Cognito, retry revocation to verify completion.'
+
 /** Workspace 全体で付与する member role です。 */
 export type WorkspaceRole = 'owner' | 'admin' | 'member' | 'guest'
 
@@ -74,6 +80,22 @@ export type WorkspaceInvitation = {
   deliveryStatus: WorkspaceInvitationDeliveryStatus
   /** Cognito identity の provisioning ownership です。 */
   identityOwnership: WorkspaceIdentityOwnership
+  /** Cognito identity cleanup provenance schema の version です。 */
+  identityLifecycleVersion?: number
+  /** cleanup 対象を同じ Cognito identity に限定する安定 ID です。 */
+  cognitoIdentityId?: string
+  /** cleanup API に渡す大文字小文字を保持した Cognito username です。 */
+  cognitoUsername?: string
+  /** この invitation が Cognito の Workspace directory claim を追加したかどうかです。 */
+  directoryClaimCleanupRequired?: boolean
+  /** revoke に伴う Cognito cleanup が完了したかどうかです。 */
+  identityCleanupCompleted?: boolean
+  /** stable identity 情報がない旧 invitation で手動 Cognito cleanup が必要かどうかです。 */
+  identityCleanupManualRequired?: boolean
+  /** stable pair を得る前に Cognito identity mutation を開始したかどうかです。 */
+  identityMutationAttempted?: boolean
+  /** password challenge と revoke を直列化する acceptance lock の期限です。 */
+  acceptanceLockExpiresAt?: string
   /** invitation の同時更新検知に使用する version です。 */
   version: number
   /** invitation の有効期限を表す ISO 8601 timestamp です。 */
@@ -138,6 +160,12 @@ export type MarkWorkspaceInvitationDeliveryInput = {
   deliveryStatus: WorkspaceInvitationDeliveryStatus
   /** Cognito identity の ownership 判定です。 */
   identityOwnership: WorkspaceIdentityOwnership
+  /** provisioning した Cognito identity の安定 ID です。 */
+  cognitoIdentityId?: string
+  /** provisioning した Cognito identity の大文字小文字を保持した username です。 */
+  cognitoUsername?: string
+  /** revoke 時にこの invitation が追加した directory claim を削除するかどうかです。 */
+  directoryClaimCleanupRequired?: boolean
   /** 読み込み時点の invitation version です。 */
   expectedVersion: number
   /** 外部へ安全に表示できる失敗理由です。 */
@@ -206,6 +234,33 @@ export interface WorkspaceAccessClient {
   ): Promise<WorkspaceInvitation>
   /** 指定 invitation を取得します。 */
   getInvitation(workspaceId: string, invitationId: string): Promise<WorkspaceInvitation | undefined>
+  /** password challenge 前に invitation acceptance lock を取得します。 */
+  acquireInvitationAcceptanceLock(
+    workspaceId: string,
+    invitationId: string,
+  ): Promise<WorkspaceInvitation | undefined>
+  /** password challenge 終了後に invitation acceptance lock を解除します。 */
+  releaseInvitationAcceptanceLock(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+  ): Promise<WorkspaceInvitation>
+  /** Cognito mutation の開始を stable identity pair とともに write-ahead 記録します。 */
+  markInvitationIdentityMutationStarted(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+    cognitoIdentityId?: string,
+    cognitoUsername?: string,
+  ): Promise<WorkspaceInvitation>
+  /** Cognito 更新前に directory claim の補償責務を version 条件付きで記録します。 */
+  markInvitationDirectoryClaimCleanupRequired(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+    cognitoIdentityId: string,
+    cognitoUsername: string,
+  ): Promise<WorkspaceInvitation>
   /** Cognito provisioning と invitation 配信の結果を記録します。 */
   markInvitationDelivery(
     workspaceId: string,
@@ -218,9 +273,22 @@ export interface WorkspaceAccessClient {
     invitationId: string,
     input: MarkWorkspaceInvitationCleanupFailureInput,
   ): Promise<WorkspaceInvitation>
-  /** Cognito cleanup 成功後に revoked invitation の retry marker を消します。 */
+  /** 自動 cleanup できない revoked invitation を手動確認待ちとして記録します。 */
+  markInvitationManualCleanupRequired(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+  ): Promise<WorkspaceInvitation>
+  /** Cognito cleanup 成功後に retry marker と directory claim の補償責務を消します。 */
   clearInvitationCleanupFailure(
     workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+  ): Promise<WorkspaceInvitation>
+  /** 手動 Cognito cleanup の完了を管理権限と version 付きで確認します。 */
+  acknowledgeInvitationManualCleanup(
+    workspaceId: string,
+    actorMemberKey: string,
     invitationId: string,
     expectedVersion: number,
   ): Promise<WorkspaceInvitation>
@@ -377,6 +445,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       status: 'provisioning',
       deliveryStatus: 'pending',
       identityOwnership: 'ambiguous',
+      identityLifecycleVersion: WORKSPACE_IDENTITY_LIFECYCLE_VERSION,
       version: 1,
       expiresAt: addDays(now, expiresInDays).toISOString(),
       createdAt: nowIso,
@@ -425,6 +494,155 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     return response.Item ? toWorkspaceInvitation(response.Item, this.clock()) : undefined
   }
 
+  /** password challenge 前に invitation acceptance lock を取得します。 */
+  async acquireInvitationAcceptanceLock(workspaceId: string, invitationId: string) {
+    const invitation = await this.getInvitation(workspaceId, invitationId)
+
+    if (!invitation) {
+      return undefined
+    }
+
+    if (!isInvitationAcceptable(invitation)) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationNotAcceptable',
+        'The Workspace invitation cannot be accepted in its current state.',
+      )
+    }
+
+    const now = this.clock()
+
+    if (hasActiveInvitationAcceptanceLock(invitation, now)) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationAcceptanceInProgress',
+        'Workspace invitation acceptance is already in progress.',
+      )
+    }
+
+    return this.updateInvitation(
+      workspaceId,
+      invitation,
+      invitation.version,
+      {
+        acceptanceLockExpiresAt: new Date(
+          now.getTime() + INVITATION_ACCEPTANCE_LOCK_MS,
+        ).toISOString(),
+      },
+      ['pending', 'provisioning', 'delivery-failed'],
+    )
+  }
+
+  /** password challenge 終了後に invitation acceptance lock を解除します。 */
+  async releaseInvitationAcceptanceLock(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+  ) {
+    const invitation = await this.requireInvitation(workspaceId, invitationId)
+
+    if (invitation.status === 'accepted') {
+      return invitation
+    }
+
+    return this.updateInvitation(
+      workspaceId,
+      invitation,
+      expectedVersion,
+      { acceptanceLockExpiresAt: undefined },
+      ['pending', 'provisioning', 'delivery-failed'],
+    )
+  }
+
+  /** Cognito mutation の開始を stable identity pair とともに write-ahead 記録します。 */
+  async markInvitationIdentityMutationStarted(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+    cognitoIdentityId?: string,
+    cognitoUsername?: string,
+  ) {
+    const invitation = await this.requireInvitation(workspaceId, invitationId)
+    const normalizedCognitoIdentityId = cognitoIdentityId?.trim() || undefined
+    const normalizedCognitoUsername = cognitoUsername?.trim() || undefined
+
+    if (Boolean(normalizedCognitoIdentityId) !== Boolean(normalizedCognitoUsername)) {
+      throw new WorkspaceAccessError(
+        503,
+        'WorkspaceIdentityUnavailable',
+        'Cognito identity metadata is unavailable.',
+      )
+    }
+
+    const preservesInvitationIdentity = normalizedCognitoIdentityId !== undefined &&
+      normalizedCognitoIdentityId === invitation.cognitoIdentityId
+
+    return this.updateInvitation(
+      workspaceId,
+      invitation,
+      expectedVersion,
+      {
+        identityOwnership: preservesInvitationIdentity
+          ? invitation.identityOwnership
+          : 'ambiguous',
+        cognitoIdentityId: normalizedCognitoIdentityId,
+        cognitoUsername: normalizedCognitoUsername,
+        directoryClaimCleanupRequired: preservesInvitationIdentity
+          ? invitation.directoryClaimCleanupRequired
+          : undefined,
+        identityMutationAttempted: true,
+      },
+      ['provisioning'],
+    )
+  }
+
+  /** Cognito 更新前に directory claim の補償責務を version 条件付きで記録します。 */
+  async markInvitationDirectoryClaimCleanupRequired(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+    cognitoIdentityId: string,
+    cognitoUsername: string,
+  ) {
+    const invitation = await this.requireInvitation(workspaceId, invitationId)
+    const normalizedCognitoIdentityId = normalizeRequired(
+      cognitoIdentityId,
+      'Cognito identity ID',
+    )
+    const normalizedCognitoUsername = normalizeRequired(cognitoUsername, 'Cognito username')
+
+    if (invitation.status !== 'provisioning' || invitation.version !== expectedVersion) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceVersionConflict',
+        'Workspace invitation changed. Reload and try again.',
+      )
+    }
+
+    if (
+      invitation.directoryClaimCleanupRequired &&
+      invitation.cognitoIdentityId === normalizedCognitoIdentityId &&
+      invitation.cognitoUsername === normalizedCognitoUsername
+    ) {
+      return invitation
+    }
+
+    return this.updateInvitation(
+      workspaceId,
+      invitation,
+      expectedVersion,
+      {
+        cognitoIdentityId: normalizedCognitoIdentityId,
+        cognitoUsername: normalizedCognitoUsername,
+        directoryClaimCleanupRequired: true,
+        identityOwnership: invitation.cognitoIdentityId === normalizedCognitoIdentityId
+          ? invitation.identityOwnership
+          : 'ambiguous',
+      },
+      ['provisioning'],
+    )
+  }
+
   /** Cognito provisioning と invitation 配信の結果を記録します。 */
   async markInvitationDelivery(
     workspaceId: string,
@@ -434,6 +652,20 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     const invitation = await this.requireInvitation(workspaceId, invitationId)
     const succeeded = input.deliveryStatus === 'sent' || input.deliveryStatus === 'not-required'
     const now = this.clock()
+    const preservesInvitationIdentity = input.cognitoIdentityId === undefined ||
+      input.cognitoIdentityId === invitation.cognitoIdentityId
+    const cognitoIdentityId = input.cognitoIdentityId ?? invitation.cognitoIdentityId
+    const cognitoUsername = input.cognitoUsername ?? (
+      preservesInvitationIdentity ? invitation.cognitoUsername : undefined
+    )
+
+    if (Boolean(cognitoIdentityId) !== Boolean(cognitoUsername)) {
+      throw new WorkspaceAccessError(
+        503,
+        'WorkspaceIdentityUnavailable',
+        'Cognito identity metadata is unavailable.',
+      )
+    }
 
     return this.updateInvitation(
       workspaceId,
@@ -443,6 +675,18 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         status: succeeded ? 'pending' : 'delivery-failed',
         deliveryStatus: input.deliveryStatus,
         identityOwnership: input.identityOwnership,
+        cognitoIdentityId,
+        cognitoUsername,
+        directoryClaimCleanupRequired: (
+          (preservesInvitationIdentity && invitation.directoryClaimCleanupRequired === true) ||
+          input.directoryClaimCleanupRequired === true
+        )
+          ? true
+          : undefined,
+        identityCleanupManualRequired: undefined,
+        identityMutationAttempted: succeeded
+          ? undefined
+          : invitation.identityMutationAttempted,
         failureMessage: succeeded ? undefined : input.failureMessage ?? 'Invitation delivery failed.',
         lastSentAt: input.deliveryStatus === 'sent' ? now.toISOString() : invitation.lastSentAt,
         expiresAt: addDays(now, 7).toISOString(),
@@ -480,7 +724,45 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     )
   }
 
-  /** Cognito cleanup 成功後に revoked invitation の retry marker を消します。 */
+  /** 自動 cleanup できない revoked invitation を手動確認待ちとして記録します。 */
+  async markInvitationManualCleanupRequired(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+  ) {
+    const invitation = await this.requireInvitation(workspaceId, invitationId)
+
+    if (invitation.status !== 'revoked') {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationNotRevoked',
+        'Only a revoked invitation can require manual Cognito cleanup.',
+      )
+    }
+
+    if (
+      invitation.identityCleanupManualRequired === true &&
+      invitation.failureMessage === MANUAL_COGNITO_CLEANUP_MESSAGE
+    ) {
+      return invitation
+    }
+
+    return this.updateInvitation(
+      workspaceId,
+      invitation,
+      expectedVersion,
+      {
+        status: 'revoked',
+        deliveryStatus: 'not-required',
+        identityCleanupCompleted: undefined,
+        identityCleanupManualRequired: true,
+        failureMessage: MANUAL_COGNITO_CLEANUP_MESSAGE,
+      },
+      ['revoked'],
+    )
+  }
+
+  /** Cognito cleanup 成功後に retry marker と directory claim の補償責務を消します。 */
   async clearInvitationCleanupFailure(
     workspaceId: string,
     invitationId: string,
@@ -503,9 +785,59 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       {
         status: 'revoked',
         deliveryStatus: 'not-required',
+        directoryClaimCleanupRequired: undefined,
+        identityCleanupCompleted: true,
+        identityCleanupManualRequired: undefined,
+        identityMutationAttempted: undefined,
         failureMessage: undefined,
       },
       ['revoked'],
+    )
+  }
+
+  /** 手動 Cognito cleanup の完了を管理権限と version 付きで確認します。 */
+  async acknowledgeInvitationManualCleanup(
+    workspaceId: string,
+    actorMemberKey: string,
+    invitationId: string,
+    expectedVersion: number,
+  ) {
+    const actor = await this.requireActiveActor(workspaceId, actorMemberKey)
+    const invitation = await this.requireInvitation(workspaceId, invitationId)
+    assertCanManageRole(actor, invitation.role)
+
+    if (
+      invitation.status !== 'revoked' ||
+      invitation.identityCleanupManualRequired !== true
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationManualCleanupNotRequired',
+        'This invitation is not waiting for manual Cognito cleanup.',
+      )
+    }
+
+    if (invitation.version !== expectedVersion) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceVersionConflict',
+        'Workspace invitation changed. Reload and try again.',
+      )
+    }
+
+    return this.updateInvitationWithActor(
+      workspaceId,
+      actor,
+      invitation,
+      {
+        status: 'revoked',
+        deliveryStatus: 'not-required',
+        directoryClaimCleanupRequired: undefined,
+        identityCleanupCompleted: true,
+        identityCleanupManualRequired: undefined,
+        identityMutationAttempted: undefined,
+        failureMessage: undefined,
+      },
     )
   }
 
@@ -520,7 +852,26 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     const invitation = await this.requireInvitation(workspaceId, invitationId)
     assertCanManageRole(actor, invitation.role)
 
-    if (invitation.status === 'revoked' || invitation.status === 'accepted') {
+    if (hasActiveInvitationAcceptanceLock(invitation, this.clock())) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationAcceptanceInProgress',
+        'An invitation cannot be resent while acceptance is in progress.',
+      )
+    }
+
+    if (
+      invitation.identityCleanupManualRequired === true ||
+      requiresManualLegacyIdentityCleanup(invitation)
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationManualCleanupRequired',
+        'Manual Cognito cleanup must complete before this invitation can be resent.',
+      )
+    }
+
+    if (invitation.status !== 'pending' && invitation.status !== 'delivery-failed') {
       throw new WorkspaceAccessError(
         409,
         'WorkspaceInvitationNotResendable',
@@ -536,6 +887,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         status: 'provisioning',
         deliveryStatus: 'pending',
         failureMessage: undefined,
+        acceptanceLockExpiresAt: undefined,
+        identityMutationAttempted: undefined,
         expiresAt: addDays(this.clock(), expiresInDays).toISOString(),
       },
     )
@@ -547,6 +900,25 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     const invitation = await this.requireInvitation(workspaceId, invitationId)
     assertCanManageRole(actor, invitation.role)
 
+    if (hasActiveInvitationAcceptanceLock(invitation, this.clock())) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationAcceptanceInProgress',
+        'An invitation cannot be revoked while acceptance is in progress.',
+      )
+    }
+
+    if (
+      invitation.status === 'provisioning' &&
+      hasActiveInvitationProvisioningLease(invitation, this.clock())
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationProvisioning',
+        'An invitation cannot be revoked while Cognito provisioning is in progress.',
+      )
+    }
+
     if (invitation.status === 'accepted') {
       throw new WorkspaceAccessError(
         409,
@@ -555,16 +927,42 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       )
     }
 
-    const cleanupPendingMessage = invitation.identityOwnership === 'workspace-created'
-      ? invitation.failureMessage ?? 'Cognito cleanup is pending and can be retried safely.'
-      : undefined
+    if (invitation.status === 'revoked' && invitation.identityCleanupCompleted) {
+      return invitation
+    }
+
+    if (invitation.status === 'revoked' && invitation.identityCleanupManualRequired === true) {
+      return invitation
+    }
+
+    const identityCleanupManualRequired = invitation.identityCleanupManualRequired === true ||
+      requiresManualLegacyIdentityCleanup(invitation)
+
+    if (
+      invitation.status === 'revoked' &&
+      !invitation.failureMessage &&
+      !identityCleanupManualRequired
+    ) {
+      return invitation
+    }
+    const cleanupPendingMessage = identityCleanupManualRequired
+      ? MANUAL_COGNITO_CLEANUP_MESSAGE
+      : (
+          invitation.identityOwnership === 'workspace-created' ||
+          invitation.directoryClaimCleanupRequired === true
+        )
+        ? invitation.failureMessage ?? 'Cognito cleanup is pending and can be retried safely.'
+        : undefined
 
     if (invitation.status === 'revoked') {
       return this.updateInvitationWithActor(
         workspaceId,
         actor,
         invitation,
-        { failureMessage: cleanupPendingMessage },
+        {
+          identityCleanupManualRequired: identityCleanupManualRequired || undefined,
+          failureMessage: cleanupPendingMessage,
+        },
       )
     }
 
@@ -575,6 +973,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       {
         status: 'revoked',
         deliveryStatus: 'not-required',
+        acceptanceLockExpiresAt: undefined,
+        identityCleanupManualRequired: identityCleanupManualRequired || undefined,
         failureMessage: cleanupPendingMessage,
       },
     )
@@ -591,6 +991,14 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     const invitation = await this.requireInvitation(workspaceId, invitationId)
     assertCanManageRole(actor, invitation.role)
 
+    if (hasActiveInvitationAcceptanceLock(invitation, this.clock())) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationAcceptanceInProgress',
+        'An invitation cannot be recreated while acceptance is in progress.',
+      )
+    }
+
     if (invitation.status !== 'expired' && invitation.status !== 'revoked') {
       throw new WorkspaceAccessError(
         409,
@@ -600,8 +1008,22 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
 
     if (
+      invitation.identityCleanupManualRequired === true ||
+      requiresManualLegacyIdentityCleanup(invitation)
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationManualCleanupRequired',
+        'Manual Cognito cleanup must complete before this invitation can be recreated.',
+      )
+    }
+
+    if (
       invitation.status === 'revoked' &&
-      invitation.identityOwnership === 'workspace-created' &&
+      (
+        invitation.identityOwnership === 'workspace-created' ||
+        invitation.directoryClaimCleanupRequired === true
+      ) &&
       invitation.failureMessage
     ) {
       throw new WorkspaceAccessError(
@@ -618,7 +1040,22 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       {
         status: 'provisioning',
         deliveryStatus: 'pending',
-        identityOwnership: 'ambiguous',
+        identityOwnership: invitation.status === 'revoked'
+          ? 'ambiguous'
+          : invitation.identityOwnership,
+        cognitoIdentityId: invitation.status === 'revoked'
+          ? undefined
+          : invitation.cognitoIdentityId,
+        cognitoUsername: invitation.status === 'revoked'
+          ? undefined
+          : invitation.cognitoUsername,
+        directoryClaimCleanupRequired: invitation.status === 'revoked'
+          ? undefined
+          : invitation.directoryClaimCleanupRequired,
+        identityCleanupCompleted: undefined,
+        identityCleanupManualRequired: undefined,
+        identityMutationAttempted: undefined,
+        acceptanceLockExpiresAt: undefined,
         failureMessage: undefined,
         expiresAt: addDays(this.clock(), expiresInDays).toISOString(),
       },
@@ -681,7 +1118,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
             recordKey: createInvitationRecordKey(invitation.id),
           },
           UpdateExpression:
-            'SET #status = :accepted, deliveryStatus = :notRequired, acceptedAt = :now, updatedAt = :now, version = version + :one REMOVE failureMessage',
+            'SET #status = :accepted, deliveryStatus = :notRequired, acceptedAt = :now, updatedAt = :now, version = version + :one REMOVE failureMessage, acceptanceLockExpiresAt',
           ConditionExpression:
             'version = :expectedVersion AND #status IN (:pending, :provisioning, :deliveryFailed) AND expiresAt > :now',
           ExpressionAttributeNames: { '#status': 'status' },
@@ -1244,6 +1681,25 @@ function isInvitationAcceptable(invitation: WorkspaceInvitation) {
     invitation.status === 'delivery-failed'
 }
 
+function hasActiveInvitationAcceptanceLock(invitation: WorkspaceInvitation, now: Date) {
+  return typeof invitation.acceptanceLockExpiresAt === 'string' &&
+    Date.parse(invitation.acceptanceLockExpiresAt) > now.getTime()
+}
+
+function hasActiveInvitationProvisioningLease(invitation: WorkspaceInvitation, now: Date) {
+  const updatedAt = Date.parse(invitation.updatedAt)
+  return Number.isFinite(updatedAt) &&
+    updatedAt + INVITATION_PROVISIONING_LEASE_MS > now.getTime()
+}
+
+function requiresManualLegacyIdentityCleanup(invitation: WorkspaceInvitation) {
+  const stablePairMissing = !invitation.cognitoIdentityId || !invitation.cognitoUsername
+  return stablePairMissing && (
+    invitation.identityLifecycleVersion !== WORKSPACE_IDENTITY_LIFECYCLE_VERSION ||
+    invitation.identityMutationAttempted === true
+  )
+}
+
 function compareWorkspaceMembers(left: WorkspaceMember, right: WorkspaceMember) {
   const roleDelta = workspaceRoleWeight(right.role) - workspaceRoleWeight(left.role)
   return roleDelta || (left.name ?? left.email).localeCompare(right.name ?? right.email, 'ja')
@@ -1334,6 +1790,30 @@ function toWorkspaceInvitation(value: unknown, now: Date): WorkspaceInvitation {
     status: effectiveStatus,
     deliveryStatus,
     identityOwnership,
+    ...(value.identityLifecycleVersion === WORKSPACE_IDENTITY_LIFECYCLE_VERSION
+      ? { identityLifecycleVersion: WORKSPACE_IDENTITY_LIFECYCLE_VERSION }
+      : {}),
+    ...(typeof value.cognitoIdentityId === 'string' && value.cognitoIdentityId.trim()
+      ? { cognitoIdentityId: value.cognitoIdentityId.trim() }
+      : {}),
+    ...(typeof value.cognitoUsername === 'string' && value.cognitoUsername.trim()
+      ? { cognitoUsername: value.cognitoUsername.trim() }
+      : {}),
+    ...(value.directoryClaimCleanupRequired === true
+      ? { directoryClaimCleanupRequired: true }
+      : {}),
+    ...(value.identityCleanupCompleted === true
+      ? { identityCleanupCompleted: true }
+      : {}),
+    ...(value.identityCleanupManualRequired === true
+      ? { identityCleanupManualRequired: true }
+      : {}),
+    ...(value.identityMutationAttempted === true
+      ? { identityMutationAttempted: true }
+      : {}),
+    ...(typeof value.acceptanceLockExpiresAt === 'string'
+      ? { acceptanceLockExpiresAt: value.acceptanceLockExpiresAt }
+      : {}),
     version: value.version,
     expiresAt: value.expiresAt,
     createdAt: value.createdAt,
@@ -1409,6 +1889,26 @@ function toInvitationItem(workspaceId: string, invitation: WorkspaceInvitation) 
     status: invitation.status,
     deliveryStatus: invitation.deliveryStatus,
     identityOwnership: invitation.identityOwnership,
+    ...(invitation.identityLifecycleVersion === WORKSPACE_IDENTITY_LIFECYCLE_VERSION
+      ? { identityLifecycleVersion: WORKSPACE_IDENTITY_LIFECYCLE_VERSION }
+      : {}),
+    ...(invitation.cognitoIdentityId ? { cognitoIdentityId: invitation.cognitoIdentityId } : {}),
+    ...(invitation.cognitoUsername ? { cognitoUsername: invitation.cognitoUsername } : {}),
+    ...(invitation.directoryClaimCleanupRequired
+      ? { directoryClaimCleanupRequired: true }
+      : {}),
+    ...(invitation.identityCleanupCompleted
+      ? { identityCleanupCompleted: true }
+      : {}),
+    ...(invitation.identityCleanupManualRequired
+      ? { identityCleanupManualRequired: true }
+      : {}),
+    ...(invitation.identityMutationAttempted
+      ? { identityMutationAttempted: true }
+      : {}),
+    ...(invitation.acceptanceLockExpiresAt
+      ? { acceptanceLockExpiresAt: invitation.acceptanceLockExpiresAt }
+      : {}),
     version: invitation.version,
     expiresAt: invitation.expiresAt,
     createdAt: invitation.createdAt,

@@ -11,6 +11,7 @@ import {
 import useSWR from 'swr'
 import { createTranslator, type Locale, type MessageKey } from '../i18n'
 import {
+  acknowledgeWorkspaceInvitationCleanup,
   createWorkspaceInvitation,
   getWorkspaceAccess,
   reinviteWorkspaceInvitation,
@@ -66,6 +67,13 @@ type WorkspaceAccessPanelProps = {
    * invitation 作成 callback です。
    */
   onInvite?: (input: CreateWorkspaceInvitationInput) => Promise<void>
+  /**
+   * 手動 Cognito cleanup の完了確認 callback です。
+   */
+  onAcknowledgeInvitationCleanup?: (
+    invitationId: string,
+    expectedVersion: number,
+  ) => Promise<void>
   /**
    * invitation 再送 callback です。
    */
@@ -135,7 +143,7 @@ type WorkspaceAccessAction =
       /**
        * invitation に対して実行する action です。
        */
-      action: 'resend' | 'revoke' | 'reinvite'
+      action: 'resend' | 'revoke' | 'reinvite' | 'acknowledgeCleanup'
     }
 
 /**
@@ -243,6 +251,10 @@ export function WorkspaceAccessPanelContainer({
       isLoading={isLoading}
       loadErrorMessage={error ? t('workspace.access.error.load') : undefined}
       locale={locale}
+      onAcknowledgeInvitationCleanup={async (invitationId, expectedVersion) => {
+        await acknowledgeWorkspaceInvitationCleanup(accessToken, invitationId, expectedVersion)
+        await refresh()
+      }}
       onInvite={async (input) => {
         await createWorkspaceInvitation(accessToken, input)
         await refresh()
@@ -276,6 +288,7 @@ export function WorkspaceAccessPanel({
   isLoading = false,
   loadErrorMessage,
   locale,
+  onAcknowledgeInvitationCleanup,
   onInvite,
   onReinviteInvitation,
   onResendInvitation,
@@ -389,6 +402,14 @@ export function WorkspaceAccessPanel({
         await onResendInvitation?.(action.invitation.id)
       } else if (action.action === 'revoke') {
         await onRevokeInvitation?.(action.invitation.id)
+      } else if (action.action === 'acknowledgeCleanup') {
+        const latestInvitation = access.invitations.find(
+          (invitation) => invitation.id === action.invitation.id,
+        ) ?? action.invitation
+        await onAcknowledgeInvitationCleanup?.(
+          latestInvitation.id,
+          latestInvitation.version,
+        )
       } else {
         await onReinviteInvitation?.(action.invitation.id)
       }
@@ -992,8 +1013,11 @@ function canManageWorkspaceInvitation(
 }
 
 function getInvitationActions(invitation: WorkspaceInvitation) {
+  if (invitation.status === 'provisioning') {
+    return ['revoke'] as const
+  }
+
   if (
-    invitation.status === 'provisioning' ||
     invitation.status === 'pending' ||
     invitation.status === 'delivery-failed'
   ) {
@@ -1001,6 +1025,10 @@ function getInvitationActions(invitation: WorkspaceInvitation) {
   }
 
   if (invitation.status === 'revoked' && invitation.failureMessage) {
+    if (invitation.identityCleanupManualRequired) {
+      return ['revoke', 'acknowledgeCleanup'] as const
+    }
+
     return ['revoke'] as const
   }
 
@@ -1048,7 +1076,7 @@ function createWorkspaceAccessActionCopy(
     confirmLabel: t(`workspace.access.action.${action.action}`),
     description: t(`workspace.access.dialog.${action.action}Description`)
       .replace('{email}', action.invitation.email),
-    destructive: action.action === 'revoke',
+    destructive: action.action === 'revoke' || action.action === 'acknowledgeCleanup',
     title: t(`workspace.access.dialog.${action.action}Title`),
   }
 }
@@ -1103,6 +1131,10 @@ function resolveWorkspaceAccessErrorMessage(
   t: (key: MessageKey) => string,
 ) {
   if (error instanceof WorkspaceAccessApiError) {
+    if (error.code === 'CognitoUserDisabled') {
+      return t('workspace.access.error.cognitoUserDisabled')
+    }
+
     if (error.status === 409) {
       return t('workspace.access.error.conflict')
     }

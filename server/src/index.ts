@@ -1,5 +1,6 @@
 import {
   AdminCreateUserCommand,
+  AdminDeleteUserAttributesCommand,
   AdminDeleteUserCommand,
   AdminGetUserCommand,
   AdminListGroupsForUserCommand,
@@ -65,6 +66,7 @@ import {
   WorkspaceAccessError,
   isWorkspaceIdentitySafeToDelete,
   type WorkspaceAccessClient,
+  type WorkspaceIdentityOwnership,
   type WorkspaceInvitation,
   type WorkspaceMember,
   type WorkspaceMemberStatus,
@@ -375,6 +377,8 @@ type CognitoWorkspaceUser = {
    * 正規化済み Cognito user profile です。
    */
   profile: CognitoUserProfile
+  /** Cognito の `sub` attribute から取得した安定 identity ID です。 */
+  identityId?: string
   /**
    * Cognito custom attribute に保存された Workspace directory ID です。
    */
@@ -401,6 +405,13 @@ type ProvisionCognitoWorkspaceUserInput = {
    * reservation 前に確認した既存 Cognito user です。
    */
   existingUser?: CognitoWorkspaceUser
+  /**
+   * 既存 identity へ directory claim を書く直前に補償責務を永続化します。
+   */
+  beforeDirectoryClaimUpdate: (
+    cognitoIdentityId: string,
+    cognitoUsername: string,
+  ) => Promise<void>
 }
 
 /**
@@ -411,15 +422,51 @@ type ProvisionCognitoWorkspaceUserResult = {
    * invitation と紐付く Cognito user profile です。
    */
   profile: CognitoUserProfile
+  /** provisioning 対象となった Cognito identity の安定 ID です。 */
+  cognitoIdentityId: string
+  /** provisioning 対象となった大文字小文字を保持した Cognito username です。 */
+  cognitoUsername: string
   /**
    * Cognito identity が Workspace によって新規作成されたかどうかです。
    */
-  identityOwnership: 'workspace-created' | 'pre-existing' | 'ambiguous'
+  identityOwnership: WorkspaceIdentityOwnership
+  /**
+   * この provisioning が既存 identity に Workspace directory claim を追加したかどうかです。
+   */
+  directoryClaimCleanupRequired: boolean
   /**
    * Cognito が invitation message を配信したかどうかです。
    */
   deliveryStatus: 'sent' | 'not-required'
 }
+
+/**
+ * revoke 時に Cognito identity を検索して補償する入力です。
+ */
+type CognitoWorkspaceUserCleanupInput = {
+  /**
+   * invitation の宛先として検索する Cognito user ID です。
+   */
+  userId: string
+  /**
+   * 削除対象 claim の Workspace directory ID です。
+   */
+  directoryId: string
+  /** provisioning 時に保存した Cognito identity の安定 ID です。 */
+  cognitoIdentityId: string
+  /** provisioning 時に保存した大文字小文字を保持した Cognito username です。 */
+  cognitoUsername: string
+}
+
+/** Cognito user 削除処理の安全な結果です。 */
+type DeleteCognitoWorkspaceUserResult =
+  | 'deleted'
+  | 'absent'
+  | 'preserved'
+  | 'manual-required'
+
+/** Cognito directory claim 解除処理の安全な結果です。 */
+type UnlinkCognitoWorkspaceUserResult = 'completed' | 'manual-required'
 
 /**
  * Cognito user 一覧 API が返す response body です。
@@ -572,6 +619,12 @@ type UpdateWorkspaceAccessMemberRequestBody = {
   /** 更新後の member status です。 */
   status?: unknown
   /** optimistic locking に使う current version です。 */
+  expectedVersion?: unknown
+}
+
+/** 手動 Cognito cleanup 完了確認 API の request body です。 */
+type AcknowledgeWorkspaceInvitationCleanupRequestBody = {
+  /** optimistic locking に使う current invitation version です。 */
   expectedVersion?: unknown
 }
 
@@ -1863,13 +1916,21 @@ type CognitoClient = {
     input: ProvisionCognitoWorkspaceUserInput,
   ): Promise<ProvisionCognitoWorkspaceUserResult>
   /**
-   * Workspace が作成した未確定 Cognito user の invitation を再送します。
+   * Workspace が作成した未確定 Cognito username へ invitation を再送します。
    */
-  resendWorkspaceUserInvitation(userId: string): Promise<void>
+  resendWorkspaceUserInvitation(username: string): Promise<void>
   /**
-   * Workspace が所有する未確定 Cognito user を削除します。
+   * Workspace が作成した未確定 user だけを削除します。
    */
-  deleteWorkspaceUser(userId: string): Promise<void>
+  deleteWorkspaceUser(
+    input: CognitoWorkspaceUserCleanupInput,
+  ): Promise<DeleteCognitoWorkspaceUserResult>
+  /**
+   * invitation が追加した Workspace directory claim を解除します。
+   */
+  unlinkWorkspaceUser(
+    input: CognitoWorkspaceUserCleanupInput,
+  ): Promise<UnlinkCognitoWorkspaceUserResult>
 }
 
 /**
@@ -2251,21 +2312,27 @@ app.post('/api/auth/challenge/new-password', async (c) => {
   }
 
   try {
-    const response = await cognito.respondToNewPasswordChallenge(email, newPassword, session)
-    const tokens = response.AuthenticationResult
+    const acceptanceLock = await acquireNewPasswordChallengeInvitationLock(email)
 
-    if (!tokens?.AccessToken) {
-      return c.json(
-        {
-          message: response.ChallengeName
-            ? `Unsupported Cognito challenge: ${response.ChallengeName}`
-            : 'Cognito did not return an access token.',
-        },
-        409,
-      )
+    try {
+      const response = await cognito.respondToNewPasswordChallenge(email, newPassword, session)
+      const tokens = response.AuthenticationResult
+
+      if (!tokens?.AccessToken) {
+        return c.json(
+          {
+            message: response.ChallengeName
+              ? `Unsupported Cognito challenge: ${response.ChallengeName}`
+              : 'Cognito did not return an access token.',
+          },
+          409,
+        )
+      }
+
+      return c.json(await createAuthenticationResponse(tokens))
+    } finally {
+      await releaseNewPasswordChallengeInvitationLock(acceptanceLock)
     }
-
-    return c.json(await createAuthenticationResponse(tokens))
   } catch (error) {
     if (error instanceof WorkspaceAccessError) {
       return toWorkspaceAccessErrorResponse(c, error)
@@ -2274,6 +2341,41 @@ app.post('/api/auth/challenge/new-password', async (c) => {
     return toNewPasswordChallengeErrorResponse(c, error)
   }
 })
+
+async function acquireNewPasswordChallengeInvitationLock(email: string) {
+  const workspaceUser = await cognito.findWorkspaceUser(email)
+
+  if (!workspaceUser?.directoryId) {
+    return undefined
+  }
+
+  const invitation = await workspaceAccess.acquireInvitationAcceptanceLock(
+    workspaceUser.directoryId,
+    email,
+  )
+
+  return invitation
+    ? { directoryId: workspaceUser.directoryId, invitation }
+    : undefined
+}
+
+async function releaseNewPasswordChallengeInvitationLock(
+  lock: { directoryId: string; invitation: WorkspaceInvitation } | undefined,
+) {
+  if (!lock) {
+    return
+  }
+
+  try {
+    await workspaceAccess.releaseInvitationAcceptanceLock(
+      lock.directoryId,
+      lock.invitation.id,
+      lock.invitation.version,
+    )
+  } catch (error) {
+    console.error('Failed to release Workspace invitation acceptance lock:', error)
+  }
+}
 
 /** Workspace member、invitation、capability の snapshot を返す endpoint です。 */
 app.get('/api/workspace/access', async (c) => {
@@ -2320,24 +2422,36 @@ app.post('/api/workspace/invitations', async (c) => {
       },
     )
 
+    const deliveryState = { invitation }
+
     try {
       const result = await deliverPreparedWorkspaceInvitation(
         principal.directoryId,
-        invitation,
+        deliveryState,
       )
+      deliveryState.invitation = {
+        ...deliveryState.invitation,
+        identityOwnership: result.identityOwnership,
+        cognitoIdentityId: result.cognitoIdentityId,
+        cognitoUsername: result.cognitoUsername,
+        directoryClaimCleanupRequired: result.directoryClaimCleanupRequired || undefined,
+      }
       const deliveredInvitation = await workspaceAccess.markInvitationDelivery(
         principal.directoryId,
-        invitation.id,
+        deliveryState.invitation.id,
         {
-          expectedVersion: invitation.version,
+          expectedVersion: deliveryState.invitation.version,
           identityOwnership: result.identityOwnership,
+          cognitoIdentityId: result.cognitoIdentityId,
+          cognitoUsername: result.cognitoUsername,
+          directoryClaimCleanupRequired: result.directoryClaimCleanupRequired,
           deliveryStatus: result.deliveryStatus,
         },
       )
 
       return c.json({ invitation: deliveredInvitation }, 201)
     } catch (error) {
-      await markWorkspaceInvitationFailure(principal.directoryId, invitation, error)
+      await markWorkspaceInvitationFailure(principal.directoryId, deliveryState.invitation, error)
       throw error
     }
   } catch (error) {
@@ -2372,9 +2486,45 @@ app.post('/api/workspace/invitations/:invitationId/revoke', async (c) => {
       invitationId,
     )
 
-    if (isWorkspaceIdentitySafeToDelete(invitation.identityOwnership)) {
+    if (
+      !invitation.identityCleanupCompleted &&
+      (
+        invitation.identityCleanupManualRequired === true ||
+        isWorkspaceIdentitySafeToDelete(invitation.identityOwnership) ||
+        invitation.directoryClaimCleanupRequired === true
+      )
+    ) {
+      const cognitoIdentityId = invitation.cognitoIdentityId?.trim()
+      const cognitoUsername = invitation.cognitoUsername?.trim()
+      let cleanupCompleted = false
+      let manualCleanupRequired = false
+
       try {
-        await cognito.deleteWorkspaceUser(invitation.email)
+        if (cognitoIdentityId && cognitoUsername) {
+          const cleanupInput = {
+            userId: invitation.email,
+            directoryId: principal.directoryId,
+            cognitoIdentityId,
+            cognitoUsername,
+          }
+
+          if (isWorkspaceIdentitySafeToDelete(invitation.identityOwnership)) {
+            const deletionResult = await cognito.deleteWorkspaceUser(cleanupInput)
+
+            if (deletionResult === 'manual-required') {
+              manualCleanupRequired = true
+            } else if (deletionResult === 'preserved') {
+              manualCleanupRequired = await cognito.unlinkWorkspaceUser(cleanupInput) ===
+                'manual-required'
+            }
+          } else {
+            manualCleanupRequired = await cognito.unlinkWorkspaceUser(cleanupInput) ===
+              'manual-required'
+          }
+          cleanupCompleted = !manualCleanupRequired
+        } else {
+          manualCleanupRequired = true
+        }
       } catch (error) {
         try {
           await workspaceAccess.markInvitationCleanupFailure(
@@ -2392,7 +2542,13 @@ app.post('/api/workspace/invitations/:invitationId/revoke', async (c) => {
         throw error
       }
 
-      if (invitation.failureMessage) {
+      if (manualCleanupRequired) {
+        invitation = await workspaceAccess.markInvitationManualCleanupRequired(
+          principal.directoryId,
+          invitation.id,
+          invitation.version,
+        )
+      } else if (cleanupCompleted) {
         invitation = await workspaceAccess.clearInvitationCleanupFailure(
           principal.directoryId,
           invitation.id,
@@ -2407,6 +2563,33 @@ app.post('/api/workspace/invitations/:invitationId/revoke', async (c) => {
       return toAuthErrorResponse(c, error)
     }
 
+    return toWorkspaceAccessErrorResponse(c, error)
+  }
+})
+
+/** 手動 Cognito cleanup の完了を管理者が明示確認する endpoint です。 */
+app.post('/api/workspace/invitations/:invitationId/cleanup/acknowledge', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceAdministration(principal)
+    const invitationId = readWorkspaceEmail(c.req.param('invitationId'))
+    const body = await readJson<AcknowledgeWorkspaceInvitationCleanupRequestBody>(c.req)
+    const expectedVersion = readWorkspaceVersion(body?.expectedVersion)
+    const invitation = await workspaceAccess.acknowledgeInvitationManualCleanup(
+      principal.directoryId,
+      principal.userKey,
+      invitationId,
+      expectedVersion,
+    )
+
+    return c.json({ invitation })
+  } catch (error) {
     return toWorkspaceAccessErrorResponse(c, error)
   }
 })
@@ -4742,25 +4925,37 @@ async function handleWorkspaceInvitationDeliveryAction(
           invitationId,
         )
 
+    const deliveryState = { invitation: preparedInvitation }
+
     try {
       const result = await deliverPreparedWorkspaceInvitation(
         principal.directoryId,
-        preparedInvitation,
-        action === 'resend',
+        deliveryState,
+        action === 'resend' || preparedInvitation.identityOwnership !== 'ambiguous',
       )
+      deliveryState.invitation = {
+        ...deliveryState.invitation,
+        identityOwnership: result.identityOwnership,
+        cognitoIdentityId: result.cognitoIdentityId,
+        cognitoUsername: result.cognitoUsername,
+        directoryClaimCleanupRequired: result.directoryClaimCleanupRequired || undefined,
+      }
       const invitation = await workspaceAccess.markInvitationDelivery(
         principal.directoryId,
-        preparedInvitation.id,
+        deliveryState.invitation.id,
         {
-          expectedVersion: preparedInvitation.version,
+          expectedVersion: deliveryState.invitation.version,
           identityOwnership: result.identityOwnership,
+          cognitoIdentityId: result.cognitoIdentityId,
+          cognitoUsername: result.cognitoUsername,
+          directoryClaimCleanupRequired: result.directoryClaimCleanupRequired,
           deliveryStatus: result.deliveryStatus,
         },
       )
 
       return c.json({ invitation })
     } catch (error) {
-      await markWorkspaceInvitationFailure(principal.directoryId, preparedInvitation, error)
+      await markWorkspaceInvitationFailure(principal.directoryId, deliveryState.invitation, error)
       throw error
     }
   } catch (error) {
@@ -4774,38 +4969,75 @@ async function handleWorkspaceInvitationDeliveryAction(
 
 async function deliverPreparedWorkspaceInvitation(
   directoryId: string,
-  invitation: WorkspaceInvitation,
+  state: { invitation: WorkspaceInvitation },
   preserveIdentityOwnership = false,
 ) {
-  const existingUser = await cognito.findWorkspaceUser(invitation.email)
+  const existingUser = await cognito.findWorkspaceUser(state.invitation.email)
+  const previousCognitoIdentityId = state.invitation.cognitoIdentityId
+  state.invitation = await workspaceAccess.markInvitationIdentityMutationStarted(
+    directoryId,
+    state.invitation.id,
+    state.invitation.version,
+    existingUser?.identityId,
+    existingUser?.profile.username,
+  )
+  const markDirectoryClaimCleanupRequired = async (
+    cognitoIdentityId: string,
+    cognitoUsername: string,
+  ) => {
+    state.invitation = await workspaceAccess.markInvitationDirectoryClaimCleanupRequired(
+      directoryId,
+      state.invitation.id,
+      state.invitation.version,
+      cognitoIdentityId,
+      cognitoUsername,
+    )
+  }
 
   if (existingUser?.profile.status === 'FORCE_CHANGE_PASSWORD') {
     const result = await cognito.provisionWorkspaceUser({
       directoryId,
-      email: invitation.email,
-      name: invitation.name,
+      email: state.invitation.email,
+      name: state.invitation.name,
       existingUser,
+      beforeDirectoryClaimUpdate: markDirectoryClaimCleanupRequired,
     })
     await cognito.resendWorkspaceUserInvitation(existingUser.profile.username)
+    const preservesInvitationIdentity = preserveIdentityOwnership &&
+      previousCognitoIdentityId !== undefined &&
+      previousCognitoIdentityId === result.cognitoIdentityId
+
     return {
-      identityOwnership: preserveIdentityOwnership
-        ? invitation.identityOwnership
+      identityOwnership: preservesInvitationIdentity
+        ? state.invitation.identityOwnership
         : result.identityOwnership,
+      cognitoIdentityId: result.cognitoIdentityId,
+      cognitoUsername: result.cognitoUsername,
+      directoryClaimCleanupRequired: result.directoryClaimCleanupRequired ||
+        (preservesInvitationIdentity && state.invitation.directoryClaimCleanupRequired === true),
       deliveryStatus: 'sent' as const,
     }
   }
 
   const result = await cognito.provisionWorkspaceUser({
     directoryId,
-    email: invitation.email,
-    name: invitation.name,
+    email: state.invitation.email,
+    name: state.invitation.name,
     existingUser,
+    beforeDirectoryClaimUpdate: markDirectoryClaimCleanupRequired,
   })
+  const preservesInvitationIdentity = preserveIdentityOwnership &&
+    previousCognitoIdentityId !== undefined &&
+    previousCognitoIdentityId === result.cognitoIdentityId
 
   return {
-    identityOwnership: preserveIdentityOwnership
-      ? invitation.identityOwnership
+    identityOwnership: preservesInvitationIdentity
+      ? state.invitation.identityOwnership
       : result.identityOwnership,
+    cognitoIdentityId: result.cognitoIdentityId,
+    cognitoUsername: result.cognitoUsername,
+    directoryClaimCleanupRequired: result.directoryClaimCleanupRequired ||
+      (preservesInvitationIdentity && state.invitation.directoryClaimCleanupRequired === true),
     deliveryStatus: result.deliveryStatus,
   }
 }
@@ -4821,6 +5053,9 @@ async function markWorkspaceInvitationFailure(
     await workspaceAccess.markInvitationDelivery(directoryId, invitation.id, {
       expectedVersion: invitation.version,
       identityOwnership: invitation.identityOwnership,
+      cognitoIdentityId: invitation.cognitoIdentityId,
+      cognitoUsername: invitation.cognitoUsername,
+      directoryClaimCleanupRequired: invitation.directoryClaimCleanupRequired,
       deliveryStatus: 'failed',
       failureMessage: 'Invitation delivery failed.',
     })
@@ -4900,6 +5135,10 @@ function toAuthErrorResponse(c: Context, error: unknown) {
   if (error.code === 'CognitoConfigurationMissing') {
     console.error(error)
     return c.json({ message: 'Cognito is not configured.' }, 503)
+  }
+
+  if (error.code === 'CognitoUserDisabled') {
+    return c.json({ code: 'CognitoUserDisabled' as const, message: error.message }, 409)
   }
 
   if (error.code === 'WorkspaceDirectoryConflict') {
@@ -6982,13 +7221,20 @@ export class AwsCognitoClient implements CognitoClient {
    * Workspace invitation 対象の Cognito user と directory 属性を検索します。
    */
   async findWorkspaceUser(userId: string): Promise<CognitoWorkspaceUser | undefined> {
+    return this.findWorkspaceUserByUsername(normalizeCognitoUserId(userId))
+  }
+
+  /** Cognito username または stable sub を大文字小文字を変えずに検索します。 */
+  private async findWorkspaceUserByUsername(
+    username: string,
+  ): Promise<CognitoWorkspaceUser | undefined> {
     const { userPoolId } = this.readRequiredConfiguration()
-    const normalizedUserId = normalizeCognitoUserId(userId)
+    const normalizedUsername = requireCognitoUsername(username)
 
     try {
       const user = await this.client.send(new AdminGetUserCommand({
         UserPoolId: userPoolId,
-        Username: normalizedUserId,
+        Username: normalizedUsername,
       }))
       const profile = toCognitoUserProfile(user)
 
@@ -6996,12 +7242,13 @@ export class AwsCognitoClient implements CognitoClient {
         throw new CognitoServiceError(
           502,
           'InvalidCognitoResponse',
-          `Cognito user "${normalizedUserId}" did not include a stable profile.`,
+          `Cognito user "${normalizedUsername}" did not include a stable profile.`,
         )
       }
 
       return {
         profile,
+        identityId: readCognitoUserAttribute(user, 'sub')?.trim() || undefined,
         directoryId: readCognitoUserDirectoryId(user),
       }
     } catch (error) {
@@ -7027,14 +7274,30 @@ export class AwsCognitoClient implements CognitoClient {
 
     if (existingUser) {
       this.requireCompatibleWorkspaceDirectory(existingUser, input.directoryId)
-      await this.updateWorkspaceUserAttributes(email, input.directoryId, input.name)
+      requireEnabledWorkspaceUser(existingUser)
+      const cognitoIdentityId = requireCognitoIdentityId(existingUser.identityId)
+      if (!existingUser.directoryId) {
+        await input.beforeDirectoryClaimUpdate(
+          cognitoIdentityId,
+          existingUser.profile.username,
+        )
+      }
+      await this.updateWorkspaceUserAttributes(
+        existingUser.profile.username,
+        email,
+        input.directoryId,
+        input.name,
+      )
 
       return {
         profile: {
           ...existingUser.profile,
           name: input.name?.trim() || existingUser.profile.name,
         },
+        cognitoIdentityId,
+        cognitoUsername: requireCognitoUsername(existingUser.profile.username),
         identityOwnership: 'pre-existing',
+        directoryClaimCleanupRequired: !existingUser.directoryId,
         deliveryStatus: 'not-required',
       }
     }
@@ -7057,7 +7320,12 @@ export class AwsCognitoClient implements CognitoClient {
           enabled: true,
           status: 'FORCE_CHANGE_PASSWORD',
         },
+        cognitoIdentityId: requireCognitoIdentityId(
+          response.User ? readCognitoUserAttribute(response.User, 'sub') : undefined,
+        ),
+        cognitoUsername: requireCognitoUsername(profile?.username ?? email),
         identityOwnership: 'workspace-created',
+        directoryClaimCleanupRequired: false,
         deliveryStatus: 'sent',
       }
     } catch (error) {
@@ -7074,7 +7342,20 @@ export class AwsCognitoClient implements CognitoClient {
       }
 
       this.requireCompatibleWorkspaceDirectory(racedUser, input.directoryId)
-      await this.updateWorkspaceUserAttributes(email, input.directoryId, input.name)
+      requireEnabledWorkspaceUser(racedUser)
+      const cognitoIdentityId = requireCognitoIdentityId(racedUser.identityId)
+      if (!racedUser.directoryId) {
+        await input.beforeDirectoryClaimUpdate(
+          cognitoIdentityId,
+          racedUser.profile.username,
+        )
+      }
+      await this.updateWorkspaceUserAttributes(
+        racedUser.profile.username,
+        email,
+        input.directoryId,
+        input.name,
+      )
 
       if (racedUser.profile.status === 'FORCE_CHANGE_PASSWORD') {
         await this.resendWorkspaceUserInvitation(racedUser.profile.username)
@@ -7082,7 +7363,10 @@ export class AwsCognitoClient implements CognitoClient {
 
       return {
         profile: racedUser.profile,
+        cognitoIdentityId,
+        cognitoUsername: requireCognitoUsername(racedUser.profile.username),
         identityOwnership: 'ambiguous',
+        directoryClaimCleanupRequired: !racedUser.directoryId,
         deliveryStatus: racedUser.profile.status === 'FORCE_CHANGE_PASSWORD'
           ? 'sent'
           : 'not-required',
@@ -7091,15 +7375,15 @@ export class AwsCognitoClient implements CognitoClient {
   }
 
   /**
-   * Workspace が作成した未確定 Cognito user の invitation を再送します。
+   * Workspace が作成した未確定 Cognito username へ invitation を再送します。
    */
-  async resendWorkspaceUserInvitation(userId: string): Promise<void> {
+  async resendWorkspaceUserInvitation(username: string): Promise<void> {
     const { userPoolId } = this.readRequiredConfiguration()
 
     try {
       await this.client.send(new AdminCreateUserCommand({
         UserPoolId: userPoolId,
-        Username: normalizeCognitoUserId(userId),
+        Username: requireCognitoUsername(username),
         MessageAction: 'RESEND',
         DesiredDeliveryMediums: ['EMAIL'],
       }))
@@ -7108,16 +7392,119 @@ export class AwsCognitoClient implements CognitoClient {
     }
   }
 
-  /**
-   * Workspace が所有する未確定 Cognito user を削除します。
-   */
-  async deleteWorkspaceUser(userId: string): Promise<void> {
+  /** Workspace が作成した未確定 user だけを削除します。 */
+  async deleteWorkspaceUser(
+    input: CognitoWorkspaceUserCleanupInput,
+  ): Promise<DeleteCognitoWorkspaceUserResult> {
     const { userPoolId } = this.readRequiredConfiguration()
+    const stableUsername = requireCognitoIdentityId(input.cognitoIdentityId)
+    const canonicalUsername = requireCognitoUsername(input.cognitoUsername)
+    const currentUser = await this.findWorkspaceUserByUsername(stableUsername)
+
+    if (!currentUser && canonicalUsername !== stableUsername) {
+      const canonicalUser = await this.findWorkspaceUserByUsername(canonicalUsername)
+
+      if (!canonicalUser) {
+        return 'absent'
+      }
+
+      if (!canonicalUser.identityId) {
+        return 'manual-required'
+      }
+
+      if (canonicalUser.identityId !== input.cognitoIdentityId) {
+        return 'absent'
+      }
+
+      if (
+        canonicalUser.directoryId !== input.directoryId ||
+        canonicalUser.profile.status !== 'FORCE_CHANGE_PASSWORD'
+      ) {
+        return 'preserved'
+      }
+
+      return 'manual-required'
+    }
+
+    if (!currentUser) {
+      return 'absent'
+    }
+
+    if (currentUser.identityId !== input.cognitoIdentityId) {
+      return 'manual-required'
+    }
+
+    if (
+      currentUser.directoryId !== input.directoryId ||
+      currentUser.profile.status !== 'FORCE_CHANGE_PASSWORD'
+    ) {
+      return 'preserved'
+    }
 
     try {
       await this.client.send(new AdminDeleteUserCommand({
         UserPoolId: userPoolId,
-        Username: normalizeCognitoUserId(userId),
+        Username: stableUsername,
+      }))
+      return 'deleted'
+    } catch (error) {
+      const cognitoError = toCognitoSdkError(error)
+
+      if (isCognitoUserNotFoundError(cognitoError)) {
+        return 'absent'
+      }
+
+      throw cognitoError
+    }
+  }
+
+  /** invitation が追加した Workspace directory claim を解除します。 */
+  async unlinkWorkspaceUser(
+    input: CognitoWorkspaceUserCleanupInput,
+  ): Promise<UnlinkCognitoWorkspaceUserResult> {
+    const { userPoolId } = this.readRequiredConfiguration()
+    const stableUsername = requireCognitoIdentityId(input.cognitoIdentityId)
+    const canonicalUsername = requireCognitoUsername(input.cognitoUsername)
+    const currentUser = await this.findWorkspaceUserByUsername(stableUsername)
+
+    if (!currentUser && canonicalUsername !== stableUsername) {
+      const canonicalUser = await this.findWorkspaceUserByUsername(canonicalUsername)
+
+      if (!canonicalUser) {
+        return 'completed'
+      }
+
+      if (!canonicalUser.identityId) {
+        return 'manual-required'
+      }
+
+      if (
+        canonicalUser.identityId !== input.cognitoIdentityId ||
+        canonicalUser.directoryId !== input.directoryId
+      ) {
+        return 'completed'
+      }
+
+      return 'manual-required'
+    }
+
+    if (!currentUser) {
+      return 'completed'
+    }
+
+    if (currentUser.identityId !== input.cognitoIdentityId) {
+      return 'manual-required'
+    }
+
+    if (currentUser.directoryId !== input.directoryId) {
+      return 'completed'
+    }
+
+    try {
+      await this.client.send(new AdminDeleteUserAttributesCommand({
+        UserPoolId: userPoolId,
+        Username: stableUsername,
+        UserAttributeNames: ['custom:directory_id', 'custom:workspace_id'],
       }))
     } catch (error) {
       const cognitoError = toCognitoSdkError(error)
@@ -7126,6 +7513,8 @@ export class AwsCognitoClient implements CognitoClient {
         throw cognitoError
       }
     }
+
+    return 'completed'
   }
 
   /**
@@ -7147,7 +7536,8 @@ export class AwsCognitoClient implements CognitoClient {
    * 既存 Cognito user に Workspace directory と表示属性を設定します。
    */
   private async updateWorkspaceUserAttributes(
-    userId: string,
+    username: string,
+    email: string,
     directoryId: string,
     name?: string,
   ) {
@@ -7156,8 +7546,8 @@ export class AwsCognitoClient implements CognitoClient {
     try {
       await this.client.send(new AdminUpdateUserAttributesCommand({
         UserPoolId: userPoolId,
-        Username: normalizeCognitoUserId(userId),
-        UserAttributes: createWorkspaceCognitoUserAttributes(userId, directoryId, name),
+        Username: requireCognitoUsername(username),
+        UserAttributes: createWorkspaceCognitoUserAttributes(email, directoryId, name),
       }))
     } catch (error) {
       throw toCognitoSdkError(error)
@@ -7186,7 +7576,7 @@ export class AwsCognitoClient implements CognitoClient {
 /**
  * Floci の Cognito JSON API を呼び出す軽量 client です。
  */
-class FlociCognitoClient {
+export class FlociCognitoClient implements CognitoClient {
   /**
    * Floci / Cognito の endpoint URL です。
    */
@@ -7222,6 +7612,9 @@ class FlociCognitoClient {
    */
   private resolvedClientId: string | undefined
 
+  /**
+   * @param endpoint Floci / Cognito の endpoint URL です。
+   */
   constructor(endpoint: string) {
     this.endpoint = trimTrailingSlash(endpoint)
   }
@@ -7356,12 +7749,17 @@ class FlociCognitoClient {
    * Workspace invitation 対象の Cognito user と directory 属性を検索します。
    */
   async findWorkspaceUser(userId: string) {
-    const normalizedUserId = normalizeCognitoUserId(userId)
+    return this.findWorkspaceUserByUsername(normalizeCognitoUserId(userId))
+  }
+
+  /** Cognito username または stable sub を大文字小文字を変えずに検索します。 */
+  private async findWorkspaceUserByUsername(username: string) {
+    const normalizedUsername = requireCognitoUsername(username)
 
     try {
       const user = await this.request<CognitoUserRecord>('AdminGetUser', {
         UserPoolId: await this.resolveUserPoolId(),
-        Username: normalizedUserId,
+        Username: normalizedUsername,
       })
       const profile = toCognitoUserProfile(user)
 
@@ -7369,12 +7767,13 @@ class FlociCognitoClient {
         throw new CognitoServiceError(
           502,
           'InvalidCognitoResponse',
-          `Cognito user "${normalizedUserId}" did not include a stable profile.`,
+          `Cognito user "${normalizedUsername}" did not include a stable profile.`,
         )
       }
 
       return {
         profile,
+        identityId: readCognitoUserAttribute(user, 'sub')?.trim() || undefined,
         directoryId: readCognitoUserDirectoryId(user),
       } satisfies CognitoWorkspaceUser
     } catch (error) {
@@ -7395,14 +7794,30 @@ class FlociCognitoClient {
 
     if (existingUser) {
       this.requireCompatibleWorkspaceDirectory(existingUser, input.directoryId)
-      await this.updateWorkspaceUserAttributes(email, input.directoryId, input.name)
+      requireEnabledWorkspaceUser(existingUser)
+      const cognitoIdentityId = requireCognitoIdentityId(existingUser.identityId)
+      if (!existingUser.directoryId) {
+        await input.beforeDirectoryClaimUpdate(
+          cognitoIdentityId,
+          existingUser.profile.username,
+        )
+      }
+      await this.updateWorkspaceUserAttributes(
+        existingUser.profile.username,
+        email,
+        input.directoryId,
+        input.name,
+      )
 
       return {
         profile: {
           ...existingUser.profile,
           name: input.name?.trim() || existingUser.profile.name,
         },
+        cognitoIdentityId,
+        cognitoUsername: requireCognitoUsername(existingUser.profile.username),
         identityOwnership: 'pre-existing',
+        directoryClaimCleanupRequired: !existingUser.directoryId,
         deliveryStatus: 'not-required',
       } satisfies ProvisionCognitoWorkspaceUserResult
     }
@@ -7425,7 +7840,12 @@ class FlociCognitoClient {
           enabled: true,
           status: 'FORCE_CHANGE_PASSWORD',
         },
+        cognitoIdentityId: requireCognitoIdentityId(
+          response.User ? readCognitoUserAttribute(response.User, 'sub') : undefined,
+        ),
+        cognitoUsername: requireCognitoUsername(profile?.username ?? email),
         identityOwnership: 'workspace-created',
+        directoryClaimCleanupRequired: false,
         deliveryStatus: 'sent',
       } satisfies ProvisionCognitoWorkspaceUserResult
     } catch (error) {
@@ -7440,7 +7860,20 @@ class FlociCognitoClient {
       }
 
       this.requireCompatibleWorkspaceDirectory(racedUser, input.directoryId)
-      await this.updateWorkspaceUserAttributes(email, input.directoryId, input.name)
+      requireEnabledWorkspaceUser(racedUser)
+      const cognitoIdentityId = requireCognitoIdentityId(racedUser.identityId)
+      if (!racedUser.directoryId) {
+        await input.beforeDirectoryClaimUpdate(
+          cognitoIdentityId,
+          racedUser.profile.username,
+        )
+      }
+      await this.updateWorkspaceUserAttributes(
+        racedUser.profile.username,
+        email,
+        input.directoryId,
+        input.name,
+      )
 
       if (racedUser.profile.status === 'FORCE_CHANGE_PASSWORD') {
         await this.resendWorkspaceUserInvitation(racedUser.profile.username)
@@ -7448,7 +7881,10 @@ class FlociCognitoClient {
 
       return {
         profile: racedUser.profile,
+        cognitoIdentityId,
+        cognitoUsername: requireCognitoUsername(racedUser.profile.username),
         identityOwnership: 'ambiguous',
+        directoryClaimCleanupRequired: !racedUser.directoryId,
         deliveryStatus: racedUser.profile.status === 'FORCE_CHANGE_PASSWORD'
           ? 'sent'
           : 'not-required',
@@ -7457,31 +7893,134 @@ class FlociCognitoClient {
   }
 
   /**
-   * Workspace が作成した未確定 Cognito user の invitation を再送します。
+   * Workspace が作成した未確定 Cognito username へ invitation を再送します。
    */
-  async resendWorkspaceUserInvitation(userId: string) {
+  async resendWorkspaceUserInvitation(username: string) {
     await this.request<AdminCreateUserResponse>('AdminCreateUser', {
       UserPoolId: await this.resolveUserPoolId(),
-      Username: normalizeCognitoUserId(userId),
+      Username: requireCognitoUsername(username),
       MessageAction: 'RESEND',
       DesiredDeliveryMediums: ['EMAIL'],
     })
   }
 
-  /**
-   * Workspace が所有する未確定 Cognito user を削除します。
-   */
-  async deleteWorkspaceUser(userId: string) {
+  /** Workspace が作成した未確定 user だけを削除します。 */
+  async deleteWorkspaceUser(
+    input: CognitoWorkspaceUserCleanupInput,
+  ): Promise<DeleteCognitoWorkspaceUserResult> {
+    const stableUsername = requireCognitoIdentityId(input.cognitoIdentityId)
+    const canonicalUsername = requireCognitoUsername(input.cognitoUsername)
+    const currentUser = await this.findWorkspaceUserByUsername(stableUsername)
+
+    if (!currentUser && canonicalUsername !== stableUsername) {
+      const canonicalUser = await this.findWorkspaceUserByUsername(canonicalUsername)
+
+      if (!canonicalUser) {
+        return 'absent'
+      }
+
+      if (!canonicalUser.identityId) {
+        return 'manual-required'
+      }
+
+      if (canonicalUser.identityId !== input.cognitoIdentityId) {
+        return 'absent'
+      }
+
+      if (
+        canonicalUser.directoryId !== input.directoryId ||
+        canonicalUser.profile.status !== 'FORCE_CHANGE_PASSWORD'
+      ) {
+        return 'preserved'
+      }
+
+      return 'manual-required'
+    }
+
+    if (!currentUser) {
+      return 'absent'
+    }
+
+    if (currentUser.identityId !== input.cognitoIdentityId) {
+      return 'manual-required'
+    }
+
+    if (
+      currentUser.directoryId !== input.directoryId ||
+      currentUser.profile.status !== 'FORCE_CHANGE_PASSWORD'
+    ) {
+      return 'preserved'
+    }
+
     try {
       await this.request<Record<string, never>>('AdminDeleteUser', {
         UserPoolId: await this.resolveUserPoolId(),
-        Username: normalizeCognitoUserId(userId),
+        Username: stableUsername,
+      })
+      return 'deleted'
+    } catch (error) {
+      if (isCognitoUserNotFoundError(error)) {
+        return 'absent'
+      }
+
+      throw error
+    }
+  }
+
+  /** invitation が追加した Workspace directory claim を解除します。 */
+  async unlinkWorkspaceUser(
+    input: CognitoWorkspaceUserCleanupInput,
+  ): Promise<UnlinkCognitoWorkspaceUserResult> {
+    const stableUsername = requireCognitoIdentityId(input.cognitoIdentityId)
+    const canonicalUsername = requireCognitoUsername(input.cognitoUsername)
+    const currentUser = await this.findWorkspaceUserByUsername(stableUsername)
+
+    if (!currentUser && canonicalUsername !== stableUsername) {
+      const canonicalUser = await this.findWorkspaceUserByUsername(canonicalUsername)
+
+      if (!canonicalUser) {
+        return 'completed'
+      }
+
+      if (!canonicalUser.identityId) {
+        return 'manual-required'
+      }
+
+      if (
+        canonicalUser.identityId !== input.cognitoIdentityId ||
+        canonicalUser.directoryId !== input.directoryId
+      ) {
+        return 'completed'
+      }
+
+      return 'manual-required'
+    }
+
+    if (!currentUser) {
+      return 'completed'
+    }
+
+    if (currentUser.identityId !== input.cognitoIdentityId) {
+      return 'manual-required'
+    }
+
+    if (currentUser.directoryId !== input.directoryId) {
+      return 'completed'
+    }
+
+    try {
+      await this.request<Record<string, never>>('AdminDeleteUserAttributes', {
+        UserPoolId: await this.resolveUserPoolId(),
+        Username: stableUsername,
+        UserAttributeNames: ['custom:directory_id', 'custom:workspace_id'],
       })
     } catch (error) {
       if (!isCognitoUserNotFoundError(error)) {
         throw error
       }
     }
+
+    return 'completed'
   }
 
   /**
@@ -7502,11 +8041,16 @@ class FlociCognitoClient {
   /**
    * 既存 Cognito user に Workspace directory と表示属性を設定します。
    */
-  private async updateWorkspaceUserAttributes(userId: string, directoryId: string, name?: string) {
+  private async updateWorkspaceUserAttributes(
+    username: string,
+    email: string,
+    directoryId: string,
+    name?: string,
+  ) {
     await this.request<Record<string, never>>('AdminUpdateUserAttributes', {
       UserPoolId: await this.resolveUserPoolId(),
-      Username: normalizeCognitoUserId(userId),
-      UserAttributes: createWorkspaceCognitoUserAttributes(userId, directoryId, name),
+      Username: requireCognitoUsername(username),
+      UserAttributes: createWorkspaceCognitoUserAttributes(email, directoryId, name),
     })
   }
 
@@ -10211,6 +10755,42 @@ function normalizeCognitoUserId(value: string) {
   }
 
   return normalized
+}
+
+function requireCognitoUsername(value: string) {
+  const username = value.trim()
+
+  if (!username) {
+    throw new CognitoServiceError(400, 'InvalidParameterException', 'Cognito username is required.')
+  }
+
+  return username
+}
+
+function requireCognitoIdentityId(value: string | undefined) {
+  const identityId = value?.trim()
+
+  if (!identityId) {
+    throw new CognitoServiceError(
+      502,
+      'InvalidCognitoResponse',
+      'Cognito user did not include a stable identity ID.',
+    )
+  }
+
+  return identityId
+}
+
+function requireEnabledWorkspaceUser(user: CognitoWorkspaceUser) {
+  if (user.profile.enabled !== false) {
+    return
+  }
+
+  throw new CognitoServiceError(
+    409,
+    'CognitoUserDisabled',
+    'The existing Cognito user is disabled. Re-enable it before sending a Workspace invitation.',
+  )
 }
 
 function toCognitoUserProfile(value: CognitoUserRecord): CognitoUserProfile | undefined {

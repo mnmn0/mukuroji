@@ -725,6 +725,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     expect(legacyTaskActions).not.toContain(writeAction);
   }
   expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:ListUsers');
+  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:AdminDeleteUserAttributes');
   expect(JSON.stringify(cognitoPolicy)).toContain('CognitoUserPoolId');
   expect(serializedApiPolicies).not.toContain('"Resource":"*"');
   expect(JSON.stringify(cognitoPolicy)).not.toContain('"Resource":"*"');
