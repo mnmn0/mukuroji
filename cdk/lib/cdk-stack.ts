@@ -1052,7 +1052,6 @@ export class CdkStack extends cdk.Stack {
 
     legacyTasksTable.grantReadData(apiFunction);
     workItemsTable.grantReadWriteData(apiFunction);
-    workItemConfigurationTable.grantReadWriteData(apiFunction);
     teamIssueEventsTable.grantReadWriteData(apiFunction);
     projectDirectoryTable.grantReadWriteData(apiFunction);
     auditEventsTable.grantReadWriteData(apiFunction);
@@ -1062,6 +1061,23 @@ export class CdkStack extends cdk.Stack {
     notificationsTable.grantReadWriteData(apiFunction);
     workspaceSearchTable.grantReadWriteData(apiFunction);
     realtimeSessionsTable.grantWriteData(apiFunction);
+    const apiWorkItemConfigurationDataPolicy = new iam.Policy(
+      this,
+      'ApiWorkItemConfigurationDataPolicy',
+      {
+        statements: [new iam.PolicyStatement({
+          actions: [
+            'dynamodb:DeleteItem',
+            'dynamodb:DescribeTable',
+            'dynamodb:GetItem',
+            'dynamodb:PutItem',
+            'dynamodb:Query',
+            'dynamodb:UpdateItem',
+          ],
+          resources: [workItemConfigurationTable.tableArn],
+        })],
+      },
+    );
     const apiTransactWritePolicy = new iam.Policy(this, 'ApiTransactWritePolicy', {
       statements: [new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
@@ -1081,6 +1097,7 @@ export class CdkStack extends cdk.Stack {
     if (!apiFunction.role) {
       throw new Error('API Lambda execution role was not created.');
     }
+    apiFunction.role.attachInlinePolicy(apiWorkItemConfigurationDataPolicy);
     apiFunction.role.attachInlinePolicy(apiTransactWritePolicy);
     apiFunction.addToRolePolicy(
       new iam.PolicyStatement({
