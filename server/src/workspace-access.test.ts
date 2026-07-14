@@ -53,6 +53,9 @@ function createInvitationItem(
     status,
     deliveryStatus: status === 'delivery-failed' ? 'failed' : 'sent',
     identityOwnership: 'workspace-created',
+    identityLifecycleVersion: 2,
+    cognitoIdentityId: 'sub-sato',
+    cognitoUsername: 'sato@example.com',
     version: 1,
     expiresAt,
     createdAt: now.toISOString(),
@@ -159,6 +162,53 @@ test('maps an overdue pending invitation to expired without mutating it', async 
   })
 })
 
+test('acquires and releases an invitation acceptance lock with version checks', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  let invitationItem = createInvitationItem('pending')
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: invitationItem }
+      }
+
+      const item = command.input.Item as typeof invitationItem | undefined
+
+      if (item) {
+        invitationItem = item
+      }
+
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  const locked = await client.acquireInvitationAcceptanceLock(workspaceId, 'sato@example.com')
+  expect(locked).toMatchObject({
+    acceptanceLockExpiresAt: '2026-07-11T00:05:00.000Z',
+    status: 'pending',
+    version: 2,
+  })
+  expect(inputs.at(-1)).toMatchObject({
+    ConditionExpression: 'version = :expectedVersion AND #status IN (:status0, :status1, :status2)',
+    Item: { acceptanceLockExpiresAt: '2026-07-11T00:05:00.000Z', version: 2 },
+  })
+
+  const released = await client.releaseInvitationAcceptanceLock(
+    workspaceId,
+    'sato@example.com',
+    2,
+  )
+  expect(released.acceptanceLockExpiresAt).toBeUndefined()
+  expect(released.version).toBe(3)
+  const releasedItem = inputs.at(-1)?.Item as Record<string, unknown> | undefined
+  expect(releasedItem?.acceptanceLockExpiresAt).toBeUndefined()
+})
+
 test('records delivery failure while preserving ambiguous identity ownership', async () => {
   const inputs: Array<Record<string, unknown>> = []
   const client = new DynamoDbWorkspaceAccessClient(
@@ -186,12 +236,14 @@ test('records delivery failure while preserving ambiguous identity ownership', a
   await expect(client.markInvitationDelivery(workspaceId, 'sato@example.com', {
     deliveryStatus: 'failed',
     identityOwnership: 'ambiguous',
+    cognitoIdentityId: 'sub-sato',
     expectedVersion: 1,
     failureMessage: 'Email delivery failed.',
   })).resolves.toMatchObject({
     status: 'delivery-failed',
     deliveryStatus: 'failed',
     identityOwnership: 'ambiguous',
+    cognitoIdentityId: 'sub-sato',
     failureMessage: 'Email delivery failed.',
     version: 2,
   })
@@ -200,7 +252,230 @@ test('records delivery failure while preserving ambiguous identity ownership', a
     Item: {
       status: 'delivery-failed',
       identityOwnership: 'ambiguous',
+      cognitoIdentityId: 'sub-sato',
     },
+  })
+})
+
+test('drops cleanup provenance when delivery binds a replacement Cognito identity', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+
+      return command.constructor.name === 'GetCommand'
+        ? {
+            Item: {
+              ...createInvitationItem('provisioning'),
+              identityOwnership: 'workspace-created',
+              cognitoIdentityId: 'sub-original',
+              directoryClaimCleanupRequired: true,
+            },
+          }
+        : {}
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  const delivered = await client.markInvitationDelivery(
+    workspaceId,
+    'sato@example.com',
+    {
+      deliveryStatus: 'not-required',
+      identityOwnership: 'pre-existing',
+      cognitoIdentityId: 'sub-replacement',
+      cognitoUsername: 'ReplacementIdentity',
+      directoryClaimCleanupRequired: false,
+      expectedVersion: 1,
+    },
+  )
+
+  expect(delivered).toMatchObject({
+    status: 'pending',
+    identityOwnership: 'pre-existing',
+    cognitoIdentityId: 'sub-replacement',
+    cognitoUsername: 'ReplacementIdentity',
+  })
+  expect(delivered.directoryClaimCleanupRequired).toBeUndefined()
+  const updatedItem = inputs.at(-1)?.Item as Record<string, unknown> | undefined
+  expect(updatedItem).toMatchObject({
+    identityOwnership: 'pre-existing',
+    cognitoIdentityId: 'sub-replacement',
+  })
+  expect(updatedItem?.directoryClaimCleanupRequired).toBeUndefined()
+})
+
+test('records directory claim cleanup responsibility before Cognito mutation', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+      return command.constructor.name === 'GetCommand'
+        ? {
+            Item: {
+              ...createInvitationItem('provisioning'),
+              identityOwnership: 'ambiguous',
+              deliveryStatus: 'pending',
+            },
+          }
+        : {}
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  await expect(client.markInvitationDirectoryClaimCleanupRequired(
+    workspaceId,
+    'sato@example.com',
+    1,
+    'sub-sato',
+    'CaseSensitiveSato',
+  )).resolves.toMatchObject({
+    cognitoIdentityId: 'sub-sato',
+    cognitoUsername: 'CaseSensitiveSato',
+    directoryClaimCleanupRequired: true,
+    status: 'provisioning',
+    version: 2,
+  })
+  expect(inputs.at(-1)).toMatchObject({
+    ConditionExpression: 'version = :expectedVersion AND #status IN (:status0)',
+    Item: {
+      directoryClaimCleanupRequired: true,
+      cognitoIdentityId: 'sub-sato',
+      cognitoUsername: 'CaseSensitiveSato',
+      status: 'provisioning',
+      version: 2,
+    },
+  })
+})
+
+test('downgrades ownership before adding claims to a replacement Cognito identity', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+      return command.constructor.name === 'GetCommand'
+        ? {
+            Item: {
+              ...createInvitationItem('provisioning'),
+              identityOwnership: 'workspace-created',
+              cognitoIdentityId: 'sub-original',
+              cognitoUsername: 'OriginalIdentity',
+            },
+          }
+        : {}
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  const marked = await client.markInvitationDirectoryClaimCleanupRequired(
+    workspaceId,
+    'sato@example.com',
+    1,
+    'sub-replacement',
+    'ReplacementIdentity',
+  )
+
+  expect(marked).toMatchObject({
+    identityOwnership: 'ambiguous',
+    cognitoIdentityId: 'sub-replacement',
+    cognitoUsername: 'ReplacementIdentity',
+    directoryClaimCleanupRequired: true,
+  })
+  expect(inputs.at(-1)).toMatchObject({
+    Item: {
+      identityOwnership: 'ambiguous',
+      cognitoIdentityId: 'sub-replacement',
+      cognitoUsername: 'ReplacementIdentity',
+      directoryClaimCleanupRequired: true,
+    },
+  })
+})
+
+test('rejects a stale directory claim marker after invitation state changes', async () => {
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient(() => ({
+      Item: {
+        ...createInvitationItem('revoked'),
+        directoryClaimCleanupRequired: true,
+        version: 2,
+      },
+    })),
+    undefined,
+    false,
+    () => now,
+  )
+
+  await expect(client.markInvitationDirectoryClaimCleanupRequired(
+    workspaceId,
+    'sato@example.com',
+    1,
+    'sub-sato',
+    'CaseSensitiveSato',
+  )).rejects.toMatchObject({
+    status: 409,
+    code: 'WorkspaceVersionConflict',
+  })
+})
+
+test('treats invitation-owned directory claims as retryable revoke cleanup', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+
+      if (command.constructor.name !== 'GetCommand') {
+        return {}
+      }
+
+      const key = command.input.Key as { recordKey?: string }
+      return key.recordKey?.startsWith('MEMBER#')
+        ? { Item: toMemberItem(createWorkspaceMember('demo@example.com')) }
+        : {
+            Item: {
+              ...createInvitationItem('pending'),
+              identityOwnership: 'pre-existing',
+              directoryClaimCleanupRequired: true,
+            },
+          }
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  await expect(client.revokeInvitation(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+  )).resolves.toMatchObject({
+    directoryClaimCleanupRequired: true,
+    failureMessage: 'Cognito cleanup is pending and can be retried safely.',
+    identityOwnership: 'pre-existing',
+    status: 'revoked',
+  })
+  expect(inputs.at(-1)).toMatchObject({
+    TransactItems: [
+      {},
+      {
+        Put: {
+          Item: {
+            directoryClaimCleanupRequired: true,
+            failureMessage: 'Cognito cleanup is pending and can be retried safely.',
+          },
+        },
+      },
+    ],
   })
 })
 
@@ -227,6 +502,38 @@ test('prepares a failed invitation for resend with an actor/version transaction'
   })
 })
 
+test('rejects resend while Cognito provisioning is still in progress', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+
+      if (command.constructor.name !== 'GetCommand') {
+        return {}
+      }
+
+      const key = command.input.Key as { recordKey?: string }
+      return key.recordKey?.startsWith('MEMBER#')
+        ? { Item: toMemberItem(createWorkspaceMember('demo@example.com')) }
+        : { Item: createInvitationItem('provisioning') }
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  await expect(client.prepareResend(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+  )).rejects.toMatchObject({
+    status: 409,
+    code: 'WorkspaceInvitationNotResendable',
+  })
+  expect(inputs).toHaveLength(2)
+})
+
 test('revokes an invitation with an actor/version transaction', async () => {
   const inputs: Array<Record<string, unknown>> = []
   const client = createInvitationLifecycleClient('pending', inputs)
@@ -245,6 +552,64 @@ test('revokes an invitation with an actor/version transaction', async () => {
     TransactItems: [
       { ConditionCheck: { ConditionExpression: '#status = :active AND #role = :role AND version = :version' } },
       { Put: { Item: { status: 'revoked' }, ConditionExpression: 'version = :expectedVersion' } },
+    ],
+  })
+})
+
+test('migrates a legacy revoked invitation to explicit manual Cognito cleanup', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+
+      if (command.constructor.name !== 'GetCommand') {
+        return {}
+      }
+
+      const key = command.input.Key as { recordKey?: string }
+      return key.recordKey?.startsWith('MEMBER#')
+        ? { Item: toMemberItem(createWorkspaceMember('demo@example.com')) }
+        : {
+            Item: {
+              ...createInvitationItem('revoked'),
+              identityOwnership: 'pre-existing',
+              identityLifecycleVersion: undefined,
+              cognitoIdentityId: undefined,
+              cognitoUsername: undefined,
+              failureMessage: undefined,
+            },
+          }
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  const invitation = await client.revokeInvitation(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+  )
+
+  expect(invitation).toMatchObject({
+    status: 'revoked',
+    identityCleanupManualRequired: true,
+    failureMessage:
+      'Manual Cognito cleanup is required. After removing the user or Workspace claims in Cognito, retry revocation to verify completion.',
+  })
+  expect(inputs.at(-1)).toMatchObject({
+    TransactItems: [
+      {},
+      {
+        Put: {
+          Item: {
+            identityCleanupManualRequired: true,
+            failureMessage:
+              'Manual Cognito cleanup is required. After removing the user or Workspace claims in Cognito, retry revocation to verify completion.',
+          },
+        },
+      },
     ],
   })
 })
@@ -281,7 +646,7 @@ test('persists Cognito cleanup failure on a revoked invitation', async () => {
   })
 })
 
-test('clears the cleanup retry marker only after Cognito deletion succeeds', async () => {
+test('clears the retry marker and claim responsibility only after Cognito cleanup succeeds', async () => {
   const inputs: Array<Record<string, unknown>> = []
   const client = new DynamoDbWorkspaceAccessClient(
     'WorkspaceAccessTable',
@@ -291,6 +656,8 @@ test('clears the cleanup retry marker only after Cognito deletion succeeds', asy
         ? {
             Item: {
               ...createInvitationItem('revoked'),
+              identityOwnership: 'pre-existing',
+              directoryClaimCleanupRequired: true,
               failureMessage: 'Cognito cleanup failed and can be retried safely.',
             },
           }
@@ -309,12 +676,122 @@ test('clears the cleanup retry marker only after Cognito deletion succeeds', asy
 
   expect(invitation).toMatchObject({ status: 'revoked', version: 2 })
   expect(invitation.failureMessage).toBeUndefined()
+  expect(invitation.directoryClaimCleanupRequired).toBeUndefined()
+  expect(invitation.identityCleanupCompleted).toBe(true)
   expect(inputs.at(-1)).toMatchObject({
     ConditionExpression: 'version = :expectedVersion AND #status IN (:status0)',
     Item: { status: 'revoked' },
   })
   const clearedItem = inputs.at(-1)?.Item as Record<string, unknown> | undefined
   expect(clearedItem?.failureMessage).toBeUndefined()
+  expect(clearedItem?.directoryClaimCleanupRequired).toBeUndefined()
+  expect(clearedItem?.identityCleanupCompleted).toBe(true)
+})
+
+test('records explicit completion after an administrator verifies manual Cognito cleanup', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  let invitationItem = {
+    ...createInvitationItem('revoked'),
+    directoryClaimCleanupRequired: true,
+    identityCleanupManualRequired: true,
+    identityMutationAttempted: true,
+    failureMessage:
+      'Manual Cognito cleanup is required. After removing the user or Workspace claims in Cognito, retry revocation to verify completion.',
+  }
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key as { recordKey?: string }
+        return key.recordKey?.startsWith('MEMBER#')
+          ? { Item: toMemberItem(createWorkspaceMember('demo@example.com')) }
+          : { Item: invitationItem }
+      }
+
+      const transaction = command.input.TransactItems as Array<{
+        Put?: { Item?: typeof invitationItem }
+      }> | undefined
+      const updatedItem = transaction?.at(-1)?.Put?.Item
+
+      if (updatedItem) {
+        invitationItem = updatedItem
+      }
+
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  const acknowledged = await client.acknowledgeInvitationManualCleanup(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+    1,
+  )
+
+  expect(acknowledged).toMatchObject({
+    status: 'revoked',
+    identityCleanupCompleted: true,
+    version: 2,
+  })
+  expect(acknowledged.identityCleanupManualRequired).toBeUndefined()
+  expect(acknowledged.directoryClaimCleanupRequired).toBeUndefined()
+  expect(acknowledged.identityMutationAttempted).toBeUndefined()
+  expect(acknowledged.failureMessage).toBeUndefined()
+  expect(inputs.at(-1)).toMatchObject({
+    TransactItems: [
+      { ConditionCheck: {} },
+      { Put: { Item: { identityCleanupCompleted: true, version: 2 } } },
+    ],
+  })
+
+  await expect(client.prepareReinvite(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+  )).resolves.toMatchObject({ status: 'provisioning', version: 3 })
+})
+
+test('rejects stale or unauthorized manual Cognito cleanup acknowledgements', async () => {
+  const createClient = (actorRole: WorkspaceMember['role']) => new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name !== 'GetCommand') {
+        return {}
+      }
+
+      const key = command.input.Key as { recordKey?: string }
+      return key.recordKey?.startsWith('MEMBER#')
+        ? { Item: toMemberItem(createWorkspaceMember('admin@example.com', actorRole)) }
+        : {
+            Item: {
+              ...createInvitationItem('revoked'),
+              role: 'owner',
+              identityCleanupManualRequired: true,
+            },
+          }
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  await expect(createClient('owner').acknowledgeInvitationManualCleanup(
+    workspaceId,
+    'admin@example.com',
+    'sato@example.com',
+    99,
+  )).rejects.toMatchObject({ code: 'WorkspaceVersionConflict', status: 409 })
+  await expect(createClient('admin').acknowledgeInvitationManualCleanup(
+    workspaceId,
+    'admin@example.com',
+    'sato@example.com',
+    1,
+  )).rejects.toMatchObject({ code: 'WorkspaceRoleDenied', status: 403 })
 })
 
 test('blocks reinvite until Workspace-owned Cognito cleanup completes', async () => {
@@ -376,6 +853,249 @@ test('prepares a revoked invitation for reinvite with a fresh expiry', async () 
       },
     ],
   })
+})
+
+test('rejects reinvite while an expired invitation still has an active acceptance lock', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+
+      if (command.constructor.name !== 'GetCommand') {
+        return {}
+      }
+
+      const key = command.input.Key as { recordKey?: string }
+      return key.recordKey?.startsWith('MEMBER#')
+        ? { Item: toMemberItem(createWorkspaceMember('demo@example.com')) }
+        : {
+            Item: {
+              ...createInvitationItem('pending', '2026-07-10T00:00:00.000Z'),
+              acceptanceLockExpiresAt: '2026-07-11T00:05:00.000Z',
+            },
+          }
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  await expect(client.prepareReinvite(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+  )).rejects.toMatchObject({
+    status: 409,
+    code: 'WorkspaceInvitationAcceptanceInProgress',
+  })
+  expect(inputs).toHaveLength(2)
+})
+
+test('preserves cleanup provenance when reinviting an expired invitation', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+
+      if (command.constructor.name !== 'GetCommand') {
+        return {}
+      }
+
+      const key = command.input.Key as { recordKey?: string }
+      return key.recordKey?.startsWith('MEMBER#')
+        ? { Item: toMemberItem(createWorkspaceMember('demo@example.com')) }
+        : {
+            Item: {
+              ...createInvitationItem('pending', '2026-07-10T00:00:00.000Z'),
+              identityOwnership: 'pre-existing',
+              directoryClaimCleanupRequired: true,
+            },
+          }
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  await expect(client.prepareReinvite(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+  )).resolves.toMatchObject({
+    status: 'provisioning',
+    identityOwnership: 'pre-existing',
+    directoryClaimCleanupRequired: true,
+  })
+  expect(inputs.at(-1)).toMatchObject({
+    TransactItems: [
+      {},
+      {
+        Put: {
+          Item: {
+            status: 'provisioning',
+            identityOwnership: 'pre-existing',
+            directoryClaimCleanupRequired: true,
+          },
+        },
+      },
+    ],
+  })
+})
+
+test('does not rerun cleanup for an already completed revoked invitation', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+
+      if (command.constructor.name !== 'GetCommand') {
+        return {}
+      }
+
+      const key = command.input.Key as { recordKey?: string }
+      return key.recordKey?.startsWith('MEMBER#')
+        ? { Item: toMemberItem(createWorkspaceMember('demo@example.com')) }
+        : {
+            Item: {
+              ...createInvitationItem('revoked'),
+              identityCleanupCompleted: true,
+            },
+          }
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  await expect(client.revokeInvitation(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+  )).resolves.toMatchObject({
+    status: 'revoked',
+    identityCleanupCompleted: true,
+    version: 1,
+  })
+  expect(inputs).toHaveLength(2)
+})
+
+test('rejects revoke while Cognito provisioning is still in progress', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+
+      if (command.constructor.name !== 'GetCommand') {
+        return {}
+      }
+
+      const key = command.input.Key as { recordKey?: string }
+      return key.recordKey?.startsWith('MEMBER#')
+        ? { Item: toMemberItem(createWorkspaceMember('demo@example.com')) }
+        : { Item: createInvitationItem('provisioning') }
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  await expect(client.revokeInvitation(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+  )).rejects.toMatchObject({
+    status: 409,
+    code: 'WorkspaceInvitationProvisioning',
+  })
+  expect(inputs).toHaveLength(2)
+})
+
+test('recovers a stale provisioning invitation into manual cleanup', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+
+      if (command.constructor.name !== 'GetCommand') {
+        return {}
+      }
+
+      const key = command.input.Key as { recordKey?: string }
+      return key.recordKey?.startsWith('MEMBER#')
+        ? { Item: toMemberItem(createWorkspaceMember('demo@example.com')) }
+        : {
+            Item: {
+              ...createInvitationItem('provisioning'),
+              cognitoIdentityId: undefined,
+              cognitoUsername: undefined,
+              identityMutationAttempted: true,
+              updatedAt: '2026-07-10T23:50:00.000Z',
+            },
+          }
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  await expect(client.revokeInvitation(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+  )).resolves.toMatchObject({
+    status: 'revoked',
+    identityCleanupManualRequired: true,
+    failureMessage:
+      'Manual Cognito cleanup is required. After removing the user or Workspace claims in Cognito, retry revocation to verify completion.',
+  })
+  expect(inputs.at(-1)).toMatchObject({
+    TransactItems: [
+      {},
+      { Put: { Item: { status: 'revoked', identityCleanupManualRequired: true } } },
+    ],
+  })
+})
+
+test('rejects revoke while password challenge acceptance is locked', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+
+      if (command.constructor.name !== 'GetCommand') {
+        return {}
+      }
+
+      const key = command.input.Key as { recordKey?: string }
+      return key.recordKey?.startsWith('MEMBER#')
+        ? { Item: toMemberItem(createWorkspaceMember('demo@example.com')) }
+        : {
+            Item: {
+              ...createInvitationItem('pending'),
+              acceptanceLockExpiresAt: '2026-07-11T00:01:00.000Z',
+            },
+          }
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  await expect(client.revokeInvitation(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+  )).rejects.toMatchObject({
+    status: 409,
+    code: 'WorkspaceInvitationAcceptanceInProgress',
+  })
+  expect(inputs).toHaveLength(2)
 })
 
 test('prevents an admin from inviting another admin or owner', async () => {

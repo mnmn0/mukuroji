@@ -209,6 +209,7 @@ user は project、task、Issue API を利用できません。
 - `POST /api/workspace/invitations`: invitation 作成
 - `POST /api/workspace/invitations/{email}/resend`: invitation 再送
 - `POST /api/workspace/invitations/{email}/revoke`: invitation 取消
+- `POST /api/workspace/invitations/{email}/cleanup/acknowledge`: Cognito の手動 cleanup 完了確認（`expectedVersion` 必須）
 - `POST /api/workspace/invitations/{email}/reinvite`: 期限切れ・取消済み invitation の再招待
 - `PATCH /api/workspace/members/{email}`: `expectedVersion` 付き role/status 更新
 

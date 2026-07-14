@@ -1088,6 +1088,7 @@ export class CdkStack extends cdk.Stack {
         actions: [
           'cognito-idp:AdminCreateUser',
           'cognito-idp:AdminDeleteUser',
+          'cognito-idp:AdminDeleteUserAttributes',
           'cognito-idp:AdminGetUser',
           'cognito-idp:AdminListGroupsForUser',
           'cognito-idp:AdminUpdateUserAttributes',

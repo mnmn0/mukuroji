@@ -872,6 +872,7 @@ const dictionaries = {
     'workspace.access.action.resend': '再送',
     'workspace.access.action.revoke': '取消',
     'workspace.access.action.reinvite': '再招待',
+    'workspace.access.action.acknowledgeCleanup': '手動クリーンアップ完了',
     'workspace.access.dialog.cancel': 'キャンセル',
     'workspace.access.dialog.working': '処理中',
     'workspace.access.dialog.roleTitle': 'Workspace ロールを変更しますか？',
@@ -892,10 +893,15 @@ const dictionaries = {
     'workspace.access.dialog.reinviteTitle': '新しい招待を作成しますか？',
     'workspace.access.dialog.reinviteDescription':
       '{email} の期限切れまたは取消済み招待を引き継ぎ、新しい期限で再招待します。',
+    'workspace.access.dialog.acknowledgeCleanupTitle': '手動クリーンアップの完了を記録しますか？',
+    'workspace.access.dialog.acknowledgeCleanupDescription':
+      '{email} に対応する Cognito ユーザーの削除、または Workspace 属性の解除を確認済みの場合のみ実行してください。確認後は再招待できるようになります。',
     'workspace.access.error.load': 'ワークスペースのアクセス情報を取得できませんでした。',
     'workspace.access.error.operation': 'アクセス情報を更新できませんでした。保存状態を確認して再試行してください。',
     'workspace.access.error.conflict':
       '別の管理者が先に更新しました。最新状態を読み込みました。内容を確認して再試行してください。',
+    'workspace.access.error.cognitoUserDisabled':
+      'このCognitoユーザーは無効です。再有効化してから、もう一度招待してください。',
     'workspace.access.error.forbidden': 'この操作を実行できる Workspace ロールではありません。',
     'workspace.access.error.retryHint': '内容を確認し、同じ確定ボタンから再試行できます。',
     'workspace.access.error.dismiss': '閉じる',
@@ -2077,6 +2083,7 @@ const dictionaries = {
     'workspace.access.action.resend': 'Resend',
     'workspace.access.action.revoke': 'Revoke',
     'workspace.access.action.reinvite': 'Reinvite',
+    'workspace.access.action.acknowledgeCleanup': 'Confirm manual cleanup',
     'workspace.access.dialog.cancel': 'Cancel',
     'workspace.access.dialog.working': 'Working',
     'workspace.access.dialog.roleTitle': 'Change this workspace role?',
@@ -2097,11 +2104,16 @@ const dictionaries = {
     'workspace.access.dialog.reinviteTitle': 'Create a new invitation?',
     'workspace.access.dialog.reinviteDescription':
       'Carry forward the expired or revoked invitation for {email} with a new expiry.',
+    'workspace.access.dialog.acknowledgeCleanupTitle': 'Record manual cleanup as complete?',
+    'workspace.access.dialog.acknowledgeCleanupDescription':
+      'Only continue after confirming that the Cognito user for {email} was deleted or its workspace attributes were removed. Reinvitation will be enabled afterward.',
     'workspace.access.error.load': 'Workspace access could not be loaded.',
     'workspace.access.error.operation':
       'Workspace access could not be updated. Check the saved state and try again.',
     'workspace.access.error.conflict':
       'Another administrator updated this record first. The latest state was reloaded; review it and try again.',
+    'workspace.access.error.cognitoUserDisabled':
+      'This Cognito user is disabled. Re-enable the user before sending the invitation again.',
     'workspace.access.error.forbidden': 'Your workspace role cannot perform this action.',
     'workspace.access.error.retryHint': 'Review the details and use the same confirmation button to retry.',
     'workspace.access.error.dismiss': 'Dismiss',

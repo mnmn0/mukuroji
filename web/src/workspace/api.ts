@@ -108,6 +108,10 @@ export type WorkspaceInvitation = {
    */
   identityOwnership: WorkspaceIdentityOwnership
   /**
+   * Cognito user または directory claim の手動 cleanup 確認が必要かどうかです。
+   */
+  identityCleanupManualRequired?: boolean
+  /**
    * invitation の同時更新検知に使用する version です。
    */
   version: number
@@ -237,11 +241,16 @@ export class WorkspaceAccessApiError extends Error {
    * API response の HTTP status code です。
    */
   readonly status: number
+  /**
+   * API が返した分岐可能な error code です。
+   */
+  readonly code?: string
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code?: string) {
     super(message)
     this.name = 'WorkspaceAccessApiError'
     this.status = status
+    this.code = code
   }
 }
 
@@ -319,6 +328,26 @@ export async function reinviteWorkspaceInvitation(accessToken: string, invitatio
 }
 
 /**
+ * Cognito 上で実施した手動 cleanup の完了を invitation version 付きで確認します。
+ */
+export async function acknowledgeWorkspaceInvitationCleanup(
+  accessToken: string,
+  invitationId: string,
+  expectedVersion: number,
+) {
+  const response = await sendWorkspaceAccessRequest<WorkspaceInvitationResponse>(
+    `/workspace/invitations/${encodeURIComponent(invitationId)}/cleanup/acknowledge`,
+    accessToken,
+    {
+      body: JSON.stringify({ expectedVersion }),
+      method: 'POST',
+    },
+  )
+
+  return response.invitation
+}
+
+/**
  * Workspace member の role または利用状態を version 付きで更新します。
  */
 export async function updateWorkspaceMember(
@@ -354,10 +383,23 @@ async function sendWorkspaceAccessRequest<T>(
   const data = await readJson<unknown>(response)
 
   if (!response.ok) {
-    throw new WorkspaceAccessApiError(response.status, readErrorMessage(data))
+    throw new WorkspaceAccessApiError(
+      response.status,
+      readErrorMessage(data),
+      readErrorCode(data),
+    )
   }
 
   return data as T
+}
+
+function readErrorCode(data: unknown) {
+  return typeof data === 'object' &&
+    data !== null &&
+    'code' in data &&
+    typeof data.code === 'string'
+    ? data.code
+    : undefined
 }
 
 function readErrorMessage(data: unknown) {
