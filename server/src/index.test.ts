@@ -2,6 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import type { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import type { WorkItemConfiguration } from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import { createAuditEvent, createMutationAuditContext } from './audit'
 import { CollaborationError, type CollaborationClient } from './collaboration'
@@ -35,6 +36,11 @@ import {
   type WorkspaceMemberStatus,
   type WorkspaceRole,
 } from './index'
+import {
+  DEFAULT_WORK_ITEM_CONFIGURATION,
+  WorkItemConfigurationError,
+  type WorkItemConfigurationClient,
+} from './work-item-configuration'
 
 afterEach(() => {
   resetApiClientsForTest()
@@ -3445,6 +3451,399 @@ test('omits truncation headers when a workspace audit export reaches the final p
   expect((await response.text()).trimEnd().split('\n')).toHaveLength(1)
 })
 
+test('reads and saves Workspace Work Item configuration through the authenticated scope', async () => {
+  configureFakeProjectClients(true)
+  const stored = createTestWorkItemConfiguration('workspace', 'user#demo@example.com', 3)
+  const reads: string[] = []
+  const writes: Array<{ configuration: WorkItemConfiguration; workspaceId: string }> = []
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getWorkspaceConfiguration(workspaceId) {
+        reads.push(workspaceId)
+        return { configuration: stored }
+      },
+      async saveWorkspaceConfiguration(workspaceId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        writes.push({ workspaceId, configuration })
+        return {
+          configuration: {
+            ...configuration,
+            revision: configuration.revision + 1,
+          },
+        }
+      },
+    }),
+  })
+
+  const readResponse = await app.request('/api/work-item-configuration', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const writeResponse = await app.request('/api/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(createTestWorkItemConfiguration('team', 'foreign-team', 3)),
+  })
+
+  expect(readResponse.status).toBe(200)
+  expect(await readResponse.json()).toEqual({ configuration: stored })
+  expect(writeResponse.status).toBe(200)
+  expect(await writeResponse.json()).toMatchObject({
+    configuration: {
+      scopeType: 'workspace',
+      scopeId: 'user#demo@example.com',
+      revision: 4,
+    },
+  })
+  expect(reads).toEqual(['user#demo@example.com'])
+  expect(writes).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    configuration: expect.objectContaining({
+      scopeType: 'workspace',
+      scopeId: 'user#demo@example.com',
+      revision: 3,
+    }),
+  }])
+})
+
+test('reads and saves Team Work Item configuration for a Team manager', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const stored = createTestWorkItemConfiguration('team', 'core-team', 2)
+  const reads: Array<{ teamId: string; workspaceId: string }> = []
+  const writes: Array<{
+    configuration: WorkItemConfiguration
+    teamId: string
+    workspaceId: string
+  }> = []
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration(workspaceId, teamId) {
+        reads.push({ workspaceId, teamId })
+        return { configuration: stored }
+      },
+      async saveTeamConfiguration(workspaceId, teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        writes.push({ workspaceId, teamId, configuration })
+        return {
+          configuration: {
+            ...configuration,
+            revision: configuration.revision + 1,
+          },
+        }
+      },
+    }),
+  })
+
+  const readResponse = await app.request('/api/teams/core-team/work-item-configuration', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const writeResponse = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(createTestWorkItemConfiguration('workspace', 'foreign-workspace', 2)),
+  })
+
+  expect(readResponse.status).toBe(200)
+  expect(await readResponse.json()).toEqual({ configuration: stored })
+  expect(writeResponse.status).toBe(200)
+  expect(reads).toEqual([{ workspaceId: 'user#demo@example.com', teamId: 'core-team' }])
+  expect(writes).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    teamId: 'core-team',
+    configuration: expect.objectContaining({
+      scopeType: 'team',
+      scopeId: 'core-team',
+      revision: 2,
+    }),
+  }])
+})
+
+test('denies Work Item configuration writes outside the required administration roles', async () => {
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  let writes = 0
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async saveWorkspaceConfiguration(workspaceId, configuration) {
+        writes += 1
+        return { configuration: { ...configuration, scopeId: workspaceId } }
+      },
+      async saveTeamConfiguration(_workspaceId, teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        writes += 1
+        return { configuration: { ...configuration, scopeId: teamId } }
+      },
+    }),
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+
+  const workspaceResponse = await app.request('/api/work-item-configuration', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(createTestWorkItemConfiguration('workspace', 'user#demo@example.com')),
+  })
+  const teamResponse = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(createTestWorkItemConfiguration('team', 'core-team')),
+  })
+
+  expect(workspaceResponse.status).toBe(403)
+  expect(teamResponse.status).toBe(403)
+  expect(writes).toBe(0)
+})
+
+test('rejects a configuration change that requires existing Work Item migration', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  let writes = 0
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async saveTeamConfiguration(_workspaceId, teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        writes += 1
+        return { configuration: { ...configuration, scopeId: teamId } }
+      },
+    }),
+  })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.customFields = [{
+    id: 'required-reviewer',
+    name: 'Required reviewer',
+    type: 'person',
+    sortOrder: 0,
+    required: true,
+  }]
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(configuration),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationMigrationRequired',
+  })
+  expect(writes).toBe(0)
+})
+
+test('rejects missing required custom fields before creating a Work Item', async () => {
+  const calls = configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.customFields = [{
+    id: 'effort',
+    name: 'Effort',
+    type: 'number',
+    sortOrder: 10,
+    required: true,
+    validation: { min: 1, max: 8 },
+  }]
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: 'Missing effort',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026/07/20',
+      priority: 'medium',
+      workflowStatusId: 'todo',
+      customFieldValues: {},
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    code: 'InvalidCustomFieldValue',
+    message: 'Custom field "effort" is required.',
+  })
+  expect(calls.issueCreates).toEqual([])
+})
+
+test('uses the configured initial workflow status when create omits legacy status', async () => {
+  const calls = configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workflow.initialStatusId = 'triage'
+  configuration.workflow.statuses.unshift({
+    id: 'triage',
+    name: 'Triage',
+    category: 'backlog',
+    sortOrder: 5,
+  })
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: 'Starts in triage',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026/07/20',
+      priority: 'medium',
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(calls.issueCreates).toContainEqual(expect.objectContaining({
+    statusCategory: 'backlog',
+    workflowStatusId: 'triage',
+  }))
+})
+
+test('rejects a disallowed configured workflow transition before updating a Work Item', async () => {
+  const calls = configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workflow.transitions = configuration.workflow.transitions.filter((transition) =>
+    !(transition.fromStatusId === 'in-progress' && transition.toStatusId === 'done')
+  )
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ workflowStatusId: 'done', expectedRevision: 1 }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'WorkflowTransitionDenied',
+    message: 'Transition from "in-progress" to "done" is not allowed.',
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('calls reciprocal relation mutations and preserves their stable conflict response', async () => {
+  configureFakeProjectClients(true)
+  const creates: Array<{ input: unknown; teamId: string; workspaceId: string }> = []
+  let deletes = 0
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async createRelation(workspaceId, teamId, input) {
+        creates.push({ workspaceId, teamId, input })
+        return {
+          relation: {
+            sourceWorkItemId: input.sourceWorkItemId,
+            targetWorkItemId: input.targetWorkItemId,
+            type: input.type,
+          },
+          reciprocalRelation: {
+            sourceWorkItemId: input.targetWorkItemId,
+            targetWorkItemId: input.sourceWorkItemId,
+            type: 'blockedBy',
+          },
+          graphRevision: input.expectedGraphRevision + 1,
+        }
+      },
+      async deleteRelation() {
+        deletes += 1
+        throw new WorkItemConfigurationError(
+          409,
+          'RelationGraphRevisionConflict',
+          'Relation graph changed. Reload and try again.',
+        )
+      },
+    }),
+  })
+
+  const createResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/relations',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: 'blocks',
+        targetWorkItemId: 'target-issue',
+        expectedGraphRevision: 4,
+      }),
+    },
+  )
+  const deleteResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/relations/target-issue/blocks',
+    {
+      method: 'DELETE',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ expectedGraphRevision: 4 }),
+    },
+  )
+
+  expect(createResponse.status).toBe(201)
+  expect(await createResponse.json()).toMatchObject({
+    relation: {
+      sourceWorkItemId: 'onboarding-friction',
+      targetWorkItemId: 'target-issue',
+      type: 'blocks',
+    },
+    reciprocalRelation: { type: 'blockedBy' },
+    graphRevision: 5,
+  })
+  expect(creates).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    teamId: 'core-team',
+    input: {
+      sourceWorkItemId: 'onboarding-friction',
+      targetWorkItemId: 'target-issue',
+      type: 'blocks',
+      expectedGraphRevision: 4,
+      sourceExpectedRevision: 1,
+      targetExpectedRevision: 1,
+      sourceAssignedProjectId: 'refero',
+      targetAssignedProjectId: 'refero',
+    },
+  }])
+  expect(deleteResponse.status).toBe(409)
+  expect(await deleteResponse.json()).toEqual({
+    code: 'RelationGraphRevisionConflict',
+    message: 'Relation graph changed. Reload and try again.',
+  })
+  expect(deletes).toBe(1)
+})
+
 test('denies project tasks when the project is outside the user directory', async () => {
   const calls = configureFakeProjectClients(false)
 
@@ -4619,6 +5018,8 @@ test('creates a project task after project access is confirmed', async () => {
       assigneeEmail: 'sato@example.com',
       assigneeName: '佐藤 花子',
       status: 'todo',
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
       dueDate: '2026/06/20',
       priority: 'medium',
       createdAt: '2026-06-08T00:00:00.000Z',
@@ -5314,6 +5715,8 @@ test('creates a team-owned issue after team access is confirmed', async () => {
       assigneeEmail: 'sato@example.com',
       assigneeName: '佐藤 花子',
       status: 'todo',
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
       dueDate: '2026/06/20',
       priority: 'medium',
       createdAt: '2026-06-08T00:00:00.000Z',
@@ -5327,8 +5730,10 @@ test('creates a team-owned issue after team access is confirmed', async () => {
       assignedProjectId: 'refero',
       directoryId: 'user#demo@example.com',
       reservedIssueIds: ['wireframe'],
+      statusCategory: 'unstarted',
       teamId: 'core-team',
       title: '新規 Issue',
+      workflowStatusId: 'todo',
     },
   ])
 })
@@ -5521,6 +5926,39 @@ test('loads team issue detail and creates comments after team access is confirme
       { id: 'comment-1', body: '背景を確認します。' },
       { id: 'comment-2', body: '追加コメント' },
     ],
+  })
+})
+
+test('omits relations whose target Project is outside the viewer access scope', async () => {
+  configureFakeProjectClients(true, {
+    inaccessibleTeamIssueCount: 1,
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+    teamIssueCount: 2,
+  })
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations() {
+        return {
+          graphRevision: 2,
+          relations: [{
+            sourceWorkItemId: 'work-item-1',
+            targetWorkItemId: 'onboarding-friction',
+            type: 'related',
+            createdAt: '2026-07-14T00:00:00.000Z',
+          }],
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/work-item-1', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    relations: [],
+    relationGraphRevision: 2,
   })
 })
 
@@ -6415,6 +6853,37 @@ test('DynamoDB Work Item list clients skip DynamoDB reads when limit is zero', a
     workItemsClient.getProjectIssues('user#demo@example.com', 'refero', { limit: 0 }),
   ).resolves.toMatchObject({ issues: [] })
   expect(sentInputs).toEqual([])
+})
+
+test('DynamoDB Team Work Item compatibility reads use the strongly consistent base table', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return { Items: [] }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await client.getTeamIssuesForAggregate('user#demo@example.com', 'core-team', {
+    consistentRead: true,
+  })
+
+  expect(sentInputs).toEqual([{
+    TableName: 'WorkItemsTable',
+    ConsistentRead: true,
+    KeyConditionExpression: 'directoryTeamId = :directoryTeamId',
+    ExpressionAttributeValues: {
+      ':directoryTeamId': 'user#demo@example.com#team#core-team',
+    },
+    ExclusiveStartKey: undefined,
+  }])
 })
 
 test('DynamoDB Team and project Work Item clients read every page without a default Limit', async () => {
@@ -8942,6 +9411,89 @@ function createFileUploadSessionFixture() {
   }
 }
 
+/** API integration tests で利用する scope 固定済み Work Item configuration です。 */
+function createTestWorkItemConfiguration(
+  scopeType: 'workspace' | 'team',
+  scopeId: string,
+  revision = 0,
+): WorkItemConfiguration {
+  return {
+    ...structuredClone(DEFAULT_WORK_ITEM_CONFIGURATION),
+    scopeType,
+    scopeId,
+    revision,
+  }
+}
+
+/** 関心のある method だけ上書きできる Work Item configuration client fake です。 */
+function createFakeWorkItemConfigurationClient(
+  overrides: Partial<WorkItemConfigurationClient> = {},
+): WorkItemConfigurationClient {
+  const createResolved = (scopeType: 'workspace' | 'team', scopeId: string) => ({
+    configuration: createTestWorkItemConfiguration(scopeType, scopeId),
+    inheritedFrom: 'default' as const,
+  })
+  return {
+    async getWorkspaceConfiguration(workspaceId) {
+      return createResolved('workspace', workspaceId)
+    },
+    async getTeamConfiguration(_workspaceId, teamId) {
+      return createResolved('team', teamId)
+    },
+    async saveWorkspaceConfiguration(workspaceId, configuration, compatibilityCheck) {
+      await compatibilityCheck()
+      return {
+        configuration: {
+          ...configuration,
+          scopeType: 'workspace',
+          scopeId: workspaceId,
+          revision: configuration.revision + 1,
+        },
+      }
+    },
+    async saveTeamConfiguration(_workspaceId, teamId, configuration, compatibilityCheck) {
+      await compatibilityCheck()
+      return {
+        configuration: {
+          ...configuration,
+          scopeType: 'team',
+          scopeId: teamId,
+          revision: configuration.revision + 1,
+        },
+      }
+    },
+    async listRelations() {
+      return { relations: [], graphRevision: 0 }
+    },
+    async createRelation(_workspaceId, _teamId, input) {
+      return createFakeRelationMutationResponse(input)
+    },
+    async deleteRelation(_workspaceId, _teamId, input) {
+      return createFakeRelationMutationResponse(input)
+    },
+    ...overrides,
+  }
+}
+
+/** Client fake の既定 relation mutation response です。 */
+function createFakeRelationMutationResponse(
+  input: Parameters<WorkItemConfigurationClient['createRelation']>[2],
+) {
+  return {
+    relation: {
+      sourceWorkItemId: input.sourceWorkItemId,
+      targetWorkItemId: input.targetWorkItemId,
+      type: input.type,
+    },
+    reciprocalRelation: {
+      sourceWorkItemId: input.targetWorkItemId,
+      targetWorkItemId: input.sourceWorkItemId,
+      type: input.type,
+    },
+    graphRevision: input.expectedGraphRevision + 1,
+  }
+}
+
 function configureFakeProjectClients(
   hasProjectAccess: boolean,
   options: {
@@ -9058,6 +9610,8 @@ function configureFakeProjectClients(
       reservedIssueIds?: string[]
       teamId: string
       title: string
+      statusCategory?: unknown
+      workflowStatusId?: unknown
     }>,
     issueDetails: [] as Array<{
       directoryId: string
@@ -9909,6 +10463,12 @@ function configureFakeProjectClients(
           reservedIssueIds,
           teamId,
           title: String(input.title),
+          ...(input.statusCategory === undefined
+            ? {}
+            : { statusCategory: input.statusCategory }),
+          ...(input.workflowStatusId === undefined
+            ? {}
+            : { workflowStatusId: input.workflowStatusId }),
         })
 
         return {
@@ -9923,7 +10483,20 @@ function configureFakeProjectClients(
             title: String(input.title),
             description: typeof input.description === 'string' ? input.description : undefined,
             assigneeUserId: String(input.assigneeUserId),
-            status: 'todo',
+            status: input.status === 'in-progress' || input.status === 'review' ||
+              input.status === 'done'
+              ? input.status
+              : 'todo',
+            workflowStatusId: typeof input.workflowStatusId === 'string'
+              ? input.workflowStatusId
+              : undefined,
+            statusCategory: input.statusCategory === 'backlog' ||
+              input.statusCategory === 'unstarted' ||
+              input.statusCategory === 'started' ||
+              input.statusCategory === 'completed' ||
+              input.statusCategory === 'canceled'
+              ? input.statusCategory
+              : undefined,
             dueDate: String(input.dueDate),
             priority: 'medium',
             createdAt: '2026-06-08T00:00:00.000Z',

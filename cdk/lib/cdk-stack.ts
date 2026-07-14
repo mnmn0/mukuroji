@@ -628,6 +628,15 @@ export class CdkStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    const workItemConfigurationTable = new dynamodb.Table(this, 'WorkItemConfigurationTable', {
+      partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      timeToLiveAttribute: 'expiresAtEpochSeconds',
+    });
+
     const teamIssueEventsTable = new dynamodb.Table(this, 'TeamIssueEventsTable', {
       partitionKey: { name: 'directoryTeamIssueId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'eventId', type: dynamodb.AttributeType.STRING },
@@ -980,6 +989,7 @@ export class CdkStack extends cdk.Stack {
         MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
         MUKUROJI_TEAM_ISSUES_TABLE: workItemsTable.tableName,
+        MUKUROJI_WORK_ITEM_CONFIGURATION_TABLE: workItemConfigurationTable.tableName,
         MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
         MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
         NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
@@ -991,6 +1001,7 @@ export class CdkStack extends cdk.Stack {
         TASKS_TABLE_NAME: legacyTasksTable.tableName,
         TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
         TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
+        WORK_ITEM_CONFIGURATION_TABLE_NAME: workItemConfigurationTable.tableName,
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
         WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
       },
@@ -1041,6 +1052,7 @@ export class CdkStack extends cdk.Stack {
 
     legacyTasksTable.grantReadData(apiFunction);
     workItemsTable.grantReadWriteData(apiFunction);
+    workItemConfigurationTable.grantReadWriteData(apiFunction);
     teamIssueEventsTable.grantReadWriteData(apiFunction);
     projectDirectoryTable.grantReadWriteData(apiFunction);
     auditEventsTable.grantReadWriteData(apiFunction);
@@ -1055,6 +1067,7 @@ export class CdkStack extends cdk.Stack {
         actions: ['dynamodb:TransactWriteItems'],
         resources: [
           workItemsTable.tableArn,
+          workItemConfigurationTable.tableArn,
           teamIssueEventsTable.tableArn,
           projectDirectoryTable.tableArn,
           auditEventsTable.tableArn,
@@ -1617,6 +1630,9 @@ export class CdkStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'WorkItemsTableName', {
       value: workItemsTable.tableName,
+    });
+    new cdk.CfnOutput(this, 'WorkItemConfigurationTableName', {
+      value: workItemConfigurationTable.tableName,
     });
     new cdk.CfnOutput(this, 'TeamIssueEventsTableName', {
       value: teamIssueEventsTable.tableName,

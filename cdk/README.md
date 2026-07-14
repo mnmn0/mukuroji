@@ -29,6 +29,7 @@
 - `ProjectTasksTableName`（legacy read-only compatibility）
 - `WorkItemsTableName`（既存 `TeamIssuesTable` を昇格した canonical store）
 - `TeamIssuesTableName`（`WorkItemsTableName` と同じ table を指す互換 output）
+- `WorkItemConfigurationTableName`（workflow、custom field、relation graph の scope store）
 - `ProjectDirectoryTableName`, `TeamIssueEventsTableName`
 - `FileProofingTableName`, `FileBucketName`, `FileMalwareProtectionPlanId`
 - `NotificationsTableName`, `CollaborationProjectionDlqUrl`, `NotificationScheduleDlqUrl`
@@ -230,9 +231,25 @@ Demo seed の custom resource は旧 `SeedProjectTasks` の論理 ID を維持�
 
 Rollback window 中はどちらの table も削除しません。rollback は直前 revision を同じ parameter で deploy し、旧 handler が同じ `TeamIssuesTable` の追加属性を無視して読めることを確認します。Migrated row の一括削除は migration 後の正規 write を失うため禁止します。
 
+## Work Item configuration cutover
+
+`WorkItemConfigurationTable` は `scopeKey` / `recordKey` を primary key とし、Workspace default、Team override、relation graph metadata を同じ scope partition に保存します。API Lambda には `WORK_ITEM_CONFIGURATION_TABLE_NAME` と互換名 `MUKUROJI_WORK_ITEM_CONFIGURATION_TABLE` を設定し、この table への read/write と `TransactWriteItems` だけを stack resource に限定して許可します。Realtime Lambda と projection Lambda は configuration を直接変更しないため、この table の権限を付与しません。
+
+CDK は configuration row を強制 seed しません。row が無い Workspace / Team は runtime の built-in default と Workspace 継承を利用します。既存 Work Item row の additive metadata は application deploy 後、[work-item-configuration.md](../docs/work-item-configuration.md) の手順で dry-run、apply、verify の順に補完します。
+
+Upgrade 前後では次を確認します。
+
+1. `cdk diff` で既存 table の replacement/deletion が無く、`WorkItemConfigurationTable` の追加だけであることを確認する。
+2. deploy 後に `WorkItemConfigurationTableName` output と Lambda の両 environment variable が同じ table を指すことを確認する。
+3. API role の read/write/transaction resource に configuration table が含まれ、legacy `ProjectTasksTable` の write 権限が増えていないことを確認する。
+4. `WORK_ITEMS_TABLE_NAME` を canonical table output に設定し、configuration metadata migration を実行する。
+5. Workspace default 未登録、Workspace default、Team override の各 API readと、relation transaction の graph revision conflict を確認する。
+
+Table は `Retain` + PITR のため code rollback で削除しません。旧 code は configuration table を参照せず、Work Item の additive metadata も無視できます。rollback 時は write を停止し、現行 template の configuration table・environment・IAM resource を残したまま旧 application artifact へ戻します。Table 追加前の CDK template をそのまま deploy すると、物理 table は `Retain` されても stack から detach されるため禁止します。誤って detach した場合は original table を resource import で再接続し、同じ table を Lambda environment が参照していることを確認してから roll-forward します。Configuration row や補完済み Work Item metadataは一括削除しません。
+
 ## Rollback
 
-code / infrastructure rollback は、直前に成功した revision を同じ 5 parameters で deploy します。DynamoDB table は `Retain` で、PITR も有効なため stack rollback / deletion で削除されません。Cognito custom schema は rollback しても残ります。
+code / infrastructure rollback は、原則として直前に成功した revision を同じ 5 parameters で deploy します。ただし現行 stack にしか存在しない retained resource を旧 template から削除してはならず、Work Item configuration cutover 後は上記の code-only rollback または resource を残す rollback template を使います。DynamoDB table は `Retain` で、PITR も有効ですが、stack から外れた resource は自動で再接続されません。Cognito custom schema は rollback しても残ります。
 
 Workspace migration の切替後に戻す場合:
 
@@ -267,7 +284,7 @@ aws dynamodb wait table-exists \
 - Function URL の edge auth は `NONE` ですが、Hono API が Cognito Bearer token の issuer / client / token use を検証します。
 - Function URL、HTTP API、Hono CORS は同じ `TaskApiAllowedOrigins` に揃えます。本番で local default を使いません。
 - Lambda IAM は stack table、`workspaces/` file object prefix、指定 user pool に限定します。API role に bucket-wide `ListBucket` は付与しません。
-- stack が管理するすべての DynamoDB table は `Retain` + PITR enabled です。FileProofing table は `expiresAt` TTL も有効です。
+- stack が管理するすべての DynamoDB table は `Retain` + PITR enabled です。FileProofing table は `expiresAt`、Work Item configuration table は `expiresAtEpochSeconds` TTL も有効です。
 - File bucket は public access を遮断し、TLS / SSE-S3 / versioning / `Retain` / malware tag-based download deny を有効にします。
 - Lambda は `server/src/index.ts` を deploy 時に bundle します。旧 inline Lambda copy はありません。
 

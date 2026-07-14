@@ -130,6 +130,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
   const stableResourceIds = [
     'ProjectTasksTableE21F6637',
     'TeamIssuesTable189D851D',
+    'WorkItemConfigurationTable35E94558',
     'TeamIssueEventsTableDD2B0F96',
     'ProjectDirectoryTable9ED01C01',
     'ListProjectTasksFunction2134AF4A',
@@ -145,7 +146,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(12);
+  expect(Object.keys(tables)).toHaveLength(13);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -164,11 +165,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 test('file proofing metadata uses a retained point-in-time recoverable table', () => {
   const template = synthesizedTemplate;
   const fileProofingTableEntry = Object.entries(template.findResources('AWS::DynamoDB::Table'))
-    .find(([, resource]) => {
-      const serializedResource = JSON.stringify(resource);
-
-      return serializedResource.includes('scopeKey') && serializedResource.includes('recordKey');
-    });
+    .find(([logicalId]) => logicalId === 'FileProofingTable81DA272F');
 
   expect(fileProofingTableEntry).toBeDefined();
   expect(fileProofingTableEntry?.[1]).toEqual(expect.objectContaining({
@@ -241,6 +238,12 @@ test('shared server handler is bundled as a Lambda asset with production environ
         },
         WORKSPACE_SEARCH_TABLE_NAME: {
           Ref: 'WorkspaceSearchTable2575AD6B',
+        },
+        MUKUROJI_WORK_ITEM_CONFIGURATION_TABLE: {
+          Ref: 'WorkItemConfigurationTable35E94558',
+        },
+        WORK_ITEM_CONFIGURATION_TABLE_NAME: {
+          Ref: 'WorkItemConfigurationTable35E94558',
         },
         COLLABORATION_TABLE_NAME: {
           Ref: 'WorkItemCollaborationTableFDECF217',
@@ -328,6 +331,37 @@ test('Function URL and API Gateway invoke the same Lambda handler', () => {
   template.hasOutput('WorkspaceSearchTableName', {
     Value: { Ref: 'WorkspaceSearchTable2575AD6B' },
   });
+  template.hasOutput('WorkItemConfigurationTableName', {
+    Value: { Ref: 'WorkItemConfigurationTable35E94558' },
+  });
+});
+
+test('Work Item configuration uses a retained scope and record key table', () => {
+  const template = synthesizedTemplate;
+  const table = template.toJSON().Resources.WorkItemConfigurationTable35E94558;
+
+  expect(table).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+    Properties: expect.objectContaining({
+      AttributeDefinitions: expect.arrayContaining([
+        { AttributeName: 'scopeKey', AttributeType: 'S' },
+        { AttributeName: 'recordKey', AttributeType: 'S' },
+      ]),
+      BillingMode: 'PAY_PER_REQUEST',
+      KeySchema: [
+        { AttributeName: 'scopeKey', KeyType: 'HASH' },
+        { AttributeName: 'recordKey', KeyType: 'RANGE' },
+      ],
+      PointInTimeRecoverySpecification: {
+        PointInTimeRecoveryEnabled: true,
+      },
+      TimeToLiveSpecification: {
+        AttributeName: 'expiresAtEpochSeconds',
+        Enabled: true,
+      },
+    }),
+  }));
 });
 
 test('Function URL and API Gateway expose the same restricted CORS contract', () => {
@@ -1062,6 +1096,10 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     return actions.includes('dynamodb:TransactWriteItems') &&
       JSON.stringify(statement.Resource).includes('WorkspaceSearchTable2575AD6B');
   });
+  const configurationDataStatement = statements.find((statement) =>
+    JSON.stringify(statement.Resource).includes('WorkItemConfigurationTable35E94558') &&
+    Array.isArray(statement.Action)
+  );
   const cognitoPolicy = Object.values(template.toJSON().Resources).find((resource) =>
     JSON.stringify(resource).includes('cognito-idp:AdminGetUser')
   );
@@ -1070,6 +1108,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Effect: 'Allow',
     Resource: expect.arrayContaining([
       { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+      { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
       { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
       { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
       { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
@@ -1114,6 +1153,16 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     'dynamodb:TransactWriteItems',
     'dynamodb:UpdateItem',
   ]));
+  expect(configurationDataStatement).toEqual(expect.objectContaining({
+    Action: expect.arrayContaining([
+      'dynamodb:DeleteItem',
+      'dynamodb:GetItem',
+      'dynamodb:PutItem',
+      'dynamodb:Query',
+      'dynamodb:UpdateItem',
+    ]),
+    Effect: 'Allow',
+  }));
 
   const legacyTaskStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('ProjectTasksTableE21F6637')
