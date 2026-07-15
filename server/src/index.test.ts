@@ -1,8 +1,12 @@
 import { afterEach, expect, test } from 'bun:test'
 import type { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import type { WorkItemConfiguration } from '@mukuroji/contracts'
+import type { DynamoDBDocumentClient, TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
+import type {
+  CustomFieldValue,
+  SearchCustomFieldValue,
+  WorkItemConfiguration,
+} from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import { createAuditEvent, createMutationAuditContext } from './audit'
 import { CollaborationError, type CollaborationClient } from './collaboration'
@@ -5930,10 +5934,9 @@ test('loads team issue detail and creates comments after team access is confirme
 })
 
 test('omits relations whose target Project is outside the viewer access scope', async () => {
-  configureFakeProjectClients(true, {
-    inaccessibleTeamIssueCount: 1,
+  const calls = configureFakeProjectClients(true, {
+    detailAssignedProjectIds: { 'onboarding-friction': 'private-project' },
     projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
-    teamIssueCount: 2,
   })
   configureApiClientsForTest({
     workItemConfigurations: createFakeWorkItemConfigurationClient({
@@ -5945,6 +5948,11 @@ test('omits relations whose target Project is outside the viewer access scope', 
             targetWorkItemId: 'onboarding-friction',
             type: 'related',
             createdAt: '2026-07-14T00:00:00.000Z',
+          }, {
+            sourceWorkItemId: 'work-item-1',
+            targetWorkItemId: 'onboarding-friction',
+            type: 'blocks',
+            createdAt: '2026-07-14T00:01:00.000Z',
           }],
         }
       },
@@ -5960,6 +5968,116 @@ test('omits relations whose target Project is outside the viewer access scope', 
     relations: [],
     relationGraphRevision: 2,
   })
+  expect(calls.issueReads).toEqual([])
+  expect(calls.issueDetails).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      teamId: 'core-team',
+      issueId: 'work-item-1',
+      readOptions: { consistentIssueRead: true },
+    },
+    {
+      directoryId: 'user#demo@example.com',
+      teamId: 'core-team',
+      issueId: 'onboarding-friction',
+      readOptions: { consistentIssueRead: true, eventLimit: 0 },
+    },
+  ])
+})
+
+test('loads deduplicated relation targets with bounded concurrency and preserves relation order', async () => {
+  const targetWorkItemIds = Array.from({ length: 12 }, (_, index) => `target-${index}`)
+  const relations = [
+    ...targetWorkItemIds.map((targetWorkItemId, index) => ({
+      sourceWorkItemId: 'source-work-item',
+      targetWorkItemId,
+      type: 'related' as const,
+      createdAt: `2026-07-14T00:${String(index).padStart(2, '0')}:00.000Z`,
+    })),
+    {
+      sourceWorkItemId: 'source-work-item',
+      targetWorkItemId: targetWorkItemIds[0] as string,
+      type: 'blocks' as const,
+      createdAt: '2026-07-14T01:00:00.000Z',
+    },
+  ]
+  let activeTargetReads = 0
+  let maximumActiveTargetReads = 0
+  const calls = configureFakeProjectClients(true, {
+    async detailReadHook(issueId) {
+      if (!issueId.startsWith('target-')) return
+      activeTargetReads += 1
+      maximumActiveTargetReads = Math.max(maximumActiveTargetReads, activeTargetReads)
+      await Promise.resolve()
+      activeTargetReads -= 1
+    },
+  })
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations() {
+        return { graphRevision: 4, relations }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/source-work-item', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const body = await response.json() as { relations: Array<{ targetWorkItemId: string }> }
+
+  expect(response.status).toBe(200)
+  expect(maximumActiveTargetReads).toBe(8)
+  expect(calls.issueReads).toEqual([])
+  expect(
+    calls.issueDetails
+      .filter(({ issueId }) => issueId.startsWith('target-'))
+      .map(({ issueId }) => issueId),
+  ).toEqual(targetWorkItemIds)
+  expect(body.relations.map(({ targetWorkItemId }) => targetWorkItemId)).toEqual(
+    relations.map(({ targetWorkItemId }) => targetWorkItemId),
+  )
+})
+
+test('fails closed when a persisted relation target Work Item is missing', async () => {
+  const calls = configureFakeProjectClients(true, {
+    detailMissingIssueIds: ['missing-target'],
+  })
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations() {
+        return {
+          graphRevision: 3,
+          relations: [{
+            sourceWorkItemId: 'work-item-1',
+            targetWorkItemId: 'missing-target',
+            type: 'related',
+            createdAt: '2026-07-14T00:00:00.000Z',
+          }],
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/work-item-1', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toEqual({
+    code: 'WorkItemRelationInconsistent',
+    message: 'A relation target Work Item is missing.',
+  })
+  expect(calls.issueReads).toEqual([])
+  expect(calls.issueDetails.map(({ issueId, readOptions }) => ({ issueId, readOptions }))).toEqual([
+    {
+      issueId: 'work-item-1',
+      readOptions: { consistentIssueRead: true },
+    },
+    {
+      issueId: 'missing-target',
+      readOptions: { consistentIssueRead: true, eventLimit: 0 },
+    },
+  ])
 })
 
 test('returns persisted collaboration comments together with inert legacy comments and reply cursors', async () => {
@@ -7234,6 +7352,121 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
         '(attribute_not_exists(#revision) AND :expectedRevision = :legacyRevision))',
     },
   })
+})
+
+test('DynamoDB Work Item client classifies configuration conflicts from the actual transaction layout', async () => {
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#refero',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    issueId: 'wireframe',
+    sortOrder: 10,
+    title: 'Wireframe',
+    assigneeUserId: 'sato@example.com',
+    status: 'todo',
+    dueDate: '2026/06/03',
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'demo@example.com', kind: 'user' },
+    idempotencyKey: 'configuration-conflict',
+    occurredAt: '2026-07-12T00:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/teams/core-team/issues/wireframe' },
+    source: { kind: 'api', requestId: 'configuration-conflict' },
+  })
+  const configurationConditionChecks: NonNullable<
+    TransactWriteCommandInput['TransactItems']
+  > = [{
+    ConditionCheck: {
+      TableName: 'ConfigurationTable',
+      Key: { workspaceId: 'workspace-1', scopeKey: 'WORK_ITEM_CONFIGURATION#TEAM#core-team' },
+      ConditionExpression: '#revision = :expectedRevision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':expectedRevision': 1 },
+    },
+  }]
+
+  for (const operation of ['create', 'update'] as const) {
+    for (const auditEnabled of [false, true]) {
+      let configurationConditionIndex = -1
+      const documentClient = {
+        async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+          if (command.constructor.name === 'QueryCommand') {
+            return { Items: [] }
+          }
+          if (command.constructor.name === 'GetCommand') {
+            return { Item: currentIssue }
+          }
+          if (command.constructor.name === 'TransactWriteCommand') {
+            const transactItems = command.input.TransactItems as Array<{
+              ConditionCheck?: { TableName?: string }
+            }>
+            configurationConditionIndex = transactItems.findIndex((item) =>
+              item.ConditionCheck?.TableName === 'ConfigurationTable'
+            )
+            const error = new Error('Transaction was canceled.')
+            error.name = 'TransactionCanceledException'
+            Object.assign(error, {
+              CancellationReasons: transactItems.map((_, index) => ({
+                Code: index === configurationConditionIndex ? 'ConditionalCheckFailed' : 'None',
+              })),
+            })
+            throw error
+          }
+          return {}
+        },
+      } as unknown as DynamoDBDocumentClient
+      const client = new DynamoDbTeamIssuesClient(
+        'IssuesTable',
+        'IssueEventsTable',
+        documentClient,
+        {} as DynamoDBClient,
+        false,
+        auditEnabled ? 'AuditTable' : undefined,
+      )
+      const mutation = operation === 'create'
+        ? client.createTeamIssue(
+            'workspace-1',
+            'core-team',
+            {
+              title: 'New Work Item',
+              assigneeUserId: 'sato@example.com',
+              status: 'todo',
+              dueDate: '2026/07/20',
+              priority: 'medium',
+              configurationConditionChecks,
+            },
+            'demo@example.com',
+            [],
+            auditEnabled ? auditContext : undefined,
+          )
+        : client.updateTeamIssue(
+            'workspace-1',
+            'core-team',
+            'wireframe',
+            {
+              status: 'done',
+              expectedRevision: 1,
+              configurationConditionChecks,
+            },
+            'demo@example.com',
+            auditEnabled ? auditContext : undefined,
+          )
+
+      await expect(mutation).rejects.toMatchObject({
+        code: 'WorkItemConfigurationRevisionConflict',
+        status: 409,
+      })
+      expect(configurationConditionIndex).toBe(auditEnabled ? 3 : 2)
+    }
+  }
 })
 
 test('DynamoDB Work Item update emits render-ready notification candidates', async () => {
@@ -8906,6 +9139,46 @@ test('search endpoint parses filters and revalidates comment scope against curre
   expect(resolvedProjectId).toBe('refero')
 })
 
+test('search endpoint projects configured workflow status and preserves cleared custom fields', async () => {
+  configureFakeProjectClients(true, {
+    detailCustomFieldValues: {},
+    detailLegacyCustomFields: { legacyScore: 13 },
+    detailWorkflowStatusId: 'active-review',
+  })
+  let resolvedScope: WorkspaceSearchResolvedScope | undefined
+  configureApiClientsForTest({
+    workspaceSearch: {
+      async search(input) {
+        resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
+          workspaceId: input.workspaceId,
+          entityType: 'work-item',
+          entityId: 'team/core-team/issue/work-item-1',
+          title: 'Stale Work Item',
+          url: '/teams/core-team/issues?issueId=work-item-1',
+          teamId: 'core-team',
+          status: 'in-progress',
+          customFields: { legacyScore: 13 },
+        }))
+        return { schemaVersion: 1, results: [] }
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+
+  const response = await app.request('/api/search', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(resolvedScope).toMatchObject({
+    teamId: 'core-team',
+    projectId: 'refero',
+    currentDocument: {
+      status: 'active-review',
+      customFields: {},
+    },
+  })
+})
+
 test('search endpoint refreshes comment content from its current source snapshot', async () => {
   configureFakeProjectClients(true)
   let resolvedScope: WorkspaceSearchResolvedScope | undefined
@@ -9515,10 +9788,22 @@ function configureFakeProjectClients(
     taskAssigneeUserId?: string
     /** Notification 認可で再取得する Work Item の現在 assigned Project ID です。 */
     detailAssignedProjectId?: string
+    /** Work Item ID ごとに detail fake が返す現在 assigned Project ID です。 */
+    detailAssignedProjectIds?: Record<string, string>
     /** Notification 認可で再取得する Work Item の現在担当者です。 */
     detailAssigneeUserId?: string
+    /** Detail fake が返す現在の設定済み custom field values です。 */
+    detailCustomFieldValues?: Record<string, CustomFieldValue>
+    /** Detail fake が返す legacy search custom fields です。 */
+    detailLegacyCustomFields?: Record<string, SearchCustomFieldValue>
+    /** Detail fake が TeamIssueNotFound を返す Work Item ID です。 */
+    detailMissingIssueIds?: string[]
     /** Work Item detail read の障害を再現する error です。 */
     detailReadError?: Error
+    /** Work Item detail read の同時実行を観測または制御する hook です。 */
+    detailReadHook?: (issueId: string) => Promise<void>
+    /** Detail fake が返す現在の設定済み workflow status ID です。 */
+    detailWorkflowStatusId?: string
     teamProjects?: Array<{ id: string; name: string; tone: 'blue' | 'purple' | 'green' | 'yellow' }>
     /** owner Team ambiguity を再現する追加 Team です。 */
     additionalTeams?: Array<{
@@ -10404,12 +10689,13 @@ function configureFakeProjectClients(
           issueId,
           ...(readOptions ? { readOptions } : {}),
         })
+        await options.detailReadHook?.(issueId)
 
         if (options.detailReadError) {
           throw options.detailReadError
         }
 
-        if (issueId === 'wireframe') {
+        if (issueId === 'wireframe' || options.detailMissingIssueIds?.includes(issueId)) {
           throw {
             status: 404,
             code: 'TeamIssueNotFound',
@@ -10423,13 +10709,23 @@ function configureFakeProjectClients(
             revision: 1,
             id: issueId,
             teamId,
-            assignedProjectId: options.unassignedIssue
-              ? undefined
-              : options.detailAssignedProjectId ?? 'refero',
+            assignedProjectId: options.detailAssignedProjectIds?.[issueId] ??
+              (options.unassignedIssue
+                ? undefined
+                : options.detailAssignedProjectId ?? 'refero'),
             title: '初回オンボーディングの離脱要因を減らす',
             description: '初回体験の摩擦を下げる。',
             assigneeUserId: options.detailAssigneeUserId ?? 'sato@example.com',
             status: 'in-progress',
+            ...(options.detailWorkflowStatusId === undefined
+              ? {}
+              : { workflowStatusId: options.detailWorkflowStatusId }),
+            ...(options.detailCustomFieldValues === undefined
+              ? {}
+              : { customFieldValues: options.detailCustomFieldValues }),
+            ...(options.detailLegacyCustomFields === undefined
+              ? {}
+              : { customFields: options.detailLegacyCustomFields }),
             dueDate: '2026/06/18',
             priority: 'high',
             createdAt: '2026-06-08T00:00:00.000Z',

@@ -10,6 +10,7 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
 
+/** Migration が適用する Work Item configuration schema version です。 */
 export { WORK_ITEM_CONFIGURATION_SCHEMA_VERSION }
 
 /** Legacy Work Item status に対応する workflow category です。 */
@@ -93,6 +94,8 @@ export type MigrationCounters = {
   unchanged: number
   /** Conditional race 後に同じ状態を確認した件数です。 */
   duplicates: number
+  /** Concurrent edit により次回実行へ持ち越した件数です。 */
+  conflicts: number
   /** Dry-run で update 対象と判定した件数です。 */
   wouldUpdate: number
   /** Verify で metadata 不足と判定した件数です。 */
@@ -307,7 +310,11 @@ async function main() {
 
   printSummary(result.counters, options.mode)
 
-  if (result.counters.invalid > 0 || result.counters.missing > 0) {
+  if (
+    result.counters.invalid > 0 ||
+    result.counters.missing > 0 ||
+    result.counters.conflicts > 0
+  ) {
     throw new Error('Work Item configuration migration did not satisfy the schema contract.')
   }
 }
@@ -406,7 +413,7 @@ async function applyBackfill(
   client: DynamoDBDocumentClient,
   tableName: string,
   plan: Extract<WorkItemConfigurationBackfillPlan, { action: 'backfill' }>,
-): Promise<'duplicates' | 'updated'> {
+): Promise<'conflicts' | 'duplicates' | 'updated'> {
   const expressionAttributeNames: Record<string, string> = {
     '#schemaVersion': 'schemaVersion',
     '#revision': 'revision',
@@ -468,8 +475,10 @@ async function applyBackfill(
 
     const reason = latestPlan.action === 'invalid'
       ? latestPlan.reason
-      : 'Work Item changed while configuration metadata was being migrated.'
-    throw new Error(`${formatTargetKey(plan.target)}: ${reason}`)
+      : 'Work Item changed while configuration metadata was being migrated; ' +
+        'it will be retried on the next run.'
+    console.error(`conflict ${formatTargetKey(plan.target)}: ${reason}`)
+    return 'conflicts'
   }
 }
 
@@ -538,6 +547,7 @@ function createEmptyCounters(): MigrationCounters {
     updated: 0,
     unchanged: 0,
     duplicates: 0,
+    conflicts: 0,
     wouldUpdate: 0,
     missing: 0,
     invalid: 0,
@@ -595,7 +605,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function printSummary(counters: MigrationCounters, mode: MigrationMode) {
   console.info(
     `work-items: mode=${mode} scanned=${counters.scanned} updated=${counters.updated} ` +
-    `unchanged=${counters.unchanged} duplicates=${counters.duplicates} ` +
+    `unchanged=${counters.unchanged} duplicates=${counters.duplicates} conflicts=${counters.conflicts} ` +
     `wouldUpdate=${counters.wouldUpdate} missing=${counters.missing} invalid=${counters.invalid}`,
   )
 }

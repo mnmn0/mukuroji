@@ -135,6 +135,53 @@ test('evaluates transitive formulas by dependency instead of display order', () 
   )).toEqual({ amount: 3, subtotal: 6, total: 7 })
 })
 
+test('validates formula syntax without evaluating fixed mock values', () => {
+  const configuration = createConfiguration({
+    customFields: [
+      field('count', 'number'),
+      field('sample', 'formula', { formulaExpression: '{count} / ({count} - 1)' }),
+    ],
+  })
+
+  expect(normalizeCustomFieldValues(
+    configuration,
+    { count: 2 },
+    { mode: 'create' },
+  )).toEqual({ count: 2, sample: 2 })
+  expectConfigurationError(
+    () => normalizeCustomFieldValues(configuration, { count: 1 }, { mode: 'create' }),
+    'InvalidCustomFieldValue',
+    'Formula cannot divide by zero.',
+  )
+})
+
+test('rejects statically invalid formula arithmetic at definition time', () => {
+  expectConfigurationError(
+    () => createConfiguration({
+      customFields: [field('formula', 'formula', { formulaExpression: '1 / 0' })],
+    }),
+    'InvalidWorkItemConfiguration',
+    'Formula cannot divide by zero.',
+  )
+  expectConfigurationError(
+    () => createConfiguration({
+      customFields: [
+        field('count', 'number'),
+        field('formula', 'formula', { formulaExpression: '1 / (0 * {count})' }),
+      ],
+    }),
+    'InvalidWorkItemConfiguration',
+    'Formula cannot divide by zero.',
+  )
+  expectConfigurationError(
+    () => createConfiguration({
+      customFields: [field('formula', 'formula', { formulaExpression: '9'.repeat(400) })],
+    }),
+    'InvalidWorkItemConfiguration',
+    'Formula result is invalid.',
+  )
+})
+
 test('applies defaults only on create and does not resurrect removed values on update', () => {
   const configuration = createConfiguration({
     customFields: [field('required', 'text', { required: true, defaultValue: 'default' })],
@@ -190,13 +237,27 @@ test('rejects formula dependency cycles and unsupported syntax', () => {
     ],
   })).toThrow('Formula dependency cycle')
 
-  expect(() => createConfiguration({
-    customFields: [
-      field('amount', 'number'),
-      field('formula', 'formula', { formulaExpression: 'Math.max({amount}, 1)' }),
-    ],
-  }))
-    .toThrow('unsupported syntax')
+  expectConfigurationError(
+    () => createConfiguration({
+      customFields: [
+        field('amount', 'number'),
+        field('formula', 'formula', { formulaExpression: 'Math.max({amount}, 1)' }),
+      ],
+    }),
+    'InvalidWorkItemConfiguration',
+    'Formula contains unsupported syntax.',
+  )
+
+  expectConfigurationError(
+    () => createConfiguration({
+      customFields: [
+        field('amount', 'number'),
+        field('formula', 'formula', { formulaExpression: '{amount} +' }),
+      ],
+    }),
+    'InvalidWorkItemConfiguration',
+    'Formula expression is invalid.',
+  )
 
   expect(() => createConfiguration({
     customFields: [
@@ -345,6 +406,31 @@ test('resolves Team configuration from Workspace and returns mutation guards', a
   })
 })
 
+test('classifies invalid stored configuration separately from client validation', async () => {
+  const stored = toStoredConfiguration(createConfiguration({ revision: 1 }))
+  const documentClient = {
+    async send() {
+      return {
+        Item: {
+          ...stored,
+          workflow: { ...stored.workflow, statuses: [] },
+        },
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+  )
+
+  await expect(client.getWorkspaceConfiguration('workspace-1')).rejects.toMatchObject({
+    code: 'StoredWorkItemConfigurationInvalid',
+    status: 503,
+  })
+})
+
 test('saves configuration with revision CAS and returns the incremented revision', async () => {
   const sent: Array<Record<string, unknown>> = []
   const documentClient = {
@@ -480,6 +566,39 @@ test('releases the configuration write lock when compatibility validation fails'
     code: 'WorkItemConfigurationMigrationRequired',
     status: 409,
   })
+  expect(sentCommands).toEqual(['PutCommand', 'DeleteCommand'])
+})
+
+test('preserves unexpected compatibility validation failures after releasing the lock', async () => {
+  const sentCommands: string[] = []
+  const compatibilityError = new Error('Compatibility validation failed unexpectedly.')
+  const documentClient = {
+    async send(command: { constructor: { name: string } }) {
+      sentCommands.push(command.constructor.name)
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+  )
+
+  let caughtError: unknown
+  try {
+    await client.saveWorkspaceConfiguration(
+      'workspace-1',
+      createConfiguration({ scopeId: 'workspace-1' }),
+      async () => {
+        throw compatibilityError
+      },
+    )
+  } catch (error) {
+    caughtError = error
+  }
+
+  expect(caughtError).toBe(compatibilityError)
   expect(sentCommands).toEqual(['PutCommand', 'DeleteCommand'])
 })
 
@@ -646,6 +765,28 @@ test('fails closed when the relation graph changes during a consistent snapshot'
   })
 })
 
+test('classifies invalid stored relations separately from client validation', async () => {
+  const documentClient = {
+    async send(command: { constructor: { name: string } }) {
+      if (command.constructor.name === 'QueryCommand') {
+        return { Items: [relationItem('', 'target', 'related')] }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+  )
+
+  await expect(client.listRelations('workspace-1', 'core-team', 'source')).rejects.toMatchObject({
+    code: 'StoredWorkItemRelationInvalid',
+    status: 503,
+  })
+})
+
 test('classifies a canceled relation transaction when an endpoint disappeared', async () => {
   const documentClient = {
     async send(command: { constructor: { name: string } }) {
@@ -729,4 +870,14 @@ function relationItem(sourceWorkItemId: string, targetWorkItemId: string, type: 
     type,
     createdAt: '2026-07-12T00:00:00.000Z',
   }
+}
+
+function expectConfigurationError(callback: () => unknown, code: string, message: string) {
+  let thrown: unknown
+  try {
+    callback()
+  } catch (error) {
+    thrown = error
+  }
+  expect(thrown).toMatchObject({ code, message, status: 400 })
 }

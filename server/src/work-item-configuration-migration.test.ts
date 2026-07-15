@@ -200,6 +200,7 @@ describe('Work Item configuration migration', () => {
         updated: 0,
         unchanged: 0,
         duplicates: 0,
+        conflicts: 0,
         wouldUpdate: 2,
         missing: 0,
         invalid: 0,
@@ -289,12 +290,66 @@ describe('Work Item configuration migration', () => {
         updated: 0,
         unchanged: 0,
         duplicates: 1,
+        conflicts: 0,
         wouldUpdate: 0,
         missing: 0,
         invalid: 0,
       },
     })
     expect(commands).toEqual(['ScanCommand', 'ScanCommand', 'UpdateCommand', 'GetCommand'])
+  })
+
+  test('counts a concurrent edit as a conflict and continues the apply pass', async () => {
+    const commands: string[] = []
+    const secondWorkItem = { ...legacyWorkItem, issueId: 'issue-2' }
+    let updateCount = 0
+    const client = createDocumentClient(async (command) => {
+      commands.push(readCommandName(command))
+      if (command instanceof ScanCommand) {
+        return { Items: [legacyWorkItem, secondWorkItem] }
+      }
+      if (command instanceof UpdateCommand) {
+        updateCount += 1
+        if (updateCount === 1) {
+          const error = new Error('The Work Item was edited concurrently.')
+          error.name = 'ConditionalCheckFailedException'
+          throw error
+        }
+        return {}
+      }
+      if (command instanceof GetCommand) {
+        return { Item: { ...legacyWorkItem, revision: legacyWorkItem.revision + 1 } }
+      }
+      throw new Error(`Unexpected command: ${readCommandName(command)}`)
+    })
+
+    const result = await runWorkItemConfigurationMigration({
+      tableName: 'work-items',
+      client,
+      mode: 'apply',
+      pageSize: 100,
+    })
+
+    expect(result).toEqual({
+      outcome: 'completed',
+      counters: {
+        scanned: 2,
+        updated: 1,
+        unchanged: 0,
+        duplicates: 0,
+        conflicts: 1,
+        wouldUpdate: 0,
+        missing: 0,
+        invalid: 0,
+      },
+    })
+    expect(commands).toEqual([
+      'ScanCommand',
+      'ScanCommand',
+      'UpdateCommand',
+      'GetCommand',
+      'UpdateCommand',
+    ])
   })
 
   test('verify reports missing metadata without issuing an update', async () => {
@@ -321,6 +376,7 @@ describe('Work Item configuration migration', () => {
         updated: 0,
         unchanged: 0,
         duplicates: 0,
+        conflicts: 0,
         wouldUpdate: 0,
         missing: 1,
         invalid: 0,

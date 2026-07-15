@@ -1174,6 +1174,8 @@ const WORK_ITEMS_TEAM_READ_LIMIT = 20
 const WORK_ITEMS_LEGACY_PROJECT_READ_LIMIT = 100
 /** `/api/work-items` が 1 partition で filter/dedupe 前に評価する最大 item 数です。 */
 const WORK_ITEMS_PARTITION_SCAN_LIMIT = 1_000
+/** Relation target の強整合 detail read を同時実行する最大数です。 */
+const WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY = 8
 /** DynamoDB BatchGetItem の 1 request あたりの最大 key 数です。 */
 const DYNAMODB_BATCH_GET_KEY_LIMIT = 100
 /** UnprocessedKeys を同じ bounded read 内で再試行する最大回数です。 */
@@ -6406,6 +6408,49 @@ async function authorizeRelationMutation(
   return { source: source.issue, target: target.issue }
 }
 
+/** Relation target のみを入力順を保った bounded concurrency で取得します。 */
+async function readRelationTargets(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  targetWorkItemIds: readonly string[],
+) {
+  const targets: Array<readonly [string, TeamIssueResponseItem]> = []
+
+  for (
+    let offset = 0;
+    offset < targetWorkItemIds.length;
+    offset += WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY
+  ) {
+    const batch = targetWorkItemIds.slice(
+      offset,
+      offset + WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY,
+    )
+    const batchTargets = await Promise.all(batch.map(async (targetWorkItemId) => {
+      try {
+        const detail = await teamIssues.getTeamIssueDetail(
+          principal.directoryId,
+          teamId,
+          targetWorkItemId,
+          { consistentIssueRead: true, eventLimit: 0 },
+        )
+        return [targetWorkItemId, detail.issue] as const
+      } catch (error) {
+        if (isTeamIssueNotFoundError(error)) {
+          throw new WorkItemConfigurationError(
+            503,
+            'WorkItemRelationInconsistent',
+            'A relation target Work Item is missing.',
+          )
+        }
+        throw error
+      }
+    }))
+    targets.push(...batchTargets)
+  }
+
+  return targets
+}
+
 async function filterVisibleWorkItemRelations(
   principal: WorkspacePrincipal,
   context: TeamPermissionContext,
@@ -6416,21 +6461,11 @@ async function filterVisibleWorkItemRelations(
     return []
   }
 
-  const readLimit = createWorkItemListProbeLimit(WORK_ITEMS_PARTITION_SCAN_LIMIT)
-  const response = await teamIssues.getTeamIssuesForAggregate(
-    principal.directoryId,
-    teamId,
-    {
-      consistentRead: true,
-      ...(readLimit === undefined ? {} : { limit: readLimit }),
-    },
-  )
-  assertWorkItemListWithinLimit(
-    response.issues,
-    WORK_ITEMS_PARTITION_SCAN_LIMIT,
-    `Team "${teamId}" relation visibility`,
-  )
-  const workItemsById = new Map(response.issues.map((workItem) => [workItem.id, workItem]))
+  const targetWorkItemIds = [...new Set(
+    relations.map((relation) => relation.targetWorkItemId),
+  )]
+  const targets = await readRelationTargets(principal, teamId, targetWorkItemIds)
+  const workItemsById = new Map(targets)
 
   return relations.filter((relation) => {
     const target = workItemsById.get(relation.targetWorkItemId)
@@ -7442,8 +7477,7 @@ function createWorkItemSearchDocument(
   workspaceId: string,
   issue: TeamIssueResponseItem,
 ) {
-  const configuredCustomFields = issue.customFieldValues &&
-    Object.keys(issue.customFieldValues).length > 0
+  const configuredCustomFields = issue.customFieldValues !== undefined
     ? issue.customFieldValues
     : issue.customFields
 
@@ -7456,7 +7490,7 @@ function createWorkItemSearchDocument(
     ...(issue.assignedProjectId ? { projectId: issue.assignedProjectId } : {}),
     ...(issue.assigneeUserId ? { assigneeUserId: issue.assigneeUserId } : {}),
     ...(issue.creatorMemberKey ? { creatorUserId: issue.creatorMemberKey } : {}),
-    status: issue.status,
+    status: issue.workflowStatusId ?? issue.status,
     ...(configuredCustomFields ? { customFields: configuredCustomFields } : {}),
     ...(issue.relationIds ? { relationIds: issue.relationIds } : {}),
     dueDate: issue.dueDate,
@@ -9890,6 +9924,7 @@ export class DynamoDbTeamIssuesClient {
     auditContext?: MutationAuditContext,
   ) {
     await this.ensureLocalTables()
+    let auditPut: ReturnType<typeof createMutationAuditEventPut> = undefined
 
     const title = readRequiredString(input.title, 'Issue title is required.')
     const description = readOptionalString(input.description, 'Issue description is invalid.')
@@ -9950,7 +9985,7 @@ export class DynamoDbTeamIssuesClient {
         summary: 'Issue was created.',
         createdAt: now,
       })
-      const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
+      auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.created',
         entityType: 'work-item',
@@ -10013,7 +10048,10 @@ export class DynamoDbTeamIssuesClient {
       } satisfies CreateTeamIssueResponse
     } catch (error) {
       const configurationConditionChecks = input.configurationConditionChecks ?? []
-      const configurationConditionStartIndex = 2 + (auditContext && this.auditTableName ? 1 : 0)
+      const configurationConditionStartIndex = resolveConfigurationConditionStartIndex(
+        2,
+        auditPut,
+      )
       if (configurationConditionChecks.some((_, index) =>
         isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
       )) {
@@ -10046,6 +10084,7 @@ export class DynamoDbTeamIssuesClient {
     auditContext?: MutationAuditContext,
   ) {
     await this.ensureLocalTables()
+    let auditPut: ReturnType<typeof createMutationAuditEventPut> = undefined
     const expectedRevision = readWorkItemExpectedRevision(input.expectedRevision)
     const nextRevision = expectedRevision + 1
     const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
@@ -10201,7 +10240,7 @@ export class DynamoDbTeamIssuesClient {
         summary: 'Issue was updated.',
         createdAt: expressionAttributeValues[':updatedAt'] as string,
       })
-      const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
+      auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.updated',
         entityType: 'work-item',
@@ -10287,7 +10326,10 @@ export class DynamoDbTeamIssuesClient {
         )
 
       const configurationConditionChecks = input.configurationConditionChecks ?? []
-      const configurationConditionStartIndex = 2 + (auditContext && this.auditTableName ? 1 : 0)
+      const configurationConditionStartIndex = resolveConfigurationConditionStartIndex(
+        2,
+        auditPut,
+      )
       if (configurationConditionChecks.some((_, index) =>
         isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
       )) {
@@ -12574,6 +12616,14 @@ function isTransactionConditionalFailureAt(error: unknown, index: number) {
   return Array.isArray(reasons) &&
     isRecord(reasons[index]) &&
     reasons[index].Code === 'ConditionalCheckFailed'
+}
+
+/** Configuration ConditionCheck の transaction 内開始位置を返します。 */
+function resolveConfigurationConditionStartIndex(
+  precedingItemCount: number,
+  auditPut: ReturnType<typeof createMutationAuditEventPut>,
+) {
+  return precedingItemCount + (auditPut === undefined ? 0 : 1)
 }
 
 function createProjectDataConflictError() {

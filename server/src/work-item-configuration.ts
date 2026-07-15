@@ -700,9 +700,22 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       revision: nextRevision,
       updatedAt: new Date().toISOString(),
     }
+    const releaseLock = async () => {
+      try {
+        await this.releaseConfigurationWriteLock(scopeKey, lock.token)
+      } catch (releaseError) {
+        console.error('Failed to release Work Item configuration write lock.', releaseError)
+      }
+    }
     try {
       await compatibilityCheck()
-      const currentEpochSeconds = Math.floor(Date.now() / 1_000)
+    } catch (error) {
+      await releaseLock()
+      throw error
+    }
+
+    const currentEpochSeconds = Math.floor(Date.now() / 1_000)
+    try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
           {
@@ -739,11 +752,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         ],
       }))
     } catch (error) {
-      try {
-        await this.releaseConfigurationWriteLock(scopeKey, lock.token)
-      } catch (releaseError) {
-        console.error('Failed to release Work Item configuration write lock.', releaseError)
-      }
+      await releaseLock()
       if (
         isNamedError(error, 'ConditionalCheckFailedException') ||
         isConfigurationConditionalTransactionCancellation(error)
@@ -1337,10 +1346,7 @@ function validateFormulaDefinitions(definitions: readonly CustomFieldDefinition[
         )
       }
     }
-    evaluateFormula(
-      definition.formulaExpression ?? '',
-      Object.fromEntries(references.map((reference) => [reference, 1])),
-    )
+    validateFormulaExpression(definition.formulaExpression ?? '')
     dependencies.set(definition.id, references.filter((reference) =>
       definitionsById.get(reference)?.type === 'formula',
     ))
@@ -1545,9 +1551,81 @@ function evaluateFormula(expression: string, values: Readonly<Record<string, Cus
   return result
 }
 
+function validateFormulaExpression(expression: string) {
+  const tokens = tokenizeFormula(expression)
+  let position = 0
+  const peek = () => tokens[position]
+  const consume = () => tokens[position++]
+  const finiteConstant = (value: number) => {
+    if (!Number.isFinite(value)) {
+      throw invalidConfiguration('Formula result is invalid.')
+    }
+    return value
+  }
+  const parsePrimary = (): number | undefined => {
+    const token = consume()
+    if (token === '(') {
+      const value = parseExpression()
+      if (consume() !== ')') {
+        throw invalidConfiguration('Formula parenthesis is not closed.')
+      }
+      return value
+    }
+    if (token === '+' || token === '-') {
+      const value = parsePrimary()
+      if (value === undefined) {
+        return undefined
+      }
+      return token === '-' ? -value : value
+    }
+    if (typeof token === 'number') {
+      return finiteConstant(token)
+    }
+    if (typeof token === 'string' && token.startsWith('{')) {
+      return undefined
+    }
+    throw invalidConfiguration('Formula expression is invalid.')
+  }
+  const parseTerm = (): number | undefined => {
+    let value = parsePrimary()
+    while (peek() === '*' || peek() === '/') {
+      const operator = consume()
+      const right = parsePrimary()
+      if (operator === '/' && right === 0) {
+        throw invalidConfiguration('Formula cannot divide by zero.')
+      }
+      if (operator === '*' && (value === 0 || right === 0)) {
+        value = 0
+      } else if (value === undefined || right === undefined) {
+        value = undefined
+      } else {
+        value = finiteConstant(operator === '*' ? value * right : value / right)
+      }
+    }
+    return value
+  }
+  const parseExpression = (): number | undefined => {
+    let value = parseTerm()
+    while (peek() === '+' || peek() === '-') {
+      const operator = consume()
+      const right = parseTerm()
+      if (value === undefined || right === undefined) {
+        value = undefined
+      } else {
+        value = finiteConstant(operator === '+' ? value + right : value - right)
+      }
+    }
+    return value
+  }
+  parseExpression()
+  if (position !== tokens.length) {
+    throw invalidConfiguration('Formula expression is invalid.')
+  }
+}
+
 function tokenizeFormula(
   expression: string,
-  values: Readonly<Record<string, CustomFieldValue>>,
+  values?: Readonly<Record<string, CustomFieldValue>>,
 ) {
   const tokens: Array<number | string> = []
   let offset = 0
@@ -1562,6 +1640,10 @@ function tokenizeFormula(
     const token = match[1]
     const reference = match[2]
     if (reference !== undefined) {
+      if (!values) {
+        tokens.push(token)
+        continue
+      }
       const value = values[reference]
       if (typeof value !== 'number' || !Number.isFinite(value)) {
         throw invalidFieldValue(`Formula reference "${reference}" must contain a number.`)
@@ -1760,13 +1842,20 @@ function createRelationRecordKey(relation: WorkItemRelation) {
 
 function readRelationItem(value: unknown): WorkItemRelation {
   if (!isRecord(value) || value.entryType !== 'relation' || !isRelationType(value.type)) {
-    throw new WorkItemConfigurationError(503, 'InvalidWorkItemRelation', 'Stored relation is invalid.')
+    throw storedRelationInvalid()
   }
-  return {
-    sourceWorkItemId: readIdentifier(value.sourceWorkItemId, 'Source Work Item ID'),
-    targetWorkItemId: readIdentifier(value.targetWorkItemId, 'Target Work Item ID'),
-    type: value.type,
-    createdAt: readIsoTimestamp(value.createdAt, 'Relation createdAt'),
+  try {
+    return {
+      sourceWorkItemId: readIdentifier(value.sourceWorkItemId, 'Source Work Item ID'),
+      targetWorkItemId: readIdentifier(value.targetWorkItemId, 'Target Work Item ID'),
+      type: value.type,
+      createdAt: readIsoTimestamp(value.createdAt, 'Relation createdAt'),
+    }
+  } catch (error) {
+    if (error instanceof WorkItemConfigurationError) {
+      throw storedRelationInvalid()
+    }
+    throw error
   }
 }
 
@@ -1775,11 +1864,18 @@ function validateStoredConfiguration(
   scopeType: WorkItemConfigurationScopeType,
   scopeId: string,
 ) {
-  const configuration = validateWorkItemConfiguration(item, { scopeType, scopeId })
-  if (configuration.revision < 1) {
-    throw new WorkItemConfigurationError(503, 'InvalidWorkItemConfiguration', 'Stored revision is invalid.')
+  try {
+    const configuration = validateWorkItemConfiguration(item, { scopeType, scopeId })
+    if (configuration.revision < 1) {
+      throw storedConfigurationInvalid()
+    }
+    return configuration
+  } catch (error) {
+    if (error instanceof WorkItemConfigurationError) {
+      throw storedConfigurationInvalid()
+    }
+    throw error
   }
-  return configuration
 }
 
 function isConfigurationTableDescription(table: TableDescription | undefined) {
@@ -2004,6 +2100,22 @@ function invalidConfiguration(message: string) {
 
 function invalidFieldValue(message: string) {
   return new WorkItemConfigurationError(400, 'InvalidCustomFieldValue', message)
+}
+
+function storedConfigurationInvalid() {
+  return new WorkItemConfigurationError(
+    503,
+    'StoredWorkItemConfigurationInvalid',
+    'Stored Work Item configuration is invalid.',
+  )
+}
+
+function storedRelationInvalid() {
+  return new WorkItemConfigurationError(
+    503,
+    'StoredWorkItemRelationInvalid',
+    'Stored Work Item relation is invalid.',
+  )
 }
 
 function toPersistenceError(error: unknown) {
