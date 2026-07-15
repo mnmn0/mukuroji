@@ -11,6 +11,7 @@ import {
   createTranslator,
   type Locale,
 } from '../i18n'
+import { resolveAvailableWorkItemRelationCandidates } from './workItemRelations'
 
 /**
  * Relation editor で選択できる同一 Team 内の Work Item です。
@@ -108,17 +109,14 @@ export function WorkItemRelationsEditor({
   const [targetWorkItemId, setTargetWorkItemId] = useState('')
   const [savingKey, setSavingKey] = useState<string | undefined>()
   const [localErrorMessage, setLocalErrorMessage] = useState<string | undefined>()
-  const relatedWorkItemIds = useMemo(
-    () => new Set(relations.map((relation) => relation.targetWorkItemId)),
-    [relations],
-  )
   const availableCandidates = useMemo(
-    () => candidates
-      .filter((candidate) =>
-        candidate.id !== currentWorkItemId && !relatedWorkItemIds.has(candidate.id),
-      )
-      .sort((first, second) => first.title.localeCompare(second.title)),
-    [candidates, currentWorkItemId, relatedWorkItemIds],
+    () => resolveAvailableWorkItemRelationCandidates(
+      candidates,
+      currentWorkItemId,
+      relations,
+      relationType,
+    ),
+    [candidates, currentWorkItemId, relations, relationType],
   )
   const resolvedTargetWorkItemId = availableCandidates.some(
     (candidate) => candidate.id === targetWorkItemId,

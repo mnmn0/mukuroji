@@ -331,6 +331,28 @@ function WorkflowConfigurationSection({
       statuses: [...statuses, nextStatus],
     })
   }
+  const removeStatus = (statusId: string) => {
+    if (statuses.length <= 1) {
+      return
+    }
+
+    const nextStatuses = statuses
+      .filter((status) => status.id !== statusId)
+      .map((status, index) => ({ ...status, sortOrder: index }))
+    const initialStatusId = configuration.workflow.initialStatusId === statusId
+      ? nextStatuses[0]?.id ?? configuration.workflow.initialStatusId
+      : configuration.workflow.initialStatusId
+
+    updateWorkflow({
+      ...configuration.workflow,
+      initialStatusId,
+      statuses: nextStatuses,
+      transitions: configuration.workflow.transitions.filter(
+        (transition) =>
+          transition.fromStatusId !== statusId && transition.toStatusId !== statusId,
+      ),
+    })
+  }
   const toggleTransition = (fromStatusId: string, toStatusId: string, enabled: boolean) => {
     const withoutTransition = configuration.workflow.transitions.filter(
       (transition) =>
@@ -371,8 +393,8 @@ function WorkflowConfigurationSection({
         </label>
       </div>
 
-      <div className="grid grid-cols-[minmax(0,0.92fr)_minmax(520px,1.08fr)] gap-0 max-[1180px]:grid-cols-1">
-        <div className="min-w-0 border-r border-[var(--workbench-border)] p-5 max-[1180px]:border-b max-[1180px]:border-r-0">
+      <div className="grid grid-cols-[minmax(0,0.92fr)_minmax(520px,1.08fr)] gap-0 max-[1320px]:grid-cols-1">
+        <div className="min-w-0 border-r border-[var(--workbench-border)] p-5 max-[1320px]:border-b max-[1320px]:border-r-0">
           <div className="mb-4 flex items-center justify-between gap-3">
             <div>
               <h4 className="text-sm font-semibold text-[var(--workbench-text)]">
@@ -448,6 +470,16 @@ function WorkflowConfigurationSection({
                     type="button"
                   >
                     ↓
+                  </button>
+                  <button
+                    aria-label={t('workItems.configuration.removeStatus').replace('{status}', status.name)}
+                    className="workbench-button-secondary grid h-9 w-9 place-items-center disabled:cursor-not-allowed disabled:opacity-40"
+                    disabled={statuses.length <= 1}
+                    onClick={() => removeStatus(status.id)}
+                    title={t('workItems.configuration.removeStatus').replace('{status}', status.name)}
+                    type="button"
+                  >
+                    ×
                   </button>
                 </div>
                 <label className="col-start-2 col-end-4 flex min-h-8 cursor-pointer items-center gap-2 text-xs font-semibold text-[var(--workbench-muted)] max-[680px]:col-end-3">
@@ -591,6 +623,13 @@ function CustomFieldsConfigurationSection({
     nextFields.splice(targetIndex, 0, field)
     updateFields(nextFields.map((candidate, index) => ({ ...candidate, sortOrder: index })))
   }
+  const removeField = (fieldId: string) => {
+    updateFields(
+      fields
+        .filter((field) => field.id !== fieldId)
+        .map((field, index) => ({ ...field, sortOrder: index })),
+    )
+  }
 
   return (
     <section className="workbench-panel overflow-hidden">
@@ -619,6 +658,7 @@ function CustomFieldsConfigurationSection({
             key={field.id}
             locale={locale}
             onMove={(direction) => moveField(field.id, direction)}
+            onRemove={() => removeField(field.id)}
             onUpdate={(update) => updateField(field.id, update)}
           />
         ))}
@@ -639,6 +679,7 @@ function CustomFieldDefinitionCard({
   isLast,
   locale,
   onMove,
+  onRemove,
   onUpdate,
 }: {
   /** 編集対象 field definition です。 */
@@ -653,6 +694,8 @@ function CustomFieldDefinitionCard({
   locale: Locale
   /** Field の表示順を移動する callback です。 */
   onMove: (direction: -1 | 1) => void
+  /** Field definition を draft から削除する callback です。 */
+  onRemove: () => void
   /** Field definition を更新する callback です。 */
   onUpdate: (update: (field: CustomFieldDefinition) => CustomFieldDefinition) => void
 }) {
@@ -719,6 +762,15 @@ function CustomFieldDefinitionCard({
           >
             ↓
           </button>
+          <button
+            aria-label={t('workItems.configuration.removeField').replace('{field}', field.name)}
+            className="workbench-button-secondary grid h-9 w-9 place-items-center"
+            onClick={onRemove}
+            title={t('workItems.configuration.removeField').replace('{field}', field.name)}
+            type="button"
+          >
+            ×
+          </button>
         </div>
       </div>
 
@@ -777,7 +829,7 @@ function CustomFieldDefinitionCard({
           </label>
         ) : null}
         {field.type === 'formula' ? (
-          <label className="col-span-3 grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)] max-[1040px]:col-span-2 max-[620px]:col-span-1">
+          <label className="col-span-4 grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)] max-[1040px]:col-span-2 max-[620px]:col-span-1">
             {t('workItems.configuration.formulaExpression')}
             <input
               className="workbench-input min-h-10 min-w-0 px-3 font-mono text-sm"

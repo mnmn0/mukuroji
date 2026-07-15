@@ -9,7 +9,17 @@ import type {
   WorkItemStatus,
 } from '@mukuroji/contracts'
 import {
+  createTranslator,
+  type Locale,
+  type MessageKey,
+} from '../i18n'
+import type { WorkspaceMember } from '../workspace/api'
+import { WorkItemConfigurationApiError } from './api'
+import {
+  type CustomFieldValidationCode,
+  type CustomFieldValidationError,
   formatCustomFieldValue,
+  isCustomFieldApplicable,
   matchesCustomFieldFilter,
   type FormatCustomFieldValueOptions,
 } from './customFields'
@@ -21,6 +31,25 @@ export type WorkItemConfigurationLike =
   | WorkItemConfiguration
   | ResolvedWorkItemConfiguration
   | undefined
+
+/**
+ * Work Item page helper が利用する翻訳関数です。
+ */
+type WorkItemTranslator = (key: MessageKey) => string
+
+/**
+ * Relation graph revision の取得に必要な Work Item detail の最小構造です。
+ */
+type WorkItemRelationDetailLike = {
+  /**
+   * Detail が表す Work Item です。
+   */
+  issue: Pick<WorkItem, 'id'>
+  /**
+   * Relation mutation の optimistic concurrency に利用する revision です。
+   */
+  relationGraphRevision?: number
+}
 
 const legacyStatusCategories: Record<WorkItemStatus, WorkflowStatusCategory> = {
   todo: 'unstarted',
@@ -218,6 +247,305 @@ export function sortWorkflowStatuses(
   return [...statuses].sort(
     (first, second) => first.sortOrder - second.sortOrder || first.name.localeCompare(second.name),
   )
+}
+
+/**
+ * Work Item が保持する workflow status ID を legacy status fallback 付きで返します。
+ *
+ * @param workItem - Workflow status を解決する Work Item です。
+ * @returns Configuration status ID、または legacy status です。
+ */
+export function resolveWorkItemWorkflowStatusId(
+  workItem: Pick<WorkItem, 'status' | 'workflowStatusId'>,
+) {
+  return workItem.workflowStatusId ?? workItem.status
+}
+
+/**
+ * Work Item の workflow status label を configuration と legacy 翻訳から解決します。
+ *
+ * @param workItem - Workflow status を表示する Work Item です。
+ * @param configuration - Team または Workspace の configuration です。
+ * @param t - Legacy status label を解決する翻訳関数です。
+ * @returns Configuration 名、legacy label、status ID の順で解決した表示名です。
+ */
+export function resolveWorkItemWorkflowStatusLabel(
+  workItem: Pick<WorkItem, 'status' | 'workflowStatusId'>,
+  configuration: WorkItemConfigurationLike,
+  t: WorkItemTranslator,
+) {
+  return resolveWorkflowStatusLabel(
+    workItem,
+    configuration,
+    (status) => t(`tasks.status.${status}`),
+  )
+}
+
+/**
+ * Configuration に存在しない保存済み status も含め、一覧表示用 workflow status を返します。
+ *
+ * @param workItems - 一覧へ表示する Work Item です。
+ * @param configuration - Team または Workspace の configuration です。
+ * @param t - Legacy status label を解決する翻訳関数です。
+ * @param fallbackStatuses - Configuration 未登録時の legacy status 表示順です。
+ * @returns Configuration と保存済み未知 status を結合した表示一覧です。
+ */
+export function resolveDisplayWorkflowStatuses(
+  workItems: readonly Pick<WorkItem, 'status' | 'statusCategory' | 'workflowStatusId'>[],
+  configuration: WorkItemConfigurationLike,
+  t: WorkItemTranslator,
+  fallbackStatuses: readonly WorkItemStatus[],
+) {
+  const statuses = resolveCreateWorkflowStatuses(configuration, t, fallbackStatuses)
+  const knownStatusIds = new Set(statuses.map((status) => status.id))
+  const unknownStatuses = workItems.flatMap((workItem, index) => {
+    const statusId = resolveWorkItemWorkflowStatusId(workItem)
+
+    if (knownStatusIds.has(statusId)) {
+      return []
+    }
+
+    knownStatusIds.add(statusId)
+    return [{
+      id: statusId,
+      name: resolveWorkItemWorkflowStatusLabel(workItem, configuration, t),
+      category: resolveWorkflowStatusCategory(workItem, configuration),
+      sortOrder: statuses.length + index,
+    } satisfies WorkflowStatusDefinition]
+  })
+
+  return [...statuses, ...unknownStatuses]
+}
+
+/**
+ * Work Item 作成 form で選択できる workflow status を返します。
+ *
+ * @param configuration - Team または Workspace の configuration です。
+ * @param t - Legacy status label を解決する翻訳関数です。
+ * @param fallbackStatuses - Configuration 未登録時の legacy status 表示順です。
+ * @returns 作成時に選択できる表示順付き status definition です。
+ */
+export function resolveCreateWorkflowStatuses(
+  configuration: WorkItemConfigurationLike,
+  t: WorkItemTranslator,
+  fallbackStatuses: readonly WorkItemStatus[],
+) {
+  const resolvedConfiguration = getWorkItemConfiguration(configuration)
+
+  if (resolvedConfiguration?.workflow.statuses.length) {
+    return sortWorkflowStatuses(resolvedConfiguration.workflow.statuses)
+  }
+
+  return fallbackStatuses.map((status, index) => ({
+    id: status,
+    name: t(`tasks.status.${status}`),
+    category: resolveWorkflowStatusCategory({ status }, undefined),
+    sortOrder: index,
+  }))
+}
+
+/**
+ * Work Item 編集 form で現在 status から選択できる workflow status を返します。
+ *
+ * @param workItem - 編集対象 Work Item です。
+ * @param configuration - Team または Workspace の configuration です。
+ * @param t - Legacy status label を解決する翻訳関数です。
+ * @param fallbackStatuses - Configuration 未登録時の legacy status 表示順です。
+ * @returns 現在 status と許可 transition 先の status definition です。
+ */
+export function resolveEditableWorkflowStatuses(
+  workItem: Pick<WorkItem, 'status' | 'statusCategory' | 'workflowStatusId'>,
+  configuration: WorkItemConfigurationLike,
+  t: WorkItemTranslator,
+  fallbackStatuses: readonly WorkItemStatus[],
+) {
+  const resolvedConfiguration = getWorkItemConfiguration(configuration)
+
+  if (!resolvedConfiguration) {
+    return resolveCreateWorkflowStatuses(undefined, t, fallbackStatuses)
+  }
+
+  const currentStatusId = resolveWorkItemWorkflowStatusId(workItem)
+  const allowedStatuses = resolveAllowedWorkflowStatuses(currentStatusId, resolvedConfiguration)
+
+  if (allowedStatuses.length > 0) {
+    return allowedStatuses
+  }
+
+  return [{
+    id: currentStatusId,
+    name: resolveWorkItemWorkflowStatusLabel(workItem, resolvedConfiguration, t),
+    category: resolveWorkflowStatusCategory(workItem, resolvedConfiguration),
+    sortOrder: -1,
+  } satisfies WorkflowStatusDefinition]
+}
+
+/**
+ * Workflow status を legacy API 互換 status へ変換します。
+ *
+ * @param status - 保存対象 workflow status definition です。
+ * @returns Legacy Work Item status です。
+ */
+export function resolveLegacyStatusForWorkflowStatus(
+  status: WorkflowStatusDefinition,
+): WorkItemStatus {
+  if (status.id === 'review') {
+    return 'review'
+  }
+  if (status.category === 'completed' || status.category === 'canceled') {
+    return 'done'
+  }
+  if (status.category === 'started') {
+    return 'in-progress'
+  }
+
+  return 'todo'
+}
+
+/**
+ * Active Workspace member を person custom field の選択候補へ変換します。
+ *
+ * @param workspaceMembers - Workspace member 一覧です。
+ * @returns Active member だけを含む person field option です。
+ */
+export function resolveWorkItemPersonOptions(
+  workspaceMembers: readonly WorkspaceMember[],
+) {
+  return workspaceMembers
+    .filter((member) => member.status === 'active')
+    .map((member) => ({
+      email: member.email,
+      id: member.email,
+      name: member.name ?? member.email,
+    }))
+}
+
+const customFieldValidationMessageKeys: Record<CustomFieldValidationCode, MessageKey> = {
+  required: 'workItems.fields.validation.required',
+  'invalid-type': 'workItems.fields.validation.invalidType',
+  'invalid-option': 'workItems.fields.validation.invalidOption',
+  'invalid-date': 'workItems.fields.validation.invalidDate',
+  min: 'workItems.fields.validation.min',
+  max: 'workItems.fields.validation.max',
+  'min-length': 'workItems.fields.validation.minLength',
+  'max-length': 'workItems.fields.validation.maxLength',
+  pattern: 'workItems.fields.validation.pattern',
+}
+
+/**
+ * Client custom field validation error を locale 別の field message へまとめます。
+ *
+ * @param errors - Parser が返した field error 一覧です。
+ * @param definitions - 現在 form に表示される field definition です。
+ * @param locale - 表示 locale です。
+ * @returns Field ID ごとに結合した翻訳済み validation message です。
+ */
+export function createCustomFieldErrorMessages(
+  errors: readonly CustomFieldValidationError[],
+  definitions: readonly CustomFieldDefinition[],
+  locale: Locale,
+) {
+  const t = createTranslator(locale)
+  const definitionIds = new Set(definitions.map((definition) => definition.id))
+  const result: Record<string, string> = {}
+
+  for (const error of errors) {
+    if (!definitionIds.has(error.fieldId)) {
+      continue
+    }
+
+    const message = t(customFieldValidationMessageKeys[error.code])
+    result[error.fieldId] = result[error.fieldId]
+      ? `${result[error.fieldId]} ${message}`
+      : message
+  }
+
+  return result
+}
+
+/**
+ * 編集 form の custom field values を API patch 形式へ変換します。
+ *
+ * @param definitions - 適用中 custom field definition です。
+ * @param existingValues - Work Item に保存済みの値です。
+ * @param parsedValues - FormData から検証済みの値です。
+ * @param projectId - Field scope を判定する Project ID です。
+ * @returns 更新値と明示的な削除 null を含む field patch です。
+ */
+export function createCustomFieldValuePatch(
+  definitions: readonly CustomFieldDefinition[],
+  existingValues: Readonly<Record<string, CustomFieldValue>> | undefined,
+  parsedValues: Readonly<Record<string, CustomFieldValue>>,
+  projectId?: string,
+) {
+  const patch: Record<string, CustomFieldValue | null> = {}
+
+  for (const definition of definitions) {
+    if (definition.type === 'formula' || !isCustomFieldApplicable(definition, projectId)) {
+      continue
+    }
+
+    if (Object.hasOwn(parsedValues, definition.id)) {
+      patch[definition.id] = parsedValues[definition.id]!
+    } else if (existingValues?.[definition.id] !== undefined) {
+      patch[definition.id] = null
+    }
+  }
+
+  return patch
+}
+
+/**
+ * 選択中 Work Item detail から relation graph revision を読み取ります。
+ *
+ * @param detail - 最新 detail response です。
+ * @param workItemId - Mutation 対象 Work Item ID です。
+ * @param t - Error message を解決する翻訳関数です。
+ * @returns Relation mutation に渡す graph revision です。
+ * @throws Detail が未取得または別 Work Item の場合に locale 別 error を投げます。
+ */
+export function readSelectedRelationGraphRevision(
+  detail: WorkItemRelationDetailLike | undefined,
+  workItemId: string,
+  t: WorkItemTranslator,
+) {
+  if (detail?.issue.id !== workItemId || detail.relationGraphRevision === undefined) {
+    throw new Error(t('workItems.relations.graphNotLoaded'))
+  }
+
+  return detail.relationGraphRevision
+}
+
+/**
+ * Relation graph conflict 時だけ最新 detail を再取得します。
+ *
+ * @param error - Relation API mutation が返した error です。
+ * @param refresh - 最新 detail を取得する callback です。
+ */
+export async function refreshRelationDetailAfterConflict(
+  error: unknown,
+  refresh: () => Promise<unknown>,
+) {
+  if (
+    error instanceof WorkItemConfigurationApiError &&
+    error.code === 'WorkItemRelationGraphConflict'
+  ) {
+    await refresh()
+  }
+}
+
+/**
+ * Work Item 一覧を明示指定された Team へ絞り込みます。
+ *
+ * @param workItems - Project API が返した Work Item 一覧です。
+ * @param teamId - URL で明示された Team ID です。
+ * @returns 指定 Team が所有する Work Item です。
+ */
+export function filterWorkItemsByTeam<T extends Pick<WorkItem, 'teamId'>>(
+  workItems: readonly T[],
+  teamId: string,
+) {
+  return workItems.filter((workItem) => workItem.teamId === teamId)
 }
 
 function getWorkItemConfiguration(configuration: WorkItemConfigurationLike) {

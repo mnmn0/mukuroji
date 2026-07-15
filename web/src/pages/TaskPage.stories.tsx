@@ -115,6 +115,7 @@ const meta = {
     layout: 'fullscreen',
   },
   args: {
+    activeProjectTeamId: 'core-team',
     locale: 'ja',
     assigneeOptions,
     canManageProjectMembers: true,

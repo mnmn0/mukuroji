@@ -319,8 +319,9 @@ export type SidebarProps = {
   activeProjectId?: string
   /**
    * 制御された現在のプロジェクトが選択されたチーム ID です。
+   * 複数 Team を横断する aggregate 表示では null を指定します。
    */
-  activeProjectTeamId?: string
+  activeProjectTeamId?: string | null
   /**
    * 非制御時に初期選択するプロジェクト ID です。
    */
@@ -670,12 +671,17 @@ export function Sidebar({
 
   const isCollapsed = controlledCollapsed ?? internalCollapsed
   const activeProjectId = controlledActiveProjectId ?? internalActiveProjectId
-  const activeProjectTeamId = controlledActiveProjectTeamId ?? internalActiveProjectTeamId
-  const projectTeamId = activeProjectId
+  const activeProjectTeamId = controlledActiveProjectTeamId !== undefined
+    ? controlledActiveProjectTeamId
+    : internalActiveProjectTeamId
+  const isAggregateProjectScope = Boolean(activeProjectId) && activeProjectTeamId === null
+  const projectTeamId = activeProjectId && !isAggregateProjectScope
     ? activeProjectTeamId ?? findProjectTeamId(teams, activeProjectId)
     : undefined
   const activeTeamViewId = controlledActiveTeamViewId ?? internalActiveTeamViewId
-  const activeTeamId = controlledActiveTeamId ?? projectTeamId ?? internalActiveTeamId
+  const activeTeamId = controlledActiveTeamId ?? (
+    isAggregateProjectScope ? undefined : projectTeamId ?? internalActiveTeamId
+  )
   const activeNavId =
     activeProjectId || activeTeamId || activeTeamViewId
       ? undefined
@@ -1750,7 +1756,7 @@ function TeamGroup({
   activeTeamId?: string
   activeTeamViewId?: SidebarTeamViewId
   activeProjectId?: string
-  activeProjectTeamId?: string
+  activeProjectTeamId?: string | null
   projectTeamId?: string
   labels: SidebarLabels
   collapsed: boolean
@@ -1767,7 +1773,11 @@ function TeamGroup({
   const isCurrentTeam = isTeamActive && !activeProjectId && !activeTeamViewId
 
   return (
-    <div>
+    <div
+      data-project-ancestor={isProjectAncestor ? 'true' : 'false'}
+      data-team-active={isTeamActive ? 'true' : 'false'}
+      data-testid={`sidebar-team-${team.id}`}
+    >
       <div className="relative">
         {isTeamActive || isProjectAncestor ? (
           <span className="absolute inset-y-0 left-0 w-1 rounded-full bg-teal-400" aria-hidden="true" />

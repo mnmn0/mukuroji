@@ -213,6 +213,14 @@ async function mockCurrentUser(page: Page, username: string, name: string) {
  */
 type MockAuthenticatedTaskPageOptions = {
   /**
+   * Team ID ごとに Sidebar の初期展開状態を上書きする値です。
+   */
+  teamExpandedById?: Partial<Record<string, boolean>>
+  /**
+   * Team と Project ID ごとに directory 表示名を上書きする値です。
+   */
+  projectNamesByTeam?: Partial<Record<string, Partial<Record<string, string>>>>
+  /**
    * チーム Issue API が初期状態として返す保存済み Issue 一覧です。
    */
   teamIssuesByTeam?: Partial<Record<string, TeamIssue[]>>
@@ -287,8 +295,21 @@ async function mockAuthenticatedTaskPage(
   }
   const projectDirectory: ProjectDirectoryTeam[] = projectDirectoryFixtures.map((team) => ({
     ...team,
-    projects: [...team.projects],
+    expanded: options.teamExpandedById?.[team.id] ?? team.expanded,
+    projects: team.projects.map((project) => ({ ...project })),
   }))
+  for (const [teamId, projectNames] of Object.entries(options.projectNamesByTeam ?? {})) {
+    const team = projectDirectory.find((candidate) => candidate.id === teamId)
+
+    if (!team || !projectNames) {
+      continue
+    }
+
+    team.projects = team.projects.map((project) => ({
+      ...project,
+      name: projectNames[project.id] ?? project.name,
+    }))
+  }
   const taskResponsesByProject: Record<string, ProjectTask[]> = {
     refero: taskResponse.map((task) => ({ ...task })),
     'product-roadmap': [],
@@ -2291,13 +2312,44 @@ test.describe('authenticated task page', () => {
       'data-testid',
       'custom-field-option-risk-level-high',
     )
+    await configurationPanel
+      .getByTestId('workflow-status-backlog')
+      .getByRole('button', { name: 'Backlog を削除' })
+      .click()
+    await configurationPanel
+      .getByTestId('custom-field-definition-target-date')
+      .getByRole('button', { name: 'Target date を削除' })
+      .click()
+    const saveRequestPromise = page.waitForRequest((request) =>
+      request.method() === 'PUT' &&
+      new URL(request.url()).pathname.endsWith(
+        '/api/teams/core-team/work-item-configuration',
+      ),
+    )
+
     await configurationPanel.getByRole('button', { name: '設定を保存' }).click()
 
+    const savedConfiguration = (await saveRequestPromise).postDataJSON() as WorkItemConfiguration
+
+    expect(savedConfiguration.workflow.initialStatusId).toBe('ready')
+    expect(savedConfiguration.workflow.statuses.map((status) => status.sortOrder)).toEqual(
+      savedConfiguration.workflow.statuses.map((_, index) => index),
+    )
+    expect(savedConfiguration.workflow.transitions.every((transition) =>
+      transition.fromStatusId !== 'backlog' && transition.toStatusId !== 'backlog',
+    )).toBe(true)
+    expect(savedConfiguration.customFields.map((field) => field.sortOrder)).toEqual(
+      savedConfiguration.customFields.map((_, index) => index),
+    )
     await expect.poll(() => requestCounts.workItemConfigurationWrites).toBe(1)
     await expect(page.getByTestId('work-item-configuration-inherited')).toHaveCount(0)
     await expect(configurationPanel.getByLabel('ワークフロー名')).toHaveValue(
       'Core team delivery',
     )
+    await expect(configurationPanel.getByTestId('workflow-status-backlog')).toHaveCount(0)
+    await expect(
+      configurationPanel.getByTestId('custom-field-definition-target-date'),
+    ).toHaveCount(0)
     await expect(configurationPanel.getByTestId('custom-field-option-risk-level-high')).toBeVisible()
   })
 
@@ -3433,6 +3485,257 @@ test.describe('authenticated task page', () => {
 
     await expect(page.getByLabel('プロジェクトのパンくずリスト')).toContainText('コアチーム')
     await expect(page.getByTestId('task-detail-pane').locator('textarea[name="description"]')).toHaveValue('core team detail')
+  })
+
+  test('teamId のない共有 Project URL は全 Team の Issue を保持する', async ({ page }) => {
+    const requestedConfigurationTeamIds: string[] = []
+
+    page.on('request', (request) => {
+      const match = new URL(request.url()).pathname.match(
+        /^\/api\/teams\/([^/]+)\/work-item-configuration$/,
+      )
+
+      if (match?.[1]) {
+        requestedConfigurationTeamIds.push(decodeURIComponent(match[1]))
+      }
+    })
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      projectNamesByTeam: {
+        'core-team': { 'shared-launch': 'Core shared launch' },
+        'design-team': { 'shared-launch': 'Design shared launch' },
+      },
+      teamExpandedById: {
+        'core-team': false,
+        'design-team': false,
+      },
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'core-shared-issue',
+            teamId: 'core-team',
+            title: 'Core shared issue',
+          }),
+        ],
+        'design-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'design-shared-issue',
+            teamId: 'design-team',
+            title: 'Design shared issue',
+          }),
+        ],
+      },
+    })
+
+    await page.goto('/projects/shared-launch/issues')
+
+    await expect(page.getByTestId('task-row-core-shared-issue')).toBeVisible()
+    await expect(page.getByTestId('task-row-design-shared-issue')).toBeVisible()
+    await expect(page.getByTestId('tasks-heading')).toHaveText('shared-launch')
+    await expect(page.getByLabel('プロジェクトのパンくずリスト')).toContainText(
+      'プロジェクト',
+    )
+    await expect(page.getByLabel('プロジェクトのパンくずリスト')).not.toContainText(
+      'コアチーム',
+    )
+    const coreTeamGroup = page.getByTestId('sidebar-team-core-team').first()
+    const designTeamGroup = page.getByTestId('sidebar-team-design-team').first()
+    const coreTeamButton = coreTeamGroup.getByRole('button', {
+      name: 'コアチーム',
+      exact: true,
+    })
+    const designTeamButton = designTeamGroup.getByRole('button', {
+      name: 'デザインチーム',
+      exact: true,
+    })
+
+    await expect(coreTeamGroup).toHaveAttribute('data-project-ancestor', 'false')
+    await expect(coreTeamGroup).toHaveAttribute('data-team-active', 'false')
+    await expect(designTeamGroup).toHaveAttribute('data-project-ancestor', 'false')
+    await expect(designTeamGroup).toHaveAttribute('data-team-active', 'false')
+    await expect(coreTeamButton).toHaveAttribute('aria-expanded', 'false')
+    await expect(designTeamButton).toHaveAttribute('aria-expanded', 'false')
+    await expect(coreTeamButton).not.toHaveClass(/bg-white\/8|bg-teal-500\/20/)
+    await expect(designTeamButton).not.toHaveClass(/bg-white\/8|bg-teal-500\/20/)
+    await expect(coreTeamGroup.locator(':scope > div.relative > span.absolute')).toHaveCount(0)
+    await expect(designTeamGroup.locator(':scope > div.relative > span.absolute')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '新規タスク' })).toHaveCount(0)
+    expect(requestedConfigurationTeamIds).toEqual([])
+  })
+
+  test('teamId のない共有 Project deep-link は選択 Issue の Team 設定と関連候補だけを詳細へ適用する', async ({
+    page,
+  }) => {
+    const coreConfiguration = {
+      ...teamWorkItemConfigurationFixture,
+      scopeId: 'core-team',
+      workflow: {
+        ...teamWorkItemConfigurationFixture.workflow,
+        id: 'core-shared-workflow',
+        initialStatusId: 'core-active',
+        statuses: [
+          { id: 'core-active', name: 'Core configured', category: 'started', sortOrder: 0 },
+        ],
+        transitions: [],
+      },
+      customFields: [
+        {
+          id: 'core-context',
+          name: 'Core-only field',
+          type: 'text',
+          sortOrder: 0,
+          required: false,
+        },
+      ],
+    } satisfies WorkItemConfiguration
+    const designConfiguration = {
+      ...teamWorkItemConfigurationFixture,
+      scopeId: 'design-team',
+      workflow: {
+        ...teamWorkItemConfigurationFixture.workflow,
+        id: 'design-shared-workflow',
+        initialStatusId: 'design-active',
+        statuses: [
+          { id: 'design-active', name: 'Design configured', category: 'started', sortOrder: 0 },
+        ],
+        transitions: [],
+      },
+      customFields: [
+        {
+          id: 'design-context',
+          name: 'Design-only field',
+          type: 'text',
+          sortOrder: 0,
+          required: false,
+        },
+      ],
+    } satisfies WorkItemConfiguration
+    const requestedConfigurationTeamIds: string[] = []
+    const requestedIssueListTeamIds: string[] = []
+
+    page.on('request', (request) => {
+      const pathname = new URL(request.url()).pathname
+      const configurationMatch = pathname.match(
+        /^\/api\/teams\/([^/]+)\/work-item-configuration$/,
+      )
+      const issueListMatch = pathname.match(/^\/api\/teams\/([^/]+)\/issues$/)
+
+      if (configurationMatch?.[1]) {
+        requestedConfigurationTeamIds.push(decodeURIComponent(configurationMatch[1]))
+      }
+      if (issueListMatch?.[1]) {
+        requestedIssueListTeamIds.push(decodeURIComponent(issueListMatch[1]))
+      }
+    })
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      projectNamesByTeam: {
+        'core-team': { 'shared-launch': 'Core shared launch' },
+        'design-team': { 'shared-launch': 'Design shared launch' },
+      },
+      teamExpandedById: {
+        'core-team': false,
+        'design-team': false,
+      },
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            customFieldValues: { 'core-context': 'Core list value' },
+            id: 'core-shared-issue',
+            status: 'in-progress',
+            statusCategory: 'started',
+            teamId: 'core-team',
+            title: 'Core shared issue',
+            workflowStatusId: 'core-active',
+          }),
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'core-relation-candidate',
+            status: 'in-progress',
+            teamId: 'core-team',
+            title: 'Core relation candidate',
+            workflowStatusId: 'core-active',
+          }),
+        ],
+        'design-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            customFieldValues: { 'design-context': 'Design detail value' },
+            description: 'design team selected detail',
+            id: 'design-selected-issue',
+            status: 'review',
+            statusCategory: 'started',
+            teamId: 'design-team',
+            title: 'Design selected issue',
+            workflowStatusId: 'design-active',
+          }),
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'design-relation-candidate',
+            status: 'review',
+            teamId: 'design-team',
+            title: 'Design relation candidate',
+            workflowStatusId: 'design-active',
+          }),
+        ],
+      },
+      teamWorkItemConfigurations: {
+        'core-team': coreConfiguration,
+        'design-team': designConfiguration,
+      },
+    })
+
+    await page.goto('/projects/shared-launch/issues?issueId=design-selected-issue')
+
+    const coreRow = page.getByTestId('task-row-core-shared-issue')
+    const designRow = page.getByTestId('task-row-design-selected-issue')
+    const detailPane = page.getByTestId('task-detail-pane')
+
+    await expect(coreRow).toBeVisible()
+    await expect(designRow).toBeVisible()
+    await expect(page.getByTestId('tasks-heading')).toHaveText('Design shared launch')
+    const breadcrumb = page.getByLabel('プロジェクトのパンくずリスト')
+
+    await expect(breadcrumb).toContainText('デザインチーム')
+    await expect(breadcrumb).toContainText('Design shared launch')
+    await expect(page.getByTestId('sidebar-team-core-team').first()).toHaveAttribute(
+      'data-project-ancestor',
+      'false',
+    )
+    await expect(page.getByTestId('sidebar-team-design-team').first()).toHaveAttribute(
+      'data-project-ancestor',
+      'true',
+    )
+    await expect(
+      page.getByTestId('sidebar-team-design-team').first().getByRole('button', {
+        name: 'デザインチーム',
+        exact: true,
+      }),
+    ).toHaveAttribute('aria-expanded', 'true')
+    await expect(coreRow).toContainText('core-active')
+    await expect(coreRow).not.toContainText('Core configured')
+    await expect(designRow).toContainText('design-active')
+    await expect(designRow).not.toContainText('Design configured')
+    await expect(detailPane.locator('textarea[name="description"]')).toHaveValue(
+      'design team selected detail',
+    )
+    await expect(detailPane.locator('select[name="workflowStatusId"]')).toHaveValue(
+      'design-active',
+    )
+    await expect(detailPane.getByText('Design-only field')).toBeVisible()
+    await expect(detailPane.getByText('Core-only field')).toHaveCount(0)
+    await expect(detailPane.getByLabel('対象 Work Item').locator('option')).toHaveText([
+      'Design relation candidate',
+    ])
+    await expect.poll(() => [...new Set(requestedConfigurationTeamIds)]).toEqual([
+      'design-team',
+    ])
+    await expect.poll(() => [...new Set(requestedIssueListTeamIds)]).toEqual([
+      'design-team',
+    ])
   })
 
   test('未割り当て Work Item を My Tasks と通知 Inbox から Team 詳細へ開ける', async ({ page }) => {

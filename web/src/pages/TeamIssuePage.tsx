@@ -1,6 +1,4 @@
 import type {
-  CustomFieldDefinition,
-  CustomFieldValue,
   ResolvedWorkItemConfiguration,
   WorkflowStatusDefinition,
   WorkItemConfiguration,
@@ -44,7 +42,6 @@ import {
   TeamIssuesApiError,
   type CreateTeamIssueInput,
   type TeamIssue,
-  type TeamIssueDetail,
   type UpdateTeamIssueInput,
   updateTeamIssue,
 } from '../issues/api'
@@ -83,19 +80,14 @@ import {
   createWorkItemRelation,
   deleteWorkItemRelation,
   getWorkItemConfiguration,
-  WorkItemConfigurationApiError,
 } from '../work-items/api'
 import {
   createDefaultCustomFieldValues,
   isCustomFieldApplicable,
   parseCustomFieldFormData,
   sortCustomFieldDefinitions,
-  type CustomFieldValidationError,
 } from '../work-items/customFields'
-import {
-  WorkItemFieldsEditor,
-  type WorkItemPersonOption,
-} from '../work-items/WorkItemFieldsEditor'
+import { WorkItemFieldsEditor } from '../work-items/WorkItemFieldsEditor'
 import {
   WorkItemDefinitionFilters,
 } from '../work-items/WorkItemDefinitionFilters'
@@ -108,13 +100,21 @@ import {
   type WorkItemRelationEditorInput,
 } from '../work-items/WorkItemRelationsEditor'
 import {
+  createCustomFieldErrorMessages,
+  createCustomFieldValuePatch,
   formatWorkItemCustomFieldValue,
-  resolveAllowedWorkflowStatuses,
+  readSelectedRelationGraphRevision,
+  refreshRelationDetailAfterConflict,
+  resolveCreateWorkflowStatuses,
+  resolveDisplayWorkflowStatuses,
+  resolveEditableWorkflowStatuses,
+  resolveLegacyStatusForWorkflowStatus,
+  resolveWorkItemPersonOptions,
+  resolveWorkItemWorkflowStatusId,
+  resolveWorkItemWorkflowStatusLabel,
   resolveWorkflowCategoryToneClassName,
   resolveWorkflowStatusCategory,
   resolveWorkflowStatusDefinition,
-  resolveWorkflowStatusLabel,
-  sortWorkflowStatuses,
 } from '../work-items/workItemDisplay'
 
 const issueStatuses = ['todo', 'in-progress', 'review', 'done'] as const satisfies readonly TaskStatus[]
@@ -517,7 +517,7 @@ export function TeamIssuePage() {
       return
     }
 
-    const graphRevision = readSelectedRelationGraphRevision(issueDetail, issueId)
+    const graphRevision = readSelectedRelationGraphRevision(issueDetail, issueId, t)
 
     try {
       await mutationRequestRunner.run(
@@ -543,7 +543,7 @@ export function TeamIssuePage() {
       return
     }
 
-    const graphRevision = readSelectedRelationGraphRevision(issueDetail, issueId)
+    const graphRevision = readSelectedRelationGraphRevision(issueDetail, issueId, t)
 
     try {
       await mutationRequestRunner.run(
@@ -732,7 +732,7 @@ export function TeamIssueScreen({
 
   const configuration = resolvedConfiguration?.configuration
   const workflowStatuses = useMemo(
-    () => resolveDisplayWorkflowStatuses(issues, configuration, t),
+    () => resolveDisplayWorkflowStatuses(issues, configuration, t, issueStatuses),
     [configuration, issues, t],
   )
   const personLabels = useMemo(
@@ -748,7 +748,8 @@ export function TeamIssueScreen({
   const visibleIssues = useMemo(
     () =>
       issues.filter((issue) => {
-        const matchesStatus = statusFilter === 'all' || resolveIssueWorkflowStatusId(issue) === statusFilter
+        const matchesStatus = statusFilter === 'all' ||
+          resolveWorkItemWorkflowStatusId(issue) === statusFilter
         const matchesDefinition = matchesWorkItemDefinitionFilter(
           issue,
           configuration,
@@ -768,7 +769,7 @@ export function TeamIssueScreen({
           resolveIssueTitle(issue, t),
           resolveWorkItemAssignee(issue, t),
           resolveAssignedProjectName(issue, activeTeam, t),
-          resolveIssueWorkflowStatusLabel(issue, configuration, t),
+          resolveWorkItemWorkflowStatusLabel(issue, configuration, t),
           t(`tasks.priority.${issue.priority}`),
           ...resolveIssueCustomFieldSearchValues(
             issue,
@@ -1036,6 +1037,9 @@ export function TeamIssueScreen({
   )
 }
 
+/**
+ * Issue 一覧の検索、status filter、表示切り替えをまとめた toolbar です。
+ */
 function IssueToolbar({
   onSearchQueryChange,
   onStatusFilterChange,
@@ -1046,13 +1050,37 @@ function IssueToolbar({
   viewMode,
   workflowStatuses,
 }: {
+  /**
+   * 検索 query を更新する callback です。
+   */
   onSearchQueryChange: (query: string) => void
+  /**
+   * Workflow status filter を更新する callback です。
+   */
   onStatusFilterChange: (status: string) => void
+  /**
+   * Issue 表示 mode を更新する callback です。
+   */
   onViewModeChange: (mode: IssueViewMode) => void
+  /**
+   * 検索 input の現在値です。
+   */
   searchQuery: string
+  /**
+   * Status select の現在値です。
+   */
   statusFilter: string
+  /**
+   * 画面文言を解決する翻訳関数です。
+   */
   t: (key: MessageKey) => string
+  /**
+   * 現在表示中の Issue view mode です。
+   */
   viewMode: IssueViewMode
+  /**
+   * Status filter に表示する workflow status です。
+   */
   workflowStatuses: readonly WorkflowStatusDefinition[]
 }) {
   return (
@@ -1127,7 +1155,7 @@ function CreateIssuePanel({
   const today = formatLocalDateInputValue()
   const [selectedProjectId, setSelectedProjectId] = useState('')
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
-  const workflowStatuses = resolveCreateWorkflowStatuses(configuration, t)
+  const workflowStatuses = resolveCreateWorkflowStatuses(configuration, t, issueStatuses)
   const initialWorkflowStatusId = configuration?.workflow.initialStatusId ?? 'todo'
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const defaultCustomFieldValues = configuration
@@ -1411,7 +1439,7 @@ function IssueBoard({
     <section className="mt-5 flex min-w-0 gap-4 overflow-x-auto pb-2">
       {workflowStatuses.map((status) => {
         const columnIssues = issues.filter(
-          (issue) => resolveIssueWorkflowStatusId(issue) === status.id,
+          (issue) => resolveWorkItemWorkflowStatusId(issue) === status.id,
         )
 
         return (
@@ -1609,8 +1637,13 @@ function IssueDetailContent({
   const isLegacyIssue = issue.source === 'legacy'
   const isIssueReadOnly = isLegacyIssue || !onUpdateIssue
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === issue.assigneeUserId)
-  const currentWorkflowStatusId = resolveIssueWorkflowStatusId(issue)
-  const workflowStatuses = resolveEditableWorkflowStatuses(issue, configuration, t)
+  const currentWorkflowStatusId = resolveWorkItemWorkflowStatusId(issue)
+  const workflowStatuses = resolveEditableWorkflowStatuses(
+    issue,
+    configuration,
+    t,
+    issueStatuses,
+  )
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const hasCustomFields = configuration?.customFields.some((definition) =>
     isCustomFieldApplicable(definition, selectedProjectId || undefined),
@@ -1898,7 +1931,7 @@ function IssueStatusBadge({
     ? resolveWorkflowStatusCategory(issue, configuration)
     : 'backlog')
   const label = resolvedStatus?.name ?? (issue
-    ? resolveIssueWorkflowStatusLabel(issue, configuration, t)
+    ? resolveWorkItemWorkflowStatusLabel(issue, configuration, t)
     : '')
 
   return (
@@ -1961,102 +1994,6 @@ function IssuePriorityBadge({ priority, t }: { priority: TaskPriority; t: (key: 
   )
 }
 
-function resolveIssueWorkflowStatusId(issue: TeamIssue) {
-  return issue.workflowStatusId ?? issue.status
-}
-
-function resolveIssueWorkflowStatusLabel(
-  issue: TeamIssue,
-  configuration: WorkItemConfiguration | undefined,
-  t: (key: MessageKey) => string,
-) {
-  return resolveWorkflowStatusLabel(
-    issue,
-    configuration,
-    (status) => t(`tasks.status.${status}`),
-  )
-}
-
-function resolveDisplayWorkflowStatuses(
-  issues: readonly TeamIssue[],
-  configuration: WorkItemConfiguration | undefined,
-  t: (key: MessageKey) => string,
-) {
-  const statuses = resolveCreateWorkflowStatuses(configuration, t)
-  const knownStatusIds = new Set(statuses.map((status) => status.id))
-  const unknownStatuses = issues.flatMap((issue, index) => {
-    const statusId = resolveIssueWorkflowStatusId(issue)
-
-    if (knownStatusIds.has(statusId)) {
-      return []
-    }
-
-    knownStatusIds.add(statusId)
-    return [{
-      id: statusId,
-      name: resolveIssueWorkflowStatusLabel(issue, configuration, t),
-      category: resolveWorkflowStatusCategory(issue, configuration),
-      sortOrder: statuses.length + index,
-    } satisfies WorkflowStatusDefinition]
-  })
-
-  return [...statuses, ...unknownStatuses]
-}
-
-function resolveCreateWorkflowStatuses(
-  configuration: WorkItemConfiguration | undefined,
-  t: (key: MessageKey) => string,
-) {
-  if (configuration?.workflow.statuses.length) {
-    return sortWorkflowStatuses(configuration.workflow.statuses)
-  }
-
-  return issueStatuses.map((status, index) => ({
-    id: status,
-    name: t(`tasks.status.${status}`),
-    category: resolveWorkflowStatusCategory({ status }, undefined),
-    sortOrder: index,
-  }))
-}
-
-function resolveEditableWorkflowStatuses(
-  issue: TeamIssue,
-  configuration: WorkItemConfiguration | undefined,
-  t: (key: MessageKey) => string,
-) {
-  if (!configuration) {
-    return resolveCreateWorkflowStatuses(undefined, t)
-  }
-
-  const currentStatusId = resolveIssueWorkflowStatusId(issue)
-  const allowedStatuses = resolveAllowedWorkflowStatuses(currentStatusId, configuration)
-
-  if (allowedStatuses.length > 0) {
-    return allowedStatuses
-  }
-
-  return [{
-    id: currentStatusId,
-    name: resolveIssueWorkflowStatusLabel(issue, configuration, t),
-    category: resolveWorkflowStatusCategory(issue, configuration),
-    sortOrder: -1,
-  } satisfies WorkflowStatusDefinition]
-}
-
-function resolveLegacyStatusForWorkflowStatus(status: WorkflowStatusDefinition): TaskStatus {
-  if (status.id === 'review') {
-    return 'review'
-  }
-  if (status.category === 'completed' || status.category === 'canceled') {
-    return 'done'
-  }
-  if (status.category === 'started') {
-    return 'in-progress'
-  }
-
-  return 'todo'
-}
-
 function resolveIssueCustomFieldEntries(
   issue: TeamIssue,
   configuration: WorkItemConfiguration | undefined,
@@ -2104,106 +2041,4 @@ function resolveIssueCustomFieldSearchValues(
 ) {
   return resolveIssueCustomFieldEntries(issue, configuration, locale, personLabels)
     .flatMap(({ definition, value }) => [definition.name, value])
-}
-
-function resolveWorkItemPersonOptions(
-  workspaceMembers: readonly WorkspaceMember[],
-): WorkItemPersonOption[] {
-  return workspaceMembers
-    .filter((member) => member.status === 'active')
-    .map((member) => ({
-      email: member.email,
-      id: member.email,
-      name: member.name ?? member.email,
-    }))
-}
-
-function createCustomFieldErrorMessages(
-  errors: readonly CustomFieldValidationError[],
-  definitions: readonly CustomFieldDefinition[],
-  locale: Locale,
-) {
-  const messages = locale === 'ja'
-    ? {
-        required: '入力が必要です。',
-        'invalid-type': '値の形式が正しくありません。',
-        'invalid-option': '定義済みの選択肢を選んでください。',
-        'invalid-date': '有効な日付を入力してください。',
-        min: '最小値以上で入力してください。',
-        max: '最大値以下で入力してください。',
-        'min-length': '必要な文字数または件数に達していません。',
-        'max-length': '文字数または件数が上限を超えています。',
-        pattern: '指定された形式で入力してください。',
-      }
-    : {
-        required: 'A value is required.',
-        'invalid-type': 'Enter a value in the expected format.',
-        'invalid-option': 'Choose a configured option.',
-        'invalid-date': 'Enter a valid date.',
-        min: 'Enter a value at or above the minimum.',
-        max: 'Enter a value at or below the maximum.',
-        'min-length': 'Enter the required number of characters or items.',
-        'max-length': 'The character or item limit was exceeded.',
-        pattern: 'Enter a value in the configured format.',
-      }
-  const definitionIds = new Set(definitions.map((definition) => definition.id))
-  const result: Record<string, string> = {}
-
-  for (const error of errors) {
-    if (!definitionIds.has(error.fieldId)) {
-      continue
-    }
-
-    result[error.fieldId] = result[error.fieldId]
-      ? `${result[error.fieldId]} ${messages[error.code]}`
-      : messages[error.code]
-  }
-
-  return result
-}
-
-function createCustomFieldValuePatch(
-  definitions: readonly CustomFieldDefinition[],
-  existingValues: Readonly<Record<string, CustomFieldValue>> | undefined,
-  parsedValues: Readonly<Record<string, CustomFieldValue>>,
-  projectId?: string,
-) {
-  const patch: Record<string, CustomFieldValue | null> = {}
-
-  for (const definition of definitions) {
-    if (definition.type === 'formula' || !isCustomFieldApplicable(definition, projectId)) {
-      continue
-    }
-
-    if (Object.hasOwn(parsedValues, definition.id)) {
-      patch[definition.id] = parsedValues[definition.id]!
-    } else if (existingValues?.[definition.id] !== undefined) {
-      patch[definition.id] = null
-    }
-  }
-
-  return patch
-}
-
-function readSelectedRelationGraphRevision(
-  detail: TeamIssueDetail | undefined,
-  issueId: string,
-) {
-  if (detail?.issue.id !== issueId || detail.relationGraphRevision === undefined) {
-    throw new Error('The latest relation graph is not loaded yet.')
-  }
-
-  return detail.relationGraphRevision
-}
-
-async function refreshRelationDetailAfterConflict(
-  error: unknown,
-  refresh: () => Promise<unknown>,
-) {
-  if (
-    error instanceof WorkItemConfigurationApiError &&
-    error.code === 'WorkItemRelationGraphConflict'
-  ) {
-    await refresh()
-  }
 }
