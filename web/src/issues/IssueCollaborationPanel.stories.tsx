@@ -63,7 +63,7 @@ export const ResolvedThread: Story = {
 }
 
 /**
- * guest や legacy Work Item で変更できない状態です。
+ * guest など権限不足で変更できない状態です。
  */
 export const ReadOnly: Story = {
   args: {

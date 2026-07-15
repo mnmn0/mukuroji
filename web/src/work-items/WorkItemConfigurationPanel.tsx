@@ -23,6 +23,11 @@ import {
   resolveWorkflowCategoryToneClassName,
   sortWorkflowStatuses,
 } from './workItemDisplay'
+import {
+  cloneWorkItemConfiguration,
+  normalizeWorkItemConfigurationForSave,
+  sortCustomFieldOptions,
+} from './workItemConfigurationEditor'
 
 /**
  * Configuration panel の scope selector に表示する選択肢です。
@@ -153,7 +158,7 @@ function WorkItemConfigurationPanelContent({
 }: WorkItemConfigurationPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [draft, setDraft] = useState<WorkItemConfiguration | undefined>(() =>
-    configuration ? cloneConfiguration(configuration) : undefined,
+    configuration ? cloneWorkItemConfiguration(configuration) : undefined,
   )
   const [isSaving, setIsSaving] = useState(false)
   const [localErrorMessage, setLocalErrorMessage] = useState<string | undefined>()
@@ -169,7 +174,7 @@ function WorkItemConfigurationPanelContent({
     setLocalErrorMessage(undefined)
 
     try {
-      await onSave(normalizeConfiguration(draft))
+      await onSave(normalizeWorkItemConfigurationForSave(draft))
     } catch (error) {
       setLocalErrorMessage(
         error instanceof Error && error.message.trim()
@@ -923,7 +928,7 @@ function CustomFieldOptionsEditor({
       NonNullable<CustomFieldDefinition['options']>,
   ) => {
     onUpdate((current) => {
-      const nextOptions = update([...(current.options ?? [])]).map((option, index) => ({
+      const nextOptions = update(sortCustomFieldOptions(current.options ?? [])).map((option, index) => ({
         ...option,
         sortOrder: index,
       }))
@@ -1102,7 +1107,7 @@ function CustomFieldDefaultControl({
           }}
         >
           {field.type === 'select' ? <option value="">—</option> : null}
-          {field.options?.map((option) => (
+          {sortCustomFieldOptions(field.options ?? []).map((option) => (
             <option key={option.id} value={option.id}>{option.name}</option>
           ))}
         </select>
@@ -1117,6 +1122,7 @@ function CustomFieldDefaultControl({
       {t('workItems.configuration.defaultValue')}
       <input
         className="workbench-input min-h-10 min-w-0 px-3"
+        step={isNumeric ? 'any' : undefined}
         type={isNumeric ? 'number' : field.type === 'date' ? 'date' : 'text'}
         value={serializeDefaultValue(field.defaultValue)}
         onChange={(event) => updateDefault(parseDefaultValue(field.type, event.target.value))}
@@ -1157,53 +1163,6 @@ function ValidationNumberInput({
       />
     </label>
   )
-}
-
-function cloneConfiguration(configuration: WorkItemConfiguration): WorkItemConfiguration {
-  return {
-    ...configuration,
-    workflow: {
-      ...configuration.workflow,
-      statuses: configuration.workflow.statuses.map((status) => ({ ...status })),
-      transitions: configuration.workflow.transitions.map((transition) => ({ ...transition })),
-    },
-    customFields: configuration.customFields.map((field) => ({
-      ...field,
-      defaultValue: Array.isArray(field.defaultValue) ? [...field.defaultValue] : field.defaultValue,
-      options: field.options?.map((option) => ({ ...option })),
-      projectIds: field.projectIds ? [...field.projectIds] : undefined,
-      validation: field.validation ? { ...field.validation } : undefined,
-    })),
-  }
-}
-
-function normalizeConfiguration(configuration: WorkItemConfiguration): WorkItemConfiguration {
-  return {
-    ...cloneConfiguration(configuration),
-    workflow: {
-      ...configuration.workflow,
-      statuses: sortWorkflowStatuses(configuration.workflow.statuses).map((status, index) => ({
-        ...status,
-        name: status.name.trim(),
-        sortOrder: index,
-      })),
-      transitions: [...configuration.workflow.transitions].sort(
-        (first, second) =>
-          first.fromStatusId.localeCompare(second.fromStatusId) ||
-          first.toStatusId.localeCompare(second.toStatusId),
-      ),
-    },
-    customFields: sortCustomFieldDefinitions(configuration.customFields).map((field, index) => ({
-      ...field,
-      name: field.name.trim(),
-      options: field.options?.map((option, optionIndex) => ({
-        ...option,
-        name: option.name.trim(),
-        sortOrder: optionIndex,
-      })),
-      sortOrder: index,
-    })),
-  }
 }
 
 function normalizeFieldForType(

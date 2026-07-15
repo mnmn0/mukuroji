@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import type { CustomFieldDefinition } from '@mukuroji/contracts'
+import {
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEMA_VERSION,
+  type CanonicalWorkItem,
+  type CustomFieldDefinition,
+} from '@mukuroji/contracts'
 import {
   createCustomFieldFormName,
   createDefaultCustomFieldValues,
@@ -145,34 +150,35 @@ describe('custom field validation and display', () => {
 
 describe('workflow-aware Work Item display', () => {
   test('resolves configured labels, categories, and allowed transitions', () => {
-    const workItem = { status: 'todo' as const, workflowStatusId: 'active' }
+    const workItem = createCanonicalWorkItem({
+      workflowStatusId: 'active',
+      statusCategory: 'started',
+    })
 
     expect(resolveWorkflowStatusLabel(workItem, workspaceWorkItemConfigurationFixture)).toBe(
       'In progress',
     )
-    expect(resolveWorkflowStatusCategory(workItem, workspaceWorkItemConfigurationFixture)).toBe(
-      'started',
-    )
+    expect(resolveWorkflowStatusCategory(workItem)).toBe('started')
     expect(resolveAllowedWorkflowStatuses('active', workspaceWorkItemConfigurationFixture)
       .map((status) => status.id)).toEqual(['active', 'review', 'canceled'])
     expect(resolveWorkflowStatusCategory({
       ...workItem,
       statusCategory: 'completed',
-    }, workspaceWorkItemConfigurationFixture)).toBe('completed')
+    })).toBe('completed')
   })
 
-  test('keeps legacy completion semantics and supports custom field list helpers', () => {
-    expect(isCompletedWorkItem({ status: 'done' })).toBe(true)
-    expect(isCompletedWorkItem({ status: 'review' })).toBe(false)
-    expect(isOpenWorkItem({ status: 'todo', statusCategory: 'canceled' })).toBe(false)
-    expect(isOpenWorkItem({ status: 'in-progress' })).toBe(true)
+  test('uses canonical status categories and custom field helpers', () => {
+    expect(isCompletedWorkItem(createCanonicalWorkItem({ statusCategory: 'completed' }))).toBe(true)
+    expect(isCompletedWorkItem(createCanonicalWorkItem({ statusCategory: 'started' }))).toBe(false)
+    expect(isOpenWorkItem(createCanonicalWorkItem({ statusCategory: 'canceled' }))).toBe(false)
+    expect(isOpenWorkItem(createCanonicalWorkItem({ statusCategory: 'started' }))).toBe(true)
 
-    const workItem = {
+    const workItem = createCanonicalWorkItem({
       customFieldValues: {
         'risk-level': 'high' as const,
         disciplines: ['frontend', 'backend'],
       },
-    }
+    })
 
     expect(formatWorkItemCustomFieldValue(workItem, getDefinition('risk-level'))).toBe('High')
     expect(matchesWorkItemCustomFieldFilter(
@@ -183,16 +189,15 @@ describe('workflow-aware Work Item display', () => {
   })
 
   test('combines workflow category, typed custom field, and project scope filters', () => {
-    const workItem = {
+    const workItem = createCanonicalWorkItem({
       assignedProjectId: 'refero',
       customFieldValues: {
         'release-blocker': false,
         'risk-level': 'high' as const,
       },
-      status: 'in-progress' as const,
       statusCategory: 'started' as const,
       workflowStatusId: 'active',
-    }
+    })
 
     expect(matchesWorkItemDefinitionFilter(
       workItem,
@@ -233,4 +238,29 @@ function getDefinition(fieldId: string): CustomFieldDefinition {
 
 function validationCodes(fieldId: string, value: string | number | boolean | string[]) {
   return validateCustomFieldValue(getDefinition(fieldId), value).map((error) => error.code)
+}
+
+function createCanonicalWorkItem(
+  overrides: Partial<CanonicalWorkItem> = {},
+): CanonicalWorkItem {
+  return {
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'creator@example.com',
+    createdAt: '2026-07-01T00:00:00.000Z',
+    customFieldValues: {},
+    dueDate: '2026/07/31',
+    id: 'work-item-1',
+    priority: 'medium',
+    relationIds: [],
+    revision: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    source: 'dynamodb',
+    statusCategory: 'started',
+    teamId: 'team-1',
+    title: 'Work Item',
+    updatedAt: '2026-07-01T00:00:00.000Z',
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    workflowStatusId: 'active',
+    ...overrides,
+  }
 }

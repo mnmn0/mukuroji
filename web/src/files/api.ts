@@ -4,7 +4,6 @@ import type {
   FileAnnotation,
   FileAttachment,
   FileVersion,
-  WorkItemStatus,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../api/mutationHeaders'
 
@@ -171,7 +170,7 @@ export type CreateApprovalRequestInput = {
   /**
    * 全 reviewer 承認後に適用する Work Item transition です。
    */
-  completionTransition?: WorkItemStatus
+  completionTransition?: string
 }
 
 /**

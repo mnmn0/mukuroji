@@ -73,7 +73,7 @@ import {
   createTeamViewPath,
   workspaceNavPaths,
 } from '../routes/paths'
-import type { TaskPriority, TaskStatus } from '../tasks/api'
+import type { TaskPriority } from '../tasks/api'
 import { getWorkspaceAccess, type WorkspaceMember } from '../workspace/api'
 import { useWorkspaceCommandMenu } from '../commands/WorkspaceCommandMenuContext'
 import {
@@ -108,7 +108,6 @@ import {
   resolveCreateWorkflowStatuses,
   resolveDisplayWorkflowStatuses,
   resolveEditableWorkflowStatuses,
-  resolveLegacyStatusForWorkflowStatus,
   resolveWorkItemPersonOptions,
   resolveWorkItemWorkflowStatusId,
   resolveWorkItemWorkflowStatusLabel,
@@ -117,7 +116,6 @@ import {
   resolveWorkflowStatusDefinition,
 } from '../work-items/workItemDisplay'
 
-const issueStatuses = ['todo', 'in-progress', 'review', 'done'] as const satisfies readonly TaskStatus[]
 const issuePriorities = ['high', 'medium', 'low'] as const satisfies readonly TaskPriority[]
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyIssues: TeamIssue[] = []
@@ -363,7 +361,6 @@ export function TeamIssuePage() {
   const resolvedSelectedIssue = issues.find((issue) => issue.id === resolvedSelectedIssueId)
   const collaboration = useIssueCollaboration({
     accessToken,
-    enabled: resolvedSelectedIssue?.source !== 'legacy',
     issueId: resolvedSelectedIssueId,
     projectId: resolvedSelectedIssue?.assignedProjectId,
     teamId,
@@ -376,7 +373,6 @@ export function TeamIssuePage() {
   [artifactIssueId, teamId])
   const artifacts = useFileArtifacts({
     accessToken,
-    enabled: resolvedSelectedIssue?.source !== 'legacy',
     scope: issueFileScope,
   })
   const detailKey = accessToken && resolvedSelectedIssueId
@@ -478,7 +474,7 @@ export function TeamIssuePage() {
       ? issueDetail.issue
       : issues.find((issue) => issue.id === issueId)
 
-    if (!currentIssue || currentIssue.source === 'legacy') {
+    if (!currentIssue) {
       return
     }
 
@@ -626,7 +622,7 @@ export function TeamIssuePage() {
   return (
     <TeamIssueScreen
       assigneeOptions={assigneeOptions}
-      artifacts={resolvedSelectedIssue?.source !== 'legacy' ? artifacts : undefined}
+      artifacts={artifacts}
       collaboration={collaboration}
       configurationErrorMessage={configurationErrorMessage}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
@@ -639,6 +635,7 @@ export function TeamIssuePage() {
       issues={screenIssues}
       isLoading={isLoading}
       isRelationsLoading={Boolean(detailKey && isIssueDetailLoading)}
+      key={teamId}
       locale={locale}
       onAddRelation={canMutateContent ? handleAddRelation : undefined}
       onArchiveProject={canManageStructure ? handleArchiveProject : undefined}
@@ -732,9 +729,22 @@ export function TeamIssueScreen({
 
   const configuration = resolvedConfiguration?.configuration
   const workflowStatuses = useMemo(
-    () => resolveDisplayWorkflowStatuses(issues, configuration, t, issueStatuses),
-    [configuration, issues, t],
+    () => resolveDisplayWorkflowStatuses(configuration),
+    [configuration],
   )
+  const effectiveStatusFilter = statusFilter === 'all' ||
+    workflowStatuses.some((status) => status.id === statusFilter)
+    ? statusFilter
+    : 'all'
+  const effectiveDefinitionFilter = useMemo(() =>
+    !definitionFilter.customFieldId ||
+      configuration?.customFields.some((field) => field.id === definitionFilter.customFieldId)
+      ? definitionFilter
+      : {
+          category: definitionFilter.category,
+          customFieldId: '',
+        },
+  [configuration?.customFields, definitionFilter])
   const personLabels = useMemo(
     () => Object.fromEntries(workspaceMembers.map((member) => [member.email, member.name ?? member.email])),
     [workspaceMembers],
@@ -745,15 +755,16 @@ export function TeamIssueScreen({
   const detailErrorMessageLocal = detailUpdateError && detailUpdateError[0] === selectedIssueUpdateErrorKey
     ? detailUpdateError[1]
     : undefined
+
   const visibleIssues = useMemo(
     () =>
       issues.filter((issue) => {
-        const matchesStatus = statusFilter === 'all' ||
-          resolveWorkItemWorkflowStatusId(issue) === statusFilter
+        const matchesStatus = effectiveStatusFilter === 'all' ||
+          resolveWorkItemWorkflowStatusId(issue) === effectiveStatusFilter
         const matchesDefinition = matchesWorkItemDefinitionFilter(
           issue,
           configuration,
-          definitionFilter,
+          effectiveDefinitionFilter,
         )
         const normalizedQuery = searchQuery.trim().toLowerCase()
 
@@ -767,9 +778,9 @@ export function TeamIssueScreen({
 
         return [
           resolveIssueTitle(issue, t),
-          resolveWorkItemAssignee(issue, t),
+          resolveWorkItemAssignee(issue),
           resolveAssignedProjectName(issue, activeTeam, t),
-          resolveWorkItemWorkflowStatusLabel(issue, configuration, t),
+          resolveWorkItemWorkflowStatusLabel(issue, configuration),
           t(`tasks.priority.${issue.priority}`),
           ...resolveIssueCustomFieldSearchValues(
             issue,
@@ -782,12 +793,12 @@ export function TeamIssueScreen({
     [
       activeTeam,
       configuration,
-      definitionFilter,
+      effectiveDefinitionFilter,
+      effectiveStatusFilter,
       issues,
       locale,
       personLabels,
       searchQuery,
-      statusFilter,
       t,
     ],
   )
@@ -938,7 +949,7 @@ export function TeamIssueScreen({
                   onStatusFilterChange={setStatusFilter}
                   onViewModeChange={setViewMode}
                   searchQuery={searchQuery}
-                  statusFilter={statusFilter}
+                  statusFilter={effectiveStatusFilter}
                   t={t}
                   viewMode={viewMode}
                   workflowStatuses={workflowStatuses}
@@ -950,7 +961,7 @@ export function TeamIssueScreen({
                     locale={locale}
                     onChange={setDefinitionFilter}
                     personOptions={resolveWorkItemPersonOptions(workspaceMembers)}
-                    value={definitionFilter}
+                    value={effectiveDefinitionFilter}
                   />
                 </div>
                 {issueErrorMessage ? (
@@ -1155,8 +1166,8 @@ function CreateIssuePanel({
   const today = formatLocalDateInputValue()
   const [selectedProjectId, setSelectedProjectId] = useState('')
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
-  const workflowStatuses = resolveCreateWorkflowStatuses(configuration, t, issueStatuses)
-  const initialWorkflowStatusId = configuration?.workflow.initialStatusId ?? 'todo'
+  const workflowStatuses = resolveCreateWorkflowStatuses(configuration)
+  const initialWorkflowStatusId = configuration?.workflow.initialStatusId ?? ''
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const defaultCustomFieldValues = configuration
     ? createDefaultCustomFieldValues(configuration.customFields, selectedProjectId || undefined)
@@ -1189,7 +1200,7 @@ function CreateIssuePanel({
               })
             : { errors: [], values: {} }
 
-          if (parsedCustomFields.errors.length > 0) {
+          if (!workflowStatus || parsedCustomFields.errors.length > 0) {
             setFieldErrors(createCustomFieldErrorMessages(
               parsedCustomFields.errors,
               configuration?.customFields ?? [],
@@ -1208,9 +1219,6 @@ function CreateIssuePanel({
             customFieldValues: parsedCustomFields.values,
             dueDate,
             priority: resolveIssuePriority(formData.get('priority')),
-            status: workflowStatus
-              ? resolveLegacyStatusForWorkflowStatus(workflowStatus)
-              : resolveIssueStatus(formData.get('status')),
             workflowStatusId,
           })
         }}
@@ -1377,9 +1385,9 @@ function IssueTable({
                     </button>
                   </td>
                   <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveAssignedProjectName(issue, activeTeam, t)}</td>
-                  <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveWorkItemAssignee(issue, t)}</td>
+                  <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveWorkItemAssignee(issue)}</td>
                   <td className="px-4 py-4">
-                    <IssueStatusBadge configuration={configuration} issue={issue} t={t} />
+                    <IssueStatusBadge configuration={configuration} issue={issue} />
                   </td>
                   <td className="max-w-64 px-4 py-3">
                     <IssueCustomFieldSummary
@@ -1445,7 +1453,7 @@ function IssueBoard({
         return (
           <div className="workbench-panel min-h-[420px] w-[min(320px,82vw)] flex-none" key={status.id}>
             <div className="flex items-center justify-between gap-3 border-b border-[var(--workbench-border)] px-4 py-3">
-              <IssueStatusBadge status={status} t={t} />
+              <IssueStatusBadge status={status} />
               <span className="text-sm font-semibold text-[var(--workbench-muted)]">{columnIssues.length}</span>
             </div>
             <div className="grid gap-3 p-3">
@@ -1634,19 +1642,16 @@ function IssueDetailContent({
     ? selectedProject.value
     : issue.assignedProjectId ?? ''
 
-  const isLegacyIssue = issue.source === 'legacy'
-  const isIssueReadOnly = isLegacyIssue || !onUpdateIssue
+  const isIssueReadOnly = !onUpdateIssue
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === issue.assigneeUserId)
   const currentWorkflowStatusId = resolveWorkItemWorkflowStatusId(issue)
   const workflowStatuses = resolveEditableWorkflowStatuses(
     issue,
     configuration,
-    t,
-    issueStatuses,
   )
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const hasCustomFields = configuration?.customFields.some((definition) =>
-    isCustomFieldApplicable(definition, selectedProjectId || undefined),
+    isCustomFieldApplicable(definition, selectedProjectId || undefined)
   ) ?? false
 
   return (
@@ -1657,7 +1662,7 @@ function IssueDetailContent({
         onSubmit={(event) => {
           event.preventDefault()
 
-          if (isIssueReadOnly) {
+          if (!onUpdateIssue) {
             return
           }
 
@@ -1667,9 +1672,6 @@ function IssueDetailContent({
           const workflowStatusId = String(
             formData.get('workflowStatusId') ?? currentWorkflowStatusId,
           ).trim()
-          const workflowStatus = workflowStatuses.find(
-            (status) => status.id === workflowStatusId,
-          )
           const parsedCustomFields = configuration
             ? parseCustomFieldFormData(formData, configuration.customFields, {
                 projectId: assignedProjectId || undefined,
@@ -1697,9 +1699,6 @@ function IssueDetailContent({
             description: String(formData.get('description') ?? '').trim(),
             dueDate: String(formData.get('dueDate') ?? '').replaceAll('-', '/'),
             priority: resolveIssuePriority(formData.get('priority')),
-            status: workflowStatus
-              ? resolveLegacyStatusForWorkflowStatus(workflowStatus)
-              : issue.status,
             title: String(formData.get('title') ?? '').trim(),
             workflowStatusId,
           }
@@ -1751,7 +1750,7 @@ function IssueDetailContent({
               {t('issues.create.assignee')}
               <select className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.assigneeUserId} name="assigneeUserId">
                 {!hasSelectedAssigneeOption ? (
-                  <option value={issue.assigneeUserId}>{resolveWorkItemAssignee(issue, t)}</option>
+                  <option value={issue.assigneeUserId}>{resolveWorkItemAssignee(issue)}</option>
                 ) : null}
                 {assigneeOptions.map((member) => (
                   <option key={member.id} value={member.id}>{formatProjectMemberOption(member)}</option>
@@ -1801,13 +1800,16 @@ function IssueDetailContent({
         </button>
         {isIssueReadOnly ? (
           <p className="text-sm font-medium text-[var(--workbench-muted)]">
-            {t(isLegacyIssue ? 'issues.detail.readOnlyLegacy' : 'issues.detail.readOnlyPermission')}
+            {t('issues.detail.readOnlyPermission')}
           </p>
         ) : null}
         {detailErrorMessage ? <p className="text-sm font-bold text-red-600">{detailErrorMessage}</p> : null}
       </form>
       {artifacts ? (
         <IssueArtifactsPanel
+          completionTransitions={workflowStatuses.filter(
+            (status) => status.id !== currentWorkflowStatusId,
+          )}
           controller={artifacts}
           currentMemberKey={currentWorkspaceMemberKey}
           locale={locale}
@@ -1816,12 +1818,10 @@ function IssueDetailContent({
       ) : null}
       <div className="border-t border-[var(--workbench-border)] px-6 py-6">
         <WorkItemRelationsEditor
-          candidates={relationCandidates
-            .filter((candidate) => candidate.source === 'dynamodb')
-            .map((candidate) => ({
-              id: candidate.id,
-              title: resolveIssueTitle(candidate, t),
-            }))}
+          candidates={relationCandidates.map((candidate) => ({
+            id: candidate.id,
+            title: resolveIssueTitle(candidate, t),
+          }))}
           currentWorkItemId={issue.id}
           isLoading={isRelationsLoading}
           locale={locale}
@@ -1831,7 +1831,7 @@ function IssueDetailContent({
           onDeleteRelation={onDeleteRelation
             ? (relation) => onDeleteRelation(issue.id, relation)
             : undefined}
-          readOnly={isLegacyIssue || (!onAddRelation && !onDeleteRelation)}
+          readOnly={!onAddRelation && !onDeleteRelation}
           relations={relations}
         />
       </div>
@@ -1845,7 +1845,6 @@ function IssueDetailContent({
           focusedRootCommentId={focusedRootCommentId}
           locale={locale}
           members={workspaceMembers}
-          readOnlyMessage={isLegacyIssue ? t('issues.comment.readOnlyLegacy') : undefined}
         />
       ) : null}
     </aside>
@@ -1878,7 +1877,8 @@ function formatLocalDateInputValue(date = new Date()) {
 }
 
 function resolveIssueTitle(issue: TeamIssue, t: (key: MessageKey) => string) {
-  return resolveWorkItemTitle(issue, t)
+  void t
+  return resolveWorkItemTitle(issue)
 }
 
 function resolveAssignedProjectName(
@@ -1891,12 +1891,6 @@ function resolveAssignedProjectName(
   }
 
   return team?.projects.find((project) => project.id === issue.assignedProjectId)?.name ?? issue.assignedProjectId
-}
-
-function resolveIssueStatus(value: FormDataEntryValue | null): TaskStatus {
-  return typeof value === 'string' && issueStatuses.includes(value as TaskStatus)
-    ? value as TaskStatus
-    : 'todo'
 }
 
 function resolveIssuePriority(value: FormDataEntryValue | null): TaskPriority {
@@ -1913,7 +1907,6 @@ function IssueStatusBadge({
   configuration,
   issue,
   status,
-  t,
 }: {
   /** Status definition の解決に使う configuration です。 */
   configuration?: WorkItemConfiguration
@@ -1921,17 +1914,15 @@ function IssueStatusBadge({
   issue?: TeamIssue
   /** Board column で直接表示する status definition です。 */
   status?: WorkflowStatusDefinition
-  /** i18n translator です。 */
-  t: (key: MessageKey) => string
 }) {
   const resolvedStatus = status ?? (issue
     ? resolveWorkflowStatusDefinition(issue, configuration)
     : undefined)
   const category = resolvedStatus?.category ?? (issue
-    ? resolveWorkflowStatusCategory(issue, configuration)
+    ? resolveWorkflowStatusCategory(issue)
     : 'backlog')
   const label = resolvedStatus?.name ?? (issue
-    ? resolveWorkItemWorkflowStatusLabel(issue, configuration, t)
+    ? resolveWorkItemWorkflowStatusLabel(issue, configuration)
     : '')
 
   return (

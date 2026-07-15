@@ -30,13 +30,13 @@ describe('Workspace search URL state', () => {
 
   test('keyword, filters, layout, sort, group, and columns round-trip canonically', () => {
     const source = new URLSearchParams(
-      'q=launch&type=comment&type=work-item&status=review&assignee=demo%40example.com&creator=owner%40example.com&team=core-team&project=shared-launch&dateField=dueDate&dateFrom=2026-07-01&dateTo=2026-07-31&relation=blocks%3A42&customField=%7B%22fieldId%22%3A%22risk%22%2C%22operator%22%3A%22equals%22%2C%22value%22%3A%22high%22%7D&layout=board&sort=updatedAt%3Adesc&sort=title%3Aasc&sort=custom%3Arisk%3Aasc&group=status&columns=title%2Cstatus%2Cassignee&view=review-view&v=1',
+      'q=launch&type=comment&type=work-item&status=ready-for-qa&assignee=demo%40example.com&creator=owner%40example.com&team=core-team&project=shared-launch&dateField=dueDate&dateFrom=2026-07-01&dateTo=2026-07-31&relation=blocks%3A42&customField=%7B%22fieldId%22%3A%22risk%22%2C%22operator%22%3A%22equals%22%2C%22value%22%3A%22high%22%7D&layout=board&sort=updatedAt%3Adesc&sort=title%3Aasc&sort=custom%3Arisk%3Aasc&group=status&columns=title%2Cstatus%2Cassignee&view=review-view&v=1',
     )
     const parsed = parseSearchRouteState(source)
 
     expect(getSearchKeyword(parsed.filters)).toBe('launch')
     expect(getSearchEntityTypes(parsed.filters)).toEqual(['comment', 'work-item'])
-    expect(getSearchStatuses(parsed.filters)).toEqual(['review'])
+    expect(getSearchStatuses(parsed.filters)).toEqual(['ready-for-qa'])
     expect(getSearchCustomFields(parsed.filters)).toEqual([
       { fieldId: 'risk', operator: 'equals', value: 'high' },
     ])
@@ -64,6 +64,55 @@ describe('Workspace search URL state', () => {
     expect(parsed.migrationWarnings).toHaveLength(2)
     expect(parsed.migrationWarnings[0]).toContain('v99')
     expect(getSearchCustomFields(parsed.filters)).toEqual([])
+  })
+
+  test('canonical dynamic workflow status IDs round-trip without a fixed allowlist', () => {
+    const source = new URLSearchParams()
+    const maximumLengthStatusId = `a${'b'.repeat(127)}`
+    source.append('status', 'ready-for-qa')
+    source.append('status', 'blocked.external_vendor')
+    source.append('status', maximumLengthStatusId)
+    source.append('status', 'ready-for-qa')
+    source.append('status', '   ')
+    source.append('status', 'ready for QA')
+    source.append('status', 'blocked/external')
+    source.append('status', 'blocked:external')
+    source.append('status', `a${'b'.repeat(128)}`)
+
+    const parsed = parseSearchRouteState(source)
+
+    expect(getSearchStatuses(parsed.filters)).toEqual([
+      'ready-for-qa',
+      'blocked.external_vendor',
+      maximumLengthStatusId,
+    ])
+
+    const canonical = serializeSearchRouteState(parsed)
+
+    expect(canonical.getAll('status')).toEqual([
+      maximumLengthStatusId,
+      'blocked.external_vendor',
+      'ready-for-qa',
+    ])
+    expect(getSearchStatuses(parseSearchRouteState(canonical).filters)).toEqual([
+      maximumLengthStatusId,
+      'blocked.external_vendor',
+      'ready-for-qa',
+    ])
+  })
+
+  test('status access and serialization trim and deduplicate dynamic IDs', () => {
+    const parsed = parseSearchRouteState(new URLSearchParams())
+    const filters = {
+      ...parsed.filters,
+      statuses: ['  triage  ', '', 'triage', 'release-candidate'],
+    }
+
+    expect(getSearchStatuses(filters)).toEqual(['triage', 'release-candidate'])
+    expect(serializeSearchRouteState({ ...parsed, filters }).getAll('status')).toEqual([
+      'release-candidate',
+      'triage',
+    ])
   })
 
   test('value-less custom field operators round-trip without invalid JSON', () => {

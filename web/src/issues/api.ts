@@ -1,12 +1,11 @@
 import type {
+  CanonicalWorkItem,
   CreateWorkItemInput,
   ResolvedWorkItemConfiguration,
   UpdateWorkItemInput,
-  WorkItem,
   WorkItemPatch,
   WorkItemRelation,
 } from '@mukuroji/contracts'
-import type { MessageKey } from '../i18n'
 import { createMutationHeaders, type MutationRequestContext } from '../api/mutationHeaders'
 
 /**
@@ -15,9 +14,9 @@ import { createMutationHeaders, type MutationRequestContext } from '../api/mutat
 export type TeamIssueActivityType = 'created' | 'updated' | 'commented'
 
 /**
- * チーム所有 Issue の互換名で参照する canonical Work Item です。
+ * チーム所有の canonical Issue です。
  */
-export type TeamIssue = WorkItem<MessageKey>
+export type TeamIssue = CanonicalWorkItem
 
 /**
  * チーム所有 Issue のコメントです。
@@ -561,7 +560,7 @@ export async function getProjectIssues(projectId: string, accessToken?: string) 
 }
 
 /**
- * 未割り当てを含む Workspace 全体の canonical Work Item を取得します。
+ * 未割り当てを含む Workspace 全体の Work Item 投影を取得します。
  */
 export async function getWorkspaceWorkItems(accessToken: string) {
   const response = await requestJson<WorkspaceWorkItemsResponse>(

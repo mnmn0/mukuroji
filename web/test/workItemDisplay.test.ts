@@ -1,4 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import {
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEMA_VERSION,
+  type CanonicalWorkItem,
+} from '@mukuroji/contracts'
 import type { MessageKey } from '../src/i18n'
 import {
   resolveWorkItemAssignee,
@@ -8,48 +13,29 @@ import {
   createCustomFieldErrorMessages,
   filterWorkItemsByTeam,
   readSelectedRelationGraphRevision,
-  resolveLegacyStatusForWorkflowStatus,
 } from '../src/work-items/workItemDisplay'
 
 describe('Work Item display helpers', () => {
-  test('prefers a literal title and translates titleKey only as a fallback', () => {
-    const translate = (key: string) => `translated:${key}`
-
-    expect(resolveWorkItemTitle({
-      id: 'work-item-1',
-      title: 'Canonical title',
-      titleKey: 'tasks.item.wireframe',
-    }, translate)).toBe('Canonical title')
-    expect(resolveWorkItemTitle({
-      id: 'work-item-1',
-      titleKey: 'tasks.item.wireframe',
-    }, translate)).toBe('translated:tasks.item.wireframe')
-    expect(resolveWorkItemTitle({
-      id: 'work-item-1',
-      title: 'tasks.item.wireframe',
-      titleKey: 'tasks.item.wireframe',
-    }, translate)).toBe('translated:tasks.item.wireframe')
-    expect(resolveWorkItemTitle({ id: 'work-item-1' }, translate)).toBe('work-item-1')
+  test('uses the canonical literal title', () => {
+    expect(resolveWorkItemTitle(createCanonicalWorkItem())).toBe('Canonical title')
   })
 
-  test('keeps the existing assignee fallback order and optional key translation', () => {
-    expect(resolveWorkItemAssignee({
-      assignee: 'Legacy assignee',
+  test('resolves the canonical assignee fallback order', () => {
+    expect(resolveWorkItemAssignee(createCanonicalWorkItem({
       assigneeEmail: 'member@example.com',
-      assigneeKey: 'tasks.assignee.sato',
       assigneeName: 'Member Name',
       assigneeUserId: 'member-id',
-    })).toBe('Member Name')
-    expect(resolveWorkItemAssignee({
-      assignee: 'Legacy assignee',
-      assigneeKey: 'tasks.assignee.sato',
-    })).toBe('Legacy assignee')
-    expect(resolveWorkItemAssignee(
-      { assigneeKey: 'tasks.assignee.sato' },
-      (key) => `translated:${key}`,
-    )).toBe('translated:tasks.assignee.sato')
-    expect(resolveWorkItemAssignee({ assigneeKey: 'tasks.assignee.sato' }))
-      .toBe('tasks.assignee.sato')
+    }))).toBe('Member Name')
+    expect(resolveWorkItemAssignee(createCanonicalWorkItem({
+      assigneeEmail: 'member@example.com',
+      assigneeName: undefined,
+      assigneeUserId: 'member-id',
+    }))).toBe('member@example.com')
+    expect(resolveWorkItemAssignee(createCanonicalWorkItem({
+      assigneeEmail: undefined,
+      assigneeName: undefined,
+      assigneeUserId: 'member-id',
+    }))).toBe('member-id')
   })
 
   test('filters project Work Items by the explicitly selected Team', () => {
@@ -93,19 +79,29 @@ describe('Work Item display helpers', () => {
     }, 'issue-a', translate)).toBe(4)
   })
 
-  test('maps workflow categories before applying the legacy review special case', () => {
-    const status = (id: string, category: 'unstarted' | 'started' | 'completed' | 'canceled') => ({
-      category,
-      id,
-      name: id,
-      sortOrder: 0,
-    })
-
-    expect(resolveLegacyStatusForWorkflowStatus(status('review', 'completed'))).toBe('done')
-    expect(resolveLegacyStatusForWorkflowStatus(status('review', 'canceled'))).toBe('done')
-    expect(resolveLegacyStatusForWorkflowStatus(status('review', 'started'))).toBe('review')
-    expect(resolveLegacyStatusForWorkflowStatus(status('implementing', 'started')))
-      .toBe('in-progress')
-    expect(resolveLegacyStatusForWorkflowStatus(status('review', 'unstarted'))).toBe('todo')
-  })
 })
+
+function createCanonicalWorkItem(
+  overrides: Partial<CanonicalWorkItem> = {},
+): CanonicalWorkItem {
+  return {
+    assigneeUserId: 'member-id',
+    creatorMemberKey: 'creator-id',
+    createdAt: '2026-07-01T00:00:00.000Z',
+    customFieldValues: {},
+    dueDate: '2026/07/31',
+    id: 'work-item-1',
+    priority: 'medium',
+    relationIds: [],
+    revision: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    source: 'dynamodb',
+    statusCategory: 'started',
+    teamId: 'team-1',
+    title: 'Canonical title',
+    updatedAt: '2026-07-01T00:00:00.000Z',
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    workflowStatusId: 'active',
+    ...overrides,
+  }
+}

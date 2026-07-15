@@ -111,7 +111,7 @@ export async function putWorkItemConfiguration(
  * @param accessToken - Authorization header に使う access token です。
  * @param input - relation 種別と相手 Work Item ID です。
  * @param mutationContext - retry 間で共有する mutation request context です。
- * @returns transaction 後の最新 relation 一覧です。
+ * @returns 作成した relation、reciprocal relation、更新後 graph revision です。
  */
 export function createWorkItemRelation(
   teamId: string,
@@ -142,7 +142,7 @@ export function createWorkItemRelation(
  * @param input - relation 種別、相手 Work Item ID、graph revision です。
  * @param accessToken - Authorization header に使う access token です。
  * @param mutationContext - retry 間で共有する mutation request context です。
- * @returns transaction 後の最新 relation 一覧です。
+ * @returns 削除した relation、reciprocal relation、更新後 graph revision です。
  */
 export function deleteWorkItemRelation(
   teamId: string,

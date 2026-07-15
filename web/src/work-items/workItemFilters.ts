@@ -1,7 +1,7 @@
 import type {
+  CanonicalWorkItem,
   CustomFieldValue,
   WorkflowStatusCategory,
-  WorkItem,
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import { isCustomFieldApplicable } from './customFields'
@@ -41,16 +41,13 @@ export function hasWorkItemDefinitionFilterValue(value: CustomFieldValue | undef
  * @returns すべての有効条件に一致する場合は true です。
  */
 export function matchesWorkItemDefinitionFilter(
-  workItem: Pick<
-    WorkItem,
-    'assignedProjectId' | 'customFieldValues' | 'status' | 'statusCategory' | 'workflowStatusId'
-  >,
+  workItem: CanonicalWorkItem,
   configuration: WorkItemConfiguration | undefined,
   filter: WorkItemDefinitionFilter,
 ) {
   if (
     filter.category !== 'all' &&
-    resolveWorkflowStatusCategory(workItem, configuration) !== filter.category
+    resolveWorkflowStatusCategory(workItem) !== filter.category
   ) {
     return false
   }

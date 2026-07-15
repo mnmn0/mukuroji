@@ -252,7 +252,7 @@ export function WorkItemRelationsEditor({
 
       {canMutate ? (
         <form
-          className="workbench-panel-muted grid grid-cols-[minmax(140px,0.65fr)_minmax(220px,1.35fr)_auto] items-end gap-3 p-3 max-[720px]:grid-cols-1"
+          className="workbench-panel-muted grid grid-cols-[minmax(0,0.65fr)_minmax(0,1.35fr)_auto] items-end gap-3 p-3 max-[720px]:grid-cols-1"
           onSubmit={(event) => void handleSubmit(event)}
         >
           <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">

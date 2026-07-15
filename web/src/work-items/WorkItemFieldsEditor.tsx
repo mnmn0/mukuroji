@@ -157,7 +157,7 @@ function CustomFieldControl({
   value?: CustomFieldValue
 }) {
   const t = createTranslator(locale)
-  const inputId = `work-item-field-${toDomToken(definition.id)}`
+  const inputId = `work-item-field-${encodeDomIdToken(definition.id)}`
   const errorId = `${inputId}-error`
   const descriptionId = `${inputId}-description`
   const name = createCustomFieldFormName(definition.id)
@@ -364,6 +364,11 @@ function CustomFieldInput({
   )
 }
 
-function toDomToken(value: string) {
-  return value.replaceAll(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'field'
+function encodeDomIdToken(value: string) {
+  const codeUnits = Array.from(
+    { length: value.length },
+    (_, index) => value.charCodeAt(index).toString(16).padStart(4, '0'),
+  ).join('')
+
+  return `${value.length.toString(16)}-${codeUnits}`
 }

@@ -1,12 +1,11 @@
 import type {
+  CanonicalWorkItem,
   CustomFieldDefinition,
   CustomFieldValue,
   ResolvedWorkItemConfiguration,
   WorkflowStatusCategory,
   WorkflowStatusDefinition,
-  WorkItem,
   WorkItemConfiguration,
-  WorkItemStatus,
 } from '@mukuroji/contracts'
 import {
   createTranslator,
@@ -44,18 +43,11 @@ type WorkItemRelationDetailLike = {
   /**
    * Detail が表す Work Item です。
    */
-  issue: Pick<WorkItem, 'id'>
+  issue: Pick<CanonicalWorkItem, 'id'>
   /**
    * Relation mutation の optimistic concurrency に利用する revision です。
    */
   relationGraphRevision?: number
-}
-
-const legacyStatusCategories: Record<WorkItemStatus, WorkflowStatusCategory> = {
-  todo: 'unstarted',
-  'in-progress': 'started',
-  review: 'started',
-  done: 'completed',
 }
 
 /**
@@ -66,13 +58,11 @@ const legacyStatusCategories: Record<WorkItemStatus, WorkflowStatusCategory> = {
  * @returns 一致する status definition、または未知の status では undefined です。
  */
 export function resolveWorkflowStatusDefinition(
-  workItem: Pick<WorkItem, 'status' | 'workflowStatusId'>,
+  workItem: CanonicalWorkItem,
   configuration: WorkItemConfigurationLike,
 ) {
-  const statusId = workItem.workflowStatusId ?? workItem.status
-
   return getWorkItemConfiguration(configuration)?.workflow.statuses.find(
-    (status) => status.id === statusId,
+    (status) => status.id === workItem.workflowStatusId,
   )
 }
 
@@ -81,43 +71,25 @@ export function resolveWorkflowStatusDefinition(
  *
  * @param workItem - Status を表示する Work Item です。
  * @param configuration - Team または Workspace の解決済み configuration です。
- * @param resolveLegacyLabel - Built-in legacy status の任意 label resolver です。
- * @returns Configuration 名、legacy label、status ID の順で解決した表示名です。
+ * @returns Configuration 名、status ID の順で解決した表示名です。
  */
 export function resolveWorkflowStatusLabel(
-  workItem: Pick<WorkItem, 'status' | 'workflowStatusId'>,
+  workItem: CanonicalWorkItem,
   configuration: WorkItemConfigurationLike,
-  resolveLegacyLabel?: (status: WorkItemStatus) => string,
 ) {
-  return resolveWorkflowStatusDefinition(workItem, configuration)?.name ??
-    (workItem.workflowStatusId ? workItem.workflowStatusId : resolveLegacyLabel?.(workItem.status)) ??
-    workItem.status
+  return resolveWorkflowStatusDefinition(workItem, configuration)?.name ?? workItem.workflowStatusId
 }
 
 /**
- * Work Item の標準 status category を snapshot、definition、legacy status の順で解決します。
+ * Canonical snapshot から標準 category を返します。
  *
  * @param workItem - Category を解決する Work Item です。
- * @param configuration - Team または Workspace の解決済み configuration です。
  * @returns 横断集計に利用できる status category です。
  */
 export function resolveWorkflowStatusCategory(
-  workItem: Pick<WorkItem, 'status' | 'statusCategory' | 'workflowStatusId'>,
-  configuration?: WorkItemConfigurationLike,
+  workItem: CanonicalWorkItem,
 ): WorkflowStatusCategory {
-  return workItem.statusCategory ??
-    resolveWorkflowStatusDefinition(workItem, configuration)?.category ??
-    resolveLegacyStatusCategory(workItem.status)
-}
-
-/**
- * Legacy status を標準 workflow category へ安全に変換します。
- *
- * @param status - Canonical v1 の legacy status です。
- * @returns Built-in workflow と同じ意味を持つ標準 category です。
- */
-export function resolveLegacyStatusCategory(status: WorkItemStatus): WorkflowStatusCategory {
-  return legacyStatusCategories[status] ?? 'backlog'
+  return workItem.statusCategory
 }
 
 /**
@@ -144,7 +116,7 @@ export function resolveWorkflowCategoryToneClassName(category: WorkflowStatusCat
  * 現在 status は form の値を保持できるよう必ず一覧へ含めます。
  *
  * @param currentStatusId - 現在の workflow status ID です。
- * @param configuration - Team または Workspace の解決済み configuration です。
+ * @param configuration - 遷移規則を解決する Work Item configuration です。
  * @returns 現在 status と許可 transition 先の status definition です。
  */
 export function resolveAllowedWorkflowStatuses(
@@ -171,14 +143,12 @@ export function resolveAllowedWorkflowStatuses(
  * Work Item が completed category か判定します。
  *
  * @param workItem - 判定対象 Work Item です。
- * @param configuration - Team または Workspace の解決済み configuration です。
  * @returns 完了として進捗率へ加算する場合は true です。
  */
 export function isCompletedWorkItem(
-  workItem: Pick<WorkItem, 'status' | 'statusCategory' | 'workflowStatusId'>,
-  configuration?: WorkItemConfigurationLike,
+  workItem: CanonicalWorkItem,
 ) {
-  return resolveWorkflowStatusCategory(workItem, configuration) === 'completed'
+  return resolveWorkflowStatusCategory(workItem) === 'completed'
 }
 
 /**
@@ -187,14 +157,12 @@ export function isCompletedWorkItem(
  * Completed と canceled は closed とし、それ以外を open とします。
  *
  * @param workItem - 判定対象 Work Item です。
- * @param configuration - Team または Workspace の解決済み configuration です。
  * @returns 未完了で操作対象に残る場合は true です。
  */
 export function isOpenWorkItem(
-  workItem: Pick<WorkItem, 'status' | 'statusCategory' | 'workflowStatusId'>,
-  configuration?: WorkItemConfigurationLike,
+  workItem: CanonicalWorkItem,
 ) {
-  const category = resolveWorkflowStatusCategory(workItem, configuration)
+  const category = resolveWorkflowStatusCategory(workItem)
 
   return category !== 'completed' && category !== 'canceled'
 }
@@ -208,11 +176,15 @@ export function isOpenWorkItem(
  * @returns List、board、report で共通利用できる表示文字列です。
  */
 export function formatWorkItemCustomFieldValue(
-  workItem: Pick<WorkItem, 'customFieldValues'>,
+  workItem: CanonicalWorkItem,
   definition: CustomFieldDefinition,
   options: FormatCustomFieldValueOptions = {},
 ) {
-  return formatCustomFieldValue(definition, workItem.customFieldValues?.[definition.id], options)
+  return formatCustomFieldValue(
+    definition,
+    workItem.customFieldValues[definition.id],
+    options,
+  )
 }
 
 /**
@@ -224,13 +196,13 @@ export function formatWorkItemCustomFieldValue(
  * @returns Filter に一致する場合は true です。
  */
 export function matchesWorkItemCustomFieldFilter(
-  workItem: Pick<WorkItem, 'customFieldValues'>,
+  workItem: CanonicalWorkItem,
   definition: CustomFieldDefinition,
   filterValue: CustomFieldValue | undefined,
 ) {
   return matchesCustomFieldFilter(
     definition,
-    workItem.customFieldValues?.[definition.id],
+    workItem.customFieldValues[definition.id],
     filterValue,
   )
 }
@@ -250,98 +222,57 @@ export function sortWorkflowStatuses(
 }
 
 /**
- * Work Item が保持する workflow status ID を legacy status fallback 付きで返します。
+ * Work Item が保持する workflow status ID を返します。
  *
  * @param workItem - Workflow status を解決する Work Item です。
- * @returns Configuration status ID、または legacy status です。
+ * @returns Configuration status ID です。
  */
 export function resolveWorkItemWorkflowStatusId(
-  workItem: Pick<WorkItem, 'status' | 'workflowStatusId'>,
+  workItem: CanonicalWorkItem,
 ) {
-  return workItem.workflowStatusId ?? workItem.status
+  return workItem.workflowStatusId
 }
 
 /**
- * Work Item の workflow status label を configuration と legacy 翻訳から解決します。
+ * Work Item の workflow status label を configuration から解決します。
  *
  * @param workItem - Workflow status を表示する Work Item です。
  * @param configuration - Team または Workspace の configuration です。
- * @param t - Legacy status label を解決する翻訳関数です。
- * @returns Configuration 名、legacy label、status ID の順で解決した表示名です。
+ * @returns Configuration 名、status ID の順で解決した表示名です。
  */
 export function resolveWorkItemWorkflowStatusLabel(
-  workItem: Pick<WorkItem, 'status' | 'workflowStatusId'>,
+  workItem: CanonicalWorkItem,
   configuration: WorkItemConfigurationLike,
-  t: WorkItemTranslator,
 ) {
-  return resolveWorkflowStatusLabel(
-    workItem,
-    configuration,
-    (status) => t(`tasks.status.${status}`),
-  )
+  return resolveWorkflowStatusLabel(workItem, configuration)
 }
 
 /**
- * Configuration に存在しない保存済み status も含め、一覧表示用 workflow status を返します。
+ * Configuration status を返します。
  *
- * @param workItems - 一覧へ表示する Work Item です。
  * @param configuration - Team または Workspace の configuration です。
- * @param t - Legacy status label を解決する翻訳関数です。
- * @param fallbackStatuses - Configuration 未登録時の legacy status 表示順です。
- * @returns Configuration と保存済み未知 status を結合した表示一覧です。
+ * @returns Configuration の表示一覧です。
  */
 export function resolveDisplayWorkflowStatuses(
-  workItems: readonly Pick<WorkItem, 'status' | 'statusCategory' | 'workflowStatusId'>[],
   configuration: WorkItemConfigurationLike,
-  t: WorkItemTranslator,
-  fallbackStatuses: readonly WorkItemStatus[],
 ) {
-  const statuses = resolveCreateWorkflowStatuses(configuration, t, fallbackStatuses)
-  const knownStatusIds = new Set(statuses.map((status) => status.id))
-  const unknownStatuses = workItems.flatMap((workItem, index) => {
-    const statusId = resolveWorkItemWorkflowStatusId(workItem)
-
-    if (knownStatusIds.has(statusId)) {
-      return []
-    }
-
-    knownStatusIds.add(statusId)
-    return [{
-      id: statusId,
-      name: resolveWorkItemWorkflowStatusLabel(workItem, configuration, t),
-      category: resolveWorkflowStatusCategory(workItem, configuration),
-      sortOrder: statuses.length + index,
-    } satisfies WorkflowStatusDefinition]
-  })
-
-  return [...statuses, ...unknownStatuses]
+  return resolveCreateWorkflowStatuses(configuration)
 }
 
 /**
  * Work Item 作成 form で選択できる workflow status を返します。
  *
  * @param configuration - Team または Workspace の configuration です。
- * @param t - Legacy status label を解決する翻訳関数です。
- * @param fallbackStatuses - Configuration 未登録時の legacy status 表示順です。
  * @returns 作成時に選択できる表示順付き status definition です。
  */
 export function resolveCreateWorkflowStatuses(
   configuration: WorkItemConfigurationLike,
-  t: WorkItemTranslator,
-  fallbackStatuses: readonly WorkItemStatus[],
 ) {
   const resolvedConfiguration = getWorkItemConfiguration(configuration)
 
-  if (resolvedConfiguration?.workflow.statuses.length) {
-    return sortWorkflowStatuses(resolvedConfiguration.workflow.statuses)
-  }
-
-  return fallbackStatuses.map((status, index) => ({
-    id: status,
-    name: t(`tasks.status.${status}`),
-    category: resolveWorkflowStatusCategory({ status }, undefined),
-    sortOrder: index,
-  }))
+  return resolvedConfiguration
+    ? sortWorkflowStatuses(resolvedConfiguration.workflow.statuses)
+    : []
 }
 
 /**
@@ -349,54 +280,19 @@ export function resolveCreateWorkflowStatuses(
  *
  * @param workItem - 編集対象 Work Item です。
  * @param configuration - Team または Workspace の configuration です。
- * @param t - Legacy status label を解決する翻訳関数です。
- * @param fallbackStatuses - Configuration 未登録時の legacy status 表示順です。
  * @returns 現在 status と許可 transition 先の status definition です。
  */
 export function resolveEditableWorkflowStatuses(
-  workItem: Pick<WorkItem, 'status' | 'statusCategory' | 'workflowStatusId'>,
+  workItem: CanonicalWorkItem,
   configuration: WorkItemConfigurationLike,
-  t: WorkItemTranslator,
-  fallbackStatuses: readonly WorkItemStatus[],
 ) {
   const resolvedConfiguration = getWorkItemConfiguration(configuration)
 
   if (!resolvedConfiguration) {
-    return resolveCreateWorkflowStatuses(undefined, t, fallbackStatuses)
+    return []
   }
 
-  const currentStatusId = resolveWorkItemWorkflowStatusId(workItem)
-  const allowedStatuses = resolveAllowedWorkflowStatuses(currentStatusId, resolvedConfiguration)
-
-  if (allowedStatuses.length > 0) {
-    return allowedStatuses
-  }
-
-  return [{
-    id: currentStatusId,
-    name: resolveWorkItemWorkflowStatusLabel(workItem, resolvedConfiguration, t),
-    category: resolveWorkflowStatusCategory(workItem, resolvedConfiguration),
-    sortOrder: -1,
-  } satisfies WorkflowStatusDefinition]
-}
-
-/**
- * Workflow status を legacy API 互換 status へ変換します。
- *
- * @param status - 保存対象 workflow status definition です。
- * @returns Legacy Work Item status です。
- */
-export function resolveLegacyStatusForWorkflowStatus(
-  status: WorkflowStatusDefinition,
-): WorkItemStatus {
-  if (status.category === 'completed' || status.category === 'canceled') {
-    return 'done'
-  }
-  if (status.category === 'started') {
-    return status.id === 'review' ? 'review' : 'in-progress'
-  }
-
-  return 'todo'
+  return resolveAllowedWorkflowStatuses(workItem.workflowStatusId, resolvedConfiguration)
 }
 
 /**
@@ -538,7 +434,7 @@ export async function refreshRelationDetailAfterConflict(
  * @param teamId - URL で明示された Team ID です。
  * @returns 指定 Team が所有する Work Item です。
  */
-export function filterWorkItemsByTeam<T extends Pick<WorkItem, 'teamId'>>(
+export function filterWorkItemsByTeam<T extends Pick<CanonicalWorkItem, 'teamId'>>(
   workItems: readonly T[],
   teamId: string,
 ) {
