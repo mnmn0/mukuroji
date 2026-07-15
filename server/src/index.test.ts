@@ -1,7 +1,12 @@
 import { afterEach, expect, test } from 'bun:test'
 import type { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import type { DynamoDBDocumentClient, TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
+import type {
+  ApprovalRequest,
+  CustomFieldValue,
+  WorkItemConfiguration,
+} from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import { createAuditEvent, createMutationAuditContext } from './audit'
 import { CollaborationError, type CollaborationClient } from './collaboration'
@@ -35,6 +40,11 @@ import {
   type WorkspaceMemberStatus,
   type WorkspaceRole,
 } from './index'
+import {
+  DEFAULT_WORK_ITEM_CONFIGURATION,
+  WorkItemConfigurationError,
+  type WorkItemConfigurationClient,
+} from './work-item-configuration'
 
 afterEach(() => {
   resetApiClientsForTest()
@@ -289,6 +299,283 @@ test('rejects excessive approval reviewers before external member fan-out', asyn
   expect(await response.json()).toMatchObject({ code: 'InvalidApprovalReviewers' })
 })
 
+test('validates and stores an approval completion target from the current workflow', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workflow.statuses.push({
+    id: 'approval-complete',
+    name: 'Approval complete',
+    category: 'completed',
+    sortOrder: 50,
+  })
+  configuration.workflow.transitions.push({
+    fromStatusId: 'in-progress',
+    toStatusId: 'approval-complete',
+  })
+  const receivedTransitions: Array<string | undefined> = []
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async list() {
+        const upload = createFileUploadSessionFixture()
+        return {
+          files: [upload.file],
+          approvals: [],
+          capabilities: {
+            canUpload: true,
+            canRequestApproval: true,
+            canGrantGuestAccess: true,
+          },
+        }
+      },
+      async createApproval(_scope, _actor, input) {
+        receivedTransitions.push(input.completionTransition)
+        return createApprovalRequestFixture()
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/approvals', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      dueAt: '2099-07-20T00:00:00.000Z',
+      fileId: 'file-1',
+      reviewerMemberKeys: ['sato@example.com'],
+      versionId: 'version-1',
+      completionTransition: 'approval-complete',
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(receivedTransitions).toEqual(['approval-complete'])
+})
+
+test('resolves approval completion with workflow metadata and configuration guards', async () => {
+  const calls = configureFakeProjectClients(true, {
+    role: 'member',
+    detailWorkflowStatusIds: ['in-progress', 'approval-complete'],
+    detailUpdatedAts: [
+      '2026-06-08T00:00:00.000Z',
+      '2026-07-12T02:34:56.000Z',
+    ],
+  })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team', 4)
+  configuration.workflow.statuses.push({
+    id: 'approval-complete',
+    name: 'Approval complete',
+    category: 'completed',
+    sortOrder: 50,
+  })
+  configuration.workflow.transitions.push({
+    fromStatusId: 'in-progress',
+    toStatusId: 'approval-complete',
+  })
+  const resolvedTransitions: unknown[] = []
+  const projectedDocuments: Array<Parameters<WorkspaceSearchClient['upsertDocument']>[0]> = []
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async decideApproval(_scope, _actor, _approvalId, _input, _auditContext, resolver) {
+        resolvedTransitions.push(await resolver?.('approval-complete'))
+        return createApprovalRequestFixture({
+          status: 'approved',
+          updatedAt: '2026-07-12T01:23:45.000Z',
+        })
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+    workspaceSearch: {
+      async upsertDocument(document) {
+        projectedDocuments.push(document)
+        return createWorkspaceSearchDocument(document)
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/approvals/approval-1/decisions',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ decision: 'approve', expectedRevision: 1 }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(resolvedTransitions).toHaveLength(1)
+  expect(resolvedTransitions[0]).toMatchObject({
+    workflowStatusId: 'approval-complete',
+    statusCategory: 'completed',
+    workflowSchemaVersion: 1,
+    expectedRevision: 1,
+  })
+  expect(
+    (resolvedTransitions[0] as {
+      configurationConditionChecks: TransactWriteCommandInput['TransactItems']
+    }).configurationConditionChecks,
+  ).toEqual(expect.arrayContaining([
+    expect.objectContaining({ ConditionCheck: expect.any(Object) }),
+  ]))
+  expect(projectedDocuments).toHaveLength(1)
+  expect(projectedDocuments[0]).toMatchObject({
+    entityType: 'work-item',
+    entityId: 'team/core-team/issue/issue-1',
+    status: 'approval-complete',
+    updatedAt: '2026-07-12T02:34:56.000Z',
+  })
+  expect(calls.issueDetails).toHaveLength(2)
+  expect(calls.issueDetails[1]?.readOptions).toMatchObject({
+    consistentIssueRead: true,
+    eventLimit: 0,
+  })
+})
+
+test('does not project a Work Item when an approval decision has no completion transition', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  let projectionWrites = 0
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async decideApproval() {
+        return createApprovalRequestFixture({ status: 'rejected' })
+      },
+    }),
+    workspaceSearch: {
+      async upsertDocument(document) {
+        projectionWrites += 1
+        return createWorkspaceSearchDocument(document)
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/approvals/approval-1/decisions',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ decision: 'reject', expectedRevision: 1 }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(projectionWrites).toBe(0)
+})
+
+test('keeps an approval completion successful when Work Item search projection fails', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workflow.statuses.push({
+    id: 'approval-complete',
+    name: 'Approval complete',
+    category: 'completed',
+    sortOrder: 50,
+  })
+  configuration.workflow.transitions.push({
+    fromStatusId: 'in-progress',
+    toStatusId: 'approval-complete',
+  })
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async decideApproval(_scope, _actor, _approvalId, _input, _auditContext, resolver) {
+        await resolver?.('approval-complete')
+        return createApprovalRequestFixture({ status: 'approved' })
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+    workspaceSearch: {
+      async upsertDocument() {
+        throw new Error('Search index unavailable')
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  const originalConsoleError = console.error
+  let projectionErrors = 0
+  console.error = () => {
+    projectionErrors += 1
+  }
+  try {
+    const response = await app.request(
+      '/api/teams/core-team/issues/issue-1/approvals/approval-1/decisions',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ decision: 'approve', expectedRevision: 1 }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ approval: { status: 'approved' } })
+    expect(projectionErrors).toBe(1)
+  } finally {
+    console.error = originalConsoleError
+  }
+})
+
+test('classifies a removed approval completion target as a decision conflict', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team', 5)
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async decideApproval(_scope, _actor, _approvalId, _input, _auditContext, resolver) {
+        const resolved = await resolver?.('removed-after-request')
+        if (!resolved) {
+          throw new FileProofingError(
+            409,
+            'ApprovalCompletionTransitionConflict',
+            'Approval completion workflow transition is no longer available.',
+          )
+        }
+        return createApprovalRequestFixture({ status: 'approved' })
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/approvals/approval-1/decisions',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ decision: 'approve', expectedRevision: 1 }),
+    },
+  )
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'ApprovalCompletionTransitionConflict',
+  })
+})
+
 test('cancels a pending approval through the authenticated Work Item scope', async () => {
   configureFakeProjectClients(true, { role: 'member' })
   let receivedRevision: number | undefined
@@ -509,6 +796,9 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
       sentInputs.push(command.input)
       return {
         Item: {
+          schemaVersion: 1,
+          revision: 1,
+          workflowSchemaVersion: 1,
           directoryId: 'workspace-1',
           teamId: 'core-team',
           directoryTeamId: 'workspace-1#team#core-team',
@@ -516,7 +806,11 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
           sortOrder: 1,
           title: 'Authorization-sensitive issue',
           assigneeUserId: 'member@example.com',
-          status: 'todo',
+          creatorMemberKey: 'member@example.com',
+          workflowStatusId: 'todo',
+          statusCategory: 'unstarted',
+          customFieldValues: {},
+          relationIds: [],
           dueDate: '2026/07/12',
           priority: 'medium',
           createdAt: '2026-07-12T00:00:00.000Z',
@@ -546,10 +840,111 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
   })
 })
 
+test('rejects a status-only canonical row instead of upcasting workflow fields', async () => {
+  const documentClient = {
+    async send() {
+      return {
+        Item: {
+          schemaVersion: 1,
+          revision: 1,
+          directoryId: 'workspace-1',
+          directoryTeamId: 'workspace-1#team#core-team',
+          teamId: 'core-team',
+          issueId: 'legacy-shaped-row',
+          sortOrder: 1,
+          title: 'Legacy-shaped row',
+          assigneeUserId: 'member@example.com',
+          status: 'todo',
+          dueDate: '2026/07/12',
+          priority: 'medium',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+        },
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core-team',
+    'legacy-shaped-row',
+    { eventLimit: 0 },
+  )).rejects.toMatchObject({ code: 'InvalidTeamIssue', status: 503 })
+})
+
+test('rejects legacy-only display fields on canonical rows', async () => {
+  const canonicalItem = {
+    schemaVersion: 1,
+    revision: 1,
+    workflowSchemaVersion: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'strict-row',
+    sortOrder: 1,
+    title: 'Strict row',
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'member@example.com',
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/12',
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+
+  for (const legacyField of [
+    'titleKey',
+    'assignee',
+    'assigneeKey',
+    'source',
+    'migrationSource',
+    'migrationSourceKey',
+    'relationIds',
+  ] as const) {
+    const documentClient = {
+      async send() {
+        return {
+          Item: {
+            ...canonicalItem,
+            [legacyField]: 'legacy-display-value',
+          },
+        }
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbTeamIssuesClient(
+      'issues-table',
+      'events-table',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+    )
+
+    await expect(client.getTeamIssueDetail(
+      'workspace-1',
+      'core-team',
+      'strict-row',
+      { eventLimit: 0 },
+    )).rejects.toMatchObject({ code: 'InvalidTeamIssue', status: 503 })
+  }
+})
+
 test('pages filtered legacy comments with a scope-bound opaque event cursor', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   let queryPage = 0
   const issueItem = {
+    schemaVersion: 1,
+    revision: 1,
+    workflowSchemaVersion: 1,
     directoryId: 'workspace-1',
     teamId: 'core-team',
     directoryTeamId: 'workspace-1#team#core-team',
@@ -557,7 +952,11 @@ test('pages filtered legacy comments with a scope-bound opaque event cursor', as
     sortOrder: 1,
     title: 'Legacy comments',
     assigneeUserId: 'member@example.com',
-    status: 'todo',
+    creatorMemberKey: 'member@example.com',
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/07/12',
     priority: 'medium',
     createdAt: '2026-07-12T00:00:00.000Z',
@@ -2656,7 +3055,7 @@ test('blocks a deactivated Workspace member before any business API read', async
 test('keeps guest Workspace members read-only even when they have a project role', async () => {
   const calls = configureFakeProjectClients(true, { workspaceRole: 'guest' })
 
-  const response = await app.request('/api/projects/refero/tasks', {
+  const response = await app.request('/api/teams/core-team/issues', {
     method: 'POST',
     headers: {
       Authorization: 'Bearer test-token',
@@ -2664,14 +3063,16 @@ test('keeps guest Workspace members read-only even when they have a project role
     },
     body: JSON.stringify({
       title: 'Guest must not create this task',
+      assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
       dueDate: '2026/07/20',
       priority: 'medium',
+      workflowStatusId: 'todo',
     }),
   })
 
   expect(response.status).toBe(403)
-  expect(calls.taskCreates).toEqual([])
+  expect(calls.issueCreates).toEqual([])
 })
 
 test('limits Workspace structure changes to owners and admins', async () => {
@@ -2695,7 +3096,7 @@ test('rejects inactive Workspace members as task assignment candidates', async (
     inactiveWorkspaceMemberKeys: ['sato@example.com'],
   })
 
-  const response = await app.request('/api/projects/refero/tasks', {
+  const response = await app.request('/api/teams/core-team/issues', {
     method: 'POST',
     headers: {
       Authorization: 'Bearer test-token',
@@ -2703,14 +3104,16 @@ test('rejects inactive Workspace members as task assignment candidates', async (
     },
     body: JSON.stringify({
       title: 'Inactive assignee task',
+      assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
       dueDate: '2026/07/20',
       priority: 'medium',
+      workflowStatusId: 'todo',
     }),
   })
 
   expect(response.status).toBe(409)
-  expect(calls.taskCreates).toEqual([])
+  expect(calls.issueCreates).toEqual([])
 })
 
 test('returns a NEW_PASSWORD_REQUIRED challenge without creating a session', async () => {
@@ -3445,6 +3848,552 @@ test('omits truncation headers when a workspace audit export reaches the final p
   expect((await response.text()).trimEnd().split('\n')).toHaveLength(1)
 })
 
+test('reads and saves Workspace Work Item configuration through the authenticated scope', async () => {
+  configureFakeProjectClients(true)
+  const stored = createTestWorkItemConfiguration('workspace', 'user#demo@example.com', 3)
+  const reads: string[] = []
+  const writes: Array<{ configuration: WorkItemConfiguration; workspaceId: string }> = []
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getWorkspaceConfiguration(workspaceId) {
+        reads.push(workspaceId)
+        return { configuration: stored }
+      },
+      async saveWorkspaceConfiguration(workspaceId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        writes.push({ workspaceId, configuration })
+        return {
+          configuration: {
+            ...configuration,
+            revision: configuration.revision + 1,
+          },
+        }
+      },
+    }),
+  })
+
+  const readResponse = await app.request('/api/work-item-configuration', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const writeResponse = await app.request('/api/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(createTestWorkItemConfiguration('team', 'foreign-team', 3)),
+  })
+
+  expect(readResponse.status).toBe(200)
+  expect(await readResponse.json()).toEqual({ configuration: stored })
+  expect(writeResponse.status).toBe(200)
+  expect(await writeResponse.json()).toMatchObject({
+    configuration: {
+      scopeType: 'workspace',
+      scopeId: 'user#demo@example.com',
+      revision: 4,
+    },
+  })
+  expect(reads).toEqual(['user#demo@example.com'])
+  expect(writes).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    configuration: expect.objectContaining({
+      scopeType: 'workspace',
+      scopeId: 'user#demo@example.com',
+      revision: 3,
+    }),
+  }])
+})
+
+test('reads and saves Team Work Item configuration for a Team manager', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const stored = createTestWorkItemConfiguration('team', 'core-team', 2)
+  const reads: Array<{ teamId: string; workspaceId: string }> = []
+  const writes: Array<{
+    configuration: WorkItemConfiguration
+    teamId: string
+    workspaceId: string
+  }> = []
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration(workspaceId, teamId) {
+        reads.push({ workspaceId, teamId })
+        return { configuration: stored }
+      },
+      async saveTeamConfiguration(workspaceId, teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        writes.push({ workspaceId, teamId, configuration })
+        return {
+          configuration: {
+            ...configuration,
+            revision: configuration.revision + 1,
+          },
+        }
+      },
+    }),
+  })
+
+  const readResponse = await app.request('/api/teams/core-team/work-item-configuration', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const writeResponse = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(createTestWorkItemConfiguration('workspace', 'foreign-workspace', 2)),
+  })
+
+  expect(readResponse.status).toBe(200)
+  expect(await readResponse.json()).toEqual({ configuration: stored })
+  expect(writeResponse.status).toBe(200)
+  expect(reads).toEqual([{ workspaceId: 'user#demo@example.com', teamId: 'core-team' }])
+  expect(writes).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    teamId: 'core-team',
+    configuration: expect.objectContaining({
+      scopeType: 'team',
+      scopeId: 'core-team',
+      revision: 2,
+    }),
+  }])
+})
+
+test('denies Work Item configuration writes outside the required administration roles', async () => {
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  let writes = 0
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async saveWorkspaceConfiguration(workspaceId, configuration) {
+        writes += 1
+        return { configuration: { ...configuration, scopeId: workspaceId } }
+      },
+      async saveTeamConfiguration(_workspaceId, teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        writes += 1
+        return { configuration: { ...configuration, scopeId: teamId } }
+      },
+    }),
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+
+  const workspaceResponse = await app.request('/api/work-item-configuration', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(createTestWorkItemConfiguration('workspace', 'user#demo@example.com')),
+  })
+  const teamResponse = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(createTestWorkItemConfiguration('team', 'core-team')),
+  })
+
+  expect(workspaceResponse.status).toBe(403)
+  expect(teamResponse.status).toBe(403)
+  expect(writes).toBe(0)
+})
+
+test('rejects a configuration change that conflicts with an existing Work Item', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  let writes = 0
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async saveTeamConfiguration(_workspaceId, teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        writes += 1
+        return { configuration: { ...configuration, scopeId: teamId } }
+      },
+    }),
+  })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.customFields = [{
+    id: 'required-reviewer',
+    name: 'Required reviewer',
+    type: 'person',
+    sortOrder: 0,
+    required: true,
+  }]
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(configuration),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationInUse',
+  })
+  expect(writes).toBe(0)
+})
+
+test('rejects missing required custom fields before creating a Work Item', async () => {
+  const calls = configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.customFields = [{
+    id: 'effort',
+    name: 'Effort',
+    type: 'number',
+    sortOrder: 10,
+    required: true,
+    validation: { min: 1, max: 8 },
+  }]
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: 'Missing effort',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026/07/20',
+      priority: 'medium',
+      workflowStatusId: 'todo',
+      customFieldValues: {},
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    code: 'InvalidCustomFieldValue',
+    message: 'Custom field "effort" is required.',
+  })
+  expect(calls.issueCreates).toEqual([])
+})
+
+test('uses the configured initial workflow status when create omits legacy status', async () => {
+  const calls = configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workflow.initialStatusId = 'triage'
+  configuration.workflow.statuses.unshift({
+    id: 'triage',
+    name: 'Triage',
+    category: 'backlog',
+    sortOrder: 5,
+  })
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: 'Starts in triage',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026/07/20',
+      priority: 'medium',
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(calls.issueCreates).toContainEqual(expect.objectContaining({
+    statusCategory: 'backlog',
+    workflowStatusId: 'triage',
+  }))
+})
+
+test('rejects a disallowed configured workflow transition before updating a Work Item', async () => {
+  const calls = configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workflow.transitions = configuration.workflow.transitions.filter((transition) =>
+    !(transition.fromStatusId === 'in-progress' && transition.toStatusId === 'done')
+  )
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ workflowStatusId: 'done', expectedRevision: 1 }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'WorkflowTransitionDenied',
+    message: 'Transition from "in-progress" to "done" is not allowed.',
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('calls reciprocal relation mutations and preserves their stable conflict response', async () => {
+  configureFakeProjectClients(true)
+  const creates: Array<{ input: unknown; teamId: string; workspaceId: string }> = []
+  let deletes = 0
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async createRelation(workspaceId, teamId, input) {
+        creates.push({ workspaceId, teamId, input })
+        return {
+          relation: {
+            sourceWorkItemId: input.sourceWorkItemId,
+            targetWorkItemId: input.targetWorkItemId,
+            type: input.type,
+          },
+          reciprocalRelation: {
+            sourceWorkItemId: input.targetWorkItemId,
+            targetWorkItemId: input.sourceWorkItemId,
+            type: 'blockedBy',
+          },
+          graphRevision: input.expectedGraphRevision + 1,
+        }
+      },
+      async deleteRelation() {
+        deletes += 1
+        throw new WorkItemConfigurationError(
+          409,
+          'RelationGraphRevisionConflict',
+          'Relation graph changed. Reload and try again.',
+        )
+      },
+    }),
+  })
+
+  const createResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/relations',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: 'blocks',
+        targetWorkItemId: 'target-issue',
+        expectedGraphRevision: 4,
+      }),
+    },
+  )
+  const deleteResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/relations/target-issue/blocks',
+    {
+      method: 'DELETE',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ expectedGraphRevision: 4 }),
+    },
+  )
+
+  expect(createResponse.status).toBe(201)
+  expect(await createResponse.json()).toMatchObject({
+    relation: {
+      sourceWorkItemId: 'onboarding-friction',
+      targetWorkItemId: 'target-issue',
+      type: 'blocks',
+    },
+    reciprocalRelation: { type: 'blockedBy' },
+    graphRevision: 5,
+  })
+  expect(creates).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    teamId: 'core-team',
+    input: {
+      sourceWorkItemId: 'onboarding-friction',
+      targetWorkItemId: 'target-issue',
+      type: 'blocks',
+      expectedGraphRevision: 4,
+      sourceExpectedRevision: 1,
+      targetExpectedRevision: 1,
+      sourceAssignedProjectId: 'refero',
+      targetAssignedProjectId: 'refero',
+    },
+  }])
+  expect(deleteResponse.status).toBe(409)
+  expect(await deleteResponse.json()).toEqual({
+    code: 'RelationGraphRevisionConflict',
+    message: 'Relation graph changed. Reload and try again.',
+  })
+  expect(deletes).toBe(1)
+})
+
+test('reprojects both Work Item relation endpoints after relation creation and deletion', async () => {
+  const calls = configureFakeProjectClients(true)
+  let graphRevision = 4
+  let relations: Array<{
+    sourceWorkItemId: string
+    targetWorkItemId: string
+    type: 'blocks' | 'blockedBy'
+  }> = []
+  const projectedDocuments: Array<ReturnType<typeof createWorkspaceSearchDocument>> = []
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations(_workspaceId, _teamId, workItemId) {
+        return {
+          graphRevision,
+          relations: relations.filter((relation) => relation.sourceWorkItemId === workItemId),
+        }
+      },
+      async createRelation(_workspaceId, _teamId, input) {
+        const response = {
+          relation: {
+            sourceWorkItemId: input.sourceWorkItemId,
+            targetWorkItemId: input.targetWorkItemId,
+            type: 'blocks' as const,
+          },
+          reciprocalRelation: {
+            sourceWorkItemId: input.targetWorkItemId,
+            targetWorkItemId: input.sourceWorkItemId,
+            type: 'blockedBy' as const,
+          },
+          graphRevision: input.expectedGraphRevision + 1,
+        }
+        relations = [response.relation, response.reciprocalRelation]
+        graphRevision = response.graphRevision
+        return response
+      },
+      async deleteRelation(_workspaceId, _teamId, input) {
+        const response = {
+          relation: relations[0]!,
+          reciprocalRelation: relations[1]!,
+          graphRevision: input.expectedGraphRevision + 1,
+        }
+        relations = []
+        graphRevision = response.graphRevision
+        return response
+      },
+    }),
+    workspaceSearch: {
+      async upsertDocument(document) {
+        const projected = createWorkspaceSearchDocument(document)
+        projectedDocuments.push(projected)
+        return projected
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+
+  const createResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/relations',
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        type: 'blocks',
+        targetWorkItemId: 'target-issue',
+        expectedGraphRevision: 4,
+      }),
+    },
+  )
+  const deleteResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/relations/target-issue/blocks',
+    {
+      method: 'DELETE',
+      headers,
+      body: JSON.stringify({ expectedGraphRevision: 5 }),
+    },
+  )
+
+  expect([createResponse.status, deleteResponse.status]).toEqual([201, 200])
+  expect(projectedDocuments.slice(0, 2)).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      entityId: 'team/core-team/issue/onboarding-friction',
+      relationIds: ['blocks:target-issue'],
+    }),
+    expect.objectContaining({
+      entityId: 'team/core-team/issue/target-issue',
+      relationIds: ['blockedBy:onboarding-friction'],
+    }),
+  ]))
+  expect(projectedDocuments.slice(2)).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      entityId: 'team/core-team/issue/onboarding-friction',
+      relationIds: [],
+    }),
+    expect.objectContaining({
+      entityId: 'team/core-team/issue/target-issue',
+      relationIds: [],
+    }),
+  ]))
+  expect(calls.issueDetails).toHaveLength(8)
+  expect([2, 3, 6, 7].map((index) => calls.issueDetails[index]?.readOptions)).toEqual([
+    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, eventLimit: 0 },
+  ])
+})
+
+test('keeps a relation mutation successful when current relation projection reads fail', async () => {
+  configureFakeProjectClients(true)
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations() {
+        throw new Error('Relation graph unavailable')
+      },
+    }),
+    workspaceSearch: {
+      async upsertDocument(document) {
+        return createWorkspaceSearchDocument(document)
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  const originalConsoleError = console.error
+  let projectionErrors = 0
+  console.error = () => {
+    projectionErrors += 1
+  }
+  try {
+    const response = await app.request(
+      '/api/teams/core-team/issues/onboarding-friction/relations',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          type: 'blocks',
+          targetWorkItemId: 'target-issue',
+          expectedGraphRevision: 4,
+        }),
+      },
+    )
+
+    expect(response.status).toBe(201)
+    expect(projectionErrors).toBe(2)
+  } finally {
+    console.error = originalConsoleError
+  }
+})
+
 test('denies project tasks when the project is outside the user directory', async () => {
   const calls = configureFakeProjectClients(false)
 
@@ -3462,7 +4411,7 @@ test('denies project tasks when the project is outside the user directory', asyn
   expect(calls.taskReads).toEqual([])
 })
 
-test('loads project tasks after project access is confirmed', async () => {
+test('loads only legacy project tasks after project access is confirmed', async () => {
   const calls = configureFakeProjectClients(true)
 
   const response = await app.request('/api/projects/refero/tasks', {
@@ -3474,29 +4423,21 @@ test('loads project tasks after project access is confirmed', async () => {
   expect(response.status).toBe(200)
   const body = await response.json()
   expect(body.projectId).toBe('refero')
-  expect(body.tasks.map((task: { id: string }) => task.id)).toEqual([
-    'onboarding-friction',
-    'wireframe',
-  ])
+  expect(body.tasks.map((task: { id: string }) => task.id)).toEqual(['wireframe'])
   expect(body.tasks[0]).toMatchObject({
-    schemaVersion: 1,
-    revision: 1,
-    teamId: 'core-team',
-    source: 'dynamodb',
-  })
-  expect(body.tasks[1]).toMatchObject({
-    schemaVersion: 1,
-    revision: 1,
-    teamId: 'core-team',
     source: 'legacy',
     titleKey: 'tasks.item.wireframe',
+    status: 'in-progress',
   })
+  expect(body.tasks[0]).not.toHaveProperty('workflowStatusId')
+  expect(body.tasks[0]).not.toHaveProperty('statusCategory')
   expect(calls.accessChecks).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
   expect(calls.taskReads).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
+  expect(calls.projectIssueReads).toEqual([])
 })
 
 test('lists Cognito users for project member assignment when the current user is project manager', async () => {
@@ -3616,11 +4557,8 @@ test('keeps project tasks available when Cognito assignee hydration fails', asyn
 
   expect(response.status).toBe(200)
   const body = await response.json()
-  expect(body.tasks.map((task: { id: string }) => task.id)).toEqual([
-    'onboarding-friction',
-    'wireframe',
-  ])
-  expect(body.tasks[1]).toMatchObject({
+  expect(body.tasks.map((task: { id: string }) => task.id)).toEqual(['wireframe'])
+  expect(body.tasks[0]).toMatchObject({
     id: 'wireframe',
     assigneeUserId: 'sato@example.com',
     source: 'legacy',
@@ -3937,10 +4875,10 @@ test('archives a team in the authenticated user scoped directory', async () => {
   ])
 })
 
-test('denies project task creation when the project role is viewer', async () => {
+test('denies project-assigned Work Item creation when the project role is viewer', async () => {
   const calls = configureFakeProjectClients(true, { role: 'viewer' })
 
-  const response = await app.request('/api/projects/refero/tasks', {
+  const response = await app.request('/api/teams/core-team/issues', {
     method: 'POST',
     headers: {
       Authorization: 'Bearer test-token',
@@ -3948,19 +4886,20 @@ test('denies project task creation when the project role is viewer', async () =>
     },
     body: JSON.stringify({
       title: '新規タスク',
+      assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
       dueDate: '2026/06/20',
       priority: 'high',
-      status: 'todo',
+      workflowStatusId: 'todo',
     }),
   })
 
   expect(response.status).toBe(403)
   expect(await response.json()).toEqual({ message: 'Project access is denied.' })
   expect(calls.accessChecks).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+    { directoryId: 'user#demo@example.com', projectId: '*' },
   ])
-  expect(calls.taskCreates).toEqual([])
+  expect(calls.issueCreates).toEqual([])
 })
 
 test('denies project member reads when the project role is viewer', async () => {
@@ -4588,158 +5527,35 @@ test('DynamoDB task client fails fast when a local table exists with the wrong s
   expect(queryAttempts).toBe(1)
 })
 
-test('creates a project task after project access is confirmed', async () => {
+test('does not expose legacy project task mutation routes', async () => {
   const calls = configureFakeProjectClients(true)
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
 
-  const response = await app.request('/api/projects/refero/tasks', {
-    method: 'POST',
-    headers: {
-      Authorization: 'Bearer test-token',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      title: '新規タスク',
-      assigneeUserId: 'sato@example.com',
-      dueDate: '2026/06/20',
-      priority: 'high',
-      status: 'todo',
+  const [createResponse, updateResponse] = await Promise.all([
+    app.request('/api/projects/refero/tasks', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ title: '新規タスク' }),
     }),
-  })
-
-  expect(response.status).toBe(201)
-  expect(await response.json()).toEqual({
-    task: {
-      schemaVersion: 1,
-      revision: 1,
-      teamId: 'core-team',
-      source: 'dynamodb',
-      id: 'new-issue',
-      title: '新規タスク',
-      assigneeUserId: 'sato@example.com',
-      assigneeEmail: 'sato@example.com',
-      assigneeName: '佐藤 花子',
-      status: 'todo',
-      dueDate: '2026/06/20',
-      priority: 'medium',
-      createdAt: '2026-06-08T00:00:00.000Z',
-      updatedAt: '2026-06-08T00:00:00.000Z',
-    },
-  })
-  expect(calls.accessChecks).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-    { directoryId: 'user#demo@example.com', projectId: '*' },
-  ])
-  expect(calls.taskCreates).toEqual([])
-  expect(calls.issueCreates).toEqual([
-    expect.objectContaining({
-      directoryId: 'user#demo@example.com',
-      teamId: 'core-team',
-      title: '新規タスク',
+    app.request('/api/projects/refero/tasks/wireframe', {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ status: 'done' }),
     }),
   ])
-  expect(calls.userProfiles).toEqual(['sato@example.com', 'sato@example.com'])
-})
 
-test('rejects project task creation when the canonical owner Team is ambiguous', async () => {
-  const calls = configureFakeProjectClients(true, {
-    additionalTeams: [{
-      id: 'design-team',
-      name: 'デザインチーム',
-      projects: [{ id: 'refero', name: 'Refero', tone: 'purple' }],
-    }],
-  })
-
-  const response = await app.request('/api/projects/refero/tasks', {
-    method: 'POST',
-    headers: {
-      Authorization: 'Bearer test-token',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      title: '曖昧なタスク',
-      assigneeUserId: 'sato@example.com',
-      dueDate: '2026/06/20',
-      priority: 'high',
-      status: 'todo',
-    }),
-  })
-
-  expect(response.status).toBe(409)
-  expect(await response.json()).toEqual({
-    code: 'AmbiguousProjectOwnerTeam',
-    message: 'Project "refero" belongs to more than one active Team.',
-  })
+  expect(createResponse.status).toBe(404)
+  expect(updateResponse.status).toBe(404)
+  expect(calls.accessChecks).toEqual([])
   expect(calls.issueCreates).toEqual([])
-  expect(calls.taskCreates).toEqual([])
-})
-
-test('rejects legacy project task status updates through the compatibility endpoint', async () => {
-  const calls = configureFakeProjectClients(true)
-
-  const response = await app.request('/api/projects/refero/tasks/wireframe', {
-    method: 'PATCH',
-    headers: {
-      Authorization: 'Bearer test-token',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      status: 'done',
-      expectedRevision: 1,
-    }),
-  })
-
-  expect(response.status).toBe(409)
-  expect(await response.json()).toEqual({
-    code: 'LegacyProjectTaskReadOnly',
-    message: 'Legacy project tasks are read-only.',
-  })
-  expect(calls.accessChecks).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-  ])
-  expect(calls.taskReads).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-  ])
-  expect(calls.projectIssueReads).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-  ])
-  expect(calls.taskStatusUpdates).toEqual([])
-})
-
-test('updates a canonical Work Item through the project task compatibility endpoint', async () => {
-  const calls = configureFakeProjectClients(true)
-
-  const response = await app.request('/api/projects/refero/tasks/onboarding-friction', {
-    method: 'PATCH',
-    headers: {
-      Authorization: 'Bearer test-token',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ status: 'done', expectedRevision: 1 }),
-  })
-
-  expect(response.status).toBe(200)
-  expect(await response.json()).toMatchObject({
-    task: {
-      schemaVersion: 1,
-      revision: 2,
-      id: 'onboarding-friction',
-      teamId: 'core-team',
-      source: 'dynamodb',
-      status: 'done',
-    },
-  })
+  expect(calls.issueUpdates).toEqual([])
   expect(calls.taskReads).toEqual([])
-  expect(calls.taskStatusUpdates).toEqual([])
-  expect(calls.issueUpdates).toEqual([
-    expect.objectContaining({
-      directoryId: 'user#demo@example.com',
-      issueId: 'onboarding-friction',
-      teamId: 'core-team',
-    }),
-  ])
 })
 
-test('loads team-owned issues with legacy project tasks after team access is confirmed', async () => {
+test('loads only canonical team-owned Work Items after team access is confirmed', async () => {
   const calls = configureFakeProjectClients(true, { taskAssigneeUserId: 'sato@example.com' })
 
   const response = await app.request('/api/teams/core-team/issues', {
@@ -4751,29 +5567,22 @@ test('loads team-owned issues with legacy project tasks after team access is con
   expect(response.status).toBe(200)
   const body = await response.json()
   expect(body.teamId).toBe('core-team')
-  expect(body.issues).toHaveLength(2)
-  expect(body.issues[0]).toMatchObject({
-    id: 'onboarding-friction',
-    teamId: 'core-team',
-    assignedProjectId: 'refero',
-    title: '初回オンボーディングの離脱要因を減らす',
-    assigneeEmail: 'sato@example.com',
-  })
-  expect(body.issues[1]).toMatchObject({
-    id: 'wireframe',
-    teamId: 'core-team',
-    assignedProjectId: 'refero',
-    titleKey: 'tasks.item.wireframe',
-  })
+  expect(body.issues).toEqual([
+    expect.objectContaining({
+      id: 'onboarding-friction',
+      teamId: 'core-team',
+      assignedProjectId: 'refero',
+      title: '初回オンボーディングの離脱要因を減らす',
+      assigneeEmail: 'sato@example.com',
+    }),
+  ])
   expect(calls.issueReads).toEqual([
     { directoryId: 'user#demo@example.com', teamId: 'core-team' },
   ])
-  expect(calls.taskReads).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-  ])
+  expect(calls.taskReads).toEqual([])
 })
 
-test('loads all accessible canonical and legacy Work Items including unassigned items', async () => {
+test('loads all accessible canonical Work Items including unassigned items', async () => {
   const calls = configureFakeProjectClients(true, {
     taskAssigneeUserId: 'sato@example.com',
     unassignedIssue: true,
@@ -4787,7 +5596,6 @@ test('loads all accessible canonical and legacy Work Items including unassigned 
   const body = await response.json()
   expect(body.workItems.map((workItem: { id: string }) => workItem.id)).toEqual([
     'onboarding-friction',
-    'wireframe',
   ])
   expect(body.workItems[0]).toMatchObject({
     schemaVersion: 1,
@@ -4796,27 +5604,15 @@ test('loads all accessible canonical and legacy Work Items including unassigned 
     source: 'dynamodb',
   })
   expect(body.workItems[0].assignedProjectId).toBeUndefined()
-  expect(body.workItems[1]).toMatchObject({
-    schemaVersion: 1,
-    revision: 1,
-    assignedProjectId: 'refero',
-    source: 'legacy',
-  })
   expect(calls.issueReads).toEqual([
     { directoryId: 'user#demo@example.com', limit: 1001, teamId: 'core-team' },
   ])
-  expect(calls.taskReads).toEqual([
-    { directoryId: 'user#demo@example.com', limit: 1001, projectId: 'refero' },
-  ])
-  expect(calls.projectIssueReads).toEqual([
-    { directoryId: 'user#demo@example.com', limit: 1001, projectId: 'refero' },
-  ])
-  expect(calls.migrationSourceBatchReads).toEqual([])
+  expect(calls.taskReads).toEqual([])
+  expect(calls.projectIssueReads).toEqual([])
 })
 
 test('rejects an oversized Work Item aggregate instead of returning a silent partial response', async () => {
   const calls = configureFakeProjectClients(true, {
-    legacyTaskIds: [],
     teamIssueCount: 201,
   })
 
@@ -4867,35 +5663,9 @@ test('rejects Work Item aggregate Team fan-out beyond the hard cap before item r
   expect(calls.projectIssueReads).toEqual([])
 })
 
-test('rejects Work Item aggregate legacy project fan-out beyond the hard cap', async () => {
-  const teamProjects = Array.from({ length: 101 }, (_, projectIndex) => ({
-    id: `project-${projectIndex}`,
-    name: `Project ${projectIndex}`,
-    tone: 'blue' as const,
-  }))
-  const calls = configureFakeProjectClients(true, {
-    projectAccesses: teamProjects.map((project) => ({
-      projectId: project.id,
-      role: 'manager' as const,
-    })),
-    teamProjects,
-  })
-
-  const response = await app.request('/api/work-items', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(413)
-  expect(await response.json()).toMatchObject({ code: 'WorkItemListLimitExceeded' })
-  expect(calls.issueReads).toEqual([])
-  expect(calls.taskReads).toEqual([])
-  expect(calls.projectIssueReads).toEqual([])
-})
-
 test('filters canonical Work Items for authorization before enforcing the response limit', async () => {
   const calls = configureFakeProjectClients(true, {
     inaccessibleTeamIssueCount: 200,
-    legacyTaskIds: [],
     teamIssueCount: 201,
   })
 
@@ -4916,7 +5686,6 @@ test('filters canonical Work Items for authorization before enforcing the respon
 test('rejects a canonical partition that exceeds the bounded Work Item scan budget', async () => {
   const calls = configureFakeProjectClients(true, {
     inaccessibleTeamIssueCount: 1001,
-    legacyTaskIds: [],
     teamIssueCount: 1001,
   })
 
@@ -4933,73 +5702,7 @@ test('rejects a canonical partition that exceeds the bounded Work Item scan budg
   expect(calls.projectIssueReads).toEqual([])
 })
 
-test('deduplicates bounded legacy candidates before enforcing the response limit', async () => {
-  const legacyTaskIds = Array.from({ length: 200 }, (_, index) => `legacy-${index}`)
-  configureFakeProjectClients(true, {
-    canonicalProjectIssueIds: legacyTaskIds.slice(0, 199),
-    legacyTaskIds,
-  })
-
-  const response = await app.request('/api/work-items', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.workItems.map((workItem: { id: string }) => workItem.id)).toEqual([
-    'onboarding-friction',
-    'legacy-199',
-  ])
-})
-
-test('checks canonical counterparts beyond the response limit before projecting legacy rows', async () => {
-  const canonicalProjectIssueIds = [
-    ...Array.from({ length: 220 }, (_, index) => `canonical-${index}`),
-    'late-counterpart',
-  ]
-  configureFakeProjectClients(true, {
-    canonicalProjectIssueIds,
-    legacyTaskIds: ['late-counterpart', 'unmigrated'],
-  })
-
-  const response = await app.request('/api/work-items', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.workItems.map((workItem: { id: string }) => workItem.id)).toEqual([
-    'onboarding-friction',
-    'unmigrated',
-  ])
-})
-
-test('suppresses a shared project legacy projection after migration to another owner Team', async () => {
-  configureFakeProjectClients(true, {
-    additionalTeams: [{
-      id: 'design-team',
-      name: 'デザインチーム',
-      projects: [{ id: 'refero', name: 'Refero', tone: 'purple' }],
-    }],
-    migratedLegacyOwnerTeamId: 'design-team',
-  })
-
-  const response = await app.request('/api/work-items', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.workItems.filter((workItem: { id: string }) => workItem.id === 'wireframe')).toEqual([
-    expect.objectContaining({
-      id: 'wireframe',
-      teamId: 'design-team',
-      source: 'dynamodb',
-    }),
-  ])
-})
-
-test('does not assign shared-project legacy rows to an arbitrary Team in compatibility reads', async () => {
+test('keeps shared-project legacy rows isolated to the read-only task adapter', async () => {
   const calls = configureFakeProjectClients(true, {
     additionalTeams: [{
       id: 'design-team',
@@ -5020,264 +5723,16 @@ test('does not assign shared-project legacy rows to an arbitrary Team in compati
   expect(detailResponse.status).toBe(404)
   expect(aggregateResponse.status).toBe(200)
   expect((await projectResponse.json()).tasks).toEqual([
-    expect.objectContaining({ id: 'onboarding-friction', source: 'dynamodb' }),
+    expect.objectContaining({ id: 'wireframe', source: 'legacy' }),
   ])
   expect((await teamResponse.json()).issues).toEqual([
     expect.objectContaining({ id: 'onboarding-friction', source: 'dynamodb' }),
   ])
   expect((await aggregateResponse.json()).workItems)
     .not.toContainEqual(expect.objectContaining({ id: 'wireframe' }))
-  expect(calls.taskReads).toEqual([])
-  expect(calls.migrationSourceBatchReads).toEqual([])
-})
-
-test('keeps a migrated legacy source suppressed after reassignment to an inaccessible project', async () => {
-  const calls = configureFakeProjectClients(true, {
-    additionalTeams: [{
-      id: 'design-team',
-      name: 'デザインチーム',
-      projects: [
-        { id: 'refero', name: 'Refero', tone: 'purple' },
-        { id: 'private-project', name: 'Private', tone: 'purple' },
-      ],
-    }],
-    migratedLegacyAssignedProjectId: 'private-project',
-    migratedLegacyOwnerTeamId: 'design-team',
-    migratedLegacySourceProjectId: 'refero',
-    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
-  })
-
-  const response = await app.request('/api/work-items', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.workItems.filter((workItem: { id: string }) => workItem.id === 'wireframe'))
-    .toEqual([])
-  expect(calls.issueReads).toEqual([
-    { directoryId: 'user#demo@example.com', limit: 1001, teamId: 'core-team' },
-    { directoryId: 'user#demo@example.com', limit: 1001, teamId: 'design-team' },
-  ])
-  expect(calls.projectIssueReads).toEqual([])
-  expect(calls.migrationSourceBatchReads).toEqual([])
-})
-
-test('does not suppress a legacy projection for a metadata-less same-Team canonical row', async () => {
-  const calls = configureFakeProjectClients(true, {
-    migratedLegacyAssignedProjectId: 'private-project',
-    migratedLegacyHasSourceMetadata: false,
-    migratedLegacyOwnerTeamId: 'core-team',
-    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
-    teamProjects: [
-      { id: 'refero', name: 'Refero', tone: 'blue' },
-      { id: 'private-project', name: 'Private', tone: 'purple' },
-    ],
-  })
-
-  const response = await app.request('/api/work-items', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.workItems.filter((workItem: { id: string }) => workItem.id === 'wireframe'))
-    .toEqual([
-      expect.objectContaining({
-        id: 'wireframe',
-        source: 'legacy',
-        teamId: 'core-team',
-      }),
-    ])
-  expect(calls.migrationSourceBatchReads).toEqual([])
-})
-
-test('keeps an accessible metadata-less canonical row ahead of its legacy projection', async () => {
-  const calls = configureFakeProjectClients(true, {
-    migratedLegacyHasSourceMetadata: false,
-    migratedLegacyOwnerTeamId: 'core-team',
-    migratedLegacyUnassigned: true,
-    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
-  })
-
-  const response = await app.request('/api/work-items', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.workItems.filter((workItem: { id: string }) => workItem.id === 'wireframe'))
-    .toEqual([
-      expect.objectContaining({
-        id: 'wireframe',
-        source: 'dynamodb',
-        teamId: 'core-team',
-      }),
-    ])
-  expect(calls.migrationSourceBatchReads).toEqual([])
-})
-
-test('does not let a project A migration source suppress a project B legacy task with the same ID', async () => {
-  const calls = configureFakeProjectClients(true, {
-    legacyTaskIds: ['wireframe'],
-    migratedLegacyAssignedProjectId: 'private-project',
-    migratedLegacyOwnerTeamId: 'core-team',
-    migratedLegacySourceProjectId: 'project-a',
-    projectAccesses: [{ projectId: 'project-b', role: 'manager' }],
-    teamProjects: [
-      { id: 'project-a', name: 'Project A', tone: 'blue' },
-      { id: 'project-b', name: 'Project B', tone: 'green' },
-      { id: 'private-project', name: 'Private', tone: 'purple' },
-    ],
-  })
-
-  const response = await app.request('/api/projects/project-b/tasks', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.tasks.filter((task: { id: string }) => task.id === 'wireframe')).toEqual([
-    expect.objectContaining({ id: 'wireframe', source: 'legacy' }),
-  ])
-  expect(calls.migrationSourceBatchReads).toEqual([{
-    directoryId: 'user#demo@example.com',
-    keys: [{ issueId: 'wireframe', teamId: 'core-team' }],
-  }])
-})
-
-test('maps an incomplete migration BatchGet lookup to service unavailable', async () => {
-  configureFakeProjectClients(true)
-  const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      if ('RequestItems' in command.input) {
-        return { UnprocessedKeys: command.input.RequestItems }
-      }
-
-      return { Items: [] }
-    },
-  } as unknown as DynamoDBDocumentClient
-  configureApiClientsForTest({
-    teamIssues: new DynamoDbTeamIssuesClient(
-      'WorkItemsTable',
-      'IssueEventsTable',
-      documentClient,
-      {} as DynamoDBClient,
-      false,
-      undefined,
-      async () => {},
-    ) as never,
-  })
-
-  const response = await app.request('/api/projects/refero/tasks', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(503)
-  expect(await response.json()).toEqual({
-    code: 'TeamIssueMigrationLookupIncomplete',
-    message: 'Work Item migration identity lookup could not process every key.',
-  })
-})
-
-test('suppresses reassigned migrations in project, Team, and detail compatibility reads', async () => {
-  const calls = configureFakeProjectClients(true, {
-    migratedLegacyAssignedProjectId: 'private-project',
-    migratedLegacyOwnerTeamId: 'core-team',
-    migratedLegacySourceProjectId: 'refero',
-    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
-    teamProjects: [
-      { id: 'refero', name: 'Refero', tone: 'blue' },
-      { id: 'private-project', name: 'Private', tone: 'purple' },
-    ],
-  })
-  const headers = { Authorization: 'Bearer test-token' }
-
-  const projectResponse = await app.request('/api/projects/refero/tasks', { headers })
-  const teamResponse = await app.request('/api/teams/core-team/issues', { headers })
-  const detailResponse = await app.request('/api/teams/core-team/issues/wireframe', { headers })
-
-  expect(projectResponse.status).toBe(200)
-  expect(teamResponse.status).toBe(200)
-  expect(detailResponse.status).toBe(404)
-  const projectBody = await projectResponse.json()
-  const teamBody = await teamResponse.json()
-  expect(projectBody.tasks.some((task: { id: string }) => task.id === 'wireframe')).toBe(false)
-  expect(teamBody.issues.some((issue: { id: string }) => issue.id === 'wireframe')).toBe(false)
-  expect(calls.migrationSourceBatchReads).toHaveLength(3)
-  expect(calls.migrationSourceBatchReads).toContainEqual({
-    directoryId: 'user#demo@example.com',
-    keys: [{ issueId: 'wireframe', teamId: 'core-team' }],
-  })
-})
-
-test('loads legacy project task rows as team issue detail fallback', async () => {
-  const calls = configureFakeProjectClients(true, { taskAssigneeUserId: 'sato@example.com' })
-
-  const response = await app.request('/api/teams/core-team/issues/wireframe', {
-    headers: {
-      Authorization: 'Bearer test-token',
-    },
-  })
-
-  expect(response.status).toBe(200)
-  expect(await response.json()).toMatchObject({
-    issue: {
-      id: 'wireframe',
-      teamId: 'core-team',
-      assignedProjectId: 'refero',
-      titleKey: 'tasks.item.wireframe',
-      assigneeUserId: 'sato@example.com',
-      assigneeEmail: 'sato@example.com',
-      status: 'in-progress',
-      dueDate: '2026/06/03',
-      priority: 'high',
-    },
-    comments: [],
-    activity: [],
-  })
-  expect(calls.issueDetails).toEqual([
-    {
-      directoryId: 'user#demo@example.com',
-      teamId: 'core-team',
-      issueId: 'wireframe',
-      readOptions: { consistentIssueRead: true },
-    },
-  ])
   expect(calls.taskReads).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
-})
-
-test('rejects legacy project task updates through the team Work Item endpoint', async () => {
-  const calls = configureFakeProjectClients(true, { taskAssigneeUserId: 'sato@example.com' })
-
-  const response = await app.request('/api/teams/core-team/issues/wireframe', {
-    method: 'PATCH',
-    headers: {
-      Authorization: 'Bearer test-token',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ status: 'done', expectedRevision: 1 }),
-  })
-
-  expect(response.status).toBe(409)
-  expect(await response.json()).toEqual({
-    code: 'LegacyProjectTaskReadOnly',
-    message: 'Legacy project tasks are read-only.',
-  })
-  expect(calls.issueDetails).toEqual([
-    {
-      directoryId: 'user#demo@example.com',
-      teamId: 'core-team',
-      issueId: 'wireframe',
-      readOptions: { consistentIssueRead: true, eventLimit: 0 },
-    },
-  ])
-  expect(calls.taskReads).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-  ])
-  expect(calls.issueUpdates).toEqual([])
 })
 
 test('creates a team-owned issue after team access is confirmed', async () => {
@@ -5296,7 +5751,7 @@ test('creates a team-owned issue after team access is confirmed', async () => {
       assigneeUserId: 'sato@example.com',
       dueDate: '2026/06/20',
       priority: 'medium',
-      status: 'todo',
+      workflowStatusId: 'todo',
     }),
   })
 
@@ -5311,9 +5766,14 @@ test('creates a team-owned issue after team access is confirmed', async () => {
       title: '新規 Issue',
       description: 'Issue の説明',
       assigneeUserId: 'sato@example.com',
+      creatorMemberKey: 'demo@example.com',
       assigneeEmail: 'sato@example.com',
       assigneeName: '佐藤 花子',
-      status: 'todo',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      relationIds: [],
       dueDate: '2026/06/20',
       priority: 'medium',
       createdAt: '2026-06-08T00:00:00.000Z',
@@ -5326,9 +5786,10 @@ test('creates a team-owned issue after team access is confirmed', async () => {
       actorUserId: 'demo@example.com',
       assignedProjectId: 'refero',
       directoryId: 'user#demo@example.com',
-      reservedIssueIds: ['wireframe'],
+      statusCategory: 'unstarted',
       teamId: 'core-team',
       title: '新規 Issue',
+      workflowStatusId: 'todo',
     },
   ])
 })
@@ -5522,6 +5983,153 @@ test('loads team issue detail and creates comments after team access is confirme
       { id: 'comment-2', body: '追加コメント' },
     ],
   })
+})
+
+test('omits relations whose target Project is outside the viewer access scope', async () => {
+  const calls = configureFakeProjectClients(true, {
+    detailAssignedProjectIds: { 'onboarding-friction': 'private-project' },
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+  })
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations() {
+        return {
+          graphRevision: 2,
+          relations: [{
+            sourceWorkItemId: 'work-item-1',
+            targetWorkItemId: 'onboarding-friction',
+            type: 'related',
+            createdAt: '2026-07-14T00:00:00.000Z',
+          }, {
+            sourceWorkItemId: 'work-item-1',
+            targetWorkItemId: 'onboarding-friction',
+            type: 'blocks',
+            createdAt: '2026-07-14T00:01:00.000Z',
+          }],
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/work-item-1', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    relations: [],
+    relationGraphRevision: 2,
+  })
+  expect(calls.issueReads).toEqual([])
+  expect(calls.issueDetails).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      teamId: 'core-team',
+      issueId: 'work-item-1',
+      readOptions: { consistentIssueRead: true },
+    },
+    {
+      directoryId: 'user#demo@example.com',
+      teamId: 'core-team',
+      issueId: 'onboarding-friction',
+      readOptions: { consistentIssueRead: true, eventLimit: 0 },
+    },
+  ])
+})
+
+test('loads deduplicated relation targets with bounded concurrency and preserves relation order', async () => {
+  const targetWorkItemIds = Array.from({ length: 12 }, (_, index) => `target-${index}`)
+  const relations = [
+    ...targetWorkItemIds.map((targetWorkItemId, index) => ({
+      sourceWorkItemId: 'source-work-item',
+      targetWorkItemId,
+      type: 'related' as const,
+      createdAt: `2026-07-14T00:${String(index).padStart(2, '0')}:00.000Z`,
+    })),
+    {
+      sourceWorkItemId: 'source-work-item',
+      targetWorkItemId: targetWorkItemIds[0] as string,
+      type: 'blocks' as const,
+      createdAt: '2026-07-14T01:00:00.000Z',
+    },
+  ]
+  let activeTargetReads = 0
+  let maximumActiveTargetReads = 0
+  const calls = configureFakeProjectClients(true, {
+    async detailReadHook(issueId) {
+      if (!issueId.startsWith('target-')) return
+      activeTargetReads += 1
+      maximumActiveTargetReads = Math.max(maximumActiveTargetReads, activeTargetReads)
+      await Promise.resolve()
+      activeTargetReads -= 1
+    },
+  })
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations() {
+        return { graphRevision: 4, relations }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/source-work-item', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const body = await response.json() as { relations: Array<{ targetWorkItemId: string }> }
+
+  expect(response.status).toBe(200)
+  expect(maximumActiveTargetReads).toBe(8)
+  expect(calls.issueReads).toEqual([])
+  expect(
+    calls.issueDetails
+      .filter(({ issueId }) => issueId.startsWith('target-'))
+      .map(({ issueId }) => issueId),
+  ).toEqual(targetWorkItemIds)
+  expect(body.relations.map(({ targetWorkItemId }) => targetWorkItemId)).toEqual(
+    relations.map(({ targetWorkItemId }) => targetWorkItemId),
+  )
+})
+
+test('fails closed when a persisted relation target Work Item is missing', async () => {
+  const calls = configureFakeProjectClients(true, {
+    detailMissingIssueIds: ['missing-target'],
+  })
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations() {
+        return {
+          graphRevision: 3,
+          relations: [{
+            sourceWorkItemId: 'work-item-1',
+            targetWorkItemId: 'missing-target',
+            type: 'related',
+            createdAt: '2026-07-14T00:00:00.000Z',
+          }],
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/work-item-1', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toEqual({
+    code: 'WorkItemRelationInconsistent',
+    message: 'A relation target Work Item is missing.',
+  })
+  expect(calls.issueReads).toEqual([])
+  expect(calls.issueDetails.map(({ issueId, readOptions }) => ({ issueId, readOptions }))).toEqual([
+    {
+      issueId: 'work-item-1',
+      readOptions: { consistentIssueRead: true },
+    },
+    {
+      issueId: 'missing-target',
+      readOptions: { consistentIssueRead: true, eventLimit: 0 },
+    },
+  ])
 })
 
 test('returns persisted collaboration comments together with inert legacy comments and reply cursors', async () => {
@@ -6092,7 +6700,7 @@ test('updates a team-owned issue after team access is confirmed', async () => {
       assigneeUserId: 'sato@example.com',
       dueDate: '2026/06/22',
       priority: 'low',
-      status: 'done',
+      workflowStatusId: 'done',
       expectedRevision: 1,
     }),
   })
@@ -6104,7 +6712,8 @@ test('updates a team-owned issue after team access is confirmed', async () => {
       teamId: 'core-team',
       title: '更新済み Issue',
       assigneeEmail: 'sato@example.com',
-      status: 'done',
+      workflowStatusId: 'done',
+      statusCategory: 'completed',
       dueDate: '2026/06/22',
       priority: 'low',
     },
@@ -6140,7 +6749,12 @@ test('returns a stable conflict code when a Work Item revision is stale', async 
     sortOrder: 10,
     title: '初回オンボーディングの離脱要因を減らす',
     assigneeUserId: 'sato@example.com',
-    status: 'in-progress',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'in-progress',
+    statusCategory: 'started',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/18',
     priority: 'high',
     createdAt: '2026-06-08T00:00:00.000Z',
@@ -6170,7 +6784,7 @@ test('returns a stable conflict code when a Work Item revision is stale', async 
       Authorization: 'Bearer test-token',
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ status: 'done', expectedRevision: 1 }),
+    body: JSON.stringify({ workflowStatusId: 'done', expectedRevision: 1 }),
   })
 
   expect(response.status).toBe(409)
@@ -6189,7 +6803,7 @@ test('requires a positive expected revision for Work Item updates', async () => 
       Authorization: 'Bearer test-token',
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ status: 'done' }),
+    body: JSON.stringify({ workflowStatusId: 'done' }),
   })
 
   expect(response.status).toBe(400)
@@ -6199,7 +6813,7 @@ test('requires a positive expected revision for Work Item updates', async () => 
   })
 })
 
-test('loads project execution issues with legacy task compatibility', async () => {
+test('loads only canonical project execution Work Items', async () => {
   const calls = configureFakeProjectClients(true, { taskAssigneeUserId: 'sato@example.com' })
 
   const response = await app.request('/api/projects/refero/issues', {
@@ -6213,14 +6827,11 @@ test('loads project execution issues with legacy task compatibility', async () =
   expect(body.projectId).toBe('refero')
   expect(body.issues.map((issue: { id: string }) => issue.id)).toEqual([
     'onboarding-friction',
-    'wireframe',
   ])
   expect(calls.projectIssueReads).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
-  expect(calls.taskReads).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-  ])
+  expect(calls.taskReads).toEqual([])
 })
 
 test('DynamoDB task client queries the scoped project partition across pages', async () => {
@@ -6276,6 +6887,7 @@ test('DynamoDB task client queries the scoped project partition across pages', a
     projectId: 'refero',
     tasks: [
       {
+        source: 'legacy',
         id: 'wireframe',
         titleKey: 'tasks.item.wireframe',
         assigneeKey: 'tasks.assignee.sato',
@@ -6284,6 +6896,7 @@ test('DynamoDB task client queries the scoped project partition across pages', a
         priority: 'high',
       },
       {
+        source: 'legacy',
         id: 'brand-guideline',
         titleKey: 'tasks.item.brandGuideline',
         assigneeKey: 'tasks.assignee.suzuki',
@@ -6320,7 +6933,7 @@ test('DynamoDB task client queries the scoped project partition across pages', a
   ])
 })
 
-test('DynamoDB Work Item list clients stop pagination at the requested read limit', async () => {
+test('DynamoDB task and Work Item list clients stop pagination at the requested read limit', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const legacyTask = {
     directoryId: 'user#demo@example.com',
@@ -6330,6 +6943,7 @@ test('DynamoDB Work Item list clients stop pagination at the requested read limi
     sortOrder: 10,
     title: 'Wireframe',
     assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
     status: 'todo',
     dueDate: '2026/06/03',
     priority: 'high',
@@ -6346,7 +6960,12 @@ test('DynamoDB Work Item list clients stop pagination at the requested read limi
     sortOrder: 10,
     title: 'Wireframe',
     assigneeUserId: 'sato@example.com',
-    status: 'todo',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/03',
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
@@ -6383,7 +7002,7 @@ test('DynamoDB Work Item list clients stop pagination at the requested read limi
   expect(sentInputs.map((input) => input.Limit)).toEqual([1, 1, 1])
 })
 
-test('DynamoDB Work Item list clients skip DynamoDB reads when limit is zero', async () => {
+test('DynamoDB task and Work Item list clients skip DynamoDB reads when limit is zero', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const documentClient = {
     async send(command: { input: Record<string, unknown> }) {
@@ -6417,6 +7036,37 @@ test('DynamoDB Work Item list clients skip DynamoDB reads when limit is zero', a
   expect(sentInputs).toEqual([])
 })
 
+test('DynamoDB Team Work Item reads can use the strongly consistent base table', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return { Items: [] }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await client.getTeamIssues('user#demo@example.com', 'core-team', {
+    consistentRead: true,
+  })
+
+  expect(sentInputs).toEqual([{
+    TableName: 'WorkItemsTable',
+    ConsistentRead: true,
+    KeyConditionExpression: 'directoryTeamId = :directoryTeamId',
+    ExpressionAttributeValues: {
+      ':directoryTeamId': 'user#demo@example.com#team#core-team',
+    },
+    ExclusiveStartKey: undefined,
+  }])
+})
+
 test('DynamoDB Team and project Work Item clients read every page without a default Limit', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const pageCounts = new Map<string, number>()
@@ -6432,7 +7082,12 @@ test('DynamoDB Team and project Work Item clients read every page without a defa
     sortOrder: 10,
     title: 'Work Item',
     assigneeUserId: 'sato@example.com',
-    status: 'todo',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/03',
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
@@ -6480,224 +7135,6 @@ test('DynamoDB Team and project Work Item clients read every page without a defa
   expect(sentInputs.every((input) => !('Limit' in input))).toBe(true)
 })
 
-test('DynamoDB aggregate Work Item reads retain only validated private migration source metadata', async () => {
-  let migrationSourceKey =
-    'user#demo@example.com#project#refero#task#wireframe'
-  const canonicalWorkItem = {
-    schemaVersion: 1,
-    revision: 1,
-    directoryId: 'user#demo@example.com',
-    directoryTeamId: 'user#demo@example.com#team#core-team',
-    directoryProjectId: 'user#demo@example.com#project#private-project',
-    teamId: 'core-team',
-    assignedProjectId: 'private-project',
-    issueId: 'wireframe',
-    sortOrder: 10,
-    title: 'Migrated Work Item',
-    assigneeUserId: 'sato@example.com',
-    status: 'todo',
-    dueDate: '2026/06/03',
-    priority: 'high',
-    createdAt: '2026-07-12T00:00:00.000Z',
-    updatedAt: '2026-07-12T00:00:00.000Z',
-  }
-  const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      const item = { ...canonicalWorkItem, migrationSourceKey }
-      return 'Key' in command.input ? { Item: item } : { Items: [item] }
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbTeamIssuesClient(
-    'WorkItemsTable',
-    'IssueEventsTable',
-    documentClient,
-    {} as DynamoDBClient,
-    false,
-  )
-
-  const response = await client.getTeamIssuesForAggregate(
-    'user#demo@example.com',
-    'core-team',
-  )
-
-  expect(response.migrationSourceKeys).toEqual([
-    'user#demo@example.com#project#refero#task#wireframe',
-  ])
-  expect(response.issues[0]).not.toHaveProperty('migrationSourceKey')
-
-  migrationSourceKey = 'user#demo@example.com#project#refero#task#another-item'
-  await expect(
-    client.getTeamIssuesForAggregate('user#demo@example.com', 'core-team'),
-  ).rejects.toMatchObject({ code: 'InvalidTeamIssue', status: 503 })
-
-  migrationSourceKey = 'another-workspace#project#refero#task#wireframe'
-  await expect(
-    client.getTeamIssuesForAggregate('user#demo@example.com', 'core-team'),
-  ).rejects.toMatchObject({ code: 'InvalidTeamIssue', status: 503 })
-})
-
-test('DynamoDB migration source lookup chunks strongly consistent BatchGet requests', async () => {
-  const sentInputs: Array<Record<string, unknown>> = []
-  const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      sentInputs.push(command.input)
-      return {}
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbTeamIssuesClient(
-    'WorkItemsTable',
-    'IssueEventsTable',
-    documentClient,
-    {} as DynamoDBClient,
-    false,
-  )
-
-  await expect(client.getTeamIssueMigrationSourceKeys(
-    'user#demo@example.com',
-    Array.from({ length: 101 }, (_, index) => ({
-      teamId: 'core-team',
-      issueId: `work-item-${index}`,
-    })),
-  )).resolves.toEqual(new Set())
-
-  expect(sentInputs).toHaveLength(2)
-  const tableRequests = sentInputs.map((input) =>
-    (input.RequestItems as Record<string, {
-      ConsistentRead?: boolean
-      Keys: Array<Record<string, unknown>>
-    }>).WorkItemsTable
-  )
-  expect(tableRequests.map((request) => request.Keys.length)).toEqual([100, 1])
-  expect(tableRequests.every((request) => request.ConsistentRead === true)).toBe(true)
-})
-
-test('DynamoDB migration source lookup retries UnprocessedKeys and returns exact metadata', async () => {
-  let attempt = 0
-  const retryDelays: number[] = []
-  const canonicalWorkItem = {
-    schemaVersion: 1,
-    revision: 1,
-    directoryId: 'user#demo@example.com',
-    directoryTeamId: 'user#demo@example.com#team#core-team',
-    directoryProjectId: 'user#demo@example.com#project#private-project',
-    teamId: 'core-team',
-    assignedProjectId: 'private-project',
-    issueId: 'wireframe',
-    sortOrder: 10,
-    title: 'Migrated Work Item',
-    assigneeUserId: 'sato@example.com',
-    status: 'todo',
-    dueDate: '2026/06/03',
-    priority: 'high',
-    createdAt: '2026-07-12T00:00:00.000Z',
-    updatedAt: '2026-07-12T00:00:00.000Z',
-    migrationSourceKey: 'user#demo@example.com#project#refero#task#wireframe',
-  }
-  const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      attempt += 1
-      const requestItems = command.input.RequestItems as Record<string, {
-        Keys: Array<Record<string, unknown>>
-      }>
-      if (attempt === 1) {
-        return { UnprocessedKeys: requestItems }
-      }
-
-      return { Responses: { WorkItemsTable: [canonicalWorkItem] } }
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbTeamIssuesClient(
-    'WorkItemsTable',
-    'IssueEventsTable',
-    documentClient,
-    {} as DynamoDBClient,
-    false,
-    undefined,
-    async (ms) => {
-      retryDelays.push(ms)
-    },
-    () => 0.5,
-  )
-
-  await expect(client.getTeamIssueMigrationSourceKeys(
-    'user#demo@example.com',
-    [{ teamId: 'core-team', issueId: 'wireframe' }],
-  )).resolves.toEqual(new Set([
-    'user#demo@example.com#project#refero#task#wireframe',
-  ]))
-  expect(attempt).toBe(2)
-  expect(retryDelays).toEqual([37])
-})
-
-test('DynamoDB migration source lookup fails closed when UnprocessedKeys remain', async () => {
-  let attempts = 0
-  const retryDelays: number[] = []
-  const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      attempts += 1
-      return {
-        UnprocessedKeys: command.input.RequestItems,
-      }
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbTeamIssuesClient(
-    'WorkItemsTable',
-    'IssueEventsTable',
-    documentClient,
-    {} as DynamoDBClient,
-    false,
-    undefined,
-    async (ms) => {
-      retryDelays.push(ms)
-    },
-    () => 0.5,
-  )
-
-  await expect(client.getTeamIssueMigrationSourceKeys(
-    'user#demo@example.com',
-    [{ teamId: 'core-team', issueId: 'wireframe' }],
-  )).rejects.toMatchObject({
-    code: 'TeamIssueMigrationLookupIncomplete',
-    status: 503,
-  })
-  expect(attempts).toBe(3)
-  expect(retryDelays).toEqual([37, 75])
-})
-
-test('DynamoDB legacy task client rejects mutations without sending writes', async () => {
-  const sentInputs: Array<Record<string, unknown>> = []
-  const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      sentInputs.push(command.input)
-      return {}
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbProjectTasksClient('TasksTable', documentClient)
-
-  await expect(
-    client.createProjectTask('user#demo@example.com', 'refero', {
-      title: '新規タスク',
-      assigneeUserId: 'suzuki@example.com',
-      status: 'todo',
-      dueDate: '2026/06/21',
-      priority: 'medium',
-    }),
-  ).rejects.toMatchObject({
-    code: 'LegacyProjectTaskReadOnly',
-    status: 409,
-  })
-  await expect(
-    client.updateProjectTaskStatus('user#demo@example.com', 'refero', 'wireframe', {
-      status: 'done',
-      expectedRevision: 1,
-    }),
-  ).rejects.toMatchObject({
-    code: 'LegacyProjectTaskReadOnly',
-    status: 409,
-  })
-  expect(sentInputs).toEqual([])
-})
-
 test('DynamoDB Work Item client increments revision with an atomic CAS update', async () => {
   const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
   const currentIssue = {
@@ -6712,7 +7149,12 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
     sortOrder: 10,
     title: 'Wireframe',
     assigneeUserId: 'sato@example.com',
-    status: 'todo',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/03',
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
@@ -6727,7 +7169,12 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
         return {
           Item: reads === 1
             ? currentIssue
-            : { ...currentIssue, revision: 2, status: 'done' },
+            : {
+                ...currentIssue,
+                revision: 2,
+                workflowStatusId: 'done',
+                statusCategory: 'completed',
+              },
         }
       }
 
@@ -6746,10 +7193,16 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
     'user#demo@example.com',
     'core-team',
     'wireframe',
-    { status: 'done', expectedRevision: 1 },
+    {
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'done',
+      statusCategory: 'completed',
+      customFieldValues: {},
+      expectedRevision: 1,
+    },
     'demo@example.com',
   )).resolves.toMatchObject({
-    issue: { schemaVersion: 1, revision: 2, status: 'done' },
+    issue: { schemaVersion: 1, revision: 2, workflowStatusId: 'done' },
   })
   const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
   const transactItems = transaction?.input.TransactItems
@@ -6761,10 +7214,134 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
       },
       ConditionExpression:
         'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
-        '(#revision = :expectedRevision OR ' +
-        '(attribute_not_exists(#revision) AND :expectedRevision = :legacyRevision))',
+        '#revision = :expectedRevision',
     },
   })
+})
+
+test('DynamoDB Work Item client classifies configuration conflicts from the actual transaction layout', async () => {
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#refero',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    issueId: 'wireframe',
+    sortOrder: 10,
+    title: 'Wireframe',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/06/03',
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'demo@example.com', kind: 'user' },
+    idempotencyKey: 'configuration-conflict',
+    occurredAt: '2026-07-12T00:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/teams/core-team/issues/wireframe' },
+    source: { kind: 'api', requestId: 'configuration-conflict' },
+  })
+  const configurationConditionChecks: NonNullable<
+    TransactWriteCommandInput['TransactItems']
+  > = [{
+    ConditionCheck: {
+      TableName: 'ConfigurationTable',
+      Key: { workspaceId: 'workspace-1', scopeKey: 'WORK_ITEM_CONFIGURATION#TEAM#core-team' },
+      ConditionExpression: '#revision = :expectedRevision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':expectedRevision': 1 },
+    },
+  }]
+
+  for (const operation of ['create', 'update'] as const) {
+    for (const auditEnabled of [false, true]) {
+      let configurationConditionIndex = -1
+      const documentClient = {
+        async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+          if (command.constructor.name === 'QueryCommand') {
+            return { Items: [] }
+          }
+          if (command.constructor.name === 'GetCommand') {
+            return { Item: currentIssue }
+          }
+          if (command.constructor.name === 'TransactWriteCommand') {
+            const transactItems = command.input.TransactItems as Array<{
+              ConditionCheck?: { TableName?: string }
+            }>
+            configurationConditionIndex = transactItems.findIndex((item) =>
+              item.ConditionCheck?.TableName === 'ConfigurationTable'
+            )
+            const error = new Error('Transaction was canceled.')
+            error.name = 'TransactionCanceledException'
+            Object.assign(error, {
+              CancellationReasons: transactItems.map((_, index) => ({
+                Code: index === configurationConditionIndex ? 'ConditionalCheckFailed' : 'None',
+              })),
+            })
+            throw error
+          }
+          return {}
+        },
+      } as unknown as DynamoDBDocumentClient
+      const client = new DynamoDbTeamIssuesClient(
+        'IssuesTable',
+        'IssueEventsTable',
+        documentClient,
+        {} as DynamoDBClient,
+        false,
+        auditEnabled ? 'AuditTable' : undefined,
+      )
+      const mutation = operation === 'create'
+        ? client.createTeamIssue(
+            'workspace-1',
+            'core-team',
+            {
+              title: 'New Work Item',
+              assigneeUserId: 'sato@example.com',
+              workflowSchemaVersion: 1,
+              workflowStatusId: 'todo',
+              statusCategory: 'unstarted',
+              customFieldValues: {},
+              dueDate: '2026/07/20',
+              priority: 'medium',
+              configurationConditionChecks,
+            },
+            'demo@example.com',
+            auditEnabled ? auditContext : undefined,
+          )
+        : client.updateTeamIssue(
+            'workspace-1',
+            'core-team',
+            'wireframe',
+            {
+              workflowSchemaVersion: 1,
+              workflowStatusId: 'done',
+              statusCategory: 'completed',
+              customFieldValues: {},
+              expectedRevision: 1,
+              configurationConditionChecks,
+            },
+            'demo@example.com',
+            auditEnabled ? auditContext : undefined,
+          )
+
+      await expect(mutation).rejects.toMatchObject({
+        code: 'WorkItemConfigurationRevisionConflict',
+        status: 409,
+      })
+      expect(configurationConditionIndex).toBe(auditEnabled ? 3 : 2)
+    }
+  }
 })
 
 test('DynamoDB Work Item update emits render-ready notification candidates', async () => {
@@ -6781,7 +7358,12 @@ test('DynamoDB Work Item update emits render-ready notification candidates', asy
     sortOrder: 10,
     title: 'Notification-ready Work Item',
     assigneeUserId: 'before@example.com',
-    status: 'todo',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/07/20',
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
@@ -6800,7 +7382,8 @@ test('DynamoDB Work Item update emits render-ready notification candidates', asy
                 ...currentIssue,
                 revision: 2,
                 assigneeUserId: 'after@example.com',
-                status: 'review',
+                workflowStatusId: 'review',
+                statusCategory: 'started',
               },
         }
       }
@@ -6831,7 +7414,10 @@ test('DynamoDB Work Item update emits render-ready notification candidates', asy
     'wireframe',
     {
       assigneeUserId: 'after@example.com',
-      status: 'review',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'review',
+      statusCategory: 'started',
+      customFieldValues: {},
       expectedRevision: 1,
     },
     'manager@example.com',
@@ -6873,9 +7459,14 @@ test('DynamoDB Work Item client classifies revision CAS transaction conditions',
     assignedProjectId: 'refero',
     issueId: 'wireframe',
     sortOrder: 10,
-    titleKey: 'tasks.item.wireframe',
+    title: 'Wireframe',
     assigneeUserId: 'sato@example.com',
-    status: 'todo',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/03',
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
@@ -6930,7 +7521,13 @@ test('DynamoDB Work Item client classifies revision CAS transaction conditions',
       'user#demo@example.com',
       'core-team',
       'wireframe',
-      { status: 'done', expectedRevision: 1 },
+      {
+        workflowSchemaVersion: 1,
+        workflowStatusId: 'done',
+        statusCategory: 'completed',
+        customFieldValues: {},
+        expectedRevision: 1,
+      },
       'demo@example.com',
       auditContext,
     )
@@ -7021,372 +7618,77 @@ test('DynamoDB Work Item client classifies revision CAS transaction conditions',
   expect(mixedReasons.sentInputs).toHaveLength(2)
 })
 
-test('DynamoDB dashboard summary client derives counts from directory and task data', async () => {
+test('DynamoDB dashboard summary client derives counts from canonical Work Items', async () => {
   const accessListReads: Array<{ directoryId: string; memberKey: string }> = []
-  const directoryReads: Array<{ directoryId: string; locale: Locale }> = []
-  const migrationSourceBatchReads: Array<Array<{ issueId: string; teamId: string }>> = []
-  const taskReads: Array<{ directoryId: string; projectId: string }> = []
+  const projectIssueReads: Array<{ directoryId: string; projectId: string }> = []
   const client = new DynamoDbDashboardSummaryClient(
     {
-      async getProjectDirectory(directoryId, locale) {
-        directoryReads.push({ directoryId, locale })
-        expect(directoryId).toBe('user#demo@example.com')
-        expect(locale).toBe('ja')
-
-        return {
-          teams: [
-            {
-              id: 'core-team',
-              name: 'コアチーム',
-              expanded: true,
-              projects: [
-                {
-                  id: 'refero',
-                  name: 'Refero',
-                  tone: 'blue',
-                },
-                {
-                  id: 'new-project',
-                  name: '新規プロジェクト',
-                  tone: 'green',
-                },
-              ],
-            },
-          ],
-        }
-      },
-      async getProjectAccess(_directoryId, projectId) {
-        return projectId === 'refero'
-          ? {
-              projectId,
-              role: 'manager' as ProjectRole,
-            }
-          : undefined
-      },
-      async getProjectAccessList(directoryId, memberKey) {
-        accessListReads.push({ directoryId, memberKey })
-
-        return [
-          {
-            projectId: 'refero',
-            role: 'manager' as ProjectRole,
-          },
-        ]
-      },
-      async hasProjectAccess() {
-        return true
-      },
-      async getProjectRole() {
-        return 'manager' as ProjectRole
-      },
-      async getProjectMembers() {
-        return {
-          projectId: 'unused',
-          members: [],
-        }
-      },
-      async updateProjectMember() {
-        return {
-          member: {
-            id: 'unused',
-            email: 'unused@example.com',
-            role: 'viewer',
-            updatedAt: '2026-06-08T00:00:00.000Z',
-          },
-        }
-      },
-      async removeProjectMember() {
-        return {
-          projectId: 'unused',
-          memberId: 'unused@example.com',
-        }
-      },
-      async createTeam() {
-        return {
-          team: {
-            id: 'unused',
-            name: 'unused',
-            projects: [],
-          },
-        }
-      },
-      async createProject() {
-        return {
-          project: {
-            id: 'unused',
-            name: 'unused',
-          },
-        }
-      },
-      async archiveTeam() {
-        return {
-          teamId: 'unused',
-          archivedAt: '2026-06-06T00:00:00.000Z',
-        }
-      },
-      async archiveProject() {
-        return {
-          teamId: 'unused',
-          projectId: 'unused',
-          archivedAt: '2026-06-06T00:00:00.000Z',
-        }
-      },
-    },
-    {
-      async getProjectTasks(directoryId, projectId) {
-        taskReads.push({ directoryId, projectId })
-
-        return {
-          projectId,
-          tasks: projectId === 'refero'
-            ? [
-                {
-                  id: 'wireframe',
-                  title: 'ワイヤーフレーム',
-                  assignee: '佐藤 花子',
-                  status: 'in-progress',
-                  dueDate: '2026/06/03',
-                  priority: 'high',
-                },
-                {
-                  id: 'archive',
-                  title: '完了済み',
-                  assignee: '鈴木 太郎',
-                  status: 'done',
-                  dueDate: '2026/06/01',
-                  priority: 'high',
-                },
-              ]
-            : [
-                {
-                  id: 'planning',
-                  title: '計画',
-                  assignee: '田中 一郎',
-                  status: 'todo',
-                  dueDate: '2026/06/12',
-                  priority: 'medium',
-                },
-              ],
-        }
-      },
-      async createProjectTask() {
-        return {
-          task: {
-            id: 'unused',
-            title: 'unused',
-            assignee: 'unused',
-            status: 'todo',
-            dueDate: '2026/06/03',
-            priority: 'medium',
-          },
-        }
-      },
-      async updateProjectTaskStatus() {
-        return {
-          task: {
-            id: 'unused',
-            title: 'unused',
-            assignee: 'unused',
-            status: 'done',
-            dueDate: '2026/06/03',
-            priority: 'medium',
-          },
-        }
-      },
-    },
-    {
-      async getProjectIssues(_directoryId: string, projectId: string) {
-        return {
-          projectId,
-          issues: [{
-            schemaVersion: 1,
-            revision: 1,
-            id: 'canonical-review',
-            teamId: 'core-team',
-            assignedProjectId: projectId,
-            title: 'Canonical review',
-            assigneeUserId: 'sato@example.com',
-            status: 'review' as const,
-            dueDate: '2026/06/10',
-            priority: 'medium' as const,
-            createdAt: '2026-06-01T00:00:00.000Z',
-            updatedAt: '2026-06-01T00:00:00.000Z',
-            source: 'dynamodb' as const,
-          }],
-        }
-      },
-      async getTeamIssueMigrationSourceKeys(
-        _directoryId: string,
-        keys: readonly { issueId: string; teamId: string }[],
-      ) {
-        migrationSourceBatchReads.push(keys.map((key) => ({ ...key })))
-
-        return new Set([
-          'user#demo@example.com#project#refero#task#wireframe',
-        ])
-      },
-    } as never,
-  )
-
-  const summary = await client.getSummary('user#demo@example.com', {
-    userKey: 'demo@example.com',
-    isSystemAdmin: false,
-  })
-
-  expect(summary.projects).toBe(1)
-  expect(summary.tasks).toBe(1)
-  expect(summary.blocked).toBe(0)
-  expect(summary.source).toBe('dynamodb')
-  expect(Date.parse(summary.updatedAt)).not.toBeNaN()
-  expect(directoryReads).toEqual([
-    { directoryId: 'user#demo@example.com', locale: 'ja' },
-  ])
-  expect(accessListReads).toEqual([
-    {
-      directoryId: 'user#demo@example.com',
-      memberKey: 'demo@example.com',
-    },
-  ])
-  expect(taskReads).toEqual([{ directoryId: 'user#demo@example.com', projectId: 'refero' }])
-  expect(migrationSourceBatchReads).toEqual([[
-    { issueId: 'wireframe', teamId: 'core-team' },
-    { issueId: 'archive', teamId: 'core-team' },
-  ]])
-})
-
-test('DynamoDB dashboard keeps same-ID legacy tasks isolated by migration source project', async () => {
-  let migrationSourceProjectId = 'project-a'
-  const client = new DynamoDbDashboardSummaryClient(
-    {
-      async getProjectDirectory(_directoryId: string, _locale: 'ja' | 'en') {
+      async getProjectDirectory() {
         return {
           teams: [{
             id: 'core-team',
             name: 'Core Team',
             expanded: true,
             projects: [
-              { id: 'project-a', name: 'Project A', tone: 'blue' as const },
-              { id: 'project-b', name: 'Project B', tone: 'green' as const },
+              { id: 'refero', name: 'Refero', tone: 'blue' as const },
+              { id: 'private', name: 'Private', tone: 'purple' as const },
             ],
           }],
         }
       },
-      async getProjectAccessList(_directoryId: string, _memberKey: string) {
-        return [{ projectId: 'project-b', role: 'viewer' as ProjectRole }]
-      },
-    } as never,
-    {
-      async getProjectTasks(_directoryId: string, projectId: string) {
-        return {
-          projectId,
-          tasks: [{
-            id: 'wireframe',
-            title: 'Wireframe',
-            assignee: '佐藤 花子',
-            status: 'in-progress' as const,
-            dueDate: '2026/06/03',
-            priority: 'high' as const,
-          }],
-        }
-      },
-    } as never,
-    {
-      async getProjectIssues(_directoryId: string, projectId: string) {
-        return { projectId, issues: [] }
-      },
-      async getTeamIssueMigrationSourceKeys(
-        directoryId: string,
-        _keys: readonly { issueId: string; teamId: string }[],
-      ) {
-        return new Set([
-          `${directoryId}#project#${migrationSourceProjectId}#task#wireframe`,
-        ])
-      },
-    } as never,
-  )
-
-  const mismatchedSourceSummary = await client.getSummary('user#demo@example.com', {
-    userKey: 'demo@example.com',
-    isSystemAdmin: false,
-  })
-  expect(mismatchedSourceSummary.tasks).toBe(1)
-  expect(mismatchedSourceSummary.blocked).toBe(1)
-
-  migrationSourceProjectId = 'project-b'
-  const exactSourceSummary = await client.getSummary('user#demo@example.com', {
-    userKey: 'demo@example.com',
-    isSystemAdmin: false,
-  })
-  expect(exactSourceSummary.tasks).toBe(0)
-  expect(exactSourceSummary.blocked).toBe(0)
-})
-
-test('DynamoDB dashboard omits legacy fallback when a project has multiple owner Teams', async () => {
-  let legacyReads = 0
-  let migrationSourceReads = 0
-  const client = new DynamoDbDashboardSummaryClient(
-    {
-      async getProjectDirectory(_directoryId: string, _locale: 'ja' | 'en') {
-        return {
-          teams: [
-            {
-              id: 'core-team',
-              name: 'Core Team',
-              expanded: true,
-              projects: [{ id: 'refero', name: 'Refero', tone: 'blue' as const }],
-            },
-            {
-              id: 'design-team',
-              name: 'Design Team',
-              expanded: true,
-              projects: [{ id: 'refero', name: 'Refero', tone: 'purple' as const }],
-            },
-          ],
-        }
-      },
-      async getProjectAccessList(_directoryId: string, _memberKey: string) {
+      async getProjectAccessList(directoryId: string, memberKey: string) {
+        accessListReads.push({ directoryId, memberKey })
         return [{ projectId: 'refero', role: 'viewer' as ProjectRole }]
       },
     } as never,
     {
-      async getProjectTasks(_directoryId: string, projectId: string) {
-        legacyReads += 1
+      async getProjectIssues(directoryId: string, projectId: string) {
+        projectIssueReads.push({ directoryId, projectId })
         return {
           projectId,
-          tasks: [{
-            id: 'wireframe',
-            title: 'Wireframe',
-            assignee: '佐藤 花子',
-            status: 'in-progress' as const,
-            dueDate: '2026/06/03',
-            priority: 'high' as const,
-          }],
+          issues: [
+            {
+              schemaVersion: 1 as const,
+              revision: 1,
+              id: 'active-high',
+              teamId: 'core-team',
+              assignedProjectId: projectId,
+              title: 'Active high priority Work Item',
+              assigneeUserId: 'sato@example.com',
+              creatorMemberKey: 'demo@example.com',
+              workflowSchemaVersion: 1 as const,
+              workflowStatusId: 'in-progress',
+              statusCategory: 'started' as const,
+              customFieldValues: {},
+              relationIds: [],
+              dueDate: '2026/07/20',
+              priority: 'high' as const,
+              createdAt: '2026-07-01T00:00:00.000Z',
+              updatedAt: '2026-07-01T00:00:00.000Z',
+              source: 'dynamodb' as const,
+            },
+            {
+              schemaVersion: 1 as const,
+              revision: 1,
+              id: 'completed-high',
+              teamId: 'core-team',
+              assignedProjectId: projectId,
+              title: 'Completed high priority Work Item',
+              assigneeUserId: 'sato@example.com',
+              creatorMemberKey: 'demo@example.com',
+              workflowSchemaVersion: 1 as const,
+              workflowStatusId: 'done',
+              statusCategory: 'completed' as const,
+              customFieldValues: {},
+              relationIds: [],
+              dueDate: '2026/07/20',
+              priority: 'high' as const,
+              createdAt: '2026-07-01T00:00:00.000Z',
+              updatedAt: '2026-07-01T00:00:00.000Z',
+              source: 'dynamodb' as const,
+            },
+          ],
         }
-      },
-    } as never,
-    {
-      async getProjectIssues(_directoryId: string, projectId: string) {
-        return {
-          projectId,
-          issues: [{
-            schemaVersion: 1 as const,
-            revision: 1,
-            id: 'canonical-review',
-            teamId: 'core-team',
-            assignedProjectId: projectId,
-            title: 'Canonical review',
-            status: 'review' as const,
-            dueDate: '2026/06/10',
-            priority: 'medium' as const,
-            createdAt: '2026-06-01T00:00:00.000Z',
-            updatedAt: '2026-06-01T00:00:00.000Z',
-            source: 'dynamodb' as const,
-          }],
-        }
-      },
-      async getTeamIssueMigrationSourceKeys() {
-        migrationSourceReads += 1
-        return new Set<string>()
       },
     } as never,
   )
@@ -7396,11 +7698,21 @@ test('DynamoDB dashboard omits legacy fallback when a project has multiple owner
     isSystemAdmin: false,
   })
 
-  expect(summary.projects).toBe(1)
-  expect(summary.tasks).toBe(1)
-  expect(summary.blocked).toBe(0)
-  expect(legacyReads).toBe(0)
-  expect(migrationSourceReads).toBe(0)
+  expect(summary).toMatchObject({
+    projects: 1,
+    tasks: 1,
+    blocked: 1,
+    source: 'dynamodb',
+  })
+  expect(Date.parse(summary.updatedAt)).not.toBeNaN()
+  expect(accessListReads).toEqual([{
+    directoryId: 'user#demo@example.com',
+    memberKey: 'demo@example.com',
+  }])
+  expect(projectIssueReads).toEqual([{
+    directoryId: 'user#demo@example.com',
+    projectId: 'refero',
+  }])
 })
 
 test('DynamoDB directory client reads project access consistently for Workspace guards', async () => {
@@ -8437,6 +8749,65 @@ test('search endpoint parses filters and revalidates comment scope against curre
   expect(resolvedProjectId).toBe('refero')
 })
 
+test('search endpoint refreshes workflow, custom fields, and relations from current sources', async () => {
+  configureFakeProjectClients(true, {
+    detailCustomFieldValues: {},
+    detailWorkflowStatusId: 'active-review',
+  })
+  let resolvedScope: WorkspaceSearchResolvedScope | undefined
+  let relationFilters: string[] | undefined
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations(_workspaceId, _teamId, workItemId) {
+        return {
+          graphRevision: 3,
+          relations: [{
+            sourceWorkItemId: workItemId,
+            targetWorkItemId: 'current-dependency',
+            type: 'blocks',
+          }],
+        }
+      },
+    }),
+    workspaceSearch: {
+      async search(input) {
+        relationFilters = input.filters.relationIds
+        resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
+          workspaceId: input.workspaceId,
+          entityType: 'work-item',
+          entityId: 'team/core-team/issue/work-item-1',
+          title: 'Stale Work Item',
+          url: '/teams/core-team/issues?issueId=work-item-1',
+          teamId: 'core-team',
+          status: 'in-progress',
+          customFields: { legacyScore: 13 },
+          relationIds: ['stale-dependency'],
+        }))
+        return { schemaVersion: 1, results: [] }
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+
+  const filters = encodeURIComponent(JSON.stringify({
+    relationIds: ['blocks:current-dependency'],
+  }))
+  const response = await app.request(`/api/search?filters=${filters}`, {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(relationFilters).toEqual(['blocks:current-dependency'])
+  expect(resolvedScope).toMatchObject({
+    teamId: 'core-team',
+    projectId: 'refero',
+    currentDocument: {
+      status: 'active-review',
+      customFields: {},
+      relationIds: ['blocks:current-dependency'],
+    },
+  })
+})
+
 test('search endpoint refreshes comment content from its current source snapshot', async () => {
   configureFakeProjectClients(true)
   let resolvedScope: WorkspaceSearchResolvedScope | undefined
@@ -8942,6 +9313,111 @@ function createFileUploadSessionFixture() {
   }
 }
 
+/** Approval API route test で利用する標準 request fixture です。 */
+function createApprovalRequestFixture(
+  overrides: Partial<ApprovalRequest> = {},
+): ApprovalRequest {
+  return {
+    id: 'approval-1',
+    teamId: 'core-team',
+    issueId: 'issue-1',
+    revision: 1,
+    fileId: 'file-1',
+    versionId: 'version-1',
+    status: 'pending',
+    reviewers: [{ memberKey: 'sato@example.com', status: 'pending' }],
+    dueAt: '2099-07-20T00:00:00.000Z',
+    requestedByMemberKey: 'demo@example.com',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    capabilities: { canCancel: true, canDecide: false },
+    ...overrides,
+  }
+}
+
+/** API integration tests で利用する scope 固定済み Work Item configuration です。 */
+function createTestWorkItemConfiguration(
+  scopeType: 'workspace' | 'team',
+  scopeId: string,
+  revision = 0,
+): WorkItemConfiguration {
+  return {
+    ...structuredClone(DEFAULT_WORK_ITEM_CONFIGURATION),
+    scopeType,
+    scopeId,
+    revision,
+  }
+}
+
+/** 関心のある method だけ上書きできる Work Item configuration client fake です。 */
+function createFakeWorkItemConfigurationClient(
+  overrides: Partial<WorkItemConfigurationClient> = {},
+): WorkItemConfigurationClient {
+  const createResolved = (scopeType: 'workspace' | 'team', scopeId: string) => ({
+    configuration: createTestWorkItemConfiguration(scopeType, scopeId),
+    inheritedFrom: 'default' as const,
+  })
+  return {
+    async getWorkspaceConfiguration(workspaceId) {
+      return createResolved('workspace', workspaceId)
+    },
+    async getTeamConfiguration(_workspaceId, teamId) {
+      return createResolved('team', teamId)
+    },
+    async saveWorkspaceConfiguration(workspaceId, configuration, compatibilityCheck) {
+      await compatibilityCheck()
+      return {
+        configuration: {
+          ...configuration,
+          scopeType: 'workspace',
+          scopeId: workspaceId,
+          revision: configuration.revision + 1,
+        },
+      }
+    },
+    async saveTeamConfiguration(_workspaceId, teamId, configuration, compatibilityCheck) {
+      await compatibilityCheck()
+      return {
+        configuration: {
+          ...configuration,
+          scopeType: 'team',
+          scopeId: teamId,
+          revision: configuration.revision + 1,
+        },
+      }
+    },
+    async listRelations() {
+      return { relations: [], graphRevision: 0 }
+    },
+    async createRelation(_workspaceId, _teamId, input) {
+      return createFakeRelationMutationResponse(input)
+    },
+    async deleteRelation(_workspaceId, _teamId, input) {
+      return createFakeRelationMutationResponse(input)
+    },
+    ...overrides,
+  }
+}
+
+/** Client fake の既定 relation mutation response です。 */
+function createFakeRelationMutationResponse(
+  input: Parameters<WorkItemConfigurationClient['createRelation']>[2],
+) {
+  return {
+    relation: {
+      sourceWorkItemId: input.sourceWorkItemId,
+      targetWorkItemId: input.targetWorkItemId,
+      type: input.type,
+    },
+    reciprocalRelation: {
+      sourceWorkItemId: input.targetWorkItemId,
+      targetWorkItemId: input.sourceWorkItemId,
+      type: input.type,
+    },
+    graphRevision: input.expectedGraphRevision + 1,
+  }
+}
+
 function configureFakeProjectClients(
   hasProjectAccess: boolean,
   options: {
@@ -8963,10 +9439,25 @@ function configureFakeProjectClients(
     taskAssigneeUserId?: string
     /** Notification 認可で再取得する Work Item の現在 assigned Project ID です。 */
     detailAssignedProjectId?: string
+    /** Work Item ID ごとに detail fake が返す現在 assigned Project ID です。 */
+    detailAssignedProjectIds?: Record<string, string>
     /** Notification 認可で再取得する Work Item の現在担当者です。 */
     detailAssigneeUserId?: string
+    /** Detail fake が返す現在の設定済み custom field values です。 */
+    detailCustomFieldValues?: Record<string, CustomFieldValue>
+    /** Detail fake が返す legacy search custom fields です。 */
+    /** Detail fake が TeamIssueNotFound を返す Work Item ID です。 */
+    detailMissingIssueIds?: string[]
     /** Work Item detail read の障害を再現する error です。 */
     detailReadError?: Error
+    /** Work Item detail read の同時実行を観測または制御する hook です。 */
+    detailReadHook?: (issueId: string) => Promise<void>
+    /** Detail fake が返す現在の設定済み workflow status ID です。 */
+    detailWorkflowStatusId?: string
+    /** Detail fake が read ごとに返す workflow status ID です。 */
+    detailWorkflowStatusIds?: string[]
+    /** Detail fake が read ごとに返す更新日時です。 */
+    detailUpdatedAts?: string[]
     teamProjects?: Array<{ id: string; name: string; tone: 'blue' | 'purple' | 'green' | 'yellow' }>
     /** owner Team ambiguity を再現する追加 Team です。 */
     additionalTeams?: Array<{
@@ -8984,18 +9475,6 @@ function configureFakeProjectClients(
         tone: 'blue' | 'purple' | 'green' | 'yellow'
       }>
     }>
-    /** Legacy task と同じ ID の canonical row を所有する Team ID です。 */
-    migratedLegacyOwnerTeamId?: string
-    /** Migration 後の canonical row が現在アサインされている project ID です。 */
-    migratedLegacyAssignedProjectId?: string
-    /** Migration metadata が指す元 legacy project ID です。 */
-    migratedLegacySourceProjectId?: string
-    /** Migrated canonical fake に stable source metadata が存在するかどうかです。 */
-    migratedLegacyHasSourceMetadata?: boolean
-    /** Migrated canonical fake が project 未アサインかどうかです。 */
-    migratedLegacyUnassigned?: boolean
-    /** Legacy project task fake が返す task ID です。 */
-    legacyTaskIds?: string[]
     /** Project 別 canonical Work Item fake が返す Issue ID です。 */
     canonicalProjectIssueIds?: string[]
     /** Team Issue fake が返す canonical Work Item 数です。 */
@@ -9031,10 +9510,6 @@ function configureFakeProjectClients(
       projectId: string
       role: string
     }>,
-    migrationSourceBatchReads: [] as Array<{
-      directoryId: string
-      keys: Array<{ issueId: string; teamId: string }>
-    }>,
     projectArchives: [] as Array<{ directoryId: string; teamId: string; projectId: string }>,
     projectCreates: [] as Array<{
       creatorUserKey: string
@@ -9055,9 +9530,10 @@ function configureFakeProjectClients(
       actorUserId: string
       assignedProjectId?: unknown
       directoryId: string
-      reservedIssueIds?: string[]
       teamId: string
       title: string
+      statusCategory?: unknown
+      workflowStatusId?: unknown
     }>,
     issueDetails: [] as Array<{
       directoryId: string
@@ -9080,14 +9556,7 @@ function configureFakeProjectClients(
       teamId: string
     }>,
     projectIssueReads: [] as Array<{ directoryId: string; limit?: number; projectId: string }>,
-    taskCreates: [] as Array<{ directoryId: string; projectId: string; title: string }>,
     taskReads: [] as Array<{ directoryId: string; limit?: number; projectId: string }>,
-    taskStatusUpdates: [] as Array<{
-      directoryId: string
-      projectId: string
-      status: string
-      taskId: string
-    }>,
     userLists: [] as Array<{
       directoryId?: string
       limit?: number
@@ -9277,6 +9746,7 @@ function configureFakeProjectClients(
         }
       },
     },
+    workItemConfigurations: createFakeWorkItemConfigurationClient(),
     projectDirectory: {
       async getProjectDirectory(directoryId, locale, consistentRead) {
         calls.directoryReads.push({
@@ -9640,7 +10110,8 @@ function configureFakeProjectClients(
           ...(readOptions?.limit === undefined ? {} : { limit: readOptions.limit }),
         })
 
-        const tasks = (options.legacyTaskIds ?? ['wireframe']).map((taskId, index) => ({
+        const tasks = ['wireframe'].map((taskId, index) => ({
+          source: 'legacy' as const,
           id: taskId,
           ...(taskId === 'wireframe'
             ? { titleKey: 'tasks.item.wireframe' as const }
@@ -9656,39 +10127,6 @@ function configureFakeProjectClients(
           tasks: readOptions?.limit === undefined ? tasks : tasks.slice(0, readOptions.limit),
         }
       },
-      async createProjectTask(directoryId, projectId, input) {
-        calls.taskCreates.push({ directoryId, projectId, title: String(input.title) })
-
-        return {
-          task: {
-            id: 'new-task',
-            title: String(input.title),
-            assigneeUserId: String(input.assigneeUserId),
-            status: 'todo',
-            dueDate: String(input.dueDate),
-            priority: 'high',
-          },
-        }
-      },
-      async updateProjectTaskStatus(directoryId, projectId, taskId, input) {
-        calls.taskStatusUpdates.push({
-          directoryId,
-          projectId,
-          status: String(input.status),
-          taskId,
-        })
-
-        return {
-          task: {
-            id: taskId,
-            titleKey: 'tasks.item.wireframe',
-            assigneeKey: 'tasks.assignee.sato',
-            status: input.status === 'done' ? 'done' : 'todo',
-            dueDate: '2026/06/03',
-            priority: 'high',
-          },
-        }
-      },
     },
     teamIssues: {
       async getTeamIssues(directoryId, teamId, readOptions) {
@@ -9698,8 +10136,7 @@ function configureFakeProjectClients(
           ...(readOptions?.limit === undefined ? {} : { limit: readOptions.limit }),
         })
 
-        const issues = [
-          ...Array.from({ length: options.teamIssueCount ?? 1 }, (_, index) => ({
+        const issues = Array.from({ length: options.teamIssueCount ?? 1 }, (_, index) => ({
             schemaVersion: 1 as const,
             revision: 1,
             id: index === 0 ? 'onboarding-friction' : `work-item-${index}`,
@@ -9712,72 +10149,22 @@ function configureFakeProjectClients(
               : `Work Item ${index}`,
             description: '初回体験の摩擦を下げる。',
             assigneeUserId: 'sato@example.com',
-            status: 'in-progress' as const,
+            creatorMemberKey: 'demo@example.com',
+            workflowSchemaVersion: 1 as const,
+            workflowStatusId: 'in-progress',
+            statusCategory: 'started' as const,
+            customFieldValues: {},
+            relationIds: [],
             dueDate: '2026/06/18',
             priority: 'high' as const,
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: '2026-06-08T00:00:00.000Z',
             source: 'dynamodb' as const,
-          })),
-          ...(options.migratedLegacyOwnerTeamId === teamId
-            ? [{
-                schemaVersion: 1 as const,
-                revision: 1,
-                id: 'wireframe',
-                teamId,
-                assignedProjectId: options.migratedLegacyUnassigned
-                  ? undefined
-                  : options.migratedLegacyAssignedProjectId ?? 'refero',
-                title: 'Migrated wireframe',
-                assigneeUserId: 'sato@example.com',
-                status: 'in-progress' as const,
-                dueDate: '2026/06/03',
-                priority: 'high' as const,
-                createdAt: '2026-06-01T00:00:00.000Z',
-                updatedAt: '2026-06-01T00:00:00.000Z',
-                source: 'dynamodb' as const,
-              }]
-            : []),
-        ]
+          }))
         return {
           teamId,
           issues: readOptions?.limit === undefined ? issues : issues.slice(0, readOptions.limit),
         }
-      },
-      async getTeamIssuesForAggregate(directoryId, teamId, readOptions) {
-        const response = await this.getTeamIssues(directoryId, teamId, readOptions)
-        const containsMigratedIssue = response.issues.some((issue) =>
-          issue.id === 'wireframe' && issue.teamId === options.migratedLegacyOwnerTeamId
-        )
-
-        return {
-          ...response,
-          migrationSourceKeys: containsMigratedIssue &&
-            options.migratedLegacyHasSourceMetadata !== false
-            ? [
-                `${directoryId}#project#${options.migratedLegacySourceProjectId ?? 'refero'}` +
-                '#task#wireframe',
-              ]
-            : [],
-        }
-      },
-      async getTeamIssueMigrationSourceKeys(directoryId, keys) {
-        const migrationSourceKey =
-          `${directoryId}#project#${options.migratedLegacySourceProjectId ?? 'refero'}` +
-          '#task#wireframe'
-        calls.migrationSourceBatchReads.push({
-          directoryId,
-          keys: keys.map((key) => ({ ...key })),
-        })
-
-        const containsMigratedIssue = keys.some((key) =>
-          key.teamId === options.migratedLegacyOwnerTeamId &&
-          key.issueId === 'wireframe'
-        )
-
-        return containsMigratedIssue && options.migratedLegacyHasSourceMetadata !== false
-          ? new Set([migrationSourceKey])
-          : new Set<string>()
       },
       async getProjectIssues(directoryId, projectId, readOptions) {
         calls.projectIssueReads.push({
@@ -9795,7 +10182,12 @@ function configureFakeProjectClients(
               assignedProjectId: projectId,
               title: `Canonical Work Item ${index}`,
               assigneeUserId: 'sato@example.com',
-              status: 'in-progress' as const,
+              creatorMemberKey: 'demo@example.com',
+              workflowSchemaVersion: 1 as const,
+              workflowStatusId: 'in-progress',
+              statusCategory: 'started' as const,
+              customFieldValues: {},
+              relationIds: [],
               dueDate: '2026/06/18',
               priority: 'high' as const,
               createdAt: '2026-06-08T00:00:00.000Z',
@@ -9811,32 +10203,18 @@ function configureFakeProjectClients(
                 assignedProjectId: projectId,
                 title: '初回オンボーディングの離脱要因を減らす',
                 assigneeUserId: 'sato@example.com',
-                status: 'in-progress' as const,
+                creatorMemberKey: 'demo@example.com',
+                workflowSchemaVersion: 1 as const,
+                workflowStatusId: 'in-progress',
+                statusCategory: 'started' as const,
+                customFieldValues: {},
+                relationIds: [],
                 dueDate: '2026/06/18',
                 priority: 'high' as const,
                 createdAt: '2026-06-08T00:00:00.000Z',
                 updatedAt: '2026-06-08T00:00:00.000Z',
                 source: 'dynamodb' as const,
               },
-              ...(options.migratedLegacyOwnerTeamId &&
-                !options.migratedLegacyUnassigned &&
-                projectId === (options.migratedLegacyAssignedProjectId ?? 'refero')
-                ? [{
-                    schemaVersion: 1 as const,
-                    revision: 1,
-                    id: 'wireframe',
-                    teamId: options.migratedLegacyOwnerTeamId,
-                    assignedProjectId: options.migratedLegacyAssignedProjectId ?? 'refero',
-                    title: 'Migrated wireframe',
-                    assigneeUserId: 'sato@example.com',
-                    status: 'in-progress' as const,
-                    dueDate: '2026/06/03',
-                    priority: 'high' as const,
-                    createdAt: '2026-06-01T00:00:00.000Z',
-                    updatedAt: '2026-06-01T00:00:00.000Z',
-                    source: 'dynamodb' as const,
-                  }]
-                : []),
             ]
         return {
           projectId,
@@ -9844,24 +10222,29 @@ function configureFakeProjectClients(
         }
       },
       async getTeamIssueDetail(directoryId, teamId, issueId, readOptions) {
+        const detailReadIndex = calls.issueDetails.length
         calls.issueDetails.push({
           directoryId,
           teamId,
           issueId,
           ...(readOptions ? { readOptions } : {}),
         })
+        await options.detailReadHook?.(issueId)
 
         if (options.detailReadError) {
           throw options.detailReadError
         }
 
-        if (issueId === 'wireframe') {
+        if (issueId === 'wireframe' || options.detailMissingIssueIds?.includes(issueId)) {
           throw {
             status: 404,
             code: 'TeamIssueNotFound',
             message: 'Issue was not found.',
           }
         }
+        const workflowStatusId = options.detailWorkflowStatusIds?.[detailReadIndex] ??
+          options.detailWorkflowStatusId ??
+          'in-progress'
 
         return {
           issue: {
@@ -9869,17 +10252,27 @@ function configureFakeProjectClients(
             revision: 1,
             id: issueId,
             teamId,
-            assignedProjectId: options.unassignedIssue
-              ? undefined
-              : options.detailAssignedProjectId ?? 'refero',
+            assignedProjectId: options.detailAssignedProjectIds?.[issueId] ??
+              (options.unassignedIssue
+                ? undefined
+                : options.detailAssignedProjectId ?? 'refero'),
             title: '初回オンボーディングの離脱要因を減らす',
             description: '初回体験の摩擦を下げる。',
             assigneeUserId: options.detailAssigneeUserId ?? 'sato@example.com',
-            status: 'in-progress',
+            creatorMemberKey: 'demo@example.com',
+            workflowSchemaVersion: 1,
+            workflowStatusId,
+            statusCategory:
+              workflowStatusId === 'done' || workflowStatusId === 'approval-complete'
+                ? 'completed'
+                : 'started',
+            customFieldValues: options.detailCustomFieldValues ?? {},
+            relationIds: [],
             dueDate: '2026/06/18',
             priority: 'high',
             createdAt: '2026-06-08T00:00:00.000Z',
-            updatedAt: '2026-06-08T00:00:00.000Z',
+            updatedAt: options.detailUpdatedAts?.[detailReadIndex] ??
+              '2026-06-08T00:00:00.000Z',
             source: 'dynamodb',
           },
           comments: [
@@ -9901,14 +10294,19 @@ function configureFakeProjectClients(
           ],
         }
       },
-      async createTeamIssue(directoryId, teamId, input, actorUserId, reservedIssueIds = []) {
+      async createTeamIssue(directoryId, teamId, input, actorUserId) {
         calls.issueCreates.push({
           actorUserId,
           assignedProjectId: input.assignedProjectId,
           directoryId,
-          reservedIssueIds,
           teamId,
           title: String(input.title),
+          ...(input.statusCategory === undefined
+            ? {}
+            : { statusCategory: input.statusCategory }),
+          ...(input.workflowStatusId === undefined
+            ? {}
+            : { workflowStatusId: input.workflowStatusId }),
         })
 
         return {
@@ -9923,7 +10321,18 @@ function configureFakeProjectClients(
             title: String(input.title),
             description: typeof input.description === 'string' ? input.description : undefined,
             assigneeUserId: String(input.assigneeUserId),
-            status: 'todo',
+            creatorMemberKey: actorUserId,
+            workflowSchemaVersion: 1,
+            workflowStatusId: String(input.workflowStatusId),
+            statusCategory: input.statusCategory === 'backlog' ||
+              input.statusCategory === 'unstarted' ||
+              input.statusCategory === 'started' ||
+              input.statusCategory === 'completed' ||
+              input.statusCategory === 'canceled'
+              ? input.statusCategory
+              : 'unstarted',
+            customFieldValues: input.customFieldValues as Record<string, CustomFieldValue>,
+            relationIds: [],
             dueDate: String(input.dueDate),
             priority: 'medium',
             createdAt: '2026-06-08T00:00:00.000Z',
@@ -9952,7 +10361,20 @@ function configureFakeProjectClients(
               : undefined,
             title: typeof input.title === 'string' ? input.title : '初回オンボーディングの離脱要因を減らす',
             assigneeUserId: typeof input.assigneeUserId === 'string' ? input.assigneeUserId : 'sato@example.com',
-            status: input.status === 'done' ? 'done' : 'in-progress',
+            creatorMemberKey: 'demo@example.com',
+            workflowSchemaVersion: 1,
+            workflowStatusId: typeof input.workflowStatusId === 'string'
+              ? input.workflowStatusId
+              : 'in-progress',
+            statusCategory: input.statusCategory === 'backlog' ||
+              input.statusCategory === 'unstarted' ||
+              input.statusCategory === 'started' ||
+              input.statusCategory === 'completed' ||
+              input.statusCategory === 'canceled'
+              ? input.statusCategory
+              : 'started',
+            customFieldValues: input.customFieldValues as Record<string, CustomFieldValue>,
+            relationIds: [],
             dueDate: typeof input.dueDate === 'string' ? input.dueDate : '2026/06/18',
             priority: input.priority === 'low' ? 'low' : 'high',
             createdAt: '2026-06-08T00:00:00.000Z',

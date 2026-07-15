@@ -79,6 +79,24 @@ describe('SearchResultCollection', () => {
     expect(html).toContain('>Low<')
     expect(html).toContain('>—<')
   })
+
+  test('renders configured names for dynamic workflow statuses', () => {
+    const html = renderToStaticMarkup(
+      <SearchResultCollection
+        layout={{ ...tableLayout, columns: ['title', 'status'] }}
+        locale="en"
+        onNavigate={() => undefined}
+        results={[{
+          ...createResult('qa-ready'),
+          status: 'ready-for-qa',
+        }]}
+        statusLabels={{ 'ready-for-qa': 'Ready for QA' }}
+      />,
+    )
+
+    expect(html).toContain('>Ready for QA<')
+    expect(html).not.toContain('>ready-for-qa<')
+  })
 })
 
 function createResult(

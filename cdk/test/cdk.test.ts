@@ -130,6 +130,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
   const stableResourceIds = [
     'ProjectTasksTableE21F6637',
     'TeamIssuesTable189D851D',
+    'WorkItemConfigurationTable35E94558',
     'TeamIssueEventsTableDD2B0F96',
     'ProjectDirectoryTable9ED01C01',
     'ListProjectTasksFunction2134AF4A',
@@ -145,7 +146,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(12);
+  expect(Object.keys(tables)).toHaveLength(13);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -164,11 +165,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 test('file proofing metadata uses a retained point-in-time recoverable table', () => {
   const template = synthesizedTemplate;
   const fileProofingTableEntry = Object.entries(template.findResources('AWS::DynamoDB::Table'))
-    .find(([, resource]) => {
-      const serializedResource = JSON.stringify(resource);
-
-      return serializedResource.includes('scopeKey') && serializedResource.includes('recordKey');
-    });
+    .find(([logicalId]) => logicalId === 'FileProofingTable81DA272F');
 
   expect(fileProofingTableEntry).toBeDefined();
   expect(fileProofingTableEntry?.[1]).toEqual(expect.objectContaining({
@@ -242,6 +239,9 @@ test('shared server handler is bundled as a Lambda asset with production environ
         WORKSPACE_SEARCH_TABLE_NAME: {
           Ref: 'WorkspaceSearchTable2575AD6B',
         },
+        WORK_ITEM_CONFIGURATION_TABLE_NAME: {
+          Ref: 'WorkItemConfigurationTable35E94558',
+        },
         COLLABORATION_TABLE_NAME: {
           Ref: 'WorkItemCollaborationTableFDECF217',
         },
@@ -271,6 +271,8 @@ test('shared server handler is bundled as a Lambda asset with production environ
   const lambdaResource = template.toJSON().Resources.ListProjectTasksFunction2134AF4A;
 
   expect(lambdaResource.Properties.Code.ZipFile).toBeUndefined();
+  expect(lambdaResource.Properties.Environment.Variables)
+    .not.toHaveProperty('MUKUROJI_WORK_ITEM_CONFIGURATION_TABLE');
 });
 
 test('Function URL and API Gateway invoke the same Lambda handler', () => {
@@ -328,6 +330,37 @@ test('Function URL and API Gateway invoke the same Lambda handler', () => {
   template.hasOutput('WorkspaceSearchTableName', {
     Value: { Ref: 'WorkspaceSearchTable2575AD6B' },
   });
+  template.hasOutput('WorkItemConfigurationTableName', {
+    Value: { Ref: 'WorkItemConfigurationTable35E94558' },
+  });
+});
+
+test('Work Item configuration uses a retained scope and record key table', () => {
+  const template = synthesizedTemplate;
+  const table = template.toJSON().Resources.WorkItemConfigurationTable35E94558;
+
+  expect(table).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+    Properties: expect.objectContaining({
+      AttributeDefinitions: expect.arrayContaining([
+        { AttributeName: 'scopeKey', AttributeType: 'S' },
+        { AttributeName: 'recordKey', AttributeType: 'S' },
+      ]),
+      BillingMode: 'PAY_PER_REQUEST',
+      KeySchema: [
+        { AttributeName: 'scopeKey', KeyType: 'HASH' },
+        { AttributeName: 'recordKey', KeyType: 'RANGE' },
+      ],
+      PointInTimeRecoverySpecification: {
+        PointInTimeRecoveryEnabled: true,
+      },
+      TimeToLiveSpecification: {
+        AttributeName: 'expiresAtEpochSeconds',
+        Enabled: true,
+      },
+    }),
+  }));
 });
 
 test('Function URL and API Gateway expose the same restricted CORS contract', () => {
@@ -1062,6 +1095,16 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     return actions.includes('dynamodb:TransactWriteItems') &&
       JSON.stringify(statement.Resource).includes('WorkspaceSearchTable2575AD6B');
   });
+  const configurationDataStatement = statements.find((statement) =>
+    JSON.stringify(statement.Resource) === JSON.stringify({
+      'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'],
+    }) &&
+    Array.isArray(statement.Action) &&
+    statement.Action.includes('dynamodb:ConditionCheckItem')
+  );
+  const configurationStatements = statements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes('WorkItemConfigurationTable35E94558')
+  );
   const cognitoPolicy = Object.values(template.toJSON().Resources).find((resource) =>
     JSON.stringify(resource).includes('cognito-idp:AdminGetUser')
   );
@@ -1070,6 +1113,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Effect: 'Allow',
     Resource: expect.arrayContaining([
       { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+      { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
       { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
       { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
       { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
@@ -1113,6 +1157,24 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     'dynamodb:Query',
     'dynamodb:TransactWriteItems',
     'dynamodb:UpdateItem',
+  ]));
+  expect(configurationDataStatement).toEqual({
+    Action: [
+      'dynamodb:ConditionCheckItem',
+      'dynamodb:DeleteItem',
+      'dynamodb:DescribeTable',
+      'dynamodb:GetItem',
+      'dynamodb:PutItem',
+      'dynamodb:Query',
+      'dynamodb:UpdateItem',
+    ],
+    Effect: 'Allow',
+    Resource: { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
+  });
+  expect(configurationStatements).toHaveLength(2);
+  expect(configurationStatements).toEqual(expect.arrayContaining([
+    configurationDataStatement,
+    transactStatement,
   ]));
 
   const legacyTaskStatements = statements.filter((statement) =>
@@ -1314,7 +1376,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
   }
 });
 
-test('canonical Work Item seed replaces legacy task writes and preserves demo data', () => {
+test('canonical Work Item seed writes complete schema data and preserves demo data', () => {
   const template = synthesizedTemplate;
   const customResources = template.findResources('Custom::AWS');
   const transactWriteResources = Object.values(customResources).filter((resource) =>
@@ -1349,16 +1411,23 @@ test('canonical Work Item seed replaces legacy task writes and preserves demo da
   expect(workItemPayload).toContain('core-team');
   expect(workItemPayload).toContain('assignedProjectId');
   expect(workItemPayload).toContain('2026-06-01T00:00:00.000Z');
-  expect(workItemPayload).toContain('dynamodb');
-  expect(workItemPayload).toContain('legacy-project-task');
-  expect(workItemPayload).toContain(
-    '{{Ref:WorkspaceDirectoryId}}#project#refero#task#wireframe',
-  );
   expect(workItemPayload.match(/schemaVersion/g)).toHaveLength(10);
+  expect(workItemPayload.match(/workflowSchemaVersion/g)).toHaveLength(10);
+  expect(workItemPayload.match(/workflowStatusId/g)).toHaveLength(10);
+  expect(workItemPayload.match(/statusCategory/g)).toHaveLength(10);
+  expect(workItemPayload.match(/customFieldValues/g)).toHaveLength(10);
+  expect(workItemPayload.match(/relationIds/g)).toHaveLength(10);
+  expect(workItemPayload.match(/creatorMemberKey/g)).toHaveLength(10);
+  expect(workItemPayload).toContain('"statusCategory":{"S":"unstarted"}');
+  expect(workItemPayload).toContain('"statusCategory":{"S":"started"}');
+  expect(workItemPayload).toContain('"statusCategory":{"S":"completed"}');
+  expect(workItemPayload).not.toMatch(/"status":\{"S":/);
+  expect(workItemPayload).not.toContain('"titleKey"');
   expect(workItemPayload.match(/revision/g)).toHaveLength(10);
-  expect(workItemPayload.match(/workItemId/g)).toHaveLength(10);
-  expect(workItemPayload.match(/migrationSourceKey/g)).toHaveLength(10);
-  expect(workItemPayload.match(/migrationSource/g)).toHaveLength(20);
+  expect(workItemPayload).not.toContain('"workItemId"');
+  expect(workItemPayload).not.toContain('migrationSourceKey');
+  expect(workItemPayload).not.toMatch(/"source":\{"S":/);
+  expect(workItemPayload).not.toMatch(/"migrationSource":\{"S":/);
   const canonicalWorkItemSeedPolicy = canonicalWorkItemSeedPolicyEntry?.[1] as {
     Properties?: {
       PolicyDocument?: {

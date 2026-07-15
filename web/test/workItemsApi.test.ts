@@ -1,10 +1,14 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { WORK_ITEM_SCHEMA_VERSION } from '@mukuroji/contracts'
+import {
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEMA_VERSION,
+} from '@mukuroji/contracts'
 import {
   getWorkspaceWorkItems,
   TeamIssuesApiError,
   updateTeamIssue,
 } from '../src/issues/api'
+import { getProjectTasks, ProjectTasksApiError } from '../src/tasks/api'
 
 const originalFetch = globalThis.fetch
 const mutationContext = {
@@ -32,7 +36,7 @@ describe('canonical Work Item API', () => {
   })
 
   test('sends expectedRevision with stable mutation headers', async () => {
-    const updatedWorkItem = createWorkItem({ revision: 4, status: 'done' })
+    const updatedWorkItem = createWorkItem({ revision: 4, workflowStatusId: 'done' })
     const requests = installFetchRecorder({ issue: updatedWorkItem })
 
     const result = await updateTeamIssue(
@@ -41,7 +45,7 @@ describe('canonical Work Item API', () => {
       'access-token',
       {
         expectedRevision: 3,
-        status: 'done',
+        workflowStatusId: 'done',
       },
       mutationContext,
     )
@@ -55,7 +59,7 @@ describe('canonical Work Item API', () => {
     })
     expect(JSON.parse(String(requests[0]?.init.body))).toEqual({
       expectedRevision: 3,
-      status: 'done',
+      workflowStatusId: 'done',
     })
   })
 
@@ -73,7 +77,7 @@ describe('canonical Work Item API', () => {
         'core-team',
         'issue-1',
         'access-token',
-        { expectedRevision: 1, status: 'review' },
+        { expectedRevision: 1, workflowStatusId: 'review' },
         mutationContext,
       )
       throw new Error('Expected updateTeamIssue to reject.')
@@ -117,6 +121,33 @@ describe('canonical Work Item API', () => {
   })
 })
 
+describe('read-only legacy Project task adapter', () => {
+  test('accepts the exact legacy response shape without canonical fields', async () => {
+    const task = {
+      assignee: 'Demo User',
+      dueDate: '2026/07/18',
+      id: 'legacy-task-1',
+      priority: 'medium',
+      source: 'legacy',
+      status: 'review',
+      title: 'Legacy task',
+    }
+    const requests = installFetchRecorder({ projectId: 'legacy-project', tasks: [task] })
+
+    await expect(getProjectTasks('legacy-project', 'access-token')).resolves.toEqual([task])
+    expect(requests[0]?.url).toBe('/api/projects/legacy-project/tasks')
+  })
+
+  test('rejects a legacy response missing required adapter fields', async () => {
+    installFetchRecorder({
+      projectId: 'legacy-project',
+      tasks: [{ id: 'legacy-task-1', source: 'legacy' }],
+    })
+
+    await expect(getProjectTasks('legacy-project')).rejects.toBeInstanceOf(ProjectTasksApiError)
+  })
+})
+
 function createWorkItem(overrides: Record<string, unknown> = {}) {
   return {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
@@ -125,10 +156,17 @@ function createWorkItem(overrides: Record<string, unknown> = {}) {
     teamId: 'core-team',
     title: 'Canonical Work Item',
     assigneeUserId: 'sato@example.com',
-    status: 'todo',
+    creatorMemberKey: 'demo@example.com',
+    customFieldValues: {},
+    statusCategory: 'unstarted',
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    workflowStatusId: 'todo',
     dueDate: '2026/07/12',
     priority: 'medium',
+    relationIds: [],
     source: 'dynamodb',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
     ...overrides,
   }
 }

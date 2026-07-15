@@ -1,6 +1,12 @@
+import type {
+  ResolvedWorkItemConfiguration,
+  WorkflowStatusDefinition,
+  WorkItemConfiguration,
+  WorkItemRelation,
+} from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactNode } from 'react'
-import { useNavigate, useParams, useSearchParams } from 'react-router'
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import useSWR from 'swr'
 import {
   canManageWorkspaceStructure,
@@ -54,6 +60,7 @@ import {
 import {
   createTeamIssue,
   getTeamIssueDetail,
+  getTeamIssues,
   getProjectIssues,
   TeamIssuesApiError,
   type TeamIssue,
@@ -81,13 +88,53 @@ import {
   ProjectTasksApiError,
   type ProjectTask,
   type TaskPriority,
-  type TaskStatus,
 } from '../tasks/api'
 import { getWorkspaceAccess, type WorkspaceMember } from '../workspace/api'
 import { useWorkspaceCommandMenu } from '../commands/WorkspaceCommandMenuContext'
+import {
+  createWorkItemRelation,
+  deleteWorkItemRelation,
+  getWorkItemConfiguration,
+} from '../work-items/api'
+import {
+  createDefaultCustomFieldValues,
+  isCustomFieldApplicable,
+  parseCustomFieldFormData,
+  sortCustomFieldDefinitions,
+} from '../work-items/customFields'
+import {
+  WorkItemFieldsEditor,
+  type WorkItemPersonOption,
+} from '../work-items/WorkItemFieldsEditor'
+import {
+  WorkItemDefinitionFilters,
+} from '../work-items/WorkItemDefinitionFilters'
+import {
+  matchesWorkItemDefinitionFilter,
+  type WorkItemDefinitionFilter,
+} from '../work-items/workItemFilters'
+import {
+  WorkItemRelationsEditor,
+  type WorkItemRelationEditorInput,
+} from '../work-items/WorkItemRelationsEditor'
+import {
+  createCustomFieldErrorMessages,
+  createCustomFieldValuePatch,
+  filterWorkItemsByTeam,
+  formatWorkItemCustomFieldValue,
+  readSelectedRelationGraphRevision,
+  refreshRelationDetailAfterConflict,
+  resolveCreateWorkflowStatuses,
+  resolveEditableWorkflowStatuses,
+  resolveWorkItemPersonOptions,
+  resolveWorkItemWorkflowStatusId,
+  resolveWorkItemWorkflowStatusLabel,
+  resolveWorkflowCategoryToneClassName,
+  resolveWorkflowStatusCategory,
+  resolveWorkflowStatusDefinition,
+} from '../work-items/workItemDisplay'
 
 const taskTabs = ['table', 'board', 'gantt', 'calendar', 'file', 'permissions'] as const
-const taskStatuses = ['in-progress', 'review', 'todo', 'done'] as const
 const taskPriorities = ['high', 'medium', 'low'] as const
 const taskDueDateFilters = ['all', 'overdue', 'upcoming', 'no-date'] as const
 const taskSortOrders = ['due-date-asc', 'due-date-desc'] as const
@@ -95,6 +142,12 @@ const emptyProjectMembers: ProjectMember[] = []
 const emptyProjectUsers: ProjectUser[] = []
 const emptyTeamIssues: TeamIssue[] = []
 const emptyWorkspaceMembers: WorkspaceMember[] = []
+const emptyResolvedWorkItemConfigurations: Record<string, ResolvedWorkItemConfiguration> = {}
+const emptyConfigurationTeamIds: string[] = []
+const emptyProjectWorkItemConfigurationLoadResult: ProjectWorkItemConfigurationLoadResult = {
+  configurationsByTeam: emptyResolvedWorkItemConfigurations,
+  failedTeamIds: emptyConfigurationTeamIds,
+}
 const apiSWRConfig = {
   dedupingInterval: 10_000,
   shouldRetryOnError: false,
@@ -108,7 +161,7 @@ type TaskTab = (typeof taskTabs)[number]
 /**
  * ステータス絞り込みの選択値です。
  */
-type StatusFilter = TaskStatus | 'all'
+type StatusFilter = string | 'all'
 
 /**
  * 担当者絞り込みの選択値です。
@@ -162,6 +215,42 @@ type AssigneeFilterOption = {
   value: AssigneeFilter
   /**
    * メニューに表示する担当者名です。
+   */
+  label: string
+}
+
+/**
+ * Project 画面で Team ごとの Work Item configuration をまとめて取得した結果です。
+ */
+type ProjectWorkItemConfigurationLoadResult = {
+  /**
+   * Team ID ごとに取得できた resolved configuration です。
+   */
+  configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
+  /**
+   * Configuration の取得に失敗した Team ID です。
+   */
+  failedTeamIds: string[]
+}
+
+/**
+ * 複数 Team を含む Project board と status filter の列定義です。
+ */
+type ProjectTaskStatusColumn = {
+  /**
+   * React key と status filter 値に使う Team-scoped ID です。
+   */
+  key: string
+  /**
+   * Status の表示名を区別するための Team ID です。
+   */
+  teamId: string
+  /**
+   * 列見出しと category tone に使う status definition です。
+   */
+  status: WorkflowStatusDefinition
+  /**
+   * Status filter に表示する Team 名を含む label です。
    */
   label: string
 }
@@ -279,6 +368,39 @@ type TaskScreenProps = {
    */
   selectedIssueDetail?: TeamIssueDetail
   /**
+   * 一覧と作成フォームへ適用する workflow と custom field configuration です。
+   * Team 未指定の集約一覧では、特定 Team の設定を誤適用しないため未指定にします。
+   */
+  resolvedConfiguration?: ResolvedWorkItemConfiguration
+  /**
+   * 集約 Project の各 Work Item に適用する Team-scoped configuration です。
+   */
+  resolvedConfigurationsByTeam?: Record<string, ResolvedWorkItemConfiguration>
+  /**
+   * Configuration の取得に失敗した Team ID です。
+   */
+  configurationFailedTeamIds?: string[]
+  /**
+   * Work Item configuration の取得失敗時に表示するエラーメッセージです。
+   */
+  configurationErrorMessage?: string
+  /**
+   * 失敗した Work Item configuration を再取得する callback です。
+   */
+  onRetryConfigurations?: () => void
+  /**
+   * Relation target として表示できる Team 全体の Issue 候補です。
+   */
+  relationCandidates?: TeamIssue[]
+  /**
+   * Relation 候補を取得中かどうかです。
+   */
+  isRelationCandidatesLoading?: boolean
+  /**
+   * Relation 候補の取得失敗時に表示するエラーメッセージです。
+   */
+  relationCandidatesErrorMessage?: string
+  /**
    * 選択中 Issue の comment thread、watcher、presence です。
    */
   collaboration?: IssueCollaborationController
@@ -326,6 +448,14 @@ type TaskScreenProps = {
     issueId: string,
     input: UpdateTeamIssueInput,
   ) => Promise<void>
+  /**
+   * 選択中 Work Item へ relation を追加する callback です。
+   */
+  onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
+  /**
+   * 選択中 Work Item の relation を解除する callback です。
+   */
+  onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
   /**
    * サイドバーからプロジェクトを選択したときの callback です。
    */
@@ -390,6 +520,7 @@ const viewLabelKeys: Record<TaskTab, MessageKey> = {
 }
 
 const taskTabPanelId = 'task-tabpanel'
+const ambiguousIssueSelectionLocationState = 'ambiguous-issue-selection'
 
 function createTaskTabId(tab: TaskTab) {
   return `task-tab-${tab}`
@@ -399,6 +530,7 @@ function createTaskTabId(tab: TaskTab) {
  * Cognito 認証後に表示するタスク専用ページです。
  */
 export function TaskPage() {
+  const location = useLocation()
   const navigate = useNavigate()
   const params = useParams()
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
@@ -462,7 +594,6 @@ export function TaskPage() {
       }),
     apiSWRConfig,
   )
-  const tasks = projectIssues
   const projectMembersKey = accessToken && user && !currentUserError
     ? (['project-members', accessToken, projectId] as const)
     : null
@@ -525,22 +656,100 @@ export function TaskPage() {
   const projectUsersErrorMessage = projectUsersError
     ? t('workspace.permissions.usersError')
     : undefined
-  const activeTeam = findTeamForProject(teams, projectId, selectedTeamId)
-  const activeProject = findProjectInTeams(teams, projectId, activeTeam?.id ?? selectedTeamId)
-  const resolvedSelectedIssue =
-    findIssueBySelection(projectIssues, selectedIssueId, selectedTeamId) ??
-    projectIssues.find((issue) => selectedTeamId ? issue.teamId === selectedTeamId : false) ??
-    projectIssues[0]
-  const resolvedSelectedIssueTeamId = resolvedSelectedIssue?.teamId ?? activeTeam?.id
+  const selectedProjectTeam = selectedTeamId
+    ? teams.find((team) =>
+        team.id === selectedTeamId && team.projects.some((project) => project.id === projectId),
+      )
+    : undefined
+  const projectTeams = teams.filter((team) =>
+    team.projects.some((project) => project.id === projectId),
+  )
+  const aggregateProjectTeam = projectTeams.length === 1 ? projectTeams[0] : undefined
+  const matchingProjects = projectTeams.flatMap((team) =>
+    team.projects.filter((project) => project.id === projectId),
+  )
+  const tasks = selectedTeamId
+    ? filterWorkItemsByTeam(projectIssues, selectedTeamId)
+    : projectIssues
+  const requestedIssueCandidates = selectedIssueId
+    ? tasks.filter((issue) =>
+        issue.id === selectedIssueId && (!selectedTeamId || issue.teamId === selectedTeamId),
+      )
+    : emptyTeamIssues
+  const hasAmbiguousIssueSelection = Boolean(
+    selectedIssueId && !selectedTeamId && requestedIssueCandidates.length > 1,
+  )
+  const requestedIssue = hasAmbiguousIssueSelection
+    ? undefined
+    : requestedIssueCandidates[0]
+  const resolvedSelectedIssue = requestedIssue ?? tasks[0]
+  const requestedIssueTeamId = (
+    selectedIssueId && requestedIssue ? requestedIssue.teamId : undefined
+  )
+  const interactionTeamId = selectedProjectTeam?.id ?? requestedIssueTeamId ?? aggregateProjectTeam?.id
+  const interactionTeam = interactionTeamId
+    ? teams.find((team) => team.id === interactionTeamId)
+    : undefined
+  const activeTeam = interactionTeam ?? aggregateProjectTeam
+  const creationTeam = selectedProjectTeam ?? aggregateProjectTeam
+  const listConfigurationTeamId = selectedProjectTeam?.id ?? aggregateProjectTeam?.id
+  const consistentAggregateProject = matchingProjects.every(
+    (project) => project.name === matchingProjects[0]?.name,
+  )
+    ? matchingProjects[0]
+    : undefined
+  const activeProject = interactionTeam
+    ? interactionTeam.projects.find((project) => project.id === projectId)
+    : consistentAggregateProject
+  const configurationTeamIds = selectedProjectTeam
+    ? [selectedProjectTeam.id]
+    : Array.from(new Set([
+        ...projectTeams.map((team) => team.id),
+        ...projectIssues.map((issue) => issue.teamId),
+      ])).sort()
+  const workItemConfigurationKey = accessToken && user && !currentUserError &&
+      configurationTeamIds.length > 0
+    ? (['project-work-item-configurations', accessToken, configurationTeamIds.join('\0')] as const)
+    : null
+  const {
+    data: workItemConfigurationLoadResult = emptyProjectWorkItemConfigurationLoadResult,
+    isLoading: isWorkItemConfigurationLoading,
+    mutate: mutateWorkItemConfigurations,
+  } = useSWR(
+    workItemConfigurationKey,
+    ([, token]) => loadProjectWorkItemConfigurations(token, configurationTeamIds),
+    apiSWRConfig,
+  )
+  const selectedWorkItemTeamId = interactionTeamId ?? (
+    hasAmbiguousIssueSelection || location.state === ambiguousIssueSelectionLocationState
+      ? undefined
+      : resolvedSelectedIssue?.teamId
+  )
+  const resolvedConfiguration = selectedWorkItemTeamId
+    ? workItemConfigurationLoadResult.configurationsByTeam[selectedWorkItemTeamId]
+    : undefined
+  const failedConfigurationTeamIds = workItemConfigurationLoadResult.failedTeamIds
+  const relationCandidatesKey = accessToken && user && !currentUserError && selectedWorkItemTeamId
+    ? (['project-relation-candidates', accessToken, selectedWorkItemTeamId] as const)
+    : null
+  const {
+    data: relationCandidates = emptyTeamIssues,
+    error: relationCandidatesError,
+    isLoading: isRelationCandidatesLoading,
+  } = useSWR(
+    relationCandidatesKey,
+    ([, token, teamId]) => getTeamIssues(teamId, token),
+    apiSWRConfig,
+  )
+  const resolvedSelectedIssueTeamId = selectedWorkItemTeamId
   const collaboration = useIssueCollaboration({
     accessToken,
-    enabled: resolvedSelectedIssue?.source !== 'legacy',
     issueId: resolvedSelectedIssue?.id,
     projectId: resolvedSelectedIssue?.assignedProjectId ?? projectId,
     teamId: resolvedSelectedIssueTeamId,
   })
   const artifactIssueId = resolvedSelectedIssue?.id
-  const artifactProjectTeamId = activeTeam?.id
+  const artifactProjectTeamId = selectedWorkItemTeamId
   const issueFileScope = useMemo<FileArtifactScope | undefined>(() =>
     artifactIssueId && resolvedSelectedIssueTeamId
       ? {
@@ -557,7 +766,6 @@ export function TaskPage() {
   [artifactProjectTeamId, projectId])
   const issueArtifacts = useFileArtifacts({
     accessToken,
-    enabled: resolvedSelectedIssue?.source !== 'legacy',
     scope: issueFileScope,
   })
   const projectFiles = useFileArtifacts({ accessToken, scope: projectFileScope })
@@ -614,11 +822,18 @@ export function TaskPage() {
   const detailErrorMessage = issueUpdateErrorMessage ?? (
     detailError ? t('tasks.detail.error') : undefined
   )
+  const configurationErrorMessage = failedConfigurationTeamIds.length > 0
+    ? t('workItems.configuration.loadError')
+    : undefined
+  const relationCandidatesErrorMessage = relationCandidatesError
+    ? t('tasks.detail.error')
+    : undefined
   const isLoading =
     !session ||
     isCurrentUserLoading ||
     Boolean(currentUserError) ||
-    Boolean(user && isProjectTasksLoading)
+    Boolean(user && isProjectTasksLoading) ||
+    Boolean(workItemConfigurationKey && isWorkItemConfigurationLoading)
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -648,6 +863,22 @@ export function TaskPage() {
     setSearchParams(nextSearchParams, { replace: true })
   }, [isCreateTaskRequested, searchParams, setSearchParams])
 
+  useEffect(() => {
+    if (!hasAmbiguousIssueSelection) {
+      return
+    }
+
+    const nextSearchParams = new URLSearchParams(searchParams)
+
+    nextSearchParams.delete('issueId')
+    nextSearchParams.delete('commentId')
+    nextSearchParams.delete('rootCommentId')
+    setSearchParams(nextSearchParams, {
+      replace: true,
+      state: ambiguousIssueSelectionLocationState,
+    })
+  }, [hasAmbiguousIssueSelection, searchParams, setSearchParams])
+
   const userInitial =
     (user?.attributes.name ?? user?.attributes.email ?? user?.username ?? 'J')
       .trim()
@@ -659,15 +890,15 @@ export function TaskPage() {
       return
     }
 
-    if (!activeTeam) {
+    if (!creationTeam) {
       throw new Error(t('issues.error.create'))
     }
 
     const issue = await mutationRequestRunner.run(
       'issue:create',
-      JSON.stringify([activeTeam.id, projectId, input]),
+      JSON.stringify([creationTeam.id, projectId, input]),
       (context) => createTeamIssue(
-        activeTeam.id,
+        creationTeam.id,
         accessToken,
         {
           ...input,
@@ -677,7 +908,7 @@ export function TaskPage() {
       ),
     )
     await mutateProjectTasks()
-    navigate(createProjectIssuesPath(projectId, activeTeam.id, issue.id))
+    navigate(createProjectIssuesPath(projectId, creationTeam.id, issue.id))
   }
 
   const handleCreateTeam = async (input: CreateProjectDirectoryTeamInput) => {
@@ -829,9 +1060,9 @@ export function TaskPage() {
     const currentIssue = selectedIssueDetail?.issue.id === issueId &&
       selectedIssueDetail.issue.teamId === teamId
       ? selectedIssueDetail.issue
-      : projectIssues.find((issue) => issue.id === issueId && issue.teamId === teamId)
+      : tasks.find((issue) => issue.id === issueId && issue.teamId === teamId)
 
-    if (!currentIssue || currentIssue.source === 'legacy') {
+    if (!currentIssue) {
       return
     }
 
@@ -870,11 +1101,83 @@ export function TaskPage() {
     }
   }
 
+  const handleAddRelation = async (
+    issueId: string,
+    input: WorkItemRelationEditorInput,
+  ) => {
+    const teamId = selectedIssueDetail?.issue.id === issueId
+      ? selectedIssueDetail.issue.teamId
+      : resolvedSelectedIssueTeamId
+
+    if (!accessToken || !teamId) {
+      return
+    }
+
+    const graphRevision = readSelectedRelationGraphRevision(selectedIssueDetail, issueId, t)
+
+    try {
+      await mutationRequestRunner.run(
+        `issue:relation:create:${teamId}:${issueId}`,
+        JSON.stringify([graphRevision, input]),
+        (context) => createWorkItemRelation(
+          teamId,
+          issueId,
+          accessToken,
+          { ...input, expectedGraphRevision: graphRevision },
+          context,
+        ),
+      )
+      await mutateSelectedIssueDetail()
+    } catch (error) {
+      await refreshRelationDetailAfterConflict(error, mutateSelectedIssueDetail)
+      throw error
+    }
+  }
+
+  const handleDeleteRelation = async (
+    issueId: string,
+    relation: WorkItemRelation,
+  ) => {
+    const teamId = selectedIssueDetail?.issue.id === issueId
+      ? selectedIssueDetail.issue.teamId
+      : resolvedSelectedIssueTeamId
+
+    if (!accessToken || !teamId) {
+      return
+    }
+
+    const graphRevision = readSelectedRelationGraphRevision(selectedIssueDetail, issueId, t)
+
+    try {
+      await mutationRequestRunner.run(
+        `issue:relation:delete:${teamId}:${issueId}`,
+        JSON.stringify([graphRevision, relation.type, relation.targetWorkItemId]),
+        (context) => deleteWorkItemRelation(
+          teamId,
+          issueId,
+          accessToken,
+          {
+            expectedGraphRevision: graphRevision,
+            targetWorkItemId: relation.targetWorkItemId,
+            type: relation.type,
+          },
+          context,
+        ),
+      )
+      await mutateSelectedIssueDetail()
+    } catch (error) {
+      await refreshRelationDetailAfterConflict(error, mutateSelectedIssueDetail)
+      throw error
+    }
+  }
+
   return (
     <TaskScreen
+      configurationErrorMessage={configurationErrorMessage}
       isLoading={isLoading}
+      isRelationCandidatesLoading={Boolean(relationCandidatesKey && isRelationCandidatesLoading)}
       locale={locale}
-      activeProjectTeamId={activeTeam?.id}
+      activeProjectTeamId={interactionTeamId}
       onSelectProject={(nextProjectId, teamId) =>
         navigate(createProjectIssuesPath(nextProjectId, teamId))
       }
@@ -886,12 +1189,16 @@ export function TaskPage() {
       onCreateTeam={canManageStructure ? handleCreateTeam : undefined}
       onArchiveProject={canManageStructure ? handleArchiveProject : undefined}
       onArchiveTeam={canManageStructure ? handleArchiveTeam : undefined}
-      onCreateTask={canMutateContent ? handleCreateTask : undefined}
+      onCreateTask={canMutateContent && creationTeam &&
+        Boolean(workItemConfigurationLoadResult.configurationsByTeam[creationTeam.id])
+        ? handleCreateTask
+        : undefined}
+      onAddRelation={canMutateContent ? handleAddRelation : undefined}
       assigneeErrorMessage={projectMembersErrorMessage}
       assigneeOptions={activeProjectMembers}
       canManageProjectMembers={canManageProjectMembers}
       collaboration={collaboration}
-      artifacts={resolvedSelectedIssue?.source !== 'legacy' ? issueArtifacts : undefined}
+      artifacts={issueArtifacts}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}
       defaultCreateTaskOpen={isCreateTaskRequested}
@@ -906,6 +1213,7 @@ export function TaskPage() {
       onLoadMoreProjectUsers={canManageProjectMembers ? handleLoadMoreProjectUsers : undefined}
       onProjectUserQueryChange={canManageProjectMembers ? setProjectUserQuery : undefined}
       onRemoveProjectMember={canManageProjectMembers ? handleRemoveProjectMember : undefined}
+      onDeleteRelation={canMutateContent ? handleDeleteRelation : undefined}
       onSelectedIssueChange={handleSelectedIssueChange}
       onUpdateIssue={canMutateContent ? handleUpdateIssue : undefined}
       onUpdateProjectMember={canManageProjectMembers ? handleUpdateProjectMember : undefined}
@@ -918,10 +1226,16 @@ export function TaskPage() {
       projectUsers={projectUsers}
       projectUsersErrorMessage={projectUsersErrorMessage}
       projectUsersNextToken={projectUsersNextToken}
+      relationCandidates={relationCandidates}
+      relationCandidatesErrorMessage={relationCandidatesErrorMessage}
       selectedIssueDetail={selectedIssueDetail}
+      resolvedConfiguration={listConfigurationTeamId ? resolvedConfiguration : undefined}
+      resolvedConfigurationsByTeam={workItemConfigurationLoadResult.configurationsByTeam}
+      configurationFailedTeamIds={failedConfigurationTeamIds}
+      onRetryConfigurations={() => void mutateWorkItemConfigurations()}
       taskErrorMessage={taskErrorMessage}
       tasks={tasks}
-      teamName={activeTeam?.name}
+      teamName={interactionTeam?.name}
       teams={teams}
       userInitial={userInitial}
       workspaceMembers={workspaceAccess?.members ?? emptyWorkspaceMembers}
@@ -945,6 +1259,7 @@ export function TaskScreen({
   canManageProjectMembers = false,
   collaboration,
   artifacts,
+  configurationErrorMessage,
   currentWorkspaceMemberKey,
   defaultCreateTaskOpen = false,
   detailErrorMessage,
@@ -955,6 +1270,7 @@ export function TaskScreen({
   initialTab = 'table',
   isAssigneeOptionsLoading = false,
   isProjectUsersLoading = false,
+  isRelationCandidatesLoading = false,
   isSelectedIssueDetailLoading = false,
   isSystemAdmin = false,
   isLoading = false,
@@ -965,10 +1281,17 @@ export function TaskScreen({
   projectUsers = emptyProjectUsers,
   projectUsersErrorMessage,
   projectUsersNextToken,
+  relationCandidates = emptyTeamIssues,
+  relationCandidatesErrorMessage,
+  resolvedConfiguration,
+  resolvedConfigurationsByTeam = emptyResolvedWorkItemConfigurations,
+  configurationFailedTeamIds = emptyConfigurationTeamIds,
   selectedIssueDetail,
   tasks = [],
   taskErrorMessage,
   onLoadMoreProjectUsers,
+  onAddRelation,
+  onDeleteRelation,
   onProjectUserQueryChange,
   onRemoveProjectMember,
   onSelectedIssueChange,
@@ -980,6 +1303,7 @@ export function TaskScreen({
   onArchiveProject,
   onArchiveTeam,
   onCreateTask,
+  onRetryConfigurations,
   onUpdateIssue,
   onUpdateProjectMember,
   workspaceMembers = emptyWorkspaceMembers,
@@ -989,6 +1313,10 @@ export function TaskScreen({
   const [activeTab, setActiveTab] = useState<TaskTab>(initialTab)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [definitionFilter, setDefinitionFilter] = useState<WorkItemDefinitionFilter>({
+    category: 'all',
+    customFieldId: '',
+  })
   const [isStatusMenuOpen, setIsStatusMenuOpen] = useState(false)
   const [assigneeFilter, setAssigneeFilter] = useState<AssigneeFilter>('all')
   const [isAssigneeMenuOpen, setIsAssigneeMenuOpen] = useState(false)
@@ -998,8 +1326,8 @@ export function TaskScreen({
   const [isDueDateMenuOpen, setIsDueDateMenuOpen] = useState(false)
   const [sortOrder, setSortOrder] = useState<TaskSortOrder>('due-date-asc')
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false)
-  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([])
-  const [localSelectedDetailTaskId, setLocalSelectedDetailTaskId] = useState<string | undefined>()
+  const [selectedTaskKeys, setSelectedTaskKeys] = useState<string[]>([])
+  const [localSelectedDetailTaskKey, setLocalSelectedDetailTaskKey] = useState<string | undefined>()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(defaultCreateTaskOpen)
@@ -1008,28 +1336,82 @@ export function TaskScreen({
   const commandMenu = useWorkspaceCommandMenu()
   const taskContentRef = useRef<HTMLDivElement>(null)
   const resolvedProjectName = projectName ?? projectId
-  const resolvedActiveTeam = findTeamForProject(teams, projectId, activeProjectTeamId)
-  const resolvedActiveTeamId = activeProjectTeamId ?? resolvedActiveTeam?.id
+  const resolvedActiveTeam = activeProjectTeamId
+    ? teams.find((team) =>
+        team.id === activeProjectTeamId &&
+        team.projects.some((project) => project.id === projectId),
+      )
+    : undefined
+  const resolvedActiveTeamId = activeProjectTeamId
+  const sidebarActiveProjectTeamId = resolvedActiveTeamId ?? null
   const resolvedTeamName = teamName ?? resolvedActiveTeam?.name ?? ''
   const activeTeamProjects = resolvedActiveTeam?.projects ?? []
-  const selectedDetailTaskId = localSelectedDetailTaskId ?? initialSelectedTaskId
-
+  const configuration = resolvedConfiguration?.configuration
+  const statusColumns = useMemo(
+    () => createProjectTaskStatusColumns(
+      tasks,
+      resolvedConfigurationsByTeam,
+      teams,
+      resolvedActiveTeamId,
+      configuration,
+    ),
+    [configuration, resolvedActiveTeamId, resolvedConfigurationsByTeam, tasks, teams],
+  )
+  const personLabels = useMemo(
+    () => Object.fromEntries(
+      workspaceMembers.map((member) => [member.email, member.name ?? member.email]),
+    ),
+    [workspaceMembers],
+  )
   useEffect(() => {
     if (defaultCreateTaskOpen) {
       queueMicrotask(() => setIsCreateTaskOpen(true))
     }
   }, [defaultCreateTaskOpen])
 
+  const effectiveStatusFilter = statusFilter === 'all' ||
+    statusColumns.some((column) => column.key === statusFilter)
+    ? statusFilter
+    : 'all'
+  const effectiveDefinitionFilter = useMemo(() =>
+    !definitionFilter.customFieldId ||
+      configuration?.customFields.some((field) => field.id === definitionFilter.customFieldId)
+      ? definitionFilter
+      : {
+          category: definitionFilter.category,
+          customFieldId: '',
+        },
+  [configuration?.customFields, definitionFilter])
+
   const visibleTasks = useMemo(
     () => {
       const filteredTasks = tasks.filter((task) => {
-        const matchesStatus = statusFilter === 'all' || task.status === statusFilter
+        const resolvedTaskConfiguration = resolveProjectTaskConfiguration(
+          task,
+          resolvedConfigurationsByTeam,
+          configuration,
+        )
+        const matchesStatus = effectiveStatusFilter === 'all' ||
+          statusColumns.some((column) =>
+            column.key === effectiveStatusFilter && isTaskInProjectStatusColumn(task, column),
+          )
         const matchesAssignee = assigneeFilter === 'all' || resolveTaskAssigneeFilterValue(task, t) === assigneeFilter
         const matchesPriority = priorityFilter === 'all' || task.priority === priorityFilter
         const matchesDueDate = matchesTaskDueDateFilter(task, dueDateFilter)
+        const matchesDefinition = matchesWorkItemDefinitionFilter(
+          task,
+          resolvedTaskConfiguration,
+          effectiveDefinitionFilter,
+        )
         const normalizedQuery = searchQuery.trim().toLowerCase()
 
-        if (!matchesStatus || !matchesAssignee || !matchesPriority || !matchesDueDate) {
+        if (
+          !matchesStatus ||
+          !matchesAssignee ||
+          !matchesPriority ||
+          !matchesDueDate ||
+          !matchesDefinition
+        ) {
           return false
         }
 
@@ -1040,21 +1422,50 @@ export function TaskScreen({
         return [
           resolveTaskTitle(task, t),
           resolveTaskAssignee(task, t),
-          t(`tasks.status.${task.status}`),
+          resolveWorkItemWorkflowStatusLabel(task, resolvedTaskConfiguration),
           t(`tasks.priority.${task.priority}`),
           task.dueDate,
+          ...resolveTaskCustomFieldSearchValues(
+            task,
+            resolvedTaskConfiguration,
+            locale,
+            personLabels,
+          ),
         ].some((value) => value.toLowerCase().includes(normalizedQuery))
       })
 
       return sortTasksByDueDate(filteredTasks, sortOrder)
     },
-    [assigneeFilter, dueDateFilter, priorityFilter, searchQuery, sortOrder, statusFilter, t, tasks],
+    [
+      assigneeFilter,
+      configuration,
+      dueDateFilter,
+      effectiveDefinitionFilter,
+      locale,
+      personLabels,
+      priorityFilter,
+      searchQuery,
+      sortOrder,
+      statusColumns,
+      effectiveStatusFilter,
+      t,
+      tasks,
+      resolvedConfigurationsByTeam,
+    ],
   )
   const selectedDetailTask =
-    findTaskBySelection(tasks, selectedDetailTaskId, resolvedActiveTeamId) ??
-    findTaskBySelection(tasks, initialSelectedTaskId, resolvedActiveTeamId) ??
+    (localSelectedDetailTaskKey
+      ? tasks.find((task) => createTaskKey(task) === localSelectedDetailTaskKey)
+      : undefined) ??
+    findTaskBySelection(tasks, initialSelectedTaskId, activeProjectTeamId) ??
     visibleTasks[0] ??
     tasks[0]
+  const selectedDetailTaskKey = selectedDetailTask
+    ? createTaskKey(selectedDetailTask)
+    : undefined
+  const selectedDetailTeamProjects = selectedDetailTask
+    ? teams.find((team) => team.id === selectedDetailTask.teamId)?.projects ?? activeTeamProjects
+    : activeTeamProjects
 
   useEffect(() => {
     if (isCreateTaskOpen) {
@@ -1062,17 +1473,17 @@ export function TaskScreen({
     }
   }, [isCreateTaskOpen])
 
-  const updateTaskSelection = (taskId: string, selected: boolean) => {
-    setSelectedTaskIds((currentTaskIds) =>
+  const updateTaskSelection = (taskKey: string, selected: boolean) => {
+    setSelectedTaskKeys((currentTaskKeys) =>
       selected
-        ? [...new Set([...currentTaskIds, taskId])]
-        : currentTaskIds.filter((currentTaskId) => currentTaskId !== taskId),
+        ? [...new Set([...currentTaskKeys, taskKey])]
+        : currentTaskKeys.filter((currentTaskKey) => currentTaskKey !== taskKey),
     )
   }
 
   const handleSelectDetailTask = (task: ProjectTask) => {
     if (!onSelectedIssueChange) {
-      setLocalSelectedDetailTaskId(task.id)
+      setLocalSelectedDetailTaskKey(createTaskKey(task))
     }
     onSelectedIssueChange?.(task)
   }
@@ -1081,7 +1492,7 @@ export function TaskScreen({
     <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
       <Sidebar
         activeProjectId={projectId}
-        activeProjectTeamId={resolvedActiveTeamId}
+        activeProjectTeamId={sidebarActiveProjectTeamId}
         className="max-[980px]:hidden"
         collapsed={sidebarCollapsed}
         inboxCount={inboxCount}
@@ -1106,7 +1517,7 @@ export function TaskScreen({
       >
         <Sidebar
           activeProjectId={projectId}
-          activeProjectTeamId={resolvedActiveTeamId}
+          activeProjectTeamId={sidebarActiveProjectTeamId}
           inboxCount={inboxCount}
           labels={sidebarLabels}
           onArchiveProject={onArchiveProject}
@@ -1157,13 +1568,33 @@ export function TaskScreen({
             data-testid="task-main-scroll"
             ref={taskContentRef}
           >
+            {configurationErrorMessage ? (
+              <div
+                className="mx-[clamp(20px,3vw,34px)] mt-5 flex flex-wrap items-center justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-5 py-4 text-sm font-semibold text-red-700"
+                data-testid="project-configuration-error"
+                role="alert"
+              >
+                <span>{configurationErrorMessage}</span>
+                {onRetryConfigurations ? (
+                  <button
+                    className="underline underline-offset-2"
+                    onClick={onRetryConfigurations}
+                    type="button"
+                  >
+                    {t('collaboration.retry')}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             {isCreateTaskOpen && onCreateTask ? (
               <CreateTaskPanel
                 assigneeErrorMessage={assigneeErrorMessage}
                 assigneeOptions={assigneeOptions}
+                configuration={configuration}
                 isAssigneeOptionsLoading={isAssigneeOptionsLoading}
                 errorMessage={createTaskError}
                 isSubmitting={isCreatingTask}
+                locale={locale}
                 onCancel={() => {
                   setCreateTaskError(undefined)
                   setIsCreateTaskOpen(false)
@@ -1185,7 +1616,9 @@ export function TaskScreen({
                     setIsCreatingTask(false)
                   }
                 }}
+                projectId={projectId}
                 t={t}
+                workspaceMembers={workspaceMembers}
               />
             ) : null}
             <div
@@ -1199,6 +1632,10 @@ export function TaskScreen({
                 allTasks={tasks}
                 assigneeFilter={assigneeFilter}
                 canManageProjectMembers={canManageProjectMembers}
+                configuration={configuration}
+                configurationsByTeam={resolvedConfigurationsByTeam}
+                configurationFailedTeamIds={configurationFailedTeamIds}
+                definitionFilter={effectiveDefinitionFilter}
                 dueDateFilter={dueDateFilter}
                 isAssigneeMenuOpen={isAssigneeMenuOpen}
                 isDueDateMenuOpen={isDueDateMenuOpen}
@@ -1208,6 +1645,9 @@ export function TaskScreen({
                 isProjectMembersLoading={isAssigneeOptionsLoading}
                 isProjectUsersLoading={isProjectUsersLoading}
                 isSystemAdmin={isSystemAdmin}
+                locale={locale}
+                personLabels={personLabels}
+                personOptions={resolveWorkItemPersonOptions(workspaceMembers)}
                 priorityFilter={priorityFilter}
                 projectId={projectId}
                 projectFiles={projectFiles}
@@ -1218,7 +1658,7 @@ export function TaskScreen({
                 projectUsers={projectUsers}
                 projectUsersErrorMessage={projectUsersErrorMessage}
                 projectUsersNextToken={projectUsersNextToken}
-                selectedDetailTaskId={selectedDetailTask?.id}
+                selectedDetailTaskKey={selectedDetailTaskKey}
                 sortOrder={sortOrder}
                 onAssigneeFilterChange={(nextAssigneeFilter) => {
                   setAssigneeFilter(nextAssigneeFilter)
@@ -1230,6 +1670,7 @@ export function TaskScreen({
                   setIsDueDateMenuOpen(false)
                 }}
                 onDueDateMenuOpenChange={setIsDueDateMenuOpen}
+                onDefinitionFilterChange={setDefinitionFilter}
                 onLoadMoreProjectUsers={onLoadMoreProjectUsers}
                 onCreateTaskOpen={onCreateTask ? () => setIsCreateTaskOpen(true) : undefined}
                 onPriorityFilterChange={(nextPriorityFilter) => {
@@ -1254,31 +1695,47 @@ export function TaskScreen({
                 onTaskSelectionChange={updateTaskSelection}
                 onUpdateProjectMember={onUpdateProjectMember}
                 searchQuery={searchQuery}
-                selectedTaskIds={selectedTaskIds}
-                statusFilter={statusFilter}
+                selectedTaskKeys={selectedTaskKeys}
+                statusFilter={effectiveStatusFilter}
                 t={t}
                 taskErrorMessage={taskErrorMessage}
                 tasks={visibleTasks}
                 currentWorkspaceMemberKey={currentWorkspaceMemberKey}
-                locale={locale}
                 workspaceMembers={workspaceMembers}
+                statusColumns={statusColumns}
               />
               {activeTab === 'permissions' || activeTab === 'file' ? null : (
                 <TaskDetailPane
                   assigneeOptions={assigneeOptions}
                   artifacts={artifacts}
                   collaboration={collaboration}
+                  configuration={selectedDetailTask
+                    ? resolveProjectTaskConfiguration(
+                        selectedDetailTask,
+                        resolvedConfigurationsByTeam,
+                        configuration,
+                      )
+                    : configuration}
                   currentWorkspaceMemberKey={currentWorkspaceMemberKey}
                   detail={selectedIssueDetail}
                   errorMessage={detailErrorMessage}
                   focusedCommentId={focusedCommentId}
                   focusedRootCommentId={focusedRootCommentId}
                   isLoading={isSelectedIssueDetailLoading}
+                  isRelationCandidatesLoading={isRelationCandidatesLoading}
+                  key={`${selectedDetailTask?.teamId ?? ''}:${selectedDetailTask?.id ?? ''}`}
                   locale={locale}
-                  projects={activeTeamProjects}
+                  onAddRelation={onAddRelation}
+                  onDeleteRelation={onDeleteRelation}
+                  projects={selectedDetailTeamProjects}
+                  relationCandidates={relationCandidates}
+                  relationCandidatesErrorMessage={relationCandidatesErrorMessage}
                   t={t}
                   task={selectedDetailTask}
-                  onUpdateIssue={onUpdateIssue}
+                  onUpdateIssue={selectedDetailTask &&
+                    configurationFailedTeamIds.includes(selectedDetailTask.teamId)
+                    ? undefined
+                    : onUpdateIssue}
                   workspaceMembers={workspaceMembers}
                 />
               )}
@@ -1288,47 +1745,6 @@ export function TaskScreen({
       </section>
     </main>
   )
-}
-
-function findProjectInTeams(
-  teams: ProjectDirectoryTeam[],
-  projectId: string,
-  preferredTeamId?: string,
-) {
-  const preferredTeam = preferredTeamId
-    ? teams.find((team) => team.id === preferredTeamId)
-    : undefined
-  const preferredProject = preferredTeam?.projects.find((candidate) => candidate.id === projectId)
-
-  if (preferredProject) {
-    return preferredProject
-  }
-
-  for (const team of teams) {
-    const project = team.projects.find((candidate) => candidate.id === projectId)
-
-    if (project) {
-      return project
-    }
-  }
-
-  return undefined
-}
-
-function findTeamForProject(
-  teams: ProjectDirectoryTeam[],
-  projectId: string,
-  preferredTeamId?: string,
-) {
-  const preferredTeam = preferredTeamId
-    ? teams.find((team) => team.id === preferredTeamId)
-    : undefined
-
-  if (preferredTeam?.projects.some((project) => project.id === projectId)) {
-    return preferredTeam
-  }
-
-  return teams.find((team) => team.projects.some((project) => project.id === projectId))
 }
 
 function resolveCurrentUserProjectKey(user: CurrentUser | undefined) {
@@ -1355,20 +1771,6 @@ function normalizeProjectIssueError(error: unknown) {
   }
 
   return error
-}
-
-function findIssueBySelection(
-  issues: TeamIssue[],
-  selectedIssueId?: string,
-  selectedTeamId?: string,
-) {
-  if (!selectedIssueId) {
-    return undefined
-  }
-
-  return issues.find((issue) =>
-    issue.id === selectedIssueId && (!selectedTeamId || issue.teamId === selectedTeamId),
-  )
 }
 
 function findTaskBySelection(
@@ -1408,8 +1810,14 @@ function TaskHeader({
   teamName: string
   userInitial: string
 }) {
-  const openTaskCount = tasks.filter((task) => task.status !== 'done').length
-  const reviewTaskCount = tasks.filter((task) => task.status === 'review').length
+  const openTaskCount = tasks.filter((task) => {
+    const category = resolveWorkflowStatusCategory(task)
+
+    return category !== 'completed' && category !== 'canceled'
+  }).length
+  const reviewTaskCount = tasks.filter(
+    (task) => resolveWorkflowStatusCategory(task) === 'started',
+  ).length
   const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: TaskTab) => {
     const tabIndex = taskTabs.indexOf(tab)
     let nextTabIndex: number | undefined
@@ -1466,7 +1874,7 @@ function TaskHeader({
                 {t('workspace.metric.openTasks')}: {openTaskCount}
               </span>
               <span className="workbench-badge-warning">
-                {t('tasks.status.review')}: {reviewTaskCount}
+                {t('tasks.metric.inProgress')}: {reviewTaskCount}
               </span>
             </div>
           </div>
@@ -1554,6 +1962,10 @@ function TaskWorkspace({
   allTasks,
   assigneeFilter,
   canManageProjectMembers,
+  configuration,
+  configurationsByTeam,
+  configurationFailedTeamIds,
+  definitionFilter,
   dueDateFilter,
   isAssigneeMenuOpen,
   isDueDateMenuOpen,
@@ -1563,6 +1975,9 @@ function TaskWorkspace({
   isProjectMembersLoading,
   isProjectUsersLoading,
   isSystemAdmin,
+  locale,
+  personLabels,
+  personOptions,
   priorityFilter,
   projectId,
   projectFiles,
@@ -1573,12 +1988,13 @@ function TaskWorkspace({
   projectUsers,
   projectUsersErrorMessage,
   projectUsersNextToken,
-  selectedDetailTaskId,
+  selectedDetailTaskKey,
   sortOrder,
   onAssigneeFilterChange,
   onAssigneeMenuOpenChange,
   onDueDateFilterChange,
   onDueDateMenuOpenChange,
+  onDefinitionFilterChange,
   onLoadMoreProjectUsers,
   onCreateTaskOpen,
   onPriorityFilterChange,
@@ -1594,19 +2010,27 @@ function TaskWorkspace({
   onTaskSelectionChange,
   onUpdateProjectMember,
   searchQuery,
-  selectedTaskIds,
+  selectedTaskKeys,
   statusFilter,
   t,
   taskErrorMessage,
   tasks,
   currentWorkspaceMemberKey,
-  locale,
   workspaceMembers,
+  statusColumns,
 }: {
   activeTab: TaskTab
   allTasks: ProjectTask[]
   assigneeFilter: AssigneeFilter
   canManageProjectMembers: boolean
+  /** Work Item の表示と集計に使う設定です。 */
+  configuration?: WorkItemConfiguration
+  /** Team ID ごとの Work Item configuration です。 */
+  configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
+  /** Work Item configuration の取得に失敗した Team ID です。 */
+  configurationFailedTeamIds: string[]
+  /** Workflow category と custom field 値の filter です。 */
+  definitionFilter: WorkItemDefinitionFilter
   dueDateFilter: DueDateFilter
   isAssigneeMenuOpen: boolean
   isDueDateMenuOpen: boolean
@@ -1616,6 +2040,12 @@ function TaskWorkspace({
   isProjectMembersLoading: boolean
   isProjectUsersLoading: boolean
   isSystemAdmin: boolean
+  /** Custom field value の表示 locale です。 */
+  locale: Locale
+  /** Person field ID から表示名を解決する map です。 */
+  personLabels: Readonly<Record<string, string>>
+  /** Person custom field の filter 候補です。 */
+  personOptions: WorkItemPersonOption[]
   priorityFilter: PriorityFilter
   projectId: string
   projectFiles?: FileArtifactsController
@@ -1626,12 +2056,14 @@ function TaskWorkspace({
   projectUsers: ProjectUser[]
   projectUsersErrorMessage?: string
   projectUsersNextToken?: string
-  selectedDetailTaskId?: string
+  selectedDetailTaskKey?: string
   sortOrder: TaskSortOrder
   onAssigneeFilterChange: (assigneeFilter: AssigneeFilter) => void
   onAssigneeMenuOpenChange: (isOpen: boolean) => void
   onDueDateFilterChange: (dueDateFilter: DueDateFilter) => void
   onDueDateMenuOpenChange: (isOpen: boolean) => void
+  /** Workflow category と custom field 値の filter 変更 callback です。 */
+  onDefinitionFilterChange: (filter: WorkItemDefinitionFilter) => void
   onLoadMoreProjectUsers?: () => Promise<void>
   onCreateTaskOpen?: () => void
   onPriorityFilterChange: (priorityFilter: PriorityFilter) => void
@@ -1644,21 +2076,22 @@ function TaskWorkspace({
   onSortOrderChange: (sortOrder: TaskSortOrder) => void
   onStatusFilterChange: (statusFilter: StatusFilter) => void
   onStatusMenuOpenChange: (isOpen: boolean) => void
-  onTaskSelectionChange: (taskId: string, selected: boolean) => void
+  onTaskSelectionChange: (taskKey: string, selected: boolean) => void
   onUpdateProjectMember?: (
     projectId: string,
     memberKey: string,
     input: UpdateProjectMemberInput,
   ) => Promise<void>
   searchQuery: string
-  selectedTaskIds: string[]
+  selectedTaskKeys: string[]
   statusFilter: StatusFilter
   t: (key: MessageKey) => string
   taskErrorMessage?: string
   tasks: ProjectTask[]
   currentWorkspaceMemberKey?: string
-  locale: Locale
   workspaceMembers: WorkspaceMember[]
+  /** Filter と board の列に表示する Team-scoped workflow status です。 */
+  statusColumns: ProjectTaskStatusColumn[]
 }) {
   const statusFilterButtonId = 'status-filter-button'
   const statusFilterMenuId = 'status-filter-menu'
@@ -1717,7 +2150,12 @@ function TaskWorkspace({
             />
           </>
         ) : (
-          <TaskFileList t={t} tasks={tasks} />
+          <TaskFileList
+            configuration={configuration}
+            configurationsByTeam={configurationsByTeam}
+            t={t}
+            tasks={tasks}
+          />
         )}
       </div>
     )
@@ -1747,6 +2185,7 @@ function TaskWorkspace({
               onAssigneeFilterChange('all')
               onPriorityFilterChange('all')
               onDueDateFilterChange('all')
+              onDefinitionFilterChange({ category: 'all', customFieldId: '' })
             }}
           />
           <div className="relative">
@@ -1767,21 +2206,24 @@ function TaskWorkspace({
                 id={statusFilterMenuId}
                 role="menu"
               >
-                {(['all', ...taskStatuses] as const).map((status) => (
+                {[
+                  { key: 'all', label: t('tasks.filter.statusAll') },
+                  ...statusColumns,
+                ].map((status) => (
                   <button
-                    aria-checked={statusFilter === status}
+                    aria-checked={statusFilter === status.key}
                     className={`flex h-9 w-full items-center justify-between rounded-md px-3 text-left text-sm font-semibold transition ${
-                      statusFilter === status
+                      statusFilter === status.key
                         ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]'
                         : 'text-[#1c1d1f] hover:bg-[#f3f4f6]'
                     }`}
-                    key={status}
-                    onClick={() => onStatusFilterChange(status)}
+                    key={status.key}
+                    onClick={() => onStatusFilterChange(status.key)}
                     role="menuitemradio"
                     type="button"
                   >
-                    {status === 'all' ? t('tasks.filter.statusAll') : t(`tasks.status.${status}`)}
-                    {statusFilter === status ? <CheckIcon /> : null}
+                    {status.label}
+                    {statusFilter === status.key ? <CheckIcon /> : null}
                   </button>
                 ))}
               </div>
@@ -1942,6 +2384,16 @@ function TaskWorkspace({
           </div>
         </div>
       </div>
+      <div className="workbench-toolbar mt-3 px-3 py-2">
+        <WorkItemDefinitionFilters
+          configuration={configuration}
+          idPrefix="project-tasks"
+          locale={locale}
+          onChange={onDefinitionFilterChange}
+          personOptions={personOptions}
+          value={definitionFilter}
+        />
+      </div>
 
       {taskErrorMessage && activeTab !== 'table' ? (
         <p
@@ -1957,8 +2409,12 @@ function TaskWorkspace({
 
       {activeTab === 'table' ? (
         <TaskTable
-          selectedDetailTaskId={selectedDetailTaskId}
-          selectedTaskIds={selectedTaskIds}
+          configuration={configuration}
+          configurationsByTeam={configurationsByTeam}
+          locale={locale}
+          personLabels={personLabels}
+          selectedDetailTaskKey={selectedDetailTaskKey}
+          selectedTaskKeys={selectedTaskKeys}
           onCreateTaskOpen={onCreateTaskOpen}
           onSelectTask={onSelectTask}
           onTaskSelectionChange={onTaskSelectionChange}
@@ -1969,38 +2425,108 @@ function TaskWorkspace({
       ) : null}
       {activeTab === 'board' && !taskErrorMessage ? (
         <TaskBoard
-          selectedDetailTaskId={selectedDetailTaskId}
+          configuration={configuration}
+          configurationsByTeam={configurationsByTeam}
+          configurationFailedTeamIds={configurationFailedTeamIds}
+          locale={locale}
+          personLabels={personLabels}
+          selectedDetailTaskKey={selectedDetailTaskKey}
           t={t}
           tasks={tasks}
+          statusColumns={statusColumns}
           onSelectTask={onSelectTask}
         />
       ) : null}
-      {activeTab === 'gantt' && !taskErrorMessage ? <TaskGantt t={t} tasks={tasks} /> : null}
+      {activeTab === 'gantt' && !taskErrorMessage ? (
+        <TaskGantt
+          configuration={configuration}
+          configurationsByTeam={configurationsByTeam}
+          t={t}
+          tasks={tasks}
+        />
+      ) : null}
       {activeTab === 'calendar' && !taskErrorMessage ? <TaskCalendar t={t} tasks={tasks} /> : null}
     </div>
   )
 }
 
+/**
+ * Project 内へ Work Item を作成する inline form です。
+ */
 function CreateTaskPanel({
   assigneeErrorMessage,
   assigneeOptions,
+  configuration,
   errorMessage,
   isAssigneeOptionsLoading,
   isSubmitting,
+  locale,
   onCancel,
   onSubmit,
+  projectId,
   t,
+  workspaceMembers,
 }: {
+  /**
+   * Assignee 候補 API の error message です。
+   */
   assigneeErrorMessage?: string
+  /**
+   * Assignee select に表示する Project member です。
+   */
   assigneeOptions: ProjectMember[]
+  /**
+   * 作成値を検証する Work Item configuration です。
+   */
+  configuration?: WorkItemConfiguration
+  /**
+   * Work Item 作成 API の error message です。
+   */
   errorMessage?: string
+  /**
+   * Assignee 候補を読み込み中かどうかです。
+   */
   isAssigneeOptionsLoading: boolean
+  /**
+   * Work Item を作成中かどうかです。
+   */
   isSubmitting: boolean
+  /**
+   * Custom field editor の表示 locale です。
+   */
+  locale: Locale
+  /**
+   * 作成 form を閉じる callback です。
+   */
   onCancel: () => void
+  /**
+   * 検証済み Work Item 作成入力を送信する callback です。
+   */
   onSubmit: (input: CreateProjectTaskInput) => Promise<void>
+  /**
+   * Custom field scope を判定する Project ID です。
+   */
+  projectId: string
+  /**
+   * 画面文言を解決する翻訳関数です。
+   */
   t: (key: MessageKey) => string
+  /**
+   * Person custom field の選択候補を作る Workspace member です。
+   */
+  workspaceMembers: WorkspaceMember[]
 }) {
   const today = new Date().toISOString().slice(0, 10)
+  const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
+  const workflowStatuses = resolveCreateWorkflowStatuses(configuration)
+  const initialWorkflowStatusId = configuration?.workflow.initialStatusId ?? ''
+  const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
+  const defaultCustomFieldValues = configuration
+    ? createDefaultCustomFieldValues(configuration.customFields, projectId)
+    : {}
+  const hasCustomFields = configuration?.customFields.some((definition) =>
+    isCustomFieldApplicable(definition, projectId),
+  ) ?? false
 
   return (
     <section className="border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-[clamp(18px,2.5vw,30px)] py-3">
@@ -2015,19 +2541,40 @@ function CreateTaskPanel({
           const title = String(formData.get('title') ?? '').trim()
           const assigneeUserId = String(formData.get('assigneeUserId') ?? '').trim()
           const dueDate = String(formData.get('dueDate') ?? today).replaceAll('-', '/')
-          const status = resolveTaskStatus(formData.get('status'))
+          const workflowStatusId = String(
+            formData.get('workflowStatusId') ?? initialWorkflowStatusId,
+          ).trim()
+          const workflowStatus = workflowStatuses.find((status) => status.id === workflowStatusId)
           const priority = resolveTaskPriority(formData.get('priority'))
+          const parsedCustomFields = configuration
+            ? parseCustomFieldFormData(formData, configuration.customFields, {
+                applyDefaults: true,
+                projectId,
+              })
+            : { errors: [], values: {} }
 
-          if (!assigneeUserId) {
+          if (!assigneeUserId || !workflowStatus) {
             event.currentTarget.reportValidity()
             return
           }
+
+          if (parsedCustomFields.errors.length > 0) {
+            setFieldErrors(createCustomFieldErrorMessages(
+              parsedCustomFields.errors,
+              configuration?.customFields ?? [],
+              locale,
+            ))
+            return
+          }
+
+          setFieldErrors({})
 
           void onSubmit({
             title,
             assigneeUserId,
             dueDate,
-            status,
+            workflowStatusId,
+            customFieldValues: parsedCustomFields.values,
             priority,
           })
         }}
@@ -2075,12 +2622,12 @@ function CreateTaskPanel({
             {t('tasks.column.status')}
             <select
               className="workbench-input h-10 px-3"
-              defaultValue="todo"
-              name="status"
+              defaultValue={initialWorkflowStatusId}
+              name="workflowStatusId"
             >
-              {taskStatuses.map((status) => (
-                <option key={status} value={status}>
-                  {t(`tasks.status.${status}`)}
+              {workflowStatuses.map((status) => (
+                <option key={status.id} value={status.id}>
+                  {status.name}
                 </option>
               ))}
             </select>
@@ -2122,6 +2669,18 @@ function CreateTaskPanel({
             </button>
           </div>
         </div>
+        {hasCustomFields ? (
+          <div className="workbench-panel-muted p-4">
+            <WorkItemFieldsEditor
+              definitions={configuration?.customFields ?? []}
+              errors={fieldErrors}
+              locale={locale}
+              personOptions={personOptions}
+              projectId={projectId}
+              values={defaultCustomFieldValues}
+            />
+          </div>
+        ) : null}
         {errorMessage ? (
           <p className="text-sm font-semibold text-red-700">{errorMessage}</p>
         ) : null}
@@ -2139,14 +2698,6 @@ function CreateTaskPanel({
   )
 }
 
-function resolveTaskStatus(value: FormDataEntryValue | null): TaskStatus {
-  if (typeof value === 'string' && taskStatuses.includes(value as TaskStatus)) {
-    return value as TaskStatus
-  }
-
-  return 'todo'
-}
-
 function resolveTaskPriority(value: FormDataEntryValue | null): TaskPriority {
   if (typeof value === 'string' && taskPriorities.includes(value as TaskPriority)) {
     return value as TaskPriority
@@ -2156,8 +2707,12 @@ function resolveTaskPriority(value: FormDataEntryValue | null): TaskPriority {
 }
 
 function TaskTable({
-  selectedDetailTaskId,
-  selectedTaskIds,
+  configuration,
+  configurationsByTeam,
+  locale,
+  personLabels,
+  selectedDetailTaskKey,
+  selectedTaskKeys,
   onCreateTaskOpen,
   onSelectTask,
   onTaskSelectionChange,
@@ -2165,11 +2720,16 @@ function TaskTable({
   taskErrorMessage,
   tasks,
 }: {
-  selectedDetailTaskId?: string
-  selectedTaskIds: string[]
+  configuration?: WorkItemConfiguration
+  /** Team ID ごとの Work Item configuration です。 */
+  configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
+  locale: Locale
+  personLabels: Readonly<Record<string, string>>
+  selectedDetailTaskKey?: string
+  selectedTaskKeys: string[]
   onCreateTaskOpen?: () => void
   onSelectTask: (task: ProjectTask) => void
-  onTaskSelectionChange: (taskId: string, selected: boolean) => void
+  onTaskSelectionChange: (taskKey: string, selected: boolean) => void
   t: (key: MessageKey) => string
   taskErrorMessage?: string
   tasks: ProjectTask[]
@@ -2240,12 +2800,19 @@ function TaskTable({
             ) : tasks.length > 0 ? (
               tasks.map((task, index) => (
                 <TaskRow
+                  configuration={resolveProjectTaskConfiguration(
+                    task,
+                    configurationsByTeam,
+                    configuration,
+                  )}
                   key={createTaskKey(task)}
+                  locale={locale}
+                  personLabels={personLabels}
                   rowIndex={index}
                   onTaskSelectionChange={onTaskSelectionChange}
                   onSelectTask={onSelectTask}
-                  selectedForDetail={selectedDetailTaskId === task.id}
-                  selected={selectedTaskIds.includes(task.id)}
+                  selectedForDetail={selectedDetailTaskKey === createTaskKey(task)}
+                  selected={selectedTaskKeys.includes(createTaskKey(task))}
                   t={t}
                   task={task}
                 />
@@ -2284,16 +2851,35 @@ function TaskTable({
 }
 
 function TaskBoard({
-  selectedDetailTaskId,
+  configuration,
+  configurationsByTeam,
+  configurationFailedTeamIds,
+  locale,
+  personLabels,
+  selectedDetailTaskKey,
   onSelectTask,
   t,
   tasks,
+  statusColumns,
 }: {
-  selectedDetailTaskId?: string
+  configuration?: WorkItemConfiguration
+  /** Team ID ごとの Work Item configuration です。 */
+  configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
+  /** Work Item configuration の取得に失敗した Team ID です。 */
+  configurationFailedTeamIds: string[]
+  locale: Locale
+  personLabels: Readonly<Record<string, string>>
+  selectedDetailTaskKey?: string
   onSelectTask: (task: ProjectTask) => void
   t: (key: MessageKey) => string
   tasks: ProjectTask[]
+  /** Team ごとに分離された board 列です。 */
+  statusColumns: ProjectTaskStatusColumn[]
 }) {
+  const unavailableTasks = tasks.filter((task) =>
+    configurationFailedTeamIds.includes(task.teamId),
+  )
+
   return (
     <section
       aria-label={t(viewLabelKeys.board)}
@@ -2306,16 +2892,23 @@ function TaskBoard({
         t={t}
         titleKey={viewLabelKeys.board}
       />
-      {taskStatuses.map((status) => {
-        const statusTasks = tasks.filter((task) => task.status === status)
+      {statusColumns.map((column) => {
+        const statusTasks = tasks.filter((task) => isTaskInProjectStatusColumn(task, column))
+        const columnConfiguration = configurationsByTeam[column.teamId]?.configuration ?? configuration
 
         return (
           <div
             className="workbench-panel min-h-[420px]"
-            key={status}
+            data-testid={`project-task-column-${createProjectStatusTestToken(column.key)}`}
+            key={column.key}
           >
             <div className="flex items-center justify-between gap-3 border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2.5">
-              <TaskStatusBadge status={status} t={t} />
+              <span className="grid gap-0.5">
+                <TaskStatusBadge configuration={columnConfiguration} status={column.status} />
+                <span className="text-[11px] font-semibold text-[var(--workbench-muted)]">
+                  {column.label}
+                </span>
+              </span>
               <span className="text-sm font-semibold text-[#5f6874]">
                 {t('tasks.board.columnCount').replace('{count}', String(statusTasks.length))}
               </span>
@@ -2325,7 +2918,7 @@ function TaskBoard({
                 statusTasks.map((task) => (
                   <button
                     className={`rounded-md border p-3 text-left transition focus:outline-none focus:ring-4 focus:ring-[#2563eb]/10 ${
-                      selectedDetailTaskId === task.id
+                      selectedDetailTaskKey === createTaskKey(task)
                         ? 'border-[#99d7cf] bg-[#e5f7f4] shadow-[inset_3px_0_0_var(--workbench-primary)]'
                         : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)]'
                     }`}
@@ -2337,6 +2930,16 @@ function TaskBoard({
                     <p className="mt-2 truncate text-xs font-medium text-[#5f6874]">
                       {resolveTaskAssignee(task, t)}
                     </p>
+                    <TaskCustomFieldSummary
+                      configuration={resolveProjectTaskConfiguration(
+                        task,
+                        configurationsByTeam,
+                        configuration,
+                      )}
+                      locale={locale}
+                      personLabels={personLabels}
+                      task={task}
+                    />
                     <div className="mt-3 flex flex-wrap items-center gap-2">
                       <TaskPriorityBadge priority={task.priority} t={t} />
                       <span className="text-xs font-semibold text-[#5f6874]">{task.dueDate}</span>
@@ -2352,6 +2955,33 @@ function TaskBoard({
           </div>
         )
       })}
+      {unavailableTasks.length > 0 ? (
+        <div
+          className="workbench-panel min-h-[420px] border-red-200"
+          data-testid="project-task-configuration-unavailable-column"
+        >
+          <div className="border-b border-red-200 bg-red-50 px-3 py-2.5 text-sm font-semibold text-red-700">
+            {t('workItems.configuration.loadError')}
+          </div>
+          <div className="grid gap-2 p-2.5">
+            {unavailableTasks.map((task) => (
+              <button
+                className="rounded-md border border-red-100 bg-white p-3 text-left transition hover:border-red-200"
+                key={createTaskKey(task)}
+                onClick={() => onSelectTask(task)}
+                type="button"
+              >
+                <p className="text-sm font-semibold leading-5 text-[var(--workbench-text)]">
+                  {resolveTaskTitle(task, t)}
+                </p>
+                <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">
+                  {resolveTaskAssignee(task, t)} · {task.workflowStatusId}
+                </p>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </section>
   )
 }
@@ -2360,15 +2990,21 @@ function TaskDetailPane({
   assigneeOptions,
   artifacts,
   collaboration,
+  configuration,
   currentWorkspaceMemberKey,
   detail,
   errorMessage,
   focusedCommentId,
   focusedRootCommentId,
   isLoading,
+  isRelationCandidatesLoading,
   locale,
+  onAddRelation,
+  onDeleteRelation,
   onUpdateIssue,
   projects,
+  relationCandidates,
+  relationCandidatesErrorMessage,
   t,
   task,
   workspaceMembers,
@@ -2376,23 +3012,44 @@ function TaskDetailPane({
   assigneeOptions: ProjectMember[]
   artifacts?: FileArtifactsController
   collaboration?: IssueCollaborationController
+  configuration?: WorkItemConfiguration
   currentWorkspaceMemberKey?: string
   detail?: TeamIssueDetail
   errorMessage?: string
   focusedCommentId?: string
   focusedRootCommentId?: string
   isLoading: boolean
+  isRelationCandidatesLoading: boolean
   locale: Locale
+  onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
+  onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
   onUpdateIssue?: (
     teamId: string,
     issueId: string,
     input: UpdateTeamIssueInput,
   ) => Promise<void>
   projects: ProjectDirectoryTeam['projects']
+  relationCandidates: TeamIssue[]
+  relationCandidatesErrorMessage?: string
   t: (key: MessageKey) => string
   task?: ProjectTask
   workspaceMembers: WorkspaceMember[]
 }) {
+  const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
+  const hasMatchingIssueDetail = Boolean(
+    task && detail?.issue.id === task.id && detail.issue.teamId === task.teamId,
+  )
+  const selectedIssue = hasMatchingIssueDetail ? detail?.issue : undefined
+  const resolvedAssignedProjectId = selectedIssue?.assignedProjectId ?? task?.assignedProjectId ?? ''
+  const projectSelectionIdentity = `${task?.teamId ?? ''}:${task?.id ?? ''}:${selectedIssue?.revision ?? task?.revision ?? 'loading'}`
+  const [selectedProject, setSelectedProject] = useState({
+    identity: projectSelectionIdentity,
+    value: resolvedAssignedProjectId,
+  })
+  const selectedProjectId = selectedProject.identity === projectSelectionIdentity
+    ? selectedProject.value
+    : resolvedAssignedProjectId
+
   if (!task) {
     return (
       <aside
@@ -2406,15 +3063,29 @@ function TaskDetailPane({
     )
   }
 
-  const issue = detail?.issue
-  const needsDetailBeforeEdit = task.source === 'dynamodb' && !issue
-  const isReadOnly = !onUpdateIssue || !task.teamId || task.source !== 'dynamodb' || needsDetailBeforeEdit
+  const issue = selectedIssue
+  const resolvedConfiguration = hasMatchingIssueDetail
+    ? detail?.resolvedConfiguration?.configuration ?? configuration
+    : configuration
+  const needsDetailBeforeEdit = !issue
+  const isReadOnly = !onUpdateIssue || needsDetailBeforeEdit
   const title = issue ? resolveTeamIssueTitle(issue, t) : resolveTaskTitle(task, t)
   const assigneeUserId = issue?.assigneeUserId ?? task.assigneeUserId ?? ''
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === assigneeUserId)
-  const assigneeLabel = issue ? resolveWorkItemAssignee(issue, t) : resolveTaskAssignee(task, t)
+  const assigneeLabel = issue ? resolveWorkItemAssignee(issue) : resolveTaskAssignee(task, t)
   const dueDate = issue?.dueDate ?? task.dueDate
-  const assignedProjectId = issue?.assignedProjectId ?? task.assignedProjectId ?? ''
+  const currentWorkflowStatusId = resolveWorkItemWorkflowStatusId(issue ?? task)
+  const workflowStatuses = issue
+    ? resolveEditableWorkflowStatuses(issue, resolvedConfiguration)
+    : []
+  const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
+  const hasCustomFields = resolvedConfiguration?.customFields.some((definition) =>
+    isCustomFieldApplicable(definition, selectedProjectId || undefined),
+  ) ?? false
+  const relations = hasMatchingIssueDetail ? detail?.relations ?? [] : []
+  const canonicalRelationCandidates = relationCandidates.filter((candidate) =>
+    candidate.teamId === task.teamId,
+  )
 
   return (
     <aside
@@ -2434,13 +3105,40 @@ function TaskDetailPane({
           const formData = new FormData(event.currentTarget)
           const nextAssignedProjectId = String(formData.get('assignedProjectId') ?? '').trim()
           const selectedAssigneeUserId = String(formData.get('assigneeUserId') ?? '').trim()
+          const workflowStatusId = String(
+            formData.get('workflowStatusId') ?? currentWorkflowStatusId,
+          ).trim()
+          const parsedCustomFields = resolvedConfiguration
+            ? parseCustomFieldFormData(formData, resolvedConfiguration.customFields, {
+                projectId: nextAssignedProjectId || undefined,
+              })
+            : { errors: [], values: {} }
+
+          if (parsedCustomFields.errors.length > 0) {
+            setFieldErrors(createCustomFieldErrorMessages(
+              parsedCustomFields.errors,
+              resolvedConfiguration?.customFields ?? [],
+              locale,
+            ))
+            return
+          }
+
+          setFieldErrors({})
           const nextIssueInput: UpdateTeamIssueInput = {
             assignedProjectId: nextAssignedProjectId || null,
+            customFieldValues: createCustomFieldValuePatch(
+              resolvedConfiguration?.customFields ?? [],
+              issue?.customFieldValues ?? (
+                task.customFieldValues
+              ),
+              parsedCustomFields.values,
+              nextAssignedProjectId || undefined,
+            ),
             description: String(formData.get('description') ?? '').trim(),
             dueDate: String(formData.get('dueDate') ?? '').replaceAll('-', '/'),
             priority: resolveTaskPriority(formData.get('priority')),
-            status: resolveTaskStatus(formData.get('status')),
             title: String(formData.get('title') ?? '').trim(),
+            workflowStatusId,
           }
 
           if (assigneeOptions.some((member) => member.id === selectedAssigneeUserId)) {
@@ -2485,8 +3183,12 @@ function TaskDetailPane({
               {t('issues.create.project')}
               <select
                 className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={assignedProjectId}
                 name="assignedProjectId"
+                onChange={(event) => setSelectedProject({
+                  identity: projectSelectionIdentity,
+                  value: event.target.value,
+                })}
+                value={selectedProjectId}
               >
                 <option value="">{t('issues.project.unassigned')}</option>
                 {projects.map((project) => (
@@ -2513,11 +3215,11 @@ function TaskDetailPane({
               {t('tasks.column.status')}
               <select
                 className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={issue?.status ?? task.status}
-                name="status"
+                defaultValue={currentWorkflowStatusId}
+                name="workflowStatusId"
               >
-                {taskStatuses.map((status) => (
-                  <option key={status} value={status}>{t(`tasks.status.${status}`)}</option>
+                {workflowStatuses.map((status) => (
+                  <option key={status.id} value={status.id}>{status.name}</option>
                 ))}
               </select>
             </label>
@@ -2543,6 +3245,20 @@ function TaskDetailPane({
               />
             </label>
           </div>
+          {hasCustomFields ? (
+            <div className="workbench-panel-muted p-4">
+              <WorkItemFieldsEditor
+                definitions={resolvedConfiguration?.customFields ?? []}
+                errors={fieldErrors}
+                locale={locale}
+                personOptions={personOptions}
+                projectId={selectedProjectId || undefined}
+                values={issue?.customFieldValues ?? (
+                  task.customFieldValues
+                )}
+              />
+            </div>
+          ) : null}
         </fieldset>
         <button
           className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300"
@@ -2560,12 +3276,35 @@ function TaskDetailPane({
       </form>
       {artifacts ? (
         <IssueArtifactsPanel
+          completionTransitions={workflowStatuses.filter(
+            (status) => status.id !== currentWorkflowStatusId,
+          )}
           controller={artifacts}
           currentMemberKey={currentWorkspaceMemberKey}
           locale={locale}
           members={workspaceMembers}
         />
       ) : null}
+      <div className="border-b border-[var(--workbench-border)] bg-white px-5 py-5">
+        <WorkItemRelationsEditor
+          candidates={canonicalRelationCandidates.map((candidate) => ({
+            id: candidate.id,
+            title: resolveTeamIssueTitle(candidate, t),
+          }))}
+          currentWorkItemId={task.id}
+          errorMessage={relationCandidatesErrorMessage}
+          isLoading={isRelationCandidatesLoading || (isLoading && !issue)}
+          locale={locale}
+          onAddRelation={onAddRelation
+            ? (input) => onAddRelation(task.id, input)
+            : undefined}
+          onDeleteRelation={onDeleteRelation
+            ? (relation) => onDeleteRelation(task.id, relation)
+            : undefined}
+          readOnly={isReadOnly || (!onAddRelation && !onDeleteRelation)}
+          relations={relations}
+        />
+      </div>
       {collaboration ? (
         <IssueCollaborationPanel
           artifacts={artifacts}
@@ -2576,14 +3315,27 @@ function TaskDetailPane({
           focusedRootCommentId={focusedRootCommentId}
           locale={locale}
           members={workspaceMembers}
-          readOnlyMessage={task.source === 'legacy' ? t('tasks.comment.readOnly') : undefined}
         />
       ) : null}
     </aside>
   )
 }
 
-function TaskGantt({ t, tasks }: { t: (key: MessageKey) => string; tasks: ProjectTask[] }) {
+function TaskGantt({
+  configuration,
+  configurationsByTeam,
+  t,
+  tasks,
+}: {
+  /** Story など単一 Team 表示で使う Work Item configuration です。 */
+  configuration?: WorkItemConfiguration
+  /** Team ID ごとの Work Item configuration です。 */
+  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>
+  /** 表示文言を解決する translator です。 */
+  t: (key: MessageKey) => string
+  /** ガント表示する Work Item です。 */
+  tasks: ProjectTask[]
+}) {
   const sortedTasks = sortTasksByDueDate(tasks, 'due-date-asc')
 
   return (
@@ -2613,7 +3365,14 @@ function TaskGantt({ t, tasks }: { t: (key: MessageKey) => string; tasks: Projec
                 </p>
               </div>
               <div className="flex flex-wrap items-center justify-end gap-2 max-[640px]:justify-start">
-                <TaskStatusBadge status={task.status} t={t} />
+                <TaskStatusBadge
+                  configuration={resolveProjectTaskConfiguration(
+                    task,
+                    configurationsByTeam,
+                    configuration,
+                  )}
+                  task={task}
+                />
                 <span className="text-xs font-semibold text-[#5f6874]">
                   {task.dueDate
                     ? t('tasks.gantt.window').replace('{date}', task.dueDate)
@@ -2692,7 +3451,18 @@ function TaskCalendar({ t, tasks }: { t: (key: MessageKey) => string; tasks: Pro
   )
 }
 
-function TaskFileList({ t, tasks }: { t: (key: MessageKey) => string; tasks: ProjectTask[] }) {
+function TaskFileList({
+  configuration,
+  configurationsByTeam,
+  t,
+  tasks,
+}: {
+  configuration?: WorkItemConfiguration
+  /** Team ID ごとの Work Item configuration です。 */
+  configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
+  t: (key: MessageKey) => string
+  tasks: ProjectTask[]
+}) {
   return (
     <section
       aria-label={t(viewLabelKeys.file)}
@@ -2721,8 +3491,17 @@ function TaskFileList({ t, tasks }: { t: (key: MessageKey) => string; tasks: Pro
                 <td className="px-4 py-3 text-[#505967]">{resolveTaskAssignee(task, t)}</td>
                 <td className="px-4 py-3 text-[#5f6874]">{task.dueDate}</td>
                 <td className="px-4 py-3">
-                  <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">
-                    {t(`tasks.status.${task.status}`)}
+                  <span className={resolveWorkflowCategoryToneClassName(
+                    resolveWorkflowStatusCategory(task),
+                  )}>
+                    {resolveWorkItemWorkflowStatusLabel(
+                      task,
+                      resolveProjectTaskConfiguration(
+                        task,
+                        configurationsByTeam,
+                        configuration,
+                      ),
+                    )}
                   </span>
                 </td>
               </tr>
@@ -2760,18 +3539,69 @@ function ViewHeading({
   )
 }
 
-function TaskStatusBadge({ status, t }: { status: TaskStatus; t: (key: MessageKey) => string }) {
-  const statusClasses: Record<TaskStatus, string> = {
-    'in-progress': 'workbench-badge-primary',
-    review: 'workbench-badge-warning',
-    todo: 'workbench-badge',
-    done: 'workbench-badge-success',
+function TaskStatusBadge({
+  configuration,
+  status,
+  task,
+}: {
+  /** Status definition の解決に使う configuration です。 */
+  configuration?: WorkItemConfiguration
+  /** Board column で直接表示する status definition です。 */
+  status?: WorkflowStatusDefinition
+  /** 一覧で status を表示する Work Item です。 */
+  task?: ProjectTask
+}) {
+  const resolvedStatus = status ?? (task
+    ? resolveWorkflowStatusDefinition(task, configuration)
+    : undefined)
+  const category = resolvedStatus?.category ?? (task
+    ? resolveWorkflowStatusCategory(task)
+    : 'backlog')
+  const label = resolvedStatus?.name ?? (task
+    ? resolveWorkItemWorkflowStatusLabel(task, configuration)
+    : '')
+
+  return (
+    <span className={resolveWorkflowCategoryToneClassName(category)}>
+      {label}
+    </span>
+  )
+}
+
+function TaskCustomFieldSummary({
+  configuration,
+  locale,
+  personLabels,
+  task,
+}: {
+  /** Custom field definition を含む configuration です。 */
+  configuration?: WorkItemConfiguration
+  /** 値の format locale です。 */
+  locale: Locale
+  /** Person field ID を表示名へ解決する map です。 */
+  personLabels: Readonly<Record<string, string>>
+  /** 表示対象 Work Item です。 */
+  task: ProjectTask
+}) {
+  const values = resolveTaskCustomFieldEntries(task, configuration, locale, personLabels)
+
+  if (values.length === 0) {
+    return null
   }
 
   return (
-    <span className={statusClasses[status]}>
-      {t(`tasks.status.${status}`)}
-    </span>
+    <div className="flex min-w-0 flex-wrap gap-1.5">
+      {values.slice(0, 2).map(({ definition, value }) => (
+        <span
+          className="workbench-badge max-w-full truncate"
+          key={definition.id}
+          title={`${definition.name}: ${value}`}
+        >
+          {definition.name}: {value}
+        </span>
+      ))}
+      {values.length > 2 ? <span className="workbench-badge">+{values.length - 2}</span> : null}
+    </div>
   )
 }
 
@@ -2795,10 +3625,22 @@ function TaskPriorityBadge({
   )
 }
 
-function SummaryCard({ t, tasks }: { t: (key: MessageKey) => string; tasks: ProjectTask[] }) {
+function SummaryCard({
+  t,
+  tasks,
+}: {
+  /** i18n translator です。 */
+  t: (key: MessageKey) => string
+  /** 集計対象 Work Item です。 */
+  tasks: ProjectTask[]
+}) {
   const totalCount = tasks.length
-  const doneCount = tasks.filter((task) => task.status === 'done').length
-  const inProgressCount = tasks.filter((task) => task.status === 'in-progress').length
+  const doneCount = tasks.filter(
+    (task) => resolveWorkflowStatusCategory(task) === 'completed',
+  ).length
+  const inProgressCount = tasks.filter(
+    (task) => resolveWorkflowStatusCategory(task) === 'started',
+  ).length
   const completionRate = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0
   const projectMetrics: ProjectMetric[] = [
     {
@@ -2893,6 +3735,9 @@ function FilterButton({
 }
 
 function TaskRow({
+  configuration,
+  locale,
+  personLabels,
   rowIndex,
   selected,
   selectedForDetail,
@@ -2901,20 +3746,17 @@ function TaskRow({
   task,
   t,
 }: {
+  configuration?: WorkItemConfiguration
+  locale: Locale
+  personLabels: Readonly<Record<string, string>>
   rowIndex: number
   selected: boolean
   selectedForDetail: boolean
   onSelectTask: (task: ProjectTask) => void
-  onTaskSelectionChange: (taskId: string, selected: boolean) => void
+  onTaskSelectionChange: (taskKey: string, selected: boolean) => void
   task: ProjectTask
   t: (key: MessageKey) => string
 }) {
-  const statusClasses: Record<TaskStatus, string> = {
-    'in-progress': 'workbench-badge-primary',
-    review: 'workbench-badge-warning',
-    todo: 'workbench-badge',
-    done: 'workbench-badge-success',
-  }
   const priorityClasses: Record<TaskPriority, string> = {
     high: 'workbench-badge-danger',
     medium: 'workbench-badge-warning',
@@ -2938,7 +3780,7 @@ function TaskRow({
             aria-label={taskTitle}
             checked={selected}
             className="h-4 w-4 rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary)]"
-            onChange={(event) => onTaskSelectionChange(task.id, event.target.checked)}
+            onChange={(event) => onTaskSelectionChange(createTaskKey(task), event.target.checked)}
             type="checkbox"
           />
           <button
@@ -2948,6 +3790,12 @@ function TaskRow({
           >
             {taskTitle}
           </button>
+          <TaskCustomFieldSummary
+            configuration={configuration}
+            locale={locale}
+            personLabels={personLabels}
+            task={task}
+          />
           {selected ? (
             <span className="workbench-badge-primary">
               {t('tasks.row.selected')}
@@ -2957,13 +3805,13 @@ function TaskRow({
       </td>
       <td className="truncate px-3 py-2.5 text-[#505967]">{resolveTaskAssignee(task, t)}</td>
       <td className="px-3 py-2.5">
-        <span className={statusClasses[task.status]}>
-          {t(`tasks.status.${task.status}`)}
-        </span>
+        <TaskStatusBadge configuration={configuration} task={task} />
       </td>
       <td
         className={`whitespace-nowrap px-3 py-2.5 ${
-          task.status === 'done' ? 'text-[#8f99a8] line-through' : isOverdue ? 'text-red-700' : 'text-[#505967]'
+          resolveWorkflowStatusCategory(task) === 'completed'
+            ? 'text-[#8f99a8] line-through'
+            : isOverdue ? 'text-red-700' : 'text-[#505967]'
         }`}
       >
         {task.dueDate}
@@ -2984,7 +3832,7 @@ function TaskRow({
 function isTaskOverdue(task: ProjectTask) {
   const dueDate = parseTaskDueDate(task.dueDate)
 
-  if (task.status === 'done' || !dueDate) {
+  if (resolveWorkflowStatusCategory(task) === 'completed' || !dueDate) {
     return false
   }
 
@@ -3058,7 +3906,7 @@ function matchesTaskDueDateFilter(task: ProjectTask, filter: DueDateFilter) {
     return !dueDate
   }
 
-  if (task.status === 'done' || !dueDate) {
+  if (resolveWorkflowStatusCategory(task) === 'completed' || !dueDate) {
     return false
   }
 
@@ -3113,19 +3961,153 @@ function formatDateInputValue(value: string) {
 }
 
 function resolveTaskTitle(task: ProjectTask, t: (key: MessageKey) => string) {
-  return resolveWorkItemTitle(task, t)
+  void t
+  return resolveWorkItemTitle(task)
 }
 
 function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) {
-  return resolveWorkItemAssignee(task, t)
+  void t
+  return resolveWorkItemAssignee(task)
 }
 
 function resolveTeamIssueTitle(issue: TeamIssue, t: (key: MessageKey) => string) {
-  return resolveWorkItemTitle(issue, t)
+  void t
+  return resolveWorkItemTitle(issue)
 }
 
 function formatProjectMemberOption(member: ProjectMember) {
   return `${member.name ?? member.email} / ${member.email}`
+}
+
+function resolveTaskCustomFieldEntries(
+  task: ProjectTask,
+  configuration: WorkItemConfiguration | undefined,
+  locale: Locale,
+  personLabels: Readonly<Record<string, string>>,
+) {
+  if (!configuration) {
+    return []
+  }
+
+  const t = createTranslator(locale)
+
+  return sortCustomFieldDefinitions(configuration.customFields).flatMap((definition) => {
+    const value = task.customFieldValues[definition.id]
+
+    if (value === undefined || !isCustomFieldApplicable(definition, task.assignedProjectId)) {
+      return []
+    }
+
+    return [{
+      definition,
+      value: formatWorkItemCustomFieldValue(task, definition, {
+        durationUnitLabels: {
+          days: t('workItems.durationUnit.days'),
+          hours: t('workItems.durationUnit.hours'),
+          minutes: t('workItems.durationUnit.minutes'),
+        },
+        falseLabel: t('workItems.fields.booleanFalse'),
+        locale,
+        personLabels,
+        trueLabel: t('workItems.fields.booleanTrue'),
+      }),
+    }]
+  })
+}
+
+function resolveTaskCustomFieldSearchValues(
+  task: ProjectTask,
+  configuration: WorkItemConfiguration | undefined,
+  locale: Locale,
+  personLabels: Readonly<Record<string, string>>,
+) {
+  return resolveTaskCustomFieldEntries(task, configuration, locale, personLabels)
+    .flatMap(({ definition, value }) => [definition.name, value])
+}
+
+async function loadProjectWorkItemConfigurations(
+  accessToken: string,
+  teamIds: readonly string[],
+): Promise<ProjectWorkItemConfigurationLoadResult> {
+  const results = await Promise.allSettled(teamIds.map(async (teamId) => ({
+    configuration: await getWorkItemConfiguration(accessToken, { kind: 'team', teamId }),
+    teamId,
+  })))
+
+  return {
+    configurationsByTeam: Object.fromEntries(results.flatMap((result) =>
+      result.status === 'fulfilled'
+        ? [[result.value.teamId, result.value.configuration]]
+        : [],
+    )) as Record<string, ResolvedWorkItemConfiguration>,
+    failedTeamIds: results.flatMap((result, index) =>
+      result.status === 'rejected' ? [teamIds[index] ?? ''] : [],
+    ).filter(Boolean),
+  }
+}
+
+function resolveProjectTaskConfiguration(
+  task: ProjectTask,
+  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
+  fallbackConfiguration?: WorkItemConfiguration,
+) {
+  const teamConfiguration = configurationsByTeam[task.teamId]?.configuration
+
+  if (teamConfiguration) {
+    return teamConfiguration
+  }
+
+  return Object.keys(configurationsByTeam).length === 0
+    ? fallbackConfiguration
+    : undefined
+}
+
+function createProjectTaskStatusColumns(
+  tasks: readonly ProjectTask[],
+  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
+  teams: readonly ProjectDirectoryTeam[],
+  fallbackTeamId?: string,
+  fallbackConfiguration?: WorkItemConfiguration,
+): ProjectTaskStatusColumn[] {
+  const statusTeamIds = fallbackTeamId && fallbackConfiguration
+    ? [fallbackTeamId]
+    : Array.from(new Set([
+        ...Object.keys(configurationsByTeam),
+        ...tasks.map((task) => task.teamId),
+      ])).sort()
+  const showTeamName = statusTeamIds.length > 1
+  return statusTeamIds.flatMap((teamId) => {
+    const configuration = configurationsByTeam[teamId]?.configuration ??
+      (teamId === fallbackTeamId ? fallbackConfiguration : undefined)
+
+    if (!configuration) {
+      return []
+    }
+
+    const teamName = teams.find((team) => team.id === teamId)?.name ?? teamId
+
+    return [...configuration.workflow.statuses]
+      .sort((first, second) =>
+        first.sortOrder - second.sortOrder || first.name.localeCompare(second.name)
+      )
+      .map((status): ProjectTaskStatusColumn => ({
+        key: `${teamId}:${status.id}`,
+        label: showTeamName ? `${teamName} · ${status.name}` : status.name,
+        status,
+        teamId,
+      }))
+  })
+}
+
+function isTaskInProjectStatusColumn(
+  task: ProjectTask,
+  column: ProjectTaskStatusColumn,
+) {
+  return column.teamId === task.teamId && column.status.id === task.workflowStatusId
+}
+
+function createProjectStatusTestToken(value: string) {
+  return value.replaceAll(/[^a-z0-9-]+/gi, '-').toLowerCase()
 }
 
 function createTaskKey(task: ProjectTask) {

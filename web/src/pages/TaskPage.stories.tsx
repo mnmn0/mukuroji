@@ -1,4 +1,7 @@
-import { WORK_ITEM_SCHEMA_VERSION } from '@mukuroji/contracts'
+import {
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEMA_VERSION,
+} from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { TaskScreen } from './TaskPage'
 import type { TeamIssueDetail } from '../issues/api'
@@ -13,6 +16,7 @@ import type { ProjectMember, ProjectUser } from '../projects/api'
 import { referoTaskFixtures } from '../tasks/fixtures'
 import { fileArtifactsControllerFixture } from '../files/fixtures'
 import type { FileArtifactsController } from '../files/useFileArtifacts'
+import { teamWorkItemConfigurationFixture } from '../work-items/fixtures'
 
 const projectFilesControllerFixture = {
   ...fileArtifactsControllerFixture,
@@ -60,13 +64,44 @@ const projectUsers: ProjectUser[] = [
   },
 ]
 
-const storyTasks = referoTaskFixtures.map((task, index) => ({
-  ...task,
-  assigneeUserId: index % 2 === 0 ? 'sato@example.com' : 'suzuki@example.com',
-  assignedProjectId: 'refero',
-  source: 'dynamodb' as const,
-  teamId: 'core-team',
-}))
+const storyTaskTitles = [
+  'ワイヤーフレームを確認する',
+  'ブランドガイドラインを更新する',
+  'SEOリサーチをまとめる',
+  '競合調査レポートを完成する',
+] as const
+
+const storyTaskWorkflowStatuses = [
+  { id: 'active', category: 'started' },
+  { id: 'review', category: 'started' },
+  { id: 'ready', category: 'unstarted' },
+  { id: 'done', category: 'completed' },
+] as const
+
+const storyTasks = referoTaskFixtures.map((task, index) => {
+  const workflowStatus = storyTaskWorkflowStatuses[index % storyTaskWorkflowStatuses.length]!
+
+  return {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: task.revision,
+    id: task.id,
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    title: storyTaskTitles[index % storyTaskTitles.length]!,
+    assigneeUserId: index % 2 === 0 ? 'sato@example.com' : 'suzuki@example.com',
+    creatorMemberKey: index % 2 === 0 ? 'sato@example.com' : 'suzuki@example.com',
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    workflowStatusId: workflowStatus.id,
+    statusCategory: workflowStatus.category,
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: task.dueDate,
+    priority: task.priority,
+    createdAt: '2026-06-08T00:00:00.000Z',
+    updatedAt: '2026-06-08T00:00:00.000Z',
+    source: 'dynamodb' as const,
+  }
+})
 
 const denseStoryTasks = Array.from({ length: 24 }, (_, index) => {
   const baseTask = storyTasks[index % storyTasks.length]
@@ -75,15 +110,11 @@ const denseStoryTasks = Array.from({ length: 24 }, (_, index) => {
     ...baseTask,
     id: `${baseTask.id}-dense-${index + 1}`,
     title: `${index + 1}. ${index % 2 === 0 ? '長いラベルのワークストリーム確認と承認依頼' : 'Cross-functional launch readiness checklist'} ${index + 1}`,
-    status: (['todo', 'in-progress', 'review', 'done'] as const)[index % 4],
+    workflowStatusId: storyTaskWorkflowStatuses[index % storyTaskWorkflowStatuses.length]!.id,
+    statusCategory: storyTaskWorkflowStatuses[index % storyTaskWorkflowStatuses.length]!.category,
     priority: (['high', 'medium', 'low'] as const)[index % 3],
   }
 })
-
-const legacyTasks = storyTasks.map((task) => ({
-  ...task,
-  source: 'legacy' as const,
-}))
 
 const selectedIssueDetail: TeamIssueDetail = {
   activity: teamIssueActivityFixtures,
@@ -94,12 +125,17 @@ const selectedIssueDetail: TeamIssueDetail = {
     id: 'wireframe',
     teamId: 'core-team',
     assignedProjectId: 'refero',
-    titleKey: 'tasks.item.wireframe',
+    title: 'ワイヤーフレームを確認する',
     description: 'Refero の初回作業面を確認し、次に進める判断材料をそろえます。',
     assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'sato@example.com',
     assigneeEmail: 'sato@example.com',
     assigneeName: '佐藤 花子',
-    status: 'in-progress',
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    workflowStatusId: 'active',
+    statusCategory: 'started',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/03',
     priority: 'high',
     createdAt: '2026-06-08T00:00:00.000Z',
@@ -115,6 +151,7 @@ const meta = {
     layout: 'fullscreen',
   },
   args: {
+    activeProjectTeamId: 'core-team',
     locale: 'ja',
     assigneeOptions,
     canManageProjectMembers: true,
@@ -131,6 +168,7 @@ const meta = {
     onCreateTeam: async () => undefined,
     onCreateTask: async () => undefined,
     onUpdateIssue: async () => undefined,
+    resolvedConfiguration: { configuration: teamWorkItemConfigurationFixture },
     tasks: storyTasks,
     teamName: 'コアチーム',
     teams: projectDirectoryFixtures,
@@ -292,16 +330,6 @@ export const DetailError: Story = {
   args: {
     detailErrorMessage: 'Issue 詳細を取得できませんでした。',
     initialSelectedTaskId: 'wireframe',
-  },
-}
-
-/**
- * legacy task の読み取り専用詳細です。
- */
-export const LegacyReadOnly: Story = {
-  args: {
-    initialSelectedTaskId: 'wireframe',
-    tasks: legacyTasks,
   },
 }
 

@@ -6,10 +6,10 @@ import {
   ScanCommand,
 } from '@aws-sdk/lib-dynamodb'
 import {
-  WORK_ITEM_SCHEMA_VERSION,
   type SearchCustomFieldValue,
   type SearchEntityType,
 } from '@mukuroji/contracts'
+import { isCanonicalWorkItemRecord } from '../src/canonical-work-item'
 import {
   createCommentWorkspaceSearchDocument,
   createProjectWorkspaceSearchDocument,
@@ -606,7 +606,7 @@ function mapProjectDirectoryItemRow(
  * Canonical Work Item row を Team scope を保持した search document 操作へ変換します。
  */
 export function mapWorkItem(item: Record<string, unknown>): SearchProjectionOperation | undefined {
-  if (!isCanonicalWorkItem(item)) {
+  if (!isCanonicalWorkItemRecord(item)) {
     return undefined
   }
 
@@ -624,8 +624,12 @@ export function mapWorkItem(item: Record<string, unknown>): SearchProjectionOper
     return createDeleteOperation(workspaceId, 'work-item', entityId)
   }
 
-  const title = readOptionalString(item.title) ?? readOptionalString(item.titleKey) ?? issueId
+  const title = readRequiredString(item.title)
   const projectId = readOptionalString(item.assignedProjectId)
+
+  if (!title) {
+    return undefined
+  }
 
   return {
     action: 'put',
@@ -637,10 +641,10 @@ export function mapWorkItem(item: Record<string, unknown>): SearchProjectionOper
       body: readOptionalString(item.description),
       projectId,
       assigneeUserId: readOptionalString(item.assigneeUserId),
-      creatorUserId: readOptionalString(item.creatorMemberKey),
-      status: readOptionalString(item.status),
-      customFields: readCustomFields(item.customFields),
-      relationIds: readStringArray(item.relationIds),
+      creatorUserId: readRequiredString(item.creatorMemberKey),
+      status: readRequiredString(item.workflowStatusId),
+      customFields: readCanonicalCustomFieldValues(item.customFieldValues),
+      relationIds: item.relationIds as string[],
       dueDate: readOptionalString(item.dueDate),
       createdAt: readOptionalString(item.createdAt),
       updatedAt: readOptionalString(item.updatedAt),
@@ -772,42 +776,29 @@ function readLocalizedTitle(item: Record<string, unknown>) {
   return { title, subtitle }
 }
 
-function readCustomFields(value: unknown): Record<string, SearchCustomFieldValue> | undefined {
-  if (!isRecord(value)) {
+function readCanonicalCustomFieldValues(
+  value: unknown,
+): Record<string, SearchCustomFieldValue> | undefined {
+  if (!isCanonicalCustomFieldValueRecord(value)) {
     return undefined
   }
 
-  const result: Record<string, SearchCustomFieldValue> = {}
-
-  for (const [fieldId, fieldValue] of Object.entries(value)) {
-    if (!fieldId.trim() || !isSearchCustomFieldValue(fieldValue)) {
-      continue
-    }
-
-    result[fieldId] = fieldValue
-  }
-
-  return Object.keys(result).length > 0 ? result : undefined
+  return Object.keys(value).length > 0 ? value : undefined
 }
 
-function isSearchCustomFieldValue(value: unknown): value is SearchCustomFieldValue {
-  return value === null ||
-    typeof value === 'string' ||
+function isCanonicalCustomFieldValue(value: unknown): value is SearchCustomFieldValue {
+  return typeof value === 'string' ||
     typeof value === 'number' && Number.isFinite(value) ||
     typeof value === 'boolean' ||
     Array.isArray(value) && value.every((entry) => typeof entry === 'string')
 }
 
-function readStringArray(value: unknown) {
-  if (!Array.isArray(value)) {
-    return undefined
-  }
-
-  const entries = [...new Set(value.flatMap((entry) =>
-    typeof entry === 'string' && entry.trim() ? [entry.trim()] : [],
-  ))]
-
-  return entries.length > 0 ? entries : undefined
+function isCanonicalCustomFieldValueRecord(
+  value: unknown,
+): value is Record<string, SearchCustomFieldValue> {
+  return isRecord(value) && Object.entries(value).every(
+    ([fieldId, fieldValue]) => fieldId.trim() && isCanonicalCustomFieldValue(fieldValue),
+  )
 }
 
 function readRequiredString(value: unknown) {
@@ -816,10 +807,6 @@ function readRequiredString(value: unknown) {
 
 function readOptionalString(value: unknown) {
   return typeof value === 'string' && value.trim() ? value : undefined
-}
-
-function readPositiveInteger(value: unknown) {
-  return Number.isSafeInteger(value) && (value as number) > 0 ? value as number : undefined
 }
 
 function isCanonicalTeamDirectoryItem(item: Record<string, unknown>, workspaceId: string) {
@@ -848,32 +835,6 @@ function isCanonicalProjectDirectoryItem(item: Record<string, unknown>, workspac
     (item.archivedAt === undefined || typeof item.archivedAt === 'string')
 }
 
-function isCanonicalWorkItem(item: Record<string, unknown>) {
-  return item.schemaVersion === WORK_ITEM_SCHEMA_VERSION &&
-    Boolean(readPositiveInteger(item.revision)) &&
-    typeof item.directoryId === 'string' &&
-    typeof item.teamId === 'string' &&
-    item.directoryTeamId === `${item.directoryId}#team#${item.teamId}` &&
-    typeof item.issueId === 'string' &&
-    typeof item.sortOrder === 'number' &&
-    (typeof item.title === 'string' || typeof item.titleKey === 'string') &&
-    (item.description === undefined || typeof item.description === 'string') &&
-    typeof item.assigneeUserId === 'string' &&
-    (item.creatorMemberKey === undefined || typeof item.creatorMemberKey === 'string') &&
-    isWorkItemStatus(item.status) &&
-    typeof item.dueDate === 'string' &&
-    isWorkItemPriority(item.priority) &&
-    typeof item.createdAt === 'string' &&
-    typeof item.updatedAt === 'string' &&
-    (
-      item.assignedProjectId === undefined ||
-      (
-        typeof item.assignedProjectId === 'string' &&
-        item.directoryProjectId === `${item.directoryId}#project#${item.assignedProjectId}`
-      )
-    )
-}
-
 function isCanonicalCollaborationComment(item: Record<string, unknown>) {
   return item.entryType === 'comment' &&
     typeof item.entityKey === 'string' &&
@@ -889,14 +850,6 @@ function isCanonicalCollaborationComment(item: Record<string, unknown>) {
 
 function isProjectTone(value: unknown) {
   return value === 'blue' || value === 'purple' || value === 'green' || value === 'yellow'
-}
-
-function isWorkItemStatus(value: unknown) {
-  return value === 'todo' || value === 'in-progress' || value === 'review' || value === 'done'
-}
-
-function isWorkItemPriority(value: unknown) {
-  return value === 'high' || value === 'medium' || value === 'low'
 }
 
 function readEnvironment(name: string) {

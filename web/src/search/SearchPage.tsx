@@ -1,6 +1,7 @@
 import {
   SAVED_VIEW_SCHEMA_VERSION,
   type CreateSavedWorkspaceViewInput,
+  type ResolvedWorkItemConfiguration,
   type SavedViewVisibility,
   type SavedWorkspaceView,
   type SearchCustomFieldFilter,
@@ -38,6 +39,7 @@ import {
   createTeamViewPath,
   workspaceNavPaths,
 } from '../routes/paths'
+import { getWorkItemConfiguration } from '../work-items/api'
 import {
   createSavedWorkspaceView,
   deleteSavedWorkspaceView,
@@ -64,6 +66,7 @@ import {
   type SearchRouteState,
 } from './queryState'
 import { SearchResultCollection } from './SearchResultCollection'
+import { createSearchStatusOptions, type SearchStatusOption } from './statusOptions'
 
 /**
  * Saved view作成フォームの入力stateです。
@@ -89,7 +92,6 @@ type SavedViewDraft = {
 
 const searchEntityTypes = ['work-item', 'project', 'team', 'comment', 'file', 'document'] as const satisfies readonly SearchEntityType[]
 const searchLayoutModes = ['table', 'board', 'calendar', 'timeline'] as const satisfies readonly SearchViewLayoutMode[]
-const workItemStatuses = ['todo', 'in-progress', 'review', 'done'] as const
 const searchCustomFieldOperators = [
   'equals',
   'not-equals',
@@ -104,6 +106,7 @@ const searchCustomFieldOperators = [
 const savedViewVisibilities = ['personal', 'team', 'shared'] as const satisfies readonly SavedViewVisibility[]
 const selectableColumns = ['type', 'status', 'assignee', 'creator', 'project', 'team', 'dueDate', 'updatedAt'] as const
 const emptyTeams: ProjectDirectoryTeam[] = []
+const emptyResolvedWorkItemConfigurations: Record<string, ResolvedWorkItemConfiguration> = {}
 const apiSWRConfig = {
   dedupingInterval: 10_000,
   shouldRetryOnError: false,
@@ -156,6 +159,20 @@ export function SearchPage() {
     ([, token, currentLocale]) => getProjectDirectory(token, currentLocale),
     apiSWRConfig,
   )
+  const teamIdsSignature = JSON.stringify(teams.map((team) => team.id).sort())
+  const workItemConfigurationsKey = accessToken && user && !currentUserError && !isProjectDirectoryLoading
+    ? (['search-work-item-configurations', accessToken, teamIdsSignature] as const)
+    : null
+  const {
+    data: workItemConfigurationsByTeam = emptyResolvedWorkItemConfigurations,
+  } = useSWR(
+    workItemConfigurationsKey,
+    ([, token, serializedTeamIds]) => loadSearchWorkItemConfigurations(
+      token,
+      readSerializedTeamIds(serializedTeamIds),
+    ),
+    apiSWRConfig,
+  )
   const savedViewsKey = accessToken && user && !currentUserError
     ? (['saved-workspace-views', accessToken] as const)
     : null
@@ -186,6 +203,17 @@ export function SearchPage() {
   const isLoading = !session || isCurrentUserLoading || Boolean(user && isProjectDirectoryLoading)
   const userLabel = user?.attributes.email ?? user?.attributes.name ?? user?.username ?? t('workspace.user.fallback')
   const userInitial = userLabel.trim().charAt(0).toUpperCase() || 'M'
+  const statusOptions = useMemo(() => createSearchStatusOptions(
+    workItemConfigurationsByTeam,
+    [
+      ...getSearchStatuses(routeState.filters),
+      ...results.flatMap((result) => result.status ? [result.status] : []),
+    ],
+  ), [results, routeState.filters, workItemConfigurationsByTeam])
+  const statusLabels = useMemo(
+    () => Object.fromEntries(statusOptions.map((status) => [status.id, status.label])),
+    [statusOptions],
+  )
 
   useEffect(() => {
     activeRouteSignatureRef.current = routeSignature
@@ -549,6 +577,7 @@ export function SearchPage() {
                   key={getSearchDateField(routeState.filters)}
                   routeState={routeState}
                   selectedSavedView={selectedSavedView}
+                  statusOptions={statusOptions}
                   t={t}
                   onFiltersChange={updateFilters}
                   onLayoutChange={updateLayout}
@@ -587,6 +616,7 @@ export function SearchPage() {
                     locale={locale}
                     onNavigate={navigate}
                     results={results}
+                    statusLabels={statusLabels}
                   />
                 ) : !searchErrorMessage ? (
                   <section className="workbench-panel px-6 py-14 text-center">
@@ -619,6 +649,7 @@ function SearchToolbar({
   onUpdateSelectedView,
   routeState,
   selectedSavedView,
+  statusOptions,
   t,
 }: {
   onFiltersChange: (patch: Record<string, unknown>) => void
@@ -626,6 +657,7 @@ function SearchToolbar({
   onUpdateSelectedView?: () => void
   routeState: SearchRouteState
   selectedSavedView?: SavedWorkspaceView
+  statusOptions: readonly SearchStatusOption[]
   t: (key: MessageKey) => string
 }) {
   const entityTypes = getSearchEntityTypes(routeState.filters)
@@ -676,12 +708,12 @@ function SearchToolbar({
           <div className="grid gap-2">
             <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{t('search.filters.status')}</span>
             <div className="flex flex-wrap gap-2">
-              {workItemStatuses.map((status) => (
+              {statusOptions.map((status) => (
                 <ToggleChip
-                  active={statuses.includes(status)}
-                  key={status}
-                  label={t(`tasks.status.${status}`)}
-                  onToggle={() => onFiltersChange({ statuses: toggleValue(statuses, status) })}
+                  active={statuses.includes(status.id)}
+                  key={status.id}
+                  label={status.label}
+                  onToggle={() => onFiltersChange({ statuses: toggleValue(statuses, status.id) })}
                 />
               ))}
             </div>
@@ -1256,6 +1288,33 @@ function hasExplicitSearchState(searchParams: URLSearchParams) {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {}
+}
+
+async function loadSearchWorkItemConfigurations(
+  accessToken: string,
+  teamIds: readonly string[],
+) {
+  const results = await Promise.allSettled(teamIds.map(async (teamId) => ({
+    configuration: await getWorkItemConfiguration(accessToken, { kind: 'team', teamId }),
+    teamId,
+  })))
+
+  return Object.fromEntries(results.flatMap((result) =>
+    result.status === 'fulfilled'
+      ? [[result.value.teamId, result.value.configuration]]
+      : [],
+  )) as Record<string, ResolvedWorkItemConfiguration>
+}
+
+function readSerializedTeamIds(value: string) {
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return Array.isArray(parsed) && parsed.every((teamId) => typeof teamId === 'string')
+      ? parsed
+      : []
+  } catch {
+    return []
+  }
 }
 
 function formatSavedViewMigrationWarnings(view: SavedWorkspaceView) {

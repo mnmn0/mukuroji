@@ -111,10 +111,10 @@ Source の更新と projection が競合すると古い scan 結果を一時的�
 書き込みを止めた maintenance window で実行し、API の live projection を有効化した後に
 もう一度 backfill を完走してから書き込みを再開してください。
 
-現時点では file/document の保存元と、#21 の workflow/custom field/relation producer は
-未導入です。検索文書 schema はこれらの entity/field を追加できる形で固定してありますが、
-producer が導入されるまでは backfill 対象になりません。Custom field/relation row が canonical
-Work Item に追加された場合は、既存 `customFields` / `relationIds` mapping をそのまま利用できます。
+現時点では file/document の保存元は未導入のため、これらは backfill 対象になりません。
+Work Item は canonical row の `creatorMemberKey`、`workflowStatusId`、`customFieldValues`、
+`relationIds` を検索文書の `creatorUserId`、`status`、`customFields`、`relationIds` へ投影します。
+旧 `customFields` や必須 canonical field を欠く row は変換せず、invalid source として扱います。
 
 Runtime API は `GET /api/search?filters=<JSON>&cursor=<opaque>&limit=<count>` と、
 `GET|POST /api/saved-views`、`PATCH|DELETE /api/saved-views/{viewId}` を提供します。

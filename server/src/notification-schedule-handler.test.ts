@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEMA_VERSION,
+} from '@mukuroji/contracts'
+import {
   parseUtcDateOnly,
   runNotificationSchedule,
   type NotificationScheduleDocumentClient,
@@ -26,14 +30,27 @@ function createRecordingDocumentClient(
 
 function createWorkItem(overrides: Record<string, unknown> = {}) {
   return {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#platform',
     teamId: 'core-team',
+    assignedProjectId: 'platform',
     issueId: 'release-checklist',
+    sortOrder: 10,
     title: 'Release checklist',
     assigneeUserId: 'Member@Example.com',
-    status: 'in-progress',
+    creatorMemberKey: 'creator@example.com',
+    workflowStatusId: 'in-progress',
+    statusCategory: 'started',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/07/12',
-    assignedProjectId: 'platform',
+    priority: 'medium',
+    createdAt: '2026-07-01T09:00:00.000Z',
+    updatedAt: '2026-07-11T09:00:00.000Z',
     ...overrides,
   }
 }
@@ -80,7 +97,7 @@ describe('notification schedule handler', () => {
             }),
             createWorkItem({ issueId: 'future', dueDate: '2026/07/13' }),
             createWorkItem({ issueId: 'invalid-date', dueDate: '2026/02/29' }),
-            createWorkItem({ issueId: 'done', status: 'done' }),
+            createWorkItem({ issueId: 'done', statusCategory: 'completed' }),
             createWorkItem({ issueId: 'unassigned', assigneeUserId: '' }),
             createWorkItem({ issueId: 'malformed', teamId: undefined }),
           ],
@@ -169,6 +186,40 @@ describe('notification schedule handler', () => {
       .toMatchObject({ eventType: 'work-item.due' })
   })
 
+  test('fails closed for non-canonical Work Item rows', async () => {
+    const recording = createRecordingDocumentClient((name) => {
+      if (name !== 'ScanCommand') {
+        return {}
+      }
+
+      return {
+        ScannedCount: 6,
+        Items: [
+          createWorkItem(),
+          createWorkItem({ issueId: 'missing-relations', relationIds: undefined }),
+          createWorkItem({ issueId: 'legacy-status', status: 'started' }),
+          createWorkItem({ issueId: 'missing-creator', creatorMemberKey: undefined }),
+          createWorkItem({
+            issueId: 'wrong-project-key',
+            directoryProjectId: 'workspace-1#project#other',
+          }),
+          createWorkItem({
+            issueId: 'stray-project-key',
+            assignedProjectId: undefined,
+          }),
+        ],
+      }
+    })
+
+    await expect(runNotificationSchedule(createRunOptions(recording.client))).resolves.toEqual({
+      scannedItems: 6,
+      emittedEvents: 1,
+      duplicateEvents: 0,
+      skippedItems: 5,
+      scannedPages: 1,
+    })
+  })
+
   test('paginates a bounded strongly consistent Work Item scan', async () => {
     let scanCount = 0
     const recording = createRecordingDocumentClient((name) => {
@@ -208,6 +259,8 @@ describe('notification schedule handler', () => {
       ConsistentRead: true,
       Limit: 1,
     })
+    expect(scans[0]?.input.ProjectionExpression).toBeUndefined()
+    expect(scans[0]?.input.FilterExpression).toBeUndefined()
     expect(scans[1]?.input.ExclusiveStartKey).toEqual({
       directoryTeamId: 'workspace-1#team#core-team',
       issueId: 'release-checklist',

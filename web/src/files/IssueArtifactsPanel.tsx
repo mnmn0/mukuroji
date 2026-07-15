@@ -1,5 +1,9 @@
 import { useMemo, useRef, useState } from 'react'
-import type { ApprovalRequest, FileAttachment } from '@mukuroji/contracts'
+import type {
+  ApprovalRequest,
+  FileAttachment,
+  WorkflowStatusDefinition,
+} from '@mukuroji/contracts'
 import { createTranslator, type Locale } from '../i18n'
 import type { WorkspaceMember } from '../workspace/api'
 import { FilePreviewDialog } from './FilePreviewDialog'
@@ -37,6 +41,10 @@ export type IssueArtifactsPanelProps = {
    * 外側 layout が追加する class name です。
    */
   className?: string
+  /**
+   * Approval 完了時に遷移できる workflow status です。
+   */
+  completionTransitions?: readonly WorkflowStatusDefinition[]
 }
 
 /**
@@ -71,6 +79,7 @@ export function IssueArtifactsPanel({
 
 function IssueArtifactsPanelContent({
   className = '',
+  completionTransitions = [],
   controller,
   currentMemberKey,
   expanded = false,
@@ -224,6 +233,7 @@ function IssueArtifactsPanelContent({
         <ApprovalSection
           approvals={controller.approvals}
           controller={controller}
+          completionTransitions={completionTransitions}
           currentMemberKey={currentMemberKey}
           error={approvalError}
           files={visibleFiles}
@@ -368,6 +378,7 @@ function FileRow({
 
 function ApprovalSection({
   approvals,
+  completionTransitions,
   controller,
   currentMemberKey,
   error,
@@ -379,6 +390,7 @@ function ApprovalSection({
   t,
 }: {
   approvals: ApprovalRequest[]
+  completionTransitions: readonly WorkflowStatusDefinition[]
   controller: FileArtifactsController
   currentMemberKey?: string
   error: boolean
@@ -414,6 +426,7 @@ function ApprovalSection({
 
       {isFormOpen ? (
         <ApprovalRequestForm
+          completionTransitions={completionTransitions}
           controller={controller}
           files={files}
           members={activeMembers}
@@ -449,6 +462,7 @@ function ApprovalSection({
 }
 
 function ApprovalRequestForm({
+  completionTransitions,
   controller,
   files,
   members,
@@ -457,6 +471,7 @@ function ApprovalRequestForm({
   onSuccess,
   t,
 }: {
+  completionTransitions: readonly WorkflowStatusDefinition[]
   controller: FileArtifactsController
   files: FileAttachment[]
   members: WorkspaceMember[]
@@ -491,7 +506,9 @@ function ApprovalRequestForm({
         onErrorChange(false)
         void controller.requestApproval({
           dueAt: new Date(`${dueDate}T23:59:59`).toISOString(),
-          completionTransition: completionTransition === 'review' || completionTransition === 'done'
+          completionTransition: completionTransitions.some(
+            (status) => status.id === completionTransition,
+          )
             ? completionTransition
             : undefined,
           fileId: file.id,
@@ -548,13 +565,20 @@ function ApprovalRequestForm({
         {t('approval.dueAt')}
         <input className="workbench-input h-9 px-3" min={formatDateInput()} name="dueAt" required type="date" />
       </label>
-      <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-text)]">
-        {t('approval.completionTransition')}
-        <select className="workbench-input h-9 px-3" defaultValue="done" name="completionTransition">
-          <option value="review">{t('tasks.status.review')}</option>
-          <option value="done">{t('tasks.status.done')}</option>
-        </select>
-      </label>
+      {completionTransitions.length > 0 ? (
+        <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-text)]">
+          {t('approval.completionTransition')}
+          <select
+            className="workbench-input h-9 px-3"
+            defaultValue={completionTransitions[0]?.id}
+            name="completionTransition"
+          >
+            {completionTransitions.map((status) => (
+              <option key={status.id} value={status.id}>{status.name}</option>
+            ))}
+          </select>
+        </label>
+      ) : null}
       <div className="flex justify-end gap-2">
         <button className="workbench-button-secondary h-9 px-3 text-xs" onClick={onCancel} type="button">
           {t('collaboration.cancel')}

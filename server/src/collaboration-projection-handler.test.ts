@@ -32,6 +32,7 @@ import {
   isRealtimeTypingAllowed,
   type RealtimeAuthorizationDirectoryItem,
   type RealtimeSessionItem,
+  type RealtimeWorkItemRecord,
 } from './realtime-handler'
 
 /**
@@ -51,6 +52,36 @@ function createProjectionEvent(
     occurredAt: '2026-07-12T12:00:00.000Z',
     notificationCandidates: [],
     outboxStatus: 'pending',
+    ...overrides,
+  }
+}
+
+/** Realtime scope validation で使う canonical Work Item row を作成します。 */
+function createRealtimeWorkItem(
+  overrides: Partial<RealtimeWorkItemRecord> = {},
+): RealtimeWorkItemRecord {
+  return {
+    schemaVersion: 1,
+    revision: 1,
+    workflowSchemaVersion: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core',
+    directoryProjectId: 'workspace-1#project#platform',
+    teamId: 'core',
+    assignedProjectId: 'platform',
+    issueId: 'example',
+    sortOrder: 10,
+    title: 'Example',
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'creator@example.com',
+    workflowStatusId: 'in-progress',
+    statusCategory: 'started',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/31',
+    priority: 'medium',
+    createdAt: '2026-07-01T09:00:00.000Z',
+    updatedAt: '2026-07-12T09:00:00.000Z',
     ...overrides,
   }
 }
@@ -405,14 +436,14 @@ describe('collaboration projection pure helpers', () => {
       checked: true,
       dueDate: '2026-07-12',
       exists: true,
-      status: 'in-progress',
+      statusCategory: 'started',
     })).toBeUndefined()
     expect(refreshScheduledNotificationEvent(scheduledEvent, {
       assigneeMemberKey: 'old-owner@example.com',
       checked: true,
       dueDate: '2026-07-12',
       exists: true,
-      status: 'in-progress',
+      statusCategory: 'started',
     })?.notificationCandidates).toEqual([{
       memberKey: 'old-owner@example.com',
       reason: 'due',
@@ -422,14 +453,14 @@ describe('collaboration projection pure helpers', () => {
       checked: true,
       dueDate: '2026-07-13',
       exists: true,
-      status: 'in-progress',
+      statusCategory: 'started',
     })).toBeUndefined()
     expect(refreshScheduledNotificationEvent(scheduledEvent, {
       assigneeMemberKey: 'new-owner@example.com',
       checked: true,
       dueDate: '2026-07-12',
       exists: true,
-      status: 'done',
+      statusCategory: 'completed',
     })).toBeUndefined()
   })
 
@@ -593,15 +624,14 @@ describe('collaboration projection pure helpers', () => {
       { entryType: 'team', teamId: 'core', archivedAt: '2026-07-12T12:00:00.000Z' },
       ...activeDirectory.slice(1),
     ])).toBe(false)
-    expect(hasCurrentRealtimeWorkItemScope(session, {
-      directoryTeamId: 'workspace-1#team#core',
-      issueId: 'example',
-      assignedProjectId: 'platform',
-    })).toBe(true)
-    expect(hasCurrentRealtimeWorkItemScope(session, {
-      directoryTeamId: 'workspace-1#team#core',
-      issueId: 'example',
+    expect(hasCurrentRealtimeWorkItemScope(session, createRealtimeWorkItem())).toBe(true)
+    expect(hasCurrentRealtimeWorkItemScope(session, createRealtimeWorkItem({
+      directoryProjectId: 'workspace-1#project#replacement-project',
       assignedProjectId: 'replacement-project',
+    }))).toBe(false)
+    expect(hasCurrentRealtimeWorkItemScope(session, {
+      ...createRealtimeWorkItem(),
+      status: 'started',
     })).toBe(false)
   })
 

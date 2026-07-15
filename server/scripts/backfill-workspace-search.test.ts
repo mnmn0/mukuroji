@@ -103,12 +103,15 @@ describe('Workspace search backfill mapping', () => {
       sortOrder: 10,
       title: 'Release check',
       assigneeUserId: 'sato@example.com',
-      status: 'review',
+      creatorMemberKey: 'creator@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'review',
+      statusCategory: 'started',
+      customFieldValues: { effort: 8, approved: true },
       dueDate: '2026/07/20',
       priority: 'high',
       createdAt: '2026-07-01T00:00:00.000Z',
       updatedAt: '2026-07-12T00:00:00.000Z',
-      customFields: { effort: 8, approved: true },
       relationIds: ['blocks:launch'],
     })
     const second = mapWorkItem({
@@ -121,7 +124,12 @@ describe('Workspace search backfill mapping', () => {
       sortOrder: 20,
       title: 'Release check',
       assigneeUserId: 'suzuki@example.com',
-      status: 'todo',
+      creatorMemberKey: 'creator@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      relationIds: [],
       dueDate: '2026/08/01',
       priority: 'medium',
       createdAt: '2026-07-02T00:00:00.000Z',
@@ -137,8 +145,40 @@ describe('Workspace search backfill mapping', () => {
     expect(first.document.recordKey).not.toBe(second.document.recordKey)
     expect(first.document.subtitle).toBe('release-check')
     expect(first.document.customFields).toEqual({ effort: 8, approved: true })
+    expect(first.document.status).toBe('review')
     expect(first.document.relationIds).toEqual(['blocks:launch'])
+    expect(second.document.relationIds).toEqual([])
     expect(first.document.dueDate).toBe('2026-07-20')
+  })
+
+  test('accepts the backlog workflow status category', () => {
+    const operation = mapWorkItem({
+      schemaVersion: 1,
+      revision: 1,
+      directoryId: 'workspace#mukuroji',
+      directoryTeamId: 'workspace#mukuroji#team#core-team',
+      teamId: 'core-team',
+      issueId: 'backlog-item',
+      sortOrder: 10,
+      title: 'Backlog item',
+      assigneeUserId: 'sato@example.com',
+      creatorMemberKey: 'creator@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'backlog',
+      statusCategory: 'backlog',
+      customFieldValues: {},
+      relationIds: [],
+      dueDate: '2026/08/01',
+      priority: 'medium',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      updatedAt: '2026-07-11T00:00:00.000Z',
+    })
+
+    expect(operation?.action).toBe('put')
+    if (operation?.action !== 'put') {
+      throw new Error('Expected a backlog Work Item search document.')
+    }
+    expect(operation.document.status).toBe('backlog')
   })
 
   test('skips malformed canonical Work Item rows before indexing their Team scope', () => {
@@ -152,7 +192,12 @@ describe('Workspace search backfill mapping', () => {
       sortOrder: 10,
       title: 'Release check',
       assigneeUserId: 'sato@example.com',
-      status: 'review',
+      creatorMemberKey: 'creator@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'review',
+      statusCategory: 'started',
+      customFieldValues: {},
+      relationIds: [],
       dueDate: '2026/07/20',
       priority: 'high',
       createdAt: '2026-07-01T00:00:00.000Z',
@@ -164,6 +209,78 @@ describe('Workspace search backfill mapping', () => {
     expect(mapWorkItem({
       ...baseItem,
       directoryTeamId: 'workspace#mukuroji#team#another-team',
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      title: undefined,
+      titleKey: 'tasks.releaseCheck',
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      workflowSchemaVersion: undefined,
+      status: 'review',
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      workflowStatusId: undefined,
+      status: 'review',
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      statusCategory: undefined,
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      customFieldValues: undefined,
+      customFields: { effort: 8 },
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      customFieldValues: { effort: null },
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      creatorMemberKey: undefined,
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      relationIds: undefined,
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      relationIds: ['related:z', 'blocks:a'],
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      relationIds: ['blocks:a', 'blocks:a'],
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      relationIds: ['unknown:a'],
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      status: 'review',
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      customFields: { effort: 8 },
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      assignee: '佐藤 花子',
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      assigneeKey: 'tasks.assignee.sato',
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      source: 'dynamodb',
+    })).toBeUndefined()
+    expect(mapWorkItem({
+      ...baseItem,
+      migrationSourceKey: 'workspace#mukuroji#project#refero#task#release-check',
     })).toBeUndefined()
   })
 

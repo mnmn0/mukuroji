@@ -13,6 +13,7 @@ import {
   TransactWriteCommand,
   UpdateCommand,
   type DynamoDBDocumentClient,
+  type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import { createMutationAuditContext } from './audit'
 import {
@@ -24,6 +25,7 @@ import {
   createFileProofingScopeKey,
   mapGuardDutyScanStatus,
   type FileObjectClient,
+  type FileApprovalCompletionTransitionResolver,
   type FileProofingActor,
   type FileProofingScope,
   type PresignedPutUpload,
@@ -40,6 +42,9 @@ class MemoryDocumentClient {
 
   /** 次の transaction request で返す任意 error です。 */
   nextTransactionError?: Error
+
+  /** 実行した transaction request です。 */
+  readonly transactionInputs: TransactWriteCommandInput[] = []
 
   /** 実行した scope query の record key prefixes です。 */
   readonly queryPrefixes: Array<string | undefined> = []
@@ -115,6 +120,7 @@ class MemoryDocumentClient {
       return {}
     }
     if (command instanceof TransactWriteCommand) {
+      this.transactionInputs.push(command.input)
       if (this.nextTransactionError) {
         const error = this.nextTransactionError
         this.nextTransactionError = undefined
@@ -155,11 +161,7 @@ class MemoryDocumentClient {
           continue
         }
         const expectedRevision = values[':expectedRevision'] ?? values[':fileRevision']
-        const actualRevision = existing?.revision ?? (
-          values[':legacyRevision'] !== undefined && expectedRevision === values[':legacyRevision']
-            ? values[':legacyRevision']
-            : undefined
-        )
+        const actualRevision = existing?.revision
         if (!existing || actualRevision !== expectedRevision) {
           throw createTransactionCancelledError()
         }
@@ -202,9 +204,11 @@ class MemoryDocumentClient {
         this.items.set(key, values[':delta'] === undefined
           ? {
               ...existing!,
-              status: values[':status'],
+              workflowSchemaVersion: values[':workflowSchemaVersion'],
+              workflowStatusId: values[':workflowStatusId'],
+              statusCategory: values[':statusCategory'],
               updatedAt: values[':updatedAt'],
-              revision: Number(existing!.revision ?? values[':legacyRevision']) + 1,
+              revision: Number(existing!.revision) + 1,
             }
           : {
               ...existing!,
@@ -241,11 +245,7 @@ class MemoryDocumentClient {
       const expectedRevision = values?.[':expectedRevision'] ??
         values?.[':fileRevision'] ??
         values?.[':revision']
-      const actualRevision = existing?.revision ?? (
-        values?.[':legacyRevision'] !== undefined && expectedRevision === values[':legacyRevision']
-          ? values[':legacyRevision']
-          : undefined
-      )
+      const actualRevision = existing?.revision
       if (actualRevision !== expectedRevision) {
         throw createTransactionCancelledError()
       }
@@ -1228,7 +1228,6 @@ describe('file proofing domain', () => {
         versionId: session.version.id,
         reviewerMemberKeys: ['first@example.com', 'second@example.com'],
         dueAt: '2099-07-20T00:00:00.000Z',
-        completionTransition: 'done',
       },
       createAuditContext('approval'),
     )
@@ -1546,15 +1545,17 @@ describe('file proofing domain', () => {
     expect(summaries.get(createFileProofingScopeKey(scope))?.nextDueAt).toBeUndefined()
   })
 
-  test('transitions the canonical Work Item atomically when every reviewer approves', async () => {
-    const state = createClient('work-items')
+  test('transitions the canonical Work Item with configuration guards when every reviewer approves', async () => {
+    const state = createClient('work-items', 'audit-events')
     const workItemKey = {
       directoryTeamId: 'workspace-1#team#core',
       issueId: 'work-item-1',
     }
     state.documentClient.items.set(createMemoryKey(workItemKey), {
       ...workItemKey,
-      status: 'review',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'review-ready',
+      statusCategory: 'started',
       revision: 3,
       updatedAt: '2026-07-12T00:00:00.000Z',
     })
@@ -1585,50 +1586,93 @@ describe('file proofing domain', () => {
         versionId: session.version.id,
         reviewerMemberKeys: ['reviewer@example.com'],
         dueAt: '2099-07-20T00:00:00.000Z',
-        completionTransition: 'done',
+        completionTransition: ' qa-approved ',
       },
       createAuditContext('workflow-approval'),
     )
     state.documentClient.items.set(createMemoryKey(workItemKey), {
       ...state.documentClient.items.get(createMemoryKey(workItemKey)),
       revision: 4,
-      status: 'in-progress',
+      workflowStatusId: 'quality-review',
     })
+    const resolverCalls: string[] = []
+    const resolveCompletionTransition: FileApprovalCompletionTransitionResolver = async (
+      completionTransition,
+    ) => {
+      resolverCalls.push(completionTransition)
+      return {
+        workflowStatusId: completionTransition,
+        statusCategory: 'completed',
+        workflowSchemaVersion: 1,
+        expectedRevision: 4,
+        configurationConditionChecks: [{
+          ConditionCheck: {
+            TableName: 'work-item-configuration',
+            Key: {
+              scopeKey: 'workspace-1#team#core#work-item-configuration',
+              recordKey: 'CONFIG',
+            },
+            ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+          },
+        }],
+      }
+    }
     const completed = await state.client.decideApproval(
       scope,
       { memberKey: 'reviewer@example.com', guest: false, canWrite: false, canManage: false },
       approval.id,
-      { decision: 'approve', expectedRevision: 1, workItemRevision: 4 },
+      { decision: 'approve', expectedRevision: 1 },
       createAuditContext('workflow-decision'),
+      resolveCompletionTransition,
     )
 
     expect(completed.status).toBe('approved')
+    expect(resolverCalls).toEqual(['qa-approved'])
     expect(state.documentClient.items.get(createMemoryKey(workItemKey))).toMatchObject({
       revision: 5,
-      status: 'done',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'qa-approved',
+      statusCategory: 'completed',
+    })
+    expect(state.documentClient.items.get(createMemoryKey(workItemKey))).not.toHaveProperty('status')
+    const transaction = state.documentClient.transactionInputs.at(-1)?.TransactItems ?? []
+    const workItemUpdate = transaction.find((entry) => entry.Update?.TableName === 'work-items')?.Update
+    expect(workItemUpdate).toMatchObject({
+      ConditionExpression: 'attribute_exists(issueId) AND revision = :expectedRevision',
+      ExpressionAttributeValues: {
+        ':expectedRevision': 4,
+        ':statusCategory': 'completed',
+        ':workflowSchemaVersion': 1,
+        ':workflowStatusId': 'qa-approved',
+      },
+    })
+    expect(workItemUpdate?.UpdateExpression).toContain('#workflowStatusId = :workflowStatusId')
+    expect(workItemUpdate?.UpdateExpression).not.toContain('#status = :status')
+    expect(transaction).toContainEqual(expect.objectContaining({
+      ConditionCheck: expect.objectContaining({ TableName: 'work-item-configuration' }),
+    }))
+    const completionAudit = [...state.documentClient.items.values()].find(
+      (item) => item.eventType === 'approval.completed',
+    )
+    expect(completionAudit?.metadata).toMatchObject({
+      automation: {
+        action: 'work-item.transition',
+        workflowStatusId: 'qa-approved',
+      },
     })
   })
 
-  test('transitions a legacy Work Item that has no stored revision attribute', async () => {
+  test('fails closed when an approval transition resolver is unavailable or cannot resolve the ID', async () => {
     const state = createClient('work-items')
-    const workItemKey = {
-      directoryTeamId: 'workspace-1#team#core',
-      issueId: 'work-item-1',
-    }
-    state.documentClient.items.set(createMemoryKey(workItemKey), {
-      ...workItemKey,
-      status: 'review',
-      updatedAt: '2026-07-12T00:00:00.000Z',
-    })
     const session = await state.client.createUpload(
       scope,
       manager,
-      { contentType: 'application/pdf', fileName: 'legacy-approval.pdf', sizeBytes: 20 },
-      createAuditContext('legacy-workflow-file'),
+      { contentType: 'application/pdf', fileName: 'unresolved-approval.pdf', sizeBytes: 20 },
+      createAuditContext('unresolved-workflow-file'),
     )
     state.objectClient.objects.set(state.objectClient.lastObjectKey!, {
       contentType: 'application/pdf',
-      objectVersionId: 'immutable-legacy-approval-version-1',
+      objectVersionId: 'immutable-unresolved-approval-version-1',
       sizeBytes: 20,
       scanStatus: 'available',
     })
@@ -1637,34 +1681,114 @@ describe('file proofing domain', () => {
       manager,
       session.file.id,
       session.version.id,
-      createAuditContext('legacy-workflow-complete'),
+      createAuditContext('unresolved-workflow-complete'),
     )
     const approval = await state.client.createApproval(
       scope,
       manager,
       {
-        completionTransition: 'done',
+        completionTransition: 'qa-approved',
         dueAt: '2099-07-20T00:00:00.000Z',
         fileId: session.file.id,
         reviewerMemberKeys: ['reviewer@example.com'],
         versionId: session.version.id,
       },
-      createAuditContext('legacy-workflow-approval'),
+      createAuditContext('unresolved-workflow-approval'),
     )
 
-    const completed = await state.client.decideApproval(
+    const decisionInput = { decision: 'approve', expectedRevision: approval.revision } as const
+    await expect(state.client.decideApproval(
       scope,
       { memberKey: 'reviewer@example.com', guest: false, canWrite: false, canManage: false },
       approval.id,
-      { decision: 'approve', expectedRevision: approval.revision, workItemRevision: 1 },
-      createAuditContext('legacy-workflow-decision'),
-    )
-
-    expect(completed.status).toBe('approved')
-    expect(state.documentClient.items.get(createMemoryKey(workItemKey))).toMatchObject({
-      revision: 2,
-      status: 'done',
+      decisionInput,
+      createAuditContext('missing-workflow-resolver'),
+    )).rejects.toMatchObject({
+      code: 'ApprovalCompletionTransitionUnavailable',
+      status: 503,
     })
+    const unresolved: FileApprovalCompletionTransitionResolver = async () => undefined
+    await expect(state.client.decideApproval(
+      scope,
+      { memberKey: 'reviewer@example.com', guest: false, canWrite: false, canManage: false },
+      approval.id,
+      decisionInput,
+      createAuditContext('unresolved-workflow-transition'),
+      unresolved,
+    )).rejects.toMatchObject({
+      code: 'ApprovalCompletionTransitionConflict',
+      status: 409,
+    })
+    expect((await state.client.list(scope, manager)).approvals[0]?.status).toBe('pending')
+  })
+
+  test('rejects a completion transition when the Work Item has no strict revision', async () => {
+    const state = createClient('work-items')
+    const workItemKey = {
+      directoryTeamId: 'workspace-1#team#core',
+      issueId: 'work-item-1',
+    }
+    state.documentClient.items.set(createMemoryKey(workItemKey), {
+      ...workItemKey,
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'quality-review',
+      statusCategory: 'started',
+      updatedAt: '2026-07-12T00:00:00.000Z',
+    })
+    const session = await state.client.createUpload(
+      scope,
+      manager,
+      { contentType: 'application/pdf', fileName: 'revisionless-approval.pdf', sizeBytes: 20 },
+      createAuditContext('revisionless-workflow-file'),
+    )
+    state.objectClient.objects.set(state.objectClient.lastObjectKey!, {
+      contentType: 'application/pdf',
+      objectVersionId: 'immutable-revisionless-approval-version-1',
+      sizeBytes: 20,
+      scanStatus: 'available',
+    })
+    await state.client.completeUpload(
+      scope,
+      manager,
+      session.file.id,
+      session.version.id,
+      createAuditContext('revisionless-workflow-complete'),
+    )
+    const approval = await state.client.createApproval(
+      scope,
+      manager,
+      {
+        completionTransition: 'qa-approved',
+        dueAt: '2099-07-20T00:00:00.000Z',
+        fileId: session.file.id,
+        reviewerMemberKeys: ['reviewer@example.com'],
+        versionId: session.version.id,
+      },
+      createAuditContext('revisionless-workflow-approval'),
+    )
+    const resolveCompletionTransition: FileApprovalCompletionTransitionResolver = async (
+      completionTransition,
+    ) => ({
+      workflowStatusId: completionTransition,
+      statusCategory: 'completed',
+      workflowSchemaVersion: 1,
+      expectedRevision: 1,
+      configurationConditionChecks: [],
+    })
+
+    await expect(state.client.decideApproval(
+      scope,
+      { memberKey: 'reviewer@example.com', guest: false, canWrite: false, canManage: false },
+      approval.id,
+      { decision: 'approve', expectedRevision: approval.revision },
+      createAuditContext('revisionless-workflow-decision'),
+      resolveCompletionTransition,
+    )).rejects.toMatchObject({
+      code: 'ApprovalCompletionTransitionConflict',
+      status: 409,
+    })
+    expect(state.documentClient.items.get(createMemoryKey(workItemKey))?.revision).toBeUndefined()
+    expect((await state.client.list(scope, manager)).approvals[0]?.status).toBe('pending')
   })
 
   test('builds stable scope keys and approval summaries', () => {

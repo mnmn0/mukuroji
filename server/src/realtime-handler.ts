@@ -16,6 +16,10 @@ import {
   TransactWriteCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
+import {
+  isCanonicalWorkItemRecord,
+  type CanonicalWorkItemRecord,
+} from './canonical-work-item'
 
 /**
  * API Gateway WebSocket event の request context です。
@@ -110,14 +114,7 @@ export type RealtimeAuthorizationDirectoryItem = {
 }
 
 /** Realtime session の現在 scope を確認する TeamIssues row です。 */
-export type RealtimeWorkItemRecord = {
-  /** Workspace/team 複合 partition key です。 */
-  directoryTeamId?: string
-  /** Work Item ID です。 */
-  issueId?: string
-  /** 現在の assigned project ID です。 */
-  assignedProjectId?: string
-}
+export type RealtimeWorkItemRecord = CanonicalWorkItemRecord
 
 /**
  * `$default` route で受け付ける realtime message です。
@@ -677,9 +674,9 @@ export function hasRealtimeDirectoryWriteAccess(
 /** Session 発行後も Work Item が同じ team/project scope にあるかを判定します。 */
 export function hasCurrentRealtimeWorkItemScope(
   session: Pick<RealtimeSessionItem, 'issueId' | 'projectId' | 'teamId' | 'workspaceId'>,
-  item: RealtimeWorkItemRecord | undefined,
+  item: unknown,
 ) {
-  if (!item ||
+  if (!isCanonicalWorkItemRecord(item) ||
     item.directoryTeamId !== `${session.workspaceId}#team#${session.teamId}` ||
     item.issueId !== session.issueId) {
     return false

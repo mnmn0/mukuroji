@@ -4,7 +4,10 @@ import type {
   TeamIssueActivityEvent,
   TeamIssueComment,
 } from './api'
-import { WORK_ITEM_SCHEMA_VERSION } from '@mukuroji/contracts'
+import {
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEMA_VERSION,
+} from '@mukuroji/contracts'
 import type { WorkspaceMember } from '../workspace/api'
 import type { IssueCollaborationController } from './useIssueCollaboration'
 
@@ -21,9 +24,14 @@ export const teamIssueFixtures = [
     title: '初回オンボーディングの離脱要因を減らす',
     description: '初回ログイン後に迷う導線を整理し、最初のプロジェクト作成までの摩擦を下げる。',
     assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'sato@example.com',
     assigneeEmail: 'sato@example.com',
     assigneeName: '佐藤 花子',
-    status: 'in-progress',
+    workflowStatusId: 'active',
+    statusCategory: 'started',
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/18',
     priority: 'high',
     createdAt: '2026-06-08T00:00:00.000Z',
@@ -38,9 +46,14 @@ export const teamIssueFixtures = [
     title: '料金導線の説明不足を解消する',
     description: '料金ページでプラン差分が判断しづらい状態を解消する。',
     assigneeUserId: 'suzuki@example.com',
+    creatorMemberKey: 'suzuki@example.com',
     assigneeEmail: 'suzuki@example.com',
     assigneeName: '鈴木 大輔',
-    status: 'todo',
+    workflowStatusId: 'backlog',
+    statusCategory: 'backlog',
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/21',
     priority: 'medium',
     createdAt: '2026-06-08T00:00:00.000Z',

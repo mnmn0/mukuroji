@@ -26,21 +26,22 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { createHash } from 'node:crypto'
-import type {
-  AnnotationAnchor,
-  ApprovalRequest,
-  ApprovalRequestStatus,
-  ApprovalReviewer,
-  ApprovalReviewerStatus,
-  ApprovalSummary,
-  FileAnnotation,
-  FileAttachment,
-  FileAttachmentCapabilities,
-  FileAttachmentTargetType,
-  FilePreviewKind,
-  FileScanStatus,
-  FileVersion,
-  WorkItemStatus,
+import {
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  type AnnotationAnchor,
+  type ApprovalRequest,
+  type ApprovalRequestStatus,
+  type ApprovalReviewer,
+  type ApprovalReviewerStatus,
+  type ApprovalSummary,
+  type FileAnnotation,
+  type FileAttachment,
+  type FileAttachmentCapabilities,
+  type FileAttachmentTargetType,
+  type FilePreviewKind,
+  type FileScanStatus,
+  type FileVersion,
+  type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
 import {
   createMutationAuditEventPut,
@@ -186,8 +187,8 @@ export type CreateFileApprovalInput = {
   reviewerMemberKeys: string[]
   /** 判断期限の ISO 8601 timestamp です。 */
   dueAt: string
-  /** 全員承認後に workflow consumer へ通知する遷移先です。 */
-  completionTransition?: WorkItemStatus
+  /** 全員承認後に適用する workflow status ID です。 */
+  completionTransition?: string
 }
 
 /** Reviewer decision の入力です。 */
@@ -198,9 +199,27 @@ export type CreateFileApprovalDecisionInput = {
   comment?: string
   /** Optimistic concurrency に使う approval revision です。 */
   expectedRevision: number
-  /** Decision 直前に強整合 read した Work Item revision です。 */
-  workItemRevision?: number
 }
+
+/** Approval 完了時に適用する検証済み workflow transition です。 */
+export type FileApprovalCompletionTransition = {
+  /** Configuration workflow 内の遷移先 status ID です。 */
+  workflowStatusId: string
+  /** List/report の横断集計に利用する標準 status category です。 */
+  statusCategory: WorkflowStatusCategory
+  /** 遷移先を検証した workflow configuration schema version です。 */
+  workflowSchemaVersion: typeof WORK_ITEM_CONFIGURATION_SCHEMA_VERSION
+  /** Work Item 更新の optimistic concurrency に使う revision です。 */
+  expectedRevision: number
+  /** Definition の同時変更を検出する DynamoDB ConditionCheck 一覧です。 */
+  configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
+}
+
+/** 保存済み遷移先を現在の workflow configuration に対して解決します。 */
+export type FileApprovalCompletionTransitionResolver = (
+  /** Approval request に保存された workflow status ID です。 */
+  completionTransition: string,
+) => Promise<FileApprovalCompletionTransition | undefined>
 
 /** Approval request cancel の入力です。 */
 export type CancelFileApprovalInput = {
@@ -296,8 +315,8 @@ type StoredApprovalItem = ApprovalRequest & {
   issueId: string
   /** Approval が属する assigned Project ID です。 */
   projectId?: string
-  /** 全員承認後に consumer が行う workflow transition です。 */
-  completionTransition?: WorkItemStatus
+  /** 全員承認後に適用する workflow status ID です。 */
+  completionTransition?: string
   /** Approval 作成 request の idempotency fingerprint です。 */
   requestFingerprint?: string
 }
@@ -546,6 +565,7 @@ export interface FileProofingClient {
     approvalId: string,
     input: CreateFileApprovalDecisionInput,
     auditContext?: MutationAuditContext,
+    resolveCompletionTransition?: FileApprovalCompletionTransitionResolver,
   ): Promise<ApprovalRequest>
   /** Requester または manager が pending approval を取り消します。 */
   cancelApproval(
@@ -1350,7 +1370,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     const approvalId = createMutationResourceId('approval', auditContext, scopeKey)
     const completionTransition = input.completionTransition === undefined
       ? undefined
-      : normalizeWorkItemStatus(input.completionTransition)
+      : normalizeWorkflowStatusId(input.completionTransition)
     const reviewers: ApprovalReviewer[] = reviewerMemberKeys.map((memberKey) => ({
       memberKey,
       status: 'pending',
@@ -1439,6 +1459,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     approvalId: string,
     input: CreateFileApprovalDecisionInput,
     auditContext?: MutationAuditContext,
+    resolveCompletionTransition?: FileApprovalCompletionTransitionResolver,
   ): Promise<ApprovalRequest> {
     requireWorkItemScope(scope)
     const expectedRevision = requireApprovalRevision(input.expectedRevision)
@@ -1488,6 +1509,12 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       : candidate)
     const status = aggregateApprovalStatus(reviewers)
     const isCompleted = status !== 'pending'
+    const completionTransition = status === 'approved' && current.completionTransition
+      ? await this.resolveCompletionTransition(
+          current.completionTransition,
+          resolveCompletionTransition,
+        )
+      : undefined
     const next: StoredApprovalItem = {
       ...current,
       revision: current.revision + 1,
@@ -1525,12 +1552,8 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         },
       ))
     }
-    if (
-      status === 'approved' &&
-      current.completionTransition &&
-      input.workItemRevision &&
-      this.workItemsTableName
-    ) {
+    if (completionTransition && this.workItemsTableName) {
+      transactionItems.push(...completionTransition.configurationConditionChecks)
       transactionItems.push({
         Update: {
           TableName: this.workItemsTableName,
@@ -1539,21 +1562,26 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
             issueId: scope.issueId,
           },
           UpdateExpression:
-            'SET #status = :status, updatedAt = :updatedAt, ' +
-            'revision = if_not_exists(revision, :legacyRevision) + :one',
+            'SET #workflowStatusId = :workflowStatusId, #statusCategory = :statusCategory, ' +
+            '#workflowSchemaVersion = :workflowSchemaVersion, updatedAt = :updatedAt, ' +
+            'revision = revision + :one',
           ConditionExpression:
-            'attribute_exists(issueId) AND (revision = :expectedRevision OR ' +
-            '(attribute_not_exists(revision) AND :expectedRevision = :legacyRevision))',
-          ExpressionAttributeNames: { '#status': 'status' },
+            'attribute_exists(issueId) AND revision = :expectedRevision',
+          ExpressionAttributeNames: {
+            '#statusCategory': 'statusCategory',
+            '#workflowSchemaVersion': 'workflowSchemaVersion',
+            '#workflowStatusId': 'workflowStatusId',
+          },
           ExpressionAttributeValues: {
-            ':status': current.completionTransition,
+            ':statusCategory': completionTransition.statusCategory,
+            ':workflowSchemaVersion': completionTransition.workflowSchemaVersion,
+            ':workflowStatusId': completionTransition.workflowStatusId,
             ':updatedAt': now,
             ':one': 1,
             ':expectedRevision': requirePositiveInteger(
-              input.workItemRevision,
+              completionTransition.expectedRevision,
               'Work Item revision',
             ),
-            ':legacyRevision': 1,
           },
         },
       })
@@ -1571,10 +1599,10 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         reviewerStatus,
         approvalStatus: status,
         completionTransition: status === 'approved' ? current.completionTransition : undefined,
-        automation: status === 'approved' && current.completionTransition
+        automation: completionTransition
           ? {
               action: 'work-item.transition',
-              status: current.completionTransition,
+              workflowStatusId: completionTransition.workflowStatusId,
             }
           : undefined,
         notificationCandidates: [{
@@ -1588,6 +1616,14 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactionItems }))
     } catch (error) {
       if (isConditionalTransactionError(error)) {
+        if (completionTransition) {
+          throw new FileProofingError(
+            409,
+            'ApprovalCompletionTransitionConflict',
+            'Workflow configuration or Work Item changed. Reload and try again.',
+            { cause: error },
+          )
+        }
         throw new FileProofingError(
           409,
           'ApprovalRevisionConflict',
@@ -1599,6 +1635,43 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     }
 
     return toApprovalRequest(next, actor)
+  }
+
+  /** Approval request の保存済み遷移先を現在の workflow に対して解決します。 */
+  private async resolveCompletionTransition(
+    completionTransition: string,
+    resolver: FileApprovalCompletionTransitionResolver | undefined,
+  ) {
+    if (!this.workItemsTableName || !resolver) {
+      throw new FileProofingError(
+        503,
+        'ApprovalCompletionTransitionUnavailable',
+        'Approval completion workflow transition is unavailable.',
+      )
+    }
+    const resolved = await resolver(completionTransition)
+    if (!resolved) {
+      throw new FileProofingError(
+        409,
+        'ApprovalCompletionTransitionConflict',
+        'Approval completion workflow transition is no longer available.',
+      )
+    }
+    const workflowStatusId = normalizeWorkflowStatusId(resolved.workflowStatusId)
+    if (
+      workflowStatusId !== completionTransition ||
+      resolved.workflowSchemaVersion !== WORK_ITEM_CONFIGURATION_SCHEMA_VERSION
+    ) {
+      throw new FileProofingError(
+        409,
+        'ApprovalCompletionTransitionConflict',
+        'Approval completion workflow transition no longer matches the stored request.',
+      )
+    }
+    return {
+      ...resolved,
+      workflowStatusId,
+    }
   }
 
   /** Requester または manager が pending approval を revision 条件付きで取り消します。 */
@@ -2724,10 +2797,15 @@ function resolveApprovalDecisionEventType(
   return 'approval.approved'
 }
 
-/** Workflow transition status を canonical Work Item status に制限します。 */
-function normalizeWorkItemStatus(value: unknown): WorkItemStatus {
-  if (value === 'todo' || value === 'in-progress' || value === 'review' || value === 'done') {
-    return value
+/** Workflow transition ID を configuration status ID と同じ形式へ正規化します。 */
+function normalizeWorkflowStatusId(value: unknown) {
+  const workflowStatusId = typeof value === 'string' ? value.trim() : ''
+  if (
+    workflowStatusId &&
+    workflowStatusId.length <= 128 &&
+    /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/i.test(workflowStatusId)
+  ) {
+    return workflowStatusId
   }
   throw new FileProofingError(
     400,

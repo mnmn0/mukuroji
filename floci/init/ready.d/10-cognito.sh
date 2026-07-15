@@ -251,10 +251,10 @@ WORK_ITEM_SEED_TIMESTAMP="2026-06-01T00:00:00.000Z"
 seed_work_item() {
   work_item_id="$1"
   sort_order="$2"
-  title_key="$3"
-  title="$4"
-  assignee_user_id="$5"
-  status="$6"
+  title="$3"
+  assignee_user_id="$4"
+  workflow_status_id="$5"
+  status_category="$6"
   due_date="$7"
   priority="$8"
   put_item_error=""
@@ -268,21 +268,21 @@ seed_work_item() {
       \"teamId\": {\"S\": \"core-team\"},
       \"assignedProjectId\": {\"S\": \"refero\"},
       \"issueId\": {\"S\": \"$work_item_id\"},
-      \"workItemId\": {\"S\": \"$work_item_id\"},
       \"schemaVersion\": {\"N\": \"1\"},
       \"revision\": {\"N\": \"1\"},
       \"sortOrder\": {\"N\": \"$sort_order\"},
-      \"titleKey\": {\"S\": \"$title_key\"},
       \"title\": {\"S\": \"$title\"},
       \"assigneeUserId\": {\"S\": \"$assignee_user_id\"},
-      \"status\": {\"S\": \"$status\"},
+      \"creatorMemberKey\": {\"S\": \"$assignee_user_id\"},
+      \"workflowSchemaVersion\": {\"N\": \"1\"},
+      \"workflowStatusId\": {\"S\": \"$workflow_status_id\"},
+      \"statusCategory\": {\"S\": \"$status_category\"},
+      \"customFieldValues\": {\"M\": {}},
+      \"relationIds\": {\"L\": []},
       \"dueDate\": {\"S\": \"$due_date\"},
       \"priority\": {\"S\": \"$priority\"},
       \"createdAt\": {\"S\": \"$WORK_ITEM_SEED_TIMESTAMP\"},
-      \"updatedAt\": {\"S\": \"$WORK_ITEM_SEED_TIMESTAMP\"},
-      \"source\": {\"S\": \"dynamodb\"},
-      \"migrationSource\": {\"S\": \"legacy-project-task\"},
-      \"migrationSourceKey\": {\"S\": \"$PROJECT_DIRECTORY_ID#project#refero#task#$work_item_id\"}
+      \"updatedAt\": {\"S\": \"$WORK_ITEM_SEED_TIMESTAMP\"}
     }" \
     --condition-expression 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)' \
     2>&1 >/dev/null)"; then
@@ -293,26 +293,16 @@ seed_work_item() {
   fi
 }
 
-LEGACY_TASK_COUNT="$(aws_local dynamodb scan \
-  --table-name "$PROJECT_TASKS_TABLE" \
-  --select COUNT \
-  --query Count \
-  --output text)"
-
-if [ "$LEGACY_TASK_COUNT" = "0" ]; then
-  seed_work_item "wireframe" 10 "tasks.item.wireframe" "新しいランディングページのワイヤーフレーム作成" "sato@example.com" "in-progress" "2026/06/03" "high"
-  seed_work_item "brand-guideline" 20 "tasks.item.brandGuideline" "ブランドガイドラインの更新" "suzuki@example.com" "review" "2026/06/05" "medium"
-  seed_work_item "pricing-content" 30 "tasks.item.pricingContent" "料金ページのコンテンツ作成" "tanaka@example.com" "in-progress" "2026/06/08" "high"
-  seed_work_item "seo-research" 40 "tasks.item.seoResearch" "SEO キーワードリサーチ" "yamamoto@example.com" "todo" "2026/06/09" "medium"
-  seed_work_item "hero-design" 50 "tasks.item.heroDesign" "ヒーロー画像のデザイン作成" "sato@example.com" "review" "2026/06/10" "medium"
-  seed_work_item "analytics-tags" 60 "tasks.item.analyticsTags" "アナリティクスタグの実装" "suzuki@example.com" "in-progress" "2026/06/11" "low"
-  seed_work_item "competitor-report" 70 "tasks.item.competitorReport" "競合サイトの分析レポート作成" "tanaka@example.com" "done" "2026/06/02" "low"
-  seed_work_item "terms-page" 80 "tasks.item.termsPage" "利用規約ページの作成" "yamamoto@example.com" "todo" "2026/06/12" "medium"
-  seed_work_item "faq-content" 90 "tasks.item.faqContent" "FAQ セクションのコンテンツ作成" "sato@example.com" "todo" "2026/06/15" "low"
-  seed_work_item "landing-release" 100 "tasks.item.landingRelease" "ランディングページの公開" "suzuki@example.com" "todo" "2026/06/16" "high"
-else
-  echo "mukuroji legacy task rows preserved for explicit Work Item migration: table=$PROJECT_TASKS_TABLE count=$LEGACY_TASK_COUNT"
-fi
+seed_work_item "wireframe" 10 "新しいランディングページのワイヤーフレーム作成" "sato@example.com" "in-progress" "started" "2026/06/03" "high"
+seed_work_item "brand-guideline" 20 "ブランドガイドラインの更新" "suzuki@example.com" "review" "started" "2026/06/05" "medium"
+seed_work_item "pricing-content" 30 "料金ページのコンテンツ作成" "tanaka@example.com" "in-progress" "started" "2026/06/08" "high"
+seed_work_item "seo-research" 40 "SEO キーワードリサーチ" "yamamoto@example.com" "todo" "unstarted" "2026/06/09" "medium"
+seed_work_item "hero-design" 50 "ヒーロー画像のデザイン作成" "sato@example.com" "review" "started" "2026/06/10" "medium"
+seed_work_item "analytics-tags" 60 "アナリティクスタグの実装" "suzuki@example.com" "in-progress" "started" "2026/06/11" "low"
+seed_work_item "competitor-report" 70 "競合サイトの分析レポート作成" "tanaka@example.com" "done" "completed" "2026/06/02" "low"
+seed_work_item "terms-page" 80 "利用規約ページの作成" "yamamoto@example.com" "todo" "unstarted" "2026/06/12" "medium"
+seed_work_item "faq-content" 90 "FAQ セクションのコンテンツ作成" "sato@example.com" "todo" "unstarted" "2026/06/15" "low"
+seed_work_item "landing-release" 100 "ランディングページの公開" "suzuki@example.com" "todo" "unstarted" "2026/06/16" "high"
 
 if ! aws_local dynamodb describe-table --table-name "$PROJECT_DIRECTORY_TABLE" >/dev/null 2>&1; then
   aws_local dynamodb create-table \

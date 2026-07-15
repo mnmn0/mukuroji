@@ -28,6 +28,10 @@ export type SearchResultCollectionProps = {
    * Search resultを開くcallbackです。
    */
   onNavigate: (path: string) => void
+  /**
+   * Workflow status ID ごとの configuration 由来の表示名です。
+   */
+  statusLabels?: Readonly<Record<string, string>>
 }
 
 const entityLabelKeys: Record<SearchEntityType, MessageKey> = {
@@ -53,8 +57,10 @@ export function SearchResultCollection({
   locale,
   onNavigate,
   results,
+  statusLabels = {},
 }: SearchResultCollectionProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const formatStatus = (status: string) => formatSearchStatus(status, statusLabels, t)
   const mode = getSearchLayoutMode(layout)
   const sortedResults = useMemo(
     () => sortWorkspaceSearchResults(results, layout),
@@ -62,27 +68,29 @@ export function SearchResultCollection({
   )
 
   if (mode === 'board') {
-    return <SearchBoard layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchBoard formatStatus={formatStatus} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
   if (mode === 'calendar') {
-    return <SearchCalendar locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchCalendar formatStatus={formatStatus} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
   if (mode === 'timeline') {
-    return <SearchTimeline locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchTimeline formatStatus={formatStatus} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
-  return <SearchTable layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+  return <SearchTable formatStatus={formatStatus} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
 }
 
 function SearchTable({
+  formatStatus,
   layout,
   locale,
   onNavigate,
   results,
   t,
 }: {
+  formatStatus: (status: string) => string
   layout: SearchViewLayout
   locale: Locale
   onNavigate: (path: string) => void
@@ -129,7 +137,7 @@ function SearchTable({
                   </td>
                   {columns.map((column) => (
                     <td className="px-4 py-4 text-sm font-medium text-[var(--workbench-muted)]" key={column}>
-                      {renderColumnValue(result, column, locale, t)}
+                      {renderColumnValue(result, column, locale, formatStatus, t)}
                     </td>
                   ))}
                 </tr>
@@ -143,12 +151,14 @@ function SearchTable({
 }
 
 function SearchBoard({
+  formatStatus,
   layout,
   locale,
   onNavigate,
   results,
   t,
 }: {
+  formatStatus: (status: string) => string
   layout: SearchViewLayout
   locale: Locale
   onNavigate: (path: string) => void
@@ -170,14 +180,14 @@ function SearchBoard({
               {groupBy === 'dueDate'
                 ? formatSearchDate(group.label, locale)
                 : groupBy === 'status'
-                  ? formatSearchStatus(group.label, t)
+                  ? formatStatus(group.label)
                   : group.label}
             </h2>
             <span className="workbench-badge">{group.results.length}</span>
           </header>
           <div className="grid gap-2 p-3">
             {group.results.map((result) => (
-              <SearchResultCard key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
+              <SearchResultCard formatStatus={formatStatus} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
             ))}
           </div>
         </article>
@@ -187,11 +197,13 @@ function SearchBoard({
 }
 
 function SearchCalendar({
+  formatStatus,
   locale,
   onNavigate,
   results,
   t,
 }: {
+  formatStatus: (status: string) => string
   locale: Locale
   onNavigate: (path: string) => void
   results: WorkspaceSearchResult[]
@@ -211,7 +223,7 @@ function SearchCalendar({
           </h2>
           <div className="mt-3 grid gap-2">
             {group.results.map((result) => (
-              <SearchResultCard compact key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
+              <SearchResultCard compact formatStatus={formatStatus} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
             ))}
           </div>
         </article>
@@ -221,11 +233,13 @@ function SearchCalendar({
 }
 
 function SearchTimeline({
+  formatStatus,
   locale,
   onNavigate,
   results,
   t,
 }: {
+  formatStatus: (status: string) => string
   locale: Locale
   onNavigate: (path: string) => void
   results: WorkspaceSearchResult[]
@@ -263,7 +277,7 @@ function SearchTimeline({
                 ) : null}
               </span>
               <span className="workbench-badge max-[680px]:col-start-2">
-                {result.status ? formatSearchStatus(result.status, t) : t(entityLabelKeys[result.entityType])}
+                {result.status ? formatStatus(result.status) : t(entityLabelKeys[result.entityType])}
               </span>
             </button>
           )
@@ -275,12 +289,14 @@ function SearchTimeline({
 
 function SearchResultCard({
   compact = false,
+  formatStatus,
   locale,
   onNavigate,
   result,
   t,
 }: {
   compact?: boolean
+  formatStatus: (status: string) => string
   locale: Locale
   onNavigate: (path: string) => void
   result: WorkspaceSearchResult
@@ -308,7 +324,7 @@ function SearchResultCard({
       ) : null}
       {result.status || result.dueDate ? (
         <span className="mt-3 flex flex-wrap gap-2">
-          {result.status ? <span className="workbench-badge">{formatSearchStatus(result.status, t)}</span> : null}
+          {result.status ? <span className="workbench-badge">{formatStatus(result.status)}</span> : null}
           {result.dueDate ? (
             <span className="text-xs font-semibold text-[var(--workbench-muted)]">
               {formatSearchDate(result.dueDate, locale)}
@@ -386,6 +402,7 @@ function renderColumnValue(
   result: WorkspaceSearchResult,
   column: string,
   locale: Locale,
+  formatStatus: (status: string) => string,
   t: (key: MessageKey) => string,
 ) {
   if (column === 'type') {
@@ -394,7 +411,7 @@ function renderColumnValue(
 
   if (column === 'status') {
     return result.status
-      ? <span className="workbench-badge">{formatSearchStatus(result.status, t)}</span>
+      ? <span className="workbench-badge">{formatStatus(result.status)}</span>
       : '—'
   }
 
@@ -440,7 +457,15 @@ function formatSearchDate(value: string, locale: Locale) {
   }).format(date)
 }
 
-function formatSearchStatus(status: string, t: (key: MessageKey) => string) {
+function formatSearchStatus(
+  status: string,
+  statusLabels: Readonly<Record<string, string>>,
+  t: (key: MessageKey) => string,
+) {
+  const configuredLabel = statusLabels[status]
+  if (configuredLabel) {
+    return configuredLabel
+  }
   const key = statusLabelKeys[status]
   return key ? t(key) : status
 }

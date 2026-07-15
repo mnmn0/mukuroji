@@ -39,7 +39,7 @@ export type IssueCollaborationPanelProps = {
    */
   artifacts?: FileArtifactsController
   /**
-   * legacy Work Item などで comment が使えない理由です。
+   * 権限不足などで comment が使えない理由です。
    */
   readOnlyMessage?: string
   /**
