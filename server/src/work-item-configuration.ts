@@ -26,8 +26,9 @@ import {
   type WorkItemRelationMutationResponse,
   type WorkItemRelationsResponse,
   type WorkItemRelationType,
-  type WorkItemStatus,
 } from '@mukuroji/contracts'
+
+export { isCanonicalWorkItemRelationIds } from './canonical-work-item'
 
 const CONFIGURATION_RECORD_KEY = 'CONFIG'
 const CONFIGURATION_WRITE_LOCK_RECORD_KEY = 'CONFIG_WRITE_LOCK'
@@ -35,6 +36,7 @@ const CONFIGURATION_WRITE_LOCK_LEASE_SECONDS = 15 * 60
 const RELATION_GRAPH_RECORD_KEY = 'RELATION_GRAPH'
 const RELATION_RECORD_PREFIX = 'REL#'
 const RELATION_SCAN_LIMIT = 2_000
+const WORK_ITEM_RELATION_ID_LIMIT = 100
 const MAX_CUSTOM_FIELD_TEXT_LENGTH = 10_000
 const MAX_FORMULA_EXPRESSION_LENGTH = 1_024
 const CONFIGURATION_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/i
@@ -62,8 +64,8 @@ export type WorkItemConfigurationGuard = {
   revision: number
 }
 
-/** Configuration lock 取得後に実行する互換性検査です。 */
-export type WorkItemConfigurationCompatibilityCheck = () => Promise<void>
+/** Configuration lock 取得後に実行する既存 Work Item の参照整合性検査です。 */
+export type WorkItemConfigurationUsageCheck = () => Promise<void>
 
 /** Custom field value の正規化条件です。 */
 export type NormalizeCustomFieldValuesOptions = {
@@ -81,8 +83,6 @@ export type ResolvedWorkflowStatus = {
   workflowStatusId: string
   /** 横断集計に使う標準 category です。 */
   statusCategory: WorkflowStatusCategory
-  /** Canonical v1 client と互換の status です。 */
-  status: WorkItemStatus
 }
 
 /** Relation mutation の入力です。 */
@@ -115,14 +115,14 @@ export type WorkItemConfigurationClient = {
   saveWorkspaceConfiguration(
     workspaceId: string,
     configuration: WorkItemConfiguration,
-    compatibilityCheck: WorkItemConfigurationCompatibilityCheck,
+    usageCheck: WorkItemConfigurationUsageCheck,
   ): Promise<ResolvedWorkItemConfiguration>
   /** Team override を optimistic revision 付きで保存します。 */
   saveTeamConfiguration(
     workspaceId: string,
     teamId: string,
     configuration: WorkItemConfiguration,
-    compatibilityCheck: WorkItemConfigurationCompatibilityCheck,
+    usageCheck: WorkItemConfigurationUsageCheck,
   ): Promise<ResolvedWorkItemConfiguration>
   /** Work Item から見た relation と graph revision を返します。 */
   listRelations(
@@ -163,31 +163,6 @@ export const DEFAULT_WORK_ITEM_CONFIGURATION: WorkItemConfiguration = {
     transitions: createAllDefaultTransitions(['todo', 'in-progress', 'review', 'done']),
   },
   customFields: [],
-}
-
-/** Legacy status に対応する標準 category を返します。 */
-export function statusCategoryForLegacyStatus(status: WorkItemStatus): WorkflowStatusCategory {
-  if (status === 'todo') {
-    return 'unstarted'
-  }
-  if (status === 'done') {
-    return 'completed'
-  }
-  return 'started'
-}
-
-/** Workflow status をcanonical v1互換statusへ変換します。 */
-export function legacyStatusForWorkflowStatus(status: WorkflowStatusDefinition): WorkItemStatus {
-  if (status.id === 'review') {
-    return 'review'
-  }
-  if (status.category === 'completed' || status.category === 'canceled') {
-    return 'done'
-  }
-  if (status.category === 'started') {
-    return 'in-progress'
-  }
-  return 'todo'
 }
 
 /** Workspace / Team scope の configuration table key を生成します。 */
@@ -386,21 +361,16 @@ export function normalizeCustomFieldValues(
   return values
 }
 
-/** Requested / legacy / initial の順で workflow status を解決します。 */
+/** Requested status、未指定時は initial status を解決します。 */
 export function resolveWorkflowStatus(
   configuration: WorkItemConfiguration,
   requestedStatusId?: unknown,
-  legacyStatus?: WorkItemStatus,
 ): ResolvedWorkflowStatus {
   const statuses = configuration.workflow.statuses
   const requested = typeof requestedStatusId === 'string'
     ? statuses.find((status) => status.id === requestedStatusId.trim())
     : undefined
-  const legacy = legacyStatus
-    ? statuses.find((status) => status.id === legacyStatus) ??
-      statuses.find((status) => status.category === statusCategoryForLegacyStatus(legacyStatus))
-    : undefined
-  const status = requested ?? legacy ?? statuses.find(
+  const status = requested ?? statuses.find(
     (candidate) => candidate.id === configuration.workflow.initialStatusId,
   )
   if (!status) {
@@ -416,7 +386,6 @@ export function resolveWorkflowStatus(
   return {
     workflowStatusId: status.id,
     statusCategory: status.category,
-    status: legacyStatusForWorkflowStatus(status),
   }
 }
 
@@ -465,7 +434,6 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   constructor(
     tableName =
       process.env.WORK_ITEM_CONFIGURATION_TABLE_NAME ??
-      process.env.MUKUROJI_WORK_ITEM_CONFIGURATION_TABLE ??
       'mukuroji-work-item-configuration-local',
     workItemsTableName =
       process.env.WORK_ITEMS_TABLE_NAME ??
@@ -520,14 +488,14 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   async saveWorkspaceConfiguration(
     workspaceId: string,
     configuration: WorkItemConfiguration,
-    compatibilityCheck: WorkItemConfigurationCompatibilityCheck,
+    usageCheck: WorkItemConfigurationUsageCheck,
   ) {
     const saved = await this.saveConfiguration(
       workspaceId,
       'workspace',
       workspaceId,
       configuration,
-      compatibilityCheck,
+      usageCheck,
     )
     return { configuration: saved } satisfies ResolvedWorkItemConfiguration
   }
@@ -537,14 +505,14 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     workspaceId: string,
     teamId: string,
     configuration: WorkItemConfiguration,
-    compatibilityCheck: WorkItemConfigurationCompatibilityCheck,
+    usageCheck: WorkItemConfigurationUsageCheck,
   ) {
     const saved = await this.saveConfiguration(
       workspaceId,
       'team',
       teamId,
       configuration,
-      compatibilityCheck,
+      usageCheck,
     )
     return { configuration: saved } satisfies ResolvedWorkItemConfiguration
   }
@@ -599,6 +567,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       createdAt,
     }
     const nextRevision = snapshot.revision + 1
+    const nextRelations = [...snapshot.relations, relation, reciprocalRelation]
 
     await this.sendRelationTransaction(
       workspaceId,
@@ -611,6 +580,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       normalized,
       relation,
       reciprocalRelation,
+      createWorkItemRelationIds(nextRelations, normalized.sourceWorkItemId),
+      createWorkItemRelationIds(nextRelations, normalized.targetWorkItemId),
       'create',
     )
     return { relation, reciprocalRelation, graphRevision: nextRevision }
@@ -640,6 +611,13 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       throw new WorkItemConfigurationError(503, 'WorkItemRelationInconsistent', 'The reciprocal relation is missing.')
     }
     const nextRevision = snapshot.revision + 1
+    const removedRecordKeys = new Set([
+      createRelationRecordKey(relation),
+      createRelationRecordKey(reciprocalRelation),
+    ])
+    const nextRelations = snapshot.relations.filter((candidate) =>
+      !removedRecordKeys.has(createRelationRecordKey(candidate))
+    )
     await this.sendRelationTransaction(
       workspaceId,
       teamId,
@@ -651,6 +629,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       normalized,
       relation,
       reciprocalRelation,
+      createWorkItemRelationIds(nextRelations, normalized.sourceWorkItemId),
+      createWorkItemRelationIds(nextRelations, normalized.targetWorkItemId),
       'delete',
     )
     return { relation, reciprocalRelation, graphRevision: nextRevision }
@@ -686,7 +666,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     scopeType: WorkItemConfigurationScopeType,
     scopeId: string,
     configuration: WorkItemConfiguration,
-    compatibilityCheck: WorkItemConfigurationCompatibilityCheck,
+    usageCheck: WorkItemConfigurationUsageCheck,
   ) {
     await this.ensureTable()
     const validated = validateWorkItemConfiguration(configuration, { scopeType, scopeId })
@@ -708,7 +688,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       }
     }
     try {
-      await compatibilityCheck()
+      await usageCheck()
     } catch (error) {
       await releaseLock()
       throw error
@@ -887,6 +867,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     input: MutateWorkItemRelationInput,
     relation: WorkItemRelation,
     reciprocalRelation: WorkItemRelation,
+    sourceRelationIds: readonly string[],
+    targetRelationIds: readonly string[],
     operation: 'create' | 'delete',
   ) {
     const scopeKey = createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId)
@@ -924,22 +906,24 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
           {
-            ConditionCheck: {
+            Update: {
               TableName: this.workItemsTableName,
               Key: { directoryTeamId: workItemPartitionKey, issueId: input.sourceWorkItemId },
-              ...createRelationEndpointCondition(
+              ...createRelationEndpointProjectionUpdate(
                 input.sourceExpectedRevision,
                 input.sourceAssignedProjectId,
+                sourceRelationIds,
               ),
             },
           },
           {
-            ConditionCheck: {
+            Update: {
               TableName: this.workItemsTableName,
               Key: { directoryTeamId: workItemPartitionKey, issueId: input.targetWorkItemId },
-              ...createRelationEndpointCondition(
+              ...createRelationEndpointProjectionUpdate(
                 input.targetExpectedRevision,
                 input.targetAssignedProjectId,
+                targetRelationIds,
               ),
             },
           },
@@ -1707,8 +1691,13 @@ function normalizeRelationInput(
   }
 }
 
-function createRelationEndpointCondition(revision: number, assignedProjectId?: string) {
+function createRelationEndpointProjectionUpdate(
+  revision: number,
+  assignedProjectId: string | undefined,
+  relationIds: readonly string[],
+) {
   return {
+    UpdateExpression: 'SET #relationIds = :relationIds',
     ConditionExpression:
       'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #revision = :revision AND ' +
       (assignedProjectId === undefined
@@ -1716,13 +1705,36 @@ function createRelationEndpointCondition(revision: number, assignedProjectId?: s
         : '#assignedProjectId = :assignedProjectId'),
     ExpressionAttributeNames: {
       '#assignedProjectId': 'assignedProjectId',
+      '#relationIds': 'relationIds',
       '#revision': 'revision',
     },
     ExpressionAttributeValues: {
+      ':relationIds': [...relationIds],
       ':revision': revision,
       ...(assignedProjectId === undefined ? {} : { ':assignedProjectId': assignedProjectId }),
     },
   }
+}
+
+/** Relation graph から Work Item row/search 用の決定的な relation ID 一覧を作成します。 */
+export function createWorkItemRelationIds(
+  relations: readonly WorkItemRelation[],
+  sourceWorkItemId: string,
+) {
+  const relationIds = relations
+    .filter((relation) => relation.sourceWorkItemId === sourceWorkItemId)
+    .map((relation) => `${relation.type}:${relation.targetWorkItemId}`)
+  if (new Set(relationIds).size !== relationIds.length) {
+    throw storedRelationInvalid()
+  }
+  if (relationIds.length > WORK_ITEM_RELATION_ID_LIMIT) {
+    throw new WorkItemConfigurationError(
+      413,
+      'WorkItemRelationEndpointLimitExceeded',
+      `A Work Item cannot exceed ${WORK_ITEM_RELATION_ID_LIMIT} relations.`,
+    )
+  }
+  return relationIds.sort()
 }
 
 function relationEndpointMatchesSnapshot(

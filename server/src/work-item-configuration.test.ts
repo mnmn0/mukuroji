@@ -9,14 +9,14 @@ import {
   assertWorkflowTransitionAllowed,
   createWorkItemConfigurationScopeKey,
   createWorkItemConfigurationGuardConditionChecks,
-  legacyStatusForWorkflowStatus,
+  createWorkItemRelationIds,
+  isCanonicalWorkItemRelationIds,
   normalizeCustomFieldValues,
   resolveWorkflowStatus,
-  statusCategoryForLegacyStatus,
   validateWorkItemConfiguration,
 } from './work-item-configuration'
 
-test('validates the built-in workflow and preserves legacy status semantics', () => {
+test('validates the built-in workflow and resolves configured statuses', () => {
   const configuration = validateWorkItemConfiguration(DEFAULT_WORK_ITEM_CONFIGURATION)
 
   expect(configuration.workflow.statuses.map((status) => status.id)).toEqual([
@@ -25,12 +25,9 @@ test('validates the built-in workflow and preserves legacy status semantics', ()
     'review',
     'done',
   ])
-  expect(statusCategoryForLegacyStatus('review')).toBe('started')
-  expect(legacyStatusForWorkflowStatus(configuration.workflow.statuses[2]!)).toBe('review')
   expect(resolveWorkflowStatus(configuration, 'done')).toEqual({
     workflowStatusId: 'done',
     statusCategory: 'completed',
-    status: 'done',
   })
 })
 
@@ -537,7 +534,7 @@ test('preserves infrastructure failures from configuration transactions', async 
   })
 })
 
-test('releases the configuration write lock when compatibility validation fails', async () => {
+test('releases the configuration write lock when usage validation fails', async () => {
   const sentCommands: string[] = []
   const documentClient = {
     async send(command: { constructor: { name: string } }) {
@@ -558,20 +555,20 @@ test('releases the configuration write lock when compatibility validation fails'
     async () => {
       throw new WorkItemConfigurationError(
         409,
-        'WorkItemConfigurationMigrationRequired',
-        'Migration is required.',
+        'WorkItemConfigurationInUse',
+        'Configuration is in use.',
       )
     },
   )).rejects.toMatchObject({
-    code: 'WorkItemConfigurationMigrationRequired',
+    code: 'WorkItemConfigurationInUse',
     status: 409,
   })
   expect(sentCommands).toEqual(['PutCommand', 'DeleteCommand'])
 })
 
-test('preserves unexpected compatibility validation failures after releasing the lock', async () => {
+test('preserves unexpected usage validation failures after releasing the lock', async () => {
   const sentCommands: string[] = []
-  const compatibilityError = new Error('Compatibility validation failed unexpectedly.')
+  const usageError = new Error('Usage validation failed unexpectedly.')
   const documentClient = {
     async send(command: { constructor: { name: string } }) {
       sentCommands.push(command.constructor.name)
@@ -591,14 +588,14 @@ test('preserves unexpected compatibility validation failures after releasing the
       'workspace-1',
       createConfiguration({ scopeId: 'workspace-1' }),
       async () => {
-        throw compatibilityError
+        throw usageError
       },
     )
   } catch (error) {
     caughtError = error
   }
 
-  expect(caughtError).toBe(compatibilityError)
+  expect(caughtError).toBe(usageError)
   expect(sentCommands).toEqual(['PutCommand', 'DeleteCommand'])
 })
 
@@ -637,18 +634,32 @@ test('creates reciprocal relation edges with endpoint and graph guards in one tr
     reciprocalRelation: { type: 'child' },
   })
   expect(transactItems).toHaveLength(5)
-  expect(transactItems.filter((item) => 'ConditionCheck' in item)).toHaveLength(2)
+  expect(transactItems.filter((item) => 'Update' in item)).toHaveLength(2)
   expect(transactItems.filter((item) => 'Put' in item)).toHaveLength(3)
-  expect(transactItems.filter((item) => 'ConditionCheck' in item)).toEqual(
+  expect(transactItems.filter((item) => 'Update' in item)).toEqual(
     expect.arrayContaining([
       expect.objectContaining({
-        ConditionCheck: expect.objectContaining({
+        Update: expect.objectContaining({
           ConditionExpression: expect.stringContaining('#revision = :revision'),
-          ExpressionAttributeValues: expect.objectContaining({ ':revision': 1 }),
+          UpdateExpression: 'SET #relationIds = :relationIds',
+          ExpressionAttributeValues: expect.objectContaining({
+            ':relationIds': ['parent:child'],
+            ':revision': 1,
+          }),
+        }),
+      }),
+      expect.objectContaining({
+        Update: expect.objectContaining({
+          UpdateExpression: 'SET #relationIds = :relationIds',
+          ExpressionAttributeValues: expect.objectContaining({
+            ':relationIds': ['child:parent'],
+            ':revision': 1,
+          }),
         }),
       }),
     ]),
   )
+  expect(JSON.stringify(transactItems.filter((item) => 'Update' in item))).not.toContain('updatedAt')
   expect(transactItems).toContainEqual(expect.objectContaining({
     Put: expect.objectContaining({
       Item: expect.objectContaining({
@@ -658,6 +669,105 @@ test('creates reciprocal relation edges with endpoint and graph guards in one tr
       }),
     }),
   }))
+})
+
+test('derives complete sorted relation projections for create and delete transactions', async () => {
+  const sentTransactions: Array<Record<string, unknown>> = []
+  let relations = [
+    relationItem('source', 'existing-z', 'related'),
+    relationItem('existing-z', 'source', 'related'),
+    relationItem('source', 'target', 'blocks'),
+    relationItem('target', 'source', 'blockedBy'),
+    relationItem('target', 'existing-a', 'parent'),
+    relationItem('existing-a', 'target', 'child'),
+  ]
+  let graphRevision = 1
+  const documentClient = {
+    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+      if (command.constructor.name === 'GetCommand') {
+        return {
+          Item: {
+            entryType: 'relation-graph',
+            schemaVersion: 1,
+            revision: graphRevision,
+          },
+        }
+      }
+      if (command.constructor.name === 'QueryCommand') {
+        return { Items: relations }
+      }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        sentTransactions.push(command.input)
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+  )
+
+  await client.createRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'source',
+    targetWorkItemId: 'new-target',
+    type: 'parent',
+    expectedGraphRevision: 1,
+    sourceExpectedRevision: 7,
+    targetExpectedRevision: 2,
+  })
+  relations = [
+    ...relations,
+    relationItem('source', 'new-target', 'parent'),
+    relationItem('new-target', 'source', 'child'),
+  ]
+  graphRevision = 2
+  await client.deleteRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'source',
+    targetWorkItemId: 'target',
+    type: 'blocks',
+    expectedGraphRevision: 2,
+    sourceExpectedRevision: 7,
+    targetExpectedRevision: 2,
+  })
+
+  const createTransaction = sentTransactions[0]
+  const deleteTransaction = sentTransactions[1]
+  if (!createTransaction || !deleteTransaction) {
+    throw new Error('Expected create and delete relation transactions.')
+  }
+  const createUpdates = (createTransaction.TransactItems as Array<{
+    Update?: { ExpressionAttributeValues?: Record<string, unknown> }
+  }>).flatMap((item) => item.Update ? [item.Update] : [])
+  const deleteUpdates = (deleteTransaction.TransactItems as Array<{
+    Update?: { ExpressionAttributeValues?: Record<string, unknown> }
+  }>).flatMap((item) => item.Update ? [item.Update] : [])
+  expect(createUpdates.map((update) => update.ExpressionAttributeValues?.[':relationIds']))
+    .toEqual([
+      ['blocks:target', 'parent:new-target', 'related:existing-z'],
+      ['child:source'],
+    ])
+  expect(deleteUpdates.map((update) => update.ExpressionAttributeValues?.[':relationIds']))
+    .toEqual([
+      ['parent:new-target', 'related:existing-z'],
+      ['parent:existing-a'],
+    ])
+})
+
+test('validates canonical derived relation IDs as bounded unique sorted keys', () => {
+  expect(createWorkItemRelationIds([
+    { sourceWorkItemId: 'source', targetWorkItemId: 'z', type: 'related' },
+    { sourceWorkItemId: 'source', targetWorkItemId: 'a', type: 'blocks' },
+  ], 'source')).toEqual(['blocks:a', 'related:z'])
+  expect(isCanonicalWorkItemRelationIds(['blocks:a', 'related:z'])).toBe(true)
+  expect(isCanonicalWorkItemRelationIds(['related:z', 'blocks:a'])).toBe(false)
+  expect(isCanonicalWorkItemRelationIds(['blocks:a', 'blocks:a'])).toBe(false)
+  expect(isCanonicalWorkItemRelationIds(['unknown:a'])).toBe(false)
+  expect(isCanonicalWorkItemRelationIds(Array.from(
+    { length: 101 },
+    (_, index) => `related:item-${String(index).padStart(3, '0')}`,
+  ))).toBe(false)
 })
 
 test('rejects relation creation before reciprocal rows exceed the graph limit', async () => {

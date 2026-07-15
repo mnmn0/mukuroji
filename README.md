@@ -134,7 +134,7 @@ API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/tea
 `/api/notifications` で DynamoDB を読みます。ローカルでは Vite proxy により、
 Web から `/api` を呼ぶだけで Floci 上の DynamoDB データを取得できます。
 
-Task / Issue の canonical schema、optimistic concurrency、legacy read compatibility、state migration / rollback は
+Task / Issue の strict canonical schema、dynamic workflow、optimistic concurrency、Issue #20 の legacy read-only adapter は
 [`docs/work-items.md`](docs/work-items.md) を参照してください。
 
 append-only event schema、activity/audit API、retention/redaction、consumer dedupe、backfill の契約は
@@ -232,9 +232,9 @@ VITE_TASKS_API_BASE_URL=<ProjectTasksApiUrl>
 VITE_WORKSPACE_API_BASE_URL=<ProjectTasksApiUrl>
 ```
 
-fresh deploy、既存 stack upgrade、bootstrap 検証、migration、rollback、PITR recovery の手順は [cdk/README.md](./cdk/README.md) を参照してください。
+fresh deploy、既存 stack upgrade、bootstrap 検証、rollback、PITR recovery の手順は [cdk/README.md](./cdk/README.md) を参照してください。
 
-`ProjectTasksTableName` は rollback window 中に保持する legacy read-only table です。旧 row を直接確認する場合だけ次を利用します。
+`ProjectTasksTableName` は Issue #20 の legacy read-only adapter が参照する table です。旧 row を直接確認する場合だけ次を利用します。
 
 ```sh
 TASKS_TABLE_NAME=<ProjectTasksTableName> bun run tasks:check-dynamodb
@@ -266,7 +266,7 @@ CDK stack の demo seed は `WorkItemsTableName` が指す canonical store へ `
 WORK_ITEMS_TABLE_NAME=<WorkItemsTableName> bun run work-items:seed-dynamodb
 ```
 
-既存 legacy row は `work-items:migrate` の dry-run / apply / verify で非破壊移行します。ローカル互換 endpoint を使う場合は `AWS_ENDPOINT_URL` を指定できます。
+Canonical Work Item は現行 workflow schema の必須 field をすべて持つ row だけを読みます。開発中の古い row は自動変換せず、削除して現行 seed または API から作り直します。
 
 ## 検証
 

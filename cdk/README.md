@@ -214,42 +214,33 @@ bootstrap update は同じ key・同じ owner なら再実行できます。既�
 
 大量 data の migration を shell の `scan | put-item` で即時実行しないでください。pagination、retry、conditional write、件数/内容照合を備えた一時 migration job として review・dry run してから実行します。
 
-## Canonical Work Item cutover
+## Canonical Work Item deploy
 
-Project task / Team Issue の state migration は Workspace partition migration と分けて実行します。CDK は既存 `TeamIssuesTable` construct と key schema を維持し、`WorkItemsTableName` という canonical alias を追加します。`ProjectTasksTable` は Retain/PITR のまま残しますが、API Lambda には read permission だけを付与します。
+CDK は既存 `TeamIssuesTable` construct と key schema を維持し、`WorkItemsTableName` という canonical alias を公開します。`ProjectTasksTable` は Issue #20 の read-only adapter 用に Retain/PITR のまま残しますが、API Lambda には read permission だけを付与します。
 
-安全な順序:
+Demo seed の custom resource は canonical `WorkItemsTable` だけに `creatorMemberKey`、`workflowSchemaVersion`、`workflowStatusId`、`statusCategory`、`customFieldValues`、空の `relationIds` を含む strict row を作成します。既存 row の upcast や legacy task からの copy は行いません。
 
-1. `ProjectTasksTable`, `WorkItemsTable`, `ProjectDirectoryTable` の table 名・件数・PITR を記録し、on-demand backup を取得する。
-2. write freeze を設定し、`cdk diff` で table replacement/deletion がなく、legacy task table の write IAM が削除されることを確認する。
-3. この revision を deploy する。
-4. `docs/work-items.md` の `work-items:migrate -- --dry-run` を実行する。複数 Team に属する project は `--project-team` で owner を明示する。
-5. checkpoint 付き apply と `--verify` を完了する。
-6. Team/project/Workspace list、detail update、stale revision の `409 WorkItemRevisionConflict` を Function URL と API Gateway の両方で確認して write を再開する。
+Deploy 時は `cdk diff` で table replacement/deletion がなく、legacy task table の write IAM が付与されていないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を Function URL と API Gateway の両方で確認します。Strict schema を満たさない開発用 row は削除し、現行 seed または API から作り直します。
 
-Demo seed の custom resource は旧 `SeedProjectTasks` の論理 ID を維持します。fresh stack の create では canonical `WorkItemsTable` だけに seed し、既存 stack の update では `onUpdate` を持たないため seed transaction を再実行しません。同じ論理 ID のまま旧 revision に戻すため、rollback 時にも legacy seed custom resource が新規作成されることはありません。既存 stack の canonical data は上記 migration で投入します。
+## Work Item configuration
 
-Rollback window 中はどちらの table も削除しません。rollback は直前 revision を同じ parameter で deploy し、旧 handler が同じ `TeamIssuesTable` の追加属性を無視して読めることを確認します。Migrated row の一括削除は migration 後の正規 write を失うため禁止します。
+`WorkItemConfigurationTable` は `scopeKey` / `recordKey` を primary key とし、Workspace default、Team override、relation graph metadata を同じ scope partition に保存します。API Lambda には `WORK_ITEM_CONFIGURATION_TABLE_NAME` を設定し、この table への read/write と `TransactWriteItems` だけを stack resource に限定して許可します。Realtime Lambda と projection Lambda は configuration を直接変更しないため、この table の権限を付与しません。
 
-## Work Item configuration cutover
+CDK は configuration row を強制 seed しません。row が無い Workspace / Team は runtime の built-in default と Workspace 継承を通常仕様として利用します。
 
-`WorkItemConfigurationTable` は `scopeKey` / `recordKey` を primary key とし、Workspace default、Team override、relation graph metadata を同じ scope partition に保存します。API Lambda には `WORK_ITEM_CONFIGURATION_TABLE_NAME` と互換名 `MUKUROJI_WORK_ITEM_CONFIGURATION_TABLE` を設定し、この table への read/write と `TransactWriteItems` だけを stack resource に限定して許可します。Realtime Lambda と projection Lambda は configuration を直接変更しないため、この table の権限を付与しません。
+運用時は次を確認します。
 
-CDK は configuration row を強制 seed しません。row が無い Workspace / Team は runtime の built-in default と Workspace 継承を利用します。既存 Work Item row の additive metadata は application deploy 後、[work-item-configuration.md](../docs/work-item-configuration.md) の手順で dry-run、apply、verify の順に補完します。
+1. `WorkItemConfigurationTableName` output と Lambda の `WORK_ITEM_CONFIGURATION_TABLE_NAME` が同じ table を指すこと。
+2. Table が `Retain`、PITR、`expiresAtEpochSeconds` TTL を維持していること。
+3. API role の read/write/transaction resource に configuration table が含まれ、Realtime / projection role には不要な権限がないこと。
+4. Workspace default 未登録、Workspace default、Team override の各 API read が期待した継承元を返すこと。
+5. Configuration revision CAS と relation graph revision CAS が stale mutation を拒否すること。
 
-Upgrade 前後では次を確認します。
-
-1. `cdk diff` で既存 table の replacement/deletion が無く、`WorkItemConfigurationTable` の追加だけであることを確認する。
-2. deploy 後に `WorkItemConfigurationTableName` output と Lambda の両 environment variable が同じ table を指すことを確認する。
-3. API role の read/write/transaction resource に configuration table が含まれ、legacy `ProjectTasksTable` の write 権限が増えていないことを確認する。
-4. `WORK_ITEMS_TABLE_NAME` を canonical table output に設定し、configuration metadata migration を実行する。
-5. Workspace default 未登録、Workspace default、Team override の各 API read と、relation transaction の graph revision conflict を確認する。
-
-Table は `Retain` + PITR のため code rollback で削除しません。旧 code は configuration table を参照せず、Work Item の additive metadata も無視できます。rollback 時は write を停止し、現行 template の configuration table・environment・IAM resource を残したまま旧 application artifact へ戻します。Table 追加前の CDK template をそのまま deploy すると、物理 table は `Retain` されても stack から detach されるため禁止します。誤って detach した場合は original table を resource import で再接続し、同じ table を Lambda environment が参照していることを確認してから roll-forward します。Configuration row や補完済み Work Item metadataは一括削除しません。
+高リスクな definition 変更の前には table 名、configuration revision、item count を記録し、必要に応じて on-demand backup を取得します。誤削除・破損時は下記の PITR recovery に従い、復元結果を確認する前に元 table や relation row を削除しません。
 
 ## Rollback
 
-code / infrastructure rollback は、原則として直前に成功した revision を同じ 5 parameters で deploy します。ただし現行 stack にしか存在しない retained resource を旧 template から削除してはならず、Work Item configuration cutover 後は上記の code-only rollback または resource を残す rollback template を使います。DynamoDB table は `Retain` で、PITR も有効ですが、stack から外れた resource は自動で再接続されません。Cognito custom schema は rollback しても残ります。
+code / infrastructure rollback は、原則として直前に成功した revision を同じ 5 parameters で deploy します。現行 stack に存在する retained resource を rollback template から削除しないでください。DynamoDB table は `Retain` で、PITR も有効ですが、stack から外れた resource は自動で再接続されません。Cognito custom schema は rollback しても残ります。
 
 Workspace migration の切替後に戻す場合:
 

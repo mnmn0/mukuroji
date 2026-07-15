@@ -29,8 +29,6 @@
     "issues:check-dynamodb": "bash scripts/check-team-issues-dynamodb.sh",
     "audit:backfill": "bun --filter server audit:backfill",
     "search:backfill": "bun --filter server search:backfill",
-    "work-items:migrate": "bun --filter server work-items:migrate",
-    "work-item-configuration:migrate": "bun --filter server work-item-configuration:migrate",
     "cdk:build": "bun --filter cdk build",
     "cdk:test": "bun --filter cdk test",
     "cdk:synth": "bun --filter cdk cdk synth"

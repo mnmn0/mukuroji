@@ -18,9 +18,6 @@ import {
   type TableDescription,
 } from '@aws-sdk/client-dynamodb'
 import {
-  BatchGetCommand,
-  type BatchGetCommandInput,
-  type BatchGetCommandOutput,
   DynamoDBDocumentClient,
   DeleteCommand,
   GetCommand,
@@ -34,12 +31,11 @@ import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   type ApprovalSummary,
+  type CanonicalWorkItem,
   type CreateSavedWorkspaceViewInput,
   type CustomFieldValue,
   type ResolvedWorkItemConfiguration,
-  type SearchCustomFieldValue,
   type UpdateSavedWorkspaceViewInput,
-  type WorkItem,
   type WorkItemConfiguration,
   type WorkItemPriority,
   type WorkItemRelation,
@@ -69,6 +65,7 @@ import {
   type MutationAuditContext,
   type MutationAuditEventInput,
 } from './audit'
+import { isCanonicalWorkItemRecord } from './canonical-work-item'
 import {
   DynamoDbWorkspaceAccessClient,
   WorkspaceAccessError,
@@ -107,6 +104,8 @@ import {
   type FileProofingActor,
   type FileProofingClient,
   type FileProofingScope,
+  type FileApprovalCompletionTransition,
+  type FileApprovalCompletionTransitionResolver,
   type ListReviewerApprovalsOptions,
   type ReviewerApprovalPage,
 } from './file-proofing'
@@ -137,9 +136,9 @@ import {
   WorkItemConfigurationError,
   assertWorkflowTransitionAllowed,
   createWorkItemConfigurationGuardConditionChecks,
+  createWorkItemRelationIds,
   normalizeCustomFieldValues,
   resolveWorkflowStatus,
-  statusCategoryForLegacyStatus,
   validateWorkItemConfiguration,
   type MutateWorkItemRelationInput,
   type WorkItemConfigurationClient,
@@ -813,22 +812,8 @@ type ProjectTaskItem = {
  * プロジェクト画面のテーブルへ表示するタスク行です。
  */
 type ProjectTaskResponseItem = {
-  /** canonical Work Item contract の schema version です。 */
-  schemaVersion?: typeof WORK_ITEM_SCHEMA_VERSION
-  /** canonical Work Item の optimistic concurrency revision です。 */
-  revision?: number
-  /** canonical Work Item を所有する Team ID です。 */
-  teamId?: string
-  /** canonical table または legacy adapter の保存元です。 */
-  source?: 'dynamodb' | 'legacy'
-  /** Workflow / custom-field 拡張値の schema version です。 */
-  workflowSchemaVersion?: typeof WORK_ITEM_CONFIGURATION_SCHEMA_VERSION
-  /** 設定済み workflow 内の status ID です。 */
-  workflowStatusId?: string
-  /** 横断集計に使う workflow status category です。 */
-  statusCategory?: WorkflowStatusCategory
-  /** Custom field ID ごとの型付き値です。 */
-  customFieldValues?: Record<string, CustomFieldValue>
+  /** 旧 Project task table を保存元とすることを表します。 */
+  source: 'legacy'
   /**
    * React の key として使う task ID です。
    */
@@ -841,10 +826,6 @@ type ProjectTaskResponseItem = {
    * API から返す literal のタスク名です。
    */
   title?: string
-  /**
-   * canonical Work Item の詳細説明です。
-   */
-  description?: string
   /**
    * 担当者名を解決する i18n key です。
    */
@@ -877,14 +858,6 @@ type ProjectTaskResponseItem = {
    * 優先度です。
    */
   priority: ProjectTaskPriority
-  /**
-   * canonical Work Item の作成日時です。
-   */
-  createdAt?: string
-  /**
-   * canonical Work Item の最終更新日時です。
-   */
-  updatedAt?: string
 }
 
 /**
@@ -921,7 +894,7 @@ type TeamIssueItem = {
   /**
    * Workflow / custom-field 拡張値の schema version です。
    */
-  workflowSchemaVersion?: typeof WORK_ITEM_CONFIGURATION_SCHEMA_VERSION
+  workflowSchemaVersion: typeof WORK_ITEM_CONFIGURATION_SCHEMA_VERSION
   /**
    * ユーザーごとの directory partition key です。
    */
@@ -953,11 +926,7 @@ type TeamIssueItem = {
   /**
    * Issue タイトルです。
    */
-  title?: string
-  /**
-   * legacy seed のタイトルを解決する表示文言 key です。
-   */
-  titleKey?: string
+  title: string
   /**
    * Issue 詳細説明です。
    */
@@ -967,21 +936,23 @@ type TeamIssueItem = {
    */
   assigneeUserId: string
   /**
-   * Issue 作成者の Workspace member key です。旧 row では未設定です。
+   * Issue 作成者の Workspace member key です。
    */
-  creatorMemberKey?: string
-  /** Search/filter へ投影する custom field values です。 */
-  customFields?: Record<string, SearchCustomFieldValue>
-  /** Search/filter へ投影する relation IDs です。 */
-  relationIds?: string[]
+  creatorMemberKey: string
+  /** Relation Graph から同期する search/backfill 用の派生 relation ID 一覧です。 */
+  relationIds: string[]
   /**
-   * legacy project task migration の安定した source key です。
+   * 設定済み workflow 内の status ID です。
    */
-  migrationSourceKey?: string
+  workflowStatusId: string
   /**
-   * Issue 状態です。
+   * 横断集計に使う workflow status category です。
    */
-  status: ProjectTaskStatus
+  statusCategory: WorkflowStatusCategory
+  /**
+   * Custom field ID ごとの型付き値です。
+   */
+  customFieldValues: Record<string, CustomFieldValue>
   /**
    * 期限日として表示する文字列です。
    */
@@ -990,18 +961,6 @@ type TeamIssueItem = {
    * 優先度です。
    */
   priority: ProjectTaskPriority
-  /**
-   * 設定済み workflow 内の status ID です。
-   */
-  workflowStatusId?: string
-  /**
-   * 横断集計に使う workflow status category です。
-   */
-  statusCategory?: WorkflowStatusCategory
-  /**
-   * Custom field ID ごとの型付き値です。
-   */
-  customFieldValues?: Record<string, CustomFieldValue>
   /**
    * 作成日時の ISO 8601 timestamp です。
    */
@@ -1061,7 +1020,7 @@ type TeamIssueEventItem = {
 /**
  * チーム Issue 一覧と詳細で表示する Issue 行です。
  */
-type TeamIssueResponseItem = WorkItem & {
+type TeamIssueResponseItem = CanonicalWorkItem & {
   /**
    * チーム内の Issue ID です。
    */
@@ -1075,61 +1034,9 @@ type TeamIssueResponseItem = WorkItem & {
    */
   assignedProjectId?: string
   /**
-   * seed 由来の legacy task タイトル i18n key です。
+   * Issue 作成者の Workspace member key です。
    */
-  titleKey?: string
-  /**
-   * Issue タイトルです。
-   */
-  title?: string
-  /**
-   * Issue 詳細説明です。
-   */
-  description?: string
-  /**
-   * Cognito user を参照する担当者 ID です。
-   */
-  assigneeUserId?: string
-  /**
-   * Issue 作成者の Workspace member key です。旧 row では未設定です。
-   */
-  creatorMemberKey?: string
-  /** Search/filter へ投影する custom field values です。 */
-  customFields?: Record<string, SearchCustomFieldValue>
-  /** Search/filter へ投影する relation IDs です。 */
-  relationIds?: string[]
-  /**
-   * Cognito から解決した担当者メールアドレスです。
-   */
-  assigneeEmail?: string
-  /**
-   * Cognito から解決した担当者表示名です。
-   */
-  assigneeName?: string
-  /**
-   * Issue 状態です。
-   */
-  status: ProjectTaskStatus
-  /**
-   * 期限日として表示する文字列です。
-   */
-  dueDate: string
-  /**
-   * 優先度です。
-   */
-  priority: ProjectTaskPriority
-  /**
-   * 作成日時の ISO 8601 timestamp です。
-   */
-  createdAt: string
-  /**
-   * 更新日時の ISO 8601 timestamp です。
-   */
-  updatedAt: string
-  /**
-   * Issue の保存元です。legacy は旧 project task table 由来の参照専用行です。
-   */
-  source: 'dynamodb' | 'legacy'
+  creatorMemberKey: string
 }
 
 /**
@@ -1137,7 +1044,7 @@ type TeamIssueResponseItem = WorkItem & {
  */
 type WorkItemsResponse = {
   /**
-   * 現在ユーザーが参照できる canonical/legacy Work Item 一覧です。
+   * 現在ユーザーが参照できる canonical Work Item 一覧です。
    */
   workItems: TeamIssueResponseItem[]
 }
@@ -1150,18 +1057,6 @@ type WorkItemListReadOptions = {
   consistentRead?: boolean
 }
 
-/** Team 一覧を legacy compatibility と統合するときの読み込み量を制御します。 */
-type TeamIssueListReadOptions = {
-  /** 各 DynamoDB partition で評価する最大 item 数です。 */
-  scanLimit?: number
-  /** Aggregate API が legacy read を許可した project ID です。 */
-  legacyProjectIds?: ReadonlySet<string>
-  /** canonical migration が取り込み済みの legacy source key です。 */
-  migrationSourceKeys?: ReadonlySet<string>
-  /** Detail fallback が必要とする legacy Issue ID です。 */
-  legacyIssueId?: string
-}
-
 /**
  * `/api/work-items` は既存の `{ workItems }` 契約を維持するため cursor を追加せず、
  * pagination 契約を導入するまで hard cap 超過を 413 で fail-closed にします。
@@ -1170,18 +1065,10 @@ type TeamIssueListReadOptions = {
 const WORK_ITEMS_RESPONSE_LIMIT = 200
 /** `/api/work-items` が一度に読む Team partition の最大数です。 */
 const WORK_ITEMS_TEAM_READ_LIMIT = 20
-/** `/api/work-items` が legacy compatibility のために読む project の最大数です。 */
-const WORK_ITEMS_LEGACY_PROJECT_READ_LIMIT = 100
 /** `/api/work-items` が 1 partition で filter/dedupe 前に評価する最大 item 数です。 */
 const WORK_ITEMS_PARTITION_SCAN_LIMIT = 1_000
 /** Relation target の強整合 detail read を同時実行する最大数です。 */
 const WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY = 8
-/** DynamoDB BatchGetItem の 1 request あたりの最大 key 数です。 */
-const DYNAMODB_BATCH_GET_KEY_LIMIT = 100
-/** UnprocessedKeys を同じ bounded read 内で再試行する最大回数です。 */
-const DYNAMODB_BATCH_GET_ATTEMPT_LIMIT = 3
-/** DynamoDB BatchGetItem retry の指数バックオフ基準時間です。 */
-const DYNAMODB_BATCH_GET_RETRY_BASE_DELAY_MS = 25
 
 /**
  * チーム Issue コメントレスポンスです。
@@ -1245,24 +1132,6 @@ type TeamIssuesResponse = {
   issues: TeamIssueResponseItem[]
 }
 
-/** Aggregate Work Item read 専用の canonical Team partition 取得結果です。 */
-type AggregateTeamIssuesRead = {
-  /** 取得対象の Team ID です。 */
-  teamId: string
-  /** 公開 API と同じ canonical Work Item 表現です。 */
-  issues: TeamIssueResponseItem[]
-  /** legacy projection の抑止にだけ使う migration source key です。 */
-  migrationSourceKeys: string[]
-}
-
-/** BatchGet で migration source を確認する Team / Issue key です。 */
-type TeamIssueMigrationLookupKey = {
-  /** Canonical Work Item を所有する Team ID です。 */
-  teamId: string
-  /** Canonical Work Item の Issue ID です。 */
-  issueId: string
-}
-
 /**
  * プロジェクトにアサインされた Issue 一覧 API が返す response body です。
  */
@@ -1324,10 +1193,6 @@ type CreateTeamIssueRequestBody = {
    */
   assigneeUserId?: unknown
   /**
-   * Issue 状態です。
-   */
-  status?: unknown
-  /**
    * 期限日として保存する文字列です。
    */
   dueDate?: unknown
@@ -1375,10 +1240,6 @@ type UpdateTeamIssueRequestBody = {
    * Cognito user を参照する担当者 ID です。
    */
   assigneeUserId?: unknown
-  /**
-   * Issue 状態です。
-   */
-  status?: unknown
   /**
    * 期限日として保存する文字列です。
    */
@@ -1513,70 +1374,6 @@ type CreateTeamIssueCommentResponse = {
    * コメント追加に対応する活動履歴です。
    */
   activity: TeamIssueActivityResponseItem
-}
-
-/**
- * プロジェクトタスク作成 API が受け取る request body です。
- */
-type CreateProjectTaskRequestBody = {
-  /**
-   * ユーザーが入力したタスク名です。
-   */
-  title?: unknown
-  /**
-   * Cognito user を参照する担当者 ID です。
-   */
-  assigneeUserId?: unknown
-  /**
-   * ユーザーが入力した担当者名です。旧 client 互換で利用します。
-   */
-  assignee?: unknown
-  /**
-   * タスク状態です。
-   */
-  status?: unknown
-  /**
-   * 期限日として保存する文字列です。
-   */
-  dueDate?: unknown
-  /**
-   * 優先度です。
-   */
-  priority?: unknown
-}
-
-/**
- * プロジェクトタスク作成 API が返す response body です。
- */
-type CreateProjectTaskResponse = {
-  /**
-   * 作成したタスク行です。
-   */
-  task: ProjectTaskResponseItem
-}
-
-/**
- * プロジェクトタスク状態更新 API が受け取る request body です。
- */
-type UpdateProjectTaskStatusRequestBody = {
-  /**
-   * 更新後のタスク状態です。
-   */
-  status?: unknown
-  /**
-   * canonical Work Item adapter が使う読み込み時点の revision です。
-   */
-  expectedRevision?: unknown
-}
-
-/**
- * プロジェクトタスク状態更新 API が返す response body です。
- */
-type UpdateProjectTaskStatusResponse = {
-  /**
-   * 更新したタスク行です。
-   */
-  task: ProjectTaskResponseItem
 }
 
 /**
@@ -2060,25 +1857,6 @@ type ProjectTasksClient = {
     projectId: string,
     options?: WorkItemListReadOptions,
   ): Promise<ProjectTasksResponse>
-  /**
-   * legacy mutation 呼び出しを read-only error として拒否します。
-   */
-  createProjectTask(
-    directoryId: string,
-    projectId: string,
-    input: CreateProjectTaskRequestBody,
-    auditContext?: MutationAuditContext,
-  ): Promise<CreateProjectTaskResponse>
-  /**
-   * legacy mutation 呼び出しを read-only error として拒否します。
-   */
-  updateProjectTaskStatus(
-    directoryId: string,
-    projectId: string,
-    taskId: string,
-    input: UpdateProjectTaskStatusRequestBody,
-    auditContext?: MutationAuditContext,
-  ): Promise<UpdateProjectTaskStatusResponse>
 }
 
 /**
@@ -2093,21 +1871,6 @@ type TeamIssuesClient = {
     teamId: string,
     options?: WorkItemListReadOptions,
   ): Promise<TeamIssuesResponse>
-  /**
-   * Aggregate API 用に canonical Issue と非公開 migration metadata を取得します。
-   */
-  getTeamIssuesForAggregate(
-    directoryId: string,
-    teamId: string,
-    options?: WorkItemListReadOptions,
-  ): Promise<AggregateTeamIssuesRead>
-  /**
-   * Team / Issue base key 候補を一括取得し、stable migration source key を返します。
-   */
-  getTeamIssueMigrationSourceKeys(
-    directoryId: string,
-    keys: readonly TeamIssueMigrationLookupKey[],
-  ): Promise<ReadonlySet<string>>
   /**
    * DynamoDB から指定 project ID にアサインされた Issue 一覧を取得します。
    */
@@ -2133,7 +1896,6 @@ type TeamIssuesClient = {
     teamId: string,
     input: CreateTeamIssueRequestBody,
     actorUserId: string,
-    reservedIssueIds?: string[],
     auditContext?: MutationAuditContext,
   ): Promise<CreateTeamIssueResponse>
   /**
@@ -3285,7 +3047,7 @@ app.put('/api/work-item-configuration', async (c) => {
       configuration,
       async () => {
         await validateWorkItemConfigurationReferences(principal.directoryId, configuration)
-        await validateWorkItemConfigurationCompatibility(principal.directoryId, configuration)
+        await validateWorkItemConfigurationUsage(principal.directoryId, configuration)
       },
     ))
   } catch (error) {
@@ -3344,7 +3106,7 @@ app.put('/api/teams/:teamId/work-item-configuration', async (c) => {
           configuration,
           teamId,
         )
-        await validateWorkItemConfigurationCompatibility(
+        await validateWorkItemConfigurationUsage(
           principal.directoryId,
           configuration,
           teamId,
@@ -3382,7 +3144,7 @@ app.post('/api/teams/:teamId/issues/:issueId/relations', async (c) => {
       'Relation graph revision',
     )
     const endpoints = await authorizeRelationMutation(principal, teamId, issueId, targetWorkItemId)
-    return c.json(await workItemConfigurations.createRelation(
+    const response = await workItemConfigurations.createRelation(
       principal.directoryId,
       teamId,
       {
@@ -3395,7 +3157,22 @@ app.post('/api/teams/:teamId/issues/:issueId/relations', async (c) => {
         sourceAssignedProjectId: endpoints.source.assignedProjectId,
         targetAssignedProjectId: endpoints.target.assignedProjectId,
       },
-    ), 201)
+    )
+    await Promise.all([
+      refreshWorkItemSearchDocumentBestEffort(
+        principal.directoryId,
+        teamId,
+        issueId,
+        'Work Item relation creation',
+      ),
+      refreshWorkItemSearchDocumentBestEffort(
+        principal.directoryId,
+        teamId,
+        targetWorkItemId,
+        'Work Item reciprocal relation creation',
+      ),
+    ])
+    return c.json(response, 201)
   } catch (error) {
     return toWorkItemConfigurationErrorResponse(c, error)
   }
@@ -3424,7 +3201,7 @@ app.delete('/api/teams/:teamId/issues/:issueId/relations/:targetWorkItemId/:rela
       'Relation graph revision',
     )
     const endpoints = await authorizeRelationMutation(principal, teamId, issueId, targetWorkItemId)
-    return c.json(await workItemConfigurations.deleteRelation(
+    const response = await workItemConfigurations.deleteRelation(
       principal.directoryId,
       teamId,
       {
@@ -3437,13 +3214,28 @@ app.delete('/api/teams/:teamId/issues/:issueId/relations/:targetWorkItemId/:rela
         sourceAssignedProjectId: endpoints.source.assignedProjectId,
         targetAssignedProjectId: endpoints.target.assignedProjectId,
       },
-    ))
+    )
+    await Promise.all([
+      refreshWorkItemSearchDocumentBestEffort(
+        principal.directoryId,
+        teamId,
+        issueId,
+        'Work Item relation deletion',
+      ),
+      refreshWorkItemSearchDocumentBestEffort(
+        principal.directoryId,
+        teamId,
+        targetWorkItemId,
+        'Work Item reciprocal relation deletion',
+      ),
+    ])
+    return c.json(response)
   } catch (error) {
     return toWorkItemConfigurationErrorResponse(c, error)
   }
 })
 
-/** 現在ユーザーが参照できる canonical/legacy Work Item を Workspace 横断で返します。 */
+/** 現在ユーザーが参照できる canonical Work Item を Workspace 横断で返します。 */
 app.get('/api/work-items', async (c) => {
   const accessToken = readBearerAccessToken(c)
 
@@ -3591,9 +3383,7 @@ app.delete('/api/saved-views/:viewId', async (c) => {
   }
 })
 
-/**
- * canonical Work Item と legacy project task を統合したプロジェクト別一覧を返します。
- */
+/** Issue #20 の legacy project task を read-only で返します。 */
 app.get('/api/projects/:projectId/tasks', async (c) => {
   const accessToken = readBearerAccessToken(c)
   const projectId = c.req.param('projectId')
@@ -3611,10 +3401,14 @@ app.get('/api/projects/:projectId/tasks', async (c) => {
     await requireProjectPermission(principal, projectId, 'viewer')
 
     return c.json(await hydrateProjectTasksResponse(
-      await readProjectTasks(principal.directoryId, projectId),
+      await projectTasks.getProjectTasks(principal.directoryId, projectId),
     ))
   } catch (error) {
-    return toWorkItemConfigurationErrorResponse(c, error)
+    if (error instanceof CognitoServiceError) {
+      return toCognitoDirectoryErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
   }
 })
 
@@ -3859,8 +3653,6 @@ app.post('/api/teams/:teamId/issues', async (c) => {
     )
     const assigneeUserId = readTeamIssueAssigneeUserId(configuredBody)
     await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
-    const reservedIssueIds = await readLegacyTeamIssueIds(principal.directoryId, context)
-
     const response = await hydrateCreateTeamIssueResponse(
       await teamIssues.createTeamIssue(
         principal.directoryId,
@@ -3870,13 +3662,14 @@ app.post('/api/teams/:teamId/issues', async (c) => {
           assigneeUserId,
         },
         principal.userKey,
-        reservedIssueIds,
         createApiMutationContext(c, principal, { teamId, ...configuredBody }),
       ),
     )
-    await projectWorkspaceSearchDocumentBestEffort(
-      () => createWorkItemSearchDocument(principal.directoryId, response.issue),
+    await projectWorkItemSearchDocumentBestEffort(
+      principal.directoryId,
+      response.issue,
       'Work Item creation',
+      [],
     )
     return c.json(response, 201)
   } catch (error) {
@@ -3903,39 +3696,18 @@ app.get('/api/teams/:teamId/issues/:issueId/activity', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     const context = await requireTeamPermission(principal, teamId, 'viewer')
-    let entityId = createTeamIssueAuditEntityId(teamId, issueId)
-
-    try {
-      const detail = await teamIssues.getTeamIssueDetail(
-        principal.directoryId,
-        teamId,
-        issueId,
-        { consistentIssueRead: true },
-      )
-      requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
-    } catch (error) {
-      if (!isTeamIssueNotFoundError(error)) {
-        throw error
-      }
-
-      const legacyIssue = await readLegacyTeamIssue(
-        principal.directoryId,
-        context,
-        principal,
-        issueId,
-      )
-
-      if (!legacyIssue?.assignedProjectId) {
-        throw error
-      }
-
-      entityId = createProjectTaskAuditEntityId(legacyIssue.assignedProjectId, issueId)
-    }
+    const detail = await teamIssues.getTeamIssueDetail(
+      principal.directoryId,
+      teamId,
+      issueId,
+      { consistentIssueRead: true },
+    )
+    requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
 
     const page = await auditEvents.query(
       readAuditEventQuery(c, principal.directoryId, {
         type: 'work-item',
-        id: entityId,
+        id: createTeamIssueAuditEntityId(teamId, issueId),
       }),
     )
 
@@ -3973,78 +3745,50 @@ app.get('/api/teams/:teamId/issues/:issueId', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     const context = await requireTeamPermission(principal, teamId, 'viewer')
 
-    try {
-      const detail = await teamIssues.getTeamIssueDetail(
+    const detail = await teamIssues.getTeamIssueDetail(
+      principal.directoryId,
+      teamId,
+      issueId,
+      { consistentIssueRead: true },
+    )
+    requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
+    const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId)
+    const projectEntityKey = detail.issue.assignedProjectId
+      ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
+      : undefined
+    const [collaborationPreview, resolvedConfiguration, relationPage] = await Promise.all([
+      collaboration.getThread({
+        entityKey,
+        viewerMemberKey: principal.userKey,
+        projectEntityKey,
+        limit: 50,
+        includeScopeState: false,
+      }),
+      workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId),
+      workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
+    ])
+    const visibleRelations = await filterVisibleWorkItemRelations(
+      principal,
+      context,
+      teamId,
+      relationPage.relations,
+    )
+
+    return c.json(
+      await hydrateTeamIssueDetailResponse(
+        {
+          ...detail,
+          comments: mergeLegacyCompatibleComments(
+            detail.comments,
+            collaborationPreview.comments,
+          ),
+          resolvedConfiguration,
+          relations: visibleRelations,
+          relationGraphRevision: relationPage.graphRevision,
+        },
         principal.directoryId,
-        teamId,
-        issueId,
-        { consistentIssueRead: true },
-      )
-      requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
-      const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId)
-      const projectEntityKey = detail.issue.assignedProjectId
-        ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
-        : undefined
-      const [collaborationPreview, resolvedConfiguration, relationPage] = await Promise.all([
-        collaboration.getThread({
-          entityKey,
-          viewerMemberKey: principal.userKey,
-          projectEntityKey,
-          limit: 50,
-          includeScopeState: false,
-        }),
-        workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId),
-        workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
-      ])
-      const visibleRelations = await filterVisibleWorkItemRelations(
-        principal,
-        context,
-        teamId,
-        relationPage.relations,
-      )
-
-      return c.json(
-        await hydrateTeamIssueDetailResponse(
-          {
-            ...detail,
-            comments: mergeLegacyCompatibleComments(
-              detail.comments,
-              collaborationPreview.comments,
-            ),
-            resolvedConfiguration,
-            relations: visibleRelations,
-            relationGraphRevision: relationPage.graphRevision,
-          },
-          principal.directoryId,
-        ),
-      )
-    } catch (error) {
-      if (isTeamIssueNotFoundError(error)) {
-        const legacyIssue = await readLegacyTeamIssue(principal.directoryId, context, principal, issueId)
-
-        if (legacyIssue) {
-          const resolvedConfiguration = await workItemConfigurations.getTeamConfiguration(
-            principal.directoryId,
-            teamId,
-          )
-          return c.json(
-            await hydrateTeamIssueDetailResponse(
-              {
-                issue: legacyIssue,
-                comments: [],
-                activity: [],
-                resolvedConfiguration,
-                relations: [],
-                relationGraphRevision: 0,
-              },
-              principal.directoryId,
-            ),
-          )
-        }
-      }
-
-      throw error
-    }
+      ),
+    )
   } catch (error) {
     return toWorkItemConfigurationErrorResponse(c, error)
   }
@@ -4075,31 +3819,12 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
       context.team,
     )
     const expectedRevision = readWorkItemExpectedRevision(body.expectedRevision)
-    let detail: TeamIssueDetailResponse
-
-    try {
-      detail = await teamIssues.getTeamIssueDetail(
-        principal.directoryId,
-        teamId,
-        issueId,
-        { consistentIssueRead: true, eventLimit: 0 },
-      )
-    } catch (error) {
-      if (isTeamIssueNotFoundError(error)) {
-        const legacyIssue = await readLegacyTeamIssue(
-          principal.directoryId,
-          context,
-          principal,
-          issueId,
-        )
-
-        if (legacyIssue) {
-          throw createLegacyProjectTaskReadOnlyError()
-        }
-      }
-
-      throw error
-    }
+    const detail = await teamIssues.getTeamIssueDetail(
+      principal.directoryId,
+      teamId,
+      issueId,
+      { consistentIssueRead: true, eventLimit: 0 },
+    )
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'member')
     requireAssignedProjectPermission(
       principal,
@@ -4142,8 +3867,9 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
         }),
       ),
     )
-    await projectWorkspaceSearchDocumentBestEffort(
-      () => createWorkItemSearchDocument(principal.directoryId, response.issue),
+    await projectWorkItemSearchDocumentBestEffort(
+      principal.directoryId,
+      response.issue,
       'Work Item update',
     )
     return c.json(response)
@@ -4378,7 +4104,7 @@ app.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       workspaceId: principal.directoryId,
       teamId,
       issueId,
-      workItemTitle: detail.issue.title ?? detail.issue.titleKey ?? issueId,
+      workItemTitle: detail.issue.title,
       entityKey,
       projectId: detail.issue.assignedProjectId,
       projectEntityKey,
@@ -4458,7 +4184,7 @@ app.patch('/api/teams/:teamId/issues/:issueId/comments/:commentId', async (c) =>
       workspaceId: principal.directoryId,
       teamId,
       issueId,
-      workItemTitle: detail.issue.title ?? detail.issue.titleKey ?? issueId,
+      workItemTitle: detail.issue.title,
       entityKey,
       projectId: detail.issue.assignedProjectId,
       projectEntityKey,
@@ -5086,11 +4812,12 @@ app.post('/api/teams/:teamId/issues/:issueId/approvals', async (c) => {
 
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken)
-    const { scope, actor } = await loadFileProofingRequestContext(
+    const { scope, actor, workItem } = await loadFileProofingRequestContext(
       c,
       principal,
       'work-item',
     )
+    const canonicalWorkItem = requireCanonicalFileProofingWorkItem(workItem)
     if (!actor.canWrite || actor.guest) {
       throw new FileProofingError(403, 'FileWriteDenied', 'File write access is required.')
     }
@@ -5174,10 +4901,17 @@ app.post('/api/teams/:teamId/issues/:issueId/approvals', async (c) => {
         )
       }
     }
+    if (body.completionTransition !== undefined) {
+      await resolveFileApprovalCompletionTransition(
+        principal.directoryId,
+        scope.teamId,
+        canonicalWorkItem,
+        body.completionTransition,
+      )
+    }
     const input = {
       ...body,
       reviewerMemberKeys,
-      completionTransition: body.completionTransition ?? 'done',
     } satisfies CreateFileApprovalInput
     return c.json({
       approval: await fileProofing.createApproval(
@@ -5201,22 +4935,44 @@ app.post('/api/teams/:teamId/issues/:issueId/approvals/:approvalId/decisions', a
 
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken)
-    const { scope, actor, workItemRevision } = await loadFileProofingRequestContext(
+    const { scope, actor, workItem } = await loadFileProofingRequestContext(
       c,
       principal,
       'work-item',
     )
+    const canonicalWorkItem = requireCanonicalFileProofingWorkItem(workItem)
     const body = await readFileProofingJson<CreateFileApprovalDecisionInput>(c.req)
-    const input = { ...body, workItemRevision } satisfies CreateFileApprovalDecisionInput
-    return c.json({
-      approval: await fileProofing.decideApproval(
-        scope,
-        actor,
-        readRequiredRouteId(c.req.param('approvalId'), 'Approval ID'),
-        input,
-        createApiMutationContext(c, principal, input),
-      ),
-    })
+    const input = { ...body } satisfies CreateFileApprovalDecisionInput
+    let resolvedCompletionTransition: FileApprovalCompletionTransition | undefined
+    const resolveCompletionTransition: FileApprovalCompletionTransitionResolver = async (
+      completionTransition,
+    ) => {
+      const resolved = await resolveFileApprovalCompletionTransitionForDecision(
+        principal.directoryId,
+        scope.teamId,
+        canonicalWorkItem,
+        completionTransition,
+      )
+      resolvedCompletionTransition = resolved
+      return resolved
+    }
+    const approval = await fileProofing.decideApproval(
+      scope,
+      actor,
+      readRequiredRouteId(c.req.param('approvalId'), 'Approval ID'),
+      input,
+      createApiMutationContext(c, principal, input),
+      resolveCompletionTransition,
+    )
+    if (approval.status === 'approved' && resolvedCompletionTransition) {
+      await refreshWorkItemSearchDocumentBestEffort(
+        principal.directoryId,
+        scope.teamId,
+        canonicalWorkItem.id,
+        'approval completion transition',
+      )
+    }
+    return c.json({ approval })
   } catch (error) {
     return toFileProofingErrorResponse(c, error)
   }
@@ -5370,163 +5126,6 @@ app.get('/api/projects/:projectId/issues', async (c) => {
     }
 
     return toProjectDataErrorResponse(c, error)
-  }
-})
-
-/**
- * 旧 project task 作成契約を canonical Work Item 作成へ変換する compatibility endpoint です。
- */
-app.post('/api/projects/:projectId/tasks', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  const projectId = c.req.param('projectId')
-
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  if (!projectId) {
-    return c.json({ message: 'Project ID is required.' }, 400)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken)
-    requireWorkspaceBusinessWrite(principal)
-    await requireProjectPermission(principal, projectId, 'member')
-    const context = await requireUniqueProjectOwnerContext(principal, projectId, 'member')
-    const body = await readJson<CreateProjectTaskRequestBody>(c.req)
-    const assigneeUserId = readTaskAssigneeUserId(body ?? {})
-    await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
-    const input: CreateTeamIssueRequestBody = {
-      title: readRequiredString(body?.title, 'Task title is required.'),
-      assignedProjectId: projectId,
-      assigneeUserId,
-      ...(body?.status === undefined
-        ? {}
-        : { status: readRequiredTaskStatus(body.status) }),
-      dueDate: readRequiredString(body?.dueDate, 'Task due date is required.'),
-      priority: readTaskPriority(body?.priority),
-    }
-    const resolvedConfiguration = await workItemConfigurations.getTeamConfiguration(
-      principal.directoryId,
-      context.team.id,
-    )
-    const configuredInput = await prepareConfiguredCreateWorkItem(
-      principal.directoryId,
-      context.team.id,
-      input,
-      resolvedConfiguration,
-    )
-    const reservedIssueIds = await readLegacyTeamIssueIds(principal.directoryId, context)
-    const response = await teamIssues.createTeamIssue(
-      principal.directoryId,
-      context.team.id,
-      configuredInput,
-      principal.userKey,
-      reservedIssueIds,
-      createApiMutationContext(c, principal, {
-        teamId: context.team.id,
-        projectId,
-        ...configuredInput,
-      }),
-    )
-    const hydrated = await hydrateCreateTeamIssueResponse(response)
-    await projectWorkspaceSearchDocumentBestEffort(
-      () => createWorkItemSearchDocument(principal.directoryId, hydrated.issue),
-      'project task compatibility creation',
-    )
-
-    return c.json(
-      { task: toProjectTaskFromTeamIssue(hydrated.issue) } satisfies CreateProjectTaskResponse,
-      201,
-    )
-  } catch (error) {
-    return toWorkItemConfigurationErrorResponse(c, error)
-  }
-})
-
-/**
- * canonical Work Item の状態だけを更新し、legacy project task は read-only とする endpoint です。
- */
-app.patch('/api/projects/:projectId/tasks/:taskId', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  const projectId = c.req.param('projectId')
-  const taskId = c.req.param('taskId')
-
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  if (!projectId) {
-    return c.json({ message: 'Project ID is required.' }, 400)
-  }
-
-  if (!taskId) {
-    return c.json({ message: 'Task ID is required.' }, 400)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken)
-    requireWorkspaceBusinessWrite(principal)
-    await requireProjectPermission(principal, projectId, 'member')
-
-    const body = await readJson<UpdateProjectTaskStatusRequestBody>(c.req)
-    const status = readRequiredTaskStatus(body?.status)
-    const expectedRevision = readWorkItemExpectedRevision(body?.expectedRevision)
-    const canonicalIssues = (await teamIssues.getProjectIssues(
-      principal.directoryId,
-      projectId,
-    )).issues.filter((issue) => issue.id === taskId)
-
-    if (canonicalIssues.length > 1) {
-      throw new ProjectDataError(
-        409,
-        'AmbiguousProjectWorkItem',
-        'More than one canonical Work Item matches this project task ID.',
-      )
-    }
-
-    const canonicalIssue = canonicalIssues[0]
-    if (!canonicalIssue) {
-      if (await isLegacyProjectTaskIssue(principal.directoryId, projectId, taskId)) {
-        throw createLegacyProjectTaskReadOnlyError()
-      }
-
-      throw new ProjectDataError(404, 'ProjectTaskNotFound', 'Task was not found.')
-    }
-    const resolvedConfiguration = await workItemConfigurations.getTeamConfiguration(
-      principal.directoryId,
-      canonicalIssue.teamId,
-    )
-    const configuredInput = await prepareConfiguredUpdateWorkItem(
-      principal.directoryId,
-      canonicalIssue.teamId,
-      canonicalIssue,
-      { status, expectedRevision },
-      resolvedConfiguration,
-    )
-    const response = await teamIssues.updateTeamIssue(
-      principal.directoryId,
-      canonicalIssue.teamId,
-      taskId,
-      configuredInput,
-      principal.userKey,
-      createApiMutationContext(c, principal, {
-        teamId: canonicalIssue.teamId,
-        projectId,
-        taskId,
-        ...configuredInput,
-      }),
-    )
-    const hydrated = await hydrateUpdateTeamIssueResponse(response)
-    await projectWorkspaceSearchDocumentBestEffort(
-      () => createWorkItemSearchDocument(principal.directoryId, hydrated.issue),
-      'project task compatibility update',
-    )
-    return c.json(
-      { task: toProjectTaskFromTeamIssue(hydrated.issue) } satisfies UpdateProjectTaskStatusResponse,
-    )
-  } catch (error) {
-    return toWorkItemConfigurationErrorResponse(c, error)
   }
 })
 
@@ -6266,9 +5865,18 @@ async function resolveCurrentWorkspaceSearchScope(
       ...(detail.issue.assignedProjectId ? { projectId: detail.issue.assignedProjectId } : {}),
     }
     if (document.entityType === 'work-item') {
+      const relationPage = await workItemConfigurations.listRelations(
+        workspaceId,
+        parsed.teamId,
+        parsed.issueId,
+      )
       return {
         ...scope,
-        currentDocument: createWorkItemSearchDocument(workspaceId, detail.issue),
+        currentDocument: createWorkItemSearchDocument(
+          workspaceId,
+          detail.issue,
+          createWorkItemRelationIds(relationPage.relations, parsed.issueId),
+        ),
       }
     }
     if (document.entityType !== 'comment') return scope
@@ -6682,13 +6290,15 @@ async function createNotificationVisibilityFilter(
           notification.teamId,
           notification.issueId,
           { consistentIssueRead: true, eventLimit: 0 },
-        ).then((detail) => ({
-          assigneeMemberKey: detail.issue.assigneeUserId.trim().toLowerCase(),
-          exists: true,
-          ...(detail.issue.assignedProjectId
-            ? { projectId: detail.issue.assignedProjectId }
-            : {}),
-        })).catch((error: unknown) => {
+        ).then((detail) => {
+          return {
+            assigneeMemberKey: detail.issue.assigneeUserId.trim().toLowerCase(),
+            exists: true,
+            ...(detail.issue.assignedProjectId
+              ? { projectId: detail.issue.assignedProjectId }
+              : {}),
+          }
+        }).catch((error: unknown) => {
           if (isTeamIssueNotFoundError(error)) {
             return { exists: false }
           }
@@ -6749,10 +6359,6 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ code: error.code, message: error.message }, 413)
   }
 
-  if (error.code === 'TeamIssueMigrationLookupIncomplete') {
-    return c.json({ code: error.code, message: error.message }, 503)
-  }
-
   if (error.code === 'InvalidProjectWrite' ||
     error.code === 'InvalidWorkItemConfiguration' ||
     error.code === 'InvalidCustomFieldValue' ||
@@ -6793,13 +6399,6 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({
       code: error.code,
       message: 'Work Item configuration changed. Reload and try again.',
-    }, 409)
-  }
-
-  if (error.code === 'LegacyProjectTaskReadOnly') {
-    return c.json({
-      code: error.code,
-      message: 'Legacy project tasks are read-only.',
     }, 409)
   }
 
@@ -6934,58 +6533,6 @@ async function requireTeamPermission(
   )
 }
 
-/**
- * 旧 project task 作成を Team-owned Work Item へ変換できる一意な owner Team を解決します。
- */
-async function requireUniqueProjectOwnerContext(
-  principal: ProjectPrincipal,
-  projectId: string,
-  minimumRole: ProjectRole,
-): Promise<TeamPermissionContext> {
-  const directory = await projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
-  const ownerTeams = directory.teams.filter((team) =>
-    team.projects.some((project) => project.id === projectId)
-  )
-
-  if (ownerTeams.length === 0) {
-    throw new ProjectDataError(404, 'ProjectNotFound', `Project "${projectId}" was not found.`)
-  }
-
-  if (ownerTeams.length > 1) {
-    throw new ProjectDataError(
-      409,
-      'AmbiguousProjectOwnerTeam',
-      `Project "${projectId}" belongs to more than one active Team.`,
-    )
-  }
-
-  const team = ownerTeams[0]
-  if (!team) {
-    throw new ProjectDataError(404, 'ProjectNotFound', `Project "${projectId}" was not found.`)
-  }
-
-  if (principal.isSystemAdmin) {
-    return { team, directory }
-  }
-
-  const teamProjectIds = new Set(team.projects.map((project) => project.id))
-  const projectAccesses = (await projectDirectory.getProjectAccessList(
-    principal.directoryId,
-    principal.userKey,
-  )).filter((access) => teamProjectIds.has(access.projectId))
-  const targetAccess = projectAccesses.find((access) => access.projectId === projectId)
-
-  if (!targetAccess || !projectAccessAllows(targetAccess, minimumRole)) {
-    throw new ProjectDataError(
-      403,
-      'ProjectAccessDenied',
-      `User "${principal.userKey}" cannot access project "${projectId}".`,
-    )
-  }
-
-  return { team, directory, projectAccesses }
-}
-
 async function loadAuthorizedTeamIssue(
   principal: WorkspacePrincipal,
   teamId: string,
@@ -7020,7 +6567,7 @@ async function loadFileProofingRequestContext(
 ): Promise<{
   scope: FileProofingScope
   actor: FileProofingActor
-  workItemRevision?: number
+  workItem?: TeamIssueResponseItem
 }> {
   const teamId = readRequiredRouteId(c.req.param('teamId'), 'Team ID')
 
@@ -7048,7 +6595,7 @@ async function loadFileProofingRequestContext(
             detail.issue.assignedProjectId,
           ),
       },
-      workItemRevision: detail.issue.revision,
+      workItem: detail.issue,
     }
   }
 
@@ -7085,6 +6632,84 @@ async function loadFileProofingRequestContext(
       canWrite,
       canManage,
     },
+  }
+}
+
+/** File approval mutation が canonical Work Item だけを対象にすることを保証します。 */
+function requireCanonicalFileProofingWorkItem(
+  workItem: TeamIssueResponseItem | undefined,
+) {
+  if (!workItem) {
+    throw new FileProofingError(
+      404,
+      'WorkItemNotFound',
+      'Work Item was not found.',
+    )
+  }
+  return workItem
+}
+
+/** Approval の保存済み遷移先を現在の workflow と Work Item revision に固定します。 */
+async function resolveFileApprovalCompletionTransition(
+  directoryId: string,
+  teamId: string,
+  workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
+  completionTransition: string,
+) {
+  try {
+    const resolved = await workItemConfigurations.getTeamConfiguration(directoryId, teamId)
+    const currentStatus = resolveWorkflowStatus(
+      resolved.configuration,
+      workItem.workflowStatusId,
+    )
+    const nextStatus = resolveWorkflowStatus(resolved.configuration, completionTransition)
+    assertWorkflowTransitionAllowed(
+      resolved.configuration,
+      currentStatus.workflowStatusId,
+      nextStatus.workflowStatusId,
+    )
+    return {
+      workflowStatusId: nextStatus.workflowStatusId,
+      statusCategory: nextStatus.statusCategory,
+      workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+      expectedRevision: workItem.revision,
+      configurationConditionChecks: createWorkItemConfigurationGuardConditionChecks(
+        getWorkItemConfigurationTableName(),
+        directoryId,
+        teamId,
+        resolved,
+      ),
+    }
+  } catch (error) {
+    if (error instanceof WorkItemConfigurationError) {
+      throw new FileProofingError(error.status, error.code, error.message, { cause: error })
+    }
+    throw error
+  }
+}
+
+/** Approval 作成後に削除・無効化された遷移先を decision conflict として扱います。 */
+async function resolveFileApprovalCompletionTransitionForDecision(
+  directoryId: string,
+  teamId: string,
+  workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
+  completionTransition: string,
+) {
+  try {
+    return await resolveFileApprovalCompletionTransition(
+      directoryId,
+      teamId,
+      workItem,
+      completionTransition,
+    )
+  } catch (error) {
+    if (
+      error instanceof FileProofingError &&
+      (error.code === 'InvalidWorkflowStatus' || error.code === 'WorkflowTransitionDenied')
+    ) {
+      return undefined
+    }
+    throw error
   }
 }
 
@@ -7441,22 +7066,17 @@ async function hydrateProjectIssuesResponse(response: ProjectIssuesResponse) {
 async function hydrateWorkItemsResponse(response: WorkItemsResponse, directoryId: string) {
   const profiles = await readIssueAssigneeProfiles(response.workItems)
   const hydratedItems = response.workItems.map((workItem) => hydrateTeamIssue(workItem, profiles))
-  const scopes = hydratedItems.flatMap((workItem) => workItem.source === 'dynamodb'
-    ? [{
-        workspaceId: directoryId,
-        teamId: workItem.teamId,
-        kind: 'work-item' as const,
-        issueId: workItem.id,
-      }]
-    : [])
+  const scopes = hydratedItems.map((workItem) => ({
+    workspaceId: directoryId,
+    teamId: workItem.teamId,
+    kind: 'work-item' as const,
+    issueId: workItem.id,
+  }))
   const summaries = scopes.length > 0 &&
     (getEnv('FILE_PROOFING_TABLE_NAME') || getConfiguredDynamoDbEndpoint())
     ? await fileProofing.getApprovalSummaries(scopes)
     : new Map<string, ApprovalSummary>()
   const workItems = hydratedItems.map((workItem) => {
-    if (workItem.source !== 'dynamodb') {
-      return workItem
-    }
     const summary = summaries.get(createFileProofingScopeKey({
       workspaceId: directoryId,
       teamId: workItem.teamId,
@@ -7476,23 +7096,20 @@ async function hydrateWorkItemsResponse(response: WorkItemsResponse, directoryId
 function createWorkItemSearchDocument(
   workspaceId: string,
   issue: TeamIssueResponseItem,
+  relationIds: readonly string[],
 ) {
-  const configuredCustomFields = issue.customFieldValues !== undefined
-    ? issue.customFieldValues
-    : issue.customFields
-
   return createWorkItemWorkspaceSearchDocument({
     workspaceId,
     teamId: issue.teamId,
     issueId: issue.id,
-    title: issue.title ?? issue.titleKey ?? issue.id,
+    title: issue.title,
     ...(issue.description ? { body: issue.description } : {}),
     ...(issue.assignedProjectId ? { projectId: issue.assignedProjectId } : {}),
     ...(issue.assigneeUserId ? { assigneeUserId: issue.assigneeUserId } : {}),
     ...(issue.creatorMemberKey ? { creatorUserId: issue.creatorMemberKey } : {}),
-    status: issue.workflowStatusId ?? issue.status,
-    ...(configuredCustomFields ? { customFields: configuredCustomFields } : {}),
-    ...(issue.relationIds ? { relationIds: issue.relationIds } : {}),
+    status: issue.workflowStatusId,
+    customFields: issue.customFieldValues,
+    relationIds: [...relationIds],
     dueDate: issue.dueDate,
     createdAt: issue.createdAt,
     updatedAt: issue.updatedAt,
@@ -7561,6 +7178,53 @@ async function projectWorkspaceSearchDocumentBestEffort(
   }
 }
 
+/** Relation graph の現在値を含む Work Item search document を best effort で反映します。 */
+async function projectWorkItemSearchDocumentBestEffort(
+  workspaceId: string,
+  issue: TeamIssueResponseItem,
+  operation: string,
+  relationIds?: readonly string[],
+) {
+  if (!workspaceSearchProjectionEnabled) return
+  try {
+    const currentRelationIds = relationIds ?? createWorkItemRelationIds(
+      (await workItemConfigurations.listRelations(workspaceId, issue.teamId, issue.id)).relations,
+      issue.id,
+    )
+    await workspaceSearch.upsertDocument(
+      createWorkItemSearchDocument(workspaceId, issue, currentRelationIds),
+    )
+  } catch (error) {
+    console.error(`Workspace search projection failed after ${operation}.`, error)
+  }
+}
+
+/** Mutation 後の Work Item と relation graph を強整合 read して search へ反映します。 */
+async function refreshWorkItemSearchDocumentBestEffort(
+  workspaceId: string,
+  teamId: string,
+  issueId: string,
+  operation: string,
+) {
+  if (!workspaceSearchProjectionEnabled) return
+  try {
+    const [detail, relationPage] = await Promise.all([
+      teamIssues.getTeamIssueDetail(workspaceId, teamId, issueId, {
+        consistentIssueRead: true,
+        eventLimit: 0,
+      }),
+      workItemConfigurations.listRelations(workspaceId, teamId, issueId),
+    ])
+    await workspaceSearch.upsertDocument(createWorkItemSearchDocument(
+      workspaceId,
+      detail.issue,
+      createWorkItemRelationIds(relationPage.relations, issueId),
+    ))
+  } catch (error) {
+    console.error(`Workspace search projection failed after ${operation}.`, error)
+  }
+}
+
 async function deleteWorkspaceSearchDocumentBestEffort(
   workspaceId: string,
   entityType: WorkspaceSearchDocument['entityType'],
@@ -7590,10 +7254,7 @@ async function hydrateTeamIssueDetailResponse(
 }
 
 async function readWorkItemApprovalSummary(directoryId: string, workItem: TeamIssueResponseItem) {
-  if (
-    workItem.source !== 'dynamodb' ||
-    (!getEnv('FILE_PROOFING_TABLE_NAME') && !getConfiguredDynamoDbEndpoint())
-  ) {
+  if (!getEnv('FILE_PROOFING_TABLE_NAME') && !getConfiguredDynamoDbEndpoint()) {
     return undefined
   }
   const summary = await fileProofing.getApprovalSummary({
@@ -7654,30 +7315,12 @@ async function readTeamIssues(
   directoryId: string,
   context: TeamPermissionContext,
   principal: ProjectPrincipal,
-  options: TeamIssueListReadOptions = {},
 ) {
-  const scanLimit = normalizeWorkItemListReadLimit(options.scanLimit)
-  const clientReadLimit = createWorkItemListProbeLimit(scanLimit)
-  const storedIssues = await teamIssues.getTeamIssues(
-    directoryId,
-    context.team.id,
-    clientReadLimit === undefined ? undefined : { limit: clientReadLimit },
-  )
-  assertWorkItemListWithinLimit(
-    storedIssues.issues,
-    scanLimit,
-    `Team "${context.team.id}" canonical partition`,
-  )
-  const accessibleStoredIssues = filterAccessibleTeamIssues(
-    storedIssues.issues,
-    principal,
-    context,
-  )
-  const legacyIssues = await readLegacyTeamIssues(directoryId, context, principal, options)
+  const storedIssues = await teamIssues.getTeamIssues(directoryId, context.team.id)
 
   return {
     teamId: context.team.id,
-    issues: mergeTeamIssues(accessibleStoredIssues, legacyIssues),
+    issues: filterAccessibleTeamIssues(storedIssues.issues, principal, context),
   } satisfies TeamIssuesResponse
 }
 
@@ -7687,7 +7330,7 @@ async function readCanonicalTeamIssuesForAggregate(
   principal: ProjectPrincipal,
 ) {
   const clientReadLimit = createWorkItemListProbeLimit(WORK_ITEMS_PARTITION_SCAN_LIMIT)
-  const storedIssues = await teamIssues.getTeamIssuesForAggregate(
+  const storedIssues = await teamIssues.getTeamIssues(
     directoryId,
     context.team.id,
     { limit: clientReadLimit },
@@ -7701,8 +7344,7 @@ async function readCanonicalTeamIssuesForAggregate(
   return {
     teamId: context.team.id,
     issues: filterAccessibleTeamIssues(storedIssues.issues, principal, context),
-    migrationSourceKeys: storedIssues.migrationSourceKeys,
-  } satisfies AggregateTeamIssuesRead
+  } satisfies TeamIssuesResponse
 }
 
 async function readAccessibleWorkItems(
@@ -7733,10 +7375,7 @@ async function readAccessibleWorkItems(
     )
   }
 
-  const legacyProjectIds = selectAggregateLegacyProjectIds(contexts, principal)
   const workItemsById = new Map<string, TeamIssueResponseItem>()
-  const migrationSourceKeys = new Set<string>()
-  const canonicalResponses: AggregateTeamIssuesRead[] = []
 
   for (const context of contexts) {
     const response = await readCanonicalTeamIssuesForAggregate(
@@ -7744,34 +7383,7 @@ async function readAccessibleWorkItems(
       context,
       principal,
     )
-    canonicalResponses.push(response)
-    for (const migrationSourceKey of response.migrationSourceKeys) {
-      migrationSourceKeys.add(migrationSourceKey)
-    }
-  }
-
-  for (const response of canonicalResponses) {
     for (const workItem of response.issues) {
-      addAggregateWorkItem(workItemsById, workItem)
-    }
-  }
-
-  for (const context of contexts) {
-    const legacyIssues = await readLegacyTeamIssues(
-      principal.directoryId,
-      context,
-      principal,
-      {
-        scanLimit: WORK_ITEMS_PARTITION_SCAN_LIMIT,
-        legacyProjectIds,
-        migrationSourceKeys,
-      },
-    )
-
-    for (const workItem of legacyIssues) {
-      if (workItemsById.has(`${workItem.teamId}\0${workItem.id}`)) {
-        continue
-      }
       addAggregateWorkItem(workItemsById, workItem)
     }
   }
@@ -7791,205 +7403,8 @@ function addAggregateWorkItem(
   }
 }
 
-function selectAggregateLegacyProjectIds(
-  contexts: readonly TeamPermissionContext[],
-  principal: ProjectPrincipal,
-) {
-  const projectIds = new Set<string>()
-
-  for (const context of contexts) {
-    for (const project of context.team.projects) {
-      if (findFirstProjectTeamId(context.directory.teams, project.id) !== context.team.id) {
-        continue
-      }
-      if (!canAccessAssignedProject(principal, context, project.id, 'viewer')) {
-        continue
-      }
-
-      if (
-        !projectIds.has(project.id) &&
-        projectIds.size >= WORK_ITEMS_LEGACY_PROJECT_READ_LIMIT
-      ) {
-        throw createWorkItemListLimitExceededError(
-          `Workspace has more than ${WORK_ITEMS_LEGACY_PROJECT_READ_LIMIT} accessible legacy projects.`,
-        )
-      }
-
-      projectIds.add(project.id)
-    }
-  }
-
-  return projectIds
-}
-
-async function readProjectTasks(
-  directoryId: string,
-  projectId: string,
-): Promise<ProjectTasksResponse> {
-  const response = await readProjectIssues(directoryId, projectId)
-
-  return {
-    projectId,
-    tasks: response.issues.map(toProjectTaskFromTeamIssue),
-  }
-}
-
 async function readProjectIssues(directoryId: string, projectId: string) {
-  const storedIssues = await teamIssues.getProjectIssues(directoryId, projectId)
-  const directory = await projectDirectory.getProjectDirectory(directoryId, 'ja')
-  const ownerTeamId = findFirstProjectTeamId(directory.teams, projectId)
-  const legacyIssues: TeamIssueResponseItem[] = []
-  if (ownerTeamId) {
-    const canonicalIssueIds = new Set(storedIssues.issues.map((issue) => issue.id))
-    const legacyTasks = (await projectTasks.getProjectTasks(directoryId, projectId)).tasks
-    const candidates = legacyTasks.filter((task) => !canonicalIssueIds.has(task.id))
-    const migrationSourceKeys = await readLegacyMigrationSourceKeys(
-      directoryId,
-      directory.teams,
-      projectId,
-      candidates,
-    )
-
-    for (const task of candidates) {
-      const sourceKey = createLegacyTaskMigrationSourceKey(directoryId, projectId, task.id)
-      if (!migrationSourceKeys.has(sourceKey)) {
-        legacyIssues.push(toLegacyTeamIssue(task, ownerTeamId, projectId))
-      }
-    }
-  }
-
-  return {
-    projectId,
-    issues: mergeTeamIssues(storedIssues.issues, legacyIssues),
-  } satisfies ProjectIssuesResponse
-}
-
-async function readLegacyTeamIssues(
-  directoryId: string,
-  context: TeamPermissionContext,
-  principal: ProjectPrincipal,
-  options: TeamIssueListReadOptions = {},
-) {
-  const issues: TeamIssueResponseItem[] = []
-  const scanLimit = normalizeWorkItemListReadLimit(options.scanLimit)
-  const clientReadLimit = createWorkItemListProbeLimit(scanLimit)
-
-  for (const project of context.team.projects) {
-    if (options.legacyProjectIds && !options.legacyProjectIds.has(project.id)) {
-      continue
-    }
-    if (findFirstProjectTeamId(context.directory.teams, project.id) !== context.team.id) {
-      continue
-    }
-
-    if (!canAccessAssignedProject(principal, context, project.id, 'viewer')) {
-      continue
-    }
-
-    const [legacyResponse, canonicalResponse] = await Promise.all([
-      projectTasks.getProjectTasks(
-        directoryId,
-        project.id,
-        clientReadLimit === undefined ? undefined : { limit: clientReadLimit },
-      ),
-      teamIssues.getProjectIssues(
-        directoryId,
-        project.id,
-        clientReadLimit === undefined ? undefined : { limit: clientReadLimit },
-      ),
-    ])
-    assertWorkItemListWithinLimit(
-      legacyResponse.tasks,
-      scanLimit,
-      `Project "${project.id}" legacy partition`,
-    )
-    assertWorkItemListWithinLimit(
-      canonicalResponse.issues,
-      scanLimit,
-      `Project "${project.id}" canonical partition`,
-    )
-    const canonicalIssueIds = new Set(canonicalResponse.issues.map((issue) => issue.id))
-    const candidates = legacyResponse.tasks.filter((task) =>
-      (!options.legacyIssueId || task.id === options.legacyIssueId) &&
-      !canonicalIssueIds.has(task.id)
-    )
-    const migrationSourceKeys = options.migrationSourceKeys ??
-      await readLegacyMigrationSourceKeys(
-        directoryId,
-        context.directory.teams,
-        project.id,
-        candidates,
-      )
-
-    for (const task of candidates) {
-      const sourceKey = createLegacyTaskMigrationSourceKey(directoryId, project.id, task.id)
-      if (!migrationSourceKeys.has(sourceKey)) {
-        issues.push(toLegacyTeamIssue(task, context.team.id, project.id))
-      }
-    }
-  }
-
-  return issues
-}
-
-async function readLegacyTeamIssue(
-  directoryId: string,
-  context: TeamPermissionContext,
-  principal: ProjectPrincipal,
-  issueId: string,
-) {
-  return (await readLegacyTeamIssues(
-    directoryId,
-    context,
-    principal,
-    { legacyIssueId: issueId },
-  )).find((issue) => issue.id === issueId)
-}
-
-async function readLegacyTeamIssueIds(
-  directoryId: string,
-  context: TeamPermissionContext,
-) {
-  const issueIds: string[] = []
-
-  for (const project of context.team.projects) {
-    if (findFirstProjectTeamId(context.directory.teams, project.id) !== context.team.id) {
-      continue
-    }
-
-    const response = await projectTasks.getProjectTasks(directoryId, project.id)
-    issueIds.push(...response.tasks.map((task) => task.id))
-  }
-
-  return issueIds
-}
-
-async function isLegacyProjectTaskIssue(
-  directoryId: string,
-  projectId: string,
-  taskId: string,
-) {
-  const directory = await projectDirectory.getProjectDirectory(directoryId, 'ja')
-
-  if (!findFirstProjectTeamId(directory.teams, projectId)) {
-    return false
-  }
-
-  const response = await projectTasks.getProjectTasks(directoryId, projectId)
-
-  return response.tasks.some((task) => task.id === taskId)
-}
-
-function mergeTeamIssues(
-  primaryIssues: TeamIssueResponseItem[],
-  fallbackIssues: TeamIssueResponseItem[],
-) {
-  const issueIds = new Set(primaryIssues.map((issue) => issue.id))
-
-  return [
-    ...primaryIssues,
-    ...fallbackIssues.filter((issue) => !issueIds.has(issue.id)),
-  ]
+  return teamIssues.getProjectIssues(directoryId, projectId)
 }
 
 function normalizeWorkItemListReadLimit(value: number | undefined) {
@@ -8022,99 +7437,6 @@ function createWorkItemListLimitExceededError(reason: string) {
     'WorkItemListLimitExceeded',
     `${reason} Refine the Workspace before loading the aggregate Work Item list.`,
   )
-}
-
-function toLegacyTeamIssue(
-  task: ProjectTaskResponseItem,
-  teamId: string,
-  assignedProjectId: string,
-): TeamIssueResponseItem {
-  return {
-    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-    revision: 1,
-    id: task.id,
-    teamId,
-    assignedProjectId,
-    titleKey: task.titleKey,
-    title: task.title,
-    assigneeUserId: task.assigneeUserId,
-    assigneeKey: task.assigneeKey,
-    assignee: task.assignee,
-    assigneeEmail: task.assigneeEmail,
-    assigneeName: task.assigneeName,
-    status: task.status,
-    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-    workflowStatusId: task.status,
-    statusCategory: toDefaultWorkflowStatusCategory(task.status),
-    customFieldValues: {},
-    dueDate: task.dueDate,
-    priority: task.priority,
-    createdAt: '2026-06-01T00:00:00.000Z',
-    updatedAt: '2026-06-01T00:00:00.000Z',
-    source: 'legacy',
-  }
-}
-
-function toProjectTaskFromTeamIssue(issue: TeamIssueResponseItem): ProjectTaskResponseItem {
-  return {
-    schemaVersion: issue.schemaVersion,
-    revision: issue.revision,
-    teamId: issue.teamId,
-    source: issue.source,
-    workflowSchemaVersion: issue.workflowSchemaVersion,
-    workflowStatusId: issue.workflowStatusId,
-    statusCategory: issue.statusCategory,
-    customFieldValues: issue.customFieldValues,
-    id: issue.id,
-    titleKey: issue.titleKey,
-    title: issue.title,
-    description: issue.description,
-    assigneeUserId: issue.assigneeUserId,
-    assigneeEmail: issue.assigneeEmail,
-    assigneeName: issue.assigneeName,
-    assignee: issue.assignee,
-    assigneeKey: issue.assigneeKey,
-    status: issue.status,
-    dueDate: issue.dueDate,
-    priority: issue.priority,
-    createdAt: issue.createdAt,
-    updatedAt: issue.updatedAt,
-  }
-}
-
-function findFirstProjectTeamId(
-  teams: readonly ProjectDirectoryTeamResponse[],
-  projectId: string,
-) {
-  const teamIds = new Set(
-    teams
-      .filter((team) => team.projects.some((project) => project.id === projectId))
-      .map((team) => team.id),
-  )
-  const [teamId] = teamIds
-
-  return teamIds.size === 1 ? teamId : undefined
-}
-
-async function readLegacyMigrationSourceKeys(
-  directoryId: string,
-  teams: readonly ProjectDirectoryTeamResponse[],
-  projectId: string,
-  tasks: readonly Pick<ProjectTaskResponseItem, 'id'>[],
-  client: TeamIssuesClient = teamIssues,
-) {
-  const teamIds = teams
-    .filter((team) => team.projects.some((project) => project.id === projectId))
-    .map((team) => team.id)
-  const keys = teamIds.flatMap((teamId) =>
-    tasks.map((task) => ({ teamId, issueId: task.id }))
-  )
-
-  if (keys.length === 0) {
-    return new Set<string>()
-  }
-
-  return client.getTeamIssueMigrationSourceKeys(directoryId, keys)
 }
 
 async function readIssueAssigneeProfiles(issues: TeamIssueResponseItem[]) {
@@ -9416,19 +8738,12 @@ export class FlociCognitoClient implements CognitoClient {
   }
 }
 
-/**
- * DynamoDB の team/project、canonical Work Item、legacy task から集計値を算出します。
- */
+/** DynamoDB の team/project と canonical Work Item から集計値を算出します。 */
 export class DynamoDbDashboardSummaryClient {
   /**
    * team/project directory を読み取る client です。
    */
   private readonly projectDirectoryClient: ProjectDirectoryClient
-
-  /**
-   * project task を読み取る client です。
-   */
-  private readonly projectTasksClient: ProjectTasksClient
 
   /**
    * canonical Work Item を読み取る client です。
@@ -9437,11 +8752,9 @@ export class DynamoDbDashboardSummaryClient {
 
   constructor(
     projectDirectoryClient: ProjectDirectoryClient = new DynamoDbProjectDirectoryClient(),
-    projectTasksClient: ProjectTasksClient = new DynamoDbProjectTasksClient(),
     teamIssuesClient: TeamIssuesClient = new DynamoDbTeamIssuesClient(),
   ) {
     this.projectDirectoryClient = projectDirectoryClient
-    this.projectTasksClient = projectTasksClient
     this.teamIssuesClient = teamIssuesClient
   }
 
@@ -9460,40 +8773,11 @@ export class DynamoDbDashboardSummaryClient {
           .map((access) => access.projectId)
       )
     const taskResponses = await Promise.all(
-      Array.from(visibleProjectIds).map(async (projectId) => {
-        const ownerTeamId = findFirstProjectTeamId(directory.teams, projectId)
-        const [canonical, legacy] = await Promise.all([
-          this.teamIssuesClient.getProjectIssues(directoryId, projectId),
-          ownerTeamId
-            ? this.projectTasksClient.getProjectTasks(directoryId, projectId)
-            : Promise.resolve({ projectId, tasks: [] }),
-        ])
-        if (!ownerTeamId) {
-          return canonical.issues
-        }
-
-        const canonicalIds = new Set(canonical.issues.map((issue) => issue.id))
-        const candidates = legacy.tasks.filter((task) => !canonicalIds.has(task.id))
-        const migrationSourceKeys = await readLegacyMigrationSourceKeys(
-          directoryId,
-          directory.teams,
-          projectId,
-          candidates,
-          this.teamIssuesClient,
-        )
-        const compatibleLegacyTasks = candidates.filter((task) =>
-          !migrationSourceKeys.has(
-            createLegacyTaskMigrationSourceKey(directoryId, projectId, task.id),
-          )
-        )
-
-        return [
-          ...canonical.issues,
-          ...compatibleLegacyTasks,
-        ]
-      }),
+      Array.from(visibleProjectIds).map((projectId) =>
+        this.teamIssuesClient.getProjectIssues(directoryId, projectId)
+      ),
     )
-    const tasks = taskResponses.flat()
+    const tasks = taskResponses.flatMap((response) => response.issues)
 
     return {
       projects: visibleProjectIds.size,
@@ -9570,31 +8854,6 @@ export class DynamoDbProjectTasksClient {
 
       throw toProjectDataError(error)
     }
-  }
-
-  /**
-   * legacy project task table への作成を拒否します。
-   */
-  async createProjectTask(
-    _directoryId: string,
-    _projectId: string,
-    _input: CreateProjectTaskRequestBody,
-    _auditContext?: MutationAuditContext,
-  ) {
-    throw createLegacyProjectTaskReadOnlyError()
-  }
-
-  /**
-   * legacy project task table の状態更新を拒否します。
-   */
-  async updateProjectTaskStatus(
-    _directoryId: string,
-    _projectId: string,
-    _taskId: string,
-    _input: UpdateProjectTaskStatusRequestBody,
-    _auditContext?: MutationAuditContext,
-  ) {
-    throw createLegacyProjectTaskReadOnlyError()
   }
 
   /**
@@ -9686,11 +8945,6 @@ export class DynamoDbTeamIssuesClient {
    * immutable audit event を保存する DynamoDB table 名です。
    */
   private readonly auditTableName?: string
-  /** BatchGetItem retry 前に待機する関数です。 */
-  private readonly batchGetRetrySleep: (ms: number) => Promise<void>
-  /** BatchGetItem retry の jitter 値を生成する関数です。 */
-  private readonly batchGetRetryRandom: () => number
-
   constructor(
     issueTableName =
       getEnv('MUKUROJI_WORK_ITEMS_TABLE') ??
@@ -9706,8 +8960,6 @@ export class DynamoDbTeamIssuesClient {
     dynamoDbClient?: DynamoDBClient,
     bootstrapLocalTables = dynamoDbClient === undefined && shouldBootstrapLocalDynamoDb(),
     auditTableName = getConfiguredAuditTableName(),
-    batchGetRetrySleep: (ms: number) => Promise<void> = sleep,
-    batchGetRetryRandom: () => number = Math.random,
   ) {
     this.issueTableName = issueTableName
     this.eventTableName = eventTableName
@@ -9715,30 +8967,12 @@ export class DynamoDbTeamIssuesClient {
     this.dynamoDbClient = dynamoDbClient ?? createDynamoDbClient()
     this.bootstrapLocalTables = bootstrapLocalTables
     this.auditTableName = auditTableName
-    this.batchGetRetrySleep = batchGetRetrySleep
-    this.batchGetRetryRandom = batchGetRetryRandom
   }
 
   /**
    * DynamoDB から指定 team ID の Issue 一覧を取得します。
    */
   async getTeamIssues(
-    directoryId: string,
-    teamId: string,
-    options: WorkItemListReadOptions = {},
-  ) {
-    const response = await this.getTeamIssuesForAggregate(directoryId, teamId, options)
-
-    return {
-      teamId: response.teamId,
-      issues: response.issues,
-    } satisfies TeamIssuesResponse
-  }
-
-  /**
-   * DynamoDB から aggregate 用の Issue 一覧と非公開 migration metadata を取得します。
-   */
-  async getTeamIssuesForAggregate(
     directoryId: string,
     teamId: string,
     options: WorkItemListReadOptions = {},
@@ -9751,92 +8985,7 @@ export class DynamoDbTeamIssuesClient {
       return {
         teamId,
         issues: items.map(toTeamIssueResponseItem),
-        migrationSourceKeys: items.flatMap((item) =>
-          item.migrationSourceKey ? [item.migrationSourceKey] : []
-        ),
-      } satisfies AggregateTeamIssuesRead
-    } catch (error) {
-      if (error instanceof ProjectDataError) {
-        throw error
-      }
-
-      throw toProjectDataError(error)
-    }
-  }
-
-  /**
-   * Team / Issue base key の canonical row 存在と migration identity を確認します。
-   */
-  async getTeamIssueMigrationSourceKeys(
-    directoryId: string,
-    keys: readonly TeamIssueMigrationLookupKey[],
-  ) {
-    await this.ensureLocalTables()
-
-    try {
-      const uniqueKeys = [...new Map(keys.map((key) => [
-        createTeamIssueLookupKey(key.teamId, key.issueId),
-        {
-          directoryTeamId: createDirectoryTeamId(directoryId, key.teamId),
-          issueId: key.issueId,
-        },
-      ])).values()]
-      const migrationSourceKeys = new Set<string>()
-
-      for (let offset = 0; offset < uniqueKeys.length; offset += DYNAMODB_BATCH_GET_KEY_LIMIT) {
-        let pendingKeys: NonNullable<
-          NonNullable<NonNullable<BatchGetCommandInput['RequestItems']>[string]>['Keys']
-        > = uniqueKeys.slice(offset, offset + DYNAMODB_BATCH_GET_KEY_LIMIT)
-
-        for (
-          let attempt = 0;
-          pendingKeys.length > 0 && attempt < DYNAMODB_BATCH_GET_ATTEMPT_LIMIT;
-          attempt += 1
-        ) {
-          const response: BatchGetCommandOutput = await this.documentClient.send(
-            new BatchGetCommand({
-              RequestItems: {
-                [this.issueTableName]: {
-                  Keys: pendingKeys,
-                  ConsistentRead: true,
-                },
-              },
-            }),
-          )
-          for (const value of response.Responses?.[this.issueTableName] ?? []) {
-            const item = toTeamIssueItem(value)
-            if (item.directoryId !== directoryId) {
-              throw new ProjectDataError(
-                503,
-                'InvalidTeamIssue',
-                'Team issue migration lookup returned another Workspace.',
-              )
-            }
-            if (item.migrationSourceKey) {
-              migrationSourceKeys.add(item.migrationSourceKey)
-            }
-          }
-          pendingKeys = response.UnprocessedKeys?.[this.issueTableName]?.Keys ?? []
-          if (
-            pendingKeys.length > 0 &&
-            attempt + 1 < DYNAMODB_BATCH_GET_ATTEMPT_LIMIT
-          ) {
-            await this.batchGetRetrySleep(
-              createDynamoDbBatchGetRetryDelayMs(attempt, this.batchGetRetryRandom),
-            )
-          }
-        }
-
-        if (pendingKeys.length > 0) {
-          throw new ProjectDataError(
-            503,
-            'TeamIssueMigrationLookupIncomplete',
-            'Work Item migration identity lookup could not process every key.',
-          )
-        }
-      }
-
-      return migrationSourceKeys
+      } satisfies TeamIssuesResponse
     } catch (error) {
       if (error instanceof ProjectDataError) {
         throw error
@@ -9920,7 +9069,6 @@ export class DynamoDbTeamIssuesClient {
     teamId: string,
     input: CreateTeamIssueRequestBody,
     actorUserId: string,
-    reservedIssueIds: string[] = [],
     auditContext?: MutationAuditContext,
   ) {
     await this.ensureLocalTables()
@@ -9929,12 +9077,12 @@ export class DynamoDbTeamIssuesClient {
     const title = readRequiredString(input.title, 'Issue title is required.')
     const description = readOptionalString(input.description, 'Issue description is invalid.')
     const assigneeUserId = readTeamIssueAssigneeUserId(input)
-    const status = readTaskStatus(input.status)
     const dueDate = readRequiredString(input.dueDate, 'Issue due date is required.')
     const priority = readTaskPriority(input.priority)
     const assignedProjectId = readAssignedProjectId(input.assignedProjectId)
-    const workflowStatusId = readWorkflowStatusId(input.workflowStatusId, status)
-    const statusCategory = readWorkflowStatusCategory(input.statusCategory, status)
+    const workflowSchemaVersion = readWorkflowSchemaVersion(input.workflowSchemaVersion)
+    const workflowStatusId = readWorkflowStatusId(input.workflowStatusId)
+    const statusCategory = readWorkflowStatusCategory(input.statusCategory)
     const customFieldValues = readCustomFieldValues(input.customFieldValues)
     const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
     const now = new Date().toISOString()
@@ -9943,7 +9091,7 @@ export class DynamoDbTeamIssuesClient {
       const currentIssues = await this.getTeamIssues(directoryId, teamId)
       const issueId = createUniqueResourceId(
         title,
-        [...currentIssues.issues.map((issue) => issue.id), ...reservedIssueIds],
+        currentIssues.issues.map((issue) => issue.id),
       )
       const item: TeamIssueItem = {
         schemaVersion: WORK_ITEM_SCHEMA_VERSION,
@@ -9956,11 +9104,11 @@ export class DynamoDbTeamIssuesClient {
         title,
         assigneeUserId,
         creatorMemberKey: actorUserId,
-        status,
-        workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        workflowSchemaVersion,
         workflowStatusId,
         statusCategory,
         customFieldValues,
+        relationIds: [],
         dueDate,
         priority,
         createdAt: now,
@@ -9998,7 +9146,6 @@ export class DynamoDbTeamIssuesClient {
           'description',
           'assignedProjectId',
           'assigneeUserId',
-          'status',
           'workflowStatusId',
           'statusCategory',
           'customFieldValues',
@@ -10096,7 +9243,6 @@ export class DynamoDbTeamIssuesClient {
     const expressionAttributeValues: Record<string, unknown> = {
       ':schemaVersion': WORK_ITEM_SCHEMA_VERSION,
       ':expectedRevision': expectedRevision,
-      ':legacyRevision': 1,
       ':nextRevision': nextRevision,
       ':updatedAt': new Date().toISOString(),
     }
@@ -10147,33 +9293,15 @@ export class DynamoDbTeamIssuesClient {
       setExpressions.push('#assigneeUserId = :assigneeUserId')
     }
 
-    if ('status' in input) {
-      expressionAttributeNames['#status'] = 'status'
-      expressionAttributeValues[':status'] = readRequiredTaskStatus(input.status)
-      setExpressions.push('#status = :status')
-    }
-
     if ('workflowStatusId' in input) {
-      const fallbackStatus = 'status' in input
-        ? readRequiredTaskStatus(input.status)
-        : undefined
       expressionAttributeNames['#workflowStatusId'] = 'workflowStatusId'
-      expressionAttributeValues[':workflowStatusId'] = readWorkflowStatusId(
-        input.workflowStatusId,
-        fallbackStatus,
-      )
+      expressionAttributeValues[':workflowStatusId'] = readWorkflowStatusId(input.workflowStatusId)
       setExpressions.push('#workflowStatusId = :workflowStatusId')
     }
 
     if ('statusCategory' in input) {
-      const fallbackStatus = 'status' in input
-        ? readRequiredTaskStatus(input.status)
-        : undefined
       expressionAttributeNames['#statusCategory'] = 'statusCategory'
-      expressionAttributeValues[':statusCategory'] = readWorkflowStatusCategory(
-        input.statusCategory,
-        fallbackStatus,
-      )
+      expressionAttributeValues[':statusCategory'] = readWorkflowStatusCategory(input.statusCategory)
       setExpressions.push('#statusCategory = :statusCategory')
     }
 
@@ -10253,7 +9381,6 @@ export class DynamoDbTeamIssuesClient {
           'description',
           'assignedProjectId',
           'assigneeUserId',
-          'status',
           'workflowStatusId',
           'statusCategory',
           'customFieldValues',
@@ -10267,7 +9394,7 @@ export class DynamoDbTeamIssuesClient {
           issueId,
           projectId: afterIssue.assignedProjectId,
           deepLink: createTeamIssueDeepLink(teamId, issueId),
-          notificationTitle: afterIssue.title ?? afterIssue.titleKey ?? issueId,
+          notificationTitle: afterIssue.title,
           notificationCandidates: createWorkItemNotificationCandidates(beforeIssue, afterIssue),
           beforeRevision: expectedRevision,
           afterRevision: nextRevision,
@@ -10289,8 +9416,7 @@ export class DynamoDbTeamIssuesClient {
                 ExpressionAttributeValues: expressionAttributeValues,
                 ConditionExpression:
                   'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
-                  '(#revision = :expectedRevision OR ' +
-                  '(attribute_not_exists(#revision) AND :expectedRevision = :legacyRevision))',
+                  '#revision = :expectedRevision',
               },
             },
             {
@@ -12234,8 +11360,8 @@ function createDefaultWorkItemConfigurationClient(): WorkItemConfigurationClient
     async getTeamConfiguration(_workspaceId, teamId) {
       return createResolved('team', teamId)
     },
-    async saveWorkspaceConfiguration(workspaceId, configuration, compatibilityCheck) {
-      await compatibilityCheck()
+    async saveWorkspaceConfiguration(workspaceId, configuration, usageCheck) {
+      await usageCheck()
       return {
         configuration: {
           ...structuredClone(configuration),
@@ -12245,8 +11371,8 @@ function createDefaultWorkItemConfigurationClient(): WorkItemConfigurationClient
         },
       }
     },
-    async saveTeamConfiguration(_workspaceId, teamId, configuration, compatibilityCheck) {
-      await compatibilityCheck()
+    async saveTeamConfiguration(_workspaceId, teamId, configuration, usageCheck) {
+      await usageCheck()
       return {
         configuration: {
           ...structuredClone(configuration),
@@ -12650,23 +11776,6 @@ function createWorkItemConfigurationRevisionConflictError() {
   )
 }
 
-function createLegacyProjectTaskReadOnlyError() {
-  return new ProjectDataError(
-    409,
-    'LegacyProjectTaskReadOnly',
-    'Legacy project tasks are read-only.',
-  )
-}
-
-function createDynamoDbBatchGetRetryDelayMs(
-  attempt: number,
-  random: () => number,
-) {
-  const exponentialDelay = DYNAMODB_BATCH_GET_RETRY_BASE_DELAY_MS * 2 ** attempt
-
-  return exponentialDelay + Math.floor(exponentialDelay * random())
-}
-
 async function sleep(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -12702,26 +11811,19 @@ function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     revision: item.revision,
     id: item.issueId,
     teamId: item.teamId,
+    title: item.title,
     assigneeUserId: item.assigneeUserId,
-    status: item.status,
-    workflowSchemaVersion:
-      item.workflowSchemaVersion ?? WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-    workflowStatusId: item.workflowStatusId ?? item.status,
-    statusCategory: item.statusCategory ?? toDefaultWorkflowStatusCategory(item.status),
-    customFieldValues: item.customFieldValues ?? {},
+    creatorMemberKey: item.creatorMemberKey,
+    workflowSchemaVersion: item.workflowSchemaVersion,
+    workflowStatusId: item.workflowStatusId,
+    statusCategory: item.statusCategory,
+    customFieldValues: item.customFieldValues,
+    relationIds: item.relationIds,
     dueDate: item.dueDate,
     priority: item.priority,
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
     source: 'dynamodb',
-  }
-
-  if (item.title) {
-    issue.title = item.title
-  }
-
-  if (item.titleKey) {
-    issue.titleKey = item.titleKey
   }
 
   if (item.assignedProjectId) {
@@ -12730,18 +11832,6 @@ function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
 
   if (item.description) {
     issue.description = item.description
-  }
-
-  if (item.creatorMemberKey) {
-    issue.creatorMemberKey = item.creatorMemberKey
-  }
-
-  if (item.customFields) {
-    issue.customFields = item.customFields
-  }
-
-  if (item.relationIds) {
-    issue.relationIds = item.relationIds
   }
 
   return issue
@@ -12767,15 +11857,7 @@ function toTeamIssueActivityResponseItem(value: TeamIssueEventItem): TeamIssueAc
 }
 
 function toTeamIssueItem(value: unknown): TeamIssueItem {
-  const candidate = isRecord(value)
-    ? {
-        ...value,
-        schemaVersion: value.schemaVersion ?? WORK_ITEM_SCHEMA_VERSION,
-        revision: value.revision ?? 1,
-      }
-    : value
-
-  if (!isTeamIssueItem(candidate)) {
+  if (!isTeamIssueItem(value)) {
     throw new ProjectDataError(
       503,
       'InvalidTeamIssue',
@@ -12783,7 +11865,7 @@ function toTeamIssueItem(value: unknown): TeamIssueItem {
     )
   }
 
-  return candidate
+  return value
 }
 
 function toTeamIssueEventItem(value: unknown): TeamIssueEventItem {
@@ -12808,6 +11890,7 @@ function toProjectTaskResponseItem(value: unknown): ProjectTaskResponseItem {
   }
 
   const task: ProjectTaskResponseItem = {
+    source: 'legacy',
     id: value.taskId,
     status: value.status,
     dueDate: value.dueDate,
@@ -12984,56 +12067,7 @@ function isActiveDirectoryItem(item: ProjectDirectoryTeamItem | ProjectDirectory
 }
 
 function isTeamIssueItem(value: unknown): value is TeamIssueItem {
-  if (!isRecord(value)) {
-    return false
-  }
-
-  return (
-    value.schemaVersion === WORK_ITEM_SCHEMA_VERSION &&
-    typeof value.revision === 'number' &&
-    Number.isSafeInteger(value.revision) &&
-    value.revision >= 1 &&
-    (
-      value.workflowSchemaVersion === undefined ||
-      value.workflowSchemaVersion === WORK_ITEM_CONFIGURATION_SCHEMA_VERSION
-    ) &&
-    typeof value.directoryId === 'string' &&
-    typeof value.teamId === 'string' &&
-    value.directoryTeamId === createDirectoryTeamId(value.directoryId, value.teamId) &&
-    typeof value.issueId === 'string' &&
-    typeof value.sortOrder === 'number' &&
-    (typeof value.title === 'string' || typeof value.titleKey === 'string') &&
-    (value.description === undefined || typeof value.description === 'string') &&
-    typeof value.assigneeUserId === 'string' &&
-    (value.creatorMemberKey === undefined || typeof value.creatorMemberKey === 'string') &&
-    (value.customFields === undefined || isSearchCustomFieldValues(value.customFields)) &&
-    (value.relationIds === undefined || isSearchRelationIds(value.relationIds)) &&
-    (
-      value.migrationSourceKey === undefined ||
-      isLegacyTaskMigrationSourceKey(
-        value.migrationSourceKey,
-        value.directoryId,
-        value.issueId,
-      )
-    ) &&
-    isProjectTaskStatus(value.status) &&
-    (value.workflowStatusId === undefined || (
-      typeof value.workflowStatusId === 'string' && value.workflowStatusId.length > 0
-    )) &&
-    (value.statusCategory === undefined || isWorkflowStatusCategory(value.statusCategory)) &&
-    (value.customFieldValues === undefined || isCustomFieldValueRecord(value.customFieldValues)) &&
-    typeof value.dueDate === 'string' &&
-    isProjectTaskPriority(value.priority) &&
-    typeof value.createdAt === 'string' &&
-    typeof value.updatedAt === 'string' &&
-    (
-      value.assignedProjectId === undefined ||
-      (
-        typeof value.assignedProjectId === 'string' &&
-        value.directoryProjectId === createDirectoryProjectId(value.directoryId, value.assignedProjectId)
-      )
-    )
-  )
+  return isCanonicalWorkItemRecord(value)
 }
 
 function isTeamIssueEventItem(value: unknown): value is TeamIssueEventItem {
@@ -13174,30 +12208,6 @@ function isProjectTaskStatus(value: unknown): value is ProjectTaskStatus {
   return value === 'in-progress' || value === 'review' || value === 'todo' || value === 'done'
 }
 
-function isSearchCustomFieldValues(
-  value: unknown,
-): value is Record<string, SearchCustomFieldValue> {
-  if (!isRecord(value)) return false
-  const entries = Object.entries(value)
-  return entries.length <= 100 && entries.every(([fieldId, fieldValue]) =>
-    Boolean(fieldId.trim()) && isSearchCustomFieldValue(fieldValue)
-  )
-}
-
-function isSearchCustomFieldValue(value: unknown): value is SearchCustomFieldValue {
-  return value === null ||
-    typeof value === 'boolean' ||
-    typeof value === 'string' ||
-    typeof value === 'number' && Number.isFinite(value) ||
-    Array.isArray(value) && value.length <= 100 &&
-      value.every((entry) => typeof entry === 'string')
-}
-
-function isSearchRelationIds(value: unknown): value is string[] {
-  return Array.isArray(value) && value.length <= 100 &&
-    value.every((entry) => typeof entry === 'string' && Boolean(entry.trim()))
-}
-
 function isWorkflowStatusCategory(value: unknown): value is WorkflowStatusCategory {
   return value === 'backlog' ||
     value === 'unstarted' ||
@@ -13218,23 +12228,8 @@ function isCustomFieldValueRecord(value: unknown): value is Record<string, Custo
   )
 }
 
-function toDefaultWorkflowStatusCategory(status: ProjectTaskStatus): WorkflowStatusCategory {
-  if (status === 'todo') {
-    return 'unstarted'
-  }
-
-  if (status === 'done') {
-    return 'completed'
-  }
-
-  return 'started'
-}
-
-function isTerminalWorkItem(
-  item: Pick<ProjectTaskResponseItem, 'status' | 'statusCategory'>,
-) {
-  const category = item.statusCategory ?? toDefaultWorkflowStatusCategory(item.status)
-  return category === 'completed' || category === 'canceled'
+function isTerminalWorkItem(item: { statusCategory: WorkflowStatusCategory }) {
+  return item.statusCategory === 'completed' || item.statusCategory === 'canceled'
 }
 
 function isProjectTaskPriority(value: unknown): value is ProjectTaskPriority {
@@ -13277,26 +12272,6 @@ function readLocalizedNames(input: CreateTeamRequestBody | CreateProjectRequestB
   }
 }
 
-function readTaskStatus(value: unknown): ProjectTaskStatus {
-  if (value === undefined) {
-    return 'todo'
-  }
-
-  if (!isProjectTaskStatus(value)) {
-    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Task status is invalid.')
-  }
-
-  return value
-}
-
-function readRequiredTaskStatus(value: unknown): ProjectTaskStatus {
-  if (!isProjectTaskStatus(value)) {
-    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Task status is invalid.')
-  }
-
-  return value
-}
-
 function readWorkItemExpectedRevision(value: unknown) {
   if (
     typeof value !== 'number' ||
@@ -13327,7 +12302,7 @@ function readTaskPriority(value: unknown): ProjectTaskPriority {
 }
 
 function readWorkflowSchemaVersion(value: unknown) {
-  if (value === undefined || value === WORK_ITEM_CONFIGURATION_SCHEMA_VERSION) {
+  if (value === WORK_ITEM_CONFIGURATION_SCHEMA_VERSION) {
     return WORK_ITEM_CONFIGURATION_SCHEMA_VERSION
   }
 
@@ -13338,11 +12313,7 @@ function readWorkflowSchemaVersion(value: unknown) {
   )
 }
 
-function readWorkflowStatusId(value: unknown, fallbackStatus?: ProjectTaskStatus) {
-  if (value === undefined && fallbackStatus) {
-    return fallbackStatus
-  }
-
+function readWorkflowStatusId(value: unknown) {
   if (typeof value !== 'string' || !value.trim() || value.length > 128) {
     throw new ProjectDataError(
       400,
@@ -13354,11 +12325,7 @@ function readWorkflowStatusId(value: unknown, fallbackStatus?: ProjectTaskStatus
   return value.trim()
 }
 
-function readWorkflowStatusCategory(value: unknown, fallbackStatus?: ProjectTaskStatus) {
-  if (value === undefined && fallbackStatus) {
-    return toDefaultWorkflowStatusCategory(fallbackStatus)
-  }
-
+function readWorkflowStatusCategory(value: unknown) {
   if (!isWorkflowStatusCategory(value)) {
     throw new ProjectDataError(
       400,
@@ -13371,10 +12338,6 @@ function readWorkflowStatusCategory(value: unknown, fallbackStatus?: ProjectTask
 }
 
 function readCustomFieldValues(value: unknown): Record<string, CustomFieldValue> {
-  if (value === undefined) {
-    return {}
-  }
-
   if (!isCustomFieldValueRecord(value)) {
     throw new ProjectDataError(
       400,
@@ -13479,13 +12442,9 @@ async function prepareConfiguredCreateWorkItem(
   input: CreateTeamIssueRequestBody,
   resolved: ResolvedWorkItemConfiguration,
 ): Promise<CreateTeamIssueRequestBody> {
-  const legacyStatus = input.status === undefined
-    ? undefined
-    : readRequiredTaskStatus(input.status)
   const workflowStatus = resolveWorkflowStatus(
     resolved.configuration,
     input.workflowStatusId,
-    legacyStatus,
   )
   const projectId = readAssignedProjectId(input.assignedProjectId) ?? undefined
   const customFieldValues = normalizeCustomFieldValues(
@@ -13496,7 +12455,6 @@ async function prepareConfiguredCreateWorkItem(
   await requireActiveCustomFieldPeople(directoryId, resolved.configuration, customFieldValues, projectId)
   return {
     ...input,
-    status: workflowStatus.status,
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     workflowStatusId: workflowStatus.workflowStatusId,
     statusCategory: workflowStatus.statusCategory,
@@ -13520,15 +12478,10 @@ async function prepareConfiguredUpdateWorkItem(
   const currentWorkflowStatus = resolveWorkflowStatus(
     resolved.configuration,
     current.workflowStatusId,
-    current.status,
   )
-  const requestedLegacyStatus = 'status' in input
-    ? readRequiredTaskStatus(input.status)
-    : current.status
   const nextWorkflowStatus = resolveWorkflowStatus(
     resolved.configuration,
-    input.workflowStatusId ?? ('status' in input ? undefined : currentWorkflowStatus.workflowStatusId),
-    requestedLegacyStatus,
+    input.workflowStatusId ?? currentWorkflowStatus.workflowStatusId,
   )
   assertWorkflowTransitionAllowed(
     resolved.configuration,
@@ -13550,7 +12503,6 @@ async function prepareConfiguredUpdateWorkItem(
   await requireActiveCustomFieldPeople(directoryId, resolved.configuration, customFieldValues, projectId)
   return {
     ...input,
-    status: nextWorkflowStatus.status,
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     workflowStatusId: nextWorkflowStatus.workflowStatusId,
     statusCategory: nextWorkflowStatus.statusCategory,
@@ -13619,7 +12571,7 @@ async function validateWorkItemConfigurationReferences(
   }
 }
 
-async function validateWorkItemConfigurationCompatibility(
+async function validateWorkItemConfigurationUsage(
   directoryId: string,
   configuration: WorkItemConfiguration,
   teamId?: string,
@@ -13641,7 +12593,7 @@ async function validateWorkItemConfigurationCompatibility(
     }
 
     const readLimit = createWorkItemListProbeLimit(WORK_ITEMS_PARTITION_SCAN_LIMIT)
-    const response = await teamIssues.getTeamIssuesForAggregate(
+    const response = await teamIssues.getTeamIssues(
       directoryId,
       targetTeamId,
       {
@@ -13655,27 +12607,25 @@ async function validateWorkItemConfigurationCompatibility(
       `Team "${targetTeamId}" configuration validation`,
     )
     for (const workItem of response.issues) {
-      assertWorkItemCompatibleWithConfiguration(workItem, configuration)
+      assertWorkItemConfigurationUsage(workItem, configuration)
     }
   }
 }
 
-function assertWorkItemCompatibleWithConfiguration(
+function assertWorkItemConfigurationUsage(
   workItem: TeamIssueResponseItem,
   configuration: WorkItemConfiguration,
 ) {
   try {
     const status = resolveWorkflowStatus(
       configuration,
-      workItem.workflowStatusId ?? workItem.status,
-      workItem.status,
+      workItem.workflowStatusId,
     )
-    const storedCategory = workItem.statusCategory ?? statusCategoryForLegacyStatus(workItem.status)
-    if (status.statusCategory !== storedCategory) {
+    if (status.statusCategory !== workItem.statusCategory) {
       throw new Error('the stored status category would become stale')
     }
 
-    const storedValues = workItem.customFieldValues ?? {}
+    const storedValues = workItem.customFieldValues
     const definitionIds = new Set(configuration.customFields.map((definition) => definition.id))
     const removedValueId = Object.keys(storedValues).find((fieldId) => !definitionIds.has(fieldId))
     if (removedValueId) {
@@ -13711,8 +12661,8 @@ function assertWorkItemCompatibleWithConfiguration(
     const reason = error instanceof Error ? error.message : 'stored values are incompatible'
     throw new WorkItemConfigurationError(
       409,
-      'WorkItemConfigurationMigrationRequired',
-      `Work Item "${workItem.id}" requires migration before this configuration can be saved: ${reason}.`,
+      'WorkItemConfigurationInUse',
+      `Work Item "${workItem.id}" uses a definition that conflicts with this configuration: ${reason}.`,
     )
   }
 }
@@ -13741,7 +12691,6 @@ function customFieldValueRecordsEqual(
 
 function getWorkItemConfigurationTableName() {
   return getEnv('WORK_ITEM_CONFIGURATION_TABLE_NAME') ??
-    getEnv('MUKUROJI_WORK_ITEM_CONFIGURATION_TABLE') ??
     'mukuroji-work-item-configuration-local'
 }
 
@@ -13859,16 +12808,6 @@ function readPresenceTyping(value: unknown) {
   }
 
   return value
-}
-
-function readTaskAssigneeUserId(input: CreateProjectTaskRequestBody) {
-  const value = input.assigneeUserId ?? input.assignee
-
-  if (typeof value !== 'string' || !value.trim()) {
-    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Task assignee is required.')
-  }
-
-  return normalizeCognitoUserId(value)
 }
 
 function readProjectMemberEmail(value: unknown, fallbackMemberKey: string) {
@@ -14133,10 +13072,6 @@ function createDirectoryTeamId(directoryId: string, teamId: string) {
   return `${directoryId}#team#${teamId}`
 }
 
-function createTeamIssueLookupKey(teamId: string, issueId: string) {
-  return JSON.stringify([teamId, issueId])
-}
-
 function createDirectoryTeamIssueId(directoryId: string, teamId: string, issueId: string) {
   return `${createDirectoryTeamId(directoryId, teamId)}#issue#${issueId}`
 }
@@ -14224,7 +13159,7 @@ function createWorkItemNotificationCandidates(
     candidates.push({ memberKey: after.assigneeUserId, reason: 'assignment' })
   }
 
-  if (before.status !== after.status) {
+  if (before.workflowStatusId !== after.workflowStatusId) {
     candidates.push({ memberKey: after.assigneeUserId, reason: 'status-change' })
   }
 
@@ -14243,7 +13178,7 @@ function createWorkItemNotificationSummary(before: TeamIssueItem, after: TeamIss
     return 'Work Item assignment changed.'
   }
 
-  if (before.status !== after.status) {
+  if (before.workflowStatusId !== after.workflowStatusId) {
     return 'Work Item status changed.'
   }
 
@@ -14263,40 +13198,6 @@ function createTeamIssueAuditCommentId(teamId: string, issueId: string, commentI
 
 function createDirectoryProjectId(directoryId: string, projectId: string) {
   return `${directoryId}#project#${projectId}`
-}
-
-function createLegacyTaskMigrationSourceKey(
-  directoryId: string,
-  projectId: string,
-  taskId: string,
-) {
-  return `${createDirectoryProjectId(directoryId, projectId)}#task#${taskId}`
-}
-
-function isLegacyTaskMigrationSourceKey(
-  value: unknown,
-  directoryId: string,
-  issueId: string,
-) {
-  if (typeof value !== 'string') {
-    return false
-  }
-
-  const prefix = `${directoryId}#project#`
-  if (!value.startsWith(prefix)) {
-    return false
-  }
-
-  const [projectId, taskId, ...unexpectedParts] = value.slice(prefix.length).split('#task#')
-
-  return Boolean(projectId) && taskId === issueId && unexpectedParts.length === 0
-}
-
-/**
- * Project-local Task ID を Workspace 内で一意な audit Work Item ID に変換します。
- */
-function createProjectTaskAuditEntityId(projectId: string, taskId: string) {
-  return `project/${projectId}/task/${taskId}`
 }
 
 function createTeamIssueEventId(createdAt: string, eventType: TeamIssueActivityType) {

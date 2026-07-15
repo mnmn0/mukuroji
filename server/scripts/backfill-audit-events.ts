@@ -17,6 +17,7 @@ import {
   type AuditEventV1,
   type AuditFieldChange,
 } from '../src/audit'
+import { isCanonicalWorkItemRecord } from '../src/canonical-work-item'
 
 const unknownOccurredAt = '1970-01-01T00:00:00.000Z'
 const checkpointVersion = 1
@@ -650,16 +651,16 @@ function mapLegacyTeamIssueEvent(item: Record<string, unknown>) {
   })
 }
 
-function mapCurrentTeamIssue(item: Record<string, unknown>) {
-  const directoryId = readRequiredString(item, 'directoryId')
-  const teamId = readRequiredString(item, 'teamId')
-  const issueId = readRequiredString(item, 'issueId')
-  const directoryTeamId = readRequiredString(item, 'directoryTeamId')
-
-  if (!directoryId || !teamId || !issueId || !directoryTeamId) {
+/** Strict canonical Work Item row を audit backfill event へ変換します。 */
+export function mapCurrentTeamIssue(item: Record<string, unknown>) {
+  if (!isCanonicalWorkItemRecord(item)) {
     return undefined
   }
 
+  const directoryId = item.directoryId
+  const teamId = item.teamId
+  const issueId = item.issueId
+  const directoryTeamId = item.directoryTeamId
   const workItemId = createTeamIssueWorkItemId(teamId, issueId)
 
   return createAuditEvent({
@@ -680,7 +681,11 @@ function mapCurrentTeamIssue(item: Record<string, unknown>) {
       ['title', false],
       ['description', true],
       ['assigneeUserId', true],
-      ['status', false],
+      ['creatorMemberKey', true],
+      ['workflowSchemaVersion', false],
+      ['workflowStatusId', false],
+      ['statusCategory', false],
+      ['customFieldValues', true],
       ['dueDate', false],
       ['priority', false],
       ['createdAt', false],
@@ -1164,7 +1169,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-main().catch((error: unknown) => {
-  console.error(error)
-  process.exitCode = 1
-})
+if (import.meta.main) {
+  void main().catch((error: unknown) => {
+    console.error(error)
+    process.exitCode = 1
+  })
+}

@@ -239,9 +239,6 @@ test('shared server handler is bundled as a Lambda asset with production environ
         WORKSPACE_SEARCH_TABLE_NAME: {
           Ref: 'WorkspaceSearchTable2575AD6B',
         },
-        MUKUROJI_WORK_ITEM_CONFIGURATION_TABLE: {
-          Ref: 'WorkItemConfigurationTable35E94558',
-        },
         WORK_ITEM_CONFIGURATION_TABLE_NAME: {
           Ref: 'WorkItemConfigurationTable35E94558',
         },
@@ -274,6 +271,8 @@ test('shared server handler is bundled as a Lambda asset with production environ
   const lambdaResource = template.toJSON().Resources.ListProjectTasksFunction2134AF4A;
 
   expect(lambdaResource.Properties.Code.ZipFile).toBeUndefined();
+  expect(lambdaResource.Properties.Environment.Variables)
+    .not.toHaveProperty('MUKUROJI_WORK_ITEM_CONFIGURATION_TABLE');
 });
 
 test('Function URL and API Gateway invoke the same Lambda handler', () => {
@@ -1377,7 +1376,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
   }
 });
 
-test('canonical Work Item seed replaces legacy task writes and preserves demo data', () => {
+test('canonical Work Item seed writes complete schema data and preserves demo data', () => {
   const template = synthesizedTemplate;
   const customResources = template.findResources('Custom::AWS');
   const transactWriteResources = Object.values(customResources).filter((resource) =>
@@ -1412,16 +1411,23 @@ test('canonical Work Item seed replaces legacy task writes and preserves demo da
   expect(workItemPayload).toContain('core-team');
   expect(workItemPayload).toContain('assignedProjectId');
   expect(workItemPayload).toContain('2026-06-01T00:00:00.000Z');
-  expect(workItemPayload).toContain('dynamodb');
-  expect(workItemPayload).toContain('legacy-project-task');
-  expect(workItemPayload).toContain(
-    '{{Ref:WorkspaceDirectoryId}}#project#refero#task#wireframe',
-  );
   expect(workItemPayload.match(/schemaVersion/g)).toHaveLength(10);
+  expect(workItemPayload.match(/workflowSchemaVersion/g)).toHaveLength(10);
+  expect(workItemPayload.match(/workflowStatusId/g)).toHaveLength(10);
+  expect(workItemPayload.match(/statusCategory/g)).toHaveLength(10);
+  expect(workItemPayload.match(/customFieldValues/g)).toHaveLength(10);
+  expect(workItemPayload.match(/relationIds/g)).toHaveLength(10);
+  expect(workItemPayload.match(/creatorMemberKey/g)).toHaveLength(10);
+  expect(workItemPayload).toContain('"statusCategory":{"S":"unstarted"}');
+  expect(workItemPayload).toContain('"statusCategory":{"S":"started"}');
+  expect(workItemPayload).toContain('"statusCategory":{"S":"completed"}');
+  expect(workItemPayload).not.toMatch(/"status":\{"S":/);
+  expect(workItemPayload).not.toContain('"titleKey"');
   expect(workItemPayload.match(/revision/g)).toHaveLength(10);
-  expect(workItemPayload.match(/workItemId/g)).toHaveLength(10);
-  expect(workItemPayload.match(/migrationSourceKey/g)).toHaveLength(10);
-  expect(workItemPayload.match(/migrationSource/g)).toHaveLength(20);
+  expect(workItemPayload).not.toContain('"workItemId"');
+  expect(workItemPayload).not.toContain('migrationSourceKey');
+  expect(workItemPayload).not.toMatch(/"source":\{"S":/);
+  expect(workItemPayload).not.toMatch(/"migrationSource":\{"S":/);
   const canonicalWorkItemSeedPolicy = canonicalWorkItemSeedPolicyEntry?.[1] as {
     Properties?: {
       PolicyDocument?: {

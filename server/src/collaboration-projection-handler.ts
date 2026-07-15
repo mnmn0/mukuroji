@@ -17,6 +17,7 @@ import {
   S3Client,
   type Tag,
 } from '@aws-sdk/client-s3'
+import { isCanonicalWorkItemRecord } from './canonical-work-item'
 import {
   listScopeConnections,
   postRealtimeMessage,
@@ -272,8 +273,8 @@ export type CurrentWorkItemNotificationScope = {
   assigneeMemberKey?: string
   /** 現在の date-only 期限です。 */
   dueDate?: string
-  /** 現在の Work Item status です。 */
-  status?: string
+  /** 現在の標準 workflow status category です。 */
+  statusCategory?: string
 }
 
 const dynamoDbClient = new DynamoDBClient({ region: getAwsRegion() })
@@ -917,7 +918,8 @@ export function refreshScheduledNotificationEvent(
     !scope.checked ||
     !scope.exists ||
     !scope.assigneeMemberKey ||
-    scope.status === 'done' ||
+    scope.statusCategory === 'completed' ||
+    scope.statusCategory === 'canceled' ||
     !event.dueDate ||
     scope.dueDate !== event.dueDate ||
     scheduledMemberKey !== scope.assigneeMemberKey
@@ -1195,17 +1197,21 @@ async function readCurrentWorkItemScope(
   }))
   const item = result.Item
 
-  if (!item || item.directoryTeamId !== directoryTeamId || item.issueId !== event.issueId) {
+  if (
+    !isCanonicalWorkItemRecord(item) ||
+    item.directoryTeamId !== directoryTeamId ||
+    item.issueId !== event.issueId
+  ) {
     return { checked: true, exists: false, projectId: undefined }
   }
 
   return {
     checked: true,
     exists: true,
-    projectId: typeof item.assignedProjectId === 'string' ? item.assignedProjectId : undefined,
-    assigneeMemberKey: normalizeMemberKey(readString(item.assigneeUserId)),
-    dueDate: normalizeStoredDateOnly(readString(item.dueDate)),
-    status: readString(item.status),
+    projectId: item.assignedProjectId,
+    assigneeMemberKey: normalizeMemberKey(item.assigneeUserId),
+    dueDate: normalizeStoredDateOnly(item.dueDate),
+    statusCategory: item.statusCategory,
   }
 }
 

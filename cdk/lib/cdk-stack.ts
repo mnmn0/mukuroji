@@ -31,20 +31,30 @@ const projectOwnerTeamIds = {
  * Canonical Work Item table に初期投入する Refero の demo データです。
  */
 const canonicalWorkItemItems = [
-  ['refero', 'wireframe', 10, 'tasks.item.wireframe', '新しいランディングページのワイヤーフレーム作成', 'sato@example.com', 'in-progress', '2026/06/03', 'high'],
-  ['refero', 'brand-guideline', 20, 'tasks.item.brandGuideline', 'ブランドガイドラインの更新', 'suzuki@example.com', 'review', '2026/06/05', 'medium'],
-  ['refero', 'pricing-content', 30, 'tasks.item.pricingContent', '料金ページのコンテンツ作成', 'tanaka@example.com', 'in-progress', '2026/06/08', 'high'],
-  ['refero', 'seo-research', 40, 'tasks.item.seoResearch', 'SEO キーワードリサーチ', 'yamamoto@example.com', 'todo', '2026/06/09', 'medium'],
-  ['refero', 'hero-design', 50, 'tasks.item.heroDesign', 'ヒーロー画像のデザイン作成', 'sato@example.com', 'review', '2026/06/10', 'medium'],
-  ['refero', 'analytics-tags', 60, 'tasks.item.analyticsTags', 'アナリティクスタグの実装', 'suzuki@example.com', 'in-progress', '2026/06/11', 'low'],
-  ['refero', 'competitor-report', 70, 'tasks.item.competitorReport', '競合サイトの分析レポート作成', 'tanaka@example.com', 'done', '2026/06/02', 'low'],
-  ['refero', 'terms-page', 80, 'tasks.item.termsPage', '利用規約ページの作成', 'yamamoto@example.com', 'todo', '2026/06/12', 'medium'],
-  ['refero', 'faq-content', 90, 'tasks.item.faqContent', 'FAQ セクションのコンテンツ作成', 'sato@example.com', 'todo', '2026/06/15', 'low'],
-  ['refero', 'landing-release', 100, 'tasks.item.landingRelease', 'ランディングページの公開', 'suzuki@example.com', 'todo', '2026/06/16', 'high'],
+  ['refero', 'wireframe', 10, '新しいランディングページのワイヤーフレーム作成', 'sato@example.com', 'in-progress', '2026/06/03', 'high'],
+  ['refero', 'brand-guideline', 20, 'ブランドガイドラインの更新', 'suzuki@example.com', 'review', '2026/06/05', 'medium'],
+  ['refero', 'pricing-content', 30, '料金ページのコンテンツ作成', 'tanaka@example.com', 'in-progress', '2026/06/08', 'high'],
+  ['refero', 'seo-research', 40, 'SEO キーワードリサーチ', 'yamamoto@example.com', 'todo', '2026/06/09', 'medium'],
+  ['refero', 'hero-design', 50, 'ヒーロー画像のデザイン作成', 'sato@example.com', 'review', '2026/06/10', 'medium'],
+  ['refero', 'analytics-tags', 60, 'アナリティクスタグの実装', 'suzuki@example.com', 'in-progress', '2026/06/11', 'low'],
+  ['refero', 'competitor-report', 70, '競合サイトの分析レポート作成', 'tanaka@example.com', 'done', '2026/06/02', 'low'],
+  ['refero', 'terms-page', 80, '利用規約ページの作成', 'yamamoto@example.com', 'todo', '2026/06/12', 'medium'],
+  ['refero', 'faq-content', 90, 'FAQ セクションのコンテンツ作成', 'sato@example.com', 'todo', '2026/06/15', 'low'],
+  ['refero', 'landing-release', 100, 'ランディングページの公開', 'suzuki@example.com', 'todo', '2026/06/16', 'high'],
 ] as const;
 
 /**
- * Legacy task fallback が使用していた決定的な timestamp です。
+ * Built-in workflow status ID に対応する canonical category です。
+ */
+const canonicalWorkflowStatusCategories = {
+  todo: 'unstarted',
+  'in-progress': 'started',
+  review: 'started',
+  done: 'completed',
+} as const;
+
+/**
+ * Canonical Work Item seed に使用する決定的な timestamp です。
  */
 const canonicalWorkItemSeedTimestamp = '2026-06-01T00:00:00.000Z';
 
@@ -291,10 +301,9 @@ function createCanonicalWorkItemTransactItems(tableName: string, directoryId: st
     projectId,
     workItemId,
     sortOrder,
-    titleKey,
     title,
     assigneeUserId,
-    status,
+    workflowStatusId,
     dueDate,
     priority,
   ]) => {
@@ -311,23 +320,21 @@ function createCanonicalWorkItemTransactItems(tableName: string, directoryId: st
           teamId: { S: teamId },
           assignedProjectId: { S: projectId },
           issueId: { S: workItemId },
-          workItemId: { S: workItemId },
           schemaVersion: { N: '1' },
           revision: { N: '1' },
           sortOrder: { N: String(sortOrder) },
-          titleKey: { S: titleKey },
           title: { S: title },
           assigneeUserId: { S: assigneeUserId },
-          status: { S: status },
+          creatorMemberKey: { S: assigneeUserId },
+          workflowSchemaVersion: { N: '1' },
+          workflowStatusId: { S: workflowStatusId },
+          statusCategory: { S: canonicalWorkflowStatusCategories[workflowStatusId] },
+          customFieldValues: { M: {} },
+          relationIds: { L: [] },
           dueDate: { S: dueDate },
           priority: { S: priority },
           createdAt: { S: canonicalWorkItemSeedTimestamp },
           updatedAt: { S: canonicalWorkItemSeedTimestamp },
-          source: { S: 'dynamodb' },
-          migrationSource: { S: 'legacy-project-task' },
-          migrationSourceKey: {
-            S: `${createDirectoryProjectId(directoryId, projectId)}#task#${workItemId}`,
-          },
         },
       },
     };
@@ -989,7 +996,6 @@ export class CdkStack extends cdk.Stack {
         MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
         MUKUROJI_TEAM_ISSUES_TABLE: workItemsTable.tableName,
-        MUKUROJI_WORK_ITEM_CONFIGURATION_TABLE: workItemConfigurationTable.tableName,
         MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
         MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
         NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,

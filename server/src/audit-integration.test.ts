@@ -5,7 +5,6 @@ import {
   app,
   configureApiClientsForTest,
   DynamoDbProjectDirectoryClient,
-  DynamoDbProjectTasksClient,
   DynamoDbTeamIssuesClient,
   resetApiClientsForTest,
 } from './index'
@@ -16,38 +15,6 @@ const occurredAt = '2026-07-11T12:00:00.000Z'
 
 afterEach(() => {
   resetApiClientsForTest()
-})
-
-test('legacy project task mutations are rejected before state or audit writes', async () => {
-  const recording = createRecordingDocumentClient(() => ({}))
-  const client = new DynamoDbProjectTasksClient(
-    'TasksTable',
-    recording.client,
-    undefined,
-    false,
-    'AuditTable',
-  )
-  await expect(client.createProjectTask(workspaceId, 'refero', {
-    title: 'Prepare audit launch',
-    assigneeUserId: actorUserId,
-    status: 'todo',
-    dueDate: '2026/07/31',
-    priority: 'high',
-  }, createAuditContext('legacy-create'))).rejects.toMatchObject({
-    code: 'LegacyProjectTaskReadOnly',
-    status: 409,
-  })
-  await expect(client.updateProjectTaskStatus(
-    workspaceId,
-    'refero',
-    'prepare-audit-launch',
-    { status: 'done', expectedRevision: 1 },
-    createAuditContext('legacy-update'),
-  )).rejects.toMatchObject({
-    code: 'LegacyProjectTaskReadOnly',
-    status: 409,
-  })
-  expect(recording.commands).toEqual([])
 })
 
 test('project directory mutations write state and audit in one transaction', async () => {
@@ -114,12 +81,14 @@ test('team issue mutations keep state, specialized activity, and generic audit a
     {
       title: 'Ship audit trail',
       assigneeUserId: actorUserId,
-      status: 'todo',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
       dueDate: '2026/07/31',
       priority: 'high',
     },
     actorUserId,
-    [],
     createAuditContext('create-team-issue'),
   )
 
@@ -136,6 +105,7 @@ test('team issue mutations keep state, specialized activity, and generic audit a
         issueId: 'ship-audit-trail',
         schemaVersion: 1,
         revision: 1,
+        relationIds: [],
       },
     },
   })
@@ -183,7 +153,12 @@ test('canonical Work Item audit diff is guarded by expected revision CAS', async
     workspaceId,
     'core-team',
     'issue-1',
-    { status: 'done', expectedRevision: 1 },
+    {
+      expectedRevision: 1,
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'done',
+      statusCategory: 'completed',
+    },
     actorUserId,
     createAuditContext('update-team-issue'),
   )
@@ -194,8 +169,7 @@ test('canonical Work Item audit diff is guarded by expected revision CAS', async
   expect(stateUpdate).toMatchObject({
     ConditionExpression:
       'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
-      '(#revision = :expectedRevision OR ' +
-      '(attribute_not_exists(#revision) AND :expectedRevision = :legacyRevision))',
+      '#revision = :expectedRevision',
     ExpressionAttributeValues: {
       ':expectedRevision': 1,
       ':nextRevision': 2,
@@ -337,11 +311,18 @@ test('issue activity authorizes the parent and forwards its pagination cursor', 
     async getTeamIssueDetail(_directoryId: string, teamId: string) {
       return {
         issue: {
+          schemaVersion: 1 as const,
+          revision: 1,
           id: 'issue-1',
           teamId,
           title: 'Audit integration',
           assigneeUserId: actorUserId,
-          status: 'todo' as const,
+          creatorMemberKey: actorUserId,
+          workflowSchemaVersion: 1 as const,
+          workflowStatusId: 'todo',
+          statusCategory: 'unstarted' as const,
+          customFieldValues: {},
+          relationIds: [],
           dueDate: '2026/07/31',
           priority: 'high' as const,
           createdAt: occurredAt,
@@ -486,10 +467,17 @@ function createTeamIssueItem(issueId: string) {
     directoryTeamId: `${workspaceId}#team#core-team`,
     teamId: 'core-team',
     issueId,
+    schemaVersion: 1,
+    revision: 1,
     sortOrder: 10,
     title: 'Audit integration',
     assigneeUserId: actorUserId,
-    status: 'todo',
+    creatorMemberKey: actorUserId,
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/07/31',
     priority: 'high',
     createdAt: occurredAt,
