@@ -8,6 +8,7 @@ import {
   createCustomFieldErrorMessages,
   filterWorkItemsByTeam,
   readSelectedRelationGraphRevision,
+  resolveLegacyStatusForWorkflowStatus,
 } from '../src/work-items/workItemDisplay'
 
 describe('Work Item display helpers', () => {
@@ -90,5 +91,21 @@ describe('Work Item display helpers', () => {
       issue: { id: 'issue-a' },
       relationGraphRevision: 4,
     }, 'issue-a', translate)).toBe(4)
+  })
+
+  test('maps workflow categories before applying the legacy review special case', () => {
+    const status = (id: string, category: 'unstarted' | 'started' | 'completed' | 'canceled') => ({
+      category,
+      id,
+      name: id,
+      sortOrder: 0,
+    })
+
+    expect(resolveLegacyStatusForWorkflowStatus(status('review', 'completed'))).toBe('done')
+    expect(resolveLegacyStatusForWorkflowStatus(status('review', 'canceled'))).toBe('done')
+    expect(resolveLegacyStatusForWorkflowStatus(status('review', 'started'))).toBe('review')
+    expect(resolveLegacyStatusForWorkflowStatus(status('implementing', 'started')))
+      .toBe('in-progress')
+    expect(resolveLegacyStatusForWorkflowStatus(status('review', 'unstarted'))).toBe('todo')
   })
 })

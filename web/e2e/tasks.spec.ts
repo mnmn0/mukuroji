@@ -3487,6 +3487,57 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-detail-pane').locator('textarea[name="description"]')).toHaveValue('core team detail')
   })
 
+  test('teamId のない曖昧な issueId deep-link は Team 固有 API を呼ばず aggregate URL へ戻す', async ({
+    page,
+  }) => {
+    const teamScopedRequestPaths: string[] = []
+
+    page.on('request', (request) => {
+      const pathname = new URL(request.url()).pathname
+
+      if (
+        /^\/api\/teams\/(?:core-team|design-team)\/(?:work-item-configuration|issues(?:\/|$))/.test(
+          pathname,
+        )
+      ) {
+        teamScopedRequestPaths.push(pathname)
+      }
+    })
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            description: 'core ambiguous detail',
+            id: 'ambiguous-issue',
+            status: 'in-progress',
+            teamId: 'core-team',
+            title: 'Core ambiguous issue',
+          }),
+        ],
+        'design-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            description: 'design ambiguous detail',
+            id: 'ambiguous-issue',
+            status: 'review',
+            teamId: 'design-team',
+            title: 'Design ambiguous issue',
+          }),
+        ],
+      },
+    })
+
+    await page.goto('/projects/shared-launch/issues?issueId=ambiguous-issue')
+
+    await expect(page).toHaveURL('/projects/shared-launch/issues')
+    await expect(page.getByTestId('task-row-ambiguous-issue')).toHaveCount(2)
+    await expect(page.getByRole('button', { name: 'Core ambiguous issue' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Design ambiguous issue' })).toBeVisible()
+    expect(teamScopedRequestPaths).toEqual([])
+  })
+
   test('teamId のない共有 Project URL は全 Team の Issue を保持する', async ({ page }) => {
     const requestedConfigurationTeamIds: string[] = []
 

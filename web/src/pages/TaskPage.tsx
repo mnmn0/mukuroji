@@ -619,7 +619,17 @@ export function TaskPage() {
   const tasks = selectedTeamId
     ? filterWorkItemsByTeam(projectIssues, selectedTeamId)
     : projectIssues
-  const requestedIssue = findIssueBySelection(tasks, selectedIssueId, selectedTeamId)
+  const requestedIssueCandidates = selectedIssueId
+    ? tasks.filter((issue) =>
+        issue.id === selectedIssueId && (!selectedTeamId || issue.teamId === selectedTeamId),
+      )
+    : emptyTeamIssues
+  const hasAmbiguousIssueSelection = Boolean(
+    selectedIssueId && !selectedTeamId && requestedIssueCandidates.length > 1,
+  )
+  const requestedIssue = hasAmbiguousIssueSelection
+    ? undefined
+    : requestedIssueCandidates[0]
   const resolvedSelectedIssue = requestedIssue ?? tasks[0]
   const requestedIssueTeamId = (
     selectedIssueId && requestedIssue ? requestedIssue.teamId : undefined
@@ -786,6 +796,19 @@ export function TaskPage() {
     nextSearchParams.delete('create')
     setSearchParams(nextSearchParams, { replace: true })
   }, [isCreateTaskRequested, searchParams, setSearchParams])
+
+  useEffect(() => {
+    if (!hasAmbiguousIssueSelection) {
+      return
+    }
+
+    const nextSearchParams = new URLSearchParams(searchParams)
+
+    nextSearchParams.delete('issueId')
+    nextSearchParams.delete('commentId')
+    nextSearchParams.delete('rootCommentId')
+    setSearchParams(nextSearchParams, { replace: true })
+  }, [hasAmbiguousIssueSelection, searchParams, setSearchParams])
 
   const userInitial =
     (user?.attributes.name ?? user?.attributes.email ?? user?.username ?? 'J')
@@ -1617,20 +1640,6 @@ function normalizeProjectIssueError(error: unknown) {
   }
 
   return error
-}
-
-function findIssueBySelection(
-  issues: TeamIssue[],
-  selectedIssueId?: string,
-  selectedTeamId?: string,
-) {
-  if (!selectedIssueId) {
-    return undefined
-  }
-
-  return issues.find((issue) =>
-    issue.id === selectedIssueId && (!selectedTeamId || issue.teamId === selectedTeamId),
-  )
 }
 
 function findTaskBySelection(

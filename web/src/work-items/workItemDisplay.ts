@@ -389,14 +389,11 @@ export function resolveEditableWorkflowStatuses(
 export function resolveLegacyStatusForWorkflowStatus(
   status: WorkflowStatusDefinition,
 ): WorkItemStatus {
-  if (status.id === 'review') {
-    return 'review'
-  }
   if (status.category === 'completed' || status.category === 'canceled') {
     return 'done'
   }
   if (status.category === 'started') {
-    return 'in-progress'
+    return status.id === 'review' ? 'review' : 'in-progress'
   }
 
   return 'todo'
