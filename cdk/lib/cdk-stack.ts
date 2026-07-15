@@ -1067,6 +1067,7 @@ export class CdkStack extends cdk.Stack {
       {
         statements: [new iam.PolicyStatement({
           actions: [
+            'dynamodb:ConditionCheckItem',
             'dynamodb:DeleteItem',
             'dynamodb:DescribeTable',
             'dynamodb:GetItem',

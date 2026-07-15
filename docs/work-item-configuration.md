@@ -43,7 +43,7 @@ CDK は table を `PAY_PER_REQUEST`、PITR enabled、`Retain` で作成する。
 | `revision` | yes | 作成時 `1`、更新成功ごとに `1` 増加する正の整数。 |
 | `workflow` | yes | 解決済み scope で使用する workflow definition。 |
 | `customFields` | yes | Scope に適用する custom field definition の配列。 |
-| `updatedAt` | yes | UTC ISO 8601 timestamp。 |
+| `updatedAt` | no | 永続化済み configuration の最終更新を表す UTC ISO 8601 timestamp。built-in default では省略する。 |
 
 未知の `schemaVersion`、不正 revision、scope key と payload の不一致を黙って読み飛ばさない。API は stable error を返し、管理 mutation と Work Item mutation を停止する。
 
@@ -119,7 +119,7 @@ Definition は stable `id`、表示名、`type`、`sortOrder`、`required`、任
 | `multi-select` | 重複のない option ID string array | 各 ID が現行 option に存在し、`minLength` / `maxLength` を満たすこと。保存前に重複を拒否し、definition order で正規化する。 |
 | `person` | Workspace member ID string | 同じ Workspace の active member であること。email 表示名を ID として新規保存しない。 |
 | `currency` | Major unit の finite JSON number | Definition の uppercase ISO 4217 `currencyCode` を必須にし、currency minor-unit precision、`min` / `max` を適用する。 |
-| `duration` | Non-negative finite JSON number | Definition の `durationUnit=minutes|hours|days` を必須にし、`min` / `max` を同じ単位で適用する。 |
+| `duration` | Non-negative finite JSON number | Definition の `durationUnit=minutes\|hours\|days` を必須にし、`min` / `max` を同じ単位で適用する。 |
 | `formula` | API が算出する JSON number | Client input を拒否し、同じ mutation 内で参照 field から決定的に再計算して保存する。 |
 
 `required=true` は空文字、空配列、未設定を拒否する。`false` と `0` は有効な値である。Default は definition 保存時にも同じ validator を通し、Work Item 作成時だけ補完する。更新のたびに削除済み value を default で復活させない。未知 field ID、scope 外 field、formula への直接入力を保存しない。
@@ -195,7 +195,7 @@ Migration は `TeamIssuesTable` の key/schemaを変更せず、canonical Work I
 | `statusCategory` | `todo -> unstarted`, `in-progress/review -> started`, `done -> completed` |
 | `customFieldValues` | `{}` |
 
-Script は未知 Work Item schema、不正 revision、未知 status、既存 metadata との矛盾、object でない `customFieldValues` を fail-closed にする。Update は key existence、`schemaVersion`、`revision`、既存 status、対象 metadata の `attribute_not_exists` を condition に含め、業務 fieldとrevisionを変更しない。Conditional race 後は consistent read し、同じ完成状態だけを duplicate success として扱う。
+Script は未知 Work Item schema、不正 revision、未知 status、既存 metadata との矛盾、object でない `customFieldValues` を fail-closed にする。Update は key existence、`schemaVersion`、`revision`、既存 status、対象 metadata の `attribute_not_exists` を condition に含め、業務 fieldとrevisionを変更しない。Conditional race 後は consistent read し、同じ完成状態だけを duplicate success として扱う。未完了の row は `conflicts` に集計して後続 row の処理を継続するが、CLI は非ゼロ終了するため、write freeze を確認して再実行する。
 
 ### 実行手順
 
@@ -203,7 +203,7 @@ Script は未知 Work Item schema、不正 revision、未知 status、既存 met
 2. 既存 application のまま短い write freeze を設定し、完了まで新規 Work Item mutation を止める。
 3. Configuration table と両 environment variable を含む application/CDK revision を deploy する。
 4. Dry-run で全 row の `wouldUpdate` / `unchanged` / `invalid` を確認する。
-5. Apply は事前 full preflight に成功した場合だけ実行する。
+5. Apply は事前 full preflight に成功した場合だけ実行し、`conflicts=0` を確認する。`conflicts>0` の場合は競合要因を止めて再実行する。
 6. Verify で `missing=0 invalid=0` を確認する。
 7. Team / project / Workspace list、dynamic board、filter/report、detail update、relation create/delete を確認して write を再開する。
 

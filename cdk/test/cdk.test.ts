@@ -1097,8 +1097,14 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
       JSON.stringify(statement.Resource).includes('WorkspaceSearchTable2575AD6B');
   });
   const configurationDataStatement = statements.find((statement) =>
-    JSON.stringify(statement.Resource).includes('WorkItemConfigurationTable35E94558') &&
-    Array.isArray(statement.Action)
+    JSON.stringify(statement.Resource) === JSON.stringify({
+      'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'],
+    }) &&
+    Array.isArray(statement.Action) &&
+    statement.Action.includes('dynamodb:ConditionCheckItem')
+  );
+  const configurationStatements = statements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes('WorkItemConfigurationTable35E94558')
   );
   const cognitoPolicy = Object.values(template.toJSON().Resources).find((resource) =>
     JSON.stringify(resource).includes('cognito-idp:AdminGetUser')
@@ -1153,16 +1159,24 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     'dynamodb:TransactWriteItems',
     'dynamodb:UpdateItem',
   ]));
-  expect(configurationDataStatement).toEqual(expect.objectContaining({
-    Action: expect.arrayContaining([
+  expect(configurationDataStatement).toEqual({
+    Action: [
+      'dynamodb:ConditionCheckItem',
       'dynamodb:DeleteItem',
+      'dynamodb:DescribeTable',
       'dynamodb:GetItem',
       'dynamodb:PutItem',
       'dynamodb:Query',
       'dynamodb:UpdateItem',
-    ]),
+    ],
     Effect: 'Allow',
-  }));
+    Resource: { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
+  });
+  expect(configurationStatements).toHaveLength(2);
+  expect(configurationStatements).toEqual(expect.arrayContaining([
+    configurationDataStatement,
+    transactStatement,
+  ]));
 
   const legacyTaskStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('ProjectTasksTableE21F6637')

@@ -243,7 +243,7 @@ Upgrade 前後では次を確認します。
 2. deploy 後に `WorkItemConfigurationTableName` output と Lambda の両 environment variable が同じ table を指すことを確認する。
 3. API role の read/write/transaction resource に configuration table が含まれ、legacy `ProjectTasksTable` の write 権限が増えていないことを確認する。
 4. `WORK_ITEMS_TABLE_NAME` を canonical table output に設定し、configuration metadata migration を実行する。
-5. Workspace default 未登録、Workspace default、Team override の各 API readと、relation transaction の graph revision conflict を確認する。
+5. Workspace default 未登録、Workspace default、Team override の各 API read と、relation transaction の graph revision conflict を確認する。
 
 Table は `Retain` + PITR のため code rollback で削除しません。旧 code は configuration table を参照せず、Work Item の additive metadata も無視できます。rollback 時は write を停止し、現行 template の configuration table・environment・IAM resource を残したまま旧 application artifact へ戻します。Table 追加前の CDK template をそのまま deploy すると、物理 table は `Retain` されても stack から detach されるため禁止します。誤って detach した場合は original table を resource import で再接続し、同じ table を Lambda environment が参照していることを確認してから roll-forward します。Configuration row や補完済み Work Item metadataは一括削除しません。
 
