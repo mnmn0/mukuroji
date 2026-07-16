@@ -7,6 +7,7 @@ import {
 } from '@aws-sdk/client-dynamodb'
 import {
   type DynamoDBDocumentClient,
+  GetCommand,
   QueryCommand,
   type QueryCommandInput,
   type TransactWriteCommandInput,
@@ -1026,6 +1027,30 @@ export class DynamoDbAuditEventsClient {
     }
     this.dynamoDbClient = dynamoDbClient
     this.bootstrapLocalTables = bootstrapLocalTables
+  }
+
+  /**
+   * Deterministic ID の audit event を強整合読みで返します。
+   */
+  async getEvent(workspaceId: string, eventId: string) {
+    if (this.bootstrapLocalTables && this.dynamoDbClient) {
+      await ensureLocalAuditEventsTable(this.tableName, this.dynamoDbClient)
+    }
+    const normalizedWorkspaceId = requireText(workspaceId, 'Audit workspace ID')
+    const normalizedEventId = requireText(eventId, 'Audit event ID')
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        directoryId: normalizedWorkspaceId,
+        eventId: normalizedEventId,
+      },
+      ConsistentRead: true,
+    }))
+    if (!response.Item) return undefined
+    const event = upcastAuditEvent(response.Item)
+    return event.workspaceId === normalizedWorkspaceId && event.eventId === normalizedEventId
+      ? event
+      : undefined
   }
 
   /**

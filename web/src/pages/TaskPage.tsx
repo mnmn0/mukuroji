@@ -1,4 +1,7 @@
 import type {
+  BulkOperation,
+  BulkOperationPreview,
+  BulkOperationRequest,
   ResolvedWorkItemConfiguration,
   WorkflowStatusDefinition,
   WorkItemConfiguration,
@@ -39,6 +42,21 @@ import {
   type MessageKey,
 } from '../i18n'
 import { useUnreadNotificationCount } from '../notifications/useNotifications'
+import {
+  applyBulkOperation,
+  previewBulkOperation,
+  retryBulkOperation,
+  undoBulkOperation,
+} from '../bulk-operations/api'
+import {
+  BulkOperationToolbar,
+  type BulkOperationProjectOption,
+  type BulkOperationSelection,
+} from '../bulk-operations/BulkOperationToolbar'
+import {
+  clearSucceededBulkSelection,
+  updateBulkItemSelection,
+} from '../bulk-operations/helpers'
 import {
   archiveProjectDirectoryProject,
   archiveProjectDirectoryTeam,
@@ -259,6 +277,8 @@ type ProjectTaskStatusColumn = {
  * タスク専用画面を描画するための props です。
  */
 type TaskScreenProps = {
+  /** Bulk operation request に含める現在の Workspace ID です。 */
+  workspaceId?: string
   /**
    * 表示 locale です。
    */
@@ -508,6 +528,17 @@ type TaskScreenProps = {
    * project member role 削除時の callback です。
    */
   onRemoveProjectMember?: (projectId: string, memberKey: string) => Promise<void>
+  /** Bulk operation の validation preview を取得する callback です。 */
+  onBulkPreview?: (request: BulkOperationRequest) => Promise<BulkOperationPreview>
+  /** Preview 済み Bulk operation を確定する callback です。 */
+  onBulkApply?: (
+    request: BulkOperationRequest,
+    preview: BulkOperationPreview,
+  ) => Promise<BulkOperation>
+  /** Bulk operation の retryable failed item を再試行する callback です。 */
+  onBulkRetry?: (operationId: string) => Promise<BulkOperation>
+  /** Bulk operation の成功 item を undo する callback です。 */
+  onBulkUndo?: (operationId: string) => Promise<BulkOperation>
 }
 
 const viewLabelKeys: Record<TaskTab, MessageKey> = {
@@ -884,6 +915,11 @@ export function TaskPage() {
       .trim()
       .charAt(0)
       .toUpperCase() || 'J'
+  const workspaceId = (
+    user?.attributes['custom:workspace_id'] ??
+    user?.attributes['custom:directory_id'] ??
+    ''
+  ).trim()
 
   const handleCreateTask = async (input: CreateProjectTaskInput) => {
     if (!accessToken) {
@@ -1101,6 +1137,74 @@ export function TaskPage() {
     }
   }
 
+  const revalidateAfterBulkOperation = async () => {
+    await Promise.all([
+      mutateProjectTasks(),
+      mutateSelectedIssueDetail(),
+    ])
+  }
+
+  const handleBulkPreview = async (request: BulkOperationRequest) => {
+    if (!accessToken) {
+      throw new Error(t('bulk.error'))
+    }
+
+    return mutationRequestRunner.run(
+      'bulk:preview',
+      JSON.stringify(request),
+      (context) => previewBulkOperation(accessToken, request, context),
+    )
+  }
+
+  const handleBulkApply = async (
+    request: BulkOperationRequest,
+    preview: BulkOperationPreview,
+  ) => {
+    if (!accessToken) {
+      throw new Error(t('bulk.error'))
+    }
+
+    const operation = await mutationRequestRunner.run(
+      'bulk:apply',
+      JSON.stringify([request, preview.operationToken]),
+      (context) => applyBulkOperation(
+        accessToken,
+        { ...request, operationToken: preview.operationToken },
+        context,
+      ),
+    )
+    await revalidateAfterBulkOperation()
+    return operation
+  }
+
+  const handleBulkRetry = async (operationId: string) => {
+    if (!accessToken) {
+      throw new Error(t('bulk.error'))
+    }
+
+    const operation = await mutationRequestRunner.run(
+      `bulk:retry:${operationId}`,
+      operationId,
+      (context) => retryBulkOperation(accessToken, operationId, context),
+    )
+    await revalidateAfterBulkOperation()
+    return operation
+  }
+
+  const handleBulkUndo = async (operationId: string) => {
+    if (!accessToken) {
+      throw new Error(t('bulk.error'))
+    }
+
+    const operation = await mutationRequestRunner.run(
+      `bulk:undo:${operationId}`,
+      operationId,
+      (context) => undoBulkOperation(accessToken, operationId, context),
+    )
+    await revalidateAfterBulkOperation()
+    return operation
+  }
+
   const handleAddRelation = async (
     issueId: string,
     input: WorkItemRelationEditorInput,
@@ -1173,6 +1277,7 @@ export function TaskPage() {
 
   return (
     <TaskScreen
+      workspaceId={workspaceId}
       configurationErrorMessage={configurationErrorMessage}
       isLoading={isLoading}
       isRelationCandidatesLoading={Boolean(relationCandidatesKey && isRelationCandidatesLoading)}
@@ -1217,6 +1322,10 @@ export function TaskPage() {
       onSelectedIssueChange={handleSelectedIssueChange}
       onUpdateIssue={canMutateContent ? handleUpdateIssue : undefined}
       onUpdateProjectMember={canManageProjectMembers ? handleUpdateProjectMember : undefined}
+      onBulkApply={canMutateContent && workspaceId ? handleBulkApply : undefined}
+      onBulkPreview={canMutateContent && workspaceId ? handleBulkPreview : undefined}
+      onBulkRetry={canMutateContent && workspaceId ? handleBulkRetry : undefined}
+      onBulkUndo={canMutateContent && workspaceId ? handleBulkUndo : undefined}
       projectId={projectId}
       projectFiles={projectFiles}
       projectMembers={projectMembers}
@@ -1247,6 +1356,7 @@ export function TaskPage() {
  * サイドバー、プロジェクトヘッダー、タスクテーブルを含むタスク管理画面です。
  */
 export function TaskScreen({
+  workspaceId = '',
   locale,
   projectId,
   userInitial,
@@ -1306,6 +1416,10 @@ export function TaskScreen({
   onRetryConfigurations,
   onUpdateIssue,
   onUpdateProjectMember,
+  onBulkPreview,
+  onBulkApply,
+  onBulkRetry,
+  onBulkUndo,
   workspaceMembers = emptyWorkspaceMembers,
 }: TaskScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
@@ -1326,7 +1440,7 @@ export function TaskScreen({
   const [isDueDateMenuOpen, setIsDueDateMenuOpen] = useState(false)
   const [sortOrder, setSortOrder] = useState<TaskSortOrder>('due-date-asc')
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false)
-  const [selectedTaskKeys, setSelectedTaskKeys] = useState<string[]>([])
+  const [selectedBulkItems, setSelectedBulkItems] = useState<BulkOperationSelection[]>([])
   const [localSelectedDetailTaskKey, setLocalSelectedDetailTaskKey] = useState<string | undefined>()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
@@ -1453,6 +1567,25 @@ export function TaskScreen({
       resolvedConfigurationsByTeam,
     ],
   )
+  const bulkProjectOptions = useMemo<BulkOperationProjectOption[]>(() => {
+    const projectsById = new Map<string, BulkOperationProjectOption>()
+
+    for (const team of teams) {
+      for (const project of team.projects) {
+        projectsById.set(project.id, { id: project.id, label: project.name })
+      }
+    }
+
+    return [...projectsById.values()].sort((left, right) => left.label.localeCompare(right.label))
+  }, [teams])
+  const selectedTaskKeys = useMemo(
+    () => selectedBulkItems.map((item) => item.selectionKey),
+    [selectedBulkItems],
+  )
+  const visibleBulkItems = useMemo(
+    () => visibleTasks.map((task) => createBulkOperationSelection(task, t)),
+    [t, visibleTasks],
+  )
   const selectedDetailTask =
     (localSelectedDetailTaskKey
       ? tasks.find((task) => createTaskKey(task) === localSelectedDetailTaskKey)
@@ -1474,11 +1607,28 @@ export function TaskScreen({
   }, [isCreateTaskOpen])
 
   const updateTaskSelection = (taskKey: string, selected: boolean) => {
-    setSelectedTaskKeys((currentTaskKeys) =>
-      selected
-        ? [...new Set([...currentTaskKeys, taskKey])]
-        : currentTaskKeys.filter((currentTaskKey) => currentTaskKey !== taskKey),
+    const task = tasks.find((candidate) => createTaskKey(candidate) === taskKey)
+    const availableItems = task ? [createBulkOperationSelection(task, t)] : []
+    setSelectedBulkItems((currentItems) =>
+      updateBulkItemSelection(currentItems, availableItems, [taskKey], selected),
     )
+  }
+
+  const updateVisibleTaskSelection = (selectionKeys: string[], selected: boolean) => {
+    setSelectedBulkItems((currentItems) =>
+      updateBulkItemSelection(currentItems, visibleBulkItems, selectionKeys, selected),
+    )
+  }
+
+  const handleBulkOperationComplete = (operation: BulkOperation) => {
+    setSelectedBulkItems((currentItems) => {
+      const nextSelectionKeys = new Set(clearSucceededBulkSelection(
+        currentItems.map((item) => item.selectionKey),
+        currentItems,
+        operation,
+      ))
+      return currentItems.filter((item) => nextSelectionKeys.has(item.selectionKey))
+    })
   }
 
   const handleSelectDetailTask = (task: ProjectTask) => {
@@ -1630,6 +1780,8 @@ export function TaskScreen({
               <TaskWorkspace
                 activeTab={activeTab}
                 allTasks={tasks}
+                bulkProjectOptions={bulkProjectOptions}
+                bulkWorkspaceId={workspaceId}
                 assigneeFilter={assigneeFilter}
                 canManageProjectMembers={canManageProjectMembers}
                 configuration={configuration}
@@ -1665,6 +1817,11 @@ export function TaskScreen({
                   setIsAssigneeMenuOpen(false)
                 }}
                 onAssigneeMenuOpenChange={setIsAssigneeMenuOpen}
+                onBulkApply={onBulkApply}
+                onBulkOperationComplete={handleBulkOperationComplete}
+                onBulkPreview={onBulkPreview}
+                onBulkRetry={onBulkRetry}
+                onBulkUndo={onBulkUndo}
                 onDueDateFilterChange={(nextDueDateFilter) => {
                   setDueDateFilter(nextDueDateFilter)
                   setIsDueDateMenuOpen(false)
@@ -1693,13 +1850,16 @@ export function TaskScreen({
                 }}
                 onStatusMenuOpenChange={setIsStatusMenuOpen}
                 onTaskSelectionChange={updateTaskSelection}
+                onVisibleTaskSelectionChange={updateVisibleTaskSelection}
                 onUpdateProjectMember={onUpdateProjectMember}
                 searchQuery={searchQuery}
                 selectedTaskKeys={selectedTaskKeys}
+                selectedBulkItems={selectedBulkItems}
                 statusFilter={effectiveStatusFilter}
                 t={t}
                 taskErrorMessage={taskErrorMessage}
                 tasks={visibleTasks}
+                visibleBulkItems={visibleBulkItems}
                 currentWorkspaceMemberKey={currentWorkspaceMemberKey}
                 workspaceMembers={workspaceMembers}
                 statusColumns={statusColumns}
@@ -1960,6 +2120,8 @@ function TaskHeader({
 function TaskWorkspace({
   activeTab,
   allTasks,
+  bulkProjectOptions,
+  bulkWorkspaceId,
   assigneeFilter,
   canManageProjectMembers,
   configuration,
@@ -1992,6 +2154,11 @@ function TaskWorkspace({
   sortOrder,
   onAssigneeFilterChange,
   onAssigneeMenuOpenChange,
+  onBulkApply,
+  onBulkOperationComplete,
+  onBulkPreview,
+  onBulkRetry,
+  onBulkUndo,
   onDueDateFilterChange,
   onDueDateMenuOpenChange,
   onDefinitionFilterChange,
@@ -2008,19 +2175,24 @@ function TaskWorkspace({
   onStatusFilterChange,
   onStatusMenuOpenChange,
   onTaskSelectionChange,
+  onVisibleTaskSelectionChange,
   onUpdateProjectMember,
   searchQuery,
   selectedTaskKeys,
+  selectedBulkItems,
   statusFilter,
   t,
   taskErrorMessage,
   tasks,
+  visibleBulkItems,
   currentWorkspaceMemberKey,
   workspaceMembers,
   statusColumns,
 }: {
   activeTab: TaskTab
   allTasks: ProjectTask[]
+  bulkProjectOptions: BulkOperationProjectOption[]
+  bulkWorkspaceId: string
   assigneeFilter: AssigneeFilter
   canManageProjectMembers: boolean
   /** Work Item の表示と集計に使う設定です。 */
@@ -2060,6 +2232,14 @@ function TaskWorkspace({
   sortOrder: TaskSortOrder
   onAssigneeFilterChange: (assigneeFilter: AssigneeFilter) => void
   onAssigneeMenuOpenChange: (isOpen: boolean) => void
+  onBulkApply?: (
+    request: BulkOperationRequest,
+    preview: BulkOperationPreview,
+  ) => Promise<BulkOperation>
+  onBulkOperationComplete: (operation: BulkOperation) => void
+  onBulkPreview?: (request: BulkOperationRequest) => Promise<BulkOperationPreview>
+  onBulkRetry?: (operationId: string) => Promise<BulkOperation>
+  onBulkUndo?: (operationId: string) => Promise<BulkOperation>
   onDueDateFilterChange: (dueDateFilter: DueDateFilter) => void
   onDueDateMenuOpenChange: (isOpen: boolean) => void
   /** Workflow category と custom field 値の filter 変更 callback です。 */
@@ -2077,6 +2257,7 @@ function TaskWorkspace({
   onStatusFilterChange: (statusFilter: StatusFilter) => void
   onStatusMenuOpenChange: (isOpen: boolean) => void
   onTaskSelectionChange: (taskKey: string, selected: boolean) => void
+  onVisibleTaskSelectionChange: (selectionKeys: string[], selected: boolean) => void
   onUpdateProjectMember?: (
     projectId: string,
     memberKey: string,
@@ -2084,10 +2265,12 @@ function TaskWorkspace({
   ) => Promise<void>
   searchQuery: string
   selectedTaskKeys: string[]
+  selectedBulkItems: BulkOperationSelection[]
   statusFilter: StatusFilter
   t: (key: MessageKey) => string
   taskErrorMessage?: string
   tasks: ProjectTask[]
+  visibleBulkItems: BulkOperationSelection[]
   currentWorkspaceMemberKey?: string
   workspaceMembers: WorkspaceMember[]
   /** Filter と board の列に表示する Team-scoped workflow status です。 */
@@ -2395,6 +2578,23 @@ function TaskWorkspace({
         />
       </div>
 
+      {activeTab === 'table' ? (
+        <BulkOperationToolbar
+          projectOptions={bulkProjectOptions}
+          readOnly={!bulkWorkspaceId || !onBulkPreview || !onBulkApply}
+          selectedItems={selectedBulkItems}
+          t={t}
+          visibleItems={visibleBulkItems}
+          workspaceId={bulkWorkspaceId}
+          onApply={onBulkApply}
+          onOperationComplete={onBulkOperationComplete}
+          onPreview={onBulkPreview}
+          onRetry={onBulkRetry}
+          onUndo={onBulkUndo}
+          onVisibleSelectionChange={onVisibleTaskSelectionChange}
+        />
+      ) : null}
+
       {taskErrorMessage && activeTab !== 'table' ? (
         <p
           className="mt-3 rounded-md border border-red-200 bg-red-50 px-5 py-4 text-sm font-semibold text-red-700"
@@ -2415,6 +2615,7 @@ function TaskWorkspace({
           personLabels={personLabels}
           selectedDetailTaskKey={selectedDetailTaskKey}
           selectedTaskKeys={selectedTaskKeys}
+          selectionReadOnly={!bulkWorkspaceId || !onBulkPreview || !onBulkApply}
           onCreateTaskOpen={onCreateTaskOpen}
           onSelectTask={onSelectTask}
           onTaskSelectionChange={onTaskSelectionChange}
@@ -2713,6 +2914,7 @@ function TaskTable({
   personLabels,
   selectedDetailTaskKey,
   selectedTaskKeys,
+  selectionReadOnly,
   onCreateTaskOpen,
   onSelectTask,
   onTaskSelectionChange,
@@ -2727,6 +2929,7 @@ function TaskTable({
   personLabels: Readonly<Record<string, string>>
   selectedDetailTaskKey?: string
   selectedTaskKeys: string[]
+  selectionReadOnly: boolean
   onCreateTaskOpen?: () => void
   onSelectTask: (task: ProjectTask) => void
   onTaskSelectionChange: (taskKey: string, selected: boolean) => void
@@ -2813,6 +3016,7 @@ function TaskTable({
                   onSelectTask={onSelectTask}
                   selectedForDetail={selectedDetailTaskKey === createTaskKey(task)}
                   selected={selectedTaskKeys.includes(createTaskKey(task))}
+                  selectionReadOnly={selectionReadOnly}
                   t={t}
                   task={task}
                 />
@@ -3741,6 +3945,7 @@ function TaskRow({
   rowIndex,
   selected,
   selectedForDetail,
+  selectionReadOnly,
   onSelectTask,
   onTaskSelectionChange,
   task,
@@ -3752,6 +3957,7 @@ function TaskRow({
   rowIndex: number
   selected: boolean
   selectedForDetail: boolean
+  selectionReadOnly: boolean
   onSelectTask: (task: ProjectTask) => void
   onTaskSelectionChange: (taskKey: string, selected: boolean) => void
   task: ProjectTask
@@ -3781,6 +3987,7 @@ function TaskRow({
             checked={selected}
             className="h-4 w-4 rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary)]"
             onChange={(event) => onTaskSelectionChange(createTaskKey(task), event.target.checked)}
+            disabled={selectionReadOnly}
             type="checkbox"
           />
           <button
@@ -4114,6 +4321,19 @@ function createTaskKey(task: ProjectTask) {
   return task.assignedProjectId || task.teamId
     ? `${task.assignedProjectId ?? ''}:${task.teamId ?? ''}:${task.id}`
     : task.id
+}
+
+function createBulkOperationSelection(
+  task: ProjectTask,
+  t: (key: MessageKey) => string,
+): BulkOperationSelection {
+  return {
+    expectedRevision: task.revision,
+    label: resolveTaskTitle(task, t),
+    selectionKey: createTaskKey(task),
+    teamId: task.teamId,
+    workItemId: task.id,
+  }
 }
 
 function createTaskCalendarDays(tasks: ProjectTask[]) {

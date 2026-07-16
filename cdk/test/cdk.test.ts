@@ -131,6 +131,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
     'ProjectTasksTableE21F6637',
     'TeamIssuesTable189D851D',
     'WorkItemConfigurationTable35E94558',
+    'AutomationTableE3D67F0D',
     'TeamIssueEventsTableDD2B0F96',
     'ProjectDirectoryTable9ED01C01',
     'ListProjectTasksFunction2134AF4A',
@@ -146,7 +147,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(13);
+  expect(Object.keys(tables)).toHaveLength(14);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -160,6 +161,55 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
       }),
     }));
   }
+});
+
+test('automation state is retained with due-schedule and execution history indexes', () => {
+  const template = synthesizedTemplate;
+  const automationTableEntry = Object.entries(template.findResources('AWS::DynamoDB::Table'))
+    .find(([, resource]) => {
+      const properties = (resource as { Properties?: Record<string, unknown> }).Properties;
+      return JSON.stringify(properties?.GlobalSecondaryIndexes ?? []).includes('ScheduleDueIndex');
+    });
+
+  expect(automationTableEntry).toBeDefined();
+  expect(automationTableEntry?.[1]).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+    Properties: expect.objectContaining({
+      AttributeDefinitions: expect.arrayContaining([
+        { AttributeName: 'scopeKey', AttributeType: 'S' },
+        { AttributeName: 'recordKey', AttributeType: 'S' },
+        { AttributeName: 'scheduleShard', AttributeType: 'S' },
+        { AttributeName: 'nextRunAtRecordKey', AttributeType: 'S' },
+        { AttributeName: 'ruleExecutionKey', AttributeType: 'S' },
+        { AttributeName: 'startedAtExecutionId', AttributeType: 'S' },
+      ]),
+      BillingMode: 'PAY_PER_REQUEST',
+      GlobalSecondaryIndexes: expect.arrayContaining([
+        expect.objectContaining({ IndexName: 'ScheduleDueIndex' }),
+        expect.objectContaining({ IndexName: 'RuleExecutionIndex' }),
+        expect.objectContaining({
+          IndexName: 'WorkspaceExecutionIndex',
+          KeySchema: [
+            { AttributeName: 'scopeKey', KeyType: 'HASH' },
+            { AttributeName: 'startedAtExecutionId', KeyType: 'RANGE' },
+          ],
+        }),
+      ]),
+      KeySchema: [
+        { AttributeName: 'scopeKey', KeyType: 'HASH' },
+        { AttributeName: 'recordKey', KeyType: 'RANGE' },
+      ],
+      PointInTimeRecoverySpecification: {
+        PointInTimeRecoveryEnabled: true,
+      },
+      TimeToLiveSpecification: {
+        AttributeName: 'expiresAt',
+        Enabled: true,
+      },
+    }),
+  }));
+  template.hasOutput('AutomationTableName', {});
 });
 
 test('file proofing metadata uses a retained point-in-time recoverable table', () => {
@@ -206,6 +256,12 @@ test('shared server handler is bundled as a Lambda asset with production environ
     Runtime: 'nodejs22.x',
     Environment: {
       Variables: Match.objectLike({
+        AUTOMATION_INBOUND_WEBHOOK_BASE_URL: Match.anyValue(),
+        AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX: 'mukuroji/automation-inbound-webhooks',
+        AUTOMATION_TABLE_NAME: {
+          Ref: 'AutomationTableE3D67F0D',
+        },
+        AUTOMATION_WEBHOOK_SECRET_PREFIX: 'mukuroji/automation-webhooks',
         COGNITO_CLIENT_ID: {
           Ref: 'CognitoUserPoolClientId',
         },
@@ -273,6 +329,46 @@ test('shared server handler is bundled as a Lambda asset with production environ
   expect(lambdaResource.Properties.Code.ZipFile).toBeUndefined();
   expect(lambdaResource.Properties.Environment.Variables)
     .not.toHaveProperty('MUKUROJI_WORK_ITEM_CONFIGURATION_TABLE');
+});
+
+test('inbound automation webhook lifecycle uses a distinct public base URL and secret namespace', () => {
+  const resources = synthesizedTemplate.toJSON().Resources;
+  const lambdaResource = resources.ListProjectTasksFunction2134AF4A;
+  const variables = lambdaResource.Properties.Environment.Variables;
+
+  expect(variables.AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX)
+    .toBe('mukuroji/automation-inbound-webhooks');
+  expect(variables.AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX)
+    .not.toBe(variables.AUTOMATION_WEBHOOK_SECRET_PREFIX);
+  const serializedBaseUrl = JSON.stringify(variables.AUTOMATION_INBOUND_WEBHOOK_BASE_URL);
+  expect(serializedBaseUrl).toContain('ProjectTasksHttpApi');
+  expect(serializedBaseUrl).toContain('ApiEndpoint');
+  expect(serializedBaseUrl).not.toContain('FunctionUrl');
+
+  const inboundPolicy = Object.entries(resources).find(([logicalId, resource]) =>
+    logicalId.startsWith('ApiAutomationInboundWebhookSecretPolicy') &&
+    (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
+  )?.[1] as {
+    Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
+  } | undefined;
+  const inboundStatement = inboundPolicy?.Properties?.PolicyDocument?.Statement?.[0];
+  const inboundActions = Array.isArray(inboundStatement?.Action)
+    ? inboundStatement.Action
+    : [inboundStatement?.Action];
+
+  expect(inboundActions).toHaveLength(5);
+  expect(inboundActions).toEqual(expect.arrayContaining([
+    'secretsmanager:CreateSecret',
+    'secretsmanager:DeleteSecret',
+    'secretsmanager:DescribeSecret',
+    'secretsmanager:GetSecretValue',
+    'secretsmanager:PutSecretValue',
+  ]));
+  expect(JSON.stringify(inboundStatement?.Resource))
+    .toContain('mukuroji/automation-inbound-webhooks/');
+  expect(JSON.stringify(inboundStatement?.Resource))
+    .not.toContain('mukuroji/automation-webhooks/');
+  expect(inboundStatement?.Resource).not.toBe('*');
 });
 
 test('Function URL and API Gateway invoke the same Lambda handler', () => {
@@ -1017,7 +1113,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 2);
+  template.resourceCountIs('AWS::SQS::Queue', 4);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -1060,6 +1156,199 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
   template.hasOutput('NotificationScheduleDlqUrl', {});
 });
 
+test('automation workers consume the audit outbox and run recurring schedules with DLQs', () => {
+  const template = synthesizedTemplate;
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: 'Executes versioned automation rules from durable audit outbox events.',
+    Handler: 'index.handler',
+    Runtime: 'nodejs22.x',
+    Timeout: 120,
+    Environment: {
+      Variables: Match.objectLike({
+        AUTOMATION_TABLE_NAME: { Ref: 'AutomationTableE3D67F0D' },
+        AUTOMATION_WEBHOOK_SECRET_PREFIX: 'mukuroji/automation-webhooks',
+        AUDIT_EVENTS_TABLE_NAME: { Ref: 'AuditEventsTable0723963E' },
+        COGNITO_CLIENT_ID: { Ref: 'CognitoUserPoolClientId' },
+        COGNITO_USER_POOL_ID: { Ref: 'CognitoUserPoolId' },
+        FILE_PROOFING_TABLE_NAME: { Ref: 'FileProofingTable81DA272F' },
+        MUKUROJI_PROJECT_DIRECTORY_TABLE: { Ref: 'ProjectDirectoryTable9ED01C01' },
+        MUKUROJI_SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
+        PROJECT_DIRECTORY_TABLE_NAME: { Ref: 'ProjectDirectoryTable9ED01C01' },
+        SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
+        WORK_ITEM_CONFIGURATION_TABLE_NAME: { Ref: 'WorkItemConfigurationTable35E94558' },
+        WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
+        WORKSPACE_SEARCH_TABLE_NAME: { Ref: 'WorkspaceSearchTable2575AD6B' },
+      }),
+    },
+  });
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: 'Materializes timezone-aware recurring Work Items with durable receipts.',
+    Handler: 'index.handler',
+    Runtime: 'nodejs22.x',
+    Timeout: 300,
+    Environment: {
+      Variables: Match.objectLike({
+        AUTOMATION_TABLE_NAME: { Ref: 'AutomationTableE3D67F0D' },
+        AUTOMATION_WEBHOOK_SECRET_PREFIX: 'mukuroji/automation-webhooks',
+        AUDIT_EVENTS_TABLE_NAME: { Ref: 'AuditEventsTable0723963E' },
+        COGNITO_CLIENT_ID: { Ref: 'CognitoUserPoolClientId' },
+        COGNITO_USER_POOL_ID: { Ref: 'CognitoUserPoolId' },
+        FILE_PROOFING_TABLE_NAME: { Ref: 'FileProofingTable81DA272F' },
+        MUKUROJI_PROJECT_DIRECTORY_TABLE: { Ref: 'ProjectDirectoryTable9ED01C01' },
+        MUKUROJI_SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
+        PROJECT_DIRECTORY_TABLE_NAME: { Ref: 'ProjectDirectoryTable9ED01C01' },
+        SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
+        WORK_ITEM_CONFIGURATION_TABLE_NAME: { Ref: 'WorkItemConfigurationTable35E94558' },
+        WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
+        WORKSPACE_SEARCH_TABLE_NAME: { Ref: 'WorkspaceSearchTable2575AD6B' },
+      }),
+    },
+  });
+  template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
+    BatchSize: 10,
+    BisectBatchOnFunctionError: true,
+    EventSourceArn: {
+      'Fn::GetAtt': ['AuditEventsTable0723963E', 'StreamArn'],
+    },
+    FunctionResponseTypes: ['ReportBatchItemFailures'],
+    MaximumRetryAttempts: 3,
+    StartingPosition: 'TRIM_HORIZON',
+    DestinationConfig: {
+      OnFailure: { Destination: Match.anyValue() },
+    },
+  });
+  template.hasResourceProperties('AWS::Events::Rule', {
+    Description: 'Checks timezone-aware recurring Work definitions every minute.',
+    ScheduleExpression: 'rate(1 minute)',
+    State: 'ENABLED',
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription: 'Detects automation outbox records that exhausted stream retries.',
+    MetricName: 'ApproximateNumberOfMessagesVisible',
+    Namespace: 'AWS/SQS',
+    Threshold: 1,
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription: 'Detects recurring Work materialization failures after asynchronous retries.',
+    MetricName: 'ApproximateNumberOfMessagesVisible',
+    Namespace: 'AWS/SQS',
+    Threshold: 1,
+  });
+  template.hasOutput('AutomationEventDlqUrl', {});
+  template.hasOutput('AutomationScheduleDlqUrl', {});
+
+  const resources = template.toJSON().Resources;
+  const eventPolicy = Object.entries(resources).find(([logicalId]) =>
+    logicalId.startsWith('AutomationEventFunctionServiceRoleDefaultPolicy')
+  )?.[1];
+  const schedulePolicy = Object.entries(resources).find(([logicalId]) =>
+    logicalId.startsWith('AutomationScheduleFunctionServiceRoleDefaultPolicy')
+  )?.[1];
+  const eventTransactPolicy = Object.entries(resources).find(([logicalId]) =>
+    logicalId.startsWith('AutomationEventTransactWritePolicy')
+  )?.[1];
+  const scheduleTransactPolicy = Object.entries(resources).find(([logicalId]) =>
+    logicalId.startsWith('AutomationScheduleTransactWritePolicy')
+  )?.[1];
+  for (const [policy, transactPolicy] of [
+    [eventPolicy, eventTransactPolicy],
+    [schedulePolicy, scheduleTransactPolicy],
+  ]) {
+    const serialized = JSON.stringify(policy);
+    expect(serialized).toContain('AutomationTableE3D67F0D');
+    expect(serialized).toContain('AuditEventsTable0723963E');
+    expect(serialized).toContain('FileProofingTable81DA272F');
+    expect(serialized).toContain('ProjectDirectoryTable9ED01C01');
+    expect(serialized).toContain('TeamIssuesTable189D851D');
+    expect(serialized).toContain('WorkspaceSearchTable2575AD6B');
+    const statements = (policy as {
+      Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
+    } | undefined)?.Properties?.PolicyDocument?.Statement ?? [];
+    const transactStatements = (transactPolicy as {
+      Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
+    } | undefined)?.Properties?.PolicyDocument?.Statement ?? [];
+    const transactStatement = transactStatements.find((statement) => {
+      const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+      return actions.includes('dynamodb:TransactWriteItems');
+    });
+    expect(transactStatement).toEqual(expect.objectContaining({
+      Effect: 'Allow',
+      Resource: expect.arrayContaining([
+        { 'Fn::GetAtt': ['AutomationTableE3D67F0D', 'Arn'] },
+        { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
+      ]),
+    }));
+    const cognitoStatement = statements.find((statement) => {
+      const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+      return actions.includes('cognito-idp:AdminGetUser');
+    });
+    expect(cognitoStatement).toEqual(expect.objectContaining({ Effect: 'Allow' }));
+    expect(cognitoStatement?.Action).toEqual(expect.arrayContaining([
+      'cognito-idp:AdminGetUser',
+      'cognito-idp:AdminListGroupsForUser',
+    ]));
+    expect(JSON.stringify(cognitoStatement?.Resource)).toContain('CognitoUserPoolId');
+    const workspaceSearchStatement = statements.find((statement) =>
+      JSON.stringify(statement.Resource).includes('WorkspaceSearchTable2575AD6B')
+    );
+    expect(workspaceSearchStatement).toEqual(expect.objectContaining({
+      Effect: 'Allow',
+      Action: expect.arrayContaining([
+        'dynamodb:GetItem',
+        'dynamodb:PutItem',
+        'dynamodb:UpdateItem',
+        'dynamodb:DeleteItem',
+      ]),
+    }));
+    const projectDirectoryStatement = statements.find((statement) =>
+      JSON.stringify(statement.Resource).includes('ProjectDirectoryTable9ED01C01')
+    );
+    expect(projectDirectoryStatement).toEqual(expect.objectContaining({
+      Effect: 'Allow',
+      Action: expect.arrayContaining([
+        'dynamodb:GetItem',
+        'dynamodb:Query',
+      ]),
+    }));
+  }
+  for (const policyPrefix of [
+    'AutomationEventWebhookSecretPolicy',
+    'AutomationScheduleWebhookSecretPolicy',
+  ]) {
+    const webhookSecretPolicy = Object.entries(resources).find(([logicalId, resource]) =>
+      logicalId.startsWith(policyPrefix) &&
+      (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
+    )?.[1];
+    const serialized = JSON.stringify(webhookSecretPolicy);
+    expect(serialized).toContain('secretsmanager:GetSecretValue');
+    expect(serialized).toContain(':secret:');
+    expect(serialized).toContain('mukuroji/automation-webhooks/');
+  }
+  const scheduleFunction = Object.entries(resources).find(([logicalId, resource]) =>
+    logicalId.startsWith('AutomationScheduleFunction') &&
+    (resource as { Type?: string }).Type === 'AWS::Lambda::Function'
+  )?.[1] as {
+    Properties?: { Environment?: { Variables?: Record<string, unknown> } };
+  } | undefined;
+  expect(scheduleFunction?.Properties?.Environment?.Variables)
+    .toMatchObject({
+      AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX: 'mukuroji/automation-inbound-webhooks',
+    });
+  const inboundCleanupPolicy = Object.entries(resources).find(([logicalId, resource]) =>
+    logicalId.startsWith('AutomationScheduleInboundWebhookSecretCleanupPolicy') &&
+    (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
+  )?.[1] as {
+    Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
+  } | undefined;
+  const inboundCleanupStatement = inboundCleanupPolicy?.Properties?.PolicyDocument?.Statement?.[0];
+  expect(inboundCleanupStatement?.Action).toBe('secretsmanager:DeleteSecret');
+  expect(JSON.stringify(inboundCleanupStatement?.Resource))
+    .toContain('mukuroji/automation-inbound-webhooks/');
+  expect(JSON.stringify(inboundCleanupStatement?.Resource))
+    .not.toContain('mukuroji/automation-webhooks/');
+});
+
 test('API IAM is limited to the data tables and configured Cognito user pool', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
@@ -1086,9 +1375,10 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   const statements = apiPolicies.flatMap((policy) =>
     policy.Properties.PolicyDocument.Statement
   );
-  const fileObjectStatement = statements.find((statement) =>
-    Array.isArray(statement.Action) && statement.Action.includes('s3:PutObject')
-  );
+  const fileObjectStatement = statements.find((statement) => {
+    const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+    return actions.includes('s3:PutObject');
+  });
   const serializedApiPolicies = JSON.stringify(apiPolicies);
   const transactStatement = statements.find((statement) => {
     const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
@@ -1102,6 +1392,11 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Array.isArray(statement.Action) &&
     statement.Action.includes('dynamodb:ConditionCheckItem')
   );
+  const automationDataStatement = statements.find((statement) =>
+    JSON.stringify(statement.Resource).includes('AutomationTableE3D67F0D') &&
+    Array.isArray(statement.Action) &&
+    statement.Action.includes('dynamodb:Query')
+  );
   const configurationStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('WorkItemConfigurationTable35E94558')
   );
@@ -1112,6 +1407,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(transactStatement).toEqual(expect.objectContaining({
     Effect: 'Allow',
     Resource: expect.arrayContaining([
+      { 'Fn::GetAtt': ['AutomationTableE3D67F0D', 'Arn'] },
       { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
       { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
       { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
@@ -1121,20 +1417,24 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     ]),
   }));
   expect(serializedApiPolicies).toContain('WorkspaceSearchTable2575AD6B');
+  expect(serializedApiPolicies).toContain('secretsmanager:GetSecretValue');
+  expect(serializedApiPolicies).toContain(':secret:');
+  expect(serializedApiPolicies).toContain('mukuroji/automation-webhooks/');
   expect(JSON.stringify(transactStatement)).not.toContain('ProjectTasksTableE21F6637');
   expect(JSON.stringify(transactStatement)).toContain('FileProofingTable');
-  expect(fileObjectStatement).toEqual(expect.objectContaining({
-    Effect: 'Allow',
-    Action: expect.arrayContaining([
-      's3:DeleteObject',
-      's3:GetObject',
-      's3:GetObjectAttributes',
-      's3:GetObjectVersion',
-      's3:GetObjectVersionTagging',
-      's3:PutObject',
-      's3:PutObjectVersionTagging',
-    ]),
-  }));
+  expect(fileObjectStatement).toEqual(expect.objectContaining({ Effect: 'Allow' }));
+  const fileObjectActions = Array.isArray(fileObjectStatement?.Action)
+    ? fileObjectStatement.Action
+    : [fileObjectStatement?.Action];
+  expect(fileObjectActions).toEqual(expect.arrayContaining([
+    's3:DeleteObject',
+    's3:GetObject',
+    's3:GetObjectAttributes',
+    's3:GetObjectVersion',
+    's3:GetObjectVersionTagging',
+    's3:PutObject',
+    's3:PutObjectVersionTagging',
+  ]));
   expect(JSON.stringify(fileObjectStatement)).toContain('workspaces/*');
   expect(JSON.stringify(fileObjectStatement)).not.toContain('s3:ListBucket');
   expect(JSON.stringify(fileObjectStatement)).not.toContain('s3:DeleteObjectVersion');
@@ -1171,6 +1471,17 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Effect: 'Allow',
     Resource: { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
   });
+  expect(automationDataStatement).toEqual(expect.objectContaining({
+    Action: expect.arrayContaining([
+      'dynamodb:ConditionCheckItem',
+      'dynamodb:GetItem',
+      'dynamodb:PutItem',
+      'dynamodb:Query',
+      'dynamodb:Scan',
+      'dynamodb:UpdateItem',
+    ]),
+    Effect: 'Allow',
+  }));
   expect(configurationStatements).toHaveLength(2);
   expect(configurationStatements).toEqual(expect.arrayContaining([
     configurationDataStatement,

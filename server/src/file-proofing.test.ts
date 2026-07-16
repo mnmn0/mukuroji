@@ -1545,6 +1545,147 @@ describe('file proofing domain', () => {
     expect(summaries.get(createFileProofingScopeKey(scope))?.nextDueAt).toBeUndefined()
   })
 
+  test('creates one durable Work Item approval across retries and transitions after unanimous approval', async () => {
+    const state = createClient('work-items', 'audit-events')
+    const workItemKey = {
+      directoryTeamId: 'workspace-1#team#core',
+      issueId: 'work-item-1',
+    }
+    state.documentClient.items.set(createMemoryKey(workItemKey), {
+      ...workItemKey,
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'review-ready',
+      statusCategory: 'started',
+      revision: 4,
+      updatedAt: '2026-07-12T00:00:00.000Z',
+    })
+    const automationActor: FileProofingActor = {
+      memberKey: 'automation:rule-1',
+      kind: 'service',
+      guest: false,
+      canWrite: true,
+      canManage: true,
+    }
+    const auditContext = createMutationAuditContext({
+      workspaceId: scope.workspaceId,
+      actor: { id: automationActor.memberKey, kind: 'service' },
+      idempotencyKey: 'execution-1:action-2',
+      request: {
+        method: 'POST',
+        path: '/internal/automation/approval',
+        body: {
+          completionTransition: 'qa-approved',
+          dueAt: '2026-07-14T00:00:00.000Z',
+          reviewerMemberKeys: ['first@example.com', 'second@example.com'],
+        },
+      },
+      source: { kind: 'system', route: 'approval' },
+      occurredAt: '2026-07-13T00:00:00.000Z',
+    })
+    const input = {
+      completionTransition: 'qa-approved',
+      dueAt: '2026-07-14T00:00:00.000Z',
+      reviewerMemberKeys: ['first@example.com', 'second@example.com'],
+    }
+
+    const created = await state.client.createWorkItemApproval(
+      scope,
+      automationActor,
+      input,
+      auditContext,
+    )
+    const itemCountAfterCreate = state.documentClient.items.size
+    const replayed = await state.client.createWorkItemApproval(
+      scope,
+      automationActor,
+      input,
+      auditContext,
+    )
+
+    expect(created).toMatchObject({
+      subjectType: 'work-item',
+      requestedByKind: 'service',
+      requestedByMemberKey: automationActor.memberKey,
+      status: 'pending',
+      revision: 1,
+    })
+    expect(created).not.toHaveProperty('fileId')
+    expect(created).not.toHaveProperty('versionId')
+    expect(replayed.id).toBe(created.id)
+    expect(state.documentClient.items.size).toBe(itemCountAfterCreate)
+    expect([...state.documentClient.items.values()].filter((item) =>
+      item.entryType === 'approval' && item.id === created.id
+    )).toHaveLength(1)
+    expect([...state.documentClient.items.values()].filter((item) =>
+      item.entryType === 'file-approval-index' && item.approvalId === created.id
+    )).toHaveLength(0)
+    expect([...state.documentClient.items.values()].filter((item) =>
+      item.eventType === 'approval.requested' && item.targetId === created.id
+    )).toHaveLength(1)
+    expect(await state.client.getApprovalSummary(scope)).toMatchObject({
+      pendingCount: 1,
+      approvedCount: 0,
+    })
+    expect((await state.client.listReviewerApprovals(scope.workspaceId, {
+      memberKey: 'first@example.com',
+      guest: false,
+      canWrite: false,
+      canManage: false,
+    })).approvals).toEqual([expect.objectContaining({
+      id: created.id,
+      subjectType: 'work-item',
+    })])
+
+    const firstDecision = await state.client.decideApproval(
+      scope,
+      { memberKey: 'first@example.com', guest: false, canWrite: false, canManage: false },
+      created.id,
+      { decision: 'approve', expectedRevision: created.revision },
+      createAuditContext('work-item-first-decision'),
+    )
+    expect(firstDecision.status).toBe('pending')
+    const completed = await state.client.decideApproval(
+      scope,
+      { memberKey: 'second@example.com', guest: false, canWrite: false, canManage: false },
+      created.id,
+      { decision: 'approve', expectedRevision: firstDecision.revision },
+      createAuditContext('work-item-second-decision'),
+      async (completionTransition) => ({
+        workflowStatusId: completionTransition,
+        statusCategory: 'completed',
+        workflowSchemaVersion: 1,
+        expectedRevision: 4,
+        configurationConditionChecks: [{
+          ConditionCheck: {
+            TableName: 'work-item-configuration',
+            Key: {
+              scopeKey: 'workspace-1#team#core#work-item-configuration',
+              recordKey: 'CONFIG',
+            },
+            ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+          },
+        }],
+      }),
+    )
+
+    expect(completed.status).toBe('approved')
+    expect(state.documentClient.items.get(createMemoryKey(workItemKey))).toMatchObject({
+      revision: 5,
+      workflowStatusId: 'qa-approved',
+      statusCategory: 'completed',
+    })
+    expect(await state.client.getApprovalSummary(scope)).toMatchObject({
+      pendingCount: 0,
+      approvedCount: 1,
+    })
+    expect((await state.client.listReviewerApprovals(scope.workspaceId, {
+      memberKey: 'second@example.com',
+      guest: false,
+      canWrite: false,
+      canManage: false,
+    })).approvals).toEqual([])
+  })
+
   test('transitions the canonical Work Item with configuration guards when every reviewer approves', async () => {
     const state = createClient('work-items', 'audit-events')
     const workItemKey = {
@@ -1798,6 +1939,7 @@ describe('file proofing domain', () => {
     expect(createApprovalSummary([
       {
         id: 'approval-1',
+        subjectType: 'file-version',
         revision: 1,
         fileId: 'file-1',
         versionId: 'version-1',
@@ -1805,6 +1947,7 @@ describe('file proofing domain', () => {
         reviewers: [],
         dueAt: '2026-01-01T00:00:00.000Z',
         requestedByMemberKey: 'manager@example.com',
+        requestedByKind: 'member',
         createdAt: '2026-01-01T00:00:00.000Z',
         updatedAt: '2026-01-01T00:00:00.000Z',
         capabilities: { canCancel: false, canDecide: false },

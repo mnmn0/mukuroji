@@ -374,6 +374,41 @@ test('queries the target timeline and binds cursor to the original filters', asy
   })).rejects.toThrow('Audit cursor does not match the query partition.')
 })
 
+test('gets a deterministic audit event with a strongly consistent read', async () => {
+  const commands: Array<Record<string, unknown>> = []
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'bulk-item-1',
+    occurredAt: '2026-07-16T12:00:00.000Z',
+    request: { method: 'POST', path: '/internal/automation/bulk-item-mutation' },
+    source: { kind: 'api' },
+  })
+  const event = createAuditEvent({
+    context,
+    eventType: 'work-item.updated',
+    entity: { type: 'work-item', id: 'team/team-1/issue/item-1' },
+    action: 'updated',
+  })
+  const documentClient = {
+    send: async (command: { input: Record<string, unknown> }) => {
+      commands.push(command.input)
+      return { Item: event }
+    },
+  } as unknown as DynamoDBDocumentClient
+
+  const client = new DynamoDbAuditEventsClient(documentClient, 'AuditTable')
+  expect(await client.getEvent('workspace-1', event.eventId)).toEqual(event)
+  expect(commands).toEqual([{
+    TableName: 'AuditTable',
+    Key: {
+      directoryId: 'workspace-1',
+      eventId: event.eventId,
+    },
+    ConsistentRead: true,
+  }])
+})
+
 test('upcasts legacy issue activity without inventing an unavailable diff', () => {
   const event = upcastAuditEvent({
     directoryTeamIssueId: 'workspace-1#team#team-1#issue#issue-1',

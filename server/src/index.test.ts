@@ -1,11 +1,18 @@
+import { createHmac } from 'node:crypto'
 import { afterEach, expect, test } from 'bun:test'
 import type { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient, TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
-import type {
-  ApprovalRequest,
-  CustomFieldValue,
-  WorkItemConfiguration,
+import {
+  AUTOMATION_SCHEMA_VERSION,
+  type AutomationTemplate,
+  type AutomationTemplateApplication,
+  type AutomationTemplateApplicationResult,
+  type BulkOperation,
+  type ApprovalRequest,
+  type BulkOperationRequest,
+  type CustomFieldValue,
+  type WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import { createAuditEvent, createMutationAuditContext } from './audit'
@@ -27,6 +34,10 @@ import {
   AwsCognitoClient,
   CognitoServiceError,
   configureApiClientsForTest,
+  createAutomationActionExecutor,
+  createBulkItemMutationIdempotencyKey,
+  requireBulkOperationOwner,
+  toBulkOperationResponse,
   DynamoDbDashboardSummaryClient,
   DynamoDbProjectDirectoryClient,
   DynamoDbProjectTasksClient,
@@ -41,6 +52,15 @@ import {
   type WorkspaceRole,
 } from './index'
 import {
+  AutomationError,
+  toAutomationInboundWebhookEndpoint,
+  type AutomationActionExecutionContext,
+  type AutomationClient,
+  type AutomationInboundWebhookEndpointRecord,
+  type AutomationInboundWebhookProvisioning,
+} from './automation'
+import type { AutomationInboundWebhookSecretStore } from './automation-inbound-webhook'
+import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
   WorkItemConfigurationError,
   type WorkItemConfigurationClient,
@@ -48,6 +68,1358 @@ import {
 
 afterEach(() => {
   resetApiClientsForTest()
+})
+
+test('derives stable and item-scoped audit idempotency keys for bulk apply', () => {
+  const request = {
+    workspaceId: 'workspace-1',
+    action: { type: 'move', targetProjectId: 'project-2' },
+    items: [
+      { teamId: 'team-1', workItemId: 'item-1', expectedRevision: 4 },
+      { teamId: 'team-1', workItemId: 'item-2', expectedRevision: 7 },
+    ],
+  } satisfies BulkOperationRequest
+
+  const first = createBulkItemMutationIdempotencyKey(request, 0, 'apply', 'owner@example.com')
+
+  expect(first).toBe(createBulkItemMutationIdempotencyKey(
+    structuredClone(request),
+    0,
+    'apply',
+    'owner@example.com',
+  ))
+  expect(first).not.toBe(createBulkItemMutationIdempotencyKey(
+    request,
+    1,
+    'apply',
+    'owner@example.com',
+  ))
+  expect(first).not.toBe(createBulkItemMutationIdempotencyKey(
+    request,
+    0,
+    'apply',
+    'other@example.com',
+  ))
+  expect(first).toMatch(/^bulk_[a-f0-9]{64}$/)
+})
+
+test('enforces Bulk operation ownership and redacts durable undo snapshots', () => {
+  const operation: BulkOperation = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'bulk-owner-test',
+    workspaceId: 'workspace-1',
+    actorMemberKey: 'owner@example.com',
+    revision: 3,
+    status: 'succeeded',
+    action: { type: 'move', targetProjectId: 'project-2' },
+    items: [{
+      teamId: 'team-1',
+      workItemId: 'item-1',
+      expectedRevision: 4,
+      resultingRevision: 5,
+      status: 'succeeded',
+      retryable: false,
+      undoable: true,
+      undoPayload: { assignedProjectId: 'project-1' },
+    }],
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:00:01.000Z',
+  }
+
+  expect(() => requireBulkOperationOwner(operation, 'owner@example.com')).not.toThrow()
+  expect(() => requireBulkOperationOwner(operation, 'other@example.com')).toThrow()
+  try {
+    requireBulkOperationOwner(operation, 'other@example.com')
+  } catch (error) {
+    expect(error).toMatchObject({ code: 'BulkOperationForbidden', status: 403 })
+  }
+  expect(toBulkOperationResponse(operation).items[0]).not.toHaveProperty('undoPayload')
+  expect(operation.items[0]?.undoPayload).toEqual({ assignedProjectId: 'project-1' })
+})
+
+test('does not recover a Bulk apply from a competing actor state without its audit proof', async () => {
+  configureFakeProjectClients(true)
+  const originalIssue = createBulkRecoveryIssue()
+  const competingIssue = {
+    ...originalIssue,
+    revision: 2,
+    title: 'Bulk title',
+    updatedAt: '2026-07-16T00:01:00.000Z',
+  }
+  const automationFake = createBulkOperationAutomationFake()
+  let detailReads = 0
+  let updateCalls = 0
+  let auditProofReads = 0
+  configureApiClientsForTest({
+    automation: automationFake.client,
+    teamIssues: {
+      async getTeamIssueDetail() {
+        detailReads += 1
+        return {
+          issue: structuredClone(detailReads <= 2 ? originalIssue : competingIssue),
+          comments: [],
+          activity: [],
+        }
+      },
+      async updateTeamIssue() {
+        updateCalls += 1
+        throw new Error('The competing write must be detected before this update.')
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+    >,
+    auditEvents: {
+      async getEvent() {
+        auditProofReads += 1
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const request = {
+    action: { type: 'edit', patch: { title: 'Bulk title' } },
+    items: [{
+      teamId: originalIssue.teamId,
+      workItemId: originalIssue.id,
+      expectedRevision: originalIssue.revision,
+    }],
+  }
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const previewResponse = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request),
+  })
+  expect(previewResponse.status).toBe(200)
+  const preview = await previewResponse.json() as { operationToken: string }
+
+  const applyResponse = await app.request('/api/bulk-operations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...request, operationToken: preview.operationToken }),
+  })
+  expect(applyResponse.status).toBe(201)
+  expect(await applyResponse.json()).toMatchObject({
+    status: 'failed',
+    items: [{
+      status: 'failed',
+      errorCode: 'WorkItemRevisionConflict',
+      retryable: false,
+      undoable: false,
+    }],
+  })
+  expect(detailReads).toBe(4)
+  expect(auditProofReads).toBe(1)
+  expect(updateCalls).toBe(0)
+})
+
+test('does not recover a Bulk undo from a competing actor state without its audit proof', async () => {
+  configureFakeProjectClients(true)
+  const currentIssue = {
+    ...createBulkRecoveryIssue(),
+    revision: 3,
+    updatedAt: '2026-07-16T00:02:00.000Z',
+  }
+  const operation: BulkOperation = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'bulk-undo-competing-actor',
+    workspaceId: 'user#demo@example.com',
+    actorMemberKey: 'demo@example.com',
+    revision: 1,
+    status: 'succeeded',
+    action: { type: 'edit', patch: { title: 'Bulk title' } },
+    items: [{
+      teamId: currentIssue.teamId,
+      workItemId: currentIssue.id,
+      expectedRevision: 1,
+      resultingRevision: 2,
+      status: 'succeeded',
+      retryable: false,
+      undoable: true,
+      undoPayload: { title: originalBulkRecoveryTitle },
+    }],
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:01:00.000Z',
+  }
+  const automationFake = createBulkOperationAutomationFake(operation)
+  let detailReads = 0
+  let updateCalls = 0
+  let auditProofReads = 0
+  configureApiClientsForTest({
+    automation: automationFake.client,
+    teamIssues: {
+      async getTeamIssueDetail() {
+        detailReads += 1
+        return {
+          issue: structuredClone(currentIssue),
+          comments: [],
+          activity: [],
+        }
+      },
+      async updateTeamIssue() {
+        updateCalls += 1
+        throw new Error('The competing undo state must be detected before this update.')
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+    >,
+    auditEvents: {
+      async getEvent() {
+        auditProofReads += 1
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+
+  const response = await app.request(`/api/bulk-operations/${operation.id}/undo`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+  })
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    status: 'partial',
+    items: [{
+      status: 'failed',
+      errorCode: 'WorkItemRevisionConflict',
+      resultingRevision: 2,
+      retryable: false,
+    }],
+  })
+  expect(detailReads).toBe(2)
+  expect(auditProofReads).toBe(1)
+  expect(updateCalls).toBe(0)
+})
+
+test('recovers Bulk apply and undo response loss only from their matching audit proofs', async () => {
+  configureFakeProjectClients(true)
+  let currentIssue = createBulkRecoveryIssue()
+  const auditProofs = new Map<string, ReturnType<typeof createAuditEvent>>()
+  const auditProofReads: string[] = []
+  const mutationContexts: Parameters<typeof createAuditEvent>[0]['context'][] = []
+  const automationFake = createBulkOperationAutomationFake()
+  let updateCalls = 0
+  configureApiClientsForTest({
+    automation: automationFake.client,
+    teamIssues: {
+      async getTeamIssueDetail() {
+        return {
+          issue: structuredClone(currentIssue),
+          comments: [],
+          activity: [],
+        }
+      },
+      async updateTeamIssue(
+        directoryId,
+        teamId,
+        issueId,
+        input,
+        actorUserId,
+        auditContext,
+      ) {
+        if (!auditContext) throw new Error('Bulk mutation audit context is required.')
+        updateCalls += 1
+        mutationContexts.push(auditContext)
+        const beforeRevision = currentIssue.revision
+        const afterRevision = beforeRevision + 1
+        currentIssue = {
+          ...currentIssue,
+          revision: afterRevision,
+          title: typeof input.title === 'string' ? input.title : currentIssue.title,
+          updatedAt: `2026-07-16T00:0${updateCalls}:00.000Z`,
+        }
+        const event = createAuditEvent({
+          context: auditContext,
+          eventType: 'work-item.updated',
+          entity: { type: 'work-item', id: `team/${teamId}/issue/${issueId}` },
+          action: 'updated',
+          metadata: {
+            adapter: 'canonical-work-item',
+            actorMemberKey: actorUserId,
+            teamId,
+            issueId,
+            beforeRevision,
+            afterRevision,
+          },
+        })
+        expect(directoryId).toBe('user#demo@example.com')
+        expect(input.expectedRevision).toBe(beforeRevision)
+        auditProofs.set(event.eventId, event)
+        throw new AutomationError(
+          503,
+          'BulkMutationResponseLost',
+          'The mutation committed but its response was lost.',
+          true,
+        )
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+    >,
+    auditEvents: {
+      async getEvent(workspaceId, eventId) {
+        expect(workspaceId).toBe('user#demo@example.com')
+        auditProofReads.push(eventId)
+        return auditProofs.get(eventId)
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const request = {
+    action: { type: 'edit', patch: { title: 'Bulk title' } },
+    items: [{
+      teamId: currentIssue.teamId,
+      workItemId: currentIssue.id,
+      expectedRevision: currentIssue.revision,
+    }],
+  }
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const previewResponse = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request),
+  })
+  expect(previewResponse.status).toBe(200)
+  const preview = await previewResponse.json() as { operationToken: string }
+  const applyResponse = await app.request('/api/bulk-operations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...request, operationToken: preview.operationToken }),
+  })
+  expect(applyResponse.status).toBe(201)
+  const applied = await applyResponse.json() as BulkOperation
+  expect(applied).toMatchObject({
+    status: 'succeeded',
+    items: [{
+      status: 'succeeded',
+      resultingRevision: 2,
+      retryable: false,
+      undoable: true,
+    }],
+  })
+  expect(currentIssue).toMatchObject({ revision: 2, title: 'Bulk title' })
+
+  const undoResponse = await app.request(`/api/bulk-operations/${applied.id}/undo`, {
+    method: 'POST',
+    headers,
+  })
+  expect(undoResponse.status).toBe(200)
+  expect(await undoResponse.json()).toMatchObject({
+    status: 'undone',
+    items: [{
+      status: 'undone',
+      resultingRevision: 3,
+      retryable: false,
+      undoable: false,
+    }],
+  })
+  expect(currentIssue).toMatchObject({
+    revision: 3,
+    title: originalBulkRecoveryTitle,
+  })
+  expect(updateCalls).toBe(2)
+  expect(auditProofReads).toHaveLength(2)
+  expect(new Set(auditProofReads).size).toBe(2)
+  expect(mutationContexts).toHaveLength(2)
+  expect(mutationContexts[0]?.requestFingerprint).not.toBe('')
+  expect(mutationContexts[1]?.requestFingerprint).not.toBe('')
+})
+
+const originalBulkRecoveryTitle = 'Initial title'
+
+function createBulkRecoveryIssue() {
+  return {
+    schemaVersion: 1,
+    revision: 1,
+    id: 'onboarding-friction',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    title: originalBulkRecoveryTitle,
+    description: 'Initial description',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'in-progress',
+    statusCategory: 'started',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/31',
+    priority: 'high',
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:00:00.000Z',
+    source: 'dynamodb',
+  }
+}
+
+function createBulkOperationAutomationFake(initialOperation?: BulkOperation) {
+  let storedOperation = initialOperation ? structuredClone(initialOperation) : undefined
+  return {
+    client: {
+      async getBulkOperation(_workspaceId: string, operationId: string) {
+        return storedOperation?.id === operationId
+          ? structuredClone(storedOperation)
+          : undefined
+      },
+      async createBulkOperation(operation: BulkOperation) {
+        if (storedOperation) return false
+        storedOperation = structuredClone(operation)
+        return true
+      },
+      async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
+        if (!storedOperation || storedOperation.revision !== expectedRevision) {
+          throw new AutomationError(
+            409,
+            'BulkOperationRevisionConflict',
+            'Bulk operation was modified concurrently.',
+          )
+        }
+        storedOperation = structuredClone(operation)
+      },
+    } as unknown as AutomationClient,
+  }
+}
+
+function createInboundWebhookEndpointRecord(
+  overrides: Partial<AutomationInboundWebhookEndpointRecord> = {},
+): AutomationInboundWebhookEndpointRecord {
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'webhook-1',
+    workspaceId: 'user#demo@example.com',
+    opaqueEndpointId: 'A'.repeat(43),
+    name: 'Build events',
+    status: 'active',
+    version: 1,
+    secretGeneration: 1,
+    revision: 2,
+    endpointUrl: `https://api.example.com/api/automation/inbound-webhooks/${'A'.repeat(43)}`,
+    secretId: `mukuroji/automation-inbound-webhooks/${'b'.repeat(64)}/webhook-1`,
+    secretVersionId: 'c'.repeat(64),
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:00:01.000Z',
+    ...overrides,
+  }
+}
+
+function createInboundWebhookProvisioning(
+  endpoint: AutomationInboundWebhookEndpointRecord,
+  kind: 'create' | 'rotate',
+): AutomationInboundWebhookProvisioning {
+  const operationId = `inbound_operation_${kind}_${'d'.repeat(32)}`
+  return {
+    endpoint: {
+      ...endpoint,
+      status: 'provisioning',
+      provisioningOperationId: operationId,
+      provisioningTargetStatus: 'active',
+    },
+    operation: {
+      id: operationId,
+      workspaceId: endpoint.workspaceId,
+      actorId: 'demo@example.com',
+      kind,
+      endpointId: endpoint.id,
+      requestFingerprint: 'e'.repeat(64),
+      status: 'provisioning',
+      targetStatus: 'active',
+      endpointVersion: endpoint.version,
+      endpointRevision: endpoint.revision,
+      secretGeneration: endpoint.secretGeneration,
+      secretId: endpoint.secretId,
+      secretVersionId: endpoint.secretVersionId,
+      createdAt: '2026-07-16T00:00:00.000Z',
+      updatedAt: '2026-07-16T00:00:00.000Z',
+      recoveryExpiresAt: '2099-07-17T00:00:00.000Z',
+    },
+  }
+}
+
+test('accepts an unauthenticated signed inbound webhook without exposing secret material', async () => {
+  const previousAuditTable = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+  process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditTable'
+  try {
+    let resolvedEndpoint = createInboundWebhookEndpointRecord()
+    let deliveryInput: Parameters<AutomationClient['recordInboundWebhookDelivery']>[1] | undefined
+    const signingSecret = Buffer.from('server-issued-secret', 'utf8')
+    const secretReads: unknown[] = []
+    configureApiClientsForTest({
+      automation: {
+        async resolveInboundWebhookEndpoint() {
+          return structuredClone(resolvedEndpoint)
+        },
+        async recordInboundWebhookDelivery(_endpoint, input) {
+          deliveryInput = input
+          return { eventId: input.eventId, replayed: false }
+        },
+      } as unknown as AutomationClient,
+      automationInboundWebhookSecrets: {
+        async provision() {
+          throw new Error('Public delivery must not provision a secret.')
+        },
+        async get(reference) {
+          secretReads.push(structuredClone(reference))
+          return signingSecret
+        },
+        async delete() {
+          throw new Error('Public delivery must not delete a secret.')
+        },
+      },
+    })
+    const rawBody = '{\n  "message": "deploy", "nested": { "value": 1 }\n}\n'
+    const timestamp = String(Math.floor(Date.now() / 1_000))
+    const signature = `sha256=${createHmac('sha256', signingSecret)
+      .update(`${timestamp}.`, 'utf8')
+      .update(rawBody, 'utf8')
+      .digest('hex')}`
+    const request = () => app.request(
+      `/api/automation/inbound-webhooks/${resolvedEndpoint.opaqueEndpointId}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Idempotency-Key': 'sender-delivery-1',
+          'X-Mukuroji-Signature': signature,
+          'X-Mukuroji-Timestamp': timestamp,
+        },
+        body: rawBody,
+      },
+    )
+
+    const response = await request()
+    expect(response.status).toBe(202)
+    expect(await response.json()).toEqual({ eventId: deliveryInput?.eventId })
+    expect(secretReads).toEqual([expect.objectContaining({
+      secretId: resolvedEndpoint.secretId,
+      secretVersionId: resolvedEndpoint.secretVersionId,
+      secretGeneration: resolvedEndpoint.secretGeneration,
+    })])
+    expect(deliveryInput).toMatchObject({
+      idempotencyKey: 'sender-delivery-1',
+      signatureTimestamp: timestamp,
+      auditTransactItem: { Put: { TableName: 'AuditTable' } },
+    })
+    expect(JSON.stringify(deliveryInput)).not.toContain('server-issued-secret')
+    expect(JSON.stringify(deliveryInput)).not.toContain(signature)
+    expect(deliveryInput?.bodyFingerprint).toMatch(/^[a-f0-9]{64}$/)
+
+    resolvedEndpoint = { ...resolvedEndpoint, status: 'paused' }
+    expect((await request()).status).toBe(423)
+    resolvedEndpoint = { ...resolvedEndpoint, status: 'provisioning' }
+    expect((await request()).status).toBe(404)
+  } finally {
+    if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+    else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previousAuditTable
+  }
+})
+
+test('maps inbound webhook public validation failures without Cognito authentication', async () => {
+  const endpoint = createInboundWebhookEndpointRecord()
+  configureApiClientsForTest({
+    automation: {
+      async resolveInboundWebhookEndpoint(opaqueEndpointId) {
+        return opaqueEndpointId === endpoint.opaqueEndpointId ? endpoint : undefined
+      },
+    } as unknown as AutomationClient,
+  })
+  const baseUrl = `/api/automation/inbound-webhooks/${endpoint.opaqueEndpointId}`
+  expect((await app.request(baseUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain', 'Idempotency-Key': 'delivery-1' },
+    body: '{}',
+  })).status).toBe(415)
+  expect((await app.request(baseUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })).status).toBe(400)
+  expect((await app.request(`/api/automation/inbound-webhooks/${'Z'.repeat(43)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'delivery-1' },
+    body: '{}',
+  })).status).toBe(404)
+})
+
+test('returns plaintext inbound secrets only from create/rotate and redacts durable endpoints', async () => {
+  configureFakeProjectClients(true)
+  let current = createInboundWebhookEndpointRecord({
+    status: 'provisioning',
+    revision: 1,
+    provisioningOperationId: `inbound_operation_create_${'d'.repeat(32)}`,
+    provisioningTargetStatus: 'active',
+  })
+  let deletedSecrets = 0
+  const createProvisioning = createInboundWebhookProvisioning(current, 'create')
+  const secretStore: AutomationInboundWebhookSecretStore = {
+    async provision(reference) {
+      return `one-time-secret-generation-${reference.secretGeneration}`
+    },
+    async get() {
+      throw new Error('Admin routes must not read delivery secrets.')
+    },
+    async delete() {
+      deletedSecrets += 1
+    },
+  }
+  configureApiClientsForTest({
+    automation: {
+      async listInboundWebhookEndpoints() {
+        return [toAutomationInboundWebhookEndpoint(current)]
+      },
+      async getInboundWebhookEndpoint() {
+        return toAutomationInboundWebhookEndpoint(current)
+      },
+      async reserveCreateInboundWebhookEndpoint() {
+        return structuredClone(createProvisioning)
+      },
+      async reserveRotateInboundWebhookEndpoint() {
+        const rotated = createInboundWebhookEndpointRecord({
+          ...current,
+          status: 'provisioning',
+          version: current.version + 1,
+          revision: current.revision + 1,
+          secretGeneration: current.secretGeneration + 1,
+          secretVersionId: 'f'.repeat(64),
+        })
+        return createInboundWebhookProvisioning(rotated, 'rotate')
+      },
+      async completeInboundWebhookProvisioning(provisioning) {
+        current = {
+          ...provisioning.endpoint,
+          status: provisioning.operation.targetStatus,
+          revision: provisioning.endpoint.revision + 1,
+        }
+        delete current.provisioningOperationId
+        delete current.provisioningTargetStatus
+        return structuredClone(current)
+      },
+      async revokeInboundWebhookEndpoint() {
+        current = {
+          ...current,
+          status: 'revoked',
+          version: current.version + 1,
+          revision: current.revision + 1,
+          revokedAt: new Date().toISOString(),
+        }
+        return structuredClone(current)
+      },
+    } as unknown as AutomationClient,
+    automationInboundWebhookSecrets: secretStore,
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+    'Idempotency-Key': 'admin-operation-1',
+  }
+  const createdResponse = await app.request('/api/automation/inbound-webhooks', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ name: 'Build events' }),
+  })
+  expect(createdResponse.status).toBe(201)
+  const created = await createdResponse.json() as Record<string, unknown>
+  expect(created.signingSecret).toBe('one-time-secret-generation-1')
+  expect(created.endpoint).not.toHaveProperty('secretId')
+  expect(created.endpoint).not.toHaveProperty('secretVersionId')
+
+  const getResponse = await app.request(`/api/automation/inbound-webhooks/${current.id}`, {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(getResponse.status).toBe(200)
+  expect(await getResponse.json()).not.toHaveProperty('signingSecret')
+  const listResponse = await app.request('/api/automation/inbound-webhooks', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(await listResponse.json()).not.toHaveProperty('signingSecret')
+
+  const rotateResponse = await app.request(
+    `/api/automation/inbound-webhooks/${current.id}/rotate`,
+    {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': 'admin-rotate-1' },
+      body: JSON.stringify({ expectedRevision: current.revision }),
+    },
+  )
+  expect(rotateResponse.status).toBe(200)
+  const rotated = await rotateResponse.json() as Record<string, unknown>
+  expect(rotated.signingSecret).toBe('one-time-secret-generation-2')
+  expect(rotated.endpoint).not.toHaveProperty('secretId')
+
+  const revokeResponse = await app.request(`/api/automation/inbound-webhooks/${current.id}`, {
+    method: 'DELETE',
+    headers,
+    body: JSON.stringify({ expectedRevision: current.revision }),
+  })
+  expect(revokeResponse.status).toBe(200)
+  expect(await revokeResponse.json()).not.toHaveProperty('signingSecret')
+  expect(deletedSecrets).toBe(1)
+})
+
+test('compensates a late secret provision after an administrator aborts provisioning', async () => {
+  configureFakeProjectClients(true)
+  const provisioning = createInboundWebhookProvisioning(
+    createInboundWebhookEndpointRecord({ status: 'provisioning', revision: 1 }),
+    'create',
+  )
+  let deletedSecrets = 0
+  let provisionFails = false
+  configureApiClientsForTest({
+    automation: {
+      async reserveCreateInboundWebhookEndpoint() {
+        return provisioning
+      },
+      async completeInboundWebhookProvisioning() {
+        throw new AutomationError(
+          409,
+          'AutomationInboundWebhookLifecycleConflict',
+          'Endpoint was revoked while the secret write was in flight.',
+        )
+      },
+      async getInboundWebhookEndpoint() {
+        return toAutomationInboundWebhookEndpoint({
+          ...provisioning.endpoint,
+          status: 'revoked',
+          revokedAt: new Date().toISOString(),
+          provisioningOperationId: undefined,
+          provisioningTargetStatus: undefined,
+        })
+      },
+    } as unknown as AutomationClient,
+    automationInboundWebhookSecrets: {
+      async provision() {
+        if (provisionFails) {
+          throw new AutomationError(
+            503,
+            'AutomationInboundWebhookSecretUnavailable',
+            'Secret write response and recovery read were unavailable.',
+            true,
+          )
+        }
+        return 'late-secret'
+      },
+      async get() {
+        throw new Error('Unexpected get.')
+      },
+      async delete() {
+        deletedSecrets += 1
+      },
+    },
+  })
+  const response = await app.request('/api/automation/inbound-webhooks', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'late-provision',
+    },
+    body: JSON.stringify({ name: 'Aborted endpoint' }),
+  })
+  expect(response.status).toBe(409)
+  expect(deletedSecrets).toBe(1)
+
+  provisionFails = true
+  const lostWriteResponse = await app.request('/api/automation/inbound-webhooks', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'late-provision',
+    },
+    body: JSON.stringify({ name: 'Aborted endpoint' }),
+  })
+  expect(lostWriteResponse.status).toBe(503)
+  expect(deletedSecrets).toBe(2)
+})
+
+test('fails closed when automation targets a Project outside the owner Team', async () => {
+  const calls = configureFakeProjectClients(true, {
+    teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+  })
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-project-guard',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 1,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'issue-1' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-project-guard:action:0000',
+  } satisfies AutomationActionExecutionContext
+  const executor = createAutomationActionExecutor()
+
+  await expect(executor.execute({ type: 'move', targetProjectId: 'other-team-project' }, context))
+    .rejects.toMatchObject({ code: 'InvalidProjectWrite', status: 400 })
+  await expect(executor.execute({
+    type: 'create',
+    values: {
+      teamId: 'core-team',
+      title: 'Invalid project create',
+      assignedProjectId: 'other-team-project',
+    },
+  }, context)).rejects.toMatchObject({ code: 'InvalidProjectWrite', status: 400 })
+  expect(calls.issueUpdates).toHaveLength(0)
+  expect(calls.issueCreates).toHaveLength(0)
+})
+
+test('fails closed before an automation comment targets a removed Team', async () => {
+  const calls = configureFakeProjectClients(true)
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-comment-team-guard',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 1,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'removed-team', issueId: 'issue-1' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-comment-team-guard:action:0000',
+  } satisfies AutomationActionExecutionContext
+
+  await expect(createAutomationActionExecutor().execute({
+    type: 'comment',
+    body: 'This must not be written.',
+  }, context)).rejects.toMatchObject({ code: 'AutomationTeamUnavailable', status: 409 })
+  expect(calls.issueComments).toHaveLength(0)
+})
+
+test('rejects removed recurring-work Teams on create and update before saving a definition', async () => {
+  configureFakeProjectClients(true)
+  let updateCalls = 0
+  configureApiClientsForTest({
+    automation: {
+      async getRecurringWork() {
+        return {
+          schemaVersion: AUTOMATION_SCHEMA_VERSION,
+          id: 'recurring-1',
+          workspaceId: 'user#demo@example.com',
+          teamId: 'core-team',
+          name: 'Daily triage',
+          enabled: true,
+          version: 1,
+          revision: 1,
+          templateId: 'template-1',
+          templateVersion: 1,
+          schedule: {
+            frequency: 'daily',
+            interval: 1,
+            timeZone: 'UTC',
+            localTime: '09:00',
+            startDate: '2026-07-16',
+            catchUpPolicy: 'latest',
+          },
+          nextRunAt: '2026-07-17T09:00:00.000Z',
+          createdAt: '2026-07-16T00:00:00.000Z',
+          updatedAt: '2026-07-16T00:00:00.000Z',
+        }
+      },
+      async updateRecurringWork() {
+        updateCalls += 1
+        throw new Error('Removed Team must be rejected first.')
+      },
+    } as unknown as AutomationClient,
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const createResponse = await app.request('/api/recurring-work', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      name: 'Daily triage',
+      teamId: 'removed-team',
+      enabled: true,
+      templateId: 'template-1',
+      schedule: {
+        frequency: 'daily',
+        interval: 1,
+        timeZone: 'UTC',
+        localTime: '09:00',
+        startDate: '2026-07-16',
+        catchUpPolicy: 'latest',
+      },
+    }),
+  })
+  const updateResponse = await app.request('/api/recurring-work/recurring-1', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ expectedRevision: 1, teamId: 'removed-team' }),
+  })
+
+  expect(createResponse.status).toBe(409)
+  expect(await createResponse.json()).toMatchObject({ code: 'AutomationTeamUnavailable' })
+  expect(updateResponse.status).toBe(409)
+  expect(await updateResponse.json()).toMatchObject({ code: 'AutomationTeamUnavailable' })
+  expect(updateCalls).toBe(0)
+})
+
+test('recovers a Project template application from atomic receipt success without duplicate creation', async () => {
+  const now = '2026-07-16T00:00:00.000Z'
+  const template: AutomationTemplate = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'template-project-1',
+    workspaceId: 'user#demo@example.com',
+    kind: 'project',
+    name: 'Incident response Project',
+    enabled: true,
+    version: 1,
+    revision: 1,
+    payload: { nameJa: '障害対応', nameEn: 'Incident response', tone: 'purple' },
+    createdAt: now,
+    updatedAt: now,
+  }
+  let application: AutomationTemplateApplication = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'application_project_1',
+    workspaceId: template.workspaceId,
+    actorId: 'demo@example.com',
+    templateId: template.id,
+    templateVersion: template.version,
+    kind: 'project',
+    target: { kind: 'project', teamId: 'core-team' },
+    status: 'pending',
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
+  let createCalls = 0
+  let templateVersionReads = 0
+  configureFakeProjectClients(true, {
+    async projectCreateHook(input, completionTransactItems) {
+      createCalls += 1
+      expect(input.idempotencyResourceId).toBe(application.id)
+      expect(completionTransactItems).toHaveLength(1)
+      const result = completionTransactItems[0]?.Update?.ExpressionAttributeValues?.[':result'] as
+        | AutomationTemplateApplicationResult
+        | undefined
+      application = {
+        ...application,
+        status: 'succeeded',
+        revision: application.revision + 1,
+        result,
+        runnerLeaseExpiresAt: undefined,
+        updatedAt: '2026-07-16T00:00:01.000Z',
+      }
+      throw new Error('The atomic Project transaction committed but its response was lost.')
+    },
+  })
+  configureApiClientsForTest({
+    automation: {
+      async reserveTemplateApplication() {
+        return structuredClone(application)
+      },
+      async claimTemplateApplication(candidate, _claimNow, leaseExpiresAt) {
+        if (candidate.status !== 'pending' || application.revision !== candidate.revision) return undefined
+        application = {
+          ...application,
+          status: 'running',
+          revision: application.revision + 1,
+          runnerLeaseExpiresAt: leaseExpiresAt,
+          updatedAt: now,
+        }
+        return structuredClone(application)
+      },
+      createTemplateApplicationCompletionTransactItem(candidate, result) {
+        return {
+          Update: {
+            TableName: 'AutomationTable',
+            Key: { scopeKey: candidate.workspaceId, recordKey: candidate.id },
+            UpdateExpression: 'SET #status = :succeeded, #result = :result',
+            ExpressionAttributeValues: { ':result': result, ':succeeded': 'succeeded' },
+          },
+        }
+      },
+      async getTemplateApplication() {
+        return structuredClone(application)
+      },
+      async getTemplateVersion() {
+        templateVersionReads += 1
+        return structuredClone(template)
+      },
+    } as unknown as AutomationClient,
+  })
+  const request = () => app.request(
+    `/api/automation/templates/${template.id}/applications`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'apply-project-1',
+      },
+      body: JSON.stringify({ target: { kind: 'project', teamId: 'core-team' } }),
+    },
+  )
+
+  const first = await request()
+  const replay = await request()
+  expect(first.status).toBe(200)
+  expect(await first.json()).toMatchObject({
+    status: 'succeeded',
+    result: {
+      kind: 'project',
+      projectId: application.id,
+      teamId: 'core-team',
+      name: '障害対応',
+    },
+  })
+  expect(replay.status).toBe(200)
+  expect(await replay.json()).toMatchObject({ status: 'succeeded', id: application.id })
+  expect({ createCalls, templateVersionReads }).toEqual({ createCalls: 1, templateVersionReads: 1 })
+})
+
+test('applies a Workflow template atomically while preserving custom fields and target revision', async () => {
+  configureFakeProjectClients(true)
+  const workspaceId = 'user#demo@example.com'
+  const now = '2026-07-16T00:00:00.000Z'
+  const template: AutomationTemplate = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'template-workflow-1',
+    workspaceId,
+    kind: 'workflow',
+    name: 'Delivery workflow',
+    enabled: true,
+    version: 1,
+    revision: 1,
+    payload: {
+      ...structuredClone(DEFAULT_WORK_ITEM_CONFIGURATION.workflow),
+      name: 'Delivery workflow',
+    },
+    createdAt: now,
+    updatedAt: now,
+  }
+  let application: AutomationTemplateApplication = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'application_workflow_1',
+    workspaceId,
+    actorId: 'demo@example.com',
+    templateId: template.id,
+    templateVersion: 1,
+    kind: 'workflow',
+    target: { kind: 'workflow', scopeType: 'team', scopeId: 'core-team', expectedRevision: 2 },
+    status: 'pending',
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
+  const existingConfiguration: WorkItemConfiguration = {
+    ...createTestWorkItemConfiguration('team', 'core-team', 2),
+    customFields: [{
+      id: 'customer',
+      name: 'Customer',
+      type: 'text',
+      sortOrder: 10,
+      required: false,
+    }],
+  }
+  let savedConfiguration: WorkItemConfiguration | undefined
+  let completionCount = 0
+  configureApiClientsForTest({
+    automation: {
+      async reserveTemplateApplication() {
+        return structuredClone(application)
+      },
+      async claimTemplateApplication(candidate, _claimNow, leaseExpiresAt) {
+        if (candidate.status !== 'pending') return undefined
+        application = {
+          ...application,
+          status: 'running',
+          revision: application.revision + 1,
+          runnerLeaseExpiresAt: leaseExpiresAt,
+        }
+        return structuredClone(application)
+      },
+      createTemplateApplicationCompletionTransactItem(candidate, result) {
+        return {
+          Update: {
+            TableName: 'AutomationTable',
+            Key: { scopeKey: candidate.workspaceId, recordKey: candidate.id },
+            UpdateExpression: 'SET #status = :succeeded, #result = :result',
+            ExpressionAttributeValues: { ':result': result, ':succeeded': 'succeeded' },
+          },
+        }
+      },
+      async getTemplateApplication() {
+        return structuredClone(application)
+      },
+      async getTemplateVersion() {
+        return structuredClone(template)
+      },
+    } as unknown as AutomationClient,
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration: structuredClone(existingConfiguration) }
+      },
+      async saveTeamConfiguration(
+        _savedWorkspaceId,
+        _teamId,
+        configuration,
+        usageCheck,
+        completionTransactItems = [],
+      ) {
+        await usageCheck()
+        savedConfiguration = structuredClone(configuration)
+        const result = completionTransactItems[0]?.Update?.ExpressionAttributeValues?.[':result'] as
+          | AutomationTemplateApplicationResult
+          | undefined
+        completionCount = completionTransactItems.length
+        application = {
+          ...application,
+          status: 'succeeded',
+          revision: application.revision + 1,
+          result,
+          runnerLeaseExpiresAt: undefined,
+          updatedAt: '2026-07-16T00:00:01.000Z',
+        }
+        return {
+          configuration: {
+            ...structuredClone(configuration),
+            revision: configuration.revision + 1,
+          },
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    `/api/automation/templates/${template.id}/applications`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'apply-workflow-1',
+      },
+      body: JSON.stringify({
+        target: {
+          kind: 'workflow',
+          scopeType: 'team',
+          scopeId: 'core-team',
+          expectedRevision: 2,
+        },
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    status: 'succeeded',
+    result: { kind: 'workflow', scopeType: 'team', scopeId: 'core-team', revision: 3 },
+  })
+  expect(savedConfiguration).toMatchObject({
+    revision: 2,
+    workflow: { name: 'Delivery workflow' },
+    customFields: existingConfiguration.customFields,
+  })
+  expect(completionCount).toBe(1)
+})
+
+test('retries Work Item approval with an execution-anchored deadline after response loss', async () => {
+  configureFakeProjectClients(true)
+  const approvalWrites: Array<{
+    actor: FileProofingActor
+    dueAt: string
+    requestFingerprint?: string
+    scope: { issueId?: string; projectId?: string; teamId: string; workspaceId: string }
+  }> = []
+  let loseFirstResponse = true
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createWorkItemApproval(scope, actor, input, auditContext) {
+        approvalWrites.push({
+          actor,
+          dueAt: input.dueAt,
+          requestFingerprint: auditContext?.requestFingerprint,
+          scope,
+        })
+        if (loseFirstResponse) {
+          loseFirstResponse = false
+          throw new Error('The approval committed but its response was lost.')
+        }
+        return {
+          id: 'approval-automation-1',
+          subjectType: 'work-item',
+          revision: 1,
+          status: 'pending',
+          reviewers: input.reviewerMemberKeys.map((memberKey) => ({
+            memberKey,
+            status: 'pending',
+          })),
+          dueAt: input.dueAt,
+          requestedByMemberKey: actor.memberKey,
+          requestedByKind: 'service',
+          createdAt: '2026-07-16T00:00:00.000Z',
+          updatedAt: '2026-07-16T00:00:00.000Z',
+          capabilities: { canCancel: false, canDecide: false },
+        }
+      },
+    }),
+  })
+  const execution = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'approval-response-loss',
+    workspaceId: 'workspace-1',
+    ruleId: 'rule-1',
+    ruleVersion: 1,
+    triggerEventId: 'event-1',
+    status: 'running' as const,
+    attempts: 1,
+    actions: [{
+      actionIndex: 0,
+      actionId: 'approval-response-loss:action:0000',
+      status: 'running' as const,
+      attempts: 1,
+      startedAt: '2026-07-16T02:00:00.000Z',
+    }],
+    startedAt: '2026-07-16T00:00:00.000Z',
+    retryable: false,
+  }
+  const event = {
+    eventId: 'event-1',
+    eventType: 'work-item.updated',
+    workspaceId: 'workspace-1',
+    occurredAt: '2026-07-16T00:00:00.000Z',
+    changes: [],
+    metadata: { teamId: 'core-team', issueId: 'issue-1' },
+  }
+  const action = {
+    type: 'approval' as const,
+    reviewerMemberKeys: ['Reviewer@Example.com'],
+    dueInHours: 24,
+  }
+  const executor = createAutomationActionExecutor()
+  const firstContext = {
+    execution,
+    event,
+    actionIndex: 0,
+    idempotencyKey: 'approval-response-loss:action:0000',
+  } satisfies AutomationActionExecutionContext
+
+  await expect(executor.execute(action, firstContext)).rejects.toThrow('response was lost')
+  const reloadedContext = {
+    ...firstContext,
+    execution: {
+      ...execution,
+      actions: [{
+        actionIndex: 0,
+        actionId: 'approval-response-loss:action:0000',
+        status: 'pending' as const,
+        attempts: 0,
+      }],
+    },
+  } satisfies AutomationActionExecutionContext
+  await executor.execute(action, reloadedContext)
+
+  expect(approvalWrites).toHaveLength(2)
+  expect(approvalWrites[0]).toMatchObject({
+    actor: {
+      kind: 'service',
+      memberKey: 'automation:rule-1',
+      canManage: true,
+      canWrite: true,
+    },
+    dueAt: '2026-07-17T00:00:00.000Z',
+    scope: {
+      workspaceId: 'workspace-1',
+      teamId: 'core-team',
+      issueId: 'issue-1',
+      projectId: 'refero',
+    },
+  })
+  expect(approvalWrites[1]?.dueAt).toBe(approvalWrites[0]?.dueAt)
+  expect(approvalWrites[1]?.requestFingerprint).toBe(approvalWrites[0]?.requestFingerprint)
+})
+
+test('rejects inactive automation approval reviewers before creating durable state', async () => {
+  configureFakeProjectClients(true, {
+    inactiveWorkspaceMemberKeys: ['inactive@example.com'],
+  })
+  let createCalls = 0
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createWorkItemApproval() {
+        createCalls += 1
+        throw new Error('An inactive reviewer must not reach durable approval creation.')
+      },
+    }),
+  })
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'approval-inactive-reviewer',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 1,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'issue-1' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'approval-inactive-reviewer:action:0000',
+  } satisfies AutomationActionExecutionContext
+
+  await expect(createAutomationActionExecutor().execute({
+    type: 'approval',
+    reviewerMemberKeys: ['inactive@example.com'],
+    dueInHours: 24,
+  }, context)).rejects.toMatchObject({
+    code: 'ApprovalReviewerInactive',
+    status: 409,
+  })
+  expect(createCalls).toBe(0)
 })
 
 test('authorizes Work Item file list reads and returns server capabilities', async () => {
@@ -587,6 +1959,7 @@ test('cancels a pending approval through the authenticated Work Item scope', asy
           id: 'approval-1',
           teamId: 'core-team',
           issueId: 'issue-1',
+          subjectType: 'file-version',
           revision: input.expectedRevision + 1,
           fileId: 'file-1',
           versionId: 'version-1',
@@ -594,6 +1967,7 @@ test('cancels a pending approval through the authenticated Work Item scope', asy
           reviewers: [{ memberKey: 'reviewer@example.com', status: 'pending' }],
           dueAt: '2099-07-20T00:00:00.000Z',
           requestedByMemberKey: 'demo@example.com',
+          requestedByKind: 'member',
           createdAt: '2026-07-12T00:00:00.000Z',
           updatedAt: '2026-07-12T01:00:00.000Z',
           completedAt: '2026-07-12T01:00:00.000Z',
@@ -672,6 +2046,7 @@ test('filters reviewer Inbox approvals after current project access is revoked',
           teamId: 'core-team',
           issueId: 'issue-1',
           projectId: 'refero',
+          subjectType: 'file-version',
           revision: 1,
           fileId: 'file-1',
           versionId: 'version-1',
@@ -679,6 +2054,7 @@ test('filters reviewer Inbox approvals after current project access is revoked',
           reviewers: [{ memberKey: 'demo@example.com', status: 'pending' }],
           dueAt: '2099-07-20T00:00:00.000Z',
           requestedByMemberKey: 'manager@example.com',
+          requestedByKind: 'member',
           createdAt: '2026-07-12T00:00:00.000Z',
           updatedAt: '2026-07-12T00:00:00.000Z',
           capabilities: { canCancel: false, canDecide: true },
@@ -703,6 +2079,7 @@ test('continues reviewer Inbox pagination after filtering an unauthorized scope'
       async listReviewerApprovals(_workspaceId, _actor, options) {
         cursors.push(options?.cursor)
         const commonApproval = {
+          subjectType: 'file-version' as const,
           revision: 1,
           fileId: 'file-1',
           versionId: 'version-1',
@@ -710,6 +2087,7 @@ test('continues reviewer Inbox pagination after filtering an unauthorized scope'
           reviewers: [{ memberKey: 'demo@example.com', status: 'pending' as const }],
           dueAt: '2099-07-20T00:00:00.000Z',
           requestedByMemberKey: 'manager@example.com',
+          requestedByKind: 'member' as const,
           createdAt: '2026-07-12T00:00:00.000Z',
           updatedAt: '2026-07-12T00:00:00.000Z',
           capabilities: { canCancel: false, canDecide: true },
@@ -766,6 +2144,7 @@ test('does not hide reviewer Inbox authorization read failures as an empty page'
           teamId: 'core-team',
           issueId: 'issue-1',
           projectId: 'refero',
+          subjectType: 'file-version',
           revision: 1,
           fileId: 'file-1',
           versionId: 'version-1',
@@ -773,6 +2152,7 @@ test('does not hide reviewer Inbox authorization read failures as an empty page'
           reviewers: [{ memberKey: 'demo@example.com', status: 'pending' }],
           dueAt: '2099-07-20T00:00:00.000Z',
           requestedByMemberKey: 'manager@example.com',
+          requestedByKind: 'member',
           createdAt: '2026-07-12T00:00:00.000Z',
           updatedAt: '2026-07-12T00:00:00.000Z',
           capabilities: { canCancel: false, canDecide: true },
@@ -3795,6 +5175,9 @@ test('marks a workspace audit export as truncated when the 1,000 event cap leave
 
   configureApiClientsForTest({
     auditEvents: {
+      async getEvent() {
+        return undefined
+      },
       async query(input) {
         pageNumber += 1
         expect(input.limit).toBe(100)
@@ -3830,6 +5213,9 @@ test('omits truncation headers when a workspace audit export reaches the final p
 
   configureApiClientsForTest({
     auditEvents: {
+      async getEvent() {
+        return undefined
+      },
       async query() {
         return { events: [event] }
       },
@@ -5307,6 +6693,96 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
           },
         },
       },
+    ],
+  })
+})
+
+test('DynamoDB directory client strongly replays a deterministic Project and keeps receipt completion atomic', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  let projectCommitted = false
+  let loseFirstResponse = true
+  const projectId = 'application_123'
+  const team = {
+    directoryId: 'workspace-1',
+    entryKey: '000010#000000#TEAM#core-team',
+    entryType: 'team',
+    teamId: 'core-team',
+    teamSortOrder: 10,
+    nameJa: 'コアチーム',
+    nameEn: 'Core Team',
+    expanded: true,
+  }
+  const project = {
+    directoryId: 'workspace-1',
+    entryKey: `000010#000010#PROJECT#${projectId}`,
+    entryType: 'project',
+    teamId: 'core-team',
+    teamSortOrder: 10,
+    projectId,
+    projectSortOrder: 10,
+    nameJa: '障害対応',
+    nameEn: 'Incident response',
+    tone: 'purple',
+  }
+  const completion = {
+    Update: {
+      TableName: 'AutomationTable',
+      Key: { scopeKey: 'workspace-1#automation', recordKey: 'TEMPLATE_APPLICATION#application_123' },
+      UpdateExpression: 'SET #status = :succeeded',
+    },
+  } satisfies NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      if ('KeyConditionExpression' in command.input) {
+        return { Items: projectCommitted ? [team, project] : [team] }
+      }
+      if (Array.isArray(command.input.TransactItems) && !projectCommitted) {
+        projectCommitted = true
+        if (loseFirstResponse) {
+          loseFirstResponse = false
+          throw Object.assign(new Error('Committed response was lost.'), { name: 'TimeoutError' })
+        }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+  )
+  const create = () => client.createProject(
+    'workspace-1',
+    'core-team',
+    {
+      idempotencyResourceId: projectId,
+      nameJa: '障害対応',
+      nameEn: 'Incident response',
+      tone: 'purple',
+    },
+    { userKey: 'demo@example.com', workspaceMemberVersion: 1 },
+    undefined,
+    [completion],
+  )
+
+  await expect(create()).rejects.toMatchObject({ status: 502, code: 'TimeoutError' })
+  await expect(create()).resolves.toEqual({
+    project: { id: projectId, name: '障害対応', tone: 'purple' },
+  })
+  const queryInputs = sentInputs.filter((input) => 'KeyConditionExpression' in input)
+  expect(queryInputs).toHaveLength(2)
+  expect(queryInputs.every((input) => input.ConsistentRead === true)).toBe(true)
+  expect(sentInputs[1]).toMatchObject({
+    TransactItems: expect.arrayContaining([completion]),
+  })
+  expect(sentInputs[3]).toMatchObject({
+    TransactItems: [
+      { ConditionCheck: { TableName: 'DirectoryTable' } },
+      completion,
     ],
   })
 })
@@ -9223,6 +10699,7 @@ function createFileProofingStub(
     createAnnotation: unsupported,
     deleteFile: unsupported,
     createApproval: unsupported,
+    createWorkItemApproval: unsupported,
     decideApproval: unsupported,
     cancelApproval: unsupported,
     async getApprovalSummary() {
@@ -9321,6 +10798,7 @@ function createApprovalRequestFixture(
     id: 'approval-1',
     teamId: 'core-team',
     issueId: 'issue-1',
+    subjectType: 'file-version',
     revision: 1,
     fileId: 'file-1',
     versionId: 'version-1',
@@ -9328,6 +10806,7 @@ function createApprovalRequestFixture(
     reviewers: [{ memberKey: 'sato@example.com', status: 'pending' }],
     dueAt: '2099-07-20T00:00:00.000Z',
     requestedByMemberKey: 'demo@example.com',
+    requestedByKind: 'member',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
     capabilities: { canCancel: true, canDecide: false },
@@ -9458,6 +10937,11 @@ function configureFakeProjectClients(
     detailWorkflowStatusIds?: string[]
     /** Detail fake が read ごとに返す更新日時です。 */
     detailUpdatedAts?: string[]
+    /** Project 作成 transaction と template application receipt の同時確定を再現する hook です。 */
+    projectCreateHook?: (
+      input: Record<string, unknown>,
+      completionTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    ) => Promise<void> | void
     teamProjects?: Array<{ id: string; name: string; tone: 'blue' | 'purple' | 'green' | 'yellow' }>
     /** owner Team ambiguity を再現する追加 Team です。 */
     additionalTeams?: Array<{
@@ -9882,19 +11366,37 @@ function configureFakeProjectClients(
           },
         }
       },
-      async createProject(directoryId, teamId, input, creator) {
+      async createProject(
+        directoryId,
+        teamId,
+        input,
+        creator,
+        _auditContext,
+        completionTransactItems = [],
+      ) {
         calls.projectCreates.push({
           creatorUserKey: creator.userKey,
           directoryId,
           name: String(input.name),
           teamId,
         })
+        await options.projectCreateHook?.(
+          input as Record<string, unknown>,
+          completionTransactItems,
+        )
 
         return {
           project: {
-            id: 'new-project',
-            name: String(input.name),
-            tone: 'green',
+            id: typeof input.idempotencyResourceId === 'string'
+              ? input.idempotencyResourceId
+              : 'new-project',
+            name: String(input.nameJa ?? input.name),
+            tone: input.tone === 'blue' ||
+                input.tone === 'purple' ||
+                input.tone === 'green' ||
+                input.tone === 'yellow'
+              ? input.tone
+              : 'green',
           },
         }
       },
