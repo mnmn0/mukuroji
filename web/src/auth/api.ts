@@ -1,4 +1,5 @@
 import type { AuthSession } from './session'
+import { createMutationHeaders, type MutationRequestContext } from '../api/mutationHeaders'
 import type { WorkspaceMemberStatus, WorkspaceRole } from '../workspace/api'
 
 /**
@@ -168,11 +169,12 @@ export async function loginWithPassword({
   email,
   password,
   remember,
-}: LoginWithPasswordParams): Promise<LoginResult> {
+}: LoginWithPasswordParams, mutationContext: MutationRequestContext): Promise<LoginResult> {
   const response = await apiFetch<LoginResponse | NewPasswordRequiredChallenge>('/auth/login', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...createMutationHeaders(mutationContext),
     },
     body: JSON.stringify({ email, password }),
   })
@@ -195,11 +197,12 @@ export async function completeNewPasswordChallenge({
   newPassword,
   remember,
   session,
-}: CompleteNewPasswordChallengeParams): Promise<AuthSession> {
+}: CompleteNewPasswordChallengeParams, mutationContext: MutationRequestContext): Promise<AuthSession> {
   const response = await apiFetch<LoginResponse>('/auth/challenge/new-password', {
     body: JSON.stringify({ email, newPassword, session }),
     headers: {
       'Content-Type': 'application/json',
+      ...createMutationHeaders(mutationContext),
     },
     method: 'POST',
   })

@@ -76,6 +76,7 @@ export type AuditEventEntityType =
   | 'work-item'
   | 'comment'
   | 'member'
+  | 'invitation'
   | 'project'
   | 'workflow'
   | 'file'
@@ -605,6 +606,10 @@ export type MutationAuditEventInput = {
    * schema の必須項目に含めない付加情報です。
    */
   metadata?: Readonly<Record<string, unknown>>
+  /**
+   * 同じ mutation context から複数 event を作る場合の決定的な連番です。
+   */
+  sequence?: number
 }
 
 /**
@@ -771,8 +776,9 @@ export function createMutationAuditContext(input: MutationAuditContextInput): Mu
  * mutation-scoped idempotency key hash と event sequence から deterministic event ID を作成します。
  *
  * @remarks
- * retry 時に生成後の resource ID や state 由来の event type が変化しても同じ event ID に
- * 衝突させるため、entity と event type は digest に含めません。
+ * 同じ logical event の retry は同じ sequence を再利用します。生成後の resource ID や
+ * event type に左右されないよう、entity と event type は digest に含めません。後続の
+ * 正当な state transition は caller が別の sequence slot を割り当てます。
  */
 export function createAuditEventId(
   context: MutationAuditContext,
@@ -807,6 +813,20 @@ export function createAuditEntityKey(workspaceId: string, entity: AuditEntity) {
   const normalizedEntity = normalizeEntity(entity, 'Audit entity')
 
   return `${requireText(workspaceId, 'Audit workspace ID')}#${normalizedEntity.type}#${normalizedEntity.id}`
+}
+
+/**
+ * Workspace member と invitation lifecycle で共有する scoped entity ID を作成します。
+ */
+export function createWorkspaceMemberAuditEntityId(workspaceId: string, memberId: string) {
+  return `workspace/${requireText(workspaceId, 'Audit workspace ID')}/member/${requireText(memberId, 'Audit member ID')}`
+}
+
+/**
+ * Workspace invitation lifecycle 用の scoped entity ID を作成します。
+ */
+export function createWorkspaceInvitationAuditEntityId(workspaceId: string, invitationId: string) {
+  return `workspace/${requireText(workspaceId, 'Audit workspace ID')}/invitation/${requireText(invitationId, 'Audit invitation ID')}`
 }
 
 /**
@@ -1167,6 +1187,7 @@ export function createMutationAuditEventPut(
     changes: input.changes,
     ...(input.summary ? { summary: input.summary } : {}),
     ...(input.metadata ? { metadata: input.metadata } : {}),
+    ...(input.sequence === undefined ? {} : { sequence: input.sequence }),
     expiresAt,
   })
 

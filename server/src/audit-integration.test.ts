@@ -1,6 +1,10 @@
 import { afterEach, expect, test } from 'bun:test'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import { createMutationAuditContext } from './audit'
+import {
+  createAuditEvent,
+  createMutationAuditContext,
+  createWorkspaceInvitationAuditEntityId,
+} from './audit'
 import {
   app,
   configureApiClientsForTest,
@@ -283,6 +287,125 @@ test('workspace audit requires system admin and forwards pagination filters', as
   ])
 })
 
+test('workspace audit projects invitation lifecycle events without storage fields', async () => {
+  const invitationId = 'invitation-1'
+  const invitationEntityId = createWorkspaceInvitationAuditEntityId(workspaceId, invitationId)
+  const actor = {
+    id: 'owner-sub',
+    kind: 'user' as const,
+    displayName: 'owner@example.com',
+  }
+  const changes = [
+    { field: 'status', before: 'pending', after: 'revoked' },
+    { field: 'deliveryStatus', before: 'sent', after: 'not-required' },
+  ]
+  const event = createAuditEvent({
+    context: createMutationAuditContext({
+      workspaceId,
+      actor,
+      idempotencyKey: 'workspace-invitation-revoke',
+      correlationId: 'workspace-invitation-correlation',
+      occurredAt,
+      request: {
+        method: 'POST',
+        path: `/api/workspace/invitations/${invitationId}/revoke`,
+      },
+      source: {
+        kind: 'api',
+        requestId: 'request-workspace-invitation',
+        method: 'POST',
+        route: '/api/workspace/invitations/:invitationId/revoke',
+        ipAddress: '203.0.113.10',
+        userAgent: 'audit-integration-test',
+      },
+    }),
+    eventType: 'invitation.revoked',
+    entity: { type: 'invitation', id: invitationEntityId },
+    target: { type: 'invitation', id: invitationEntityId },
+    action: 'revoked',
+    changes,
+    summary: 'Workspace invitation was revoked.',
+    metadata: { kind: 'workspace-invitation', invitationId },
+    expiresAt: 1_999_999_999,
+    outboxStatus: 'pending',
+  })
+  const queries: Array<Record<string, unknown>> = []
+  configureApiClientsForTest({
+    cognito: createCognitoClient(),
+    workspaceAccess: createWorkspaceAccessClient(),
+    auditEvents: {
+      async query(input) {
+        queries.push({ ...input })
+        return { events: [event] }
+      },
+    },
+  })
+
+  const response = await app.request(
+    `/api/audit/events?targetType=invitation&targetId=${encodeURIComponent(invitationEntityId)}&limit=10`,
+    {
+      headers: {
+        Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
+      },
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(queries).toEqual([
+    expect.objectContaining({
+      workspaceId,
+      targetType: 'invitation',
+      targetId: invitationEntityId,
+      limit: 10,
+      direction: 'descending',
+    }),
+  ])
+  const body = await response.json() as { events: Array<Record<string, unknown>> }
+  expect(body.events).toHaveLength(1)
+  const projectedEvent = body.events[0] ?? {}
+  expect(projectedEvent).toMatchObject({
+    schemaVersion: 1,
+    eventId: event.eventId,
+    workspaceId,
+    eventType: 'invitation.revoked',
+    occurredAt,
+    actor,
+    actorUserId: actor.id,
+    entity: { type: 'invitation', id: invitationEntityId },
+    entityType: 'invitation',
+    entityId: invitationEntityId,
+    target: { type: 'invitation', id: invitationEntityId },
+    targetType: 'invitation',
+    targetId: invitationEntityId,
+    changes,
+    action: 'revoked',
+    correlationId: 'workspace-invitation-correlation',
+    source: 'api',
+    summary: 'Workspace invitation was revoked.',
+    metadata: { kind: 'workspace-invitation' },
+  })
+
+  for (const field of [
+    'directoryId',
+    'occurredAtEventId',
+    'workspaceKey',
+    'workspaceEventKey',
+    'actorKey',
+    'actorEventKey',
+    'entityKey',
+    'entityEventKey',
+    'targetKey',
+    'targetEventKey',
+    'idempotencyKeyHash',
+    'requestFingerprint',
+    'sourceDetails',
+    'expiresAt',
+    'outboxStatus',
+  ]) {
+    expect(projectedEvent).not.toHaveProperty(field)
+  }
+})
+
 test('issue activity authorizes the parent and forwards its pagination cursor', async () => {
   const queries: Array<Record<string, unknown>> = []
   const projectDirectory = {
@@ -512,7 +635,7 @@ function createCognitoClient() {
         email: userId,
       }
     },
-  }
+  } as unknown as NonNullable<Parameters<typeof configureApiClientsForTest>[0]['cognito']>
 }
 
 /**

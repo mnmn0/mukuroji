@@ -71,12 +71,28 @@ To preview and run the append-only audit backfill against local DynamoDB:
 ```sh
 AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- --dry-run --limit 100
 AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
-  --checkpoint /tmp/mukuroji-audit-backfill.json
+  --source workspace-access --dry-run --limit 100
+AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
+  --checkpoint /tmp/mukuroji-audit-backfill-v2.json
 ```
 
 The write run bootstraps `mukuroji-audit-events` with the production-compatible
 keys, GSIs, and stream when the local table does not exist. Dry runs do not
-create the table or write events/checkpoints.
+create the table or write events/checkpoints. The `workspace-access` source maps
+`workspace-member` and `workspace-invitation` rows to suppressed snapshot events;
+the Workspace metadata row is counted as ignored, while unknown or malformed
+lifecycle rows stop the run. Workspace timestamps must use canonical UTC ISO
+format. Dry-run logs omit entity and target IDs.
+
+AWS runs require `WORKSPACE_ACCESS_TABLE_NAME` in addition to the existing source
+table variables and `AUDIT_EVENTS_TABLE_NAME`. Audit backfill checkpoint v2 adds
+the Workspace access source and is not compatible with a v1 checkpoint. Use a new
+checkpoint path; rescanning older sources is safe because event writes are
+deterministic and conditional. The default v2 checkpoint is
+`./audit-event-backfill-v2.checkpoint.json`; it is created with owner-only
+permissions because its `LastEvaluatedKey` can contain source identifiers. Delete
+it after the migration is complete. Unknown-timestamp snapshot events omit TTL so
+they are not immediately deleted.
 
 ## Workspace search backfill
 

@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import {
   createMutationHeaders,
+  createMutationFingerprint,
   createMutationRequestRunner,
   type MutationRequestContext,
 } from '../src/api/mutationHeaders'
@@ -16,6 +17,29 @@ test('creates stable headers from one explicit mutation context', () => {
     'X-Correlation-Id': 'correlation-1',
   })
   expect(createMutationHeaders(context)).toEqual(createMutationHeaders(context))
+})
+
+test('hashes secret mutation inputs without retaining their plaintext', async () => {
+  const first = await createMutationFingerprint(
+    'invitee@example.com',
+    'challenge-session-1',
+    'replacement-password-1',
+  )
+  const changedPassword = await createMutationFingerprint(
+    'invitee@example.com',
+    'challenge-session-1',
+    'replacement-password-2',
+  )
+  const changedSession = await createMutationFingerprint(
+    'invitee@example.com',
+    'challenge-session-2',
+    'replacement-password-1',
+  )
+
+  expect(first).toMatch(/^[a-f0-9]{64}$/)
+  expect(first).not.toContain('replacement-password')
+  expect(changedPassword).not.toBe(first)
+  expect(changedSession).not.toBe(first)
 })
 
 test('retains a context only while the HTTP mutation rejects and clears it on resolve', async () => {
@@ -67,6 +91,35 @@ test('allocates a new context when the logical mutation input changes', async ()
   await runner.run('issue:update', 'status:done', async (context) => {
     observedContexts.push(context)
   })
+
+  expect(observedContexts).toEqual(contexts)
+})
+
+test('discards a context after a caller-classified HTTP response error', async () => {
+  const contexts: MutationRequestContext[] = [
+    { correlationId: 'correlation-1', idempotencyKey: 'request-1' },
+    { correlationId: 'correlation-2', idempotencyKey: 'request-2' },
+  ]
+  let contextIndex = 0
+  const runner = createMutationRequestRunner(() => contexts[contextIndex++]!)
+  const observedContexts: MutationRequestContext[] = []
+
+  await expect(runner.run(
+    'workspace-invitation:resend:invitee@example.com',
+    'same-input',
+    async (context) => {
+      observedContexts.push(context)
+      throw new Error('confirmed HTTP error')
+    },
+    () => false,
+  )).rejects.toThrow('confirmed HTTP error')
+  await runner.run(
+    'workspace-invitation:resend:invitee@example.com',
+    'same-input',
+    async (context) => {
+      observedContexts.push(context)
+    },
+  )
 
   expect(observedContexts).toEqual(contexts)
 })

@@ -13,6 +13,8 @@ import {
   createAuditEvent as createSchemaV1AuditEvent,
   createAuditFieldChanges,
   createMutationAuditContext,
+  createWorkspaceInvitationAuditEntityId,
+  createWorkspaceMemberAuditEntityId,
   ensureLocalAuditEventsTable,
   type AuditEventV1,
   type AuditFieldChange,
@@ -20,13 +22,14 @@ import {
 import { isCanonicalWorkItemRecord } from '../src/canonical-work-item'
 
 const unknownOccurredAt = '1970-01-01T00:00:00.000Z'
-const checkpointVersion = 1
+const checkpointVersion = 2
 const scanPageSize = 100
 const sourceNames = [
   'team-issue-events',
   'team-issues',
   'project-tasks',
   'project-directory',
+  'workspace-access',
 ] as const
 
 /**
@@ -51,6 +54,10 @@ type AuditEventInput = {
    * Source item の一意 key です。
    */
   legacyKey: string
+  /**
+   * 保存 metadata では legacy key を digest に置き換えるかどうかです。
+   */
+  redactLegacyKey?: boolean
   /**
    * Domain event type です。
    */
@@ -148,7 +155,11 @@ type BackfillCounters = {
    */
   duplicates: number
   /**
-   * 必須 field 不足または対象外で skip した item 数です。
+   * 明示的に allowlist した非 domain metadata item 数です。
+   */
+  ignored: number
+  /**
+   * 既存 source mapper が必須 field 不足などで変換できず skip した item 数です。
    */
   skipped: number
 }
@@ -178,7 +189,7 @@ type CheckpointState = {
   /**
    * Checkpoint schema version です。
    */
-  version: 1
+  version: 2
   /**
    * Table 組み合わせの誤用を防ぐ hash です。
    */
@@ -214,6 +225,10 @@ type TableNames = {
    */
   projectDirectory: string
   /**
+   * Workspace member / invitation lifecycle table 名です。
+   */
+  workspaceAccess: string
+  /**
    * Backfill 先の汎用 AuditEvents table 名です。
    */
   auditEvents: string
@@ -234,7 +249,7 @@ type SourceDefinition = {
   /**
    * Source item を汎用 audit event に変換します。
    */
-  mapItem: (item: Record<string, unknown>) => AuditEventV1 | undefined
+  mapItem: (item: Record<string, unknown>) => AuditEventV1 | null | undefined
 }
 
 /**
@@ -304,7 +319,7 @@ function parseArguments(args: string[]): BackfillOptions {
   const options: BackfillOptions = {
     dryRun: false,
     help: false,
-    checkpointPath: resolve(process.cwd(), 'audit-event-backfill.checkpoint.json'),
+    checkpointPath: resolve(process.cwd(), 'audit-event-backfill-v2.checkpoint.json'),
   }
 
   for (let index = 0; index < args.length; index += 1) {
@@ -378,14 +393,15 @@ function printHelp() {
 
 Options:
   --dry-run                 Scan and map items without writing events/checkpoint.
-  --checkpoint <path>      Checkpoint JSON path (default: ./audit-event-backfill.checkpoint.json).
+  --checkpoint <path>      Checkpoint JSON path (default: ./audit-event-backfill-v2.checkpoint.json).
   --limit <count>          Maximum source items scanned in this run.
-  --source <name>          Run only team-issue-events, team-issues, project-tasks, or project-directory.
+  --source <name>          Run only team-issue-events, team-issues, project-tasks,
+                           project-directory, or workspace-access.
   --help, -h               Show this help.
 
 Required production environment:
   TEAM_ISSUE_EVENTS_TABLE_NAME, TEAM_ISSUES_TABLE_NAME, TASKS_TABLE_NAME,
-  PROJECT_DIRECTORY_TABLE_NAME, AUDIT_EVENTS_TABLE_NAME
+  PROJECT_DIRECTORY_TABLE_NAME, WORKSPACE_ACCESS_TABLE_NAME, AUDIT_EVENTS_TABLE_NAME
 
 For a local endpoint, repository-local default table names are used when omitted.
 Write runs bootstrap mukuroji-audit-events with the shared schema when it is missing.`)
@@ -413,6 +429,11 @@ function resolveTableNames(endpoint: string | undefined): TableNames {
     projectDirectory: resolveTableName(
       ['MUKUROJI_PROJECT_DIRECTORY_TABLE', 'PROJECT_DIRECTORY_TABLE_NAME'],
       'mukuroji-project-directory-local',
+      allowLocalDefaults,
+    ),
+    workspaceAccess: resolveTableName(
+      ['MUKUROJI_WORKSPACE_ACCESS_TABLE', 'WORKSPACE_ACCESS_TABLE_NAME'],
+      'mukuroji-workspace-access-local',
       allowLocalDefaults,
     ),
     auditEvents: resolveTableName(
@@ -495,6 +516,11 @@ function createSourceDefinitions(tables: TableNames): SourceDefinition[] {
       tableName: tables.projectDirectory,
       mapItem: mapProjectDirectoryItem,
     },
+    {
+      name: 'workspace-access',
+      tableName: tables.workspaceAccess,
+      mapItem: mapWorkspaceAccessItem,
+    },
   ]
 }
 
@@ -533,6 +559,11 @@ async function runBackfill(
       for (const item of items) {
         const event = definition.mapItem(item)
 
+        if (event === null) {
+          sourceCheckpoint.counters.ignored += 1
+          continue
+        }
+
         if (!event) {
           sourceCheckpoint.counters.skipped += 1
           console.warn(`Skipped invalid or unsupported ${definition.name} item.`)
@@ -540,10 +571,7 @@ async function runBackfill(
         }
 
         if (options.dryRun) {
-          console.info(
-            `[dry-run] ${event.eventType} eventId=${event.eventId} ` +
-            `entity=${event.entityType}:${event.entityId} target=${event.targetType}:${event.targetId}`,
-          )
+          console.info(`[dry-run] ${event.eventType} eventId=${event.eventId}`)
           continue
         }
 
@@ -870,6 +898,310 @@ function mapProjectDirectoryItem(item: Record<string, unknown>) {
   return undefined
 }
 
+/**
+ * WorkspaceAccessTable の canonical member / invitation row を snapshot event へ変換します。
+ *
+ * @remarks
+ * `WORKSPACE` metadata row は event を作らず無視します。一方、member / invitation row の破損や
+ * 未知の row は、欠落を ignored / skipped として隠さないよう fail-closed で例外にします。
+ */
+export function mapWorkspaceAccessItem(item: Record<string, unknown>) {
+  const entryType = readOptionalString(item, 'entryType')
+  const recordKey = readOptionalString(item, 'recordKey')
+
+  if (entryType === 'workspace-meta' || recordKey === 'WORKSPACE') {
+    assertWorkspaceAccessRow(
+      entryType === 'workspace-meta' && recordKey === 'WORKSPACE' &&
+        readRequiredString(item, 'workspaceId') !== undefined,
+      'Workspace metadata row has an invalid key or entryType.',
+    )
+    return null
+  }
+
+  if (entryType === 'workspace-member' || recordKey?.startsWith('MEMBER#')) {
+    return mapWorkspaceMemberItem(item)
+  }
+
+  if (entryType === 'workspace-invitation' || recordKey?.startsWith('INVITATION#')) {
+    return mapWorkspaceInvitationItem(item)
+  }
+
+  throw new Error('Invalid workspace-access source row: Unrecognized row discriminator.')
+}
+
+function mapWorkspaceMemberItem(item: Record<string, unknown>) {
+  const workspaceId = requireWorkspaceAccessString(item, 'workspaceId', 'Workspace member')
+  const recordKey = requireWorkspaceAccessString(item, 'recordKey', 'Workspace member')
+  const entryType = requireWorkspaceAccessString(item, 'entryType', 'Workspace member')
+  const memberKey = normalizeWorkspaceAccessEmail(
+    requireWorkspaceAccessString(item, 'memberKey', 'Workspace member'),
+    'Workspace member key',
+  )
+  const email = normalizeWorkspaceAccessEmail(
+    requireWorkspaceAccessString(item, 'email', 'Workspace member'),
+    'Workspace member email',
+  )
+  const id = normalizeWorkspaceAccessEmail(
+    requireWorkspaceAccessString(item, 'id', 'Workspace member'),
+    'Workspace member ID',
+  )
+  const role = requireWorkspaceAccessString(item, 'role', 'Workspace member')
+  const status = requireWorkspaceAccessString(item, 'status', 'Workspace member')
+  requireWorkspaceAccessTimestamp(item, 'createdAt', 'Workspace member')
+  const updatedAt = requireWorkspaceAccessTimestamp(item, 'updatedAt', 'Workspace member')
+
+  assertWorkspaceAccessRow(entryType === 'workspace-member', 'Workspace member entryType is invalid.')
+  assertWorkspaceAccessRow(recordKey === `MEMBER#${memberKey}`, 'Workspace member recordKey is invalid.')
+  assertWorkspaceAccessRow(email === memberKey, 'Workspace member email and memberKey do not match.')
+  assertWorkspaceAccessRow(id === memberKey, 'Workspace member ID and memberKey do not match.')
+  assertWorkspaceAccessRow(
+    role === 'owner' || role === 'admin' || role === 'member' || role === 'guest',
+    'Workspace member role is invalid.',
+  )
+  assertWorkspaceAccessRow(
+    status === 'active' || status === 'deactivated',
+    'Workspace member status is invalid.',
+  )
+  requireWorkspaceAccessVersion(item, 'Workspace member')
+  validateOptionalWorkspaceAccessTimestamp(item, 'deactivatedAt', 'Workspace member')
+  validateOptionalWorkspaceAccessString(item, 'name', 'Workspace member')
+  validateOptionalWorkspaceAccessIdentityOwnership(item, 'Workspace member')
+
+  const memberId = createWorkspaceMemberAuditEntityId(workspaceId, memberKey)
+
+  return createAuditEvent({
+    legacySource: 'workspace-access',
+    legacyKey: `${workspaceId}#${recordKey}`,
+    redactLegacyKey: true,
+    eventType: 'member.backfilled',
+    directoryId: workspaceId,
+    occurredAt: updatedAt,
+    actorUserId: 'system:backfill',
+    entityType: 'member',
+    entityId: memberId,
+    targetType: 'member',
+    targetId: memberId,
+    action: 'backfilled',
+    changes: createSnapshotChanges(item, [
+      ['memberKey', true],
+      ['email', true],
+      ['name', true],
+      ['role', false],
+      ['status', false],
+      ['version', false],
+      ['createdAt', false],
+      ['updatedAt', false],
+      ['deactivatedAt', false],
+      ['identityOwnership', false],
+    ]),
+    reason: 'Current Workspace member snapshot backfilled; historical transitions were not reconstructed.',
+    source: 'backfill',
+    metadata: { kind: 'workspace-member' },
+  })
+}
+
+function mapWorkspaceInvitationItem(item: Record<string, unknown>) {
+  const workspaceId = requireWorkspaceAccessString(item, 'workspaceId', 'Workspace invitation')
+  const recordKey = requireWorkspaceAccessString(item, 'recordKey', 'Workspace invitation')
+  const entryType = requireWorkspaceAccessString(item, 'entryType', 'Workspace invitation')
+  const invitationId = normalizeWorkspaceAccessEmail(
+    requireWorkspaceAccessString(item, 'id', 'Workspace invitation'),
+    'Workspace invitation ID',
+  )
+  const email = normalizeWorkspaceAccessEmail(
+    requireWorkspaceAccessString(item, 'email', 'Workspace invitation'),
+    'Workspace invitation email',
+  )
+  const role = requireWorkspaceAccessString(item, 'role', 'Workspace invitation')
+  const status = requireWorkspaceAccessString(item, 'status', 'Workspace invitation')
+  const deliveryStatus = requireWorkspaceAccessString(item, 'deliveryStatus', 'Workspace invitation')
+  const identityOwnership = requireWorkspaceAccessString(
+    item,
+    'identityOwnership',
+    'Workspace invitation',
+  )
+  const updatedAt = requireWorkspaceAccessTimestamp(item, 'updatedAt', 'Workspace invitation')
+  requireWorkspaceAccessTimestamp(item, 'createdAt', 'Workspace invitation')
+
+  assertWorkspaceAccessRow(
+    entryType === 'workspace-invitation',
+    'Workspace invitation entryType is invalid.',
+  )
+  assertWorkspaceAccessRow(
+    recordKey === `INVITATION#${invitationId}`,
+    'Workspace invitation recordKey is invalid.',
+  )
+  assertWorkspaceAccessRow(email === invitationId, 'Workspace invitation email and ID do not match.')
+  assertWorkspaceAccessRow(
+    role === 'owner' || role === 'admin' || role === 'member' || role === 'guest',
+    'Workspace invitation role is invalid.',
+  )
+  assertWorkspaceAccessRow(
+    status === 'provisioning' || status === 'pending' || status === 'delivery-failed' ||
+      status === 'expired' || status === 'revoked' || status === 'accepted',
+    'Workspace invitation status is invalid.',
+  )
+  assertWorkspaceAccessRow(
+    deliveryStatus === 'pending' || deliveryStatus === 'sent' || deliveryStatus === 'failed' ||
+      deliveryStatus === 'not-required',
+    'Workspace invitation deliveryStatus is invalid.',
+  )
+  assertWorkspaceAccessRow(
+    identityOwnership === 'workspace-created' || identityOwnership === 'pre-existing' ||
+      identityOwnership === 'ambiguous',
+    'Workspace invitation identityOwnership is invalid.',
+  )
+  requireWorkspaceAccessVersion(item, 'Workspace invitation')
+  requireWorkspaceAccessTimestamp(item, 'expiresAt', 'Workspace invitation')
+  validateOptionalWorkspaceAccessTimestamp(item, 'acceptedAt', 'Workspace invitation')
+  validateOptionalWorkspaceAccessTimestamp(item, 'lastSentAt', 'Workspace invitation')
+  validateOptionalWorkspaceAccessTimestamp(item, 'acceptanceLockExpiresAt', 'Workspace invitation')
+  validateOptionalWorkspaceAccessString(item, 'name', 'Workspace invitation')
+  validateOptionalWorkspaceAccessString(item, 'failureMessage', 'Workspace invitation')
+  validateOptionalWorkspaceAccessString(item, 'cognitoIdentityId', 'Workspace invitation')
+  validateOptionalWorkspaceAccessString(item, 'cognitoUsername', 'Workspace invitation')
+  for (const field of [
+    'directoryClaimCleanupRequired',
+    'identityCleanupCompleted',
+    'identityCleanupManualRequired',
+    'identityMutationAttempted',
+  ]) {
+    assertWorkspaceAccessRow(
+      item[field] === undefined || typeof item[field] === 'boolean',
+      `Workspace invitation ${field} is invalid.`,
+    )
+  }
+  assertWorkspaceAccessRow(
+    item.identityLifecycleVersion === undefined || item.identityLifecycleVersion === 2,
+    'Workspace invitation identityLifecycleVersion is invalid.',
+  )
+
+  const scopedInvitationId = createWorkspaceInvitationAuditEntityId(workspaceId, invitationId)
+
+  return createAuditEvent({
+    legacySource: 'workspace-access',
+    legacyKey: `${workspaceId}#${recordKey}`,
+    redactLegacyKey: true,
+    eventType: 'invitation.backfilled',
+    directoryId: workspaceId,
+    occurredAt: updatedAt,
+    actorUserId: 'system:backfill',
+    entityType: 'invitation',
+    entityId: scopedInvitationId,
+    targetType: 'invitation',
+    targetId: scopedInvitationId,
+    action: 'backfilled',
+    changes: createSnapshotChanges(item, [
+      ['email', true],
+      ['name', true],
+      ['role', false],
+      ['status', false],
+      ['deliveryStatus', false],
+      ['identityOwnership', false],
+      ['identityLifecycleVersion', false],
+      ['directoryClaimCleanupRequired', false],
+      ['identityCleanupCompleted', false],
+      ['identityCleanupManualRequired', false],
+      ['identityMutationAttempted', false],
+      ['version', false],
+      ['expiresAt', false],
+      ['createdAt', false],
+      ['updatedAt', false],
+      ['acceptedAt', false],
+      ['lastSentAt', false],
+      ['acceptanceLockExpiresAt', false],
+      ['failureMessage', true],
+    ]),
+    reason: 'Current Workspace invitation snapshot backfilled; historical transitions were not reconstructed.',
+    source: 'backfill',
+    metadata: { kind: 'workspace-invitation' },
+  })
+}
+
+function requireWorkspaceAccessString(
+  item: Record<string, unknown>,
+  fieldName: string,
+  rowLabel: string,
+) {
+  const value = readRequiredString(item, fieldName)
+
+  assertWorkspaceAccessRow(value !== undefined, `${rowLabel} ${fieldName} is required.`)
+  return value
+}
+
+function requireWorkspaceAccessTimestamp(
+  item: Record<string, unknown>,
+  fieldName: string,
+  rowLabel: string,
+) {
+  const rawValue = item[fieldName]
+  const value = requireWorkspaceAccessString(item, fieldName, rowLabel)
+  const timestamp = new Date(value)
+
+  assertWorkspaceAccessRow(
+    rawValue === value && !Number.isNaN(timestamp.getTime()) && timestamp.toISOString() === value,
+    `${rowLabel} ${fieldName} is invalid.`,
+  )
+  return value
+}
+
+function validateOptionalWorkspaceAccessTimestamp(
+  item: Record<string, unknown>,
+  fieldName: string,
+  rowLabel: string,
+) {
+  if (item[fieldName] === undefined) return
+  requireWorkspaceAccessTimestamp(item, fieldName, rowLabel)
+}
+
+function validateOptionalWorkspaceAccessString(
+  item: Record<string, unknown>,
+  fieldName: string,
+  rowLabel: string,
+) {
+  if (item[fieldName] === undefined) return
+  requireWorkspaceAccessString(item, fieldName, rowLabel)
+}
+
+function validateOptionalWorkspaceAccessIdentityOwnership(
+  item: Record<string, unknown>,
+  rowLabel: string,
+) {
+  if (item.identityOwnership === undefined) return
+  const value = requireWorkspaceAccessString(item, 'identityOwnership', rowLabel)
+
+  assertWorkspaceAccessRow(
+    value === 'workspace-created' || value === 'pre-existing' || value === 'ambiguous',
+    `${rowLabel} identityOwnership is invalid.`,
+  )
+}
+
+function requireWorkspaceAccessVersion(item: Record<string, unknown>, rowLabel: string) {
+  const value = item.version
+
+  assertWorkspaceAccessRow(
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 1,
+    `${rowLabel} version is invalid.`,
+  )
+  return value
+}
+
+function normalizeWorkspaceAccessEmail(value: string, fieldLabel: string) {
+  const normalized = value.trim().toLowerCase()
+
+  assertWorkspaceAccessRow(
+    normalized.length > 0 && normalized.includes('@'),
+    `${fieldLabel} is invalid.`,
+  )
+  return normalized
+}
+
+function assertWorkspaceAccessRow(condition: unknown, message: string): asserts condition {
+  if (!condition) {
+    throw new Error(`Invalid workspace-access source row: ${message}`)
+  }
+}
+
 function createAuditEvent(input: AuditEventInput): AuditEventV1 {
   const sourceKeyDigest = createDigest(`${input.legacySource}\0${input.legacyKey}`)
   const context = createMutationAuditContext({
@@ -911,11 +1243,15 @@ function createAuditEvent(input: AuditEventInput): AuditEventV1 {
     changes: input.changes,
     sequence: 0,
     summary: input.reason,
-    expiresAt: calculateAuditExpiresAt(input.occurredAt, readAuditRetentionDays()),
+    ...(input.occurredAt === unknownOccurredAt
+      ? {}
+      : { expiresAt: calculateAuditExpiresAt(input.occurredAt, readAuditRetentionDays()) }),
     metadata: {
       ...input.metadata,
       backfilled: true,
-      legacyKey: input.legacyKey,
+      legacyKey: input.redactLegacyKey
+        ? `sha256:${createDigest(input.legacyKey)}`
+        : input.legacyKey,
       legacySource: input.legacySource,
     },
     outboxStatus: 'suppressed',
@@ -1036,6 +1372,12 @@ async function readCheckpoint(path: string, configurationHash: string): Promise<
   try {
     const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
 
+    if (isRecord(parsed) && parsed.version === 1) {
+      throw new Error(
+        `Checkpoint v1 cannot be resumed after adding workspace-access; use a new v2 path: ${path}`,
+      )
+    }
+
     if (!isCheckpointState(parsed)) {
       throw new Error(`Checkpoint file is invalid: ${path}`)
     }
@@ -1066,6 +1408,7 @@ function createEmptyCheckpoint(configurationHash: string): CheckpointState {
       'team-issues': createEmptySourceCheckpoint(),
       'project-tasks': createEmptySourceCheckpoint(),
       'project-directory': createEmptySourceCheckpoint(),
+      'workspace-access': createEmptySourceCheckpoint(),
     },
   }
 }
@@ -1077,6 +1420,7 @@ function createEmptySourceCheckpoint(): SourceCheckpoint {
       scanned: 0,
       written: 0,
       duplicates: 0,
+      ignored: 0,
       skipped: 0,
     },
   }
@@ -1085,7 +1429,11 @@ function createEmptySourceCheckpoint(): SourceCheckpoint {
 async function writeCheckpoint(path: string, checkpoint: CheckpointState) {
   await mkdir(dirname(path), { recursive: true })
   const temporaryPath = `${path}.${process.pid}.tmp`
-  await writeFile(temporaryPath, `${JSON.stringify(checkpoint, undefined, 2)}\n`, 'utf8')
+  await writeFile(
+    temporaryPath,
+    `${JSON.stringify(checkpoint, undefined, 2)}\n`,
+    { encoding: 'utf8', mode: 0o600 },
+  )
   await rename(temporaryPath, path)
 }
 
@@ -1118,6 +1466,7 @@ function isSourceCheckpoint(value: unknown): value is SourceCheckpoint {
     typeof counters.scanned === 'number' &&
     typeof counters.written === 'number' &&
     typeof counters.duplicates === 'number' &&
+    typeof counters.ignored === 'number' &&
     typeof counters.skipped === 'number' &&
     (value.lastEvaluatedKey === undefined || isRecord(value.lastEvaluatedKey))
   )
@@ -1130,7 +1479,7 @@ function printSummary(checkpoint: CheckpointState, definitions: SourceDefinition
     console.info(
       `${definition.name}: completed=${source.completed} scanned=${source.counters.scanned} ` +
       `written=${source.counters.written} duplicates=${source.counters.duplicates} ` +
-      `skipped=${source.counters.skipped}`,
+      `ignored=${source.counters.ignored} skipped=${source.counters.skipped}`,
     )
   }
 }

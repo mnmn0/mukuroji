@@ -3425,6 +3425,76 @@ test('serializes Workspace role updates with the Planning revision', async () =>
   }])
 })
 
+test('forwards stable Workspace mutation audit headers and actor context to the state client', async () => {
+  configureFakeProjectClients(true)
+  let capturedAuditContext: ReturnType<typeof createMutationAuditContext> | undefined
+  const owner = {
+    id: 'demo@example.com',
+    memberKey: 'demo@example.com',
+    email: 'demo@example.com',
+    role: 'owner' as const,
+    status: 'active' as const,
+    version: 1,
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z',
+  }
+  configureApiClientsForTest({
+    workspaceAccess: {
+      async getActiveMember() {
+        return owner
+      },
+      async updateMember(
+        _workspaceId: string,
+        _actorMemberKey: string,
+        memberKey: string,
+        input: Parameters<WorkspaceAccessClient['updateMember']>[3],
+        auditContext: Parameters<WorkspaceAccessClient['updateMember']>[4],
+      ) {
+        capturedAuditContext = auditContext
+        return {
+          ...owner,
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: input.role ?? owner.role,
+          status: input.status ?? owner.status,
+          version: input.expectedVersion + 1,
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request('/api/workspace/members/sato%40example.com', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-member-role-change-1',
+      'X-Correlation-Id': 'workspace-correlation-1',
+    },
+    body: JSON.stringify({ expectedVersion: 1, role: 'guest' }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(capturedAuditContext).toMatchObject({
+    workspaceId: 'user#demo@example.com',
+    actor: {
+      id: 'demo@example.com',
+      displayName: 'demo@example.com',
+      kind: 'user',
+    },
+    correlationId: 'workspace-correlation-1',
+    source: {
+      kind: 'api',
+      method: 'PATCH',
+      route: '/api/workspace/members/sato%40example.com',
+    },
+  })
+  expect(capturedAuditContext?.idempotencyKeyHash).not.toContain(
+    'workspace-member-role-change-1',
+  )
+})
+
 test('rejects deactivating a Workspace member who still manages an active project', async () => {
   const calls = configureFakeProjectClients(true, {
     projectAccesses: [{ projectId: 'refero', role: 'manager' }],
