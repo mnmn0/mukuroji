@@ -644,6 +644,14 @@ export class CdkStack extends cdk.Stack {
       timeToLiveAttribute: 'expiresAtEpochSeconds',
     });
 
+    const planningTable = new dynamodb.Table(this, 'PlanningTable', {
+      partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     const teamIssueEventsTable = new dynamodb.Table(this, 'TeamIssueEventsTable', {
       partitionKey: { name: 'directoryTeamIssueId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'eventId', type: dynamodb.AttributeType.STRING },
@@ -1000,6 +1008,7 @@ export class CdkStack extends cdk.Stack {
         MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
         NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
         NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
+        PLANNING_TABLE_NAME: planningTable.tableName,
         REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
@@ -1091,6 +1100,7 @@ export class CdkStack extends cdk.Stack {
         resources: [
           workItemsTable.tableArn,
           workItemConfigurationTable.tableArn,
+          planningTable.tableArn,
           teamIssueEventsTable.tableArn,
           projectDirectoryTable.tableArn,
           auditEventsTable.tableArn,
@@ -1104,7 +1114,22 @@ export class CdkStack extends cdk.Stack {
     if (!apiFunction.role) {
       throw new Error('API Lambda execution role was not created.');
     }
+    const apiPlanningDataPolicy = new iam.Policy(this, 'ApiPlanningDataPolicy', {
+      statements: [new iam.PolicyStatement({
+        actions: [
+          'dynamodb:ConditionCheckItem',
+          'dynamodb:DeleteItem',
+          'dynamodb:DescribeTable',
+          'dynamodb:GetItem',
+          'dynamodb:PutItem',
+          'dynamodb:Query',
+          'dynamodb:UpdateItem',
+        ],
+        resources: [planningTable.tableArn],
+      })],
+    });
     apiFunction.role.attachInlinePolicy(apiWorkItemConfigurationDataPolicy);
+    apiFunction.role.attachInlinePolicy(apiPlanningDataPolicy);
     apiFunction.role.attachInlinePolicy(apiTransactWritePolicy);
     apiFunction.addToRolePolicy(
       new iam.PolicyStatement({
@@ -1657,6 +1682,9 @@ export class CdkStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'WorkItemConfigurationTableName', {
       value: workItemConfigurationTable.tableName,
+    });
+    new cdk.CfnOutput(this, 'PlanningTableName', {
+      value: planningTable.tableName,
     });
     new cdk.CfnOutput(this, 'TeamIssueEventsTableName', {
       value: teamIssueEventsTable.tableName,
