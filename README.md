@@ -37,7 +37,10 @@ bun run floci:up
 
 ```sh
 FLOCI_PORT=4567 bun run floci:up
-COGNITO_ENDPOINT=http://localhost:4567 bun run server:dev
+set -a
+. .floci/generated/cognito.env
+set +a
+bun run server:dev
 ```
 
 Floci の ready hook がローカル Cognito と Workspace を初期化します。作成される初期 owner は以下です。
@@ -87,6 +90,9 @@ bun run web:storybook
 API サーバー:
 
 ```sh
+set -a
+. .floci/generated/cognito.env
+set +a
 bun run server:dev
 ```
 
@@ -94,6 +100,9 @@ bun run server:dev
 
 ```sh
 bun run floci:up
+set -a
+. .floci/generated/cognito.env
+set +a
 bun run server:dev
 bun run web:dev
 ```
@@ -125,6 +134,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `REALTIME_WEBSOCKET_URL`: production の collaboration invalidation/presence 用 WebSocket URL。未指定時は Web が polling fallback を使います。
 - `MUKUROJI_AUDIT_EVENTS_TABLE` / `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
 - `MUKUROJI_AUDIT_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS`: audit event の保持日数。未指定時は 2555 日（7年）
+- `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY`: Workspace/member/invitation の公開 audit ID を HMAC 化する32 byte以上の固定 key。本番ではランダム生成し、backfill と API で同じ値を使います。
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID`: Cognito claim と DynamoDB partition で共有する canonical Workspace ID。未指定時は `workspace#mukuroji-local`
 - `MUKUROJI_PROJECT_DIRECTORY_ID`: 旧 local 設定との互換入力。`MUKUROJI_WORKSPACE_DIRECTORY_ID` が優先されます。
 - `MUKUROJI_INITIAL_OWNER_EMAIL` / `MUKUROJI_INITIAL_OWNER_USERNAME`: 初期 owner の email と Cognito username
@@ -150,18 +160,25 @@ Notification event、Inbox state、filter/cursor、deep link、配信設定、�
 Cycle rollover、戦略階層、roll-up、timeline dependency、critical path の契約は
 [`docs/planning.md`](docs/planning.md) を参照してください。
 
-Web の mutation は operation と入力 fingerprint ごとに `MutationRequestContext` を1つ保持し、失敗後に
-同じ入力を retry した場合だけ同じ object を API client へ渡します。HTTP mutation 成功時または
-入力変更時は context を破棄し、別の logical mutation に同じ key を流用しません。Web API client の context 引数は必須です。
+Web の mutation は operation と入力 fingerprint ごとに `MutationRequestContext` を1つ作り、同じ
+in-flight request で共有します。transport failure 後は結果が不明な間だけ保持し、Workspace snapshot の
+再取得に成功した時点で破棄します。自動再送は行わず、利用者の続行操作を新しい logical mutation として
+扱います。Web API client の context 引数は必須です。
 
 ローカル backfill は次の command で実行できます。本実行時は共通 bootstrap が未作成の
 `mukuroji-audit-events` table を本番互換 schema で作成します。
 
 ```sh
+set -a
+. .floci/generated/cognito.env
+set +a
 AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- --dry-run --limit 100
 AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
-  --checkpoint /tmp/mukuroji-audit-backfill.json
+  --checkpoint /tmp/mukuroji-audit-backfill-v2.json
 ```
+
+`.floci/generated/cognito.env` から API writer と同じ
+`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` を読み込んでください。
 
 CDK stack も同じタスクデータと指定した Workspace 用の
 チーム/プロジェクト階層に加え、Workspace metadata と初期 active owner を
@@ -175,6 +192,7 @@ export COGNITO_USER_POOL_CLIENT_ID=<public-app-client-id>
 export MUKUROJI_WORKSPACE_DIRECTORY_ID=<workspace-directory-id>
 export MUKUROJI_INITIAL_OWNER_EMAIL=<owner@example.com>
 export MUKUROJI_INITIAL_OWNER_USERNAME=<cognito-username>
+export MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY="$(openssl rand -hex 32)"
 
 bash scripts/prepare-workspace-cognito.sh
 bun run cdk:build
@@ -184,9 +202,12 @@ bun --filter cdk cdk diff \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
+  --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME"
 ```
+
+`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は環境作成時に一度だけ生成して secret store に保存し、API deploy と audit backfill で同じ値を再利用してください。通常の再 deploy で生成し直すと Workspace access の audit ID が変わります。
 
 Lambda Function URL の CORS 許可 origin は CDK parameter
 `TaskApiAllowedOrigins` で指定します。未指定時は

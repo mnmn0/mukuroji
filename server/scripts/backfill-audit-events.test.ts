@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { mapCurrentTeamIssue, mapWorkspaceAccessItem } from './backfill-audit-events'
 
+const workspaceAuditPseudonymKey = 'test-workspace-audit-pseudonym-key-00000000000000000000000000000000'
+const mapWorkspaceAccess = (item: Record<string, unknown>) =>
+  mapWorkspaceAccessItem(item, workspaceAuditPseudonymKey)
+
 function createCanonicalWorkItem(overrides: Record<string, unknown> = {}) {
   return {
     schemaVersion: 1,
@@ -68,8 +72,8 @@ describe('audit backfill Workspace access mapping', () => {
       createdAt: '2026-07-11T00:00:00.000Z',
       updatedAt: '2026-07-16T01:02:03.000Z',
     }
-    const event = mapWorkspaceAccessItem(item)
-    const retry = mapWorkspaceAccessItem(item)
+    const event = mapWorkspaceAccess(item)
+    const retry = mapWorkspaceAccess(item)
 
     expect(event).toMatchObject({
       eventType: 'member.backfilled',
@@ -77,11 +81,15 @@ describe('audit backfill Workspace access mapping', () => {
       actor: { id: 'system:backfill', kind: 'system' },
       entity: {
         type: 'member',
-        id: 'workspace/workspace-1/member/sato@example.com',
+        id: expect.stringMatching(
+          /^workspace\/wsp_v1_[a-f0-9]{48}\/member\/mbr_v1_[a-f0-9]{48}$/,
+        ),
       },
       target: {
         type: 'member',
-        id: 'workspace/workspace-1/member/sato@example.com',
+        id: expect.stringMatching(
+          /^workspace\/wsp_v1_[a-f0-9]{48}\/member\/mbr_v1_[a-f0-9]{48}$/,
+        ),
       },
       action: 'backfilled',
       source: 'backfill',
@@ -102,16 +110,20 @@ describe('audit backfill Workspace access mapping', () => {
       { field: 'version', after: 3 },
     ]))
     expect(retry?.eventId).toBe(event?.eventId)
+    expect(event?.entityId).not.toContain('sato@example.com')
+    expect(event?.entityId).not.toContain('workspace-1')
+    expect(event?.targetId).toBe(event?.entityId)
 
-    const otherWorkspaceEvent = mapWorkspaceAccessItem({ ...item, workspaceId: 'workspace-2' })
+    const otherWorkspaceEvent = mapWorkspaceAccess({ ...item, workspaceId: 'workspace-2' })
     expect(otherWorkspaceEvent?.eventId).not.toBe(event?.eventId)
-    expect(otherWorkspaceEvent?.entityId).toBe(
-      'workspace/workspace-2/member/sato@example.com',
+    expect(otherWorkspaceEvent?.entityId).toMatch(
+      /^workspace\/wsp_v1_[a-f0-9]{48}\/member\/mbr_v1_[a-f0-9]{48}$/,
     )
+    expect(otherWorkspaceEvent?.entityId).not.toBe(event?.entityId)
   })
 
   test('maps a Workspace invitation snapshot without internal Cognito identity fields', () => {
-    const event = mapWorkspaceAccessItem({
+    const event = mapWorkspaceAccess({
       workspaceId: 'workspace-1',
       recordKey: 'INVITATION#invitee@example.com',
       entryType: 'workspace-invitation',
@@ -141,11 +153,15 @@ describe('audit backfill Workspace access mapping', () => {
       actorUserId: 'system:backfill',
       entity: {
         type: 'invitation',
-        id: 'workspace/workspace-1/invitation/invitee@example.com',
+        id: expect.stringMatching(
+          /^workspace\/wsp_v1_[a-f0-9]{48}\/invitation\/inv_v1_[a-f0-9]{48}$/,
+        ),
       },
       target: {
         type: 'invitation',
-        id: 'workspace/workspace-1/invitation/invitee@example.com',
+        id: expect.stringMatching(
+          /^workspace\/wsp_v1_[a-f0-9]{48}\/invitation\/inv_v1_[a-f0-9]{48}$/,
+        ),
       },
       source: 'backfill',
       outboxStatus: 'suppressed',
@@ -169,10 +185,13 @@ describe('audit backfill Workspace access mapping', () => {
       'cognitoIdentityId',
       'cognitoUsername',
     ]))
+    expect(event?.entityId).not.toContain('invitee@example.com')
+    expect(event?.entityId).not.toContain('workspace-1')
+    expect(event?.targetId).toBe(event?.entityId)
   })
 
   test('ignores only Workspace metadata and fails closed for unrecognized rows', () => {
-    expect(mapWorkspaceAccessItem({
+    expect(mapWorkspaceAccess({
       workspaceId: 'workspace-1',
       recordKey: 'WORKSPACE',
       entryType: 'workspace-meta',
@@ -181,7 +200,7 @@ describe('audit backfill Workspace access mapping', () => {
       createdAt: '2026-07-11T00:00:00.000Z',
       updatedAt: '2026-07-16T00:00:00.000Z',
     })).toBeNull()
-    expect(() => mapWorkspaceAccessItem({
+    expect(() => mapWorkspaceAccess({
       workspaceId: 'workspace-1',
       recordKey: 'EMAIL_ALIAS#member@example.com',
       entryType: 'email-alias',
@@ -190,7 +209,7 @@ describe('audit backfill Workspace access mapping', () => {
   })
 
   test('fails closed for malformed rows recognized as Workspace lifecycle state', () => {
-    expect(() => mapWorkspaceAccessItem({
+    expect(() => mapWorkspaceAccess({
       workspaceId: 'workspace-1',
       recordKey: 'MEMBER#malformed@example.com',
       entryType: 'workspace-member',
@@ -203,7 +222,7 @@ describe('audit backfill Workspace access mapping', () => {
       createdAt: '2026-07-11T00:00:00.000Z',
       updatedAt: '2026-07-16T00:00:00.000Z',
     })).toThrow('Workspace member role is invalid.')
-    expect(() => mapWorkspaceAccessItem({
+    expect(() => mapWorkspaceAccess({
       workspaceId: 'workspace-1',
       recordKey: 'INVITATION#other@example.com',
       entryType: 'workspace-invitation',
@@ -218,7 +237,7 @@ describe('audit backfill Workspace access mapping', () => {
       createdAt: '2026-07-11T00:00:00.000Z',
       updatedAt: '2026-07-16T00:00:00.000Z',
     })).toThrow('Workspace invitation recordKey is invalid.')
-    expect(() => mapWorkspaceAccessItem({
+    expect(() => mapWorkspaceAccess({
       workspaceId: 'workspace-1',
       recordKey: 'MEMBER#invalid-time@example.com',
       entryType: 'workspace-member',

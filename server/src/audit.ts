@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import {
   CreateTableCommand,
   DescribeTableCommand,
@@ -46,6 +46,20 @@ export const AUDIT_REDACTED_VALUE = '[REDACTED]'
  * audit payload に保存できる文字列の最大長です。
  */
 export const AUDIT_MAX_TEXT_LENGTH = 4096
+
+/**
+ * 発生時刻を復元できない backfill event にだけ使う sentinel です。
+ */
+export const AUDIT_UNKNOWN_OCCURRED_AT = '1970-01-01T00:00:00.000Z'
+
+/**
+ * Workspace access の公開 audit ID に使う HMAC key の環境変数名です。
+ */
+export const WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV =
+  'MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY'
+
+const workspaceAuditPseudonymKeyMinimumBytes = 32
+const workspaceAccessEntityIdNamespace = 'workspace-access-entity-v1'
 
 /**
  * audit event に保存できる JSON object です。
@@ -306,7 +320,7 @@ export type AuditEventV1 = {
    */
   summary?: string
   /**
-   * DynamoDB TTL に渡す epoch seconds です。
+   * DynamoDB TTL に渡す epoch seconds です。時刻不明の backfill event だけ省略できます。
    */
   expiresAt?: number
   /**
@@ -816,17 +830,78 @@ export function createAuditEntityKey(workspaceId: string, entity: AuditEntity) {
 }
 
 /**
- * Workspace member と invitation lifecycle で共有する scoped entity ID を作成します。
+ * Workspace member lifecycle 用の PII を含まない scoped entity ID を作成します。
  */
-export function createWorkspaceMemberAuditEntityId(workspaceId: string, memberId: string) {
-  return `workspace/${requireText(workspaceId, 'Audit workspace ID')}/member/${requireText(memberId, 'Audit member ID')}`
+export function createWorkspaceMemberAuditEntityId(
+  workspaceId: string,
+  memberId: string,
+  pseudonymKey: string,
+) {
+  const normalizedWorkspaceId = requireText(workspaceId, 'Audit workspace ID')
+  const normalizedMemberId = requireText(memberId, 'Audit member ID')
+  const workspacePseudonym = createWorkspaceAccessPseudonym(
+    pseudonymKey,
+    'workspace',
+    normalizedWorkspaceId,
+  )
+  const memberPseudonym = createWorkspaceAccessPseudonym(
+    pseudonymKey,
+    'member',
+    normalizedWorkspaceId,
+    normalizedMemberId,
+  )
+
+  return `workspace/wsp_v1_${workspacePseudonym}/member/mbr_v1_${memberPseudonym}`
 }
 
 /**
- * Workspace invitation lifecycle 用の scoped entity ID を作成します。
+ * Workspace invitation lifecycle 用の PII を含まない scoped entity ID を作成します。
  */
-export function createWorkspaceInvitationAuditEntityId(workspaceId: string, invitationId: string) {
-  return `workspace/${requireText(workspaceId, 'Audit workspace ID')}/invitation/${requireText(invitationId, 'Audit invitation ID')}`
+export function createWorkspaceInvitationAuditEntityId(
+  workspaceId: string,
+  invitationId: string,
+  pseudonymKey: string,
+) {
+  const normalizedWorkspaceId = requireText(workspaceId, 'Audit workspace ID')
+  const normalizedInvitationId = requireText(invitationId, 'Audit invitation ID')
+  const workspacePseudonym = createWorkspaceAccessPseudonym(
+    pseudonymKey,
+    'workspace',
+    normalizedWorkspaceId,
+  )
+  const invitationPseudonym = createWorkspaceAccessPseudonym(
+    pseudonymKey,
+    'invitation',
+    normalizedWorkspaceId,
+    normalizedInvitationId,
+  )
+
+  return `workspace/wsp_v1_${workspacePseudonym}/invitation/inv_v1_${invitationPseudonym}`
+}
+
+/**
+ * Workspace access audit pseudonym key を環境変数から読み、強度を検証します。
+ *
+ * @param environment key を読む環境変数 map です。
+ * @returns live writer と backfill で固定して共有する HMAC key です。
+ */
+export function readWorkspaceAuditPseudonymKey(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  const key = environment[WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV]?.trim()
+
+  if (!key) {
+    throw new TypeError(`${WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV} is required.`)
+  }
+
+  if (new TextEncoder().encode(key).byteLength < workspaceAuditPseudonymKeyMinimumBytes) {
+    throw new RangeError(
+      `${WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV} must contain at least ` +
+      `${workspaceAuditPseudonymKeyMinimumBytes} bytes.`,
+    )
+  }
+
+  return key
 }
 
 /**
@@ -902,6 +977,19 @@ export function createAuditEvent(input: CreateAuditEventInput): AuditEventV1 {
 
   if (input.expiresAt !== undefined && (!Number.isSafeInteger(input.expiresAt) || input.expiresAt <= 0)) {
     throw new RangeError('Audit expiresAt must be a positive integer epoch timestamp.')
+  }
+
+  if (
+    input.expiresAt === undefined &&
+    !(
+      input.context.source.kind === 'backfill' &&
+      occurredAt === AUDIT_UNKNOWN_OCCURRED_AT &&
+      outboxStatus === 'suppressed'
+    )
+  ) {
+    throw new TypeError(
+      'Audit expiresAt may be omitted only for a backfill event with an unknown occurredAt.',
+    )
   }
 
   return {
@@ -1262,19 +1350,12 @@ export function toAuditEventView(value: unknown) {
   const metadata = createAuditMetadataView(event.metadata)
 
   return {
-    schemaVersion: event.schemaVersion,
     eventId: event.eventId,
-    workspaceId: event.workspaceId,
     eventType: event.eventType,
     occurredAt: event.occurredAt,
     actor: event.actor,
-    actorUserId: event.actorUserId,
     entity: event.entity,
-    entityType: event.entityType,
-    entityId: event.entityId,
     target: event.target,
-    targetType: event.targetType,
-    targetId: event.targetId,
     changes: event.changes,
     action: event.action,
     correlationId: event.correlationId,
@@ -2271,6 +2352,25 @@ function hashCanonical(value: unknown) {
 
 function hashText(value: string) {
   return createHash('sha256').update(value).digest('hex')
+}
+
+function createWorkspaceAccessPseudonym(
+  pseudonymKey: string,
+  kind: 'workspace' | 'member' | 'invitation',
+  workspaceId: string,
+  privateId?: string,
+) {
+  const key = readWorkspaceAuditPseudonymKey({
+    [WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV]: pseudonymKey,
+  })
+  const payload = [
+    workspaceAccessEntityIdNamespace,
+    kind,
+    workspaceId,
+    ...(privateId === undefined ? [] : [privateId]),
+  ].join('\0')
+
+  return createHmac('sha256', key).update(payload).digest('hex').slice(0, 48)
 }
 
 function normalizeActor(actor: AuditActor): AuditActor {

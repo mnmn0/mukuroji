@@ -124,6 +124,49 @@ test('discards a context after a caller-classified HTTP response error', async (
   expect(observedContexts).toEqual(contexts)
 })
 
+test('discards a retained context after external state recovery', async () => {
+  const contexts: MutationRequestContext[] = [
+    { correlationId: 'correlation-1', idempotencyKey: 'request-1' },
+    { correlationId: 'correlation-2', idempotencyKey: 'request-2' },
+  ]
+  let contextIndex = 0
+  const runner = createMutationRequestRunner(() => contexts[contextIndex++]!)
+  const observedContexts: MutationRequestContext[] = []
+
+  await expect(runner.run('workspace-invitation:create', 'same-input', async (context) => {
+    observedContexts.push(context)
+    throw new Error('network error')
+  })).rejects.toThrow('network error')
+
+  runner.discardRetainedContexts()
+  await runner.run('workspace-invitation:create', 'same-input', async (context) => {
+    observedContexts.push(context)
+  })
+
+  expect(observedContexts).toEqual(contexts)
+})
+
+test('does not discard an in-flight context during external state recovery', async () => {
+  const context: MutationRequestContext = {
+    correlationId: 'correlation-1',
+    idempotencyKey: 'request-1',
+  }
+  const runner = createMutationRequestRunner(() => context)
+  let resolveRequest: ((result: string) => void) | undefined
+  const request = async () => new Promise<string>((resolve) => {
+    resolveRequest = resolve
+  })
+
+  const firstResult = runner.run('workspace-member:update:member-1', 'same-input', request)
+  await Promise.resolve()
+  runner.discardRetainedContexts()
+  const secondResult = runner.run('workspace-member:update:member-1', 'same-input', request)
+
+  expect(secondResult).toBe(firstResult)
+  resolveRequest?.('updated')
+  expect(await Promise.all([firstResult, secondResult])).toEqual(['updated', 'updated'])
+})
+
 test('shares one in-flight request for concurrent calls to the same logical mutation', async () => {
   const context: MutationRequestContext = {
     correlationId: 'correlation-1',

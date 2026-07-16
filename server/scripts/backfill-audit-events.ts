@@ -9,6 +9,7 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import {
   AUDIT_MAX_TEXT_LENGTH,
+  AUDIT_UNKNOWN_OCCURRED_AT,
   calculateAuditExpiresAt,
   createAuditEvent as createSchemaV1AuditEvent,
   createAuditFieldChanges,
@@ -16,12 +17,12 @@ import {
   createWorkspaceInvitationAuditEntityId,
   createWorkspaceMemberAuditEntityId,
   ensureLocalAuditEventsTable,
+  readWorkspaceAuditPseudonymKey,
   type AuditEventV1,
   type AuditFieldChange,
 } from '../src/audit'
 import { isCanonicalWorkItemRecord } from '../src/canonical-work-item'
 
-const unknownOccurredAt = '1970-01-01T00:00:00.000Z'
 const checkpointVersion = 2
 const scanPageSize = 100
 const sourceNames = [
@@ -289,17 +290,20 @@ async function main() {
     readEnvironment('AWS_ENDPOINT_URL')
   const region = readEnvironment('AWS_REGION') ?? readEnvironment('AWS_DEFAULT_REGION') ?? 'us-east-1'
   const tables = resolveTableNames(endpoint)
+  const workspaceAuditPseudonymKey = readWorkspaceAuditPseudonymKey()
   const configurationHash = createDigest(JSON.stringify({
     endpoint: endpoint ?? 'aws-default',
     region,
     profile: readEnvironment('AWS_PROFILE') ?? 'default-provider-chain',
     account: readEnvironment('AWS_ACCOUNT_ID') ?? 'unknown-account',
     tables,
+    workspaceAccessEntityIdContract: 'v1',
+    workspaceAuditPseudonymKeyFingerprint: createDigest(workspaceAuditPseudonymKey),
   }))
   const checkpoint = await readCheckpoint(options.checkpointPath, configurationHash)
   const dynamoDbClient = createDynamoDbClient(endpoint, region)
   const client = createDocumentClient(dynamoDbClient)
-  const definitions = createSourceDefinitions(tables)
+  const definitions = createSourceDefinitions(tables, workspaceAuditPseudonymKey)
     .filter((definition) => options.source === undefined || definition.name === options.source)
 
   if (!options.dryRun && endpoint && isLocalEndpoint(endpoint)) {
@@ -401,7 +405,8 @@ Options:
 
 Required production environment:
   TEAM_ISSUE_EVENTS_TABLE_NAME, TEAM_ISSUES_TABLE_NAME, TASKS_TABLE_NAME,
-  PROJECT_DIRECTORY_TABLE_NAME, WORKSPACE_ACCESS_TABLE_NAME, AUDIT_EVENTS_TABLE_NAME
+  PROJECT_DIRECTORY_TABLE_NAME, WORKSPACE_ACCESS_TABLE_NAME, AUDIT_EVENTS_TABLE_NAME,
+  MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY
 
 For a local endpoint, repository-local default table names are used when omitted.
 Write runs bootstrap mukuroji-audit-events with the shared schema when it is missing.`)
@@ -494,7 +499,10 @@ function createDocumentClient(baseClient: DynamoDBClient) {
   })
 }
 
-function createSourceDefinitions(tables: TableNames): SourceDefinition[] {
+function createSourceDefinitions(
+  tables: TableNames,
+  workspaceAuditPseudonymKey: string,
+): SourceDefinition[] {
   return [
     {
       name: 'team-issue-events',
@@ -519,7 +527,7 @@ function createSourceDefinitions(tables: TableNames): SourceDefinition[] {
     {
       name: 'workspace-access',
       tableName: tables.workspaceAccess,
-      mapItem: mapWorkspaceAccessItem,
+      mapItem: (item) => mapWorkspaceAccessItem(item, workspaceAuditPseudonymKey),
     },
   ]
 }
@@ -669,7 +677,7 @@ function mapLegacyTeamIssueEvent(item: Record<string, unknown>) {
     action: mapLegacyAction(legacyEventType),
     changes,
     reason: readOptionalString(item, 'summary'),
-    source: 'migration',
+    source: 'backfill',
     metadata: {
       adapter: 'team-issue',
       diffUnavailable: legacyEventType === 'updated',
@@ -905,7 +913,10 @@ function mapProjectDirectoryItem(item: Record<string, unknown>) {
  * `WORKSPACE` metadata row は event を作らず無視します。一方、member / invitation row の破損や
  * 未知の row は、欠落を ignored / skipped として隠さないよう fail-closed で例外にします。
  */
-export function mapWorkspaceAccessItem(item: Record<string, unknown>) {
+export function mapWorkspaceAccessItem(
+  item: Record<string, unknown>,
+  workspaceAuditPseudonymKey: string,
+) {
   const entryType = readOptionalString(item, 'entryType')
   const recordKey = readOptionalString(item, 'recordKey')
 
@@ -919,17 +930,20 @@ export function mapWorkspaceAccessItem(item: Record<string, unknown>) {
   }
 
   if (entryType === 'workspace-member' || recordKey?.startsWith('MEMBER#')) {
-    return mapWorkspaceMemberItem(item)
+    return mapWorkspaceMemberItem(item, workspaceAuditPseudonymKey)
   }
 
   if (entryType === 'workspace-invitation' || recordKey?.startsWith('INVITATION#')) {
-    return mapWorkspaceInvitationItem(item)
+    return mapWorkspaceInvitationItem(item, workspaceAuditPseudonymKey)
   }
 
   throw new Error('Invalid workspace-access source row: Unrecognized row discriminator.')
 }
 
-function mapWorkspaceMemberItem(item: Record<string, unknown>) {
+function mapWorkspaceMemberItem(
+  item: Record<string, unknown>,
+  workspaceAuditPseudonymKey: string,
+) {
   const workspaceId = requireWorkspaceAccessString(item, 'workspaceId', 'Workspace member')
   const recordKey = requireWorkspaceAccessString(item, 'recordKey', 'Workspace member')
   const entryType = requireWorkspaceAccessString(item, 'entryType', 'Workspace member')
@@ -967,7 +981,11 @@ function mapWorkspaceMemberItem(item: Record<string, unknown>) {
   validateOptionalWorkspaceAccessString(item, 'name', 'Workspace member')
   validateOptionalWorkspaceAccessIdentityOwnership(item, 'Workspace member')
 
-  const memberId = createWorkspaceMemberAuditEntityId(workspaceId, memberKey)
+  const memberId = createWorkspaceMemberAuditEntityId(
+    workspaceId,
+    memberKey,
+    workspaceAuditPseudonymKey,
+  )
 
   return createAuditEvent({
     legacySource: 'workspace-access',
@@ -1000,7 +1018,10 @@ function mapWorkspaceMemberItem(item: Record<string, unknown>) {
   })
 }
 
-function mapWorkspaceInvitationItem(item: Record<string, unknown>) {
+function mapWorkspaceInvitationItem(
+  item: Record<string, unknown>,
+  workspaceAuditPseudonymKey: string,
+) {
   const workspaceId = requireWorkspaceAccessString(item, 'workspaceId', 'Workspace invitation')
   const recordKey = requireWorkspaceAccessString(item, 'recordKey', 'Workspace invitation')
   const entryType = requireWorkspaceAccessString(item, 'entryType', 'Workspace invitation')
@@ -1076,7 +1097,11 @@ function mapWorkspaceInvitationItem(item: Record<string, unknown>) {
     'Workspace invitation identityLifecycleVersion is invalid.',
   )
 
-  const scopedInvitationId = createWorkspaceInvitationAuditEntityId(workspaceId, invitationId)
+  const scopedInvitationId = createWorkspaceInvitationAuditEntityId(
+    workspaceId,
+    invitationId,
+    workspaceAuditPseudonymKey,
+  )
 
   return createAuditEvent({
     legacySource: 'workspace-access',
@@ -1243,7 +1268,7 @@ function createAuditEvent(input: AuditEventInput): AuditEventV1 {
     changes: input.changes,
     sequence: 0,
     summary: input.reason,
-    ...(input.occurredAt === unknownOccurredAt
+    ...(input.occurredAt === AUDIT_UNKNOWN_OCCURRED_AT
       ? {}
       : { expiresAt: calculateAuditExpiresAt(input.occurredAt, readAuditRetentionDays()) }),
     metadata: {
@@ -1324,12 +1349,12 @@ function readActor(value: unknown): ActorIdentity {
 
 function normalizeTimestamp(value: unknown) {
   if (typeof value !== 'string' || !value.trim()) {
-    return unknownOccurredAt
+    return AUDIT_UNKNOWN_OCCURRED_AT
   }
 
   const timestamp = Date.parse(value)
 
-  return Number.isNaN(timestamp) ? unknownOccurredAt : new Date(timestamp).toISOString()
+  return Number.isNaN(timestamp) ? AUDIT_UNKNOWN_OCCURRED_AT : new Date(timestamp).toISOString()
 }
 
 function readRequiredString(item: Record<string, unknown>, fieldName: string) {
@@ -1374,7 +1399,7 @@ async function readCheckpoint(path: string, configurationHash: string): Promise<
 
     if (isRecord(parsed) && parsed.version === 1) {
       throw new Error(
-        `Checkpoint v1 cannot be resumed after adding workspace-access; use a new v2 path: ${path}`,
+        `Checkpoint v1 cannot be resumed after adding workspace-access: ${path}. Choose a separate path for the new v2 checkpoint.`,
       )
     }
 

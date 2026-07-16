@@ -1,6 +1,11 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import { createMutationAuditContext } from './audit'
+import {
+  WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV,
+  createMutationAuditContext,
+  createWorkspaceInvitationAuditEntityId,
+  createWorkspaceMemberAuditEntityId,
+} from './audit'
 import {
   DynamoDbWorkspaceAccessClient,
   WorkspaceAccessError,
@@ -10,10 +15,13 @@ import {
 
 const workspaceId = 'user#demo@example.com'
 const now = new Date('2026-07-11T00:00:00.000Z')
+const workspaceAuditPseudonymKey =
+  'test-workspace-audit-pseudonym-key-00000000000000000000000000000000'
+process.env[WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV] = workspaceAuditPseudonymKey
 
-function createAuditContext(idempotencyKey: string) {
+function createAuditContext(idempotencyKey: string, contextWorkspaceId = workspaceId) {
   return createMutationAuditContext({
-    workspaceId,
+    workspaceId: contextWorkspaceId,
     actor: { id: 'sub-demo', kind: 'user', displayName: 'demo@example.com' },
     idempotencyKey,
     correlationId: `correlation-${idempotencyKey}`,
@@ -98,6 +106,15 @@ function createConditionalTransactionError(transactionLength: number, failedInde
     CancellationReasons: Array.from({ length: transactionLength }, (_, index) => ({
       Code: index === failedIndex ? 'ConditionalCheckFailed' : 'None',
     })),
+  })
+  return error
+}
+
+function createTransactionCancellationError(reasonCodes: string[]) {
+  const error = new Error('transaction canceled')
+  error.name = 'TransactionCanceledException'
+  Object.assign(error, {
+    CancellationReasons: reasonCodes.map((Code) => ({ Code })),
   })
   return error
 }
@@ -1344,6 +1361,39 @@ test('classifies a Planning revision race during member deactivation', async () 
   })
 })
 
+test('preserves mixed Planning cancellation reasons as an infrastructure failure', async () => {
+  const actor = createWorkspaceMember('demo@example.com')
+  const target = createWorkspaceMember('member@example.com', 'member')
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key as { recordKey?: string }
+        return { Item: toMemberItem(key.recordKey?.includes('member@example.com') ? target : actor) }
+      }
+
+      throw createTransactionCancellationError([
+        'None',
+        'TransactionConflict',
+        'ConditionalCheckFailed',
+      ])
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+  )
+
+  await expect(client.updateMember(workspaceId, actor.memberKey, target.memberKey, {
+    status: 'deactivated',
+    expectedVersion: target.version,
+    expectedPlanningRevision: 7,
+  })).rejects.toMatchObject({
+    status: 502,
+    code: 'WorkspaceAccessUnavailable',
+  })
+})
+
 test('classifies a canceled last-owner transaction as a domain conflict', async () => {
   const owner = createWorkspaceMember('demo@example.com')
   const secondOwner = createWorkspaceMember('second-owner@example.com')
@@ -1557,7 +1607,11 @@ test('writes invitation creation state and its scoped audit event atomically', a
       Item: {
         eventType: 'invitation.created',
         entityType: 'invitation',
-        entityId: `workspace/${workspaceId}/invitation/sato@example.com`,
+        entityId: createWorkspaceInvitationAuditEntityId(
+          workspaceId,
+          'sato@example.com',
+          workspaceAuditPseudonymKey,
+        ),
         occurredAt: now.toISOString(),
         correlationId: 'correlation-create-invitation',
         metadata: { kind: 'workspace-invitation' },
@@ -1724,7 +1778,11 @@ test('reconciles member and invitation with two deterministic audit events', asy
   expect(memberEvent).toMatchObject({
     eventType: 'member.created',
     entityType: 'member',
-    entityId: `workspace/${workspaceId}/member/sato@example.com`,
+    entityId: createWorkspaceMemberAuditEntityId(
+      workspaceId,
+      'sato@example.com',
+      workspaceAuditPseudonymKey,
+    ),
     occurredAt: now.toISOString(),
     changes: expect.arrayContaining([
       { field: 'role', after: 'member' },
@@ -1734,7 +1792,11 @@ test('reconciles member and invitation with two deterministic audit events', asy
   expect(invitationEvent).toMatchObject({
     eventType: 'invitation.accepted',
     entityType: 'invitation',
-    entityId: `workspace/${workspaceId}/invitation/sato@example.com`,
+    entityId: createWorkspaceInvitationAuditEntityId(
+      workspaceId,
+      'sato@example.com',
+      workspaceAuditPseudonymKey,
+    ),
     occurredAt: now.toISOString(),
     changes: expect.arrayContaining([
       { field: 'acceptedAt', after: now.toISOString() },
@@ -1783,8 +1845,65 @@ test('writes member role changes and their safe field diff atomically', async ()
       Item: {
         eventType: 'member.role-changed',
         entityType: 'member',
-        entityId: `workspace/${workspaceId}/member/sato@example.com`,
+        entityId: createWorkspaceMemberAuditEntityId(
+          workspaceId,
+          'sato@example.com',
+          workspaceAuditPseudonymKey,
+        ),
         occurredAt: now.toISOString(),
+        changes: [{ field: 'role', before: 'member', after: 'guest' }],
+      },
+    },
+  })
+})
+
+test('preserves deactivatedAt when changing only the role of a deactivated member', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const actor = createWorkspaceMember('demo@example.com')
+  const deactivatedAt = '2026-07-10T00:00:00.000Z'
+  const target = {
+    ...createWorkspaceMember('sato@example.com', 'member', 'deactivated'),
+    deactivatedAt,
+  }
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key as { recordKey?: string }
+        return { Item: toMemberItem(key.recordKey?.includes('demo@example.com') ? actor : target) }
+      }
+
+      inputs.push(command.input)
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+  )
+
+  const member = await client.updateMember(
+    workspaceId,
+    actor.memberKey,
+    target.memberKey,
+    { role: 'guest', expectedVersion: 1, expectedPlanningRevision: 0 },
+    createAuditContext('change-deactivated-role'),
+  )
+
+  expect(member.deactivatedAt).toBe(deactivatedAt)
+  const transactItems = inputs[0]?.TransactItems as Array<Record<string, unknown>>
+  expect(transactItems[1]).toMatchObject({
+    Update: {
+      UpdateExpression:
+        'SET #role = :role, #status = :status, updatedAt = :now, version = version + :one',
+    },
+  })
+  expect(transactItems[3]).toMatchObject({
+    Put: {
+      TableName: 'AuditTable',
+      Item: {
+        eventType: 'member.role-changed',
         changes: [{ field: 'role', before: 'member', after: 'guest' }],
       },
     },
@@ -1817,6 +1936,100 @@ test('fails closed before a Workspace state write when audit context is missing'
     code: 'WorkspaceAuditContextMissing',
   })
   expect(inputs.some((input) => Array.isArray(input.TransactItems))).toBe(false)
+})
+
+test('fails closed before a Workspace state write when the audit context targets another Workspace', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+      return command.constructor.name === 'GetCommand'
+        ? { Item: toMemberItem(createWorkspaceMember('demo@example.com')) }
+        : {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+  )
+
+  await expect(client.createInvitation(
+    workspaceId,
+    'demo@example.com',
+    { email: 'sato@example.com', role: 'member' },
+    undefined,
+    createAuditContext('workspace-mismatch', 'workspace#other'),
+  )).rejects.toMatchObject({
+    status: 500,
+    code: 'WorkspaceAuditContextMismatch',
+  })
+  expect(inputs.some((input) => Array.isArray(input.TransactItems))).toBe(false)
+})
+
+test('fails closed before a Workspace state write when the audit pseudonym key is missing', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+      return command.constructor.name === 'GetCommand'
+        ? { Item: toMemberItem(createWorkspaceMember('demo@example.com')) }
+        : {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+    '',
+  )
+
+  await expect(client.createInvitation(
+    workspaceId,
+    'demo@example.com',
+    { email: 'sato@example.com', role: 'member' },
+    undefined,
+    createAuditContext('missing-pseudonym-key'),
+  )).rejects.toMatchObject({
+    status: 500,
+    code: 'WorkspaceAuditPseudonymKeyMissing',
+  })
+  expect(inputs.some((input) => Array.isArray(input.TransactItems))).toBe(false)
+})
+
+test('preserves mixed invitation cancellation reasons as an infrastructure failure', async () => {
+  let invitationReadCount = 0
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        invitationReadCount += 1
+        return { Item: createInvitationItem('pending') }
+      }
+
+      throw createTransactionCancellationError([
+        'ConditionalCheckFailed',
+        'TransactionConflict',
+      ])
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+  )
+
+  await expect(client.acquireInvitationAcceptanceLock(
+    workspaceId,
+    'sato@example.com',
+    createAuditContext('mixed-invitation-cancellation'),
+  )).rejects.toMatchObject({
+    status: 502,
+    code: 'WorkspaceAccessUnavailable',
+  })
+  expect(invitationReadCount).toBe(1)
 })
 
 test('classifies a duplicate owner audit event separately from the last-owner guard', async () => {

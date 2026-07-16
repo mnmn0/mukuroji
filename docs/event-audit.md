@@ -31,7 +31,7 @@
 | `schemaVersion` | yes | event payload の version。初期値は `1`。 |
 | `eventId` | yes | Workspace/actor scoped idempotency hash と event sequence から決定的に導出する event ID。 |
 | `eventType` | yes | `work-item.updated` のような過去形の domain event 名。 |
-| `directoryId` / `workspaceId` | yes | Workspace partition。#19 完了前は現在の Cognito directory ID と同じ値。 |
+| `directoryId` / `workspaceId` | yes | 内部 Workspace partition。production の canonical ID は email 等の PII を含めない。公開 DTO には含めない。 |
 | `occurredAt` | yes | state mutation が確定した時刻。 |
 | `occurredAtEventId` | yes | `<occurredAt>#<eventId>` の timeline sort key。各 GSI の sort key と同じ値。 |
 | `actor` / `actorUserId` | yes | kind、安定 user key、任意の表示名を持つ actor snapshot。backfill は `system:backfill` を使う。Bearer token は保存しない。 |
@@ -81,7 +81,7 @@ mutation ごとに許可する field を allowlist 化し、request body 全体�
 - `file`
 - `approval`
 
-event type は resource と operation を組み合わせる。例: `work-item.created`、`work-item.updated`、`comment.created`、`member.role-changed`、`member.removed`、`invitation.created`、`invitation.revoked`、`project.archived`、`workflow.updated`、`file.attached`、`approval.decided`。team は現行 directory model との互換のため `entityType=project`、`entityId=team/<teamId>`、`metadata.kind=team` として扱う。Canonical Work Item ID は既存 activity / collaboration key と互換の `team/<teamId>/issue/<issueId>` とし、comment target は `<workItemId>/comment/<commentId>` とする。Workspace member ID は `workspace/<workspaceId>/member/<memberKey>`、invitation ID は `workspace/<workspaceId>/invitation/<invitationId>` とし、同じ user または invitation を別 Workspace と混同しない。過去に legacy task から backfill 済みの `project/<projectId>/task/<taskId>` は historical alias としてだけ読み取り、新しい mutation には使わない。migration が current snapshot だけを復元した event は `*.backfilled` とし、実際の作成時刻や actor を捏造しない。
+event type は resource と operation を組み合わせる。例: `work-item.created`、`work-item.updated`、`comment.created`、`member.role-changed`、`member.removed`、`invitation.created`、`invitation.revoked`、`project.archived`、`workflow.updated`、`file.attached`、`approval.decided`。team は現行 directory model との互換のため `entityType=project`、`entityId=team/<teamId>`、`metadata.kind=team` として扱う。Canonical Work Item ID は既存 activity / collaboration key と互換の `team/<teamId>/issue/<issueId>` とし、comment target は `<workItemId>/comment/<commentId>` とする。Workspace member / invitation の公開 ID は固定 HMAC key と domain separation から `workspace/wsp_v1_<digest>/member/mbr_v1_<digest>`、`workspace/wsp_v1_<digest>/invitation/inv_v1_<digest>` を導出し、raw Workspace ID、member key、email を含めない。同じ private resource は live mutation と backfill で同じ ID になり、別 Workspace と混同しない。過去に legacy task から backfill 済みの `project/<projectId>/task/<taskId>` は historical alias としてだけ読み取り、新しい mutation には使わない。migration が current snapshot だけを復元した event は `*.backfilled` とし、実際の作成時刻や actor を捏造しない。
 
 ## DynamoDB key
 
@@ -123,7 +123,7 @@ mutation は次の item を 1 回の `TransactWriteItems` で確定する。
 
 ## Idempotency と retry
 
-mutation client は logical mutation の開始時に `MutationRequestContext` を1回だけ作り、初回 request と response を確認できなかった transport retry で同じ `Idempotency-Key` / `X-Correlation-Id` を再利用する。Web UI は operation と入力 fingerprint ごとに context を保持する。Workspace invitation の多段 mutation は取得済み state の version/status も fingerprint に含め、失敗後の再取得で state が進んでいれば続行操作を新しい logical mutation として別 key へ切り替える。HTTP success、HTTP error response、入力変更時は context を破棄し、確認済みの失敗後に利用者が行う次の操作は新しい logical mutation として扱う。認証入力の fingerprint は password/session の平文を保持せず、memory 内の SHA-256 digest だけを使う。Web API client は context を必須とし、呼び出し側が retry の境界を明示する。CORS でも両 header を許可する。互換 client が idempotency header を送らない場合の server 採番は後方互換用であり、response 消失後の再送保証には使わない。
+mutation client は logical mutation の開始時に `MutationRequestContext` を1回だけ作り、同時実行された同じ operation/input の in-flight request で `Idempotency-Key` / `X-Correlation-Id` を共有する。現行 server は保存済み response を replay しないため、response を確認できなかった transport failure 後に同じ key を無条件再送してはならない。Workspace UI は context を一時保持し、snapshot の再取得が成功した時点で retry 待ち context を破棄する。Workspace invitation の多段 mutation は取得済み state の version/status も fingerprint に含め、再取得した最新 state から利用者が行う続行操作を新しい logical mutation として別 key へ切り替える。再取得に失敗して結果が不明な間だけ context を保持し、自動再送は行わない。認証入力の fingerprint は password/session の平文を保持せず、memory 内の SHA-256 digest だけを使う。Web API client は context を必須とし、呼び出し側が retry の境界を明示する。CORS でも両 header を許可する。互換 client が idempotency header を送らない場合の server 採番は後方互換用であり、response 消失後の再送保証には使わない。
 
 server は method、path、query、body から request fingerprint を計算し、`SHA-256("audit-idempotency-v1\0" + workspaceId + "\0" + actorId + "\0" + idempotencyKey)` を `idempotencyKeyHash` とする。`X-Correlation-Id` がなければ `corr_` と `SHA-256(workspaceId + "\0" + idempotencyKeyHash)` の先頭32桁から決定的に補う。event ID は `workspaceId + idempotencyKeyHash + schemaVersion + sequence` から作り、生成後の resource ID、state、entity、event type を digest に含めない。Workspace invitation の複数段 mutation は開始、identity mutation、claim/reconcile、delivery/cleanup に固定 sequence `0..3` を割り当てる。同じ Workspace/actor で同じ `Idempotency-Key` を再利用した場合:
 
@@ -154,7 +154,7 @@ system admin を要求する。target filter がある場合は `TargetOccurredA
 
 ### Public response projection
 
-activity、audit、export は保存 row をそのまま返さず、`eventId`、`eventType`、`occurredAt`、actor、entity、target、action、redact 済み changes、`correlationId`、source kind、`summary`、allowlist 済み metadata だけを DTO へ projection する。`workspaceKey` / `*EventKey` / `actorKey` / `entityKey` / `targetKey` 等の DynamoDB key、backfill の `legacyKey`、`requestFingerprint`、`idempotencyKeyHash`、`sourceDetails` の IP/User-Agent、`outboxStatus` は public response と export に含めない。
+activity、audit、export は保存 row をそのまま返さず、`eventId`、`eventType`、`occurredAt`、nested actor/entity/target、action、redact 済み changes、`correlationId`、source kind、`summary`、allowlist 済み metadata だけを DTO へ projection する。`schemaVersion`、`workspaceId` / `directoryId`、`actorUserId`、flat な entity/target field、`workspaceKey` / `*EventKey` / `actorKey` / `entityKey` / `targetKey` 等の DynamoDB key、backfill の `legacyKey`、`requestFingerprint`、`idempotencyKeyHash`、`sourceDetails` の IP/User-Agent、`outboxStatus` は public response と export に含めない。
 
 ### Cursor
 
@@ -165,6 +165,7 @@ cursor v1 は version、index、filter fingerprint、DynamoDB `LastEvaluatedKey`
 - audit event は `AUDIT_RETENTION_DAYS`（default 2,555日、約7年）から `expiresAt` を計算する。値は最低1日とし、policy 変更は新規 event から適用する。
 - 同じ row が outbox を兼ねるため、TTL は consumer の最大再処理期間より十分長くする。consumer checkpoint は別の短い retention を設定できる。
 - field 名が password/token/secret/authorization/cookie/credential/api key/private key/signed URL に該当する値は write-time に `[REDACTED]` へ置換し、文字列は最大4,096文字に制限する。response-time mask だけに依存しない。
+- Workspace/member/invitation の公開識別子は PII を直接または unkeyed digest として含めず、`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` を使う HMAC pseudonym に限定する。この key は環境ごとに32 byte以上の random 値を固定し、通常の rotation 対象にしない。
 - comment body や説明文は対象への閲覧権限がある activity と system-admin audit だけに返す。より細かい export policy が必要になった場合は field allowlist を追加する。
 - 個人情報削除が必要な場合、immutable event を上書きしない。redaction event を append し、query projection で過去値を隠す。強い削除要件がある payload は暗号化した別 table に置き、鍵破棄または payload deletion で消去できるようにする。
 - export は event ID、時刻、actor、target、event type、redact 済み changes、correlation ID を含め、internal DynamoDB key、request fingerprint、保存済み mutation response は含めない。
@@ -198,6 +199,7 @@ source item の key から logical idempotency key を決定的に作り、通�
 # まず読み取りだけを最大100件確認する
 AWS_ENDPOINT_URL=http://localhost:4566 \
 AUDIT_EVENTS_TABLE_NAME=mukuroji-audit-events \
+MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<fixed-32-byte-or-longer-key> \
 bun server/scripts/backfill-audit-events.ts --dry-run --limit 100
 
 # checkpoint を使って本実行する
@@ -208,16 +210,17 @@ TASKS_TABLE_NAME=mukuroji-project-tasks-v2-local \
 PROJECT_DIRECTORY_TABLE_NAME=mukuroji-project-directory-local \
 WORKSPACE_ACCESS_TABLE_NAME=mukuroji-workspace-access-local \
 AUDIT_EVENTS_TABLE_NAME=mukuroji-audit-events \
+MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<same-key-as-api-writer> \
 bun server/scripts/backfill-audit-events.ts \
   --checkpoint /tmp/mukuroji-audit-backfill-v2.json \
   --limit 1000
 ```
 
-`--limit` は 1 run で scan する source item 数の上限であり、event 数ではない。source は consistent read で scan する。checkpoint v2 は DynamoDB `LastEvaluatedKey` と累積 counter を 5 source のそれぞれに保持し、endpoint、region、profile、account hint、table 名の configuration hash が異なる環境では再利用を拒否する。既定 path は `./audit-event-backfill-v2.checkpoint.json` で、file は owner のみが読める mode で作成する。`LastEvaluatedKey` には source identifier が含まれ得るため、checkpoint は機密情報として保管し、完了後に削除する。Workspace access source 追加前の checkpoint v1 は互換ではないため、新しい checkpoint path で再実行する。既存の 4 source を再走査しても conditional Put により event は重複しない。page 処理中に停止した場合は同じ page を再処理するが、同じ duplicate guard により安全である。`--dry-run` は table、event、checkpoint のいずれも書き込まず、log に entity/target ID を出力しない。local endpoint の本実行は共通 bootstrap を呼び、`mukuroji-audit-events` が未作成なら本番と同じ key/GSI/Stream を持つ table を作成してから書き込む。
+`--limit` は 1 run で scan する source item 数の上限であり、event 数ではない。source は consistent read で scan する。checkpoint v2 は DynamoDB `LastEvaluatedKey` と累積 counter を 5 source のそれぞれに保持し、endpoint、region、profile、account hint、table 名、pseudonym key fingerprint、ID contract version の configuration hash が異なる環境では再利用を拒否する。既定 path は `./audit-event-backfill-v2.checkpoint.json` で、file は owner のみが読める mode で作成する。`LastEvaluatedKey` には source identifier が含まれ得るため、checkpoint は機密情報として保管し、完了後に削除する。Workspace access source 追加前の checkpoint v1 は互換ではないため、新しい checkpoint path で再実行する。既存の 4 source を再走査しても conditional Put により event は重複しない。page 処理中に停止した場合は同じ page を再処理するが、同じ duplicate guard により安全である。`--dry-run` は table、event、checkpoint のいずれも書き込まず、log に entity/target ID を出力しない。local endpoint の本実行は共通 bootstrap を呼び、`mukuroji-audit-events` が未作成なら本番と同じ key/GSI/Stream を持つ table を作成してから書き込む。
 
-WorkspaceAccess row は `recordKey=WORKSPACE` / `entryType=workspace-meta` だけを `ignored` とし、member/invitation の record key と identifier の一致、role/status/delivery/ownership enum、version、必須 field、canonical timestamp を検証する。未知 row または認識できる破損 row は skip せず migration を停止する。backfill は現在値だけを復元するため、過去の招待再送、取消、受諾、role/status 変更の順序や actor は復元せず、`system:backfill` actor の snapshot event として記録する。changes 内の email、member key、表示名、failure message は write-time に redact し、Cognito identity ID/username は snapshot payload に含めない。
+WorkspaceAccess row は `recordKey=WORKSPACE` / `entryType=workspace-meta` だけを `ignored` とし、member/invitation の record key と identifier の一致、role/status/delivery/ownership enum、version、必須 field、canonical timestamp を検証する。公開 entity/target ID は API writer と同じ固定 HMAC key から導出し、raw Workspace ID や email を保存しない。未知 row または認識できる破損 row は skip せず migration を停止する。backfill は現在値だけを復元するため、過去の招待再送、取消、受諾、role/status 変更の順序や actor は復元せず、`system:backfill` actor の snapshot event として記録する。changes 内の email、member key、表示名、failure message は write-time に redact し、Cognito identity ID/username は snapshot payload に含めない。
 
-Workspace access の rollout は state/event atomic writer を先に deploy し、その後 `--source workspace-access --dry-run` の member/invitation/ignored 件数と sample projection を保存してから v2 checkpoint で apply する。apply 後は checkpoint、source 件数、`TargetOccurredAtIndex` の sample、`outboxStatus=suppressed`、audit export の redaction を照合する。backfill event を過去の lifecycle transition として扱ってはならない。
+Workspace access の rollout は同じ pseudonym key を設定した state/event atomic writer を先に deploy し、その後 `--source workspace-access --dry-run` の member/invitation/ignored 件数と sample projection を保存してから v2 checkpoint で apply する。key は ID contract の一部なので apply 後に rotation しない。apply 後は checkpoint、source 件数、`TargetOccurredAtIndex` の sample、`outboxStatus=suppressed`、audit export の redaction を照合する。backfill event を過去の lifecycle transition として扱ってはならない。
 
 backfill の Put も DynamoDB Stream record を生成するため、`outboxStatus=suppressed` を必ず付ける。consumer はこれを通常通知・自動化へ流さない。過去 event を配送する場合は、対象 event type と期間を明示した別 replay job を用意する。
 
@@ -254,7 +257,7 @@ type MutationAuditContextInput = {
 
 `WorkspaceMembershipIdentityAdapter` は active Workspace member と owner/admin/member/guest の権限、deactivated member、revoked invitation を検証する。audit actor ID は認証済み principal の安定 ID、表示名は event 発生時点の `principal.userKey` snapshot とする。event writer と schema は Cognito provisioning や adapter の実装を知らない。
 
-project member event の entity/target ID は `<projectId>/<memberId>` とする。Workspace member と invitation は上記の `workspace/<workspaceId>/...` ID を使い、同じ user の異なる scope を混同しない。
+project member event の entity/target ID は `<projectId>/<memberId>` とする。Workspace member と invitation は上記の HMAC pseudonym ID を使い、raw Workspace ID、member key、email を公開せずに同じ user の異なる scope を混同しない。
 
 ### Canonical Work Item
 

@@ -234,8 +234,14 @@ export function WorkspaceAccessPanelContainer({
   locale,
 }: WorkspaceAccessPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const mutationRequestRunner = useRef(createMutationRequestRunner()).current
-  const accessKey = accessToken ? (['workspace-access', accessToken] as const) : null
+  const mutationSession = useMemo(() => ({
+    accessToken,
+    requestRunner: createMutationRequestRunner(),
+  }), [accessToken])
+  const mutationRequestRunner = mutationSession.requestRunner
+  const accessKey = mutationSession.accessToken
+    ? (['workspace-access', mutationSession.accessToken] as const)
+    : null
   const {
     data: access,
     error,
@@ -249,6 +255,7 @@ export function WorkspaceAccessPanelContainer({
 
   const refresh = async () => {
     await mutate()
+    mutationRequestRunner.discardRetainedContexts()
   }
 
   const createInvitationMutationFingerprint = (invitationId: string) => {

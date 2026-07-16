@@ -7,17 +7,15 @@ Hono で実装した API を、Bun development server と Node.js 22 Lambda の�
 ```sh
 bun install
 bun run floci:up
-bun run server:dev
-```
-
-server は既定で `http://localhost:4566` の Floci Cognito / DynamoDB に接続します。Floci が生成した値を明示的に読み込む場合は次のように起動します。
-
-```sh
 set -a
 . .floci/generated/cognito.env
 set +a
 bun run server:dev
 ```
+
+server は既定で `http://localhost:4566` の Floci Cognito / DynamoDB に接続します。
+Workspace access mutation に必要な固定 HMAC key を API writer と backfill で共有するため、
+Floci が生成した `.floci/generated/cognito.env` は必ず読み込んでください。
 
 health check は `GET http://localhost:3000/api/health` です。`POST /api/auth/login` 以外の application API は、Cognito access token を `Authorization: Bearer <token>` で受け取ります。
 
@@ -54,6 +52,7 @@ Default local table names are:
 - `PLANNING_TABLE_NAME=mukuroji-planning-local`
 - `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`（未指定時は `mukuroji-workspace-search-local`）
 - `MUKUROJI_AUDIT_RETENTION_DAYS=2555`
+- `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<32-byte以上の固定random key>`（API と backfill で共有し、通常は rotation しない）
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID=workspace#mukuroji-local`
 - `MUKUROJI_WORKSPACE_ACCESS_TABLE=mukuroji-workspace-access-local`
 
@@ -69,12 +68,18 @@ name to the API Lambda through the same environment variable.
 To preview and run the append-only audit backfill against local DynamoDB:
 
 ```sh
+set -a
+. .floci/generated/cognito.env
+set +a
 AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- --dry-run --limit 100
 AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
   --source workspace-access --dry-run --limit 100
 AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
   --checkpoint /tmp/mukuroji-audit-backfill-v2.json
 ```
+
+この env file から API writer と同じ `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY`
+を読み込まない場合、backfill は開始前に fail-closed で停止します。
 
 The write run bootstraps `mukuroji-audit-events` with the production-compatible
 keys, GSIs, and stream when the local table does not exist. Dry runs do not

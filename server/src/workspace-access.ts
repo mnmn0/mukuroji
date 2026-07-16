@@ -402,6 +402,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   private readonly planningTableName: string
   /** immutable audit event を保存する DynamoDB table 名です。 */
   private readonly auditTableName?: string
+  /** Workspace/member/invitation の公開 audit ID を導出する固定 HMAC key です。 */
+  private readonly auditPseudonymKey?: string
   /** 進行中または完了済みの local table 初期化です。 */
   private localTableInitializer?: Promise<void>
 
@@ -417,6 +419,9 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     auditTableName: string | null | undefined = documentClient === undefined
       ? getConfiguredAuditTableName() ?? 'mukuroji-audit-events'
       : undefined,
+    auditPseudonymKey: string | undefined = readEnvironment(
+      'MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY',
+    ),
   ) {
     this.tableName = tableName
     this.dynamoDbClient = dynamoDbClient
@@ -427,6 +432,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     this.clock = clock
     this.planningTableName = planningTableName
     this.auditTableName = auditTableName ?? undefined
+    this.auditPseudonymKey = auditPseudonymKey?.trim() || undefined
   }
 
   /** 指定 member を consistent read で取得します。 */
@@ -1277,7 +1283,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       directoryId: normalizedWorkspaceId,
       eventType: 'member.created',
       entityType: 'member',
-      entityId: createWorkspaceMemberAuditEntityId(normalizedWorkspaceId, member.memberKey),
+      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, member.memberKey),
       action: 'created',
       occurredAt: nowIso,
       changes: createAuditFieldChanges(
@@ -1405,13 +1411,18 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     const willBeActiveOwner = nextRole === 'owner' && nextStatus === 'active'
     const ownerCountDelta = Number(willBeActiveOwner) - Number(wasActiveOwner)
     const nowIso = this.clock().toISOString()
+    const becameDeactivated = target.status !== 'deactivated' && nextStatus === 'deactivated'
     const nextMember = {
       ...target,
       role: nextRole,
       status: nextStatus,
       version: target.version + 1,
       updatedAt: nowIso,
-      deactivatedAt: nextStatus === 'deactivated' ? nowIso : undefined,
+      deactivatedAt: becameDeactivated
+        ? nowIso
+        : nextStatus === 'deactivated'
+          ? target.deactivatedAt
+          : undefined,
     } satisfies WorkspaceMember
     const roleChanged = nextRole !== target.role
     const statusChanged = nextStatus !== target.status
@@ -1438,7 +1449,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       directoryId: normalizedWorkspaceId,
       eventType: memberEventType,
       entityType: 'member',
-      entityId: createWorkspaceMemberAuditEntityId(normalizedWorkspaceId, target.memberKey),
+      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, target.memberKey),
       action: memberAction,
       occurredAt: nowIso,
       changes: createAuditFieldChanges(
@@ -1465,9 +1476,11 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           workspaceId: normalizedWorkspaceId,
           recordKey: createMemberRecordKey(target.memberKey),
         },
-        UpdateExpression: nextStatus === 'deactivated'
+        UpdateExpression: becameDeactivated
           ? 'SET #role = :role, #status = :status, updatedAt = :now, deactivatedAt = :now, version = version + :one'
-          : 'SET #role = :role, #status = :status, updatedAt = :now, version = version + :one REMOVE deactivatedAt',
+          : nextStatus === 'deactivated'
+            ? 'SET #role = :role, #status = :status, updatedAt = :now, version = version + :one'
+            : 'SET #role = :role, #status = :status, updatedAt = :now, version = version + :one REMOVE deactivatedAt',
         ConditionExpression: 'attribute_exists(workspaceId) AND version = :expectedVersion',
         ExpressionAttributeNames: { '#role': 'role', '#status': 'status' },
         ExpressionAttributeValues: {
@@ -1509,6 +1522,10 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       return nextMember
     } catch (error) {
       if (isAwsError(error, 'TransactionCanceledException')) {
+        if (!isConditionalTransactionCancellation(error)) {
+          throw toWorkspaceAccessError(error)
+        }
+
         if (isTransactionConditionalFailureAt(error, planningRevisionItemIndex)) {
           throw new WorkspaceAccessError(
             409,
@@ -1516,10 +1533,6 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
             'Planning changed. Reload and try again.',
             { cause: error },
           )
-        }
-
-        if (!isConditionalTransactionCancellation(error)) {
-          throw toWorkspaceAccessError(error)
         }
 
         const aggregateConditionFailed =
@@ -1600,7 +1613,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       directoryId: workspaceId,
       eventType,
       entityType: 'invitation',
-      entityId: createWorkspaceInvitationAuditEntityId(workspaceId, after.id),
+      entityId: this.createInvitationAuditEntityId(workspaceId, after.id),
       action,
       occurredAt: after.updatedAt,
       changes: createAuditFieldChanges(
@@ -1631,7 +1644,55 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       )
     }
 
+    if (auditContext.workspaceId !== input.directoryId) {
+      throw new WorkspaceAccessError(
+        500,
+        'WorkspaceAuditContextMismatch',
+        'Workspace mutation audit context does not match the target Workspace.',
+      )
+    }
+
     return createMutationAuditEventPut(this.auditTableName, auditContext, input)
+  }
+
+  /** Workspace member の公開 audit ID を固定 HMAC key から導出します。 */
+  private createMemberAuditEntityId(workspaceId: string, memberId: string) {
+    return this.createAuditEntityId((pseudonymKey) =>
+      createWorkspaceMemberAuditEntityId(workspaceId, memberId, pseudonymKey)
+    )
+  }
+
+  /** Workspace invitation の公開 audit ID を固定 HMAC key から導出します。 */
+  private createInvitationAuditEntityId(workspaceId: string, invitationId: string) {
+    return this.createAuditEntityId((pseudonymKey) =>
+      createWorkspaceInvitationAuditEntityId(workspaceId, invitationId, pseudonymKey)
+    )
+  }
+
+  /** Audit 無効時は未使用 placeholder を返し、有効時は key 設定を fail-closed で検証します。 */
+  private createAuditEntityId(createId: (pseudonymKey: string) => string) {
+    if (!this.auditTableName) {
+      return 'audit-disabled'
+    }
+
+    if (!this.auditPseudonymKey) {
+      throw new WorkspaceAccessError(
+        500,
+        'WorkspaceAuditPseudonymKeyMissing',
+        'Workspace audit pseudonym key is required.',
+      )
+    }
+
+    try {
+      return createId(this.auditPseudonymKey)
+    } catch (error) {
+      throw new WorkspaceAccessError(
+        500,
+        'WorkspaceAuditPseudonymKeyInvalid',
+        'Workspace audit pseudonym key is invalid.',
+        { cause: error },
+      )
+    }
   }
 
   /** actor guard と invitation update を同一 transaction で実行します。 */
@@ -1773,7 +1834,10 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     } catch (error) {
       if (
         isAwsError(error, 'ConditionalCheckFailedException') ||
-        isTransactionConditionalFailureAt(error, 0)
+        (
+          isConditionalTransactionCancellation(error) &&
+          isTransactionConditionalFailureAt(error, 0)
+        )
       ) {
         const latest = await this.getInvitation(workspaceId, invitation.id)
 

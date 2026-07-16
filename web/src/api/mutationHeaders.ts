@@ -17,6 +17,10 @@ export type MutationRequestContext = {
  */
 export type MutationRequestRunner = {
   /**
+   * State 再取得後に、実行中ではない retry 待ち context を破棄します。
+   */
+  readonly discardRetainedContexts: () => void
+  /**
    * 同じ operation key と fingerprint の実行中 request と保持対象の再実行を共有します。
    */
   readonly run: <TResult>(
@@ -90,6 +94,13 @@ export function createMutationRequestRunner(
   const pendingRequests = new Map<string, PendingMutationRequest>()
 
   return {
+    discardRetainedContexts: () => {
+      for (const [operationKey, pendingRequest] of pendingRequests) {
+        if (pendingRequest.inFlight === undefined) {
+          pendingRequests.delete(operationKey)
+        }
+      }
+    },
     run: <TResult>(
       operationKey: string,
       fingerprint: string,

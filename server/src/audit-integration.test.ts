@@ -16,6 +16,8 @@ import {
 const workspaceId = 'workspace-1'
 const actorUserId = 'demo@example.com'
 const occurredAt = '2026-07-11T12:00:00.000Z'
+const workspaceAuditPseudonymKey =
+  'test-workspace-audit-pseudonym-key-00000000000000000000000000000000'
 
 afterEach(() => {
   resetApiClientsForTest()
@@ -289,7 +291,11 @@ test('workspace audit requires system admin and forwards pagination filters', as
 
 test('workspace audit projects invitation lifecycle events without storage fields', async () => {
   const invitationId = 'invitation-1'
-  const invitationEntityId = createWorkspaceInvitationAuditEntityId(workspaceId, invitationId)
+  const invitationEntityId = createWorkspaceInvitationAuditEntityId(
+    workspaceId,
+    invitationId,
+    workspaceAuditPseudonymKey,
+  )
   const actor = {
     id: 'owner-sub',
     kind: 'user' as const,
@@ -364,19 +370,12 @@ test('workspace audit projects invitation lifecycle events without storage field
   expect(body.events).toHaveLength(1)
   const projectedEvent = body.events[0] ?? {}
   expect(projectedEvent).toMatchObject({
-    schemaVersion: 1,
     eventId: event.eventId,
-    workspaceId,
     eventType: 'invitation.revoked',
     occurredAt,
     actor,
-    actorUserId: actor.id,
     entity: { type: 'invitation', id: invitationEntityId },
-    entityType: 'invitation',
-    entityId: invitationEntityId,
     target: { type: 'invitation', id: invitationEntityId },
-    targetType: 'invitation',
-    targetId: invitationEntityId,
     changes,
     action: 'revoked',
     correlationId: 'workspace-invitation-correlation',
@@ -386,16 +385,23 @@ test('workspace audit projects invitation lifecycle events without storage field
   })
 
   for (const field of [
+    'schemaVersion',
     'directoryId',
+    'workspaceId',
     'occurredAtEventId',
     'workspaceKey',
     'workspaceEventKey',
     'actorKey',
     'actorEventKey',
+    'actorUserId',
+    'entityType',
+    'entityId',
     'entityKey',
     'entityEventKey',
     'targetKey',
     'targetEventKey',
+    'targetType',
+    'targetId',
     'idempotencyKeyHash',
     'requestFingerprint',
     'sourceDetails',

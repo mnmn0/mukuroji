@@ -540,6 +540,20 @@ export class CdkStack extends cdk.Stack {
       minValue: 1,
       description: 'Number of days immutable audit events are retained before DynamoDB TTL expiry.',
     });
+    const workspaceAuditPseudonymKey = new cdk.CfnParameter(
+      this,
+      'WorkspaceAuditPseudonymKey',
+      {
+        type: 'String',
+        noEcho: true,
+        minLength: 32,
+        allowedPattern: '^\\S{32,}$',
+        constraintDescription:
+          'WorkspaceAuditPseudonymKey must contain at least 32 non-whitespace characters.',
+        description:
+          'Stable HMAC key for non-PII Workspace member and invitation audit identifiers.',
+      },
+    );
     const fileRetentionDays = new cdk.CfnParameter(this, 'FileRetentionDays', {
       type: 'Number',
       default: 30,
@@ -1006,6 +1020,8 @@ export class CdkStack extends cdk.Stack {
         MUKUROJI_TEAM_ISSUES_TABLE: workItemsTable.tableName,
         MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
         MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
+        MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:
+          workspaceAuditPseudonymKey.valueAsString,
         NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
         NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
         PLANNING_TABLE_NAME: planningTable.tableName,
