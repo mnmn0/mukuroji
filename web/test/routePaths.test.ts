@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  createPlanningPath,
   createProjectIssuesPath,
   createTeamIssuesPath,
 } from '../src/routes/paths'
@@ -24,6 +25,15 @@ describe('Work Item detail paths', () => {
     )
     expect(createTeamIssuesPath('team', 'issue', 'comment/1', 'root/1')).toBe(
       '/teams/team/issues?issueId=issue&commentId=comment%2F1&rootCommentId=root%2F1',
+    )
+  })
+})
+
+describe('Planning paths', () => {
+  test('keeps the selected view and optional entity in a canonical URL', () => {
+    expect(createPlanningPath('timeline')).toBe('/planning/timeline')
+    expect(createPlanningPath('roadmap', 'goal/launch')).toBe(
+      '/planning/roadmap?entityId=goal%2Flaunch',
     )
   })
 })

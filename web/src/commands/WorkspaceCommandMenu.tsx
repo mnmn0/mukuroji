@@ -195,6 +195,7 @@ export function WorkspaceCommandMenu({
     { id: 'nav-inbox', label: t('sidebar.nav.inbox'), path: '/inbox' },
     { id: 'nav-search', label: t('search.title'), path: '/search' },
     { id: 'nav-dashboard', label: t('sidebar.nav.dashboard'), path: '/dashboard' },
+    { id: 'nav-planning', label: t('sidebar.nav.planning'), path: '/planning/timeline' },
     { id: 'nav-reports', label: t('sidebar.nav.reports'), path: '/reports' },
   ], [t])
   const createPath = createQuickCreatePath(currentLocation)

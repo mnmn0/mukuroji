@@ -6,4 +6,9 @@ describe('sidebar shortcut labels', () => {
     expect(createSidebarLabels('ja').searchShortcut).toBe('Ctrl/⌘ K')
     expect(createSidebarLabels('en').searchShortcut).toBe('Ctrl/⌘ K')
   })
+
+  test('localizes the Planning navigation entry', () => {
+    expect(createSidebarLabels('ja').nav.planning).toBe('プランニング')
+    expect(createSidebarLabels('en').nav.planning).toBe('Planning')
+  })
 })

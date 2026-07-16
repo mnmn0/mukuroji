@@ -1,4 +1,4 @@
-import { createBrowserRouter } from 'react-router'
+import { Navigate, createBrowserRouter } from 'react-router'
 import { ForgotPasswordPage } from '../pages/ForgotPasswordPage'
 import { LoginPage } from '../pages/LoginPage'
 import { NotFoundPage } from '../pages/NotFoundPage'
@@ -8,6 +8,7 @@ import { TaskPage } from '../pages/TaskPage'
 import { TeamIssuePage } from '../pages/TeamIssuePage'
 import { TermsPage } from '../pages/TermsPage'
 import { WorkspacePage } from '../pages/WorkspacePage'
+import { PlanningPage } from '../pages/PlanningPage'
 import { ProjectTasksRedirect } from './ProjectTasksRedirect'
 import { WorkspaceCommandMenuLayout } from '../commands/WorkspaceCommandMenu'
 import { SearchPage } from '../search/SearchPage'
@@ -42,6 +43,14 @@ export const router = createBrowserRouter([
       {
         path: '/search',
         element: <SearchPage />,
+      },
+      {
+        path: '/planning',
+        element: <Navigate replace to="/planning/timeline" />,
+      },
+      {
+        path: '/planning/:planningView',
+        element: <PlanningPage />,
       },
       {
         path: '/reports',

@@ -65,6 +65,7 @@ export type SidebarNavId =
   | 'my-tasks'
   | 'inbox'
   | 'dashboard'
+  | 'planning'
   | 'reports'
   | 'help'
   | 'settings'
@@ -456,6 +457,7 @@ const mainNavItems: MainNavItem[] = [
   { id: 'my-tasks', icon: CheckCircleIcon },
   { id: 'inbox', icon: BellIcon },
   { id: 'dashboard', icon: DashboardIcon },
+  { id: 'planning', icon: PlanningIcon },
   { id: 'reports', icon: ReportIcon },
 ]
 
@@ -523,6 +525,7 @@ const defaultLabels: SidebarLabels = {
     'my-tasks': 'マイタスク',
     inbox: '受信箱',
     dashboard: 'ダッシュボード',
+    planning: 'プランニング',
     reports: 'レポート',
     help: 'ヘルプ',
     settings: '設定',
@@ -2117,6 +2120,22 @@ function DashboardIcon({ className }: SidebarIconProps) {
       <path d="M16 20v-8" />
       <path d="M22 20H2" />
       <path d="M20 20V8" />
+    </SvgBase>
+  )
+}
+
+function PlanningIcon({ className }: SidebarIconProps) {
+  return (
+    <SvgBase className={className}>
+      <path d="M4 6h6" />
+      <path d="M14 6h6" />
+      <path d="M8 6v12" />
+      <path d="M8 10h8" />
+      <path d="M16 10v8" />
+      <circle cx="8" cy="6" r="2" />
+      <circle cx="16" cy="10" r="2" />
+      <circle cx="8" cy="18" r="2" />
+      <circle cx="16" cy="18" r="2" />
     </SvgBase>
   )
 }
