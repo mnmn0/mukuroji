@@ -81,7 +81,7 @@ mutation ごとに許可する field を allowlist 化し、request body 全体�
 - `file`
 - `approval`
 
-event type は resource と operation を組み合わせる。例: `work-item.created`、`work-item.updated`、`comment.created`、`member.role-changed`、`member.removed`、`invitation.created`、`invitation.revoked`、`project.archived`、`workflow.updated`、`file.attached`、`approval.decided`。team は現行 directory model との互換のため `entityType=project`、`entityId=team/<teamId>`、`metadata.kind=team` として扱う。Canonical Work Item ID は既存 activity / collaboration key と互換の `team/<teamId>/issue/<issueId>` とし、comment target は `<workItemId>/comment/<commentId>` とする。Workspace member / invitation の公開 ID は固定 HMAC key と domain separation から `workspace/wsp_v1_<digest>/member/mbr_v1_<digest>`、`workspace/wsp_v1_<digest>/invitation/inv_v1_<digest>` を導出し、raw Workspace ID、member key、email を含めない。同じ private resource は live mutation と backfill で同じ ID になり、別 Workspace と混同しない。過去に legacy task から backfill 済みの `project/<projectId>/task/<taskId>` は historical alias としてだけ読み取り、新しい mutation には使わない。migration が current snapshot だけを復元した event は `*.backfilled` とし、実際の作成時刻や actor を捏造しない。
+event type は resource と operation を組み合わせる。例: `work-item.created`、`work-item.updated`、`comment.created`、`member.role-changed`、`member.removed`、`invitation.created`、`invitation.revoked`、`project.archived`、`workflow.updated`、`file.attached`、`approval.decided`。team は現行 directory model との互換のため `entityType=project`、`entityId=team/<teamId>`、`metadata.kind=team` として扱う。Canonical Work Item ID は既存 activity / collaboration key と互換の `team/<teamId>/issue/<issueId>` とし、comment target は `<workItemId>/comment/<commentId>` とする。Workspace member / invitation の公開 ID は固定 HMAC key と domain separation から `workspace/wsp_v2_<digest>/member/mbr_v2_<digest>`、`workspace/wsp_v2_<digest>/invitation/inv_v2_<digest>` を導出し、raw Workspace ID、member key、email を含めない。同じ private resource は live mutation と backfill で同じ ID になり、別 Workspace と混同しない。過去に legacy task から backfill 済みの `project/<projectId>/task/<taskId>` は historical alias としてだけ読み取り、新しい mutation には使わない。migration が current snapshot だけを復元した event は `*.backfilled` とし、実際の作成時刻や actor を捏造しない。
 
 ## DynamoDB key
 
@@ -165,7 +165,7 @@ cursor v1 は version、index、filter fingerprint、DynamoDB `LastEvaluatedKey`
 - audit event は `AUDIT_RETENTION_DAYS`（default 2,555日、約7年）から `expiresAt` を計算する。値は最低1日とし、policy 変更は新規 event から適用する。
 - 同じ row が outbox を兼ねるため、TTL は consumer の最大再処理期間より十分長くする。consumer checkpoint は別の短い retention を設定できる。
 - field 名が password/token/secret/authorization/cookie/credential/api key/private key/signed URL に該当する値は write-time に `[REDACTED]` へ置換し、文字列は最大4,096文字に制限する。response-time mask だけに依存しない。
-- Workspace/member/invitation の公開識別子は PII を直接または unkeyed digest として含めず、`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` を使う HMAC pseudonym に限定する。この key は環境ごとに32 byte以上の random 値を固定し、通常の rotation 対象にしない。
+- Workspace/member/invitation の公開識別子は PII を直接または unkeyed digest として含めず、`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` を使う HMAC pseudonym に限定する。この key は環境ごとに `openssl rand -hex 32` などで生成した64桁の小文字hex値を固定し、通常の rotation 対象にしない。未設定、長さ不正、非hex文字、uppercase、前後空白はAPI/backfillともfail-closedで拒否する。
 - comment body や説明文は対象への閲覧権限がある activity と system-admin audit だけに返す。より細かい export policy が必要になった場合は field allowlist を追加する。
 - 個人情報削除が必要な場合、immutable event を上書きしない。redaction event を append し、query projection で過去値を隠す。強い削除要件がある payload は暗号化した別 table に置き、鍵破棄または payload deletion で消去できるようにする。
 - export は event ID、時刻、actor、target、event type、redact 済み changes、correlation ID を含め、internal DynamoDB key、request fingerprint、保存済み mutation response は含めない。
@@ -199,7 +199,7 @@ source item の key から logical idempotency key を決定的に作り、通�
 # まず読み取りだけを最大100件確認する
 AWS_ENDPOINT_URL=http://localhost:4566 \
 AUDIT_EVENTS_TABLE_NAME=mukuroji-audit-events \
-MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<fixed-32-byte-or-longer-key> \
+MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64-character-lowercase-hex-key> \
 bun server/scripts/backfill-audit-events.ts --dry-run --limit 100
 
 # checkpoint を使って本実行する
@@ -210,13 +210,13 @@ TASKS_TABLE_NAME=mukuroji-project-tasks-v2-local \
 PROJECT_DIRECTORY_TABLE_NAME=mukuroji-project-directory-local \
 WORKSPACE_ACCESS_TABLE_NAME=mukuroji-workspace-access-local \
 AUDIT_EVENTS_TABLE_NAME=mukuroji-audit-events \
-MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<same-key-as-api-writer> \
+MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<same-64-character-lowercase-hex-key-as-api-writer> \
 bun server/scripts/backfill-audit-events.ts \
   --checkpoint /tmp/mukuroji-audit-backfill-v2.json \
   --limit 1000
 ```
 
-`--limit` は 1 run で scan する source item 数の上限であり、event 数ではない。source は consistent read で scan する。checkpoint v2 は DynamoDB `LastEvaluatedKey` と累積 counter を 5 source のそれぞれに保持し、endpoint、region、profile、account hint、table 名、pseudonym key fingerprint、ID contract version の configuration hash が異なる環境では再利用を拒否する。既定 path は `./audit-event-backfill-v2.checkpoint.json` で、file は owner のみが読める mode で作成する。`LastEvaluatedKey` には source identifier が含まれ得るため、checkpoint は機密情報として保管し、完了後に削除する。Workspace access source 追加前の checkpoint v1 は互換ではないため、新しい checkpoint path で再実行する。既存の 4 source を再走査しても conditional Put により event は重複しない。page 処理中に停止した場合は同じ page を再処理するが、同じ duplicate guard により安全である。`--dry-run` は table、event、checkpoint のいずれも書き込まず、log に entity/target ID を出力しない。local endpoint の本実行は共通 bootstrap を呼び、`mukuroji-audit-events` が未作成なら本番と同じ key/GSI/Stream を持つ table を作成してから書き込む。
+`--limit` は 1 run で scan する source item 数の上限であり、event 数ではない。source は consistent read で scan する。checkpoint v2 は DynamoDB `LastEvaluatedKey` と累積 counter を 5 source のそれぞれに保持し、endpoint、region、profile、account hint、table 名、pseudonym key fingerprint、ID contract version の configuration hash が異なる環境では再利用を拒否する。hex decode前のWorkspace access ID contract v1で作成したcheckpoint v2も、ID contract v2のconfiguration hashとは一致せずfail-closedで拒否する。既定 path は `./audit-event-backfill-v2.checkpoint.json` で、file は owner のみが読める mode で作成する。`LastEvaluatedKey` には source identifier が含まれ得るため、checkpoint は機密情報として保管し、完了後に削除する。Workspace access source 追加前の checkpoint v1 は互換ではないため、新しい checkpoint path で再実行する。既存の 4 source を再走査しても conditional Put により event は重複しない。page 処理中に停止した場合は同じ page を再処理するが、同じ duplicate guard により安全である。`--dry-run` は table、event、checkpoint のいずれも書き込まず、log に entity/target ID を出力しない。local endpoint の本実行は共通 bootstrap を呼び、`mukuroji-audit-events` が未作成なら本番と同じ key/GSI/Stream を持つ table を作成してから書き込む。
 
 WorkspaceAccess row は `recordKey=WORKSPACE` / `entryType=workspace-meta` だけを `ignored` とし、member/invitation の record key と identifier の一致、role/status/delivery/ownership enum、version、必須 field、canonical timestamp を検証する。公開 entity/target ID は API writer と同じ固定 HMAC key から導出し、raw Workspace ID や email を保存しない。未知 row または認識できる破損 row は skip せず migration を停止する。backfill は現在値だけを復元するため、過去の招待再送、取消、受諾、role/status 変更の順序や actor は復元せず、`system:backfill` actor の snapshot event として記録する。changes 内の email、member key、表示名、failure message は write-time に redact し、Cognito identity ID/username は snapshot payload に含めない。
 

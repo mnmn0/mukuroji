@@ -4,6 +4,15 @@ Hono で実装した API を、Bun development server と Node.js 22 Lambda の�
 
 ## Local development
 
+初回起動前に `openssl rand -hex 32` の64桁小文字hex出力を、git管理外の
+repository root `.env` に次の形式で保存します。Docker Compose はこの変数を
+Floci containerへ明示的に渡し、未設定または形式不正なら起動前に停止します。
+保存後は `chmod 600 .env` でowner以外からの読み取りを禁止してください。
+
+```dotenv
+MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64-character-lowercase-hex-output>
+```
+
 ```sh
 bun install
 bun run floci:up
@@ -14,8 +23,9 @@ bun run server:dev
 ```
 
 server は既定で `http://localhost:4566` の Floci Cognito / DynamoDB に接続します。
-Workspace access mutation に必要な固定 HMAC key を API writer と backfill で共有するため、
-Floci が生成した `.floci/generated/cognito.env` は必ず読み込んでください。
+`.floci/generated/cognito.env` は Cognito endpoint/clientなどの非secret値を保持し、native Linuxの
+host userからも読み込めます。Workspace access mutationに必要な固定HMAC keyはこのfileへ複製せず、
+API writerとbackfillの両方がowner-onlyのroot `.env`から同じ値を読み込みます。
 
 health check は `GET http://localhost:3000/api/health` です。`POST /api/auth/login` 以外の application API は、Cognito access token を `Authorization: Bearer <token>` で受け取ります。
 
@@ -52,7 +62,7 @@ Default local table names are:
 - `PLANNING_TABLE_NAME=mukuroji-planning-local`
 - `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`（未指定時は `mukuroji-workspace-search-local`）
 - `MUKUROJI_AUDIT_RETENTION_DAYS=2555`
-- `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<32-byte以上の固定random key>`（API と backfill で共有し、通常は rotation しない）
+- `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64桁の小文字hex固定key>`（`openssl rand -hex 32` などで生成し、API と backfill で共有して通常は rotation しない）
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID=workspace#mukuroji-local`
 - `MUKUROJI_WORKSPACE_ACCESS_TABLE=mukuroji-workspace-access-local`
 
@@ -78,8 +88,8 @@ AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
   --checkpoint /tmp/mukuroji-audit-backfill-v2.json
 ```
 
-この env file から API writer と同じ `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY`
-を読み込まない場合、backfill は開始前に fail-closed で停止します。
+`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` はgenerated fileではなくowner-onlyのroot
+`.env`から読み込みます。未設定または形式不正なら、backfillは開始前にfail-closedで停止します。
 
 The write run bootstraps `mukuroji-audit-events` with the production-compatible
 keys, GSIs, and stream when the local table does not exist. Dry runs do not
@@ -96,7 +106,8 @@ checkpoint path; rescanning older sources is safe because event writes are
 deterministic and conditional. The default v2 checkpoint is
 `./audit-event-backfill-v2.checkpoint.json`; it is created with owner-only
 permissions because its `LastEvaluatedKey` can contain source identifiers. Delete
-it after the migration is complete. Unknown-timestamp snapshot events omit TTL so
+it after the migration is complete. Checkpoints created with the pre-hex-decoding
+Workspace access ID contract are rejected by the configuration hash. Unknown-timestamp snapshot events omit TTL so
 they are not immediately deleted.
 
 ## Workspace search backfill

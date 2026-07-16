@@ -17,6 +17,15 @@ mukuroji は、プロジェクトやタスクの進捗をチームで見渡す�
 bun install
 ```
 
+Floci を初めて起動する前に `openssl rand -hex 32` を一度実行し、その64桁の
+小文字hex出力をgit管理外の `.env` に保存してください。Docker Compose はこの値を
+ready hookへ渡し、未設定または形式不正なら起動前に停止します。保存後は
+`chmod 600 .env` でowner以外からの読み取りを禁止してください。
+
+```dotenv
+MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64-character-lowercase-hex-output>
+```
+
 Codex cloud のカスタムセットアップスクリプトには、以下を指定できます。
 
 ```sh
@@ -49,6 +58,9 @@ Floci の ready hook がローカル Cognito と Workspace を初期化します
 - パスワード: `Password123!`
 
 API サーバーはデフォルトで `http://localhost:4566` の Floci Cognito に接続し、`mukuroji-local` user pool と `mukuroji-web-local` client を自動検出します。初期 owner を含む local user の `custom:directory_id` と `custom:workspace_id` は、どちらも `workspace#mukuroji-local` に設定されます。生成された値は `.floci/generated/cognito.env` に出力されます。
+この generated file は native Linux の host user からも読み込めるよう非secret値だけを含め、
+HMAC key は owner-only の root `.env` だけに保持します。関連する root package scripts は
+`--env-file=.env` を指定して子processへ明示的に渡します。
 
 同じ ready hook で DynamoDB table `mukuroji-dashboard-local`,
 `mukuroji-project-tasks-v2-local`, `mukuroji-project-directory-local`,
@@ -134,7 +146,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `REALTIME_WEBSOCKET_URL`: production の collaboration invalidation/presence 用 WebSocket URL。未指定時は Web が polling fallback を使います。
 - `MUKUROJI_AUDIT_EVENTS_TABLE` / `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
 - `MUKUROJI_AUDIT_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS`: audit event の保持日数。未指定時は 2555 日（7年）
-- `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY`: Workspace/member/invitation の公開 audit ID を HMAC 化する32 byte以上の固定 key。本番ではランダム生成し、backfill と API で同じ値を使います。
+- `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY`: Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。本番では `openssl rand -hex 32` などで生成し、backfill と API で同じ値を使います。
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID`: Cognito claim と DynamoDB partition で共有する canonical Workspace ID。未指定時は `workspace#mukuroji-local`
 - `MUKUROJI_PROJECT_DIRECTORY_ID`: 旧 local 設定との互換入力。`MUKUROJI_WORKSPACE_DIRECTORY_ID` が優先されます。
 - `MUKUROJI_INITIAL_OWNER_EMAIL` / `MUKUROJI_INITIAL_OWNER_USERNAME`: 初期 owner の email と Cognito username
@@ -177,8 +189,8 @@ AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
   --checkpoint /tmp/mukuroji-audit-backfill-v2.json
 ```
 
-`.floci/generated/cognito.env` から API writer と同じ
-`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` を読み込んでください。
+`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は generated file へ複製せず、API writer と
+backfill の両方が owner-only の root `.env` から同じ値を読み込みます。
 
 CDK stack も同じタスクデータと指定した Workspace 用の
 チーム/プロジェクト階層に加え、Workspace metadata と初期 active owner を
@@ -207,7 +219,7 @@ bun --filter cdk cdk diff \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME"
 ```
 
-`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は環境作成時に一度だけ生成して secret store に保存し、API deploy と audit backfill で同じ値を再利用してください。通常の再 deploy で生成し直すと Workspace access の audit ID が変わります。
+`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は環境作成時に一度だけ `openssl rand -hex 32` などで生成し、64桁の小文字hex値を secret store に保存して、API deploy と audit backfill で再利用してください。通常の再 deploy で生成し直すと Workspace access の audit ID が変わります。
 
 Lambda Function URL の CORS 許可 origin は CDK parameter
 `TaskApiAllowedOrigins` で指定します。未指定時は

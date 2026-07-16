@@ -58,8 +58,14 @@ export const AUDIT_UNKNOWN_OCCURRED_AT = '1970-01-01T00:00:00.000Z'
 export const WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV =
   'MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY'
 
-const workspaceAuditPseudonymKeyMinimumBytes = 32
-const workspaceAccessEntityIdNamespace = 'workspace-access-entity-v1'
+/**
+ * Workspace access の公開 audit entity ID contract version です。
+ */
+export const WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION = 'v2'
+
+const workspaceAuditPseudonymKeyPattern = /^[0-9a-f]{64}$/u
+const workspaceAccessEntityIdNamespace =
+  `workspace-access-entity-${WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION}`
 
 /**
  * audit event に保存できる JSON object です。
@@ -851,7 +857,8 @@ export function createWorkspaceMemberAuditEntityId(
     normalizedMemberId,
   )
 
-  return `workspace/wsp_v1_${workspacePseudonym}/member/mbr_v1_${memberPseudonym}`
+  return `workspace/wsp_${WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION}_${workspacePseudonym}` +
+    `/member/mbr_${WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION}_${memberPseudonym}`
 }
 
 /**
@@ -876,28 +883,28 @@ export function createWorkspaceInvitationAuditEntityId(
     normalizedInvitationId,
   )
 
-  return `workspace/wsp_v1_${workspacePseudonym}/invitation/inv_v1_${invitationPseudonym}`
+  return `workspace/wsp_${WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION}_${workspacePseudonym}` +
+    `/invitation/inv_${WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION}_${invitationPseudonym}`
 }
 
 /**
- * Workspace access audit pseudonym key を環境変数から読み、強度を検証します。
+ * Workspace access audit pseudonym key を環境変数から読み、64桁小文字hex形式を検証します。
  *
  * @param environment key を読む環境変数 map です。
- * @returns live writer と backfill で固定して共有する HMAC key です。
+ * @returns live writer と backfill で固定して共有する32-byte random値のhex表現です。
  */
 export function readWorkspaceAuditPseudonymKey(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ) {
-  const key = environment[WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV]?.trim()
+  const key = environment[WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV]
 
   if (!key) {
     throw new TypeError(`${WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV} is required.`)
   }
 
-  if (new TextEncoder().encode(key).byteLength < workspaceAuditPseudonymKeyMinimumBytes) {
-    throw new RangeError(
-      `${WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV} must contain at least ` +
-      `${workspaceAuditPseudonymKeyMinimumBytes} bytes.`,
+  if (!workspaceAuditPseudonymKeyPattern.test(key)) {
+    throw new TypeError(
+      `${WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV} must be exactly 64 lowercase hexadecimal characters.`,
     )
   }
 
@@ -2360,9 +2367,10 @@ function createWorkspaceAccessPseudonym(
   workspaceId: string,
   privateId?: string,
 ) {
-  const key = readWorkspaceAuditPseudonymKey({
+  const encodedKey = readWorkspaceAuditPseudonymKey({
     [WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV]: pseudonymKey,
   })
+  const key = Buffer.from(encodedKey, 'hex')
   const payload = [
     workspaceAccessEntityIdNamespace,
     kind,

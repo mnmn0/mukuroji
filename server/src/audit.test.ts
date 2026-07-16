@@ -90,7 +90,7 @@ test('allows an omitted expiry only for an unknown-time backfill event', () => {
 })
 
 test('creates stable keyed Workspace access IDs without exposing private identifiers', () => {
-  const key = 'test-workspace-audit-pseudonym-key-00000000000000000000000000000000'
+  const key = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
   const workspaceId = 'user#owner@example.com'
   const memberId = createWorkspaceMemberAuditEntityId(
     workspaceId,
@@ -104,11 +104,11 @@ test('creates stable keyed Workspace access IDs without exposing private identif
   )
 
   expect(memberId).toMatch(
-    /^workspace\/wsp_v1_[a-f0-9]{48}\/member\/mbr_v1_[a-f0-9]{48}$/,
+    /^workspace\/wsp_v2_[a-f0-9]{48}\/member\/mbr_v2_[a-f0-9]{48}$/,
   )
   expect(memberId).toBe(
-    'workspace/wsp_v1_c1ddb82b5e8edb56a1585fa9c6c6a42b2c295cc661d79b8d/' +
-    'member/mbr_v1_17746bc6ce23ba77195d9d4c9856087465e194ab6784c846',
+    'workspace/wsp_v2_5602da2d003d94202fcaefcf30a1c671fd2a126556defb3b/' +
+    'member/mbr_v2_fbbd6cdf95b29a44b1030a5e5c5203a308d3fbb1985f7934',
   )
   expect(memberId).toBe(createWorkspaceMemberAuditEntityId(
     workspaceId,
@@ -116,11 +116,11 @@ test('creates stable keyed Workspace access IDs without exposing private identif
     key,
   ))
   expect(invitationId).toMatch(
-    /^workspace\/wsp_v1_[a-f0-9]{48}\/invitation\/inv_v1_[a-f0-9]{48}$/,
+    /^workspace\/wsp_v2_[a-f0-9]{48}\/invitation\/inv_v2_[a-f0-9]{48}$/,
   )
   expect(invitationId).toBe(
-    'workspace/wsp_v1_c1ddb82b5e8edb56a1585fa9c6c6a42b2c295cc661d79b8d/' +
-    'invitation/inv_v1_69418dd1f24d81c7345d4ce96f0a552aae18c5e12326051e',
+    'workspace/wsp_v2_5602da2d003d94202fcaefcf30a1c671fd2a126556defb3b/' +
+    'invitation/inv_v2_987594a766d90a3eb75f812762f09f63e844ae31adba9c61',
   )
   expect(invitationId).not.toBe(memberId)
   expect(memberId).not.toContain(workspaceId)
@@ -133,7 +133,23 @@ test('creates stable keyed Workspace access IDs without exposing private identif
   expect(() => readWorkspaceAuditPseudonymKey({})).toThrow('is required')
   expect(() => readWorkspaceAuditPseudonymKey({
     MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: 'too-short',
-  })).toThrow('at least 32 bytes')
+  })).toThrow('exactly 64 lowercase hexadecimal characters')
+  expect(() => readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:
+      '0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF',
+  })).toThrow('exactly 64 lowercase hexadecimal characters')
+  expect(() => readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: `g${'0'.repeat(63)}`,
+  })).toThrow('exactly 64 lowercase hexadecimal characters')
+  expect(() => readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: '0'.repeat(65),
+  })).toThrow('exactly 64 lowercase hexadecimal characters')
+  expect(() => readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: `${key} `,
+  })).toThrow('exactly 64 lowercase hexadecimal characters')
+  expect(readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: key,
+  })).toBe(key)
 })
 
 test('uses the local audit table default for shared AWS endpoint variables', () => {

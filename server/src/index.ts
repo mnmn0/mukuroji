@@ -162,6 +162,9 @@ import {
   type PlanningWorkItemState,
 } from './planning'
 
+/**
+ * Workspace access の永続化 client と API error です。
+ */
 export {
   DynamoDbWorkspaceAccessClient,
   WorkspaceAccessError,

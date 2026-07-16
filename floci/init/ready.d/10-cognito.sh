@@ -24,13 +24,44 @@ NOTIFICATIONS_TABLE="${MUKUROJI_NOTIFICATIONS_TABLE:-${NOTIFICATIONS_TABLE_NAME:
 REALTIME_SESSIONS_TABLE="${MUKUROJI_REALTIME_SESSIONS_TABLE:-${REALTIME_SESSIONS_TABLE_NAME:-mukuroji-realtime-sessions-local}}"
 AUDIT_EVENTS_TABLE="${MUKUROJI_AUDIT_EVENTS_TABLE:-${AUDIT_EVENTS_TABLE_NAME:-mukuroji-audit-events}}"
 AUDIT_RETENTION_DAYS="${MUKUROJI_AUDIT_RETENTION_DAYS:-${AUDIT_RETENTION_DAYS:-2555}}"
-WORKSPACE_AUDIT_PSEUDONYM_KEY="${MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:-6d756b75726f6a692d6c6f63616c2d61756469742d70736575646f6e796d2d7631}"
+WORKSPACE_AUDIT_PSEUDONYM_KEY="${MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:-}"
 WORKSPACE_ACCESS_TABLE="${MUKUROJI_WORKSPACE_ACCESS_TABLE:-mukuroji-workspace-access-local}"
 WORKSPACE_DIRECTORY_ID="${MUKUROJI_WORKSPACE_DIRECTORY_ID:-${MUKUROJI_PROJECT_DIRECTORY_ID:-workspace#mukuroji-local}}"
 PROJECT_DIRECTORY_ID="$WORKSPACE_DIRECTORY_ID"
 PROJECT_MEMBER_KEY="$(printf '%s' "$INITIAL_OWNER_EMAIL" | tr '[:upper:]' '[:lower:]')"
 DASHBOARD_UPDATED_AT="${MUKUROJI_DASHBOARD_UPDATED_AT:-$(date -u +%Y-%m-%dT%H:%M:%S.000Z)}"
 GENERATED_DIR="${MUKUROJI_GENERATED_DIR:-/app/generated}"
+COGNITO_ENV_FILE="$GENERATED_DIR/cognito.env"
+
+# 旧 ready hook が生成した file には secret が含まれるため、bootstrap が途中で
+# 失敗しても残存しないよう、非secret版を生成する前に legacy file だけ除去します。
+if [ -f "$COGNITO_ENV_FILE" ]; then
+  if grep -Eq '^(COGNITO_TEST_PASSWORD|MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY)=' "$COGNITO_ENV_FILE"; then
+    rm -f "$COGNITO_ENV_FILE"
+  else
+    legacy_env_inspection_status=$?
+    if [ "$legacy_env_inspection_status" -gt 1 ]; then
+      rm -f "$COGNITO_ENV_FILE"
+    fi
+  fi
+fi
+
+if [ -z "$WORKSPACE_AUDIT_PSEUDONYM_KEY" ]; then
+  echo 'MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY is required. Set it to the output of "openssl rand -hex 32".' >&2
+  exit 2
+fi
+
+case "$WORKSPACE_AUDIT_PSEUDONYM_KEY" in
+  *[!0-9a-f]*)
+    echo 'MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY must be exactly 64 lowercase hexadecimal characters.' >&2
+    exit 2
+    ;;
+esac
+
+if [ "${#WORKSPACE_AUDIT_PSEUDONYM_KEY}" -ne 64 ]; then
+  echo 'MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY must be exactly 64 lowercase hexadecimal characters.' >&2
+  exit 2
+fi
 
 case "$WORKSPACE_DIRECTORY_ID" in
   '' | *[!A-Za-z0-9._:/#@+-]*)
@@ -516,8 +547,17 @@ for project_id in refero product-roadmap shared-launch brand-refresh; do
   assert_present "$(read_directory_attribute "$project_member_key" 'updatedAt')" "initial owner project updatedAt ($project_id)"
 done
 
+umask 077
 mkdir -p "$GENERATED_DIR"
-cat >"$GENERATED_DIR/cognito.env" <<EOF
+COGNITO_ENV_TEMP_FILE="$(mktemp "$GENERATED_DIR/cognito.env.XXXXXX")"
+cleanup_cognito_env_temp_file() {
+  rm -f "$COGNITO_ENV_TEMP_FILE"
+}
+trap cleanup_cognito_env_temp_file 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+cat >"$COGNITO_ENV_TEMP_FILE" <<EOF
 COGNITO_ENDPOINT=$PUBLIC_ENDPOINT_URL
 COGNITO_ISSUER=$PUBLIC_ENDPOINT_URL/$POOL_ID
 COGNITO_USER_POOL_ID=$POOL_ID
@@ -525,7 +565,6 @@ COGNITO_USER_POOL_NAME=$POOL_NAME
 COGNITO_USER_POOL_CLIENT_NAME=$CLIENT_NAME
 COGNITO_CLIENT_ID=$CLIENT_ID
 COGNITO_TEST_USERNAME=$INITIAL_OWNER_USERNAME
-COGNITO_TEST_PASSWORD=$TEST_PASSWORD
 MUKUROJI_INITIAL_OWNER_USERNAME=$INITIAL_OWNER_USERNAME
 MUKUROJI_INITIAL_OWNER_EMAIL=$PROJECT_MEMBER_KEY
 MUKUROJI_SYSTEM_ADMIN_GROUPS=$SYSTEM_ADMIN_GROUP
@@ -550,10 +589,13 @@ MUKUROJI_WORKSPACE_DIRECTORY_ID=$WORKSPACE_DIRECTORY_ID
 MUKUROJI_PROJECT_DIRECTORY_ID=$WORKSPACE_DIRECTORY_ID
 MUKUROJI_AUDIT_EVENTS_TABLE=$AUDIT_EVENTS_TABLE
 MUKUROJI_AUDIT_RETENTION_DAYS=$AUDIT_RETENTION_DAYS
-MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=$WORKSPACE_AUDIT_PSEUDONYM_KEY
 MUKUROJI_WORKSPACE_ACCESS_TABLE=$WORKSPACE_ACCESS_TABLE
 DYNAMODB_ENDPOINT=$PUBLIC_ENDPOINT_URL
 EOF
+# Host-owned .env に secret を残し、この discovery file は container UID と異なる
+# native Linux user からも source できる mode で公開します。
+chmod 644 "$COGNITO_ENV_TEMP_FILE"
+mv -f "$COGNITO_ENV_TEMP_FILE" "$COGNITO_ENV_FILE"
 
 echo "mukuroji Cognito ready: userPoolId=$POOL_ID clientId=$CLIENT_ID username=$INITIAL_OWNER_USERNAME adminGroup=$SYSTEM_ADMIN_GROUP"
 echo "mukuroji DynamoDB ready: table=$DASHBOARD_TABLE item=summary"

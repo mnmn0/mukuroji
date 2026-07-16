@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import { mapCurrentTeamIssue, mapWorkspaceAccessItem } from './backfill-audit-events'
 
-const workspaceAuditPseudonymKey = 'test-workspace-audit-pseudonym-key-00000000000000000000000000000000'
+const workspaceAuditPseudonymKey =
+  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 const mapWorkspaceAccess = (item: Record<string, unknown>) =>
   mapWorkspaceAccessItem(item, workspaceAuditPseudonymKey)
 
@@ -82,13 +83,13 @@ describe('audit backfill Workspace access mapping', () => {
       entity: {
         type: 'member',
         id: expect.stringMatching(
-          /^workspace\/wsp_v1_[a-f0-9]{48}\/member\/mbr_v1_[a-f0-9]{48}$/,
+          /^workspace\/wsp_v2_[a-f0-9]{48}\/member\/mbr_v2_[a-f0-9]{48}$/,
         ),
       },
       target: {
         type: 'member',
         id: expect.stringMatching(
-          /^workspace\/wsp_v1_[a-f0-9]{48}\/member\/mbr_v1_[a-f0-9]{48}$/,
+          /^workspace\/wsp_v2_[a-f0-9]{48}\/member\/mbr_v2_[a-f0-9]{48}$/,
         ),
       },
       action: 'backfilled',
@@ -117,7 +118,7 @@ describe('audit backfill Workspace access mapping', () => {
     const otherWorkspaceEvent = mapWorkspaceAccess({ ...item, workspaceId: 'workspace-2' })
     expect(otherWorkspaceEvent?.eventId).not.toBe(event?.eventId)
     expect(otherWorkspaceEvent?.entityId).toMatch(
-      /^workspace\/wsp_v1_[a-f0-9]{48}\/member\/mbr_v1_[a-f0-9]{48}$/,
+      /^workspace\/wsp_v2_[a-f0-9]{48}\/member\/mbr_v2_[a-f0-9]{48}$/,
     )
     expect(otherWorkspaceEvent?.entityId).not.toBe(event?.entityId)
   })
@@ -154,13 +155,13 @@ describe('audit backfill Workspace access mapping', () => {
       entity: {
         type: 'invitation',
         id: expect.stringMatching(
-          /^workspace\/wsp_v1_[a-f0-9]{48}\/invitation\/inv_v1_[a-f0-9]{48}$/,
+          /^workspace\/wsp_v2_[a-f0-9]{48}\/invitation\/inv_v2_[a-f0-9]{48}$/,
         ),
       },
       target: {
         type: 'invitation',
         id: expect.stringMatching(
-          /^workspace\/wsp_v1_[a-f0-9]{48}\/invitation\/inv_v1_[a-f0-9]{48}$/,
+          /^workspace\/wsp_v2_[a-f0-9]{48}\/invitation\/inv_v2_[a-f0-9]{48}$/,
         ),
       },
       source: 'backfill',

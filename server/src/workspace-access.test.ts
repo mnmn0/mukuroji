@@ -16,7 +16,7 @@ import {
 const workspaceId = 'user#demo@example.com'
 const now = new Date('2026-07-11T00:00:00.000Z')
 const workspaceAuditPseudonymKey =
-  'test-workspace-audit-pseudonym-key-00000000000000000000000000000000'
+  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 process.env[WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV] = workspaceAuditPseudonymKey
 
 function createAuditContext(idempotencyKey: string, contextWorkspaceId = workspaceId) {
@@ -1995,6 +1995,37 @@ test('fails closed before a Workspace state write when the audit pseudonym key i
   )).rejects.toMatchObject({
     status: 500,
     code: 'WorkspaceAuditPseudonymKeyMissing',
+  })
+  expect(inputs.some((input) => Array.isArray(input.TransactItems))).toBe(false)
+})
+
+test('rejects surrounding whitespace in an injected audit pseudonym key', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+      return command.constructor.name === 'GetCommand'
+        ? { Item: toMemberItem(createWorkspaceMember('demo@example.com')) }
+        : {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+    ` ${workspaceAuditPseudonymKey} `,
+  )
+
+  await expect(client.createInvitation(
+    workspaceId,
+    'demo@example.com',
+    { email: 'sato@example.com', role: 'member' },
+    undefined,
+    createAuditContext('invalid-pseudonym-key'),
+  )).rejects.toMatchObject({
+    status: 500,
+    code: 'WorkspaceAuditPseudonymKeyInvalid',
   })
   expect(inputs.some((input) => Array.isArray(input.TransactItems))).toBe(false)
 })

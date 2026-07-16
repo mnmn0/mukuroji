@@ -17,7 +17,7 @@ const workspaceId = 'workspace-1'
 const actorUserId = 'demo@example.com'
 const occurredAt = '2026-07-11T12:00:00.000Z'
 const workspaceAuditPseudonymKey =
-  'test-workspace-audit-pseudonym-key-00000000000000000000000000000000'
+  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 
 afterEach(() => {
   resetApiClientsForTest()

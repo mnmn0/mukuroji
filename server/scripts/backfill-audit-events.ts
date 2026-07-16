@@ -18,6 +18,7 @@ import {
   createWorkspaceMemberAuditEntityId,
   ensureLocalAuditEventsTable,
   readWorkspaceAuditPseudonymKey,
+  WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION,
   type AuditEventV1,
   type AuditFieldChange,
 } from '../src/audit'
@@ -297,7 +298,7 @@ async function main() {
     profile: readEnvironment('AWS_PROFILE') ?? 'default-provider-chain',
     account: readEnvironment('AWS_ACCOUNT_ID') ?? 'unknown-account',
     tables,
-    workspaceAccessEntityIdContract: 'v1',
+    workspaceAccessEntityIdContract: WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION,
     workspaceAuditPseudonymKeyFingerprint: createDigest(workspaceAuditPseudonymKey),
   }))
   const checkpoint = await readCheckpoint(options.checkpointPath, configurationHash)
@@ -406,7 +407,7 @@ Options:
 Required production environment:
   TEAM_ISSUE_EVENTS_TABLE_NAME, TEAM_ISSUES_TABLE_NAME, TASKS_TABLE_NAME,
   PROJECT_DIRECTORY_TABLE_NAME, WORKSPACE_ACCESS_TABLE_NAME, AUDIT_EVENTS_TABLE_NAME,
-  MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY
+  MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY (exactly 64 lowercase hexadecimal characters)
 
 For a local endpoint, repository-local default table names are used when omitted.
 Write runs bootstrap mukuroji-audit-events with the shared schema when it is missing.`)

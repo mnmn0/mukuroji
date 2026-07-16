@@ -8,7 +8,7 @@ import {
   type KeyboardEvent,
   type RefObject,
 } from 'react'
-import useSWR from 'swr'
+import useSWR, { useSWRConfig } from 'swr'
 import { createMutationRequestRunner } from '../api/mutationHeaders'
 import { createTranslator, type Locale, type MessageKey } from '../i18n'
 import {
@@ -234,6 +234,7 @@ export function WorkspaceAccessPanelContainer({
   locale,
 }: WorkspaceAccessPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const { mutate: mutateCache } = useSWRConfig()
   const mutationSession = useMemo(() => ({
     accessToken,
     requestRunner: createMutationRequestRunner(),
@@ -246,7 +247,6 @@ export function WorkspaceAccessPanelContainer({
     data: access,
     error,
     isLoading,
-    mutate,
   } = useSWR(
     accessKey,
     ([, token]) => getWorkspaceAccess(token),
@@ -254,8 +254,27 @@ export function WorkspaceAccessPanelContainer({
   )
 
   const refresh = async () => {
-    await mutate()
+    if (!accessKey) {
+      return
+    }
+
+    // bound mutate は最新の hook key を参照するため、開始時 token の key を明示して
+    // 旧 session の snapshot が token 切り替え後の cache を上書きしないようにします。
+    await mutateCache(
+      accessKey,
+      () => getWorkspaceAccess(mutationSession.accessToken),
+      { revalidate: false },
+    )
     mutationRequestRunner.discardRetainedContexts()
+  }
+
+  const retryLoad = async () => {
+    try {
+      await refresh()
+    } catch {
+      // SWR が保持する既存の load error を表示したまま、click handler の
+      // unhandled rejection だけを抑止します。
+    }
   }
 
   const createInvitationMutationFingerprint = (invitationId: string) => {
@@ -272,6 +291,7 @@ export function WorkspaceAccessPanelContainer({
     <WorkspaceAccessPanel
       access={access}
       isLoading={isLoading}
+      key={mutationSession.accessToken}
       loadErrorMessage={error ? t('workspace.access.error.load') : undefined}
       locale={locale}
       onAcknowledgeInvitationCleanup={async (invitationId, expectedVersion) => {
@@ -315,7 +335,7 @@ export function WorkspaceAccessPanelContainer({
         )
         await refresh()
       }}
-      onRetry={refresh}
+      onRetry={retryLoad}
       onRevokeInvitation={async (invitationId) => {
         await mutationRequestRunner.run(
           `workspace-invitation:revoke:${invitationId}`,

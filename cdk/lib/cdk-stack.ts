@@ -546,12 +546,11 @@ export class CdkStack extends cdk.Stack {
       {
         type: 'String',
         noEcho: true,
-        minLength: 32,
-        allowedPattern: '^\\S{32,}$',
+        allowedPattern: '^[0-9a-f]{64}$',
         constraintDescription:
-          'WorkspaceAuditPseudonymKey must contain at least 32 non-whitespace characters.',
+          'WorkspaceAuditPseudonymKey must be exactly 64 lowercase hexadecimal characters.',
         description:
-          'Stable HMAC key for non-PII Workspace member and invitation audit identifiers.',
+          'Stable 32-byte random HMAC key encoded as lowercase hexadecimal for non-PII Workspace member and invitation audit identifiers.',
       },
     );
     const fileRetentionDays = new cdk.CfnParameter(this, 'FileRetentionDays', {

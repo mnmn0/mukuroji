@@ -432,7 +432,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     this.clock = clock
     this.planningTableName = planningTableName
     this.auditTableName = auditTableName ?? undefined
-    this.auditPseudonymKey = auditPseudonymKey?.trim() || undefined
+    this.auditPseudonymKey = auditPseudonymKey || undefined
   }
 
   /** 指定 member を consistent read で取得します。 */

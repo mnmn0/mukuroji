@@ -82,8 +82,9 @@ test('fresh deployment requires explicit external Cognito and workspace paramete
   expect(parameters.WorkspaceAuditPseudonymKey).toEqual(expect.objectContaining({
     Type: 'String',
     NoEcho: true,
-    MinLength: 32,
-    AllowedPattern: '^\\S{32,}$',
+    AllowedPattern: '^[0-9a-f]{64}$',
+    ConstraintDescription:
+      'WorkspaceAuditPseudonymKey must be exactly 64 lowercase hexadecimal characters.',
   }));
   expect(parameters.InitialOwnerEmail).toEqual(expect.objectContaining({
     Type: 'String',
