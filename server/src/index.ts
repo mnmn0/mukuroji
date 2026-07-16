@@ -25,16 +25,27 @@ import {
   QueryCommand,
   TransactWriteCommand,
   type TransactWriteCommandInput,
-  UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  PLANNING_SCHEMA_VERSION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   type ApprovalSummary,
   type CanonicalWorkItem,
+  type CreatePlanningDependencyInput,
+  type CreatePlanningEntityInput,
   type CreateSavedWorkspaceViewInput,
   type CustomFieldValue,
+  type CycleRolloverInput,
+  type DuplicatePlanningEntityInput,
+  type MovePlanningEntityInput,
+  type PlanningEntity,
+  type PlanningRevisionInput,
+  type PlanningStatusUpdateInput,
+  type PlanningWorkItemLinkInput,
+  type PlanningWorkItemSummary,
   type ResolvedWorkItemConfiguration,
+  type UpdatePlanningEntityInput,
   type UpdateSavedWorkspaceViewInput,
   type WorkItemConfiguration,
   type WorkItemPriority,
@@ -143,6 +154,13 @@ import {
   type MutateWorkItemRelationInput,
   type WorkItemConfigurationClient,
 } from './work-item-configuration'
+import {
+  DynamoDbPlanningClient,
+  InMemoryPlanningClient,
+  PlanningError,
+  type PlanningClient,
+  type PlanningWorkItemState,
+} from './planning'
 
 export {
   DynamoDbWorkspaceAccessClient,
@@ -2030,7 +2048,8 @@ type ProjectDirectoryClient = {
   archiveTeam(
     directoryId: string,
     teamId: string,
-    auditContext?: MutationAuditContext,
+    auditContext: MutationAuditContext | undefined,
+    expectedPlanningRevision: number,
   ): Promise<ArchiveTeamResponse>
   /**
    * DynamoDB 上のチーム配下プロジェクトをアーカイブします。
@@ -2039,7 +2058,8 @@ type ProjectDirectoryClient = {
     directoryId: string,
     teamId: string,
     projectId: string,
-    auditContext?: MutationAuditContext,
+    auditContext: MutationAuditContext | undefined,
+    expectedPlanningRevision: number,
   ): Promise<ArchiveProjectResponse>
 }
 
@@ -2076,6 +2096,7 @@ let notifications: NotificationClient
 let workspaceSearch: WorkspaceSearchClient
 let workspaceSearchProjectionEnabled: boolean
 let workItemConfigurations: WorkItemConfigurationClient
+let planning: PlanningClient
 const projectDirectoryIdPrefix = 'user#'
 const defaultAllowedOrigins = [
   'http://localhost:5173',
@@ -2491,15 +2512,27 @@ app.patch('/api/workspace/members/:memberKey', async (c) => {
     const status = body?.status === undefined ? undefined : readWorkspaceMemberStatus(body.status)
     const expectedVersion = readWorkspaceVersion(body?.expectedVersion)
 
+    let expectedPlanningRevision: number
     if (status === 'deactivated') {
       await requireWorkspaceMemberHasNoManagedProjects(principal.directoryId, memberKey)
+      expectedPlanningRevision = await requireWorkspaceMemberHasNoOwnedPlanningEntities(
+        principal.directoryId,
+        memberKey,
+      )
+    } else {
+      expectedPlanningRevision = (await planning.getAuthorizationState(principal.directoryId)).revision
     }
 
     const member = await workspaceAccess.updateMember(
       principal.directoryId,
       principal.userKey,
       memberKey,
-      { role, status, expectedVersion },
+      {
+        role,
+        status,
+        expectedVersion,
+        expectedPlanningRevision,
+      },
     )
 
     return c.json({ member })
@@ -2884,11 +2917,16 @@ app.patch('/api/teams/:teamId/archive', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     requireWorkspaceAdministration(principal)
+    const expectedPlanningRevision = await requirePlanningTeamScopeIsUnused(
+      principal.directoryId,
+      teamId,
+    )
 
     const response = await projectDirectory.archiveTeam(
       principal.directoryId,
       teamId,
       createApiMutationContext(c, principal, { teamId }),
+      expectedPlanningRevision,
     )
     await deleteWorkspaceSearchDocumentBestEffort(
       principal.directoryId,
@@ -2929,12 +2967,18 @@ app.patch('/api/teams/:teamId/projects/:projectId/archive', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     requireWorkspaceAdministration(principal)
+    const expectedPlanningRevision = await requirePlanningProjectScopeIsUnused(
+      principal.directoryId,
+      teamId,
+      projectId,
+    )
 
     const response = await projectDirectory.archiveProject(
       principal.directoryId,
       teamId,
       projectId,
       createApiMutationContext(c, principal, { teamId, projectId }),
+      expectedPlanningRevision,
     )
     await deleteWorkspaceSearchDocumentBestEffort(
       principal.directoryId,
@@ -3251,6 +3295,414 @@ app.get('/api/work-items', async (c) => {
     ))
   } catch (error) {
     return toWorkItemConfigurationErrorResponse(c, error)
+  }
+})
+
+/** Workspace planning graph と canonical Work Item roll-up を返します。 */
+app.get('/api/planning', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const workItemState = await readPlanningWorkItemState(principal)
+    return c.json(await planning.get(principal.directoryId, workItemState))
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Planning hierarchy に entity を作成します。 */
+app.post('/api/planning/entities', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const input = await readPlanningJson<CreatePlanningEntityInput>(c.req)
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = await planning.get(principal.directoryId, workItemState)
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    await requirePlanningScopePermission(principal, input, 'manager')
+    if (input.parentId) {
+      await requirePlanningEntityPermission(
+        principal,
+        snapshot.entities,
+        input.parentId,
+        'manager',
+      )
+    }
+    await requirePlanningActiveOwner(principal, input.ownerMemberKey)
+    const response = await planning.create(principal.directoryId, input, workItemState)
+    return c.json(response.planning, 201)
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Planning entity の editable fields を更新します。 */
+app.patch('/api/planning/entities/:entityId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const entityId = readPlanningRouteId(c.req.param('entityId'), 'Planning entity ID')
+    const input = await readPlanningJson<UpdatePlanningEntityInput>(c.req)
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = await planning.get(principal.directoryId, workItemState)
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'manager')
+    if (isRecord(input.patch) && input.patch.ownerMemberKey !== undefined) {
+      await requirePlanningActiveOwner(principal, input.patch.ownerMemberKey)
+    }
+    const response = await planning.update(principal.directoryId, entityId, input, workItemState)
+    return c.json(response.planning)
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Planning entity を soft archive します。 */
+app.post('/api/planning/entities/:entityId/archive', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const entityId = readPlanningRouteId(c.req.param('entityId'), 'Planning entity ID')
+    const input = await readPlanningJson<PlanningRevisionInput>(c.req)
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = await planning.get(principal.directoryId, workItemState)
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'manager')
+    const response = await planning.archive(principal.directoryId, entityId, input, workItemState)
+    return c.json(response.planning)
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Planning entity を link や dependency を持たない新規 entity として複製します。 */
+app.post('/api/planning/entities/:entityId/duplicate', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const entityId = readPlanningRouteId(c.req.param('entityId'), 'Planning entity ID')
+    const input = await readPlanningJson<DuplicatePlanningEntityInput>(c.req)
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = await planning.get(principal.directoryId, workItemState)
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    const source = await requirePlanningEntityPermission(
+      principal,
+      snapshot.entities,
+      entityId,
+      'manager',
+    )
+    await requirePlanningActiveOwner(principal, source.ownerMemberKey)
+    const effectiveParentId = input.parentId === undefined ? source.parentId : input.parentId
+    if (effectiveParentId) {
+      await requirePlanningEntityPermission(
+        principal,
+        snapshot.entities,
+        effectiveParentId,
+        'manager',
+      )
+    }
+    const response = await planning.duplicate(principal.directoryId, entityId, input, workItemState)
+    return c.json(response.planning, 201)
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Planning entity の hierarchy / Team / Project scope を移動します。 */
+app.post('/api/planning/entities/:entityId/move', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const entityId = readPlanningRouteId(c.req.param('entityId'), 'Planning entity ID')
+    const input = await readPlanningJson<MovePlanningEntityInput>(c.req)
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = await planning.get(principal.directoryId, workItemState)
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'manager')
+    for (const descendant of collectActivePlanningDescendants(snapshot.entities, entityId)) {
+      await requirePlanningScopePermission(principal, descendant, 'manager')
+    }
+    await requirePlanningScopePermission(principal, input, 'manager')
+    if (input.parentId) {
+      await requirePlanningEntityPermission(
+        principal,
+        snapshot.entities,
+        input.parentId,
+        'manager',
+      )
+    }
+    const response = await planning.move(principal.directoryId, entityId, input, workItemState)
+    return c.json(response.planning)
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Planning entity に member authored status update を追記します。 */
+app.post('/api/planning/entities/:entityId/status-updates', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const entityId = readPlanningRouteId(c.req.param('entityId'), 'Planning entity ID')
+    const input = await readPlanningJson<PlanningStatusUpdateInput>(c.req)
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = await planning.get(principal.directoryId, workItemState)
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'member')
+    const response = await planning.addStatusUpdate(
+      principal.directoryId,
+      entityId,
+      input,
+      principal.userKey,
+      workItemState,
+    )
+    return c.json(response.planning, 201)
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Planning entity 間に directed dependency を作成します。 */
+app.post('/api/planning/dependencies', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const input = await readPlanningJson<CreatePlanningDependencyInput>(c.req)
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = await planning.get(principal.directoryId, workItemState)
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    await Promise.all([
+      requirePlanningEntityPermission(
+        principal,
+        snapshot.entities,
+        input.predecessorId,
+        'manager',
+      ),
+      requirePlanningEntityPermission(
+        principal,
+        snapshot.entities,
+        input.successorId,
+        'manager',
+      ),
+    ])
+    const response = await planning.createDependency(principal.directoryId, input, workItemState)
+    return c.json(response.planning, 201)
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Planning dependency を削除します。 */
+app.delete('/api/planning/dependencies/:dependencyId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const dependencyId = readPlanningRouteId(c.req.param('dependencyId'), 'Dependency ID')
+    const input = await readPlanningJson<PlanningRevisionInput>(c.req)
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = await planning.get(principal.directoryId, workItemState)
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    const dependency = snapshot.dependencies.find((candidate) => candidate.id === dependencyId)
+    if (!dependency) {
+      throw new PlanningError(404, 'PlanningDependencyNotFound', 'Planning dependency was not found.')
+    }
+    await Promise.all([
+      requirePlanningEntityPermission(
+        principal,
+        snapshot.entities,
+        dependency.predecessorId,
+        'manager',
+      ),
+      requirePlanningEntityPermission(
+        principal,
+        snapshot.entities,
+        dependency.successorId,
+        'manager',
+      ),
+    ])
+    const response = await planning.deleteDependency(
+      principal.directoryId,
+      dependencyId,
+      input,
+      workItemState,
+    )
+    return c.json(response.planning)
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Canonical Work Item と Cycle / Milestone / Goal の link を作成または置換します。 */
+app.put('/api/planning/work-item-links/:teamId/:workItemId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const teamId = readPlanningRouteId(c.req.param('teamId'), 'Team ID')
+    const workItemId = readPlanningRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const input = await readPlanningJson<PlanningWorkItemLinkInput>(c.req)
+    if (input.teamId !== teamId || input.workItemId !== workItemId) {
+      throw new PlanningError(
+        400,
+        'PlanningWorkItemPathMismatch',
+        'Work Item link path and request body IDs must match.',
+      )
+    }
+    const projectId = input.projectId === undefined
+      ? undefined
+      : readPlanningIdentifier(input.projectId, 'Project ID')
+    const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+    if (
+      projectId !== undefined &&
+      projectId !== detail.issue.assignedProjectId
+    ) {
+      throw new PlanningError(
+        409,
+        'PlanningWorkItemProjectMismatch',
+        'Work Item link Project does not match the canonical Work Item.',
+      )
+    }
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = await planning.get(principal.directoryId, workItemState)
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    const current = await planning.getWorkItemLinkForAuthorization(
+      principal.directoryId,
+      teamId,
+      workItemId,
+    )
+    if (current) {
+      await requirePlanningLinkEntityPermissions(
+        principal,
+        snapshot.entities,
+        current,
+      )
+    }
+    await requirePlanningLinkEntityPermissions(principal, snapshot.entities, input)
+    const response = await planning.putWorkItemLink(principal.directoryId, input, workItemState)
+    return c.json(response.planning)
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Canonical Work Item の Planning link を削除します。 */
+app.delete('/api/planning/work-item-links/:teamId/:workItemId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const teamId = readPlanningRouteId(c.req.param('teamId'), 'Team ID')
+    const workItemId = readPlanningRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const input = await readPlanningJson<PlanningRevisionInput>(c.req)
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = await planning.get(principal.directoryId, workItemState)
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    const current = snapshot.workItemLinks.find((link) =>
+      link.teamId === teamId && link.workItemId === workItemId,
+    )
+    if (current) {
+      await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+      await requirePlanningLinkEntityPermissions(principal, snapshot.entities, current)
+    } else if (!principal.isSystemAdmin) {
+      requireWorkspaceAdministration(principal)
+    }
+    const response = await planning.deleteWorkItemLink(
+      principal.directoryId,
+      teamId,
+      workItemId,
+      input,
+      workItemState,
+    )
+    return c.json(response.planning)
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Cycle を完了し、未完了 Work Item を設定済み policy で rollover します。 */
+app.post('/api/planning/cycles/:cycleId/rollover', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const cycleId = readPlanningRouteId(c.req.param('cycleId'), 'Cycle ID')
+    const input = await readPlanningJson<CycleRolloverInput>(c.req)
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = await planning.get(principal.directoryId, workItemState)
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    await Promise.all([
+      requirePlanningEntityPermission(principal, snapshot.entities, cycleId, 'manager'),
+      requirePlanningEntityPermission(
+        principal,
+        snapshot.entities,
+        input.targetCycleId,
+        'manager',
+      ),
+    ])
+    return c.json(await planning.rolloverCycle(
+      principal.directoryId,
+      cycleId,
+      input,
+      workItemState,
+    ))
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
   }
 })
 
@@ -5137,6 +5589,34 @@ async function readJson<T>(request: { json: () => Promise<T> }) {
   }
 }
 
+async function readPlanningJson<T>(request: { json: () => Promise<unknown> }) {
+  const body = await readJson<unknown>(request)
+  if (!isRecord(body)) {
+    throw new PlanningError(
+      400,
+      'InvalidPlanningInput',
+      'A JSON object request body is required.',
+    )
+  }
+  return body as T
+}
+
+function readPlanningRouteId(value: string | undefined, label: string) {
+  return readPlanningIdentifier(value, label)
+}
+
+function readPlanningIdentifier(value: unknown, label: string) {
+  if (
+    typeof value !== 'string' ||
+    !value.trim() ||
+    value !== value.trim() ||
+    value.length > 256
+  ) {
+    throw new PlanningError(400, 'InvalidPlanningInput', `${label} is required.`)
+  }
+  return value
+}
+
 async function readFileProofingJson<T>(request: { json: () => Promise<unknown> }) {
   const body = await readJson<unknown>(request)
   if (!isRecord(body)) {
@@ -5711,6 +6191,35 @@ function toWorkItemConfigurationErrorResponse(c: Context, error: unknown) {
   return c.json({ code: error.code, message: error.message }, status)
 }
 
+function toPlanningErrorResponse(c: Context, error: unknown) {
+  if (error instanceof CognitoServiceError) {
+    return toCognitoDirectoryErrorResponse(c, error)
+  }
+  if (
+    error instanceof WorkspaceAccessError ||
+    error instanceof ProjectDataError ||
+    isTeamIssueNotFoundError(error)
+  ) {
+    return toProjectDataErrorResponse(c, error)
+  }
+  if (!(error instanceof PlanningError)) {
+    console.error(error)
+    return c.json({ message: 'Planning data is unavailable.' }, 502)
+  }
+  if (error.status >= 500) {
+    console.error(error)
+  }
+  const status = error.status === 400 ||
+    error.status === 403 ||
+    error.status === 404 ||
+    error.status === 409 ||
+    error.status === 413 ||
+    error.status === 503
+    ? error.status
+    : 502
+  return c.json({ code: error.code, message: error.message }, status)
+}
+
 function requireSystemAdmin(principal: ProjectPrincipal) {
   if (principal.isSystemAdmin) {
     return
@@ -5745,6 +6254,152 @@ function requireWorkspaceAdministration(principal: WorkspacePrincipal) {
     'WorkspaceRoleDenied',
     'Workspace owner or admin access is required.',
   )
+}
+
+function requirePlanningAuthorizationRevision(
+  currentRevision: number,
+  expectedRevision: unknown,
+) {
+  if (
+    typeof expectedRevision !== 'number' ||
+    !Number.isSafeInteger(expectedRevision) ||
+    expectedRevision < 0
+  ) {
+    throw new PlanningError(
+      400,
+      'InvalidPlanningInput',
+      'Planning expectedRevision must be a non-negative safe integer.',
+    )
+  }
+  if (currentRevision !== expectedRevision) {
+    throw new PlanningError(
+      409,
+      'PlanningRevisionConflict',
+      'Planning changed. Reload and try again.',
+    )
+  }
+}
+
+async function requirePlanningActiveOwner(
+  principal: WorkspacePrincipal,
+  ownerMemberKey: unknown,
+) {
+  const memberKey = readPlanningIdentifier(ownerMemberKey, 'Planning owner member key')
+  const owner = await workspaceAccess.getActiveMember(principal.directoryId, memberKey)
+  if (!owner) {
+    throw new PlanningError(
+      409,
+      'PlanningOwnerInactive',
+      'Planning owner must be an active Workspace member.',
+    )
+  }
+}
+
+async function requirePlanningScopePermission(
+  principal: WorkspacePrincipal,
+  scope: Pick<PlanningEntity, 'teamId' | 'projectId'>,
+  minimumRole: Extract<ProjectRole, 'member' | 'manager'>,
+  allowWorkspaceScopeMember = false,
+) {
+  requireWorkspaceBusinessWrite(principal)
+  const teamId = scope.teamId === undefined
+    ? undefined
+    : readPlanningIdentifier(scope.teamId, 'Team ID')
+  const projectId = scope.projectId === undefined
+    ? undefined
+    : readPlanningIdentifier(scope.projectId, 'Project ID')
+  const teamContext = teamId
+    ? await requireTeamPermission(principal, teamId, minimumRole)
+    : undefined
+  if (projectId) {
+    await requireProjectPermission(principal, projectId, minimumRole)
+  }
+  if (
+    teamContext &&
+    projectId &&
+    !teamContext.team.projects.some((project) => project.id === projectId)
+  ) {
+    throw new PlanningError(
+      409,
+      'PlanningScopeMismatch',
+      'Planning Team and Project scopes do not belong to the same hierarchy.',
+    )
+  }
+  if (!teamId && !projectId && !principal.isSystemAdmin && !allowWorkspaceScopeMember) {
+    requireWorkspaceAdministration(principal)
+  }
+}
+
+async function requirePlanningEntityPermission(
+  principal: WorkspacePrincipal,
+  entities: readonly PlanningEntity[],
+  entityId: unknown,
+  minimumRole: Extract<ProjectRole, 'member' | 'manager'>,
+  allowWorkspaceScopeMember = false,
+) {
+  const normalizedEntityId = readPlanningIdentifier(entityId, 'Planning entity ID')
+  const entity = entities.find((candidate) => candidate.id === normalizedEntityId)
+  if (!entity) {
+    throw new PlanningError(404, 'PlanningEntityNotFound', 'Planning entity was not found.')
+  }
+  await requirePlanningScopePermission(
+    principal,
+    entity,
+    minimumRole,
+    allowWorkspaceScopeMember,
+  )
+  return entity
+}
+
+async function requirePlanningLinkEntityPermissions(
+  principal: WorkspacePrincipal,
+  entities: readonly PlanningEntity[],
+  link: Pick<PlanningWorkItemLinkInput, 'cycleId' | 'milestoneId' | 'goalIds'>,
+) {
+  const goalIds: unknown = link.goalIds
+  if (!Array.isArray(goalIds)) {
+    throw new PlanningError(400, 'InvalidPlanningInput', 'Goal IDs must be an array.')
+  }
+  const entityIds = new Set([
+    ...(link.cycleId === undefined
+      ? []
+      : [readPlanningIdentifier(link.cycleId, 'Cycle ID')]),
+    ...(link.milestoneId === undefined
+      ? []
+      : [readPlanningIdentifier(link.milestoneId, 'Milestone ID')]),
+    ...goalIds.map((goalId) => readPlanningIdentifier(goalId, 'Goal ID')),
+  ])
+  await Promise.all(
+    [...entityIds].map((entityId) =>
+      requirePlanningEntityPermission(principal, entities, entityId, 'member', true)
+    ),
+  )
+}
+
+function collectActivePlanningDescendants(
+  entities: readonly PlanningEntity[],
+  rootEntityId: string,
+) {
+  const descendants: PlanningEntity[] = []
+  const childrenByParent = new Map<string, PlanningEntity[]>()
+  for (const entity of entities) {
+    if (!entity.parentId) continue
+    const children = childrenByParent.get(entity.parentId) ?? []
+    children.push(entity)
+    childrenByParent.set(entity.parentId, children)
+  }
+  const pending = [rootEntityId]
+  const visited = new Set<string>(pending)
+  while (pending.length > 0) {
+    const parentId = pending.pop()!
+    for (const entity of childrenByParent.get(parentId) ?? []) {
+      if (visited.has(entity.id)) continue
+      visited.add(entity.id)
+      pending.push(entity.id)
+      if (!entity.archivedAt) descendants.push(entity)
+    }
+  }
+  return descendants
 }
 
 /** Search と saved view authorization に使う current directory snapshot です。 */
@@ -6109,6 +6764,63 @@ async function requireWorkspaceMemberHasNoManagedProjects(
   }
 }
 
+async function requireWorkspaceMemberHasNoOwnedPlanningEntities(
+  directoryId: string,
+  memberKey: string,
+) {
+  const authorizationState = await planning.getAuthorizationState(directoryId)
+  const ownedEntity = authorizationState.entities.find(
+    (entity) => !entity.archivedAt && entity.ownerMemberKey === memberKey,
+  )
+  if (ownedEntity) {
+    throw new WorkspaceAccessError(
+      409,
+      'WorkspaceMemberOwnsPlanningEntities',
+      'Transfer or archive all owned Planning entities before deactivating this member.',
+    )
+  }
+  return authorizationState.revision
+}
+
+async function requirePlanningTeamScopeIsUnused(directoryId: string, teamId: string) {
+  const authorizationState = await planning.getAuthorizationState(directoryId)
+  const scopedEntity = authorizationState.entities.find((entity) =>
+    !entity.archivedAt && entity.teamId === teamId
+  )
+  const scopedLink = authorizationState.workItemLinks.find((link) => link.teamId === teamId)
+  if (scopedEntity || scopedLink) {
+    throw new WorkspaceAccessError(
+      409,
+      'PlanningTeamScopeInUse',
+      'Move or archive active Planning entities and remove Work Item links before archiving this Team.',
+    )
+  }
+  return authorizationState.revision
+}
+
+async function requirePlanningProjectScopeIsUnused(
+  directoryId: string,
+  teamId: string,
+  projectId: string,
+) {
+  const authorizationState = await planning.getAuthorizationState(directoryId)
+  const scopedEntity = authorizationState.entities.find(
+    (entity) =>
+      !entity.archivedAt && entity.teamId === teamId && entity.projectId === projectId,
+  )
+  const scopedLink = authorizationState.workItemLinks.find(
+    (link) => link.teamId === teamId && link.projectId === projectId,
+  )
+  if (scopedEntity || scopedLink) {
+    throw new WorkspaceAccessError(
+      409,
+      'PlanningProjectScopeInUse',
+      'Move or archive active Planning entities and remove Work Item links before archiving this Project.',
+    )
+  }
+  return authorizationState.revision
+}
+
 function toCollaborationErrorResponse(c: Context, error: unknown) {
   if (error instanceof CognitoServiceError) {
     return toCognitoDirectoryErrorResponse(c, error)
@@ -6364,6 +7076,7 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     error.code === 'InvalidCustomFieldValue' ||
     error.code === 'InvalidAuditQuery' ||
     error.code === 'InvalidCommentMention' ||
+    error.code === 'InvalidPlanningRevision' ||
     error.code === 'InvalidTeamIssueCursor') {
     return c.json({ message: error.message }, 400)
   }
@@ -6400,6 +7113,10 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
       code: error.code,
       message: 'Work Item configuration changed. Reload and try again.',
     }, 409)
+  }
+
+  if (error.code === 'PlanningRevisionConflict') {
+    return c.json({ code: error.code, message: error.message }, 409)
   }
 
   if (
@@ -7333,7 +8050,7 @@ async function readCanonicalTeamIssuesForAggregate(
   const storedIssues = await teamIssues.getTeamIssues(
     directoryId,
     context.team.id,
-    { limit: clientReadLimit },
+    { limit: clientReadLimit, consistentRead: true },
   )
   assertWorkItemListWithinLimit(
     storedIssues.issues,
@@ -7389,6 +8106,25 @@ async function readAccessibleWorkItems(
   }
 
   return { workItems: [...workItemsById.values()] }
+}
+
+async function readPlanningWorkItemState(
+  principal: ProjectPrincipal,
+): Promise<PlanningWorkItemState> {
+  const response = await readAccessibleWorkItems(principal)
+  return {
+    workItems: response.workItems.map((workItem) => ({
+      id: workItem.id,
+      revision: workItem.revision,
+      teamId: workItem.teamId,
+      title: workItem.title,
+      ...(workItem.assignedProjectId
+        ? { projectId: workItem.assignedProjectId }
+        : {}),
+      statusCategory: workItem.statusCategory,
+      dueDate: workItem.dueDate,
+    } satisfies PlanningWorkItemSummary)),
+  }
 }
 
 function addAggregateWorkItem(
@@ -9846,6 +10582,10 @@ export class DynamoDbProjectDirectoryClient {
    * project member mutation と競合させる Workspace access table 名です。
    */
   private readonly workspaceAccessTableName: string
+  /**
+   * Team / Project archive と直列化する Planning table 名です。
+   */
+  private readonly planningTableName: string
 
   constructor(
     tableName =
@@ -9860,6 +10600,7 @@ export class DynamoDbProjectDirectoryClient {
       getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
       getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
       'mukuroji-workspace-access-local',
+    planningTableName = getEnv('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',
   ) {
     this.tableName = tableName
     this.documentClient = documentClient
@@ -9867,6 +10608,7 @@ export class DynamoDbProjectDirectoryClient {
     this.bootstrapLocalTables = bootstrapLocalTables
     this.auditTableName = auditTableName
     this.workspaceAccessTableName = workspaceAccessTableName
+    this.planningTableName = planningTableName
   }
 
   /**
@@ -10523,9 +11265,11 @@ export class DynamoDbProjectDirectoryClient {
   async archiveTeam(
     directoryId: string,
     teamId: string,
-    auditContext?: MutationAuditContext,
+    auditContext: MutationAuditContext | undefined,
+    expectedPlanningRevision: number,
   ) {
     await this.ensureLocalAuditTable()
+    let planningRevisionItemIndex: number | undefined
     try {
       const items = await this.readValidDirectoryItems(directoryId)
       const team = items.find((item) =>
@@ -10558,14 +11302,19 @@ export class DynamoDbProjectDirectoryClient {
         changes: createAuditFieldChanges(team, { ...team, archivedAt }, ['archivedAt']),
         metadata: { kind: 'team', teamId },
       })
+      const planningRevisionMutation = createPlanningRevisionBump(
+        this.planningTableName,
+        directoryId,
+        expectedPlanningRevision,
+        archivedAt,
+      )
+      planningRevisionItemIndex = 1 + auditItems.length
 
-      if (auditItems.length) {
-        await this.documentClient.send(
-          new TransactWriteCommand({ TransactItems: [stateUpdate, ...auditItems] }),
-        )
-      } else {
-        await this.documentClient.send(new UpdateCommand(stateUpdate.Update))
-      }
+      await this.documentClient.send(
+        new TransactWriteCommand({
+          TransactItems: [stateUpdate, ...auditItems, planningRevisionMutation],
+        }),
+      )
 
       return {
         teamId,
@@ -10574,6 +11323,17 @@ export class DynamoDbProjectDirectoryClient {
     } catch (error) {
       if (isTransactionConditionalFailureAt(error, 0)) {
         await this.throwArchiveTeamTransactionCancellationResult(directoryId, teamId, error)
+      }
+
+      if (
+        planningRevisionItemIndex !== undefined &&
+        isTransactionConditionalFailureAt(error, planningRevisionItemIndex)
+      ) {
+        throw new ProjectDataError(
+          409,
+          'PlanningRevisionConflict',
+          'Planning changed. Reload and try again.',
+        )
       }
 
       if (hasTransactionConditionalFailure(error)) {
@@ -10595,9 +11355,11 @@ export class DynamoDbProjectDirectoryClient {
     directoryId: string,
     teamId: string,
     projectId: string,
-    auditContext?: MutationAuditContext,
+    auditContext: MutationAuditContext | undefined,
+    expectedPlanningRevision: number,
   ) {
     await this.ensureLocalAuditTable()
+    let planningRevisionItemIndex: number | undefined
     try {
       const items = await this.readValidDirectoryItems(directoryId)
       const team = items.find((item) =>
@@ -10645,14 +11407,19 @@ export class DynamoDbProjectDirectoryClient {
         changes: createAuditFieldChanges(project, { ...project, archivedAt }, ['archivedAt']),
         metadata: { kind: 'project', projectId, teamId },
       })
+      const planningRevisionMutation = createPlanningRevisionBump(
+        this.planningTableName,
+        directoryId,
+        expectedPlanningRevision,
+        archivedAt,
+      )
+      planningRevisionItemIndex = 1 + auditItems.length
 
-      if (auditItems.length) {
-        await this.documentClient.send(
-          new TransactWriteCommand({ TransactItems: [stateUpdate, ...auditItems] }),
-        )
-      } else {
-        await this.documentClient.send(new UpdateCommand(stateUpdate.Update))
-      }
+      await this.documentClient.send(
+        new TransactWriteCommand({
+          TransactItems: [stateUpdate, ...auditItems, planningRevisionMutation],
+        }),
+      )
 
       return {
         teamId,
@@ -10666,6 +11433,18 @@ export class DynamoDbProjectDirectoryClient {
           teamId,
           projectId,
           error,
+        )
+      }
+
+
+      if (
+        planningRevisionItemIndex !== undefined &&
+        isTransactionConditionalFailureAt(error, planningRevisionItemIndex)
+      ) {
+        throw new ProjectDataError(
+          409,
+          'PlanningRevisionConflict',
+          'Planning changed. Reload and try again.',
         )
       }
 
@@ -11341,6 +12120,22 @@ function createWorkItemConfigurationClient() {
   )
 }
 
+function createPlanningClient() {
+  const dynamoDbClient = createDynamoDbClient()
+  return new DynamoDbPlanningClient(
+    getEnv('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',
+    createDynamoDbDocumentClient(dynamoDbClient),
+    dynamoDbClient,
+    shouldBootstrapLocalDynamoDb(),
+    () => new Date(),
+    getEnv('MUKUROJI_WORK_ITEMS_TABLE') ??
+      getEnv('WORK_ITEMS_TABLE_NAME') ??
+      getEnv('MUKUROJI_TEAM_ISSUES_TABLE') ??
+      getEnv('TEAM_ISSUES_TABLE_NAME') ??
+      'mukuroji-team-issues-local',
+  )
+}
+
 function createDefaultWorkItemConfigurationClient(): WorkItemConfigurationClient {
   const createResolved = (
     scopeType: 'workspace' | 'team',
@@ -11758,6 +12553,44 @@ function createProjectDataConflictError() {
     'ConditionalCheckFailedException',
     'The transaction condition failed.',
   )
+}
+
+function createPlanningRevisionBump(
+  tableName: string,
+  workspaceId: string,
+  expectedRevision: number,
+  updatedAt: string,
+) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    throw new ProjectDataError(
+      400,
+      'InvalidPlanningRevision',
+      'Planning revision must be a non-negative safe integer.',
+    )
+  }
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        workspaceId,
+        recordKey: 'META',
+        entryType: 'planning-meta',
+        schemaVersion: PLANNING_SCHEMA_VERSION,
+        revision: expectedRevision + 1,
+        updatedAt,
+      },
+      ...(expectedRevision === 0
+        ? {
+            ConditionExpression:
+              'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+          }
+        : {
+            ConditionExpression: '#revision = :expectedPlanningRevision',
+            ExpressionAttributeNames: { '#revision': 'revision' },
+            ExpressionAttributeValues: { ':expectedPlanningRevision': expectedRevision },
+          }),
+    },
+  }
 }
 
 function createWorkItemRevisionConflictError() {
@@ -13323,6 +14156,7 @@ notifications = new DynamoDbNotificationsClient()
 workspaceSearch = new DynamoDbWorkspaceSearchClient()
 workspaceSearchProjectionEnabled = shouldEnableWorkspaceSearchProjection()
 workItemConfigurations = createWorkItemConfigurationClient()
+planning = createPlanningClient()
 
 /**
  * Server test で外部 service client を差し替えます。
@@ -13341,6 +14175,7 @@ export function configureApiClientsForTest(clients: {
   notifications?: NotificationClient
   workspaceSearch?: WorkspaceSearchClient
   workItemConfigurations?: WorkItemConfigurationClient
+  planning?: PlanningClient
 }) {
   cognito = clients.cognito ?? cognito
   dashboardSummary = clients.dashboardSummary ?? dashboardSummary
@@ -13356,6 +14191,7 @@ export function configureApiClientsForTest(clients: {
   workspaceSearch = clients.workspaceSearch ?? workspaceSearch
   if (clients.workspaceSearch) workspaceSearchProjectionEnabled = true
   workItemConfigurations = clients.workItemConfigurations ?? workItemConfigurations
+  planning = clients.planning ?? planning
 }
 
 /**
@@ -13376,6 +14212,7 @@ export function resetApiClientsForTest() {
   workspaceSearch = new DynamoDbWorkspaceSearchClient()
   workspaceSearchProjectionEnabled = shouldEnableWorkspaceSearchProjection()
   workItemConfigurations = createDefaultWorkItemConfigurationClient()
+  planning = new InMemoryPlanningClient()
 }
 
 /**
