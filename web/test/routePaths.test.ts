@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test'
+import { matchRoutes } from 'react-router'
 import {
   createPlanningPath,
   createProjectIssuesPath,
   createTeamIssuesPath,
 } from '../src/routes/paths'
+import { appRoutes } from '../src/routes/router'
 
 describe('Work Item detail paths', () => {
   test('keeps assigned Work Items scoped by project, team, and issue', () => {
@@ -35,5 +37,15 @@ describe('Planning paths', () => {
     expect(createPlanningPath('roadmap', 'goal/launch')).toBe(
       '/planning/roadmap?entityId=goal%2Flaunch',
     )
+  })
+
+  test('matches only supported Planning views and sends invalid views to Not Found', () => {
+    for (const view of ['timeline', 'roadmap', 'portfolio'] as const) {
+      expect(matchRoutes(appRoutes, `/planning/${view}`)?.at(-1)?.route.path).toBe(
+        `/planning/${view}`,
+      )
+    }
+
+    expect(matchRoutes(appRoutes, '/planning/invalid')?.at(-1)?.route.path).toBe('*')
   })
 })

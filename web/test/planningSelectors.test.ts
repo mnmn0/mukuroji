@@ -53,9 +53,17 @@ describe('planning selectors', () => {
     const validTarget = planningSnapshotFixture.entities.find(
       (entity) => entity.id === 'cycle-15',
     )!
+    const sameDateTarget = { ...validTarget, id: 'cycle-15-z' }
+    const laterTarget = {
+      ...validTarget,
+      id: 'cycle-16',
+      baseline: { startDate: '2026-08-10', endDate: '2026-08-23' },
+      forecast: { startDate: '2026-08-10', endDate: '2026-08-23' },
+    }
     const candidates: PlanningEntity[] = [
       source,
-      validTarget,
+      laterTarget,
+      sameDateTarget,
       { ...validTarget, id: 'cycle-wrong-team', teamId: 'other-team' },
       { ...validTarget, id: 'cycle-wrong-project', projectId: 'other-project' },
       { ...validTarget, id: 'cycle-wrong-cadence', cadence: { unit: 'month', count: 1 } },
@@ -66,10 +74,11 @@ describe('planning selectors', () => {
       },
       { ...validTarget, id: 'cycle-completed', status: 'completed' },
       { ...validTarget, id: 'cycle-archived', archivedAt: '2026-07-16T05:00:00.000Z' },
+      validTarget,
     ]
 
     expect(resolvePlanningCycleRolloverTargets(source, candidates).map((cycle) => cycle.id))
-      .toEqual([validTarget.id])
+      .toEqual([validTarget.id, sameDateTarget.id, laterTarget.id])
     expect(resolvePlanningCycleRolloverTargets(
       { ...source, status: 'canceled' },
       candidates,

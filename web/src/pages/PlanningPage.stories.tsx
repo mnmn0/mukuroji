@@ -17,6 +17,12 @@ const meta = {
   },
   args: {
     activeView: 'timeline',
+    canCreateInScope: () => true,
+    createScopeTeams: [{
+      id: 'core-team',
+      name: 'Core team',
+      projects: [{ id: 'refero', name: 'Refero' }],
+    }],
     labels: createPlanningLabels('ja'),
     snapshot: planningSnapshotFixture,
     onArchiveEntity: async () => undefined,

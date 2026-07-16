@@ -10,6 +10,7 @@ import {
   movePlanningEntity,
   PlanningApiError,
   putPlanningWorkItemLink,
+  resolvePlanningErrorMessageKey,
   rolloverPlanningCycle,
   updatePlanningEntity,
 } from '../src/planning/api'
@@ -147,6 +148,30 @@ describe('Planning API', () => {
       code: 'PlanningRevisionConflict',
       message: 'Planning graph changed.',
       status: 409,
+    })
+    expect(resolvePlanningErrorMessageKey(error)).toBe('planning.conflict')
+    expect(resolvePlanningErrorMessageKey(
+      new PlanningApiError(409, 'Entity already exists.', 'PlanningEntityExists'),
+      'mutation',
+    )).toBe('planning.mutationError')
+    expect(resolvePlanningErrorMessageKey(new Error('raw API detail'))).toBe('planning.error')
+    expect(resolvePlanningErrorMessageKey(new Error('raw API detail'), 'mutation'))
+      .toBe('planning.mutationError')
+  })
+
+  test('keeps the HTTP status and fallback when an error message is malformed', async () => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      code: 'PlanningUnavailable',
+      message: { internal: 'do not display' },
+    }), { status: 503 })) as typeof fetch
+
+    const error = await getPlanningSnapshot('token').catch((reason: unknown) => reason)
+
+    expect(error).toBeInstanceOf(PlanningApiError)
+    expect(error).toMatchObject({
+      code: undefined,
+      message: 'Unable to complete the planning request.',
+      status: 503,
     })
   })
 })

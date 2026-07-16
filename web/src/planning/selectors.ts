@@ -64,15 +64,20 @@ export function resolvePlanningCycleRolloverTargets(
   if (!source || source.type !== 'cycle' || !source.cadence || !isOpenPlanningEntity(source)) {
     return []
   }
-  return cycles.filter((target) =>
-    target.id !== source.id &&
-    target.type === 'cycle' &&
-    target.teamId === source.teamId &&
-    target.projectId === source.projectId &&
-    target.cadence?.unit === source.cadence?.unit &&
-    target.cadence?.count === source.cadence?.count &&
-    target.baseline.startDate > source.baseline.endDate &&
-    target.forecast.startDate > source.forecast.endDate &&
-    isOpenPlanningEntity(target),
-  )
+  return cycles
+    .filter((target) =>
+      target.id !== source.id &&
+      target.type === 'cycle' &&
+      target.teamId === source.teamId &&
+      target.projectId === source.projectId &&
+      target.cadence?.unit === source.cadence?.unit &&
+      target.cadence?.count === source.cadence?.count &&
+      target.baseline.startDate > source.baseline.endDate &&
+      target.forecast.startDate > source.forecast.endDate &&
+      isOpenPlanningEntity(target),
+    )
+    .sort((first, second) =>
+      first.baseline.startDate.localeCompare(second.baseline.startDate) ||
+      first.id.localeCompare(second.id),
+    )
 }

@@ -19,7 +19,7 @@ Issue #27 の Planning domain は、短期の Cycle と中長期の Portfolio / 
 
 許可する基本階層は `Portfolio → Roadmap → Initiative → Goal/OKR` で、OKR は `Objective → Key Result` を表現できます。その下に `Phase → Milestone/Release` を配置します。Project 計画の実用性のため、Phase は Roadmap / Initiative の直下、Milestone / Release は Roadmap / Initiative / Goal の直下にも配置できます。Cycle と Portfolio は root です。Self reference、存在しないまたは archive 済みの親、循環は保存しません。親を archive する前に active な子を移動または archive する必要があり、dependency と Work Item link は履歴として保持します。
 
-Automatic progress は、関連 Work Item と子孫の現在状態から on-read で決定します。`completed` は 100、`started` は 50、`backlog` / `unstarted` は 0 とし、`canceled` は分母から除外します。同じ Work Item が複数経路から辿れる場合も、ancestor ごとに一度だけ数えます。Manual progress を指定した entity は 0〜100 の保存値を使います。`rollupHealth` は自身と active な子孫の最も悪い health を返します。
+Automatic progress は、関連 Work Item と子孫の現在状態から on-read で決定します。`completed` は 100、`started` は 50、`backlog` / `unstarted` は 0 とし、`canceled` は分母から除外します。同じ Work Item が複数経路から辿れる場合も、ancestor ごとに一度だけ数えます。Manual progress を指定した entity は 0〜100 の保存値を使います。Health は entity 自身の risk で補正し、`high` / `critical` は `off-track`、`medium` は少なくとも `at-risk`、`none` / `low` は報告された health を effective health とします。`rollupHealth` は自身と active な子孫の effective health のうち最も悪い値を返します。
 
 ## Cycle rollover
 
@@ -31,6 +31,8 @@ Cycle は date-only の baseline / forecast、cadence、Work Item 件数単位�
 Response は再計算済み snapshot と `movedWorkItemIds` / `retainedWorkItemIds` を返すため、同じ入力と revision から結果を再現できます。
 
 Rollover は canonical Work Item revision を Planning META と同じ DynamoDB transaction で条件検証します。Transaction の100 item上限に合わせ、一度に検証できる source link は49件までです。削除済み・閲覧不能の Work Item が link された場合は rollover を fail-closed にし、Workspace owner / admin が既存の DELETE API で stale link を清掃してから再実行します。Work Item の Project が変わった link は snapshot / roll-up から除外し、新しい Project scope へ明示的に再 link するまで rollover を拒否します。
+
+Cycle を archive できるのは、残っている link の canonical Work Item がすべて `completed` / `canceled` の場合だけです。未完了なら先に rollover または unlink が必要で、canonical Work Item が削除済み・閲覧不能なら fail-closed に拒否します。archive 時も対象 Work Item の revision を Planning META と同じ transaction で条件検証します。
 
 ## Timeline と critical path
 

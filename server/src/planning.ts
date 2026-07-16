@@ -369,8 +369,30 @@ abstract class BasePlanningClient implements PlanningClient {
           'Move or archive active child entities before archiving their parent.',
         )
       }
+      const workItemConditions: PlanningWorkItemCondition[] = []
+      if (current.type === 'cycle') {
+        const summaries = createWorkItemMap(workItemState)
+        for (const link of state.workItemLinks) {
+          if (link.cycleId !== current.id) continue
+          const summary = summaries.get(createWorkItemKey(link.teamId, link.workItemId))
+          if (!summary) {
+            throw new PlanningError(503, 'PlanningWorkItemMissing', 'A linked Work Item is missing.')
+          }
+          if (summary.statusCategory !== 'completed' && summary.statusCategory !== 'canceled') {
+            throw conflict(
+              'PlanningCycleHasIncompleteWorkItems',
+              'Rollover or unlink incomplete Work Items before archiving this Cycle.',
+            )
+          }
+          workItemConditions.push({
+            teamId: link.teamId,
+            workItemId: link.workItemId,
+            revision: readRevision(summary.revision),
+          })
+        }
+      }
       const next = replaceEntity(state, { ...current, archivedAt: now, updatedAt: now })
-      return { state: next }
+      return { state: next, workItemConditions }
     })
   }
 
@@ -850,7 +872,9 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
         `Planning Workspace cannot exceed ${PLANNING_READ_LIMIT} rows.`,
       )
     }
-    for (const item of afterRows.values()) {
+    const mutations: NonNullable<TransactWriteCommandInput['TransactItems']> = []
+    for (const [recordKey, item] of afterRows) {
+      if (recordKey === META_RECORD_KEY || recordsEqual(item, beforeRows.get(recordKey))) continue
       if (utf8ByteLength(JSON.stringify(item)) > MAX_PLANNING_ROW_BYTES) {
         throw new PlanningError(
           413,
@@ -858,10 +882,6 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
           'A Planning row exceeds the safe DynamoDB item size limit.',
         )
       }
-    }
-    const mutations: NonNullable<TransactWriteCommandInput['TransactItems']> = []
-    for (const [recordKey, item] of afterRows) {
-      if (recordKey === META_RECORD_KEY || recordsEqual(item, beforeRows.get(recordKey))) continue
       mutations.push({ Put: { TableName: this.tableName, Item: item } })
     }
     for (const recordKey of beforeRows.keys()) {

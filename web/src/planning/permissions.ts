@@ -124,6 +124,33 @@ export function canManageAnyPlanningScope(
   return Object.values(access.projectRoles).some((role) => role === 'manager')
 }
 
+/**
+ * Entity 作成時に現在ユーザーが選べる Team / Project scope だけを返します。
+ *
+ * @param user - Current user です。
+ * @param teams - Active Team / Project directory です。
+ * @param access - Current user の Project role snapshot です。
+ * @returns Team scope と、その配下で管理可能な Project だけを含む directory です。
+ */
+export function filterManageablePlanningScopeTeams(
+  user: CurrentUser | null | undefined,
+  teams: readonly ProjectDirectoryTeam[],
+  access: PlanningAccessSnapshot,
+) {
+  return teams.flatMap((team) => {
+    if (!canManagePlanningScope(user, { teamId: team.id }, access)) return []
+
+    return [{
+      ...team,
+      projects: team.projects.filter((project) =>
+        canManagePlanningScope(user, {
+          teamId: team.id,
+          projectId: project.id,
+        }, access)),
+    }]
+  })
+}
+
 function canUsePlanningScope(
   user: CurrentUser | null | undefined,
   scope: PlanningScope,

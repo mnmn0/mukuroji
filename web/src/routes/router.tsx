@@ -1,4 +1,4 @@
-import { Navigate, createBrowserRouter } from 'react-router'
+import { Navigate, createBrowserRouter, type RouteObject } from 'react-router'
 import { ForgotPasswordPage } from '../pages/ForgotPasswordPage'
 import { LoginPage } from '../pages/LoginPage'
 import { NotFoundPage } from '../pages/NotFoundPage'
@@ -16,7 +16,7 @@ import { SearchPage } from '../search/SearchPage'
 /**
  * アプリケーション全体の画面ルーティング定義です。
  */
-export const router = createBrowserRouter([
+export const appRoutes: RouteObject[] = [
   {
     path: '/',
     element: <LoginPage />,
@@ -49,7 +49,15 @@ export const router = createBrowserRouter([
         element: <Navigate replace to="/planning/timeline" />,
       },
       {
-        path: '/planning/:planningView',
+        path: '/planning/timeline',
+        element: <PlanningPage />,
+      },
+      {
+        path: '/planning/roadmap',
+        element: <PlanningPage />,
+      },
+      {
+        path: '/planning/portfolio',
         element: <PlanningPage />,
       },
       {
@@ -106,4 +114,13 @@ export const router = createBrowserRouter([
     path: '*',
     element: <NotFoundPage />,
   },
-])
+]
+
+/**
+ * Browser history を利用する application router を作成します。
+ *
+ * @returns App で利用する browser router です。
+ */
+export function createAppRouter() {
+  return createBrowserRouter(appRoutes)
+}

@@ -31,8 +31,8 @@ import {
   duplicatePlanningEntity,
   getPlanningSnapshot,
   movePlanningEntity,
-  PlanningApiError,
   putPlanningWorkItemLink,
+  resolvePlanningErrorMessageKey,
   rolloverPlanningCycle,
   updatePlanningEntity,
 } from '../planning/api'
@@ -43,6 +43,7 @@ import {
   canUpdatePlanningEntityStatus,
   canUpdatePlanningWorkItemLink,
   createPlanningAccessSnapshot,
+  filterManageablePlanningScopeTeams,
 } from '../planning/permissions'
 import {
   PlanningScreen,
@@ -139,18 +140,22 @@ export function PlanningPage() {
     () => createPlanningAccessSnapshot(teams, projectRoles),
     [projectRoles, teams],
   )
+  const manageableCreateScopeTeams = useMemo(
+    () => filterManageablePlanningScopeTeams(user, teams, planningAccess),
+    [planningAccess, teams, user],
+  )
   const activeView = resolvePlanningView(location.pathname)
+  const selectedEntityId = searchParams.get('entityId') ?? undefined
   const canManagePlanning = canManageAnyPlanningScope(user, planningAccess)
   const canMutatePlanningContent = canMutateWorkspaceContent(user)
   const isLoading = !session || isCurrentUserLoading ||
     Boolean(user && isProjectDirectoryLoading) ||
     Boolean(planningProjectRolesKey && isProjectRolesLoading) ||
     Boolean(planningKey && isPlanningLoading)
-  const loadErrorMessage = planningError instanceof Error
-    ? planningError.message
-    : currentUserError instanceof Error
-      ? currentUserError.message
-      : undefined
+  const loadError = planningError ?? currentUserError
+  const loadErrorMessage = loadError
+    ? t(resolvePlanningErrorMessageKey(loadError))
+    : undefined
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -188,13 +193,10 @@ export function PlanningPage() {
       )
       await mutatePlanning(result, { revalidate: false })
     } catch (error) {
-      if (error instanceof PlanningApiError && error.status === 409) {
-        setMutationErrorMessage(t('planning.conflict'))
+      const messageKey = resolvePlanningErrorMessageKey(error, 'mutation')
+      setMutationErrorMessage(t(messageKey))
+      if (messageKey === 'planning.conflict') {
         await mutatePlanning()
-      } else {
-        setMutationErrorMessage(
-          error instanceof Error && error.message.trim() ? error.message : t('planning.error'),
-        )
       }
     }
   }
@@ -241,33 +243,40 @@ export function PlanningPage() {
         <PlanningScreen
           activeView={activeView}
           errorMessage={mutationErrorMessage ?? loadErrorMessage}
-          initialSelectedEntityId={searchParams.get('entityId') ?? undefined}
+          initialSelectedEntityId={selectedEntityId}
           isLoading={isLoading}
-          key={`${activeView}:${searchParams.get('entityId') ?? ''}`}
+          key={selectedEntityId ?? ''}
           labels={labels}
           snapshot={snapshot}
           canLinkEntity={(entity) => canLinkPlanningEntity(user, entity, planningAccess)}
+          canCreateInScope={(scope) => canManagePlanningScope(user, scope, planningAccess)}
           canManageEntity={(entity) => canManagePlanningScope(user, entity, planningAccess)}
           canUpdateEntityStatus={(entity) =>
             canUpdatePlanningEntityStatus(user, entity, planningAccess)}
           canUpdateWorkItemLink={(workItem) =>
             canUpdatePlanningWorkItemLink(user, workItem, planningAccess)}
-          onRetry={() => void mutatePlanning()}
-          onViewChange={(view) => navigate(createPlanningPath(view))}
+          createScopeTeams={manageableCreateScopeTeams}
+          onRetry={loadErrorMessage && !mutationErrorMessage
+            ? () => void mutatePlanning()
+            : undefined}
+          onViewChange={(view) => navigate(createPlanningPath(view, selectedEntityId))}
           onOpenWorkItem={(workItem) => navigate(
             workItem.projectId
               ? createProjectIssuesPath(workItem.projectId, workItem.teamId, workItem.id)
               : createTeamIssuesPath(workItem.teamId, workItem.id),
           )}
           onCreateEntity={canManagePlanning && snapshot && accessToken
-            ? (input) => runMutation(
-                `planning:entity:${input.id}:create`,
-                [snapshot.revision, input],
-                (context) => createPlanningEntity(accessToken, {
-                  ...input,
-                  expectedRevision: snapshot.revision,
-                }, context),
-              )
+            ? (input) => {
+                if (!canManagePlanningScope(user, input, planningAccess)) return
+                return runMutation(
+                  `planning:entity:${input.id}:create`,
+                  [snapshot.revision, input],
+                  (context) => createPlanningEntity(accessToken, {
+                    ...input,
+                    expectedRevision: snapshot.revision,
+                  }, context),
+                )
+              }
             : undefined}
           onChangeMilestoneDate={canManagePlanning && snapshot && accessToken
             ? (entity, date) => runMutation(

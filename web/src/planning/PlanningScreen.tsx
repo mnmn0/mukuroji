@@ -12,13 +12,18 @@ import type {
   PlanningWorkItemLink,
   PlanningWorkItemSummary,
 } from '@mukuroji/contracts'
-import { useMemo, useState } from 'react'
-import type { PlanningViewId } from '../routes/paths'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import type { ProjectDirectoryTeam } from '../projects/api'
+import {
+  resolvePlanningViewTabTarget,
+  type PlanningViewId,
+} from '../routes/paths'
 import {
   resolvePlanningMoveSelection,
   resolvePlanningParentCandidates,
   type PlanningMoveSelection,
 } from './hierarchy'
+import type { PlanningScope } from './permissions'
 import {
   createPlanningEntityDetailKey,
   isOpenPlanningEntity,
@@ -150,6 +155,8 @@ export type PlanningLabels = {
   entity: string
   /** Entity ID field の文言です。 */
   entityId: string
+  /** Entity type field の文言です。 */
+  entityType: string
   /** Team scope field の文言です。 */
   team: string
   /** Project scope field の文言です。 */
@@ -234,6 +241,10 @@ export type PlanningScreenProps = {
   initialSelectedEntityId?: string
   /** Current user が entity の構造を管理できるか判定する callback です。 */
   canManageEntity?: (entity: PlanningEntity) => boolean
+  /** Current user が entity を指定 scope に作成できるか判定する callback です。 */
+  canCreateInScope?: (scope: PlanningScope) => boolean
+  /** Entity 作成 form に表示する管理可能な Team / Project scope です。 */
+  createScopeTeams?: readonly ProjectDirectoryTeam[]
   /** Current user が entity に status update を追加できるか判定する callback です。 */
   canUpdateEntityStatus?: (entity: PlanningEntity) => boolean
   /** Current user が canonical Work Item の Planning link を更新できるか判定する callback です。 */
@@ -299,15 +310,19 @@ const timelineEntityTypes = new Set<PlanningEntityType>([
   'release',
   'phase',
 ])
+const planningViews: readonly PlanningViewId[] = ['timeline', 'roadmap', 'portfolio']
+
 /**
  * Timeline、roadmap、portfolio を同じ snapshot から描画します。
  */
 export function PlanningScreen({
   activeView,
+  canCreateInScope,
   canLinkEntity,
   canManageEntity,
   canUpdateEntityStatus,
   canUpdateWorkItemLink,
+  createScopeTeams = [],
   errorMessage,
   initialSelectedEntityId,
   isLoading = false,
@@ -333,8 +348,27 @@ export function PlanningScreen({
     [snapshot],
   )
   const [selectedEntityId, setSelectedEntityId] = useState(initialSelectedEntityId)
+  const pendingViewFocus = useRef<PlanningViewId | undefined>(undefined)
   const selectedEntity = activeEntities.find((entity) => entity.id === selectedEntityId) ??
     activeEntities.find((entity) => entity.type === 'goal') ?? activeEntities[0]
+
+  useEffect(() => {
+    if (pendingViewFocus.current !== activeView) return
+    document.getElementById(`planning-view-${activeView}`)?.focus()
+    pendingViewFocus.current = undefined
+  }, [activeView])
+
+  const handleViewTabKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    view: PlanningViewId,
+  ) => {
+    const nextView = resolvePlanningViewTabTarget(view, event.key)
+    if (!nextView) return
+
+    event.preventDefault()
+    pendingViewFocus.current = nextView
+    onViewChange?.(nextView)
+  }
 
   return (
     <section className="workbench-main min-h-svh bg-[var(--workbench-bg)]" data-testid="planning-screen">
@@ -347,17 +381,21 @@ export function PlanningScreen({
           className="mt-5 flex flex-wrap gap-2"
           role="tablist"
         >
-          {(['timeline', 'roadmap', 'portfolio'] as const).map((view) => (
+          {planningViews.map((view) => (
             <button
+              aria-controls="planning-view-panel"
               aria-selected={activeView === view}
               className={activeView === view
                 ? 'workbench-button-primary min-h-10 px-4'
                 : 'workbench-button-secondary min-h-10 px-4'}
               data-testid={`planning-view-${view}`}
+              id={`planning-view-${view}`}
               key={view}
+              tabIndex={activeView === view ? 0 : -1}
               role="tab"
               type="button"
               onClick={() => onViewChange?.(view)}
+              onKeyDown={(event) => handleViewTabKeyDown(event, view)}
             >
               {labels[view]}
             </button>
@@ -365,7 +403,13 @@ export function PlanningScreen({
         </div>
       </header>
 
-      <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
+      <div
+        aria-labelledby={`planning-view-${activeView}`}
+        className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5"
+        id="planning-view-panel"
+        role="tabpanel"
+        tabIndex={0}
+      >
         {errorMessage ? (
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3" role="alert">
             <p className="text-sm font-semibold text-red-800">{errorMessage || labels.error}</p>
@@ -388,7 +432,9 @@ export function PlanningScreen({
             </section>
             {snapshot ? (
               <CreateEntityPanel
+                canCreateInScope={canCreateInScope}
                 canManageEntity={canManageEntity}
+                createScopeTeams={createScopeTeams}
                 entities={[]}
                 labels={labels}
                 onCreate={onCreateEntity}
@@ -438,7 +484,9 @@ export function PlanningScreen({
               <PortfolioView labels={labels} snapshot={snapshot} />
             ) : null}
             <CreateEntityPanel
+              canCreateInScope={canCreateInScope}
               canManageEntity={canManageEntity}
+              createScopeTeams={createScopeTeams}
               entities={activeEntities}
               labels={labels}
               onCreate={onCreateEntity}
@@ -1046,12 +1094,16 @@ function EntityActions({
 }
 
 function CreateEntityPanel({
+  canCreateInScope,
   canManageEntity,
+  createScopeTeams,
   entities,
   labels,
   onCreate,
 }: {
+  canCreateInScope?: PlanningScreenProps['canCreateInScope']
   canManageEntity?: PlanningScreenProps['canManageEntity']
+  createScopeTeams: readonly ProjectDirectoryTeam[]
   entities: PlanningEntity[]
   labels: PlanningLabels
   onCreate?: PlanningScreenProps['onCreateEntity']
@@ -1060,9 +1112,34 @@ function CreateEntityPanel({
     resolveInitialEntityType(entities),
   )
   const [goalFramework, setGoalFramework] = useState<PlanningGoalFramework>('goal')
+  const canCreateInWorkspace = canCreateInScope?.({}) ?? true
+  const manageableScopeTeams = createScopeTeams.flatMap((team) =>
+    canCreateInScope?.({ teamId: team.id }) === false
+      ? []
+      : [{
+          ...team,
+          projects: team.projects.filter((project) =>
+            canCreateInScope?.({ teamId: team.id, projectId: project.id }) ?? true),
+        }],
+  )
+  const [selectedTeamId, setSelectedTeamId] = useState(
+    canCreateInWorkspace ? '' : manageableScopeTeams[0]?.id ?? '',
+  )
+  const [selectedProjectId, setSelectedProjectId] = useState('')
   const parentCandidates = resolvePlanningParentCandidates(entities, entityType, goalFramework)
     .filter((entity) => canManageEntity?.(entity) ?? true)
   const requiresParent = entityType !== 'portfolio' && entityType !== 'cycle'
+  const selectedTeam = manageableScopeTeams.find((team) => team.id === selectedTeamId)
+  const selectedProject = selectedTeam?.projects.find(
+    (project) => project.id === selectedProjectId,
+  )
+  const selectedRootScope: PlanningScope = {
+    ...(selectedTeam ? { teamId: selectedTeam.id } : {}),
+    ...(selectedProject ? { projectId: selectedProject.id } : {}),
+  }
+  const canCreateInSelectedRootScope = entityType !== 'cycle' || selectedTeam !== undefined
+    ? canCreateInScope?.(selectedRootScope) ?? true
+    : false
   return (
     <form
       className="workbench-panel grid gap-4 p-5"
@@ -1086,6 +1163,7 @@ function CreateEntityPanel({
         const requestedProjectId = String(data.get('projectId') ?? '').trim()
         const teamId = parent?.teamId ?? (requestedTeamId || undefined)
         const projectId = parent?.projectId ?? (requestedProjectId || undefined)
+        if (canCreateInScope && !canCreateInScope({ teamId, projectId })) return
         const input: Omit<CreatePlanningEntityInput, 'expectedRevision'> = {
           id: String(data.get('entityId') ?? '').trim(),
           type: entityType,
@@ -1121,7 +1199,7 @@ function CreateEntityPanel({
       <div className="grid grid-cols-4 gap-3 max-[1000px]:grid-cols-2 max-[640px]:grid-cols-1">
         <PlanningInput label={labels.entityId} name="entityId" required />
         <PlanningInput label={labels.entity} name="title" required />
-        <label className="grid gap-2 text-sm font-semibold">{labels.dependencyType}<select className="workbench-input h-10 px-3" name="entityType" value={entityType} onChange={(event) => setEntityType(event.target.value as PlanningEntityType)}>{(Object.keys(labels.entityTypes) as PlanningEntityType[]).map((type) => <option key={type} value={type}>{labels.entityTypes[type]}</option>)}</select></label>
+        <label className="grid gap-2 text-sm font-semibold">{labels.entityType}<select className="workbench-input h-10 px-3" name="entityType" value={entityType} onChange={(event) => setEntityType(event.target.value as PlanningEntityType)}>{(Object.keys(labels.entityTypes) as PlanningEntityType[]).map((type) => <option key={type} value={type}>{labels.entityTypes[type]}</option>)}</select></label>
         <PlanningInput label={labels.owner} name="ownerMemberKey" required />
         {entityType === 'goal' ? (
           <label className="grid gap-2 text-sm font-semibold">
@@ -1138,9 +1216,45 @@ function CreateEntityPanel({
             </select>
           </label>
         ) : null}
-        <label className="grid gap-2 text-sm font-semibold">{labels.moveTarget}<select className="workbench-input h-10 px-3" defaultValue={parentCandidates[0]?.id ?? ''} disabled={!requiresParent} key={`parent:${entityType}:${goalFramework}`} name="parentId" required={requiresParent}>{requiresParent ? null : <option value="">{labels.moveToRoot}</option>}{parentCandidates.map((entity) => <option key={entity.id} value={entity.id}>{entity.title}</option>)}</select></label>
-        <PlanningInput label={labels.team} name="teamId" required={entityType === 'cycle'} />
-        <PlanningInput label={labels.project} name="projectId" />
+        {requiresParent ? (
+          <label className="grid gap-2 text-sm font-semibold">{labels.moveTarget}<select className="workbench-input h-10 px-3" defaultValue={parentCandidates[0]?.id ?? ''} key={`parent:${entityType}:${goalFramework}`} name="parentId" required>{parentCandidates.map((entity) => <option key={entity.id} value={entity.id}>{entity.title}</option>)}</select></label>
+        ) : (
+          <>
+            <label className="grid gap-2 text-sm font-semibold">
+              {labels.team}
+              <select
+                className="workbench-input h-10 px-3"
+                name="teamId"
+                required={entityType === 'cycle'}
+                value={selectedTeam?.id ?? ''}
+                onChange={(event) => {
+                  setSelectedTeamId(event.target.value)
+                  setSelectedProjectId('')
+                }}
+              >
+                {entityType !== 'cycle' && canCreateInWorkspace ? <option value="">-</option> : null}
+                {manageableScopeTeams.map((team) => (
+                  <option key={team.id} value={team.id}>{team.name}</option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-2 text-sm font-semibold">
+              {labels.project}
+              <select
+                className="workbench-input h-10 px-3"
+                disabled={!selectedTeam}
+                name="projectId"
+                value={selectedProject?.id ?? ''}
+                onChange={(event) => setSelectedProjectId(event.target.value)}
+              >
+                <option value="">-</option>
+                {selectedTeam?.projects.map((project) => (
+                  <option key={project.id} value={project.id}>{project.name}</option>
+                ))}
+              </select>
+            </label>
+          </>
+        )}
         <PlanningInput label={labels.startDate} name="startDate" required type="date" />
         {entityType === 'milestone' ? null : (
           <PlanningInput label={labels.endDate} name="endDate" required type="date" />
@@ -1154,7 +1268,7 @@ function CreateEntityPanel({
           <label className="grid gap-2 text-sm font-semibold">{labels.cycleRollover}<select className="workbench-input h-10 px-3" name="carryOverPolicy"><option value="move-incomplete">{labels.carryOverMove}</option><option value="keep-incomplete">{labels.carryOverKeep}</option></select></label>
         </div>
       ) : null}
-      <button className="workbench-button-primary min-h-10 px-4 disabled:opacity-50" disabled={!onCreate || (requiresParent && parentCandidates.length === 0)} type="submit">{labels.create}</button>
+      <button className="workbench-button-primary min-h-10 px-4 disabled:opacity-50" disabled={!onCreate || (requiresParent ? parentCandidates.length === 0 : !canCreateInSelectedRootScope)} type="submit">{labels.create}</button>
     </form>
   )
 }

@@ -14,10 +14,44 @@ import {
   resolvePlanningParentCandidates,
 } from '../src/planning/hierarchy'
 import { createPlanningEntityDetailKey } from '../src/planning/selectors'
+import { resolvePlanningViewTabTarget } from '../src/routes/paths'
 
 const labels = createPlanningLabels('en')
 
 describe('PlanningScreen', () => {
+  test('uses roving tab stops and wraps Planning view arrow navigation', () => {
+    const html = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="roadmap"
+        labels={labels}
+        snapshot={planningSnapshotFixture}
+      />,
+    )
+    const tabMarkup = (view: 'timeline' | 'roadmap' | 'portfolio') => {
+      const markerIndex = html.indexOf(`data-testid="planning-view-${view}"`)
+      return html.slice(
+        html.lastIndexOf('<button', markerIndex),
+        html.indexOf('</button>', markerIndex),
+      )
+    }
+
+    expect(tabMarkup('timeline')).toContain('aria-selected="false"')
+    expect(tabMarkup('timeline')).toContain('aria-controls="planning-view-panel"')
+    expect(tabMarkup('timeline')).toContain('tabindex="-1"')
+    expect(tabMarkup('roadmap')).toContain('aria-selected="true"')
+    expect(tabMarkup('roadmap')).toContain('tabindex="0"')
+    expect(tabMarkup('portfolio')).toContain('aria-selected="false"')
+    expect(tabMarkup('portfolio')).toContain('tabindex="-1"')
+    expect(html).toContain('aria-labelledby="planning-view-roadmap"')
+    expect(html).toContain('id="planning-view-panel"')
+    expect(html).toContain('role="tabpanel"')
+    expect(resolvePlanningViewTabTarget('timeline', 'ArrowLeft')).toBe('portfolio')
+    expect(resolvePlanningViewTabTarget('portfolio', 'ArrowRight')).toBe('timeline')
+    expect(resolvePlanningViewTabTarget('roadmap', 'Home')).toBe('timeline')
+    expect(resolvePlanningViewTabTarget('roadmap', 'End')).toBe('portfolio')
+    expect(resolvePlanningViewTabTarget('roadmap', 'Enter')).toBeUndefined()
+  })
+
   test('remounts detail forms when the same Entity receives new saved defaults', () => {
     const entity = planningSnapshotFixture.entities.find((candidate) => candidate.id === 'cycle-14')!
 
@@ -439,5 +473,67 @@ describe('PlanningScreen', () => {
     expect(html).toContain(labels.emptyTitle)
     expect(html).toContain('data-testid="planning-create-entity"')
     expect(html).toContain('value="portfolio" selected=""')
+  })
+
+  test('only offers manageable root scopes when creating an entity', () => {
+    const html = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="timeline"
+        canCreateInScope={(scope) => scope.teamId === 'managed-team' &&
+          (!scope.projectId || scope.projectId === 'managed-project')}
+        createScopeTeams={[
+          {
+            id: 'managed-team',
+            name: 'Managed team',
+            projects: [
+              { id: 'managed-project', name: 'Managed project' },
+              { id: 'viewer-project', name: 'Viewer project' },
+            ],
+          },
+          {
+            id: 'viewer-team',
+            name: 'Viewer team',
+            projects: [],
+          },
+        ]}
+        labels={labels}
+        snapshot={emptyPlanningSnapshotFixture}
+        onCreateEntity={() => undefined}
+      />,
+    )
+    const createFormHtml = html.slice(
+      html.indexOf('data-testid="planning-create-entity"'),
+      html.indexOf('</form>', html.indexOf('data-testid="planning-create-entity"')),
+    )
+
+    expect(createFormHtml).toContain('Managed team')
+    expect(createFormHtml).toContain('Managed project')
+    expect(createFormHtml).not.toContain('Viewer team')
+    expect(createFormHtml).not.toContain('Viewer project')
+    expect(createFormHtml).toContain('value="managed-team" selected=""')
+  })
+
+  test('disables root entity creation when no manageable scope is available', () => {
+    const html = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="timeline"
+        canCreateInScope={() => false}
+        labels={labels}
+        snapshot={emptyPlanningSnapshotFixture}
+        onCreateEntity={() => undefined}
+      />,
+    )
+    const createFormHtml = html.slice(
+      html.indexOf('data-testid="planning-create-entity"'),
+      html.indexOf('</form>', html.indexOf('data-testid="planning-create-entity"')),
+    )
+    const createLabel = `>${labels.create}</button>`
+    const createButtonIndex = createFormHtml.indexOf(createLabel)
+
+    expect(createButtonIndex).toBeGreaterThan(-1)
+    expect(createFormHtml.slice(
+      createFormHtml.lastIndexOf('<button', createButtonIndex),
+      createButtonIndex,
+    )).toContain(' disabled=""')
   })
 })

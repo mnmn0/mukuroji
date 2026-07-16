@@ -54,6 +54,32 @@ function createCycleInput(
   })
 }
 
+function createStoredCycle(id: string) {
+  return {
+    workspaceId: 'workspace-1',
+    recordKey: `ENTITY#${id}`,
+    entryType: 'planning-entity',
+    id,
+    type: 'cycle',
+    title: id,
+    teamId: 'team-1',
+    projectId: 'project-1',
+    ownerMemberKey: 'owner@example.com',
+    status: 'active',
+    health: 'on-track',
+    risk: 'none',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-08-01', endDate: '2026-08-14' },
+    forecast: { startDate: '2026-08-01', endDate: '2026-08-14' },
+    cadence: { unit: 'week', count: 2 },
+    capacity: 10,
+    carryOverPolicy: 'move-incomplete',
+    statusUpdates: [],
+    createdAt: NOW.toISOString(),
+    updatedAt: NOW.toISOString(),
+  }
+}
+
 function getEntity(entities: readonly PlanningEntity[], id: string) {
   const entity = entities.find((candidate) => candidate.id === id)
   if (!entity) throw new Error(`Planning entity "${id}" was not returned.`)
@@ -72,6 +98,33 @@ function createWorkItem(
     projectId: 'project-1',
     statusCategory,
     dueDate: '2026-08-31',
+  }
+}
+
+function createOversizedStoredEntity(id: string) {
+  return {
+    workspaceId: 'workspace-1',
+    recordKey: `ENTITY#${id}`,
+    entryType: 'planning-entity',
+    id,
+    type: 'portfolio',
+    title: id,
+    description: 'd'.repeat(20_000),
+    ownerMemberKey: 'owner@example.com',
+    status: 'planned',
+    health: 'on-track',
+    risk: 'none',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-08-01', endDate: '2026-08-01' },
+    forecast: { startDate: '2026-08-01', endDate: '2026-08-01' },
+    statusUpdates: Array.from({ length: 32 }, (_, index) => ({
+      id: `${String(index).padStart(2, '0')}${'😀'.repeat(127)}`,
+      message: 'x'.repeat(8_000),
+      authorMemberKey: '😀'.repeat(128),
+      createdAt: NOW.toISOString(),
+    })),
+    createdAt: NOW.toISOString(),
+    updatedAt: NOW.toISOString(),
   }
 }
 
@@ -512,15 +565,30 @@ describe('planning domain', () => {
         code: 'PlanningCycleRolloverSourceClosed',
       })
 
-      const archived = await client.archive(
-        'workspace-1',
-        'cycle-source',
-        { expectedRevision: 5 },
-        workItemState,
-      )
-      expect(getEntity(archived.planning.entities, 'cycle-source').archivedAt)
-        .toBe(NOW.toISOString())
-      expect(archived.planning.workItemLinks).toHaveLength(2)
+      if (carryOverPolicy === 'move-incomplete') {
+        const archived = await client.archive(
+          'workspace-1',
+          'cycle-source',
+          { expectedRevision: 5 },
+          workItemState,
+        )
+        expect(getEntity(archived.planning.entities, 'cycle-source').archivedAt)
+          .toBe(NOW.toISOString())
+        expect(archived.planning.workItemLinks).toHaveLength(2)
+      } else {
+        await expect(client.archive(
+          'workspace-1',
+          'cycle-source',
+          { expectedRevision: 5 },
+          workItemState,
+        )).rejects.toMatchObject({
+          status: 409,
+          code: 'PlanningCycleHasIncompleteWorkItems',
+        })
+        const unchanged = await client.get('workspace-1', workItemState)
+        expect(unchanged.revision).toBe(5)
+        expect(getEntity(unchanged.entities, 'cycle-source').archivedAt).toBeUndefined()
+      }
     }
 
     const closedTargetClient = new InMemoryPlanningClient(() => NOW)
@@ -905,6 +973,40 @@ describe('planning domain', () => {
       .toBe(NOW.toISOString())
   })
 
+  test('rejects archiving a Cycle while it has an incomplete Work Item link', async () => {
+    const incompleteWorkItems: PlanningWorkItemState = {
+      workItems: [createWorkItem('work-incomplete', 'started')],
+    }
+    const client = new InMemoryPlanningClient(() => NOW)
+    await client.create(
+      'workspace-1',
+      createCycleInput('cycle-incomplete', 0, { projectId: 'project-1' }),
+      incompleteWorkItems,
+    )
+    await client.putWorkItemLink('workspace-1', {
+      teamId: 'team-1',
+      workItemId: 'work-incomplete',
+      projectId: 'project-1',
+      cycleId: 'cycle-incomplete',
+      goalIds: [],
+      expectedRevision: 1,
+    }, incompleteWorkItems)
+
+    await expect(client.archive(
+      'workspace-1',
+      'cycle-incomplete',
+      { expectedRevision: 2 },
+      incompleteWorkItems,
+    )).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningCycleHasIncompleteWorkItems',
+    })
+
+    const unchanged = await client.get('workspace-1', incompleteWorkItems)
+    expect(unchanged.revision).toBe(2)
+    expect(getEntity(unchanged.entities, 'cycle-incomplete').archivedAt).toBeUndefined()
+  })
+
   test('moves a scoped hierarchy subtree atomically', async () => {
     const client = new InMemoryPlanningClient(() => NOW)
     const originalScope = { teamId: 'team-1', projectId: 'project-1' }
@@ -1047,29 +1149,7 @@ describe('planning persistence', () => {
 
   test('condition-checks canonical Work Item revision in link transactions', async () => {
     let transaction: Record<string, unknown> | undefined
-    const storedCycle = {
-      workspaceId: 'workspace-1',
-      recordKey: 'ENTITY#cycle-1',
-      entryType: 'planning-entity',
-      id: 'cycle-1',
-      type: 'cycle',
-      title: 'Cycle 1',
-      teamId: 'team-1',
-      projectId: 'project-1',
-      ownerMemberKey: 'owner@example.com',
-      status: 'active',
-      health: 'on-track',
-      risk: 'none',
-      progressMode: 'automatic',
-      baseline: { startDate: '2026-08-01', endDate: '2026-08-14' },
-      forecast: { startDate: '2026-08-01', endDate: '2026-08-14' },
-      cadence: { unit: 'week', count: 2 },
-      capacity: 10,
-      carryOverPolicy: 'move-incomplete',
-      statusUpdates: [],
-      createdAt: NOW.toISOString(),
-      updatedAt: NOW.toISOString(),
-    }
+    const storedCycle = createStoredCycle('cycle-1')
     const documentClient = {
       async send(command: {
         /** AWS SDK command constructor. */
@@ -1118,14 +1198,7 @@ describe('planning persistence', () => {
       goalIds: [],
       expectedRevision: 1,
     }, {
-      workItems: [{
-        id: 'work-1',
-        revision: 7,
-        teamId: 'team-1',
-        title: 'Work 1',
-        projectId: 'project-1',
-        statusCategory: 'unstarted',
-      }],
+      workItems: [{ ...createWorkItem('work-1', 'unstarted'), revision: 7 }],
     })).rejects.toMatchObject({ status: 409, code: 'PlanningWorkItemChanged' })
 
     expect(transaction?.TransactItems).toEqual([
@@ -1141,6 +1214,90 @@ describe('planning persistence', () => {
         }),
       },
       expect.objectContaining({ Put: expect.any(Object) }),
+    ])
+  })
+
+  test('condition-checks completed Work Item revisions when archiving a Cycle', async () => {
+    let transaction: Record<string, unknown> | undefined
+    const storedCycle = createStoredCycle('cycle-1')
+    const storedLink = {
+      workspaceId: 'workspace-1',
+      recordKey: 'LINK#team-1#work-1',
+      entryType: 'planning-work-item-link',
+      teamId: 'team-1',
+      workItemId: 'work-1',
+      projectId: 'project-1',
+      cycleId: 'cycle-1',
+      goalIds: [],
+      createdAt: NOW.toISOString(),
+    }
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
+      }) {
+        if (command.constructor.name === 'GetCommand') {
+          return {
+            Item: {
+              workspaceId: 'workspace-1',
+              recordKey: 'META',
+              entryType: 'planning-meta',
+              schemaVersion: 1,
+              revision: 1,
+              updatedAt: NOW.toISOString(),
+            },
+          }
+        }
+        if (command.constructor.name === 'QueryCommand') return { Items: [storedCycle, storedLink] }
+        transaction = command.input
+        throw {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [
+            { Code: 'None' },
+            { Code: 'ConditionalCheckFailed' },
+            { Code: 'None' },
+          ],
+        }
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => NOW,
+      'WorkItemsTable',
+    )
+
+    await expect(client.archive(
+      'workspace-1',
+      'cycle-1',
+      { expectedRevision: 1 },
+      { workItems: [{ ...createWorkItem('work-1', 'completed'), revision: 7 }] },
+    )).rejects.toMatchObject({ status: 409, code: 'PlanningWorkItemChanged' })
+
+    expect(transaction?.TransactItems).toEqual([
+      expect.objectContaining({ Put: expect.any(Object) }),
+      {
+        ConditionCheck: expect.objectContaining({
+          TableName: 'WorkItemsTable',
+          Key: {
+            directoryTeamId: 'workspace-1#team#team-1',
+            issueId: 'work-1',
+          },
+          ExpressionAttributeValues: { ':expectedRevision': 7 },
+        }),
+      },
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          Item: expect.objectContaining({
+            recordKey: 'ENTITY#cycle-1',
+            archivedAt: NOW.toISOString(),
+          }),
+        }),
+      }),
     ])
   })
 
@@ -1209,6 +1366,107 @@ describe('planning persistence', () => {
       code: 'PlanningSnapshotSizeLimitExceeded',
     })
     expect(transactionCalls).toBe(0)
+  })
+
+  test('rejects an oversized changed row before committing it', async () => {
+    let transactionCalls = 0
+    const storedEntity = createOversizedStoredEntity('portfolio-large')
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+      }) {
+        if (command.constructor.name === 'GetCommand') {
+          return {
+            Item: {
+              workspaceId: 'workspace-1',
+              recordKey: 'META',
+              entryType: 'planning-meta',
+              schemaVersion: 1,
+              revision: 1,
+              updatedAt: NOW.toISOString(),
+            },
+          }
+        }
+        if (command.constructor.name === 'QueryCommand') return { Items: [storedEntity] }
+        transactionCalls += 1
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => NOW,
+    )
+
+    await expect(client.update('workspace-1', 'portfolio-large', {
+      expectedRevision: 1,
+      patch: { title: 'Updated portfolio' },
+    }, EMPTY_WORK_ITEMS)).rejects.toMatchObject({
+      status: 413,
+      code: 'PlanningRowSizeLimitExceeded',
+    })
+    expect(transactionCalls).toBe(0)
+  })
+
+  test('does not revalidate an oversized unchanged row during another mutation', async () => {
+    let transaction: Record<string, unknown> | undefined
+    const storedLargeEntity = createOversizedStoredEntity('portfolio-large')
+    const storedSmallEntity = {
+      ...createOversizedStoredEntity('portfolio-small'),
+      description: undefined,
+      statusUpdates: [],
+    }
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
+      }) {
+        if (command.constructor.name === 'GetCommand') {
+          return {
+            Item: {
+              workspaceId: 'workspace-1',
+              recordKey: 'META',
+              entryType: 'planning-meta',
+              schemaVersion: 1,
+              revision: 1,
+              updatedAt: NOW.toISOString(),
+            },
+          }
+        }
+        if (command.constructor.name === 'QueryCommand') {
+          return { Items: [storedLargeEntity, storedSmallEntity] }
+        }
+        transaction = command.input
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => NOW,
+    )
+
+    const response = await client.update('workspace-1', 'portfolio-small', {
+      expectedRevision: 1,
+      patch: { title: 'Updated small portfolio' },
+    }, EMPTY_WORK_ITEMS)
+
+    expect(response.planning.revision).toBe(2)
+    const transactionItems = transaction?.TransactItems as Array<{
+      /** DynamoDB Put operation. */
+      Put?: { Item: Record<string, unknown> }
+    }>
+    expect(transactionItems.map((item) => item.Put?.Item.recordKey)).toEqual([
+      'META',
+      'ENTITY#portfolio-small',
+    ])
   })
 
   test('rejects a mutation that would make a Workspace unreadable', async () => {

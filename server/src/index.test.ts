@@ -5168,7 +5168,8 @@ test('rejects archiving scopes referenced only by a stored Planning Work Item li
       teamId: 'core-team',
       title: 'Linked Work Item',
       projectId: 'refero',
-      statusCategory: 'started' as const,
+      statusCategory: 'completed' as const,
+      dueDate: '2026-08-31',
     }],
   }
   await planningClient.create(
@@ -11483,6 +11484,7 @@ test('requires old Planning scope permission when re-linking a moved Work Item',
       title: 'Moved Work Item',
       projectId: 'refero',
       statusCategory: 'started' as const,
+      dueDate: '2026-08-31',
     }],
   }
   await planningClient.create(
@@ -11547,6 +11549,7 @@ test('lets Workspace owners clean up inaccessible stale Work Item links', async 
       title: 'Deleted later',
       projectId: 'refero',
       statusCategory: 'unstarted' as const,
+      dueDate: '2026-08-31',
     }],
   }
   await planningClient.create(

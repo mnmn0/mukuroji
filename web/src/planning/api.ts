@@ -50,6 +50,26 @@ const planningApiBaseUrl = trimTrailingSlash(
 const defaultPlanningApiErrorMessage = 'Unable to complete the planning request.'
 
 /**
+ * Planning 画面に表示する locale 済み error message の翻訳 key を解決します。
+ *
+ * @param error - Planning の load または mutation で発生した error です。
+ * @param operation - Error が発生した操作です。
+ * @returns Revision conflict は競合用、それ以外は汎用 error の翻訳 key です。
+ */
+export function resolvePlanningErrorMessageKey(
+  error: unknown,
+  operation: 'load' | 'mutation' = 'load',
+) {
+  if (typeof error !== 'object' || error === null) {
+    return operation === 'mutation' ? 'planning.mutationError' as const : 'planning.error' as const
+  }
+
+  const code = 'code' in error && typeof error.code === 'string' ? error.code : undefined
+  if (code === 'PlanningRevisionConflict') return 'planning.conflict' as const
+  return operation === 'mutation' ? 'planning.mutationError' as const : 'planning.error' as const
+}
+
+/**
  * 現在 user が参照できる計画 snapshot を取得します。
  *
  * @param accessToken - Authorization header に使う access token です。
@@ -388,7 +408,11 @@ async function requestJson<T>(path: string, accessToken: string, init: RequestIn
 }
 
 function isErrorResponse(value: unknown): value is { code?: string; message?: string } {
-  return typeof value === 'object' && value !== null
+  if (typeof value !== 'object' || value === null) return false
+
+  const hasValidCode = !('code' in value) || typeof value.code === 'string'
+  const hasValidMessage = !('message' in value) || typeof value.message === 'string'
+  return hasValidCode && hasValidMessage
 }
 
 async function readJson<T>(response: Response): Promise<T> {
