@@ -5171,13 +5171,25 @@ test('rejects archiving scopes referenced only by a stored Planning Work Item li
       statusCategory: 'started' as const,
     }],
   }
+  await planningClient.create(
+    'user#demo@example.com',
+    createCyclePlanningInput('cycle-link-scope', 0),
+    workItemState,
+  )
   await planningClient.putWorkItemLink('user#demo@example.com', {
     teamId: 'core-team',
     workItemId: 'linked-work-item',
     projectId: 'refero',
+    cycleId: 'cycle-link-scope',
     goalIds: [],
-    expectedRevision: 0,
+    expectedRevision: 1,
   }, workItemState)
+  await planningClient.archive(
+    'user#demo@example.com',
+    'cycle-link-scope',
+    { expectedRevision: 2 },
+    workItemState,
+  )
   const calls = configureFakeProjectClients(true)
   configureApiClientsForTest({ planning: planningClient })
 

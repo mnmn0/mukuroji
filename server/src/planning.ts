@@ -1217,6 +1217,12 @@ function validateWorkItemLink(
     ...(link.milestoneId ? [[link.milestoneId, 'milestone'] as const] : []),
     ...link.goalIds.map((goalId) => [goalId, 'goal'] as const),
   ]
+  if (references.length === 0) {
+    throw invalid(
+      'PlanningWorkItemLinkTargetRequired',
+      'Planning Work Item link requires a Cycle, Milestone, or Goal.',
+    )
+  }
   for (const [entityId, type] of references) {
     const entity = requireActive ? requireActiveEntity(state, entityId) : findEntity(state, entityId)
     if (!entity) {

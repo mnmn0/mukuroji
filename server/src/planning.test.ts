@@ -213,6 +213,27 @@ describe('planning domain', () => {
     })
   })
 
+  test('rejects a Work Item link without a Cycle, Milestone, or Goal', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    const workItemState: PlanningWorkItemState = {
+      workItems: [createWorkItem('work-unlinked', 'unstarted')],
+    }
+
+    await expect(client.putWorkItemLink('workspace-1', {
+      teamId: 'team-1',
+      workItemId: 'work-unlinked',
+      goalIds: [],
+      expectedRevision: 0,
+    }, workItemState)).rejects.toMatchObject({
+      status: 400,
+      code: 'PlanningWorkItemLinkTargetRequired',
+    })
+
+    const snapshot = await client.get('workspace-1', workItemState)
+    expect(snapshot.revision).toBe(0)
+    expect(snapshot.workItemLinks).toEqual([])
+  })
+
   test('rolls up unique Work Items and the worst descendant health', async () => {
     const workItemState: PlanningWorkItemState = {
       workItems: [

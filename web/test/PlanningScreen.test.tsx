@@ -330,6 +330,47 @@ describe('PlanningScreen', () => {
     expect(linkEditorHtml).not.toContain('Completed milestone')
   })
 
+  test('allows unlinking archived targets without offering them as new link choices', () => {
+    const archivedEntityIds = new Set([
+      'cycle-14',
+      'milestone-beta',
+      'goal-activation',
+    ])
+    const snapshot = {
+      ...planningSnapshotFixture,
+      entities: planningSnapshotFixture.entities.map((entity) =>
+        archivedEntityIds.has(entity.id)
+          ? { ...entity, archivedAt: '2026-07-16T05:00:00.000Z' }
+          : entity,
+      ),
+    }
+    const html = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="roadmap"
+        labels={labels}
+        snapshot={snapshot}
+        onDeleteWorkItemLink={() => undefined}
+        onSaveWorkItemLink={() => undefined}
+      />,
+    )
+    const linkEditorHtml = html.slice(
+      html.indexOf('data-testid="planning-work-item-link"'),
+      html.indexOf('</form>', html.indexOf('data-testid="planning-work-item-link"')),
+    )
+    const unlinkLabel = `>${labels.unlinkWorkItem}</button>`
+    const unlinkLabelIndex = linkEditorHtml.indexOf(unlinkLabel)
+
+    expect(linkEditorHtml).toContain('Cycle 15')
+    expect(linkEditorHtml).not.toContain('Cycle 14')
+    expect(linkEditorHtml).not.toContain('Beta ready')
+    expect(linkEditorHtml).not.toContain('Improve first-week activation')
+    expect(unlinkLabelIndex).toBeGreaterThan(-1)
+    expect(linkEditorHtml.slice(
+      linkEditorHtml.lastIndexOf('<button', unlinkLabelIndex),
+      unlinkLabelIndex,
+    )).not.toContain(' disabled=""')
+  })
+
   test('offers Objective parents only to Key Results', () => {
     const objective = planningSnapshotFixture.entities.find(
       (entity) => entity.id === 'goal-activation',

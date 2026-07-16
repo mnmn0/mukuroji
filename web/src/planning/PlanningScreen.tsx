@@ -896,7 +896,7 @@ function RoadmapView({
         <WorkItemLinkEditor
           canLinkEntity={canLinkEntity}
           canUpdateWorkItemLink={canUpdateWorkItemLink}
-          entities={activeEntities}
+          entities={snapshot.entities}
           labels={labels}
           snapshot={snapshot}
           onDelete={onDeleteWorkItemLink}
