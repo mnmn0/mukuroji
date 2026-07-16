@@ -30,6 +30,7 @@
 - `WorkItemsTableName`（既存 `TeamIssuesTable` を昇格した canonical store）
 - `TeamIssuesTableName`（`WorkItemsTableName` と同じ table を指す互換 output）
 - `WorkItemConfigurationTableName`（workflow、custom field、relation graph の scope store）
+- `PlanningTableName`（cycle、goal、milestone、roadmap、portfolio の計画 store）
 - `ProjectDirectoryTableName`, `TeamIssueEventsTableName`
 - `FileProofingTableName`, `FileBucketName`, `FileMalwareProtectionPlanId`
 - `NotificationsTableName`, `CollaborationProjectionDlqUrl`, `NotificationScheduleDlqUrl`
@@ -237,6 +238,12 @@ CDK は configuration row を強制 seed しません。row が無い Workspace 
 5. Configuration revision CAS と relation graph revision CAS が stale mutation を拒否すること。
 
 高リスクな definition 変更の前には table 名、configuration revision、item count を記録し、必要に応じて on-demand backup を取得します。誤削除・破損時は下記の PITR recovery に従い、復元結果を確認する前に元 table や relation row を削除しません。
+
+## Planning data
+
+`PlanningTable` は `workspaceId` / `recordKey` を primary key とし、cycle、goal、milestone、roadmap、portfolio とその関連情報を Workspace ごとに保存します。API Lambda には `PLANNING_TABLE_NAME` を設定し、この table への read/write と `TransactWriteItems` を stack resource に限定して許可します。
+
+Table は `PAY_PER_REQUEST`、`Retain`、PITR enabled で作成します。deploy 前後に `PlanningTableName` output と Lambda の `PLANNING_TABLE_NAME` が同じ table を指すこと、table replacement がないこと、API role 以外へ不要な planning data 権限が付いていないことを確認してください。
 
 ## Rollback
 

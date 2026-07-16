@@ -5,6 +5,8 @@ import type { DynamoDBDocumentClient, TransactWriteCommandInput } from '@aws-sdk
 import type {
   ApprovalRequest,
   CustomFieldValue,
+  PlanningMutationResponse,
+  PlanningSnapshot,
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
@@ -45,6 +47,7 @@ import {
   WorkItemConfigurationError,
   type WorkItemConfigurationClient,
 } from './work-item-configuration'
+import { InMemoryPlanningClient } from './planning'
 
 afterEach(() => {
   resetApiClientsForTest()
@@ -3402,6 +3405,26 @@ test('returns owner and admin Workspace capabilities from the API source of trut
   })
 })
 
+test('serializes Workspace role updates with the Planning revision', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  const response = await app.request('/api/workspace/members/sato%40example.com', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ role: 'guest', expectedVersion: 1 }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(calls.workspaceMemberUpdates).toEqual([{
+    expectedPlanningRevision: 0,
+    memberKey: 'sato@example.com',
+    role: 'guest',
+  }])
+})
+
 test('rejects deactivating a Workspace member who still manages an active project', async () => {
   const calls = configureFakeProjectClients(true, {
     projectAccesses: [{ projectId: 'refero', role: 'manager' }],
@@ -3423,6 +3446,30 @@ test('rejects deactivating a Workspace member who still manages an active projec
   expect(calls.accessChecks).toEqual([
     { directoryId: 'user#demo@example.com', projectId: '*' },
   ])
+})
+
+test('rejects deactivating a Workspace member who owns an active Planning entity', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await planningClient.create('user#demo@example.com', {
+    ...createCyclePlanningInput('cycle-owned-by-member', 0),
+    ownerMemberKey: 'SATO@EXAMPLE.COM',
+  }, { workItems: [] })
+  configureFakeProjectClients(true, { role: 'member' })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await app.request('/api/workspace/members/sato%40example.com', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ expectedVersion: 1, status: 'deactivated' }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    message: 'Transfer or archive all owned Planning entities before deactivating this member.',
+  })
 })
 
 test('resends credentials when inviting an existing unconfirmed Workspace identity', async () => {
@@ -4871,8 +4918,31 @@ test('archives a team in the authenticated user scoped directory', async () => {
     archivedAt: '2026-06-06T00:00:00.000Z',
   })
   expect(calls.teamArchives).toEqual([
-    { directoryId: 'user#demo@example.com', teamId: 'core-team' },
+    { directoryId: 'user#demo@example.com', expectedPlanningRevision: 0, teamId: 'core-team' },
   ])
+})
+
+test('rejects archiving a Team referenced by an active Planning entity', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await planningClient.create(
+    'user#demo@example.com',
+    createCyclePlanningInput('cycle-team-scope', 0),
+    { workItems: [] },
+  )
+  const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await app.request('/api/teams/core-team/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    message:
+      'Move or archive active Planning entities and remove Work Item links before archiving this Team.',
+  })
+  expect(calls.teamArchives).toEqual([])
 })
 
 test('denies project-assigned Work Item creation when the project role is viewer', async () => {
@@ -5019,8 +5089,124 @@ test('archives a project under an authenticated team directory', async () => {
     archivedAt: '2026-06-06T00:00:00.000Z',
   })
   expect(calls.projectArchives).toEqual([
-    { directoryId: 'user#demo@example.com', teamId: 'core-team', projectId: 'refero' },
+    {
+      directoryId: 'user#demo@example.com',
+      expectedPlanningRevision: 0,
+      teamId: 'core-team',
+      projectId: 'refero',
+    },
   ])
+})
+
+test('does not block archive for a same-named Project scoped to another Team', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await planningClient.create(
+    'user#demo@example.com',
+    {
+      ...createCyclePlanningInput('cycle-other-team-project', 0),
+      teamId: 'other-team',
+      projectId: 'refero',
+    },
+    { workItems: [] },
+  )
+  const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({ planning: planningClient })
+
+  const projectResponse = await app.request('/api/teams/core-team/projects/refero/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const teamResponse = await app.request('/api/teams/core-team/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(projectResponse.status).toBe(200)
+  expect(teamResponse.status).toBe(200)
+  expect(calls.projectArchives).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      expectedPlanningRevision: 1,
+      teamId: 'core-team',
+      projectId: 'refero',
+    },
+  ])
+  expect(calls.teamArchives).toEqual([
+    { directoryId: 'user#demo@example.com', expectedPlanningRevision: 1, teamId: 'core-team' },
+  ])
+})
+
+test('rejects archiving a Project referenced by an active Planning entity', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await planningClient.create(
+    'user#demo@example.com',
+    createCyclePlanningInput('cycle-project-scope', 0),
+    { workItems: [] },
+  )
+  const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await app.request('/api/teams/core-team/projects/refero/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    message:
+      'Move or archive active Planning entities and remove Work Item links before archiving this Project.',
+  })
+  expect(calls.projectArchives).toEqual([])
+})
+
+test('rejects archiving scopes referenced only by a stored Planning Work Item link', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  const workItemState = {
+    workItems: [{
+      id: 'linked-work-item',
+      revision: 1,
+      teamId: 'core-team',
+      title: 'Linked Work Item',
+      projectId: 'refero',
+      statusCategory: 'completed' as const,
+      dueDate: '2026-08-31',
+    }],
+  }
+  await planningClient.create(
+    'user#demo@example.com',
+    createCyclePlanningInput('cycle-link-scope', 0),
+    workItemState,
+  )
+  await planningClient.putWorkItemLink('user#demo@example.com', {
+    teamId: 'core-team',
+    workItemId: 'linked-work-item',
+    projectId: 'refero',
+    cycleId: 'cycle-link-scope',
+    goalIds: [],
+    expectedRevision: 1,
+  }, workItemState)
+  await planningClient.archive(
+    'user#demo@example.com',
+    'cycle-link-scope',
+    { expectedRevision: 2 },
+    workItemState,
+  )
+  const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({ planning: planningClient })
+
+  const teamResponse = await app.request('/api/teams/core-team/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const projectResponse = await app.request('/api/teams/core-team/projects/refero/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(teamResponse.status).toBe(409)
+  expect(projectResponse.status).toBe(409)
+  expect(calls.teamArchives).toEqual([])
+  expect(calls.projectArchives).toEqual([])
 })
 
 test('DynamoDB directory client validates and ignores workspace bootstrap rows for reads and writes', async () => {
@@ -7976,36 +8162,177 @@ test('DynamoDB directory client archives teams and projects with conditional upd
   } as unknown as DynamoDBDocumentClient
   const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
 
-  await expect(client.archiveTeam('user#demo@example.com', 'core-team')).resolves.toEqual({
+  await expect(client.archiveTeam('user#demo@example.com', 'core-team', undefined, 0)).resolves.toEqual({
     teamId: 'core-team',
     archivedAt: expect.any(String),
   })
   await expect(
-    client.archiveProject('user#demo@example.com', 'core-team', 'refero'),
+    client.archiveProject('user#demo@example.com', 'core-team', 'refero', undefined, 1),
   ).resolves.toEqual({
     teamId: 'core-team',
     projectId: 'refero',
     archivedAt: expect.any(String),
   })
   expect(sentInputs[1]).toMatchObject({
-    TableName: 'DirectoryTable',
-    Key: {
-      directoryId: 'user#demo@example.com',
-      entryKey: '000010#000000#TEAM#core-team',
-    },
-    UpdateExpression: 'SET archivedAt = :archivedAt',
-    ConditionExpression:
-      'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+    TransactItems: [{
+      Update: {
+        TableName: 'DirectoryTable',
+        Key: {
+          directoryId: 'user#demo@example.com',
+          entryKey: '000010#000000#TEAM#core-team',
+        },
+        UpdateExpression: 'SET archivedAt = :archivedAt',
+        ConditionExpression:
+          'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+      },
+    }, {
+      Put: {
+        TableName: 'mukuroji-planning-local',
+        Item: {
+          workspaceId: 'user#demo@example.com',
+          recordKey: 'META',
+          revision: 1,
+        },
+        ConditionExpression:
+          'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+      },
+    }],
   })
   expect(sentInputs[3]).toMatchObject({
-    TableName: 'DirectoryTable',
-    Key: {
-      directoryId: 'user#demo@example.com',
-      entryKey: '000010#000010#PROJECT#refero',
+    TransactItems: [{
+      Update: {
+        TableName: 'DirectoryTable',
+        Key: {
+          directoryId: 'user#demo@example.com',
+          entryKey: '000010#000010#PROJECT#refero',
+        },
+        UpdateExpression: 'SET archivedAt = :archivedAt',
+        ConditionExpression:
+          'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+      },
+    }, {}],
+  })
+})
+
+test('serializes directory archive with the Planning graph revision', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [{
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000000#TEAM#core-team',
+            entryType: 'team',
+            teamId: 'core-team',
+            teamSortOrder: 10,
+            nameJa: 'コアチーム',
+            nameEn: 'Core Team',
+            expanded: true,
+          }],
+        }
+      }
+      return {}
     },
-    UpdateExpression: 'SET archivedAt = :archivedAt',
-    ConditionExpression:
-      'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+    'PlanningTable',
+  )
+
+  await client.archiveTeam('user#demo@example.com', 'core-team', undefined, 4)
+
+  expect(sentInputs[1]).toMatchObject({
+    TransactItems: [
+      { Update: { TableName: 'DirectoryTable' } },
+      {
+        Put: {
+          TableName: 'PlanningTable',
+          Item: {
+            workspaceId: 'user#demo@example.com',
+            recordKey: 'META',
+            entryType: 'planning-meta',
+            schemaVersion: 1,
+            revision: 5,
+          },
+          ConditionExpression: '#revision = :expectedPlanningRevision',
+          ExpressionAttributeValues: { ':expectedPlanningRevision': 4 },
+        },
+      },
+    ],
+  })
+})
+
+test('classifies a Planning revision race during directory archive', async () => {
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000010#PROJECT#refero',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'refero',
+              projectSortOrder: 10,
+              nameJa: 'Refero',
+              nameEn: 'Refero',
+              tone: 'blue',
+            },
+          ],
+        }
+      }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const error = new Error('canceled')
+        error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: [
+            { Code: 'None' },
+            { Code: 'ConditionalCheckFailed' },
+          ],
+        })
+        throw error
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+    'PlanningTable',
+  )
+
+  await expect(client.archiveProject(
+    'user#demo@example.com',
+    'core-team',
+    'refero',
+    undefined,
+    4,
+  )).rejects.toMatchObject({
+    status: 409,
+    code: 'PlanningRevisionConflict',
   })
 })
 
@@ -9510,7 +9837,12 @@ function configureFakeProjectClients(
       projectId: string
       role: string
     }>,
-    projectArchives: [] as Array<{ directoryId: string; teamId: string; projectId: string }>,
+    projectArchives: [] as Array<{
+      directoryId: string
+      expectedPlanningRevision: number
+      teamId: string
+      projectId: string
+    }>,
     projectCreates: [] as Array<{
       creatorUserKey: string
       directoryId: string
@@ -9523,7 +9855,11 @@ function configureFakeProjectClients(
       isSystemAdmin: boolean
       userKey: string
     }>,
-    teamArchives: [] as Array<{ directoryId: string; teamId: string }>,
+    teamArchives: [] as Array<{
+      directoryId: string
+      expectedPlanningRevision: number
+      teamId: string
+    }>,
     teamCreates: [] as Array<{ directoryId: string; name: string }>,
     issueComments: [] as Array<{ actorUserId: string; directoryId: string; issueId: string; teamId: string }>,
     issueCreates: [] as Array<{
@@ -9565,6 +9901,12 @@ function configureFakeProjectClients(
     }>,
     userProfiles: [] as string[],
     workspaceInvitationResends: [] as string[],
+    workspaceMemberUpdates: [] as Array<{
+      expectedPlanningRevision: number
+      memberKey: string
+      role?: WorkspaceRole
+      status?: WorkspaceMemberStatus
+    }>,
     workspaceReconciliations: [] as string[],
   }
   const workspaceInvitationInputs = new Map<string, {
@@ -9898,16 +10240,22 @@ function configureFakeProjectClients(
           },
         }
       },
-      async archiveTeam(directoryId, teamId) {
-        calls.teamArchives.push({ directoryId, teamId })
+      async archiveTeam(directoryId, teamId, _auditContext, expectedPlanningRevision) {
+        calls.teamArchives.push({ directoryId, expectedPlanningRevision, teamId })
 
         return {
           teamId,
           archivedAt: '2026-06-06T00:00:00.000Z',
         }
       },
-      async archiveProject(directoryId, teamId, projectId) {
-        calls.projectArchives.push({ directoryId, teamId, projectId })
+      async archiveProject(
+        directoryId,
+        teamId,
+        projectId,
+        _auditContext,
+        expectedPlanningRevision,
+      ) {
+        calls.projectArchives.push({ directoryId, expectedPlanningRevision, teamId, projectId })
 
         return {
           teamId,
@@ -10094,6 +10442,12 @@ function configureFakeProjectClients(
         return createWorkspaceMember(input.memberKey)
       },
       async updateMember(_workspaceId, _actorMemberKey, memberKey, input) {
+        calls.workspaceMemberUpdates.push({
+          expectedPlanningRevision: input.expectedPlanningRevision,
+          memberKey,
+          ...(input.role === undefined ? {} : { role: input.role }),
+          ...(input.status === undefined ? {} : { status: input.status }),
+        })
         return {
           ...createWorkspaceMember(memberKey),
           role: input.role ?? createWorkspaceMember(memberKey).role,
@@ -10574,3 +10928,782 @@ function createAccessToken(groups: string[] = [], claims: Record<string, unknown
 
   return `header.${payload}.signature`
 }
+
+function planningApiRequest(path: string, method = 'GET', body?: unknown) {
+  return app.request(path, {
+    method,
+    headers: {
+      Authorization: 'Bearer test-token',
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  })
+}
+
+function createCyclePlanningInput(id: string, expectedRevision: number) {
+  return {
+    id,
+    type: 'cycle' as const,
+    title: `Cycle ${id}`,
+    teamId: 'core-team',
+    projectId: 'refero',
+    ownerMemberKey: 'demo@example.com',
+    status: 'active' as const,
+    health: 'on-track' as const,
+    risk: 'low' as const,
+    progressMode: 'automatic' as const,
+    baseline: { startDate: '2026-07-01', endDate: '2026-07-14' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-07-14' },
+    cadence: { unit: 'week' as const, count: 2 },
+    capacity: 10,
+    carryOverPolicy: 'move-incomplete' as const,
+    expectedRevision,
+  }
+}
+
+async function seedPlanningWorkspaceParentAndScopedChild(
+  planningClient: InMemoryPlanningClient,
+) {
+  await planningClient.create('user#demo@example.com', {
+    ...createCyclePlanningInput('portfolio-scope-parent', 0),
+    type: 'portfolio',
+    title: 'Workspace portfolio',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planningClient.create('user#demo@example.com', {
+    ...createCyclePlanningInput('roadmap-scoped-child', 1),
+    type: 'roadmap',
+    title: 'Scoped roadmap',
+    parentId: 'portfolio-scope-parent',
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+}
+
+test('returns an authenticated empty Planning graph with accessible Work Item projections', async () => {
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: new InMemoryPlanningClient() })
+
+  const response = await planningApiRequest('/api/planning')
+
+  expect(response.status).toBe(200)
+  const planning = await response.json() as PlanningSnapshot
+  expect(planning).toMatchObject({
+    schemaVersion: 1,
+    revision: 0,
+    entities: [],
+    dependencies: [],
+    workItemLinks: [],
+  })
+  expect(planning.workItems).toEqual([
+    expect.objectContaining({
+      id: 'onboarding-friction',
+      teamId: 'core-team',
+      projectId: 'refero',
+      statusCategory: 'started',
+    }),
+  ])
+})
+
+test('lets managers build a scoped hierarchy and dependency graph', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  configureApiClientsForTest({ planning: new InMemoryPlanningClient() })
+
+  const portfolio = await planningApiRequest('/api/planning/entities', 'POST', {
+    id: 'portfolio-1',
+    type: 'portfolio',
+    title: 'Company portfolio',
+    ownerMemberKey: 'demo@example.com',
+    status: 'active',
+    health: 'on-track',
+    risk: 'low',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    expectedRevision: 0,
+  })
+  expect(portfolio.status).toBe(201)
+
+  for (const [index, id] of ['roadmap-a', 'roadmap-b'].entries()) {
+    const response = await planningApiRequest('/api/planning/entities', 'POST', {
+      id,
+      type: 'roadmap',
+      title: id,
+      parentId: 'portfolio-1',
+      teamId: 'core-team',
+      projectId: 'refero',
+      ownerMemberKey: 'demo@example.com',
+      status: 'planned',
+      health: 'on-track',
+      risk: 'low',
+      progressMode: 'automatic',
+      baseline: { startDate: '2026-07-01', endDate: '2026-07-31' },
+      forecast: { startDate: '2026-07-01', endDate: '2026-07-31' },
+      expectedRevision: index + 1,
+    })
+    expect(response.status).toBe(201)
+  }
+
+  const dependency = await planningApiRequest('/api/planning/dependencies', 'POST', {
+    id: 'dependency-1',
+    predecessorId: 'roadmap-a',
+    successorId: 'roadmap-b',
+    type: 'finish-to-start',
+    lagDays: 2,
+    expectedRevision: 3,
+  })
+
+  expect(dependency.status).toBe(201)
+  const planning = await dependency.json() as PlanningSnapshot
+  expect(planning.revision).toBe(4)
+  expect(planning.dependencies).toEqual([
+    expect.objectContaining({
+      id: 'dependency-1',
+      predecessorId: 'roadmap-a',
+      successorId: 'roadmap-b',
+    }),
+  ])
+})
+
+test('requires parent scope permission when creating a Planning child', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const parent = await planningApiRequest('/api/planning/entities', 'POST', {
+    id: 'portfolio-protected',
+    type: 'portfolio',
+    title: 'Protected Workspace portfolio',
+    ownerMemberKey: 'demo@example.com',
+    status: 'active',
+    health: 'on-track',
+    risk: 'low',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    expectedRevision: 0,
+  })
+  expect(parent.status).toBe(201)
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const child = await planningApiRequest('/api/planning/entities', 'POST', {
+    id: 'roadmap-denied',
+    type: 'roadmap',
+    title: 'Project roadmap',
+    parentId: 'portfolio-protected',
+    teamId: 'core-team',
+    projectId: 'refero',
+    ownerMemberKey: 'demo@example.com',
+    status: 'planned',
+    health: 'on-track',
+    risk: 'low',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-07-31' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-07-31' },
+    expectedRevision: 1,
+  })
+
+  expect(child.status).toBe(403)
+  const snapshot = await planningClient.get('user#demo@example.com', { workItems: [] })
+  expect(snapshot.revision).toBe(1)
+  expect(snapshot.entities.map((entity) => entity.id)).toEqual(['portfolio-protected'])
+})
+
+test('requires inherited parent permission when duplicate omits parentId', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await seedPlanningWorkspaceParentAndScopedChild(planningClient)
+  let duplicateCalls = 0
+  const duplicate = planningClient.duplicate.bind(planningClient)
+  planningClient.duplicate = async (...input) => {
+    duplicateCalls += 1
+    return duplicate(...input)
+  }
+  configureFakeProjectClients(true, {
+    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
+    workspaceRole: 'member',
+  })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities/roadmap-scoped-child/duplicate',
+    'POST',
+    { targetId: 'roadmap-denied-copy', expectedRevision: 2 },
+  )
+
+  expect(response.status).toBe(403)
+  expect(duplicateCalls).toBe(0)
+})
+
+test('requires manager permission for every active descendant before subtree move', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await seedPlanningWorkspaceParentAndScopedChild(planningClient)
+  let moveCalls = 0
+  const move = planningClient.move.bind(planningClient)
+  planningClient.move = async (...input) => {
+    moveCalls += 1
+    return move(...input)
+  }
+  configureFakeProjectClients(true, {
+    projectAccesses: [],
+    workspaceRole: 'owner',
+  })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities/portfolio-scope-parent/move',
+    'POST',
+    { expectedRevision: 2 },
+  )
+
+  expect(response.status).toBe(403)
+  expect(moveCalls).toBe(0)
+})
+
+test('denies guest Planning writes before invoking a mutation client', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'guest' })
+  const planningClient = new InMemoryPlanningClient()
+  const create = planningClient.create.bind(planningClient)
+  let createCalls = 0
+  planningClient.create = async (...input) => {
+    createCalls += 1
+    return create(...input)
+  }
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('guest-cycle', 0),
+  )
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toEqual({
+    message: 'Guest members have read-only Workspace access.',
+  })
+  expect(createCalls).toBe(0)
+})
+
+test('enforces Planning revisions and structural permissions before mutations', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: planningClient })
+  const created = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('cycle-structural', 0),
+  )
+  expect(created.status).toBe(201)
+
+  const malformedPatch = await planningApiRequest(
+    '/api/planning/entities/cycle-structural',
+    'PATCH',
+    { expectedRevision: 1 },
+  )
+  expect(malformedPatch.status).toBe(400)
+  expect(await malformedPatch.json()).toMatchObject({ code: 'PlanningPatchInvalid' })
+
+  const structuralCalls = { archive: 0, duplicate: 0, move: 0 }
+  const archive = planningClient.archive.bind(planningClient)
+  const duplicate = planningClient.duplicate.bind(planningClient)
+  const move = planningClient.move.bind(planningClient)
+  planningClient.archive = async (...input) => {
+    structuralCalls.archive += 1
+    return archive(...input)
+  }
+  planningClient.duplicate = async (...input) => {
+    structuralCalls.duplicate += 1
+    return duplicate(...input)
+  }
+  planningClient.move = async (...input) => {
+    structuralCalls.move += 1
+    return move(...input)
+  }
+
+  const futureRevision = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/archive',
+    'POST',
+    { expectedRevision: 2 },
+  )
+  expect(futureRevision.status).toBe(409)
+  expect(await futureRevision.json()).toMatchObject({ code: 'PlanningRevisionConflict' })
+  expect(structuralCalls.archive).toBe(0)
+
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  const memberArchive = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/archive',
+    'POST',
+    { expectedRevision: 1 },
+  )
+  expect(memberArchive.status).toBe(403)
+
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  const viewerDuplicate = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/duplicate',
+    'POST',
+    { targetId: 'cycle-viewer-copy', expectedRevision: 1 },
+  )
+  expect(viewerDuplicate.status).toBe(403)
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const rootMove = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/move',
+    'POST',
+    { expectedRevision: 1 },
+  )
+  expect(rootMove.status).toBe(403)
+  expect(structuralCalls).toEqual({ archive: 0, duplicate: 0, move: 0 })
+
+  const managerDuplicate = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/duplicate',
+    'POST',
+    { targetId: 'cycle-manager-copy', expectedRevision: 1 },
+  )
+  expect(managerDuplicate.status).toBe(201)
+  const duplicatedPlanning = await managerDuplicate.json() as PlanningSnapshot
+  expect(duplicatedPlanning.revision).toBe(2)
+
+  const managerMove = await planningApiRequest(
+    '/api/planning/entities/cycle-manager-copy/move',
+    'POST',
+    { teamId: 'core-team', projectId: 'refero', expectedRevision: 2 },
+  )
+  expect(managerMove.status).toBe(200)
+  const movedPlanning = await managerMove.json() as PlanningSnapshot
+  expect(movedPlanning.revision).toBe(3)
+
+  const managerArchive = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/archive',
+    'POST',
+    { expectedRevision: 3 },
+  )
+  expect(managerArchive.status).toBe(200)
+  const archivedPlanning = await managerArchive.json() as PlanningSnapshot
+  expect(archivedPlanning.revision).toBe(4)
+  expect(archivedPlanning.entities.find((entity) => entity.id === 'cycle-structural')?.archivedAt)
+    .toBeDefined()
+  expect(structuralCalls).toEqual({ archive: 1, duplicate: 1, move: 1 })
+})
+
+test('requires Workspace administration for unscoped status updates', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  configureApiClientsForTest({ planning: planningClient })
+  const created = await planningApiRequest('/api/planning/entities', 'POST', {
+    id: 'portfolio-workspace',
+    type: 'portfolio',
+    title: 'Workspace portfolio',
+    ownerMemberKey: 'demo@example.com',
+    status: 'active',
+    health: 'on-track',
+    risk: 'low',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    expectedRevision: 0,
+  })
+  expect(created.status).toBe(201)
+
+  let statusUpdateCalls = 0
+  const addStatusUpdate = planningClient.addStatusUpdate.bind(planningClient)
+  planningClient.addStatusUpdate = async (...input) => {
+    statusUpdateCalls += 1
+    return addStatusUpdate(...input)
+  }
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities/portfolio-workspace/status-updates',
+    'POST',
+    {
+      id: 'status-workspace',
+      message: 'Member must not update Workspace scope.',
+      health: 'at-risk',
+      expectedRevision: 1,
+    },
+  )
+
+  expect(response.status).toBe(403)
+  expect(statusUpdateCalls).toBe(0)
+})
+
+test('rejects an inactive Planning owner before invoking the mutation client', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  let createCalls = 0
+  const create = planningClient.create.bind(planningClient)
+  planningClient.create = async (...input) => {
+    createCalls += 1
+    return create(...input)
+  }
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'owner',
+    inactiveWorkspaceMemberKeys: ['inactive@example.com'],
+  })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest('/api/planning/entities', 'POST', {
+    id: 'portfolio-inactive-owner',
+    type: 'portfolio',
+    title: 'Invalid owner portfolio',
+    ownerMemberKey: 'inactive@example.com',
+    status: 'planned',
+    health: 'on-track',
+    risk: 'none',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    expectedRevision: 0,
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'PlanningOwnerInactive' })
+  expect(createCalls).toBe(0)
+})
+
+test('rejects duplicate when the source Planning owner became inactive', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: planningClient })
+  const created = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    {
+      ...createCyclePlanningInput('cycle-inactive-owner', 0),
+      ownerMemberKey: 'former-owner@example.com',
+    },
+  )
+  expect(created.status).toBe(201)
+
+  let duplicateCalls = 0
+  const duplicate = planningClient.duplicate.bind(planningClient)
+  planningClient.duplicate = async (...input) => {
+    duplicateCalls += 1
+    return duplicate(...input)
+  }
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    inactiveWorkspaceMemberKeys: ['former-owner@example.com'],
+  })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities/cycle-inactive-owner/duplicate',
+    'POST',
+    { targetId: 'cycle-inactive-owner-copy', expectedRevision: 1 },
+  )
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'PlanningOwnerInactive' })
+  expect(duplicateCalls).toBe(0)
+})
+
+test('lets Project members link Work Items to Workspace-scope strategic goals', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  const workspaceId = 'user#demo@example.com'
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 0),
+    id: 'portfolio-strategy',
+    type: 'portfolio',
+    title: 'Strategy portfolio',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 1),
+    id: 'roadmap-strategy',
+    type: 'roadmap',
+    title: 'Strategy roadmap',
+    parentId: 'portfolio-strategy',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 2),
+    id: 'initiative-strategy',
+    type: 'initiative',
+    title: 'Strategy initiative',
+    parentId: 'roadmap-strategy',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 3),
+    id: 'objective-strategy',
+    type: 'goal',
+    title: 'Strategy objective',
+    parentId: 'initiative-strategy',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+    goalFramework: 'objective',
+  }, { workItems: [] })
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'refero',
+      goalIds: ['objective-strategy'],
+      expectedRevision: 4,
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect((await response.json() as PlanningSnapshot).workItemLinks[0]?.goalIds)
+    .toEqual(['objective-strategy'])
+})
+
+test('requires old Planning scope permission when re-linking a moved Work Item', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  const workspaceId = 'user#demo@example.com'
+  const oldWorkItemState = {
+    workItems: [{
+      id: 'onboarding-friction',
+      revision: 1,
+      teamId: 'core-team',
+      title: 'Moved Work Item',
+      projectId: 'refero',
+      statusCategory: 'started' as const,
+      dueDate: '2026-08-31',
+    }],
+  }
+  await planningClient.create(
+    workspaceId,
+    createCyclePlanningInput('cycle-project-a', 0),
+    oldWorkItemState,
+  )
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('cycle-project-b', 1),
+    projectId: 'project-b',
+  }, oldWorkItemState)
+  await planningClient.putWorkItemLink(workspaceId, {
+    teamId: 'core-team',
+    workItemId: 'onboarding-friction',
+    projectId: 'refero',
+    cycleId: 'cycle-project-a',
+    goalIds: [],
+    expectedRevision: 2,
+  }, oldWorkItemState)
+  let putCalls = 0
+  const putWorkItemLink = planningClient.putWorkItemLink.bind(planningClient)
+  planningClient.putWorkItemLink = async (...input) => {
+    putCalls += 1
+    return putWorkItemLink(...input)
+  }
+  configureFakeProjectClients(true, {
+    detailAssignedProjectId: 'project-b',
+    projectAccesses: [{ projectId: 'project-b', role: 'member' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'project-b', name: 'Project B', tone: 'green' },
+    ],
+    workspaceRole: 'member',
+  })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'project-b',
+      cycleId: 'cycle-project-b',
+      goalIds: [],
+      expectedRevision: 3,
+    },
+  )
+
+  expect(response.status).toBe(403)
+  expect(putCalls).toBe(0)
+})
+
+test('lets Workspace owners clean up inaccessible stale Work Item links', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  const workspaceId = 'user#demo@example.com'
+  const staleWorkItemState = {
+    workItems: [{
+      id: 'missing-work-item',
+      revision: 1,
+      teamId: 'core-team',
+      title: 'Deleted later',
+      projectId: 'refero',
+      statusCategory: 'unstarted' as const,
+      dueDate: '2026-08-31',
+    }],
+  }
+  await planningClient.create(
+    workspaceId,
+    createCyclePlanningInput('cycle-stale-link', 0),
+    staleWorkItemState,
+  )
+  await planningClient.putWorkItemLink(workspaceId, {
+    teamId: 'core-team',
+    workItemId: 'missing-work-item',
+    projectId: 'refero',
+    cycleId: 'cycle-stale-link',
+    goalIds: [],
+    expectedRevision: 1,
+  }, staleWorkItemState)
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/missing-work-item',
+    'DELETE',
+    { expectedRevision: 2 },
+  )
+
+  expect(response.status).toBe(200)
+  const planning = await response.json() as PlanningSnapshot
+  expect(planning.revision).toBe(3)
+  expect(planning.workItemLinks).toEqual([])
+})
+
+test('lets members add status updates and link accessible canonical Work Items', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: planningClient })
+  const created = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('cycle-current', 0),
+  )
+  expect(created.status).toBe(201)
+
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  const statusUpdate = await planningApiRequest(
+    '/api/planning/entities/cycle-current/status-updates',
+    'POST',
+    {
+      id: 'status-1',
+      message: 'Delivery is proceeding.',
+      health: 'on-track',
+      expectedRevision: 1,
+    },
+  )
+  expect(statusUpdate.status).toBe(201)
+  const statusPlanning = await statusUpdate.json() as PlanningSnapshot
+  expect(statusPlanning.entities[0]?.statusUpdates[0]).toMatchObject({
+    id: 'status-1',
+    authorMemberKey: 'demo@example.com',
+  })
+
+  const malformedLink = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'refero',
+      cycleId: 'cycle-current',
+      expectedRevision: 2,
+    },
+  )
+  expect(malformedLink.status).toBe(400)
+  expect(await malformedLink.json()).toMatchObject({ code: 'InvalidPlanningInput' })
+
+  const linked = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'refero',
+      cycleId: 'cycle-current',
+      goalIds: [],
+      expectedRevision: 2,
+    },
+  )
+
+  expect(linked.status).toBe(200)
+  const linkedPlanning = await linked.json() as PlanningSnapshot
+  expect(linkedPlanning.workItemLinks).toEqual([
+    expect.objectContaining({
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      cycleId: 'cycle-current',
+    }),
+  ])
+  expect(linkedPlanning.entities[0]).toMatchObject({
+    linkedWorkItemCount: 1,
+    progress: 50,
+  })
+})
+
+test('returns revision conflicts and reproducibly rolls incomplete Work Items forward', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: new InMemoryPlanningClient() })
+
+  const source = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('cycle-source', 0),
+  )
+  expect(source.status).toBe(201)
+  const target = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    {
+      ...createCyclePlanningInput('cycle-target', 1),
+      baseline: { startDate: '2026-07-15', endDate: '2026-07-28' },
+      forecast: { startDate: '2026-07-15', endDate: '2026-07-28' },
+    },
+  )
+  expect(target.status).toBe(201)
+  const linked = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'refero',
+      cycleId: 'cycle-source',
+      goalIds: [],
+      expectedRevision: 2,
+    },
+  )
+  expect(linked.status).toBe(200)
+
+  const conflict = await planningApiRequest(
+    '/api/planning/cycles/cycle-source/rollover',
+    'POST',
+    { targetCycleId: 'cycle-target', expectedRevision: 2 },
+  )
+  expect(conflict.status).toBe(409)
+  expect(await conflict.json()).toMatchObject({ code: 'PlanningRevisionConflict' })
+
+  const rolledOver = await planningApiRequest(
+    '/api/planning/cycles/cycle-source/rollover',
+    'POST',
+    { targetCycleId: 'cycle-target', expectedRevision: 3 },
+  )
+  expect(rolledOver.status).toBe(200)
+  const body = await rolledOver.json() as PlanningMutationResponse
+  expect(body.movedWorkItemIds).toEqual(['onboarding-friction'])
+  expect(body.retainedWorkItemIds).toEqual([])
+  expect(body.planning.revision).toBe(4)
+  expect(body.planning.workItemLinks[0]?.cycleId).toBe('cycle-target')
+  expect(body.planning.entities.find((entity) => entity.id === 'cycle-source')?.status)
+    .toBe('completed')
+})

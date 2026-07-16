@@ -12,6 +12,7 @@ import {
   TransactWriteCommand,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
+import { PLANNING_SCHEMA_VERSION } from '@mukuroji/contracts'
 
 const INVITATION_ACCEPTANCE_LOCK_MS = 5 * 60_000
 const INVITATION_PROVISIONING_LEASE_MS = 5 * 60_000
@@ -198,6 +199,8 @@ export type UpdateWorkspaceMemberInput = {
   status?: WorkspaceMemberStatus
   /** 読み込み時点の member version です。 */
   expectedVersion: number
+  /** Planning 認可 snapshot と直列化する Workspace graph revision です。 */
+  expectedPlanningRevision: number
 }
 
 /** Workspace access domain error です。 */
@@ -343,6 +346,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   private readonly bootstrapLocalTable: boolean
   /** timestamp を生成する clock です。 */
   private readonly clock: () => Date
+  /** Member の role / status 更新と直列化する Planning table 名です。 */
+  private readonly planningTableName: string
   /** 進行中または完了済みの local table 初期化です。 */
   private localTableInitializer?: Promise<void>
 
@@ -354,6 +359,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     dynamoDbClient = createDynamoDbClient(),
     bootstrapLocalTable = false,
     clock: () => Date = () => new Date(),
+    planningTableName = readEnvironment('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',
   ) {
     this.tableName = tableName
     this.dynamoDbClient = dynamoDbClient
@@ -362,6 +368,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     })
     this.bootstrapLocalTable = bootstrapLocalTable
     this.clock = clock
+    this.planningTableName = planningTableName
   }
 
   /** 指定 member を consistent read で取得します。 */
@@ -1237,6 +1244,14 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       })
     }
 
+    const planningRevisionItemIndex = transactItems.length
+    transactItems.push(createPlanningRevisionMutation(
+      this.planningTableName,
+      normalizedWorkspaceId,
+      input.expectedPlanningRevision,
+      nowIso,
+    ))
+
     try {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
       return {
@@ -1249,6 +1264,14 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       } satisfies WorkspaceMember
     } catch (error) {
       if (isAwsError(error, 'TransactionCanceledException')) {
+        if (isTransactionConditionalFailureAt(error, planningRevisionItemIndex)) {
+          throw new WorkspaceAccessError(
+            409,
+            'PlanningRevisionConflict',
+            'Planning changed. Reload and try again.',
+            { cause: error },
+          )
+        }
         await this.classifyMemberUpdateConflict(
           normalizedWorkspaceId,
           actor,
@@ -1954,6 +1977,50 @@ function createOwnerCountUpdate(
       ':one': 1,
     },
   }
+}
+
+function createPlanningRevisionMutation(
+  tableName: string,
+  workspaceId: string,
+  expectedRevision: number,
+  nowIso: string,
+) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    throw new WorkspaceAccessError(
+      400,
+      'InvalidPlanningRevision',
+      'Planning revision must be a non-negative safe integer.',
+    )
+  }
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        workspaceId,
+        recordKey: 'META',
+        entryType: 'planning-meta',
+        schemaVersion: PLANNING_SCHEMA_VERSION,
+        revision: expectedRevision + 1,
+        updatedAt: nowIso,
+      },
+      ...(expectedRevision === 0
+        ? {
+            ConditionExpression:
+              'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+          }
+        : {
+            ConditionExpression: '#revision = :expectedPlanningRevision',
+            ExpressionAttributeNames: { '#revision': 'revision' },
+            ExpressionAttributeValues: { ':expectedPlanningRevision': expectedRevision },
+          }),
+    },
+  }
+}
+
+function isTransactionConditionalFailureAt(error: unknown, index: number) {
+  if (!isRecord(error) || !Array.isArray(error.CancellationReasons)) return false
+  const reason = error.CancellationReasons[index]
+  return isRecord(reason) && reason.Code === 'ConditionalCheckFailed'
 }
 
 function invalidWorkspaceDataError() {

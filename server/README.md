@@ -51,6 +51,7 @@ Default local table names are:
 - `NOTIFICATIONS_STATUS_INDEX_NAME=RecipientStatusIndex`
 - `MUKUROJI_REALTIME_SESSIONS_TABLE=mukuroji-realtime-sessions-local`
 - `MUKUROJI_AUDIT_EVENTS_TABLE=mukuroji-audit-events`
+- `PLANNING_TABLE_NAME=mukuroji-planning-local`
 - `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`（未指定時は `mukuroji-workspace-search-local`）
 - `MUKUROJI_AUDIT_RETENTION_DAYS=2555`
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID=workspace#mukuroji-local`
@@ -60,6 +61,10 @@ Project directory rows are scoped by the authenticated Cognito user's Workspace 
 The local Floci seed writes `workspace#mukuroji-local` to both `custom:directory_id` and
 `custom:workspace_id`. Project task rows are queried by
 `workspace#mukuroji-local#project#<projectId>`.
+
+Planning records use `PLANNING_TABLE_NAME` and the production-compatible
+`workspaceId` / `recordKey` key schema. CDK supplies the deployed `PlanningTable`
+name to the API Lambda through the same environment variable.
 
 To preview and run the append-only audit backfill against local DynamoDB:
 

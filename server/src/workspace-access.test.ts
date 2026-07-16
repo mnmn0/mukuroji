@@ -1125,6 +1125,7 @@ test('prevents a member from deactivating their own membership', async () => {
   await expect(client.updateMember(workspaceId, owner.memberKey, owner.memberKey, {
     status: 'deactivated',
     expectedVersion: owner.version,
+    expectedPlanningRevision: 0,
   })).rejects.toMatchObject({
     status: 409,
     code: 'WorkspaceSelfDeactivation',
@@ -1154,6 +1155,7 @@ test('protects the last active owner with metadata and member conditions in one 
   await client.updateMember(workspaceId, secondOwner.memberKey, owner.memberKey, {
     role: 'admin',
     expectedVersion: 1,
+    expectedPlanningRevision: 0,
   })
 
   expect(transactionInputs[0]).toMatchObject({
@@ -1173,7 +1175,104 @@ test('protects the last active owner with metadata and member conditions in one 
           },
         },
       },
+      {
+        Put: {
+          TableName: 'mukuroji-planning-local',
+          Item: {
+            workspaceId,
+            recordKey: 'META',
+            revision: 1,
+          },
+          ConditionExpression:
+            'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+        },
+      },
     ],
+  })
+})
+
+test('serializes member deactivation with the Planning graph revision', async () => {
+  const actor = createWorkspaceMember('demo@example.com')
+  const target = createWorkspaceMember('member@example.com', 'member')
+  const transactionInputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key as { recordKey?: string }
+        return { Item: toMemberItem(key.recordKey?.includes('member@example.com') ? target : actor) }
+      }
+      transactionInputs.push(command.input)
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+  )
+
+  await client.updateMember(workspaceId, actor.memberKey, target.memberKey, {
+    status: 'deactivated',
+    expectedVersion: target.version,
+    expectedPlanningRevision: 7,
+  })
+
+  expect(transactionInputs[0]).toMatchObject({
+    TransactItems: [
+      {},
+      {},
+      {
+        Put: {
+          TableName: 'PlanningTable',
+          Item: {
+            workspaceId,
+            recordKey: 'META',
+            entryType: 'planning-meta',
+            schemaVersion: 1,
+            revision: 8,
+          },
+          ConditionExpression: '#revision = :expectedPlanningRevision',
+          ExpressionAttributeValues: { ':expectedPlanningRevision': 7 },
+        },
+      },
+    ],
+  })
+})
+
+test('classifies a Planning revision race during member deactivation', async () => {
+  const actor = createWorkspaceMember('demo@example.com')
+  const target = createWorkspaceMember('member@example.com', 'member')
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key as { recordKey?: string }
+        return { Item: toMemberItem(key.recordKey?.includes('member@example.com') ? target : actor) }
+      }
+      const error = new Error('canceled')
+      error.name = 'TransactionCanceledException'
+      Object.assign(error, {
+        CancellationReasons: [
+          { Code: 'None' },
+          { Code: 'None' },
+          { Code: 'ConditionalCheckFailed' },
+        ],
+      })
+      throw error
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+  )
+
+  await expect(client.updateMember(workspaceId, actor.memberKey, target.memberKey, {
+    status: 'deactivated',
+    expectedVersion: target.version,
+    expectedPlanningRevision: 7,
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'PlanningRevisionConflict',
   })
 })
 
@@ -1199,6 +1298,7 @@ test('classifies a canceled last-owner transaction as a domain conflict', async 
   await expect(client.updateMember(workspaceId, secondOwner.memberKey, owner.memberKey, {
     role: 'admin',
     expectedVersion: 1,
+    expectedPlanningRevision: 0,
   })).rejects.toMatchObject({
     status: 409,
     code: 'WorkspaceLastOwner',
@@ -1234,6 +1334,7 @@ test('classifies concurrent member updates through optimistic version checks', a
   await expect(client.updateMember(workspaceId, actor.memberKey, original.memberKey, {
     role: 'guest',
     expectedVersion: 1,
+    expectedPlanningRevision: 0,
   })).rejects.toMatchObject({
     status: 409,
     code: 'WorkspaceVersionConflict',

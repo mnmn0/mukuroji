@@ -8,9 +8,51 @@ export const workspaceNavPaths: Record<SidebarNavId, string> = {
   'my-tasks': '/my-tasks',
   inbox: '/inbox',
   dashboard: '/dashboard',
+  planning: '/planning/timeline',
   reports: '/reports',
   help: '/help',
   settings: '/settings',
+}
+
+/**
+ * Planning 画面で切り替える表示です。
+ */
+export type PlanningViewId = 'timeline' | 'roadmap' | 'portfolio'
+
+const planningViewIds: readonly PlanningViewId[] = ['timeline', 'roadmap', 'portfolio']
+
+/**
+ * Arrow / Home / End key で移動する Planning view tab を返します。
+ *
+ * @param currentView - 現在 focus されている Planning view です。
+ * @param key - Keyboard event の key です。
+ * @returns キーに対応する view。対象外の key では undefined です。
+ */
+export function resolvePlanningViewTabTarget(currentView: PlanningViewId, key: string) {
+  const currentIndex = planningViewIds.indexOf(currentView)
+  if (key === 'ArrowRight') {
+    return planningViewIds[(currentIndex + 1) % planningViewIds.length]
+  }
+  if (key === 'ArrowLeft') {
+    return planningViewIds[(currentIndex - 1 + planningViewIds.length) % planningViewIds.length]
+  }
+  if (key === 'Home') return planningViewIds[0]
+  if (key === 'End') return planningViewIds.at(-1)
+  return undefined
+}
+
+/**
+ * Planning view と任意の選択 entity に対応する URL を生成します。
+ *
+ * @param viewId - 表示する Planning view です。
+ * @param entityId - 詳細を開く任意の Planning entity ID です。
+ * @returns Planning 画面の same-origin path です。
+ */
+export function createPlanningPath(viewId: PlanningViewId, entityId?: string) {
+  const path = `/planning/${viewId}`
+  return entityId
+    ? `${path}?entityId=${encodeURIComponent(entityId)}`
+    : path
 }
 
 /**
