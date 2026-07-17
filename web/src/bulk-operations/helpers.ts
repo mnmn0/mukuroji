@@ -133,11 +133,21 @@ function createBulkOperationRequestSignature(request: BulkOperationRequest) {
   return stableStringify({
     ...request,
     items: [...request.items].sort((first, second) =>
-      first.teamId.localeCompare(second.teamId) ||
-      first.workItemId.localeCompare(second.workItemId) ||
+      compareAscendingStrings(first.teamId, second.teamId) ||
+      compareAscendingStrings(first.workItemId, second.workItemId) ||
       first.expectedRevision - second.expectedRevision
     ),
   })
+}
+
+function compareAscendingStrings(first: string, second: string) {
+  if (first < second) {
+    return -1
+  }
+  if (first > second) {
+    return 1
+  }
+  return 0
 }
 
 function stableStringify(value: unknown): string {
@@ -147,7 +157,7 @@ function stableStringify(value: unknown): string {
   if (value && typeof value === 'object') {
     return `{${
       Object.entries(value)
-        .sort(([firstKey], [secondKey]) => firstKey.localeCompare(secondKey))
+        .sort(([firstKey], [secondKey]) => compareAscendingStrings(firstKey, secondKey))
         .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)
         .join(',')
     }}`

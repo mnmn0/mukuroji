@@ -192,6 +192,54 @@ describe('BulkOperationToolbar', () => {
     )).toBe(false)
   })
 
+  test('matches reordered requests using locale-independent item and object-key ordering', () => {
+    const composed = '\u00e9'
+    const decomposed = 'e\u0301'
+    const itemOrderingRequest: BulkOperationRequest = {
+      action: { archived: true, type: 'archive' },
+      items: [
+        { expectedRevision: 1, teamId: composed, workItemId: decomposed },
+        { expectedRevision: 1, teamId: decomposed, workItemId: composed },
+        { expectedRevision: 2, teamId: 'same-team', workItemId: 'same-item' },
+        { expectedRevision: 1, teamId: 'same-team', workItemId: 'same-item' },
+      ],
+      workspaceId: 'workspace-1',
+    }
+    const objectKeyOrderingRequest: BulkOperationRequest = {
+      action: {
+        patch: {
+          [composed]: 'composed',
+          [decomposed]: 'decomposed',
+        },
+        type: 'edit',
+      },
+      items: [
+        { expectedRevision: 1, teamId: 'team-1', workItemId: 'item-1' },
+      ],
+      workspaceId: 'workspace-1',
+    }
+    const reorderedObjectKeysRequest: BulkOperationRequest = {
+      ...objectKeyOrderingRequest,
+      action: {
+        patch: {
+          [decomposed]: 'decomposed',
+          [composed]: 'composed',
+        },
+        type: 'edit',
+      },
+    }
+
+    expect(composed.normalize()).toBe(decomposed.normalize())
+    expect(isBulkOperationPreviewRequestCurrent(
+      itemOrderingRequest,
+      { ...itemOrderingRequest, items: [...itemOrderingRequest.items].reverse() },
+    )).toBe(true)
+    expect(isBulkOperationPreviewRequestCurrent(
+      objectKeyOrderingRequest,
+      reorderedObjectKeysRequest,
+    )).toBe(true)
+  })
+
   test('clears only succeeded item selections across duplicate IDs in different Teams', () => {
     expect(clearSucceededBulkSelection(
       selections.map((item) => item.selectionKey),

@@ -1302,9 +1302,9 @@ type CreateTeamIssueRequestBody = {
 }
 
 /**
- * チーム Issue 更新 API が受け取る request body です。
+ * 公開チーム Issue 更新 API が受け取る request body です。
  */
-type UpdateTeamIssueRequestBody = {
+type PublicUpdateTeamIssueRequestBody = {
   /**
    * optimistic concurrency に使う読み込み時点の revision です。
    */
@@ -1341,6 +1341,12 @@ type UpdateTeamIssueRequestBody = {
    * Custom field ID ごとの型付き値です。null は保存済み値の削除を表します。
    */
   customFieldValues?: unknown
+}
+
+/**
+ * 検証済みの設定値と内部 adapter 専用フィールドを含むチーム Issue 更新入力です。
+ */
+type UpdateTeamIssueRequestBody = PublicUpdateTeamIssueRequestBody & {
   /** API handler が検証後に付与する workflow extension schema version です。 */
   workflowSchemaVersion?: unknown
   /** API handler が検証後に付与する workflow status category です。 */
@@ -4974,8 +4980,10 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     requireWorkspaceBusinessWrite(principal)
     const context = await requireTeamPermission(principal, teamId, 'member')
+    const input = await readJson<PublicUpdateTeamIssueRequestBody>(c.req) ?? {}
+    rejectInternalWorkItemUpdateFields(input)
     const body = normalizeTeamIssueInput(
-      await readJson<UpdateTeamIssueRequestBody>(c.req) ?? {},
+      input,
       context.team,
     )
     const expectedRevision = readWorkItemExpectedRevision(body.expectedRevision)
@@ -9309,6 +9317,10 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ code: error.code, message: error.message }, 400)
   }
 
+  if (error.code === 'InvalidWorkItemArchiveUpdate') {
+    return c.json({ code: error.code, message: error.message }, 400)
+  }
+
   if (error.code === 'WorkItemListLimitExceeded') {
     return c.json({ code: error.code, message: error.message }, 413)
   }
@@ -12634,7 +12646,7 @@ export class DynamoDbTeamIssuesClient {
           existing.Item.actorUserId === actorUserId &&
           existing.Item.body === body
         ) {
-          return { comment: toTeamIssueCommentResponseItem(existing.Item) }
+          return toCreateTeamIssueCommentResponse(existing.Item)
         }
       }
       if (isTransactionConditionalFailureAt(error, 0)) {
@@ -12656,10 +12668,7 @@ export class DynamoDbTeamIssuesClient {
       throw toProjectDataError(error)
     }
 
-    return {
-      comment: toTeamIssueCommentResponseItem(item),
-      activity: toTeamIssueActivityResponseItem(item),
-    } satisfies CreateTeamIssueCommentResponse
+    return toCreateTeamIssueCommentResponse(item)
   }
 
   private async hasTeamIssueItem(directoryId: string, teamId: string, issueId: string) {
@@ -15092,6 +15101,15 @@ function toTeamIssueActivityResponseItem(value: TeamIssueEventItem): TeamIssueAc
   }
 }
 
+function toCreateTeamIssueCommentResponse(
+  value: TeamIssueEventItem,
+): CreateTeamIssueCommentResponse {
+  return {
+    comment: toTeamIssueCommentResponseItem(value),
+    activity: toTeamIssueActivityResponseItem(value),
+  }
+}
+
 function toTeamIssueItem(value: unknown): TeamIssueItem {
   if (!isTeamIssueItem(value)) {
     throw new ProjectDataError(
@@ -15669,6 +15687,16 @@ function normalizeTeamIssueInput<TInput extends CreateTeamIssueRequestBody | Upd
   return {
     ...input,
     assignedProjectId,
+  }
+}
+
+function rejectInternalWorkItemUpdateFields(input: PublicUpdateTeamIssueRequestBody) {
+  if ('archivedAt' in input || 'archivedBy' in input) {
+    throw new ProjectDataError(
+      400,
+      'InvalidWorkItemArchiveUpdate',
+      'Work Item archive fields cannot be updated through this endpoint.',
+    )
   }
 }
 

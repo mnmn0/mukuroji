@@ -8926,6 +8926,36 @@ test('updates a team-owned issue after team access is confirmed', async () => {
   ])
 })
 
+test('rejects internal archive fields on the public Work Item update endpoint', async () => {
+  const calls = configureFakeProjectClients(true)
+  const archiveFields = [
+    { archivedAt: '2026-07-17T00:00:00.000Z' },
+    { archivedBy: 'attacker@example.com' },
+  ]
+
+  for (const archiveField of archiveFields) {
+    const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...archiveField,
+        expectedRevision: 1,
+      }),
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      code: 'InvalidWorkItemArchiveUpdate',
+      message: 'Work Item archive fields cannot be updated through this endpoint.',
+    })
+  }
+
+  expect(calls.issueUpdates).toEqual([])
+})
+
 test('returns a stable conflict code when a Work Item revision is stale', async () => {
   configureFakeProjectClients(true)
   const currentIssue = {
@@ -9485,6 +9515,90 @@ test('DynamoDB Work Item creation allocates IDs and sort order across archived r
       },
     },
   })
+})
+
+test('DynamoDB Work Item comment idempotent replay returns comment and activity', async () => {
+  const issue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'issue-1',
+    sortOrder: 10,
+    title: 'Idempotent comments',
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'member@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/20',
+    priority: 'medium',
+    createdAt: '2026-07-17T00:00:00.000Z',
+    updatedAt: '2026-07-17T00:00:00.000Z',
+  }
+  const existingComment = {
+    directoryId: 'workspace-1',
+    teamId: 'core-team',
+    issueId: 'issue-1',
+    directoryTeamIssueId: 'workspace-1#team#core-team#issue#issue-1',
+    eventId: 'automation-comment-1',
+    eventType: 'commented',
+    actorUserId: 'automation:rule-1',
+    body: 'Already delivered',
+    summary: 'Comment was added.',
+    createdAt: '2026-07-17T00:01:00.000Z',
+  }
+  let getCount = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        getCount += 1
+        return { Item: getCount === 1 ? issue : existingComment }
+      }
+      if (command.constructor.name === 'PutCommand') {
+        const error = new Error('The comment already exists.')
+        error.name = 'ConditionalCheckFailedException'
+        throw error
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.createTeamIssueComment(
+    'workspace-1',
+    'core-team',
+    'issue-1',
+    {
+      body: 'Already delivered',
+      idempotencyEventId: 'automation-comment-1',
+    },
+    'automation:rule-1',
+  )).resolves.toEqual({
+    comment: {
+      id: 'automation-comment-1',
+      actorUserId: 'automation:rule-1',
+      body: 'Already delivered',
+      createdAt: '2026-07-17T00:01:00.000Z',
+    },
+    activity: {
+      id: 'automation-comment-1',
+      type: 'commented',
+      actorUserId: 'automation:rule-1',
+      summary: 'Comment was added.',
+      createdAt: '2026-07-17T00:01:00.000Z',
+    },
+  })
+  expect(getCount).toBe(2)
 })
 
 test('DynamoDB Work Item client increments revision with an atomic CAS update', async () => {
