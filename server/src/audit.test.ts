@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
+  AUDIT_UNKNOWN_OCCURRED_AT,
   AUDIT_TARGET_INDEX_NAME,
   auditEventsToNdjson,
   calculateAuditExpiresAt,
@@ -11,13 +12,18 @@ import {
   createAuditFieldChanges,
   createAuditTransactPut,
   createMutationAuditContext,
+  createWorkspaceInvitationAuditEntityId,
+  createWorkspaceMemberAuditEntityId,
   DynamoDbAuditEventsClient,
   ensureLocalAuditEventsTable,
   getConfiguredAuditTableName,
   getConfiguredDynamoDbEndpoint,
+  readWorkspaceAuditPseudonymKey,
   toAuditEventView,
   upcastAuditEvent,
 } from './audit'
+
+const auditExpiresAt = 2_000_000_000
 
 test('calculates audit expiry from the historical event occurrence time', () => {
   const occurredAt = '2020-01-02T03:04:05.000Z'
@@ -25,6 +31,125 @@ test('calculates audit expiry from the historical event occurrence time', () => 
   expect(calculateAuditExpiresAt(occurredAt, 30)).toBe(
     Math.floor(Date.parse(occurredAt) / 1000) + 30 * 86_400,
   )
+})
+
+test('allows an omitted expiry only for an unknown-time backfill event', () => {
+  const apiContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'api-request',
+    occurredAt: '2026-07-11T12:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/work-items/item-1' },
+    source: { kind: 'api' },
+  })
+
+  expect(() => createAuditEvent({
+    context: apiContext,
+    eventType: 'work-item.updated',
+    entity: { type: 'work-item', id: 'item-1' },
+  })).toThrow('Audit expiresAt may be omitted only for a backfill event')
+
+  const backfillContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'system:backfill', kind: 'system' },
+    idempotencyKey: 'backfill-request',
+    occurredAt: AUDIT_UNKNOWN_OCCURRED_AT,
+    request: { method: 'BACKFILL', path: '/audit/backfill/team-issues' },
+    source: { kind: 'backfill' },
+  })
+  const knownTimeBackfillContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'system:backfill', kind: 'system' },
+    idempotencyKey: 'known-time-backfill-request',
+    occurredAt: '2026-07-11T12:00:00.000Z',
+    request: { method: 'BACKFILL', path: '/audit/backfill/team-issues' },
+    source: { kind: 'backfill' },
+  })
+
+  expect(() => createAuditEvent({
+    context: knownTimeBackfillContext,
+    eventType: 'work-item.backfilled',
+    entity: { type: 'work-item', id: 'item-1' },
+    outboxStatus: 'suppressed',
+  })).toThrow('Audit expiresAt may be omitted only for a backfill event')
+  expect(() => createAuditEvent({
+    context: backfillContext,
+    eventType: 'work-item.backfilled',
+    entity: { type: 'work-item', id: 'item-1' },
+  })).toThrow('Audit expiresAt may be omitted only for a backfill event')
+
+  const event = createAuditEvent({
+    context: backfillContext,
+    eventType: 'work-item.backfilled',
+    entity: { type: 'work-item', id: 'item-1' },
+    outboxStatus: 'suppressed',
+  })
+
+  expect(event.occurredAt).toBe(AUDIT_UNKNOWN_OCCURRED_AT)
+  expect(event.expiresAt).toBeUndefined()
+})
+
+test('creates stable keyed Workspace access IDs without exposing private identifiers', () => {
+  const key = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+  const workspaceId = 'user#owner@example.com'
+  const memberId = createWorkspaceMemberAuditEntityId(
+    workspaceId,
+    'member@example.com',
+    key,
+  )
+  const invitationId = createWorkspaceInvitationAuditEntityId(
+    workspaceId,
+    'member@example.com',
+    key,
+  )
+
+  expect(memberId).toMatch(
+    /^workspace\/wsp_v2_[a-f0-9]{48}\/member\/mbr_v2_[a-f0-9]{48}$/,
+  )
+  expect(memberId).toBe(
+    'workspace/wsp_v2_5602da2d003d94202fcaefcf30a1c671fd2a126556defb3b/' +
+    'member/mbr_v2_fbbd6cdf95b29a44b1030a5e5c5203a308d3fbb1985f7934',
+  )
+  expect(memberId).toBe(createWorkspaceMemberAuditEntityId(
+    workspaceId,
+    'member@example.com',
+    key,
+  ))
+  expect(invitationId).toMatch(
+    /^workspace\/wsp_v2_[a-f0-9]{48}\/invitation\/inv_v2_[a-f0-9]{48}$/,
+  )
+  expect(invitationId).toBe(
+    'workspace/wsp_v2_5602da2d003d94202fcaefcf30a1c671fd2a126556defb3b/' +
+    'invitation/inv_v2_987594a766d90a3eb75f812762f09f63e844ae31adba9c61',
+  )
+  expect(invitationId).not.toBe(memberId)
+  expect(memberId).not.toContain(workspaceId)
+  expect(memberId).not.toContain('member@example.com')
+  expect(createWorkspaceMemberAuditEntityId(
+    'workspace-2',
+    'member@example.com',
+    key,
+  )).not.toBe(memberId)
+  expect(() => readWorkspaceAuditPseudonymKey({})).toThrow('is required')
+  expect(() => readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: 'too-short',
+  })).toThrow('exactly 64 lowercase hexadecimal characters')
+  expect(() => readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:
+      '0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF',
+  })).toThrow('exactly 64 lowercase hexadecimal characters')
+  expect(() => readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: `g${'0'.repeat(63)}`,
+  })).toThrow('exactly 64 lowercase hexadecimal characters')
+  expect(() => readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: '0'.repeat(65),
+  })).toThrow('exactly 64 lowercase hexadecimal characters')
+  expect(() => readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: `${key} `,
+  })).toThrow('exactly 64 lowercase hexadecimal characters')
+  expect(readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: key,
+  })).toBe(key)
 })
 
 test('uses the local audit table default for shared AWS endpoint variables', () => {
@@ -69,6 +194,7 @@ test('creates deterministic audit IDs and CDK-compatible DynamoDB keys', () => {
   })
   const first = createAuditEvent({
     context,
+    expiresAt: auditExpiresAt,
     eventType: 'work-item.updated',
     entity: { type: 'work-item', id: 'item-1' },
     action: 'updated',
@@ -77,6 +203,7 @@ test('creates deterministic audit IDs and CDK-compatible DynamoDB keys', () => {
   })
   const second = createAuditEvent({
     context,
+    expiresAt: auditExpiresAt,
     eventType: 'work-item.updated',
     entity: { type: 'work-item', id: 'item-1' },
     action: 'updated',
@@ -85,6 +212,7 @@ test('creates deterministic audit IDs and CDK-compatible DynamoDB keys', () => {
   })
   const retryAfterGeneratedIdChanged = createAuditEvent({
     context,
+    expiresAt: auditExpiresAt,
     eventType: 'work-item.created',
     entity: { type: 'work-item', id: 'item-2' },
     action: 'created',
@@ -100,6 +228,7 @@ test('creates deterministic audit IDs and CDK-compatible DynamoDB keys', () => {
   })
   const otherActorEvent = createAuditEvent({
     context: otherActorContext,
+    expiresAt: auditExpiresAt,
     eventType: 'work-item.updated',
     entity: { type: 'work-item', id: 'item-1' },
   })
@@ -198,6 +327,7 @@ test('sanitizes direct changes and metadata before persistence', () => {
   const longValue = 'x'.repeat(5_000)
   const event = createAuditEvent({
     context,
+    expiresAt: auditExpiresAt,
     eventType: 'work-item.updated',
     entity: { type: 'work-item', id: 'item-1' },
     changes: [
@@ -240,6 +370,7 @@ test('creates a conditional audit transaction Put', () => {
   })
   const event = createAuditEvent({
     context,
+    expiresAt: auditExpiresAt,
     eventType: 'project.created',
     entity: { type: 'project', id: 'project-1' },
     after: { name: 'Project 1' },
@@ -295,6 +426,7 @@ test('queries the target timeline and binds cursor to the original filters', asy
   })
   const event = createAuditEvent({
     context,
+    expiresAt: auditExpiresAt,
     eventType: 'comment.created',
     entity: { type: 'work-item', id: 'item-1' },
     target: { type: 'comment', id: 'comment-1' },
@@ -423,10 +555,14 @@ test('exports schema-normalized events as newline-delimited JSON', async () => {
 
   expect(lines).toHaveLength(1)
   expect(JSON.parse(lines[0] ?? '{}')).toMatchObject({
-    schemaVersion: 1,
     eventType: 'comment.created',
-    targetType: 'comment',
+    target: {
+      type: 'comment',
+      id: 'team/team-1/issue/issue-1/comment/legacy-comment',
+    },
   })
+  expect(JSON.parse(lines[0] ?? '{}')).not.toHaveProperty('schemaVersion')
+  expect(JSON.parse(lines[0] ?? '{}')).not.toHaveProperty('targetType')
   expect(JSON.parse(lines[0] ?? '{}')).not.toHaveProperty('requestFingerprint')
   expect(JSON.parse(lines[0] ?? '{}')).not.toHaveProperty('idempotencyKeyHash')
   expect(JSON.parse(lines[0] ?? '{}')).not.toHaveProperty('workspaceKey')

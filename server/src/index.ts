@@ -162,6 +162,9 @@ import {
   type PlanningWorkItemState,
 } from './planning'
 
+/**
+ * Workspace access の永続化 client と API error です。
+ */
 export {
   DynamoDbWorkspaceAccessClient,
   WorkspaceAccessError,
@@ -2170,7 +2173,7 @@ app.post('/api/auth/login', async (c) => {
       )
     }
 
-    return c.json(await createAuthenticationResponse(tokens))
+    return c.json(await createAuthenticationResponse(tokens, c, { email }))
   } catch (error) {
     if (error instanceof WorkspaceAccessError) {
       return toWorkspaceAccessErrorResponse(c, error)
@@ -2199,7 +2202,7 @@ app.post('/api/auth/challenge/new-password', async (c) => {
   }
 
   try {
-    const acceptanceLock = await acquireNewPasswordChallengeInvitationLock(email)
+    const acceptanceState = await acquireNewPasswordChallengeInvitationLock(c, email)
 
     try {
       const response = await cognito.respondToNewPasswordChallenge(email, newPassword, session)
@@ -2216,9 +2219,14 @@ app.post('/api/auth/challenge/new-password', async (c) => {
         )
       }
 
-      return c.json(await createAuthenticationResponse(tokens))
+      return c.json(await createAuthenticationResponse(
+        tokens,
+        c,
+        { email },
+        acceptanceState?.auditContext,
+      ))
     } finally {
-      await releaseNewPasswordChallengeInvitationLock(acceptanceLock)
+      await releaseNewPasswordChallengeInvitationLock(acceptanceState)
     }
   } catch (error) {
     if (error instanceof WorkspaceAccessError) {
@@ -2229,7 +2237,7 @@ app.post('/api/auth/challenge/new-password', async (c) => {
   }
 })
 
-async function acquireNewPasswordChallengeInvitationLock(email: string) {
+async function acquireNewPasswordChallengeInvitationLock(c: Context, email: string) {
   const workspaceUser = await cognito.findWorkspaceUser(email)
 
   if (!workspaceUser?.directoryId) {
@@ -2240,33 +2248,47 @@ async function acquireNewPasswordChallengeInvitationLock(email: string) {
     workspaceUser.directoryId,
     workspaceUser.profile.id,
   )
+  const auditContext = createWorkspaceMutationContextForActor(
+    c,
+    workspaceUser.directoryId,
+    workspaceUser.identityId ?? workspaceUser.profile.username ?? workspaceUser.profile.id,
+    workspaceUser.profile.email,
+    { email },
+  )
 
   if (activeMember) {
-    return undefined
+    return { auditContext }
   }
 
   const invitation = await workspaceAccess.acquireInvitationAcceptanceLock(
     workspaceUser.directoryId,
     email,
+    auditContext,
   )
 
-  return invitation
-    ? { directoryId: workspaceUser.directoryId, invitation }
-    : undefined
+  return {
+    auditContext,
+    ...(invitation ? { directoryId: workspaceUser.directoryId, invitation } : {}),
+  }
 }
 
 async function releaseNewPasswordChallengeInvitationLock(
-  lock: { directoryId: string; invitation: WorkspaceInvitation } | undefined,
+  state: {
+    auditContext: MutationAuditContext
+    directoryId?: string
+    invitation?: WorkspaceInvitation
+  } | undefined,
 ) {
-  if (!lock) {
+  if (!state?.directoryId || !state.invitation) {
     return
   }
 
   try {
     await workspaceAccess.releaseInvitationAcceptanceLock(
-      lock.directoryId,
-      lock.invitation.id,
-      lock.invitation.version,
+      state.directoryId,
+      state.invitation.id,
+      state.invitation.version,
+      state.auditContext,
     )
   } catch (error) {
     console.error('Failed to release Workspace invitation acceptance lock:', error)
@@ -2308,6 +2330,7 @@ app.post('/api/workspace/invitations', async (c) => {
     const email = readWorkspaceEmail(body?.email)
     const role = readWorkspaceRole(body?.role)
     const name = readOptionalWorkspaceName(body?.name)
+    const auditContext = createWorkspaceMutationContext(c, principal, { email, name, role })
     const invitation = await workspaceAccess.createInvitation(
       principal.directoryId,
       principal.userKey,
@@ -2316,6 +2339,8 @@ app.post('/api/workspace/invitations', async (c) => {
         name,
         role,
       },
+      undefined,
+      auditContext,
     )
 
     const deliveryState = { invitation }
@@ -2324,6 +2349,8 @@ app.post('/api/workspace/invitations', async (c) => {
       const result = await deliverPreparedWorkspaceInvitation(
         principal.directoryId,
         deliveryState,
+        false,
+        auditContext,
       )
       deliveryState.invitation = {
         ...deliveryState.invitation,
@@ -2343,11 +2370,17 @@ app.post('/api/workspace/invitations', async (c) => {
           directoryClaimCleanupRequired: result.directoryClaimCleanupRequired,
           deliveryStatus: result.deliveryStatus,
         },
+        auditContext,
       )
 
       return c.json({ invitation: deliveredInvitation }, 201)
     } catch (error) {
-      await markWorkspaceInvitationFailure(principal.directoryId, deliveryState.invitation, error)
+      await markWorkspaceInvitationFailure(
+        principal.directoryId,
+        deliveryState.invitation,
+        error,
+        auditContext,
+      )
       throw error
     }
   } catch (error) {
@@ -2376,10 +2409,12 @@ app.post('/api/workspace/invitations/:invitationId/revoke', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     requireWorkspaceAdministration(principal)
     const invitationId = readWorkspaceEmail(c.req.param('invitationId'))
+    const auditContext = createWorkspaceMutationContext(c, principal, { invitationId })
     let invitation = await workspaceAccess.revokeInvitation(
       principal.directoryId,
       principal.userKey,
       invitationId,
+      auditContext,
     )
 
     if (
@@ -2430,6 +2465,7 @@ app.post('/api/workspace/invitations/:invitationId/revoke', async (c) => {
               expectedVersion: invitation.version,
               failureMessage: 'Cognito cleanup failed and can be retried safely.',
             },
+            auditContext,
           )
         } catch (markError) {
           console.error('Failed to persist Workspace invitation cleanup failure:', markError)
@@ -2443,12 +2479,14 @@ app.post('/api/workspace/invitations/:invitationId/revoke', async (c) => {
           principal.directoryId,
           invitation.id,
           invitation.version,
+          auditContext,
         )
       } else if (cleanupCompleted) {
         invitation = await workspaceAccess.clearInvitationCleanupFailure(
           principal.directoryId,
           invitation.id,
           invitation.version,
+          auditContext,
         )
       }
     }
@@ -2477,11 +2515,17 @@ app.post('/api/workspace/invitations/:invitationId/cleanup/acknowledge', async (
     const invitationId = readWorkspaceEmail(c.req.param('invitationId'))
     const body = await readJson<AcknowledgeWorkspaceInvitationCleanupRequestBody>(c.req)
     const expectedVersion = readWorkspaceVersion(body?.expectedVersion)
+    const auditContext = createWorkspaceMutationContext(
+      c,
+      principal,
+      { expectedVersion, invitationId },
+    )
     const invitation = await workspaceAccess.acknowledgeInvitationManualCleanup(
       principal.directoryId,
       principal.userKey,
       invitationId,
       expectedVersion,
+      auditContext,
     )
 
     return c.json({ invitation })
@@ -2511,6 +2555,11 @@ app.patch('/api/workspace/members/:memberKey', async (c) => {
     const role = body?.role === undefined ? undefined : readWorkspaceRole(body.role)
     const status = body?.status === undefined ? undefined : readWorkspaceMemberStatus(body.status)
     const expectedVersion = readWorkspaceVersion(body?.expectedVersion)
+    const auditContext = createWorkspaceMutationContext(
+      c,
+      principal,
+      { expectedVersion, memberKey, role, status },
+    )
 
     let expectedPlanningRevision: number
     if (status === 'deactivated') {
@@ -2533,6 +2582,7 @@ app.patch('/api/workspace/members/:memberKey', async (c) => {
         expectedVersion,
         expectedPlanningRevision,
       },
+      auditContext,
     )
 
     return c.json({ member })
@@ -5634,34 +5684,14 @@ function createApiMutationContext(
   principal: ProjectPrincipal,
   body: unknown,
 ): MutationAuditContext {
-  const idempotencyKey = c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()
-  const correlationId = c.req.header('X-Correlation-Id')?.trim()
-  const path = new URL(c.req.url).pathname
-
   try {
-    return createMutationAuditContext({
-      workspaceId: principal.directoryId,
-      actor: {
-        id: principal.actorId,
-        kind: 'user',
-        displayName: principal.userKey,
-      },
-      idempotencyKey,
-      ...(correlationId ? { correlationId } : {}),
-      request: {
-        method: c.req.method,
-        path,
-        body,
-      },
-      source: {
-        kind: 'api',
-        requestId: c.req.header('X-Request-Id'),
-        method: c.req.method,
-        route: path,
-        ipAddress: c.req.header('X-Forwarded-For')?.split(',')[0]?.trim(),
-        userAgent: c.req.header('User-Agent'),
-      },
-    })
+    return createRequestMutationContext(
+      c,
+      principal.directoryId,
+      principal.actorId,
+      principal.userKey,
+      body,
+    )
   } catch (error) {
     if (error instanceof TypeError || error instanceof RangeError) {
       throw new ProjectDataError(400, 'InvalidProjectWrite', error.message)
@@ -5669,6 +5699,78 @@ function createApiMutationContext(
 
     throw error
   }
+}
+
+function createWorkspaceMutationContext(
+  c: Context,
+  principal: ProjectPrincipal,
+  body: unknown,
+) {
+  return createWorkspaceMutationContextForActor(
+    c,
+    principal.directoryId,
+    principal.actorId,
+    principal.userKey,
+    body,
+  )
+}
+
+function createWorkspaceMutationContextForActor(
+  c: Context,
+  workspaceId: string,
+  actorId: string,
+  displayName: string,
+  body: unknown,
+) {
+  try {
+    return createRequestMutationContext(c, workspaceId, actorId, displayName, body)
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof RangeError) {
+      throw new WorkspaceAccessError(
+        400,
+        'InvalidWorkspaceMutation',
+        error.message,
+      )
+    }
+
+    throw error
+  }
+}
+
+function createRequestMutationContext(
+  c: Context,
+  workspaceId: string,
+  actorId: string,
+  displayName: string,
+  body: unknown,
+) {
+  const idempotencyKey = c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()
+  const correlationId = c.req.header('X-Correlation-Id')?.trim()
+  const path = new URL(c.req.url).pathname
+
+  return createMutationAuditContext({
+    workspaceId,
+    actor: {
+      id: actorId,
+      kind: 'user',
+      displayName,
+    },
+    idempotencyKey,
+    ...(correlationId ? { correlationId } : {}),
+    request: {
+      method: c.req.method,
+      path,
+      body,
+    },
+    source: {
+      kind: 'api',
+      requestId: c.req.header('X-Request-Id'),
+      method: c.req.method,
+      route: path,
+      ipAddress: c.req.header('X-Forwarded-For')?.split(',')[0]?.trim(),
+      userAgent: c.req.header('User-Agent'),
+    },
+  })
 }
 
 function createOptionalAuditTransactItems(
@@ -5823,7 +5925,12 @@ function readWorkspaceVersion(value: unknown) {
   return value
 }
 
-async function createAuthenticationResponse(tokens: AuthTokenSet) {
+async function createAuthenticationResponse(
+  tokens: AuthTokenSet,
+  c: Context,
+  requestBody: Readonly<Record<string, unknown>>,
+  requestAuditContext?: MutationAuditContext,
+) {
   if (!tokens.AccessToken) {
     throw new CognitoServiceError(
       502,
@@ -5847,11 +5954,16 @@ async function createAuthenticationResponse(tokens: AuthTokenSet) {
 
   if (userKey?.trim()) {
     const principal = toProjectPrincipal(user, tokens.AccessToken)
+    const auditContext = requestAuditContext ?? createWorkspaceMutationContext(
+      c,
+      principal,
+      requestBody,
+    )
     await workspaceAccess.reconcileAuthenticatedMember(principal.directoryId, {
       memberKey: principal.userKey,
       email: readUserAttribute(user, 'email') ?? principal.userKey,
       name: readUserAttribute(user, 'name'),
-    })
+    }, auditContext)
   }
 
   return {
@@ -5877,16 +5989,25 @@ async function handleWorkspaceInvitationDeliveryAction(
     const principal = await authenticateWorkspacePrincipal(accessToken)
     requireWorkspaceAdministration(principal)
     const invitationId = readWorkspaceEmail(c.req.param('invitationId'))
+    const auditContext = createWorkspaceMutationContext(
+      c,
+      principal,
+      { action, invitationId },
+    )
     const preparedInvitation = action === 'resend'
       ? await workspaceAccess.prepareResend(
           principal.directoryId,
           principal.userKey,
           invitationId,
+          undefined,
+          auditContext,
         )
       : await workspaceAccess.prepareReinvite(
           principal.directoryId,
           principal.userKey,
           invitationId,
+          undefined,
+          auditContext,
         )
 
     const deliveryState = { invitation: preparedInvitation }
@@ -5896,6 +6017,7 @@ async function handleWorkspaceInvitationDeliveryAction(
         principal.directoryId,
         deliveryState,
         action === 'resend' || preparedInvitation.identityOwnership !== 'ambiguous',
+        auditContext,
       )
       deliveryState.invitation = {
         ...deliveryState.invitation,
@@ -5915,11 +6037,17 @@ async function handleWorkspaceInvitationDeliveryAction(
           directoryClaimCleanupRequired: result.directoryClaimCleanupRequired,
           deliveryStatus: result.deliveryStatus,
         },
+        auditContext,
       )
 
       return c.json({ invitation })
     } catch (error) {
-      await markWorkspaceInvitationFailure(principal.directoryId, deliveryState.invitation, error)
+      await markWorkspaceInvitationFailure(
+        principal.directoryId,
+        deliveryState.invitation,
+        error,
+        auditContext,
+      )
       throw error
     }
   } catch (error) {
@@ -5935,6 +6063,7 @@ async function deliverPreparedWorkspaceInvitation(
   directoryId: string,
   state: { invitation: WorkspaceInvitation },
   preserveIdentityOwnership = false,
+  auditContext?: MutationAuditContext,
 ) {
   const existingUser = await cognito.findWorkspaceUser(state.invitation.email)
   const previousCognitoIdentityId = state.invitation.cognitoIdentityId
@@ -5944,6 +6073,7 @@ async function deliverPreparedWorkspaceInvitation(
     state.invitation.version,
     existingUser?.identityId,
     existingUser?.profile.username,
+    auditContext,
   )
   const markDirectoryClaimCleanupRequired = async (
     cognitoIdentityId: string,
@@ -5955,6 +6085,7 @@ async function deliverPreparedWorkspaceInvitation(
       state.invitation.version,
       cognitoIdentityId,
       cognitoUsername,
+      auditContext,
     )
   }
 
@@ -6010,6 +6141,7 @@ async function markWorkspaceInvitationFailure(
   directoryId: string,
   invitation: WorkspaceInvitation,
   error: unknown,
+  auditContext?: MutationAuditContext,
 ) {
   console.error('Workspace invitation delivery failed:', error)
 
@@ -6022,7 +6154,7 @@ async function markWorkspaceInvitationFailure(
       directoryClaimCleanupRequired: invitation.directoryClaimCleanupRequired,
       deliveryStatus: 'failed',
       failureMessage: 'Invitation delivery failed.',
-    })
+    }, auditContext)
   } catch (markError) {
     console.error('Failed to persist Workspace invitation delivery failure:', markError)
   }

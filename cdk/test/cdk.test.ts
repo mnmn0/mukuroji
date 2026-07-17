@@ -79,6 +79,13 @@ test('fresh deployment requires explicit external Cognito and workspace paramete
     MinLength: 1,
     AllowedPattern: '^\\S+$',
   }));
+  expect(parameters.WorkspaceAuditPseudonymKey).toEqual(expect.objectContaining({
+    Type: 'String',
+    NoEcho: true,
+    AllowedPattern: '^[0-9a-f]{64}$',
+    ConstraintDescription:
+      'WorkspaceAuditPseudonymKey must be exactly 64 lowercase hexadecimal characters.',
+  }));
   expect(parameters.InitialOwnerEmail).toEqual(expect.objectContaining({
     Type: 'String',
     ConstraintDescription: 'InitialOwnerEmail must be a lowercase email address.',
@@ -114,6 +121,7 @@ test('fresh deployment requires explicit external Cognito and workspace paramete
     'CognitoUserPoolId',
     'CognitoUserPoolClientId',
     'WorkspaceDirectoryId',
+    'WorkspaceAuditPseudonymKey',
     'InitialOwnerEmail',
     'InitialOwnerUsername',
   ]) {
@@ -218,6 +226,9 @@ test('shared server handler is bundled as a Lambda asset with production environ
         },
         MUKUROJI_WORKSPACE_DIRECTORY_ID: {
           Ref: 'WorkspaceDirectoryId',
+        },
+        MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: {
+          Ref: 'WorkspaceAuditPseudonymKey',
         },
         MUKUROJI_PROJECT_DIRECTORY_TABLE: {
           Ref: 'ProjectDirectoryTable9ED01C01',

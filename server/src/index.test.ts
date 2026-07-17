@@ -1449,7 +1449,9 @@ test('runs the Workspace identity lifecycle through the production AWS Cognito a
 
   const challengeResponse = await app.request('/api/auth/challenge/new-password', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify({
       email: 'Demo@Example.com',
       newPassword: 'Permanent123!',
@@ -1927,6 +1929,7 @@ test('requires manual cleanup when a Cognito stable identity lookup is inconclus
 
 test('cleans invitation-owned claims when revoking a pre-existing Cognito identity', async () => {
   const cleanupInputs: Array<Record<string, unknown>> = []
+  const auditContexts: ObservedWorkspaceMutationAuditContext[] = []
   let cleanupMarkerClears = 0
   configureApiClientsForTest({
     cognito: {
@@ -1959,7 +1962,9 @@ test('cleans invitation-owned claims when revoking a pre-existing Cognito identi
         _workspaceId: string,
         _actorMemberKey: string,
         invitationId: string,
+        auditContext,
       ) {
+        auditContexts.push({ stage: 'revokeInvitation', context: auditContext })
         return {
           id: invitationId,
           email: invitationId,
@@ -1982,7 +1987,9 @@ test('cleans invitation-owned claims when revoking a pre-existing Cognito identi
         _workspaceId: string,
         invitationId: string,
         expectedVersion: number,
+        auditContext,
       ) {
+        auditContexts.push({ stage: 'clearInvitationCleanupFailure', context: auditContext })
         cleanupMarkerClears += 1
         return {
           id: invitationId,
@@ -2008,7 +2015,11 @@ test('cleans invitation-owned claims when revoking a pre-existing Cognito identi
     '/api/workspace/invitations/existing%40example.com/revoke',
     {
       method: 'POST',
-      headers: { Authorization: 'Bearer test-token' },
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Idempotency-Key': 'workspace-revoke-1',
+        'X-Correlation-Id': 'workspace-revoke-correlation',
+      },
     },
   )
 
@@ -2020,6 +2031,16 @@ test('cleans invitation-owned claims when revoking a pre-existing Cognito identi
     cognitoUsername: 'CaseSensitiveExisting',
   }])
   expect(cleanupMarkerClears).toBe(1)
+  expectStableWorkspaceMutationAuditContexts(auditContexts, {
+    actorId: 'demo@example.com',
+    correlationId: 'workspace-revoke-correlation',
+    idempotencyKey: 'workspace-revoke-1',
+    method: 'POST',
+    requestBody: { invitationId: 'existing@example.com' },
+    route: '/api/workspace/invitations/existing%40example.com/revoke',
+    stages: ['revokeInvitation', 'clearInvitationCleanupFailure'],
+    workspaceId: 'user#demo@example.com',
+  })
   const responseBody = await response.json() as { invitation: Record<string, unknown> }
   expect(responseBody.invitation).toMatchObject({
     identityCleanupCompleted: true,
@@ -3166,6 +3187,7 @@ test('returns a stable error when a new password violates the Cognito policy', a
 
 test('holds the invitation acceptance lock across the Cognito password challenge', async () => {
   const sequence: string[] = []
+  const auditContexts: ObservedWorkspaceMutationAuditContext[] = []
   const invitation = {
     id: 'invitee@example.com',
     email: 'invitee@example.com',
@@ -3219,20 +3241,32 @@ test('holds the invitation acceptance lock across the Cognito password challenge
         sequence.push('get-active-member')
         return undefined
       },
-      async acquireInvitationAcceptanceLock() {
+      async acquireInvitationAcceptanceLock(_workspaceId, _invitationId, auditContext) {
         sequence.push('acquire-lock')
+        auditContexts.push({ stage: 'acquireInvitationAcceptanceLock', context: auditContext })
         return invitation
       },
-      async releaseInvitationAcceptanceLock() {
+      async releaseInvitationAcceptanceLock(
+        _workspaceId,
+        _invitationId,
+        _expectedVersion,
+        auditContext,
+      ) {
         sequence.push('release-lock')
+        auditContexts.push({ stage: 'releaseInvitationAcceptanceLock', context: auditContext })
         return {
           ...invitation,
           acceptanceLockExpiresAt: undefined,
           version: 3,
         }
       },
-      async reconcileAuthenticatedMember(_workspaceId: string, input: { memberKey: string }) {
+      async reconcileAuthenticatedMember(
+        _workspaceId: string,
+        input: { memberKey: string },
+        auditContext,
+      ) {
         sequence.push('reconcile-member')
+        auditContexts.push({ stage: 'reconcileAuthenticatedMember', context: auditContext })
         return {
           id: input.memberKey,
           memberKey: input.memberKey,
@@ -3249,7 +3283,11 @@ test('holds the invitation acceptance lock across the Cognito password challenge
 
   const response = await app.request('/api/auth/challenge/new-password', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-challenge-1',
+      'X-Correlation-Id': 'workspace-challenge-correlation',
+    },
     body: JSON.stringify({
       email: 'invitee@example.com',
       newPassword: 'Permanent123!',
@@ -3267,6 +3305,20 @@ test('holds the invitation acceptance lock across the Cognito password challenge
     'reconcile-member',
     'release-lock',
   ])
+  expectStableWorkspaceMutationAuditContexts(auditContexts, {
+    actorId: 'sub-invitee',
+    correlationId: 'workspace-challenge-correlation',
+    idempotencyKey: 'workspace-challenge-1',
+    method: 'POST',
+    requestBody: { email: 'invitee@example.com' },
+    route: '/api/auth/challenge/new-password',
+    stages: [
+      'acquireInvitationAcceptanceLock',
+      'reconcileAuthenticatedMember',
+      'releaseInvitationAcceptanceLock',
+    ],
+    workspaceId: 'workspace#production',
+  })
 })
 
 test('lets an active Workspace member complete a new password challenge without an invitation lock', async () => {
@@ -3364,7 +3416,11 @@ test('retries membership reconcile on normal login after password completion suc
 
   const challengeResponse = await app.request('/api/auth/challenge/new-password', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-challenge-reconcile-1',
+      'X-Correlation-Id': 'workspace-challenge-reconcile-correlation',
+    },
     body: JSON.stringify({
       email: 'demo@example.com',
       newPassword: 'Permanent123!',
@@ -3375,7 +3431,11 @@ test('retries membership reconcile on normal login after password completion suc
 
   const loginResponse = await app.request('/api/auth/login', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-login-reconcile-1',
+      'X-Correlation-Id': 'workspace-login-reconcile-correlation',
+    },
     body: JSON.stringify({ email: 'demo@example.com', password: 'Permanent123!' }),
   })
 
@@ -3385,6 +3445,32 @@ test('retries membership reconcile on normal login after password completion suc
     'demo@example.com',
     'demo@example.com',
   ])
+  expectStableWorkspaceMutationAuditContexts(
+    calls.workspaceMutationAuditContexts.slice(0, 1),
+    {
+      actorId: 'sub-demo@example.com',
+      correlationId: 'workspace-challenge-reconcile-correlation',
+      idempotencyKey: 'workspace-challenge-reconcile-1',
+      method: 'POST',
+      requestBody: { email: 'demo@example.com' },
+      route: '/api/auth/challenge/new-password',
+      stages: ['reconcileAuthenticatedMember'],
+      workspaceId: 'user#demo@example.com',
+    },
+  )
+  expectStableWorkspaceMutationAuditContexts(
+    calls.workspaceMutationAuditContexts.slice(1),
+    {
+      actorId: 'demo@example.com',
+      correlationId: 'workspace-login-reconcile-correlation',
+      idempotencyKey: 'workspace-login-reconcile-1',
+      method: 'POST',
+      requestBody: { email: 'demo@example.com' },
+      route: '/api/auth/login',
+      stages: ['reconcileAuthenticatedMember'],
+      workspaceId: 'user#demo@example.com',
+    },
+  )
 })
 
 test('returns owner and admin Workspace capabilities from the API source of truth', async () => {
@@ -3423,6 +3509,76 @@ test('serializes Workspace role updates with the Planning revision', async () =>
     memberKey: 'sato@example.com',
     role: 'guest',
   }])
+})
+
+test('forwards stable Workspace mutation audit headers and actor context to the state client', async () => {
+  configureFakeProjectClients(true)
+  let capturedAuditContext: ReturnType<typeof createMutationAuditContext> | undefined
+  const owner = {
+    id: 'demo@example.com',
+    memberKey: 'demo@example.com',
+    email: 'demo@example.com',
+    role: 'owner' as const,
+    status: 'active' as const,
+    version: 1,
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z',
+  }
+  configureApiClientsForTest({
+    workspaceAccess: {
+      async getActiveMember() {
+        return owner
+      },
+      async updateMember(
+        _workspaceId: string,
+        _actorMemberKey: string,
+        memberKey: string,
+        input: Parameters<WorkspaceAccessClient['updateMember']>[3],
+        auditContext: Parameters<WorkspaceAccessClient['updateMember']>[4],
+      ) {
+        capturedAuditContext = auditContext
+        return {
+          ...owner,
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: input.role ?? owner.role,
+          status: input.status ?? owner.status,
+          version: input.expectedVersion + 1,
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request('/api/workspace/members/sato%40example.com', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-member-role-change-1',
+      'X-Correlation-Id': 'workspace-correlation-1',
+    },
+    body: JSON.stringify({ expectedVersion: 1, role: 'guest' }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(capturedAuditContext).toMatchObject({
+    workspaceId: 'user#demo@example.com',
+    actor: {
+      id: 'demo@example.com',
+      displayName: 'demo@example.com',
+      kind: 'user',
+    },
+    correlationId: 'workspace-correlation-1',
+    source: {
+      kind: 'api',
+      method: 'PATCH',
+      route: '/api/workspace/members/sato%40example.com',
+    },
+  })
+  expect(capturedAuditContext?.idempotencyKeyHash).not.toContain(
+    'workspace-member-role-change-1',
+  )
 })
 
 test('rejects deactivating a Workspace member who still manages an active project', async () => {
@@ -3480,6 +3636,8 @@ test('resends credentials when inviting an existing unconfirmed Workspace identi
     headers: {
       Authorization: 'Bearer test-token',
       'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-invitation-create-1',
+      'X-Correlation-Id': 'workspace-invitation-create-correlation',
     },
     body: JSON.stringify({
       email: 'invitee@example.com',
@@ -3490,6 +3648,20 @@ test('resends credentials when inviting an existing unconfirmed Workspace identi
 
   expect(response.status).toBe(201)
   expect(calls.workspaceInvitationResends).toEqual(['invitee@example.com'])
+  expectStableWorkspaceMutationAuditContexts(calls.workspaceMutationAuditContexts, {
+    actorId: 'demo@example.com',
+    correlationId: 'workspace-invitation-create-correlation',
+    idempotencyKey: 'workspace-invitation-create-1',
+    method: 'POST',
+    requestBody: { email: 'invitee@example.com', name: 'Invitee', role: 'member' },
+    route: '/api/workspace/invitations',
+    stages: [
+      'createInvitation',
+      'markInvitationIdentityMutationStarted',
+      'markInvitationDelivery',
+    ],
+    workspaceId: 'user#demo@example.com',
+  })
   expect(await response.json()).toMatchObject({
     invitation: {
       deliveryStatus: 'sent',
@@ -3645,6 +3817,8 @@ test('keeps raced Cognito ownership ambiguous while resending temporary credenti
     headers: {
       Authorization: 'Bearer test-token',
       'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-invitation-race-1',
+      'X-Correlation-Id': 'workspace-invitation-race-correlation',
     },
     body: JSON.stringify({
       email: 'raced-user@example.com',
@@ -3654,6 +3828,21 @@ test('keeps raced Cognito ownership ambiguous while resending temporary credenti
 
   expect(response.status).toBe(201)
   expect(calls.workspaceInvitationResends).toEqual(['raced-user@example.com'])
+  expectStableWorkspaceMutationAuditContexts(calls.workspaceMutationAuditContexts, {
+    actorId: 'demo@example.com',
+    correlationId: 'workspace-invitation-race-correlation',
+    idempotencyKey: 'workspace-invitation-race-1',
+    method: 'POST',
+    requestBody: { email: 'raced-user@example.com', role: 'member' },
+    route: '/api/workspace/invitations',
+    stages: [
+      'createInvitation',
+      'markInvitationIdentityMutationStarted',
+      'markInvitationDirectoryClaimCleanupRequired',
+      'markInvitationDelivery',
+    ],
+    workspaceId: 'user#demo@example.com',
+  })
   expect(await response.json()).toMatchObject({
     invitation: {
       deliveryStatus: 'sent',
@@ -3666,6 +3855,7 @@ test('keeps raced Cognito ownership ambiguous while resending temporary credenti
 
 test('drops ownership and cleanup provenance when reinvite finds a replacement Cognito identity', async () => {
   const deliveryInputs: Array<Parameters<WorkspaceAccessClient['markInvitationDelivery']>[2]> = []
+  const auditContexts: ObservedWorkspaceMutationAuditContext[] = []
   const resends: string[] = []
   const preparedInvitation = {
     id: 'replacement@example.com',
@@ -3745,7 +3935,14 @@ test('drops ownership and cleanup provenance when reinvite finds a replacement C
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-      async prepareReinvite() {
+      async prepareReinvite(
+        _workspaceId,
+        _actorMemberKey,
+        _invitationId,
+        _expiresInDays,
+        auditContext,
+      ) {
+        auditContexts.push({ stage: 'prepareReinvite', context: auditContext })
         return preparedInvitation
       },
       async markInvitationIdentityMutationStarted(
@@ -3754,7 +3951,9 @@ test('drops ownership and cleanup provenance when reinvite finds a replacement C
         expectedVersion,
         cognitoIdentityId,
         cognitoUsername,
+        auditContext,
       ) {
+        auditContexts.push({ stage: 'markInvitationIdentityMutationStarted', context: auditContext })
         return {
           ...preparedInvitation,
           identityOwnership: 'ambiguous',
@@ -3765,7 +3964,8 @@ test('drops ownership and cleanup provenance when reinvite finds a replacement C
           version: expectedVersion + 1,
         }
       },
-      async markInvitationDelivery(_workspaceId, _invitationId, input) {
+      async markInvitationDelivery(_workspaceId, _invitationId, input, auditContext) {
+        auditContexts.push({ stage: 'markInvitationDelivery', context: auditContext })
         deliveryInputs.push(input)
         return {
           ...preparedInvitation,
@@ -3785,12 +3985,30 @@ test('drops ownership and cleanup provenance when reinvite finds a replacement C
     '/api/workspace/invitations/replacement%40example.com/reinvite',
     {
       method: 'POST',
-      headers: { Authorization: 'Bearer test-token' },
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Idempotency-Key': 'workspace-reinvite-1',
+        'X-Correlation-Id': 'workspace-reinvite-correlation',
+      },
     },
   )
 
   expect(response.status).toBe(200)
   expect(resends).toEqual(['CaseSensitiveReplacement'])
+  expectStableWorkspaceMutationAuditContexts(auditContexts, {
+    actorId: 'demo@example.com',
+    correlationId: 'workspace-reinvite-correlation',
+    idempotencyKey: 'workspace-reinvite-1',
+    method: 'POST',
+    requestBody: { action: 'reinvite', invitationId: 'replacement@example.com' },
+    route: '/api/workspace/invitations/replacement%40example.com/reinvite',
+    stages: [
+      'prepareReinvite',
+      'markInvitationIdentityMutationStarted',
+      'markInvitationDelivery',
+    ],
+    workspaceId: 'user#demo@example.com',
+  })
   expect(deliveryInputs).toEqual([{
     expectedVersion: 3,
     identityOwnership: 'pre-existing',
@@ -3806,6 +4024,138 @@ test('drops ownership and cleanup provenance when reinvite finds a replacement C
       cognitoUsername: 'CaseSensitiveReplacement',
       directoryClaimCleanupRequired: false,
     },
+  })
+})
+
+test('forwards one mutation audit context through every invitation resend stage', async () => {
+  const auditContexts: ObservedWorkspaceMutationAuditContext[] = []
+  const preparedInvitation = {
+    id: 'resend@example.com',
+    email: 'resend@example.com',
+    role: 'member' as const,
+    status: 'provisioning' as const,
+    deliveryStatus: 'pending' as const,
+    identityOwnership: 'workspace-created' as const,
+    cognitoIdentityId: 'sub-resend',
+    cognitoUsername: 'ResendIdentity',
+    version: 2,
+    expiresAt: '2026-07-18T00:00:00.000Z',
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z',
+  }
+
+  configureApiClientsForTest({
+    cognito: {
+      async getUser() {
+        return {
+          Username: 'demo@example.com',
+          UserAttributes: [
+            { Name: 'email', Value: 'demo@example.com' },
+            { Name: 'custom:directory_id', Value: 'user#demo@example.com' },
+            { Name: 'custom:workspace_id', Value: 'user#demo@example.com' },
+          ],
+        }
+      },
+      async isSystemAdmin() {
+        return false
+      },
+      async findWorkspaceUser() {
+        return undefined
+      },
+      async provisionWorkspaceUser() {
+        return {
+          profile: createFakeCognitoProfile('resend@example.com'),
+          cognitoIdentityId: 'sub-resend',
+          cognitoUsername: 'ResendIdentity',
+          identityOwnership: 'workspace-created' as const,
+          directoryClaimCleanupRequired: false,
+          deliveryStatus: 'sent' as const,
+        }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['cognito']
+    >,
+    workspaceAccess: {
+      async getActiveMember(_workspaceId, memberKey) {
+        return {
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: 'owner',
+          status: 'active',
+          version: 1,
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async prepareResend(
+        _workspaceId,
+        _actorMemberKey,
+        _invitationId,
+        _expiresInDays,
+        auditContext,
+      ) {
+        auditContexts.push({ stage: 'prepareResend', context: auditContext })
+        return preparedInvitation
+      },
+      async markInvitationIdentityMutationStarted(
+        _workspaceId,
+        _invitationId,
+        expectedVersion,
+        cognitoIdentityId,
+        cognitoUsername,
+        auditContext,
+      ) {
+        auditContexts.push({ stage: 'markInvitationIdentityMutationStarted', context: auditContext })
+        return {
+          ...preparedInvitation,
+          cognitoIdentityId,
+          cognitoUsername,
+          identityMutationAttempted: true,
+          version: expectedVersion + 1,
+        }
+      },
+      async markInvitationDelivery(_workspaceId, _invitationId, input, auditContext) {
+        auditContexts.push({ stage: 'markInvitationDelivery', context: auditContext })
+        return {
+          ...preparedInvitation,
+          status: 'pending',
+          deliveryStatus: input.deliveryStatus,
+          identityOwnership: input.identityOwnership,
+          cognitoIdentityId: input.cognitoIdentityId,
+          cognitoUsername: input.cognitoUsername,
+          version: input.expectedVersion + 1,
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request(
+    '/api/workspace/invitations/resend%40example.com/resend',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Idempotency-Key': 'workspace-resend-1',
+        'X-Correlation-Id': 'workspace-resend-correlation',
+      },
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expectStableWorkspaceMutationAuditContexts(auditContexts, {
+    actorId: 'demo@example.com',
+    correlationId: 'workspace-resend-correlation',
+    idempotencyKey: 'workspace-resend-1',
+    method: 'POST',
+    requestBody: { action: 'resend', invitationId: 'resend@example.com' },
+    route: '/api/workspace/invitations/resend%40example.com/resend',
+    stages: [
+      'prepareResend',
+      'markInvitationIdentityMutationStarted',
+      'markInvitationDelivery',
+    ],
+    workspaceId: 'user#demo@example.com',
   })
 })
 
@@ -9529,6 +9879,7 @@ function createFakeAuditEvent() {
 
   return createAuditEvent({
     context,
+    expiresAt: 2_000_000_000,
     eventType: 'project.updated',
     entity: { type: 'project', id: 'refero' },
   })
@@ -9745,6 +10096,84 @@ function createFakeRelationMutationResponse(
   }
 }
 
+/** Workspace mutation client で観測した audit context と呼び出し段階です。 */
+type ObservedWorkspaceMutationAuditContext = {
+  /** Context を受け取る Workspace mutation client method です。 */
+  stage: string
+  /** Method に渡された audit context です。欠落も検出するため undefined を保持します。 */
+  context: ReturnType<typeof createMutationAuditContext> | undefined
+}
+
+/** Workspace mutation audit context の決定的な期待値です。 */
+type ExpectedWorkspaceMutationAuditContext = {
+  /** Context actor の安定 ID です。 */
+  actorId: string
+  /** Request の correlation ID header です。 */
+  correlationId: string
+  /** Request の raw idempotency key header です。 */
+  idempotencyKey: string
+  /** Context fingerprint に含める canonical request body です。 */
+  requestBody: unknown
+  /** Context source の HTTP method です。 */
+  method: string
+  /** Context source と fingerprint の route path です。 */
+  route: string
+  /** Context が順番どおり渡される Workspace mutation client method です。 */
+  stages: readonly string[]
+  /** Context の canonical Workspace ID です。 */
+  workspaceId: string
+}
+
+function expectStableWorkspaceMutationAuditContexts(
+  observations: ObservedWorkspaceMutationAuditContext[],
+  expected: ExpectedWorkspaceMutationAuditContext,
+) {
+  expect(observations.map(({ stage }) => stage)).toEqual(expected.stages)
+  const first = observations[0]?.context
+
+  if (!first) {
+    throw new Error('The first Workspace mutation audit context is missing.')
+  }
+
+  const expectedContext = createMutationAuditContext({
+    workspaceId: expected.workspaceId,
+    actor: { id: expected.actorId, kind: 'user' },
+    idempotencyKey: expected.idempotencyKey,
+    correlationId: expected.correlationId,
+    occurredAt: first.occurredAt,
+    request: {
+      method: expected.method,
+      path: expected.route,
+      body: expected.requestBody,
+    },
+    source: {
+      kind: 'api',
+      method: expected.method,
+      route: expected.route,
+    },
+  })
+
+  expect(first).toMatchObject({
+    workspaceId: expected.workspaceId,
+    actor: {
+      id: expected.actorId,
+      kind: 'user',
+    },
+    correlationId: expected.correlationId,
+    source: {
+      kind: 'api',
+      method: expected.method,
+      route: expected.route,
+    },
+  })
+  expect(first.idempotencyKeyHash).toBe(expectedContext.idempotencyKeyHash)
+  expect(first.requestFingerprint).toBe(expectedContext.requestFingerprint)
+
+  for (const observation of observations) {
+    expect(observation.context).toBe(first)
+  }
+}
+
 function configureFakeProjectClients(
   hasProjectAccess: boolean,
   options: {
@@ -9901,6 +10330,7 @@ function configureFakeProjectClients(
     }>,
     userProfiles: [] as string[],
     workspaceInvitationResends: [] as string[],
+    workspaceMutationAuditContexts: [] as ObservedWorkspaceMutationAuditContext[],
     workspaceMemberUpdates: [] as Array<{
       expectedPlanningRevision: number
       memberKey: string
@@ -10308,7 +10738,12 @@ function configureFakeProjectClients(
         expectedVersion,
         cognitoIdentityId,
         cognitoUsername,
+        auditContext,
       ) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'markInvitationIdentityMutationStarted',
+          context: auditContext,
+        })
         return {
           id: invitationId,
           email: invitationId,
@@ -10333,7 +10768,12 @@ function configureFakeProjectClients(
         expectedVersion,
         cognitoIdentityId,
         cognitoUsername,
+        auditContext,
       ) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'markInvitationDirectoryClaimCleanupRequired',
+          context: auditContext,
+        })
         return {
           id: invitationId,
           email: invitationId,
@@ -10350,7 +10790,8 @@ function configureFakeProjectClients(
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-      async createInvitation(_workspaceId, _actorMemberKey, input) {
+      async createInvitation(_workspaceId, _actorMemberKey, input, _expiresInDays, auditContext) {
+        calls.workspaceMutationAuditContexts.push({ stage: 'createInvitation', context: auditContext })
         workspaceInvitationInputs.set(input.email, { name: input.name, role: input.role })
         return {
           id: input.email,
@@ -10366,7 +10807,11 @@ function configureFakeProjectClients(
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-      async markInvitationDelivery(_workspaceId, invitationId, input) {
+      async markInvitationDelivery(_workspaceId, invitationId, input, auditContext) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'markInvitationDelivery',
+          context: auditContext,
+        })
         return {
           id: invitationId,
           email: invitationId,
@@ -10383,7 +10828,11 @@ function configureFakeProjectClients(
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-      async markInvitationCleanupFailure(_workspaceId, invitationId, input) {
+      async markInvitationCleanupFailure(_workspaceId, invitationId, input, auditContext) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'markInvitationCleanupFailure',
+          context: auditContext,
+        })
         return {
           id: invitationId,
           email: invitationId,
@@ -10398,7 +10847,16 @@ function configureFakeProjectClients(
           failureMessage: input.failureMessage,
         }
       },
-      async clearInvitationCleanupFailure(_workspaceId, invitationId, expectedVersion) {
+      async clearInvitationCleanupFailure(
+        _workspaceId,
+        invitationId,
+        expectedVersion,
+        auditContext,
+      ) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'clearInvitationCleanupFailure',
+          context: auditContext,
+        })
         return {
           id: invitationId,
           email: invitationId,
@@ -10427,7 +10885,11 @@ function configureFakeProjectClients(
       async prepareReinvite() {
         throw new Error('Invitation fake is not configured for this test.')
       },
-      async reconcileAuthenticatedMember(_workspaceId, input) {
+      async reconcileAuthenticatedMember(_workspaceId, input, auditContext) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'reconcileAuthenticatedMember',
+          context: auditContext,
+        })
         calls.workspaceReconciliations.push(input.memberKey)
 
         if (workspaceReconcileFailures > 0) {
@@ -10441,7 +10903,8 @@ function configureFakeProjectClients(
 
         return createWorkspaceMember(input.memberKey)
       },
-      async updateMember(_workspaceId, _actorMemberKey, memberKey, input) {
+      async updateMember(_workspaceId, _actorMemberKey, memberKey, input, auditContext) {
+        calls.workspaceMutationAuditContexts.push({ stage: 'updateMember', context: auditContext })
         calls.workspaceMemberUpdates.push({
           expectedPlanningRevision: input.expectedPlanningRevision,
           memberKey,

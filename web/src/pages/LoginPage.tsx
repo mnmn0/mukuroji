@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
   type ReactNode,
@@ -12,6 +13,10 @@ import {
   loginWithPassword,
   type NewPasswordRequiredChallenge,
 } from '../auth/api'
+import {
+  createMutationFingerprint,
+  createMutationRequestRunner,
+} from '../api/mutationHeaders'
 import { getAuthSession, saveAuthSession } from '../auth/session'
 import { BrandMark } from '../components/BrandMark'
 import {
@@ -30,6 +35,10 @@ import {
   type Locale,
   type MessageKey,
 } from '../i18n'
+
+function shouldRetainAuthMutationContext(error: unknown) {
+  return !(error instanceof ApiError)
+}
 
 /**
  * ログイン画面フッターリンクの props です。
@@ -81,6 +90,7 @@ export function LoginPage({
     initialChallengeFailed ? 'login.challenge.error' : null,
   )
   const t = useMemo(() => createTranslator(locale), [locale])
+  const mutationRequestRunner = useRef(createMutationRequestRunner()).current
 
   useEffect(() => {
     if (getAuthSession()) {
@@ -110,7 +120,14 @@ export function LoginPage({
     setErrorKey(null)
 
     try {
-      const result = await loginWithPassword({ email, password, remember })
+      const normalizedEmail = email.trim().toLowerCase()
+      const fingerprint = await createMutationFingerprint(normalizedEmail, password)
+      const result = await mutationRequestRunner.run(
+        `auth:login:${normalizedEmail}`,
+        fingerprint,
+        (context) => loginWithPassword({ email, password, remember }, context),
+        shouldRetainAuthMutationContext,
+      )
 
       if ('challenge' in result) {
         setChallenge(result)
@@ -147,12 +164,23 @@ export function LoginPage({
     setChallengeFailed(false)
 
     try {
-      const session = await completeNewPasswordChallenge({
-        email: challenge.email,
+      const normalizedEmail = challenge.email.trim().toLowerCase()
+      const fingerprint = await createMutationFingerprint(
+        normalizedEmail,
+        challenge.session,
         newPassword,
-        remember,
-        session: challenge.session,
-      })
+      )
+      const session = await mutationRequestRunner.run(
+        `auth:new-password:${normalizedEmail}`,
+        fingerprint,
+        (context) => completeNewPasswordChallenge({
+          email: challenge.email,
+          newPassword,
+          remember,
+          session: challenge.session,
+        }, context),
+        shouldRetainAuthMutationContext,
+      )
       saveAuthSession(session)
       navigate('/dashboard', { replace: true })
     } catch (error) {

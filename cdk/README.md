@@ -11,6 +11,7 @@
 | `CognitoUserPoolId` | yes | 既存 Cognito user pool ID。access token の issuer と IAM scope に使います。 |
 | `CognitoUserPoolClientId` | yes | client secret なし、`ALLOW_USER_PASSWORD_AUTH` 有効の既存 public app client ID。access token の `client_id` と照合します。 |
 | `WorkspaceDirectoryId` | yes | Cognito の両 custom attribute と DynamoDB partition に使う canonical ID。例: `workspace#production`。 |
+| `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡してbackfillにも同じ値を設定します。 |
 | `InitialOwnerEmail` | yes | lowercase の初期 owner email。Workspace/member/alias key に使います。 |
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
 | `TaskApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
@@ -19,7 +20,7 @@
 | `FileUploadUrlTtlSeconds` | no | direct upload URL の有効秒数。既定値 600、範囲 60–3600 秒です。bucket policy もこの上限より古い upload 署名を拒否します。 |
 | `FileDownloadUrlTtlSeconds` | no | malware scan 済み file の download URL 有効秒数。既定値 300、範囲 60–3600 秒です。bucket policy もこの上限より古い download 署名を拒否します。 |
 
-`WorkspaceDirectoryId`、owner email / username は data key と認可境界に使います。環境ごとに固定し、通常の application deploy で変更しないでください。
+`WorkspaceDirectoryId`、`WorkspaceAuditPseudonymKey`、owner email / username は data key と認可境界に使います。環境ごとに固定し、通常の application deploy で変更しないでください。pseudonym key を変更すると既存 resource の audit timeline が分裂するため、通常の rotation 対象にはしません。
 
 ## Outputs
 
@@ -73,9 +74,12 @@ export COGNITO_USER_POOL_CLIENT_ID=<public-app-client-id>
 export MUKUROJI_WORKSPACE_DIRECTORY_ID=<workspace-directory-id>
 export MUKUROJI_INITIAL_OWNER_EMAIL=<lowercase-owner@example.com>
 export MUKUROJI_INITIAL_OWNER_USERNAME=<cognito-username>
+export MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY="$(openssl rand -hex 32)"
 
 bash scripts/prepare-workspace-cognito.sh
 ```
+
+`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は環境作成時に一度だけ生成し、64桁の小文字hex値を secret store に保存して、以後の diff/deploy と audit backfill で再利用します。CloudFormation parameter とAPI/backfillのいずれも、この形式以外をfail-closedで拒否します。
 
 この script は user pool / client / owner を検証し、不足している mutable custom attribute `directory_id` と `workspace_id` を追加して、owner の `custom:directory_id` / `custom:workspace_id` を同じ Workspace ID に設定します。Cognito schema へ追加した custom attribute は削除できないため、値と対象 account を先に確認してください。再実行は同じ値へ収束します。
 
@@ -112,6 +116,7 @@ bun --filter cdk cdk diff CdkStack \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
+  --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
   --parameters TaskApiAllowedOrigins=https://app.example.com
@@ -120,6 +125,7 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
+  --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
   --parameters TaskApiAllowedOrigins=https://app.example.com \

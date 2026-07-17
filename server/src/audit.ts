@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import {
   CreateTableCommand,
   DescribeTableCommand,
@@ -48,6 +48,26 @@ export const AUDIT_REDACTED_VALUE = '[REDACTED]'
 export const AUDIT_MAX_TEXT_LENGTH = 4096
 
 /**
+ * 発生時刻を復元できない backfill event にだけ使う sentinel です。
+ */
+export const AUDIT_UNKNOWN_OCCURRED_AT = '1970-01-01T00:00:00.000Z'
+
+/**
+ * Workspace access の公開 audit ID に使う HMAC key の環境変数名です。
+ */
+export const WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV =
+  'MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY'
+
+/**
+ * Workspace access の公開 audit entity ID contract version です。
+ */
+export const WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION = 'v2'
+
+const workspaceAuditPseudonymKeyPattern = /^[0-9a-f]{64}$/u
+const workspaceAccessEntityIdNamespace =
+  `workspace-access-entity-${WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION}`
+
+/**
  * audit event に保存できる JSON object です。
  */
 export type AuditObject = {
@@ -76,6 +96,7 @@ export type AuditEventEntityType =
   | 'work-item'
   | 'comment'
   | 'member'
+  | 'invitation'
   | 'project'
   | 'workflow'
   | 'file'
@@ -305,7 +326,7 @@ export type AuditEventV1 = {
    */
   summary?: string
   /**
-   * DynamoDB TTL に渡す epoch seconds です。
+   * DynamoDB TTL に渡す epoch seconds です。時刻不明の backfill event だけ省略できます。
    */
   expiresAt?: number
   /**
@@ -605,6 +626,10 @@ export type MutationAuditEventInput = {
    * schema の必須項目に含めない付加情報です。
    */
   metadata?: Readonly<Record<string, unknown>>
+  /**
+   * 同じ mutation context から複数 event を作る場合の決定的な連番です。
+   */
+  sequence?: number
 }
 
 /**
@@ -771,8 +796,9 @@ export function createMutationAuditContext(input: MutationAuditContextInput): Mu
  * mutation-scoped idempotency key hash と event sequence から deterministic event ID を作成します。
  *
  * @remarks
- * retry 時に生成後の resource ID や state 由来の event type が変化しても同じ event ID に
- * 衝突させるため、entity と event type は digest に含めません。
+ * 同じ logical event の retry は同じ sequence を再利用します。生成後の resource ID や
+ * event type に左右されないよう、entity と event type は digest に含めません。後続の
+ * 正当な state transition は caller が別の sequence slot を割り当てます。
  */
 export function createAuditEventId(
   context: MutationAuditContext,
@@ -807,6 +833,82 @@ export function createAuditEntityKey(workspaceId: string, entity: AuditEntity) {
   const normalizedEntity = normalizeEntity(entity, 'Audit entity')
 
   return `${requireText(workspaceId, 'Audit workspace ID')}#${normalizedEntity.type}#${normalizedEntity.id}`
+}
+
+/**
+ * Workspace member lifecycle 用の PII を含まない scoped entity ID を作成します。
+ */
+export function createWorkspaceMemberAuditEntityId(
+  workspaceId: string,
+  memberId: string,
+  pseudonymKey: string,
+) {
+  const normalizedWorkspaceId = requireText(workspaceId, 'Audit workspace ID')
+  const normalizedMemberId = requireText(memberId, 'Audit member ID')
+  const workspacePseudonym = createWorkspaceAccessPseudonym(
+    pseudonymKey,
+    'workspace',
+    normalizedWorkspaceId,
+  )
+  const memberPseudonym = createWorkspaceAccessPseudonym(
+    pseudonymKey,
+    'member',
+    normalizedWorkspaceId,
+    normalizedMemberId,
+  )
+
+  return `workspace/wsp_${WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION}_${workspacePseudonym}` +
+    `/member/mbr_${WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION}_${memberPseudonym}`
+}
+
+/**
+ * Workspace invitation lifecycle 用の PII を含まない scoped entity ID を作成します。
+ */
+export function createWorkspaceInvitationAuditEntityId(
+  workspaceId: string,
+  invitationId: string,
+  pseudonymKey: string,
+) {
+  const normalizedWorkspaceId = requireText(workspaceId, 'Audit workspace ID')
+  const normalizedInvitationId = requireText(invitationId, 'Audit invitation ID')
+  const workspacePseudonym = createWorkspaceAccessPseudonym(
+    pseudonymKey,
+    'workspace',
+    normalizedWorkspaceId,
+  )
+  const invitationPseudonym = createWorkspaceAccessPseudonym(
+    pseudonymKey,
+    'invitation',
+    normalizedWorkspaceId,
+    normalizedInvitationId,
+  )
+
+  return `workspace/wsp_${WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION}_${workspacePseudonym}` +
+    `/invitation/inv_${WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION}_${invitationPseudonym}`
+}
+
+/**
+ * Workspace access audit pseudonym key を環境変数から読み、64桁小文字hex形式を検証します。
+ *
+ * @param environment key を読む環境変数 map です。
+ * @returns live writer と backfill で固定して共有する32-byte random値のhex表現です。
+ */
+export function readWorkspaceAuditPseudonymKey(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  const key = environment[WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV]
+
+  if (!key) {
+    throw new TypeError(`${WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV} is required.`)
+  }
+
+  if (!workspaceAuditPseudonymKeyPattern.test(key)) {
+    throw new TypeError(
+      `${WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV} must be exactly 64 lowercase hexadecimal characters.`,
+    )
+  }
+
+  return key
 }
 
 /**
@@ -882,6 +984,19 @@ export function createAuditEvent(input: CreateAuditEventInput): AuditEventV1 {
 
   if (input.expiresAt !== undefined && (!Number.isSafeInteger(input.expiresAt) || input.expiresAt <= 0)) {
     throw new RangeError('Audit expiresAt must be a positive integer epoch timestamp.')
+  }
+
+  if (
+    input.expiresAt === undefined &&
+    !(
+      input.context.source.kind === 'backfill' &&
+      occurredAt === AUDIT_UNKNOWN_OCCURRED_AT &&
+      outboxStatus === 'suppressed'
+    )
+  ) {
+    throw new TypeError(
+      'Audit expiresAt may be omitted only for a backfill event with an unknown occurredAt.',
+    )
   }
 
   return {
@@ -1167,6 +1282,7 @@ export function createMutationAuditEventPut(
     changes: input.changes,
     ...(input.summary ? { summary: input.summary } : {}),
     ...(input.metadata ? { metadata: input.metadata } : {}),
+    ...(input.sequence === undefined ? {} : { sequence: input.sequence }),
     expiresAt,
   })
 
@@ -1241,19 +1357,12 @@ export function toAuditEventView(value: unknown) {
   const metadata = createAuditMetadataView(event.metadata)
 
   return {
-    schemaVersion: event.schemaVersion,
     eventId: event.eventId,
-    workspaceId: event.workspaceId,
     eventType: event.eventType,
     occurredAt: event.occurredAt,
     actor: event.actor,
-    actorUserId: event.actorUserId,
     entity: event.entity,
-    entityType: event.entityType,
-    entityId: event.entityId,
     target: event.target,
-    targetType: event.targetType,
-    targetId: event.targetId,
     changes: event.changes,
     action: event.action,
     correlationId: event.correlationId,
@@ -2250,6 +2359,26 @@ function hashCanonical(value: unknown) {
 
 function hashText(value: string) {
   return createHash('sha256').update(value).digest('hex')
+}
+
+function createWorkspaceAccessPseudonym(
+  pseudonymKey: string,
+  kind: 'workspace' | 'member' | 'invitation',
+  workspaceId: string,
+  privateId?: string,
+) {
+  const encodedKey = readWorkspaceAuditPseudonymKey({
+    [WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV]: pseudonymKey,
+  })
+  const key = Buffer.from(encodedKey, 'hex')
+  const payload = [
+    workspaceAccessEntityIdNamespace,
+    kind,
+    workspaceId,
+    ...(privateId === undefined ? [] : [privateId]),
+  ].join('\0')
+
+  return createHmac('sha256', key).update(payload).digest('hex').slice(0, 48)
 }
 
 function normalizeActor(actor: AuditActor): AuditActor {
