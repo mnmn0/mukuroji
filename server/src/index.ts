@@ -35,6 +35,17 @@ import {
   type CreatePlanningDependencyInput,
   type CreatePlanningEntityInput,
   type CreateSavedWorkspaceViewInput,
+  type CreateRequestFormInput,
+  type CustomFieldDefinition,
+  type PublishRequestFormInput,
+  type RequestFormDraft,
+  type RequestFormField,
+  type RequestFormRoutingTarget,
+  type RequestSubmissionActionInput,
+  type RequestRequesterReplyInput,
+  type RequestAttachmentUploadInput,
+  type SubmitRequestInput,
+  type UpdateRequestFormInput,
   type CustomFieldValue,
   type CycleRolloverInput,
   type DuplicatePlanningEntityInput,
@@ -57,7 +68,7 @@ import {
   type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
 import { Hono } from 'hono'
-import { handle, type LambdaContext, type LambdaEvent } from 'hono/aws-lambda'
+import { getConnInfo, handle, type LambdaContext, type LambdaEvent } from 'hono/aws-lambda'
 import { cors } from 'hono/cors'
 import type { Context } from 'hono'
 import {
@@ -141,6 +152,14 @@ import {
   type WorkspaceSearchClient,
   type WorkspaceSearchDocument,
 } from './workspace-search'
+import {
+  RequestIntakeError,
+  createDefaultRequestIntakeClient,
+  createRequestWorkItemInput,
+  type RequestExternalContext,
+  type RequestIntakeClient,
+  type RequestLinkResolution,
+} from './request-intake'
 import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
   DynamoDbWorkItemConfigurationClient,
@@ -960,6 +979,8 @@ type TeamIssueItem = {
    * Issue 作成者の Workspace member key です。
    */
   creatorMemberKey: string
+  /** Request intake から作成された場合の source submission ID です。 */
+  sourceRequestId?: string
   /** Relation Graph から同期する search/backfill 用の派生 relation ID 一覧です。 */
   relationIds: string[]
   /**
@@ -1235,6 +1256,22 @@ type CreateTeamIssueRequestBody = {
   statusCategory?: unknown
   /** API handler が definition の同時変更を検出するために付与する ConditionCheck です。 */
   configurationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>
+}
+
+/** Trusted request conversion handler が Work Item transactionへ追加する narrow projection です。 */
+type RequestConversionTransactionInput = {
+  /** Request intake table 名です。 */
+  tableName: string
+  /** Submission の Workspace partition key です。 */
+  scopeKey: string
+  /** Submission row sort key です。 */
+  recordKey: string
+  /** 読み込み時点の submission revision です。 */
+  expectedRevision: number
+  /** Conversion event の actor member ID です。 */
+  actorId: string
+  /** Work Item に保存する source submission ID です。 */
+  submissionId: string
 }
 
 /**
@@ -1918,6 +1955,7 @@ type TeamIssuesClient = {
     input: CreateTeamIssueRequestBody,
     actorUserId: string,
     auditContext?: MutationAuditContext,
+    requestConversion?: RequestConversionTransactionInput,
   ): Promise<CreateTeamIssueResponse>
   /**
    * DynamoDB の team issue を更新します。
@@ -2100,6 +2138,7 @@ let workspaceSearch: WorkspaceSearchClient
 let workspaceSearchProjectionEnabled: boolean
 let workItemConfigurations: WorkItemConfigurationClient
 let planning: PlanningClient
+let requestIntake: RequestIntakeClient
 const projectDirectoryIdPrefix = 'user#'
 const defaultAllowedOrigins = [
   'http://localhost:5173',
@@ -2123,6 +2162,15 @@ app.use(
     exposeHeaders: ['X-Audit-Truncated', 'X-Audit-Next-Cursor'],
   }),
 )
+
+app.use('/api/*', async (c, next) => {
+  await next()
+  if (c.req.path.startsWith('/api/request-')) {
+    c.header('Cache-Control', 'private, no-store')
+    c.header('Pragma', 'no-cache')
+    c.header('Referrer-Policy', 'no-referrer')
+  }
+})
 
 app.get('/', (c) => {
   return c.text('mukuroji API')
@@ -3104,6 +3152,300 @@ for (const projectWatchMethod of ['PUT', 'DELETE'] as const) {
     }
   })
 }
+
+/** Opaque capability link から allowlist 済み public Request Form を返します。 */
+app.get('/api/request-intake/:token', async (c) => {
+  try {
+    const resolution = await requestIntake.resolveLink(c.req.param('token'))
+    await authorizeRequestLink(c, resolution)
+    return c.json(await requestIntake.getPublicForm(resolution, createRequestExternalContext(c)))
+  } catch (error) {
+    return toRequestIntakeErrorResponse(c, error, true)
+  }
+})
+
+/** Public/authenticated Request Form 用の direct attachment upload session を作成します。 */
+app.post('/api/request-intake/:token/uploads', async (c) => {
+  try {
+    const resolution = await requestIntake.resolveLink(c.req.param('token'))
+    await authorizeRequestLink(c, resolution)
+    const body = await readJson<RequestAttachmentUploadInput>(c.req)
+    return c.json(await requestIntake.createAttachmentUpload(
+      resolution,
+      body ?? {} as RequestAttachmentUploadInput,
+      createRequestExternalContext(c),
+    ), 201)
+  } catch (error) {
+    return toRequestIntakeErrorResponse(c, error, true)
+  }
+})
+
+/** Public/authenticated Request Form の回答を intake queue へ保存します。 */
+app.post('/api/request-intake/:token/submissions', async (c) => {
+  try {
+    const resolution = await requestIntake.resolveLink(c.req.param('token'))
+    await authorizeRequestLink(c, resolution)
+    const body = await readJson<SubmitRequestInput>(c.req)
+    return c.json(await requestIntake.submit(
+      resolution,
+      body ?? {} as SubmitRequestInput,
+      createRequestExternalContext(c),
+    ), 201)
+  } catch (error) {
+    return toRequestIntakeErrorResponse(c, error, true)
+  }
+})
+
+/** Opaque thread capability から requester 向け message だけを返します。 */
+app.get('/api/request-threads/:threadToken', async (c) => {
+  try {
+    return c.json(await requestIntake.getRequesterThread(
+      c.req.param('threadToken'),
+      createRequestExternalContext(c),
+    ))
+  } catch (error) {
+    return toRequestIntakeErrorResponse(c, error, true)
+  }
+})
+
+/** Opaque thread capability から追加情報 reply を安全に保存します。 */
+app.post('/api/request-threads/:threadToken/replies', async (c) => {
+  try {
+    const body = await readJson<RequestRequesterReplyInput>(c.req)
+    return c.json(await requestIntake.replyToThread(
+      c.req.param('threadToken'),
+      body ?? {} as RequestRequesterReplyInput,
+      createRequestExternalContext(c),
+    ), 201)
+  } catch (error) {
+    return toRequestIntakeErrorResponse(c, error, true)
+  }
+})
+
+/** Workspace admin が管理できる Request Form 一覧を返します。 */
+app.get('/api/request-forms', async (c) => {
+  try {
+    const principal = await requireRequestAdministration(c)
+    return c.json(await requestIntake.listForms(principal.directoryId))
+  } catch (error) {
+    return toRequestIntakeErrorResponse(c, error)
+  }
+})
+
+/** Workspace admin が Request Form draft と capability link を作成します。 */
+app.post('/api/request-forms', async (c) => {
+  try {
+    const principal = await requireRequestAdministration(c)
+    const body = await readJson<CreateRequestFormInput>(c.req)
+    return c.json(await requestIntake.createForm(
+      principal.directoryId,
+      { id: principal.userKey },
+      body ?? {} as CreateRequestFormInput,
+    ), 201)
+  } catch (error) {
+    return toRequestIntakeErrorResponse(c, error)
+  }
+})
+
+/** Workspace admin が Request Form detail と published version metadata を取得します。 */
+app.get('/api/request-forms/:formId', async (c) => {
+  try {
+    const principal = await requireRequestAdministration(c)
+    return c.json(await requestIntake.getForm(principal.directoryId, c.req.param('formId')))
+  } catch (error) {
+    return toRequestIntakeErrorResponse(c, error)
+  }
+})
+
+/** Workspace admin が Request Form draft/link を revision 条件付きで更新します。 */
+app.put('/api/request-forms/:formId', async (c) => {
+  try {
+    const principal = await requireRequestAdministration(c)
+    const body = await readJson<UpdateRequestFormInput>(c.req)
+    return c.json(await requestIntake.updateForm(
+      principal.directoryId,
+      c.req.param('formId'),
+      { id: principal.userKey },
+      body ?? {} as UpdateRequestFormInput,
+    ))
+  } catch (error) {
+    return toRequestIntakeErrorResponse(c, error)
+  }
+})
+
+/** Workspace admin が current draft を immutable Request Form version として公開します。 */
+app.post('/api/request-forms/:formId/publish', async (c) => {
+  try {
+    const principal = await requireRequestAdministration(c)
+    const formId = c.req.param('formId')
+    const body = await readJson<PublishRequestFormInput>(c.req)
+    const publishInput = body ?? {} as PublishRequestFormInput
+    const current = await requestIntake.getForm(principal.directoryId, formId)
+    if (
+      !Number.isSafeInteger(publishInput.expectedRevision) ||
+      publishInput.expectedRevision !== current.revision
+    ) {
+      throw new RequestIntakeError(
+        409,
+        'RequestRevisionConflict',
+        'Request resource revision changed.',
+      )
+    }
+    await validateRequestFormRoutingReferences(principal.directoryId, current.draft)
+    return c.json(await requestIntake.publishForm(
+      principal.directoryId,
+      formId,
+      { id: principal.userKey },
+      publishInput,
+    ))
+  } catch (error) {
+    return toRequestIntakeErrorResponse(c, error)
+  }
+})
+
+/** Workspace admin の intake queue を cursor pagination します。 */
+app.get('/api/request-queue', async (c) => {
+  try {
+    const principal = await requireRequestAdministration(c)
+    return c.json(await requestIntake.listSubmissions(principal.directoryId, {
+      status: readRequestSubmissionStatus(c.req.query('status')),
+      limit: readOptionalPositiveQueryInteger(c.req.query('limit'), 'Request queue limit'),
+      cursor: c.req.query('cursor'),
+    }))
+  } catch (error) {
+    return toRequestIntakeErrorResponse(c, error)
+  }
+})
+
+/** Workspace admin が historical form snapshot を含む submission detail を取得します。 */
+app.get('/api/request-submissions/:submissionId', async (c) => {
+  try {
+    const principal = await requireRequestAdministration(c)
+    return c.json(await requestIntake.getSubmission(
+      principal.directoryId,
+      c.req.param('submissionId'),
+    ))
+  } catch (error) {
+    return toRequestIntakeErrorResponse(c, error)
+  }
+})
+
+/** Workspace admin が explicit triage transition または Work Item conversion を実行します。 */
+app.post('/api/request-submissions/:submissionId/actions', async (c) => {
+  try {
+    const principal = await requireRequestAdministration(c)
+    requireWorkspaceBusinessWrite(principal)
+    const submissionId = c.req.param('submissionId')
+    const body = await readJson<RequestSubmissionActionInput>(c.req)
+    if (!body || !isRecord(body) || typeof body.action !== 'string') {
+      throw new RequestIntakeError(400, 'InvalidRequestIntakeInput', 'Request action is required.')
+    }
+    if (
+      body.action !== 'assign' &&
+      body.action !== 'request-more-info' &&
+      body.action !== 'reject' &&
+      body.action !== 'mark-duplicate' &&
+      body.action !== 'convert'
+    ) {
+      throw new RequestIntakeError(400, 'InvalidRequestIntakeInput', 'Request action is invalid.')
+    }
+    if (body.action !== 'convert') {
+      if (body.action === 'assign') {
+        if (typeof body.assigneeUserId !== 'string' || !body.assigneeUserId.trim()) {
+          throw new RequestIntakeError(400, 'InvalidRequestIntakeInput', 'Request assignee is required.')
+        }
+        await requireActiveWorkspaceAssignee(principal.directoryId, body.assigneeUserId)
+      }
+      return c.json(await requestIntake.applyAction(
+        principal.directoryId,
+        submissionId,
+        { id: principal.userKey },
+        body,
+      ))
+    }
+    const submission = await requestIntake.getSubmission(principal.directoryId, submissionId)
+    const conversion = createRequestWorkItemInput(submission, body)
+    const teamContext = await requireTeamPermission(principal, conversion.target.teamId, 'member')
+    requireAssignedProjectPermission(
+      principal,
+      teamContext,
+      conversion.target.projectId,
+      'member',
+    )
+    await validateRequestRoutingTarget(principal.directoryId, conversion.target)
+    const normalized = normalizeTeamIssueInput(conversion.input, teamContext.team)
+    const resolvedConfiguration = await workItemConfigurations.getTeamConfiguration(
+      principal.directoryId,
+      conversion.target.teamId,
+    )
+    const configured = await prepareConfiguredCreateWorkItem(
+      principal.directoryId,
+      conversion.target.teamId,
+      normalized,
+      resolvedConfiguration,
+    )
+    await requireActiveWorkspaceAssignee(
+      principal.directoryId,
+      readTeamIssueAssigneeUserId(configured),
+    )
+    const created = await hydrateCreateTeamIssueResponse(await teamIssues.createTeamIssue(
+      principal.directoryId,
+      conversion.target.teamId,
+      configured,
+      principal.userKey,
+      createApiMutationContext(c, principal, {
+        submissionId,
+        action: 'convert',
+        target: conversion.target,
+      }),
+      {
+        tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+        scopeKey: `WORKSPACE#${principal.directoryId}`,
+        recordKey: `SUBMISSION#${submissionId}`,
+        expectedRevision: body.expectedRevision,
+        actorId: principal.userKey,
+        submissionId,
+      },
+    ))
+    await projectWorkItemSearchDocumentBestEffort(
+      principal.directoryId,
+      created.issue,
+      'Request conversion',
+      [],
+    )
+    return c.json(await requestIntake.completeConversion(
+      principal.directoryId,
+      submissionId,
+      { id: principal.userKey },
+      {
+        expectedRevision: body.expectedRevision,
+        workItem: {
+          teamId: created.issue.teamId,
+          workItemId: created.issue.id,
+          ...(created.issue.assignedProjectId
+            ? { projectId: created.issue.assignedProjectId }
+            : {}),
+        },
+      },
+    ))
+  } catch (error) {
+    return toRequestIntakeErrorResponse(c, error)
+  }
+})
+
+/** Workspace admin が malware scan 済み request attachment の短命 URL を取得します。 */
+app.post('/api/request-submissions/:submissionId/attachments/:attachmentId/access', async (c) => {
+  try {
+    const principal = await requireRequestAdministration(c)
+    return c.json(await requestIntake.createAttachmentAccess(
+      principal.directoryId,
+      c.req.param('submissionId'),
+      c.req.param('attachmentId'),
+    ))
+  } catch (error) {
+    return toRequestIntakeErrorResponse(c, error)
+  }
+})
 
 /** Workspace default または built-in Work Item configuration を返します。 */
 app.get('/api/work-item-configuration', async (c) => {
@@ -5783,6 +6125,66 @@ function createOptionalAuditTransactItems(
   return item ? [item] : []
 }
 
+function createRequestConversionTransactionUpdate(
+  input: RequestConversionTransactionInput,
+  teamId: string,
+  workItemId: string,
+  projectId: string | undefined,
+  now: string,
+) {
+  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Request conversion revision is invalid.',
+    )
+  }
+  const workItem = {
+    teamId,
+    workItemId,
+    ...(projectId ? { projectId } : {}),
+  }
+  return {
+    Update: {
+      TableName: input.tableName,
+      Key: { scopeKey: input.scopeKey, recordKey: input.recordKey },
+      UpdateExpression:
+        'SET #status = :converted, #revision = :nextRevision, workItem = :workItem, updatedAt = :updatedAt, capabilities = :capabilities, events = list_append(if_not_exists(events, :emptyEvents), :events)',
+      ConditionExpression:
+        '#revision = :expectedRevision AND (#status = :received OR #status = :triaging OR #status = :needsMoreInfo)',
+      ExpressionAttributeNames: {
+        '#status': 'status',
+        '#revision': 'revision',
+      },
+      ExpressionAttributeValues: {
+        ':converted': 'converted',
+        ':nextRevision': input.expectedRevision + 1,
+        ':workItem': workItem,
+        ':updatedAt': now,
+        ':capabilities': {
+          canAssign: false,
+          canRequestMoreInfo: false,
+          canReject: false,
+          canMarkDuplicate: false,
+          canConvert: false,
+        },
+        ':emptyEvents': [],
+        ':events': [{
+          id: `event_${now.replace(/[-:.TZ]/gu, '')}_${workItemId}`,
+          type: 'converted',
+          actorId: input.actorId,
+          summary: 'Request was converted to a Work Item.',
+          createdAt: now,
+        }],
+        ':expectedRevision': input.expectedRevision,
+        ':received': 'received',
+        ':triaging': 'triaging',
+        ':needsMoreInfo': 'needs-more-info',
+      },
+    },
+  }
+}
+
 async function ensureConfiguredAuditTable(
   tableName: string | undefined,
   dynamoDbClient: DynamoDBClient,
@@ -6347,6 +6749,216 @@ function toPlanningErrorResponse(c: Context, error: unknown) {
     error.status === 409 ||
     error.status === 413 ||
     error.status === 503
+    ? error.status
+    : 502
+  return c.json({ code: error.code, message: error.message }, status)
+}
+
+async function requireRequestAdministration(c: Context) {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    throw new RequestIntakeError(401, 'RequestAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken)
+  requireWorkspaceAdministration(principal)
+  return principal
+}
+
+async function authorizeRequestLink(c: Context, resolution: RequestLinkResolution) {
+  if (resolution.accessMode === 'public') return
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    throw new RequestIntakeError(
+      401,
+      'RequestAuthenticationRequired',
+      'Authentication is required for this request form.',
+    )
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken)
+  if (principal.directoryId !== resolution.workspaceId) {
+    throw new RequestIntakeError(404, 'RequestFormUnavailable', 'Request form is unavailable.')
+  }
+}
+
+function createRequestExternalContext(c: Context): RequestExternalContext {
+  let trustedSource: string | undefined
+  try {
+    trustedSource = getConnInfo(c).remote.address
+  } catch {
+    trustedSource = undefined
+  }
+  const localForwardedSource = !getEnv('AWS_LAMBDA_FUNCTION_NAME')
+    ? c.req.header('X-Forwarded-For')?.split(',')[0]?.trim()
+    : undefined
+  const source = trustedSource || localForwardedSource || 'transport-unavailable'
+  return {
+    clientKey: source,
+    ...(c.req.header('Idempotency-Key')?.trim()
+      ? { idempotencyKey: c.req.header('Idempotency-Key')!.trim() }
+      : {}),
+  }
+}
+
+function readRequestSubmissionStatus(value: string | undefined) {
+  if (value === undefined) return undefined
+  if (
+    value === 'received' ||
+    value === 'triaging' ||
+    value === 'needs-more-info' ||
+    value === 'rejected' ||
+    value === 'duplicate' ||
+    value === 'converted'
+  ) return value
+  throw new RequestIntakeError(400, 'InvalidRequestIntakeInput', 'Request status is invalid.')
+}
+
+async function validateRequestFormRoutingReferences(
+  workspaceId: string,
+  draft: RequestFormDraft,
+) {
+  const targets = [draft.routing.defaultTarget, ...draft.routing.rules.map((rule) => rule.target)]
+  const configurations = new Map<string, WorkItemConfiguration>()
+  for (const target of targets) {
+    const configuration = await validateRequestRoutingTarget(workspaceId, target)
+    configurations.set(target.teamId, configuration)
+  }
+  for (const [formFieldId, customFieldId] of Object.entries(
+    draft.routing.mapping.customFieldMappings ?? {},
+  )) {
+    const formField = draft.definition.sections.flatMap((section) => section.fields)
+      .find((field) => field.id === formFieldId)
+    for (const target of targets) {
+      const configuration = configurations.get(target.teamId)!
+      const customField = configuration.customFields.find((definition) => definition.id === customFieldId)
+      if (!customField) {
+        throw new RequestIntakeError(
+          400,
+          'InvalidRequestRouting',
+          `Custom field "${customFieldId}" is not active for Team "${target.teamId}".`,
+        )
+      }
+      if (
+        customField.projectIds &&
+        (!target.projectId || !customField.projectIds.includes(target.projectId))
+      ) {
+        throw new RequestIntakeError(
+          400,
+          'InvalidRequestRouting',
+          `Custom field "${customFieldId}" is not active for the routed Project.`,
+        )
+      }
+      if (!formField || !isCompatibleRequestCustomField(formField, customField)) {
+        throw new RequestIntakeError(
+          400,
+          'InvalidRequestRouting',
+          `Form field "${formFieldId}" is not compatible with custom field "${customFieldId}".`,
+        )
+      }
+    }
+  }
+}
+
+function isCompatibleRequestCustomField(
+  formField: RequestFormField,
+  customField: CustomFieldDefinition,
+) {
+  if (
+    formField.type === 'short-text' ||
+    formField.type === 'long-text' ||
+    formField.type === 'email' ||
+    formField.type === 'url'
+  ) return customField.type === 'text'
+  if (formField.type === 'number') {
+    return customField.type === 'number' || customField.type === 'currency' || customField.type === 'duration'
+  }
+  if (formField.type === 'boolean') return customField.type === 'boolean'
+  if (formField.type === 'date') return customField.type === 'date'
+  if (formField.type === 'single-select') {
+    const allowedOptions = new Set(customField.options?.map((option) => option.id) ?? [])
+    return customField.type === 'select' &&
+      (formField.options ?? []).every((option) => allowedOptions.has(option.id))
+  }
+  if (formField.type === 'multi-select') {
+    const allowedOptions = new Set(customField.options?.map((option) => option.id) ?? [])
+    return customField.type === 'multi-select' &&
+      (formField.options ?? []).every((option) => allowedOptions.has(option.id))
+  }
+  return false
+}
+
+async function validateRequestRoutingTarget(
+  workspaceId: string,
+  target: RequestFormRoutingTarget,
+) {
+  const directory = await projectDirectory.getProjectDirectory(workspaceId, 'ja')
+  const team = directory.teams.find((candidate) => candidate.id === target.teamId)
+  if (!team) {
+    throw new RequestIntakeError(400, 'InvalidRequestRouting', 'Request routing Team is inactive.')
+  }
+  if (target.projectId && !team.projects.some((project) => project.id === target.projectId)) {
+    throw new RequestIntakeError(400, 'InvalidRequestRouting', 'Request routing Project is inactive.')
+  }
+  await requireActiveWorkspaceAssignee(workspaceId, target.assigneeUserId)
+  const resolved = await workItemConfigurations.getTeamConfiguration(workspaceId, target.teamId)
+  resolveWorkflowStatus(resolved.configuration, target.workflowStatusId)
+  return resolved.configuration
+}
+
+function toRequestIntakeErrorResponse(
+  c: Context,
+  error: unknown,
+  publicBoundary = false,
+) {
+  if (
+    publicBoundary &&
+    (
+      error instanceof CognitoServiceError && error.status >= 500 ||
+      error instanceof FileProofingError && error.status >= 500 ||
+      error instanceof RequestIntakeError && error.status >= 500
+    )
+  ) {
+    console.error(error)
+    return c.json({ code: 'RequestIntakeUnavailable', message: 'Request intake is unavailable.' }, 503)
+  }
+  if (error instanceof CognitoServiceError) return toAuthErrorResponse(c, error)
+  if (error instanceof WorkspaceAccessError) {
+    if (publicBoundary) {
+      return c.json(
+        { code: 'RequestAuthenticationRequired', message: 'Authentication is required for this request form.' },
+        401,
+      )
+    }
+    return toWorkspaceAccessErrorResponse(c, error)
+  }
+  if (
+    error instanceof ProjectDataError ||
+    error instanceof WorkItemConfigurationError
+  ) return toWorkItemConfigurationErrorResponse(c, error)
+  if (error instanceof FileProofingError) {
+    const status = error.status === 400 || error.status === 403 || error.status === 404 ||
+      error.status === 409 || error.status === 413 || error.status === 422 || error.status === 503
+      ? error.status
+      : 502
+    return c.json({ code: error.code, message: error.message }, status)
+  }
+  if (!(error instanceof RequestIntakeError)) {
+    console.error(error)
+    return c.json({ code: 'RequestIntakeUnavailable', message: 'Request intake is unavailable.' }, 503)
+  }
+  if (error.status >= 500) console.error(error)
+  if (
+    publicBoundary &&
+    (
+      error.code === 'RequestFormUnavailable' ||
+      error.code === 'RequestCapabilityUnavailable' ||
+      error.code === 'RequestThreadUnavailable'
+    )
+  ) {
+    return c.json({ code: 'RequestFormUnavailable', message: 'Request form is unavailable.' }, 404)
+  }
+  const status = error.status === 400 || error.status === 401 || error.status === 403 ||
+    error.status === 404 || error.status === 409 || error.status === 413 ||
+    error.status === 422 || error.status === 429 || error.status === 503
     ? error.status
     : 502
   return c.json({ code: error.code, message: error.message }, status)
@@ -9938,6 +10550,7 @@ export class DynamoDbTeamIssuesClient {
     input: CreateTeamIssueRequestBody,
     actorUserId: string,
     auditContext?: MutationAuditContext,
+    requestConversion?: RequestConversionTransactionInput,
   ) {
     await this.ensureLocalTables()
     let auditPut: ReturnType<typeof createMutationAuditEventPut> = undefined
@@ -9952,15 +10565,31 @@ export class DynamoDbTeamIssuesClient {
     const workflowStatusId = readWorkflowStatusId(input.workflowStatusId)
     const statusCategory = readWorkflowStatusCategory(input.statusCategory)
     const customFieldValues = readCustomFieldValues(input.customFieldValues)
+    const sourceRequestId = requestConversion
+      ? readSourceRequestId(requestConversion.submissionId)
+      : undefined
     const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
     const now = new Date().toISOString()
 
     try {
       const currentIssues = await this.getTeamIssues(directoryId, teamId)
-      const issueId = createUniqueResourceId(
-        title,
-        currentIssues.issues.map((issue) => issue.id),
-      )
+      const existingSourceIssue = sourceRequestId
+        ? currentIssues.issues.find((issue) => issue.sourceRequestId === sourceRequestId)
+        : undefined
+
+      if (existingSourceIssue) {
+        return { issue: existingSourceIssue } satisfies CreateTeamIssueResponse
+      }
+
+      const issueId = sourceRequestId
+        ? createUniqueResourceId(
+            `request-${sourceRequestId}`,
+            currentIssues.issues.map((issue) => issue.id),
+          )
+        : createUniqueResourceId(
+            title,
+            currentIssues.issues.map((issue) => issue.id),
+          )
       const item: TeamIssueItem = {
         schemaVersion: WORK_ITEM_SCHEMA_VERSION,
         revision: 1,
@@ -9972,6 +10601,7 @@ export class DynamoDbTeamIssuesClient {
         title,
         assigneeUserId,
         creatorMemberKey: actorUserId,
+        ...(sourceRequestId ? { sourceRequestId } : {}),
         workflowSchemaVersion,
         workflowStatusId,
         statusCategory,
@@ -10019,6 +10649,7 @@ export class DynamoDbTeamIssuesClient {
           'customFieldValues',
           'dueDate',
           'priority',
+          'sourceRequestId',
         ]),
         metadata: {
           adapter: 'canonical-work-item',
@@ -10026,6 +10657,7 @@ export class DynamoDbTeamIssuesClient {
           teamId,
           issueId,
           projectId: assignedProjectId,
+          sourceRequestId,
           deepLink: createTeamIssueDeepLink(teamId, issueId),
           notificationTitle: title,
           notificationCandidates: [
@@ -10035,6 +10667,15 @@ export class DynamoDbTeamIssuesClient {
         },
       })
       const configurationConditionChecks = input.configurationConditionChecks ?? []
+      const requestConversionUpdate = requestConversion
+        ? createRequestConversionTransactionUpdate(
+            requestConversion,
+            teamId,
+            issueId,
+            assignedProjectId ?? undefined,
+            now,
+          )
+        : undefined
       await this.documentClient.send(
         new TransactWriteCommand({
           TransactItems: [
@@ -10054,6 +10695,7 @@ export class DynamoDbTeamIssuesClient {
             },
             ...(auditPut ? [auditPut] : []),
             ...configurationConditionChecks,
+            ...(requestConversionUpdate ? [requestConversionUpdate] : []),
           ],
         }),
       )
@@ -10076,6 +10718,15 @@ export class DynamoDbTeamIssuesClient {
         isAwsNamedError(error, 'TransactionCanceledException') &&
         hasTransactionConditionalFailure(error)
       ) {
+        if (sourceRequestId) {
+          const currentIssues = await this.getTeamIssues(directoryId, teamId)
+          const existingSourceIssue = currentIssues.issues.find(
+            (issue) => issue.sourceRequestId === sourceRequestId,
+          )
+          if (existingSourceIssue) {
+            return { issue: existingSourceIssue } satisfies CreateTeamIssueResponse
+          }
+        }
         throw createProjectDataConflictError()
       }
 
@@ -12791,6 +13442,10 @@ function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     source: 'dynamodb',
   }
 
+  if (item.sourceRequestId) {
+    issue.sourceRequestId = item.sourceRequestId
+  }
+
   if (item.assignedProjectId) {
     issue.assignedProjectId = item.assignedProjectId
   }
@@ -13677,6 +14332,25 @@ function readAssignedProjectId(value: unknown) {
   return assignedProjectId || null
 }
 
+function readSourceRequestId(value: unknown) {
+  if (value === undefined) {
+    return undefined
+  }
+
+  if (
+    typeof value !== 'string' ||
+    !/^req_[A-Za-z0-9_-]{12,160}$/u.test(value.trim())
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Source request ID is invalid.',
+    )
+  }
+
+  return value.trim()
+}
+
 function readOptionalString(value: unknown, message: string) {
   if (value === undefined) {
     return undefined
@@ -14289,6 +14963,7 @@ workspaceSearch = new DynamoDbWorkspaceSearchClient()
 workspaceSearchProjectionEnabled = shouldEnableWorkspaceSearchProjection()
 workItemConfigurations = createWorkItemConfigurationClient()
 planning = createPlanningClient()
+requestIntake = createDefaultRequestIntakeClient()
 
 /**
  * Server test で外部 service client を差し替えます。
@@ -14308,6 +14983,7 @@ export function configureApiClientsForTest(clients: {
   workspaceSearch?: WorkspaceSearchClient
   workItemConfigurations?: WorkItemConfigurationClient
   planning?: PlanningClient
+  requestIntake?: RequestIntakeClient
 }) {
   cognito = clients.cognito ?? cognito
   dashboardSummary = clients.dashboardSummary ?? dashboardSummary
@@ -14324,6 +15000,7 @@ export function configureApiClientsForTest(clients: {
   if (clients.workspaceSearch) workspaceSearchProjectionEnabled = true
   workItemConfigurations = clients.workItemConfigurations ?? workItemConfigurations
   planning = clients.planning ?? planning
+  requestIntake = clients.requestIntake ?? requestIntake
 }
 
 /**
@@ -14345,6 +15022,7 @@ export function resetApiClientsForTest() {
   workspaceSearchProjectionEnabled = shouldEnableWorkspaceSearchProjection()
   workItemConfigurations = createDefaultWorkItemConfigurationClient()
   planning = new InMemoryPlanningClient()
+  requestIntake = createDefaultRequestIntakeClient()
 }
 
 /**

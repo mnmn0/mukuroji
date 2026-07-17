@@ -843,6 +843,8 @@ export type CanonicalWorkItem = WorkItemBase & {
   assigneeUserId: string
   /** Work Item を作成した Workspace member key です。 */
   creatorMemberKey: string
+  /** Request intake から作成された場合の source submission ID です。 */
+  sourceRequestId?: string
   /** Canonical Work Item は legacy の担当者 literal を持ちません。 */
   assignee?: never
   /** Canonical Work Item は legacy の担当者表示文言 key を持ちません。 */
@@ -955,6 +957,8 @@ export type UpdateWorkItemInput = WorkItemPatch & {
    */
   expectedRevision: number
 }
+
+export * from './request-intake'
 
 /**
  * File を関連付ける resource 種別です。

@@ -40,6 +40,8 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   assigneeUserId: string
   /** Work Item を作成した Workspace member key です。 */
   creatorMemberKey: string
+  /** Request intake から作成された場合の source submission ID です。 */
+  sourceRequestId?: string
   /** Workflow 内の現在 status ID です。 */
   workflowStatusId: string
   /** 横断集計に利用する標準 status category です。 */
@@ -90,6 +92,7 @@ export function isCanonicalWorkItemRecord(value: unknown): value is CanonicalWor
     (value.description === undefined || typeof value.description === 'string') &&
     isNonEmptyString(value.assigneeUserId) &&
     isNonEmptyString(value.creatorMemberKey) &&
+    (value.sourceRequestId === undefined || isNonEmptyString(value.sourceRequestId)) &&
     hasCanonicalProjectAssignment(value) &&
     forbiddenCanonicalWorkItemFields.every((field) => value[field] === undefined) &&
     isNonEmptyString(value.workflowStatusId) &&
