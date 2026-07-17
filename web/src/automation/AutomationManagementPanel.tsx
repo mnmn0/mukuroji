@@ -13,7 +13,7 @@ import type {
   RecurringWork,
   UpdateAutomationTemplateInput,
 } from '@mukuroji/contracts'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../i18n'
 import {
   AutomationRuleEditor,
@@ -25,8 +25,10 @@ import {
 import { AutomationInboundWebhooksPanel } from './AutomationInboundWebhooksPanel'
 import {
   automationManagementTabs,
+  resolveAutomationManagementTabTarget,
   type AutomationManagementTab,
 } from './tabs'
+import { refreshAutomationTemplateApplication } from './templateApplicationRefresh'
 
 const tabLabelKeys: Record<AutomationManagementTab, MessageKey> = {
   rules: 'automation.tab.rules',
@@ -40,6 +42,40 @@ const templateKindLabelKeys: Record<AutomationTemplate['kind'], MessageKey> = {
   'work-item': 'automation.template.kind.workItem',
   project: 'automation.template.kind.project',
   workflow: 'automation.template.kind.workflow',
+}
+
+const triggerTypeLabelKeys: Record<string, MessageKey> = {
+  status: 'automation.trigger.statusChange',
+  assignee: 'automation.trigger.assigneeChange',
+  due: 'automation.trigger.dueDate',
+  'custom-field': 'automation.trigger.customFieldChange',
+  comment: 'automation.trigger.comment',
+  form: 'automation.trigger.formSubmission',
+  webhook: 'automation.trigger.webhook',
+  schedule: 'automation.trigger.schedule',
+}
+
+const actionTypeLabelKeys: Record<string, MessageKey> = {
+  assign: 'automation.action.assign',
+  move: 'automation.action.moveStatus',
+  update: 'automation.action.updateFields',
+  create: 'automation.action.createWorkItem',
+  comment: 'automation.action.addComment',
+  notify: 'automation.action.notify',
+  approval: 'automation.action.requestApproval',
+  webhook: 'automation.action.webhook',
+}
+
+const automationStatusLabelKeys: Record<string, MessageKey> = {
+  active: 'automation.status.active',
+  paused: 'automation.status.paused',
+  archived: 'automation.status.archived',
+  pending: 'automation.status.pending',
+  running: 'automation.status.running',
+  succeeded: 'automation.status.succeeded',
+  failed: 'automation.status.failed',
+  'dead-letter': 'automation.status.deadLetter',
+  skipped: 'automation.status.skipped',
 }
 
 /** Workflow template application の scope selector option です。 */
@@ -170,10 +206,29 @@ export function AutomationManagementPanel({
 }: AutomationManagementPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [selectedTab, setSelectedTab] = useState<AutomationManagementTab>(initialTab)
+  const pendingTabFocus = useRef<AutomationManagementTab | undefined>(undefined)
   const visibleTabs = canViewWebhooks
     ? automationManagementTabs
     : automationManagementTabs.filter((tab) => tab !== 'webhooks')
   const activeTab = canViewWebhooks || selectedTab !== 'webhooks' ? selectedTab : 'rules'
+
+  useEffect(() => {
+    if (pendingTabFocus.current !== activeTab) return
+    document.getElementById(`automation-tab-${activeTab}`)?.focus()
+    pendingTabFocus.current = undefined
+  }, [activeTab])
+
+  function handleTabKeyDown(
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    tab: AutomationManagementTab,
+  ) {
+    const nextTab = resolveAutomationManagementTabTarget(tab, event.key, visibleTabs)
+    if (!nextTab) return
+
+    event.preventDefault()
+    pendingTabFocus.current = nextTab
+    setSelectedTab(nextTab)
+  }
 
   if (isLoading) {
     return <AutomationLoadingState locale={locale} />
@@ -211,8 +266,10 @@ export function AutomationManagementPanel({
               id={`automation-tab-${tab}`}
               key={tab}
               role="tab"
+              tabIndex={activeTab === tab ? 0 : -1}
               type="button"
               onClick={() => setSelectedTab(tab)}
+              onKeyDown={(event) => handleTabKeyDown(event, tab)}
             >
               {t(tabLabelKeys[tab])}
             </button>
@@ -303,6 +360,7 @@ export function AutomationManagementPanel({
   )
 }
 
+/** Automation rule tab の props です。 */
 type RulesTabProps = {
   /** 表示 locale です。 */
   locale: Locale
@@ -354,8 +412,14 @@ function RulesTab({
             <ResourceCard
               key={id}
               description={[
-                trigger ? `${t('automation.rule.trigger')}: ${formatType(trigger)}` : '',
-                actions.length > 0 ? `${t('automation.rule.action')}: ${actions.map(formatType).join(', ')}` : '',
+                trigger
+                  ? `${t('automation.rule.trigger')}: ${formatType(trigger, t, 'trigger')}`
+                  : '',
+                actions.length > 0
+                  ? `${t('automation.rule.action')}: ${actions
+                    .map((action) => formatType(action, t, 'action'))
+                    .join(', ')}`
+                  : '',
               ].filter(Boolean).join(' · ')}
               locale={locale}
               name={readResourceName(rule, t('automation.common.unnamed'))}
@@ -381,6 +445,7 @@ function RulesTab({
   )
 }
 
+/** Automation template tab の props です。 */
 type TemplatesTabProps = {
   /** 表示 locale です。 */
   locale: Locale
@@ -542,6 +607,7 @@ function TemplatesTab({
   )
 }
 
+/** Automation template application editor の props です。 */
 type AutomationTemplateApplicationEditorProps = {
   /** 表示 locale です。 */
   locale: Locale
@@ -581,6 +647,7 @@ export function AutomationTemplateApplicationEditor({
       : workflowTargetValues[0] ?? '',
   )
   const [application, setApplication] = useState(initialApplication)
+  const [refreshErrorMessage, setRefreshErrorMessage] = useState<string>()
   const [isRefreshing, setIsRefreshing] = useState(false)
   const targetsAvailable = template.kind === 'project'
     ? projectTargetValues.length > 0
@@ -600,12 +667,14 @@ export function AutomationTemplateApplicationEditor({
 
   async function refreshApplication() {
     if (!application || !onRefresh) return
-    setIsRefreshing(true)
-    try {
-      setApplication(await onRefresh(application.id))
-    } finally {
-      setIsRefreshing(false)
-    }
+    await refreshAutomationTemplateApplication({
+      applicationId: application.id,
+      errorMessage: t('automation.template.application.refreshError'),
+      onErrorChange: setRefreshErrorMessage,
+      onRefresh,
+      onRefreshingChange: setIsRefreshing,
+      onSuccess: setApplication,
+    })
   }
 
   return (
@@ -665,16 +734,17 @@ export function AutomationTemplateApplicationEditor({
           onRefresh={onRefresh ? refreshApplication : undefined}
         />
       ) : null}
+      {refreshErrorMessage ? (
+        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700" role="alert">
+          {refreshErrorMessage}
+        </p>
+      ) : null}
     </form>
   )
 }
 
-function TemplateApplicationResult({
-  application,
-  isRefreshing,
-  locale,
-  onRefresh,
-}: {
+/** Template application result の props です。 */
+type TemplateApplicationResultProps = {
   /** 表示する durable receipt です。 */
   application: AutomationTemplateApplication
   /** Receipt の再取得中かどうかです。 */
@@ -683,7 +753,14 @@ function TemplateApplicationResult({
   locale: Locale
   /** 非終端 receipt の再取得 callback です。 */
   onRefresh?: () => Promise<void>
-}) {
+}
+
+function TemplateApplicationResult({
+  application,
+  isRefreshing,
+  locale,
+  onRefresh,
+}: TemplateApplicationResultProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const result = application.result
   return (
@@ -777,6 +854,7 @@ function formatWorkflowTargetLabel(
       : ''}`
 }
 
+/** Recurring Work tab の props です。 */
 type RecurringTabProps = {
   /** 表示 locale です。 */
   locale: Locale
@@ -860,6 +938,7 @@ function RecurringTab({
   )
 }
 
+/** Automation execution history tab の props です。 */
 type RunsTabProps = {
   /** 表示 locale です。 */
   locale: Locale
@@ -898,7 +977,10 @@ function RunsTab({ busyOperation, executions, locale, onRetry, readOnly }: RunsT
                   <h3 className="break-all text-sm font-semibold text-[var(--workbench-text)]">
                     {readText(execution, 'ruleName') || `${t('automation.runs.execution')} ${id}`}
                   </h3>
-                  <StatusBadge status={status} />
+                  <StatusBadge
+                    label={formatType(status, t, 'status')}
+                    status={status}
+                  />
                 </div>
                 <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">
                   {startedAt ? formatDateTime(startedAt, locale) : id}
@@ -933,11 +1015,20 @@ function RunsTab({ busyOperation, executions, locale, onRetry, readOnly }: RunsT
                   return (
                     <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-lg bg-[var(--workbench-surface-muted)] px-3 py-2" key={`${id}-action-${index}`}>
                       <span className="text-xs font-semibold text-[var(--workbench-text)]">
-                        {formatType(readType(result) || readText(result, 'actionId') || `${t('automation.rule.action')} ${index + 1}`)}
+                        {formatType(
+                          readType(result) ||
+                            readText(result, 'actionId') ||
+                            `${t('automation.rule.action')} ${index + 1}`,
+                          t,
+                          'action',
+                        )}
                       </span>
                       <span className="flex min-w-0 items-center gap-2">
                         {actionFailure ? <span className="break-all text-xs font-medium text-red-700">{actionFailure}</span> : null}
-                        <StatusBadge status={actionStatus} />
+                        <StatusBadge
+                          label={formatType(actionStatus, t, 'status')}
+                          status={actionStatus}
+                        />
                       </span>
                     </div>
                   )
@@ -951,6 +1042,7 @@ function RunsTab({ busyOperation, executions, locale, onRetry, readOnly }: RunsT
   )
 }
 
+/** Resource collection の props です。 */
 type ResourceCollectionProps<TItem> = {
   /** 表示する resource です。 */
   items: TItem[]
@@ -966,6 +1058,7 @@ function ResourceCollection<TItem>({ emptyMessage, items, renderItem }: Resource
     : <EmptyState message={emptyMessage} />
 }
 
+/** Automation resource card の props です。 */
 type ResourceCardProps = {
   /** Resource name です。 */
   name: string
@@ -990,7 +1083,10 @@ function ResourceCard({ children, description, locale, name, resource, status }:
       <div className="min-w-0">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <h3 className="break-words text-sm font-semibold text-[var(--workbench-text)]">{name}</h3>
-          <StatusBadge status={status} />
+          <StatusBadge
+            label={formatType(status, t, 'status')}
+            status={status}
+          />
           {version !== undefined ? (
             <span className="workbench-badge">
               {t('automation.version').replace('{version}', String(version))}
@@ -1008,6 +1104,7 @@ function ResourceCard({ children, description, locale, name, resource, status }:
   )
 }
 
+/** Automation status badge の props です。 */
 type StatusBadgeProps = {
   /** 表示する status です。 */
   status: string
@@ -1025,9 +1122,10 @@ function StatusBadge({ label, status }: StatusBadgeProps) {
         ? 'workbench-badge-primary'
         : 'workbench-badge-warning'
 
-  return <span className={className}>{label ?? formatType(status)}</span>
+  return <span className={className}>{label ?? formatUnknownType(status)}</span>
 }
 
+/** Automation empty state の props です。 */
 type EmptyStateProps = {
   /** 空状態 message です。 */
   message: string
@@ -1119,7 +1217,22 @@ function toRecord(value: unknown): Record<string, unknown> {
     : {}
 }
 
-function formatType(value: string) {
+function formatType(
+  value: string,
+  t: ReturnType<typeof createTranslator>,
+  category: 'trigger' | 'action' | 'status',
+) {
+  const labelKeys = category === 'trigger'
+    ? triggerTypeLabelKeys
+    : category === 'action'
+      ? actionTypeLabelKeys
+      : automationStatusLabelKeys
+  const labelKey = labelKeys[value]
+
+  return labelKey ? t(labelKey) : formatUnknownType(value)
+}
+
+function formatUnknownType(value: string) {
   return value.replaceAll('_', ' ').replaceAll('-', ' ')
 }
 

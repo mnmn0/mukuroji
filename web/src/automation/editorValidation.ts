@@ -12,6 +12,7 @@ import type {
   CreateAutomationTemplateInputForKind,
   WorkflowDefinition,
 } from '@mukuroji/contracts'
+import { createTranslator, type Locale } from '../i18n'
 import { createRecurringSchedule, type RecurringScheduleInput } from './recurringSchedule'
 
 /** Trigger type が設定値を必須とするか返します。 */
@@ -117,6 +118,23 @@ export function parseAutomationTemplatePayload(value: string):
   ) {
     return { error: 'invalid-value' }
   }
+  if (
+    parsed.assignedProjectId !== undefined &&
+    parsed.assignedProjectId !== null &&
+    typeof parsed.assignedProjectId !== 'string'
+  ) {
+    return { error: 'invalid-value' }
+  }
+  if (
+    (parsed.assigneeUserId !== undefined && typeof parsed.assigneeUserId !== 'string') ||
+    (parsed.customFieldValues !== undefined && !isRecord(parsed.customFieldValues)) ||
+    (parsed.description !== undefined && typeof parsed.description !== 'string') ||
+    (parsed.dueDate !== undefined && typeof parsed.dueDate !== 'string') ||
+    (parsed.teamId !== undefined && typeof parsed.teamId !== 'string') ||
+    (parsed.workflowStatusId !== undefined && typeof parsed.workflowStatusId !== 'string')
+  ) {
+    return { error: 'invalid-value' }
+  }
   return { payload: parsed as AutomationWorkItemTemplatePayload }
 }
 
@@ -190,16 +208,34 @@ export function isAutomationWorkflowTemplatePayloadValid(payload: WorkflowDefini
   )
 }
 
-/** 新しい Workflow template editor に表示する有効な初期 definition を返します。 */
-export function createDefaultAutomationWorkflowTemplatePayload(): WorkflowDefinition {
+/** 新しい Workflow template editor に現在 locale の表示名で有効な初期 definition を返します。 */
+export function createDefaultAutomationWorkflowTemplatePayload(
+  locale: Locale = 'en',
+): WorkflowDefinition {
+  const t = createTranslator(locale)
   return {
     id: 'workflow-template',
-    name: 'Delivery workflow',
+    name: t('workItems.configuration.workflowTitle'),
     initialStatusId: 'backlog',
     statuses: [
-      { category: 'backlog', id: 'backlog', name: 'Backlog', sortOrder: 0 },
-      { category: 'started', id: 'in-progress', name: 'In progress', sortOrder: 1 },
-      { category: 'completed', id: 'done', name: 'Done', sortOrder: 2 },
+      {
+        category: 'backlog',
+        id: 'backlog',
+        name: t('workItems.statusCategory.backlog'),
+        sortOrder: 0,
+      },
+      {
+        category: 'started',
+        id: 'in-progress',
+        name: t('tasks.status.in-progress'),
+        sortOrder: 1,
+      },
+      {
+        category: 'completed',
+        id: 'done',
+        name: t('tasks.status.done'),
+        sortOrder: 2,
+      },
     ],
     transitions: [
       { fromStatusId: 'backlog', toStatusId: 'in-progress' },

@@ -65,8 +65,7 @@ export function BulkOperationResultPanel({
   const canUndo = Boolean(
     operation &&
     onUndo &&
-    operation.items.some((item) => item.undoable) &&
-    succeededItems.length > 0 &&
+    succeededItems.some((item) => item.undoable) &&
     operation.status !== 'running' &&
     operation.status !== 'undone',
   )

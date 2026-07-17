@@ -243,6 +243,28 @@ describe('BulkOperationToolbar', () => {
     expect(html).not.toContain('Undo succeeded items')
   })
 
+  test('does not offer undo when only a failed item is marked undoable', () => {
+    const mismatchedUndoOperation = {
+      ...partialOperation,
+      items: partialOperation.items.map((item) => ({
+        ...item,
+        undoable: item.status === 'failed',
+      })),
+    }
+    const html = renderToStaticMarkup(
+      <BulkOperationResultPanel
+        operation={mismatchedUndoOperation}
+        t={createTranslator('en')}
+        onClose={() => undefined}
+        onUndo={() => undefined}
+      />,
+    )
+
+    expect(mismatchedUndoOperation.items.some((item) => item.status === 'succeeded')).toBe(true)
+    expect(mismatchedUndoOperation.items.some((item) => item.undoable)).toBe(true)
+    expect(html).not.toContain('Undo succeeded items')
+  })
+
   test('disables selection and actions in read-only mode', () => {
     const html = renderToStaticMarkup(
       <BulkOperationToolbar

@@ -34,7 +34,6 @@ import {
   type AutomationTemplateApplicationTarget,
   type AutomationTrigger,
   type AutomationValue,
-  type AutomationWorkItemTemplatePayload,
   type BulkOperation,
   type BulkOperationItemResult,
   type BulkOperationPreview,
@@ -3344,14 +3343,46 @@ export function validateCreateAutomationTemplateInput(
         'workflowStatusId',
       ], 'Work Item template payload')
       const title = requireBoundedText(payload.title, 'Work Item template title', 500)
-      const normalized = structuredClone(payload) as Record<string, AutomationValue>
-      normalized.title = title
-      if (!isAutomationValue(normalized)) throw invalidInput('Work Item template payload is invalid.')
+      const assignedProjectId = payload.assignedProjectId
       if (
-        normalized.priority !== undefined &&
-        normalized.priority !== 'low' &&
-        normalized.priority !== 'medium' &&
-        normalized.priority !== 'high'
+        assignedProjectId !== undefined &&
+        assignedProjectId !== null &&
+        typeof assignedProjectId !== 'string'
+      ) {
+        throw invalidInput('Work Item template assigned Project ID must be a string or null.')
+      }
+      const assigneeUserId = readOptionalTemplateString(
+        payload.assigneeUserId,
+        'Work Item template assignee user ID',
+      )
+      const description = readOptionalTemplateString(
+        payload.description,
+        'Work Item template description',
+      )
+      const dueDate = readOptionalTemplateString(
+        payload.dueDate,
+        'Work Item template due date',
+      )
+      const teamId = readOptionalTemplateString(
+        payload.teamId,
+        'Work Item template Team ID',
+      )
+      const workflowStatusId = readOptionalTemplateString(
+        payload.workflowStatusId,
+        'Work Item template Workflow status ID',
+      )
+      let customFieldValues: Record<string, AutomationValue> | undefined
+      if (payload.customFieldValues !== undefined) {
+        if (!isRecord(payload.customFieldValues) || !isAutomationValue(payload.customFieldValues)) {
+          throw invalidInput('Work Item template custom field values must be an object.')
+        }
+        customFieldValues = structuredClone(payload.customFieldValues) as Record<string, AutomationValue>
+      }
+      if (
+        payload.priority !== undefined &&
+        payload.priority !== 'low' &&
+        payload.priority !== 'medium' &&
+        payload.priority !== 'high'
       ) {
         throw invalidInput('Work Item template priority is invalid.')
       }
@@ -3359,7 +3390,17 @@ export function validateCreateAutomationTemplateInput(
         kind: input.kind,
         name,
         enabled,
-        payload: normalized as AutomationWorkItemTemplatePayload,
+        payload: {
+          title,
+          ...(assignedProjectId === undefined ? {} : { assignedProjectId }),
+          ...(assigneeUserId === undefined ? {} : { assigneeUserId }),
+          ...(customFieldValues === undefined ? {} : { customFieldValues }),
+          ...(description === undefined ? {} : { description }),
+          ...(dueDate === undefined ? {} : { dueDate }),
+          ...(payload.priority === undefined ? {} : { priority: payload.priority }),
+          ...(teamId === undefined ? {} : { teamId }),
+          ...(workflowStatusId === undefined ? {} : { workflowStatusId }),
+        },
       }
     }
     case 'project': {
@@ -5725,6 +5766,12 @@ function requireBoundedText(value: unknown, label: string, maximum: number) {
   const text = requireText(value, label)
   if (text.length > maximum) throw invalidInput(`${label} must be ${maximum} characters or fewer.`)
   return text
+}
+
+function readOptionalTemplateString(value: unknown, label: string) {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') throw invalidInput(`${label} must be a string.`)
+  return value
 }
 
 function requireBoolean(value: unknown, label: string) {

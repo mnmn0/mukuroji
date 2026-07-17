@@ -84,13 +84,21 @@ const recurringCadences = ['daily', 'weekly', 'monthly'] as const
 const catchUpPolicies = ['skip', 'latest', 'all'] as const
 const recurringWeekdays = [0, 1, 2, 3, 4, 5, 6] as const
 
+/** Automation rule editor で選択できる trigger type です。 */
 type AutomationTriggerType = (typeof automationTriggerTypes)[number]
+/** Schedule 以外の Automation trigger type です。 */
 type NonScheduleAutomationTriggerType = Exclude<AutomationTriggerType, 'schedule'>
+/** Automation rule editor で選択できる action type です。 */
 type AutomationActionType = (typeof automationActionTypes)[number]
+/** Automation condition editor で選択できる operator です。 */
 type ConditionOperator = (typeof conditionOperators)[number]
+/** Automation template editor で選択できる template kind です。 */
 type TemplateKind = (typeof templateKinds)[number]
+/** Recurring schedule editor で選択できる cadence です。 */
 type RecurringCadence = (typeof recurringCadences)[number]
+/** Recurring schedule editor で選択できる catch-up policy です。 */
 type CatchUpPolicy = (typeof catchUpPolicies)[number]
+/** Recurring schedule editor で選択できる曜日です。 */
 type RecurringWeekday = (typeof recurringWeekdays)[number]
 
 const triggerLabelKeys: Record<AutomationTriggerType, MessageKey> = {
@@ -410,7 +418,7 @@ export function AutomationRuleEditor({
             <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
               {t('automation.recurring.timeZone')}
               <input
-                aria-invalid={!isScheduleValid}
+                aria-invalid={!isScheduleTimeValid}
                 className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
                 data-testid="automation-rule-schedule-time-zone"
                 required
@@ -421,7 +429,7 @@ export function AutomationRuleEditor({
             <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
               {t('automation.recurring.localTime')}
               <input
-                aria-invalid={!isScheduleValid}
+                aria-invalid={!isScheduleTimeValid}
                 className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
                 data-testid="automation-rule-schedule-local-time"
                 required
@@ -570,7 +578,7 @@ export function AutomationTemplateEditor({
     tone: 'blue',
   })
   const [workflowPayload, setWorkflowPayload] = useState<WorkflowDefinition>(
-    createDefaultAutomationWorkflowTemplatePayload,
+    () => createDefaultAutomationWorkflowTemplatePayload(locale),
   )
   const payloadResult = useMemo(
     () => parseAutomationTemplatePayload(payloadJson),
@@ -606,7 +614,7 @@ export function AutomationTemplateEditor({
         setName('')
         setPayloadJson('{}')
         setProjectPayload({ tone: 'blue' })
-        setWorkflowPayload(createDefaultAutomationWorkflowTemplatePayload())
+        setWorkflowPayload(createDefaultAutomationWorkflowTemplatePayload(locale))
       },
     )
   }
@@ -706,7 +714,7 @@ export function AutomationTemplateUpdateEditor({
   const [workflowPayload, setWorkflowPayload] = useState<WorkflowDefinition>(() =>
     template.kind === 'workflow'
       ? structuredClone(template.payload)
-      : createDefaultAutomationWorkflowTemplatePayload()
+      : createDefaultAutomationWorkflowTemplatePayload(locale)
   )
   const payloadResult = useMemo(
     () => parseAutomationTemplatePayload(payloadJson),
@@ -1103,7 +1111,7 @@ export function RecurringWorkEditor({
         <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
           {t('automation.recurring.timeZone')}
           <input
-            aria-invalid={!isScheduleValid}
+            aria-invalid={!isScheduleTimeValid}
             className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
             placeholder="Asia/Tokyo"
             required
@@ -1114,7 +1122,7 @@ export function RecurringWorkEditor({
         <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
           {t('automation.recurring.localTime')}
           <input
-            aria-invalid={!isScheduleValid}
+            aria-invalid={!isScheduleTimeValid}
             className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
             required
             type="time"
@@ -1187,6 +1195,7 @@ export function RecurringWorkEditor({
   )
 }
 
+/** Select field へ表示する option です。 */
 type SelectOption = {
   /** Option value です。 */
   value: string
@@ -1194,6 +1203,7 @@ type SelectOption = {
   label: string
 }
 
+/** Select field の props です。 */
 type SelectFieldProps = {
   /** Field label です。 */
   label: string
@@ -1225,6 +1235,7 @@ function SelectField({ label, onChange, options, testId, value }: SelectFieldPro
   )
 }
 
+/** Number field の props です。 */
 type NumberFieldProps = {
   /** Field label です。 */
   label: string

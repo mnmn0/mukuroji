@@ -562,6 +562,55 @@ describe('automation management create idempotency', () => {
     )).rejects.toMatchObject({ code: 'IdempotencyConflict' })
   })
 
+  test('validates every Work Item template field at the server boundary', () => {
+    expect(validateCreateAutomationTemplateInput({
+      kind: 'work-item',
+      name: 'Review starter',
+      enabled: true,
+      payload: {
+        assignedProjectId: null,
+        assigneeUserId: 'reviewer@example.com',
+        customFieldValues: { effort: 3, labels: ['review'] },
+        description: '',
+        dueDate: '2026-07-31',
+        priority: 'high',
+        teamId: 'core',
+        title: 'Review',
+        workflowStatusId: 'backlog',
+      },
+    })).toMatchObject({
+      kind: 'work-item',
+      payload: {
+        assignedProjectId: null,
+        assigneeUserId: 'reviewer@example.com',
+        customFieldValues: { effort: 3, labels: ['review'] },
+        description: '',
+        dueDate: '2026-07-31',
+        priority: 'high',
+        teamId: 'core',
+        title: 'Review',
+        workflowStatusId: 'backlog',
+      },
+    })
+
+    for (const payload of [
+      { assignedProjectId: 1, title: 'Review' },
+      { assigneeUserId: null, title: 'Review' },
+      { customFieldValues: [], title: 'Review' },
+      { description: false, title: 'Review' },
+      { dueDate: 1, title: 'Review' },
+      { teamId: {}, title: 'Review' },
+      { title: 'Review', workflowStatusId: 2 },
+    ]) {
+      expect(() => validateCreateAutomationTemplateInput({
+        kind: 'work-item',
+        name: 'Unsafe',
+        enabled: true,
+        payload,
+      })).toThrow('Work Item template')
+    }
+  })
+
   test('keeps template kinds immutable and validates Project, Workflow, update, and approval payloads strictly', async () => {
     expect(validateCreateAutomationTemplateInput({
       kind: 'project',

@@ -1254,6 +1254,9 @@ test('automation workers consume the audit outbox and run recurring schedules wi
     EventSourceArn: {
       'Fn::GetAtt': ['AuditEventsTable0723963E', 'StreamArn'],
     },
+    FunctionName: {
+      Ref: 'AutomationEventFunction5E8CB543',
+    },
     FunctionResponseTypes: ['ReportBatchItemFailures'],
     MaximumRetryAttempts: 3,
     StartingPosition: 'TRIM_HORIZON',

@@ -4,6 +4,7 @@ import {
   AutomationManagementPanel,
   AutomationTemplateApplicationEditor,
 } from '../src/automation/AutomationManagementPanel'
+import { createTranslator } from '../src/i18n'
 import { loadAutomationManagementData } from '../src/automation/managementData'
 import {
   AutomationInboundWebhooksPanel,
@@ -30,6 +31,8 @@ import {
 } from '../src/automation/editorValidation'
 import { submitAutomationEditorCreate } from '../src/automation/editorSubmission'
 import { runAutomationManagementMutation } from '../src/automation/mutation'
+import { resolveAutomationManagementTabTarget } from '../src/automation/tabs'
+import { refreshAutomationTemplateApplication } from '../src/automation/templateApplicationRefresh'
 import {
   activeAutomationRuleFixture,
   activeInboundWebhookEndpointFixture,
@@ -86,6 +89,130 @@ describe('AutomationManagementPanel', () => {
       'idempotency-1',
       'idempotency-1',
     ])
+  })
+
+  test('uses roving tab stops and wraps keyboard navigation across visible tabs', () => {
+    const html = renderToStaticMarkup(
+      <AutomationManagementPanel
+        canViewWebhooks={false}
+        executions={[]}
+        initialTab="templates"
+        locale="en"
+        recurringWork={[]}
+        rules={[]}
+        teams={teams}
+        templates={[]}
+      />,
+    )
+    const tabMarkup = (tab: 'rules' | 'templates' | 'recurring' | 'runs') => {
+      const markerIndex = html.indexOf(`data-testid="automation-tab-${tab}"`)
+      return html.slice(
+        html.lastIndexOf('<button', markerIndex),
+        html.indexOf('</button>', markerIndex),
+      )
+    }
+    const visibleTabs = ['rules', 'templates', 'recurring', 'runs'] as const
+
+    expect(tabMarkup('rules')).toContain('aria-selected="false"')
+    expect(tabMarkup('rules')).toContain('tabindex="-1"')
+    expect(tabMarkup('templates')).toContain('aria-selected="true"')
+    expect(tabMarkup('templates')).toContain('tabindex="0"')
+    expect(tabMarkup('recurring')).toContain('tabindex="-1"')
+    expect(tabMarkup('runs')).toContain('tabindex="-1"')
+    expect(resolveAutomationManagementTabTarget('rules', 'ArrowLeft', visibleTabs))
+      .toBe('runs')
+    expect(resolveAutomationManagementTabTarget('runs', 'ArrowRight', visibleTabs))
+      .toBe('rules')
+    expect(resolveAutomationManagementTabTarget('recurring', 'Home', visibleTabs))
+      .toBe('rules')
+    expect(resolveAutomationManagementTabTarget('templates', 'End', visibleTabs))
+      .toBe('runs')
+    expect(resolveAutomationManagementTabTarget('templates', 'Enter', visibleTabs))
+      .toBeUndefined()
+  })
+
+  test('localizes known trigger, action, and status identifiers while retaining safe fallbacks', () => {
+    const japaneseRuleHtml = renderToStaticMarkup(
+      <AutomationManagementPanel
+        executions={[]}
+        locale="ja"
+        recurringWork={[]}
+        rules={[activeAutomationRuleFixture]}
+        teams={teams}
+        templates={[]}
+      />,
+    )
+    const englishRuleHtml = renderToStaticMarkup(
+      <AutomationManagementPanel
+        executions={[]}
+        locale="en"
+        recurringWork={[]}
+        rules={[activeAutomationRuleFixture]}
+        teams={teams}
+        templates={[]}
+      />,
+    )
+    const executionHtml = renderToStaticMarkup(
+      <AutomationManagementPanel
+        executions={[deadLetterAutomationExecutionFixture]}
+        initialTab="runs"
+        locale="ja"
+        recurringWork={[]}
+        rules={[]}
+        teams={teams}
+        templates={[]}
+      />,
+    )
+
+    expect(japaneseRuleHtml).toContain('トリガー: ステータス変更')
+    expect(japaneseRuleHtml).toContain('アクション: コメントを追加')
+    expect(japaneseRuleHtml).toContain('>有効</span>')
+    expect(englishRuleHtml).toContain('Trigger: Status changed')
+    expect(englishRuleHtml).toContain('Action: Add comment')
+    expect(englishRuleHtml).toContain('>Active</span>')
+    expect(executionHtml).toContain('>デッドレター</span>')
+    expect(executionHtml).toContain('>失敗</span>')
+    expect(executionHtml).toContain('rule outbound webhook:v2:0')
+  })
+
+  test('catches template application refresh failures and restores refreshing state', async () => {
+    const errorChanges: Array<string | undefined> = []
+    const refreshingChanges: boolean[] = []
+    const applications: typeof projectTemplateApplicationFixture[] = []
+    const errorMessage = createTranslator('ja')(
+      'automation.template.application.refreshError',
+    )
+
+    await expect(refreshAutomationTemplateApplication({
+      applicationId: projectTemplateApplicationFixture.id,
+      errorMessage,
+      onErrorChange: (message) => errorChanges.push(message),
+      onRefresh: async () => {
+        throw new Error('Refresh failed')
+      },
+      onRefreshingChange: (isRefreshing) => refreshingChanges.push(isRefreshing),
+      onSuccess: (application) => applications.push(application),
+    })).resolves.toBeUndefined()
+
+    expect(errorChanges).toEqual([
+      undefined,
+      'Application receipt の状態を更新できませんでした。もう一度お試しください。',
+    ])
+    expect(refreshingChanges).toEqual([true, false])
+    expect(applications).toEqual([])
+
+    await refreshAutomationTemplateApplication({
+      applicationId: projectTemplateApplicationFixture.id,
+      errorMessage: createTranslator('en')('automation.template.application.refreshError'),
+      onErrorChange: (message) => errorChanges.push(message),
+      onRefresh: async () => projectTemplateApplicationFixture,
+      onRefreshingChange: (isRefreshing) => refreshingChanges.push(isRefreshing),
+      onSuccess: (application) => applications.push(application),
+    })
+
+    expect(errorChanges.at(-1)).toBeUndefined()
+    expect(refreshingChanges.slice(-2)).toEqual([true, false])
+    expect(applications).toEqual([projectTemplateApplicationFixture])
   })
 
   test('shows all trigger and action choices plus active and paused rule controls', () => {
@@ -798,7 +925,7 @@ describe('AutomationManagementPanel', () => {
     expect(recurringHtml).toContain('America/New_York')
     expect(recurringHtml).toContain('Next run')
     expect(recurringHtml).toContain('Mar 8, 2026 at 9:00 AM')
-    expect(executionHtml).toContain('dead letter')
+    expect(executionHtml).toContain('Dead letter')
     expect(executionHtml).toContain('The execution reached the retry limit')
     expect(executionHtml).toContain('rule outbound webhook:v2:0')
     expect(executionHtml).toContain('Retry')
@@ -842,7 +969,7 @@ describe('AutomationManagementPanel', () => {
       />,
     )
 
-    expect(html).toContain('dead letter')
+    expect(html).toContain('Dead letter')
     expect(html).not.toContain('data-testid="automation-run-retry-')
   })
 })
