@@ -554,6 +554,19 @@ export class CdkStack extends cdk.Stack {
       minValue: 1,
       description: 'Number of days immutable audit events are retained before DynamoDB TTL expiry.',
     });
+    const workspaceAuditPseudonymKey = new cdk.CfnParameter(
+      this,
+      'WorkspaceAuditPseudonymKey',
+      {
+        type: 'String',
+        noEcho: true,
+        allowedPattern: '^[0-9a-f]{64}$',
+        constraintDescription:
+          'WorkspaceAuditPseudonymKey must be exactly 64 lowercase hexadecimal characters.',
+        description:
+          'Stable 32-byte random HMAC key encoded as lowercase hexadecimal for non-PII Workspace member and invitation audit identifiers.',
+      },
+    );
     const fileRetentionDays = new cdk.CfnParameter(this, 'FileRetentionDays', {
       type: 'Number',
       default: 30,
@@ -686,6 +699,14 @@ export class CdkStack extends cdk.Stack {
       partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'startedAtExecutionId', type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    const planningTable = new dynamodb.Table(this, 'PlanningTable', {
+      partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
     const teamIssueEventsTable = new dynamodb.Table(this, 'TeamIssueEventsTable', {
@@ -1045,8 +1066,11 @@ export class CdkStack extends cdk.Stack {
         MUKUROJI_TEAM_ISSUES_TABLE: workItemsTable.tableName,
         MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
         MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
+        MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:
+          workspaceAuditPseudonymKey.valueAsString,
         NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
         NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
+        PLANNING_TABLE_NAME: planningTable.tableName,
         REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
@@ -1158,6 +1182,7 @@ export class CdkStack extends cdk.Stack {
           automationTable.tableArn,
           workItemsTable.tableArn,
           workItemConfigurationTable.tableArn,
+          planningTable.tableArn,
           teamIssueEventsTable.tableArn,
           projectDirectoryTable.tableArn,
           auditEventsTable.tableArn,
@@ -1171,8 +1196,23 @@ export class CdkStack extends cdk.Stack {
     if (!apiFunction.role) {
       throw new Error('API Lambda execution role was not created.');
     }
+    const apiPlanningDataPolicy = new iam.Policy(this, 'ApiPlanningDataPolicy', {
+      statements: [new iam.PolicyStatement({
+        actions: [
+          'dynamodb:ConditionCheckItem',
+          'dynamodb:DeleteItem',
+          'dynamodb:DescribeTable',
+          'dynamodb:GetItem',
+          'dynamodb:PutItem',
+          'dynamodb:Query',
+          'dynamodb:UpdateItem',
+        ],
+        resources: [planningTable.tableArn],
+      })],
+    });
     apiFunction.role.attachInlinePolicy(apiAutomationDataPolicy);
     apiFunction.role.attachInlinePolicy(apiWorkItemConfigurationDataPolicy);
+    apiFunction.role.attachInlinePolicy(apiPlanningDataPolicy);
     apiFunction.role.attachInlinePolicy(apiTransactWritePolicy);
     apiFunction.role.attachInlinePolicy(new iam.Policy(this, 'ApiAutomationWebhookSecretPolicy', {
       statements: [new iam.PolicyStatement({
@@ -1991,6 +2031,9 @@ export class CdkStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'AutomationTableName', {
       value: automationTable.tableName,
+    });
+    new cdk.CfnOutput(this, 'PlanningTableName', {
+      value: planningTable.tableName,
     });
     new cdk.CfnOutput(this, 'TeamIssueEventsTableName', {
       value: teamIssueEventsTable.tableName,

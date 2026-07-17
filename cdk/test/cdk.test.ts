@@ -79,6 +79,13 @@ test('fresh deployment requires explicit external Cognito and workspace paramete
     MinLength: 1,
     AllowedPattern: '^\\S+$',
   }));
+  expect(parameters.WorkspaceAuditPseudonymKey).toEqual(expect.objectContaining({
+    Type: 'String',
+    NoEcho: true,
+    AllowedPattern: '^[0-9a-f]{64}$',
+    ConstraintDescription:
+      'WorkspaceAuditPseudonymKey must be exactly 64 lowercase hexadecimal characters.',
+  }));
   expect(parameters.InitialOwnerEmail).toEqual(expect.objectContaining({
     Type: 'String',
     ConstraintDescription: 'InitialOwnerEmail must be a lowercase email address.',
@@ -114,6 +121,7 @@ test('fresh deployment requires explicit external Cognito and workspace paramete
     'CognitoUserPoolId',
     'CognitoUserPoolClientId',
     'WorkspaceDirectoryId',
+    'WorkspaceAuditPseudonymKey',
     'InitialOwnerEmail',
     'InitialOwnerUsername',
   ]) {
@@ -132,6 +140,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
     'TeamIssuesTable189D851D',
     'WorkItemConfigurationTable35E94558',
     'AutomationTableE3D67F0D',
+    'PlanningTable2A0D4CC5',
     'TeamIssueEventsTableDD2B0F96',
     'ProjectDirectoryTable9ED01C01',
     'ListProjectTasksFunction2134AF4A',
@@ -147,7 +156,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(14);
+  expect(Object.keys(tables)).toHaveLength(15);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -274,6 +283,9 @@ test('shared server handler is bundled as a Lambda asset with production environ
         MUKUROJI_WORKSPACE_DIRECTORY_ID: {
           Ref: 'WorkspaceDirectoryId',
         },
+        MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: {
+          Ref: 'WorkspaceAuditPseudonymKey',
+        },
         MUKUROJI_PROJECT_DIRECTORY_TABLE: {
           Ref: 'ProjectDirectoryTable9ED01C01',
         },
@@ -305,6 +317,9 @@ test('shared server handler is bundled as a Lambda asset with production environ
           Ref: 'NotificationsTable76DCFC6C',
         },
         NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
+        PLANNING_TABLE_NAME: {
+          Ref: 'PlanningTable2A0D4CC5',
+        },
         REALTIME_SESSIONS_TABLE_NAME: {
           Ref: 'RealtimeSessionsTable607096EB',
         },
@@ -429,6 +444,9 @@ test('Function URL and API Gateway invoke the same Lambda handler', () => {
   template.hasOutput('WorkItemConfigurationTableName', {
     Value: { Ref: 'WorkItemConfigurationTable35E94558' },
   });
+  template.hasOutput('PlanningTableName', {
+    Value: { Ref: 'PlanningTable2A0D4CC5' },
+  });
 });
 
 test('Work Item configuration uses a retained scope and record key table', () => {
@@ -457,6 +475,31 @@ test('Work Item configuration uses a retained scope and record key table', () =>
       },
     }),
   }));
+});
+
+test('planning data uses a retained point-in-time recoverable workspace table', () => {
+  const template = synthesizedTemplate;
+  const table = template.toJSON().Resources.PlanningTable2A0D4CC5;
+
+  expect(table).toEqual({
+    Type: 'AWS::DynamoDB::Table',
+    Properties: {
+      AttributeDefinitions: [
+        { AttributeName: 'workspaceId', AttributeType: 'S' },
+        { AttributeName: 'recordKey', AttributeType: 'S' },
+      ],
+      BillingMode: 'PAY_PER_REQUEST',
+      KeySchema: [
+        { AttributeName: 'workspaceId', KeyType: 'HASH' },
+        { AttributeName: 'recordKey', KeyType: 'RANGE' },
+      ],
+      PointInTimeRecoverySpecification: {
+        PointInTimeRecoveryEnabled: true,
+      },
+    },
+    UpdateReplacePolicy: 'Retain',
+    DeletionPolicy: 'Retain',
+  });
 });
 
 test('Function URL and API Gateway expose the same restricted CORS contract', () => {
@@ -1400,6 +1443,16 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   const configurationStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('WorkItemConfigurationTable35E94558')
   );
+  const planningDataStatement = statements.find((statement) =>
+    JSON.stringify(statement.Resource) === JSON.stringify({
+      'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'],
+    }) &&
+    Array.isArray(statement.Action) &&
+    statement.Action.includes('dynamodb:ConditionCheckItem')
+  );
+  const planningStatements = statements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes('PlanningTable2A0D4CC5')
+  );
   const cognitoPolicy = Object.values(template.toJSON().Resources).find((resource) =>
     JSON.stringify(resource).includes('cognito-idp:AdminGetUser')
   );
@@ -1410,6 +1463,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
       { 'Fn::GetAtt': ['AutomationTableE3D67F0D', 'Arn'] },
       { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
       { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
+      { 'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'] },
       { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
       { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
       { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
@@ -1449,7 +1503,6 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   const workspaceSearchActions = workspaceSearchStatements.flatMap((statement) =>
     Array.isArray(statement.Action) ? statement.Action : [statement.Action]
   );
-
   expect(workspaceSearchActions).toEqual(expect.arrayContaining([
     'dynamodb:DeleteItem',
     'dynamodb:GetItem',
@@ -1485,6 +1538,24 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(configurationStatements).toHaveLength(2);
   expect(configurationStatements).toEqual(expect.arrayContaining([
     configurationDataStatement,
+    transactStatement,
+  ]));
+  expect(planningDataStatement).toEqual(expect.objectContaining({
+    Action: [
+      'dynamodb:ConditionCheckItem',
+      'dynamodb:DeleteItem',
+      'dynamodb:DescribeTable',
+      'dynamodb:GetItem',
+      'dynamodb:PutItem',
+      'dynamodb:Query',
+      'dynamodb:UpdateItem',
+    ],
+    Effect: 'Allow',
+    Resource: { 'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'] },
+  }));
+  expect(planningStatements).toHaveLength(2);
+  expect(planningStatements).toEqual(expect.arrayContaining([
+    planningDataStatement,
     transactStatement,
   ]));
 

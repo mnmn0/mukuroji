@@ -1,3 +1,5 @@
+import { createMutationHeaders, type MutationRequestContext } from '../api/mutationHeaders'
+
 /**
  * Workspace 全体で付与する member role です。
  */
@@ -131,6 +133,10 @@ export type WorkspaceInvitation = {
    * 招待メール最終送信日時の ISO 8601 timestamp です。
    */
   lastSentAt?: string
+  /**
+   * Invitation を membership へ収束させた日時です。
+   */
+  acceptedAt?: string
   /**
    * 配信または provisioning 失敗時の安全な表示メッセージです。
    */
@@ -275,12 +281,14 @@ export function getWorkspaceAccess(accessToken: string, signal?: AbortSignal) {
 export async function createWorkspaceInvitation(
   accessToken: string,
   input: CreateWorkspaceInvitationInput,
+  mutationContext: MutationRequestContext,
 ) {
   const response = await sendWorkspaceAccessRequest<WorkspaceInvitationResponse>(
     '/workspace/invitations',
     accessToken,
     {
       body: JSON.stringify(input),
+      headers: createMutationHeaders(mutationContext),
       method: 'POST',
     },
   )
@@ -291,11 +299,18 @@ export async function createWorkspaceInvitation(
 /**
  * 配信可能な Workspace invitation を再送します。
  */
-export async function resendWorkspaceInvitation(accessToken: string, invitationId: string) {
+export async function resendWorkspaceInvitation(
+  accessToken: string,
+  invitationId: string,
+  mutationContext: MutationRequestContext,
+) {
   const response = await sendWorkspaceAccessRequest<WorkspaceInvitationResponse>(
     `/workspace/invitations/${encodeURIComponent(invitationId)}/resend`,
     accessToken,
-    { method: 'POST' },
+    {
+      headers: createMutationHeaders(mutationContext),
+      method: 'POST',
+    },
   )
 
   return response.invitation
@@ -304,11 +319,18 @@ export async function resendWorkspaceInvitation(accessToken: string, invitationI
 /**
  * Workspace invitation を取り消します。
  */
-export async function revokeWorkspaceInvitation(accessToken: string, invitationId: string) {
+export async function revokeWorkspaceInvitation(
+  accessToken: string,
+  invitationId: string,
+  mutationContext: MutationRequestContext,
+) {
   const response = await sendWorkspaceAccessRequest<WorkspaceInvitationResponse>(
     `/workspace/invitations/${encodeURIComponent(invitationId)}/revoke`,
     accessToken,
-    { method: 'POST' },
+    {
+      headers: createMutationHeaders(mutationContext),
+      method: 'POST',
+    },
   )
 
   return response.invitation
@@ -317,11 +339,18 @@ export async function revokeWorkspaceInvitation(accessToken: string, invitationI
 /**
  * 期限切れまたは取消済み invitation から再招待を作成します。
  */
-export async function reinviteWorkspaceInvitation(accessToken: string, invitationId: string) {
+export async function reinviteWorkspaceInvitation(
+  accessToken: string,
+  invitationId: string,
+  mutationContext: MutationRequestContext,
+) {
   const response = await sendWorkspaceAccessRequest<WorkspaceInvitationResponse>(
     `/workspace/invitations/${encodeURIComponent(invitationId)}/reinvite`,
     accessToken,
-    { method: 'POST' },
+    {
+      headers: createMutationHeaders(mutationContext),
+      method: 'POST',
+    },
   )
 
   return response.invitation
@@ -334,12 +363,14 @@ export async function acknowledgeWorkspaceInvitationCleanup(
   accessToken: string,
   invitationId: string,
   expectedVersion: number,
+  mutationContext: MutationRequestContext,
 ) {
   const response = await sendWorkspaceAccessRequest<WorkspaceInvitationResponse>(
     `/workspace/invitations/${encodeURIComponent(invitationId)}/cleanup/acknowledge`,
     accessToken,
     {
       body: JSON.stringify({ expectedVersion }),
+      headers: createMutationHeaders(mutationContext),
       method: 'POST',
     },
   )
@@ -354,12 +385,14 @@ export async function updateWorkspaceMember(
   accessToken: string,
   memberKey: string,
   input: UpdateWorkspaceMemberInput,
+  mutationContext: MutationRequestContext,
 ) {
   const response = await sendWorkspaceAccessRequest<WorkspaceMemberResponse>(
     `/workspace/members/${encodeURIComponent(memberKey)}`,
     accessToken,
     {
       body: JSON.stringify(input),
+      headers: createMutationHeaders(mutationContext),
       method: 'PATCH',
     },
   )

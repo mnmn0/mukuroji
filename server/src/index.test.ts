@@ -12,10 +12,16 @@ import {
   type ApprovalRequest,
   type BulkOperationRequest,
   type CustomFieldValue,
+  type PlanningMutationResponse,
+  type PlanningSnapshot,
   type WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
-import { createAuditEvent, createMutationAuditContext } from './audit'
+import {
+  calculateAuditExpiresAt,
+  createAuditEvent,
+  createMutationAuditContext,
+} from './audit'
 import { CollaborationError, type CollaborationClient } from './collaboration'
 import type { NotificationClient, NotificationItem } from './notifications'
 import {
@@ -65,6 +71,7 @@ import {
   WorkItemConfigurationError,
   type WorkItemConfigurationClient,
 } from './work-item-configuration'
+import { InMemoryPlanningClient } from './planning'
 
 afterEach(() => {
   resetApiClientsForTest()
@@ -340,6 +347,7 @@ test('recovers Bulk apply and undo response loss only from their matching audit 
         }
         const event = createAuditEvent({
           context: auditContext,
+          expiresAt: calculateAuditExpiresAt(auditContext.occurredAt, 365),
           eventType: 'work-item.updated',
           entity: { type: 'work-item', id: `team/${teamId}/issue/${issueId}` },
           action: 'updated',
@@ -2826,7 +2834,9 @@ test('runs the Workspace identity lifecycle through the production AWS Cognito a
 
   const challengeResponse = await app.request('/api/auth/challenge/new-password', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify({
       email: 'Demo@Example.com',
       newPassword: 'Permanent123!',
@@ -3304,6 +3314,7 @@ test('requires manual cleanup when a Cognito stable identity lookup is inconclus
 
 test('cleans invitation-owned claims when revoking a pre-existing Cognito identity', async () => {
   const cleanupInputs: Array<Record<string, unknown>> = []
+  const auditContexts: ObservedWorkspaceMutationAuditContext[] = []
   let cleanupMarkerClears = 0
   configureApiClientsForTest({
     cognito: {
@@ -3336,7 +3347,9 @@ test('cleans invitation-owned claims when revoking a pre-existing Cognito identi
         _workspaceId: string,
         _actorMemberKey: string,
         invitationId: string,
+        auditContext,
       ) {
+        auditContexts.push({ stage: 'revokeInvitation', context: auditContext })
         return {
           id: invitationId,
           email: invitationId,
@@ -3359,7 +3372,9 @@ test('cleans invitation-owned claims when revoking a pre-existing Cognito identi
         _workspaceId: string,
         invitationId: string,
         expectedVersion: number,
+        auditContext,
       ) {
+        auditContexts.push({ stage: 'clearInvitationCleanupFailure', context: auditContext })
         cleanupMarkerClears += 1
         return {
           id: invitationId,
@@ -3385,7 +3400,11 @@ test('cleans invitation-owned claims when revoking a pre-existing Cognito identi
     '/api/workspace/invitations/existing%40example.com/revoke',
     {
       method: 'POST',
-      headers: { Authorization: 'Bearer test-token' },
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Idempotency-Key': 'workspace-revoke-1',
+        'X-Correlation-Id': 'workspace-revoke-correlation',
+      },
     },
   )
 
@@ -3397,6 +3416,16 @@ test('cleans invitation-owned claims when revoking a pre-existing Cognito identi
     cognitoUsername: 'CaseSensitiveExisting',
   }])
   expect(cleanupMarkerClears).toBe(1)
+  expectStableWorkspaceMutationAuditContexts(auditContexts, {
+    actorId: 'demo@example.com',
+    correlationId: 'workspace-revoke-correlation',
+    idempotencyKey: 'workspace-revoke-1',
+    method: 'POST',
+    requestBody: { invitationId: 'existing@example.com' },
+    route: '/api/workspace/invitations/existing%40example.com/revoke',
+    stages: ['revokeInvitation', 'clearInvitationCleanupFailure'],
+    workspaceId: 'user#demo@example.com',
+  })
   const responseBody = await response.json() as { invitation: Record<string, unknown> }
   expect(responseBody.invitation).toMatchObject({
     identityCleanupCompleted: true,
@@ -4543,6 +4572,7 @@ test('returns a stable error when a new password violates the Cognito policy', a
 
 test('holds the invitation acceptance lock across the Cognito password challenge', async () => {
   const sequence: string[] = []
+  const auditContexts: ObservedWorkspaceMutationAuditContext[] = []
   const invitation = {
     id: 'invitee@example.com',
     email: 'invitee@example.com',
@@ -4596,20 +4626,32 @@ test('holds the invitation acceptance lock across the Cognito password challenge
         sequence.push('get-active-member')
         return undefined
       },
-      async acquireInvitationAcceptanceLock() {
+      async acquireInvitationAcceptanceLock(_workspaceId, _invitationId, auditContext) {
         sequence.push('acquire-lock')
+        auditContexts.push({ stage: 'acquireInvitationAcceptanceLock', context: auditContext })
         return invitation
       },
-      async releaseInvitationAcceptanceLock() {
+      async releaseInvitationAcceptanceLock(
+        _workspaceId,
+        _invitationId,
+        _expectedVersion,
+        auditContext,
+      ) {
         sequence.push('release-lock')
+        auditContexts.push({ stage: 'releaseInvitationAcceptanceLock', context: auditContext })
         return {
           ...invitation,
           acceptanceLockExpiresAt: undefined,
           version: 3,
         }
       },
-      async reconcileAuthenticatedMember(_workspaceId: string, input: { memberKey: string }) {
+      async reconcileAuthenticatedMember(
+        _workspaceId: string,
+        input: { memberKey: string },
+        auditContext,
+      ) {
         sequence.push('reconcile-member')
+        auditContexts.push({ stage: 'reconcileAuthenticatedMember', context: auditContext })
         return {
           id: input.memberKey,
           memberKey: input.memberKey,
@@ -4626,7 +4668,11 @@ test('holds the invitation acceptance lock across the Cognito password challenge
 
   const response = await app.request('/api/auth/challenge/new-password', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-challenge-1',
+      'X-Correlation-Id': 'workspace-challenge-correlation',
+    },
     body: JSON.stringify({
       email: 'invitee@example.com',
       newPassword: 'Permanent123!',
@@ -4644,6 +4690,20 @@ test('holds the invitation acceptance lock across the Cognito password challenge
     'reconcile-member',
     'release-lock',
   ])
+  expectStableWorkspaceMutationAuditContexts(auditContexts, {
+    actorId: 'sub-invitee',
+    correlationId: 'workspace-challenge-correlation',
+    idempotencyKey: 'workspace-challenge-1',
+    method: 'POST',
+    requestBody: { email: 'invitee@example.com' },
+    route: '/api/auth/challenge/new-password',
+    stages: [
+      'acquireInvitationAcceptanceLock',
+      'reconcileAuthenticatedMember',
+      'releaseInvitationAcceptanceLock',
+    ],
+    workspaceId: 'workspace#production',
+  })
 })
 
 test('lets an active Workspace member complete a new password challenge without an invitation lock', async () => {
@@ -4741,7 +4801,11 @@ test('retries membership reconcile on normal login after password completion suc
 
   const challengeResponse = await app.request('/api/auth/challenge/new-password', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-challenge-reconcile-1',
+      'X-Correlation-Id': 'workspace-challenge-reconcile-correlation',
+    },
     body: JSON.stringify({
       email: 'demo@example.com',
       newPassword: 'Permanent123!',
@@ -4752,7 +4816,11 @@ test('retries membership reconcile on normal login after password completion suc
 
   const loginResponse = await app.request('/api/auth/login', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-login-reconcile-1',
+      'X-Correlation-Id': 'workspace-login-reconcile-correlation',
+    },
     body: JSON.stringify({ email: 'demo@example.com', password: 'Permanent123!' }),
   })
 
@@ -4762,6 +4830,32 @@ test('retries membership reconcile on normal login after password completion suc
     'demo@example.com',
     'demo@example.com',
   ])
+  expectStableWorkspaceMutationAuditContexts(
+    calls.workspaceMutationAuditContexts.slice(0, 1),
+    {
+      actorId: 'sub-demo@example.com',
+      correlationId: 'workspace-challenge-reconcile-correlation',
+      idempotencyKey: 'workspace-challenge-reconcile-1',
+      method: 'POST',
+      requestBody: { email: 'demo@example.com' },
+      route: '/api/auth/challenge/new-password',
+      stages: ['reconcileAuthenticatedMember'],
+      workspaceId: 'user#demo@example.com',
+    },
+  )
+  expectStableWorkspaceMutationAuditContexts(
+    calls.workspaceMutationAuditContexts.slice(1),
+    {
+      actorId: 'demo@example.com',
+      correlationId: 'workspace-login-reconcile-correlation',
+      idempotencyKey: 'workspace-login-reconcile-1',
+      method: 'POST',
+      requestBody: { email: 'demo@example.com' },
+      route: '/api/auth/login',
+      stages: ['reconcileAuthenticatedMember'],
+      workspaceId: 'user#demo@example.com',
+    },
+  )
 })
 
 test('returns owner and admin Workspace capabilities from the API source of truth', async () => {
@@ -4780,6 +4874,96 @@ test('returns owner and admin Workspace capabilities from the API source of trut
       canManageAdmins: false,
     },
   })
+})
+
+test('serializes Workspace role updates with the Planning revision', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  const response = await app.request('/api/workspace/members/sato%40example.com', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ role: 'guest', expectedVersion: 1 }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(calls.workspaceMemberUpdates).toEqual([{
+    expectedPlanningRevision: 0,
+    memberKey: 'sato@example.com',
+    role: 'guest',
+  }])
+})
+
+test('forwards stable Workspace mutation audit headers and actor context to the state client', async () => {
+  configureFakeProjectClients(true)
+  let capturedAuditContext: ReturnType<typeof createMutationAuditContext> | undefined
+  const owner = {
+    id: 'demo@example.com',
+    memberKey: 'demo@example.com',
+    email: 'demo@example.com',
+    role: 'owner' as const,
+    status: 'active' as const,
+    version: 1,
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z',
+  }
+  configureApiClientsForTest({
+    workspaceAccess: {
+      async getActiveMember() {
+        return owner
+      },
+      async updateMember(
+        _workspaceId: string,
+        _actorMemberKey: string,
+        memberKey: string,
+        input: Parameters<WorkspaceAccessClient['updateMember']>[3],
+        auditContext: Parameters<WorkspaceAccessClient['updateMember']>[4],
+      ) {
+        capturedAuditContext = auditContext
+        return {
+          ...owner,
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: input.role ?? owner.role,
+          status: input.status ?? owner.status,
+          version: input.expectedVersion + 1,
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request('/api/workspace/members/sato%40example.com', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-member-role-change-1',
+      'X-Correlation-Id': 'workspace-correlation-1',
+    },
+    body: JSON.stringify({ expectedVersion: 1, role: 'guest' }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(capturedAuditContext).toMatchObject({
+    workspaceId: 'user#demo@example.com',
+    actor: {
+      id: 'demo@example.com',
+      displayName: 'demo@example.com',
+      kind: 'user',
+    },
+    correlationId: 'workspace-correlation-1',
+    source: {
+      kind: 'api',
+      method: 'PATCH',
+      route: '/api/workspace/members/sato%40example.com',
+    },
+  })
+  expect(capturedAuditContext?.idempotencyKeyHash).not.toContain(
+    'workspace-member-role-change-1',
+  )
 })
 
 test('rejects deactivating a Workspace member who still manages an active project', async () => {
@@ -4805,6 +4989,30 @@ test('rejects deactivating a Workspace member who still manages an active projec
   ])
 })
 
+test('rejects deactivating a Workspace member who owns an active Planning entity', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await planningClient.create('user#demo@example.com', {
+    ...createCyclePlanningInput('cycle-owned-by-member', 0),
+    ownerMemberKey: 'SATO@EXAMPLE.COM',
+  }, { workItems: [] })
+  configureFakeProjectClients(true, { role: 'member' })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await app.request('/api/workspace/members/sato%40example.com', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ expectedVersion: 1, status: 'deactivated' }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    message: 'Transfer or archive all owned Planning entities before deactivating this member.',
+  })
+})
+
 test('resends credentials when inviting an existing unconfirmed Workspace identity', async () => {
   const calls = configureFakeProjectClients(true)
 
@@ -4813,6 +5021,8 @@ test('resends credentials when inviting an existing unconfirmed Workspace identi
     headers: {
       Authorization: 'Bearer test-token',
       'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-invitation-create-1',
+      'X-Correlation-Id': 'workspace-invitation-create-correlation',
     },
     body: JSON.stringify({
       email: 'invitee@example.com',
@@ -4823,6 +5033,20 @@ test('resends credentials when inviting an existing unconfirmed Workspace identi
 
   expect(response.status).toBe(201)
   expect(calls.workspaceInvitationResends).toEqual(['invitee@example.com'])
+  expectStableWorkspaceMutationAuditContexts(calls.workspaceMutationAuditContexts, {
+    actorId: 'demo@example.com',
+    correlationId: 'workspace-invitation-create-correlation',
+    idempotencyKey: 'workspace-invitation-create-1',
+    method: 'POST',
+    requestBody: { email: 'invitee@example.com', name: 'Invitee', role: 'member' },
+    route: '/api/workspace/invitations',
+    stages: [
+      'createInvitation',
+      'markInvitationIdentityMutationStarted',
+      'markInvitationDelivery',
+    ],
+    workspaceId: 'user#demo@example.com',
+  })
   expect(await response.json()).toMatchObject({
     invitation: {
       deliveryStatus: 'sent',
@@ -4978,6 +5202,8 @@ test('keeps raced Cognito ownership ambiguous while resending temporary credenti
     headers: {
       Authorization: 'Bearer test-token',
       'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-invitation-race-1',
+      'X-Correlation-Id': 'workspace-invitation-race-correlation',
     },
     body: JSON.stringify({
       email: 'raced-user@example.com',
@@ -4987,6 +5213,21 @@ test('keeps raced Cognito ownership ambiguous while resending temporary credenti
 
   expect(response.status).toBe(201)
   expect(calls.workspaceInvitationResends).toEqual(['raced-user@example.com'])
+  expectStableWorkspaceMutationAuditContexts(calls.workspaceMutationAuditContexts, {
+    actorId: 'demo@example.com',
+    correlationId: 'workspace-invitation-race-correlation',
+    idempotencyKey: 'workspace-invitation-race-1',
+    method: 'POST',
+    requestBody: { email: 'raced-user@example.com', role: 'member' },
+    route: '/api/workspace/invitations',
+    stages: [
+      'createInvitation',
+      'markInvitationIdentityMutationStarted',
+      'markInvitationDirectoryClaimCleanupRequired',
+      'markInvitationDelivery',
+    ],
+    workspaceId: 'user#demo@example.com',
+  })
   expect(await response.json()).toMatchObject({
     invitation: {
       deliveryStatus: 'sent',
@@ -4999,6 +5240,7 @@ test('keeps raced Cognito ownership ambiguous while resending temporary credenti
 
 test('drops ownership and cleanup provenance when reinvite finds a replacement Cognito identity', async () => {
   const deliveryInputs: Array<Parameters<WorkspaceAccessClient['markInvitationDelivery']>[2]> = []
+  const auditContexts: ObservedWorkspaceMutationAuditContext[] = []
   const resends: string[] = []
   const preparedInvitation = {
     id: 'replacement@example.com',
@@ -5078,7 +5320,14 @@ test('drops ownership and cleanup provenance when reinvite finds a replacement C
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-      async prepareReinvite() {
+      async prepareReinvite(
+        _workspaceId,
+        _actorMemberKey,
+        _invitationId,
+        _expiresInDays,
+        auditContext,
+      ) {
+        auditContexts.push({ stage: 'prepareReinvite', context: auditContext })
         return preparedInvitation
       },
       async markInvitationIdentityMutationStarted(
@@ -5087,7 +5336,9 @@ test('drops ownership and cleanup provenance when reinvite finds a replacement C
         expectedVersion,
         cognitoIdentityId,
         cognitoUsername,
+        auditContext,
       ) {
+        auditContexts.push({ stage: 'markInvitationIdentityMutationStarted', context: auditContext })
         return {
           ...preparedInvitation,
           identityOwnership: 'ambiguous',
@@ -5098,7 +5349,8 @@ test('drops ownership and cleanup provenance when reinvite finds a replacement C
           version: expectedVersion + 1,
         }
       },
-      async markInvitationDelivery(_workspaceId, _invitationId, input) {
+      async markInvitationDelivery(_workspaceId, _invitationId, input, auditContext) {
+        auditContexts.push({ stage: 'markInvitationDelivery', context: auditContext })
         deliveryInputs.push(input)
         return {
           ...preparedInvitation,
@@ -5118,12 +5370,30 @@ test('drops ownership and cleanup provenance when reinvite finds a replacement C
     '/api/workspace/invitations/replacement%40example.com/reinvite',
     {
       method: 'POST',
-      headers: { Authorization: 'Bearer test-token' },
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Idempotency-Key': 'workspace-reinvite-1',
+        'X-Correlation-Id': 'workspace-reinvite-correlation',
+      },
     },
   )
 
   expect(response.status).toBe(200)
   expect(resends).toEqual(['CaseSensitiveReplacement'])
+  expectStableWorkspaceMutationAuditContexts(auditContexts, {
+    actorId: 'demo@example.com',
+    correlationId: 'workspace-reinvite-correlation',
+    idempotencyKey: 'workspace-reinvite-1',
+    method: 'POST',
+    requestBody: { action: 'reinvite', invitationId: 'replacement@example.com' },
+    route: '/api/workspace/invitations/replacement%40example.com/reinvite',
+    stages: [
+      'prepareReinvite',
+      'markInvitationIdentityMutationStarted',
+      'markInvitationDelivery',
+    ],
+    workspaceId: 'user#demo@example.com',
+  })
   expect(deliveryInputs).toEqual([{
     expectedVersion: 3,
     identityOwnership: 'pre-existing',
@@ -5139,6 +5409,138 @@ test('drops ownership and cleanup provenance when reinvite finds a replacement C
       cognitoUsername: 'CaseSensitiveReplacement',
       directoryClaimCleanupRequired: false,
     },
+  })
+})
+
+test('forwards one mutation audit context through every invitation resend stage', async () => {
+  const auditContexts: ObservedWorkspaceMutationAuditContext[] = []
+  const preparedInvitation = {
+    id: 'resend@example.com',
+    email: 'resend@example.com',
+    role: 'member' as const,
+    status: 'provisioning' as const,
+    deliveryStatus: 'pending' as const,
+    identityOwnership: 'workspace-created' as const,
+    cognitoIdentityId: 'sub-resend',
+    cognitoUsername: 'ResendIdentity',
+    version: 2,
+    expiresAt: '2026-07-18T00:00:00.000Z',
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z',
+  }
+
+  configureApiClientsForTest({
+    cognito: {
+      async getUser() {
+        return {
+          Username: 'demo@example.com',
+          UserAttributes: [
+            { Name: 'email', Value: 'demo@example.com' },
+            { Name: 'custom:directory_id', Value: 'user#demo@example.com' },
+            { Name: 'custom:workspace_id', Value: 'user#demo@example.com' },
+          ],
+        }
+      },
+      async isSystemAdmin() {
+        return false
+      },
+      async findWorkspaceUser() {
+        return undefined
+      },
+      async provisionWorkspaceUser() {
+        return {
+          profile: createFakeCognitoProfile('resend@example.com'),
+          cognitoIdentityId: 'sub-resend',
+          cognitoUsername: 'ResendIdentity',
+          identityOwnership: 'workspace-created' as const,
+          directoryClaimCleanupRequired: false,
+          deliveryStatus: 'sent' as const,
+        }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['cognito']
+    >,
+    workspaceAccess: {
+      async getActiveMember(_workspaceId, memberKey) {
+        return {
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: 'owner',
+          status: 'active',
+          version: 1,
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async prepareResend(
+        _workspaceId,
+        _actorMemberKey,
+        _invitationId,
+        _expiresInDays,
+        auditContext,
+      ) {
+        auditContexts.push({ stage: 'prepareResend', context: auditContext })
+        return preparedInvitation
+      },
+      async markInvitationIdentityMutationStarted(
+        _workspaceId,
+        _invitationId,
+        expectedVersion,
+        cognitoIdentityId,
+        cognitoUsername,
+        auditContext,
+      ) {
+        auditContexts.push({ stage: 'markInvitationIdentityMutationStarted', context: auditContext })
+        return {
+          ...preparedInvitation,
+          cognitoIdentityId,
+          cognitoUsername,
+          identityMutationAttempted: true,
+          version: expectedVersion + 1,
+        }
+      },
+      async markInvitationDelivery(_workspaceId, _invitationId, input, auditContext) {
+        auditContexts.push({ stage: 'markInvitationDelivery', context: auditContext })
+        return {
+          ...preparedInvitation,
+          status: 'pending',
+          deliveryStatus: input.deliveryStatus,
+          identityOwnership: input.identityOwnership,
+          cognitoIdentityId: input.cognitoIdentityId,
+          cognitoUsername: input.cognitoUsername,
+          version: input.expectedVersion + 1,
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request(
+    '/api/workspace/invitations/resend%40example.com/resend',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Idempotency-Key': 'workspace-resend-1',
+        'X-Correlation-Id': 'workspace-resend-correlation',
+      },
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expectStableWorkspaceMutationAuditContexts(auditContexts, {
+    actorId: 'demo@example.com',
+    correlationId: 'workspace-resend-correlation',
+    idempotencyKey: 'workspace-resend-1',
+    method: 'POST',
+    requestBody: { action: 'resend', invitationId: 'resend@example.com' },
+    route: '/api/workspace/invitations/resend%40example.com/resend',
+    stages: [
+      'prepareResend',
+      'markInvitationIdentityMutationStarted',
+      'markInvitationDelivery',
+    ],
+    workspaceId: 'user#demo@example.com',
   })
 })
 
@@ -6257,8 +6659,31 @@ test('archives a team in the authenticated user scoped directory', async () => {
     archivedAt: '2026-06-06T00:00:00.000Z',
   })
   expect(calls.teamArchives).toEqual([
-    { directoryId: 'user#demo@example.com', teamId: 'core-team' },
+    { directoryId: 'user#demo@example.com', expectedPlanningRevision: 0, teamId: 'core-team' },
   ])
+})
+
+test('rejects archiving a Team referenced by an active Planning entity', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await planningClient.create(
+    'user#demo@example.com',
+    createCyclePlanningInput('cycle-team-scope', 0),
+    { workItems: [] },
+  )
+  const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await app.request('/api/teams/core-team/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    message:
+      'Move or archive active Planning entities and remove Work Item links before archiving this Team.',
+  })
+  expect(calls.teamArchives).toEqual([])
 })
 
 test('denies project-assigned Work Item creation when the project role is viewer', async () => {
@@ -6405,8 +6830,124 @@ test('archives a project under an authenticated team directory', async () => {
     archivedAt: '2026-06-06T00:00:00.000Z',
   })
   expect(calls.projectArchives).toEqual([
-    { directoryId: 'user#demo@example.com', teamId: 'core-team', projectId: 'refero' },
+    {
+      directoryId: 'user#demo@example.com',
+      expectedPlanningRevision: 0,
+      teamId: 'core-team',
+      projectId: 'refero',
+    },
   ])
+})
+
+test('does not block archive for a same-named Project scoped to another Team', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await planningClient.create(
+    'user#demo@example.com',
+    {
+      ...createCyclePlanningInput('cycle-other-team-project', 0),
+      teamId: 'other-team',
+      projectId: 'refero',
+    },
+    { workItems: [] },
+  )
+  const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({ planning: planningClient })
+
+  const projectResponse = await app.request('/api/teams/core-team/projects/refero/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const teamResponse = await app.request('/api/teams/core-team/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(projectResponse.status).toBe(200)
+  expect(teamResponse.status).toBe(200)
+  expect(calls.projectArchives).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      expectedPlanningRevision: 1,
+      teamId: 'core-team',
+      projectId: 'refero',
+    },
+  ])
+  expect(calls.teamArchives).toEqual([
+    { directoryId: 'user#demo@example.com', expectedPlanningRevision: 1, teamId: 'core-team' },
+  ])
+})
+
+test('rejects archiving a Project referenced by an active Planning entity', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await planningClient.create(
+    'user#demo@example.com',
+    createCyclePlanningInput('cycle-project-scope', 0),
+    { workItems: [] },
+  )
+  const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await app.request('/api/teams/core-team/projects/refero/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    message:
+      'Move or archive active Planning entities and remove Work Item links before archiving this Project.',
+  })
+  expect(calls.projectArchives).toEqual([])
+})
+
+test('rejects archiving scopes referenced only by a stored Planning Work Item link', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  const workItemState = {
+    workItems: [{
+      id: 'linked-work-item',
+      revision: 1,
+      teamId: 'core-team',
+      title: 'Linked Work Item',
+      projectId: 'refero',
+      statusCategory: 'completed' as const,
+      dueDate: '2026-08-31',
+    }],
+  }
+  await planningClient.create(
+    'user#demo@example.com',
+    createCyclePlanningInput('cycle-link-scope', 0),
+    workItemState,
+  )
+  await planningClient.putWorkItemLink('user#demo@example.com', {
+    teamId: 'core-team',
+    workItemId: 'linked-work-item',
+    projectId: 'refero',
+    cycleId: 'cycle-link-scope',
+    goalIds: [],
+    expectedRevision: 1,
+  }, workItemState)
+  await planningClient.archive(
+    'user#demo@example.com',
+    'cycle-link-scope',
+    { expectedRevision: 2 },
+    workItemState,
+  )
+  const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({ planning: planningClient })
+
+  const teamResponse = await app.request('/api/teams/core-team/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const projectResponse = await app.request('/api/teams/core-team/projects/refero/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(teamResponse.status).toBe(409)
+  expect(projectResponse.status).toBe(409)
+  expect(calls.teamArchives).toEqual([])
+  expect(calls.projectArchives).toEqual([])
 })
 
 test('DynamoDB directory client validates and ignores workspace bootstrap rows for reads and writes', async () => {
@@ -9452,36 +9993,177 @@ test('DynamoDB directory client archives teams and projects with conditional upd
   } as unknown as DynamoDBDocumentClient
   const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
 
-  await expect(client.archiveTeam('user#demo@example.com', 'core-team')).resolves.toEqual({
+  await expect(client.archiveTeam('user#demo@example.com', 'core-team', undefined, 0)).resolves.toEqual({
     teamId: 'core-team',
     archivedAt: expect.any(String),
   })
   await expect(
-    client.archiveProject('user#demo@example.com', 'core-team', 'refero'),
+    client.archiveProject('user#demo@example.com', 'core-team', 'refero', undefined, 1),
   ).resolves.toEqual({
     teamId: 'core-team',
     projectId: 'refero',
     archivedAt: expect.any(String),
   })
   expect(sentInputs[1]).toMatchObject({
-    TableName: 'DirectoryTable',
-    Key: {
-      directoryId: 'user#demo@example.com',
-      entryKey: '000010#000000#TEAM#core-team',
-    },
-    UpdateExpression: 'SET archivedAt = :archivedAt',
-    ConditionExpression:
-      'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+    TransactItems: [{
+      Update: {
+        TableName: 'DirectoryTable',
+        Key: {
+          directoryId: 'user#demo@example.com',
+          entryKey: '000010#000000#TEAM#core-team',
+        },
+        UpdateExpression: 'SET archivedAt = :archivedAt',
+        ConditionExpression:
+          'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+      },
+    }, {
+      Put: {
+        TableName: 'mukuroji-planning-local',
+        Item: {
+          workspaceId: 'user#demo@example.com',
+          recordKey: 'META',
+          revision: 1,
+        },
+        ConditionExpression:
+          'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+      },
+    }],
   })
   expect(sentInputs[3]).toMatchObject({
-    TableName: 'DirectoryTable',
-    Key: {
-      directoryId: 'user#demo@example.com',
-      entryKey: '000010#000010#PROJECT#refero',
+    TransactItems: [{
+      Update: {
+        TableName: 'DirectoryTable',
+        Key: {
+          directoryId: 'user#demo@example.com',
+          entryKey: '000010#000010#PROJECT#refero',
+        },
+        UpdateExpression: 'SET archivedAt = :archivedAt',
+        ConditionExpression:
+          'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+      },
+    }, {}],
+  })
+})
+
+test('serializes directory archive with the Planning graph revision', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [{
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000000#TEAM#core-team',
+            entryType: 'team',
+            teamId: 'core-team',
+            teamSortOrder: 10,
+            nameJa: 'コアチーム',
+            nameEn: 'Core Team',
+            expanded: true,
+          }],
+        }
+      }
+      return {}
     },
-    UpdateExpression: 'SET archivedAt = :archivedAt',
-    ConditionExpression:
-      'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+    'PlanningTable',
+  )
+
+  await client.archiveTeam('user#demo@example.com', 'core-team', undefined, 4)
+
+  expect(sentInputs[1]).toMatchObject({
+    TransactItems: [
+      { Update: { TableName: 'DirectoryTable' } },
+      {
+        Put: {
+          TableName: 'PlanningTable',
+          Item: {
+            workspaceId: 'user#demo@example.com',
+            recordKey: 'META',
+            entryType: 'planning-meta',
+            schemaVersion: 1,
+            revision: 5,
+          },
+          ConditionExpression: '#revision = :expectedPlanningRevision',
+          ExpressionAttributeValues: { ':expectedPlanningRevision': 4 },
+        },
+      },
+    ],
+  })
+})
+
+test('classifies a Planning revision race during directory archive', async () => {
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000010#PROJECT#refero',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'refero',
+              projectSortOrder: 10,
+              nameJa: 'Refero',
+              nameEn: 'Refero',
+              tone: 'blue',
+            },
+          ],
+        }
+      }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const error = new Error('canceled')
+        error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: [
+            { Code: 'None' },
+            { Code: 'ConditionalCheckFailed' },
+          ],
+        })
+        throw error
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+    'PlanningTable',
+  )
+
+  await expect(client.archiveProject(
+    'user#demo@example.com',
+    'core-team',
+    'refero',
+    undefined,
+    4,
+  )).rejects.toMatchObject({
+    status: 409,
+    code: 'PlanningRevisionConflict',
   })
 })
 
@@ -10678,6 +11360,7 @@ function createFakeAuditEvent() {
 
   return createAuditEvent({
     context,
+    expiresAt: 2_000_000_000,
     eventType: 'project.updated',
     entity: { type: 'project', id: 'refero' },
   })
@@ -10897,6 +11580,84 @@ function createFakeRelationMutationResponse(
   }
 }
 
+/** Workspace mutation client で観測した audit context と呼び出し段階です。 */
+type ObservedWorkspaceMutationAuditContext = {
+  /** Context を受け取る Workspace mutation client method です。 */
+  stage: string
+  /** Method に渡された audit context です。欠落も検出するため undefined を保持します。 */
+  context: ReturnType<typeof createMutationAuditContext> | undefined
+}
+
+/** Workspace mutation audit context の決定的な期待値です。 */
+type ExpectedWorkspaceMutationAuditContext = {
+  /** Context actor の安定 ID です。 */
+  actorId: string
+  /** Request の correlation ID header です。 */
+  correlationId: string
+  /** Request の raw idempotency key header です。 */
+  idempotencyKey: string
+  /** Context fingerprint に含める canonical request body です。 */
+  requestBody: unknown
+  /** Context source の HTTP method です。 */
+  method: string
+  /** Context source と fingerprint の route path です。 */
+  route: string
+  /** Context が順番どおり渡される Workspace mutation client method です。 */
+  stages: readonly string[]
+  /** Context の canonical Workspace ID です。 */
+  workspaceId: string
+}
+
+function expectStableWorkspaceMutationAuditContexts(
+  observations: ObservedWorkspaceMutationAuditContext[],
+  expected: ExpectedWorkspaceMutationAuditContext,
+) {
+  expect(observations.map(({ stage }) => stage)).toEqual(expected.stages)
+  const first = observations[0]?.context
+
+  if (!first) {
+    throw new Error('The first Workspace mutation audit context is missing.')
+  }
+
+  const expectedContext = createMutationAuditContext({
+    workspaceId: expected.workspaceId,
+    actor: { id: expected.actorId, kind: 'user' },
+    idempotencyKey: expected.idempotencyKey,
+    correlationId: expected.correlationId,
+    occurredAt: first.occurredAt,
+    request: {
+      method: expected.method,
+      path: expected.route,
+      body: expected.requestBody,
+    },
+    source: {
+      kind: 'api',
+      method: expected.method,
+      route: expected.route,
+    },
+  })
+
+  expect(first).toMatchObject({
+    workspaceId: expected.workspaceId,
+    actor: {
+      id: expected.actorId,
+      kind: 'user',
+    },
+    correlationId: expected.correlationId,
+    source: {
+      kind: 'api',
+      method: expected.method,
+      route: expected.route,
+    },
+  })
+  expect(first.idempotencyKeyHash).toBe(expectedContext.idempotencyKeyHash)
+  expect(first.requestFingerprint).toBe(expectedContext.requestFingerprint)
+
+  for (const observation of observations) {
+    expect(observation.context).toBe(first)
+  }
+}
+
 function configureFakeProjectClients(
   hasProjectAccess: boolean,
   options: {
@@ -10994,7 +11755,12 @@ function configureFakeProjectClients(
       projectId: string
       role: string
     }>,
-    projectArchives: [] as Array<{ directoryId: string; teamId: string; projectId: string }>,
+    projectArchives: [] as Array<{
+      directoryId: string
+      expectedPlanningRevision: number
+      teamId: string
+      projectId: string
+    }>,
     projectCreates: [] as Array<{
       creatorUserKey: string
       directoryId: string
@@ -11007,7 +11773,11 @@ function configureFakeProjectClients(
       isSystemAdmin: boolean
       userKey: string
     }>,
-    teamArchives: [] as Array<{ directoryId: string; teamId: string }>,
+    teamArchives: [] as Array<{
+      directoryId: string
+      expectedPlanningRevision: number
+      teamId: string
+    }>,
     teamCreates: [] as Array<{ directoryId: string; name: string }>,
     issueComments: [] as Array<{ actorUserId: string; directoryId: string; issueId: string; teamId: string }>,
     issueCreates: [] as Array<{
@@ -11049,6 +11819,13 @@ function configureFakeProjectClients(
     }>,
     userProfiles: [] as string[],
     workspaceInvitationResends: [] as string[],
+    workspaceMutationAuditContexts: [] as ObservedWorkspaceMutationAuditContext[],
+    workspaceMemberUpdates: [] as Array<{
+      expectedPlanningRevision: number
+      memberKey: string
+      role?: WorkspaceRole
+      status?: WorkspaceMemberStatus
+    }>,
     workspaceReconciliations: [] as string[],
   }
   const workspaceInvitationInputs = new Map<string, {
@@ -11400,16 +12177,22 @@ function configureFakeProjectClients(
           },
         }
       },
-      async archiveTeam(directoryId, teamId) {
-        calls.teamArchives.push({ directoryId, teamId })
+      async archiveTeam(directoryId, teamId, _auditContext, expectedPlanningRevision) {
+        calls.teamArchives.push({ directoryId, expectedPlanningRevision, teamId })
 
         return {
           teamId,
           archivedAt: '2026-06-06T00:00:00.000Z',
         }
       },
-      async archiveProject(directoryId, teamId, projectId) {
-        calls.projectArchives.push({ directoryId, teamId, projectId })
+      async archiveProject(
+        directoryId,
+        teamId,
+        projectId,
+        _auditContext,
+        expectedPlanningRevision,
+      ) {
+        calls.projectArchives.push({ directoryId, expectedPlanningRevision, teamId, projectId })
 
         return {
           teamId,
@@ -11462,7 +12245,12 @@ function configureFakeProjectClients(
         expectedVersion,
         cognitoIdentityId,
         cognitoUsername,
+        auditContext,
       ) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'markInvitationIdentityMutationStarted',
+          context: auditContext,
+        })
         return {
           id: invitationId,
           email: invitationId,
@@ -11487,7 +12275,12 @@ function configureFakeProjectClients(
         expectedVersion,
         cognitoIdentityId,
         cognitoUsername,
+        auditContext,
       ) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'markInvitationDirectoryClaimCleanupRequired',
+          context: auditContext,
+        })
         return {
           id: invitationId,
           email: invitationId,
@@ -11504,7 +12297,8 @@ function configureFakeProjectClients(
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-      async createInvitation(_workspaceId, _actorMemberKey, input) {
+      async createInvitation(_workspaceId, _actorMemberKey, input, _expiresInDays, auditContext) {
+        calls.workspaceMutationAuditContexts.push({ stage: 'createInvitation', context: auditContext })
         workspaceInvitationInputs.set(input.email, { name: input.name, role: input.role })
         return {
           id: input.email,
@@ -11520,7 +12314,11 @@ function configureFakeProjectClients(
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-      async markInvitationDelivery(_workspaceId, invitationId, input) {
+      async markInvitationDelivery(_workspaceId, invitationId, input, auditContext) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'markInvitationDelivery',
+          context: auditContext,
+        })
         return {
           id: invitationId,
           email: invitationId,
@@ -11537,7 +12335,11 @@ function configureFakeProjectClients(
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-      async markInvitationCleanupFailure(_workspaceId, invitationId, input) {
+      async markInvitationCleanupFailure(_workspaceId, invitationId, input, auditContext) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'markInvitationCleanupFailure',
+          context: auditContext,
+        })
         return {
           id: invitationId,
           email: invitationId,
@@ -11552,7 +12354,16 @@ function configureFakeProjectClients(
           failureMessage: input.failureMessage,
         }
       },
-      async clearInvitationCleanupFailure(_workspaceId, invitationId, expectedVersion) {
+      async clearInvitationCleanupFailure(
+        _workspaceId,
+        invitationId,
+        expectedVersion,
+        auditContext,
+      ) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'clearInvitationCleanupFailure',
+          context: auditContext,
+        })
         return {
           id: invitationId,
           email: invitationId,
@@ -11581,7 +12392,11 @@ function configureFakeProjectClients(
       async prepareReinvite() {
         throw new Error('Invitation fake is not configured for this test.')
       },
-      async reconcileAuthenticatedMember(_workspaceId, input) {
+      async reconcileAuthenticatedMember(_workspaceId, input, auditContext) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'reconcileAuthenticatedMember',
+          context: auditContext,
+        })
         calls.workspaceReconciliations.push(input.memberKey)
 
         if (workspaceReconcileFailures > 0) {
@@ -11595,7 +12410,14 @@ function configureFakeProjectClients(
 
         return createWorkspaceMember(input.memberKey)
       },
-      async updateMember(_workspaceId, _actorMemberKey, memberKey, input) {
+      async updateMember(_workspaceId, _actorMemberKey, memberKey, input, auditContext) {
+        calls.workspaceMutationAuditContexts.push({ stage: 'updateMember', context: auditContext })
+        calls.workspaceMemberUpdates.push({
+          expectedPlanningRevision: input.expectedPlanningRevision,
+          memberKey,
+          ...(input.role === undefined ? {} : { role: input.role }),
+          ...(input.status === undefined ? {} : { status: input.status }),
+        })
         return {
           ...createWorkspaceMember(memberKey),
           role: input.role ?? createWorkspaceMember(memberKey).role,
@@ -12076,3 +12898,782 @@ function createAccessToken(groups: string[] = [], claims: Record<string, unknown
 
   return `header.${payload}.signature`
 }
+
+function planningApiRequest(path: string, method = 'GET', body?: unknown) {
+  return app.request(path, {
+    method,
+    headers: {
+      Authorization: 'Bearer test-token',
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  })
+}
+
+function createCyclePlanningInput(id: string, expectedRevision: number) {
+  return {
+    id,
+    type: 'cycle' as const,
+    title: `Cycle ${id}`,
+    teamId: 'core-team',
+    projectId: 'refero',
+    ownerMemberKey: 'demo@example.com',
+    status: 'active' as const,
+    health: 'on-track' as const,
+    risk: 'low' as const,
+    progressMode: 'automatic' as const,
+    baseline: { startDate: '2026-07-01', endDate: '2026-07-14' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-07-14' },
+    cadence: { unit: 'week' as const, count: 2 },
+    capacity: 10,
+    carryOverPolicy: 'move-incomplete' as const,
+    expectedRevision,
+  }
+}
+
+async function seedPlanningWorkspaceParentAndScopedChild(
+  planningClient: InMemoryPlanningClient,
+) {
+  await planningClient.create('user#demo@example.com', {
+    ...createCyclePlanningInput('portfolio-scope-parent', 0),
+    type: 'portfolio',
+    title: 'Workspace portfolio',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planningClient.create('user#demo@example.com', {
+    ...createCyclePlanningInput('roadmap-scoped-child', 1),
+    type: 'roadmap',
+    title: 'Scoped roadmap',
+    parentId: 'portfolio-scope-parent',
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+}
+
+test('returns an authenticated empty Planning graph with accessible Work Item projections', async () => {
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: new InMemoryPlanningClient() })
+
+  const response = await planningApiRequest('/api/planning')
+
+  expect(response.status).toBe(200)
+  const planning = await response.json() as PlanningSnapshot
+  expect(planning).toMatchObject({
+    schemaVersion: 1,
+    revision: 0,
+    entities: [],
+    dependencies: [],
+    workItemLinks: [],
+  })
+  expect(planning.workItems).toEqual([
+    expect.objectContaining({
+      id: 'onboarding-friction',
+      teamId: 'core-team',
+      projectId: 'refero',
+      statusCategory: 'started',
+    }),
+  ])
+})
+
+test('lets managers build a scoped hierarchy and dependency graph', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  configureApiClientsForTest({ planning: new InMemoryPlanningClient() })
+
+  const portfolio = await planningApiRequest('/api/planning/entities', 'POST', {
+    id: 'portfolio-1',
+    type: 'portfolio',
+    title: 'Company portfolio',
+    ownerMemberKey: 'demo@example.com',
+    status: 'active',
+    health: 'on-track',
+    risk: 'low',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    expectedRevision: 0,
+  })
+  expect(portfolio.status).toBe(201)
+
+  for (const [index, id] of ['roadmap-a', 'roadmap-b'].entries()) {
+    const response = await planningApiRequest('/api/planning/entities', 'POST', {
+      id,
+      type: 'roadmap',
+      title: id,
+      parentId: 'portfolio-1',
+      teamId: 'core-team',
+      projectId: 'refero',
+      ownerMemberKey: 'demo@example.com',
+      status: 'planned',
+      health: 'on-track',
+      risk: 'low',
+      progressMode: 'automatic',
+      baseline: { startDate: '2026-07-01', endDate: '2026-07-31' },
+      forecast: { startDate: '2026-07-01', endDate: '2026-07-31' },
+      expectedRevision: index + 1,
+    })
+    expect(response.status).toBe(201)
+  }
+
+  const dependency = await planningApiRequest('/api/planning/dependencies', 'POST', {
+    id: 'dependency-1',
+    predecessorId: 'roadmap-a',
+    successorId: 'roadmap-b',
+    type: 'finish-to-start',
+    lagDays: 2,
+    expectedRevision: 3,
+  })
+
+  expect(dependency.status).toBe(201)
+  const planning = await dependency.json() as PlanningSnapshot
+  expect(planning.revision).toBe(4)
+  expect(planning.dependencies).toEqual([
+    expect.objectContaining({
+      id: 'dependency-1',
+      predecessorId: 'roadmap-a',
+      successorId: 'roadmap-b',
+    }),
+  ])
+})
+
+test('requires parent scope permission when creating a Planning child', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const parent = await planningApiRequest('/api/planning/entities', 'POST', {
+    id: 'portfolio-protected',
+    type: 'portfolio',
+    title: 'Protected Workspace portfolio',
+    ownerMemberKey: 'demo@example.com',
+    status: 'active',
+    health: 'on-track',
+    risk: 'low',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    expectedRevision: 0,
+  })
+  expect(parent.status).toBe(201)
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const child = await planningApiRequest('/api/planning/entities', 'POST', {
+    id: 'roadmap-denied',
+    type: 'roadmap',
+    title: 'Project roadmap',
+    parentId: 'portfolio-protected',
+    teamId: 'core-team',
+    projectId: 'refero',
+    ownerMemberKey: 'demo@example.com',
+    status: 'planned',
+    health: 'on-track',
+    risk: 'low',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-07-31' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-07-31' },
+    expectedRevision: 1,
+  })
+
+  expect(child.status).toBe(403)
+  const snapshot = await planningClient.get('user#demo@example.com', { workItems: [] })
+  expect(snapshot.revision).toBe(1)
+  expect(snapshot.entities.map((entity) => entity.id)).toEqual(['portfolio-protected'])
+})
+
+test('requires inherited parent permission when duplicate omits parentId', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await seedPlanningWorkspaceParentAndScopedChild(planningClient)
+  let duplicateCalls = 0
+  const duplicate = planningClient.duplicate.bind(planningClient)
+  planningClient.duplicate = async (...input) => {
+    duplicateCalls += 1
+    return duplicate(...input)
+  }
+  configureFakeProjectClients(true, {
+    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
+    workspaceRole: 'member',
+  })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities/roadmap-scoped-child/duplicate',
+    'POST',
+    { targetId: 'roadmap-denied-copy', expectedRevision: 2 },
+  )
+
+  expect(response.status).toBe(403)
+  expect(duplicateCalls).toBe(0)
+})
+
+test('requires manager permission for every active descendant before subtree move', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await seedPlanningWorkspaceParentAndScopedChild(planningClient)
+  let moveCalls = 0
+  const move = planningClient.move.bind(planningClient)
+  planningClient.move = async (...input) => {
+    moveCalls += 1
+    return move(...input)
+  }
+  configureFakeProjectClients(true, {
+    projectAccesses: [],
+    workspaceRole: 'owner',
+  })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities/portfolio-scope-parent/move',
+    'POST',
+    { expectedRevision: 2 },
+  )
+
+  expect(response.status).toBe(403)
+  expect(moveCalls).toBe(0)
+})
+
+test('denies guest Planning writes before invoking a mutation client', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'guest' })
+  const planningClient = new InMemoryPlanningClient()
+  const create = planningClient.create.bind(planningClient)
+  let createCalls = 0
+  planningClient.create = async (...input) => {
+    createCalls += 1
+    return create(...input)
+  }
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('guest-cycle', 0),
+  )
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toEqual({
+    message: 'Guest members have read-only Workspace access.',
+  })
+  expect(createCalls).toBe(0)
+})
+
+test('enforces Planning revisions and structural permissions before mutations', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: planningClient })
+  const created = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('cycle-structural', 0),
+  )
+  expect(created.status).toBe(201)
+
+  const malformedPatch = await planningApiRequest(
+    '/api/planning/entities/cycle-structural',
+    'PATCH',
+    { expectedRevision: 1 },
+  )
+  expect(malformedPatch.status).toBe(400)
+  expect(await malformedPatch.json()).toMatchObject({ code: 'PlanningPatchInvalid' })
+
+  const structuralCalls = { archive: 0, duplicate: 0, move: 0 }
+  const archive = planningClient.archive.bind(planningClient)
+  const duplicate = planningClient.duplicate.bind(planningClient)
+  const move = planningClient.move.bind(planningClient)
+  planningClient.archive = async (...input) => {
+    structuralCalls.archive += 1
+    return archive(...input)
+  }
+  planningClient.duplicate = async (...input) => {
+    structuralCalls.duplicate += 1
+    return duplicate(...input)
+  }
+  planningClient.move = async (...input) => {
+    structuralCalls.move += 1
+    return move(...input)
+  }
+
+  const futureRevision = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/archive',
+    'POST',
+    { expectedRevision: 2 },
+  )
+  expect(futureRevision.status).toBe(409)
+  expect(await futureRevision.json()).toMatchObject({ code: 'PlanningRevisionConflict' })
+  expect(structuralCalls.archive).toBe(0)
+
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  const memberArchive = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/archive',
+    'POST',
+    { expectedRevision: 1 },
+  )
+  expect(memberArchive.status).toBe(403)
+
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  const viewerDuplicate = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/duplicate',
+    'POST',
+    { targetId: 'cycle-viewer-copy', expectedRevision: 1 },
+  )
+  expect(viewerDuplicate.status).toBe(403)
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const rootMove = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/move',
+    'POST',
+    { expectedRevision: 1 },
+  )
+  expect(rootMove.status).toBe(403)
+  expect(structuralCalls).toEqual({ archive: 0, duplicate: 0, move: 0 })
+
+  const managerDuplicate = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/duplicate',
+    'POST',
+    { targetId: 'cycle-manager-copy', expectedRevision: 1 },
+  )
+  expect(managerDuplicate.status).toBe(201)
+  const duplicatedPlanning = await managerDuplicate.json() as PlanningSnapshot
+  expect(duplicatedPlanning.revision).toBe(2)
+
+  const managerMove = await planningApiRequest(
+    '/api/planning/entities/cycle-manager-copy/move',
+    'POST',
+    { teamId: 'core-team', projectId: 'refero', expectedRevision: 2 },
+  )
+  expect(managerMove.status).toBe(200)
+  const movedPlanning = await managerMove.json() as PlanningSnapshot
+  expect(movedPlanning.revision).toBe(3)
+
+  const managerArchive = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/archive',
+    'POST',
+    { expectedRevision: 3 },
+  )
+  expect(managerArchive.status).toBe(200)
+  const archivedPlanning = await managerArchive.json() as PlanningSnapshot
+  expect(archivedPlanning.revision).toBe(4)
+  expect(archivedPlanning.entities.find((entity) => entity.id === 'cycle-structural')?.archivedAt)
+    .toBeDefined()
+  expect(structuralCalls).toEqual({ archive: 1, duplicate: 1, move: 1 })
+})
+
+test('requires Workspace administration for unscoped status updates', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  configureApiClientsForTest({ planning: planningClient })
+  const created = await planningApiRequest('/api/planning/entities', 'POST', {
+    id: 'portfolio-workspace',
+    type: 'portfolio',
+    title: 'Workspace portfolio',
+    ownerMemberKey: 'demo@example.com',
+    status: 'active',
+    health: 'on-track',
+    risk: 'low',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    expectedRevision: 0,
+  })
+  expect(created.status).toBe(201)
+
+  let statusUpdateCalls = 0
+  const addStatusUpdate = planningClient.addStatusUpdate.bind(planningClient)
+  planningClient.addStatusUpdate = async (...input) => {
+    statusUpdateCalls += 1
+    return addStatusUpdate(...input)
+  }
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities/portfolio-workspace/status-updates',
+    'POST',
+    {
+      id: 'status-workspace',
+      message: 'Member must not update Workspace scope.',
+      health: 'at-risk',
+      expectedRevision: 1,
+    },
+  )
+
+  expect(response.status).toBe(403)
+  expect(statusUpdateCalls).toBe(0)
+})
+
+test('rejects an inactive Planning owner before invoking the mutation client', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  let createCalls = 0
+  const create = planningClient.create.bind(planningClient)
+  planningClient.create = async (...input) => {
+    createCalls += 1
+    return create(...input)
+  }
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'owner',
+    inactiveWorkspaceMemberKeys: ['inactive@example.com'],
+  })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest('/api/planning/entities', 'POST', {
+    id: 'portfolio-inactive-owner',
+    type: 'portfolio',
+    title: 'Invalid owner portfolio',
+    ownerMemberKey: 'inactive@example.com',
+    status: 'planned',
+    health: 'on-track',
+    risk: 'none',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    expectedRevision: 0,
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'PlanningOwnerInactive' })
+  expect(createCalls).toBe(0)
+})
+
+test('rejects duplicate when the source Planning owner became inactive', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: planningClient })
+  const created = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    {
+      ...createCyclePlanningInput('cycle-inactive-owner', 0),
+      ownerMemberKey: 'former-owner@example.com',
+    },
+  )
+  expect(created.status).toBe(201)
+
+  let duplicateCalls = 0
+  const duplicate = planningClient.duplicate.bind(planningClient)
+  planningClient.duplicate = async (...input) => {
+    duplicateCalls += 1
+    return duplicate(...input)
+  }
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    inactiveWorkspaceMemberKeys: ['former-owner@example.com'],
+  })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities/cycle-inactive-owner/duplicate',
+    'POST',
+    { targetId: 'cycle-inactive-owner-copy', expectedRevision: 1 },
+  )
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'PlanningOwnerInactive' })
+  expect(duplicateCalls).toBe(0)
+})
+
+test('lets Project members link Work Items to Workspace-scope strategic goals', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  const workspaceId = 'user#demo@example.com'
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 0),
+    id: 'portfolio-strategy',
+    type: 'portfolio',
+    title: 'Strategy portfolio',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 1),
+    id: 'roadmap-strategy',
+    type: 'roadmap',
+    title: 'Strategy roadmap',
+    parentId: 'portfolio-strategy',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 2),
+    id: 'initiative-strategy',
+    type: 'initiative',
+    title: 'Strategy initiative',
+    parentId: 'roadmap-strategy',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 3),
+    id: 'objective-strategy',
+    type: 'goal',
+    title: 'Strategy objective',
+    parentId: 'initiative-strategy',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+    goalFramework: 'objective',
+  }, { workItems: [] })
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'refero',
+      goalIds: ['objective-strategy'],
+      expectedRevision: 4,
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect((await response.json() as PlanningSnapshot).workItemLinks[0]?.goalIds)
+    .toEqual(['objective-strategy'])
+})
+
+test('requires old Planning scope permission when re-linking a moved Work Item', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  const workspaceId = 'user#demo@example.com'
+  const oldWorkItemState = {
+    workItems: [{
+      id: 'onboarding-friction',
+      revision: 1,
+      teamId: 'core-team',
+      title: 'Moved Work Item',
+      projectId: 'refero',
+      statusCategory: 'started' as const,
+      dueDate: '2026-08-31',
+    }],
+  }
+  await planningClient.create(
+    workspaceId,
+    createCyclePlanningInput('cycle-project-a', 0),
+    oldWorkItemState,
+  )
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('cycle-project-b', 1),
+    projectId: 'project-b',
+  }, oldWorkItemState)
+  await planningClient.putWorkItemLink(workspaceId, {
+    teamId: 'core-team',
+    workItemId: 'onboarding-friction',
+    projectId: 'refero',
+    cycleId: 'cycle-project-a',
+    goalIds: [],
+    expectedRevision: 2,
+  }, oldWorkItemState)
+  let putCalls = 0
+  const putWorkItemLink = planningClient.putWorkItemLink.bind(planningClient)
+  planningClient.putWorkItemLink = async (...input) => {
+    putCalls += 1
+    return putWorkItemLink(...input)
+  }
+  configureFakeProjectClients(true, {
+    detailAssignedProjectId: 'project-b',
+    projectAccesses: [{ projectId: 'project-b', role: 'member' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'project-b', name: 'Project B', tone: 'green' },
+    ],
+    workspaceRole: 'member',
+  })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'project-b',
+      cycleId: 'cycle-project-b',
+      goalIds: [],
+      expectedRevision: 3,
+    },
+  )
+
+  expect(response.status).toBe(403)
+  expect(putCalls).toBe(0)
+})
+
+test('lets Workspace owners clean up inaccessible stale Work Item links', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  const workspaceId = 'user#demo@example.com'
+  const staleWorkItemState = {
+    workItems: [{
+      id: 'missing-work-item',
+      revision: 1,
+      teamId: 'core-team',
+      title: 'Deleted later',
+      projectId: 'refero',
+      statusCategory: 'unstarted' as const,
+      dueDate: '2026-08-31',
+    }],
+  }
+  await planningClient.create(
+    workspaceId,
+    createCyclePlanningInput('cycle-stale-link', 0),
+    staleWorkItemState,
+  )
+  await planningClient.putWorkItemLink(workspaceId, {
+    teamId: 'core-team',
+    workItemId: 'missing-work-item',
+    projectId: 'refero',
+    cycleId: 'cycle-stale-link',
+    goalIds: [],
+    expectedRevision: 1,
+  }, staleWorkItemState)
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/missing-work-item',
+    'DELETE',
+    { expectedRevision: 2 },
+  )
+
+  expect(response.status).toBe(200)
+  const planning = await response.json() as PlanningSnapshot
+  expect(planning.revision).toBe(3)
+  expect(planning.workItemLinks).toEqual([])
+})
+
+test('lets members add status updates and link accessible canonical Work Items', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: planningClient })
+  const created = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('cycle-current', 0),
+  )
+  expect(created.status).toBe(201)
+
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  const statusUpdate = await planningApiRequest(
+    '/api/planning/entities/cycle-current/status-updates',
+    'POST',
+    {
+      id: 'status-1',
+      message: 'Delivery is proceeding.',
+      health: 'on-track',
+      expectedRevision: 1,
+    },
+  )
+  expect(statusUpdate.status).toBe(201)
+  const statusPlanning = await statusUpdate.json() as PlanningSnapshot
+  expect(statusPlanning.entities[0]?.statusUpdates[0]).toMatchObject({
+    id: 'status-1',
+    authorMemberKey: 'demo@example.com',
+  })
+
+  const malformedLink = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'refero',
+      cycleId: 'cycle-current',
+      expectedRevision: 2,
+    },
+  )
+  expect(malformedLink.status).toBe(400)
+  expect(await malformedLink.json()).toMatchObject({ code: 'InvalidPlanningInput' })
+
+  const linked = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'refero',
+      cycleId: 'cycle-current',
+      goalIds: [],
+      expectedRevision: 2,
+    },
+  )
+
+  expect(linked.status).toBe(200)
+  const linkedPlanning = await linked.json() as PlanningSnapshot
+  expect(linkedPlanning.workItemLinks).toEqual([
+    expect.objectContaining({
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      cycleId: 'cycle-current',
+    }),
+  ])
+  expect(linkedPlanning.entities[0]).toMatchObject({
+    linkedWorkItemCount: 1,
+    progress: 50,
+  })
+})
+
+test('returns revision conflicts and reproducibly rolls incomplete Work Items forward', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: new InMemoryPlanningClient() })
+
+  const source = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('cycle-source', 0),
+  )
+  expect(source.status).toBe(201)
+  const target = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    {
+      ...createCyclePlanningInput('cycle-target', 1),
+      baseline: { startDate: '2026-07-15', endDate: '2026-07-28' },
+      forecast: { startDate: '2026-07-15', endDate: '2026-07-28' },
+    },
+  )
+  expect(target.status).toBe(201)
+  const linked = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'refero',
+      cycleId: 'cycle-source',
+      goalIds: [],
+      expectedRevision: 2,
+    },
+  )
+  expect(linked.status).toBe(200)
+
+  const conflict = await planningApiRequest(
+    '/api/planning/cycles/cycle-source/rollover',
+    'POST',
+    { targetCycleId: 'cycle-target', expectedRevision: 2 },
+  )
+  expect(conflict.status).toBe(409)
+  expect(await conflict.json()).toMatchObject({ code: 'PlanningRevisionConflict' })
+
+  const rolledOver = await planningApiRequest(
+    '/api/planning/cycles/cycle-source/rollover',
+    'POST',
+    { targetCycleId: 'cycle-target', expectedRevision: 3 },
+  )
+  expect(rolledOver.status).toBe(200)
+  const body = await rolledOver.json() as PlanningMutationResponse
+  expect(body.movedWorkItemIds).toEqual(['onboarding-friction'])
+  expect(body.retainedWorkItemIds).toEqual([])
+  expect(body.planning.revision).toBe(4)
+  expect(body.planning.workItemLinks[0]?.cycleId).toBe('cycle-target')
+  expect(body.planning.entities.find((entity) => entity.id === 'cycle-source')?.status)
+    .toBe('completed')
+})
