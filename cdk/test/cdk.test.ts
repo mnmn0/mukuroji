@@ -62,7 +62,7 @@ function serializeAwsSdkCall(value: unknown): string {
 
 const synthesizedTemplate = createTemplate();
 
-test('fresh deployment requires explicit external Cognito and workspace parameters', () => {
+test('fresh deployment requires explicit Cognito workspace and request secrets parameters', () => {
   const template = synthesizedTemplate;
   const parameters = template.toJSON().Parameters;
 
@@ -116,6 +116,23 @@ test('fresh deployment requires explicit external Cognito and workspace paramete
     MinValue: 60,
     MaxValue: 3600,
   }));
+  expect(parameters.RequestRateLimitPerHour).toEqual(expect.objectContaining({
+    Type: 'Number',
+    Default: 10,
+    MinValue: 1,
+    MaxValue: 10000,
+  }));
+  for (const secretParameterName of [
+    'RequestEmailWebhookSecret',
+    'RequestTokenHashSecret',
+  ]) {
+    expect(parameters[secretParameterName]).toEqual(expect.objectContaining({
+      Type: 'String',
+      MinLength: 32,
+      MaxLength: 256,
+      NoEcho: true,
+    }));
+  }
 
   for (const parameterName of [
     'CognitoUserPoolId',
@@ -124,6 +141,8 @@ test('fresh deployment requires explicit external Cognito and workspace paramete
     'WorkspaceAuditPseudonymKey',
     'InitialOwnerEmail',
     'InitialOwnerUsername',
+    'RequestEmailWebhookSecret',
+    'RequestTokenHashSecret',
   ]) {
     expect(parameters[parameterName].Default).toBeUndefined();
   }
@@ -155,7 +174,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(14);
+  expect(Object.keys(tables)).toHaveLength(15);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -268,6 +287,14 @@ test('shared server handler is bundled as a Lambda asset with production environ
           Ref: 'RealtimeSessionsTable607096EB',
         },
         REALTIME_WEBSOCKET_URL: Match.anyValue(),
+        REQUEST_INTAKE_TABLE_NAME: Match.anyValue(),
+        REQUEST_QUEUE_INDEX_NAME: 'RequestQueueIndex',
+        REQUEST_RATE_LIMIT_PER_HOUR: {
+          Ref: 'RequestRateLimitPerHour',
+        },
+        REQUEST_TOKEN_HASH_SECRET: {
+          Ref: 'RequestTokenHashSecret',
+        },
         FILE_BUCKET_NAME: Match.anyValue(),
         FILE_DOWNLOAD_URL_TTL_SECONDS: {
           Ref: 'FileDownloadUrlTtlSeconds',
@@ -351,6 +378,7 @@ test('Function URL and API Gateway invoke the same Lambda handler', () => {
   template.hasOutput('PlanningTableName', {
     Value: { Ref: 'PlanningTable2A0D4CC5' },
   });
+  template.hasOutput('RequestIntakeTableName', {});
 });
 
 test('Work Item configuration uses a retained scope and record key table', () => {
@@ -404,6 +432,54 @@ test('planning data uses a retained point-in-time recoverable workspace table', 
     UpdateReplacePolicy: 'Retain',
     DeletionPolicy: 'Retain',
   });
+});
+
+test('request intake uses a retained queue-indexed table with transient row expiry', () => {
+  const template = synthesizedTemplate;
+  const output = template.toJSON().Outputs.RequestIntakeTableName;
+  const tableLogicalId = output?.Value?.Ref;
+
+  expect(typeof tableLogicalId).toBe('string');
+  if (typeof tableLogicalId !== 'string') {
+    throw new Error('Request intake table output was not found.');
+  }
+
+  const table = template.toJSON().Resources[tableLogicalId];
+
+  expect(table).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+    Properties: expect.objectContaining({
+      AttributeDefinitions: expect.arrayContaining([
+        { AttributeName: 'scopeKey', AttributeType: 'S' },
+        { AttributeName: 'recordKey', AttributeType: 'S' },
+        { AttributeName: 'queueKey', AttributeType: 'S' },
+        { AttributeName: 'queueRecordKey', AttributeType: 'S' },
+      ]),
+      BillingMode: 'PAY_PER_REQUEST',
+      KeySchema: [
+        { AttributeName: 'scopeKey', KeyType: 'HASH' },
+        { AttributeName: 'recordKey', KeyType: 'RANGE' },
+      ],
+      GlobalSecondaryIndexes: expect.arrayContaining([
+        expect.objectContaining({
+          IndexName: 'RequestQueueIndex',
+          KeySchema: [
+            { AttributeName: 'queueKey', KeyType: 'HASH' },
+            { AttributeName: 'queueRecordKey', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
+      ]),
+      PointInTimeRecoverySpecification: {
+        PointInTimeRecoveryEnabled: true,
+      },
+      TimeToLiveSpecification: {
+        AttributeName: 'expiresAt',
+        Enabled: true,
+      },
+    }),
+  }));
 });
 
 test('Function URL and API Gateway expose the same restricted CORS contract', () => {
@@ -1060,7 +1136,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 2);
+  template.resourceCountIs('AWS::SQS::Queue', 3);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -1103,6 +1179,113 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
   template.hasOutput('NotificationScheduleDlqUrl', {});
 });
 
+test('request email ingestion is an asynchronous narrow-IAM Lambda with a monitored DLQ', () => {
+  const template = synthesizedTemplate;
+  const resources = template.toJSON().Resources;
+  const functionLogicalId = template.toJSON().Outputs.RequestEmailIngestionFunctionName?.Value?.Ref;
+
+  expect(typeof functionLogicalId).toBe('string');
+  if (typeof functionLogicalId !== 'string') {
+    throw new Error('Request email ingestion function output was not found.');
+  }
+
+  const lambdaResource = resources[functionLogicalId];
+  expect(lambdaResource).toEqual(expect.objectContaining({
+    Type: 'AWS::Lambda::Function',
+    Properties: expect.objectContaining({
+      Description: 'Validates signed email envelopes and appends them to request intake threads.',
+      Handler: 'index.handler',
+      MemorySize: 512,
+      Runtime: 'nodejs22.x',
+      Timeout: 30,
+      Environment: {
+        Variables: {
+          REQUEST_EMAIL_WEBHOOK_SECRET: { Ref: 'RequestEmailWebhookSecret' },
+          REQUEST_INTAKE_TABLE_NAME: expect.anything(),
+          REQUEST_TOKEN_HASH_SECRET: { Ref: 'RequestTokenHashSecret' },
+        },
+      },
+    }),
+  }));
+
+  const roleLogicalId = lambdaResource.Properties.Role?.['Fn::GetAtt']?.[0];
+  expect(typeof roleLogicalId).toBe('string');
+  if (typeof roleLogicalId !== 'string') {
+    throw new Error('Request email ingestion execution role was not found.');
+  }
+
+  const policies = Object.values(resources).filter((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::IAM::Policy' &&
+    ((resource as { Properties?: { Roles?: unknown[] } }).Properties?.Roles ?? []).some((role) =>
+      (role as { Ref?: string }).Ref === roleLogicalId
+    )
+  );
+  const serializedPolicies = JSON.stringify(policies);
+  const requestTableLogicalId = template.toJSON().Outputs.RequestIntakeTableName?.Value?.Ref;
+
+  expect(policies).not.toHaveLength(0);
+  expect(serializedPolicies).toContain(String(requestTableLogicalId));
+  expect(serializedPolicies).toContain('dynamodb:GetItem');
+  expect(serializedPolicies).toContain('dynamodb:PutItem');
+  expect(serializedPolicies).not.toContain('dynamodb:TransactWriteItems');
+  expect(serializedPolicies).toContain('dynamodb:EnclosingOperation');
+  expect(serializedPolicies).toContain('ForAnyValue:StringEquals');
+  expect(serializedPolicies).toContain('sqs:SendMessage');
+  for (const forbiddenResource of [
+    'TeamIssuesTable189D851D',
+    'AuditEventsTable0723963E',
+    'ProjectDirectoryTable9ED01C01',
+    'FileProofingTable81DA272F',
+    'CognitoUserPoolId',
+  ]) {
+    expect(serializedPolicies).not.toContain(forbiddenResource);
+  }
+  expect(serializedPolicies).not.toContain('s3:');
+
+  const eventInvokeConfig = Object.values(resources).find((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::Lambda::EventInvokeConfig' &&
+    (resource as { Properties?: { FunctionName?: { Ref?: string } } }).Properties
+      ?.FunctionName?.Ref === functionLogicalId
+  ) as {
+    Properties?: {
+      DestinationConfig?: { OnFailure?: { Destination?: { 'Fn::GetAtt'?: string[] } } }
+      MaximumRetryAttempts?: number
+    }
+  } | undefined;
+  expect(eventInvokeConfig?.Properties?.MaximumRetryAttempts).toBe(2);
+  const queueLogicalId = eventInvokeConfig?.Properties?.DestinationConfig?.OnFailure
+    ?.Destination?.['Fn::GetAtt']?.[0];
+  expect(typeof queueLogicalId).toBe('string');
+  if (typeof queueLogicalId !== 'string') {
+    throw new Error('Request email ingestion DLQ destination was not found.');
+  }
+  expect(resources[queueLogicalId]).toEqual(expect.objectContaining({
+    Type: 'AWS::SQS::Queue',
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+    Properties: expect.objectContaining({
+      MessageRetentionPeriod: 1209600,
+      SqsManagedSseEnabled: true,
+    }),
+  }));
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription: 'Detects request intake email envelopes that exhausted asynchronous retries.',
+    Threshold: 1,
+    TreatMissingData: 'notBreaching',
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription: 'Detects failures while Lambda delivers request intake email failures to the DLQ.',
+    MetricName: 'DestinationDeliveryFailures',
+    Threshold: 1,
+    TreatMissingData: 'notBreaching',
+  });
+  expect(JSON.stringify(template.findResources('AWS::ApiGatewayV2::Integration')))
+    .not.toContain(functionLogicalId);
+  expect(JSON.stringify(template.findResources('AWS::Lambda::Url')))
+    .not.toContain(functionLogicalId);
+  template.hasOutput('RequestEmailIngestionDlqUrl', {});
+});
+
 test('API IAM is limited to the data tables and configured Cognito user pool', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
@@ -1133,11 +1316,6 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Array.isArray(statement.Action) && statement.Action.includes('s3:PutObject')
   );
   const serializedApiPolicies = JSON.stringify(apiPolicies);
-  const transactStatement = statements.find((statement) => {
-    const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
-    return actions.includes('dynamodb:TransactWriteItems') &&
-      JSON.stringify(statement.Resource).includes('WorkspaceSearchTable2575AD6B');
-  });
   const configurationDataStatement = statements.find((statement) =>
     JSON.stringify(statement.Resource) === JSON.stringify({
       'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'],
@@ -1158,25 +1336,17 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   const planningStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('PlanningTable2A0D4CC5')
   );
+  const requestTableLogicalId = template.toJSON().Outputs.RequestIntakeTableName?.Value?.Ref;
+  expect(typeof requestTableLogicalId).toBe('string');
+  const requestIntakeStatements = statements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes(String(requestTableLogicalId))
+  );
   const cognitoPolicy = Object.values(template.toJSON().Resources).find((resource) =>
     JSON.stringify(resource).includes('cognito-idp:AdminGetUser')
   );
 
-  expect(transactStatement).toEqual(expect.objectContaining({
-    Effect: 'Allow',
-    Resource: expect.arrayContaining([
-      { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
-      { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
-      { 'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'] },
-      { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
-      { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
-      { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
-      { 'Fn::GetAtt': ['WorkspaceSearchTable2575AD6B', 'Arn'] },
-    ]),
-  }));
   expect(serializedApiPolicies).toContain('WorkspaceSearchTable2575AD6B');
-  expect(JSON.stringify(transactStatement)).not.toContain('ProjectTasksTableE21F6637');
-  expect(JSON.stringify(transactStatement)).toContain('FileProofingTable');
+  expect(serializedApiPolicies).not.toContain('dynamodb:TransactWriteItems');
   expect(fileObjectStatement).toEqual(expect.objectContaining({
     Effect: 'Allow',
     Action: expect.arrayContaining([
@@ -1208,7 +1378,6 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',
-    'dynamodb:TransactWriteItems',
     'dynamodb:UpdateItem',
   ]));
   expect(configurationDataStatement).toEqual({
@@ -1224,10 +1393,17 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Effect: 'Allow',
     Resource: { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
   });
-  expect(configurationStatements).toHaveLength(2);
-  expect(configurationStatements).toEqual(expect.arrayContaining([
-    configurationDataStatement,
-    transactStatement,
+  expect(configurationStatements).toEqual([configurationDataStatement]);
+
+  const requestIntakeActions = requestIntakeStatements.flatMap((statement) =>
+    Array.isArray(statement.Action) ? statement.Action : [statement.Action]
+  );
+  expect(requestIntakeActions).toEqual(expect.arrayContaining([
+    'dynamodb:DescribeTable',
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+    'dynamodb:Query',
+    'dynamodb:UpdateItem',
   ]));
   expect(planningDataStatement).toEqual(expect.objectContaining({
     Action: [
@@ -1242,11 +1418,15 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Effect: 'Allow',
     Resource: { 'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'] },
   }));
-  expect(planningStatements).toHaveLength(2);
-  expect(planningStatements).toEqual(expect.arrayContaining([
-    planningDataStatement,
-    transactStatement,
-  ]));
+  expect(planningStatements).toEqual([planningDataStatement]);
+  for (const forbiddenAction of [
+    'dynamodb:BatchGetItem',
+    'dynamodb:BatchWriteItem',
+    'dynamodb:DeleteItem',
+    'dynamodb:Scan',
+  ]) {
+    expect(requestIntakeActions).not.toContain(forbiddenAction);
+  }
 
   const legacyTaskStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('ProjectTasksTableE21F6637')

@@ -150,6 +150,8 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID`: Cognito claim と DynamoDB partition で共有する canonical Workspace ID。未指定時は `workspace#mukuroji-local`
 - `MUKUROJI_PROJECT_DIRECTORY_ID`: 旧 local 設定との互換入力。`MUKUROJI_WORKSPACE_DIRECTORY_ID` が優先されます。
 - `MUKUROJI_INITIAL_OWNER_EMAIL` / `MUKUROJI_INITIAL_OWNER_USERNAME`: 初期 owner の email と Cognito username
+- `MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET`: email adapter envelope の署名検証に使う 32–256 文字の secret
+- `MUKUROJI_REQUEST_TOKEN_HASH_SECRET`: request/reply capability の hash に使う別の 32–256 文字の secret
 
 API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/teams/projects`, `/api/work-items`,
 `/api/teams/{teamId}/issues`, `/api/projects/{projectId}/issues`,
@@ -171,6 +173,9 @@ Notification event、Inbox state、filter/cursor、deep link、配信設定、�
 
 Cycle rollover、戦略階層、roll-up、timeline dependency、critical path の契約は
 [`docs/planning.md`](docs/planning.md) を参照してください。
+
+Request Form、public intake、queue/triage、attachment、email reply、Work Item conversion の契約は
+[`docs/request-intake.md`](docs/request-intake.md) を参照してください。
 
 Web の mutation は operation と入力 fingerprint ごとに `MutationRequestContext` を1つ作り、同じ
 in-flight request で共有します。transport failure 後は結果が不明な間だけ保持し、Workspace snapshot の
@@ -205,6 +210,8 @@ export MUKUROJI_WORKSPACE_DIRECTORY_ID=<workspace-directory-id>
 export MUKUROJI_INITIAL_OWNER_EMAIL=<owner@example.com>
 export MUKUROJI_INITIAL_OWNER_USERNAME=<cognito-username>
 export MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY="$(openssl rand -hex 32)"
+export MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET=<at-least-32-random-characters>
+export MUKUROJI_REQUEST_TOKEN_HASH_SECRET=<different-at-least-32-random-characters>
 
 bash scripts/prepare-workspace-cognito.sh
 bun run cdk:build
@@ -216,7 +223,9 @@ bun --filter cdk cdk diff \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
-  --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME"
+  --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
+  --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
+  --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET"
 ```
 
 `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は環境作成時に一度だけ `openssl rand -hex 32` などで生成し、64桁の小文字hex値を secret store に保存して、API deploy と audit backfill で再利用してください。通常の再 deploy で生成し直すと Workspace access の audit ID が変わります。
