@@ -12,6 +12,8 @@ import { PlanningPage } from '../pages/PlanningPage'
 import { ProjectTasksRedirect } from './ProjectTasksRedirect'
 import { WorkspaceCommandMenuLayout } from '../commands/WorkspaceCommandMenu'
 import { SearchPage } from '../search/SearchPage'
+import { PublicRequestFormPage } from '../requests/PublicRequestFormPage'
+import { RequestIntakePage } from '../requests/RequestIntakePage'
 
 /**
  * アプリケーション全体の画面ルーティング定義です。
@@ -39,6 +41,10 @@ export const appRoutes: RouteObject[] = [
       {
         path: '/inbox',
         element: <WorkspacePage view="inbox" />,
+      },
+      {
+        path: '/requests',
+        element: <RequestIntakePage />,
       },
       {
         path: '/search',
@@ -93,6 +99,10 @@ export const appRoutes: RouteObject[] = [
         element: <ProjectTasksRedirect />,
       },
     ],
+  },
+  {
+    path: '/request/:linkToken',
+    element: <PublicRequestFormPage />,
   },
   {
     path: '/forgot-password',

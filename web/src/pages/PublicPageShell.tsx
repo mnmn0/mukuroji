@@ -42,6 +42,10 @@ type PublicPageShellProps = {
    */
   initialLocale?: Locale
   /**
+   * 親ページが locale を管理する場合の controlled value です。
+   */
+  locale?: Locale
+  /**
    * 表示言語を変更したときにページ固有の一時状態を同期する callback です。
    */
   onLocaleChange?: (locale: Locale) => void
@@ -57,10 +61,12 @@ type PublicPageShellProps = {
 export function PublicPageShell({
   children,
   initialLocale,
+  locale: controlledLocale,
   onLocaleChange,
   titleKey,
 }: PublicPageShellProps) {
-  const [locale, setLocale] = useState<Locale>(() => initialLocale ?? getInitialLocale())
+  const [uncontrolledLocale, setUncontrolledLocale] = useState<Locale>(() => initialLocale ?? getInitialLocale())
+  const locale = controlledLocale ?? uncontrolledLocale
   const t = useMemo(() => createTranslator(locale), [locale])
 
   useEffect(() => {
@@ -70,7 +76,9 @@ export function PublicPageShell({
 
   const handleLocaleChange = (value: string) => {
     const nextLocale = value === 'en' ? 'en' : 'ja'
-    setLocale(nextLocale)
+    if (controlledLocale === undefined) {
+      setUncontrolledLocale(nextLocale)
+    }
     setLocalePreference(nextLocale)
     onLocaleChange?.(nextLocale)
   }

@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test'
 import { matchRoutes } from 'react-router'
 import {
   createPlanningPath,
+  createPublicRequestPath,
   createProjectIssuesPath,
+  createRequestsPath,
   createTeamIssuesPath,
 } from '../src/routes/paths'
 import { appRoutes } from '../src/routes/router'
@@ -47,5 +49,18 @@ describe('Planning paths', () => {
     }
 
     expect(matchRoutes(appRoutes, '/planning/invalid')?.at(-1)?.route.path).toBe('*')
+  })
+})
+
+describe('Request intake paths', () => {
+  test('keeps queue and form selections in encoded URL state', () => {
+    expect(createRequestsPath()).toBe('/requests')
+    expect(createRequestsPath('queue', 'request/1')).toBe(
+      '/requests?submissionId=request%2F1',
+    )
+    expect(createRequestsPath('forms', 'form/1')).toBe(
+      '/requests?view=forms&formId=form%2F1',
+    )
+    expect(createPublicRequestPath('opaque/token')).toBe('/request/opaque%2Ftoken')
   })
 })

@@ -6,7 +6,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from 'react'
-import { Link, useNavigate } from 'react-router'
+import { Link, useNavigate, useSearchParams } from 'react-router'
 import {
   ApiError,
   completeNewPasswordChallenge,
@@ -35,6 +35,7 @@ import {
   type Locale,
   type MessageKey,
 } from '../i18n'
+import { resolveSafeLoginReturnPath } from './loginReturnPath'
 
 function shouldRetainAuthMutationContext(error: unknown) {
   return !(error instanceof ApiError)
@@ -76,6 +77,8 @@ export function LoginPage({
   initialChallengeFailed = false,
 }: LoginPageProps = {}) {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const returnPath = resolveSafeLoginReturnPath(searchParams.get('returnTo'))
   const [locale, setLocale] = useState<Locale>(() => getInitialLocale())
   const [email, setEmail] = useState(initialChallenge?.email ?? '')
   const [password, setPassword] = useState('')
@@ -94,9 +97,9 @@ export function LoginPage({
 
   useEffect(() => {
     if (getAuthSession()) {
-      navigate('/dashboard', { replace: true })
+      navigate(returnPath, { replace: true })
     }
-  }, [navigate])
+  }, [navigate, returnPath])
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -139,7 +142,7 @@ export function LoginPage({
       }
 
       saveAuthSession(result)
-      navigate('/dashboard', { replace: true })
+      navigate(returnPath, { replace: true })
     } catch (error) {
       setErrorKey(resolveLoginErrorKey(error))
     } finally {
@@ -182,7 +185,7 @@ export function LoginPage({
         shouldRetainAuthMutationContext,
       )
       saveAuthSession(session)
-      navigate('/dashboard', { replace: true })
+      navigate(returnPath, { replace: true })
     } catch (error) {
       setErrorKey(resolveChallengeErrorKey(error))
       setChallengeFailed(shouldShowChallengeRecovery(error))
