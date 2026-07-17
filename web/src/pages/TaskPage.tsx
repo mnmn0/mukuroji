@@ -162,6 +162,7 @@ const emptyTeamIssues: TeamIssue[] = []
 const emptyWorkspaceMembers: WorkspaceMember[] = []
 const emptyResolvedWorkItemConfigurations: Record<string, ResolvedWorkItemConfiguration> = {}
 const emptyConfigurationTeamIds: string[] = []
+const emptyBulkOperationSelections: BulkOperationSelection[] = []
 const emptyProjectWorkItemConfigurationLoadResult: ProjectWorkItemConfigurationLoadResult = {
   configurationsByTeam: emptyResolvedWorkItemConfigurations,
   failedTeamIds: emptyConfigurationTeamIds,
@@ -1440,7 +1441,10 @@ export function TaskScreen({
   const [isDueDateMenuOpen, setIsDueDateMenuOpen] = useState(false)
   const [sortOrder, setSortOrder] = useState<TaskSortOrder>('due-date-asc')
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false)
-  const [selectedBulkItems, setSelectedBulkItems] = useState<BulkOperationSelection[]>([])
+  const [bulkSelection, setBulkSelection] = useState(() => ({
+    items: [] as BulkOperationSelection[],
+    projectId,
+  }))
   const [localSelectedDetailTaskKey, setLocalSelectedDetailTaskKey] = useState<string | undefined>()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
@@ -1482,6 +1486,16 @@ export function TaskScreen({
       queueMicrotask(() => setIsCreateTaskOpen(true))
     }
   }, [defaultCreateTaskOpen])
+
+  useEffect(() => {
+    if (bulkSelection.projectId !== projectId) {
+      queueMicrotask(() => setBulkSelection((currentSelection) =>
+        currentSelection.projectId === projectId
+          ? currentSelection
+          : { items: [], projectId },
+      ))
+    }
+  }, [bulkSelection.projectId, projectId])
 
   const effectiveStatusFilter = statusFilter === 'all' ||
     statusColumns.some((column) => column.key === statusFilter)
@@ -1578,6 +1592,9 @@ export function TaskScreen({
 
     return [...projectsById.values()].sort((left, right) => left.label.localeCompare(right.label))
   }, [teams])
+  const selectedBulkItems = bulkSelection.projectId === projectId
+    ? bulkSelection.items
+    : emptyBulkOperationSelections
   const selectedTaskKeys = useMemo(
     () => selectedBulkItems.map((item) => item.selectionKey),
     [selectedBulkItems],
@@ -1609,25 +1626,45 @@ export function TaskScreen({
   const updateTaskSelection = (taskKey: string, selected: boolean) => {
     const task = tasks.find((candidate) => createTaskKey(candidate) === taskKey)
     const availableItems = task ? [createBulkOperationSelection(task, t)] : []
-    setSelectedBulkItems((currentItems) =>
-      updateBulkItemSelection(currentItems, availableItems, [taskKey], selected),
-    )
+    setBulkSelection((currentSelection) => ({
+      items: updateBulkItemSelection(
+        currentSelection.projectId === projectId ? currentSelection.items : [],
+        availableItems,
+        [taskKey],
+        selected,
+      ),
+      projectId,
+    }))
   }
 
   const updateVisibleTaskSelection = (selectionKeys: string[], selected: boolean) => {
-    setSelectedBulkItems((currentItems) =>
-      updateBulkItemSelection(currentItems, visibleBulkItems, selectionKeys, selected),
-    )
+    setBulkSelection((currentSelection) => ({
+      items: updateBulkItemSelection(
+        currentSelection.projectId === projectId ? currentSelection.items : [],
+        visibleBulkItems,
+        selectionKeys,
+        selected,
+      ),
+      projectId,
+    }))
   }
 
   const handleBulkOperationComplete = (operation: BulkOperation) => {
-    setSelectedBulkItems((currentItems) => {
+    setBulkSelection((currentSelection) => {
+      if (currentSelection.projectId !== projectId) {
+        return currentSelection
+      }
+
+      const currentItems = currentSelection.items
       const nextSelectionKeys = new Set(clearSucceededBulkSelection(
         currentItems.map((item) => item.selectionKey),
         currentItems,
         operation,
       ))
-      return currentItems.filter((item) => nextSelectionKeys.has(item.selectionKey))
+      return {
+        items: currentItems.filter((item) => nextSelectionKeys.has(item.selectionKey)),
+        projectId,
+      }
     })
   }
 
@@ -2580,6 +2617,7 @@ function TaskWorkspace({
 
       {activeTab === 'table' ? (
         <BulkOperationToolbar
+          key={projectId}
           projectOptions={bulkProjectOptions}
           readOnly={!bulkWorkspaceId || !onBulkPreview || !onBulkApply}
           selectedItems={selectedBulkItems}

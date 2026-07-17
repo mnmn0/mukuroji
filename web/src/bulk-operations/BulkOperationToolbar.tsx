@@ -3,13 +3,12 @@ import type {
   BulkOperationAction,
   BulkOperationPreview,
   BulkOperationRequest,
-  WorkItemPriority,
 } from '@mukuroji/contracts'
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { MessageKey } from '../i18n'
 import { BulkOperationResultPanel } from './BulkOperationResultPanel'
+import { bulkEditFields, createBulkEditPatch, type BulkEditField } from './helpers'
 
-const bulkEditFields = ['workflowStatusId', 'assigneeUserId', 'dueDate', 'priority'] as const
 const bulkPriorities = ['high', 'medium', 'low'] as const
 
 /** Bulk selection を API identity と table selection key へ結び付けます。 */
@@ -68,8 +67,6 @@ export type BulkOperationToolbarProps = {
   /** Story/test で表示する初期 operation です。 */
   initialOperation?: BulkOperation
 }
-
-type BulkEditField = (typeof bulkEditFields)[number]
 
 /**
  * 選択中 Work Item の edit/move/archive を preview してから確定する toolbar です。
@@ -440,14 +437,6 @@ function createBulkOperationRequest(
     items,
     workspaceId,
   }
-}
-
-function createBulkEditPatch(field: BulkEditField, value: string) {
-  const normalizedValue = value.trim()
-  if (field === 'priority') {
-    return { priority: normalizedValue as WorkItemPriority }
-  }
-  return { [field]: normalizedValue }
 }
 
 function toBulkErrorMessage(error: unknown, t: (key: MessageKey) => string) {

@@ -188,14 +188,21 @@ const mockRequestCountsByPage = new WeakMap<Page, MockRequestCounts>()
  * @param page - API route を差し替える Playwright page です。
  * @param username - username と email に使う識別子です。
  * @param name - 画面に表示するユーザー名です。
+ * @param workspaceId - ユーザーの Workspace ID です。
  */
-async function mockCurrentUser(page: Page, username: string, name: string) {
+async function mockCurrentUser(
+  page: Page,
+  username: string,
+  name: string,
+  workspaceId?: string,
+) {
   await page.unroute('**/api/auth/me')
   await page.route('**/api/auth/me', async (route) => {
     await route.fulfill({
       json: {
         username,
         attributes: {
+          'custom:workspace_id': workspaceId,
           email: username,
           name,
         },
@@ -2039,6 +2046,19 @@ test.describe('authenticated task page', () => {
       'data-selected',
       'true',
     )
+  })
+
+  test('プロジェクト切り替え時に bulk 選択を引き継がない', async ({ page }) => {
+    await mockCurrentUser(page, 'demo@example.com', 'Demo User', 'workspace-demo')
+    await page.goto('/projects/refero/issues?teamId=core-team')
+
+    await page.getByRole('checkbox', { name: 'SEO キーワードリサーチ' }).check()
+    await expect(page.getByTestId('bulk-selected-count')).toHaveText('1件を選択中')
+
+    await page.getByRole('button', { name: 'ブランド刷新', exact: true }).click()
+
+    await expect(page).toHaveURL('/projects/brand-refresh/issues?teamId=design-team')
+    await expect(page.getByTestId('bulk-selected-count')).toHaveText('0件を選択中')
   })
 
   test('Issue toolbar で検索、ステータス絞り込み、テーブル/ボード切替が動作する', async ({ page }) => {

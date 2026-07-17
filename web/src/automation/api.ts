@@ -60,10 +60,30 @@ export class AutomationApiError extends Error {
   }
 }
 
-const automationApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const automationApiBaseUrl = resolveAutomationApiBaseUrl(import.meta.env)
 const defaultAutomationApiErrorMessage = 'Unable to complete the automation request.'
+
+/**
+ * Automation API の base URL を既存 Workspace API と同じ優先順で解決します。
+ *
+ * @param environment - Vite から渡される環境変数です。
+ * @returns 末尾の slash を除いた API base URL です。
+ */
+export function resolveAutomationApiBaseUrl(
+  environment: Record<string, string | boolean | undefined>,
+) {
+  return trimTrailingSlash(
+    typeof environment.VITE_WORKSPACE_API_BASE_URL === 'string'
+      ? environment.VITE_WORKSPACE_API_BASE_URL
+      : typeof environment.VITE_PROJECTS_API_BASE_URL === 'string'
+        ? environment.VITE_PROJECTS_API_BASE_URL
+        : typeof environment.VITE_TASKS_API_BASE_URL === 'string'
+          ? environment.VITE_TASKS_API_BASE_URL
+          : typeof environment.VITE_API_BASE_URL === 'string'
+            ? environment.VITE_API_BASE_URL
+            : '/api',
+  )
+}
 
 /**
  * Workspace の automation rule を取得します。

@@ -8,6 +8,7 @@ import {
 import { BulkOperationResultPanel } from '../src/bulk-operations/BulkOperationResultPanel'
 import {
   clearSucceededBulkSelection,
+  createBulkEditPatch,
   getResumableBulkOperationItems,
   getRetryableBulkOperationItems,
   updateBulkItemSelection,
@@ -98,6 +99,15 @@ const runningOperation = {
 }
 
 describe('BulkOperationToolbar', () => {
+  test('normalizes the date input value to the Work Item storage format', () => {
+    expect(createBulkEditPatch('dueDate', ' 2026-07-31 ')).toEqual({
+      dueDate: '2026/07/31',
+    })
+    expect(createBulkEditPatch('workflowStatusId', ' active ')).toEqual({
+      workflowStatusId: 'active',
+    })
+  })
+
   test('selects only visible rows while preserving hidden selections', () => {
     expect(updateVisibleBulkSelection(
       ['hidden'],

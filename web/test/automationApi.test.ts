@@ -22,6 +22,7 @@ import {
   getRecurringWork,
   pauseAutomationInboundWebhookEndpoint,
   resumeAutomationInboundWebhookEndpoint,
+  resolveAutomationApiBaseUrl,
   revokeAutomationInboundWebhookEndpoint,
   retryAutomationExecution,
   rotateAutomationInboundWebhookEndpoint,
@@ -38,6 +39,30 @@ const mutationContext = {
 
 afterEach(() => {
   globalThis.fetch = originalFetch
+})
+
+describe('automation API base URL', () => {
+  test('uses the Workspace, Projects, Tasks, and shared API fallback chain', () => {
+    expect(resolveAutomationApiBaseUrl({
+      VITE_API_BASE_URL: 'https://shared.example.test/',
+      VITE_PROJECTS_API_BASE_URL: 'https://projects.example.test/',
+      VITE_TASKS_API_BASE_URL: 'https://tasks.example.test/',
+      VITE_WORKSPACE_API_BASE_URL: 'https://workspace.example.test/',
+    })).toBe('https://workspace.example.test')
+    expect(resolveAutomationApiBaseUrl({
+      VITE_API_BASE_URL: 'https://shared.example.test/',
+      VITE_PROJECTS_API_BASE_URL: 'https://projects.example.test/',
+      VITE_TASKS_API_BASE_URL: 'https://tasks.example.test/',
+    })).toBe('https://projects.example.test')
+    expect(resolveAutomationApiBaseUrl({
+      VITE_API_BASE_URL: 'https://shared.example.test/',
+      VITE_TASKS_API_BASE_URL: 'https://tasks.example.test/',
+    })).toBe('https://tasks.example.test')
+    expect(resolveAutomationApiBaseUrl({
+      VITE_API_BASE_URL: 'https://shared.example.test/',
+    })).toBe('https://shared.example.test')
+    expect(resolveAutomationApiBaseUrl({})).toBe('/api')
+  })
 })
 
 describe('automation API', () => {

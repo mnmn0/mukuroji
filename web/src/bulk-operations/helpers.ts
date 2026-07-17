@@ -1,5 +1,26 @@
-import type { BulkOperation } from '@mukuroji/contracts'
+import type { AutomationValue, BulkOperation, WorkItemPriority } from '@mukuroji/contracts'
 import type { BulkOperationSelection } from './BulkOperationToolbar'
+
+/** Bulk edit で更新できる Work Item fields です。 */
+export const bulkEditFields = ['workflowStatusId', 'assigneeUserId', 'dueDate', 'priority'] as const
+
+/** Bulk edit で更新できる Work Item field です。 */
+export type BulkEditField = (typeof bulkEditFields)[number]
+
+/** Bulk edit の入力値を Work Item の保存形式へ正規化した patch にします。 */
+export function createBulkEditPatch(
+  field: BulkEditField,
+  value: string,
+): Record<string, AutomationValue> {
+  const normalizedValue = value.trim()
+  if (field === 'priority') {
+    return { priority: normalizedValue as WorkItemPriority }
+  }
+  if (field === 'dueDate') {
+    return { dueDate: normalizedValue.replaceAll('-', '/') }
+  }
+  return { [field]: normalizedValue }
+}
 
 /** Failed status の item だけを retry 対象として返します。 */
 export function getRetryableBulkOperationItems(operation: BulkOperation) {
