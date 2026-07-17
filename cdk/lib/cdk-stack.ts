@@ -529,6 +529,20 @@ export class CdkStack extends cdk.Stack {
       description: 'Comma-separated CORS origins allowed to call the mukuroji API.',
     });
     const taskApiAllowedOriginList = cdk.Fn.split(',', taskApiAllowedOrigins.valueAsString);
+    const automationWebhookSecretPrefix = 'mukuroji/automation-webhooks';
+    const automationWebhookSecretArn = this.formatArn({
+      arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+      service: 'secretsmanager',
+      resource: 'secret',
+      resourceName: `${automationWebhookSecretPrefix}/*`,
+    });
+    const automationInboundWebhookSecretPrefix = 'mukuroji/automation-inbound-webhooks';
+    const automationInboundWebhookSecretArn = this.formatArn({
+      arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+      service: 'secretsmanager',
+      resource: 'secret',
+      resourceName: `${automationInboundWebhookSecretPrefix}/*`,
+    });
     const systemAdminGroups = new cdk.CfnParameter(this, 'SystemAdminGroups', {
       type: 'String',
       default: 'mukuroji-system-admins',
@@ -655,6 +669,36 @@ export class CdkStack extends cdk.Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       timeToLiveAttribute: 'expiresAtEpochSeconds',
+    });
+
+    const automationTable = new dynamodb.Table(this, 'AutomationTable', {
+      partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      timeToLiveAttribute: 'expiresAt',
+    });
+
+    automationTable.addGlobalSecondaryIndex({
+      indexName: 'ScheduleDueIndex',
+      partitionKey: { name: 'scheduleShard', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'nextRunAtRecordKey', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    automationTable.addGlobalSecondaryIndex({
+      indexName: 'RuleExecutionIndex',
+      partitionKey: { name: 'ruleExecutionKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'startedAtExecutionId', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    automationTable.addGlobalSecondaryIndex({
+      indexName: 'WorkspaceExecutionIndex',
+      partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'startedAtExecutionId', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
     });
 
     const planningTable = new dynamodb.Table(this, 'PlanningTable', {
@@ -1001,6 +1045,9 @@ export class CdkStack extends cdk.Stack {
       },
       environment: {
         ALLOWED_ORIGINS: taskApiAllowedOrigins.valueAsString,
+        AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX: automationInboundWebhookSecretPrefix,
+        AUTOMATION_TABLE_NAME: automationTable.tableName,
+        AUTOMATION_WEBHOOK_SECRET_PREFIX: automationWebhookSecretPrefix,
         COLLABORATION_TABLE_NAME: collaborationTable.tableName,
         COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
@@ -1091,6 +1138,25 @@ export class CdkStack extends cdk.Stack {
     notificationsTable.grantReadWriteData(apiFunction);
     workspaceSearchTable.grantReadWriteData(apiFunction);
     realtimeSessionsTable.grantWriteData(apiFunction);
+    const apiAutomationDataPolicy = new iam.Policy(
+      this,
+      'ApiAutomationDataPolicy',
+      {
+        statements: [new iam.PolicyStatement({
+          actions: [
+            'dynamodb:ConditionCheckItem',
+            'dynamodb:DeleteItem',
+            'dynamodb:DescribeTable',
+            'dynamodb:GetItem',
+            'dynamodb:PutItem',
+            'dynamodb:Query',
+            'dynamodb:Scan',
+            'dynamodb:UpdateItem',
+          ],
+          resources: [automationTable.tableArn, `${automationTable.tableArn}/index/*`],
+        })],
+      },
+    );
     const apiWorkItemConfigurationDataPolicy = new iam.Policy(
       this,
       'ApiWorkItemConfigurationDataPolicy',
@@ -1113,6 +1179,7 @@ export class CdkStack extends cdk.Stack {
       statements: [new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
         resources: [
+          automationTable.tableArn,
           workItemsTable.tableArn,
           workItemConfigurationTable.tableArn,
           planningTable.tableArn,
@@ -1143,9 +1210,32 @@ export class CdkStack extends cdk.Stack {
         resources: [planningTable.tableArn],
       })],
     });
+    apiFunction.role.attachInlinePolicy(apiAutomationDataPolicy);
     apiFunction.role.attachInlinePolicy(apiWorkItemConfigurationDataPolicy);
     apiFunction.role.attachInlinePolicy(apiPlanningDataPolicy);
     apiFunction.role.attachInlinePolicy(apiTransactWritePolicy);
+    apiFunction.role.attachInlinePolicy(new iam.Policy(this, 'ApiAutomationWebhookSecretPolicy', {
+      statements: [new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [automationWebhookSecretArn],
+      })],
+    }));
+    apiFunction.role.attachInlinePolicy(new iam.Policy(
+      this,
+      'ApiAutomationInboundWebhookSecretPolicy',
+      {
+        statements: [new iam.PolicyStatement({
+          actions: [
+            'secretsmanager:CreateSecret',
+            'secretsmanager:DeleteSecret',
+            'secretsmanager:DescribeSecret',
+            'secretsmanager:GetSecretValue',
+            'secretsmanager:PutSecretValue',
+          ],
+          resources: [automationInboundWebhookSecretArn],
+        })],
+      },
+    ));
     apiFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: [
@@ -1213,6 +1303,7 @@ export class CdkStack extends cdk.Stack {
         allowHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id'],
       },
     });
+    apiFunction.addEnvironment('AUTOMATION_INBOUND_WEBHOOK_BASE_URL', httpApi.apiEndpoint);
 
     const realtimeFunction = new lambdaNodejs.NodejsFunction(this, 'RealtimeHandlerFunction', {
       entry: path.join(__dirname, '../../server/src/realtime-handler.ts'),
@@ -1394,6 +1485,246 @@ export class CdkStack extends cdk.Stack {
       }),
     );
     realtimeWebSocketStage.grantManagementApiAccess(collaborationProjectionFunction);
+
+    const automationEventDlq = new sqs.Queue(this, 'AutomationEventDlq', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(14),
+    });
+    const automationEventFunction = new lambdaNodejs.NodejsFunction(
+      this,
+      'AutomationEventFunction',
+      {
+        entry: path.join(__dirname, '../../server/src/automation-event-handler.ts'),
+        handler: 'handler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+        projectRoot: path.join(__dirname, '../..'),
+        timeout: cdk.Duration.minutes(2),
+        memorySize: 512,
+        description: 'Executes versioned automation rules from durable audit outbox events.',
+        bundling: {
+          bundleAwsSDK: true,
+          minify: true,
+          sourceMap: true,
+          target: 'node22',
+        },
+        environment: {
+          AUTOMATION_TABLE_NAME: automationTable.tableName,
+          AUTOMATION_WEBHOOK_SECRET_PREFIX: automationWebhookSecretPrefix,
+          AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
+          AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
+          COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
+          COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+          FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
+          MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
+          MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+          MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
+          MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
+          PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+          SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+          TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
+          TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
+          WORK_ITEM_CONFIGURATION_TABLE_NAME: workItemConfigurationTable.tableName,
+          WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
+          WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
+          WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
+        },
+      },
+    );
+    automationEventFunction.addEventSource(
+      new lambdaEventSources.DynamoEventSource(auditEventsTable, {
+        startingPosition: lambda.StartingPosition.TRIM_HORIZON,
+        batchSize: 10,
+        bisectBatchOnError: true,
+        retryAttempts: 3,
+        reportBatchItemFailures: true,
+        onFailure: new lambdaEventSources.SqsDlq(automationEventDlq),
+      }),
+    );
+    auditEventsTable.grantStreamRead(automationEventFunction);
+    automationTable.grantReadWriteData(automationEventFunction);
+    auditEventsTable.grantReadWriteData(automationEventFunction);
+    fileProofingTable.grantReadWriteData(automationEventFunction);
+    projectDirectoryTable.grantReadData(automationEventFunction);
+    teamIssueEventsTable.grantReadWriteData(automationEventFunction);
+    workItemsTable.grantReadWriteData(automationEventFunction);
+    workspaceSearchTable.grantReadWriteData(automationEventFunction);
+    workItemConfigurationTable.grantReadData(automationEventFunction);
+    workspaceAccessTable.grantReadData(automationEventFunction);
+    if (!automationEventFunction.role) {
+      throw new Error('Automation event Lambda execution role was not created.');
+    }
+    automationEventFunction.role.attachInlinePolicy(new iam.Policy(
+      this,
+      'AutomationEventTransactWritePolicy',
+      {
+        statements: [new iam.PolicyStatement({
+          actions: ['dynamodb:TransactWriteItems'],
+          resources: [
+            automationTable.tableArn,
+            auditEventsTable.tableArn,
+            fileProofingTable.tableArn,
+            teamIssueEventsTable.tableArn,
+            workItemConfigurationTable.tableArn,
+            workItemsTable.tableArn,
+          ],
+        })],
+      },
+    ));
+    automationEventFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'cognito-idp:AdminGetUser',
+        'cognito-idp:AdminListGroupsForUser',
+      ],
+      resources: [cognitoUserPoolArn],
+    }));
+    automationEventFunction.role.attachInlinePolicy(new iam.Policy(
+      this,
+      'AutomationEventWebhookSecretPolicy',
+      {
+        statements: [new iam.PolicyStatement({
+          actions: ['secretsmanager:GetSecretValue'],
+          resources: [automationWebhookSecretArn],
+        })],
+      },
+    ));
+
+    new cloudwatch.Alarm(this, 'AutomationEventDlqAlarm', {
+      alarmDescription: 'Detects automation outbox records that exhausted stream retries.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: automationEventDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    const automationScheduleDlq = new sqs.Queue(this, 'AutomationScheduleDlq', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(14),
+    });
+    const automationScheduleFunction = new lambdaNodejs.NodejsFunction(
+      this,
+      'AutomationScheduleFunction',
+      {
+        entry: path.join(__dirname, '../../server/src/automation-schedule-handler.ts'),
+        handler: 'handler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+        projectRoot: path.join(__dirname, '../..'),
+        timeout: cdk.Duration.minutes(5),
+        memorySize: 512,
+        description: 'Materializes timezone-aware recurring Work Items with durable receipts.',
+        onFailure: new lambdaDestinations.SqsDestination(automationScheduleDlq),
+        retryAttempts: 2,
+        bundling: {
+          bundleAwsSDK: true,
+          minify: true,
+          sourceMap: true,
+          target: 'node22',
+        },
+        environment: {
+          AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX: automationInboundWebhookSecretPrefix,
+          AUTOMATION_TABLE_NAME: automationTable.tableName,
+          AUTOMATION_WEBHOOK_SECRET_PREFIX: automationWebhookSecretPrefix,
+          AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
+          AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
+          COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
+          COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+          FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
+          MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
+          MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+          MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
+          MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
+          PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+          SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+          TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
+          TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
+          WORK_ITEM_CONFIGURATION_TABLE_NAME: workItemConfigurationTable.tableName,
+          WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
+          WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
+          WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
+        },
+      },
+    );
+    automationTable.grantReadWriteData(automationScheduleFunction);
+    auditEventsTable.grantReadWriteData(automationScheduleFunction);
+    fileProofingTable.grantReadWriteData(automationScheduleFunction);
+    projectDirectoryTable.grantReadData(automationScheduleFunction);
+    teamIssueEventsTable.grantReadWriteData(automationScheduleFunction);
+    workItemsTable.grantReadWriteData(automationScheduleFunction);
+    workspaceSearchTable.grantReadWriteData(automationScheduleFunction);
+    workItemConfigurationTable.grantReadData(automationScheduleFunction);
+    workspaceAccessTable.grantReadData(automationScheduleFunction);
+    if (!automationScheduleFunction.role) {
+      throw new Error('Automation schedule Lambda execution role was not created.');
+    }
+    automationScheduleFunction.role.attachInlinePolicy(new iam.Policy(
+      this,
+      'AutomationScheduleTransactWritePolicy',
+      {
+        statements: [new iam.PolicyStatement({
+          actions: ['dynamodb:TransactWriteItems'],
+          resources: [
+            automationTable.tableArn,
+            auditEventsTable.tableArn,
+            fileProofingTable.tableArn,
+            teamIssueEventsTable.tableArn,
+            workItemConfigurationTable.tableArn,
+            workItemsTable.tableArn,
+          ],
+        })],
+      },
+    ));
+    automationScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'cognito-idp:AdminGetUser',
+        'cognito-idp:AdminListGroupsForUser',
+      ],
+      resources: [cognitoUserPoolArn],
+    }));
+    automationScheduleFunction.role.attachInlinePolicy(new iam.Policy(
+      this,
+      'AutomationScheduleWebhookSecretPolicy',
+      {
+        statements: [new iam.PolicyStatement({
+          actions: ['secretsmanager:GetSecretValue'],
+          resources: [automationWebhookSecretArn],
+        })],
+      },
+    ));
+    automationScheduleFunction.role.attachInlinePolicy(new iam.Policy(
+      this,
+      'AutomationScheduleInboundWebhookSecretCleanupPolicy',
+      {
+        statements: [new iam.PolicyStatement({
+          actions: ['secretsmanager:DeleteSecret'],
+          resources: [automationInboundWebhookSecretArn],
+        })],
+      },
+    ));
+
+    new cloudwatch.Alarm(this, 'AutomationScheduleDlqAlarm', {
+      alarmDescription: 'Detects recurring Work materialization failures after asynchronous retries.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: automationScheduleDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    new events.Rule(this, 'AutomationScheduleRule', {
+      description: 'Checks timezone-aware recurring Work definitions every minute.',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
+      targets: [new eventsTargets.LambdaFunction(automationScheduleFunction)],
+    });
 
     const notificationScheduleDlq = new sqs.Queue(this, 'NotificationScheduleDlq', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
@@ -1698,6 +2029,9 @@ export class CdkStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'WorkItemConfigurationTableName', {
       value: workItemConfigurationTable.tableName,
     });
+    new cdk.CfnOutput(this, 'AutomationTableName', {
+      value: automationTable.tableName,
+    });
     new cdk.CfnOutput(this, 'PlanningTableName', {
       value: planningTable.tableName,
     });
@@ -1738,6 +2072,12 @@ export class CdkStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'CollaborationProjectionDlqUrl', {
       value: collaborationProjectionDlq.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'AutomationEventDlqUrl', {
+      value: automationEventDlq.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'AutomationScheduleDlqUrl', {
+      value: automationScheduleDlq.queueUrl,
     });
     new cdk.CfnOutput(this, 'NotificationScheduleDlqUrl', {
       value: notificationScheduleDlq.queueUrl,

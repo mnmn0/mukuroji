@@ -173,4 +173,37 @@ describe('IssueArtifactsPanel', () => {
     expect(requesterHtml).toContain('Cancel request')
     expect(capabilityHtml).toContain('Cancel request')
   })
+
+  test('renders an automation-created Work Item approval without a file subject', () => {
+    const html = renderToStaticMarkup(
+      <IssueArtifactsPanel
+        controller={{
+          ...fileArtifactsControllerFixture,
+          approvals: [{
+            id: 'approval-work-item-1',
+            subjectType: 'work-item',
+            revision: 1,
+            status: 'pending',
+            reviewers: [{ memberKey: 'demo@example.com', status: 'pending' }],
+            dueAt: '2026-07-17T00:00:00.000Z',
+            requestedByMemberKey: 'automation:rule-1',
+            requestedByKind: 'service',
+            createdAt: '2026-07-16T00:00:00.000Z',
+            updatedAt: '2026-07-16T00:00:00.000Z',
+            capabilities: { canCancel: false, canDecide: true },
+          }],
+          files: [],
+        }}
+        currentMemberKey="demo@example.com"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('Work Item')
+    expect(html).toContain('Requested by: Automation')
+    expect(html).toContain('Approve')
+    expect(html).not.toContain('undefined')
+    expect(html).not.toContain('Cancel request')
+  })
 })

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   AdminCreateUserCommand,
   AdminDeleteUserAttributesCommand,
@@ -30,6 +31,14 @@ import {
   PLANNING_SCHEMA_VERSION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
+  type AutomationAction,
+  type AutomationExecutionStatus,
+  type AutomationTemplateApplication,
+  type AutomationValue,
+  type BulkOperation,
+  type BulkOperationItemResult,
+  type BulkOperationPreview,
+  type BulkOperationRequest,
   type ApprovalSummary,
   type CanonicalWorkItem,
   type CreatePlanningDependencyInput,
@@ -45,6 +54,9 @@ import {
   type PlanningWorkItemLinkInput,
   type PlanningWorkItemSummary,
   type ResolvedWorkItemConfiguration,
+  type UpdateAutomationRuleInput,
+  type UpdateAutomationTemplateInput,
+  type UpdateRecurringWorkInput,
   type UpdatePlanningEntityInput,
   type UpdateSavedWorkspaceViewInput,
   type WorkItemConfiguration,
@@ -62,9 +74,14 @@ import { cors } from 'hono/cors'
 import type { Context } from 'hono'
 import {
   auditEventsToNdjson,
+  createAuditEvent,
+  createAuditEventId,
+  createAuditEventTransactPut,
   createAuditFieldChanges,
   createMutationAuditContext,
   createMutationAuditEventPut,
+  createRequestFingerprint,
+  calculateAuditExpiresAt,
   DynamoDbAuditEventsClient,
   ensureLocalAuditEventsTable,
   getConfiguredAuditTableName,
@@ -73,6 +90,7 @@ import {
   type AuditEventEntityType,
   type AuditEventPage,
   type AuditEventQuery,
+  type AuditEventV1,
   type MutationAuditContext,
   type MutationAuditEventInput,
 } from './audit'
@@ -154,6 +172,44 @@ import {
   type MutateWorkItemRelationInput,
   type WorkItemConfigurationClient,
 } from './work-item-configuration'
+import {
+  AUTOMATION_TEMPLATE_APPLICATION_LEASE_MS,
+  AutomationEngine,
+  AutomationError,
+  DynamoDbAutomationClient,
+  applyBulkOperation,
+  normalizeAutomationActionFailure,
+  previewBulkOperation,
+  retryBulkOperation,
+  toAutomationInboundWebhookEndpoint,
+  undoBulkOperation,
+  validateCreateAutomationRuleInput,
+  validateCreateAutomationTemplateInput,
+  validateApplyAutomationTemplateInput,
+  validateAutomationInboundWebhookLifecycleInput,
+  validateCreateAutomationInboundWebhookEndpointInput,
+  validateCreateRecurringWorkInput,
+  validateUpdateAutomationInboundWebhookEndpointInput,
+  isAutomationValue,
+  type AutomationActionExecutionContext,
+  type AutomationActionExecutor,
+  type AutomationClient,
+  type AutomationEvent,
+  type AutomationInboundWebhookEndpointRecord,
+  type AutomationInboundWebhookProvisioning,
+  type BulkOperationAdapter,
+} from './automation'
+import {
+  SecretsManagerAutomationInboundWebhookSecretStore,
+  isAutomationInboundWebhookJsonContentType,
+  parseAutomationInboundWebhookJson,
+  readAutomationInboundWebhookBody,
+  readAutomationInboundWebhookTimestamp,
+  verifyAutomationInboundWebhookSignature,
+  type AutomationInboundWebhookSecretReference,
+  type AutomationInboundWebhookSecretStore,
+} from './automation-inbound-webhook'
+import { deliverAutomationWebhook } from './automation-webhook'
 import {
   DynamoDbPlanningClient,
   InMemoryPlanningClient,
@@ -990,6 +1046,10 @@ type TeamIssueItem = {
    * 更新日時の ISO 8601 timestamp です。
    */
   updatedAt: string
+  /** Reversible archive を適用した ISO 8601 timestamp です。 */
+  archivedAt?: string
+  /** Archive mutation を実行した Workspace member key です。 */
+  archivedBy?: string
 }
 
 /**
@@ -1076,6 +1136,8 @@ type WorkItemListReadOptions = {
   limit?: number
   /** Base table から強整合 read するかどうかです。 */
   consistentRead?: boolean
+  /** Archive 済み Work Item を内部管理 read に含めます。 */
+  includeArchived?: boolean
 }
 
 /**
@@ -1197,6 +1259,8 @@ type TeamIssueDetailResponse = {
  * チーム Issue 作成 API が受け取る request body です。
  */
 type CreateTeamIssueRequestBody = {
+  /** Internal automation create action が再配送間で固定する resource ID です。 */
+  idempotencyResourceId?: unknown
   /**
    * Issue タイトルです。
    */
@@ -1238,9 +1302,9 @@ type CreateTeamIssueRequestBody = {
 }
 
 /**
- * チーム Issue 更新 API が受け取る request body です。
+ * 公開チーム Issue 更新 API が受け取る request body です。
  */
-type UpdateTeamIssueRequestBody = {
+type PublicUpdateTeamIssueRequestBody = {
   /**
    * optimistic concurrency に使う読み込み時点の revision です。
    */
@@ -1277,18 +1341,30 @@ type UpdateTeamIssueRequestBody = {
    * Custom field ID ごとの型付き値です。null は保存済み値の削除を表します。
    */
   customFieldValues?: unknown
+}
+
+/**
+ * 検証済みの設定値と内部 adapter 専用フィールドを含むチーム Issue 更新入力です。
+ */
+type UpdateTeamIssueRequestBody = PublicUpdateTeamIssueRequestBody & {
   /** API handler が検証後に付与する workflow extension schema version です。 */
   workflowSchemaVersion?: unknown
   /** API handler が検証後に付与する workflow status category です。 */
   statusCategory?: unknown
   /** API handler が definition の同時変更を検出するために付与する ConditionCheck です。 */
   configurationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>
+  /** Internal bulk operation が設定または解除する archive timestamp です。 */
+  archivedAt?: unknown
+  /** Internal bulk operation が記録する archive actor member key です。 */
+  archivedBy?: unknown
 }
 
 /**
  * チーム Issue コメント作成 API が受け取る request body です。
  */
 type CreateTeamIssueCommentRequestBody = {
+  /** Internal automation comment action が再配送間で固定する event ID です。 */
+  idempotencyEventId?: unknown
   /**
    * 旧 client が送信する plain text コメント本文です。
    */
@@ -1631,6 +1707,8 @@ type CreateTeamResponse = {
  * プロジェクト作成 API が受け取る request body です。
  */
 type CreateProjectRequestBody = {
+  /** Internal template application が response-loss retry 間で固定する Project ID です。 */
+  idempotencyResourceId?: unknown
   /**
    * locale 非依存で扱うプロジェクト名です。
    */
@@ -2044,6 +2122,7 @@ type ProjectDirectoryClient = {
     input: CreateProjectRequestBody,
     creator: ProjectCreatorContext,
     auditContext?: MutationAuditContext,
+    completionTransactItems?: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ): Promise<CreateProjectResponse>
   /**
    * DynamoDB 上のチームをアーカイブします。
@@ -2070,6 +2149,10 @@ type ProjectDirectoryClient = {
  * API handler から利用する append-only audit event query client です。
  */
 type AuditEventsClient = {
+  /**
+   * Deterministic ID の event を強整合読みで返します。
+   */
+  getEvent(workspaceId: string, eventId: string): Promise<AuditEventV1 | undefined>
   /**
    * workspace、actor、entity、target、期間で event を page 取得します。
    */
@@ -2099,6 +2182,8 @@ let notifications: NotificationClient
 let workspaceSearch: WorkspaceSearchClient
 let workspaceSearchProjectionEnabled: boolean
 let workItemConfigurations: WorkItemConfigurationClient
+let automation: AutomationClient
+let automationInboundWebhookSecrets: AutomationInboundWebhookSecretStore
 let planning: PlanningClient
 const projectDirectoryIdPrefix = 'user#'
 const defaultAllowedOrigins = [
@@ -2789,6 +2874,582 @@ app.patch('/api/notifications/:notificationId', async (c) => {
   }
 })
 
+/** Workspace の versioned automation rules を返します。 */
+app.get('/api/automation/rules', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c)
+    return c.json({ rules: await automation.listRules(principal.directoryId) })
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が automation rule を作成します。 */
+app.post('/api/automation/rules', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    const input = validateCreateAutomationRuleInput(await readAutomationJson(c))
+    return c.json(await automation.createRule(
+      principal.directoryId,
+      input,
+      c.req.header('Idempotency-Key')?.trim() || undefined,
+    ), 201)
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が automation rule の新 version を保存します。 */
+app.patch('/api/automation/rules/:ruleId', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    const input = await readAutomationJson(c) as UpdateAutomationRuleInput
+    return c.json(await automation.updateRule(
+      principal.directoryId,
+      c.req.param('ruleId'),
+      input,
+    ))
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者へ secret を除いた inbound webhook endpoints を返します。 */
+app.get('/api/automation/inbound-webhooks', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    return c.json({
+      endpoints: await automation.listInboundWebhookEndpoints(principal.directoryId),
+    })
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が server-issued inbound webhook endpoint を作成します。 */
+app.post('/api/automation/inbound-webhooks', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    const idempotencyKey = readRequiredInboundWebhookIdempotencyKey(c)
+    const provisioning = await automation.reserveCreateInboundWebhookEndpoint(
+      principal.directoryId,
+      principal.actorId,
+      validateCreateAutomationInboundWebhookEndpointInput(await readAutomationJson(c)),
+      idempotencyKey,
+      getAutomationInboundWebhookBaseUrl(c),
+    )
+    const { completed, signingSecret } = await provisionAutomationInboundWebhookEndpoint(
+      provisioning,
+    )
+    return c.json({
+      endpoint: toAutomationInboundWebhookEndpoint(completed),
+      signingSecret,
+    }, 201)
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者へ secret を除いた inbound webhook endpoint を返します。 */
+app.get('/api/automation/inbound-webhooks/:endpointId', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    return c.json(await requireAutomationInboundWebhookEndpoint(
+      principal.directoryId,
+      c.req.param('endpointId'),
+    ))
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が inbound webhook endpoint の表示名を更新します。 */
+app.patch('/api/automation/inbound-webhooks/:endpointId', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    return c.json(await automation.updateInboundWebhookEndpoint(
+      principal.directoryId,
+      c.req.param('endpointId'),
+      validateUpdateAutomationInboundWebhookEndpointInput(await readAutomationJson(c)),
+    ))
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が inbound webhook endpoint を pause します。 */
+app.post('/api/automation/inbound-webhooks/:endpointId/pause', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    return c.json(await automation.setInboundWebhookEndpointStatus(
+      principal.directoryId,
+      c.req.param('endpointId'),
+      validateAutomationInboundWebhookLifecycleInput(await readAutomationJson(c)),
+      'paused',
+    ))
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が inbound webhook endpoint を resume します。 */
+app.post('/api/automation/inbound-webhooks/:endpointId/resume', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    return c.json(await automation.setInboundWebhookEndpointStatus(
+      principal.directoryId,
+      c.req.param('endpointId'),
+      validateAutomationInboundWebhookLifecycleInput(await readAutomationJson(c)),
+      'active',
+    ))
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が signing secret generation を rotate します。 */
+app.post('/api/automation/inbound-webhooks/:endpointId/rotate', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    const idempotencyKey = readRequiredInboundWebhookIdempotencyKey(c)
+    const provisioning = await automation.reserveRotateInboundWebhookEndpoint(
+      principal.directoryId,
+      principal.actorId,
+      c.req.param('endpointId'),
+      validateAutomationInboundWebhookLifecycleInput(await readAutomationJson(c)),
+      idempotencyKey,
+    )
+    const { completed, signingSecret } = await provisionAutomationInboundWebhookEndpoint(
+      provisioning,
+    )
+    return c.json({
+      endpoint: toAutomationInboundWebhookEndpoint(completed),
+      signingSecret,
+    })
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が inbound webhook endpoint と全 secret generations を revoke します。 */
+app.delete('/api/automation/inbound-webhooks/:endpointId', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    const revoked = await automation.revokeInboundWebhookEndpoint(
+      principal.directoryId,
+      c.req.param('endpointId'),
+      validateAutomationInboundWebhookLifecycleInput(await readAutomationJson(c)),
+    )
+    await automationInboundWebhookSecrets.delete(
+      toAutomationInboundWebhookSecretReference(revoked),
+    )
+    return c.json(toAutomationInboundWebhookEndpoint(revoked))
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** External sender の raw JSON delivery を HMAC 検証して durable outbox event に変換します。 */
+app.post('/api/automation/inbound-webhooks/:opaqueEndpointId', async (c) => {
+  try {
+    const endpoint = await automation.resolveInboundWebhookEndpoint(
+      c.req.param('opaqueEndpointId'),
+    )
+    if (!endpoint || endpoint.status === 'provisioning' || endpoint.status === 'revoked') {
+      throw automationInboundWebhookNotFound()
+    }
+    if (endpoint.status === 'paused') {
+      throw new AutomationError(
+        423,
+        'AutomationInboundWebhookPaused',
+        'Inbound webhook endpoint is paused.',
+      )
+    }
+    if (!isAutomationInboundWebhookJsonContentType(c.req.header('Content-Type'))) {
+      throw new AutomationError(
+        415,
+        'AutomationInboundWebhookContentTypeUnsupported',
+        'Content-Type must be application/json with optional UTF-8 charset.',
+      )
+    }
+
+    const idempotencyKey = readRequiredInboundWebhookIdempotencyKey(c)
+    const rawBody = await readAutomationInboundWebhookBody(c.req.raw)
+    const signatureTimestamp = readAutomationInboundWebhookTimestamp(
+      c.req.header('X-Mukuroji-Timestamp'),
+    )
+    const secretReference = toAutomationInboundWebhookSecretReference(endpoint)
+    const signingSecret = await automationInboundWebhookSecrets.get(secretReference)
+    const signatureFingerprint = verifyAutomationInboundWebhookSignature(
+      signingSecret,
+      signatureTimestamp,
+      rawBody,
+      c.req.header('X-Mukuroji-Signature'),
+    )
+    const payload = parseAutomationInboundWebhookJson(rawBody)
+    if (!isAutomationValue(payload)) {
+      throw new AutomationError(
+        400,
+        'AutomationInboundWebhookJsonInvalid',
+        'Request body contains an unsupported JSON value.',
+      )
+    }
+
+    const auditTableName = getConfiguredAuditTableName()
+    if (!auditTableName) throw automationInboundWebhookUnavailable()
+    const bodyFingerprint = createHash('sha256').update(rawBody).digest('hex')
+    const path = `/api/automation/inbound-webhooks/${endpoint.opaqueEndpointId}`
+    const auditContext = createMutationAuditContext({
+      workspaceId: endpoint.workspaceId,
+      actor: {
+        id: `inbound-webhook:${endpoint.id}`,
+        kind: 'service',
+        displayName: endpoint.name,
+      },
+      idempotencyKey: createHash('sha256')
+        .update(`${endpoint.id}\0${idempotencyKey}`)
+        .digest('hex'),
+      request: {
+        method: 'POST',
+        path,
+        body: { endpointId: endpoint.id, bodyFingerprint },
+      },
+      source: {
+        kind: 'api',
+        requestId: c.req.header('X-Request-Id'),
+        method: 'POST',
+        route: path,
+        ipAddress: c.req.header('X-Forwarded-For')?.split(',')[0]?.trim(),
+        userAgent: c.req.header('User-Agent'),
+      },
+    })
+    const event = createAuditEvent({
+      context: auditContext,
+      eventType: 'webhook.received',
+      entity: { type: 'automation-webhook', id: endpoint.id },
+      summary: 'Automation webhook was received.',
+      metadata: { webhookId: endpoint.id, payload },
+      expiresAt: calculateAuditExpiresAt(auditContext.occurredAt, 365),
+    })
+    const delivery = await automation.recordInboundWebhookDelivery(endpoint, {
+      idempotencyKey,
+      bodyFingerprint,
+      signatureFingerprint,
+      signatureTimestamp,
+      eventId: event.eventId,
+      auditTransactItem: createAuditEventTransactPut(auditTableName, event),
+    })
+    return c.json({ eventId: delivery.eventId }, 202)
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace の versioned automation templates を返します。 */
+app.get('/api/automation/templates', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c)
+    return c.json({ templates: await automation.listTemplates(principal.directoryId) })
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が automation template を作成します。 */
+app.post('/api/automation/templates', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    const input = validateCreateAutomationTemplateInput(await readAutomationJson(c))
+    return c.json(await automation.createTemplate(
+      principal.directoryId,
+      input,
+      c.req.header('Idempotency-Key')?.trim() || undefined,
+    ), 201)
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が automation template の新 version を保存します。 */
+app.patch('/api/automation/templates/:templateId', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    const input = await readAutomationJson(c) as UpdateAutomationTemplateInput
+    return c.json(await automation.updateTemplate(
+      principal.directoryId,
+      c.req.param('templateId'),
+      input,
+    ))
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が template の current version を複製します。 */
+app.post('/api/automation/templates/:templateId/duplicate', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    const source = await automation.getTemplate(
+      principal.directoryId,
+      c.req.param('templateId'),
+    )
+    if (!source) {
+      throw new AutomationError(404, 'AutomationTemplateNotFound', 'Automation template was not found.')
+    }
+    return c.json(await automation.createTemplate(
+      principal.directoryId,
+      validateCreateAutomationTemplateInput({
+        kind: source.kind,
+        name: `${source.name} copy`,
+        enabled: source.enabled,
+        payload: structuredClone(source.payload),
+      }),
+      c.req.header('Idempotency-Key')?.trim() || undefined,
+    ), 201)
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が Project/Workflow template を immutable version pin 付きで適用します。 */
+app.post('/api/automation/templates/:templateId/applications', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    const idempotencyKey = c.req.header('Idempotency-Key')?.trim()
+    if (!idempotencyKey) {
+      throw new AutomationError(
+        400,
+        'AutomationIdempotencyKeyRequired',
+        'Idempotency-Key is required for template application.',
+      )
+    }
+    const input = validateApplyAutomationTemplateInput(await readAutomationJson(c))
+    if (
+      input.target.kind === 'workflow' &&
+      input.target.scopeType === 'workspace' &&
+      input.target.scopeId !== principal.directoryId
+    ) {
+      throw new AutomationError(
+        400,
+        'InvalidAutomationInput',
+        'Workspace workflow target must match the authenticated Workspace.',
+      )
+    }
+    if (input.target.kind === 'workflow' && input.target.scopeType === 'team') {
+      await requireTeamConfigurationAdministration(principal, input.target.scopeId)
+    }
+    const application = await automation.reserveTemplateApplication(
+      principal.directoryId,
+      principal.actorId,
+      c.req.param('templateId'),
+      input.target,
+      idempotencyKey,
+    )
+    return c.json(await executeAutomationTemplateApplication(c, principal, application))
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が durable template application receipt を取得します。 */
+app.get('/api/automation/template-applications/:applicationId', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    const application = await automation.getTemplateApplication(
+      principal.directoryId,
+      c.req.param('applicationId'),
+    )
+    if (!application) {
+      throw new AutomationError(
+        404,
+        'AutomationTemplateApplicationNotFound',
+        'Template application was not found.',
+      )
+    }
+    return c.json(application)
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace の recurring Work 定義を返します。 */
+app.get('/api/recurring-work', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c)
+    return c.json({ recurringWorks: await automation.listRecurringWorks(principal.directoryId) })
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が recurring Work 定義を作成します。 */
+app.post('/api/recurring-work', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    const input = validateCreateRecurringWorkInput(await readAutomationJson(c))
+    await requireAutomationTeam(principal.directoryId, input.teamId)
+    return c.json(await automation.createRecurringWork(
+      principal.directoryId,
+      input,
+      c.req.header('Idempotency-Key')?.trim() || undefined,
+    ), 201)
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が recurring Work 定義の新 version を保存します。 */
+app.patch('/api/recurring-work/:recurringWorkId', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    const input = await readAutomationJson(c) as UpdateRecurringWorkInput
+    const current = await automation.getRecurringWork(
+      principal.directoryId,
+      c.req.param('recurringWorkId'),
+    )
+    if (!current) {
+      throw new AutomationError(404, 'RecurringWorkNotFound', 'Recurring Work definition was not found.')
+    }
+    await requireAutomationTeam(principal.directoryId, input.teamId ?? current.teamId)
+    return c.json(await automation.updateRecurringWork(
+      principal.directoryId,
+      c.req.param('recurringWorkId'),
+      input,
+    ))
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Automation execution history と partial action state を返します。 */
+app.get('/api/automation/executions', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c)
+    return c.json(await automation.listExecutions({
+      workspaceId: principal.directoryId,
+      ruleId: c.req.query('ruleId'),
+      status: readAutomationExecutionStatus(c.req.query('status')),
+      cursor: c.req.query('cursor'),
+      limit: readAutomationPageLimit(c.req.query('limit')),
+    }))
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Workspace 管理者が retryable execution を同じ trigger event で再開します。 */
+app.post('/api/automation/executions/:executionId/retry', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c, true)
+    const executionId = c.req.param('executionId')
+    const event = await automation.getExecutionEvent(principal.directoryId, executionId)
+    if (!event) {
+      throw new AutomationError(404, 'AutomationExecutionNotFound', 'Automation execution was not found.')
+    }
+    const engine = new AutomationEngine(automation, createAutomationActionExecutor())
+    return c.json(await engine.retryExecution(principal.directoryId, executionId, event))
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Authenticated form submission を durable automation outbox event に変換します。 */
+app.post('/api/automation/forms/:formId/submissions', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c)
+    requireWorkspaceBusinessWrite(principal)
+    const payload = await readAutomationJson(c)
+    const event = await putAutomationIngressEvent(
+      c,
+      principal,
+      c.req.param('formId'),
+      { formId: c.req.param('formId'), payload },
+    )
+    return c.json({ eventId: event.eventId }, 202)
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Bulk Work Item mutation を item 単位で検証し、dry-run 結果を返します。 */
+app.post('/api/bulk-operations/preview', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c)
+    requireWorkspaceBusinessWrite(principal)
+    const request = readWorkspaceBulkOperationRequest(
+      await readAutomationJson(c),
+      principal.directoryId,
+    )
+    const preview = await previewBulkOperation(
+      request,
+      createApiBulkOperationAdapter(principal, c),
+    )
+    return c.json(toBulkOperationPreviewResponse(preview))
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Preview token が一致する Bulk Work Item mutation を確定します。 */
+app.post('/api/bulk-operations', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c)
+    requireWorkspaceBusinessWrite(principal)
+    const request = readWorkspaceBulkOperationRequest(
+      await readAutomationJson(c),
+      principal.directoryId,
+    )
+    const adapter = createApiBulkOperationAdapter(principal, c)
+    const preview = await previewBulkOperation(request, adapter)
+    const operation = await applyBulkOperation(
+      request,
+      preview,
+      adapter,
+      principal.userKey,
+      automation,
+    )
+    return c.json(toBulkOperationResponse(operation), 201)
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Bulk operation の retryable failures だけを安全に再実行します。 */
+app.post('/api/bulk-operations/:operationId/retry', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c)
+    requireWorkspaceBusinessWrite(principal)
+    const operation = await requireBulkOperation(principal.directoryId, c.req.param('operationId'))
+    requireBulkOperationOwner(operation, principal.userKey)
+    const retried = await retryBulkOperation(
+      operation,
+      createApiBulkOperationAdapter(principal, c),
+      automation,
+    )
+    return c.json(toBulkOperationResponse(retried))
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
+/** Bulk operation の成功 item を current revision guard 付きで undo します。 */
+app.post('/api/bulk-operations/:operationId/undo', async (c) => {
+  try {
+    const principal = await authenticateAutomationPrincipal(c)
+    requireWorkspaceBusinessWrite(principal)
+    const operation = await requireBulkOperation(principal.directoryId, c.req.param('operationId'))
+    requireBulkOperationOwner(operation, principal.userKey)
+    const undone = await undoBulkOperation(
+      operation,
+      createApiBulkOperationAdapter(principal, c),
+      automation,
+    )
+    return c.json(toBulkOperationResponse(undone))
+  } catch (error) {
+    return toAutomationErrorResponse(c, error)
+  }
+})
+
 /** Recipient の notification channel、digest、quiet hours 設定を返します。 */
 app.get('/api/notification-preferences', async (c) => {
   const accessToken = readBearerAccessToken(c)
@@ -2914,12 +3575,13 @@ app.post('/api/teams/:teamId/projects', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     requireWorkspaceAdministration(principal)
-    const body = await readJson<CreateProjectRequestBody>(c.req)
+    const body = await readJson<CreateProjectRequestBody>(c.req) ?? {}
+    delete body.idempotencyResourceId
 
     const response = await projectDirectory.createProject(
       principal.directoryId,
       teamId,
-      body ?? {},
+      body,
       {
         userKey: principal.userKey,
         workspaceMemberVersion: principal.workspaceMember.version,
@@ -2928,7 +3590,7 @@ app.post('/api/teams/:teamId/projects', async (c) => {
     )
     await projectWorkspaceSearchDocumentBestEffort(
       () => {
-        const names = readLocalizedNames(body ?? {})
+        const names = readLocalizedNames(body)
         return createProjectSearchDocument(
           principal.directoryId,
           teamId,
@@ -4133,8 +4795,10 @@ app.post('/api/teams/:teamId/issues', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     requireWorkspaceBusinessWrite(principal)
     const context = await requireTeamPermission(principal, teamId, 'member')
+    const requestBody = await readJson<CreateTeamIssueRequestBody>(c.req) ?? {}
+    delete requestBody.idempotencyResourceId
     const body = normalizeTeamIssueInput(
-      await readJson<CreateTeamIssueRequestBody>(c.req) ?? {},
+      requestBody,
       context.team,
     )
     requireAssignedProjectPermission(
@@ -4316,8 +4980,10 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     requireWorkspaceBusinessWrite(principal)
     const context = await requireTeamPermission(principal, teamId, 'member')
+    const input = await readJson<PublicUpdateTeamIssueRequestBody>(c.req) ?? {}
+    rejectInternalWorkItemUpdateFields(input)
     const body = normalizeTeamIssueInput(
-      await readJson<UpdateTeamIssueRequestBody>(c.req) ?? {},
+      input,
       context.team,
     )
     const expectedRevision = readWorkItemExpectedRevision(body.expectedRevision)
@@ -4369,7 +5035,7 @@ app.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
         }),
       ),
     )
-    await projectWorkItemSearchDocumentBestEffort(
+    await projectWorkItemMutationSearchDocumentBestEffort(
       principal.directoryId,
       response.issue,
       'Work Item update',
@@ -5349,51 +6015,12 @@ app.post('/api/teams/:teamId/issues/:issueId/approvals', async (c) => {
         'Approval must target the current file version.',
       )
     }
-    const reviewerMembers = await Promise.all(reviewerMemberKeys.map(async (memberKey) => {
-      const member = await workspaceAccess.getActiveMember(principal.directoryId, memberKey)
-      if (!member) {
-        throw new FileProofingError(
-          409,
-          'ApprovalReviewerInactive',
-          `Reviewer "${memberKey}" is not an active Workspace member.`,
-        )
-      }
-      const reviewerIsSystemAdmin = await cognito.isSystemAdmin(member.memberKey)
-      if (scope.projectId && !reviewerIsSystemAdmin) {
-        const projectAccess = await projectDirectory.getProjectAccess(
-          principal.directoryId,
-          scope.projectId,
-          member.memberKey,
-        )
-        if (!projectAccess || !projectAccessAllows(projectAccess, 'viewer')) {
-          throw new FileProofingError(
-            409,
-            'ApprovalReviewerAccessDenied',
-            `Reviewer "${memberKey}" cannot view the assigned project.`,
-          )
-        }
-      } else if (!scope.projectId && !reviewerIsSystemAdmin) {
-        const directory = await projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
-        const teamProjectIds = new Set(
-          directory.teams.find((team) => team.id === scope.teamId)?.projects
-            .map((project) => project.id) ?? [],
-        )
-        const projectAccesses = await projectDirectory.getProjectAccessList(
-          principal.directoryId,
-          member.memberKey,
-        )
-        if (!projectAccesses.some((access) =>
-          teamProjectIds.has(access.projectId) && projectAccessAllows(access, 'viewer')
-        )) {
-          throw new FileProofingError(
-            409,
-            'ApprovalReviewerAccessDenied',
-            `Reviewer "${memberKey}" cannot view the Work Item team.`,
-          )
-        }
-      }
-      return member
-    }))
+    const reviewerMembers = await requireApprovalReviewers(
+      principal.directoryId,
+      scope.teamId,
+      scope.projectId,
+      reviewerMemberKeys,
+    )
     if (reviewerMembers.some((member) => member.role === 'guest')) {
       if (!targetFile?.guestAccess) {
         throw new FileProofingError(
@@ -5427,6 +6054,58 @@ app.post('/api/teams/:teamId/issues/:issueId/approvals', async (c) => {
     return toFileProofingErrorResponse(c, error)
   }
 })
+
+/** Approval reviewer が active かつ対象 Work Item を閲覧可能であることを検証します。 */
+async function requireApprovalReviewers(
+  workspaceId: string,
+  teamId: string,
+  assignedProjectId: string | undefined,
+  reviewerMemberKeys: readonly string[],
+) {
+  const directory = assignedProjectId
+    ? undefined
+    : await projectDirectory.getProjectDirectory(workspaceId, 'ja', true)
+  const teamProjectIds = new Set(
+    directory?.teams.find((team) => team.id === teamId)?.projects.map((project) => project.id) ?? [],
+  )
+  return await Promise.all(reviewerMemberKeys.map(async (memberKey) => {
+    const member = await workspaceAccess.getActiveMember(workspaceId, memberKey)
+    if (!member) {
+      throw new FileProofingError(
+        409,
+        'ApprovalReviewerInactive',
+        `Reviewer "${memberKey}" is not an active Workspace member.`,
+      )
+    }
+    const reviewerIsSystemAdmin = await cognito.isSystemAdmin(member.memberKey)
+    if (assignedProjectId && !reviewerIsSystemAdmin) {
+      const projectAccess = await projectDirectory.getProjectAccess(
+        workspaceId,
+        assignedProjectId,
+        member.memberKey,
+      )
+      if (!projectAccess || !projectAccessAllows(projectAccess, 'viewer')) {
+        throw new FileProofingError(
+          409,
+          'ApprovalReviewerAccessDenied',
+          `Reviewer "${memberKey}" cannot view the assigned project.`,
+        )
+      }
+    } else if (!assignedProjectId && !reviewerIsSystemAdmin) {
+      const projectAccesses = await projectDirectory.getProjectAccessList(workspaceId, member.memberKey)
+      if (!projectAccesses.some((access) =>
+        teamProjectIds.has(access.projectId) && projectAccessAllows(access, 'viewer')
+      )) {
+        throw new FileProofingError(
+          409,
+          'ApprovalReviewerAccessDenied',
+          `Reviewer "${memberKey}" cannot view the Work Item team.`,
+        )
+      }
+    }
+    return member
+  }))
+}
 
 /** Assigned reviewer の approval decision を保存する endpoint です。 */
 app.post('/api/teams/:teamId/issues/:issueId/approvals/:approvalId/decisions', async (c) => {
@@ -5639,6 +6318,1407 @@ async function readJson<T>(request: { json: () => Promise<T> }) {
   }
 }
 
+async function readAutomationJson(c: Context) {
+  const value = await readJson<unknown>(c.req)
+  if (!isRecord(value)) {
+    throw new AutomationError(
+      400,
+      'InvalidAutomationInput',
+      'A JSON object request body is required.',
+    )
+  }
+  return value
+}
+
+async function authenticateAutomationPrincipal(c: Context, manage = false) {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    throw new AutomationError(401, 'AutomationAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken)
+  if (manage) requireWorkspaceAdministration(principal)
+  return principal
+}
+
+function readRequiredInboundWebhookIdempotencyKey(c: Context) {
+  const value = c.req.header('Idempotency-Key')?.trim()
+  if (!value || value.length > 256) {
+    throw new AutomationError(
+      400,
+      'AutomationInboundWebhookIdempotencyKeyRequired',
+      'A non-empty Idempotency-Key of at most 256 characters is required.',
+    )
+  }
+  return value
+}
+
+function getAutomationInboundWebhookBaseUrl(c: Context) {
+  return getEnv('AUTOMATION_INBOUND_WEBHOOK_BASE_URL')?.trim() || new URL(c.req.url).origin
+}
+
+async function requireAutomationInboundWebhookEndpoint(
+  workspaceId: string,
+  endpointId: string,
+) {
+  const endpoint = await automation.getInboundWebhookEndpoint(workspaceId, endpointId)
+  if (!endpoint) throw automationInboundWebhookNotFound()
+  return endpoint
+}
+
+function toAutomationInboundWebhookSecretReference(
+  endpoint: AutomationInboundWebhookEndpointRecord,
+): AutomationInboundWebhookSecretReference {
+  return {
+    workspaceId: endpoint.workspaceId,
+    endpointId: endpoint.id,
+    secretId: endpoint.secretId,
+    secretVersionId: endpoint.secretVersionId,
+    secretGeneration: endpoint.secretGeneration,
+  }
+}
+
+async function provisionAutomationInboundWebhookEndpoint(
+  provisioning: AutomationInboundWebhookProvisioning,
+) {
+  const secretReference = toAutomationInboundWebhookSecretReference(provisioning.endpoint)
+  try {
+    const signingSecret = await automationInboundWebhookSecrets.provision(secretReference)
+    return {
+      completed: await automation.completeInboundWebhookProvisioning(provisioning),
+      signingSecret,
+    }
+  } catch (error) {
+    const current = await automation.getInboundWebhookEndpoint(
+      provisioning.endpoint.workspaceId,
+      provisioning.endpoint.id,
+    ).catch(() => undefined)
+    if (current?.status === 'revoked') {
+      await automationInboundWebhookSecrets.delete(secretReference)
+    }
+    throw error
+  }
+}
+
+function automationInboundWebhookNotFound() {
+  return new AutomationError(
+    404,
+    'AutomationInboundWebhookNotFound',
+    'Inbound webhook endpoint was not found.',
+  )
+}
+
+function automationInboundWebhookUnavailable() {
+  return new AutomationError(
+    503,
+    'AutomationInboundWebhookUnavailable',
+    'Inbound webhook service is unavailable.',
+    true,
+  )
+}
+
+function readAutomationPageLimit(value: string | undefined) {
+  if (value === undefined) return undefined
+  const limit = Number(value)
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    throw new AutomationError(400, 'InvalidAutomationQuery', 'Automation page limit is invalid.')
+  }
+  return limit
+}
+
+function readAutomationExecutionStatus(
+  value: string | undefined,
+): AutomationExecutionStatus | undefined {
+  if (value === undefined) return undefined
+  if (
+    value === 'pending' ||
+    value === 'running' ||
+    value === 'succeeded' ||
+    value === 'failed' ||
+    value === 'dead-letter' ||
+    value === 'skipped'
+  ) return value
+  throw new AutomationError(400, 'InvalidAutomationQuery', 'Automation execution status is invalid.')
+}
+
+function readWorkspaceBulkOperationRequest(
+  value: Record<string, unknown>,
+  workspaceId: string,
+): BulkOperationRequest {
+  return {
+    ...value,
+    workspaceId,
+  } as BulkOperationRequest
+}
+
+async function requireBulkOperation(workspaceId: string, operationId: string) {
+  const operation = await automation.getBulkOperation(workspaceId, operationId)
+  if (!operation) {
+    throw new AutomationError(404, 'BulkOperationNotFound', 'Bulk operation was not found.')
+  }
+  return operation
+}
+
+/** Bulk retry/undo を operation を開始した member だけへ制限します。 */
+export function requireBulkOperationOwner(operation: BulkOperation, actorMemberKey: string) {
+  if (operation.actorMemberKey !== actorMemberKey) {
+    throw new AutomationError(403, 'BulkOperationForbidden', 'Bulk operation access is denied.')
+  }
+}
+
+/** Server-only undo snapshots を除いた Bulk operation API response を返します。 */
+export function toBulkOperationResponse(operation: BulkOperation): BulkOperation {
+  return {
+    ...operation,
+    items: operation.items.map((item) => {
+      const redacted = { ...item }
+      delete redacted.undoPayload
+      return redacted
+    }),
+  }
+}
+
+function toBulkOperationPreviewResponse(preview: BulkOperationPreview): BulkOperationPreview {
+  return {
+    ...preview,
+    items: preview.items.map((item) => {
+      const redacted = { ...item }
+      delete redacted.undoPayload
+      return redacted
+    }),
+  }
+}
+
+async function putAutomationIngressEvent(
+  c: Context,
+  principal: WorkspacePrincipal,
+  entityId: string,
+  metadata: Record<string, unknown>,
+) {
+  const tableName = getConfiguredAuditTableName()
+  if (!tableName) {
+    throw new AutomationError(503, 'AutomationAuditUnavailable', 'Audit outbox is not configured.', true)
+  }
+  const context = createApiMutationContext(c, principal, metadata)
+  const event = createAuditEvent({
+    context,
+    eventType: 'form.submitted',
+    entity: { type: 'automation-form', id: entityId },
+    summary: 'Automation form was submitted.',
+    metadata,
+    expiresAt: calculateAuditExpiresAt(context.occurredAt, 365),
+  })
+  const documentClient = createDynamoDbDocumentClient()
+  try {
+    await documentClient.send(new PutCommand({
+      TableName: tableName,
+      Item: event,
+      ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(eventId)',
+    }))
+  } catch (error) {
+    if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
+    const existing = await documentClient.send(new GetCommand({
+      TableName: tableName,
+      Key: { directoryId: event.directoryId, eventId: event.eventId },
+      ConsistentRead: true,
+    }))
+    if (
+      existing.Item?.eventType !== event.eventType ||
+      existing.Item?.requestFingerprint !== event.requestFingerprint ||
+      existing.Item?.entityId !== event.entityId
+    ) {
+      throw new AutomationError(
+        409,
+        'IdempotencyConflict',
+        'Idempotency key was already used with different automation ingress input.',
+      )
+    }
+  }
+  return event
+}
+
+async function executeAutomationTemplateApplication(
+  c: Context,
+  principal: WorkspacePrincipal,
+  initialApplication: AutomationTemplateApplication,
+) {
+  if (initialApplication.status === 'succeeded') return initialApplication
+  assertTemplateApplicationNotFailed(initialApplication)
+  const now = new Date()
+  const application = await automation.claimTemplateApplication(
+    initialApplication,
+    now,
+    new Date(now.getTime() + AUTOMATION_TEMPLATE_APPLICATION_LEASE_MS).toISOString(),
+  )
+  if (!application) {
+    const current = await automation.getTemplateApplication(
+      initialApplication.workspaceId,
+      initialApplication.id,
+    )
+    if (current?.status === 'succeeded') return current
+    if (current) assertTemplateApplicationNotFailed(current)
+    throw new AutomationError(
+      409,
+      'AutomationTemplateApplicationInProgress',
+      'Template application is already in progress. Retry with the same Idempotency-Key.',
+      true,
+    )
+  }
+
+  try {
+    const template = await automation.getTemplateVersion(
+      application.workspaceId,
+      application.templateId,
+      application.templateVersion,
+    )
+    if (!template || template.kind !== application.kind) {
+      throw new AutomationError(
+        503,
+        'AutomationTemplateVersionUnavailable',
+        'Pinned template version is unavailable.',
+        true,
+      )
+    }
+    if (application.kind === 'project') {
+      const target = application.target
+      if (template.kind !== 'project' || target.kind !== 'project') {
+        throw new AutomationError(503, 'AutomationTemplateApplicationInvalid', 'Project template application is invalid.')
+      }
+      const names = readLocalizedNames(template.payload)
+      const result = {
+        kind: 'project' as const,
+        teamId: target.teamId,
+        projectId: application.id,
+        name: names.nameJa,
+      }
+      const response = await projectDirectory.createProject(
+        principal.directoryId,
+        target.teamId,
+        {
+          ...template.payload,
+          idempotencyResourceId: application.id,
+        },
+        {
+          userKey: principal.userKey,
+          workspaceMemberVersion: principal.workspaceMember.version,
+        },
+        createApiMutationContext(
+          c,
+          principal,
+          {
+            applicationId: application.id,
+            target,
+            templateId: application.templateId,
+            templateVersion: application.templateVersion,
+          },
+          application.id,
+        ),
+        [automation.createTemplateApplicationCompletionTransactItem(application, result)],
+      )
+      await projectWorkspaceSearchDocumentBestEffort(
+        () => {
+          return createProjectSearchDocument(
+            principal.directoryId,
+            target.teamId,
+            response.project,
+            principal.userKey,
+            names.nameEn === response.project.name ? undefined : names.nameEn,
+          )
+        },
+        'automation template Project creation',
+      )
+      return await requireCompletedTemplateApplication(application)
+    }
+
+    if (template.kind !== 'workflow' || application.target.kind !== 'workflow') {
+      throw new AutomationError(503, 'AutomationTemplateApplicationInvalid', 'Workflow template application is invalid.')
+    }
+    const target = application.target
+    const resolved = target.scopeType === 'workspace'
+      ? await workItemConfigurations.getWorkspaceConfiguration(application.workspaceId)
+      : await workItemConfigurations.getTeamConfiguration(
+          application.workspaceId,
+          target.scopeId,
+        )
+    const storedTargetRevision = target.scopeType === 'team' && resolved.inheritedFrom
+      ? 0
+      : resolved.configuration.revision
+    if (storedTargetRevision !== target.expectedRevision) {
+      throw new WorkItemConfigurationError(
+        409,
+        'WorkItemConfigurationRevisionConflict',
+        'Work Item configuration changed. Reload and try again.',
+      )
+    }
+    const configuration = validateWorkItemConfiguration({
+      ...resolved.configuration,
+      scopeType: target.scopeType,
+      scopeId: target.scopeId,
+      revision: target.expectedRevision,
+      workflow: template.payload,
+      ...(target.expectedRevision === 0 ? { updatedAt: undefined } : {}),
+    }, {
+      scopeType: target.scopeType,
+      scopeId: target.scopeId,
+    })
+    const result = {
+      kind: 'workflow',
+      scopeType: target.scopeType,
+      scopeId: target.scopeId,
+      revision: target.expectedRevision + 1,
+    } as const
+    const completionTransactItems = [
+      automation.createTemplateApplicationCompletionTransactItem(application, result),
+    ]
+    if (target.scopeType === 'workspace') {
+      await workItemConfigurations.saveWorkspaceConfiguration(
+        application.workspaceId,
+        configuration,
+        async () => {
+          await validateWorkItemConfigurationReferences(application.workspaceId, configuration)
+          await validateWorkItemConfigurationUsage(application.workspaceId, configuration)
+        },
+        completionTransactItems,
+      )
+    } else {
+      await workItemConfigurations.saveTeamConfiguration(
+        application.workspaceId,
+        target.scopeId,
+        configuration,
+        async () => {
+          await validateWorkItemConfigurationReferences(
+            application.workspaceId,
+            configuration,
+            target.scopeId,
+          )
+          await validateWorkItemConfigurationUsage(
+            application.workspaceId,
+            configuration,
+            target.scopeId,
+          )
+        },
+        completionTransactItems,
+      )
+    }
+    return await requireCompletedTemplateApplication(application)
+  } catch (error) {
+    const current = await automation.getTemplateApplication(application.workspaceId, application.id)
+      .catch(() => undefined)
+    if (current?.status === 'succeeded') return current
+    if (
+      current?.status === 'running' &&
+      current.revision === application.revision &&
+      current.runnerLeaseExpiresAt === application.runnerLeaseExpiresAt
+    ) {
+      await saveTemplateApplicationFailureState(current, error).catch(() => undefined)
+    }
+    throw error
+  }
+}
+
+function assertTemplateApplicationNotFailed(application: AutomationTemplateApplication) {
+  if (application.status !== 'failed') return
+  throw new AutomationError(
+    409,
+    application.errorCode ?? 'AutomationTemplateApplicationFailed',
+    application.errorMessage ?? 'Template application previously failed.',
+  )
+}
+
+async function requireCompletedTemplateApplication(application: AutomationTemplateApplication) {
+  const completed = await automation.getTemplateApplication(application.workspaceId, application.id)
+  if (completed?.status === 'succeeded') return completed
+  throw new AutomationError(
+    503,
+    'AutomationTemplateApplicationCompletionUnavailable',
+    'Template application completion is not yet available.',
+    true,
+  )
+}
+
+async function saveTemplateApplicationFailureState(
+  application: AutomationTemplateApplication,
+  error: unknown,
+) {
+  const {
+    runnerLeaseExpiresAt: _runnerLeaseExpiresAt,
+    result: _result,
+    errorCode: _errorCode,
+    errorMessage: _errorMessage,
+    ...base
+  } = application
+  const updatedAt = new Date().toISOString()
+  if (!isTerminalTemplateApplicationError(error)) {
+    await automation.saveTemplateApplication({
+      ...base,
+      status: 'pending',
+      revision: application.revision + 1,
+      updatedAt,
+    }, application.revision)
+    return
+  }
+  const failed: AutomationTemplateApplication = {
+    ...base,
+    status: 'failed',
+    revision: application.revision + 1,
+    errorCode: error.code,
+    errorMessage: error.message,
+    updatedAt,
+  }
+  await automation.saveTemplateApplication(failed, application.revision)
+}
+
+function isTerminalTemplateApplicationError(
+  error: unknown,
+): error is AutomationError | WorkItemConfigurationError | ProjectDataError {
+  if (error instanceof AutomationError) return error.status < 500 && !error.retryable
+  return (error instanceof WorkItemConfigurationError || error instanceof ProjectDataError) &&
+    error.status < 500
+}
+
+function createApiBulkOperationAdapter(
+  principal: WorkspacePrincipal,
+  c: Context,
+): BulkOperationAdapter {
+  const createBulkMutationContext = (
+    metadata: Record<string, unknown>,
+    idempotencyKey: string,
+  ) => {
+    const context = createApiMutationContext(c, principal, metadata, idempotencyKey)
+    return {
+      ...context,
+      requestFingerprint: createRequestFingerprint({
+        method: 'POST',
+        path: '/internal/automation/bulk-item-mutation',
+        body: metadata,
+      }),
+    }
+  }
+
+  const hasBulkMutationAuditProof = async (
+    context: MutationAuditContext,
+    teamId: string,
+    workItemId: string,
+    beforeRevision: number,
+    afterRevision: number,
+  ) => {
+    const entityId = createTeamIssueAuditEntityId(teamId, workItemId)
+    const eventId = createAuditEventId(
+      context,
+      'work-item.updated',
+      { type: 'work-item', id: entityId },
+    )
+    const event = await auditEvents.getEvent(principal.directoryId, eventId)
+    return isExpectedBulkMutationAuditProof(
+      event,
+      context,
+      principal,
+      entityId,
+      teamId,
+      workItemId,
+      beforeRevision,
+      afterRevision,
+    )
+  }
+
+  const loadCurrentItem = async (request: BulkOperationRequest, itemIndex: number) => {
+    const item = request.items[itemIndex]
+    if (!item) {
+      throw new AutomationError(400, 'BulkOperationTargetMissing', 'Bulk operation target is missing.')
+    }
+    const context = await requireTeamPermission(principal, item.teamId, 'member')
+    const detail = await teamIssues.getTeamIssueDetail(
+      principal.directoryId,
+      item.teamId,
+      item.workItemId,
+      { consistentIssueRead: true, eventLimit: 0 },
+    )
+    requireAssignedProjectPermission(
+      principal,
+      context,
+      detail.issue.assignedProjectId,
+      'member',
+    )
+    return { context, detail, item }
+  }
+
+  const loadItem = async (request: BulkOperationRequest, itemIndex: number) => {
+    const loaded = await loadCurrentItem(request, itemIndex)
+    if (loaded.detail.issue.revision !== loaded.item.expectedRevision) {
+      throw new AutomationError(
+        409,
+        'WorkItemRevisionConflict',
+        'Work Item changed after it was selected.',
+      )
+    }
+    return loaded
+  }
+
+  const prepareAction = async (
+    request: BulkOperationRequest,
+    itemIndex: number,
+  ) => {
+    const loaded = await loadItem(request, itemIndex)
+    const { action } = request
+    let body: UpdateTeamIssueRequestBody
+
+    if (action.type === 'move') {
+      body = normalizeTeamIssueInput(
+        {
+          assignedProjectId: action.targetProjectId,
+          expectedRevision: loaded.item.expectedRevision,
+        },
+        loaded.context.team,
+      )
+      requireAssignedProjectPermission(
+        principal,
+        loaded.context,
+        action.targetProjectId,
+        'member',
+      )
+    } else if (action.type === 'archive') {
+      body = {
+        archivedAt: action.archived ? new Date().toISOString() : null,
+        archivedBy: action.archived ? principal.userKey : null,
+        expectedRevision: loaded.item.expectedRevision,
+      }
+    } else {
+      body = normalizeTeamIssueInput(
+        {
+          ...action.patch,
+          expectedRevision: loaded.item.expectedRevision,
+        },
+        loaded.context.team,
+      )
+      requireAssignedProjectPermission(
+        principal,
+        loaded.context,
+        readAssignedProjectId(body.assignedProjectId),
+        'member',
+      )
+    }
+
+    const configuredBody = action.type === 'archive'
+      ? body
+      : await prepareConfiguredUpdateWorkItem(
+          principal.directoryId,
+          loaded.item.teamId,
+          loaded.detail.issue,
+          body,
+          await workItemConfigurations.getTeamConfiguration(
+            principal.directoryId,
+            loaded.item.teamId,
+          ),
+        )
+    if ('assigneeUserId' in configuredBody) {
+      await requireActiveWorkspaceAssignee(
+        principal.directoryId,
+        readTeamIssueAssigneeUserId(configuredBody),
+      )
+    }
+    return { ...loaded, body: configuredBody }
+  }
+
+  const canAttemptResponseLossRecovery = (error: unknown) => {
+    const failure = normalizeAutomationActionFailure(error)
+    return failure.retryable || failure.code === 'WorkItemRevisionConflict' ||
+      failure.code === 'ConditionalCheckFailedException'
+  }
+
+  const recoverAppliedItem = async (
+    request: BulkOperationRequest,
+    itemIndex: number,
+    checkpoint: BulkOperationItemResult,
+  ) => {
+    if (!checkpoint.undoPayload) return undefined
+    const loaded = await loadCurrentItem(request, itemIndex)
+    const resultingRevision = loaded.item.expectedRevision + 1
+    if (
+      loaded.detail.issue.revision !== resultingRevision ||
+      !isBulkActionApplied(loaded.detail.issue, request.action)
+    ) return undefined
+    const metadata = { bulkAction: request.action, item: loaded.item }
+    const context = createBulkMutationContext(
+      metadata,
+      createBulkItemMutationIdempotencyKey(
+        request,
+        itemIndex,
+        'apply',
+        principal.userKey,
+      ),
+    )
+    if (!await hasBulkMutationAuditProof(
+      context,
+      loaded.item.teamId,
+      loaded.item.workItemId,
+      loaded.item.expectedRevision,
+      resultingRevision,
+    )) return undefined
+    return {
+      resultingRevision,
+      undoPayload: structuredClone(checkpoint.undoPayload),
+    }
+  }
+
+  const recoverUndoneItem = async (
+    operation: BulkOperation,
+    itemIndex: number,
+    request: BulkOperationRequest,
+    item: BulkOperationItemResult,
+  ) => {
+    if (!item.undoPayload || item.resultingRevision === undefined) return undefined
+    const loaded = await loadCurrentItem(request, 0)
+    const resultingRevision = item.resultingRevision + 1
+    if (
+      loaded.detail.issue.revision !== resultingRevision ||
+      !isAutomationPatchApplied(loaded.detail.issue, item.undoPayload)
+    ) return undefined
+    const metadata = {
+      bulkOperationId: operation.id,
+      itemIndex,
+      undo: true,
+    }
+    const context = createBulkMutationContext(
+      metadata,
+      createBulkUndoMutationIdempotencyKey(operation, itemIndex),
+    )
+    if (!await hasBulkMutationAuditProof(
+      context,
+      item.teamId,
+      item.workItemId,
+      item.resultingRevision,
+      resultingRevision,
+    )) return undefined
+    return { resultingRevision }
+  }
+
+  return {
+    async preview(request, itemIndex) {
+      const prepared = await prepareAction(request, itemIndex)
+      return {
+        allowed: true,
+        undoPayload: createBulkUndoPayload(request.action, prepared.detail.issue),
+      }
+    },
+    async apply(request, itemIndex, checkpoint) {
+      let prepared: Awaited<ReturnType<typeof prepareAction>>
+      try {
+        prepared = await prepareAction(request, itemIndex)
+      } catch (error) {
+        const recovered = canAttemptResponseLossRecovery(error)
+          ? await recoverAppliedItem(request, itemIndex, checkpoint)
+          : undefined
+        if (recovered) return recovered
+        throw error
+      }
+      let response: UpdateTeamIssueResponse
+      try {
+        response = await teamIssues.updateTeamIssue(
+          principal.directoryId,
+          prepared.item.teamId,
+          prepared.item.workItemId,
+          prepared.body,
+          principal.userKey,
+          createBulkMutationContext(
+            { bulkAction: request.action, item: prepared.item },
+            createBulkItemMutationIdempotencyKey(
+              request,
+              itemIndex,
+              'apply',
+              principal.userKey,
+            ),
+          ),
+        )
+      } catch (error) {
+        const recovered = canAttemptResponseLossRecovery(error)
+          ? await recoverAppliedItem(request, itemIndex, checkpoint)
+          : undefined
+        if (recovered) return recovered
+        throw error
+      }
+      await projectWorkItemMutationSearchDocumentBestEffort(
+        principal.directoryId,
+        response.issue,
+        'bulk Work Item update',
+      )
+      return {
+        resultingRevision: response.issue.revision,
+        undoPayload: structuredClone(checkpoint.undoPayload),
+      }
+    },
+    async undo(operation, itemIndex) {
+      const item = operation.items[itemIndex]
+      if (!item?.undoPayload || item.resultingRevision === undefined) {
+        throw new AutomationError(409, 'BulkUndoUnavailable', 'Bulk operation item cannot be undone.')
+      }
+      const request: BulkOperationRequest = {
+        workspaceId: operation.workspaceId,
+        action: operation.action,
+        items: [{
+          teamId: item.teamId,
+          workItemId: item.workItemId,
+          expectedRevision: item.resultingRevision,
+        }],
+      }
+      let loaded: Awaited<ReturnType<typeof loadItem>>
+      try {
+        loaded = await loadItem(request, 0)
+      } catch (error) {
+        const recovered = canAttemptResponseLossRecovery(error)
+          ? await recoverUndoneItem(operation, itemIndex, request, item)
+          : undefined
+        if (recovered) return recovered
+        throw error
+      }
+      const body = {
+        ...item.undoPayload,
+        expectedRevision: item.resultingRevision,
+      } as UpdateTeamIssueRequestBody
+      const normalizedBody = operation.action.type === 'archive'
+        ? body
+        : normalizeTeamIssueInput(body, loaded.context.team)
+      if ('assignedProjectId' in normalizedBody) {
+        requireAssignedProjectPermission(
+          principal,
+          loaded.context,
+          readAssignedProjectId(normalizedBody.assignedProjectId),
+          'member',
+        )
+      }
+      const configuredBody = operation.action.type === 'archive'
+        ? normalizedBody
+        : await prepareConfiguredUpdateWorkItem(
+            principal.directoryId,
+            item.teamId,
+            loaded.detail.issue,
+            normalizedBody,
+            await workItemConfigurations.getTeamConfiguration(
+              principal.directoryId,
+              item.teamId,
+            ),
+          )
+      if ('assigneeUserId' in configuredBody) {
+        await requireActiveWorkspaceAssignee(
+          principal.directoryId,
+          readTeamIssueAssigneeUserId(configuredBody),
+        )
+      }
+      let response: UpdateTeamIssueResponse
+      try {
+        response = await teamIssues.updateTeamIssue(
+          principal.directoryId,
+          item.teamId,
+          item.workItemId,
+          configuredBody,
+          principal.userKey,
+          createBulkMutationContext(
+            {
+              bulkOperationId: operation.id,
+              itemIndex,
+              undo: true,
+            },
+            createBulkUndoMutationIdempotencyKey(operation, itemIndex),
+          ),
+        )
+      } catch (error) {
+        const recovered = canAttemptResponseLossRecovery(error)
+          ? await recoverUndoneItem(operation, itemIndex, request, item)
+          : undefined
+        if (recovered) return recovered
+        throw error
+      }
+      await projectWorkItemMutationSearchDocumentBestEffort(
+        principal.directoryId,
+        response.issue,
+        'bulk Work Item undo',
+      )
+      return { resultingRevision: response.issue.revision }
+    },
+  }
+}
+
+function isExpectedBulkMutationAuditProof(
+  event: AuditEventV1 | undefined,
+  context: MutationAuditContext,
+  principal: WorkspacePrincipal,
+  entityId: string,
+  teamId: string,
+  workItemId: string,
+  beforeRevision: number,
+  afterRevision: number,
+) {
+  return event?.directoryId === principal.directoryId &&
+    event.workspaceId === principal.directoryId &&
+    event.eventType === 'work-item.updated' &&
+    event.action === 'updated' &&
+    event.idempotencyKeyHash === context.idempotencyKeyHash &&
+    event.requestFingerprint === context.requestFingerprint &&
+    event.actor.id === principal.actorId &&
+    event.actor.kind === 'user' &&
+    event.actorUserId === principal.actorId &&
+    event.entity.type === 'work-item' &&
+    event.entity.id === entityId &&
+    event.entityType === 'work-item' &&
+    event.entityId === entityId &&
+    event.target.type === 'work-item' &&
+    event.target.id === entityId &&
+    event.targetType === 'work-item' &&
+    event.targetId === entityId &&
+    event.metadata?.adapter === 'canonical-work-item' &&
+    event.metadata.actorMemberKey === principal.userKey &&
+    event.metadata.teamId === teamId &&
+    event.metadata.issueId === workItemId &&
+    event.metadata.beforeRevision === beforeRevision &&
+    event.metadata.afterRevision === afterRevision
+}
+
+/** Bulk apply の各 Work Item へ衝突しない deterministic mutation key を割り当てます。 */
+export function createBulkItemMutationIdempotencyKey(
+  request: BulkOperationRequest,
+  itemIndex: number,
+  phase: 'apply',
+  actorMemberKey: string,
+) {
+  const item = request.items[itemIndex]
+  return `bulk_${createHash('sha256').update(JSON.stringify({
+    action: request.action,
+    item,
+    phase,
+    actorMemberKey,
+    workspaceId: request.workspaceId,
+  })).digest('hex')}`
+}
+
+function createBulkUndoMutationIdempotencyKey(
+  operation: BulkOperation,
+  itemIndex: number,
+) {
+  return `bulk_${createHash('sha256').update(JSON.stringify({
+    itemIndex,
+    operationId: operation.id,
+    phase: 'undo',
+    workspaceId: operation.workspaceId,
+  })).digest('hex')}`
+}
+
+async function projectWorkItemMutationSearchDocumentBestEffort(
+  workspaceId: string,
+  issue: TeamIssueResponseItem,
+  operation: string,
+) {
+  if (issue.archivedAt) {
+    await deleteWorkspaceSearchDocumentBestEffort(
+      workspaceId,
+      'work-item',
+      `team/${issue.teamId}/issue/${issue.id}`,
+      operation,
+    )
+    return
+  }
+  await projectWorkItemSearchDocumentBestEffort(workspaceId, issue, operation)
+}
+
+function createBulkUndoPayload(
+  action: BulkOperationRequest['action'],
+  issue: TeamIssueResponseItem,
+): Record<string, AutomationValue> {
+  if (action.type === 'move') {
+    return { assignedProjectId: issue.assignedProjectId ?? null }
+  }
+  if (action.type === 'archive') {
+    return {
+      archivedAt: issue.archivedAt ?? null,
+      archivedBy: issue.archivedBy ?? null,
+    }
+  }
+  const snapshot: Record<string, AutomationValue> = {}
+  const issueValues = issue as unknown as Record<string, AutomationValue | undefined>
+  for (const field of Object.keys(action.patch)) {
+    if (bulkEditableWorkItemFields.has(field)) {
+      snapshot[field] = issueValues[field] ?? null
+    }
+  }
+  return snapshot
+}
+
+function isBulkActionApplied(
+  issue: TeamIssueResponseItem,
+  action: BulkOperationRequest['action'],
+) {
+  if (action.type === 'edit') return isAutomationPatchApplied(issue, action.patch)
+  if (action.type === 'move') {
+    return automationValuesEqual(issue.assignedProjectId ?? null, action.targetProjectId)
+  }
+  return action.archived
+    ? Boolean(issue.archivedAt) && issue.archivedBy !== undefined
+    : issue.archivedAt === undefined && issue.archivedBy === undefined
+}
+
+const bulkEditableWorkItemFields = new Set([
+  'assignedProjectId',
+  'assigneeUserId',
+  'customFieldValues',
+  'description',
+  'dueDate',
+  'priority',
+  'title',
+  'workflowStatusId',
+])
+
+/** Durable automation engine が利用する production action executor を返します。 */
+export function createAutomationActionExecutor(): AutomationActionExecutor {
+  return {
+    async execute(action, context) {
+      switch (action.type) {
+        case 'assign':
+          await executeAutomationWorkItemUpdate(
+            { assigneeUserId: action.assigneeMemberKey },
+            context,
+          )
+          return
+        case 'move':
+          await executeAutomationWorkItemUpdate(
+            { assignedProjectId: action.targetProjectId },
+            context,
+          )
+          return
+        case 'update':
+          await executeAutomationWorkItemUpdate(action.patch, context)
+          return
+        case 'create':
+          await executeAutomationWorkItemCreate(action, context)
+          return
+        case 'comment':
+          await executeAutomationComment(action.body, context)
+          return
+        case 'notify':
+          await emitAutomationOutboxEvent(
+            'automation.notification.requested',
+            action.title,
+            action.recipientMemberKeys,
+            context,
+            { body: action.body ?? '' },
+          )
+          return
+        case 'approval':
+          await executeAutomationApproval(action, context)
+          return
+        case 'webhook':
+          await deliverAutomationWebhook(action, context)
+      }
+    },
+  }
+}
+
+async function executeAutomationWorkItemUpdate(
+  patch: Record<string, AutomationValue>,
+  context: AutomationActionExecutionContext,
+) {
+  const target = readAutomationWorkItemTarget(context.event)
+  const detail = await teamIssues.getTeamIssueDetail(
+    context.execution.workspaceId,
+    target.teamId,
+    target.workItemId,
+    { consistentIssueRead: true, eventLimit: 0 },
+  )
+  const unsafeFields = Object.keys(patch).filter((field) => !bulkEditableWorkItemFields.has(field))
+  if (unsafeFields.length > 0) {
+    throw new AutomationError(
+      400,
+      'AutomationUpdateFieldUnsupported',
+      `Automation cannot update fields: ${unsafeFields.join(', ')}.`,
+    )
+  }
+  const body = {
+    ...patch,
+    expectedRevision: detail.issue.revision,
+  } as UpdateTeamIssueRequestBody
+  const team = await requireAutomationTeam(context.execution.workspaceId, target.teamId)
+  const configuredBody = await prepareConfiguredUpdateWorkItem(
+    context.execution.workspaceId,
+    target.teamId,
+    detail.issue,
+    normalizeTeamIssueInput(body, team),
+    await workItemConfigurations.getTeamConfiguration(
+      context.execution.workspaceId,
+      target.teamId,
+    ),
+  )
+  if ('assigneeUserId' in configuredBody) {
+    await requireActiveWorkspaceAssignee(
+      context.execution.workspaceId,
+      readTeamIssueAssigneeUserId(configuredBody),
+    )
+  }
+  const mutationContext = createAutomationMutationContext(context, patch)
+  let updatedIssue: TeamIssueResponseItem
+  try {
+    const response = await teamIssues.updateTeamIssue(
+      context.execution.workspaceId,
+      target.teamId,
+      target.workItemId,
+      configuredBody,
+      `automation:${context.execution.ruleId}`,
+      mutationContext,
+    )
+    updatedIssue = response.issue
+  } catch (error) {
+    const current = await teamIssues.getTeamIssueDetail(
+      context.execution.workspaceId,
+      target.teamId,
+      target.workItemId,
+      { consistentIssueRead: true, eventLimit: 0 },
+    ).catch(() => undefined)
+    const resultingRevision = detail.issue.revision + 1
+    if (
+      !current ||
+      current.issue.revision !== resultingRevision ||
+      !isAutomationPatchApplied(current.issue, patch) ||
+      !await hasAutomationMutationAuditProof(
+        mutationContext,
+        target.teamId,
+        target.workItemId,
+        detail.issue.revision,
+        resultingRevision,
+      )
+    ) throw error
+    updatedIssue = current.issue
+  }
+  await projectWorkItemSearchDocumentBestEffort(
+    context.execution.workspaceId,
+    updatedIssue,
+    'automation Work Item update',
+  )
+}
+
+async function hasAutomationMutationAuditProof(
+  context: MutationAuditContext,
+  teamId: string,
+  workItemId: string,
+  beforeRevision: number,
+  afterRevision: number,
+) {
+  const entityId = createTeamIssueAuditEntityId(teamId, workItemId)
+  const eventId = createAuditEventId(
+    context,
+    'work-item.updated',
+    { type: 'work-item', id: entityId },
+  )
+  const event = await auditEvents.getEvent(context.workspaceId, eventId)
+  return event?.directoryId === context.workspaceId &&
+    event.workspaceId === context.workspaceId &&
+    event.eventType === 'work-item.updated' &&
+    event.action === 'updated' &&
+    event.idempotencyKeyHash === context.idempotencyKeyHash &&
+    event.requestFingerprint === context.requestFingerprint &&
+    event.actor.id === context.actor.id &&
+    event.actor.kind === 'service' &&
+    event.actorUserId === context.actor.id &&
+    event.entity.type === 'work-item' &&
+    event.entity.id === entityId &&
+    event.entityType === 'work-item' &&
+    event.entityId === entityId &&
+    event.target.type === 'work-item' &&
+    event.target.id === entityId &&
+    event.targetType === 'work-item' &&
+    event.targetId === entityId &&
+    event.metadata?.adapter === 'canonical-work-item' &&
+    event.metadata.actorMemberKey === context.actor.id &&
+    event.metadata.teamId === teamId &&
+    event.metadata.issueId === workItemId &&
+    event.metadata.beforeRevision === beforeRevision &&
+    event.metadata.afterRevision === afterRevision
+}
+
+async function executeAutomationWorkItemCreate(
+  action: Extract<AutomationAction, { type: 'create' }>,
+  context: AutomationActionExecutionContext,
+) {
+  const templateVersion = action.templateVersion
+  const template = action.templateId && templateVersion !== undefined && Number.isSafeInteger(templateVersion)
+    ? await automation.getTemplateVersion(
+        context.execution.workspaceId,
+        action.templateId,
+        templateVersion,
+      )
+    : undefined
+  if (action.templateId && (!template || !template.enabled || template.kind !== 'work-item')) {
+    throw new AutomationError(
+      409,
+      'AutomationTemplateUnavailable',
+      'The selected Work Item template is unavailable.',
+    )
+  }
+  const values: Record<string, AutomationValue> = {
+    ...(template?.kind === 'work-item' ? template.payload : {}),
+    ...action.values,
+  }
+  const teamId = readAutomationText(values.teamId) ?? readAutomationMetadataText(context.event, 'teamId')
+  if (!teamId) {
+    throw new AutomationError(400, 'AutomationTargetMissing', 'Create action requires a Team ID.')
+  }
+  const body = { ...values }
+  delete body.teamId
+  body.idempotencyResourceId = `${context.execution.id}_create_${context.actionIndex}`
+  const team = await requireAutomationTeam(context.execution.workspaceId, teamId)
+  const configuredBody = await prepareConfiguredCreateWorkItem(
+    context.execution.workspaceId,
+    teamId,
+    normalizeTeamIssueInput(body as CreateTeamIssueRequestBody, team),
+    await workItemConfigurations.getTeamConfiguration(context.execution.workspaceId, teamId),
+  )
+  const assignee = readTeamIssueAssigneeUserId(configuredBody)
+  await requireActiveWorkspaceAssignee(context.execution.workspaceId, assignee)
+  const response = await teamIssues.createTeamIssue(
+    context.execution.workspaceId,
+    teamId,
+    configuredBody,
+    `automation:${context.execution.ruleId}`,
+    createAutomationMutationContext(context, values),
+  )
+  await projectWorkItemSearchDocumentBestEffort(
+    context.execution.workspaceId,
+    response.issue,
+    'automation Work Item creation',
+    [],
+  )
+}
+
+async function requireAutomationTeam(workspaceId: string, teamId: string) {
+  const directory = await projectDirectory.getProjectDirectory(workspaceId, 'en', true)
+  const team = directory.teams.find((candidate) => candidate.id === teamId)
+  if (!team) {
+    throw new AutomationError(
+      409,
+      'AutomationTeamUnavailable',
+      'The selected Work Item Team is unavailable.',
+    )
+  }
+  return team
+}
+
+/** Automation action から durable Work Item approval を一度だけ作成します。 */
+async function executeAutomationApproval(
+  action: Extract<AutomationAction, { type: 'approval' }>,
+  context: AutomationActionExecutionContext,
+) {
+  const target = readAutomationWorkItemTarget(context.event)
+  const detail = await teamIssues.getTeamIssueDetail(
+    context.execution.workspaceId,
+    target.teamId,
+    target.workItemId,
+    { consistentIssueRead: true, eventLimit: 0 },
+  )
+  const team = await requireAutomationTeam(context.execution.workspaceId, target.teamId)
+  if (
+    detail.issue.assignedProjectId &&
+    !team.projects.some((project) => project.id === detail.issue.assignedProjectId)
+  ) {
+    throw new AutomationError(
+      409,
+      'AutomationApprovalTargetUnavailable',
+      'The approval Work Item project is not active in its owner Team.',
+    )
+  }
+  const reviewerMemberKeys = action.reviewerMemberKeys.map((memberKey) => memberKey.trim().toLowerCase())
+  await requireApprovalReviewers(
+    context.execution.workspaceId,
+    target.teamId,
+    detail.issue.assignedProjectId,
+    reviewerMemberKeys,
+  )
+  if (action.completionStatusId) {
+    await resolveFileApprovalCompletionTransition(
+      context.execution.workspaceId,
+      target.teamId,
+      detail.issue,
+      action.completionStatusId,
+    )
+  }
+  const executionStartedAtEpoch = Date.parse(context.execution.startedAt)
+  if (!Number.isFinite(executionStartedAtEpoch)) {
+    throw new AutomationError(
+      503,
+      'AutomationExecutionStateInvalid',
+      'Automation execution start time is invalid.',
+    )
+  }
+  const input = {
+    reviewerMemberKeys,
+    dueAt: new Date(executionStartedAtEpoch + action.dueInHours * 3_600_000).toISOString(),
+    ...(action.completionStatusId ? { completionTransition: action.completionStatusId } : {}),
+  }
+  await fileProofing.createWorkItemApproval(
+    {
+      workspaceId: context.execution.workspaceId,
+      teamId: target.teamId,
+      kind: 'work-item',
+      issueId: target.workItemId,
+      ...(detail.issue.assignedProjectId
+        ? { projectId: detail.issue.assignedProjectId }
+        : {}),
+    },
+    {
+      memberKey: `automation:${context.execution.ruleId}`,
+      kind: 'service',
+      guest: false,
+      canWrite: true,
+      canManage: true,
+    },
+    input,
+    createAutomationMutationContext(context, {
+      subjectType: 'work-item',
+      teamId: target.teamId,
+      workItemId: target.workItemId,
+      ...input,
+    }),
+  )
+}
+
+async function executeAutomationComment(
+  body: string,
+  context: AutomationActionExecutionContext,
+) {
+  const target = readAutomationWorkItemTarget(context.event)
+  await requireAutomationTeam(context.execution.workspaceId, target.teamId)
+  await teamIssues.createTeamIssueComment(
+    context.execution.workspaceId,
+    target.teamId,
+    target.workItemId,
+    {
+      body,
+      idempotencyEventId: `${context.execution.id}_comment_${context.actionIndex}`,
+    },
+    `automation:${context.execution.ruleId}`,
+    createAutomationMutationContext(context, { body }),
+  )
+}
+
+async function emitAutomationOutboxEvent(
+  eventType: string,
+  summary: string,
+  recipientMemberKeys: string[],
+  context: AutomationActionExecutionContext,
+  metadata: Record<string, AutomationValue>,
+) {
+  const tableName = getConfiguredAuditTableName()
+  if (!tableName) {
+    throw new AutomationError(503, 'AutomationAuditUnavailable', 'Audit outbox is not configured.', true)
+  }
+  const target = readOptionalAutomationWorkItemTarget(context.event)
+  const event = createAuditEvent({
+    context: createAutomationMutationContext(context, metadata),
+    eventType,
+    entity: {
+      type: target ? 'work-item' : 'automation-execution',
+      id: target ? `${target.teamId}#${target.workItemId}` : context.execution.id,
+    },
+    summary,
+    expiresAt: calculateAuditExpiresAt(new Date().toISOString(), 365),
+    metadata: {
+      ...metadata,
+      ...(target ? { teamId: target.teamId, issueId: target.workItemId } : {}),
+      automationRuleLineage: createAutomationRuleLineage(context),
+      notificationTitle: summary,
+      notificationCandidates: recipientMemberKeys.map((memberKey) => ({
+        memberKey,
+        reason: eventType === 'approval.requested' ? 'approval' : 'automation',
+      })),
+    },
+  })
+  try {
+    await createDynamoDbDocumentClient().send(new PutCommand({
+      TableName: tableName,
+      Item: event,
+      ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(eventId)',
+    }))
+  } catch (error) {
+    if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) {
+      throw new AutomationError(503, 'AutomationAuditUnavailable', 'Audit outbox write failed.', true)
+    }
+  }
+}
+
+function createAutomationMutationContext(
+  context: AutomationActionExecutionContext,
+  body: unknown,
+) {
+  return createMutationAuditContext({
+    workspaceId: context.execution.workspaceId,
+    actor: {
+      id: `automation:${context.execution.ruleId}`,
+      kind: 'service',
+      displayName: 'mukuroji automation',
+    },
+    idempotencyKey: context.idempotencyKey,
+    correlationId: context.execution.id,
+    request: {
+      method: 'AUTOMATION',
+      path: `/automation/executions/${context.execution.id}/actions/${context.actionIndex}`,
+      body,
+    },
+    source: {
+      kind: 'system',
+      requestId: context.execution.id,
+      route: `automation-lineage:${createAutomationRuleLineage(context).join(',')}`,
+    },
+  })
+}
+
+function createAutomationRuleLineage(context: AutomationActionExecutionContext) {
+  return [...(context.event.automationRuleLineage ?? []), context.execution.ruleId]
+}
+
+function readAutomationWorkItemTarget(event: AutomationEvent) {
+  const target = readOptionalAutomationWorkItemTarget(event)
+  if (!target) {
+    throw new AutomationError(400, 'AutomationTargetMissing', 'Action requires a Work Item target.')
+  }
+  return target
+}
+
+function readOptionalAutomationWorkItemTarget(event: AutomationEvent) {
+  const teamId = readAutomationMetadataText(event, 'teamId') ?? readAutomationText(event.workItem?.teamId)
+  const workItemId = readAutomationMetadataText(event, 'issueId') ??
+    readAutomationMetadataText(event, 'workItemId') ??
+    readAutomationText(event.workItem?.id)
+  return teamId && workItemId ? { teamId, workItemId } : undefined
+}
+
+function readAutomationMetadataText(event: AutomationEvent, key: string) {
+  return readAutomationText(event.metadata?.[key])
+}
+
+function readAutomationText(value: AutomationValue | undefined) {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function isAutomationPatchApplied(
+  issue: TeamIssueResponseItem,
+  patch: Record<string, AutomationValue>,
+) {
+  const current = issue as unknown as Record<string, unknown>
+  return Object.entries(patch).every(([field, expected]) =>
+    automationValuesEqual(current[field] ?? null, expected)
+  )
+}
+
+function automationValuesEqual(first: unknown, second: unknown): boolean {
+  if (Object.is(first, second)) return true
+  if (Array.isArray(first) && Array.isArray(second)) {
+    return first.length === second.length &&
+      first.every((value, index) => automationValuesEqual(value, second[index]))
+  }
+  if (isRecord(first) && isRecord(second)) {
+    const firstKeys = Object.keys(first).sort()
+    const secondKeys = Object.keys(second).sort()
+    return firstKeys.length === secondKeys.length &&
+      firstKeys.every((key, index) =>
+        key === secondKeys[index] && automationValuesEqual(first[key], second[key])
+      )
+  }
+  return false
+}
+
 async function readPlanningJson<T>(request: { json: () => Promise<unknown> }) {
   const body = await readJson<unknown>(request)
   if (!isRecord(body)) {
@@ -5683,6 +7763,7 @@ function createApiMutationContext(
   c: Context,
   principal: ProjectPrincipal,
   body: unknown,
+  idempotencyKeyOverride?: string,
 ): MutationAuditContext {
   try {
     return createRequestMutationContext(
@@ -5691,6 +7772,7 @@ function createApiMutationContext(
       principal.actorId,
       principal.userKey,
       body,
+      idempotencyKeyOverride,
     )
   } catch (error) {
     if (error instanceof TypeError || error instanceof RangeError) {
@@ -5743,8 +7825,10 @@ function createRequestMutationContext(
   actorId: string,
   displayName: string,
   body: unknown,
+  idempotencyKeyOverride?: string,
 ) {
-  const idempotencyKey = c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()
+  const idempotencyKey = idempotencyKeyOverride ??
+    (c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID())
   const correlationId = c.req.header('X-Correlation-Id')?.trim()
   const path = new URL(c.req.url).pathname
 
@@ -7030,6 +9114,40 @@ function toNotificationErrorResponse(c: Context, error: unknown) {
   return c.json({ code: error.code, message: error.message }, status)
 }
 
+function toAutomationErrorResponse(c: Context, error: unknown) {
+  if (error instanceof CognitoServiceError) {
+    return toCognitoDirectoryErrorResponse(c, error)
+  }
+  if (error instanceof WorkspaceAccessError || error instanceof ProjectDataError) {
+    return toProjectDataErrorResponse(c, error)
+  }
+  if (error instanceof WorkItemConfigurationError) {
+    return toWorkItemConfigurationErrorResponse(c, error)
+  }
+  if (error instanceof FileProofingError) {
+    return toFileProofingErrorResponse(c, error)
+  }
+  if (!(error instanceof AutomationError)) {
+    console.error(error)
+    return c.json({ message: 'Automation data is unavailable.' }, 502)
+  }
+  if (error.status >= 500) console.error(error)
+  const status = error.status === 400 ||
+    error.status === 401 ||
+    error.status === 403 ||
+    error.status === 404 ||
+    error.status === 409 ||
+    error.status === 413 ||
+    error.status === 415 ||
+    error.status === 422 ||
+    error.status === 423 ||
+    error.status === 429 ||
+    error.status === 503
+    ? error.status
+    : 502
+  return c.json({ code: error.code, message: error.message }, status)
+}
+
 function readNotificationAction(value: unknown): NotificationAction {
   if (
     value === 'mark-read' ||
@@ -7196,6 +9314,10 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
   }
 
   if (error.code === 'InvalidWorkItemRevision') {
+    return c.json({ code: error.code, message: error.message }, 400)
+  }
+
+  if (error.code === 'InvalidWorkItemArchiveUpdate') {
     return c.json({ code: error.code, message: error.message }, 400)
   }
 
@@ -9849,10 +11971,13 @@ export class DynamoDbTeamIssuesClient {
 
     try {
       const items = await this.queryTeamIssueItems(directoryId, teamId, options)
+      const visibleItems = options.includeArchived
+        ? items
+        : items.filter((item) => item.archivedAt === undefined)
 
       return {
         teamId,
-        issues: items.map(toTeamIssueResponseItem),
+        issues: visibleItems.map(toTeamIssueResponseItem),
       } satisfies TeamIssuesResponse
     } catch (error) {
       if (error instanceof ProjectDataError) {
@@ -9875,10 +12000,13 @@ export class DynamoDbTeamIssuesClient {
 
     try {
       const items = await this.queryProjectIssueItems(directoryId, projectId, options)
+      const visibleItems = options.includeArchived
+        ? items
+        : items.filter((item) => item.archivedAt === undefined)
 
       return {
         projectId,
-        issues: items.map(toTeamIssueResponseItem),
+        issues: visibleItems.map(toTeamIssueResponseItem),
       } satisfies ProjectIssuesResponse
     } catch (error) {
       if (error instanceof ProjectDataError) {
@@ -9952,12 +12080,13 @@ export class DynamoDbTeamIssuesClient {
     const workflowStatusId = readWorkflowStatusId(input.workflowStatusId)
     const statusCategory = readWorkflowStatusCategory(input.statusCategory)
     const customFieldValues = readCustomFieldValues(input.customFieldValues)
+    const idempotencyResourceId = readIdempotencyResourceId(input.idempotencyResourceId)
     const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
     const now = new Date().toISOString()
 
     try {
-      const currentIssues = await this.getTeamIssues(directoryId, teamId)
-      const issueId = createUniqueResourceId(
+      const currentIssues = await this.getTeamIssues(directoryId, teamId, { includeArchived: true })
+      const issueId = idempotencyResourceId ?? createUniqueResourceId(
         title,
         currentIssues.issues.map((issue) => issue.id),
       )
@@ -10076,6 +12205,29 @@ export class DynamoDbTeamIssuesClient {
         isAwsNamedError(error, 'TransactionCanceledException') &&
         hasTransactionConditionalFailure(error)
       ) {
+        if (idempotencyResourceId) {
+          const existing = await this.getTeamIssueDetail(
+            directoryId,
+            teamId,
+            idempotencyResourceId,
+            { consistentIssueRead: true, eventLimit: 0 },
+          ).catch(() => undefined)
+          if (existing && isMatchingIdempotentWorkItemCreate(existing.issue, {
+            actorUserId,
+            assigneeUserId,
+            assignedProjectId,
+            customFieldValues,
+            description,
+            dueDate,
+            priority,
+            statusCategory,
+            title,
+            workflowSchemaVersion,
+            workflowStatusId,
+          })) {
+            return { issue: existing.issue } satisfies CreateTeamIssueResponse
+          }
+        }
         throw createProjectDataConflictError()
       }
 
@@ -10199,6 +12351,28 @@ export class DynamoDbTeamIssuesClient {
       setExpressions.push('#priority = :priority')
     }
 
+    if ('archivedAt' in input) {
+      const archivedAt = readOptionalString(input.archivedAt, 'Issue archive timestamp is invalid.')
+      expressionAttributeNames['#archivedAt'] = 'archivedAt'
+      expressionAttributeNames['#archivedBy'] = 'archivedBy'
+
+      if (archivedAt) {
+        if (!Number.isFinite(Date.parse(archivedAt))) {
+          throw new ProjectDataError(400, 'InvalidProjectWrite', 'Issue archive timestamp is invalid.')
+        }
+        expressionAttributeValues[':archivedAt'] = new Date(archivedAt).toISOString()
+        expressionAttributeValues[':archivedBy'] = readRequiredString(
+          input.archivedBy ?? actorUserId,
+          'Issue archive actor is required.',
+        )
+        setExpressions.push('#archivedAt = :archivedAt')
+        setExpressions.push('#archivedBy = :archivedBy')
+      } else {
+        removeExpressions.push('#archivedAt')
+        removeExpressions.push('#archivedBy')
+      }
+    }
+
     const updateExpression = [
       `SET ${setExpressions.join(', ')}`,
       removeExpressions.length > 0 ? `REMOVE ${removeExpressions.join(', ')}` : undefined,
@@ -10254,6 +12428,8 @@ export class DynamoDbTeamIssuesClient {
           'customFieldValues',
           'dueDate',
           'priority',
+          'archivedAt',
+          'archivedBy',
         ]),
         metadata: {
           adapter: 'canonical-work-item',
@@ -10384,6 +12560,7 @@ export class DynamoDbTeamIssuesClient {
 
     const createdAt = new Date().toISOString()
     const body = readRequiredCommentBody(input.body)
+    const idempotencyEventId = readIdempotencyResourceId(input.idempotencyEventId)
     const item = this.createIssueEventItem({
       directoryId,
       teamId,
@@ -10393,6 +12570,7 @@ export class DynamoDbTeamIssuesClient {
       body,
       summary: 'Comment was added.',
       createdAt,
+      ...(idempotencyEventId ? { eventId: idempotencyEventId } : {}),
     })
     const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
       directoryId,
@@ -10406,7 +12584,7 @@ export class DynamoDbTeamIssuesClient {
       action: 'commented',
       occurredAt: createdAt,
       changes: createAuditFieldChanges(undefined, { body }, ['body'], ['body']),
-      metadata: { adapter: 'team-issue', teamId, commentId: item.eventId },
+      metadata: { adapter: 'team-issue', teamId, issueId, commentId: item.eventId },
     })
 
     try {
@@ -10447,6 +12625,30 @@ export class DynamoDbTeamIssuesClient {
         )
       }
     } catch (error) {
+      if (
+        idempotencyEventId &&
+        (
+          isAwsNamedError(error, 'ConditionalCheckFailedException') ||
+          hasTransactionConditionalFailure(error)
+        )
+      ) {
+        const existing = await this.documentClient.send(new GetCommand({
+          TableName: this.eventTableName,
+          Key: {
+            directoryTeamIssueId: createDirectoryTeamIssueId(directoryId, teamId, issueId),
+            eventId: idempotencyEventId,
+          },
+          ConsistentRead: true,
+        }))
+        if (
+          isTeamIssueEventItem(existing.Item) &&
+          existing.Item.eventType === 'commented' &&
+          existing.Item.actorUserId === actorUserId &&
+          existing.Item.body === body
+        ) {
+          return toCreateTeamIssueCommentResponse(existing.Item)
+        }
+      }
       if (isTransactionConditionalFailureAt(error, 0)) {
         if (!await this.hasTeamIssueItem(directoryId, teamId, issueId)) {
           throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
@@ -10466,10 +12668,7 @@ export class DynamoDbTeamIssuesClient {
       throw toProjectDataError(error)
     }
 
-    return {
-      comment: toTeamIssueCommentResponseItem(item),
-      activity: toTeamIssueActivityResponseItem(item),
-    } satisfies CreateTeamIssueCommentResponse
+    return toCreateTeamIssueCommentResponse(item)
   }
 
   private async hasTeamIssueItem(directoryId: string, teamId: string, issueId: string) {
@@ -10519,7 +12718,7 @@ export class DynamoDbTeamIssuesClient {
     teamId: string,
     options: WorkItemListReadOptions = {},
   ) {
-    const items: unknown[] = []
+    const items: TeamIssueItem[] = []
     const limit = normalizeWorkItemListReadLimit(options.limit)
     let exclusiveStartKey: Record<string, unknown> | undefined
 
@@ -10544,18 +12743,17 @@ export class DynamoDbTeamIssuesClient {
         }),
       )
 
-      items.push(...(
-        remaining === undefined
-          ? response.Items ?? []
-          : (response.Items ?? []).slice(0, remaining)
-      ))
+      const pageItems = (response.Items ?? [])
+        .map(toTeamIssueItem)
+        .filter((item) => options.includeArchived || item.archivedAt === undefined)
+      items.push(...(remaining === undefined ? pageItems : pageItems.slice(0, remaining)))
       if (limit !== undefined && items.length >= limit) {
         break
       }
       exclusiveStartKey = response.LastEvaluatedKey
     } while (exclusiveStartKey)
 
-    return items.map(toTeamIssueItem)
+    return items
   }
 
   private async queryProjectIssueItems(
@@ -10563,7 +12761,7 @@ export class DynamoDbTeamIssuesClient {
     projectId: string,
     options: WorkItemListReadOptions = {},
   ) {
-    const items: unknown[] = []
+    const items: TeamIssueItem[] = []
     const limit = normalizeWorkItemListReadLimit(options.limit)
     let exclusiveStartKey: Record<string, unknown> | undefined
 
@@ -10587,18 +12785,17 @@ export class DynamoDbTeamIssuesClient {
         }),
       )
 
-      items.push(...(
-        remaining === undefined
-          ? response.Items ?? []
-          : (response.Items ?? []).slice(0, remaining)
-      ))
+      const pageItems = (response.Items ?? [])
+        .map(toTeamIssueItem)
+        .filter((item) => options.includeArchived || item.archivedAt === undefined)
+      items.push(...(remaining === undefined ? pageItems : pageItems.slice(0, remaining)))
       if (limit !== undefined && items.length >= limit) {
         break
       }
       exclusiveStartKey = response.LastEvaluatedKey
     } while (exclusiveStartKey)
 
-    return items.map(toTeamIssueItem)
+    return items
   }
 
   private async queryTeamIssueEventItems(
@@ -10663,11 +12860,13 @@ export class DynamoDbTeamIssuesClient {
     return item
   }
 
-  private createIssueEventItem(input: Omit<TeamIssueEventItem, 'directoryTeamIssueId' | 'eventId'>) {
+  private createIssueEventItem(
+    input: Omit<TeamIssueEventItem, 'directoryTeamIssueId' | 'eventId'> & { eventId?: string },
+  ) {
     return {
       ...input,
       directoryTeamIssueId: createDirectoryTeamIssueId(input.directoryId, input.teamId, input.issueId),
-      eventId: createTeamIssueEventId(input.createdAt, input.eventType),
+      eventId: input.eventId ?? createTeamIssueEventId(input.createdAt, input.eventType),
     } satisfies TeamIssueEventItem
   }
 
@@ -11244,10 +13443,12 @@ export class DynamoDbProjectDirectoryClient {
     input: CreateProjectRequestBody,
     creator: ProjectCreatorContext,
     auditContext?: MutationAuditContext,
+    completionTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ) {
     await this.ensureLocalAuditTable()
     const names = readLocalizedNames(input)
     const tone = readProjectTone(input.tone)
+    const idempotencyResourceId = readIdempotencyResourceId(input.idempotencyResourceId)
     const creatorMemberKey = normalizeProjectMemberKey(creator.userKey)
 
     if (!creatorMemberKey) {
@@ -11259,8 +13460,8 @@ export class DynamoDbProjectDirectoryClient {
     }
 
     try {
-      const items = await this.readValidDirectoryItems(directoryId)
-      const team = items.find((item) =>
+      const items = await this.readValidDirectoryItems(directoryId, Boolean(idempotencyResourceId))
+      const team = items.find((item): item is ProjectDirectoryTeamItem =>
         item.entryType === 'team' && item.teamId === teamId && isActiveDirectoryItem(item),
       )
 
@@ -11268,7 +13469,70 @@ export class DynamoDbProjectDirectoryClient {
         throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
       }
 
-      const projectId = createUniqueResourceId(
+      if (idempotencyResourceId) {
+        const existingProject = items.find((item): item is ProjectDirectoryProjectItem =>
+          item.entryType === 'project' && item.projectId === idempotencyResourceId,
+        )
+        if (existingProject) {
+          if (
+            existingProject.teamId !== teamId ||
+            existingProject.nameJa !== names.nameJa ||
+            existingProject.nameEn !== names.nameEn ||
+            (existingProject.tone ?? 'blue') !== tone ||
+            existingProject.archivedAt
+          ) {
+            throw createProjectDataConflictError()
+          }
+          if (completionTransactItems.length > 0) {
+            try {
+              await this.documentClient.send(new TransactWriteCommand({
+                TransactItems: [
+                  {
+                    ConditionCheck: {
+                      TableName: this.tableName,
+                      Key: { directoryId, entryKey: existingProject.entryKey },
+                      ConditionExpression:
+                        '#entryType = :entryType AND #projectId = :projectId AND #teamId = :teamId AND #nameJa = :nameJa AND #nameEn = :nameEn AND #tone = :tone AND attribute_not_exists(#archivedAt)',
+                      ExpressionAttributeNames: {
+                        '#archivedAt': 'archivedAt',
+                        '#entryType': 'entryType',
+                        '#nameEn': 'nameEn',
+                        '#nameJa': 'nameJa',
+                        '#projectId': 'projectId',
+                        '#teamId': 'teamId',
+                        '#tone': 'tone',
+                      },
+                      ExpressionAttributeValues: {
+                        ':entryType': 'project',
+                        ':nameEn': names.nameEn,
+                        ':nameJa': names.nameJa,
+                        ':projectId': idempotencyResourceId,
+                        ':teamId': teamId,
+                        ':tone': tone,
+                      },
+                    },
+                  },
+                  ...completionTransactItems,
+                ],
+              }))
+            } catch (error) {
+              if (hasTransactionConditionalFailure(error)) {
+                throw createProjectDataConflictError()
+              }
+              throw error
+            }
+          }
+          return {
+            project: {
+              id: existingProject.projectId,
+              name: existingProject.nameJa,
+              tone: existingProject.tone,
+            },
+          } satisfies CreateProjectResponse
+        }
+      }
+
+      const projectId = idempotencyResourceId ?? createUniqueResourceId(
         names.nameJa,
         items
           .filter((item) => item.entryType === 'project')
@@ -11352,6 +13616,7 @@ export class DynamoDbProjectDirectoryClient {
                 }),
                 metadata: { kind: 'project', projectId, teamId },
               }),
+              ...completionTransactItems,
             ],
           }),
         )
@@ -12252,6 +14517,16 @@ function createWorkItemConfigurationClient() {
   )
 }
 
+function createAutomationClient() {
+  const dynamoDbClient = createDynamoDbClient()
+  return new DynamoDbAutomationClient(
+    getAutomationTableName(),
+    createDynamoDbDocumentClient(dynamoDbClient),
+    dynamoDbClient,
+    shouldBootstrapLocalDynamoDb(),
+  )
+}
+
 function createPlanningClient() {
   const dynamoDbClient = createDynamoDbClient()
   return new DynamoDbPlanningClient(
@@ -12799,6 +15074,11 @@ function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     issue.description = item.description
   }
 
+  if (item.archivedAt) {
+    issue.archivedAt = item.archivedAt
+    issue.archivedBy = item.archivedBy
+  }
+
   return issue
 }
 
@@ -12818,6 +15098,15 @@ function toTeamIssueActivityResponseItem(value: TeamIssueEventItem): TeamIssueAc
     actorUserId: value.actorUserId,
     summary: value.summary,
     createdAt: value.createdAt,
+  }
+}
+
+function toCreateTeamIssueCommentResponse(
+  value: TeamIssueEventItem,
+): CreateTeamIssueCommentResponse {
+  return {
+    comment: toTeamIssueCommentResponseItem(value),
+    activity: toTeamIssueActivityResponseItem(value),
   }
 }
 
@@ -13401,6 +15690,16 @@ function normalizeTeamIssueInput<TInput extends CreateTeamIssueRequestBody | Upd
   }
 }
 
+function rejectInternalWorkItemUpdateFields(input: PublicUpdateTeamIssueRequestBody) {
+  if ('archivedAt' in input || 'archivedBy' in input) {
+    throw new ProjectDataError(
+      400,
+      'InvalidWorkItemArchiveUpdate',
+      'Work Item archive fields cannot be updated through this endpoint.',
+    )
+  }
+}
+
 async function prepareConfiguredCreateWorkItem(
   directoryId: string,
   teamId: string,
@@ -13659,6 +15958,12 @@ function getWorkItemConfigurationTableName() {
     'mukuroji-work-item-configuration-local'
 }
 
+function getAutomationTableName() {
+  return getEnv('AUTOMATION_TABLE_NAME') ??
+    getEnv('MUKUROJI_AUTOMATION_TABLE') ??
+    'mukuroji-automation-local'
+}
+
 function readAssignedProjectId(value: unknown) {
   if (value === undefined) {
     return undefined
@@ -13675,6 +15980,50 @@ function readAssignedProjectId(value: unknown) {
   const assignedProjectId = value.trim()
 
   return assignedProjectId || null
+}
+
+function readIdempotencyResourceId(value: unknown) {
+  if (value === undefined) return undefined
+  if (
+    typeof value !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Idempotency resource ID is invalid.',
+    )
+  }
+  return value
+}
+
+function isMatchingIdempotentWorkItemCreate(
+  issue: TeamIssueResponseItem,
+  expected: {
+    actorUserId: string
+    assigneeUserId: string
+    assignedProjectId: string | null | undefined
+    customFieldValues: Record<string, CustomFieldValue>
+    description: string | undefined
+    dueDate: string
+    priority: ProjectTaskPriority
+    statusCategory: WorkflowStatusCategory
+    title: string
+    workflowSchemaVersion: typeof WORK_ITEM_CONFIGURATION_SCHEMA_VERSION
+    workflowStatusId: string
+  },
+) {
+  return issue.creatorMemberKey === expected.actorUserId &&
+    issue.assigneeUserId === expected.assigneeUserId &&
+    issue.assignedProjectId === (expected.assignedProjectId ?? undefined) &&
+    customFieldValueRecordsEqual(issue.customFieldValues, expected.customFieldValues) &&
+    issue.description === expected.description &&
+    issue.dueDate === expected.dueDate &&
+    issue.priority === expected.priority &&
+    issue.statusCategory === expected.statusCategory &&
+    issue.title === expected.title &&
+    issue.workflowSchemaVersion === expected.workflowSchemaVersion &&
+    issue.workflowStatusId === expected.workflowStatusId
 }
 
 function readOptionalString(value: unknown, message: string) {
@@ -14132,6 +16481,10 @@ function createWorkItemNotificationCandidates(
     candidates.push({ memberKey: after.assigneeUserId, reason: 'due-date-change' })
   }
 
+  if (before.archivedAt !== after.archivedAt) {
+    candidates.push({ memberKey: after.assigneeUserId, reason: 'archive-change' })
+  }
+
   return candidates
 }
 
@@ -14139,6 +16492,10 @@ function createWorkItemNotificationCandidates(
  * Work Item 更新通知と activity に使う最も具体的な概要を選びます。
  */
 function createWorkItemNotificationSummary(before: TeamIssueItem, after: TeamIssueItem) {
+  if (before.archivedAt !== after.archivedAt) {
+    return after.archivedAt ? 'Work Item was archived.' : 'Work Item was restored.'
+  }
+
   if (before.assigneeUserId !== after.assigneeUserId) {
     return 'Work Item assignment changed.'
   }
@@ -14288,6 +16645,8 @@ notifications = new DynamoDbNotificationsClient()
 workspaceSearch = new DynamoDbWorkspaceSearchClient()
 workspaceSearchProjectionEnabled = shouldEnableWorkspaceSearchProjection()
 workItemConfigurations = createWorkItemConfigurationClient()
+automation = createAutomationClient()
+automationInboundWebhookSecrets = new SecretsManagerAutomationInboundWebhookSecretStore()
 planning = createPlanningClient()
 
 /**
@@ -14307,6 +16666,8 @@ export function configureApiClientsForTest(clients: {
   notifications?: NotificationClient
   workspaceSearch?: WorkspaceSearchClient
   workItemConfigurations?: WorkItemConfigurationClient
+  automation?: AutomationClient
+  automationInboundWebhookSecrets?: AutomationInboundWebhookSecretStore
   planning?: PlanningClient
 }) {
   cognito = clients.cognito ?? cognito
@@ -14323,6 +16684,9 @@ export function configureApiClientsForTest(clients: {
   workspaceSearch = clients.workspaceSearch ?? workspaceSearch
   if (clients.workspaceSearch) workspaceSearchProjectionEnabled = true
   workItemConfigurations = clients.workItemConfigurations ?? workItemConfigurations
+  automation = clients.automation ?? automation
+  automationInboundWebhookSecrets = clients.automationInboundWebhookSecrets ??
+    automationInboundWebhookSecrets
   planning = clients.planning ?? planning
 }
 
@@ -14344,6 +16708,8 @@ export function resetApiClientsForTest() {
   workspaceSearch = new DynamoDbWorkspaceSearchClient()
   workspaceSearchProjectionEnabled = shouldEnableWorkspaceSearchProjection()
   workItemConfigurations = createDefaultWorkItemConfigurationClient()
+  automation = createAutomationClient()
+  automationInboundWebhookSecrets = new SecretsManagerAutomationInboundWebhookSecretStore()
   planning = new InMemoryPlanningClient()
 }
 
