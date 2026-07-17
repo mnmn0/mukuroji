@@ -21,6 +21,7 @@ import {
   evaluateAutomationCondition,
   getRecurringOccurrences,
   matchesAutomationTrigger,
+  normalizeAutomationActionFailure,
   previewBulkOperation,
   retryBulkOperation,
   selectCatchUpOccurrences,
@@ -289,6 +290,23 @@ function createIdempotencyDocumentClient() {
         for (const put of puts) items.set(itemKey(put.Item), structuredClone(put.Item))
         return {}
       }
+      if (
+        command.input.Key &&
+        command.input.ConditionExpression === '#revision = :expectedRevision'
+      ) {
+        const key = command.input.Key as Record<string, unknown>
+        const existing = items.get(itemKey(key))
+        const expectedRevision = (
+          command.input.ExpressionAttributeValues as Record<string, unknown>
+        )[':expectedRevision']
+        if (existing?.revision !== expectedRevision) {
+          throw Object.assign(new Error('ConditionalCheckFailed'), {
+            name: 'ConditionalCheckFailedException',
+          })
+        }
+        items.delete(itemKey(key))
+        return {}
+      }
       if (command.input.Key) {
         const key = command.input.Key as Record<string, unknown>
         const item = items.get(itemKey(key))
@@ -366,6 +384,13 @@ describe('automation management create idempotency', () => {
     }
 
     const recurring = await client.createRecurringWork('workspace-1', recurringInput, 'shared-key')
+    expect(await client.createRecurringWork('workspace-1', recurringInput, 'shared-key')).toEqual(recurring)
+    const disabledTemplate = await client.updateTemplate('workspace-1', template.id, {
+      expectedRevision: template.revision,
+      enabled: false,
+    })
+    expect(await client.createRecurringWork('workspace-1', recurringInput, 'shared-key')).toEqual(recurring)
+    await client.deleteTemplate('workspace-1', template.id, disabledTemplate.revision)
     expect(await client.createRecurringWork('workspace-1', recurringInput, 'shared-key')).toEqual(recurring)
     expect(recurring.id).not.toBe(template.id)
     expect((await client.createTemplate('workspace-2', templateInput, 'shared-key')).id).not.toBe(template.id)
@@ -918,6 +943,41 @@ describe('automation execution safety', () => {
       .toMatchObject({ status: 'dead-letter', nextRetryAt: undefined })
   })
 
+  test('redacts untrusted action failure details before they reach durable history', () => {
+    const secret = 'outbound-secret-value'
+    const awsFailure = Object.assign(new Error(`Request exposed ${secret}.`), {
+      name: 'ProvisionedThroughputExceededException',
+      $retryable: { throttling: true },
+    })
+    const normalizedAwsFailure = normalizeAutomationActionFailure(awsFailure)
+
+    expect(normalizedAwsFailure).toEqual({
+      code: 'ProvisionedThroughputExceededException',
+      message: 'Automation action failed.',
+      retryable: true,
+    })
+    expect(JSON.stringify(normalizedAwsFailure)).not.toContain(secret)
+
+    const untrustedCodeFailure = normalizeAutomationActionFailure(Object.assign(
+      new Error(`Adapter exposed ${secret}.`),
+      { code: secret },
+    ))
+    expect(untrustedCodeFailure).toEqual({
+      code: 'AutomationActionFailed',
+      message: 'Automation action failed.',
+      retryable: false,
+    })
+    expect(JSON.stringify(untrustedCodeFailure)).not.toContain(secret)
+
+    expect(normalizeAutomationActionFailure(
+      new AutomationError(409, 'TrustedAutomationFailure', 'Safe domain message.'),
+    )).toEqual({
+      code: 'TrustedAutomationFailure',
+      message: 'Safe domain message.',
+      retryable: false,
+    })
+  })
+
   test('lists workspace execution history newest-first through its sparse index', async () => {
     const commands: Array<{ input: Record<string, unknown> }> = []
     const lastEvaluatedKey = {
@@ -950,6 +1010,130 @@ describe('automation execution safety', () => {
     })
     expect(commands[0]?.input).not.toHaveProperty('FilterExpression')
     expect(commands[1]?.input).toMatchObject({ ExclusiveStartKey: lastEvaluatedKey })
+  })
+
+  test('fills status-filtered execution pages across DynamoDB evaluated pages', async () => {
+    const commands: Array<{ input: Record<string, unknown> }> = []
+    const firstCursor = {
+      scopeKey: 'workspace-1#automation',
+      recordKey: 'EXECUTION#evaluated-1',
+      startedAtExecutionId: '2026-07-16T03:00:00.000Z#evaluated-1',
+    }
+    const secondCursor = {
+      scopeKey: 'workspace-1#automation',
+      recordKey: 'EXECUTION#evaluated-2',
+      startedAtExecutionId: '2026-07-16T02:00:00.000Z#evaluated-2',
+    }
+    const thirdCursor = {
+      scopeKey: 'workspace-1#automation',
+      recordKey: 'EXECUTION#succeeded-2',
+      startedAtExecutionId: '2026-07-16T01:00:00.000Z#succeeded-2',
+    }
+    const storageItem = (id: string, startedAt: string) => ({
+      scopeKey: 'workspace-1#automation',
+      recordKey: `EXECUTION#${id}`,
+      entryType: 'execution',
+      ...createExecution({
+        id,
+        status: 'succeeded',
+        startedAt,
+        completedAt: startedAt,
+        nextRetryAt: undefined,
+        retryable: false,
+      }),
+      startedAtExecutionId: `${startedAt}#${id}`,
+    })
+    const documentClient = {
+      async send(command: { input: Record<string, unknown> }) {
+        commands.push(command)
+        const cursor = command.input.ExclusiveStartKey
+        if (!cursor) {
+          return {
+            Items: [storageItem('succeeded-1', '2026-07-16T04:00:00.000Z')],
+            LastEvaluatedKey: firstCursor,
+          }
+        }
+        if (cursor === firstCursor) {
+          return { Items: [], LastEvaluatedKey: secondCursor }
+        }
+        if (cursor === secondCursor) {
+          return {
+            Items: [storageItem('succeeded-2', '2026-07-16T01:00:00.000Z')],
+            LastEvaluatedKey: thirdCursor,
+          }
+        }
+        return {
+          Items: [storageItem('succeeded-3', '2026-07-16T00:00:00.000Z')],
+        }
+      },
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
+    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+
+    const firstPage = await client.listExecutions({
+      workspaceId: 'workspace-1',
+      status: 'succeeded',
+      limit: 2,
+    })
+    const secondPage = await client.listExecutions({
+      workspaceId: 'workspace-1',
+      status: 'succeeded',
+      limit: 2,
+      cursor: firstPage.nextCursor,
+    })
+
+    expect(firstPage.executions.map((execution) => execution.id)).toEqual([
+      'succeeded-1',
+      'succeeded-2',
+    ])
+    expect(firstPage.nextCursor).toBeDefined()
+    expect(secondPage.executions.map((execution) => execution.id)).toEqual(['succeeded-3'])
+    expect(secondPage.nextCursor).toBeUndefined()
+    expect(commands.map((command) => command.input.Limit)).toEqual([2, 1, 1, 2])
+    expect(commands[3]?.input.ExclusiveStartKey).toEqual(thirdCursor)
+    for (const command of commands) {
+      expect(command.input).toMatchObject({
+        FilterExpression: '#status = :status',
+        ExpressionAttributeNames: {
+          '#scopeKey': 'scopeKey',
+          '#status': 'status',
+        },
+        ExpressionAttributeValues: {
+          ':scopeKey': 'workspace-1#automation',
+          ':status': 'succeeded',
+        },
+      })
+    }
+  })
+
+  test('bounds status-filtered execution reads and returns a continuation cursor', async () => {
+    const commands: Array<{ input: Record<string, unknown> }> = []
+    const documentClient = {
+      async send(command: { input: Record<string, unknown> }) {
+        commands.push(command)
+        const page = commands.length
+        return {
+          Items: [],
+          ScannedCount: command.input.Limit,
+          LastEvaluatedKey: {
+            scopeKey: 'workspace-1#automation',
+            recordKey: `EXECUTION#evaluated-${page}`,
+            startedAtExecutionId: `2026-07-16T00:00:0${page}.000Z#evaluated-${page}`,
+          },
+        }
+      },
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
+    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+
+    const page = await client.listExecutions({
+      workspaceId: 'workspace-1',
+      status: 'failed',
+      limit: 2,
+    })
+
+    expect(page.executions).toEqual([])
+    expect(page.nextCursor).toBeDefined()
+    expect(commands).toHaveLength(5)
+    expect(commands.map((command) => command.input.Limit)).toEqual([2, 2, 2, 2, 2])
   })
 
   test('creates and validates the local workspace execution index', async () => {

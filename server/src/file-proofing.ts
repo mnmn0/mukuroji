@@ -878,7 +878,9 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     const approvals = approvalItems.filter(isStoredApprovalItem)
       .filter((approval) => {
         const fileSubject = readFileApprovalSubject(approval)
-        return !fileSubject || visibleFileIds.has(fileSubject.fileId)
+        return fileSubject
+          ? visibleFileIds.has(fileSubject.fileId)
+          : !actor.guest
       })
       .map((approval) => toApprovalRequest(approval, actor))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
@@ -1984,7 +1986,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
           return undefined
         }
         const fileSubject = readFileApprovalSubject(approval)
-        if (!fileSubject) return approval
+        if (!fileSubject) return actor.guest ? undefined : approval
         const file = await this.getFile(item.sourceScopeKey, fileSubject.fileId, false)
         return file && !file.deletedAt && (!actor.guest || file.guestAccess) ? approval : undefined
       }))
@@ -2763,14 +2765,12 @@ function toApprovalRequest(item: StoredApprovalItem, actor: FileProofingActor): 
   )
   const fileSubject = readFileApprovalSubject(item)
   const requestedByKind = readApprovalRequesterKind(item)
-  return {
+  const approval = {
     id: item.id,
     teamId: item.teamId,
     issueId: item.issueId,
     ...(item.projectId ? { projectId: item.projectId } : {}),
-    subjectType: fileSubject ? 'file-version' : 'work-item',
     revision: item.revision,
-    ...(fileSubject ? { fileId: fileSubject.fileId, versionId: fileSubject.versionId } : {}),
     status: item.status,
     reviewers: item.reviewers,
     dueAt: item.dueAt,
@@ -2789,6 +2789,17 @@ function toApprovalRequest(item: StoredApprovalItem, actor: FileProofingActor): 
       ),
     },
   }
+  return fileSubject
+    ? {
+        ...approval,
+        subjectType: 'file-version',
+        fileId: fileSubject.fileId,
+        versionId: fileSubject.versionId,
+      }
+    : {
+        ...approval,
+        subjectType: 'work-item',
+      }
 }
 
 /** Stored file 内の version を取得します。 */

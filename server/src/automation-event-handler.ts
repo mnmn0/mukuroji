@@ -78,7 +78,13 @@ export function parseAutomationStreamRecord(record: DynamoStreamRecord) {
   const eventType = readText(value.eventType)
   const workspaceId = readText(value.workspaceId) ?? readText(value.directoryId)
   const occurredAt = readText(value.occurredAt)
-  if (!eventId || !eventType || !workspaceId || !occurredAt) {
+  if (
+    !eventId ||
+    !eventType ||
+    !workspaceId ||
+    !occurredAt ||
+    Number.isNaN(Date.parse(occurredAt))
+  ) {
     throw new AutomationError(
       400,
       'AutomationOutboxEventMalformed',

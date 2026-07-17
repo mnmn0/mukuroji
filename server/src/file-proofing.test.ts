@@ -1128,6 +1128,80 @@ describe('file proofing domain', () => {
     expect(guestFiles.files.map((file) => file.name)).toEqual(['guest.png'])
   })
 
+  test('hides Work Item approvals from guests while preserving shared File approvals', async () => {
+    const { client, objectClient } = createClient()
+    const session = await client.createUpload(
+      scope,
+      manager,
+      {
+        contentType: 'image/png',
+        fileName: 'guest-approval.png',
+        sizeBytes: 10,
+        guestAccess: true,
+      },
+      createAuditContext('guest-approval-file'),
+    )
+    objectClient.objects.set(objectClient.lastObjectKey!, {
+      contentType: 'image/png',
+      objectVersionId: 'immutable-guest-approval-version-1',
+      scanStatus: 'available',
+      sizeBytes: 10,
+    })
+    await client.completeUpload(
+      scope,
+      manager,
+      session.file.id,
+      session.version.id,
+      createAuditContext('guest-approval-completion'),
+    )
+    const fileApproval = await client.createApproval(
+      scope,
+      manager,
+      {
+        dueAt: '2099-07-20T00:00:00.000Z',
+        fileId: session.file.id,
+        reviewerMemberKeys: ['guest@example.com'],
+        versionId: session.version.id,
+      },
+      createAuditContext('guest-file-approval'),
+    )
+    const workItemApproval = await client.createWorkItemApproval(
+      scope,
+      manager,
+      {
+        dueAt: '2099-07-20T00:00:00.000Z',
+        reviewerMemberKeys: ['guest@example.com'],
+      },
+      createAuditContext('guest-work-item-approval'),
+    )
+
+    const guestActor: FileProofingActor = {
+      memberKey: 'guest@example.com',
+      guest: true,
+      canWrite: false,
+      canManage: false,
+    }
+    const guestCollection = await client.list(scope, guestActor)
+
+    expect(guestCollection.approvals).toEqual([
+      expect.objectContaining({
+        id: fileApproval.id,
+        subjectType: 'file-version',
+      }),
+    ])
+    expect(guestCollection.approvals.map((approval) => approval.id))
+      .not.toContain(workItemApproval.id)
+    const guestInbox = await client.listReviewerApprovals(scope.workspaceId, guestActor)
+    expect(guestInbox.approvals).toEqual([
+      expect.objectContaining({
+        id: fileApproval.id,
+        subjectType: 'file-version',
+      }),
+    ])
+    expect(guestInbox.approvals.map((approval) => approval.id))
+      .not.toContain(workItemApproval.id)
+  })
+
   test('keeps a downgraded guest uploader from deleting its shared file', async () => {
     const { client } = createClient()
     const session = await client.createUpload(

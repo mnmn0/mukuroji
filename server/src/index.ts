@@ -32,6 +32,7 @@ import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   type AutomationAction,
+  type AutomationExecutionStatus,
   type AutomationTemplateApplication,
   type AutomationValue,
   type BulkOperation,
@@ -3318,19 +3319,13 @@ app.patch('/api/recurring-work/:recurringWorkId', async (c) => {
 app.get('/api/automation/executions', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c)
-    const page = await automation.listExecutions({
+    return c.json(await automation.listExecutions({
       workspaceId: principal.directoryId,
       ruleId: c.req.query('ruleId'),
+      status: readAutomationExecutionStatus(c.req.query('status')),
       cursor: c.req.query('cursor'),
       limit: readAutomationPageLimit(c.req.query('limit')),
-    })
-    const status = c.req.query('status')
-    return c.json({
-      ...page,
-      executions: status
-        ? page.executions.filter((execution) => execution.status === status)
-        : page.executions,
-    })
+    }))
   } catch (error) {
     return toAutomationErrorResponse(c, error)
   }
@@ -6422,6 +6417,21 @@ function readAutomationPageLimit(value: string | undefined) {
   return limit
 }
 
+function readAutomationExecutionStatus(
+  value: string | undefined,
+): AutomationExecutionStatus | undefined {
+  if (value === undefined) return undefined
+  if (
+    value === 'pending' ||
+    value === 'running' ||
+    value === 'succeeded' ||
+    value === 'failed' ||
+    value === 'dead-letter' ||
+    value === 'skipped'
+  ) return value
+  throw new AutomationError(400, 'InvalidAutomationQuery', 'Automation execution status is invalid.')
+}
+
 function readWorkspaceBulkOperationRequest(
   value: Record<string, unknown>,
   workspaceId: string,
@@ -7331,6 +7341,7 @@ async function executeAutomationWorkItemUpdate(
       readTeamIssueAssigneeUserId(configuredBody),
     )
   }
+  const mutationContext = createAutomationMutationContext(context, patch)
   let updatedIssue: TeamIssueResponseItem
   try {
     const response = await teamIssues.updateTeamIssue(
@@ -7339,7 +7350,7 @@ async function executeAutomationWorkItemUpdate(
       target.workItemId,
       configuredBody,
       `automation:${context.execution.ruleId}`,
-      createAutomationMutationContext(context, patch),
+      mutationContext,
     )
     updatedIssue = response.issue
   } catch (error) {
@@ -7349,7 +7360,19 @@ async function executeAutomationWorkItemUpdate(
       target.workItemId,
       { consistentIssueRead: true, eventLimit: 0 },
     ).catch(() => undefined)
-    if (!current || !isAutomationPatchApplied(current.issue, patch)) throw error
+    const resultingRevision = detail.issue.revision + 1
+    if (
+      !current ||
+      current.issue.revision !== resultingRevision ||
+      !isAutomationPatchApplied(current.issue, patch) ||
+      !await hasAutomationMutationAuditProof(
+        mutationContext,
+        target.teamId,
+        target.workItemId,
+        detail.issue.revision,
+        resultingRevision,
+      )
+    ) throw error
     updatedIssue = current.issue
   }
   await projectWorkItemSearchDocumentBestEffort(
@@ -7357,6 +7380,45 @@ async function executeAutomationWorkItemUpdate(
     updatedIssue,
     'automation Work Item update',
   )
+}
+
+async function hasAutomationMutationAuditProof(
+  context: MutationAuditContext,
+  teamId: string,
+  workItemId: string,
+  beforeRevision: number,
+  afterRevision: number,
+) {
+  const entityId = createTeamIssueAuditEntityId(teamId, workItemId)
+  const eventId = createAuditEventId(
+    context,
+    'work-item.updated',
+    { type: 'work-item', id: entityId },
+  )
+  const event = await auditEvents.getEvent(context.workspaceId, eventId)
+  return event?.directoryId === context.workspaceId &&
+    event.workspaceId === context.workspaceId &&
+    event.eventType === 'work-item.updated' &&
+    event.action === 'updated' &&
+    event.idempotencyKeyHash === context.idempotencyKeyHash &&
+    event.requestFingerprint === context.requestFingerprint &&
+    event.actor.id === context.actor.id &&
+    event.actor.kind === 'service' &&
+    event.actorUserId === context.actor.id &&
+    event.entity.type === 'work-item' &&
+    event.entity.id === entityId &&
+    event.entityType === 'work-item' &&
+    event.entityId === entityId &&
+    event.target.type === 'work-item' &&
+    event.target.id === entityId &&
+    event.targetType === 'work-item' &&
+    event.targetId === entityId &&
+    event.metadata?.adapter === 'canonical-work-item' &&
+    event.metadata.actorMemberKey === context.actor.id &&
+    event.metadata.teamId === teamId &&
+    event.metadata.issueId === workItemId &&
+    event.metadata.beforeRevision === beforeRevision &&
+    event.metadata.afterRevision === afterRevision
 }
 
 async function executeAutomationWorkItemCreate(
@@ -9053,6 +9115,9 @@ function toAutomationErrorResponse(c: Context, error: unknown) {
   }
   if (error instanceof WorkItemConfigurationError) {
     return toWorkItemConfigurationErrorResponse(c, error)
+  }
+  if (error instanceof FileProofingError) {
+    return toFileProofingErrorResponse(c, error)
   }
   if (!(error instanceof AutomationError)) {
     console.error(error)
@@ -12008,7 +12073,7 @@ export class DynamoDbTeamIssuesClient {
     const now = new Date().toISOString()
 
     try {
-      const currentIssues = await this.getTeamIssues(directoryId, teamId)
+      const currentIssues = await this.getTeamIssues(directoryId, teamId, { includeArchived: true })
       const issueId = idempotencyResourceId ?? createUniqueResourceId(
         title,
         currentIssues.issues.map((issue) => issue.id),
@@ -12644,7 +12709,7 @@ export class DynamoDbTeamIssuesClient {
     teamId: string,
     options: WorkItemListReadOptions = {},
   ) {
-    const items: unknown[] = []
+    const items: TeamIssueItem[] = []
     const limit = normalizeWorkItemListReadLimit(options.limit)
     let exclusiveStartKey: Record<string, unknown> | undefined
 
@@ -12669,18 +12734,17 @@ export class DynamoDbTeamIssuesClient {
         }),
       )
 
-      items.push(...(
-        remaining === undefined
-          ? response.Items ?? []
-          : (response.Items ?? []).slice(0, remaining)
-      ))
+      const pageItems = (response.Items ?? [])
+        .map(toTeamIssueItem)
+        .filter((item) => options.includeArchived || item.archivedAt === undefined)
+      items.push(...(remaining === undefined ? pageItems : pageItems.slice(0, remaining)))
       if (limit !== undefined && items.length >= limit) {
         break
       }
       exclusiveStartKey = response.LastEvaluatedKey
     } while (exclusiveStartKey)
 
-    return items.map(toTeamIssueItem)
+    return items
   }
 
   private async queryProjectIssueItems(
@@ -12688,7 +12752,7 @@ export class DynamoDbTeamIssuesClient {
     projectId: string,
     options: WorkItemListReadOptions = {},
   ) {
-    const items: unknown[] = []
+    const items: TeamIssueItem[] = []
     const limit = normalizeWorkItemListReadLimit(options.limit)
     let exclusiveStartKey: Record<string, unknown> | undefined
 
@@ -12712,18 +12776,17 @@ export class DynamoDbTeamIssuesClient {
         }),
       )
 
-      items.push(...(
-        remaining === undefined
-          ? response.Items ?? []
-          : (response.Items ?? []).slice(0, remaining)
-      ))
+      const pageItems = (response.Items ?? [])
+        .map(toTeamIssueItem)
+        .filter((item) => options.includeArchived || item.archivedAt === undefined)
+      items.push(...(remaining === undefined ? pageItems : pageItems.slice(0, remaining)))
       if (limit !== undefined && items.length >= limit) {
         break
       }
       exclusiveStartKey = response.LastEvaluatedKey
     } while (exclusiveStartKey)
 
-    return items.map(toTeamIssueItem)
+    return items
   }
 
   private async queryTeamIssueEventItems(

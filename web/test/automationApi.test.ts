@@ -7,6 +7,7 @@ import {
   type CreateRecurringWorkInput,
 } from '@mukuroji/contracts'
 import {
+  AutomationApiError,
   applyAutomationTemplate,
   createAutomationInboundWebhookEndpoint,
   createAutomationRule,
@@ -291,6 +292,31 @@ describe('automation API', () => {
       })
     }
     expect(JSON.parse(String(requests[7]?.init.body))).toEqual({ expectedRevision: 8 })
+  })
+
+  test('accepts an empty response body but rejects malformed non-empty JSON', async () => {
+    globalThis.fetch = (async () => new Response(null, { status: 200 })) as typeof fetch
+    await expect(getAutomationRules('access-token')).resolves.toEqual([])
+
+    globalThis.fetch = (async () =>
+      new Response('{"rules":', {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })) as typeof fetch
+
+    let failure: unknown
+    try {
+      await getAutomationRules('access-token')
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).toBeInstanceOf(AutomationApiError)
+    expect(failure).toMatchObject({
+      code: 'InvalidAutomationResponse',
+      message: 'Automation API returned invalid JSON.',
+      status: 200,
+    })
   })
 })
 

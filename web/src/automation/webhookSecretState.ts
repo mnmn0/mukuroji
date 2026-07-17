@@ -17,6 +17,8 @@ export type AutomationWebhookSecretAction =
       type: 'reveal'
       /** Secret を含む一回限り response です。 */
       response: AutomationInboundWebhookSecretResponse
+      /** Response 完了時点で参照専用かどうかです。 */
+      readOnly: boolean
     }
   | {
       /** 利用者が secret を明示的に破棄する action です。 */
@@ -28,6 +30,12 @@ export type AutomationWebhookSecretAction =
       /** Revoke した endpoint ID です。 */
       endpointId: string
     }
+  | {
+      /** Access mode の変更に応じて secret を破棄する action です。 */
+      type: 'access-change'
+      /** 参照専用へ遷移したかどうかです。 */
+      readOnly: boolean
+    }
 
 /** Create/rotate、dismiss、revoke に応じて one-time secret state を更新します。 */
 export function reduceAutomationWebhookSecret(
@@ -36,6 +44,7 @@ export function reduceAutomationWebhookSecret(
 ): AutomationWebhookOneTimeSecret | undefined {
   switch (action.type) {
     case 'reveal':
+      if (action.readOnly) return undefined
       return {
         endpointId: action.response.endpoint.id,
         endpointName: action.response.endpoint.name,
@@ -45,5 +54,7 @@ export function reduceAutomationWebhookSecret(
       return undefined
     case 'revoke':
       return current?.endpointId === action.endpointId ? undefined : current
+    case 'access-change':
+      return action.readOnly ? undefined : current
   }
 }

@@ -77,6 +77,64 @@ afterEach(() => {
   resetApiClientsForTest()
 })
 
+test('passes execution status into persistence pagination and rejects unknown statuses', async () => {
+  configureFakeProjectClients(true)
+  const queries: Array<Parameters<AutomationClient['listExecutions']>[0]> = []
+  configureApiClientsForTest({
+    automation: {
+      async listExecutions(query: Parameters<AutomationClient['listExecutions']>[0]) {
+        queries.push(query)
+        return { executions: [] }
+      },
+    } as unknown as AutomationClient,
+  })
+
+  const response = await app.request(
+    '/api/automation/executions?status=failed&limit=25&cursor=cursor-1',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(response.status).toBe(200)
+  expect(queries).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    ruleId: undefined,
+    status: 'failed',
+    cursor: 'cursor-1',
+    limit: 25,
+  }])
+
+  const invalid = await app.request(
+    '/api/automation/executions?status=unknown',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(invalid.status).toBe(400)
+  expect(await invalid.json()).toMatchObject({ code: 'InvalidAutomationQuery' })
+  expect(queries).toHaveLength(1)
+})
+
+test('preserves FileProofingError status and code in Automation API responses', async () => {
+  configureFakeProjectClients(true)
+  configureApiClientsForTest({
+    automation: {
+      async listRules() {
+        throw new FileProofingError(
+          409,
+          'ApprovalRevisionConflict',
+          'Approval changed. Reload and try again.',
+        )
+      },
+    } as unknown as AutomationClient,
+  })
+
+  const response = await app.request('/api/automation/rules', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'ApprovalRevisionConflict',
+    message: 'Approval changed. Reload and try again.',
+  })
+})
+
 test('derives stable and item-scoped audit idempotency keys for bulk apply', () => {
   const request = {
     workspaceId: 'workspace-1',
@@ -850,6 +908,122 @@ test('compensates a late secret provision after an administrator aborts provisio
   })
   expect(lostWriteResponse.status).toBe(503)
   expect(deletedSecrets).toBe(2)
+})
+
+test('recovers an automation Work Item update only from its deterministic audit proof', async () => {
+  const runResponseLoss = async (withAuditProof: boolean) => {
+    configureFakeProjectClients(true, {
+      teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+    })
+    let currentIssue = createBulkRecoveryIssue()
+    let auditProof: ReturnType<typeof createAuditEvent> | undefined
+    let auditProofReads = 0
+    configureApiClientsForTest({
+      teamIssues: {
+        async getTeamIssueDetail() {
+          return {
+            issue: structuredClone(currentIssue),
+            comments: [],
+            activity: [],
+          }
+        },
+        async updateTeamIssue(
+          _directoryId,
+          teamId,
+          issueId,
+          input,
+          actorUserId,
+          auditContext,
+        ) {
+          if (!auditContext) throw new Error('Automation mutation audit context is required.')
+          const beforeRevision = currentIssue.revision
+          const afterRevision = beforeRevision + 1
+          currentIssue = {
+            ...currentIssue,
+            revision: afterRevision,
+            title: String(input.title),
+            updatedAt: '2026-07-16T00:01:00.000Z',
+          }
+          const event = createAuditEvent({
+            context: auditContext,
+            expiresAt: calculateAuditExpiresAt(auditContext.occurredAt, 365),
+            eventType: 'work-item.updated',
+            entity: { type: 'work-item', id: `team/${teamId}/issue/${issueId}` },
+            action: 'updated',
+            metadata: {
+              adapter: 'canonical-work-item',
+              actorMemberKey: actorUserId,
+              teamId,
+              issueId,
+              beforeRevision,
+              afterRevision,
+            },
+          })
+          if (withAuditProof) auditProof = event
+          throw new AutomationError(
+            503,
+            'AutomationMutationResponseLost',
+            'The mutation committed but its response was lost.',
+            true,
+          )
+        },
+      } as unknown as NonNullable<
+        Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+      >,
+      auditEvents: {
+        async getEvent(workspaceId, eventId) {
+          auditProofReads += 1
+          expect(workspaceId).toBe('workspace-1')
+          return auditProof?.eventId === eventId ? auditProof : undefined
+        },
+        async query() {
+          return { events: [] }
+        },
+      },
+    })
+    const context = {
+      execution: {
+        schemaVersion: AUTOMATION_SCHEMA_VERSION,
+        id: `automation-update-${withAuditProof ? 'proved' : 'unproved'}`,
+        workspaceId: 'workspace-1',
+        ruleId: 'rule-1',
+        ruleVersion: 1,
+        triggerEventId: 'event-1',
+        status: 'running',
+        attempts: 1,
+        actions: [],
+        startedAt: '2026-07-16T00:00:00.000Z',
+        retryable: false,
+      },
+      event: {
+        eventId: 'event-1',
+        eventType: 'work-item.updated',
+        workspaceId: 'workspace-1',
+        occurredAt: '2026-07-16T00:00:00.000Z',
+        changes: [],
+        metadata: { teamId: 'core-team', issueId: currentIssue.id },
+      },
+      actionIndex: 0,
+      idempotencyKey: `automation-update-${withAuditProof ? 'proved' : 'unproved'}:action:0000`,
+    } satisfies AutomationActionExecutionContext
+    const execution = createAutomationActionExecutor().execute({
+      type: 'update',
+      patch: { title: 'Automation title' },
+    }, context)
+
+    if (withAuditProof) {
+      await expect(execution).resolves.toBeUndefined()
+    } else {
+      await expect(execution).rejects.toMatchObject({
+        code: 'AutomationMutationResponseLost',
+        status: 503,
+      })
+    }
+    expect(auditProofReads).toBe(1)
+  }
+
+  await runResponseLoss(false)
+  await runResponseLoss(true)
 })
 
 test('fails closed when automation targets a Project outside the owner Team', async () => {
@@ -9150,6 +9324,167 @@ test('DynamoDB Team and project Work Item clients read every page without a defa
   expect(projectResponse.issues).toHaveLength(2)
   expect(sentInputs).toHaveLength(4)
   expect(sentInputs.every((input) => !('Limit' in input))).toBe(true)
+})
+
+test('DynamoDB Work Item list limits count visible rows instead of archived rows', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const pageCounts = new Map<string, number>()
+  const canonicalWorkItem = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'user#demo@example.com',
+    directoryTeamId: 'user#demo@example.com#team#core-team',
+    directoryProjectId: 'user#demo@example.com#project#refero',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    issueId: 'work-item',
+    sortOrder: 10,
+    title: 'Work Item',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/06/03',
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      const indexName = String(command.input.IndexName)
+      const pageCount = (pageCounts.get(indexName) ?? 0) + 1
+      pageCounts.set(indexName, pageCount)
+      return pageCount === 1
+        ? {
+            Items: [{
+              ...canonicalWorkItem,
+              issueId: `${indexName}-archived`,
+              archivedAt: '2026-07-12T01:00:00.000Z',
+            }],
+            LastEvaluatedKey: { indexName, pageCount },
+          }
+        : {
+            Items: [{
+              ...canonicalWorkItem,
+              issueId: `${indexName}-active`,
+              sortOrder: 20,
+            }],
+          }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const teamResponse = await client.getTeamIssues(
+    'user#demo@example.com',
+    'core-team',
+    { limit: 1 },
+  )
+  const projectResponse = await client.getProjectIssues(
+    'user#demo@example.com',
+    'refero',
+    { limit: 1 },
+  )
+
+  expect(teamResponse.issues.map((issue) => issue.id)).toEqual([
+    'TeamIssueSortOrderIndex-active',
+  ])
+  expect(projectResponse.issues.map((issue) => issue.id)).toEqual([
+    'AssignedProjectIssueIndex-active',
+  ])
+  expect(sentInputs).toHaveLength(4)
+  expect(sentInputs.map((input) => input.Limit)).toEqual([1, 1, 1, 1])
+  expect(sentInputs[1]?.ExclusiveStartKey).toEqual({
+    indexName: 'TeamIssueSortOrderIndex',
+    pageCount: 1,
+  })
+  expect(sentInputs[3]?.ExclusiveStartKey).toEqual({
+    indexName: 'AssignedProjectIssueIndex',
+    pageCount: 1,
+  })
+})
+
+test('DynamoDB Work Item creation allocates IDs and sort order across archived rows', async () => {
+  const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  const archivedWorkItem = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'user#demo@example.com',
+    directoryTeamId: 'user#demo@example.com#team#core-team',
+    directoryProjectId: 'user#demo@example.com#project#refero',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    issueId: 'wireframe',
+    sortOrder: 10,
+    title: 'Wireframe',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/06/03',
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    archivedAt: '2026-07-12T01:00:00.000Z',
+  }
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentCommands.push({ input: command.input, name: command.constructor.name })
+      if (command.constructor.name === 'QueryCommand') {
+        return { Items: [archivedWorkItem] }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const response = await client.createTeamIssue(
+    'user#demo@example.com',
+    'core-team',
+    {
+      title: 'Wireframe',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'sato@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      dueDate: '2026/06/03',
+      priority: 'high',
+    },
+    'demo@example.com',
+  )
+
+  expect(response.issue.id).toBe('wireframe-2')
+  const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
+  const transactionItems = (transaction?.input as TransactWriteCommandInput | undefined)
+    ?.TransactItems
+  expect(transactionItems?.[0]).toMatchObject({
+    Put: {
+      Item: {
+        issueId: 'wireframe-2',
+        sortOrder: 20,
+      },
+    },
+  })
 })
 
 test('DynamoDB Work Item client increments revision with an atomic CAS update', async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { AUTOMATION_SCHEMA_VERSION } from '@mukuroji/contracts'
+import { AUTOMATION_SCHEMA_VERSION, type BulkOperationRequest } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   BulkOperationToolbar,
@@ -11,6 +11,7 @@ import {
   createBulkEditPatch,
   getResumableBulkOperationItems,
   getRetryableBulkOperationItems,
+  isBulkOperationPreviewRequestCurrent,
   updateBulkItemSelection,
   updateVisibleBulkSelection,
 } from '../src/bulk-operations/helpers'
@@ -137,6 +138,58 @@ describe('BulkOperationToolbar', () => {
       [selectedSnapshot.selectionKey],
       true,
     )).toEqual([refreshedItem])
+  })
+
+  test('invalidates a pending preview when any normalized request input changes', () => {
+    const previewedEditRequest: BulkOperationRequest = {
+      action: {
+        patch: { workflowStatusId: 'active' },
+        type: 'edit',
+      },
+      items: selections.map(({ expectedRevision, teamId, workItemId }) => ({
+        expectedRevision,
+        teamId,
+        workItemId,
+      })),
+      workspaceId: 'workspace-1',
+    }
+    const previewedMoveRequest: BulkOperationRequest = {
+      ...previewedEditRequest,
+      action: { targetProjectId: 'project-1', type: 'move' },
+    }
+
+    expect(isBulkOperationPreviewRequestCurrent(
+      previewedEditRequest,
+      { ...previewedEditRequest, items: [...previewedEditRequest.items].reverse() },
+    )).toBe(true)
+    expect(isBulkOperationPreviewRequestCurrent(
+      previewedEditRequest,
+      { ...previewedEditRequest, action: { archived: true, type: 'archive' } },
+    )).toBe(false)
+    expect(isBulkOperationPreviewRequestCurrent(
+      previewedEditRequest,
+      {
+        ...previewedEditRequest,
+        action: { patch: { workflowStatusId: 'in-review' }, type: 'edit' },
+      },
+    )).toBe(false)
+    expect(isBulkOperationPreviewRequestCurrent(
+      previewedMoveRequest,
+      { ...previewedMoveRequest, action: { targetProjectId: 'project-2', type: 'move' } },
+    )).toBe(false)
+    expect(isBulkOperationPreviewRequestCurrent(
+      previewedEditRequest,
+      { ...previewedEditRequest, workspaceId: 'workspace-2' },
+    )).toBe(false)
+    expect(isBulkOperationPreviewRequestCurrent(
+      previewedEditRequest,
+      {
+        ...previewedEditRequest,
+        items: previewedEditRequest.items.map((item, index) =>
+          index === 0 ? { ...item, expectedRevision: item.expectedRevision + 1 } : item
+        ),
+      },
+    )).toBe(false)
   })
 
   test('clears only succeeded item selections across duplicate IDs in different Teams', () => {

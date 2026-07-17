@@ -613,7 +613,11 @@ async function readJson<TResponse>(response: Response): Promise<TResponse> {
   try {
     return JSON.parse(text) as TResponse
   } catch {
-    return {} as TResponse
+    throw new AutomationApiError(
+      response.status,
+      'Automation API returned invalid JSON.',
+      'InvalidAutomationResponse',
+    )
   }
 }
 

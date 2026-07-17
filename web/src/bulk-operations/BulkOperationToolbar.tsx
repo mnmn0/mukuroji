@@ -7,7 +7,12 @@ import type {
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { MessageKey } from '../i18n'
 import { BulkOperationResultPanel } from './BulkOperationResultPanel'
-import { bulkEditFields, createBulkEditPatch, type BulkEditField } from './helpers'
+import {
+  bulkEditFields,
+  createBulkEditPatch,
+  isBulkOperationPreviewRequestCurrent,
+  type BulkEditField,
+} from './helpers'
 
 const bulkPriorities = ['high', 'medium', 'low'] as const
 
@@ -107,17 +112,6 @@ export function BulkOperationToolbar({
   const allVisibleSelected = visibleItems.length > 0 &&
     visibleItems.every((item) => selectedKeySet.has(item.selectionKey))
   const someVisibleSelected = visibleItems.some((item) => selectedKeySet.has(item.selectionKey))
-  const selectionSignature = selectedItems
-    .map((item) => `${item.teamId}\u0000${item.workItemId}\u0000${item.expectedRevision}`)
-    .sort()
-    .join('\u0001')
-  const previewSelectionSignature = previewedRequest?.items
-    .map((item) => `${item.teamId}\u0000${item.workItemId}\u0000${item.expectedRevision}`)
-    .sort()
-    .join('\u0001')
-  const activePreview = !previewedRequest || previewSelectionSignature === selectionSignature
-    ? preview
-    : undefined
 
   useEffect(() => {
     if (selectAllRef.current) {
@@ -133,6 +127,9 @@ export function BulkOperationToolbar({
     editValue,
     moveProjectId,
   )
+  const isPreviewRequestCurrent = !previewedRequest ||
+    isBulkOperationPreviewRequestCurrent(previewedRequest, request)
+  const activePreview = isPreviewRequestCurrent ? preview : undefined
   const requestReady = selectedItems.length > 0 && (
     action === 'archive' ||
     (action === 'move' ? Boolean(moveProjectId.trim()) : Boolean(editValue.trim()))

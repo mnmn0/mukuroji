@@ -61,12 +61,20 @@ const automationInboundWebhookSecrets =
   new SecretsManagerAutomationInboundWebhookSecretStore()
 const RECURRING_ACTION_LEASE_MS = 5 * 60_000
 
-/** Due recurring definitions を timezone/DST policy に従って materialize します。 */
-export async function handler(event: AutomationScheduleEvent = {}) {
-  const now = event.time ? new Date(event.time) : new Date()
-  if (Number.isNaN(now.getTime())) {
+/** EventBridge timestamp を検証し、runner lease 用の wall-clock 時刻を返します。 */
+export function resolveAutomationScheduleProcessingTime(
+  event: AutomationScheduleEvent,
+  wallClock = new Date(),
+) {
+  if (event.time && Number.isNaN(Date.parse(event.time))) {
     throw new AutomationError(400, 'AutomationScheduleTimeInvalid', 'Schedule time is invalid.')
   }
+  return wallClock
+}
+
+/** Due recurring definitions を timezone/DST policy に従って materialize します。 */
+export async function handler(event: AutomationScheduleEvent = {}) {
+  const now = resolveAutomationScheduleProcessingTime(event)
   return await processAutomationSchedule(now, {
     client: automationClient,
     actionExecutor: createAutomationActionExecutor(),

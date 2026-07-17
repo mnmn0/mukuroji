@@ -18,9 +18,21 @@ import {
   processInboundWebhookSecretCleanup,
   processRecurringWorkDefinition,
   processScheduledAutomationRule,
+  resolveAutomationScheduleProcessingTime,
 } from './automation-schedule-handler'
 
 describe('automation schedule handler', () => {
+  test('validates event time without using an old delivery time for processing leases', () => {
+    const wallClock = new Date('2026-07-17T12:00:00.000Z')
+
+    expect(resolveAutomationScheduleProcessingTime({
+      time: '2026-07-16T00:00:00.000Z',
+    }, wallClock)).toBe(wallClock)
+    expect(() => resolveAutomationScheduleProcessingTime({
+      time: 'not-a-timestamp',
+    }, wallClock)).toThrow('Schedule time is invalid.')
+  })
+
   test('materializes an on-time skip slot once across schedule redelivery', async () => {
     const definition = createRecurringWork()
     const executions = new Map<string, AutomationExecution>()

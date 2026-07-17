@@ -167,6 +167,25 @@ describe('automation event handler', () => {
     })
   })
 
+  test('fails closed for an inserted outbox record with an invalid occurrence time', async () => {
+    const invalidRecord = createRecord('event-invalid-time', 'sequence-invalid-time')
+    invalidRecord.dynamodb.NewImage.occurredAt = { S: 'not-a-timestamp' }
+    const processed: string[] = []
+
+    const response = await processAutomationEventBatch({
+      Records: [invalidRecord],
+    }, {
+      async process(event) {
+        processed.push(event.eventId)
+      },
+    })
+
+    expect(processed).toEqual([])
+    expect(response).toEqual({
+      batchItemFailures: [{ itemIdentifier: 'sequence-invalid-time' }],
+    })
+  })
+
   test('acknowledges a durably scheduled retry and propagates persistence failures', async () => {
     const rule = { id: 'rule-1' } as AutomationRule
     const event: AutomationEvent = {

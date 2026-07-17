@@ -612,10 +612,12 @@ describe('AutomationManagementPanel', () => {
 
   test('keeps create and rotate secrets one-time and redacts durable endpoint markup', () => {
     const created = reduceAutomationWebhookSecret(undefined, {
+      readOnly: false,
       response: inboundWebhookSecretResponseFixture,
       type: 'reveal',
     })
     const rotated = reduceAutomationWebhookSecret(created, {
+      readOnly: false,
       response: {
         endpoint: {
           ...activeInboundWebhookEndpointFixture,
@@ -655,6 +657,61 @@ describe('AutomationManagementPanel', () => {
     expect(noticeHtml).toContain('data-testid="automation-webhook-secret-dismiss"')
     expect(durableHtml).not.toContain('whsec_')
     expect(durableHtml).not.toContain('automation-webhook-one-time-secret')
+  })
+
+  test('discards a one-time Webhook secret when access becomes read-only', () => {
+    const revealed = reduceAutomationWebhookSecret(undefined, {
+      readOnly: false,
+      response: inboundWebhookSecretResponseFixture,
+      type: 'reveal',
+    })
+
+    expect(reduceAutomationWebhookSecret(revealed, {
+      readOnly: false,
+      type: 'access-change',
+    })).toEqual(revealed)
+    expect(reduceAutomationWebhookSecret(revealed, {
+      readOnly: true,
+      type: 'access-change',
+    })).toBeUndefined()
+    expect(reduceAutomationWebhookSecret(revealed, {
+      readOnly: true,
+      response: inboundWebhookSecretResponseFixture,
+      type: 'reveal',
+    })).toBeUndefined()
+  })
+
+  test('disables every Webhook mutation while one endpoint mutation is pending', () => {
+    const html = renderToStaticMarkup(
+      <AutomationInboundWebhooksPanel
+        busyOperation={`webhook:rotate:${activeInboundWebhookEndpointFixture.id}`}
+        endpoints={[
+          activeInboundWebhookEndpointFixture,
+          pausedInboundWebhookEndpointFixture,
+        ]}
+        locale="en"
+        readOnly={false}
+        onCreate={async () => inboundWebhookSecretResponseFixture}
+        onPause={async () => undefined}
+        onResume={async () => undefined}
+        onRevoke={async () => undefined}
+        onRotate={async () => inboundWebhookSecretResponseFixture}
+      />,
+    )
+
+    for (const testId of [
+      'automation-webhook-create',
+      `automation-webhook-pause-${activeInboundWebhookEndpointFixture.id}`,
+      `automation-webhook-rotate-${activeInboundWebhookEndpointFixture.id}`,
+      `automation-webhook-revoke-${activeInboundWebhookEndpointFixture.id}`,
+      `automation-webhook-resume-${pausedInboundWebhookEndpointFixture.id}`,
+      `automation-webhook-rotate-${pausedInboundWebhookEndpointFixture.id}`,
+      `automation-webhook-revoke-${pausedInboundWebhookEndpointFixture.id}`,
+    ]) {
+      expect(html).toMatch(new RegExp(
+        `<button[^>]*data-testid="${testId}"[^>]*disabled=""`,
+      ))
+    }
   })
 
   test('warns administrators how to abort a provisioning Webhook in English and Japanese', () => {

@@ -1,4 +1,9 @@
-import type { AutomationValue, BulkOperation, WorkItemPriority } from '@mukuroji/contracts'
+import type {
+  AutomationValue,
+  BulkOperation,
+  BulkOperationRequest,
+  WorkItemPriority,
+} from '@mukuroji/contracts'
 import type { BulkOperationSelection } from './BulkOperationToolbar'
 
 /** Bulk edit で更新できる Work Item fields です。 */
@@ -20,6 +25,21 @@ export function createBulkEditPatch(
     return { dueDate: normalizedValue.replaceAll('-', '/') }
   }
   return { [field]: normalizedValue }
+}
+
+/**
+ * Preview を取得した request が現在の正規化済み request 全体と一致するか判定します。
+ */
+export function isBulkOperationPreviewRequestCurrent(
+  previewedRequest: BulkOperationRequest | undefined,
+  currentRequest: BulkOperationRequest | undefined,
+) {
+  if (!previewedRequest || !currentRequest) {
+    return false
+  }
+
+  return createBulkOperationRequestSignature(previewedRequest) ===
+    createBulkOperationRequestSignature(currentRequest)
 }
 
 /** Failed status の item だけを retry 対象として返します。 */
@@ -107,4 +127,30 @@ export function clearSucceededBulkSelection(
   )
 
   return currentSelectionKeys.filter((selectionKey) => !succeededSelectionKeys.has(selectionKey))
+}
+
+function createBulkOperationRequestSignature(request: BulkOperationRequest) {
+  return stableStringify({
+    ...request,
+    items: [...request.items].sort((first, second) =>
+      first.teamId.localeCompare(second.teamId) ||
+      first.workItemId.localeCompare(second.workItemId) ||
+      first.expectedRevision - second.expectedRevision
+    ),
+  })
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`
+  }
+  if (value && typeof value === 'object') {
+    return `{${
+      Object.entries(value)
+        .sort(([firstKey], [secondKey]) => firstKey.localeCompare(secondKey))
+        .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)
+        .join(',')
+    }}`
+  }
+  return JSON.stringify(value) ?? 'undefined'
 }

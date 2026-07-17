@@ -1246,9 +1246,42 @@ export type ApprovalCapabilities = {
 }
 
 /**
+ * Approval request が判断対象にする resource です。
+ */
+type ApprovalSubject =
+  | {
+      /**
+       * File version approval を示します。
+       */
+      subjectType: Extract<ApprovalSubjectType, 'file-version'>
+      /**
+       * 対象 File ID です。
+       */
+      fileId: string
+      /**
+       * 対象 version ID です。
+       */
+      versionId: string
+    }
+  | {
+      /**
+       * Work Item approval を示します。
+       */
+      subjectType: Extract<ApprovalSubjectType, 'work-item'>
+      /**
+       * Work Item subject では指定しません。
+       */
+      fileId?: never
+      /**
+       * Work Item subject では指定しません。
+       */
+      versionId?: never
+    }
+
+/**
  * Work Item 自体または特定 File version に対する approval request です。
  */
-export type ApprovalRequest = {
+export type ApprovalRequest = ApprovalSubject & {
   /**
    * Approval ID です。
    */
@@ -1266,21 +1299,9 @@ export type ApprovalRequest = {
    */
   projectId?: string
   /**
-   * 判断対象が Work Item 自体か特定 File version かを示します。
-   */
-  subjectType: ApprovalSubjectType
-  /**
    * Optimistic concurrency に使う revision です。
    */
   revision: number
-  /**
-   * File version approval の対象 File ID です。
-   */
-  fileId?: string
-  /**
-   * File version approval の対象 version ID です。
-   */
-  versionId?: string
   /**
    * Approval 全体の状態です。
    */

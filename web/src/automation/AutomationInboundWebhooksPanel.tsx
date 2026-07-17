@@ -3,7 +3,7 @@ import type {
   AutomationInboundWebhookSecretResponse,
   CreateAutomationInboundWebhookEndpointInput,
 } from '@mukuroji/contracts'
-import { useMemo, useReducer, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../i18n'
 import { reduceAutomationWebhookSecret } from './webhookSecretState'
 
@@ -58,13 +58,23 @@ export function AutomationInboundWebhooksPanel({
     reduceAutomationWebhookSecret,
     undefined,
   )
+  const readOnlyRef = useRef(readOnly)
+  const isMutationBusy = Boolean(busyOperation)
+
+  useEffect(() => {
+    readOnlyRef.current = readOnly
+    if (!readOnly) return
+    // 権限変更時は secret を component state から即時に破棄します。
+    dispatchSecret({ readOnly, type: 'access-change' })
+  }, [readOnly])
 
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const normalizedName = name.trim()
     if (!normalizedName || !onCreate) return
     try {
-      dispatchSecret({ response: await onCreate({ name: normalizedName }), type: 'reveal' })
+      const response = await onCreate({ name: normalizedName })
+      dispatchSecret({ readOnly: readOnlyRef.current, response, type: 'reveal' })
     } catch {
       return
     }
@@ -74,7 +84,8 @@ export function AutomationInboundWebhooksPanel({
   async function handleRotate(endpoint: AutomationInboundWebhookEndpoint) {
     if (!onRotate) return
     try {
-      dispatchSecret({ response: await onRotate(endpoint), type: 'reveal' })
+      const response = await onRotate(endpoint)
+      dispatchSecret({ readOnly: readOnlyRef.current, response, type: 'reveal' })
     } catch {
       return
     }
@@ -128,7 +139,7 @@ export function AutomationInboundWebhooksPanel({
             <button
               className="workbench-button-primary min-h-10 px-5 disabled:cursor-not-allowed disabled:opacity-55"
               data-testid="automation-webhook-create"
-              disabled={busyOperation === 'webhook:create' || !name.trim()}
+              disabled={isMutationBusy || !name.trim()}
               type="submit"
             >
               {t(busyOperation === 'webhook:create'
@@ -139,7 +150,7 @@ export function AutomationInboundWebhooksPanel({
         </form>
       ) : null}
 
-      {oneTimeSecret ? (
+      {!readOnly && oneTimeSecret ? (
         <AutomationWebhookSecretNotice
           endpointName={oneTimeSecret.endpointName}
           locale={locale}
@@ -157,7 +168,6 @@ export function AutomationInboundWebhooksPanel({
       ) : (
         <div className="grid gap-3">
           {endpoints.map((endpoint) => {
-            const isEndpointBusy = busyOperation?.endsWith(`:${endpoint.id}`) === true
             const canRotate = endpoint.status === 'active' || endpoint.status === 'paused'
             return (
               <article
@@ -190,7 +200,7 @@ export function AutomationInboundWebhooksPanel({
                         <button
                           className="workbench-button-secondary min-h-9 px-3 disabled:cursor-not-allowed disabled:opacity-55"
                           data-testid={`automation-webhook-pause-${endpoint.id}`}
-                          disabled={isEndpointBusy}
+                          disabled={isMutationBusy}
                           type="button"
                           onClick={() => void handleLifecycle(() => onPause(endpoint))}
                         >
@@ -201,7 +211,7 @@ export function AutomationInboundWebhooksPanel({
                         <button
                           className="workbench-button-secondary min-h-9 px-3 disabled:cursor-not-allowed disabled:opacity-55"
                           data-testid={`automation-webhook-resume-${endpoint.id}`}
-                          disabled={isEndpointBusy}
+                          disabled={isMutationBusy}
                           type="button"
                           onClick={() => void handleLifecycle(() => onResume(endpoint))}
                         >
@@ -212,7 +222,7 @@ export function AutomationInboundWebhooksPanel({
                         <button
                           className="workbench-button-secondary min-h-9 px-3 disabled:cursor-not-allowed disabled:opacity-55"
                           data-testid={`automation-webhook-rotate-${endpoint.id}`}
-                          disabled={isEndpointBusy}
+                          disabled={isMutationBusy}
                           type="button"
                           onClick={() => void handleRotate(endpoint)}
                         >
@@ -223,7 +233,7 @@ export function AutomationInboundWebhooksPanel({
                         <button
                           className="workbench-button-secondary min-h-9 px-3 text-red-700 disabled:cursor-not-allowed disabled:opacity-55"
                           data-testid={`automation-webhook-revoke-${endpoint.id}`}
-                          disabled={isEndpointBusy}
+                          disabled={isMutationBusy}
                           type="button"
                           onClick={() => void handleRevoke(endpoint)}
                         >

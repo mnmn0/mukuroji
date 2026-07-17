@@ -211,6 +211,8 @@ export type AutomationExecutionQuery = {
   workspaceId: string
   /** 対象 rule ID です。 */
   ruleId?: string
+  /** 対象 execution status です。 */
+  status?: AutomationExecution['status']
   /** Page size です。 */
   limit?: number
   /** 前 page の opaque cursor です。 */
@@ -1978,6 +1980,15 @@ export class DynamoDbAutomationClient implements AutomationClient {
     const createIdentity = idempotencyKey
       ? createAutomationCreateIdentity(normalizedWorkspaceId, 'recurring', idempotencyKey, normalized)
       : undefined
+    if (createIdentity) {
+      const replay = await this.getOptionalIdempotentCreateReplay<RecurringWork>(
+        normalizedWorkspaceId,
+        `RECURRING#${encodeKey(createIdentity.resourceId)}`,
+        'recurring',
+        createIdentity,
+      )
+      if (replay) return replay
+    }
     const template = await this.requireEnabledWorkItemTemplate(
       normalizedWorkspaceId,
       normalized.templateId,
@@ -2466,35 +2477,66 @@ export class DynamoDbAutomationClient implements AutomationClient {
   async listExecutions(query: AutomationExecutionQuery) {
     await this.ensureTable()
     const limit = normalizeLimit(query.limit ?? 50)
-    const exclusiveStartKey = query.cursor ? decodeCursor(query.cursor) : undefined
-    const response = query.ruleId
-      ? await this.documentClient.send(new QueryCommand({
-          TableName: this.tableName,
+    const readBudget = query.status === undefined ? limit : limit * 5
+    const indexQuery: {
+      IndexName: string
+      KeyConditionExpression: string
+      ExpressionAttributeNames: Record<string, string>
+      ExpressionAttributeValues: Record<string, string>
+    } = query.ruleId
+      ? {
           IndexName: 'RuleExecutionIndex',
           KeyConditionExpression: '#ruleExecutionKey = :ruleExecutionKey',
           ExpressionAttributeNames: { '#ruleExecutionKey': 'ruleExecutionKey' },
           ExpressionAttributeValues: {
             ':ruleExecutionKey': `${requireText(query.workspaceId, 'Workspace ID')}#rule#${requireText(query.ruleId, 'Rule ID')}`,
           },
-          Limit: limit,
-          ScanIndexForward: false,
-          ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
-        }))
-      : await this.documentClient.send(new QueryCommand({
-          TableName: this.tableName,
+        }
+      : {
           IndexName: 'WorkspaceExecutionIndex',
           KeyConditionExpression: '#scopeKey = :scopeKey',
           ExpressionAttributeNames: { '#scopeKey': 'scopeKey' },
           ExpressionAttributeValues: {
             ':scopeKey': automationScopeKey(query.workspaceId),
           },
-          Limit: limit,
-          ScanIndexForward: false,
-          ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
-        }))
+        }
+    const executions: AutomationExecution[] = []
+    let evaluated = 0
+    let exclusiveStartKey = query.cursor ? decodeCursor(query.cursor) : undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        ...indexQuery,
+        ...(query.status !== undefined
+          ? {
+              FilterExpression: '#status = :status',
+              ExpressionAttributeNames: {
+                ...indexQuery.ExpressionAttributeNames,
+                '#status': 'status',
+              },
+              ExpressionAttributeValues: {
+                ...indexQuery.ExpressionAttributeValues,
+                ':status': query.status,
+              },
+            }
+          : {}),
+        Limit: Math.min(limit - executions.length, readBudget - evaluated),
+        ScanIndexForward: false,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }))
+      executions.push(...(response.Items ?? []).map(readExecution))
+      const evaluatedCount = response.ScannedCount ?? response.Count ?? response.Items?.length ?? 0
+      evaluated += Math.max(evaluatedCount, response.LastEvaluatedKey ? 1 : 0)
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (
+      query.status !== undefined &&
+      executions.length < limit &&
+      exclusiveStartKey &&
+      evaluated < readBudget
+    )
     return {
-      executions: (response.Items ?? []).map(readExecution),
-      ...(response.LastEvaluatedKey ? { nextCursor: encodeCursor(response.LastEvaluatedKey) } : {}),
+      executions,
+      ...(exclusiveStartKey ? { nextCursor: encodeCursor(exclusiveStartKey) } : {}),
     }
   }
 
@@ -4823,6 +4865,11 @@ const retryableAwsErrorCodes = new Set([
   'ThrottlingException',
   'TransactionInProgressException',
 ])
+const trustedExternalAutomationFailureCodes = new Set([
+  ...retryableAwsErrorCodes,
+  'ConditionalCheckFailedException',
+  'WorkItemRevisionConflict',
+])
 
 /** Action adapter failure を stable code/message/retryability へ正規化します。 */
 export function normalizeAutomationActionFailure(error: unknown) {
@@ -4842,12 +4889,15 @@ export function normalizeAutomationActionFailure(error: unknown) {
         : typeof metadata?.httpStatusCode === 'number'
           ? metadata.httpStatusCode
           : undefined
-    const code = typeof error.code === 'string'
+    const rawCode = typeof error.code === 'string'
       ? error.code
       : typeof error.name === 'string' ? error.name : 'AutomationActionFailed'
+    const code = trustedExternalAutomationFailureCodes.has(rawCode)
+      ? rawCode
+      : 'AutomationActionFailed'
     return {
       code,
-      message: typeof error.message === 'string' ? error.message : 'Automation action failed.',
+      message: 'Automation action failed.',
       retryable: error.retryable === true || Boolean(error.$retryable) ||
         retryableAwsErrorCodes.has(code) || isTransientFailureStatus(status),
     }
