@@ -2,12 +2,28 @@ import { useState } from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { SWRConfig } from 'swr'
+import { createTranslator, type Locale } from '../i18n'
 import type { WorkspaceAccess, WorkspaceInvitation } from './api'
 import { WorkspaceAccessPanelContainer } from './WorkspaceAccessPanel'
 
 const initialAccessToken = 'storybook-workspace-access-token'
 const rotatedAccessToken = 'storybook-rotated-workspace-access-token'
 const invitationEmail = 'retry.member@example.com'
+const uuidV4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+/**
+ * Story fetch mock が記録する mutation context header です。
+ */
+interface StoryMutationContextHeaders {
+  /**
+   * リクエストを追跡する X-Correlation-Id header です。
+   */
+  correlationId: string | null
+  /**
+   * mutation の重複実行を防ぐ Idempotency-Key header です。
+   */
+  idempotencyKey: string | null
+}
 
 const ownerMember = {
   createdAt: '2026-07-01T00:00:00.000Z',
@@ -69,11 +85,11 @@ const invitationFixture = {
 } satisfies WorkspaceInvitation
 
 const retainedContextScenario = {
-  invitationRequestIds: [] as string[],
+  invitationRequestContexts: [] as StoryMutationContextHeaders[],
   invitationRequestCount: 0,
   snapshotRequestCount: 0,
   reset() {
-    this.invitationRequestIds = []
+    this.invitationRequestContexts = []
     this.invitationRequestCount = 0
     this.snapshotRequestCount = 0
   },
@@ -92,7 +108,7 @@ const retainedContextScenario = {
 
     if (request.method === 'POST' && request.url.pathname === '/api/workspace/invitations') {
       this.invitationRequestCount += 1
-      this.invitationRequestIds.push(request.headers.get('Idempotency-Key') ?? '')
+      this.invitationRequestContexts.push(readMutationContextHeaders(request.headers))
 
       if (this.invitationRequestCount <= 2) {
         throw new TypeError('Storybook mutation transport failure')
@@ -107,13 +123,13 @@ const retainedContextScenario = {
 
 const accessTokenScenario = {
   invitationAccessTokens: [] as string[],
-  invitationRequestIds: [] as string[],
+  invitationRequestContexts: [] as StoryMutationContextHeaders[],
   oldSnapshotRequestStarted: false,
   resolveOldSnapshotRequest: undefined as ((response: Response) => void) | undefined,
   reset() {
     this.releaseOldSnapshotRequestIfPending()
     this.invitationAccessTokens = []
-    this.invitationRequestIds = []
+    this.invitationRequestContexts = []
     this.oldSnapshotRequestStarted = false
   },
   releaseOldSnapshotRequest() {
@@ -140,7 +156,7 @@ const accessTokenScenario = {
 
     if (request.method === 'GET' && request.url.pathname === '/api/workspace/access') {
       if (authorization === `Bearer ${initialAccessToken}`) {
-        if (this.invitationRequestIds.length === 0) {
+        if (this.invitationRequestContexts.length === 0) {
           return jsonResponse(workspaceAccessFixture)
         }
 
@@ -162,7 +178,7 @@ const accessTokenScenario = {
 
     if (request.method === 'POST' && request.url.pathname === '/api/workspace/invitations') {
       this.invitationAccessTokens.push(authorization)
-      this.invitationRequestIds.push(request.headers.get('Idempotency-Key') ?? '')
+      this.invitationRequestContexts.push(readMutationContextHeaders(request.headers))
 
       if (authorization === `Bearer ${initialAccessToken}`) {
         throw new TypeError('Storybook mutation transport failure')
@@ -195,6 +211,21 @@ function jsonResponse(value: unknown) {
   })
 }
 
+function readMutationContextHeaders(headers: Headers): StoryMutationContextHeaders {
+  return {
+    correlationId: headers.get('X-Correlation-Id'),
+    idempotencyKey: headers.get('Idempotency-Key'),
+  }
+}
+
+function expectValidMutationContextHeaders(context: StoryMutationContextHeaders | undefined) {
+  expect(context).toBeDefined()
+  expect(context?.correlationId).toBeTruthy()
+  expect(context?.correlationId).toEqual(expect.stringMatching(uuidV4Pattern))
+  expect(context?.idempotencyKey).toBeTruthy()
+  expect(context?.idempotencyKey).toEqual(expect.stringMatching(uuidV4Pattern))
+}
+
 function installStoryFetch(fetchImplementation: typeof fetch) {
   const originalFetch = globalThis.fetch
 
@@ -209,6 +240,7 @@ function WorkspaceAccessTokenSwitchHarness(
   props: Parameters<typeof WorkspaceAccessPanelContainer>[0],
 ) {
   const [accessToken, setAccessToken] = useState(props.accessToken)
+  const switchAccessTokenLabel = createAccessTokenSwitchLabel(props.locale)
 
   return (
     <div className="grid gap-4">
@@ -217,11 +249,15 @@ function WorkspaceAccessTokenSwitchHarness(
         type="button"
         onClick={() => setAccessToken(rotatedAccessToken)}
       >
-        Access token を切り替える
+        {switchAccessTokenLabel}
       </button>
       <WorkspaceAccessPanelContainer {...props} accessToken={accessToken} />
     </div>
   )
+}
+
+function createAccessTokenSwitchLabel(locale: Locale) {
+  return createTranslator(locale)('workspace.access.action.switchAccessToken')
 }
 
 const meta = {
@@ -275,12 +311,12 @@ export const RetainedContextUntilSnapshotRecovery: Story = {
       await userEvent.click(submitButton)
       await waitFor(() => {
         expect(retainedContextScenario.snapshotRequestCount).toBe(2)
-        expect(retainedContextScenario.invitationRequestIds).toHaveLength(1)
+        expect(retainedContextScenario.invitationRequestContexts).toHaveLength(1)
         expect(submitButton).not.toBeDisabled()
       })
 
-      expect(retainedContextScenario.invitationRequestIds[0]).toMatch(
-        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      expectValidMutationContextHeaders(
+        retainedContextScenario.invitationRequestContexts[0],
       )
     })
 
@@ -288,26 +324,34 @@ export const RetainedContextUntilSnapshotRecovery: Story = {
       await userEvent.click(submitButton)
       await waitFor(() => {
         expect(retainedContextScenario.snapshotRequestCount).toBe(3)
-        expect(retainedContextScenario.invitationRequestIds).toHaveLength(2)
+        expect(retainedContextScenario.invitationRequestContexts).toHaveLength(2)
         expect(submitButton).not.toBeDisabled()
       })
 
-      expect(retainedContextScenario.invitationRequestIds[1]).toBe(
-        retainedContextScenario.invitationRequestIds[0],
-      )
+      const initialContext = retainedContextScenario.invitationRequestContexts[0]
+      const retryContext = retainedContextScenario.invitationRequestContexts[1]
+
+      expectValidMutationContextHeaders(initialContext)
+      expectValidMutationContextHeaders(retryContext)
+      expect(retryContext?.correlationId).toBe(initialContext?.correlationId)
+      expect(retryContext?.idempotencyKey).toBe(initialContext?.idempotencyKey)
     })
 
     await step('snapshot refresh 成功後は次の mutation に新しい context を使う', async () => {
       await userEvent.click(submitButton)
       await waitFor(() => {
         expect(retainedContextScenario.snapshotRequestCount).toBe(4)
-        expect(retainedContextScenario.invitationRequestIds).toHaveLength(3)
+        expect(retainedContextScenario.invitationRequestContexts).toHaveLength(3)
         expect(emailInput).toHaveValue('')
       })
 
-      expect(retainedContextScenario.invitationRequestIds[2]).not.toBe(
-        retainedContextScenario.invitationRequestIds[1],
-      )
+      const recoveredContext = retainedContextScenario.invitationRequestContexts[2]
+      const retainedContext = retainedContextScenario.invitationRequestContexts[1]
+
+      expectValidMutationContextHeaders(retainedContext)
+      expectValidMutationContextHeaders(recoveredContext)
+      expect(recoveredContext?.correlationId).not.toBe(retainedContext?.correlationId)
+      expect(recoveredContext?.idempotencyKey).not.toBe(retainedContext?.idempotencyKey)
     })
   },
 }
@@ -326,9 +370,10 @@ export const NewRunnerAfterAccessTokenChange: Story = {
     }
   },
   render: (args) => <WorkspaceAccessTokenSwitchHarness {...args} />,
-  play: async ({ canvasElement, step }) => {
+  play: async ({ args, canvasElement, step }) => {
     const canvas = within(canvasElement)
     const firstEmailInput = await canvas.findByRole('textbox', { name: 'メールアドレス' })
+    const switchAccessTokenLabel = createAccessTokenSwitchLabel(args.locale)
 
     await userEvent.type(firstEmailInput, invitationEmail)
 
@@ -338,7 +383,7 @@ export const NewRunnerAfterAccessTokenChange: Story = {
       await userEvent.click(submitButton)
       await waitFor(() => {
         expect(accessTokenScenario.invitationAccessTokens).toHaveLength(1)
-        expect(accessTokenScenario.invitationRequestIds).toHaveLength(1)
+        expect(accessTokenScenario.invitationRequestContexts).toHaveLength(1)
         expect(accessTokenScenario.oldSnapshotRequestStarted).toBe(true)
         expect(submitButton).toBeDisabled()
       })
@@ -346,10 +391,11 @@ export const NewRunnerAfterAccessTokenChange: Story = {
       expect(accessTokenScenario.invitationAccessTokens).toEqual([
         `Bearer ${initialAccessToken}`,
       ])
+      expectValidMutationContextHeaders(accessTokenScenario.invitationRequestContexts[0])
     })
 
     await step('旧 refresh 保留中でも新しい token は新しい context を使う', async () => {
-      await userEvent.click(canvas.getByRole('button', { name: 'Access token を切り替える' }))
+      await userEvent.click(canvas.getByRole('button', { name: switchAccessTokenLabel }))
       await canvas.findByText('Rotated session owner')
 
       const rotatedEmailInput = await canvas.findByRole('textbox', { name: 'メールアドレス' })
@@ -362,7 +408,7 @@ export const NewRunnerAfterAccessTokenChange: Story = {
       await userEvent.click(submitButton)
       await waitFor(() => {
         expect(accessTokenScenario.invitationAccessTokens).toHaveLength(2)
-        expect(accessTokenScenario.invitationRequestIds).toHaveLength(2)
+        expect(accessTokenScenario.invitationRequestContexts).toHaveLength(2)
         expect(rotatedEmailInput).toHaveValue('')
       })
 
@@ -370,9 +416,13 @@ export const NewRunnerAfterAccessTokenChange: Story = {
         `Bearer ${initialAccessToken}`,
         `Bearer ${rotatedAccessToken}`,
       ])
-      expect(accessTokenScenario.invitationRequestIds[1]).not.toBe(
-        accessTokenScenario.invitationRequestIds[0],
-      )
+      const initialContext = accessTokenScenario.invitationRequestContexts[0]
+      const rotatedContext = accessTokenScenario.invitationRequestContexts[1]
+
+      expectValidMutationContextHeaders(initialContext)
+      expectValidMutationContextHeaders(rotatedContext)
+      expect(rotatedContext?.correlationId).not.toBe(initialContext?.correlationId)
+      expect(rotatedContext?.idempotencyKey).not.toBe(initialContext?.idempotencyKey)
       expect(accessTokenScenario.resolveOldSnapshotRequest).toBeDefined()
     })
 
