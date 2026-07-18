@@ -68,12 +68,31 @@ export type ConnectorPollInventoryMessage = {
   cursor: string
 }
 
+/** Disconnected installation の links をbounded pageでpauseするmessageです。 */
+export type ConnectorDisconnectLinksMessage = {
+  /** Queue payload schema version です。 */
+  version: typeof CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION
+  /** Disconnect cleanup message discriminator です。 */
+  kind: 'disconnect-links'
+  /** Installation が属する Workspace ID です。 */
+  workspaceId: string
+  /** Pause対象 connector installation ID です。 */
+  installationId: string
+  /** Disconnect transitionを束縛する lifecycle revision です。 */
+  lifecycleRevision: number
+  /** Lifecycle auditへ記録するactor User IDです。 */
+  updatedByUserId?: string
+  /** 前pageが返した内部cursorです。 */
+  cursor?: string
+}
+
 /** Connector sync worker が受け付ける versioned secret-free payload です。 */
 export type ConnectorSyncQueueMessage =
   | ConnectorWorkItemChangedMessage
   | ConnectorOutboundMessage
   | ConnectorPollMessage
   | ConnectorPollInventoryMessage
+  | ConnectorDisconnectLinksMessage
 
 /** Connector sync queue への書き込み境界です。 */
 export interface ConnectorSyncQueue {
@@ -146,7 +165,9 @@ export interface ConnectorPollCheckpointStore {
 /** Connector worker が current state の再読込に使う platform subset です。 */
 export type ConnectorSyncWorkerPlatform = Pick<
   DeveloperPlatformClient,
-  'listConnectors' | 'listExternalWorkItemLinks'
+  | 'listConnectors'
+  | 'listExternalWorkItemLinks'
+  | 'pauseConnectorExternalLinksPage'
 >
 
 /** Durable worker が呼び出す connector sync engine subset です。 */
@@ -171,6 +192,8 @@ export type ConnectorSyncWorkerDependencies = {
   maximumPollPages?: number
   /** 1 inventory continuation message で読む global inventory page 上限です。 */
   maximumInventoryPages?: number
+  /** 1 disconnect continuation message でpauseする link 上限です。 */
+  maximumDisconnectLinks?: number
 }
 
 /** Global schedule inventory が返す secret-free poll target です。 */
@@ -372,6 +395,28 @@ export async function processConnectorSyncMessage(
       inventory: dependencies.inventory,
       queue: dependencies.queue,
     })
+    return
+  }
+  if (normalized.kind === 'disconnect-links') {
+    const page = await dependencies.platform.pauseConnectorExternalLinksPage({
+      workspaceId: normalized.workspaceId,
+      installationId: normalized.installationId,
+      expectedLifecycleRevision: normalized.lifecycleRevision,
+      ...(normalized.updatedByUserId
+        ? { updatedByUserId: normalized.updatedByUserId }
+        : {}),
+      limit: readPageLimit(
+        dependencies.maximumDisconnectLinks ?? 25,
+        'Connector disconnect page limit',
+      ),
+      ...(normalized.cursor ? { cursor: normalized.cursor } : {}),
+    })
+    if (page.nextCursor) {
+      await dependencies.queue.enqueue({
+        ...normalized,
+        cursor: page.nextCursor,
+      })
+    }
     return
   }
   await pollCurrentInstallation(normalized, dependencies)
@@ -579,32 +624,13 @@ async function pollCurrentInstallation(
     installationId: message.installationId,
     resourceType: message.resourceType,
   }
-  const [installations, links, storedCheckpoint] = await Promise.all([
+  const [installations, storedCheckpoint] = await Promise.all([
     dependencies.platform.listConnectors(message.workspaceId),
-    dependencies.platform.listExternalWorkItemLinks({
-      workspaceId: message.workspaceId,
-      installationId: message.installationId,
-      resourceType: message.resourceType,
-    }),
     dependencies.checkpoints.get(key),
   ])
   const installation = installations.find((candidate) => candidate.id === message.installationId)
   if (!installation || installation.status !== 'connected') return
   const checkpoint = normalizeCheckpoint(storedCheckpoint)
-  const hasInboundLink = links.some((link) =>
-    link.installationId === message.installationId &&
-    link.resourceType === message.resourceType &&
-    link.syncStatus !== 'paused' &&
-    link.syncStatus !== 'conflict' &&
-    (link.syncDirection === 'inbound' || link.syncDirection === 'bidirectional')
-  )
-  if (!hasInboundLink) {
-    await dependencies.checkpoints.compareAndSet({
-      ...key,
-      ...(checkpoint ? { expectedRevision: checkpoint.revision } : {}),
-    })
-    return
-  }
   const result = await dependencies.engine.pollInstallation({
     ...key,
     ...(checkpoint?.cursor ? { cursor: checkpoint.cursor } : {}),
@@ -676,6 +702,33 @@ function normalizeQueueMessage(value: unknown): ConnectorSyncQueueMessage {
       version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
       kind: 'poll-inventory',
       cursor: readProviderCursor(value.cursor, 'Connector poll inventory cursor'),
+    }
+  }
+  if (value.kind === 'disconnect-links') {
+    assertExactKeys(value, [
+      'version',
+      'kind',
+      'workspaceId',
+      'installationId',
+      'lifecycleRevision',
+      ...(value.updatedByUserId === undefined ? [] : ['updatedByUserId']),
+      ...(value.cursor === undefined ? [] : ['cursor']),
+    ])
+    return {
+      version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+      kind: 'disconnect-links',
+      workspaceId: readIdentifier(value.workspaceId, 'Workspace ID'),
+      installationId: readIdentifier(value.installationId, 'Connector installation ID'),
+      lifecycleRevision: readPositiveInteger(
+        value.lifecycleRevision,
+        'Connector lifecycle revision',
+      ),
+      ...(value.updatedByUserId === undefined
+        ? {}
+        : { updatedByUserId: readIdentifier(value.updatedByUserId, 'Connector updater User ID') }),
+      ...(value.cursor === undefined
+        ? {}
+        : { cursor: readProviderCursor(value.cursor, 'Connector disconnect cursor') }),
     }
   }
   throw new TypeError('Connector sync queue message kind is unsupported.')
@@ -783,6 +836,13 @@ function readPageLimit(value: number, label: string) {
     throw new RangeError(`${label} must be an integer between 1 and 100.`)
   }
   return value
+}
+
+function readPositiveInteger(value: unknown, label: string) {
+  if (!Number.isSafeInteger(value) || Number(value) < 1) {
+    throw new RangeError(`${label} must be a positive integer.`)
+  }
+  return Number(value)
 }
 
 function readQueueUrl(value: string) {

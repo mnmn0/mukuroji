@@ -1,11 +1,17 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import {
+  DeleteCommand,
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
   QueryCommand,
 } from '@aws-sdk/lib-dynamodb'
-import type { ExternalWorkItemLink } from '@mukuroji/contracts'
+import {
+  CONNECTOR_POLL_TARGET_SHARD_COUNT,
+  createConnectorPollTargetLookupKey,
+  createConnectorPollTargetRecordKey,
+  createConnectorPollTargetShardLookupKey,
+} from './connector-poll-projection'
 import {
   createDefaultSecretProtector,
   type SecretProtector,
@@ -19,9 +25,6 @@ import type {
   ConnectorPollInventoryTarget,
   ConnectorWorkItemResourceType,
 } from './connector-sync-worker'
-
-/** External link の sparse global inventory partition です。 */
-export const CONNECTOR_SYNC_LINK_INVENTORY_KEY = 'CONNECTOR_SYNC_LINK'
 
 /** DynamoDB poll adapter の共通 options です。 */
 export type DynamoDbConnectorPollOptions = {
@@ -61,16 +64,37 @@ type ConnectorPollCheckpointRow = {
   cursorCiphertext?: string
 }
 
-/** GSI locator から読み直す external-link row の必要部分です。 */
-type ExternalLinkInventoryRow = {
+/** GSI locator から強整合再取得する materialized poll target row です。 */
+type ConnectorPollTargetRow = {
   /** Workspace partition key です。 */
   workspaceId: string
-  /** External link sort key です。 */
+  /** Installation/resource scoped sort key です。 */
   recordKey: string
   /** Row discriminator です。 */
-  entryType: 'external-link'
-  /** Secret を含まない external-link snapshot です。 */
-  value: ExternalWorkItemLink
+  entryType: 'connector-poll-target'
+  /** Secret-free poll target identity です。 */
+  value: {
+    /** Connector installation ID です。 */
+    installationId: string
+    /** Provider resource 種別です。 */
+    resourceType: ConnectorWorkItemResourceType
+  }
+  /** Sharded global inventory partition key です。 */
+  lookupKey: string
+  /** Stable global inventory sort key です。 */
+  lookupSortKey: string
+  /** Current pollable external-link 数です。 */
+  pollableLinkCount: number
+  /** Conditional tombstone cleanup を fencing する revision です。 */
+  version: number
+}
+
+/** Sharded poll inventory cursor payload です。 */
+type ConnectorPollInventoryCursor = {
+  /** Query中の shard番号です。 */
+  shard: number
+  /** 同一 shard内のDynamoDB exclusive start keyです。 */
+  exclusiveStartKey?: Record<string, unknown>
 }
 
 /** Provider cursor を KMS-encrypted single-table row へ CAS 保存します。 */
@@ -199,56 +223,93 @@ export class DynamoDbConnectorPollInventory implements ConnectorPollInventory {
     this.documentClient = options.documentClient ?? createDocumentClient()
   }
 
-  /** One GSI page を読み、current inbound/bidirectional links だけを返します。 */
+  /** One sharded GSI page を読み、current materialized poll targetsだけを返します。 */
   async listPollTargets(cursor?: string): Promise<ConnectorPollInventoryPage> {
-    const exclusiveStartKey = cursor === undefined
-      ? undefined
+    const position = cursor === undefined
+      ? { shard: 0 } satisfies ConnectorPollInventoryCursor
       : decodeInventoryCursor(cursor)
+    const lookupKey = createConnectorPollTargetShardLookupKey(position.shard)
     try {
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.tableName,
         IndexName: this.lookupIndexName,
         KeyConditionExpression: 'lookupKey = :lookupKey',
         ExpressionAttributeValues: {
-          ':lookupKey': CONNECTOR_SYNC_LINK_INVENTORY_KEY,
+          ':lookupKey': lookupKey,
         },
         Limit: 50,
-        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+        ...(position.exclusiveStartKey
+          ? { ExclusiveStartKey: position.exclusiveStartKey }
+          : {}),
       }))
-      const targets = new Map<string, ConnectorPollInventoryTarget>()
-      await Promise.all((response.Items ?? []).map(async (locator) => {
+      const targets = (await mapWithConcurrency(
+        response.Items ?? [],
+        10,
+        async (locator) => {
         const workspaceId = readIdentifier(locator.workspaceId, 'Workspace ID')
-        const recordKey = readIdentifier(locator.recordKey, 'External link record key')
+        const recordKey = readIdentifier(locator.recordKey, 'Connector poll target record key')
+        if (
+          locator.lookupKey !== lookupKey ||
+          typeof locator.lookupSortKey !== 'string'
+        ) throw storedRowInvalid()
         const item = await this.documentClient.send(new GetCommand({
           TableName: this.tableName,
           Key: { workspaceId, recordKey },
           ConsistentRead: true,
         }))
-        if (!item.Item) return
-        const row = readExternalLinkRow(item.Item, workspaceId, recordKey)
-        const link = row.value
-        if (
-          link.syncStatus === 'paused' ||
-          link.syncStatus === 'conflict' ||
-          (link.syncDirection !== 'inbound' && link.syncDirection !== 'bidirectional')
-        ) return
-        const target: ConnectorPollInventoryTarget = {
+        if (!item.Item) return undefined
+        const row = readConnectorPollTargetRow(
+          item.Item,
+          workspaceId,
+          recordKey,
+          lookupKey,
+          locator.lookupSortKey,
+        )
+        if (row.pollableLinkCount === 0) {
+          try {
+            await this.documentClient.send(new DeleteCommand({
+              TableName: this.tableName,
+              Key: { workspaceId, recordKey },
+              ConditionExpression:
+                '#entryType = :entryType AND #version = :expectedVersion AND ' +
+                'pollableLinkCount = :zero',
+              ExpressionAttributeNames: {
+                '#entryType': 'entryType',
+                '#version': 'version',
+              },
+              ExpressionAttributeValues: {
+                ':entryType': 'connector-poll-target',
+                ':expectedVersion': row.version,
+                ':zero': 0,
+              },
+            }))
+          } catch (error) {
+            if (!isConditionalFailure(error)) throw error
+          }
+          return undefined
+        }
+        return {
           workspaceId,
           installationId: readIdentifier(
-            link.installationId,
+            row.value.installationId,
             'Connector installation ID',
           ),
-          resourceType: readResourceType(link.resourceType),
-        }
-        targets.set(
-          `${target.workspaceId}\0${target.installationId}\0${target.resourceType}`,
-          target,
-        )
-      }))
+          resourceType: readResourceType(row.value.resourceType),
+        } satisfies ConnectorPollInventoryTarget
+        },
+      )).filter(isDefined)
+      const nextPosition = response.LastEvaluatedKey
+        ? {
+            shard: position.shard,
+            exclusiveStartKey: response.LastEvaluatedKey,
+          } satisfies ConnectorPollInventoryCursor
+        : position.shard + 1 < CONNECTOR_POLL_TARGET_SHARD_COUNT
+          ? { shard: position.shard + 1 } satisfies ConnectorPollInventoryCursor
+          : undefined
       return {
-        targets: [...targets.values()],
-        ...(response.LastEvaluatedKey
-          ? { nextCursor: encodeInventoryCursor(response.LastEvaluatedKey) }
+        targets,
+        ...(nextPosition
+          ? { nextCursor: encodeInventoryCursor(nextPosition) }
           : {}),
       }
     } catch (error) {
@@ -306,18 +367,38 @@ function readCheckpointRow(
   return value as ConnectorPollCheckpointRow
 }
 
-function readExternalLinkRow(
+function readConnectorPollTargetRow(
   value: Record<string, unknown>,
   workspaceId: string,
   recordKey: string,
-): ExternalLinkInventoryRow {
+  lookupKey: string,
+  lookupSortKey: string,
+): ConnectorPollTargetRow {
   if (
     value.workspaceId !== workspaceId ||
     value.recordKey !== recordKey ||
-    value.entryType !== 'external-link' ||
-    !isRecord(value.value)
+    value.entryType !== 'connector-poll-target' ||
+    value.lookupKey !== lookupKey ||
+    value.lookupSortKey !== lookupSortKey ||
+    !isRecord(value.value) ||
+    typeof value.value.installationId !== 'string' ||
+    !Number.isSafeInteger(value.pollableLinkCount) ||
+    Number(value.pollableLinkCount) < 0 ||
+    !Number.isSafeInteger(value.version) ||
+    Number(value.version) < 1
   ) throw storedRowInvalid()
-  return value as ExternalLinkInventoryRow
+  const installationId = value.value.installationId
+  const resourceType = readResourceType(value.value.resourceType)
+  if (
+    recordKey !== createConnectorPollTargetRecordKey(installationId, resourceType) ||
+    lookupKey !== createConnectorPollTargetLookupKey(
+      workspaceId,
+      installationId,
+      resourceType,
+    ) ||
+    lookupSortKey !== `${workspaceId}#${installationId}#${resourceType}`
+  ) throw storedRowInvalid()
+  return value as ConnectorPollTargetRow
 }
 
 function checkpointRecordKey(
@@ -334,7 +415,7 @@ function checkpointProtectionContext(
     `${key.installationId}\0${key.resourceType}`
 }
 
-function encodeInventoryCursor(value: Record<string, unknown>) {
+function encodeInventoryCursor(value: ConnectorPollInventoryCursor) {
   return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
 }
 
@@ -342,8 +423,22 @@ function decodeInventoryCursor(value: string) {
   if (!value || value.length > 8_192) throw new TypeError('Poll inventory cursor is invalid.')
   try {
     const decoded = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as unknown
-    if (!isRecord(decoded)) throw new TypeError('Poll inventory cursor is invalid.')
-    return decoded
+    if (
+      !isRecord(decoded) ||
+      !Number.isSafeInteger(decoded.shard) ||
+      Number(decoded.shard) < 0 ||
+      Number(decoded.shard) >= CONNECTOR_POLL_TARGET_SHARD_COUNT ||
+      (
+        decoded.exclusiveStartKey !== undefined &&
+        !isRecord(decoded.exclusiveStartKey)
+      )
+    ) throw new TypeError('Poll inventory cursor is invalid.')
+    return {
+      shard: Number(decoded.shard),
+      ...(decoded.exclusiveStartKey
+        ? { exclusiveStartKey: decoded.exclusiveStartKey }
+        : {}),
+    } satisfies ConnectorPollInventoryCursor
   } catch (error) {
     if (error instanceof TypeError) throw error
     throw new TypeError('Poll inventory cursor is invalid.')
@@ -410,4 +505,27 @@ function hasControlCharacter(value: string) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+async function mapWithConcurrency<TInput, TOutput>(
+  values: readonly TInput[],
+  concurrency: number,
+  mapper: (value: TInput) => Promise<TOutput>,
+) {
+  const results: TOutput[] = []
+  let nextIndex = 0
+  await Promise.all(Array.from({
+    length: Math.min(values.length, Math.max(1, Math.floor(concurrency))),
+  }, async () => {
+    while (nextIndex < values.length) {
+      const index = nextIndex
+      nextIndex += 1
+      results[index] = await mapper(values[index]!)
+    }
+  }))
+  return results
+}
+
+function isDefined<T>(value: T | undefined): value is T {
+  return value !== undefined
 }

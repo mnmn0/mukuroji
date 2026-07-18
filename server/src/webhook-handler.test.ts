@@ -9,7 +9,10 @@ import {
   LocalAesGcmSecretProtector,
 } from './developer-platform'
 import {
+  DynamoDbWebhookAuditEventReader,
   DynamoDbWebhookDeliveryClaimStore,
+  WEBHOOK_PROJECTION_CONCURRENCY,
+  WEBHOOK_PROJECTION_PAGE_SIZE,
   processWebhookDeliveryBatch,
   processWebhookProjectionBatch,
   type WebhookDeliveryClaimStore,
@@ -18,13 +21,10 @@ import {
   type WebhookQueueMessage,
 } from './webhook-handler'
 
-test('projects one deterministic secret-free delivery from a pending audit event', async () => {
+test('queues an ID-only durable projection locator from a pending audit event', async () => {
   const now = new Date('2026-07-18T00:00:00.000Z')
-  const platform = createPlatform(() => now)
-  await createSubscription(platform)
   const queued: WebhookQueueMessage[] = []
   const event = createWorkItemAuditEvent(now)
-  let batchAuthorizerCreations = 0
 
   const response = await processWebhookProjectionBatch({
     Records: [{
@@ -35,70 +35,105 @@ test('projects one deterministic secret-free delivery from a pending audit event
       },
     }],
   }, {
+    queue: createRecordingQueue(queued),
+  })
+
+  expect(response).toEqual({ batchItemFailures: [] })
+  expect(queued).toHaveLength(1)
+  expect(queued[0]).toEqual({
+    kind: 'projection',
+    workspaceId: 'workspace-1',
+    eventId: event.eventId,
+  })
+  expect(JSON.stringify(queued)).not.toContain('mk_webhook_')
+  expect(JSON.stringify(queued)).not.toContain('metadata')
+})
+
+test('projects one bounded subscription page and queues a durable continuation', async () => {
+  const now = new Date('2026-07-18T00:00:00.000Z')
+  const platform = createPlatform(() => now)
+  const matching = await Promise.all(Array.from({ length: 13 }, async (_, index) =>
+    await createSubscription(platform, {
+      name: `Matching subscription ${String(index)}`,
+    })
+  ))
+  const wrongEvent = await createSubscription(platform, {
+    name: 'Wrong event subscription',
+    eventTypes: ['work-item.updated'],
+  })
+  const wrongTeam = await createSubscription(platform, {
+    name: 'Wrong Team subscription',
+    teamIds: ['team-2'],
+  })
+  const disabled = await createSubscription(platform, {
+    name: 'Disabled subscription',
+  })
+  await platform.setWebhookSubscriptionStatus({
+    workspaceId: 'workspace-1',
+    subscriptionId: disabled.subscription.id,
+    status: 'disabled',
+  })
+  const subscriptions = await platform.listWebhookSubscriptions('workspace-1')
+  const pageRequests: Array<{ workspaceId: string; cursor?: string; limit?: number }> = []
+  platform.listActiveWebhookSubscriptionsPage = async (request) => {
+    pageRequests.push(request)
+    return { subscriptions, nextCursor: 'subscription-page-2' }
+  }
+
+  const queued: WebhookQueueMessage[] = []
+  const event = createWorkItemAuditEvent(now)
+  let concurrentAuthorizations = 0
+  let maxConcurrentAuthorizations = 0
+  const authorizationIds: string[] = []
+  const deniedSubscriptionId = matching.at(-1)!.subscription.id
+  const response = await processWebhookDeliveryBatch({
+    Records: [createProjectionSqsRecord(event.eventId)],
+  }, {
+    auditEvents: { getEvent: async () => event },
     developerPlatform: platform,
     authorizer: {
-      async canDeliver() {
-        throw new Error('The unscoped authorizer must not be used for a Lambda batch.')
-      },
-      createBatch() {
-        batchAuthorizerCreations += 1
-        return { canDeliver: async () => true }
+      async canDeliver(_workspaceId, subscription) {
+        authorizationIds.push(subscription.id)
+        concurrentAuthorizations += 1
+        maxConcurrentAuthorizations = Math.max(
+          maxConcurrentAuthorizations,
+          concurrentAuthorizations,
+        )
+        await Promise.resolve()
+        concurrentAuthorizations -= 1
+        return subscription.id !== deniedSubscriptionId
       },
     },
     queue: createRecordingQueue(queued),
+    claims: createMemoryClaimStore(),
+    now: () => now,
+    random: () => 0.5,
+    async deliver() {
+      throw new Error('Projection must not perform HTTP delivery.')
+    },
   })
 
   expect(response).toEqual({ batchItemFailures: [] })
-  expect(batchAuthorizerCreations).toBe(1)
-  expect(queued).toHaveLength(1)
-  expect(queued[0]).toEqual({
+  expect(pageRequests).toEqual([{
     workspaceId: 'workspace-1',
-    deliveryId: expect.stringMatching(/^delivery_/),
-  })
-  expect(JSON.stringify(queued)).not.toContain('whsec_')
-  const page = await platform.listWebhookDeliveries({ workspaceId: 'workspace-1' })
-  expect(page.deliveries).toHaveLength(1)
-  expect(page.deliveries[0]).toMatchObject({
+    limit: WEBHOOK_PROJECTION_PAGE_SIZE,
+  }])
+  expect(maxConcurrentAuthorizations).toBe(WEBHOOK_PROJECTION_CONCURRENCY)
+  expect(authorizationIds.sort()).toEqual(
+    matching.map(({ subscription }) => subscription.id).sort(),
+  )
+  expect(authorizationIds).not.toContain(wrongEvent.subscription.id)
+  expect(authorizationIds).not.toContain(wrongTeam.subscription.id)
+  expect(authorizationIds).not.toContain(disabled.subscription.id)
+  expect(queued.filter((message) => message.kind === 'delivery')).toHaveLength(12)
+  expect(queued.at(-1)).toEqual({
+    kind: 'projection',
+    workspaceId: 'workspace-1',
     eventId: event.eventId,
-    eventType: 'work-item.created',
-    status: 'pending',
-    attempts: 0,
+    cursor: 'subscription-page-2',
   })
-  const prepared = await platform.prepareWebhookDelivery({
-    workspaceId: 'workspace-1',
-    deliveryId: page.deliveries[0]!.id,
-  })
-  expect(JSON.parse(prepared.payload)).toMatchObject({
-    id: event.eventId,
-    type: 'work-item.created',
-    apiVersion: '2026-07-01',
-    workspaceId: 'workspace-1',
-  })
-})
-
-test('skips delivery when the subscription creator lost current Team access', async () => {
-  const now = new Date('2026-07-18T00:00:00.000Z')
-  const platform = createPlatform(() => now)
-  await createSubscription(platform)
-  const queued: WebhookQueueMessage[] = []
-  const response = await processWebhookProjectionBatch({
-    Records: [{
-      eventName: 'INSERT',
-      dynamodb: {
-        SequenceNumber: '102',
-        NewImage: marshallRecord(createWorkItemAuditEvent(now)),
-      },
-    }],
-  }, {
-    developerPlatform: platform,
-    authorizer: { canDeliver: async () => false },
-    queue: createRecordingQueue(queued),
-  })
-
-  expect(response).toEqual({ batchItemFailures: [] })
-  expect(queued).toEqual([])
-  expect(await platform.listWebhookDeliveries({ workspaceId: 'workspace-1' }))
-    .toMatchObject({ deliveries: [] })
+  const deliveries = await platform.listWebhookDeliveries({ workspaceId: 'workspace-1' })
+  expect(deliveries.deliveries).toHaveLength(12)
 })
 
 test('records a successful signed HTTP attempt in the delivery log', async () => {
@@ -110,6 +145,7 @@ test('records a successful signed HTTP attempt in the delivery log', async () =>
   const response = await processWebhookDeliveryBatch({
     Records: [createSqsRecord(fixture.deliveryId)],
   }, {
+    auditEvents: createMissingAuditReader(),
     developerPlatform: fixture.platform,
     authorizer: {
       async canDeliver() {
@@ -153,6 +189,7 @@ test('claims a delivery ID before HTTP and retries a concurrent duplicate', asyn
       createSqsRecord(fixture.deliveryId, 'message-duplicate'),
     ],
   }, {
+    auditEvents: createMissingAuditReader(),
     developerPlatform: fixture.platform,
     authorizer: { canDeliver: async () => true },
     queue: createRecordingQueue([]),
@@ -188,6 +225,7 @@ test('does not acknowledge a redelivery while a failed attempt lease is active',
   }
   let deliveryCalls = 0
   const dependencies = {
+    auditEvents: createMissingAuditReader(),
     developerPlatform: fixture.platform,
     authorizer: { canDeliver: async () => true },
     queue: createRecordingQueue([]),
@@ -257,6 +295,28 @@ test('uses an expiring conditional DynamoDB row for delivery claims', async () =
   })
 })
 
+test('strongly reads a Workspace-bound Audit event for projection', async () => {
+  const event = createWorkItemAuditEvent(new Date('2026-07-18T00:00:00.000Z'))
+  const commands: Array<{ constructor: { name: string }; input: Record<string, unknown> }> = []
+  const documentClient = {
+    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+      commands.push(command)
+      return { Item: event }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const reader = new DynamoDbWebhookAuditEventReader(documentClient, 'audit-events-test')
+
+  await expect(reader.getEvent('workspace-1', event.eventId)).resolves.toEqual(event)
+  expect(commands[0]).toMatchObject({
+    constructor: { name: 'GetCommand' },
+    input: {
+      TableName: 'audit-events-test',
+      Key: { directoryId: 'workspace-1', eventId: event.eventId },
+      ConsistentRead: true,
+    },
+  })
+})
+
 test('blocks a queued replay after the subscription creator loses access', async () => {
   const now = new Date('2026-07-18T00:00:00.000Z')
   const fixture = await createDeliveryFixture(() => now)
@@ -265,6 +325,7 @@ test('blocks a queued replay after the subscription creator loses access', async
   const response = await processWebhookDeliveryBatch({
     Records: [createSqsRecord(fixture.deliveryId)],
   }, {
+    auditEvents: createMissingAuditReader(),
     developerPlatform: fixture.platform,
     authorizer: { canDeliver: async () => false },
     queue: createRecordingQueue([]),
@@ -289,6 +350,7 @@ test('persists retry schedule and avoids an early duplicate HTTP attempt', async
   const queued: WebhookQueueMessage[] = []
   let deliveryCalls = 0
   const dependencies = {
+    auditEvents: createMissingAuditReader(),
     developerPlatform: fixture.platform,
     authorizer: { canDeliver: async () => true },
     queue: createRecordingQueue(queued),
@@ -314,6 +376,7 @@ test('persists retry schedule and avoids an early duplicate HTTP attempt', async
   }, dependencies)
   expect(deliveryCalls).toBe(1)
   expect(queued.at(-1)).toEqual({
+    kind: 'delivery',
     workspaceId: 'workspace-1',
     deliveryId: fixture.deliveryId,
     delaySeconds: 45,
@@ -330,7 +393,7 @@ test('persists retry schedule and avoids an early duplicate HTTP attempt', async
     Records: [createSqsRecord(fixture.deliveryId, 'message-early')],
   }, dependencies)
   expect(deliveryCalls).toBe(1)
-  expect(queued.at(-1)?.delaySeconds).toBe(45)
+  expect(queued.at(-1)).toMatchObject({ kind: 'delivery', delaySeconds: 45 })
 
   now = new Date('2026-07-18T00:00:46.000Z')
   await processWebhookDeliveryBatch({
@@ -354,6 +417,7 @@ test('records terminal rejection and isolates an invalid queue message', async (
       { messageId: 'invalid-message', body: '{' },
     ],
   }, {
+    auditEvents: createMissingAuditReader(),
     developerPlatform: fixture.platform,
     authorizer: { canDeliver: async () => true },
     queue: createRecordingQueue([]),
@@ -388,15 +452,22 @@ function createPlatform(clock: () => Date) {
   )
 }
 
-async function createSubscription(platform: InMemoryDeveloperPlatformClient) {
+async function createSubscription(
+  platform: InMemoryDeveloperPlatformClient,
+  options: {
+    name?: string
+    teamIds?: string[]
+    eventTypes?: Array<'work-item.created' | 'work-item.updated'>
+  } = {},
+) {
   return await platform.createWebhookSubscription({
     workspaceId: 'workspace-1',
     createdByUserId: 'creator-1',
     input: {
-      name: 'Work Item automation',
+      name: options.name ?? 'Work Item automation',
       url: 'https://hooks.example.com/mukuroji',
-      teamIds: ['team-1'],
-      eventTypes: ['work-item.created'],
+      teamIds: options.teamIds ?? ['team-1'],
+      eventTypes: options.eventTypes ?? ['work-item.created'],
       scopes: ['work-items:read'],
     },
   })
@@ -465,10 +536,21 @@ function createMemoryClaimStore(): WebhookDeliveryClaimStore {
   }
 }
 
+function createMissingAuditReader() {
+  return { getEvent: async () => undefined }
+}
+
 function createSqsRecord(deliveryId: string, messageId = 'message-1') {
   return {
     messageId,
-    body: JSON.stringify({ workspaceId: 'workspace-1', deliveryId }),
+    body: JSON.stringify({ kind: 'delivery', workspaceId: 'workspace-1', deliveryId }),
+  }
+}
+
+function createProjectionSqsRecord(eventId: string, messageId = 'projection-message-1') {
+  return {
+    messageId,
+    body: JSON.stringify({ kind: 'projection', workspaceId: 'workspace-1', eventId }),
   }
 }
 

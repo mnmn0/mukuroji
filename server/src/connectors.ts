@@ -379,6 +379,8 @@ export function decideConnectorInboundSync(input: {
   externalVersion: string
   /** Event に含まれた origin marker です。 */
   originMarker?: string
+  /** 直前の outbound operation で送信した未消費 marker です。 */
+  expectedOriginMarker?: string
   /** Link 読み込み後に取得した現在 Work Item revision です。 */
   actualWorkItemRevision: number
   /** Origin marker を認証する HMAC secret です。 */
@@ -389,14 +391,19 @@ export function decideConnectorInboundSync(input: {
   if (input.eventId === input.state.lastExternalEventId) {
     return { kind: 'duplicate', reason: 'External event was already processed.' }
   }
-  if (input.originMarker && isAuthenticConnectorOriginMarker(
-    input.originMarker,
-    input.state,
-    [
-      input.originSigningSecret,
-      ...(input.previousOriginSigningSecrets ?? []),
-    ],
-  )) {
+  if (
+    input.originMarker &&
+    input.originMarker === input.expectedOriginMarker &&
+    input.externalVersion === input.state.lastExternalVersion &&
+    isAuthenticConnectorOriginMarker(
+      input.originMarker,
+      input.state,
+      [
+        input.originSigningSecret,
+        ...(input.previousOriginSigningSecrets ?? []),
+      ],
+    )
+  ) {
     return { kind: 'self-origin', reason: 'Event echoes a mukuroji outbound mutation.' }
   }
   if (

@@ -92,6 +92,13 @@ describe('connector sync recovery', () => {
   }
 
   test('duplicate/self-origin/out-of-order event を side effect なしで skip する', () => {
+    const originMarker = createConnectorOriginMarker(
+      'ins_1',
+      'link_1',
+      4,
+      'operation-1',
+      ORIGIN_SIGNING_SECRET,
+    )
     expect(decideConnectorInboundSync({
       state,
       eventId: 'evt_old',
@@ -100,16 +107,11 @@ describe('connector sync recovery', () => {
       originSigningSecret: ORIGIN_SIGNING_SECRET,
     }).kind).toBe('duplicate')
     expect(decideConnectorInboundSync({
-      state,
+      state: { ...state, lastExternalVersion: '11' },
       eventId: 'evt_echo',
       externalVersion: '11',
-      originMarker: createConnectorOriginMarker(
-        'ins_1',
-        'link_1',
-        4,
-        'operation-1',
-        ORIGIN_SIGNING_SECRET,
-      ),
+      originMarker,
+      expectedOriginMarker: originMarker,
       actualWorkItemRevision: 4,
       originSigningSecret: ORIGIN_SIGNING_SECRET,
     }).kind).toBe('self-origin')
@@ -198,10 +200,11 @@ describe('connector sync recovery', () => {
       PREVIOUS_ORIGIN_SIGNING_SECRET,
     )
     expect(decideConnectorInboundSync({
-      state,
+      state: { ...state, lastExternalVersion: '11' },
       eventId: 'evt_rotated_echo',
       externalVersion: '11',
       originMarker,
+      expectedOriginMarker: originMarker,
       actualWorkItemRevision: 4,
       originSigningSecret: ORIGIN_SIGNING_SECRET,
       previousOriginSigningSecrets: [PREVIOUS_ORIGIN_SIGNING_SECRET],
@@ -214,8 +217,44 @@ describe('connector sync recovery', () => {
       eventId: 'evt_without_grace_key',
       externalVersion: '11',
       originMarker,
+      expectedOriginMarker: originMarker,
       actualWorkItemRevision: 4,
       originSigningSecret: ORIGIN_SIGNING_SECRET,
     })).toEqual({ kind: 'apply' })
+  })
+
+  test('binds self-origin suppression to the exact operation and returned version', () => {
+    const originMarker = createConnectorOriginMarker(
+      'ins_1',
+      'link_1',
+      4,
+      'operation-1',
+      ORIGIN_SIGNING_SECRET,
+    )
+    expect(decideConnectorInboundSync({
+      state: { ...state, lastExternalVersion: '11' },
+      eventId: 'evt_provider_edit',
+      externalVersion: '12',
+      originMarker,
+      expectedOriginMarker: originMarker,
+      actualWorkItemRevision: 4,
+      originSigningSecret: ORIGIN_SIGNING_SECRET,
+    })).toEqual({ kind: 'apply' })
+    const anotherOperationMarker = createConnectorOriginMarker(
+      'ins_1',
+      'link_1',
+      4,
+      'operation-2',
+      ORIGIN_SIGNING_SECRET,
+    )
+    expect(decideConnectorInboundSync({
+      state: { ...state, lastExternalVersion: '11' },
+      eventId: 'evt_other_operation',
+      externalVersion: '11',
+      originMarker: anotherOperationMarker,
+      expectedOriginMarker: originMarker,
+      actualWorkItemRevision: 4,
+      originSigningSecret: ORIGIN_SIGNING_SECRET,
+    })).toMatchObject({ kind: 'stale' })
   })
 })

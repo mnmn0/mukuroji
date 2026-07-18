@@ -201,7 +201,10 @@ export class ConnectorAuthorizationRuntime
           status: 'disconnected',
           updatedByUserId: principal.userId,
         })
-        return
+        return await this.platform.readConnectorLifecycleSnapshot({
+          workspaceId: principal.workspaceId,
+          installationId,
+        })
       }
       let serialized: string
       try {
@@ -229,7 +232,10 @@ export class ConnectorAuthorizationRuntime
           updatedByUserId: principal.userId,
           expectedCredential: serialized,
         })
-        return
+        return await this.platform.readConnectorLifecycleSnapshot({
+          workspaceId: principal.workspaceId,
+          installationId,
+        })
       } catch (error) {
         if (
           error instanceof DeveloperPlatformError &&

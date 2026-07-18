@@ -2,6 +2,10 @@ import { describe, expect, test } from 'bun:test'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import type { ExternalWorkItemLink } from '@mukuroji/contracts'
 import {
+  createConnectorPollTargetLookupKey,
+  createConnectorPollTargetRecordKey,
+} from './connector-poll-projection'
+import {
   DynamoDbConnectorSyncPersistence,
 } from './connector-sync-persistence'
 import type { StoredConnectorSyncConflict } from './connector-sync-runtime'
@@ -83,8 +87,15 @@ function createMemoryDocumentClient() {
             ConditionExpression: string
             ExpressionAttributeValues: Record<string, unknown>
           }
+          Update?: {
+            TableName: string
+            Key: { workspaceId: string; recordKey: string }
+            UpdateExpression: string
+            ConditionExpression: string
+            ExpressionAttributeValues: Record<string, unknown>
+          }
         }>
-        if (writes.some(({ Put, ConditionCheck }) => {
+        if (writes.some(({ Put, ConditionCheck, Update }) => {
           if (Put) {
             const current = items.get(itemKey(Put.TableName, Put.Item))
             if (
@@ -114,11 +125,59 @@ function createMemoryDocumentClient() {
               current?.version !== Put.ExpressionAttributeValues?.[':expectedVersion']
             ) return true
           }
+          if (Update) {
+            const current = items.get(itemKey(Update.TableName, Update.Key))
+            const currentValue = current?.value as
+              | Record<string, unknown>
+              | undefined
+            const values = Update.ExpressionAttributeValues
+            if (values[':entryType'] !== 'connector-poll-target') {
+              throw new Error(
+                `Unsupported transaction Update: ${Update.UpdateExpression}`,
+              )
+            }
+            const incrementing = Update.UpdateExpression.includes(
+              'if_not_exists(pollableLinkCount, :zero) +',
+            )
+            const expectedCondition = incrementing
+              ? 'attribute_not_exists(#entryType) OR ' +
+                '(#entryType = :entryType AND #value.#installationId = :installationId AND ' +
+                '#value.#resourceType = :resourceType AND pollableLinkCount >= :zero)'
+              : '#entryType = :entryType AND #value.#installationId = :installationId AND ' +
+                '#value.#resourceType = :resourceType AND pollableLinkCount >= :one'
+            if (Update.ConditionExpression !== expectedCondition) {
+              throw new Error(
+                `Unsupported transaction Update condition: ${Update.ConditionExpression}`,
+              )
+            }
+            const count = Number(current?.pollableLinkCount ?? 0)
+            if (!current) return !incrementing
+            if (
+              current.entryType !== values[':entryType'] ||
+              currentValue?.installationId !== values[':installationId'] ||
+              currentValue?.resourceType !== values[':resourceType'] ||
+              !Number.isSafeInteger(count) ||
+              count < (incrementing ? 0 : 1)
+            ) return true
+          }
           if (!ConditionCheck) return false
           const current = items.get(itemKey(
             ConditionCheck.TableName,
             ConditionCheck.Key,
           ))
+          if (
+            ConditionCheck.ConditionExpression ===
+              '#entryType = :entryType AND #version = :expectedStateRevision AND ' +
+                '#value.#lastExternalVersion = :expectedExternalVersion'
+          ) {
+            const value = current?.value as Record<string, unknown> | undefined
+            return current?.entryType !==
+                ConditionCheck.ExpressionAttributeValues[':entryType'] ||
+              current?.version !==
+                ConditionCheck.ExpressionAttributeValues[':expectedStateRevision'] ||
+              value?.lastExternalVersion !==
+                ConditionCheck.ExpressionAttributeValues[':expectedExternalVersion']
+          }
           if (ConditionCheck.ConditionExpression === '#version = :expectedVersion') {
             return current?.version !==
               ConditionCheck.ExpressionAttributeValues[':expectedVersion']
@@ -143,9 +202,27 @@ function createMemoryDocumentClient() {
             value.status === values[':needsReauthorization']
           )
         })) throw transactionFailure()
-        for (const { Put } of writes) {
-          if (!Put) continue
-          items.set(itemKey(Put.TableName, Put.Item), structuredClone(Put.Item))
+        for (const { Put, Update } of writes) {
+          if (Put) {
+            items.set(itemKey(Put.TableName, Put.Item), structuredClone(Put.Item))
+          }
+          if (Update) {
+            const key = itemKey(Update.TableName, Update.Key)
+            const current = items.get(key)
+            const values = Update.ExpressionAttributeValues
+            const delta = Update.UpdateExpression.includes('pollableLinkCount -')
+              ? -1
+              : 1
+            items.set(key, {
+              ...(current ?? Update.Key),
+              entryType: current?.entryType ?? values[':entryType'],
+              value: current?.value ?? structuredClone(values[':value']),
+              pollableLinkCount: Number(current?.pollableLinkCount ?? 0) + delta,
+              lookupKey: values[':lookupKey'],
+              lookupSortKey: values[':lookupSortKey'],
+              version: Number(current?.version ?? 0) + 1,
+            })
+          }
         }
         return {}
       }
@@ -236,14 +313,6 @@ function seedLinkAndConnector(
       entryType: 'external-link',
       value: structuredClone(link),
       version: 1,
-      ...(link.syncStatus !== 'paused' &&
-          link.syncStatus !== 'conflict' &&
-          (link.syncDirection === 'inbound' || link.syncDirection === 'bidirectional')
-        ? {
-            lookupKey: 'CONNECTOR_SYNC_LINK',
-            lookupSortKey: `workspace-1#${link.id}`,
-          }
-        : {}),
     },
   )
   memory.items.set(
@@ -262,6 +331,53 @@ function seedLinkAndConnector(
       version: 1,
     },
   )
+  if (
+    link.syncStatus !== 'paused' &&
+    link.syncStatus !== 'conflict' &&
+    (link.syncDirection === 'inbound' || link.syncDirection === 'bidirectional')
+  ) {
+    const recordKey = createConnectorPollTargetRecordKey(
+      link.installationId,
+      link.resourceType,
+    )
+    memory.items.set(
+      memory.itemKey('DeveloperPlatformTable', {
+        workspaceId: 'workspace-1',
+        recordKey,
+      }),
+      {
+        workspaceId: 'workspace-1',
+        recordKey,
+        entryType: 'connector-poll-target',
+        value: {
+          installationId: link.installationId,
+          resourceType: link.resourceType,
+        },
+        pollableLinkCount: 1,
+        lookupKey: createConnectorPollTargetLookupKey(
+          'workspace-1',
+          link.installationId,
+          link.resourceType,
+        ),
+        lookupSortKey:
+          `workspace-1#${link.installationId}#${link.resourceType}`,
+        version: 1,
+      },
+    )
+  }
+}
+
+function getPollTarget(
+  memory: ReturnType<typeof createMemoryDocumentClient>,
+  link: ExternalWorkItemLink,
+) {
+  return memory.items.get(memory.itemKey('DeveloperPlatformTable', {
+    workspaceId: 'workspace-1',
+    recordKey: createConnectorPollTargetRecordKey(
+      link.installationId,
+      link.resourceType,
+    ),
+  }))
 }
 
 function createConflict(): StoredConnectorSyncConflict {
@@ -374,6 +490,13 @@ describe('DynamoDbConnectorSyncPersistence', () => {
         }),
       }),
     ]))
+    expect(firstCommitWrites).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ Update: expect.anything() }),
+    ]))
+    expect(getPollTarget(memory, link)).toMatchObject({
+      pollableLinkCount: 1,
+      version: 1,
+    })
     await expect(persistence.commitLinkState(first)).resolves.toBe(false)
     await expect(persistence.commitLinkState({
       ...first,
@@ -445,12 +568,35 @@ describe('DynamoDbConnectorSyncPersistence', () => {
       workspaceId: 'workspace-1',
       recordKey: `EXTERNALLINK#${link.id}`,
     }))).not.toHaveProperty('lookupKey')
+    expect(getPollTarget(memory, link)).toMatchObject({
+      pollableLinkCount: 0,
+      version: 2,
+    })
   })
 
   test('acknowledges only the exact pending poll generation', async () => {
     const memory = createMemoryDocumentClient()
     const link = createLink()
     seedLinkAndConnector(memory, link)
+    memory.items.set(
+      memory.itemKey('DeveloperPlatformTable', {
+        workspaceId: 'workspace-1',
+        recordKey: `CONNECTORSYNC#${link.id}`,
+      }),
+      {
+        workspaceId: 'workspace-1',
+        recordKey: `CONNECTORSYNC#${link.id}`,
+        entryType: 'connector-sync-state',
+        value: {
+          installationId: link.installationId,
+          linkId: link.id,
+          workItemRevision: 3,
+          lastExternalVersion: 'external-4',
+          storageRevision: 1,
+        },
+        version: 1,
+      },
+    )
     const persistence = new DynamoDbConnectorSyncPersistence({
       tableName: 'DeveloperPlatformTable',
       auditTableName: 'AuditEventsTable',
@@ -461,12 +607,32 @@ describe('DynamoDbConnectorSyncPersistence', () => {
       'workspace-1',
       link.id,
       '2026-07-18T00:00:01.000Z',
+      'external-4',
+      1,
       '2026-07-18T00:01:00.000Z',
     )).resolves.toBe(false)
     await expect(persistence.acknowledgePendingLink(
       'workspace-1',
       link.id,
       link.updatedAt,
+      'external-stale',
+      1,
+      '2026-07-18T00:01:00.000Z',
+    )).resolves.toBe(false)
+    await expect(persistence.acknowledgePendingLink(
+      'workspace-1',
+      link.id,
+      link.updatedAt,
+      'external-4',
+      2,
+      '2026-07-18T00:01:00.000Z',
+    )).resolves.toBe(false)
+    await expect(persistence.acknowledgePendingLink(
+      'workspace-1',
+      link.id,
+      link.updatedAt,
+      'external-4',
+      1,
       '2026-07-18T00:01:00.000Z',
     )).resolves.toBe(true)
     expect(memory.items.get(memory.itemKey('DeveloperPlatformTable', {
@@ -480,10 +646,16 @@ describe('DynamoDbConnectorSyncPersistence', () => {
       },
       version: 2,
     })
+    expect(getPollTarget(memory, link)).toMatchObject({
+      pollableLinkCount: 1,
+      version: 1,
+    })
     await expect(persistence.acknowledgePendingLink(
       'workspace-1',
       link.id,
       link.updatedAt,
+      'external-4',
+      1,
       '2026-07-18T00:01:00.000Z',
     )).resolves.toBe(false)
   })
@@ -664,7 +836,15 @@ describe('DynamoDbConnectorSyncPersistence', () => {
       workspaceId: 'workspace-1',
       recordKey: `EXTERNALLINK#${link.id}`,
     }))).not.toHaveProperty('lookupKey')
+    expect(getPollTarget(memory, link)).toMatchObject({
+      pollableLinkCount: 0,
+      version: 2,
+    })
     await expect(persistence.createConflict(record)).resolves.toEqual(record.conflict)
+    expect(getPollTarget(memory, link)).toMatchObject({
+      pollableLinkCount: 0,
+      version: 2,
+    })
     await expect(persistence.getConflict('workspace-other', record.conflict.id))
       .resolves.toBeUndefined()
     await expect(persistence.listConflicts('workspace-1', {
@@ -726,12 +906,14 @@ describe('DynamoDbConnectorSyncPersistence', () => {
       workspaceId: 'workspace-1',
       recordKey: `EXTERNALLINK#${link.id}`,
     }))).toMatchObject({
-      lookupKey: 'CONNECTOR_SYNC_LINK',
-      lookupSortKey: `workspace-1#${link.id}`,
       value: {
         syncStatus: 'synced',
         lastSyncedAt: '2026-07-18T00:02:00.000Z',
       },
+      version: 3,
+    })
+    expect(getPollTarget(memory, link)).toMatchObject({
+      pollableLinkCount: 1,
       version: 3,
     })
 

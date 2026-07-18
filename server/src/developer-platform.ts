@@ -39,6 +39,10 @@ import {
   getConfiguredAuditTableName,
   type AuditTransactWriteItem,
 } from './audit'
+import {
+  createConnectorPollTargetLookupKey,
+  createConnectorPollTargetRecordKey,
+} from './connector-poll-projection'
 
 /** Developer platform credential に付与できる全 scope です。 */
 export const API_SCOPES = [
@@ -77,6 +81,9 @@ export const IDEMPOTENCY_RESERVATION_LEASE_SECONDS = 2 * 60
 /** Webhook delivery log と index locator を保持する期間です。 */
 export const WEBHOOK_DELIVERY_RETENTION_SECONDS = 90 * 24 * 60 * 60
 
+/** Disabled Webhook subscription metadata を監査目的で保持する期間です。 */
+export const WEBHOOK_DISABLED_SUBSCRIPTION_RETENTION_SECONDS = 90 * 24 * 60 * 60
+
 /** Webhook delivery の既定取得件数です。 */
 export const WEBHOOK_DELIVERY_DEFAULT_LIMIT = 50
 
@@ -86,8 +93,17 @@ export const WEBHOOK_DELIVERY_MAX_LIMIT = 100
 /** 一つの Workspace に保存できる Webhook subscription 上限です。 */
 export const WEBHOOK_SUBSCRIPTION_LIMIT = 1_000
 
+/** 一つの Webhook projection job が処理できる subscription 上限です。 */
+export const WEBHOOK_PROJECTION_PAGE_MAX_LIMIT = 50
+
+/** Webhook delivery 永続化処理の同時実行上限です。 */
+const WEBHOOK_ENQUEUE_CONCURRENCY = 10
+
 /** 一つの connector installation に保存できる external link 上限です。 */
 export const EXTERNAL_LINK_INSTALLATION_LIMIT = 2_000
+
+/** 一つの connector disconnect job が処理できる link 上限です。 */
+export const CONNECTOR_DISCONNECT_PAGE_MAX_LIMIT = 50
 
 /** 一つの Work Item に保存できる external link 上限です。 */
 export const EXTERNAL_LINK_WORK_ITEM_LIMIT = 2_000
@@ -320,6 +336,24 @@ export type EnqueueWebhookEventRequest = {
   event: WebhookEventEnvelope
 }
 
+/** Active Webhook subscription の内部pagination requestです。 */
+export type ListActiveWebhookSubscriptionsPageRequest = {
+  /** Subscription を所有する Workspace ID です。 */
+  workspaceId: string
+  /** 一 page の最大件数です。 */
+  limit: number
+  /** 前 page が返した内部 cursor です。 */
+  cursor?: string
+}
+
+/** Active Webhook subscription の内部pagination結果です。 */
+export type ActiveWebhookSubscriptionsPage = {
+  /** Current active projectionを強整合再検証した subscription です。 */
+  subscriptions: WebhookSubscription[]
+  /** 次 page が存在する場合の内部 cursor です。 */
+  nextCursor?: string
+}
+
 /** Webhook delivery page request です。 */
 export type ListWebhookDeliveriesRequest = {
   /** Delivery を所有する Workspace ID です。 */
@@ -468,6 +502,32 @@ export type ConnectorLifecycleSnapshot = {
   installation: ConnectorInstallation
   /** Installation row の optimistic-concurrency revision です。 */
   lifecycleRevision: number
+  /** Pending disconnect cleanupをqueueへ束縛するstable operation revisionです。 */
+  disconnectCleanupRevision?: number
+}
+
+/** Disconnected connector link のbounded pause requestです。 */
+export type PauseConnectorExternalLinksPageRequest = {
+  /** Installation を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Pause対象 installation ID です。 */
+  installationId: string
+  /** Disconnect transitionを束縛する lifecycle revision です。 */
+  expectedLifecycleRevision: number
+  /** Lifecycle auditへ記録する actor User ID です。 */
+  updatedByUserId?: string
+  /** 一 job でpauseする最大 link 数です。 */
+  limit: number
+  /** 前 page が返した内部 cursor です。 */
+  cursor?: string
+}
+
+/** Disconnected connector link のbounded pause結果です。 */
+export type PauseConnectorExternalLinksPageResult = {
+  /** このpageでpauseへ遷移した link 数です。 */
+  paused: number
+  /** 次 page が存在する場合の内部 cursor です。 */
+  nextCursor?: string
 }
 
 /** Reauthorization callback の current OAuth state 検証 request です。 */
@@ -784,6 +844,10 @@ export interface DeveloperPlatformClient {
   ): Promise<WebhookSecretResult>
   /** Workspace の secret を含まない Webhook subscription を返します。 */
   listWebhookSubscriptions(workspaceId: string): Promise<WebhookSubscription[]>
+  /** Active Webhook subscription projection を bounded page 取得します。 */
+  listActiveWebhookSubscriptionsPage(
+    request: ListActiveWebhookSubscriptionsPageRequest,
+  ): Promise<ActiveWebhookSubscriptionsPage>
   /** Webhook signing secret を置換し、新 secret を一度だけ返します。 */
   rotateWebhookSecret(request: RotateWebhookSecretRequest): Promise<WebhookSecretResult>
   /** Webhook subscription status を更新します。 */
@@ -842,6 +906,10 @@ export interface DeveloperPlatformClient {
   recoverConnector(request: RecoverConnectorRequest): Promise<ConnectorInstallation>
   /** Connector worker 内でのみ使う credential を復号します。 */
   readConnectorCredential(request: ReadConnectorCredentialRequest): Promise<string>
+  /** Disconnected installation の external links を bounded page でpauseします。 */
+  pauseConnectorExternalLinksPage(
+    request: PauseConnectorExternalLinksPageRequest,
+  ): Promise<PauseConnectorExternalLinksPageResult>
   /** External resource と canonical Work Item の一意な link を作成します。 */
   createExternalWorkItemLink(
     request: CreateExternalWorkItemLinkRequest,
@@ -1189,6 +1257,7 @@ type DeveloperPlatformEntryType =
   | 'webhook-delivery'
   | 'webhook-delivery-index'
   | 'connector-installation'
+  | 'connector-poll-target'
   | 'external-link'
   | 'external-link-index'
   | 'external-link-claim'
@@ -1227,6 +1296,8 @@ type DeveloperPlatformRecord = {
   connectorOAuthStateDigest?: string
   /** Connector OAuth state fencing の単調増加 revision です。 */
   connectorOAuthStateRevision?: number
+  /** External-link pause 完了まで reauthorization を防ぐ disconnect revision です。 */
+  connectorDisconnectCleanupRevision?: number
   /** DynamoDB TTL epoch seconds です。 */
   expiresAt?: number
   /** Fixed-window rate limit の消費量です。 */
@@ -1237,6 +1308,8 @@ type DeveloperPlatformRecord = {
   subscriptionCount?: number
   /** Connector installation に作成済みの external-link 数です。 */
   externalLinkCount?: number
+  /** Installation/resource に現在存在する pollable external-link 数です。 */
+  pollableLinkCount?: number
   /** Optimistic conditional update 用 version です。 */
   version: number
 }
@@ -1323,6 +1396,14 @@ type StoredWebhookSubscriptionQuotaValue = {
   limit: typeof WEBHOOK_SUBSCRIPTION_LIMIT
 }
 
+/** Installation/resource ごとの materialized connector poll target です。 */
+type StoredConnectorPollTargetValue = {
+  /** Connector installation ID です。 */
+  installationId: string
+  /** Provider resource 種別です。 */
+  resourceType: ExternalWorkItemLink['resourceType']
+}
+
 /** Idempotency row の非公開 value です。 */
 type StoredIdempotencyValue = {
   /** 同じ raw key に対する request fingerprint digest です。 */
@@ -1407,6 +1488,14 @@ type QueryLookupIndexResult = {
   locators: DeveloperPlatformRecordLocator[]
   /** 続きがある場合の最終評価 key です。 */
   lastEvaluatedKey?: DeveloperPlatformRecordLocator
+}
+
+/** Base-table prefix query のbounded page結果です。 */
+type ListRecordsPageResult = {
+  /** Current page のstrongly consistent rows です。 */
+  records: DeveloperPlatformRecord[]
+  /** 次 page が存在する場合のbase-table sort keyです。 */
+  nextRecordKey?: string
 }
 
 /** Conditional put の条件です。 */
@@ -1518,6 +1607,14 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     recordKeyPrefix: string,
   ): Promise<DeveloperPlatformRecord[]>
 
+  /** Workspace partition の prefix rows をbounded page取得します。 */
+  protected abstract listRecordsPage(
+    workspaceId: string,
+    recordKeyPrefix: string,
+    limit: number,
+    exclusiveStartRecordKey?: string,
+  ): Promise<ListRecordsPageResult>
+
   /** lookupKey GSI 相当から一意な row を取得します。 */
   protected abstract getRecordByLookupKey(
     lookupKey: string,
@@ -1620,8 +1717,18 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     linkRecord: DeveloperPlatformRecord,
     expectedLinkVersion: number,
     installationRecord: DeveloperPlatformRecord,
+    previousLink: ExternalWorkItemLink,
+    expectedConnectorStatus: 'connected' | 'disconnected',
     completion?: PreparedIdempotencyCompletionRecord,
     auditPut?: AuditTransactWriteItem,
+  ): Promise<boolean>
+
+  /** Connector lifecycle revisionを変えずにcurrent disconnect cleanup markerを解除します。 */
+  protected abstract clearConnectorDisconnectCleanupMarker(
+    workspaceId: string,
+    connectorRecordKey: string,
+    expectedRecordVersion: number,
+    expectedCleanupRevision: number,
   ): Promise<boolean>
 
   /** External link、claim、sync state、receipt、audit を原子的に削除・保存します。 */
@@ -2504,7 +2611,10 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       createWebhookRecordKey(id),
       'webhook-subscription',
       subscription,
-      { secretCiphertext },
+      {
+        secretCiphertext,
+        ...createActiveWebhookSubscriptionProjection(workspaceId, subscription),
+      },
     )
     const result = {
       subscription: clone(subscription),
@@ -2534,11 +2644,64 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     const records = await this.listRecords(workspaceId, 'WEBHOOK#')
     return sortByCreatedAt(
       records
-        .filter((record) => record.entryType === 'webhook-subscription')
+        .filter((record) =>
+          record.entryType === 'webhook-subscription' &&
+          !isRecordExpired(record, this.clock())
+        )
         .map((record) =>
           clone(readRecordValue<WebhookSubscription>(record, 'webhook-subscription'))
         ),
     )
+  }
+
+  /** Active sparse projection を bounded page 取得し、base row を強整合再検証します。 */
+  async listActiveWebhookSubscriptionsPage(
+    request: ListActiveWebhookSubscriptionsPageRequest,
+  ): Promise<ActiveWebhookSubscriptionsPage> {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const limit = readBoundedLimit(
+      request.limit,
+      WEBHOOK_PROJECTION_PAGE_MAX_LIMIT,
+      'Webhook subscription page limit',
+    )
+    const lookupKey = createActiveWebhookSubscriptionLookupKey(workspaceId)
+    const exclusiveStartKey = request.cursor === undefined
+      ? undefined
+      : decodeInternalLookupCursor(
+          request.cursor,
+          lookupKey,
+          'Webhook subscription cursor',
+        )
+    const page = await this.queryLookupIndex({
+      lookupKey,
+      limit,
+      scanIndexForward: true,
+      ...(exclusiveStartKey ? { exclusiveStartKey } : {}),
+    })
+    const subscriptions = (await mapWithConcurrency(
+      page.locators,
+      WEBHOOK_ENQUEUE_CONCURRENCY,
+      async (locator) => {
+        const record = await this.getRecord(locator.workspaceId, locator.recordKey)
+        if (
+          record?.entryType !== 'webhook-subscription' ||
+          record.lookupKey !== lookupKey ||
+          record.lookupSortKey !== locator.lookupSortKey
+        ) return undefined
+        const subscription = readRecordValue<WebhookSubscription>(
+          record,
+          'webhook-subscription',
+        )
+        if (subscription.status !== 'active') return undefined
+        return clone(subscription)
+      },
+    )).filter(isDefined)
+    return {
+      subscriptions,
+      ...(page.lastEvaluatedKey
+        ? { nextCursor: encodeInternalLookupCursor(page.lastEvaluatedKey) }
+        : {}),
+    }
   }
 
   /** Webhook signing secret を置換し、新 secret を一度だけ返します。 */
@@ -2635,7 +2798,21 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       value: subscription,
       version: record.version + 1,
     }
-    if (status === 'disabled') delete updatedRecord.secretCiphertext
+    if (status === 'active') {
+      Object.assign(
+        updatedRecord,
+        createActiveWebhookSubscriptionProjection(workspaceId, subscription),
+      )
+    } else {
+      delete updatedRecord.lookupKey
+      delete updatedRecord.lookupSortKey
+    }
+    if (status === 'disabled') {
+      delete updatedRecord.secretCiphertext
+      updatedRecord.expiresAt = record.expiresAt ??
+        Math.floor(Date.parse(subscription.updatedAt) / 1_000) +
+          WEBHOOK_DISABLED_SUBSCRIPTION_RETENTION_SECONDS
+    }
     const response = request.idempotencyResponse ?? { status: 200, body: subscription }
     const saved = current.status !== 'disabled' && status === 'disabled'
       ? await this.disableWebhookSubscriptionRecord(
@@ -2681,17 +2858,35 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     const authorizedSubscriptionIds = new Set(readIdentifierArray(
       request.authorizedSubscriptionIds,
       'Authorized Webhook subscription IDs',
-      WEBHOOK_SUBSCRIPTION_LIMIT,
+      WEBHOOK_PROJECTION_PAGE_MAX_LIMIT,
       true,
     ))
-    const subscriptions = await this.listWebhookSubscriptions(workspaceId)
-    const matching = subscriptions.filter((subscription) =>
-      subscription.status === 'active' &&
-      authorizedSubscriptionIds.has(subscription.id) &&
-      subscription.teamIds.includes(teamId) &&
-      subscription.eventTypes.some((pattern) => eventTypeMatches(pattern, event.type))
-    )
-    const deliveries = await Promise.all(matching.map(async (subscription) => {
+    const matching = (await mapWithConcurrency(
+      [...authorizedSubscriptionIds],
+      WEBHOOK_ENQUEUE_CONCURRENCY,
+      async (subscriptionId) => {
+        const record = await this.getRecord(
+          workspaceId,
+          createWebhookRecordKey(subscriptionId),
+        )
+        if (record?.entryType !== 'webhook-subscription') return undefined
+        const subscription = readRecordValue<WebhookSubscription>(
+          record,
+          'webhook-subscription',
+        )
+        return subscription.status === 'active' &&
+            subscription.teamIds.includes(teamId) &&
+            subscription.eventTypes.some((pattern) =>
+              eventTypeMatches(pattern, event.type)
+            )
+          ? subscription
+          : undefined
+      },
+    )).filter(isDefined)
+    const deliveries = await mapWithConcurrency(
+      matching,
+      WEBHOOK_ENQUEUE_CONCURRENCY,
+      async (subscription) => {
       const id = createDeterministicDeliveryId(subscription.id, event.id)
       const recordKey = createWebhookDeliveryRecordKey(id)
       const existing = await this.getRecord(workspaceId, recordKey)
@@ -2744,7 +2939,8 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
         )
       }
       return clone(delivery)
-    }))
+      },
+    )
     return deliveries.sort(compareCreatedAtDescending)
   }
 
@@ -3253,6 +3449,12 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
         'connector-installation',
       )),
       lifecycleRevision: record.version,
+      ...(record.connectorDisconnectCleanupRevision === undefined
+        ? {}
+        : {
+            disconnectCleanupRevision:
+              record.connectorDisconnectCleanupRevision,
+          }),
     } satisfies ConnectorLifecycleSnapshot
   }
 
@@ -3361,6 +3563,16 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
         'OAuth state can only be bound to a connector needing reauthorization.',
       )
     }
+    if (
+      current.status === 'disconnected' &&
+      status === 'needs-reauth' &&
+      record.connectorDisconnectCleanupRevision !== undefined
+    ) {
+      throw conflict(
+        'ConnectorDisconnectCleanupPending',
+        'Connector reauthorization must wait for disconnect cleanup to finish.',
+      )
+    }
     const nextOAuthStateDigest = reauthorizationStateId
       ? digestConnectorOAuthState(reauthorizationStateId)
       : undefined
@@ -3420,11 +3632,6 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       record.connectorCredentialRefreshClaimedAt === undefined &&
       record.connectorOAuthStateDigest === undefined
     if (isNoopDisconnect) {
-      await this.pauseConnectorExternalLinks(
-        workspaceId,
-        installationId,
-        updatedByUserId,
-      )
       return clone(current)
     }
     const updatedRecord: DeveloperPlatformRecord = {
@@ -3432,6 +3639,11 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       value: installation,
       connectorOAuthStateRevision: nextOAuthStateRevision,
       version: record.version + 1,
+    }
+    if (status === 'disconnected') {
+      updatedRecord.connectorDisconnectCleanupRevision = updatedRecord.version
+    } else {
+      delete updatedRecord.connectorDisconnectCleanupRevision
     }
     if (nextOAuthStateDigest) {
       updatedRecord.connectorOAuthStateDigest = nextOAuthStateDigest
@@ -3481,13 +3693,6 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
         )
       : await this.putRecord(updatedRecord, { expectedVersion: record.version })
     if (!saved) throw persistenceConflict()
-    if (status === 'disconnected') {
-      await this.pauseConnectorExternalLinks(
-        workspaceId,
-        installationId,
-        updatedByUserId,
-      )
-    }
     return clone(installation)
   }
 
@@ -3935,109 +4140,185 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     )
   }
 
-  /** Disconnected installation の既存 external links を削除せず pause します。 */
-  private async pauseConnectorExternalLinks(
-    workspaceId: string,
-    installationId: string,
-    updatedByUserId?: string,
-  ) {
-    const indexRecords = await this.listRecords(
-      workspaceId,
-      createExternalLinkInstallationIndexRecordPrefix(installationId),
+  /** Disconnected installation の external links をdurable continuation単位でpauseします。 */
+  async pauseConnectorExternalLinksPage(
+    request: PauseConnectorExternalLinksPageRequest,
+  ): Promise<PauseConnectorExternalLinksPageResult> {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const installationId = readIdentifier(
+      request.installationId,
+      'Connector installation ID',
     )
-    if (indexRecords.length > EXTERNAL_LINK_INSTALLATION_LIMIT) {
-      throw persistenceInvalid('Connector installation external-link count is invalid.')
+    const expectedLifecycleRevision = readPositiveInteger(
+      request.expectedLifecycleRevision,
+      'Connector lifecycle revision',
+    )
+    const updatedByUserId = request.updatedByUserId === undefined
+      ? undefined
+      : readIdentifier(request.updatedByUserId, 'Connector updater user ID')
+    const limit = readBoundedLimit(
+      request.limit,
+      CONNECTOR_DISCONNECT_PAGE_MAX_LIMIT,
+      'Connector disconnect page limit',
+    )
+    const recordKeyPrefix = createExternalLinkInstallationIndexRecordPrefix(
+      installationId,
+    )
+    const exclusiveStartRecordKey = request.cursor === undefined
+      ? undefined
+      : decodeInternalRecordCursor(
+          request.cursor,
+          recordKeyPrefix,
+          'Connector disconnect cursor',
+        )
+    const installationRecord = await this.getRecord(
+      workspaceId,
+      createConnectorRecordKey(installationId),
+    )
+    const installation = installationRecord?.entryType === 'connector-installation'
+      ? readRecordValue<ConnectorInstallation>(
+          installationRecord,
+          'connector-installation',
+        )
+      : undefined
+    if (
+      !installationRecord ||
+      installation?.status !== 'disconnected' ||
+      installationRecord.connectorDisconnectCleanupRevision !==
+        expectedLifecycleRevision
+    ) return { paused: 0 }
+
+    const page = await this.listRecordsPage(
+      workspaceId,
+      recordKeyPrefix,
+      limit,
+      exclusiveStartRecordKey,
+    )
+    const outcomes = await mapWithConcurrency(
+      page.records,
+      5,
+      async (indexRecord): Promise<'paused' | 'unchanged' | 'stale'> => {
+        if (indexRecord.entryType !== 'external-link-index') {
+          throw persistenceInvalid('External link installation index row is invalid.')
+        }
+        const index = readRecordValue<StoredExternalLinkIndexValue>(
+          indexRecord,
+          'external-link-index',
+        )
+        if (index.kind !== 'installation') {
+          throw persistenceInvalid('External link installation index kind is invalid.')
+        }
+        let connectorGuardRecord = installationRecord
+        let record = await this.getRecord(workspaceId, index.targetRecordKey)
+        for (let attempt = 0; attempt < 3 && record; attempt += 1) {
+          if (record.entryType !== 'external-link') {
+            throw persistenceInvalid('External link installation index target is invalid.')
+          }
+          const link = readRecordValue<ExternalWorkItemLink>(record, 'external-link')
+          if (link.installationId !== installationId) {
+            throw persistenceInvalid('External link installation index scope is invalid.')
+          }
+          if (link.syncStatus === 'paused') return 'unchanged'
+          const paused: ExternalWorkItemLink = {
+            ...link,
+            syncStatus: 'paused',
+            updatedAt: this.clock().toISOString(),
+          }
+          const nextRecord = createExternalLinkReplacementRecord(record, paused)
+          const auditPut = this.createPlatformAuditPut({
+            workspaceId,
+            eventType: 'external-link.updated',
+            entityType: 'external-link',
+            entityId: link.id,
+            transitionId: `connector-disconnect:${nextRecord.version}`,
+            teamId: link.teamId,
+            occurredAt: paused.updatedAt,
+            action: 'paused',
+            summary:
+              'External Work Item link was paused because its connector disconnected.',
+            ...(updatedByUserId ? { actorId: updatedByUserId } : {}),
+            metadata: {
+              externalLinkId: link.id,
+              workItemId: link.workItemId,
+              installationId,
+              resourceType: link.resourceType,
+              previousSyncDirection: link.syncDirection,
+              syncDirection: link.syncDirection,
+              previousSyncStatus: link.syncStatus,
+              syncStatus: paused.syncStatus,
+              cause: 'connector-disconnected',
+            },
+          })
+          if (await this.putExternalLinkWithConnectorGuard(
+            nextRecord,
+            record.version,
+            connectorGuardRecord,
+            link,
+            'disconnected',
+            undefined,
+            auditPut,
+          )) return 'paused'
+          const currentInstallation = await this.getRecord(
+            workspaceId,
+            connectorGuardRecord.recordKey,
+          )
+          const currentInstallationValue =
+            currentInstallation?.entryType === 'connector-installation'
+              ? readRecordValue<ConnectorInstallation>(
+                  currentInstallation,
+                  'connector-installation',
+                )
+              : undefined
+          if (
+            currentInstallation?.connectorDisconnectCleanupRevision !==
+              expectedLifecycleRevision ||
+            currentInstallationValue?.status !== 'disconnected'
+          ) return 'stale'
+          connectorGuardRecord = currentInstallation
+          record = await this.getRecord(workspaceId, record.recordKey)
+        }
+        if (!record) return 'unchanged'
+        throw persistenceConflict()
+      },
+    )
+    const paused = outcomes.filter((outcome) => outcome === 'paused').length
+    if (outcomes.includes('stale')) return { paused }
+    if (page.nextRecordKey) {
+      return {
+        paused,
+        nextCursor: encodeInternalRecordCursor(page.nextRecordKey),
+      }
     }
-    const links = await Promise.all(indexRecords.map(async (indexRecord) => {
-      if (indexRecord.entryType !== 'external-link-index') {
-        throw persistenceInvalid('External link installation index row is invalid.')
-      }
-      const index = readRecordValue<StoredExternalLinkIndexValue>(
-        indexRecord,
-        'external-link-index',
-      )
-      if (index.kind !== 'installation') {
-        throw persistenceInvalid('External link installation index kind is invalid.')
-      }
-      const target = await this.getRecord(workspaceId, index.targetRecordKey)
-      if (target?.entryType !== 'external-link') {
-        throw persistenceInvalid('External link installation index target is invalid.')
-      }
-      const link = readRecordValue<ExternalWorkItemLink>(target, 'external-link')
-      if (link.installationId !== installationId) {
-        throw persistenceInvalid('External link installation index scope is invalid.')
-      }
-      return clone(link)
-    }))
-    for (const candidate of links) {
-      let record = await this.getRecord(
-        workspaceId,
-        createExternalLinkRecordKey(candidate.id),
-      )
-      for (let attempt = 0; attempt < 3 && record; attempt += 1) {
-        const link = readRecordValue<ExternalWorkItemLink>(record, 'external-link')
-        if (link.installationId !== installationId || link.syncStatus === 'paused') {
-          break
-        }
-        const paused: ExternalWorkItemLink = {
-          ...link,
-          syncStatus: 'paused',
-          updatedAt: this.clock().toISOString(),
-        }
-        const nextRecord = createExternalLinkReplacementRecord(record, paused)
-        const auditPut = this.createPlatformAuditPut({
-          workspaceId,
-          eventType: 'external-link.updated',
-          entityType: 'external-link',
-          entityId: link.id,
-          transitionId: `connector-disconnect:${nextRecord.version}`,
-          teamId: link.teamId,
-          occurredAt: paused.updatedAt,
-          action: 'paused',
-          summary:
-            'External Work Item link was paused because its connector disconnected.',
-          ...(updatedByUserId ? { actorId: updatedByUserId } : {}),
-          metadata: {
-            externalLinkId: link.id,
-            workItemId: link.workItemId,
-            installationId,
-            resourceType: link.resourceType,
-            previousSyncDirection: link.syncDirection,
-            syncDirection: link.syncDirection,
-            previousSyncStatus: link.syncStatus,
-            syncStatus: paused.syncStatus,
-            cause: 'connector-disconnected',
-          },
-        })
-        const saved = auditPut
-          ? await this.putRecordWithAudit(
-              nextRecord,
-              { expectedVersion: record.version },
-              auditPut,
-            )
-          : await this.putRecord(
-              nextRecord,
-              { expectedVersion: record.version },
-            )
-        if (saved) break
-        record = await this.getRecord(workspaceId, record.recordKey)
-        if (record?.entryType !== 'external-link') record = undefined
-      }
-      if (record) {
-        const link = readRecordValue<ExternalWorkItemLink>(record, 'external-link')
-        const current = await this.getRecord(workspaceId, record.recordKey)
-        const currentLink = current?.entryType === 'external-link'
-          ? readRecordValue<ExternalWorkItemLink>(current, 'external-link')
-          : undefined
-        if (
-          link.installationId === installationId &&
-          currentLink &&
-          currentLink.syncStatus !== 'paused'
-        ) {
-          throw persistenceConflict()
-        }
-      }
+    const completionRecord = await this.getRecord(
+      workspaceId,
+      installationRecord.recordKey,
+    )
+    const completionInstallation = completionRecord?.entryType ===
+        'connector-installation'
+      ? readRecordValue<ConnectorInstallation>(
+          completionRecord,
+          'connector-installation',
+        )
+      : undefined
+    if (
+      !completionRecord ||
+      completionInstallation?.status !== 'disconnected' ||
+      completionRecord.connectorDisconnectCleanupRevision !==
+        expectedLifecycleRevision
+    ) return { paused }
+    if (!await this.clearConnectorDisconnectCleanupMarker(
+      workspaceId,
+      completionRecord.recordKey,
+      completionRecord.version,
+      expectedLifecycleRevision,
+    )) {
+      const latest = await this.getRecord(workspaceId, completionRecord.recordKey)
+      if (
+        latest?.connectorDisconnectCleanupRevision ===
+          expectedLifecycleRevision
+      ) throw persistenceConflict()
     }
+    return { paused }
   }
 
   /** External resource と canonical Work Item の一意な link を作成します。 */
@@ -4106,7 +4387,6 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       createExternalLinkRecordKey(id),
       'external-link',
       link,
-      createConnectorPollProjection(link, workspaceId),
     )
     const indexRecords = createExternalLinkIndexRecords(workspaceId, link)
     const claimRecordKey = createExternalLinkClaimRecordKey(
@@ -4436,6 +4716,8 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       nextRecord,
       record.version,
       installationRecord,
+      current,
+      'connected',
       completion,
       auditPut,
     )
@@ -5224,6 +5506,32 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
       .map((record) => clone(record))
   }
 
+  /** Memory partition の prefix rows をbounded page取得します。 */
+  protected async listRecordsPage(
+    workspaceId: string,
+    recordKeyPrefix: string,
+    limit: number,
+    exclusiveStartRecordKey?: string,
+  ) {
+    const records = [...this.records.values()]
+      .filter((record) =>
+        record.workspaceId === workspaceId &&
+        record.recordKey.startsWith(recordKeyPrefix) &&
+        (
+          exclusiveStartRecordKey === undefined ||
+          record.recordKey > exclusiveStartRecordKey
+        )
+      )
+      .sort((left, right) => left.recordKey.localeCompare(right.recordKey))
+    const selected = records.slice(0, limit)
+    return {
+      records: selected.map((record) => clone(record)),
+      ...(records.length > selected.length && selected.length > 0
+        ? { nextRecordKey: selected.at(-1)!.recordKey }
+        : {}),
+    } satisfies ListRecordsPageResult
+  }
+
   /** lookupKey GSI 相当から一意な row を取得します。 */
   protected async getRecordByLookupKey(lookupKey: string) {
     const records = [...this.records.values()].filter((record) =>
@@ -5729,6 +6037,14 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
     })
     this.records.set(claimKey, clone(claimRecord))
     this.records.set(linkKey, clone(linkRecord))
+    if (isPollableExternalLink(link)) {
+      applyMemoryConnectorPollTargetDelta(
+        this.records,
+        linkRecord.workspaceId,
+        link,
+        1,
+      )
+    }
     this.records.set(createMemoryKey(
       installationRecord.workspaceId,
       installationRecord.recordKey,
@@ -5751,8 +6067,10 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
     linkRecord: DeveloperPlatformRecord,
     expectedLinkVersion: number,
     installationRecord: DeveloperPlatformRecord,
+    previousLink: ExternalWorkItemLink,
+    expectedConnectorStatus: 'connected' | 'disconnected',
     completion?: PreparedIdempotencyCompletionRecord,
-    auditPut?: AuditTransactWriteItem,
+    _auditPut?: AuditTransactWriteItem,
   ) {
     const currentInstallation = this.records.get(createMemoryKey(
       installationRecord.workspaceId,
@@ -5767,23 +6085,74 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
       : undefined
     if (
       currentInstallation?.version !== installationRecord.version ||
-      installation?.status !== 'connected'
+      installation?.status !== expectedConnectorStatus
     ) return false
+    const linkKey = createMemoryKey(linkRecord.workspaceId, linkRecord.recordKey)
+    if (this.records.get(linkKey)?.version !== expectedLinkVersion) return false
+    let idempotencyKey: string | undefined
     if (completion) {
-      return this.putRecordWithIdempotency(
-        linkRecord,
-        { expectedVersion: expectedLinkVersion },
-        completion,
-        auditPut,
+      idempotencyKey = createMemoryKey(
+        completion.reservedRecord.workspaceId,
+        completion.reservedRecord.recordKey,
+      )
+      const currentIdempotency = this.records.get(idempotencyKey)
+      if (
+        !currentIdempotency ||
+        currentIdempotency.version !== completion.reservedRecord.version ||
+        currentIdempotency.entryType !== 'idempotency'
+      ) return false
+      const currentValue = readRecordValue<StoredIdempotencyValue>(
+        currentIdempotency,
+        'idempotency',
+      )
+      if (
+        currentValue.state !== 'reserved' ||
+        !secretDigestsEqual(
+          currentValue.reservationDigest,
+          completion.reservationDigest,
+        ) ||
+        currentValue.requestFingerprintDigest !== completion.requestFingerprintDigest
+      ) return false
+    }
+    const nextLink = readRecordValue<ExternalWorkItemLink>(linkRecord, 'external-link')
+    const pollTargetDelta = Number(isPollableExternalLink(nextLink)) -
+      Number(isPollableExternalLink(previousLink))
+    if (pollTargetDelta !== 0) {
+      applyMemoryConnectorPollTargetDelta(
+        this.records,
+        linkRecord.workspaceId,
+        nextLink,
+        pollTargetDelta,
       )
     }
-    return auditPut
-      ? this.putRecordWithAudit(
-          linkRecord,
-          { expectedVersion: expectedLinkVersion },
-          auditPut,
-        )
-      : this.putRecord(linkRecord, { expectedVersion: expectedLinkVersion })
+    this.records.set(linkKey, clone(linkRecord))
+    if (completion && idempotencyKey) {
+      this.records.set(idempotencyKey, clone(completion.completedRecord))
+    }
+    return true
+  }
+
+  /** Memory row の current disconnect cleanup markerだけを条件付き解除します。 */
+  protected async clearConnectorDisconnectCleanupMarker(
+    workspaceId: string,
+    connectorRecordKey: string,
+    expectedRecordVersion: number,
+    expectedCleanupRevision: number,
+  ) {
+    const key = createMemoryKey(workspaceId, connectorRecordKey)
+    const current = this.records.get(key)
+    const installation = current?.entryType === 'connector-installation'
+      ? readRecordValue<ConnectorInstallation>(current, 'connector-installation')
+      : undefined
+    if (
+      current?.version !== expectedRecordVersion ||
+      current.connectorDisconnectCleanupRevision !== expectedCleanupRevision ||
+      installation?.status !== 'disconnected'
+    ) return false
+    const completed = clone(current)
+    delete completed.connectorDisconnectCleanupRevision
+    this.records.set(key, completed)
+    return true
   }
 
   /** Memory commit で link、claim、sync state、receipt を同時に更新します。 */
@@ -5887,6 +6256,14 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
 
     this.records.delete(claimKey)
     this.records.delete(linkKey)
+    if (isPollableExternalLink(currentLink)) {
+      applyMemoryConnectorPollTargetDelta(
+        this.records,
+        linkRecord.workspaceId,
+        currentLink,
+        -1,
+      )
+    }
     for (const indexKey of indexKeys) this.records.delete(indexKey)
     this.records.delete(createMemoryKey(
       linkRecord.workspaceId,
@@ -6072,6 +6449,52 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
       } while (exclusiveStartKey)
       return records
     } catch (error) {
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** Workspace partition の prefix rows をstrongly consistentなbounded pageで返します。 */
+  protected async listRecordsPage(
+    workspaceId: string,
+    recordKeyPrefix: string,
+    limit: number,
+    exclusiveStartRecordKey?: string,
+  ) {
+    try {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression:
+          'workspaceId = :workspaceId AND begins_with(recordKey, :recordKeyPrefix)',
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':recordKeyPrefix': recordKeyPrefix,
+        },
+        ConsistentRead: true,
+        Limit: limit,
+        ...(exclusiveStartRecordKey
+          ? {
+              ExclusiveStartKey: {
+                workspaceId,
+                recordKey: exclusiveStartRecordKey,
+              },
+            }
+          : {}),
+      }))
+      const records = (response.Items ?? []).map(readStoredRecord)
+      const nextRecordKey = response.LastEvaluatedKey?.recordKey
+      if (
+        nextRecordKey !== undefined &&
+        (
+          typeof nextRecordKey !== 'string' ||
+          !nextRecordKey.startsWith(recordKeyPrefix)
+        )
+      ) throw persistenceInvalid('Developer platform page cursor is invalid.')
+      return {
+        records,
+        ...(nextRecordKey ? { nextRecordKey } : {}),
+      } satisfies ListRecordsPageResult
+    } catch (error) {
+      if (error instanceof DeveloperPlatformError) throw error
       throw toPersistenceError(error)
     }
   }
@@ -6816,6 +7239,14 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
                 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
             },
           },
+          ...(isPollableExternalLink(link)
+            ? [createConnectorPollTargetTransactUpdate(
+                this.tableName,
+                linkRecord.workspaceId,
+                link,
+                1,
+              )]
+            : []),
           ...indexRecords.map((indexRecord) => ({
             Put: {
               TableName: this.tableName,
@@ -6886,9 +7317,17 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
     linkRecord: DeveloperPlatformRecord,
     expectedLinkVersion: number,
     installationRecord: DeveloperPlatformRecord,
+    previousLink: ExternalWorkItemLink,
+    expectedConnectorStatus: 'connected' | 'disconnected',
     completion?: PreparedIdempotencyCompletionRecord,
     auditPut?: AuditTransactWriteItem,
   ) {
+    const nextLink = readRecordValue<ExternalWorkItemLink>(
+      linkRecord,
+      'external-link',
+    )
+    const pollTargetDelta = Number(isPollableExternalLink(nextLink)) -
+      Number(isPollableExternalLink(previousLink))
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
@@ -6900,7 +7339,7 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
                 recordKey: installationRecord.recordKey,
               },
               ConditionExpression:
-                '#version = :expectedVersion AND #value.#status = :connected',
+                '#version = :expectedVersion AND #value.#status = :expectedStatus',
               ExpressionAttributeNames: {
                 '#version': 'version',
                 '#value': 'value',
@@ -6908,7 +7347,7 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
               },
               ExpressionAttributeValues: {
                 ':expectedVersion': installationRecord.version,
-                ':connected': 'connected',
+                ':expectedStatus': expectedConnectorStatus,
               },
             },
           },
@@ -6923,6 +7362,14 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
               },
             },
           },
+          ...(pollTargetDelta === 0
+            ? []
+            : [createConnectorPollTargetTransactUpdate(
+                this.tableName,
+                linkRecord.workspaceId,
+                nextLink,
+                pollTargetDelta,
+              )]),
           ...(completion
             ? [createIdempotencyCompletionTransactWriteItem(
                 this.tableName,
@@ -6935,6 +7382,42 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
       return true
     } catch (error) {
       if (isTransactionConditionFailure(error)) return false
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** DynamoDB row の lifecycle versionを進めずcleanup markerだけを解除します。 */
+  protected async clearConnectorDisconnectCleanupMarker(
+    workspaceId: string,
+    connectorRecordKey: string,
+    expectedRecordVersion: number,
+    expectedCleanupRevision: number,
+  ) {
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: connectorRecordKey },
+        UpdateExpression: 'REMOVE connectorDisconnectCleanupRevision',
+        ConditionExpression:
+          '#entryType = :entryType AND #version = :expectedRecordVersion AND ' +
+          'connectorDisconnectCleanupRevision = :expectedCleanupRevision AND ' +
+          '#value.#status = :disconnected',
+        ExpressionAttributeNames: {
+          '#entryType': 'entryType',
+          '#status': 'status',
+          '#value': 'value',
+          '#version': 'version',
+        },
+        ExpressionAttributeValues: {
+          ':disconnected': 'disconnected',
+          ':entryType': 'connector-installation',
+          ':expectedCleanupRevision': expectedCleanupRevision,
+          ':expectedRecordVersion': expectedRecordVersion,
+        },
+      }))
+      return true
+    } catch (error) {
+      if (isNamedError(error, 'ConditionalCheckFailedException')) return false
       throw toPersistenceError(error)
     }
   }
@@ -7070,6 +7553,14 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
               },
             },
           },
+          ...(isPollableExternalLink(link)
+            ? [createConnectorPollTargetTransactUpdate(
+                this.tableName,
+                linkRecord.workspaceId,
+                link,
+                -1,
+              )]
+            : []),
           {
             Delete: {
               TableName: this.tableName,
@@ -7327,6 +7818,20 @@ function createWebhookRecordKey(id: string) {
   return `WEBHOOK#${id}`
 }
 
+function createActiveWebhookSubscriptionLookupKey(workspaceId: string) {
+  return `WEBHOOK#ACTIVE#${workspaceId}`
+}
+
+function createActiveWebhookSubscriptionProjection(
+  workspaceId: string,
+  subscription: WebhookSubscription,
+): CreateRecordOptions {
+  return {
+    lookupKey: createActiveWebhookSubscriptionLookupKey(workspaceId),
+    lookupSortKey: `${subscription.createdAt}#${subscription.id}`,
+  }
+}
+
 function createWebhookSubscriptionQuotaRecordKey() {
   return 'WEBHOOKSUBSCRIPTIONQUOTA'
 }
@@ -7514,18 +8019,120 @@ function createExternalLinkIndexRecords(
   ]
 }
 
-function createConnectorPollProjection(
-  link: ExternalWorkItemLink,
-  workspaceId: string,
-): CreateRecordOptions {
+function isPollableExternalLink(link: ExternalWorkItemLink) {
   return link.syncStatus !== 'paused' &&
-      link.syncStatus !== 'conflict' &&
-      (link.syncDirection === 'inbound' || link.syncDirection === 'bidirectional')
-    ? {
-        lookupKey: 'CONNECTOR_SYNC_LINK',
-        lookupSortKey: `${workspaceId}#${link.id}`,
-      }
-    : {}
+    link.syncStatus !== 'conflict' &&
+    (link.syncDirection === 'inbound' || link.syncDirection === 'bidirectional')
+}
+
+function createConnectorPollTargetTransactUpdate(
+  tableName: string,
+  workspaceId: string,
+  link: ExternalWorkItemLink,
+  delta: -1 | 1,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const value = {
+    installationId: link.installationId,
+    resourceType: link.resourceType,
+  } satisfies StoredConnectorPollTargetValue
+  const incrementing = delta === 1
+  return {
+    Update: {
+      TableName: tableName,
+      Key: {
+        workspaceId,
+        recordKey: createConnectorPollTargetRecordKey(
+          link.installationId,
+          link.resourceType,
+        ),
+      },
+      UpdateExpression:
+        'SET #entryType = if_not_exists(#entryType, :entryType), ' +
+        '#value = if_not_exists(#value, :value), ' +
+        'pollableLinkCount = ' +
+        `${incrementing ? 'if_not_exists(pollableLinkCount, :zero) +' : 'pollableLinkCount -'} :one, ` +
+        'lookupKey = :lookupKey, lookupSortKey = :lookupSortKey, ' +
+        '#version = if_not_exists(#version, :zero) + :one',
+      ConditionExpression: incrementing
+        ? 'attribute_not_exists(#entryType) OR ' +
+          '(#entryType = :entryType AND #value.#installationId = :installationId AND ' +
+          '#value.#resourceType = :resourceType AND pollableLinkCount >= :zero)'
+        : '#entryType = :entryType AND #value.#installationId = :installationId AND ' +
+          '#value.#resourceType = :resourceType AND pollableLinkCount >= :one',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#value': 'value',
+        '#installationId': 'installationId',
+        '#resourceType': 'resourceType',
+        '#version': 'version',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'connector-poll-target',
+        ':value': value,
+        ':installationId': link.installationId,
+        ':resourceType': link.resourceType,
+        ':lookupKey': createConnectorPollTargetLookupKey(
+          workspaceId,
+          link.installationId,
+          link.resourceType,
+        ),
+        ':lookupSortKey': `${workspaceId}#${link.installationId}#${link.resourceType}`,
+        ':zero': 0,
+        ':one': 1,
+      },
+    },
+  }
+}
+
+function applyMemoryConnectorPollTargetDelta(
+  records: Map<string, DeveloperPlatformRecord>,
+  workspaceId: string,
+  link: ExternalWorkItemLink,
+  delta: -1 | 1,
+) {
+  const recordKey = createConnectorPollTargetRecordKey(
+    link.installationId,
+    link.resourceType,
+  )
+  const key = createMemoryKey(workspaceId, recordKey)
+  const current = records.get(key)
+  const value = current?.entryType === 'connector-poll-target'
+    ? readRecordValue<StoredConnectorPollTargetValue>(
+        current,
+        'connector-poll-target',
+      )
+    : undefined
+  if (
+    current &&
+    (
+      !value ||
+      value.installationId !== link.installationId ||
+      value.resourceType !== link.resourceType ||
+      !Number.isSafeInteger(current.pollableLinkCount) ||
+      Number(current.pollableLinkCount) < 0
+    )
+  ) throw persistenceInvalid('Connector poll target is invalid.')
+  const count = Number(current?.pollableLinkCount ?? 0)
+  if (delta === -1 && count < 1) {
+    throw persistenceInvalid('Connector poll target count is invalid.')
+  }
+  records.set(key, {
+    workspaceId,
+    recordKey,
+    entryType: 'connector-poll-target',
+    value: {
+      installationId: link.installationId,
+      resourceType: link.resourceType,
+    } satisfies StoredConnectorPollTargetValue,
+    lookupKey: createConnectorPollTargetLookupKey(
+      workspaceId,
+      link.installationId,
+      link.resourceType,
+    ),
+    lookupSortKey: `${workspaceId}#${link.installationId}#${link.resourceType}`,
+    pollableLinkCount: count + delta,
+    version: (current?.version ?? 0) + 1,
+  })
 }
 
 function createExternalLinkReplacementRecord(
@@ -7541,7 +8148,6 @@ function createExternalLinkReplacementRecord(
     ...baseRecord,
     value: clone(link),
     version: record.version + 1,
-    ...createConnectorPollProjection(link, record.workspaceId),
   }
 }
 
@@ -7897,6 +8503,88 @@ function readPositiveInteger(value: number, label: string, maximum = Number.MAX_
     )
   }
   return value
+}
+
+function readBoundedLimit(value: number, maximum: number, label: string) {
+  return readPositiveInteger(value, label, maximum)
+}
+
+function encodeInternalLookupCursor(locator: DeveloperPlatformRecordLocator) {
+  return Buffer.from(JSON.stringify(locator), 'utf8').toString('base64url')
+}
+
+function decodeInternalLookupCursor(
+  value: string,
+  expectedLookupKey: string,
+  label: string,
+) {
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(requireText(value, label), 'base64url').toString('utf8'),
+    ) as unknown
+    if (
+      !isRecord(parsed) ||
+      typeof parsed.workspaceId !== 'string' ||
+      typeof parsed.recordKey !== 'string' ||
+      parsed.lookupKey !== expectedLookupKey ||
+      typeof parsed.lookupSortKey !== 'string'
+    ) throw new Error('invalid')
+    return {
+      workspaceId: parsed.workspaceId,
+      recordKey: parsed.recordKey,
+      lookupKey: expectedLookupKey,
+      lookupSortKey: parsed.lookupSortKey,
+    } satisfies DeveloperPlatformRecordLocator
+  } catch {
+    throw invalid('DeveloperCursorInvalid', `${label} is invalid.`)
+  }
+}
+
+function encodeInternalRecordCursor(recordKey: string) {
+  return Buffer.from(recordKey, 'utf8').toString('base64url')
+}
+
+function decodeInternalRecordCursor(
+  value: string,
+  expectedPrefix: string,
+  label: string,
+) {
+  try {
+    const encoded = requireText(value, label)
+    const recordKey = Buffer.from(encoded, 'base64url').toString('utf8')
+    if (
+      !recordKey.startsWith(expectedPrefix) ||
+      Buffer.from(recordKey, 'utf8').toString('base64url') !== encoded
+    ) throw new Error('invalid')
+    return recordKey
+  } catch {
+    throw invalid('DeveloperCursorInvalid', `${label} is invalid.`)
+  }
+}
+
+async function mapWithConcurrency<TInput, TOutput>(
+  values: readonly TInput[],
+  concurrency: number,
+  mapper: (value: TInput, index: number) => Promise<TOutput>,
+) {
+  const results: TOutput[] = []
+  let nextIndex = 0
+  const workerCount = Math.min(
+    values.length,
+    Math.max(1, Math.floor(concurrency)),
+  )
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < values.length) {
+      const index = nextIndex
+      nextIndex += 1
+      results[index] = await mapper(values[index]!, index)
+    }
+  }))
+  return results
+}
+
+function isDefined<T>(value: T | undefined): value is T {
+  return value !== undefined
 }
 
 function readHttpStatus(value: number) {
@@ -8372,9 +9060,15 @@ function readStoredRecord(value: Record<string, unknown>) {
     !isOptionalSha256Digest(value.connectorOAuthStateDigest) ||
     !isOptionalNonNegativeInteger(value.connectorCredentialRevision) ||
     !isOptionalNonNegativeInteger(value.connectorOAuthStateRevision) ||
+    !isOptionalPositiveInteger(value.connectorDisconnectCleanupRevision) ||
+    (
+      value.connectorDisconnectCleanupRevision !== undefined &&
+      value.entryType !== 'connector-installation'
+    ) ||
     !isOptionalNonNegativeInteger(value.activeLinkCount) ||
     !isOptionalNonNegativeInteger(value.subscriptionCount) ||
-    !isOptionalNonNegativeInteger(value.externalLinkCount)
+    !isOptionalNonNegativeInteger(value.externalLinkCount) ||
+    !isOptionalNonNegativeInteger(value.pollableLinkCount)
   ) {
     throw persistenceInvalid('Developer platform row is invalid.')
   }
@@ -8398,6 +9092,11 @@ function isOptionalTimestamp(value: unknown) {
 function isOptionalNonNegativeInteger(value: unknown) {
   return value === undefined ||
     (Number.isSafeInteger(value) && Number(value) >= 0)
+}
+
+function isOptionalPositiveInteger(value: unknown) {
+  return value === undefined ||
+    (Number.isSafeInteger(value) && Number(value) > 0)
 }
 
 function readWorkItemLinkFenceCount(
@@ -8449,6 +9148,7 @@ function isDeveloperPlatformEntryType(value: string): value is DeveloperPlatform
     value === 'webhook-delivery' ||
     value === 'webhook-delivery-index' ||
     value === 'connector-installation' ||
+    value === 'connector-poll-target' ||
     value === 'external-link' ||
     value === 'external-link-index' ||
     value === 'external-link-claim' ||

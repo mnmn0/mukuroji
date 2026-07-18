@@ -1546,8 +1546,6 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
       PROJECT_DIRECTORY_TABLE_NAME: {
         Ref: 'ProjectDirectoryTable9ED01C01',
       },
-      PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
-        'WebhookAuthorizationIndex',
       WEBHOOK_DELIVERY_QUEUE_URL: {
         Ref: 'WebhookDeliveryQueue2A244492',
       },
@@ -1568,6 +1566,54 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
     Timeout: 30,
     Environment: deliveryEnvironment,
   });
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description:
+      'Starts the resumable Webhook ACL backfill before delivery reads are enabled.',
+    Environment: {
+      Variables: {
+        PROJECT_DIRECTORY_TABLE_NAME: {
+          Ref: 'ProjectDirectoryTable9ED01C01',
+        },
+        PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
+          'WebhookAuthorizationIndex',
+      },
+    },
+    Handler: 'index.handler',
+    MemorySize: 512,
+    Runtime: 'nodejs22.x',
+    Timeout: 30,
+  });
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description:
+      'Processes one checkpointed page of the retained Webhook ACL backfill.',
+    Environment: {
+      Variables: {
+        PROJECT_DIRECTORY_TABLE_NAME: {
+          Ref: 'ProjectDirectoryTable9ED01C01',
+        },
+        PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
+          'WebhookAuthorizationIndex',
+      },
+    },
+    Handler: 'index.isCompleteHandler',
+    MemorySize: 1024,
+    Runtime: 'nodejs22.x',
+    Timeout: 300,
+  });
+  const backfillEntry = Object.entries(resources).find(([, resource]) =>
+    (resource as { Properties?: { MigrationVersion?: string } })
+      .Properties?.MigrationVersion === 'v1'
+  );
+  expect(backfillEntry?.[0]).toBe('WebhookAuthorizationBackfill');
+  expect(backfillEntry?.[1]).toEqual(expect.objectContaining({
+    Type: 'AWS::CloudFormation::CustomResource',
+    DependsOn: expect.arrayContaining([
+      'ListProjectTasksFunction2134AF4A',
+    ]),
+  }));
+  expect(resources.WebhookDeliveryFunctionEA305509.DependsOn).toEqual(
+    expect.arrayContaining(['WebhookAuthorizationBackfill']),
+  );
   template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
     BatchSize: 10,
     EventSourceArn: {
@@ -1664,9 +1710,10 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   expect(deliveryPolicies).toContain('WorkspaceAccessTableD7C8D2C7');
   expect(deliveryPolicies).toContain('WebhookDeliveryQueue2A244492');
   expect(deliveryPolicies).toContain('dynamodb:PutItem');
+  expect(deliveryPolicies).toContain('dynamodb:TransactWriteItems');
   expect(deliveryPolicies).toContain('dynamodb:UpdateItem');
   expect(deliveryPolicies).toContain('dynamodb:DeleteItem');
-  expect(deliveryPolicies).toContain('WebhookAuthorizationIndex');
+  expect(deliveryPolicies).not.toContain('WebhookAuthorizationIndex');
   expect(deliveryPolicies).toContain('kms:Decrypt');
   expect(deliveryPolicies).not.toContain('kms:Encrypt');
   expect(deliveryPolicies).not.toContain('kms:GenerateDataKey');
@@ -1877,7 +1924,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
       'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.'
   ) as { Properties: { Environment: { Variables: Record<string, unknown> } } };
   expect(apiFunction.Properties.Environment.Variables)
-    .not.toHaveProperty('CONNECTOR_SYNC_QUEUE_URL');
+    .toHaveProperty('CONNECTOR_SYNC_QUEUE_URL', { Ref: queueId });
 
   template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
     BatchSize: 1,
@@ -1950,6 +1997,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   expect(workerPolicies).toContain('secretsmanager:GetSecretValue');
   expect(pollPolicies).toContain(queueId);
   expect(pollPolicies).toContain('DeveloperPlatformTable772E085C');
+  expect(pollPolicies).toContain('dynamodb:DeleteItem');
   expect(pollPolicies).toContain('dynamodb:Scan');
   expect(pollPolicies).not.toContain(secretId);
   expect(pollPolicies).not.toContain('secretsmanager:GetSecretValue');
@@ -2595,6 +2643,9 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Effect: 'Allow',
     Resource: [
       {
+        'Fn::GetAtt': [connectorSyncQueueLogicalId, 'Arn'],
+      },
+      {
         'Fn::GetAtt': ['WebhookDeliveryQueue2A244492', 'Arn'],
       },
       {
@@ -2602,7 +2653,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
       },
     ],
   }));
-  expect(serializedApiPolicies).not.toContain(connectorSyncQueueLogicalId);
+  expect(serializedApiPolicies).toContain(connectorSyncQueueLogicalId);
   for (const forbiddenAction of [
     'dynamodb:BatchGetItem',
     'dynamodb:BatchWriteItem',
@@ -2705,10 +2756,28 @@ test('workspace metadata owner alias and project manager rows are idempotently b
   expect(createPayload).toContain('PROJECT_MEMBER#product-roadmap#');
   expect(createPayload).toContain('PROJECT_MEMBER#shared-launch#');
   expect(createPayload).toContain('PROJECT_MEMBER#brand-refresh#');
+  expect(createPayload).toContain('WEBHOOK_TEAM_GRANT#');
+  expect(createPayload).toContain('WEBHOOK_ACL#TEAM_MEMBER#');
   expect(createPayload.match(/":role":\{"S":"manager"\}/g)).toHaveLength(4);
   expect(createPayload.match(/":timestamp":\{"S":"2026-07-11T00:00:00.000Z"\}/g)).toHaveLength(5);
   expect(createPayload.match(/"Update"/g)).toHaveLength(7);
-  expect(createPayload).not.toContain('"Item"');
+  expect(createPayload.match(/"Put"/g)).toHaveLength(5);
+  expect(createPayload.match(/"entryType":\{"S":"webhook-team-grant"\}/g))
+    .toHaveLength(5);
+  expect(createPayload.match(/"teamSourceEntryKey"/g)).toHaveLength(5);
+  expect(createPayload.match(/"projectSourceEntryKey"/g)).toHaveLength(5);
+  expect(createPayload).toContain(
+    '"teamSourceEntryKey":{"S":"000010#000000#TEAM#core-team"}',
+  );
+  expect(createPayload).toContain(
+    '"projectSourceEntryKey":{"S":"000010#000030#PROJECT#shared-launch"}',
+  );
+  expect(createPayload).toContain(
+    '"teamSourceEntryKey":{"S":"000020#000000#TEAM#design-team"}',
+  );
+  expect(createPayload).toContain(
+    '"projectSourceEntryKey":{"S":"000020#000010#PROJECT#shared-launch"}',
+  );
   expect(createPayload).toContain('createdAt = if_not_exists(createdAt, :timestamp)');
   expect(createPayload).toContain('updatedAt = if_not_exists(updatedAt, :timestamp)');
   expect(createPayload.match(/#role = :role/g)).toHaveLength(1);
@@ -2727,7 +2796,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
     {
       customResourcePrefix: 'SeedProjectDirectory',
       policyPrefix: 'SeedProjectDirectoryCustomResourcePolicy',
-      itemAction: 'dynamodb:PutItem',
+      itemActions: ['dynamodb:PutItem'],
       tableOutputName: 'ProjectDirectoryTableName',
       physicalResourceId: 'project-directory-seed-v3',
       runsOnUpdate: false,
@@ -2735,7 +2804,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
     {
       customResourcePrefix: 'SeedWorkspaceAccess',
       policyPrefix: 'SeedWorkspaceAccessCustomResourcePolicy',
-      itemAction: 'dynamodb:UpdateItem',
+      itemActions: ['dynamodb:UpdateItem'],
       tableOutputName: 'WorkspaceAccessTableName',
       physicalResourceId: 'workspace-access-seed-v2',
       runsOnUpdate: true,
@@ -2743,7 +2812,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
     {
       customResourcePrefix: 'BootstrapWorkspace',
       policyPrefix: 'BootstrapWorkspaceCustomResourcePolicy',
-      itemAction: 'dynamodb:UpdateItem',
+      itemActions: ['dynamodb:UpdateItem', 'dynamodb:PutItem'],
       tableOutputName: 'ProjectDirectoryTableName',
       physicalResourceId: 'workspace-bootstrap-v2',
       runsOnUpdate: true,
@@ -2751,7 +2820,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
     {
       customResourcePrefix: 'SeedWorkspaceDemoMembers',
       policyPrefix: 'SeedWorkspaceDemoMembersCustomResourcePolicy',
-      itemAction: 'dynamodb:UpdateItem',
+      itemActions: ['dynamodb:UpdateItem'],
       tableOutputName: 'WorkspaceAccessTableName',
       physicalResourceId: 'workspace-access-demo-members-seed-v2',
       runsOnUpdate: true,
@@ -2794,12 +2863,19 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
     const statements = policy?.Properties?.PolicyDocument?.Statement ?? [];
     const tableArn = { 'Fn::GetAtt': [tableLogicalId, 'Arn'] };
     const itemActionStatements = statements.filter((statement) =>
-      statement.Action === transactionCase.itemAction,
+      (Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action]
+      ).some((action) =>
+        transactionCase.itemActions.some((expected) => expected === action)
+      ),
     );
 
-    expect(itemActionStatements).toEqual([
-      {
-        Action: transactionCase.itemAction,
+    expect(itemActionStatements.flatMap((statement) =>
+      Array.isArray(statement.Action) ? statement.Action : [statement.Action]
+    )).toEqual(expect.arrayContaining([...transactionCase.itemActions]));
+    for (const statement of itemActionStatements) {
+      expect(statement).toEqual(expect.objectContaining({
         Condition: {
           'ForAnyValue:StringEquals': {
             'dynamodb:EnclosingOperation': ['TransactWriteItems'],
@@ -2807,8 +2883,8 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
         },
         Effect: 'Allow',
         Resource: tableArn,
-      },
-    ]);
+      }));
+    }
   }
 });
 
@@ -2892,6 +2968,14 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   );
   expect(JSON.stringify(canonicalWorkItemSeedPolicy)).not.toContain('ProjectTasksTableE21F6637');
   expect(directoryPayload).toContain('WorkspaceDirectoryId');
+  expect(directoryPayload.match(/"teamSourceEntryKey"/g)).toHaveLength(2);
+  expect(directoryPayload.match(/"projectSourceEntryKey"/g)).toHaveLength(2);
+  expect(directoryPayload).toContain(
+    '"teamSourceEntryKey":{"S":"000010#000000#TEAM#core-team"}',
+  );
+  expect(directoryPayload).toContain(
+    '"projectSourceEntryKey":{"S":"000010#000010#PROJECT#refero"}',
+  );
   expect(workItemPayload).not.toContain('user#demo@example.com');
   expect(directoryPayload).not.toContain('user#demo@example.com');
   expect(canonicalWorkItemSeed?.Properties.Update).toBeUndefined();

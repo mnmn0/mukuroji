@@ -20,13 +20,13 @@ import {
 } from '@aws-sdk/client-dynamodb'
 import {
   DynamoDBDocumentClient,
-  DeleteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
+import { SQSClient } from '@aws-sdk/client-sqs'
 import {
   PUBLIC_API_OPENAPI_DOCUMENT,
   PLANNING_SCHEMA_VERSION,
@@ -279,6 +279,10 @@ import {
   type ConnectorWorkItemSnapshot,
 } from './connector-sync-runtime'
 import {
+  CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+  SqsConnectorSyncQueue,
+} from './connector-sync-worker'
+import {
   createPublicApiRouter,
   PUBLIC_API_MAX_PAGE_SIZE,
   PublicApiServiceError,
@@ -293,6 +297,16 @@ import {
   previewWorkItemImport,
   WorkItemTransferError,
 } from './work-item-transfer'
+import { allowsWebhookTeamAccess } from './webhook-authorization'
+import {
+  createWebhookMemberAuthorizationKey,
+  createWebhookProjectAuthorizationSortKey,
+  createWebhookResourceAuthorizationKey,
+  createWebhookTeamAuthorizationSortKey,
+  createWebhookTeamGrantDirectoryId,
+  createWebhookTeamGrantEntryKey,
+  createWebhookTeamGrantItem,
+} from './webhook-authorization-projection'
 import { queueWebhookDeliveryMessage } from './webhook-handler'
 import {
   createDefaultWorkItemImportExecutionStore,
@@ -1804,12 +1818,26 @@ type ProjectMemberItem = {
    * member item の更新日時です。
    */
   updatedAt: string
+  /**
+   * Retain 済み旧 row が論理削除されている場合の timestamp です。
+   */
+  archivedAt?: string
 }
 
 /**
  * DynamoDB に保存する team/project/member directory item です。
  */
 type ProjectDirectoryItem = ProjectDirectoryTeamItem | ProjectDirectoryProjectItem | ProjectMemberItem
+
+/** Webhook grant から強整合確認する Team / Project source locator です。 */
+type ProjectWebhookGrantSource = {
+  /** Grant が対象にする Team ID です。 */
+  teamId: string
+  /** Team source row の base-table sort key です。 */
+  teamSourceEntryKey: string
+  /** Project source row の base-table sort key です。 */
+  projectSourceEntryKey: string
+}
 
 /**
  * サイドバーに表示するプロジェクト行です。
@@ -2417,6 +2445,8 @@ const projectRoleWeights = {
   member: 2,
   manager: 3,
 } as const satisfies Record<ProjectRole, number>
+/** DynamoDB TransactWriteItems が受け付ける action 数の上限です。 */
+const DYNAMODB_TRANSACTION_MAX_ACTIONS = 100
 
 app.use(
   '/api/*',
@@ -10337,6 +10367,43 @@ async function requireTeamPermission(
   )
 }
 
+async function requireWebhookTeamPermission(
+  principal: ProjectPrincipal,
+  teamId: string,
+) {
+  const directory = await projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    'ja',
+    true,
+  )
+  const team = directory.teams.find((candidate) => candidate.id === teamId)
+
+  if (!team) {
+    throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+  }
+
+  const teamProjectIds = new Set(team.projects.map((project) => project.id))
+  const projectAccesses = (await projectDirectory.getProjectAccessList(
+    principal.directoryId,
+    principal.userKey,
+  )).filter((projectAccess) => teamProjectIds.has(projectAccess.projectId))
+  if (allowsWebhookTeamAccess({
+    activeWorkspaceMember: true,
+    activeTeam: true,
+    hasActiveProjectRole: projectAccesses.some((projectAccess) =>
+      projectAccessAllows(projectAccess, 'viewer')
+    ),
+  })) {
+    return
+  }
+
+  throw new ProjectDataError(
+    403,
+    'ProjectAccessDenied',
+    `User "${principal.userKey}" cannot access team "${teamId}".`,
+  )
+}
+
 async function loadAuthorizedTeamIssue(
   principal: WorkspacePrincipal,
   teamId: string,
@@ -14321,7 +14388,11 @@ export class DynamoDbProjectDirectoryClient {
       const items = await this.readValidDirectoryItems(directoryId)
       this.requireActiveProject(items, projectId)
       const members = items
-        .filter((item) => item.entryType === 'project-member' && item.projectId === projectId)
+        .filter((item): item is ProjectMemberItem =>
+          item.entryType === 'project-member' &&
+          item.projectId === projectId &&
+          isActiveDirectoryItem(item)
+        )
         .sort(compareProjectMemberItems)
         .map(toProjectMemberResponseItem)
 
@@ -14360,10 +14431,12 @@ export class DynamoDbProjectDirectoryClient {
     try {
       const items = await this.readValidDirectoryItems(directoryId, true)
       this.requireActiveProject(items, projectId)
-      const existingMember = items.find((item) =>
+      const projectGrantSources = getActiveProjectGrantSources(items, projectId)
+      const existingMember = items.find((item): item is ProjectMemberItem =>
         item.entryType === 'project-member' &&
         item.projectId === projectId &&
-        item.memberKey === normalizedMemberKey,
+        item.memberKey === normalizedMemberKey &&
+        isActiveDirectoryItem(item),
       )
       existingMemberExpected = existingMember !== undefined
 
@@ -14437,8 +14510,22 @@ export class DynamoDbProjectDirectoryClient {
             updatedAt,
           ),
         },
+        ...projectGrantSources.map((source) => ({
+          Put: {
+            TableName: this.tableName,
+            Item: createWebhookTeamGrantItem({
+              workspaceId: directoryId,
+              teamId: source.teamId,
+              projectId,
+              memberKey: normalizedMemberKey,
+              teamSourceEntryKey: source.teamSourceEntryKey,
+              projectSourceEntryKey: source.projectSourceEntryKey,
+            }),
+          },
+        })),
         ...(auditPut ? [auditPut] : []),
       )
+      requireDynamoDbTransactionCapacity(transactItems)
       const workspaceUpdateIndex = guardManager ? 2 : 1
 
       try {
@@ -14514,10 +14601,12 @@ export class DynamoDbProjectDirectoryClient {
     try {
       const items = await this.readValidDirectoryItems(directoryId, true)
       this.requireActiveProject(items, projectId)
-      const member = items.find((item) =>
+      const projectTeamIds = getProjectTeamIds(items, projectId)
+      const member = items.find((item): item is ProjectMemberItem =>
         item.entryType === 'project-member' &&
         item.projectId === projectId &&
-        item.memberKey === normalizedMemberKey,
+        item.memberKey === normalizedMemberKey &&
+        isActiveDirectoryItem(item),
       )
 
       if (!member) {
@@ -14560,41 +14649,40 @@ export class DynamoDbProjectDirectoryClient {
           ':expectedRole': member.role,
         },
       }
-
-      if (guardManager) {
-        await this.documentClient.send(
-          new TransactWriteCommand({
-            TransactItems: [
-              {
-                ConditionCheck: this.createProjectManagerConditionCheck(directoryId, guardManager.entryKey),
-              },
-              {
-                Delete: memberDelete,
-              },
-              ...(auditPut ? [auditPut] : []),
-            ],
-          }),
-        )
-      } else {
-        if (auditPut) {
-          await this.documentClient.send(
-            new TransactWriteCommand({
-              TransactItems: [
-                {
-                  Delete: memberDelete,
-                },
-                auditPut,
-              ],
-            }),
-          )
-        } else {
-          await this.documentClient.send(
-            new DeleteCommand({
-              ...memberDelete,
-            }),
-          )
+      const grantDeletes = projectTeamIds.map((teamId) => {
+        return {
+          Delete: {
+            TableName: this.tableName,
+            Key: {
+              directoryId: createWebhookTeamGrantDirectoryId(
+                directoryId,
+                normalizedMemberKey,
+              ),
+              entryKey: createWebhookTeamGrantEntryKey(teamId, projectId),
+            },
+          },
         }
-      }
+      })
+
+      const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+        ...(guardManager
+          ? [{
+              ConditionCheck: this.createProjectManagerConditionCheck(
+                directoryId,
+                guardManager.entryKey,
+              ),
+            }]
+          : []),
+        {
+          Delete: memberDelete,
+        },
+        ...grantDeletes,
+        ...(auditPut ? [auditPut] : []),
+      ]
+      requireDynamoDbTransactionCapacity(transactItems)
+      await this.documentClient.send(
+        new TransactWriteCommand({ TransactItems: transactItems }),
+      )
 
       return {
         projectId,
@@ -14818,14 +14906,18 @@ export class DynamoDbProjectDirectoryClient {
       const projectId = idempotencyResourceId ?? createUniqueResourceId(
         names.nameJa,
         items
-          .filter((item) => item.entryType === 'project')
+          .filter((item): item is ProjectDirectoryProjectItem =>
+            item.entryType === 'project'
+          )
           .flatMap((item) => (item.projectId ? [item.projectId] : [])),
       )
       const projectSortOrder =
         Math.max(
           0,
           ...items
-            .filter((item) => item.entryType === 'project' && item.teamId === teamId)
+            .filter((item): item is ProjectDirectoryProjectItem =>
+              item.entryType === 'project' && item.teamId === teamId
+            )
             .map((item) => item.projectSortOrder ?? 0),
         ) + 10
       const item: ProjectDirectoryItem = {
@@ -14861,54 +14953,67 @@ export class DynamoDbProjectDirectoryClient {
       }
 
       try {
-        await this.documentClient.send(
-          new TransactWriteCommand({
-            TransactItems: [
-              {
-                ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey),
-              },
-              {
-                Put: {
-                  TableName: this.tableName,
-                  Item: item,
-                  ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
-                },
-              },
-              {
-                Put: {
-                  TableName: this.tableName,
-                  Item: creatorMemberItem,
-                  ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
-                },
-              },
-              {
-                Update: this.createActiveWorkspaceMemberVersionUpdate(
-                  directoryId,
-                  creatorMemberKey,
-                  creator.workspaceMemberVersion,
-                  updatedAt,
-                ),
-              },
-              ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
-                directoryId,
-                eventType: 'project.created',
-                entityType: 'project',
-                entityId: projectId,
-                action: 'created',
-                occurredAt: updatedAt,
-                changes: createAuditFieldChanges(undefined, {
-                  projectId,
-                  teamId,
-                  name: names.nameJa,
-                  tone,
-                  creatorMemberKey,
-                  creatorRole: 'manager',
-                }),
-                metadata: { kind: 'project', projectId, teamId },
+        const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+          {
+            ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey),
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: item,
+              ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+            },
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: creatorMemberItem,
+              ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+            },
+          },
+          {
+            Update: this.createActiveWorkspaceMemberVersionUpdate(
+              directoryId,
+              creatorMemberKey,
+              creator.workspaceMemberVersion,
+              updatedAt,
+            ),
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: createWebhookTeamGrantItem({
+                workspaceId: directoryId,
+                teamId,
+                projectId,
+                memberKey: creatorMemberKey,
+                teamSourceEntryKey: team.entryKey,
+                projectSourceEntryKey: item.entryKey,
               }),
-              ...completionTransactItems,
-            ],
+            },
+          },
+          ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+            directoryId,
+            eventType: 'project.created',
+            entityType: 'project',
+            entityId: projectId,
+            action: 'created',
+            occurredAt: updatedAt,
+            changes: createAuditFieldChanges(undefined, {
+              projectId,
+              teamId,
+              name: names.nameJa,
+              tone,
+              creatorMemberKey,
+              creatorRole: 'manager',
+            }),
+            metadata: { kind: 'project', projectId, teamId },
           }),
+          ...completionTransactItems,
+        ]
+        requireDynamoDbTransactionCapacity(transactItems)
+        await this.documentClient.send(
+          new TransactWriteCommand({ TransactItems: transactItems }),
         )
       } catch (error) {
         if (isTransactionConditionalFailureAt(error, 3)) {
@@ -15225,7 +15330,8 @@ export class DynamoDbProjectDirectoryClient {
       item.entryType === 'project-member' &&
       item.projectId === projectId &&
       item.memberKey !== memberKey &&
-      item.role === 'manager',
+      item.role === 'manager' &&
+      isActiveDirectoryItem(item),
     )
   }
 
@@ -15335,10 +15441,11 @@ export class DynamoDbProjectDirectoryClient {
   ): Promise<never> {
     const items = await this.readValidDirectoryItems(directoryId, true)
     this.requireActiveProject(items, projectId)
-    const member = items.find((item) =>
+    const member = items.find((item): item is ProjectMemberItem =>
       item.entryType === 'project-member' &&
       item.projectId === projectId &&
-      item.memberKey === memberKey,
+      item.memberKey === memberKey &&
+      isActiveDirectoryItem(item),
     )
 
     if (existingMemberExpected && !member) {
@@ -15367,10 +15474,11 @@ export class DynamoDbProjectDirectoryClient {
   ): Promise<never> {
     const items = await this.readValidDirectoryItems(directoryId, true)
     this.requireActiveProject(items, projectId)
-    const member = items.find((item) =>
+    const member = items.find((item): item is ProjectMemberItem =>
       item.entryType === 'project-member' &&
       item.projectId === projectId &&
-      item.memberKey === memberKey,
+      item.memberKey === memberKey &&
+      isActiveDirectoryItem(item),
     )
 
     if (!member) {
@@ -16278,6 +16386,19 @@ function resolveConfigurationConditionStartIndex(
   return precedingItemCount + (auditPut === undefined ? 0 : 1)
 }
 
+function requireDynamoDbTransactionCapacity(
+  transactItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
+) {
+  if (transactItems.length > DYNAMODB_TRANSACTION_MAX_ACTIONS) {
+    throw new ProjectDataError(
+      409,
+      'ProjectMembershipTransactionTooLarge',
+      `Project membership would require ${transactItems.length} atomic writes; ` +
+        `the supported maximum is ${DYNAMODB_TRANSACTION_MAX_ACTIONS}.`,
+    )
+  }
+}
+
 function createProjectDataConflictError() {
   return new ProjectDataError(
     409,
@@ -16532,7 +16653,7 @@ function toProjectDirectoryResponse(
 ): ProjectDirectoryTeamResponse[] {
   const teams: ProjectDirectoryTeamResponse[] = []
   const teamById = new Map<string, ProjectDirectoryTeamResponse>()
-  const projectItems: ProjectDirectoryItem[] = []
+  const projectItems: ProjectDirectoryProjectItem[] = []
 
   for (const value of readProjectDirectoryItems(values, directoryId)) {
     if (value.entryType === 'project-member') {
@@ -16594,13 +16715,17 @@ function toProjectMemberResponseItem(item: ProjectMemberItem): ProjectMemberResp
 function toProjectAccessEntries(items: ProjectDirectoryItem[], memberKey: string) {
   const activeTeamIds = new Set(
     items
-      .filter((item) => item.entryType === 'team' && isActiveDirectoryItem(item))
+      .filter((item): item is ProjectDirectoryTeamItem =>
+        item.entryType === 'team' && isActiveDirectoryItem(item)
+      )
       .map((item) => item.teamId),
   )
   const roleByProjectId = new Map(
     items
-      .filter((item) => {
-        return item.entryType === 'project-member' && item.memberKey === memberKey
+      .filter((item): item is ProjectMemberItem => {
+        return item.entryType === 'project-member' &&
+          item.memberKey === memberKey &&
+          item.archivedAt === undefined
       })
       .map((item) => [item.projectId, item.role] as const),
   )
@@ -16627,6 +16752,49 @@ function toProjectAccessEntries(items: ProjectDirectoryItem[], memberKey: string
   return accessEntries
 }
 
+function getProjectTeamIds(
+  items: ProjectDirectoryItem[],
+  projectId: string,
+) {
+  return [...new Set(items
+    .filter((item): item is ProjectDirectoryProjectItem =>
+      item.entryType === 'project' &&
+      item.projectId === projectId
+    )
+    .map((item) => item.teamId))]
+}
+
+function getActiveProjectGrantSources(
+  items: ProjectDirectoryItem[],
+  projectId: string,
+) {
+  const activeTeams = new Map(
+    items
+      .filter((item): item is ProjectDirectoryTeamItem =>
+        item.entryType === 'team' && isActiveDirectoryItem(item)
+      )
+      .map((item) => [item.teamId, item] as const),
+  )
+  const sourcesByTeamId = new Map<string, ProjectWebhookGrantSource>()
+  for (const item of items) {
+    if (
+      item.entryType !== 'project' ||
+      item.projectId !== projectId ||
+      !isActiveDirectoryItem(item)
+    ) {
+      continue
+    }
+    const team = activeTeams.get(item.teamId)
+    if (!team || sourcesByTeamId.has(item.teamId)) continue
+    sourcesByTeamId.set(item.teamId, {
+      teamId: item.teamId,
+      teamSourceEntryKey: team.entryKey,
+      projectSourceEntryKey: item.entryKey,
+    })
+  }
+  return [...sourcesByTeamId.values()]
+}
+
 function compareProjectMemberItems(first: ProjectMemberItem, second: ProjectMemberItem) {
   const roleDelta = projectRoleWeights[second.role] - projectRoleWeights[first.role]
 
@@ -16644,7 +16812,7 @@ function localizedName(item: ProjectDirectoryTeamItem | ProjectDirectoryProjectI
   return locale === 'en' ? item.nameEn || item.nameJa : item.nameJa || item.nameEn
 }
 
-function isActiveDirectoryItem(item: ProjectDirectoryTeamItem | ProjectDirectoryProjectItem) {
+function isActiveDirectoryItem(item: { archivedAt?: string }) {
   return item.archivedAt === undefined
 }
 
@@ -16761,7 +16929,8 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
       (value.name === undefined || typeof value.name === 'string') &&
       isProjectRole(value.role) &&
       typeof value.createdAt === 'string' &&
-      typeof value.updatedAt === 'string'
+      typeof value.updatedAt === 'string' &&
+      (value.archivedAt === undefined || typeof value.archivedAt === 'string')
     )
   }
 
@@ -17549,22 +17718,6 @@ function createProjectEntryKey(
 
 function createProjectMemberEntryKey(projectId: string, memberKey: string) {
   return `PROJECT_MEMBER#${projectId}#${memberKey}`
-}
-
-function createWebhookResourceAuthorizationKey(directoryId: string) {
-  return `WEBHOOK_ACL#RESOURCE#${directoryId}`
-}
-
-function createWebhookMemberAuthorizationKey(directoryId: string, memberKey: string) {
-  return `WEBHOOK_ACL#MEMBER#${directoryId}#${memberKey}`
-}
-
-function createWebhookTeamAuthorizationSortKey(teamId: string) {
-  return `TEAM#${teamId}`
-}
-
-function createWebhookProjectAuthorizationSortKey(projectId: string) {
-  return `PROJECT#${projectId}`
 }
 
 function padSortOrder(value: number) {
@@ -18473,7 +18626,7 @@ function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       const principal = await resolveDeveloperManagementPrincipal(managementPrincipal)
       requireWorkspaceBusinessWrite(principal)
       for (const teamId of teamIds) {
-        await requireTeamPermission(principal, teamId, 'viewer')
+        await requireWebhookTeamPermission(principal, teamId)
       }
     },
 
@@ -18959,6 +19112,9 @@ function createConfiguredConnectorRuntime(
     persistence,
     health,
     originSigningSecret,
+    previousOriginSigningSecrets: readConnectorSyncOriginPreviousSigningSecrets(
+      environment.CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON,
+    ),
   })
   authorization = new ConnectorAuthorizationRuntime({
     platform: createForwardingClient(() => developerPlatform),
@@ -18991,6 +19147,29 @@ function readConnectorOAuthStatePreviousSigningSecrets(
   } catch {
     throw new TypeError(
       'CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON must be a JSON array of up to three non-empty strings.',
+    )
+  }
+}
+
+/** Connector origin marker key rotation 用の旧 secret JSON array を検証します。 */
+export function readConnectorSyncOriginPreviousSigningSecrets(
+  value: string | undefined,
+) {
+  if (!value?.trim()) return []
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!Array.isArray(parsed) || parsed.length > 3) throw new TypeError()
+    const secrets = parsed.map((secret) => {
+      if (typeof secret !== 'string') throw new TypeError()
+      return secret.trim()
+    })
+    if (secrets.some((secret) => Buffer.byteLength(secret, 'utf8') < 32)) {
+      throw new TypeError()
+    }
+    return secrets
+  } catch {
+    throw new TypeError(
+      'CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON must be a JSON array of up to three strings containing at least 32 bytes.',
     )
   }
 }
@@ -19076,6 +19255,57 @@ const lazyConnectorAuthorization: ConnectorAuthorizationService = {
     return (await requireConfiguredConnectorAuthorization())
       .resolveConflict(principal, conflictId, input)
   },
+}
+
+let publicConnectorSyncQueue: SqsConnectorSyncQueue | undefined
+let publicConnectorSyncSqsClient: SQSClient | undefined
+
+function getPublicConnectorSyncQueue() {
+  if (publicConnectorSyncQueue) return publicConnectorSyncQueue
+  const queueUrl = getEnv('CONNECTOR_SYNC_QUEUE_URL')
+  if (!queueUrl) {
+    throw new ConnectorRuntimeError(
+      'ConnectorSyncQueueUnavailable',
+      'Connector synchronization queue is not configured.',
+      { retryable: true },
+    )
+  }
+  const endpoint = getEnv('SQS_ENDPOINT') ??
+    getEnv('AWS_ENDPOINT_URL_SQS') ??
+    getEnv('AWS_ENDPOINT_URL')
+  publicConnectorSyncSqsClient ??= new SQSClient({
+    region: getEnv('AWS_REGION') ?? getEnv('AWS_DEFAULT_REGION') ?? 'ap-northeast-1',
+    ...(endpoint
+      ? {
+          endpoint,
+          credentials: {
+            accessKeyId: getEnv('AWS_ACCESS_KEY_ID') ?? 'test',
+            secretAccessKey: getEnv('AWS_SECRET_ACCESS_KEY') ?? 'test',
+          },
+        }
+      : {}),
+  })
+  publicConnectorSyncQueue = new SqsConnectorSyncQueue(
+    publicConnectorSyncSqsClient,
+    queueUrl,
+  )
+  return publicConnectorSyncQueue
+}
+
+async function queueConnectorDisconnectMessage(input: {
+  workspaceId: string
+  installationId: string
+  lifecycleRevision: number
+  updatedByUserId: string
+}) {
+  await getPublicConnectorSyncQueue().enqueue({
+    version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+    kind: 'disconnect-links',
+    workspaceId: input.workspaceId,
+    installationId: input.installationId,
+    lifecycleRevision: input.lifecycleRevision,
+    updatedByUserId: input.updatedByUserId,
+  })
 }
 
 async function requirePublicImportPermission(
@@ -19630,6 +19860,7 @@ if (!getEnv('MUKUROJI_RUNTIME_ROLE')) {
     cursorSecret: getPublicApiCursorSecret(),
     queueWebhookDelivery: queueWebhookDeliveryMessage,
     connectorAuthorization: lazyConnectorAuthorization,
+    queueConnectorDisconnect: queueConnectorDisconnectMessage,
     mapError: mapPublicApiAdapterError,
   }
   app.route('/api', createPublicApiRouter(publicApiDependencies))

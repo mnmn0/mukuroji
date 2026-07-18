@@ -342,12 +342,32 @@ if ! aws_local dynamodb describe-table --table-name "$PROJECT_DIRECTORY_TABLE" >
     --attribute-definitions \
       AttributeName=directoryId,AttributeType=S \
       AttributeName=entryKey,AttributeType=S \
+      AttributeName=webhookAuthorizationKey,AttributeType=S \
+      AttributeName=webhookAuthorizationSortKey,AttributeType=S \
     --key-schema \
       AttributeName=directoryId,KeyType=HASH \
       AttributeName=entryKey,KeyType=RANGE \
+    --global-secondary-indexes \
+      'IndexName=WebhookAuthorizationIndex,KeySchema=[{AttributeName=webhookAuthorizationKey,KeyType=HASH},{AttributeName=webhookAuthorizationSortKey,KeyType=RANGE}],Projection={ProjectionType=ALL}' \
     --billing-mode PAY_PER_REQUEST \
     >/dev/null
 fi
+
+WEBHOOK_AUTHORIZATION_INDEX_COUNT="$(aws_local dynamodb describe-table \
+  --table-name "$PROJECT_DIRECTORY_TABLE" \
+  --query "length(Table.GlobalSecondaryIndexes[?IndexName=='WebhookAuthorizationIndex'])" \
+  --output text)"
+if [ "$WEBHOOK_AUTHORIZATION_INDEX_COUNT" = "0" ]; then
+  aws_local dynamodb update-table \
+    --table-name "$PROJECT_DIRECTORY_TABLE" \
+    --attribute-definitions \
+      AttributeName=webhookAuthorizationKey,AttributeType=S \
+      AttributeName=webhookAuthorizationSortKey,AttributeType=S \
+    --global-secondary-index-updates \
+      '[{"Create":{"IndexName":"WebhookAuthorizationIndex","KeySchema":[{"AttributeName":"webhookAuthorizationKey","KeyType":"HASH"},{"AttributeName":"webhookAuthorizationSortKey","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}}]' \
+    >/dev/null
+fi
+aws_local dynamodb wait table-exists --table-name "$PROJECT_DIRECTORY_TABLE"
 
 DIRECTORY_UNPROCESSED_TABLES="$(aws_local dynamodb batch-write-item \
   --request-items "{
@@ -390,6 +410,117 @@ if [ "$WORKSPACE_UNPROCESSED_TABLES" != "0" ]; then
   echo "DynamoDB workspace bootstrap left unprocessed items: table=$PROJECT_DIRECTORY_TABLE workspaceDirectory=$WORKSPACE_DIRECTORY_ID" >&2
   exit 1
 fi
+
+set_webhook_authorization_projection() {
+  entry_key="$1"
+  authorization_key="$2"
+  authorization_sort_key="$3"
+  aws_local dynamodb update-item \
+    --table-name "$PROJECT_DIRECTORY_TABLE" \
+    --key "{
+      \"directoryId\": {\"S\": \"$PROJECT_DIRECTORY_ID\"},
+      \"entryKey\": {\"S\": \"$entry_key\"}
+    }" \
+    --update-expression \
+      'SET webhookAuthorizationKey = :authorizationKey, webhookAuthorizationSortKey = :authorizationSortKey' \
+    --expression-attribute-values "{
+      \":authorizationKey\": {\"S\": \"$authorization_key\"},
+      \":authorizationSortKey\": {\"S\": \"$authorization_sort_key\"}
+    }" \
+    >/dev/null
+}
+
+seed_webhook_team_grant() {
+  team_id="$1"
+  project_id="$2"
+  member_key="$3"
+  team_source_entry_key="$4"
+  project_source_entry_key="$5"
+  aws_local dynamodb put-item \
+    --table-name "$PROJECT_DIRECTORY_TABLE" \
+    --item "{
+      \"directoryId\": {\"S\": \"WEBHOOK_TEAM_GRANT#$PROJECT_DIRECTORY_ID#$member_key\"},
+      \"entryKey\": {\"S\": \"TEAM#$team_id#PROJECT#$project_id\"},
+      \"entryType\": {\"S\": \"webhook-team-grant\"},
+      \"workspaceId\": {\"S\": \"$PROJECT_DIRECTORY_ID\"},
+      \"teamId\": {\"S\": \"$team_id\"},
+      \"projectId\": {\"S\": \"$project_id\"},
+      \"memberKey\": {\"S\": \"$member_key\"},
+      \"sourceEntryKey\": {\"S\": \"PROJECT_MEMBER#$project_id#$member_key\"},
+      \"teamSourceEntryKey\": {\"S\": \"$team_source_entry_key\"},
+      \"projectSourceEntryKey\": {\"S\": \"$project_source_entry_key\"},
+      \"webhookAuthorizationKey\": {\"S\": \"WEBHOOK_ACL#TEAM_MEMBER#$PROJECT_DIRECTORY_ID#$team_id#$member_key\"},
+      \"webhookAuthorizationSortKey\": {\"S\": \"PROJECT#$project_id\"}
+    }" \
+    >/dev/null
+}
+
+RESOURCE_AUTHORIZATION_KEY="WEBHOOK_ACL#RESOURCE#$PROJECT_DIRECTORY_ID"
+set_webhook_authorization_projection \
+  '000010#000000#TEAM#core-team' \
+  "$RESOURCE_AUTHORIZATION_KEY" \
+  'TEAM#core-team'
+set_webhook_authorization_projection \
+  '000010#000010#PROJECT#refero' \
+  "$RESOURCE_AUTHORIZATION_KEY" \
+  'PROJECT#refero'
+set_webhook_authorization_projection \
+  '000010#000020#PROJECT#product-roadmap' \
+  "$RESOURCE_AUTHORIZATION_KEY" \
+  'PROJECT#product-roadmap'
+set_webhook_authorization_projection \
+  '000010#000030#PROJECT#shared-launch' \
+  "$RESOURCE_AUTHORIZATION_KEY" \
+  'PROJECT#shared-launch'
+set_webhook_authorization_projection \
+  '000020#000000#TEAM#design-team' \
+  "$RESOURCE_AUTHORIZATION_KEY" \
+  'TEAM#design-team'
+set_webhook_authorization_projection \
+  '000020#000010#PROJECT#shared-launch' \
+  "$RESOURCE_AUTHORIZATION_KEY" \
+  'PROJECT#shared-launch'
+set_webhook_authorization_projection \
+  '000020#000020#PROJECT#brand-refresh' \
+  "$RESOURCE_AUTHORIZATION_KEY" \
+  'PROJECT#brand-refresh'
+
+set_webhook_authorization_projection \
+  'PROJECT_MEMBER#refero#sato@example.com' \
+  "WEBHOOK_ACL#MEMBER#$PROJECT_DIRECTORY_ID#sato@example.com" \
+  'PROJECT#refero'
+set_webhook_authorization_projection \
+  'PROJECT_MEMBER#refero#viewer@example.com' \
+  "WEBHOOK_ACL#MEMBER#$PROJECT_DIRECTORY_ID#viewer@example.com" \
+  'PROJECT#refero'
+for owner_project_id in refero product-roadmap shared-launch brand-refresh; do
+  set_webhook_authorization_projection \
+    "PROJECT_MEMBER#$owner_project_id#$PROJECT_MEMBER_KEY" \
+    "WEBHOOK_ACL#MEMBER#$PROJECT_DIRECTORY_ID#$PROJECT_MEMBER_KEY" \
+    "PROJECT#$owner_project_id"
+done
+
+seed_webhook_team_grant \
+  'core-team' 'refero' 'sato@example.com' \
+  '000010#000000#TEAM#core-team' '000010#000010#PROJECT#refero'
+seed_webhook_team_grant \
+  'core-team' 'refero' 'viewer@example.com' \
+  '000010#000000#TEAM#core-team' '000010#000010#PROJECT#refero'
+seed_webhook_team_grant \
+  'core-team' 'refero' "$PROJECT_MEMBER_KEY" \
+  '000010#000000#TEAM#core-team' '000010#000010#PROJECT#refero'
+seed_webhook_team_grant \
+  'core-team' 'product-roadmap' "$PROJECT_MEMBER_KEY" \
+  '000010#000000#TEAM#core-team' '000010#000020#PROJECT#product-roadmap'
+seed_webhook_team_grant \
+  'core-team' 'shared-launch' "$PROJECT_MEMBER_KEY" \
+  '000010#000000#TEAM#core-team' '000010#000030#PROJECT#shared-launch'
+seed_webhook_team_grant \
+  'design-team' 'shared-launch' "$PROJECT_MEMBER_KEY" \
+  '000020#000000#TEAM#design-team' '000020#000010#PROJECT#shared-launch'
+seed_webhook_team_grant \
+  'design-team' 'brand-refresh' "$PROJECT_MEMBER_KEY" \
+  '000020#000000#TEAM#design-team' '000020#000020#PROJECT#brand-refresh'
 
 if ! aws_local dynamodb describe-table --table-name "$WORKSPACE_ACCESS_TABLE" >/dev/null 2>&1; then
   aws_local dynamodb create-table \

@@ -3,11 +3,22 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import {
   DeleteCommand,
   DynamoDBDocumentClient,
+  GetCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs'
-import type { WebhookDelivery, WebhookEventEnvelope, WebhookEventType } from '@mukuroji/contracts'
-import { toAuditEventView, upcastAuditEvent } from './audit'
+import type {
+  WebhookDelivery,
+  WebhookEventEnvelope,
+  WebhookEventType,
+  WebhookSubscription,
+} from '@mukuroji/contracts'
+import {
+  getConfiguredAuditTableName,
+  toAuditEventView,
+  upcastAuditEvent,
+  type AuditEventV1,
+} from './audit'
 import {
   DeveloperPlatformError,
   DynamoDbDeveloperPlatformClient,
@@ -31,6 +42,12 @@ export const WEBHOOK_QUEUE_MAX_DELAY_SECONDS = 15 * 60
 
 /** Webhook HTTP attempt を単一 worker に束縛する lease 秒数です。 */
 export const WEBHOOK_DELIVERY_LEASE_SECONDS = 90
+
+/** 1 projection message で読み取る Webhook subscription の最大件数です。 */
+export const WEBHOOK_PROJECTION_PAGE_SIZE = 50
+
+/** Webhook projection が同時に実行する認可・永続化・enqueue の最大件数です。 */
+export const WEBHOOK_PROJECTION_CONCURRENCY = 10
 
 /** DynamoDB Streams image に含まれる AttributeValue の必要最小表現です。 */
 export type WebhookDynamoAttributeValue = {
@@ -83,8 +100,10 @@ export type WebhookBatchResponse = {
   batchItemFailures: WebhookBatchItemFailure[]
 }
 
-/** Webhook delivery queue に載せる secret-free message です。 */
-export type WebhookQueueMessage = {
+/** Webhook HTTP delivery queue に載せる secret-free locator です。 */
+export type WebhookDeliveryQueueMessage = {
+  /** Message の用途を識別する discriminator です。 */
+  kind: 'delivery'
   /** Delivery が属する Workspace ID です。 */
   workspaceId: string
   /** 永続化済み Webhook delivery ID です。 */
@@ -93,10 +112,33 @@ export type WebhookQueueMessage = {
   delaySeconds?: number
 }
 
+/** Audit event から Webhook deliveries を durable に射影する queue message です。 */
+export type WebhookProjectionQueueMessage = {
+  /** Message の用途を識別する discriminator です。 */
+  kind: 'projection'
+  /** Audit event が属する Workspace ID です。 */
+  workspaceId: string
+  /** 強整合読みで復元する Audit event ID です。 */
+  eventId: string
+  /** 次に読む subscription page の opaque cursor です。 */
+  cursor?: string
+}
+
+/** Webhook queue に載せる secret-free message です。 */
+export type WebhookQueueMessage =
+  | WebhookDeliveryQueueMessage
+  | WebhookProjectionQueueMessage
+
 /** Webhook delivery queue への書き込み境界です。 */
 export interface WebhookDeliveryQueue {
-  /** Secret を含まない delivery locator を enqueue します。 */
+  /** Secret を含まない projection または delivery locator を enqueue します。 */
   enqueue(message: WebhookQueueMessage): Promise<void>
+}
+
+/** Webhook projection worker が Audit event を強整合読みする境界です。 */
+export interface WebhookAuditEventReader {
+  /** Workspace-bound ID で Audit event を返します。 */
+  getEvent(workspaceId: string, eventId: string): Promise<AuditEventV1 | undefined>
 }
 
 /** Webhook delivery の durable claim 入力です。 */
@@ -123,16 +165,14 @@ export interface WebhookDeliveryClaimStore {
 
 /** Audit stream projection の注入可能 dependencies です。 */
 export type WebhookProjectionDependencies = {
-  /** Subscription と delivery log の永続化境界です。 */
-  developerPlatform: DeveloperPlatformClient
-  /** Subscription 作成者の current Team ACL を検証します。 */
-  authorizer: WebhookSubscriptionAuthorizer
-  /** HTTP worker へ delivery locator を渡す queue です。 */
+  /** Durable projection message を delivery worker へ渡す queue です。 */
   queue: WebhookDeliveryQueue
 }
 
 /** Webhook HTTP worker の注入可能 dependencies です。 */
 export type WebhookDeliveryWorkerDependencies = {
+  /** Projection message の Audit event を強整合読みします。 */
+  auditEvents: WebhookAuditEventReader
   /** Subscription と delivery log の永続化境界です。 */
   developerPlatform: DeveloperPlatformClient
   /** Retry/replay 時にも subscription 作成者の current ACL を再検証します。 */
@@ -168,20 +208,19 @@ let defaultWebhookAuthorizer: WebhookSubscriptionAuthorizer | undefined
 let defaultQueue: WebhookDeliveryQueue | undefined
 let defaultSqsClient: SQSClient | undefined
 let defaultWebhookDeliveryClaimStore: WebhookDeliveryClaimStore | undefined
+let defaultWebhookAuditEventReader: WebhookAuditEventReader | undefined
 
 /**
- * AuditEventsTable の pending insert を versioned webhook envelope へ射影します。
+ * AuditEventsTable の pending insert を durable projection queue へ渡します。
  *
  * @remarks
- * Delivery ID は domain 側で subscription/event ごとに決定的に作られるため、stream retry で
- * 同じ delivery log が重複作成されません。SQS message には secret や payload を含めません。
+ * Stream worker は ID だけを enqueue します。SQS worker が event を強整合読みし、bounded page
+ * ごとに delivery を作成するため、subscription 数が多くても durable に継続できます。
  */
 export async function projectionHandler(
   event: WebhookDynamoStreamEvent,
 ): Promise<WebhookBatchResponse> {
   return await processWebhookProjectionBatch(event, {
-    developerPlatform: getDefaultDeveloperPlatform(),
-    authorizer: getDefaultWebhookAuthorizer(),
     queue: getDefaultWebhookQueue(),
   })
 }
@@ -191,13 +230,9 @@ export async function processWebhookProjectionBatch(
   event: WebhookDynamoStreamEvent,
   dependencies: WebhookProjectionDependencies,
 ): Promise<WebhookBatchResponse> {
-  const batchDependencies = {
-    ...dependencies,
-    authorizer: dependencies.authorizer.createBatch?.() ?? dependencies.authorizer,
-  }
   const results = await Promise.all((event.Records ?? []).map(async (record) => {
     try {
-      await projectAuditRecord(record, batchDependencies)
+      await projectAuditRecord(record, dependencies)
       return undefined
     } catch (error) {
       console.error('Webhook projection failed:', readSafeErrorMessage(error))
@@ -207,9 +242,10 @@ export async function processWebhookProjectionBatch(
   return { batchItemFailures: results.filter(isDefined) }
 }
 
-/** SQS delivery batch を処理し、失敗した message だけを再試行します。 */
+/** SQS projection/delivery batch を処理し、失敗した message だけを再試行します。 */
 export async function deliveryHandler(event: WebhookSqsEvent): Promise<WebhookBatchResponse> {
   return await processWebhookDeliveryBatch(event, {
+    auditEvents: getDefaultWebhookAuditEventReader(),
     developerPlatform: getDefaultDeveloperPlatform(),
     authorizer: getDefaultWebhookAuthorizer(),
     queue: getDefaultWebhookQueue(),
@@ -247,7 +283,12 @@ export async function queueWebhookDeliveryMessage(
   deliveryId: string,
   delaySeconds = 0,
 ) {
-  await getDefaultWebhookQueue().enqueue({ workspaceId, deliveryId, delaySeconds })
+  await getDefaultWebhookQueue().enqueue({
+    kind: 'delivery',
+    workspaceId,
+    deliveryId,
+    delaySeconds,
+  })
 }
 
 async function projectAuditRecord(
@@ -259,42 +300,98 @@ async function projectAuditRecord(
   if (stored.outboxStatus !== 'pending') return
   const event = upcastAuditEvent(stored)
   if (event.outboxStatus !== 'pending' || !isWebhookEventType(event.eventType)) return
+  await dependencies.queue.enqueue({
+    kind: 'projection',
+    workspaceId: event.workspaceId,
+    eventId: event.eventId,
+  })
+}
+
+async function processWebhookProjectionMessage(
+  message: WebhookProjectionQueueMessage,
+  dependencies: WebhookDeliveryWorkerDependencies,
+) {
+  const event = await dependencies.auditEvents.getEvent(message.workspaceId, message.eventId)
+  if (
+    !event ||
+    event.workspaceId !== message.workspaceId ||
+    event.eventId !== message.eventId ||
+    event.outboxStatus !== 'pending' ||
+    !isWebhookEventType(event.eventType)
+  ) return
+
   const envelope: WebhookEventEnvelope = {
     id: event.eventId,
     type: event.eventType,
     apiVersion: '2026-07-01',
     occurredAt: event.occurredAt,
     workspaceId: event.workspaceId,
-    data: toAuditEventView(stored),
+    data: toAuditEventView(event),
   }
   const resourceScope = readWebhookEventResourceScope(envelope)
   if (!resourceScope) return
-  const subscriptions = await dependencies.developerPlatform.listWebhookSubscriptions(
-    event.workspaceId,
-  )
-  const authorizedSubscriptionIds = (await Promise.all(subscriptions.map(async (
-    subscription,
-  ) =>
-    subscription.status === 'active' &&
-    subscription.teamIds.includes(resourceScope.teamId) &&
-    await dependencies.authorizer.canDeliver(
-      event.workspaceId,
-      subscription,
-      resourceScope.teamId,
-      resourceScope.projectId,
-    )
-      ? subscription.id
-      : undefined
-  ))).filter(isDefined)
-  const deliveries = await dependencies.developerPlatform.enqueueWebhookEvent({
+
+  const page = await dependencies.developerPlatform.listActiveWebhookSubscriptionsPage({
     workspaceId: event.workspaceId,
-    event: envelope,
-    authorizedSubscriptionIds,
+    ...(message.cursor ? { cursor: message.cursor } : {}),
+    limit: WEBHOOK_PROJECTION_PAGE_SIZE,
   })
-  await Promise.all(deliveries.map((delivery) => dependencies.queue.enqueue({
-    workspaceId: event.workspaceId,
-    deliveryId: delivery.id,
-  })))
+  const candidates = page.subscriptions.filter((subscription) =>
+    isMatchingWebhookProjectionSubscription(subscription, envelope, resourceScope.teamId)
+  )
+
+  for (const group of chunkValues(candidates, WEBHOOK_PROJECTION_CONCURRENCY)) {
+    const authorizedSubscriptionIds = (await mapWithConcurrency(
+      group,
+      WEBHOOK_PROJECTION_CONCURRENCY,
+      async (subscription) => {
+        const authorized = await dependencies.authorizer.canDeliver(
+          event.workspaceId,
+          subscription,
+          resourceScope.teamId,
+          resourceScope.projectId,
+        )
+        return authorized ? subscription.id : undefined
+      },
+    )).filter(isDefined)
+    if (authorizedSubscriptionIds.length === 0) continue
+
+    const deliveries = await dependencies.developerPlatform.enqueueWebhookEvent({
+      workspaceId: event.workspaceId,
+      event: envelope,
+      authorizedSubscriptionIds,
+    })
+    await mapWithConcurrency(
+      deliveries,
+      WEBHOOK_PROJECTION_CONCURRENCY,
+      async (delivery) => {
+        await dependencies.queue.enqueue({
+          kind: 'delivery',
+          workspaceId: event.workspaceId,
+          deliveryId: delivery.id,
+        })
+      },
+    )
+  }
+
+  if (page.nextCursor) {
+    await dependencies.queue.enqueue({
+      kind: 'projection',
+      workspaceId: event.workspaceId,
+      eventId: event.eventId,
+      cursor: page.nextCursor,
+    })
+  }
+}
+
+function isMatchingWebhookProjectionSubscription(
+  subscription: WebhookSubscription,
+  event: WebhookEventEnvelope,
+  teamId: string,
+) {
+  return subscription.status === 'active' &&
+    subscription.teamIds.includes(teamId) &&
+    subscription.eventTypes.includes(event.type)
 }
 
 async function processWebhookQueueRecord(
@@ -302,9 +399,14 @@ async function processWebhookQueueRecord(
   dependencies: WebhookDeliveryWorkerDependencies,
 ) {
   const message = readWebhookQueueMessage(record.body)
+  if (message.kind === 'projection') {
+    await processWebhookProjectionMessage(message, dependencies)
+    return
+  }
   const now = dependencies.now()
   const claim: WebhookDeliveryClaimRequest = {
-    ...message,
+    workspaceId: message.workspaceId,
+    deliveryId: message.deliveryId,
     leaseOwner: randomUUID(),
     now: now.toISOString(),
     leaseExpiresAt: new Date(
@@ -327,7 +429,7 @@ async function processWebhookQueueRecord(
 }
 
 async function processClaimedWebhookQueueRecord(
-  message: WebhookQueueMessage,
+  message: WebhookDeliveryQueueMessage,
   dependencies: WebhookDeliveryWorkerDependencies,
   markAttemptStarted: () => void,
 ) {
@@ -436,6 +538,40 @@ async function deliverPreparedWebhook(prepared: PreparedWebhookDelivery) {
   })
 }
 
+/** Audit event を Workspace-bound key で強整合読みする DynamoDB reader です。 */
+export class DynamoDbWebhookAuditEventReader
+implements WebhookAuditEventReader {
+  /** Audit event table を操作する DocumentClient です。 */
+  private readonly documentClient: DynamoDBDocumentClient
+  /** Immutable Audit event table 名です。 */
+  private readonly tableName: string
+
+  /** DynamoDB-backed Audit event reader を作成します。 */
+  constructor(
+    documentClient: DynamoDBDocumentClient = createWebhookDocumentClient(),
+    tableName = readWebhookAuditTableName(),
+  ) {
+    this.documentClient = documentClient
+    this.tableName = readIdentifier(tableName, 'Audit event table name')
+  }
+
+  /** Workspace-bound deterministic ID で Audit event を強整合読みします。 */
+  async getEvent(workspaceIdValue: string, eventIdValue: string) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const eventId = readIdentifier(eventIdValue, 'Audit event ID')
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { directoryId: workspaceId, eventId },
+      ConsistentRead: true,
+    }))
+    if (!response.Item) return undefined
+    const event = upcastAuditEvent(response.Item)
+    return event.workspaceId === workspaceId && event.eventId === eventId
+      ? event
+      : undefined
+  }
+}
+
 /** Developer platform table の dedicated row で Webhook attempt lease を保持します。 */
 export class DynamoDbWebhookDeliveryClaimStore
 implements WebhookDeliveryClaimStore {
@@ -446,7 +582,7 @@ implements WebhookDeliveryClaimStore {
 
   /** DynamoDB-backed claim store を作成します。 */
   constructor(
-    documentClient: DynamoDBDocumentClient = createWebhookClaimDocumentClient(),
+    documentClient: DynamoDBDocumentClient = createWebhookDocumentClient(),
     tableName = readWebhookClaimTableName(),
   ) {
     this.documentClient = documentClient
@@ -523,6 +659,11 @@ function getDefaultWebhookDeliveryClaimStore() {
   return defaultWebhookDeliveryClaimStore
 }
 
+function getDefaultWebhookAuditEventReader() {
+  defaultWebhookAuditEventReader ??= new DynamoDbWebhookAuditEventReader()
+  return defaultWebhookAuditEventReader
+}
+
 function getDefaultWebhookAuthorizer() {
   defaultWebhookAuthorizer ??= new DynamoDbWebhookSubscriptionAuthorizer()
   return defaultWebhookAuthorizer
@@ -539,13 +680,12 @@ function getDefaultWebhookQueue() {
           'Webhook delivery queue is not configured.',
         )
       }
-      const delaySeconds = normalizeQueueDelay(message.delaySeconds)
+      const delaySeconds = normalizeQueueDelay(
+        message.kind === 'delivery' ? message.delaySeconds : undefined,
+      )
       await createSqsClient().send(new SendMessageCommand({
         QueueUrl: queueUrl,
-        MessageBody: JSON.stringify({
-          workspaceId: readIdentifier(message.workspaceId, 'Workspace ID'),
-          deliveryId: readIdentifier(message.deliveryId, 'Webhook delivery ID'),
-        }),
+        MessageBody: JSON.stringify(createSerializedWebhookQueueMessage(message)),
         ...(delaySeconds > 0 ? { DelaySeconds: delaySeconds } : {}),
       }))
     },
@@ -573,7 +713,7 @@ function createSqsClient() {
   return defaultSqsClient
 }
 
-function createWebhookClaimDocumentClient() {
+function createWebhookDocumentClient() {
   const endpoint = process.env.DYNAMODB_ENDPOINT ??
     process.env.AWS_ENDPOINT_URL_DYNAMODB ??
     process.env.AWS_ENDPOINT_URL
@@ -592,6 +732,19 @@ function createWebhookClaimDocumentClient() {
   return DynamoDBDocumentClient.from(client, {
     marshallOptions: { removeUndefinedValues: true },
   })
+}
+
+function readWebhookAuditTableName() {
+  const configured = getConfiguredAuditTableName()
+  if (configured) return configured
+  if (
+    process.env.NODE_ENV === 'production' ||
+    Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME?.trim()) ||
+    Boolean(process.env.AWS_EXECUTION_ENV?.trim())
+  ) {
+    throw new TypeError('Audit event table name is required in production.')
+  }
+  return 'mukuroji-audit-events'
 }
 
 function readWebhookClaimTableName() {
@@ -654,10 +807,56 @@ function readWebhookQueueMessage(body: string | undefined): WebhookQueueMessage 
     throw new TypeError('Webhook queue body must be valid JSON.')
   }
   if (!isRecord(value)) throw new TypeError('Webhook queue body must be an object.')
-  return {
-    workspaceId: readIdentifier(value.workspaceId, 'Workspace ID'),
-    deliveryId: readIdentifier(value.deliveryId, 'Webhook delivery ID'),
+  const workspaceId = readIdentifier(value.workspaceId, 'Workspace ID')
+  if (value.kind === 'delivery') {
+    return {
+      kind: 'delivery',
+      workspaceId,
+      deliveryId: readIdentifier(value.deliveryId, 'Webhook delivery ID'),
+    }
   }
+  if (value.kind === 'projection') {
+    return {
+      kind: 'projection',
+      workspaceId,
+      eventId: readIdentifier(value.eventId, 'Audit event ID'),
+      ...(value.cursor === undefined
+        ? {}
+        : { cursor: readOpaqueCursor(value.cursor) }),
+    }
+  }
+  throw new TypeError('Webhook queue message kind is invalid.')
+}
+
+function createSerializedWebhookQueueMessage(message: WebhookQueueMessage) {
+  const workspaceId = readIdentifier(message.workspaceId, 'Workspace ID')
+  if (message.kind === 'delivery') {
+    return {
+      kind: message.kind,
+      workspaceId,
+      deliveryId: readIdentifier(message.deliveryId, 'Webhook delivery ID'),
+    }
+  }
+  return {
+    kind: message.kind,
+    workspaceId,
+    eventId: readIdentifier(message.eventId, 'Audit event ID'),
+    ...(message.cursor === undefined
+      ? {}
+      : { cursor: readOpaqueCursor(message.cursor) }),
+  }
+}
+
+function readOpaqueCursor(value: unknown) {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > 4_096 ||
+    value.trim() !== value
+  ) {
+    throw new TypeError('Webhook subscription cursor is invalid.')
+  }
+  return value
 }
 
 function readRemainingRetryDelay(delivery: WebhookDelivery, now: Date) {
@@ -784,6 +983,37 @@ function readIdentifier(value: unknown, label: string) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+async function mapWithConcurrency<Value, Result>(
+  values: readonly Value[],
+  concurrency: number,
+  task: (value: Value) => Promise<Result>,
+) {
+  if (!Number.isSafeInteger(concurrency) || concurrency <= 0) {
+    throw new TypeError('Webhook worker concurrency must be a positive integer.')
+  }
+  const results: Result[] = []
+  let nextIndex = 0
+  const worker = async () => {
+    while (nextIndex < values.length) {
+      const currentIndex = nextIndex
+      nextIndex += 1
+      results[currentIndex] = await task(values[currentIndex]!)
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, values.length) }, worker),
+  )
+  return results
+}
+
+function chunkValues<Value>(values: readonly Value[], size: number) {
+  const chunks: Value[][] = []
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size))
+  }
+  return chunks
 }
 
 function isDefined<T>(value: T | undefined): value is T {

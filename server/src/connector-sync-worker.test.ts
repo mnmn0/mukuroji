@@ -188,6 +188,66 @@ test('keeps poll cursors in a CAS checkpoint and queues only ID locators', async
   expect(fixture.readCheckpoint()).toEqual({ revision: 5 })
 })
 
+test('does not preload external links before delegating a poll to the engine', async () => {
+  const fixture = createWorkerFixture()
+
+  await processConnectorSyncMessage({
+    version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+    kind: 'poll',
+    workspaceId: 'workspace-1',
+    installationId: 'installation-1',
+    resourceType: 'issue',
+  }, fixture.dependencies)
+
+  expect(fixture.linkListCalls).toEqual([])
+  expect(fixture.pollCalls).toHaveLength(1)
+})
+
+test('continues disconnected link cleanup through durable ID-only jobs', async () => {
+  const fixture = createWorkerFixture({
+    disconnectPages: [
+      { paused: 2, nextCursor: 'disconnect-page-2' },
+      { paused: 1 },
+    ],
+    maximumDisconnectLinks: 2,
+  })
+  const message = {
+    version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+    kind: 'disconnect-links',
+    workspaceId: 'workspace-1',
+    installationId: 'installation-1',
+    lifecycleRevision: 4,
+    updatedByUserId: 'user-1',
+  } as const
+
+  await processConnectorSyncMessage(message, fixture.dependencies)
+
+  expect(fixture.pauseCalls[0]).toEqual({
+    workspaceId: 'workspace-1',
+    installationId: 'installation-1',
+    expectedLifecycleRevision: 4,
+    updatedByUserId: 'user-1',
+    limit: 2,
+  })
+  expect(fixture.queued).toEqual([{
+    ...message,
+    cursor: 'disconnect-page-2',
+  }])
+  expect(JSON.stringify(fixture.queued)).not.toContain('external.test')
+
+  await processConnectorSyncMessage(fixture.queued[0]!, fixture.dependencies)
+
+  expect(fixture.pauseCalls[1]).toEqual({
+    workspaceId: 'workspace-1',
+    installationId: 'installation-1',
+    expectedLifecycleRevision: 4,
+    updatedByUserId: 'user-1',
+    limit: 2,
+    cursor: 'disconnect-page-2',
+  })
+  expect(fixture.queued).toHaveLength(1)
+})
+
 test('returns partial SQS failures and rejects payload fields that could carry secrets', async () => {
   const fixture = createWorkerFixture()
   const valid = {
@@ -345,6 +405,8 @@ function createWorkerFixture(options: {
   checkpoint?: ConnectorPollCheckpoint
   pollCursors?: Array<string | undefined>
   inventory?: ConnectorPollInventory
+  disconnectPages?: Array<{ paused: number; nextCursor?: string }>
+  maximumDisconnectLinks?: number
 } = {}) {
   const links: ExternalWorkItemLink[] = [createLink()]
   const installations: ConnectorInstallation[] = [createInstallation()]
@@ -361,8 +423,11 @@ function createWorkerFixture(options: {
     cursor?: string
     maximumPages?: number
   }> = []
+  const linkListCalls: unknown[] = []
+  const pauseCalls: unknown[] = []
   const commits: CommitConnectorPollCheckpointInput[] = []
   const pollCursors = [...(options.pollCursors ?? [])]
+  const disconnectPages = [...(options.disconnectPages ?? [])]
   let checkpoint = options.checkpoint
     ? structuredClone(options.checkpoint)
     : undefined
@@ -386,12 +451,17 @@ function createWorkerFixture(options: {
         return structuredClone(installations)
       },
       async listExternalWorkItemLinks(request) {
+        linkListCalls.push(structuredClone(request))
         return structuredClone(links.filter((link) =>
           (request.teamId === undefined || link.teamId === request.teamId) &&
           (request.workItemId === undefined || link.workItemId === request.workItemId) &&
           (request.installationId === undefined ||
             link.installationId === request.installationId)
         ))
+      },
+      async pauseConnectorExternalLinksPage(request) {
+        pauseCalls.push(structuredClone(request))
+        return structuredClone(disconnectPages.shift() ?? { paused: 0 })
       },
     },
     engine: {
@@ -419,6 +489,9 @@ function createWorkerFixture(options: {
     },
     checkpoints,
     ...(options.inventory ? { inventory: options.inventory } : {}),
+    ...(options.maximumDisconnectLinks === undefined
+      ? {}
+      : { maximumDisconnectLinks: options.maximumDisconnectLinks }),
   }
   return {
     dependencies,
@@ -427,6 +500,8 @@ function createWorkerFixture(options: {
     queued,
     outboundCalls,
     pollCalls,
+    linkListCalls,
+    pauseCalls,
     commits,
     readCheckpoint: () => checkpoint ? structuredClone(checkpoint) : undefined,
   }

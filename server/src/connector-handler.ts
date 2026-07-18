@@ -31,6 +31,7 @@ export async function queueHandler(event: ConnectorSyncSqsEvent) {
     inventory: getInventory(),
     maximumPollPages: 10,
     maximumInventoryPages: 100,
+    maximumDisconnectLinks: 25,
   })
 }
 

@@ -6,6 +6,12 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import type { WebhookSubscription } from '@mukuroji/contracts'
 import {
+  createWebhookTeamGrantDirectoryId,
+  createWebhookTeamGrantEntryKey,
+  createWebhookTeamGrantEntryKeyPrefix,
+  createWebhookTeamGrantItem,
+} from './webhook-authorization-projection'
+import {
   DynamoDbWorkspaceAccessClient,
   type WorkspaceAccessClient,
 } from './workspace-access'
@@ -23,16 +29,35 @@ export interface WebhookSubscriptionAuthorizer {
   createBatch?(): WebhookSubscriptionAuthorizer
 }
 
-/** 1 Lambda batch 内でのみ共有する ACL read-through cache です。 */
-type WebhookAuthorizationBatchCache = {
-  /** Target resource/member ごとの強整合 ACL row です。 */
-  authorizationRows: Map<string, Promise<ProjectDirectoryAuthorizationRow[]>>
-  /** Workspace user ごとの active membership snapshot です。 */
-  activeMembers: Map<string, ReturnType<WorkspaceAccessClient['getActiveMember']>>
+/** Webhook の Team selector に必要な current ACL state です。 */
+export type WebhookTeamAuthorizationState = {
+  /** Subscription creator が active Workspace member かどうかです。 */
+  activeWorkspaceMember: boolean
+  /** 対象 Team が active かどうかです。 */
+  activeTeam: boolean
+  /** 対象 Team の active Project に creator の viewer 以上の role があるかどうかです。 */
+  hasActiveProjectRole: boolean
 }
 
-/** Webhook authorization 用 sparse GSI の既定名です。 */
-const DEFAULT_WEBHOOK_AUTHORIZATION_INDEX_NAME = 'WebhookAuthorizationIndex'
+/** Management API と delivery worker が共有する Team Webhook ACL predicate です。 */
+export function allowsWebhookTeamAccess(state: WebhookTeamAuthorizationState) {
+  return state.activeWorkspaceMember &&
+    state.activeTeam &&
+    state.hasActiveProjectRole
+}
+
+/** 1 Lambda batch 内でのみ共有する ACL read-through cache です。 */
+type WebhookAuthorizationBatchCache = {
+  /** Base table locator ごとの強整合 ACL row です。 */
+  authoritativeRows: Map<string, Promise<ProjectDirectoryAuthorizationRow>>
+  /** Workspace user ごとの active membership snapshot です。 */
+  activeMembers: Map<string, ReturnType<WorkspaceAccessClient['getActiveMember']>>
+  /** Team/member ごとの pagewise grant 検証結果です。 */
+  teamGrantAccess: Map<string, Promise<boolean>>
+}
+
+/** Team grant を1回の Query で検証する page size です。 */
+const WEBHOOK_TEAM_GRANT_QUERY_PAGE_SIZE = 25
 
 /** Project directory の current ACL を使う production authorizer です。 */
 export class DynamoDbWebhookSubscriptionAuthorizer
@@ -43,8 +68,6 @@ implements WebhookSubscriptionAuthorizer {
   private readonly documentClient: DynamoDBDocumentClient
   /** Project directory table 名です。 */
   private readonly projectDirectoryTableName: string
-  /** Webhook authorization sparse GSI 名です。 */
-  private readonly webhookAuthorizationIndexName: string
 
   constructor(
     workspaceAccess: WorkspaceAccessClient = new DynamoDbWorkspaceAccessClient(),
@@ -52,19 +75,12 @@ implements WebhookSubscriptionAuthorizer {
     projectDirectoryTableName = process.env.PROJECT_DIRECTORY_TABLE_NAME ??
       process.env.MUKUROJI_PROJECT_DIRECTORY_TABLE ??
       'mukuroji-project-directory-local',
-    webhookAuthorizationIndexName =
-      process.env.PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME ??
-      DEFAULT_WEBHOOK_AUTHORIZATION_INDEX_NAME,
   ) {
     this.workspaceAccess = workspaceAccess
     this.documentClient = documentClient
     this.projectDirectoryTableName = readIdentifier(
       projectDirectoryTableName,
       'Project directory table name',
-    )
-    this.webhookAuthorizationIndexName = readIdentifier(
-      webhookAuthorizationIndexName,
-      'Webhook authorization index name',
     )
   }
 
@@ -86,8 +102,9 @@ implements WebhookSubscriptionAuthorizer {
   /** 同じ Lambda batch の subscription 判定で directory/member read を再利用します。 */
   createBatch(): WebhookSubscriptionAuthorizer {
     const cache: WebhookAuthorizationBatchCache = {
-      authorizationRows: new Map(),
+      authoritativeRows: new Map(),
       activeMembers: new Map(),
+      teamGrantAccess: new Map(),
     }
     return {
       canDeliver: async (workspaceId, subscription, teamId, projectId) =>
@@ -116,144 +133,145 @@ implements WebhookSubscriptionAuthorizer {
       this.workspaceAccess.getActiveMember(workspaceId, subscription.createdByUserId)
     cache?.activeMembers.set(memberCacheKey, memberPromise)
     const member = await memberPromise
-    if (!member) return false
+    if (!member) {
+      return allowsWebhookTeamAccess({
+        activeWorkspaceMember: false,
+        activeTeam: false,
+        hasActiveProjectRole: false,
+      })
+    }
     const projectId = projectIdValue === undefined
       ? undefined
       : readIdentifier(projectIdValue, 'Webhook Project ID')
-    const teamPromise = this.readAuthorizationRows(
+    const hasActiveProjectRole = await this.hasActiveTeamGrant(
       workspaceId,
-      createResourceAuthorizationKey(workspaceId),
-      createTeamAuthorizationSortKey(teamId),
+      teamId,
+      member.memberKey,
+      projectId,
       cache,
     )
-    if (projectId !== undefined) {
-      const [teamRows, projectRows, memberRows] = await Promise.all([
-        teamPromise,
-        this.readAuthorizationRows(
-          workspaceId,
-          createResourceAuthorizationKey(workspaceId),
-          createProjectAuthorizationSortKey(projectId),
-          cache,
-        ),
-        this.readAuthorizationRows(
-          workspaceId,
-          createMemberAuthorizationKey(workspaceId, member.memberKey),
-          createProjectAuthorizationSortKey(projectId),
-          cache,
-        ),
-      ])
-      return hasActiveTeam(teamRows, teamId) &&
-        hasActiveProject(projectRows, teamId, projectId) &&
-        hasProjectRole(memberRows, member.memberKey, projectId)
-    }
-
-    const [teamRows, memberRows] = await Promise.all([
-      teamPromise,
-      this.readAuthorizationRows(
-        workspaceId,
-        createMemberAuthorizationKey(workspaceId, member.memberKey),
-        undefined,
-        cache,
-      ),
-    ])
-    if (!hasActiveTeam(teamRows, teamId)) return false
-    // Team-level Work Items follow requireTeamPermission: one active Project role
-    // in the Team grants viewer access even when the Work Item is unassigned.
-    const accessibleProjectIds = new Set(
-      memberRows
-        .filter((row) => hasProjectRole([row], member.memberKey, row.projectId))
-        .flatMap((row) => row.projectId ? [row.projectId] : []),
-    )
-    const projectIds = [...accessibleProjectIds]
-    const projects = await Promise.all(projectIds.map(async (
-      accessibleProjectId,
-    ) =>
-      await this.readAuthorizationRows(
-        workspaceId,
-        createResourceAuthorizationKey(workspaceId),
-        createProjectAuthorizationSortKey(accessibleProjectId),
-        cache,
-      )
-    ))
-    return projects.some((rows, index) =>
-      hasActiveProject(rows, teamId, projectIds[index]!)
-    )
+    return allowsWebhookTeamAccess({
+      activeWorkspaceMember: true,
+      activeTeam: hasActiveProjectRole,
+      hasActiveProjectRole,
+    })
   }
 
-  private async readAuthorizationRows(
+  private async hasActiveTeamGrant(
     workspaceId: string,
-    authorizationKey: string,
-    authorizationSortKey: string | undefined,
+    teamId: string,
+    memberKey: string,
+    projectId?: string,
     cache?: WebhookAuthorizationBatchCache,
   ) {
-    const cacheKey = `${workspaceId}\0${authorizationKey}\0${authorizationSortKey ?? ''}`
-    const cached = cache?.authorizationRows.get(cacheKey)
+    const cacheKey = `${workspaceId}\0${teamId}\0${memberKey}\0${projectId ?? ''}`
+    const cached = cache?.teamGrantAccess.get(cacheKey)
     if (cached) return await cached
-    const pending = this.queryAuthorizationRows(
+    const pending = this.queryActiveTeamGrant(
       workspaceId,
-      authorizationKey,
-      authorizationSortKey,
+      teamId,
+      memberKey,
+      projectId,
+      cache,
     )
-    cache?.authorizationRows.set(cacheKey, pending)
+    cache?.teamGrantAccess.set(cacheKey, pending)
     return await pending
   }
 
-  private async queryAuthorizationRows(
+  private async queryActiveTeamGrant(
     workspaceId: string,
-    authorizationKey: string,
-    authorizationSortKey?: string,
+    teamId: string,
+    memberKey: string,
+    projectId?: string,
+    cache?: WebhookAuthorizationBatchCache,
   ) {
-    const locators: Array<{ directoryId: string; entryKey: string }> = []
+    const grantDirectoryId =
+      createWebhookTeamGrantDirectoryId(workspaceId, memberKey)
+    if (projectId !== undefined) {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.projectDirectoryTableName,
+        Key: {
+          directoryId: grantDirectoryId,
+          entryKey: createWebhookTeamGrantEntryKey(teamId, projectId),
+        },
+        ConsistentRead: true,
+      }))
+      const grant = readAuthorizationRow(response.Item ?? {})
+      return isWebhookTeamGrant(grant, workspaceId, teamId, memberKey) &&
+        await this.hasCurrentGrantSources(grant, memberKey, cache)
+    }
+    const grantEntryKeyPrefix = createWebhookTeamGrantEntryKeyPrefix(teamId)
     let exclusiveStartKey: Record<string, unknown> | undefined
     do {
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.projectDirectoryTableName,
-        IndexName: this.webhookAuthorizationIndexName,
-        KeyConditionExpression: authorizationSortKey
-          ? 'webhookAuthorizationKey = :authorizationKey AND ' +
-            'webhookAuthorizationSortKey = :authorizationSortKey'
-          : 'webhookAuthorizationKey = :authorizationKey',
+        KeyConditionExpression:
+          'directoryId = :grantDirectoryId AND ' +
+          'begins_with(entryKey, :grantEntryKeyPrefix)',
         ExpressionAttributeValues: {
-          ':authorizationKey': authorizationKey,
-          ...(authorizationSortKey
-            ? { ':authorizationSortKey': authorizationSortKey }
-            : {}),
+          ':grantDirectoryId': grantDirectoryId,
+          ':grantEntryKeyPrefix': grantEntryKeyPrefix,
         },
-        ProjectionExpression: 'directoryId, entryKey',
+        ConsistentRead: true,
+        Limit: WEBHOOK_TEAM_GRANT_QUERY_PAGE_SIZE,
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       }))
-      for (const item of response.Items ?? []) {
-        if (
-          item.directoryId === workspaceId &&
-          typeof item.entryKey === 'string'
-        ) {
-          locators.push({ directoryId: workspaceId, entryKey: item.entryKey })
-        }
-      }
+      const grantRows = (response.Items ?? []).map(readAuthorizationRow)
+      const grants = grantRows.filter((row) =>
+        isWebhookTeamGrant(row, workspaceId, teamId, memberKey)
+      )
+      const checks = await Promise.all(grants.map(async (grant) =>
+        await this.hasCurrentGrantSources(grant, memberKey, cache)
+      ))
+      if (checks.some(Boolean)) return true
       exclusiveStartKey = response.LastEvaluatedKey
     } while (exclusiveStartKey)
-    return await Promise.all(locators.map(async (locator) => {
-      const response = await this.documentClient.send(new GetCommand({
-        TableName: this.projectDirectoryTableName,
-        Key: locator,
-        ConsistentRead: true,
-      }))
-      return readAuthorizationRow(response.Item ?? {})
-    })).then((rows) => rows.filter((row) =>
-      row.directoryId === workspaceId &&
-      row.webhookAuthorizationKey === authorizationKey &&
-      (
-        authorizationSortKey === undefined ||
-        row.webhookAuthorizationSortKey === authorizationSortKey
-      )
-    ))
+    return false
   }
+
+  private async hasCurrentGrantSources(
+    grant: ProjectDirectoryAuthorizationRow,
+    memberKey: string,
+    cache?: WebhookAuthorizationBatchCache,
+  ) {
+    const workspaceId = grant.workspaceId!
+    const teamId = grant.teamId!
+    const projectId = grant.projectId!
+    const [memberRow, teamRow, projectRow] = await Promise.all([
+      this.readAuthoritativeRow(workspaceId, grant.sourceEntryKey!, cache),
+      this.readAuthoritativeRow(workspaceId, grant.teamSourceEntryKey!, cache),
+      this.readAuthoritativeRow(workspaceId, grant.projectSourceEntryKey!, cache),
+    ])
+    return hasProjectRole([memberRow], memberKey, projectId) &&
+      hasActiveTeam([teamRow], teamId) &&
+      hasActiveProject([projectRow], teamId, projectId)
+  }
+
+  private async readAuthoritativeRow(
+    directoryId: string,
+    entryKey: string,
+    cache?: WebhookAuthorizationBatchCache,
+  ) {
+    const cacheKey = `${directoryId}\0${entryKey}`
+    const cached = cache?.authoritativeRows.get(cacheKey)
+    if (cached) return await cached
+    const pending = this.documentClient.send(new GetCommand({
+      TableName: this.projectDirectoryTableName,
+      Key: { directoryId, entryKey },
+      ConsistentRead: true,
+    })).then((response) => readAuthorizationRow(response.Item ?? {}))
+    cache?.authoritativeRows.set(cacheKey, pending)
+    return await pending
+  }
+
 }
 
 /** ACL 判定に必要な Project directory row の最小 shape です。 */
 type ProjectDirectoryAuthorizationRow = {
   /** Workspace ID です。 */
   directoryId?: string
+  /** Projection row が参照する Workspace ID です。 */
+  workspaceId?: string
   /** Base table sort key です。 */
   entryKey?: string
   /** Row discriminator です。 */
@@ -270,6 +288,12 @@ type ProjectDirectoryAuthorizationRow = {
   memberKey?: string
   /** Project role です。 */
   role?: string
+  /** Materialized grant が参照する authoritative member sort key です。 */
+  sourceEntryKey?: string
+  /** Materialized grant が参照する authoritative Team sort key です。 */
+  teamSourceEntryKey?: string
+  /** Materialized grant が参照する authoritative Project sort key です。 */
+  projectSourceEntryKey?: string
   /** Archive timestamp です。 */
   archivedAt?: string
 }
@@ -277,6 +301,7 @@ type ProjectDirectoryAuthorizationRow = {
 function readAuthorizationRow(value: Record<string, unknown>) {
   return {
     ...(typeof value.directoryId === 'string' ? { directoryId: value.directoryId } : {}),
+    ...(typeof value.workspaceId === 'string' ? { workspaceId: value.workspaceId } : {}),
     ...(typeof value.entryKey === 'string' ? { entryKey: value.entryKey } : {}),
     entryType: typeof value.entryType === 'string' ? value.entryType : '',
     ...(typeof value.webhookAuthorizationKey === 'string'
@@ -289,6 +314,15 @@ function readAuthorizationRow(value: Record<string, unknown>) {
     ...(typeof value.projectId === 'string' ? { projectId: value.projectId } : {}),
     ...(typeof value.memberKey === 'string' ? { memberKey: value.memberKey } : {}),
     ...(typeof value.role === 'string' ? { role: value.role } : {}),
+    ...(typeof value.sourceEntryKey === 'string'
+      ? { sourceEntryKey: value.sourceEntryKey }
+      : {}),
+    ...(typeof value.teamSourceEntryKey === 'string'
+      ? { teamSourceEntryKey: value.teamSourceEntryKey }
+      : {}),
+    ...(typeof value.projectSourceEntryKey === 'string'
+      ? { projectSourceEntryKey: value.projectSourceEntryKey }
+      : {}),
     ...(typeof value.archivedAt === 'string' ? { archivedAt: value.archivedAt } : {}),
   } satisfies ProjectDirectoryAuthorizationRow
 }
@@ -322,25 +356,44 @@ function hasProjectRole(
   return rows.some((row) =>
     row.entryType === 'project-member' &&
     row.memberKey === memberKey &&
+    row.archivedAt === undefined &&
     (projectId === undefined || row.projectId === projectId) &&
     (row.role === 'viewer' || row.role === 'member' || row.role === 'manager')
   )
 }
 
-function createResourceAuthorizationKey(workspaceId: string) {
-  return `WEBHOOK_ACL#RESOURCE#${workspaceId}`
-}
-
-function createMemberAuthorizationKey(workspaceId: string, memberKey: string) {
-  return `WEBHOOK_ACL#MEMBER#${workspaceId}#${memberKey}`
-}
-
-function createTeamAuthorizationSortKey(teamId: string) {
-  return `TEAM#${teamId}`
-}
-
-function createProjectAuthorizationSortKey(projectId: string) {
-  return `PROJECT#${projectId}`
+function isWebhookTeamGrant(
+  row: ProjectDirectoryAuthorizationRow,
+  workspaceId: string,
+  teamId: string,
+  memberKey: string,
+) {
+  if (
+    row.entryType !== 'webhook-team-grant' ||
+    row.workspaceId !== workspaceId ||
+    row.teamId !== teamId ||
+    row.memberKey !== memberKey ||
+    typeof row.projectId !== 'string' ||
+    typeof row.teamSourceEntryKey !== 'string' ||
+    typeof row.projectSourceEntryKey !== 'string'
+  ) {
+    return false
+  }
+  const expected = createWebhookTeamGrantItem({
+    workspaceId,
+    teamId,
+    projectId: row.projectId,
+    memberKey,
+    teamSourceEntryKey: row.teamSourceEntryKey,
+    projectSourceEntryKey: row.projectSourceEntryKey,
+  })
+  return row.directoryId === expected.directoryId &&
+    row.entryKey === expected.entryKey &&
+    row.sourceEntryKey === expected.sourceEntryKey &&
+    row.teamSourceEntryKey === expected.teamSourceEntryKey &&
+    row.projectSourceEntryKey === expected.projectSourceEntryKey &&
+    row.webhookAuthorizationKey === expected.webhookAuthorizationKey &&
+    row.webhookAuthorizationSortKey === expected.webhookAuthorizationSortKey
 }
 
 function createDocumentClient() {

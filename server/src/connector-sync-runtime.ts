@@ -120,7 +120,7 @@ export interface ConnectorWorkItemGateway {
 export type PersistedConnectorSyncState = ConnectorSyncState & {
   /** Store-level optimistic concurrency revision です。 */
   storageRevision: number
-  /** 最後に provider と一致した external snapshot です。 */
+  /** 最後に provider と一致したsnapshotで、outbound直後は返却versionと組にした未消費markerを含みます。 */
   lastExternalRecord?: ConnectorExternalRecord
   /** 最後に同期へ成功した日時です。 */
   lastSyncedAt?: string
@@ -142,7 +142,7 @@ export type CommitConnectorSyncStateInput = {
   eventId?: string
   /** 同期完了日時です。 */
   syncedAt: string
-  /** Conflict terminalization まで public link status 更新を遅延する場合は true です。 */
+  /** Sync state だけを保存し、public link status 更新を遅延する場合は true です。 */
   deferLinkStatus?: boolean
 }
 
@@ -199,6 +199,8 @@ export interface ConnectorSyncPersistence {
     workspaceId: string,
     linkId: string,
     expectedUpdatedAt: string,
+    expectedExternalVersion: string,
+    expectedStateRevision: number,
     syncedAt: string,
   ): Promise<boolean>
   /** Deterministic conflict ID で open conflict を冪等に保存します。 */
@@ -487,23 +489,39 @@ export class ConnectorSyncEngine {
       eventId: requireStableValue(input.eventId, 'Connector event ID'),
       externalVersion: input.record.externalVersion,
       originMarker: input.record.originMarker,
+      expectedOriginMarker: persisted?.lastExternalRecord?.originMarker,
       actualWorkItemRevision: workItem.revision,
       originSigningSecret: this.originSigningSecret,
       previousOriginSigningSecrets: this.previousOriginSigningSecrets,
     })
-    if (decision.kind === 'duplicate' || decision.kind === 'self-origin' ||
-      decision.kind === 'stale') {
-      if (
-        (decision.kind === 'duplicate' || decision.kind === 'stale') &&
-        link.syncStatus === 'pending' &&
-        input.pollGeneration === link.updatedAt &&
-        state.workItemRevision === workItem.revision
-      ) {
+    const pollGeneration = input.pollGeneration
+    const isCurrentExactPoll =
+      link.syncStatus === 'pending' &&
+      pollGeneration === link.updatedAt &&
+      state.lastExternalVersion !== undefined &&
+      input.record.externalVersion === state.lastExternalVersion &&
+      state.workItemRevision === workItem.revision
+    if (decision.kind === 'self-origin') {
+      await this.commitSyncedState(
+        input.workspaceId,
+        link,
+        persisted,
+        state.workItemRevision,
+        input.record,
+        input.eventId,
+        !isCurrentExactPoll,
+      )
+      return { kind: 'skipped', linkId: link.id, reason: decision.kind }
+    }
+    if (decision.kind === 'duplicate' || decision.kind === 'stale') {
+      if (isCurrentExactPoll && pollGeneration && persisted) {
         const syncedAt = this.clock().toISOString()
         const acknowledged = await this.persistence.acknowledgePendingLink(
           input.workspaceId,
           link.id,
-          input.pollGeneration,
+          pollGeneration,
+          input.record.externalVersion,
+          persisted.storageRevision,
           syncedAt,
         )
         if (acknowledged) {
@@ -611,6 +629,9 @@ export class ConnectorSyncEngine {
       persisted,
       workItem.revision,
       record,
+      undefined,
+      false,
+      mutation.originMarker,
     )
     return {
       kind: 'synced',
@@ -807,6 +828,7 @@ export class ConnectorSyncEngine {
     }
     let synchronizedWorkItem = current
     let synchronizedRecord = stored.externalRecord
+    let outboundOriginMarker: string | undefined
     if (resolution.resolution === 'use-external' || resolution.resolution === 'merge') {
       const patch = resolution.resolution === 'merge'
         ? resolution.mergedValues
@@ -840,21 +862,20 @@ export class ConnectorSyncEngine {
       synchronizedWorkItem = applied.workItem
     }
     if (resolution.resolution === 'use-local' || resolution.resolution === 'merge') {
+      const mutation = createOutboundMutation(
+        link,
+        synchronizedWorkItem,
+        operationId,
+        this.originSigningSecret,
+        stored.externalRecord.externalVersion,
+      )
+      outboundOriginMarker = mutation.originMarker
       synchronizedRecord = await this.withConnectorCredential(
         actor.workspaceId,
         installation,
         installationSnapshot.lifecycleRevision,
         async (adapter, credential) =>
-          adapter.push(
-            credential,
-            createOutboundMutation(
-              link,
-              synchronizedWorkItem,
-              operationId,
-              this.originSigningSecret,
-              stored.externalRecord.externalVersion,
-            ),
-          ),
+          adapter.push(credential, mutation),
       )
     }
     const persisted = await this.persistence.getLinkState(
@@ -869,6 +890,7 @@ export class ConnectorSyncEngine {
       synchronizedRecord,
       undefined,
       true,
+      outboundOriginMarker,
     )
     const resolved = await this.persistence.completeConflict(
       actor.workspaceId,
@@ -1108,6 +1130,7 @@ export class ConnectorSyncEngine {
     record: ConnectorExternalRecord,
     eventId?: string,
     deferLinkStatus = false,
+    outboundOriginMarker?: string,
   ) {
     const syncedAt = this.clock().toISOString()
     const committed = await this.persistence.commitLinkState({
@@ -1117,7 +1140,10 @@ export class ConnectorSyncEngine {
         ? { expectedStorageRevision: persisted.storageRevision }
         : {}),
       workItemRevision,
-      externalRecord: record,
+      externalRecord: createPersistedConnectorExternalRecord(
+        record,
+        outboundOriginMarker,
+      ),
       ...(eventId ? { eventId } : {}),
       syncedAt,
       ...(deferLinkStatus ? { deferLinkStatus: true } : {}),
@@ -1192,8 +1218,15 @@ export class InMemoryConnectorSyncPersistence implements ConnectorSyncPersistenc
     workspaceId: string,
     linkId: string,
     _expectedUpdatedAt: string,
+    expectedExternalVersion: string,
+    expectedStateRevision: number,
     _syncedAt: string,
   ) {
+    const state = this.states.get(syncStateKey(workspaceId, linkId))
+    if (
+      state?.lastExternalVersion !== expectedExternalVersion ||
+      state.storageRevision !== expectedStateRevision
+    ) return false
     this.statuses.set(syncStateKey(workspaceId, linkId), 'synced')
     return true
   }
@@ -1371,6 +1404,17 @@ function createInitialSyncState(
     workItemRevision,
     storageRevision: 0,
   }
+}
+
+/** Outbound marker を返却versionと組で保存し、inbound commit で消費します。 */
+function createPersistedConnectorExternalRecord(
+  record: ConnectorExternalRecord,
+  outboundOriginMarker?: string,
+) {
+  const persisted = structuredClone(record)
+  if (outboundOriginMarker) persisted.originMarker = outboundOriginMarker
+  else delete persisted.originMarker
+  return persisted
 }
 
 function createOutboundMutation(

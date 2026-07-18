@@ -14,6 +14,7 @@ import {
   InMemoryDeveloperPlatformClient,
   KmsEnvelopeSecretProtector,
   LocalAesGcmSecretProtector,
+  WEBHOOK_DISABLED_SUBSCRIPTION_RETENTION_SECONDS,
   WEBHOOK_DELIVERY_RETENTION_SECONDS,
   WEBHOOK_SUBSCRIPTION_LIMIT,
   createWebhookSignature,
@@ -147,11 +148,15 @@ function createMemoryDocumentClient() {
         const exclusiveStartKey = input.ExclusiveStartKey as
           | Record<string, unknown>
           | undefined
-        const remaining = exclusiveStartKey && input.IndexName
+        const remaining = exclusiveStartKey
           ? matching.filter((item) => {
-              const comparison = String(item.lookupSortKey).localeCompare(
-                String(exclusiveStartKey.lookupSortKey),
-              )
+              const comparison = String(
+                input.IndexName ? item.lookupSortKey : item.recordKey,
+              ).localeCompare(String(
+                input.IndexName
+                  ? exclusiveStartKey.lookupSortKey
+                  : exclusiveStartKey.recordKey,
+              ))
               return input.ScanIndexForward === false ? comparison < 0 : comparison > 0
             })
           : matching
@@ -217,10 +222,15 @@ function createMemoryDocumentClient() {
               `${ConditionCheck.Key.workspaceId}\0${ConditionCheck.Key.recordKey}`,
             )
             const currentValue = current?.value as Record<string, unknown> | undefined
+            const expectedStatus =
+              ConditionCheck.ExpressionAttributeValues?.[':expectedStatus'] ??
+              ConditionCheck.ExpressionAttributeValues?.[':connected']
             return current?.version !==
                 ConditionCheck.ExpressionAttributeValues?.[':expectedVersion'] ||
-              currentValue?.status !==
-                ConditionCheck.ExpressionAttributeValues?.[':connected']
+              (
+                expectedStatus !== undefined &&
+                currentValue?.status !== expectedStatus
+              )
           }
           if (Delete) {
             const workspaceId = Delete.Key.workspaceId
@@ -318,6 +328,17 @@ function createMemoryDocumentClient() {
               return values[':limit'] !== undefined
                 ? count >= Number(values[':limit'])
                 : count < Number(values[':one'])
+            }
+            if (values[':entryType'] === 'connector-poll-target') {
+              if (!current) return values[':zero'] === undefined
+              const count = Number(current.pollableLinkCount ?? 0)
+              return current.entryType !== 'connector-poll-target' ||
+                currentValue?.installationId !== values[':installationId'] ||
+                currentValue?.resourceType !== values[':resourceType'] ||
+                (
+                  Update.UpdateExpression.includes('pollableLinkCount -') &&
+                  count < Number(values[':one'])
+                )
             }
             return true
           }
@@ -439,6 +460,23 @@ function createMemoryDocumentClient() {
             items.set(mapKey, {
               ...current,
               externalLinkCount: Number(current?.externalLinkCount ?? 0) + delta,
+              version: Number(current?.version ?? 0) + 1,
+            })
+          } else if (values[':entryType'] === 'connector-poll-target') {
+            const delta = Update.UpdateExpression.includes('pollableLinkCount -')
+              ? -1
+              : 1
+            items.set(mapKey, {
+              ...(current ?? {
+                workspaceId: Update.Key.workspaceId,
+                recordKey: Update.Key.recordKey,
+                entryType: values[':entryType'],
+                value: structuredClone(values[':value']),
+                version: 0,
+              }),
+              lookupKey: values[':lookupKey'],
+              lookupSortKey: values[':lookupSortKey'],
+              pollableLinkCount: Number(current?.pollableLinkCount ?? 0) + delta,
               version: Number(current?.version ?? 0) + 1,
             })
           }
@@ -1160,7 +1198,7 @@ describe('DynamoDB developer platform persistence', () => {
         ExpressionAttributeValues?: Record<string, unknown>
       }
     }> | undefined
-    expect(linkWrites).toHaveLength(7)
+    expect(linkWrites).toHaveLength(8)
     expect(linkWrites?.[0]?.Update).toMatchObject({
       TableName: 'DeveloperPlatformTable',
       ExpressionAttributeValues: {
@@ -1177,13 +1215,20 @@ describe('DynamoDB developer platform persistence', () => {
         ':one': 1,
       },
     })
-    expect(linkWrites?.[4]?.Put?.Item).toMatchObject({
-      entryType: 'external-link-index',
+    expect(linkWrites?.[4]?.Update).toMatchObject({
+      TableName: 'DeveloperPlatformTable',
+      ExpressionAttributeValues: {
+        ':entryType': 'connector-poll-target',
+        ':one': 1,
+      },
     })
     expect(linkWrites?.[5]?.Put?.Item).toMatchObject({
       entryType: 'external-link-index',
     })
-    expect(linkWrites?.[6]?.Put).toMatchObject({
+    expect(linkWrites?.[6]?.Put?.Item).toMatchObject({
+      entryType: 'external-link-index',
+    })
+    expect(linkWrites?.[7]?.Put).toMatchObject({
       TableName: 'AuditEventsTable',
       Item: {
         eventType: 'external-link.created',
@@ -1231,8 +1276,12 @@ describe('DynamoDB developer platform persistence', () => {
     )
     const updateWrites = updateTransaction?.input.TransactItems as Array<{
       Put?: { TableName?: string; Item?: Record<string, unknown> }
+      Update?: {
+        TableName?: string
+        ExpressionAttributeValues?: Record<string, unknown>
+      }
     }> | undefined
-    expect(updateWrites).toHaveLength(4)
+    expect(updateWrites).toHaveLength(5)
     expect(updateWrites?.[1]?.Put).toMatchObject({
       TableName: 'DeveloperPlatformTable',
       Item: {
@@ -1244,7 +1293,14 @@ describe('DynamoDB developer platform persistence', () => {
         },
       },
     })
-    expect(updateWrites?.[2]?.Put).toMatchObject({
+    expect(updateWrites?.[2]?.Update).toMatchObject({
+      TableName: 'DeveloperPlatformTable',
+      ExpressionAttributeValues: {
+        ':entryType': 'connector-poll-target',
+        ':one': 1,
+      },
+    })
+    expect(updateWrites?.[3]?.Put).toMatchObject({
       TableName: 'DeveloperPlatformTable',
       Item: {
         entryType: 'idempotency',
@@ -1254,7 +1310,7 @@ describe('DynamoDB developer platform persistence', () => {
         },
       },
     })
-    expect(updateWrites?.[3]?.Put).toMatchObject({
+    expect(updateWrites?.[4]?.Put).toMatchObject({
       TableName: 'AuditEventsTable',
       Item: {
         eventType: 'external-link.updated',
@@ -2141,12 +2197,47 @@ describe('webhook subscription and delivery', () => {
     await client.setWebhookSubscriptionStatus({
       workspaceId: 'workspace-1',
       subscriptionId: created.subscription.id,
+      status: 'paused',
+    })
+    await expect(client.listActiveWebhookSubscriptionsPage({
+      workspaceId: 'workspace-1',
+      limit: 50,
+    })).resolves.toEqual({ subscriptions: [] })
+    expect(readStoredRows(client)
+      .find((row) => row.entryType === 'webhook-subscription'))
+      .not.toHaveProperty('lookupKey')
+    await client.setWebhookSubscriptionStatus({
+      workspaceId: 'workspace-1',
+      subscriptionId: created.subscription.id,
+      status: 'active',
+    })
+    await expect(client.listActiveWebhookSubscriptionsPage({
+      workspaceId: 'workspace-1',
+      limit: 50,
+    })).resolves.toMatchObject({
+      subscriptions: [
+        expect.objectContaining({ id: created.subscription.id }),
+      ],
+    })
+    await client.setWebhookSubscriptionStatus({
+      workspaceId: 'workspace-1',
+      subscriptionId: created.subscription.id,
       status: 'disabled',
     })
 
     const disabledRow = readStoredRows(client)
       .find((row) => row.entryType === 'webhook-subscription')
     expect(disabledRow).not.toHaveProperty('secretCiphertext')
+    expect(disabledRow).not.toHaveProperty('lookupKey')
+    expect(disabledRow).not.toHaveProperty('lookupSortKey')
+    expect(disabledRow?.expiresAt).toBe(
+      Math.floor(START.getTime() / 1_000) +
+        WEBHOOK_DISABLED_SUBSCRIPTION_RETENTION_SECONDS,
+    )
+    await expect(client.listActiveWebhookSubscriptionsPage({
+      workspaceId: 'workspace-1',
+      limit: 50,
+    })).resolves.toEqual({ subscriptions: [] })
     await expect(client.verifyWebhookSignature({
       workspaceId: 'workspace-1',
       subscriptionId: created.subscription.id,
@@ -2772,12 +2863,15 @@ describe('connectors, links, and imports', () => {
         syncDirection: 'bidirectional',
       },
     })
-    const createdRow = readStoredRows(client).find(
-      (candidate) => candidate.recordKey === `EXTERNALLINK#${link.id}`,
+    const pollTargetRow = readStoredRows(client).find(
+      (candidate) => candidate.entryType === 'connector-poll-target',
     )
-    expect(createdRow).toMatchObject({
-      lookupKey: 'CONNECTOR_SYNC_LINK',
-      lookupSortKey: `workspace-disconnect-links#${link.id}`,
+    expect(pollTargetRow).toMatchObject({
+      value: {
+        installationId: installation.id,
+        resourceType: 'issue',
+      },
+      pollableLinkCount: 1,
     })
 
     await client.updateConnectorStatus({
@@ -2795,6 +2889,23 @@ describe('connectors, links, and imports', () => {
     })
     expect(disconnected).not.toHaveProperty('lastError')
     expect(disconnected).not.toHaveProperty('reauthorizationUrl')
+    expect((await client.listExternalWorkItemLinks({
+      workspaceId: 'workspace-disconnect-links',
+      installationId: installation.id,
+    }))[0]).toMatchObject({
+      id: link.id,
+      syncStatus: 'pending',
+    })
+    const snapshot = await client.readConnectorLifecycleSnapshot({
+      workspaceId: 'workspace-disconnect-links',
+      installationId: installation.id,
+    })
+    await expect(client.pauseConnectorExternalLinksPage({
+      workspaceId: 'workspace-disconnect-links',
+      installationId: installation.id,
+      expectedLifecycleRevision: snapshot.lifecycleRevision,
+      limit: 25,
+    })).resolves.toEqual({ paused: 1 })
     const links = await client.listExternalWorkItemLinks({
       workspaceId: 'workspace-disconnect-links',
       installationId: installation.id,
@@ -2806,11 +2917,9 @@ describe('connectors, links, and imports', () => {
         syncStatus: 'paused',
       }),
     ])
-    const pausedRow = readStoredRows(client).find(
-      (candidate) => candidate.recordKey === `EXTERNALLINK#${link.id}`,
-    )
-    expect(pausedRow).not.toHaveProperty('lookupKey')
-    expect(pausedRow).not.toHaveProperty('lookupSortKey')
+    expect(readStoredRows(client).find(
+      (candidate) => candidate.entryType === 'connector-poll-target',
+    )).toMatchObject({ pollableLinkCount: 0 })
   })
 
   test('disconnect strongly reconciles links before a lookup GSI is visible', async () => {
@@ -2849,6 +2958,17 @@ describe('connectors, links, and imports', () => {
       installationId: installation.id,
       status: 'disconnected',
     })
+    const snapshot = await client.readConnectorLifecycleSnapshot({
+      workspaceId,
+      installationId: installation.id,
+    })
+    expect(snapshot.disconnectCleanupRevision).toBe(snapshot.lifecycleRevision)
+    await expect(client.pauseConnectorExternalLinksPage({
+      workspaceId,
+      installationId: installation.id,
+      expectedLifecycleRevision: snapshot.lifecycleRevision,
+      limit: 25,
+    })).resolves.toEqual({ paused: 1 })
 
     expect(readStoredRows(client).find((record) =>
       record.recordKey === `EXTERNALLINK#${link.id}`
@@ -2856,8 +2976,192 @@ describe('connectors, links, and imports', () => {
       value: { syncStatus: 'paused' },
     })
     expect(readStoredRows(client).find((record) =>
-      record.recordKey === `EXTERNALLINK#${link.id}`
-    )).not.toHaveProperty('lookupKey')
+      record.entryType === 'connector-poll-target'
+    )).toMatchObject({ pollableLinkCount: 0 })
+  })
+
+  test('pauses disconnected links through bounded durable continuation pages', async () => {
+    const { client } = createClient()
+    const workspaceId = 'workspace-disconnect-pages'
+    const installation = await client.installConnector({
+      workspaceId,
+      installedByUserId: 'user-disconnect-pages',
+      input: {
+        category: 'source-control',
+        provider: 'github',
+        name: 'Paged GitHub',
+        scopes: ['repo'],
+        credential: 'disconnect-pages-credential',
+      },
+    })
+    for (const sequence of [1, 2, 3]) {
+      await client.createExternalWorkItemLink({
+        workspaceId,
+        input: {
+          teamId: 'team-disconnect-pages',
+          workItemId: `work-item-disconnect-pages-${sequence}`,
+          installationId: installation.id,
+          resourceType: 'issue',
+          externalId: `issue-disconnect-pages-${sequence}`,
+          externalUrl: `https://provider.test/issues/${sequence}`,
+          syncDirection: 'bidirectional',
+        },
+      })
+    }
+    await client.updateConnectorStatus({
+      workspaceId,
+      installationId: installation.id,
+      status: 'disconnected',
+    })
+    const snapshot = await client.readConnectorLifecycleSnapshot({
+      workspaceId,
+      installationId: installation.id,
+    })
+
+    const first = await client.pauseConnectorExternalLinksPage({
+      workspaceId,
+      installationId: installation.id,
+      expectedLifecycleRevision: snapshot.lifecycleRevision,
+      limit: 1,
+    })
+    expect(first.paused).toBe(1)
+    expect(typeof first.nextCursor).toBe('string')
+    await expect(client.updateConnectorStatus({
+      workspaceId,
+      installationId: installation.id,
+      status: 'needs-reauth',
+      reauthorizationUrl: 'https://provider.test/oauth/authorize',
+      reauthorizationStateId: 'd'.repeat(32),
+      updatedByUserId: 'user-disconnect-pages',
+      expectedLifecycleRevision: snapshot.lifecycleRevision,
+    })).rejects.toMatchObject({
+      code: 'ConnectorDisconnectCleanupPending',
+      status: 409,
+    })
+    if (!first.nextCursor) throw new Error('First disconnect cursor was not created.')
+    const second = await client.pauseConnectorExternalLinksPage({
+      workspaceId,
+      installationId: installation.id,
+      expectedLifecycleRevision: snapshot.lifecycleRevision,
+      limit: 1,
+      cursor: first.nextCursor,
+    })
+    expect(second.paused).toBe(1)
+    expect(typeof second.nextCursor).toBe('string')
+    if (!second.nextCursor) throw new Error('Second disconnect cursor was not created.')
+    await expect(client.pauseConnectorExternalLinksPage({
+      workspaceId,
+      installationId: installation.id,
+      expectedLifecycleRevision: snapshot.lifecycleRevision,
+      limit: 1,
+      cursor: second.nextCursor,
+    })).resolves.toEqual({ paused: 1 })
+    const completedSnapshot = await client.readConnectorLifecycleSnapshot({
+      workspaceId,
+      installationId: installation.id,
+    })
+    expect(completedSnapshot.lifecycleRevision).toBe(snapshot.lifecycleRevision)
+    expect(completedSnapshot.disconnectCleanupRevision).toBeUndefined()
+    await expect(client.updateConnectorStatus({
+      workspaceId,
+      installationId: installation.id,
+      status: 'needs-reauth',
+      reauthorizationUrl: 'https://provider.test/oauth/authorize',
+      reauthorizationStateId: 'd'.repeat(32),
+      updatedByUserId: 'user-disconnect-pages',
+      expectedLifecycleRevision: completedSnapshot.lifecycleRevision,
+    })).resolves.toMatchObject({ status: 'needs-reauth' })
+    expect(await client.listExternalWorkItemLinks({
+      workspaceId,
+      installationId: installation.id,
+    })).toEqual([
+      expect.objectContaining({ syncStatus: 'paused' }),
+      expect.objectContaining({ syncStatus: 'paused' }),
+      expect.objectContaining({ syncStatus: 'paused' }),
+    ])
+    expect(readStoredRows(client).find(
+      (record) => record.entryType === 'connector-poll-target',
+    )).toMatchObject({ pollableLinkCount: 0 })
+  })
+
+  test('keeps disconnect cleanup durable when link deletion advances the storage version', async () => {
+    const { client } = createClient()
+    const workspaceId = 'workspace-disconnect-version-drift'
+    const installation = await client.installConnector({
+      workspaceId,
+      installedByUserId: 'user-disconnect-version-drift',
+      input: {
+        category: 'source-control',
+        provider: 'github',
+        name: 'Version Drift GitHub',
+        scopes: ['repo'],
+        credential: 'disconnect-version-drift-credential',
+      },
+    })
+    const links = []
+    for (const sequence of [1, 2]) {
+      links.push(await client.createExternalWorkItemLink({
+        workspaceId,
+        input: {
+          teamId: 'team-disconnect-version-drift',
+          workItemId: `work-item-disconnect-version-drift-${sequence}`,
+          installationId: installation.id,
+          resourceType: 'issue',
+          externalId: `issue-disconnect-version-drift-${sequence}`,
+          externalUrl: `https://provider.test/issues/${sequence}`,
+          syncDirection: 'bidirectional',
+        },
+      }))
+    }
+    await client.updateConnectorStatus({
+      workspaceId,
+      installationId: installation.id,
+      status: 'disconnected',
+    })
+    const disconnectSnapshot = await client.readConnectorLifecycleSnapshot({
+      workspaceId,
+      installationId: installation.id,
+    })
+    await client.deleteExternalWorkItemLink({
+      workspaceId,
+      teamId: links[0]!.teamId,
+      workItemId: links[0]!.workItemId,
+      linkId: links[0]!.id,
+    })
+    const driftedSnapshot = await client.readConnectorLifecycleSnapshot({
+      workspaceId,
+      installationId: installation.id,
+    })
+    expect(driftedSnapshot.lifecycleRevision).toBeGreaterThan(
+      disconnectSnapshot.lifecycleRevision,
+    )
+    expect(driftedSnapshot.disconnectCleanupRevision).toBe(
+      disconnectSnapshot.disconnectCleanupRevision,
+    )
+
+    await expect(client.pauseConnectorExternalLinksPage({
+      workspaceId,
+      installationId: installation.id,
+      expectedLifecycleRevision: disconnectSnapshot.disconnectCleanupRevision!,
+      limit: 25,
+    })).resolves.toEqual({ paused: 1 })
+    const completedSnapshot = await client.readConnectorLifecycleSnapshot({
+      workspaceId,
+      installationId: installation.id,
+    })
+    expect(completedSnapshot.lifecycleRevision).toBe(
+      driftedSnapshot.lifecycleRevision,
+    )
+    expect(completedSnapshot.disconnectCleanupRevision).toBeUndefined()
+    await expect(client.updateConnectorStatus({
+      workspaceId,
+      installationId: installation.id,
+      status: 'needs-reauth',
+      reauthorizationUrl: 'https://provider.test/oauth/authorize',
+      reauthorizationStateId: 'e'.repeat(32),
+      updatedByUserId: 'user-disconnect-version-drift',
+      expectedLifecycleRevision: completedSnapshot.lifecycleRevision,
+    })).resolves.toMatchObject({ status: 'needs-reauth' })
   })
 
   test('atomically rejects external links at installation and Work Item caps', async () => {
@@ -3047,6 +3351,16 @@ describe('connectors, links, and imports', () => {
     releasePatch()
     await expect(patchOutcome).resolves.toMatchObject({
       error: { code: 'ConnectorNotConnected' },
+    })
+    const snapshot = await client.readConnectorLifecycleSnapshot({
+      workspaceId: 'workspace-link-disconnect-race',
+      installationId: installation.id,
+    })
+    await client.pauseConnectorExternalLinksPage({
+      workspaceId: 'workspace-link-disconnect-race',
+      installationId: installation.id,
+      expectedLifecycleRevision: snapshot.lifecycleRevision,
+      limit: 25,
     })
     expect((await client.listExternalWorkItemLinks({
       workspaceId: 'workspace-link-disconnect-race',

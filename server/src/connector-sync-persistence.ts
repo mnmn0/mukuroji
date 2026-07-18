@@ -21,6 +21,10 @@ import {
   getConfiguredAuditTableName,
 } from './audit'
 import {
+  createConnectorPollTargetLookupKey,
+  createConnectorPollTargetRecordKey,
+} from './connector-poll-projection'
+import {
   ConnectorRuntimeError,
 } from './connector-oauth'
 import type {
@@ -105,9 +109,9 @@ type ExternalLinkRow = {
   value: ExternalWorkItemLink
   /** Storage CAS revision です。 */
   version: number
-  /** Connector poll 対象だけに付与する sparse GSI partition key です。 */
+  /** Legacy sparse GSI partition key です。replacement時に除去します。 */
   lookupKey?: string
-  /** Workspace と link ID で安定化した sparse GSI sort key です。 */
+  /** Legacy sparse GSI sort key です。replacement時に除去します。 */
   lookupSortKey?: string
 }
 
@@ -309,6 +313,14 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       lastSyncedAt: syncedAt,
     }
     const nextLink = createExternalLinkReplacementRow(currentLink, syncedLink)
+    const pollTargetUpdate = input.deferLinkStatus
+      ? undefined
+      : createPollTargetDeltaUpdate(
+          this.tableName,
+          workspaceId,
+          currentLink.value,
+          syncedLink,
+        )
     const auditPut = input.deferLinkStatus
       ? undefined
       : createPlatformAuditPut(this.auditTableName, {
@@ -365,6 +377,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
             workspaceId,
             installationId,
           ),
+          ...(pollTargetUpdate ? [pollTargetUpdate] : []),
           ...(auditPut ? [auditPut] : []),
         ],
       }))
@@ -414,6 +427,12 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       ...(normalizedStatus === 'synced' ? { lastSyncedAt: updatedAt } : {}),
     }
     const next = createExternalLinkReplacementRow(row, link)
+    const pollTargetUpdate = createPollTargetDeltaUpdate(
+      this.tableName,
+      workspaceId,
+      row.value,
+      link,
+    )
     const auditPut = createPlatformAuditPut(this.auditTableName, {
       workspaceId,
       eventType: 'external-link.updated',
@@ -444,6 +463,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
                 workspaceId,
                 link.installationId,
               )]),
+          ...(pollTargetUpdate ? [pollTargetUpdate] : []),
           auditPut,
         ],
       }))
@@ -464,6 +484,8 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
     workspaceIdValue: string,
     linkIdValue: string,
     expectedUpdatedAtValue: string,
+    expectedExternalVersionValue: string,
+    expectedStateRevisionValue: number,
     syncedAtValue: string,
   ) {
     const workspaceId = requireIdentifier(workspaceIdValue, 'Workspace ID')
@@ -471,6 +493,14 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
     const expectedUpdatedAt = requireTimestamp(
       expectedUpdatedAtValue,
       'Expected external link update timestamp',
+    )
+    const expectedExternalVersion = requireText(
+      expectedExternalVersionValue,
+      'Expected external version',
+    )
+    const expectedStateRevision = requirePositiveInteger(
+      expectedStateRevisionValue,
+      'Expected connector sync state revision',
     )
     const syncedAt = requireTimestamp(
       syncedAtValue,
@@ -494,6 +524,12 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       lastSyncedAt: syncedAt,
     }
     const next = createExternalLinkReplacementRow(row, link)
+    const pollTargetUpdate = createPollTargetDeltaUpdate(
+      this.tableName,
+      workspaceId,
+      row.value,
+      link,
+    )
     const auditPut = createPlatformAuditPut(this.auditTableName, {
       workspaceId,
       eventType: 'external-link.updated',
@@ -517,11 +553,35 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
           createVersionedPut(this.tableName, next, row.version),
+          {
+            ConditionCheck: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId,
+                recordKey: syncStateRecordKey(linkId),
+              },
+              ConditionExpression:
+                '#entryType = :entryType AND #version = :expectedStateRevision AND ' +
+                '#value.#lastExternalVersion = :expectedExternalVersion',
+              ExpressionAttributeNames: {
+                '#entryType': 'entryType',
+                '#version': 'version',
+                '#value': 'value',
+                '#lastExternalVersion': 'lastExternalVersion',
+              },
+              ExpressionAttributeValues: {
+                ':entryType': 'connector-sync-state',
+                ':expectedStateRevision': expectedStateRevision,
+                ':expectedExternalVersion': expectedExternalVersion,
+              },
+            },
+          },
           createActiveConnectorConditionCheck(
             this.tableName,
             workspaceId,
             link.installationId,
           ),
+          ...(pollTargetUpdate ? [pollTargetUpdate] : []),
           auditPut,
         ],
       }))
@@ -580,6 +640,12 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       currentLink,
       conflictedLink,
     )
+    const pollTargetUpdate = createPollTargetDeltaUpdate(
+      this.tableName,
+      record.workspaceId,
+      currentLink.value,
+      conflictedLink,
+    )
     const auditPut = createPlatformAuditPut(this.auditTableName, {
       workspaceId: record.workspaceId,
       eventType: 'sync-conflict.created',
@@ -629,6 +695,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
             record.workspaceId,
             record.installationId,
           ),
+          ...(pollTargetUpdate ? [pollTargetUpdate] : []),
           auditPut,
           linkAuditPut,
         ],
@@ -905,6 +972,12 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
         : {}),
     }
     const nextLink = createExternalLinkReplacementRow(currentLink, terminalLink)
+    const pollTargetUpdate = createPollTargetDeltaUpdate(
+      this.tableName,
+      workspaceId,
+      currentLink.value,
+      terminalLink,
+    )
     const auditPut = createPlatformAuditPut(this.auditTableName, {
       workspaceId,
       eventType: 'sync-conflict.resolved',
@@ -961,6 +1034,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
                 terminalLink.installationId,
               )]
             : []),
+          ...(pollTargetUpdate ? [pollTargetUpdate] : []),
           auditPut,
           linkAuditPut,
         ],
@@ -1095,6 +1169,73 @@ function createVersionedPut(
   }
 }
 
+function isPollableExternalLink(link: ExternalWorkItemLink) {
+  return link.syncStatus !== 'paused' &&
+    link.syncStatus !== 'conflict' &&
+    (link.syncDirection === 'inbound' || link.syncDirection === 'bidirectional')
+}
+
+function createPollTargetDeltaUpdate(
+  tableName: string,
+  workspaceId: string,
+  previous: ExternalWorkItemLink,
+  next: ExternalWorkItemLink,
+) {
+  const delta = Number(isPollableExternalLink(next)) -
+    Number(isPollableExternalLink(previous))
+  if (delta === 0) return undefined
+  const incrementing = delta === 1
+  return {
+    Update: {
+      TableName: tableName,
+      Key: {
+        workspaceId,
+        recordKey: createConnectorPollTargetRecordKey(
+          next.installationId,
+          next.resourceType,
+        ),
+      },
+      UpdateExpression:
+        'SET #entryType = if_not_exists(#entryType, :entryType), ' +
+        '#value = if_not_exists(#value, :value), ' +
+        'pollableLinkCount = ' +
+        `${incrementing ? 'if_not_exists(pollableLinkCount, :zero) +' : 'pollableLinkCount -'} :one, ` +
+        'lookupKey = :lookupKey, lookupSortKey = :lookupSortKey, ' +
+        '#version = if_not_exists(#version, :zero) + :one',
+      ConditionExpression: incrementing
+        ? 'attribute_not_exists(#entryType) OR ' +
+          '(#entryType = :entryType AND #value.#installationId = :installationId AND ' +
+          '#value.#resourceType = :resourceType AND pollableLinkCount >= :zero)'
+        : '#entryType = :entryType AND #value.#installationId = :installationId AND ' +
+          '#value.#resourceType = :resourceType AND pollableLinkCount >= :one',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#value': 'value',
+        '#installationId': 'installationId',
+        '#resourceType': 'resourceType',
+        '#version': 'version',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'connector-poll-target',
+        ':value': {
+          installationId: next.installationId,
+          resourceType: next.resourceType,
+        },
+        ':installationId': next.installationId,
+        ':resourceType': next.resourceType,
+        ':lookupKey': createConnectorPollTargetLookupKey(
+          workspaceId,
+          next.installationId,
+          next.resourceType,
+        ),
+        ':lookupSortKey': `${workspaceId}#${next.installationId}#${next.resourceType}`,
+        ':zero': 0,
+        ':one': 1,
+      },
+    },
+  }
+}
+
 function createExternalLinkReplacementRow(
   row: ExternalLinkRow,
   link: ExternalWorkItemLink,
@@ -1104,19 +1245,10 @@ function createExternalLinkReplacementRow(
     lookupSortKey: _lookupSortKey,
     ...baseRow
   } = row
-  const isPollable = link.syncStatus !== 'paused' &&
-    link.syncStatus !== 'conflict' &&
-    (link.syncDirection === 'inbound' || link.syncDirection === 'bidirectional')
   return {
     ...baseRow,
     value: link,
     version: row.version + 1,
-    ...(isPollable
-      ? {
-          lookupKey: 'CONNECTOR_SYNC_LINK',
-          lookupSortKey: `${row.workspaceId}#${link.id}`,
-        }
-      : {}),
   }
 }
 

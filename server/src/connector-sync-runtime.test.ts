@@ -265,6 +265,13 @@ describe('ConnectorSyncEngine', () => {
         PREVIOUS_ORIGIN_SIGNING_SECRET,
       ),
     }
+    await expect(fixture.persistence.commitLinkState({
+      workspaceId: 'workspace-1',
+      link: fixture.link,
+      workItemRevision: 4,
+      externalRecord: record,
+      syncedAt: NOW.toISOString(),
+    })).resolves.toBe(true)
     await expect(fixture.engine.processInbound({
       workspaceId: 'workspace-1',
       link: fixture.link,
@@ -276,6 +283,117 @@ describe('ConnectorSyncEngine', () => {
       reason: 'self-origin',
     })
     expect(fixture.getWorkItem().revision).toBe(4)
+    expect(await fixture.persistence.getLinkState(
+      'workspace-1',
+      fixture.link.id,
+    )).toMatchObject({
+      lastExternalEventId: 'event-before-key-rotation',
+      lastExternalRecord: expect.not.objectContaining({ originMarker: expect.anything() }),
+    })
+  })
+
+  test('consumes an exact outbound echo once and applies a later retained-marker edit', async () => {
+    let echo: ReturnType<typeof externalRecord> & { originMarker: string } | undefined
+    const fixture = await createRuntimeFixture(createAdapter({
+      async push(_credential, mutation) {
+        echo = {
+          ...externalRecord('11'),
+          originMarker: mutation.originMarker,
+        }
+        return echo
+      },
+    }))
+    await fixture.engine.processOutbound({
+      workspaceId: 'workspace-1',
+      link: fixture.link,
+      operationId: 'outbound-before-provider-edit',
+    })
+    if (!echo) throw new Error('Outbound echo is required.')
+    expect(await fixture.persistence.getLinkState(
+      'workspace-1',
+      fixture.link.id,
+    )).toMatchObject({
+      lastExternalVersion: '11',
+      lastExternalRecord: { originMarker: echo.originMarker },
+    })
+
+    await expect(fixture.engine.processInbound({
+      workspaceId: 'workspace-1',
+      link: fixture.link,
+      eventId: 'outbound-echo-11',
+      record: echo,
+    })).resolves.toMatchObject({ kind: 'skipped', reason: 'self-origin' })
+    expect(await fixture.persistence.getLinkState(
+      'workspace-1',
+      fixture.link.id,
+    )).toMatchObject({
+      lastExternalEventId: 'outbound-echo-11',
+      lastExternalRecord: expect.not.objectContaining({ originMarker: expect.anything() }),
+    })
+    await expect(fixture.engine.processInbound({
+      workspaceId: 'workspace-1',
+      link: fixture.link,
+      eventId: 'second-echo-delivery-11',
+      record: echo,
+    })).resolves.toMatchObject({ kind: 'skipped', reason: 'stale' })
+    await expect(fixture.engine.processInbound({
+      workspaceId: 'workspace-1',
+      link: fixture.link,
+      eventId: 'provider-user-edit-12',
+      record: {
+        ...echo,
+        externalVersion: '12',
+        title: 'Provider user edit',
+      },
+    })).resolves.toMatchObject({ kind: 'synced', externalVersion: '12' })
+    expect(fixture.getWorkItem()).toMatchObject({
+      revision: 5,
+      title: 'Provider user edit',
+    })
+  })
+
+  test('does not absorb a newer local revision while consuming an outbound echo', async () => {
+    let echo: ReturnType<typeof externalRecord> & { originMarker: string } | undefined
+    const fixture = await createRuntimeFixture(createAdapter({
+      async push(_credential, mutation) {
+        echo = {
+          ...externalRecord('11'),
+          originMarker: mutation.originMarker,
+        }
+        return echo
+      },
+    }))
+    await fixture.engine.processOutbound({
+      workspaceId: 'workspace-1',
+      link: fixture.link,
+      operationId: 'outbound-before-local-edit',
+    })
+    fixture.setWorkItem({
+      ...fixture.getWorkItem(),
+      revision: 5,
+      title: 'Newer local edit',
+    })
+    if (!echo) throw new Error('Outbound echo is required.')
+
+    await expect(fixture.engine.processInbound({
+      workspaceId: 'workspace-1',
+      link: fixture.link,
+      eventId: 'outbound-echo-before-local-edit',
+      record: echo,
+    })).resolves.toMatchObject({ kind: 'skipped', reason: 'self-origin' })
+    expect(await fixture.persistence.getLinkState(
+      'workspace-1',
+      fixture.link.id,
+    )).toMatchObject({
+      workItemRevision: 4,
+      lastExternalVersion: '11',
+    })
+    await expect(fixture.engine.processInbound({
+      workspaceId: 'workspace-1',
+      link: fixture.link,
+      eventId: 'provider-edit-after-local-edit',
+      record: { ...echo, externalVersion: '12' },
+    })).resolves.toMatchObject({ kind: 'conflict' })
   })
 
   test('does not heal a user-requested pending resync from an old duplicate event', async () => {
@@ -346,7 +464,11 @@ describe('ConnectorSyncEngine', () => {
       updatedByUserId: 'user-1',
       input: { syncDirection: 'inbound' },
     })
-    const acknowledgements: string[] = []
+    const acknowledgements: Array<{
+      expectedUpdatedAt: string
+      expectedExternalVersion: string
+      expectedStateRevision: number
+    }> = []
     const acknowledge = fixture.persistence.acknowledgePendingLink.bind(
       fixture.persistence,
     )
@@ -354,10 +476,23 @@ describe('ConnectorSyncEngine', () => {
       workspaceId,
       linkId,
       expectedUpdatedAt,
+      expectedExternalVersion,
+      expectedStateRevision,
       syncedAt,
     ) => {
-      acknowledgements.push(expectedUpdatedAt)
-      return acknowledge(workspaceId, linkId, expectedUpdatedAt, syncedAt)
+      acknowledgements.push({
+        expectedUpdatedAt,
+        expectedExternalVersion,
+        expectedStateRevision,
+      })
+      return acknowledge(
+        workspaceId,
+        linkId,
+        expectedUpdatedAt,
+        expectedExternalVersion,
+        expectedStateRevision,
+        syncedAt,
+      )
     }
 
     const result = await fixture.engine.pollInstallation({
@@ -370,11 +505,100 @@ describe('ConnectorSyncEngine', () => {
       linkId: fixture.link.id,
       reason: 'stale',
     }])
-    expect(acknowledgements).toEqual([pending.updatedAt])
+    expect(acknowledgements).toEqual([{
+      expectedUpdatedAt: pending.updatedAt,
+      expectedExternalVersion: '10',
+      expectedStateRevision: 1,
+    }])
     expect(fixture.persistence.getLinkStatus(
       'workspace-1',
       fixture.link.id,
     )).toBe('synced')
+  })
+
+  test('does not acknowledge a pending generation from an older provider replica', async () => {
+    const fixture = await createRuntimeFixture(createAdapter({
+      async pull() {
+        return { items: [externalRecord('9')] }
+      },
+    }))
+    await fixture.engine.processInbound({
+      workspaceId: 'workspace-1',
+      link: fixture.link,
+      eventId: 'event-version-10',
+      record: externalRecord('10'),
+    })
+    fixture.setCurrentTime(new Date('2026-07-18T00:01:00.000Z'))
+    await fixture.platform.updateExternalWorkItemLink({
+      workspaceId: 'workspace-1',
+      teamId: fixture.link.teamId,
+      workItemId: fixture.link.workItemId,
+      linkId: fixture.link.id,
+      updatedByUserId: 'user-1',
+      input: { syncDirection: 'inbound' },
+    })
+    let acknowledgementCalls = 0
+    fixture.persistence.acknowledgePendingLink = async () => {
+      acknowledgementCalls += 1
+      return true
+    }
+
+    await expect(fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'issue',
+    })).resolves.toMatchObject({
+      results: [{ kind: 'skipped', reason: 'stale' }],
+    })
+    expect(acknowledgementCalls).toBe(0)
+  })
+
+  test('acknowledges and consumes an exact self-origin echo from the current poll', async () => {
+    let echo: ReturnType<typeof externalRecord> & { originMarker: string } | undefined
+    const fixture = await createRuntimeFixture(createAdapter({
+      async push(_credential, mutation) {
+        echo = {
+          ...externalRecord('11'),
+          originMarker: mutation.originMarker,
+        }
+        return echo
+      },
+      async pull() {
+        return { items: echo ? [echo] : [] }
+      },
+    }))
+    await fixture.engine.processOutbound({
+      workspaceId: 'workspace-1',
+      link: fixture.link,
+      operationId: 'pending-self-origin-poll',
+    })
+    fixture.setCurrentTime(new Date('2026-07-18T00:01:00.000Z'))
+    await fixture.platform.updateExternalWorkItemLink({
+      workspaceId: 'workspace-1',
+      teamId: fixture.link.teamId,
+      workItemId: fixture.link.workItemId,
+      linkId: fixture.link.id,
+      updatedByUserId: 'user-1',
+      input: { syncDirection: 'inbound' },
+    })
+
+    await expect(fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'issue',
+    })).resolves.toMatchObject({
+      results: [{ kind: 'skipped', reason: 'self-origin' }],
+    })
+    expect(fixture.persistence.getLinkStatus(
+      'workspace-1',
+      fixture.link.id,
+    )).toBe('synced')
+    expect(await fixture.persistence.getLinkState(
+      'workspace-1',
+      fixture.link.id,
+    )).toMatchObject({
+      lastExternalRecord: expect.not.objectContaining({ originMarker: expect.anything() }),
+    })
   })
 
   test('does not acknowledge a pending link after its poll generation changes', async () => {
@@ -703,11 +927,15 @@ describe('ConnectorSyncEngine', () => {
         workspaceId,
         linkId,
         expectedUpdatedAt,
+        expectedExternalVersion,
+        expectedStateRevision,
         syncedAt,
       ) => fixture.persistence.acknowledgePendingLink(
         workspaceId,
         linkId,
         expectedUpdatedAt,
+        expectedExternalVersion,
+        expectedStateRevision,
         syncedAt,
       ),
       createConflict: (record) => fixture.persistence.createConflict(record),

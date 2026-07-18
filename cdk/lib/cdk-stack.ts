@@ -268,6 +268,19 @@ const projectMemberItems = [
 ] as const;
 
 /**
+ * Demo Team の authoritative base-table sort key を返します。
+ */
+function findProjectDirectoryTeamEntryKey(teamId: string) {
+  const team = projectDirectoryItems.find((entry) =>
+    entry.entryType === 'team' && entry.teamId === teamId
+  );
+  if (!team) {
+    throw new Error(`Project directory Team "${teamId}" was not found.`);
+  }
+  return team.entryKey;
+}
+
+/**
  * DynamoDB に保存する project partition key を作成します。
  */
 function createDirectoryProjectId(directoryId: string, projectId: string) {
@@ -279,6 +292,43 @@ function createDirectoryProjectId(directoryId: string, projectId: string) {
  */
 function createProjectMemberEntryKey(projectId: string, memberKey: string) {
   return `PROJECT_MEMBER#${projectId}#${memberKey}`;
+}
+
+/**
+ * Team-only Webhook ACL を直接引く materialized grant の Put を作成します。
+ */
+function createWebhookTeamGrantPut(
+  tableName: string,
+  workspaceId: string,
+  teamId: string,
+  projectId: string,
+  memberKey: string,
+  teamSourceEntryKey: string,
+  projectSourceEntryKey: string,
+) {
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        directoryId: { S: `WEBHOOK_TEAM_GRANT#${workspaceId}#${memberKey}` },
+        entryKey: { S: `TEAM#${teamId}#PROJECT#${projectId}` },
+        entryType: { S: 'webhook-team-grant' },
+        workspaceId: { S: workspaceId },
+        teamId: { S: teamId },
+        projectId: { S: projectId },
+        memberKey: { S: memberKey },
+        sourceEntryKey: {
+          S: createProjectMemberEntryKey(projectId, memberKey),
+        },
+        teamSourceEntryKey: { S: teamSourceEntryKey },
+        projectSourceEntryKey: { S: projectSourceEntryKey },
+        webhookAuthorizationKey: {
+          S: `WEBHOOK_ACL#TEAM_MEMBER#${workspaceId}#${teamId}#${memberKey}`,
+        },
+        webhookAuthorizationSortKey: { S: `PROJECT#${projectId}` },
+      },
+    },
+  };
 }
 
 /**
@@ -399,8 +449,25 @@ function createProjectDirectoryTransactItems(tableName: string, directoryId: str
       },
     },
   }));
+  const teamGrantItems = projectMemberItems.flatMap(([projectId, memberKey]) =>
+    projectDirectoryItems
+      .filter((entry) =>
+        entry.entryType === 'project' && entry.projectId === projectId
+      )
+      .map((entry) =>
+        createWebhookTeamGrantPut(
+          tableName,
+          directoryId,
+          entry.teamId,
+          projectId,
+          memberKey,
+          findProjectDirectoryTeamEntryKey(entry.teamId),
+          entry.entryKey,
+        )
+      )
+  );
 
-  return [...directoryItems, ...memberItems];
+  return [...directoryItems, ...memberItems, ...teamGrantItems];
 }
 
 /**
@@ -510,8 +577,31 @@ function createWorkspaceBootstrapTransactItems(
       },
     },
   }));
+  const ownerTeamGrantItems = ownerProjectIds.flatMap((projectId) =>
+    projectDirectoryItems
+      .filter((entry) =>
+        entry.entryType === 'project' && entry.projectId === projectId
+      )
+      .map((entry) =>
+        createWebhookTeamGrantPut(
+          tableName,
+          directoryId,
+          entry.teamId,
+          projectId,
+          initialOwnerEmail,
+          findProjectDirectoryTeamEntryKey(entry.teamId),
+          entry.entryKey,
+        )
+      )
+  );
 
-  return [workspaceMetadataItem, workspaceOwnerItem, emailAliasItem, ...ownerProjectMemberItems];
+  return [
+    workspaceMetadataItem,
+    workspaceOwnerItem,
+    emailAliasItem,
+    ...ownerProjectMemberItems,
+    ...ownerTeamGrantItems,
+  ];
 }
 
 /**
@@ -1280,6 +1370,7 @@ export class CdkStack extends cdk.Stack {
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
         CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN:
           connectorRuntimeSecret.secretArn,
+        CONNECTOR_SYNC_QUEUE_URL: connectorSyncQueue.queueUrl,
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
         DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID:
@@ -1471,6 +1562,7 @@ export class CdkStack extends cdk.Stack {
           new iam.PolicyStatement({
             actions: ['sqs:SendMessage'],
             resources: [
+              connectorSyncQueue.queueArn,
               webhookDeliveryQueue.queueArn,
               workItemImportQueue.queueArn,
             ],
@@ -2182,6 +2274,94 @@ export class CdkStack extends cdk.Stack {
       targets: [new eventsTargets.LambdaFunction(automationScheduleFunction)],
     });
 
+    const webhookAuthorizationBackfillFunction = new lambdaNodejs.NodejsFunction(
+      this,
+      'WebhookAuthorizationBackfillFunction',
+      {
+        entry: path.join(
+          __dirname,
+          '../../server/src/webhook-authorization-backfill-handler.ts',
+        ),
+        handler: 'handler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+        projectRoot: path.join(__dirname, '../..'),
+        timeout: cdk.Duration.seconds(30),
+        memorySize: 512,
+        description:
+          'Starts the resumable Webhook ACL backfill before delivery reads are enabled.',
+        bundling: {
+          bundleAwsSDK: true,
+          minify: true,
+          sourceMap: true,
+          target: 'node22',
+        },
+        environment: {
+          PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+          PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
+            'WebhookAuthorizationIndex',
+        },
+      },
+    );
+    projectDirectoryTable.grantReadWriteData(webhookAuthorizationBackfillFunction);
+    const webhookAuthorizationBackfillProgressFunction =
+      new lambdaNodejs.NodejsFunction(
+        this,
+        'WebhookAuthorizationBackfillProgressFunction',
+        {
+          entry: path.join(
+            __dirname,
+            '../../server/src/webhook-authorization-backfill-handler.ts',
+          ),
+          handler: 'isCompleteHandler',
+          runtime: lambda.Runtime.NODEJS_22_X,
+          depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+          projectRoot: path.join(__dirname, '../..'),
+          timeout: cdk.Duration.minutes(5),
+          memorySize: 1024,
+          description:
+            'Processes one checkpointed page of the retained Webhook ACL backfill.',
+          bundling: {
+            bundleAwsSDK: true,
+            minify: true,
+            sourceMap: true,
+            target: 'node22',
+          },
+          environment: {
+            PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+            PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
+              'WebhookAuthorizationIndex',
+          },
+        },
+      );
+    projectDirectoryTable.grantReadWriteData(
+      webhookAuthorizationBackfillProgressFunction,
+    );
+    const webhookAuthorizationBackfillProvider = new customResources.Provider(
+      this,
+      'WebhookAuthorizationBackfillProvider',
+      {
+        onEventHandler: webhookAuthorizationBackfillFunction,
+        isCompleteHandler: webhookAuthorizationBackfillProgressFunction,
+        queryInterval: cdk.Duration.seconds(1),
+        totalTimeout: cdk.Duration.hours(1),
+      },
+    );
+    const webhookAuthorizationBackfill = new cdk.CustomResource(
+      this,
+      'WebhookAuthorizationBackfill',
+      {
+        serviceToken: webhookAuthorizationBackfillProvider.serviceToken,
+        properties: {
+          MigrationVersion: 'v1',
+          ProjectDirectoryTableName: projectDirectoryTable.tableName,
+        },
+      },
+    );
+    // Deploy the transactionally maintained writer before backfilling retained
+    // rows, then enable the new reader only after the migration succeeds.
+    webhookAuthorizationBackfill.node.addDependency(apiFunction);
+
     const webhookDeliveryFunction = new lambdaNodejs.NodejsFunction(
       this,
       'WebhookDeliveryFunction',
@@ -2201,18 +2381,18 @@ export class CdkStack extends cdk.Stack {
           target: 'node22',
         },
         environment: {
+          AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
           DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
           DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
           DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID:
             developerPlatformWebhookKey.keyArn,
           PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
-          PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
-            'WebhookAuthorizationIndex',
           WEBHOOK_DELIVERY_QUEUE_URL: webhookDeliveryQueue.queueUrl,
           WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         },
       },
     );
+    webhookDeliveryFunction.node.addDependency(webhookAuthorizationBackfill);
 
     webhookDeliveryFunction.addEventSource(
       new lambdaEventSources.SqsEventSource(webhookDeliveryQueue, {
@@ -2234,6 +2414,7 @@ export class CdkStack extends cdk.Stack {
       actions: [
         'dynamodb:DeleteItem',
         'dynamodb:PutItem',
+        'dynamodb:TransactWriteItems',
         'dynamodb:UpdateItem',
       ],
       resources: [developerPlatformTable.tableArn],
@@ -2245,11 +2426,11 @@ export class CdkStack extends cdk.Stack {
       ],
       resources: [
         projectDirectoryTable.tableArn,
-        `${projectDirectoryTable.tableArn}/index/WebhookAuthorizationIndex`,
         workspaceAccessTable.tableArn,
       ],
     }));
     developerPlatformWebhookKey.grantDecrypt(webhookDeliveryFunction);
+    auditEventsTable.grantReadData(webhookDeliveryFunction);
     webhookDeliveryQueue.grantConsumeMessages(webhookDeliveryFunction);
     webhookDeliveryQueue.grantSendMessages(webhookDeliveryFunction);
 
@@ -2383,6 +2564,10 @@ export class CdkStack extends cdk.Stack {
       },
     );
     developerPlatformTable.grantReadData(connectorPollFunction);
+    connectorPollFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:DeleteItem'],
+      resources: [developerPlatformTable.tableArn],
+    }));
     connectorSyncQueue.grantSendMessages(connectorPollFunction);
 
     new events.Rule(this, 'ConnectorPollRule', {
@@ -2748,6 +2933,15 @@ export class CdkStack extends cdk.Stack {
           }),
           new iam.PolicyStatement({
             actions: ['dynamodb:UpdateItem'],
+            resources: [projectDirectoryTable.tableArn],
+            conditions: {
+              'ForAnyValue:StringEquals': {
+                'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+              },
+            },
+          }),
+          new iam.PolicyStatement({
+            actions: ['dynamodb:PutItem'],
             resources: [projectDirectoryTable.tableArn],
             conditions: {
               'ForAnyValue:StringEquals': {

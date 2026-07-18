@@ -29,6 +29,7 @@ import { Hono, type Context } from 'hono'
 import {
   DeveloperPlatformError,
   type AuthenticatedDeveloperCredential,
+  type ConnectorLifecycleSnapshot,
   type DeveloperPlatformClient,
   type IdempotencyMutationToken,
 } from './developer-platform'
@@ -222,7 +223,7 @@ export interface ConnectorAuthorizationService {
   disconnect(
     principal: DeveloperManagementPrincipal,
     installationId: string,
-  ): Promise<void>
+  ): Promise<ConnectorLifecycleSnapshot>
   /** Provider adapter が永続化した sync conflict page を返します。 */
   listConflicts(
     principal: DeveloperManagementPrincipal,
@@ -250,6 +251,18 @@ export interface ConnectorAuthorizationService {
   ): Promise<WorkItemSyncConflict>
 }
 
+/** Connector disconnect 後のlink cleanupをdurable queueへ渡す入力です。 */
+export type QueueConnectorDisconnectInput = {
+  /** Installation が属する Workspace ID です。 */
+  workspaceId: string
+  /** Pause対象 connector installation ID です。 */
+  installationId: string
+  /** Disconnect transitionを束縛する lifecycle revision です。 */
+  lifecycleRevision: number
+  /** Lifecycle auditへ記録するactor User IDです。 */
+  updatedByUserId: string
+}
+
 /** Developer/public router の外部 dependencies です。 */
 export type PublicApiDependencies = {
   /** Credential、webhook、connector、import metadata store です。 */
@@ -266,6 +279,8 @@ export type PublicApiDependencies = {
   queueWebhookDelivery?(workspaceId: string, deliveryId: string): Promise<void>
   /** Connector OAuth と sync-conflict recovery の optional provider adapter です。 */
   connectorAuthorization?: ConnectorAuthorizationService
+  /** Connector disconnect link cleanupをdurable queueへ送ります。 */
+  queueConnectorDisconnect?(input: QueueConnectorDisconnectInput): Promise<void>
   /** Existing domain error を stable public error へ変換します。 */
   mapError?(error: unknown): PublicApiServiceError | undefined
   /** Test で request ID を固定する generator です。 */
@@ -1121,7 +1136,10 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       c.req.param('installationId'),
       'Connector installation ID',
     )
-    if (!dependencies.connectorAuthorization) {
+    if (
+      !dependencies.connectorAuthorization ||
+      !dependencies.queueConnectorDisconnect
+    ) {
       readIdempotencyKey(c.req.header('Idempotency-Key'))
       throw unavailableManagementMutation('Connector provider disconnect')
     }
@@ -1131,8 +1149,9 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       principal,
       { installationId },
       async () => {
+        let snapshot: ConnectorLifecycleSnapshot
         try {
-          await dependencies.connectorAuthorization!.disconnect(
+          snapshot = await dependencies.connectorAuthorization!.disconnect(
             principal,
             installationId,
           )
@@ -1144,15 +1163,36 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
             true,
           )
         }
-        return {
-          status: 200,
-          body: await platform.updateConnectorStatus({
+        if (snapshot.installation.status !== 'disconnected') {
+          throw new PublicApiServiceError(
+            503,
+            'temporarily_unavailable',
+            'Connector disconnect did not reach a stable local state.',
+            true,
+          )
+        }
+        try {
+          await dependencies.queueConnectorDisconnect!({
             workspaceId: principal.workspaceId,
             installationId,
-            status: 'disconnected',
-          }),
+            lifecycleRevision: snapshot.disconnectCleanupRevision ??
+              snapshot.lifecycleRevision,
+            updatedByUserId: principal.userId,
+          })
+        } catch {
+          throw new PublicApiServiceError(
+            503,
+            'temporarily_unavailable',
+            'Connector cleanup was not queued. Retry the same operation to recover safely.',
+            true,
+          )
+        }
+        return {
+          status: 200,
+          body: snapshot.installation,
         }
       },
+      { releaseReservationAfterCompletionFailure: true },
     )
   })
 
