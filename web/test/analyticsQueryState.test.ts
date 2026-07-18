@@ -57,6 +57,77 @@ describe('Analytics report URL state', () => {
     expect(state.filter.customFields).toEqual([])
   })
 
+  test('treats omitted version-one filters as explicit empty values', () => {
+    const fallback = {
+      assigneeUserIds: ['owner@example.com'],
+      customFields: [{
+        fieldId: 'impact',
+        operator: 'equals' as const,
+        value: 'high',
+      }],
+      includeArchived: true,
+      period: {
+        from: '2026-06-01T00:00:00.000Z',
+        to: '2026-06-30T23:59:59.999Z',
+      },
+      projectIds: ['refero'],
+      statusCategories: ['started' as const],
+      teamIds: ['core-team'],
+    }
+    const state = parseAnalyticsRouteState(
+      new URLSearchParams(
+        'v=1&from=2026-07-01T00%3A00%3A00.000Z&to=2026-07-31T23%3A59%3A59.999Z',
+      ),
+      fallback,
+      'Asia/Tokyo',
+      {
+        from: '2026-07-01T00:00:00.000Z',
+        to: '2026-08-15T23:59:59.999Z',
+      },
+    )
+
+    expect(state.filter).toEqual({
+      assigneeUserIds: [],
+      customFields: [],
+      includeArchived: false,
+      period: {
+        from: '2026-07-01T00:00:00.000Z',
+        to: '2026-07-31T23:59:59.999Z',
+      },
+      projectIds: [],
+      statusCategories: [],
+      teamIds: [],
+    })
+    expect(state.forecastBaseline).toBeUndefined()
+    expect(state.timezone).toBe('UTC')
+  })
+
+  test('uses a saved report fallback only for an unversioned legacy URL', () => {
+    const fallback = {
+      includeArchived: true,
+      period: {
+        from: '2026-06-01T00:00:00.000Z',
+        to: '2026-06-30T23:59:59.999Z',
+      },
+      projectIds: ['refero'],
+      teamIds: ['core-team'],
+    }
+    const baseline = {
+      from: '2026-06-01T00:00:00.000Z',
+      to: '2026-07-15T23:59:59.999Z',
+    }
+    const state = parseAnalyticsRouteState(
+      new URLSearchParams(),
+      fallback,
+      'Asia/Tokyo',
+      baseline,
+    )
+
+    expect(state.filter).toMatchObject(fallback)
+    expect(state.forecastBaseline).toEqual(baseline)
+    expect(state.timezone).toBe('Asia/Tokyo')
+  })
+
   test('uses the local current day for a positive-offset timezone near UTC midnight', () => {
     const filter = createDefaultAnalyticsFilter(
       new Date('2026-07-18T15:30:00.000Z'),

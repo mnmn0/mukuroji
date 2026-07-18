@@ -26,8 +26,11 @@ Work Item が権限変更や削除で見えなくなった場合、その値や�
 Analytics 用の canonical reader は Team partition を archived row も含めて読み、現在の
 Team/Project ACL を適用します。Project filter がある場合も、その Project が属する Team
 partition から読みます。現在状態が `asOf` より後に project 移動、archive、status 変更されていても
-過去状態を復元できるよう、Audit event は request の読み取り時点まで古い順に読み、
-現在参照可能な `team/{teamId}/issue/{workItemId}` entity ID との完全一致で絞ります。
+過去状態を復元できるよう、Audit event は request の読み取り時点まで古い順に読みます。
+Workspace 全履歴をscanせず、現在参照可能な `team/{teamId}/issue/{workItemId}` ごとに
+`EntityOccurredAtIndex` をqueryします。Legacy raw Work Item ID は、event metadata の
+Team/Issueまたはcanonical Work Item targetでcurrent authorized Work Itemへ一意に解決し、
+存在するentity、metadata、targetのtype/Team/Issue identityがすべて一致する場合だけ採用します。
 Engine は canonical row から `asOf` より後の event を巻き戻してから filter と metric を評価します。
 巻き戻した `asOf` state の Project がcallerのcurrent readable Project集合に含まれない場合は、
 現在のcanonical rowが別の参照可能なProjectへ移動済みでも、そのfactとevidenceを除外します。
@@ -35,13 +38,17 @@ Project access rowはcurrent active directory Projectとの積集合で評価し
 stale access rowをallowlistとして信頼しません。
 
 1 query の上限は Team partition 100件、1 partition 10,000 Work Item、現在参照可能な Work Item
-合計10,000件、Audit event 100件×100 pageです。上限に達した場合は部分集計を成功扱いせず
+合計10,000件、canonicalとlegacy raw IDを合わせたentity timeline 500件、全timelineを通じた
+Audit page query 500回、返却されたAudit event合計10,000件、1 identityあたり100 pageです。
+raw ID eventが認可・identity整合性チェックで除外される場合も、page queryと返却eventの上限を
+消費します。raw IDが重複しない通常構成では1 Work Itemにつきcanonicalとraw IDの2 timelineを
+確認するため、250件を超える場合はhistory read前に`413`でfail-fastします。
+上限に達した場合は部分集計を成功扱いせず
 `413` で fail-closed に終了します。Partition数と合計Work Item上限は、Team/Project filterで
 読み取るTeam partition数を減らして回避できます。1つのTeam自体が10,000件を超える場合は、
 Work Item storeのpartition分割またはscoped indexが必要です。
-Audit event は現在、Workspace の work-item history を exact entity ID filter の前に読むため、
-query期間を狭めても読み込み量は減りません。Audit上限を超えるWorkspaceでは、履歴の保持・移行を
-見直すか、entity scopeをserver-sideで絞れるindexを導入する必要があります。
+無関係なWorkspace eventはこの上限を消費しません。対象Work Item自体の履歴が上限を超える場合は、
+report scopeを狭めるか、履歴の保持・集約方針を見直す必要があります。
 
 Snapshot 作成時は実行した正規化済み query、report revision、metric contract version、
 permission scope hash を保存します。一覧は新しい順に最大100件を返し、export と一覧のどちらも

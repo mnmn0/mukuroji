@@ -1841,8 +1841,11 @@ export class CdkStack extends cdk.Stack {
           ANALYTICS_SCHEDULE_INDEX_NAME: 'ScheduleDueIndex',
           ANALYTICS_TABLE_NAME: analyticsTable.tableName,
           AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
+          COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
+          COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
           MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
           MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
+          SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
           WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         },
       },
@@ -1851,6 +1854,10 @@ export class CdkStack extends cdk.Stack {
     analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
       actions: ['dynamodb:TransactWriteItems'],
       resources: [analyticsTable.tableArn],
+    }));
+    analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['cognito-idp:AdminListGroupsForUser'],
+      resources: [cognitoUserPoolArn],
     }));
     auditEventsTable.grantReadData(analyticsScheduleFunction);
     projectDirectoryTable.grantReadData(analyticsScheduleFunction);
@@ -1866,6 +1873,20 @@ export class CdkStack extends cdk.Stack {
       metric: analyticsScheduleDlq.metricApproximateNumberOfMessagesVisible({
         period: cdk.Duration.minutes(5),
         statistic: 'Maximum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    new cloudwatch.Alarm(this, 'AnalyticsScheduleDestinationFailureAlarm', {
+      alarmDescription:
+        'Detects failures while Lambda delivers analytics schedule failures to the DLQ.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: analyticsScheduleFunction.metric('DestinationDeliveryFailures', {
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
       }),
       threshold: 1,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,

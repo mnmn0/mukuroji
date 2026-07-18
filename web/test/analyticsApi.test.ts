@@ -55,9 +55,12 @@ describe('Analytics API', () => {
       ['POST', '/api/analytics/query'],
       ['POST', '/api/analytics/evidence'],
     ])
-    expect(JSON.parse(String(requests[1]?.init.body))).toMatchObject({
-      metric: 'throughput',
+    expect(JSON.parse(String(requests[1]?.init.body))).toEqual({
+      asOf: query.asOf,
+      filter: analyticsFilterFixture,
       limit: 40,
+      metric: 'throughput',
+      timeZone: 'Asia/Tokyo',
     })
   })
 
@@ -115,6 +118,13 @@ describe('Analytics API', () => {
         'X-Correlation-Id': 'analytics-correlation',
       })
     }
+    expect(JSON.parse(String(requests[2]?.init.body))).toEqual({
+      expectedRevision: 7,
+      name: 'Updated',
+    })
+    expect(JSON.parse(String(requests[3]?.init.body))).toEqual({
+      expectedRevision: 8,
+    })
   })
 
   test('returns a browser artifact using the export filename header', async () => {

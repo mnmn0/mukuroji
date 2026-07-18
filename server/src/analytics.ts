@@ -14,6 +14,7 @@ import {
   type AnalyticsEvidenceInput,
   type AnalyticsEvidenceItem,
   type AnalyticsEvidenceResponse,
+  type AnalyticsExportLocale,
   type AnalyticsFilter,
   type AnalyticsForecast,
   type AnalyticsGroup,
@@ -35,6 +36,7 @@ import {
   type UpdateAnalyticsReportInput,
 } from '@mukuroji/contracts'
 import type { AuditEventV1, AuditFieldChange, AuditValue } from './audit'
+import { analyticsPdfFont } from './analytics-pdf-font'
 
 const REPORT_RECORD_PREFIX = 'REPORT#'
 const SNAPSHOT_RECORD_PREFIX = 'SNAPSHOT#'
@@ -49,7 +51,117 @@ const MILLISECONDS_PER_DAY = 24 * MILLISECONDS_PER_HOUR
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u
 const ISO_INSTANT_PATTERN = /T.*(?:Z|[+-]\d{2}:\d{2})$/u
 const LOCAL_TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/u
+const ROUTE_SAFE_REPORT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u
 const localDateFormatterCache = new Map<string, Intl.DateTimeFormat>()
+const PDF_LINES_PER_PAGE = 36
+const PDF_JAPANESE_FONT_NAME =
+  `${createPdfFontSubsetTag(analyticsPdfFont.bytes)}+NotoSansJP-Thin`
+const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
+  en: Object.freeze({
+    csvHeaders: Object.freeze([
+      'Widget ID',
+      'Metric key',
+      'Metric',
+      'Value',
+      'Sample size',
+      'Record type',
+      'Dimension value',
+      'Period from',
+      'Period to',
+      'Row ID',
+      'Row label',
+      'Team ID',
+      'Work Item ID',
+      'Project ID',
+      'Occurred at',
+    ]),
+    recordTypes: Object.freeze({
+      total: 'Total',
+      group: 'Group',
+      series: 'Series',
+      tableRow: 'Table row',
+    }),
+    metricLabels: Object.freeze({
+      throughput: 'Throughput',
+      'cycle-time': 'Cycle time',
+      'lead-time': 'Lead time',
+      wip: 'Work in progress',
+      overdue: 'Overdue',
+      'scope-change': 'Scope change',
+      velocity: 'Velocity',
+      sla: 'SLA attainment',
+    }),
+    unitLabels: Object.freeze({
+      count: 'items',
+      hours: 'hours',
+      'items-per-week': 'items/week',
+      percent: '%',
+    }),
+    riskLabels: Object.freeze({
+      unknown: 'Unknown',
+      low: 'Low',
+      medium: 'Medium',
+      high: 'High',
+    }),
+    asOf: 'As of',
+    timeZone: 'Time zone',
+    forecastP85: 'Forecast P85',
+    risk: 'Risk',
+    unavailable: 'N/A',
+  }),
+  ja: Object.freeze({
+    csvHeaders: Object.freeze([
+      'ウィジェットID',
+      '指標キー',
+      '指標',
+      '値',
+      'サンプル数',
+      'レコード種別',
+      'ディメンション値',
+      '期間開始',
+      '期間終了',
+      '行ID',
+      '行ラベル',
+      'チームID',
+      '作業項目ID',
+      'プロジェクトID',
+      '発生日時',
+    ]),
+    recordTypes: Object.freeze({
+      total: '合計',
+      group: 'グループ',
+      series: '時系列',
+      tableRow: 'テーブル行',
+    }),
+    metricLabels: Object.freeze({
+      throughput: 'スループット',
+      'cycle-time': 'サイクルタイム',
+      'lead-time': 'リードタイム',
+      wip: '進行中',
+      overdue: '期限超過',
+      'scope-change': 'スコープ変更',
+      velocity: 'ベロシティ',
+      sla: 'SLA達成率',
+    }),
+    unitLabels: Object.freeze({
+      count: '件',
+      hours: '時間',
+      'items-per-week': '件/週',
+      percent: '%',
+    }),
+    riskLabels: Object.freeze({
+      unknown: '不明',
+      low: '低',
+      medium: '中',
+      high: '高',
+    }),
+    asOf: '基準日時',
+    timeZone: 'タイムゾーン',
+    forecastP85: '予測 P85',
+    risk: 'リスク',
+    unavailable: '利用不可',
+  }),
+})
 
 /** Analytics schedule GSI の固定 partition value です。 */
 export const ANALYTICS_SCHEDULE_SHARD = 'schedule'
@@ -568,7 +680,14 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
     authorizedProjectIds,
   )
   const widgets = normalized.query.widgets.map((widget) =>
-    createWidgetResult(widget, facts, input.workItems, eventsByWorkItem, normalized)
+    createWidgetResult(
+      widget,
+      facts,
+      input.workItems,
+      eventsByWorkItem,
+      normalized,
+      authorizedProjectIds,
+    )
   )
   const evidenceCount = dedupeEvidence(
     normalized.query.widgets.flatMap((widget) =>
@@ -677,56 +796,106 @@ export function queryAnalyticsEvidence(
 }
 
 /**
- * Snapshot を formula-safe UTF-8 CSV text へ変換します。
+ * Client locale を analytics export が対応する primary language へ正規化します。
+ *
+ * @param locale - 任意の locale tag です。
+ * @returns `ja` / `ja-*` の場合は `ja`、それ以外は安全なfallbackである `en` です。
+ */
+export function normalizeAnalyticsExportLocale(
+  locale: string | undefined,
+): AnalyticsExportLocale {
+  if (typeof locale !== 'string') return 'en'
+  const primaryLanguage = locale.trim().replaceAll('_', '-').split('-', 1)[0]?.toLowerCase()
+  return primaryLanguage === 'ja' ? 'ja' : 'en'
+}
+
+/**
+ * Snapshot を fixed-column、formula-safe UTF-8 CSV text へ変換します。
  *
  * @param snapshot - Export 対象 snapshot です。
+ * @param locale - Header と label に利用する locale tag です。未対応時は英語へfallbackします。
  * @returns CRLF 区切りの CSV text です。
  */
-export function createAnalyticsCsv(snapshot: AnalyticsSnapshot) {
+export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string) {
   const normalized = normalizeSnapshot(snapshot)
-  const rows: Array<Array<string | number>> = [[
-    'widgetId',
-    'metric',
-    'value',
-    'sampleSize',
-    'dimension',
-    'dimensionValue',
-    'periodFrom',
-    'periodTo',
-  ]]
+  const messages = ANALYTICS_EXPORT_MESSAGES[normalizeAnalyticsExportLocale(locale)]
+  const rows: Array<Array<string | number | boolean | null | undefined>> = [
+    [...messages.csvHeaders],
+  ]
   for (const widget of normalized.widgets) {
+    const metricLabel = messages.metricLabels[widget.metric]
     rows.push([
       widget.widgetId,
       widget.metric,
-      widget.value ?? '',
+      metricLabel,
+      widget.value,
       widget.sampleSize,
-      'total',
+      messages.recordTypes.total,
       '',
       normalized.filter.period.from,
       normalized.filter.period.to,
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
     ])
     for (const group of widget.groups) {
       rows.push([
         widget.widgetId,
         widget.metric,
-        group.value ?? '',
+        metricLabel,
+        group.value,
         group.sampleSize,
-        'group',
+        messages.recordTypes.group,
         group.label,
         normalized.filter.period.from,
         normalized.filter.period.to,
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
       ])
     }
     for (const point of widget.series) {
       rows.push([
         widget.widgetId,
         widget.metric,
-        point.value ?? '',
+        metricLabel,
+        point.value,
         point.sampleSize,
-        'series',
+        messages.recordTypes.series,
         '',
         point.from,
         point.to,
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+      ])
+    }
+    for (const row of widget.rows) {
+      rows.push([
+        widget.widgetId,
+        widget.metric,
+        metricLabel,
+        row.values.value,
+        '',
+        messages.recordTypes.tableRow,
+        '',
+        normalized.filter.period.from,
+        normalized.filter.period.to,
+        row.id,
+        row.label,
+        row.values.teamId,
+        row.values.workItemId,
+        row.values.projectId,
+        row.values.occurredAt,
       ])
     }
   }
@@ -734,40 +903,89 @@ export function createAnalyticsCsv(snapshot: AnalyticsSnapshot) {
 }
 
 /**
- * Snapshot summary を dependency-free の最小 valid PDF document へ変換します。
+ * Snapshot summary を localized、multi-page PDF document へ変換します。
  *
  * @param snapshot - Export 対象 snapshot です。
+ * @param locale - Label に利用する locale tag です。未対応時は英語へfallbackします。
  * @returns `%PDF-1.4` から始まる PDF bytes です。
  */
-export function createAnalyticsPdf(snapshot: AnalyticsSnapshot) {
+export function createAnalyticsPdf(snapshot: AnalyticsSnapshot, locale?: string) {
   const normalized = normalizeSnapshot(snapshot)
+  const exportLocale = normalizeAnalyticsExportLocale(locale)
+  const messages = ANALYTICS_EXPORT_MESSAGES[exportLocale]
   const lines = [
     'mukuroji analytics',
-    `As of: ${normalized.asOf}`,
-    `Time zone: ${normalized.timeZone}`,
-    ...normalized.widgets.map((widget) =>
-      `${widget.definition.label}: ${widget.value === null ? 'N/A' : String(widget.value)} ${widget.definition.unit}`,
+    `${messages.asOf}: ${normalized.asOf}`,
+    `${messages.timeZone}: ${normalized.timeZone}`,
+    ...normalized.widgets.map((widget) => {
+      const value = widget.value === null ? messages.unavailable : String(widget.value)
+      const unit = messages.unitLabels[widget.definition.unit]
+      return `${messages.metricLabels[widget.metric]}: ${value} ${unit}`
+    }),
+    `${messages.forecastP85}: ${normalized.forecast.p85 ?? messages.unavailable}`,
+    `${messages.risk}: ${messages.riskLabels[normalized.forecast.risk]}`,
+  ]
+  const pageLines = Array.from(
+    { length: Math.ceil(lines.length / PDF_LINES_PER_PAGE) },
+    (_, index) => lines.slice(
+      index * PDF_LINES_PER_PAGE,
+      (index + 1) * PDF_LINES_PER_PAGE,
     ),
-    `Forecast P85: ${normalized.forecast.p85 ?? 'N/A'}`,
-    `Risk: ${normalized.forecast.risk}`,
-  ]
-  const content = [
-    'BT',
-    '/F1 12 Tf',
-    '50 780 Td',
-    ...lines.flatMap((line, index) => [
-      ...(index === 0 ? [] : ['0 -18 Td']),
-      `(${escapePdfText(toPdfAscii(line))}) Tj`,
-    ]),
-    'ET',
-  ].join('\n')
-  const objects = [
-    '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
-    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
-    `<< /Length ${Buffer.byteLength(content, 'latin1')} >>\nstream\n${content}\nendstream`,
-  ]
+  )
+  const objects = ['', '']
+  let fontObjectId: number
+  if (exportLocale === 'ja') {
+    const fontBytes = analyticsPdfFont.bytes.toString('latin1')
+    const fontFileObjectId = objects.push(
+      `<< /Length ${analyticsPdfFont.bytes.length} ` +
+      `/Length1 ${analyticsPdfFont.bytes.length} >>\n` +
+      `stream\n${fontBytes}\nendstream`,
+    )
+    const fontDescriptorObjectId = objects.push(
+      `<< /Type /FontDescriptor /FontName /${PDF_JAPANESE_FONT_NAME} ` +
+      '/Flags 32 /FontBBox [-44 -279 984 880] /ItalicAngle 0 ' +
+      '/Ascent 880 /Descent -120 /CapHeight 733 /StemV 80 ' +
+      `/FontFile2 ${fontFileObjectId} 0 R >>`,
+    )
+    const descendantFontObjectId = objects.push(
+      `<< /Type /Font /Subtype /CIDFontType2 /BaseFont /${PDF_JAPANESE_FONT_NAME} ` +
+      '/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> ' +
+      `/FontDescriptor ${fontDescriptorObjectId} 0 R /CIDToGIDMap /Identity ` +
+      `/DW 1000 /W [1 [${analyticsPdfFont.asciiWidths.join(' ')}]] >>`,
+    )
+    const toUnicode = createAnalyticsPdfToUnicodeCMap()
+    const toUnicodeObjectId = objects.push(
+      `<< /Length ${Buffer.byteLength(toUnicode, 'latin1')} >>\n` +
+      `stream\n${toUnicode}\nendstream`,
+    )
+    fontObjectId = objects.push(
+      `<< /Type /Font /Subtype /Type0 /BaseFont /${PDF_JAPANESE_FONT_NAME} ` +
+      `/Encoding /Identity-H /DescendantFonts [${descendantFontObjectId} 0 R] ` +
+      `/ToUnicode ${toUnicodeObjectId} 0 R >>`,
+    )
+  } else {
+    fontObjectId = objects.push(
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    )
+  }
+  const pageObjectIds: number[] = []
+  for (const page of pageLines) {
+    const content = createPdfPageContent(page, exportLocale)
+    const contentObjectId = objects.push(
+      `<< /Length ${Buffer.byteLength(content, 'latin1')} >>\nstream\n${content}\nendstream`,
+    )
+    const pageObjectId = objects.push(
+      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ' +
+      `/Resources << /Font << /F1 ${fontObjectId} 0 R >> >> ` +
+      `/Contents ${contentObjectId} 0 R >>`,
+    )
+    pageObjectIds.push(pageObjectId)
+  }
+  const documentLanguage = exportLocale === 'ja' ? 'ja-JP' : 'en-US'
+  objects[0] = `<< /Type /Catalog /Pages 2 0 R /Lang (${documentLanguage}) >>`
+  objects[1] = '<< /Type /Pages ' +
+    `/Kids [${pageObjectIds.map((id) => `${id} 0 R`).join(' ')}] ` +
+    `/Count ${pageObjectIds.length} >>`
   let source = '%PDF-1.4\n%\xE2\xE3\xCF\xD3\n'
   const offsets = [0]
   for (const [index, object] of objects.entries()) {
@@ -1019,20 +1237,27 @@ function indexAuthorizedEvents(
 
   for (const event of events) {
     if (event.entityType !== 'work-item' && event.entity.type !== 'work-item') continue
-    const candidates = new Set<string>()
+    const canonicalCandidates = new Set<string>()
+    const rawCandidates = new Set<string>()
     for (const eventEntityId of [event.entityId, event.entity.id]) {
       const canonical = byCanonicalEntityId.get(eventEntityId)
-      if (canonical) candidates.add(canonical)
+      if (canonical) canonicalCandidates.add(canonical)
       const raw = byRawId.get(eventEntityId)
-      if (raw?.length === 1) candidates.add(raw[0]!)
+      if (raw?.length === 1) rawCandidates.add(raw[0]!)
     }
     const metadataTeamId = readOptionalAuditString(event.metadata?.teamId)
     const metadataIssueId = readOptionalAuditString(
       event.metadata?.issueId ?? event.metadata?.workItemId,
     )
+    const candidates = new Set(canonicalCandidates)
     if (metadataTeamId && metadataIssueId) {
-      const key = workItemKey(metadataTeamId, metadataIssueId)
-      if (result.has(key)) candidates.add(key)
+      const metadataKey = workItemKey(metadataTeamId, metadataIssueId)
+      if (result.has(metadataKey)) candidates.add(metadataKey)
+      for (const rawCandidate of rawCandidates) {
+        if (rawCandidate === metadataKey) candidates.add(rawCandidate)
+      }
+    } else {
+      for (const rawCandidate of rawCandidates) candidates.add(rawCandidate)
     }
     if (candidates.size > 1) {
       throw invalid(
@@ -1362,6 +1587,7 @@ function createWidgetResult(
   workItems: readonly CanonicalWorkItem[],
   eventsByWorkItem: ReadonlyMap<string, readonly AuditEventV1[]>,
   normalized: NormalizedAnalyticsQuery,
+  authorizedProjectIds: ReadonlySet<string>,
 ): AnalyticsWidgetResult {
   const total = calculateMetric(
     widget.metric,
@@ -1377,11 +1603,24 @@ function createWidgetResult(
     widget.groupBy.dimension === 'week' ||
     widget.groupBy.dimension === 'month'
   const series = widget.type === 'chart' && calendarGroup
-    ? createMetricSeries(widget, workItems, eventsByWorkItem, normalized)
+    ? createMetricSeries(
+        widget,
+        workItems,
+        eventsByWorkItem,
+        normalized,
+        authorizedProjectIds,
+      )
     : []
   const groups = widget.groupBy === undefined
     ? []
-    : createMetricGroups(widget, facts, workItems, eventsByWorkItem, normalized)
+    : createMetricGroups(
+        widget,
+        facts,
+        workItems,
+        eventsByWorkItem,
+        normalized,
+        authorizedProjectIds,
+      )
   const evidence = dedupeEvidence(total.evidence).sort(compareEvidence)
   const rows: AnalyticsTableRow[] = widget.type === 'table'
     ? evidence.map((item) => ({
@@ -1414,6 +1653,7 @@ function createMetricSeries(
   workItems: readonly CanonicalWorkItem[],
   eventsByWorkItem: ReadonlyMap<string, readonly AuditEventV1[]>,
   normalized: NormalizedAnalyticsQuery,
+  authorizedProjectIds: ReadonlySet<string>,
 ) {
   const granularity = widget.groupBy?.dimension === 'week' ||
       widget.groupBy?.dimension === 'month'
@@ -1437,8 +1677,18 @@ function createMetricSeries(
       asOf: evaluationAt,
     }
     const bucketFacts = widget.metric === 'wip' || widget.metric === 'overdue'
-      ? createFilteredFacts(workItems, eventsByWorkItem, bucketNormalized)
-      : createFilteredFacts(workItems, eventsByWorkItem, normalized)
+      ? createFilteredFacts(
+          workItems,
+          eventsByWorkItem,
+          bucketNormalized,
+          authorizedProjectIds,
+        )
+      : createFilteredFacts(
+          workItems,
+          eventsByWorkItem,
+          normalized,
+          authorizedProjectIds,
+        )
     const computation = calculateMetric(
       widget.metric,
       bucketFacts,
@@ -1463,6 +1713,7 @@ function createMetricGroups(
   workItems: readonly CanonicalWorkItem[],
   eventsByWorkItem: ReadonlyMap<string, readonly AuditEventV1[]>,
   normalized: NormalizedAnalyticsQuery,
+  authorizedProjectIds: ReadonlySet<string>,
 ) {
   const groupBy = widget.groupBy!
   if (
@@ -1487,7 +1738,12 @@ function createMetricGroups(
         asOf: evaluationAt,
       }
       const metricFacts = widget.metric === 'wip' || widget.metric === 'overdue'
-        ? createFilteredFacts(workItems, eventsByWorkItem, bucketNormalized)
+        ? createFilteredFacts(
+            workItems,
+            eventsByWorkItem,
+            bucketNormalized,
+            authorizedProjectIds,
+          )
         : facts
       const result = calculateMetric(
         widget.metric,
@@ -2058,11 +2314,109 @@ function normalizeSnapshot(snapshot: AnalyticsSnapshot) {
   return structuredClone(snapshot)
 }
 
-function escapeCsvValue(value: string | number) {
-  let text = String(value)
+function escapeCsvValue(value: string | number | boolean | null | undefined) {
+  let text = value === null || value === undefined ? '' : String(value)
   if (/^[=+\-@\t\r]/u.test(text)) text = `'${text}`
   if (/[",\r\n]/u.test(text)) text = `"${text.replaceAll('"', '""')}"`
   return text
+}
+
+function createPdfPageContent(
+  lines: readonly string[],
+  locale: AnalyticsExportLocale,
+) {
+  return [
+    'BT',
+    '/F1 12 Tf',
+    '50 760 Td',
+    ...lines.flatMap((line, index) => [
+      ...(index === 0 ? [] : ['0 -18 Td']),
+      `${createPdfTextOperand(line, locale)} Tj`,
+    ]),
+    'ET',
+  ].join('\n')
+}
+
+function createPdfFontSubsetTag(fontBytes: Uint8Array) {
+  const digestPrefix = createHash('sha256')
+    .update(fontBytes)
+    .digest()
+    .readUInt32BE(0)
+  let value = digestPrefix % (26 ** 6)
+  let tag = ''
+  for (let index = 0; index < 6; index += 1) {
+    tag = String.fromCharCode(65 + (value % 26)) + tag
+    value = Math.floor(value / 26)
+  }
+  return tag
+}
+
+function createPdfTextOperand(value: string, locale: AnalyticsExportLocale) {
+  return locale === 'ja'
+    ? `<${toAnalyticsPdfGlyphHex(value)}>`
+    : `(${escapePdfText(toPdfAscii(value))})`
+}
+
+function toAnalyticsPdfGlyphHex(value: string) {
+  return [...value].map((character) => {
+    const codePoint = character.codePointAt(0)!
+    if (codePoint >= 0x20 && codePoint <= 0x7E) {
+      return (codePoint - 0x1F).toString(16).padStart(4, '0')
+    }
+    const japaneseIndex = analyticsPdfFont.japaneseGlyphs.indexOf(character)
+    if (japaneseIndex < 0) {
+      throw invalid(
+        'AnalyticsPdfGlyphMissing',
+        `Analytics PDF font does not contain the required character U+${toPdfHexCode(codePoint)}.`,
+      )
+    }
+    const glyphId = japaneseIndex + 96
+    return glyphId.toString(16).padStart(4, '0')
+  }).join('').toUpperCase()
+}
+
+function createAnalyticsPdfToUnicodeCMap() {
+  const mappings = [
+    ...Array.from({ length: 95 }, (_, index) => ({
+      glyphId: index + 1,
+      unicode: index + 0x20,
+    })),
+    ...[...analyticsPdfFont.japaneseGlyphs].map((character, index) => ({
+      glyphId: index + 96,
+      unicode: character.codePointAt(0)!,
+    })),
+  ]
+  const mappingBlocks: string[] = []
+  for (let offset = 0; offset < mappings.length; offset += 100) {
+    const block = mappings.slice(offset, offset + 100)
+    mappingBlocks.push(
+      `${block.length} beginbfchar\n` +
+      block.map(({ glyphId, unicode }) =>
+        `<${toPdfHexCode(glyphId)}> <${toPdfHexCode(unicode)}>`
+      ).join('\n') +
+      '\nendbfchar',
+    )
+  }
+  return [
+    '/CIDInit /ProcSet findresource begin',
+    '12 dict begin',
+    'begincmap',
+    '/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def',
+    '/CMapName /NotoSansJP-Analytics-UCS def',
+    '/CMapType 2 def',
+    '1 begincodespacerange',
+    '<0000> <FFFF>',
+    'endcodespacerange',
+    ...mappingBlocks,
+    'endcmap',
+    'CMapName currentdict /CMap defineresource pop',
+    'end',
+    'end',
+  ].join('\n')
+}
+
+function toPdfHexCode(value: number) {
+  return value.toString(16).padStart(4, '0').toUpperCase()
 }
 
 function toPdfAscii(value: string) {
@@ -2396,7 +2750,7 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
       return normalized
     } catch (error) {
       if (
-        !isNamedError(error, 'TransactionCanceledException') &&
+        !isConditionalTransactionCancellation(error) &&
         !isNamedError(error, 'ConditionalCheckFailedException')
       ) throw persistenceError(error)
       const current = await this.getSnapshot(normalized.workspaceId, normalized.id)
@@ -2577,7 +2931,7 @@ function createReportDefinition(
   validateVisibilityTeam(visibility, teamId)
   return {
     schemaVersion: ANALYTICS_SCHEMA_VERSION,
-    id: readIdentifier(input.id, 'Analytics report ID'),
+    id: readRouteSafeReportId(input.id),
     workspaceId: readIdentifier(workspaceId, 'Workspace ID'),
     name: readText(input.name, 'Analytics report name', 200),
     ...(input.description === undefined
@@ -3170,6 +3524,16 @@ function readIdentifier(value: unknown, label: string) {
   return value.trim()
 }
 
+function readRouteSafeReportId(value: unknown) {
+  if (typeof value !== 'string' || !ROUTE_SAFE_REPORT_ID_PATTERN.test(value)) {
+    throw invalid(
+      'AnalyticsReportIdInvalid',
+      'Analytics report ID must be a route-safe identifier of at most 128 characters.',
+    )
+  }
+  return value
+}
+
 function readText(value: unknown, label: string, maximumLength: number) {
   if (typeof value !== 'string' || value.trim().length === 0 || value.length > maximumLength) {
     throw invalid('AnalyticsTextInvalid', `${label} is invalid.`)
@@ -3466,4 +3830,20 @@ function persistenceError(error: unknown) {
 
 function isNamedError(error: unknown, name: string) {
   return isRecord(error) && error.name === name
+}
+
+function isConditionalTransactionCancellation(error: unknown) {
+  if (!isRecord(error) || error.name !== 'TransactionCanceledException') return false
+  const reasons = error.CancellationReasons
+  if (!Array.isArray(reasons)) return false
+  let hasConditionalFailure = false
+  for (const reason of reasons) {
+    if (!isRecord(reason)) return false
+    if (reason.Code === 'ConditionalCheckFailed') {
+      hasConditionalFailure = true
+      continue
+    }
+    if (reason.Code !== 'None') return false
+  }
+  return hasConditionalFailure
 }

@@ -54,6 +54,7 @@ import {
   queryAnalytics,
   updateAnalyticsReport,
 } from '../analytics/api'
+import { shouldClearAnalyticsAuthSession } from '../analytics/authError'
 import {
   createDefaultAnalyticsWidgets,
   getDefaultAnalyticsTimeZone,
@@ -104,6 +105,7 @@ export function ReportsPage() {
   const [evidence, setEvidence] = useState<AnalyticsEvidenceResponse>()
   const [evidenceInput, setEvidenceInput] = useState<AnalyticsEvidenceInput>()
   const [isEvidenceLoading, setIsEvidenceLoading] = useState(false)
+  const evidenceRequest = useRef<AbortController | undefined>(undefined)
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   const [mutationErrorMessage, setMutationErrorMessage] = useState<string>()
   const [noticeMessage, setNoticeMessage] = useState<string>()
@@ -118,6 +120,7 @@ export function ReportsPage() {
     data: user,
     error: currentUserError,
     isLoading: isCurrentUserLoading,
+    mutate: mutateCurrentUser,
   } = useSWR(
     currentUserKey,
     ([, token]) => getCurrentUser(token),
@@ -269,6 +272,10 @@ export function ReportsPage() {
     document.title = `${t('analytics.title')} | ${t('app.title')}`
   }, [locale, t])
 
+  useEffect(() => () => {
+    evidenceRequest.current?.abort()
+  }, [])
+
   useEffect(() => {
     if (!session) {
       navigate('/', { replace: true })
@@ -276,7 +283,7 @@ export function ReportsPage() {
   }, [navigate, session])
 
   useEffect(() => {
-    if (currentUserError) {
+    if (shouldClearAnalyticsAuthSession(currentUserError)) {
       clearAuthSession()
       navigate('/', { replace: true })
     }
@@ -316,14 +323,21 @@ export function ReportsPage() {
     setNoticeMessage(undefined)
   }
 
+  const closeEvidence = () => {
+    evidenceRequest.current?.abort()
+    evidenceRequest.current = undefined
+    setEvidence(undefined)
+    setEvidenceInput(undefined)
+    setIsEvidenceLoading(false)
+  }
+
   const refreshQuery = (
     patch: Partial<AnalyticsRouteState>,
     nextWidgets?: AnalyticsWidget[],
     nextWidgetSourceKey = widgetSourceKey,
   ) => {
     resetFeedback()
-    setEvidence(undefined)
-    setEvidenceInput(undefined)
+    closeEvidence()
     setQueryAsOf(new Date().toISOString())
     const restoredWidgets = nextWidgets ??
       selectedSnapshotRecord?.query.widgets
@@ -508,36 +522,75 @@ export function ReportsPage() {
   const openEvidence = async (input: AnalyticsEvidenceInput) => {
     if (!accessToken) return
     resetFeedback()
+    evidenceRequest.current?.abort()
+    const controller = new AbortController()
+    evidenceRequest.current = controller
     setEvidence(undefined)
     setEvidenceInput(input)
     setIsEvidenceLoading(true)
     try {
-      setEvidence(await getAnalyticsEvidence(accessToken, input))
+      const nextEvidence = await getAnalyticsEvidence(
+        accessToken,
+        input,
+        controller.signal,
+      )
+      if (evidenceRequest.current === controller) {
+        setEvidence(nextEvidence)
+      }
     } catch (error) {
-      setMutationErrorMessage(resolveAnalyticsErrorMessage(error, t, 'evidence'))
+      if (
+        evidenceRequest.current === controller &&
+        !isAbortError(error)
+      ) {
+        setMutationErrorMessage(
+          resolveAnalyticsErrorMessage(error, t, 'evidence'),
+        )
+      }
     } finally {
-      setIsEvidenceLoading(false)
+      if (evidenceRequest.current === controller) {
+        evidenceRequest.current = undefined
+        setIsEvidenceLoading(false)
+      }
     }
   }
 
   const loadMoreEvidence = async () => {
     if (!accessToken || !evidenceInput || !evidence?.nextCursor) return
+    evidenceRequest.current?.abort()
+    const controller = new AbortController()
+    evidenceRequest.current = controller
     setIsEvidenceLoading(true)
     const nextInput = {
       ...evidenceInput,
       cursor: evidence.nextCursor,
     }
     try {
-      const nextPage = await getAnalyticsEvidence(accessToken, nextInput)
-      setEvidence({
-        items: [...evidence.items, ...nextPage.items],
-        nextCursor: nextPage.nextCursor,
-      })
-      setEvidenceInput(nextInput)
+      const nextPage = await getAnalyticsEvidence(
+        accessToken,
+        nextInput,
+        controller.signal,
+      )
+      if (evidenceRequest.current === controller) {
+        setEvidence({
+          items: [...evidence.items, ...nextPage.items],
+          nextCursor: nextPage.nextCursor,
+        })
+        setEvidenceInput(nextInput)
+      }
     } catch (error) {
-      setMutationErrorMessage(resolveAnalyticsErrorMessage(error, t, 'evidence'))
+      if (
+        evidenceRequest.current === controller &&
+        !isAbortError(error)
+      ) {
+        setMutationErrorMessage(
+          resolveAnalyticsErrorMessage(error, t, 'evidence'),
+        )
+      }
     } finally {
-      setIsEvidenceLoading(false)
+      if (evidenceRequest.current === controller) {
+        evidenceRequest.current = undefined
+        setIsEvidenceLoading(false)
+      }
     }
   }
 
@@ -654,10 +707,7 @@ export function ReportsPage() {
             }
             commitRouteState({ ...routeState, builder })
           }}
-          onCloseEvidence={() => {
-            setEvidence(undefined)
-            setEvidenceInput(undefined)
-          }}
+          onCloseEvidence={closeEvidence}
           onCreateBlank={() => {
             setHasStartedAdHoc(true)
             refreshQuery({
@@ -684,6 +734,7 @@ export function ReportsPage() {
           onRetry={() => {
             resetFeedback()
             void Promise.all([
+              mutateCurrentUser(),
               mutateProjectDirectory(),
               mutateReports(),
               mutateSnapshots(),
@@ -716,7 +767,7 @@ export function ReportsPage() {
               forecastBaseline: undefined,
               reportId: undefined,
               timezone: initialTimeZone,
-            }, createDefaultAnalyticsWidgets(), 'ad-hoc')
+            }, createDefaultAnalyticsWidgets(locale), 'ad-hoc')
           }}
           onSelectSnapshot={(snapshotId) =>
             commitRouteState({ ...routeState, snapshotId })}
@@ -730,7 +781,7 @@ export function ReportsPage() {
               forecastBaseline: undefined,
               reportId: undefined,
               timezone: initialTimeZone,
-            }, createDefaultAnalyticsWidgets(), 'ad-hoc')
+            }, createDefaultAnalyticsWidgets(locale), 'ad-hoc')
           }}
           onTimeZoneChange={(timezone) =>
             refreshQuery({ timezone })}

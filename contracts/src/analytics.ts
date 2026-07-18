@@ -164,7 +164,7 @@ export type AnalyticsReportListResponse = {
 
 /** Analytics report 作成 API の入力です。 */
 export type CreateAnalyticsReportInput = {
-  /** Workspace 内で一意な report ID です。 */
+  /** Workspace 内で一意な route-safe ID です。`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$` に従います。 */
   id: string
   /** Report の表示名です。 */
   name: string
@@ -409,6 +409,9 @@ export type AnalyticsEvidenceInput = {
   cursor?: string
 }
 
+/** Analytics export が label と header に利用する対応 locale です。 */
+export type AnalyticsExportLocale = 'en' | 'ja'
+
 /** Analytics export API の入力です。 */
 export type AnalyticsExportInput = {
   /** 保存済み snapshot を出力する場合の ID です。 */
@@ -419,6 +422,9 @@ export type AnalyticsExportInput = {
   query?: AnalyticsQueryInput
   /** Artifact の形式です。 */
   format: 'csv' | 'pdf'
-  /** Export label に利用する locale です。 */
+  /**
+   * Export header、metric、unit、risk label に利用する locale です。
+   * `ja` / `ja-*` は日本語、`en` / `en-*` は英語へ正規化し、省略時と未対応値は英語へfallbackします。
+   */
   locale?: string
 }

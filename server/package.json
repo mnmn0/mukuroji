@@ -19,6 +19,7 @@
     "hono": "^4.12.21"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "pdfjs-dist": "^6.1.200"
   }
 }

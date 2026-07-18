@@ -338,8 +338,11 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
         ANALYTICS_SCHEDULE_INDEX_NAME: 'ScheduleDueIndex',
         ANALYTICS_TABLE_NAME: { Ref: analyticsTableLogicalId },
         AUDIT_EVENTS_TABLE_NAME: { Ref: auditTableLogicalId },
+        COGNITO_CLIENT_ID: { Ref: 'CognitoUserPoolClientId' },
+        COGNITO_USER_POOL_ID: { Ref: 'CognitoUserPoolId' },
         MUKUROJI_PROJECT_DIRECTORY_TABLE: { Ref: projectDirectoryTableLogicalId },
         MUKUROJI_WORK_ITEMS_TABLE: { Ref: workItemsTableLogicalId },
+        SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
         WORKSPACE_ACCESS_TABLE_NAME: { Ref: workspaceAccessTableLogicalId },
       }),
     },
@@ -357,6 +360,14 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
     Namespace: 'AWS/SQS',
     Threshold: 1,
   });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects failures while Lambda delivers analytics schedule failures to the DLQ.',
+    MetricName: 'DestinationDeliveryFailures',
+    Namespace: 'AWS/Lambda',
+    Threshold: 1,
+    TreatMissingData: 'notBreaching',
+  });
   template.hasOutput('AnalyticsScheduleDlqUrl', {});
 
   const schedulePolicies = Object.entries(resources)
@@ -372,6 +383,8 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
   expect(serializedSchedulePolicies).toContain(projectDirectoryTableLogicalId);
   expect(serializedSchedulePolicies).toContain(workItemsTableLogicalId);
   expect(serializedSchedulePolicies).toContain(workspaceAccessTableLogicalId);
+  expect(serializedSchedulePolicies).toContain('CognitoUserPoolId');
+  expect(serializedSchedulePolicies).toContain('cognito-idp:AdminListGroupsForUser');
   expect(serializedSchedulePolicies).toContain('dynamodb:TransactWriteItems');
 
   const scheduleStatements = schedulePolicies.flatMap((policy) => {

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import {
   DeleteCommand,
   GetCommand,
@@ -25,6 +26,7 @@ import {
   createAnalyticsPermissionScopeHash,
   createAnalyticsPdf,
   createAnalyticsSnapshot,
+  normalizeAnalyticsExportLocale,
   queryAnalyticsEvidence,
 } from './analytics'
 import {
@@ -32,6 +34,7 @@ import {
   type AuditEventV1,
   type AuditFieldChange,
 } from './audit'
+import { analyticsPdfFont } from './analytics-pdf-font'
 
 const period = {
   from: '2026-01-01T00:00:00.000Z',
@@ -163,6 +166,7 @@ function createDynamoDocumentClient() {
   const rows = new Map<string, Record<string, unknown>>()
   const commands: unknown[] = []
   let queryLastEvaluatedKey: Record<string, unknown> | undefined
+  let nextTransactionError: unknown
   const keyOf = (key: Record<string, unknown>) =>
     `${String(key.workspaceId)}\u0000${String(key.recordKey)}`
   const send = async (command: unknown) => {
@@ -193,6 +197,11 @@ function createDynamoDocumentClient() {
       return {}
     }
     if (command instanceof TransactWriteCommand) {
+      if (nextTransactionError !== undefined) {
+        const error = nextTransactionError
+        nextTransactionError = undefined
+        throw error
+      }
       const writes = (command.input.TransactItems ?? []).flatMap((item) =>
         item.Put === undefined ? [] : [item.Put]
       )
@@ -204,6 +213,10 @@ function createDynamoDocumentClient() {
         ) {
           throw Object.assign(new Error('transaction canceled'), {
             name: 'TransactionCanceledException',
+            CancellationReasons: [
+              { Code: 'ConditionalCheckFailed' },
+              { Code: 'None' },
+            ],
           })
         }
       }
@@ -266,6 +279,9 @@ function createDynamoDocumentClient() {
     commands,
     setQueryLastEvaluatedKey(value: Record<string, unknown>) {
       queryLastEvaluatedKey = value
+    },
+    setNextTransactionError(error: unknown) {
+      nextTransactionError = error
     },
   }
 }
@@ -403,6 +419,18 @@ describe('Analytics metric engine', () => {
       events: [identityConflict],
       query,
     })).toThrow(AnalyticsError)
+
+    const legacyRawIdForInaccessibleItem = {
+      ...completion,
+      entityId: item.id,
+      entity: { type: 'work-item', id: item.id },
+      metadata: { teamId: 'inaccessible-team', issueId: item.id },
+    }
+    expect(createTestAnalyticsSnapshot({
+      workItems: [item],
+      events: [legacyRawIdForInaccessibleItem],
+      query,
+    }).widgets[0]?.value).toBe(0)
   })
 
   test('excludes redacted metric transitions instead of interpreting redaction markers', () => {
@@ -937,6 +965,54 @@ describe('Analytics metric engine', () => {
     expect(visible.widgets[0]?.groups.map((group) => group.key)).toEqual(['project-b'])
   })
 
+  test('reapplies the Project allowlist to historical chart and calendar-group buckets', () => {
+    const item = createWorkItem('bucket-project-scope', {
+      assignedProjectId: 'project-a',
+      statusCategory: 'started',
+      workflowStatusId: 'status-started',
+    })
+    const moved = createAuditEvent(
+      'bucket-project-move',
+      item,
+      '2026-01-06T00:00:00.000Z',
+      [{
+        field: 'assignedProjectId',
+        before: 'project-b',
+        after: 'project-a',
+      }],
+    )
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [item],
+      events: [moved],
+      query: createQuery([{
+        id: 'historical-wip-chart',
+        title: 'Historical WIP',
+        type: 'chart',
+        metric: 'wip',
+        groupBy: { dimension: 'day' },
+      }]),
+    }, new Set(['project-a']))
+
+    expect(snapshot.widgets[0]?.series.map((point) => point.value)).toEqual([
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      1,
+    ])
+    expect(snapshot.widgets[0]?.groups.map((group) => group.value)).toEqual([
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      1,
+    ])
+  })
+
   test('binds permission scope hashes to the complete current Project allowlist', () => {
     const item = createWorkItem('permission-scope', {
       assignedProjectId: 'project-a',
@@ -970,8 +1046,11 @@ describe('Analytics metric engine', () => {
 })
 
 describe('Analytics export', () => {
-  test('creates formula-safe CSV and a structurally complete PDF', () => {
-    const item = createWorkItem('export', { assignedProjectId: '=cmd' })
+  test('exports fixed table columns formula-safely and localizes supported labels', () => {
+    const item = createWorkItem('@export', {
+      assignedProjectId: '=cmd',
+      title: '+SUM(1,1)',
+    })
     const completion = createAuditEvent(
       'export-completed',
       item,
@@ -990,15 +1069,129 @@ describe('Analytics export', () => {
       }]),
     })
     const csv = createAnalyticsCsv(snapshot)
-    const pdf = Buffer.from(createAnalyticsPdf(snapshot)).toString('latin1')
+    const japaneseCsv = createAnalyticsCsv(snapshot, 'ja-JP')
+    const fallbackCsv = createAnalyticsCsv(snapshot, 'fr-FR')
 
     expect(csv).toContain("'=cmd")
+    expect(csv).toContain("'+SUM(1,1)")
+    expect(csv).toContain("'@export")
+    expect(csv).toContain('Table row')
     expect(csv.split('\r\n')[0]).toBe(
-      'widgetId,metric,value,sampleSize,dimension,dimensionValue,periodFrom,periodTo',
+      'Widget ID,Metric key,Metric,Value,Sample size,Record type,Dimension value,' +
+      'Period from,Period to,Row ID,Row label,Team ID,Work Item ID,Project ID,Occurred at',
     )
+    expect(japaneseCsv.split('\r\n')[0]).toBe(
+      'ウィジェットID,指標キー,指標,値,サンプル数,レコード種別,ディメンション値,' +
+      '期間開始,期間終了,行ID,行ラベル,チームID,作業項目ID,プロジェクトID,発生日時',
+    )
+    expect(japaneseCsv).toContain('スループット')
+    expect(japaneseCsv).toContain('テーブル行')
+    expect(fallbackCsv.split('\r\n')[0]).toBe(csv.split('\r\n')[0])
+    expect(normalizeAnalyticsExportLocale('JA_jp')).toBe('ja')
+    expect(normalizeAnalyticsExportLocale('en-US')).toBe('en')
+    expect(normalizeAnalyticsExportLocale('unsupported')).toBe('en')
+  })
+
+  test('creates localized, structurally complete PDFs with automatic pagination', async () => {
+    const paginatedSnapshot = createTestAnalyticsSnapshot({
+      workItems: [],
+      events: [],
+      query: createQuery(Array.from({ length: 50 }, (_, index) => ({
+        id: `throughput-${index}`,
+        title: `Throughput ${index}`,
+        type: 'metric',
+        metric: 'throughput',
+      }))),
+    })
+    const localizedSnapshot = createTestAnalyticsSnapshot({
+      workItems: [],
+      events: [],
+      query: createQuery(([
+        'throughput',
+        'cycle-time',
+        'lead-time',
+        'wip',
+        'overdue',
+        'scope-change',
+        'velocity',
+        'sla',
+      ] as const).map((metric) => ({
+        id: metric,
+        title: metric,
+        type: 'metric',
+        metric,
+      }))),
+    })
+    const pdf = Buffer.from(createAnalyticsPdf(paginatedSnapshot)).toString('latin1')
+    const japanesePdfBytes = createAnalyticsPdf(localizedSnapshot, 'ja')
+    const japanesePdf = Buffer.from(japanesePdfBytes).toString('latin1')
+
     expect(pdf.startsWith('%PDF-1.4')).toBeTrue()
+    expect(pdf).toContain('/Lang (en-US)')
+    expect(pdf).toContain('/Count 2')
+    expect(pdf.match(/\/Type \/Page /gu)).toHaveLength(2)
     expect(pdf).toContain('\nxref\n')
     expect(pdf.endsWith('%%EOF\n')).toBeTrue()
+    expect(japanesePdf).toContain('/Lang (ja-JP)')
+    expect(japanesePdf).toContain('/Encoding /Identity-H')
+    expect(japanesePdf).toContain('/FontFile2 ')
+    expect(japanesePdf).toContain('/CIDToGIDMap /Identity')
+    expect(japanesePdf).toContain('/ToUnicode ')
+    expect(japanesePdf).toContain('<007C> <57FA>')
+    expect(japanesePdf).toContain('/FontName /JYQTAR+NotoSansJP-Thin')
+    expect(japanesePdf.match(/\/BaseFont \/JYQTAR\+NotoSansJP-Thin/gu)).toHaveLength(2)
+
+    const japaneseLoadingTask = getDocument({
+      data: japanesePdfBytes,
+    })
+    const japaneseDocument = await japaneseLoadingTask.promise
+    const extractedPages = await Promise.all(
+      Array.from({ length: japaneseDocument.numPages }, async (_, index) => {
+        const page = await japaneseDocument.getPage(index + 1)
+        const content = await page.getTextContent()
+        return content.items
+          .flatMap((item) => 'str' in item ? [item.str] : [])
+          .join(' ')
+      }),
+    )
+    const extractedText = extractedPages.join(' ')
+    const expectedRenderedLabels = [
+      '基準日時',
+      'タイムゾーン',
+      'スループット',
+      'サイクルタイム',
+      'リードタイム',
+      '進行中',
+      '期限超過',
+      'スコープ変更',
+      'ベロシティ',
+      'SLA達成率',
+      '件',
+      '時間',
+      '件/週',
+      '予測 P85',
+      'リスク',
+      '不明',
+      '利用不可',
+    ]
+    for (const expectedLabel of expectedRenderedLabels) {
+      expect(extractedText).toContain(expectedLabel)
+    }
+    const everyJapaneseLabel = [
+      ...expectedRenderedLabels,
+      '低',
+      '中',
+      '高',
+    ]
+    const requiredJapaneseCharacters = new Set(
+      everyJapaneseLabel
+        .flatMap((label) => [...label])
+        .filter((character) => character.codePointAt(0)! > 0x7E),
+    )
+    for (const character of requiredJapaneseCharacters) {
+      expect(analyticsPdfFont.japaneseGlyphs).toContain(character)
+    }
+    await japaneseLoadingTask.destroy()
   })
 })
 
@@ -1042,6 +1235,30 @@ describe('Analytics scheduling', () => {
 })
 
 describe('Analytics repository', () => {
+  test('requires route-safe report IDs at the repository boundary', async () => {
+    const repository = new InMemoryAnalyticsRepository()
+    for (const id of [
+      '/report',
+      'report/path',
+      'report path',
+      '..',
+      'report%2Fpath',
+      `r${'x'.repeat(128)}`,
+    ]) {
+      await expect(repository.createReport(
+        'workspace-1',
+        'member-1',
+        createReportInput({ id }),
+      )).rejects.toMatchObject({ code: 'AnalyticsReportIdInvalid' })
+    }
+    const created = await repository.createReport(
+      'workspace-1',
+      'member-1',
+      createReportInput({ id: 'Report_1-safe' }),
+    )
+    expect(created.id).toBe('Report_1-safe')
+  })
+
   test('enforces report revisions and immutable snapshot payloads', async () => {
     const repository = new InMemoryAnalyticsRepository(
       () => new Date('2026-01-08T00:00:00.000Z'),
@@ -1270,6 +1487,46 @@ describe('Analytics repository', () => {
     })
     expect(receiptRetry.created).toBeFalse()
     expect(receiptRetry.receipt.createdAt).toBe(receipt.createdAt)
+  })
+
+  test('does not misclassify operational transaction cancellations as snapshot conflicts', async () => {
+    const fake = createDynamoDocumentClient()
+    const repository = new DynamoDbAnalyticsRepository('analytics-table', fake.client)
+    const query = createQuery([])
+    const snapshot = createTestAnalyticsSnapshot({ workItems: [], events: [], query })
+    const record: AnalyticsSnapshotRecord = {
+      id: 'operational-cancellation',
+      workspaceId: 'workspace-1',
+      createdByMemberKey: 'member-1',
+      createdAt: '2026-01-08T09:00:00.000Z',
+      query,
+      snapshot,
+    }
+    for (const error of [
+      Object.assign(new Error('transaction conflict'), {
+        name: 'TransactionCanceledException',
+        CancellationReasons: [{ Code: 'TransactionConflict' }],
+      }),
+      Object.assign(new Error('mixed cancellation reasons'), {
+        name: 'TransactionCanceledException',
+        CancellationReasons: [
+          { Code: 'ConditionalCheckFailed' },
+          { Code: 'TransactionConflict' },
+        ],
+      }),
+      Object.assign(new Error('malformed cancellation reasons'), {
+        name: 'TransactionCanceledException',
+        CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, {}],
+      }),
+      Object.assign(new Error('missing cancellation reasons'), {
+        name: 'TransactionCanceledException',
+      }),
+    ]) {
+      fake.setNextTransactionError(error)
+      await expect(repository.putSnapshot(record)).rejects.toMatchObject({
+        code: 'AnalyticsPersistenceUnavailable',
+      })
+    }
   })
 
   test('enforces Workspace-unique snapshot IDs consistently across repositories', async () => {

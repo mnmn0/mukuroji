@@ -25,6 +25,8 @@ import {
   DynamoDbAnalyticsRepository,
 } from './analytics'
 import {
+  AwsCognitoClient,
+  CognitoServiceError,
   DynamoDbProjectDirectoryClient,
   DynamoDbTeamIssuesClient,
 } from './index'
@@ -35,11 +37,18 @@ import {
 
 const ANALYTICS_SCHEDULE_PAGE_SIZE = 100
 const ANALYTICS_SCHEDULE_MAX_PAGES = 100
+const ANALYTICS_SCHEDULE_WORKER_COUNT = 4
+const ANALYTICS_SCHEDULE_READ_BARRIER_MAX_ATTEMPTS = 3
 const ANALYTICS_WORK_ITEM_PARTITION_COUNT_LIMIT = 100
 const ANALYTICS_WORK_ITEM_LIMIT = 10_000
 const ANALYTICS_WORK_ITEM_PARTITION_LIMIT = 10_000
 const ANALYTICS_AUDIT_PAGE_SIZE = 100
 const ANALYTICS_AUDIT_MAX_PAGES = 100
+const ANALYTICS_AUDIT_PAGE_QUERY_LIMIT = 500
+const ANALYTICS_AUDIT_EVENT_LIMIT =
+  ANALYTICS_AUDIT_PAGE_SIZE * ANALYTICS_AUDIT_MAX_PAGES
+const ANALYTICS_AUDIT_QUERY_CONCURRENCY = 4
+const ANALYTICS_AUDIT_IDENTITY_QUERY_LIMIT = 500
 
 /** EventBridge schedule event のうち Analytics worker が利用する最小表現です。 */
 export type AnalyticsScheduleEvent = {
@@ -136,6 +145,12 @@ export type AnalyticsScheduleWorkspaceAccessClient = {
   ): Promise<WorkspaceMember | undefined>
 }
 
+/** Recipient の current Cognito system administrator membership を読む client です。 */
+export type AnalyticsScheduleSystemAdminClient = {
+  /** 現在いずれかの system administrator group に所属するかを返します。 */
+  isSystemAdmin(userId: string): Promise<boolean>
+}
+
 /** Analytics 用 immutable audit history を読む client です。 */
 export type AnalyticsScheduleAuditClient = {
   /** Workspace timeline を cursor 付きで返します。 */
@@ -150,6 +165,8 @@ export type AnalyticsScheduleRendererDependencies = {
   workItems: AnalyticsScheduleWorkItemsClient
   /** Workspace membership の current state です。 */
   workspaceAccess: AnalyticsScheduleWorkspaceAccessClient
+  /** Cognito system administrator group の current state です。 */
+  systemAdmin: AnalyticsScheduleSystemAdminClient
   /** Immutable audit history です。 */
   auditEvents: AnalyticsScheduleAuditClient
 }
@@ -244,10 +261,26 @@ const analyticsRepository = new DynamoDbAnalyticsRepository(
       process.env.ANALYTICS_SCHEDULE_INDEX_NAME ?? 'ScheduleDueIndex',
   },
 )
+const cognito = new AwsCognitoClient()
 const analyticsRenderer = createAnalyticsScheduleRenderer({
   directory: new DynamoDbProjectDirectoryClient(),
   workItems: new DynamoDbTeamIssuesClient(),
   workspaceAccess: new DynamoDbWorkspaceAccessClient(),
+  systemAdmin: {
+    async isSystemAdmin(userId) {
+      try {
+        return await cognito.isSystemAdmin(userId)
+      } catch (error) {
+        if (
+          error instanceof CognitoServiceError &&
+          error.code === 'UserNotFoundException'
+        ) {
+          return false
+        }
+        throw error
+      }
+    },
+  },
   auditEvents: new DynamoDbAuditEventsClient(
     documentClient,
     process.env.AUDIT_EVENTS_TABLE_NAME ?? 'mukuroji-audit-events',
@@ -328,10 +361,10 @@ export async function processAnalyticsSchedule(
     )
     pageCount += 1
     aggregate.dueReports += page.reports.length
-    const results = await Promise.allSettled(
-      page.reports.map(async (report) =>
-        await processDueAnalyticsReport(report, now, dependencies)
-      ),
+    const results = await processAnalyticsScheduleReportBatch(
+      page.reports,
+      now,
+      dependencies,
     )
     for (const result of results) {
       if (result.status === 'rejected') {
@@ -353,6 +386,38 @@ export async function processAnalyticsSchedule(
     )
   }
   return aggregate
+}
+
+/** Due report page を固定数 worker で処理し、各 report の成否をすべて保持します。 */
+async function processAnalyticsScheduleReportBatch(
+  reports: readonly AnalyticsReport[],
+  now: Date,
+  dependencies: AnalyticsScheduleDependencies,
+): Promise<PromiseSettledResult<AnalyticsScheduledReportResult>[]> {
+  const results: PromiseSettledResult<AnalyticsScheduledReportResult>[] = []
+  let nextReportIndex = 0
+  const processNextReport = async () => {
+    while (nextReportIndex < reports.length) {
+      const reportIndex = nextReportIndex
+      nextReportIndex += 1
+      const report = reports[reportIndex]
+      if (!report) continue
+
+      try {
+        results[reportIndex] = {
+          status: 'fulfilled',
+          value: await processDueAnalyticsReport(report, now, dependencies),
+        }
+      } catch (reason) {
+        results[reportIndex] = { status: 'rejected', reason }
+      }
+    }
+  }
+  const workerCount = Math.min(ANALYTICS_SCHEDULE_WORKER_COUNT, reports.length)
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => await processNextReport()),
+  )
+  return results
 }
 
 /** 一つの current report occurrence を recipient ごとに配信し、CAS で次回へ進めます。 */
@@ -497,54 +562,35 @@ export function createAnalyticsScheduleRenderer(
   dependencies: AnalyticsScheduleRendererDependencies,
 ): AnalyticsScheduleRenderer {
   return async ({ report, recipientMemberKey, scheduledFor, historyReadAt }) => {
-    const member = await dependencies.workspaceAccess.getActiveMember(
-      report.workspaceId,
-      recipientMemberKey,
-    )
-    if (!member) return undefined
-
-    const [directory, projectAccesses] = await Promise.all([
-      dependencies.directory.getProjectDirectory(report.workspaceId, 'ja', true),
-      dependencies.directory.getProjectAccessList(report.workspaceId, recipientMemberKey),
-    ])
-    const activeProjectIds = new Set(directory.teams.flatMap((team) =>
-      team.projects.map((project) => project.id)
-    ))
-    const readableProjectIds = new Set(
-      projectAccesses
-        .filter((access) =>
-          activeProjectIds.has(access.projectId) &&
-          access.role !== undefined
-        )
-        .map((access) => access.projectId),
-    )
-    const readableTeamIds = new Set(
-      directory.teams
-        .filter((team) => team.projects.some((project) =>
-          readableProjectIds.has(project.id)
-        ))
-        .map((team) => team.id),
-    )
-    if (!canRecipientReadAnalyticsReport(
+    const initialAuthorization = await readAnalyticsScheduleAuthorization(
       report,
       recipientMemberKey,
-      readableTeamIds,
-    )) {
-      return undefined
-    }
+      dependencies,
+    )
+    if (!initialAuthorization) return undefined
 
-    const workItems = await readRecipientWorkItems(
+    const authorized = await readRecipientAuthorizedData(
       report,
-      directory,
-      readableProjectIds,
+      initialAuthorization.directory,
+      initialAuthorization.readableProjectIds,
       dependencies.workItems,
-    )
-    const events = await readRecipientAuditEvents(
-      report.workspaceId,
       historyReadAt,
-      workItems,
       dependencies.auditEvents,
     )
+    const currentAuthorization = await readAnalyticsScheduleAuthorization(
+      report,
+      recipientMemberKey,
+      dependencies,
+    )
+    if (!currentAuthorization) return undefined
+    if (
+      currentAuthorization.fingerprint !==
+        initialAuthorization.fingerprint
+    ) {
+      throw createAnalyticsScheduleReadBarrierError(
+        'Analytics recipient authorization changed while history was read.',
+      )
+    }
     const query: AnalyticsQueryInput = {
       filter: structuredClone(report.filter),
       widgets: structuredClone(report.widgets),
@@ -555,10 +601,9 @@ export function createAnalyticsScheduleRenderer(
         : { forecastBaseline: structuredClone(report.forecastBaseline) }),
     }
     const snapshot = createAnalyticsSnapshot({
-      workItems,
-      events,
+      ...authorized,
       query,
-      authorizedProjectIds: readableProjectIds,
+      authorizedProjectIds: currentAuthorization.readableProjectIds,
     })
     return {
       workspaceId: report.workspaceId,
@@ -569,6 +614,78 @@ export function createAnalyticsScheduleRenderer(
       query,
       snapshot,
     }
+  }
+}
+
+/** Recipient のcurrent membership、directory、Project ACL、system-admin scopeを返します。 */
+async function readAnalyticsScheduleAuthorization(
+  report: AnalyticsReport,
+  recipientMemberKey: string,
+  dependencies: AnalyticsScheduleRendererDependencies,
+) {
+  const member = await dependencies.workspaceAccess.getActiveMember(
+    report.workspaceId,
+    recipientMemberKey,
+  )
+  if (!member) return undefined
+
+  const [directory, isSystemAdmin] = await Promise.all([
+    dependencies.directory.getProjectDirectory(report.workspaceId, 'ja', true),
+    dependencies.systemAdmin.isSystemAdmin(member.email),
+  ])
+  const activeProjectIds = new Set(directory.teams.flatMap((team) =>
+    team.projects.map((project) => project.id)
+  ))
+  const projectAccesses = isSystemAdmin
+    ? []
+    : await dependencies.directory.getProjectAccessList(
+        report.workspaceId,
+        recipientMemberKey,
+      )
+  const readableProjectIds = isSystemAdmin
+    ? activeProjectIds
+    : new Set(
+        projectAccesses
+          .filter((access) =>
+            activeProjectIds.has(access.projectId) &&
+            access.role !== undefined
+          )
+          .map((access) => access.projectId),
+      )
+  const readableTeamIds = new Set(
+    directory.teams
+      .filter((team) => team.projects.some((project) =>
+        readableProjectIds.has(project.id)
+      ))
+      .map((team) => team.id),
+  )
+  if (!canRecipientReadAnalyticsReport(
+    report,
+    recipientMemberKey,
+    readableTeamIds,
+  )) {
+    return undefined
+  }
+
+  const normalizedDirectory = directory.teams
+    .map((team) => ({
+      id: team.id,
+      projectIds: team.projects.map((project) => project.id).sort(),
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id))
+  const fingerprint = createHash('sha256')
+    .update(stableAnalyticsScheduleStringify({
+      isSystemAdmin,
+      memberKey: member.memberKey,
+      directory: normalizedDirectory,
+      readableProjectIds: [...readableProjectIds].sort(),
+      readableTeamIds: [...readableTeamIds].sort(),
+    }))
+    .digest('hex')
+  return {
+    directory,
+    readableProjectIds,
+    fingerprint,
   }
 }
 
@@ -598,6 +715,209 @@ export function canRecipientReadAnalyticsReport(
   return report.visibility === 'team' &&
     report.teamId !== undefined &&
     readableTeamIds.has(report.teamId)
+}
+
+/**
+ * Canonical Work Item と cutoff 以下の audit events を read barrier で揃えて返します。
+ *
+ * @remarks
+ * Strong read の前後で canonical state が変わった場合は同じ cutoff でもう一度読み直します。
+ * Cutoff より新しい state は対応 event を安全に読めないため、invocation 全体を再試行させます。
+ */
+async function readRecipientAuthorizedData(
+  report: AnalyticsReport,
+  directory: AnalyticsDirectoryResponse,
+  readableProjectIds: ReadonlySet<string>,
+  workItemsClient: AnalyticsScheduleWorkItemsClient,
+  historyReadAt: string,
+  auditClient: AnalyticsScheduleAuditClient,
+) {
+  let workItems = await readRecipientWorkItems(
+    report,
+    directory,
+    readableProjectIds,
+    workItemsClient,
+  )
+  assertAnalyticsScheduleWorkItemsAtCutoff(workItems, historyReadAt)
+
+  for (
+    let attempt = 0;
+    attempt < ANALYTICS_SCHEDULE_READ_BARRIER_MAX_ATTEMPTS;
+    attempt += 1
+  ) {
+    const events = await readRecipientAuditEvents(
+      report.workspaceId,
+      historyReadAt,
+      workItems,
+      auditClient,
+    )
+    const verifiedWorkItems = await readRecipientWorkItems(
+      report,
+      directory,
+      readableProjectIds,
+      workItemsClient,
+    )
+    assertAnalyticsScheduleWorkItemsAtCutoff(verifiedWorkItems, historyReadAt)
+
+    if (
+      createAnalyticsScheduleWorkItemsFingerprint(workItems) ===
+        createAnalyticsScheduleWorkItemsFingerprint(verifiedWorkItems)
+    ) {
+      assertAnalyticsScheduleAuditCoverage(
+        verifiedWorkItems,
+        events,
+      )
+      return { workItems: verifiedWorkItems, events }
+    }
+    workItems = verifiedWorkItems
+  }
+
+  throw createAnalyticsScheduleReadBarrierError(
+    'Canonical Work Items kept changing while Analytics history was read.',
+  )
+}
+
+/** Canonical state が audit cutoff 以下であることを fail-closed に検証します。 */
+function assertAnalyticsScheduleWorkItemsAtCutoff(
+  workItems: readonly CanonicalWorkItem[],
+  historyReadAt: string,
+) {
+  const cutoff = Date.parse(historyReadAt)
+  if (
+    Number.isNaN(cutoff) ||
+    workItems.some((workItem) => {
+      const updatedAt = Date.parse(workItem.updatedAt)
+      return Number.isNaN(updatedAt) || updatedAt > cutoff
+    })
+  ) {
+    throw createAnalyticsScheduleReadBarrierError(
+      'Canonical Work Items are newer than the Analytics history cutoff.',
+    )
+  }
+}
+
+/**
+ * 更新済みcanonical stateのlatest audit eventがentity GSIに到達済みか検証します。
+ */
+function assertAnalyticsScheduleAuditCoverage(
+  workItems: readonly CanonicalWorkItem[],
+  events: readonly AuditEventV1[],
+) {
+  for (const workItem of workItems) {
+    if (workItem.revision <= 1) continue
+    const updatedAt = Date.parse(workItem.updatedAt)
+    const canonicalEntityId = createAnalyticsWorkItemEntityId(
+      workItem.teamId,
+      workItem.id,
+    )
+    const authorizedRawIdByCanonicalEntityId = new Map([
+      [canonicalEntityId, workItem.id],
+    ])
+    const covered = events.some((event) =>
+      Date.parse(event.occurredAt) === updatedAt &&
+      isAnalyticsScheduleLatestWorkItemUpdate(
+        event,
+        workItem,
+        canonicalEntityId,
+      ) &&
+      (
+        isCanonicalAnalyticsScheduleEvent(event, canonicalEntityId) ||
+        isAuthorizedLegacyAnalyticsScheduleEvent(
+          event,
+          workItem.id,
+          authorizedRawIdByCanonicalEntityId,
+        )
+      )
+    )
+    if (!covered) {
+      throw createAnalyticsScheduleReadBarrierError(
+        'Analytics audit history has not reached the latest canonical Work Item state.',
+      )
+    }
+  }
+}
+
+/** Event が latest canonical Work Item revision を生成したupdateかを検証します。 */
+function isAnalyticsScheduleLatestWorkItemUpdate(
+  event: AuditEventV1,
+  workItem: CanonicalWorkItem,
+  canonicalEntityId: string,
+) {
+  if (
+    event.eventType !== 'work-item.updated' ||
+    event.action !== 'updated' ||
+    event.targetType !== 'work-item' ||
+    event.target.type !== 'work-item' ||
+    event.targetId !== event.target.id ||
+    (
+      event.targetId !== canonicalEntityId &&
+      event.targetId !== workItem.id
+    )
+  ) {
+    return false
+  }
+
+  const metadataTeamId = readAnalyticsScheduleMetadataText(
+    event.metadata?.teamId,
+  )
+  const metadataIssueId = readAnalyticsScheduleMetadataText(
+    event.metadata?.issueId,
+  )
+  const metadataWorkItemId = readAnalyticsScheduleMetadataText(
+    event.metadata?.workItemId,
+  )
+  return event.metadata?.adapter === 'canonical-work-item' &&
+    event.metadata.afterRevision === workItem.revision &&
+    metadataTeamId === workItem.teamId &&
+    (metadataIssueId ?? metadataWorkItemId) === workItem.id &&
+    (
+      metadataIssueId === undefined ||
+      metadataWorkItemId === undefined ||
+      metadataIssueId === metadataWorkItemId
+    )
+}
+
+/** Canonical Work Item 集合の順序非依存 fingerprint を返します。 */
+function createAnalyticsScheduleWorkItemsFingerprint(
+  workItems: readonly CanonicalWorkItem[],
+) {
+  const digest = createHash('sha256')
+  const ordered = [...workItems].sort((left, right) => {
+    const leftKey = `${left.teamId}\0${left.id}`
+    const rightKey = `${right.teamId}\0${right.id}`
+    return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0
+  })
+  for (const workItem of ordered) {
+    digest.update(stableAnalyticsScheduleStringify(workItem))
+    digest.update('\0')
+  }
+  return digest.digest('hex')
+}
+
+/** Object key の列挙順に依存しない canonical JSON 文字列を返します。 */
+function stableAnalyticsScheduleStringify(value: unknown): string {
+  if (value === undefined) return 'undefined'
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value) ?? 'undefined'
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableAnalyticsScheduleStringify).join(',')}]`
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) =>
+      `${JSON.stringify(key)}:${stableAnalyticsScheduleStringify(entry)}`
+    )
+  return `{${entries.join(',')}}`
+}
+
+/** Lambda の次回 invocation で安全な cutoff を取り直す retryable error を返します。 */
+function createAnalyticsScheduleReadBarrierError(message: string) {
+  return new AnalyticsError(
+    503,
+    'AnalyticsScheduleReadBarrierUnavailable',
+    message,
+  )
 }
 
 /** Current project ACL を適用した canonical Work Item 集合を fail-closed で返します。 */
@@ -685,47 +1005,215 @@ function assertAnalyticsSchedulePartitionSize(
   }
 }
 
-/** Current Work Item entity ID 集合に完全一致する immutable events だけを返します。 */
+/**
+ * Current Work Item identity ごとの entity timeline から immutable events を返します。
+ *
+ * @remarks
+ * Legacy raw ID timeline は metadata または canonical target が current authorized Work Item
+ * に一致する場合だけ採用し、Team を跨ぐ同名 ID の event を fail-closed に除外します。
+ */
 async function readRecipientAuditEvents(
   workspaceId: string,
   historyReadAt: string,
   workItems: readonly CanonicalWorkItem[],
   client: AnalyticsScheduleAuditClient,
 ) {
-  const accessibleEntityIds = new Set(
-    workItems.map((workItem) =>
-      createAnalyticsWorkItemEntityId(workItem.teamId, workItem.id)
-    ),
+  const authorizedRawIdByCanonicalEntityId = new Map(workItems.map((workItem) => [
+    createAnalyticsWorkItemEntityId(workItem.teamId, workItem.id),
+    workItem.id,
+  ]))
+  const authorizedCanonicalEntityIds = new Set(
+    authorizedRawIdByCanonicalEntityId.keys(),
   )
+  const identities = [
+    ...[...authorizedCanonicalEntityIds].sort().map((entityId) => ({
+      entityId,
+      legacyRawId: false,
+    })),
+    ...[...new Set(workItems.map((workItem) => workItem.id))]
+      .sort()
+      .map((entityId) => ({ entityId, legacyRawId: true })),
+  ]
+  if (identities.length > ANALYTICS_AUDIT_IDENTITY_QUERY_LIMIT) {
+    throw new AnalyticsError(
+      413,
+      'AnalyticsHistoryLimitExceeded',
+      `Analytics history requires more than ${ANALYTICS_AUDIT_IDENTITY_QUERY_LIMIT} entity timeline queries. Narrow the report scope.`,
+    )
+  }
   const events: AuditEventV1[] = []
-  let cursor: string | undefined
-  let pageCount = 0
+  let nextIdentityIndex = 0
+  let pageQueryCount = 0
+  let readEventCount = 0
+  let failure: unknown
+  const workerCount = Math.min(
+    ANALYTICS_AUDIT_QUERY_CONCURRENCY,
+    identities.length,
+  )
+  const readNextIdentity = async () => {
+    while (failure === undefined) {
+      const identityIndex = nextIdentityIndex
+      nextIdentityIndex += 1
+      const identity = identities[identityIndex]
+      if (!identity) return
 
-  do {
-    if (pageCount >= ANALYTICS_AUDIT_MAX_PAGES) {
-      throw new AnalyticsError(
-        413,
-        'AnalyticsHistoryLimitExceeded',
-        'Analytics history exceeds the safe schedule processing limit.',
-      )
+      try {
+        let cursor: string | undefined
+        let pageCount = 0
+        do {
+          if (
+            pageCount >= ANALYTICS_AUDIT_MAX_PAGES ||
+            pageQueryCount >= ANALYTICS_AUDIT_PAGE_QUERY_LIMIT
+          ) {
+            throw createAnalyticsScheduleHistoryLimitError()
+          }
+          pageQueryCount += 1
+          const page = await client.query({
+            workspaceId,
+            entityType: 'work-item',
+            entityId: identity.entityId,
+            to: historyReadAt,
+            limit: ANALYTICS_AUDIT_PAGE_SIZE,
+            cursor,
+            direction: 'ascending',
+          })
+          pageCount += 1
+          readEventCount += page.events.length
+          if (readEventCount > ANALYTICS_AUDIT_EVENT_LIMIT) {
+            throw createAnalyticsScheduleHistoryLimitError()
+          }
+          for (const event of page.events) {
+            const authorized = identity.legacyRawId
+              ? isAuthorizedLegacyAnalyticsScheduleEvent(
+                  event,
+                  identity.entityId,
+                  authorizedRawIdByCanonicalEntityId,
+                )
+              : isCanonicalAnalyticsScheduleEvent(event, identity.entityId)
+            if (!authorized) continue
+
+            events.push(event)
+            if (events.length > ANALYTICS_AUDIT_EVENT_LIMIT) {
+              throw createAnalyticsScheduleHistoryLimitError()
+            }
+          }
+          cursor = page.nextCursor
+        } while (cursor)
+      } catch (error) {
+        failure ??= error
+      }
     }
-    const page = await client.query({
-      workspaceId,
-      entityType: 'work-item',
-      to: historyReadAt,
-      limit: ANALYTICS_AUDIT_PAGE_SIZE,
-      cursor,
-      direction: 'ascending',
-    })
-    pageCount += 1
-    events.push(...page.events.filter((event) =>
-      event.entityType === 'work-item' &&
-      accessibleEntityIds.has(event.entityId)
-    ))
-    cursor = page.nextCursor
-  } while (cursor)
-
+  }
+  await Promise.all(Array.from({ length: workerCount }, readNextIdentity))
+  if (failure !== undefined) throw failure
   return events
+}
+
+/** Canonical entity timeline のeventがquery identityと一致するかを検証します。 */
+function isCanonicalAnalyticsScheduleEvent(
+  event: AuditEventV1,
+  canonicalEntityId: string,
+) {
+  return event.entityType === 'work-item' &&
+    event.entity.type === 'work-item' &&
+    event.entityId === canonicalEntityId &&
+    event.entity.id === canonicalEntityId
+}
+
+/** Legacy raw-ID event が current authorized Work Item へ安全に解決できるかを判定します。 */
+function isAuthorizedLegacyAnalyticsScheduleEvent(
+  event: AuditEventV1,
+  rawWorkItemId: string,
+  authorizedRawIdByCanonicalEntityId: ReadonlyMap<string, string>,
+) {
+  if (
+    event.entityType !== 'work-item' ||
+    event.entity.type !== 'work-item'
+  ) {
+    return false
+  }
+  if (
+    event.entityId !== rawWorkItemId ||
+    event.entity.id !== rawWorkItemId
+  ) {
+    return false
+  }
+  if (
+    event.targetType !== event.target.type ||
+    event.targetId !== event.target.id
+  ) {
+    return false
+  }
+
+  const metadataTeamValue = event.metadata?.teamId
+  const metadataIssueValue = event.metadata?.issueId
+  const metadataWorkItemValue = event.metadata?.workItemId
+  const metadataTeamId = readAnalyticsScheduleMetadataText(metadataTeamValue)
+  const metadataIssueId = readAnalyticsScheduleMetadataText(metadataIssueValue)
+  const metadataWorkItemId = readAnalyticsScheduleMetadataText(
+    metadataWorkItemValue,
+  )
+  if (
+    (metadataTeamValue !== undefined && metadataTeamId === undefined) ||
+    (metadataIssueValue !== undefined && metadataIssueId === undefined) ||
+    (
+      metadataWorkItemValue !== undefined &&
+      metadataWorkItemId === undefined
+    )
+  ) {
+    return false
+  }
+  if (
+    metadataIssueId !== undefined &&
+    metadataWorkItemId !== undefined &&
+    metadataIssueId !== metadataWorkItemId
+  ) {
+    return false
+  }
+  const metadataRawId = metadataIssueId ?? metadataWorkItemId
+  if (metadataRawId !== undefined && metadataRawId !== rawWorkItemId) {
+    return false
+  }
+
+  const resolvedCanonicalEntityIds = new Set<string>()
+  if (metadataTeamId !== undefined) {
+    const canonicalEntityId = createAnalyticsWorkItemEntityId(
+      metadataTeamId,
+      metadataRawId ?? rawWorkItemId,
+    )
+    if (
+      authorizedRawIdByCanonicalEntityId.get(canonicalEntityId) !==
+        rawWorkItemId
+    ) {
+      return false
+    }
+    resolvedCanonicalEntityIds.add(canonicalEntityId)
+  }
+
+  if (event.targetType === 'work-item' && event.targetId !== rawWorkItemId) {
+    if (
+      authorizedRawIdByCanonicalEntityId.get(event.targetId) !==
+        rawWorkItemId
+    ) {
+      return false
+    }
+    resolvedCanonicalEntityIds.add(event.targetId)
+  }
+  return resolvedCanonicalEntityIds.size === 1
+}
+
+/** Analytics audit metadata の non-empty string だけを返します。 */
+function readAnalyticsScheduleMetadataText(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+/** Relevant entity history が安全上限を超えた場合の fail-closed error を返します。 */
+function createAnalyticsScheduleHistoryLimitError() {
+  return new AnalyticsError(
+    413,
+    'AnalyticsHistoryLimitExceeded',
+    'Analytics history for the authorized Work Items exceeds the safe schedule processing limit.',
+  )
 }
 
 /** Schedule occurrence/report revision/query/scope に決定的な共有 snapshot ID を返します。 */

@@ -19,6 +19,7 @@ import {
 } from './analytics'
 import {
   createAnalyticsScheduleRenderer,
+  processAnalyticsSchedule,
   processDueAnalyticsReport,
   resolveAnalyticsScheduleProcessingTime,
   type AnalyticsScheduleArtifactInput,
@@ -39,6 +40,11 @@ test('renders recipient-specific current ACL data and filters audit events by ex
     workspaceAccess: {
       async getActiveMember(workspaceId, memberKey) {
         return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
       },
     },
     directory: {
@@ -93,12 +99,19 @@ test('renders recipient-specific current ACL data and filters audit events by ex
     authorizedProjectIds: new Set(['open-project']),
   })
   expect(rendered?.snapshot.permissionScopeHash).toBe(expected.permissionScopeHash)
-  expect(auditQueries).toEqual([expect.objectContaining({
-    direction: 'ascending',
-    entityType: 'work-item',
-    to: NOW.toISOString(),
-    workspaceId: report.workspaceId,
-  })])
+  expect(auditQueries).toHaveLength(2)
+  expect(auditQueries.map((query) => query.entityId).sort()).toEqual([
+    'open-item',
+    'team/team-1/issue/open-item',
+  ])
+  for (const query of auditQueries) {
+    expect(query).toEqual(expect.objectContaining({
+      direction: 'ascending',
+      entityType: 'work-item',
+      to: NOW.toISOString(),
+      workspaceId: report.workspaceId,
+    }))
+  }
 })
 
 test('scheduled snapshots rewind later project, archive, and status changes', async () => {
@@ -119,6 +132,11 @@ test('scheduled snapshots rewind later project, archive, and status changes', as
     workspaceAccess: {
       async getActiveMember(workspaceId, memberKey) {
         return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
       },
     },
     directory: {
@@ -167,7 +185,7 @@ test('scheduled snapshots rewind later project, archive, and status changes', as
     sampleSize: 1,
     value: 1,
   })
-  expect(includeArchivedReads).toEqual([true])
+  expect(includeArchivedReads).toEqual([true, true])
 })
 
 test('scheduled snapshots exclude historical Projects outside the active current ACL', async () => {
@@ -186,6 +204,11 @@ test('scheduled snapshots exclude historical Projects outside the active current
     workspaceAccess: {
       async getActiveMember(workspaceId, memberKey) {
         return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
       },
     },
     directory: {
@@ -233,6 +256,920 @@ test('scheduled snapshots exclude historical Projects outside the active current
   })
 })
 
+test('scheduled Cognito system administrators can read every active Project', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const recipientMemberKey = 'admin@example.com'
+  const report = await createScheduledReport(repository, [recipientMemberKey])
+  report.visibility = 'team'
+  report.teamId = 'team-1'
+  const adminWorkItem = createWorkItem('admin-item', 'private-project')
+  let projectAccessReads = 0
+  const systemAdminReads: string[] = []
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin(userId) {
+        systemAdminReads.push(userId)
+        return true
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        return {
+          teams: [{
+            id: 'team-1',
+            projects: [
+              { id: 'open-project' },
+              { id: 'private-project' },
+            ],
+          }],
+        }
+      },
+      async getProjectAccessList() {
+        projectAccessReads += 1
+        return []
+      },
+    },
+    workItems: {
+      async getTeamIssues(_workspaceId, teamId) {
+        return { teamId, issues: [adminWorkItem] }
+      },
+      async getProjectIssues() {
+        throw new Error('System administrators must use the owning Team partition.')
+      },
+    },
+    auditEvents: {
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+
+  const rendered = await renderer({
+    report,
+    recipientMemberKey,
+    scheduledFor: SCHEDULED_FOR,
+    historyReadAt: NOW.toISOString(),
+  })
+
+  expect(rendered?.snapshot.widgets[0]).toMatchObject({
+    metric: 'wip',
+    sampleSize: 1,
+    value: 1,
+  })
+  expect(projectAccessReads).toBe(0)
+  expect(systemAdminReads).toEqual([recipientMemberKey, recipientMemberKey])
+  const expected = createAnalyticsSnapshot({
+    workItems: [adminWorkItem],
+    events: [],
+    query: createReportQuery(report),
+    authorizedProjectIds: new Set(['open-project', 'private-project']),
+  })
+  expect(rendered?.snapshot.permissionScopeHash).toBe(expected.permissionScopeHash)
+})
+
+test('retries when canonical Work Items are newer than the audit history cutoff', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const newerWorkItem = {
+    ...createWorkItem('newer-item', 'open-project'),
+    updatedAt: '2026-07-18T08:30:00.001Z',
+  }
+  let auditReads = 0
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        return {
+          teams: [{
+            id: 'team-1',
+            projects: [{ id: 'open-project' }],
+          }],
+        }
+      },
+      async getProjectAccessList() {
+        return [{ projectId: 'open-project', role: 'viewer' }]
+      },
+    },
+    workItems: {
+      async getTeamIssues(_workspaceId, teamId) {
+        return { teamId, issues: [newerWorkItem] }
+      },
+      async getProjectIssues() {
+        throw new Error('The renderer must use the owning Team partition.')
+      },
+    },
+    auditEvents: {
+      async query() {
+        auditReads += 1
+        return { events: [] }
+      },
+    },
+  })
+
+  await expect(renderer({
+    report,
+    recipientMemberKey: 'recipient@example.com',
+    scheduledFor: SCHEDULED_FOR,
+    historyReadAt: NOW.toISOString(),
+  })).rejects.toMatchObject({
+    code: 'AnalyticsScheduleReadBarrierUnavailable',
+    status: 503,
+  })
+  expect(auditReads).toBe(0)
+})
+
+test('retries when the entity GSI has not reached a post-occurrence canonical update', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const updatedWorkItem = {
+    ...createWorkItem('gsi-lagged-item', 'open-project'),
+    revision: 2,
+    workflowStatusId: 'completed',
+    statusCategory: 'completed' as const,
+    updatedAt: '2026-07-18T08:15:00.000Z',
+  }
+  let workItemReads = 0
+  let auditReads = 0
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        return {
+          teams: [{
+            id: 'team-1',
+            projects: [{ id: 'open-project' }],
+          }],
+        }
+      },
+      async getProjectAccessList() {
+        return [{ projectId: 'open-project', role: 'viewer' }]
+      },
+    },
+    workItems: {
+      async getTeamIssues(_workspaceId, teamId) {
+        workItemReads += 1
+        return { teamId, issues: [updatedWorkItem] }
+      },
+      async getProjectIssues() {
+        throw new Error('The renderer must use the owning Team partition.')
+      },
+    },
+    auditEvents: {
+      async query() {
+        auditReads += 1
+        return { events: [] }
+      },
+    },
+  })
+
+  await expect(renderer({
+    report,
+    recipientMemberKey: 'recipient@example.com',
+    scheduledFor: SCHEDULED_FOR,
+    historyReadAt: NOW.toISOString(),
+  })).rejects.toMatchObject({
+    code: 'AnalyticsScheduleReadBarrierUnavailable',
+    status: 503,
+  })
+  expect(workItemReads).toBe(2)
+  expect(auditReads).toBe(2)
+})
+
+test('does not treat same-time stale or unrelated events as latest update coverage', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const workItem = {
+    ...createWorkItem('same-time-stale-item', 'open-project'),
+    revision: 3,
+    workflowStatusId: 'completed',
+    statusCategory: 'completed' as const,
+    updatedAt: '2026-07-18T08:15:00.000Z',
+  }
+  const latestEvent = createWorkItemEvent(
+    workItem,
+    workItem.updatedAt,
+    'started',
+  )
+  const staleRevisionEvent = {
+    ...latestEvent,
+    eventId: `${latestEvent.eventId}-stale-revision`,
+    metadata: {
+      ...latestEvent.metadata,
+      afterRevision: workItem.revision - 1,
+    },
+  }
+  const commentTargetId =
+    `team/${workItem.teamId}/issue/${workItem.id}/comment/comment-1`
+  const unrelatedCommentEvent = {
+    ...latestEvent,
+    eventId: `${latestEvent.eventId}-comment`,
+    eventType: 'work-item.comment.created',
+    action: 'created',
+    target: { type: 'comment' as const, id: commentTargetId },
+    targetType: 'comment' as const,
+    targetId: commentTargetId,
+  }
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        return {
+          teams: [{
+            id: 'team-1',
+            projects: [{ id: 'open-project' }],
+          }],
+        }
+      },
+      async getProjectAccessList() {
+        return [{ projectId: 'open-project', role: 'viewer' }]
+      },
+    },
+    workItems: {
+      async getTeamIssues(_workspaceId, teamId) {
+        return { teamId, issues: [workItem] }
+      },
+      async getProjectIssues() {
+        throw new Error('The renderer must use the owning Team partition.')
+      },
+    },
+    auditEvents: {
+      async query(input) {
+        return input.entityId ===
+            `team/${workItem.teamId}/issue/${workItem.id}`
+          ? { events: [staleRevisionEvent, unrelatedCommentEvent] }
+          : { events: [] }
+      },
+    },
+  })
+
+  await expect(renderer({
+    report,
+    recipientMemberKey: 'recipient@example.com',
+    scheduledFor: SCHEDULED_FOR,
+    historyReadAt: NOW.toISOString(),
+  })).rejects.toMatchObject({
+    code: 'AnalyticsScheduleReadBarrierUnavailable',
+    status: 503,
+  })
+})
+
+test('restarts the audit read when canonical Work Items change across the read barrier', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const before = createWorkItem('raced-item', 'open-project')
+  const after = {
+    ...before,
+    revision: 2,
+    workflowStatusId: 'completed',
+    statusCategory: 'completed' as const,
+    updatedAt: '2026-07-17T12:00:00.000Z',
+  }
+  const event = createWorkItemEvent(after, after.updatedAt, 'started')
+  let workItemReads = 0
+  let auditReads = 0
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        return {
+          teams: [{
+            id: 'team-1',
+            projects: [{ id: 'open-project' }],
+          }],
+        }
+      },
+      async getProjectAccessList() {
+        return [{ projectId: 'open-project', role: 'viewer' }]
+      },
+    },
+    workItems: {
+      async getTeamIssues(_workspaceId, teamId) {
+        workItemReads += 1
+        return {
+          teamId,
+          issues: [workItemReads === 1 ? before : after],
+        }
+      },
+      async getProjectIssues() {
+        throw new Error('The renderer must use the owning Team partition.')
+      },
+    },
+    auditEvents: {
+      async query() {
+        auditReads += 1
+        return { events: [event] }
+      },
+    },
+  })
+
+  const rendered = await renderer({
+    report,
+    recipientMemberKey: 'recipient@example.com',
+    scheduledFor: '2026-07-16T08:00:00.000Z',
+    historyReadAt: NOW.toISOString(),
+  })
+
+  expect(rendered?.snapshot.widgets[0]).toMatchObject({
+    metric: 'wip',
+    sampleSize: 1,
+    value: 1,
+  })
+  expect(workItemReads).toBe(3)
+  expect(auditReads).toBe(4)
+})
+
+test('retries when current Project authorization changes during the history read', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const workItem = createWorkItem('authorization-race-item', 'open-project')
+  let memberReads = 0
+  let directoryReads = 0
+  let systemAdminReads = 0
+  let projectAccessReads = 0
+  let workItemReads = 0
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        memberReads += 1
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        systemAdminReads += 1
+        return false
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        directoryReads += 1
+        return {
+          teams: [{
+            id: 'team-1',
+            projects: [{ id: 'open-project' }],
+          }],
+        }
+      },
+      async getProjectAccessList() {
+        projectAccessReads += 1
+        return projectAccessReads === 1
+          ? [{ projectId: 'open-project', role: 'viewer' }]
+          : []
+      },
+    },
+    workItems: {
+      async getTeamIssues(_workspaceId, teamId) {
+        workItemReads += 1
+        return { teamId, issues: [workItem] }
+      },
+      async getProjectIssues() {
+        throw new Error('The renderer must use the owning Team partition.')
+      },
+    },
+    auditEvents: {
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+
+  await expect(renderer({
+    report,
+    recipientMemberKey: 'recipient@example.com',
+    scheduledFor: SCHEDULED_FOR,
+    historyReadAt: NOW.toISOString(),
+  })).rejects.toMatchObject({
+    code: 'AnalyticsScheduleReadBarrierUnavailable',
+    status: 503,
+  })
+  expect(memberReads).toBe(2)
+  expect(directoryReads).toBe(2)
+  expect(systemAdminReads).toBe(2)
+  expect(projectAccessReads).toBe(2)
+  expect(workItemReads).toBe(2)
+})
+
+test('accepts safely attributed legacy raw-ID events without crossing Team boundaries', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const accepted = {
+    ...createWorkItem('accepted-item', 'open-project'),
+    revision: 2,
+    workflowStatusId: 'completed',
+    statusCategory: 'completed' as const,
+    updatedAt: '2026-07-17T12:00:00.000Z',
+  }
+  const denied = {
+    ...createWorkItem('denied-item', 'open-project'),
+    workflowStatusId: 'completed',
+    statusCategory: 'completed' as const,
+    updatedAt: '2026-07-15T13:00:00.000Z',
+  }
+  const acceptedEvent = createLegacyRawWorkItemEvent(
+    accepted,
+    accepted.updatedAt,
+    'team-1',
+  )
+  const deniedEvent = createLegacyRawWorkItemEvent(
+    denied,
+    denied.updatedAt,
+    'inaccessible-team',
+  )
+  const auditEntityIds: string[] = []
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        return {
+          teams: [{
+            id: 'team-1',
+            projects: [{ id: 'open-project' }],
+          }],
+        }
+      },
+      async getProjectAccessList() {
+        return [{ projectId: 'open-project', role: 'viewer' }]
+      },
+    },
+    workItems: {
+      async getTeamIssues(_workspaceId, teamId) {
+        return { teamId, issues: [accepted, denied] }
+      },
+      async getProjectIssues() {
+        throw new Error('The renderer must use the owning Team partition.')
+      },
+    },
+    auditEvents: {
+      async query(input) {
+        auditEntityIds.push(input.entityId ?? '')
+        if (input.entityId === accepted.id) return { events: [acceptedEvent] }
+        if (input.entityId === denied.id) return { events: [deniedEvent] }
+        return { events: [] }
+      },
+    },
+  })
+
+  const rendered = await renderer({
+    report,
+    recipientMemberKey: 'recipient@example.com',
+    scheduledFor: '2026-07-16T08:00:00.000Z',
+    historyReadAt: NOW.toISOString(),
+  })
+
+  expect(rendered?.snapshot.widgets[0]).toMatchObject({
+    metric: 'wip',
+    sampleSize: 1,
+    value: 1,
+  })
+  expect(auditEntityIds.sort()).toEqual([
+    'accepted-item',
+    'denied-item',
+    'team/team-1/issue/accepted-item',
+    'team/team-1/issue/denied-item',
+  ])
+})
+
+test('rejects legacy raw-ID coverage when its identity sources disagree', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const workItem = {
+    ...createWorkItem('conflicting-identity-item', 'open-project'),
+    revision: 2,
+    workflowStatusId: 'completed',
+    statusCategory: 'completed' as const,
+    updatedAt: '2026-07-17T12:00:00.000Z',
+  }
+  const rawEvent = createLegacyRawWorkItemEvent(
+    workItem,
+    workItem.updatedAt,
+    workItem.teamId,
+  )
+  const conflictingTarget = {
+    ...rawEvent,
+    eventId: `${rawEvent.eventId}-target-conflict`,
+    target: {
+      type: 'work-item' as const,
+      id: `team/inaccessible-team/issue/${workItem.id}`,
+    },
+    targetId: `team/inaccessible-team/issue/${workItem.id}`,
+  }
+  const conflictingMetadata = {
+    ...rawEvent,
+    eventId: `${rawEvent.eventId}-metadata-conflict`,
+    metadata: {
+      ...rawEvent.metadata,
+      workItemId: 'different-item',
+    },
+  }
+  const conflictingEntity = {
+    ...rawEvent,
+    eventId: `${rawEvent.eventId}-entity-conflict`,
+    entity: { type: 'work-item' as const, id: 'different-item' },
+  }
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        return {
+          teams: [{
+            id: 'team-1',
+            projects: [{ id: 'open-project' }],
+          }],
+        }
+      },
+      async getProjectAccessList() {
+        return [{ projectId: 'open-project', role: 'viewer' }]
+      },
+    },
+    workItems: {
+      async getTeamIssues(_workspaceId, teamId) {
+        return { teamId, issues: [workItem] }
+      },
+      async getProjectIssues() {
+        throw new Error('The renderer must use the owning Team partition.')
+      },
+    },
+    auditEvents: {
+      async query(input) {
+        return input.entityId === workItem.id
+          ? {
+              events: [
+                conflictingTarget,
+                conflictingMetadata,
+                conflictingEntity,
+              ],
+            }
+          : { events: [] }
+      },
+    },
+  })
+
+  await expect(renderer({
+    report,
+    recipientMemberKey: 'recipient@example.com',
+    scheduledFor: '2026-07-16T08:00:00.000Z',
+    historyReadAt: NOW.toISOString(),
+  })).rejects.toMatchObject({
+    code: 'AnalyticsScheduleReadBarrierUnavailable',
+    status: 503,
+  })
+})
+
+test('rejects an oversized identity-query fan-out before reading audit history', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const workItems = Array.from({ length: 251 }, (_, index) =>
+    createWorkItem(`identity-${index}`, 'open-project')
+  )
+  let workItemReads = 0
+  let auditReads = 0
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        return {
+          teams: [{
+            id: 'team-1',
+            projects: [{ id: 'open-project' }],
+          }],
+        }
+      },
+      async getProjectAccessList() {
+        return [{ projectId: 'open-project', role: 'viewer' }]
+      },
+    },
+    workItems: {
+      async getTeamIssues(_workspaceId, teamId) {
+        workItemReads += 1
+        return { teamId, issues: workItems }
+      },
+      async getProjectIssues() {
+        throw new Error('The renderer must use the owning Team partition.')
+      },
+    },
+    auditEvents: {
+      async query() {
+        auditReads += 1
+        return { events: [] }
+      },
+    },
+  })
+
+  await expect(renderer({
+    report,
+    recipientMemberKey: 'recipient@example.com',
+    scheduledFor: SCHEDULED_FOR,
+    historyReadAt: NOW.toISOString(),
+  })).rejects.toMatchObject({
+    code: 'AnalyticsHistoryLimitExceeded',
+    status: 413,
+  })
+  expect(workItemReads).toBe(1)
+  expect(auditReads).toBe(0)
+})
+
+test('bounds shared schedule page reads across paginated audit identities', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const workItems = Array.from({ length: 6 }, (_, index) =>
+    createWorkItem(`paginated-identity-${index}`, 'open-project')
+  )
+  const rejectedEvents = new Map(workItems.map((workItem) => {
+    const event = createLegacyRawWorkItemEvent(
+      workItem,
+      workItem.updatedAt,
+      workItem.teamId,
+    )
+    return [
+      workItem.id,
+      {
+        ...event,
+        entity: {
+          type: 'work-item' as const,
+          id: 'conflicting-raw-entity',
+        },
+      },
+    ]
+  }))
+  const identityReads = new Map<string, number>()
+  let auditReads = 0
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        return {
+          teams: [{
+            id: 'team-1',
+            projects: [{ id: 'open-project' }],
+          }],
+        }
+      },
+      async getProjectAccessList() {
+        return [{ projectId: 'open-project', role: 'viewer' }]
+      },
+    },
+    workItems: {
+      async getTeamIssues(_workspaceId, teamId) {
+        return { teamId, issues: workItems }
+      },
+      async getProjectIssues() {
+        throw new Error('The renderer must use the owning Team partition.')
+      },
+    },
+    auditEvents: {
+      async query(input) {
+        auditReads += 1
+        const event = rejectedEvents.get(input.entityId ?? '')
+        if (!event) return { events: [] }
+
+        const readCount = (identityReads.get(input.entityId ?? '') ?? 0) + 1
+        identityReads.set(input.entityId ?? '', readCount)
+        return {
+          events: [event],
+          ...(readCount < 99
+            ? { nextCursor: `${input.entityId}-page-${readCount}` }
+            : {}),
+        }
+      },
+    },
+  })
+
+  await expect(renderer({
+    report,
+    recipientMemberKey: 'recipient@example.com',
+    scheduledFor: SCHEDULED_FOR,
+    historyReadAt: NOW.toISOString(),
+  })).rejects.toMatchObject({
+    code: 'AnalyticsHistoryLimitExceeded',
+    status: 413,
+  })
+  expect(auditReads).toBe(500)
+  expect(Math.max(...identityReads.values())).toBeLessThan(100)
+})
+
+test('counts rejected raw events toward the shared schedule read budget', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const workItems = [
+    createWorkItem('rejected-events-1', 'open-project'),
+    createWorkItem('rejected-events-2', 'open-project'),
+  ]
+  const rejectedEvents = new Map(workItems.map((workItem) => {
+    const event = createLegacyRawWorkItemEvent(
+      workItem,
+      workItem.updatedAt,
+      workItem.teamId,
+    )
+    return [
+      workItem.id,
+      {
+        ...event,
+        entity: {
+          type: 'work-item' as const,
+          id: 'conflicting-raw-entity',
+        },
+      },
+    ]
+  }))
+  let rawAuditReads = 0
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        return {
+          teams: [{
+            id: 'team-1',
+            projects: [{ id: 'open-project' }],
+          }],
+        }
+      },
+      async getProjectAccessList() {
+        return [{ projectId: 'open-project', role: 'viewer' }]
+      },
+    },
+    workItems: {
+      async getTeamIssues(_workspaceId, teamId) {
+        return { teamId, issues: workItems }
+      },
+      async getProjectIssues() {
+        throw new Error('The renderer must use the owning Team partition.')
+      },
+    },
+    auditEvents: {
+      async query(input) {
+        const event = rejectedEvents.get(input.entityId ?? '')
+        if (!event) return { events: [] }
+
+        rawAuditReads += 1
+        return {
+          events: Array(100).fill(event),
+          nextCursor: `${input.entityId}-page-${rawAuditReads}`,
+        }
+      },
+    },
+  })
+
+  await expect(renderer({
+    report,
+    recipientMemberKey: 'recipient@example.com',
+    scheduledFor: SCHEDULED_FOR,
+    historyReadAt: NOW.toISOString(),
+  })).rejects.toMatchObject({
+    code: 'AnalyticsHistoryLimitExceeded',
+    status: 413,
+  })
+  expect(rawAuditReads).toBeGreaterThanOrEqual(101)
+  expect(rawAuditReads).toBeLessThanOrEqual(102)
+})
+
+test('fails closed when relevant entity history exceeds the schedule event limit', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const workItem = createWorkItem('large-history-item', 'open-project')
+  const event = createWorkItemEvent(
+    workItem,
+    '2026-07-17T12:00:00.000Z',
+  )
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        return {
+          teams: [{
+            id: 'team-1',
+            projects: [{ id: 'open-project' }],
+          }],
+        }
+      },
+      async getProjectAccessList() {
+        return [{ projectId: 'open-project', role: 'viewer' }]
+      },
+    },
+    workItems: {
+      async getTeamIssues(_workspaceId, teamId) {
+        return { teamId, issues: [workItem] }
+      },
+      async getProjectIssues() {
+        throw new Error('The renderer must use the owning Team partition.')
+      },
+    },
+    auditEvents: {
+      async query(input) {
+        return {
+          events: input.entityId === `team/team-1/issue/${workItem.id}`
+            ? Array.from({ length: 10_001 }, () => event)
+            : [],
+        }
+      },
+    },
+  })
+
+  await expect(renderer({
+    report,
+    recipientMemberKey: 'recipient@example.com',
+    scheduledFor: SCHEDULED_FOR,
+    historyReadAt: NOW.toISOString(),
+  })).rejects.toMatchObject({
+    code: 'AnalyticsHistoryLimitExceeded',
+    status: 413,
+  })
+})
+
 test('skips inactive recipients without reading directory, Work Item, or audit data', async () => {
   const repository = new InMemoryAnalyticsRepository(() => NOW)
   const report = await createScheduledReport(repository, ['inactive@example.com'])
@@ -241,6 +1178,12 @@ test('skips inactive recipients without reading directory, Work Item, or audit d
     workspaceAccess: {
       async getActiveMember() {
         return undefined
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        protectedReads += 1
+        return false
       },
     },
     directory: {
@@ -528,6 +1471,51 @@ test('fails closed when an occurrence receipt has a different immutable payload'
   expect((await repository.getReport(report.workspaceId, report.id))?.revision).toBe(1)
 })
 
+test('processes due reports with a bounded worker pool and preserves every settlement', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const reportIds = Array.from({ length: 9 }, (_, index) => `report-${index + 1}`)
+  for (const reportId of reportIds) {
+    await createScheduledReport(
+      repository,
+      [`${reportId}@example.com`],
+      reportId,
+    )
+  }
+  const attemptedReportIds: string[] = []
+  let activeWorkers = 0
+  let maximumActiveWorkers = 0
+
+  let caught: unknown
+  try {
+    await processAnalyticsSchedule(NOW, {
+      repository,
+      async render(input) {
+        attemptedReportIds.push(input.report.id)
+        activeWorkers += 1
+        maximumActiveWorkers = Math.max(maximumActiveWorkers, activeWorkers)
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        activeWorkers -= 1
+        if (input.report.id === 'report-3') {
+          throw new AnalyticsError(
+            503,
+            'AnalyticsRecipientReadUnavailable',
+            'Recipient data is temporarily unavailable.',
+          )
+        }
+        return createRenderedSnapshot(input.report, input.recipientMemberKey)
+      },
+      renderArtifact: async () => {},
+    })
+  } catch (error) {
+    caught = error
+  }
+
+  expect(caught).toBeInstanceOf(AggregateError)
+  expect(maximumActiveWorkers).toBe(4)
+  expect([...attemptedReportIds].sort()).toEqual([...reportIds].sort())
+  expect(activeWorkers).toBe(0)
+}, 15_000)
+
 test('rejects an invalid EventBridge timestamp', () => {
   expect(() => resolveAnalyticsScheduleProcessingTime({
     time: 'not-a-timestamp',
@@ -537,12 +1525,13 @@ test('rejects an invalid EventBridge timestamp', () => {
 async function createScheduledReport(
   repository: InMemoryAnalyticsRepository,
   recipientMemberKeys: string[],
+  reportId = 'report-1',
 ) {
   return await repository.createReport(
     'workspace-1',
     'owner@example.com',
     {
-      id: 'report-1',
+      id: reportId,
       name: 'Delivery report',
       visibility: 'shared',
       timeZone: 'UTC',
@@ -635,7 +1624,11 @@ function createWorkItem(id: string, assignedProjectId: string): CanonicalWorkIte
   }
 }
 
-function createWorkItemEvent(workItem: CanonicalWorkItem, occurredAt: string) {
+function createWorkItemEvent(
+  workItem: CanonicalWorkItem,
+  occurredAt: string,
+  beforeStatusCategory: 'unstarted' | 'started' = 'unstarted',
+) {
   const context = createMutationAuditContext({
     workspaceId: 'workspace-1',
     actor: { id: 'owner@example.com', kind: 'user' },
@@ -660,10 +1653,37 @@ function createWorkItemEvent(workItem: CanonicalWorkItem, occurredAt: string) {
       type: 'work-item',
       id: `team/${workItem.teamId}/issue/${workItem.id}`,
     },
-    before: { statusCategory: 'unstarted' },
+    before: { statusCategory: beforeStatusCategory },
     after: { statusCategory: workItem.statusCategory },
+    metadata: {
+      adapter: 'canonical-work-item',
+      teamId: workItem.teamId,
+      issueId: workItem.id,
+      afterRevision: workItem.revision,
+    },
     expiresAt: 2_000_000_000,
   })
+}
+
+function createLegacyRawWorkItemEvent(
+  workItem: CanonicalWorkItem,
+  occurredAt: string,
+  metadataTeamId: string,
+) {
+  const event = createWorkItemEvent(workItem, occurredAt, 'started')
+  return {
+    ...event,
+    entity: {
+      type: 'work-item' as const,
+      id: workItem.id,
+    },
+    entityId: workItem.id,
+    metadata: {
+      ...event.metadata,
+      teamId: metadataTeamId,
+      issueId: workItem.id,
+    },
+  }
 }
 
 function createHistoricalWorkItemEvent(workItem: CanonicalWorkItem) {

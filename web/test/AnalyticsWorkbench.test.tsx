@@ -110,6 +110,22 @@ describe('AnalyticsWorkbench', () => {
     expect(html).toContain('Harden billing webhook retries')
     expect(html).toContain('MKJ-184')
     expect(html).toContain('Load more')
+    expect(html).toContain('Jul 16, 2026 at 1:20 PM')
+    expect(html).not.toContain('Jul 16, 2026 at 4:20 AM')
+    expect(html).toContain('tabindex="-1"')
+  })
+
+  test('keeps a closed evidence drawer hidden while an aborted request settles', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        evidenceMetric={undefined}
+        isEvidenceLoading
+      />,
+    )
+
+    expect(html).not.toContain('aria-modal="true"')
+    expect(html).not.toContain('Loading evidence')
   })
 
   test('offers example and blank-report actions in the explicit empty state', () => {
@@ -126,6 +142,25 @@ describe('AnalyticsWorkbench', () => {
     expect(html).toContain('Create your first report')
     expect(html).toContain('View an example')
     expect(html).toContain('Create blank report')
+  })
+
+  test('shows a retryable load error instead of empty-state onboarding', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        errorMessage="Analytics data could not be loaded."
+        reports={[]}
+        selectedReportId={undefined}
+        snapshot={undefined}
+        widgets={[]}
+        onRetry={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('Analytics data could not be loaded.')
+    expect(html).toContain('Retry')
+    expect(html).not.toContain('Create your first report')
+    expect(html).not.toContain('View an example')
   })
 
   test('renders an immutable snapshot with its historical widget definition', () => {
@@ -183,6 +218,9 @@ describe('AnalyticsWorkbench', () => {
     expect(html).toContain('value="monthly" selected=""')
     expect(html).not.toContain('Day of week')
     expect(html).toContain('required=""')
+    expect(html).toContain('No external email is sent.')
+    expect(html).toContain('data-modal-initial-focus="true"')
+    expect(html).toContain('tabindex="-1"')
   })
 
   test('blocks scheduled delivery when a team report has no shared team', () => {
@@ -200,6 +238,24 @@ describe('AnalyticsWorkbench', () => {
 
     expect(html).toContain('A shared team is required for a team report.')
     expect(html).toContain('role="alert"')
+    expect(html).toMatch(
+      /<button[^>]*disabled=""[^>]*type="submit"[^>]*>Save schedule<\/button>/u,
+    )
+  })
+
+  test('explains the in-app-only schedule boundary in Japanese', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        initialScheduleOpen
+        locale="ja"
+        onSaveSchedule={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('アプリ内の配信履歴')
+    expect(html).toContain('外部メールは送信されません。')
+    expect(html).toContain('アプリ内受信メンバー')
   })
 
   test('disables report saving when a team draft has no shared team', () => {

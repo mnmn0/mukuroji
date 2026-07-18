@@ -254,6 +254,7 @@ import {
   createAnalyticsPermissionScopeHash,
   createAnalyticsPdf,
   createAnalyticsSnapshot,
+  normalizeAnalyticsExportLocale,
   queryAnalyticsEvidence,
   type AnalyticsRepository,
 } from './analytics'
@@ -1192,10 +1193,19 @@ const WORK_ITEMS_RESPONSE_LIMIT = 200
 const WORK_ITEMS_TEAM_READ_LIMIT = 20
 /** `/api/work-items` が 1 partition で filter/dedupe 前に評価する最大 item 数です。 */
 const WORK_ITEMS_PARTITION_SCAN_LIMIT = 1_000
-/** Analytics が一度に読む audit event page の評価上限です。 */
+/** Analytics が一つの entity query で読む audit event page size です。 */
 const ANALYTICS_AUDIT_PAGE_SIZE = 100
-/** Analytics が部分集計を返さず fail-closed にする最大 audit page 数です。 */
+/** Analytics が一つの Work Item identity で読む最大 audit page 数です。 */
 const ANALYTICS_AUDIT_MAX_PAGES = 100
+/** Analytics が認可済み Work Item 全体で評価する最大 audit event 数です。 */
+const ANALYTICS_AUDIT_EVENT_LIMIT =
+  ANALYTICS_AUDIT_PAGE_SIZE * ANALYTICS_AUDIT_MAX_PAGES
+/** Entity-scoped audit query を並列実行する最大 worker 数です。 */
+const ANALYTICS_AUDIT_QUERY_CONCURRENCY = 8
+/** API timeout 内に収めるため、一度にqueryするWork Item identityの最大数です。 */
+const ANALYTICS_AUDIT_IDENTITY_QUERY_LIMIT = 500
+/** 全 identity の pagination を通じて実行する audit page query の最大数です。 */
+const ANALYTICS_AUDIT_PAGE_QUERY_LIMIT = 500
 /** Analytics が filter/ACL 適用後に一度に評価する Work Item の最大数です。 */
 const ANALYTICS_WORK_ITEM_LIMIT = 10_000
 /** Analytics が一度に読む Team または Project partition の最大数です。 */
@@ -2894,6 +2904,7 @@ app.post('/api/analytics/export', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     const input = await readAnalyticsJson(c) as AnalyticsExportInput
     const format = readAnalyticsExportFormat(input.format)
+    const locale = normalizeAnalyticsExportLocale(input.locale)
     const snapshot = await resolveAnalyticsExportSnapshot(principal, input)
     const headers = {
       'Cache-Control': 'private, no-store',
@@ -2903,9 +2914,9 @@ app.post('/api/analytics/export', async (c) => {
         : 'application/pdf',
     }
     if (format === 'csv') {
-      return c.body(createAnalyticsCsv(snapshot), 200, headers)
+      return c.body(createAnalyticsCsv(snapshot, locale), 200, headers)
     }
-    return new Response(createAnalyticsPdf(snapshot), { headers, status: 200 })
+    return new Response(createAnalyticsPdf(snapshot, locale), { headers, status: 200 })
   } catch (error) {
     return toAnalyticsErrorResponse(c, error)
   }
@@ -7088,46 +7099,222 @@ async function readAuthorizedAnalyticsData(
   const historyReadAt = new Date(
     Math.max(Date.now(), Date.parse(asOf)),
   ).toISOString()
-  const entityIds = new Set(workItems.map((workItem) =>
-    createTeamIssueAuditEntityId(workItem.teamId, workItem.id)
-  ))
-  const events: AuditEventV1[] = []
-  let cursor: string | undefined
-  let pageCount = 0
-
-  do {
-    if (pageCount >= ANALYTICS_AUDIT_MAX_PAGES) {
-      throw new AnalyticsError(
-        413,
-        'AnalyticsHistoryLimitExceeded',
-        'Analytics history exceeds the safe query limit. Reduce retained history or add a scoped history index before retrying.',
-      )
-    }
-    const page = await auditEvents.query({
-      workspaceId: principal.directoryId,
-      entityType: 'work-item',
-      to: historyReadAt,
-      limit: ANALYTICS_AUDIT_PAGE_SIZE,
-      cursor,
-      direction: 'ascending',
-    })
-    pageCount += 1
-    for (const event of page.events) {
-      if (
-        event.entityType === 'work-item' &&
-        entityIds.has(event.entityId)
-      ) {
-        events.push(event)
-      }
-    }
-    cursor = page.nextCursor
-  } while (cursor)
+  const events = await readAuthorizedAnalyticsAuditEvents(
+    principal.directoryId,
+    workItems,
+    historyReadAt,
+  )
 
   return {
     workItems,
     events,
     authorizedProjectIds: accessible.authorizedProjectIds,
   }
+}
+
+/**
+ * Current ACL で選ばれた Work Item identity だけを entity GSI から読みます。
+ *
+ * Canonical identity に加えて legacy raw ID も検索しますが、raw ID event は Team/Issue
+ * metadata または canonical target が current authorized Work Item と一致する場合だけ採用します。
+ * Team を跨いで同じ raw ID が存在しても、認可不能な event を別 Work Item に帰属させません。
+ */
+async function readAuthorizedAnalyticsAuditEvents(
+  workspaceId: string,
+  workItems: readonly TeamIssueResponseItem[],
+  historyReadAt: string,
+) {
+  const authorizedRawIdByCanonicalEntityId = new Map(workItems.map((workItem) => [
+    createTeamIssueAuditEntityId(workItem.teamId, workItem.id),
+    workItem.id,
+  ]))
+  const authorizedCanonicalEntityIds = new Set(
+    authorizedRawIdByCanonicalEntityId.keys(),
+  )
+  const identities = [
+    ...[...authorizedCanonicalEntityIds].sort().map((entityId) => ({
+      entityId,
+      legacyRawId: false,
+    })),
+    ...[...new Set(workItems.map((workItem) => workItem.id))].sort().map((entityId) => ({
+      entityId,
+      legacyRawId: true,
+    })),
+  ]
+  if (identities.length > ANALYTICS_AUDIT_IDENTITY_QUERY_LIMIT) {
+    throw new AnalyticsError(
+      413,
+      'AnalyticsHistoryLimitExceeded',
+      `Analytics history requires more than ${ANALYTICS_AUDIT_IDENTITY_QUERY_LIMIT} entity timeline queries. Narrow the report scope.`,
+    )
+  }
+  const events: AuditEventV1[] = []
+  let nextIdentityIndex = 0
+  let pageQueryCount = 0
+  let readEventCount = 0
+  let failure: unknown
+  const workerCount = Math.min(ANALYTICS_AUDIT_QUERY_CONCURRENCY, identities.length)
+
+  const readNextIdentity = async () => {
+    while (failure === undefined) {
+      const identityIndex = nextIdentityIndex
+      nextIdentityIndex += 1
+      const identity = identities[identityIndex]
+      if (!identity) return
+
+      try {
+        let cursor: string | undefined
+        let pageCount = 0
+        do {
+          if (
+            pageCount >= ANALYTICS_AUDIT_MAX_PAGES ||
+            pageQueryCount >= ANALYTICS_AUDIT_PAGE_QUERY_LIMIT
+          ) {
+            throw createAnalyticsHistoryLimitExceededError()
+          }
+          pageQueryCount += 1
+          const page = await auditEvents.query({
+            workspaceId,
+            entityType: 'work-item',
+            entityId: identity.entityId,
+            to: historyReadAt,
+            limit: ANALYTICS_AUDIT_PAGE_SIZE,
+            cursor,
+            direction: 'ascending',
+          })
+          pageCount += 1
+          readEventCount += page.events.length
+          if (readEventCount > ANALYTICS_AUDIT_EVENT_LIMIT) {
+            throw createAnalyticsHistoryLimitExceededError()
+          }
+          for (const event of page.events) {
+            const authorized = identity.legacyRawId
+              ? isAuthorizedLegacyAnalyticsAuditEvent(
+                event,
+                identity.entityId,
+                authorizedRawIdByCanonicalEntityId,
+              )
+              : isCanonicalAnalyticsAuditEvent(event, identity.entityId)
+            if (!authorized) continue
+
+            events.push(event)
+            if (events.length > ANALYTICS_AUDIT_EVENT_LIMIT) {
+              throw createAnalyticsHistoryLimitExceededError()
+            }
+          }
+          cursor = page.nextCursor
+        } while (cursor)
+      } catch (error) {
+        failure ??= error
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, readNextIdentity))
+  if (failure !== undefined) throw failure
+  return events
+}
+
+/** Canonical entity query の結果が要求した Work Item identity と完全一致するかを判定します。 */
+function isCanonicalAnalyticsAuditEvent(
+  event: AuditEventV1,
+  canonicalEntityId: string,
+) {
+  return event.entityType === 'work-item' &&
+    event.entity.type === 'work-item' &&
+    event.entityId === canonicalEntityId &&
+    event.entity.id === canonicalEntityId
+}
+
+/** Legacy raw-ID event が current authorized Work Item へ安全に解決できるかを判定します。 */
+function isAuthorizedLegacyAnalyticsAuditEvent(
+  event: AuditEventV1,
+  rawWorkItemId: string,
+  authorizedRawIdByCanonicalEntityId: ReadonlyMap<string, string>,
+) {
+  if (
+    event.entityType !== 'work-item' ||
+    event.entity.type !== 'work-item'
+  ) {
+    return false
+  }
+  if (
+    event.entityId !== rawWorkItemId ||
+    event.entity.id !== rawWorkItemId
+  ) {
+    return false
+  }
+  if (
+    event.targetType !== event.target.type ||
+    event.targetId !== event.target.id
+  ) {
+    return false
+  }
+
+  const metadataTeamValue = event.metadata?.teamId
+  const metadataIssueValue = event.metadata?.issueId
+  const metadataWorkItemValue = event.metadata?.workItemId
+  const metadataTeamId = readAnalyticsAuditMetadataText(event.metadata?.teamId)
+  const metadataIssueId = readAnalyticsAuditMetadataText(metadataIssueValue)
+  const metadataWorkItemId = readAnalyticsAuditMetadataText(metadataWorkItemValue)
+  if (
+    (metadataTeamValue !== undefined && metadataTeamId === undefined) ||
+    (metadataIssueValue !== undefined && metadataIssueId === undefined) ||
+    (metadataWorkItemValue !== undefined && metadataWorkItemId === undefined)
+  ) {
+    return false
+  }
+  if (
+    metadataIssueId !== undefined &&
+    metadataWorkItemId !== undefined &&
+    metadataIssueId !== metadataWorkItemId
+  ) {
+    return false
+  }
+  const metadataRawId = metadataIssueId ?? metadataWorkItemId
+  if (metadataRawId !== undefined && metadataRawId !== rawWorkItemId) {
+    return false
+  }
+
+  const resolvedCanonicalEntityIds = new Set<string>()
+  if (metadataTeamId !== undefined) {
+    const canonicalEntityId = createTeamIssueAuditEntityId(
+      metadataTeamId,
+      metadataRawId ?? rawWorkItemId,
+    )
+    if (
+      authorizedRawIdByCanonicalEntityId.get(canonicalEntityId) !==
+        rawWorkItemId
+    ) {
+      return false
+    }
+    resolvedCanonicalEntityIds.add(canonicalEntityId)
+  }
+
+  if (event.targetType === 'work-item' && event.targetId !== rawWorkItemId) {
+    if (
+      authorizedRawIdByCanonicalEntityId.get(event.targetId) !==
+        rawWorkItemId
+    ) {
+      return false
+    }
+    resolvedCanonicalEntityIds.add(event.targetId)
+  }
+  return resolvedCanonicalEntityIds.size === 1
+}
+
+/** Analytics audit metadata の non-empty string だけを返します。 */
+function readAnalyticsAuditMetadataText(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+/** Relevant entity history が安全上限を超えた場合の fail-closed error を返します。 */
+function createAnalyticsHistoryLimitExceededError() {
+  return new AnalyticsError(
+    413,
+    'AnalyticsHistoryLimitExceeded',
+    'Analytics history for the authorized Work Items exceeds the safe query limit. Narrow the report scope.',
+  )
 }
 
 /**

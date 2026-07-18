@@ -58,7 +58,10 @@ export function parseAnalyticsRouteState(
   fallbackTimezone: string,
   fallbackForecastBaseline?: AnalyticsDateRange,
 ): AnalyticsRouteState {
-  const fallback = asRecord(fallbackFilter)
+  const usesLegacyFallback = !searchParams.has('v')
+  const fallback = usesLegacyFallback
+    ? asRecord(fallbackFilter)
+    : {}
   const fallbackPeriod = asRecord(fallback.period)
   const from = readValue(searchParams, 'from') ??
     readString(fallbackPeriod.from) ??
@@ -87,9 +90,9 @@ export function parseAnalyticsRouteState(
       : fallback.includeArchived === true,
   } as unknown as AnalyticsFilter
   const baselineFrom = readValue(searchParams, 'baselineFrom') ??
-    fallbackForecastBaseline?.from
+    (usesLegacyFallback ? fallbackForecastBaseline?.from : undefined)
   const baselineTo = readValue(searchParams, 'baselineTo') ??
-    fallbackForecastBaseline?.to
+    (usesLegacyFallback ? fallbackForecastBaseline?.to : undefined)
   const forecastBaseline = searchParams.get('baseline') === 'none'
     ? undefined
     : baselineFrom && baselineTo
@@ -103,7 +106,8 @@ export function parseAnalyticsRouteState(
     forecastBaseline,
     reportId: readValue(searchParams, 'report'),
     snapshotId: readValue(searchParams, 'snapshot'),
-    timezone: readValue(searchParams, 'timezone') ?? fallbackTimezone,
+    timezone: readValue(searchParams, 'timezone') ??
+      (usesLegacyFallback ? fallbackTimezone : 'UTC'),
   }
 }
 

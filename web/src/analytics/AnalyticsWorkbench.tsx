@@ -19,6 +19,7 @@ import {
   type Locale,
   type MessageKey,
 } from '../i18n'
+import { useModalFocus } from '../components/useModalFocus'
 import type { ProjectDirectoryTeam } from '../projects/api'
 import type { AnalyticsExportFormat } from './api'
 import {
@@ -323,6 +324,7 @@ export function AnalyticsWorkbench({
   const contentResults = snapshot?.widgets.filter((result) =>
     resolveWidgetType(widgets, result.widgetId) !== 'metric') ?? []
   const showEmptyState = !isLoading &&
+    !errorMessage &&
     reports.length === 0 &&
     !selectedReport &&
     !snapshot &&
@@ -601,13 +603,14 @@ export function AnalyticsWorkbench({
         </div>
       </div>
 
-      {evidenceMetric || isEvidenceLoading ? (
+      {evidenceMetric ? (
         <AnalyticsEvidenceDrawer
           evidence={evidence}
           isLoading={isEvidenceLoading}
           locale={locale}
           metric={evidenceMetric}
           t={t}
+          timeZone={timeZone}
           onClose={onCloseEvidence}
           onLoadMore={onLoadMoreEvidence}
           onOpenWorkItem={onOpenWorkItem}
@@ -1581,6 +1584,7 @@ function AnalyticsEvidenceDrawer({
   onLoadMore,
   onOpenWorkItem,
   t,
+  timeZone,
 }: {
   evidence?: AnalyticsEvidenceResponse
   isLoading: boolean
@@ -1590,12 +1594,15 @@ function AnalyticsEvidenceDrawer({
   onLoadMore?: () => void
   onOpenWorkItem?: (item: AnalyticsEvidenceItem) => void
   t: ReturnType<typeof createTranslator>
+  timeZone: string
 }) {
+  const dialogRef = useModalFocus<HTMLElement>(() => onClose?.())
+
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/30" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose?.()
     }}>
-      <aside aria-label={t('analytics.evidence.title')} aria-modal="true" className="ml-auto flex h-full w-full max-w-[560px] flex-col border-l border-[var(--workbench-border)] bg-white shadow-2xl" role="dialog">
+      <aside ref={dialogRef} aria-label={t('analytics.evidence.title')} aria-modal="true" className="ml-auto flex h-full w-full max-w-[560px] flex-col border-l border-[var(--workbench-border)] bg-white shadow-2xl" role="dialog" tabIndex={-1}>
         <header className="flex items-start justify-between gap-4 border-b border-[var(--workbench-border)] px-5 py-4">
           <div>
             <p className="workbench-eyebrow">{t('analytics.evidence.eyebrow')}</p>
@@ -1625,7 +1632,7 @@ function AnalyticsEvidenceDrawer({
                   <span className="flex flex-wrap items-center gap-2 text-xs font-medium text-[var(--workbench-muted)]">
                     <span>{item.teamId}</span>
                     {item.projectId ? <span>· {item.projectId}</span> : null}
-                    <span>· {formatDateTime(item.occurredAt, locale, 'UTC')}</span>
+                    <span>· {formatDateTime(item.occurredAt, locale, timeZone)}</span>
                   </span>
                   <span className="flex flex-wrap gap-2">
                     <span className="workbench-badge">{item.workItemId}</span>
@@ -1677,12 +1684,13 @@ function AnalyticsScheduleDialog({
       ? undefined
       : t('analytics.schedule.teamRequired'),
   )
+  const dialogRef = useModalFocus<HTMLElement>(onClose)
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 px-4 py-6" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose()
     }}>
-      <section aria-label={t('analytics.schedule.title')} aria-modal="true" className="workbench-panel w-full max-w-[560px] overflow-hidden" role="dialog">
+      <section ref={dialogRef} aria-label={t('analytics.schedule.title')} aria-modal="true" className="workbench-panel w-full max-w-[560px] overflow-hidden" role="dialog" tabIndex={-1}>
         <div className="flex items-start justify-between gap-4 border-b border-[var(--workbench-border)] px-5 py-4">
           <div>
             <h2 className="text-lg font-semibold text-[var(--workbench-text)]">{t('analytics.schedule.title')}</h2>
@@ -1736,6 +1744,7 @@ function AnalyticsScheduleDialog({
               {t('analytics.schedule.frequency')}
               <select
                 className="workbench-input min-h-10 px-3"
+                data-modal-initial-focus
                 name="frequency"
                 value={frequency}
                 onChange={(event) =>
@@ -1816,7 +1825,7 @@ function AnalyticsScheduleDialog({
             </button>
             <span className="flex gap-2">
               <button className="workbench-button-secondary min-h-10 px-4" disabled={isSaving} type="button" onClick={onClose}>{t('analytics.schedule.cancel')}</button>
-              <button className="workbench-button-primary min-h-10 px-4 disabled:opacity-50" disabled={isSaving} type="submit">{isSaving ? t('analytics.schedule.saving') : t('analytics.schedule.save')}</button>
+              <button className="workbench-button-primary min-h-10 px-4 disabled:opacity-50" disabled={isSaving || !isTeamVisibilityValid} type="submit">{isSaving ? t('analytics.schedule.saving') : t('analytics.schedule.save')}</button>
             </span>
           </div>
         </form>
