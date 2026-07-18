@@ -42,6 +42,8 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 
 - `POST /api/auth/login`, `GET /api/auth/me`
 - `GET /api/dashboard/summary`
+- `/api/analytics/query`, `/api/analytics/evidence`, `/api/analytics/export`
+- `/api/analytics/reports`, `/api/analytics/reports/{reportId}/snapshots`
 - `POST /api/teams`, `GET /api/teams/projects`
 - `/api/teams/{teamId}/issues`
 - `/api/teams/{teamId}/issues/{issueId}/collaboration`, `/comments`, `/watch`, `/presence`
@@ -62,6 +64,8 @@ Default local table names are:
 - `MUKUROJI_REALTIME_SESSIONS_TABLE=mukuroji-realtime-sessions-local`
 - `MUKUROJI_AUDIT_EVENTS_TABLE=mukuroji-audit-events`
 - `PLANNING_TABLE_NAME=mukuroji-planning-local`
+- `ANALYTICS_TABLE_NAME=mukuroji-analytics-local`
+- `ANALYTICS_SCHEDULE_INDEX_NAME=ScheduleDueIndex`
 - `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`（未指定時は `mukuroji-workspace-search-local`）
 - `MUKUROJI_AUDIT_RETENTION_DAYS=2555`
 - `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64桁の小文字hex固定key>`（`openssl rand -hex 32` などで生成し、API と backfill で共有して通常は rotation しない）
@@ -82,6 +86,20 @@ The local Floci seed writes `workspace#mukuroji-local` to both `custom:directory
 Planning records use `PLANNING_TABLE_NAME` and the production-compatible
 `workspaceId` / `recordKey` key schema. CDK supplies the deployed `PlanningTable`
 name to the API Lambda through the same environment variable.
+
+Analytics report、immutable snapshot、scheduled delivery receipt は
+`ANALYTICS_TABLE_NAME` の `workspaceId` / `recordKey` に保存します。定期配信対象は
+`ANALYTICS_SCHEDULE_INDEX_NAME` の `scheduleShard` / `nextDeliveryAtRecordKey` で取得します。
+API は Team partition の canonical Work Item を archived row も含めて読み、current ACL を
+確定してから、同じ Team/Work Item entity ID の audit event を request 読み取り時点まで取得します。
+Analytics engine は `asOf` より後の project/archive/status event を巻き戻して historical state を
+復元します。`asOf`時点のProjectがcurrent active/readable Project集合の外なら、現在は別の
+参照可能Projectに移動済みでも集計しません。現在削除済み、またはcallerのcurrent ACL外になった
+itemも集計しません。
+Work Item は Team partition 100件、1 partition/合計10,000件、audit history は100件×100 pageを
+上限とし、超過時は部分結果を返さず`413`でfail-closedにします。
+Metric定義、timezone、archive、snapshot、scheduleの詳細は
+[`docs/analytics.md`](../docs/analytics.md) を参照してください。
 
 To preview and run the append-only audit backfill against local DynamoDB:
 

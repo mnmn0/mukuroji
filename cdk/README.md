@@ -35,11 +35,13 @@
 - `TeamIssuesTableName`（`WorkItemsTableName` と同じ table を指す互換 output）
 - `WorkItemConfigurationTableName`（workflow、custom field、relation graph の scope store）
 - `PlanningTableName`（cycle、goal、milestone、roadmap、portfolio の計画 store）
+- `AnalyticsTableName`（report、immutable snapshot、scheduled delivery receipt の store）
 - `RequestIntakeTableName`（form version、link capability、submission、queue、reply thread の scope store）
 - `RequestEmailIngestionFunctionName`, `RequestEmailIngestionDlqUrl`
 - `ProjectDirectoryTableName`, `TeamIssueEventsTableName`
 - `FileProofingTableName`, `FileBucketName`, `FileMalwareProtectionPlanId`
 - `NotificationsTableName`, `CollaborationProjectionDlqUrl`, `NotificationScheduleDlqUrl`
+- `AnalyticsScheduleDlqUrl`
 - `AuditEventsTableName`, `ProcessedAuditEventsTableName`
 - `WorkItemCollaborationTableName`, `RealtimeSessionsTableName`, `RealtimeWebSocketUrl`
 - `WorkspaceSearchTableName`（検索文書、saved view、ユーザー別 view preference）
@@ -273,6 +275,39 @@ CDK は configuration row を強制 seed しません。row が無い Workspace 
 `PlanningTable` は `workspaceId` / `recordKey` を primary key とし、cycle、goal、milestone、roadmap、portfolio とその関連情報を Workspace ごとに保存します。API Lambda には `PLANNING_TABLE_NAME` を設定し、この table への read/write と `TransactWriteItems` を stack resource に限定して許可します。
 
 Table は `PAY_PER_REQUEST`、`Retain`、PITR enabled で作成します。deploy 前後に `PlanningTableName` output と Lambda の `PLANNING_TABLE_NAME` が同じ table を指すこと、table replacement がないこと、API role 以外へ不要な planning data 権限が付いていないことを確認してください。
+
+## Analytics data and scheduled delivery
+
+`AnalyticsTable` は `workspaceId` / `recordKey` をprimary keyとし、saved report、immutable
+snapshot、scheduled delivery receiptをWorkspaceごとに保存します。Tableは
+`PAY_PER_REQUEST`、`Retain`、PITR enabledです。Due reportは`ScheduleDueIndex`の
+`scheduleShard` / `nextDeliveryAtRecordKey`で取得します。
+
+Shared API Lambdaには`ANALYTICS_TABLE_NAME`と`ANALYTICS_SCHEDULE_INDEX_NAME`を設定し、
+analytics tableへのread/writeだけをstack resourceへ限定して許可します。
+`AnalyticsScheduleFunction`は5分ごとのEventBridge ruleで起動し、同じreport occurrenceを
+決定的なreceiptで重複排除します。Schedule roleはAnalyticsTableへのread/writeに加えて、
+recipientのcurrent ACLとhistorical stateを評価するため、`AuditEventsTable`、
+`ProjectDirectoryTable`、`WorkItemsTable`、`WorkspaceAccessTable`へのread-only権限だけを
+持ちます。非同期retryを2回行った後の失敗は14日保持のencrypted
+`AnalyticsScheduleDlq`へ入り、visible messageが1件以上になるとCloudWatch alarmが
+`ALARM`になります。
+
+Schedule deliveryは現在のrecipient認可を確認できない場合に送信しないfail-closed contractです。
+現行delivery boundaryはimmutable snapshotとin-app receiptの保存で、artifact rendererは外部
+副作用を持ちません。SESや外部email providerの権限はAnalytics Lambdaへ付与しません。Emailを
+追加する場合はtransactional outboxまたはdelivery state machine、provider adapter、secret、
+bounce/retry運用を別変更として導入してください。またAnalyticsのために`AuditEventsTable` streamへ
+3つ目のdirect event source mappingを追加しません。
+
+Deploy前後に次を確認します。
+
+1. `AnalyticsTableName` outputと両Lambdaの`ANALYTICS_TABLE_NAME`が同じtableを指す。
+2. Table replacement/deletionがなく、PITRとRetainが維持される。
+3. `ScheduleDueIndex`のkey schemaが変更されていない。
+4. API/schedule role以外にanalytics table権限が付いていない。
+5. Schedule roleのsource table権限がread-onlyで、write権限がAnalyticsTableだけに限定される。
+6. `AnalyticsScheduleDlqUrl`の滞留とCloudWatch alarmを監視対象に追加する。
 
 ## Rollback
 

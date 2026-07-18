@@ -5,6 +5,8 @@ import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient, TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import {
   AUTOMATION_SCHEMA_VERSION,
+  type AnalyticsQueryInput,
+  type AnalyticsSnapshotRecord,
   type AutomationTemplate,
   type AutomationTemplateApplication,
   type AutomationTemplateApplicationResult,
@@ -15,6 +17,7 @@ import {
   type PlanningMutationResponse,
   type PlanningSnapshot,
   type WorkItemConfiguration,
+  type CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import {
@@ -74,9 +77,559 @@ import {
 } from './work-item-configuration'
 import { InMemoryPlanningClient } from './planning'
 import type { RequestIntakeClient } from './request-intake'
+import {
+  InMemoryAnalyticsRepository,
+} from './analytics'
 
 afterEach(() => {
   resetApiClientsForTest()
+})
+
+test('keeps Analytics queries independent from the 200-item aggregate list limit', async () => {
+  const calls = configureFakeProjectClients(true, { teamIssueCount: 250 })
+  const auditQueries: Array<Record<string, unknown>> = []
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        auditQueries.push(input)
+        return { events: [] }
+      },
+    },
+  })
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...createAnalyticsQueryInput(),
+    filter: {
+      ...createAnalyticsQueryInput().filter,
+      teamIds: ['core-team'],
+    },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as {
+    snapshot: { widgets: Array<{ sampleSize: number; value: number | null }> }
+  }
+  expect(body.snapshot.widgets[0]).toMatchObject({ sampleSize: 250, value: 250 })
+  expect(calls.issueReads).toContainEqual({
+    directoryId: 'user#demo@example.com',
+    limit: 10_001,
+    teamId: 'core-team',
+  })
+  expect(auditQueries).toEqual([expect.objectContaining({
+    direction: 'ascending',
+    entityType: 'work-item',
+  })])
+})
+
+test('requires authentication and enforces Team report viewer/manager ACLs', async () => {
+  const unauthenticated = await app.request('/api/analytics/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(createAnalyticsQueryInput()),
+  })
+  expect(unauthenticated.status).toBe(401)
+
+  const repository = new InMemoryAnalyticsRepository()
+  await repository.createReport('user#demo@example.com', 'demo@example.com', {
+    id: 'team-report',
+    name: 'Team report',
+    visibility: 'team',
+    teamId: 'core-team',
+    timeZone: 'UTC',
+    filter: createAnalyticsQueryInput().filter,
+    widgets: createAnalyticsQueryInput().widgets,
+  })
+  configureFakeProjectClients(false, { workspaceRole: 'member' })
+  configureApiClientsForTest({ analytics: repository })
+  const hidden = await app.request('/api/analytics/reports', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(hidden.status).toBe(200)
+  expect(await hidden.json()).toEqual({ reports: [] })
+  const deniedQuery = await analyticsApiRequest('/api/analytics/query', {
+    reportId: 'team-report',
+    asOf: createAnalyticsQueryInput().asOf,
+  })
+  expect(deniedQuery.status).toBe(403)
+
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  const visible = await app.request('/api/analytics/reports', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(visible.status).toBe(200)
+  expect(await visible.json()).toMatchObject({
+    reports: [expect.objectContaining({ id: 'team-report' })],
+  })
+  const viewerWrite = await analyticsApiRequest(
+    '/api/analytics/reports/team-report',
+    { expectedRevision: 1, name: 'Viewer edit' },
+    'PATCH',
+  )
+  expect(viewerWrite.status).toBe(403)
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const managerWrite = await analyticsApiRequest(
+    '/api/analytics/reports/team-report',
+    { expectedRevision: 1, name: 'Manager edit' },
+    'PATCH',
+  )
+  expect(managerWrite.status).toBe(200)
+  expect(await managerWrite.json()).toMatchObject({
+    report: { name: 'Manager edit', revision: 2 },
+  })
+})
+
+test('fails closed instead of returning a partial Analytics aggregate above its safe cap', async () => {
+  configureFakeProjectClients(true, { teamIssueCount: 10_001 })
+  let auditReads = 0
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        auditReads += 1
+        return { events: [] }
+      },
+    },
+  })
+
+  const response = await analyticsApiRequest(
+    '/api/analytics/query',
+    createAnalyticsQueryInput(),
+  )
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toMatchObject({
+    code: 'AnalyticsWorkItemLimitExceeded',
+  })
+  expect(auditReads).toBe(0)
+}, 10_000)
+
+test('filters inaccessible Work Items and unrelated audit pages before Analytics execution', async () => {
+  configureFakeProjectClients(true, {
+    inaccessibleTeamIssueCount: 1,
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+    teamIssueCount: 2,
+  })
+  const auditQueries: Array<Record<string, unknown>> = []
+  let auditPage = 0
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        auditQueries.push(input)
+        auditPage += 1
+        return auditPage === 1
+          ? {
+              events: [createAnalyticsAuditEvent(
+                'workspace-member',
+                'private-member',
+                '2026-07-10T00:00:00.000Z',
+              )],
+              nextCursor: 'next-page',
+            }
+          : { events: [] }
+      },
+    },
+  })
+
+  const response = await analyticsApiRequest(
+    '/api/analytics/query',
+    createAnalyticsQueryInput(),
+  )
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as {
+    snapshot: { widgets: Array<{ sampleSize: number; value: number | null }> }
+  }
+  expect(body.snapshot.widgets[0]).toMatchObject({ sampleSize: 1, value: 1 })
+  expect(auditQueries).toHaveLength(2)
+  expect(auditQueries.every((query) => query.entityType === 'work-item')).toBe(true)
+})
+
+test('rewinds post-asOf status, project, and archive changes from current authorized state', async () => {
+  const current = createHistoricalAnalyticsWorkItem()
+  const futureEvent = createHistoricalAnalyticsWorkItemEvent(current)
+  const includeArchivedReads: boolean[] = []
+  const auditUpperBounds: string[] = []
+  configureFakeProjectClients(true, {
+    projectAccesses: [
+      { projectId: 'project-before', role: 'viewer' },
+      { projectId: 'project-after', role: 'viewer' },
+    ],
+    teamProjects: [
+      { id: 'project-before', name: 'Before', tone: 'blue' },
+      { id: 'project-after', name: 'After', tone: 'green' },
+    ],
+  })
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    teamIssues: {
+      async getTeamIssues(_workspaceId, teamId, options) {
+        includeArchivedReads.push(options?.includeArchived === true)
+        return { teamId, issues: [current] }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+    >,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        auditUpperBounds.push(input.to ?? '')
+        return Date.parse(input.to ?? '') >= Date.parse(futureEvent.occurredAt)
+          ? { events: [futureEvent] }
+          : { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  query.asOf = '2026-07-16T12:00:00.000Z'
+  query.filter.projectIds = ['project-before']
+
+  const response = await analyticsApiRequest('/api/analytics/query', query)
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as {
+    snapshot: { widgets: Array<{ sampleSize: number; value: number | null }> }
+  }
+  expect(body.snapshot.widgets[0]).toMatchObject({ sampleSize: 1, value: 1 })
+  expect(includeArchivedReads).toEqual([true])
+  expect(auditUpperBounds).toHaveLength(1)
+  expect(Date.parse(auditUpperBounds[0]!)).toBeGreaterThan(Date.parse(futureEvent.occurredAt))
+})
+
+test('excludes historical Project state outside current ACL and invalidates its snapshots', async () => {
+  const repository = new InMemoryAnalyticsRepository()
+  const current = createHistoricalAnalyticsWorkItem()
+  const futureEvent = createHistoricalAnalyticsWorkItemEvent(current)
+  const projectDefinitions = [
+    { id: 'project-before', name: 'Before', tone: 'blue' as const },
+    { id: 'project-after', name: 'After', tone: 'green' as const },
+  ]
+  const configureHistoricalAccess = (
+    projectIds: string[],
+    activeProjectIds = ['project-before', 'project-after'],
+  ) => {
+    configureFakeProjectClients(true, {
+      workspaceRole: 'owner',
+      projectAccesses: projectIds.map((projectId) => ({
+        projectId,
+        role: 'viewer' as const,
+      })),
+      teamProjects: projectDefinitions.filter((project) =>
+        activeProjectIds.includes(project.id)
+      ),
+    })
+    configureApiClientsForTest({
+      analytics: repository,
+      teamIssues: {
+        async getTeamIssues(_workspaceId, teamId) {
+          return { teamId, issues: [current] }
+        },
+      } as unknown as NonNullable<
+        Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+      >,
+      auditEvents: {
+        async getEvent() {
+          return undefined
+        },
+        async query() {
+          return { events: [futureEvent] }
+        },
+      },
+    })
+  }
+  const query = createAnalyticsQueryInput()
+  query.asOf = '2026-07-16T12:00:00.000Z'
+
+  configureHistoricalAccess(['project-after'])
+  const excludedQuery = await analyticsApiRequest('/api/analytics/query', query)
+  expect(excludedQuery.status).toBe(200)
+  expect(await excludedQuery.json()).toMatchObject({
+    snapshot: {
+      widgets: [{
+        metric: 'wip',
+        sampleSize: 0,
+        value: 0,
+      }],
+    },
+  })
+  const excludedEvidence = await analyticsApiRequest('/api/analytics/evidence', {
+    metric: 'wip',
+    filter: query.filter,
+    asOf: query.asOf,
+    timeZone: query.timeZone,
+  })
+  expect(excludedEvidence.status).toBe(200)
+  expect(await excludedEvidence.json()).toMatchObject({ items: [] })
+
+  configureHistoricalAccess(
+    ['project-before', 'project-after'],
+    ['project-after'],
+  )
+  const staleAccessQuery = await analyticsApiRequest('/api/analytics/query', query)
+  expect(staleAccessQuery.status).toBe(200)
+  expect(await staleAccessQuery.json()).toMatchObject({
+    snapshot: {
+      widgets: [{
+        sampleSize: 0,
+        value: 0,
+      }],
+    },
+  })
+
+  configureHistoricalAccess(['project-before', 'project-after'])
+  await repository.createReport('user#demo@example.com', 'demo@example.com', {
+    id: 'historical-scope-report',
+    name: 'Historical scope report',
+    visibility: 'personal',
+    timeZone: query.timeZone,
+    filter: query.filter,
+    widgets: query.widgets,
+  })
+  const createdSnapshot = await analyticsApiRequest(
+    '/api/analytics/reports/historical-scope-report/snapshots',
+    query,
+  )
+  expect(createdSnapshot.status).toBe(201)
+  const createdSnapshotBody = await createdSnapshot.json() as {
+    snapshotRecord: AnalyticsSnapshotRecord
+  }
+  expect(createdSnapshotBody.snapshotRecord.snapshot.widgets[0]).toMatchObject({
+    sampleSize: 1,
+    value: 1,
+  })
+
+  configureHistoricalAccess(['project-after'])
+  const hiddenSnapshots = await app.request(
+    '/api/analytics/reports/historical-scope-report/snapshots',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(hiddenSnapshots.status).toBe(200)
+  expect(await hiddenSnapshots.json()).toEqual({ snapshots: [] })
+  const deniedExport = await analyticsApiRequest('/api/analytics/export', {
+    snapshotId: createdSnapshotBody.snapshotRecord.id,
+    format: 'csv',
+  })
+  expect(deniedExport.status).toBe(403)
+  expect(await deniedExport.json()).toMatchObject({
+    code: 'AnalyticsSnapshotScopeChanged',
+  })
+})
+
+test('preserves exact snapshot queries, saved baselines, and server-owned schedule cursors', async () => {
+  const repository = new InMemoryAnalyticsRepository(
+    () => new Date('2026-07-18T08:00:00.000Z'),
+  )
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  configureApiClientsForTest({
+    analytics: repository,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const createInput = {
+    id: 'analytics-api-report',
+    name: 'Analytics API report',
+    visibility: 'personal',
+    timeZone: 'UTC',
+    filter: createAnalyticsQueryInput().filter,
+    forecastBaseline: {
+      from: '2026-08-01T00:00:00.000Z',
+      to: '2026-08-31T23:59:59.999Z',
+    },
+    widgets: createAnalyticsQueryInput().widgets,
+    schedule: {
+      enabled: true,
+      frequency: 'daily',
+      timeZone: 'UTC',
+      localTime: '09:00',
+      recipientMemberKeys: ['demo@example.com'],
+      format: 'csv',
+      nextRunAt: '2099-01-01T00:00:00.000Z',
+    },
+  }
+  const createdResponse = await analyticsApiRequest(
+    '/api/analytics/reports',
+    createInput,
+  )
+  expect(createdResponse.status).toBe(201)
+  const created = await createdResponse.json() as {
+    report: {
+      revision: number
+      forecastBaseline?: { from: string; to: string }
+      schedule?: { nextRunAt?: string }
+    }
+  }
+  expect(created.report.forecastBaseline).toEqual(createInput.forecastBaseline)
+  expect(created.report.schedule?.nextRunAt).toBe('2026-07-18T09:00:00.000Z')
+
+  const savedQueryResponse = await analyticsApiRequest('/api/analytics/query', {
+    reportId: createInput.id,
+    asOf: '2026-07-18T08:30:00.000Z',
+    forecastBaseline: {
+      from: '2099-01-01T00:00:00.000Z',
+      to: '2099-01-31T23:59:59.999Z',
+    },
+  })
+  expect(savedQueryResponse.status).toBe(200)
+  expect(await savedQueryResponse.json()).toMatchObject({
+    snapshot: {
+      forecast: {
+        baseline: createInput.forecastBaseline,
+      },
+    },
+  })
+
+  const sameScheduleResponse = await analyticsApiRequest(
+    `/api/analytics/reports/${createInput.id}`,
+    {
+      expectedRevision: 1,
+      name: 'Renamed report',
+      schedule: {
+        ...createInput.schedule,
+        nextRunAt: '2000-01-01T00:00:00.000Z',
+      },
+    },
+    'PATCH',
+  )
+  expect(sameScheduleResponse.status).toBe(200)
+  const sameSchedule = await sameScheduleResponse.json() as {
+    report: { revision: number; schedule?: { nextRunAt?: string } }
+  }
+  expect(sameSchedule.report.revision).toBe(2)
+  expect(sameSchedule.report.schedule?.nextRunAt).toBe('2026-07-18T09:00:00.000Z')
+
+  const changedScheduleResponse = await analyticsApiRequest(
+    `/api/analytics/reports/${createInput.id}`,
+    {
+      expectedRevision: 2,
+      schedule: {
+        ...createInput.schedule,
+        localTime: '10:00',
+        nextRunAt: '2099-01-01T00:00:00.000Z',
+      },
+    },
+    'PATCH',
+  )
+  expect(changedScheduleResponse.status).toBe(200)
+  const changedSchedule = await changedScheduleResponse.json() as {
+    report: { revision: number; schedule?: { nextRunAt?: string } }
+  }
+  expect(changedSchedule.report.revision).toBe(3)
+  expect(changedSchedule.report.schedule?.nextRunAt).toBe('2026-07-18T10:00:00.000Z')
+
+  const inlineQuery = {
+    ...createAnalyticsQueryInput(),
+    filter: {
+      ...createAnalyticsQueryInput().filter,
+      teamIds: ['core-team'],
+    },
+    forecastBaseline: {
+      from: '2026-09-01T00:00:00.000Z',
+      to: '2026-09-30T23:59:59.999Z',
+    },
+    timeZone: 'Asia/Tokyo',
+    widgets: [{
+      id: 'inline-wip',
+      type: 'metric',
+      title: 'Inline WIP',
+      metric: 'wip',
+    }],
+  } satisfies AnalyticsQueryInput
+  const snapshotResponse = await analyticsApiRequest(
+    `/api/analytics/reports/${createInput.id}/snapshots`,
+    inlineQuery,
+  )
+  expect(snapshotResponse.status).toBe(201)
+  const snapshotBody = await snapshotResponse.json() as {
+    snapshotRecord: AnalyticsSnapshotRecord
+  }
+  expect(snapshotBody.snapshotRecord.query).toEqual({
+    ...inlineQuery,
+    filter: {
+      ...inlineQuery.filter,
+      period: {
+        ...inlineQuery.filter.period,
+        to: inlineQuery.asOf,
+      },
+    },
+  })
+  expect(snapshotBody.snapshotRecord.reportRevision).toBe(3)
+
+  configureFakeProjectClients(false, { workspaceRole: 'owner' })
+  const hiddenSnapshots = await app.request(
+    `/api/analytics/reports/${createInput.id}/snapshots`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(hiddenSnapshots.status).toBe(200)
+  expect(await hiddenSnapshots.json()).toEqual({ snapshots: [] })
+  const deniedExport = await analyticsApiRequest('/api/analytics/export', {
+    snapshotId: snapshotBody.snapshotRecord.id,
+    format: 'csv',
+  })
+  expect(deniedExport.status).toBe(403)
+  expect(await deniedExport.json()).toMatchObject({
+    code: 'AnalyticsSnapshotScopeChanged',
+  })
+
+  const stalePatch = await analyticsApiRequest(
+    `/api/analytics/reports/${createInput.id}`,
+    { expectedRevision: 1, name: 'Stale edit' },
+    'PATCH',
+  )
+  expect(stalePatch.status).toBe(409)
+  expect(await stalePatch.json()).toMatchObject({ code: 'AnalyticsRevisionConflict' })
+})
+
+test('returns current-ACL evidence and CSV exports from Analytics endpoints', async () => {
+  configureFakeProjectClients(true)
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  const evidence = await analyticsApiRequest('/api/analytics/evidence', {
+    metric: 'wip',
+    filter: query.filter,
+    asOf: query.asOf,
+    timeZone: query.timeZone,
+  })
+  expect(evidence.status).toBe(200)
+  expect(await evidence.json()).toMatchObject({
+    items: [expect.objectContaining({ workItemId: 'onboarding-friction' })],
+  })
+
+  const exported = await analyticsApiRequest('/api/analytics/export', {
+    query,
+    format: 'csv',
+  })
+  expect(exported.status).toBe(200)
+  expect(exported.headers.get('Content-Type')).toBe('text/csv; charset=utf-8')
+  expect(await exported.text()).toContain('widgetId,metric,value')
 })
 
 test('passes execution status into persistence pagination and rejects unknown statuses', async () => {
@@ -12277,6 +12830,137 @@ function expectStableWorkspaceMutationAuditContexts(
   for (const observation of observations) {
     expect(observation.context).toBe(first)
   }
+}
+
+function analyticsApiRequest(
+  path: string,
+  body: unknown,
+  method = 'POST',
+) {
+  return app.request(path, {
+    method,
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+}
+
+function createAnalyticsQueryInput(): AnalyticsQueryInput {
+  return {
+    filter: {
+      period: {
+        from: '2026-07-01T00:00:00.000Z',
+        to: '2026-07-31T23:59:59.999Z',
+      },
+    },
+    widgets: [{
+      id: 'wip',
+      type: 'metric',
+      title: 'WIP',
+      metric: 'wip',
+    }],
+    asOf: '2026-07-18T08:30:00.000Z',
+    timeZone: 'UTC',
+  }
+}
+
+function createAnalyticsAuditEvent(
+  entityType: string,
+  entityId: string,
+  occurredAt: string,
+) {
+  const context = createMutationAuditContext({
+    workspaceId: 'user#demo@example.com',
+    actor: { id: 'demo@example.com', kind: 'user' },
+    idempotencyKey: `${entityType}-${entityId}-${occurredAt}`,
+    correlationId: `correlation-${entityId}`,
+    occurredAt,
+    request: {
+      method: 'PATCH',
+      path: `/api/${entityType}/${entityId}`,
+      body: { entityId },
+    },
+    source: {
+      kind: 'api',
+      method: 'PATCH',
+      route: `/api/${entityType}/:id`,
+    },
+  })
+  return createAuditEvent({
+    context,
+    eventType: `${entityType}.updated`,
+    entity: { type: entityType, id: entityId },
+    before: { state: 'before' },
+    after: { state: 'after' },
+    expiresAt: 2_000_000_000,
+  })
+}
+
+function createHistoricalAnalyticsWorkItem(): CanonicalWorkItem {
+  return {
+    schemaVersion: 1,
+    revision: 4,
+    id: 'historical-item',
+    teamId: 'core-team',
+    assignedProjectId: 'project-after',
+    title: 'Historical item',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowStatusId: 'completed',
+    statusCategory: 'completed',
+    workflowSchemaVersion: 1,
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-31',
+    priority: 'medium',
+    createdAt: '2026-07-01T00:00:00.000Z',
+    updatedAt: '2026-07-17T12:00:00.000Z',
+    archivedAt: '2026-07-17T12:00:00.000Z',
+    archivedBy: 'demo@example.com',
+    source: 'dynamodb',
+  }
+}
+
+function createHistoricalAnalyticsWorkItemEvent(workItem: CanonicalWorkItem) {
+  const occurredAt = '2026-07-17T12:00:00.000Z'
+  const context = createMutationAuditContext({
+    workspaceId: 'user#demo@example.com',
+    actor: { id: 'demo@example.com', kind: 'user' },
+    idempotencyKey: 'historical-item-future-change',
+    correlationId: 'historical-item-correlation',
+    occurredAt,
+    request: {
+      method: 'PATCH',
+      path: `/api/teams/${workItem.teamId}/issues/${workItem.id}`,
+      body: { expectedRevision: 3 },
+    },
+    source: {
+      kind: 'api',
+      method: 'PATCH',
+      route: '/api/teams/:teamId/issues/:issueId',
+    },
+  })
+  return createAuditEvent({
+    context,
+    eventType: 'work-item.updated',
+    entity: {
+      type: 'work-item',
+      id: `team/${workItem.teamId}/issue/${workItem.id}`,
+    },
+    before: {
+      assignedProjectId: 'project-before',
+      archivedAt: undefined,
+      statusCategory: 'started',
+    },
+    after: {
+      assignedProjectId: workItem.assignedProjectId,
+      archivedAt: workItem.archivedAt,
+      statusCategory: workItem.statusCategory,
+    },
+    expiresAt: 2_000_000_000,
+  })
 }
 
 function configureFakeProjectClients(

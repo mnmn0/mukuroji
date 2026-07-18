@@ -31,6 +31,12 @@ import {
   PLANNING_SCHEMA_VERSION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
+  type AnalyticsEvidenceInput,
+  type AnalyticsExportInput,
+  type AnalyticsQueryInput,
+  type AnalyticsReport,
+  type AnalyticsSnapshot,
+  type CreateAnalyticsReportInput,
   type AutomationAction,
   type AutomationExecutionStatus,
   type AutomationTemplateApplication,
@@ -68,6 +74,7 @@ import {
   type ResolvedWorkItemConfiguration,
   type UpdateAutomationRuleInput,
   type UpdateAutomationTemplateInput,
+  type UpdateAnalyticsReportInput,
   type UpdateRecurringWorkInput,
   type UpdatePlanningEntityInput,
   type UpdateSavedWorkspaceViewInput,
@@ -239,6 +246,17 @@ import {
   type PlanningClient,
   type PlanningWorkItemState,
 } from './planning'
+import {
+  AnalyticsError,
+  DynamoDbAnalyticsRepository,
+  InMemoryAnalyticsRepository,
+  createAnalyticsCsv,
+  createAnalyticsPermissionScopeHash,
+  createAnalyticsPdf,
+  createAnalyticsSnapshot,
+  queryAnalyticsEvidence,
+  type AnalyticsRepository,
+} from './analytics'
 
 /**
  * Workspace access の永続化 client と API error です。
@@ -1174,6 +1192,18 @@ const WORK_ITEMS_RESPONSE_LIMIT = 200
 const WORK_ITEMS_TEAM_READ_LIMIT = 20
 /** `/api/work-items` が 1 partition で filter/dedupe 前に評価する最大 item 数です。 */
 const WORK_ITEMS_PARTITION_SCAN_LIMIT = 1_000
+/** Analytics が一度に読む audit event page の評価上限です。 */
+const ANALYTICS_AUDIT_PAGE_SIZE = 100
+/** Analytics が部分集計を返さず fail-closed にする最大 audit page 数です。 */
+const ANALYTICS_AUDIT_MAX_PAGES = 100
+/** Analytics が filter/ACL 適用後に一度に評価する Work Item の最大数です。 */
+const ANALYTICS_WORK_ITEM_LIMIT = 10_000
+/** Analytics が一度に読む Team または Project partition の最大数です。 */
+const ANALYTICS_WORK_ITEM_PARTITION_COUNT_LIMIT = 100
+/** Analytics が一つの Team または Project partition で評価する最大 item 数です。 */
+const ANALYTICS_WORK_ITEM_PARTITION_SCAN_LIMIT = 10_000
+/** Analytics snapshot 一覧で current ACL を再検証する最大 record 数です。 */
+const ANALYTICS_SNAPSHOT_LIST_LIMIT = 100
 /** Relation target の強整合 detail read を同時実行する最大数です。 */
 const WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY = 8
 
@@ -2229,6 +2259,7 @@ let automation: AutomationClient
 let automationInboundWebhookSecrets: AutomationInboundWebhookSecretStore
 let planning: PlanningClient
 let requestIntake: RequestIntakeClient
+let analytics: AnalyticsRepository
 const projectDirectoryIdPrefix = 'user#'
 const defaultAllowedOrigins = [
   'http://localhost:5173',
@@ -2817,6 +2848,242 @@ app.get('/api/audit/events', async (c) => {
  */
 app.get('/api/audit/events/export', async (c) => {
   return handleWorkspaceAuditRequest(c, true)
+})
+
+/** Current ACL を先に適用して ad-hoc または saved report を集計します。 */
+app.post('/api/analytics/query', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const body = await readAnalyticsJson(c)
+    const query = await resolveAnalyticsQuery(principal, body)
+    return c.json({ snapshot: await executeAnalyticsQuery(principal, query) })
+  } catch (error) {
+    return toAnalyticsErrorResponse(c, error)
+  }
+})
+
+/** Metric drill-down を current ACL で再実行して evidence page を返します。 */
+app.post('/api/analytics/evidence', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const evidence = await readAnalyticsJson(c) as AnalyticsEvidenceInput
+    return c.json(await executeAnalyticsEvidenceQuery(principal, evidence))
+  } catch (error) {
+    return toAnalyticsErrorResponse(c, error)
+  }
+})
+
+/** Current ACL で再計算した analytics snapshot を CSV/PDF として同期 export します。 */
+app.post('/api/analytics/export', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const input = await readAnalyticsJson(c) as AnalyticsExportInput
+    const format = readAnalyticsExportFormat(input.format)
+    const snapshot = await resolveAnalyticsExportSnapshot(principal, input)
+    const headers = {
+      'Cache-Control': 'private, no-store',
+      'Content-Disposition': `attachment; filename="mukuroji-analytics.${format}"`,
+      'Content-Type': format === 'csv'
+        ? 'text/csv; charset=utf-8'
+        : 'application/pdf',
+    }
+    if (format === 'csv') {
+      return c.body(createAnalyticsCsv(snapshot), 200, headers)
+    }
+    return new Response(createAnalyticsPdf(snapshot), { headers, status: 200 })
+  } catch (error) {
+    return toAnalyticsErrorResponse(c, error)
+  }
+})
+
+/** Current user が参照できる personal/team/shared analytics report を返します。 */
+app.get('/api/analytics/reports', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const context = await createWorkspaceSearchContext(principal)
+    const response = await analytics.listReports(principal.directoryId)
+    return c.json({
+      reports: response.reports.filter((report) =>
+        canReadAnalyticsReport(principal, context, report)
+      ),
+    })
+  } catch (error) {
+    return toAnalyticsErrorResponse(c, error)
+  }
+})
+
+/** Analytics report definition を visibility policy に従って保存します。 */
+app.post('/api/analytics/reports', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const body = await readAnalyticsJson(c)
+    const input = sanitizePublicAnalyticsReportCreateInput(body)
+    await requireAnalyticsVisibilityWrite(
+      principal,
+      input.visibility,
+      input.teamId,
+      principal.userKey,
+    )
+    return c.json({
+      report: await analytics.createReport(
+        principal.directoryId,
+        principal.userKey,
+        input,
+      ),
+    }, 201)
+  } catch (error) {
+    return toAnalyticsErrorResponse(c, error)
+  }
+})
+
+/** Analytics report definition を optimistic revision 付きで更新します。 */
+app.patch('/api/analytics/reports/:reportId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const reportId = readAnalyticsIdentifier(c.req.param('reportId'), 'Analytics report ID')
+    const current = await requireAnalyticsReport(principal, reportId)
+    await requireAnalyticsReportWrite(principal, current)
+    const body = await readAnalyticsJson(c)
+    const input = sanitizePublicAnalyticsReportUpdateInput(body, current)
+    await requireAnalyticsVisibilityWrite(
+      principal,
+      input.visibility ?? current.visibility,
+      input.teamId === null ? undefined : input.teamId ?? current.teamId,
+      current.ownerMemberKey,
+    )
+    return c.json({
+      report: await analytics.updateReport(principal.directoryId, reportId, input),
+    })
+  } catch (error) {
+    return toAnalyticsErrorResponse(c, error)
+  }
+})
+
+/** Analytics report definition を optimistic revision 付きで削除します。 */
+app.delete('/api/analytics/reports/:reportId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const reportId = readAnalyticsIdentifier(c.req.param('reportId'), 'Analytics report ID')
+    const current = await requireAnalyticsReport(principal, reportId)
+    await requireAnalyticsReportWrite(principal, current)
+    const input = await readAnalyticsJson(c)
+    const expectedRevision = readAnalyticsExpectedRevision(input.expectedRevision)
+    await analytics.deleteReport(principal.directoryId, reportId, expectedRevision)
+    return c.json({ deleted: true })
+  } catch (error) {
+    return toAnalyticsErrorResponse(c, error)
+  }
+})
+
+/** Report に保存された immutable analytics snapshot を current ACL で一覧化します。 */
+app.get('/api/analytics/reports/:reportId/snapshots', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    const reportId = readAnalyticsIdentifier(c.req.param('reportId'), 'Analytics report ID')
+    const report = await requireAnalyticsReport(principal, reportId)
+    const snapshots = (await analytics.listSnapshots(principal.directoryId, report.id))
+      .slice(0, ANALYTICS_SNAPSHOT_LIST_LIMIT)
+    const visibleSnapshots = []
+    const scopeCache =
+      new Map<string, ReturnType<typeof readAccessibleAnalyticsWorkItems>>()
+    for (const record of snapshots) {
+      const currentPermissionScopeHash = await readCurrentAnalyticsPermissionScopeHash(
+        principal,
+        record.query,
+        scopeCache,
+      )
+      if (currentPermissionScopeHash === record.snapshot.permissionScopeHash) {
+        visibleSnapshots.push(record)
+      }
+    }
+    return c.json({ snapshots: visibleSnapshots })
+  } catch (error) {
+    return toAnalyticsErrorResponse(c, error)
+  }
+})
+
+/** Report definition と current ACL を再評価した immutable snapshot を保存します。 */
+app.post('/api/analytics/reports/:reportId/snapshots', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken)
+    requireWorkspaceBusinessWrite(principal)
+    const reportId = readAnalyticsIdentifier(c.req.param('reportId'), 'Analytics report ID')
+    const report = await requireAnalyticsReport(principal, reportId)
+    await requireAnalyticsReportWrite(principal, report)
+    const body = await readAnalyticsJson(c)
+    const query = Object.keys(body).length === 0
+      ? createAnalyticsReportQuery(report, {})
+      : body as unknown as AnalyticsQueryInput
+    const snapshot = await executeAnalyticsQuery(principal, query)
+    const createdAt = new Date().toISOString()
+    const snapshotRecord = await analytics.putSnapshot({
+      id: createAnalyticsSnapshotId(
+        principal.directoryId,
+        report,
+        snapshot,
+        principal.userKey,
+        c.req.header('Idempotency-Key'),
+      ),
+      workspaceId: principal.directoryId,
+      reportId: report.id,
+      reportRevision: report.revision,
+      createdByMemberKey: principal.userKey,
+      createdAt,
+      query: structuredClone(query),
+      snapshot,
+    })
+    return c.json({ snapshotRecord }, 201)
+  } catch (error) {
+    return toAnalyticsErrorResponse(c, error)
+  }
 })
 
 /** Recipient の durable notification timeline を cursor 付きで返します。 */
@@ -6666,6 +6933,428 @@ async function readJson<T>(request: { json: () => Promise<T> }) {
   }
 }
 
+/** Analytics route の JSON object body を検証します。 */
+async function readAnalyticsJson(c: Context): Promise<Record<string, unknown>> {
+  const value = await readJson<unknown>(c.req)
+  if (!isRecord(value)) {
+    throw new AnalyticsError(
+      400,
+      'InvalidAnalyticsInput',
+      'A JSON object request body is required.',
+    )
+  }
+  return value
+}
+
+/** Public create input から server-owned schedule cursor を除外します。 */
+function sanitizePublicAnalyticsReportCreateInput(
+  body: Record<string, unknown>,
+): CreateAnalyticsReportInput {
+  return {
+    ...body,
+    ...(body.schedule === undefined
+      ? {}
+      : { schedule: stripAnalyticsScheduleCursor(body.schedule) }),
+  } as unknown as CreateAnalyticsReportInput
+}
+
+/**
+ * Public update input の schedule cursor を除外し、設定が不変なら current cursor を保持します。
+ */
+function sanitizePublicAnalyticsReportUpdateInput(
+  body: Record<string, unknown>,
+  current: AnalyticsReport,
+): UpdateAnalyticsReportInput {
+  if (!isRecord(body.schedule)) {
+    return body as unknown as UpdateAnalyticsReportInput
+  }
+  const schedule = stripAnalyticsScheduleCursor(body.schedule)
+  const currentSchedule = current.schedule
+  return {
+    ...body,
+    schedule: currentSchedule !== undefined &&
+        analyticsScheduleConfigurationKey(schedule) ===
+          analyticsScheduleConfigurationKey(currentSchedule)
+      ? structuredClone(currentSchedule)
+      : schedule,
+  } as unknown as UpdateAnalyticsReportInput
+}
+
+/** Client-controlled `nextRunAt` を schedule configuration から除きます。 */
+function stripAnalyticsScheduleCursor(value: unknown) {
+  if (!isRecord(value)) return value
+  const { nextRunAt: _clientNextRunAt, ...schedule } = value
+  return schedule
+}
+
+/** Schedule cursor を除いた semantic configuration の比較 key を返します。 */
+function analyticsScheduleConfigurationKey(value: unknown) {
+  if (!isRecord(value)) return JSON.stringify(value)
+  const recipients = Array.isArray(value.recipientMemberKeys) &&
+      value.recipientMemberKeys.every((recipient) => typeof recipient === 'string')
+    ? [...new Set(value.recipientMemberKeys)].sort()
+    : value.recipientMemberKeys
+  return JSON.stringify({
+    enabled: value.enabled,
+    frequency: value.frequency,
+    timeZone: value.timeZone,
+    localTime: value.localTime,
+    dayOfWeek: value.dayOfWeek,
+    dayOfMonth: value.dayOfMonth,
+    recipientMemberKeys: recipients,
+    format: value.format,
+  })
+}
+
+/** Ad-hoc input または saved report ID から実行 query を解決します。 */
+async function resolveAnalyticsQuery(
+  principal: WorkspacePrincipal,
+  body: Record<string, unknown>,
+): Promise<AnalyticsQueryInput> {
+  if (body.reportId === undefined) {
+    return body as unknown as AnalyticsQueryInput
+  }
+  const reportId = readAnalyticsIdentifier(body.reportId, 'Analytics report ID')
+  const report = await requireAnalyticsReport(principal, reportId)
+  return createAnalyticsReportQuery(report, body)
+}
+
+/** Saved report の definition を client override から保護して query にします。 */
+function createAnalyticsReportQuery(
+  report: AnalyticsReport,
+  overrides: Record<string, unknown>,
+): AnalyticsQueryInput {
+  const asOf = typeof overrides.asOf === 'string' && overrides.asOf.trim()
+    ? overrides.asOf
+    : new Date().toISOString()
+  return {
+    filter: structuredClone(report.filter),
+    widgets: structuredClone(report.widgets),
+    asOf,
+    timeZone: report.timeZone,
+    ...(report.forecastBaseline === undefined
+      ? {}
+      : { forecastBaseline: structuredClone(report.forecastBaseline) }),
+  }
+}
+
+/** Query を事前検証し、current ACL の Work Item/event だけで snapshot を作ります。 */
+async function executeAnalyticsQuery(
+  principal: WorkspacePrincipal,
+  query: AnalyticsQueryInput,
+): Promise<AnalyticsSnapshot> {
+  createAnalyticsSnapshot({
+    workItems: [],
+    events: [],
+    query,
+    authorizedProjectIds: new Set(),
+  })
+  const authorized = await readAuthorizedAnalyticsData(principal, query.filter, query.asOf)
+  return createAnalyticsSnapshot({ ...authorized, query })
+}
+
+/** Evidence query を事前検証し、current ACL の Work Item/event だけで再実行します。 */
+async function executeAnalyticsEvidenceQuery(
+  principal: WorkspacePrincipal,
+  evidence: AnalyticsEvidenceInput,
+) {
+  queryAnalyticsEvidence({
+    workItems: [],
+    events: [],
+    evidence,
+    authorizedProjectIds: new Set(),
+  })
+  const authorized = await readAuthorizedAnalyticsData(
+    principal,
+    evidence.filter,
+    evidence.asOf,
+  )
+  return queryAnalyticsEvidence({ ...authorized, evidence })
+}
+
+/**
+ * Analytics engine へ渡す前に current Work Item ACL を確定し、対応eventだけを残します。
+ */
+async function readAuthorizedAnalyticsData(
+  principal: WorkspacePrincipal,
+  filter: AnalyticsQueryInput['filter'],
+  asOf: string,
+) {
+  const accessible = await readAccessibleAnalyticsWorkItems(
+    principal,
+    filter,
+  )
+  const workItems = accessible.workItems
+  const historyReadAt = new Date(
+    Math.max(Date.now(), Date.parse(asOf)),
+  ).toISOString()
+  const entityIds = new Set(workItems.map((workItem) =>
+    createTeamIssueAuditEntityId(workItem.teamId, workItem.id)
+  ))
+  const events: AuditEventV1[] = []
+  let cursor: string | undefined
+  let pageCount = 0
+
+  do {
+    if (pageCount >= ANALYTICS_AUDIT_MAX_PAGES) {
+      throw new AnalyticsError(
+        413,
+        'AnalyticsHistoryLimitExceeded',
+        'Analytics history exceeds the safe query limit. Reduce retained history or add a scoped history index before retrying.',
+      )
+    }
+    const page = await auditEvents.query({
+      workspaceId: principal.directoryId,
+      entityType: 'work-item',
+      to: historyReadAt,
+      limit: ANALYTICS_AUDIT_PAGE_SIZE,
+      cursor,
+      direction: 'ascending',
+    })
+    pageCount += 1
+    for (const event of page.events) {
+      if (
+        event.entityType === 'work-item' &&
+        entityIds.has(event.entityId)
+      ) {
+        events.push(event)
+      }
+    }
+    cursor = page.nextCursor
+  } while (cursor)
+
+  return {
+    workItems,
+    events,
+    authorizedProjectIds: accessible.authorizedProjectIds,
+  }
+}
+
+/**
+ * Snapshot ACL 再検証では audit history/metric を再計算せず、current accessible Work Item
+ * key、active readable Project allowlist、snapshot `asOf` から同じ permission scope hash
+ * を作ります。
+ */
+async function readCurrentAnalyticsPermissionScopeHash(
+  principal: WorkspacePrincipal,
+  query: AnalyticsQueryInput,
+  cache = new Map<string, ReturnType<typeof readAccessibleAnalyticsWorkItems>>(),
+) {
+  const normalized = createAnalyticsSnapshot({
+    workItems: [],
+    events: [],
+    query,
+    authorizedProjectIds: new Set(),
+  })
+  const cacheKey = JSON.stringify({
+    teamIds: normalized.filter.teamIds ?? null,
+    projectIds: normalized.filter.projectIds ?? null,
+    includeArchived: normalized.filter.includeArchived === true,
+  })
+  let accessible = cache.get(cacheKey)
+  if (!accessible) {
+    accessible = readAccessibleAnalyticsWorkItems(principal, normalized.filter)
+    cache.set(cacheKey, accessible)
+  }
+  const current = await accessible
+  return createAnalyticsPermissionScopeHash(
+    current.workItems,
+    Date.parse(normalized.asOf),
+    current.authorizedProjectIds,
+  )
+}
+
+/** Export selector を current ACL で再実行できる snapshot へ解決します。 */
+async function resolveAnalyticsExportSnapshot(
+  principal: WorkspacePrincipal,
+  input: AnalyticsExportInput,
+) {
+  const selectorCount = Number(input.query !== undefined) +
+    Number(input.reportId !== undefined) +
+    Number(input.snapshotId !== undefined)
+  if (selectorCount !== 1) {
+    throw new AnalyticsError(
+      400,
+      'InvalidAnalyticsExport',
+      'Analytics export requires exactly one query, reportId, or snapshotId.',
+    )
+  }
+  if (input.query !== undefined) {
+    return await executeAnalyticsQuery(principal, input.query)
+  }
+  if (input.reportId !== undefined) {
+    const report = await requireAnalyticsReport(
+      principal,
+      readAnalyticsIdentifier(input.reportId, 'Analytics report ID'),
+    )
+    return await executeAnalyticsQuery(
+      principal,
+      createAnalyticsReportQuery(report, {}),
+    )
+  }
+
+  const snapshotId = readAnalyticsIdentifier(input.snapshotId, 'Analytics snapshot ID')
+  const stored = await analytics.getSnapshot(principal.directoryId, snapshotId)
+  if (!stored) {
+    throw new AnalyticsError(404, 'AnalyticsSnapshotNotFound', 'Analytics snapshot was not found.')
+  }
+  if (stored.reportId) {
+    await requireAnalyticsReport(principal, stored.reportId)
+  } else if (stored.createdByMemberKey !== principal.userKey) {
+    throw new AnalyticsError(
+      403,
+      'AnalyticsSnapshotForbidden',
+      'Analytics snapshot access is denied.',
+    )
+  }
+  const currentPermissionScopeHash = await readCurrentAnalyticsPermissionScopeHash(
+    principal,
+    stored.query,
+  )
+  if (currentPermissionScopeHash !== stored.snapshot.permissionScopeHash) {
+    throw new AnalyticsError(
+      403,
+      'AnalyticsSnapshotScopeChanged',
+      'Analytics snapshot authorization scope has changed.',
+    )
+  }
+  return stored.snapshot
+}
+
+/** Analytics export format を検証します。 */
+function readAnalyticsExportFormat(value: unknown): 'csv' | 'pdf' {
+  if (value === 'csv' || value === 'pdf') return value
+  throw new AnalyticsError(
+    400,
+    'InvalidAnalyticsExport',
+    'Analytics export format must be csv or pdf.',
+  )
+}
+
+/** Current viewer が report definition 自体を参照できるか判定します。 */
+function canReadAnalyticsReport(
+  principal: WorkspacePrincipal,
+  context: WorkspaceSearchContext,
+  report: AnalyticsReport,
+) {
+  if (report.visibility === 'personal') {
+    return report.ownerMemberKey === principal.userKey
+  }
+  if (report.visibility === 'shared') {
+    return true
+  }
+  return report.visibility === 'team' &&
+    typeof report.teamId === 'string' &&
+    context.savedViewAccess.teamIds.has(report.teamId)
+}
+
+/** Report を取得し、current visibility policy を満たすことを保証します。 */
+async function requireAnalyticsReport(
+  principal: WorkspacePrincipal,
+  reportId: string,
+) {
+  const report = await analytics.getReport(principal.directoryId, reportId)
+  if (!report) {
+    throw new AnalyticsError(404, 'AnalyticsReportNotFound', 'Analytics report was not found.')
+  }
+  const context = await createWorkspaceSearchContext(principal)
+  if (!canReadAnalyticsReport(principal, context, report)) {
+    throw new AnalyticsError(403, 'AnalyticsReportForbidden', 'Analytics report access is denied.')
+  }
+  return report
+}
+
+/** Existing report の visibility に応じた write role を要求します。 */
+async function requireAnalyticsReportWrite(
+  principal: WorkspacePrincipal,
+  report: AnalyticsReport,
+) {
+  await requireAnalyticsVisibilityWrite(
+    principal,
+    report.visibility,
+    report.teamId,
+    report.ownerMemberKey,
+  )
+}
+
+/** Personal/team/shared report の作成・更新・削除 policy を適用します。 */
+async function requireAnalyticsVisibilityWrite(
+  principal: WorkspacePrincipal,
+  visibility: unknown,
+  teamId: unknown,
+  ownerMemberKey: string,
+) {
+  if (visibility === 'personal') {
+    if (ownerMemberKey !== principal.userKey) {
+      throw new AnalyticsError(
+        403,
+        'AnalyticsReportForbidden',
+        'Only the personal report owner can change this report.',
+      )
+    }
+    return
+  }
+  if (visibility === 'team') {
+    const normalizedTeamId = readAnalyticsIdentifier(teamId, 'Analytics report Team ID')
+    await requireTeamPermission(principal, normalizedTeamId, 'manager')
+    return
+  }
+  if (visibility === 'shared') {
+    requireWorkspaceAdministration(principal)
+    return
+  }
+  throw new AnalyticsError(
+    400,
+    'InvalidAnalyticsReport',
+    'Analytics report visibility is invalid.',
+  )
+}
+
+/** Analytics route identifier を path/storage keyに安全な形式へ制限します。 */
+function readAnalyticsIdentifier(value: unknown, label: string) {
+  if (
+    typeof value !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(value)
+  ) {
+    throw new AnalyticsError(400, 'InvalidAnalyticsInput', `${label} is invalid.`)
+  }
+  return value
+}
+
+/** Report mutation の positive optimistic revision を検証します。 */
+function readAnalyticsExpectedRevision(value: unknown) {
+  if (!Number.isSafeInteger(value) || Number(value) < 1) {
+    throw new AnalyticsError(
+      400,
+      'InvalidAnalyticsReport',
+      'Analytics expectedRevision must be a positive safe integer.',
+    )
+  }
+  return Number(value)
+}
+
+/** Snapshot retry を同じ immutable record ID へ収束させます。 */
+function createAnalyticsSnapshotId(
+  workspaceId: string,
+  report: AnalyticsReport,
+  snapshot: AnalyticsSnapshot,
+  memberKey: string,
+  idempotencyKey: string | undefined,
+) {
+  const operationKey = idempotencyKey?.trim() || crypto.randomUUID()
+  const digest = createHash('sha256')
+    .update(JSON.stringify({
+      workspaceId,
+      reportId: report.id,
+      reportRevision: report.revision,
+      queryHash: snapshot.queryHash,
+      memberKey,
+      operationKey,
+    }))
+    .digest('hex')
+  return `snapshot_${digest.slice(0, 48)}`
+}
+
 async function readAutomationJson(c: Context) {
   const value = await readJson<unknown>(c.req)
   if (!isRecord(value)) {
@@ -8823,6 +9512,43 @@ function toWorkItemConfigurationErrorResponse(c: Context, error: unknown) {
   return c.json({ code: error.code, message: error.message }, status)
 }
 
+/** Analytics domain/persistence error を公開可能な API response へ変換します。 */
+function toAnalyticsErrorResponse(c: Context, error: unknown) {
+  if (error instanceof CognitoServiceError) {
+    return toCognitoDirectoryErrorResponse(c, error)
+  }
+  if (error instanceof WorkspaceAccessError) {
+    return toWorkspaceAccessErrorResponse(c, error)
+  }
+  if (error instanceof ProjectDataError || isTeamIssueNotFoundError(error)) {
+    return toProjectDataErrorResponse(c, error)
+  }
+  if (error instanceof TypeError || error instanceof RangeError) {
+    return c.json({ code: 'InvalidAnalyticsInput', message: error.message }, 400)
+  }
+  if (!(error instanceof AnalyticsError)) {
+    console.error(error)
+    return c.json(
+      { code: 'AnalyticsUnavailable', message: 'Analytics data is unavailable.' },
+      502,
+    )
+  }
+  if (error.status >= 500) {
+    console.error(error)
+  }
+  const status = error.status === 400 ||
+      error.status === 401 ||
+      error.status === 403 ||
+      error.status === 404 ||
+      error.status === 409 ||
+      error.status === 413 ||
+      error.status === 422 ||
+      error.status === 503
+    ? error.status
+    : 502
+  return c.json({ code: error.code, message: error.message }, status)
+}
+
 function toPlanningErrorResponse(c: Context, error: unknown) {
   if (error instanceof CognitoServiceError) {
     return toCognitoDirectoryErrorResponse(c, error)
@@ -10951,12 +11677,13 @@ async function readCanonicalTeamIssuesForAggregate(
   directoryId: string,
   context: TeamPermissionContext,
   principal: ProjectPrincipal,
+  includeArchived = false,
 ) {
   const clientReadLimit = createWorkItemListProbeLimit(WORK_ITEMS_PARTITION_SCAN_LIMIT)
   const storedIssues = await teamIssues.getTeamIssues(
     directoryId,
     context.team.id,
-    { limit: clientReadLimit, consistentRead: true },
+    { limit: clientReadLimit, consistentRead: true, includeArchived },
   )
   assertWorkItemListWithinLimit(
     storedIssues.issues,
@@ -10972,6 +11699,7 @@ async function readCanonicalTeamIssuesForAggregate(
 
 async function readAccessibleWorkItems(
   principal: ProjectPrincipal,
+  includeArchived = false,
 ): Promise<WorkItemsResponse> {
   const directory = await projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const projectAccesses = principal.isSystemAdmin
@@ -11005,6 +11733,7 @@ async function readAccessibleWorkItems(
       principal.directoryId,
       context,
       principal,
+      includeArchived,
     )
     for (const workItem of response.issues) {
       addAggregateWorkItem(workItemsById, workItem)
@@ -11012,6 +11741,119 @@ async function readAccessibleWorkItems(
   }
 
   return { workItems: [...workItemsById.values()] }
+}
+
+/**
+ * Analytics filter の Team/Project scope を read 前に適用し、current ACL の canonical
+ * Work Item を通常一覧とは独立した安全上限まで返します。
+ */
+async function readAccessibleAnalyticsWorkItems(
+  principal: ProjectPrincipal,
+  filter: AnalyticsQueryInput['filter'],
+) {
+  const directory = await projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    'ja',
+    true,
+  )
+  const filteredTeamIds = filter.teamIds === undefined
+    ? undefined
+    : new Set(filter.teamIds)
+  const filteredProjectIds = filter.projectIds === undefined
+    ? undefined
+    : new Set(filter.projectIds)
+  const projectAccesses = principal.isSystemAdmin
+    ? undefined
+    : await projectDirectory.getProjectAccessList(
+        principal.directoryId,
+        principal.userKey,
+      )
+  const activeProjectIds = new Set(directory.teams.flatMap((team) =>
+    team.projects.map((project) => project.id)
+  ))
+  const readableProjectIds = principal.isSystemAdmin
+    ? activeProjectIds
+    : new Set(
+        (projectAccesses ?? [])
+          .filter((access) =>
+            activeProjectIds.has(access.projectId) &&
+            projectAccessAllows(access, 'viewer')
+          )
+          .map((access) => access.projectId),
+      )
+  const workItemsById = new Map<string, TeamIssueResponseItem>()
+  const addWorkItem = (workItem: TeamIssueResponseItem) => {
+    workItemsById.set(`${workItem.teamId}\0${workItem.id}`, workItem)
+    if (workItemsById.size > ANALYTICS_WORK_ITEM_LIMIT) {
+      throw new AnalyticsError(
+        413,
+        'AnalyticsWorkItemLimitExceeded',
+        `Analytics query has more than ${ANALYTICS_WORK_ITEM_LIMIT} accessible Work Items. Narrow the report scope.`,
+      )
+    }
+  }
+  const readOptions: WorkItemListReadOptions = {
+    limit: ANALYTICS_WORK_ITEM_PARTITION_SCAN_LIMIT + 1,
+    consistentRead: true,
+    includeArchived: true,
+  }
+
+  const selectedTeams = directory.teams.filter((team) => {
+    if (filteredTeamIds !== undefined && !filteredTeamIds.has(team.id)) return false
+    return team.projects.some((project) => {
+      return readableProjectIds.has(project.id) &&
+        (filteredProjectIds === undefined || filteredProjectIds.has(project.id))
+    })
+  })
+  assertAnalyticsPartitionCount(selectedTeams.length)
+  for (const team of selectedTeams) {
+    const response = await teamIssues.getTeamIssues(
+      principal.directoryId,
+      team.id,
+      readOptions,
+    )
+    assertAnalyticsPartitionSize(response.issues, `Team "${team.id}"`)
+    for (const workItem of response.issues) {
+      if (
+        workItem.teamId === team.id &&
+        (
+          workItem.assignedProjectId === undefined ||
+          readableProjectIds.has(workItem.assignedProjectId)
+        )
+      ) {
+        addWorkItem(workItem)
+      }
+    }
+  }
+  return {
+    workItems: [...workItemsById.values()],
+    authorizedProjectIds: readableProjectIds,
+  }
+}
+
+/** Analytics data read が評価する partition 数を fail-closed 上限内に制限します。 */
+function assertAnalyticsPartitionCount(count: number) {
+  if (count > ANALYTICS_WORK_ITEM_PARTITION_COUNT_LIMIT) {
+    throw new AnalyticsError(
+      413,
+      'AnalyticsWorkItemLimitExceeded',
+      `Analytics query spans more than ${ANALYTICS_WORK_ITEM_PARTITION_COUNT_LIMIT} data partitions. Narrow the report scope.`,
+    )
+  }
+}
+
+/** Analytics data read が一つの partition から部分結果を返さないよう probe 結果を検証します。 */
+function assertAnalyticsPartitionSize(
+  workItems: readonly TeamIssueResponseItem[],
+  scope: string,
+) {
+  if (workItems.length > ANALYTICS_WORK_ITEM_PARTITION_SCAN_LIMIT) {
+    throw new AnalyticsError(
+      413,
+      'AnalyticsWorkItemLimitExceeded',
+      `${scope} has more than ${ANALYTICS_WORK_ITEM_PARTITION_SCAN_LIMIT} Work Items. Narrow the report scope.`,
+    )
+  }
 }
 
 async function readPlanningWorkItemState(
@@ -15244,6 +16086,18 @@ function createPlanningClient() {
   )
 }
 
+function createAnalyticsRepository() {
+  const dynamoDbClient = createDynamoDbClient()
+  return new DynamoDbAnalyticsRepository(
+    getEnv('ANALYTICS_TABLE_NAME') ?? 'mukuroji-analytics-local',
+    createDynamoDbDocumentClient(dynamoDbClient),
+    {
+      scheduleDueIndexName:
+        getEnv('ANALYTICS_SCHEDULE_INDEX_NAME') ?? 'ScheduleDueIndex',
+    },
+  )
+}
+
 function createDefaultWorkItemConfigurationClient(): WorkItemConfigurationClient {
   const createResolved = (
     scopeType: 'workspace' | 'team',
@@ -17373,6 +18227,7 @@ automation = createAutomationClient()
 automationInboundWebhookSecrets = new SecretsManagerAutomationInboundWebhookSecretStore()
 planning = createPlanningClient()
 requestIntake = createDefaultRequestIntakeClient()
+analytics = createAnalyticsRepository()
 
 /**
  * Server test で外部 service client を差し替えます。
@@ -17395,6 +18250,7 @@ export function configureApiClientsForTest(clients: {
   automationInboundWebhookSecrets?: AutomationInboundWebhookSecretStore
   planning?: PlanningClient
   requestIntake?: RequestIntakeClient
+  analytics?: AnalyticsRepository
 }) {
   cognito = clients.cognito ?? cognito
   dashboardSummary = clients.dashboardSummary ?? dashboardSummary
@@ -17415,6 +18271,7 @@ export function configureApiClientsForTest(clients: {
     automationInboundWebhookSecrets
   planning = clients.planning ?? planning
   requestIntake = clients.requestIntake ?? requestIntake
+  analytics = clients.analytics ?? analytics
 }
 
 /**
@@ -17439,6 +18296,7 @@ export function resetApiClientsForTest() {
   automationInboundWebhookSecrets = new SecretsManagerAutomationInboundWebhookSecretStore()
   planning = new InMemoryPlanningClient()
   requestIntake = createDefaultRequestIntakeClient()
+  analytics = new InMemoryAnalyticsRepository()
 }
 
 /**
