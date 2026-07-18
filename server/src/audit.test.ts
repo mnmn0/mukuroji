@@ -89,6 +89,28 @@ test('allows an omitted expiry only for an unknown-time backfill event', () => {
   expect(event.expiresAt).toBeUndefined()
 })
 
+test('preserves a session-bound break-glass actor kind in immutable events', () => {
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'recovery-admin', kind: 'break-glass' },
+    idempotencyKey: 'break-glass-policy-repair',
+    occurredAt: '2026-07-18T12:00:00.000Z',
+    request: { method: 'PUT', path: '/api/enterprise/security/policy' },
+    source: { kind: 'api' },
+  })
+  const event = createAuditEvent({
+    context,
+    eventType: 'security-policy.updated',
+    entity: { type: 'enterprise-security', id: 'policy' },
+    expiresAt: auditExpiresAt,
+  })
+
+  expect(upcastAuditEvent(event).actor).toEqual({
+    id: 'recovery-admin',
+    kind: 'break-glass',
+  })
+})
+
 test('creates stable keyed Workspace access IDs without exposing private identifiers', () => {
   const key = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
   const workspaceId = 'user#owner@example.com'

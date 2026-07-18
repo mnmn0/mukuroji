@@ -30,6 +30,16 @@ export type CreateRealtimeTicketInput = {
   canWrite: boolean
   /** 接続後に購読できる collaboration scope key です。 */
   scopeKey: string
+  /** Cognito `auth_time` または `iat` の epoch seconds です。 */
+  authenticatedAt: number
+  /** Cognito access token の `exp` epoch seconds です。 */
+  tokenExpiresAt: number
+  /** Access token を plaintext 保存せず session-bound policy に使う SHA-256 digest です。 */
+  authenticationSessionId: string
+  /** Access token で確認した authentication method 一覧です。 */
+  authenticationMethods: string[]
+  /** Ticket 発行 request の trusted client IP です。 */
+  clientIp: string
 }
 
 /** Browser に一度だけ返す Realtime ticket です。 */
@@ -123,12 +133,32 @@ export class DynamoDbRealtimeTicketsClient implements RealtimeTicketsClient {
     }
 
     const scopeKey = requireText(input.scopeKey, 'Realtime scope key')
+    const authenticationSessionId = requireText(
+      input.authenticationSessionId,
+      'Realtime authentication session ID',
+    )
+    if (
+      !Number.isSafeInteger(input.authenticatedAt) ||
+      !Number.isSafeInteger(input.tokenExpiresAt) ||
+      input.authenticatedAt > input.tokenExpiresAt ||
+      !Array.isArray(input.authenticationMethods) ||
+      input.authenticationMethods.some((method) => typeof method !== 'string') ||
+      !input.clientIp.trim()
+    ) {
+      throw new RealtimeTicketError(
+        400,
+        'InvalidRealtimeTicket',
+        'Realtime authentication context is invalid.',
+      )
+    }
     const rawTicket = randomBytes(32).toString('base64url')
     const ticketDigest = createHash('sha256').update(rawTicket).digest('hex')
     const createdAt = this.clock()
     const expiresAtEpoch = Math.floor(createdAt.getTime() / 1000) + REALTIME_TICKET_TTL_SECONDS
-    const authorizationExpiresAt = Math.floor(createdAt.getTime() / 1000) +
-      REALTIME_AUTHORIZATION_TTL_SECONDS
+    const authorizationExpiresAt = Math.min(
+      Math.floor(createdAt.getTime() / 1000) + REALTIME_AUTHORIZATION_TTL_SECONDS,
+      input.tokenExpiresAt,
+    )
     const expiresAt = new Date(expiresAtEpoch * 1000).toISOString()
 
     try {
@@ -149,6 +179,11 @@ export class DynamoDbRealtimeTicketsClient implements RealtimeTicketsClient {
             createdAt: createdAt.toISOString(),
             expiresAt: expiresAtEpoch,
             authorizationExpiresAt,
+            authenticatedAt: input.authenticatedAt,
+            tokenExpiresAt: input.tokenExpiresAt,
+            authenticationSessionId,
+            authenticationMethods: [...input.authenticationMethods],
+            clientIp: input.clientIp.trim(),
           },
           ConditionExpression: 'attribute_not_exists(connectionId)',
         }),

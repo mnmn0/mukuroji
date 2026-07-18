@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import { afterEach, expect, test } from 'bun:test'
 import type { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
@@ -21,6 +21,7 @@ import {
   calculateAuditExpiresAt,
   createAuditEvent,
   createMutationAuditContext,
+  type AuditEventV1,
 } from './audit'
 import { CollaborationError, type CollaborationClient } from './collaboration'
 import type { NotificationClient, NotificationItem } from './notifications'
@@ -55,6 +56,7 @@ import {
   WorkspaceAccessError,
   type ProjectRole,
   type WorkspaceAccessClient,
+  type WorkspaceMember,
   type WorkspaceMemberStatus,
   type WorkspaceRole,
 } from './index'
@@ -74,6 +76,10 @@ import {
 } from './work-item-configuration'
 import { InMemoryPlanningClient } from './planning'
 import type { RequestIntakeClient } from './request-intake'
+import {
+  InMemoryEnterpriseIdentityClient,
+  resolveEnterpriseDirectoryPrincipal,
+} from './enterprise-identity'
 
 afterEach(() => {
   resetApiClientsForTest()
@@ -2914,6 +2920,7 @@ test('uses an explicit Floci public issuer and rejects other issuers before GetU
       AWS_LAMBDA_FUNCTION_NAME: 'mukuroji-api-test',
       COGNITO_CLIENT_ID: 'mukuroji-client',
       COGNITO_ISSUER: '  http://localhost:4567/us-east-1_mukuroji/  ',
+      COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
       COGNITO_USER_POOL_ID: 'us-east-1_mukuroji',
     },
     async () => {
@@ -2935,18 +2942,27 @@ test('uses an explicit Floci public issuer and rejects other issuers before GetU
         iss: 'http://localhost:4567/us-east-1_other',
         token_use: 'access',
       })
+      const ssoAccessToken = createAccessToken([], {
+        client_id: 'mukuroji-sso-client',
+        iss: 'http://localhost:4567/us-east-1_mukuroji',
+        token_use: 'access',
+      })
 
       const validResponse = await app.request('/api/auth/me', {
         headers: { Authorization: `Bearer ${validAccessToken}` },
+      })
+      const ssoResponse = await app.request('/api/auth/me', {
+        headers: { Authorization: `Bearer ${ssoAccessToken}` },
       })
       const wrongIssuerResponse = await app.request('/api/auth/me', {
         headers: { Authorization: `Bearer ${wrongIssuerToken}` },
       })
 
       expect(validResponse.status).toBe(200)
+      expect(ssoResponse.status).toBe(200)
       expect(wrongIssuerResponse.status).toBe(401)
       expect(await wrongIssuerResponse.json()).toEqual({ message: 'Authentication failed.' })
-      expect(getUserCalls).toBe(1)
+      expect(getUserCalls).toBe(2)
     },
   )
 })
@@ -2979,6 +2995,565 @@ test('fails closed when production Cognito pool or client configuration is missi
       expect(getUserCalls).toBe(0)
     },
   )
+})
+
+test('binds a route-issued SCIM credential to the active Cognito provider', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    configureFakeProjectClients(true)
+    const workspaceId = 'user#demo@example.com'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    await identity.putIdentityProvider({
+      workspaceId,
+      providerId: 'idp-1',
+      kind: 'oidc',
+      displayName: 'Enterprise OIDC',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active',
+      revision: 1,
+      issuer: 'https://idp.example.com',
+      clientId: 'enterprise-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email'],
+      createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+    })
+    configureApiClientsForTest({
+      enterpriseIdentity: identity,
+      enterpriseSessionActivity: {
+        async getAuthenticationMethods() {
+          return []
+        },
+        async recordAuthenticationAssurance() {
+          return undefined
+        },
+        async validateAndTouch(input) {
+          return [...input.authenticationMethods]
+        },
+      },
+    })
+
+    const response = await app.request('/api/enterprise/security/scim/token', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'route-scim-token',
+      },
+      body: JSON.stringify({ expectedVersion: 0 }),
+    })
+
+    expect(response.status).toBe(201)
+    const body = await response.json()
+    expect(body).toMatchObject({
+      scim: {
+        identityProviderId: 'idp-1',
+        tokenGeneration: 1,
+      },
+    })
+    expect(body.token).toStartWith('msc_')
+    expect(await identity.authenticateScimToken(workspaceId, body.token))
+      .toMatchObject({ identityProviderId: 'idp-1' })
+  })
+})
+
+test('scopes SCIM collection reads to the credential identity provider', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    configureFakeProjectClients(true)
+    const workspaceId = 'workspace-scim-provider-scope'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    for (const providerId of ['idp-a', 'idp-b']) {
+      await identity.putIdentityProvider({
+        workspaceId,
+        providerId,
+        kind: 'oidc',
+        displayName: providerId,
+        cognitoProviderName: 'EnterpriseOidc',
+        status: 'active',
+        revision: 1,
+        issuer: 'https://idp.example.com',
+        clientId: 'enterprise-client',
+        authorizationEndpoint: 'https://idp.example.com/authorize',
+        tokenEndpoint: 'https://idp.example.com/token',
+        jwksUri: 'https://idp.example.com/jwks',
+        scopes: ['openid', 'email'],
+        createdAt: now,
+        updatedAt: now,
+        lastTestedAt: now,
+      })
+    }
+    const credentialA = await identity.issueScimToken(
+      workspaceId,
+      'idp-a',
+      'Provider A',
+    )
+    const credentialB = await identity.issueScimToken(
+      workspaceId,
+      'idp-b',
+      'Provider B',
+    )
+    const userA = await identity.upsertScimUser({
+      workspaceId,
+      identityProviderId: 'idp-a',
+      externalId: 'shared-user',
+      userName: 'a@example.com',
+      emails: ['a@example.com'],
+      active: true,
+      idempotencyKey: 'create-shared-user',
+    })
+    await identity.upsertScimUser({
+      workspaceId,
+      identityProviderId: 'idp-b',
+      externalId: 'shared-user',
+      userName: 'b@example.com',
+      emails: ['b@example.com'],
+      active: true,
+      idempotencyKey: 'create-shared-user',
+    })
+    configureApiClientsForTest({ enterpriseIdentity: identity })
+
+    const responseA = await app.request(
+      `/api/scim/v2/${workspaceId}/Users`,
+      { headers: { Authorization: `Bearer ${credentialA.token}` } },
+    )
+    const responseB = await app.request(
+      `/api/scim/v2/${workspaceId}/Users`,
+      { headers: { Authorization: `Bearer ${credentialB.token}` } },
+    )
+
+    expect(responseA.status).toBe(200)
+    expect(responseB.status).toBe(200)
+    expect(await responseA.json()).toMatchObject({
+      totalResults: 1,
+      Resources: [{ id: userA.userId, externalId: 'shared-user' }],
+    })
+    expect((await responseB.json()).Resources[0].id).not.toBe(userA.userId)
+
+    configureFakeProjectClients(true, {
+      cognitoProviderDetails: {
+        oidc_issuer: 'https://replacement.example.com',
+        client_id: 'enterprise-client',
+      },
+    })
+    configureApiClientsForTest({ enterpriseIdentity: identity })
+    const drifted = await app.request(
+      `/api/scim/v2/${workspaceId}/Users`,
+      { headers: { Authorization: `Bearer ${credentialA.token}` } },
+    )
+    expect(drifted.status).toBe(409)
+  })
+})
+
+test('uses provider-qualified SCIM authority and never grants failed desired state', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    configureFakeProjectClients(true)
+    const workspaceId = 'workspace-scim-authority'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    const credentials = new Map<string, string>()
+    for (const providerId of ['idp-a', 'idp-b', 'idp-c']) {
+      await identity.putIdentityProvider({
+        workspaceId,
+        providerId,
+        kind: 'oidc',
+        displayName: providerId,
+        cognitoProviderName: 'EnterpriseOidc',
+        status: 'active',
+        revision: 1,
+        issuer: 'https://idp.example.com',
+        clientId: 'enterprise-client',
+        authorizationEndpoint: 'https://idp.example.com/authorize',
+        tokenEndpoint: 'https://idp.example.com/token',
+        jwksUri: 'https://idp.example.com/jwks',
+        scopes: ['openid', 'email'],
+        createdAt: now,
+        updatedAt: now,
+        lastTestedAt: now,
+      })
+      credentials.set(
+        providerId,
+        (await identity.issueScimToken(workspaceId, providerId, providerId)).token,
+      )
+    }
+
+    let currentMember: Awaited<ReturnType<WorkspaceAccessClient['getMember']>>
+    const reconciledAuthorityIds: string[] = []
+    configureApiClientsForTest({
+      enterpriseIdentity: identity,
+      workspaceAccess: {
+        async getMember(_workspaceId: string, memberKey: string) {
+          return currentMember?.memberKey === memberKey ? currentMember : undefined
+        },
+        async reconcileDirectoryMember(_workspaceId, input) {
+          reconciledAuthorityIds.push(input.externalIdentityId)
+          if (
+            currentMember?.externalIdentityId &&
+            currentMember.externalIdentityId !== input.externalIdentityId
+          ) {
+            throw new WorkspaceAccessError(
+              409,
+              'WorkspaceDirectoryIdentityConflict',
+              'Directory identity does not own this member.',
+            )
+          }
+          currentMember = {
+            id: input.memberKey,
+            memberKey: input.memberKey,
+            email: input.email,
+            name: input.name,
+            role: input.role,
+            status: 'active',
+            provisioningSource: 'directory',
+            externalIdentityId: input.externalIdentityId,
+            version: (currentMember?.version ?? 0) + 1,
+            createdAt: currentMember?.createdAt ?? now,
+            updatedAt: now,
+          }
+          return currentMember
+        },
+      } as unknown as WorkspaceAccessClient,
+    })
+
+    const postUser = (
+      providerId: string,
+      externalId: string,
+      userName: string,
+    ) => app.request(`/api/scim/v2/${workspaceId}/Users`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${credentials.get(providerId)}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': `${providerId}:${externalId}`,
+      },
+      body: JSON.stringify({
+        externalId,
+        userName,
+        emails: [{ value: 'shared-member@example.com', primary: true }],
+        active: true,
+      }),
+    })
+
+    const providerAResponse = await postUser('idp-a', 'shared-user', 'a@example.com')
+    const providerBResponse = await postUser('idp-b', 'shared-user', 'b@example.com')
+    const providerCResponse = await postUser('idp-c', 'different-user', 'c@example.com')
+    expect(providerAResponse.status).toBe(201)
+    expect(providerBResponse.status).toBe(409)
+    expect(providerCResponse.status).toBe(409)
+
+    const providerAResource = await providerAResponse.json()
+    const snapshot = await identity.getSnapshot(workspaceId)
+    const providerBUser = snapshot.scimUsers.find((user) =>
+      user.identityProviderId === 'idp-b'
+    )
+    expect(currentMember?.externalIdentityId).toBe(providerAResource.id)
+    expect(new Set(reconciledAuthorityIds)).toEqual(
+      new Set(snapshot.scimUsers.map((user) => user.userId)),
+    )
+    expect(snapshot.scimUsers.map((user) => user.userId)).not.toContain('shared-user')
+    expect(providerBUser).toMatchObject({
+      externalId: 'shared-user',
+      linkedMemberKey: 'shared-member@example.com',
+      appliedVersion: 0,
+    })
+    if (!providerBUser) throw new Error('Expected provider B desired user state.')
+
+    const providerBGroup = await identity.upsertScimGroup({
+      workspaceId,
+      identityProviderId: 'idp-b',
+      externalId: 'shared-group',
+      displayName: 'Provider B administrators',
+      active: true,
+      memberUserIds: [providerBUser.userId],
+      idempotencyKey: 'provider-b-group',
+    })
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'provider-b-admins',
+      identityProviderId: 'idp-b',
+      directoryGroupId: providerBGroup.groupId,
+      roleId: 'workspace:admin',
+      scope: { workspaceId, kind: 'workspace' },
+      enabled: true,
+      priority: 0,
+      revision: 1,
+      updatedAt: now,
+    })
+    const afterMapping = await identity.getSnapshot(workspaceId)
+    expect(
+      resolveEnterpriseDirectoryPrincipal(
+        afterMapping,
+        'shared-member@example.com',
+        [],
+      ).compatibleGroupMappings,
+    ).toEqual([])
+  })
+})
+
+test('reconciles workspace guest roles for SCIM membership and mapping changes', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    const workspaceId = 'user#demo@example.com'
+    const scenario = await configureEnterpriseScimGuestRoleScenario(workspaceId)
+    const scimBaseUrl = `/api/scim/v2/${encodeURIComponent(workspaceId)}`
+    const scimHeaders = {
+      Authorization: `Bearer ${scenario.scimToken}`,
+      'Content-Type': 'application/scim+json',
+    }
+    const userResponse = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers: { ...scimHeaders, 'Idempotency-Key': 'guest-role-user' },
+      body: JSON.stringify({
+        externalId: 'managed-user',
+        userName: 'managed@example.com',
+        emails: [{ value: 'managed@example.com', primary: true }],
+        active: true,
+      }),
+    })
+    expect(userResponse.status).toBe(201)
+    const user = await userResponse.json()
+    const groupResponse = await app.request(`${scimBaseUrl}/Groups`, {
+      method: 'POST',
+      headers: { ...scimHeaders, 'Idempotency-Key': 'guest-role-group' },
+      body: JSON.stringify({
+        externalId: 'workspace-guests',
+        displayName: 'Workspace guests',
+        members: [{ value: user.id }],
+        active: true,
+      }),
+    })
+    expect(groupResponse.status).toBe(201)
+    const group = await groupResponse.json()
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+
+    const mappingResponse = await app.request(
+      '/api/enterprise/security/group-mappings',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'workspace-guest-mapping',
+        },
+        body: JSON.stringify({
+          identityProviderId: 'idp-guest-role',
+          directoryGroupId: group.id,
+          scopeType: 'workspace',
+          roleId: 'workspace:guest',
+        }),
+      },
+    )
+    expect(mappingResponse.status).toBe(201)
+    const mapping = (await mappingResponse.json()).mapping
+    expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+
+    const removeMemberResponse = await app.request(
+      `${scimBaseUrl}/Groups/${group.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'remove-workspace-guest',
+          'If-Match': 'W/"1"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'remove',
+            path: `members[value eq "${user.id}"]`,
+          }],
+        }),
+      },
+    )
+    expect(removeMemberResponse.status).toBe(200)
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+
+    const addMemberResponse = await app.request(
+      `${scimBaseUrl}/Groups/${group.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'add-workspace-guest',
+          'If-Match': 'W/"2"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'add',
+            path: 'members',
+            value: [{ value: user.id }],
+          }],
+        }),
+      },
+    )
+    expect(addMemberResponse.status).toBe(200)
+    expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+
+    const memberMappingResponse = await app.request(
+      `/api/enterprise/security/group-mappings/${mapping.id}`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          expectedVersion: 1,
+          directoryGroupId: group.id,
+          scopeType: 'workspace',
+          roleId: 'workspace:member',
+        }),
+      },
+    )
+    expect(memberMappingResponse.status).toBe(200)
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+
+    const guestMappingResponse = await app.request(
+      `/api/enterprise/security/group-mappings/${mapping.id}`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          expectedVersion: 2,
+          directoryGroupId: group.id,
+          scopeType: 'workspace',
+          roleId: 'workspace:guest',
+        }),
+      },
+    )
+    expect(guestMappingResponse.status).toBe(200)
+    expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+
+    const deleteMappingResponse = await app.request(
+      `/api/enterprise/security/group-mappings/${mapping.id}`,
+      {
+        method: 'DELETE',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ expectedVersion: 3 }),
+      },
+    )
+    expect(deleteMappingResponse.status).toBe(204)
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+  })
+})
+
+test('retries a provisioning plan with desired guest groups before checkpointing them', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    const workspaceId = 'user#demo@example.com'
+    const scenario = await configureEnterpriseScimGuestRoleScenario(workspaceId)
+    const scimBaseUrl = `/api/scim/v2/${encodeURIComponent(workspaceId)}`
+    const userResponse = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${scenario.scimToken}`,
+        'Content-Type': 'application/scim+json',
+        'Idempotency-Key': 'provisioning-guest-user',
+      },
+      body: JSON.stringify({
+        externalId: 'provisioning-managed-user',
+        userName: 'managed@example.com',
+        emails: [{ value: 'managed@example.com', primary: true }],
+        active: true,
+      }),
+    })
+    expect(userResponse.status).toBe(201)
+    const user = await userResponse.json()
+    const group = await scenario.identity.upsertScimGroup({
+      workspaceId,
+      identityProviderId: 'idp-guest-role',
+      externalId: 'pending-workspace-guests',
+      displayName: 'Pending workspace guests',
+      active: true,
+      memberUserIds: [user.id],
+      idempotencyKey: 'pending-workspace-guests',
+    })
+    await scenario.identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'pending-workspace-guest-mapping',
+      identityProviderId: 'idp-guest-role',
+      directoryGroupId: group.groupId,
+      roleId: 'workspace:guest',
+      scope: { workspaceId, kind: 'workspace' },
+      enabled: true,
+      priority: 0,
+      revision: 1,
+      updatedAt: new Date().toISOString(),
+    })
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+
+    const previewResponse = await app.request(
+      '/api/enterprise/security/provisioning/preview',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'guest-provisioning-preview',
+        },
+        body: '{}',
+      },
+    )
+    expect(previewResponse.status).toBe(200)
+    const preview = (await previewResponse.json()).impact
+    scenario.setReconcileFailures(1)
+    const failedResponse = await app.request(
+      '/api/enterprise/security/provisioning/reconcile',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'guest-provisioning-run',
+        },
+        body: JSON.stringify({
+          previewId: preview.previewId,
+          previewExpiresAt: preview.expiresAt,
+        }),
+      },
+    )
+    expect(failedResponse.status).toBe(503)
+    const failedSnapshot = await scenario.identity.getSnapshot(workspaceId)
+    const failedGroup = failedSnapshot.scimGroups.find((candidate) =>
+      candidate.groupId === group.groupId
+    )
+    expect(failedGroup?.appliedVersion).toBe(0)
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+    const failedRun = failedSnapshot.provisioningRuns.find((run) =>
+      run.status === 'failed'
+    )
+    expect(failedRun).toBeDefined()
+    if (!failedRun) throw new Error('Expected a failed provisioning run.')
+
+    const retryResponse = await app.request(
+      `/api/enterprise/security/provisioning/logs/${failedRun.runId}/retry`,
+      {
+        method: 'POST',
+        headers: { Authorization: 'Bearer test-token' },
+      },
+    )
+    expect(retryResponse.status).toBe(200)
+    expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+    const succeededGroup = (await scenario.identity.getSnapshot(workspaceId))
+      .scimGroups.find((candidate) => candidate.groupId === group.groupId)
+    expect(succeededGroup?.appliedVersion).toBe(succeededGroup?.version)
+  })
 })
 
 test('uses AWS Cognito SDK commands and excludes users with conflicting workspace attributes', async () => {
@@ -3026,6 +3601,34 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
         }
       }
 
+      if (commandName === 'DescribeIdentityProviderCommand') {
+        return {
+          IdentityProvider: {
+            ProviderName: 'EnterpriseOidc',
+            ProviderType: 'OIDC',
+            ProviderDetails: {
+              oidc_issuer: 'https://idp.example.com',
+              client_id: 'enterprise-client',
+            },
+          },
+        }
+      }
+
+      if (commandName === 'DescribeUserPoolClientCommand') {
+        return {
+          UserPoolClient: {
+            ClientId: 'mukuroji-sso-client',
+            ClientSecret: undefined,
+            SupportedIdentityProviders: ['EnterpriseOidc'],
+            AllowedOAuthFlowsUserPoolClient: true,
+            AllowedOAuthFlows: ['code'],
+            AllowedOAuthScopes: ['openid', 'email', 'profile'],
+            CallbackURLs: ['https://app.example.com/api/auth/sso/callback'],
+            ExplicitAuthFlows: ['ALLOW_REFRESH_TOKEN_AUTH'],
+          },
+        }
+      }
+
       return {
         Username: 'valid@example.com',
         UserAttributes: [{ Name: 'email', Value: 'valid@example.com' }],
@@ -3055,6 +3658,7 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
         email: 'valid@example.com',
         name: undefined,
         enabled: undefined,
+        mfaConfigured: false,
         status: undefined,
       },
     ],
@@ -3063,12 +3667,34 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
   await expect(client.getUserProfile('valid@example.com')).resolves.toMatchObject({
     id: 'valid@example.com',
   })
+  await expect(client.describeEnterpriseIdentityProvider('EnterpriseOidc'))
+    .resolves.toEqual({
+      providerName: 'EnterpriseOidc',
+      providerType: 'OIDC',
+      providerDetails: {
+        oidc_issuer: 'https://idp.example.com',
+        client_id: 'enterprise-client',
+      },
+    })
+  await expect(client.describeEnterpriseSsoAppClient('mukuroji-sso-client'))
+    .resolves.toEqual({
+      clientId: 'mukuroji-sso-client',
+      hasClientSecret: false,
+      supportedIdentityProviders: ['EnterpriseOidc'],
+      allowedOAuthFlowsUserPoolClient: true,
+      allowedOAuthFlows: ['code'],
+      allowedOAuthScopes: ['openid', 'email', 'profile'],
+      explicitAuthFlows: ['ALLOW_REFRESH_TOKEN_AUTH'],
+      callbackUrls: ['https://app.example.com/api/auth/sso/callback'],
+    })
   expect(commandNames).toEqual([
     'InitiateAuthCommand',
     'RespondToAuthChallengeCommand',
     'GetUserCommand',
     'ListUsersCommand',
     'AdminGetUserCommand',
+    'DescribeIdentityProviderCommand',
+    'DescribeUserPoolClientCommand',
   ])
 })
 
@@ -3338,19 +3964,23 @@ test('runs the Workspace identity lifecycle through the production AWS Cognito a
     .map(({ name }) => name)).toEqual([
     'AdminGetUserCommand',
     'RespondToAuthChallengeCommand',
+    'AdminListGroupsForUserCommand',
+    'AdminGetUserCommand',
+    'AdminUpdateUserAttributesCommand',
+    'AdminCreateUserCommand',
+    'AdminListGroupsForUserCommand',
+    'AdminGetUserCommand',
+    'AdminGetUserCommand',
+    'AdminCreateUserCommand',
+    'AdminListGroupsForUserCommand',
+    'AdminGetUserCommand',
+    'AdminGetUserCommand',
+    'AdminCreateUserCommand',
     'AdminGetUserCommand',
     'AdminUpdateUserAttributesCommand',
     'AdminCreateUserCommand',
     'AdminGetUserCommand',
-    'AdminGetUserCommand',
-    'AdminCreateUserCommand',
-    'AdminGetUserCommand',
-    'AdminGetUserCommand',
-    'AdminCreateUserCommand',
-    'AdminGetUserCommand',
-    'AdminUpdateUserAttributesCommand',
-    'AdminCreateUserCommand',
-    'AdminGetUserCommand',
+    'AdminListGroupsForUserCommand',
     'AdminGetUserCommand',
     'AdminDeleteUserCommand',
     'AdminGetUserCommand',
@@ -4123,7 +4753,11 @@ test('rejects disabled existing Cognito identities before mutating invitation at
     code: 'CognitoUserDisabled',
     message: 'The existing Cognito user is disabled. Re-enable it before sending a Workspace invitation.',
   })
-  expect(commandNames).toEqual(['GetUserCommand', 'AdminGetUserCommand'])
+  expect(commandNames).toEqual([
+    'GetUserCommand',
+    'AdminListGroupsForUserCommand',
+    'AdminGetUserCommand',
+  ])
 })
 
 test('rejects a disabled Cognito identity discovered after UsernameExists', async () => {
@@ -4766,7 +5400,9 @@ test('hides stale assignee-only notifications after Work Item reassignment', asy
 })
 
 test('returns Cognito groups and system admin status for the current user', async () => {
-  configureFakeProjectClients(true)
+  configureFakeProjectClients(true, {
+    systemAdminMemberKeys: ['demo@example.com'],
+  })
 
   const response = await app.request('/api/auth/me', {
     headers: {
@@ -4795,6 +5431,498 @@ test('returns Workspace role and active status for the current user', async () =
   })
 })
 
+test('requires server-attested SSO for a user in an enforced domain', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
+  }, async () => {
+    configureFakeProjectClients(true)
+    const workspaceId = 'user#demo@example.com'
+    const providerId = 'idp-enforced'
+    const providerRevision = 1
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    const provider = {
+      workspaceId,
+      providerId,
+      kind: 'oidc' as const,
+      displayName: 'Enterprise SSO',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active' as const,
+      revision: providerRevision,
+      issuer: 'https://idp.example.com',
+      clientId: 'enterprise-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email'],
+      createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+    }
+    await identity.putIdentityProvider(provider)
+    const domain = {
+      workspaceId,
+      domainId: 'example-com',
+      domain: 'example.com',
+      status: 'verified' as const,
+      revision: 1,
+      verificationRecordName: '_mukuroji-challenge.example.com',
+      verifiedAt: now,
+      enforceSso: false,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await identity.putVerifiedDomain(domain)
+    const ssoAuthenticationMethod =
+      `mukuroji:enterprise-sso-provider-sha256:${
+        createHash('sha256').update(`${providerId}\0${providerRevision}`).digest('hex')
+      }`
+    let verifiedAuthenticationMethods: string[] = []
+    configureApiClientsForTest({
+      enterpriseIdentity: identity,
+      enterpriseSessionActivity: {
+        async getAuthenticationMethods() {
+          return [...verifiedAuthenticationMethods]
+        },
+        async recordAuthenticationAssurance() {
+          return undefined
+        },
+        async validateAndTouch(input) {
+          return [...input.authenticationMethods]
+        },
+      },
+    })
+    const mainAccessToken = createAccessToken([], {
+      'cognito:amr': [ssoAuthenticationMethod],
+      client_id: 'mukuroji-main-client',
+      iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+      token_use: 'access',
+    })
+    const ssoAccessToken = createAccessToken([], {
+      client_id: 'mukuroji-sso-client',
+      iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+      token_use: 'access',
+    })
+    const requestCurrentUser = (accessToken: string) => app.request('/api/auth/me', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+
+    const nonEnforced = await requestCurrentUser(mainAccessToken)
+    expect(nonEnforced.status).toBe(200)
+
+    await identity.putVerifiedDomain({
+      ...domain,
+      revision: 2,
+      enforceSso: true,
+      identityProviderId: providerId,
+    })
+
+    const forgedClaim = await requestCurrentUser(mainAccessToken)
+    expect(forgedClaim.status).toBe(403)
+    expect(await forgedClaim.json()).toEqual({
+      code: 'EnterpriseSsoSessionRequired',
+      message: 'Single sign-on is required for this Workspace account.',
+    })
+
+    verifiedAuthenticationMethods = [ssoAuthenticationMethod]
+    const wrongClient = await requestCurrentUser(mainAccessToken)
+    expect(wrongClient.status).toBe(403)
+    const serverAttested = await requestCurrentUser(ssoAccessToken)
+    expect(serverAttested.status).toBe(200)
+
+    await identity.putIdentityProvider({
+      ...provider,
+      revision: providerRevision + 1,
+    })
+    const staleProviderRevision = await requestCurrentUser(ssoAccessToken)
+    expect(staleProviderRevision.status).toBe(403)
+    expect(await staleProviderRevision.json()).toMatchObject({
+      code: 'EnterpriseSsoSessionRequired',
+    })
+  })
+})
+
+test('binds SSO exchange assurance to the signed provider revision', async () => {
+  await withTestEnvironment({
+    AWS_REGION: 'ap-northeast-1',
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
+    ENTERPRISE_SSO_STATE_SECRET: '0123456789abcdef0123456789abcdef',
+  }, async () => {
+    configureFakeProjectClients(true)
+    const workspaceId = 'user#demo@example.com'
+    const providerId = 'idp-enforced'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    const provider = {
+      workspaceId,
+      providerId,
+      kind: 'oidc' as const,
+      displayName: 'Enterprise SSO',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active' as const,
+      revision: 1,
+      issuer: 'https://idp.example.com',
+      clientId: 'enterprise-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email'],
+      createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+    }
+    await identity.putIdentityProvider(provider)
+    await identity.putVerifiedDomain({
+      workspaceId,
+      domainId: 'example-com',
+      domain: 'example.com',
+      status: 'verified',
+      revision: 1,
+      verificationRecordName: '_mukuroji-challenge.example.com',
+      verifiedAt: now,
+      enforceSso: true,
+      identityProviderId: providerId,
+      createdAt: now,
+      updatedAt: now,
+    })
+    const assurances: string[][] = []
+    configureApiClientsForTest({
+      enterpriseIdentity: identity,
+      enterpriseSessionActivity: {
+        async getAuthenticationMethods() {
+          return []
+        },
+        async recordAuthenticationAssurance(input) {
+          assurances.push([...input.authenticationMethods])
+        },
+        async validateAndTouch(input) {
+          return [...input.authenticationMethods]
+        },
+      },
+    })
+    const startSso = () => app.request('/api/auth/sso/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'demo@example.com',
+        returnTo: '/workspace',
+      }),
+    })
+    const firstStart = await startSso()
+    expect(firstStart.status).toBe(200)
+    const firstStartBody = await firstStart.json()
+    let tokenNonce = new URL(firstStartBody.authorizationUrl).searchParams.get('nonce') ?? ''
+    const accessToken = createAccessToken([], {
+      'cognito:amr': [
+        'PASSWORD',
+        'mukuroji:enterprise-sso-provider-sha256:forged-access-claim',
+      ],
+      client_id: 'mukuroji-sso-client',
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
+      iat: Math.floor(Date.now() / 1_000),
+      iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+      token_use: 'access',
+    })
+    const originalFetch = globalThis.fetch
+    let tokenExchangeCalls = 0
+    globalThis.fetch = (async () => {
+      tokenExchangeCalls += 1
+      const epochSeconds = Math.floor(Date.now() / 1_000)
+      return new Response(JSON.stringify({
+        access_token: accessToken,
+        id_token: createAccessToken([], {
+          amr: [
+            'upstream-mfa',
+            'mukuroji:enterprise-sso-provider-sha256:forged-id-claim',
+          ],
+          aud: 'mukuroji-sso-client',
+          email: 'demo@example.com',
+          email_verified: true,
+          exp: epochSeconds + 3_600,
+          iat: epochSeconds,
+          iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+          nonce: tokenNonce,
+          sub: 'cognito-user-id',
+          token_use: 'id',
+        }),
+        expires_in: 3_600,
+        refresh_token: 'refresh-token',
+        token_type: 'Bearer',
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    try {
+      const updatedProviderRevision = provider.revision + 1
+      await identity.putIdentityProvider({
+        ...provider,
+        revision: updatedProviderRevision,
+      })
+      const staleExchange = await app.request('/api/auth/sso/exchange', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'authorization-code-before-provider-update',
+          codeVerifier: firstStartBody.codeVerifier,
+          state: firstStartBody.state,
+        }),
+      })
+
+      expect(staleExchange.status).toBe(409)
+      expect(await staleExchange.json()).toMatchObject({
+        code: 'EnterpriseSsoConfigurationChanged',
+      })
+      expect(tokenExchangeCalls).toBe(0)
+
+      const currentStart = await startSso()
+      expect(currentStart.status).toBe(200)
+      const currentStartBody = await currentStart.json()
+      tokenNonce = new URL(currentStartBody.authorizationUrl).searchParams.get('nonce') ?? ''
+      const currentExchange = await app.request('/api/auth/sso/exchange', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'authorization-code-after-provider-update',
+          codeVerifier: currentStartBody.codeVerifier,
+          state: currentStartBody.state,
+        }),
+      })
+
+      expect(currentExchange.status).toBe(200)
+      expect(tokenExchangeCalls).toBe(1)
+      const expectedSsoMethod = `mukuroji:enterprise-sso-provider-sha256:${
+        createHash('sha256')
+          .update(`${providerId}\0${updatedProviderRevision}`)
+          .digest('hex')
+      }`
+      expect(assurances).toEqual([[
+        'PASSWORD',
+        'upstream-mfa',
+        expectedSsoMethod,
+      ]])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+})
+
+test('rejects a Cognito SSO app client that can escape the enterprise IdP contract', async () => {
+  await withTestEnvironment({
+    AWS_REGION: 'ap-northeast-1',
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
+    ENTERPRISE_SSO_STATE_SECRET: '0123456789abcdef0123456789abcdef',
+  }, async () => {
+    const workspaceId = 'user#demo@example.com'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    await identity.putIdentityProvider({
+      workspaceId,
+      providerId: 'idp-enforced',
+      kind: 'oidc',
+      displayName: 'Enterprise SSO',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active',
+      revision: 1,
+      issuer: 'https://idp.example.com',
+      clientId: 'enterprise-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email'],
+      createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+    })
+    await identity.putVerifiedDomain({
+      workspaceId,
+      domainId: 'example-com',
+      domain: 'example.com',
+      status: 'verified',
+      revision: 1,
+      verificationRecordName: '_mukuroji-challenge.example.com',
+      verifiedAt: now,
+      enforceSso: true,
+      identityProviderId: 'idp-enforced',
+      createdAt: now,
+      updatedAt: now,
+    })
+    const startSso = () => app.request('/api/auth/sso/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'demo@example.com' }),
+    })
+    const invalidBindings = [
+      { supportedIdentityProviders: ['EnterpriseOidc', 'COGNITO'] },
+      { allowedOAuthFlows: ['implicit'] },
+      { allowedOAuthScopes: ['openid', 'email'] },
+      { explicitAuthFlows: ['ALLOW_USER_PASSWORD_AUTH', 'ALLOW_REFRESH_TOKEN_AUTH'] },
+      { callbackUrls: ['https://attacker.example.com/callback'] },
+      { hasClientSecret: true },
+      { allowedOAuthFlowsUserPoolClient: false },
+    ]
+
+    for (const cognitoSsoClientDetails of invalidBindings) {
+      configureFakeProjectClients(true, { cognitoSsoClientDetails })
+      configureApiClientsForTest({ enterpriseIdentity: identity })
+      const response = await startSso()
+
+      expect(response.status).toBe(503)
+      expect(await response.json()).toMatchObject({
+        code: 'EnterpriseCognitoSsoAppClientBindingInvalid',
+      })
+    }
+
+    configureFakeProjectClients(true)
+    configureApiClientsForTest({ enterpriseIdentity: identity })
+    await withTestEnvironment({
+      COGNITO_SSO_CLIENT_ID: 'mukuroji-main-client',
+    }, async () => {
+      const sharedClient = await startSso()
+      expect(sharedClient.status).toBe(503)
+      expect(await sharedClient.json()).toMatchObject({
+        code: 'EnterpriseCognitoSsoAppClientUnavailable',
+      })
+    })
+  })
+})
+
+test('preflights a tested identity provider replacement before SSO enforcement can race', async () => {
+  await withTestEnvironment({
+    AWS_REGION: 'ap-northeast-1',
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
+    ENTERPRISE_SSO_STATE_SECRET: '0123456789abcdef0123456789abcdef',
+  }, async () => {
+    const workspaceId = 'user#demo@example.com'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    await identity.putIdentityProvider({
+      workspaceId,
+      providerId: 'idp-enforced',
+      kind: 'oidc',
+      displayName: 'Existing enterprise SSO',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active',
+      revision: 1,
+      issuer: 'https://idp.example.com',
+      clientId: 'existing-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email', 'profile'],
+      createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+    })
+    await identity.putVerifiedDomain({
+      workspaceId,
+      domainId: 'managed-example',
+      domain: 'managed.example',
+      status: 'verified',
+      revision: 1,
+      verificationRecordName: '_mukuroji-challenge.managed.example',
+      verifiedAt: now,
+      enforceSso: false,
+      identityProviderId: 'idp-enforced',
+      createdAt: now,
+      updatedAt: now,
+    })
+    await identity.putVerifiedDomain({
+      workspaceId,
+      domainId: 'example-com',
+      domain: 'example.com',
+      status: 'verified',
+      revision: 1,
+      verificationRecordName: '_mukuroji-challenge.example.com',
+      verifiedAt: now,
+      enforceSso: false,
+      createdAt: now,
+      updatedAt: now,
+    })
+    configureFakeProjectClients(true, {
+      cognitoProviderDetails: {
+        oidc_issuer: 'https://replacement.example.com',
+        client_id: 'replacement-client',
+      },
+      cognitoSsoClientDetails: {
+        supportedIdentityProviders: ['EnterpriseOidc', 'COGNITO'],
+      },
+    })
+    let connectionTests = 0
+    configureApiClientsForTest({
+      enterpriseIdentity: identity,
+      async enterpriseIdentityProviderConnectionTester(provider) {
+        connectionTests += 1
+        return {
+          ...provider,
+          status: 'active',
+          lastTestedAt: now,
+        }
+      },
+    })
+    const epochSeconds = Math.floor(Date.now() / 1_000)
+    const accessToken = createAccessToken([], {
+      client_id: 'mukuroji-main-client',
+      exp: epochSeconds + 3_600,
+      iat: epochSeconds,
+      iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+      token_use: 'access',
+    })
+    expect((await identity.getSnapshot(workspaceId)).domains.some((domain) =>
+      domain.status === 'verified' && domain.enforceSso
+    )).toBe(false)
+
+    const response = await app.request('/api/enterprise/security/identity-provider', {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        protocol: 'oidc',
+        displayName: 'Replacement enterprise SSO',
+        issuer: 'https://replacement.example.com',
+        ssoUrl: 'https://replacement.example.com/authorize',
+        clientId: 'replacement-client',
+        expectedVersion: 1,
+        testConnection: true,
+      }),
+    })
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({
+      code: 'EnterpriseCognitoSsoAppClientBindingInvalid',
+    })
+    expect(connectionTests).toBe(1)
+    expect((await identity.getSnapshot(workspaceId)).identityProviders).toEqual([
+      expect.objectContaining({
+        displayName: 'Existing enterprise SSO',
+        revision: 1,
+      }),
+    ])
+  })
+})
+
 test('blocks a deactivated Workspace member before any business API read', async () => {
   const calls = configureFakeProjectClients(true, { workspaceStatus: 'deactivated' })
 
@@ -4803,7 +5931,10 @@ test('blocks a deactivated Workspace member before any business API read', async
   })
 
   expect(response.status).toBe(403)
-  expect(await response.json()).toEqual({ message: 'Workspace access is denied.' })
+  expect(await response.json()).toEqual({
+    code: 'WorkspaceAccessDenied',
+    message: 'Workspace access is denied.',
+  })
   expect(calls.directoryReads).toEqual([])
 })
 
@@ -4887,6 +6018,212 @@ test('returns a NEW_PASSWORD_REQUIRED challenge without creating a session', asy
     session: 'new-password-session',
   })
   expect(calls.workspaceReconciliations).toEqual([])
+})
+
+test('returns a supported MFA challenge without attempting Workspace reconciliation', async () => {
+  const calls = configureFakeProjectClients(true, {
+    passwordMfaChallenge: 'SMS_MFA',
+  })
+
+  const response = await app.request('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'mfa-login@example.com', password: 'Password123!' }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    challenge: 'SMS_MFA',
+    deliveryDestination: '***-***-1234',
+    deliveryMedium: 'SMS',
+    email: 'mfa-login@example.com',
+    session: 'mfa-session',
+  })
+  expect(calls.workspaceReconciliations).toEqual([])
+})
+
+test('rechecks enforced SSO before completing password and MFA challenges', async () => {
+  const calls = configureFakeProjectClients(true, {
+    newPasswordChallengeTokens: true,
+    mfaChallengeTokens: true,
+  })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const timestamp = new Date().toISOString()
+  const provider = {
+    workspaceId: 'user#demo@example.com',
+    providerId: 'idp-enforced',
+    kind: 'oidc' as const,
+    displayName: 'Enterprise SSO',
+    cognitoProviderName: 'EnterpriseOidc',
+    status: 'active' as const,
+    revision: 1,
+    issuer: 'https://idp.example.com',
+    clientId: 'enterprise-client',
+    authorizationEndpoint: 'https://idp.example.com/authorize',
+    tokenEndpoint: 'https://idp.example.com/token',
+    jwksUri: 'https://idp.example.com/jwks',
+    scopes: ['openid', 'email'],
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    lastTestedAt: timestamp,
+  }
+  identity.discoverSso = async (email) =>
+    email.toLowerCase().endsWith('@managed.example')
+      ? {
+          provider,
+          domain: {
+            workspaceId: 'user#demo@example.com',
+            domainId: 'managed-example',
+            domain: 'managed.example',
+            status: 'verified',
+            revision: 1,
+            verificationRecordName: '_mukuroji-challenge.managed.example',
+            verifiedAt: timestamp,
+            enforceSso: true,
+            identityProviderId: provider.providerId,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          },
+        }
+      : undefined
+  configureApiClientsForTest({
+    enterpriseIdentity: identity,
+    enterpriseSessionActivity: {
+      async getAuthenticationMethods() {
+        return []
+      },
+      async recordAuthenticationAssurance() {
+        return undefined
+      },
+      async validateAndTouch(input) {
+        return [...input.authenticationMethods]
+      },
+    },
+  })
+
+  const newPassword = await app.request('/api/auth/challenge/new-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'person@managed.example',
+      newPassword: 'NewPassword123!',
+      session: 'challenge-before-enforcement',
+    }),
+  })
+  const managedMfa = await app.request('/api/auth/challenge/mfa', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'person@managed.example',
+      challenge: 'SOFTWARE_TOKEN_MFA',
+      code: '123456',
+      session: 'challenge-before-enforcement',
+    }),
+  })
+  const recoveryMfa = await app.request('/api/auth/challenge/mfa', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'recovery@outside.example',
+      challenge: 'SOFTWARE_TOKEN_MFA',
+      code: '123456',
+      session: 'local-recovery-session',
+    }),
+  })
+
+  expect(newPassword.status).toBe(409)
+  expect(await newPassword.json()).toMatchObject({ code: 'SsoRequired' })
+  expect(managedMfa.status).toBe(409)
+  expect(await managedMfa.json()).toMatchObject({ code: 'SsoRequired' })
+  expect(recoveryMfa.status).toBe(200)
+  expect(calls.mfaChallenges).toEqual([{
+    challenge: 'SOFTWARE_TOKEN_MFA',
+    code: '123456',
+    email: 'recovery@outside.example',
+    session: 'local-recovery-session',
+  }])
+})
+
+test('completes an MFA challenge and binds server-verified assurance to the access token', async () => {
+  const calls = configureFakeProjectClients(true, { mfaChallengeTokens: true })
+  const assurances: string[][] = []
+  configureApiClientsForTest({
+    enterpriseSessionActivity: {
+      async getAuthenticationMethods() {
+        return []
+      },
+      async recordAuthenticationAssurance(input) {
+        assurances.push([...input.authenticationMethods])
+      },
+      async validateAndTouch(input) {
+        return [...input.authenticationMethods]
+      },
+    },
+  })
+
+  const response = await app.request('/api/auth/challenge/mfa', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'demo@example.com',
+      challenge: 'SOFTWARE_TOKEN_MFA',
+      code: '123456',
+      session: 'mfa-session',
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({ accessToken: 'test-token' })
+  expect(calls.mfaChallenges).toEqual([{
+    challenge: 'SOFTWARE_TOKEN_MFA',
+    code: '123456',
+    email: 'demo@example.com',
+    session: 'mfa-session',
+  }])
+  expect(assurances).toEqual([['SOFTWARE_TOKEN_MFA']])
+})
+
+test('rejects malformed MFA codes before calling Cognito', async () => {
+  const calls = configureFakeProjectClients(true, { mfaChallengeTokens: true })
+
+  const response = await app.request('/api/auth/challenge/mfa', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'invalid-mfa@example.com',
+      challenge: 'SMS_OTP',
+      code: '12-ab',
+      session: 'mfa-session',
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({ code: 'InvalidMfaChallenge' })
+  expect(calls.mfaChallenges).toEqual([])
+})
+
+test('rate limits repeated MFA verification attempts by transport and email', async () => {
+  configureFakeProjectClients(true)
+  const createRequest = () => app.request('/api/auth/challenge/mfa', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'rate-limit-mfa@example.com',
+      challenge: 'EMAIL_OTP',
+      code: '123456',
+      session: 'mfa-session',
+    }),
+  })
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    expect((await createRequest()).status).toBe(409)
+  }
+  const limited = await createRequest()
+  expect(limited.status).toBe(429)
+  expect(limited.headers.get('Retry-After')).toBeTruthy()
+  expect(await limited.json()).toMatchObject({
+    code: 'AuthenticationChallengeRateLimited',
+  })
 })
 
 test('returns a stable error when a new password violates the Cognito policy', async () => {
@@ -5260,6 +6597,15 @@ test('forwards stable Workspace mutation audit headers and actor context to the 
       async getActiveMember() {
         return owner
       },
+      async getMember(_workspaceId: string, memberKey: string) {
+        return {
+          ...owner,
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: 'member',
+        }
+      },
       async updateMember(
         _workspaceId: string,
         _actorMemberKey: string,
@@ -5328,6 +6674,7 @@ test('rejects deactivating a Workspace member who still manages an active projec
 
   expect(response.status).toBe(409)
   expect(await response.json()).toEqual({
+    code: 'WorkspaceMemberManagesProjects',
     message: 'Transfer or remove all active project manager roles before deactivating this member.',
   })
   expect(calls.accessChecks).toEqual([
@@ -5355,6 +6702,7 @@ test('rejects deactivating a Workspace member who owns an active Planning entity
 
   expect(response.status).toBe(409)
   expect(await response.json()).toEqual({
+    code: 'WorkspaceMemberOwnsPlanningEntities',
     message: 'Transfer or archive all owned Planning entities before deactivating this member.',
   })
 })
@@ -5920,9 +7268,13 @@ test('marks a workspace audit export as truncated when the 1,000 event cap leave
   configureFakeProjectClients(true)
   const event = createFakeAuditEvent()
   let pageNumber = 0
+  const accessEvents: AuditEventV1[] = []
 
   configureApiClientsForTest({
     auditEvents: {
+      async putEvent(accessEvent) {
+        accessEvents.push(accessEvent)
+      },
       async getEvent() {
         return undefined
       },
@@ -5953,6 +7305,17 @@ test('marks a workspace audit export as truncated when the 1,000 event cap leave
   expect(response.headers.get('X-Audit-Next-Cursor')).toBe('cursor-10')
   expect((await response.text()).trimEnd().split('\n')).toHaveLength(1_000)
   expect(pageNumber).toBe(10)
+  expect(accessEvents).toHaveLength(1)
+  expect(accessEvents[0]).toMatchObject({
+    eventType: 'audit.exported',
+    actor: { kind: 'user' },
+    entity: { type: 'audit-log', id: 'user#demo@example.com' },
+    metadata: {
+      format: 'ndjson',
+      returnedEventCount: 1_000,
+      truncated: true,
+    },
+  })
 })
 
 test('omits truncation headers when a workspace audit export reaches the final page', async () => {
@@ -5961,6 +7324,7 @@ test('omits truncation headers when a workspace audit export reaches the final p
 
   configureApiClientsForTest({
     auditEvents: {
+      async putEvent() {},
       async getEvent() {
         return undefined
       },
@@ -5980,6 +7344,46 @@ test('omits truncation headers when a workspace audit export reaches the final p
   expect(response.headers.get('X-Audit-Truncated')).toBeNull()
   expect(response.headers.get('X-Audit-Next-Cursor')).toBeNull()
   expect((await response.text()).trimEnd().split('\n')).toHaveLength(1)
+})
+
+test('appends an immutable audit event after viewing the workspace audit timeline', async () => {
+  configureFakeProjectClients(true)
+  const event = createFakeAuditEvent()
+  const accessEvents: AuditEventV1[] = []
+  configureApiClientsForTest({
+    auditEvents: {
+      async putEvent(accessEvent) {
+        accessEvents.push(accessEvent)
+      },
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [event] }
+      },
+    },
+  })
+
+  const response = await app.request('/api/audit/events?eventType=project.created', {
+    headers: {
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
+      'X-Request-Id': 'audit-view-request-1',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(accessEvents).toHaveLength(1)
+  expect(accessEvents[0]).toMatchObject({
+    eventType: 'audit.viewed',
+    actor: { kind: 'user' },
+    entity: { type: 'audit-log', id: 'user#demo@example.com' },
+    metadata: {
+      format: 'json',
+      returnedEventCount: 1,
+      truncated: false,
+      filtered: true,
+    },
+  })
 })
 
 test('reads and saves Workspace Work Item configuration through the authenticated scope', async () => {
@@ -7026,6 +8430,7 @@ test('rejects archiving a Team referenced by an active Planning entity', async (
 
   expect(response.status).toBe(409)
   expect(await response.json()).toEqual({
+    code: 'PlanningTeamScopeInUse',
     message:
       'Move or archive active Planning entities and remove Work Item links before archiving this Team.',
   })
@@ -7118,7 +8523,10 @@ test('updates a project member role when the current user is project manager', a
 })
 
 test('lets a system admin update project members without a project role', async () => {
-  const calls = configureFakeProjectClients(false, { role: undefined })
+  const calls = configureFakeProjectClients(false, {
+    role: undefined,
+    systemAdminMemberKeys: ['demo@example.com'],
+  })
 
   const response = await app.request('/api/projects/refero/members/viewer%40example.com', {
     method: 'PATCH',
@@ -7240,6 +8648,7 @@ test('rejects archiving a Project referenced by an active Planning entity', asyn
 
   expect(response.status).toBe(409)
   expect(await response.json()).toEqual({
+    code: 'PlanningProjectScopeInUse',
     message:
       'Move or archive active Planning entities and remove Work Item links before archiving this Project.',
   })
@@ -9036,7 +10445,8 @@ test('issues a one-time realtime ticket only after Work Item viewer access is co
     websocketUrl: 'wss://realtime.example.com/dev',
     expiresAt: '2026-07-12T00:01:00.000Z',
   })
-  expect(ticketInputs).toEqual([{
+  expect(ticketInputs).toHaveLength(1)
+  expect(ticketInputs[0]).toMatchObject({
     workspaceId: 'user#demo@example.com',
     memberKey: 'demo@example.com',
     teamId: 'core-team',
@@ -9045,7 +10455,672 @@ test('issues a one-time realtime ticket only after Work Item viewer access is co
     systemAdmin: false,
     canWrite: true,
     scopeKey: 'user#demo@example.com#work-item#team/core-team/issue/onboarding-friction',
-  }])
+    authenticationSessionId: expect.any(String),
+    authenticationMethods: [],
+    clientIp: 'transport-unavailable',
+  })
+  expect(ticketInputs[0]?.authenticatedAt).toEqual(expect.any(Number))
+  expect(ticketInputs[0]?.tokenExpiresAt).toEqual(expect.any(Number))
+})
+
+test('applies a directory-mapped custom role to only its assigned Project APIs', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+  }, async () => {
+  configureFakeProjectClients(false, {
+    workspaceRole: 'member',
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const workspaceId = 'user#demo@example.com'
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const now = new Date().toISOString()
+  await identity.putIdentityProvider({
+    workspaceId,
+    providerId: 'idp-project-role',
+    kind: 'oidc',
+    displayName: 'Project directory',
+    cognitoProviderName: 'EnterpriseOidc',
+    status: 'active',
+    revision: 1,
+    issuer: 'https://idp.example.com',
+    clientId: 'enterprise-client',
+    authorizationEndpoint: 'https://idp.example.com/authorize',
+    tokenEndpoint: 'https://idp.example.com/token',
+    jwksUri: 'https://idp.example.com/jwks',
+    scopes: ['openid', 'email'],
+    createdAt: now,
+    updatedAt: now,
+    lastTestedAt: now,
+  })
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:project-reader',
+    name: 'Project reader',
+    permissions: ['projects.read', 'work-items.read', 'automation.manage'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  const user = await identity.upsertScimUser({
+    workspaceId,
+    identityProviderId: 'idp-project-role',
+    externalId: 'demo-user',
+    userName: 'demo@example.com',
+    emails: ['demo@example.com'],
+    active: true,
+    linkedMemberKey: 'demo@example.com',
+    idempotencyKey: 'project-reader-user',
+  })
+  const group = await identity.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'idp-project-role',
+    externalId: 'project-readers',
+    displayName: 'Project readers',
+    active: true,
+    memberUserIds: [user.userId],
+    idempotencyKey: 'project-reader-group',
+  })
+  const desiredUser = (await identity.getSnapshot(workspaceId)).scimUsers.find((candidate) =>
+    candidate.userId === user.userId
+  )
+  if (!desiredUser) throw new Error('Expected the SCIM user to exist.')
+  await identity.markScimUserApplied(
+    workspaceId,
+    desiredUser.userId,
+    desiredUser.version,
+  )
+  await identity.markScimGroupApplied(
+    workspaceId,
+    group.groupId,
+    group.version,
+  )
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: 'project-reader-mapping',
+    identityProviderId: 'idp-project-role',
+    directoryGroupId: group.groupId,
+    roleId: 'custom:project-reader',
+    scope: { workspaceId, kind: 'project', targetId: 'refero' },
+    enabled: true,
+    priority: 0,
+    revision: 1,
+    updatedAt: now,
+  })
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:team-project-creator',
+    name: 'Team project creator',
+    permissions: ['projects.write'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: 'team-project-creator-mapping',
+    identityProviderId: 'idp-project-role',
+    directoryGroupId: group.groupId,
+    roleId: 'custom:team-project-creator',
+    scope: { workspaceId, kind: 'team', targetId: 'core-team' },
+    enabled: true,
+    priority: 1,
+    revision: 1,
+    updatedAt: now,
+  })
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:project-team-writer',
+    name: 'Project-scoped Team writer',
+    permissions: ['teams.write'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: 'project-team-writer-mapping',
+    identityProviderId: 'idp-project-role',
+    directoryGroupId: group.groupId,
+    roleId: 'custom:project-team-writer',
+    scope: { workspaceId, kind: 'project', targetId: 'refero' },
+    enabled: true,
+    priority: 2,
+    revision: 1,
+    updatedAt: now,
+  })
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:project-planner',
+    name: 'Project planner',
+    permissions: ['planning.read', 'planning.write', 'automation.manage'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: 'project-planner-mapping',
+    identityProviderId: 'idp-project-role',
+    directoryGroupId: group.groupId,
+    roleId: 'custom:project-planner',
+    scope: { workspaceId, kind: 'project', targetId: 'refero' },
+    enabled: true,
+    priority: 3,
+    revision: 1,
+    updatedAt: now,
+  })
+  configureApiClientsForTest({
+    enterpriseIdentity: identity,
+    planning: new InMemoryPlanningClient(),
+  })
+  const authorization = `Bearer ${createAccessToken([], {
+    client_id: 'mukuroji-main-client',
+    token_use: 'access',
+  })}`
+
+  const allowed = await app.request('/api/projects/refero/tasks', {
+    headers: { Authorization: authorization },
+  })
+  const denied = await app.request('/api/projects/private-project/tasks', {
+    headers: { Authorization: authorization },
+  })
+  const directoryResponse = await app.request('/api/teams/projects', {
+    headers: { Authorization: authorization },
+  })
+  const projectCreateResponse = await app.request('/api/teams/core-team/projects', {
+    method: 'POST',
+    headers: {
+      Authorization: authorization,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ name: 'Scoped project', tone: 'green' }),
+  })
+  const teamCreateResponse = await app.request('/api/teams', {
+    method: 'POST',
+    headers: {
+      Authorization: authorization,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ name: 'Escaped Team' }),
+  })
+  const projectUserCandidatesResponse = await app.request('/api/projects/refero/users', {
+    headers: { Authorization: authorization },
+  })
+  const planningCreateResponse = await app.request('/api/planning/entities', {
+    method: 'POST',
+    headers: {
+      Authorization: authorization,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      id: 'scoped-plan',
+      type: 'portfolio',
+      title: 'Scoped plan',
+      teamId: 'core-team',
+      projectId: 'refero',
+      ownerMemberKey: 'demo@example.com',
+      status: 'planned',
+      health: 'on-track',
+      risk: 'low',
+      progressMode: 'manual',
+      manualProgress: 0,
+      baseline: { startDate: '2026-07-01', endDate: '2026-07-31' },
+      forecast: { startDate: '2026-07-01', endDate: '2026-07-31' },
+      expectedRevision: 0,
+    }),
+  })
+  const planningArchiveResponse = await app.request(
+    '/api/planning/entities/scoped-plan/archive',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ expectedRevision: 1 }),
+    },
+  )
+
+  expect(allowed.status).toBe(200)
+  expect(denied.status).toBe(403)
+  expect(projectCreateResponse.status).toBe(201)
+  expect(teamCreateResponse.status).toBe(403)
+  expect(projectUserCandidatesResponse.status).toBe(403)
+  expect(planningCreateResponse.status).toBe(201)
+  expect(planningArchiveResponse.status).toBe(403)
+  expect(await directoryResponse.json()).toEqual({
+    teams: [{
+      id: 'core-team',
+      name: 'コアチーム',
+      expanded: true,
+      projects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+    }],
+  })
+  configureFakeProjectClients(false, {
+    workspaceRole: 'member',
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+    cognitoProviderDetails: {
+      oidc_issuer: 'https://replacement.example.com',
+      client_id: 'enterprise-client',
+    },
+  })
+  configureApiClientsForTest({ enterpriseIdentity: identity })
+  const drifted = await app.request('/api/projects/refero/tasks', {
+    headers: { Authorization: authorization },
+  })
+  expect(drifted.status).toBe(403)
+  })
+})
+
+test('preserves an empty Team and Team-scoped Planning aggregates for a directory mapping', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+  }, async () => {
+    configureFakeProjectClients(false, {
+      workspaceRole: 'member',
+      teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+      additionalTeams: [{
+        id: 'empty-team',
+        name: 'Empty Team',
+        projects: [],
+      }],
+      unassignedIssue: true,
+    })
+    const workspaceId = 'user#demo@example.com'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    await identity.putIdentityProvider({
+      workspaceId,
+      providerId: 'idp-team-role',
+      kind: 'oidc',
+      displayName: 'Team directory',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active',
+      revision: 1,
+      issuer: 'https://idp.example.com',
+      clientId: 'enterprise-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email'],
+      createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+    })
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:empty-team-reader',
+      name: 'Empty Team reader',
+      permissions: ['teams.read', 'planning.read', 'work-items.read'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    const user = await identity.upsertScimUser({
+      workspaceId,
+      identityProviderId: 'idp-team-role',
+      externalId: 'team-reader-user',
+      userName: 'demo@example.com',
+      emails: ['demo@example.com'],
+      active: true,
+      linkedMemberKey: 'demo@example.com',
+      idempotencyKey: 'team-reader-user',
+    })
+    const group = await identity.upsertScimGroup({
+      workspaceId,
+      identityProviderId: 'idp-team-role',
+      externalId: 'empty-team-readers',
+      displayName: 'Empty Team readers',
+      active: true,
+      memberUserIds: [user.userId],
+      idempotencyKey: 'empty-team-reader-group',
+    })
+    const desiredUser = (await identity.getSnapshot(workspaceId)).scimUsers.find((candidate) =>
+      candidate.userId === user.userId
+    )
+    if (!desiredUser) throw new Error('Expected the SCIM user to exist.')
+    await identity.markScimUserApplied(workspaceId, desiredUser.userId, desiredUser.version)
+    await identity.markScimGroupApplied(workspaceId, group.groupId, group.version)
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'empty-team-reader-mapping',
+      identityProviderId: 'idp-team-role',
+      directoryGroupId: group.groupId,
+      roleId: 'custom:empty-team-reader',
+      scope: { workspaceId, kind: 'team', targetId: 'empty-team' },
+      enabled: true,
+      priority: 0,
+      revision: 1,
+      updatedAt: now,
+    })
+
+    const planningClient = new InMemoryPlanningClient()
+    const teamWorkItemState = {
+      workItems: [{
+        id: 'onboarding-friction',
+        revision: 1,
+        teamId: 'empty-team',
+        title: 'Empty Team Work Item',
+        statusCategory: 'started' as const,
+        dueDate: '2026/06/18',
+      }],
+    }
+    await planningClient.create(workspaceId, {
+      ...createCyclePlanningInput('empty-team-cycle-a', 0),
+      teamId: 'empty-team',
+      projectId: undefined,
+    }, teamWorkItemState)
+    await planningClient.create(workspaceId, {
+      ...createCyclePlanningInput('empty-team-cycle-b', 1),
+      teamId: 'empty-team',
+      projectId: undefined,
+    }, teamWorkItemState)
+    await planningClient.create(
+      workspaceId,
+      createCyclePlanningInput('private-project-cycle', 2),
+      teamWorkItemState,
+    )
+    await planningClient.createDependency(workspaceId, {
+      id: 'empty-team-dependency',
+      predecessorId: 'empty-team-cycle-a',
+      successorId: 'empty-team-cycle-b',
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 3,
+    }, teamWorkItemState)
+    await planningClient.putWorkItemLink(workspaceId, {
+      teamId: 'empty-team',
+      workItemId: 'onboarding-friction',
+      cycleId: 'empty-team-cycle-a',
+      goalIds: [],
+      expectedRevision: 4,
+    }, teamWorkItemState)
+    configureApiClientsForTest({ enterpriseIdentity: identity, planning: planningClient })
+
+    const accessToken = createAccessToken([], {
+      client_id: 'mukuroji-main-client',
+      token_use: 'access',
+    })
+    const headers = { Authorization: `Bearer ${accessToken}` }
+    const directoryResponse = await app.request('/api/teams/projects', { headers })
+    const workItemsResponse = await app.request('/api/work-items', { headers })
+    const planningResponse = await app.request('/api/planning', { headers })
+
+    expect(directoryResponse.status).toBe(200)
+    expect(await directoryResponse.json()).toEqual({
+      teams: [{
+        id: 'empty-team',
+        name: 'Empty Team',
+        projects: [],
+      }],
+    })
+    expect(workItemsResponse.status).toBe(200)
+    expect(await workItemsResponse.json()).toMatchObject({
+      workItems: [{ id: 'onboarding-friction', teamId: 'empty-team' }],
+    })
+    expect(planningResponse.status).toBe(200)
+    const planningSnapshot = await planningResponse.json() as PlanningSnapshot
+    expect(planningSnapshot.entities.map((entity) => entity.id)).toEqual([
+      'empty-team-cycle-a',
+      'empty-team-cycle-b',
+    ])
+    expect(planningSnapshot.dependencies).toEqual([
+      expect.objectContaining({ id: 'empty-team-dependency' }),
+    ])
+    expect(planningSnapshot.workItemLinks).toEqual([
+      expect.objectContaining({
+        teamId: 'empty-team',
+        workItemId: 'onboarding-friction',
+        cycleId: 'empty-team-cycle-a',
+      }),
+    ])
+    expect(planningSnapshot.workItems).toEqual([
+      expect.objectContaining({ id: 'onboarding-friction', teamId: 'empty-team' }),
+    ])
+    expect(planningSnapshot.criticalPath.entityIds).not.toContain('private-project-cycle')
+    expect(planningSnapshot.criticalPath.slackByEntityId)
+      .not.toHaveProperty('private-project-cycle')
+  })
+})
+
+test('enforces service-account Project scope before recording successful use', async () => {
+  await withTestEnvironment({
+    MUKUROJI_WORKSPACE_DIRECTORY_ID: 'workspace-service-account',
+  }, async () => {
+    configureFakeProjectClients(false, {
+      teamProjects: [
+        { id: 'refero', name: 'Refero', tone: 'blue' },
+        { id: 'private-project', name: 'Private', tone: 'purple' },
+      ],
+    })
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const timestamp = new Date().toISOString()
+    const issued = await identity.createServiceAccountWithToken({
+      workspaceId: 'workspace-service-account',
+      accountId: 'project-reader-service',
+      displayName: 'Project reader',
+      permissions: ['projects.read', 'work-items.read', 'service-accounts.use'],
+      roleId: 'project:viewer',
+      scope: {
+        workspaceId: 'workspace-service-account',
+        kind: 'project',
+        targetId: 'refero',
+      },
+      credentialLifetimeDays: 30,
+      allowedSourceCidrs: [],
+      status: 'active',
+      credentialGeneration: 0,
+      revision: 1,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }, 'create-project-reader', 'create-project-reader-fingerprint')
+    const recordServiceAccountUse = identity.recordServiceAccountUse.bind(identity)
+    let serviceAccountAuditContext:
+      Parameters<typeof identity.recordServiceAccountUse>[2]
+    identity.recordServiceAccountUse = async (workspaceId, accountId, auditContext) => {
+      serviceAccountAuditContext = auditContext
+      await recordServiceAccountUse(workspaceId, accountId, auditContext)
+    }
+    configureApiClientsForTest({ enterpriseIdentity: identity })
+    const headers = { Authorization: `Bearer ${issued.token}` }
+
+    const denied = await app.request('/api/projects/private-project/tasks', { headers })
+    expect(denied.status).toBe(403)
+    expect(
+      (await identity.getSnapshot('workspace-service-account'))
+        .serviceAccounts[0]?.lastUsedAt,
+    ).toBeUndefined()
+
+    const allowed = await app.request('/api/projects/refero/tasks', { headers })
+    expect(allowed.status).toBe(200)
+    expect(
+      (await identity.getSnapshot('workspace-service-account'))
+        .serviceAccounts[0]?.lastUsedAt,
+    ).toEqual(expect.any(String))
+    expect(serviceAccountAuditContext).toMatchObject({
+      actor: {
+        id: 'project-reader-service',
+        kind: 'service',
+      },
+      source: {
+        kind: 'api',
+        route: '/api/projects/refero/tasks',
+      },
+    })
+  })
+})
+
+test('uses an active break-glass elevation to repair an IP allowlist lockout', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member' })
+  const workspaceId = 'user#demo@example.com'
+  const timestamp = new Date()
+  const now = timestamp.toISOString()
+  const nowSeconds = Math.floor(timestamp.getTime() / 1_000)
+  const accessToken = [
+    Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url'),
+    Buffer.from(JSON.stringify({
+      auth_time: nowSeconds,
+      iat: nowSeconds,
+      exp: nowSeconds + 3_600,
+      token_use: 'access',
+    })).toString('base64url'),
+    'test-signature',
+  ].join('.')
+  const alternateAccessToken = [
+    Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url'),
+    Buffer.from(JSON.stringify({
+      auth_time: nowSeconds,
+      iat: nowSeconds,
+      exp: nowSeconds + 3_600,
+      token_use: 'access',
+    })).toString('base64url'),
+    'alternate-test-signature',
+  ].join('.')
+  const identity = new InMemoryEnterpriseIdentityClient()
+  await identity.putSecurityPolicy({
+    workspaceId,
+    loginMode: 'password-or-sso',
+    mfaRequirement: 'required',
+    sessionLifetimeMinutes: 480,
+    idleTimeoutMinutes: 60,
+    reauthenticationIntervalMinutes: 120,
+    sensitiveActionReauthenticationMinutes: 15,
+    ipAllowlistMode: 'all-users',
+    ipAllowlist: ['203.0.113.0/24'],
+    externalAccess: {
+      allowGuests: true,
+      allowExternalCollaborators: true,
+      requireMfa: true,
+      maximumSessionLifetimeMinutes: 120,
+      allowedGuestDomains: [],
+      permissionCeiling: ['workspace.read'],
+    },
+    revision: 1,
+    updatedAt: now,
+    updatedBy: 'owner@example.com',
+  })
+  await identity.putBreakGlassAccount({
+    workspaceId,
+    accountId: 'recovery-demo',
+    linkedMemberKey: 'demo@example.com',
+    email: 'recovery@outside.example',
+    status: 'active',
+    requireMfa: true,
+    maximumActivationMinutes: 30,
+    mfaVerifiedAt: now,
+    lastTestedAt: now,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  const putSecurityPolicy = identity.putSecurityPolicy.bind(identity)
+  let breakGlassAuditContext: Parameters<typeof identity.putSecurityPolicy>[1]
+  identity.putSecurityPolicy = async (policy, auditContext) => {
+    breakGlassAuditContext = auditContext
+    return putSecurityPolicy(policy, auditContext)
+  }
+  configureApiClientsForTest({
+    enterpriseIdentity: identity,
+    enterpriseSessionActivity: {
+      async getAuthenticationMethods() {
+        return ['software_token_mfa']
+      },
+      async recordAuthenticationAssurance() {
+        return undefined
+      },
+      async validateAndTouch(input) {
+        return [...input.authenticationMethods]
+      },
+    },
+  })
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    'Content-Type': 'application/json',
+  }
+
+  const activation = await app.request(
+    '/api/enterprise/security/break-glass/activate',
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        reason: 'Repair mistaken IP policy',
+        durationMinutes: 15,
+      }),
+    },
+  )
+  const snapshotResponse = await app.request('/api/enterprise/security', { headers })
+  const alternateSessionResponse = await app.request('/api/enterprise/security', {
+    headers: { Authorization: `Bearer ${alternateAccessToken}` },
+  })
+  const policyResponse = await app.request('/api/enterprise/security/policy', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({
+      expectedVersion: 1,
+      mfaRequired: true,
+      sessionLifetimeMinutes: 480,
+      idleTimeoutMinutes: 60,
+      reauthenticationMinutes: 120,
+      sensitiveActionReauthenticationMinutes: 15,
+      ipAllowlist: [],
+      guestsAllowed: true,
+      externalCollaboratorsAllowed: true,
+      guestSessionLifetimeMinutes: 120,
+      allowedGuestDomains: [],
+    }),
+  })
+
+  expect(activation.status).toBe(201)
+  const activationBody = await activation.clone().json() as {
+    activation: { id: string }
+  }
+  expect(snapshotResponse.status).toBe(200)
+  expect(alternateSessionResponse.status).toBe(403)
+  expect(await alternateSessionResponse.json()).toMatchObject({
+    code: 'EnterpriseSessionIpDenied',
+  })
+  expect(await identity.getActiveBreakGlassActivation(
+    workspaceId,
+    'demo@example.com',
+    createHash('sha256').update(accessToken).digest('base64url'),
+  )).toMatchObject({ accountId: 'recovery-demo' })
+  expect(await identity.getActiveBreakGlassActivation(
+    workspaceId,
+    'demo@example.com',
+    createHash('sha256').update(alternateAccessToken).digest('base64url'),
+  )).toBeUndefined()
+  expect(await snapshotResponse.json()).toMatchObject({
+    activeBreakGlassActivation: {
+      expiresAt: expect.any(String),
+    },
+  })
+  expect(policyResponse.status).toBe(200)
+  expect(breakGlassAuditContext).toMatchObject({
+    actor: {
+      id: 'demo@example.com',
+      kind: 'break-glass',
+    },
+    correlationId: activationBody.activation.id,
+  })
+  expect((await identity.getSnapshot(workspaceId)).policy?.ipAllowlist).toEqual([])
 })
 
 test('updates a team-owned issue after team access is confirmed', async () => {
@@ -10351,6 +12426,25 @@ test('DynamoDB dashboard summary client derives counts from canonical Work Items
     directoryId: 'user#demo@example.com',
     projectId: 'refero',
   }])
+
+  const enterpriseSummary = await client.getSummary('user#demo@example.com', {
+    userKey: 'demo@example.com',
+    isSystemAdmin: false,
+    projectAccesses: [{ projectId: 'private', role: 'viewer' }],
+  })
+  const removedMappingSummary = await client.getSummary('user#demo@example.com', {
+    userKey: 'demo@example.com',
+    isSystemAdmin: false,
+    projectAccesses: [],
+  })
+
+  expect(enterpriseSummary.projects).toBe(1)
+  expect(removedMappingSummary).toMatchObject({ projects: 0, tasks: 0, blocked: 0 })
+  expect(accessListReads).toHaveLength(1)
+  expect(projectIssueReads.at(-1)).toEqual({
+    directoryId: 'user#demo@example.com',
+    projectId: 'private',
+  })
 })
 
 test('DynamoDB directory client reads project access consistently for Workspace guards', async () => {
@@ -12291,7 +14385,25 @@ function configureFakeProjectClients(
     mentionAccessDeniedMemberKeys?: string[]
     /** NEW_PASSWORD_REQUIRED challenge で Cognito が返す error です。 */
     newPasswordChallengeError?: CognitoServiceError
+    /** Cognito federation provider inspection fake が返す provider details です。 */
+    cognitoProviderDetails?: Record<string, string>
+    /** Cognito SSO app client inspection fake の既定 contract を上書きします。 */
+    cognitoSsoClientDetails?: {
+      allowedOAuthFlows?: string[]
+      allowedOAuthFlowsUserPoolClient?: boolean
+      allowedOAuthScopes?: string[]
+      callbackUrls?: string[]
+      explicitAuthFlows?: string[]
+      hasClientSecret?: boolean
+      supportedIdentityProviders?: string[]
+    }
     newPasswordChallengeTokens?: boolean
+    /** MFA challenge 応答 fake が返す Cognito error です。 */
+    mfaChallengeError?: CognitoServiceError
+    /** MFA challenge 応答 fake が token set を返すかどうかです。 */
+    mfaChallengeTokens?: boolean
+    /** Password login fake が返す MFA challenge です。 */
+    passwordMfaChallenge?: 'SOFTWARE_TOKEN_MFA' | 'SMS_MFA' | 'SMS_OTP' | 'EMAIL_OTP'
     passwordAuthChallenge?: boolean
     passwordAuthTokens?: boolean
     projectAccesses?: Array<{ projectId: string; role?: ProjectRole }>
@@ -12448,6 +14560,12 @@ function configureFakeProjectClients(
       status?: WorkspaceMemberStatus
     }>,
     workspaceReconciliations: [] as string[],
+    mfaChallenges: [] as Array<{
+      challenge: string
+      code: string
+      email: string
+      session: string
+    }>,
   }
   const workspaceInvitationInputs = new Map<string, {
     name?: string
@@ -12500,6 +14618,16 @@ function configureFakeProjectClients(
     }),
     cognito: {
       async initiatePasswordAuth() {
+        if (options.passwordMfaChallenge) {
+          return {
+            ChallengeName: options.passwordMfaChallenge,
+            ChallengeParameters: {
+              CODE_DELIVERY_DESTINATION: '***-***-1234',
+              CODE_DELIVERY_DELIVERY_MEDIUM: 'SMS',
+            },
+            Session: 'mfa-session',
+          }
+        }
         if (options.passwordAuthChallenge) {
           return {
             ChallengeName: 'NEW_PASSWORD_REQUIRED',
@@ -12522,6 +14650,14 @@ function configureFakeProjectClients(
           return { AuthenticationResult: createFakeAuthTokenSet() }
         }
 
+        return {}
+      },
+      async respondToMfaChallenge(email, challenge, code, session) {
+        calls.mfaChallenges.push({ email, challenge, code, session })
+        if (options.mfaChallengeError) throw options.mfaChallengeError
+        if (options.mfaChallengeTokens) {
+          return { AuthenticationResult: createFakeAuthTokenSet() }
+        }
         return {}
       },
       async getUser() {
@@ -12562,6 +14698,38 @@ function configureFakeProjectClients(
       },
       async isSystemAdmin(userId) {
         return options.systemAdminMemberKeys?.includes(userId.toLowerCase()) ?? false
+      },
+      async describeEnterpriseIdentityProvider(providerName) {
+        return {
+          providerName,
+          providerType: 'OIDC',
+          providerDetails: options.cognitoProviderDetails ?? {
+            oidc_issuer: 'https://idp.example.com',
+            client_id: 'enterprise-client',
+          },
+        }
+      },
+      async describeEnterpriseSsoAppClient(clientId) {
+        return {
+          clientId,
+          hasClientSecret: options.cognitoSsoClientDetails?.hasClientSecret ?? false,
+          supportedIdentityProviders:
+            options.cognitoSsoClientDetails?.supportedIdentityProviders ?? ['EnterpriseOidc'],
+          allowedOAuthFlowsUserPoolClient:
+            options.cognitoSsoClientDetails?.allowedOAuthFlowsUserPoolClient ?? true,
+          allowedOAuthFlows:
+            options.cognitoSsoClientDetails?.allowedOAuthFlows ?? ['code'],
+          allowedOAuthScopes:
+            options.cognitoSsoClientDetails?.allowedOAuthScopes ??
+              ['openid', 'email', 'profile'],
+          explicitAuthFlows:
+            options.cognitoSsoClientDetails?.explicitAuthFlows ??
+              ['ALLOW_REFRESH_TOKEN_AUTH'],
+          callbackUrls: options.cognitoSsoClientDetails?.callbackUrls ?? [
+            Bun.env.COGNITO_SSO_REDIRECT_URI ??
+              'https://app.example.com/api/auth/sso/callback',
+          ],
+        }
       },
       async findWorkspaceUser(userId) {
         if (options.workspaceUserMissing || options.workspaceProvisionRace) {
@@ -13444,6 +15612,123 @@ async function withTestEnvironment(
   }
 }
 
+async function configureEnterpriseScimGuestRoleScenario(workspaceId: string) {
+  configureFakeProjectClients(true)
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const now = new Date().toISOString()
+  await identity.putIdentityProvider({
+    workspaceId,
+    providerId: 'idp-guest-role',
+    kind: 'oidc',
+    displayName: 'Guest role directory',
+    cognitoProviderName: 'EnterpriseOidc',
+    status: 'active',
+    revision: 1,
+    issuer: 'https://idp.example.com',
+    clientId: 'enterprise-client',
+    authorizationEndpoint: 'https://idp.example.com/authorize',
+    tokenEndpoint: 'https://idp.example.com/token',
+    jwksUri: 'https://idp.example.com/jwks',
+    scopes: ['openid', 'email'],
+    createdAt: now,
+    updatedAt: now,
+    lastTestedAt: now,
+  })
+  const scimToken = (await identity.issueScimToken(
+    workspaceId,
+    'idp-guest-role',
+    'Guest role directory',
+  )).token
+  const members = new Map<string, WorkspaceMember>([
+    ['demo@example.com', {
+      id: 'demo@example.com',
+      memberKey: 'demo@example.com',
+      email: 'demo@example.com',
+      name: 'Demo User',
+      role: 'owner',
+      status: 'active',
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    }],
+    ['managed@example.com', {
+      id: 'managed@example.com',
+      memberKey: 'managed@example.com',
+      email: 'managed@example.com',
+      name: 'Managed User',
+      role: 'member',
+      status: 'active',
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    }],
+  ])
+  const reconciledRoles: WorkspaceRole[] = []
+  let reconcileFailures = 0
+  configureApiClientsForTest({
+    enterpriseIdentity: identity,
+    planning: new InMemoryPlanningClient(),
+    workspaceAccess: {
+      async getMember(_workspaceId: string, memberKey: string) {
+        return members.get(memberKey)
+      },
+      async getActiveMember(_workspaceId: string, memberKey: string) {
+        const member = members.get(memberKey)
+        return member?.status === 'active' ? member : undefined
+      },
+      async listActiveMembers() {
+        return [...members.values()].filter((member) => member.status === 'active')
+      },
+      async reconcileDirectoryMember(_workspaceId, input) {
+        if (reconcileFailures > 0) {
+          reconcileFailures -= 1
+          throw new WorkspaceAccessError(
+            503,
+            'WorkspaceDirectoryReconcileUnavailable',
+            'Directory reconciliation is temporarily unavailable.',
+          )
+        }
+        const existing = members.get(input.memberKey)
+        if (
+          input.expectedVersion !== undefined &&
+          existing?.version !== input.expectedVersion
+        ) {
+          throw new WorkspaceAccessError(
+            409,
+            'WorkspaceMemberVersionConflict',
+            'Workspace member changed.',
+          )
+        }
+        const member: WorkspaceMember = {
+          id: input.memberKey,
+          memberKey: input.memberKey,
+          email: input.email,
+          name: input.name,
+          role: input.role,
+          status: 'active',
+          provisioningSource: 'directory',
+          externalIdentityId: input.externalIdentityId,
+          version: (existing?.version ?? 0) + 1,
+          createdAt: existing?.createdAt ?? now,
+          updatedAt: now,
+        }
+        members.set(input.memberKey, member)
+        reconciledRoles.push(member.role)
+        return member
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+  return {
+    identity,
+    members,
+    reconciledRoles,
+    scimToken,
+    setReconcileFailures(value: number) {
+      reconcileFailures = value
+    },
+  }
+}
+
 function createFakeCognitoProfile(userId: string) {
   const id = userId.trim().toLowerCase()
   const names: Record<string, string> = {
@@ -13774,6 +16059,7 @@ test('denies guest Planning writes before invoking a mutation client', async () 
 
   expect(response.status).toBe(403)
   expect(await response.json()).toEqual({
+    code: 'WorkspaceRoleDenied',
     message: 'Guest members have read-only Workspace access.',
   })
   expect(createCalls).toBe(0)

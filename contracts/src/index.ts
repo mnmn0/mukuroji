@@ -1,4 +1,5 @@
 export * from './automation'
+export * from './enterprise-identity'
 
 /**
  * 現在の canonical Work Item schema version です。

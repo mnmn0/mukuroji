@@ -8,6 +8,7 @@ import {
 import {
   type DynamoDBDocumentClient,
   GetCommand,
+  PutCommand,
   QueryCommand,
   type QueryCommandInput,
   type TransactWriteCommandInput,
@@ -86,7 +87,7 @@ export type AuditValue = null | boolean | number | string | AuditObject | AuditV
 /**
  * mutation を行った主体の種別です。
  */
-export type AuditActorKind = 'user' | 'system' | 'service'
+export type AuditActorKind = 'user' | 'system' | 'service' | 'break-glass'
 
 /**
  * audit event が扱う entity type です。
@@ -1145,6 +1146,35 @@ export class DynamoDbAuditEventsClient {
   }
 
   /**
+   * Immutable audit event を idempotent に append します。
+   */
+  async putEvent(event: AuditEventV1) {
+    if (this.bootstrapLocalTables && this.dynamoDbClient) {
+      await ensureLocalAuditEventsTable(this.tableName, this.dynamoDbClient)
+    }
+    try {
+      await this.documentClient.send(new PutCommand({
+        TableName: this.tableName,
+        Item: event,
+        ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(eventId)',
+      }))
+    } catch (error) {
+      if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
+      const existing = await this.getEvent(event.workspaceId, event.eventId)
+      if (
+        existing?.eventType !== event.eventType ||
+        existing?.requestFingerprint !== event.requestFingerprint ||
+        existing?.actor.id !== event.actor.id ||
+        existing?.actor.kind !== event.actor.kind ||
+        existing?.entity.type !== event.entity.type ||
+        existing?.entity.id !== event.entity.id
+      ) {
+        throw new TypeError('Audit event idempotency key conflicts with an existing event.')
+      }
+    }
+  }
+
+  /**
    * Deterministic ID の audit event を強整合読みで返します。
    */
   async getEvent(workspaceId: string, eventId: string) {
@@ -1282,6 +1312,19 @@ export function calculateAuditExpiresAt(occurredAt: string, retentionDays: numbe
 }
 
 /**
+ * Environment で構成した共通 audit retention 日数を返します。
+ */
+export function getConfiguredAuditRetentionDays() {
+  const retentionDays = Number(
+    process.env.MUKUROJI_AUDIT_RETENTION_DAYS ?? process.env.AUDIT_RETENTION_DAYS ?? 2555,
+  )
+  if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
+    throw new RangeError('Audit retention days must be a positive number.')
+  }
+  return Math.floor(retentionDays)
+}
+
+/**
  * optional audit 設定を扱う既存 mutation client 用の条件付き event Put を作成します。
  */
 export function createMutationAuditEventPut(
@@ -1293,9 +1336,7 @@ export function createMutationAuditEventPut(
     return undefined
   }
 
-  const retentionDays = Number(
-    process.env.MUKUROJI_AUDIT_RETENTION_DAYS ?? process.env.AUDIT_RETENTION_DAYS ?? 2555,
-  )
+  const retentionDays = getConfiguredAuditRetentionDays()
   const occurredAt = normalizeTimestamp(input.occurredAt ?? context.occurredAt, 'Audit occurredAt')
   const expiresAt = calculateAuditExpiresAt(occurredAt, retentionDays)
   const event = createAuditEvent({
@@ -2004,7 +2045,12 @@ function readActor(value: unknown): AuditActor {
   const record = requireRecord(value, 'Audit actor')
   const kind = record.kind
 
-  if (kind !== 'user' && kind !== 'system' && kind !== 'service') {
+  if (
+    kind !== 'user' &&
+    kind !== 'system' &&
+    kind !== 'service' &&
+    kind !== 'break-glass'
+  ) {
     throw new TypeError('Audit actor kind is invalid.')
   }
 
@@ -2407,7 +2453,12 @@ function createWorkspaceAccessPseudonym(
 }
 
 function normalizeActor(actor: AuditActor): AuditActor {
-  if (actor.kind !== 'user' && actor.kind !== 'system' && actor.kind !== 'service') {
+  if (
+    actor.kind !== 'user' &&
+    actor.kind !== 'system' &&
+    actor.kind !== 'service' &&
+    actor.kind !== 'break-glass'
+  ) {
     throw new TypeError('Audit actor kind is invalid.')
   }
 

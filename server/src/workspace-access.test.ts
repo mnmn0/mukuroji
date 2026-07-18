@@ -2175,6 +2175,266 @@ test('never marks pre-existing or ambiguous Cognito identities as safe to delete
   expect(isWorkspaceIdentitySafeToDelete('ambiguous')).toBe(false)
 })
 
+test('provisions a new directory member with an immutable external identity', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+      return command.constructor.name === 'GetCommand' ? {} : {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+  )
+
+  const member = await client.reconcileDirectoryMember(workspaceId, {
+    memberKey: 'sato@example.com',
+    email: 'SATO@example.com',
+    name: '佐藤 花子',
+    role: 'member',
+    externalIdentityId: 'scim-user-123',
+    expectedPlanningRevision: 0,
+  }, createAuditContext('directory-provision'))
+
+  expect(member).toMatchObject({
+    memberKey: 'sato@example.com',
+    email: 'sato@example.com',
+    provisioningSource: 'directory',
+    externalIdentityId: 'scim-user-123',
+    status: 'active',
+    version: 1,
+  })
+  expect(inputs.at(-1)).toMatchObject({
+    TransactItems: [
+      {
+        Put: {
+          TableName: 'WorkspaceAccessTable',
+          Item: {
+            recordKey: 'MEMBER#sato@example.com',
+            provisioningSource: 'directory',
+            externalIdentityId: 'scim-user-123',
+          },
+        },
+      },
+      {
+        Put: {
+          TableName: 'PlanningTable',
+          Item: {
+            recordKey: 'META',
+            revision: 1,
+          },
+        },
+      },
+      {
+        Put: {
+          TableName: 'AuditTable',
+          Item: {
+            eventType: 'member.directory-provisioned',
+            action: 'directory-provisioned',
+          },
+        },
+      },
+    ],
+  })
+})
+
+test('deprovisions a directory member atomically with the Planning revision and audit event', async () => {
+  const target = {
+    ...createWorkspaceMember('sato@example.com', 'member', 'active', 4),
+    provisioningSource: 'directory' as const,
+    externalIdentityId: 'scim-user-123',
+  }
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+      return command.constructor.name === 'GetCommand'
+        ? { Item: toMemberItem(target) }
+        : {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+  )
+
+  const member = await client.deprovisionDirectoryMember(
+    workspaceId,
+    target.memberKey,
+    {
+      externalIdentityId: target.externalIdentityId,
+      expectedVersion: target.version,
+      expectedPlanningRevision: 9,
+    },
+    createAuditContext('directory-deprovision'),
+  )
+
+  expect(member).toMatchObject({
+    status: 'deactivated',
+    provisioningSource: 'directory',
+    externalIdentityId: 'scim-user-123',
+    version: 5,
+    deactivatedAt: now.toISOString(),
+  })
+  expect(inputs.at(-1)).toMatchObject({
+    TransactItems: [
+      {
+        Update: {
+          TableName: 'WorkspaceAccessTable',
+          ConditionExpression:
+            'version = :expectedVersion AND #role <> :owner AND provisioningSource = :directory AND externalIdentityId = :externalIdentityId',
+        },
+      },
+      {
+        Put: {
+          TableName: 'PlanningTable',
+          Item: {
+            recordKey: 'META',
+            revision: 10,
+          },
+        },
+      },
+      {
+        Put: {
+          TableName: 'AuditTable',
+          Item: {
+            eventType: 'member.directory-deprovisioned',
+            action: 'directory-deprovisioned',
+          },
+        },
+      },
+    ],
+  })
+})
+
+test('directory provisioning cannot take ownership of a Workspace owner', async () => {
+  const owner = createWorkspaceMember('demo@example.com', 'owner')
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      return command.constructor.name === 'GetCommand'
+        ? { Item: toMemberItem(owner) }
+        : {}
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  await expect(client.reconcileDirectoryMember(workspaceId, {
+    memberKey: owner.memberKey,
+    email: owner.email,
+    role: 'member',
+    externalIdentityId: 'scim-owner',
+    expectedVersion: owner.version,
+    expectedPlanningRevision: 0,
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'WorkspaceDirectoryOwnerProtected',
+  })
+})
+
+test('directory deprovisioning cannot silently adopt a manual member', async () => {
+  const manualMember = createWorkspaceMember('manual@example.com', 'member')
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      return command.constructor.name === 'GetCommand'
+        ? { Item: toMemberItem(manualMember) }
+        : {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+  )
+
+  await expect(client.deprovisionDirectoryMember(
+    workspaceId,
+    manualMember.memberKey,
+    {
+      externalIdentityId: 'scim-manual',
+      expectedVersion: manualMember.version,
+      expectedPlanningRevision: 0,
+    },
+  )).rejects.toMatchObject({
+    status: 409,
+    code: 'WorkspaceDirectoryIdentityConflict',
+  })
+})
+
+test('directory reconcile replay returns exact desired state before stale version rejection', async () => {
+  const directoryMember = {
+    ...createWorkspaceMember('directory@example.com', 'member', 'active', 4),
+    provisioningSource: 'directory' as const,
+    externalIdentityId: 'scim-directory',
+  }
+  let transactionCount = 0
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: toMemberItem(directoryMember) }
+      }
+      transactionCount += 1
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+  )
+
+  await expect(client.reconcileDirectoryMember(workspaceId, {
+    memberKey: directoryMember.memberKey,
+    email: directoryMember.email,
+    role: directoryMember.role,
+    externalIdentityId: directoryMember.externalIdentityId,
+    expectedVersion: 3,
+    expectedPlanningRevision: 8,
+  })).resolves.toEqual(directoryMember)
+  expect(transactionCount).toBe(0)
+})
+
+test('directory create race rejects a different desired role', async () => {
+  const racedMember = {
+    ...createWorkspaceMember('race@example.com', 'admin'),
+    provisioningSource: 'directory' as const,
+    externalIdentityId: 'scim-race',
+  }
+  let getCount = 0
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        getCount += 1
+        return getCount === 1 ? {} : { Item: toMemberItem(racedMember) }
+      }
+      throw createConditionalTransactionError(2, 0)
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+  )
+
+  await expect(client.reconcileDirectoryMember(workspaceId, {
+    memberKey: racedMember.memberKey,
+    email: racedMember.email,
+    role: 'guest',
+    externalIdentityId: racedMember.externalIdentityId,
+    expectedPlanningRevision: 0,
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'WorkspaceDirectoryIdentityConflict',
+  })
+})
+
 test('exposes WorkspaceAccessError status and code for API mapping', () => {
   const error = new WorkspaceAccessError(409, 'WorkspaceVersionConflict', 'conflict')
   expect(error).toMatchObject({ status: 409, code: 'WorkspaceVersionConflict' })

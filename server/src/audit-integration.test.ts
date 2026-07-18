@@ -248,12 +248,16 @@ test('comment mutation condition-checks its parent and writes specialized and ge
 
 test('workspace audit requires system admin and forwards pagination filters', async () => {
   const queries: Array<Record<string, unknown>> = []
+  const auditWrites: Array<Record<string, unknown>> = []
   configureApiClientsForTest({
     cognito: createCognitoClient(),
     workspaceAccess: createWorkspaceAccessClient(),
     auditEvents: {
       async getEvent() {
         return undefined
+      },
+      async putEvent(event) {
+        auditWrites.push(event as unknown as Record<string, unknown>)
       },
       async query(input) {
         queries.push({ ...input })
@@ -288,6 +292,18 @@ test('workspace audit requires system admin and forwards pagination filters', as
       limit: 25,
       cursor: 'cursor-1',
       direction: 'descending',
+    }),
+  ])
+  expect(auditWrites).toEqual([
+    expect.objectContaining({
+      workspaceId,
+      eventType: 'audit.viewed',
+      entityType: 'audit-log',
+      entityId: workspaceId,
+      metadata: expect.objectContaining({
+        format: 'json',
+        returnedEventCount: 0,
+      }),
     }),
   ])
 })
@@ -339,10 +355,14 @@ test('workspace audit projects invitation lifecycle events without storage field
     outboxStatus: 'pending',
   })
   const queries: Array<Record<string, unknown>> = []
+  const auditWrites: Array<Record<string, unknown>> = []
   configureApiClientsForTest({
     cognito: createCognitoClient(),
     workspaceAccess: createWorkspaceAccessClient(),
     auditEvents: {
+      async putEvent(auditEvent) {
+        auditWrites.push(auditEvent as unknown as Record<string, unknown>)
+      },
       async query(input) {
         queries.push({ ...input })
         return { events: [event] }
@@ -413,6 +433,16 @@ test('workspace audit projects invitation lifecycle events without storage field
   ]) {
     expect(projectedEvent).not.toHaveProperty(field)
   }
+  expect(auditWrites).toEqual([
+    expect.objectContaining({
+      workspaceId,
+      eventType: 'audit.viewed',
+      metadata: expect.objectContaining({
+        filtered: true,
+        returnedEventCount: 1,
+      }),
+    }),
+  ])
 })
 
 test('issue activity authorizes the parent and forwards its pagination cursor', async () => {
