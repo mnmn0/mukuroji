@@ -9,11 +9,13 @@ import * as guardduty from 'aws-cdk-lib/aws-guardduty';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaDestinations from 'aws-cdk-lib/aws-lambda-destinations';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
 
@@ -529,6 +531,18 @@ export class CdkStack extends cdk.Stack {
       description: 'Comma-separated CORS origins allowed to call the mukuroji API.',
     });
     const taskApiAllowedOriginList = cdk.Fn.split(',', taskApiAllowedOrigins.valueAsString);
+    const taskApiExposedHeaders = [
+      'content-disposition',
+      'idempotency-replayed',
+      'ratelimit-limit',
+      'ratelimit-remaining',
+      'ratelimit-reset',
+      'retry-after',
+      'x-ratelimit-limit',
+      'x-ratelimit-remaining',
+      'x-ratelimit-reset',
+      'x-request-id',
+    ];
     const systemAdminGroups = new cdk.CfnParameter(this, 'SystemAdminGroups', {
       type: 'String',
       default: 'mukuroji-system-admins',
@@ -540,6 +554,17 @@ export class CdkStack extends cdk.Stack {
       minValue: 1,
       description: 'Number of days immutable audit events are retained before DynamoDB TTL expiry.',
     });
+    const connectorRuntimeConfiguration = new cdk.CfnParameter(
+      this,
+      'ConnectorRuntimeConfiguration',
+      {
+        type: 'String',
+        default: '{}',
+        noEcho: true,
+        description:
+          'Secret JSON object whose string properties are loaded as connector runtime environment variables.',
+      },
+    );
     const workspaceAuditPseudonymKey = new cdk.CfnParameter(
       this,
       'WorkspaceAuditPseudonymKey',
@@ -664,6 +689,70 @@ export class CdkStack extends cdk.Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
+
+    const developerPlatformTable = new dynamodb.Table(this, 'DeveloperPlatformTable', {
+      partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      timeToLiveAttribute: 'expiresAt',
+    });
+
+    developerPlatformTable.addGlobalSecondaryIndex({
+      indexName: 'LookupKeyIndex',
+      partitionKey: { name: 'lookupKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'lookupSortKey', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+    });
+
+    const developerPlatformWebhookKey = new kms.Key(
+      this,
+      'DeveloperPlatformWebhookKey',
+      {
+        description: 'Envelope key for developer platform Webhook signing secrets.',
+        enableKeyRotation: true,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+      },
+    );
+    const developerPlatformConnectorKey = new kms.Key(
+      this,
+      'DeveloperPlatformConnectorKey',
+      {
+        description: 'Envelope key for developer platform connector credentials.',
+        enableKeyRotation: true,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+      },
+    );
+    const developerPlatformStateKey = new kms.Key(
+      this,
+      'DeveloperPlatformStateKey',
+      {
+        description: 'Envelope key for developer platform cursors and idempotency state.',
+        enableKeyRotation: true,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+      },
+    );
+    const connectorRuntimeConfigurationKey = new kms.Key(
+      this,
+      'ConnectorRuntimeConfigurationKey',
+      {
+        description: 'Encryption key for connector provider runtime configuration.',
+        enableKeyRotation: true,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+      },
+    );
+    const connectorRuntimeSecret = new secretsmanager.Secret(
+      this,
+      'ConnectorRuntimeSecret',
+      {
+        description:
+          'Provider configuration and signing secrets loaded only by connector runtimes.',
+        encryptionKey: connectorRuntimeConfigurationKey,
+        secretStringValue: cdk.SecretValue.cfnParameter(connectorRuntimeConfiguration),
+      },
+    );
+    connectorRuntimeSecret.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
 
     const teamIssueEventsTable = new dynamodb.Table(this, 'TeamIssueEventsTable', {
       partitionKey: { name: 'directoryTeamIssueId', type: dynamodb.AttributeType.STRING },
@@ -814,6 +903,30 @@ export class CdkStack extends cdk.Stack {
         {
           expiredObjectDeleteMarker: true,
           id: 'DeleteExpiredMarkers',
+        },
+      ],
+      objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      versioned: true,
+    });
+
+    const workItemImportBucket = new s3.Bucket(this, 'WorkItemImportBucket', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      lifecycleRules: [
+        {
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+          id: 'AbortIncompleteImportSources',
+        },
+        {
+          expiration: cdk.Duration.days(15),
+          id: 'ExpireImportSources',
+          noncurrentVersionExpiration: cdk.Duration.days(15),
+        },
+        {
+          expiredObjectDeleteMarker: true,
+          id: 'DeleteExpiredImportSourceMarkers',
         },
       ],
       objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
@@ -984,6 +1097,50 @@ export class CdkStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    const webhookProjectionDlq = new sqs.Queue(this, 'WebhookProjectionDlq', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(14),
+    });
+    const webhookDeliveryDlq = new sqs.Queue(this, 'WebhookDeliveryDlq', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(14),
+    });
+    const webhookDeliveryQueue = new sqs.Queue(this, 'WebhookDeliveryQueue', {
+      deadLetterQueue: {
+        maxReceiveCount: 5,
+        queue: webhookDeliveryDlq,
+      },
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(14),
+      visibilityTimeout: cdk.Duration.minutes(2),
+    });
+    const workItemImportDlq = new sqs.Queue(this, 'WorkItemImportDlq', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(14),
+    });
+    const workItemImportQueue = new sqs.Queue(this, 'WorkItemImportQueue', {
+      deadLetterQueue: {
+        maxReceiveCount: 5,
+        queue: workItemImportDlq,
+      },
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(14),
+      visibilityTimeout: cdk.Duration.minutes(90),
+    });
+    const connectorSyncDlq = new sqs.Queue(this, 'ConnectorSyncDlq', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(14),
+    });
+    const connectorSyncQueue = new sqs.Queue(this, 'ConnectorSyncQueue', {
+      deadLetterQueue: {
+        maxReceiveCount: 5,
+        queue: connectorSyncDlq,
+      },
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(14),
+      visibilityTimeout: cdk.Duration.minutes(6),
+    });
+
     const apiFunction = new lambdaNodejs.NodejsFunction(this, 'ListProjectTasksFunction', {
       entry: path.join(__dirname, '../../server/src/index.ts'),
       handler: 'handler',
@@ -1004,8 +1161,18 @@ export class CdkStack extends cdk.Stack {
         COLLABORATION_TABLE_NAME: collaborationTable.tableName,
         COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+        CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN:
+          connectorRuntimeSecret.secretArn,
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
+        DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID:
+          developerPlatformConnectorKey.keyArn,
+        DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
+        DEVELOPER_PLATFORM_STATE_KMS_KEY_ID:
+          developerPlatformStateKey.keyArn,
+        DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
+        DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID:
+          developerPlatformWebhookKey.keyArn,
         FILE_BUCKET_NAME: fileBucket.bucketName,
         FILE_DOWNLOAD_URL_TTL_SECONDS: fileDownloadUrlTtlSeconds.valueAsString,
         FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
@@ -1031,7 +1198,10 @@ export class CdkStack extends cdk.Stack {
         TASKS_TABLE_NAME: legacyTasksTable.tableName,
         TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
         TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
+        WEBHOOK_DELIVERY_QUEUE_URL: webhookDeliveryQueue.queueUrl,
         WORK_ITEM_CONFIGURATION_TABLE_NAME: workItemConfigurationTable.tableName,
+        WORK_ITEM_IMPORT_BUCKET_NAME: workItemImportBucket.bucketName,
+        WORK_ITEM_IMPORT_QUEUE_URL: workItemImportQueue.queueUrl,
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
         WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
       },
@@ -1123,12 +1293,60 @@ export class CdkStack extends cdk.Stack {
           collaborationTable.tableArn,
           fileProofingTable.tableArn,
           workspaceSearchTable.tableArn,
+          developerPlatformTable.tableArn,
         ],
       })],
     });
+    const apiDeveloperPlatformDataPolicy = new iam.Policy(
+      this,
+      'ApiDeveloperPlatformDataPolicy',
+      {
+        statements: [
+          new iam.PolicyStatement({
+            actions: [
+              'dynamodb:DeleteItem',
+              'dynamodb:GetItem',
+              'dynamodb:PutItem',
+              'dynamodb:Query',
+              'dynamodb:UpdateItem',
+            ],
+            resources: [
+              developerPlatformTable.tableArn,
+              `${developerPlatformTable.tableArn}/index/*`,
+            ],
+          }),
+          new iam.PolicyStatement({
+            actions: ['sqs:SendMessage'],
+            resources: [
+              webhookDeliveryQueue.queueArn,
+              workItemImportQueue.queueArn,
+            ],
+          }),
+        ],
+      },
+    );
     if (!apiFunction.role) {
       throw new Error('API Lambda execution role was not created.');
     }
+    apiFunction.role.attachInlinePolicy(new iam.Policy(
+      this,
+      'ApiDeveloperPlatformKmsPolicy',
+      {
+        statements: [new iam.PolicyStatement({
+          actions: [
+            'kms:Decrypt',
+            'kms:Encrypt',
+            'kms:GenerateDataKey*',
+            'kms:ReEncrypt*',
+          ],
+          resources: [
+            developerPlatformWebhookKey.keyArn,
+            developerPlatformConnectorKey.keyArn,
+            developerPlatformStateKey.keyArn,
+          ],
+        })],
+      },
+    ));
     const apiPlanningDataPolicy = new iam.Policy(this, 'ApiPlanningDataPolicy', {
       statements: [new iam.PolicyStatement({
         actions: [
@@ -1144,8 +1362,10 @@ export class CdkStack extends cdk.Stack {
       })],
     });
     apiFunction.role.attachInlinePolicy(apiWorkItemConfigurationDataPolicy);
+    apiFunction.role.attachInlinePolicy(apiDeveloperPlatformDataPolicy);
     apiFunction.role.attachInlinePolicy(apiPlanningDataPolicy);
     apiFunction.role.attachInlinePolicy(apiTransactWritePolicy);
+    connectorRuntimeSecret.grantRead(apiFunction);
     apiFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: [
@@ -1158,6 +1378,17 @@ export class CdkStack extends cdk.Stack {
           's3:PutObjectVersionTagging',
         ],
         resources: [fileBucket.arnForObjects('workspaces/*')],
+      }),
+    );
+    apiFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          's3:DeleteObjectVersion',
+          's3:GetObject',
+          's3:GetObjectVersion',
+          's3:PutObject',
+        ],
+        resources: [workItemImportBucket.arnForObjects('work-item-imports/*')],
       }),
     );
     apiFunction.addToRolePolicy(
@@ -1176,6 +1407,102 @@ export class CdkStack extends cdk.Stack {
       }),
     );
 
+    const workItemImportFunction = new lambdaNodejs.NodejsFunction(
+      this,
+      'WorkItemImportFunction',
+      {
+        entry: path.join(__dirname, '../../server/src/index.ts'),
+        handler: 'workItemImportHandler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+        projectRoot: path.join(__dirname, '../..'),
+        timeout: cdk.Duration.minutes(15),
+        memorySize: 1024,
+        description: 'Processes durable Work Item imports with resumable row receipts.',
+        bundling: {
+          bundleAwsSDK: true,
+          minify: true,
+          sourceMap: true,
+          target: 'node22',
+        },
+        environment: {
+          AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
+          AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
+          COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+          DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
+          MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
+          MUKUROJI_RUNTIME_ROLE: 'work-item-import-worker',
+          MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+          MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
+          MUKUROJI_TEAM_ISSUES_TABLE: workItemsTable.tableName,
+          MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
+          PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+          SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+          TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
+          TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
+          WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
+          WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
+          WORK_ITEM_CONFIGURATION_TABLE_NAME: workItemConfigurationTable.tableName,
+          WORK_ITEM_IMPORT_BUCKET_NAME: workItemImportBucket.bucketName,
+          WORK_ITEM_IMPORT_QUEUE_URL: workItemImportQueue.queueUrl,
+          WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
+        },
+      },
+    );
+    workItemImportFunction.addEventSource(
+      new lambdaEventSources.SqsEventSource(workItemImportQueue, {
+        batchSize: 1,
+        reportBatchItemFailures: true,
+      }),
+    );
+    workItemImportQueue.grantConsumeMessages(workItemImportFunction);
+    developerPlatformTable.grantReadWriteData(workItemImportFunction);
+    workItemsTable.grantReadWriteData(workItemImportFunction);
+    teamIssueEventsTable.grantReadWriteData(workItemImportFunction);
+    auditEventsTable.grantReadWriteData(workItemImportFunction);
+    projectDirectoryTable.grantReadData(workItemImportFunction);
+    workspaceAccessTable.grantReadData(workItemImportFunction);
+    workItemConfigurationTable.grantReadData(workItemImportFunction);
+    workspaceSearchTable.grantReadWriteData(workItemImportFunction);
+    workItemImportFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:TransactWriteItems'],
+      resources: [
+        auditEventsTable.tableArn,
+        developerPlatformTable.tableArn,
+        teamIssueEventsTable.tableArn,
+        workItemConfigurationTable.tableArn,
+        workItemsTable.tableArn,
+      ],
+    }));
+    workItemImportFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        's3:DeleteObjectVersion',
+        's3:GetObject',
+        's3:GetObjectVersion',
+      ],
+      resources: [workItemImportBucket.arnForObjects('work-item-imports/*')],
+    }));
+    workItemImportFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'cognito-idp:AdminGetUser',
+        'cognito-idp:AdminListGroupsForUser',
+      ],
+      resources: [cognitoUserPoolArn],
+    }));
+
+    new cloudwatch.Alarm(this, 'WorkItemImportDlqAlarm', {
+      alarmDescription: 'Detects Work Item imports that exhausted resumable queue attempts.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: workItemImportDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
     const functionUrl = apiFunction.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.NONE,
       cors: {
@@ -1187,7 +1514,14 @@ export class CdkStack extends cdk.Stack {
           lambda.HttpMethod.PATCH,
           lambda.HttpMethod.DELETE,
         ],
-        allowedHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id'],
+        allowedHeaders: [
+          'authorization',
+          'content-type',
+          'idempotency-key',
+          'x-correlation-id',
+          'x-request-id',
+        ],
+        exposedHeaders: taskApiExposedHeaders,
       },
     });
     const httpApi = new apigatewayv2.HttpApi(this, 'ProjectTasksHttpApi', {
@@ -1210,7 +1544,14 @@ export class CdkStack extends cdk.Stack {
           apigatewayv2.CorsHttpMethod.DELETE,
           apigatewayv2.CorsHttpMethod.OPTIONS,
         ],
-        allowHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id'],
+        allowHeaders: [
+          'authorization',
+          'content-type',
+          'idempotency-key',
+          'x-correlation-id',
+          'x-request-id',
+        ],
+        exposeHeaders: taskApiExposedHeaders,
       },
     });
 
@@ -1394,6 +1735,354 @@ export class CdkStack extends cdk.Stack {
       }),
     );
     realtimeWebSocketStage.grantManagementApiAccess(collaborationProjectionFunction);
+
+    const webhookProjectionFunction = new lambdaNodejs.NodejsFunction(
+      this,
+      'WebhookProjectionFunction',
+      {
+        entry: path.join(__dirname, '../../server/src/webhook-handler.ts'),
+        handler: 'projectionHandler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+        projectRoot: path.join(__dirname, '../..'),
+        timeout: cdk.Duration.seconds(30),
+        memorySize: 512,
+        description: 'Projects audit events into durable signed Webhook deliveries.',
+        bundling: {
+          bundleAwsSDK: true,
+          minify: true,
+          sourceMap: true,
+          target: 'node22',
+        },
+        environment: {
+          DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
+          DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
+          PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+          WEBHOOK_DELIVERY_QUEUE_URL: webhookDeliveryQueue.queueUrl,
+          WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
+        },
+      },
+    );
+
+    webhookProjectionFunction.addEventSource(
+      new lambdaEventSources.DynamoEventSource(auditEventsTable, {
+        startingPosition: lambda.StartingPosition.TRIM_HORIZON,
+        batchSize: 10,
+        bisectBatchOnError: true,
+        retryAttempts: 3,
+        reportBatchItemFailures: true,
+        onFailure: new lambdaEventSources.SqsDlq(webhookProjectionDlq),
+      }),
+    );
+    auditEventsTable.grantStreamRead(webhookProjectionFunction);
+    webhookProjectionFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'dynamodb:GetItem',
+        'dynamodb:Query',
+      ],
+      resources: [
+        developerPlatformTable.tableArn,
+        `${developerPlatformTable.tableArn}/index/LookupKeyIndex`,
+      ],
+    }));
+    webhookProjectionFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:TransactWriteItems'],
+      resources: [developerPlatformTable.tableArn],
+    }));
+    webhookProjectionFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'dynamodb:GetItem',
+        'dynamodb:Query',
+      ],
+      resources: [
+        projectDirectoryTable.tableArn,
+        workspaceAccessTable.tableArn,
+      ],
+    }));
+    webhookDeliveryQueue.grantSendMessages(webhookProjectionFunction);
+
+    const webhookDeliveryFunction = new lambdaNodejs.NodejsFunction(
+      this,
+      'WebhookDeliveryFunction',
+      {
+        entry: path.join(__dirname, '../../server/src/webhook-handler.ts'),
+        handler: 'deliveryHandler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+        projectRoot: path.join(__dirname, '../..'),
+        timeout: cdk.Duration.seconds(30),
+        memorySize: 512,
+        description: 'Delivers signed Webhooks from the durable SQS queue.',
+        bundling: {
+          bundleAwsSDK: true,
+          minify: true,
+          sourceMap: true,
+          target: 'node22',
+        },
+        environment: {
+          DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
+          DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
+          DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID:
+            developerPlatformWebhookKey.keyArn,
+          PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+          WEBHOOK_DELIVERY_QUEUE_URL: webhookDeliveryQueue.queueUrl,
+          WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
+        },
+      },
+    );
+
+    webhookDeliveryFunction.addEventSource(
+      new lambdaEventSources.SqsEventSource(webhookDeliveryQueue, {
+        batchSize: 10,
+        reportBatchItemFailures: true,
+      }),
+    );
+    webhookDeliveryFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'dynamodb:GetItem',
+        'dynamodb:Query',
+      ],
+      resources: [
+        developerPlatformTable.tableArn,
+        `${developerPlatformTable.tableArn}/index/LookupKeyIndex`,
+      ],
+    }));
+    webhookDeliveryFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:PutItem'],
+      resources: [developerPlatformTable.tableArn],
+    }));
+    webhookDeliveryFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'dynamodb:GetItem',
+        'dynamodb:Query',
+      ],
+      resources: [
+        projectDirectoryTable.tableArn,
+        workspaceAccessTable.tableArn,
+      ],
+    }));
+    developerPlatformWebhookKey.grantDecrypt(webhookDeliveryFunction);
+    webhookDeliveryQueue.grantConsumeMessages(webhookDeliveryFunction);
+    webhookDeliveryQueue.grantSendMessages(webhookDeliveryFunction);
+
+    new cloudwatch.Alarm(this, 'WebhookProjectionDlqAlarm', {
+      alarmDescription:
+        'Detects audit events that exhausted Webhook projection retries.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: webhookProjectionDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    new cloudwatch.Alarm(this, 'WebhookDeliveryDlqAlarm', {
+      alarmDescription:
+        'Detects signed Webhook deliveries that exhausted queue redrive attempts.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: webhookDeliveryDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    const connectorAuditProjectionFunction = new lambdaNodejs.NodejsFunction(
+      this,
+      'ConnectorAuditProjectionFunction',
+      {
+        entry: path.join(__dirname, '../../server/src/connector-handler.ts'),
+        handler: 'auditProjectionHandler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+        projectRoot: path.join(__dirname, '../..'),
+        timeout: cdk.Duration.seconds(30),
+        memorySize: 512,
+        description: 'Projects audit events into provider-neutral connector sync jobs.',
+        bundling: {
+          bundleAwsSDK: true,
+          minify: true,
+          sourceMap: true,
+          target: 'node22',
+        },
+        environment: {
+          CONNECTOR_SYNC_QUEUE_URL: connectorSyncQueue.queueUrl,
+          MUKUROJI_RUNTIME_ROLE: 'connector-audit-projection',
+        },
+      },
+    );
+    connectorAuditProjectionFunction.addEventSource(
+      new lambdaEventSources.DynamoEventSource(auditEventsTable, {
+        startingPosition: lambda.StartingPosition.LATEST,
+        batchSize: 10,
+        bisectBatchOnError: true,
+        retryAttempts: 3,
+        reportBatchItemFailures: true,
+        onFailure: new lambdaEventSources.SqsDlq(connectorSyncDlq),
+      }),
+    );
+    auditEventsTable.grantStreamRead(connectorAuditProjectionFunction);
+    connectorSyncQueue.grantSendMessages(connectorAuditProjectionFunction);
+
+    const connectorSyncFunction = new lambdaNodejs.NodejsFunction(
+      this,
+      'ConnectorSyncFunction',
+      {
+        entry: path.join(__dirname, '../../server/src/connector-handler.ts'),
+        handler: 'queueHandler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+        projectRoot: path.join(__dirname, '../..'),
+        timeout: cdk.Duration.minutes(5),
+        memorySize: 1024,
+        description:
+          'Processes provider-neutral connector synchronization jobs with current Work Item RBAC.',
+        bundling: {
+          bundleAwsSDK: true,
+          minify: true,
+          sourceMap: true,
+          target: 'node22',
+        },
+        environment: {
+          AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
+          AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
+          COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+          CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN:
+            connectorRuntimeSecret.secretArn,
+          CONNECTOR_SYNC_QUEUE_URL: connectorSyncQueue.queueUrl,
+          DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID:
+            developerPlatformConnectorKey.keyArn,
+          DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
+          DEVELOPER_PLATFORM_STATE_KMS_KEY_ID:
+            developerPlatformStateKey.keyArn,
+          DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
+          MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
+          MUKUROJI_RUNTIME_ROLE: 'connector-queue-worker',
+          MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+          MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
+          MUKUROJI_TEAM_ISSUES_TABLE: workItemsTable.tableName,
+          MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
+          PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+          SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+          TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
+          TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
+          WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
+          WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
+          WORK_ITEM_CONFIGURATION_TABLE_NAME: workItemConfigurationTable.tableName,
+          WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
+        },
+      },
+    );
+    connectorSyncFunction.addEventSource(
+      new lambdaEventSources.SqsEventSource(connectorSyncQueue, {
+        batchSize: 1,
+        reportBatchItemFailures: true,
+      }),
+    );
+    connectorSyncQueue.grantConsumeMessages(connectorSyncFunction);
+    connectorSyncQueue.grantSendMessages(connectorSyncFunction);
+    connectorRuntimeSecret.grantRead(connectorSyncFunction);
+    developerPlatformTable.grantReadWriteData(connectorSyncFunction);
+    workItemsTable.grantReadWriteData(connectorSyncFunction);
+    teamIssueEventsTable.grantReadWriteData(connectorSyncFunction);
+    auditEventsTable.grantReadWriteData(connectorSyncFunction);
+    projectDirectoryTable.grantReadData(connectorSyncFunction);
+    workspaceAccessTable.grantReadData(connectorSyncFunction);
+    workItemConfigurationTable.grantReadData(connectorSyncFunction);
+    workspaceSearchTable.grantReadWriteData(connectorSyncFunction);
+    developerPlatformConnectorKey.grantEncryptDecrypt(connectorSyncFunction);
+    developerPlatformStateKey.grantEncryptDecrypt(connectorSyncFunction);
+    connectorSyncFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:TransactWriteItems'],
+      resources: [
+        auditEventsTable.tableArn,
+        developerPlatformTable.tableArn,
+        teamIssueEventsTable.tableArn,
+        workItemConfigurationTable.tableArn,
+        workItemsTable.tableArn,
+        workspaceSearchTable.tableArn,
+      ],
+    }));
+    connectorSyncFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'cognito-idp:AdminGetUser',
+        'cognito-idp:AdminListGroupsForUser',
+      ],
+      resources: [cognitoUserPoolArn],
+    }));
+
+    const connectorPollFunction = new lambdaNodejs.NodejsFunction(
+      this,
+      'ConnectorPollFunction',
+      {
+        entry: path.join(__dirname, '../../server/src/connector-handler.ts'),
+        handler: 'pollHandler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+        projectRoot: path.join(__dirname, '../..'),
+        timeout: cdk.Duration.minutes(2),
+        memorySize: 512,
+        description: 'Schedules bounded polling jobs for connected provider installations.',
+        bundling: {
+          bundleAwsSDK: true,
+          minify: true,
+          sourceMap: true,
+          target: 'node22',
+        },
+        environment: {
+          CONNECTOR_SYNC_QUEUE_URL: connectorSyncQueue.queueUrl,
+          DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
+          DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
+          MUKUROJI_RUNTIME_ROLE: 'connector-poll',
+        },
+      },
+    );
+    developerPlatformTable.grantReadData(connectorPollFunction);
+    connectorSyncQueue.grantSendMessages(connectorPollFunction);
+
+    new events.Rule(this, 'ConnectorPollRule', {
+      description: 'Schedules bounded connector polling for providers without push events.',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+      targets: [
+        new eventsTargets.LambdaFunction(connectorPollFunction, {
+          deadLetterQueue: connectorSyncDlq,
+          maxEventAge: cdk.Duration.hours(1),
+          retryAttempts: 2,
+        }),
+      ],
+    });
+
+    new cloudwatch.Alarm(this, 'ConnectorSyncDlqAlarm', {
+      alarmDescription:
+        'Detects connector projection, polling, or sync jobs that exhausted retries.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: connectorSyncDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    new cloudwatch.Alarm(this, 'ConnectorSyncQueueAgeAlarm', {
+      alarmDescription: 'Detects connector synchronization jobs delayed for 15 minutes.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: connectorSyncQueue.metricApproximateAgeOfOldestMessage({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: cdk.Duration.minutes(15).toSeconds(),
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
 
     const notificationScheduleDlq = new sqs.Queue(this, 'NotificationScheduleDlq', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
@@ -1701,6 +2390,12 @@ export class CdkStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'PlanningTableName', {
       value: planningTable.tableName,
     });
+    new cdk.CfnOutput(this, 'DeveloperPlatformTableName', {
+      value: developerPlatformTable.tableName,
+    });
+    new cdk.CfnOutput(this, 'DeveloperPlatformLookupIndexName', {
+      value: 'LookupKeyIndex',
+    });
     new cdk.CfnOutput(this, 'TeamIssueEventsTableName', {
       value: teamIssueEventsTable.tableName,
     });
@@ -1738,6 +2433,33 @@ export class CdkStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'CollaborationProjectionDlqUrl', {
       value: collaborationProjectionDlq.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'WebhookProjectionDlqUrl', {
+      value: webhookProjectionDlq.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'WebhookDeliveryQueueUrl', {
+      value: webhookDeliveryQueue.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'WebhookDeliveryDlqUrl', {
+      value: webhookDeliveryDlq.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'WorkItemImportBucketName', {
+      value: workItemImportBucket.bucketName,
+    });
+    new cdk.CfnOutput(this, 'WorkItemImportQueueUrl', {
+      value: workItemImportQueue.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'WorkItemImportDlqUrl', {
+      value: workItemImportDlq.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'ConnectorRuntimeSecretArn', {
+      value: connectorRuntimeSecret.secretArn,
+    });
+    new cdk.CfnOutput(this, 'ConnectorSyncQueueUrl', {
+      value: connectorSyncQueue.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'ConnectorSyncDlqUrl', {
+      value: connectorSyncDlq.queueUrl,
     });
     new cdk.CfnOutput(this, 'NotificationScheduleDlqUrl', {
       value: notificationScheduleDlq.queueUrl,

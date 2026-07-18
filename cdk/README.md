@@ -16,6 +16,7 @@
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
 | `TaskApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
+| `ConnectorRuntimeConfiguration` | no | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
 | `FileRetentionDays` | no | soft delete 後の metadata と S3 noncurrent version の保持日数。既定値は 30 日です。live current object の有効期限ではありません。 |
 | `FileUploadUrlTtlSeconds` | no | direct upload URL の有効秒数。既定値 600、範囲 60–3600 秒です。bucket policy もこの上限より古い upload 署名を拒否します。 |
 | `FileDownloadUrlTtlSeconds` | no | malware scan 済み file の download URL 有効秒数。既定値 300、範囲 60–3600 秒です。bucket policy もこの上限より古い download 署名を拒否します。 |
@@ -38,9 +39,39 @@
 - `AuditEventsTableName`, `ProcessedAuditEventsTableName`
 - `WorkItemCollaborationTableName`, `RealtimeSessionsTableName`, `RealtimeWebSocketUrl`
 - `WorkspaceSearchTableName`（検索文書、saved view、ユーザー別 view preference）
+- `ConnectorRuntimeSecretArn`, `ConnectorSyncQueueUrl`, `ConnectorSyncDlqUrl`
 - `WorkspaceDirectoryId`
 
 Function URL と API Gateway は同じ Lambda を呼びます。いずれも `<base>/teams/projects` と `<base>/api/teams/projects` を同じ canonical `/api` route へ正規化します。
+
+## Connector runtime configuration
+
+Stack は provider 設定と signing secret 用の Secrets Manager secret を `{}` で作成し、専用の rotation-enabled KMS key で暗号化します。Secret の read 権限は OAuth callback を扱う API Lambda と provider 呼び出しを行う connector queue worker に限定します。Audit stream projection と scheduled poller は secret を読まず、secret-free な sync job ID だけを SQS へ送ります。
+
+Production credential を CloudFormation parameter、Lambda environment、repository、`cdk diff`、shell history に含めないでください。初回 deploy 後に `ConnectorRuntimeSecretArn` output を取得し、権限を限定した作業端末から reviewed JSON file を新しい secret version として保存します。
+
+```sh
+export CONNECTOR_RUNTIME_SECRET_ARN="$(aws cloudformation describe-stacks \
+  --region "$AWS_REGION" \
+  --stack-name CdkStack \
+  --query "Stacks[0].Outputs[?OutputKey=='ConnectorRuntimeSecretArn'].OutputValue | [0]" \
+  --output text)"
+
+aws secretsmanager put-secret-value \
+  --region "$AWS_REGION" \
+  --secret-id "$CONNECTOR_RUNTIME_SECRET_ARN" \
+  --secret-string file://connector-runtime.production.json
+```
+
+Secret JSON は string value の object とし、次の key だけを許可します。
+
+- `MUKUROJI_CONNECTOR_PROVIDERS_JSON`
+- `CONNECTOR_OAUTH_STATE_SIGNING_SECRET`
+- `CONNECTOR_SYNC_ORIGIN_SIGNING_SECRET`
+- `CONNECTOR_REAUTHORIZATION_RETURN_URL`
+- provider client secret 用の `MUKUROJI_CONNECTOR_<NAME>` key
+
+`MUKUROJI_CONNECTOR_PROVIDERS_JSON` 自体は JSON array を文字列化した値です。各 provider entry の `clientSecretEnvironmentVariable` は同じ secret object 内の `MUKUROJI_CONNECTOR_<NAME>` を参照させます。Signing secret はそれぞれ独立した十分に長い random value を使います。更新後は API と connector worker の新しい cold start で反映されるため、設定確認用の再認証を行い、`ConnectorSyncDlqUrl`、queue age alarm、provider 側 callback error を監視します。CloudFormation parameter は `{}` のまま維持し、通常 deploy で手動更新した current secret version を戻さないでください。
 
 ## File storage security and retention
 

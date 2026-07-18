@@ -7,7 +7,12 @@ import { CdkStack } from '../lib/cdk-stack';
  * 各 test で使用する synthesized CloudFormation template を作成します。
  */
 function createTemplate() {
-  const app = new cdk.App();
+  const app = new cdk.App({
+    context: {
+      '@aws-cdk/aws-iam:minimizePolicies': true,
+      '@aws-cdk/aws-lambda:createNewPoliciesWithAddToRolePolicy': false,
+    },
+  });
   const stack = new CdkStack(app, 'TestStack');
 
   return Template.fromStack(stack);
@@ -86,6 +91,12 @@ test('fresh deployment requires explicit external Cognito and workspace paramete
     ConstraintDescription:
       'WorkspaceAuditPseudonymKey must be exactly 64 lowercase hexadecimal characters.',
   }));
+  expect(parameters.ConnectorRuntimeConfiguration).toEqual(expect.objectContaining({
+    Type: 'String',
+    Default: '{}',
+    NoEcho: true,
+  }));
+  expect(parameters.DeveloperPlatformSecretProtectorKey).toBeUndefined();
   expect(parameters.InitialOwnerEmail).toEqual(expect.objectContaining({
     Type: 'String',
     ConstraintDescription: 'InitialOwnerEmail must be a lowercase email address.',
@@ -140,6 +151,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
     'TeamIssuesTable189D851D',
     'WorkItemConfigurationTable35E94558',
     'PlanningTable2A0D4CC5',
+    'DeveloperPlatformTable772E085C',
     'TeamIssueEventsTableDD2B0F96',
     'ProjectDirectoryTable9ED01C01',
     'ListProjectTasksFunction2134AF4A',
@@ -155,7 +167,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(14);
+  expect(Object.keys(tables)).toHaveLength(15);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -221,6 +233,13 @@ test('shared server handler is bundled as a Lambda asset with production environ
         COGNITO_USER_POOL_ID: {
           Ref: 'CognitoUserPoolId',
         },
+        DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID: Match.anyValue(),
+        DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
+        DEVELOPER_PLATFORM_STATE_KMS_KEY_ID: Match.anyValue(),
+        DEVELOPER_PLATFORM_TABLE_NAME: {
+          Ref: 'DeveloperPlatformTable772E085C',
+        },
+        DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID: Match.anyValue(),
         MUKUROJI_PROJECT_DIRECTORY_ID: {
           Ref: 'WorkspaceDirectoryId',
         },
@@ -268,6 +287,9 @@ test('shared server handler is bundled as a Lambda asset with production environ
           Ref: 'RealtimeSessionsTable607096EB',
         },
         REALTIME_WEBSOCKET_URL: Match.anyValue(),
+        WEBHOOK_DELIVERY_QUEUE_URL: {
+          Ref: 'WebhookDeliveryQueue2A244492',
+        },
         FILE_BUCKET_NAME: Match.anyValue(),
         FILE_DOWNLOAD_URL_TTL_SECONDS: {
           Ref: 'FileDownloadUrlTtlSeconds',
@@ -288,6 +310,145 @@ test('shared server handler is bundled as a Lambda asset with production environ
   expect(lambdaResource.Properties.Code.ZipFile).toBeUndefined();
   expect(lambdaResource.Properties.Environment.Variables)
     .not.toHaveProperty('MUKUROJI_WORK_ITEM_CONFIGURATION_TABLE');
+});
+
+test('durable Work Item imports use retained versioned sources and an isolated resumable worker', () => {
+  const template = synthesizedTemplate;
+  const resources = template.toJSON().Resources as Record<string, {
+    Type: string;
+    Properties: Record<string, unknown>;
+    [key: string]: unknown;
+  }>;
+  const outputs = template.toJSON().Outputs;
+  const importBucketEntry = Object.entries(resources).find(([, resource]) =>
+    resource.Type === 'AWS::S3::Bucket' &&
+    JSON.stringify(resource).includes('ExpireImportSources')
+  );
+  const importQueueEntry = Object.entries(resources).find(([logicalId]) =>
+    logicalId.startsWith('WorkItemImportQueue') &&
+    resources[logicalId].Type === 'AWS::SQS::Queue'
+  );
+  const importDlqEntry = Object.entries(resources).find(([logicalId]) =>
+    logicalId.startsWith('WorkItemImportDlq') &&
+    resources[logicalId].Type === 'AWS::SQS::Queue'
+  );
+  const workerEntry = Object.entries(resources).find(([, resource]) =>
+    resource.Type === 'AWS::Lambda::Function' &&
+    resource.Properties?.Handler === 'index.workItemImportHandler'
+  );
+
+  expect(importBucketEntry).toBeDefined();
+  expect(importQueueEntry).toBeDefined();
+  expect(importDlqEntry).toBeDefined();
+  expect(workerEntry).toBeDefined();
+  if (!importBucketEntry || !importQueueEntry || !importDlqEntry || !workerEntry) {
+    throw new Error('Durable Work Item import resources were not synthesized.');
+  }
+
+  const [importBucketId, importBucket] = importBucketEntry;
+  const [importQueueId, importQueue] = importQueueEntry;
+  const [importDlqId, importDlq] = importDlqEntry;
+  const [workerId, worker] = workerEntry;
+  const workerEnvironment = worker.Properties.Environment as {
+    Variables: Record<string, unknown>;
+  };
+  expect(importBucket).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+    Properties: expect.objectContaining({
+      BucketEncryption: {
+        ServerSideEncryptionConfiguration: [{
+          ServerSideEncryptionByDefault: { SSEAlgorithm: 'AES256' },
+        }],
+      },
+      LifecycleConfiguration: {
+        Rules: expect.arrayContaining([
+          expect.objectContaining({
+            ExpirationInDays: 15,
+            Id: 'ExpireImportSources',
+            NoncurrentVersionExpiration: { NoncurrentDays: 15 },
+            Status: 'Enabled',
+          }),
+        ]),
+      },
+      PublicAccessBlockConfiguration: {
+        BlockPublicAcls: true,
+        BlockPublicPolicy: true,
+        IgnorePublicAcls: true,
+        RestrictPublicBuckets: true,
+      },
+      VersioningConfiguration: { Status: 'Enabled' },
+    }),
+  }));
+  expect(importQueue.Properties).toEqual(expect.objectContaining({
+    MessageRetentionPeriod: 14 * 24 * 60 * 60,
+    RedrivePolicy: {
+      deadLetterTargetArn: { 'Fn::GetAtt': [importDlqId, 'Arn'] },
+      maxReceiveCount: 5,
+    },
+    SqsManagedSseEnabled: true,
+    VisibilityTimeout: 90 * 60,
+  }));
+  expect(importDlq.Properties).toEqual(expect.objectContaining({
+    MessageRetentionPeriod: 14 * 24 * 60 * 60,
+    SqsManagedSseEnabled: true,
+  }));
+  expect(worker.Properties).toEqual(expect.objectContaining({
+    Description: 'Processes durable Work Item imports with resumable row receipts.',
+    Handler: 'index.workItemImportHandler',
+    MemorySize: 1024,
+    Runtime: 'nodejs22.x',
+    Timeout: 15 * 60,
+    Environment: {
+      Variables: expect.objectContaining({
+        DEVELOPER_PLATFORM_TABLE_NAME: { Ref: 'DeveloperPlatformTable772E085C' },
+        MUKUROJI_RUNTIME_ROLE: 'work-item-import-worker',
+        WORK_ITEM_IMPORT_BUCKET_NAME: { Ref: importBucketId },
+        WORK_ITEM_IMPORT_QUEUE_URL: { Ref: importQueueId },
+      }),
+    },
+  }));
+  expect(workerEnvironment.Variables)
+    .not.toHaveProperty('DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID');
+  expect(workerEnvironment.Variables)
+    .not.toHaveProperty('MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY');
+
+  template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
+    BatchSize: 1,
+    EventSourceArn: { 'Fn::GetAtt': [importQueueId, 'Arn'] },
+    FunctionName: { Ref: workerId },
+    FunctionResponseTypes: ['ReportBatchItemFailures'],
+  });
+  const workerPolicy = Object.entries(resources).find(([logicalId]) =>
+    logicalId.startsWith('WorkItemImportFunctionServiceRoleDefaultPolicy')
+  )?.[1];
+  expect(workerPolicy).toBeDefined();
+  const serializedWorkerPolicy = JSON.stringify(workerPolicy);
+  for (const requiredPermission of [
+    'cognito-idp:AdminGetUser',
+    'cognito-idp:AdminListGroupsForUser',
+    'dynamodb:TransactWriteItems',
+    's3:DeleteObjectVersion',
+    's3:GetObjectVersion',
+    'sqs:ReceiveMessage',
+  ]) {
+    expect(serializedWorkerPolicy).toContain(requiredPermission);
+  }
+  expect(serializedWorkerPolicy).toContain(importBucketId);
+  expect(serializedWorkerPolicy).toContain(importQueueId);
+  expect(serializedWorkerPolicy).not.toContain('kms:Decrypt');
+  expect(serializedWorkerPolicy).not.toContain('kms:Encrypt');
+
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription: 'Detects Work Item imports that exhausted resumable queue attempts.',
+    ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+    EvaluationPeriods: 1,
+    Threshold: 1,
+    TreatMissingData: 'notBreaching',
+  });
+  expect(outputs.WorkItemImportBucketName.Value).toEqual({ Ref: importBucketId });
+  expect(outputs.WorkItemImportQueueUrl.Value).toEqual({ Ref: importQueueId });
+  expect(outputs.WorkItemImportDlqUrl.Value).toEqual({ Ref: importDlqId });
 });
 
 test('Function URL and API Gateway invoke the same Lambda handler', () => {
@@ -406,6 +567,85 @@ test('planning data uses a retained point-in-time recoverable workspace table', 
   });
 });
 
+test('developer platform uses a retained TTL table with a lookup GSI', () => {
+  const template = synthesizedTemplate;
+  const table = template.toJSON().Resources.DeveloperPlatformTable772E085C;
+
+  expect(table).toEqual({
+    Type: 'AWS::DynamoDB::Table',
+    Properties: {
+      AttributeDefinitions: [
+        { AttributeName: 'workspaceId', AttributeType: 'S' },
+        { AttributeName: 'recordKey', AttributeType: 'S' },
+        { AttributeName: 'lookupKey', AttributeType: 'S' },
+        { AttributeName: 'lookupSortKey', AttributeType: 'S' },
+      ],
+      BillingMode: 'PAY_PER_REQUEST',
+      GlobalSecondaryIndexes: [{
+        IndexName: 'LookupKeyIndex',
+        KeySchema: [
+          { AttributeName: 'lookupKey', KeyType: 'HASH' },
+          { AttributeName: 'lookupSortKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'KEYS_ONLY' },
+      }],
+      KeySchema: [
+        { AttributeName: 'workspaceId', KeyType: 'HASH' },
+        { AttributeName: 'recordKey', KeyType: 'RANGE' },
+      ],
+      PointInTimeRecoverySpecification: {
+        PointInTimeRecoveryEnabled: true,
+      },
+      TimeToLiveSpecification: {
+        AttributeName: 'expiresAt',
+        Enabled: true,
+      },
+    },
+    UpdateReplacePolicy: 'Retain',
+    DeletionPolicy: 'Retain',
+  });
+  template.hasOutput('DeveloperPlatformTableName', {
+    Value: { Ref: 'DeveloperPlatformTable772E085C' },
+  });
+  template.hasOutput('DeveloperPlatformLookupIndexName', {
+    Value: 'LookupKeyIndex',
+  });
+});
+
+test('developer platform and connector runtime secrets use rotated purpose-specific KMS keys', () => {
+  const template = synthesizedTemplate;
+  const resources = template.toJSON().Resources;
+
+  template.resourceCountIs('AWS::KMS::Key', 4);
+  for (const description of [
+    'Envelope key for developer platform Webhook signing secrets.',
+    'Envelope key for developer platform connector credentials.',
+    'Envelope key for developer platform cursors and idempotency state.',
+    'Encryption key for connector provider runtime configuration.',
+  ]) {
+    template.hasResourceProperties('AWS::KMS::Key', {
+      Description: description,
+      EnableKeyRotation: true,
+    });
+  }
+  const developerKmsKeys = Object.values(resources).filter((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::KMS::Key' &&
+    String((resource as { Properties?: { Description?: string } }).Properties?.Description)
+      .startsWith('Envelope key for developer platform')
+  ) as Array<{ DeletionPolicy?: string; UpdateReplacePolicy?: string }>;
+  expect(developerKmsKeys).toHaveLength(3);
+  expect(developerKmsKeys.every((resource) =>
+    resource.DeletionPolicy === 'Retain' &&
+    resource.UpdateReplacePolicy === 'Retain'
+  )).toBe(true);
+  expect(JSON.stringify(resources)).not.toContain(
+    'DEVELOPER_PLATFORM_SECRET_PROTECTOR_KEY',
+  );
+  expect(JSON.stringify(resources)).not.toContain(
+    'DeveloperPlatformSecretProtectorKey',
+  );
+});
+
 test('Function URL and API Gateway expose the same restricted CORS contract', () => {
   const template = synthesizedTemplate;
   const allowedOrigins = {
@@ -416,19 +656,45 @@ test('Function URL and API Gateway expose the same restricted CORS contract', ()
       },
     ],
   };
+  const exposedHeaders = [
+    'content-disposition',
+    'idempotency-replayed',
+    'ratelimit-limit',
+    'ratelimit-remaining',
+    'ratelimit-reset',
+    'retry-after',
+    'x-ratelimit-limit',
+    'x-ratelimit-remaining',
+    'x-ratelimit-reset',
+    'x-request-id',
+  ];
 
   template.hasResourceProperties('AWS::Lambda::Url', {
     Cors: {
-      AllowHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id'],
+      AllowHeaders: [
+        'authorization',
+        'content-type',
+        'idempotency-key',
+        'x-correlation-id',
+        'x-request-id',
+      ],
       AllowMethods: Match.arrayWith(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']),
       AllowOrigins: allowedOrigins,
+      ExposeHeaders: exposedHeaders,
     },
   });
   template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
     CorsConfiguration: {
-      AllowHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id'],
+      AllowHeaders: [
+        'authorization',
+        'content-type',
+        'idempotency-key',
+        'x-correlation-id',
+        'x-request-id',
+      ],
       AllowMethods: Match.arrayWith(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']),
       AllowOrigins: allowedOrigins,
+      ExposeHeaders: exposedHeaders,
     },
     ProtocolType: 'HTTP',
   });
@@ -1034,6 +1300,498 @@ test('audit stream projects notifications with retries DLQ and scoped production
   expect(JSON.stringify(fileCleanupS3Statement)).toContain('workspaces/*');
 });
 
+test('audit Webhook projection and SQS delivery are durable encrypted and observable', () => {
+  const template = synthesizedTemplate;
+  const resources = template.toJSON().Resources;
+  const projectionEnvironment = {
+    Variables: Match.objectLike({
+      DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
+      DEVELOPER_PLATFORM_TABLE_NAME: {
+        Ref: 'DeveloperPlatformTable772E085C',
+      },
+      PROJECT_DIRECTORY_TABLE_NAME: {
+        Ref: 'ProjectDirectoryTable9ED01C01',
+      },
+      WEBHOOK_DELIVERY_QUEUE_URL: {
+        Ref: 'WebhookDeliveryQueue2A244492',
+      },
+      WORKSPACE_ACCESS_TABLE_NAME: {
+        Ref: 'WorkspaceAccessTableD7C8D2C7',
+      },
+    }),
+  };
+  const deliveryEnvironment = {
+    Variables: Match.objectLike({
+      DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
+      DEVELOPER_PLATFORM_TABLE_NAME: {
+        Ref: 'DeveloperPlatformTable772E085C',
+      },
+      DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID: Match.anyValue(),
+      PROJECT_DIRECTORY_TABLE_NAME: {
+        Ref: 'ProjectDirectoryTable9ED01C01',
+      },
+      WEBHOOK_DELIVERY_QUEUE_URL: {
+        Ref: 'WebhookDeliveryQueue2A244492',
+      },
+      WORKSPACE_ACCESS_TABLE_NAME: {
+        Ref: 'WorkspaceAccessTableD7C8D2C7',
+      },
+    }),
+  };
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Code: {
+      S3Bucket: Match.anyValue(),
+      S3Key: Match.stringLikeRegexp('\\.zip$'),
+    },
+    Description: 'Projects audit events into durable signed Webhook deliveries.',
+    Handler: 'index.projectionHandler',
+    Runtime: 'nodejs22.x',
+    Timeout: 30,
+    Environment: projectionEnvironment,
+  });
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Code: {
+      S3Bucket: Match.anyValue(),
+      S3Key: Match.stringLikeRegexp('\\.zip$'),
+    },
+    Description: 'Delivers signed Webhooks from the durable SQS queue.',
+    Handler: 'index.deliveryHandler',
+    Runtime: 'nodejs22.x',
+    Timeout: 30,
+    Environment: deliveryEnvironment,
+  });
+  template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
+    BatchSize: 10,
+    BisectBatchOnFunctionError: true,
+    DestinationConfig: {
+      OnFailure: {
+        Destination: {
+          'Fn::GetAtt': ['WebhookProjectionDlq93E06A80', 'Arn'],
+        },
+      },
+    },
+    EventSourceArn: {
+      'Fn::GetAtt': ['AuditEventsTable0723963E', 'StreamArn'],
+    },
+    FunctionName: {
+      Ref: 'WebhookProjectionFunctionDA24C36F',
+    },
+    FunctionResponseTypes: ['ReportBatchItemFailures'],
+    MaximumRetryAttempts: 3,
+    StartingPosition: 'TRIM_HORIZON',
+  });
+  template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
+    BatchSize: 10,
+    EventSourceArn: {
+      'Fn::GetAtt': ['WebhookDeliveryQueue2A244492', 'Arn'],
+    },
+    FunctionName: {
+      Ref: 'WebhookDeliveryFunctionEA305509',
+    },
+    FunctionResponseTypes: ['ReportBatchItemFailures'],
+  });
+
+  expect(resources.WebhookProjectionDlq93E06A80).toEqual({
+    Type: 'AWS::SQS::Queue',
+    Properties: {
+      MessageRetentionPeriod: 1209600,
+      SqsManagedSseEnabled: true,
+    },
+    UpdateReplacePolicy: 'Delete',
+    DeletionPolicy: 'Delete',
+  });
+  expect(resources.WebhookDeliveryDlq163DBE73).toEqual({
+    Type: 'AWS::SQS::Queue',
+    Properties: {
+      MessageRetentionPeriod: 1209600,
+      SqsManagedSseEnabled: true,
+    },
+    UpdateReplacePolicy: 'Delete',
+    DeletionPolicy: 'Delete',
+  });
+  expect(resources.WebhookDeliveryQueue2A244492).toEqual({
+    Type: 'AWS::SQS::Queue',
+    Properties: {
+      MessageRetentionPeriod: 1209600,
+      RedrivePolicy: {
+        deadLetterTargetArn: {
+          'Fn::GetAtt': ['WebhookDeliveryDlq163DBE73', 'Arn'],
+        },
+        maxReceiveCount: 5,
+      },
+      SqsManagedSseEnabled: true,
+      VisibilityTimeout: 120,
+    },
+    UpdateReplacePolicy: 'Delete',
+    DeletionPolicy: 'Delete',
+  });
+  expect(resources.WebhookDeliveryQueue2A244492.Properties.FifoQueue).toBeUndefined();
+
+  for (const [alarmDescription, queueLogicalId] of [
+    [
+      'Detects audit events that exhausted Webhook projection retries.',
+      'WebhookProjectionDlq93E06A80',
+    ],
+    [
+      'Detects signed Webhook deliveries that exhausted queue redrive attempts.',
+      'WebhookDeliveryDlq163DBE73',
+    ],
+  ] as const) {
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmDescription: alarmDescription,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      DatapointsToAlarm: 1,
+      Dimensions: [{
+        Name: 'QueueName',
+        Value: {
+          'Fn::GetAtt': [queueLogicalId, 'QueueName'],
+        },
+      }],
+      EvaluationPeriods: 1,
+      MetricName: 'ApproximateNumberOfMessagesVisible',
+      Namespace: 'AWS/SQS',
+      Period: 300,
+      Statistic: 'Maximum',
+      Threshold: 1,
+      TreatMissingData: 'notBreaching',
+    });
+  }
+
+  const projectionRoleId = Object.entries(resources).find(([logicalId, resource]) =>
+    logicalId.startsWith('WebhookProjectionFunctionServiceRole') &&
+    (resource as { Type?: string }).Type === 'AWS::IAM::Role'
+  )?.[0];
+  const deliveryRoleId = Object.entries(resources).find(([logicalId, resource]) =>
+    logicalId.startsWith('WebhookDeliveryFunctionServiceRole') &&
+    (resource as { Type?: string }).Type === 'AWS::IAM::Role'
+  )?.[0];
+  expect(projectionRoleId).toBeDefined();
+  expect(deliveryRoleId).toBeDefined();
+  const policiesForRole = (roleId: string | undefined) =>
+    Object.values(resources).filter((resource) => {
+      if (!roleId || (resource as { Type?: string }).Type !== 'AWS::IAM::Policy') return false;
+      const roles = (resource as { Properties?: { Roles?: unknown[] } }).Properties?.Roles ?? [];
+      return roles.some((role) => (role as { Ref?: string }).Ref === roleId);
+    });
+  const projectionPolicies = JSON.stringify(policiesForRole(projectionRoleId));
+  const deliveryPolicies = JSON.stringify(policiesForRole(deliveryRoleId));
+
+  expect(projectionPolicies).toContain('AuditEventsTable0723963E');
+  expect(projectionPolicies).toContain('DeveloperPlatformTable772E085C');
+  expect(projectionPolicies).toContain('ProjectDirectoryTable9ED01C01');
+  expect(projectionPolicies).toContain('WorkspaceAccessTableD7C8D2C7');
+  expect(projectionPolicies).toContain('WebhookDeliveryQueue2A244492');
+  expect(projectionPolicies).toContain('WebhookProjectionDlq93E06A80');
+  expect(projectionPolicies).toContain('dynamodb:GetRecords');
+  expect(projectionPolicies).toContain('dynamodb:TransactWriteItems');
+  expect(projectionPolicies).not.toContain('kms:');
+  expect(projectionPolicies).toContain('sqs:SendMessage');
+  expect(deliveryPolicies).toContain('DeveloperPlatformTable772E085C');
+  expect(deliveryPolicies).toContain('ProjectDirectoryTable9ED01C01');
+  expect(deliveryPolicies).toContain('WorkspaceAccessTableD7C8D2C7');
+  expect(deliveryPolicies).toContain('WebhookDeliveryQueue2A244492');
+  expect(deliveryPolicies).toContain('dynamodb:PutItem');
+  expect(deliveryPolicies).toContain('kms:Decrypt');
+  expect(deliveryPolicies).not.toContain('kms:Encrypt');
+  expect(deliveryPolicies).not.toContain('kms:GenerateDataKey');
+  expect(deliveryPolicies).toContain('sqs:ReceiveMessage');
+  expect(deliveryPolicies).toContain('sqs:DeleteMessage');
+  expect(deliveryPolicies).toContain('sqs:SendMessage');
+  const projectionFunction = Object.values(resources).find((resource) =>
+    (resource as { Properties?: { Description?: string } }).Properties?.Description ===
+      'Projects audit events into durable signed Webhook deliveries.'
+  ) as { Properties: { Environment: { Variables: Record<string, unknown> } } };
+  const deliveryFunction = Object.values(resources).find((resource) =>
+    (resource as { Properties?: { Description?: string } }).Properties?.Description ===
+      'Delivers signed Webhooks from the durable SQS queue.'
+  ) as { Properties: { Environment: { Variables: Record<string, unknown> } } };
+  expect(projectionFunction.Properties.Environment.Variables)
+    .not.toHaveProperty('DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID');
+  expect(deliveryFunction.Properties.Environment.Variables)
+    .toHaveProperty('DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID');
+  const projectionWildcardStatements = policiesForRole(projectionRoleId).flatMap((resource) =>
+    (
+      resource as {
+        Properties: { PolicyDocument: { Statement: Array<Record<string, unknown>> } };
+      }
+    ).Properties.PolicyDocument.Statement.filter((statement) => statement.Resource === '*')
+  );
+  expect(projectionWildcardStatements).toEqual([{
+    Action: 'dynamodb:ListStreams',
+    Effect: 'Allow',
+    Resource: '*',
+  }]);
+  expect(deliveryPolicies).not.toContain('"Resource":"*"');
+
+  template.hasOutput('WebhookProjectionDlqUrl', {
+    Value: { Ref: 'WebhookProjectionDlq93E06A80' },
+  });
+  template.hasOutput('WebhookDeliveryQueueUrl', {
+    Value: { Ref: 'WebhookDeliveryQueue2A244492' },
+  });
+  template.hasOutput('WebhookDeliveryDlqUrl', {
+    Value: { Ref: 'WebhookDeliveryDlq163DBE73' },
+  });
+});
+
+test('connector runtime uses secret-backed configuration and isolated durable workers', () => {
+  const template = synthesizedTemplate;
+  const resources = template.toJSON().Resources;
+  const findResourceId = (
+    prefix: string,
+    type: string,
+  ) => Object.entries(resources).find(([logicalId, resource]) =>
+    logicalId.startsWith(prefix) &&
+    (resource as { Type?: string }).Type === type
+  )?.[0];
+  const secretId = findResourceId('ConnectorRuntimeSecret', 'AWS::SecretsManager::Secret');
+  const configurationKeyId = findResourceId(
+    'ConnectorRuntimeConfigurationKey',
+    'AWS::KMS::Key',
+  );
+  const queueId = findResourceId('ConnectorSyncQueue', 'AWS::SQS::Queue');
+  const dlqId = findResourceId('ConnectorSyncDlq', 'AWS::SQS::Queue');
+  const projectionFunctionId = findResourceId(
+    'ConnectorAuditProjectionFunction',
+    'AWS::Lambda::Function',
+  );
+  const workerFunctionId = findResourceId('ConnectorSyncFunction', 'AWS::Lambda::Function');
+  const pollFunctionId = findResourceId('ConnectorPollFunction', 'AWS::Lambda::Function');
+
+  expect(secretId).toBeDefined();
+  expect(configurationKeyId).toBeDefined();
+  expect(queueId).toBeDefined();
+  expect(dlqId).toBeDefined();
+  expect(projectionFunctionId).toBeDefined();
+  expect(workerFunctionId).toBeDefined();
+  expect(pollFunctionId).toBeDefined();
+  if (
+    !secretId ||
+    !configurationKeyId ||
+    !queueId ||
+    !dlqId ||
+    !projectionFunctionId ||
+    !workerFunctionId ||
+    !pollFunctionId
+  ) {
+    throw new Error('Connector runtime resources were not synthesized.');
+  }
+
+  expect(resources[secretId]).toEqual(expect.objectContaining({
+    Type: 'AWS::SecretsManager::Secret',
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+    Properties: expect.objectContaining({
+      Description:
+        'Provider configuration and signing secrets loaded only by connector runtimes.',
+      KmsKeyId: { 'Fn::GetAtt': [configurationKeyId, 'Arn'] },
+      SecretString: { Ref: 'ConnectorRuntimeConfiguration' },
+    }),
+  }));
+  expect(resources[queueId]).toEqual(expect.objectContaining({
+    Type: 'AWS::SQS::Queue',
+    Properties: expect.objectContaining({
+      MessageRetentionPeriod: 1209600,
+      RedrivePolicy: {
+        deadLetterTargetArn: { 'Fn::GetAtt': [dlqId, 'Arn'] },
+        maxReceiveCount: 5,
+      },
+      SqsManagedSseEnabled: true,
+      VisibilityTimeout: 360,
+    }),
+  }));
+  expect(resources[dlqId]).toEqual(expect.objectContaining({
+    Type: 'AWS::SQS::Queue',
+    Properties: expect.objectContaining({
+      MessageRetentionPeriod: 1209600,
+      SqsManagedSseEnabled: true,
+    }),
+  }));
+
+  for (const [description, handler, timeout, runtimeRole] of [
+    [
+      'Projects audit events into provider-neutral connector sync jobs.',
+      'index.auditProjectionHandler',
+      30,
+      'connector-audit-projection',
+    ],
+    [
+      'Processes provider-neutral connector synchronization jobs with current Work Item RBAC.',
+      'index.queueHandler',
+      300,
+      'connector-queue-worker',
+    ],
+    [
+      'Schedules bounded polling jobs for connected provider installations.',
+      'index.pollHandler',
+      120,
+      'connector-poll',
+    ],
+  ] as const) {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Code: {
+        S3Bucket: Match.anyValue(),
+        S3Key: Match.stringLikeRegexp('\\.zip$'),
+      },
+      Description: description,
+      Handler: handler,
+      Runtime: 'nodejs22.x',
+      Timeout: timeout,
+      Environment: {
+        Variables: Match.objectLike({
+          CONNECTOR_SYNC_QUEUE_URL: { Ref: queueId },
+          MUKUROJI_RUNTIME_ROLE: runtimeRole,
+        }),
+      },
+    });
+  }
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description:
+      'Processes provider-neutral connector synchronization jobs with current Work Item RBAC.',
+    Environment: {
+      Variables: Match.objectLike({
+        CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN: { Ref: secretId },
+        DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID: Match.anyValue(),
+        DEVELOPER_PLATFORM_STATE_KMS_KEY_ID: Match.anyValue(),
+        DEVELOPER_PLATFORM_TABLE_NAME: {
+          Ref: 'DeveloperPlatformTable772E085C',
+        },
+        WORK_ITEMS_TABLE_NAME: {
+          Ref: 'TeamIssuesTable189D851D',
+        },
+      }),
+    },
+  });
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: 'Schedules bounded polling jobs for connected provider installations.',
+    Environment: {
+      Variables: Match.objectLike({
+        DEVELOPER_PLATFORM_TABLE_NAME: {
+          Ref: 'DeveloperPlatformTable772E085C',
+        },
+      }),
+    },
+  });
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: 'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.',
+    Environment: {
+      Variables: Match.objectLike({
+        CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN: { Ref: secretId },
+      }),
+    },
+  });
+  const apiFunction = Object.values(resources).find((resource) =>
+    (resource as { Properties?: { Description?: string } }).Properties?.Description ===
+      'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.'
+  ) as { Properties: { Environment: { Variables: Record<string, unknown> } } };
+  expect(apiFunction.Properties.Environment.Variables)
+    .not.toHaveProperty('CONNECTOR_SYNC_QUEUE_URL');
+
+  template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
+    BatchSize: 1,
+    EventSourceArn: { 'Fn::GetAtt': [queueId, 'Arn'] },
+    FunctionName: { Ref: workerFunctionId },
+    FunctionResponseTypes: ['ReportBatchItemFailures'],
+  });
+  template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
+    BatchSize: 10,
+    BisectBatchOnFunctionError: true,
+    DestinationConfig: {
+      OnFailure: {
+        Destination: { 'Fn::GetAtt': [dlqId, 'Arn'] },
+      },
+    },
+    EventSourceArn: {
+      'Fn::GetAtt': ['AuditEventsTable0723963E', 'StreamArn'],
+    },
+    FunctionName: { Ref: projectionFunctionId },
+    FunctionResponseTypes: ['ReportBatchItemFailures'],
+    MaximumRetryAttempts: 3,
+    StartingPosition: 'LATEST',
+  });
+  template.hasResourceProperties('AWS::Events::Rule', {
+    Description: 'Schedules bounded connector polling for providers without push events.',
+    ScheduleExpression: 'rate(5 minutes)',
+    State: 'ENABLED',
+    Targets: Match.arrayWith([
+      Match.objectLike({
+        Arn: { 'Fn::GetAtt': [pollFunctionId, 'Arn'] },
+        DeadLetterConfig: {
+          Arn: { 'Fn::GetAtt': [dlqId, 'Arn'] },
+        },
+        RetryPolicy: {
+          MaximumEventAgeInSeconds: 3600,
+          MaximumRetryAttempts: 2,
+        },
+      }),
+    ]),
+  });
+
+  const policiesForFunction = (functionId: string) => {
+    const functionResource = resources[functionId] as {
+      Properties: { Role: { 'Fn::GetAtt': [string, string] } };
+    };
+    const roleId = functionResource.Properties.Role['Fn::GetAtt'][0];
+    return Object.values(resources).filter((resource) => {
+      if ((resource as { Type?: string }).Type !== 'AWS::IAM::Policy') return false;
+      const roles = (
+        resource as { Properties?: { Roles?: Array<{ Ref?: string }> } }
+      ).Properties?.Roles ?? [];
+      return roles.some((role) => role.Ref === roleId);
+    });
+  };
+  const projectionPolicies = JSON.stringify(policiesForFunction(projectionFunctionId));
+  const workerPolicies = JSON.stringify(policiesForFunction(workerFunctionId));
+  const pollPolicies = JSON.stringify(policiesForFunction(pollFunctionId));
+
+  expect(projectionPolicies).toContain('AuditEventsTable0723963E');
+  expect(projectionPolicies).toContain(queueId);
+  expect(projectionPolicies).toContain(dlqId);
+  expect(projectionPolicies).not.toContain('ConnectorRuntimeSecret');
+  expect(projectionPolicies).not.toContain('DeveloperPlatformTable772E085C');
+  expect(workerPolicies).toContain(secretId);
+  expect(workerPolicies).toContain(queueId);
+  expect(workerPolicies).toContain('DeveloperPlatformTable772E085C');
+  expect(workerPolicies).toContain('TeamIssuesTable189D851D');
+  expect(workerPolicies).toContain('AuditEventsTable0723963E');
+  expect(workerPolicies).toContain('WorkspaceAccessTableD7C8D2C7');
+  expect(workerPolicies).toContain('dynamodb:TransactWriteItems');
+  expect(workerPolicies).toContain('kms:Decrypt');
+  expect(workerPolicies).toContain('kms:Encrypt');
+  expect(workerPolicies).toContain('secretsmanager:GetSecretValue');
+  expect(pollPolicies).toContain(queueId);
+  expect(pollPolicies).toContain('DeveloperPlatformTable772E085C');
+  expect(pollPolicies).toContain('dynamodb:Scan');
+  expect(pollPolicies).not.toContain(secretId);
+  expect(pollPolicies).not.toContain('secretsmanager:GetSecretValue');
+  expect(pollPolicies).not.toContain('TeamIssuesTable189D851D');
+  expect(pollPolicies).not.toContain('AuditEventsTable0723963E');
+  expect(pollPolicies).not.toContain('DeveloperPlatformConnectorKey');
+
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects connector projection, polling, or sync jobs that exhausted retries.',
+    MetricName: 'ApproximateNumberOfMessagesVisible',
+    Threshold: 1,
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription: 'Detects connector synchronization jobs delayed for 15 minutes.',
+    ComparisonOperator: 'GreaterThanThreshold',
+    MetricName: 'ApproximateAgeOfOldestMessage',
+    Threshold: 900,
+  });
+  template.hasOutput('ConnectorRuntimeSecretArn', {
+    Value: { Ref: secretId },
+  });
+  template.hasOutput('ConnectorSyncQueueUrl', {
+    Value: { Ref: queueId },
+  });
+  template.hasOutput('ConnectorSyncDlqUrl', {
+    Value: { Ref: dlqId },
+  });
+});
+
 test('hourly schedule emits deterministic events and surfaces bounded scan failures', () => {
   const template = synthesizedTemplate;
 
@@ -1060,7 +1818,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 2);
+  template.resourceCountIs('AWS::SQS::Queue', 9);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -1129,8 +1887,11 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   const statements = apiPolicies.flatMap((policy) =>
     policy.Properties.PolicyDocument.Statement
   );
-  const fileObjectStatement = statements.find((statement) =>
-    Array.isArray(statement.Action) && statement.Action.includes('s3:PutObject')
+  const fileObjectStatements = statements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes('FileBucket')
+  );
+  const fileObjectActions = fileObjectStatements.flatMap((statement) =>
+    Array.isArray(statement.Action) ? statement.Action : [statement.Action]
   );
   const serializedApiPolicies = JSON.stringify(apiPolicies);
   const transactStatement = statements.find((statement) => {
@@ -1158,6 +1919,21 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   const planningStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('PlanningTable2A0D4CC5')
   );
+  const developerPlatformDataStatement = statements.find((statement) =>
+    JSON.stringify(statement.Resource).includes('DeveloperPlatformTable772E085C') &&
+    Array.isArray(statement.Action) &&
+    statement.Action.includes('dynamodb:Query')
+  );
+  const webhookQueueSendStatement = statements.find((statement) =>
+    JSON.stringify(statement.Resource).includes('WebhookDeliveryQueue2A244492') &&
+    statement.Action === 'sqs:SendMessage'
+  );
+  const connectorSyncQueueLogicalId = Object.entries(resources).find(
+    ([logicalId, resource]) =>
+      logicalId.startsWith('ConnectorSyncQueue') &&
+      (resource as { Type?: string }).Type === 'AWS::SQS::Queue',
+  )?.[0];
+  expect(connectorSyncQueueLogicalId).toBeDefined();
   const cognitoPolicy = Object.values(template.toJSON().Resources).find((resource) =>
     JSON.stringify(resource).includes('cognito-idp:AdminGetUser')
   );
@@ -1172,27 +1948,34 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
       { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
       { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
       { 'Fn::GetAtt': ['WorkspaceSearchTable2575AD6B', 'Arn'] },
+      { 'Fn::GetAtt': ['DeveloperPlatformTable772E085C', 'Arn'] },
     ]),
   }));
   expect(serializedApiPolicies).toContain('WorkspaceSearchTable2575AD6B');
+  expect(serializedApiPolicies).toContain('kms:Decrypt');
+  expect(serializedApiPolicies).toContain('kms:GenerateDataKey');
+  expect(serializedApiPolicies).toContain('DeveloperPlatformWebhookKey');
+  expect(serializedApiPolicies).toContain('DeveloperPlatformConnectorKey');
+  expect(serializedApiPolicies).toContain('DeveloperPlatformStateKey');
   expect(JSON.stringify(transactStatement)).not.toContain('ProjectTasksTableE21F6637');
   expect(JSON.stringify(transactStatement)).toContain('FileProofingTable');
-  expect(fileObjectStatement).toEqual(expect.objectContaining({
-    Effect: 'Allow',
-    Action: expect.arrayContaining([
-      's3:DeleteObject',
-      's3:GetObject',
-      's3:GetObjectAttributes',
-      's3:GetObjectVersion',
-      's3:GetObjectVersionTagging',
-      's3:PutObject',
-      's3:PutObjectVersionTagging',
-    ]),
-  }));
-  expect(JSON.stringify(fileObjectStatement)).toContain('workspaces/*');
-  expect(JSON.stringify(fileObjectStatement)).not.toContain('s3:ListBucket');
-  expect(JSON.stringify(fileObjectStatement)).not.toContain('s3:DeleteObjectVersion');
-  expect(JSON.stringify(fileObjectStatement)).not.toContain('s3:DeleteObjectTagging');
+  expect(fileObjectStatements).not.toHaveLength(0);
+  expect(fileObjectStatements).toEqual(expect.arrayContaining([
+    expect.objectContaining({ Effect: 'Allow' }),
+  ]));
+  expect(fileObjectActions).toEqual(expect.arrayContaining([
+    's3:DeleteObject',
+    's3:GetObject',
+    's3:GetObjectAttributes',
+    's3:GetObjectVersion',
+    's3:GetObjectVersionTagging',
+    's3:PutObject',
+    's3:PutObjectVersionTagging',
+  ]));
+  expect(JSON.stringify(fileObjectStatements)).toContain('workspaces/*');
+  expect(fileObjectActions).not.toContain('s3:ListBucket');
+  expect(fileObjectActions).not.toContain('s3:DeleteObjectVersion');
+  expect(fileObjectActions).not.toContain('s3:DeleteObjectTagging');
   expect(serializedApiPolicies).toContain('NotificationsTable76DCFC6C');
   expect(serializedApiPolicies).toContain('dynamodb:Query');
   expect(serializedApiPolicies).toContain('dynamodb:PutItem');
@@ -1247,6 +2030,41 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     planningDataStatement,
     transactStatement,
   ]));
+  expect(developerPlatformDataStatement).toEqual({
+    Action: [
+      'dynamodb:DeleteItem',
+      'dynamodb:GetItem',
+      'dynamodb:PutItem',
+      'dynamodb:Query',
+      'dynamodb:UpdateItem',
+    ],
+    Effect: 'Allow',
+    Resource: [
+      { 'Fn::GetAtt': ['DeveloperPlatformTable772E085C', 'Arn'] },
+      {
+        'Fn::Join': [
+          '',
+          [
+            { 'Fn::GetAtt': ['DeveloperPlatformTable772E085C', 'Arn'] },
+            '/index/*',
+          ],
+        ],
+      },
+    ],
+  });
+  expect(webhookQueueSendStatement).toEqual(expect.objectContaining({
+    Action: 'sqs:SendMessage',
+    Effect: 'Allow',
+    Resource: [
+      {
+        'Fn::GetAtt': ['WebhookDeliveryQueue2A244492', 'Arn'],
+      },
+      {
+        'Fn::GetAtt': ['WorkItemImportQueueA2F07A30', 'Arn'],
+      },
+    ],
+  }));
+  expect(serializedApiPolicies).not.toContain(connectorSyncQueueLogicalId);
 
   const legacyTaskStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('ProjectTasksTableE21F6637')
