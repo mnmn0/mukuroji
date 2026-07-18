@@ -588,6 +588,18 @@ export class CdkStack extends cdk.Stack {
       noEcho: true,
       description: 'Secret used to hash public request and reply capability tokens.',
     });
+    const enterpriseIdentityTokenHashSecret = new cdk.CfnParameter(
+      this,
+      'EnterpriseIdentityTokenHashSecret',
+      {
+        type: 'String',
+        minLength: 32,
+        maxLength: 256,
+        noEcho: true,
+        description:
+          'Stable secret used to HMAC enterprise identity bearer and service-account credentials.',
+      },
+    );
     const fileRetentionDays = new cdk.CfnParameter(this, 'FileRetentionDays', {
       type: 'Number',
       default: 30,
@@ -618,6 +630,67 @@ export class CdkStack extends cdk.Stack {
       type: 'String',
       allowedPattern: '^[A-Za-z0-9]+$',
       description: 'Existing Cognito app client ID used by the mukuroji API.',
+    });
+    const cognitoSsoUserPoolClientId = new cdk.CfnParameter(
+      this,
+      'CognitoSsoUserPoolClientId',
+      {
+        type: 'String',
+        allowedPattern: '^[A-Za-z0-9]+$',
+        description:
+          'Dedicated public Cognito app client ID restricted to enterprise Hosted UI login.',
+      },
+    );
+    const cognitoHostedUiDomain = new cdk.CfnParameter(this, 'CognitoHostedUiDomain', {
+      type: 'String',
+      minLength: 1,
+      description: 'HTTPS Cognito managed-login domain used for enterprise federation.',
+    });
+    const cognitoSsoRedirectUri = new cdk.CfnParameter(this, 'CognitoSsoRedirectUri', {
+      type: 'String',
+      allowedPattern: '^https://[^\\s]+$',
+      description: 'Exact SPA callback URI registered on the Cognito app client.',
+    });
+    const cognitoEnterpriseIdpName = new cdk.CfnParameter(
+      this,
+      'CognitoEnterpriseIdpName',
+      {
+        type: 'String',
+        minLength: 1,
+        maxLength: 128,
+        description: 'Cognito identity-provider name used by enterprise SAML/OIDC federation.',
+      },
+    );
+    const enterpriseSsoStateSecret = new cdk.CfnParameter(
+      this,
+      'EnterpriseSsoStateSecret',
+      {
+        type: 'String',
+        minLength: 32,
+        maxLength: 256,
+        noEcho: true,
+        description: 'Secret used only to sign short-lived enterprise SSO state.',
+      },
+    );
+    new cdk.CfnRule(this, 'EnterpriseSecretSeparation', {
+      assertions: [{
+        assert: cdk.Fn.conditionNot(cdk.Fn.conditionEquals(
+          enterpriseSsoStateSecret.valueAsString,
+          enterpriseIdentityTokenHashSecret.valueAsString,
+        )),
+        assertDescription:
+          'EnterpriseSsoStateSecret must differ from EnterpriseIdentityTokenHashSecret.',
+      }],
+    });
+    new cdk.CfnRule(this, 'CognitoClientSeparation', {
+      assertions: [{
+        assert: cdk.Fn.conditionNot(cdk.Fn.conditionEquals(
+          cognitoSsoUserPoolClientId.valueAsString,
+          cognitoUserPoolClientId.valueAsString,
+        )),
+        assertDescription:
+          'CognitoSsoUserPoolClientId must differ from CognitoUserPoolClientId.',
+      }],
     });
     const workspaceDirectoryId = new cdk.CfnParameter(this, 'WorkspaceDirectoryId', {
       type: 'String',
@@ -801,6 +874,17 @@ export class CdkStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    const enterpriseIdentityTable = new dynamodb.Table(this, 'EnterpriseIdentityTable', {
+      partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      deletionProtection: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      stream: dynamodb.StreamViewType.NEW_IMAGE,
+      timeToLiveAttribute: 'expiresAt',
     });
 
     const collaborationTable = new dynamodb.Table(this, 'WorkItemCollaborationTable', {
@@ -1087,9 +1171,17 @@ export class CdkStack extends cdk.Stack {
         AUTOMATION_WEBHOOK_SECRET_PREFIX: automationWebhookSecretPrefix,
         COLLABORATION_TABLE_NAME: collaborationTable.tableName,
         COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
+        COGNITO_ENTERPRISE_IDP_NAME: cognitoEnterpriseIdpName.valueAsString,
+        COGNITO_HOSTED_UI_DOMAIN: cognitoHostedUiDomain.valueAsString,
+        COGNITO_SSO_CLIENT_ID: cognitoSsoUserPoolClientId.valueAsString,
+        COGNITO_SSO_REDIRECT_URI: cognitoSsoRedirectUri.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
+        ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
+        ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET:
+          enterpriseIdentityTokenHashSecret.valueAsString,
+        ENTERPRISE_SSO_STATE_SECRET: enterpriseSsoStateSecret.valueAsString,
         FILE_BUCKET_NAME: fileBucket.bucketName,
         FILE_DOWNLOAD_URL_TTL_SECONDS: fileDownloadUrlTtlSeconds.valueAsString,
         FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
@@ -1178,7 +1270,7 @@ export class CdkStack extends cdk.Stack {
     fileProofingTable.grantReadWriteData(apiFunction);
     notificationsTable.grantReadWriteData(apiFunction);
     workspaceSearchTable.grantReadWriteData(apiFunction);
-    realtimeSessionsTable.grantWriteData(apiFunction);
+    realtimeSessionsTable.grantReadWriteData(apiFunction);
     const apiAutomationDataPolicy = new iam.Policy(
       this,
       'ApiAutomationDataPolicy',
@@ -1195,6 +1287,25 @@ export class CdkStack extends cdk.Stack {
             'dynamodb:UpdateItem',
           ],
           resources: [automationTable.tableArn, `${automationTable.tableArn}/index/*`],
+        })],
+      },
+    );
+    const apiEnterpriseIdentityDataPolicy = new iam.Policy(
+      this,
+      'ApiEnterpriseIdentityDataPolicy',
+      {
+        statements: [new iam.PolicyStatement({
+          actions: [
+            'dynamodb:BatchWriteItem',
+            'dynamodb:ConditionCheckItem',
+            'dynamodb:DeleteItem',
+            'dynamodb:DescribeTable',
+            'dynamodb:GetItem',
+            'dynamodb:PutItem',
+            'dynamodb:Query',
+            'dynamodb:UpdateItem',
+          ],
+          resources: [enterpriseIdentityTable.tableArn],
         })],
       },
     );
@@ -1240,6 +1351,7 @@ export class CdkStack extends cdk.Stack {
           projectDirectoryTable.tableArn,
           auditEventsTable.tableArn,
           workspaceAccessTable.tableArn,
+          enterpriseIdentityTable.tableArn,
           collaborationTable.tableArn,
           fileProofingTable.tableArn,
           workspaceSearchTable.tableArn,
@@ -1264,6 +1376,7 @@ export class CdkStack extends cdk.Stack {
       })],
     });
     apiFunction.role.attachInlinePolicy(apiAutomationDataPolicy);
+    apiFunction.role.attachInlinePolicy(apiEnterpriseIdentityDataPolicy);
     apiFunction.role.attachInlinePolicy(apiWorkItemConfigurationDataPolicy);
     apiFunction.role.attachInlinePolicy(apiPlanningDataPolicy);
     apiFunction.role.attachInlinePolicy(apiRequestIntakeDataPolicy);
@@ -1310,15 +1423,104 @@ export class CdkStack extends cdk.Stack {
           'cognito-idp:AdminCreateUser',
           'cognito-idp:AdminDeleteUser',
           'cognito-idp:AdminDeleteUserAttributes',
+          'cognito-idp:AdminDisableUser',
+          'cognito-idp:AdminEnableUser',
           'cognito-idp:AdminGetUser',
           'cognito-idp:AdminListGroupsForUser',
+          'cognito-idp:AdminUserGlobalSignOut',
           'cognito-idp:AdminUpdateUserAttributes',
+          'cognito-idp:DescribeIdentityProvider',
+          'cognito-idp:DescribeUserPoolClient',
           'cognito-idp:GetUser',
           'cognito-idp:ListUsers',
         ],
         resources: [cognitoUserPoolArn],
       }),
     );
+
+    const enterpriseIdentityMaintenanceDlq = new sqs.Queue(
+      this,
+      'EnterpriseIdentityMaintenanceDlq',
+      {
+        encryption: sqs.QueueEncryption.SQS_MANAGED,
+        retentionPeriod: cdk.Duration.days(14),
+      },
+    );
+    const enterpriseIdentityMaintenanceFunction = new lambdaNodejs.NodejsFunction(
+      this,
+      'EnterpriseIdentityMaintenanceFunction',
+      {
+        entry: path.join(
+          __dirname,
+          '../../server/src/enterprise-identity-maintenance-handler.ts',
+        ),
+        handler: 'handler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+        projectRoot: path.join(__dirname, '../..'),
+        timeout: cdk.Duration.minutes(15),
+        memorySize: 1024,
+        description:
+          'Compacts enterprise identity generations and applies grace-period TTL retirement.',
+        bundling: {
+          bundleAwsSDK: true,
+          minify: true,
+          sourceMap: true,
+          target: 'node22',
+        },
+        environment: {
+          ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
+        },
+      },
+    );
+    enterpriseIdentityMaintenanceFunction.addEventSource(
+      new lambdaEventSources.DynamoEventSource(enterpriseIdentityTable, {
+        startingPosition: lambda.StartingPosition.TRIM_HORIZON,
+        batchSize: 1,
+        bisectBatchOnError: true,
+        retryAttempts: 10,
+        reportBatchItemFailures: true,
+        filters: [lambda.FilterCriteria.filter({
+          eventName: lambda.FilterRule.or('INSERT', 'MODIFY'),
+          dynamodb: {
+            NewImage: {
+              entryType: {
+                S: lambda.FilterRule.isEqual('enterprise-identity-control'),
+              },
+              maintenanceRequired: {
+                BOOL: lambda.FilterRule.isEqual(true),
+              },
+              recordKey: { S: lambda.FilterRule.isEqual('CONTROL') },
+            },
+          },
+        })],
+        onFailure: new lambdaEventSources.SqsDlq(enterpriseIdentityMaintenanceDlq),
+      }),
+    );
+    enterpriseIdentityTable.grantStreamRead(enterpriseIdentityMaintenanceFunction);
+    enterpriseIdentityMaintenanceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'dynamodb:BatchWriteItem',
+        'dynamodb:GetItem',
+        'dynamodb:PutItem',
+        'dynamodb:Query',
+        'dynamodb:UpdateItem',
+      ],
+      resources: [enterpriseIdentityTable.tableArn],
+    }));
+    new cloudwatch.Alarm(this, 'EnterpriseIdentityMaintenanceDlqAlarm', {
+      alarmDescription:
+        'Detects enterprise identity compaction or generation retirement failures.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: enterpriseIdentityMaintenanceDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
 
     const functionUrl = apiFunction.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.NONE,
@@ -1375,7 +1577,9 @@ export class CdkStack extends cdk.Stack {
         target: 'node22',
       },
       environment: {
+        COGNITO_ENTERPRISE_IDP_NAME: cognitoEnterpriseIdpName.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+        ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
         REALTIME_SESSION_TTL_SECONDS: '3600',
@@ -1407,6 +1611,10 @@ export class CdkStack extends cdk.Stack {
 
     realtimeSessionsTable.grantReadWriteData(realtimeFunction);
     projectDirectoryTable.grantReadData(realtimeFunction);
+    realtimeFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+      resources: [enterpriseIdentityTable.tableArn],
+    }));
     workItemsTable.grantReadData(realtimeFunction);
     workspaceAccessTable.grantReadData(realtimeFunction);
     realtimeFunction.addToRolePolicy(
@@ -1417,7 +1625,10 @@ export class CdkStack extends cdk.Stack {
     );
     realtimeFunction.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ['cognito-idp:AdminListGroupsForUser'],
+        actions: [
+          'cognito-idp:AdminListGroupsForUser',
+          'cognito-idp:DescribeIdentityProvider',
+        ],
         resources: [cognitoUserPoolArn],
       }),
     );
@@ -2181,6 +2392,9 @@ export class CdkStack extends cdk.Stack {
       value: processedAuditEventsTable.tableName,
     });
     new cdk.CfnOutput(this, 'WorkspaceAccessTableName', { value: workspaceAccessTable.tableName });
+    new cdk.CfnOutput(this, 'EnterpriseIdentityTableName', {
+      value: enterpriseIdentityTable.tableName,
+    });
     new cdk.CfnOutput(this, 'WorkItemCollaborationTableName', {
       value: collaborationTable.tableName,
     });
@@ -2205,6 +2419,9 @@ export class CdkStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'CollaborationProjectionDlqUrl', {
       value: collaborationProjectionDlq.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'EnterpriseIdentityMaintenanceDlqUrl', {
+      value: enterpriseIdentityMaintenanceDlq.queueUrl,
     });
     new cdk.CfnOutput(this, 'AutomationEventDlqUrl', {
       value: automationEventDlq.queueUrl,

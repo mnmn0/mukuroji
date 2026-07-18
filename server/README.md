@@ -4,13 +4,15 @@ Hono で実装した API を、Bun development server と Node.js 22 Lambda の�
 
 ## Local development
 
-初回起動前に `openssl rand -hex 32` の64桁小文字hex出力を、git管理外の
-repository root `.env` に次の形式で保存します。Docker Compose はこの変数を
-Floci containerへ明示的に渡し、未設定または形式不正なら起動前に停止します。
+初回起動前に `openssl rand -hex 32` を3回実行し、それぞれ独立した64桁小文字hex出力を
+git管理外の repository root `.env` に次の形式で保存します。Docker Compose はこれらを
+Floci containerへ明示的に渡します。
 保存後は `chmod 600 .env` でowner以外からの読み取りを禁止してください。
 
 ```dotenv
 MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64-character-lowercase-hex-output>
+ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET=<different-64-character-lowercase-hex-output>
+ENTERPRISE_SSO_STATE_SECRET=<third-64-character-lowercase-hex-output>
 ```
 
 ```sh
@@ -23,9 +25,12 @@ bun run server:dev
 ```
 
 server は既定で `http://localhost:4566` の Floci Cognito / DynamoDB に接続します。
-`.floci/generated/cognito.env` は Cognito endpoint/clientなどの非secret値を保持し、native Linuxの
-host userからも読み込めます。Workspace access mutationに必要な固定HMAC keyはこのfileへ複製せず、
-API writerとbackfillの両方がowner-onlyのroot `.env`から同じ値を読み込みます。
+Ready hook は password/API 用 `mukuroji-web-local` と Hosted UI SSO 専用
+`mukuroji-sso-local` を別の public client として作成します。
+`.floci/generated/cognito.env` は Cognito endpoint、両 client ID、SSO callback などの非secret値を保持し、native Linuxの
+host userからも読み込めます。Workspace access audit、enterprise credential digest、SSO state に必要な
+固定 secret はこのfileへ複製せず、API writer、backfill、local backend がowner-onlyのroot `.env`から
+読み込みます。
 
 health check は `GET http://localhost:3000/api/health` です。Public Request Form / requester reply と `POST /api/auth/login` 以外の application API は、Cognito access token を `Authorization: Bearer <token>` で受け取ります。
 
@@ -40,7 +45,8 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 
 主な route:
 
-- `POST /api/auth/login`, `GET /api/auth/me`
+- `POST /api/auth/login`, `GET /api/auth/me`, `GET /api/auth/sso/discovery`,
+  `POST /api/auth/sso/start`, `POST /api/auth/sso/exchange`
 - `GET /api/dashboard/summary`
 - `POST /api/teams`, `GET /api/teams/projects`
 - `/api/teams/{teamId}/issues`
@@ -49,6 +55,10 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 - `/api/notifications`, `/api/notifications/unread-count`, `/api/notification-preferences`
 - `/api/request-forms`, `/api/request-queue`, `/api/request-submissions/{submissionId}`
 - `/api/request-intake/{token}`, `GET /api/request-threads/{threadToken}`, `/api/request-threads/{threadToken}/replies`
+- `GET /api/enterprise/security` と `/api/enterprise/security/*` の管理 mutation
+- `/api/scim/v2/{workspaceId}/ServiceProviderConfig`,
+  `/api/scim/v2/{workspaceId}/Users`, `/api/scim/v2/{workspaceId}/Groups`
+- `GET /api/audit/events`, `GET /api/audit/events/export`
 
 The local API reads DynamoDB through `DYNAMODB_ENDPOINT`, `AWS_ENDPOINT_URL_DYNAMODB`, or `AWS_ENDPOINT_URL`.
 Default local table names are:
@@ -61,6 +71,16 @@ Default local table names are:
 - `NOTIFICATIONS_STATUS_INDEX_NAME=RecipientStatusIndex`
 - `MUKUROJI_REALTIME_SESSIONS_TABLE=mukuroji-realtime-sessions-local`
 - `MUKUROJI_AUDIT_EVENTS_TABLE=mukuroji-audit-events`
+- `ENTERPRISE_IDENTITY_TABLE_NAME=mukuroji-enterprise-identity-local`（Workspace generation/`CONTROL`
+  checkpoint と global domain claim を保存。Enterprise Identity 専用 GSI はありません）
+- `ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET=<32–256文字の安定したsecret>`（credential
+  kind・Workspace・credential ID で domain-separated な digest と10分の response recovery に使用）
+- `ENTERPRISE_SSO_STATE_SECRET=<別の32–256文字の安定したsecret>`
+- `COGNITO_CLIENT_ID=<password/API用public client ID>`
+- `COGNITO_SSO_CLIENT_ID=<Hosted UI SSO専用public client ID>`（通常 client と同じ値は拒否）
+- `COGNITO_HOSTED_UI_DOMAIN`, `COGNITO_SSO_REDIRECT_URI`, `COGNITO_ENTERPRISE_IDP_NAME`
+  （Cognito Hosted UI federation。Local callback の既定値は
+  `http://localhost:5173/auth/sso/callback`）
 - `PLANNING_TABLE_NAME=mukuroji-planning-local`
 - `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`（未指定時は `mukuroji-workspace-search-local`）
 - `MUKUROJI_AUDIT_RETENTION_DAYS=2555`
@@ -78,6 +98,17 @@ Project directory rows are scoped by the authenticated Cognito user's Workspace 
 The local Floci seed writes `workspace#mukuroji-local` to both `custom:directory_id` and
 `custom:workspace_id`. Project task rows are queried by
 `workspace#mukuroji-local#project#<projectId>`.
+
+API の access-token validator は `client_id` が `COGNITO_CLIENT_ID` または
+`COGNITO_SSO_CLIENT_ID` に完全一致する token だけを受け入れます。SSO enforcement 対象では、
+SSO client の token であることに加え、code exchange 時に server が access-token digest と
+provider revision へ記録した authentication assurance を要求します。Token claim に同名の marker を
+埋め込むだけでは SSO session になりません。
+
+Floci は外部 SAML/OIDC federation 自体を模擬しませんが、local password auth と OAuth SSO の
+境界を保つため専用 client metadata は常に作成します。`COGNITO_ENTERPRISE_IDP_NAME` がない場合の
+local placeholder は `COGNITO` provider を使いますが、enterprise federation 設定が揃わないため
+SSO start/exchange と enforcement は利用できません。
 
 Planning records use `PLANNING_TABLE_NAME` and the production-compatible
 `workspaceId` / `recordKey` key schema. CDK supplies the deployed `PlanningTable`

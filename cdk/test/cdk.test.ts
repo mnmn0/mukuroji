@@ -62,7 +62,7 @@ function serializeAwsSdkCall(value: unknown): string {
 
 const synthesizedTemplate = createTemplate();
 
-test('fresh deployment requires explicit Cognito workspace and request secrets parameters', () => {
+test('fresh deployment requires explicit Cognito workspace and runtime secrets parameters', () => {
   const template = synthesizedTemplate;
   const parameters = template.toJSON().Parameters;
 
@@ -71,6 +71,10 @@ test('fresh deployment requires explicit Cognito workspace and request secrets p
     AllowedPattern: '^[a-z]{2}(?:-[a-z0-9]+)+_[A-Za-z0-9]+$',
   }));
   expect(parameters.CognitoUserPoolClientId).toEqual(expect.objectContaining({
+    Type: 'String',
+    AllowedPattern: '^[A-Za-z0-9]+$',
+  }));
+  expect(parameters.CognitoSsoUserPoolClientId).toEqual(expect.objectContaining({
     Type: 'String',
     AllowedPattern: '^[A-Za-z0-9]+$',
   }));
@@ -123,6 +127,8 @@ test('fresh deployment requires explicit Cognito workspace and request secrets p
     MaxValue: 10000,
   }));
   for (const secretParameterName of [
+    'EnterpriseIdentityTokenHashSecret',
+    'EnterpriseSsoStateSecret',
     'RequestEmailWebhookSecret',
     'RequestTokenHashSecret',
   ]) {
@@ -137,6 +143,9 @@ test('fresh deployment requires explicit Cognito workspace and request secrets p
   for (const parameterName of [
     'CognitoUserPoolId',
     'CognitoUserPoolClientId',
+    'CognitoSsoUserPoolClientId',
+    'EnterpriseIdentityTokenHashSecret',
+    'EnterpriseSsoStateSecret',
     'WorkspaceDirectoryId',
     'WorkspaceAuditPseudonymKey',
     'InitialOwnerEmail',
@@ -146,6 +155,34 @@ test('fresh deployment requires explicit Cognito workspace and request secrets p
   ]) {
     expect(parameters[parameterName].Default).toBeUndefined();
   }
+  expect(template.toJSON().Rules.EnterpriseSecretSeparation).toEqual({
+    Assertions: [{
+      Assert: {
+        'Fn::Not': [{
+          'Fn::Equals': [
+            { Ref: 'EnterpriseSsoStateSecret' },
+            { Ref: 'EnterpriseIdentityTokenHashSecret' },
+          ],
+        }],
+      },
+      AssertDescription:
+        'EnterpriseSsoStateSecret must differ from EnterpriseIdentityTokenHashSecret.',
+    }],
+  });
+  expect(template.toJSON().Rules.CognitoClientSeparation).toEqual({
+    Assertions: [{
+      Assert: {
+        'Fn::Not': [{
+          'Fn::Equals': [
+            { Ref: 'CognitoSsoUserPoolClientId' },
+            { Ref: 'CognitoUserPoolClientId' },
+          ],
+        }],
+      },
+      AssertDescription:
+        'CognitoSsoUserPoolClientId must differ from CognitoUserPoolClientId.',
+    }],
+  });
 
   template.resourceCountIs('AWS::Cognito::UserPool', 0);
   template.resourceCountIs('AWS::Cognito::UserPoolClient', 0);
@@ -175,7 +212,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(16);
+  expect(Object.keys(tables)).toHaveLength(17);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -240,6 +277,111 @@ test('automation state is retained with due-schedule and execution history index
   template.hasOutput('AutomationTableName', {});
 });
 
+test('enterprise identity state is retained, protected, and free of unused indexes', () => {
+  const template = synthesizedTemplate;
+  const tableLogicalId = template.toJSON().Outputs.EnterpriseIdentityTableName?.Value?.Ref;
+  const table = template.toJSON().Resources[tableLogicalId];
+
+  expect(typeof tableLogicalId).toBe('string');
+  expect(table).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+    Properties: expect.objectContaining({
+      AttributeDefinitions: [
+        { AttributeName: 'scopeKey', AttributeType: 'S' },
+        { AttributeName: 'recordKey', AttributeType: 'S' },
+      ],
+      BillingMode: 'PAY_PER_REQUEST',
+      DeletionProtectionEnabled: true,
+      KeySchema: [
+        { AttributeName: 'scopeKey', KeyType: 'HASH' },
+        { AttributeName: 'recordKey', KeyType: 'RANGE' },
+      ],
+      PointInTimeRecoverySpecification: {
+        PointInTimeRecoveryEnabled: true,
+      },
+      StreamSpecification: {
+        StreamViewType: 'NEW_IMAGE',
+      },
+      TimeToLiveSpecification: {
+        AttributeName: 'expiresAt',
+        Enabled: true,
+      },
+    }),
+  }));
+  expect(JSON.stringify(template.toJSON().Outputs))
+    .not.toContain('EnterpriseIdentityTokenHashSecret');
+});
+
+test('enterprise identity CONTROL stream runs bounded asynchronous maintenance', () => {
+  const template = synthesizedTemplate;
+  const resources = template.toJSON().Resources;
+  const tableLogicalId = template.toJSON().Outputs.EnterpriseIdentityTableName?.Value?.Ref;
+  const functionEntry = Object.entries(resources).find(([, resource]) =>
+    (resource as { Properties?: { Description?: string } }).Properties?.Description ===
+      'Compacts enterprise identity generations and applies grace-period TTL retirement.'
+  );
+
+  expect(functionEntry).toBeDefined();
+  const [functionLogicalId, maintenanceFunction] = functionEntry!;
+  expect(maintenanceFunction).toEqual(expect.objectContaining({
+    Properties: expect.objectContaining({
+      Environment: {
+        Variables: {
+          ENTERPRISE_IDENTITY_TABLE_NAME: { Ref: tableLogicalId },
+        },
+      },
+      MemorySize: 1024,
+      Timeout: 900,
+    }),
+  }));
+  expect(JSON.stringify(maintenanceFunction))
+    .not.toContain('ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET');
+
+  const eventSource = Object.values(resources).find((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::Lambda::EventSourceMapping' &&
+    JSON.stringify(resource).includes(functionLogicalId)
+  ) as { Properties?: Record<string, unknown> } | undefined;
+  expect(eventSource?.Properties).toEqual(expect.objectContaining({
+    BatchSize: 1,
+    BisectBatchOnFunctionError: true,
+    FunctionResponseTypes: ['ReportBatchItemFailures'],
+    MaximumRetryAttempts: 10,
+    StartingPosition: 'TRIM_HORIZON',
+  }));
+  expect(JSON.stringify(eventSource?.Properties?.FilterCriteria))
+    .toContain('enterprise-identity-control');
+  expect(JSON.stringify(eventSource?.Properties?.FilterCriteria))
+    .toContain('maintenanceRequired');
+  expect(JSON.stringify(eventSource?.Properties?.EventSourceArn))
+    .toContain(String(tableLogicalId));
+  expect(JSON.stringify(eventSource?.Properties?.DestinationConfig))
+    .toContain('EnterpriseIdentityMaintenanceDlq');
+
+  const functionRoleLogicalId = (
+    (maintenanceFunction as {
+      Properties?: { Role?: { 'Fn::GetAtt'?: string[] } }
+    }).Properties?.Role?.['Fn::GetAtt'] ?? []
+  )[0];
+  const rolePolicies = Object.values(resources).filter((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::IAM::Policy' &&
+    JSON.stringify(resource).includes(String(functionRoleLogicalId))
+  );
+  const serializedPolicies = JSON.stringify(rolePolicies);
+  expect(serializedPolicies).toContain('dynamodb:BatchWriteItem');
+  expect(serializedPolicies).toContain('dynamodb:GetItem');
+  expect(serializedPolicies).toContain('dynamodb:PutItem');
+  expect(serializedPolicies).toContain('dynamodb:Query');
+  expect(serializedPolicies).toContain('dynamodb:UpdateItem');
+  expect(serializedPolicies).not.toContain('dynamodb:Scan');
+  expect(serializedPolicies).not.toContain('secretsmanager:');
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects enterprise identity compaction or generation retirement failures.',
+  });
+  template.hasOutput('EnterpriseIdentityMaintenanceDlqUrl', {});
+});
+
 test('file proofing metadata uses a retained point-in-time recoverable table', () => {
   const template = synthesizedTemplate;
   const fileProofingTableEntry = Object.entries(template.findResources('AWS::DynamoDB::Table'))
@@ -293,8 +435,15 @@ test('shared server handler is bundled as a Lambda asset with production environ
         COGNITO_CLIENT_ID: {
           Ref: 'CognitoUserPoolClientId',
         },
+        COGNITO_SSO_CLIENT_ID: {
+          Ref: 'CognitoSsoUserPoolClientId',
+        },
         COGNITO_USER_POOL_ID: {
           Ref: 'CognitoUserPoolId',
+        },
+        ENTERPRISE_IDENTITY_TABLE_NAME: Match.anyValue(),
+        ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET: {
+          Ref: 'EnterpriseIdentityTokenHashSecret',
         },
         MUKUROJI_PROJECT_DIRECTORY_ID: {
           Ref: 'WorkspaceDirectoryId',
@@ -990,6 +1139,7 @@ test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () =
         COGNITO_USER_POOL_ID: {
           Ref: 'CognitoUserPoolId',
         },
+        ENTERPRISE_IDENTITY_TABLE_NAME: Match.anyValue(),
         PROJECT_DIRECTORY_TABLE_NAME: {
           Ref: 'ProjectDirectoryTable9ED01C01',
         },
@@ -1048,12 +1198,36 @@ test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () =
   const realtimePolicy = template.toJSON().Resources
     .RealtimeHandlerFunctionServiceRoleDefaultPolicy58738CCE;
   const serializedRealtimePolicy = JSON.stringify(realtimePolicy);
+  const enterpriseIdentityTableLogicalId =
+    template.toJSON().Outputs.EnterpriseIdentityTableName.Value.Ref;
+  const enterpriseIdentityStatements =
+    realtimePolicy.Properties.PolicyDocument.Statement.filter((statement: {
+      Resource?: unknown
+    }) => JSON.stringify(statement.Resource).includes(enterpriseIdentityTableLogicalId));
 
+  expect(serializedRealtimePolicy).toContain(enterpriseIdentityTableLogicalId);
+  expect(enterpriseIdentityStatements).toEqual([
+    expect.objectContaining({
+      Action: ['dynamodb:GetItem', 'dynamodb:Query'],
+      Effect: 'Allow',
+    }),
+  ]);
   expect(serializedRealtimePolicy).toContain('ProjectDirectoryTable9ED01C01');
   expect(serializedRealtimePolicy).toContain('TeamIssuesTable189D851D');
   expect(serializedRealtimePolicy).toContain('WorkspaceAccessTableD7C8D2C7');
   expect(serializedRealtimePolicy).toContain('cognito-idp:AdminListGroupsForUser');
+  expect(serializedRealtimePolicy).toContain('cognito-idp:DescribeIdentityProvider');
   expect(serializedRealtimePolicy).toContain('CognitoUserPoolId');
+  const realtimeFunctions = template.findResources('AWS::Lambda::Function', {
+    Description: 'Consumes one-time tickets and handles mukuroji WebSocket presence events.',
+    Environment: {
+      Variables: Match.objectLike({
+        COGNITO_ENTERPRISE_IDP_NAME: { Ref: 'CognitoEnterpriseIdpName' },
+      }),
+    },
+  });
+  expect(JSON.stringify(realtimeFunctions))
+    .not.toContain('ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET');
   expect(serializedRealtimePolicy).toContain('production/*/@connections/*');
   expect(serializedRealtimePolicy).not.toContain('/*/*/@connections/*');
 });
@@ -1232,7 +1406,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 5);
+  template.resourceCountIs('AWS::SQS::Queue', 6);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -1644,6 +1818,12 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   const requestIntakeStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes(String(requestTableLogicalId))
   );
+  const enterpriseIdentityTableLogicalId =
+    template.toJSON().Outputs.EnterpriseIdentityTableName?.Value?.Ref;
+  expect(typeof enterpriseIdentityTableLogicalId).toBe('string');
+  const enterpriseIdentityStatements = statements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes(String(enterpriseIdentityTableLogicalId))
+  );
   const cognitoPolicy = Object.values(template.toJSON().Resources).find((resource) =>
     JSON.stringify(resource).includes('cognito-idp:AdminGetUser')
   );
@@ -1659,6 +1839,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
       { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
       { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
       { 'Fn::GetAtt': ['WorkspaceSearchTable2575AD6B', 'Arn'] },
+      { 'Fn::GetAtt': [enterpriseIdentityTableLogicalId, 'Arn'] },
     ]),
   }));
   expect(serializedApiPolicies).toContain('WorkspaceSearchTable2575AD6B');
@@ -1742,6 +1923,23 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     'dynamodb:Query',
     'dynamodb:UpdateItem',
   ]));
+  const enterpriseIdentityActions = enterpriseIdentityStatements.flatMap((statement) =>
+    Array.isArray(statement.Action) ? statement.Action : [statement.Action]
+  );
+  expect(enterpriseIdentityActions).toEqual(expect.arrayContaining([
+    'dynamodb:BatchWriteItem',
+    'dynamodb:ConditionCheckItem',
+    'dynamodb:DeleteItem',
+    'dynamodb:DescribeTable',
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+    'dynamodb:Query',
+    'dynamodb:TransactWriteItems',
+    'dynamodb:UpdateItem',
+  ]));
+  expect(enterpriseIdentityActions).not.toContain('dynamodb:Scan');
+  expect(JSON.stringify(enterpriseIdentityStatements))
+    .toContain(String(enterpriseIdentityTableLogicalId));
   expect(planningDataStatement).toEqual(expect.objectContaining({
     Action: [
       'dynamodb:ConditionCheckItem',
@@ -1794,7 +1992,12 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     expect(legacyTaskActions).not.toContain(writeAction);
   }
   expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:ListUsers');
+  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:DescribeIdentityProvider');
+  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:DescribeUserPoolClient');
   expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:AdminDeleteUserAttributes');
+  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:AdminDisableUser');
+  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:AdminEnableUser');
+  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:AdminUserGlobalSignOut');
   expect(JSON.stringify(cognitoPolicy)).toContain('CognitoUserPoolId');
   expect(serializedApiPolicies).not.toContain('"Resource":"*"');
   expect(serializedApiPolicies).not.toContain('"Action":"s3:*"');
