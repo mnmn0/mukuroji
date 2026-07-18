@@ -40,6 +40,7 @@ const meta = {
         value: 'project-mukuroji',
         label: 'mukuroji',
         description: 'Product delivery project.',
+        teamId: 'team-product',
       },
     ],
     importTeamOptions: [
@@ -168,6 +169,61 @@ export const SecretIssued: Story = {
         name: developerPlatformLabelsFixture.closeDialog,
       }),
     ).toBeDisabled()
+    await userEvent.click(
+      canvas.getByRole('button', {
+        name: developerPlatformLabelsFixture.copySecret,
+      }),
+    )
+    await expect(
+      canvas.getByRole('checkbox', {
+        name: developerPlatformLabelsFixture.secretStoredConfirmation,
+      }),
+    ).not.toBeChecked()
+    await expect(
+      canvas.getByRole('button', {
+        name: developerPlatformLabelsFixture.closeDialog,
+      }),
+    ).toBeDisabled()
+  },
+}
+
+/**
+ * API key scope を空にした場合は明示 validation を表示します。
+ */
+export const CredentialScopeRequired: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.click(
+      canvas.getByRole('button', {
+        name: developerPlatformLabelsFixture.actions.createApiKey,
+      }),
+    )
+    const editor = within(
+      canvas.getByRole('dialog', {
+        name: developerPlatformLabelsFixture.headings['create-api-key'],
+      }),
+    )
+    const selectedScopeLabel = editor.getByText(
+      developerPlatformLabelsFixture.scopeOptions[0]!.label,
+    ).closest('label')
+
+    if (!selectedScopeLabel) {
+      throw new Error('API key scope option was not rendered.')
+    }
+    await userEvent.click(
+      within(selectedScopeLabel).getByRole('checkbox'),
+    )
+    await expect(
+      editor.getByRole('alert'),
+    ).toHaveTextContent(
+      developerPlatformLabelsFixture.helpText.selectionRequired,
+    )
+    await expect(
+      editor.getByRole('button', {
+        name: developerPlatformLabelsFixture.actions['submit-api-key'],
+      }),
+    ).toBeDisabled()
   },
 }
 
@@ -285,5 +341,29 @@ export const ImportDryRunError: Story = {
     initialSection: 'imports',
     resources:
       importDryRunErrorDeveloperPlatformResourcesFixture,
+  },
+}
+
+/**
+ * Export failure を panel 共通 error として処理し、再試行可能に戻します。
+ */
+export const ExportFailure: Story = {
+  args: {
+    initialSection: 'imports',
+    onExport: async () => {
+      throw new Error('Export failed.')
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const exportButton = canvas.getByRole('button', {
+      name: developerPlatformLabelsFixture.actions['export-csv'],
+    })
+
+    await userEvent.click(exportButton)
+    await expect(
+      canvas.getByRole('alert'),
+    ).toHaveTextContent(developerPlatformLabelsFixture.operationError)
+    await expect(exportButton).toBeEnabled()
   },
 }

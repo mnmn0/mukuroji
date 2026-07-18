@@ -5,6 +5,7 @@ import {
   connectorConflictDeveloperPlatformResourcesFixture,
   developerPlatformLabelsFixture,
   developerSyncConflictsFixture,
+  developerPlatformResourcesFixture,
   multipleConnectorAccountsDeveloperPlatformResourcesFixture,
 } from '../src/developer-platform/fixtures'
 
@@ -63,5 +64,52 @@ describe('DeveloperPlatformPanel connector management', () => {
     expect(html).toMatch(
       /<button[^>]*disabled=""[^>]*>Resolve conflict<\/button>/,
     )
+  })
+
+  test('shows only import projects owned by the selected Team', () => {
+    const html = renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        initialSection="imports"
+        importProjectOptions={[
+          {
+            value: 'project-product',
+            label: 'Product project',
+            description: 'Product',
+            teamId: 'team-product',
+          },
+          {
+            value: 'project-operations',
+            label: 'Operations project',
+            description: 'Operations',
+            teamId: 'team-operations',
+          },
+        ]}
+        importTeamOptions={[
+          {
+            value: 'team-product',
+            label: 'Product',
+            description: 'Product Team',
+          },
+          {
+            value: 'team-operations',
+            label: 'Operations',
+            description: 'Operations Team',
+          },
+        ]}
+        labels={developerPlatformLabelsFixture}
+        resources={developerPlatformResourcesFixture}
+        onDryRunImport={async () => ({
+          errors: [],
+          invalidRows: 0,
+          sample: [],
+          totalRows: 0,
+          valid: true,
+          validRows: 0,
+        })}
+      />,
+    )
+
+    expect(html).toContain('Product project')
+    expect(html).not.toContain('Operations project')
   })
 })

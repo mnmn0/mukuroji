@@ -2467,28 +2467,14 @@ function SettingsView({
     [teams],
   )
   const developerImportProjectOptions = useMemo(() => {
-    const projects = new Map<
-      string,
-      { label: string; teamNames: Set<string> }
-    >()
-    for (const team of teams) {
-      for (const project of team.projects) {
-        const current = projects.get(project.id)
-        if (current) {
-          current.teamNames.add(team.name)
-        } else {
-          projects.set(project.id, {
-            label: project.name,
-            teamNames: new Set([team.name]),
-          })
-        }
-      }
-    }
-    return [...projects.entries()].map(([value, project]) => ({
-      value,
-      label: project.label,
-      description: [...project.teamNames].join(' / '),
-    }))
+    return teams.flatMap((team) =>
+      team.projects.map((project) => ({
+        value: project.id,
+        label: project.name,
+        description: team.name,
+        teamId: team.id,
+      })),
+    )
   }, [teams])
   const developerDateTimeFormatter = useMemo(
     () => new Intl.DateTimeFormat(locale === 'ja' ? 'ja-JP' : 'en-US', {
@@ -2590,7 +2576,7 @@ function SettingsView({
         <WorkspaceAccessPanelContainer accessToken={accessToken} locale={locale} />
       ) : null}
 
-      {accessToken && canManageWorkspaceConfiguration ? (
+      {accessToken ? (
         <DeveloperPlatformPanelContainer
           accessToken={accessToken}
           formatDateTime={(value) => developerDateTimeFormatter.format(new Date(value))}

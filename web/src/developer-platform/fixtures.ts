@@ -400,6 +400,7 @@ export const developerPlatformLabelsFixture = {
       'Revoke this credential? Integrations using it may stop immediately.',
     secretCopyError:
       'The secret could not be copied to the clipboard. Select the value and copy it manually.',
+    selectionRequired: 'Select at least one option.',
     'source-csv':
       'Best for tabular migrations with a stable header row.',
     'source-json':

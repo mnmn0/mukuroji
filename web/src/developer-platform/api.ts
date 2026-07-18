@@ -16,6 +16,7 @@ import type {
   UpdateExternalWorkItemLinkInput,
   WebhookDelivery,
   WebhookSubscription,
+  WorkItem,
   WorkItemSyncConflict,
 } from '@mukuroji/contracts'
 import {
@@ -264,7 +265,7 @@ export type DeveloperExportFile = {
    */
   blob: Blob
   /**
-   * Content-Disposition から解決した file 名です。
+   * UI が export 日と format から生成した file 名です。
    */
   fileName: string
 }
@@ -288,6 +289,9 @@ export class DeveloperPlatformApiError extends Error {
    */
   readonly retryable: boolean
 
+  /** API が指定した再試行待機秒数です。 */
+  readonly retryAfterSeconds?: number
+
   /**
    * Developer Platform API error を作成します。
    *
@@ -295,18 +299,21 @@ export class DeveloperPlatformApiError extends Error {
    * @param message ユーザーへ表示できる secret-safe message です。
    * @param code API が返した機械判定用 error code です。
    * @param retryable 同じ logical mutation として再試行できるかどうかです。
+   * @param retryAfterSeconds API が Retry-After で指定した待機秒数です。
    */
   constructor(
     status: number,
     message: string,
     code?: string,
     retryable = false,
+    retryAfterSeconds?: number,
   ) {
     super(message)
     this.name = 'DeveloperPlatformApiError'
     this.status = status
     this.code = code
     this.retryable = retryable
+    this.retryAfterSeconds = retryAfterSeconds
   }
 }
 
@@ -533,6 +540,7 @@ export function revokeDeveloperWebhook(
       headers: createMutationHeaders(mutationContext),
       method: 'DELETE',
     },
+    true,
   )
 }
 
@@ -725,6 +733,7 @@ export function deleteDeveloperExternalLink(
       headers: createMutationHeaders(mutationContext),
       method: 'DELETE',
     },
+    true,
   )
 }
 
@@ -847,36 +856,183 @@ export async function exportDeveloperWorkItems(
   accessToken: string,
   format: DeveloperExportFormat,
 ) {
-  const response = await fetch(
-    `${developerApiBaseUrl}/developer/exports?format=${encodeURIComponent(format)}`,
-    {
-      headers: {
-        Accept: format === 'csv' ? 'text/csv' : 'application/json',
-        Authorization: `Bearer ${accessToken}`,
-      },
-    },
-  )
+  const workItems: WorkItem[] = []
+  const cursors = new Set<string>()
+  let cursor: string | undefined
 
-  if (!response.ok) {
-    const data = await readJson<unknown>(response)
-    const errorData = readErrorResponse(data)
+  do {
+    const query = new URLSearchParams({
+      format,
+      limit: '100',
+    })
+    if (cursor) {
+      query.set('cursor', cursor)
+    }
 
-    throw new DeveloperPlatformApiError(
-      response.status,
-      errorData?.message?.trim() ||
-        errorData?.detail?.trim() ||
-        defaultDeveloperApiErrorMessage,
-      errorData?.code,
-      isRetryableDeveloperApiResponse(response.status, errorData),
-    )
+    const page = await requestDeveloperExportPage(accessToken, query)
+    workItems.push(...page.items)
+
+    if (!page.hasMore) {
+      cursor = undefined
+      continue
+    }
+    if (!page.nextCursor || cursors.has(page.nextCursor)) {
+      throw new DeveloperPlatformApiError(
+        200,
+        'Developer Platform API returned an invalid export cursor.',
+        'InvalidDeveloperPlatformResponse',
+      )
+    }
+
+    cursors.add(page.nextCursor)
+    cursor = page.nextCursor
+  } while (cursor)
+
+  return createDeveloperExportFile(format, workItems)
+}
+
+async function requestDeveloperExportPage(
+  accessToken: string,
+  query: URLSearchParams,
+) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await requestJson<CursorPage<WorkItem>>(
+        `/developer/exports?${query.toString()}`,
+        accessToken,
+      )
+    } catch (error) {
+      if (
+        !(error instanceof DeveloperPlatformApiError) ||
+        error.status !== 429 ||
+        error.retryAfterSeconds === undefined ||
+        attempt >= 5
+      ) throw error
+      await waitForDeveloperExportRetry(error.retryAfterSeconds)
+    }
+  }
+}
+
+function waitForDeveloperExportRetry(seconds: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, seconds * 1_000)
+  })
+}
+
+function createDeveloperExportFile(
+  format: DeveloperExportFormat,
+  workItems: readonly WorkItem[],
+): DeveloperExportFile {
+  const suffix = new Date().toISOString().slice(0, 10)
+  if (format === 'json') {
+    const body = `${JSON.stringify({
+      apiVersion: '2026-07-01',
+      workItems: workItems.map(toExportWorkItem),
+    }, null, 2)}\n`
+
+    return {
+      blob: new Blob([body], {
+        type: 'application/json; charset=utf-8',
+      }),
+      fileName: `mukuroji-work-items-${suffix}.json`,
+    }
   }
 
+  const customFieldIds = [...new Set(
+    workItems.flatMap((workItem) =>
+      Object.keys(workItem.customFieldValues)
+    ),
+  )].sort()
+  const headers = [
+    'id',
+    'teamId',
+    'title',
+    'description',
+    'assignedProjectId',
+    'assigneeUserId',
+    'workflowStatusId',
+    'statusCategory',
+    'dueDate',
+    'priority',
+    'revision',
+    'createdAt',
+    'updatedAt',
+    ...customFieldIds.map(
+      (fieldId) => `customFieldValues.${fieldId}`,
+    ),
+  ]
+  const lines = [
+    headers.map(escapeDeveloperExportCsvValue).join(','),
+    ...workItems.map((workItem) =>
+      headers.map((header) => {
+        const value = header.startsWith('customFieldValues.')
+          ? workItem.customFieldValues[
+              header.slice('customFieldValues.'.length)
+            ]
+          : (workItem as unknown as Record<string, unknown>)[header]
+
+        return escapeDeveloperExportCsvValue(
+          serializeDeveloperExportCell(value),
+        )
+      }).join(',')
+    ),
+  ]
+
   return {
-    blob: await response.blob(),
-    fileName:
-      readDownloadFileName(response.headers.get('Content-Disposition')) ??
-      `work-items.${format}`,
-  } satisfies DeveloperExportFile
+    blob: new Blob(
+      [`\ufeff${lines.join('\r\n')}\r\n`],
+      { type: 'text/csv; charset=utf-8' },
+    ),
+    fileName: `mukuroji-work-items-${suffix}.csv`,
+  }
+}
+
+function toExportWorkItem(workItem: WorkItem) {
+  return {
+    id: workItem.id,
+    teamId: workItem.teamId,
+    title: workItem.title,
+    ...(workItem.description
+      ? { description: workItem.description }
+      : {}),
+    ...(workItem.assignedProjectId
+      ? { assignedProjectId: workItem.assignedProjectId }
+      : {}),
+    assigneeUserId: workItem.assigneeUserId,
+    workflowStatusId: workItem.workflowStatusId,
+    statusCategory: workItem.statusCategory,
+    customFieldValues: structuredClone(workItem.customFieldValues),
+    relationIds: [...workItem.relationIds],
+    dueDate: workItem.dueDate,
+    priority: workItem.priority,
+    revision: workItem.revision,
+    createdAt: workItem.createdAt,
+    updatedAt: workItem.updatedAt,
+  }
+}
+
+function serializeDeveloperExportCell(value: unknown) {
+  if (value === undefined || value === null) {
+    return ''
+  }
+  if (
+    Array.isArray(value) ||
+    (typeof value === 'object' && value !== null)
+  ) {
+    return JSON.stringify(value)
+  }
+
+  return String(value)
+}
+
+function escapeDeveloperExportCsvValue(value: string) {
+  const safeValue = /^[\t\r\n ]*[=+\-@]/u.test(value)
+    ? `'${value}`
+    : value
+
+  return /[",\r\n]/u.test(safeValue)
+    ? `"${safeValue.replaceAll('"', '""')}"`
+    : safeValue
 }
 
 function createJsonMutation(
@@ -898,6 +1054,7 @@ async function requestJson<T>(
   path: string,
   accessToken: string,
   init: RequestInit = {},
+  allowEmptyResponse = false,
 ) {
   const response = await fetch(`${developerApiBaseUrl}${path}`, {
     ...init,
@@ -906,7 +1063,11 @@ async function requestJson<T>(
       ...init.headers,
     },
   })
-  const data = await readJson<unknown>(response)
+  const data = await readJson<unknown>(
+    response,
+    allowEmptyResponse || !response.ok,
+    response.ok,
+  )
 
   if (!response.ok) {
     const errorData = readErrorResponse(data)
@@ -918,10 +1079,22 @@ async function requestJson<T>(
         defaultDeveloperApiErrorMessage,
       errorData?.code,
       isRetryableDeveloperApiResponse(response.status, errorData),
+      readRetryAfterSeconds(response),
     )
   }
 
   return data as T
+}
+
+function readRetryAfterSeconds(response: Response) {
+  const value = response.headers.get('Retry-After')?.trim()
+  if (!value) return undefined
+  if (/^\d+$/u.test(value)) {
+    return Math.min(Number(value), 300)
+  }
+  const retryAt = Date.parse(value)
+  if (Number.isNaN(retryAt)) return undefined
+  return Math.min(Math.max(Math.ceil((retryAt - Date.now()) / 1_000), 0), 300)
 }
 
 function readErrorResponse(
@@ -942,24 +1115,40 @@ function isRetryableDeveloperApiResponse(
   return error?.retryable === true || status === 429 || status >= 500
 }
 
-async function readJson<T>(response: Response): Promise<T> {
+async function readJson<T>(
+  response: Response,
+  allowEmpty: boolean,
+  rejectMalformed: boolean,
+): Promise<T> {
   const text = await response.text()
 
   if (!text) {
-    return {} as T
+    if (allowEmpty) {
+      return {} as T
+    }
+
+    throw new DeveloperPlatformApiError(
+      response.status,
+      'Developer Platform API returned an empty JSON response.',
+      'InvalidDeveloperPlatformResponse',
+      isRetryableDeveloperApiResponse(response.status, undefined),
+    )
   }
 
   try {
     return JSON.parse(text) as T
   } catch {
-    return {} as T
+    if (!rejectMalformed) {
+      return {} as T
+    }
+
+    throw new DeveloperPlatformApiError(
+      response.status,
+      'Developer Platform API returned invalid JSON.',
+      'InvalidDeveloperPlatformResponse',
+      isRetryableDeveloperApiResponse(response.status, undefined),
+    )
   }
-}
-
-function readDownloadFileName(contentDisposition: string | null) {
-  const match = contentDisposition?.match(/filename="?([^";]+)"?/i)
-
-  return match?.[1]
 }
 
 function trimTrailingSlash(value: string) {

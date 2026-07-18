@@ -184,6 +184,12 @@ export function WorkItemExternalLinksPanelContainer({
     () => createWorkItemExternalLinksLabels(locale),
     [locale],
   )
+  const localizedDateTimeFormatter = useMemo(
+    () =>
+      formatDateTime ??
+      ((value: string) => formatExternalLinkTimestamp(value, locale)),
+    [formatDateTime, locale],
+  )
   const mutationRunner = useMemo(
     () => createMutationRequestRunner(),
     [],
@@ -271,7 +277,7 @@ export function WorkItemExternalLinksPanelContainer({
       errorMessage={!hasLoadedLinkPage && (resourceError || linkError)
         ? labels.loadError
         : undefined}
-      formatDateTime={formatDateTime}
+      formatDateTime={localizedDateTimeFormatter}
       hasMore={hasMore}
       installations={resources?.connectors ?? []}
       isLoading={(canManage && isResourcesLoading) || isLinksLoading}
@@ -357,7 +363,9 @@ export function WorkItemExternalLinksPanel({
   const [displayKey, setDisplayKey] = useState('')
   const [syncDirection, setSyncDirection] =
     useState<ExternalSyncDirection>('bidirectional')
-  const [busyOperation, setBusyOperation] = useState<string>()
+  const [busyOperations, setBusyOperations] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  )
   const [operationError, setOperationError] = useState<string>()
   const selectedInstallationId = connectedInstallations.some(
     (installation) => installation.id === installationId,
@@ -366,7 +374,7 @@ export function WorkItemExternalLinksPanel({
     : connectedInstallations[0]?.id ?? ''
 
   const runAction = async (key: string, action: () => Promise<void>) => {
-    setBusyOperation(key)
+    setBusyOperations((current) => new Set(current).add(key))
     setOperationError(undefined)
 
     try {
@@ -376,7 +384,12 @@ export function WorkItemExternalLinksPanel({
       setOperationError(labels.operationError)
       return false
     } finally {
-      setBusyOperation(undefined)
+      setBusyOperations((current) => {
+        const next = new Set(current)
+
+        next.delete(key)
+        return next
+      })
     }
   }
 
@@ -513,7 +526,7 @@ export function WorkItemExternalLinksPanel({
           <div className="flex justify-end gap-2">
             <button
               className="workbench-button-secondary min-h-9 px-3"
-              disabled={busyOperation === 'external-link:create'}
+              disabled={busyOperations.has('external-link:create')}
               onClick={() => setIsAdding(false)}
               type="button"
             >
@@ -521,7 +534,7 @@ export function WorkItemExternalLinksPanel({
             </button>
             <button
               className="workbench-button-primary min-h-9 px-3 disabled:opacity-50"
-              disabled={busyOperation === 'external-link:create'}
+              disabled={busyOperations.has('external-link:create')}
               type="submit"
             >
               {labels.createLink}
@@ -557,7 +570,9 @@ export function WorkItemExternalLinksPanel({
             <div className="mt-4 grid gap-3">
               {links.map((link) => {
                 const installation = installations.find((item) => item.id === link.installationId)
-                const busy = busyOperation?.endsWith(link.id)
+                const busy =
+                  busyOperations.has(`external-link:update:${link.id}`) ||
+                  busyOperations.has(`external-link:delete:${link.id}`)
                 const canUpdateDirection =
                   canManage &&
                   Boolean(onUpdateDirection) &&
@@ -785,8 +800,8 @@ function formatExternalLinkSnapshot(
   return names.length ? names.join(' · ') : link.installationId
 }
 
-function formatExternalLinkTimestamp(value: string) {
-  return new Intl.DateTimeFormat(undefined, {
+function formatExternalLinkTimestamp(value: string, locale: Locale = 'en') {
+  return new Intl.DateTimeFormat(locale === 'ja' ? 'ja-JP' : 'en-US', {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(new Date(value))

@@ -493,6 +493,9 @@ export function createDeveloperPlatformLabels(
       secretCopyError: ja
         ? 'Clipboard へコピーできませんでした。値を選択して手動でコピーしてください。'
         : 'The secret could not be copied to the clipboard. Select the value and copy it manually.',
+      selectionRequired: ja
+        ? '少なくとも 1 つ選択してください。'
+        : 'Select at least one option.',
       'source-csv': ja
         ? '安定した header 行を持つ表形式の移行に適しています。'
         : 'Best for tabular migrations with a stable header row.',

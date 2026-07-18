@@ -89,6 +89,16 @@ export type DeveloperPlatformOption<TValue extends string = string> = {
 }
 
 /**
+ * Import destination の Team に属する Project 選択肢です。
+ */
+export type DeveloperImportProjectOption = DeveloperPlatformOption & {
+  /**
+   * Project を所有する Team ID です。
+   */
+  teamId: string
+}
+
+/**
  * 未接続状態も含めて表示する connector catalog item です。
  */
 export type DeveloperConnectorCatalogItem = {
@@ -325,7 +335,7 @@ export type DeveloperPlatformPanelProps = {
   /**
    * Import destination として選択できる Project 一覧です。
    */
-  importProjectOptions?: DeveloperPlatformOption[]
+  importProjectOptions?: DeveloperImportProjectOption[]
   /**
    * ISO 8601 timestamp をユーザー向けに整形する callback です。
    */
@@ -454,7 +464,7 @@ export type DeveloperPlatformPanelContainerProps = {
   /**
    * Import destination として選択できる Project 一覧です。
    */
-  importProjectOptions?: DeveloperPlatformOption[]
+  importProjectOptions?: DeveloperImportProjectOption[]
   /**
    * ISO 8601 timestamp をユーザー向けに整形する callback です。
    */
@@ -934,6 +944,8 @@ export function DeveloperPlatformPanel({
   const [secretStored, setSecretStored] = useState(false)
   const [dialogTrigger, setDialogTrigger] = useState<HTMLElement | null>(null)
   const [busyOperation, setBusyOperation] = useState<string>()
+  const [exportingFormat, setExportingFormat] =
+    useState<DeveloperExportFormat>()
   const [operationError, setOperationError] = useState<string>()
   const [apiKeyName, setApiKeyName] = useState('')
   const [apiKeyExpiry, setApiKeyExpiry] = useState('')
@@ -983,12 +995,17 @@ export function DeveloperPlatformPanel({
     importTeamOptions[0]?.value ?? '',
   )
   const [importProjectId, setImportProjectId] = useState(
-    importProjectOptions[0]?.value ?? '',
+    importProjectOptions.find(
+      (option) => option.teamId === importTeamOptions[0]?.value,
+    )?.value ?? '',
   )
   const [previewImportReport, setPreviewImportReport] =
     useState<ImportDryRunReport>()
   const [validatedImportInput, setValidatedImportInput] =
     useState<DryRunDeveloperImportInput>()
+  const availableImportProjectOptions = importProjectOptions.filter(
+    (option) => option.teamId === importTeamId,
+  )
 
   if (isLoading) {
     return (
@@ -1172,7 +1189,7 @@ export function DeveloperPlatformPanel({
         name: apiKeyName,
         scopes: apiKeyScopes,
         expiresAt: apiKeyExpiry
-          ? `${apiKeyExpiry}T23:59:59.999Z`
+          ? toLocalEndOfDayIso(apiKeyExpiry)
           : undefined,
       }),
     )
@@ -1198,7 +1215,7 @@ export function DeveloperPlatformPanel({
         grantTypes: oauthGrantTypes,
         scopes: oauthScopes,
         expiresAt: oauthExpiry
-          ? `${oauthExpiry}T23:59:59.999Z`
+          ? toLocalEndOfDayIso(oauthExpiry)
           : undefined,
       }),
     )
@@ -1273,6 +1290,21 @@ export function DeveloperPlatformPanel({
     if (result) {
       setPreviewImportReport(result)
       setValidatedImportInput(input)
+    }
+  }
+
+  const handleExport = async (format: DeveloperExportFormat) => {
+    if (!onExport) {
+      return
+    }
+
+    setExportingFormat(format)
+    try {
+      await runAction(`export:${format}`, () => onExport(format))
+    } finally {
+      setExportingFormat((current) =>
+        current === format ? undefined : current,
+      )
     }
   }
 
@@ -1587,10 +1619,11 @@ export function DeveloperPlatformPanel({
                 canExport: resources.capabilities.canExport,
                 canImport: resources.capabilities.canImport,
                 format: importFormat,
+                exportingFormat,
                 importFile,
                 importMappings,
                 importProjectId,
-                importProjectOptions,
+                importProjectOptions: availableImportProjectOptions,
                 importTeamId,
                 importTeamOptions,
                 labels,
@@ -1610,7 +1643,7 @@ export function DeveloperPlatformPanel({
                           },
                         )
                     : undefined,
-                onExport,
+                onExport: onExport ? handleExport : undefined,
                 onFileChange: (file) => {
                   setImportFile(file)
                   setPreviewImportReport(undefined)
@@ -1634,6 +1667,13 @@ export function DeveloperPlatformPanel({
                 onSubmit: onDryRunImport ? handleDryRun : undefined,
                 onTeamChange: (teamId) => {
                   setImportTeamId(teamId)
+                  if (!importProjectOptions.some(
+                    (option) =>
+                      option.teamId === teamId &&
+                      option.value === importProjectId,
+                  )) {
+                    setImportProjectId('')
+                  }
                   setPreviewImportReport(undefined)
                   setValidatedImportInput(undefined)
                 },
@@ -1690,7 +1730,6 @@ export function DeveloperPlatformPanel({
             try {
               await navigator.clipboard.writeText(secretDialog.value)
               setSecretCopied(true)
-              setSecretStored(true)
               setSecretCopyError(undefined)
             } catch {
               setSecretCopyError(labels.helpText.secretCopyError)
@@ -2698,6 +2737,7 @@ function renderImportSection({
   busyOperation,
   canExport,
   canImport,
+  exportingFormat,
   format,
   importFile,
   importMappings,
@@ -2720,11 +2760,12 @@ function renderImportSection({
   busyOperation?: string
   canExport: boolean
   canImport: boolean
+  exportingFormat?: DeveloperExportFormat
   format: DeveloperImportFormat
   importFile?: File
   importMappings: DeveloperImportFieldMapping[]
   importProjectId: string
-  importProjectOptions: DeveloperPlatformOption[]
+  importProjectOptions: DeveloperImportProjectOption[]
   importTeamId: string
   importTeamOptions: DeveloperPlatformOption[]
   labels: DeveloperPlatformLabels
@@ -3035,7 +3076,11 @@ function renderImportSection({
           {(['csv', 'json'] as const).map((exportFormat) => (
             <button
               className="workbench-button-secondary min-h-10 px-4 disabled:opacity-50"
-              disabled={!canExport || !onExport}
+              disabled={
+                !canExport ||
+                !onExport ||
+                exportingFormat === exportFormat
+              }
               key={exportFormat}
               onClick={() => void onExport?.(exportFormat)}
               type="button"
@@ -3181,6 +3226,11 @@ function EditorDialog({
                 />
               </label>
               <OptionChecklist
+                errorMessage={
+                  apiKeyScopes.length === 0
+                    ? labels.helpText.selectionRequired
+                    : undefined
+                }
                 legend={labels.fields.scopes}
                 options={labels.scopeOptions}
                 value={apiKeyScopes}
@@ -3217,6 +3267,11 @@ function EditorDialog({
                 />
               </label>
               <OptionChecklist
+                errorMessage={
+                  oauthScopes.length === 0
+                    ? labels.helpText.selectionRequired
+                    : undefined
+                }
                 legend={labels.fields.scopes}
                 options={labels.scopeOptions}
                 value={oauthScopes}
@@ -3248,12 +3303,22 @@ function EditorDialog({
                 onChange={onWebhookTeamIdsChange}
               />
               <OptionChecklist
+                errorMessage={
+                  webhookEvents.length === 0
+                    ? labels.helpText.selectionRequired
+                    : undefined
+                }
                 legend={labels.fields.events}
                 options={labels.webhookEventOptions}
                 value={webhookEvents}
                 onChange={onWebhookEventsChange}
               />
               <OptionChecklist
+                errorMessage={
+                  webhookScopes.length === 0
+                    ? labels.helpText.selectionRequired
+                    : undefined
+                }
                 legend={labels.fields.scopes}
                 options={labels.scopeOptions}
                 value={webhookScopes}
@@ -3277,7 +3342,19 @@ function EditorDialog({
           </button>
           <button
             className="workbench-button-primary min-h-10 px-4 disabled:opacity-50"
-            disabled={isBusy || (kind === 'webhook' && webhookTeamIds.length === 0)}
+            disabled={
+              isBusy ||
+              (kind === 'api-key' && apiKeyScopes.length === 0) ||
+              (kind === 'oauth-app' && oauthScopes.length === 0) ||
+              (
+                kind === 'webhook' &&
+                (
+                  webhookTeamIds.length === 0 ||
+                  webhookEvents.length === 0 ||
+                  webhookScopes.length === 0
+                )
+              )
+            }
             type="submit"
           >
             {labels.actions[`submit-${kind}`]}
@@ -3583,12 +3660,14 @@ function TextField({
 
 function OptionChecklist<TValue extends string>({
   disabled = false,
+  errorMessage,
   legend,
   options,
   value,
   onChange,
 }: {
   disabled?: boolean
+  errorMessage?: string
   legend: string
   options: DeveloperPlatformOption<TValue>[]
   value: TValue[]
@@ -3625,6 +3704,11 @@ function OptionChecklist<TValue extends string>({
           </label>
         ))}
       </div>
+      {errorMessage ? (
+        <p className="text-xs font-semibold text-red-700" role="alert">
+          {errorMessage}
+        </p>
+      ) : null}
     </fieldset>
   )
 }
@@ -3706,6 +3790,10 @@ function formatDeveloperTimestamp(value: string) {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(new Date(value))
+}
+
+function toLocalEndOfDayIso(value: string) {
+  return new Date(`${value}T23:59:59.999`).toISOString()
 }
 
 function formatConnectorProviderName(value: string) {

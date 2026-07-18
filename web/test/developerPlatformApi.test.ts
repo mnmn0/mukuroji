@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { PUBLIC_API_OPENAPI_DOCUMENT } from '@mukuroji/contracts'
+import {
+  PUBLIC_API_OPENAPI_DOCUMENT,
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEMA_VERSION,
+  type WorkItem,
+} from '@mukuroji/contracts'
 import {
   DeveloperPlatformApiError,
   connectDeveloperConnector,
@@ -48,20 +53,38 @@ afterEach(() => {
 
 describe('Developer Platform API', () => {
   test('documents sync-conflict listing and resolution routes', () => {
+    const { components, paths } = PUBLIC_API_OPENAPI_DOCUMENT
+
     expect(
-      PUBLIC_API_OPENAPI_DOCUMENT.paths[
+      paths[
         '/api/developer/sync-conflicts'
       ].get.operationId,
     ).toBe('listManagedWorkItemSyncConflicts')
     expect(
-      PUBLIC_API_OPENAPI_DOCUMENT.paths[
+      paths[
         '/api/developer/sync-conflicts/{conflictId}/resolve'
       ].post.operationId,
     ).toBe('resolveManagedWorkItemSyncConflict')
     expect(
-      PUBLIC_API_OPENAPI_DOCUMENT.components.schemas
-        .ResolveWorkItemSyncConflictInput.oneOf,
+      components.schemas.ResolveWorkItemSyncConflictInput.oneOf,
     ).toHaveLength(2)
+    expect(
+      paths['/api/developer/api-keys/{apiKeyId}/rotate'].post
+        .requestBody.content['application/json'].schema,
+    ).toEqual({ $ref: '#/components/schemas/RotateApiKeyInput' })
+    expect(
+      components.schemas.RotateApiKeyInput.properties.expiresAt,
+    ).toEqual({ type: ['string', 'null'], format: 'date-time' })
+    expect(
+      paths['/api/developer/connector-oauth/callback'].get.responses['303']
+        .headers,
+    ).toHaveProperty('RateLimit-Limit')
+    expect(
+      paths['/api/developer/exports'].get.responses['200'].headers,
+    ).toHaveProperty('RateLimit-Limit')
+    expect(
+      paths['/api/developer/exports'].get.operationId,
+    ).toBe('listManagedWorkItemExportPage')
   })
 
   test('gets the aggregate resource with Bearer authorization', async () => {
@@ -396,33 +419,51 @@ describe('Developer Platform API', () => {
       importInput,
       mutationContext,
     )
+    const exportedWorkItems = [
+      createExportWorkItem({
+        customFieldValues: { risk: 'high' },
+        id: 'work-item-1',
+        title: '=HYPERLINK("https://example.com")',
+      }),
+      createExportWorkItem({
+        customFieldValues: { labels: ['api', 'p1'] },
+        id: 'work-item-2',
+        title: 'Ship API',
+      }),
+    ]
 
     globalThis.fetch = (async (
       input: string | URL | Request,
       init: RequestInit = {},
     ) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url
       requests.push({
-        url:
-          typeof input === 'string'
-            ? input
-            : input instanceof URL
-              ? input.toString()
-              : input.url,
+        url,
         init,
       })
 
-      return new Response('title,status\\nShip API,Todo', {
-        headers: {
-          'Content-Disposition':
-            'attachment; filename="mukuroji-work-items.csv"',
-          'Content-Type': 'text/csv',
-        },
+      const isNextPage = url.includes('cursor=')
+      return new Response(JSON.stringify({
+        items: [exportedWorkItems[isNextPage ? 1 : 0]],
+        hasMore: !isNextPage,
+        ...(isNextPage ? {} : { nextCursor: 'signed/cursor+2' }),
+      }), {
+        headers: { 'Content-Type': 'application/json' },
       })
     }) as typeof fetch
 
-    const exportedFile = await exportDeveloperWorkItems(
+    const csvExport = await exportDeveloperWorkItems(
       'access-token',
       'csv',
+    )
+    const jsonExport = await exportDeveloperWorkItems(
+      'access-token',
+      'json',
     )
 
     expect(
@@ -430,7 +471,10 @@ describe('Developer Platform API', () => {
     ).toEqual([
       '/api/developer/imports/dry-run',
       '/api/developer/imports',
-      '/api/developer/exports?format=csv',
+      '/api/developer/exports?format=csv&limit=100',
+      '/api/developer/exports?format=csv&limit=100&cursor=signed%2Fcursor%2B2',
+      '/api/developer/exports?format=json&limit=100',
+      '/api/developer/exports?format=json&limit=100&cursor=signed%2Fcursor%2B2',
     ])
     expect(JSON.parse(String(requests[0]?.init.body))).toEqual(
       importInput,
@@ -439,15 +483,73 @@ describe('Developer Platform API', () => {
       importInput,
     )
     expect(requests[2]?.init.headers).toMatchObject({
-      Accept: 'text/csv',
       Authorization: 'Bearer access-token',
     })
-    expect(exportedFile.fileName).toBe(
-      'mukuroji-work-items.csv',
+    expect(csvExport.fileName).toMatch(
+      /^mukuroji-work-items-\d{4}-\d{2}-\d{2}\.csv$/u,
     )
-    expect(await exportedFile.blob.text()).toBe(
-      'title,status\\nShip API,Todo',
+    expect(new Uint8Array(await csvExport.blob.arrayBuffer()).slice(0, 3))
+      .toEqual(new Uint8Array([0xef, 0xbb, 0xbf]))
+    expect(await csvExport.blob.text()).toContain(
+      'id,teamId,title,description,assignedProjectId,assigneeUserId,workflowStatusId,statusCategory,dueDate,priority,revision,createdAt,updatedAt,customFieldValues.labels,customFieldValues.risk\r\n',
     )
+    expect(await csvExport.blob.text()).toContain(
+      'work-item-1,team-product,"\'=HYPERLINK(""https://example.com"")"',
+    )
+    expect(jsonExport.fileName).toMatch(
+      /^mukuroji-work-items-\d{4}-\d{2}-\d{2}\.json$/u,
+    )
+    expect(JSON.parse(await jsonExport.blob.text())).toMatchObject({
+      apiVersion: '2026-07-01',
+      workItems: [
+        {
+          id: 'work-item-1',
+          customFieldValues: { risk: 'high' },
+        },
+        {
+          id: 'work-item-2',
+          customFieldValues: { labels: ['api', 'p1'] },
+        },
+      ],
+    })
+  })
+
+  test('retries the same export cursor after the API rate-limit window', async () => {
+    const urls: string[] = []
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url
+      urls.push(url)
+      if (urls.length === 1) {
+        return new Response(JSON.stringify({
+          code: 'rate_limited',
+          detail: 'API rate limit exceeded.',
+          retryable: true,
+        }), {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/problem+json',
+            'Retry-After': '0',
+          },
+        })
+      }
+      return new Response(JSON.stringify({
+        items: [createExportWorkItem({ id: 'work-item-retry' })],
+        hasMore: false,
+      }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    await expect(exportDeveloperWorkItems('access-token', 'json'))
+      .resolves.toMatchObject({ fileName: expect.stringMatching(/\.json$/u) })
+    expect(urls).toEqual([
+      '/api/developer/exports?format=json&limit=100',
+      '/api/developer/exports?format=json&limit=100',
+    ])
   })
 
   test('preserves stable API status and error code', async () => {
@@ -577,6 +679,35 @@ describe('Developer Platform API', () => {
       status: 503,
     } satisfies Partial<DeveloperPlatformApiError>)
   })
+
+  test('rejects malformed non-empty success JSON and explicitly accepts empty delete responses', async () => {
+    globalThis.fetch = (async () =>
+      new Response('{"apiKeys":', {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })) as typeof fetch
+
+    await expect(
+      getDeveloperPlatformResources('access-token'),
+    ).rejects.toMatchObject({
+      code: 'InvalidDeveloperPlatformResponse',
+      status: 200,
+    } satisfies Partial<DeveloperPlatformApiError>)
+
+    globalThis.fetch = (async () =>
+      new Response(null, { status: 204 })) as typeof fetch
+
+    await expect(revokeDeveloperWebhook(
+      'access-token',
+      'subscription-29',
+      mutationContext,
+    )).resolves.toEqual({})
+    await expect(deleteDeveloperExternalLink(
+      'access-token',
+      'external-link-29',
+      mutationContext,
+    )).resolves.toEqual({})
+  })
 })
 
 function installFetchRecorder(responseBody: unknown) {
@@ -606,4 +737,29 @@ function installFetchRecorder(responseBody: unknown) {
   }) as typeof fetch
 
   return requests
+}
+
+function createExportWorkItem(
+  overrides: Partial<WorkItem>,
+): WorkItem {
+  return {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 3,
+    id: 'work-item-export',
+    teamId: 'team-product',
+    title: 'Export Work Item',
+    assigneeUserId: 'user-minami',
+    creatorMemberKey: 'member-minami',
+    customFieldValues: {},
+    statusCategory: 'unstarted',
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    workflowStatusId: 'todo',
+    dueDate: '2026-08-01',
+    priority: 'medium',
+    relationIds: [],
+    source: 'dynamodb',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T01:00:00.000Z',
+    ...overrides,
+  }
 }
