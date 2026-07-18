@@ -1,0 +1,294 @@
+import type {
+  AnalyticsDateRange,
+  AnalyticsFilter,
+} from '@mukuroji/contracts'
+import {
+  analyticsCalendarDateBoundaryToInstant,
+  formatAnalyticsCalendarDate,
+} from './timeZone'
+
+/**
+ * Analytics workbench を URL から復元する versioned state です。
+ */
+export type AnalyticsRouteState = {
+  /**
+   * Analytics query に渡す期間と dimension filter です。
+   */
+  filter: AnalyticsFilter
+  /**
+   * Forecast risk と比較する target date range です。
+   */
+  forecastBaseline?: AnalyticsDateRange
+  /**
+   * Metric の日付境界と表示に使う IANA timezone です。
+   */
+  timezone: string
+  /**
+   * 選択中 saved report の ID です。
+   */
+  reportId?: string
+  /**
+   * 過去時点を再実行する任意の ISO timestamp です。
+   */
+  asOf?: string
+  /**
+   * 表示中の immutable snapshot record ID です。
+   */
+  snapshotId?: string
+  /**
+   * Widget builder を表示するかどうかです。
+   */
+  builder: boolean
+}
+
+const analyticsRouteVersion = '1'
+
+/**
+ * Analytics URL query を canonical route state に変換します。
+ *
+ * @param searchParams - `/reports` の URLSearchParams です。
+ * @param fallbackFilter - Saved report または初期値の filter です。
+ * @param fallbackTimezone - Saved report または browser の timezone です。
+ * @param fallbackForecastBaseline - Saved report の任意 forecast baseline です。
+ * @returns URL override を適用した analytics state です。
+ */
+export function parseAnalyticsRouteState(
+  searchParams: URLSearchParams,
+  fallbackFilter: AnalyticsFilter,
+  fallbackTimezone: string,
+  fallbackForecastBaseline?: AnalyticsDateRange,
+): AnalyticsRouteState {
+  const fallback = asRecord(fallbackFilter)
+  const fallbackPeriod = asRecord(fallback.period)
+  const from = readValue(searchParams, 'from') ??
+    readString(fallbackPeriod.from) ??
+    ''
+  const to = readValue(searchParams, 'to') ??
+    readString(fallbackPeriod.to) ??
+    ''
+  const filter = {
+    ...fallback,
+    period: { from, to },
+    teamIds: readRepeatedOrFallback(searchParams, 'team', fallback.teamIds),
+    projectIds: readRepeatedOrFallback(searchParams, 'project', fallback.projectIds),
+    assigneeUserIds: readRepeatedOrFallback(
+      searchParams,
+      'assignee',
+      fallback.assigneeUserIds,
+    ),
+    statusCategories: readRepeatedOrFallback(
+      searchParams,
+      'status',
+      fallback.statusCategories,
+    ),
+    customFields: readCustomFields(searchParams, fallback.customFields),
+    includeArchived: searchParams.has('archived')
+      ? searchParams.get('archived') === '1'
+      : fallback.includeArchived === true,
+  } as unknown as AnalyticsFilter
+  const baselineFrom = readValue(searchParams, 'baselineFrom') ??
+    fallbackForecastBaseline?.from
+  const baselineTo = readValue(searchParams, 'baselineTo') ??
+    fallbackForecastBaseline?.to
+  const forecastBaseline = searchParams.get('baseline') === 'none'
+    ? undefined
+    : baselineFrom && baselineTo
+      ? { from: baselineFrom, to: baselineTo }
+      : undefined
+
+  return {
+    asOf: readValue(searchParams, 'asOf'),
+    builder: searchParams.get('edit') === '1',
+    filter,
+    forecastBaseline,
+    reportId: readValue(searchParams, 'report'),
+    snapshotId: readValue(searchParams, 'snapshot'),
+    timezone: readValue(searchParams, 'timezone') ?? fallbackTimezone,
+  }
+}
+
+/**
+ * Analytics route state を順序が安定した共有可能 URL query に変換します。
+ *
+ * @param state - 現在の report、filter、timezone、builder state です。
+ * @returns Canonical URLSearchParams です。
+ */
+export function serializeAnalyticsRouteState(state: AnalyticsRouteState) {
+  const searchParams = new URLSearchParams({ v: analyticsRouteVersion })
+  const filter = asRecord(state.filter)
+  const period = asRecord(filter.period)
+
+  setValue(searchParams, 'report', state.reportId)
+  setValue(searchParams, 'snapshot', state.snapshotId)
+  if (state.forecastBaseline) {
+    setValue(searchParams, 'baselineFrom', state.forecastBaseline.from)
+    setValue(searchParams, 'baselineTo', state.forecastBaseline.to)
+  } else {
+    searchParams.set('baseline', 'none')
+  }
+  setValue(searchParams, 'from', readString(period.from))
+  setValue(searchParams, 'to', readString(period.to))
+  appendValues(searchParams, 'team', readStringArray(filter.teamIds))
+  appendValues(searchParams, 'project', readStringArray(filter.projectIds))
+  appendValues(searchParams, 'assignee', readStringArray(filter.assigneeUserIds))
+  appendValues(searchParams, 'status', readStringArray(filter.statusCategories))
+
+  for (const customField of readUnknownArray(filter.customFields)) {
+    searchParams.append('customField', stableStringify(customField))
+  }
+
+  if (filter.includeArchived === true) {
+    searchParams.set('archived', '1')
+  }
+  if (state.timezone) {
+    searchParams.set('timezone', state.timezone)
+  }
+  setValue(searchParams, 'asOf', state.asOf)
+  if (state.builder) {
+    searchParams.set('edit', '1')
+  }
+
+  searchParams.sort()
+  return searchParams
+}
+
+/**
+ * 直近30日を期間とする初期 analytics filter を生成します。
+ *
+ * @param now - 期間終端を決める日時です。
+ * @param timeZone - Calendar date を解釈する IANA timezone です。
+ * @returns 指定 timezone の30 calendar daysをUTC instantへ変換した filter です。
+ */
+export function createDefaultAnalyticsFilter(
+  now = new Date(),
+  timeZone = 'UTC',
+) {
+  const endDate = formatAnalyticsCalendarDate(now.toISOString(), timeZone)
+  const end = new Date(`${endDate}T00:00:00.000Z`)
+  const start = new Date(end)
+  start.setUTCDate(start.getUTCDate() - 29)
+  const startDate = formatDate(start)
+
+  return {
+    period: {
+      from: analyticsCalendarDateBoundaryToInstant(
+        startDate,
+        timeZone,
+        'start',
+      ),
+      to: analyticsCalendarDateBoundaryToInstant(
+        endDate,
+        timeZone,
+        'end',
+      ),
+    },
+  } as AnalyticsFilter
+}
+
+/**
+ * Analytics route state の一部を immutable に置き換えます。
+ *
+ * @param state - 更新前 state です。
+ * @param patch - 置き換える state field です。
+ * @returns 更新後 state です。
+ */
+export function updateAnalyticsRouteState(
+  state: AnalyticsRouteState,
+  patch: Partial<AnalyticsRouteState>,
+): AnalyticsRouteState {
+  return {
+    ...state,
+    ...patch,
+  }
+}
+
+function readRepeatedOrFallback(
+  searchParams: URLSearchParams,
+  key: string,
+  fallback: unknown,
+) {
+  return searchParams.has(key)
+    ? readRepeated(searchParams, key)
+    : readStringArray(fallback)
+}
+
+function readCustomFields(searchParams: URLSearchParams, fallback: unknown) {
+  if (!searchParams.has('customField')) {
+    return readUnknownArray(fallback)
+  }
+
+  return searchParams.getAll('customField').flatMap((value) => {
+    try {
+      const parsed: unknown = JSON.parse(value)
+      return typeof parsed === 'object' && parsed !== null ? [parsed] : []
+    } catch {
+      return []
+    }
+  })
+}
+
+function appendValues(searchParams: URLSearchParams, key: string, values: string[]) {
+  for (const value of [...new Set(values)].sort()) {
+    searchParams.append(key, value)
+  }
+}
+
+function readRepeated(searchParams: URLSearchParams, key: string) {
+  return [...new Set(
+    searchParams.getAll(key).map((value) => value.trim()).filter(Boolean),
+  )]
+}
+
+function setValue(
+  searchParams: URLSearchParams,
+  key: string,
+  value: string | undefined,
+) {
+  if (value) {
+    searchParams.set(key, value)
+  }
+}
+
+function readValue(searchParams: URLSearchParams, key: string) {
+  return searchParams.get(key)?.trim() || undefined
+}
+
+function formatDate(date: Date) {
+  return date.toISOString().slice(0, 10)
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`
+  }
+
+  if (typeof value === 'object' && value !== null) {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([first], [second]) => first.localeCompare(second))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)
+      .join(',')}}`
+  }
+
+  return JSON.stringify(value)
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function readString(value: unknown) {
+  return typeof value === 'string' ? value : undefined
+}
+
+function readStringArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && Boolean(item))
+    : []
+}
+
+function readUnknownArray(value: unknown) {
+  return Array.isArray(value) ? value : []
+}

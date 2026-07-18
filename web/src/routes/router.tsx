@@ -14,6 +14,7 @@ import { WorkspaceCommandMenuLayout } from '../commands/WorkspaceCommandMenu'
 import { SearchPage } from '../search/SearchPage'
 import { PublicRequestFormPage } from '../requests/PublicRequestFormPage'
 import { RequestIntakePage } from '../requests/RequestIntakePage'
+import { ReportsPage } from '../pages/ReportsPage'
 
 /**
  * アプリケーション全体の画面ルーティング定義です。
@@ -68,7 +69,7 @@ export const appRoutes: RouteObject[] = [
       },
       {
         path: '/reports',
-        element: <WorkspacePage view="reports" />,
+        element: <ReportsPage />,
       },
       {
         path: '/help',
