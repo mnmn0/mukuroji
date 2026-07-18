@@ -16,6 +16,7 @@ import {
 } from '../auth/api'
 import { clearAuthSession, getAuthSession, type AuthSession } from '../auth/session'
 import { createMutationRequestRunner, type MutationRequestContext } from '../api/mutationHeaders'
+import { AutomationManagementPanelContainer } from '../automation/AutomationManagementPanelContainer'
 import {
   MobileSidebarButton,
   MobileSidebarDrawer,
@@ -2605,6 +2606,15 @@ function SettingsView({
           accessToken={accessToken}
           canManageWorkspaceConfiguration={canManageWorkspaceConfiguration}
           canMutateTeamConfiguration={canMutateTeamConfiguration}
+          locale={locale}
+          teams={teams}
+        />
+      ) : null}
+
+      {accessToken ? (
+        <AutomationManagementPanelContainer
+          accessToken={accessToken}
+          canManage={canManageWorkspaceConfiguration}
           locale={locale}
           teams={teams}
         />

@@ -252,6 +252,9 @@ test('workspace audit requires system admin and forwards pagination filters', as
     cognito: createCognitoClient(),
     workspaceAccess: createWorkspaceAccessClient(),
     auditEvents: {
+      async getEvent() {
+        return undefined
+      },
       async query(input) {
         queries.push({ ...input })
         return { events: [], nextCursor: 'next-audit-page' }
@@ -469,6 +472,9 @@ test('issue activity authorizes the parent and forwards its pagination cursor', 
     projectDirectory,
     teamIssues,
     auditEvents: {
+      async getEvent() {
+        return undefined
+      },
       async query(input) {
         queries.push({ ...input })
         return { events: [], nextCursor: 'next-activity-page' }

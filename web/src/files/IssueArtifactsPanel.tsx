@@ -609,11 +609,19 @@ function ApprovalCard({
   t: ReturnType<typeof createTranslator>
 }) {
   const [comment, setComment] = useState('')
+  const subjectLabel = approval.subjectType === 'work-item'
+    ? t('approval.subject.workItem')
+    : file?.name ?? approval.fileId ?? t('approval.subject.fileUnavailable')
+  const requesterLabel = approval.requestedByKind === 'service'
+    ? t('approval.requester.automation')
+    : resolveMemberName(approval.requestedByMemberKey, members)
   const canCurrentUserDecide = approval.capabilities.canDecide && approval.reviewers.some((reviewer) =>
     reviewer.memberKey === currentMemberKey && reviewer.status === 'pending'
   )
   const canCurrentUserCancel = approval.status === 'pending' && (
-    approval.capabilities.canCancel || approval.requestedByMemberKey === currentMemberKey
+    approval.capabilities.canCancel || (
+      approval.requestedByKind === 'member' && approval.requestedByMemberKey === currentMemberKey
+    )
   )
   const decide = async (decision: ApprovalDecision) => {
     const succeeded = await controller.decideApproval(approval, {
@@ -635,9 +643,12 @@ function ApprovalCard({
     <article className="rounded-lg border border-[var(--workbench-border)] bg-white p-3" data-testid={`approval-${approval.id}`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-[var(--workbench-text)]">{file?.name ?? approval.fileId}</p>
+          <p className="truncate text-sm font-semibold text-[var(--workbench-text)]">{subjectLabel}</p>
           <p className="mt-1 text-xs font-medium text-[var(--workbench-muted)]">
             {t('approval.dueValue').replace('{date}', formatApprovalDate(approval.dueAt))}
+          </p>
+          <p className="mt-1 text-xs font-medium text-[var(--workbench-muted)]">
+            {t('approval.requestedByValue').replace('{name}', requesterLabel)}
           </p>
         </div>
         <span className={resolveApprovalBadgeClassName(approval.status)}>{t(`approval.status.${approval.status}`)}</span>

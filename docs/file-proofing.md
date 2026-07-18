@@ -31,7 +31,7 @@ recordKey = FILE#<fileId>
           | DOWNLOAD#<downloadId>
 ```
 
-Comment attachment は親 Work Item partition に保存し、`targetType=comment` / `targetId=<commentId>` で区別する。File row は全 version の immutable object key、scan state、現在 version、guest access、soft-delete retention を保持する。`FILE_APPROVAL` row は file delete 時に関連 approval/reviewer metadata を file prefix の強整合 Query だけで列挙する逆引き projection で、approval state と同じ transaction で保存する。download URL の発行は URL 自体ではなく actor/file/version/time だけを履歴に残す。
+Comment attachment は親 Work Item partition に保存し、`targetType=comment` / `targetId=<commentId>` で区別する。File row は全 version の immutable object key、scan state、現在 version、guest access、soft-delete retention を保持する。Approval main row は `subjectType=file-version|work-item` と `requestedByKind=member|service` を持つ。`FILE_APPROVAL` row は file-version subject だけに作成し、file delete 時に関連 approval/reviewer metadata を file prefix の強整合 Query だけで列挙する逆引き projection で、approval state と同じ transaction で保存する。Work Item subject は file row や逆引き row を要求しない。download URL の発行は URL 自体ではなく actor/file/version/time だけを履歴に残す。
 
 Reviewer Inbox 用 projection は `WORKSPACE#<workspaceId>#REVIEWER#<memberKey>` partition に main approval への pointer、期限、reviewer/aggregate status だけを同じ transaction で保存する。comment を含む approval 全体は複製せず、bounded Query 後に BatchGet する。`APPROVAL_SUMMARY` は status count と `dueAt#approvalId` の pending set を原子的に増減し、read 時点の `overdueCount` / `nextDueAt` を算出する。`/api/work-items` は summary rows を最大 100 件ずつ BatchGet し、Inbox と report が同じ正本を利用する。
 
@@ -58,9 +58,9 @@ POST /api/teams/{teamId}/issues/{issueId}/approvals/{approvalId}/cancel
 GET  /api/approvals/reviewer?limit=50&cursor=<opaque>
 ```
 
-Request は最大 20 人の active Workspace reviewer と期限を必須にし、decision comment は 2,000 文字までに制限する。Reviewer decision は approval revision で optimistic concurrency を行い、`approved` / `rejected` / `changes-requested` を保存する。Pending approval 中は対象 version の差し替えと file delete を拒否するが、requester または manager は revision 条件付き cancel で reviewer projection、pending count、summary を同じ transaction 内で解除できる。全 reviewer が承認した transaction では、Request 時に現在の configuration から選択・保存した完了先 workflow status へ canonical Work Item を遷移する。Decision 直前に configuration と Work Item を強整合 read し、両方の revision を transaction 条件に含めるため、完了先 transition の削除や同時更新は 409 conflict として全体を rollback する。Legacy Work Item は read-only のため Approval mutation の対象にしない。Approval row、reviewer projection、File pending count、summary、Work Item transition、audit/outbox event のいずれかが競合した場合も全体を rollback する。
+Request は最大 20 人の active Workspace reviewer と期限を必須にし、decision comment は 2,000 文字までに制限する。Reviewer decision は approval revision で optimistic concurrency を行い、`approved` / `rejected` / `changes-requested` を保存する。File-version subject の pending approval 中は対象 version の差し替えと file delete を拒否する。Member requester または manager は revision 条件付き cancel で reviewer projection、pending count、summary を同じ transaction 内で解除できる。Automation の service requester は member identity として cancel できず、manager capability が必要になる。全 reviewer が承認した transaction では、Request 時に現在の configuration から選択・保存した完了先 workflow status へ canonical Work Item を遷移する。Decision 直前に configuration と Work Item を強整合 read し、両方の revision を transaction 条件に含めるため、完了先 transition の削除や同時更新は 409 conflict として全体を rollback する。Legacy Work Item は read-only のため Approval mutation の対象にしない。Approval row、reviewer projection、任意の File pending count、summary、Work Item transition、audit/outbox event のいずれかが競合した場合も全体を rollback する。
 
-`approval.requested` と `approval.completed` は reviewer/requester の notification candidate、deep link、workflow transition、automation hook を metadata に持つ。現在の event consumer は notification projection を行い、automation engine は同じ durable event を将来の idempotent trigger として利用する。
+`approval.requested` と `approval.completed` は reviewer、member requester の notification candidate、deep link、subject/requester kind、workflow transition、automation hook を metadata に持つ。現在の event consumer は notification projection を行い、automation engine は同じ durable event を idempotent trigger として利用する。
 
 ## Audit / retention
 

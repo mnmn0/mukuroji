@@ -442,12 +442,20 @@ test('saves configuration with revision CAS and returns the incremented revision
     documentClient,
     {} as DynamoDBClient,
   )
+  const completion = {
+    Update: {
+      TableName: 'automation-table',
+      Key: { scopeKey: 'workspace-1#automation', recordKey: 'TEMPLATE_APPLICATION#application-1' },
+      UpdateExpression: 'SET #status = :succeeded',
+    },
+  }
 
   const response = await client.saveTeamConfiguration(
     'workspace-1',
     'core-team',
     createConfiguration({ scopeType: 'team', scopeId: 'core-team', revision: 2 }),
     async () => undefined,
+    [completion],
   )
 
   expect(response.configuration.revision).toBe(3)
@@ -468,6 +476,7 @@ test('saves configuration with revision CAS and returns the incremented revision
           ConditionExpression: '#token = :token AND #expiresAt >= :now',
         },
       },
+      completion,
     ],
   })
 })

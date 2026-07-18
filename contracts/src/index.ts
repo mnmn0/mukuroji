@@ -1,3 +1,5 @@
+export * from './automation'
+
 /**
  * 現在の canonical Work Item schema version です。
  */
@@ -828,7 +830,15 @@ type WorkItemBase = {
    */
   updatedAt?: string
   /**
-   * File approval の現在状態を Workspace Inbox / report へ投影する集計です。
+   * Reversible bulk archive を適用した ISO 8601 timestamp です。
+   */
+  archivedAt?: string
+  /**
+   * Archive mutation を実行した Workspace member key です。
+   */
+  archivedBy?: string
+  /**
+   * Work Item approval の現在状態を Workspace Inbox / report へ投影する集計です。
    */
   approvalSummary?: ApprovalSummary
 }
@@ -1190,6 +1200,16 @@ export type ApprovalReviewerStatus = 'pending' | 'approved' | 'rejected' | 'chan
 export type ApprovalRequestStatus = ApprovalReviewerStatus | 'cancelled'
 
 /**
+ * Approval が判断対象にする resource の種別です。
+ */
+export type ApprovalSubjectType = 'file-version' | 'work-item'
+
+/**
+ * Approval request を作成した主体の種別です。
+ */
+export type ApprovalRequesterKind = 'member' | 'service'
+
+/**
  * Approval reviewer の現在状態です。
  */
 export type ApprovalReviewer = {
@@ -1226,9 +1246,42 @@ export type ApprovalCapabilities = {
 }
 
 /**
- * 特定 File version に対する approval request です。
+ * Approval request が判断対象にする resource です。
  */
-export type ApprovalRequest = {
+type ApprovalSubject =
+  | {
+      /**
+       * File version approval を示します。
+       */
+      subjectType: Extract<ApprovalSubjectType, 'file-version'>
+      /**
+       * 対象 File ID です。
+       */
+      fileId: string
+      /**
+       * 対象 version ID です。
+       */
+      versionId: string
+    }
+  | {
+      /**
+       * Work Item approval を示します。
+       */
+      subjectType: Extract<ApprovalSubjectType, 'work-item'>
+      /**
+       * Work Item subject では指定しません。
+       */
+      fileId?: never
+      /**
+       * Work Item subject では指定しません。
+       */
+      versionId?: never
+    }
+
+/**
+ * Work Item 自体または特定 File version に対する approval request です。
+ */
+export type ApprovalRequest = ApprovalSubject & {
   /**
    * Approval ID です。
    */
@@ -1250,14 +1303,6 @@ export type ApprovalRequest = {
    */
   revision: number
   /**
-   * 対象 File ID です。
-   */
-  fileId: string
-  /**
-   * 対象 version ID です。
-   */
-  versionId: string
-  /**
    * Approval 全体の状態です。
    */
   status: ApprovalRequestStatus
@@ -1273,6 +1318,10 @@ export type ApprovalRequest = {
    * Request 作成者の Workspace member key です。
    */
   requestedByMemberKey: string
+  /**
+   * Requester が Workspace member か automation などの service かを示します。
+   */
+  requestedByKind: ApprovalRequesterKind
   /**
    * 作成日時の ISO 8601 timestamp です。
    */
