@@ -6,6 +6,7 @@ import {
   createProjectIssuesPath,
   createRequestsPath,
   createTeamIssuesPath,
+  createWorkItemSearchPath,
 } from '../src/routes/paths'
 import { appRoutes } from '../src/routes/router'
 
@@ -29,6 +30,22 @@ describe('Work Item detail paths', () => {
     )
     expect(createTeamIssuesPath('team', 'issue', 'comment/1', 'root/1')).toBe(
       '/teams/team/issues?issueId=issue&commentId=comment%2F1&rootCommentId=root%2F1',
+    )
+  })
+
+  test('routes an unscoped Work Item link through real workspace search', () => {
+    expect(createWorkItemSearchPath('issue/42')).toBe(
+      '/search?q=issue%2F42&type=work-item',
+    )
+  })
+
+  test('opens a canonical Work Item relation at its direct Team route', () => {
+    expect(
+      createWorkItemSearchPath(
+        'team/core-team/issue/issue-42',
+      ),
+    ).toBe(
+      '/teams/core-team/issues?issueId=issue-42',
     )
   })
 })

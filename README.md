@@ -138,6 +138,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_WORK_ITEMS_TABLE` / `WORK_ITEMS_TABLE_NAME`: canonical Work Item store。移行期間は `MUKUROJI_TEAM_ISSUES_TABLE` / `TEAM_ISSUES_TABLE_NAME` と同じ既存 table を指します。
 - `MUKUROJI_TEAM_ISSUE_EVENTS_TABLE`: チーム Issue のコメント/活動履歴を保存する DynamoDB table 名。未指定時は `mukuroji-team-issue-events-local`
 - `MUKUROJI_COLLABORATION_TABLE` / `COLLABORATION_TABLE_NAME`: comment thread、reaction、watcher、presence を保存する DynamoDB table 名。未指定時は `mukuroji-collaboration-local`
+- `MUKUROJI_DOCUMENTS_TABLE` / `DOCUMENTS_TABLE_NAME`: Document tree、version、comment、presence、share、backlink を保存する DynamoDB table 名。未指定時は `mukuroji-documents-local`
 - `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`: Workspace search document、saved view、ユーザー別 view preference を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-search-local`
 - `MUKUROJI_NOTIFICATIONS_TABLE` / `NOTIFICATIONS_TABLE_NAME`: ユーザー別の durable notification timeline と配信設定を保存する DynamoDB table 名。未指定時は `mukuroji-notifications-local`
 - `PLANNING_TABLE_NAME`: Cycle、Milestone、Release、Phase、Goal/OKR、Initiative、Roadmap、Portfolio の Planning entity と、Dependency、Work Item link を保存する DynamoDB table 名。未指定時は `mukuroji-planning-local`
@@ -161,7 +162,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/teams/projects`, `/api/work-items`,
 `/api/teams/{teamId}/issues`, `/api/projects/{projectId}/issues`,
 `/api/projects/{projectId}/tasks`, `/api/search`, `/api/saved-views`, `/api/audit/events`,
-`/api/notifications`, `/api/automation/rules`, `/api/automation/templates`,
+`/api/notifications`, `/api/documents`, `/api/automation/rules`, `/api/automation/templates`,
 `/api/automation/inbound-webhooks`, `/api/recurring-work`,
 `/api/automation/executions`, `/api/bulk-operations`, `/api/planning` で DynamoDB を読みます。ローカルでは Vite proxy により、
 Web から `/api` を呼ぶだけで Floci 上の DynamoDB データを取得できます。
@@ -188,6 +189,9 @@ Cycle rollover、戦略階層、roll-up、timeline dependency、critical path �
 
 Request Form、public intake、queue/triage、attachment、email reply、Work Item conversion の契約は
 [`docs/request-intake.md`](docs/request-intake.md) を参照してください。
+
+Document tree、block / whiteboard schema、同時編集、履歴、ACL、共有、検索、export の契約は
+[`docs/documents.md`](docs/documents.md) を参照してください。
 
 Web の mutation は operation と入力 fingerprint ごとに `MutationRequestContext` を1つ作り、同じ
 in-flight request で共有します。transport failure 後は結果が不明な間だけ保持し、Workspace snapshot の
