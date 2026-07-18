@@ -260,21 +260,21 @@ export async function getAnalyticsSnapshots(
  *
  * @param accessToken - Authorization header に使う access token です。
  * @param reportId - Snapshot を保存する report ID です。
- * @param query - Snapshot の filter、widget、timezone です。
+ * @param query - Report definition へ適用する snapshot の `asOf` です。
  * @param mutationContext - Retry 間で維持する mutation context です。
  * @returns 保存された snapshot record です。
  */
 export async function createAnalyticsSnapshot(
   accessToken: string,
   reportId: string,
-  query: AnalyticsQueryInput,
+  query: Pick<AnalyticsQueryInput, 'asOf'>,
   mutationContext: MutationRequestContext,
 ) {
   const response = await requestJson<unknown>(
     `${createReportPath(reportId)}/snapshots`,
     accessToken,
     {
-      body: JSON.stringify(query),
+      body: JSON.stringify({ asOf: query.asOf }),
       headers: {
         'Content-Type': 'application/json',
         ...createMutationHeaders(mutationContext),

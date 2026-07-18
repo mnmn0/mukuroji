@@ -1212,6 +1212,8 @@ const ANALYTICS_WORK_ITEM_LIMIT = 10_000
 const ANALYTICS_WORK_ITEM_PARTITION_COUNT_LIMIT = 100
 /** Analytics が一つの Team または Project partition で評価する最大 item 数です。 */
 const ANALYTICS_WORK_ITEM_PARTITION_SCAN_LIMIT = 10_000
+/** Canonical Work Item と audit history を揃える最大 read barrier 試行回数です。 */
+const ANALYTICS_READ_BARRIER_MAX_ATTEMPTS = 3
 /** Analytics snapshot 一覧で current ACL を再検証する最大 record 数です。 */
 const ANALYTICS_SNAPSHOT_LIST_LIMIT = 100
 /** Relation target の強整合 detail read を同時実行する最大数です。 */
@@ -3035,8 +3037,11 @@ app.get('/api/analytics/reports/:reportId/snapshots', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     const reportId = readAnalyticsIdentifier(c.req.param('reportId'), 'Analytics report ID')
     const report = await requireAnalyticsReport(principal, reportId)
-    const snapshots = (await analytics.listSnapshots(principal.directoryId, report.id))
-      .slice(0, ANALYTICS_SNAPSHOT_LIST_LIMIT)
+    const snapshots = await analytics.listSnapshots(
+      principal.directoryId,
+      report.id,
+      ANALYTICS_SNAPSHOT_LIST_LIMIT,
+    )
     const visibleSnapshots = []
     const scopeCache =
       new Map<string, ReturnType<typeof readAccessibleAnalyticsWorkItems>>()
@@ -3070,9 +3075,7 @@ app.post('/api/analytics/reports/:reportId/snapshots', async (c) => {
     const report = await requireAnalyticsReport(principal, reportId)
     await requireAnalyticsReportWrite(principal, report)
     const body = await readAnalyticsJson(c)
-    const query = Object.keys(body).length === 0
-      ? createAnalyticsReportQuery(report, {})
-      : body as unknown as AnalyticsQueryInput
+    const query = createAnalyticsReportQuery(report, body)
     const snapshot = await executeAnalyticsQuery(principal, query)
     const createdAt = new Date().toISOString()
     const snapshotRecord = await analytics.putSnapshot({
@@ -7091,25 +7094,175 @@ async function readAuthorizedAnalyticsData(
   filter: AnalyticsQueryInput['filter'],
   asOf: string,
 ) {
-  const accessible = await readAccessibleAnalyticsWorkItems(
+  let accessible = await readAccessibleAnalyticsWorkItems(
     principal,
     filter,
   )
-  const workItems = accessible.workItems
   const historyReadAt = new Date(
     Math.max(Date.now(), Date.parse(asOf)),
   ).toISOString()
-  const events = await readAuthorizedAnalyticsAuditEvents(
-    principal.directoryId,
-    workItems,
-    historyReadAt,
-  )
+  assertAnalyticsWorkItemsAtCutoff(accessible.workItems, historyReadAt)
 
-  return {
-    workItems,
-    events,
-    authorizedProjectIds: accessible.authorizedProjectIds,
+  for (
+    let attempt = 0;
+    attempt < ANALYTICS_READ_BARRIER_MAX_ATTEMPTS;
+    attempt += 1
+  ) {
+    const events = await readAuthorizedAnalyticsAuditEvents(
+      principal.directoryId,
+      accessible.workItems,
+      historyReadAt,
+    )
+    const verified = await readAccessibleAnalyticsWorkItems(
+      principal,
+      filter,
+    )
+    assertAnalyticsWorkItemsAtCutoff(verified.workItems, historyReadAt)
+
+    if (
+      createAnalyticsAccessibleDataFingerprint(accessible) ===
+        createAnalyticsAccessibleDataFingerprint(verified) &&
+      hasAnalyticsLatestAuditCoverage(verified.workItems, events)
+    ) {
+      return {
+        workItems: verified.workItems,
+        events,
+        authorizedProjectIds: verified.authorizedProjectIds,
+      }
+    }
+    accessible = verified
   }
+
+  throw createAnalyticsReadBarrierError()
+}
+
+/** Canonical state が audit cutoff 以下であることを fail-closed に検証します。 */
+function assertAnalyticsWorkItemsAtCutoff(
+  workItems: readonly CanonicalWorkItem[],
+  historyReadAt: string,
+) {
+  const cutoff = Date.parse(historyReadAt)
+  if (
+    Number.isNaN(cutoff) ||
+    workItems.some((workItem) => {
+      const updatedAt = Date.parse(workItem.updatedAt)
+      return Number.isNaN(updatedAt) || updatedAt > cutoff
+    })
+  ) {
+    throw createAnalyticsReadBarrierError()
+  }
+}
+
+/** ACL allowlist と canonical Work Item 集合の順序非依存 fingerprint を返します。 */
+function createAnalyticsAccessibleDataFingerprint(
+  accessible: Awaited<ReturnType<typeof readAccessibleAnalyticsWorkItems>>,
+) {
+  const digest = createHash('sha256')
+  for (const projectId of [...accessible.authorizedProjectIds].sort()) {
+    digest.update(`project:${projectId}\0`)
+  }
+  const workItems = [...accessible.workItems].sort((left, right) =>
+    createTeamIssueAuditEntityId(left.teamId, left.id).localeCompare(
+      createTeamIssueAuditEntityId(right.teamId, right.id),
+    )
+  )
+  for (const workItem of workItems) {
+    digest.update(stableAnalyticsApiStringify(workItem))
+    digest.update('\0')
+  }
+  return digest.digest('hex')
+}
+
+/** Object key の列挙順に依存しない canonical JSON 文字列を返します。 */
+function stableAnalyticsApiStringify(value: unknown): string {
+  if (value === undefined) return 'undefined'
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value) ?? 'undefined'
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableAnalyticsApiStringify).join(',')}]`
+  }
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) =>
+      `${JSON.stringify(key)}:${stableAnalyticsApiStringify(entry)}`
+    )
+    .join(',')}}`
+}
+
+/** Current canonical revision の latest update event がすべて読めたかを返します。 */
+function hasAnalyticsLatestAuditCoverage(
+  workItems: readonly CanonicalWorkItem[],
+  events: readonly AuditEventV1[],
+) {
+  const rawIdByCanonicalEntityId = new Map(workItems.map((workItem) => [
+    createTeamIssueAuditEntityId(workItem.teamId, workItem.id),
+    workItem.id,
+  ]))
+  return workItems.every((workItem) => {
+    if (workItem.revision <= 1) return true
+    const canonicalEntityId = createTeamIssueAuditEntityId(
+      workItem.teamId,
+      workItem.id,
+    )
+    const updatedAt = Date.parse(workItem.updatedAt)
+    return events.some((event) =>
+      Date.parse(event.occurredAt) === updatedAt &&
+      isAnalyticsLatestWorkItemUpdate(event, workItem, canonicalEntityId) &&
+      (
+        isCanonicalAnalyticsAuditEvent(event, canonicalEntityId) ||
+        isAuthorizedLegacyAnalyticsAuditEvent(
+          event,
+          workItem.id,
+          rawIdByCanonicalEntityId,
+        )
+      )
+    )
+  })
+}
+
+/** Event が canonical Work Item の latest revision を生成した update かを返します。 */
+function isAnalyticsLatestWorkItemUpdate(
+  event: AuditEventV1,
+  workItem: CanonicalWorkItem,
+  canonicalEntityId: string,
+) {
+  if (
+    event.eventType !== 'work-item.updated' ||
+    event.action !== 'updated' ||
+    event.targetType !== 'work-item' ||
+    event.target.type !== 'work-item' ||
+    event.targetId !== event.target.id ||
+    (
+      event.targetId !== canonicalEntityId &&
+      event.targetId !== workItem.id
+    )
+  ) {
+    return false
+  }
+  const metadataTeamId = readAnalyticsAuditMetadataText(event.metadata?.teamId)
+  const metadataIssueId = readAnalyticsAuditMetadataText(event.metadata?.issueId)
+  const metadataWorkItemId = readAnalyticsAuditMetadataText(
+    event.metadata?.workItemId,
+  )
+  return event.metadata?.adapter === 'canonical-work-item' &&
+    event.metadata.afterRevision === workItem.revision &&
+    metadataTeamId === workItem.teamId &&
+    (metadataIssueId ?? metadataWorkItemId) === workItem.id &&
+    (
+      metadataIssueId === undefined ||
+      metadataWorkItemId === undefined ||
+      metadataIssueId === metadataWorkItemId
+    )
+}
+
+/** Bounded retry 後も整合しない canonical/audit read を retryable error にします。 */
+function createAnalyticsReadBarrierError() {
+  return new AnalyticsError(
+    503,
+    'AnalyticsReadBarrierUnavailable',
+    'Analytics data changed while its audit history was being read. Retry the request.',
+  )
 }
 
 /**

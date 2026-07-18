@@ -393,6 +393,100 @@ test('filters inaccessible Work Items and unrelated audit pages before Analytics
   )).toBe(true)
 })
 
+test('retries Analytics history reads until the latest canonical revision reaches the entity GSI', async () => {
+  const current = createHistoricalAnalyticsWorkItem()
+  const latestEvent = createHistoricalAnalyticsWorkItemEvent(current)
+  const canonicalEntityId = `team/${current.teamId}/issue/${current.id}`
+  let canonicalReads = 0
+  let workItemReads = 0
+  configureFakeProjectClients(true, {
+    projectAccesses: [
+      { projectId: 'project-before', role: 'viewer' },
+      { projectId: 'project-after', role: 'viewer' },
+    ],
+    teamProjects: [
+      { id: 'project-before', name: 'Before', tone: 'blue' },
+      { id: 'project-after', name: 'After', tone: 'green' },
+    ],
+  })
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    teamIssues: {
+      async getTeamIssues(_workspaceId, teamId) {
+        workItemReads += 1
+        return { teamId, issues: [current] }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+    >,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        if (input.entityId !== canonicalEntityId) return { events: [] }
+        canonicalReads += 1
+        return canonicalReads === 1
+          ? { events: [] }
+          : { events: [latestEvent] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  query.asOf = '2026-07-16T12:00:00.000Z'
+
+  const response = await analyticsApiRequest('/api/analytics/query', query)
+
+  expect(response.status).toBe(200)
+  expect(canonicalReads).toBe(2)
+  expect(workItemReads).toBe(3)
+})
+
+test('fails closed when Analytics history never reaches the latest canonical revision', async () => {
+  const current = createHistoricalAnalyticsWorkItem()
+  let workItemReads = 0
+  configureFakeProjectClients(true, {
+    projectAccesses: [
+      { projectId: 'project-before', role: 'viewer' },
+      { projectId: 'project-after', role: 'viewer' },
+    ],
+    teamProjects: [
+      { id: 'project-before', name: 'Before', tone: 'blue' },
+      { id: 'project-after', name: 'After', tone: 'green' },
+    ],
+  })
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    teamIssues: {
+      async getTeamIssues(_workspaceId, teamId) {
+        workItemReads += 1
+        return { teamId, issues: [current] }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+    >,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+
+  const response = await analyticsApiRequest(
+    '/api/analytics/query',
+    createAnalyticsQueryInput(),
+  )
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toMatchObject({
+    code: 'AnalyticsReadBarrierUnavailable',
+  })
+  expect(workItemReads).toBe(4)
+})
+
 test('rewinds post-asOf status, project, and archive changes from current authorized state', async () => {
   const current = createHistoricalAnalyticsWorkItem()
   const futureEvent = createHistoricalAnalyticsWorkItemEvent(current)
@@ -441,7 +535,7 @@ test('rewinds post-asOf status, project, and archive changes from current author
     snapshot: { widgets: Array<{ sampleSize: number; value: number | null }> }
   }
   expect(body.snapshot.widgets[0]).toMatchObject({ sampleSize: 1, value: 1 })
-  expect(includeArchivedReads).toEqual([true])
+  expect(includeArchivedReads).toEqual([true, true])
   expect(auditUpperBounds).toHaveLength(2)
   expect(auditUpperBounds.every((upperBound) =>
     Date.parse(upperBound) > Date.parse(futureEvent.occurredAt)
@@ -603,7 +697,12 @@ test('rejects legacy raw Work Item events whose identity sources disagree', asyn
                 nonWorkItemTarget,
               ],
             }
-          : { events: [] }
+          : {
+              events: [{
+                ...futureEvent,
+                changes: [],
+              }],
+            }
       },
     },
   })
@@ -744,7 +843,7 @@ test('excludes historical Project state outside current ACL and invalidates its 
   })
 })
 
-test('preserves exact snapshot queries, saved baselines, and server-owned schedule cursors', async () => {
+test('preserves report-bound snapshot queries, saved baselines, and server-owned schedule cursors', async () => {
   const repository = new InMemoryAnalyticsRepository(
     () => new Date('2026-07-18T08:00:00.000Z'),
   )
@@ -878,14 +977,17 @@ test('preserves exact snapshot queries, saved baselines, and server-owned schedu
     snapshotRecord: AnalyticsSnapshotRecord
   }
   expect(snapshotBody.snapshotRecord.query).toEqual({
-    ...inlineQuery,
     filter: {
-      ...inlineQuery.filter,
+      ...createInput.filter,
       period: {
-        ...inlineQuery.filter.period,
+        ...createInput.filter.period,
         to: inlineQuery.asOf,
       },
     },
+    widgets: createInput.widgets,
+    asOf: inlineQuery.asOf,
+    timeZone: createInput.timeZone,
+    forecastBaseline: createInput.forecastBaseline,
   })
   expect(snapshotBody.snapshotRecord.reportRevision).toBe(3)
 
@@ -13259,7 +13361,7 @@ function createHistoricalAnalyticsWorkItemEvent(workItem: CanonicalWorkItem) {
       route: '/api/teams/:teamId/issues/:issueId',
     },
   })
-  return createAuditEvent({
+  const event = createAuditEvent({
     context,
     eventType: 'work-item.updated',
     entity: {
@@ -13278,6 +13380,17 @@ function createHistoricalAnalyticsWorkItemEvent(workItem: CanonicalWorkItem) {
     },
     expiresAt: 2_000_000_000,
   })
+  return {
+    ...event,
+    metadata: {
+      ...event.metadata,
+      adapter: 'canonical-work-item',
+      afterRevision: workItem.revision,
+      teamId: workItem.teamId,
+      issueId: workItem.id,
+      workItemId: workItem.id,
+    },
+  }
 }
 
 function configureFakeProjectClients(
