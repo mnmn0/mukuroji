@@ -7,7 +7,11 @@ import { CdkStack } from '../lib/cdk-stack';
  * 各 test で使用する synthesized CloudFormation template を作成します。
  */
 function createTemplate() {
-  const app = new cdk.App();
+  const app = new cdk.App({
+    context: {
+      '@aws-cdk/aws-iam:minimizePolicies': true,
+    },
+  });
   const stack = new CdkStack(app, 'TestStack');
 
   return Template.fromStack(stack);
