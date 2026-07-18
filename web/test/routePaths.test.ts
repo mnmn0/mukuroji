@@ -63,4 +63,11 @@ describe('Request intake paths', () => {
     )
     expect(createPublicRequestPath('opaque/token')).toBe('/request/opaque%2Ftoken')
   })
+
+  test('registers both management and public request routes', () => {
+    expect(matchRoutes(appRoutes, '/requests')?.at(-1)?.route.path).toBe('/requests')
+    expect(matchRoutes(appRoutes, '/request/opaque-token')?.at(-1)?.route.path).toBe(
+      '/request/:linkToken',
+    )
+  })
 })

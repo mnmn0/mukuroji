@@ -116,6 +116,7 @@ export type WorkItemConfigurationClient = {
     workspaceId: string,
     configuration: WorkItemConfiguration,
     usageCheck: WorkItemConfigurationUsageCheck,
+    completionTransactItems?: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ): Promise<ResolvedWorkItemConfiguration>
   /** Team override を optimistic revision 付きで保存します。 */
   saveTeamConfiguration(
@@ -123,6 +124,7 @@ export type WorkItemConfigurationClient = {
     teamId: string,
     configuration: WorkItemConfiguration,
     usageCheck: WorkItemConfigurationUsageCheck,
+    completionTransactItems?: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ): Promise<ResolvedWorkItemConfiguration>
   /** Work Item から見た relation と graph revision を返します。 */
   listRelations(
@@ -251,6 +253,11 @@ export function validateWorkItemConfiguration(
       ? {}
       : { updatedAt: readIsoTimestamp(value.updatedAt, 'Configuration updatedAt') }),
   }
+}
+
+/** Unknown input を厳格に検証済み Workflow definition へ変換します。 */
+export function validateWorkflowDefinition(value: unknown): WorkItemConfiguration['workflow'] {
+  return readWorkflowDefinition(value)
 }
 
 /** Work Item custom field値へdefault/patchを適用し、全definitionに対して検証します。 */
@@ -489,6 +496,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     workspaceId: string,
     configuration: WorkItemConfiguration,
     usageCheck: WorkItemConfigurationUsageCheck,
+    completionTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ) {
     const saved = await this.saveConfiguration(
       workspaceId,
@@ -496,6 +504,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       workspaceId,
       configuration,
       usageCheck,
+      completionTransactItems,
     )
     return { configuration: saved } satisfies ResolvedWorkItemConfiguration
   }
@@ -506,6 +515,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     teamId: string,
     configuration: WorkItemConfiguration,
     usageCheck: WorkItemConfigurationUsageCheck,
+    completionTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ) {
     const saved = await this.saveConfiguration(
       workspaceId,
@@ -513,6 +523,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       teamId,
       configuration,
       usageCheck,
+      completionTransactItems,
     )
     return { configuration: saved } satisfies ResolvedWorkItemConfiguration
   }
@@ -667,6 +678,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     scopeId: string,
     configuration: WorkItemConfiguration,
     usageCheck: WorkItemConfigurationUsageCheck,
+    completionTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ) {
     await this.ensureTable()
     const validated = validateWorkItemConfiguration(configuration, { scopeType, scopeId })
@@ -729,6 +741,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
               },
             },
           },
+          ...completionTransactItems,
         ],
       }))
     } catch (error) {

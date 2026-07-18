@@ -150,6 +150,7 @@ export const fileAnnotationFixtures = [
  */
 export const approvalRequestFixture = {
   id: 'approval-launch-hero',
+  subjectType: 'file-version',
   revision: 1,
   fileId: imageFileFixture.id,
   versionId: imageFileFixture.currentVersion.id,
@@ -160,6 +161,7 @@ export const approvalRequestFixture = {
   ],
   dueAt: '2026-07-15T14:59:59.000Z',
   requestedByMemberKey: 'sato@example.com',
+  requestedByKind: 'member',
   createdAt: '2026-07-12T02:15:00.000Z',
   updatedAt: '2026-07-12T02:20:00.000Z',
   capabilities: { canCancel: false, canDecide: true },

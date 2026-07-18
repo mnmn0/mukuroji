@@ -41,4 +41,24 @@ describe('RequestQueue', () => {
 
     expect(html).toContain('>不具合, legacy-option</dd>')
   })
+
+  test('does not expose duplicate-candidate actions without the capability', () => {
+    const submission = normalizeRequestSubmission({
+      ...requestSubmissionFixture,
+      capabilities: {
+        ...requestSubmissionFixture.capabilities,
+        canMarkDuplicate: false,
+      },
+    })
+    const html = renderToStaticMarkup(
+      <RequestQueue
+        locale="ja"
+        selectedSubmission={submission}
+        submissions={[submission]}
+        onSelectSubmission={() => undefined}
+      />,
+    )
+
+    expect(html).not.toContain('submission-previous')
+  })
 })

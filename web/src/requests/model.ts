@@ -254,7 +254,7 @@ export type RequestSubmissionModel = {
   /** Triage lifecycle status です。 */
   status: RequestSubmissionStatus
   /** Web form または email ingestion の source です。 */
-  source: string
+  source: RequestSubmission['source']
   /** Submit に利用した form 名です。 */
   formName: string
   /** Submit に利用した immutable version 表示です。 */
@@ -380,6 +380,8 @@ export function isRequestFormDraftModelValid(model: RequestFormDraftModel) {
   const defaultLocale = model.defaultLocale
   const fields = model.sections.flatMap((section) => section.fields)
   const fieldIds = new Set(fields.map((field) => field.id))
+  const sectionIds = new Set(model.sections.map((section) => section.id))
+  const routingRuleIds = new Set(model.routing.rules.map((rule) => rule.id))
   const titleField = fields.find((field) => field.id === model.routing.titleFieldId)
   const hasLocalizedText = (text: RequestLocalizedText) =>
     Object.values(text).some((value) => Boolean(value?.trim()))
@@ -405,7 +407,9 @@ export function isRequestFormDraftModelValid(model: RequestFormDraftModel) {
 
   if (
     !model.name.trim() ||
+    sectionIds.size !== model.sections.length ||
     fieldIds.size !== fields.length ||
+    routingRuleIds.size !== model.routing.rules.length ||
     !model.locales.includes(defaultLocale) ||
     !hasDefaultText(model.title) ||
     !hasDefaultText(model.confirmation) ||
@@ -424,6 +428,7 @@ export function isRequestFormDraftModelValid(model: RequestFormDraftModel) {
   const knownFieldIds = new Set<string>()
   for (const section of model.sections) {
     if (
+      !section.id.trim() ||
       !hasDefaultText(section.title) ||
       !optionalDefaultTextIsValid(section.description) ||
       section.fields.length === 0 ||
@@ -434,6 +439,9 @@ export function isRequestFormDraftModelValid(model: RequestFormDraftModel) {
 
     for (const field of section.fields) {
       if (!field.id.trim() || !hasDefaultText(field.label)) return false
+      if (new Set(field.options.map((option) => option.id)).size !== field.options.length) {
+        return false
+      }
       if (field.condition && !conditionIsValid(field.condition, knownFieldIds)) return false
       if (
         (field.type === 'select' || field.type === 'multi-select') &&
@@ -583,9 +591,12 @@ export function normalizeRequestSubmission(submission: RequestSubmission): Reque
   const definition = submission.formSnapshot.snapshot.definition
   const fields = definition.sections.flatMap((section) => section.fields)
   const locale = submission.locale
+  const titleAnswer = submission.answers[submission.workItemMapping.titleFieldId]
+  const mappedSummary = answerValueToText(titleAnswer).trim()
   const firstAnswer = Object.values(submission.answers).find(
     (value) => typeof value === 'string' && value.trim(),
   )
+  const summary = mappedSummary || firstAnswer
 
   return {
     answers: fields.flatMap((field) => {
@@ -620,7 +631,7 @@ export function normalizeRequestSubmission(submission: RequestSubmission): Reque
     routing: { ...submission.routingTarget },
     source: submission.source,
     status: submission.status,
-    summary: typeof firstAnswer === 'string' ? firstAnswer : submission.receiptId,
+    summary: typeof summary === 'string' ? summary : submission.receiptId,
     workItem: submission.workItem
       ? {
           id: submission.workItem.workItemId,
@@ -629,6 +640,12 @@ export function normalizeRequestSubmission(submission: RequestSubmission): Reque
         }
       : undefined,
   }
+}
+
+function answerValueToText(value: RequestAnswerValue | undefined) {
+  if (value === undefined) return ''
+  if (Array.isArray(value)) return value.join(', ')
+  return String(value)
 }
 
 /**

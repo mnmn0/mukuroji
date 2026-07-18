@@ -36,6 +36,7 @@ import {
   isCurrentPublicRequestFormRequest,
   resolveRequestFormLocale,
   resolveRequestLocalizedText,
+  selectRemainingRequestAttachmentFiles,
   selectRequestAttachmentClaims,
   updatePendingRequestAttachmentFields,
   validateVisibleRequestAnswers,
@@ -271,6 +272,7 @@ function PublicRequestFormPageForLink({ linkToken }: { linkToken: string }) {
 
   return (
     <PublicPageShell
+      availableLocales={form?.locales ?? [locale]}
       locale={locale}
       titleKey="requests.public.pageTitle"
       onLocaleChange={(nextLocale) => handleLocaleChange(nextLocale)}
@@ -580,7 +582,7 @@ export function PublicRequestFormScreen({
       <div className="border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-6 py-6 sm:px-8">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="max-w-[620px]">
-            <p className="workbench-eyebrow">mukuroji request</p>
+            <p className="workbench-eyebrow">{t('requests.public.eyebrow')}</p>
             <h1 className="mt-2 text-3xl font-semibold tracking-tight text-[var(--workbench-text)]">
               {resolveRequestLocalizedText(form.title, locale, form.defaultLocale)}
             </h1>
@@ -636,8 +638,21 @@ export function PublicRequestFormScreen({
                       const attachmentIds = Array.isArray(existingAnswer)
                         ? existingAnswer.filter((value): value is string => typeof value === 'string')
                         : []
+                      const existingAttachmentCount = form.sections
+                        .flatMap((section) => section.fields)
+                        .filter((candidate) => candidate.type === 'attachment')
+                        .reduce((count, candidate) => {
+                          const value = answers[candidate.id]
+                          return count + (Array.isArray(value)
+                            ? value.filter((item) => typeof item === 'string').length
+                            : 0)
+                        }, 0)
                       const fileNames = [...(fileNamesByField[field.id] ?? [])]
-                      for (const file of files) {
+                      for (const file of selectRemainingRequestAttachmentFiles(
+                        files,
+                        existingAttachmentCount,
+                        form.attachmentPolicy.maxFiles,
+                      )) {
                         attachmentIds.push(await onUploadAttachment(field.id, file))
                         fileNames.push(file.name)
                         updateAnswer(field.id, [...attachmentIds])
@@ -748,9 +763,8 @@ function PublicField({
           {field.options.map((option) => <option key={option.id} value={option.id}>{resolveRequestLocalizedText(option.label, locale, form.defaultLocale)}</option>)}
         </select>
       ) : field.type === 'checkbox' ? (
-        <span className="flex min-h-11 items-center gap-3 rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3">
+        <span className="flex min-h-11 items-center rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3">
           <input checked={answer === true} className="h-4 w-4 accent-[var(--workbench-primary)]" onChange={(event) => onChange(event.target.checked)} type="checkbox" />
-          {label}
         </span>
       ) : field.type === 'attachment' ? (
         <span className="grid gap-2">

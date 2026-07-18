@@ -6,6 +6,7 @@ import {
   matchesRequestVisibilityCondition,
   resolveRequestFormLocale,
   resolveRequestLocalizedText,
+  selectRemainingRequestAttachmentFiles,
   selectRequestAttachmentClaims,
   updatePendingRequestAttachmentFields,
   validateVisibleRequestAnswers,
@@ -203,6 +204,13 @@ describe('request form conditional logic', () => {
 
     pendingFields = updatePendingRequestAttachmentFields(pendingFields, 'logs', false)
     expect(pendingFields.size).toBe(0)
+  })
+
+  test('limits each attachment selection by the remaining cumulative capacity', () => {
+    expect(selectRemainingRequestAttachmentFiles(['new-1', 'new-2'], 2, 3)).toEqual([
+      'new-1',
+    ])
+    expect(selectRemainingRequestAttachmentFiles(['new-1'], 3, 3)).toEqual([])
   })
 })
 

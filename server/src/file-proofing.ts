@@ -27,6 +27,7 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { createHash } from 'node:crypto'
 import {
+  APPROVAL_MAX_REVIEWERS,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   type AnnotationAnchor,
   type ApprovalRequest,
@@ -55,7 +56,7 @@ import { isMissingFileObjectVersionError } from './file-object-errors'
 export const FILE_UPLOAD_MAX_SIZE_BYTES = 2 * 1024 * 1024 * 1024
 
 /** 一つの approval request に指定できる reviewer 上限です。 */
-export const FILE_APPROVAL_MAX_REVIEWERS = 20
+export const FILE_APPROVAL_MAX_REVIEWERS = APPROVAL_MAX_REVIEWERS
 
 /** Approval decision comment 一件の最大文字数です。 */
 export const FILE_APPROVAL_COMMENT_MAX_LENGTH = 2_000
@@ -98,8 +99,10 @@ export type FileProofingScope = {
 
 /** File API で認可済みの actor context です。 */
 export type FileProofingActor = {
-  /** Workspace member key です。 */
+  /** Workspace member key または service identity です。 */
   memberKey: string
+  /** Human member と service actor を区別します。 */
+  kind?: 'member' | 'service'
   /** Guest role かどうかです。 */
   guest: boolean
   /** Scope へ content を追加・review できるかどうかです。 */
@@ -183,6 +186,16 @@ export type CreateFileApprovalInput = {
   fileId: string
   /** Approval 対象 version ID です。 */
   versionId: string
+  /** Reviewer の Workspace member key 一覧です。 */
+  reviewerMemberKeys: string[]
+  /** 判断期限の ISO 8601 timestamp です。 */
+  dueAt: string
+  /** 全員承認後に適用する workflow status ID です。 */
+  completionTransition?: string
+}
+
+/** Work Item 自体に対する approval request 作成入力です。 */
+export type CreateWorkItemApprovalInput = {
   /** Reviewer の Workspace member key 一覧です。 */
   reviewerMemberKeys: string[]
   /** 判断期限の ISO 8601 timestamp です。 */
@@ -558,6 +571,13 @@ export interface FileProofingClient {
     input: CreateFileApprovalInput,
     auditContext?: MutationAuditContext,
   ): Promise<ApprovalRequest>
+  /** Work Item 自体に approval request を作成します。 */
+  createWorkItemApproval(
+    scope: FileProofingScope,
+    actor: FileProofingActor,
+    input: CreateWorkItemApprovalInput,
+    auditContext?: MutationAuditContext,
+  ): Promise<ApprovalRequest>
   /** Reviewer decision を revision 条件付きで保存します。 */
   decideApproval(
     scope: FileProofingScope,
@@ -856,7 +876,12 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
     const visibleFileIds = new Set(files.map((file) => file.id))
     const approvals = approvalItems.filter(isStoredApprovalItem)
-      .filter((approval) => visibleFileIds.has(approval.fileId))
+      .filter((approval) => {
+        const fileSubject = readFileApprovalSubject(approval)
+        return fileSubject
+          ? visibleFileIds.has(fileSubject.fileId)
+          : !actor.guest
+      })
       .map((approval) => toApprovalRequest(approval, actor))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
 
@@ -1354,27 +1379,13 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       )
     }
     requireAvailableScanStatus(version.scanStatus)
-    if (!Array.isArray(input.reviewerMemberKeys)) {
-      throw new FileProofingError(400, 'InvalidApprovalReviewers', 'Approval reviewers are required.')
-    }
-    const reviewerMemberKeys = [...new Set(input.reviewerMemberKeys.map(normalizeReviewerMemberKey))]
-    if (reviewerMemberKeys.length === 0 || reviewerMemberKeys.length > FILE_APPROVAL_MAX_REVIEWERS) {
-      throw new FileProofingError(
-        400,
-        'InvalidApprovalReviewers',
-        `Approval requires 1-${FILE_APPROVAL_MAX_REVIEWERS} unique reviewers.`,
-      )
-    }
+    const reviewers = normalizeApprovalReviewers(input.reviewerMemberKeys)
     const dueAt = normalizeFutureTimestamp(input.dueAt, 'Approval due date')
     const now = auditContext?.occurredAt ?? new Date().toISOString()
     const approvalId = createMutationResourceId('approval', auditContext, scopeKey)
     const completionTransition = input.completionTransition === undefined
       ? undefined
       : normalizeWorkflowStatusId(input.completionTransition)
-    const reviewers: ApprovalReviewer[] = reviewerMemberKeys.map((memberKey) => ({
-      memberKey,
-      status: 'pending',
-    }))
     const item: StoredApprovalItem = {
       scopeKey,
       recordKey: createApprovalRecordKey(approvalId),
@@ -1384,6 +1395,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       issueId: scope.issueId!,
       ...(scope.projectId ? { projectId: scope.projectId } : {}),
       id: approvalId,
+      subjectType: 'file-version',
       revision: 1,
       fileId: file.fileId,
       versionId: version.id,
@@ -1391,6 +1403,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       reviewers,
       dueAt,
       requestedByMemberKey: actor.memberKey,
+      requestedByKind: actor.kind ?? 'member',
       createdAt: now,
       updatedAt: now,
       capabilities: { canCancel: false, canDecide: false },
@@ -1419,7 +1432,95 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       target: { type: 'approval', id: approvalId },
       action: 'requested',
       metadata: {
-        ...createFileAuditMetadata(scope, actor, file.fileId, version.id),
+        ...createApprovalAuditMetadata(scope, actor, item),
+        approvalId,
+        dueAt,
+        completionTransition,
+        notificationCandidates: reviewers.map((reviewer) => ({
+          memberKey: reviewer.memberKey,
+          reason: 'approval-requested',
+        })),
+      },
+    })
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactionItems }))
+    } catch (error) {
+      if (!isConditionalTransactionError(error)) {
+        throw error
+      }
+      const existing = await this.getApproval(scopeKey, approvalId, false)
+      if (existing) {
+        requireMatchingIdempotencyFingerprint(existing.requestFingerprint, auditContext)
+        return toApprovalRequest(existing, actor)
+      }
+      throw new FileProofingError(
+        409,
+        auditContext ? 'IdempotencyKeyReused' : 'ApprovalRevisionConflict',
+        'Approval state changed. Reload and try again.',
+        { cause: error },
+      )
+    }
+
+    return toApprovalRequest(item, actor)
+  }
+
+  /** Work Item 自体に approval request を作成します。 */
+  async createWorkItemApproval(
+    scope: FileProofingScope,
+    actor: FileProofingActor,
+    input: CreateWorkItemApprovalInput,
+    auditContext?: MutationAuditContext,
+  ): Promise<ApprovalRequest> {
+    requireApprovalWrite(actor)
+    requireWorkItemScope(scope)
+    await this.ensureReady()
+    const scopeKey = createFileProofingScopeKey(scope)
+    const reviewers = normalizeApprovalReviewers(input.reviewerMemberKeys)
+    const dueAt = normalizeApprovalTimestamp(input.dueAt, 'Approval due date')
+    const now = auditContext?.occurredAt ?? new Date().toISOString()
+    const approvalId = createMutationResourceId('approval', auditContext, scopeKey)
+    const completionTransition = input.completionTransition === undefined
+      ? undefined
+      : normalizeWorkflowStatusId(input.completionTransition)
+    const item: StoredApprovalItem = {
+      scopeKey,
+      recordKey: createApprovalRecordKey(approvalId),
+      entryType: 'approval',
+      workspaceId: scope.workspaceId,
+      teamId: scope.teamId,
+      issueId: scope.issueId!,
+      ...(scope.projectId ? { projectId: scope.projectId } : {}),
+      id: approvalId,
+      subjectType: 'work-item',
+      revision: 1,
+      status: 'pending',
+      reviewers,
+      dueAt,
+      requestedByMemberKey: actor.memberKey,
+      requestedByKind: actor.kind ?? 'member',
+      createdAt: now,
+      updatedAt: now,
+      capabilities: { canCancel: false, canDecide: false },
+      ...(completionTransition ? { completionTransition } : {}),
+      ...(auditContext ? { requestFingerprint: auditContext.requestFingerprint } : {}),
+    }
+    const transactionItems = createApprovalProjectionPutItems(this.tableName, item)
+    transactionItems.push(createApprovalSummaryUpdate(
+      this.tableName,
+      scopeKey,
+      now,
+      { approvalId, dueAt, pending: 1 },
+    ))
+    addAuditItem(transactionItems, this.auditTableName, auditContext, {
+      directoryId: scope.workspaceId,
+      eventType: 'approval.requested',
+      entityType: 'work-item',
+      entityId: createWorkItemAuditEntityId(scope),
+      target: { type: 'approval', id: approvalId },
+      action: 'requested',
+      metadata: {
+        ...createApprovalAuditMetadata(scope, actor, item),
         approvalId,
         dueAt,
         completionTransition,
@@ -1466,15 +1567,18 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     await this.ensureReady()
     const scopeKey = createFileProofingScopeKey(scope)
     const current = await this.getApproval(scopeKey, approvalId)
-    const file = await this.getFile(scopeKey, current.fileId)
-    requireFileNotDeleted(file)
-    requireFileRead(file, actor)
-    if (file.currentVersionId !== current.versionId) {
-      throw new FileProofingError(
-        409,
-        'ApprovalVersionStale',
-        'The approved file version is no longer current.',
-      )
+    const fileSubject = readFileApprovalSubject(current)
+    const file = fileSubject ? await this.getFile(scopeKey, fileSubject.fileId) : undefined
+    if (file && fileSubject) {
+      requireFileNotDeleted(file)
+      requireFileRead(file, actor)
+      if (file.currentVersionId !== fileSubject.versionId) {
+        throw new FileProofingError(
+          409,
+          'ApprovalVersionStale',
+          'The approved file version is no longer current.',
+        )
+      }
     }
     if (current.revision !== expectedRevision) {
       throw new FileProofingError(409, 'ApprovalRevisionConflict', 'Approval changed. Reload and try again.')
@@ -1528,15 +1632,17 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       next,
       current.revision,
     )
-    transactionItems.push(isCompleted
-      ? createFilePendingApprovalUpdate(
-          this.tableName,
-          file,
-          current.versionId,
-          now,
-          'decrement',
-        )
-      : createFileRevisionConditionCheck(this.tableName, file, current.versionId))
+    if (file && fileSubject) {
+      transactionItems.push(isCompleted
+        ? createFilePendingApprovalUpdate(
+            this.tableName,
+            file,
+            fileSubject.versionId,
+            now,
+            'decrement',
+          )
+        : createFileRevisionConditionCheck(this.tableName, file, fileSubject.versionId))
+    }
     if (isCompleted) {
       transactionItems.push(createApprovalSummaryUpdate(
         this.tableName,
@@ -1594,7 +1700,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       target: { type: 'approval', id: approvalId },
       action: status === 'approved' ? 'completed' : 'decision-recorded',
       metadata: {
-        ...createFileAuditMetadata(scope, actor, current.fileId, current.versionId),
+        ...createApprovalAuditMetadata(scope, actor, current),
         approvalId,
         reviewerStatus,
         approvalStatus: status,
@@ -1605,10 +1711,12 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
               workflowStatusId: completionTransition.workflowStatusId,
             }
           : undefined,
-        notificationCandidates: [{
-          memberKey: current.requestedByMemberKey,
-          reason: status === 'approved' ? 'approval-completed' : 'approval-decision',
-        }],
+        notificationCandidates: readApprovalRequesterKind(current) === 'member'
+          ? [{
+              memberKey: current.requestedByMemberKey,
+              reason: status === 'approved' ? 'approval-completed' : 'approval-decision',
+            }]
+          : [],
       },
     })
 
@@ -1687,10 +1795,15 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     await this.ensureReady()
     const scopeKey = createFileProofingScopeKey(scope)
     const current = await this.getApproval(scopeKey, approvalId)
-    const file = await this.getFile(scopeKey, current.fileId)
-    requireFileNotDeleted(file)
-    requireFileRead(file, actor)
-    if (!actor.canManage && normalizeMemberKey(current.requestedByMemberKey) !== normalizeMemberKey(actor.memberKey)) {
+    const fileSubject = readFileApprovalSubject(current)
+    const file = fileSubject ? await this.getFile(scopeKey, fileSubject.fileId) : undefined
+    if (file) {
+      requireFileNotDeleted(file)
+      requireFileRead(file, actor)
+    }
+    const isMemberRequester = readApprovalRequesterKind(current) === 'member' &&
+      normalizeMemberKey(current.requestedByMemberKey) === normalizeMemberKey(actor.memberKey)
+    if (!actor.canManage && !isMemberRequester) {
       throw new FileProofingError(
         403,
         'ApprovalCancelDenied',
@@ -1703,7 +1816,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     if (current.status !== 'pending') {
       throw new FileProofingError(409, 'ApprovalAlreadyCompleted', 'Approval is no longer pending.')
     }
-    if (file.currentVersionId !== current.versionId) {
+    if (file && fileSubject && file.currentVersionId !== fileSubject.versionId) {
       throw new FileProofingError(
         409,
         'ApprovalVersionStale',
@@ -1723,13 +1836,15 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       next,
       current.revision,
     )
-    transactionItems.push(createFilePendingApprovalUpdate(
-      this.tableName,
-      file,
-      current.versionId,
-      now,
-      'decrement',
-    ))
+    if (file && fileSubject) {
+      transactionItems.push(createFilePendingApprovalUpdate(
+        this.tableName,
+        file,
+        fileSubject.versionId,
+        now,
+        'decrement',
+      ))
+    }
     transactionItems.push(createApprovalSummaryUpdate(
       this.tableName,
       scopeKey,
@@ -1744,7 +1859,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       target: { type: 'approval', id: approvalId },
       action: 'cancelled',
       metadata: {
-        ...createFileAuditMetadata(scope, actor, current.fileId, current.versionId),
+        ...createApprovalAuditMetadata(scope, actor, current),
         approvalId,
         notificationCandidates: current.reviewers.map((reviewer) => ({
           memberKey: reviewer.memberKey,
@@ -1870,10 +1985,10 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         )) {
           return undefined
         }
-        const file = await this.getFile(item.sourceScopeKey, approval.fileId, false)
-        return file && !file.deletedAt && (!actor.guest || file.guestAccess)
-          ? approval
-          : undefined
+        const fileSubject = readFileApprovalSubject(approval)
+        if (!fileSubject) return actor.guest ? undefined : approval
+        const file = await this.getFile(item.sourceScopeKey, fileSubject.fileId, false)
+        return file && !file.deletedAt && (!actor.guest || file.guestAccess) ? approval : undefined
       }))
       approvals.push(...visibleItems
         .filter((item): item is StoredApprovalItem => item !== undefined)
@@ -2624,34 +2739,67 @@ function toFileAnnotation(item: StoredAnnotationItem, actor: FileProofingActor):
   }
 }
 
+/** 保存済み approval から File version subject を安全に復元します。 */
+function readFileApprovalSubject(item: StoredApprovalItem) {
+  if (item.subjectType === 'work-item') return undefined
+  if (typeof item.fileId === 'string' && item.fileId && typeof item.versionId === 'string' && item.versionId) {
+    return { fileId: item.fileId, versionId: item.versionId }
+  }
+  throw new FileProofingError(
+    503,
+    'InvalidApprovalState',
+    'File approval subject metadata is incomplete.',
+  )
+}
+
+/** Legacy approval rows を member requester として安全に読みます。 */
+function readApprovalRequesterKind(item: StoredApprovalItem) {
+  return item.requestedByKind === 'service' ? 'service' as const : 'member' as const
+}
+
 /** Stored approval を actor capability 付き response へ変換します。 */
 function toApprovalRequest(item: StoredApprovalItem, actor: FileProofingActor): ApprovalRequest {
   const isPendingReviewer = item.reviewers.some((reviewer) =>
     normalizeMemberKey(reviewer.memberKey) === normalizeMemberKey(actor.memberKey) &&
     reviewer.status === 'pending'
   )
-  return {
+  const fileSubject = readFileApprovalSubject(item)
+  const requestedByKind = readApprovalRequesterKind(item)
+  const approval = {
     id: item.id,
     teamId: item.teamId,
     issueId: item.issueId,
     ...(item.projectId ? { projectId: item.projectId } : {}),
     revision: item.revision,
-    fileId: item.fileId,
-    versionId: item.versionId,
     status: item.status,
     reviewers: item.reviewers,
     dueAt: item.dueAt,
     requestedByMemberKey: item.requestedByMemberKey,
+    requestedByKind,
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
     ...(item.completedAt ? { completedAt: item.completedAt } : {}),
     capabilities: {
       canDecide: isPendingReviewer && item.status === 'pending',
       canCancel: item.status === 'pending' && (
-        actor.canManage || item.requestedByMemberKey === actor.memberKey
+        actor.canManage || (
+          requestedByKind === 'member' &&
+          normalizeMemberKey(item.requestedByMemberKey) === normalizeMemberKey(actor.memberKey)
+        )
       ),
     },
   }
+  return fileSubject
+    ? {
+        ...approval,
+        subjectType: 'file-version',
+        fileId: fileSubject.fileId,
+        versionId: fileSubject.versionId,
+      }
+    : {
+        ...approval,
+        subjectType: 'work-item',
+      }
 }
 
 /** Stored file 内の version を取得します。 */
@@ -2698,6 +2846,17 @@ function requireFileNotDeleted(file: StoredFileItem) {
 function requireFileWrite(actor: FileProofingActor) {
   if (!actor.canWrite || actor.guest) {
     throw new FileProofingError(403, 'FileWriteDenied', 'File write access is required.')
+  }
+}
+
+/** Actor に Work Item approval 作成 capability があることを検証します。 */
+function requireApprovalWrite(actor: FileProofingActor) {
+  if (!actor.canWrite || actor.guest) {
+    throw new FileProofingError(
+      403,
+      'ApprovalWriteDenied',
+      'Work Item approval write access is required.',
+    )
   }
 }
 
@@ -2832,16 +2991,19 @@ function createApprovalProjectionPutItems(
         : { ExpressionAttributeValues: { ':expectedRevision': expectedRevision } }),
     },
   }]
-  const fileApprovalIndex: StoredFileApprovalIndexItem = {
-    scopeKey: approval.scopeKey,
-    recordKey: createFileApprovalIndexRecordKey(approval.fileId, approval.id),
-    entryType: 'file-approval-index',
-    fileId: approval.fileId,
-    approvalId: approval.id,
-    dueAt: approval.dueAt,
-    reviewerMemberKeys: approval.reviewers.map((reviewer) => reviewer.memberKey),
+  const fileSubject = readFileApprovalSubject(approval)
+  if (fileSubject) {
+    const fileApprovalIndex: StoredFileApprovalIndexItem = {
+      scopeKey: approval.scopeKey,
+      recordKey: createFileApprovalIndexRecordKey(fileSubject.fileId, approval.id),
+      entryType: 'file-approval-index',
+      fileId: fileSubject.fileId,
+      approvalId: approval.id,
+      dueAt: approval.dueAt,
+      reviewerMemberKeys: approval.reviewers.map((reviewer) => reviewer.memberKey),
+    }
+    transactionItems.push({ Put: { TableName: tableName, Item: fileApprovalIndex } })
   }
-  transactionItems.push({ Put: { TableName: tableName, Item: fileApprovalIndex } })
   for (const reviewer of approval.reviewers) {
     const projection: StoredReviewerApprovalItem = {
       scopeKey: createReviewerScopeKey(approval.workspaceId, reviewer.memberKey),
@@ -3005,6 +3167,27 @@ function createFileAuditMetadata(
   }
 }
 
+/** File/Work Item approval 共通の audit/outbox metadata を作成します。 */
+function createApprovalAuditMetadata(
+  scope: FileProofingScope,
+  actor: FileProofingActor,
+  approval: StoredApprovalItem,
+) {
+  const fileSubject = readFileApprovalSubject(approval)
+  return {
+    actorMemberKey: actor.memberKey,
+    actorKind: actor.kind ?? 'member',
+    requesterKey: approval.requestedByMemberKey,
+    requesterKind: readApprovalRequesterKind(approval),
+    subjectType: fileSubject ? 'file-version' : 'work-item',
+    teamId: scope.teamId,
+    issueId: scope.issueId,
+    projectId: scope.projectId,
+    ...(fileSubject ? { fileId: fileSubject.fileId, versionId: fileSubject.versionId } : {}),
+    deepLink: `/teams/${encodeURIComponent(scope.teamId)}/issues/${encodeURIComponent(scope.issueId ?? '')}`,
+  }
+}
+
 /** Scope と mutation idempotency hash から deterministic resource ID を作成します。 */
 function createMutationResourceId(
   prefix: string,
@@ -3051,6 +3234,16 @@ function normalizeFutureTimestamp(value: unknown, label: string) {
   return new Date(epoch).toISOString()
 }
 
+/** Automation approval の決定済み期限を ISO timestamp として正規化します。 */
+function normalizeApprovalTimestamp(value: unknown, label: string) {
+  const timestamp = requireText(value, label)
+  const epoch = Date.parse(timestamp)
+  if (!Number.isFinite(epoch)) {
+    throw new FileProofingError(400, 'InvalidApprovalDueAt', `${label} must be an ISO timestamp.`)
+  }
+  return new Date(epoch).toISOString()
+}
+
 /** Member key を比較用に正規化します。 */
 function normalizeMemberKey(value: unknown) {
   return requireText(value, 'Workspace member key').toLowerCase()
@@ -3059,6 +3252,22 @@ function normalizeMemberKey(value: unknown) {
 /** Reviewer member key を DynamoDB item size に収まる identity 長へ制限します。 */
 function normalizeReviewerMemberKey(value: unknown) {
   return requireLimitedText(value, 'Approval reviewer', 320).toLowerCase()
+}
+
+/** Reviewer keys を unique な pending reviewer 一覧へ正規化します。 */
+function normalizeApprovalReviewers(value: unknown): ApprovalReviewer[] {
+  if (!Array.isArray(value)) {
+    throw new FileProofingError(400, 'InvalidApprovalReviewers', 'Approval reviewers are required.')
+  }
+  const reviewerMemberKeys = [...new Set(value.map(normalizeReviewerMemberKey))]
+  if (reviewerMemberKeys.length === 0 || reviewerMemberKeys.length > FILE_APPROVAL_MAX_REVIEWERS) {
+    throw new FileProofingError(
+      400,
+      'InvalidApprovalReviewers',
+      `Approval requires 1-${FILE_APPROVAL_MAX_REVIEWERS} unique reviewers.`,
+    )
+  }
+  return reviewerMemberKeys.map((memberKey) => ({ memberKey, status: 'pending' }))
 }
 
 /** Reviewer page size を 1-100 件へ制限します。 */

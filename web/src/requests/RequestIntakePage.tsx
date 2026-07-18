@@ -370,7 +370,7 @@ export function RequestIntakePage() {
                         type="button"
                       >
                         <strong className="block truncate text-sm text-[var(--workbench-text)]">{form.name}</strong>
-                        <span className="mt-1 block text-xs font-semibold uppercase text-[var(--workbench-muted)]">{form.status} · v{form.currentPublishedVersion ?? 0}</span>
+                        <span className="mt-1 block text-xs font-semibold uppercase text-[var(--workbench-muted)]">{t(`requests.formStatus.${form.status}`)} · v{form.currentPublishedVersion ?? 0}</span>
                       </button>
                     ))}
                   </div>
@@ -424,6 +424,7 @@ function RequestFormEditorContainer({
   onUpdated: (form: RequestForm) => void
   teams: ProjectDirectoryTeam[]
 }) {
+  const t = useMemo(() => createTranslator(locale), [locale])
   const mutationRunner = useRef(createMutationRequestRunner()).current
   const [model, setModel] = useState<RequestFormDraftModel>(() =>
     initialForm ? normalizeRequestForm(initialForm) : createEmptyRequestFormDraft(),
@@ -471,7 +472,7 @@ function RequestFormEditorContainer({
         onCreated(created)
       }
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Unable to save request form.')
+      setErrorMessage(error instanceof Error ? error.message : t('requests.builder.saveError'))
       throw error
     } finally {
       setIsSaving(false)
@@ -509,7 +510,7 @@ function RequestFormEditorContainer({
       setModel(normalizeRequestForm(published))
       onUpdated(published)
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Unable to publish request form.')
+      setErrorMessage(error instanceof Error ? error.message : t('requests.builder.publishError'))
       throw error
     } finally {
       setIsPublishing(false)

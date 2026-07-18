@@ -52,7 +52,7 @@ const definition = {
           id: 'title',
           type: 'short-text',
           label: { ja: '件名', en: 'Title' },
-          validation: { required: true, minLength: 3, pattern: '^[A-Z].+' },
+          validation: { required: true, minLength: 3 },
         },
         {
           id: 'estimate',
@@ -502,6 +502,16 @@ test('validates a complete form draft and rejects unknown or forward conditional
     () => validateRequestFormDraft(oversizedDraft),
     'Request form draft is too large.',
   )
+
+  const duplicateCustomFieldMapping = cloneDraft()
+  duplicateCustomFieldMapping.routing.mapping.customFieldMappings = {
+    category: 'same-custom-field',
+    estimate: 'same-custom-field',
+  }
+  expectIntakeError(
+    () => validateRequestFormDraft(duplicateCustomFieldMapping),
+    'Each Work Item custom field may be mapped from only one request field.',
+  )
 })
 
 test('evaluates all/any conditions and rejects answers submitted to hidden fields or sections', () => {
@@ -574,8 +584,14 @@ test('enforces visible required fields, answer types, numeric bounds, safe patte
     () => validateRequestAnswers(definition, 'ja', { ...urgentAnswers, estimate: 101 }),
     'Field "estimate" exceeds its maximum.',
   )
+  const fixedPatternDefinition = structuredClone(definition) as RequestFormDefinition
+  fixedPatternDefinition.sections[0]!.fields[1]!.validation!.pattern = '^[A-Z][a-z]{2}$'
+  expect(validateRequestAnswers(fixedPatternDefinition, 'ja', {
+    ...urgentAnswers,
+    title: 'Abc',
+  }).title).toBe('Abc')
   expectIntakeError(
-    () => validateRequestAnswers(definition, 'ja', { ...urgentAnswers, title: 'lowercase title' }),
+    () => validateRequestAnswers(fixedPatternDefinition, 'ja', { ...urgentAnswers, title: 'abc' }),
     'Field "title" has an invalid format.',
   )
   expectIntakeError(
@@ -622,13 +638,34 @@ test('enforces visible required fields, answer types, numeric bounds, safe patte
   unsafePattern.sections[0]!.fields[1]!.validation!.pattern = '^(a+)+$'
   expectIntakeError(
     () => validateRequestFormDefinition(unsafePattern),
-    'unsafe repeated expression',
+    'restricted anchored syntax',
   )
   const ambiguousPattern = structuredClone(definition)
   ambiguousPattern.sections[0]!.fields[1]!.validation!.pattern = '^(a|aa)+$'
   expectIntakeError(
     () => validateRequestFormDefinition(ambiguousPattern),
-    'unsafe repeated expression',
+    'restricted anchored syntax',
+  )
+
+  for (const pattern of ['a{3}', '^a+$', '^a{1,3}$', '^a?$', '^a|b$', '^([a])$', '^a\\1$']) {
+    const restrictedDefinition = structuredClone(definition)
+    restrictedDefinition.sections[0]!.fields[1]!.validation!.pattern = pattern
+    expectIntakeError(
+      () => validateRequestFormDefinition(restrictedDefinition),
+      'restricted anchored syntax',
+    )
+  }
+
+  const linearDefinition = structuredClone(definition) as RequestFormDefinition
+  linearDefinition.sections[0]!.fields[1]!.validation!.pattern = '^[a]{1000}$'
+  const linearAnswers = { ...urgentAnswers, title: 'a'.repeat(1_000) }
+  expect(validateRequestAnswers(linearDefinition, 'ja', linearAnswers).title).toBe(linearAnswers.title)
+  expectIntakeError(
+    () => validateRequestAnswers(linearDefinition, 'ja', {
+      ...linearAnswers,
+      title: `${'a'.repeat(999)}!`,
+    }),
+    'Field "title" has an invalid format.',
   )
 })
 
@@ -846,6 +883,82 @@ test('rejects invalid form status and masks non-conditional store failures', asy
     code: 'RequestIntakeUnavailable',
     message: 'Request intake storage is unavailable.',
     status: 503,
+  })
+})
+
+test('forces link rotation when restoring an archived form and never revives its old token', async () => {
+  let root = createStoredForm({
+    status: 'archived',
+    link: {
+      linkId: 'link-archived',
+      accessMode: 'public',
+      revokedAt: '2026-07-16T08:30:00.000Z',
+    },
+  })
+  const deriveToken = (linkId: string) => createHmac('sha256', tokenHashSecret)
+    .update(`link-value\0workspace-1\0form-1\0${linkId}`)
+    .digest('hex')
+  const digestToken = (token: string) => createHmac('sha256', tokenHashSecret)
+    .update(`link\0${token}`)
+    .digest('hex')
+  const oldToken = deriveToken('link-archived')
+  const lookups = new Map<string, Record<string, unknown>>([
+    [`LINK#${digestToken(oldToken)}`, {
+      entryType: 'link-lookup',
+      scopeKey: `LINK#${digestToken(oldToken)}`,
+      recordKey: 'LOOKUP',
+      workspaceId: 'workspace-1',
+      formId: 'form-1',
+      linkId: 'link-archived',
+      accessMode: 'public',
+      revokedAt: '2026-07-16T08:30:00.000Z',
+    }],
+  ])
+  let transaction: Array<{
+    Put?: { Item?: Record<string, unknown> }
+    Update?: {
+      Key?: { scopeKey?: string }
+      ExpressionAttributeValues?: Record<string, unknown>
+    }
+  }> = []
+  const client = createClient(createDocumentClient((command) => {
+    const key = command.input.Key as { scopeKey?: string; recordKey?: string } | undefined
+    if (key?.recordKey === 'FORM_ROOT#form-1') return { Item: root }
+    if (key?.scopeKey?.startsWith('LINK#')) return { Item: lookups.get(key.scopeKey) }
+    if (Array.isArray(command.input.TransactItems)) {
+      transaction = command.input.TransactItems as typeof transaction
+      root = transaction[0]!.Put!.Item as typeof root
+      const nextLookup = transaction[1]!.Put!.Item!
+      lookups.set(String(nextLookup.scopeKey), nextLookup)
+      const revoked = transaction[2]!.Update!
+      const revokedLookup = lookups.get(revoked.Key!.scopeKey!)!
+      revokedLookup.revokedAt = revoked.ExpressionAttributeValues![':revokedAt']
+      return {}
+    }
+    throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
+  }))
+
+  const restored = await client.updateForm(
+    'workspace-1',
+    'form-1',
+    { id: 'admin@example.com' },
+    { expectedRevision: 1, status: 'draft' },
+  )
+  expect(restored.link.linkId).not.toBe('link-archived')
+  expect(restored.link.token).not.toBe(oldToken)
+  expect(transaction).toHaveLength(3)
+  expect(transaction[2]?.Update?.Key).toEqual({
+    scopeKey: `LINK#${digestToken(oldToken)}`,
+    recordKey: 'LOOKUP',
+  })
+
+  root = { ...root, status: 'published' }
+  await expect(client.resolveLink(oldToken)).rejects.toMatchObject({
+    code: 'RequestFormUnavailable',
+  })
+  await expect(client.resolveLink(restored.link.token)).resolves.toMatchObject({
+    workspaceId: 'workspace-1',
+    formId: 'form-1',
   })
 })
 
@@ -1094,8 +1207,13 @@ test('claims an attachment after submission session renewal without persisting t
     answers: { files: [upload.attachmentId] },
   })
   expect(JSON.stringify(transaction)).not.toContain(claimToken)
-  expect(transaction?.at(-1)?.Update?.ExpressionAttributeValues).toMatchObject({
+  expect(transaction?.find(({ Update }) => Update?.ExpressionAttributeValues?.[':claimDigest'])
+    ?.Update?.ExpressionAttributeValues).toMatchObject({
     ':claimDigest': storedUpload?.claimDigest,
+  })
+  expect(transaction?.at(-1)?.Put?.Item).toMatchObject({
+    entryType: 'submission-event',
+    type: 'submitted',
   })
 })
 
@@ -1185,6 +1303,10 @@ test('fixes submission history to the session version and replays only an identi
       session.usedAt = values[':usedAt']
       session.inputFingerprint = values[':fingerprint']
       session.receipt = values[':receipt']
+      expect(transactItems.at(-1)?.Put?.Item).toMatchObject({
+        entryType: 'submission-event',
+        type: 'submitted',
+      })
       return {}
     }
     throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
@@ -1237,14 +1359,196 @@ test('fixes submission history to the session version and replays only an identi
   )).rejects.toMatchObject({ status: 409, code: 'RequestSessionConsumed' })
 })
 
+test('fills a filtered queue page across evaluated chunks and resumes after the last returned match', async () => {
+  const createQueueSubmission = (id: string, minute: string) => createStoredSubmission({
+    id,
+    recordKey: `SUBMISSION#${id}`,
+    queueRecordKey: `2026-07-16T08:${minute}:00.000Z#${id}`,
+    events: [{
+      id: `projection-${id}`,
+      type: 'assigned',
+      actorId: 'projection@example.com',
+      summary: 'Bounded root projection.',
+      createdAt: `2026-07-16T08:${minute}:30.000Z`,
+    }],
+  })
+  const first = createQueueSubmission('req-1', '59')
+  const second = createQueueSubmission('req-2', '58')
+  const third = createQueueSubmission('req-3', '57')
+  const eventRows = new Map([
+    ['req-1', [{
+      entryType: 'submission-event',
+      scopeKey: 'WORKSPACE#workspace-1',
+      recordKey: 'SUBMISSION_EVENT#req-1#2026-07-16T08:30:00.000Z#event-req-1',
+      submissionId: 'req-1',
+      id: 'event-req-1',
+      type: 'submitted',
+      actorId: 'requester',
+      summary: 'Request was submitted.',
+      createdAt: '2026-07-16T08:30:00.000Z',
+    }]],
+    ['req-2', [{
+      entryType: 'submission-event',
+      scopeKey: 'WORKSPACE#workspace-1',
+      recordKey: 'SUBMISSION_EVENT#req-2#2026-07-16T08:31:00.000Z#event-req-2',
+      submissionId: 'req-2',
+      id: 'event-req-2',
+      type: 'submitted',
+      actorId: 'requester',
+      summary: 'Request was submitted.',
+      createdAt: '2026-07-16T08:31:00.000Z',
+    }]],
+    ['req-3', [{
+      entryType: 'submission-event',
+      scopeKey: 'WORKSPACE#workspace-1',
+      recordKey: 'SUBMISSION_EVENT#req-3#2026-07-16T08:32:00.000Z#event-req-3',
+      submissionId: 'req-3',
+      id: 'event-req-3',
+      type: 'submitted',
+      actorId: 'requester',
+      summary: 'Request was submitted.',
+      createdAt: '2026-07-16T08:32:00.000Z',
+    }]],
+  ])
+  const queueLimits: unknown[] = []
+  const pageA = { scopeKey: 'page-a', recordKey: 'page-a', queueKey: 'page-a', queueRecordKey: 'page-a' }
+  const pageB = { scopeKey: 'page-b', recordKey: 'page-b', queueKey: 'page-b', queueRecordKey: 'page-b' }
+  const client = createClient(createDocumentClient((command) => {
+    if (command.input.IndexName === 'RequestQueueIndex') {
+      queueLimits.push(command.input.Limit)
+      const start = command.input.ExclusiveStartKey as Record<string, unknown> | undefined
+      if (!start) return { Items: [], LastEvaluatedKey: pageA }
+      if (start.scopeKey === 'page-a') return { Items: [first], LastEvaluatedKey: pageB }
+      if (start.scopeKey === 'page-b') {
+        return { Items: [second, third], LastEvaluatedKey: { scopeKey: 'page-c' } }
+      }
+      if (start.scopeKey === second.scopeKey && start.recordKey === second.recordKey) {
+        return { Items: [third] }
+      }
+    }
+    const values = command.input.ExpressionAttributeValues as Record<string, unknown> | undefined
+    const prefix = values?.[':prefix']
+    if (typeof prefix === 'string' && prefix.startsWith('SUBMISSION_EVENT#')) {
+      const submissionId = prefix.split('#')[1]!
+      return { Items: eventRows.get(submissionId) ?? [] }
+    }
+    throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
+  }))
+
+  const page = await client.listSubmissions('workspace-1', { status: 'received', limit: 2 })
+  expect(page.submissions.map(({ id }) => id)).toEqual(['req-1', 'req-2'])
+  expect(page.submissions[0]?.events).toEqual(eventRows.get('req-1')!.map(({
+    entryType: _entryType,
+    scopeKey: _scopeKey,
+    recordKey: _recordKey,
+    submissionId: _submissionId,
+    ...event
+  }) => event))
+  expect(queueLimits).toEqual([100, 100, 100])
+  const cursor = JSON.parse(Buffer.from(page.nextCursor!, 'base64url').toString('utf8')) as {
+    key: Record<string, unknown>
+  }
+  expect(cursor.key).toEqual({
+    scopeKey: second.scopeKey,
+    recordKey: second.recordKey,
+    queueKey: second.queueKey,
+    queueRecordKey: second.queueRecordKey,
+  })
+
+  const finalPage = await client.listSubmissions('workspace-1', {
+    status: 'received',
+    limit: 2,
+    cursor: page.nextCursor,
+  })
+  expect(finalPage.submissions.map(({ id }) => id)).toEqual(['req-3'])
+  expect(finalPage.nextCursor).toBeUndefined()
+})
+
+test('fails closed when filtered queue pagination repeats an evaluated cursor', async () => {
+  const repeatedCursor = {
+    scopeKey: 'repeated',
+    recordKey: 'repeated',
+    queueKey: 'repeated',
+    queueRecordKey: 'repeated',
+  }
+  const client = createClient(createDocumentClient((command) => {
+    if (command.input.IndexName === 'RequestQueueIndex') {
+      return { Items: [], LastEvaluatedKey: repeatedCursor }
+    }
+    throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
+  }))
+
+  await expect(client.listSubmissions('workspace-1', {
+    status: 'received',
+    limit: 1,
+  })).rejects.toMatchObject({ status: 503, code: 'RequestIntakeUnavailable' })
+})
+
+test('restores complete append-only event history in submission detail across event pages', async () => {
+  const stored = createStoredSubmission({
+    attachmentFinalizedAt: '2026-07-16T08:31:00.000Z',
+    events: [{
+      id: 'projection-only',
+      type: 'rejected',
+      actorId: 'projection@example.com',
+      summary: 'Bounded projection.',
+      createdAt: '2026-07-16T08:35:00.000Z',
+    }],
+  })
+  const firstEvent = {
+    entryType: 'submission-event',
+    scopeKey: 'WORKSPACE#workspace-1',
+    recordKey: 'SUBMISSION_EVENT#req-1#2026-07-16T08:30:00.000Z#event-submitted',
+    submissionId: 'req-1',
+    id: 'event-submitted',
+    type: 'submitted',
+    actorId: 'requester',
+    summary: 'Request was submitted.',
+    createdAt: '2026-07-16T08:30:00.000Z',
+  }
+  const secondEvent = {
+    entryType: 'submission-event',
+    scopeKey: 'WORKSPACE#workspace-1',
+    recordKey: 'SUBMISSION_EVENT#req-1#2026-07-16T08:35:00.000Z#event-assigned',
+    submissionId: 'req-1',
+    id: 'event-assigned',
+    type: 'assigned',
+    actorId: 'manager@example.com',
+    summary: 'Request was assigned for triage.',
+    createdAt: '2026-07-16T08:35:00.000Z',
+  }
+  let eventPage = 0
+  const client = createClient(createDocumentClient((command) => {
+    const key = command.input.Key as { recordKey?: string } | undefined
+    if (key?.recordKey === 'SUBMISSION#req-1') return { Item: stored }
+    if (command.input.KeyConditionExpression) {
+      eventPage += 1
+      return eventPage === 1
+        ? { Items: [firstEvent], LastEvaluatedKey: { scopeKey: 'event-page-2' } }
+        : { Items: [secondEvent] }
+    }
+    throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
+  }))
+
+  const detail = await client.getSubmission('workspace-1', 'req-1')
+  expect(detail.events.map(({ id }) => id)).toEqual(['event-submitted', 'event-assigned'])
+  expect(eventPage).toBe(2)
+  expect(JSON.stringify(detail.events)).not.toContain('scopeKey')
+})
+
 test('applies explicit triage transitions and rejects mutation after a terminal state', async () => {
   let stored = createStoredSubmission()
   const puts: Record<string, unknown>[] = []
+  const eventPuts: Record<string, unknown>[] = []
   const client = createClient(createDocumentClient((command) => {
     if (command.input.Key) return { Item: stored }
-    if (command.input.Item) {
-      stored = command.input.Item as RequestSubmission & Record<string, unknown>
+    const items = command.input.TransactItems as Array<{
+      Put?: { Item?: Record<string, unknown> }
+    }> | undefined
+    if (items) {
+      stored = items[0]!.Put!.Item as RequestSubmission & Record<string, unknown>
       puts.push(stored)
+      eventPuts.push(items[1]!.Put!.Item!)
       return {}
     }
     throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
@@ -1293,6 +1597,13 @@ test('applies explicit triage transitions and rejects mutation after a terminal 
     },
   })
   expect(rejected.events.at(-1)?.summary).toBe('Request was rejected: Out of scope.')
+  expect(eventPuts).toHaveLength(3)
+  expect(eventPuts.at(-1)).toMatchObject({
+    entryType: 'submission-event',
+    submissionId: 'req-1',
+    type: 'rejected',
+    summary: 'Request was rejected: Out of scope.',
+  })
   await expect(client.applyAction(
     'workspace-1',
     'req-1',
@@ -1319,10 +1630,15 @@ test('rejects an unknown triage discriminator instead of treating it as a duplic
 test('makes Work Item conversion completion idempotent for the same trace target', async () => {
   let stored = createStoredSubmission()
   let putCount = 0
+  let eventPut: Record<string, unknown> | undefined
   const client = createClient(createDocumentClient((command) => {
     if (command.input.Key) return { Item: stored }
-    if (command.input.Item) {
-      stored = command.input.Item as RequestSubmission & Record<string, unknown>
+    const items = command.input.TransactItems as Array<{
+      Put?: { Item?: Record<string, unknown> }
+    }> | undefined
+    if (items) {
+      stored = items[0]!.Put!.Item as RequestSubmission & Record<string, unknown>
+      eventPut = items[1]!.Put!.Item
       putCount += 1
       return {}
     }
@@ -1347,6 +1663,11 @@ test('makes Work Item conversion completion idempotent for the same trace target
   expect(converted).toMatchObject({ status: 'converted', revision: 2, workItem: projection.workItem })
   expect(replay).toEqual(converted)
   expect(putCount).toBe(1)
+  expect(eventPut).toMatchObject({
+    entryType: 'submission-event',
+    submissionId: 'req-1',
+    type: 'converted',
+  })
 })
 
 test('exposes staff requests through an allowlisted requester thread view', async () => {
@@ -1509,7 +1830,12 @@ test('hashes requester thread tokens and appends a web reply to an open request'
     const items = command.input.TransactItems as Array<{ Put?: { Item?: Record<string, unknown> } }> | undefined
     if (items) {
       stored = items[0]!.Put!.Item as RequestSubmission & Record<string, unknown>
-      replyReceipt = items[1]?.Put?.Item
+      expect(items[1]?.Put?.Item).toMatchObject({
+        entryType: 'submission-event',
+        submissionId: 'req-1',
+        type: 'requester-replied',
+      })
+      replyReceipt = items[2]?.Put?.Item
       return {}
     }
     throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
@@ -1571,7 +1897,12 @@ test('binds email replies to the original sender and deduplicates Message-ID', a
     if (items) {
       transactionCount += 1
       stored = items[0]!.Put!.Item as RequestSubmission & Record<string, unknown>
-      emailReceipt = items[1]!.Put!.Item
+      expect(items[1]?.Put?.Item).toMatchObject({
+        entryType: 'submission-event',
+        submissionId: 'req-1',
+        type: 'requester-replied',
+      })
+      emailReceipt = items[2]!.Put!.Item
       return {}
     }
     throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)

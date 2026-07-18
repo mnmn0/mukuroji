@@ -216,9 +216,9 @@ export function RequestFormBuilder({
                     : 'draft',
               })}
             >
-              <option value="draft">Draft</option>
-              {model.status === 'published' ? <option value="published">Published</option> : null}
-              <option value="archived">Archived</option>
+              <option value="draft">{t('requests.formStatus.draft')}</option>
+              {model.status === 'published' ? <option value="published">{t('requests.formStatus.published')}</option> : null}
+              <option value="archived">{t('requests.formStatus.archived')}</option>
             </select>
           </BuilderLabel>
           <BuilderLabel label={t('requests.builder.version')}>
@@ -631,7 +631,7 @@ export function RequestFormBuilder({
               priority: event.target.value as WorkItemPriority,
             } })}
           >
-            {priorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}
+            {priorities.map((priority) => <option key={priority} value={priority}>{t(`requests.priority.${priority}`)}</option>)}
           </select>
         </BuilderLabel>
         <BuilderLabel label={t('requests.builder.dueOffset')}>
@@ -835,7 +835,7 @@ function RoutingTargetEditor({
       </BuilderLabel>
       <BuilderLabel label={t('requests.builder.priority')}>
         <select className="workbench-input min-h-10 px-3" value={target.priority} onChange={(event) => onChange({ ...target, priority: event.target.value as WorkItemPriority })}>
-          {priorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}
+          {priorities.map((priority) => <option key={priority} value={priority}>{t(`requests.priority.${priority}`)}</option>)}
         </select>
       </BuilderLabel>
       <BuilderLabel label={t('requests.builder.dueOffset')}>
@@ -1007,17 +1007,68 @@ function FieldEditor({
         </label>
       </div>
       {supportsOptions ? (
-        <div className="border-t border-[var(--workbench-border)] p-3">
-          <BuilderLabel label={t('requests.builder.options')}>
-            <textarea
-              className="workbench-input min-h-24 px-3 py-2"
-              value={field.options.map((option) => option.label[editingLocale] ?? '').join('\n')}
-              onChange={(event) => onChange({
-                ...field,
-                options: updateRequestOptions(field, editingLocale, event.target.value),
-              })}
-            />
-          </BuilderLabel>
+        <div className="grid gap-3 border-t border-[var(--workbench-border)] p-3">
+          <p className="text-sm font-semibold text-[var(--workbench-text)]">
+            {t('requests.builder.options')}
+          </p>
+          {field.options.map((option, optionIndex) => (
+            <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-3" key={option.id}>
+              <BuilderLabel label={`${t('requests.builder.optionLabel')} · ${option.id}`}>
+                <input
+                  className="workbench-input min-h-10 px-3"
+                  required={isDefaultLocale}
+                  value={option.label[editingLocale] ?? ''}
+                  onChange={(event) => onChange({
+                    ...field,
+                    options: field.options.map((candidate, candidateIndex) =>
+                      candidateIndex === optionIndex
+                        ? {
+                            ...candidate,
+                            label: updateLocalized(
+                              candidate.label,
+                              editingLocale,
+                              event.target.value,
+                            ),
+                          }
+                        : candidate
+                    ),
+                  })}
+                />
+              </BuilderLabel>
+              <ReorderButtons
+                disableDown={optionIndex === field.options.length - 1}
+                disableUp={optionIndex === 0}
+                removeDisabled={false}
+                t={t}
+                onMove={(direction) => onChange({
+                  ...field,
+                  options: moveItem(field.options, optionIndex, direction),
+                })}
+                onRemove={() => onChange({
+                  ...field,
+                  options: field.options.filter((_, candidateIndex) =>
+                    candidateIndex !== optionIndex
+                  ),
+                })}
+              />
+            </div>
+          ))}
+          <button
+            className="workbench-button-secondary min-h-9 justify-self-start px-3"
+            onClick={() => onChange({
+              ...field,
+              options: [
+                ...field.options,
+                {
+                  id: createUniqueId('option', field.options.map((option) => option.id)),
+                  label: { en: '', ja: '' },
+                },
+              ],
+            })}
+            type="button"
+          >
+            + {t('requests.builder.addOption')}
+          </button>
         </div>
       ) : null}
       <details className="border-t border-[var(--workbench-border)] p-3">
@@ -1182,7 +1233,7 @@ function ConditionEditor({
                 ) })
               }}
             >
-              {conditionOperators.map((operator) => <option key={operator} value={operator}>{operator}</option>)}
+              {conditionOperators.map((operator) => <option key={operator} value={operator}>{t(`requests.conditionOperator.${operator}`)}</option>)}
             </select>
             <ConditionValueInput
               editingLocale={editingLocale}
@@ -1257,8 +1308,8 @@ function ConditionValueInput({
   if (field?.type === 'checkbox') {
     return (
       <select aria-label={ariaLabel} className="workbench-input min-h-9 px-3" value={value === false ? 'false' : 'true'} onChange={(event) => onChange(event.target.value === 'true')}>
-        <option value="true">true</option>
-        <option value="false">false</option>
+        <option value="true">{t('requests.boolean.true')}</option>
+        <option value="false">{t('requests.boolean.false')}</option>
       </select>
     )
   }
@@ -1448,23 +1499,4 @@ async function copyText(value: string) {
 function runBuilderAction(action: (() => void | Promise<void>) | undefined) {
   if (!action) return
   void Promise.resolve().then(action).catch(() => undefined)
-}
-
-function updateRequestOptions(
-  field: RequestBuilderField,
-  locale: RequestLocale,
-  value: string,
-) {
-  const usedIds = field.options.map((option) => option.id)
-
-  return value.split('\n').map((label, optionIndex) => {
-    const existingOption = field.options[optionIndex]
-    const id = existingOption?.id ?? createUniqueId('option', usedIds)
-    if (!existingOption) usedIds.push(id)
-
-    return {
-      id,
-      label: updateLocalized(existingOption?.label ?? {}, locale, label),
-    }
-  })
 }

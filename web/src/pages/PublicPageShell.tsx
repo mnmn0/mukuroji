@@ -34,6 +34,10 @@ export type PublicPageContext = {
  */
 type PublicPageShellProps = {
   /**
+   * Locale selector に表示できる locale 一覧です。
+   */
+  availableLocales?: readonly Locale[]
+  /**
    * 現在の locale を受け取ってページ本文を返す描画関数です。
    */
   children: (context: PublicPageContext) => ReactNode
@@ -59,6 +63,7 @@ type PublicPageShellProps = {
  * 未ログイン利用者向けページで共有するヘッダー、言語切替、フッターを描画します。
  */
 export function PublicPageShell({
+  availableLocales,
   children,
   initialLocale,
   locale: controlledLocale,
@@ -68,6 +73,9 @@ export function PublicPageShell({
   const [uncontrolledLocale, setUncontrolledLocale] = useState<Locale>(() => initialLocale ?? getInitialLocale())
   const locale = controlledLocale ?? uncontrolledLocale
   const t = useMemo(() => createTranslator(locale), [locale])
+  const availableLocaleOptions = localeOptions.filter((option) =>
+    availableLocales?.includes(option.locale) ?? true
+  )
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -76,6 +84,7 @@ export function PublicPageShell({
 
   const handleLocaleChange = (value: string) => {
     const nextLocale = value === 'en' ? 'en' : 'ja'
+    if (!availableLocaleOptions.some((option) => option.locale === nextLocale)) return
     if (controlledLocale === undefined) {
       setUncontrolledLocale(nextLocale)
     }
@@ -121,7 +130,7 @@ export function PublicPageShell({
               value={locale}
               onChange={(event) => handleLocaleChange(event.target.value)}
             >
-              {localeOptions.map((option) => (
+              {availableLocaleOptions.map((option) => (
                 <option key={option.locale} value={option.locale}>
                   {option.label}
                 </option>

@@ -81,6 +81,7 @@ const REQUEST_FORM_DRAFT_BYTE_LIMIT = 128 * 1024
 const REQUEST_ANSWER_TOTAL_BYTE_LIMIT = 96 * 1024
 const REQUEST_THREAD_TOTAL_BYTE_LIMIT = 64 * 1024
 const REQUEST_EVENT_TOTAL_BYTE_LIMIT = 32 * 1024
+const REQUEST_PATTERN_FIXED_QUANTIFIER_LIMIT = 1_000
 const REQUEST_STORED_ITEM_BYTE_LIMIT = 360 * 1024
 const REQUEST_SUBMISSION_REPLAY_GRACE_MS = 15 * 60_000
 const REQUEST_SUBMISSION_REPLAY_LIMIT = 5
@@ -412,6 +413,18 @@ type StoredRequestSubmission = RequestSubmission & {
   attachmentFinalizedAt?: string
 }
 
+/** Submission activity を immutable に保存する append-only row です。 */
+type StoredRequestSubmissionEvent = RequestSubmissionEvent & {
+  /** DynamoDB row discriminator です。 */
+  entryType: 'submission-event'
+  /** Workspace partition key です。 */
+  scopeKey: string
+  /** Submission、時刻、event ID を含む sort key です。 */
+  recordKey: string
+  /** Event が属する submission ID です。 */
+  submissionId: string
+}
+
 /** Hashed requester reply capability の lookup row です。 */
 type StoredThreadLookup = {
   /** DynamoDB row discriminator です。 */
@@ -724,6 +737,12 @@ function validateRequestFormRouting(
         if (!fieldIds.has(fieldId)) throw invalidInput(`Custom mapping field "${fieldId}" was not found.`)
         return [fieldId, requireIdentifier(customFieldId, 'Custom field ID')]
       }))
+  if (
+    customFieldMappings &&
+    new Set(Object.values(customFieldMappings)).size !== Object.keys(customFieldMappings).length
+  ) {
+    throw invalidInput('Each Work Item custom field may be mapped from only one request field.')
+  }
   return {
     defaultTarget,
     rules: normalizedRules,
@@ -837,7 +856,9 @@ function validateAnswerValue(field: RequestFormField, raw: unknown): RequestAnsw
   if (field.type === 'date' && !isValidIsoDate(value)) throw invalidInput(`Field "${field.id}" must be an ISO date.`)
   if (field.validation?.minLength !== undefined && value.length < field.validation.minLength) throw invalidInput(`Field "${field.id}" is too short.`)
   if (field.validation?.maxLength !== undefined && value.length > field.validation.maxLength) throw invalidInput(`Field "${field.id}" is too long.`)
-  if (field.validation?.pattern && !(new RegExp(field.validation.pattern, 'u')).test(value)) throw invalidInput(`Field "${field.id}" has an invalid format.`)
+  if (field.validation?.pattern && !matchesRequestPattern(field.validation.pattern, value)) {
+    throw invalidInput(`Field "${field.id}" has an invalid format.`)
+  }
   return value
 }
 
@@ -910,7 +931,7 @@ function requireAnyLocalizedText(value: unknown, label: string) {
 function requireSafePattern(value: unknown) {
   const pattern = requireText(value, 'Validation pattern', 256)
   if (!isSafeRequestPattern(pattern)) {
-    throw invalidInput('Validation pattern contains an unsafe repeated expression.')
+    throw invalidInput('Validation pattern must use the restricted anchored syntax.')
   }
   try {
     new RegExp(pattern, 'u')
@@ -921,13 +942,13 @@ function requireSafePattern(value: unknown) {
 }
 
 function isSafeRequestPattern(pattern: string) {
-  if (/\\[1-9]|\\k</u.test(pattern) || /[()|]/u.test(pattern)) return false
+  if (pattern.length < 2 || !pattern.startsWith('^') || !pattern.endsWith('$')) return false
   let escaped = false
   let insideCharacterClass = false
-  let variableQuantifierCount = 0
   for (let index = 0; index < pattern.length; index += 1) {
     const character = pattern[index]!
     if (escaped) {
+      if (/[1-9]/u.test(character) || character === 'k' && pattern[index + 1] === '<') return false
       escaped = false
       continue
     }
@@ -944,25 +965,29 @@ function isSafeRequestPattern(pattern: string) {
       continue
     }
     if (insideCharacterClass) continue
-    if (character === '*' || character === '+' || character === '?') {
-      variableQuantifierCount += 1
-    } else if (character === '{') {
-      const quantifier = pattern.slice(index).match(/^\{(\d+)(?:,(\d*))?\}/u)
-      if (quantifier) {
-        const minimum = Number(quantifier[1])
-        const maximum = quantifier[2] === undefined || quantifier[2] === ''
-          ? minimum
-          : Number(quantifier[2])
-        if (!Number.isSafeInteger(minimum) || !Number.isSafeInteger(maximum) || maximum > REQUEST_ANSWER_TEXT_LIMIT) {
-          return false
-        }
-        if (quantifier[2] !== undefined) variableQuantifierCount += 1
-        index += quantifier[0].length - 1
-      }
+    if (character === '(' || character === ')' || character === '|' ||
+      character === '*' || character === '+' || character === '?') return false
+    if (character === '^' && index !== 0 || character === '$' && index !== pattern.length - 1) {
+      return false
     }
-    if (variableQuantifierCount > 1) return false
+    if (character === '}') return false
+    if (character !== '{') continue
+    const quantifier = pattern.slice(index).match(/^\{(\d+)\}/u)
+    if (!quantifier) return false
+    const count = Number(quantifier[1])
+    if (
+      !Number.isSafeInteger(count) ||
+      count < 1 ||
+      count > REQUEST_PATTERN_FIXED_QUANTIFIER_LIMIT
+    ) return false
+    index += quantifier[0].length - 1
   }
-  return variableQuantifierCount === 0 || pattern.startsWith('^')
+  return !escaped && !insideCharacterClass
+}
+
+function matchesRequestPattern(pattern: string, value: string) {
+  const match = new RegExp(pattern, 'u').exec(value)
+  return match?.[0] === value
 }
 
 function requireScope(value: unknown): RequestFormScope {
@@ -1107,11 +1132,43 @@ function appendRequestMessage(
   )
 }
 
-function appendRequestEvent(
+/** Submission root に保持する bounded event projection を作成します。 */
+export function createRequestSubmissionEventProjection(
   current: readonly RequestSubmissionEvent[],
   event: RequestSubmissionEvent,
 ) {
-  return appendBoundedRequestHistory(current, event, 200, REQUEST_EVENT_TOTAL_BYTE_LIMIT)
+  return appendBoundedRequestHistory(
+    current,
+    normalizeRequestSubmissionEvent(event),
+    200,
+    REQUEST_EVENT_TOTAL_BYTE_LIMIT,
+  )
+}
+
+/** Submission mutation と同じ transaction に追加する immutable event Put を作成します。 */
+export function createRequestSubmissionEventTransactionPut(
+  tableName: string,
+  scopeKey: string,
+  submissionId: string,
+  event: RequestSubmissionEvent,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const normalizedSubmissionId = requireIdentifier(submissionId, 'Request submission ID')
+  const normalizedEvent = normalizeRequestSubmissionEvent(event)
+  const item: StoredRequestSubmissionEvent = {
+    entryType: 'submission-event',
+    scopeKey: requireText(scopeKey, 'Request submission event scope', 1_000),
+    recordKey: createSubmissionEventRecordKey(normalizedSubmissionId, normalizedEvent),
+    submissionId: normalizedSubmissionId,
+    ...normalizedEvent,
+  }
+  assertStoredRequestItemSize(item)
+  return {
+    Put: {
+      TableName: requireText(tableName, 'Request intake table name', 1_000),
+      Item: item,
+      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    },
+  }
 }
 
 function assertStoredRequestItemSize(value: unknown) {
@@ -1312,10 +1369,11 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       : input.expiresAt === null
         ? undefined
         : readOptionalFutureTimestamp(input.expiresAt, nowDate, 'Request link expiry')
-    const rotate = input.rotateLinkToken === true
     const status = input.status === undefined
       ? current.status
       : requireRequestFormUpdateStatus(input.status)
+    const rotate = input.rotateLinkToken === true ||
+      current.status === 'archived' && status !== 'archived'
     const link = {
       linkId: rotate ? createSortableId('link', nowDate, randomUUID()) : current.link.linkId,
       accessMode,
@@ -1863,6 +1921,12 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
           },
         },
       })),
+      createRequestSubmissionEventTransactionPut(
+        this.tableName,
+        submission.scopeKey,
+        submissionId,
+        event,
+      ),
     ]
     try {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
@@ -1895,27 +1959,60 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       ? 50
       : requireInteger(options.limit, 'Request queue limit', 1, 100)
     const queueKey = createWorkspaceScopeKey(workspaceId)
-    const exclusiveStartKey = options.cursor
+    let exclusiveStartKey = options.cursor
       ? decodeQueueCursor(options.cursor, queueKey, options.status)
       : undefined
-    const response = await this.documentClient.send(new QueryCommand({
-      TableName: this.tableName,
-      IndexName: this.queueIndexName,
-      KeyConditionExpression: 'queueKey = :queueKey',
-      ...(options.status ? { FilterExpression: '#status = :status' } : {}),
-      ExpressionAttributeNames: options.status ? { '#status': 'status' } : undefined,
-      ExpressionAttributeValues: {
-        ':queueKey': queueKey,
-        ...(options.status ? { ':status': options.status } : {}),
-      },
-      ScanIndexForward: false,
-      Limit: limit,
-      ExclusiveStartKey: exclusiveStartKey,
-    }))
+    const storedSubmissions: StoredRequestSubmission[] = []
+    let nextCursorKey: Record<string, unknown> | undefined
+    const evaluatedCursors = new Set<string>()
+    do {
+      if (exclusiveStartKey) {
+        const cursorFingerprint = stableStringify(exclusiveStartKey)
+        if (evaluatedCursors.has(cursorFingerprint)) throw requestStoreUnavailable()
+        evaluatedCursors.add(cursorFingerprint)
+      }
+      const remaining = limit - storedSubmissions.length
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        IndexName: this.queueIndexName,
+        KeyConditionExpression: 'queueKey = :queueKey',
+        ...(options.status ? { FilterExpression: '#status = :status' } : {}),
+        ExpressionAttributeNames: options.status ? { '#status': 'status' } : undefined,
+        ExpressionAttributeValues: {
+          ':queueKey': queueKey,
+          ...(options.status ? { ':status': options.status } : {}),
+        },
+        ScanIndexForward: false,
+        Limit: options.status ? 100 : remaining,
+        ExclusiveStartKey: exclusiveStartKey,
+      }))
+      const matched = (response.Items ?? []).map(readStoredSubmission)
+      storedSubmissions.push(...matched.slice(0, remaining))
+      if (matched.length > remaining) {
+        nextCursorKey = createQueueCursorKey(matched[remaining - 1]!)
+        if (evaluatedCursors.has(stableStringify(nextCursorKey))) throw requestStoreUnavailable()
+        break
+      }
+      if (storedSubmissions.length >= limit) {
+        nextCursorKey = response.LastEvaluatedKey
+        if (
+          nextCursorKey &&
+          evaluatedCursors.has(stableStringify(nextCursorKey))
+        ) throw requestStoreUnavailable()
+        break
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (storedSubmissions.length < limit && exclusiveStartKey)
+    const submissions = await Promise.all(storedSubmissions.map(async (stored) =>
+      toRequestSubmissionView(
+        stored,
+        await this.getSubmissionEvents(workspaceId, stored.id),
+      )
+    ))
     return {
-      submissions: (response.Items ?? []).map((item) => toRequestSubmissionView(readStoredSubmission(item))),
-      ...(response.LastEvaluatedKey
-        ? { nextCursor: encodeQueueCursor(queueKey, options.status, response.LastEvaluatedKey) }
+      submissions,
+      ...(nextCursorKey
+        ? { nextCursor: encodeQueueCursor(queueKey, options.status, nextCursorKey) }
         : {}),
     }
   }
@@ -1942,7 +2039,8 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     ) {
       await this.finalizeSubmissionAttachments(refreshed)
     }
-    return toRequestSubmissionView(refreshed)
+    const events = await this.getSubmissionEvents(workspaceId, submissionId)
+    return toRequestSubmissionView(refreshed, events)
   }
 
   /** Convert 以外の explicit triage action を適用します。 */
@@ -2002,6 +2100,13 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     } else {
       throw invalidInput('Request action is invalid.')
     }
+    const event: RequestSubmissionEvent = {
+      id: createSortableId('event', nowDate, randomUUID()),
+      type: eventType,
+      actorId: requireText(actor.id, 'Request actor', 320),
+      summary,
+      createdAt: now,
+    }
     const next = {
       ...current,
       status: nextStatus,
@@ -2010,19 +2115,13 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       ...(duplicateOfSubmissionId ? { duplicateOfSubmissionId } : {}),
       messages: messages.reduce<RequestSubmissionMessage[]>((history, message) =>
         appendRequestMessage(history, message), []),
-      events: appendRequestEvent(current.events, {
-        id: createSortableId('event', nowDate, randomUUID()),
-        type: eventType,
-        actorId: requireText(actor.id, 'Request actor', 320),
-        summary,
-        createdAt: now,
-      }),
+      events: createRequestSubmissionEventProjection(current.events, event),
       updatedAt: now,
       capabilities: terminalSubmissionStatuses.has(nextStatus)
         ? terminalSubmissionCapabilities
         : activeSubmissionCapabilities,
     } satisfies StoredRequestSubmission
-    await this.putSubmissionWithRevision(next, current.revision)
+    await this.putSubmissionWithRevision(next, current.revision, event)
     return toRequestSubmissionView(next)
   }
 
@@ -2041,22 +2140,23 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     assertSubmissionMutable(current)
     const nowDate = this.now()
     const now = nowDate.toISOString()
+    const event: RequestSubmissionEvent = {
+      id: createSortableId('event', nowDate, randomUUID()),
+      type: 'converted',
+      actorId: requireText(actor.id, 'Request actor', 320),
+      summary: 'Request was converted to a Work Item.',
+      createdAt: now,
+    }
     const next: StoredRequestSubmission = {
       ...current,
       status: 'converted',
       revision: current.revision + 1,
       workItem: validateWorkItemReference(input.workItem),
-      events: appendRequestEvent(current.events, {
-        id: createSortableId('event', nowDate, randomUUID()),
-        type: 'converted',
-        actorId: requireText(actor.id, 'Request actor', 320),
-        summary: 'Request was converted to a Work Item.',
-        createdAt: now,
-      }),
+      events: createRequestSubmissionEventProjection(current.events, event),
       updatedAt: now,
       capabilities: terminalSubmissionCapabilities,
     }
-    await this.putSubmissionWithRevision(next, current.revision)
+    await this.putSubmissionWithRevision(next, current.revision, event)
     return toRequestSubmissionView(next)
   }
 
@@ -2358,6 +2458,43 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     return readStoredSubmission(response.Item)
   }
 
+  private async getSubmissionEvents(workspaceId: string, submissionId: string) {
+    const scopeKey = createWorkspaceScopeKey(workspaceId)
+    const prefix = createSubmissionEventRecordKeyPrefix(submissionId)
+    const events: RequestSubmissionEvent[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    const evaluatedCursors = new Set<string>()
+    do {
+      if (exclusiveStartKey) {
+        const cursorFingerprint = stableStringify(exclusiveStartKey)
+        if (evaluatedCursors.has(cursorFingerprint)) throw requestStoreUnavailable()
+        evaluatedCursors.add(cursorFingerprint)
+      }
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'scopeKey = :scopeKey AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: { ':scopeKey': scopeKey, ':prefix': prefix },
+        ConsistentRead: true,
+        ExclusiveStartKey: exclusiveStartKey,
+      }))
+      events.push(...(response.Items ?? []).map((item) => {
+        const stored = readStoredSubmissionEvent(item)
+        if (stored.submissionId !== submissionId) {
+          throw new RequestIntakeError(
+            503,
+            'InvalidRequestSubmissionEvent',
+            'Stored request submission event is invalid.',
+          )
+        }
+        return toRequestSubmissionEvent(stored)
+      }))
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return events.sort((left, right) =>
+      left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)
+    )
+  }
+
   private async finalizeAvailableAttachments(submission: StoredRequestSubmission) {
     await Promise.all(submission.attachments.map(async (attachment) => {
       if (attachment.scanStatus !== 'available') return
@@ -2389,17 +2526,33 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     }
   }
 
-  private async putSubmissionWithRevision(next: StoredRequestSubmission, expectedRevision: number) {
+  private async putSubmissionWithRevision(
+    next: StoredRequestSubmission,
+    expectedRevision: number,
+    event: RequestSubmissionEvent,
+  ) {
     assertStoredRequestItemSize(next)
     try {
-      await this.documentClient.send(new PutCommand({
-        TableName: this.tableName,
-        Item: next,
-        ConditionExpression: 'revision = :expectedRevision AND entryType = :entryType',
-        ExpressionAttributeValues: {
-          ':expectedRevision': expectedRevision,
-          ':entryType': 'submission',
-        },
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: next,
+              ConditionExpression: 'revision = :expectedRevision AND entryType = :entryType',
+              ExpressionAttributeValues: {
+                ':expectedRevision': expectedRevision,
+                ':entryType': 'submission',
+              },
+            },
+          },
+          createRequestSubmissionEventTransactionPut(
+            this.tableName,
+            next.scopeKey,
+            next.id,
+            event,
+          ),
+        ],
       }))
     } catch (error) {
       if (isConditionalFailure(error)) throw revisionConflict('Request submission')
@@ -2439,6 +2592,13 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     const now = nowDate.toISOString()
     const replyId = createSortableId('reply', nowDate, randomUUID())
     const receipt: RequestRequesterReplyReceipt = { replyId, receivedAt: now }
+    const event: RequestSubmissionEvent = {
+      id: createSortableId('event', nowDate, randomUUID()),
+      type: 'requester-replied',
+      actorId: 'requester',
+      summary: source === 'email' ? 'Requester replied by email.' : 'Requester replied on the request form.',
+      createdAt: now,
+    }
     const next: StoredRequestSubmission = {
       ...current,
       status: 'triaging',
@@ -2450,13 +2610,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         body,
         createdAt: now,
       }),
-      events: appendRequestEvent(current.events, {
-        id: createSortableId('event', nowDate, randomUUID()),
-        type: 'requester-replied',
-        actorId: 'requester',
-        summary: source === 'email' ? 'Requester replied by email.' : 'Requester replied on the request form.',
-        createdAt: now,
-      }),
+      events: createRequestSubmissionEventProjection(current.events, event),
       updatedAt: now,
       capabilities: activeSubmissionCapabilities,
     }
@@ -2473,6 +2627,12 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
           },
         },
       },
+      createRequestSubmissionEventTransactionPut(
+        this.tableName,
+        next.scopeKey,
+        next.id,
+        event,
+      ),
     ]
     if (dedupe) {
       const replyReceipt: StoredReplyReceipt = {
@@ -2711,6 +2871,20 @@ const terminalSubmissionStatuses = new Set<RequestSubmissionStatus>([
   'converted',
 ])
 
+function normalizeRequestSubmissionEvent(value: unknown): RequestSubmissionEvent {
+  const record = requireRecord(value, 'Request submission event')
+  if (!isSubmissionEventType(record.type)) {
+    throw invalidInput('Request submission event type is invalid.')
+  }
+  return {
+    id: requireIdentifier(record.id, 'Request submission event ID'),
+    type: record.type,
+    actorId: requireText(record.actorId, 'Request submission event actor', 320),
+    summary: requireText(record.summary, 'Request submission event summary', 10_000),
+    createdAt: requireIsoTimestamp(record.createdAt, 'Request submission event timestamp'),
+  }
+}
+
 function readStoredForm(value: unknown): StoredRequestForm {
   const record = requireRecord(value, 'Stored request form')
   if (
@@ -2879,7 +3053,62 @@ function readStoredSubmission(value: unknown): StoredRequestSubmission {
   }
 }
 
-function toRequestSubmissionView(stored: StoredRequestSubmission): RequestSubmission {
+function readStoredSubmissionEvent(value: unknown): StoredRequestSubmissionEvent {
+  const record = requireRecord(value, 'Stored request submission event')
+  if (
+    record.entryType !== 'submission-event' ||
+    typeof record.scopeKey !== 'string' ||
+    typeof record.recordKey !== 'string' ||
+    typeof record.submissionId !== 'string' ||
+    typeof record.id !== 'string' ||
+    !isSubmissionEventType(record.type) ||
+    typeof record.actorId !== 'string' ||
+    typeof record.summary !== 'string' ||
+    typeof record.createdAt !== 'string'
+  ) {
+    throw invalidStoredSubmissionEvent()
+  }
+  try {
+    const event = normalizeRequestSubmissionEvent(record)
+    const submissionId = requireIdentifier(record.submissionId, 'Stored request submission ID')
+    if (record.recordKey !== createSubmissionEventRecordKey(submissionId, event)) {
+      throw new Error('event key mismatch')
+    }
+    return {
+      entryType: 'submission-event',
+      scopeKey: record.scopeKey,
+      recordKey: record.recordKey,
+      submissionId,
+      ...event,
+    }
+  } catch {
+    throw invalidStoredSubmissionEvent()
+  }
+}
+
+function invalidStoredSubmissionEvent() {
+  return new RequestIntakeError(
+    503,
+    'InvalidRequestSubmissionEvent',
+    'Stored request submission event is invalid.',
+  )
+}
+
+function toRequestSubmissionEvent(stored: StoredRequestSubmissionEvent): RequestSubmissionEvent {
+  const {
+    entryType: _entryType,
+    scopeKey: _scopeKey,
+    recordKey: _recordKey,
+    submissionId: _submissionId,
+    ...event
+  } = stored
+  return event
+}
+
+function toRequestSubmissionView(
+  stored: StoredRequestSubmission,
+  events: readonly RequestSubmissionEvent[] = stored.events,
+): RequestSubmission {
   const {
     entryType: _entryType,
     scopeKey: _scopeKey,
@@ -2894,7 +3123,11 @@ function toRequestSubmissionView(stored: StoredRequestSubmission): RequestSubmis
     attachmentFinalizedAt: _attachmentFinalizedAt,
     ...view
   } = stored
-  return { ...view, formSnapshot: toRequestFormVersion(view.formSnapshot) }
+  return {
+    ...view,
+    formSnapshot: toRequestFormVersion(view.formSnapshot),
+    events: events.length > 0 ? [...events] : view.events,
+  }
 }
 
 function readThreadLookup(value: unknown): StoredThreadLookup {
@@ -2938,6 +3171,12 @@ function readDuplicatePointer(value: unknown, now: Date) {
 function isSubmissionStatus(value: unknown): value is RequestSubmissionStatus {
   return value === 'received' || value === 'triaging' || value === 'needs-more-info' ||
     value === 'rejected' || value === 'duplicate' || value === 'converted'
+}
+
+function isSubmissionEventType(value: unknown): value is RequestSubmissionEvent['type'] {
+  return value === 'submitted' || value === 'assigned' || value === 'more-info-requested' ||
+    value === 'requester-replied' || value === 'rejected' || value === 'duplicate-marked' ||
+    value === 'converted'
 }
 
 function assertSubmissionMutable(submission: RequestSubmission) {
@@ -3087,6 +3326,17 @@ function createSubmissionRecordKey(submissionId: string) {
   return `SUBMISSION#${requireIdentifier(submissionId, 'Request submission ID')}`
 }
 
+function createSubmissionEventRecordKeyPrefix(submissionId: string) {
+  return `SUBMISSION_EVENT#${requireIdentifier(submissionId, 'Request submission ID')}#`
+}
+
+function createSubmissionEventRecordKey(
+  submissionId: string,
+  event: RequestSubmissionEvent,
+) {
+  return `${createSubmissionEventRecordKeyPrefix(submissionId)}${event.createdAt}#${event.id}`
+}
+
 function createUploadRecordKey(attachmentId: string) {
   return `UPLOAD#${requireIdentifier(attachmentId, 'Request attachment ID')}`
 }
@@ -3108,6 +3358,15 @@ function readWorkspaceIdFromFormStorage(form: StoredRequestForm) {
     throw new RequestIntakeError(503, 'InvalidRequestFormRecord', 'Stored form Workspace scope is invalid.')
   }
   return form.scopeKey.slice(prefix.length)
+}
+
+function createQueueCursorKey(submission: StoredRequestSubmission) {
+  return {
+    scopeKey: submission.scopeKey,
+    recordKey: submission.recordKey,
+    queueKey: submission.queueKey,
+    queueRecordKey: submission.queueRecordKey,
+  }
 }
 
 function encodeQueueCursor(
@@ -3171,11 +3430,15 @@ function isConditionalFailure(error: unknown) {
 
 function toRequestStoreError(error: unknown) {
   if (error instanceof RequestIntakeError) return error
+  return requestStoreUnavailable(error)
+}
+
+function requestStoreUnavailable(cause?: unknown) {
   return new RequestIntakeError(
     503,
     'RequestIntakeUnavailable',
     'Request intake storage is unavailable.',
-    { cause: error },
+    { cause },
   )
 }
 

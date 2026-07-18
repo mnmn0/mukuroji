@@ -79,7 +79,7 @@ bun run floci:up
 bun run floci:deploy-backend
 ```
 
-`floci:deploy-backend` は `server/src/index.ts` を Node.js 22 Lambda 用に bundle し、Floci の REST API Gateway から Lambda に proxy します。React から Lambda 経由 API を呼ぶ場合は、生成された `.floci/generated/backend.env` の `VITE_API_BASE_URL` を使います。Lambda adapter は `/teams/projects` のような直下パスと `/api/teams/projects` の両方を同じ Hono route へ正規化します。
+`floci:deploy-backend` は `server/src/index.ts` を Node.js 22 Lambda 用に bundle し、Floci の REST API Gateway から Lambda に proxy します。React から Lambda 経由 API を呼ぶ場合は、生成された `.floci/generated/backend.env` の `VITE_API_BASE_URL` を使います。Deploy script は確定した REST API URL を `AUTOMATION_INBOUND_WEBHOOK_BASE_URL` として Lambda にも渡すため、管理 API が返す signed inbound webhook URL は sender から到達可能な同じ API を指します。Lambda adapter は `/teams/projects` のような直下パスと `/api/teams/projects` の両方を同じ Hono route へ正規化します。
 
 停止:
 
@@ -145,6 +145,11 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_REALTIME_SESSIONS_TABLE` / `REALTIME_SESSIONS_TABLE_NAME`: WebSocket ticket と connection lease を保存する DynamoDB table 名。未指定時は `mukuroji-realtime-sessions-local`
 - `REALTIME_WEBSOCKET_URL`: production の collaboration invalidation/presence 用 WebSocket URL。未指定時は Web が polling fallback を使います。
 - `MUKUROJI_AUDIT_EVENTS_TABLE` / `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
+- `MUKUROJI_AUTOMATION_TABLE` / `AUTOMATION_TABLE_NAME`: rule/template/recurring/execution/bulk/template application に加え、inbound webhook endpoint と delivery/replay receipt を保存する DynamoDB table 名。ローカル既定値は `mukuroji-automation-local`
+- `AUTOMATION_WEBHOOK_SECRET_PREFIX`: outbound webhook の workspace-scoped signing secret を置く Secrets Manager prefix。未指定時は `mukuroji/automation-webhooks`
+- `AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX`: server-issued inbound webhook signing secret を outbound secret から分離して置く Secrets Manager prefix。未指定時は `mukuroji/automation-inbound-webhooks`
+- `AUTOMATION_INBOUND_WEBHOOK_BASE_URL`: Sender に渡す inbound webhook URL の public API base URL。Server はこの値へ `/api/automation/inbound-webhooks/{opaqueEndpointId}` を追加します。HTTPS が必須で、HTTP は `localhost`、`127.0.0.1`、`[::1]` の loopback development host だけに許可します。Floci deploy では作成済み REST API ID と stage から自動設定します。
+- `SECRETS_MANAGER_ENDPOINT` / `AWS_ENDPOINT_URL_SECRETSMANAGER` / `AWS_ENDPOINT_URL`: API Lambda から見る Secrets Manager endpoint。ローカル Lambda では Floci 内部 endpoint の `http://floci:4566` を使います。
 - `MUKUROJI_AUDIT_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS`: audit event の保持日数。未指定時は 2555 日（7年）
 - `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY`: Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。本番では `openssl rand -hex 32` などで生成し、backfill と API で同じ値を使います。
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID`: Cognito claim と DynamoDB partition で共有する canonical Workspace ID。未指定時は `workspace#mukuroji-local`
@@ -156,8 +161,12 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/teams/projects`, `/api/work-items`,
 `/api/teams/{teamId}/issues`, `/api/projects/{projectId}/issues`,
 `/api/projects/{projectId}/tasks`, `/api/search`, `/api/saved-views`, `/api/audit/events`,
-`/api/notifications`, `/api/planning` で DynamoDB を読みます。ローカルでは Vite proxy により、
+`/api/notifications`, `/api/automation/rules`, `/api/automation/templates`,
+`/api/automation/inbound-webhooks`, `/api/recurring-work`,
+`/api/automation/executions`, `/api/bulk-operations`, `/api/planning` で DynamoDB を読みます。ローカルでは Vite proxy により、
 Web から `/api` を呼ぶだけで Floci 上の DynamoDB データを取得できます。
+
+Inbound webhook の管理 API は Workspace 管理者専用です。`/api/automation/inbound-webhooks` 以下で作成、pause/resume、rotate、revoke を行い、public sender は発行された `/api/automation/inbound-webhooks/{opaqueEndpointId}` へ署名済み JSON を POST します。Signing secret は create/rotate response で一度だけ返し、応答消失時の同一 key による recovery も 24 時間で失効します。Delivery idempotency receipt は、365 日保持する audit outbox の deterministic event ID 衝突期間を覆うため 400 日保持します。`provisioning` が完了しない場合は管理者が revoke して abort できますが、rotate 途中の abort も endpoint を終端失効させるため、Rule と sender を新しい endpoint へ再設定する必要があります。Revoke は durable cleanup intent を残し、即時削除後も schedule Lambda が inbound-only `DeleteSecret` 権限で 5 分間隔に recovery window 24 時間とその後の 5 分間の grace が終わるまで secret 削除を再試行し、期限直前に開始済みの late provisioning write も回収します。
 
 Task / Issue の strict canonical schema、dynamic workflow、optimistic concurrency、Issue #20 の legacy read-only adapter は
 [`docs/work-items.md`](docs/work-items.md) を参照してください。
@@ -170,6 +179,9 @@ Comment thread、mention/watch 通知、reaction、presence、realtime fallback 
 
 Notification event、Inbox state、filter/cursor、deep link、配信設定、期限通知の契約は
 [`docs/notifications.md`](docs/notifications.md) を参照してください。
+
+Versioned rule、signed inbound webhook、template、timezone/DST recurring、bulk dry-run/retry/undo、実行履歴の契約は
+[`docs/automation.md`](docs/automation.md) を参照してください。
 
 Cycle rollover、戦略階層、roll-up、timeline dependency、critical path の契約は
 [`docs/planning.md`](docs/planning.md) を参照してください。

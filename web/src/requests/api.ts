@@ -11,6 +11,7 @@ import type {
   RequestSubmissionActionInput,
   RequestSubmissionPage,
   RequestSubmissionReceipt,
+  RequestSubmissionStatus,
   PublicRequestForm,
   SubmitRequestInput,
   UpdateRequestFormInput,
@@ -36,7 +37,7 @@ export type GetRequestQueueOptions = {
   /**
    * Submission status の完全一致 filter です。
    */
-  status?: string
+  status?: RequestSubmissionStatus
 }
 
 /**

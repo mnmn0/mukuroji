@@ -226,6 +226,23 @@ export function updatePendingRequestAttachmentFields(
 }
 
 /**
+ * Submission 全体の残り attachment 枠に収まる file だけを返します。
+ *
+ * @param files - 今回選択された upload 候補です。
+ * @param existingCount - すでに回答へ追加済みの attachment 数です。
+ * @param maxFiles - Form policy が許可する累計最大数です。
+ * @returns 残り枠を超えない先頭の file 一覧です。
+ */
+export function selectRemainingRequestAttachmentFiles<T>(
+  files: readonly T[],
+  existingCount: number,
+  maxFiles: number,
+) {
+  const remainingFiles = Math.max(0, maxFiles - existingCount)
+  return files.slice(0, remainingFiles)
+}
+
+/**
  * 非同期 form response が現在表示中の public link request に属するか判定します。
  *
  * @param requestedLinkToken - Request 開始時の link token です。

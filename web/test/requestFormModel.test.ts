@@ -7,6 +7,7 @@ import {
 } from '../src/requests/fixtures'
 import {
   createEmptyRequestFormDraft,
+  createEmptyRequestField,
   createRequestFormInput,
   isRequestFormDraftModelValid,
   normalizeRequestBuilderFieldForType,
@@ -123,10 +124,26 @@ describe('request form model round-trip', () => {
     const answer = model.answers.find((candidate) => candidate.fieldId === 'request-kind')
 
     expect(model.formDefaultLocale).toBe('ja')
+    expect(model.summary).toBe(requestSubmissionFixture.answers.summary)
     expect(answer?.options).toEqual([
       { id: 'bug', label: { en: 'Bug', ja: '不具合' } },
       { id: 'question', label: { en: 'Question', ja: '質問' } },
     ])
+  })
+
+  test('uses a numeric mapped title as the queue summary', () => {
+    const submission = structuredClone(requestSubmissionFixture)
+    submission.answers.summary = 42
+
+    expect(normalizeRequestSubmission(submission).summary).toBe('42')
+  })
+
+  test('joins a multi-select mapped title for the queue summary', () => {
+    const submission = structuredClone(requestSubmissionFixture)
+    submission.answers['request-kind'] = ['bug', 'question']
+    submission.workItemMapping.titleFieldId = 'request-kind'
+
+    expect(normalizeRequestSubmission(submission).summary).toBe('bug, question')
   })
 
   test('rejects field and section conditions that refer to later fields', () => {
@@ -165,6 +182,37 @@ describe('request form model round-trip', () => {
     }
 
     expect(isRequestFormDraftModelValid(model)).toBe(false)
+  })
+
+  test('rejects duplicate section, option, and routing rule IDs', () => {
+    const sectionModel = normalizeRequestForm(requestFormFixture)
+    const firstSection = sectionModel.sections[0]
+    if (!firstSection) throw new Error('Request form fixture needs a section.')
+    const extraField = createEmptyRequestField('extra-field')
+    extraField.label.ja = '追加項目'
+    sectionModel.sections.push({
+      description: { en: '', ja: '' },
+      fields: [extraField],
+      id: firstSection.id,
+      title: { en: '', ja: '追加セクション' },
+    })
+    expect(isRequestFormDraftModelValid(sectionModel)).toBe(false)
+
+    const optionModel = normalizeRequestForm(requestFormFixture)
+    const selectField = optionModel.sections
+      .flatMap((section) => section.fields)
+      .find((field) => field.type === 'select')
+    if (!selectField?.options[0] || !selectField.options[1]) {
+      throw new Error('Request form fixture needs two select options.')
+    }
+    selectField.options[1].id = selectField.options[0].id
+    expect(isRequestFormDraftModelValid(optionModel)).toBe(false)
+
+    const routingModel = normalizeRequestForm(requestFormFixture)
+    const firstRule = routingModel.routing.rules[0]
+    if (!firstRule) throw new Error('Request form fixture needs a routing rule.')
+    routingModel.routing.rules.push(structuredClone(firstRule))
+    expect(isRequestFormDraftModelValid(routingModel)).toBe(false)
   })
 
   test('persists the current draft before publishing the returned revision', async () => {

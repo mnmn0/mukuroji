@@ -138,7 +138,7 @@ export function RequestQueue({
                         <span className="text-xs text-[var(--workbench-muted)]">{submission.formVersionLabel}</span>
                       </button>
                     </td>
-                    <td className="px-4 py-4 uppercase">{submission.source}</td>
+                    <td className="px-4 py-4">{t(`requests.source.${submission.source}`)}</td>
                     <td className="px-4 py-4"><RequestStatusBadge status={submission.status} t={t} /></td>
                     <td className="max-w-[180px] truncate px-4 py-4 text-[var(--workbench-muted)]">
                       {submission.assigneeUserId ?? t('requests.queue.unassigned')}
@@ -282,7 +282,7 @@ function RequestSubmissionDetail({
                   {resolveRequestLocalizedText(answer.label, locale, submission.formDefaultLocale) || answer.fieldId}
                 </dt>
                 <dd className="mt-2 whitespace-pre-wrap break-words text-sm font-medium text-[var(--workbench-text)]">
-                  {formatAnswer(answer, locale, submission.formDefaultLocale)}
+                  {formatAnswer(answer, locale, submission.formDefaultLocale, t)}
                 </dd>
               </div>
             ))}
@@ -296,7 +296,7 @@ function RequestSubmissionDetail({
                 <li className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--workbench-border)] px-4 py-3 text-sm font-semibold" key={attachment.id}>
                   <span className="min-w-0 truncate">{attachment.fileName}</span>
                   <span className="flex flex-none items-center gap-2">
-                    <span className="workbench-badge">{attachment.scanStatus}</span>
+                    <span className="workbench-badge">{t(`requests.scanStatus.${attachment.scanStatus}`)}</span>
                     {attachment.scanStatus === 'available' && onOpenAttachment ? (
                       <button className="workbench-button-secondary min-h-9 px-3" disabled={openingAttachmentId === attachment.id} onClick={() => {
                         setOpeningAttachmentId(attachment.id)
@@ -325,7 +325,7 @@ function RequestSubmissionDetail({
           </DetailSection>
         ) : null}
 
-        {submission.duplicateCandidateIds.length > 0 ? (
+        {submission.capabilities.canMarkDuplicate && submission.duplicateCandidateIds.length > 0 ? (
           <DetailSection title={t('requests.detail.duplicates')}>
             <div className="flex flex-wrap gap-2">
               {submission.duplicateCandidateIds.map((id) => (
@@ -343,7 +343,7 @@ function RequestSubmissionDetail({
               {submission.messages.map((message) => (
                 <div className={`rounded-lg border px-4 py-3 ${message.direction === 'internal' ? 'border-teal-200 bg-teal-50' : 'border-[var(--workbench-border)] bg-white'}`} key={message.id}>
                   <p className="text-xs font-bold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
-                    {message.direction} · {formatDateTime(message.createdAt, locale)}
+                    {t(`requests.messageDirection.${message.direction}`)} · {formatDateTime(message.createdAt, locale)}
                   </p>
                   <p className="mt-2 whitespace-pre-wrap break-words text-sm font-medium leading-6 text-[var(--workbench-text)]">{message.body}</p>
                 </div>
@@ -357,7 +357,7 @@ function RequestSubmissionDetail({
             <ol className="grid gap-2">
               {submission.events.map((event) => (
                 <li className="border-l-2 border-teal-200 pl-3 text-sm font-medium text-[var(--workbench-text)]" key={event.id}>
-                  <strong>{event.type}</strong> · {event.summary}
+                  <strong>{t(`requests.eventType.${event.type}`)}</strong> · {event.summary}
                   <span className="mt-1 block text-xs text-[var(--workbench-muted)]">{formatDateTime(event.createdAt, locale)}</span>
                 </li>
               ))}
@@ -394,10 +394,10 @@ function RequestSubmissionDetail({
             </h3>
             {actionMode === 'convert' ? (
               <>
-                <input className="workbench-input min-h-10 px-3" placeholder="Work Item title override" value={titleOverride} onChange={(event) => setTitleOverride(event.target.value)} />
-                <textarea className="workbench-input min-h-24 px-3 py-2" placeholder="Work Item description override" value={descriptionOverride} onChange={(event) => setDescriptionOverride(event.target.value)} />
+                <input aria-label={t('requests.action.titleOverride')} className="workbench-input min-h-10 px-3" placeholder={t('requests.action.titleOverride')} value={titleOverride} onChange={(event) => setTitleOverride(event.target.value)} />
+                <textarea aria-label={t('requests.action.descriptionOverride')} className="workbench-input min-h-24 px-3 py-2" placeholder={t('requests.action.descriptionOverride')} value={descriptionOverride} onChange={(event) => setDescriptionOverride(event.target.value)} />
                 <p className="text-xs font-medium text-[var(--workbench-muted)]">
-                  {submission.routing.teamId} · {submission.routing.projectId ?? 'Team backlog'} · {submission.routing.workflowStatusId ?? 'initial'}
+                  {submission.routing.teamId} · {submission.routing.projectId ?? t('requests.routing.teamBacklog')} · {submission.routing.workflowStatusId ?? t('requests.routing.initialStatus')}
                 </p>
               </>
             ) : actionMode === 'assign' || actionMode === 'mark-duplicate' ? (
@@ -458,6 +458,7 @@ function formatAnswer(
   answer: RequestSubmissionModel['answers'][number],
   locale: Locale,
   defaultLocale: RequestSubmissionModel['formDefaultLocale'],
+  t: ReturnType<typeof createTranslator>,
 ) {
   const optionLabels = new Map(answer.options.map((option) => [
     option.id,
@@ -468,7 +469,7 @@ function formatAnswer(
   return Array.isArray(answer.value)
     ? answer.value.map(formatValue).join(', ')
     : typeof answer.value === 'boolean'
-      ? (answer.value ? 'Yes' : 'No')
+      ? (answer.value ? t('requests.boolean.true') : t('requests.boolean.false'))
       : typeof answer.value === 'string'
         ? formatValue(answer.value)
         : String(answer.value)

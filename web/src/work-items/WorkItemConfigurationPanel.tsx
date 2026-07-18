@@ -277,7 +277,8 @@ function WorkItemConfigurationPanelContent({
   )
 }
 
-function WorkflowConfigurationSection({
+/** Workflow definition を status rail と transition matrix で編集します。 */
+export function WorkflowConfigurationSection({
   configuration,
   locale,
   onChange,
