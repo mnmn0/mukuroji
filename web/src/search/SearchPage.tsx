@@ -13,10 +13,11 @@ import {
   type WorkspaceSearchResult,
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router'
+import { useLocation, useNavigate, useSearchParams } from 'react-router'
 import useSWR from 'swr'
 import { createMutationRequestRunner } from '../api/mutationHeaders'
 import { getCurrentUser } from '../auth/api'
+import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import {
   MobileSidebarButton,
@@ -116,6 +117,7 @@ const apiSWRConfig = {
  * Permission-aware Workspace search、saved view、cursor paginationを提供する画面です。
  */
 export function SearchPage() {
+  const location = useLocation()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
@@ -128,6 +130,7 @@ export function SearchPage() {
   const [nextPageLoadingSignature, setNextPageLoadingSignature] = useState<string | undefined>()
   const [searchErrorMessage, setSearchErrorMessage] = useState<string | undefined>()
   const [savedViewErrorMessage, setSavedViewErrorMessage] = useState<string | undefined>()
+  const [authenticatedApiError, setAuthenticatedApiError] = useState<unknown>()
   const [isSavedViewFormOpen, setIsSavedViewFormOpen] = useState(false)
   const [savedViewDraft, setSavedViewDraft] = useState<SavedViewDraft>({
     description: '',
@@ -153,6 +156,7 @@ export function SearchPage() {
     : null
   const {
     data: teams = emptyTeams,
+    error: projectDirectoryError,
     isLoading: isProjectDirectoryLoading,
   } = useSWR(
     projectDirectoryKey,
@@ -164,7 +168,8 @@ export function SearchPage() {
     ? (['search-work-item-configurations', accessToken, teamIdsSignature] as const)
     : null
   const {
-    data: workItemConfigurationsByTeam = emptyResolvedWorkItemConfigurations,
+    data: workItemConfigurationLoadResult,
+    error: workItemConfigurationsError,
   } = useSWR(
     workItemConfigurationsKey,
     ([, token, serializedTeamIds]) => loadSearchWorkItemConfigurations(
@@ -173,6 +178,8 @@ export function SearchPage() {
     ),
     apiSWRConfig,
   )
+  const workItemConfigurationsByTeam = workItemConfigurationLoadResult?.configurationsByTeam ??
+    emptyResolvedWorkItemConfigurations
   const savedViewsKey = accessToken && user && !currentUserError
     ? (['saved-workspace-views', accessToken] as const)
     : null
@@ -200,6 +207,17 @@ export function SearchPage() {
   const canManageSharedViews = Boolean(
     user && (user.isSystemAdmin || user.workspaceRole === 'owner' || user.workspaceRole === 'admin'),
   )
+  const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
+    currentUserError,
+    [
+      projectDirectoryError,
+      workItemConfigurationsError,
+      ...(workItemConfigurationLoadResult?.errors ?? []),
+      savedViewsError,
+      authenticatedApiError,
+    ],
+    `${location.pathname}${location.search}${location.hash}`,
+  )
   const isLoading = !session || isCurrentUserLoading || Boolean(user && isProjectDirectoryLoading)
   const userLabel = user?.attributes.email ?? user?.attributes.name ?? user?.username ?? t('workspace.user.fallback')
   const userInitial = userLabel.trim().charAt(0).toUpperCase() || 'M'
@@ -214,6 +232,9 @@ export function SearchPage() {
     () => Object.fromEntries(statusOptions.map((status) => [status.id, status.label])),
     [statusOptions],
   )
+  const visibleSearchErrorMessage = currentUserErrorAction?.kind === 'stay'
+    ? t('search.error')
+    : searchErrorMessage
 
   useEffect(() => {
     activeRouteSignatureRef.current = routeSignature
@@ -237,11 +258,17 @@ export function SearchPage() {
   }, [navigate, session])
 
   useEffect(() => {
-    if (currentUserError) {
-      clearAuthSession()
-      navigate('/', { replace: true })
+    if (currentUserErrorAction?.redirectTo) {
+      if (currentUserErrorAction.clearSession) {
+        clearAuthSession()
+      }
+      navigate(currentUserErrorAction.redirectTo, { replace: true })
     }
-  }, [currentUserError, navigate])
+  }, [
+    currentUserErrorAction?.clearSession,
+    currentUserErrorAction?.redirectTo,
+    navigate,
+  ])
 
   useEffect(() => {
     if (!accessToken || !user || currentUserError) {
@@ -252,6 +279,7 @@ export function SearchPage() {
     const timeoutId = window.setTimeout(() => {
       setIsSearchLoading(true)
       setSearchErrorMessage(undefined)
+      setAuthenticatedApiError(undefined)
       void searchWorkspace(accessToken, routeState.filters, {
         limit: 30,
         signal: abortController.signal,
@@ -262,6 +290,7 @@ export function SearchPage() {
         })
         .catch((error: unknown) => {
           if (!abortController.signal.aborted) {
+            setAuthenticatedApiError(() => error)
             setResults([])
             setNextCursor(undefined)
             setSearchErrorMessage(error instanceof Error ? error.message : t('search.error'))
@@ -342,6 +371,7 @@ export function SearchPage() {
     nextPageAbortControllerRef.current = abortController
     setNextPageLoadingSignature(requestRouteSignature)
     setSearchErrorMessage(undefined)
+    setAuthenticatedApiError(undefined)
     try {
       const response = await searchWorkspace(accessToken, routeState.filters, {
         cursor: nextCursor,
@@ -357,6 +387,7 @@ export function SearchPage() {
       setNextCursor(response.nextCursor)
     } catch (error) {
       if (!abortController.signal.aborted && activeRouteSignatureRef.current === requestRouteSignature) {
+        setAuthenticatedApiError(() => error)
         setSearchErrorMessage(error instanceof Error ? error.message : t('search.error'))
       }
     } finally {
@@ -377,6 +408,7 @@ export function SearchPage() {
     }
 
     setSavedViewErrorMessage(undefined)
+    setAuthenticatedApiError(undefined)
     const input = {
       description: savedViewDraft.description.trim() || undefined,
       filters: routeState.filters,
@@ -402,6 +434,7 @@ export function SearchPage() {
         savedViewId: view.id,
       })
     } catch (error) {
+      setAuthenticatedApiError(() => error)
       setSavedViewErrorMessage(error instanceof Error ? error.message : t('search.error'))
     }
   }
@@ -412,6 +445,7 @@ export function SearchPage() {
     }
 
     setSavedViewErrorMessage(undefined)
+    setAuthenticatedApiError(undefined)
     const input = {
       expectedRevision: view.revision,
       ...patch,
@@ -425,6 +459,7 @@ export function SearchPage() {
       )
       await mutateSavedViews()
     } catch (error) {
+      setAuthenticatedApiError(() => error)
       setSavedViewErrorMessage(error instanceof Error ? error.message : t('search.error'))
     }
   }
@@ -435,6 +470,7 @@ export function SearchPage() {
     }
 
     setSavedViewErrorMessage(undefined)
+    setAuthenticatedApiError(undefined)
     try {
       await mutationRequestRunner.run(
         `saved-view:delete:${view.id}`,
@@ -447,6 +483,7 @@ export function SearchPage() {
         commitRouteState({ ...routeState, savedViewId: undefined })
       }
     } catch (error) {
+      setAuthenticatedApiError(() => error)
       setSavedViewErrorMessage(error instanceof Error ? error.message : t('search.error'))
     }
   }
@@ -603,9 +640,11 @@ export function SearchPage() {
                     </span>
                   ) : null}
                 </div>
-                {searchErrorMessage ? (
+                {visibleSearchErrorMessage ? (
                   <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
-                    {t('search.error')} {searchErrorMessage}
+                    {currentUserErrorAction?.kind === 'stay'
+                      ? visibleSearchErrorMessage
+                      : `${t('search.error')} ${visibleSearchErrorMessage}`}
                   </p>
                 ) : null}
                 {isSearchLoading ? (
@@ -618,7 +657,7 @@ export function SearchPage() {
                     results={results}
                     statusLabels={statusLabels}
                   />
-                ) : !searchErrorMessage ? (
+                ) : !visibleSearchErrorMessage ? (
                   <section className="workbench-panel px-6 py-14 text-center">
                     <h2 className="text-base font-semibold text-[var(--workbench-text)]">{t('search.emptyTitle')}</h2>
                     <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">{t('search.emptyDescription')}</p>
@@ -1299,11 +1338,16 @@ async function loadSearchWorkItemConfigurations(
     teamId,
   })))
 
-  return Object.fromEntries(results.flatMap((result) =>
-    result.status === 'fulfilled'
-      ? [[result.value.teamId, result.value.configuration]]
-      : [],
-  )) as Record<string, ResolvedWorkItemConfiguration>
+  return {
+    configurationsByTeam: Object.fromEntries(results.flatMap((result) =>
+      result.status === 'fulfilled'
+        ? [[result.value.teamId, result.value.configuration]]
+        : [],
+    )) as Record<string, ResolvedWorkItemConfiguration>,
+    errors: results.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : []
+    ),
+  }
 }
 
 function readSerializedTeamIds(value: string) {

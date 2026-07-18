@@ -157,6 +157,10 @@ export type FileArtifactsController = {
    */
   mutationErrorCode?: string
   /**
+   * Shell が認証 policy error を一元処理するための raw load/mutation errors です。
+   */
+  sessionErrors?: readonly unknown[]
+  /**
    * 新規添付または version 差し替えを直接 object storage へ送信します。
    */
   uploadFiles: (files: File[], options?: FileUploadOptions) => Promise<boolean>
@@ -636,6 +640,7 @@ export function useFileArtifacts({
     mutationErrorStatus: currentMutationError?.status,
     refresh,
     requestApproval,
+    sessionErrors: [error, currentMutationError],
     scope,
     uploadFiles,
   }), [
@@ -651,8 +656,7 @@ export function useFileArtifacts({
     isConfigured,
     isLoading,
     isMutating,
-    currentMutationError?.code,
-    currentMutationError?.status,
+    currentMutationError,
     refresh,
     removeFile,
     requestApproval,

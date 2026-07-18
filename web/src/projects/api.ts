@@ -318,9 +318,15 @@ export class ProjectDirectoryApiError extends Error {
    */
   readonly status: number
 
-  constructor(status: number, message: string) {
+  /**
+   * API が返した機械判定用の安定 error code です。
+   */
+  readonly code?: string
+
+  constructor(status: number, message: string, code?: string) {
     super(message)
     this.status = status
+    this.code = code
   }
 }
 
@@ -358,15 +364,11 @@ export async function getProjectDirectory(
   const data = await readJson<unknown>(response)
 
   if (!response.ok) {
-    const message =
-      typeof data === 'object' &&
-      data !== null &&
-      'message' in data &&
-      typeof data.message === 'string'
-        ? data.message
-        : 'projects.error.loading'
-
-    throw new ProjectDirectoryApiError(response.status, message)
+    throw new ProjectDirectoryApiError(
+      response.status,
+      readErrorMessage(data),
+      readErrorCode(data),
+    )
   }
 
   if (!isProjectDirectoryResponse(data)) {
@@ -492,9 +494,11 @@ export async function getProjectMembers(accessToken: string, projectId: string, 
   const data = await readJson<unknown>(response)
 
   if (!response.ok) {
-    const message = readErrorMessage(data)
-
-    throw new ProjectDirectoryApiError(response.status, message)
+    throw new ProjectDirectoryApiError(
+      response.status,
+      readErrorMessage(data),
+      readErrorCode(data),
+    )
   }
 
   if (!isProjectMembersResponse(data)) {
@@ -540,9 +544,11 @@ export async function getProjectUsers(
   const data = await readJson<unknown>(response)
 
   if (!response.ok) {
-    const message = readErrorMessage(data)
-
-    throw new ProjectDirectoryApiError(response.status, message)
+    throw new ProjectDirectoryApiError(
+      response.status,
+      readErrorMessage(data),
+      readErrorCode(data),
+    )
   }
 
   if (!isProjectUsersResponse(data)) {
@@ -622,9 +628,11 @@ async function sendProjectDirectoryRequest<T>(
   const data = await readJson<unknown>(response)
 
   if (!response.ok) {
-    const message = readErrorMessage(data)
-
-    throw new ProjectDirectoryApiError(response.status, message)
+    throw new ProjectDirectoryApiError(
+      response.status,
+      readErrorMessage(data),
+      readErrorCode(data),
+    )
   }
 
   return data as T
@@ -637,6 +645,15 @@ function readErrorMessage(data: unknown) {
     typeof data.message === 'string'
     ? data.message
     : 'projects.error.loading'
+}
+
+function readErrorCode(data: unknown) {
+  return typeof data === 'object' &&
+    data !== null &&
+    'code' in data &&
+    typeof data.code === 'string'
+    ? data.code
+    : undefined
 }
 
 /**

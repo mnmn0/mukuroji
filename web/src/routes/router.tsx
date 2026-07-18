@@ -14,6 +14,8 @@ import { WorkspaceCommandMenuLayout } from '../commands/WorkspaceCommandMenu'
 import { SearchPage } from '../search/SearchPage'
 import { PublicRequestFormPage } from '../requests/PublicRequestFormPage'
 import { RequestIntakePage } from '../requests/RequestIntakePage'
+import { EnterpriseSsoCallbackPage } from '../pages/EnterpriseSsoCallbackPage'
+import { SecurityRecoveryPage } from '../pages/SecurityRecoveryPage'
 
 /**
  * アプリケーション全体の画面ルーティング定義です。
@@ -22,6 +24,18 @@ export const appRoutes: RouteObject[] = [
   {
     path: '/',
     element: <LoginPage />,
+  },
+  {
+    path: '/login',
+    element: <LoginPage />,
+  },
+  {
+    path: '/auth/sso/callback',
+    element: <EnterpriseSsoCallbackPage />,
+  },
+  {
+    path: '/security/recovery',
+    element: <SecurityRecoveryPage />,
   },
   {
     element: <WorkspaceCommandMenuLayout />,
@@ -77,6 +91,10 @@ export const appRoutes: RouteObject[] = [
       {
         path: '/settings',
         element: <WorkspacePage view="settings" />,
+      },
+      {
+        path: '/settings/security',
+        element: <WorkspacePage view="enterprise-security" />,
       },
       {
         path: '/teams/:teamId/overview',

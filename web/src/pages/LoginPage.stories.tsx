@@ -48,6 +48,31 @@ type Story = StoryObj<typeof meta>
 export const Default: Story = {}
 
 /**
+ * Discovery 後に password login が許可された unmanaged domain の画面です。
+ */
+export const PasswordAllowed: Story = {
+  args: {
+    initialEmail: 'member@example.com',
+    initialLoginStep: 'password',
+  },
+}
+
+/**
+ * SMS へ送信された one-time code を入力する MFA challenge です。
+ */
+export const MfaRequired: Story = {
+  args: {
+    initialChallenge: {
+      challenge: 'SMS_MFA',
+      deliveryDestination: '+81 ******1234',
+      deliveryMedium: 'SMS',
+      email: 'recovery.admin@outside.example',
+      session: 'storybook-mfa-session',
+    },
+  },
+}
+
+/**
  * Cognito が初回ログインの新しいパスワードを要求した状態です。
  */
 export const NewPasswordRequired: Story = {

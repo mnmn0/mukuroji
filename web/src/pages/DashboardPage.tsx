@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router'
+import { useLocation, useNavigate } from 'react-router'
 import useSWR from 'swr'
 import {
   getCurrentUser,
@@ -7,6 +7,7 @@ import {
   type CurrentUser,
   type DashboardSummary,
 } from '../auth/api'
+import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession, type AuthSession } from '../auth/session'
 import { Sidebar } from '../components/sidebar'
 import {
@@ -97,6 +98,7 @@ export function DashboardPage({
   initialProjectDirectory = emptyProjectDirectory,
   initialLocale,
 }: DashboardPageProps = {}) {
+  const location = useLocation()
   const navigate = useNavigate()
   const [session] = useState<AuthSession | null>(() => getSession())
   const [locale] = useState<Locale>(() => initialLocale ?? getInitialLocale())
@@ -116,7 +118,11 @@ export function DashboardPage({
   const dashboardSummaryKey = accessToken && user && !currentUserError
     ? (['dashboard-summary', accessToken] as const)
     : null
-  const { data: summary, isLoading: isDashboardSummaryLoading } = useSWR(
+  const {
+    data: summary,
+    error: dashboardSummaryError,
+    isLoading: isDashboardSummaryLoading,
+  } = useSWR(
     dashboardSummaryKey,
     ([, accessToken]) => loadDashboardSummary(accessToken),
     apiSWRConfig,
@@ -124,7 +130,7 @@ export function DashboardPage({
   const notificationUnreadCountKey = accessToken && user && !currentUserError
     ? (['notification-unread-count', accessToken] as const)
     : null
-  const { data: inboxCount = 0 } = useSWR(
+  const { data: inboxCount = 0, error: notificationUnreadCountError } = useSWR(
     notificationUnreadCountKey,
     ([, currentAccessToken]) => loadNotificationUnreadCount(currentAccessToken),
     apiSWRConfig,
@@ -132,14 +138,25 @@ export function DashboardPage({
   const projectDirectoryKey = accessToken && user && !currentUserError
     ? (['project-directory', accessToken, locale] as const)
     : null
-  const { data: loadedProjectDirectory } = useSWR(
+  const { data: loadedProjectDirectory, error: projectDirectoryError } = useSWR(
     projectDirectoryKey,
     ([, accessToken, currentLocale]) =>
       loadProjectDirectory(accessToken, currentLocale),
     apiSWRConfig,
   )
+  const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
+    currentUserError,
+    [
+      dashboardSummaryError,
+      notificationUnreadCountError,
+      projectDirectoryError,
+    ],
+    `${location.pathname}${location.search}${location.hash}`,
+  )
   const teams = loadedProjectDirectory ?? initialProjectDirectory
-  const isLoading = !session || isCurrentUserLoading || Boolean(currentUserError)
+  const isLoading = !session ||
+    isCurrentUserLoading ||
+    Boolean(currentUserError && currentUserErrorAction?.kind !== 'stay')
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -153,11 +170,18 @@ export function DashboardPage({
   }, [navigate, session])
 
   useEffect(() => {
-    if (currentUserError) {
-      clearSession()
-      navigate('/', { replace: true })
+    if (currentUserErrorAction?.redirectTo) {
+      if (currentUserErrorAction.clearSession) {
+        clearSession()
+      }
+      navigate(currentUserErrorAction.redirectTo, { replace: true })
     }
-  }, [clearSession, currentUserError, navigate])
+  }, [
+    clearSession,
+    currentUserErrorAction?.clearSession,
+    currentUserErrorAction?.redirectTo,
+    navigate,
+  ])
 
   const handleLogout = () => {
     clearSession()
@@ -206,7 +230,14 @@ export function DashboardPage({
           </button>
         </header>
 
-        {isLoading ? (
+        {currentUserErrorAction?.kind === 'stay' ? (
+          <p
+            className="mt-7 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700"
+            role="alert"
+          >
+            {t('dashboard.loadError')}
+          </p>
+        ) : isLoading ? (
           <p className="mt-7 text-sm font-medium text-[var(--workbench-muted)]">
             {t('dashboard.loading')}
           </p>

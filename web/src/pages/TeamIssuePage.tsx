@@ -5,13 +5,14 @@ import type {
   WorkItemRelation,
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useParams, useSearchParams } from 'react-router'
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import useSWR from 'swr'
 import {
   canManageWorkspaceStructure,
   canMutateWorkspaceContent,
   getCurrentUser,
 } from '../auth/api'
+import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import { createMutationRequestRunner } from '../api/mutationHeaders'
 import { IssueArtifactsPanel } from '../files/IssueArtifactsPanel'
@@ -287,6 +288,7 @@ type TeamIssueScreenProps = {
  * Cognito 認証後に表示するチーム所有 Issue ページです。
  */
 export function TeamIssuePage() {
+  const location = useLocation()
   const navigate = useNavigate()
   const params = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -294,6 +296,7 @@ export function TeamIssuePage() {
   const teamId = params.teamId ?? 'core-team'
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
+  const [authenticatedApiError, setAuthenticatedApiError] = useState<unknown>()
   const requestedIssueId = searchParams.get('issueId')?.trim() || undefined
   const focusedCommentId = searchParams.get('commentId')?.trim() || undefined
   const focusedRootCommentId = searchParams.get('rootCommentId')?.trim() || undefined
@@ -313,7 +316,7 @@ export function TeamIssuePage() {
   const workspaceAccessKey = accessToken && user && !currentUserError
     ? (['workspace-access', accessToken] as const)
     : null
-  const { data: workspaceAccess } = useSWR(
+  const { data: workspaceAccess, error: workspaceAccessError } = useSWR(
     workspaceAccessKey,
     ([, token]) => getWorkspaceAccess(token),
     apiSWRConfig,
@@ -323,6 +326,7 @@ export function TeamIssuePage() {
     : null
   const {
     data: teams = emptyTeams,
+    error: projectDirectoryError,
     isLoading: isProjectDirectoryLoading,
     mutate: mutateProjectDirectory,
   } = useSWR(
@@ -394,11 +398,12 @@ export function TeamIssuePage() {
   const memberKey = accessToken && activeTeam
     ? (['team-issue-members', accessToken, activeTeam.projects.map((project) => project.id).join('\u0000')] as const)
     : null
-  const { data: assigneeOptions = emptyMembers } = useSWR(
+  const { data: assigneeOptionsResult, error: assigneeOptionsError } = useSWR(
     memberKey,
     ([, token]) => loadTeamProjectMembers(token, activeTeam?.projects.map((project) => project.id) ?? []),
     apiSWRConfig,
   )
+  const assigneeOptions = assigneeOptionsResult?.members ?? emptyMembers
   const userInitial =
     (user?.attributes.name ?? user?.attributes.email ?? user?.username ?? 'J')
       .trim()
@@ -406,14 +411,38 @@ export function TeamIssuePage() {
       .toUpperCase() || 'J'
   const canManageStructure = canManageWorkspaceStructure(user)
   const canMutateContent = canMutateWorkspaceContent(user)
+  const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
+    currentUserError,
+    [
+      workspaceAccessError,
+      projectDirectoryError,
+      issueError,
+      workItemConfigurationError,
+      detailError,
+      assigneeOptionsError,
+      ...(assigneeOptionsResult?.errors ?? []),
+      authenticatedApiError,
+      ...(artifacts.sessionErrors ?? []),
+      ...(collaboration.sessionErrors ?? []),
+    ],
+    `${location.pathname}${location.search}${location.hash}`,
+  )
+  const guardEnterpriseSession = async <Result,>(request: Promise<Result>) => {
+    try {
+      return await request
+    } catch (error) {
+      setAuthenticatedApiError(() => error)
+      throw error
+    }
+  }
   const isLoading =
     !session ||
     isCurrentUserLoading ||
-    Boolean(currentUserError) ||
+    Boolean(currentUserError && currentUserErrorAction?.kind !== 'stay') ||
     Boolean(user && isProjectDirectoryLoading) ||
     Boolean(user && isIssuesLoading) ||
     Boolean(user && isWorkItemConfigurationLoading)
-  const issueErrorMessage = issueError
+  const issueErrorMessage = currentUserErrorAction?.kind === 'stay' || issueError
     ? t('issues.error.loading')
     : undefined
   const detailErrorMessage = detailError
@@ -435,11 +464,17 @@ export function TeamIssuePage() {
   }, [navigate, session])
 
   useEffect(() => {
-    if (currentUserError) {
-      clearAuthSession()
-      navigate('/', { replace: true })
+    if (currentUserErrorAction?.redirectTo) {
+      if (currentUserErrorAction.clearSession) {
+        clearAuthSession()
+      }
+      navigate(currentUserErrorAction.redirectTo, { replace: true })
     }
-  }, [currentUserError, navigate])
+  }, [
+    currentUserErrorAction?.clearSession,
+    currentUserErrorAction?.redirectTo,
+    navigate,
+  ])
 
   useEffect(() => {
     if (!isCreateIssueRequested) {
@@ -456,11 +491,11 @@ export function TeamIssuePage() {
       return
     }
 
-    const issue = await mutationRequestRunner.run(
+    const issue = await guardEnterpriseSession(mutationRequestRunner.run(
       `issue:create:${teamId}`,
       JSON.stringify(input),
       (context) => createTeamIssue(teamId, accessToken, input, context),
-    )
+    ))
     navigate(createTeamIssuesPath(teamId, issue.id))
     await mutateIssues()
   }
@@ -479,7 +514,7 @@ export function TeamIssuePage() {
     }
 
     try {
-      await mutationRequestRunner.run(
+      await guardEnterpriseSession(mutationRequestRunner.run(
         `issue:update:${teamId}:${issueId}`,
         JSON.stringify([currentIssue.revision, input]),
         (context) => updateTeamIssue(
@@ -492,7 +527,7 @@ export function TeamIssuePage() {
           },
           context,
         ),
-      )
+      ))
       await mutateIssues()
       await mutateIssueDetail()
     } catch (error) {
@@ -516,7 +551,7 @@ export function TeamIssuePage() {
     const graphRevision = readSelectedRelationGraphRevision(issueDetail, issueId, t)
 
     try {
-      await mutationRequestRunner.run(
+      await guardEnterpriseSession(mutationRequestRunner.run(
         `issue:relation:create:${teamId}:${issueId}`,
         JSON.stringify([graphRevision, input]),
         (context) => createWorkItemRelation(
@@ -526,7 +561,7 @@ export function TeamIssuePage() {
           { ...input, expectedGraphRevision: graphRevision },
           context,
         ),
-      )
+      ))
       await mutateIssueDetail()
     } catch (error) {
       await refreshRelationDetailAfterConflict(error, mutateIssueDetail)
@@ -542,7 +577,7 @@ export function TeamIssuePage() {
     const graphRevision = readSelectedRelationGraphRevision(issueDetail, issueId, t)
 
     try {
-      await mutationRequestRunner.run(
+      await guardEnterpriseSession(mutationRequestRunner.run(
         `issue:relation:delete:${teamId}:${issueId}`,
         JSON.stringify([graphRevision, relation.type, relation.targetWorkItemId]),
         (context) => deleteWorkItemRelation(
@@ -556,7 +591,7 @@ export function TeamIssuePage() {
           },
           context,
         ),
-      )
+      ))
       await mutateIssueDetail()
     } catch (error) {
       await refreshRelationDetailAfterConflict(error, mutateIssueDetail)
@@ -569,9 +604,9 @@ export function TeamIssuePage() {
       return
     }
 
-    await mutationRequestRunner.run('team:create', JSON.stringify(input), (context) =>
+    await guardEnterpriseSession(mutationRequestRunner.run('team:create', JSON.stringify(input), (context) =>
       createProjectDirectoryTeam(accessToken, input, context),
-    )
+    ))
     await mutateProjectDirectory()
   }
 
@@ -583,11 +618,11 @@ export function TeamIssuePage() {
       return
     }
 
-    await mutationRequestRunner.run(
+    await guardEnterpriseSession(mutationRequestRunner.run(
       'project:create',
       JSON.stringify([nextTeamId, input]),
       (context) => createProjectDirectoryProject(accessToken, nextTeamId, input, context),
-    )
+    ))
     await mutateProjectDirectory()
   }
 
@@ -596,9 +631,9 @@ export function TeamIssuePage() {
       return
     }
 
-    await mutationRequestRunner.run('team:archive', nextTeamId, (context) =>
+    await guardEnterpriseSession(mutationRequestRunner.run('team:archive', nextTeamId, (context) =>
       archiveProjectDirectoryTeam(accessToken, nextTeamId, context),
-    )
+    ))
     await mutateProjectDirectory()
 
     if (nextTeamId === teamId) {
@@ -611,11 +646,11 @@ export function TeamIssuePage() {
       return
     }
 
-    await mutationRequestRunner.run(
+    await guardEnterpriseSession(mutationRequestRunner.run(
       'project:archive',
       JSON.stringify([nextTeamId, projectId]),
       (context) => archiveProjectDirectoryProject(accessToken, nextTeamId, projectId, context),
-    )
+    ))
     await mutateProjectDirectory()
   }
 
@@ -1865,7 +1900,12 @@ async function loadTeamProjectMembers(accessToken: string, projectIds: string[])
     }
   }
 
-  return Array.from(membersById.values()).filter(isActiveProjectAssignmentCandidate)
+  return {
+    errors: responses.flatMap((response) =>
+      response.status === 'rejected' ? [response.reason] : []
+    ),
+    members: Array.from(membersById.values()).filter(isActiveProjectAssignmentCandidate),
+  }
 }
 
 function formatLocalDateInputValue(date = new Date()) {

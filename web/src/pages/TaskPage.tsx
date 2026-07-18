@@ -17,6 +17,7 @@ import {
   getCurrentUser,
   type CurrentUser,
 } from '../auth/api'
+import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import { createMutationRequestRunner } from '../api/mutationHeaders'
 import { ChevronIcon } from '../components/icons'
@@ -165,6 +166,7 @@ const emptyConfigurationTeamIds: string[] = []
 const emptyBulkOperationSelections: BulkOperationSelection[] = []
 const emptyProjectWorkItemConfigurationLoadResult: ProjectWorkItemConfigurationLoadResult = {
   configurationsByTeam: emptyResolvedWorkItemConfigurations,
+  errors: [],
   failedTeamIds: emptyConfigurationTeamIds,
 }
 const apiSWRConfig = {
@@ -246,6 +248,10 @@ type ProjectWorkItemConfigurationLoadResult = {
    * Team ID ごとに取得できた resolved configuration です。
    */
   configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
+  /**
+   * Session policy を失わず shell へ伝える取得 error です。
+   */
+  errors: unknown[]
   /**
    * Configuration の取得に失敗した Team ID です。
    */
@@ -596,7 +602,7 @@ export function TaskPage() {
   const workspaceAccessKey = accessToken && user && !currentUserError
     ? (['workspace-access', accessToken] as const)
     : null
-  const { data: workspaceAccess } = useSWR(
+  const { data: workspaceAccess, error: workspaceAccessError } = useSWR(
     workspaceAccessKey,
     ([, token]) => getWorkspaceAccess(token),
     apiSWRConfig,
@@ -604,7 +610,11 @@ export function TaskPage() {
   const projectDirectoryKey = accessToken && user && !currentUserError
     ? (['project-directory', accessToken, locale] as const)
     : null
-  const { data: teams = [], mutate: mutateProjectDirectory } = useSWR(
+  const {
+    data: teams = [],
+    error: projectDirectoryError,
+    mutate: mutateProjectDirectory,
+  } = useSWR(
     projectDirectoryKey,
     ([, accessToken, currentLocale]) =>
       getProjectDirectory(accessToken, currentLocale),
@@ -745,6 +755,7 @@ export function TaskPage() {
     : null
   const {
     data: workItemConfigurationLoadResult = emptyProjectWorkItemConfigurationLoadResult,
+    error: workItemConfigurationError,
     isLoading: isWorkItemConfigurationLoading,
     mutate: mutateWorkItemConfigurations,
   } = useSWR(
@@ -842,7 +853,55 @@ export function TaskPage() {
   const projectPermissionsErrorMessage = projectMembersError
     ? t('workspace.permissions.error')
     : undefined
+  const currentPath = `${location.pathname}${location.search}${location.hash}`
+  const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
+    currentUserError,
+    [
+      workspaceAccessError,
+      projectDirectoryError,
+      taskError,
+      projectMembersError,
+      projectUsersError,
+      workItemConfigurationError,
+      ...workItemConfigurationLoadResult.errors,
+      relationCandidatesError,
+      detailError,
+      ...(issueArtifacts.sessionErrors ?? []),
+      ...(projectFiles.sessionErrors ?? []),
+      ...(collaboration.sessionErrors ?? []),
+    ],
+    currentPath,
+  )
+  const redirectEnterpriseSessionError = (error: unknown) => {
+    const sessionErrorAction = resolveEnterpriseSessionErrorsAction(
+      undefined,
+      [error],
+      currentPath,
+    )
+
+    if (!sessionErrorAction?.redirectTo) {
+      return false
+    }
+
+    if (sessionErrorAction.clearSession) {
+      clearAuthSession()
+    }
+    navigate(sessionErrorAction.redirectTo, { replace: true })
+    return true
+  }
+  const guardEnterpriseSession = async <Result,>(request: Promise<Result>) => {
+    try {
+      return await request
+    } catch (error) {
+      redirectEnterpriseSessionError(error)
+      throw error
+    }
+  }
   const taskErrorMessage = useMemo(() => {
+    if (currentUserErrorAction?.kind === 'stay') {
+      return t('tasks.error.loading')
+    }
+
     if (!taskError) {
       return undefined
     }
@@ -850,7 +909,7 @@ export function TaskPage() {
     const message = taskError instanceof Error ? taskError.message : 'tasks.error.loading'
 
     return message === 'tasks.error.loading' ? t('tasks.error.loading') : message
-  }, [taskError, t])
+  }, [currentUserErrorAction?.kind, taskError, t])
   const detailErrorMessage = issueUpdateErrorMessage ?? (
     detailError ? t('tasks.detail.error') : undefined
   )
@@ -863,7 +922,7 @@ export function TaskPage() {
   const isLoading =
     !session ||
     isCurrentUserLoading ||
-    Boolean(currentUserError) ||
+    Boolean(currentUserError && currentUserErrorAction?.kind !== 'stay') ||
     Boolean(user && isProjectTasksLoading) ||
     Boolean(workItemConfigurationKey && isWorkItemConfigurationLoading)
 
@@ -879,11 +938,17 @@ export function TaskPage() {
   }, [navigate, session])
 
   useEffect(() => {
-    if (currentUserError) {
-      clearAuthSession()
-      navigate('/', { replace: true })
+    if (currentUserErrorAction?.redirectTo) {
+      if (currentUserErrorAction.clearSession) {
+        clearAuthSession()
+      }
+      navigate(currentUserErrorAction.redirectTo, { replace: true })
     }
-  }, [currentUserError, navigate])
+  }, [
+    currentUserErrorAction?.clearSession,
+    currentUserErrorAction?.redirectTo,
+    navigate,
+  ])
 
   useEffect(() => {
     if (!isCreateTaskRequested) {
@@ -931,7 +996,7 @@ export function TaskPage() {
       throw new Error(t('issues.error.create'))
     }
 
-    const issue = await mutationRequestRunner.run(
+    const issue = await guardEnterpriseSession(mutationRequestRunner.run(
       'issue:create',
       JSON.stringify([creationTeam.id, projectId, input]),
       (context) => createTeamIssue(
@@ -943,7 +1008,7 @@ export function TaskPage() {
         },
         context,
       ),
-    )
+    ))
     await mutateProjectTasks()
     navigate(createProjectIssuesPath(projectId, creationTeam.id, issue.id))
   }
@@ -959,6 +1024,7 @@ export function TaskPage() {
       )
       await mutateProjectDirectory()
     } catch (error) {
+      redirectEnterpriseSessionError(error)
       console.error('Failed to create team:', error)
       throw error
     }
@@ -980,6 +1046,7 @@ export function TaskPage() {
       )
       await mutateProjectDirectory()
     } catch (error) {
+      redirectEnterpriseSessionError(error)
       console.error('Failed to create project:', error)
       throw error
     }
@@ -990,9 +1057,9 @@ export function TaskPage() {
       return
     }
 
-    await mutationRequestRunner.run('team:archive', teamId, (context) =>
+    await guardEnterpriseSession(mutationRequestRunner.run('team:archive', teamId, (context) =>
       archiveProjectDirectoryTeam(accessToken, teamId, context),
-    )
+    ))
     await mutateProjectDirectory()
 
     if (activeTeam?.id === teamId) {
@@ -1005,7 +1072,7 @@ export function TaskPage() {
       return
     }
 
-    await mutationRequestRunner.run(
+    await guardEnterpriseSession(mutationRequestRunner.run(
       'project:archive',
       JSON.stringify([teamId, archivedProjectId]),
       (context) => archiveProjectDirectoryProject(
@@ -1014,7 +1081,7 @@ export function TaskPage() {
         archivedProjectId,
         context,
       ),
-    )
+    ))
     await mutateProjectDirectory()
 
     if (projectId === archivedProjectId && activeTeam?.id === teamId) {
@@ -1031,11 +1098,11 @@ export function TaskPage() {
       return
     }
 
-    await mutationRequestRunner.run(
+    await guardEnterpriseSession(mutationRequestRunner.run(
       `member:update:${currentProjectId}:${memberKey}`,
       JSON.stringify(input),
       (context) => updateProjectMember(accessToken, currentProjectId, memberKey, input, context),
-    )
+    ))
     await mutateProjectMembers()
   }
 
@@ -1044,11 +1111,11 @@ export function TaskPage() {
       return
     }
 
-    await mutationRequestRunner.run(
+    await guardEnterpriseSession(mutationRequestRunner.run(
       `member:remove:${currentProjectId}:${memberKey}`,
       memberKey,
       (context) => removeProjectMember(accessToken, currentProjectId, memberKey, context),
-    )
+    ))
     await mutateProjectMembers()
   }
 
@@ -1061,11 +1128,11 @@ export function TaskPage() {
     const currentExtraUsers = projectUsersExtraPage?.key === currentPageKey
       ? projectUsersExtraPage.users
       : emptyProjectUsers
-    const response = await getProjectUsers(accessToken, projectId, {
+    const response = await guardEnterpriseSession(getProjectUsers(accessToken, projectId, {
       limit: 20,
       nextToken: projectUsersNextToken,
       query: projectUserQuery,
-    })
+    }))
 
     setProjectUsersExtraPage({
       key: currentPageKey,
@@ -1127,6 +1194,7 @@ export function TaskPage() {
       await mutateProjectTasks()
       await mutateSelectedIssueDetail()
     } catch (error) {
+      redirectEnterpriseSessionError(error)
       if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
         setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.detail.conflict')])
         await Promise.all([mutateProjectTasks(), mutateSelectedIssueDetail()])
@@ -1150,11 +1218,11 @@ export function TaskPage() {
       throw new Error(t('bulk.error'))
     }
 
-    return mutationRequestRunner.run(
+    return guardEnterpriseSession(mutationRequestRunner.run(
       'bulk:preview',
       JSON.stringify(request),
       (context) => previewBulkOperation(accessToken, request, context),
-    )
+    ))
   }
 
   const handleBulkApply = async (
@@ -1165,7 +1233,7 @@ export function TaskPage() {
       throw new Error(t('bulk.error'))
     }
 
-    const operation = await mutationRequestRunner.run(
+    const operation = await guardEnterpriseSession(mutationRequestRunner.run(
       'bulk:apply',
       JSON.stringify([request, preview.operationToken]),
       (context) => applyBulkOperation(
@@ -1173,7 +1241,7 @@ export function TaskPage() {
         { ...request, operationToken: preview.operationToken },
         context,
       ),
-    )
+    ))
     await revalidateAfterBulkOperation()
     return operation
   }
@@ -1183,11 +1251,11 @@ export function TaskPage() {
       throw new Error(t('bulk.error'))
     }
 
-    const operation = await mutationRequestRunner.run(
+    const operation = await guardEnterpriseSession(mutationRequestRunner.run(
       `bulk:retry:${operationId}`,
       operationId,
       (context) => retryBulkOperation(accessToken, operationId, context),
-    )
+    ))
     await revalidateAfterBulkOperation()
     return operation
   }
@@ -1197,11 +1265,11 @@ export function TaskPage() {
       throw new Error(t('bulk.error'))
     }
 
-    const operation = await mutationRequestRunner.run(
+    const operation = await guardEnterpriseSession(mutationRequestRunner.run(
       `bulk:undo:${operationId}`,
       operationId,
       (context) => undoBulkOperation(accessToken, operationId, context),
-    )
+    ))
     await revalidateAfterBulkOperation()
     return operation
   }
@@ -1234,6 +1302,7 @@ export function TaskPage() {
       )
       await mutateSelectedIssueDetail()
     } catch (error) {
+      redirectEnterpriseSessionError(error)
       await refreshRelationDetailAfterConflict(error, mutateSelectedIssueDetail)
       throw error
     }
@@ -1271,6 +1340,7 @@ export function TaskPage() {
       )
       await mutateSelectedIssueDetail()
     } catch (error) {
+      redirectEnterpriseSessionError(error)
       await refreshRelationDetailAfterConflict(error, mutateSelectedIssueDetail)
       throw error
     }
@@ -1964,7 +2034,7 @@ function mergeProjectUsers(currentUsers: ProjectUser[], nextUsers: ProjectUser[]
 
 function normalizeProjectIssueError(error: unknown) {
   if (error instanceof TeamIssuesApiError && error.message === 'issues.error.loading') {
-    return new ProjectTasksApiError(error.status, 'tasks.error.loading')
+    return new ProjectTasksApiError(error.status, 'tasks.error.loading', error.code)
   }
 
   return error
@@ -4285,6 +4355,9 @@ async function loadProjectWorkItemConfigurations(
         ? [[result.value.teamId, result.value.configuration]]
         : [],
     )) as Record<string, ResolvedWorkItemConfiguration>,
+    errors: results.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : []
+    ),
     failedTeamIds: results.flatMap((result, index) =>
       result.status === 'rejected' ? [teamIds[index] ?? ''] : [],
     ).filter(Boolean),

@@ -3,8 +3,8 @@ import type {
   RequestSubmissionActionInput,
   RequestSubmissionPage,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useLocation, useNavigate, useSearchParams } from 'react-router'
 import useSWR from 'swr'
 import useSWRInfinite from 'swr/infinite'
 import { createMutationRequestRunner } from '../api/mutationHeaders'
@@ -12,6 +12,7 @@ import {
   canManageWorkspaceStructure,
   getCurrentUser,
 } from '../auth/api'
+import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import { useWorkspaceCommandMenu } from '../commands/WorkspaceCommandMenuContext'
 import {
@@ -73,6 +74,7 @@ const apiSWRConfig = {
  * Request intake queue と form builder を認証済み Workspace shell 内に描画します。
  */
 export function RequestIntakePage() {
+  const location = useLocation()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const mutationRunner = useRef(createMutationRequestRunner()).current
@@ -80,6 +82,10 @@ export function RequestIntakePage() {
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   const [actionErrorMessage, setActionErrorMessage] = useState<string>()
+  const [authenticatedApiError, setAuthenticatedApiError] = useState<unknown>()
+  const handleAuthenticatedApiError = useCallback((error: unknown) => {
+    setAuthenticatedApiError(() => error)
+  }, [])
   const commandMenu = useWorkspaceCommandMenu()
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
@@ -100,6 +106,7 @@ export function RequestIntakePage() {
     : null
   const {
     data: teams = emptyTeams,
+    error: projectDirectoryError,
     isLoading: isProjectDirectoryLoading,
   } = useSWR(
     projectDirectoryKey,
@@ -183,6 +190,18 @@ export function RequestIntakePage() {
   )
   const userLabel = user?.attributes.email ?? user?.attributes.name ?? user?.username ?? t('workspace.user.fallback')
   const userInitial = userLabel.trim().charAt(0).toUpperCase() || 'M'
+  const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
+    currentUserError,
+    [
+      projectDirectoryError,
+      queueError,
+      formsError,
+      detailError,
+      selectedFormError,
+      authenticatedApiError,
+    ],
+    `${location.pathname}${location.search}${location.hash}`,
+  )
   const isLoading = !session || isCurrentUserLoading || Boolean(user && isProjectDirectoryLoading)
 
   useEffect(() => {
@@ -195,11 +214,17 @@ export function RequestIntakePage() {
   }, [navigate, session])
 
   useEffect(() => {
-    if (currentUserError) {
-      clearAuthSession()
-      navigate('/', { replace: true })
+    if (currentUserErrorAction?.redirectTo) {
+      if (currentUserErrorAction.clearSession) {
+        clearAuthSession()
+      }
+      navigate(currentUserErrorAction.redirectTo, { replace: true })
     }
-  }, [currentUserError, navigate])
+  }, [
+    currentUserErrorAction?.clearSession,
+    currentUserErrorAction?.redirectTo,
+    navigate,
+  ])
 
   const selectView = (view: RequestsView) => {
     setSearchParams(view === 'forms' ? { view: 'forms' } : {}, { replace: true })
@@ -221,6 +246,7 @@ export function RequestIntakePage() {
     if (!accessToken) return
 
     setActionErrorMessage(undefined)
+    setAuthenticatedApiError(undefined)
     try {
       const updated = await mutationRunner.run(
         `request-submission:${submissionId}:${input.action}`,
@@ -235,6 +261,7 @@ export function RequestIntakePage() {
       await mutateSelectedSubmission(updated, { revalidate: false })
       await mutateQueue()
     } catch (error) {
+      setAuthenticatedApiError(() => error)
       setActionErrorMessage(error instanceof Error ? error.message : t('requests.action.error'))
       throw error
     }
@@ -243,17 +270,23 @@ export function RequestIntakePage() {
   const handleOpenAttachment = async (submissionId: string, attachmentId: string) => {
     if (!accessToken) return
 
-    const access = await mutationRunner.run(
-      `request-attachment-access:${submissionId}:${attachmentId}`,
-      `${submissionId}:${attachmentId}`,
-      (context) => createRequestAttachmentAccess(
-        submissionId,
-        attachmentId,
-        accessToken,
-        context,
-      ),
-    )
-    openDownloadUrl(access.url)
+    setAuthenticatedApiError(undefined)
+    try {
+      const access = await mutationRunner.run(
+        `request-attachment-access:${submissionId}:${attachmentId}`,
+        `${submissionId}:${attachmentId}`,
+        (context) => createRequestAttachmentAccess(
+          submissionId,
+          attachmentId,
+          accessToken,
+          context,
+        ),
+      )
+      openDownloadUrl(access.url)
+    } catch (error) {
+      setAuthenticatedApiError(() => error)
+      throw error
+    }
   }
 
   const sidebar = (
@@ -328,6 +361,15 @@ export function RequestIntakePage() {
 
         {isLoading ? (
           <div className="grid min-h-0 flex-1 place-items-center text-sm font-semibold text-[var(--workbench-muted)]">{t('requests.loading')}</div>
+        ) : currentUserErrorAction?.kind === 'stay' ? (
+          <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-[clamp(20px,3vw,34px)] py-5">
+            <p
+              className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700"
+              role="alert"
+            >
+              {t('requests.loadError')}
+            </p>
+          </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-[clamp(20px,3vw,34px)] py-5">
             <div className="mb-5 flex flex-wrap gap-2 border-b border-[var(--workbench-border)] pb-3" role="tablist">
@@ -385,6 +427,7 @@ export function RequestIntakePage() {
                       selectedFormId === 'new' ? undefined : selectedForm,
                     )}
                     locale={locale}
+                    onAuthenticatedApiError={handleAuthenticatedApiError}
                     teams={teams}
                     onCreated={(form) => {
                       void mutateForms()
@@ -413,6 +456,7 @@ function RequestFormEditorContainer({
   accessToken,
   initialForm,
   locale,
+  onAuthenticatedApiError,
   onCreated,
   onUpdated,
   teams,
@@ -420,6 +464,7 @@ function RequestFormEditorContainer({
   accessToken: string
   initialForm?: RequestForm
   locale: Locale
+  onAuthenticatedApiError: (error: unknown) => void
   onCreated: (form: RequestForm) => void
   onUpdated: (form: RequestForm) => void
   teams: ProjectDirectoryTeam[]
@@ -437,11 +482,17 @@ function RequestFormEditorContainer({
   const configurationKey = accessToken && model.routing.teamId
     ? (['request-routing-workflow', accessToken, model.routing.teamId] as const)
     : null
-  const { data: resolvedConfiguration } = useSWR(
+  const { data: resolvedConfiguration, error: configurationError } = useSWR(
     configurationKey,
     ([, token, teamId]) => getWorkItemConfiguration(token, { kind: 'team', teamId }),
     apiSWRConfig,
   )
+
+  useEffect(() => {
+    if (configurationError) {
+      onAuthenticatedApiError(configurationError)
+    }
+  }, [configurationError, onAuthenticatedApiError])
 
   const save = async () => {
     setIsSaving(true)
@@ -474,6 +525,7 @@ function RequestFormEditorContainer({
         onCreated(created)
       }
     } catch (error) {
+      onAuthenticatedApiError(error)
       setErrorMessage(error instanceof Error ? error.message : t('requests.builder.saveError'))
       throw error
     } finally {
@@ -513,6 +565,7 @@ function RequestFormEditorContainer({
       setModel(normalizeRequestForm(published))
       onUpdated(published)
     } catch (error) {
+      onAuthenticatedApiError(error)
       setErrorMessage(error instanceof Error ? error.message : t('requests.builder.publishError'))
       throw error
     } finally {

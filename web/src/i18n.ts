@@ -40,8 +40,16 @@ const dictionaries = {
     'preview.healthText': '主要タスクは予定通りに進行中',
     'login.title': 'ログイン',
     'login.subtitle': 'アカウントにサインインしてください',
+    'login.emailFirstSubtitle':
+      '仕事用メールアドレスから安全なログイン方法を確認します',
+    'login.passwordSubtitle': 'パスワードを入力して続行してください',
     'login.email': 'メールアドレス',
     'login.emailPlaceholder': 'メールアドレスを入力',
+    'login.discoveryHelp':
+      '管理対象ドメインでは、パスワードを送信せず組織の SSO へ移動します。',
+    'login.changeEmail': '変更',
+    'login.continue': '続行',
+    'login.continuing': 'ログイン方法を確認中',
     'login.password': 'パスワード',
     'login.passwordPlaceholder': 'パスワードを入力',
     'login.showPassword': 'パスワードを表示',
@@ -54,6 +62,67 @@ const dictionaries = {
       'ローカル Cognito がまだ準備できていません。Floci の起動状態を確認してください。',
     'login.errorUnknown':
       'ログインに失敗しました。時間をおいてもう一度お試しください。',
+    'login.errorSso':
+      'シングルサインオンを開始できませんでした。時間をおいてもう一度お試しください。',
+    'login.ssoCallback.title': 'シングルサインオンを完了しています',
+    'login.ssoCallback.description':
+      '認証結果を安全に確認しています。この画面を閉じずにお待ちください。',
+    'login.ssoCallback.errorTitle': 'シングルサインオンを完了できませんでした',
+    'login.ssoCallback.errorDescription':
+      '認証リクエストが期限切れか、確認できませんでした。ログイン画面からもう一度開始してください。',
+    'login.ssoCallback.retry': 'ログイン画面へ戻る',
+    'security.recovery.header': 'セキュリティ復旧',
+    'security.recovery.eyebrow': '緊急アクセス',
+    'security.recovery.title': '安全に管理アクセスを復旧する',
+    'security.recovery.description':
+      '通常の管理経路が利用できない場合に限り、事前登録済みの緊急管理者として短時間だけアクセスを昇格します。',
+    'security.recovery.step.verify.title': '本人性と端末を再確認',
+    'security.recovery.step.verify.description':
+      '多要素認証と直近の再認証を満たすセッションだけが復旧を開始できます。',
+    'security.recovery.step.audit.title': '具体的な理由を記録',
+    'security.recovery.step.audit.description':
+      '理由、実行者、開始・終了時刻は監査ログに残り、後から確認できます。',
+    'security.recovery.step.expire.title': '必要最小限の時間で自動終了',
+    'security.recovery.step.expire.description':
+      '選択した時間を過ぎると昇格は自動で失効します。作業後は通常の権限へ戻ります。',
+    'security.recovery.form.label': 'Break-glass activation',
+    'security.recovery.form.title': '復旧アクセスを開始',
+    'security.recovery.warning.title': '緊急時だけ使用してください',
+    'security.recovery.warning.description':
+      'この操作は強い管理権限を一時的に付与し、監査対象になります。',
+    'security.recovery.reason': '復旧が必要な理由',
+    'security.recovery.reasonPlaceholder':
+      '例: SSO 設定の障害を復旧し、通常の管理者アクセスを再開する',
+    'security.recovery.reasonHelp':
+      '10文字以上で具体的に入力してください。理由は監査ログに保存されます。',
+    'security.recovery.duration': '有効時間',
+    'security.recovery.duration.five': '5分',
+    'security.recovery.duration.fifteen': '15分',
+    'security.recovery.duration.thirty': '30分',
+    'security.recovery.durationHelp':
+      '必要な作業を終えられる最短の時間を選んでください。',
+    'security.recovery.activate': '復旧アクセスを開始',
+    'security.recovery.activating': '本人性を確認して開始中…',
+    'security.recovery.reauthenticate': '本人確認のためログインし直す',
+    'security.recovery.cancel': 'ダッシュボードへ戻る',
+    'security.recovery.error.reason': '復旧理由を10文字以上で入力してください。',
+    'security.recovery.error.denied':
+      'このアカウントは緊急管理者として事前登録されていません。別の復旧担当者へ連絡してください。',
+    'security.recovery.error.mfa':
+      '多要素認証を確認できませんでした。MFA を使ってログインし直してください。',
+    'security.recovery.error.reauthentication':
+      '直近の本人確認が必要です。ログインし直してから、もう一度お試しください。',
+    'security.recovery.error.duration':
+      '選択した有効時間はこの緊急管理者に許可されていません。短い時間を選んでください。',
+    'security.recovery.error.session':
+      'ログインセッションを確認できませんでした。ログインし直してください。',
+    'security.recovery.error.unknown':
+      '復旧アクセスを開始できませんでした。接続を確認して、もう一度お試しください。',
+    'security.recovery.active.title': '緊急復旧アクセスが有効です',
+    'security.recovery.active.description':
+      '{time} に自動終了します。復旧作業が終わったら、予定より早く終了してください。',
+    'security.recovery.active.revoke': '今すぐ終了',
+    'security.recovery.active.revoking': '終了中…',
     'login.forgotPassword': 'パスワードを忘れた場合',
     'login.challenge.title': '新しいパスワードを設定',
     'login.challenge.subtitle': '初回ログインを完了してください',
@@ -78,10 +147,38 @@ const dictionaries = {
     'login.challenge.retryTitle': '通常ログインから処理を再開できます',
     'login.challenge.retryDescription':
       '新しいパスワードが Cognito に保存され、Workspace 更新だけが失敗した場合も、通常ログインで同じメールアドレスと新しいパスワードを入力すると復旧処理が再開されます。',
+    'login.mfa.title': '確認コードを入力',
+    'login.mfa.subtitle': '多要素認証を完了してください',
+    'login.mfa.verifyTitle': '本人確認が必要です',
+    'login.mfa.authenticatorDescription':
+      '認証アプリに表示されている確認コードを入力してください。',
+    'login.mfa.codeDescription':
+      '登録済みの認証手段へ送信された確認コードを入力してください。',
+    'login.mfa.deliveryDescription':
+      '{destination} に送信された確認コードを入力してください。',
+    'login.mfa.code': '確認コード',
+    'login.mfa.codePlaceholder': '6〜8桁のコード',
+    'login.mfa.codeHelp':
+      '数字のみを入力してください。確認コードや challenge session はブラウザに保存しません。',
+    'login.mfa.verify': '確認してログイン',
+    'login.mfa.verifying': '確認中',
+    'login.mfa.restart': 'メールアドレスからやり直す',
+    'login.mfa.errorCode': '6〜8桁の確認コードを入力してください。',
+    'login.mfa.errorInvalid':
+      '確認コードが正しくないか、有効期限が切れています。新しいコードを確認してください。',
+    'login.mfa.errorExpired':
+      '本人確認セッションが期限切れです。メールアドレスからログインをやり直してください。',
+    'login.mfa.errorRateLimited':
+      '確認の試行回数が上限に達しました。時間をおいてからやり直してください。',
+    'login.mfa.errorUnavailable':
+      '本人確認サービスへ接続できませんでした。時間をおいて再試行してください。',
+    'login.mfa.errorUnknown':
+      '確認を完了できませんでした。コードを確認してもう一度お試しください。',
     'dashboard.title': 'ダッシュボード',
     'dashboard.subtitle':
       'Cognito で認証されたユーザーとして、ローカル環境の mukuroji にアクセスしています。',
     'dashboard.loading': 'ユーザー情報を確認しています。',
+    'dashboard.loadError': 'アカウント情報を確認できませんでした。時間をおいて再度お試しください。',
     'dashboard.authProvider': 'Cognito 認証',
     'dashboard.authProviderValue': 'Floci のローカル Cognito ユーザープールで認証済み',
     'dashboard.signedInAs': 'ログイン中のユーザー',
@@ -1927,6 +2024,434 @@ const dictionaries = {
     'public.notFound.privacyDescription': '情報の取り扱いと利用者の選択肢',
     'public.notFound.termsTitle': '利用規約',
     'public.notFound.termsDescription': 'サービスを共同利用するための条件',
+    'workspace.settings.securityEyebrow': 'Enterprise',
+    'workspace.settings.securityTitle': 'ID・セキュリティ管理',
+    'workspace.settings.securityDescription':
+      'SSO、SCIM、ロール、セッション、特権アカウントを専用画面で管理します。',
+    'security.page.eyebrow': 'Enterprise 管理',
+    'security.page.title': 'ID・セキュリティ',
+    'security.page.description':
+      '組織の認証、プロビジョニング、アクセス制御、セッションと緊急アクセスを一元管理します。',
+    'security.eyebrow': 'Enterprise security',
+    'security.title': '組織のセキュリティ管理',
+    'security.description':
+      '変更前の前提条件と影響を確認しながら、IDライフサイクルと特権アクセスを安全に運用します。',
+    'security.tabsAria': 'Enterprise セキュリティ設定',
+    'security.tab.overview': '概要',
+    'security.tab.identity': 'ID',
+    'security.tab.provisioning': 'プロビジョニング',
+    'security.tab.access': 'マッピング・ロール',
+    'security.tab.sessions': 'セッション',
+    'security.tab.privileged': '特権アクセス',
+    'security.mode.admin': '管理可能',
+    'security.mode.readOnly': '読み取り専用',
+    'security.readOnly':
+      'この設定は読み取り専用です。変更するには Enterprise security の管理権限が必要です。',
+    'security.action.retryLoad': '再読み込み',
+    'security.action.refresh': '最新状態を取得',
+    'security.action.testing': '保存・テスト中',
+    'security.action.rotating': 'ローテーション中',
+    'security.action.previewing': '差分を確認中',
+    'security.action.retrying': '再試行中',
+    'security.action.remove': '削除',
+    'security.action.saving': '保存中',
+    'security.action.save': '保存',
+    'security.action.close': '閉じる',
+    'security.action.working': '実行中',
+    'security.action.cancel': 'キャンセル',
+    'security.action.copy': 'コピー',
+    'security.action.copied': 'コピー済み',
+    'security.action.signInAgain': '本人確認をやり直す',
+    'security.error.load': 'Enterprise セキュリティ設定を読み込めませんでした。',
+    'security.error.stale':
+      '表示中の内容は古い可能性があります。更新操作を行う前に再読み込みしてください。',
+    'security.error.forbidden': 'この操作を実行する権限がありません。',
+    'security.error.authenticationRequired':
+      'セッションの有効期限、MFA、または再認証ポリシーにより、もう一度本人確認が必要です。安全のため一時的な認証情報は画面から消去されました。',
+    'security.error.ipDenied':
+      '現在のネットワークは Workspace の IP 許可リストに含まれていません。承認済みネットワークへ切り替えてから再読み込みしてください。',
+    'security.error.conflict':
+      '別の管理者が設定を更新しました。最新状態を確認してから再実行してください。',
+    'security.error.invalid': '入力内容を確認してから再実行してください。',
+    'security.error.prerequisite':
+      '安全に実行するための前提条件が不足しています。チェックリストを確認してください。',
+    'security.error.operation': 'セキュリティ設定を更新できませんでした。',
+    'security.error.refreshAfterMutation':
+      '変更は適用されましたが、最新状態を再取得できませんでした。状態を再読み込みしてください。',
+    'security.error.refreshAfterCredential':
+      '認証情報は発行済みですが、最新状態を再取得できませんでした。表示中の認証情報を安全な場所に保存してから、状態を再読み込みしてください。',
+    'security.value.notConfigured': '未設定',
+    'security.value.none': 'なし',
+    'security.value.never': '未実行',
+    'security.unit.minutes': '分',
+    'security.unit.days': '日',
+    'security.overview.metric.sso': 'SSO 強制',
+    'security.overview.metric.scim': 'SCIM',
+    'security.overview.metric.provisioningErrors': '同期の要対応',
+    'security.overview.metric.privileged': '特権経路',
+    'security.overview.enforced': '強制中',
+    'security.overview.notEnforced': '任意',
+    'security.overview.privilegedCount':
+      'Service {service}件・緊急 {breakGlass}件',
+    'security.overview.readinessEyebrow': '安全な有効化',
+    'security.overview.readinessTitle': 'SSO 強制の準備状況',
+    'security.overview.readinessDescription':
+      '接続確認、ドメイン所有、緊急管理者の3条件を満たしてから、管理対象ドメインへSSOを強制します。',
+    'security.overview.card.identityTitle': 'ID 接続を確認',
+    'security.overview.card.identityDescription':
+      'IdP、管理対象ドメイン、SSO強制の前提条件を確認します。',
+    'security.overview.card.provisioningTitle': '同期の影響を確認',
+    'security.overview.card.provisioningDescription':
+      'SCIMトークン、dry-run差分、失敗ログと再試行を管理します。',
+    'security.overview.card.sessionsTitle': 'セッションを制御',
+    'security.overview.card.sessionsDescription':
+      'MFA、有効期間、再認証、IP、ゲスト上限を設定します。',
+    'security.overview.open': '開く',
+    'security.prerequisite.ready': '有効化可能',
+    'security.prerequisite.actionRequired': '要対応',
+    'security.prerequisite.identity': 'IdP の接続テストが成功している',
+    'security.prerequisite.domain': '確認済みドメインが1件以上ある',
+    'security.prerequisite.breakGlass':
+      'MFA設定済みの緊急管理者が有効になっている',
+    'security.prerequisite.complete': '完了',
+    'security.prerequisite.incomplete': '未完了',
+    'security.prerequisite.unavailable': '現在の権限では状態を確認できません',
+    'security.identity.status.not-configured': '未設定',
+    'security.identity.status.draft': '下書き',
+    'security.identity.status.verified': '接続確認済み',
+    'security.identity.status.error': '要確認',
+    'security.identity.providerTitle': 'ID プロバイダー',
+    'security.identity.providerDescription':
+      'SAMLまたはOIDCの公開設定を保存し、接続テストで利用可能性を確認します。',
+    'security.identity.protocol': 'プロトコル',
+    'security.identity.displayName': '表示名',
+    'security.identity.issuer': 'Issuer / Entity ID',
+    'security.identity.metadataUrl': 'SAML metadata URL',
+    'security.identity.metadataUrlHelp':
+      'HTTPSでmetadata XMLを取得し、Entity ID、SSO URL、署名証明書を接続テストで検証します。',
+    'security.identity.ssoUrl': 'SSO URL',
+    'security.identity.clientId': 'Client ID / Audience',
+    'security.identity.saveAndTest': '保存して接続テスト',
+    'security.identity.lastTested': '最終接続テスト: {date}',
+    'security.identity.domainsTitle': '管理対象ドメイン',
+    'security.identity.domainsDescription':
+      'DNS TXTレコードで所有権を確認し、SSO対象を明示します。',
+    'security.identity.domainLabel': 'ドメイン',
+    'security.identity.claimDomain': 'ドメインを追加',
+    'security.identity.verifyDomain': '所有権を確認',
+    'security.identity.domainsEmpty': '管理対象ドメインはまだありません。',
+    'security.identity.verificationRecordName': 'TXT レコード名',
+    'security.domainChallenge.title': '{domain} の DNS 検証値',
+    'security.domainChallenge.description':
+      'この TXT 値は再表示されません。DNS に設定するまで安全な場所に保存してください。',
+    'security.domainChallenge.recordName': 'TXT レコード名',
+    'security.domainChallenge.recordValue': 'TXT 値（一回限り表示）',
+    'security.domain.status.pending': '確認待ち',
+    'security.domain.status.verified': '確認済み',
+    'security.domain.status.conflict': '競合',
+    'security.identity.enforcementTitle': 'SSO 強制',
+    'security.identity.enforcementDescription':
+      '管理対象ドメインのログイン経路をIdPへ統一します。緊急経路を確保してから有効化してください。',
+    'security.identity.enforcementReady':
+      'すべての前提条件を満たしています。影響を確認してSSOを強制できます。',
+    'security.identity.enforcementBlocked':
+      '未完了の前提条件があります。チェックリストを完了すると有効化できます。',
+    'security.identity.disableEnforcement': 'SSO強制を解除',
+    'security.identity.enableEnforcement': 'SSOを強制',
+    'security.scim.status.disabled': '無効',
+    'security.scim.status.ready': '利用可能',
+    'security.scim.status.syncing': '同期中',
+    'security.scim.status.error': '要確認',
+    'security.provisioning.scimTitle': 'SCIM 接続',
+    'security.provisioning.scimDescription':
+      'IdPへ渡すendpointと、保存済みcredentialの安全なメタデータを確認します。',
+    'security.provisioning.endpoint': 'Endpoint',
+    'security.provisioning.tokenGeneration': 'Token',
+    'security.provisioning.generation':
+      'Generation {generation}・末尾 {lastFour}',
+    'security.provisioning.lastSync': '最終同期',
+    'security.provisioning.tokenHelp':
+      '新しいtokenは発行直後に一度だけ表示されます。先にIdPへ登録できる準備をしてください。',
+    'security.provisioning.rotateToken': 'Tokenをローテーション',
+    'security.provisioning.createToken': 'Tokenを発行',
+    'security.provisioning.scimTokenLabel': 'SCIM bearer token',
+    'security.provisioning.reconcileTitle': 'Directory reconciliation',
+    'security.provisioning.reconcileDescription':
+      '適用前にdry-runを実行し、作成・更新・無効化・session失効の件数を確認します。',
+    'security.provisioning.dryRunTitle': '変更せずに差分を確認',
+    'security.provisioning.dryRunDescription':
+      '現在のdirectory状態とWorkspaceを比較し、短時間有効なpreviewを作成します。',
+    'security.provisioning.preview': 'Dry-runを実行',
+    'security.provisioning.logsTitle': '実行ログ',
+    'security.provisioning.logsDescription':
+      '秘密情報を除外した同期履歴とcorrelation IDを確認します。',
+    'security.provisioning.logStatus.pending': '待機中',
+    'security.provisioning.logStatus.running': '実行中',
+    'security.provisioning.logStatus.succeeded': '成功',
+    'security.provisioning.logStatus.partial': '一部失敗',
+    'security.provisioning.logStatus.failed': '失敗',
+    'security.provisioning.summary.pending':
+      'プロビジョニング処理は実行待ちです。',
+    'security.provisioning.summary.running':
+      'プロビジョニング処理を実行しています。',
+    'security.provisioning.summary.succeeded':
+      'プロビジョニング処理が完了しました。',
+    'security.provisioning.summary.partial':
+      'プロビジョニング処理の一部に対応が必要です。',
+    'security.provisioning.summary.failed':
+      'プロビジョニング処理に失敗しました。詳細は監査ログで確認してください。',
+    'security.provisioning.operation.scim': 'SCIM',
+    'security.provisioning.operation.dry-run': 'Dry-run',
+    'security.provisioning.operation.reconcile': 'Reconcile',
+    'security.provisioning.operation.deprovision': 'Deprovision',
+    'security.provisioning.attempts': '試行 {count}回',
+    'security.provisioning.retry': '再試行',
+    'security.provisioning.logsEmpty': '実行ログはまだありません。',
+    'security.provisioning.impactTitle': '適用される変更',
+    'security.provisioning.previewExpires': 'Preview期限: {date}',
+    'security.provisioning.previewExpired':
+      'このpreviewは期限切れです。適用前にもう一度dry-runを実行してください。',
+    'security.provisioning.previewExpiredAction': '期限切れ・再確認が必要',
+    'security.provisioning.previewBlocked':
+      '保護対象への影響が含まれるため適用できません。警告の対象をDirectory変更から除外して、dry-runをやり直してください。',
+    'security.provisioning.previewBlockedAction': '保護対象への影響を解消',
+    'security.provisioning.blockingChanges': '適用不可',
+    'security.provisioning.warningSummary':
+      'このpreviewには要確認の影響が{count}件あります。件数と保護状態を確認し、詳細は監査ログで確認してください。',
+    'security.provisioning.changesFound': '差分あり',
+    'security.provisioning.noChanges': '差分なし',
+    'security.provisioning.impact.usersCreated': 'User作成',
+    'security.provisioning.impact.usersUpdated': 'User更新',
+    'security.provisioning.impact.usersDeactivated': 'User無効化',
+    'security.provisioning.impact.groupsCreated': 'Group作成',
+    'security.provisioning.impact.groupsUpdated': 'Group更新',
+    'security.provisioning.impact.sessionsRevoked': 'Session失効',
+    'security.provisioning.apply': 'この差分を適用',
+    'security.access.mappingsTitle': 'Directory group mapping',
+    'security.access.mappingsDescription':
+      'IdPのgroupをWorkspace、Team、Projectのroleへ決定的に割り当てます。',
+    'security.access.directoryGroupName': 'Directory group名',
+    'security.access.directoryGroupId': 'Directory group ID',
+    'security.access.scope': '適用範囲',
+    'security.access.role': 'ロール',
+    'security.access.selectRole': 'ロールを選択',
+    'security.access.addMapping': 'Mappingを追加',
+    'security.scope.workspace': 'Workspace',
+    'security.scope.team': 'Team',
+    'security.scope.project': 'Project',
+    'security.access.column.group': 'Directory group',
+    'security.access.column.scope': '適用範囲',
+    'security.access.column.role': 'ロール',
+    'security.access.column.action': '操作',
+    'security.access.mappingsEmpty': 'Group mappingはまだありません。',
+    'security.access.rolesTitle': 'ロールと権限',
+    'security.access.rolesDescription':
+      '権限を用途別に比較し、custom roleだけを編集できます。',
+    'security.access.roleName': 'ロール名',
+    'security.access.roleDescription': '説明',
+    'security.access.rolePermissions': '付与する権限',
+    'security.access.permissionRequired': '少なくとも1つの権限を選択してください。',
+    'security.access.permissionGrantCeilingHelp':
+      '現在の自分が持つ権限だけを新しいロールへ付与できます。付与できない権限は無効で表示されます。',
+    'security.access.permissionOutsideGrantCeiling':
+      '現在の自分には、この権限をロールへ付与する権限がありません。',
+    'security.access.roleOutsideGrantCeiling':
+      'このロールには現在の自分が付与できない権限が含まれるため、編集できません。',
+    'security.access.guestAssignable': 'Guestへの割り当てを許可',
+    'security.access.guestAssignableWarning':
+      '有効にすると、外部Guestへこのロールのすべての権限を付与できます。Guest policyと権限内容を確認してください。',
+    'security.access.createRole': 'Custom roleを作成',
+    'security.access.permission': '権限',
+    'security.access.privilegedPermission': '高権限',
+    'security.access.saveCustomRoles': 'Custom roleの変更を保存',
+    'security.access.saveRole': '保存',
+    'security.access.deleteRole': '削除',
+    'security.access.roleInUse': '割り当て中のロールは削除できません。',
+    'security.access.roleImpactBlocked':
+      'このロールは直接割り当て{assignments}件・Group mapping {mappings}件・Service account {serviceAccounts}件から参照されています。参照を解除してから削除してください。',
+    'security.access.systemManaged': 'System管理',
+    'security.role.kind.built-in': 'Built-in',
+    'security.role.kind.custom': 'Custom',
+    'security.role.name.workspaceOwner': 'Workspaceオーナー',
+    'security.role.name.workspaceAdmin': 'Workspace管理者',
+    'security.role.name.workspaceMember': 'Workspaceメンバー',
+    'security.role.name.workspaceGuest': 'ゲスト',
+    'security.role.name.teamManager': 'Team管理者',
+    'security.role.name.teamMember': 'Teamメンバー',
+    'security.role.name.projectManager': 'Project管理者',
+    'security.role.name.projectMember': 'Projectメンバー',
+    'security.role.name.projectViewer': 'Project閲覧者',
+    'security.permission.localizedName': '{resource}：{action}',
+    'security.permission.localizedDescription':
+      '「{permission}」の権限を付与します。',
+    'security.permission.resource.workspace': 'Workspace',
+    'security.permission.resource.members': 'メンバー',
+    'security.permission.resource.teams': 'Team',
+    'security.permission.resource.projects': 'Project',
+    'security.permission.resource.workItems': 'Work Item',
+    'security.permission.resource.files': 'ファイル',
+    'security.permission.resource.requests': 'リクエスト',
+    'security.permission.resource.planning': '計画',
+    'security.permission.resource.automation': 'オートメーション',
+    'security.permission.resource.audit': '監査ログ',
+    'security.permission.resource.identity': 'ID管理',
+    'security.permission.resource.security': 'セキュリティ',
+    'security.permission.resource.serviceAccounts': 'Service account',
+    'security.permission.resource.content': 'コンテンツ',
+    'security.permission.action.read': '閲覧',
+    'security.permission.action.write': '編集',
+    'security.permission.action.manage': '管理',
+    'security.permission.action.approve': '承認',
+    'security.permission.action.export': 'エクスポート',
+    'security.permission.action.use': '利用',
+    'security.permission.action.configure': '設定',
+    'security.permissionGroup.workspace': 'Workspace',
+    'security.permissionGroup.members': 'メンバー',
+    'security.permissionGroup.content': 'コンテンツ',
+    'security.permissionGroup.security': 'セキュリティ',
+    'security.permissionGroup.automation': 'オートメーション',
+    'security.sessions.authenticationTitle': '認証とセッション',
+    'security.sessions.authenticationDescription':
+      '時間の単位と上限を明示して、通常操作と機密操作の再認証境界を設定します。',
+    'security.sessions.mfaRequired': 'MFAを必須にする',
+    'security.sessions.mfaDescription':
+      'Workspaceのhuman memberへ多要素認証を要求します。',
+    'security.sessions.lifetime': 'セッション有効期間',
+    'security.sessions.lifetimeDescription':
+      'ログインから強制終了までの絶対時間です。',
+    'security.sessions.idleTimeout': 'アイドルタイムアウト',
+    'security.sessions.idleTimeoutDescription':
+      '操作がないセッションを終了するまでの時間です。',
+    'security.sessions.reauthentication': '通常の再認証間隔',
+    'security.sessions.reauthenticationDescription':
+      '通常のセッションで本人確認をやり直すまでの時間です。',
+    'security.sessions.sensitiveReauthentication': '機密操作の再認証間隔',
+    'security.sessions.sensitiveReauthenticationDescription':
+      'セキュリティ設定などの機密操作で本人確認をやり直すまでの時間です。',
+    'security.sessions.unitHelpTitle': '時間設定の関係',
+    'security.sessions.unitHelpDescription':
+      'アイドル時間と通常の再認証はセッション有効期間以下、機密操作の再認証は通常の再認証以下にしてください。',
+    'security.sessions.reauthenticationError':
+      'セッション、アイドル、通常操作、機密操作の時間関係を確認してください。',
+    'security.sessions.networkTitle': 'ネットワーク境界',
+    'security.sessions.networkDescription':
+      'Workspaceへ接続できるIPv4/IPv6 CIDRを1行ずつ指定します。',
+    'security.sessions.ipAllowlist': 'IP allowlist',
+    'security.sessions.ipAllowlistHelp':
+      '空欄では制限しません。現在の接続元を除外しないよう確認してください。',
+    'security.sessions.guestsTitle': 'Guest・外部協力者',
+    'security.sessions.guestsDescription':
+      'Guest利用の可否、session有効時間、許可するメールドメインを制限します。',
+    'security.sessions.guestsAllowed': 'Guestを許可',
+    'security.sessions.guestsAllowedDescription':
+      '限定されたroleを持つ外部協力者をWorkspaceへ追加できます。',
+    'security.sessions.externalCollaboratorsAllowed':
+      '外部コラボレーターを許可',
+    'security.sessions.externalCollaboratorsAllowedDescription':
+      '確認済みドメイン外のmemberをWorkspaceへ追加できます。Guestとは別に制御されます。',
+    'security.sessions.guestSessionLifetime': 'Guest sessionの最大有効時間',
+    'security.sessions.guestSessionLifetimeDescription':
+      'Guestのinteractive sessionが継続できる最大時間です。アカウントの有効期限ではありません。',
+    'security.sessions.allowedGuestDomains': '許可するGuestドメイン',
+    'security.sessions.allowedGuestDomainsHelp':
+      'Guestと外部コラボレーターに許可する小文字のドメインを1行ずつ入力します。空欄では限定しません。',
+    'security.sessions.save': 'セキュリティポリシーを保存',
+    'security.privileged.serviceAccountsTitle': 'Service account',
+    'security.privileged.serviceAccountsDescription':
+      '人のセッションと分離した認証主体へ、必要最小限のroleとcredentialを付与します。',
+    'security.privileged.serviceAccountName': 'Service account名',
+    'security.privileged.serviceAccountScope': '許可するリソース範囲',
+    'security.privileged.selectScope': 'Scopeを選択',
+    'security.privileged.selectRole': 'ロールを選択',
+    'security.privileged.role': '最小権限ロール',
+    'security.privileged.credentialLifetime': 'Credential有効期間',
+    'security.privileged.credentialLifetimeHelp':
+      'ローテーション後も維持する1〜365日の絶対有効期間です。',
+    'security.privileged.allowedSourceCidrs': '許可する送信元CIDR',
+    'security.privileged.allowedSourceCidrsHelp':
+      '1行に1つ入力します。空欄では送信元ネットワークを限定しません。',
+    'security.privileged.impactSummary': '作成されるアクセス境界',
+    'security.privileged.impactSummaryDescription':
+      'Scope: {scope}。Credentialは{days}日後に失効します。送信元: {source}',
+    'security.privileged.serviceAccountScopeValue': 'Scope: {scope}',
+    'security.privileged.credentialExpires': 'Credential失効: {date}',
+    'security.privileged.sourceCidrsRestricted': '送信元CIDR {count}件に限定',
+    'security.privileged.sourceCidrsUnrestricted': '送信元ネットワークの限定なし',
+    'security.privileged.createServiceAccount': 'Accountを作成',
+    'security.privileged.credentialGeneration': 'Credential generation {generation}',
+    'security.privileged.lastUsed': '最終利用: {date}',
+    'security.privileged.rotateCredential': 'Credentialをローテーション',
+    'security.privileged.revoke': '失効',
+    'security.privileged.serviceAccountsEmpty': 'Service accountはまだありません。',
+    'security.service.status.active': '有効',
+    'security.service.status.revoked': '失効済み',
+    'security.privileged.breakGlassTitle': '緊急管理者',
+    'security.privileged.breakGlassDescription':
+      '確認済みドメイン外の復旧担当者を事前登録します。SSO強制にはMFAと30日以内のaccess testが必要です。',
+    'security.privileged.recoveryOnly': '緊急時のみ',
+    'security.privileged.breakGlassEmail': '緊急管理者のメールアドレス',
+    'security.privileged.registerBreakGlass': '緊急管理者を事前登録',
+    'security.privileged.testBreakGlass': '現在の復旧経路をテスト',
+    'security.privileged.testingBreakGlass': '復旧経路をテスト中',
+    'security.privileged.mfaConfigured': 'MFA設定済み',
+    'security.privileged.mfaRequired': 'MFA設定が必要',
+    'security.privileged.lastTested': '最終テスト: {date}',
+    'security.privileged.deactivate': '無効化',
+    'security.privileged.breakGlassEmpty': '緊急管理者が設定されていません。',
+    'security.breakGlass.status.active': '有効',
+    'security.breakGlass.status.disabled': '無効',
+    'security.secret.title': '今だけ表示される秘密情報',
+    'security.secret.scimDescription':
+      'このSCIM tokenは再表示できません。今すぐIdPの安全な保管先へ保存してください。',
+    'security.secret.serviceAccountDescription':
+      'このservice account tokenは再表示できません。今すぐ秘密情報管理へ保存してください。',
+    'security.dialog.retryHint':
+      '設定は確定していません。最新状態を確認してから再試行できます。',
+    'security.dialog.ssoEnableTitle': 'SSOを強制しますか？',
+    'security.dialog.ssoEnableDescription':
+      '管理対象ドメインの通常ログインがIdPへ統一されます。緊急管理者で復旧できることを確認してください。',
+    'security.dialog.ssoDisableTitle': 'SSO強制を解除しますか？',
+    'security.dialog.ssoDisableDescription':
+      '管理対象ドメインでSSO以外のログイン経路が再び利用可能になります。',
+    'security.dialog.provisioningTitle': 'Directory差分を適用しますか？',
+    'security.dialog.provisioningDescription':
+      '{count}件の変更を適用します。無効化されたuserのsessionは直ちに失効する場合があります。',
+    'security.dialog.sessionPolicyTitle':
+      '現在の接続元を除外して保存しますか？',
+    'security.dialog.sessionPolicyDescription':
+      '更新後のIP許可リストでは現在の接続元（{ip}）が拒否されます。保存直後にこの管理画面へ接続できなくなる可能性があります。',
+    'security.dialog.sessionPolicyUnknownIp': '解決できない接続元IP',
+    'security.dialog.sessionPolicyConfirm': '理解して保存',
+    'security.dialog.scimRotateTitle': 'SCIM tokenをローテーションしますか？',
+    'security.dialog.scimRotateDescription':
+      '現在のSCIM tokenは直ちに利用できなくなります。IdP側のcredentialを切り替えられる状態で続行してください。',
+    'security.dialog.serviceAccountRotateTitle':
+      'Service account credentialをローテーションしますか？',
+    'security.dialog.serviceAccountRotateDescription':
+      '{name} の現在のcredentialは直ちに利用できなくなり、新しいcredentialには同じ有効期間ポリシーが適用されます。利用中の連携を切り替えられる状態で続行してください。',
+    'security.dialog.mappingDeleteTitle': 'Group mappingを削除しますか？',
+    'security.dialog.mappingDeleteDescription':
+      '{group} の {scope} / {role} mappingを削除します。このGroupから付与されたアクセスは直ちに失われる可能性があります。',
+    'security.dialog.mappingUpdateTitle': 'Group mappingを変更しますか？',
+    'security.dialog.mappingUpdateDescription':
+      '{group} を {scope} / {role} へ変更します。現在のmappingから付与されたアクセスは直ちに変わる可能性があります。',
+    'security.dialog.serviceAccountTitle': 'Service accountを失効しますか？',
+    'security.dialog.serviceAccountDescription':
+      '{name} のcredentialが直ちに利用できなくなります。利用中の連携を先に切り替えてください。',
+    'security.dialog.breakGlassTitle': '緊急管理者を無効化しますか？',
+    'security.dialog.breakGlassDescription':
+      '{email} を無効化すると、IdP障害時の復旧経路が減少します。',
+    'security.dialog.roleUpdateTitle': 'ロール権限を減らしますか？',
+    'security.dialog.roleUpdateDescription':
+      '{name} から{permissions}件の権限を外します。直接割り当て{assignments}件・Group mapping {mappings}件・Service account {serviceAccounts}件へ直ちに反映されます。',
+    'security.dialog.roleGuestTitle': 'Guestへの割り当て境界を変更しますか？',
+    'security.dialog.roleGuestEnableDescription':
+      '{name} を外部Guestへ割り当て可能にします。このロールのすべての権限がGuestへ付与され得ます。',
+    'security.dialog.roleGuestDisableDescription':
+      '{name} を新たに外部Guestへ割り当てられない状態へ変更します。既存の割り当てへの影響を確認してください。',
+    'security.dialog.roleTitle': 'Custom roleを削除しますか？',
+    'security.dialog.roleDescription':
+      '{name} を削除します。確認時点の直接割り当ては{assignments}件、Group mappingは{mappings}件、Service accountは{serviceAccounts}件です。',
   },
   en: {
     'app.title': 'mukuroji',
@@ -1952,8 +2477,16 @@ const dictionaries = {
     'preview.healthText': 'Core tasks are tracking on schedule',
     'login.title': 'Log in',
     'login.subtitle': 'Sign in to your account',
+    'login.emailFirstSubtitle':
+      'We’ll find the secure sign-in method for your work email',
+    'login.passwordSubtitle': 'Enter your password to continue',
     'login.email': 'Email address',
     'login.emailPlaceholder': 'Enter your email address',
+    'login.discoveryHelp':
+      'For managed domains, you’ll continue to your organization’s SSO without sending a password.',
+    'login.changeEmail': 'Change',
+    'login.continue': 'Continue',
+    'login.continuing': 'Checking sign-in method',
     'login.password': 'Password',
     'login.passwordPlaceholder': 'Enter your password',
     'login.showPassword': 'Show password',
@@ -1965,6 +2498,68 @@ const dictionaries = {
     'login.errorUnavailable':
       'Local Cognito is not ready yet. Check the Floci service status.',
     'login.errorUnknown': 'Login failed. Please try again later.',
+    'login.errorSso':
+      'Single sign-on could not be started. Please try again later.',
+    'login.ssoCallback.title': 'Completing single sign-on',
+    'login.ssoCallback.description':
+      'Securely validating the authentication response. Keep this page open.',
+    'login.ssoCallback.errorTitle': 'Single sign-on could not be completed',
+    'login.ssoCallback.errorDescription':
+      'The authentication request expired or could not be verified. Start again from the login page.',
+    'login.ssoCallback.retry': 'Return to login',
+    'security.recovery.header': 'Security recovery',
+    'security.recovery.eyebrow': 'Emergency access',
+    'security.recovery.title': 'Recover administrative access safely',
+    'security.recovery.description':
+      'When the normal administration path is unavailable, a pre-registered emergency administrator can elevate access for a short, controlled window.',
+    'security.recovery.step.verify.title': 'Verify identity and session',
+    'security.recovery.step.verify.description':
+      'Recovery can start only from a session that satisfies multi-factor and recent reauthentication checks.',
+    'security.recovery.step.audit.title': 'Record a specific reason',
+    'security.recovery.step.audit.description':
+      'The reason, actor, start time, and expiry are recorded for later audit review.',
+    'security.recovery.step.expire.title': 'Expire after the minimum time',
+    'security.recovery.step.expire.description':
+      'Elevation ends automatically after the selected window and your normal permissions resume.',
+    'security.recovery.form.label': 'Break-glass activation',
+    'security.recovery.form.title': 'Start recovery access',
+    'security.recovery.warning.title': 'Use only for an emergency',
+    'security.recovery.warning.description':
+      'This action temporarily grants powerful administrative access and is audited.',
+    'security.recovery.reason': 'Reason recovery is required',
+    'security.recovery.reasonPlaceholder':
+      'Example: Restore the SSO configuration and resume normal administrator access',
+    'security.recovery.reasonHelp':
+      'Enter at least 10 characters. The reason is saved in the audit log.',
+    'security.recovery.duration': 'Access window',
+    'security.recovery.duration.five': '5 min',
+    'security.recovery.duration.fifteen': '15 min',
+    'security.recovery.duration.thirty': '30 min',
+    'security.recovery.durationHelp':
+      'Choose the shortest window needed to complete the recovery.',
+    'security.recovery.activate': 'Start recovery access',
+    'security.recovery.activating': 'Verifying and starting…',
+    'security.recovery.reauthenticate':
+      'Sign in again to verify identity',
+    'security.recovery.cancel': 'Return to dashboard',
+    'security.recovery.error.reason': 'Enter a recovery reason of at least 10 characters.',
+    'security.recovery.error.denied':
+      'This account is not pre-registered as an emergency administrator. Contact another recovery owner.',
+    'security.recovery.error.mfa':
+      'Multi-factor authentication could not be verified. Sign in again using MFA.',
+    'security.recovery.error.reauthentication':
+      'Recent identity verification is required. Sign in again, then retry.',
+    'security.recovery.error.duration':
+      'That access window is not allowed for this emergency administrator. Choose a shorter window.',
+    'security.recovery.error.session':
+      'Your login session could not be verified. Sign in again.',
+    'security.recovery.error.unknown':
+      'Recovery access could not be started. Check your connection and try again.',
+    'security.recovery.active.title': 'Emergency recovery access is active',
+    'security.recovery.active.description':
+      'It expires automatically at {time}. End it early as soon as recovery work is complete.',
+    'security.recovery.active.revoke': 'End access now',
+    'security.recovery.active.revoking': 'Ending access…',
     'login.forgotPassword': 'Forgot your password?',
     'login.challenge.title': 'Set a new password',
     'login.challenge.subtitle': 'Complete your first sign-in',
@@ -1990,10 +2585,38 @@ const dictionaries = {
     'login.challenge.retryTitle': 'You can resume from regular login',
     'login.challenge.retryDescription':
       'If Cognito saved the new password but the workspace update failed, enter the same email address and new password on regular login to resume recovery.',
+    'login.mfa.title': 'Enter your verification code',
+    'login.mfa.subtitle': 'Complete multi-factor authentication',
+    'login.mfa.verifyTitle': 'Identity verification required',
+    'login.mfa.authenticatorDescription':
+      'Enter the verification code shown in your authenticator app.',
+    'login.mfa.codeDescription':
+      'Enter the verification code sent through your registered authentication method.',
+    'login.mfa.deliveryDescription':
+      'Enter the verification code sent to {destination}.',
+    'login.mfa.code': 'Verification code',
+    'login.mfa.codePlaceholder': '6–8 digit code',
+    'login.mfa.codeHelp':
+      'Use digits only. Verification codes and challenge sessions are not saved in the browser.',
+    'login.mfa.verify': 'Verify and log in',
+    'login.mfa.verifying': 'Verifying',
+    'login.mfa.restart': 'Start again with email',
+    'login.mfa.errorCode': 'Enter a 6–8 digit verification code.',
+    'login.mfa.errorInvalid':
+      'The code is incorrect or expired. Check for a newer verification code.',
+    'login.mfa.errorExpired':
+      'The verification session expired. Start the login again with your email.',
+    'login.mfa.errorRateLimited':
+      'Too many verification attempts. Wait before starting again.',
+    'login.mfa.errorUnavailable':
+      'The verification service is unavailable. Try again later.',
+    'login.mfa.errorUnknown':
+      'Verification could not be completed. Check the code and try again.',
     'dashboard.title': 'Dashboard',
     'dashboard.subtitle':
       'You are accessing local mukuroji as a user authenticated by Cognito.',
     'dashboard.loading': 'Checking user information.',
+    'dashboard.loadError': 'Account information could not be verified. Try again later.',
     'dashboard.authProvider': 'Cognito auth',
     'dashboard.authProviderValue':
       'Authenticated with the Floci local Cognito user pool',
@@ -3841,6 +4464,440 @@ const dictionaries = {
     'public.notFound.privacyDescription': 'How information is handled and what users can request',
     'public.notFound.termsTitle': 'Terms of use',
     'public.notFound.termsDescription': 'Conditions for collaborating in the service',
+    'workspace.settings.securityEyebrow': 'Enterprise',
+    'workspace.settings.securityTitle': 'Identity and security',
+    'workspace.settings.securityDescription':
+      'Manage SSO, SCIM, roles, sessions, and privileged accounts in a dedicated workspace.',
+    'security.page.eyebrow': 'Enterprise administration',
+    'security.page.title': 'Identity and security',
+    'security.page.description':
+      'Manage organization authentication, provisioning, access controls, sessions, and emergency access in one place.',
+    'security.eyebrow': 'Enterprise security',
+    'security.title': 'Organization security controls',
+    'security.description':
+      'Operate identity lifecycle and privileged access safely with prerequisites and impact shown before each change.',
+    'security.tabsAria': 'Enterprise security settings',
+    'security.tab.overview': 'Overview',
+    'security.tab.identity': 'Identity',
+    'security.tab.provisioning': 'Provisioning',
+    'security.tab.access': 'Mappings and roles',
+    'security.tab.sessions': 'Sessions',
+    'security.tab.privileged': 'Privileged',
+    'security.mode.admin': 'Can manage',
+    'security.mode.readOnly': 'Read-only',
+    'security.readOnly':
+      'These settings are read-only. Enterprise security administration permission is required to make changes.',
+    'security.action.retryLoad': 'Reload',
+    'security.action.refresh': 'Refresh state',
+    'security.action.testing': 'Saving and testing',
+    'security.action.rotating': 'Rotating',
+    'security.action.previewing': 'Checking impact',
+    'security.action.retrying': 'Retrying',
+    'security.action.remove': 'Remove',
+    'security.action.saving': 'Saving',
+    'security.action.save': 'Save',
+    'security.action.close': 'Close',
+    'security.action.working': 'Working',
+    'security.action.cancel': 'Cancel',
+    'security.action.copy': 'Copy',
+    'security.action.copied': 'Copied',
+    'security.action.signInAgain': 'Verify identity again',
+    'security.error.load': 'Could not load enterprise security settings.',
+    'security.error.stale':
+      'The displayed state may be stale. Refresh before making changes.',
+    'security.error.forbidden': 'You do not have permission to perform this action.',
+    'security.error.authenticationRequired':
+      'Your session expiry, MFA, or reauthentication policy requires identity verification again. Temporary credentials were cleared from this screen for safety.',
+    'security.error.ipDenied':
+      'Your current network is not in the Workspace IP allowlist. Switch to an approved network, then reload.',
+    'security.error.conflict':
+      'Another administrator updated these settings. Refresh and try again.',
+    'security.error.invalid': 'Review the input and try again.',
+    'security.error.prerequisite':
+      'A safety prerequisite is missing. Review the readiness checklist.',
+    'security.error.operation': 'Could not update security settings.',
+    'security.error.refreshAfterMutation':
+      'The change was applied, but the latest state could not be loaded. Refresh the state.',
+    'security.error.refreshAfterCredential':
+      'The credential was issued, but the latest state could not be loaded. Save the displayed credential securely, then refresh the state.',
+    'security.value.notConfigured': 'Not configured',
+    'security.value.none': 'None',
+    'security.value.never': 'Never',
+    'security.unit.minutes': 'minutes',
+    'security.unit.days': 'days',
+    'security.overview.metric.sso': 'SSO enforcement',
+    'security.overview.metric.scim': 'SCIM',
+    'security.overview.metric.provisioningErrors': 'Sync attention',
+    'security.overview.metric.privileged': 'Privileged paths',
+    'security.overview.enforced': 'Enforced',
+    'security.overview.notEnforced': 'Optional',
+    'security.overview.privilegedCount':
+      '{service} service · {breakGlass} emergency',
+    'security.overview.readinessEyebrow': 'Safe enablement',
+    'security.overview.readinessTitle': 'SSO enforcement readiness',
+    'security.overview.readinessDescription':
+      'Require a tested connection, verified domain, and emergency administrator before enforcing SSO for managed domains.',
+    'security.overview.card.identityTitle': 'Review identity connections',
+    'security.overview.card.identityDescription':
+      'Check the IdP, managed domains, and prerequisites for SSO enforcement.',
+    'security.overview.card.provisioningTitle': 'Review sync impact',
+    'security.overview.card.provisioningDescription':
+      'Manage the SCIM token, dry-run changes, failed logs, and retries.',
+    'security.overview.card.sessionsTitle': 'Control sessions',
+    'security.overview.card.sessionsDescription':
+      'Set MFA, lifetime, reauthentication, network, and guest limits.',
+    'security.overview.open': 'Open',
+    'security.prerequisite.ready': 'Ready to enable',
+    'security.prerequisite.actionRequired': 'Action required',
+    'security.prerequisite.identity': 'The IdP connection test has succeeded',
+    'security.prerequisite.domain': 'At least one domain is verified',
+    'security.prerequisite.breakGlass':
+      'An active emergency administrator has MFA configured',
+    'security.prerequisite.complete': 'Complete',
+    'security.prerequisite.incomplete': 'Incomplete',
+    'security.prerequisite.unavailable':
+      'Status unavailable with current access',
+    'security.identity.status.not-configured': 'Not configured',
+    'security.identity.status.draft': 'Draft',
+    'security.identity.status.verified': 'Connection verified',
+    'security.identity.status.error': 'Needs attention',
+    'security.identity.providerTitle': 'Identity provider',
+    'security.identity.providerDescription':
+      'Save public SAML or OIDC settings and verify availability with a connection test.',
+    'security.identity.protocol': 'Protocol',
+    'security.identity.displayName': 'Display name',
+    'security.identity.issuer': 'Issuer / Entity ID',
+    'security.identity.metadataUrl': 'SAML metadata URL',
+    'security.identity.metadataUrlHelp':
+      'The connection test fetches metadata XML over HTTPS and verifies the entity ID, SSO URL, and signing certificate.',
+    'security.identity.ssoUrl': 'SSO URL',
+    'security.identity.clientId': 'Client ID / Audience',
+    'security.identity.saveAndTest': 'Save and test connection',
+    'security.identity.lastTested': 'Last connection test: {date}',
+    'security.identity.domainsTitle': 'Managed domains',
+    'security.identity.domainsDescription':
+      'Verify ownership with a DNS TXT record and make the SSO boundary explicit.',
+    'security.identity.domainLabel': 'Domain',
+    'security.identity.claimDomain': 'Add domain',
+    'security.identity.verifyDomain': 'Verify ownership',
+    'security.identity.domainsEmpty': 'No managed domains yet.',
+    'security.identity.verificationRecordName': 'TXT record name',
+    'security.domainChallenge.title': 'DNS verification for {domain}',
+    'security.domainChallenge.description':
+      'This TXT value will not be shown again. Store it securely until it is configured in DNS.',
+    'security.domainChallenge.recordName': 'TXT record name',
+    'security.domainChallenge.recordValue': 'TXT value (shown once)',
+    'security.domain.status.pending': 'Pending',
+    'security.domain.status.verified': 'Verified',
+    'security.domain.status.conflict': 'Conflict',
+    'security.identity.enforcementTitle': 'SSO enforcement',
+    'security.identity.enforcementDescription':
+      'Standardize managed-domain sign-in through the IdP. Establish an emergency path first.',
+    'security.identity.enforcementReady':
+      'All prerequisites are complete. Review the impact before enforcing SSO.',
+    'security.identity.enforcementBlocked':
+      'Complete the missing checklist items before enforcement can be enabled.',
+    'security.identity.disableEnforcement': 'Disable enforcement',
+    'security.identity.enableEnforcement': 'Enforce SSO',
+    'security.scim.status.disabled': 'Disabled',
+    'security.scim.status.ready': 'Ready',
+    'security.scim.status.syncing': 'Syncing',
+    'security.scim.status.error': 'Needs attention',
+    'security.provisioning.scimTitle': 'SCIM connection',
+    'security.provisioning.scimDescription':
+      'Review the endpoint shared with the IdP and safe metadata for the stored credential.',
+    'security.provisioning.endpoint': 'Endpoint',
+    'security.provisioning.tokenGeneration': 'Token',
+    'security.provisioning.generation':
+      'Generation {generation} · ending {lastFour}',
+    'security.provisioning.lastSync': 'Last sync',
+    'security.provisioning.tokenHelp':
+      'A new token is shown only once. Be ready to store it securely in the IdP before issuing it.',
+    'security.provisioning.rotateToken': 'Rotate token',
+    'security.provisioning.createToken': 'Issue token',
+    'security.provisioning.scimTokenLabel': 'SCIM bearer token',
+    'security.provisioning.reconcileTitle': 'Directory reconciliation',
+    'security.provisioning.reconcileDescription':
+      'Run a dry-run before applying changes and review creates, updates, deactivations, and session revocations.',
+    'security.provisioning.dryRunTitle': 'Preview without changing data',
+    'security.provisioning.dryRunDescription':
+      'Compare current directory state with the workspace and create a short-lived preview.',
+    'security.provisioning.preview': 'Run dry-run',
+    'security.provisioning.logsTitle': 'Run logs',
+    'security.provisioning.logsDescription':
+      'Review secret-free sync history and correlation IDs.',
+    'security.provisioning.logStatus.pending': 'Pending',
+    'security.provisioning.logStatus.running': 'Running',
+    'security.provisioning.logStatus.succeeded': 'Succeeded',
+    'security.provisioning.logStatus.partial': 'Partial',
+    'security.provisioning.logStatus.failed': 'Failed',
+    'security.provisioning.summary.pending':
+      'The provisioning operation is waiting to run.',
+    'security.provisioning.summary.running':
+      'The provisioning operation is running.',
+    'security.provisioning.summary.succeeded':
+      'The provisioning operation completed.',
+    'security.provisioning.summary.partial':
+      'Part of the provisioning operation needs attention.',
+    'security.provisioning.summary.failed':
+      'The provisioning operation failed. Review the audit log for details.',
+    'security.provisioning.operation.scim': 'SCIM',
+    'security.provisioning.operation.dry-run': 'Dry-run',
+    'security.provisioning.operation.reconcile': 'Reconcile',
+    'security.provisioning.operation.deprovision': 'Deprovision',
+    'security.provisioning.attempts': '{count} attempts',
+    'security.provisioning.retry': 'Retry',
+    'security.provisioning.logsEmpty': 'No run logs yet.',
+    'security.provisioning.impactTitle': 'Changes to apply',
+    'security.provisioning.previewExpires': 'Preview expires: {date}',
+    'security.provisioning.previewExpired':
+      'This preview has expired. Run the dry-run again before applying changes.',
+    'security.provisioning.previewExpiredAction': 'Expired · preview again',
+    'security.provisioning.previewBlocked':
+      'This preview cannot be applied because it affects protected access. Exclude the warned entries from the directory change and run the dry-run again.',
+    'security.provisioning.previewBlockedAction':
+      'Resolve protected-access impact',
+    'security.provisioning.blockingChanges': 'Blocked',
+    'security.provisioning.warningSummary':
+      'This preview contains {count} impacts that need review. Check the counts and protection state, then use the audit log for details.',
+    'security.provisioning.changesFound': 'Changes found',
+    'security.provisioning.noChanges': 'No changes',
+    'security.provisioning.impact.usersCreated': 'Users created',
+    'security.provisioning.impact.usersUpdated': 'Users updated',
+    'security.provisioning.impact.usersDeactivated': 'Users deactivated',
+    'security.provisioning.impact.groupsCreated': 'Groups created',
+    'security.provisioning.impact.groupsUpdated': 'Groups updated',
+    'security.provisioning.impact.sessionsRevoked': 'Sessions revoked',
+    'security.provisioning.apply': 'Apply this change set',
+    'security.access.mappingsTitle': 'Directory group mappings',
+    'security.access.mappingsDescription':
+      'Map IdP groups deterministically to workspace, team, or project roles.',
+    'security.access.directoryGroupName': 'Directory group name',
+    'security.access.directoryGroupId': 'Directory group ID',
+    'security.access.scope': 'Scope',
+    'security.access.role': 'Role',
+    'security.access.selectRole': 'Select a role',
+    'security.access.addMapping': 'Add mapping',
+    'security.scope.workspace': 'Workspace',
+    'security.scope.team': 'Team',
+    'security.scope.project': 'Project',
+    'security.access.column.group': 'Directory group',
+    'security.access.column.scope': 'Scope',
+    'security.access.column.role': 'Role',
+    'security.access.column.action': 'Action',
+    'security.access.mappingsEmpty': 'No group mappings yet.',
+    'security.access.rolesTitle': 'Roles and permissions',
+    'security.access.rolesDescription':
+      'Compare permissions by purpose. Only custom roles can be edited.',
+    'security.access.roleName': 'Role name',
+    'security.access.roleDescription': 'Description',
+    'security.access.rolePermissions': 'Permissions to grant',
+    'security.access.permissionRequired': 'Select at least one permission.',
+    'security.access.permissionGrantCeilingHelp':
+      'You can grant only permissions you currently hold. Permissions outside that ceiling are disabled.',
+    'security.access.permissionOutsideGrantCeiling':
+      'You do not currently have authority to grant this permission to a role.',
+    'security.access.roleOutsideGrantCeiling':
+      'This role includes permissions outside your grant ceiling and cannot be edited.',
+    'security.access.guestAssignable': 'Allow assignment to guests',
+    'security.access.guestAssignableWarning':
+      'When enabled, external guests can receive every permission in this role. Review the guest policy and permission set first.',
+    'security.access.createRole': 'Create custom role',
+    'security.access.permission': 'Permission',
+    'security.access.privilegedPermission': 'Privileged',
+    'security.access.saveCustomRoles': 'Save custom role changes',
+    'security.access.saveRole': 'Save',
+    'security.access.deleteRole': 'Delete',
+    'security.access.roleInUse': 'Assigned roles cannot be deleted.',
+    'security.access.roleImpactBlocked':
+      'This role is referenced by {assignments} direct assignments, {mappings} group mappings, and {serviceAccounts} service accounts. Remove those references before deleting it.',
+    'security.access.systemManaged': 'System managed',
+    'security.role.kind.built-in': 'Built-in',
+    'security.role.kind.custom': 'Custom',
+    'security.role.name.workspaceOwner': 'Workspace owner',
+    'security.role.name.workspaceAdmin': 'Workspace administrator',
+    'security.role.name.workspaceMember': 'Workspace member',
+    'security.role.name.workspaceGuest': 'Guest',
+    'security.role.name.teamManager': 'Team manager',
+    'security.role.name.teamMember': 'Team member',
+    'security.role.name.projectManager': 'Project manager',
+    'security.role.name.projectMember': 'Project member',
+    'security.role.name.projectViewer': 'Project viewer',
+    'security.permission.localizedName': '{action} {resource}',
+    'security.permission.localizedDescription':
+      'Grants the “{permission}” permission.',
+    'security.permission.resource.workspace': 'workspace',
+    'security.permission.resource.members': 'members',
+    'security.permission.resource.teams': 'teams',
+    'security.permission.resource.projects': 'projects',
+    'security.permission.resource.workItems': 'work items',
+    'security.permission.resource.files': 'files',
+    'security.permission.resource.requests': 'requests',
+    'security.permission.resource.planning': 'planning',
+    'security.permission.resource.automation': 'automation',
+    'security.permission.resource.audit': 'audit log',
+    'security.permission.resource.identity': 'identity',
+    'security.permission.resource.security': 'security',
+    'security.permission.resource.serviceAccounts': 'service accounts',
+    'security.permission.resource.content': 'content',
+    'security.permission.action.read': 'View',
+    'security.permission.action.write': 'Edit',
+    'security.permission.action.manage': 'Manage',
+    'security.permission.action.approve': 'Approve',
+    'security.permission.action.export': 'Export',
+    'security.permission.action.use': 'Use',
+    'security.permission.action.configure': 'Configure',
+    'security.permissionGroup.workspace': 'Workspace',
+    'security.permissionGroup.members': 'Members',
+    'security.permissionGroup.content': 'Content',
+    'security.permissionGroup.security': 'Security',
+    'security.permissionGroup.automation': 'Automation',
+    'security.sessions.authenticationTitle': 'Authentication and sessions',
+    'security.sessions.authenticationDescription':
+      'Set explicit units and limits for standard sessions and sensitive-operation reauthentication.',
+    'security.sessions.mfaRequired': 'Require MFA',
+    'security.sessions.mfaDescription':
+      'Require multi-factor authentication for human workspace members.',
+    'security.sessions.lifetime': 'Session lifetime',
+    'security.sessions.lifetimeDescription':
+      'Absolute time from sign-in until the session ends.',
+    'security.sessions.idleTimeout': 'Idle timeout',
+    'security.sessions.idleTimeoutDescription':
+      'Time without activity before an interactive session ends.',
+    'security.sessions.reauthentication': 'Standard reauthentication',
+    'security.sessions.reauthenticationDescription':
+      'Time before a standard session requires identity verification again.',
+    'security.sessions.sensitiveReauthentication':
+      'Sensitive-action reauthentication',
+    'security.sessions.sensitiveReauthenticationDescription':
+      'Time before security settings and other sensitive actions require verification again.',
+    'security.sessions.unitHelpTitle': 'How the time settings relate',
+    'security.sessions.unitHelpDescription':
+      'Idle and standard reauthentication must not exceed session lifetime; sensitive reauthentication must not exceed standard reauthentication.',
+    'security.sessions.reauthenticationError':
+      'Review the relationship between session, idle, standard, and sensitive-action intervals.',
+    'security.sessions.networkTitle': 'Network boundary',
+    'security.sessions.networkDescription':
+      'Enter one IPv4 or IPv6 CIDR per line to control workspace access.',
+    'security.sessions.ipAllowlist': 'IP allowlist',
+    'security.sessions.ipAllowlistHelp':
+      'Leave blank for no restriction. Confirm your current network will remain allowed.',
+    'security.sessions.guestsTitle': 'Guests and external collaborators',
+    'security.sessions.guestsDescription':
+      'Limit guest availability, session duration, and allowed email domains.',
+    'security.sessions.guestsAllowed': 'Allow guests',
+    'security.sessions.guestsAllowedDescription':
+      'External collaborators with limited roles can join the workspace.',
+    'security.sessions.externalCollaboratorsAllowed':
+      'Allow external collaborators',
+    'security.sessions.externalCollaboratorsAllowedDescription':
+      'Members outside verified domains can join the workspace. This is controlled separately from guests.',
+    'security.sessions.guestSessionLifetime': 'Guest session lifetime',
+    'security.sessions.guestSessionLifetimeDescription':
+      'Maximum duration of a guest interactive session. This is not an account expiration.',
+    'security.sessions.allowedGuestDomains': 'Allowed guest domains',
+    'security.sessions.allowedGuestDomainsHelp':
+      'Enter allowed lowercase domains for guests and external collaborators, one per line. Leave blank for no domain restriction.',
+    'security.sessions.save': 'Save security policy',
+    'security.privileged.serviceAccountsTitle': 'Service accounts',
+    'security.privileged.serviceAccountsDescription':
+      'Give non-human principals a least-privilege role and credential isolated from interactive sessions.',
+    'security.privileged.serviceAccountName': 'Service account name',
+    'security.privileged.serviceAccountScope': 'Allowed resource scope',
+    'security.privileged.selectScope': 'Select a scope',
+    'security.privileged.selectRole': 'Select a role',
+    'security.privileged.role': 'Least-privilege role',
+    'security.privileged.credentialLifetime': 'Credential lifetime',
+    'security.privileged.credentialLifetimeHelp':
+      'Absolute lifetime from 1 to 365 days, retained after rotation.',
+    'security.privileged.allowedSourceCidrs': 'Allowed source CIDRs',
+    'security.privileged.allowedSourceCidrsHelp':
+      'Enter one CIDR per line. Leave blank to allow any source network.',
+    'security.privileged.impactSummary': 'Access boundary to create',
+    'security.privileged.impactSummaryDescription':
+      'Scope: {scope}. The credential expires after {days} days. Source: {source}',
+    'security.privileged.serviceAccountScopeValue': 'Scope: {scope}',
+    'security.privileged.credentialExpires': 'Credential expires: {date}',
+    'security.privileged.sourceCidrsRestricted':
+      'Restricted to {count} source CIDRs',
+    'security.privileged.sourceCidrsUnrestricted':
+      'No source network restriction',
+    'security.privileged.createServiceAccount': 'Create account',
+    'security.privileged.credentialGeneration': 'Credential generation {generation}',
+    'security.privileged.lastUsed': 'Last used: {date}',
+    'security.privileged.rotateCredential': 'Rotate credential',
+    'security.privileged.revoke': 'Revoke',
+    'security.privileged.serviceAccountsEmpty': 'No service accounts yet.',
+    'security.service.status.active': 'Active',
+    'security.service.status.revoked': 'Revoked',
+    'security.privileged.breakGlassTitle': 'Emergency administrators',
+    'security.privileged.breakGlassDescription':
+      'Pre-register a recovery operator outside verified domains. SSO enforcement requires MFA and an access test within 30 days.',
+    'security.privileged.recoveryOnly': 'Emergency only',
+    'security.privileged.breakGlassEmail': 'Emergency administrator email',
+    'security.privileged.registerBreakGlass': 'Register administrator',
+    'security.privileged.testBreakGlass': 'Test current recovery access',
+    'security.privileged.testingBreakGlass': 'Testing recovery access',
+    'security.privileged.mfaConfigured': 'MFA configured',
+    'security.privileged.mfaRequired': 'MFA setup required',
+    'security.privileged.lastTested': 'Last tested: {date}',
+    'security.privileged.deactivate': 'Deactivate',
+    'security.privileged.breakGlassEmpty':
+      'No emergency administrator is configured.',
+    'security.breakGlass.status.active': 'Active',
+    'security.breakGlass.status.disabled': 'Disabled',
+    'security.secret.title': 'Secret shown only now',
+    'security.secret.scimDescription':
+      'This SCIM token cannot be shown again. Store it securely in the IdP now.',
+    'security.secret.serviceAccountDescription':
+      'This service account token cannot be shown again. Store it in your secrets manager now.',
+    'security.dialog.retryHint':
+      'The change was not confirmed. Refresh state before trying again.',
+    'security.dialog.ssoEnableTitle': 'Enforce SSO?',
+    'security.dialog.ssoEnableDescription':
+      'Standard sign-in for managed domains will use the IdP. Confirm the emergency administrator can recover access.',
+    'security.dialog.ssoDisableTitle': 'Disable SSO enforcement?',
+    'security.dialog.ssoDisableDescription':
+      'Sign-in methods outside SSO will become available again for managed domains.',
+    'security.dialog.provisioningTitle': 'Apply directory changes?',
+    'security.dialog.provisioningDescription':
+      'Apply {count} changes. Sessions for deactivated users may be revoked immediately.',
+    'security.dialog.sessionPolicyTitle':
+      'Save while excluding your current connection?',
+    'security.dialog.sessionPolicyDescription':
+      'The updated IP allowlist will reject your current source ({ip}). You may lose access to this administration page immediately after saving.',
+    'security.dialog.sessionPolicyUnknownIp': 'unresolved source IP',
+    'security.dialog.sessionPolicyConfirm': 'Save and continue',
+    'security.dialog.scimRotateTitle': 'Rotate the SCIM token?',
+    'security.dialog.scimRotateDescription':
+      'The current SCIM token will stop working immediately. Continue only when you are ready to update the IdP credential.',
+    'security.dialog.serviceAccountRotateTitle':
+      'Rotate the service account credential?',
+    'security.dialog.serviceAccountRotateDescription':
+      'The current credential for {name} will stop working immediately, and the new credential will use the same lifetime policy. Continue only when dependent integrations are ready to switch.',
+    'security.dialog.mappingDeleteTitle': 'Remove group mapping?',
+    'security.dialog.mappingDeleteDescription':
+      'Remove the {scope} / {role} mapping for {group}. Access granted through this group may be lost immediately.',
+    'security.dialog.mappingUpdateTitle': 'Change group mapping?',
+    'security.dialog.mappingUpdateDescription':
+      'Change {group} to {scope} / {role}. Access granted through the current mapping may change immediately.',
+    'security.dialog.serviceAccountTitle': 'Revoke service account?',
+    'security.dialog.serviceAccountDescription':
+      'Credentials for {name} will stop working immediately. Migrate active integrations first.',
+    'security.dialog.breakGlassTitle': 'Deactivate emergency administrator?',
+    'security.dialog.breakGlassDescription':
+      'Deactivating {email} reduces recovery options during an IdP outage.',
+    'security.dialog.roleUpdateTitle': 'Reduce role permissions?',
+    'security.dialog.roleUpdateDescription':
+      'Remove {permissions} permissions from {name}. This immediately affects {assignments} direct assignments, {mappings} group mappings, and {serviceAccounts} service accounts.',
+    'security.dialog.roleGuestTitle': 'Change guest assignment eligibility?',
+    'security.dialog.roleGuestEnableDescription':
+      'Allow {name} to be assigned to external guests. Guests may receive every permission in this role.',
+    'security.dialog.roleGuestDisableDescription':
+      'Prevent new external guest assignments for {name}. Review the impact on existing assignments.',
+    'security.dialog.roleTitle': 'Delete custom role?',
+    'security.dialog.roleDescription':
+      'Delete {name}. The confirmed impact includes {assignments} direct assignments, {mappings} group mappings, and {serviceAccounts} service accounts.',
   },
 } as const
 
