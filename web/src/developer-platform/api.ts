@@ -1131,7 +1131,8 @@ async function readJson<T>(
       response.status,
       'Developer Platform API returned an empty JSON response.',
       'InvalidDeveloperPlatformResponse',
-      isRetryableDeveloperApiResponse(response.status, undefined),
+      response.ok ||
+        isRetryableDeveloperApiResponse(response.status, undefined),
     )
   }
 
@@ -1146,7 +1147,8 @@ async function readJson<T>(
       response.status,
       'Developer Platform API returned invalid JSON.',
       'InvalidDeveloperPlatformResponse',
-      isRetryableDeveloperApiResponse(response.status, undefined),
+      response.ok ||
+        isRetryableDeveloperApiResponse(response.status, undefined),
     )
   }
 }

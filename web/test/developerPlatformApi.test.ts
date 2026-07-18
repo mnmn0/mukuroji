@@ -680,6 +680,80 @@ describe('Developer Platform API', () => {
     } satisfies Partial<DeveloperPlatformApiError>)
   })
 
+  test('retries unreadable success responses with the original idempotency context', async () => {
+    for (const unreadableBody of [null, '{"apiKey":'] as const) {
+      const contexts: MutationRequestContext[] = [
+        {
+          correlationId: 'correlation-unreadable-1',
+          idempotencyKey: 'idempotency-unreadable-1',
+        },
+        {
+          correlationId: 'correlation-unreadable-2',
+          idempotencyKey: 'idempotency-unreadable-2',
+        },
+      ]
+      let contextIndex = 0
+      let attempt = 0
+      const observedIdempotencyKeys: Array<string | null> = []
+      const runner = createMutationRequestRunner(
+        () => contexts[contextIndex++]!,
+      )
+
+      globalThis.fetch = (async (
+        _input: string | URL | Request,
+        init: RequestInit = {},
+      ) => {
+        observedIdempotencyKeys.push(
+          new Headers(init.headers).get('Idempotency-Key'),
+        )
+        attempt += 1
+
+        if (attempt === 1) {
+          return new Response(unreadableBody, {
+            headers: { 'Content-Type': 'application/json' },
+            status: 201,
+          })
+        }
+
+        return new Response(JSON.stringify(issuedApiKeySecretFixture), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 201,
+        })
+      }) as typeof fetch
+
+      const runCreateApiKey = () =>
+        runner.run(
+          'api-key:create',
+          'same-input',
+          (context) =>
+            createDeveloperApiKey(
+              'access-token',
+              {
+                name: 'Ambiguous success',
+                scopes: ['work-items:read'],
+              },
+              context,
+            ),
+          shouldRetainDeveloperPlatformMutationContext,
+        )
+
+      await expect(runCreateApiKey()).rejects.toMatchObject({
+        code: 'InvalidDeveloperPlatformResponse',
+        retryable: true,
+        status: 201,
+      } satisfies Partial<DeveloperPlatformApiError>)
+      await expect(runCreateApiKey()).resolves.toEqual(
+        issuedApiKeySecretFixture,
+      )
+
+      expect(contextIndex).toBe(1)
+      expect(observedIdempotencyKeys).toEqual([
+        'idempotency-unreadable-1',
+        'idempotency-unreadable-1',
+      ])
+    }
+  })
+
   test('rejects malformed non-empty success JSON and explicitly accepts empty delete responses', async () => {
     globalThis.fetch = (async () =>
       new Response('{"apiKeys":', {
@@ -691,6 +765,7 @@ describe('Developer Platform API', () => {
       getDeveloperPlatformResources('access-token'),
     ).rejects.toMatchObject({
       code: 'InvalidDeveloperPlatformResponse',
+      retryable: true,
       status: 200,
     } satisfies Partial<DeveloperPlatformApiError>)
 
