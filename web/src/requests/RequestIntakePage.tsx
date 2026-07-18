@@ -432,6 +432,8 @@ function RequestFormEditorContainer({
   const [isSaving, setIsSaving] = useState(false)
   const [isPublishing, setIsPublishing] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string>()
+  const canEdit = initialForm?.capabilities.canEdit ?? true
+  const canPublish = initialForm?.capabilities.canPublish ?? false
   const configurationKey = accessToken && model.routing.teamId
     ? (['request-routing-workflow', accessToken, model.routing.teamId] as const)
     : null
@@ -487,6 +489,7 @@ function RequestFormEditorContainer({
     try {
       const published = await persistAndPublishRequestForm(
         model,
+        canEdit,
         (input) => mutationRunner.run(
           `request-form:update:${formId}`,
           JSON.stringify(input),
@@ -519,8 +522,8 @@ function RequestFormEditorContainer({
 
   return (
     <RequestFormBuilder
-      canEdit={initialForm?.capabilities.canEdit ?? true}
-      canPublish={initialForm?.capabilities.canPublish ?? false}
+      canEdit={canEdit}
+      canPublish={canPublish}
       errorMessage={errorMessage}
       isPublishing={isPublishing}
       isSaving={isSaving}

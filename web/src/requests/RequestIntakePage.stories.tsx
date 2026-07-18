@@ -42,6 +42,9 @@ const meta = {
   ],
 } satisfies Meta<typeof RequestIntakePage>
 
+/**
+ * Request intake page の Storybook metadata です。
+ */
 export default meta
 
 /**

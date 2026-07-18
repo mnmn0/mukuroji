@@ -266,6 +266,19 @@ function createStoredSubmission(overrides: Record<string, unknown> = {}) {
   } as RequestSubmission & Record<string, unknown>
 }
 
+function createStoredSubmissionEventRow(
+  submissionId: string,
+  event: RequestSubmission['events'][number],
+) {
+  return {
+    entryType: 'submission-event',
+    scopeKey: 'WORKSPACE#workspace-1',
+    recordKey: `SUBMISSION_EVENT#${submissionId}#${event.createdAt}#${event.id}`,
+    submissionId,
+    ...event,
+  }
+}
+
 /** Test double が受け取る AWS SDK command の最小表現です。 */
 type FakeCommand = {
   /** AWS SDK command が公開する入力です。 */
@@ -1375,42 +1388,8 @@ test('fills a filtered queue page across evaluated chunks and resumes after the 
   const first = createQueueSubmission('req-1', '59')
   const second = createQueueSubmission('req-2', '58')
   const third = createQueueSubmission('req-3', '57')
-  const eventRows = new Map([
-    ['req-1', [{
-      entryType: 'submission-event',
-      scopeKey: 'WORKSPACE#workspace-1',
-      recordKey: 'SUBMISSION_EVENT#req-1#2026-07-16T08:30:00.000Z#event-req-1',
-      submissionId: 'req-1',
-      id: 'event-req-1',
-      type: 'submitted',
-      actorId: 'requester',
-      summary: 'Request was submitted.',
-      createdAt: '2026-07-16T08:30:00.000Z',
-    }]],
-    ['req-2', [{
-      entryType: 'submission-event',
-      scopeKey: 'WORKSPACE#workspace-1',
-      recordKey: 'SUBMISSION_EVENT#req-2#2026-07-16T08:31:00.000Z#event-req-2',
-      submissionId: 'req-2',
-      id: 'event-req-2',
-      type: 'submitted',
-      actorId: 'requester',
-      summary: 'Request was submitted.',
-      createdAt: '2026-07-16T08:31:00.000Z',
-    }]],
-    ['req-3', [{
-      entryType: 'submission-event',
-      scopeKey: 'WORKSPACE#workspace-1',
-      recordKey: 'SUBMISSION_EVENT#req-3#2026-07-16T08:32:00.000Z#event-req-3',
-      submissionId: 'req-3',
-      id: 'event-req-3',
-      type: 'submitted',
-      actorId: 'requester',
-      summary: 'Request was submitted.',
-      createdAt: '2026-07-16T08:32:00.000Z',
-    }]],
-  ])
   const queueLimits: unknown[] = []
+  let eventQueryCount = 0
   const pageA = { scopeKey: 'page-a', recordKey: 'page-a', queueKey: 'page-a', queueRecordKey: 'page-a' }
   const pageB = { scopeKey: 'page-b', recordKey: 'page-b', queueKey: 'page-b', queueRecordKey: 'page-b' }
   const client = createClient(createDocumentClient((command) => {
@@ -1429,21 +1408,15 @@ test('fills a filtered queue page across evaluated chunks and resumes after the 
     const values = command.input.ExpressionAttributeValues as Record<string, unknown> | undefined
     const prefix = values?.[':prefix']
     if (typeof prefix === 'string' && prefix.startsWith('SUBMISSION_EVENT#')) {
-      const submissionId = prefix.split('#')[1]!
-      return { Items: eventRows.get(submissionId) ?? [] }
+      eventQueryCount += 1
+      return { Items: [] }
     }
     throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
   }))
 
   const page = await client.listSubmissions('workspace-1', { status: 'received', limit: 2 })
   expect(page.submissions.map(({ id }) => id)).toEqual(['req-1', 'req-2'])
-  expect(page.submissions[0]?.events).toEqual(eventRows.get('req-1')!.map(({
-    entryType: _entryType,
-    scopeKey: _scopeKey,
-    recordKey: _recordKey,
-    submissionId: _submissionId,
-    ...event
-  }) => event))
+  expect(page.submissions[0]?.events).toEqual(first.events)
   expect(queueLimits).toEqual([100, 100, 100])
   const cursor = JSON.parse(Buffer.from(page.nextCursor!, 'base64url').toString('utf8')) as {
     key: Record<string, unknown>
@@ -1462,6 +1435,7 @@ test('fills a filtered queue page across evaluated chunks and resumes after the 
   })
   expect(finalPage.submissions.map(({ id }) => id)).toEqual(['req-3'])
   expect(finalPage.nextCursor).toBeUndefined()
+  expect(eventQueryCount).toBe(0)
 })
 
 test('fails closed when filtered queue pagination repeats an evaluated cursor', async () => {
@@ -1538,10 +1512,26 @@ test('restores complete append-only event history in submission detail across ev
 
 test('applies explicit triage transitions and rejects mutation after a terminal state', async () => {
   let stored = createStoredSubmission()
+  const historicalEvent: RequestSubmission['events'][number] = {
+    id: 'event-0',
+    type: 'requester-replied',
+    actorId: 'requester',
+    summary: 'Older event omitted from the root projection.',
+    createdAt: '2026-07-16T08:00:00.000Z',
+  }
+  const eventRows = [
+    createStoredSubmissionEventRow(stored.id, historicalEvent),
+    ...stored.events.map((event) => createStoredSubmissionEventRow(stored.id, event)),
+  ]
   const puts: Record<string, unknown>[] = []
   const eventPuts: Record<string, unknown>[] = []
+  let eventQueryCount = 0
   const client = createClient(createDocumentClient((command) => {
     if (command.input.Key) return { Item: stored }
+    if (command.input.KeyConditionExpression) {
+      eventQueryCount += 1
+      return { Items: eventRows }
+    }
     const items = command.input.TransactItems as Array<{
       Put?: { Item?: Record<string, unknown> }
     }> | undefined
@@ -1549,6 +1539,7 @@ test('applies explicit triage transitions and rejects mutation after a terminal 
       stored = items[0]!.Put!.Item as RequestSubmission & Record<string, unknown>
       puts.push(stored)
       eventPuts.push(items[1]!.Put!.Item!)
+      eventRows.push(items[1]!.Put!.Item!)
       return {}
     }
     throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
@@ -1565,6 +1556,9 @@ test('applies explicit triage transitions and rejects mutation after a terminal 
     revision: 2,
     triageAssigneeUserId: 'triager@example.com',
   })
+  expect(assigned.events).toHaveLength(3)
+  expect(assigned.events).toContainEqual(historicalEvent)
+  expect(assigned.events).toContainEqual(expect.objectContaining({ type: 'assigned' }))
 
   const waiting = await client.applyAction(
     'workspace-1',
@@ -1578,6 +1572,9 @@ test('applies explicit triage transitions and rejects mutation after a terminal 
     source: 'internal',
     body: 'Please add an order number.',
   })
+  expect(waiting.events).toHaveLength(4)
+  expect(waiting.events).toContainEqual(historicalEvent)
+  expect(waiting.events).toContainEqual(expect.objectContaining({ type: 'more-info-requested' }))
 
   const rejected = await client.applyAction(
     'workspace-1',
@@ -1596,7 +1593,12 @@ test('applies explicit triage transitions and rejects mutation after a terminal 
       canConvert: false,
     },
   })
-  expect(rejected.events.at(-1)?.summary).toBe('Request was rejected: Out of scope.')
+  expect(rejected.events).toHaveLength(5)
+  expect(rejected.events).toContainEqual(historicalEvent)
+  expect(rejected.events).toContainEqual(expect.objectContaining({
+    type: 'rejected',
+    summary: 'Request was rejected: Out of scope.',
+  }))
   expect(eventPuts).toHaveLength(3)
   expect(eventPuts.at(-1)).toMatchObject({
     entryType: 'submission-event',
@@ -1611,6 +1613,49 @@ test('applies explicit triage transitions and rejects mutation after a terminal 
     { action: 'assign', expectedRevision: 4, assigneeUserId: 'other@example.com' },
   )).rejects.toMatchObject({ status: 409, code: 'RequestSubmissionTerminal' })
   expect(puts).toHaveLength(3)
+  expect(eventQueryCount).toBe(3)
+})
+
+test('does not commit a submission mutation when complete event history cannot be read', async () => {
+  const createHistoryFailureStore = () => {
+    let transactionCount = 0
+    const client = createClient(createDocumentClient((command) => {
+      if (command.input.Key) return { Item: createStoredSubmission() }
+      if (command.input.KeyConditionExpression) {
+        throw new Error('Event history is unavailable.')
+      }
+      if (command.input.TransactItems) {
+        transactionCount += 1
+        return {}
+      }
+      throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
+    }))
+    return {
+      client,
+      getTransactionCount: () => transactionCount,
+    }
+  }
+
+  const actionStore = createHistoryFailureStore()
+  await expect(actionStore.client.applyAction(
+    'workspace-1',
+    'req-1',
+    { id: 'manager@example.com' },
+    { action: 'assign', expectedRevision: 1, assigneeUserId: 'triager@example.com' },
+  )).rejects.toThrow('Event history is unavailable.')
+  expect(actionStore.getTransactionCount()).toBe(0)
+
+  const conversionStore = createHistoryFailureStore()
+  await expect(conversionStore.client.completeConversion(
+    'workspace-1',
+    'req-1',
+    { id: 'manager@example.com' },
+    {
+      expectedRevision: 1,
+      workItem: { teamId: 'team-core', workItemId: 'wi-1' },
+    },
+  )).rejects.toThrow('Event history is unavailable.')
+  expect(conversionStore.getTransactionCount()).toBe(0)
 })
 
 test('rejects an unknown triage discriminator instead of treating it as a duplicate', async () => {
@@ -1629,16 +1674,33 @@ test('rejects an unknown triage discriminator instead of treating it as a duplic
 
 test('makes Work Item conversion completion idempotent for the same trace target', async () => {
   let stored = createStoredSubmission()
+  const historicalEvent: RequestSubmission['events'][number] = {
+    id: 'event-0',
+    type: 'requester-replied',
+    actorId: 'requester',
+    summary: 'Older event omitted from the root projection.',
+    createdAt: '2026-07-16T08:00:00.000Z',
+  }
+  const eventRows = [
+    createStoredSubmissionEventRow(stored.id, historicalEvent),
+    ...stored.events.map((event) => createStoredSubmissionEventRow(stored.id, event)),
+  ]
   let putCount = 0
+  let eventQueryCount = 0
   let eventPut: Record<string, unknown> | undefined
   const client = createClient(createDocumentClient((command) => {
     if (command.input.Key) return { Item: stored }
+    if (command.input.KeyConditionExpression) {
+      eventQueryCount += 1
+      return { Items: eventRows }
+    }
     const items = command.input.TransactItems as Array<{
       Put?: { Item?: Record<string, unknown> }
     }> | undefined
     if (items) {
       stored = items[0]!.Put!.Item as RequestSubmission & Record<string, unknown>
       eventPut = items[1]!.Put!.Item
+      eventRows.push(eventPut!)
       putCount += 1
       return {}
     }
@@ -1661,8 +1723,12 @@ test('makes Work Item conversion completion idempotent for the same trace target
     projection,
   )
   expect(converted).toMatchObject({ status: 'converted', revision: 2, workItem: projection.workItem })
+  expect(converted.events).toHaveLength(3)
+  expect(converted.events).toContainEqual(historicalEvent)
+  expect(converted.events).toContainEqual(expect.objectContaining({ type: 'converted' }))
   expect(replay).toEqual(converted)
   expect(putCount).toBe(1)
+  expect(eventQueryCount).toBe(2)
   expect(eventPut).toMatchObject({
     entryType: 'submission-event',
     submissionId: 'req-1',

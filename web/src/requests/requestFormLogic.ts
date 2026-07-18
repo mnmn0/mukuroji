@@ -438,7 +438,9 @@ function validateRequestField(
   value: RequestAnswerValue | undefined,
 ): RequestFieldValidationError[] {
   const errors: RequestFieldValidationError[] = []
-  const empty = isEmptyAnswer(value)
+  const normalizedStringValue = typeof value === 'string' ? value.trim() : undefined
+  const validationValue = normalizedStringValue ?? value
+  const empty = isEmptyAnswer(validationValue)
 
   if (field.required && empty) {
     return [{ fieldId: field.id, code: 'required' }]
@@ -449,7 +451,7 @@ function validateRequestField(
   }
 
   if (field.type === 'email' && (
-    typeof value !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+    normalizedStringValue === undefined || !/^[^\s@]+@[^\s@]+$/u.test(normalizedStringValue)
   )) {
     errors.push({ fieldId: field.id, code: 'invalid-email' })
   }
@@ -469,7 +471,9 @@ function validateRequestField(
     }
   }
 
-  const valueLength = typeof value === 'string' || Array.isArray(value) ? value.length : undefined
+  const valueLength = typeof validationValue === 'string' || Array.isArray(validationValue)
+    ? validationValue.length
+    : undefined
   if (
     valueLength !== undefined &&
     field.validation?.minLength !== undefined &&
@@ -486,9 +490,9 @@ function validateRequestField(
   }
 
   if (
-    typeof value === 'string' &&
+    normalizedStringValue !== undefined &&
     field.validation?.pattern &&
-    !matchesPattern(field.validation.pattern, value)
+    !matchesPattern(field.validation.pattern, normalizedStringValue)
   ) {
     errors.push({ fieldId: field.id, code: 'pattern' })
   }

@@ -371,6 +371,43 @@ export function createEmptyRequestFormDraft(): RequestFormDraftModel {
 }
 
 /**
+ * Team scope の変更を default target と全 routing rule target へ同期します。
+ *
+ * Team が実際に変わる target では、旧 Team に属する Project と workflow status を除去します。
+ *
+ * @param routing - 現在の request routing draft です。
+ * @param teamId - Form scope が固定する Team ID です。
+ * @returns 全 target が指定 Team を参照する routing draft です。
+ */
+export function synchronizeRequestRoutingTeam(
+  routing: RequestRoutingDraft,
+  teamId: string,
+): RequestRoutingDraft {
+  const synchronizeTarget = (
+    target: RequestRoutingTargetDraft,
+  ): RequestRoutingTargetDraft => target.teamId === teamId
+    ? target
+    : {
+        ...target,
+        projectId: '',
+        teamId,
+        workflowStatusId: '',
+      }
+  const defaultTarget = synchronizeTarget(routing)
+
+  return {
+    ...routing,
+    projectId: defaultTarget.projectId,
+    teamId: defaultTarget.teamId,
+    workflowStatusId: defaultTarget.workflowStatusId,
+    rules: routing.rules.map((rule) => ({
+      ...rule,
+      target: synchronizeTarget(rule.target),
+    })),
+  }
+}
+
+/**
  * Builder model が server の strict draft validation に必要な入力を満たすか判定します。
  *
  * @param model - 保存または公開しようとしている request form draft です。
@@ -378,6 +415,7 @@ export function createEmptyRequestFormDraft(): RequestFormDraftModel {
  */
 export function isRequestFormDraftModelValid(model: RequestFormDraftModel) {
   const defaultLocale = model.defaultLocale
+  const scopedTeamId = model.scope.type === 'team' ? model.scope.teamId : undefined
   const fields = model.sections.flatMap((section) => section.fields)
   const fieldIds = new Set(fields.map((field) => field.id))
   const sectionIds = new Set(model.sections.map((section) => section.id))
@@ -392,7 +430,8 @@ export function isRequestFormDraftModelValid(model: RequestFormDraftModel) {
     Boolean(target.teamId.trim()) &&
     Boolean(target.assigneeUserId.trim()) &&
     Number.isInteger(target.dueDateOffsetDays) &&
-    target.dueDateOffsetDays >= 0
+    target.dueDateOffsetDays >= 0 &&
+    (scopedTeamId === undefined || target.teamId === scopedTeamId)
   const conditionIsValid = (
     condition: RequestVisibilityCondition,
     allowedFieldIds: ReadonlySet<string> = fieldIds,
@@ -566,15 +605,24 @@ export function updateRequestFormInput(model: RequestFormDraftModel): UpdateRequ
 }
 
 /**
- * 現在の builder draft を保存してから、返却 revision を使って immutable version を公開します。
+ * 編集可能なら現在の builder draft を保存し、公開専用なら現在 revision を直接公開します。
+ *
+ * @param model - 公開対象の builder model です。
+ * @param canEdit - Current principal が公開前に draft を更新できるかどうかです。
+ * @param persist - 編集可能な場合に draft を保存する callback です。
+ * @param publish - Expected revision を使って immutable version を公開する callback です。
+ * @param onPublishRejected - 保存後の公開だけが失敗した場合に中間 revision を保持する callback です。
+ * @returns 公開後の Request Form です。
  */
 export async function persistAndPublishRequestForm(
   model: RequestFormDraftModel,
+  canEdit: boolean,
   persist: (input: UpdateRequestFormInput) => Promise<RequestForm>,
   publish: (expectedRevision: number) => Promise<RequestForm>,
   onPublishRejected: (persisted: RequestForm) => void,
 ) {
   if (!model.id) throw new Error('Request form must be saved before publishing.')
+  if (!canEdit) return publish(model.revision)
   const updated = await persist(updateRequestFormInput(model))
   try {
     return await publish(updated.revision)

@@ -578,7 +578,10 @@ export type RequestSubmission = {
   workItem?: RequestWorkItemReference
   /** Thread に保存された bounded plain text message です。 */
   messages: RequestSubmissionMessage[]
-  /** Submission の append-only activity です。 */
+  /**
+   * Submission activity です。Detail/action response は完全な append-only 履歴、
+   * queue page は submission root の bounded projection を返します。
+   */
   events: RequestSubmissionEvent[]
   /** Submission を受理した ISO 8601 timestamp です。 */
   createdAt: string
@@ -590,7 +593,7 @@ export type RequestSubmission = {
 
 /** Cursor pagination された intake queue です。 */
 export type RequestSubmissionPage = {
-  /** Current scope で参照できる submission 一覧です。 */
+  /** Current scope で参照できる bounded event projection 付き submission 一覧です。 */
   submissions: RequestSubmission[]
   /** 次 page を指す scope-bound opaque cursor です。 */
   nextCursor?: string

@@ -239,4 +239,51 @@ describe('request form validation', () => {
       kind: 'question',
     })).toEqual([])
   })
+
+  test('trims strings before required, length, pattern, and email validation', () => {
+    const trimVersion: RequestFormLogicVersion = {
+      defaultLocale: 'ja',
+      locales: ['ja'],
+      sections: [{
+        fields: [
+          { id: 'required-text', required: true, type: 'text' },
+          { id: 'email', required: true, type: 'email' },
+          {
+            id: 'code',
+            type: 'text',
+            validation: {
+              maxLength: 5,
+              minLength: 3,
+              pattern: '^[a-z]+$',
+            },
+          },
+        ],
+        id: 'trimmed-values',
+      }],
+    }
+
+    expect(validateVisibleRequestAnswers(trimVersion, {
+      code: '  abc  ',
+      email: '  user@localhost  ',
+      'required-text': '   ',
+    })).toEqual([{ fieldId: 'required-text', code: 'required' }])
+
+    expect(validateVisibleRequestAnswers(trimVersion, {
+      code: '  ab  ',
+      email: 'user@localhost',
+      'required-text': 'present',
+    })).toEqual([{ fieldId: 'code', code: 'min-length' }])
+
+    expect(validateVisibleRequestAnswers(trimVersion, {
+      code: '  abcdef  ',
+      email: 'user@localhost',
+      'required-text': 'present',
+    })).toEqual([{ fieldId: 'code', code: 'max-length' }])
+
+    expect(validateVisibleRequestAnswers(trimVersion, {
+      code: '  ABC  ',
+      email: 'user@localhost',
+      'required-text': 'present',
+    })).toEqual([{ fieldId: 'code', code: 'pattern' }])
+  })
 })

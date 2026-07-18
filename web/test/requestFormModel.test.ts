@@ -15,6 +15,7 @@ import {
   normalizePublicRequestForm,
   normalizeRequestSubmission,
   persistAndPublishRequestForm,
+  synchronizeRequestRoutingTeam,
   updateRequestFormInput,
 } from '../src/requests/model'
 
@@ -215,12 +216,58 @@ describe('request form model round-trip', () => {
     expect(isRequestFormDraftModelValid(routingModel)).toBe(false)
   })
 
+  test('synchronizes every routing target to a Team-scoped form', () => {
+    const model = normalizeRequestForm(requestFormFixture)
+    const synchronized = synchronizeRequestRoutingTeam(model.routing, 'core-team')
+
+    expect(synchronized.teamId).toBe('core-team')
+    expect(synchronized.projectId).toBe('refero')
+    expect(synchronized.workflowStatusId).toBe('todo')
+    expect(synchronized.rules[0]?.target).toMatchObject({
+      projectId: '',
+      teamId: 'core-team',
+      workflowStatusId: '',
+    })
+
+    const moved = synchronizeRequestRoutingTeam(synchronized, 'design-team')
+    expect(moved).toMatchObject({
+      projectId: '',
+      teamId: 'design-team',
+      workflowStatusId: '',
+    })
+    expect(moved.rules.every((rule) =>
+      rule.target.teamId === 'design-team' &&
+      rule.target.projectId === '' &&
+      rule.target.workflowStatusId === ''
+    )).toBe(true)
+  })
+
+  test('rejects default and rule targets outside a Team-scoped form', () => {
+    const model = normalizeRequestForm(requestFormFixture)
+    model.scope = { type: 'team', teamId: 'core-team' }
+
+    expect(isRequestFormDraftModelValid(model)).toBe(false)
+
+    model.routing = synchronizeRequestRoutingTeam(model.routing, 'core-team')
+    expect(isRequestFormDraftModelValid(model)).toBe(true)
+
+    const firstRule = model.routing.rules[0]
+    if (!firstRule) throw new Error('Request form fixture needs a routing rule.')
+    firstRule.target.teamId = 'design-team'
+    expect(isRequestFormDraftModelValid(model)).toBe(false)
+
+    firstRule.target.teamId = 'core-team'
+    model.routing.teamId = 'design-team'
+    expect(isRequestFormDraftModelValid(model)).toBe(false)
+  })
+
   test('persists the current draft before publishing the returned revision', async () => {
     const model = normalizeRequestForm(requestFormFixture)
     const calls: string[] = []
 
     const published = await persistAndPublishRequestForm(
       model,
+      true,
       async (input) => {
         calls.push(`persist:${input.expectedRevision}`)
         return { ...requestFormFixture, revision: 8 }
@@ -236,6 +283,32 @@ describe('request form model round-trip', () => {
 
     expect(calls).toEqual([`persist:${model.revision}`, 'publish:8'])
     expect(published.revision).toBe(9)
+  })
+
+  test('publishes the current revision without persisting for a publish-only principal', async () => {
+    const model = normalizeRequestForm(requestFormFixture)
+    const persistedRevisions: number[] = []
+    const publishedRevisions: number[] = []
+
+    const published = await persistAndPublishRequestForm(
+      model,
+      false,
+      async (input) => {
+        persistedRevisions.push(input.expectedRevision)
+        throw new Error('Publish-only principals must not persist the draft.')
+      },
+      async (expectedRevision) => {
+        publishedRevisions.push(expectedRevision)
+        return { ...requestFormFixture, revision: expectedRevision + 1 }
+      },
+      () => {
+        throw new Error('Direct publishing must not retain an intermediate revision.')
+      },
+    )
+
+    expect(persistedRevisions).toEqual([])
+    expect(publishedRevisions).toEqual([model.revision])
+    expect(published.revision).toBe(model.revision + 1)
   })
 
   test('retains the persisted revision after publishing is rejected', async () => {
@@ -260,6 +333,7 @@ describe('request form model round-trip', () => {
 
     await expect(persistAndPublishRequestForm(
       model,
+      true,
       persist,
       publish,
       retainPersistedForm,
@@ -270,6 +344,7 @@ describe('request form model round-trip', () => {
     rejectPublishing = false
     const published = await persistAndPublishRequestForm(
       retainedModel,
+      true,
       persist,
       publish,
       retainPersistedForm,

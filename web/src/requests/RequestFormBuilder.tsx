@@ -13,6 +13,7 @@ import {
   createEmptyRequestSection,
   isRequestFormDraftModelValid,
   normalizeRequestBuilderFieldForType,
+  synchronizeRequestRoutingTeam,
   type RequestBuilderField,
   type RequestBuilderFieldType,
   type RequestBuilderSection,
@@ -128,6 +129,8 @@ export function RequestFormBuilder({
   const t = useMemo(() => createTranslator(locale), [locale])
   const [editingLocale, setEditingLocale] = useState<RequestLocale>(model.defaultLocale)
   const [localValidationError, setLocalValidationError] = useState(false)
+  const mutationPending = isSaving || isPublishing
+  const editingDisabled = !canEdit || mutationPending
   const activeTeam = teams.find((team) => team.id === model.routing.teamId)
   const allFields = model.sections.flatMap((section) => section.fields)
   const publicPath = model.linkToken
@@ -138,6 +141,7 @@ export function RequestFormBuilder({
     : publicPath
 
   const update = (patch: Partial<RequestFormDraftModel>) => {
+    if (editingDisabled) return
     setLocalValidationError(false)
     onChange({ ...model, ...patch })
   }
@@ -151,6 +155,7 @@ export function RequestFormBuilder({
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (editingDisabled) return
     if (!isRequestFormDraftModelValid(model)) {
       setLocalValidationError(true)
       return
@@ -159,6 +164,7 @@ export function RequestFormBuilder({
   }
 
   const handlePublish = () => {
+    if (mutationPending || !canPublish || !model.id) return
     if (!isRequestFormDraftModelValid(model)) {
       setLocalValidationError(true)
       return
@@ -168,6 +174,7 @@ export function RequestFormBuilder({
 
   return (
     <form className="grid gap-5" data-testid="request-form-builder" onSubmit={handleSubmit}>
+      <fieldset className="contents" data-testid="request-form-builder-controls" disabled={mutationPending}>
       <section className="workbench-panel overflow-hidden">
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-5 py-4">
           <div>
@@ -179,14 +186,16 @@ export function RequestFormBuilder({
           <div className="flex flex-wrap gap-2">
             <button
               className="workbench-button-secondary min-h-10 px-4"
-              disabled={!canEdit || isSaving || isPublishing}
+              data-testid="request-form-builder-save"
+              disabled={editingDisabled}
               type="submit"
             >
               {isSaving ? t('requests.builder.saving') : t('requests.builder.save')}
             </button>
             <button
               className="workbench-button-primary min-h-10 px-4"
-              disabled={!model.id || !canPublish || isSaving || isPublishing}
+              data-testid="request-form-builder-publish"
+              disabled={!model.id || !canPublish || mutationPending}
               onClick={handlePublish}
               type="button"
             >
@@ -195,7 +204,7 @@ export function RequestFormBuilder({
           </div>
         </div>
 
-        <fieldset className="grid grid-cols-4 gap-4 border-0 p-5 max-[1080px]:grid-cols-2 max-[640px]:grid-cols-1" disabled={!canEdit || isSaving || isPublishing}>
+        <fieldset className="grid grid-cols-4 gap-4 border-0 p-5 max-[1080px]:grid-cols-2 max-[640px]:grid-cols-1" disabled={editingDisabled}>
           <BuilderLabel label={t('requests.builder.name')} span="col-span-2 max-[640px]:col-span-1">
             <input
               className="workbench-input min-h-10 px-3"
@@ -229,11 +238,20 @@ export function RequestFormBuilder({
             <select
               className="workbench-input min-h-10 px-3"
               value={model.scope.type}
-              onChange={(event) => update({
-                scope: event.target.value === 'team'
-                  ? { type: 'team', teamId: model.scope.teamId ?? teams[0]?.id }
-                  : { type: 'workspace' },
-              })}
+              onChange={(event) => {
+                if (event.target.value !== 'team') {
+                  update({ scope: { type: 'workspace' } })
+                  return
+                }
+
+                const teamId = model.scope.type === 'team'
+                  ? model.scope.teamId ?? teams[0]?.id ?? ''
+                  : teams[0]?.id ?? ''
+                update({
+                  routing: synchronizeRequestRoutingTeam(model.routing, teamId),
+                  scope: { type: 'team', teamId },
+                })
+              }}
             >
               <option value="workspace">{t('requests.builder.scopeWorkspace')}</option>
               <option value="team">{t('requests.builder.scopeTeam')}</option>
@@ -245,7 +263,13 @@ export function RequestFormBuilder({
                 className="workbench-input min-h-10 px-3"
                 required
                 value={model.scope.teamId ?? ''}
-                onChange={(event) => update({ scope: { type: 'team', teamId: event.target.value } })}
+                onChange={(event) => {
+                  const teamId = event.target.value
+                  update({
+                    routing: synchronizeRequestRoutingTeam(model.routing, teamId),
+                    scope: { type: 'team', teamId },
+                  })
+                }}
               >
                 <option value="">—</option>
                 {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
@@ -289,6 +313,7 @@ export function RequestFormBuilder({
         </fieldset>
       </section>
 
+      <fieldset className="contents" data-testid="request-form-builder-edit-controls" disabled={!canEdit}>
       <section className="workbench-panel overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-5 py-4">
           <h3 className="text-lg font-semibold text-[var(--workbench-text)]">
@@ -308,7 +333,7 @@ export function RequestFormBuilder({
             ))}
           </div>
         </div>
-        <fieldset className="grid grid-cols-2 gap-4 border-0 p-5 max-[720px]:grid-cols-1" disabled={!canEdit || isSaving || isPublishing}>
+        <fieldset className="grid grid-cols-2 gap-4 border-0 p-5 max-[720px]:grid-cols-1" disabled={editingDisabled}>
           <BuilderLabel label={t('requests.builder.defaultLocale')}>
             <select
               className="workbench-input min-h-10 px-3"
@@ -368,7 +393,7 @@ export function RequestFormBuilder({
           </h3>
           <button
             className="workbench-button-secondary min-h-10 px-4"
-            disabled={!canEdit}
+            disabled={editingDisabled}
             onClick={() => updateSections([
               ...model.sections,
               createEmptyRequestSection(createUniqueId('section', model.sections.map((section) => section.id))),
@@ -463,7 +488,7 @@ export function RequestFormBuilder({
                 })}
                 <button
                   className="workbench-button-secondary min-h-10 justify-self-start px-4"
-                  disabled={!canEdit}
+                  disabled={editingDisabled}
                   onClick={() => updateSection(section.id, (current) => ({
                     ...current,
                     fields: [
@@ -482,7 +507,7 @@ export function RequestFormBuilder({
       </section>
 
       <section className="grid grid-cols-2 gap-5 max-[900px]:grid-cols-1">
-        <fieldset className="workbench-panel grid gap-4 border-0 p-5" disabled={!canEdit}>
+        <fieldset className="workbench-panel grid gap-4 border-0 p-5" disabled={editingDisabled}>
           <h3 className="text-lg font-semibold text-[var(--workbench-text)]">
             {t('requests.builder.consent')}
           </h3>
@@ -516,7 +541,7 @@ export function RequestFormBuilder({
           </BuilderLabel>
         </fieldset>
 
-        <fieldset className="workbench-panel grid gap-4 border-0 p-5" disabled={!canEdit}>
+        <fieldset className="workbench-panel grid gap-4 border-0 p-5" disabled={editingDisabled}>
           <h3 className="text-lg font-semibold text-[var(--workbench-text)]">
             {t('requests.builder.attachments')}
           </h3>
@@ -570,13 +595,15 @@ export function RequestFormBuilder({
         </fieldset>
       </section>
 
-      <fieldset className="workbench-panel grid grid-cols-4 gap-4 border-0 p-5 max-[1080px]:grid-cols-2 max-[640px]:grid-cols-1" disabled={!canEdit}>
+      <fieldset className="workbench-panel grid grid-cols-4 gap-4 border-0 p-5 max-[1080px]:grid-cols-2 max-[640px]:grid-cols-1" disabled={editingDisabled}>
         <h3 className="col-span-4 text-lg font-semibold text-[var(--workbench-text)] max-[1080px]:col-span-2 max-[640px]:col-span-1">
           {t('requests.builder.routing')}
         </h3>
         <BuilderLabel label={t('requests.builder.team')}>
           <select
             className="workbench-input min-h-10 px-3"
+            data-testid="request-routing-default-team"
+            disabled={model.scope.type === 'team'}
             required
             value={model.routing.teamId}
             onChange={(event) => update({ routing: {
@@ -678,17 +705,18 @@ export function RequestFormBuilder({
 
       <RoutingRulesEditor
         defaultTarget={model.routing}
-        disabled={!canEdit || isSaving || isPublishing}
+        disabled={editingDisabled}
         editingLocale={editingLocale}
         fields={allFields}
         rules={model.routing.rules}
         t={t}
+        teamLocked={model.scope.type === 'team'}
         teams={teams}
         onChange={(rules) => update({ routing: { ...model.routing, rules } })}
       />
 
       <CustomFieldMappingsEditor
-        disabled={!canEdit || isSaving || isPublishing}
+        disabled={editingDisabled}
         editingLocale={editingLocale}
         fields={allFields}
         mappings={model.routing.customFieldMappings}
@@ -697,12 +725,14 @@ export function RequestFormBuilder({
           routing: { ...model.routing, customFieldMappings },
         })}
       />
+      </fieldset>
 
       {localValidationError || errorMessage ? (
         <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
           {localValidationError ? t('requests.builder.invalidDraft') : errorMessage}
         </p>
       ) : null}
+      </fieldset>
     </form>
   )
 }
@@ -715,6 +745,7 @@ function RoutingRulesEditor({
   onChange,
   rules,
   t,
+  teamLocked,
   teams,
 }: {
   defaultTarget: RequestRoutingTargetDraft
@@ -724,6 +755,7 @@ function RoutingRulesEditor({
   onChange: (rules: RequestRoutingRuleDraft[]) => void
   rules: RequestRoutingRuleDraft[]
   t: ReturnType<typeof createTranslator>
+  teamLocked: boolean
   teams: ProjectDirectoryTeam[]
 }) {
   const addRule = () => {
@@ -791,6 +823,7 @@ function RoutingRulesEditor({
           <RoutingTargetEditor
             target={rule.target}
             t={t}
+            teamLocked={teamLocked}
             teams={teams}
             onChange={(target) => onChange(rules.map((candidate) => candidate.id === rule.id ? { ...candidate, target } : candidate))}
           />
@@ -804,11 +837,13 @@ function RoutingTargetEditor({
   onChange,
   target,
   t,
+  teamLocked,
   teams,
 }: {
   onChange: (target: RequestRoutingTargetDraft) => void
   target: RequestRoutingTargetDraft
   t: ReturnType<typeof createTranslator>
+  teamLocked: boolean
   teams: ProjectDirectoryTeam[]
 }) {
   const team = teams.find((candidate) => candidate.id === target.teamId)
@@ -816,7 +851,7 @@ function RoutingTargetEditor({
   return (
     <div className="grid grid-cols-3 gap-3 max-[900px]:grid-cols-2 max-[620px]:grid-cols-1">
       <BuilderLabel label={t('requests.builder.team')}>
-        <select className="workbench-input min-h-10 px-3" required value={target.teamId} onChange={(event) => onChange({ ...target, projectId: '', teamId: event.target.value, workflowStatusId: '' })}>
+        <select className="workbench-input min-h-10 px-3" data-testid="request-routing-rule-team" disabled={teamLocked} required value={target.teamId} onChange={(event) => onChange({ ...target, projectId: '', teamId: event.target.value, workflowStatusId: '' })}>
           <option value="">—</option>
           {teams.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
         </select>

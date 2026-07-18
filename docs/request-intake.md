@@ -36,7 +36,7 @@ Form 管理、queue read、triage、attachment download は Workspace owner/admi
 
 `RequestIntakeTable` は `scopeKey` / `recordKey` を primary key とし、TTL `expiresAt` と `RequestQueueIndex` を持つ。主な row は form、immutable version、hashed link/session/thread lookup、submission、upload、rate counter、duplicate pointer、email receipt である。
 
-DynamoDB の 400 KB item 上限より十分小さく保つため、normalized form draft は128 KiB、回答全体は96 KiB、thread message history は64 KiB、submission root の event projection は32 KiB、保存 item は360 KiBを上限とする。Append-only event 本体は submission mutation と同じ transaction で immutable な別 row に保存し、detail / queue response ではその event row を時系列に復元する。件数上限だけでなく UTF-8 byte 数を server で検証し、超過時は DynamoDB へ書き込む前に `413 RequestPayloadTooLarge` を返す。
+DynamoDB の 400 KB item 上限より十分小さく保つため、normalized form draft は128 KiB、回答全体は96 KiB、thread message history は64 KiB、submission root の event projection は32 KiB、保存 item は360 KiBを上限とする。Append-only event 本体は submission mutation と同じ transaction で immutable な別 row に保存し、detail / mutation response ではその event row を時系列に復元する。Queue response は一覧取得時の N+1 query を避けるため、submission root の bounded event projection を返す。件数上限だけでなく UTF-8 byte 数を server で検証し、超過時は DynamoDB へ書き込む前に `413 RequestPayloadTooLarge` を返す。
 
 Public form GET は version と link digest に bind した短命 session を発行する。submit transaction は session を一度だけ consumeし、同じ fingerprint の response-loss retry だけ同じ receipt を返す。別 payload での再利用は `409` で拒否する。
 

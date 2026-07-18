@@ -34,6 +34,9 @@ const meta = {
   },
 } satisfies Meta<typeof RequestFormBuilder>
 
+/**
+ * Request form builder の Storybook metadata です。
+ */
 export default meta
 
 /**

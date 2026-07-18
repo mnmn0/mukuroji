@@ -31,6 +31,9 @@ const meta = {
   },
 } satisfies Meta<typeof RequestQueue>
 
+/**
+ * Request queue の Storybook metadata です。
+ */
 export default meta
 
 /**

@@ -2003,12 +2003,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       }
       exclusiveStartKey = response.LastEvaluatedKey
     } while (storedSubmissions.length < limit && exclusiveStartKey)
-    const submissions = await Promise.all(storedSubmissions.map(async (stored) =>
-      toRequestSubmissionView(
-        stored,
-        await this.getSubmissionEvents(workspaceId, stored.id),
-      )
-    ))
+    const submissions = storedSubmissions.map((stored) => toRequestSubmissionView(stored))
     return {
       submissions,
       ...(nextCursorKey
@@ -2107,6 +2102,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       summary,
       createdAt: now,
     }
+    const persistedEvents = await this.getSubmissionEvents(workspaceId, submissionId)
     const next = {
       ...current,
       status: nextStatus,
@@ -2122,7 +2118,10 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         : activeSubmissionCapabilities,
     } satisfies StoredRequestSubmission
     await this.putSubmissionWithRevision(next, current.revision, event)
-    return toRequestSubmissionView(next)
+    return toRequestSubmissionView(
+      next,
+      appendCompleteRequestSubmissionEventHistory(current, persistedEvents, event),
+    )
   }
 
   /** Work Item 作成後の trace projection を保存します。 */
@@ -2134,7 +2133,8 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
   ) {
     const current = await this.getStoredSubmission(workspaceId, submissionId)
     if (current.status === 'converted' && current.workItem && sameWorkItem(current.workItem, input.workItem)) {
-      return toRequestSubmissionView(current)
+      const events = await this.getSubmissionEvents(workspaceId, submissionId)
+      return toRequestSubmissionView(current, events)
     }
     requireExpectedRevision(input.expectedRevision, current.revision)
     assertSubmissionMutable(current)
@@ -2147,6 +2147,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       summary: 'Request was converted to a Work Item.',
       createdAt: now,
     }
+    const persistedEvents = await this.getSubmissionEvents(workspaceId, submissionId)
     const next: StoredRequestSubmission = {
       ...current,
       status: 'converted',
@@ -2157,7 +2158,10 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       capabilities: terminalSubmissionCapabilities,
     }
     await this.putSubmissionWithRevision(next, current.revision, event)
-    return toRequestSubmissionView(next)
+    return toRequestSubmissionView(
+      next,
+      appendCompleteRequestSubmissionEventHistory(current, persistedEvents, event),
+    )
   }
 
   /** External capability thread の allowlist 済み message view を返します。 */
@@ -3103,6 +3107,17 @@ function toRequestSubmissionEvent(stored: StoredRequestSubmissionEvent): Request
     ...event
   } = stored
   return event
+}
+
+function appendCompleteRequestSubmissionEventHistory(
+  stored: StoredRequestSubmission,
+  persistedEvents: readonly RequestSubmissionEvent[],
+  event: RequestSubmissionEvent,
+) {
+  const history = persistedEvents.length > 0 ? persistedEvents : stored.events
+  return [...history, event].sort((left, right) =>
+    left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)
+  )
 }
 
 function toRequestSubmissionView(

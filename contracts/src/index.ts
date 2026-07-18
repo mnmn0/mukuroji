@@ -968,6 +968,9 @@ export type UpdateWorkItemInput = WorkItemPatch & {
   expectedRevision: number
 }
 
+/**
+ * Request form、submission、thread、email ingestion の公開契約です。
+ */
 export * from './request-intake'
 
 /**

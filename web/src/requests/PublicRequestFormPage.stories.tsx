@@ -38,6 +38,9 @@ const meta = {
   },
 } satisfies Meta<typeof PublicRequestFormScreen>
 
+/**
+ * Public request form の Storybook metadata です。
+ */
 export default meta
 
 /**

@@ -752,7 +752,7 @@ function PublicField({
       <span>{label}{field.required ? <span className="ml-1 text-red-700">*</span> : null}</span>
       {helpText ? <span className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">{helpText}</span> : null}
       {field.type === 'textarea' ? (
-        <textarea className={`${commonInputClass} min-h-28 py-3`} maxLength={field.validation?.maxLength} minLength={field.validation?.minLength} placeholder={placeholder} value={typeof answer === 'string' ? answer : ''} onChange={(event) => onChange(event.target.value)} />
+        <textarea className={`${commonInputClass} min-h-28 py-3`} data-testid={`public-request-field-${field.id}`} placeholder={placeholder} value={typeof answer === 'string' ? answer : ''} onChange={(event) => onChange(event.target.value)} />
       ) : field.type === 'select' ? (
         <select className={commonInputClass} value={typeof answer === 'string' ? answer : ''} onChange={(event) => onChange(event.target.value)}>
           <option value="">—</option>
@@ -782,14 +782,14 @@ function PublicField({
         </span>
       ) : (
         <input
+          autoComplete={field.type === 'email' ? 'email' : undefined}
           className={commonInputClass}
+          data-testid={`public-request-field-${field.id}`}
+          inputMode={field.type === 'email' ? 'email' : undefined}
           max={field.validation?.max}
-          maxLength={field.validation?.maxLength}
           min={field.validation?.min}
-          minLength={field.validation?.minLength}
-          pattern={field.validation?.pattern}
           placeholder={placeholder}
-          type={field.type === 'text' ? 'text' : field.type}
+          type={field.type === 'text' || field.type === 'email' ? 'text' : field.type}
           value={typeof answer === 'string' || typeof answer === 'number' ? answer : ''}
           onChange={(event) => onChange(
             field.type === 'number' && event.target.value !== ''
