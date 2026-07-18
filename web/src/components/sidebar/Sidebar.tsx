@@ -64,6 +64,7 @@ export type SidebarNavId =
   | 'home'
   | 'my-tasks'
   | 'inbox'
+  | 'requests'
   | 'dashboard'
   | 'planning'
   | 'reports'
@@ -456,6 +457,7 @@ const mainNavItems: MainNavItem[] = [
   { id: 'home', icon: HomeIcon },
   { id: 'my-tasks', icon: CheckCircleIcon },
   { id: 'inbox', icon: BellIcon },
+  { id: 'requests', icon: PanelIcon },
   { id: 'dashboard', icon: DashboardIcon },
   { id: 'planning', icon: PlanningIcon },
   { id: 'reports', icon: ReportIcon },
@@ -524,6 +526,7 @@ const defaultLabels: SidebarLabels = {
     home: 'ホーム',
     'my-tasks': 'マイタスク',
     inbox: '受信箱',
+    requests: 'リクエスト',
     dashboard: 'ダッシュボード',
     planning: 'プランニング',
     reports: 'レポート',

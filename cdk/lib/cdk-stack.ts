@@ -567,6 +567,27 @@ export class CdkStack extends cdk.Stack {
           'Stable 32-byte random HMAC key encoded as lowercase hexadecimal for non-PII Workspace member and invitation audit identifiers.',
       },
     );
+    const requestRateLimitPerHour = new cdk.CfnParameter(this, 'RequestRateLimitPerHour', {
+      type: 'Number',
+      default: 10,
+      minValue: 1,
+      maxValue: 10_000,
+      description: 'Maximum anonymous request submissions accepted per capability and hour.',
+    });
+    const requestEmailWebhookSecret = new cdk.CfnParameter(this, 'RequestEmailWebhookSecret', {
+      type: 'String',
+      minLength: 32,
+      maxLength: 256,
+      noEcho: true,
+      description: 'Secret used to authenticate request intake email envelopes.',
+    });
+    const requestTokenHashSecret = new cdk.CfnParameter(this, 'RequestTokenHashSecret', {
+      type: 'String',
+      minLength: 32,
+      maxLength: 256,
+      noEcho: true,
+      description: 'Secret used to hash public request and reply capability tokens.',
+    });
     const fileRetentionDays = new cdk.CfnParameter(this, 'FileRetentionDays', {
       type: 'Number',
       default: 30,
@@ -707,6 +728,22 @@ export class CdkStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    const requestIntakeTable = new dynamodb.Table(this, 'RequestIntakeTable', {
+      partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      timeToLiveAttribute: 'expiresAt',
+    });
+
+    requestIntakeTable.addGlobalSecondaryIndex({
+      indexName: 'RequestQueueIndex',
+      partitionKey: { name: 'queueKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'queueRecordKey', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
     });
 
     const teamIssueEventsTable = new dynamodb.Table(this, 'TeamIssueEventsTable', {
@@ -1072,6 +1109,10 @@ export class CdkStack extends cdk.Stack {
         NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
         PLANNING_TABLE_NAME: planningTable.tableName,
         REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
+        REQUEST_INTAKE_TABLE_NAME: requestIntakeTable.tableName,
+        REQUEST_QUEUE_INDEX_NAME: 'RequestQueueIndex',
+        REQUEST_RATE_LIMIT_PER_HOUR: requestRateLimitPerHour.valueAsString,
+        REQUEST_TOKEN_HASH_SECRET: requestTokenHashSecret.valueAsString,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
@@ -1175,6 +1216,18 @@ export class CdkStack extends cdk.Stack {
         })],
       },
     );
+    const apiRequestIntakeDataPolicy = new iam.Policy(this, 'ApiRequestIntakeDataPolicy', {
+      statements: [new iam.PolicyStatement({
+        actions: [
+          'dynamodb:DescribeTable',
+          'dynamodb:GetItem',
+          'dynamodb:PutItem',
+          'dynamodb:Query',
+          'dynamodb:UpdateItem',
+        ],
+        resources: [requestIntakeTable.tableArn, `${requestIntakeTable.tableArn}/index/*`],
+      })],
+    });
     const apiTransactWritePolicy = new iam.Policy(this, 'ApiTransactWritePolicy', {
       statements: [new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
@@ -1213,6 +1266,7 @@ export class CdkStack extends cdk.Stack {
     apiFunction.role.attachInlinePolicy(apiAutomationDataPolicy);
     apiFunction.role.attachInlinePolicy(apiWorkItemConfigurationDataPolicy);
     apiFunction.role.attachInlinePolicy(apiPlanningDataPolicy);
+    apiFunction.role.attachInlinePolicy(apiRequestIntakeDataPolicy);
     apiFunction.role.attachInlinePolicy(apiTransactWritePolicy);
     apiFunction.role.attachInlinePolicy(new iam.Policy(this, 'ApiAutomationWebhookSecretPolicy', {
       statements: [new iam.PolicyStatement({
@@ -1782,6 +1836,82 @@ export class CdkStack extends cdk.Stack {
       targets: [new eventsTargets.LambdaFunction(notificationScheduleFunction)],
     });
 
+    const requestEmailIngestionDlq = new sqs.Queue(this, 'RequestEmailIngestionDlq', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      retentionPeriod: cdk.Duration.days(14),
+    });
+    const requestEmailIngestionFunction = new lambdaNodejs.NodejsFunction(
+      this,
+      'RequestEmailIngestionFunction',
+      {
+        entry: path.join(__dirname, '../../server/src/request-intake-email-handler.ts'),
+        handler: 'handler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+        projectRoot: path.join(__dirname, '../..'),
+        timeout: cdk.Duration.seconds(30),
+        memorySize: 512,
+        description: 'Validates signed email envelopes and appends them to request intake threads.',
+        onFailure: new lambdaDestinations.SqsDestination(requestEmailIngestionDlq),
+        retryAttempts: 2,
+        bundling: {
+          bundleAwsSDK: true,
+          minify: true,
+          sourceMap: true,
+          target: 'node22',
+        },
+        environment: {
+          REQUEST_EMAIL_WEBHOOK_SECRET: requestEmailWebhookSecret.valueAsString,
+          REQUEST_INTAKE_TABLE_NAME: requestIntakeTable.tableName,
+          REQUEST_TOKEN_HASH_SECRET: requestTokenHashSecret.valueAsString,
+        },
+      },
+    );
+    requestEmailIngestionFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem'],
+        resources: [requestIntakeTable.tableArn],
+      }),
+    );
+    requestEmailIngestionFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['dynamodb:PutItem'],
+        resources: [requestIntakeTable.tableArn],
+        conditions: {
+          'ForAnyValue:StringEquals': {
+            'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+          },
+        },
+      }),
+    );
+
+    new cloudwatch.Alarm(this, 'RequestEmailIngestionDlqAlarm', {
+      alarmDescription: 'Detects request intake email envelopes that exhausted asynchronous retries.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: requestEmailIngestionDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    new cloudwatch.Alarm(this, 'RequestEmailIngestionDestinationFailureAlarm', {
+      alarmDescription: 'Detects failures while Lambda delivers request intake email failures to the DLQ.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: requestEmailIngestionFunction.metric('DestinationDeliveryFailures', {
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
     const cognitoPolicy = customResources.AwsCustomResourcePolicy.fromStatements([
       new iam.PolicyStatement({
         actions: [
@@ -2035,6 +2165,9 @@ export class CdkStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'PlanningTableName', {
       value: planningTable.tableName,
     });
+    new cdk.CfnOutput(this, 'RequestIntakeTableName', {
+      value: requestIntakeTable.tableName,
+    });
     new cdk.CfnOutput(this, 'TeamIssueEventsTableName', {
       value: teamIssueEventsTable.tableName,
     });
@@ -2081,6 +2214,12 @@ export class CdkStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'NotificationScheduleDlqUrl', {
       value: notificationScheduleDlq.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'RequestEmailIngestionFunctionName', {
+      value: requestEmailIngestionFunction.functionName,
+    });
+    new cdk.CfnOutput(this, 'RequestEmailIngestionDlqUrl', {
+      value: requestEmailIngestionDlq.queueUrl,
     });
     new cdk.CfnOutput(this, 'ProjectTasksApiUrl', {
       value: functionUrl.url,

@@ -7,6 +7,7 @@ export const workspaceNavPaths: Record<SidebarNavId, string> = {
   home: '/home',
   'my-tasks': '/my-tasks',
   inbox: '/inbox',
+  requests: '/requests',
   dashboard: '/dashboard',
   planning: '/planning/timeline',
   reports: '/reports',
@@ -53,6 +54,44 @@ export function createPlanningPath(viewId: PlanningViewId, entityId?: string) {
   return entityId
     ? `${path}?entityId=${encodeURIComponent(entityId)}`
     : path
+}
+
+/**
+ * Requests workbench で表示できる tab です。
+ */
+export type RequestsView = 'queue' | 'forms'
+
+/**
+ * Requests workbench の URL を生成します。
+ *
+ * @param view - 表示する queue または forms tab です。
+ * @param selectedId - Queue では submission ID、forms では form ID です。
+ * @returns URL state を query に保持した application path です。
+ */
+export function createRequestsPath(view: RequestsView = 'queue', selectedId?: string) {
+  const searchParams = new URLSearchParams()
+
+  if (view !== 'queue') {
+    searchParams.set('view', view)
+  }
+
+  if (selectedId) {
+    searchParams.set(view === 'forms' ? 'formId' : 'submissionId', selectedId)
+  }
+
+  const query = searchParams.toString()
+
+  return `/requests${query ? `?${query}` : ''}`
+}
+
+/**
+ * Opaque link token から公開 request form の URL を生成します。
+ *
+ * @param linkToken - Request link 発行 API が返す opaque token です。
+ * @returns URL encoded token を含む公開 path です。
+ */
+export function createPublicRequestPath(linkToken: string) {
+  return `/request/${encodeURIComponent(linkToken)}`
 }
 
 /**

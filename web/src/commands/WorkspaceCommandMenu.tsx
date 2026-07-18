@@ -193,6 +193,7 @@ export function WorkspaceCommandMenu({
     { id: 'nav-home', label: t('sidebar.nav.home'), path: '/home' },
     { id: 'nav-my-tasks', label: t('sidebar.nav.myTasks'), path: '/my-tasks' },
     { id: 'nav-inbox', label: t('sidebar.nav.inbox'), path: '/inbox' },
+    { id: 'nav-requests', label: t('sidebar.nav.requests'), path: '/requests' },
     { id: 'nav-search', label: t('search.title'), path: '/search' },
     { id: 'nav-dashboard', label: t('sidebar.nav.dashboard'), path: '/dashboard' },
     { id: 'nav-planning', label: t('sidebar.nav.planning'), path: '/planning/timeline' },
