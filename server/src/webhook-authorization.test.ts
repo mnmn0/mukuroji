@@ -51,7 +51,7 @@ test('fails closed after the creator loses project access or the Team is archive
 })
 
 test('reuses the current ACL snapshot within one Lambda batch', async () => {
-  const calls = { directoryReads: 0, memberReads: 0 }
+  const calls = { authoritativeReads: 0, directoryQueries: 0, memberReads: 0 }
   const authorizer = createAuthorizer([
     { entryType: 'team', teamId: 'team-1' },
     { entryType: 'project', teamId: 'team-1', projectId: 'project-1' },
@@ -71,14 +71,24 @@ test('reuses the current ACL snapshot within one Lambda batch', async () => {
       'workspace-1',
       { ...createSubscription(), id: 'webhook-2' },
       'team-1',
+      'project-1',
     ),
   ])).resolves.toEqual([true, true])
-  expect(calls).toEqual({ directoryReads: 1, memberReads: 1 })
+  expect(calls).toEqual({
+    authoritativeReads: 4,
+    directoryQueries: 4,
+    memberReads: 1,
+  })
 })
 
-test('does not fail closed solely because a directory contains more than 10,000 rows', async () => {
-  const calls = { directoryReads: 0, memberReads: 0 }
-  const fillerRows = Array.from({ length: 10_001 }, () => ({ entryType: 'other' }))
+test('paginates a creator ACL projection larger than 10,000 rows', async () => {
+  const calls = { authoritativeReads: 0, directoryQueries: 0, memberReads: 0 }
+  const fillerRows = Array.from({ length: 10_001 }, (_, index) => ({
+    entryType: 'project-member',
+    projectId: `inaccessible-${index}`,
+    memberKey: 'creator-1',
+    role: 'removed',
+  }))
   const authorizer = createAuthorizer([
     ...fillerRows,
     { entryType: 'team', teamId: 'team-1' },
@@ -89,7 +99,7 @@ test('does not fail closed solely because a directory contains more than 10,000 
       memberKey: 'creator-1',
       role: 'viewer',
     },
-  ], calls)
+  ], calls, 10_001)
   const batch = authorizer.createBatch()
 
   await expect(Promise.all([
@@ -101,7 +111,9 @@ test('does not fail closed solely because a directory contains more than 10,000 
       'project-1',
     ),
   ])).resolves.toEqual([true, true])
-  expect(calls).toEqual({ directoryReads: 1, memberReads: 1 })
+  expect(calls.memberReads).toBe(1)
+  expect(calls.directoryQueries).toBeGreaterThanOrEqual(4)
+  expect(calls.authoritativeReads).toBe(10_005)
 })
 
 test('uses the indexed Team, Project, and member relationships without cross-Team access', async () => {
@@ -143,7 +155,12 @@ test('uses the indexed Team, Project, and member relationships without cross-Tea
 
 function createAuthorizer(
   rows: Record<string, unknown>[],
-  calls?: { directoryReads: number; memberReads: number },
+  calls?: {
+    authoritativeReads: number
+    directoryQueries: number
+    memberReads: number
+  },
+  pageSize = Number.POSITIVE_INFINITY,
 ) {
   const workspaceAccess = {
     async getActiveMember() {
@@ -160,10 +177,59 @@ function createAuthorizer(
       }
     },
   } as unknown as WorkspaceAccessClient
+  const storedRows = rows.map((row, index) => withAuthorizationProjection(row, index))
+  const storedRowsByKey = new Map(storedRows.map((row) => [
+    `${row.directoryId}\0${row.entryKey}`,
+    row,
+  ]))
   const documentClient = {
-    async send() {
-      if (calls) calls.directoryReads += 1
-      return { Items: rows }
+    async send(command: {
+      constructor: { name: string }
+      input: Record<string, unknown>
+    }) {
+      if (command.constructor.name === 'GetCommand') {
+        if (calls) calls.authoritativeReads += 1
+        const key = command.input.Key as { directoryId?: string; entryKey?: string }
+        return {
+          Item: storedRowsByKey.get(`${key.directoryId}\0${key.entryKey}`),
+        }
+      }
+      if (command.constructor.name !== 'QueryCommand') {
+        throw new Error(`Unexpected command: ${command.constructor.name}`)
+      }
+      if (calls) calls.directoryQueries += 1
+      const values = command.input.ExpressionAttributeValues as Record<string, string>
+      const matching = storedRows.filter((row) =>
+        row.webhookAuthorizationKey === values[':authorizationKey'] &&
+        (
+          values[':authorizationSortKey'] === undefined ||
+          row.webhookAuthorizationSortKey === values[':authorizationSortKey']
+        )
+      )
+      const startKey = command.input.ExclusiveStartKey as { entryKey?: string } | undefined
+      const startIndex = startKey?.entryKey
+        ? matching.findIndex((row) => row.entryKey === startKey.entryKey) + 1
+        : 0
+      const page = matching.slice(startIndex, startIndex + pageSize)
+      const hasNextPage = startIndex + page.length < matching.length
+      return {
+        Items: page.map((row) => ({
+          directoryId: row.directoryId,
+          entryKey: row.entryKey,
+        })),
+        ...(hasNextPage && page.at(-1)
+          ? {
+              LastEvaluatedKey: {
+                directoryId: page.at(-1)!.directoryId,
+                entryKey: page.at(-1)!.entryKey,
+                webhookAuthorizationKey:
+                  page.at(-1)!.webhookAuthorizationKey,
+                webhookAuthorizationSortKey:
+                  page.at(-1)!.webhookAuthorizationSortKey,
+              },
+            }
+          : {}),
+      }
     },
   } as unknown as DynamoDBDocumentClient
   return new DynamoDbWebhookSubscriptionAuthorizer(
@@ -171,6 +237,44 @@ function createAuthorizer(
     documentClient,
     'project-directory-test',
   )
+}
+
+function withAuthorizationProjection(row: Record<string, unknown>, index: number) {
+  const directoryId = 'workspace-1'
+  const entryType = row.entryType
+  if (entryType === 'team' && typeof row.teamId === 'string') {
+    return {
+      directoryId,
+      entryKey: `TEAM#${index}`,
+      webhookAuthorizationKey: `WEBHOOK_ACL#RESOURCE#${directoryId}`,
+      webhookAuthorizationSortKey: `TEAM#${row.teamId}`,
+      ...row,
+    }
+  }
+  if (entryType === 'project' && typeof row.projectId === 'string') {
+    return {
+      directoryId,
+      entryKey: `PROJECT#${index}`,
+      webhookAuthorizationKey: `WEBHOOK_ACL#RESOURCE#${directoryId}`,
+      webhookAuthorizationSortKey: `PROJECT#${row.projectId}`,
+      ...row,
+    }
+  }
+  if (
+    entryType === 'project-member' &&
+    typeof row.projectId === 'string' &&
+    typeof row.memberKey === 'string'
+  ) {
+    return {
+      directoryId,
+      entryKey: `PROJECT_MEMBER#${index}`,
+      webhookAuthorizationKey:
+        `WEBHOOK_ACL#MEMBER#${directoryId}#${row.memberKey}`,
+      webhookAuthorizationSortKey: `PROJECT#${row.projectId}`,
+      ...row,
+    }
+  }
+  return { directoryId, entryKey: `OTHER#${index}`, ...row }
 }
 
 function createSubscription() {

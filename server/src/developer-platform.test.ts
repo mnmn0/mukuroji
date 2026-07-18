@@ -8,11 +8,14 @@ import type { ApiProblem, WebhookEventEnvelope } from '@mukuroji/contracts'
 import {
   DeveloperPlatformError,
   DynamoDbDeveloperPlatformClient,
+  EXTERNAL_LINK_INSTALLATION_LIMIT,
+  EXTERNAL_LINK_WORK_ITEM_LIMIT,
   IDEMPOTENCY_MAX_RESPONSE_BYTES,
   InMemoryDeveloperPlatformClient,
   KmsEnvelopeSecretProtector,
   LocalAesGcmSecretProtector,
   WEBHOOK_DELIVERY_RETENTION_SECONDS,
+  WEBHOOK_SUBSCRIPTION_LIMIT,
   createWebhookSignature,
 } from './developer-platform'
 
@@ -35,6 +38,14 @@ function createClient() {
     clock.now,
   )
   return { client, clock }
+}
+
+/** Lookup GSI の伝播遅延を再現する memory client です。 */
+class LaggingLookupDeveloperPlatformClient extends InMemoryDeveloperPlatformClient {
+  /** GSI propagation lag を再現し、authoritative rows だけを保持します。 */
+  protected override async queryLookupIndex() {
+    return { locators: [] }
+  }
 }
 
 function createProblem(detail: string): ApiProblem {
@@ -192,8 +203,15 @@ function createMemoryDocumentClient() {
             ConditionExpression?: string
             ExpressionAttributeValues?: Record<string, unknown>
           }
+          Update?: {
+            TableName?: string
+            Key: { workspaceId: string; recordKey: string }
+            UpdateExpression: string
+            ConditionExpression?: string
+            ExpressionAttributeValues?: Record<string, unknown>
+          }
         }>
-        if (transactItems.some(({ ConditionCheck, Delete, Put }) => {
+        if (transactItems.some(({ ConditionCheck, Delete, Put, Update }) => {
           if (ConditionCheck) {
             const current = items.get(
               `${ConditionCheck.Key.workspaceId}\0${ConditionCheck.Key.recordKey}`,
@@ -217,8 +235,11 @@ function createMemoryDocumentClient() {
             const expectedTarget =
               Delete.ExpressionAttributeValues?.[':targetRecordKey']
             if (expectedTarget !== undefined) {
+              const expectedEntryType =
+                Delete.ExpressionAttributeValues?.[':claimEntryType'] ??
+                Delete.ExpressionAttributeValues?.[':indexEntryType']
               return current?.entryType !==
-                  Delete.ExpressionAttributeValues?.[':claimEntryType'] ||
+                  expectedEntryType ||
                 currentValue?.targetRecordKey !== expectedTarget
             }
             const expectedAuthVersion =
@@ -252,6 +273,48 @@ function createMemoryDocumentClient() {
             }
             return false
           }
+          if (Update) {
+            if (Update.TableName !== 'DeveloperPlatformTable') return false
+            const current = items.get(
+              `${Update.Key.workspaceId}\0${Update.Key.recordKey}`,
+            )
+            const currentValue = current?.value as Record<string, unknown> | undefined
+            const values = Update.ExpressionAttributeValues ?? {}
+            if (values[':entryType'] === 'work-item-link-fence') {
+              if (!current) return false
+              return current.entryType !== 'work-item-link-fence' ||
+                currentValue?.teamId !== values[':teamId'] ||
+                currentValue?.workItemId !== values[':workItemId'] ||
+                currentValue?.deletedAt !== undefined ||
+                (values[':limit'] !== undefined &&
+                  Number(current.activeLinkCount ?? 0) >= Number(values[':limit'])) ||
+                (Update.UpdateExpression.includes('activeLinkCount -') &&
+                  Number(current.activeLinkCount ?? 0) < 1)
+            }
+            if (values[':entryType'] === 'webhook-subscription-quota') {
+              return current !== undefined &&
+                (
+                  current.entryType !== 'webhook-subscription-quota' ||
+                  currentValue?.limit !== values[':limit'] ||
+                  Number(current.subscriptionCount ?? 0) >= Number(values[':limit'])
+                )
+            }
+            if (values[':entryType'] === 'webhook-subscription') {
+              return current?.entryType !== 'webhook-subscription'
+            }
+            if (values[':entryType'] === 'connector-installation') {
+              if (current?.entryType !== 'connector-installation') return true
+              if (
+                values[':connected'] !== undefined &&
+                currentValue?.status !== values[':connected']
+              ) return true
+              const count = Number(current.externalLinkCount ?? 0)
+              return values[':limit'] !== undefined
+                ? count >= Number(values[':limit'])
+                : count < Number(values[':one'])
+            }
+            return true
+          }
           if (!Put) return false
           const current = items.get(
             `${String(Put.Item.workspaceId)}\0${String(Put.Item.recordKey)}`,
@@ -275,6 +338,9 @@ function createMemoryDocumentClient() {
               Put.ExpressionAttributeValues?.[':expectedLinkVersion']
           }
           if (Put.ConditionExpression?.startsWith('#version =')) {
+            if (Put.ExpressionAttributeValues?.[':reservationDigest'] === undefined) {
+              return current?.version !== Put.ExpressionAttributeValues?.[':expectedVersion']
+            }
             const value = current?.value as Record<string, unknown> | undefined
             return current?.version !== Put.ExpressionAttributeValues?.[':expectedVersion'] ||
               current?.entryType !== 'idempotency' ||
@@ -293,7 +359,7 @@ function createMemoryDocumentClient() {
           error.CancellationReasons = [{ Code: 'ConditionalCheckFailed' }]
           throw error
         }
-        for (const { Delete, Put } of transactItems) {
+        for (const { Delete, Put, Update } of transactItems) {
           if (
             Delete &&
             typeof Delete.Key.workspaceId === 'string' &&
@@ -301,11 +367,67 @@ function createMemoryDocumentClient() {
           ) {
             items.delete(`${Delete.Key.workspaceId}\0${Delete.Key.recordKey}`)
           }
-          if (!Put) continue
-          items.set(
-            `${String(Put.Item.workspaceId)}\0${String(Put.Item.recordKey)}`,
-            structuredClone(Put.Item),
-          )
+          if (Put) {
+            items.set(
+              `${String(Put.Item.workspaceId)}\0${String(Put.Item.recordKey)}`,
+              structuredClone(Put.Item),
+            )
+          }
+          if (!Update) continue
+          const mapKey = `${Update.Key.workspaceId}\0${Update.Key.recordKey}`
+          const current = items.get(mapKey)
+          const values = Update.ExpressionAttributeValues ?? {}
+          if (values[':entryType'] === 'work-item-link-fence') {
+            const delta = Update.UpdateExpression.includes('activeLinkCount -') ? -1 : 1
+            items.set(mapKey, {
+              ...(current ?? {
+                workspaceId: Update.Key.workspaceId,
+                recordKey: Update.Key.recordKey,
+                entryType: values[':entryType'],
+                value: structuredClone(values[':value']),
+                version: 0,
+              }),
+              activeLinkCount: Number(current?.activeLinkCount ?? 0) + delta,
+              version: Number(current?.version ?? 0) + 1,
+            })
+          } else if (values[':entryType'] === 'webhook-subscription-quota') {
+            items.set(mapKey, {
+              ...(current ?? {
+                workspaceId: Update.Key.workspaceId,
+                recordKey: Update.Key.recordKey,
+                entryType: values[':entryType'],
+                value: structuredClone(values[':value']),
+                version: 0,
+              }),
+              subscriptionCount: Number(current?.subscriptionCount ?? 0) + 1,
+              version: Number(current?.version ?? 0) + 1,
+            })
+          } else if (values[':entryType'] === 'webhook-subscription') {
+            const currentValue = current?.value as Record<string, unknown>
+            items.set(mapKey, {
+              ...current,
+              value: {
+                ...currentValue,
+                lastDeliveryAt: values[':attemptedAt'],
+                updatedAt: values[':attemptedAt'],
+                failureCount: Update.UpdateExpression.includes(
+                  '#value.#failureCount = :zero',
+                )
+                  ? 0
+                  : Number(currentValue.failureCount ?? 0) + 1,
+              },
+              version: Number(current?.version ?? 0) + 1,
+            })
+          } else if (values[':entryType'] === 'connector-installation') {
+            const delta = Update.UpdateExpression.includes('externalLinkCount -')
+              ? -1
+              : 1
+            items.set(mapKey, {
+              ...current,
+              externalLinkCount: Number(current?.externalLinkCount ?? 0) + delta,
+              version: Number(current?.version ?? 0) + 1,
+            })
+          }
         }
         return {}
       }
@@ -1024,15 +1146,30 @@ describe('DynamoDB developer platform persistence', () => {
         ExpressionAttributeValues?: Record<string, unknown>
       }
     }> | undefined
-    expect(linkWrites).toHaveLength(5)
+    expect(linkWrites).toHaveLength(7)
+    expect(linkWrites?.[0]?.Update).toMatchObject({
+      TableName: 'DeveloperPlatformTable',
+      ExpressionAttributeValues: {
+        ':entryType': 'connector-installation',
+        ':limit': EXTERNAL_LINK_INSTALLATION_LIMIT,
+        ':one': 1,
+      },
+    })
     expect(linkWrites?.[1]?.Update).toMatchObject({
       TableName: 'DeveloperPlatformTable',
       ExpressionAttributeValues: {
         ':entryType': 'work-item-link-fence',
+        ':limit': EXTERNAL_LINK_WORK_ITEM_LIMIT,
         ':one': 1,
       },
     })
-    expect(linkWrites?.[4]?.Put).toMatchObject({
+    expect(linkWrites?.[4]?.Put?.Item).toMatchObject({
+      entryType: 'external-link-index',
+    })
+    expect(linkWrites?.[5]?.Put?.Item).toMatchObject({
+      entryType: 'external-link-index',
+    })
+    expect(linkWrites?.[6]?.Put).toMatchObject({
       TableName: 'AuditEventsTable',
       Item: {
         eventType: 'external-link.created',
@@ -1182,7 +1319,7 @@ describe('DynamoDB developer platform persistence', () => {
         ExpressionAttributeValues?: Record<string, unknown>
       }
     }> | undefined
-    expect(deleteWrites).toHaveLength(6)
+    expect(deleteWrites).toHaveLength(9)
     expect(deleteWrites?.[0]?.Delete).toMatchObject({
       TableName: 'DeveloperPlatformTable',
       Key: {
@@ -1199,7 +1336,30 @@ describe('DynamoDB developer platform persistence', () => {
         ':one': 1,
       },
     })
-    expect(deleteWrites?.[2]?.Delete).toMatchObject({
+    expect(deleteWrites?.[2]?.Update).toMatchObject({
+      TableName: 'DeveloperPlatformTable',
+      ExpressionAttributeValues: {
+        ':entryType': 'connector-installation',
+        ':one': 1,
+      },
+    })
+    expect(deleteWrites?.[3]?.Delete).toMatchObject({
+      TableName: 'DeveloperPlatformTable',
+      Key: {
+        workspaceId: 'workspace-events',
+        recordKey: `EXTERNALLINKINDEX#WORKITEM#${link.id}`,
+      },
+    })
+    expect(deleteWrites?.[4]?.Delete).toMatchObject({
+      TableName: 'DeveloperPlatformTable',
+      Key: {
+        workspaceId: 'workspace-events',
+        recordKey: expect.stringMatching(
+          new RegExp(`^EXTERNALLINKINDEX#INSTALLATION#[a-f0-9]{64}#${link.id}$`),
+        ),
+      },
+    })
+    expect(deleteWrites?.[5]?.Delete).toMatchObject({
       TableName: 'DeveloperPlatformTable',
       Key: {
         workspaceId: 'workspace-events',
@@ -1209,14 +1369,14 @@ describe('DynamoDB developer platform persistence', () => {
         '#version = :expectedVersion AND #entryType = :linkEntryType AND ' +
         '#value.#syncStatus <> :conflict',
     })
-    expect(deleteWrites?.[3]?.Delete).toMatchObject({
+    expect(deleteWrites?.[6]?.Delete).toMatchObject({
       TableName: 'DeveloperPlatformTable',
       Key: {
         workspaceId: 'workspace-events',
         recordKey: `CONNECTORSYNC#${link.id}`,
       },
     })
-    expect(deleteWrites?.[4]?.Put).toMatchObject({
+    expect(deleteWrites?.[7]?.Put).toMatchObject({
       TableName: 'DeveloperPlatformTable',
       Item: {
         entryType: 'idempotency',
@@ -1226,7 +1386,7 @@ describe('DynamoDB developer platform persistence', () => {
         },
       },
     })
-    expect(deleteWrites?.[5]?.Put).toMatchObject({
+    expect(deleteWrites?.[8]?.Put).toMatchObject({
       TableName: 'AuditEventsTable',
       Item: {
         eventType: 'external-link.updated',
@@ -1310,9 +1470,128 @@ describe('DynamoDB developer platform persistence', () => {
       ({ name }) => name === 'TransactWriteCommand',
     )).toHaveLength(transactionCount)
   })
+
+  test('uses materialized filters and point reads instead of scanning all external links', async () => {
+    const memory = createMemoryDocumentClient()
+    const client = new DynamoDbDeveloperPlatformClient(
+      'DeveloperPlatformTable',
+      memory.documentClient,
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(6)),
+      () => START,
+      'LookupKeyIndex',
+    )
+    const installation = await client.installConnector({
+      workspaceId: 'workspace-indexed-links',
+      installedByUserId: 'user-indexed-links',
+      input: {
+        category: 'source-control',
+        provider: 'github',
+        name: 'Indexed GitHub',
+        scopes: ['issues:read'],
+        credential: 'indexed-connector-secret',
+      },
+    })
+    const link = await client.createExternalWorkItemLink({
+      workspaceId: 'workspace-indexed-links',
+      input: {
+        teamId: 'team-indexed-links',
+        workItemId: 'work-item-indexed-links',
+        installationId: installation.id,
+        resourceType: 'issue',
+        externalId: 'issue-indexed-links',
+        externalUrl: 'https://github.com/mnmn0/mukuroji/issues/29',
+        syncDirection: 'bidirectional',
+      },
+    })
+
+    memory.commands.splice(0)
+    await expect(client.listExternalWorkItemLinks({
+      workspaceId: 'workspace-indexed-links',
+      teamId: 'team-indexed-links',
+      workItemId: 'work-item-indexed-links',
+    })).resolves.toEqual([expect.objectContaining({ id: link.id })])
+    const filterQueries = memory.commands.filter(({ name }) => name === 'QueryCommand')
+    expect(filterQueries).toHaveLength(1)
+    expect(filterQueries[0]?.input).toMatchObject({
+      IndexName: 'LookupKeyIndex',
+      KeyConditionExpression: 'lookupKey = :lookupKey',
+    })
+
+    memory.commands.splice(0)
+    await expect(client.listExternalWorkItemLinks({
+      workspaceId: 'workspace-indexed-links',
+      linkId: link.id,
+    })).resolves.toEqual([expect.objectContaining({ id: link.id })])
+    expect(memory.commands.map(({ name }) => name)).toEqual(['GetCommand'])
+
+    const resourceTypes = ['merge-request', 'commit', 'deploy'] as const
+    const extraLinks = await Promise.all(resourceTypes.map((resourceType) =>
+      client.createExternalWorkItemLink({
+        workspaceId: 'workspace-indexed-links',
+        input: {
+          teamId: 'team-indexed-links',
+          workItemId: `work-item-indexed-links-${resourceType}`,
+          installationId: installation.id,
+          resourceType,
+          externalId: `${resourceType}-indexed-links`,
+          externalUrl: `https://github.com/mnmn0/mukuroji/${resourceType}/indexed`,
+          syncDirection: 'bidirectional',
+        },
+      })
+    ))
+    memory.commands.splice(0)
+    const installationLinks = await client.listExternalWorkItemLinks({
+      workspaceId: 'workspace-indexed-links',
+      installationId: installation.id,
+    })
+    expect(installationLinks.map(({ id }) => id).sort()).toEqual(
+      [link, ...extraLinks].map(({ id }) => id).sort(),
+    )
+    expect(memory.commands.filter(({ name }) => name === 'QueryCommand'))
+      .toHaveLength(4)
+  })
 })
 
 describe('webhook subscription and delivery', () => {
+  test('atomically enforces the Workspace subscription quota', async () => {
+    const { client } = createClient()
+    const storage = client as unknown as {
+      records: Map<string, Record<string, unknown>>
+    }
+    storage.records.set('workspace-quota\0WEBHOOKSUBSCRIPTIONQUOTA', {
+      workspaceId: 'workspace-quota',
+      recordKey: 'WEBHOOKSUBSCRIPTIONQUOTA',
+      entryType: 'webhook-subscription-quota',
+      value: { limit: WEBHOOK_SUBSCRIPTION_LIMIT },
+      subscriptionCount: WEBHOOK_SUBSCRIPTION_LIMIT - 1,
+      version: WEBHOOK_SUBSCRIPTION_LIMIT - 1,
+    })
+    const create = (name: string) => client.createWebhookSubscription({
+      workspaceId: 'workspace-quota',
+      createdByUserId: 'user-quota',
+      input: {
+        name,
+        url: 'https://hooks.example.test/quota',
+        eventTypes: ['work-item.updated'],
+        teamIds: ['team-quota'],
+        scopes: ['work-items:read'],
+      },
+    })
+
+    const results = await Promise.allSettled([create('Quota A'), create('Quota B')])
+
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    expect(results.filter((result) => result.status === 'rejected')).toEqual([
+      expect.objectContaining({
+        reason: expect.objectContaining({
+          status: 409,
+          code: 'WebhookSubscriptionLimitExceeded',
+        }),
+      }),
+    ])
+    expect(await client.listWebhookSubscriptions('workspace-quota')).toHaveLength(1)
+  })
+
   test('requires payload scopes for every selected event category', async () => {
     const { client } = createClient()
     await expect(client.createWebhookSubscription({
@@ -1938,6 +2217,60 @@ describe('webhook subscription and delivery', () => {
       workspaceId: 'workspace-replay-operation',
     })).deliveries).toHaveLength(3)
   })
+
+  test('records different delivery attempts concurrently without subscription CAS loss', async () => {
+    const { client } = createClient()
+    const workspaceId = 'workspace-concurrent-deliveries'
+    const created = await client.createWebhookSubscription({
+      workspaceId,
+      createdByUserId: 'user-concurrent-deliveries',
+      input: {
+        name: 'Concurrent deliveries',
+        url: 'https://hooks.example.test/concurrent-deliveries',
+        teamIds: ['team-1'],
+        eventTypes: ['work-item.updated'],
+        scopes: ['work-items:read'],
+      },
+    })
+    const first = (await client.enqueueWebhookEvent({
+      workspaceId,
+      authorizedSubscriptionIds: [created.subscription.id],
+      event: createWebhookEvent('event-concurrent-delivery-1', workspaceId),
+    }))[0]!
+    const second = (await client.enqueueWebhookEvent({
+      workspaceId,
+      authorizedSubscriptionIds: [created.subscription.id],
+      event: createWebhookEvent('event-concurrent-delivery-2', workspaceId),
+    }))[0]!
+
+    const [failed, delivered] = await Promise.all([
+      client.recordWebhookDeliveryAttempt({
+        workspaceId,
+        deliveryId: first.id,
+        status: 'failed',
+        responseStatus: 500,
+      }),
+      client.recordWebhookDeliveryAttempt({
+        workspaceId,
+        deliveryId: second.id,
+        status: 'delivered',
+        responseStatus: 204,
+      }),
+    ])
+
+    expect(failed).toMatchObject({ id: first.id, status: 'failed', attempts: 1 })
+    expect(delivered).toMatchObject({
+      id: second.id,
+      status: 'delivered',
+      attempts: 1,
+    })
+    expect(readStoredRows(client).find((record) =>
+      record.recordKey === `WEBHOOK#${created.subscription.id}`
+    )).toMatchObject({
+      version: 3,
+      value: { failureCount: 0, lastDeliveryAt: START.toISOString() },
+    })
+  })
 })
 
 describe('connectors, links, and imports', () => {
@@ -2057,37 +2390,44 @@ describe('connectors, links, and imports', () => {
         credential: 'credential-before-refresh',
       },
     })
-    const results = await Promise.allSettled([
-      client.recoverConnector({
-        workspaceId: 'workspace-credential-cas',
-        installationId: installation.id,
-        credential: 'credential-refresh-a',
-        expectedCredential: 'credential-before-refresh',
-        reason: 'refresh',
-      }),
-      client.recoverConnector({
-        workspaceId: 'workspace-credential-cas',
-        installationId: installation.id,
-        credential: 'credential-refresh-b',
-        expectedCredential: 'credential-before-refresh',
-        reason: 'refresh',
-      }),
-    ])
-    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
-    const rejected = results.find((result) => result.status === 'rejected')
-    expect(rejected).toMatchObject({
-      status: 'rejected',
-      reason: {
-        status: 409,
-        code: 'ConnectorCredentialChanged',
-      },
+    const firstClaimId = 'credential-refresh-claim-a'
+    const secondClaimId = 'credential-refresh-claim-b'
+    await expect(client.claimConnectorCredentialRefresh({
+      workspaceId: 'workspace-credential-cas',
+      installationId: installation.id,
+      expectedCredential: 'credential-before-refresh',
+      claimId: firstClaimId,
+    })).resolves.toBe('claimed')
+    await expect(client.claimConnectorCredentialRefresh({
+      workspaceId: 'workspace-credential-cas',
+      installationId: installation.id,
+      expectedCredential: 'credential-before-refresh',
+      claimId: secondClaimId,
+    })).resolves.toBe('busy')
+    await expect(client.recoverConnector({
+      workspaceId: 'workspace-credential-cas',
+      installationId: installation.id,
+      credential: 'credential-refresh-a',
+      expectedCredential: 'credential-before-refresh',
+      refreshClaimId: firstClaimId,
+      reason: 'refresh',
+    })).resolves.toMatchObject({ status: 'connected' })
+    await expect(client.recoverConnector({
+      workspaceId: 'workspace-credential-cas',
+      installationId: installation.id,
+      credential: 'credential-refresh-b',
+      expectedCredential: 'credential-before-refresh',
+      refreshClaimId: secondClaimId,
+      reason: 'refresh',
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'ConnectorCredentialChanged',
     })
     const storedCredential = await client.readConnectorCredential({
       workspaceId: 'workspace-credential-cas',
       installationId: installation.id,
     })
-    expect(['credential-refresh-a', 'credential-refresh-b'])
-      .toContain(storedCredential)
+    expect(storedCredential).toBe('credential-refresh-a')
     const row = readStoredRows(client).find(
       (candidate) => candidate.recordKey === `CONNECTOR#${installation.id}`,
     )
@@ -2096,9 +2436,53 @@ describe('connectors, links, and imports', () => {
       connectorOAuthStateRevision: 0,
     })
     expect(row?.connectorCredentialDigest).toMatch(/^[a-f0-9]{64}$/)
+    expect(row).not.toHaveProperty('connectorCredentialRefreshClaimDigest')
+    expect(row).not.toHaveProperty('connectorCredentialRefreshClaimedAt')
     expect(JSON.stringify(row)).not.toContain('credential-before-refresh')
     expect(JSON.stringify(row)).not.toContain('credential-refresh-a')
     expect(JSON.stringify(row)).not.toContain('credential-refresh-b')
+  })
+
+  test('reclaims expired refresh leases and releases only the current owner', async () => {
+    let now = START
+    const client = new InMemoryDeveloperPlatformClient(
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(17)),
+      () => now,
+    )
+    const installation = await client.installConnector({
+      workspaceId: 'workspace-refresh-lease',
+      installedByUserId: 'user-refresh-lease',
+      input: {
+        category: 'source-control',
+        provider: 'github',
+        name: 'Refresh Lease GitHub',
+        scopes: ['repo'],
+        credential: 'credential-refresh-lease',
+      },
+    })
+    const request = {
+      workspaceId: 'workspace-refresh-lease',
+      installationId: installation.id,
+      expectedCredential: 'credential-refresh-lease',
+      claimId: 'refresh-lease-operation',
+    }
+    await expect(client.claimConnectorCredentialRefresh(request))
+      .resolves.toBe('claimed')
+    await expect(client.claimConnectorCredentialRefresh(request))
+      .resolves.toBe('same-operation')
+    await expect(client.releaseConnectorCredentialRefresh({
+      workspaceId: request.workspaceId,
+      installationId: request.installationId,
+      claimId: 'another-refresh-operation',
+    })).resolves.toBe(false)
+    now = new Date(START.getTime() + 61_000)
+    await expect(client.claimConnectorCredentialRefresh(request))
+      .resolves.toBe('claimed')
+    await expect(client.releaseConnectorCredentialRefresh({
+      workspaceId: request.workspaceId,
+      installationId: request.installationId,
+      claimId: request.claimId,
+    })).resolves.toBe(true)
   })
 
   test('retries refreshed credential storage after a status-only concurrent mutation', async () => {
@@ -2133,12 +2517,20 @@ describe('connectors, links, and imports', () => {
       },
     })
     installationId = installation.id
+    const refreshClaimId = 'credential-refresh-status-race-claim'
+    await client.claimConnectorCredentialRefresh({
+      workspaceId: 'workspace-refresh-status-race',
+      installationId: installation.id,
+      expectedCredential: 'credential-before-status-race',
+      claimId: refreshClaimId,
+    })
 
     await expect(client.recoverConnector({
       workspaceId: 'workspace-refresh-status-race',
       installationId: installation.id,
       credential: 'credential-after-status-race',
       expectedCredential: 'credential-before-status-race',
+      refreshClaimId,
       reason: 'refresh',
     })).resolves.toMatchObject({ status: 'connected' })
     expect(raced).toBe(true)
@@ -2162,6 +2554,13 @@ describe('connectors, links, and imports', () => {
       },
     })
     const stateId = 'd'.repeat(32)
+    const refreshClaimId = 'credential-refresh-reauth-race-claim'
+    await client.claimConnectorCredentialRefresh({
+      workspaceId: 'workspace-refresh-reauth-race',
+      installationId: installation.id,
+      expectedCredential: 'credential-before-reauth',
+      claimId: refreshClaimId,
+    })
     await client.updateConnectorStatus({
       workspaceId: 'workspace-refresh-reauth-race',
       installationId: installation.id,
@@ -2175,6 +2574,7 @@ describe('connectors, links, and imports', () => {
       installationId: installation.id,
       credential: 'credential-from-stale-refresh',
       expectedCredential: 'credential-before-reauth',
+      refreshClaimId,
       reason: 'refresh',
     })).rejects.toMatchObject({
       status: 409,
@@ -2191,7 +2591,7 @@ describe('connectors, links, and imports', () => {
     })).resolves.toBe('credential-before-reauth')
   })
 
-  test('disconnect preserves and pauses links while retaining their global sync locator', async () => {
+  test('disconnect preserves links while removing paused links from the global poll inventory', async () => {
     const { client } = createClient()
     const installation = await client.installConnector({
       workspaceId: 'workspace-disconnect-links',
@@ -2253,9 +2653,128 @@ describe('connectors, links, and imports', () => {
     const pausedRow = readStoredRows(client).find(
       (candidate) => candidate.recordKey === `EXTERNALLINK#${link.id}`,
     )
-    expect(pausedRow).toMatchObject({
-      lookupKey: 'CONNECTOR_SYNC_LINK',
-      lookupSortKey: `workspace-disconnect-links#${link.id}`,
+    expect(pausedRow).not.toHaveProperty('lookupKey')
+    expect(pausedRow).not.toHaveProperty('lookupSortKey')
+  })
+
+  test('disconnect strongly reconciles links before a lookup GSI is visible', async () => {
+    const clock = createClock()
+    const client = new LaggingLookupDeveloperPlatformClient(
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(4)),
+      clock.now,
+    )
+    const workspaceId = 'workspace-disconnect-gsi-lag'
+    const installation = await client.installConnector({
+      workspaceId,
+      installedByUserId: 'user-disconnect-gsi-lag',
+      input: {
+        category: 'source-control',
+        provider: 'github',
+        name: 'Lagging GitHub',
+        scopes: ['repo'],
+        credential: 'disconnect-gsi-lag-credential',
+      },
+    })
+    const link = await client.createExternalWorkItemLink({
+      workspaceId,
+      input: {
+        teamId: 'team-disconnect-gsi-lag',
+        workItemId: 'work-item-disconnect-gsi-lag',
+        installationId: installation.id,
+        resourceType: 'issue',
+        externalId: 'issue-disconnect-gsi-lag',
+        externalUrl: 'https://github.com/mnmn0/mukuroji/issues/29',
+        syncDirection: 'bidirectional',
+      },
+    })
+
+    await client.updateConnectorStatus({
+      workspaceId,
+      installationId: installation.id,
+      status: 'disconnected',
+    })
+
+    expect(readStoredRows(client).find((record) =>
+      record.recordKey === `EXTERNALLINK#${link.id}`
+    )).toMatchObject({
+      value: { syncStatus: 'paused' },
+    })
+    expect(readStoredRows(client).find((record) =>
+      record.recordKey === `EXTERNALLINK#${link.id}`
+    )).not.toHaveProperty('lookupKey')
+  })
+
+  test('atomically rejects external links at installation and Work Item caps', async () => {
+    const { client } = createClient()
+    const records = (
+      client as unknown as {
+        records: Map<string, Record<string, unknown>>
+      }
+    ).records
+    const install = async (workspaceId: string) => client.installConnector({
+      workspaceId,
+      installedByUserId: 'user-link-cap',
+      input: {
+        category: 'source-control',
+        provider: 'github',
+        name: 'Capped GitHub',
+        scopes: ['repo'],
+        credential: 'link-cap-credential',
+      },
+    })
+    const cappedInstallation = await install('workspace-installation-link-cap')
+    const installationRecord = records.get(
+      `workspace-installation-link-cap\0CONNECTOR#${cappedInstallation.id}`,
+    )!
+    installationRecord.externalLinkCount = EXTERNAL_LINK_INSTALLATION_LIMIT
+    await expect(client.createExternalWorkItemLink({
+      workspaceId: 'workspace-installation-link-cap',
+      input: {
+        teamId: 'team-link-cap',
+        workItemId: 'work-item-link-cap',
+        installationId: cappedInstallation.id,
+        resourceType: 'issue',
+        externalId: 'issue-installation-link-cap',
+        externalUrl: 'https://github.com/mnmn0/mukuroji/issues/29',
+        syncDirection: 'bidirectional',
+      },
+    })).rejects.toMatchObject({
+      status: 413,
+      code: 'ExternalWorkItemLinkLimitExceeded',
+    })
+
+    const workItemInstallation = await install('workspace-work-item-link-cap')
+    const first = await client.createExternalWorkItemLink({
+      workspaceId: 'workspace-work-item-link-cap',
+      input: {
+        teamId: 'team-link-cap',
+        workItemId: 'work-item-link-cap',
+        installationId: workItemInstallation.id,
+        resourceType: 'issue',
+        externalId: 'issue-work-item-link-cap-1',
+        externalUrl: 'https://github.com/mnmn0/mukuroji/issues/29',
+        syncDirection: 'bidirectional',
+      },
+    })
+    const fence = [...records.values()].find((record) =>
+      record.workspaceId === 'workspace-work-item-link-cap' &&
+      record.entryType === 'work-item-link-fence'
+    )!
+    fence.activeLinkCount = EXTERNAL_LINK_WORK_ITEM_LIMIT
+    await expect(client.createExternalWorkItemLink({
+      workspaceId: 'workspace-work-item-link-cap',
+      input: {
+        teamId: first.teamId,
+        workItemId: first.workItemId,
+        installationId: workItemInstallation.id,
+        resourceType: 'issue',
+        externalId: 'issue-work-item-link-cap-2',
+        externalUrl: 'https://github.com/mnmn0/mukuroji/issues/30',
+        syncDirection: 'bidirectional',
+      },
+    })).rejects.toMatchObject({
+      status: 413,
+      code: 'ExternalWorkItemLinkLimitExceeded',
     })
   })
 

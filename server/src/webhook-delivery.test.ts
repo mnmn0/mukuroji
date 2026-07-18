@@ -120,14 +120,20 @@ describe('webhook delivery policy', () => {
   })
 
   test('429 と 5xx を retryable、通常の 4xx を terminal にする', async () => {
-    const retryable = await deliverWebhookRequest(
-      { deliveryId: 'd1', eventId: 'e1', url: 'https://93.184.216.34', signingSecret: 's', payload: '{}' },
-      {
-        resolveAddresses: async () => [{ address: '93.184.216.34', family: 4 }],
-        transport: async () => ({ status: 429, retryAfter: '30' }),
-      },
-    )
-    expect(retryable).toMatchObject({ retryable: true, responseStatus: 429, retryAfterSeconds: 30 })
+    for (const status of [429, 500, 503]) {
+      const retryable = await deliverWebhookRequest(
+        { deliveryId: 'd1', eventId: 'e1', url: 'https://93.184.216.34', signingSecret: 's', payload: '{}' },
+        {
+          resolveAddresses: async () => [{ address: '93.184.216.34', family: 4 }],
+          transport: async () => ({ status, retryAfter: '30' }),
+        },
+      )
+      expect(retryable).toMatchObject({
+        retryable: true,
+        responseStatus: status,
+        retryAfterSeconds: 30,
+      })
+    }
 
     for (const status of [409, 422]) {
       const terminal = await deliverWebhookRequest(

@@ -16,6 +16,11 @@ describe('combined audit projection handler', () => {
           eventName: 'INSERT',
           dynamodb: { SequenceNumber: 'sequence-1' },
         },
+        {
+          eventID: 'event-2',
+          eventName: 'INSERT',
+          dynamodb: { SequenceNumber: 'sequence-2' },
+        },
       ],
     }
     const receivedEvents: DynamoStreamEvent[] = []

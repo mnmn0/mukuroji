@@ -20,6 +20,10 @@ describe('connector runtime configuration', () => {
           CONNECTOR_OAUTH_STATE_SIGNING_SECRET: 'state-secret',
           CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON:
             '["previous-state-secret"]',
+          CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON:
+            '["previous-origin-secret"]',
+          CONNECTOR_SYNC_CURSOR_PREVIOUS_SIGNING_SECRETS_JSON:
+            '["previous-cursor-secret"]',
         })
       },
     })
@@ -29,6 +33,12 @@ describe('connector runtime configuration', () => {
     expect(
       environment.CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON,
     ).toBe('["previous-state-secret"]')
+    expect(
+      environment.CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON,
+    ).toBe('["previous-origin-secret"]')
+    expect(
+      environment.CONNECTOR_SYNC_CURSOR_PREVIOUS_SIGNING_SECRETS_JSON,
+    ).toBe('["previous-cursor-secret"]')
     expect(base.CONNECTOR_OAUTH_STATE_SIGNING_SECRET).toBeUndefined()
   })
 

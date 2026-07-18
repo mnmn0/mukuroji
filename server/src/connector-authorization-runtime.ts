@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type {
   ConnectorAuthorizationOutput,
   ConnectorInstallation,
@@ -474,22 +475,61 @@ export class ConnectorAuthorizationRuntime
       installationId,
     })
     const adapter = this.registry.get(readSupportedProvider(installation.provider))
-    const credential = await adapter.refresh(
-      deserializeConnectorCredential(serialized),
-    )
+    const claimId = randomUUID()
+    const claim = await this.platform.claimConnectorCredentialRefresh({
+      workspaceId,
+      installationId,
+      expectedCredential: serialized,
+      claimId,
+    })
+    if (claim === 'busy' || claim === 'credential-changed') {
+      const winner = await this.platform.readConnectorCredential({
+        workspaceId,
+        installationId,
+      })
+      deserializeConnectorCredential(winner)
+      if (winner === serialized && claim === 'busy') {
+        throw new ConnectorRuntimeError(
+          'ConnectorCredentialRefreshInProgress',
+          'Connector credential refresh is already in progress.',
+          { retryable: true },
+        )
+      }
+      return this.requireInstallation(workspaceId, installationId)
+    }
+    let credential: ReturnType<typeof deserializeConnectorCredential>
+    try {
+      credential = await adapter.refresh(
+        deserializeConnectorCredential(serialized),
+      )
+    } catch (error) {
+      await this.platform.releaseConnectorCredentialRefresh({
+        workspaceId,
+        installationId,
+        claimId,
+      }).catch(() => false)
+      throw error
+    }
     try {
       return await this.platform.recoverConnector({
         workspaceId,
         installationId,
         credential: serializeConnectorCredential(credential),
         expectedCredential: serialized,
+        refreshClaimId: claimId,
         reason: 'refresh',
       })
     } catch (error) {
+      await this.platform.releaseConnectorCredentialRefresh({
+        workspaceId,
+        installationId,
+        claimId,
+      }).catch(() => false)
       if (
         !(error instanceof DeveloperPlatformError) ||
         (
           error.code !== 'ConnectorCredentialChanged' &&
+          error.code !== 'ConnectorCredentialRefreshClaimLost' &&
           error.code !== 'DeveloperPlatformConcurrentMutation' &&
           error.code !== 'ConnectorReauthorizationStateRequired'
         )

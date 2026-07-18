@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   createAuditEvent,
   createMutationAuditContext,
@@ -8,8 +9,10 @@ import {
   LocalAesGcmSecretProtector,
 } from './developer-platform'
 import {
+  DynamoDbWebhookDeliveryClaimStore,
   processWebhookDeliveryBatch,
   processWebhookProjectionBatch,
+  type WebhookDeliveryClaimStore,
   type WebhookDeliveryQueue,
   type WebhookDynamoAttributeValue,
   type WebhookQueueMessage,
@@ -118,6 +121,7 @@ test('records a successful signed HTTP attempt in the delivery log', async () =>
       },
     },
     queue: createRecordingQueue([]),
+    claims: createMemoryClaimStore(),
     now: () => now,
     random: () => 0.5,
     async deliver(prepared) {
@@ -139,6 +143,120 @@ test('records a successful signed HTTP attempt in the delivery log', async () =>
   })
 })
 
+test('claims a delivery ID before HTTP and retries a concurrent duplicate', async () => {
+  const now = new Date('2026-07-18T00:00:00.000Z')
+  const fixture = await createDeliveryFixture(() => now)
+  let deliveryCalls = 0
+  const response = await processWebhookDeliveryBatch({
+    Records: [
+      createSqsRecord(fixture.deliveryId, 'message-first'),
+      createSqsRecord(fixture.deliveryId, 'message-duplicate'),
+    ],
+  }, {
+    developerPlatform: fixture.platform,
+    authorizer: { canDeliver: async () => true },
+    queue: createRecordingQueue([]),
+    claims: createMemoryClaimStore(),
+    now: () => now,
+    random: () => 0.5,
+    async deliver() {
+      deliveryCalls += 1
+      await Promise.resolve()
+      return { succeeded: true, retryable: false, responseStatus: 204 }
+    },
+  })
+
+  expect(response).toEqual({
+    batchItemFailures: [{ itemIdentifier: 'message-duplicate' }],
+  })
+  expect(deliveryCalls).toBe(1)
+})
+
+test('does not acknowledge a redelivery while a failed attempt lease is active', async () => {
+  const now = new Date('2026-07-18T00:00:00.000Z')
+  const fixture = await createDeliveryFixture(() => now)
+  const claims = createMemoryClaimStore()
+  const originalRecordAttempt =
+    fixture.platform.recordWebhookDeliveryAttempt.bind(fixture.platform)
+  let persistenceFails = true
+  fixture.platform.recordWebhookDeliveryAttempt = async (request) => {
+    if (persistenceFails) {
+      persistenceFails = false
+      throw new Error('DynamoDB transaction is temporarily unavailable.')
+    }
+    return originalRecordAttempt(request)
+  }
+  let deliveryCalls = 0
+  const dependencies = {
+    developerPlatform: fixture.platform,
+    authorizer: { canDeliver: async () => true },
+    queue: createRecordingQueue([]),
+    claims,
+    now: () => now,
+    random: () => 0.5,
+    async deliver() {
+      deliveryCalls += 1
+      return { succeeded: true, retryable: false, responseStatus: 204 }
+    },
+  }
+
+  const first = await processWebhookDeliveryBatch({
+    Records: [createSqsRecord(fixture.deliveryId, 'message-first')],
+  }, dependencies)
+  const redelivery = await processWebhookDeliveryBatch({
+    Records: [createSqsRecord(fixture.deliveryId, 'message-redelivery')],
+  }, dependencies)
+
+  expect(first).toEqual({
+    batchItemFailures: [{ itemIdentifier: 'message-first' }],
+  })
+  expect(redelivery).toEqual({
+    batchItemFailures: [{ itemIdentifier: 'message-redelivery' }],
+  })
+  expect(deliveryCalls).toBe(1)
+})
+
+test('uses an expiring conditional DynamoDB row for delivery claims', async () => {
+  const commands: Array<{ constructor: { name: string }; input: Record<string, unknown> }> = []
+  let claimed = false
+  const documentClient = {
+    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+      commands.push(command)
+      if (command.constructor.name === 'UpdateCommand') {
+        if (claimed) throw { name: 'ConditionalCheckFailedException' }
+        claimed = true
+      }
+      if (command.constructor.name === 'DeleteCommand') claimed = false
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const store = new DynamoDbWebhookDeliveryClaimStore(
+    documentClient,
+    'developer-platform-test',
+  )
+  const request = {
+    workspaceId: 'workspace-1',
+    deliveryId: 'delivery-1',
+    leaseOwner: 'worker-1',
+    now: '2026-07-18T00:00:00.000Z',
+    leaseExpiresAt: '2026-07-18T00:01:30.000Z',
+  }
+
+  await expect(store.tryClaim(request)).resolves.toBe(true)
+  await expect(store.tryClaim({ ...request, leaseOwner: 'worker-2' }))
+    .resolves.toBe(false)
+  await store.release(request)
+  await expect(store.tryClaim({ ...request, leaseOwner: 'worker-3' }))
+    .resolves.toBe(true)
+  expect(commands[0]?.input).toMatchObject({
+    ConditionExpression: expect.stringContaining('leaseExpiresAt < :now'),
+    Key: {
+      workspaceId: 'workspace-1',
+      recordKey: 'WEBHOOKDELIVERYCLAIM#delivery-1',
+    },
+  })
+})
+
 test('blocks a queued replay after the subscription creator loses access', async () => {
   const now = new Date('2026-07-18T00:00:00.000Z')
   const fixture = await createDeliveryFixture(() => now)
@@ -150,6 +268,7 @@ test('blocks a queued replay after the subscription creator loses access', async
     developerPlatform: fixture.platform,
     authorizer: { canDeliver: async () => false },
     queue: createRecordingQueue([]),
+    claims: createMemoryClaimStore(),
     now: () => now,
     random: () => 0.5,
     async deliver() {
@@ -173,6 +292,7 @@ test('persists retry schedule and avoids an early duplicate HTTP attempt', async
     developerPlatform: fixture.platform,
     authorizer: { canDeliver: async () => true },
     queue: createRecordingQueue(queued),
+    claims: createMemoryClaimStore(),
     now: () => now,
     random: () => 0.5,
     async deliver() {
@@ -237,6 +357,7 @@ test('records terminal rejection and isolates an invalid queue message', async (
     developerPlatform: fixture.platform,
     authorizer: { canDeliver: async () => true },
     queue: createRecordingQueue([]),
+    claims: createMemoryClaimStore(),
     now: () => now,
     random: () => 0.5,
     async deliver() {
@@ -325,6 +446,21 @@ function createRecordingQueue(messages: WebhookQueueMessage[]): WebhookDeliveryQ
   return {
     async enqueue(message) {
       messages.push(message)
+    },
+  }
+}
+
+function createMemoryClaimStore(): WebhookDeliveryClaimStore {
+  const claimed = new Set<string>()
+  return {
+    async tryClaim(request) {
+      const key = `${request.workspaceId}\0${request.deliveryId}`
+      if (claimed.has(key)) return false
+      claimed.add(key)
+      return true
+    },
+    async release(request) {
+      claimed.delete(`${request.workspaceId}\0${request.deliveryId}`)
     },
   }
 }

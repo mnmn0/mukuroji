@@ -560,7 +560,8 @@ async function processCurrentOutboundLink(
 ) {
   const link = (await dependencies.platform.listExternalWorkItemLinks({
     workspaceId: message.workspaceId,
-  })).find((candidate) => candidate.id === message.linkId)
+    linkId: message.linkId,
+  }))[0]
   if (!link) return
   await dependencies.engine.processOutbound({
     workspaceId: message.workspaceId,
@@ -583,6 +584,7 @@ async function pollCurrentInstallation(
     dependencies.platform.listExternalWorkItemLinks({
       workspaceId: message.workspaceId,
       installationId: message.installationId,
+      resourceType: message.resourceType,
     }),
     dependencies.checkpoints.get(key),
   ])

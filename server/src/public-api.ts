@@ -88,11 +88,20 @@ export type PublicImportSourceInput = {
 
 /** Public Work Item API と既存 canonical service の境界です。 */
 export interface PublicWorkItemService {
-  /** Credential owner の current RBAC で Work Items を filter します。 */
+  /** Credential owner の current RBAC で Work Items を bounded page 取得します。 */
   list(
     credential: AuthenticatedDeveloperCredential,
     filters: Record<string, string | number | undefined>,
-  ): Promise<CanonicalWorkItem[]>
+    continuation: string | undefined,
+    limit: number,
+  ): Promise<{
+    /** Current store page に含まれる Work Items です。 */
+    items: CanonicalWorkItem[]
+    /** Store に次 page があるかどうかです。 */
+    hasMore: boolean
+    /** 次 page の store-bound opaque continuation です。 */
+    nextContinuation?: string
+  }>
   /** Team + Work Item ID を current RBAC で取得します。 */
   get(
     credential: AuthenticatedDeveloperCredential,
@@ -159,11 +168,20 @@ export interface PublicWorkItemService {
     job: ImportJob,
     context: PublicMutationContext,
   ): Promise<ImportJob>
-  /** Permission-filtered Work Items を download payload に変換します。 */
+  /** Permission-filtered Work Items を bounded export page で返します。 */
   export(
     principal: DeveloperManagementPrincipal,
     format: 'csv' | 'json',
-  ): Promise<{ /** Media type です。 */ contentType: string; /** File name です。 */ fileName: string; /** UTF-8 body です。 */ body: string }>
+    continuation: string | undefined,
+    limit: number,
+  ): Promise<{
+    /** Export page に含まれる Work Items です。 */
+    items: CanonicalWorkItem[]
+    /** Export に次 page があるかどうかです。 */
+    hasMore: boolean
+    /** 次 page の store-bound opaque continuation です。 */
+    nextContinuation?: string
+  }>
 }
 
 /** Provider OAuth と sync-conflict recovery を実装する optional connector 境界です。 */
@@ -452,8 +470,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/v1/work-items', async (c) => {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     const filters = readWorkItemFilters(c)
-    const allItems = await dependencies.workItems.list(credential, filters)
-    return c.json(createSignedKeysetPage(
+    return c.json(await createSignedContinuationPage(
       c,
       dependencies,
       {
@@ -462,7 +479,8 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         resource: '/v1/work-items',
         filters,
       },
-      allItems,
+      (continuation, limit) =>
+        dependencies.workItems.list(credential, filters, continuation, limit),
       (item) => item.updatedAt,
     ))
   })
@@ -1469,10 +1487,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/exports', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canExport')
     const format = readExportFormat(c.req.query('format'))
-    const result = await dependencies.workItems.export(principal, format)
-    c.header('Content-Type', result.contentType)
-    c.header('Content-Disposition', `attachment; filename="${result.fileName}"`)
-    return c.body(result.body)
+    return c.json(await createSignedContinuationPage(
+      c,
+      dependencies,
+      managementCursorScope(principal, '/developer/exports', { format }),
+      (continuation, limit) =>
+        dependencies.workItems.export(principal, format, continuation, limit),
+      (item) => item.updatedAt,
+    ))
   })
 
   return router
@@ -1543,8 +1565,7 @@ async function requireExternalWorkItemLink(
   workspaceId: string,
   linkId: string,
 ) {
-  const link = (await platform.listExternalWorkItemLinks({ workspaceId }))
-    .find((candidate) => candidate.id === linkId)
+  const link = (await platform.listExternalWorkItemLinks({ workspaceId, linkId }))[0]
   if (!link) {
     throw new PublicApiServiceError(404, 'not_found', 'External Work Item link was not found.')
   }

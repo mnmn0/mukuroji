@@ -317,7 +317,7 @@ async function deliverPinnedHttpsRequest(
       signal: input.signal,
     }, (response) => {
       const retryAfter = response.headers['retry-after']
-      response.resume()
+      response.destroy()
       resolve({
         status: response.statusCode ?? 502,
         retryAfter: Array.isArray(retryAfter) ? (retryAfter[0] ?? null) : (retryAfter ?? null),

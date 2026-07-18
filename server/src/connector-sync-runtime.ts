@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type {
   CanonicalWorkItem,
   ConnectorInstallation,
@@ -194,6 +194,13 @@ export interface ConnectorSyncPersistence {
     status: ExternalWorkItemLink['syncStatus'],
     updatedAt: string,
   ): Promise<void>
+  /** Poll generation と一致する pending link だけを synced へ CAS 遷移します。 */
+  acknowledgePendingLink(
+    workspaceId: string,
+    linkId: string,
+    expectedUpdatedAt: string,
+    syncedAt: string,
+  ): Promise<boolean>
   /** Deterministic conflict ID で open conflict を冪等に保存します。 */
   createConflict(record: StoredConnectorSyncConflict): Promise<WorkItemSyncConflict>
   /** Workspace 内の conflict page を返します。 */
@@ -255,6 +262,8 @@ export type ConnectorSyncPlatform = Pick<
   | 'readConnectorCredential'
   | 'updateConnectorStatus'
   | 'recoverConnector'
+  | 'claimConnectorCredentialRefresh'
+  | 'releaseConnectorCredentialRefresh'
 >
 
 /** Authorization failure と connector health を永続化する hook です。 */
@@ -284,6 +293,8 @@ export type ProcessConnectorInboundInput = {
   link: ExternalWorkItemLink
   /** Provider webhook または polling から正規化した record です。 */
   record: ConnectorExternalRecord
+  /** Pending link を安全に acknowledge できる poll inventory generation です。 */
+  pollGeneration?: string
 }
 
 /** Outbound sync worker input です。 */
@@ -373,6 +384,8 @@ export type ConnectorSyncEngineOptions = {
   health: ConnectorSyncHealthReporter
   /** Provider が返す loop guard を認証する HMAC secret です。 */
   originSigningSecret: string
+  /** Rotation grace period 中に inbound 検証だけ許可する旧 HMAC secrets です。 */
+  previousOriginSigningSecrets?: readonly string[]
   /** Sync timestamps に使う clock です。 */
   clock?: () => Date
 }
@@ -391,6 +404,8 @@ export class ConnectorSyncEngine {
   private readonly health: ConnectorSyncHealthReporter
   /** Origin marker HMAC secret です。 */
   private readonly originSigningSecret: string
+  /** Rotation grace period 中に inbound 検証だけ許可する旧 HMAC secrets です。 */
+  private readonly previousOriginSigningSecrets: readonly string[]
   /** Sync timestamps に使う clock です。 */
   private readonly clock: () => Date
 
@@ -408,6 +423,18 @@ export class ConnectorSyncEngine {
       )
     }
     this.originSigningSecret = options.originSigningSecret
+    this.previousOriginSigningSecrets = options.previousOriginSigningSecrets ?? []
+    if (
+      this.previousOriginSigningSecrets.length > 3 ||
+      this.previousOriginSigningSecrets.some((secret) =>
+        Buffer.byteLength(secret, 'utf8') < 32
+      )
+    ) {
+      throw new ConnectorRuntimeError(
+        'ConnectorOriginSigningSecretInvalid',
+        'Previous connector origin signing secrets are invalid.',
+      )
+    }
     this.clock = options.clock ?? (() => new Date())
   }
 
@@ -462,9 +489,32 @@ export class ConnectorSyncEngine {
       originMarker: input.record.originMarker,
       actualWorkItemRevision: workItem.revision,
       originSigningSecret: this.originSigningSecret,
+      previousOriginSigningSecrets: this.previousOriginSigningSecrets,
     })
     if (decision.kind === 'duplicate' || decision.kind === 'self-origin' ||
       decision.kind === 'stale') {
+      if (
+        (decision.kind === 'duplicate' || decision.kind === 'stale') &&
+        link.syncStatus === 'pending' &&
+        input.pollGeneration === link.updatedAt &&
+        state.workItemRevision === workItem.revision
+      ) {
+        const syncedAt = this.clock().toISOString()
+        const acknowledged = await this.persistence.acknowledgePendingLink(
+          input.workspaceId,
+          link.id,
+          input.pollGeneration,
+          syncedAt,
+        )
+        if (acknowledged) {
+          await this.platform.updateConnectorStatus({
+            workspaceId: input.workspaceId,
+            installationId: link.installationId,
+            status: 'connected',
+            lastSyncAt: syncedAt,
+          })
+        }
+      }
       return { kind: 'skipped', linkId: link.id, reason: decision.kind }
     }
     // A revision conflict intentionally reaches the idempotent gateway. If a
@@ -582,6 +632,7 @@ export class ConnectorSyncEngine {
     const links = await this.platform.listExternalWorkItemLinks({
       workspaceId: input.workspaceId,
       installationId: input.installationId,
+      resourceType: input.resourceType,
     })
     const linkByExternalId = new Map(
       links
@@ -621,6 +672,9 @@ export class ConnectorSyncEngine {
           workspaceId: input.workspaceId,
           link,
           record,
+          ...(link.syncStatus === 'pending'
+            ? { pollGeneration: link.updatedAt }
+            : {}),
           eventId: createSyncOperationId(
             'poll',
             input.workspaceId,
@@ -891,8 +945,10 @@ export class ConnectorSyncEngine {
 
   /** Workspace-bound external link を取得します。 */
   private async requireLink(workspaceId: string, linkId: string) {
-    const link = (await this.platform.listExternalWorkItemLinks({ workspaceId }))
-      .find((candidate) => candidate.id === linkId)
+    const link = (await this.platform.listExternalWorkItemLinks({
+      workspaceId,
+      linkId,
+    }))[0]
     if (!link) {
       throw new ConnectorRuntimeError(
         'ExternalWorkItemLinkNotFound',
@@ -919,20 +975,57 @@ export class ConnectorSyncEngine {
       })
       const credential = deserializeConnectorCredential(serialized)
       const adapter = this.registry.get(readSupportedProvider(installation.provider))
-      const refreshed = shouldRefreshCredential(credential, this.clock())
-        ? await adapter.refresh(credential)
-        : credential
-      let operationCredential = refreshed
-      if (refreshed !== credential) {
+      let operationCredential = credential
+      if (shouldRefreshCredential(credential, this.clock())) {
+        const claimId = randomUUID()
+        const claim = await this.platform.claimConnectorCredentialRefresh({
+          workspaceId,
+          installationId: installation.id,
+          expectedCredential: serialized,
+          claimId,
+        })
+        if (claim === 'busy' || claim === 'credential-changed') {
+          const winner = await this.platform.readConnectorCredential({
+            workspaceId,
+            installationId: installation.id,
+          })
+          if (winner === serialized && claim === 'busy') {
+            throw new ConnectorRuntimeError(
+              'ConnectorCredentialRefreshInProgress',
+              'Connector credential refresh is already in progress.',
+              { retryable: true },
+            )
+          }
+          operationCredential = deserializeConnectorCredential(winner)
+          return await operation(adapter, operationCredential)
+        }
+        let refreshed: ReturnType<typeof deserializeConnectorCredential>
+        try {
+          refreshed = await adapter.refresh(credential)
+        } catch (error) {
+          await this.platform.releaseConnectorCredentialRefresh({
+            workspaceId,
+            installationId: installation.id,
+            claimId,
+          }).catch(() => false)
+          throw error
+        }
+        operationCredential = refreshed
         try {
           await this.platform.recoverConnector({
             workspaceId,
             installationId: installation.id,
             credential: serializeConnectorCredential(refreshed),
             expectedCredential: serialized,
+            refreshClaimId: claimId,
             reason: 'refresh',
           })
         } catch (error) {
+          await this.platform.releaseConnectorCredentialRefresh({
+            workspaceId,
+            installationId: installation.id,
+            claimId,
+          }).catch(() => false)
           if (!isConnectorCredentialCasConflict(error)) throw error
           try {
             operationCredential = deserializeConnectorCredential(
@@ -955,18 +1048,28 @@ export class ConnectorSyncEngine {
       return await operation(adapter, operationCredential)
     } catch (error) {
       if (error instanceof ConnectorRuntimeError) {
+        const latestSnapshot = await this.platform.readConnectorLifecycleSnapshot({
+          workspaceId,
+          installationId: installation.id,
+        }).catch(() => undefined)
+        const healthInstallation = latestSnapshot?.installation ?? installation
+        const healthLifecycleRevision =
+          latestSnapshot?.lifecycleRevision ?? lifecycleRevision
         if (error.authorizationRequired) {
           await this.health.authorizationRequired(
             workspaceId,
-            installation,
-            lifecycleRevision,
+            healthInstallation,
+            healthLifecycleRevision,
           )
-        } else if (error.retryable) {
+        } else if (
+          error.retryable &&
+          error.code !== 'ConnectorCredentialRefreshInProgress'
+        ) {
           await this.health.degraded(
             workspaceId,
-            installation,
+            healthInstallation,
             error,
-            lifecycleRevision,
+            healthLifecycleRevision,
           )
         }
       }
@@ -1082,6 +1185,17 @@ export class InMemoryConnectorSyncPersistence implements ConnectorSyncPersistenc
     status: ExternalWorkItemLink['syncStatus'],
   ) {
     this.statuses.set(syncStateKey(workspaceId, linkId), status)
+  }
+
+  /** Engine で検証済みの pending poll generation を synced へ保存します。 */
+  async acknowledgePendingLink(
+    workspaceId: string,
+    linkId: string,
+    _expectedUpdatedAt: string,
+    _syncedAt: string,
+  ) {
+    this.statuses.set(syncStateKey(workspaceId, linkId), 'synced')
+    return true
   }
 
   /** Deterministic conflict ID で record を冪等保存します。 */
@@ -1442,6 +1556,7 @@ function isConnectorCredentialCasConflict(error: unknown) {
   return error instanceof DeveloperPlatformError &&
     (
       error.code === 'ConnectorCredentialChanged' ||
+      error.code === 'ConnectorCredentialRefreshClaimLost' ||
       error.code === 'DeveloperPlatformConcurrentMutation' ||
       error.code === 'ConnectorReauthorizationStateRequired'
     )

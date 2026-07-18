@@ -13,8 +13,15 @@ function createMemoryDocumentClient() {
   const commands: Array<{ name: string; input: Record<string, unknown> }> = []
   const itemKey = (
     tableName: unknown,
-    value: { workspaceId?: unknown; recordKey?: unknown },
-  ) => `${String(tableName)}\0${String(value.workspaceId)}\0${String(value.recordKey)}`
+    value: {
+      workspaceId?: unknown
+      recordKey?: unknown
+      directoryId?: unknown
+      eventId?: unknown
+    },
+  ) => value.directoryId !== undefined || value.eventId !== undefined
+    ? `${String(tableName)}\0${String(value.directoryId)}\0${String(value.eventId)}`
+    : `${String(tableName)}\0${String(value.workspaceId)}\0${String(value.recordKey)}`
   const documentClient = {
     async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
       const name = command.constructor.name
@@ -28,19 +35,28 @@ function createMemoryDocumentClient() {
         const item = input.Item as Record<string, unknown>
         const key = itemKey(input.TableName, item)
         const current = items.get(key)
+        const condition = input.ConditionExpression
         if (
-          input.ConditionExpression ===
+          condition !== undefined &&
+          condition !==
+            'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)' &&
+          condition !== '#version = :expectedVersion' &&
+          condition !==
+            '#version = :expectedVersion AND #value.#resolutionOperationId = :operationId'
+        ) throw new Error(`Unsupported PutCommand condition: ${String(condition)}`)
+        if (
+          condition ===
             'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)' &&
           current
         ) throw conditionalFailure()
         if (
-          input.ConditionExpression === '#version = :expectedVersion' &&
+          condition === '#version = :expectedVersion' &&
           current?.version !== (
             input.ExpressionAttributeValues as Record<string, unknown>
           )[':expectedVersion']
         ) throw conditionalFailure()
         if (
-          input.ConditionExpression ===
+          condition ===
             '#version = :expectedVersion AND #value.#resolutionOperationId = :operationId'
         ) {
           const values = input.ExpressionAttributeValues as Record<string, unknown>
@@ -72,8 +88,25 @@ function createMemoryDocumentClient() {
           if (Put) {
             const current = items.get(itemKey(Put.TableName, Put.Item))
             if (
+              Put.ConditionExpression !== undefined &&
+              Put.ConditionExpression !==
+                'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)' &&
+              Put.ConditionExpression !== '#version = :expectedVersion' &&
+              Put.ConditionExpression !==
+                'attribute_not_exists(#directoryId) AND attribute_not_exists(#eventId)'
+            ) {
+              throw new Error(
+                `Unsupported transaction Put condition: ${Put.ConditionExpression}`,
+              )
+            }
+            if (
               Put.ConditionExpression ===
                 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)' &&
+              current !== undefined
+            ) return true
+            if (
+              Put.ConditionExpression ===
+                'attribute_not_exists(#directoryId) AND attribute_not_exists(#eventId)' &&
               current !== undefined
             ) return true
             if (
@@ -86,27 +119,24 @@ function createMemoryDocumentClient() {
             ConditionCheck.TableName,
             ConditionCheck.Key,
           ))
-          if (!current) return true
-          const value = current.value as Record<string, unknown> | undefined
+          if (ConditionCheck.ConditionExpression === '#version = :expectedVersion') {
+            return current?.version !==
+              ConditionCheck.ExpressionAttributeValues[':expectedVersion']
+          }
+          if (
+            ConditionCheck.ConditionExpression !==
+              '#value.#id = :installationId AND #value.#status <> :disconnected AND #value.#status <> :needsReauthorization'
+          ) {
+            throw new Error(
+              `Unsupported transaction ConditionCheck: ${ConditionCheck.ConditionExpression}`,
+            )
+          }
+          const value = current?.value as Record<string, unknown> | undefined
           const values = ConditionCheck.ExpressionAttributeValues
           if (!value) return true
-          if (values[':linkId'] !== undefined && value.id !== values[':linkId']) return true
           if (
             values[':installationId'] !== undefined &&
-            value.installationId !== values[':installationId'] &&
             value.id !== values[':installationId']
-          ) return true
-          if (
-            values[':linkUpdatedAt'] !== undefined &&
-            value.updatedAt !== values[':linkUpdatedAt']
-          ) return true
-          if (
-            values[':syncDirection'] !== undefined &&
-            value.syncDirection !== values[':syncDirection']
-          ) return true
-          if (
-            values[':syncStatus'] !== undefined &&
-            value.syncStatus !== values[':syncStatus']
           ) return true
           return values[':disconnected'] !== undefined && (
             value.status === values[':disconnected'] ||
@@ -206,6 +236,14 @@ function seedLinkAndConnector(
       entryType: 'external-link',
       value: structuredClone(link),
       version: 1,
+      ...(link.syncStatus !== 'paused' &&
+          link.syncStatus !== 'conflict' &&
+          (link.syncDirection === 'inbound' || link.syncDirection === 'bidirectional')
+        ? {
+            lookupKey: 'CONNECTOR_SYNC_LINK',
+            lookupSortKey: `workspace-1#${link.id}`,
+          }
+        : {}),
     },
   )
   memory.items.set(
@@ -257,6 +295,29 @@ function createConflict(): StoredConnectorSyncConflict {
       title: 'Local',
     },
   }
+}
+
+function seedConflictRow(
+  memory: ReturnType<typeof createMemoryDocumentClient>,
+  conflictId: string,
+  detectedAt: string,
+) {
+  const value = createConflict()
+  value.conflict.id = conflictId
+  value.conflict.detectedAt = detectedAt
+  const row = {
+    workspaceId: value.workspaceId,
+    recordKey: `SYNCCONFLICT#${conflictId}`,
+    entryType: 'connector-sync-conflict',
+    value,
+    version: 1,
+    lookupKey: `CONNECTOR_SYNC_CONFLICT#${value.workspaceId}`,
+    lookupSortKey: `${detectedAt}#${conflictId}`,
+  }
+  memory.items.set(
+    memory.itemKey('DeveloperPlatformTable', row),
+    structuredClone(row),
+  )
 }
 
 describe('DynamoDbConnectorSyncPersistence', () => {
@@ -374,6 +435,57 @@ describe('DynamoDbConnectorSyncPersistence', () => {
         metadata: { teamId: 'team-1', syncStatus: 'synced' },
       },
     })
+    await persistence.setLinkStatus(
+      'workspace-1',
+      link.id,
+      'paused',
+      '2026-07-18T00:02:00.000Z',
+    )
+    expect(memory.items.get(memory.itemKey('DeveloperPlatformTable', {
+      workspaceId: 'workspace-1',
+      recordKey: `EXTERNALLINK#${link.id}`,
+    }))).not.toHaveProperty('lookupKey')
+  })
+
+  test('acknowledges only the exact pending poll generation', async () => {
+    const memory = createMemoryDocumentClient()
+    const link = createLink()
+    seedLinkAndConnector(memory, link)
+    const persistence = new DynamoDbConnectorSyncPersistence({
+      tableName: 'DeveloperPlatformTable',
+      auditTableName: 'AuditEventsTable',
+      documentClient: memory.documentClient,
+    })
+
+    await expect(persistence.acknowledgePendingLink(
+      'workspace-1',
+      link.id,
+      '2026-07-18T00:00:01.000Z',
+      '2026-07-18T00:01:00.000Z',
+    )).resolves.toBe(false)
+    await expect(persistence.acknowledgePendingLink(
+      'workspace-1',
+      link.id,
+      link.updatedAt,
+      '2026-07-18T00:01:00.000Z',
+    )).resolves.toBe(true)
+    expect(memory.items.get(memory.itemKey('DeveloperPlatformTable', {
+      workspaceId: 'workspace-1',
+      recordKey: `EXTERNALLINK#${link.id}`,
+    }))).toMatchObject({
+      value: {
+        syncStatus: 'synced',
+        updatedAt: '2026-07-18T00:01:00.000Z',
+        lastSyncedAt: '2026-07-18T00:01:00.000Z',
+      },
+      version: 2,
+    })
+    await expect(persistence.acknowledgePendingLink(
+      'workspace-1',
+      link.id,
+      link.updatedAt,
+      '2026-07-18T00:01:00.000Z',
+    )).resolves.toBe(false)
   })
 
   test('does not commit or reactivate synchronization after pause or disconnect', async () => {
@@ -439,6 +551,102 @@ describe('DynamoDbConnectorSyncPersistence', () => {
     )).rejects.toMatchObject({ code: 'ConnectorSyncStateConflict' })
   })
 
+  test('signs expiring workspace/index-bound cursors and accepts previous keys', async () => {
+    const memory = createMemoryDocumentClient()
+    seedConflictRow(memory, 'conflict-1', '2026-07-18T00:00:00.000Z')
+    seedConflictRow(memory, 'conflict-2', '2026-07-18T00:01:00.000Z')
+    let now = new Date('2026-07-18T00:02:00.000Z')
+    const previousSecret =
+      'connector-sync-previous-cursor-signing-secret-at-least-thirty-two-bytes'
+    const currentSecret =
+      'connector-sync-current-cursor-signing-secret-at-least-thirty-two-bytes'
+    const previousPersistence = new DynamoDbConnectorSyncPersistence({
+      tableName: 'DeveloperPlatformTable',
+      auditTableName: 'AuditEventsTable',
+      documentClient: memory.documentClient,
+      clock: () => now,
+      cursorSigningSecret: previousSecret,
+      cursorTtlSeconds: 60,
+    })
+    const first = await previousPersistence.listConflicts('workspace-1', {
+      limit: 1,
+    })
+    expect(first).toMatchObject({
+      items: [{ id: 'conflict-2' }],
+      hasMore: true,
+    })
+    expect(first.nextCursor).toStartWith('v1.')
+
+    const rotatedPersistence = new DynamoDbConnectorSyncPersistence({
+      tableName: 'DeveloperPlatformTable',
+      auditTableName: 'AuditEventsTable',
+      documentClient: memory.documentClient,
+      clock: () => now,
+      cursorSigningSecret: currentSecret,
+      previousCursorSigningSecrets: [previousSecret],
+      cursorTtlSeconds: 60,
+    })
+    await expect(rotatedPersistence.listConflicts('workspace-1', {
+      cursor: first.nextCursor!,
+      limit: 1,
+    })).resolves.toMatchObject({
+      items: [{ id: 'conflict-1' }],
+      hasMore: false,
+    })
+    await expect(rotatedPersistence.listConflicts('workspace-other', {
+      cursor: first.nextCursor!,
+      limit: 1,
+    })).rejects.toMatchObject({ code: 'ConnectorSyncCursorInvalid' })
+
+    const cursorSegments = first.nextCursor!.split('.')
+    const signature = cursorSegments[2]!
+    cursorSegments[2] = `${signature[0] === 'a' ? 'b' : 'a'}${signature.slice(1)}`
+    await expect(rotatedPersistence.listConflicts('workspace-1', {
+      cursor: cursorSegments.join('.'),
+      limit: 1,
+    })).rejects.toMatchObject({ code: 'ConnectorSyncCursorInvalid' })
+
+    const otherIndexPersistence = new DynamoDbConnectorSyncPersistence({
+      tableName: 'DeveloperPlatformTable',
+      auditTableName: 'AuditEventsTable',
+      lookupIndexName: 'OtherLookupIndex',
+      documentClient: memory.documentClient,
+      clock: () => now,
+      cursorSigningSecret: previousSecret,
+    })
+    await expect(otherIndexPersistence.listConflicts('workspace-1', {
+      cursor: first.nextCursor!,
+      limit: 1,
+    })).rejects.toMatchObject({ code: 'ConnectorSyncCursorInvalid' })
+
+    now = new Date('2026-07-18T00:03:01.000Z')
+    await expect(rotatedPersistence.listConflicts('workspace-1', {
+      cursor: first.nextCursor!,
+      limit: 1,
+    })).rejects.toMatchObject({ code: 'ConnectorSyncCursorInvalid' })
+  })
+
+  test('fails fast when production persistence configuration is incomplete', () => {
+    expect(() => new DynamoDbConnectorSyncPersistence({
+      auditTableName: 'AuditEventsTable',
+      documentClient: createMemoryDocumentClient().documentClient,
+      environment: { NODE_ENV: 'production' },
+    })).toThrow('Developer platform table name is required in production.')
+    expect(() => new DynamoDbConnectorSyncPersistence({
+      tableName: 'DeveloperPlatformTable',
+      auditTableName: 'AuditEventsTable',
+      documentClient: createMemoryDocumentClient().documentClient,
+      environment: { NODE_ENV: 'production' },
+    })).toThrow('Developer platform lookup index name is required in production.')
+    expect(() => new DynamoDbConnectorSyncPersistence({
+      tableName: 'DeveloperPlatformTable',
+      lookupIndexName: 'LookupKeyIndex',
+      auditTableName: 'AuditEventsTable',
+      documentClient: createMemoryDocumentClient().documentClient,
+      environment: { NODE_ENV: 'production' },
+    })).toThrow('Connector sync cursor signing secret is required in production.')
+  })
+
   test('persists and resolves conflicts with tenant isolation and audit events', async () => {
     const memory = createMemoryDocumentClient()
     const link = createLink()
@@ -452,6 +660,10 @@ describe('DynamoDbConnectorSyncPersistence', () => {
     const record = createConflict()
 
     await expect(persistence.createConflict(record)).resolves.toEqual(record.conflict)
+    expect(memory.items.get(memory.itemKey('DeveloperPlatformTable', {
+      workspaceId: 'workspace-1',
+      recordKey: `EXTERNALLINK#${link.id}`,
+    }))).not.toHaveProperty('lookupKey')
     await expect(persistence.createConflict(record)).resolves.toEqual(record.conflict)
     await expect(persistence.getConflict('workspace-other', record.conflict.id))
       .resolves.toBeUndefined()
@@ -514,6 +726,8 @@ describe('DynamoDbConnectorSyncPersistence', () => {
       workspaceId: 'workspace-1',
       recordKey: `EXTERNALLINK#${link.id}`,
     }))).toMatchObject({
+      lookupKey: 'CONNECTOR_SYNC_LINK',
+      lookupSortKey: `workspace-1#${link.id}`,
       value: {
         syncStatus: 'synced',
         lastSyncedAt: '2026-07-18T00:02:00.000Z',
@@ -628,6 +842,15 @@ describe('DynamoDbConnectorSyncPersistence', () => {
     )).resolves.toBe('claimed')
 
     now = new Date('2026-07-18T00:01:31.000Z')
+    await expect(persistence.claimConflictResolution(
+      'workspace-1',
+      'conflict-1',
+      {
+        operationId: 'resolution-operation-2',
+        startedAt: now.toISOString(),
+      },
+    )).resolves.toBe('claimed')
+    now = new Date('2026-07-18T00:02:32.000Z')
     await expect(persistence.claimConflictResolution(
       'workspace-1',
       'conflict-1',

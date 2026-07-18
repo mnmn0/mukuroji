@@ -427,6 +427,13 @@ const components = {
         expiresAt: { type: 'string', format: 'date-time' },
       },
     },
+    RotateApiKeyInput: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        expiresAt: { type: ['string', 'null'], format: 'date-time' },
+      },
+    },
     ApiKeyOneTimeSecretOutput: {
       type: 'object',
       additionalProperties: false,
@@ -1275,6 +1282,12 @@ const paths = {
       description: '旧 key を失効し、新しい平文 secret をこの response で一度だけ返します。',
       security: sessionSecurity,
       parameters: [idPathParameter('apiKeyId', 'API key resource ID です。'), ...idempotencyParameters],
+      requestBody: {
+        required: false,
+        content: {
+          'application/json': { schema: schemaRef('RotateApiKeyInput') },
+        },
+      },
       responses: {
         '200': secretJsonResponse('Rotation 後の API key と一度限りの secret です。', schemaRef('ApiKeyOneTimeSecretOutput'), true),
         ...notFoundResponse,
@@ -1529,6 +1542,7 @@ const paths = {
         '303': {
           description: 'Connector settings の検証済み return URL へ戻します。',
           headers: {
+            ...rateLimitHeaders,
             Location: { schema: { type: 'string' } },
             'Cache-Control': { schema: { type: 'string', enum: ['no-store'] } },
             'Referrer-Policy': { schema: { type: 'string', enum: ['no-referrer'] } },
@@ -1813,36 +1827,24 @@ const paths = {
   },
   '/api/developer/exports': {
     get: {
-      operationId: 'downloadManagedWorkItemExport',
+      operationId: 'listManagedWorkItemExportPage',
       tags: ['Import and Export'],
-      summary: '閲覧可能な Work Item を同期 export する',
+      summary: '閲覧可能な Work Item の bounded export page を取得する',
       security: sessionSecurity,
       parameters: [
         {
           name: 'format',
           in: 'query',
-          description: 'Download file の形式です。',
+          description: 'UI が page を集約して生成する download file の形式です。',
           schema: { type: 'string', enum: ['csv', 'json'], default: 'csv' },
         },
+        ...publicCursorParameters,
       ],
       responses: {
-        '200': {
-          description: 'RBAC で閲覧可能な Work Item の download file です。',
-          headers: {
-            'Content-Disposition': {
-              description: 'Download 用 file name を含む attachment header です。',
-              schema: { type: 'string' },
-            },
-          },
-          content: {
-            'text/csv': {
-              schema: { type: 'string' },
-            },
-            'application/json': {
-              schema: { type: 'array', items: schemaRef('WorkItem') },
-            },
-          },
-        },
+        '200': jsonResponse(
+          'RBAC で閲覧可能な Work Item の bounded export page です。',
+          schemaRef('PublicWorkItemPage'),
+        ),
         ...problemResponses,
       },
     },

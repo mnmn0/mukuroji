@@ -279,6 +279,41 @@ export const BUILT_IN_CONNECTOR_CATALOG: readonly ConnectorDefinition[] = [
   },
 ] as const
 
+/**
+ * Provider definition が built-in catalog の capability contract と完全一致することを検証します。
+ *
+ * @param definition 検証する adapter definition です。
+ * @returns 検証済み definition です。
+ */
+export function validateConnectorDefinition(
+  definition: ConnectorDefinition,
+): ConnectorDefinition {
+  const catalog = BUILT_IN_CONNECTOR_CATALOG.find(
+    (entry) => entry.id === definition.id,
+  )
+  const resourceTypes = definition.resourceTypes
+  const uniqueResourceTypes = new Set(resourceTypes)
+  if (
+    !catalog ||
+    catalog.category !== definition.category ||
+    catalog.name !== definition.name ||
+    catalog.usesOAuthPkce !== definition.usesOAuthPkce ||
+    uniqueResourceTypes.size !== resourceTypes.length ||
+    resourceTypes.some((resourceType) =>
+      !catalog.resourceTypes.includes(resourceType)
+    ) ||
+    catalog.resourceTypes.some((resourceType) =>
+      !uniqueResourceTypes.has(resourceType)
+    )
+  ) {
+    throw new ConnectorAdapterError(
+      'ConnectorAdapterDefinitionMismatch',
+      'Connector adapter definition does not match the built-in catalog.',
+    )
+  }
+  return definition
+}
+
 /** Provider adapters を category-safe に解決する registry です。 */
 export class ConnectorRegistry {
   /** Provider ID ごとの adapter です。 */
@@ -297,13 +332,7 @@ export class ConnectorRegistry {
         `Connector adapter "${adapter.definition.id}" is already registered.`,
       )
     }
-    const catalog = BUILT_IN_CONNECTOR_CATALOG.find((entry) => entry.id === adapter.definition.id)
-    if (!catalog || catalog.category !== adapter.definition.category) {
-      throw new ConnectorAdapterError(
-        'ConnectorAdapterDefinitionMismatch',
-        'Connector adapter definition does not match the built-in catalog.',
-      )
-    }
+    validateConnectorDefinition(adapter.definition)
     this.adapters.set(adapter.definition.id, adapter)
   }
 
@@ -354,6 +383,8 @@ export function decideConnectorInboundSync(input: {
   actualWorkItemRevision: number
   /** Origin marker を認証する HMAC secret です。 */
   originSigningSecret: string
+  /** Rotation grace period 中に検証だけ許可する旧 HMAC secrets です。 */
+  previousOriginSigningSecrets?: readonly string[]
 }): ConnectorSyncDecision {
   if (input.eventId === input.state.lastExternalEventId) {
     return { kind: 'duplicate', reason: 'External event was already processed.' }
@@ -361,7 +392,10 @@ export function decideConnectorInboundSync(input: {
   if (input.originMarker && isAuthenticConnectorOriginMarker(
     input.originMarker,
     input.state,
-    input.originSigningSecret,
+    [
+      input.originSigningSecret,
+      ...(input.previousOriginSigningSecrets ?? []),
+    ],
   )) {
     return { kind: 'self-origin', reason: 'Event echoes a mukuroji outbound mutation.' }
   }
@@ -385,20 +419,27 @@ export function decideConnectorInboundSync(input: {
 function isAuthenticConnectorOriginMarker(
   marker: string,
   state: ConnectorSyncState,
-  signingSecret: string,
+  signingSecrets: readonly string[],
 ) {
   const [version, payload, signature, extra] = marker.split('.')
   if (version !== 'v1' || !payload || !signature || extra !== undefined) return false
-  const expected = createHmac('sha256', readOriginSigningSecret(signingSecret))
-    .update(`v1.${payload}`)
-    .digest()
   let actual: Buffer
   try {
     actual = Buffer.from(signature, 'base64url')
   } catch {
     return false
   }
-  if (actual.byteLength !== expected.byteLength || !timingSafeEqual(actual, expected)) {
+  const authentic = signingSecrets.some((signingSecret) => {
+    const expected = createHmac(
+      'sha256',
+      readOriginSigningSecret(signingSecret),
+    )
+      .update(`v1.${payload}`)
+      .digest()
+    return actual.byteLength === expected.byteLength &&
+      timingSafeEqual(actual, expected)
+  })
+  if (!authentic) {
     return false
   }
   try {
@@ -449,8 +490,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function compareExternalVersions(left: string, right: string) {
-  const leftNumber = Number(left)
-  const rightNumber = Number(right)
-  if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) return leftNumber - rightNumber
+  if (/^[+-]?\d+$/u.test(left) && /^[+-]?\d+$/u.test(right)) {
+    const leftInteger = BigInt(left)
+    const rightInteger = BigInt(right)
+    return leftInteger === rightInteger ? 0 : leftInteger > rightInteger ? 1 : -1
+  }
   return left.localeCompare(right)
 }

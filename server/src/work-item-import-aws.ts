@@ -499,7 +499,11 @@ export function createDefaultWorkItemImportExecutionStore() {
     DynamoDBDocumentClient.from(client, {
       marshallOptions: { removeUndefinedValues: true },
     }),
-    readEnvironment('DEVELOPER_PLATFORM_TABLE_NAME') ?? 'mukuroji-developer-platform-local',
+    readRequiredImportAwsResource(
+      'DEVELOPER_PLATFORM_TABLE_NAME',
+      'mukuroji-developer-platform-local',
+      'Developer platform table name',
+    ),
   )
 }
 
@@ -520,7 +524,11 @@ export function createDefaultWorkItemImportSourceStore() {
           }
         : {}),
     }),
-    readEnvironment('WORK_ITEM_IMPORT_BUCKET_NAME') ?? 'mukuroji-work-item-import-local',
+    readRequiredImportAwsResource(
+      'WORK_ITEM_IMPORT_BUCKET_NAME',
+      'mukuroji-work-item-import-local',
+      'Work Item import bucket name',
+    ),
   )
 }
 
@@ -540,7 +548,11 @@ export function createDefaultWorkItemImportQueue() {
           }
         : {}),
     }),
-    readEnvironment('WORK_ITEM_IMPORT_QUEUE_URL') ?? 'http://localhost:4566/000000000000/work-item-import',
+    readRequiredImportAwsResource(
+      'WORK_ITEM_IMPORT_QUEUE_URL',
+      'http://localhost:4566/000000000000/work-item-import',
+      'Work Item import queue URL',
+    ),
   )
 }
 
@@ -742,4 +754,24 @@ function requireText(value: string, label: string) {
 
 function readEnvironment(name: string) {
   return process.env[name]?.trim() || undefined
+}
+
+function readRequiredImportAwsResource(
+  name: string,
+  localFallback: string,
+  label: string,
+) {
+  const configured = readEnvironment(name)
+  if (configured) return configured
+  if (
+    process.env.NODE_ENV === 'production' ||
+    Boolean(readEnvironment('AWS_LAMBDA_FUNCTION_NAME')) ||
+    Boolean(readEnvironment('AWS_EXECUTION_ENV'))
+  ) {
+    throw new WorkItemImportError(
+      'ImportConfigurationInvalid',
+      `${label} is required in production.`,
+    )
+  }
+  return localFallback
 }

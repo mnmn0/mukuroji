@@ -27,6 +27,8 @@ import {
 
 const NOW = new Date('2026-07-18T00:00:00.000Z')
 const ORIGIN_SIGNING_SECRET = 'connector-origin-signing-secret-at-least-thirty-two-bytes'
+const PREVIOUS_ORIGIN_SIGNING_SECRET =
+  'previous-connector-origin-signing-secret-at-least-thirty-two-bytes'
 
 function createAdapter(
   overrides: Partial<ConnectorAdapter> = {},
@@ -64,7 +66,10 @@ function createAdapter(
   }
 }
 
-async function createRuntimeFixture(adapter = createAdapter()) {
+async function createRuntimeFixture(
+  adapter = createAdapter(),
+  previousOriginSigningSecrets: readonly string[] = [],
+) {
   let currentTime = NOW
   const platform = new InMemoryDeveloperPlatformClient(
     new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
@@ -163,6 +168,7 @@ async function createRuntimeFixture(adapter = createAdapter()) {
     persistence,
     health,
     originSigningSecret: ORIGIN_SIGNING_SECRET,
+    previousOriginSigningSecrets,
     clock: () => currentTime,
   })
   return {
@@ -244,6 +250,34 @@ describe('ConnectorSyncEngine', () => {
     })
   })
 
+  test('suppresses echo events signed with a previous origin key during rotation', async () => {
+    const fixture = await createRuntimeFixture(
+      createAdapter(),
+      [PREVIOUS_ORIGIN_SIGNING_SECRET],
+    )
+    const record = {
+      ...externalRecord(),
+      originMarker: createConnectorOriginMarker(
+        fixture.installation.id,
+        fixture.link.id,
+        4,
+        'operation-before-key-rotation',
+        PREVIOUS_ORIGIN_SIGNING_SECRET,
+      ),
+    }
+    await expect(fixture.engine.processInbound({
+      workspaceId: 'workspace-1',
+      link: fixture.link,
+      eventId: 'event-before-key-rotation',
+      record,
+    })).resolves.toEqual({
+      kind: 'skipped',
+      linkId: fixture.link.id,
+      reason: 'self-origin',
+    })
+    expect(fixture.getWorkItem().revision).toBe(4)
+  })
+
   test('does not heal a user-requested pending resync from an old duplicate event', async () => {
     const fixture = await createRuntimeFixture()
     const input = {
@@ -289,6 +323,100 @@ describe('ConnectorSyncEngine', () => {
     })).resolves.toEqual([
       expect.objectContaining({ syncStatus: 'pending' }),
     ])
+  })
+
+  test('acknowledges a pending direction generation from a current provider poll', async () => {
+    const fixture = await createRuntimeFixture(createAdapter({
+      async pull() {
+        return { items: [externalRecord()] }
+      },
+    }))
+    await fixture.engine.processInbound({
+      workspaceId: 'workspace-1',
+      link: fixture.link,
+      eventId: 'event-before-direction-change',
+      record: externalRecord(),
+    })
+    fixture.setCurrentTime(new Date('2026-07-18T00:01:00.000Z'))
+    const pending = await fixture.platform.updateExternalWorkItemLink({
+      workspaceId: 'workspace-1',
+      teamId: fixture.link.teamId,
+      workItemId: fixture.link.workItemId,
+      linkId: fixture.link.id,
+      updatedByUserId: 'user-1',
+      input: { syncDirection: 'inbound' },
+    })
+    const acknowledgements: string[] = []
+    const acknowledge = fixture.persistence.acknowledgePendingLink.bind(
+      fixture.persistence,
+    )
+    fixture.persistence.acknowledgePendingLink = async (
+      workspaceId,
+      linkId,
+      expectedUpdatedAt,
+      syncedAt,
+    ) => {
+      acknowledgements.push(expectedUpdatedAt)
+      return acknowledge(workspaceId, linkId, expectedUpdatedAt, syncedAt)
+    }
+
+    const result = await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'issue',
+    })
+    expect(result.results).toEqual([{
+      kind: 'skipped',
+      linkId: fixture.link.id,
+      reason: 'stale',
+    }])
+    expect(acknowledgements).toEqual([pending.updatedAt])
+    expect(fixture.persistence.getLinkStatus(
+      'workspace-1',
+      fixture.link.id,
+    )).toBe('synced')
+  })
+
+  test('does not acknowledge a pending link after its poll generation changes', async () => {
+    const fixture = await createRuntimeFixture()
+    await fixture.engine.processInbound({
+      workspaceId: 'workspace-1',
+      link: fixture.link,
+      eventId: 'event-before-generation-change',
+      record: externalRecord(),
+    })
+    fixture.setCurrentTime(new Date('2026-07-18T00:01:00.000Z'))
+    const staleGeneration = await fixture.platform.updateExternalWorkItemLink({
+      workspaceId: 'workspace-1',
+      teamId: fixture.link.teamId,
+      workItemId: fixture.link.workItemId,
+      linkId: fixture.link.id,
+      updatedByUserId: 'user-1',
+      input: { syncDirection: 'inbound' },
+    })
+    fixture.setCurrentTime(new Date('2026-07-18T00:02:00.000Z'))
+    await fixture.platform.updateExternalWorkItemLink({
+      workspaceId: 'workspace-1',
+      teamId: fixture.link.teamId,
+      workItemId: fixture.link.workItemId,
+      linkId: fixture.link.id,
+      updatedByUserId: 'user-1',
+      input: { syncDirection: 'bidirectional' },
+    })
+    let acknowledgementCalls = 0
+    fixture.persistence.acknowledgePendingLink = async () => {
+      acknowledgementCalls += 1
+      return true
+    }
+
+    await fixture.engine.processInbound({
+      workspaceId: 'workspace-1',
+      link: staleGeneration,
+      eventId: 'event-before-generation-change',
+      record: externalRecord(),
+      pollGeneration: staleGeneration.updatedAt,
+    })
+    expect(acknowledgementCalls).toBe(0)
   })
 
   test('resolves GitLab sync adapters from the built-in connector catalog', async () => {
@@ -360,10 +488,12 @@ describe('ConnectorSyncEngine', () => {
     })
   })
 
-  test('uses the winning credential when an inline refresh loses its compare-and-set', async () => {
+  test('uses the winning credential when another worker owns the refresh claim', async () => {
     let pushedAccessToken: string | undefined
+    let refreshCalls = 0
     const fixture = await createRuntimeFixture(createAdapter({
       async refresh(credential) {
+        refreshCalls += 1
         return {
           ...credential,
           accessToken: 'access-refresh-loser',
@@ -393,23 +523,33 @@ describe('ConnectorSyncEngine', () => {
         expiresAt: '2026-07-18T00:01:00.000Z',
       }),
     })
+    const claim = fixture.platform.claimConnectorCredentialRefresh.bind(
+      fixture.platform,
+    )
     const recover = fixture.platform.recoverConnector.bind(fixture.platform)
     let concurrentWrites = 0
-    fixture.platform.recoverConnector = async (request) => {
-      if (request.reason === 'refresh' && concurrentWrites === 0) {
+    fixture.platform.claimConnectorCredentialRefresh = async (request) => {
+      if (concurrentWrites === 0) {
         concurrentWrites += 1
-        const previous = deserializeConnectorCredential(request.expectedCredential!)
+        const winnerClaimId = 'inline-refresh-winning-claim'
+        await claim({ ...request, claimId: winnerClaimId })
+        const previous = deserializeConnectorCredential(request.expectedCredential)
         await recover({
-          ...request,
+          workspaceId: request.workspaceId,
+          installationId: request.installationId,
           credential: serializeConnectorCredential({
             ...previous,
             accessToken: 'access-refresh-winner',
             refreshToken: 'refresh-winner',
             expiresAt: '2026-07-18T01:00:00.000Z',
           }),
+          expectedCredential: request.expectedCredential,
+          refreshClaimId: winnerClaimId,
+          reason: 'refresh',
         })
+        return 'credential-changed'
       }
-      return recover(request)
+      return claim(request)
     }
 
     await expect(fixture.engine.processOutbound({
@@ -418,6 +558,7 @@ describe('ConnectorSyncEngine', () => {
       operationId: 'refresh-race-outbound',
     })).resolves.toMatchObject({ kind: 'synced' })
     expect(concurrentWrites).toBe(1)
+    expect(refreshCalls).toBe(0)
     expect(pushedAccessToken).toBe('access-refresh-winner')
     expect(deserializeConnectorCredential(
       await fixture.platform.readConnectorCredential({
@@ -558,6 +699,17 @@ describe('ConnectorSyncEngine', () => {
       },
       setLinkStatus: (workspaceId, linkId, status) =>
         fixture.persistence.setLinkStatus(workspaceId, linkId, status),
+      acknowledgePendingLink: (
+        workspaceId,
+        linkId,
+        expectedUpdatedAt,
+        syncedAt,
+      ) => fixture.persistence.acknowledgePendingLink(
+        workspaceId,
+        linkId,
+        expectedUpdatedAt,
+        syncedAt,
+      ),
       createConflict: (record) => fixture.persistence.createConflict(record),
       listConflicts: (workspaceId, input) =>
         fixture.persistence.listConflicts(workspaceId, input),

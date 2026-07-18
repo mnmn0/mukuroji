@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import {
   BUILT_IN_CONNECTOR_CATALOG,
-  ConnectorAdapterError,
   ConnectorRegistry,
+  validateConnectorDefinition,
   type ConnectorAdapter,
   type ConnectorAuthorizationInput,
   type ConnectorCredential,
@@ -235,7 +235,7 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
 
   /** 検証済み provider configuration から adapter を作成します。 */
   constructor(options: ConfiguredOAuthConnectorOptions) {
-    this.definition = validateDefinition(options.definition)
+    this.definition = validateConnectorDefinition(options.definition)
     this.clientId = requireNonEmpty(options.clientId, 'OAuth client ID')
     this.clientSecret = requireNonEmpty(options.clientSecret, 'OAuth client secret')
     this.redirectUri = validateHttpsEndpoint(
@@ -279,7 +279,7 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
     this.defaultScopes = validateScopes(options.defaultScopes)
     this.tokenMapping = validateTokenMapping(options.token)
     this.accountMapping = options.account
-    this.resources = validateResourceBindings(options.resources)
+    this.resources = validateResourceBindings(options.resources, this.definition)
     if (
       !this.accountEndpoint &&
       !this.tokenMapping.externalAccountId
@@ -642,7 +642,12 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
           { retryable: true },
         )
       }
-      throw error
+      if (error instanceof ConnectorRuntimeError) throw error
+      throw new ConnectorRuntimeError(
+        'ConnectorProviderUnavailable',
+        'Connector provider request could not be completed.',
+        { retryable: true },
+      )
     }
   }
 
@@ -786,25 +791,6 @@ export function createConfiguredOAuthConnectorRegistry(
   ))
 }
 
-function validateDefinition(definition: ConnectorDefinition) {
-  const catalog = BUILT_IN_CONNECTOR_CATALOG.find((entry) => entry.id === definition.id)
-  if (
-    !catalog ||
-    catalog.category !== definition.category ||
-    catalog.name !== definition.name ||
-    catalog.usesOAuthPkce !== definition.usesOAuthPkce ||
-    catalog.resourceTypes.some((resourceType) =>
-      !definition.resourceTypes.includes(resourceType)
-    )
-  ) {
-    throw new ConnectorAdapterError(
-      'ConnectorAdapterDefinitionMismatch',
-      'Connector adapter definition does not match the built-in catalog.',
-    )
-  }
-  return definition
-}
-
 function validateHttpsEndpoint(value: string, allowedHosts: readonly string[], label: string) {
   let url: URL
   try {
@@ -865,7 +851,21 @@ function validateTokenMapping(value: ConnectorOAuthTokenMapping) {
 
 function validateResourceBindings(
   value: Partial<Record<ExternalResourceType, ConnectorOAuthResourceBinding>>,
+  definition: ConnectorDefinition,
 ) {
+  const configuredResourceTypes = Object.keys(value)
+  if (
+    configuredResourceTypes.length !== definition.resourceTypes.length ||
+    configuredResourceTypes.some((resourceType) =>
+      !definition.resourceTypes.includes(resourceType as ExternalResourceType)
+    ) ||
+    definition.resourceTypes.some((resourceType) => !value[resourceType])
+  ) {
+    throw new ConnectorRuntimeError(
+      'ConnectorResourceBindingMismatch',
+      'Connector resource bindings must exactly match the declared capabilities.',
+    )
+  }
   for (const [resourceType, binding] of Object.entries(value)) {
     if (!binding) continue
     validateRelativeApiPath(binding.collectionPath, `${resourceType} collection path`)
@@ -892,6 +892,7 @@ function validateResourceBindings(
     if (binding.versionHeader) {
       requireProviderHeaderName(binding.versionHeader, `${resourceType} version header`)
     }
+    validateProviderHeaderMappings(binding, resourceType)
     validateRecordMapping(binding.record, resourceType)
     validateMutationMapping(binding.mutation, resourceType)
   }
@@ -929,12 +930,47 @@ function validateMutationMapping(
   value: ConnectorOutboundMutationMapping,
   resourceType: string,
 ) {
-  requireBodyFieldName(value.originMarker, `${resourceType} origin marker field`)
-  if (value.title) requireBodyFieldName(value.title, `${resourceType} title field`)
-  if (value.description) {
-    requireBodyFieldName(value.description, `${resourceType} description field`)
+  const fields = [
+    requireBodyFieldName(value.originMarker, `${resourceType} origin marker field`),
+  ]
+  if (value.title) {
+    fields.push(requireBodyFieldName(value.title, `${resourceType} title field`))
   }
-  if (value.status) requireBodyFieldName(value.status, `${resourceType} status field`)
+  if (value.description) {
+    fields.push(requireBodyFieldName(
+      value.description,
+      `${resourceType} description field`,
+    ))
+  }
+  if (value.status) {
+    fields.push(requireBodyFieldName(value.status, `${resourceType} status field`))
+  }
+  if (new Set(fields.map((field) => field.toLowerCase())).size !== fields.length) {
+    throw new ConnectorRuntimeError(
+      'ConnectorMutationMappingInvalid',
+      `${resourceType} mutation fields must be unique ignoring case.`,
+    )
+  }
+}
+
+function validateProviderHeaderMappings(
+  binding: ConnectorOAuthResourceBinding,
+  resourceType: string,
+) {
+  const headers = [
+    binding.idempotencyHeader,
+    binding.versionHeader,
+  ].filter((header): header is string => header !== undefined)
+  const normalized = headers.map((header) => header.toLowerCase())
+  if (
+    normalized.includes('x-mukuroji-origin') ||
+    new Set(normalized).size !== normalized.length
+  ) {
+    throw new ConnectorRuntimeError(
+      'ConnectorHeaderInvalid',
+      `${resourceType} provider headers conflict with runtime-managed headers.`,
+    )
+  }
 }
 
 function validateRelativeApiPath(value: string, label: string) {
@@ -964,14 +1000,40 @@ function resolveApiPath(baseUrl: URL, path: string) {
 }
 
 async function readBoundedJson(response: Response) {
+  const maximumBytes = 2 * 1024 * 1024
   const contentLength = Number(response.headers.get('Content-Length'))
-  if (Number.isFinite(contentLength) && contentLength > 2 * 1024 * 1024) {
+  if (Number.isFinite(contentLength) && contentLength > maximumBytes) {
+    await response.body?.cancel().catch(() => undefined)
     throw malformedProviderResponse('Connector provider response is too large.')
   }
-  const text = await response.text()
-  if (Buffer.byteLength(text, 'utf8') > 2 * 1024 * 1024) {
-    throw malformedProviderResponse('Connector provider response is too large.')
+  const reader = response.body?.getReader()
+  const chunks: Uint8Array[] = []
+  let totalBytes = 0
+  if (reader) {
+    try {
+      while (true) {
+        const result = await reader.read()
+        if (result.done) break
+        totalBytes += result.value.byteLength
+        if (totalBytes > maximumBytes) {
+          await reader.cancel().catch(() => undefined)
+          throw malformedProviderResponse('Connector provider response is too large.')
+        }
+        chunks.push(result.value)
+      }
+    } catch (error) {
+      if (error instanceof ConnectorRuntimeError) throw error
+      await reader.cancel().catch(() => undefined)
+      throw new ConnectorRuntimeError(
+        'ConnectorProviderUnavailable',
+        'Connector provider response could not be read.',
+        { retryable: true },
+      )
+    } finally {
+      reader.releaseLock()
+    }
   }
+  const text = Buffer.concat(chunks, totalBytes).toString('utf8')
   try {
     return JSON.parse(text) as unknown
   } catch {

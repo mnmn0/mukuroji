@@ -1,3 +1,10 @@
+import { randomUUID } from 'node:crypto'
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import {
+  DeleteCommand,
+  DynamoDBDocumentClient,
+  UpdateCommand,
+} from '@aws-sdk/lib-dynamodb'
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs'
 import type { WebhookDelivery, WebhookEventEnvelope, WebhookEventType } from '@mukuroji/contracts'
 import { toAuditEventView, upcastAuditEvent } from './audit'
@@ -21,6 +28,9 @@ import {
 
 /** SQS が1 message に設定できる最大 delay 秒です。 */
 export const WEBHOOK_QUEUE_MAX_DELAY_SECONDS = 15 * 60
+
+/** Webhook HTTP attempt を単一 worker に束縛する lease 秒数です。 */
+export const WEBHOOK_DELIVERY_LEASE_SECONDS = 90
 
 /** DynamoDB Streams image に含まれる AttributeValue の必要最小表現です。 */
 export type WebhookDynamoAttributeValue = {
@@ -89,6 +99,28 @@ export interface WebhookDeliveryQueue {
   enqueue(message: WebhookQueueMessage): Promise<void>
 }
 
+/** Webhook delivery の durable claim 入力です。 */
+export type WebhookDeliveryClaimRequest = {
+  /** Delivery が属する Workspace ID です。 */
+  workspaceId: string
+  /** Claim 対象の delivery ID です。 */
+  deliveryId: string
+  /** Claim owner を一意に識別する token です。 */
+  leaseOwner: string
+  /** Claim 判定時刻です。 */
+  now: string
+  /** Claim の失効日時です。 */
+  leaseExpiresAt: string
+}
+
+/** 同じ delivery ID の並行 HTTP attempt を直列化する永続化境界です。 */
+export interface WebhookDeliveryClaimStore {
+  /** Claim を取得できた worker だけ true を返します。 */
+  tryClaim(request: WebhookDeliveryClaimRequest): Promise<boolean>
+  /** Current claim owner だけが claim を解放します。 */
+  release(request: WebhookDeliveryClaimRequest): Promise<void>
+}
+
 /** Audit stream projection の注入可能 dependencies です。 */
 export type WebhookProjectionDependencies = {
   /** Subscription と delivery log の永続化境界です。 */
@@ -107,6 +139,8 @@ export type WebhookDeliveryWorkerDependencies = {
   authorizer: WebhookSubscriptionAuthorizer
   /** HTTP worker へ delivery locator を渡す queue です。 */
   queue: WebhookDeliveryQueue
+  /** Delivery ID ごとの durable HTTP attempt claim です。 */
+  claims: WebhookDeliveryClaimStore
   /** 署名付き HTTP request を1回だけ実行します。 */
   deliver(prepared: PreparedWebhookDelivery): Promise<WebhookRequestResult>
   /** Retry schedule と署名時刻を決める clock です。 */
@@ -133,6 +167,7 @@ let defaultDeveloperPlatform: DeveloperPlatformClient | undefined
 let defaultWebhookAuthorizer: WebhookSubscriptionAuthorizer | undefined
 let defaultQueue: WebhookDeliveryQueue | undefined
 let defaultSqsClient: SQSClient | undefined
+let defaultWebhookDeliveryClaimStore: WebhookDeliveryClaimStore | undefined
 
 /**
  * AuditEventsTable の pending insert を versioned webhook envelope へ射影します。
@@ -178,6 +213,7 @@ export async function deliveryHandler(event: WebhookSqsEvent): Promise<WebhookBa
     developerPlatform: getDefaultDeveloperPlatform(),
     authorizer: getDefaultWebhookAuthorizer(),
     queue: getDefaultWebhookQueue(),
+    claims: getDefaultWebhookDeliveryClaimStore(),
     deliver: deliverPreparedWebhook,
     now: () => new Date(),
     random: Math.random,
@@ -266,6 +302,35 @@ async function processWebhookQueueRecord(
   dependencies: WebhookDeliveryWorkerDependencies,
 ) {
   const message = readWebhookQueueMessage(record.body)
+  const now = dependencies.now()
+  const claim: WebhookDeliveryClaimRequest = {
+    ...message,
+    leaseOwner: randomUUID(),
+    now: now.toISOString(),
+    leaseExpiresAt: new Date(
+      now.getTime() + WEBHOOK_DELIVERY_LEASE_SECONDS * 1_000,
+    ).toISOString(),
+  }
+  if (!await dependencies.claims.tryClaim(claim)) {
+    throw new Error('Webhook delivery claim is still active.')
+  }
+  let attemptStarted = false
+  let completed = false
+  try {
+    await processClaimedWebhookQueueRecord(message, dependencies, () => {
+      attemptStarted = true
+    })
+    completed = true
+  } finally {
+    if (completed || !attemptStarted) await dependencies.claims.release(claim)
+  }
+}
+
+async function processClaimedWebhookQueueRecord(
+  message: WebhookQueueMessage,
+  dependencies: WebhookDeliveryWorkerDependencies,
+  markAttemptStarted: () => void,
+) {
   let prepared: PreparedWebhookDelivery
   try {
     prepared = await dependencies.developerPlatform.prepareWebhookDelivery(message)
@@ -310,6 +375,7 @@ async function processWebhookQueueRecord(
 
   let result: WebhookRequestResult
   try {
+    markAttemptStarted()
     result = await dependencies.deliver(prepared)
   } catch (error) {
     if (error instanceof UnsafeWebhookUrlError) {
@@ -370,9 +436,91 @@ async function deliverPreparedWebhook(prepared: PreparedWebhookDelivery) {
   })
 }
 
+/** Developer platform table の dedicated row で Webhook attempt lease を保持します。 */
+export class DynamoDbWebhookDeliveryClaimStore
+implements WebhookDeliveryClaimStore {
+  /** DynamoDB DocumentClient です。 */
+  private readonly documentClient: DynamoDBDocumentClient
+  /** Claim row を保存する Developer platform table 名です。 */
+  private readonly tableName: string
+
+  /** DynamoDB-backed claim store を作成します。 */
+  constructor(
+    documentClient: DynamoDBDocumentClient = createWebhookClaimDocumentClient(),
+    tableName = readWebhookClaimTableName(),
+  ) {
+    this.documentClient = documentClient
+    this.tableName = readIdentifier(tableName, 'Developer platform table name')
+  }
+
+  /** Missing/expired claim だけを current worker が条件付き取得します。 */
+  async tryClaim(request: WebhookDeliveryClaimRequest) {
+    const normalized = readWebhookDeliveryClaimRequest(request)
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalized.workspaceId,
+          recordKey: createWebhookDeliveryClaimRecordKey(normalized.deliveryId),
+        },
+        UpdateExpression:
+          'SET #entryType = :entryType, deliveryId = :deliveryId, ' +
+          'leaseOwner = :leaseOwner, leaseExpiresAt = :leaseExpiresAt, ' +
+          'updatedAt = :now, expiresAt = :expiresAt',
+        ConditionExpression:
+          'attribute_not_exists(workspaceId) OR ' +
+          '(#entryType = :entryType AND ' +
+          '(leaseExpiresAt < :now OR leaseOwner = :leaseOwner))',
+        ExpressionAttributeNames: { '#entryType': 'entryType' },
+        ExpressionAttributeValues: {
+          ':entryType': 'webhook-delivery-claim',
+          ':deliveryId': normalized.deliveryId,
+          ':leaseOwner': normalized.leaseOwner,
+          ':leaseExpiresAt': normalized.leaseExpiresAt,
+          ':now': normalized.now,
+          ':expiresAt': Math.floor(Date.parse(normalized.leaseExpiresAt) / 1_000),
+        },
+      }))
+      return true
+    } catch (error) {
+      if (readErrorName(error) === 'ConditionalCheckFailedException') return false
+      throw error
+    }
+  }
+
+  /** Current owner の claim だけを条件付き削除します。 */
+  async release(request: WebhookDeliveryClaimRequest) {
+    const normalized = readWebhookDeliveryClaimRequest(request)
+    try {
+      await this.documentClient.send(new DeleteCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalized.workspaceId,
+          recordKey: createWebhookDeliveryClaimRecordKey(normalized.deliveryId),
+        },
+        ConditionExpression:
+          '#entryType = :entryType AND deliveryId = :deliveryId AND leaseOwner = :leaseOwner',
+        ExpressionAttributeNames: { '#entryType': 'entryType' },
+        ExpressionAttributeValues: {
+          ':entryType': 'webhook-delivery-claim',
+          ':deliveryId': normalized.deliveryId,
+          ':leaseOwner': normalized.leaseOwner,
+        },
+      }))
+    } catch (error) {
+      if (readErrorName(error) !== 'ConditionalCheckFailedException') throw error
+    }
+  }
+}
+
 function getDefaultDeveloperPlatform() {
   defaultDeveloperPlatform ??= new DynamoDbDeveloperPlatformClient()
   return defaultDeveloperPlatform
+}
+
+function getDefaultWebhookDeliveryClaimStore() {
+  defaultWebhookDeliveryClaimStore ??= new DynamoDbWebhookDeliveryClaimStore()
+  return defaultWebhookDeliveryClaimStore
 }
 
 function getDefaultWebhookAuthorizer() {
@@ -423,6 +571,78 @@ function createSqsClient() {
       : {}),
   })
   return defaultSqsClient
+}
+
+function createWebhookClaimDocumentClient() {
+  const endpoint = process.env.DYNAMODB_ENDPOINT ??
+    process.env.AWS_ENDPOINT_URL_DYNAMODB ??
+    process.env.AWS_ENDPOINT_URL
+  const client = new DynamoDBClient({
+    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
+    ...(endpoint
+      ? {
+          endpoint,
+          credentials: {
+            accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
+            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
+          },
+        }
+      : {}),
+  })
+  return DynamoDBDocumentClient.from(client, {
+    marshallOptions: { removeUndefinedValues: true },
+  })
+}
+
+function readWebhookClaimTableName() {
+  const configured = process.env.DEVELOPER_PLATFORM_TABLE_NAME?.trim()
+  if (configured) return configured
+  if (
+    process.env.NODE_ENV === 'production' ||
+    Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME?.trim()) ||
+    Boolean(process.env.AWS_EXECUTION_ENV?.trim())
+  ) {
+    throw new TypeError('Developer platform table name is required in production.')
+  }
+  return 'mukuroji-developer-platform-local'
+}
+
+function readWebhookDeliveryClaimRequest(
+  request: WebhookDeliveryClaimRequest,
+): WebhookDeliveryClaimRequest {
+  const now = readTimestamp(request.now, 'Webhook claim time')
+  const leaseExpiresAt = readTimestamp(
+    request.leaseExpiresAt,
+    'Webhook claim expiry',
+  )
+  if (Date.parse(leaseExpiresAt) <= Date.parse(now)) {
+    throw new TypeError('Webhook claim expiry must be after its claim time.')
+  }
+  return {
+    workspaceId: readIdentifier(request.workspaceId, 'Workspace ID'),
+    deliveryId: readIdentifier(request.deliveryId, 'Webhook delivery ID'),
+    leaseOwner: readIdentifier(request.leaseOwner, 'Webhook claim owner'),
+    now,
+    leaseExpiresAt,
+  }
+}
+
+function createWebhookDeliveryClaimRecordKey(deliveryId: string) {
+  return `WEBHOOKDELIVERYCLAIM#${deliveryId}`
+}
+
+function readTimestamp(value: string, label: string) {
+  if (!value || !Number.isFinite(Date.parse(value))) {
+    throw new TypeError(`${label} is invalid.`)
+  }
+  return new Date(value).toISOString()
+}
+
+function readErrorName(error: unknown) {
+  return error && typeof error === 'object' && 'name' in error &&
+      typeof error.name === 'string'
+    ? error.name
+    : undefined
 }
 
 function readWebhookQueueMessage(body: string | undefined): WebhookQueueMessage {

@@ -85,6 +85,19 @@ function createRuntimeFixture() {
     }
     throw new Error(`Unexpected URL: ${url}`)
   }) as typeof fetch
+  const resourceBinding = {
+    collectionPath: 'resources',
+    itemPath: 'resources/{externalId}',
+    itemsPath: 'items',
+    record: {
+      externalId: 'id',
+      externalUrl: 'url',
+      externalVersion: 'version',
+    },
+    mutation: {
+      originMarker: 'mukuroji_origin',
+    },
+  }
   const options: ConfiguredOAuthConnectorOptions = {
     definition: BUILT_IN_CONNECTOR_CATALOG[0]!,
     clientId: 'client-id',
@@ -106,7 +119,12 @@ function createRuntimeFixture() {
       externalAccountId: 'id',
       externalAccountName: 'login',
     },
-    resources: {},
+    resources: Object.fromEntries(
+      BUILT_IN_CONNECTOR_CATALOG[0]!.resourceTypes.map((resourceType) => [
+        resourceType,
+        structuredClone(resourceBinding),
+      ]),
+    ),
     allowedHosts: ['app.test', 'provider.test'],
     fetch: fetcher,
     clock: () => NOW,
@@ -477,7 +495,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     expect(current).not.toHaveProperty('lastError')
   })
 
-  test('reloads the winning credential when refresh loses its compare-and-set', async () => {
+  test('claims refresh before the provider call so concurrent workers call it once', async () => {
     const fixture = createRuntimeFixture()
     const authorization = await fixture.runtime.begin(principal, {
       provider: 'github',
@@ -489,40 +507,28 @@ describe('ConnectorAuthorizationRuntime', () => {
       code: 'refresh-cas-code',
       state: readStateFromAuthorizationUrl(authorization.authorizationUrl),
     })
-    const recover = fixture.platform.recoverConnector.bind(fixture.platform)
-    let concurrentWrites = 0
-    fixture.platform.recoverConnector = async (request) => {
-      if (request.reason === 'refresh' && concurrentWrites === 0) {
-        concurrentWrites += 1
-        const expected = deserializeConnectorCredential(request.expectedCredential!)
-        await recover({
-          ...request,
-          credential: serializeConnectorCredential({
-            ...expected,
-            accessToken: 'access-concurrent-winner',
-            refreshToken: 'refresh-concurrent-winner',
-          }),
-        })
-      }
-      return recover(request)
-    }
-
-    await expect(fixture.runtime.refreshCredential(
-      'workspace-1',
-      installed.installation.id,
-    )).resolves.toMatchObject({
-      id: installed.installation.id,
-      status: 'connected',
-    })
-    expect(concurrentWrites).toBe(1)
+    const outcomes = await Promise.allSettled([
+      fixture.runtime.refreshCredential(
+        'workspace-1',
+        installed.installation.id,
+      ),
+      fixture.runtime.refreshCredential(
+        'workspace-1',
+        installed.installation.id,
+      ),
+    ])
+    expect(outcomes.some((outcome) => outcome.status === 'fulfilled')).toBe(true)
+    expect(fixture.tokenRequests.filter((request) =>
+      request.get('grant_type') === 'refresh_token'
+    )).toHaveLength(1)
     expect(deserializeConnectorCredential(
       await fixture.platform.readConnectorCredential({
         workspaceId: 'workspace-1',
         installationId: installed.installation.id,
       }),
     )).toMatchObject({
-      accessToken: 'access-concurrent-winner',
-      refreshToken: 'refresh-concurrent-winner',
+      accessToken: 'access-refresh-1',
+      refreshToken: 'refresh-1',
     })
   })
 
@@ -643,6 +649,10 @@ describe('ConnectorAuthorizationRuntime', () => {
           calls.push({ kind: 'list', workspaceId, input })
           return { items: [conflict], hasMore: false }
         },
+        async canAccessConflict(actor, conflictId) {
+          calls.push({ kind: 'access', actor, conflictId })
+          return true
+        },
         async resolveConflict(actor, conflictId, input) {
           calls.push({ kind: 'resolve', actor, conflictId, input })
           return {
@@ -670,6 +680,11 @@ describe('ConnectorAuthorizationRuntime', () => {
         kind: 'list',
         workspaceId: 'workspace-1',
         input: { status: 'open', limit: 25 },
+      },
+      {
+        kind: 'access',
+        actor: { workspaceId: 'workspace-1', userId: 'user-1' },
+        conflictId: 'conflict-1',
       },
       {
         kind: 'resolve',

@@ -191,10 +191,6 @@ export type UpdateApiKeyInput = {
    */
   name?: string
   /**
-   * 変更後の scope です。
-   */
-  scopes?: ApiScope[]
-  /**
    * 変更後の有効期限です。null は有効期限の解除を表します。
    */
   expiresAt?: string | null
@@ -313,14 +309,6 @@ export type UpdateOAuthAppInput = {
    * 変更後の表示名です。
    */
   name?: string
-  /**
-   * 変更後の grant type です。
-   */
-  grantTypes?: OAuthGrantType[]
-  /**
-   * 変更後の scope 上限です。
-   */
-  scopes?: ApiScope[]
 }
 
 /**

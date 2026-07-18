@@ -4,6 +4,9 @@ import type { SQSClient } from '@aws-sdk/client-sqs'
 import {
   S3WorkItemImportSourceStore,
   SqsWorkItemImportQueue,
+  createDefaultWorkItemImportExecutionStore,
+  createDefaultWorkItemImportQueue,
+  createDefaultWorkItemImportSourceStore,
 } from './work-item-import-aws'
 import {
   WorkItemImportError,
@@ -490,6 +493,42 @@ test('SQS queue serializes no source, actor, mapping, or secret material', async
     QueueUrl: 'https://sqs.example/imports',
     MessageBody: JSON.stringify({ workspaceId: 'workspace-1', jobId: 'import-1' }),
   }])
+})
+
+test('production Work Item import adapters fail closed when AWS resources are missing', () => {
+  const names = [
+    'AWS_EXECUTION_ENV',
+    'AWS_LAMBDA_FUNCTION_NAME',
+    'DEVELOPER_PLATFORM_TABLE_NAME',
+    'NODE_ENV',
+    'WORK_ITEM_IMPORT_BUCKET_NAME',
+    'WORK_ITEM_IMPORT_QUEUE_URL',
+  ] as const
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]))
+  try {
+    process.env.AWS_LAMBDA_FUNCTION_NAME = 'mukuroji-import-test'
+    delete process.env.AWS_EXECUTION_ENV
+    delete process.env.NODE_ENV
+    delete process.env.DEVELOPER_PLATFORM_TABLE_NAME
+    delete process.env.WORK_ITEM_IMPORT_BUCKET_NAME
+    delete process.env.WORK_ITEM_IMPORT_QUEUE_URL
+
+    expect(() => createDefaultWorkItemImportExecutionStore()).toThrow(
+      'Developer platform table name is required in production.',
+    )
+    expect(() => createDefaultWorkItemImportSourceStore()).toThrow(
+      'Work Item import bucket name is required in production.',
+    )
+    expect(() => createDefaultWorkItemImportQueue()).toThrow(
+      'Work Item import queue URL is required in production.',
+    )
+  } finally {
+    for (const name of names) {
+      const value = previous[name]
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  }
 })
 
 function createStageRequest(jobId: string) {

@@ -10,6 +10,14 @@ const DEFAULT_CONNECTOR_RUNTIME_RETRY_INITIAL_MS = 250
 /** Connector runtime load failure 後の既定最大 backoff です。 */
 const DEFAULT_CONNECTOR_RUNTIME_RETRY_MAX_MS = 5_000
 
+/** Warm runtime で共有する Secrets Manager client/command constructor です。 */
+let awsSecretsManagerRuntimePromise: Promise<{
+  /** 再利用する Secrets Manager client です。 */
+  client: Record<string, unknown>
+  /** GetSecretValue command constructor です。 */
+  Command: Function
+}> | undefined
+
 /** Connector runtime 設定を格納する Secrets Manager secret ARN の環境変数です。 */
 export const CONNECTOR_CONFIGURATION_SECRET_ARN_ENVIRONMENT_VARIABLE =
   'CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN'
@@ -221,17 +229,7 @@ function createAwsSecretsManagerLoader(): ConnectorRuntimeSecretLoader {
   return {
     async readSecret(secretId) {
       try {
-        const packageName = ['@aws-sdk', 'client-secrets-manager'].join('/')
-        const sdk = await import(packageName) as Record<string, unknown>
-        const Client = requireConstructor(
-          sdk.SecretsManagerClient,
-          'SecretsManagerClient',
-        )
-        const Command = requireConstructor(
-          sdk.GetSecretValueCommand,
-          'GetSecretValueCommand',
-        )
-        const client = Reflect.construct(Client, []) as Record<string, unknown>
+        const { client, Command } = await getAwsSecretsManagerRuntime()
         const send = client.send
         if (typeof send !== 'function') {
           throw new TypeError('Secrets Manager client is unavailable.')
@@ -258,6 +256,36 @@ function createAwsSecretsManagerLoader(): ConnectorRuntimeSecretLoader {
   }
 }
 
+function getAwsSecretsManagerRuntime() {
+  if (!awsSecretsManagerRuntimePromise) {
+    const loading = loadAwsSecretsManagerRuntime()
+    awsSecretsManagerRuntimePromise = loading
+    void loading.catch(() => {
+      if (awsSecretsManagerRuntimePromise === loading) {
+        awsSecretsManagerRuntimePromise = undefined
+      }
+    })
+  }
+  return awsSecretsManagerRuntimePromise
+}
+
+async function loadAwsSecretsManagerRuntime() {
+  const packageName = ['@aws-sdk', 'client-secrets-manager'].join('/')
+  const sdk = await import(packageName) as Record<string, unknown>
+  const Client = requireConstructor(
+    sdk.SecretsManagerClient,
+    'SecretsManagerClient',
+  )
+  const Command = requireConstructor(
+    sdk.GetSecretValueCommand,
+    'GetSecretValueCommand',
+  )
+  return {
+    client: Reflect.construct(Client, []) as Record<string, unknown>,
+    Command,
+  }
+}
+
 function requireConstructor(value: unknown, name: string): Function {
   if (typeof value !== 'function') {
     throw new TypeError(`${name} is unavailable.`)
@@ -270,6 +298,9 @@ function isAllowedConnectorEnvironmentKey(value: string) {
     value === 'CONNECTOR_OAUTH_STATE_SIGNING_SECRET' ||
     value === 'CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON' ||
     value === 'CONNECTOR_SYNC_ORIGIN_SIGNING_SECRET' ||
+    value === 'CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON' ||
+    value === 'CONNECTOR_SYNC_CURSOR_SIGNING_SECRET' ||
+    value === 'CONNECTOR_SYNC_CURSOR_PREVIOUS_SIGNING_SECRETS_JSON' ||
     value === 'CONNECTOR_REAUTHORIZATION_RETURN_URL' ||
     /^MUKUROJI_CONNECTOR_[A-Z0-9_]{1,96}$/.test(value)
 }

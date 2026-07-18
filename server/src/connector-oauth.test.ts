@@ -24,6 +24,32 @@ import {
 const NOW = new Date('2026-07-18T00:00:00.000Z')
 
 function createProviderOptions(fetcher: typeof fetch): ConfiguredOAuthConnectorOptions {
+  const resourceBinding = {
+    collectionPath: 'issues',
+    itemPath: 'issues/{externalId}',
+    itemsPath: 'data.items',
+    nextCursorPath: 'page.next',
+    cursorParameter: 'after',
+    record: {
+      externalId: 'id',
+      externalUrl: 'html_url',
+      externalVersion: 'updated_at',
+      displayKey: 'number',
+      title: 'title',
+      description: 'body',
+      status: 'state',
+      originMarker: 'mukuroji_origin',
+      metadata: ['number'],
+    },
+    mutation: {
+      title: 'title',
+      description: 'body',
+      status: 'state',
+      originMarker: 'mukuroji_origin',
+    },
+    idempotencyHeader: 'Idempotency-Key',
+    versionHeader: 'If-Match',
+  } as const
   return {
     definition: BUILT_IN_CONNECTOR_CATALOG[0]!,
     clientId: 'client-id',
@@ -45,34 +71,12 @@ function createProviderOptions(fetcher: typeof fetch): ConfiguredOAuthConnectorO
       externalAccountId: 'id',
       externalAccountName: 'login',
     },
-    resources: {
-      issue: {
-        collectionPath: 'issues',
-        itemPath: 'issues/{externalId}',
-        itemsPath: 'data.items',
-        nextCursorPath: 'page.next',
-        cursorParameter: 'after',
-        record: {
-          externalId: 'id',
-          externalUrl: 'html_url',
-          externalVersion: 'updated_at',
-          displayKey: 'number',
-          title: 'title',
-          description: 'body',
-          status: 'state',
-          originMarker: 'mukuroji_origin',
-          metadata: ['number'],
-        },
-        mutation: {
-          title: 'title',
-          description: 'body',
-          status: 'state',
-          originMarker: 'mukuroji_origin',
-        },
-        idempotencyHeader: 'Idempotency-Key',
-        versionHeader: 'If-Match',
-      },
-    },
+    resources: Object.fromEntries(
+      BUILT_IN_CONNECTOR_CATALOG[0]!.resourceTypes.map((resourceType) => [
+        resourceType,
+        structuredClone(resourceBinding),
+      ]),
+    ),
     allowedHosts: ['app.test', 'provider.test'],
     fetch: fetcher,
     clock: () => NOW,
@@ -338,7 +342,7 @@ describe('ConfiguredOAuthConnectorAdapter', () => {
         accessToken: 'access_token',
         externalAccountId: 'account_id',
       },
-      resources: {},
+      resources: options.resources,
       allowedHosts: ['app.test', 'provider.test'],
     }]
     expect(() => createOAuthConnectorRegistryFromEnvironment({
@@ -353,6 +357,81 @@ describe('ConfiguredOAuthConnectorAdapter', () => {
       },
     })
     expect(registry.get('github').definition.category).toBe('source-control')
+  })
+
+  test('requires exact resource bindings and rejects case-insensitive mapping collisions', () => {
+    const fetcher = (async (_input: URL | RequestInfo, _init?: RequestInit) =>
+      Response.json({})) as typeof fetch
+    const missingBinding = createProviderOptions(fetcher)
+    delete missingBinding.resources.deploy
+    expect(() => new ConfiguredOAuthConnectorAdapter(missingBinding))
+      .toThrow(expect.objectContaining({ code: 'ConnectorResourceBindingMismatch' }))
+
+    const mutationCollision = createProviderOptions(fetcher)
+    mutationCollision.resources.issue!.mutation.status = 'TITLE'
+    expect(() => new ConfiguredOAuthConnectorAdapter(mutationCollision))
+      .toThrow(expect.objectContaining({ code: 'ConnectorMutationMappingInvalid' }))
+
+    const reservedHeader = createProviderOptions(fetcher)
+    reservedHeader.resources.issue!.idempotencyHeader = 'x-MUKUROJI-origin'
+    expect(() => new ConfiguredOAuthConnectorAdapter(reservedHeader))
+      .toThrow(expect.objectContaining({ code: 'ConnectorHeaderInvalid' }))
+
+    const headerCollision = createProviderOptions(fetcher)
+    headerCollision.resources.issue!.idempotencyHeader = 'X-Provider-Version'
+    headerCollision.resources.issue!.versionHeader = 'x-provider-version'
+    expect(() => new ConfiguredOAuthConnectorAdapter(headerCollision))
+      .toThrow(expect.objectContaining({ code: 'ConnectorHeaderInvalid' }))
+  })
+
+  test('wraps transport failures without exposing provider error details', async () => {
+    const adapter = new ConfiguredOAuthConnectorAdapter(createProviderOptions(
+      (async () => {
+        throw new Error('getaddrinfo ENOTFOUND token=provider-secret')
+      }) as typeof fetch,
+    ))
+    try {
+      await adapter.pull({
+        accessToken: 'access-secret',
+        externalAccountId: '42',
+        scopes: ['repo'],
+      }, 'issue')
+      throw new Error('expected provider request to fail')
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: 'ConnectorProviderUnavailable',
+        retryable: true,
+        message: 'Connector provider request could not be completed.',
+      })
+      expect(String(error)).not.toContain('provider-secret')
+    }
+  })
+
+  test('cancels streamed provider responses as soon as the 2 MiB limit is exceeded', async () => {
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(1024 * 1024))
+        controller.enqueue(new Uint8Array(1024 * 1024))
+        controller.enqueue(new Uint8Array(1))
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    const adapter = new ConfiguredOAuthConnectorAdapter(createProviderOptions(
+      (async () => new Response(body, { status: 200 })) as typeof fetch,
+    ))
+
+    await expect(adapter.pull({
+      accessToken: 'access-secret',
+      externalAccountId: '42',
+      scopes: ['repo'],
+    }, 'issue')).rejects.toMatchObject({
+      code: 'ConnectorProviderResponseMalformed',
+      message: 'Connector provider response is too large.',
+    })
+    expect(cancelled).toBe(true)
   })
 
   test('round-trips the validated credential envelope and rejects malformed storage', () => {
@@ -577,9 +656,10 @@ describe('ConnectorOAuthStateManager', () => {
       returnUrl: '/settings/developer',
       redirectUri: 'https://app.test/callback',
     })
-    const tampered = `${created.state.slice(0, -1)}${
-      created.state.endsWith('a') ? 'b' : 'a'
-    }`
+    const stateSegments = created.state.split('.')
+    const signature = stateSegments[2]!
+    stateSegments[2] = `${signature[0] === 'a' ? 'b' : 'a'}${signature.slice(1)}`
+    const tampered = stateSegments.join('.')
     await expect(manager.consume(tampered)).rejects.toMatchObject({
       code: 'ConnectorOAuthStateInvalid',
     })

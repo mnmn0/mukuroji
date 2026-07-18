@@ -1,4 +1,8 @@
-import { createHash } from 'node:crypto'
+import {
+  createHash,
+  createHmac,
+  timingSafeEqual,
+} from 'node:crypto'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import {
   DynamoDBDocumentClient,
@@ -30,6 +34,9 @@ import type {
 /** Stuck conflict resolution claim を takeover できるまでの既定秒数です。 */
 export const CONNECTOR_CONFLICT_RESOLUTION_LEASE_SECONDS = 15 * 60
 
+/** Public conflict cursor の既定有効期間秒数です。 */
+export const CONNECTOR_SYNC_CURSOR_TTL_SECONDS = 15 * 60
+
 /** DynamoDB connector sync store の構築 options です。 */
 export type DynamoDbConnectorSyncPersistenceOptions = {
   /** Developer platform single-table 名です。 */
@@ -44,6 +51,14 @@ export type DynamoDbConnectorSyncPersistenceOptions = {
   clock?: () => Date
   /** Stuck resolution claim を takeover できるまでの秒数です。 */
   resolutionLeaseSeconds?: number
+  /** Cursor HMAC と production 判定に使う environment です。 */
+  environment?: Readonly<Record<string, string | undefined>>
+  /** 新規 cursor を署名する current HMAC secret です。 */
+  cursorSigningSecret?: string
+  /** Rotation grace period 中に検証だけ許可する旧 HMAC secrets です。 */
+  previousCursorSigningSecrets?: readonly string[]
+  /** Cursor の有効期間秒数です。 */
+  cursorTtlSeconds?: number
 }
 
 /** Connector sync state の single-table row です。 */
@@ -90,6 +105,10 @@ type ExternalLinkRow = {
   value: ExternalWorkItemLink
   /** Storage CAS revision です。 */
   version: number
+  /** Connector poll 対象だけに付与する sparse GSI partition key です。 */
+  lookupKey?: string
+  /** Workspace と link ID で安定化した sparse GSI sort key です。 */
+  lookupSortKey?: string
 }
 
 /** DeveloperPlatformTable に connector sync state/conflict を永続化します。 */
@@ -106,15 +125,32 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
   private readonly clock: () => Date
   /** Stuck resolution claim を takeover できるまでの秒数です。 */
   private readonly resolutionLeaseSeconds: number
+  /** 新規 public cursor を署名する HMAC secret です。 */
+  private readonly cursorSigningSecret: string
+  /** Current と rotation grace period 中の旧 cursor HMAC secrets です。 */
+  private readonly cursorVerificationSecrets: readonly string[]
+  /** Public cursor の有効期間秒数です。 */
+  private readonly cursorTtlSeconds: number
 
   /** Environment または明示 options から durable store を作成します。 */
   constructor(options: DynamoDbConnectorSyncPersistenceOptions = {}) {
+    const environment = options.environment ?? process.env
+    const production = isProductionEnvironment(environment)
+    const configuredTableName = options.tableName ??
+      environment.DEVELOPER_PLATFORM_TABLE_NAME?.trim()
+    if (production && !configuredTableName) {
+      throw new ConnectorRuntimeError(
+        'ConnectorSyncPersistenceConfigurationMissing',
+        'Developer platform table name is required in production.',
+      )
+    }
     this.tableName = requireText(
-      options.tableName ?? process.env.DEVELOPER_PLATFORM_TABLE_NAME ??
+      configuredTableName ??
         'mukuroji-developer-platform-local',
       'Developer platform table name',
     )
-    const auditTableName = options.auditTableName ?? getConfiguredAuditTableName()
+    const auditTableName = options.auditTableName ??
+      getConfiguredAuditTableName(environment)
     if (!auditTableName) {
       throw new ConnectorRuntimeError(
         'ConnectorAuditOutboxUnavailable',
@@ -122,9 +158,17 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       )
     }
     this.auditTableName = auditTableName
-    this.documentClient = options.documentClient ?? createDocumentClient()
+    this.documentClient = options.documentClient ?? createDocumentClient(environment)
+    const configuredLookupIndexName = options.lookupIndexName ??
+      environment.DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME?.trim()
+    if (production && !configuredLookupIndexName) {
+      throw new ConnectorRuntimeError(
+        'ConnectorSyncPersistenceConfigurationMissing',
+        'Developer platform lookup index name is required in production.',
+      )
+    }
     this.lookupIndexName = requireText(
-      options.lookupIndexName ?? process.env.DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME ??
+      configuredLookupIndexName ??
         'LookupKeyIndex',
       'Developer platform lookup index name',
     )
@@ -139,6 +183,46 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       throw new ConnectorRuntimeError(
         'ConnectorSyncResolutionLeaseInvalid',
         'Connector sync resolution lease must be between 60 and 3600 seconds.',
+      )
+    }
+    const configuredCursorSigningSecret = options.cursorSigningSecret ??
+      environment.CONNECTOR_SYNC_CURSOR_SIGNING_SECRET?.trim() ??
+      environment.CONNECTOR_SYNC_ORIGIN_SIGNING_SECRET?.trim()
+    if (production && !configuredCursorSigningSecret) {
+      throw new ConnectorRuntimeError(
+        'ConnectorSyncPersistenceConfigurationMissing',
+        'Connector sync cursor signing secret is required in production.',
+      )
+    }
+    this.cursorSigningSecret = requireSigningSecret(
+      configuredCursorSigningSecret ??
+        'mukuroji-local-connector-sync-cursor-signing-secret',
+    )
+    const previousCursorSigningSecrets =
+      options.previousCursorSigningSecrets ??
+      readPreviousSigningSecrets(
+        environment.CONNECTOR_SYNC_CURSOR_PREVIOUS_SIGNING_SECRETS_JSON,
+      )
+    if (previousCursorSigningSecrets.length > 3) {
+      throw new ConnectorRuntimeError(
+        'ConnectorSyncCursorSigningSecretInvalid',
+        'Connector sync cursor supports up to three previous signing secrets.',
+      )
+    }
+    this.cursorVerificationSecrets = [
+      this.cursorSigningSecret,
+      ...previousCursorSigningSecrets.map(requireSigningSecret),
+    ]
+    this.cursorTtlSeconds = options.cursorTtlSeconds ??
+      CONNECTOR_SYNC_CURSOR_TTL_SECONDS
+    if (
+      !Number.isSafeInteger(this.cursorTtlSeconds) ||
+      this.cursorTtlSeconds < 60 ||
+      this.cursorTtlSeconds > 24 * 60 * 60
+    ) {
+      throw new ConnectorRuntimeError(
+        'ConnectorSyncCursorTtlInvalid',
+        'Connector sync cursor TTL must be between 60 and 86400 seconds.',
       )
     }
   }
@@ -224,11 +308,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       updatedAt: syncedAt,
       lastSyncedAt: syncedAt,
     }
-    const nextLink: ExternalLinkRow = {
-      ...currentLink,
-      value: syncedLink,
-      version: currentLink.version + 1,
-    }
+    const nextLink = createExternalLinkReplacementRow(currentLink, syncedLink)
     const auditPut = input.deferLinkStatus
       ? undefined
       : createPlatformAuditPut(this.auditTableName, {
@@ -333,11 +413,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       updatedAt,
       ...(normalizedStatus === 'synced' ? { lastSyncedAt: updatedAt } : {}),
     }
-    const next: ExternalLinkRow = {
-      ...row,
-      value: link,
-      version: row.version + 1,
-    }
+    const next = createExternalLinkReplacementRow(row, link)
     const auditPut = createPlatformAuditPut(this.auditTableName, {
       workspaceId,
       eventType: 'external-link.updated',
@@ -379,6 +455,79 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
           { retryable: true },
         )
       }
+      throw persistenceFailure(error)
+    }
+  }
+
+  /** Poll inventory generation と一致する pending link だけを synced へ CAS 遷移します。 */
+  async acknowledgePendingLink(
+    workspaceIdValue: string,
+    linkIdValue: string,
+    expectedUpdatedAtValue: string,
+    syncedAtValue: string,
+  ) {
+    const workspaceId = requireIdentifier(workspaceIdValue, 'Workspace ID')
+    const linkId = requireIdentifier(linkIdValue, 'External link ID')
+    const expectedUpdatedAt = requireTimestamp(
+      expectedUpdatedAtValue,
+      'Expected external link update timestamp',
+    )
+    const syncedAt = requireTimestamp(
+      syncedAtValue,
+      'Connector sync timestamp',
+    )
+    const rowValue = await this.getRow(workspaceId, externalLinkRecordKey(linkId))
+    if (!rowValue) return false
+    const row = readExternalLinkRow(rowValue)
+    if (
+      row.value.syncStatus !== 'pending' ||
+      row.value.updatedAt !== expectedUpdatedAt ||
+      (
+        row.value.syncDirection !== 'inbound' &&
+        row.value.syncDirection !== 'bidirectional'
+      )
+    ) return false
+    const link: ExternalWorkItemLink = {
+      ...row.value,
+      syncStatus: 'synced',
+      updatedAt: syncedAt,
+      lastSyncedAt: syncedAt,
+    }
+    const next = createExternalLinkReplacementRow(row, link)
+    const auditPut = createPlatformAuditPut(this.auditTableName, {
+      workspaceId,
+      eventType: 'external-link.updated',
+      entityType: 'external-link',
+      entityId: link.id,
+      transitionId: `pending-poll-ack:${expectedUpdatedAt}:${syncedAt}`,
+      teamId: link.teamId,
+      occurredAt: syncedAt,
+      action: 'updated',
+      summary: 'External Work Item link pending synchronization was acknowledged.',
+      metadata: {
+        externalLinkId: link.id,
+        workItemId: link.workItemId,
+        installationId: link.installationId,
+        resourceType: link.resourceType,
+        syncDirection: link.syncDirection,
+        syncStatus: link.syncStatus,
+      },
+    })
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          createVersionedPut(this.tableName, next, row.version),
+          createActiveConnectorConditionCheck(
+            this.tableName,
+            workspaceId,
+            link.installationId,
+          ),
+          auditPut,
+        ],
+      }))
+      return true
+    } catch (error) {
+      if (isTransactionConditionFailure(error)) return false
       throw persistenceFailure(error)
     }
   }
@@ -427,11 +576,10 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       syncStatus: 'conflict',
       updatedAt: record.conflict.detectedAt,
     }
-    const nextLink: ExternalLinkRow = {
-      ...currentLink,
-      value: conflictedLink,
-      version: currentLink.version + 1,
-    }
+    const nextLink = createExternalLinkReplacementRow(
+      currentLink,
+      conflictedLink,
+    )
     const auditPut = createPlatformAuditPut(this.auditTableName, {
       workspaceId: record.workspaceId,
       eventType: 'sync-conflict.created',
@@ -519,7 +667,13 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       ? undefined
       : requireConflictStatus(input.status)
     const exclusiveStartKey = input.cursor
-      ? decodeCursor(input.cursor, workspaceId)
+      ? decodeCursor(
+          input.cursor,
+          workspaceId,
+          this.lookupIndexName,
+          this.cursorVerificationSecrets,
+          this.clock().getTime(),
+        )
       : undefined
     try {
       const items: WorkItemSyncConflict[] = []
@@ -555,7 +709,14 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
         }
         startKey = response.LastEvaluatedKey
         if (items.length >= limit) {
-          const nextCursor = encodeCursor(workspaceId, startKey)
+          const nextCursor = encodeCursor(
+            workspaceId,
+            startKey,
+            this.lookupIndexName,
+            this.cursorSigningSecret,
+            this.clock().getTime(),
+            this.cursorTtlSeconds,
+          )
           return { items, hasMore: true, nextCursor }
         }
       }
@@ -598,14 +759,15 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
     const row = readConflictRow(value)
     if (row.value.conflict.status !== 'open') return undefined
     if (row.value.resolutionOperationId) {
-      if (row.value.resolutionOperationId === operationId) {
-        return 'same-operation' as const
-      }
       const claimedAt = Date.parse(row.value.resolutionStartedAt ?? '')
-      if (
+      const claimIsActive =
         Number.isFinite(claimedAt) &&
         claimedAt + this.resolutionLeaseSeconds * 1_000 > this.clock().getTime()
-      ) return 'busy' as const
+      if (claimIsActive) {
+        return row.value.resolutionOperationId === operationId
+          ? 'same-operation' as const
+          : 'busy' as const
+      }
     }
     const next: ConnectorSyncConflictRow = {
       ...row,
@@ -742,11 +904,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
         ? { lastSyncedAt: resolvedAt }
         : {}),
     }
-    const nextLink: ExternalLinkRow = {
-      ...currentLink,
-      value: terminalLink,
-      version: currentLink.version + 1,
-    }
+    const nextLink = createExternalLinkReplacementRow(currentLink, terminalLink)
     const auditPut = createPlatformAuditPut(this.auditTableName, {
       workspaceId,
       eventType: 'sync-conflict.resolved',
@@ -829,9 +987,16 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
   }
 }
 
-/** Environment 設定から production connector sync store を作成します。 */
-export function createDynamoDbConnectorSyncPersistenceFromEnvironment() {
-  return new DynamoDbConnectorSyncPersistence()
+/**
+ * Environment 設定から production connector sync store を作成します。
+ *
+ * @param environment table/index/cursor key を読む environment です。
+ * @returns Durable connector sync persistence です。
+ */
+export function createDynamoDbConnectorSyncPersistenceFromEnvironment(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  return new DynamoDbConnectorSyncPersistence({ environment })
 }
 
 /** Connector sync persistence が platform audit へ渡す入力です。 */
@@ -930,6 +1095,31 @@ function createVersionedPut(
   }
 }
 
+function createExternalLinkReplacementRow(
+  row: ExternalLinkRow,
+  link: ExternalWorkItemLink,
+): ExternalLinkRow {
+  const {
+    lookupKey: _lookupKey,
+    lookupSortKey: _lookupSortKey,
+    ...baseRow
+  } = row
+  const isPollable = link.syncStatus !== 'paused' &&
+    link.syncStatus !== 'conflict' &&
+    (link.syncDirection === 'inbound' || link.syncDirection === 'bidirectional')
+  return {
+    ...baseRow,
+    value: link,
+    version: row.version + 1,
+    ...(isPollable
+      ? {
+          lookupKey: 'CONNECTOR_SYNC_LINK',
+          lookupSortKey: `${row.workspaceId}#${link.id}`,
+        }
+      : {}),
+  }
+}
+
 function normalizeConflictRecord(value: StoredConnectorSyncConflict) {
   const workspaceId = requireIdentifier(value.workspaceId, 'Workspace ID')
   const conflict = structuredClone(value.conflict)
@@ -1004,7 +1194,14 @@ function sameConflictIdentity(
     left.conflict.externalRevision === right.conflict.externalRevision
 }
 
-function encodeCursor(workspaceId: string, key: Record<string, unknown>) {
+function encodeCursor(
+  workspaceId: string,
+  key: Record<string, unknown>,
+  lookupIndexName: string,
+  signingSecret: string,
+  issuedAt: number,
+  ttlSeconds: number,
+) {
   if (
     key.workspaceId !== workspaceId ||
     typeof key.recordKey !== 'string' ||
@@ -1013,20 +1210,56 @@ function encodeCursor(workspaceId: string, key: Record<string, unknown>) {
   ) {
     throw invalidStoredRow('connector conflict cursor')
   }
-  return Buffer.from(JSON.stringify({
+  const payload = Buffer.from(JSON.stringify({
     workspaceId,
+    lookupIndexName,
+    issuedAt,
+    expiresAt: issuedAt + ttlSeconds * 1_000,
     recordKey: key.recordKey,
     lookupKey: key.lookupKey,
     lookupSortKey: key.lookupSortKey,
   })).toString('base64url')
+  const signature = createHmac('sha256', signingSecret)
+    .update(`connector-sync-cursor-v1\0${payload}`)
+    .digest('base64url')
+  return `v1.${payload}.${signature}`
 }
 
-function decodeCursor(value: string, workspaceId: string) {
+function decodeCursor(
+  value: string,
+  workspaceId: string,
+  lookupIndexName: string,
+  verificationSecrets: readonly string[],
+  now: number,
+) {
   try {
-    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as unknown
+    if (value.length > 4_096) throw new Error('invalid')
+    const [version, payload, signature, extra] = value.split('.')
+    if (
+      version !== 'v1' ||
+      !payload ||
+      !signature ||
+      extra !== undefined ||
+      !/^[A-Za-z0-9_-]+$/u.test(payload) ||
+      !/^[A-Za-z0-9_-]{43}$/u.test(signature) ||
+      !verificationSecrets.some((secret) =>
+        isAuthenticCursorSignature(payload, signature, secret)
+      )
+    ) throw new Error('invalid')
+    const parsed = JSON.parse(
+      Buffer.from(payload, 'base64url').toString('utf8'),
+    ) as unknown
     if (
       !isRecord(parsed) ||
       parsed.workspaceId !== workspaceId ||
+      parsed.lookupIndexName !== lookupIndexName ||
+      typeof parsed.issuedAt !== 'number' ||
+      !Number.isSafeInteger(parsed.issuedAt) ||
+      typeof parsed.expiresAt !== 'number' ||
+      !Number.isSafeInteger(parsed.expiresAt) ||
+      parsed.issuedAt > now + 60_000 ||
+      parsed.expiresAt <= now ||
+      parsed.expiresAt <= parsed.issuedAt ||
       typeof parsed.recordKey !== 'string' ||
       !parsed.recordKey.startsWith('SYNCCONFLICT#') ||
       parsed.lookupKey !== conflictLookupKey(workspaceId) ||
@@ -1046,18 +1279,36 @@ function decodeCursor(value: string, workspaceId: string) {
   }
 }
 
-function createDocumentClient() {
-  const endpoint = process.env.DYNAMODB_ENDPOINT ??
-    process.env.AWS_ENDPOINT_URL_DYNAMODB ??
-    process.env.AWS_ENDPOINT_URL
+function isAuthenticCursorSignature(
+  payload: string,
+  signature: string,
+  secret: string,
+) {
+  const expected = createHmac('sha256', secret)
+    .update(`connector-sync-cursor-v1\0${payload}`)
+    .digest()
+  const actual = Buffer.from(signature, 'base64url')
+  return actual.toString('base64url') === signature &&
+    actual.byteLength === expected.byteLength &&
+    timingSafeEqual(actual, expected)
+}
+
+function createDocumentClient(
+  environment: Readonly<Record<string, string | undefined>>,
+) {
+  const endpoint = environment.DYNAMODB_ENDPOINT ??
+    environment.AWS_ENDPOINT_URL_DYNAMODB ??
+    environment.AWS_ENDPOINT_URL
   const client = new DynamoDBClient({
-    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
+    region: environment.AWS_REGION ??
+      environment.AWS_DEFAULT_REGION ??
+      'ap-northeast-1',
     ...(endpoint
       ? {
           endpoint,
           credentials: {
-            accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
-            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
+            accessKeyId: environment.AWS_ACCESS_KEY_ID ?? 'test',
+            secretAccessKey: environment.AWS_SECRET_ACCESS_KEY ?? 'test',
           },
         }
       : {}),
@@ -1207,6 +1458,48 @@ function isTransactionConditionFailure(error: unknown) {
 
 function isNamedError(error: unknown, name: string) {
   return error instanceof Error && error.name === name
+}
+
+function requireSigningSecret(value: string) {
+  if (
+    typeof value !== 'string' ||
+    value !== value.trim() ||
+    Buffer.byteLength(value, 'utf8') < 32 ||
+    Buffer.byteLength(value, 'utf8') > 4_096
+  ) {
+    throw new ConnectorRuntimeError(
+      'ConnectorSyncCursorSigningSecretInvalid',
+      'Connector sync cursor signing secret is invalid.',
+    )
+  }
+  return value
+}
+
+function readPreviousSigningSecrets(value: string | undefined) {
+  if (!value?.trim()) return []
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length > 3 ||
+      parsed.some((secret) => typeof secret !== 'string')
+    ) throw new Error('invalid')
+    return parsed.map(requireSigningSecret)
+  } catch (error) {
+    if (error instanceof ConnectorRuntimeError) throw error
+    throw new ConnectorRuntimeError(
+      'ConnectorSyncCursorSigningSecretInvalid',
+      'Previous connector sync cursor signing secrets are invalid.',
+    )
+  }
+}
+
+function isProductionEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+) {
+  return environment.NODE_ENV === 'production' ||
+    Boolean(environment.AWS_LAMBDA_FUNCTION_NAME) ||
+    Boolean(environment.AWS_EXECUTION_ENV)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

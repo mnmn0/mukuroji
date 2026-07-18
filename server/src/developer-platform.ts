@@ -83,14 +83,40 @@ export const WEBHOOK_DELIVERY_DEFAULT_LIMIT = 50
 /** Webhook delivery の最大取得件数です。 */
 export const WEBHOOK_DELIVERY_MAX_LIMIT = 100
 
+/** 一つの Workspace に保存できる Webhook subscription 上限です。 */
+export const WEBHOOK_SUBSCRIPTION_LIMIT = 1_000
+
+/** 一つの connector installation に保存できる external link 上限です。 */
+export const EXTERNAL_LINK_INSTALLATION_LIMIT = 2_000
+
+/** 一つの Work Item に保存できる external link 上限です。 */
+export const EXTERNAL_LINK_WORK_ITEM_LIMIT = 2_000
+
 /** Webhook を自動 retry する最大 attempt 数です。 */
 export const WEBHOOK_MAX_ATTEMPTS = 8
+
+/** Provider credential refresh claim を takeover できるまでの lease 期間です。 */
+export const CONNECTOR_CREDENTIAL_REFRESH_LEASE_SECONDS = 60
 
 /** Webhook signature timestamp に許容する既定 clock skew です。 */
 export const WEBHOOK_SIGNATURE_TOLERANCE_SECONDS = 5 * 60
 
 /** DynamoDB の lookupKey GSI 既定名です。 */
 export const DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME = 'LookupKeyIndex'
+
+/** External link installation index が受け付ける resource 種別です。 */
+const EXTERNAL_LINK_RESOURCE_TYPES = [
+  'issue',
+  'merge-request',
+  'commit',
+  'deploy',
+] as const satisfies readonly ExternalWorkItemLink['resourceType'][]
+
+/** External link index を一度に評価する page size です。 */
+const EXTERNAL_LINK_INDEX_PAGE_SIZE = 100
+
+/** 一つの filter から解決できる external links の hard cap です。 */
+const EXTERNAL_LINK_INDEX_RESULT_LIMIT = EXTERNAL_LINK_INSTALLATION_LIMIT
 
 /** Domain mutation と同じ transaction で idempotency response を確定する token です。 */
 export type IdempotencyMutationToken = {
@@ -454,10 +480,41 @@ export type RecoverConnectorRequest = {
   expectedReauthorizationStateId?: string
   /** Refresh CAS が比較する置換前の serialized credential です。 */
   expectedCredential?: string
+  /** Provider refresh 呼び出し前に取得した durable claim ID です。 */
+  refreshClaimId?: string
   /** Credential replacement の lifecycle reason です。 */
   reason?: 'reauthorization' | 'refresh' | 'recovery'
   /** Lifecycle audit に記録する mutation actor User ID です。 */
   updatedByUserId?: string
+}
+
+/** Provider refresh side effect の durable claim request です。 */
+export type ClaimConnectorCredentialRefreshRequest = {
+  /** Installation を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Refresh 対象 installation ID です。 */
+  installationId: string
+  /** Claim が比較する現在の serialized credential です。 */
+  expectedCredential: string
+  /** Refresh invocation を一意に束縛する claim ID です。 */
+  claimId: string
+}
+
+/** Provider refresh side effect の durable claim 判定です。 */
+export type ConnectorCredentialRefreshClaimResult =
+  | 'claimed'
+  | 'same-operation'
+  | 'busy'
+  | 'credential-changed'
+
+/** Provider refresh side effect claim の解放 request です。 */
+export type ReleaseConnectorCredentialRefreshRequest = {
+  /** Installation を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Refresh 対象 installation ID です。 */
+  installationId: string
+  /** 解放する current claim ID です。 */
+  claimId: string
 }
 
 /** Connector worker 用 credential 取得 request です。 */
@@ -500,12 +557,16 @@ export type CreateExternalWorkItemLinkRequest = {
 export type ListExternalWorkItemLinksRequest = {
   /** Link を所有する Workspace ID です。 */
   workspaceId: string
+  /** Primary key で一件だけ取得する external link ID です。 */
+  linkId?: string
   /** 指定時に絞り込む canonical Work Item ID です。 */
   workItemId?: string
   /** Work Item filter と組で指定する owner Team ID です。 */
   teamId?: string
   /** 指定時に絞り込む installation ID です。 */
   installationId?: string
+  /** Installation filter と組で指定する provider resource 種別です。 */
+  resourceType?: ExternalWorkItemLink['resourceType']
 }
 
 /** External Work Item link 更新 request です。 */
@@ -757,6 +818,14 @@ export interface DeveloperPlatformClient {
   assertConnectorReauthorizationState(
     request: AssertConnectorReauthorizationStateRequest,
   ): Promise<void>
+  /** Provider refresh side effect の実行権を credential-bound lease で取得します。 */
+  claimConnectorCredentialRefresh(
+    request: ClaimConnectorCredentialRefreshRequest,
+  ): Promise<ConnectorCredentialRefreshClaimResult>
+  /** Provider side effect 前後の失敗時に current refresh claim を解放します。 */
+  releaseConnectorCredentialRefresh(
+    request: ReleaseConnectorCredentialRefreshRequest,
+  ): Promise<boolean>
   /** Credential を置換して connector を connected へ復旧します。 */
   recoverConnector(request: RecoverConnectorRequest): Promise<ConnectorInstallation>
   /** Connector worker 内でのみ使う credential を復号します。 */
@@ -1104,10 +1173,12 @@ type DeveloperPlatformEntryType =
   | 'oauth-app'
   | 'oauth-token'
   | 'webhook-subscription'
+  | 'webhook-subscription-quota'
   | 'webhook-delivery'
   | 'webhook-delivery-index'
   | 'connector-installation'
   | 'external-link'
+  | 'external-link-index'
   | 'external-link-claim'
   | 'work-item-link-fence'
   | 'import-job'
@@ -1136,6 +1207,10 @@ type DeveloperPlatformRecord = {
   connectorCredentialDigest?: string
   /** Connector credential replacement の単調増加 revision です。 */
   connectorCredentialRevision?: number
+  /** Current provider refresh claim ID の SHA-256 digest です。 */
+  connectorCredentialRefreshClaimDigest?: string
+  /** Current provider refresh claim を取得した timestamp です。 */
+  connectorCredentialRefreshClaimedAt?: string
   /** Current connector OAuth reauthorization state ID の SHA-256 digest です。 */
   connectorOAuthStateDigest?: string
   /** Connector OAuth state fencing の単調増加 revision です。 */
@@ -1146,6 +1221,10 @@ type DeveloperPlatformRecord = {
   consumed?: number
   /** Work Item に現在紐づく external-link 数です。 */
   activeLinkCount?: number
+  /** Workspace に作成済みの Webhook subscription 数です。 */
+  subscriptionCount?: number
+  /** Connector installation に作成済みの external-link 数です。 */
+  externalLinkCount?: number
   /** Optimistic conditional update 用 version です。 */
   version: number
 }
@@ -1226,6 +1305,12 @@ type StoredOAuthTokenValue = {
   lastUsedAt?: string
 }
 
+/** Workspace Webhook subscription quota row の非公開 value です。 */
+type StoredWebhookSubscriptionQuotaValue = {
+  /** Quota row が適用する immutable subscription 上限です。 */
+  limit: typeof WEBHOOK_SUBSCRIPTION_LIMIT
+}
+
 /** Idempotency row の非公開 value です。 */
 type StoredIdempotencyValue = {
   /** 同じ raw key に対する request fingerprint digest です。 */
@@ -1255,6 +1340,14 @@ type PreparedIdempotencyCompletionRecord = {
 /** External link uniqueness claim の非公開 value です。 */
 type StoredExternalLinkClaimValue = {
   /** Claim が所有する external link record key です。 */
+  targetRecordKey: string
+}
+
+/** External link の bounded list access pattern を指す locator row です。 */
+type StoredExternalLinkIndexValue = {
+  /** Index が表す access pattern です。 */
+  kind: 'work-item' | 'installation'
+  /** Strongly consistent に再取得する external link record key です。 */
   targetRecordKey: string
 }
 
@@ -1346,6 +1439,8 @@ type SaveExternalLinkResult =
   | 'same-owner'
   | 'conflict'
   | 'installation-changed'
+  | 'installation-limit-exceeded'
+  | 'work-item-limit-exceeded'
   | 'work-item-deleted'
 
 /** Storage 固有の fixed-window 原子更新入力です。 */
@@ -1472,6 +1567,21 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     expectedVersion?: number,
   ): Promise<boolean>
 
+  /** Webhook subscription と Workspace quota、optional receipt を原子的に保存します。 */
+  protected abstract createWebhookSubscriptionRecord(
+    record: DeveloperPlatformRecord,
+    completion?: PreparedIdempotencyCompletionRecord,
+  ): Promise<'created' | 'quota-exceeded' | 'conflict'>
+
+  /** Webhook delivery attempt と subscription health を原子的に保存します。 */
+  protected abstract putWebhookDeliveryAttempt(
+    deliveryRecord: DeveloperPlatformRecord,
+    expectedDeliveryVersion: number,
+    subscriptionRecordKey: string,
+    delivered: boolean,
+    attemptedAt: string,
+  ): Promise<boolean>
+
   /** Delivery 本体と immutable index locator を原子的に新規保存します。 */
   protected abstract createWebhookDeliveryRecords(
     records: readonly DeveloperPlatformRecord[],
@@ -1481,6 +1591,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
   protected abstract saveExternalLinkWithClaim(
     linkRecord: DeveloperPlatformRecord,
     claimRecord: DeveloperPlatformRecord,
+    indexRecords: readonly DeveloperPlatformRecord[],
     installationRecord: DeveloperPlatformRecord,
     auditPut?: AuditTransactWriteItem,
   ): Promise<SaveExternalLinkResult>
@@ -1498,6 +1609,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
   protected abstract deleteExternalLinkWithClaim(
     linkRecord: DeveloperPlatformRecord,
     claimRecordKey: string,
+    indexRecordKeys: readonly string[],
     completion?: PreparedIdempotencyCompletionRecord,
     auditPut?: AuditTransactWriteItem,
   ): Promise<boolean>
@@ -2379,13 +2491,21 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       subscription: clone(subscription),
       signingSecret: secret,
     } satisfies WebhookSecretResult
-    if (!await this.persistMutationRecord(
-      workspaceId,
-      record,
-      { ifAbsent: true },
-      request.idempotency,
-      { status: 201, body: result },
-    )) throw persistenceConflict()
+    const completion = request.idempotency
+      ? await this.prepareIdempotencyCompletionRecord(
+          workspaceId,
+          request.idempotency,
+          { status: 201, body: result },
+        )
+      : undefined
+    const saved = await this.createWebhookSubscriptionRecord(record, completion)
+    if (saved === 'quota-exceeded') {
+      throw conflict(
+        'WebhookSubscriptionLimitExceeded',
+        `A Workspace cannot contain more than ${WEBHOOK_SUBSCRIPTION_LIMIT} Webhook subscriptions.`,
+      )
+    }
+    if (saved !== 'created') throw persistenceConflict()
     return result
   }
 
@@ -2525,7 +2645,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     const authorizedSubscriptionIds = new Set(readIdentifierArray(
       request.authorizedSubscriptionIds,
       'Authorized Webhook subscription IDs',
-      1_000,
+      WEBHOOK_SUBSCRIPTION_LIMIT,
       true,
     ))
     const subscriptions = await this.listWebhookSubscriptions(workspaceId)
@@ -2765,18 +2885,25 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       delivery,
       ...(error ? { lastError: error } : { lastError: undefined }),
     }
-    const saved = await this.putRecord({
-      ...record,
-      value,
-      version: record.version + 1,
-    }, { expectedVersion: record.version })
-    if (!saved) throw persistenceConflict()
-    await this.updateWebhookDeliveryHealth(
+    const subscriptionRecord = await this.requireRecord(
       workspaceId,
-      delivery.subscriptionId,
-      normalizedStatus,
+      createWebhookRecordKey(delivery.subscriptionId),
+      'webhook-subscription',
+      'WebhookSubscriptionNotFound',
+      'Webhook subscription was not found.',
+    )
+    const saved = await this.putWebhookDeliveryAttempt(
+      {
+        ...record,
+        value,
+        version: record.version + 1,
+      },
+      record.version,
+      subscriptionRecord.recordKey,
+      normalizedStatus === 'delivered',
       now,
     )
+    if (!saved) throw persistenceConflict()
     return clone(delivery)
   }
 
@@ -3026,6 +3153,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
             }
           : { connectorCredentialRevision: 0 }),
         connectorOAuthStateRevision: 0,
+        externalLinkCount: 0,
       },
     )
     const auditPut = this.createPlatformAuditPut({
@@ -3252,6 +3380,8 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       current.reauthorizationUrl === undefined &&
       record.secretCiphertext === undefined &&
       record.connectorCredentialDigest === undefined &&
+      record.connectorCredentialRefreshClaimDigest === undefined &&
+      record.connectorCredentialRefreshClaimedAt === undefined &&
       record.connectorOAuthStateDigest === undefined
     if (isNoopDisconnect) {
       await this.pauseConnectorExternalLinks(
@@ -3278,6 +3408,10 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       if (removesCredential) {
         updatedRecord.connectorCredentialRevision = currentCredentialRevision + 1
       }
+    }
+    if (status === 'disconnected' || reauthorizationStateId) {
+      delete updatedRecord.connectorCredentialRefreshClaimDigest
+      delete updatedRecord.connectorCredentialRefreshClaimedAt
     }
     const now = installation.updatedAt
     const auditPut = this.createPlatformAuditPut({
@@ -3352,6 +3486,132 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     }
   }
 
+  /** Provider refresh side effect の実行権を credential-bound durable lease で取得します。 */
+  async claimConnectorCredentialRefresh(
+    request: ClaimConnectorCredentialRefreshRequest,
+    concurrentMutationRetries = 0,
+  ): Promise<ConnectorCredentialRefreshClaimResult> {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const installationId = readIdentifier(
+      request.installationId,
+      'Connector installation ID',
+    )
+    const expectedCredential = requireText(
+      request.expectedCredential,
+      'Expected connector credential',
+    )
+    const claimId = readIdentifier(request.claimId, 'Connector refresh claim ID')
+    const claimDigest = digestConnectorCredentialRefreshClaim(claimId)
+    const record = await this.requireRecord(
+      workspaceId,
+      createConnectorRecordKey(installationId),
+      'connector-installation',
+      'ConnectorInstallationNotFound',
+      'Connector installation was not found.',
+    )
+    const installation = readRecordValue<ConnectorInstallation>(
+      record,
+      'connector-installation',
+    )
+    if (installation.status === 'disconnected' || !record.secretCiphertext) {
+      throw conflict(
+        'ConnectorDisconnected',
+        'Disconnected connector credentials cannot be refreshed.',
+      )
+    }
+    if (record.connectorOAuthStateDigest) {
+      throw conflict(
+        'ConnectorReauthorizationStateRequired',
+        'Current connector reauthorization must complete before credential refresh.',
+      )
+    }
+    if (
+      !record.connectorCredentialDigest ||
+      !secretDigestsEqual(
+        record.connectorCredentialDigest,
+        digestConnectorCredential(expectedCredential),
+      )
+    ) return 'credential-changed'
+    if (
+      record.connectorCredentialRefreshClaimDigest &&
+      record.connectorCredentialRefreshClaimedAt
+    ) {
+      const claimedAt = Date.parse(record.connectorCredentialRefreshClaimedAt)
+      const active = Number.isFinite(claimedAt) &&
+        claimedAt + CONNECTOR_CREDENTIAL_REFRESH_LEASE_SECONDS * 1_000 >
+          this.clock().getTime()
+      if (active) {
+        return secretDigestsEqual(
+            record.connectorCredentialRefreshClaimDigest,
+            claimDigest,
+          )
+          ? 'same-operation'
+          : 'busy'
+      }
+    }
+    const updatedRecord: DeveloperPlatformRecord = {
+      ...record,
+      connectorCredentialRefreshClaimDigest: claimDigest,
+      connectorCredentialRefreshClaimedAt: this.clock().toISOString(),
+      version: record.version + 1,
+    }
+    if (await this.putRecord(
+      updatedRecord,
+      { expectedVersion: record.version },
+    )) return 'claimed'
+    if (concurrentMutationRetries < 3) {
+      return this.claimConnectorCredentialRefresh(
+        request,
+        concurrentMutationRetries + 1,
+      )
+    }
+    throw persistenceConflict()
+  }
+
+  /** Provider side effect 前後の失敗時に current refresh claim を CAS 解放します。 */
+  async releaseConnectorCredentialRefresh(
+    request: ReleaseConnectorCredentialRefreshRequest,
+    concurrentMutationRetries = 0,
+  ): Promise<boolean> {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const installationId = readIdentifier(
+      request.installationId,
+      'Connector installation ID',
+    )
+    const claimId = readIdentifier(request.claimId, 'Connector refresh claim ID')
+    const record = await this.requireRecord(
+      workspaceId,
+      createConnectorRecordKey(installationId),
+      'connector-installation',
+      'ConnectorInstallationNotFound',
+      'Connector installation was not found.',
+    )
+    if (
+      !record.connectorCredentialRefreshClaimDigest ||
+      !secretDigestsEqual(
+        record.connectorCredentialRefreshClaimDigest,
+        digestConnectorCredentialRefreshClaim(claimId),
+      )
+    ) return false
+    const updatedRecord: DeveloperPlatformRecord = {
+      ...record,
+      version: record.version + 1,
+    }
+    delete updatedRecord.connectorCredentialRefreshClaimDigest
+    delete updatedRecord.connectorCredentialRefreshClaimedAt
+    if (await this.putRecord(
+      updatedRecord,
+      { expectedVersion: record.version },
+    )) return true
+    if (concurrentMutationRetries < 3) {
+      return this.releaseConnectorCredentialRefresh(
+        request,
+        concurrentMutationRetries + 1,
+      )
+    }
+    throw persistenceConflict()
+  }
+
   /** Credential を置換して connector を connected へ復旧します。 */
   async recoverConnector(
     request: RecoverConnectorRequest,
@@ -3369,7 +3629,13 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     const expectedCredential = request.expectedCredential === undefined
       ? undefined
       : requireText(request.expectedCredential, 'Expected connector credential')
-    if (expectedReauthorizationStateId && expectedCredential) {
+    const refreshClaimId = request.refreshClaimId === undefined
+      ? undefined
+      : readIdentifier(request.refreshClaimId, 'Connector refresh claim ID')
+    if (
+      expectedReauthorizationStateId &&
+      (expectedCredential || refreshClaimId)
+    ) {
       throw invalid(
         'ConnectorCredentialExpectationInvalid',
         'Credential replacement cannot compare OAuth state and credential together.',
@@ -3384,7 +3650,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     ))
     if (
       (reason === 'reauthorization' && !expectedReauthorizationStateId) ||
-      (reason === 'refresh' && !expectedCredential)
+      (reason === 'refresh' && (!expectedCredential || !refreshClaimId))
     ) {
       throw invalid(
         'ConnectorCredentialExpectationRequired',
@@ -3393,7 +3659,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     }
     if (
       (reason !== 'reauthorization' && expectedReauthorizationStateId) ||
-      (reason !== 'refresh' && expectedCredential)
+      (reason !== 'refresh' && (expectedCredential || refreshClaimId))
     ) {
       throw invalid(
         'ConnectorCredentialExpectationInvalid',
@@ -3450,6 +3716,21 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
         'Connector credential changed before refresh completed.',
       )
     }
+    if (
+      refreshClaimId &&
+      (
+        !record.connectorCredentialRefreshClaimDigest ||
+        !secretDigestsEqual(
+          record.connectorCredentialRefreshClaimDigest,
+          digestConnectorCredentialRefreshClaim(refreshClaimId),
+        )
+      )
+    ) {
+      throw conflict(
+        'ConnectorCredentialRefreshClaimLost',
+        'Connector credential refresh claim is no longer current.',
+      )
+    }
     const {
       lastError: _currentLastError,
       reauthorizationUrl: _currentReauthorizationUrl,
@@ -3478,6 +3759,8 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       connectorOAuthStateRevision: nextOAuthStateRevision,
       version: record.version + 1,
     }
+    delete updatedRecord.connectorCredentialRefreshClaimDigest
+    delete updatedRecord.connectorCredentialRefreshClaimedAt
     delete updatedRecord.connectorOAuthStateDigest
     const auditPut = this.createPlatformAuditPut({
       workspaceId,
@@ -3555,6 +3838,19 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
             digestConnectorCredential(expectedCredential),
           )
         ) {
+          if (
+            !refreshClaimId ||
+            !latest.connectorCredentialRefreshClaimDigest ||
+            !secretDigestsEqual(
+              latest.connectorCredentialRefreshClaimDigest,
+              digestConnectorCredentialRefreshClaim(refreshClaimId),
+            )
+          ) {
+            throw conflict(
+              'ConnectorCredentialRefreshClaimLost',
+              'Connector credential refresh claim is no longer current.',
+            )
+          }
           if (concurrentMutationRetries < 3) {
             return this.recoverConnector(request, concurrentMutationRetries + 1)
           }
@@ -3609,9 +3905,39 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     installationId: string,
     updatedByUserId?: string,
   ) {
-    const records = await this.listRecords(workspaceId, 'EXTERNALLINK#')
-    for (const candidate of records) {
-      let record: DeveloperPlatformRecord | undefined = candidate
+    const indexRecords = await this.listRecords(
+      workspaceId,
+      createExternalLinkInstallationIndexRecordPrefix(installationId),
+    )
+    if (indexRecords.length > EXTERNAL_LINK_INSTALLATION_LIMIT) {
+      throw persistenceInvalid('Connector installation external-link count is invalid.')
+    }
+    const links = await Promise.all(indexRecords.map(async (indexRecord) => {
+      if (indexRecord.entryType !== 'external-link-index') {
+        throw persistenceInvalid('External link installation index row is invalid.')
+      }
+      const index = readRecordValue<StoredExternalLinkIndexValue>(
+        indexRecord,
+        'external-link-index',
+      )
+      if (index.kind !== 'installation') {
+        throw persistenceInvalid('External link installation index kind is invalid.')
+      }
+      const target = await this.getRecord(workspaceId, index.targetRecordKey)
+      if (target?.entryType !== 'external-link') {
+        throw persistenceInvalid('External link installation index target is invalid.')
+      }
+      const link = readRecordValue<ExternalWorkItemLink>(target, 'external-link')
+      if (link.installationId !== installationId) {
+        throw persistenceInvalid('External link installation index scope is invalid.')
+      }
+      return clone(link)
+    }))
+    for (const candidate of links) {
+      let record = await this.getRecord(
+        workspaceId,
+        createExternalLinkRecordKey(candidate.id),
+      )
       for (let attempt = 0; attempt < 3 && record; attempt += 1) {
         const link = readRecordValue<ExternalWorkItemLink>(record, 'external-link')
         if (link.installationId !== installationId || link.syncStatus === 'paused') {
@@ -3622,11 +3948,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
           syncStatus: 'paused',
           updatedAt: this.clock().toISOString(),
         }
-        const nextRecord: DeveloperPlatformRecord = {
-          ...record,
-          value: paused,
-          version: record.version + 1,
-        }
+        const nextRecord = createExternalLinkReplacementRecord(record, paused)
         const auditPut = this.createPlatformAuditPut({
           workspaceId,
           eventType: 'external-link.updated',
@@ -3748,11 +4070,9 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       createExternalLinkRecordKey(id),
       'external-link',
       link,
-      {
-        lookupKey: 'CONNECTOR_SYNC_LINK',
-        lookupSortKey: `${workspaceId}#${id}`,
-      },
+      createConnectorPollProjection(link, workspaceId),
     )
+    const indexRecords = createExternalLinkIndexRecords(workspaceId, link)
     const claimRecordKey = createExternalLinkClaimRecordKey(
       installationId,
       resourceType,
@@ -3785,6 +4105,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     const result = await this.saveExternalLinkWithClaim(
       linkRecord,
       claimRecord,
+      indexRecords,
       installationRecord,
       auditPut,
     )
@@ -3798,6 +4119,20 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       throw conflict(
         'ExternalWorkItemTargetDeleted',
         'The Work Item was deleted while the external link was being created.',
+      )
+    }
+    if (result === 'installation-limit-exceeded') {
+      throw new DeveloperPlatformError(
+        413,
+        'ExternalWorkItemLinkLimitExceeded',
+        `A connector installation cannot have more than ${EXTERNAL_LINK_INSTALLATION_LIMIT} external links.`,
+      )
+    }
+    if (result === 'work-item-limit-exceeded') {
+      throw new DeveloperPlatformError(
+        413,
+        'ExternalWorkItemLinkLimitExceeded',
+        `A Work Item cannot have more than ${EXTERNAL_LINK_WORK_ITEM_LIMIT} external links.`,
       )
     }
     if (result === 'conflict') {
@@ -3833,6 +4168,9 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
   /** Workspace 内の external link を取得します。 */
   async listExternalWorkItemLinks(request: ListExternalWorkItemLinksRequest) {
     const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const linkId = request.linkId === undefined
+      ? undefined
+      : readIdentifier(request.linkId, 'External Work Item link ID')
     const workItemId = request.workItemId === undefined
       ? undefined
       : readIdentifier(request.workItemId, 'Work Item ID')
@@ -3848,15 +4186,129 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     const installationId = request.installationId === undefined
       ? undefined
       : readIdentifier(request.installationId, 'Connector installation ID')
-    const records = await this.listRecords(workspaceId, 'EXTERNALLINK#')
-    return records
-      .map((record) => clone(readRecordValue<ExternalWorkItemLink>(record, 'external-link')))
+    const resourceType = request.resourceType === undefined
+      ? undefined
+      : readExternalResourceType(request.resourceType)
+    if (resourceType && !installationId) {
+      throw invalid(
+        'ExternalWorkItemFilterInvalid',
+        'External resourceType filter requires installationId.',
+      )
+    }
+    if (
+      linkId &&
+      (teamId || workItemId || installationId || resourceType)
+    ) {
+      throw invalid(
+        'ExternalWorkItemFilterInvalid',
+        'External link ID cannot be combined with list filters.',
+      )
+    }
+    if (linkId) {
+      const record = await this.getRecord(workspaceId, createExternalLinkRecordKey(linkId))
+      return record?.entryType === 'external-link'
+        ? [clone(readRecordValue<ExternalWorkItemLink>(record, 'external-link'))]
+        : []
+    }
+
+    let links: ExternalWorkItemLink[]
+    if (teamId && workItemId) {
+      links = await this.listExternalLinksByLookupKey(
+        createExternalLinkWorkItemLookupKey(workspaceId, teamId, workItemId),
+        'work-item',
+      )
+    } else if (installationId) {
+      const resourceTypes = resourceType
+        ? [resourceType]
+        : EXTERNAL_LINK_RESOURCE_TYPES
+      links = (await Promise.all(resourceTypes.map((candidate) =>
+        this.listExternalLinksByLookupKey(
+          createExternalLinkInstallationLookupKey(
+            workspaceId,
+            installationId,
+            candidate,
+          ),
+          'installation',
+        )
+      ))).flat()
+    } else {
+      const records = await this.listRecords(workspaceId, 'EXTERNALLINK#')
+      links = records.map((record) =>
+        clone(readRecordValue<ExternalWorkItemLink>(record, 'external-link'))
+      )
+    }
+    return links
       .filter((link) =>
         (teamId === undefined || link.teamId === teamId) &&
         (workItemId === undefined || link.workItemId === workItemId) &&
-        (installationId === undefined || link.installationId === installationId)
+        (installationId === undefined || link.installationId === installationId) &&
+        (resourceType === undefined || link.resourceType === resourceType)
       )
       .sort(compareCreatedAtDescending)
+  }
+
+  /** Materialized GSI locators を bounded page 取得し、authoritative link rows を再検証します。 */
+  private async listExternalLinksByLookupKey(
+    lookupKey: string,
+    expectedKind: StoredExternalLinkIndexValue['kind'],
+  ) {
+    const links = new Map<string, ExternalWorkItemLink>()
+    let exclusiveStartKey: DeveloperPlatformRecordLocator | undefined
+    let previousCursor: string | undefined
+    do {
+      const page = await this.queryLookupIndex({
+        lookupKey,
+        limit: EXTERNAL_LINK_INDEX_PAGE_SIZE,
+        scanIndexForward: false,
+        ...(exclusiveStartKey ? { exclusiveStartKey } : {}),
+      })
+      const resolved = await Promise.all(page.locators.map(async (locator) => {
+        const indexRecord = await this.getRecord(locator.workspaceId, locator.recordKey)
+        if (!indexRecord) return undefined
+        if (
+          indexRecord.entryType !== 'external-link-index' ||
+          indexRecord.lookupKey !== lookupKey ||
+          indexRecord.lookupSortKey !== locator.lookupSortKey
+        ) {
+          throw persistenceInvalid('External link index locator is invalid.')
+        }
+        const index = readRecordValue<StoredExternalLinkIndexValue>(
+          indexRecord,
+          'external-link-index',
+        )
+        if (index.kind !== expectedKind) {
+          throw persistenceInvalid('External link index kind is invalid.')
+        }
+        const target = await this.getRecord(locator.workspaceId, index.targetRecordKey)
+        if (!target) return undefined
+        if (
+          target.entryType !== 'external-link' ||
+          target.recordKey !== index.targetRecordKey
+        ) {
+          throw persistenceInvalid('External link index target is invalid.')
+        }
+        return clone(readRecordValue<ExternalWorkItemLink>(target, 'external-link'))
+      }))
+      for (const link of resolved) {
+        if (link) links.set(link.id, link)
+      }
+      if (links.size > EXTERNAL_LINK_INDEX_RESULT_LIMIT) {
+        throw new DeveloperPlatformError(
+          413,
+          'ExternalWorkItemLinkLimitExceeded',
+          `External link filter cannot return more than ${EXTERNAL_LINK_INDEX_RESULT_LIMIT} items.`,
+        )
+      }
+      const cursor = page.lastEvaluatedKey
+        ? `${page.lastEvaluatedKey.lookupSortKey}\0${page.lastEvaluatedKey.recordKey}`
+        : undefined
+      if (cursor && cursor === previousCursor) {
+        throw persistenceInvalid('External link index pagination did not advance.')
+      }
+      previousCursor = cursor
+      exclusiveStartKey = page.lastEvaluatedKey
+    } while (exclusiveStartKey)
+    return [...links.values()]
   }
 
   /** External link の同期方向を更新し、再同期または一時停止状態へ遷移します。 */
@@ -3914,11 +4366,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       syncStatus: syncDirection === 'none' ? 'paused' : 'pending',
       updatedAt: now,
     }
-    const nextRecord: DeveloperPlatformRecord = {
-      ...record,
-      value: link,
-      version: record.version + 1,
-    }
+    const nextRecord = createExternalLinkReplacementRecord(record, link)
     const auditPut = this.createPlatformAuditPut({
       workspaceId,
       eventType: 'external-link.updated',
@@ -4043,6 +4491,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
         link.resourceType,
         link.externalId,
       ),
+      createExternalLinkIndexRecordKeys(link),
       completion,
       auditPut,
     )
@@ -4672,29 +5121,6 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     return record
   }
 
-  /** Subscription の delivery health summary を更新します。 */
-  private async updateWebhookDeliveryHealth(
-    workspaceId: string,
-    subscriptionId: string,
-    status: WebhookDelivery['status'],
-    now: string,
-  ) {
-    const record = await this.getRecord(workspaceId, createWebhookRecordKey(subscriptionId))
-    if (!record || record.entryType !== 'webhook-subscription') return
-    const current = readRecordValue<WebhookSubscription>(record, 'webhook-subscription')
-    const subscription: WebhookSubscription = {
-      ...current,
-      lastDeliveryAt: now,
-      failureCount: status === 'delivered' ? 0 : current.failureCount + 1,
-      updatedAt: now,
-    }
-    await this.putRecord({
-      ...record,
-      value: subscription,
-      version: record.version + 1,
-    }, { expectedVersion: record.version })
-  }
-
   /** Webhook cursor を復号し、tenant/filter binding を検証します。 */
   private async decodeWebhookCursor(
     encoded: string,
@@ -5019,6 +5445,99 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
     return true
   }
 
+  /** Webhook subscription と quota counter、optional receipt を同じ memory commit にします。 */
+  protected async createWebhookSubscriptionRecord(
+    record: DeveloperPlatformRecord,
+    completion?: PreparedIdempotencyCompletionRecord,
+  ): Promise<'created' | 'quota-exceeded' | 'conflict'> {
+    const recordKey = createMemoryKey(record.workspaceId, record.recordKey)
+    if (this.records.has(recordKey)) return 'conflict'
+    const quotaKey = createMemoryKey(
+      record.workspaceId,
+      createWebhookSubscriptionQuotaRecordKey(),
+    )
+    const quotaRecord = this.records.get(quotaKey)
+    if (quotaRecord && quotaRecord.entryType !== 'webhook-subscription-quota') {
+      return 'conflict'
+    }
+    const subscriptionCount = quotaRecord?.subscriptionCount ?? 0
+    if (subscriptionCount >= WEBHOOK_SUBSCRIPTION_LIMIT) return 'quota-exceeded'
+
+    let completionKey: string | undefined
+    if (completion) {
+      completionKey = createMemoryKey(
+        completion.reservedRecord.workspaceId,
+        completion.reservedRecord.recordKey,
+      )
+      const current = this.records.get(completionKey)
+      if (
+        !current ||
+        current.version !== completion.reservedRecord.version ||
+        current.entryType !== 'idempotency'
+      ) return 'conflict'
+      const value = readRecordValue<StoredIdempotencyValue>(current, 'idempotency')
+      if (
+        value.state !== 'reserved' ||
+        !secretDigestsEqual(value.reservationDigest, completion.reservationDigest) ||
+        value.requestFingerprintDigest !== completion.requestFingerprintDigest
+      ) return 'conflict'
+    }
+
+    this.records.set(quotaKey, {
+      workspaceId: record.workspaceId,
+      recordKey: createWebhookSubscriptionQuotaRecordKey(),
+      entryType: 'webhook-subscription-quota',
+      value: { limit: WEBHOOK_SUBSCRIPTION_LIMIT } satisfies
+        StoredWebhookSubscriptionQuotaValue,
+      subscriptionCount: subscriptionCount + 1,
+      version: (quotaRecord?.version ?? 0) + 1,
+    })
+    this.records.set(recordKey, clone(record))
+    if (completion && completionKey) {
+      this.records.set(completionKey, clone(completion.completedRecord))
+    }
+    return 'created'
+  }
+
+  /** Delivery attempt と subscription health を同じ memory commit にします。 */
+  protected async putWebhookDeliveryAttempt(
+    deliveryRecord: DeveloperPlatformRecord,
+    expectedDeliveryVersion: number,
+    subscriptionRecordKey: string,
+    delivered: boolean,
+    attemptedAt: string,
+  ) {
+    const deliveryKey = createMemoryKey(
+      deliveryRecord.workspaceId,
+      deliveryRecord.recordKey,
+    )
+    const subscriptionKey = createMemoryKey(
+      deliveryRecord.workspaceId,
+      subscriptionRecordKey,
+    )
+    const currentSubscriptionRecord = this.records.get(subscriptionKey)
+    if (
+      this.records.get(deliveryKey)?.version !== expectedDeliveryVersion ||
+      currentSubscriptionRecord?.entryType !== 'webhook-subscription'
+    ) return false
+    const currentSubscription = readRecordValue<WebhookSubscription>(
+      currentSubscriptionRecord,
+      'webhook-subscription',
+    )
+    this.records.set(deliveryKey, clone(deliveryRecord))
+    this.records.set(subscriptionKey, {
+      ...currentSubscriptionRecord,
+      value: {
+        ...currentSubscription,
+        lastDeliveryAt: attemptedAt,
+        failureCount: delivered ? 0 : currentSubscription.failureCount + 1,
+        updatedAt: attemptedAt,
+      },
+      version: currentSubscriptionRecord.version + 1,
+    })
+    return true
+  }
+
   /** Delivery 本体と immutable index locator を原子的に新規保存します。 */
   protected async createWebhookDeliveryRecords(
     records: readonly DeveloperPlatformRecord[],
@@ -5038,6 +5557,7 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
   protected async saveExternalLinkWithClaim(
     linkRecord: DeveloperPlatformRecord,
     claimRecord: DeveloperPlatformRecord,
+    indexRecords: readonly DeveloperPlatformRecord[],
     installationRecord: DeveloperPlatformRecord,
     _auditPut?: AuditTransactWriteItem,
   ) {
@@ -5081,12 +5601,29 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
         )
       : undefined
     if (
-      currentInstallation?.version !== installationRecord.version ||
+      currentInstallation?.entryType !== 'connector-installation' ||
       currentInstallationValue?.status !== 'connected'
-    ) return 'installation-changed' as const
+    ) {
+      return 'installation-changed' as const
+    }
+    const externalLinkCount = currentInstallation?.externalLinkCount
+    if (!Number.isSafeInteger(externalLinkCount) || Number(externalLinkCount) < 0) {
+      throw persistenceInvalid('Connector installation external-link count is invalid.')
+    }
+    if (Number(externalLinkCount) >= EXTERNAL_LINK_INSTALLATION_LIMIT) {
+      return 'installation-limit-exceeded' as const
+    }
     const linkKey = createMemoryKey(linkRecord.workspaceId, linkRecord.recordKey)
-    if (this.records.has(linkKey)) return 'conflict' as const
+    if (
+      this.records.has(linkKey) ||
+      indexRecords.some((indexRecord) =>
+        this.records.has(createMemoryKey(indexRecord.workspaceId, indexRecord.recordKey))
+      )
+    ) return 'conflict' as const
     const activeLinkCount = readWorkItemLinkFenceCount(currentFence)
+    if (activeLinkCount >= EXTERNAL_LINK_WORK_ITEM_LIMIT) {
+      return 'work-item-limit-exceeded' as const
+    }
     this.records.set(fenceKey, {
       workspaceId: linkRecord.workspaceId,
       recordKey: createWorkItemLinkFenceRecordKey(link.teamId, link.workItemId),
@@ -5100,6 +5637,20 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
     })
     this.records.set(claimKey, clone(claimRecord))
     this.records.set(linkKey, clone(linkRecord))
+    this.records.set(createMemoryKey(
+      installationRecord.workspaceId,
+      installationRecord.recordKey,
+    ), {
+      ...currentInstallation,
+      externalLinkCount: Number(externalLinkCount) + 1,
+      version: currentInstallation.version + 1,
+    })
+    for (const indexRecord of indexRecords) {
+      this.records.set(
+        createMemoryKey(indexRecord.workspaceId, indexRecord.recordKey),
+        clone(indexRecord),
+      )
+    }
     return 'created' as const
   }
 
@@ -5147,6 +5698,7 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
   protected async deleteExternalLinkWithClaim(
     linkRecord: DeveloperPlatformRecord,
     claimRecordKey: string,
+    indexRecordKeys: readonly string[],
     completion?: PreparedIdempotencyCompletionRecord,
     _auditPut?: AuditTransactWriteItem,
   ) {
@@ -5171,6 +5723,18 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
     )
     if (claimValue.targetRecordKey !== linkRecord.recordKey) return false
 
+    const indexKeys = indexRecordKeys.map((recordKey) =>
+      createMemoryKey(linkRecord.workspaceId, recordKey)
+    )
+    if (indexKeys.some((indexKey) => {
+      const indexRecord = this.records.get(indexKey)
+      if (indexRecord?.entryType !== 'external-link-index') return true
+      return readRecordValue<StoredExternalLinkIndexValue>(
+        indexRecord,
+        'external-link-index',
+      ).targetRecordKey !== linkRecord.recordKey
+    })) return false
+
     const fenceKey = createMemoryKey(
       linkRecord.workspaceId,
       createWorkItemLinkFenceRecordKey(currentLink.teamId, currentLink.workItemId),
@@ -5190,6 +5754,16 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
       currentFenceValue.teamId !== currentLink.teamId ||
       currentFenceValue.workItemId !== currentLink.workItemId ||
       activeLinkCount < 1
+    ) return false
+    const installationKey = createMemoryKey(
+      linkRecord.workspaceId,
+      createConnectorRecordKey(currentLink.installationId),
+    )
+    const currentInstallation = this.records.get(installationKey)
+    if (
+      currentInstallation?.entryType !== 'connector-installation' ||
+      !Number.isSafeInteger(currentInstallation.externalLinkCount) ||
+      Number(currentInstallation.externalLinkCount) < 1
     ) return false
 
     let idempotencyKey: string | undefined
@@ -5221,6 +5795,7 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
 
     this.records.delete(claimKey)
     this.records.delete(linkKey)
+    for (const indexKey of indexKeys) this.records.delete(indexKey)
     this.records.delete(createMemoryKey(
       linkRecord.workspaceId,
       createConnectorSyncStateRecordKey(currentLink.id),
@@ -5229,6 +5804,11 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
       ...currentFence,
       activeLinkCount: activeLinkCount - 1,
       version: currentFence.version + 1,
+    })
+    this.records.set(installationKey, {
+      ...currentInstallation,
+      externalLinkCount: Number(currentInstallation.externalLinkCount) - 1,
+      version: currentInstallation.version + 1,
     })
     if (completion && idempotencyKey) {
       this.records.set(idempotencyKey, clone(completion.completedRecord))
@@ -5828,6 +6408,130 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
     }
   }
 
+  /** Webhook subscription と quota counter、optional receipt を同じ transaction にします。 */
+  protected async createWebhookSubscriptionRecord(
+    record: DeveloperPlatformRecord,
+    completion?: PreparedIdempotencyCompletionRecord,
+  ): Promise<'created' | 'quota-exceeded' | 'conflict'> {
+    const quotaRecordKey = createWebhookSubscriptionQuotaRecordKey()
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Update: {
+              TableName: this.tableName,
+              Key: { workspaceId: record.workspaceId, recordKey: quotaRecordKey },
+              UpdateExpression:
+                'SET #entryType = if_not_exists(#entryType, :entryType), ' +
+                '#value = if_not_exists(#value, :value), ' +
+                'subscriptionCount = if_not_exists(subscriptionCount, :zero) + :one, ' +
+                '#version = if_not_exists(#version, :zero) + :one',
+              ConditionExpression:
+                '(attribute_not_exists(#entryType) OR ' +
+                '(#entryType = :entryType AND #value.#limit = :limit)) AND ' +
+                '(attribute_not_exists(subscriptionCount) OR subscriptionCount < :limit)',
+              ExpressionAttributeNames: {
+                '#entryType': 'entryType',
+                '#value': 'value',
+                '#limit': 'limit',
+                '#version': 'version',
+              },
+              ExpressionAttributeValues: {
+                ':entryType': 'webhook-subscription-quota',
+                ':value': { limit: WEBHOOK_SUBSCRIPTION_LIMIT } satisfies
+                  StoredWebhookSubscriptionQuotaValue,
+                ':limit': WEBHOOK_SUBSCRIPTION_LIMIT,
+                ':zero': 0,
+                ':one': 1,
+              },
+            },
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: record,
+              ConditionExpression:
+                'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+            },
+          },
+          ...(completion
+            ? [createIdempotencyCompletionTransactWriteItem(this.tableName, completion)]
+            : []),
+        ],
+      }))
+      return 'created'
+    } catch (error) {
+      if (!isTransactionConditionFailure(error)) throw toPersistenceError(error)
+      const quotaRecord = await this.getRecord(record.workspaceId, quotaRecordKey)
+      if (
+        quotaRecord?.entryType === 'webhook-subscription-quota' &&
+        (quotaRecord.subscriptionCount ?? 0) >= WEBHOOK_SUBSCRIPTION_LIMIT
+      ) return 'quota-exceeded'
+      return 'conflict'
+    }
+  }
+
+  /** Delivery attempt と subscription health を同じ DynamoDB transaction にします。 */
+  protected async putWebhookDeliveryAttempt(
+    deliveryRecord: DeveloperPlatformRecord,
+    expectedDeliveryVersion: number,
+    subscriptionRecordKey: string,
+    delivered: boolean,
+    attemptedAt: string,
+  ) {
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: deliveryRecord,
+              ConditionExpression: '#version = :expectedVersion',
+              ExpressionAttributeNames: { '#version': 'version' },
+              ExpressionAttributeValues: { ':expectedVersion': expectedDeliveryVersion },
+            },
+          },
+          {
+            Update: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: deliveryRecord.workspaceId,
+                recordKey: subscriptionRecordKey,
+              },
+              UpdateExpression:
+                'SET #value.#lastDeliveryAt = :attemptedAt, ' +
+                '#value.#updatedAt = :attemptedAt, ' +
+                '#value.#failureCount = ' +
+                (delivered
+                  ? ':zero, '
+                  : 'if_not_exists(#value.#failureCount, :zero) + :one, ') +
+                '#version = #version + :one',
+              ConditionExpression: '#entryType = :entryType',
+              ExpressionAttributeNames: {
+                '#entryType': 'entryType',
+                '#value': 'value',
+                '#lastDeliveryAt': 'lastDeliveryAt',
+                '#updatedAt': 'updatedAt',
+                '#failureCount': 'failureCount',
+                '#version': 'version',
+              },
+              ExpressionAttributeValues: {
+                ':entryType': 'webhook-subscription',
+                ':attemptedAt': attemptedAt,
+                ':zero': 0,
+                ':one': 1,
+              },
+            },
+          },
+        ],
+      }))
+      return true
+    } catch (error) {
+      if (isTransactionConditionFailure(error)) return false
+      throw toPersistenceError(error)
+    }
+  }
+
   /** Delivery 本体と immutable index locator を原子的に新規保存します。 */
   protected async createWebhookDeliveryRecords(
     records: readonly DeveloperPlatformRecord[],
@@ -5854,6 +6558,7 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
   protected async saveExternalLinkWithClaim(
     linkRecord: DeveloperPlatformRecord,
     claimRecord: DeveloperPlatformRecord,
+    indexRecords: readonly DeveloperPlatformRecord[],
     installationRecord: DeveloperPlatformRecord,
     auditPut?: AuditTransactWriteItem,
   ): Promise<SaveExternalLinkResult> {
@@ -5873,22 +6578,29 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
           {
-            ConditionCheck: {
+            Update: {
               TableName: this.tableName,
               Key: {
                 workspaceId: installationRecord.workspaceId,
                 recordKey: installationRecord.recordKey,
               },
+              UpdateExpression:
+                'SET externalLinkCount = externalLinkCount + :one, ' +
+                '#version = #version + :one',
               ConditionExpression:
-                '#version = :expectedVersion AND #value.#status = :connected',
+                '#entryType = :entryType AND #value.#status = :connected AND ' +
+                'externalLinkCount < :limit',
               ExpressionAttributeNames: {
+                '#entryType': 'entryType',
                 '#version': 'version',
                 '#value': 'value',
                 '#status': 'status',
               },
               ExpressionAttributeValues: {
-                ':expectedVersion': installationRecord.version,
+                ':entryType': 'connector-installation',
                 ':connected': 'connected',
+                ':limit': EXTERNAL_LINK_INSTALLATION_LIMIT,
+                ':one': 1,
               },
             },
           },
@@ -5908,7 +6620,8 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
                 'attribute_not_exists(#entryType) OR ' +
                 '(#entryType = :entryType AND #value.#teamId = :teamId AND ' +
                 '#value.#workItemId = :workItemId AND ' +
-                'attribute_not_exists(#value.#deletedAt))',
+                'attribute_not_exists(#value.#deletedAt) AND ' +
+                'activeLinkCount < :limit)',
               ExpressionAttributeNames: {
                 '#entryType': 'entryType',
                 '#value': 'value',
@@ -5927,6 +6640,7 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
                 ':workItemId': link.workItemId,
                 ':zero': 0,
                 ':one': 1,
+                ':limit': EXTERNAL_LINK_WORK_ITEM_LIMIT,
               },
             },
           },
@@ -5946,6 +6660,14 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
                 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
             },
           },
+          ...indexRecords.map((indexRecord) => ({
+            Put: {
+              TableName: this.tableName,
+              Item: indexRecord,
+              ConditionExpression:
+                'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+            },
+          })),
           ...(auditPut ? [auditPut] : []),
         ],
       }))
@@ -5970,10 +6692,15 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
               'connector-installation',
             )
           : undefined
+        if (installation?.status !== 'connected') return 'installation-changed'
         if (
-          currentInstallation?.version !== installationRecord.version ||
-          installation?.status !== 'connected'
-        ) return 'installation-changed'
+          !Number.isSafeInteger(currentInstallation?.externalLinkCount) ||
+          Number(currentInstallation?.externalLinkCount) < 0
+        ) {
+          throw persistenceInvalid(
+            'Connector installation external-link count is invalid.',
+          )
+        }
         const currentFence = await this.getRecord(
           linkRecord.workspaceId,
           fenceRecordKey,
@@ -5984,7 +6711,14 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
             'work-item-link-fence',
           )
           if (fence.deletedAt) return 'work-item-deleted'
+          if (
+            Number(currentFence.activeLinkCount) >= EXTERNAL_LINK_WORK_ITEM_LIMIT
+          ) return 'work-item-limit-exceeded'
         }
+        if (
+          Number(currentInstallation?.externalLinkCount) >=
+            EXTERNAL_LINK_INSTALLATION_LIMIT
+        ) return 'installation-limit-exceeded'
         throw persistenceConflict()
       }
       throw toPersistenceError(error)
@@ -6053,6 +6787,7 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
   protected async deleteExternalLinkWithClaim(
     linkRecord: DeveloperPlatformRecord,
     claimRecordKey: string,
+    indexRecordKeys: readonly string[],
     completion?: PreparedIdempotencyCompletionRecord,
     auditPut?: AuditTransactWriteItem,
   ) {
@@ -6114,6 +6849,48 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
               },
             },
           },
+          {
+            Update: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: linkRecord.workspaceId,
+                recordKey: createConnectorRecordKey(link.installationId),
+              },
+              UpdateExpression:
+                'SET externalLinkCount = externalLinkCount - :one, ' +
+                '#version = #version + :one',
+              ConditionExpression:
+                '#entryType = :entryType AND externalLinkCount >= :one',
+              ExpressionAttributeNames: {
+                '#entryType': 'entryType',
+                '#version': 'version',
+              },
+              ExpressionAttributeValues: {
+                ':entryType': 'connector-installation',
+                ':one': 1,
+              },
+            },
+          },
+          ...indexRecordKeys.map((recordKey) => ({
+            Delete: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: linkRecord.workspaceId,
+                recordKey,
+              },
+              ConditionExpression:
+                '#entryType = :indexEntryType AND #value.#targetRecordKey = :targetRecordKey',
+              ExpressionAttributeNames: {
+                '#entryType': 'entryType',
+                '#value': 'value',
+                '#targetRecordKey': 'targetRecordKey',
+              },
+              ExpressionAttributeValues: {
+                ':indexEntryType': 'external-link-index',
+                ':targetRecordKey': linkRecord.recordKey,
+              },
+            },
+          })),
           {
             Delete: {
               TableName: this.tableName,
@@ -6272,6 +7049,8 @@ type CreateRecordOptions = {
   connectorOAuthStateDigest?: string
   /** Connector OAuth state fencing の単調増加 revision です。 */
   connectorOAuthStateRevision?: number
+  /** Connector installation に作成済みの external-link 数です。 */
+  externalLinkCount?: number
   /** DynamoDB TTL epoch seconds です。 */
   expiresAt?: number
 }
@@ -6392,6 +7171,10 @@ function createWebhookRecordKey(id: string) {
   return `WEBHOOK#${id}`
 }
 
+function createWebhookSubscriptionQuotaRecordKey() {
+  return 'WEBHOOKSUBSCRIPTIONQUOTA'
+}
+
 function createWebhookDeliveryRecordKey(id: string) {
   return `WEBHOOKDELIVERY#${id}`
 }
@@ -6500,6 +7283,110 @@ function createConnectorRecordKey(id: string) {
 
 function createExternalLinkRecordKey(id: string) {
   return `EXTERNALLINK#${id}`
+}
+
+function createExternalLinkWorkItemLookupKey(
+  workspaceId: string,
+  teamId: string,
+  workItemId: string,
+) {
+  return `EXTERNALLINK#WORKITEM#${workspaceId}#${digestText(`${teamId}\0${workItemId}`)}`
+}
+
+function createExternalLinkInstallationLookupKey(
+  workspaceId: string,
+  installationId: string,
+  resourceType: ExternalWorkItemLink['resourceType'],
+) {
+  return `EXTERNALLINK#INSTALLATION#${workspaceId}#${installationId}#${resourceType}`
+}
+
+function createExternalLinkIndexRecordKeys(link: ExternalWorkItemLink) {
+  return [
+    `EXTERNALLINKINDEX#WORKITEM#${link.id}`,
+    `${createExternalLinkInstallationIndexRecordPrefix(link.installationId)}${link.id}`,
+  ] as const
+}
+
+function createExternalLinkInstallationIndexRecordPrefix(installationId: string) {
+  return `EXTERNALLINKINDEX#INSTALLATION#${digestText(installationId)}#`
+}
+
+function createExternalLinkIndexRecords(
+  workspaceId: string,
+  link: ExternalWorkItemLink,
+) {
+  const targetRecordKey = createExternalLinkRecordKey(link.id)
+  const [workItemRecordKey, installationRecordKey] =
+    createExternalLinkIndexRecordKeys(link)
+  const lookupSortKey = `${link.createdAt}#${link.id}`
+  return [
+    createRecord(
+      workspaceId,
+      workItemRecordKey,
+      'external-link-index',
+      {
+        kind: 'work-item',
+        targetRecordKey,
+      } satisfies StoredExternalLinkIndexValue,
+      {
+        lookupKey: createExternalLinkWorkItemLookupKey(
+          workspaceId,
+          link.teamId,
+          link.workItemId,
+        ),
+        lookupSortKey,
+      },
+    ),
+    createRecord(
+      workspaceId,
+      installationRecordKey,
+      'external-link-index',
+      {
+        kind: 'installation',
+        targetRecordKey,
+      } satisfies StoredExternalLinkIndexValue,
+      {
+        lookupKey: createExternalLinkInstallationLookupKey(
+          workspaceId,
+          link.installationId,
+          link.resourceType,
+        ),
+        lookupSortKey,
+      },
+    ),
+  ]
+}
+
+function createConnectorPollProjection(
+  link: ExternalWorkItemLink,
+  workspaceId: string,
+): CreateRecordOptions {
+  return link.syncStatus !== 'paused' &&
+      link.syncStatus !== 'conflict' &&
+      (link.syncDirection === 'inbound' || link.syncDirection === 'bidirectional')
+    ? {
+        lookupKey: 'CONNECTOR_SYNC_LINK',
+        lookupSortKey: `${workspaceId}#${link.id}`,
+      }
+    : {}
+}
+
+function createExternalLinkReplacementRecord(
+  record: DeveloperPlatformRecord,
+  link: ExternalWorkItemLink,
+): DeveloperPlatformRecord {
+  const {
+    lookupKey: _lookupKey,
+    lookupSortKey: _lookupSortKey,
+    ...baseRecord
+  } = record
+  return {
+    ...baseRecord,
+    value: clone(link),
+    version: record.version + 1,
+    ...createConnectorPollProjection(link, record.workspaceId),
+  }
 }
 
 function createConnectorSyncStateRecordKey(linkId: string) {
@@ -6629,6 +7516,10 @@ function digestSecret(value: string) {
 
 function digestConnectorCredential(value: string) {
   return digestText(`connector-credential-v1\0${value}`)
+}
+
+function digestConnectorCredentialRefreshClaim(value: string) {
+  return digestText(`connector-credential-refresh-claim-v1\0${value}`)
 }
 
 function digestConnectorOAuthState(value: string) {
@@ -7316,10 +8207,18 @@ function readStoredRecord(value: Record<string, unknown>) {
     Number(value.version) <= 0 ||
     value.value === undefined ||
     !isOptionalSha256Digest(value.connectorCredentialDigest) ||
+    !isOptionalSha256Digest(value.connectorCredentialRefreshClaimDigest) ||
+    !isOptionalTimestamp(value.connectorCredentialRefreshClaimedAt) ||
+    (
+      (value.connectorCredentialRefreshClaimDigest === undefined) !==
+      (value.connectorCredentialRefreshClaimedAt === undefined)
+    ) ||
     !isOptionalSha256Digest(value.connectorOAuthStateDigest) ||
     !isOptionalNonNegativeInteger(value.connectorCredentialRevision) ||
     !isOptionalNonNegativeInteger(value.connectorOAuthStateRevision) ||
-    !isOptionalNonNegativeInteger(value.activeLinkCount)
+    !isOptionalNonNegativeInteger(value.activeLinkCount) ||
+    !isOptionalNonNegativeInteger(value.subscriptionCount) ||
+    !isOptionalNonNegativeInteger(value.externalLinkCount)
   ) {
     throw persistenceInvalid('Developer platform row is invalid.')
   }
@@ -7329,6 +8228,15 @@ function readStoredRecord(value: Record<string, unknown>) {
 function isOptionalSha256Digest(value: unknown) {
   return value === undefined ||
     (typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value))
+}
+
+function isOptionalTimestamp(value: unknown) {
+  return value === undefined ||
+    (
+      typeof value === 'string' &&
+      !Number.isNaN(Date.parse(value)) &&
+      new Date(value).toISOString() === value
+    )
 }
 
 function isOptionalNonNegativeInteger(value: unknown) {
@@ -7381,10 +8289,12 @@ function isDeveloperPlatformEntryType(value: string): value is DeveloperPlatform
     value === 'oauth-app' ||
     value === 'oauth-token' ||
     value === 'webhook-subscription' ||
+    value === 'webhook-subscription-quota' ||
     value === 'webhook-delivery' ||
     value === 'webhook-delivery-index' ||
     value === 'connector-installation' ||
     value === 'external-link' ||
+    value === 'external-link-index' ||
     value === 'external-link-claim' ||
     value === 'work-item-link-fence' ||
     value === 'import-job' ||

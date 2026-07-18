@@ -82,7 +82,7 @@ function createDefaultWorkItemService(
   const workItem = createWorkItem()
   return {
     async list() {
-      return [workItem]
+      return { items: [workItem], hasMore: false }
     },
     async get() {
       return workItem
@@ -117,9 +117,8 @@ function createDefaultWorkItemService(
     },
     async export() {
       return {
-        contentType: 'text/csv; charset=utf-8',
-        fileName: 'work-items.csv',
-        body: 'id,title\r\nwork-item-1,Example\r\n',
+        items: [workItem],
+        hasMore: false,
       }
     },
     ...overrides,
@@ -336,7 +335,7 @@ describe('public API router', () => {
     }
   })
 
-  test('keeps keyset pages stable when a live collection receives a newer item', async () => {
+  test('keeps store continuation pages stable when a live collection receives a newer item', async () => {
     const workItemAt = (id: string, hour: number) => ({
       ...createWorkItem(id),
       createdAt: `2026-07-18T0${hour}:00:00.000Z`,
@@ -349,8 +348,17 @@ describe('public API router', () => {
       workItemAt('work-item-d', 1),
     ]
     const workItems = createDefaultWorkItemService({
-      async list() {
-        return structuredClone(items)
+      async list(_credential, _filters, continuation, limit) {
+        const offset = continuation
+          ? Math.max(0, items.findIndex((item) => item.id === continuation) + 1)
+          : 0
+        const pageItems = items.slice(offset, offset + limit)
+        const hasMore = offset + pageItems.length < items.length
+        return {
+          items: structuredClone(pageItems),
+          hasMore,
+          ...(hasMore ? { nextContinuation: pageItems.at(-1)!.id } : {}),
+        }
       },
     })
     const { platform, router } = createTestRouter({ workItems })
@@ -810,7 +818,11 @@ describe('public API router', () => {
     let now = new Date(NOW)
     const workItems = createDefaultWorkItemService({
       async list() {
-        return [createWorkItem('work-item-1'), createWorkItem('work-item-2')]
+        return {
+          items: [createWorkItem('work-item-1')],
+          hasMore: true,
+          nextContinuation: 'work-item-1',
+        }
       },
     })
     const { platform, router } = createTestRouter({ workItems, now: () => new Date(now) })

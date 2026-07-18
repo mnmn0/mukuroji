@@ -280,6 +280,7 @@ import {
 } from './connector-sync-runtime'
 import {
   createPublicApiRouter,
+  PUBLIC_API_MAX_PAGE_SIZE,
   PublicApiServiceError,
   type ConnectorAuthorizationService,
   type DeveloperManagementPrincipal,
@@ -289,7 +290,6 @@ import {
   type PublicWorkItemService,
 } from './public-api'
 import {
-  createWorkItemExport,
   previewWorkItemImport,
   WorkItemTransferError,
 } from './work-item-transfer'
@@ -1242,6 +1242,48 @@ type WorkItemListReadOptions = {
   includeArchived?: boolean
 }
 
+/** Public Work Item の DynamoDB-backed bounded page read options です。 */
+type PublicWorkItemPageReadOptions = {
+  /** DynamoDB が一度の Query で評価する最大 item 数です。 */
+  limit: number
+  /** 前 page の LastEvaluatedKey を表す opaque cursor です。 */
+  cursor?: string
+  /** 指定 Project に割り当てられた Work Item だけを返します。 */
+  assignedProjectId?: string
+  /** 指定 assignee の Work Item だけを返します。 */
+  assigneeUserId?: string
+  /** 指定 workflow status の Work Item だけを返します。 */
+  workflowStatusId?: string
+  /** この timestamp より新しく更新された Work Item だけを返します。 */
+  updatedAfter?: string
+  /** Current RBAC で参照できる assigned Project IDs です。 */
+  accessibleProjectIds?: readonly string[]
+}
+
+/** TeamIssueUpdatedAtIndex の page cursor payload です。 */
+type PublicWorkItemPageCursor = {
+  /** Cursor schema version です。 */
+  version: 1
+  /** Cursor を束縛する Team partition key です。 */
+  directoryTeamId: string
+  /** GSI sort key の更新 timestamp です。 */
+  updatedAt: string
+  /** Base table sort key の Work Item ID です。 */
+  issueId: string
+}
+
+/** Workspace 横断 export の Team/page continuation です。 */
+type WorkItemExportContinuation = {
+  /** Continuation schema version です。 */
+  version: 1
+  /** 次に読む Team ID です。 */
+  teamId: string
+  /** Accessible Team 順序を current RBAC directory snapshot に束縛する digest です。 */
+  teamSetDigest: string
+  /** Team 内の次 Work Item page cursor です。 */
+  workItemCursor?: string
+}
+
 /**
  * `/api/work-items` は既存の `{ workItems }` 契約を維持するため cursor を追加せず、
  * pagination 契約を導入するまで hard cap 超過を 413 で fail-closed にします。
@@ -1619,6 +1661,14 @@ type ProjectDirectoryTeamItem = {
    */
   entryType: 'team'
   /**
+   * Webhook authorization GSI の resource partition key です。
+   */
+  webhookAuthorizationKey?: string
+  /**
+   * Webhook authorization GSI の Team sort key です。
+   */
+  webhookAuthorizationSortKey?: string
+  /**
    * 所属チーム ID です。
    */
   teamId: string
@@ -1660,6 +1710,14 @@ type ProjectDirectoryProjectItem = {
    * item 種別です。
    */
   entryType: 'project'
+  /**
+   * Webhook authorization GSI の resource partition key です。
+   */
+  webhookAuthorizationKey?: string
+  /**
+   * Webhook authorization GSI の Project sort key です。
+   */
+  webhookAuthorizationSortKey?: string
   /**
    * 所属チーム ID です。
    */
@@ -1710,6 +1768,14 @@ type ProjectMemberItem = {
    * item 種別です。
    */
   entryType: 'project-member'
+  /**
+   * Webhook authorization GSI の member partition key です。
+   */
+  webhookAuthorizationKey?: string
+  /**
+   * Webhook authorization GSI の Project sort key です。
+   */
+  webhookAuthorizationSortKey?: string
   /**
    * 所属プロジェクト ID です。
    */
@@ -11129,44 +11195,107 @@ async function readAccessibleWorkItems(
   return { workItems: [...workItemsById.values()] }
 }
 
-/**
- * Export 専用に、一覧画面の Team/item hard cap を使わず全 accessible partition を走査します。
- *
- * `DynamoDbTeamIssuesClient.getTeamIssues` は各 Team partition の LastEvaluatedKey を内部で
- * 最終 page まで辿ります。ここでは Team を一つずつ処理し、無制限な並列 Query を避けます。
- */
-async function readAccessibleWorkItemsForExport(
+/** Export を一つの Team/GSI Query に制限し、次 page の store continuation を返します。 */
+async function readAccessibleWorkItemExportPage(
   principal: ProjectPrincipal,
-): Promise<TeamIssueResponseItem[]> {
+  continuation: string | undefined,
+  limit: number,
+) {
   const directory = await projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const projectAccesses = principal.isSystemAdmin
     ? undefined
     : await projectDirectory.getProjectAccessList(principal.directoryId, principal.userKey)
-  const workItems: TeamIssueResponseItem[] = []
-
-  for (const team of directory.teams) {
-    const context: TeamPermissionContext | undefined = principal.isSystemAdmin
-      ? { team, directory }
-      : (() => {
-          const teamProjectIds = new Set(team.projects.map((project) => project.id))
-          const teamProjectAccesses = (projectAccesses ?? []).filter((access) =>
-            teamProjectIds.has(access.projectId)
-          )
-          return teamProjectAccesses.some((access) => projectAccessAllows(access, 'viewer'))
-            ? { team, directory, projectAccesses: teamProjectAccesses }
-            : undefined
-        })()
-    if (!context) continue
-
-    const response = await teamIssues.getTeamIssues(
-      principal.directoryId,
-      team.id,
-      { consistentRead: true },
+  const contexts = directory.teams.flatMap((team) => {
+    if (principal.isSystemAdmin) {
+      return [{ team, directory } satisfies TeamPermissionContext]
+    }
+    const teamProjectIds = new Set(team.projects.map((project) => project.id))
+    const teamProjectAccesses = (projectAccesses ?? []).filter((access) =>
+      teamProjectIds.has(access.projectId) && projectAccessAllows(access, 'viewer')
     )
-    workItems.push(...filterAccessibleTeamIssues(response.issues, principal, context))
-  }
+    return teamProjectAccesses.length > 0
+      ? [{ team, directory, projectAccesses: teamProjectAccesses } satisfies TeamPermissionContext]
+      : []
+  })
+  if (contexts.length === 0) return { items: [], hasMore: false }
 
-  return workItems
+  const teamSetDigest = createHash('sha256')
+    .update(contexts.map((context) => context.team.id).join('\0'))
+    .digest('base64url')
+  const decoded = decodeWorkItemExportContinuation(
+    continuation,
+    teamSetDigest,
+  )
+  const teamIndex = decoded
+    ? contexts.findIndex((context) => context.team.id === decoded.teamId)
+    : 0
+  if (teamIndex < 0) {
+    throw new PublicApiServiceError(
+      400,
+      'invalid_request',
+      'Export cursor no longer matches the accessible Team set.',
+    )
+  }
+  const context = contexts[teamIndex]!
+  const accessibleProjectIds = principal.isSystemAdmin
+    ? undefined
+    : (context.projectAccesses ?? []).map((access) => access.projectId)
+  const page = await teamIssues.getPublicWorkItemPage(
+    principal.directoryId,
+    context.team.id,
+    {
+      limit,
+      ...(decoded?.workItemCursor ? { cursor: decoded.workItemCursor } : {}),
+      ...(accessibleProjectIds ? { accessibleProjectIds } : {}),
+    },
+  )
+  const nextTeam = page.nextCursor ? context : contexts[teamIndex + 1]
+  const nextContinuation = nextTeam
+    ? encodeWorkItemExportContinuation({
+        version: 1,
+        teamId: nextTeam.team.id,
+        teamSetDigest,
+        ...(page.nextCursor ? { workItemCursor: page.nextCursor } : {}),
+      })
+    : undefined
+  return {
+    items: page.issues,
+    hasMore: nextContinuation !== undefined,
+    ...(nextContinuation ? { nextContinuation } : {}),
+  }
+}
+
+function encodeWorkItemExportContinuation(value: WorkItemExportContinuation) {
+  return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
+}
+
+function decodeWorkItemExportContinuation(
+  value: string | undefined,
+  teamSetDigest: string,
+) {
+  if (!value) return undefined
+  try {
+    const decoded = JSON.parse(
+      Buffer.from(value, 'base64url').toString('utf8'),
+    ) as Partial<WorkItemExportContinuation>
+    if (
+      decoded.version !== 1 ||
+      decoded.teamSetDigest !== teamSetDigest ||
+      typeof decoded.teamId !== 'string' ||
+      !decoded.teamId ||
+      (decoded.workItemCursor !== undefined &&
+        (typeof decoded.workItemCursor !== 'string' || !decoded.workItemCursor))
+    ) {
+      throw new TypeError('Invalid export continuation.')
+    }
+    return decoded as WorkItemExportContinuation
+  } catch {
+    throw new PublicApiServiceError(
+      400,
+      'invalid_request',
+      'Export cursor is invalid.',
+    )
+  }
 }
 
 async function readPlanningWorkItemState(
@@ -11210,6 +11339,17 @@ function normalizeWorkItemListReadLimit(value: number | undefined) {
   }
 
   return Math.max(0, Math.floor(value))
+}
+
+function normalizePublicWorkItemPageLimit(value: number) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > PUBLIC_API_MAX_PAGE_SIZE) {
+    throw new ProjectDataError(
+      400,
+      'InvalidWorkItemPageLimit',
+      `Work Item page limit must be between 1 and ${PUBLIC_API_MAX_PAGE_SIZE}.`,
+    )
+  }
+  return value
 }
 
 function createWorkItemListProbeLimit(limit: number | undefined) {
@@ -12796,6 +12936,108 @@ export class DynamoDbTeamIssuesClient {
   }
 
   /**
+   * UpdatedAt GSI を一度だけ Query し、Public API 用の bounded Work Item page を返します。
+   */
+  async getPublicWorkItemPage(
+    directoryId: string,
+    teamId: string,
+    options: PublicWorkItemPageReadOptions,
+  ) {
+    await this.ensureLocalTables()
+    const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
+    const limit = normalizePublicWorkItemPageLimit(options.limit)
+    const exclusiveStartKey = decodePublicWorkItemPageCursor(
+      options.cursor,
+      directoryTeamId,
+    )
+    const expressionAttributeNames: Record<string, string> = {
+      '#directoryTeamId': 'directoryTeamId',
+      '#archivedAt': 'archivedAt',
+    }
+    const expressionAttributeValues: Record<string, unknown> = {
+      ':directoryTeamId': directoryTeamId,
+    }
+    const filterExpressions = ['attribute_not_exists(#archivedAt)']
+
+    if (options.assignedProjectId) {
+      expressionAttributeNames['#assignedProjectId'] = 'assignedProjectId'
+      expressionAttributeValues[':assignedProjectId'] = options.assignedProjectId
+      filterExpressions.push('#assignedProjectId = :assignedProjectId')
+    } else if (
+      options.accessibleProjectIds &&
+      options.accessibleProjectIds.length <= 90
+    ) {
+      expressionAttributeNames['#assignedProjectId'] = 'assignedProjectId'
+      const accessiblePlaceholders = options.accessibleProjectIds.map((projectId, index) => {
+        const placeholder = `:accessibleProject${index}`
+        expressionAttributeValues[placeholder] = projectId
+        return placeholder
+      })
+      filterExpressions.push(
+        accessiblePlaceholders.length > 0
+          ? `(attribute_not_exists(#assignedProjectId) OR #assignedProjectId IN (${accessiblePlaceholders.join(', ')}))`
+          : 'attribute_not_exists(#assignedProjectId)',
+      )
+    }
+    if (options.assigneeUserId) {
+      expressionAttributeNames['#assigneeUserId'] = 'assigneeUserId'
+      expressionAttributeValues[':assigneeUserId'] = options.assigneeUserId
+      filterExpressions.push('#assigneeUserId = :assigneeUserId')
+    }
+    if (options.workflowStatusId) {
+      expressionAttributeNames['#workflowStatusId'] = 'workflowStatusId'
+      expressionAttributeValues[':workflowStatusId'] = options.workflowStatusId
+      filterExpressions.push('#workflowStatusId = :workflowStatusId')
+    }
+    if (options.updatedAfter) {
+      expressionAttributeNames['#updatedAt'] = 'updatedAt'
+      expressionAttributeValues[':updatedAfter'] = options.updatedAfter
+    }
+
+    try {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.issueTableName,
+        IndexName: 'TeamIssueUpdatedAtIndex',
+        KeyConditionExpression: options.updatedAfter
+          ? '#directoryTeamId = :directoryTeamId AND #updatedAt > :updatedAfter'
+          : '#directoryTeamId = :directoryTeamId',
+        FilterExpression: filterExpressions.join(' AND '),
+        ExpressionAttributeNames: expressionAttributeNames,
+        ExpressionAttributeValues: expressionAttributeValues,
+        ExclusiveStartKey: exclusiveStartKey,
+        ScanIndexForward: false,
+        Limit: limit,
+      }))
+      const accessibleProjectIds = options.accessibleProjectIds &&
+          options.accessibleProjectIds.length > 90
+        ? new Set(options.accessibleProjectIds)
+        : undefined
+      const issues = (response.Items ?? [])
+        .map(toTeamIssueItem)
+        .filter((item) =>
+          !accessibleProjectIds ||
+          !item.assignedProjectId ||
+          accessibleProjectIds.has(item.assignedProjectId)
+        )
+        .map(toTeamIssueResponseItem)
+      return {
+        issues,
+        ...(response.LastEvaluatedKey
+          ? {
+              nextCursor: encodePublicWorkItemPageCursor(
+                response.LastEvaluatedKey,
+                directoryTeamId,
+              ),
+            }
+          : {}),
+      }
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
    * DynamoDB から指定 project ID にアサインされた Issue 一覧を取得します。
    */
   async getProjectIssues(
@@ -14138,6 +14380,11 @@ export class DynamoDbProjectDirectoryClient {
         directoryId,
         entryKey: createProjectMemberEntryKey(projectId, normalizedMemberKey),
         entryType: 'project-member',
+        webhookAuthorizationKey: createWebhookMemberAuthorizationKey(
+          directoryId,
+          normalizedMemberKey,
+        ),
+        webhookAuthorizationSortKey: createWebhookProjectAuthorizationSortKey(projectId),
         projectId,
         memberKey: normalizedMemberKey,
         email,
@@ -14407,6 +14654,8 @@ export class DynamoDbProjectDirectoryClient {
         directoryId,
         entryKey: createTeamEntryKey(teamSortOrder, teamId),
         entryType: 'team',
+        webhookAuthorizationKey: createWebhookResourceAuthorizationKey(directoryId),
+        webhookAuthorizationSortKey: createWebhookTeamAuthorizationSortKey(teamId),
         teamId,
         teamSortOrder,
         nameJa: names.nameJa,
@@ -14583,6 +14832,8 @@ export class DynamoDbProjectDirectoryClient {
         directoryId,
         entryKey: createProjectEntryKey(team.teamSortOrder, projectSortOrder, projectId),
         entryType: 'project',
+        webhookAuthorizationKey: createWebhookResourceAuthorizationKey(directoryId),
+        webhookAuthorizationSortKey: createWebhookProjectAuthorizationSortKey(projectId),
         teamId,
         teamSortOrder: team.teamSortOrder,
         nameJa: names.nameJa,
@@ -14596,6 +14847,11 @@ export class DynamoDbProjectDirectoryClient {
         directoryId,
         entryKey: createProjectMemberEntryKey(projectId, creatorMemberKey),
         entryType: 'project-member',
+        webhookAuthorizationKey: createWebhookMemberAuthorizationKey(
+          directoryId,
+          creatorMemberKey,
+        ),
+        webhookAuthorizationSortKey: createWebhookProjectAuthorizationSortKey(projectId),
         projectId,
         memberKey: creatorMemberKey,
         email: creatorMemberKey,
@@ -15673,6 +15929,7 @@ async function ensureLocalTeamIssuesTable(
           { AttributeName: 'issueId', AttributeType: 'S' },
           { AttributeName: 'sortOrder', AttributeType: 'N' },
           { AttributeName: 'directoryProjectId', AttributeType: 'S' },
+          { AttributeName: 'updatedAt', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
@@ -15692,6 +15949,14 @@ async function ensureLocalTeamIssuesTable(
             KeySchema: [
               { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
               { AttributeName: 'sortOrder', KeyType: 'RANGE' },
+            ],
+            Projection: { ProjectionType: 'ALL' },
+          },
+          {
+            IndexName: 'TeamIssueUpdatedAtIndex',
+            KeySchema: [
+              { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
+              { AttributeName: 'updatedAt', KeyType: 'RANGE' },
             ],
             Projection: { ProjectionType: 'ALL' },
           },
@@ -15774,11 +16039,21 @@ async function ensureLocalProjectDirectoryTable(
         AttributeDefinitions: [
           { AttributeName: 'directoryId', AttributeType: 'S' },
           { AttributeName: 'entryKey', AttributeType: 'S' },
+          { AttributeName: 'webhookAuthorizationKey', AttributeType: 'S' },
+          { AttributeName: 'webhookAuthorizationSortKey', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'directoryId', KeyType: 'HASH' },
           { AttributeName: 'entryKey', KeyType: 'RANGE' },
         ],
+        GlobalSecondaryIndexes: [{
+          IndexName: 'WebhookAuthorizationIndex',
+          KeySchema: [
+            { AttributeName: 'webhookAuthorizationKey', KeyType: 'HASH' },
+            { AttributeName: 'webhookAuthorizationSortKey', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'KEYS_ONLY' },
+        }],
         BillingMode: 'PAY_PER_REQUEST',
       }),
     isProjectDirectoryTableDescription,
@@ -15898,6 +16173,15 @@ function isTeamIssuesTableDescription(table: TableDescription | undefined) {
           ['sortOrder', 'RANGE'],
         ]),
       ),
+    ) &&
+    Boolean(
+      table?.GlobalSecondaryIndexes?.some((index) =>
+        index.IndexName === 'TeamIssueUpdatedAtIndex' &&
+        hasKeySchema(index, [
+          ['directoryTeamId', 'HASH'],
+          ['updatedAt', 'RANGE'],
+        ]),
+      ),
     )
   )
 }
@@ -15913,7 +16197,13 @@ function isProjectDirectoryTableDescription(table: TableDescription | undefined)
   return hasKeySchema(table, [
     ['directoryId', 'HASH'],
     ['entryKey', 'RANGE'],
-  ])
+  ]) && table?.GlobalSecondaryIndexes?.some((index) =>
+    index.IndexName === 'WebhookAuthorizationIndex' &&
+    hasKeySchema(index, [
+      ['webhookAuthorizationKey', 'HASH'],
+      ['webhookAuthorizationSortKey', 'RANGE'],
+    ])
+  ) === true
 }
 
 function hasKeySchema(
@@ -17261,6 +17551,22 @@ function createProjectMemberEntryKey(projectId: string, memberKey: string) {
   return `PROJECT_MEMBER#${projectId}#${memberKey}`
 }
 
+function createWebhookResourceAuthorizationKey(directoryId: string) {
+  return `WEBHOOK_ACL#RESOURCE#${directoryId}`
+}
+
+function createWebhookMemberAuthorizationKey(directoryId: string, memberKey: string) {
+  return `WEBHOOK_ACL#MEMBER#${directoryId}#${memberKey}`
+}
+
+function createWebhookTeamAuthorizationSortKey(teamId: string) {
+  return `TEAM#${teamId}`
+}
+
+function createWebhookProjectAuthorizationSortKey(projectId: string) {
+  return `PROJECT#${projectId}`
+}
+
 function padSortOrder(value: number) {
   return String(value).padStart(6, '0')
 }
@@ -17445,6 +17751,63 @@ function createDirectoryTeamId(directoryId: string, teamId: string) {
 
 function createDirectoryTeamIssueId(directoryId: string, teamId: string, issueId: string) {
   return `${createDirectoryTeamId(directoryId, teamId)}#issue#${issueId}`
+}
+
+/** Public Work Item page の DynamoDB key を store-local cursor に変換します。 */
+function encodePublicWorkItemPageCursor(
+  key: Record<string, unknown>,
+  directoryTeamId: string,
+) {
+  const updatedAt = typeof key.updatedAt === 'string' ? key.updatedAt : undefined
+  const issueId = typeof key.issueId === 'string' ? key.issueId : undefined
+  if (key.directoryTeamId !== directoryTeamId || !updatedAt || !issueId) {
+    throw new ProjectDataError(
+      503,
+      'InvalidWorkItemPageCursor',
+      'Work Item page did not include a valid continuation key.',
+    )
+  }
+  const cursor: PublicWorkItemPageCursor = {
+    version: 1,
+    directoryTeamId,
+    updatedAt,
+    issueId,
+  }
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+/** Public Work Item store cursor を検証し DynamoDB key に戻します。 */
+function decodePublicWorkItemPageCursor(
+  value: string | undefined,
+  directoryTeamId: string,
+) {
+  if (!value) return undefined
+  try {
+    const cursor = JSON.parse(
+      Buffer.from(value, 'base64url').toString('utf8'),
+    ) as Partial<PublicWorkItemPageCursor>
+    if (
+      cursor.version !== 1 ||
+      cursor.directoryTeamId !== directoryTeamId ||
+      typeof cursor.updatedAt !== 'string' ||
+      !Number.isFinite(Date.parse(cursor.updatedAt)) ||
+      typeof cursor.issueId !== 'string' ||
+      !cursor.issueId
+    ) {
+      throw new TypeError('Invalid cursor payload.')
+    }
+    return {
+      directoryTeamId,
+      updatedAt: cursor.updatedAt,
+      issueId: cursor.issueId,
+    }
+  } catch {
+    throw new ProjectDataError(
+      400,
+      'InvalidWorkItemPageCursor',
+      'Work Item page cursor is invalid.',
+    )
+  }
 }
 
 /** Team Issue event の DynamoDB key を scope-bound opaque cursor に変換します。 */
@@ -17883,31 +18246,52 @@ async function createCanonicalPublicWorkItem(
 
 function createCanonicalPublicWorkItemService(): PublicWorkItemService {
   return {
-    async list(credential, filters) {
+    async list(credential, filters, continuation, limit) {
       const principal = await resolveDeveloperCredentialPrincipal(credential)
       const teamId = typeof filters.teamId === 'string' ? filters.teamId : ''
       if (!teamId) {
         throw new PublicApiServiceError(400, 'invalid_request', 'teamId is required.')
       }
       const permission = await requireTeamPermission(principal, teamId, 'viewer')
-      const response = await readTeamIssues(principal.directoryId, permission, principal)
-      const updatedAfter = typeof filters.updatedAfter === 'string'
-        ? Date.parse(filters.updatedAfter)
+      const assignedProjectId = typeof filters.assignedProjectId === 'string'
+        ? filters.assignedProjectId
         : undefined
-      return response.issues
-        .filter((issue) =>
-          (filters.assignedProjectId === undefined ||
-            issue.assignedProjectId === filters.assignedProjectId) &&
-          (filters.assigneeUserId === undefined ||
-            issue.assigneeUserId === filters.assigneeUserId) &&
-          (filters.workflowStatusId === undefined ||
-            issue.workflowStatusId === filters.workflowStatusId) &&
-          (updatedAfter === undefined || Date.parse(issue.updatedAt) > updatedAfter)
-        )
-        .sort((left, right) =>
-          left.updatedAt.localeCompare(right.updatedAt) ||
-          left.id.localeCompare(right.id)
-        )
+      const accessibleProjectIds = principal.isSystemAdmin
+        ? undefined
+        : (permission.projectAccesses ?? [])
+            .filter((access) => projectAccessAllows(access, 'viewer'))
+            .map((access) => access.projectId)
+      if (
+        assignedProjectId &&
+        accessibleProjectIds &&
+        !accessibleProjectIds.includes(assignedProjectId)
+      ) {
+        return { items: [], hasMore: false }
+      }
+      const page = await teamIssues.getPublicWorkItemPage(
+        principal.directoryId,
+        teamId,
+        {
+          limit,
+          ...(continuation ? { cursor: continuation } : {}),
+          ...(assignedProjectId ? { assignedProjectId } : {}),
+          ...(typeof filters.assigneeUserId === 'string'
+            ? { assigneeUserId: filters.assigneeUserId }
+            : {}),
+          ...(typeof filters.workflowStatusId === 'string'
+            ? { workflowStatusId: filters.workflowStatusId }
+            : {}),
+          ...(typeof filters.updatedAfter === 'string'
+            ? { updatedAfter: filters.updatedAfter }
+            : {}),
+          ...(accessibleProjectIds ? { accessibleProjectIds } : {}),
+        },
+      )
+      return {
+        items: page.issues,
+        hasMore: page.nextCursor !== undefined,
+        ...(page.nextCursor ? { nextContinuation: page.nextCursor } : {}),
+      }
     },
 
     async get(credential, teamId, workItemId) {
@@ -18239,12 +18623,13 @@ function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       return requireImportJob(principal.directoryId, job.id)
     },
 
-    async export(managementPrincipal, format) {
+    async export(managementPrincipal, _format, continuation, limit) {
       const principal = await resolveDeveloperManagementPrincipal(managementPrincipal)
       requireWorkspaceBusinessWrite(principal)
-      return createWorkItemExport(
-        format,
-        await readAccessibleWorkItemsForExport(principal),
+      return readAccessibleWorkItemExportPage(
+        principal,
+        continuation,
+        limit,
       )
     },
   }
@@ -18555,7 +18940,7 @@ function createConfiguredConnectorRuntime(
       environment.CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON,
     ),
   })
-  const persistence = createDynamoDbConnectorSyncPersistenceFromEnvironment()
+  const persistence = createDynamoDbConnectorSyncPersistenceFromEnvironment(environment)
   let authorization: ConnectorAuthorizationRuntime | undefined
   const health = createForwardingClient<ConnectorSyncHealthReporter>(() => {
     if (!authorization) {
