@@ -157,6 +157,8 @@ implements WebhookSubscriptionAuthorizer {
       ),
     ])
     if (!hasActiveTeam(teamRows, teamId)) return false
+    // Team-level Work Items follow requireTeamPermission: one active Project role
+    // in the Team grants viewer access even when the Work Item is unassigned.
     const accessibleProjectIds = new Set(
       memberRows
         .filter((row) => hasProjectRole([row], member.memberKey, row.projectId))

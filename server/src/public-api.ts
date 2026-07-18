@@ -926,13 +926,16 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       dependencies,
       principal,
       { subscriptionId },
-      async () => {
+      async (_context, idempotency) => {
+        const response = { status: 204 as const, body: null }
         await platform.setWebhookSubscriptionStatus({
           workspaceId: principal.workspaceId,
           subscriptionId,
           status: 'disabled',
+          idempotency,
+          idempotencyResponse: response,
         })
-        return { status: 204, body: null }
+        return response
       },
     )
   })

@@ -52,6 +52,7 @@ Credential の scope は作成後に変更しない。権限を変える場合�
 - Cursor は Workspace、credential または management user、route/resource、filter、page limit、期限へ署名付きで束縛する。いずれかが request と一致しない場合、期限切れ、改ざん、または対象 scope が変わった場合は `400 invalid_request` を返す。
 - 一覧の途中で resource が更新される可能性があるため、client は ID で重複排除し、完全な snapshot が必要なら最初から走査し直す。
 - In-memory pagination を行う一覧は作成・検出・接続日時の降順、同時刻では resource ID の降順に固定する。Downstream store の continuation を使う一覧も、外側の署名 cursor で同じ request scope を検証する。
+- Work Item 一覧で actor が参照できる Project が 90 件を超える場合、DynamoDB から取得した page を application 側で権限 filter する。このため読み取り量が増え、`items` が `limit` 未満または空でも `hasMore: true` と `nextCursor` を返すことがある。Client は page の件数で走査完了を判断せず、`hasMore: false` になるまで `nextCursor` を辿る。
 
 ## Idempotency
 

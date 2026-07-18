@@ -130,6 +130,14 @@ export type IdempotencyMutationToken = {
   reservationId: string
 }
 
+/** Domain mutation と同じ transaction で保存する HTTP response です。 */
+export type IdempotencyMutationResponse = {
+  /** Replay 時に返す HTTP status です。 */
+  status: 200 | 201 | 202 | 204
+  /** Replay 時に返す response body です。 */
+  body: unknown
+}
+
 /** Atomic idempotency を任意で付与できる domain mutation request です。 */
 export type IdempotentDomainMutationRequest = {
   /** Domain row と response receipt を同時確定する内部 token です。 */
@@ -290,12 +298,16 @@ export type RotateWebhookSecretRequest = IdempotentDomainMutationRequest & {
 export type SetWebhookSubscriptionStatusRequest = RotateWebhookSecretRequest & {
   /** 更新後 status です。 */
   status: WebhookSubscription['status']
+  /** Status 更新と同じ transaction で確定する endpoint response です。 */
+  idempotencyResponse?: IdempotencyMutationResponse
 }
 
 /** Webhook subscription metadata 更新 request です。 */
 export type UpdateWebhookSubscriptionRequest = RotateWebhookSecretRequest & {
   /** 検証する partial metadata 更新です。 */
   input: UpdateWebhookSubscriptionInput
+  /** Metadata 更新と同じ transaction で確定する endpoint response です。 */
+  idempotencyResponse?: IdempotencyMutationResponse
 }
 
 /** Webhook event enqueue request です。 */
@@ -1573,6 +1585,13 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     completion?: PreparedIdempotencyCompletionRecord,
   ): Promise<'created' | 'quota-exceeded' | 'conflict'>
 
+  /** Webhook subscription の無効化と Workspace quota 解放を原子的に保存します。 */
+  protected abstract disableWebhookSubscriptionRecord(
+    record: DeveloperPlatformRecord,
+    expectedVersion: number,
+    completion?: PreparedIdempotencyCompletionRecord,
+  ): Promise<boolean>
+
   /** Webhook delivery attempt と subscription health を原子的に保存します。 */
   protected abstract putWebhookDeliveryAttempt(
     deliveryRecord: DeveloperPlatformRecord,
@@ -2617,13 +2636,26 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       version: record.version + 1,
     }
     if (status === 'disabled') delete updatedRecord.secretCiphertext
-    const saved = await this.persistMutationRecord(
-      workspaceId,
-      updatedRecord,
-      { expectedVersion: record.version },
-      request.idempotency,
-      { status: 200, body: subscription },
-    )
+    const response = request.idempotencyResponse ?? { status: 200, body: subscription }
+    const saved = current.status !== 'disabled' && status === 'disabled'
+      ? await this.disableWebhookSubscriptionRecord(
+          updatedRecord,
+          record.version,
+          request.idempotency
+            ? await this.prepareIdempotencyCompletionRecord(
+                workspaceId,
+                request.idempotency,
+                response,
+              )
+            : undefined,
+        )
+      : await this.persistMutationRecord(
+          workspaceId,
+          updatedRecord,
+          { expectedVersion: record.version },
+          request.idempotency,
+          response,
+        )
     if (!saved) throw persistenceConflict()
     return clone(subscription)
   }
@@ -2634,6 +2666,10 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       workspaceId: request.workspaceId,
       subscriptionId: request.subscriptionId,
       input: { status: request.status },
+      ...(request.idempotency ? { idempotency: request.idempotency } : {}),
+      ...(request.idempotencyResponse
+        ? { idempotencyResponse: request.idempotencyResponse }
+        : {}),
     })
   }
 
@@ -5499,6 +5535,62 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
     return 'created'
   }
 
+  /** Webhook subscription の無効化と quota 解放を同じ memory commit にします。 */
+  protected async disableWebhookSubscriptionRecord(
+    record: DeveloperPlatformRecord,
+    expectedVersion: number,
+    completion?: PreparedIdempotencyCompletionRecord,
+  ) {
+    const recordKey = createMemoryKey(record.workspaceId, record.recordKey)
+    const currentRecord = this.records.get(recordKey)
+    const quotaKey = createMemoryKey(
+      record.workspaceId,
+      createWebhookSubscriptionQuotaRecordKey(),
+    )
+    const quotaRecord = this.records.get(quotaKey)
+    if (
+      currentRecord?.entryType !== 'webhook-subscription' ||
+      currentRecord.version !== expectedVersion ||
+      quotaRecord?.entryType !== 'webhook-subscription-quota' ||
+      readRecordValue<StoredWebhookSubscriptionQuotaValue>(
+        quotaRecord,
+        'webhook-subscription-quota',
+      ).limit !== WEBHOOK_SUBSCRIPTION_LIMIT ||
+      (quotaRecord.subscriptionCount ?? 0) < 1
+    ) return false
+
+    let completionKey: string | undefined
+    if (completion) {
+      completionKey = createMemoryKey(
+        completion.reservedRecord.workspaceId,
+        completion.reservedRecord.recordKey,
+      )
+      const current = this.records.get(completionKey)
+      if (
+        !current ||
+        current.version !== completion.reservedRecord.version ||
+        current.entryType !== 'idempotency'
+      ) return false
+      const value = readRecordValue<StoredIdempotencyValue>(current, 'idempotency')
+      if (
+        value.state !== 'reserved' ||
+        !secretDigestsEqual(value.reservationDigest, completion.reservationDigest) ||
+        value.requestFingerprintDigest !== completion.requestFingerprintDigest
+      ) return false
+    }
+
+    this.records.set(recordKey, clone(record))
+    this.records.set(quotaKey, {
+      ...quotaRecord,
+      subscriptionCount: (quotaRecord.subscriptionCount ?? 0) - 1,
+      version: quotaRecord.version + 1,
+    })
+    if (completion && completionKey) {
+      this.records.set(completionKey, clone(completion.completedRecord))
+    }
+    return true
+  }
+
   /** Delivery attempt と subscription health を同じ memory commit にします。 */
   protected async putWebhookDeliveryAttempt(
     deliveryRecord: DeveloperPlatformRecord,
@@ -6468,6 +6560,70 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
         (quotaRecord.subscriptionCount ?? 0) >= WEBHOOK_SUBSCRIPTION_LIMIT
       ) return 'quota-exceeded'
       return 'conflict'
+    }
+  }
+
+  /** Webhook subscription の無効化と quota 解放を同じ transaction にします。 */
+  protected async disableWebhookSubscriptionRecord(
+    record: DeveloperPlatformRecord,
+    expectedVersion: number,
+    completion?: PreparedIdempotencyCompletionRecord,
+  ) {
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: record,
+              ConditionExpression:
+                '#recordVersion = :expectedRecordVersion AND ' +
+                '#entryType = :subscriptionEntryType',
+              ExpressionAttributeNames: {
+                '#recordVersion': 'version',
+                '#entryType': 'entryType',
+              },
+              ExpressionAttributeValues: {
+                ':expectedRecordVersion': expectedVersion,
+                ':subscriptionEntryType': 'webhook-subscription',
+              },
+            },
+          },
+          {
+            Update: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: record.workspaceId,
+                recordKey: createWebhookSubscriptionQuotaRecordKey(),
+              },
+              UpdateExpression:
+                'SET subscriptionCount = subscriptionCount - :one, ' +
+                '#version = #version + :one',
+              ConditionExpression:
+                '#entryType = :entryType AND #value.#limit = :limit AND ' +
+                'subscriptionCount >= :one',
+              ExpressionAttributeNames: {
+                '#entryType': 'entryType',
+                '#value': 'value',
+                '#limit': 'limit',
+                '#version': 'version',
+              },
+              ExpressionAttributeValues: {
+                ':entryType': 'webhook-subscription-quota',
+                ':limit': WEBHOOK_SUBSCRIPTION_LIMIT,
+                ':one': 1,
+              },
+            },
+          },
+          ...(completion
+            ? [createIdempotencyCompletionTransactWriteItem(this.tableName, completion)]
+            : []),
+        ],
+      }))
+      return true
+    } catch (error) {
+      if (isTransactionConditionFailure(error)) return false
+      throw toPersistenceError(error)
     }
   }
 

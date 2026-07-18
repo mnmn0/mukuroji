@@ -292,11 +292,17 @@ function createMemoryDocumentClient() {
                   Number(current.activeLinkCount ?? 0) < 1)
             }
             if (values[':entryType'] === 'webhook-subscription-quota') {
+              const subscriptionCount = Number(current?.subscriptionCount ?? 0)
+              if (Update.UpdateExpression.includes('subscriptionCount -')) {
+                return current?.entryType !== 'webhook-subscription-quota' ||
+                  currentValue?.limit !== values[':limit'] ||
+                  subscriptionCount < Number(values[':one'])
+              }
               return current !== undefined &&
                 (
                   current.entryType !== 'webhook-subscription-quota' ||
                   currentValue?.limit !== values[':limit'] ||
-                  Number(current.subscriptionCount ?? 0) >= Number(values[':limit'])
+                  subscriptionCount >= Number(values[':limit'])
                 )
             }
             if (values[':entryType'] === 'webhook-subscription') {
@@ -325,7 +331,12 @@ function createMemoryDocumentClient() {
           ) return current !== undefined
           if (Put.ConditionExpression?.startsWith('#recordVersion =')) {
             return current?.version !==
-              Put.ExpressionAttributeValues?.[':expectedRecordVersion']
+                Put.ExpressionAttributeValues?.[':expectedRecordVersion'] ||
+              (
+                Put.ExpressionAttributeValues?.[':subscriptionEntryType'] !== undefined &&
+                current?.entryType !==
+                  Put.ExpressionAttributeValues?.[':subscriptionEntryType']
+              )
           }
           if (Put.ConditionExpression?.startsWith('#authVersion =')) {
             return current?.version !==
@@ -391,6 +402,9 @@ function createMemoryDocumentClient() {
               version: Number(current?.version ?? 0) + 1,
             })
           } else if (values[':entryType'] === 'webhook-subscription-quota') {
+            const delta = Update.UpdateExpression.includes('subscriptionCount -')
+              ? -1
+              : 1
             items.set(mapKey, {
               ...(current ?? {
                 workspaceId: Update.Key.workspaceId,
@@ -399,7 +413,7 @@ function createMemoryDocumentClient() {
                 value: structuredClone(values[':value']),
                 version: 0,
               }),
-              subscriptionCount: Number(current?.subscriptionCount ?? 0) + 1,
+              subscriptionCount: Number(current?.subscriptionCount ?? 0) + delta,
               version: Number(current?.version ?? 0) + 1,
             })
           } else if (values[':entryType'] === 'webhook-subscription') {
@@ -1592,6 +1606,139 @@ describe('webhook subscription and delivery', () => {
     expect(await client.listWebhookSubscriptions('workspace-quota')).toHaveLength(1)
   })
 
+  test('releases DynamoDB subscription quota exactly once after disablement', async () => {
+    const memory = createMemoryDocumentClient()
+    const client = new DynamoDbDeveloperPlatformClient(
+      'DeveloperPlatformTable',
+      memory.documentClient,
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(19)),
+      () => START,
+    )
+    const quotaKey = 'workspace-dynamo-quota\0WEBHOOKSUBSCRIPTIONQUOTA'
+    memory.items.set(quotaKey, {
+      workspaceId: 'workspace-dynamo-quota',
+      recordKey: 'WEBHOOKSUBSCRIPTIONQUOTA',
+      entryType: 'webhook-subscription-quota',
+      value: { limit: WEBHOOK_SUBSCRIPTION_LIMIT },
+      subscriptionCount: WEBHOOK_SUBSCRIPTION_LIMIT - 1,
+      version: WEBHOOK_SUBSCRIPTION_LIMIT - 1,
+    })
+    const create = (name: string) => client.createWebhookSubscription({
+      workspaceId: 'workspace-dynamo-quota',
+      createdByUserId: 'user-dynamo-quota',
+      input: {
+        name,
+        url: `https://hooks.example.test/${name.toLowerCase()}`,
+        eventTypes: ['work-item.updated'],
+        teamIds: ['team-dynamo-quota'],
+        scopes: ['work-items:read'],
+      },
+    })
+
+    const original = await create('Original')
+    await expect(create('Blocked')).rejects.toMatchObject({
+      status: 409,
+      code: 'WebhookSubscriptionLimitExceeded',
+    })
+    const disableMutation = {
+      workspaceId: 'workspace-dynamo-quota',
+      credentialId: 'user:user-dynamo-quota',
+      idempotencyKey: 'disable-original-webhook',
+      requestFingerprint: 'DELETE:/developer/webhook-subscriptions/original',
+    }
+    const reservation = await client.reserveIdempotency(disableMutation)
+    if (reservation.status !== 'reserved') {
+      throw new Error('Webhook disable idempotency reservation was not created.')
+    }
+    const disableResponse = { status: 204 as const, body: null }
+    memory.commands.splice(0)
+    await expect(client.setWebhookSubscriptionStatus({
+      workspaceId: 'workspace-dynamo-quota',
+      subscriptionId: original.subscription.id,
+      status: 'disabled',
+      idempotency: {
+        ...disableMutation,
+        reservationId: reservation.reservationId,
+      },
+      idempotencyResponse: disableResponse,
+    })).resolves.toMatchObject({ status: 'disabled' })
+    const disableTransaction = memory.commands.find(
+      ({ name }) => name === 'TransactWriteCommand',
+    )
+    const disableWrites = disableTransaction?.input.TransactItems as Array<{
+      Put?: { Item?: Record<string, unknown> }
+      Update?: { UpdateExpression?: string }
+    }> | undefined
+    expect(disableWrites).toHaveLength(3)
+    expect(disableWrites?.[0]?.Put?.Item).toMatchObject({
+      entryType: 'webhook-subscription',
+      value: { status: 'disabled' },
+    })
+    expect(disableWrites?.[1]?.Update?.UpdateExpression)
+      .toContain('subscriptionCount - :one')
+    expect(disableWrites?.[2]?.Put?.Item).toMatchObject({
+      entryType: 'idempotency',
+      value: { state: 'completed' },
+    })
+    await expect(client.reserveIdempotency(disableMutation)).resolves.toEqual({
+      status: 'replay',
+      response: disableResponse,
+    })
+    expect(memory.items.get(quotaKey)?.subscriptionCount)
+      .toBe(WEBHOOK_SUBSCRIPTION_LIMIT - 1)
+
+    await expect(client.setWebhookSubscriptionStatus({
+      workspaceId: 'workspace-dynamo-quota',
+      subscriptionId: original.subscription.id,
+      status: 'disabled',
+    })).resolves.toMatchObject({ status: 'disabled' })
+    expect(memory.items.get(quotaKey)?.subscriptionCount)
+      .toBe(WEBHOOK_SUBSCRIPTION_LIMIT - 1)
+
+    await expect(create('Replacement')).resolves.toMatchObject({
+      subscription: { status: 'active' },
+    })
+    expect(memory.items.get(quotaKey)?.subscriptionCount)
+      .toBe(WEBHOOK_SUBSCRIPTION_LIMIT)
+  })
+
+  test('rejects DynamoDB subscription quota underflow without disabling the record', async () => {
+    const memory = createMemoryDocumentClient()
+    const client = new DynamoDbDeveloperPlatformClient(
+      'DeveloperPlatformTable',
+      memory.documentClient,
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(20)),
+      () => START,
+    )
+    const created = await client.createWebhookSubscription({
+      workspaceId: 'workspace-quota-underflow',
+      createdByUserId: 'user-quota-underflow',
+      input: {
+        name: 'Underflow guard',
+        url: 'https://hooks.example.test/underflow-guard',
+        eventTypes: ['work-item.updated'],
+        teamIds: ['team-quota-underflow'],
+        scopes: ['work-items:read'],
+      },
+    })
+    const quotaKey = 'workspace-quota-underflow\0WEBHOOKSUBSCRIPTIONQUOTA'
+    const quotaRecord = memory.items.get(quotaKey)
+    memory.items.set(quotaKey, { ...quotaRecord, subscriptionCount: 0 })
+
+    await expect(client.setWebhookSubscriptionStatus({
+      workspaceId: 'workspace-quota-underflow',
+      subscriptionId: created.subscription.id,
+      status: 'disabled',
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'DeveloperPlatformConcurrentMutation',
+    })
+    expect(memory.items.get(quotaKey)?.subscriptionCount).toBe(0)
+    expect(memory.items.get(
+      `workspace-quota-underflow\0WEBHOOK#${created.subscription.id}`,
+    )?.value).toMatchObject({ status: 'active' })
+  })
+
   test('requires payload scopes for every selected event category', async () => {
     const { client } = createClient()
     await expect(client.createWebhookSubscription({
@@ -2475,13 +2622,22 @@ describe('connectors, links, and imports', () => {
       installationId: request.installationId,
       claimId: 'another-refresh-operation',
     })).resolves.toBe(false)
+    const takeoverRequest = {
+      ...request,
+      claimId: 'refresh-lease-takeover-operation',
+    }
     now = new Date(START.getTime() + 61_000)
-    await expect(client.claimConnectorCredentialRefresh(request))
+    await expect(client.claimConnectorCredentialRefresh(takeoverRequest))
       .resolves.toBe('claimed')
     await expect(client.releaseConnectorCredentialRefresh({
       workspaceId: request.workspaceId,
       installationId: request.installationId,
       claimId: request.claimId,
+    })).resolves.toBe(false)
+    await expect(client.releaseConnectorCredentialRefresh({
+      workspaceId: takeoverRequest.workspaceId,
+      installationId: takeoverRequest.installationId,
+      claimId: takeoverRequest.claimId,
     })).resolves.toBe(true)
   })
 

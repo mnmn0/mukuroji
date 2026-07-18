@@ -1225,6 +1225,52 @@ describe('public API router', () => {
     expect(await platform.listWebhookSubscriptions('workspace-1')).toEqual([])
   })
 
+  test('passes the exact DELETE receipt into the atomic webhook disable mutation', async () => {
+    const platform = new InMemoryDeveloperPlatformClient(
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(21)),
+      () => new Date(NOW),
+    )
+    const created = await platform.createWebhookSubscription({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: {
+        name: 'Atomic delete webhook',
+        url: 'https://hooks.example.test/atomic-delete',
+        teamIds: ['team-1'],
+        eventTypes: ['work-item.updated'],
+      },
+    })
+    const setStatus = platform.setWebhookSubscriptionStatus.bind(platform)
+    let setStatusCalls = 0
+    let receivedAtomicReceipt = false
+    platform.setWebhookSubscriptionStatus = async (request) => {
+      setStatusCalls += 1
+      receivedAtomicReceipt = request.idempotency !== undefined &&
+        request.idempotencyResponse?.status === 204 &&
+        request.idempotencyResponse.body === null
+      return await setStatus(request)
+    }
+    const { router } = createTestRouter({ platform })
+    const request = () => router.request(
+      `http://localhost/developer/webhook-subscriptions/${created.subscription.id}`,
+      {
+        method: 'DELETE',
+        headers: {
+          Authorization: 'Bearer session-token',
+          'Idempotency-Key': 'delete-webhook-atomically',
+        },
+      },
+    )
+
+    const response = await request()
+    expect(response.status).toBe(204)
+    expect(receivedAtomicReceipt).toBe(true)
+    const replay = await request()
+    expect(replay.status).toBe(204)
+    expect(replay.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(setStatusCalls).toBe(1)
+  })
+
   test('prevents another administrator from rotating creator-owned credentials', async () => {
     const { platform } = createTestRouter()
     const apiKey = await createApiKey(platform, ['work-items:read'])
