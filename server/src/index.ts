@@ -46,6 +46,7 @@ import {
   type CreateSavedWorkspaceViewInput,
   type CreateRequestFormInput,
   type CustomFieldDefinition,
+  type DocumentRelationTarget,
   type PublishRequestFormInput,
   type RequestFormDraft,
   type RequestFormField,
@@ -161,6 +162,8 @@ import {
 } from './notifications'
 import {
   createCommentWorkspaceSearchDocument,
+  createDocumentWorkspaceSearchSourceDocument,
+  createDocumentWorkspaceSearchDocument,
   DynamoDbWorkspaceSearchClient,
   WorkspaceSearchError,
   createProjectWorkspaceSearchDocument,
@@ -239,6 +242,17 @@ import {
   type PlanningClient,
   type PlanningWorkItemState,
 } from './planning'
+import {
+  DocumentError,
+  DynamoDbDocumentsClient,
+  type DocumentAccessContext,
+  type DocumentClient,
+  type DocumentProjectRole,
+} from './documents'
+import {
+  registerDocumentApiRoutes,
+  type DocumentApiPrincipal,
+} from './document-api'
 
 /**
  * Workspace access の永続化 client と API error です。
@@ -2223,12 +2237,18 @@ let collaboration: CollaborationClient
 let fileProofing: FileProofingClient
 let notifications: NotificationClient
 let workspaceSearch: WorkspaceSearchClient
+let documents: DocumentClient
 let workspaceSearchProjectionEnabled: boolean
 let workItemConfigurations: WorkItemConfigurationClient
 let automation: AutomationClient
 let automationInboundWebhookSecrets: AutomationInboundWebhookSecretStore
 let planning: PlanningClient
 let requestIntake: RequestIntakeClient
+const documentProjectRolesCache = new Map<string, {
+  expiresAt: number
+  value: Promise<Record<string, DocumentProjectRole>>
+}>()
+const documentProjectRolesCacheTtlMs = 1_000
 const projectDirectoryIdPrefix = 'user#'
 const defaultAllowedOrigins = [
   'http://localhost:5173',
@@ -2268,6 +2288,24 @@ app.get('/', (c) => {
 
 app.get('/api/health', (c) => {
   return c.json({ ok: true })
+})
+
+registerDocumentApiRoutes(app, {
+  getClient: () => documents,
+  authenticate: createDocumentApiPrincipal,
+  getActiveMember: (workspaceId, memberKey) =>
+    workspaceAccess.getActiveMember(workspaceId, memberKey),
+  validateRelationTargets: validateDocumentRelationTargets,
+  upsertSearchDocument: async (workspaceId, document) => {
+    if (!workspaceSearchProjectionEnabled) return
+    await workspaceSearch.upsertDocument(
+      createDocumentWorkspaceSearchDocument(workspaceId, document),
+    )
+  },
+  deleteSearchDocument: async (workspaceId, documentId) => {
+    if (!workspaceSearchProjectionEnabled) return
+    await workspaceSearch.deleteDocument(workspaceId, 'document', documentId)
+  },
 })
 
 /**
@@ -8683,6 +8721,159 @@ async function authenticateWorkspacePrincipal(
   }
 }
 
+async function createDocumentApiPrincipal(
+  accessToken: string,
+): Promise<DocumentApiPrincipal> {
+  const principal = await authenticateWorkspacePrincipal(accessToken)
+  const projectRoles = await getCachedDocumentProjectRoles(
+    principal.directoryId,
+    principal.userKey,
+  )
+
+  return {
+    workspaceId: principal.directoryId,
+    memberKey: principal.userKey,
+    displayName:
+      principal.workspaceMember.name ??
+      principal.workspaceMember.email ??
+      principal.userKey,
+    workspaceRole: principal.workspaceRole,
+    isSystemAdmin: principal.isSystemAdmin,
+    projectRoles,
+  }
+}
+
+async function getCachedDocumentProjectRoles(
+  workspaceId: string,
+  memberKey: string,
+) {
+  const cacheKey = `${workspaceId}\0${memberKey}`
+  const now = Date.now()
+  const cached = documentProjectRolesCache.get(cacheKey)
+  if (cached && cached.expiresAt > now) return cached.value
+  const value = projectDirectory.getProjectAccessList(
+    workspaceId,
+    memberKey,
+  ).then((projectAccesses) =>
+    Object.fromEntries(
+      projectAccesses.flatMap(({ projectId, role }) =>
+        role === undefined ? [] : [[projectId, role]]
+      ),
+    ) as Record<string, DocumentProjectRole>
+  ).catch((error: unknown) => {
+    documentProjectRolesCache.delete(cacheKey)
+    throw error
+  })
+  documentProjectRolesCache.set(cacheKey, {
+    expiresAt: now + documentProjectRolesCacheTtlMs,
+    value,
+  })
+  return value
+}
+
+async function validateDocumentRelationTargets(
+  principal: DocumentApiPrincipal,
+  targets: readonly DocumentRelationTarget[],
+) {
+  const directory = await projectDirectory.getProjectDirectory(
+    principal.workspaceId,
+    'ja',
+    true,
+  )
+  await Promise.all(targets.map(async (target) => {
+    if (target.kind === 'goal') {
+      return
+    }
+    if (target.kind === 'project') {
+      const exists = directory.teams.some((team) =>
+        team.projects.some((project) =>
+          project.id === target.projectId
+        )
+      )
+      if (!exists) {
+        throw new DocumentError(
+          400,
+          'InvalidDocumentRelationTarget',
+          'The related Project was not found.',
+        )
+      }
+      if (
+        !principal.isSystemAdmin &&
+        principal.projectRoles[target.projectId] === undefined
+      ) {
+        throw new DocumentError(
+          403,
+          'DocumentRelationTargetDenied',
+          'The related Project is not visible.',
+        )
+      }
+      return
+    }
+    const parsed = parseSearchWorkItemEntityId(target.workItemId)
+    if (!parsed) {
+      throw new DocumentError(
+        400,
+        'InvalidDocumentRelationTarget',
+        'Work Item targets must use team/<teamId>/issue/<issueId>.',
+      )
+    }
+    const team = directory.teams.find(
+      (candidate) => candidate.id === parsed.teamId,
+    )
+    if (!team) {
+      throw new DocumentError(
+        400,
+        'InvalidDocumentRelationTarget',
+        'The related Team was not found.',
+      )
+    }
+    if (
+      !principal.isSystemAdmin &&
+      !team.projects.some(
+        (project) =>
+          principal.projectRoles[project.id] !== undefined,
+      )
+    ) {
+      throw new DocumentError(
+        403,
+        'DocumentRelationTargetDenied',
+        'The related Work Item is not visible.',
+      )
+    }
+    let detail: TeamIssueDetailResponse
+    try {
+      detail = await teamIssues.getTeamIssueDetail(
+        principal.workspaceId,
+        parsed.teamId,
+        parsed.issueId,
+        { consistentIssueRead: true, eventLimit: 0 },
+      )
+    } catch (error) {
+      if (isTeamIssueNotFoundError(error)) {
+        throw new DocumentError(
+          400,
+          'InvalidDocumentRelationTarget',
+          'The related Work Item was not found.',
+        )
+      }
+      throw error
+    }
+    if (
+      detail.issue.assignedProjectId &&
+      !principal.isSystemAdmin &&
+      principal.projectRoles[
+        detail.issue.assignedProjectId
+      ] === undefined
+    ) {
+      throw new DocumentError(
+        403,
+        'DocumentRelationTargetDenied',
+        'The related Work Item is not visible.',
+      )
+    }
+  }))
+}
+
 function readBearerAccessToken(c: Context) {
   const authorization = c.req.header('Authorization') ?? ''
 
@@ -9274,6 +9465,8 @@ function collectActivePlanningDescendants(
 type WorkspaceSearchContext = {
   /** Active Team/Project hierarchy です。 */
   directory: ProjectDirectoryResponse
+  /** Document source of truth の ACL 評価に使う current viewer です。 */
+  documentAccess: DocumentAccessContext
   /** Search result の current viewer scope です。 */
   searchAccess: WorkspaceSearchAccessScope
   /** Saved view の current viewer scope です。 */
@@ -9310,9 +9503,20 @@ async function createWorkspaceSearchContext(
       .filter((team) => team.projects.some((project) => manageableProjectIds.has(project.id)))
       .map((team) => team.id),
   )
+  const projectRoles = Object.fromEntries(
+    projectAccesses.flatMap(({ projectId, role }) =>
+      role === undefined ? [] : [[projectId, role]]
+    ),
+  ) as Record<string, DocumentProjectRole>
 
   return {
     directory,
+    documentAccess: {
+      memberKey: principal.userKey,
+      workspaceRole: principal.workspaceRole,
+      isSystemAdmin: principal.isSystemAdmin,
+      projectRoles,
+    },
     searchAccess: {
       viewerUserId: principal.userKey,
       isSystemAdmin: principal.isSystemAdmin,
@@ -9339,6 +9543,34 @@ async function resolveCurrentWorkspaceSearchScope(
   context: WorkspaceSearchContext,
   scopeCache: Map<string, Promise<TeamIssueDetailResponse | undefined>>,
 ) {
+  if (document.entityType === 'document') {
+    try {
+      const currentDocument = await documents.get({
+        workspaceId,
+        documentId: document.entityId,
+        access: context.documentAccess,
+      })
+      return {
+        ...(currentDocument.scope.type === 'project'
+          ? { projectId: currentDocument.scope.projectId }
+          : {}),
+        permissionVerified: true,
+        currentDocument: createDocumentWorkspaceSearchSourceDocument(
+          workspaceId,
+          currentDocument,
+        ),
+      }
+    } catch (error) {
+      if (
+        error instanceof DocumentError &&
+        (error.status === 403 || error.status === 404)
+      ) {
+        return undefined
+      }
+      throw error
+    }
+  }
+
   if (document.entityType === 'team') {
     const team = context.directory.teams.find((candidate) => candidate.id === document.teamId)
     return team ? { teamId: team.id } : undefined
@@ -9875,13 +10107,23 @@ async function createNotificationVisibilityFilter(
       projectTeamIds.set(project.id, teamIds)
     }
   }
-  const accessibleProjectIds = principal.isSystemAdmin
-    ? new Set(projectTeamIds.keys())
-    : new Set(
-        (await projectDirectory.getProjectAccessList(principal.directoryId, principal.userKey))
-          .filter((access) => projectAccessAllows(access, 'viewer') && projectTeamIds.has(access.projectId))
-          .map((access) => access.projectId),
+  const projectAccesses = principal.isSystemAdmin
+    ? [...projectTeamIds.keys()].map((projectId) => ({
+        projectId,
+        role: 'manager' as const,
+      }))
+    : await projectDirectory.getProjectAccessList(
+        principal.directoryId,
+        principal.userKey,
       )
+  const accessibleProjectIds = new Set(
+    projectAccesses
+      .filter((access) =>
+        projectAccessAllows(access, 'viewer') &&
+        projectTeamIds.has(access.projectId)
+      )
+      .map((access) => access.projectId),
+  )
   const accessibleTeamIds = principal.isSystemAdmin
     ? activeTeamIds
     : new Set(
@@ -9893,8 +10135,42 @@ async function createNotificationVisibilityFilter(
     exists: boolean
     projectId?: string
   }>>()
+  const documentAccess: DocumentAccessContext = {
+    memberKey: principal.userKey,
+    workspaceRole: principal.workspaceRole,
+    isSystemAdmin: principal.isSystemAdmin,
+    projectRoles: Object.fromEntries(
+      projectAccesses.flatMap(({ projectId, role }) =>
+        role === undefined ? [] : [[projectId, role]]
+      ),
+    ) as Record<string, DocumentProjectRole>,
+  }
+  const documentVisibilities = new Map<string, Promise<boolean>>()
 
   return async (notification: NotificationItem) => {
+    if (
+      notification.eventType.startsWith('document.') &&
+      notification.entityId
+    ) {
+      let visibility = documentVisibilities.get(notification.entityId)
+      if (visibility === undefined) {
+        visibility = documents.get({
+          workspaceId: principal.directoryId,
+          documentId: notification.entityId,
+          access: documentAccess,
+        }).then(() => true).catch((error: unknown) => {
+          if (
+            error instanceof DocumentError &&
+            (error.status === 403 || error.status === 404)
+          ) {
+            return false
+          }
+          throw error
+        })
+        documentVisibilities.set(notification.entityId, visibility)
+      }
+      if (!await visibility) return false
+    }
     if (notification.teamId && notification.issueId) {
       const scopeKey = `${notification.teamId}\0${notification.issueId}`
       let scope = workItemScopes.get(scopeKey)
@@ -17367,6 +17643,7 @@ collaboration = new DynamoDbCollaborationClient()
 fileProofing = createDefaultFileProofingClient()
 notifications = new DynamoDbNotificationsClient()
 workspaceSearch = new DynamoDbWorkspaceSearchClient()
+documents = new DynamoDbDocumentsClient()
 workspaceSearchProjectionEnabled = shouldEnableWorkspaceSearchProjection()
 workItemConfigurations = createWorkItemConfigurationClient()
 automation = createAutomationClient()
@@ -17390,12 +17667,14 @@ export function configureApiClientsForTest(clients: {
   fileProofing?: FileProofingClient
   notifications?: NotificationClient
   workspaceSearch?: WorkspaceSearchClient
+  documents?: DocumentClient
   workItemConfigurations?: WorkItemConfigurationClient
   automation?: AutomationClient
   automationInboundWebhookSecrets?: AutomationInboundWebhookSecretStore
   planning?: PlanningClient
   requestIntake?: RequestIntakeClient
 }) {
+  documentProjectRolesCache.clear()
   cognito = clients.cognito ?? cognito
   dashboardSummary = clients.dashboardSummary ?? dashboardSummary
   projectTasks = clients.projectTasks ?? projectTasks
@@ -17408,6 +17687,7 @@ export function configureApiClientsForTest(clients: {
   fileProofing = clients.fileProofing ?? fileProofing
   notifications = clients.notifications ?? notifications
   workspaceSearch = clients.workspaceSearch ?? workspaceSearch
+  documents = clients.documents ?? documents
   if (clients.workspaceSearch) workspaceSearchProjectionEnabled = true
   workItemConfigurations = clients.workItemConfigurations ?? workItemConfigurations
   automation = clients.automation ?? automation
@@ -17421,6 +17701,7 @@ export function configureApiClientsForTest(clients: {
  * Server test 後に外部 service client を実装 client に戻します。
  */
 export function resetApiClientsForTest() {
+  documentProjectRolesCache.clear()
   cognito = createCognitoClient()
   dashboardSummary = new DynamoDbDashboardSummaryClient()
   projectTasks = new DynamoDbProjectTasksClient()
@@ -17433,6 +17714,7 @@ export function resetApiClientsForTest() {
   fileProofing = createDefaultFileProofingClient()
   notifications = new DynamoDbNotificationsClient()
   workspaceSearch = new DynamoDbWorkspaceSearchClient()
+  documents = new DynamoDbDocumentsClient()
   workspaceSearchProjectionEnabled = shouldEnableWorkspaceSearchProjection()
   workItemConfigurations = createDefaultWorkItemConfigurationClient()
   automation = createAutomationClient()

@@ -18,6 +18,9 @@ import {
   SAVED_VIEW_SCHEMA_VERSION,
   SEARCH_SCHEMA_VERSION,
   type CreateSavedWorkspaceViewInput,
+  type DocumentBlock,
+  type DocumentDetail,
+  type DocumentRelationTarget,
   type SavedViewMigrationWarning,
   type SavedViewVisibility,
   type SavedWorkspaceView,
@@ -53,6 +56,9 @@ export const WORKSPACE_SEARCH_MAX_LIMIT = 100
 
 /** 一つの search page で評価する index row の最大件数です。 */
 export const WORKSPACE_SEARCH_EVALUATION_LIMIT = 1_000
+
+/** DynamoDB の一つの search document row に保存する本文の最大文字数です。 */
+export const WORKSPACE_SEARCH_STORED_BODY_MAX_LENGTH = 20_000
 
 /** Current scope を page 内で並列再検証する最大数です。 */
 const WORKSPACE_SEARCH_SCOPE_CONCURRENCY = 10
@@ -119,6 +125,11 @@ export type WorkspaceSearchResolvedScope = {
   teamId?: string
   /** Current Project ID です。 */
   projectId?: string
+  /**
+   * Team/Project scope だけでは表現できない resource ACL を source of truth で
+   * 検証済みかどうかです。
+   */
+  permissionVerified?: boolean
   /** Source of truth から再構築した current search document です。 */
   currentDocument?: WorkspaceSearchDocument
 }
@@ -456,7 +467,12 @@ export function createWorkspaceSearchDocument(
   }
 
   copyOptionalText(document, input, 'subtitle', 500)
-  copyOptionalText(document, input, 'body', 20_000)
+  copyOptionalText(
+    document,
+    input,
+    'body',
+    WORKSPACE_SEARCH_STORED_BODY_MAX_LENGTH,
+  )
   copyOptionalText(document, input, 'teamId', 256)
   copyOptionalText(document, input, 'projectId', 256)
   copyOptionalText(document, input, 'parentId', 1_024)
@@ -544,6 +560,84 @@ export function createProjectWorkspaceSearchDocument(input: {
   })
 }
 
+/**
+ * Canonical Document / Whiteboard source を permission-aware search document へ変換します。
+ *
+ * @param workspaceId - Document を保持する canonical Workspace ID です。
+ * @param document - Source of truth から取得した Document detail です。
+ * @returns Workspace search index に保存する正規化済み document です。
+ */
+export function createDocumentWorkspaceSearchDocument(
+  workspaceId: string,
+  document: DocumentDetail,
+) {
+  const body = createDocumentSearchBody(document).slice(
+    0,
+    WORKSPACE_SEARCH_STORED_BODY_MAX_LENGTH,
+  )
+  return createDocumentWorkspaceSearchProjection(
+    workspaceId,
+    document,
+    body,
+  )
+}
+
+/**
+ * Canonical Document の全文を current-source 検索用の一時 projection へ変換します。
+ *
+ * DynamoDB に永続化する projection は
+ * {@link createDocumentWorkspaceSearchDocument} を使います。この関数が返す全文本文は
+ * source-of-truth ACL の検証後に memory 上で照合し、検索 table へ保存しません。
+ *
+ * @param workspaceId - Document を保持する canonical Workspace ID です。
+ * @param document - ACL 検証済みの current Document detail です。
+ * @returns Document 最大 payload の本文を省略しない検索用 document です。
+ */
+export function createDocumentWorkspaceSearchSourceDocument(
+  workspaceId: string,
+  document: DocumentDetail,
+) {
+  const body = createDocumentSearchBody(document)
+  const storedProjection = createDocumentWorkspaceSearchProjection(
+    workspaceId,
+    document,
+    body.slice(0, WORKSPACE_SEARCH_STORED_BODY_MAX_LENGTH),
+  )
+  return body
+    ? { ...storedProjection, body }
+    : storedProjection
+}
+
+function createDocumentWorkspaceSearchProjection(
+  workspaceId: string,
+  document: DocumentDetail,
+  body: string,
+) {
+  const relationIds = createDocumentSearchRelationIds(document)
+
+  return createWorkspaceSearchDocument({
+    workspaceId,
+    entityType: 'document',
+    entityId: document.id,
+    title: document.title,
+    subtitle: document.kind,
+    ...(body ? { body } : {}),
+    url: `/documents/${encodeURIComponent(document.id)}`,
+    ...(document.scope.type === 'project'
+      ? { projectId: document.scope.projectId }
+      : {}),
+    creatorUserId: document.createdByUserId,
+    status: document.archivedAt ? 'archived' : 'active',
+    customFields: {
+      documentKind: document.kind,
+      permissionMode: document.permission.mode,
+    },
+    ...(relationIds.length > 0 ? { relationIds } : {}),
+    createdAt: document.createdAt,
+    updatedAt: document.updatedAt,
+  })
+}
+
 /** Canonical Work Item source を runtime/backfill 共通の search document へ変換します。 */
 export function createWorkItemWorkspaceSearchDocument(input: {
   /** Canonical Workspace ID です。 */
@@ -601,6 +695,68 @@ export function createWorkItemWorkspaceSearchDocument(input: {
     ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
   })
+}
+
+function createDocumentSearchBody(document: DocumentDetail) {
+  if (document.kind === 'page' || document.kind === 'template') {
+    return document.blocks.map(createDocumentBlockSearchText).filter(Boolean).join('\n')
+  }
+
+  if (document.kind === 'whiteboard') {
+    return [
+      ...document.whiteboard.objects.map((object) => {
+        if (object.type === 'work-item') return object.workItemId
+        return object.text ?? ''
+      }),
+      ...document.whiteboard.connectors.map((connector) => connector.label ?? ''),
+      ...document.whiteboard.frames.map((frame) => frame.title),
+    ].filter(Boolean).join('\n')
+  }
+
+  return ''
+}
+
+function createDocumentBlockSearchText(block: DocumentBlock) {
+  switch (block.type) {
+    case 'paragraph':
+    case 'heading':
+      return block.text
+    case 'table':
+      return [
+        block.columns.join('\t'),
+        ...block.rows.map((row) => row.cells.map((cell) => cell.text).join('\t')),
+      ].join('\n')
+    case 'code':
+      return block.code
+    case 'checklist':
+      return block.items.map((item) => item.text).join('\n')
+    case 'embed':
+      return [block.title, block.provider, block.url].filter(Boolean).join('\n')
+    case 'diagram':
+      return block.source
+  }
+}
+
+function createDocumentSearchRelationIds(document: DocumentDetail) {
+  const relationIds = new Set(
+    document.relations.map((relation) => createDocumentRelationTargetId(relation.target)),
+  )
+
+  if (document.kind === 'whiteboard') {
+    for (const object of document.whiteboard.objects) {
+      if (object.type === 'work-item') {
+        relationIds.add(`work-item:${object.workItemId}`)
+      }
+    }
+  }
+
+  return [...relationIds].sort()
+}
+
+function createDocumentRelationTargetId(target: DocumentRelationTarget) {
+  if (target.kind === 'work-item') return `work-item:${target.workItemId}`
+  if (target.kind === 'project') return `project:${target.projectId}`
+  return `goal:${target.goalId}`
 }
 
 /** Collaboration comment source を runtime/backfill 共通の search document へ変換します。 */
@@ -734,44 +890,63 @@ export class DynamoDbWorkspaceSearchClient {
         document: readWorkspaceSearchDocumentSafely(item),
         recordKey: typeof item.recordKey === 'string' ? item.recordKey : undefined,
       }))
-      const currentDocuments = await mapWithConcurrency(
-        documentRows,
-        WORKSPACE_SEARCH_SCOPE_CONCURRENCY,
-        async ({ document: storedDocument }) => {
-          if (!storedDocument) return undefined
-          const resolvedScope = input.resolveCurrentScope
-            ? await input.resolveCurrentScope(storedDocument)
-            : {
-                ...(storedDocument.teamId ? { teamId: storedDocument.teamId } : {}),
-                ...(storedDocument.projectId ? { projectId: storedDocument.projectId } : {}),
-              }
-          if (!resolvedScope) return undefined
-          const document = {
-            ...(resolvedScope.currentDocument ?? storedDocument),
-            teamId: resolvedScope.teamId,
-            projectId: resolvedScope.projectId,
-          }
-          return canAccessWorkspaceSearchDocument(document, input.access) &&
-              matchesWorkspaceSearchFilters(document, filters)
-            ? document
-            : undefined
-        },
-      )
       let processedDocumentCount = 0
       let lastProcessedRecordKey: string | undefined
 
-      for (let index = 0; index < documentRows.length; index += 1) {
-        const row = documentRows[index]
-        if (!row) continue
-        processedDocumentCount += 1
-        evaluated += 1
-        if (row.recordKey) lastProcessedRecordKey = row.recordKey
-        const document = currentDocuments[index]
-        if (!document) continue
-        results.push(toWorkspaceSearchResult(document, filters.keyword))
-        if (results.length >= limit) {
-          reachedLimit = true
-          break
+      for (
+        let offset = 0;
+        offset < documentRows.length && !reachedLimit;
+        offset += WORKSPACE_SEARCH_SCOPE_CONCURRENCY
+      ) {
+        const batch = documentRows.slice(
+          offset,
+          offset + WORKSPACE_SEARCH_SCOPE_CONCURRENCY,
+        )
+        const currentDocuments = await mapWithConcurrency(
+          batch,
+          WORKSPACE_SEARCH_SCOPE_CONCURRENCY,
+          async ({ document: storedDocument }) => {
+            if (!storedDocument) return undefined
+            const resolvedScope = input.resolveCurrentScope
+              ? await input.resolveCurrentScope(storedDocument)
+              : {
+                  ...(storedDocument.teamId ? { teamId: storedDocument.teamId } : {}),
+                  ...(storedDocument.projectId ? { projectId: storedDocument.projectId } : {}),
+                }
+            if (!resolvedScope) return undefined
+            const document = {
+              ...(resolvedScope.currentDocument ?? storedDocument),
+              teamId: resolvedScope.teamId,
+              projectId: resolvedScope.projectId,
+            }
+            return canAccessWorkspaceSearchDocument(
+              document,
+              input.access,
+              resolvedScope.permissionVerified === true,
+            ) &&
+                matchesWorkspaceSearchFilters(document, filters)
+              ? document
+              : undefined
+          },
+        )
+        for (let index = 0; index < batch.length; index += 1) {
+          const row = batch[index]
+          if (!row) continue
+          processedDocumentCount += 1
+          evaluated += 1
+          if (row.recordKey) lastProcessedRecordKey = row.recordKey
+          const document = currentDocuments[index]
+          if (!document) continue
+          results.push(
+            toWorkspaceSearchResult(
+              document,
+              filters.keyword,
+            ),
+          )
+          if (results.length >= limit) {
+            reachedLimit = true
+            break
+          }
         }
       }
 
@@ -1411,7 +1586,12 @@ function matchesWorkspaceSearchFilters(
     if (!value || !matchesSearchDateRange(value, filters.date.from, filters.date.to)) return false
   }
   if (filters.keyword) {
-    const haystack = normalizeSearchText([document.title, document.subtitle, document.body].filter(Boolean).join('\n'))
+    const haystack = normalizeSearchText([
+      document.entityId,
+      document.title,
+      document.subtitle,
+      document.body,
+    ].filter(Boolean).join('\n'))
     if (!splitKeyword(filters.keyword).every((term) => haystack.includes(term))) return false
   }
   return true
@@ -1443,7 +1623,9 @@ function matchesCustomFieldFilter(
 function canAccessWorkspaceSearchDocument(
   document: WorkspaceSearchDocument,
   access: WorkspaceSearchAccessScope,
+  permissionVerified = false,
 ) {
+  if (document.entityType === 'document') return permissionVerified
   if (access.isSystemAdmin) return true
   if (document.entityType === 'project') {
     return Boolean(document.projectId && access.projectIds.has(document.projectId))

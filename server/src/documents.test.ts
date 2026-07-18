@@ -1,0 +1,2444 @@
+import { expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
+import type {
+  DocumentDetail,
+  DocumentOperation,
+  DocumentRelationTarget,
+} from '@mukuroji/contracts'
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { createMutationAuditContext } from './audit'
+import {
+  DOCUMENT_MAX_ITEM_BYTES,
+  DynamoDbDocumentsClient,
+  reduceDocumentOperations,
+  renderDocumentExport,
+  validateDocumentPayload,
+} from './documents'
+
+const ownerAccess = {
+  memberKey: 'owner@example.com',
+  workspaceRole: 'owner',
+} as const
+
+test('merges stale-base operations on independent elements and rejects a same-element conflict atomically', () => {
+  const document = createPage()
+  const first = reduceDocumentOperations({
+    document,
+    elementRevisions: { 'block:block-a': 1, 'block:block-b': 1 },
+    baseRevision: 1,
+    nextRevision: 2,
+    operations: [{
+      type: 'update-block',
+      operationId: 'operation-a',
+      blockId: 'block-a',
+      block: { id: 'block-a', type: 'paragraph', text: 'A2' },
+    }],
+  })
+  const merged = reduceDocumentOperations({
+    document: first.document,
+    elementRevisions: first.elementRevisions,
+    baseRevision: 1,
+    nextRevision: 3,
+    operations: [{
+      type: 'update-block',
+      operationId: 'operation-b',
+      blockId: 'block-b',
+      block: { id: 'block-b', type: 'paragraph', text: 'B2' },
+    }],
+  })
+
+  expect(merged.document).toMatchObject({
+    revision: 3,
+    blocks: [
+      { id: 'block-a', text: 'A2' },
+      { id: 'block-b', text: 'B2' },
+    ],
+  })
+  const beforeConflict = structuredClone(merged.document)
+  expect(() => reduceDocumentOperations({
+    document: merged.document,
+    elementRevisions: merged.elementRevisions,
+    baseRevision: 1,
+    nextRevision: 4,
+    operations: [
+      {
+        type: 'update-block',
+        operationId: 'operation-conflict',
+        blockId: 'block-a',
+        block: { id: 'block-a', type: 'paragraph', text: 'stale' },
+      },
+      {
+        type: 'update-block',
+        operationId: 'operation-would-have-succeeded',
+        blockId: 'block-b',
+        block: { id: 'block-b', type: 'paragraph', text: 'not applied' },
+      },
+    ],
+  })).toThrow(expect.objectContaining({
+    code: 'DocumentOperationConflict',
+    status: 409,
+    details: {
+      conflicts: [
+        expect.objectContaining({
+          operationId: 'operation-conflict',
+          elementType: 'block',
+          elementId: 'block-a',
+          updatedRevision: 2,
+          baseRevision: 1,
+        }),
+        expect.objectContaining({
+          operationId: 'operation-would-have-succeeded',
+          elementType: 'block',
+          elementId: 'block-b',
+          updatedRevision: 3,
+          baseRevision: 1,
+        }),
+      ],
+    },
+  }))
+  expect(merged.document).toEqual(beforeConflict)
+})
+
+test('conflicts stale block and object deletion with concurrent source relation updates', () => {
+  const page = createPage({
+    relations: [{
+      id: 'block-relation',
+      source: { kind: 'block', blockId: 'block-a' },
+      target: { kind: 'goal', goalId: 'goal-1' },
+      createdByUserId: 'owner@example.com',
+      createdAt: '2026-07-18T00:00:00.000Z',
+    }],
+  })
+  const pageRelationUpdated = reduceDocumentOperations({
+    document: page,
+    elementRevisions: {
+      'block:block-a': 1,
+      'block:block-b': 1,
+      'relation:block-relation': 1,
+    },
+    baseRevision: 1,
+    nextRevision: 2,
+    operations: [{
+      type: 'upsert-relation',
+      operationId: 'update-block-relation',
+      relation: {
+        ...page.relations[0]!,
+        target: { kind: 'goal', goalId: 'goal-2' },
+      },
+    }],
+  })
+  expect(() => reduceDocumentOperations({
+    document: pageRelationUpdated.document,
+    elementRevisions: pageRelationUpdated.elementRevisions,
+    baseRevision: 1,
+    nextRevision: 3,
+    operations: [{
+      type: 'delete-block',
+      operationId: 'stale-delete-block',
+      blockId: 'block-a',
+    }],
+  })).toThrow(expect.objectContaining({
+    code: 'DocumentOperationConflict',
+    details: {
+      conflicts: [
+        expect.objectContaining({
+          operationId: 'stale-delete-block',
+          elementType: 'relation',
+          elementId: 'block-relation',
+          updatedRevision: 2,
+        }),
+      ],
+    },
+  }))
+  const pageDeleted = reduceDocumentOperations({
+    document: pageRelationUpdated.document,
+    elementRevisions: pageRelationUpdated.elementRevisions,
+    baseRevision: 2,
+    nextRevision: 3,
+    operations: [{
+      type: 'delete-block',
+      operationId: 'delete-block',
+      blockId: 'block-a',
+    }],
+  })
+  expect(pageDeleted.document.relations).toEqual([])
+  expect(pageDeleted.elementRevisions['relation:block-relation']).toBe(3)
+
+  const whiteboard = createWhiteboard()
+  whiteboard.relations = [{
+    id: 'object-relation',
+    source: { kind: 'whiteboard-object', objectId: 'object-1' },
+    target: { kind: 'project', projectId: 'project-1' },
+    createdByUserId: 'owner@example.com',
+    createdAt: '2026-07-18T00:00:00.000Z',
+  }]
+  const objectRelationUpdated = reduceDocumentOperations({
+    document: whiteboard,
+    elementRevisions: {
+      'object:object-1': 1,
+      'relation:object-relation': 1,
+    },
+    baseRevision: 1,
+    nextRevision: 2,
+    operations: [{
+      type: 'upsert-relation',
+      operationId: 'update-object-relation',
+      relation: {
+        ...whiteboard.relations[0]!,
+        target: { kind: 'project', projectId: 'project-2' },
+      },
+    }],
+  })
+  expect(() => reduceDocumentOperations({
+    document: objectRelationUpdated.document,
+    elementRevisions: objectRelationUpdated.elementRevisions,
+    baseRevision: 1,
+    nextRevision: 3,
+    operations: [{
+      type: 'delete-object',
+      operationId: 'stale-delete-object',
+      objectId: 'object-1',
+    }],
+  })).toThrow(expect.objectContaining({
+    code: 'DocumentOperationConflict',
+    details: {
+      conflicts: [
+        expect.objectContaining({
+          operationId: 'stale-delete-object',
+          elementType: 'relation',
+          elementId: 'object-relation',
+          updatedRevision: 2,
+        }),
+      ],
+    },
+  }))
+  const objectDeleted = reduceDocumentOperations({
+    document: objectRelationUpdated.document,
+    elementRevisions: objectRelationUpdated.elementRevisions,
+    baseRevision: 2,
+    nextRevision: 3,
+    operations: [{
+      type: 'delete-object',
+      operationId: 'delete-object',
+      objectId: 'object-1',
+    }],
+  })
+  expect(objectDeleted.document.relations).toEqual([])
+  expect(objectDeleted.elementRevisions['relation:object-relation']).toBe(3)
+})
+
+test('stores operation receipts for idempotent retry and rejects operation ID reuse', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Operations',
+    blocks: [
+      { id: 'block-a', type: 'paragraph', text: 'A1' },
+      { id: 'block-b', type: 'paragraph', text: 'B1' },
+    ],
+  })
+  const firstInput = {
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-block',
+        operationId: 'operation-1',
+        blockId: 'block-a',
+        block: { id: 'block-a', type: 'paragraph', text: 'A2' },
+      }] satisfies DocumentOperation[],
+    },
+  }
+
+  const first = await client.applyOperations(firstInput)
+  const retry = await client.applyOperations(firstInput)
+  const merged = await client.applyOperations({
+    ...firstInput,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-2',
+      operations: [{
+        type: 'update-block',
+        operationId: 'operation-2',
+        blockId: 'block-b',
+        block: { id: 'block-b', type: 'paragraph', text: 'B2' },
+      }],
+    },
+  })
+  const lateRetry = await client.applyOperations(firstInput)
+
+  expect(first.revision).toBe(2)
+  expect(retry.revision).toBe(2)
+  expect(merged.revision).toBe(3)
+  expect(lateRetry.revision).toBe(2)
+  expect(memory.items().filter(({ entryType }) => entryType === 'document-version')).toHaveLength(3)
+  expect(memory.items().filter(({ entryType }) => entryType === 'document-operation')).toHaveLength(2)
+  await expect(client.applyOperations({
+    ...firstInput,
+    input: {
+      ...firstInput.input,
+      operations: [{
+        type: 'update-block',
+        operationId: 'operation-1',
+        blockId: 'block-a',
+        block: { id: 'block-a', type: 'paragraph', text: 'different payload' },
+      }],
+    },
+  })).rejects.toMatchObject({
+    code: 'DocumentOperationIdempotencyConflict',
+    status: 409,
+  })
+  await expect(client.applyOperations({
+    ...firstInput,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-3',
+      operations: [{
+        type: 'update-block',
+        operationId: 'operation-3',
+        blockId: 'block-a',
+        block: { id: 'block-a', type: 'paragraph', text: 'stale edit' },
+      }],
+    },
+  })).rejects.toMatchObject({
+    code: 'DocumentOperationConflict',
+    status: 409,
+  })
+})
+
+test('compacts deleted element revisions while rejecting bases older than the conflict floor', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Compaction',
+    blocks: [{ id: 'block-live', type: 'paragraph', text: 'live' }],
+  })
+  let revision = created.revision
+  const firstInsert = {
+    baseRevision: revision,
+    clientId: 'compaction-editor',
+    operations: [{
+      block: {
+        id: 'temporary-0',
+        type: 'paragraph' as const,
+        text: 'temporary',
+      },
+      index: 1,
+      operationId: 'insert-temporary-0',
+      type: 'insert-block' as const,
+    }],
+  }
+  for (let index = 0; index < 70; index += 1) {
+    const blockId = `temporary-${index}`
+    const inserted = await client.applyOperations({
+      workspaceId: 'workspace-1',
+      documentId: created.id,
+      access: ownerAccess,
+      input:
+        index === 0
+          ? firstInsert
+          : {
+              baseRevision: revision,
+              clientId: 'compaction-editor',
+              operations: [{
+                block: {
+                  id: blockId,
+                  type: 'paragraph',
+                  text: 'temporary',
+                },
+                index: 1,
+                operationId: `insert-${blockId}`,
+                type: 'insert-block',
+              }],
+            },
+    })
+    revision = inserted.revision
+    const deleted = await client.applyOperations({
+      workspaceId: 'workspace-1',
+      documentId: created.id,
+      access: ownerAccess,
+      input: {
+        baseRevision: revision,
+        clientId: 'compaction-editor',
+        operations: [{
+          blockId,
+          operationId: `delete-${blockId}`,
+          type: 'delete-block',
+        }],
+      },
+    })
+    revision = deleted.revision
+  }
+
+  const stored = memory.items().find(
+    ({ entryType }) => entryType === 'document',
+  )
+  expect(
+    Object.keys(
+      stored?.elementRevisions as Record<string, number>,
+    ).length,
+  ).toBeLessThan(20)
+  expect(stored?.operationConflictFloorRevision).toBeGreaterThan(1)
+  await expect(client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'stale-editor',
+      operations: [{
+        block: {
+          id: 'temporary-0',
+          type: 'paragraph',
+          text: 'stale resurrection',
+        },
+        index: 1,
+        operationId: 'stale-resurrection',
+        type: 'insert-block',
+      }],
+    },
+  })).rejects.toMatchObject({
+    code: 'DocumentOperationHistoryCompacted',
+    status: 409,
+  })
+  const replayed = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: firstInsert,
+  })
+  expect(replayed.revision).toBe(2)
+})
+
+test('creates an immutable version for every mutation and restores an old snapshot as a new revision', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Versions',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'original' }],
+  })
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-block',
+        operationId: 'operation-1',
+        blockId: 'block-a',
+        block: { id: 'block-a', type: 'paragraph', text: 'edited' },
+      }],
+    },
+  })
+
+  const restored = await client.restoreVersion({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    versionId: `${created.id}:1`,
+    expectedRevision: 2,
+    validateRelationTargets: async () => undefined,
+  })
+  const versions = await client.listVersions({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+  })
+
+  expect(restored).toMatchObject({
+    revision: 3,
+    blocks: [{ id: 'block-a', text: 'original' }],
+  })
+  expect(versions.versions.map(({ revision, reason }) => ({ revision, reason }))).toEqual([
+    { revision: 3, reason: 'restore' },
+    { revision: 2, reason: 'edit' },
+    { revision: 1, reason: 'create' },
+  ])
+})
+
+test('revalidates relation and Whiteboard Work Item targets before restoring a snapshot', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const relationTarget = {
+    kind: 'project' as const,
+    projectId: 'project-1',
+  }
+  const workItemTarget = {
+    kind: 'work-item' as const,
+    workItemId: 'team/team-a/issue/work-item-1',
+  }
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'whiteboard',
+    scope: { type: 'workspace' },
+    title: 'Restore targets',
+    relations: [{
+      id: 'relation-project',
+      source: { kind: 'document' },
+      target: relationTarget,
+      createdByUserId: ownerAccess.memberKey,
+      createdAt: '2026-07-18T00:00:00.000Z',
+    }],
+    whiteboard: {
+      objects: [{
+        id: 'card-1',
+        type: 'work-item',
+        workItemId: workItemTarget.workItemId,
+        bounds: {
+          x: 0,
+          y: 0,
+          width: 200,
+          height: 100,
+        },
+        zIndex: 1,
+      }],
+      connectors: [],
+      frames: [],
+    },
+  })
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-1',
+      operations: [
+        {
+          type: 'delete-object',
+          operationId: 'delete-card',
+          objectId: 'card-1',
+        },
+        {
+          type: 'delete-relation',
+          operationId: 'delete-project-relation',
+          relationId: 'relation-project',
+        },
+      ],
+    },
+  })
+  await expect(client.restoreVersion({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    versionId: `${created.id}:1`,
+    expectedRevision: 2,
+    validateRelationTargets: async () => {
+      throw new Error('target access denied')
+    },
+  })).rejects.toThrow('target access denied')
+  expect(await client.get({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+  })).toMatchObject({
+    revision: 2,
+    relations: [],
+    whiteboard: { objects: [] },
+  })
+  const validatedTargets: DocumentRelationTarget[] = []
+
+  await client.restoreVersion({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    versionId: `${created.id}:1`,
+    expectedRevision: 2,
+    validateRelationTargets: async (targets) => {
+      validatedTargets.push(...targets)
+    },
+  })
+
+  expect(validatedTargets).toEqual([
+    relationTarget,
+    workItemTarget,
+  ])
+})
+
+test('records restore deletions as tombstones against stale element edits', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Restore conflict',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'original' }],
+  })
+  const relation = {
+    id: 'relation-added',
+    source: { kind: 'document' as const },
+    target: { kind: 'goal' as const, goalId: 'goal-1' },
+    createdByUserId: ownerAccess.memberKey,
+    createdAt: '2026-07-18T00:00:00.000Z',
+  }
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-a',
+      operations: [{
+        operationId: 'add-relation',
+        relation,
+        type: 'upsert-relation',
+      }],
+    },
+  })
+  await client.restoreVersion({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    versionId: `${created.id}:1`,
+    expectedRevision: 2,
+    validateRelationTargets: async () => undefined,
+  })
+
+  await expect(client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 2,
+      clientId: 'editor-a',
+      operations: [{
+        operationId: 'stale-relation-retry',
+        relation,
+        type: 'upsert-relation',
+      }],
+    },
+  })).rejects.toMatchObject({
+    code: 'DocumentOperationConflict',
+    details: {
+      conflicts: [
+        expect.objectContaining({
+          elementId: relation.id,
+          elementType: 'relation',
+          updatedRevision: 3,
+        }),
+      ],
+    },
+    status: 409,
+  })
+})
+
+test('restores an explicitly managed child without requiring private parent access', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const bobAccess = {
+    memberKey: 'bob@example.com',
+    workspaceRole: 'member' as const,
+  }
+  const aliceAccess = {
+    memberKey: 'alice@example.com',
+    workspaceRole: 'member' as const,
+  }
+  const parent = await client.create({
+    workspaceId: 'workspace-1',
+    access: bobAccess,
+    kind: 'folder',
+    scope: { type: 'workspace' },
+    title: 'Bob private folder',
+    permission: { mode: 'private', memberGrants: [] },
+  })
+  const child = await client.create({
+    workspaceId: 'workspace-1',
+    access: bobAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    parentId: parent.id,
+    title: 'Alice managed child',
+    permission: {
+      mode: 'inherit',
+      memberGrants: [{
+        memberKey: aliceAccess.memberKey,
+        role: 'manager',
+      }],
+    },
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'original' }],
+  })
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: child.id,
+    access: aliceAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'alice-editor',
+      operations: [{
+        block: {
+          id: 'block-a',
+          type: 'paragraph',
+          text: 'changed',
+        },
+        blockId: 'block-a',
+        operationId: 'alice-change',
+        type: 'update-block',
+      }],
+    },
+  })
+
+  const restoredVersion = await client.restoreVersion({
+    workspaceId: 'workspace-1',
+    documentId: child.id,
+    access: aliceAccess,
+    versionId: `${child.id}:1`,
+    expectedRevision: 2,
+    validateRelationTargets: async () => undefined,
+  })
+  expect(restoredVersion.revision).toBe(3)
+  const archived = await client.archive({
+    workspaceId: 'workspace-1',
+    documentId: child.id,
+    access: aliceAccess,
+    expectedRevision: 3,
+  })
+  const restoredArchive = await client.restoreArchived({
+    workspaceId: 'workspace-1',
+    documentId: child.id,
+    access: aliceAccess,
+    expectedRevision: archived.revision,
+  })
+  expect(restoredArchive.archivedAt).toBeUndefined()
+  expect(restoredArchive.parentId).toBe(parent.id)
+})
+
+test('reuses deterministic cloned block IDs when template instantiation is retried', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const template = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'template',
+    scope: { type: 'workspace' },
+    title: 'Launch brief',
+    permission: {
+      mode: 'private',
+      memberGrants: [{
+        memberKey: 'template-viewer@example.com',
+        role: 'viewer',
+      }],
+    },
+    blocks: [{
+      id: 'source-heading',
+      level: 1,
+      text: 'Launch',
+      type: 'heading',
+    }],
+  })
+  const input = {
+    workspaceId: 'workspace-1',
+    templateId: template.id,
+    access: ownerAccess,
+    scope: { type: 'workspace' as const },
+    idempotencyKey: 'instantiate-template-request-1',
+  }
+
+  const created = await client.instantiateTemplate(input)
+  await client.update({
+    workspaceId: 'workspace-1',
+    documentId: template.id,
+    access: ownerAccess,
+    expectedRevision: 1,
+    title: 'Changed launch brief',
+  })
+  const retried = await client.instantiateTemplate(input)
+
+  expect(retried).toEqual(created)
+  expect(created.kind).toBe('page')
+  expect(created.permission).toEqual({
+    mode: 'inherit',
+    memberGrants: [],
+  })
+  expect(
+    created.kind === 'page' ? created.blocks[0]?.id : undefined,
+  ).toMatch(/^block_[a-f0-9]{32}$/u)
+  expect(
+    memory.items().filter(
+      ({ entryType }) => entryType === 'document',
+    ),
+  ).toHaveLength(2)
+})
+
+test('does not reveal an idempotent create result after the actor loses private access', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const aliceAccess = {
+    memberKey: 'alice@example.com',
+    workspaceRole: 'member' as const,
+  }
+  const bobAccess = {
+    memberKey: 'bob@example.com',
+    workspaceRole: 'member' as const,
+  }
+  const input = {
+    workspaceId: 'workspace-1',
+    access: aliceAccess,
+    kind: 'page' as const,
+    scope: { type: 'workspace' as const },
+    title: 'Private retry',
+    blocks: [{ id: 'block-a', type: 'paragraph' as const, text: 'secret' }],
+    permission: {
+      mode: 'private' as const,
+      memberGrants: [{
+        memberKey: bobAccess.memberKey,
+        role: 'manager' as const,
+      }],
+    },
+    idempotencyKey: 'private-create-request-1',
+  }
+  const created = await client.create(input)
+  await client.update({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: bobAccess,
+    expectedRevision: 1,
+    permission: {
+      mode: 'private',
+      memberGrants: [{
+        memberKey: bobAccess.memberKey,
+        role: 'manager',
+      }],
+    },
+  })
+
+  await expect(client.create(input)).rejects.toMatchObject({
+    code: 'DocumentViewDenied',
+    status: 403,
+  })
+})
+
+test('allows an editor to restore content without rolling back current ACL metadata', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Original title',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'original content' }],
+  })
+  const current = await client.update({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    expectedRevision: 1,
+    title: 'Current title',
+    permission: {
+      mode: 'private',
+      memberGrants: [{ memberKey: 'editor@example.com', role: 'editor' }],
+    },
+  })
+  const currentPermission = structuredClone(current.permission)
+
+  const restored = await client.restoreVersion({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: {
+      memberKey: 'editor@example.com',
+      workspaceRole: 'member',
+    },
+    versionId: `${created.id}:1`,
+    expectedRevision: 2,
+    validateRelationTargets: async () => undefined,
+  })
+
+  expect(restored.title).toBe('Original title')
+  expect(restored.permission).toEqual({
+    mode: 'private',
+    memberGrants: [],
+  })
+  expect(restored.capabilities.canEdit).toBeTrue()
+  const storedDocument = memory.items().find(
+    ({ entryType }) => entryType === 'document',
+  )?.document as DocumentDetail
+  expect(storedDocument.permission).toEqual(currentPermission)
+  expect(storedDocument.permission).not.toEqual(created.permission)
+})
+
+test('redacts member grants after ACL evaluation while preserving manager visibility', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Private ACL',
+    permission: {
+      mode: 'private',
+      memberGrants: [
+        { memberKey: 'viewer@example.com', role: 'viewer' },
+        { memberKey: 'guest@example.com', role: 'viewer' },
+        { memberKey: 'editor@example.com', role: 'editor' },
+        { memberKey: 'manager@example.com', role: 'manager' },
+      ],
+    },
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'private' }],
+  })
+
+  const viewer = await client.get({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: {
+      memberKey: 'viewer@example.com',
+      workspaceRole: 'member',
+    },
+  })
+  const guest = await client.get({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: {
+      memberKey: 'guest@example.com',
+      workspaceRole: 'guest',
+    },
+  })
+  const editor = await client.get({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: {
+      memberKey: 'editor@example.com',
+      workspaceRole: 'member',
+    },
+  })
+  const manager = await client.get({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: {
+      memberKey: 'manager@example.com',
+      workspaceRole: 'member',
+    },
+  })
+
+  expect(manager.capabilities.canManagePermissions).toBeTrue()
+  expect(manager.permission).toEqual(created.permission)
+  expect(viewer.capabilities).toMatchObject({
+    canView: true,
+    canEdit: false,
+    canManagePermissions: false,
+  })
+  expect(guest.capabilities).toMatchObject({
+    canView: true,
+    canEdit: false,
+    canComment: false,
+    canManagePermissions: false,
+  })
+  expect(editor.capabilities).toMatchObject({
+    canView: true,
+    canEdit: true,
+    canManagePermissions: false,
+  })
+  for (const document of [viewer, guest, editor]) {
+    expect(document.permission).toEqual({
+      mode: 'private',
+      memberGrants: [],
+    })
+  }
+})
+
+test('counts only active children visible to the current viewer in detail and tree projections', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const root = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'folder',
+    scope: { type: 'workspace' },
+    title: 'Root',
+  })
+  const visible = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    parentId: root.id,
+    title: 'Visible child',
+    blocks: [],
+  })
+  const hidden = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    parentId: root.id,
+    title: 'Hidden child',
+    permission: { mode: 'private', memberGrants: [] },
+    blocks: [],
+  })
+  const viewerAccess = {
+    memberKey: 'member@example.com',
+    workspaceRole: 'member',
+  } as const
+
+  const detail = await client.get({
+    workspaceId: 'workspace-1',
+    documentId: root.id,
+    access: viewerAccess,
+  })
+  const tree = await client.list({
+    workspaceId: 'workspace-1',
+    access: viewerAccess,
+  })
+  const managerDetail = await client.get({
+    workspaceId: 'workspace-1',
+    documentId: root.id,
+    access: ownerAccess,
+  })
+
+  expect(detail).toMatchObject({ id: root.id, childCount: 1 })
+  expect(tree.nodes.find(({ id }) => id === root.id)).toMatchObject({
+    childCount: 1,
+  })
+  expect(tree.nodes.map(({ id }) => id)).toContain(visible.id)
+  expect(tree.nodes.map(({ id }) => id)).not.toContain(hidden.id)
+  expect(managerDetail).toMatchObject({ id: root.id, childCount: 2 })
+})
+
+test('rejects a parent update that would create a folder cycle', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const root = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'folder',
+    scope: { type: 'workspace' },
+    title: 'Root',
+  })
+  const child = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'folder',
+    scope: { type: 'workspace' },
+    parentId: root.id,
+    title: 'Child',
+  })
+
+  await expect(client.update({
+    workspaceId: 'workspace-1',
+    documentId: root.id,
+    access: ownerAccess,
+    expectedRevision: 1,
+    parentId: child.id,
+  })).rejects.toMatchObject({
+    code: 'DocumentTreeCycle',
+    status: 409,
+  })
+})
+
+test('serializes reciprocal folder moves so concurrent validation cannot create a cycle', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const first = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'folder',
+    scope: { type: 'workspace' },
+    title: 'First',
+  })
+  const second = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'folder',
+    scope: { type: 'workspace' },
+    title: 'Second',
+  })
+
+  const results = await Promise.allSettled([
+    client.update({
+      workspaceId: 'workspace-1',
+      documentId: first.id,
+      access: ownerAccess,
+      expectedRevision: 1,
+      parentId: second.id,
+    }),
+    client.update({
+      workspaceId: 'workspace-1',
+      documentId: second.id,
+      access: ownerAccess,
+      expectedRevision: 1,
+      parentId: first.id,
+    }),
+  ])
+
+  expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
+  expect(results.filter(({ status }) => status === 'rejected')).toHaveLength(1)
+  const latestFirst = await client.get({
+    workspaceId: 'workspace-1',
+    documentId: first.id,
+    access: ownerAccess,
+  })
+  const latestSecond = await client.get({
+    workspaceId: 'workspace-1',
+    documentId: second.id,
+    access: ownerAccess,
+  })
+  expect(
+    latestFirst.parentId === second.id &&
+      latestSecond.parentId === first.id,
+  ).toBeFalse()
+  expect(memory.items()).toContainEqual(expect.objectContaining({
+    entryType: 'document-tree-revision',
+    revision: 1,
+  }))
+})
+
+test('serializes child creation against a concurrent parent scope change', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const access = {
+    ...ownerAccess,
+    projectRoles: { 'project-1': 'manager' as const },
+  }
+  const folder = await client.create({
+    workspaceId: 'workspace-1',
+    access,
+    kind: 'folder',
+    scope: { type: 'workspace' },
+    title: 'Scope race',
+  })
+
+  const results = await Promise.allSettled([
+    client.update({
+      workspaceId: 'workspace-1',
+      documentId: folder.id,
+      access,
+      expectedRevision: 1,
+      scope: { type: 'project', projectId: 'project-1' },
+    }),
+    client.create({
+      workspaceId: 'workspace-1',
+      access,
+      kind: 'page',
+      scope: { type: 'workspace' },
+      parentId: folder.id,
+      title: 'Concurrent child',
+      blocks: [],
+    }),
+  ])
+
+  expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
+  expect(results.filter(({ status }) => status === 'rejected')).toHaveLength(1)
+  const currentRows = memory.items().filter(
+    ({ entryType }) => entryType === 'document',
+  )
+  const storedFolder = currentRows.find(
+    ({ documentId }) => documentId === folder.id,
+  )?.document as DocumentDetail
+  const storedChild = currentRows
+    .map(({ document }) => document as DocumentDetail)
+    .find(({ parentId }) => parentId === folder.id)
+  if (storedChild !== undefined) {
+    expect(storedChild.scope).toEqual(storedFolder.scope)
+  }
+})
+
+test('requires destination scope manager access for scope and tree moves', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const projectManager = {
+    memberKey: 'manager@example.com',
+    workspaceRole: 'member',
+    projectRoles: {
+      'project-1': 'manager',
+      'project-2': 'viewer',
+    },
+  } as const
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: projectManager,
+    kind: 'page',
+    scope: { type: 'project', projectId: 'project-1' },
+    title: 'Project document',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+
+  await expect(client.update({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: projectManager,
+    expectedRevision: 1,
+    scope: { type: 'workspace' },
+  })).rejects.toMatchObject({
+    code: 'DocumentDestinationScopeDenied',
+    status: 403,
+  })
+  await expect(client.update({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: projectManager,
+    expectedRevision: 1,
+    scope: { type: 'project', projectId: 'project-2' },
+  })).rejects.toMatchObject({
+    code: 'DocumentDestinationScopeDenied',
+    status: 403,
+  })
+})
+
+test('hides an archived folder subtree from active and includeArchived detail reads until restore', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const folder = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'folder',
+    scope: { type: 'workspace' },
+    title: 'Folder',
+  })
+  const child = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    parentId: folder.id,
+    title: 'Child',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  const archived = await client.archive({
+    workspaceId: 'workspace-1',
+    documentId: folder.id,
+    access: ownerAccess,
+    expectedRevision: 1,
+  })
+
+  await expect(client.get({
+    workspaceId: 'workspace-1',
+    documentId: child.id,
+    access: ownerAccess,
+  })).rejects.toMatchObject({ code: 'DocumentNotFound', status: 404 })
+  await expect(client.get({
+    workspaceId: 'workspace-1',
+    documentId: child.id,
+    access: ownerAccess,
+    includeArchived: true,
+  })).rejects.toMatchObject({ code: 'DocumentNotFound', status: 404 })
+  expect((await client.list({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+  })).nodes).toEqual([])
+
+  await client.restoreArchived({
+    workspaceId: 'workspace-1',
+    documentId: folder.id,
+    access: ownerAccess,
+    expectedRevision: archived.revision,
+  })
+  expect(await client.get({
+    workspaceId: 'workspace-1',
+    documentId: child.id,
+    access: ownerAccess,
+  })).toMatchObject({ id: child.id, title: 'Child' })
+})
+
+test('indexes Whiteboard work-item cards as transactional backlinks', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'whiteboard',
+    scope: { type: 'workspace' },
+    title: 'Work items',
+    whiteboard: {
+      objects: [{
+        id: 'card-1',
+        type: 'work-item',
+        workItemId: 'team/team-a/issue/work-item-1',
+        bounds: { x: 0, y: 0, width: 200, height: 100 },
+        zIndex: 1,
+      }],
+      connectors: [],
+      frames: [],
+    },
+  })
+  expect(await client.listBacklinks({
+    workspaceId: 'workspace-1',
+    targetKind: 'work-item',
+    targetId: 'team/team-a/issue/work-item-1',
+    access: ownerAccess,
+  })).toEqual({
+    backlinks: [expect.objectContaining({
+      documentId: created.id,
+      relation: expect.objectContaining({
+        source: { kind: 'whiteboard-object', objectId: 'card-1' },
+        target: {
+          kind: 'work-item',
+          workItemId: 'team/team-a/issue/work-item-1',
+        },
+      }),
+    })],
+    nextCursor: undefined,
+  })
+
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-object',
+        operationId: 'update-card',
+        objectId: 'card-1',
+        object: {
+          id: 'card-1',
+          type: 'work-item',
+          workItemId: 'team/team-a/issue/work-item-2',
+          bounds: { x: 0, y: 0, width: 200, height: 100 },
+          zIndex: 1,
+        },
+      }],
+    },
+  })
+  expect(await client.listBacklinks({
+    workspaceId: 'workspace-1',
+    targetKind: 'work-item',
+    targetId: 'team/team-a/issue/work-item-1',
+    access: ownerAccess,
+  })).toEqual({
+    backlinks: [],
+    nextCursor: undefined,
+  })
+  expect(await client.listBacklinks({
+    workspaceId: 'workspace-1',
+    targetKind: 'work-item',
+    targetId: 'team/team-a/issue/work-item-2',
+    access: ownerAccess,
+  })).toMatchObject({
+    backlinks: [expect.objectContaining({
+      documentId: created.id,
+    })],
+  })
+
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 2,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'delete-object',
+        operationId: 'delete-card',
+        objectId: 'card-1',
+      }],
+    },
+  })
+  expect(await client.listBacklinks({
+    workspaceId: 'workspace-1',
+    targetKind: 'work-item',
+    targetId: 'team/team-a/issue/work-item-2',
+    access: ownerAccess,
+  })).toEqual({
+    backlinks: [],
+    nextCursor: undefined,
+  })
+})
+
+test('hashes public tokens at rest, carries allowExport, and checks expiry synchronously', async () => {
+  const memory = createMemoryDocumentClient()
+  let currentTime = new Date('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => currentTime)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Shared',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'public content' }],
+  })
+  const result = await client.createPublicShare({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    expiresAt: '2026-07-19T00:00:00.000Z',
+    allowExport: true,
+    idempotencyKey: 'public-share-request-1',
+  })
+  const retried = await client.createPublicShare({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    expiresAt: '2026-07-19T00:00:00.000Z',
+    allowExport: true,
+    idempotencyKey: 'public-share-request-1',
+  })
+
+  const storedJson = JSON.stringify(memory.items())
+  const tokenDerivableWithoutServerSecret = createHash('sha256')
+    .update(
+      'mukuroji-public-share\0workspace-1\0public-share-request-1',
+    )
+    .digest('base64url')
+  expect(storedJson).not.toContain(result.token)
+  expect(result.token).not.toBe(tokenDerivableWithoutServerSecret)
+  expect(retried).toEqual(result)
+  expect(
+    memory.items().filter(
+      ({ entryType }) => entryType === 'document-share',
+    ),
+  ).toHaveLength(1)
+  expect(memory.items()).toContainEqual(expect.objectContaining({
+    entryType: 'document-share',
+    tokenHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    allowExport: true,
+  }))
+  expect(memory.items()).toContainEqual(expect.objectContaining({
+    workspaceId: expect.stringMatching(/^PUBLIC#[a-f0-9]{64}$/u),
+    recordKey: 'LINK',
+  }))
+  const resolved = await client.resolvePublicShare(result.token)
+  expect(resolved.document.capabilities).toMatchObject({
+    canView: true,
+    canExport: true,
+    canEdit: false,
+  })
+  expect(resolved.share.allowExport).toBeTrue()
+  await expect(client.createPublicShare({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    expiresAt: '2026-07-19T00:00:00.000Z',
+    allowExport: false,
+    idempotencyKey: 'public-share-request-1',
+  })).rejects.toMatchObject({
+    code: 'DocumentShareIdempotencyConflict',
+    status: 409,
+  })
+
+  currentTime = new Date('2026-07-19T00:00:00.000Z')
+  await expect(client.resolvePublicShare(result.token)).rejects.toMatchObject({
+    code: 'DocumentPublicShareNotFound',
+    status: 404,
+  })
+})
+
+test('stores text anchors and presence selections losslessly with a unified TTL attribute', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Collaboration',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'hello @alice' }],
+  })
+  const comment = await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    body: 'Please ask @alice',
+    mentions: [{ userId: 'alice@example.com', offset: 11, length: 6 }],
+    anchor: { type: 'text', blockId: 'block-a', start: 0, end: 5 },
+  })
+  await client.heartbeatPresence({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    clientId: 'browser-tab-1',
+    displayName: 'Owner',
+    color: '#123456',
+    selection: {
+      type: 'text',
+      blockId: 'block-a',
+      anchorOffset: 1,
+      focusOffset: 4,
+    },
+  })
+
+  expect(comment).toMatchObject({
+    mentions: [{ userId: 'alice@example.com', offset: 11, length: 6 }],
+    anchor: { type: 'text', blockId: 'block-a', start: 0, end: 5 },
+  })
+  expect(await client.listPresence({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+  })).toEqual([expect.objectContaining({
+    selection: {
+      type: 'text',
+      blockId: 'block-a',
+      anchorOffset: 1,
+      focusOffset: 4,
+    },
+  })])
+  const presenceRow = memory.items().find(({ entryType }) => entryType === 'document-presence')
+  expect(presenceRow).toHaveProperty('expiresAtEpoch')
+  expect(presenceRow).not.toHaveProperty('expiresAt')
+})
+
+test('stores document mention notification source events atomically with comments', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(
+    memory,
+    () => new Date('2026-07-18T00:00:00.000Z'),
+    'audit-events-table',
+  )
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Mention source',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: {
+      id: ownerAccess.memberKey,
+      kind: 'user',
+      displayName: 'Owner',
+    },
+    idempotencyKey: 'comment-mention-1',
+    request: {
+      method: 'POST',
+      path: `/api/documents/${document.id}/comments`,
+      body: { body: 'Ask @Mina' },
+    },
+    source: { kind: 'api' },
+    occurredAt: '2026-07-18T00:00:00.000Z',
+  })
+
+  const comment = await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Ask @Mina and @Owner',
+    mentions: [
+      { userId: 'mina@example.com', offset: 4, length: 5 },
+      { userId: ownerAccess.memberKey, offset: 14, length: 6 },
+    ],
+    commentId: 'comment-mention-1',
+    auditContext,
+  })
+
+  const auditEvent = memory.items().find(
+    ({ eventType }) => eventType === 'document.comment.created',
+  )
+  expect(comment.id).toBe('comment-mention-1')
+  expect(auditEvent).toMatchObject({
+    entity: { id: document.id, type: 'document' },
+    metadata: {
+      actorMemberKey: ownerAccess.memberKey,
+      commentId: comment.id,
+      deepLink:
+        `/documents/${document.id}?context=comments&commentId=${comment.id}`,
+      notificationCandidates: [{
+        memberKey: 'mina@example.com',
+        reason: 'mention',
+      }],
+      notificationTitle: 'Mention source',
+    },
+  })
+})
+
+test('stores at most one replaceable presence lease per Workspace member', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Presence ownership',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  await client.heartbeatPresence({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    clientId: 'shared-client-id',
+    displayName: 'Owner',
+  })
+
+  await client.heartbeatPresence({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: {
+      memberKey: 'other@example.com',
+      workspaceRole: 'member',
+    },
+    clientId: 'shared-client-id',
+    displayName: 'Other user',
+  })
+  await client.heartbeatPresence({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    clientId: 'shared-client-id',
+    displayName: 'Owner updated',
+  })
+
+  expect(memory.items().filter(
+    ({ entryType }) => entryType === 'document-presence',
+  )).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      userId: ownerAccess.memberKey,
+      displayName: 'Owner updated',
+    }),
+    expect.objectContaining({
+      userId: 'other@example.com',
+      displayName: 'Other user',
+    }),
+  ]))
+  expect(memory.items().filter(
+    ({ entryType }) => entryType === 'document-presence',
+  )).toHaveLength(2)
+})
+
+test('pages comments with a scope-bound opaque DynamoDB cursor', async () => {
+  const memory = createMemoryDocumentClient()
+  let timestamp = 0
+  const client = createClient(
+    memory,
+    () => new Date(Date.UTC(2026, 6, 18, 0, 0, timestamp++)),
+  )
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Comment pagination',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  for (const body of ['First', 'Second', 'Third']) {
+    await client.createComment({
+      workspaceId: 'workspace-1',
+      documentId: document.id,
+      access: ownerAccess,
+      body,
+    })
+  }
+
+  const firstPage = await client.listComments({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    limit: 2,
+  })
+  expect(firstPage.comments.map(({ body }) => body)).toEqual([
+    'Third',
+    'Second',
+  ])
+  expect(firstPage.nextCursor).toBeDefined()
+  if (firstPage.nextCursor === undefined) {
+    throw new Error('Expected a comment pagination cursor.')
+  }
+
+  const secondPage = await client.listComments({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    limit: 2,
+    cursor: firstPage.nextCursor,
+  })
+  expect(secondPage).toEqual({
+    comments: [expect.objectContaining({ body: 'First' })],
+    nextCursor: undefined,
+  })
+  await expect(client.listComments({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    limit: 2,
+    cursor: `${firstPage.nextCursor}!`,
+  })).rejects.toMatchObject({
+    code: 'InvalidDocumentCursor',
+    status: 400,
+  })
+  const otherDocument = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Other comment scope',
+    blocks: [{ id: 'block-b', type: 'paragraph', text: 'other' }],
+  })
+  await expect(client.listComments({
+    workspaceId: 'workspace-1',
+    documentId: otherDocument.id,
+    access: ownerAccess,
+    limit: 2,
+    cursor: firstPage.nextCursor,
+  })).rejects.toMatchObject({
+    code: 'InvalidDocumentCursor',
+    status: 400,
+  })
+  await expect(client.listComments({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    limit: 2,
+    rootCommentId: 'another-thread',
+    cursor: firstPage.nextCursor,
+  })).rejects.toMatchObject({
+    code: 'InvalidDocumentCursor',
+    status: 400,
+  })
+  await expect(client.listComments({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    limit: 101,
+  })).rejects.toMatchObject({
+    code: 'InvalidDocumentPageLimit',
+    status: 400,
+  })
+})
+
+test('rejects replies to a resolved Document comment thread', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Resolved thread',
+    blocks: [],
+  })
+  const root = await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Root',
+  })
+  await client.resolveComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: root.id,
+    access: ownerAccess,
+    resolved: true,
+  })
+
+  await expect(client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Late reply',
+    parentCommentId: root.id,
+  })).rejects.toMatchObject({
+    code: 'DocumentCommentThreadResolved',
+    status: 409,
+  })
+})
+
+test('condition-checks an unresolved root when reply creation races with resolve', async () => {
+  const memory = createMemoryDocumentClient()
+  let raceNextReply = false
+  const proxyClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      const transaction = command.input.TransactItems as
+        | Array<Record<string, Record<string, unknown>>>
+        | undefined
+      const parentGuard = transaction
+        ?.find(({ ConditionCheck }) =>
+          ConditionCheck?.ConditionExpression ===
+            'resolved = :unresolved AND updatedAt = :parentUpdatedAt'
+        )
+        ?.ConditionCheck
+      if (raceNextReply && parentGuard !== undefined) {
+        raceNextReply = false
+        const key = parentGuard.Key as {
+          workspaceId: string
+          recordKey: string
+        }
+        const storedRoot = memory.items().find(
+          ({ workspaceId, recordKey }) =>
+            workspaceId === key.workspaceId &&
+            recordKey === key.recordKey,
+        )
+        if (storedRoot === undefined) {
+          throw new Error('Expected the stored root comment.')
+        }
+        memory.put({
+          ...storedRoot,
+          resolved: true,
+          resolvedAt: '2026-07-18T00:01:00.000Z',
+          resolvedByUserId: ownerAccess.memberKey,
+          updatedAt: '2026-07-18T00:01:00.000Z',
+        })
+      }
+      return memory.client.send(command as never)
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = createClient({
+    ...memory,
+    client: proxyClient,
+  })
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Resolve race',
+    blocks: [],
+  })
+  const root = await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Root',
+  })
+
+  raceNextReply = true
+  await expect(client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Racing reply',
+    parentCommentId: root.id,
+  })).rejects.toMatchObject({
+    code: 'DocumentCommentThreadResolved',
+    status: 409,
+  })
+  expect(
+    memory.items().filter(
+      ({ entryType, parentCommentId }) =>
+        entryType === 'document-comment' &&
+        parentCommentId === root.id,
+    ),
+  ).toHaveLength(0)
+})
+
+test('reuses a deterministic comment receipt when a response-loss retry has a later timestamp', async () => {
+  const memory = createMemoryDocumentClient()
+  let currentTime = new Date('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => currentTime)
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Comment retry',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  const input = {
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Ask @alice',
+    mentions: [{
+      userId: 'alice@example.com',
+      offset: 4,
+      length: 6,
+    }],
+    anchor: {
+      type: 'block' as const,
+      blockId: 'block-a',
+    },
+    commentId: 'comment-request-1',
+  }
+  const created = await client.createComment(input)
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'delete-block',
+        operationId: 'delete-comment-anchor',
+        blockId: 'block-a',
+      }],
+    },
+  })
+  currentTime = new Date('2026-07-18T00:01:00.000Z')
+  const retried = await client.createComment(input)
+
+  expect(retried).toEqual(created)
+  expect(
+    memory.items().filter(
+      ({ entryType }) => entryType === 'document-comment',
+    ),
+  ).toHaveLength(1)
+  expect(memory.items()).toContainEqual(expect.objectContaining({
+    commentId: input.commentId,
+    entryType: 'document-comment-receipt',
+  }))
+})
+
+test('normalizes relation authorship and private manager grants at the store boundary', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Private relations',
+    permission: { mode: 'private', memberGrants: [] },
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  expect(created.permission.memberGrants).toContainEqual({
+    memberKey: ownerAccess.memberKey,
+    role: 'manager',
+  })
+
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'upsert-relation',
+        operationId: 'relation-operation',
+        relation: {
+          id: 'relation-1',
+          source: { kind: 'document' },
+          target: { kind: 'project', projectId: 'project-1' },
+          createdByUserId: 'spoofed@example.com',
+          createdAt: '2000-01-01T00:00:00.000Z',
+        },
+      }],
+    },
+  })
+  const document = await client.get({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+  })
+  expect(document.relations[0]).toMatchObject({
+    createdByUserId: ownerAccess.memberKey,
+    createdAt: '2026-07-18T00:00:00.000Z',
+  })
+  const updated = await client.update({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    expectedRevision: 2,
+    permission: {
+      mode: 'private',
+      memberGrants: [{ memberKey: 'editor@example.com', role: 'editor' }],
+    },
+  })
+  expect(updated.permission.memberGrants).toContainEqual({
+    memberKey: ownerAccess.memberKey,
+    role: 'manager',
+  })
+})
+
+test('returns preference persistence metadata and rejects malformed nested payloads as a 400', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Preference',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  const preference = await client.updatePreference({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    favorite: true,
+    openedAt: '2026-07-18T00:00:00.000Z',
+  })
+  expect(preference).toMatchObject({
+    documentId: created.id,
+    favorite: true,
+    lastOpenedAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T00:00:00.000Z',
+    document: { id: created.id, favorite: true },
+  })
+
+  expect(() => reduceDocumentOperations({
+    document: createPage(),
+    elementRevisions: { 'block:block-a': 1 },
+    baseRevision: 1,
+    nextRevision: 2,
+    operations: [{
+      type: 'update-block',
+      operationId: 'malformed',
+      blockId: 'block-a',
+      block: undefined,
+    } as unknown as DocumentOperation],
+  })).toThrow(expect.objectContaining({
+    code: 'InvalidDocumentPayload',
+    status: 400,
+  }))
+  await expect(client.heartbeatPresence({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    clientId: 'client-1',
+    selection: {
+      type: 'text',
+      blockId: 'missing-block',
+      anchorOffset: 0,
+      focusOffset: 0,
+    },
+  })).rejects.toMatchObject({
+    code: 'InvalidDocumentPayload',
+    status: 400,
+  })
+})
+
+test('merges concurrent favorite and recent preference writes without losing either field', async () => {
+  const memory = createMemoryDocumentClient()
+  let holdPreferenceReads = false
+  let preferenceReadCount = 0
+  let releasePreferenceReads: (() => void) | undefined
+  const preferenceReadBarrier = new Promise<void>((resolve) => {
+    releasePreferenceReads = resolve
+  })
+  const proxyClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      const result = await memory.client.send(command as never)
+      const key = command.input.Key as
+        | { recordKey?: string }
+        | undefined
+      if (
+        holdPreferenceReads &&
+        key?.recordKey?.startsWith('PREFERENCE#')
+      ) {
+        preferenceReadCount += 1
+        if (preferenceReadCount === 2) {
+          holdPreferenceReads = false
+          releasePreferenceReads?.()
+        } else {
+          await preferenceReadBarrier
+        }
+      }
+      return result
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = createClient({
+    ...memory,
+    client: proxyClient,
+  })
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Concurrent preference',
+    blocks: [],
+  })
+  await client.updatePreference({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    favorite: false,
+    openedAt: '2026-07-17T00:00:00.000Z',
+  })
+
+  holdPreferenceReads = true
+  await Promise.all([
+    client.updatePreference({
+      workspaceId: 'workspace-1',
+      documentId: document.id,
+      access: ownerAccess,
+      favorite: true,
+    }),
+    client.updatePreference({
+      workspaceId: 'workspace-1',
+      documentId: document.id,
+      access: ownerAccess,
+      openedAt: '2026-07-18T00:00:00.000Z',
+    }),
+  ])
+
+  const projected = await client.get({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+  })
+  expect(projected).toMatchObject({
+    favorite: true,
+    lastOpenedAt: '2026-07-18T00:00:00.000Z',
+  })
+  expect(
+    memory.items().filter(
+      ({ entryType }) => entryType === 'document-recent',
+    ),
+  ).toEqual([
+    expect.objectContaining({
+      documentId: document.id,
+      favorite: true,
+      lastOpenedAt: '2026-07-18T00:00:00.000Z',
+    }),
+  ])
+})
+
+test('reads recent Documents from the newest-first index', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const documents = await Promise.all(
+    ['Oldest', 'Newest', 'Middle'].map((title) =>
+      client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        title,
+        blocks: [],
+      })
+    ),
+  )
+  const openedAt = [
+    '2026-07-16T00:00:00.000Z',
+    '2026-07-18T00:00:00.000Z',
+    '2026-07-17T00:00:00.000Z',
+  ]
+  await Promise.all(
+    documents.map((document, index) =>
+      client.updatePreference({
+        workspaceId: 'workspace-1',
+        documentId: document.id,
+        access: ownerAccess,
+        openedAt: openedAt[index],
+      })
+    ),
+  )
+
+  const recent = await client.listRecent({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    limit: 2,
+  })
+
+  expect(recent.map(({ title }) => title)).toEqual([
+    'Newest',
+    'Middle',
+  ])
+  expect(
+    memory.items().filter(
+      ({ entryType }) => entryType === 'document-recent',
+    ),
+  ).toHaveLength(3)
+})
+
+test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloads', () => {
+  const page = createPage({
+    title: 'Export / document',
+    blocks: [
+      { id: 'block-a', type: 'paragraph', text: '<script>alert(1)</script>' },
+      {
+        id: 'block-b',
+        type: 'table',
+        columns: ['A|B'],
+        rows: [{ id: 'row-1', cells: [{ id: 'cell-1', text: 'x|y' }] }],
+      },
+    ],
+  })
+  const markdown = renderDocumentExport(page, 'markdown')
+  const json = renderDocumentExport(page, 'json')
+  expect(markdown.fileName).toBe('Export - document.md')
+  expect(markdown.content).toContain('\\<script\\>alert(1)\\</script\\>')
+  expect(markdown.content).toContain('A\\|B')
+  expect(JSON.parse(json.content)).toMatchObject({ id: page.id, revision: 1 })
+
+  const whiteboard = createWhiteboard()
+  const svg = renderDocumentExport(whiteboard, 'svg')
+  expect(svg.content).toContain('&lt;unsafe&gt;')
+  expect(svg.content).not.toContain('<unsafe>')
+  whiteboard.whiteboard.objects.push({
+    id: 'work-item-card-1',
+    type: 'work-item',
+    workItemId: 'team/team-a/issue/authenticated-work-item-id',
+    bounds: { x: 140, y: 20, width: 100, height: 80 },
+    zIndex: 2,
+  })
+  expect(renderDocumentExport(whiteboard, 'svg').content).toContain(
+    'Work item: team/team-a/issue/authenticated-work-item-id',
+  )
+
+  expect(() => validateDocumentPayload(createPage({
+    blocks: [{
+      id: 'block-a',
+      type: 'embed',
+      url: 'javascript:alert(1)',
+    }],
+  }))).toThrow(expect.objectContaining({ code: 'InvalidDocumentUrl' }))
+
+  const oversized = createPage({
+    blocks: [{
+      id: 'block-a',
+      type: 'paragraph',
+      text: 'x'.repeat(DOCUMENT_MAX_ITEM_BYTES),
+    }],
+  })
+  expect(() => validateDocumentPayload(oversized)).toThrow(expect.objectContaining({
+    code: expect.stringMatching(/DocumentPayloadTooLarge|InvalidDocumentText/u),
+  }))
+})
+
+function createPage(
+  overrides: Partial<Extract<DocumentDetail, { kind: 'page' }>> = {},
+): Extract<DocumentDetail, { kind: 'page' }> {
+  return {
+    schemaVersion: 1,
+    id: 'document-1',
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Document',
+    position: 'a',
+    revision: 1,
+    permission: { mode: 'inherit', memberGrants: [] },
+    relations: [],
+    favorite: false,
+    capabilities: {
+      canView: false,
+      canEdit: false,
+      canComment: false,
+      canShare: false,
+      canManagePermissions: false,
+      canArchive: false,
+      canRestore: false,
+      canExport: false,
+    },
+    createdByUserId: 'owner@example.com',
+    updatedByUserId: 'owner@example.com',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T00:00:00.000Z',
+    blocks: [
+      { id: 'block-a', type: 'paragraph', text: 'A1' },
+      { id: 'block-b', type: 'paragraph', text: 'B1' },
+    ],
+    ...structuredClone(overrides),
+  }
+}
+
+function createWhiteboard(): Extract<DocumentDetail, { kind: 'whiteboard' }> {
+  return {
+    schemaVersion: 1,
+    id: 'whiteboard-1',
+    kind: 'whiteboard',
+    scope: { type: 'workspace' },
+    title: 'Whiteboard',
+    position: 'a',
+    revision: 1,
+    permission: { mode: 'inherit', memberGrants: [] },
+    relations: [],
+    favorite: false,
+    capabilities: {
+      canView: false,
+      canEdit: false,
+      canComment: false,
+      canShare: false,
+      canManagePermissions: false,
+      canArchive: false,
+      canRestore: false,
+      canExport: false,
+    },
+    createdByUserId: 'owner@example.com',
+    updatedByUserId: 'owner@example.com',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T00:00:00.000Z',
+    whiteboard: {
+      objects: [{
+        id: 'object-1',
+        type: 'note',
+        text: '<unsafe>',
+        bounds: { x: 10, y: 20, width: 100, height: 80 },
+        zIndex: 1,
+      }],
+      connectors: [],
+      frames: [],
+    },
+  }
+}
+
+function createClient(
+  memory: ReturnType<typeof createMemoryDocumentClient>,
+  now = () => new Date('2026-07-18T00:00:00.000Z'),
+  auditTableName?: string,
+): DynamoDbDocumentsClient {
+  let id = 0
+  return new DynamoDbDocumentsClient({
+    tableName: 'documents-table',
+    documentClient: memory.client,
+    autoCreateLocal: false,
+    now,
+    generateId: () => `generated-${++id}`,
+    publicShareTokenSecret:
+      'test-public-share-token-secret-with-at-least-32-bytes',
+    auditTableName,
+  })
+}
+
+function createMemoryDocumentClient() {
+  const stored = new Map<string, Record<string, unknown>>()
+  const client = {
+    async send(command: { input: Record<string, unknown> }) {
+      const input = command.input
+      const transaction = input.TransactItems as
+        | Array<Record<string, Record<string, unknown>>>
+        | undefined
+      if (transaction !== undefined) {
+        const pending = new Map(
+          [...stored].map(([key, item]) => [key, structuredClone(item)]),
+        )
+        for (const action of transaction) applyTransactionAction(pending, action)
+        stored.clear()
+        for (const [key, item] of pending) stored.set(key, item)
+        return {}
+      }
+      const key = input.Key as { workspaceId?: string; recordKey?: string } | undefined
+      if (key !== undefined) {
+        const mapKey = memoryKey(key.workspaceId, key.recordKey)
+        if (command.constructor.name === 'DeleteCommand') {
+          if (!matchesCondition(stored.get(mapKey), input)) throw conditionalError()
+          stored.delete(mapKey)
+          return {}
+        }
+        return { Item: structuredClone(stored.get(mapKey)) }
+      }
+      const item = input.Item as Record<string, unknown> | undefined
+      if (item !== undefined) {
+        const mapKey = memoryKey(item.workspaceId, item.recordKey)
+        if (!matchesCondition(stored.get(mapKey), input)) throw conditionalError()
+        stored.set(mapKey, structuredClone(item))
+        return {}
+      }
+      if (typeof input.KeyConditionExpression === 'string') {
+        const values = input.ExpressionAttributeValues as Record<string, unknown>
+        const workspaceId = values[':workspaceId']
+        const prefix = String(values[':prefix'] ?? '')
+        const start = (input.ExclusiveStartKey as { recordKey?: string } | undefined)?.recordKey
+        let matches = [...stored.values()]
+          .filter(
+            (candidate) =>
+              candidate.workspaceId === workspaceId &&
+              String(candidate.recordKey).startsWith(prefix),
+          )
+          .sort((left, right) => String(left.recordKey).localeCompare(String(right.recordKey)))
+        if (input.ScanIndexForward === false) matches.reverse()
+        if (start !== undefined) {
+          const startIndex = matches.findIndex(({ recordKey }) => recordKey === start)
+          matches = startIndex < 0 ? matches : matches.slice(startIndex + 1)
+        }
+        const limit = typeof input.Limit === 'number' ? input.Limit : matches.length
+        const page = matches.slice(0, limit)
+        const hasNext = matches.length > page.length
+        return {
+          Items: structuredClone(page),
+          ...(hasNext && page.at(-1) !== undefined
+            ? {
+                LastEvaluatedKey: {
+                  workspaceId: page.at(-1)?.workspaceId,
+                  recordKey: page.at(-1)?.recordKey,
+                },
+              }
+            : {}),
+        }
+      }
+      throw new Error(`Unsupported command: ${command.constructor.name}`)
+    },
+  } as unknown as DynamoDBDocumentClient
+  return {
+    client,
+    items: () => [...stored.values()].map((item) => structuredClone(item)),
+    put: (item: Record<string, unknown>) => {
+      stored.set(
+        memoryKey(item.workspaceId, item.recordKey),
+        structuredClone(item),
+      )
+    },
+  }
+}
+
+function applyTransactionAction(
+  items: Map<string, Record<string, unknown>>,
+  action: Record<string, Record<string, unknown>>,
+): void {
+  const operation =
+    action.Put ?? action.Delete ?? action.ConditionCheck
+  if (operation === undefined) throw new Error('Unsupported transaction action.')
+  const item = operation.Item as Record<string, unknown> | undefined
+  const key = (operation.Key ?? item) as Record<string, unknown>
+  const mapKey = memoryKey(
+    key.workspaceId ?? key.directoryId,
+    key.recordKey ?? key.eventId,
+  )
+  const current = items.get(mapKey)
+  if (!matchesCondition(current, operation)) throw conditionalError()
+  if (action.Put !== undefined && item !== undefined) items.set(mapKey, structuredClone(item))
+  else if (action.Delete !== undefined) items.delete(mapKey)
+}
+
+function matchesCondition(
+  current: Record<string, unknown> | undefined,
+  operation: Record<string, unknown>,
+): boolean {
+  const condition = operation.ConditionExpression
+  if (typeof condition !== 'string') return true
+  if (condition === 'attribute_not_exists(workspaceId)') return current === undefined
+  if (condition === 'attribute_not_exists(preferenceRevision)') {
+    return current?.preferenceRevision === undefined
+  }
+  if (
+    condition ===
+    'attribute_not_exists(#directoryId) AND attribute_not_exists(#eventId)'
+  ) {
+    return current === undefined
+  }
+  if (condition === 'attribute_not_exists(revokedAt)') return current?.revokedAt === undefined
+  if (condition === 'attribute_not_exists(userId) OR userId = :userId') {
+    const values = operation.ExpressionAttributeValues as Record<string, unknown>
+    return current?.userId === undefined || current.userId === values[':userId']
+  }
+  const values = operation.ExpressionAttributeValues as Record<string, unknown>
+  if (condition === 'revision = :expectedRevision') {
+    return current?.revision === values[':expectedRevision']
+  }
+  if (condition === 'updatedAt = :updatedAt') {
+    return current?.updatedAt === values[':updatedAt']
+  }
+  if (condition === 'preferenceRevision = :expectedPreferenceRevision') {
+    return (
+      current?.preferenceRevision ===
+        values[':expectedPreferenceRevision']
+    )
+  }
+  if (
+    condition ===
+    'resolved = :unresolved AND updatedAt = :parentUpdatedAt'
+  ) {
+    return (
+      current?.resolved === values[':unresolved'] &&
+      current.updatedAt === values[':parentUpdatedAt']
+    )
+  }
+  if (condition === 'clientId = :clientId') {
+    return current?.clientId === values[':clientId']
+  }
+  throw new Error(`Unsupported condition: ${condition}`)
+}
+
+function memoryKey(workspaceId: unknown, recordKey: unknown): string {
+  return `${String(workspaceId)}\0${String(recordKey)}`
+}
+
+function conditionalError(): Error {
+  const error = new Error('condition failed')
+  error.name = 'TransactionCanceledException'
+  return error
+}

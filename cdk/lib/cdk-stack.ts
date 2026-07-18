@@ -13,6 +13,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaDestinations from 'aws-cdk-lib/aws-lambda-destinations';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
@@ -803,6 +804,30 @@ export class CdkStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    const documentsTable = new dynamodb.Table(this, 'DocumentsTable', {
+      partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      timeToLiveAttribute: 'expiresAtEpoch',
+    });
+    const documentPublicShareTokenSecret = new secretsmanager.Secret(
+      this,
+      'DocumentPublicShareTokenSecret',
+      {
+        description:
+          'Server-only HMAC key for idempotent mukuroji public document links.',
+        generateSecretString: {
+          excludePunctuation: true,
+          passwordLength: 64,
+        },
+      },
+    );
+    documentPublicShareTokenSecret.applyRemovalPolicy(
+      cdk.RemovalPolicy.RETAIN,
+    );
+
     const collaborationTable = new dynamodb.Table(this, 'WorkItemCollaborationTable', {
       partitionKey: { name: 'entityKey', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
@@ -1086,6 +1111,9 @@ export class CdkStack extends cdk.Stack {
         AUTOMATION_TABLE_NAME: automationTable.tableName,
         AUTOMATION_WEBHOOK_SECRET_PREFIX: automationWebhookSecretPrefix,
         COLLABORATION_TABLE_NAME: collaborationTable.tableName,
+        DOCUMENTS_TABLE_NAME: documentsTable.tableName,
+        DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET:
+          documentPublicShareTokenSecret.secretValue.unsafeUnwrap(),
         COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
@@ -1101,6 +1129,7 @@ export class CdkStack extends cdk.Stack {
         MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
         MUKUROJI_TEAM_ISSUES_TABLE: workItemsTable.tableName,
+        MUKUROJI_DOCUMENTS_TABLE: documentsTable.tableName,
         MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
         MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
         MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:
@@ -1174,6 +1203,7 @@ export class CdkStack extends cdk.Stack {
     projectDirectoryTable.grantReadWriteData(apiFunction);
     auditEventsTable.grantReadWriteData(apiFunction);
     workspaceAccessTable.grantReadWriteData(apiFunction);
+    documentsTable.grantReadWriteData(apiFunction);
     collaborationTable.grantReadWriteData(apiFunction);
     fileProofingTable.grantReadWriteData(apiFunction);
     notificationsTable.grantReadWriteData(apiFunction);
@@ -1240,6 +1270,7 @@ export class CdkStack extends cdk.Stack {
           projectDirectoryTable.tableArn,
           auditEventsTable.tableArn,
           workspaceAccessTable.tableArn,
+          documentsTable.tableArn,
           collaborationTable.tableArn,
           fileProofingTable.tableArn,
           workspaceSearchTable.tableArn,
@@ -2181,6 +2212,7 @@ export class CdkStack extends cdk.Stack {
       value: processedAuditEventsTable.tableName,
     });
     new cdk.CfnOutput(this, 'WorkspaceAccessTableName', { value: workspaceAccessTable.tableName });
+    new cdk.CfnOutput(this, 'DocumentsTableName', { value: documentsTable.tableName });
     new cdk.CfnOutput(this, 'WorkItemCollaborationTableName', {
       value: collaborationTable.tableName,
     });

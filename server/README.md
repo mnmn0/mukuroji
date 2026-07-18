@@ -49,6 +49,8 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 - `/api/notifications`, `/api/notifications/unread-count`, `/api/notification-preferences`
 - `/api/request-forms`, `/api/request-queue`, `/api/request-submissions/{submissionId}`
 - `/api/request-intake/{token}`, `GET /api/request-threads/{threadToken}`, `/api/request-threads/{threadToken}/replies`
+- `/api/documents`, `/api/documents/{documentId}/operations`, `/comments`, `/presence`, `/versions`, `/shares`, `/export`
+- `/api/public/documents/{token}`, `/api/document-backlinks`
 
 The local API reads DynamoDB through `DYNAMODB_ENDPOINT`, `AWS_ENDPOINT_URL_DYNAMODB`, or `AWS_ENDPOINT_URL`.
 Default local table names are:
@@ -57,6 +59,8 @@ Default local table names are:
 - `MUKUROJI_PROJECT_TASKS_TABLE=mukuroji-project-tasks-v2-local`
 - `MUKUROJI_PROJECT_DIRECTORY_TABLE=mukuroji-project-directory-local`
 - `MUKUROJI_COLLABORATION_TABLE=mukuroji-collaboration-local`
+- `MUKUROJI_DOCUMENTS_TABLE` / `DOCUMENTS_TABLE_NAME`（未指定時は `mukuroji-documents-local`）
+- `DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET`（public link の冪等再送用 HMAC key。本番 CDK は 64 文字の secret を自動生成）
 - `MUKUROJI_NOTIFICATIONS_TABLE=mukuroji-notifications-local`
 - `NOTIFICATIONS_STATUS_INDEX_NAME=RecipientStatusIndex`
 - `MUKUROJI_REALTIME_SESSIONS_TABLE=mukuroji-realtime-sessions-local`
@@ -139,6 +143,7 @@ AWS 環境では次の table 名を明示します。
 export PROJECT_DIRECTORY_TABLE_NAME=<ProjectDirectoryTableName>
 export WORK_ITEMS_TABLE_NAME=<WorkItemsTableName>
 export COLLABORATION_TABLE_NAME=<WorkItemCollaborationTableName>
+export DOCUMENTS_TABLE_NAME=<DocumentsTableName>
 export WORKSPACE_SEARCH_TABLE_NAME=<WorkspaceSearchTableName>
 
 bun run search:backfill -- --dry-run
@@ -156,10 +161,16 @@ Source の更新と projection が競合すると古い scan 結果を一時的�
 書き込みを止めた maintenance window で実行し、API の live projection を有効化した後に
 もう一度 backfill を完走してから書き込みを再開してください。
 
-現時点では file/document の保存元は未導入のため、これらは backfill 対象になりません。
+現時点では file の保存元は未導入のため、file は backfill 対象になりません。
 Work Item は canonical row の `creatorMemberKey`、`workflowStatusId`、`customFieldValues`、
 `relationIds` を検索文書の `creatorUserId`、`status`、`customFields`、`relationIds` へ投影します。
 旧 `customFields` や必須 canonical field を欠く row は変換せず、invalid source として扱います。
+
+Document は mutation のたびに current snapshot を検索文書へ live projection します。
+Detail polling は検索 table へ書き込みません。既存 Document の再同期や一時障害後の
+reconciliation は
+`bun run search:backfill -- --source documents` で実行できます。Archived Document は対応する
+検索文書を削除し、malformed row や version/receipt row は fail-closed で skip します。
 
 Runtime API は `GET /api/search?filters=<JSON>&cursor=<opaque>&limit=<count>` と、
 `GET|POST /api/saved-views`、`PATCH|DELETE /api/saved-views/{viewId}` を提供します。
