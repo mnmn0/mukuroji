@@ -816,6 +816,13 @@ test('rejects legacy raw-ID coverage when its identity sources disagree', async 
     eventId: `${rawEvent.eventId}-entity-conflict`,
     entity: { type: 'work-item' as const, id: 'different-item' },
   }
+  const nonWorkItemTarget = {
+    ...rawEvent,
+    eventId: `${rawEvent.eventId}-target-type-conflict`,
+    target: { type: 'project' as const, id: workItem.id },
+    targetType: 'project' as const,
+    targetId: workItem.id,
+  }
   const renderer = createAnalyticsScheduleRenderer({
     workspaceAccess: {
       async getActiveMember(workspaceId, memberKey) {
@@ -856,6 +863,7 @@ test('rejects legacy raw-ID coverage when its identity sources disagree', async 
                 conflictingTarget,
                 conflictingMetadata,
                 conflictingEntity,
+                nonWorkItemTarget,
               ],
             }
           : { events: [] }

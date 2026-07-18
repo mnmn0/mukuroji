@@ -562,6 +562,14 @@ test('rejects legacy raw Work Item events whose identity sources disagree', asyn
     eventId: `${futureEvent.eventId}-entity-conflict`,
     entity: { type: 'work-item' as const, id: 'different-item' },
   }
+  const nonWorkItemTarget = {
+    ...futureEvent,
+    ...rawIdentityFields,
+    eventId: `${futureEvent.eventId}-target-type-conflict`,
+    target: { type: 'project' as const, id: rawEntityId },
+    targetType: 'project' as const,
+    targetId: rawEntityId,
+  }
   configureFakeProjectClients(true, {
     projectAccesses: [
       { projectId: 'project-before', role: 'viewer' },
@@ -592,6 +600,7 @@ test('rejects legacy raw Work Item events whose identity sources disagree', asyn
                 conflictingTarget,
                 conflictingMetadata,
                 conflictingEntity,
+                nonWorkItemTarget,
               ],
             }
           : { events: [] }

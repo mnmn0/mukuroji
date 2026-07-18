@@ -431,6 +431,16 @@ describe('Analytics metric engine', () => {
       events: [legacyRawIdForInaccessibleItem],
       query,
     }).widgets[0]?.value).toBe(0)
+
+    const mismatchedEntityType = {
+      ...completion,
+      entityType: 'project' as const,
+    }
+    expect(createTestAnalyticsSnapshot({
+      workItems: [item],
+      events: [mismatchedEntityType],
+      query,
+    }).widgets[0]?.value).toBe(0)
   })
 
   test('excludes redacted metric transitions instead of interpreting redaction markers', () => {

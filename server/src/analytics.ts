@@ -1236,7 +1236,7 @@ function indexAuthorizedEvents(
   }
 
   for (const event of events) {
-    if (event.entityType !== 'work-item' && event.entity.type !== 'work-item') continue
+    if (event.entityType !== 'work-item' || event.entity.type !== 'work-item') continue
     const canonicalCandidates = new Set<string>()
     const rawCandidates = new Set<string>()
     for (const eventEntityId of [event.entityId, event.entity.id]) {

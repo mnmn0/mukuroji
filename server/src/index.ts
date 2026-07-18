@@ -7245,7 +7245,8 @@ function isAuthorizedLegacyAnalyticsAuditEvent(
     return false
   }
   if (
-    event.targetType !== event.target.type ||
+    event.targetType !== 'work-item' ||
+    event.target.type !== 'work-item' ||
     event.targetId !== event.target.id
   ) {
     return false
@@ -7291,7 +7292,7 @@ function isAuthorizedLegacyAnalyticsAuditEvent(
     resolvedCanonicalEntityIds.add(canonicalEntityId)
   }
 
-  if (event.targetType === 'work-item' && event.targetId !== rawWorkItemId) {
+  if (event.targetId !== rawWorkItemId) {
     if (
       authorizedRawIdByCanonicalEntityId.get(event.targetId) !==
         rawWorkItemId
