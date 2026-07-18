@@ -2366,6 +2366,8 @@ export class CdkStack extends cdk.Stack {
         timeout: cdk.Duration.minutes(2),
         memorySize: 512,
         description: 'Schedules bounded polling jobs for connected provider installations.',
+        onFailure: new lambdaDestinations.SqsDestination(connectorPollDlq),
+        retryAttempts: 2,
         bundling: {
           bundleAwsSDK: true,
           minify: true,

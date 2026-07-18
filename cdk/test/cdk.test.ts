@@ -1902,6 +1902,18 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
       }),
     ]),
   });
+  expect(Object.values(resources)).toContainEqual(expect.objectContaining({
+    Type: 'AWS::Lambda::EventInvokeConfig',
+    Properties: expect.objectContaining({
+      DestinationConfig: {
+        OnFailure: {
+          Destination: { 'Fn::GetAtt': [pollDlqId, 'Arn'] },
+        },
+      },
+      FunctionName: { Ref: pollFunctionId },
+      MaximumRetryAttempts: 2,
+    }),
+  }));
 
   const policiesForFunction = (functionId: string) => {
     const functionResource = resources[functionId] as {
