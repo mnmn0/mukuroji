@@ -1684,3 +1684,13 @@ export type PlanningMutationResponse = {
   /** Cycle rollover で元 Cycle に残した Work Item ID 一覧です。 */
   retainedWorkItemIds: string[]
 }
+
+/**
+ * Public API と developer platform の共有 contract です。
+ */
+export * from './developer-platform'
+
+/**
+ * Public API の OpenAPI 3.1 document です。
+ */
+export * from './openapi'

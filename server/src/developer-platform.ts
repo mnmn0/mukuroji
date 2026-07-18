@@ -1,0 +1,7028 @@
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from 'node:crypto'
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import {
+  DeleteCommand,
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  QueryCommand,
+  TransactWriteCommand,
+  UpdateCommand,
+  type TransactWriteCommandInput,
+} from '@aws-sdk/lib-dynamodb'
+import type {
+  ApiKeySummary,
+  ApiScope,
+  ConnectorInstallation,
+  CreateApiKeyInput,
+  CreateOAuthAppInput,
+  ExternalWorkItemLink,
+  ImportJob,
+  OAuthAppSummary,
+  UpdateExternalWorkItemLinkInput,
+  UpdateWebhookSubscriptionInput,
+  WebhookDelivery,
+  WebhookEventEnvelope,
+  WebhookSubscription,
+} from '@mukuroji/contracts'
+import {
+  createMutationAuditContext,
+  createMutationAuditEventPut,
+  getConfiguredAuditTableName,
+  type AuditTransactWriteItem,
+} from './audit'
+
+/** Developer platform credential に付与できる全 scope です。 */
+export const API_SCOPES = [
+  'work-items:read',
+  'work-items:write',
+  'work-items:delete',
+  'webhooks:read',
+  'webhooks:write',
+  'integrations:read',
+  'integrations:write',
+  'imports:read',
+  'imports:write',
+] as const satisfies readonly ApiScope[]
+
+/** API key の既定有効期間です。 */
+export const API_KEY_DEFAULT_TTL_SECONDS = 90 * 24 * 60 * 60
+
+/** OAuth app credential の既定有効期間です。 */
+export const OAUTH_APP_DEFAULT_TTL_SECONDS = 90 * 24 * 60 * 60
+
+/** OAuth access token の既定有効期間です。 */
+export const OAUTH_TOKEN_DEFAULT_TTL_SECONDS = 60 * 60
+
+/** OAuth access token に許可する最大有効期間です。 */
+export const OAUTH_TOKEN_MAX_TTL_SECONDS = 24 * 60 * 60
+
+/** Idempotency response を保持する既定期間です。 */
+export const IDEMPOTENCY_DEFAULT_TTL_SECONDS = 24 * 60 * 60
+
+/** 暗号化後も DynamoDB item 上限へ安全に収める idempotency response 上限です。 */
+export const IDEMPOTENCY_MAX_RESPONSE_BYTES = 256 * 1024
+
+/** 未完了 idempotency reservation を takeover できるまでの lease 期間です。 */
+export const IDEMPOTENCY_RESERVATION_LEASE_SECONDS = 2 * 60
+
+/** Webhook delivery log と index locator を保持する期間です。 */
+export const WEBHOOK_DELIVERY_RETENTION_SECONDS = 90 * 24 * 60 * 60
+
+/** Webhook delivery の既定取得件数です。 */
+export const WEBHOOK_DELIVERY_DEFAULT_LIMIT = 50
+
+/** Webhook delivery の最大取得件数です。 */
+export const WEBHOOK_DELIVERY_MAX_LIMIT = 100
+
+/** Webhook を自動 retry する最大 attempt 数です。 */
+export const WEBHOOK_MAX_ATTEMPTS = 8
+
+/** Webhook signature timestamp に許容する既定 clock skew です。 */
+export const WEBHOOK_SIGNATURE_TOLERANCE_SECONDS = 5 * 60
+
+/** DynamoDB の lookupKey GSI 既定名です。 */
+export const DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME = 'LookupKeyIndex'
+
+/** Domain mutation と同じ transaction で idempotency response を確定する token です。 */
+export type IdempotencyMutationToken = {
+  /** Idempotency namespace を分離する credential ID です。 */
+  credentialId: string
+  /** Caller が指定した HTTP `Idempotency-Key` です。 */
+  idempotencyKey: string
+  /** Method、target、body を束縛する stable fingerprint です。 */
+  requestFingerprint: string
+  /** Current reservation owner だけが commit できる opaque token です。 */
+  reservationId: string
+}
+
+/** Atomic idempotency を任意で付与できる domain mutation request です。 */
+export type IdempotentDomainMutationRequest = {
+  /** Domain row と response receipt を同時確定する内部 token です。 */
+  idempotency?: IdempotencyMutationToken
+}
+
+/** API key 作成 request です。 */
+export type CreateApiKeyRequest = IdempotentDomainMutationRequest & {
+  /** API key を所有する Workspace ID です。 */
+  workspaceId: string
+  /** API key を作成する User ID です。 */
+  createdByUserId: string
+  /** 検証済み API key 入力です。 */
+  input: CreateApiKeyInput
+}
+
+/** API key secret を一度だけ含む作成・rotation response です。 */
+export type ApiKeySecretResult = {
+  /** Secret を除いた API key summary です。 */
+  apiKey: ApiKeySummary
+  /** 作成・rotation response でのみ返す高 entropy secret です。 */
+  secret: string
+}
+
+/** API key rotation request です。 */
+export type RotateApiKeyRequest = IdempotentDomainMutationRequest & {
+  /** API key を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Rotation 対象 API key ID です。 */
+  apiKeyId: string
+}
+
+/** API key revoke request です。 */
+export type RevokeApiKeyRequest = RotateApiKeyRequest
+
+/** Credential 認証時の共通入力です。 */
+export type AuthenticateCredentialRequest = {
+  /** Caller が提示した bearer credential です。 */
+  credential: string
+  /** Endpoint が必要とする scope です。 */
+  requiredScopes?: readonly ApiScope[]
+}
+
+/** 認証済み developer credential snapshot です。 */
+export type AuthenticatedDeveloperCredential = {
+  /** 認証方式です。 */
+  kind: 'api-key' | 'oauth-token'
+  /** Credential が所属する Workspace ID です。 */
+  workspaceId: string
+  /** API key または OAuth token ID です。 */
+  credentialId: string
+  /** Request ごとに active membership/RBAC を再評価する subject User ID です。 */
+  subjectUserId: string
+  /** OAuth token の場合に発行元 app を示す ID です。 */
+  oauthAppId?: string
+  /** Credential に付与された scope です。 */
+  scopes: ApiScope[]
+  /** Credential の失効日時です。 */
+  expiresAt?: string
+}
+
+/** OAuth app 作成 request です。 */
+export type CreateOAuthAppRequest = IdempotentDomainMutationRequest & {
+  /** OAuth app を所有する Workspace ID です。 */
+  workspaceId: string
+  /** OAuth app を作成する User ID です。 */
+  createdByUserId: string
+  /** 検証済み OAuth app 入力です。 */
+  input: CreateOAuthAppInput
+}
+
+/** OAuth client secret を一度だけ含む作成・rotation response です。 */
+export type OAuthAppSecretResult = {
+  /** Secret を除いた OAuth app summary です。 */
+  oauthApp: OAuthAppSummary
+  /** 作成・rotation response でのみ返す高 entropy client secret です。 */
+  clientSecret: string
+}
+
+/** OAuth client secret rotation request です。 */
+export type RotateOAuthClientSecretRequest = IdempotentDomainMutationRequest & {
+  /** OAuth app を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Rotation 対象 OAuth app ID です。 */
+  oauthAppId: string
+}
+
+/** OAuth app revoke request です。 */
+export type RevokeOAuthAppRequest = RotateOAuthClientSecretRequest
+
+/** OAuth client_credentials token request です。 */
+export type IssueOAuthTokenRequest = {
+  /** Public OAuth client ID です。 */
+  clientId: string
+  /** Caller が提示した client secret です。 */
+  clientSecret: string
+  /** App の scope から絞り込む token scope です。 */
+  scopes?: readonly ApiScope[]
+  /** Token の有効秒数です。 */
+  expiresInSeconds?: number
+}
+
+/** OAuth token endpoint response です。 */
+export type OAuthTokenResult = {
+  /** 一度だけ返す bearer access token です。 */
+  accessToken: string
+  /** OAuth token type です。 */
+  tokenType: 'Bearer'
+  /** Token の有効秒数です。 */
+  expiresIn: number
+  /** Token の失効日時です。 */
+  expiresAt: string
+  /** Token に付与された scope です。 */
+  scopes: ApiScope[]
+}
+
+/** Webhook subscription 作成入力です。 */
+export type CreateWebhookSubscriptionInput = {
+  /** Subscription の表示名です。 */
+  name: string
+  /** HTTPS delivery endpoint です。 */
+  url: string
+  /** 購読する audit event type または wildcard pattern です。 */
+  eventTypes: WebhookSubscription['eventTypes']
+  /** Payload 配信を許可する Team ID です。 */
+  teamIds: string[]
+  /** Delivery payload に許可する scope です。 */
+  scopes?: ApiScope[]
+}
+
+/** Webhook subscription 作成 request です。 */
+export type CreateWebhookSubscriptionRequest = IdempotentDomainMutationRequest & {
+  /** Subscription を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Subscription を作成する Workspace user ID です。 */
+  createdByUserId: string
+  /** 検証済み subscription 入力です。 */
+  input: CreateWebhookSubscriptionInput
+}
+
+/** Webhook signing secret を一度だけ含む response です。 */
+export type WebhookSecretResult = {
+  /** Secret を除いた subscription です。 */
+  subscription: WebhookSubscription
+  /** 作成・rotation response でのみ返す signing secret です。 */
+  signingSecret: string
+}
+
+/** Webhook secret rotation request です。 */
+export type RotateWebhookSecretRequest = IdempotentDomainMutationRequest & {
+  /** Subscription を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Rotation 対象 subscription ID です。 */
+  subscriptionId: string
+}
+
+/** Webhook subscription status 更新 request です。 */
+export type SetWebhookSubscriptionStatusRequest = RotateWebhookSecretRequest & {
+  /** 更新後 status です。 */
+  status: WebhookSubscription['status']
+}
+
+/** Webhook subscription metadata 更新 request です。 */
+export type UpdateWebhookSubscriptionRequest = RotateWebhookSecretRequest & {
+  /** 検証する partial metadata 更新です。 */
+  input: UpdateWebhookSubscriptionInput
+}
+
+/** Webhook event enqueue request です。 */
+export type EnqueueWebhookEventRequest = {
+  /** Event を所有する Workspace ID です。 */
+  workspaceId: string
+  /** 現在の RBAC で event を配信できる subscription ID です。 */
+  authorizedSubscriptionIds: string[]
+  /** 配送する immutable event envelope です。 */
+  event: WebhookEventEnvelope
+}
+
+/** Webhook delivery page request です。 */
+export type ListWebhookDeliveriesRequest = {
+  /** Delivery を所有する Workspace ID です。 */
+  workspaceId: string
+  /** 指定時に絞り込む subscription ID です。 */
+  subscriptionId?: string
+  /** 一 page の最大件数です。 */
+  limit?: number
+  /** 前 page が返した opaque cursor です。 */
+  cursor?: string
+}
+
+/** Cursor pagination された Webhook delivery です。 */
+export type WebhookDeliveryPage = {
+  /** 作成日時の降順で並んだ delivery です。 */
+  deliveries: WebhookDelivery[]
+  /** 次 page が存在する場合の opaque cursor です。 */
+  nextCursor?: string
+}
+
+/** Webhook delivery detail の取得 request です。 */
+export type GetWebhookDeliveryRequest = {
+  /** Delivery を所有する Workspace ID です。 */
+  workspaceId: string
+  /** 取得する delivery ID です。 */
+  deliveryId: string
+}
+
+/** Webhook worker が HTTP delivery に必要とする秘密情報です。 */
+export type PreparedWebhookDelivery = {
+  /** 現在の delivery state です。 */
+  delivery: WebhookDelivery
+  /** Delivery endpoint を持つ subscription です。 */
+  subscription: WebhookSubscription
+  /** Worker 内だけで利用し、log や API response に含めない signing secret です。 */
+  signingSecret: string
+  /** 署名対象の安定した JSON payload です。 */
+  payload: string
+}
+
+/** Webhook delivery worker の取得 request です。 */
+export type PrepareWebhookDeliveryRequest = {
+  /** Delivery を所有する Workspace ID です。 */
+  workspaceId: string
+  /** 取得する delivery ID です。 */
+  deliveryId: string
+}
+
+/** Webhook delivery attempt の保存 request です。 */
+export type RecordWebhookDeliveryAttemptRequest = PrepareWebhookDeliveryRequest & {
+  /** Attempt 後の delivery status です。 */
+  status: WebhookDelivery['status']
+  /** Remote endpoint の HTTP status です。 */
+  responseStatus?: number
+  /** Retry scheduler が次に配送できる日時です。 */
+  nextAttemptAt?: string
+  /** Secret を含まない短い error message です。 */
+  error?: string
+}
+
+/** Webhook delivery replay request です。 */
+export type ReplayWebhookDeliveryRequest = PrepareWebhookDeliveryRequest & {
+  /** 同じ API mutation retry を一つの replay delivery に束縛する digest です。 */
+  operationId?: string
+}
+
+/** Webhook signature 検証 request です。 */
+export type VerifyWebhookSignatureRequest = {
+  /** Subscription を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Signing secret を解決する subscription ID です。 */
+  subscriptionId: string
+  /** HTTP request body の原文です。 */
+  payload: string
+  /** `X-Mukuroji-Timestamp` の epoch seconds です。 */
+  timestamp: number
+  /** `X-Mukuroji-Signature` の `v1=` 付き signature です。 */
+  signature: string
+  /** 許容する clock skew 秒です。 */
+  toleranceSeconds?: number
+}
+
+/** Connector installation 作成入力です。 */
+export type InstallConnectorInput = {
+  /** Connector 分類です。 */
+  category: ConnectorInstallation['category']
+  /** GitHub や Slack などの provider code です。 */
+  provider: ConnectorInstallation['provider']
+  /** Installation の表示名です。 */
+  name: string
+  /** Connector に許可する API scope です。 */
+  scopes: string[]
+  /** Provider 側 account ID です。 */
+  externalAccountId?: string
+  /** Provider 側 account 表示名です。 */
+  externalAccountName?: string
+  /** SecretProtector で暗号化して保存する credential です。 */
+  credential?: string
+}
+
+/** Connector installation 作成 request です。 */
+export type InstallConnectorRequest = {
+  /** Installation を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Installation を開始した User ID です。 */
+  installedByUserId: string
+  /** 検証済み connector 入力です。 */
+  input: InstallConnectorInput
+}
+
+/** Connector status 更新 request です。 */
+export type UpdateConnectorStatusRequest = {
+  /** Installation を所有する Workspace ID です。 */
+  workspaceId: string
+  /** 更新対象 installation ID です。 */
+  installationId: string
+  /** 更新後 status です。 */
+  status: ConnectorInstallation['status']
+  /** Secret を含まない provider error です。 */
+  lastError?: ConnectorInstallation['lastError']
+  /** 再認証開始 URL です。 */
+  reauthorizationUrl?: string
+  /** 成功した同期時刻です。 */
+  lastSyncAt?: string
+  /** `needs-reauth` transition に束縛する single-use OAuth state ID です。 */
+  reauthorizationStateId?: string
+  /** Lifecycle audit に記録する mutation actor User ID です。 */
+  updatedByUserId?: string
+  /** Flow/health snapshot を束縛する installation row revision です。 */
+  expectedLifecycleRevision?: number
+  /** Disconnect 前に provider で revoke 済みの serialized credential です。 */
+  expectedCredential?: string
+}
+
+/** Secret-free connector lifecycle snapshot 取得 request です。 */
+export type ReadConnectorLifecycleSnapshotRequest = {
+  /** Installation を所有する Workspace ID です。 */
+  workspaceId: string
+  /** 取得対象 installation ID です。 */
+  installationId: string
+}
+
+/** OAuth/status mutation を fencing する connector lifecycle snapshot です。 */
+export type ConnectorLifecycleSnapshot = {
+  /** Credential を含まない installation summary です。 */
+  installation: ConnectorInstallation
+  /** Installation row の optimistic-concurrency revision です。 */
+  lifecycleRevision: number
+}
+
+/** Reauthorization callback の current OAuth state 検証 request です。 */
+export type AssertConnectorReauthorizationStateRequest = {
+  /** Installation を所有する Workspace ID です。 */
+  workspaceId: string
+  /** 検証対象 installation ID です。 */
+  installationId: string
+  /** Callback の encrypted flow から復元した state ID です。 */
+  stateId: string
+}
+
+/** Connector credential 更新による復旧 request です。 */
+export type RecoverConnectorRequest = {
+  /** Installation を所有する Workspace ID です。 */
+  workspaceId: string
+  /** 復旧対象 installation ID です。 */
+  installationId: string
+  /** SecretProtector で暗号化して置換する credential です。 */
+  credential: string
+  /** Reauthorization callback が提示する current OAuth state ID です。 */
+  expectedReauthorizationStateId?: string
+  /** Refresh CAS が比較する置換前の serialized credential です。 */
+  expectedCredential?: string
+  /** Credential replacement の lifecycle reason です。 */
+  reason?: 'reauthorization' | 'refresh' | 'recovery'
+  /** Lifecycle audit に記録する mutation actor User ID です。 */
+  updatedByUserId?: string
+}
+
+/** Connector worker 用 credential 取得 request です。 */
+export type ReadConnectorCredentialRequest = {
+  /** Installation を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Credential を所有する installation ID です。 */
+  installationId: string
+}
+
+/** External Work Item link 作成入力です。 */
+export type CreateExternalWorkItemLinkInput = {
+  /** Canonical Work Item を所有する Team ID です。 */
+  teamId: string
+  /** Canonical Work Item ID です。 */
+  workItemId: string
+  /** Link を管理する connector installation ID です。 */
+  installationId: string
+  /** Provider 側 resource 種別です。 */
+  resourceType: ExternalWorkItemLink['resourceType']
+  /** Provider account 内の immutable external ID です。 */
+  externalId: string
+  /** Provider resource の HTTPS URL です。 */
+  externalUrl: string
+  /** UI 用 provider key です。 */
+  displayKey?: string
+  /** 同期方向です。 */
+  syncDirection: ExternalWorkItemLink['syncDirection']
+}
+
+/** External Work Item link 作成 request です。 */
+export type CreateExternalWorkItemLinkRequest = {
+  /** Link を所有する Workspace ID です。 */
+  workspaceId: string
+  /** 検証済み link 入力です。 */
+  input: CreateExternalWorkItemLinkInput
+}
+
+/** External Work Item link list request です。 */
+export type ListExternalWorkItemLinksRequest = {
+  /** Link を所有する Workspace ID です。 */
+  workspaceId: string
+  /** 指定時に絞り込む canonical Work Item ID です。 */
+  workItemId?: string
+  /** Work Item filter と組で指定する owner Team ID です。 */
+  teamId?: string
+  /** 指定時に絞り込む installation ID です。 */
+  installationId?: string
+}
+
+/** External Work Item link 更新 request です。 */
+export type UpdateExternalWorkItemLinkRequest = IdempotentDomainMutationRequest & {
+  /** Link を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Link 先 Work Item を所有する Team ID です。 */
+  teamId: string
+  /** Link 先 Work Item ID です。 */
+  workItemId: string
+  /** 更新対象 link ID です。 */
+  linkId: string
+  /** Audit actor に保存する Workspace user ID です。 */
+  updatedByUserId: string
+  /** 検証済み更新入力です。 */
+  input: UpdateExternalWorkItemLinkInput
+}
+
+/** External Work Item link delete request です。 */
+export type DeleteExternalWorkItemLinkRequest = IdempotentDomainMutationRequest & {
+  /** Link を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Link 先 Work Item を所有する Team ID です。 */
+  teamId: string
+  /** Link 先 Work Item ID です。 */
+  workItemId: string
+  /** 削除対象 link ID です。 */
+  linkId: string
+  /** Audit actor に保存する Workspace user または credential ID です。 */
+  deletedByActorId?: string
+}
+
+/** Import job 作成入力です。 */
+export type CreateImportJobInput = {
+  /** Source file format です。 */
+  format: ImportJob['format']
+  /** Imported Work Item を所有する Team ID です。 */
+  teamId: string
+  /** Imported Work Item の既定 assigned Project ID です。 */
+  assignedProjectId?: string
+  /** Source column から canonical field への mapping です。 */
+  mapping: ImportJob['mapping']
+  /** 永続化せず検証・report だけ行うかどうかです。 */
+  dryRun?: boolean
+}
+
+/** Import job 作成 request です。 */
+export type CreateImportJobRequest = {
+  /** Import 対象 Workspace ID です。 */
+  workspaceId: string
+  /** Import を開始した User ID です。 */
+  createdByUserId: string
+  /** Queue retry 間で固定できる deterministic Import job ID です。 */
+  jobId?: string
+  /** 検証済み import 入力です。 */
+  input: CreateImportJobInput
+}
+
+/** Import job 更新 request です。 */
+export type UpdateImportJobRequest = {
+  /** Import 対象 Workspace ID です。 */
+  workspaceId: string
+  /** 更新対象 job ID です。 */
+  jobId: string
+  /** 更新後 status です。 */
+  status: ImportJob['status']
+  /** 完了、dry-run、または validation failure の bounded report です。 */
+  report?: ImportJob['report']
+  /** Secret や source row を含まない error です。 */
+  error?: ImportJob['error']
+}
+
+/** Idempotency reservation request です。 */
+export type ReserveIdempotencyRequest = {
+  /** Request を処理する Workspace ID です。 */
+  workspaceId: string
+  /** Rate limit と idempotency を分離する credential ID です。 */
+  credentialId: string
+  /** HTTP `Idempotency-Key` の原文です。 */
+  idempotencyKey: string
+  /** Method、path、body から作成した stable fingerprint です。 */
+  requestFingerprint: string
+  /** Reservation と response を保持する秒数です。 */
+  ttlSeconds?: number
+}
+
+/** Idempotency reservation の判定結果です。 */
+export type IdempotencyDecision =
+  | {
+      /** 初回 caller が処理を開始できる状態です。 */
+      status: 'reserved'
+      /** 完了保存を最初の caller に束縛する token です。 */
+      reservationId: string
+    }
+  | {
+      /** 同一 request がまだ処理中である状態です。 */
+      status: 'in-progress'
+    }
+  | {
+      /** 保存済み response をそのまま返せる状態です。 */
+      status: 'replay'
+      /** 前回処理が保存した JSON-safe response です。 */
+      response: unknown
+    }
+
+/** Idempotent request 完了保存 request です。 */
+export type CompleteIdempotencyRequest = ReserveIdempotencyRequest & {
+  /** Reserve 時に返された ownership token です。 */
+  reservationId: string
+  /** Replay 時に返す JSON-safe response です。 */
+  response: unknown
+}
+
+/** Domain mutation と同じ DynamoDB transaction に追加する idempotency completion です。 */
+export type IdempotencyCompletionTransactWrite = {
+  /** Reserved receipt を encrypted completed receipt へ置換する transaction item です。 */
+  transactWriteItem: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+}
+
+/** Work Item 削除と同じ transaction に追加する external-link fence 入力です。 */
+export type PrepareWorkItemDeletionFenceRequest = {
+  /** Work Item を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Work Item を所有する Team ID です。 */
+  teamId: string
+  /** 削除対象 Work Item ID です。 */
+  workItemId: string
+}
+
+/** Work Item 削除と external-link 作成を直列化する transaction item です。 */
+export type WorkItemDeletionFenceTransactWrite = {
+  /** Link count が 0 の場合だけ durable tombstone を保存する transaction item です。 */
+  transactWriteItem: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+}
+
+/** 未完了 idempotency reservation の解放 request です。 */
+export type ReleaseIdempotencyRequest = ReserveIdempotencyRequest & {
+  /** Reserve 時に返された ownership token です。 */
+  reservationId: string
+}
+
+/** Fixed-window rate limit 消費 request です。 */
+export type ConsumeRateLimitRequest = {
+  /** Credential が所属する Workspace ID です。 */
+  workspaceId: string
+  /** Window を分離する credential ID です。 */
+  credentialId: string
+  /** Window 内に許可する request cost です。 */
+  limit: number
+  /** Fixed window の秒数です。 */
+  windowSeconds: number
+  /** この request が消費する cost です。 */
+  cost?: number
+}
+
+/** Fixed-window rate limit の現在値です。 */
+export type RateLimitDecision = {
+  /** Request を処理できるかどうかです。 */
+  allowed: boolean
+  /** Window の上限です。 */
+  limit: number
+  /** この判定後に残る cost です。 */
+  remaining: number
+  /** Fixed window が reset される日時です。 */
+  resetAt: string
+  /** 拒否時に待つ秒数です。 */
+  retryAfterSeconds?: number
+}
+
+/** Developer platform domain/store の公開契約です。 */
+export interface DeveloperPlatformClient {
+  /** API key を作成し、secret を一度だけ返します。 */
+  createApiKey(request: CreateApiKeyRequest): Promise<ApiKeySecretResult>
+  /** Workspace の secret を含まない API key summary を返します。 */
+  listApiKeys(workspaceId: string): Promise<ApiKeySummary[]>
+  /** API key secret を置換し、新 secret を一度だけ返します。 */
+  rotateApiKey(request: RotateApiKeyRequest): Promise<ApiKeySecretResult>
+  /** API key を revoke します。 */
+  revokeApiKey(request: RevokeApiKeyRequest): Promise<ApiKeySummary>
+  /** API key secret を認証し、last-used を更新します。 */
+  authenticateApiKey(
+    request: AuthenticateCredentialRequest,
+  ): Promise<AuthenticatedDeveloperCredential>
+  /** OAuth app を作成し、client secret を一度だけ返します。 */
+  createOAuthApp(request: CreateOAuthAppRequest): Promise<OAuthAppSecretResult>
+  /** Workspace の secret を含まない OAuth app summary を返します。 */
+  listOAuthApps(workspaceId: string): Promise<OAuthAppSummary[]>
+  /** OAuth client secret を置換し、新 secret を一度だけ返します。 */
+  rotateOAuthClientSecret(
+    request: RotateOAuthClientSecretRequest,
+  ): Promise<OAuthAppSecretResult>
+  /** OAuth app と配下 token を revoke します。 */
+  revokeOAuthApp(request: RevokeOAuthAppRequest): Promise<OAuthAppSummary>
+  /** client_credentials を検証し、digest だけ保存する token を発行します。 */
+  issueOAuthToken(request: IssueOAuthTokenRequest): Promise<OAuthTokenResult>
+  /** Bearer token を認証します。 */
+  authenticateOAuthToken(
+    request: AuthenticateCredentialRequest,
+  ): Promise<AuthenticatedDeveloperCredential>
+  /** Webhook subscription を作成し、signing secret を一度だけ返します。 */
+  createWebhookSubscription(
+    request: CreateWebhookSubscriptionRequest,
+  ): Promise<WebhookSecretResult>
+  /** Workspace の secret を含まない Webhook subscription を返します。 */
+  listWebhookSubscriptions(workspaceId: string): Promise<WebhookSubscription[]>
+  /** Webhook signing secret を置換し、新 secret を一度だけ返します。 */
+  rotateWebhookSecret(request: RotateWebhookSecretRequest): Promise<WebhookSecretResult>
+  /** Webhook subscription status を更新します。 */
+  setWebhookSubscriptionStatus(
+    request: SetWebhookSubscriptionStatusRequest,
+  ): Promise<WebhookSubscription>
+  /** Webhook subscription metadata と status を原子的に更新します。 */
+  updateWebhookSubscription(
+    request: UpdateWebhookSubscriptionRequest,
+  ): Promise<WebhookSubscription>
+  /** Event に一致する subscription へ delivery を冪等に enqueue します。 */
+  enqueueWebhookEvent(request: EnqueueWebhookEventRequest): Promise<WebhookDelivery[]>
+  /** Webhook delivery log を cursor pagination します。 */
+  listWebhookDeliveries(
+    request: ListWebhookDeliveriesRequest,
+  ): Promise<WebhookDeliveryPage>
+  /** Webhook delivery を tenant-bound ID lookup で取得します。 */
+  getWebhookDelivery(request: GetWebhookDeliveryRequest): Promise<WebhookDelivery>
+  /** Worker 用 payload と signing secret を安全な内部境界で解決します。 */
+  prepareWebhookDelivery(
+    request: PrepareWebhookDeliveryRequest,
+  ): Promise<PreparedWebhookDelivery>
+  /** Webhook attempt 結果を保存します。 */
+  recordWebhookDeliveryAttempt(
+    request: RecordWebhookDeliveryAttemptRequest,
+  ): Promise<WebhookDelivery>
+  /** Original delivery を保存したまま新しい pending replay を作成します。 */
+  replayWebhookDelivery(request: ReplayWebhookDeliveryRequest): Promise<WebhookDelivery>
+  /** Incoming webhook signature を timing-safe に検証します。 */
+  verifyWebhookSignature(request: VerifyWebhookSignatureRequest): Promise<boolean>
+  /** Connector credential を暗号化して installation を作成します。 */
+  installConnector(request: InstallConnectorRequest): Promise<ConnectorInstallation>
+  /** Workspace の credential を含まない connector summary を返します。 */
+  listConnectors(workspaceId: string): Promise<ConnectorInstallation[]>
+  /** Strongly consistent lifecycle snapshot と revision を返します。 */
+  readConnectorLifecycleSnapshot(
+    request: ReadConnectorLifecycleSnapshotRequest,
+  ): Promise<ConnectorLifecycleSnapshot>
+  /** Connector の current health status を保存します。 */
+  updateConnectorStatus(
+    request: UpdateConnectorStatusRequest,
+  ): Promise<ConnectorInstallation>
+  /** Provider code exchange 前に reauthorization state が current か検証します。 */
+  assertConnectorReauthorizationState(
+    request: AssertConnectorReauthorizationStateRequest,
+  ): Promise<void>
+  /** Credential を置換して connector を connected へ復旧します。 */
+  recoverConnector(request: RecoverConnectorRequest): Promise<ConnectorInstallation>
+  /** Connector worker 内でのみ使う credential を復号します。 */
+  readConnectorCredential(request: ReadConnectorCredentialRequest): Promise<string>
+  /** External resource と canonical Work Item の一意な link を作成します。 */
+  createExternalWorkItemLink(
+    request: CreateExternalWorkItemLinkRequest,
+  ): Promise<ExternalWorkItemLink>
+  /** Workspace 内の external link を取得します。 */
+  listExternalWorkItemLinks(
+    request: ListExternalWorkItemLinksRequest,
+  ): Promise<ExternalWorkItemLink[]>
+  /** External link の同期方向・状態を tenant-bound CAS で更新します。 */
+  updateExternalWorkItemLink(
+    request: UpdateExternalWorkItemLinkRequest,
+  ): Promise<ExternalWorkItemLink>
+  /** External link と uniqueness claim を削除します。 */
+  deleteExternalWorkItemLink(
+    request: DeleteExternalWorkItemLinkRequest,
+  ): Promise<void>
+  /** Import job を queued 状態で作成します。 */
+  createImportJob(request: CreateImportJobRequest): Promise<ImportJob>
+  /** Workspace の Import job を作成日時降順で返します。 */
+  listImportJobs(workspaceId: string): Promise<ImportJob[]>
+  /** Import job state と report を保存します。 */
+  updateImportJob(request: UpdateImportJobRequest): Promise<ImportJob>
+  /** Idempotency key を reserve、replay、または conflict 判定します。 */
+  reserveIdempotency(request: ReserveIdempotencyRequest): Promise<IdempotencyDecision>
+  /** Reserve owner だけが response を保存できます。 */
+  completeIdempotency(request: CompleteIdempotencyRequest): Promise<void>
+  /**
+   * Domain mutation と response receipt を同じ DynamoDB transaction へ束縛します。
+   * DynamoDB-backed client だけが提供し、他の実装は通常の完了保存へ fallback します。
+   */
+  prepareIdempotencyCompletionTransactWrite?(
+    request: CompleteIdempotencyRequest,
+  ): Promise<IdempotencyCompletionTransactWrite>
+  /** Work Item delete transaction に external-link existence fence を追加します。 */
+  prepareWorkItemDeletionFenceTransactWrite?(
+    request: PrepareWorkItemDeletionFenceRequest,
+  ): Promise<WorkItemDeletionFenceTransactWrite>
+  /** 失敗した処理の Reserve owner だけが未完了 reservation を解放できます。 */
+  releaseIdempotency(request: ReleaseIdempotencyRequest): Promise<void>
+  /** Credential ごとの fixed-window rate limit を原子的に消費します。 */
+  consumeRateLimit(request: ConsumeRateLimitRequest): Promise<RateLimitDecision>
+}
+
+/** Secret を storage-safe ciphertext へ変換する境界です。 */
+export interface SecretProtector {
+  /** Context-bound authenticated encryption を行います。 */
+  protect(plaintext: string, context: string): Promise<string>
+  /** Context-bound ciphertext を復号・検証します。 */
+  unprotect(ciphertext: string, context: string): Promise<string>
+}
+
+/** KMS envelope encryption で鍵を分離する用途です。 */
+export type KmsEnvelopePurpose = 'webhook' | 'connector' | 'platform-state'
+
+/** GenerateDataKey の構造化入力です。 */
+export type KmsGenerateDataKeyRequest = {
+  /** 利用する KMS key ID または ARN です。 */
+  keyId: string
+  /** KMS が認証する暗号化 context です。 */
+  encryptionContext: Readonly<Record<string, string>>
+}
+
+/** GenerateDataKey の必要最小 response です。 */
+export type KmsGenerateDataKeyResult = {
+  /** 一度だけ利用して zeroize する 256-bit plaintext data key です。 */
+  plaintext: Uint8Array
+  /** Envelope に保存する KMS encrypted data key です。 */
+  ciphertextBlob: Uint8Array
+}
+
+/** Decrypt の構造化入力です。 */
+export type KmsDecryptRequest = {
+  /** Envelope の data key を暗号化した KMS key ID または ARN です。 */
+  keyId: string
+  /** Envelope に保存された KMS encrypted data key です。 */
+  ciphertextBlob: Uint8Array
+  /** GenerateDataKey と完全一致させる暗号化 context です。 */
+  encryptionContext: Readonly<Record<string, string>>
+}
+
+/** Decrypt の必要最小 response です。 */
+export type KmsDecryptResult = {
+  /** 一度だけ利用して zeroize する 256-bit plaintext data key です。 */
+  plaintext: Uint8Array
+}
+
+/** AWS KMS SDK を構造型で注入する envelope encryption 境界です。 */
+export interface KmsEnvelopeClient {
+  /** AES-256 data key と encrypted copy を生成します。 */
+  generateDataKey(request: KmsGenerateDataKeyRequest): Promise<KmsGenerateDataKeyResult>
+  /** Envelope の encrypted data key を復号します。 */
+  decrypt(request: KmsDecryptRequest): Promise<KmsDecryptResult>
+}
+
+/** Purpose ごとの KMS key ID です。 */
+export type KmsEnvelopeKeyIds = {
+  /** Webhook signing secret 専用 key です。 */
+  webhook?: string
+  /** Connector provider credential 専用 key です。 */
+  connector?: string
+  /** Idempotency response と cursor 専用 key です。 */
+  platformState?: string
+}
+
+/** Developer platform API/store の安定した error です。 */
+export class DeveloperPlatformError extends Error {
+  /** HTTP response に対応する status code です。 */
+  readonly status: number
+  /** External client が分岐に使える stable error code です。 */
+  readonly code: string
+
+  constructor(status: number, code: string, message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'DeveloperPlatformError'
+    this.status = status
+    this.code = code
+  }
+}
+
+/** Local/test で利用できる AES-256-GCM SecretProtector です。 */
+export class LocalAesGcmSecretProtector implements SecretProtector {
+  /** AES-256 key bytes です。 */
+  private readonly encryptionKey: Buffer
+
+  constructor(key: string | Uint8Array = randomBytes(32)) {
+    if (typeof key === 'string') {
+      const normalized = key.trim()
+      if (Buffer.byteLength(normalized, 'utf8') < 32) {
+        throw new DeveloperPlatformError(
+          500,
+          'SecretProtectorKeyInvalid',
+          'Secret protector key must contain at least 32 UTF-8 bytes.',
+        )
+      }
+      this.encryptionKey = createHash('sha256').update(normalized).digest()
+      return
+    }
+    if (key.byteLength !== 32) {
+      throw new DeveloperPlatformError(
+        500,
+        'SecretProtectorKeyInvalid',
+        'Secret protector key must contain 32 bytes.',
+      )
+    }
+    this.encryptionKey = Buffer.from(key)
+  }
+
+  /** AES-GCM と context AAD で secret を暗号化します。 */
+  async protect(plaintext: string, context: string) {
+    const normalizedContext = requireText(context, 'Secret protection context')
+    const initializationVector = randomBytes(12)
+    const cipher = createCipheriv('aes-256-gcm', this.encryptionKey, initializationVector)
+    cipher.setAAD(Buffer.from(normalizedContext, 'utf8'))
+    const ciphertext = Buffer.concat([
+      cipher.update(requireText(plaintext, 'Protected secret'), 'utf8'),
+      cipher.final(),
+    ])
+    const authenticationTag = cipher.getAuthTag()
+    return [
+      'v1',
+      initializationVector.toString('base64url'),
+      ciphertext.toString('base64url'),
+      authenticationTag.toString('base64url'),
+    ].join('.')
+  }
+
+  /** AES-GCM authentication tag と context AAD を検証して復号します。 */
+  async unprotect(ciphertext: string, context: string) {
+    const [version, initializationVector, encrypted, authenticationTag, extra] =
+      ciphertext.split('.')
+    if (
+      version !== 'v1' ||
+      !initializationVector ||
+      !encrypted ||
+      !authenticationTag ||
+      extra !== undefined
+    ) {
+      throw new DeveloperPlatformError(
+        400,
+        'ProtectedSecretInvalid',
+        'Protected secret is invalid.',
+      )
+    }
+    try {
+      const decipher = createDecipheriv(
+        'aes-256-gcm',
+        this.encryptionKey,
+        Buffer.from(initializationVector, 'base64url'),
+      )
+      decipher.setAAD(Buffer.from(requireText(context, 'Secret protection context'), 'utf8'))
+      decipher.setAuthTag(Buffer.from(authenticationTag, 'base64url'))
+      return Buffer.concat([
+        decipher.update(Buffer.from(encrypted, 'base64url')),
+        decipher.final(),
+      ]).toString('utf8')
+    } catch (error) {
+      if (error instanceof DeveloperPlatformError) throw error
+      throw new DeveloperPlatformError(
+        400,
+        'ProtectedSecretInvalid',
+        'Protected secret could not be authenticated.',
+      )
+    }
+  }
+}
+
+/** AWS KMS data key と local AES-GCM を組み合わせる production protector です。 */
+export class KmsEnvelopeSecretProtector implements SecretProtector {
+  /** GenerateDataKey/Decrypt の注入境界です。 */
+  private readonly kmsClient: KmsEnvelopeClient
+  /** Purpose ごとに分離した KMS key ID です。 */
+  private readonly keyIds: KmsEnvelopeKeyIds
+
+  constructor(kmsClient: KmsEnvelopeClient, keyIds: KmsEnvelopeKeyIds) {
+    this.kmsClient = kmsClient
+    this.keyIds = {
+      ...(keyIds.webhook
+        ? { webhook: requireText(keyIds.webhook, 'Webhook KMS key ID') }
+        : {}),
+      ...(keyIds.connector
+        ? { connector: requireText(keyIds.connector, 'Connector KMS key ID') }
+        : {}),
+      ...(keyIds.platformState
+        ? { platformState: requireText(keyIds.platformState, 'Platform state KMS key ID') }
+        : {}),
+    }
+  }
+
+  /** KMS data key を一度だけ使い、context-bound AES-GCM envelope を作成します。 */
+  async protect(plaintext: string, context: string) {
+    const normalizedPlaintext = requireText(plaintext, 'Protected secret')
+    const normalizedContext = requireText(context, 'Secret protection context')
+    const purpose = readKmsEnvelopePurpose(normalizedContext)
+    const keyId = readKmsKeyId(this.keyIds, purpose)
+    const encryptionContext = createKmsEncryptionContext(purpose, normalizedContext)
+    let generated: KmsGenerateDataKeyResult | undefined
+    let dataKey: Buffer | undefined
+    try {
+      generated = await this.kmsClient.generateDataKey({ keyId, encryptionContext })
+      dataKey = Buffer.from(generated.plaintext)
+      if (dataKey.byteLength !== 32 || generated.ciphertextBlob.byteLength === 0) {
+        throw new Error('KMS returned invalid data key material.')
+      }
+      const initializationVector = randomBytes(12)
+      const cipher = createCipheriv('aes-256-gcm', dataKey, initializationVector)
+      cipher.setAAD(Buffer.from(createKmsEnvelopeAad(purpose, keyId, normalizedContext)))
+      const encrypted = Buffer.concat([
+        cipher.update(normalizedPlaintext, 'utf8'),
+        cipher.final(),
+      ])
+      return [
+        'kms-v1',
+        purpose,
+        Buffer.from(generated.ciphertextBlob).toString('base64url'),
+        initializationVector.toString('base64url'),
+        encrypted.toString('base64url'),
+        cipher.getAuthTag().toString('base64url'),
+      ].join('.')
+    } catch {
+      throw new DeveloperPlatformError(
+        500,
+        'SecretProtectionFailed',
+        'Secret could not be protected.',
+      )
+    } finally {
+      dataKey?.fill(0)
+      generated?.plaintext.fill(0)
+    }
+  }
+
+  /** KMS data key と AES-GCM AAD を検証し、平文 key を必ず zeroize します。 */
+  async unprotect(ciphertext: string, context: string) {
+    const normalizedCiphertext = requireText(ciphertext, 'Protected secret')
+    const normalizedContext = requireText(context, 'Secret protection context')
+    const expectedPurpose = readKmsEnvelopePurpose(normalizedContext)
+    const [
+      version,
+      storedPurpose,
+      encryptedDataKey,
+      initializationVector,
+      encrypted,
+      authenticationTag,
+      extra,
+    ] = normalizedCiphertext.split('.')
+    if (
+      version !== 'kms-v1' ||
+      storedPurpose !== expectedPurpose ||
+      !encryptedDataKey ||
+      !initializationVector ||
+      !encrypted ||
+      !authenticationTag ||
+      extra !== undefined
+    ) {
+      throw new DeveloperPlatformError(
+        400,
+        'ProtectedSecretInvalid',
+        'Protected secret is invalid.',
+      )
+    }
+    const purpose = storedPurpose as KmsEnvelopePurpose
+    const keyId = readKmsKeyId(this.keyIds, purpose)
+    const encryptionContext = createKmsEncryptionContext(purpose, normalizedContext)
+    let decrypted: KmsDecryptResult | undefined
+    let dataKey: Buffer | undefined
+    try {
+      decrypted = await this.kmsClient.decrypt({
+        keyId,
+        ciphertextBlob: Buffer.from(encryptedDataKey, 'base64url'),
+        encryptionContext,
+      })
+      dataKey = Buffer.from(decrypted.plaintext)
+      if (dataKey.byteLength !== 32) throw new Error('KMS returned invalid plaintext key.')
+      const decipher = createDecipheriv(
+        'aes-256-gcm',
+        dataKey,
+        Buffer.from(initializationVector, 'base64url'),
+      )
+      decipher.setAAD(Buffer.from(createKmsEnvelopeAad(purpose, keyId, normalizedContext)))
+      decipher.setAuthTag(Buffer.from(authenticationTag, 'base64url'))
+      return Buffer.concat([
+        decipher.update(Buffer.from(encrypted, 'base64url')),
+        decipher.final(),
+      ]).toString('utf8')
+    } catch {
+      throw new DeveloperPlatformError(
+        400,
+        'ProtectedSecretInvalid',
+        'Protected secret could not be authenticated.',
+      )
+    } finally {
+      dataKey?.fill(0)
+      decrypted?.plaintext.fill(0)
+    }
+  }
+}
+
+/** Single-table row discriminator です。 */
+type DeveloperPlatformEntryType =
+  | 'api-key'
+  | 'oauth-app'
+  | 'oauth-token'
+  | 'webhook-subscription'
+  | 'webhook-delivery'
+  | 'webhook-delivery-index'
+  | 'connector-installation'
+  | 'external-link'
+  | 'external-link-claim'
+  | 'work-item-link-fence'
+  | 'import-job'
+  | 'idempotency'
+  | 'rate-limit'
+
+/** Developer platform single-table の共通 row です。 */
+type DeveloperPlatformRecord = {
+  /** DynamoDB partition key である Workspace ID です。 */
+  workspaceId: string
+  /** DynamoDB sort key です。 */
+  recordKey: string
+  /** Row の domain discriminator です。 */
+  entryType: DeveloperPlatformEntryType
+  /** Secret を除く domain value です。 */
+  value: unknown
+  /** Global secondary index partition key です。 */
+  lookupKey?: string
+  /** Global secondary index sort key です。 */
+  lookupSortKey?: string
+  /** API key、OAuth secret/token の SHA-256 digest です。 */
+  secretDigest?: string
+  /** Webhook/connector credential の authenticated ciphertext です。 */
+  secretCiphertext?: string
+  /** Connector credential の serialized value を束縛する SHA-256 digest です。 */
+  connectorCredentialDigest?: string
+  /** Connector credential replacement の単調増加 revision です。 */
+  connectorCredentialRevision?: number
+  /** Current connector OAuth reauthorization state ID の SHA-256 digest です。 */
+  connectorOAuthStateDigest?: string
+  /** Connector OAuth state fencing の単調増加 revision です。 */
+  connectorOAuthStateRevision?: number
+  /** DynamoDB TTL epoch seconds です。 */
+  expiresAt?: number
+  /** Fixed-window rate limit の消費量です。 */
+  consumed?: number
+  /** Work Item に現在紐づく external-link 数です。 */
+  activeLinkCount?: number
+  /** Optimistic conditional update 用 version です。 */
+  version: number
+}
+
+/** Eventual-consistent lookup index から得る primary-key locator です。 */
+type DeveloperPlatformRecordLocator = {
+  /** DynamoDB partition key である Workspace ID です。 */
+  workspaceId: string
+  /** DynamoDB sort key です。 */
+  recordKey: string
+  /** Global secondary index partition key です。 */
+  lookupKey: string
+  /** Global secondary index sort key です。 */
+  lookupSortKey: string
+}
+
+/** Webhook delivery row の非公開 value です。 */
+type StoredWebhookDeliveryValue = {
+  /** Public delivery summary です。 */
+  delivery: WebhookDelivery
+  /** Worker が配送する immutable event envelope です。 */
+  event: WebhookEventEnvelope
+  /** Secret を除いた最新 attempt error です。 */
+  lastError?: string
+}
+
+/** Webhook delivery access pattern を指す immutable locator row です。 */
+type StoredWebhookDeliveryIndexValue = {
+  /** Locator の access pattern です。 */
+  kind: 'workspace-list' | 'subscription-list' | 'replay-chain'
+  /** 強整合再取得する delivery 本体の record key です。 */
+  targetRecordKey: string
+}
+
+/** OAuth token row の非公開 value です。 */
+type StoredOAuthTokenValue = {
+  /** Token の opaque ID です。 */
+  id: string
+  /** Token を発行した OAuth app ID です。 */
+  oauthAppId: string
+  /** Request ごとに active membership/RBAC を再評価する subject User ID です。 */
+  subjectUserId: string
+  /** Token scope です。 */
+  scopes: ApiScope[]
+  /** Token 発行日時です。 */
+  createdAt: string
+  /** Token 失効日時です。 */
+  expiresAt: string
+  /** Token の最終利用日時です。 */
+  lastUsedAt?: string
+}
+
+/** Idempotency row の非公開 value です。 */
+type StoredIdempotencyValue = {
+  /** 同じ raw key に対する request fingerprint digest です。 */
+  requestFingerprintDigest: string
+  /** Reservation 所有 token の SHA-256 digest です。 */
+  reservationDigest: string
+  /** Reservation state です。 */
+  state: 'reserved' | 'completed'
+  /** Completed request の context-bound authenticated ciphertext です。 */
+  responseCiphertext?: string
+  /** Reservation 作成日時です。 */
+  createdAt: string
+}
+
+/** Domain row と同時 commit する暗号化済み idempotency receipt です。 */
+type PreparedIdempotencyCompletionRecord = {
+  /** Transaction が置換する completed idempotency row です。 */
+  completedRecord: DeveloperPlatformRecord
+  /** Transaction 開始時に存在すべき reserved row です。 */
+  reservedRecord: DeveloperPlatformRecord
+  /** Current owner を束縛する reservation digest です。 */
+  reservationDigest: string
+  /** Current request を束縛する fingerprint digest です。 */
+  requestFingerprintDigest: string
+}
+
+/** External link uniqueness claim の非公開 value です。 */
+type StoredExternalLinkClaimValue = {
+  /** Claim が所有する external link record key です。 */
+  targetRecordKey: string
+}
+
+/** Work Item ごとの active external-link count と deletion fence です。 */
+type StoredWorkItemLinkFenceValue = {
+  /** Link 対象を所有する Team ID です。 */
+  teamId: string
+  /** Link 対象 Work Item ID です。 */
+  workItemId: string
+  /** Work Item が削除された時刻です。存在する場合は新規 link を拒否します。 */
+  deletedAt?: string
+}
+
+/** Webhook cursor の暗号化 payload です。 */
+type WebhookDeliveryCursor = {
+  /** Cursor format version です。 */
+  version: 2
+  /** Cursor を利用できる Workspace ID です。 */
+  workspaceId: string
+  /** Cursor を利用できる subscription filter です。 */
+  subscriptionId?: string
+  /** 次 page の ExclusiveStartKey に使う GSI partition key です。 */
+  lookupKey: string
+  /** 次 page の ExclusiveStartKey に使う GSI sort key です。 */
+  lookupSortKey: string
+  /** 次 page の ExclusiveStartKey に使う base-table sort key です。 */
+  recordKey: string
+}
+
+/** LookupKeyIndex の bounded query 入力です。 */
+type QueryLookupIndexRequest = {
+  /** Query 対象 GSI partition key です。 */
+  lookupKey: string
+  /** DynamoDB が評価する最大 item 数です。 */
+  limit: number
+  /** 昇順なら true、降順なら false です。 */
+  scanIndexForward: boolean
+  /** 前 page の排他的開始位置です。 */
+  exclusiveStartKey?: DeveloperPlatformRecordLocator
+}
+
+/** LookupKeyIndex の bounded query 結果です。 */
+type QueryLookupIndexResult = {
+  /** GSI projection から読み取った base-table locator です。 */
+  locators: DeveloperPlatformRecordLocator[]
+  /** 続きがある場合の最終評価 key です。 */
+  lastEvaluatedKey?: DeveloperPlatformRecordLocator
+}
+
+/** Conditional put の条件です。 */
+type PutRecordCondition = {
+  /** Row が存在しない場合だけ作成するかどうかです。 */
+  ifAbsent?: boolean
+  /** 現在の version が一致する場合だけ置換します。 */
+  expectedVersion?: number
+}
+
+/** Developer platform lifecycle を audit/Webhook outbox event に変換する入力です。 */
+type PlatformAuditEventInput = {
+  /** Event を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Webhook contract と一致する event type です。 */
+  eventType: string
+  /** Audit timeline の entity type です。 */
+  entityType: string
+  /** Workspace 内で安定した entity ID です。 */
+  entityId: string
+  /** Retry 間で変わらない transition identity です。 */
+  transitionId: string
+  /** Team selector authorization に使う optional Team ID です。 */
+  teamId?: string
+  /** Project selector authorization に使う optional Project ID です。 */
+  projectId?: string
+  /** Event 発生日時です。 */
+  occurredAt: string
+  /** Audit action code です。 */
+  action: string
+  /** Activity と delivery log に表示できる概要です。 */
+  summary: string
+  /** Secret や source row を含まない追加 metadata です。 */
+  metadata?: Readonly<Record<string, unknown>>
+  /** Mutation actor ID です。 */
+  actorId?: string
+}
+
+/** External link と claim を同時保存する結果です。 */
+type SaveExternalLinkResult =
+  | 'created'
+  | 'same-owner'
+  | 'conflict'
+  | 'installation-changed'
+  | 'work-item-deleted'
+
+/** Storage 固有の fixed-window 原子更新入力です。 */
+type ConsumeRateLimitStorageInput = {
+  /** Credential の Workspace ID です。 */
+  workspaceId: string
+  /** Window row の sort key です。 */
+  recordKey: string
+  /** Window 上限です。 */
+  limit: number
+  /** 消費する cost です。 */
+  cost: number
+  /** Window reset timestamp です。 */
+  resetAt: string
+  /** DynamoDB TTL epoch seconds です。 */
+  expiresAt: number
+}
+
+/** Storage 固有の fixed-window 原子更新結果です。 */
+type ConsumeRateLimitStorageResult = {
+  /** Limit 内で消費できたかどうかです。 */
+  allowed: boolean
+  /** 判定後の消費量です。 */
+  consumed: number
+}
+
+/** Rate-limit row の非公開 value です。 */
+type StoredRateLimitValue = {
+  /** Fixed window に設定した上限です。 */
+  limit: number
+  /** Fixed window の reset timestamp です。 */
+  resetAt: string
+}
+
+/** Storage primitives を共有 domain implementation へ接続する基底 class です。 */
+abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
+  /** Webhook/connector secret と cursor を暗号化する protector です。 */
+  protected readonly secretProtector: SecretProtector
+  /** Test から差し替え可能な clock です。 */
+  protected readonly clock: () => Date
+  /** Platform lifecycle event を保存する immutable audit outbox table 名です。 */
+  protected readonly auditTableName?: string
+
+  constructor(
+    secretProtector: SecretProtector,
+    clock: () => Date,
+    auditTableName?: string,
+  ) {
+    this.secretProtector = secretProtector
+    this.clock = clock
+    this.auditTableName = auditTableName
+  }
+
+  /** Primary key で row を取得します。 */
+  protected abstract getRecord(
+    workspaceId: string,
+    recordKey: string,
+  ): Promise<DeveloperPlatformRecord | undefined>
+
+  /** Workspace partition の prefix rows を取得します。 */
+  protected abstract listRecords(
+    workspaceId: string,
+    recordKeyPrefix: string,
+  ): Promise<DeveloperPlatformRecord[]>
+
+  /** lookupKey GSI 相当から一意な row を取得します。 */
+  protected abstract getRecordByLookupKey(
+    lookupKey: string,
+  ): Promise<DeveloperPlatformRecordLocator | undefined>
+
+  /** LookupKeyIndex を件数上限付きで query します。 */
+  protected abstract queryLookupIndex(
+    request: QueryLookupIndexRequest,
+  ): Promise<QueryLookupIndexResult>
+
+  /** Row を作成または条件付き置換します。 */
+  protected abstract putRecord(
+    record: DeveloperPlatformRecord,
+    condition?: PutRecordCondition,
+  ): Promise<boolean>
+
+  /** Domain row と encrypted idempotency receipt を原子的に保存します。 */
+  protected abstract putRecordWithIdempotency(
+    record: DeveloperPlatformRecord,
+    condition: PutRecordCondition,
+    completion: PreparedIdempotencyCompletionRecord,
+    auditPut?: AuditTransactWriteItem,
+  ): Promise<boolean>
+
+  /** Domain row と immutable audit outbox event を原子的に保存します。 */
+  protected abstract putRecordWithAudit(
+    record: DeveloperPlatformRecord,
+    condition: PutRecordCondition,
+    auditPut: AuditTransactWriteItem,
+  ): Promise<boolean>
+
+  /** Primary key の row を削除します。 */
+  protected abstract deleteRecord(
+    workspaceId: string,
+    recordKey: string,
+    expectedVersion?: number,
+  ): Promise<boolean>
+
+  /** Delivery 本体と immutable index locator を原子的に新規保存します。 */
+  protected abstract createWebhookDeliveryRecords(
+    records: readonly DeveloperPlatformRecord[],
+  ): Promise<boolean>
+
+  /** External link と tenant-scoped uniqueness claim を原子的に保存します。 */
+  protected abstract saveExternalLinkWithClaim(
+    linkRecord: DeveloperPlatformRecord,
+    claimRecord: DeveloperPlatformRecord,
+    installationRecord: DeveloperPlatformRecord,
+    auditPut?: AuditTransactWriteItem,
+  ): Promise<SaveExternalLinkResult>
+
+  /** Connector lifecycle guard と external-link mutation を原子的に保存します。 */
+  protected abstract putExternalLinkWithConnectorGuard(
+    linkRecord: DeveloperPlatformRecord,
+    expectedLinkVersion: number,
+    installationRecord: DeveloperPlatformRecord,
+    completion?: PreparedIdempotencyCompletionRecord,
+    auditPut?: AuditTransactWriteItem,
+  ): Promise<boolean>
+
+  /** External link、claim、sync state、receipt、audit を原子的に削除・保存します。 */
+  protected abstract deleteExternalLinkWithClaim(
+    linkRecord: DeveloperPlatformRecord,
+    claimRecordKey: string,
+    completion?: PreparedIdempotencyCompletionRecord,
+    auditPut?: AuditTransactWriteItem,
+  ): Promise<boolean>
+
+  /** Credential fixed-window counter を原子的に消費します。 */
+  protected abstract consumeRateLimitRecord(
+    input: ConsumeRateLimitStorageInput,
+  ): Promise<ConsumeRateLimitStorageResult>
+
+  /** Optional token があれば domain row と response receipt を同時保存します。 */
+  private async persistMutationRecord(
+    workspaceId: string,
+    record: DeveloperPlatformRecord,
+    condition: PutRecordCondition,
+    idempotency: IdempotencyMutationToken | undefined,
+    response: unknown,
+    auditPut?: AuditTransactWriteItem,
+  ) {
+    if (!idempotency) {
+      return auditPut
+        ? this.putRecordWithAudit(record, condition, auditPut)
+        : this.putRecord(record, condition)
+    }
+    const completion = await this.prepareIdempotencyCompletionRecord(
+      workspaceId,
+      idempotency,
+      response,
+    )
+    return this.putRecordWithIdempotency(record, condition, completion, auditPut)
+  }
+
+  /** Platform lifecycle を既存 audit stream へ流す immutable outbox Put にします。 */
+  protected createPlatformAuditPut(input: PlatformAuditEventInput) {
+    if (!this.auditTableName) return undefined
+    const context = createMutationAuditContext({
+      workspaceId: input.workspaceId,
+      actor: {
+        id: input.actorId ?? 'developer-platform',
+        kind: input.actorId ? 'user' : 'service',
+      },
+      idempotencyKey:
+        `developer-platform:${input.eventType}:${input.entityId}:${input.transitionId}`,
+      occurredAt: input.occurredAt,
+      request: {
+        method: 'EVENT',
+        path: `/developer-platform/${input.entityType}/${input.entityId}`,
+        body: { transitionId: input.transitionId },
+      },
+      source: {
+        kind: 'system',
+        requestId: `developer-platform-${digestText(input.transitionId).slice(0, 24)}`,
+      },
+    })
+    return createMutationAuditEventPut(this.auditTableName, context, {
+      directoryId: input.workspaceId,
+      eventType: input.eventType,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      action: input.action,
+      occurredAt: input.occurredAt,
+      summary: input.summary,
+      metadata: {
+        adapter: 'developer-platform',
+        ...(input.teamId ? { teamId: input.teamId } : {}),
+        ...(input.projectId ? { projectId: input.projectId } : {}),
+        ...input.metadata,
+      },
+    })
+  }
+
+  /** Current reservation owner に束縛した encrypted completed row を準備します。 */
+  protected async prepareIdempotencyCompletionRecord(
+    workspaceIdValue: string,
+    token: IdempotencyMutationToken,
+    responseValue: unknown,
+  ): Promise<PreparedIdempotencyCompletionRecord> {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const credentialId = readIdentifier(token.credentialId, 'Credential ID')
+    const idempotencyKey = readIdempotencyKey(token.idempotencyKey)
+    const requestFingerprint = requireText(
+      token.requestFingerprint,
+      'Idempotency request fingerprint',
+    )
+    const reservationId = requireText(
+      token.reservationId,
+      'Idempotency reservation ID',
+    )
+    const keyDigest = digestText(
+      `developer-idempotency-v1\0${workspaceId}\0${credentialId}\0${idempotencyKey}`,
+    )
+    const recordKey = `IDEMPOTENCY#${credentialId}#${keyDigest}`
+    const reservedRecord = await this.requireRecord(
+      workspaceId,
+      recordKey,
+      'idempotency',
+      'IdempotencyReservationNotFound',
+      'Idempotency reservation was not found.',
+    )
+    if ((reservedRecord.expiresAt ?? 0) <= Math.floor(this.clock().getTime() / 1_000)) {
+      throw conflict(
+        'IdempotencyReservationExpired',
+        'Idempotency reservation has expired.',
+      )
+    }
+    const stored = readRecordValue<StoredIdempotencyValue>(
+      reservedRecord,
+      'idempotency',
+    )
+    const reservationDigest = digestSecret(reservationId)
+    if (!secretDigestsEqual(stored.reservationDigest, reservationDigest)) {
+      throw forbidden(
+        'IdempotencyReservationOwnerMismatch',
+        'Idempotency reservation belongs to another request.',
+      )
+    }
+    const requestFingerprintDigest = digestText(
+      `developer-request-v1\0${requestFingerprint}`,
+    )
+    if (stored.requestFingerprintDigest !== requestFingerprintDigest) {
+      throw conflict(
+        'IdempotencyKeyConflict',
+        'Idempotency key was already used for a different request.',
+      )
+    }
+    if (stored.state !== 'reserved') {
+      throw conflict(
+        'IdempotencyAlreadyCompleted',
+        'Idempotency request was already completed.',
+      )
+    }
+    const response = cloneJsonValue(responseValue)
+    const serializedResponse = JSON.stringify(response)
+    if (
+      Buffer.byteLength(serializedResponse, 'utf8') >
+        IDEMPOTENCY_MAX_RESPONSE_BYTES
+    ) {
+      throw new DeveloperPlatformError(
+        413,
+        'IdempotencyResponseTooLarge',
+        'Idempotency response exceeds the safe persistence limit.',
+      )
+    }
+    const responseCiphertext = await this.secretProtector.protect(
+      serializedResponse,
+      createIdempotencyResponseContext(workspaceId, credentialId, keyDigest),
+    )
+    const completedRecord: DeveloperPlatformRecord = {
+      ...reservedRecord,
+      value: {
+        ...stored,
+        state: 'completed',
+        responseCiphertext,
+      } satisfies StoredIdempotencyValue,
+      version: reservedRecord.version + 1,
+    }
+    if (estimateStoredRecordBytes(completedRecord) > 380 * 1024) {
+      throw new DeveloperPlatformError(
+        413,
+        'IdempotencyResponseTooLarge',
+        'Encrypted idempotency response exceeds the safe persistence limit.',
+      )
+    }
+    return {
+      completedRecord,
+      reservedRecord,
+      reservationDigest,
+      requestFingerprintDigest,
+    }
+  }
+
+  /** API key を作成し、secret を一度だけ返します。 */
+  async createApiKey(request: CreateApiKeyRequest): Promise<ApiKeySecretResult> {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const createdByUserId = readIdentifier(request.createdByUserId, 'Creator user ID')
+    const name = readName(request.input.name, 'API key name')
+    const scopes = readScopes(request.input.scopes)
+    const now = this.clock()
+    const expiresAt = request.input.expiresAt === undefined
+      ? new Date(now.getTime() + API_KEY_DEFAULT_TTL_SECONDS * 1_000).toISOString()
+      : readFutureTimestamp(request.input.expiresAt, now, 'API key expiry')
+    const id = createId('key')
+    const secret = createSecret('mk_key')
+    const apiKey: ApiKeySummary = {
+      id,
+      name,
+      prefix: secret.slice(0, 14),
+      scopes,
+      status: 'active',
+      createdByUserId,
+      createdAt: now.toISOString(),
+      expiresAt,
+    }
+    const record = createRecord(
+      workspaceId,
+      createApiKeyRecordKey(id),
+      'api-key',
+      apiKey,
+      {
+        lookupKey: createSecretLookupKey('APIKEY', secret),
+        secretDigest: digestSecret(secret),
+      },
+    )
+    const result = { apiKey: clone(apiKey), secret } satisfies ApiKeySecretResult
+    if (!await this.persistMutationRecord(
+      workspaceId,
+      record,
+      { ifAbsent: true },
+      request.idempotency,
+      { status: 201, body: result },
+    )) {
+      throw persistenceConflict()
+    }
+    return result
+  }
+
+  /** Workspace の secret を含まない API key summary を返します。 */
+  async listApiKeys(workspaceIdValue: string) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const now = this.clock()
+    const records = await this.listRecords(workspaceId, 'APIKEY#')
+    const apiKeys: ApiKeySummary[] = []
+    for (const record of records) {
+      const apiKey = readRecordValue<ApiKeySummary>(record, 'api-key')
+      const normalized = normalizeCredentialStatus(apiKey, now)
+      if (normalized !== apiKey || (
+        normalized.status !== 'active' &&
+        (record.secretDigest !== undefined || record.lookupKey !== undefined)
+      )) {
+        await this.putRecord(withoutStoredCredential({
+          ...record,
+          value: normalized,
+          version: record.version + 1,
+        }, true), { expectedVersion: record.version })
+      }
+      apiKeys.push(clone(normalized))
+    }
+    return sortByCreatedAt(apiKeys)
+  }
+
+  /** API key secret を置換し、新 secret を一度だけ返します。 */
+  async rotateApiKey(request: RotateApiKeyRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const apiKeyId = readIdentifier(request.apiKeyId, 'API key ID')
+    const record = await this.requireRecord(
+      workspaceId,
+      createApiKeyRecordKey(apiKeyId),
+      'api-key',
+      'ApiKeyNotFound',
+      'API key was not found.',
+    )
+    const current = normalizeCredentialStatus(
+      readRecordValue<ApiKeySummary>(record, 'api-key'),
+      this.clock(),
+    )
+    if (current.status !== 'active') {
+      if (
+        current.status === 'expired' &&
+        (
+          current !== record.value ||
+          record.secretDigest !== undefined ||
+          record.lookupKey !== undefined
+        )
+      ) {
+        const saved = await this.putRecord(withoutStoredCredential({
+          ...record,
+          value: current,
+          version: record.version + 1,
+        }, true), { expectedVersion: record.version })
+        if (!saved) throw persistenceConflict()
+      }
+      throw conflict('ApiKeyNotActive', 'Only an active API key can be rotated.')
+    }
+    const secret = createSecret('mk_key')
+    const apiKey: ApiKeySummary = {
+      ...current,
+      prefix: secret.slice(0, 14),
+      lastUsedAt: undefined,
+    }
+    const updatedRecord: DeveloperPlatformRecord = {
+      ...record,
+      value: apiKey,
+      lookupKey: createSecretLookupKey('APIKEY', secret),
+      secretDigest: digestSecret(secret),
+      version: record.version + 1,
+    }
+    const result = { apiKey: clone(apiKey), secret } satisfies ApiKeySecretResult
+    const saved = await this.persistMutationRecord(
+      workspaceId,
+      updatedRecord,
+      { expectedVersion: record.version },
+      request.idempotency,
+      { status: 200, body: result },
+    )
+    if (!saved) throw persistenceConflict()
+    return result
+  }
+
+  /** API key を revoke します。 */
+  async revokeApiKey(request: RevokeApiKeyRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const apiKeyId = readIdentifier(request.apiKeyId, 'API key ID')
+    const record = await this.requireRecord(
+      workspaceId,
+      createApiKeyRecordKey(apiKeyId),
+      'api-key',
+      'ApiKeyNotFound',
+      'API key was not found.',
+    )
+    const current = readRecordValue<ApiKeySummary>(record, 'api-key')
+    if (current.status === 'revoked') {
+      if (record.secretDigest || record.lookupKey) {
+        const saved = await this.putRecord(
+          withoutStoredCredential({
+            ...record,
+            version: record.version + 1,
+          }, true),
+          { expectedVersion: record.version },
+        )
+        if (!saved) throw persistenceConflict()
+      }
+      return clone(current)
+    }
+    const apiKey: ApiKeySummary = {
+      ...current,
+      status: 'revoked',
+      revokedAt: this.clock().toISOString(),
+    }
+    const saved = await this.putRecord(withoutStoredCredential({
+      ...record,
+      value: apiKey,
+      version: record.version + 1,
+    }, true), { expectedVersion: record.version })
+    if (!saved) throw persistenceConflict()
+    return clone(apiKey)
+  }
+
+  /** API key secret を認証し、last-used を更新します。 */
+  async authenticateApiKey(request: AuthenticateCredentialRequest) {
+    const credential = requireText(request.credential, 'API key credential')
+    const lookupKey = createSecretLookupKey('APIKEY', credential)
+    const record = await this.getAuthoritativeRecordByLookupKey(lookupKey)
+    if (
+      !record ||
+      record.entryType !== 'api-key' ||
+      !record.secretDigest ||
+      !secretDigestsEqual(record.secretDigest, digestSecret(credential))
+    ) {
+      throw unauthorized('ApiKeyInvalid', 'API key is invalid.')
+    }
+    const now = this.clock()
+    const current = normalizeCredentialStatus(
+      readRecordValue<ApiKeySummary>(record, 'api-key'),
+      now,
+    )
+    if (current.status === 'expired') {
+      if (
+        current !== record.value ||
+        record.secretDigest !== undefined ||
+        record.lookupKey !== undefined
+      ) {
+        await this.putRecord(withoutStoredCredential({
+          ...record,
+          value: current,
+          version: record.version + 1,
+        }, true), { expectedVersion: record.version })
+      }
+      throw unauthorized('ApiKeyExpired', 'API key has expired.')
+    }
+    if (current.status !== 'active') {
+      throw unauthorized('ApiKeyRevoked', 'API key has been revoked.')
+    }
+    assertRequiredScopes(current.scopes, request.requiredScopes)
+    const lastUsedAt = now.toISOString()
+    const apiKey: ApiKeySummary = { ...current, lastUsedAt }
+    await this.putRecord({
+      ...record,
+      value: apiKey,
+      version: record.version + 1,
+    }, { expectedVersion: record.version })
+    return {
+      kind: 'api-key',
+      workspaceId: record.workspaceId,
+      credentialId: current.id,
+      subjectUserId: current.createdByUserId,
+      scopes: [...current.scopes],
+      ...(current.expiresAt ? { expiresAt: current.expiresAt } : {}),
+    } satisfies AuthenticatedDeveloperCredential
+  }
+
+  /** OAuth app を作成し、client secret を一度だけ返します。 */
+  async createOAuthApp(request: CreateOAuthAppRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const createdByUserId = readIdentifier(request.createdByUserId, 'Creator user ID')
+    const name = readName(request.input.name, 'OAuth app name')
+    const grantTypes = readOAuthGrantTypes(request.input.grantTypes)
+    const scopes = readScopes(request.input.scopes)
+    const now = this.clock()
+    const expiresAt = request.input.expiresAt === undefined
+      ? new Date(now.getTime() + OAUTH_APP_DEFAULT_TTL_SECONDS * 1_000).toISOString()
+      : readFutureTimestamp(request.input.expiresAt, now, 'OAuth app expiry')
+    const id = createId('oauth')
+    const clientId = createPublicIdentifier('mk_oauth')
+    const clientSecret = createSecret('mk_oauth_secret')
+    const oauthApp: OAuthAppSummary = {
+      id,
+      name,
+      clientId,
+      grantTypes,
+      scopes,
+      status: 'active',
+      createdByUserId,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      expiresAt,
+    }
+    const record = createRecord(
+      workspaceId,
+      createOAuthAppRecordKey(id),
+      'oauth-app',
+      oauthApp,
+      {
+        lookupKey: `OAUTHCLIENT#${clientId}`,
+        secretDigest: digestSecret(clientSecret),
+      },
+    )
+    const result = {
+      oauthApp: clone(oauthApp),
+      clientSecret,
+    } satisfies OAuthAppSecretResult
+    if (!await this.persistMutationRecord(
+      workspaceId,
+      record,
+      { ifAbsent: true },
+      request.idempotency,
+      { status: 201, body: result },
+    )) throw persistenceConflict()
+    return result
+  }
+
+  /** Workspace の secret を含まない OAuth app summary を返します。 */
+  async listOAuthApps(workspaceIdValue: string) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const records = await this.listRecords(workspaceId, 'OAUTHAPP#')
+    const now = this.clock()
+    const oauthApps: OAuthAppSummary[] = []
+    for (const record of records) {
+      const oauthApp = readRecordValue<OAuthAppSummary>(record, 'oauth-app')
+      const normalized = normalizeCredentialStatus(oauthApp, now)
+      if (normalized !== oauthApp || (
+        normalized.status !== 'active' && record.secretDigest !== undefined
+      )) {
+        await this.persistInactiveOAuthApp(record, normalized)
+      }
+      oauthApps.push(clone(normalized))
+    }
+    return sortByCreatedAt(oauthApps)
+  }
+
+  /** OAuth client secret を置換し、新 secret を一度だけ返します。 */
+  async rotateOAuthClientSecret(request: RotateOAuthClientSecretRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const oauthAppId = readIdentifier(request.oauthAppId, 'OAuth app ID')
+    const record = await this.requireRecord(
+      workspaceId,
+      createOAuthAppRecordKey(oauthAppId),
+      'oauth-app',
+      'OAuthAppNotFound',
+      'OAuth app was not found.',
+    )
+    const current = normalizeCredentialStatus(
+      readRecordValue<OAuthAppSummary>(record, 'oauth-app'),
+      this.clock(),
+    )
+    if (current.status !== 'active') {
+      if (
+        current.status === 'expired' &&
+        (current !== record.value || record.secretDigest !== undefined)
+      ) {
+        await this.persistInactiveOAuthApp(record, current)
+      }
+      throw conflict('OAuthAppNotActive', 'Only an active OAuth app can be rotated.')
+    }
+    const clientSecret = createSecret('mk_oauth_secret')
+    const oauthApp: OAuthAppSummary = {
+      ...current,
+      updatedAt: this.clock().toISOString(),
+      lastUsedAt: undefined,
+    }
+    const updatedRecord: DeveloperPlatformRecord = {
+      ...record,
+      value: oauthApp,
+      secretDigest: digestSecret(clientSecret),
+      version: record.version + 1,
+    }
+    const result = {
+      oauthApp: clone(oauthApp),
+      clientSecret,
+    } satisfies OAuthAppSecretResult
+    const saved = await this.persistMutationRecord(
+      workspaceId,
+      updatedRecord,
+      { expectedVersion: record.version },
+      request.idempotency,
+      { status: 200, body: result },
+    )
+    if (!saved) throw persistenceConflict()
+    return result
+  }
+
+  /** OAuth app と配下 token を revoke します。 */
+  async revokeOAuthApp(request: RevokeOAuthAppRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const oauthAppId = readIdentifier(request.oauthAppId, 'OAuth app ID')
+    const record = await this.requireRecord(
+      workspaceId,
+      createOAuthAppRecordKey(oauthAppId),
+      'oauth-app',
+      'OAuthAppNotFound',
+      'OAuth app was not found.',
+    )
+    const current = readRecordValue<OAuthAppSummary>(record, 'oauth-app')
+    if (current.status === 'revoked') {
+      if (record.secretDigest !== undefined) {
+        await this.persistInactiveOAuthApp(record, current)
+      }
+      return clone(current)
+    }
+    const now = this.clock().toISOString()
+    const oauthApp: OAuthAppSummary = {
+      ...current,
+      status: 'revoked',
+      revokedAt: now,
+      updatedAt: now,
+    }
+    await this.persistInactiveOAuthApp(record, oauthApp)
+    return clone(oauthApp)
+  }
+
+  /** client_credentials を検証し、digest だけ保存する token を発行します。 */
+  async issueOAuthToken(request: IssueOAuthTokenRequest) {
+    const clientId = requireText(request.clientId, 'OAuth client ID')
+    const clientSecret = requireText(request.clientSecret, 'OAuth client secret')
+    const record = await this.getAuthoritativeRecordByLookupKey(`OAUTHCLIENT#${clientId}`)
+    if (
+      !record ||
+      record.entryType !== 'oauth-app' ||
+      !record.secretDigest ||
+      !secretDigestsEqual(record.secretDigest, digestSecret(clientSecret))
+    ) {
+      throw unauthorized('OAuthClientInvalid', 'OAuth client credentials are invalid.')
+    }
+    const now = this.clock()
+    const oauthApp = normalizeCredentialStatus(
+      readRecordValue<OAuthAppSummary>(record, 'oauth-app'),
+      now,
+    )
+    if (oauthApp.status === 'expired') {
+      await this.persistInactiveOAuthApp(record, oauthApp)
+      throw unauthorized('OAuthAppExpired', 'OAuth app has expired.')
+    }
+    if (oauthApp.status !== 'active') {
+      throw unauthorized('OAuthAppRevoked', 'OAuth app has been revoked.')
+    }
+    if (!oauthApp.grantTypes.includes('client_credentials')) {
+      throw forbidden(
+        'OAuthGrantNotAllowed',
+        'OAuth app does not allow the client_credentials grant.',
+      )
+    }
+    const scopes = request.scopes === undefined
+      ? [...oauthApp.scopes]
+      : readScopes(request.scopes)
+    assertRequiredScopes(oauthApp.scopes, scopes)
+    const requestedExpiresIn = readPositiveInteger(
+      request.expiresInSeconds ?? OAUTH_TOKEN_DEFAULT_TTL_SECONDS,
+      'OAuth token expiry seconds',
+      OAUTH_TOKEN_MAX_TTL_SECONDS,
+    )
+    const appRemainingSeconds = oauthApp.expiresAt
+      ? Math.floor((Date.parse(oauthApp.expiresAt) - now.getTime()) / 1_000)
+      : requestedExpiresIn
+    if (appRemainingSeconds < 1) {
+      await this.persistInactiveOAuthApp(record, {
+        ...oauthApp,
+        status: 'expired',
+      })
+      throw unauthorized('OAuthAppExpired', 'OAuth app has expired.')
+    }
+    const expiresIn = Math.min(requestedExpiresIn, appRemainingSeconds)
+    const expiresAt = new Date(now.getTime() + expiresIn * 1_000).toISOString()
+    const tokenId = createId('token')
+    const accessToken = createSecret('mk_access')
+    const token: StoredOAuthTokenValue = {
+      id: tokenId,
+      oauthAppId: oauthApp.id,
+      subjectUserId: oauthApp.createdByUserId,
+      scopes,
+      createdAt: now.toISOString(),
+      expiresAt,
+    }
+    const tokenRecord = createRecord(
+      record.workspaceId,
+      createOAuthTokenRecordKey(tokenId),
+      'oauth-token',
+      token,
+      {
+        lookupKey: createSecretLookupKey('OAUTHTOKEN', accessToken),
+        secretDigest: digestSecret(accessToken),
+        expiresAt: toEpochSeconds(expiresAt),
+      },
+    )
+    if (!await this.putRecord(tokenRecord, { ifAbsent: true })) throw persistenceConflict()
+    const appSaved = await this.putRecord({
+      ...record,
+      value: {
+        ...oauthApp,
+        lastUsedAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+      } satisfies OAuthAppSummary,
+      version: record.version + 1,
+    }, { expectedVersion: record.version })
+    if (!appSaved) {
+      await this.deleteRecord(record.workspaceId, tokenRecord.recordKey)
+      throw persistenceConflict()
+    }
+    return {
+      accessToken,
+      tokenType: 'Bearer',
+      expiresIn,
+      expiresAt,
+      scopes: [...scopes],
+    } satisfies OAuthTokenResult
+  }
+
+  /** Bearer token を認証します。 */
+  async authenticateOAuthToken(request: AuthenticateCredentialRequest) {
+    const credential = requireText(request.credential, 'OAuth access token')
+    const record = await this.getAuthoritativeRecordByLookupKey(
+      createSecretLookupKey('OAUTHTOKEN', credential),
+    )
+    if (
+      !record ||
+      record.entryType !== 'oauth-token' ||
+      !record.secretDigest ||
+      !secretDigestsEqual(record.secretDigest, digestSecret(credential))
+    ) {
+      throw unauthorized('OAuthTokenInvalid', 'OAuth access token is invalid.')
+    }
+    const token = readRecordValue<StoredOAuthTokenValue>(record, 'oauth-token')
+    const now = this.clock()
+    if (Date.parse(token.expiresAt) <= now.getTime()) {
+      await this.deleteRecord(record.workspaceId, record.recordKey)
+      throw unauthorized('OAuthTokenExpired', 'OAuth access token has expired.')
+    }
+    const appRecord = await this.getRecord(
+      record.workspaceId,
+      createOAuthAppRecordKey(token.oauthAppId),
+    )
+    if (!appRecord || appRecord.entryType !== 'oauth-app') {
+      throw unauthorized('OAuthTokenInvalid', 'OAuth access token is invalid.')
+    }
+    const oauthApp = normalizeCredentialStatus(
+      readRecordValue<OAuthAppSummary>(appRecord, 'oauth-app'),
+      now,
+    )
+    if (oauthApp.status === 'expired') {
+      await this.persistInactiveOAuthApp(appRecord, oauthApp)
+      throw unauthorized('OAuthAppExpired', 'OAuth app has expired.')
+    }
+    if (oauthApp.status !== 'active') {
+      throw unauthorized('OAuthAppRevoked', 'OAuth app has been revoked.')
+    }
+    assertRequiredScopes(token.scopes, request.requiredScopes)
+    await this.putRecord({
+      ...record,
+      value: { ...token, lastUsedAt: now.toISOString() } satisfies StoredOAuthTokenValue,
+      version: record.version + 1,
+    }, { expectedVersion: record.version })
+    return {
+      kind: 'oauth-token',
+      workspaceId: record.workspaceId,
+      credentialId: token.id,
+      subjectUserId: token.subjectUserId,
+      oauthAppId: token.oauthAppId,
+      scopes: [...token.scopes],
+      expiresAt: token.expiresAt,
+    } satisfies AuthenticatedDeveloperCredential
+  }
+
+  /** Webhook subscription を作成し、signing secret を一度だけ返します。 */
+  async createWebhookSubscription(request: CreateWebhookSubscriptionRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const createdByUserId = readIdentifier(
+      request.createdByUserId,
+      'Webhook creator user ID',
+    )
+    const name = readName(request.input.name, 'Webhook subscription name')
+    const url = readHttpsUrl(request.input.url, 'Webhook URL')
+    const eventTypes = readEventTypes(request.input.eventTypes)
+    const teamIds = readIdentifierArray(
+      request.input.teamIds,
+      'Webhook Team IDs',
+      100,
+    )
+    const scopes = readScopes(request.input.scopes ?? ['work-items:read'])
+    assertWebhookEventScopes(eventTypes, scopes)
+    const id = createId('webhook')
+    const secret = createSecret('mk_webhook')
+    const now = this.clock().toISOString()
+    const subscription: WebhookSubscription = {
+      id,
+      name,
+      url,
+      createdByUserId,
+      teamIds,
+      eventTypes,
+      scopes,
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+      failureCount: 0,
+    }
+    const secretCiphertext = await this.secretProtector.protect(
+      secret,
+      createWebhookSecretContext(workspaceId, id),
+    )
+    const record = createRecord(
+      workspaceId,
+      createWebhookRecordKey(id),
+      'webhook-subscription',
+      subscription,
+      { secretCiphertext },
+    )
+    const result = {
+      subscription: clone(subscription),
+      signingSecret: secret,
+    } satisfies WebhookSecretResult
+    if (!await this.persistMutationRecord(
+      workspaceId,
+      record,
+      { ifAbsent: true },
+      request.idempotency,
+      { status: 201, body: result },
+    )) throw persistenceConflict()
+    return result
+  }
+
+  /** Workspace の secret を含まない Webhook subscription を返します。 */
+  async listWebhookSubscriptions(workspaceIdValue: string) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const records = await this.listRecords(workspaceId, 'WEBHOOK#')
+    return sortByCreatedAt(
+      records
+        .filter((record) => record.entryType === 'webhook-subscription')
+        .map((record) =>
+          clone(readRecordValue<WebhookSubscription>(record, 'webhook-subscription'))
+        ),
+    )
+  }
+
+  /** Webhook signing secret を置換し、新 secret を一度だけ返します。 */
+  async rotateWebhookSecret(request: RotateWebhookSecretRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const subscriptionId = readIdentifier(request.subscriptionId, 'Webhook subscription ID')
+    const record = await this.requireRecord(
+      workspaceId,
+      createWebhookRecordKey(subscriptionId),
+      'webhook-subscription',
+      'WebhookSubscriptionNotFound',
+      'Webhook subscription was not found.',
+    )
+    const current = readRecordValue<WebhookSubscription>(record, 'webhook-subscription')
+    if (current.status === 'disabled') {
+      throw conflict(
+        'WebhookSubscriptionDisabled',
+        'A disabled Webhook subscription cannot be rotated.',
+      )
+    }
+    const secret = createSecret('mk_webhook')
+    const subscription: WebhookSubscription = {
+      ...current,
+      updatedAt: this.clock().toISOString(),
+    }
+    const secretCiphertext = await this.secretProtector.protect(
+      secret,
+      createWebhookSecretContext(workspaceId, subscriptionId),
+    )
+    const updatedRecord: DeveloperPlatformRecord = {
+      ...record,
+      value: subscription,
+      secretCiphertext,
+      version: record.version + 1,
+    }
+    const result = {
+      subscription: clone(subscription),
+      signingSecret: secret,
+    } satisfies WebhookSecretResult
+    const saved = await this.persistMutationRecord(
+      workspaceId,
+      updatedRecord,
+      { expectedVersion: record.version },
+      request.idempotency,
+      { status: 200, body: result },
+    )
+    if (!saved) throw persistenceConflict()
+    return result
+  }
+
+  /** Webhook subscription metadata と status を原子的に更新します。 */
+  async updateWebhookSubscription(request: UpdateWebhookSubscriptionRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const subscriptionId = readIdentifier(request.subscriptionId, 'Webhook subscription ID')
+    const record = await this.requireRecord(
+      workspaceId,
+      createWebhookRecordKey(subscriptionId),
+      'webhook-subscription',
+      'WebhookSubscriptionNotFound',
+      'Webhook subscription was not found.',
+    )
+    const current = readRecordValue<WebhookSubscription>(record, 'webhook-subscription')
+    const status = request.input.status === undefined
+      ? current.status
+      : readWebhookSubscriptionStatus(request.input.status)
+    if (current.status === 'disabled' && status !== 'disabled') {
+      throw conflict(
+        'WebhookSubscriptionDisabled',
+        'A disabled Webhook subscription cannot be re-enabled.',
+      )
+    }
+    const eventTypes = request.input.eventTypes === undefined
+      ? current.eventTypes
+      : readEventTypes(request.input.eventTypes)
+    const scopes = request.input.scopes === undefined
+      ? current.scopes
+      : readScopes(request.input.scopes)
+    assertWebhookEventScopes(eventTypes, scopes)
+    const subscription: WebhookSubscription = {
+      ...current,
+      name: request.input.name === undefined
+        ? current.name
+        : readName(request.input.name, 'Webhook subscription name'),
+      url: request.input.url === undefined
+        ? current.url
+        : readHttpsUrl(request.input.url, 'Webhook URL'),
+      eventTypes,
+      scopes,
+      status,
+      updatedAt: this.clock().toISOString(),
+    }
+    const updatedRecord: DeveloperPlatformRecord = {
+      ...record,
+      value: subscription,
+      version: record.version + 1,
+    }
+    if (status === 'disabled') delete updatedRecord.secretCiphertext
+    const saved = await this.persistMutationRecord(
+      workspaceId,
+      updatedRecord,
+      { expectedVersion: record.version },
+      request.idempotency,
+      { status: 200, body: subscription },
+    )
+    if (!saved) throw persistenceConflict()
+    return clone(subscription)
+  }
+
+  /** Webhook subscription status を更新します。 */
+  async setWebhookSubscriptionStatus(request: SetWebhookSubscriptionStatusRequest) {
+    return this.updateWebhookSubscription({
+      workspaceId: request.workspaceId,
+      subscriptionId: request.subscriptionId,
+      input: { status: request.status },
+    })
+  }
+
+  /** Event に一致する subscription へ delivery を冪等に enqueue します。 */
+  async enqueueWebhookEvent(request: EnqueueWebhookEventRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const event = readWebhookEvent(request.event, workspaceId)
+    const teamId = readWebhookEventTeamId(event)
+    const authorizedSubscriptionIds = new Set(readIdentifierArray(
+      request.authorizedSubscriptionIds,
+      'Authorized Webhook subscription IDs',
+      1_000,
+      true,
+    ))
+    const subscriptions = await this.listWebhookSubscriptions(workspaceId)
+    const matching = subscriptions.filter((subscription) =>
+      subscription.status === 'active' &&
+      authorizedSubscriptionIds.has(subscription.id) &&
+      subscription.teamIds.includes(teamId) &&
+      subscription.eventTypes.some((pattern) => eventTypeMatches(pattern, event.type))
+    )
+    const deliveries = await Promise.all(matching.map(async (subscription) => {
+      const id = createDeterministicDeliveryId(subscription.id, event.id)
+      const recordKey = createWebhookDeliveryRecordKey(id)
+      const existing = await this.getRecord(workspaceId, recordKey)
+      if (existing) {
+        const existingValue = readRecordValue<StoredWebhookDeliveryValue>(
+          existing,
+          'webhook-delivery',
+        )
+        if (
+          existingValue.event.id !== event.id ||
+          existingValue.delivery.subscriptionId !== subscription.id
+        ) {
+          throw persistenceConflict()
+        }
+        return clone(existingValue.delivery)
+      }
+      const now = this.clock().toISOString()
+      const delivery: WebhookDelivery = {
+        id,
+        subscriptionId: subscription.id,
+        eventId: event.id,
+        eventType: event.type,
+        status: 'pending',
+        attempts: 0,
+        createdAt: now,
+        updatedAt: now,
+      }
+      const value: StoredWebhookDeliveryValue = {
+        delivery,
+        event,
+      }
+      const expiresAt = Math.floor(this.clock().getTime() / 1_000) +
+        WEBHOOK_DELIVERY_RETENTION_SECONDS
+      const records = createWebhookDeliveryStorageRecords(
+        workspaceId,
+        value,
+        expiresAt,
+      )
+      if (!await this.createWebhookDeliveryRecords(records)) {
+        const concurrent = await this.getRecord(workspaceId, recordKey)
+        if (
+          !concurrent ||
+          concurrent.entryType !== 'webhook-delivery' ||
+          isRecordExpired(concurrent, this.clock())
+        ) {
+          throw persistenceConflict()
+        }
+        return clone(
+          readRecordValue<StoredWebhookDeliveryValue>(concurrent, 'webhook-delivery').delivery,
+        )
+      }
+      return clone(delivery)
+    }))
+    return deliveries.sort(compareCreatedAtDescending)
+  }
+
+  /** Webhook delivery log を cursor pagination します。 */
+  async listWebhookDeliveries(request: ListWebhookDeliveriesRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const subscriptionId = request.subscriptionId === undefined
+      ? undefined
+      : readIdentifier(request.subscriptionId, 'Webhook subscription ID')
+    const limit = readPositiveInteger(
+      request.limit ?? WEBHOOK_DELIVERY_DEFAULT_LIMIT,
+      'Webhook delivery page limit',
+      WEBHOOK_DELIVERY_MAX_LIMIT,
+    )
+    const cursor = request.cursor
+      ? await this.decodeWebhookCursor(request.cursor, workspaceId, subscriptionId)
+      : undefined
+    const lookupKey = subscriptionId
+      ? createWebhookDeliverySubscriptionLookupKey(workspaceId, subscriptionId)
+      : createWebhookDeliveryWorkspaceLookupKey(workspaceId)
+    const page = await this.queryLookupIndex({
+      lookupKey,
+      limit,
+      scanIndexForward: false,
+      ...(cursor
+        ? {
+            exclusiveStartKey: {
+              workspaceId,
+              recordKey: cursor.recordKey,
+              lookupKey: cursor.lookupKey,
+              lookupSortKey: cursor.lookupSortKey,
+            },
+          }
+        : {}),
+    })
+    const resolved = await Promise.all(page.locators.map((locator) =>
+      this.resolveWebhookDeliveryIndexLocator(
+        locator,
+        subscriptionId ? 'subscription-list' : 'workspace-list',
+      )
+    ))
+    const deliveries = resolved
+      .filter((delivery): delivery is WebhookDelivery => delivery !== undefined)
+    return {
+      deliveries: clone(deliveries),
+      ...(page.lastEvaluatedKey
+        ? {
+            nextCursor: await this.secretProtector.protect(
+              JSON.stringify({
+                version: 2,
+                workspaceId,
+                ...(subscriptionId ? { subscriptionId } : {}),
+                lookupKey: page.lastEvaluatedKey.lookupKey,
+                lookupSortKey: page.lastEvaluatedKey.lookupSortKey,
+                recordKey: page.lastEvaluatedKey.recordKey,
+              } satisfies WebhookDeliveryCursor),
+              WEBHOOK_CURSOR_CONTEXT,
+            ),
+          }
+        : {}),
+    } satisfies WebhookDeliveryPage
+  }
+
+  /** Webhook delivery を tenant-bound ID lookup で取得します。 */
+  async getWebhookDelivery(request: GetWebhookDeliveryRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const deliveryId = readIdentifier(request.deliveryId, 'Webhook delivery ID')
+    const record = await this.requireWebhookDeliveryRecordById(workspaceId, deliveryId)
+    return clone(
+      readRecordValue<StoredWebhookDeliveryValue>(record, 'webhook-delivery').delivery,
+    )
+  }
+
+  /** Worker 用 payload と signing secret を安全な内部境界で解決します。 */
+  async prepareWebhookDelivery(request: PrepareWebhookDeliveryRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const deliveryId = readIdentifier(request.deliveryId, 'Webhook delivery ID')
+    const deliveryRecord = await this.requireWebhookDeliveryRecordById(
+      workspaceId,
+      deliveryId,
+    )
+    const stored = readRecordValue<StoredWebhookDeliveryValue>(
+      deliveryRecord,
+      'webhook-delivery',
+    )
+    const subscriptionRecord = await this.requireRecord(
+      workspaceId,
+      createWebhookRecordKey(stored.delivery.subscriptionId),
+      'webhook-subscription',
+      'WebhookSubscriptionNotFound',
+      'Webhook subscription was not found.',
+    )
+    const subscription = readRecordValue<WebhookSubscription>(
+      subscriptionRecord,
+      'webhook-subscription',
+    )
+    if (subscription.status !== 'active') {
+      throw conflict(
+        'WebhookSubscriptionNotActive',
+        'Webhook subscription is not active.',
+      )
+    }
+    if (!subscriptionRecord.secretCiphertext) {
+      throw persistenceInvalid('Webhook signing secret is missing.')
+    }
+    const signingSecret = await this.secretProtector.unprotect(
+      subscriptionRecord.secretCiphertext,
+      createWebhookSecretContext(workspaceId, subscription.id),
+    )
+    return {
+      delivery: clone(stored.delivery),
+      subscription: clone(subscription),
+      signingSecret,
+      payload: stableJson(stored.event),
+    } satisfies PreparedWebhookDelivery
+  }
+
+  /** Webhook attempt 結果を保存します。 */
+  async recordWebhookDeliveryAttempt(request: RecordWebhookDeliveryAttemptRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const deliveryId = readIdentifier(request.deliveryId, 'Webhook delivery ID')
+    const status = readWebhookDeliveryStatus(request.status)
+    const responseStatus = request.responseStatus === undefined
+      ? undefined
+      : readHttpStatus(request.responseStatus)
+    const nextAttemptAt = request.nextAttemptAt === undefined
+      ? undefined
+      : readTimestamp(request.nextAttemptAt, 'Webhook next attempt')
+    const error = request.error === undefined
+      ? undefined
+      : readOptionalText(request.error, 'Webhook delivery error', 1_000)
+    if (status === 'retrying' && !nextAttemptAt) {
+      throw invalid(
+        'WebhookRetryTimeRequired',
+        'Retrying Webhook delivery requires nextAttemptAt.',
+      )
+    }
+    if (status !== 'retrying' && nextAttemptAt) {
+      throw invalid(
+        'WebhookRetryTimeInvalid',
+        'Only a retrying Webhook delivery can set nextAttemptAt.',
+      )
+    }
+    if (status === 'pending') {
+      throw invalid(
+        'WebhookDeliveryAttemptStatusInvalid',
+        'A delivery attempt cannot finish in pending status.',
+      )
+    }
+    const record = await this.requireWebhookDeliveryRecordById(workspaceId, deliveryId)
+    const stored = readRecordValue<StoredWebhookDeliveryValue>(record, 'webhook-delivery')
+    if (stored.delivery.status === 'delivered') {
+      throw conflict(
+        'WebhookDeliveryAlreadyDelivered',
+        'Delivered Webhook delivery must be replayed before another attempt.',
+      )
+    }
+    const now = this.clock().toISOString()
+    const attempts = stored.delivery.attempts + 1
+    const normalizedStatus = attempts >= WEBHOOK_MAX_ATTEMPTS && status === 'retrying'
+      ? 'failed'
+      : status
+    const delivery: WebhookDelivery = {
+      ...stored.delivery,
+      status: normalizedStatus,
+      attempts,
+      ...(responseStatus === undefined ? {} : { responseStatus }),
+      nextAttemptAt: normalizedStatus === 'retrying' ? nextAttemptAt : undefined,
+      deliveredAt: normalizedStatus === 'delivered' ? now : undefined,
+      updatedAt: now,
+    }
+    const value: StoredWebhookDeliveryValue = {
+      ...stored,
+      delivery,
+      ...(error ? { lastError: error } : { lastError: undefined }),
+    }
+    const saved = await this.putRecord({
+      ...record,
+      value,
+      version: record.version + 1,
+    }, { expectedVersion: record.version })
+    if (!saved) throw persistenceConflict()
+    await this.updateWebhookDeliveryHealth(
+      workspaceId,
+      delivery.subscriptionId,
+      normalizedStatus,
+      now,
+    )
+    return clone(delivery)
+  }
+
+  /** Original delivery を保存したまま新しい pending replay を作成します。 */
+  async replayWebhookDelivery(request: ReplayWebhookDeliveryRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const deliveryId = readIdentifier(request.deliveryId, 'Webhook delivery ID')
+    const operationId = request.operationId === undefined
+      ? undefined
+      : readWebhookReplayOperationId(request.operationId)
+    const requestedRecord = await this.requireWebhookDeliveryRecordById(
+      workspaceId,
+      deliveryId,
+    )
+    const requested = readRecordValue<StoredWebhookDeliveryValue>(
+      requestedRecord,
+      'webhook-delivery',
+    )
+    const originalDeliveryId = requested.delivery.replayOfDeliveryId ?? requested.delivery.id
+    const operationReplayId = operationId
+      ? createDeterministicReplayOperationDeliveryId(originalDeliveryId, operationId)
+      : undefined
+    if (operationReplayId) {
+      const existingOperationReplay = await this.getRecord(
+        workspaceId,
+        createWebhookDeliveryRecordKey(operationReplayId),
+      )
+      if (existingOperationReplay) {
+        if (existingOperationReplay.entryType !== 'webhook-delivery') {
+          throw persistenceConflict()
+        }
+        const delivery = readRecordValue<StoredWebhookDeliveryValue>(
+          existingOperationReplay,
+          'webhook-delivery',
+        ).delivery
+        if (
+          delivery.replayOfDeliveryId !== originalDeliveryId ||
+          delivery.subscriptionId !== requested.delivery.subscriptionId ||
+          delivery.eventId !== requested.delivery.eventId
+        ) throw persistenceConflict()
+        return clone(delivery)
+      }
+    }
+    const replayLookupKey = createWebhookDeliveryReplayLookupKey(
+      workspaceId,
+      originalDeliveryId,
+    )
+    const latestPage = await this.queryLookupIndex({
+      lookupKey: replayLookupKey,
+      limit: 1,
+      scanIndexForward: false,
+    })
+    const latestReplay = latestPage.locators[0]
+      ? await this.resolveWebhookDeliveryIndexLocator(
+          latestPage.locators[0],
+          'replay-chain',
+        )
+      : undefined
+    if (
+      !operationReplayId &&
+      latestReplay &&
+      (
+        latestReplay.subscriptionId !== requested.delivery.subscriptionId ||
+        latestReplay.eventId !== requested.delivery.eventId ||
+        (latestReplay.replayOfDeliveryId ?? latestReplay.id) !== originalDeliveryId
+      )
+    ) {
+      throw persistenceInvalid('Webhook replay chain invariant is invalid.')
+    }
+    if (
+      !operationReplayId &&
+      latestReplay &&
+      (
+        latestReplay.status === 'pending' ||
+        latestReplay.status === 'retrying'
+      )
+    ) {
+      return clone(latestReplay)
+    }
+    if (
+      !operationReplayId &&
+      !latestReplay &&
+      (
+        requested.delivery.status === 'pending' ||
+        requested.delivery.status === 'retrying'
+      )
+    ) {
+      return clone(requested.delivery)
+    }
+    let replayNumber = Math.max(
+      latestReplay?.replayNumber ?? 0,
+      requested.delivery.replayNumber ?? 0,
+    ) + 1
+    while (Number.isSafeInteger(replayNumber)) {
+      const replayId = operationReplayId ?? createDeterministicReplayDeliveryId(
+        originalDeliveryId,
+        replayNumber,
+      )
+      const now = this.clock()
+      const createdAt = now.toISOString()
+      const delivery: WebhookDelivery = {
+        id: replayId,
+        subscriptionId: requested.delivery.subscriptionId,
+        eventId: requested.delivery.eventId,
+        eventType: requested.delivery.eventType,
+        status: 'pending',
+        attempts: 0,
+        replayOfDeliveryId: originalDeliveryId,
+        replayNumber,
+        createdAt,
+        updatedAt: createdAt,
+      }
+      const value: StoredWebhookDeliveryValue = {
+        delivery,
+        event: requested.event,
+      }
+      const records = createWebhookDeliveryStorageRecords(
+        workspaceId,
+        value,
+        Math.floor(now.getTime() / 1_000) + WEBHOOK_DELIVERY_RETENTION_SECONDS,
+      )
+      if (await this.createWebhookDeliveryRecords(records)) return clone(delivery)
+      const concurrent = await this.getRecord(
+        workspaceId,
+        createWebhookDeliveryRecordKey(replayId),
+      )
+      if (!concurrent || concurrent.entryType !== 'webhook-delivery') {
+        throw persistenceConflict()
+      }
+      const concurrentReplay = readRecordValue<StoredWebhookDeliveryValue>(
+        concurrent,
+        'webhook-delivery',
+      ).delivery
+      if (
+        concurrentReplay.replayOfDeliveryId !== originalDeliveryId ||
+        concurrentReplay.replayNumber !== replayNumber ||
+        concurrentReplay.subscriptionId !== requested.delivery.subscriptionId ||
+        concurrentReplay.eventId !== requested.delivery.eventId
+      ) {
+        throw persistenceConflict()
+      }
+      if (operationReplayId) return clone(concurrentReplay)
+      if (
+        concurrentReplay.status === 'pending' ||
+        concurrentReplay.status === 'retrying'
+      ) {
+        return clone(concurrentReplay)
+      }
+      replayNumber += 1
+    }
+    throw persistenceInvalid('Webhook replay number exceeded the supported range.')
+  }
+
+  /** Incoming webhook signature を timing-safe に検証します。 */
+  async verifyWebhookSignature(request: VerifyWebhookSignatureRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const subscriptionId = readIdentifier(request.subscriptionId, 'Webhook subscription ID')
+    const payload = request.payload
+    if (typeof payload !== 'string') {
+      throw invalid('WebhookPayloadInvalid', 'Webhook payload must be a string.')
+    }
+    const timestamp = readPositiveInteger(request.timestamp, 'Webhook signature timestamp')
+    const toleranceSeconds = readPositiveInteger(
+      request.toleranceSeconds ?? WEBHOOK_SIGNATURE_TOLERANCE_SECONDS,
+      'Webhook signature tolerance',
+      24 * 60 * 60,
+    )
+    const currentEpoch = Math.floor(this.clock().getTime() / 1_000)
+    if (Math.abs(currentEpoch - timestamp) > toleranceSeconds) return false
+    const record = await this.requireRecord(
+      workspaceId,
+      createWebhookRecordKey(subscriptionId),
+      'webhook-subscription',
+      'WebhookSubscriptionNotFound',
+      'Webhook subscription was not found.',
+    )
+    const subscription = readRecordValue<WebhookSubscription>(
+      record,
+      'webhook-subscription',
+    )
+    if (subscription.status !== 'active') return false
+    if (!record.secretCiphertext) throw persistenceInvalid('Webhook signing secret is missing.')
+    const secret = await this.secretProtector.unprotect(
+      record.secretCiphertext,
+      createWebhookSecretContext(workspaceId, subscriptionId),
+    )
+    const expected = createWebhookSignature(secret, timestamp, payload)
+    return safeTextEqual(expected, request.signature)
+  }
+
+  /** Connector credential を暗号化して installation を作成します。 */
+  async installConnector(request: InstallConnectorRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const installedByUserId = readIdentifier(request.installedByUserId, 'Installer user ID')
+    const input = request.input
+    const category = readConnectorCategory(input.category)
+    const provider = readProvider(input.provider)
+    if (!connectorProviderMatchesCategory(provider, category)) {
+      throw invalid(
+        'ConnectorCategoryProviderMismatch',
+        'Connector provider does not belong to the selected category.',
+      )
+    }
+    const name = readName(input.name, 'Connector name')
+    const scopes = readConnectorScopes(input.scopes)
+    const externalAccountId = input.externalAccountId === undefined
+      ? undefined
+      : readIdentifier(input.externalAccountId, 'External account ID')
+    const externalAccountName = input.externalAccountName === undefined
+      ? undefined
+      : readName(input.externalAccountName, 'External account name')
+    const id = createId('connector')
+    const credential = input.credential === undefined
+      ? undefined
+      : requireText(input.credential, 'Connector credential')
+    const now = this.clock().toISOString()
+    const installation: ConnectorInstallation = {
+      id,
+      category,
+      provider,
+      name,
+      status: credential ? 'connected' : 'disconnected',
+      scopes,
+      ...(externalAccountId ? { externalAccountId } : {}),
+      ...(externalAccountName ? { externalAccountName } : {}),
+      installedByUserId,
+      installedAt: now,
+      updatedAt: now,
+    }
+    const secretCiphertext = credential
+      ? await this.secretProtector.protect(
+          credential,
+          createConnectorSecretContext(workspaceId, id),
+        )
+      : undefined
+    const record = createRecord(
+      workspaceId,
+      createConnectorRecordKey(id),
+      'connector-installation',
+      installation,
+      {
+        secretCiphertext,
+        ...(credential
+          ? {
+              connectorCredentialDigest: digestConnectorCredential(credential),
+              connectorCredentialRevision: 1,
+            }
+          : { connectorCredentialRevision: 0 }),
+        connectorOAuthStateRevision: 0,
+      },
+    )
+    const auditPut = this.createPlatformAuditPut({
+      workspaceId,
+      eventType: 'connector.installed',
+      entityType: 'connector-installation',
+      entityId: id,
+      transitionId: 'installed:1',
+      occurredAt: now,
+      action: 'installed',
+      summary: 'Connector installation was created.',
+      actorId: installedByUserId,
+      metadata: {
+        category,
+        provider,
+        status: installation.status,
+        scopesCount: scopes.length,
+        credentialConfigured: credential !== undefined,
+      },
+    })
+    const saved = auditPut
+      ? await this.putRecordWithAudit(record, { ifAbsent: true }, auditPut)
+      : await this.putRecord(record, { ifAbsent: true })
+    if (!saved) throw persistenceConflict()
+    return clone(installation)
+  }
+
+  /** Workspace の credential を含まない connector summary を返します。 */
+  async listConnectors(workspaceIdValue: string) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const records = await this.listRecords(workspaceId, 'CONNECTOR#')
+    return records
+      .map((record) =>
+        clone(readRecordValue<ConnectorInstallation>(record, 'connector-installation'))
+      )
+      .sort((left, right) =>
+        right.installedAt.localeCompare(left.installedAt) ||
+        right.id.localeCompare(left.id)
+      )
+  }
+
+  /** Strongly consistent connector lifecycle snapshot と revision を返します。 */
+  async readConnectorLifecycleSnapshot(
+    request: ReadConnectorLifecycleSnapshotRequest,
+  ) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const installationId = readIdentifier(
+      request.installationId,
+      'Connector installation ID',
+    )
+    const record = await this.requireRecord(
+      workspaceId,
+      createConnectorRecordKey(installationId),
+      'connector-installation',
+      'ConnectorInstallationNotFound',
+      'Connector installation was not found.',
+    )
+    return {
+      installation: clone(readRecordValue<ConnectorInstallation>(
+        record,
+        'connector-installation',
+      )),
+      lifecycleRevision: record.version,
+    } satisfies ConnectorLifecycleSnapshot
+  }
+
+  /** Connector の current health status を保存します。 */
+  async updateConnectorStatus(request: UpdateConnectorStatusRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const installationId = readIdentifier(request.installationId, 'Connector installation ID')
+    const status = readConnectorStatus(request.status)
+    const updatedByUserId = request.updatedByUserId === undefined
+      ? undefined
+      : readIdentifier(request.updatedByUserId, 'Connector updater user ID')
+    const expectedLifecycleRevision = request.expectedLifecycleRevision === undefined
+      ? undefined
+      : readPositiveInteger(
+          request.expectedLifecycleRevision,
+          'Connector lifecycle revision',
+        )
+    const expectedCredential = request.expectedCredential === undefined
+      ? undefined
+      : requireText(request.expectedCredential, 'Expected connector credential')
+    if (expectedCredential && status !== 'disconnected') {
+      throw invalid(
+        'ConnectorCredentialExpectationInvalid',
+        'Expected credential can only fence connector disconnect.',
+      )
+    }
+    const record = await this.requireRecord(
+      workspaceId,
+      createConnectorRecordKey(installationId),
+      'connector-installation',
+      'ConnectorInstallationNotFound',
+      'Connector installation was not found.',
+    )
+    const current = readRecordValue<ConnectorInstallation>(
+      record,
+      'connector-installation',
+    )
+    if (
+      expectedLifecycleRevision !== undefined &&
+      record.version !== expectedLifecycleRevision
+    ) {
+      throw conflict(
+        'ConnectorLifecycleChanged',
+        'Connector lifecycle changed before the status mutation was committed.',
+      )
+    }
+    if (
+      current.status === 'disconnected' &&
+      status !== 'disconnected' &&
+      !(
+        status === 'needs-reauth' &&
+        request.reauthorizationStateId !== undefined &&
+        updatedByUserId !== undefined
+      )
+    ) {
+      return clone(current)
+    }
+    if (
+      record.connectorOAuthStateDigest &&
+      status !== 'needs-reauth' &&
+      status !== 'disconnected'
+    ) {
+      return clone(current)
+    }
+    if (status === 'connected' && !record.secretCiphertext) {
+      throw conflict(
+        'ConnectorCredentialRequired',
+        'Connector cannot be connected without a credential.',
+      )
+    }
+    if (
+      expectedCredential &&
+      (
+        !record.connectorCredentialDigest ||
+        !secretDigestsEqual(
+          record.connectorCredentialDigest,
+          digestConnectorCredential(expectedCredential),
+        )
+      )
+    ) {
+      throw conflict(
+        'ConnectorCredentialChanged',
+        'Connector credential changed before disconnect completed.',
+      )
+    }
+    const lastError = request.lastError === undefined
+      ? undefined
+      : sanitizeConnectorProblem(request.lastError)
+    const reauthorizationUrl = request.reauthorizationUrl === undefined
+      ? undefined
+      : readHttpsUrl(request.reauthorizationUrl, 'Connector reauthorization URL')
+    const reauthorizationStateId = request.reauthorizationStateId === undefined
+      ? undefined
+      : readConnectorOAuthStateId(
+          request.reauthorizationStateId,
+        )
+    if (status === 'needs-reauth' && (!reauthorizationUrl || !reauthorizationStateId)) {
+      throw invalid(
+        'ConnectorReauthorizationStateRequired',
+        'A connector needing reauthorization requires a URL and OAuth state.',
+      )
+    }
+    if (status !== 'needs-reauth' && reauthorizationStateId !== undefined) {
+      throw invalid(
+        'ConnectorReauthorizationStateUnexpected',
+        'OAuth state can only be bound to a connector needing reauthorization.',
+      )
+    }
+    const nextOAuthStateDigest = reauthorizationStateId
+      ? digestConnectorOAuthState(reauthorizationStateId)
+      : undefined
+    if (
+      status === 'needs-reauth' &&
+      current.status === 'needs-reauth' &&
+      reauthorizationUrl === current.reauthorizationUrl &&
+      nextOAuthStateDigest !== undefined &&
+      record.connectorOAuthStateDigest !== undefined &&
+      secretDigestsEqual(
+        nextOAuthStateDigest,
+        record.connectorOAuthStateDigest,
+      )
+    ) {
+      return clone(current)
+    }
+    const lastSyncAt = request.lastSyncAt === undefined
+      ? current.lastSyncAt
+      : readTimestamp(request.lastSyncAt, 'Connector last sync')
+    const {
+      lastError: _currentLastError,
+      reauthorizationUrl: _currentReauthorizationUrl,
+      ...stableInstallation
+    } = current
+    const installation: ConnectorInstallation = {
+      ...stableInstallation,
+      status,
+      ...(lastSyncAt ? { lastSyncAt } : {}),
+      ...(status === 'needs-reauth'
+        ? {
+            ...(lastError ? { lastError } : {}),
+            reauthorizationUrl: reauthorizationUrl!,
+          }
+        : status === 'degraded' || status === 'conflict'
+          ? lastError ? { lastError } : {}
+          : {}),
+      updatedAt: this.clock().toISOString(),
+    }
+    const currentOAuthStateRevision = record.connectorOAuthStateRevision ?? 0
+    const currentCredentialRevision = record.connectorCredentialRevision ?? 0
+    const invalidatesOAuthState =
+      status !== 'needs-reauth' && record.connectorOAuthStateDigest !== undefined
+    const nextOAuthStateRevision =
+      reauthorizationStateId || invalidatesOAuthState
+        ? currentOAuthStateRevision + 1
+        : currentOAuthStateRevision
+    const removesCredential =
+      status === 'disconnected' && record.secretCiphertext !== undefined
+    const isNoopDisconnect =
+      status === 'disconnected' &&
+      current.status === 'disconnected' &&
+      current.lastError === undefined &&
+      current.reauthorizationUrl === undefined &&
+      record.secretCiphertext === undefined &&
+      record.connectorCredentialDigest === undefined &&
+      record.connectorOAuthStateDigest === undefined
+    if (isNoopDisconnect) {
+      await this.pauseConnectorExternalLinks(
+        workspaceId,
+        installationId,
+        updatedByUserId,
+      )
+      return clone(current)
+    }
+    const updatedRecord: DeveloperPlatformRecord = {
+      ...record,
+      value: installation,
+      connectorOAuthStateRevision: nextOAuthStateRevision,
+      version: record.version + 1,
+    }
+    if (nextOAuthStateDigest) {
+      updatedRecord.connectorOAuthStateDigest = nextOAuthStateDigest
+    } else {
+      delete updatedRecord.connectorOAuthStateDigest
+    }
+    if (status === 'disconnected') {
+      delete updatedRecord.secretCiphertext
+      delete updatedRecord.connectorCredentialDigest
+      if (removesCredential) {
+        updatedRecord.connectorCredentialRevision = currentCredentialRevision + 1
+      }
+    }
+    const now = installation.updatedAt
+    const auditPut = this.createPlatformAuditPut({
+      workspaceId,
+      eventType: reauthorizationStateId
+        ? 'connector.reauthorization.started'
+        : 'connector.status.updated',
+      entityType: 'connector-installation',
+      entityId: installationId,
+      transitionId: `status:${updatedRecord.version}:${nextOAuthStateRevision}`,
+      occurredAt: now,
+      action: reauthorizationStateId ? 'reauthorization-started' : 'status-updated',
+      summary: reauthorizationStateId
+        ? 'Connector reauthorization was started.'
+        : 'Connector installation status changed.',
+      ...(updatedByUserId ? { actorId: updatedByUserId } : {}),
+      metadata: {
+        category: current.category,
+        provider: current.provider,
+        previousStatus: current.status,
+        status,
+        oauthStateRevision: nextOAuthStateRevision,
+        credentialRemoved: removesCredential,
+      },
+    })
+    const saved = auditPut
+      ? await this.putRecordWithAudit(
+          updatedRecord,
+          { expectedVersion: record.version },
+          auditPut,
+        )
+      : await this.putRecord(updatedRecord, { expectedVersion: record.version })
+    if (!saved) throw persistenceConflict()
+    if (status === 'disconnected') {
+      await this.pauseConnectorExternalLinks(
+        workspaceId,
+        installationId,
+        updatedByUserId,
+      )
+    }
+    return clone(installation)
+  }
+
+  /** Provider code exchange 前に current reauthorization state digest を照合します。 */
+  async assertConnectorReauthorizationState(
+    request: AssertConnectorReauthorizationStateRequest,
+  ) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const installationId = readIdentifier(
+      request.installationId,
+      'Connector installation ID',
+    )
+    const stateId = readConnectorOAuthStateId(request.stateId)
+    const record = await this.requireRecord(
+      workspaceId,
+      createConnectorRecordKey(installationId),
+      'connector-installation',
+      'ConnectorInstallationNotFound',
+      'Connector installation was not found.',
+    )
+    if (
+      !record.connectorOAuthStateDigest ||
+      !secretDigestsEqual(
+        record.connectorOAuthStateDigest,
+        digestConnectorOAuthState(stateId),
+      )
+    ) {
+      throw conflict(
+        'ConnectorReauthorizationStateStale',
+        'Connector reauthorization state is no longer current.',
+      )
+    }
+  }
+
+  /** Credential を置換して connector を connected へ復旧します。 */
+  async recoverConnector(
+    request: RecoverConnectorRequest,
+    concurrentMutationRetries = 0,
+  ) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const installationId = readIdentifier(request.installationId, 'Connector installation ID')
+    const credential = requireText(request.credential, 'Connector credential')
+    const expectedReauthorizationStateId =
+      request.expectedReauthorizationStateId === undefined
+        ? undefined
+        : readConnectorOAuthStateId(
+            request.expectedReauthorizationStateId,
+          )
+    const expectedCredential = request.expectedCredential === undefined
+      ? undefined
+      : requireText(request.expectedCredential, 'Expected connector credential')
+    if (expectedReauthorizationStateId && expectedCredential) {
+      throw invalid(
+        'ConnectorCredentialExpectationInvalid',
+        'Credential replacement cannot compare OAuth state and credential together.',
+      )
+    }
+    const reason = readConnectorCredentialReplacementReason(request.reason ?? (
+      expectedReauthorizationStateId
+        ? 'reauthorization'
+        : expectedCredential
+          ? 'refresh'
+          : 'recovery'
+    ))
+    if (
+      (reason === 'reauthorization' && !expectedReauthorizationStateId) ||
+      (reason === 'refresh' && !expectedCredential)
+    ) {
+      throw invalid(
+        'ConnectorCredentialExpectationRequired',
+        'Credential replacement reason requires its matching current value.',
+      )
+    }
+    if (
+      (reason !== 'reauthorization' && expectedReauthorizationStateId) ||
+      (reason !== 'refresh' && expectedCredential)
+    ) {
+      throw invalid(
+        'ConnectorCredentialExpectationInvalid',
+        'Credential replacement expectation does not match its lifecycle reason.',
+      )
+    }
+    const updatedByUserId = request.updatedByUserId === undefined
+      ? undefined
+      : readIdentifier(request.updatedByUserId, 'Connector updater user ID')
+    const record = await this.requireRecord(
+      workspaceId,
+      createConnectorRecordKey(installationId),
+      'connector-installation',
+      'ConnectorInstallationNotFound',
+      'Connector installation was not found.',
+    )
+    const current = readRecordValue<ConnectorInstallation>(
+      record,
+      'connector-installation',
+    )
+    if (record.connectorOAuthStateDigest && !expectedReauthorizationStateId) {
+      throw conflict(
+        'ConnectorReauthorizationStateRequired',
+        'Current connector reauthorization requires its expected OAuth state.',
+      )
+    }
+    if (
+      expectedReauthorizationStateId &&
+      (
+        !record.connectorOAuthStateDigest ||
+        !secretDigestsEqual(
+          record.connectorOAuthStateDigest,
+          digestConnectorOAuthState(expectedReauthorizationStateId),
+        )
+      )
+    ) {
+      throw conflict(
+        'ConnectorReauthorizationStateStale',
+        'Connector reauthorization state is no longer current.',
+      )
+    }
+    if (
+      expectedCredential &&
+      (
+        !record.connectorCredentialDigest ||
+        !secretDigestsEqual(
+          record.connectorCredentialDigest,
+          digestConnectorCredential(expectedCredential),
+        )
+      )
+    ) {
+      throw conflict(
+        'ConnectorCredentialChanged',
+        'Connector credential changed before refresh completed.',
+      )
+    }
+    const {
+      lastError: _currentLastError,
+      reauthorizationUrl: _currentReauthorizationUrl,
+      ...stableInstallation
+    } = current
+    const installation: ConnectorInstallation = {
+      ...stableInstallation,
+      status: 'connected',
+      updatedAt: this.clock().toISOString(),
+    }
+    const secretCiphertext = await this.secretProtector.protect(
+      credential,
+      createConnectorSecretContext(workspaceId, installationId),
+    )
+    const previousCredentialRevision = record.connectorCredentialRevision ?? 0
+    const previousOAuthStateRevision = record.connectorOAuthStateRevision ?? 0
+    const nextOAuthStateRevision = record.connectorOAuthStateDigest
+      ? previousOAuthStateRevision + 1
+      : previousOAuthStateRevision
+    const updatedRecord: DeveloperPlatformRecord = {
+      ...record,
+      value: installation,
+      secretCiphertext,
+      connectorCredentialDigest: digestConnectorCredential(credential),
+      connectorCredentialRevision: previousCredentialRevision + 1,
+      connectorOAuthStateRevision: nextOAuthStateRevision,
+      version: record.version + 1,
+    }
+    delete updatedRecord.connectorOAuthStateDigest
+    const auditPut = this.createPlatformAuditPut({
+      workspaceId,
+      eventType: 'connector.credential.replaced',
+      entityType: 'connector-installation',
+      entityId: installationId,
+      transitionId:
+        `credential:${updatedRecord.version}:${previousCredentialRevision + 1}`,
+      occurredAt: installation.updatedAt,
+      action: 'credential-replaced',
+      summary: 'Connector credential was replaced.',
+      ...(updatedByUserId ? { actorId: updatedByUserId } : {}),
+      metadata: {
+        category: current.category,
+        provider: current.provider,
+        previousStatus: current.status,
+        status: installation.status,
+        reason,
+        previousCredentialRevision,
+        credentialRevision: previousCredentialRevision + 1,
+        oauthStateRevision: nextOAuthStateRevision,
+      },
+    })
+    const saved = auditPut
+      ? await this.putRecordWithAudit(
+          updatedRecord,
+          { expectedVersion: record.version },
+          auditPut,
+        )
+      : await this.putRecord(updatedRecord, { expectedVersion: record.version })
+    if (!saved) {
+      if (expectedReauthorizationStateId) {
+        const latest = await this.requireRecord(
+          workspaceId,
+          createConnectorRecordKey(installationId),
+          'connector-installation',
+          'ConnectorInstallationNotFound',
+          'Connector installation was not found.',
+        )
+        if (
+          latest.connectorOAuthStateDigest &&
+          secretDigestsEqual(
+            latest.connectorOAuthStateDigest,
+            digestConnectorOAuthState(expectedReauthorizationStateId),
+          )
+        ) {
+          if (concurrentMutationRetries < 3) {
+            return this.recoverConnector(request, concurrentMutationRetries + 1)
+          }
+          throw persistenceConflict()
+        }
+        throw conflict(
+          'ConnectorReauthorizationStateStale',
+          'Connector reauthorization state is no longer current.',
+        )
+      }
+      if (expectedCredential) {
+        const latest = await this.requireRecord(
+          workspaceId,
+          createConnectorRecordKey(installationId),
+          'connector-installation',
+          'ConnectorInstallationNotFound',
+          'Connector installation was not found.',
+        )
+        if (latest.connectorOAuthStateDigest) {
+          throw conflict(
+            'ConnectorReauthorizationStateRequired',
+            'Current connector reauthorization requires its expected OAuth state.',
+          )
+        }
+        if (
+          latest.connectorCredentialDigest &&
+          secretDigestsEqual(
+            latest.connectorCredentialDigest,
+            digestConnectorCredential(expectedCredential),
+          )
+        ) {
+          if (concurrentMutationRetries < 3) {
+            return this.recoverConnector(request, concurrentMutationRetries + 1)
+          }
+          throw persistenceConflict()
+        }
+        throw conflict(
+          'ConnectorCredentialChanged',
+          'Connector credential changed before refresh completed.',
+        )
+      }
+      throw persistenceConflict()
+    }
+    return clone(installation)
+  }
+
+  /** Connector worker 内でのみ使う credential を復号します。 */
+  async readConnectorCredential(request: ReadConnectorCredentialRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const installationId = readIdentifier(request.installationId, 'Connector installation ID')
+    const record = await this.requireRecord(
+      workspaceId,
+      createConnectorRecordKey(installationId),
+      'connector-installation',
+      'ConnectorInstallationNotFound',
+      'Connector installation was not found.',
+    )
+    const installation = readRecordValue<ConnectorInstallation>(
+      record,
+      'connector-installation',
+    )
+    if (installation.status === 'disconnected') {
+      throw conflict(
+        'ConnectorDisconnected',
+        'Disconnected connector credentials cannot be read.',
+      )
+    }
+    if (!record.secretCiphertext) {
+      throw conflict(
+        'ConnectorCredentialMissing',
+        'Connector installation has no stored credential.',
+      )
+    }
+    return this.secretProtector.unprotect(
+      record.secretCiphertext,
+      createConnectorSecretContext(workspaceId, installationId),
+    )
+  }
+
+  /** Disconnected installation の既存 external links を削除せず pause します。 */
+  private async pauseConnectorExternalLinks(
+    workspaceId: string,
+    installationId: string,
+    updatedByUserId?: string,
+  ) {
+    const records = await this.listRecords(workspaceId, 'EXTERNALLINK#')
+    for (const candidate of records) {
+      let record: DeveloperPlatformRecord | undefined = candidate
+      for (let attempt = 0; attempt < 3 && record; attempt += 1) {
+        const link = readRecordValue<ExternalWorkItemLink>(record, 'external-link')
+        if (link.installationId !== installationId || link.syncStatus === 'paused') {
+          break
+        }
+        const paused: ExternalWorkItemLink = {
+          ...link,
+          syncStatus: 'paused',
+          updatedAt: this.clock().toISOString(),
+        }
+        const nextRecord: DeveloperPlatformRecord = {
+          ...record,
+          value: paused,
+          version: record.version + 1,
+        }
+        const auditPut = this.createPlatformAuditPut({
+          workspaceId,
+          eventType: 'external-link.updated',
+          entityType: 'external-link',
+          entityId: link.id,
+          transitionId: `connector-disconnect:${nextRecord.version}`,
+          teamId: link.teamId,
+          occurredAt: paused.updatedAt,
+          action: 'paused',
+          summary:
+            'External Work Item link was paused because its connector disconnected.',
+          ...(updatedByUserId ? { actorId: updatedByUserId } : {}),
+          metadata: {
+            externalLinkId: link.id,
+            workItemId: link.workItemId,
+            installationId,
+            resourceType: link.resourceType,
+            previousSyncDirection: link.syncDirection,
+            syncDirection: link.syncDirection,
+            previousSyncStatus: link.syncStatus,
+            syncStatus: paused.syncStatus,
+            cause: 'connector-disconnected',
+          },
+        })
+        const saved = auditPut
+          ? await this.putRecordWithAudit(
+              nextRecord,
+              { expectedVersion: record.version },
+              auditPut,
+            )
+          : await this.putRecord(
+              nextRecord,
+              { expectedVersion: record.version },
+            )
+        if (saved) break
+        record = await this.getRecord(workspaceId, record.recordKey)
+        if (record?.entryType !== 'external-link') record = undefined
+      }
+      if (record) {
+        const link = readRecordValue<ExternalWorkItemLink>(record, 'external-link')
+        const current = await this.getRecord(workspaceId, record.recordKey)
+        const currentLink = current?.entryType === 'external-link'
+          ? readRecordValue<ExternalWorkItemLink>(current, 'external-link')
+          : undefined
+        if (
+          link.installationId === installationId &&
+          currentLink &&
+          currentLink.syncStatus !== 'paused'
+        ) {
+          throw persistenceConflict()
+        }
+      }
+    }
+  }
+
+  /** External resource と canonical Work Item の一意な link を作成します。 */
+  async createExternalWorkItemLink(request: CreateExternalWorkItemLinkRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const input = request.input
+    const teamId = readIdentifier(input.teamId, 'Team ID')
+    const workItemId = readIdentifier(input.workItemId, 'Work Item ID')
+    const installationId = readIdentifier(input.installationId, 'Connector installation ID')
+    const resourceType = readExternalResourceType(input.resourceType)
+    const installationRecord = await this.getRecord(
+      workspaceId,
+      createConnectorRecordKey(installationId),
+    )
+    if (!installationRecord || installationRecord.entryType !== 'connector-installation') {
+      throw notFound(
+        'ConnectorInstallationNotFound',
+        'Connector installation was not found.',
+      )
+    }
+    const installation = readRecordValue<ConnectorInstallation>(
+      installationRecord,
+      'connector-installation',
+    )
+    if (installation.status !== 'connected') {
+      throw conflict(
+        'ConnectorNotConnected',
+        'External links require a connected connector installation.',
+      )
+    }
+    if (installation.category !== 'source-control') {
+      throw conflict(
+        'ConnectorCapabilityUnsupported',
+        `${resourceType} external links require a source-control connector.`,
+      )
+    }
+    const externalId = readExternalIdentifier(input.externalId)
+    const externalUrl = readHttpsUrl(input.externalUrl, 'External resource URL')
+    const displayKey = input.displayKey === undefined
+      ? undefined
+      : readName(input.displayKey, 'External display key')
+    const syncDirection = readExternalSyncDirection(input.syncDirection)
+    const id = createId('link')
+    const now = this.clock().toISOString()
+    const link: ExternalWorkItemLink = {
+      id,
+      teamId,
+      workItemId,
+      installationId,
+      provider: installation.provider,
+      installationName: installation.name,
+      ...(installation.externalAccountName
+        ? { externalAccountName: installation.externalAccountName }
+        : {}),
+      resourceType,
+      externalId,
+      externalUrl,
+      ...(displayKey ? { displayKey } : {}),
+      syncDirection,
+      syncStatus: 'pending',
+      createdAt: now,
+      updatedAt: now,
+    }
+    const linkRecord = createRecord(
+      workspaceId,
+      createExternalLinkRecordKey(id),
+      'external-link',
+      link,
+      {
+        lookupKey: 'CONNECTOR_SYNC_LINK',
+        lookupSortKey: `${workspaceId}#${id}`,
+      },
+    )
+    const claimRecordKey = createExternalLinkClaimRecordKey(
+      installationId,
+      resourceType,
+      externalId,
+    )
+    const claimRecord = createRecord(
+      workspaceId,
+      claimRecordKey,
+      'external-link-claim',
+      { targetRecordKey: linkRecord.recordKey } satisfies StoredExternalLinkClaimValue,
+    )
+    const auditPut = this.createPlatformAuditPut({
+      workspaceId,
+      eventType: 'external-link.created',
+      entityType: 'external-link',
+      entityId: id,
+      transitionId: 'created',
+      teamId,
+      occurredAt: now,
+      action: 'created',
+      summary: 'External resource was linked to a Work Item.',
+      metadata: {
+        externalLinkId: id,
+        workItemId,
+        installationId,
+        resourceType,
+        syncDirection,
+      },
+    })
+    const result = await this.saveExternalLinkWithClaim(
+      linkRecord,
+      claimRecord,
+      installationRecord,
+      auditPut,
+    )
+    if (result === 'installation-changed') {
+      throw conflict(
+        'ConnectorNotConnected',
+        'External links require a connected connector installation.',
+      )
+    }
+    if (result === 'work-item-deleted') {
+      throw conflict(
+        'ExternalWorkItemTargetDeleted',
+        'The Work Item was deleted while the external link was being created.',
+      )
+    }
+    if (result === 'conflict') {
+      throw conflict(
+        'ExternalWorkItemLinkConflict',
+        'External resource is already linked to another Work Item.',
+      )
+    }
+    if (result === 'same-owner') {
+      const claim = await this.getRecord(workspaceId, claimRecordKey)
+      const claimValue = claim
+        ? readRecordValue<StoredExternalLinkClaimValue>(claim, 'external-link-claim')
+        : undefined
+      const existing = claimValue
+        ? await this.getRecord(workspaceId, claimValue.targetRecordKey)
+        : undefined
+      if (!existing) throw persistenceInvalid('External link claim has no target.')
+      return clone(readRecordValue<ExternalWorkItemLink>(existing, 'external-link'))
+    }
+    return clone(link)
+  }
+
+  /** Workspace 内の external link を取得します。 */
+  async listExternalWorkItemLinks(request: ListExternalWorkItemLinksRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workItemId = request.workItemId === undefined
+      ? undefined
+      : readIdentifier(request.workItemId, 'Work Item ID')
+    const teamId = request.teamId === undefined
+      ? undefined
+      : readIdentifier(request.teamId, 'Team ID')
+    if ((teamId === undefined) !== (workItemId === undefined)) {
+      throw invalid(
+        'ExternalWorkItemIdentityInvalid',
+        'External Work Item filters require both teamId and workItemId.',
+      )
+    }
+    const installationId = request.installationId === undefined
+      ? undefined
+      : readIdentifier(request.installationId, 'Connector installation ID')
+    const records = await this.listRecords(workspaceId, 'EXTERNALLINK#')
+    return records
+      .map((record) => clone(readRecordValue<ExternalWorkItemLink>(record, 'external-link')))
+      .filter((link) =>
+        (teamId === undefined || link.teamId === teamId) &&
+        (workItemId === undefined || link.workItemId === workItemId) &&
+        (installationId === undefined || link.installationId === installationId)
+      )
+      .sort(compareCreatedAtDescending)
+  }
+
+  /** External link の同期方向を更新し、再同期または一時停止状態へ遷移します。 */
+  async updateExternalWorkItemLink(request: UpdateExternalWorkItemLinkRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const teamId = readIdentifier(request.teamId, 'Team ID')
+    const workItemId = readIdentifier(request.workItemId, 'Work Item ID')
+    const linkId = readIdentifier(request.linkId, 'External Work Item link ID')
+    const updatedByUserId = readIdentifier(
+      request.updatedByUserId,
+      'External Work Item link updater user ID',
+    )
+    const syncDirection = readExternalSyncDirection(request.input.syncDirection)
+    const record = await this.requireRecord(
+      workspaceId,
+      createExternalLinkRecordKey(linkId),
+      'external-link',
+      'ExternalWorkItemLinkNotFound',
+      'External Work Item link was not found.',
+    )
+    const current = readRecordValue<ExternalWorkItemLink>(record, 'external-link')
+    if (current.teamId !== teamId || current.workItemId !== workItemId) {
+      throw notFound(
+        'ExternalWorkItemLinkNotFound',
+        'External Work Item link was not found.',
+      )
+    }
+    if (current.syncStatus === 'conflict') {
+      throw conflict(
+        'ExternalWorkItemLinkSyncConflict',
+        'Resolve the open synchronization conflict before changing this link.',
+      )
+    }
+    const installationRecord = await this.requireRecord(
+      workspaceId,
+      createConnectorRecordKey(current.installationId),
+      'connector-installation',
+      'ConnectorInstallationNotFound',
+      'Connector installation was not found.',
+    )
+    const installation = readRecordValue<ConnectorInstallation>(
+      installationRecord,
+      'connector-installation',
+    )
+    if (installation.status !== 'connected') {
+      throw conflict(
+        'ConnectorNotConnected',
+        'Disconnected connector links cannot be resumed.',
+      )
+    }
+    const now = this.clock().toISOString()
+    const link: ExternalWorkItemLink = {
+      ...current,
+      syncDirection,
+      syncStatus: syncDirection === 'none' ? 'paused' : 'pending',
+      updatedAt: now,
+    }
+    const nextRecord: DeveloperPlatformRecord = {
+      ...record,
+      value: link,
+      version: record.version + 1,
+    }
+    const auditPut = this.createPlatformAuditPut({
+      workspaceId,
+      eventType: 'external-link.updated',
+      entityType: 'external-link',
+      entityId: link.id,
+      transitionId: `direction:${nextRecord.version}:${syncDirection}`,
+      teamId,
+      occurredAt: now,
+      action: 'updated',
+      summary: 'External Work Item link synchronization direction changed.',
+      actorId: updatedByUserId,
+      metadata: {
+        externalLinkId: link.id,
+        workItemId,
+        installationId: link.installationId,
+        resourceType: link.resourceType,
+        previousSyncDirection: current.syncDirection,
+        syncDirection: link.syncDirection,
+        previousSyncStatus: current.syncStatus,
+        syncStatus: link.syncStatus,
+      },
+    })
+    const completion = request.idempotency
+      ? await this.prepareIdempotencyCompletionRecord(
+          workspaceId,
+          request.idempotency,
+          { status: 200, body: link },
+        )
+      : undefined
+    const saved = await this.putExternalLinkWithConnectorGuard(
+      nextRecord,
+      record.version,
+      installationRecord,
+      completion,
+      auditPut,
+    )
+    if (!saved) {
+      const currentInstallation = await this.getRecord(
+        workspaceId,
+        installationRecord.recordKey,
+      )
+      const currentInstallationValue = currentInstallation?.entryType ===
+          'connector-installation'
+        ? readRecordValue<ConnectorInstallation>(
+            currentInstallation,
+            'connector-installation',
+          )
+        : undefined
+      if (currentInstallationValue?.status !== 'connected') {
+        throw conflict(
+          'ConnectorNotConnected',
+          'Disconnected connector links cannot be resumed.',
+        )
+      }
+      throw persistenceConflict()
+    }
+    return clone(link)
+  }
+
+  /** External link と uniqueness claim を削除します。 */
+  async deleteExternalWorkItemLink(request: DeleteExternalWorkItemLinkRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const teamId = readIdentifier(request.teamId, 'Team ID')
+    const workItemId = readIdentifier(request.workItemId, 'Work Item ID')
+    const linkId = readIdentifier(request.linkId, 'External Work Item link ID')
+    const deletedByActorId = request.deletedByActorId === undefined
+      ? undefined
+      : readIdentifier(
+          request.deletedByActorId,
+          'External Work Item link deletion actor ID',
+        )
+    const record = await this.requireRecord(
+      workspaceId,
+      createExternalLinkRecordKey(linkId),
+      'external-link',
+      'ExternalWorkItemLinkNotFound',
+      'External Work Item link was not found.',
+    )
+    const link = readRecordValue<ExternalWorkItemLink>(record, 'external-link')
+    if (link.teamId !== teamId || link.workItemId !== workItemId) {
+      throw notFound(
+        'ExternalWorkItemLinkNotFound',
+        'External Work Item link was not found.',
+      )
+    }
+    if (link.syncStatus === 'conflict') {
+      throw externalLinkDeletionConflict()
+    }
+    const now = this.clock().toISOString()
+    const completion = request.idempotency
+      ? await this.prepareIdempotencyCompletionRecord(
+          workspaceId,
+          request.idempotency,
+          { status: 204, body: null },
+        )
+      : undefined
+    const auditPut = this.createPlatformAuditPut({
+      workspaceId,
+      eventType: 'external-link.updated',
+      entityType: 'external-link',
+      entityId: link.id,
+      transitionId: `deleted:${record.version}`,
+      teamId,
+      occurredAt: now,
+      action: 'deleted',
+      summary: 'External resource was unlinked from a Work Item.',
+      actorId: deletedByActorId,
+      metadata: {
+        externalLinkId: link.id,
+        workItemId,
+        installationId: link.installationId,
+        resourceType: link.resourceType,
+        syncDirection: link.syncDirection,
+        previousSyncStatus: link.syncStatus,
+        lifecycle: 'deleted',
+      },
+    })
+    const deleted = await this.deleteExternalLinkWithClaim(
+      record,
+      createExternalLinkClaimRecordKey(
+        link.installationId,
+        link.resourceType,
+        link.externalId,
+      ),
+      completion,
+      auditPut,
+    )
+    if (deleted) return
+    const current = await this.getRecord(workspaceId, record.recordKey)
+    if (current?.entryType === 'external-link') {
+      const currentLink = readRecordValue<ExternalWorkItemLink>(
+        current,
+        'external-link',
+      )
+      if (currentLink.syncStatus === 'conflict') {
+        throw externalLinkDeletionConflict()
+      }
+    }
+    throw persistenceConflict()
+  }
+
+  /** Import job を queued 状態で作成します。 */
+  async createImportJob(request: CreateImportJobRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const createdByUserId = readIdentifier(request.createdByUserId, 'Creator user ID')
+    const jobId = request.jobId === undefined
+      ? createId('import')
+      : readIdentifier(request.jobId, 'Import job ID')
+    const format = readImportFormat(request.input.format)
+    const teamId = readIdentifier(request.input.teamId, 'Import Team ID')
+    const assignedProjectId = request.input.assignedProjectId === undefined
+      ? undefined
+      : readIdentifier(request.input.assignedProjectId, 'Import assigned Project ID')
+    const mapping = readImportMapping(request.input.mapping)
+    if (
+      request.input.dryRun !== undefined &&
+      typeof request.input.dryRun !== 'boolean'
+    ) {
+      throw invalid('ImportDryRunInvalid', 'Import dryRun must be a boolean.')
+    }
+    const now = this.clock().toISOString()
+    const job: ImportJob = {
+      id: jobId,
+      format,
+      teamId,
+      ...(assignedProjectId ? { assignedProjectId } : {}),
+      status: 'queued',
+      mapping,
+      dryRun: request.input.dryRun ?? false,
+      createdByUserId,
+      createdAt: now,
+    }
+    assertImportJobStorable(job)
+    const record = createRecord(
+      workspaceId,
+      createImportJobRecordKey(job.id),
+      'import-job',
+      job,
+    )
+    if (!await this.putRecord(record, { ifAbsent: true })) {
+      const existingRecord = await this.getRecord(workspaceId, record.recordKey)
+      if (!existingRecord || existingRecord.entryType !== 'import-job') {
+        throw persistenceConflict()
+      }
+      const existing = readRecordValue<ImportJob>(existingRecord, 'import-job')
+      if (
+        existing.id !== job.id ||
+        existing.format !== job.format ||
+        existing.teamId !== job.teamId ||
+        existing.assignedProjectId !== job.assignedProjectId ||
+        existing.dryRun !== job.dryRun ||
+        existing.createdByUserId !== job.createdByUserId ||
+        stableJson(existing.mapping) !== stableJson(job.mapping)
+      ) {
+        throw conflict(
+          'ImportJobIdConflict',
+          'Import job ID was already used for different import metadata.',
+        )
+      }
+      return clone(existing)
+    }
+    return clone(job)
+  }
+
+  /** Workspace の Import job を作成日時降順で返します。 */
+  async listImportJobs(workspaceIdValue: string) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const records = await this.listRecords(workspaceId, 'IMPORT#')
+    return records
+      .map((record) => clone(readRecordValue<ImportJob>(record, 'import-job')))
+      .sort(compareCreatedAtDescending)
+  }
+
+  /** Import job state と report を保存します。 */
+  async updateImportJob(request: UpdateImportJobRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const jobId = readIdentifier(request.jobId, 'Import job ID')
+    const status = readImportJobStatus(request.status)
+    const record = await this.requireRecord(
+      workspaceId,
+      createImportJobRecordKey(jobId),
+      'import-job',
+      'ImportJobNotFound',
+      'Import job was not found.',
+    )
+    const current = readRecordValue<ImportJob>(record, 'import-job')
+    assertImportTransition(current.status, status)
+    if (current.status === status) return clone(current)
+    const now = this.clock().toISOString()
+    const report = request.report === undefined
+      ? current.report
+      : clone(request.report)
+    const error = request.error === undefined
+      ? current.error
+      : cloneJsonValue(request.error) as ImportJob['error']
+    if (status === 'completed' && !report) {
+      throw invalid(
+        'ImportReportRequired',
+        'A completed import job requires a report.',
+      )
+    }
+    if (status === 'failed' && !error) {
+      throw invalid(
+        'ImportErrorRequired',
+        'A failed import job requires an error.',
+      )
+    }
+    const job: ImportJob = {
+      ...current,
+      status,
+      ...(current.startedAt
+        ? {}
+        : status === 'validating' || status === 'running'
+          ? { startedAt: now }
+          : {}),
+      ...(status === 'completed' || status === 'failed' || status === 'cancelled'
+        ? { completedAt: now }
+        : {}),
+      ...(report === undefined ? {} : { report }),
+      ...(error === undefined ? {} : { error }),
+    }
+    assertImportJobStorable(job)
+    const updatedRecord = {
+      ...record,
+      value: job,
+      version: record.version + 1,
+    }
+    const auditPut = status === 'completed' || status === 'failed'
+      ? this.createPlatformAuditPut({
+          workspaceId,
+          eventType: `import.${status}`,
+          entityType: 'import-job',
+          entityId: job.id,
+          transitionId: status,
+          teamId: job.teamId,
+          ...(job.assignedProjectId ? { projectId: job.assignedProjectId } : {}),
+          occurredAt: now,
+          action: status,
+          summary: status === 'completed'
+            ? 'Work Item import completed.'
+            : 'Work Item import failed.',
+          metadata: {
+            importJobId: job.id,
+            format: job.format,
+            dryRun: job.dryRun,
+            status,
+            ...(job.report
+              ? {
+                  totalRows: job.report.totalRows,
+                  validRows: job.report.validRows,
+                  invalidRows: job.report.invalidRows,
+                }
+              : {}),
+          },
+          actorId: job.createdByUserId,
+        })
+      : undefined
+    const saved = await this.persistMutationRecord(
+      workspaceId,
+      updatedRecord,
+      { expectedVersion: record.version },
+      undefined,
+      { status: 200, body: job },
+      auditPut,
+    )
+    if (!saved) throw persistenceConflict()
+    return clone(job)
+  }
+
+  /** Idempotency key を reserve、replay、または conflict 判定します。 */
+  async reserveIdempotency(
+    request: ReserveIdempotencyRequest,
+  ): Promise<IdempotencyDecision> {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const credentialId = readIdentifier(request.credentialId, 'Credential ID')
+    const idempotencyKey = readIdempotencyKey(request.idempotencyKey)
+    const requestFingerprint = requireText(
+      request.requestFingerprint,
+      'Idempotency request fingerprint',
+    )
+    const ttlSeconds = readPositiveInteger(
+      request.ttlSeconds ?? IDEMPOTENCY_DEFAULT_TTL_SECONDS,
+      'Idempotency TTL seconds',
+      7 * 24 * 60 * 60,
+    )
+    const keyDigest = digestText(
+      `developer-idempotency-v1\0${workspaceId}\0${credentialId}\0${idempotencyKey}`,
+    )
+    const fingerprintDigest = digestText(
+      `developer-request-v1\0${requestFingerprint}`,
+    )
+    const recordKey = `IDEMPOTENCY#${credentialId}#${keyDigest}`
+    const now = this.clock()
+    const existing = await this.getRecord(workspaceId, recordKey)
+    if (existing && (existing.expiresAt ?? 0) > Math.floor(now.getTime() / 1_000)) {
+      const value = readRecordValue<StoredIdempotencyValue>(existing, 'idempotency')
+      if (value.requestFingerprintDigest !== fingerprintDigest) {
+        throw conflict(
+          'IdempotencyKeyConflict',
+          'Idempotency key was already used for a different request.',
+        )
+      }
+      if (value.state === 'completed') {
+        if (!value.responseCiphertext) {
+          throw persistenceInvalid('Completed idempotency response is missing.')
+        }
+        let response: unknown
+        try {
+          const plaintext = await this.secretProtector.unprotect(
+            value.responseCiphertext,
+            createIdempotencyResponseContext(workspaceId, credentialId, keyDigest),
+          )
+          response = cloneJsonValue(JSON.parse(plaintext))
+        } catch {
+          throw persistenceInvalid('Completed idempotency response is invalid.')
+        }
+        return { status: 'replay', response } satisfies IdempotencyDecision
+      }
+      const createdAt = Date.parse(value.createdAt)
+      if (!Number.isFinite(createdAt)) {
+        throw persistenceInvalid('Idempotency reservation timestamp is invalid.')
+      }
+      if (
+        createdAt + IDEMPOTENCY_RESERVATION_LEASE_SECONDS * 1_000 >
+          now.getTime()
+      ) {
+        return { status: 'in-progress' } satisfies IdempotencyDecision
+      }
+    }
+    const reservationId = createSecret('mk_reservation')
+    const value: StoredIdempotencyValue = {
+      requestFingerprintDigest: fingerprintDigest,
+      reservationDigest: digestSecret(reservationId),
+      state: 'reserved',
+      createdAt: now.toISOString(),
+    }
+    const record = {
+      ...createRecord(
+        workspaceId,
+        recordKey,
+        'idempotency',
+        value,
+        { expiresAt: Math.floor(now.getTime() / 1_000) + ttlSeconds },
+      ),
+      version: (existing?.version ?? 0) + 1,
+    }
+    if (!await this.putRecord(record, existing
+      ? { expectedVersion: existing.version }
+      : { ifAbsent: true })) {
+      return this.reserveIdempotency(request)
+    }
+    return { status: 'reserved', reservationId } satisfies IdempotencyDecision
+  }
+
+  /** Reserve owner だけが response を保存できます。 */
+  async completeIdempotency(request: CompleteIdempotencyRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const credentialId = readIdentifier(request.credentialId, 'Credential ID')
+    const idempotencyKey = readIdempotencyKey(request.idempotencyKey)
+    const keyDigest = digestText(
+      `developer-idempotency-v1\0${workspaceId}\0${credentialId}\0${idempotencyKey}`,
+    )
+    const recordKey = `IDEMPOTENCY#${credentialId}#${keyDigest}`
+    const record = await this.requireRecord(
+      workspaceId,
+      recordKey,
+      'idempotency',
+      'IdempotencyReservationNotFound',
+      'Idempotency reservation was not found.',
+    )
+    if ((record.expiresAt ?? 0) <= Math.floor(this.clock().getTime() / 1_000)) {
+      throw conflict(
+        'IdempotencyReservationExpired',
+        'Idempotency reservation has expired.',
+      )
+    }
+    const value = readRecordValue<StoredIdempotencyValue>(record, 'idempotency')
+    if (!secretDigestsEqual(value.reservationDigest, digestSecret(request.reservationId))) {
+      throw forbidden(
+        'IdempotencyReservationOwnerMismatch',
+        'Idempotency reservation belongs to another request.',
+      )
+    }
+    const expectedFingerprint = digestText(
+      `developer-request-v1\0${requireText(
+        request.requestFingerprint,
+        'Idempotency request fingerprint',
+      )}`,
+    )
+    if (value.requestFingerprintDigest !== expectedFingerprint) {
+      throw conflict(
+        'IdempotencyKeyConflict',
+        'Idempotency key was already used for a different request.',
+      )
+    }
+    if (value.state === 'completed') return
+    const response = cloneJsonValue(request.response)
+    const serializedResponse = JSON.stringify(response)
+    if (
+      Buffer.byteLength(serializedResponse, 'utf8') >
+        IDEMPOTENCY_MAX_RESPONSE_BYTES
+    ) {
+      throw new DeveloperPlatformError(
+        413,
+        'IdempotencyResponseTooLarge',
+        'Idempotency response exceeds the safe persistence limit.',
+      )
+    }
+    const responseCiphertext = await this.secretProtector.protect(
+      serializedResponse,
+      createIdempotencyResponseContext(workspaceId, credentialId, keyDigest),
+    )
+    const completedRecord: DeveloperPlatformRecord = {
+      ...record,
+      value: {
+        ...value,
+        state: 'completed',
+        responseCiphertext,
+      } satisfies StoredIdempotencyValue,
+      version: record.version + 1,
+    }
+    if (estimateStoredRecordBytes(completedRecord) > 380 * 1024) {
+      throw new DeveloperPlatformError(
+        413,
+        'IdempotencyResponseTooLarge',
+        'Encrypted idempotency response exceeds the safe persistence limit.',
+      )
+    }
+    const saved = await this.putRecord(completedRecord, { expectedVersion: record.version })
+    if (!saved) throw persistenceConflict()
+  }
+
+  /** 失敗した処理の Reserve owner だけが未完了 reservation を解放できます。 */
+  async releaseIdempotency(request: ReleaseIdempotencyRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const credentialId = readIdentifier(request.credentialId, 'Credential ID')
+    const idempotencyKey = readIdempotencyKey(request.idempotencyKey)
+    const keyDigest = digestText(
+      `developer-idempotency-v1\0${workspaceId}\0${credentialId}\0${idempotencyKey}`,
+    )
+    const recordKey = `IDEMPOTENCY#${credentialId}#${keyDigest}`
+    const record = await this.getRecord(workspaceId, recordKey)
+    if (!record) return
+    if (record.entryType !== 'idempotency') {
+      throw persistenceInvalid('Idempotency reservation row is invalid.')
+    }
+    const value = readRecordValue<StoredIdempotencyValue>(record, 'idempotency')
+    if (value.state === 'completed') return
+    if (!secretDigestsEqual(value.reservationDigest, digestSecret(request.reservationId))) {
+      throw forbidden(
+        'IdempotencyReservationOwnerMismatch',
+        'Idempotency reservation belongs to another request.',
+      )
+    }
+    const expectedFingerprint = digestText(
+      `developer-request-v1\0${requireText(
+        request.requestFingerprint,
+        'Idempotency request fingerprint',
+      )}`,
+    )
+    if (value.requestFingerprintDigest !== expectedFingerprint) {
+      throw conflict(
+        'IdempotencyKeyConflict',
+        'Idempotency key was already used for a different request.',
+      )
+    }
+    if (!await this.deleteRecord(workspaceId, recordKey, record.version)) {
+      throw persistenceConflict()
+    }
+  }
+
+  /** Credential ごとの fixed-window rate limit を原子的に消費します。 */
+  async consumeRateLimit(request: ConsumeRateLimitRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const credentialId = readIdentifier(request.credentialId, 'Credential ID')
+    const limit = readPositiveInteger(request.limit, 'Rate limit')
+    const windowSeconds = readPositiveInteger(
+      request.windowSeconds,
+      'Rate limit window seconds',
+      24 * 60 * 60,
+    )
+    const cost = readPositiveInteger(request.cost ?? 1, 'Rate limit cost', limit)
+    const nowEpoch = Math.floor(this.clock().getTime() / 1_000)
+    const windowStart = Math.floor(nowEpoch / windowSeconds) * windowSeconds
+    const resetEpoch = windowStart + windowSeconds
+    const result = await this.consumeRateLimitRecord({
+      workspaceId,
+      recordKey: `RATELIMIT#${credentialId}#${windowStart}`,
+      limit,
+      cost,
+      resetAt: new Date(resetEpoch * 1_000).toISOString(),
+      expiresAt: resetEpoch + windowSeconds,
+    })
+    return {
+      allowed: result.allowed,
+      limit,
+      remaining: Math.max(0, limit - result.consumed),
+      resetAt: new Date(resetEpoch * 1_000).toISOString(),
+      ...(!result.allowed
+        ? { retryAfterSeconds: Math.max(1, resetEpoch - nowEpoch) }
+        : {}),
+    } satisfies RateLimitDecision
+  }
+
+  /** OAuth app secret digest を消去し、配下 access token を無効化します。 */
+  private async persistInactiveOAuthApp(
+    record: DeveloperPlatformRecord,
+    oauthApp: OAuthAppSummary,
+  ) {
+    const saved = await this.putRecord(withoutStoredCredential({
+      ...record,
+      value: oauthApp,
+      version: record.version + 1,
+    }, false), { expectedVersion: record.version })
+    if (!saved) throw persistenceConflict()
+    const tokens = await this.listRecords(record.workspaceId, 'OAUTHTOKEN#')
+    await Promise.all(tokens.map(async (tokenRecord) => {
+      const token = readRecordValue<StoredOAuthTokenValue>(tokenRecord, 'oauth-token')
+      if (token.oauthAppId === oauthApp.id) {
+        await this.deleteRecord(record.workspaceId, tokenRecord.recordKey)
+      }
+    }))
+  }
+
+  /** Lookup index を locator のみに使い、base table の強整合 row を再検証します。 */
+  private async getAuthoritativeRecordByLookupKey(lookupKey: string) {
+    const locator = await this.getRecordByLookupKey(lookupKey)
+    if (!locator) return undefined
+    const record = await this.getRecord(locator.workspaceId, locator.recordKey)
+    return record?.lookupKey === lookupKey &&
+        record.lookupSortKey === locator.lookupSortKey
+      ? record
+      : undefined
+  }
+
+  /** Delivery ID GSI locator から tenant-bound row を強整合再取得します。 */
+  private async getWebhookDeliveryRecordById(workspaceId: string, deliveryId: string) {
+    const lookupKey = createWebhookDeliveryIdLookupKey(workspaceId, deliveryId)
+    const record = await this.getAuthoritativeRecordByLookupKey(lookupKey)
+    if (!record || isRecordExpired(record, this.clock())) return undefined
+    if (
+      record.workspaceId !== workspaceId ||
+      record.recordKey !== createWebhookDeliveryRecordKey(deliveryId) ||
+      record.entryType !== 'webhook-delivery' ||
+      record.lookupSortKey !== record.recordKey
+    ) {
+      throw persistenceInvalid('Webhook delivery ID locator is invalid.')
+    }
+    const stored = readRecordValue<StoredWebhookDeliveryValue>(record, 'webhook-delivery')
+    if (stored.delivery.id !== deliveryId) {
+      throw persistenceInvalid('Webhook delivery ID does not match its locator.')
+    }
+    return record
+  }
+
+  /** Delivery ID GSI locator から tenant-bound row を必須取得します。 */
+  private async requireWebhookDeliveryRecordById(
+    workspaceId: string,
+    deliveryId: string,
+  ) {
+    const record = await this.getWebhookDeliveryRecordById(workspaceId, deliveryId)
+    if (!record) {
+      throw notFound(
+        'WebhookDeliveryNotFound',
+        'Webhook delivery was not found.',
+      )
+    }
+    return record
+  }
+
+  /** GSI locator と delivery 本体を強整合再取得して immutable index を検証します。 */
+  private async resolveWebhookDeliveryIndexLocator(
+    locator: DeveloperPlatformRecordLocator,
+    expectedKind: StoredWebhookDeliveryIndexValue['kind'],
+  ) {
+    const indexRecord = await this.getRecord(locator.workspaceId, locator.recordKey)
+    if (!indexRecord || isRecordExpired(indexRecord, this.clock())) return undefined
+    if (
+      indexRecord.entryType !== 'webhook-delivery-index' ||
+      indexRecord.lookupKey !== locator.lookupKey ||
+      indexRecord.lookupSortKey !== locator.lookupSortKey
+    ) {
+      throw persistenceInvalid('Webhook delivery index locator is stale or invalid.')
+    }
+    const index = readRecordValue<StoredWebhookDeliveryIndexValue>(
+      indexRecord,
+      'webhook-delivery-index',
+    )
+    if (index.kind !== expectedKind) {
+      throw persistenceInvalid('Webhook delivery index kind is invalid.')
+    }
+    const deliveryRecord = await this.getRecord(locator.workspaceId, index.targetRecordKey)
+    if (!deliveryRecord || isRecordExpired(deliveryRecord, this.clock())) return undefined
+    if (deliveryRecord.entryType !== 'webhook-delivery') {
+      throw persistenceInvalid('Webhook delivery index target is invalid.')
+    }
+    const delivery = readRecordValue<StoredWebhookDeliveryValue>(
+      deliveryRecord,
+      'webhook-delivery',
+    ).delivery
+    const expectedLookupKey = expectedKind === 'workspace-list'
+      ? createWebhookDeliveryWorkspaceLookupKey(locator.workspaceId)
+      : expectedKind === 'subscription-list'
+        ? createWebhookDeliverySubscriptionLookupKey(
+            locator.workspaceId,
+            delivery.subscriptionId,
+          )
+        : createWebhookDeliveryReplayLookupKey(
+            locator.workspaceId,
+            delivery.replayOfDeliveryId ?? delivery.id,
+          )
+    const expectedLookupSortKey = expectedKind === 'replay-chain'
+      ? createWebhookDeliveryReplaySortKey(delivery)
+      : createWebhookDeliveryOrderSortKey(delivery)
+    if (
+      locator.lookupKey !== expectedLookupKey ||
+      locator.lookupSortKey !== expectedLookupSortKey ||
+      index.targetRecordKey !== createWebhookDeliveryRecordKey(delivery.id) ||
+      deliveryRecord.lookupKey !== createWebhookDeliveryIdLookupKey(
+        locator.workspaceId,
+        delivery.id,
+      )
+    ) {
+      throw persistenceInvalid('Webhook delivery index invariant is invalid.')
+    }
+    return clone(delivery)
+  }
+
+  /** Primary key の型付き row を必須取得します。 */
+  private async requireRecord(
+    workspaceId: string,
+    recordKey: string,
+    entryType: DeveloperPlatformEntryType,
+    code: string,
+    message: string,
+  ) {
+    const record = await this.getRecord(workspaceId, recordKey)
+    if (!record || record.entryType !== entryType) throw notFound(code, message)
+    return record
+  }
+
+  /** Subscription の delivery health summary を更新します。 */
+  private async updateWebhookDeliveryHealth(
+    workspaceId: string,
+    subscriptionId: string,
+    status: WebhookDelivery['status'],
+    now: string,
+  ) {
+    const record = await this.getRecord(workspaceId, createWebhookRecordKey(subscriptionId))
+    if (!record || record.entryType !== 'webhook-subscription') return
+    const current = readRecordValue<WebhookSubscription>(record, 'webhook-subscription')
+    const subscription: WebhookSubscription = {
+      ...current,
+      lastDeliveryAt: now,
+      failureCount: status === 'delivered' ? 0 : current.failureCount + 1,
+      updatedAt: now,
+    }
+    await this.putRecord({
+      ...record,
+      value: subscription,
+      version: record.version + 1,
+    }, { expectedVersion: record.version })
+  }
+
+  /** Webhook cursor を復号し、tenant/filter binding を検証します。 */
+  private async decodeWebhookCursor(
+    encoded: string,
+    workspaceId: string,
+    subscriptionId: string | undefined,
+  ) {
+    try {
+      const plaintext = await this.secretProtector.unprotect(
+        requireText(encoded, 'Webhook delivery cursor'),
+        WEBHOOK_CURSOR_CONTEXT,
+      )
+      const cursor = JSON.parse(plaintext) as Partial<WebhookDeliveryCursor>
+      const expectedLookupKey = subscriptionId
+        ? createWebhookDeliverySubscriptionLookupKey(workspaceId, subscriptionId)
+        : createWebhookDeliveryWorkspaceLookupKey(workspaceId)
+      if (
+        cursor.version !== 2 ||
+        cursor.workspaceId !== workspaceId ||
+        cursor.subscriptionId !== subscriptionId ||
+        cursor.lookupKey !== expectedLookupKey ||
+        typeof cursor.lookupSortKey !== 'string' ||
+        typeof cursor.recordKey !== 'string' ||
+        cursor.recordKey !== createWebhookDeliveryIndexRecordKey(
+          expectedLookupKey,
+          cursor.lookupSortKey,
+        )
+      ) {
+        throw invalid('WebhookCursorInvalid', 'Webhook delivery cursor is invalid.')
+      }
+      return cursor as WebhookDeliveryCursor
+    } catch (error) {
+      if (error instanceof DeveloperPlatformError && error.code === 'WebhookCursorInvalid') {
+        throw error
+      }
+      throw invalid('WebhookCursorInvalid', 'Webhook delivery cursor is invalid.', error)
+    }
+  }
+}
+
+/** Local/test 向けの in-memory developer platform client です。 */
+export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient {
+  /** Workspace と recordKey で分離した永続化 row です。 */
+  private readonly records = new Map<string, DeveloperPlatformRecord>()
+
+  constructor(
+    secretProtector: SecretProtector = new LocalAesGcmSecretProtector(),
+    clock: () => Date = () => new Date(),
+  ) {
+    super(secretProtector, clock)
+  }
+
+  /** Primary key で row を取得します。 */
+  protected async getRecord(workspaceId: string, recordKey: string) {
+    const record = this.records.get(createMemoryKey(workspaceId, recordKey))
+    return record ? clone(record) : undefined
+  }
+
+  /** Workspace partition の prefix rows を取得します。 */
+  protected async listRecords(workspaceId: string, recordKeyPrefix: string) {
+    return [...this.records.values()]
+      .filter((record) =>
+        record.workspaceId === workspaceId && record.recordKey.startsWith(recordKeyPrefix)
+      )
+      .sort((left, right) => left.recordKey.localeCompare(right.recordKey))
+      .map((record) => clone(record))
+  }
+
+  /** lookupKey GSI 相当から一意な row を取得します。 */
+  protected async getRecordByLookupKey(lookupKey: string) {
+    const records = [...this.records.values()].filter((record) =>
+      record.lookupKey === lookupKey
+    )
+    if (records.length > 1) throw persistenceInvalid('Developer lookup is not unique.')
+    return records[0]
+      ? readStoredRecordLocator(clone(records[0]) as unknown as Record<string, unknown>, lookupKey)
+      : undefined
+  }
+
+  /** LookupKeyIndex 相当を件数上限付きで query します。 */
+  protected async queryLookupIndex(request: QueryLookupIndexRequest) {
+    const ordered = [...this.records.values()]
+      .filter((record) =>
+        record.lookupKey === request.lookupKey &&
+        typeof record.lookupSortKey === 'string'
+      )
+      .sort((left, right) => {
+        const comparison = left.lookupSortKey!.localeCompare(right.lookupSortKey!)
+        return request.scanIndexForward ? comparison : -comparison
+      })
+    const remaining = request.exclusiveStartKey
+      ? ordered.filter((record) => {
+          const comparison = record.lookupSortKey!.localeCompare(
+            request.exclusiveStartKey!.lookupSortKey,
+          )
+          return request.scanIndexForward ? comparison > 0 : comparison < 0
+        })
+      : ordered
+    const selected = remaining.slice(0, request.limit)
+    const locators = selected.map((record) =>
+      readStoredRecordLocator(
+        clone(record) as unknown as Record<string, unknown>,
+        request.lookupKey,
+      )
+    )
+    return {
+      locators,
+      ...(remaining.length > selected.length && locators.length > 0
+        ? { lastEvaluatedKey: locators.at(-1)! }
+        : {}),
+    } satisfies QueryLookupIndexResult
+  }
+
+  /** Row を作成または条件付き置換します。 */
+  protected async putRecord(
+    record: DeveloperPlatformRecord,
+    condition: PutRecordCondition = {},
+  ) {
+    const key = createMemoryKey(record.workspaceId, record.recordKey)
+    const current = this.records.get(key)
+    if (condition.ifAbsent && current) return false
+    if (
+      condition.expectedVersion !== undefined &&
+      current?.version !== condition.expectedVersion
+    ) {
+      return false
+    }
+    this.records.set(key, clone(record))
+    return true
+  }
+
+  /** Domain row と encrypted response receipt を同じ memory commit にします。 */
+  protected async putRecordWithIdempotency(
+    record: DeveloperPlatformRecord,
+    condition: PutRecordCondition,
+    completion: PreparedIdempotencyCompletionRecord,
+    _auditPut?: AuditTransactWriteItem,
+  ) {
+    const recordKey = createMemoryKey(record.workspaceId, record.recordKey)
+    const currentRecord = this.records.get(recordKey)
+    if (condition.ifAbsent && currentRecord) return false
+    if (
+      condition.expectedVersion !== undefined &&
+      currentRecord?.version !== condition.expectedVersion
+    ) return false
+
+    const idempotencyKey = createMemoryKey(
+      completion.reservedRecord.workspaceId,
+      completion.reservedRecord.recordKey,
+    )
+    const currentIdempotency = this.records.get(idempotencyKey)
+    if (
+      !currentIdempotency ||
+      currentIdempotency.version !== completion.reservedRecord.version ||
+      currentIdempotency.entryType !== 'idempotency'
+    ) return false
+    const currentValue = readRecordValue<StoredIdempotencyValue>(
+      currentIdempotency,
+      'idempotency',
+    )
+    if (
+      currentValue.state !== 'reserved' ||
+      !secretDigestsEqual(
+        currentValue.reservationDigest,
+        completion.reservationDigest,
+      ) ||
+      currentValue.requestFingerprintDigest !== completion.requestFingerprintDigest
+    ) return false
+
+    this.records.set(recordKey, clone(record))
+    this.records.set(idempotencyKey, clone(completion.completedRecord))
+    return true
+  }
+
+  /** Memory commit では domain row と audit emission を同じ critical section とみなします。 */
+  protected async putRecordWithAudit(
+    record: DeveloperPlatformRecord,
+    condition: PutRecordCondition,
+    _auditPut: AuditTransactWriteItem,
+  ) {
+    return this.putRecord(record, condition)
+  }
+
+  /** Primary key の row を削除します。 */
+  protected async deleteRecord(
+    workspaceId: string,
+    recordKey: string,
+    expectedVersion?: number,
+  ) {
+    const key = createMemoryKey(workspaceId, recordKey)
+    const current = this.records.get(key)
+    if (!current) return true
+    if (expectedVersion !== undefined && current.version !== expectedVersion) return false
+    this.records.delete(key)
+    return true
+  }
+
+  /** Delivery 本体と immutable index locator を原子的に新規保存します。 */
+  protected async createWebhookDeliveryRecords(
+    records: readonly DeveloperPlatformRecord[],
+  ) {
+    if (records.some((record) =>
+      this.records.has(createMemoryKey(record.workspaceId, record.recordKey))
+    )) {
+      return false
+    }
+    for (const record of records) {
+      this.records.set(createMemoryKey(record.workspaceId, record.recordKey), clone(record))
+    }
+    return true
+  }
+
+  /** External link と tenant-scoped uniqueness claim を原子的に保存します。 */
+  protected async saveExternalLinkWithClaim(
+    linkRecord: DeveloperPlatformRecord,
+    claimRecord: DeveloperPlatformRecord,
+    installationRecord: DeveloperPlatformRecord,
+    _auditPut?: AuditTransactWriteItem,
+  ) {
+    const link = readRecordValue<ExternalWorkItemLink>(
+      linkRecord,
+      'external-link',
+    )
+    const fenceKey = createMemoryKey(
+      linkRecord.workspaceId,
+      createWorkItemLinkFenceRecordKey(link.teamId, link.workItemId),
+    )
+    const currentFence = this.records.get(fenceKey)
+    const currentFenceValue = currentFence?.entryType === 'work-item-link-fence'
+      ? readRecordValue<StoredWorkItemLinkFenceValue>(
+          currentFence,
+          'work-item-link-fence',
+        )
+      : undefined
+    if (currentFenceValue?.deletedAt) return 'work-item-deleted' as const
+    if (
+      currentFenceValue &&
+      (
+        currentFenceValue.teamId !== link.teamId ||
+        currentFenceValue.workItemId !== link.workItemId
+      )
+    ) return 'conflict' as const
+    const claimKey = createMemoryKey(claimRecord.workspaceId, claimRecord.recordKey)
+    const existingClaim = this.records.get(claimKey)
+    if (existingClaim) {
+      return this.compareExternalLinkClaim(linkRecord, existingClaim)
+    }
+    const currentInstallation = this.records.get(createMemoryKey(
+      installationRecord.workspaceId,
+      installationRecord.recordKey,
+    ))
+    const currentInstallationValue = currentInstallation?.entryType ===
+        'connector-installation'
+      ? readRecordValue<ConnectorInstallation>(
+          currentInstallation,
+          'connector-installation',
+        )
+      : undefined
+    if (
+      currentInstallation?.version !== installationRecord.version ||
+      currentInstallationValue?.status !== 'connected'
+    ) return 'installation-changed' as const
+    const linkKey = createMemoryKey(linkRecord.workspaceId, linkRecord.recordKey)
+    if (this.records.has(linkKey)) return 'conflict' as const
+    const activeLinkCount = readWorkItemLinkFenceCount(currentFence)
+    this.records.set(fenceKey, {
+      workspaceId: linkRecord.workspaceId,
+      recordKey: createWorkItemLinkFenceRecordKey(link.teamId, link.workItemId),
+      entryType: 'work-item-link-fence',
+      value: {
+        teamId: link.teamId,
+        workItemId: link.workItemId,
+      } satisfies StoredWorkItemLinkFenceValue,
+      activeLinkCount: activeLinkCount + 1,
+      version: (currentFence?.version ?? 0) + 1,
+    })
+    this.records.set(claimKey, clone(claimRecord))
+    this.records.set(linkKey, clone(linkRecord))
+    return 'created' as const
+  }
+
+  /** Memory commit で connector lifecycle と external-link write を同時検証します。 */
+  protected async putExternalLinkWithConnectorGuard(
+    linkRecord: DeveloperPlatformRecord,
+    expectedLinkVersion: number,
+    installationRecord: DeveloperPlatformRecord,
+    completion?: PreparedIdempotencyCompletionRecord,
+    auditPut?: AuditTransactWriteItem,
+  ) {
+    const currentInstallation = this.records.get(createMemoryKey(
+      installationRecord.workspaceId,
+      installationRecord.recordKey,
+    ))
+    const installation = currentInstallation?.entryType ===
+        'connector-installation'
+      ? readRecordValue<ConnectorInstallation>(
+          currentInstallation,
+          'connector-installation',
+        )
+      : undefined
+    if (
+      currentInstallation?.version !== installationRecord.version ||
+      installation?.status !== 'connected'
+    ) return false
+    if (completion) {
+      return this.putRecordWithIdempotency(
+        linkRecord,
+        { expectedVersion: expectedLinkVersion },
+        completion,
+        auditPut,
+      )
+    }
+    return auditPut
+      ? this.putRecordWithAudit(
+          linkRecord,
+          { expectedVersion: expectedLinkVersion },
+          auditPut,
+        )
+      : this.putRecord(linkRecord, { expectedVersion: expectedLinkVersion })
+  }
+
+  /** Memory commit で link、claim、sync state、receipt を同時に更新します。 */
+  protected async deleteExternalLinkWithClaim(
+    linkRecord: DeveloperPlatformRecord,
+    claimRecordKey: string,
+    completion?: PreparedIdempotencyCompletionRecord,
+    _auditPut?: AuditTransactWriteItem,
+  ) {
+    const linkKey = createMemoryKey(linkRecord.workspaceId, linkRecord.recordKey)
+    const currentLinkRecord = this.records.get(linkKey)
+    if (
+      currentLinkRecord?.entryType !== 'external-link' ||
+      currentLinkRecord.version !== linkRecord.version
+    ) return false
+    const currentLink = readRecordValue<ExternalWorkItemLink>(
+      currentLinkRecord,
+      'external-link',
+    )
+    if (currentLink.syncStatus === 'conflict') return false
+
+    const claimKey = createMemoryKey(linkRecord.workspaceId, claimRecordKey)
+    const claim = this.records.get(claimKey)
+    if (claim?.entryType !== 'external-link-claim') return false
+    const claimValue = readRecordValue<StoredExternalLinkClaimValue>(
+      claim,
+      'external-link-claim',
+    )
+    if (claimValue.targetRecordKey !== linkRecord.recordKey) return false
+
+    const fenceKey = createMemoryKey(
+      linkRecord.workspaceId,
+      createWorkItemLinkFenceRecordKey(currentLink.teamId, currentLink.workItemId),
+    )
+    const currentFence = this.records.get(fenceKey)
+    const currentFenceValue = currentFence?.entryType === 'work-item-link-fence'
+      ? readRecordValue<StoredWorkItemLinkFenceValue>(
+          currentFence,
+          'work-item-link-fence',
+        )
+      : undefined
+    const activeLinkCount = readWorkItemLinkFenceCount(currentFence)
+    if (
+      !currentFence ||
+      !currentFenceValue ||
+      currentFenceValue.deletedAt ||
+      currentFenceValue.teamId !== currentLink.teamId ||
+      currentFenceValue.workItemId !== currentLink.workItemId ||
+      activeLinkCount < 1
+    ) return false
+
+    let idempotencyKey: string | undefined
+    if (completion) {
+      idempotencyKey = createMemoryKey(
+        completion.reservedRecord.workspaceId,
+        completion.reservedRecord.recordKey,
+      )
+      const currentIdempotency = this.records.get(idempotencyKey)
+      if (
+        !currentIdempotency ||
+        currentIdempotency.version !== completion.reservedRecord.version ||
+        currentIdempotency.entryType !== 'idempotency'
+      ) return false
+      const currentValue = readRecordValue<StoredIdempotencyValue>(
+        currentIdempotency,
+        'idempotency',
+      )
+      if (
+        currentValue.state !== 'reserved' ||
+        !secretDigestsEqual(
+          currentValue.reservationDigest,
+          completion.reservationDigest,
+        ) ||
+        currentValue.requestFingerprintDigest !==
+          completion.requestFingerprintDigest
+      ) return false
+    }
+
+    this.records.delete(claimKey)
+    this.records.delete(linkKey)
+    this.records.delete(createMemoryKey(
+      linkRecord.workspaceId,
+      createConnectorSyncStateRecordKey(currentLink.id),
+    ))
+    this.records.set(fenceKey, {
+      ...currentFence,
+      activeLinkCount: activeLinkCount - 1,
+      version: currentFence.version + 1,
+    })
+    if (completion && idempotencyKey) {
+      this.records.set(idempotencyKey, clone(completion.completedRecord))
+    }
+    return true
+  }
+
+  /** Credential fixed-window counter を原子的に消費します。 */
+  protected async consumeRateLimitRecord(input: ConsumeRateLimitStorageInput) {
+    const key = createMemoryKey(input.workspaceId, input.recordKey)
+    const existing = this.records.get(key)
+    if (existing) {
+      const value = readRecordValue<StoredRateLimitValue>(existing, 'rate-limit')
+      if (value.limit !== input.limit || value.resetAt !== input.resetAt) {
+        throw conflict(
+          'RateLimitConfigurationConflict',
+          'Rate limit configuration changed inside an active window.',
+        )
+      }
+    }
+    const consumed = existing?.consumed ?? 0
+    if (consumed + input.cost > input.limit) {
+      return { allowed: false, consumed } satisfies ConsumeRateLimitStorageResult
+    }
+    this.records.set(key, {
+      workspaceId: input.workspaceId,
+      recordKey: input.recordKey,
+      entryType: 'rate-limit',
+      value: { limit: input.limit, resetAt: input.resetAt } satisfies StoredRateLimitValue,
+      consumed: consumed + input.cost,
+      expiresAt: input.expiresAt,
+      version: (existing?.version ?? 0) + 1,
+    })
+    return {
+      allowed: true,
+      consumed: consumed + input.cost,
+    } satisfies ConsumeRateLimitStorageResult
+  }
+
+  /** Existing claim target と new canonical identity を比較します。 */
+  private compareExternalLinkClaim(
+    candidateRecord: DeveloperPlatformRecord,
+    claimRecord: DeveloperPlatformRecord,
+  ): SaveExternalLinkResult {
+    const claim = readRecordValue<StoredExternalLinkClaimValue>(
+      claimRecord,
+      'external-link-claim',
+    )
+    const target = this.records.get(
+      createMemoryKey(candidateRecord.workspaceId, claim.targetRecordKey),
+    )
+    if (!target || target.entryType !== 'external-link') {
+      throw persistenceInvalid('External link claim has no target.')
+    }
+    const candidate = readRecordValue<ExternalWorkItemLink>(
+      candidateRecord,
+      'external-link',
+    )
+    const existing = readRecordValue<ExternalWorkItemLink>(target, 'external-link')
+    return existing.teamId === candidate.teamId &&
+        existing.workItemId === candidate.workItemId
+      ? 'same-owner'
+      : 'conflict'
+  }
+}
+
+/** Production DynamoDB-backed developer platform client です。 */
+export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient {
+  /** Developer platform single-table 名です。 */
+  private readonly tableName: string
+  /** lookupKey GSI 名です。 */
+  private readonly lookupIndexName: string
+  /** DynamoDB DocumentClient です。 */
+  private readonly documentClient: DynamoDBDocumentClient
+
+  constructor(
+    tableName = process.env.DEVELOPER_PLATFORM_TABLE_NAME ??
+      'mukuroji-developer-platform-local',
+    documentClient = createDeveloperPlatformDocumentClient(),
+    secretProtector: SecretProtector = createDefaultSecretProtector(),
+    clock: () => Date = () => new Date(),
+    lookupIndexName = process.env.DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME ??
+      DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME,
+    auditTableName = getConfiguredAuditTableName(),
+  ) {
+    super(secretProtector, clock, auditTableName)
+    this.tableName = requireText(tableName, 'Developer platform table name')
+    this.documentClient = documentClient
+    this.lookupIndexName = requireText(
+      lookupIndexName,
+      'Developer platform lookup index name',
+    )
+  }
+
+  /** Primary key で row を強整合取得します。 */
+  protected async getRecord(workspaceId: string, recordKey: string) {
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey },
+        ConsistentRead: true,
+      }))
+      return response.Item
+        ? readStoredRecord(response.Item)
+        : undefined
+    } catch (error) {
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** LookupKeyIndex を件数上限付きで query します。 */
+  protected async queryLookupIndex(request: QueryLookupIndexRequest) {
+    try {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        IndexName: this.lookupIndexName,
+        KeyConditionExpression: 'lookupKey = :lookupKey',
+        ExpressionAttributeValues: { ':lookupKey': request.lookupKey },
+        Limit: request.limit,
+        ScanIndexForward: request.scanIndexForward,
+        ...(request.exclusiveStartKey
+          ? {
+              ExclusiveStartKey: {
+                workspaceId: request.exclusiveStartKey.workspaceId,
+                recordKey: request.exclusiveStartKey.recordKey,
+                lookupKey: request.exclusiveStartKey.lookupKey,
+                lookupSortKey: request.exclusiveStartKey.lookupSortKey,
+              },
+            }
+          : {}),
+      }))
+      return {
+        locators: (response.Items ?? []).map((item) =>
+          readStoredRecordLocator(item, request.lookupKey)
+        ),
+        ...(response.LastEvaluatedKey
+          ? {
+              lastEvaluatedKey: readStoredRecordLocator(
+                response.LastEvaluatedKey,
+                request.lookupKey,
+              ),
+            }
+          : {}),
+      } satisfies QueryLookupIndexResult
+    } catch (error) {
+      if (error instanceof DeveloperPlatformError) throw error
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** Workspace partition の prefix rows を全 page 取得します。 */
+  protected async listRecords(workspaceId: string, recordKeyPrefix: string) {
+    const records: DeveloperPlatformRecord[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    try {
+      do {
+        const response = await this.documentClient.send(new QueryCommand({
+          TableName: this.tableName,
+          KeyConditionExpression:
+            'workspaceId = :workspaceId AND begins_with(recordKey, :recordKeyPrefix)',
+          ExpressionAttributeValues: {
+            ':workspaceId': workspaceId,
+            ':recordKeyPrefix': recordKeyPrefix,
+          },
+          ConsistentRead: true,
+          ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+        }))
+        records.push(...(response.Items ?? []).map(readStoredRecord))
+        exclusiveStartKey = response.LastEvaluatedKey
+      } while (exclusiveStartKey)
+      return records
+    } catch (error) {
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** lookupKey GSI から一意な row を取得します。 */
+  protected async getRecordByLookupKey(lookupKey: string) {
+    try {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        IndexName: this.lookupIndexName,
+        KeyConditionExpression: 'lookupKey = :lookupKey',
+        ExpressionAttributeValues: { ':lookupKey': lookupKey },
+        Limit: 2,
+      }))
+      if ((response.Items?.length ?? 0) > 1) {
+        throw persistenceInvalid('Developer lookup is not unique.')
+      }
+      return response.Items?.[0]
+        ? readStoredRecordLocator(response.Items[0], lookupKey)
+        : undefined
+    } catch (error) {
+      if (error instanceof DeveloperPlatformError) throw error
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** Row を作成または version 条件付き置換します。 */
+  protected async putRecord(
+    record: DeveloperPlatformRecord,
+    condition: PutRecordCondition = {},
+  ) {
+    const conditional = condition.ifAbsent
+      ? {
+          ConditionExpression:
+            'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+        }
+      : condition.expectedVersion === undefined
+        ? {}
+        : {
+            ConditionExpression: '#version = :expectedVersion',
+            ExpressionAttributeNames: { '#version': 'version' },
+            ExpressionAttributeValues: {
+              ':expectedVersion': condition.expectedVersion,
+            },
+          }
+    try {
+      await this.documentClient.send(new PutCommand({
+        TableName: this.tableName,
+        Item: record,
+        ...conditional,
+      }))
+      return true
+    } catch (error) {
+      if (isNamedError(error, 'ConditionalCheckFailedException')) return false
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** Domain row と encrypted response receipt を DynamoDB transaction で保存します。 */
+  protected async putRecordWithIdempotency(
+    record: DeveloperPlatformRecord,
+    condition: PutRecordCondition,
+    completion: PreparedIdempotencyCompletionRecord,
+    auditPut?: AuditTransactWriteItem,
+  ) {
+    const recordCondition = condition.ifAbsent
+      ? {
+          ConditionExpression:
+            'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+        }
+      : condition.expectedVersion === undefined
+        ? {}
+        : {
+            ConditionExpression: '#recordVersion = :expectedRecordVersion',
+            ExpressionAttributeNames: { '#recordVersion': 'version' },
+            ExpressionAttributeValues: {
+              ':expectedRecordVersion': condition.expectedVersion,
+            },
+          }
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: record,
+              ...recordCondition,
+            },
+          },
+          createIdempotencyCompletionTransactWriteItem(this.tableName, completion),
+          ...(auditPut ? [auditPut] : []),
+        ],
+      }))
+      return true
+    } catch (error) {
+      if (isTransactionConditionFailure(error)) return false
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** Domain row と immutable audit outbox event を DynamoDB transaction で保存します。 */
+  protected async putRecordWithAudit(
+    record: DeveloperPlatformRecord,
+    condition: PutRecordCondition,
+    auditPut: AuditTransactWriteItem,
+  ) {
+    const recordCondition = condition.ifAbsent
+      ? {
+          ConditionExpression:
+            'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+        }
+      : condition.expectedVersion === undefined
+        ? {}
+        : {
+            ConditionExpression: '#recordVersion = :expectedRecordVersion',
+            ExpressionAttributeNames: { '#recordVersion': 'version' },
+            ExpressionAttributeValues: {
+              ':expectedRecordVersion': condition.expectedVersion,
+            },
+          }
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: record,
+              ...recordCondition,
+            },
+          },
+          auditPut,
+        ],
+      }))
+      return true
+    } catch (error) {
+      if (isTransactionConditionFailure(error)) return false
+      throw toPersistenceError(error)
+    }
+  }
+
+  /**
+   * Work Item など別 table の domain mutation に encrypted response receipt を追加します。
+   */
+  async prepareIdempotencyCompletionTransactWrite(
+    request: CompleteIdempotencyRequest,
+  ): Promise<IdempotencyCompletionTransactWrite> {
+    const completion = await this.prepareIdempotencyCompletionRecord(
+      request.workspaceId,
+      {
+        credentialId: request.credentialId,
+        idempotencyKey: request.idempotencyKey,
+        requestFingerprint: request.requestFingerprint,
+        reservationId: request.reservationId,
+      },
+      request.response,
+    )
+    return {
+      transactWriteItem: createIdempotencyCompletionTransactWriteItem(
+        this.tableName,
+        completion,
+      ),
+    }
+  }
+
+  /** Work Item delete と external-link create を同じ durable fence で直列化します。 */
+  async prepareWorkItemDeletionFenceTransactWrite(
+    request: PrepareWorkItemDeletionFenceRequest,
+  ): Promise<WorkItemDeletionFenceTransactWrite> {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const teamId = readIdentifier(request.teamId, 'Team ID')
+    const workItemId = readIdentifier(request.workItemId, 'Work Item ID')
+    const deletedAt = this.clock().toISOString()
+    const value = {
+      teamId,
+      workItemId,
+      deletedAt,
+    } satisfies StoredWorkItemLinkFenceValue
+    return {
+      transactWriteItem: {
+        Put: {
+          TableName: this.tableName,
+          Item: {
+            workspaceId,
+            recordKey: createWorkItemLinkFenceRecordKey(teamId, workItemId),
+            entryType: 'work-item-link-fence',
+            value,
+            activeLinkCount: 0,
+            version: 1,
+          },
+          ConditionExpression:
+            'attribute_not_exists(workspaceId) OR ' +
+            '(#entryType = :entryType AND activeLinkCount = :zero AND ' +
+            '#value.#teamId = :teamId AND #value.#workItemId = :workItemId AND ' +
+            'attribute_not_exists(#value.#deletedAt))',
+          ExpressionAttributeNames: {
+            '#entryType': 'entryType',
+            '#value': 'value',
+            '#teamId': 'teamId',
+            '#workItemId': 'workItemId',
+            '#deletedAt': 'deletedAt',
+          },
+          ExpressionAttributeValues: {
+            ':entryType': 'work-item-link-fence',
+            ':zero': 0,
+            ':teamId': teamId,
+            ':workItemId': workItemId,
+          },
+        },
+      },
+    }
+  }
+
+  /** Primary key の row を削除します。 */
+  protected async deleteRecord(
+    workspaceId: string,
+    recordKey: string,
+    expectedVersion?: number,
+  ) {
+    try {
+      await this.documentClient.send(new DeleteCommand({
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey },
+        ...(expectedVersion === undefined
+          ? {}
+          : {
+              ConditionExpression: '#version = :expectedVersion',
+              ExpressionAttributeNames: { '#version': 'version' },
+              ExpressionAttributeValues: { ':expectedVersion': expectedVersion },
+            }),
+      }))
+      return true
+    } catch (error) {
+      if (isNamedError(error, 'ConditionalCheckFailedException')) return false
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** Delivery 本体と immutable index locator を原子的に新規保存します。 */
+  protected async createWebhookDeliveryRecords(
+    records: readonly DeveloperPlatformRecord[],
+  ) {
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: records.map((record) => ({
+          Put: {
+            TableName: this.tableName,
+            Item: record,
+            ConditionExpression:
+              'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+          },
+        })),
+      }))
+      return true
+    } catch (error) {
+      if (isTransactionConditionFailure(error)) return false
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** External link と tenant-scoped uniqueness claim を原子的に保存します。 */
+  protected async saveExternalLinkWithClaim(
+    linkRecord: DeveloperPlatformRecord,
+    claimRecord: DeveloperPlatformRecord,
+    installationRecord: DeveloperPlatformRecord,
+    auditPut?: AuditTransactWriteItem,
+  ): Promise<SaveExternalLinkResult> {
+    const link = readRecordValue<ExternalWorkItemLink>(linkRecord, 'external-link')
+    const fenceRecordKey = createWorkItemLinkFenceRecordKey(
+      link.teamId,
+      link.workItemId,
+    )
+    const existingClaim = await this.getRecord(
+      claimRecord.workspaceId,
+      claimRecord.recordKey,
+    )
+    if (existingClaim) {
+      return this.compareDynamoExternalLinkClaim(linkRecord, existingClaim)
+    }
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            ConditionCheck: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: installationRecord.workspaceId,
+                recordKey: installationRecord.recordKey,
+              },
+              ConditionExpression:
+                '#version = :expectedVersion AND #value.#status = :connected',
+              ExpressionAttributeNames: {
+                '#version': 'version',
+                '#value': 'value',
+                '#status': 'status',
+              },
+              ExpressionAttributeValues: {
+                ':expectedVersion': installationRecord.version,
+                ':connected': 'connected',
+              },
+            },
+          },
+          {
+            Update: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: linkRecord.workspaceId,
+                recordKey: fenceRecordKey,
+              },
+              UpdateExpression:
+                'SET #entryType = if_not_exists(#entryType, :entryType), ' +
+                '#value = if_not_exists(#value, :value), ' +
+                'activeLinkCount = if_not_exists(activeLinkCount, :zero) + :one, ' +
+                '#version = if_not_exists(#version, :zero) + :one',
+              ConditionExpression:
+                'attribute_not_exists(#entryType) OR ' +
+                '(#entryType = :entryType AND #value.#teamId = :teamId AND ' +
+                '#value.#workItemId = :workItemId AND ' +
+                'attribute_not_exists(#value.#deletedAt))',
+              ExpressionAttributeNames: {
+                '#entryType': 'entryType',
+                '#value': 'value',
+                '#teamId': 'teamId',
+                '#workItemId': 'workItemId',
+                '#deletedAt': 'deletedAt',
+                '#version': 'version',
+              },
+              ExpressionAttributeValues: {
+                ':entryType': 'work-item-link-fence',
+                ':value': {
+                  teamId: link.teamId,
+                  workItemId: link.workItemId,
+                } satisfies StoredWorkItemLinkFenceValue,
+                ':teamId': link.teamId,
+                ':workItemId': link.workItemId,
+                ':zero': 0,
+                ':one': 1,
+              },
+            },
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: claimRecord,
+              ConditionExpression:
+                'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+            },
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: linkRecord,
+              ConditionExpression:
+                'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+            },
+          },
+          ...(auditPut ? [auditPut] : []),
+        ],
+      }))
+      return 'created'
+    } catch (error) {
+      if (isTransactionConditionFailure(error)) {
+        const concurrentClaim = await this.getRecord(
+          claimRecord.workspaceId,
+          claimRecord.recordKey,
+        )
+        if (concurrentClaim) {
+          return this.compareDynamoExternalLinkClaim(linkRecord, concurrentClaim)
+        }
+        const currentInstallation = await this.getRecord(
+          installationRecord.workspaceId,
+          installationRecord.recordKey,
+        )
+        const installation = currentInstallation?.entryType ===
+            'connector-installation'
+          ? readRecordValue<ConnectorInstallation>(
+              currentInstallation,
+              'connector-installation',
+            )
+          : undefined
+        if (
+          currentInstallation?.version !== installationRecord.version ||
+          installation?.status !== 'connected'
+        ) return 'installation-changed'
+        const currentFence = await this.getRecord(
+          linkRecord.workspaceId,
+          fenceRecordKey,
+        )
+        if (currentFence?.entryType === 'work-item-link-fence') {
+          const fence = readRecordValue<StoredWorkItemLinkFenceValue>(
+            currentFence,
+            'work-item-link-fence',
+          )
+          if (fence.deletedAt) return 'work-item-deleted'
+        }
+        throw persistenceConflict()
+      }
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** Connector version/status と external-link mutation を同じ transaction で保存します。 */
+  protected async putExternalLinkWithConnectorGuard(
+    linkRecord: DeveloperPlatformRecord,
+    expectedLinkVersion: number,
+    installationRecord: DeveloperPlatformRecord,
+    completion?: PreparedIdempotencyCompletionRecord,
+    auditPut?: AuditTransactWriteItem,
+  ) {
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            ConditionCheck: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: installationRecord.workspaceId,
+                recordKey: installationRecord.recordKey,
+              },
+              ConditionExpression:
+                '#version = :expectedVersion AND #value.#status = :connected',
+              ExpressionAttributeNames: {
+                '#version': 'version',
+                '#value': 'value',
+                '#status': 'status',
+              },
+              ExpressionAttributeValues: {
+                ':expectedVersion': installationRecord.version,
+                ':connected': 'connected',
+              },
+            },
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: linkRecord,
+              ConditionExpression: '#linkVersion = :expectedLinkVersion',
+              ExpressionAttributeNames: { '#linkVersion': 'version' },
+              ExpressionAttributeValues: {
+                ':expectedLinkVersion': expectedLinkVersion,
+              },
+            },
+          },
+          ...(completion
+            ? [createIdempotencyCompletionTransactWriteItem(
+                this.tableName,
+                completion,
+              )]
+            : []),
+          ...(auditPut ? [auditPut] : []),
+        ],
+      }))
+      return true
+    } catch (error) {
+      if (isTransactionConditionFailure(error)) return false
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** DynamoDB transaction で link、claim、sync state、receipt、audit を更新します。 */
+  protected async deleteExternalLinkWithClaim(
+    linkRecord: DeveloperPlatformRecord,
+    claimRecordKey: string,
+    completion?: PreparedIdempotencyCompletionRecord,
+    auditPut?: AuditTransactWriteItem,
+  ) {
+    const link = readRecordValue<ExternalWorkItemLink>(linkRecord, 'external-link')
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Delete: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: linkRecord.workspaceId,
+                recordKey: claimRecordKey,
+              },
+              ConditionExpression:
+                '#entryType = :claimEntryType AND ' +
+                '#value.#targetRecordKey = :targetRecordKey',
+              ExpressionAttributeNames: {
+                '#entryType': 'entryType',
+                '#value': 'value',
+                '#targetRecordKey': 'targetRecordKey',
+              },
+              ExpressionAttributeValues: {
+                ':claimEntryType': 'external-link-claim',
+                ':targetRecordKey': linkRecord.recordKey,
+              },
+            },
+          },
+          {
+            Update: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: linkRecord.workspaceId,
+                recordKey: createWorkItemLinkFenceRecordKey(
+                  link.teamId,
+                  link.workItemId,
+                ),
+              },
+              UpdateExpression:
+                'SET activeLinkCount = activeLinkCount - :one, ' +
+                '#version = #version + :one',
+              ConditionExpression:
+                '#entryType = :entryType AND #value.#teamId = :teamId AND ' +
+                '#value.#workItemId = :workItemId AND ' +
+                'attribute_not_exists(#value.#deletedAt) AND activeLinkCount >= :one',
+              ExpressionAttributeNames: {
+                '#entryType': 'entryType',
+                '#value': 'value',
+                '#teamId': 'teamId',
+                '#workItemId': 'workItemId',
+                '#deletedAt': 'deletedAt',
+                '#version': 'version',
+              },
+              ExpressionAttributeValues: {
+                ':entryType': 'work-item-link-fence',
+                ':teamId': link.teamId,
+                ':workItemId': link.workItemId,
+                ':one': 1,
+              },
+            },
+          },
+          {
+            Delete: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: linkRecord.workspaceId,
+                recordKey: linkRecord.recordKey,
+              },
+              ConditionExpression:
+                '#version = :expectedVersion AND #entryType = :linkEntryType AND ' +
+                '#value.#syncStatus <> :conflict',
+              ExpressionAttributeNames: {
+                '#version': 'version',
+                '#entryType': 'entryType',
+                '#value': 'value',
+                '#syncStatus': 'syncStatus',
+              },
+              ExpressionAttributeValues: {
+                ':expectedVersion': linkRecord.version,
+                ':linkEntryType': 'external-link',
+                ':conflict': 'conflict',
+              },
+            },
+          },
+          {
+            Delete: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: linkRecord.workspaceId,
+                recordKey: createConnectorSyncStateRecordKey(link.id),
+              },
+            },
+          },
+          ...(completion
+            ? [createIdempotencyCompletionTransactWriteItem(
+                this.tableName,
+                completion,
+              )]
+            : []),
+          ...(auditPut ? [auditPut] : []),
+        ],
+      }))
+      return true
+    } catch (error) {
+      if (isTransactionConditionFailure(error)) return false
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** Credential fixed-window counter を原子的に消費します。 */
+  protected async consumeRateLimitRecord(input: ConsumeRateLimitStorageInput) {
+    const value: StoredRateLimitValue = {
+      limit: input.limit,
+      resetAt: input.resetAt,
+    }
+    try {
+      const response = await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: { workspaceId: input.workspaceId, recordKey: input.recordKey },
+        UpdateExpression:
+          'SET entryType = :entryType, #value = if_not_exists(#value, :value), ' +
+          'expiresAt = :expiresAt, #version = if_not_exists(#version, :zero) + :one ' +
+          'ADD consumed :cost',
+        ConditionExpression:
+          'attribute_not_exists(consumed) OR ' +
+          '(#value.#limit = :limit AND #value.#resetAt = :resetAt AND consumed <= :maximumBefore)',
+        ExpressionAttributeNames: {
+          '#value': 'value',
+          '#limit': 'limit',
+          '#resetAt': 'resetAt',
+          '#version': 'version',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'rate-limit',
+          ':value': value,
+          ':expiresAt': input.expiresAt,
+          ':zero': 0,
+          ':one': 1,
+          ':cost': input.cost,
+          ':limit': input.limit,
+          ':resetAt': input.resetAt,
+          ':maximumBefore': input.limit - input.cost,
+        },
+        ReturnValues: 'ALL_NEW',
+      }))
+      const consumed = response.Attributes?.consumed
+      if (typeof consumed !== 'number') {
+        throw persistenceInvalid('Rate limit counter response is invalid.')
+      }
+      return { allowed: true, consumed }
+    } catch (error) {
+      if (!isNamedError(error, 'ConditionalCheckFailedException')) {
+        if (error instanceof DeveloperPlatformError) throw error
+        throw toPersistenceError(error)
+      }
+      const current = await this.getRecord(input.workspaceId, input.recordKey)
+      if (!current || current.entryType !== 'rate-limit') throw persistenceConflict()
+      const currentValue = readRecordValue<StoredRateLimitValue>(current, 'rate-limit')
+      if (currentValue.limit !== input.limit || currentValue.resetAt !== input.resetAt) {
+        throw conflict(
+          'RateLimitConfigurationConflict',
+          'Rate limit configuration changed inside an active window.',
+        )
+      }
+      return {
+        allowed: false,
+        consumed: current.consumed ?? input.limit,
+      }
+    }
+  }
+
+  /** Existing claim target と new canonical identity を比較します。 */
+  private async compareDynamoExternalLinkClaim(
+    candidateRecord: DeveloperPlatformRecord,
+    claimRecord: DeveloperPlatformRecord,
+  ): Promise<SaveExternalLinkResult> {
+    const claim = readRecordValue<StoredExternalLinkClaimValue>(
+      claimRecord,
+      'external-link-claim',
+    )
+    const target = await this.getRecord(candidateRecord.workspaceId, claim.targetRecordKey)
+    if (!target || target.entryType !== 'external-link') {
+      throw persistenceInvalid('External link claim has no target.')
+    }
+    const candidate = readRecordValue<ExternalWorkItemLink>(
+      candidateRecord,
+      'external-link',
+    )
+    const existing = readRecordValue<ExternalWorkItemLink>(target, 'external-link')
+    return existing.teamId === candidate.teamId &&
+        existing.workItemId === candidate.workItemId
+      ? 'same-owner'
+      : 'conflict'
+  }
+}
+
+/** Webhook cursor ciphertext の authenticated context です。 */
+const WEBHOOK_CURSOR_CONTEXT = 'mukuroji-developer-platform:webhook-cursor:v1'
+
+/** Secret-free row 作成時の optional storage fields です。 */
+type CreateRecordOptions = {
+  /** lookupKey GSI value です。 */
+  lookupKey?: string
+  /** lookupSortKey GSI value です。 */
+  lookupSortKey?: string
+  /** SHA-256 secret digest です。 */
+  secretDigest?: string
+  /** Authenticated encrypted credential です。 */
+  secretCiphertext?: string
+  /** Connector credential の serialized value を束縛する SHA-256 digest です。 */
+  connectorCredentialDigest?: string
+  /** Connector credential replacement の単調増加 revision です。 */
+  connectorCredentialRevision?: number
+  /** Current connector OAuth reauthorization state ID の SHA-256 digest です。 */
+  connectorOAuthStateDigest?: string
+  /** Connector OAuth state fencing の単調増加 revision です。 */
+  connectorOAuthStateRevision?: number
+  /** DynamoDB TTL epoch seconds です。 */
+  expiresAt?: number
+}
+
+function createRecord(
+  workspaceId: string,
+  recordKey: string,
+  entryType: DeveloperPlatformEntryType,
+  value: unknown,
+  options: CreateRecordOptions = {},
+): DeveloperPlatformRecord {
+  const {
+    lookupKey,
+    lookupSortKey,
+    ...storedOptions
+  } = options
+  return {
+    workspaceId,
+    recordKey,
+    entryType,
+    value: clone(value),
+    ...(lookupKey
+      ? {
+          lookupKey,
+          lookupSortKey: lookupSortKey ?? recordKey,
+        }
+      : {}),
+    ...storedOptions,
+    version: 1,
+  }
+}
+
+function withoutStoredCredential(
+  record: DeveloperPlatformRecord,
+  removeLookupKey: boolean,
+) {
+  const sanitized = { ...record }
+  delete sanitized.secretDigest
+  if (removeLookupKey) {
+    delete sanitized.lookupKey
+    delete sanitized.lookupSortKey
+  }
+  return sanitized
+}
+
+function createApiKeyRecordKey(id: string) {
+  return `APIKEY#${id}`
+}
+
+function createOAuthAppRecordKey(id: string) {
+  return `OAUTHAPP#${id}`
+}
+
+function createOAuthTokenRecordKey(id: string) {
+  return `OAUTHTOKEN#${id}`
+}
+
+function createWebhookRecordKey(id: string) {
+  return `WEBHOOK#${id}`
+}
+
+function createWebhookDeliveryRecordKey(id: string) {
+  return `WEBHOOKDELIVERY#${id}`
+}
+
+function createWebhookDeliveryIdLookupKey(workspaceId: string, deliveryId: string) {
+  return `WEBHOOKDELIVERY#ID#${workspaceId}#${deliveryId}`
+}
+
+function createWebhookDeliveryWorkspaceLookupKey(workspaceId: string) {
+  return `WEBHOOKDELIVERY#LIST#${workspaceId}`
+}
+
+function createWebhookDeliverySubscriptionLookupKey(
+  workspaceId: string,
+  subscriptionId: string,
+) {
+  return `WEBHOOKDELIVERY#SUBSCRIPTION#${workspaceId}#${subscriptionId}`
+}
+
+function createWebhookDeliveryReplayLookupKey(
+  workspaceId: string,
+  originalDeliveryId: string,
+) {
+  return `WEBHOOKDELIVERY#REPLAY#${workspaceId}#${originalDeliveryId}`
+}
+
+function createWebhookDeliveryOrderSortKey(delivery: WebhookDelivery) {
+  return `${delivery.createdAt}#${delivery.id}`
+}
+
+function createWebhookDeliveryReplaySortKey(delivery: WebhookDelivery) {
+  const replayNumber = delivery.replayNumber ?? 0
+  return `${String(replayNumber).padStart(16, '0')}#${delivery.id}`
+}
+
+function createWebhookDeliveryIndexRecordKey(lookupKey: string, lookupSortKey: string) {
+  return `WEBHOOKDELIVERYINDEX#${digestText(`${lookupKey}\0${lookupSortKey}`)}`
+}
+
+function createWebhookDeliveryStorageRecords(
+  workspaceId: string,
+  value: StoredWebhookDeliveryValue,
+  expiresAt: number,
+) {
+  const delivery = value.delivery
+  const targetRecordKey = createWebhookDeliveryRecordKey(delivery.id)
+  const originalDeliveryId = delivery.replayOfDeliveryId ?? delivery.id
+  const orderSortKey = createWebhookDeliveryOrderSortKey(delivery)
+  const indexDefinitions = [
+    {
+      kind: 'workspace-list',
+      lookupKey: createWebhookDeliveryWorkspaceLookupKey(workspaceId),
+      lookupSortKey: orderSortKey,
+    },
+    {
+      kind: 'subscription-list',
+      lookupKey: createWebhookDeliverySubscriptionLookupKey(
+        workspaceId,
+        delivery.subscriptionId,
+      ),
+      lookupSortKey: orderSortKey,
+    },
+    {
+      kind: 'replay-chain',
+      lookupKey: createWebhookDeliveryReplayLookupKey(workspaceId, originalDeliveryId),
+      lookupSortKey: createWebhookDeliveryReplaySortKey(delivery),
+    },
+  ] as const
+  return [
+    createRecord(
+      workspaceId,
+      targetRecordKey,
+      'webhook-delivery',
+      value,
+      {
+        lookupKey: createWebhookDeliveryIdLookupKey(workspaceId, delivery.id),
+        lookupSortKey: targetRecordKey,
+        expiresAt,
+      },
+    ),
+    ...indexDefinitions.map((definition) =>
+      createRecord(
+        workspaceId,
+        createWebhookDeliveryIndexRecordKey(
+          definition.lookupKey,
+          definition.lookupSortKey,
+        ),
+        'webhook-delivery-index',
+        {
+          kind: definition.kind,
+          targetRecordKey,
+        } satisfies StoredWebhookDeliveryIndexValue,
+        {
+          lookupKey: definition.lookupKey,
+          lookupSortKey: definition.lookupSortKey,
+          expiresAt,
+        },
+      )
+    ),
+  ]
+}
+
+function createConnectorRecordKey(id: string) {
+  return `CONNECTOR#${id}`
+}
+
+function createExternalLinkRecordKey(id: string) {
+  return `EXTERNALLINK#${id}`
+}
+
+function createConnectorSyncStateRecordKey(linkId: string) {
+  return `CONNECTORSYNC#${linkId}`
+}
+
+function createWorkItemLinkFenceRecordKey(teamId: string, workItemId: string) {
+  return `WORKITEMLINKS#${digestText(`${teamId}\0${workItemId}`)}`
+}
+
+function createExternalLinkClaimRecordKey(
+  installationId: string,
+  resourceType: ExternalWorkItemLink['resourceType'],
+  externalId: string,
+) {
+  return `EXTERNALCLAIM#${digestText(
+    `${installationId}\0${resourceType}\0${externalId}`,
+  )}`
+}
+
+function createImportJobRecordKey(id: string) {
+  return `IMPORT#${id}`
+}
+
+function createIdempotencyCompletionTransactWriteItem(
+  tableName: string,
+  completion: PreparedIdempotencyCompletionRecord,
+): IdempotencyCompletionTransactWrite['transactWriteItem'] {
+  return {
+    Put: {
+      TableName: tableName,
+      Item: completion.completedRecord,
+      ConditionExpression:
+        '#version = :expectedVersion AND #entryType = :entryType AND ' +
+        '#value.#state = :reserved AND ' +
+        '#value.#reservationDigest = :reservationDigest AND ' +
+        '#value.#requestFingerprintDigest = :requestFingerprintDigest',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#requestFingerprintDigest': 'requestFingerprintDigest',
+        '#reservationDigest': 'reservationDigest',
+        '#state': 'state',
+        '#value': 'value',
+        '#version': 'version',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'idempotency',
+        ':expectedVersion': completion.reservedRecord.version,
+        ':requestFingerprintDigest': completion.requestFingerprintDigest,
+        ':reservationDigest': completion.reservationDigest,
+        ':reserved': 'reserved',
+      },
+    },
+  }
+}
+
+function createWebhookSecretContext(workspaceId: string, subscriptionId: string) {
+  return `mukuroji:webhook:${workspaceId}:${subscriptionId}:v1`
+}
+
+function createConnectorSecretContext(workspaceId: string, installationId: string) {
+  return `mukuroji:connector:${workspaceId}:${installationId}:v1`
+}
+
+function createIdempotencyResponseContext(
+  workspaceId: string,
+  credentialId: string,
+  keyDigest: string,
+) {
+  return `mukuroji:idempotency-response:v1\0${workspaceId}\0${credentialId}\0${keyDigest}`
+}
+
+function createMemoryKey(workspaceId: string, recordKey: string) {
+  return `${workspaceId}\0${recordKey}`
+}
+
+function createId(prefix: string) {
+  return `${prefix}_${randomUUID().replaceAll('-', '')}`
+}
+
+function createPublicIdentifier(prefix: string) {
+  return `${prefix}_${randomBytes(18).toString('base64url')}`
+}
+
+function createSecret(prefix: string) {
+  return `${prefix}_${randomBytes(32).toString('base64url')}`
+}
+
+function createSecretLookupKey(type: 'APIKEY' | 'OAUTHTOKEN', secret: string) {
+  return `${type}#${digestSecret(secret)}`
+}
+
+function createDeterministicDeliveryId(subscriptionId: string, eventId: string) {
+  return `delivery_${digestText(
+    `webhook-delivery-v1\0${subscriptionId}\0${eventId}`,
+  ).slice(0, 40)}`
+}
+
+function createDeterministicReplayDeliveryId(
+  originalDeliveryId: string,
+  replayNumber: number,
+) {
+  return `delivery_replay_${digestText(
+    `webhook-delivery-replay-v1\0${originalDeliveryId}\0${replayNumber}`,
+  ).slice(0, 40)}`
+}
+
+function createDeterministicReplayOperationDeliveryId(
+  originalDeliveryId: string,
+  operationId: string,
+) {
+  return `delivery_replay_${digestText(
+    `webhook-delivery-replay-operation-v1\0${originalDeliveryId}\0${operationId}`,
+  ).slice(0, 40)}`
+}
+
+function readWebhookReplayOperationId(value: string) {
+  const operationId = requireText(value, 'Webhook replay operation ID')
+  if (!/^[a-f0-9]{64}$/u.test(operationId)) {
+    throw invalid(
+      'WebhookReplayOperationIdInvalid',
+      'Webhook replay operation ID is invalid.',
+    )
+  }
+  return operationId
+}
+
+function digestSecret(value: string) {
+  return digestText(`developer-secret-v1\0${value}`)
+}
+
+function digestConnectorCredential(value: string) {
+  return digestText(`connector-credential-v1\0${value}`)
+}
+
+function digestConnectorOAuthState(value: string) {
+  return digestText(`connector-oauth-state-v1\0${value}`)
+}
+
+function digestText(value: string) {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function secretDigestsEqual(left: string, right: string) {
+  return safeTextEqual(left, right)
+}
+
+function safeTextEqual(left: string, right: string) {
+  const leftBytes = Buffer.from(left)
+  const rightBytes = Buffer.from(right)
+  if (leftBytes.byteLength !== rightBytes.byteLength) return false
+  return timingSafeEqual(leftBytes, rightBytes)
+}
+
+/**
+ * Webhook worker が timestamp と payload に対する HMAC-SHA256 signature を作成します。
+ */
+export function createWebhookSignature(
+  signingSecret: string,
+  timestamp: number,
+  payload: string,
+) {
+  const secret = requireText(signingSecret, 'Webhook signing secret')
+  if (typeof payload !== 'string') {
+    throw invalid('WebhookPayloadInvalid', 'Webhook payload must be a string.')
+  }
+  const normalizedTimestamp = readPositiveInteger(timestamp, 'Webhook signature timestamp')
+  const digest = createHmac('sha256', secret)
+    .update(`${normalizedTimestamp}.${payload}`)
+    .digest('hex')
+  return `v1=${digest}`
+}
+
+function readIdentifier(value: string, label: string) {
+  const normalized = requireText(value, label)
+  if (normalized.length > 200 || !/^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/u.test(normalized)) {
+    throw invalid('DeveloperIdentifierInvalid', `${label} is invalid.`)
+  }
+  return normalized
+}
+
+function readConnectorOAuthStateId(value: string) {
+  const normalized = requireText(value, 'Connector reauthorization state ID')
+  if (
+    normalized.length !== 32 ||
+    !/^[A-Za-z0-9_-]{32}$/u.test(normalized)
+  ) {
+    throw invalid(
+      'DeveloperIdentifierInvalid',
+      'Connector reauthorization state ID is invalid.',
+    )
+  }
+  return normalized
+}
+
+function readIdentifierArray(
+  values: readonly string[],
+  label: string,
+  maximum: number,
+  allowEmpty = false,
+) {
+  if (
+    !Array.isArray(values) ||
+    (!allowEmpty && values.length === 0) ||
+    values.length > maximum
+  ) {
+    throw invalid('DeveloperIdentifierListInvalid', `${label} is invalid.`)
+  }
+  const normalized = values.map((value) => readIdentifier(value, label))
+  if (new Set(normalized).size !== normalized.length) {
+    throw invalid('DeveloperIdentifierListInvalid', `${label} must not contain duplicates.`)
+  }
+  return normalized.sort()
+}
+
+function readExternalIdentifier(value: string) {
+  const normalized = requireText(value, 'External resource ID')
+  if (normalized.length > 512 || containsControlCharacter(normalized)) {
+    throw invalid('ExternalIdentifierInvalid', 'External resource ID is invalid.')
+  }
+  return normalized
+}
+
+function readName(value: string, label: string) {
+  const normalized = requireText(value, label)
+  if (normalized.length > 120 || containsControlCharacter(normalized)) {
+    throw invalid('DeveloperNameInvalid', `${label} is invalid.`)
+  }
+  return normalized
+}
+
+function readProvider(value: ConnectorInstallation['provider']) {
+  if (
+    value === 'github' ||
+    value === 'gitlab' ||
+    value === 'slack' ||
+    value === 'microsoft-teams' ||
+    value === 'gmail' ||
+    value === 'outlook' ||
+    value === 'google-calendar' ||
+    value === 'outlook-calendar' ||
+    value === 'google-drive' ||
+    value === 'onedrive' ||
+    value === 'dropbox'
+  ) return value
+  throw invalid('ConnectorProviderInvalid', 'Connector provider is invalid.')
+}
+
+function requireText(value: string, label: string) {
+  if (typeof value !== 'string') {
+    throw invalid('DeveloperTextInvalid', `${label} must be a string.`)
+  }
+  const normalized = value.trim()
+  if (!normalized) throw invalid('DeveloperTextInvalid', `${label} is required.`)
+  return normalized
+}
+
+function readOptionalText(value: string, label: string, maximumLength: number) {
+  const normalized = requireText(value, label)
+  if (normalized.length > maximumLength || containsControlCharacter(normalized, true)) {
+    throw invalid('DeveloperTextInvalid', `${label} is invalid.`)
+  }
+  return normalized
+}
+
+function containsControlCharacter(value: string, allowNewline = false) {
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0
+    if (code < 32 && !(allowNewline && (code === 9 || code === 10 || code === 13))) {
+      return true
+    }
+    if (code === 127) return true
+  }
+  return false
+}
+
+function readScopes(values: readonly ApiScope[]) {
+  if (!Array.isArray(values) || values.length === 0 || values.length > API_SCOPES.length) {
+    throw invalid('ApiScopesInvalid', 'At least one API scope is required.')
+  }
+  const allowed = new Set<string>(API_SCOPES)
+  const scopes: ApiScope[] = []
+  for (const value of values) {
+    if (!allowed.has(value)) {
+      throw invalid('ApiScopesInvalid', `API scope "${String(value)}" is invalid.`)
+    }
+    if (!scopes.includes(value)) scopes.push(value)
+  }
+  return scopes.sort()
+}
+
+function readConnectorScopes(values: readonly string[]) {
+  if (!Array.isArray(values) || values.length === 0 || values.length > 64) {
+    throw invalid('ConnectorScopesInvalid', 'At least one connector scope is required.')
+  }
+  const scopes: string[] = []
+  for (const value of values) {
+    const normalized = requireText(value, 'Connector scope')
+    if (
+      normalized.length > 160 ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u.test(normalized)
+    ) {
+      throw invalid('ConnectorScopeInvalid', `Connector scope "${normalized}" is invalid.`)
+    }
+    if (!scopes.includes(normalized)) scopes.push(normalized)
+  }
+  return scopes.sort()
+}
+
+function assertRequiredScopes(
+  grantedScopes: readonly ApiScope[],
+  requiredScopes: readonly ApiScope[] | undefined,
+) {
+  if (!requiredScopes) return
+  const required = readScopes(requiredScopes)
+  const granted = new Set(grantedScopes)
+  const missing = required.filter((scope) => !granted.has(scope))
+  if (missing.length > 0) {
+    throw forbidden(
+      'ApiScopeInsufficient',
+      `Credential is missing required scope: ${missing.join(', ')}.`,
+    )
+  }
+}
+
+function readFutureTimestamp(value: string, now: Date, label: string) {
+  const timestamp = readTimestamp(value, label)
+  if (Date.parse(timestamp) <= now.getTime()) {
+    throw invalid('DeveloperExpiryInvalid', `${label} must be in the future.`)
+  }
+  return timestamp
+}
+
+function readTimestamp(value: string, label: string) {
+  const normalized = requireText(value, label)
+  const milliseconds = Date.parse(normalized)
+  if (!Number.isFinite(milliseconds)) {
+    throw invalid('DeveloperTimestampInvalid', `${label} is invalid.`)
+  }
+  return new Date(milliseconds).toISOString()
+}
+
+function toEpochSeconds(timestamp: string) {
+  return Math.floor(Date.parse(timestamp) / 1_000)
+}
+
+function readPositiveInteger(value: number, label: string, maximum = Number.MAX_SAFE_INTEGER) {
+  if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
+    throw invalid(
+      'DeveloperNumberInvalid',
+      `${label} must be a positive integer no greater than ${maximum}.`,
+    )
+  }
+  return value
+}
+
+function readHttpStatus(value: number) {
+  if (!Number.isSafeInteger(value) || value < 100 || value > 599) {
+    throw invalid('WebhookResponseStatusInvalid', 'Webhook response status is invalid.')
+  }
+  return value
+}
+
+function readHttpsUrl(value: string, label: string) {
+  const normalized = requireText(value, label)
+  let url: URL
+  try {
+    url = new URL(normalized)
+  } catch {
+    throw invalid('DeveloperUrlInvalid', `${label} is invalid.`)
+  }
+  if (
+    url.protocol !== 'https:' ||
+    url.username ||
+    url.password ||
+    !url.hostname ||
+    normalized.length > 2_048
+  ) {
+    throw invalid(
+      'DeveloperUrlInvalid',
+      `${label} must be an HTTPS URL without embedded credentials.`,
+    )
+  }
+  return url.toString()
+}
+
+function readOAuthGrantTypes(values: OAuthAppSummary['grantTypes']) {
+  if (!Array.isArray(values) || values.length === 0) {
+    throw invalid('OAuthGrantTypesInvalid', 'At least one OAuth grant type is required.')
+  }
+  const allowed = new Set(['client_credentials'])
+  const grantTypes: OAuthAppSummary['grantTypes'] = []
+  for (const value of values) {
+    if (!allowed.has(value)) {
+      throw invalid('OAuthGrantTypesInvalid', `OAuth grant type "${String(value)}" is invalid.`)
+    }
+    if (!grantTypes.includes(value)) grantTypes.push(value)
+  }
+  return grantTypes.sort()
+}
+
+function readEventTypes(values: WebhookSubscription['eventTypes']) {
+  if (!Array.isArray(values) || values.length === 0 || values.length > 32) {
+    throw invalid('WebhookEventTypesInvalid', 'At least one Webhook event type is required.')
+  }
+  const allowed = new Set<WebhookSubscription['eventTypes'][number]>([
+    'work-item.created',
+    'work-item.updated',
+    'work-item.deleted',
+    'external-link.created',
+    'external-link.updated',
+    'sync-conflict.created',
+    'sync-conflict.resolved',
+    'import.completed',
+    'import.failed',
+  ])
+  const eventTypes: WebhookSubscription['eventTypes'] = []
+  for (const value of values) {
+    if (!allowed.has(value)) {
+      throw invalid('WebhookEventTypeInvalid', `Webhook event type "${String(value)}" is invalid.`)
+    }
+    if (!eventTypes.includes(value)) eventTypes.push(value)
+  }
+  return eventTypes.sort()
+}
+
+function assertWebhookEventScopes(
+  eventTypes: readonly WebhookSubscription['eventTypes'][number][],
+  scopes: readonly ApiScope[],
+) {
+  const requiredScopes = new Set<ApiScope>()
+  for (const eventType of eventTypes) {
+    if (eventType.startsWith('work-item.')) {
+      requiredScopes.add('work-items:read')
+    } else if (
+      eventType.startsWith('external-link.') ||
+      eventType.startsWith('sync-conflict.')
+    ) {
+      requiredScopes.add('integrations:read')
+    } else if (eventType.startsWith('import.')) {
+      requiredScopes.add('imports:read')
+    }
+  }
+  const missingScopes = [...requiredScopes].filter((scope) => !scopes.includes(scope))
+  if (missingScopes.length > 0) {
+    throw invalid(
+      'WebhookEventScopeInvalid',
+      `Webhook event types require scope: ${missingScopes.sort().join(', ')}.`,
+    )
+  }
+}
+
+function eventTypeMatches(pattern: string, eventType: string) {
+  return pattern === eventType
+}
+
+function readWebhookEvent(
+  event: WebhookEventEnvelope,
+  expectedWorkspaceId: string,
+) {
+  if (!isRecord(event)) {
+    throw invalid('WebhookEventInvalid', 'Webhook event must be an object.')
+  }
+  const id = readIdentifier(event.id, 'Webhook event ID')
+  const type = readEventTypes([event.type])[0]!
+  if (event.apiVersion !== '2026-07-01') {
+    throw invalid('WebhookApiVersionInvalid', 'Webhook API version is invalid.')
+  }
+  const apiVersion = event.apiVersion
+  const occurredAt = readTimestamp(event.occurredAt, 'Webhook event occurrence')
+  const workspaceId = readIdentifier(event.workspaceId, 'Webhook event Workspace ID')
+  if (workspaceId !== expectedWorkspaceId) {
+    throw forbidden(
+      'WebhookWorkspaceMismatch',
+      'Webhook event belongs to another Workspace.',
+    )
+  }
+  const data = cloneJsonValue(event.data)
+  return {
+    id,
+    type,
+    apiVersion,
+    occurredAt,
+    workspaceId,
+    data,
+  } satisfies WebhookEventEnvelope
+}
+
+function readWebhookEventTeamId(event: WebhookEventEnvelope) {
+  if (
+    !isRecord(event.data) ||
+    !isRecord(event.data.metadata) ||
+    event.data.metadata.teamId === undefined
+  ) {
+    throw invalid(
+      'WebhookEventTeamScopeMissing',
+      'Webhook event metadata must contain its Team ID.',
+    )
+  }
+  return readIdentifier(
+    event.data.metadata.teamId as string,
+    'Webhook event Team ID',
+  )
+}
+
+function readWebhookSubscriptionStatus(value: WebhookSubscription['status']) {
+  if (value === 'active' || value === 'paused' || value === 'disabled') return value
+  throw invalid('WebhookSubscriptionStatusInvalid', 'Webhook subscription status is invalid.')
+}
+
+function readWebhookDeliveryStatus(value: WebhookDelivery['status']) {
+  if (
+    value === 'pending' ||
+    value === 'retrying' ||
+    value === 'delivered' ||
+    value === 'failed'
+  ) return value
+  throw invalid('WebhookDeliveryStatusInvalid', 'Webhook delivery status is invalid.')
+}
+
+function readConnectorCategory(value: ConnectorInstallation['category']) {
+  if (
+    value === 'source-control' ||
+    value === 'chat' ||
+    value === 'email' ||
+    value === 'calendar' ||
+    value === 'cloud-storage'
+  ) return value
+  throw invalid('ConnectorCategoryInvalid', 'Connector category is invalid.')
+}
+
+function readConnectorStatus(value: ConnectorInstallation['status']) {
+  if (
+    value === 'connected' ||
+    value === 'needs-reauth' ||
+    value === 'degraded' ||
+    value === 'disconnected' ||
+    value === 'conflict'
+  ) return value
+  throw invalid('ConnectorStatusInvalid', 'Connector status is invalid.')
+}
+
+function readConnectorCredentialReplacementReason(
+  value: NonNullable<RecoverConnectorRequest['reason']>,
+) {
+  if (
+    value === 'reauthorization' ||
+    value === 'refresh' ||
+    value === 'recovery'
+  ) return value
+  throw invalid(
+    'ConnectorCredentialReplacementReasonInvalid',
+    'Connector credential replacement reason is invalid.',
+  )
+}
+
+function sanitizeConnectorProblem(value: unknown): NonNullable<
+  ConnectorInstallation['lastError']
+> {
+  if (!isRecord(value)) {
+    throw invalid('ConnectorProblemInvalid', 'Connector error must be an object.')
+  }
+  const status = readHttpStatus(value.status as number)
+  const code = readApiProblemCode(value.code)
+  if (typeof value.retryable !== 'boolean') {
+    throw invalid('ConnectorProblemInvalid', 'Connector retryable flag is invalid.')
+  }
+  const descriptor = describeConnectorProblem(code, status, value.retryable)
+  return {
+    type: `https://docs.mukuroji.app/problems/${code}`,
+    title: descriptor.title,
+    status,
+    code,
+    detail: descriptor.detail,
+    requestId: 'provider-error',
+    retryable: value.retryable,
+  }
+}
+
+function readApiProblemCode(value: unknown): NonNullable<
+  ConnectorInstallation['lastError']
+>['code'] {
+  if (
+    value === 'invalid_request' ||
+    value === 'authentication_required' ||
+    value === 'invalid_credentials' ||
+    value === 'insufficient_scope' ||
+    value === 'forbidden' ||
+    value === 'not_found' ||
+    value === 'conflict' ||
+    value === 'idempotency_conflict' ||
+    value === 'validation_failed' ||
+    value === 'rate_limited' ||
+    value === 'temporarily_unavailable' ||
+    value === 'internal_error'
+  ) {
+    return value
+  }
+  throw invalid('ConnectorProblemInvalid', 'Connector error code is invalid.')
+}
+
+function describeConnectorProblem(
+  code: NonNullable<ConnectorInstallation['lastError']>['code'],
+  status: number,
+  retryable: boolean,
+) {
+  if (code === 'rate_limited' || status === 429) {
+    return {
+      title: 'Provider rate limit reached',
+      detail: 'The provider request can be retried after its rate limit resets.',
+    }
+  }
+  if (
+    code === 'authentication_required' ||
+    code === 'invalid_credentials' ||
+    status === 401
+  ) {
+    return {
+      title: 'Provider authorization required',
+      detail: 'Reconnect the provider before retrying this operation.',
+    }
+  }
+  if (retryable || code === 'temporarily_unavailable' || status >= 500) {
+    return {
+      title: 'Provider temporarily unavailable',
+      detail: 'The provider request could not be completed and may be retried.',
+    }
+  }
+  return {
+    title: 'Provider request failed',
+    detail: 'The provider rejected the request.',
+  }
+}
+
+function connectorProviderMatchesCategory(
+  provider: ConnectorInstallation['provider'],
+  category: ConnectorInstallation['category'],
+) {
+  const categories: Record<
+    ConnectorInstallation['provider'],
+    ConnectorInstallation['category']
+  > = {
+    github: 'source-control',
+    gitlab: 'source-control',
+    slack: 'chat',
+    'microsoft-teams': 'chat',
+    gmail: 'email',
+    outlook: 'email',
+    'google-calendar': 'calendar',
+    'outlook-calendar': 'calendar',
+    'google-drive': 'cloud-storage',
+    onedrive: 'cloud-storage',
+    dropbox: 'cloud-storage',
+  }
+  return categories[provider] === category
+}
+
+function readExternalResourceType(value: ExternalWorkItemLink['resourceType']) {
+  if (
+    value === 'issue' ||
+    value === 'merge-request' ||
+    value === 'commit' ||
+    value === 'deploy'
+  ) return value
+  throw invalid('ExternalResourceTypeInvalid', 'External resource type is invalid.')
+}
+
+function readExternalSyncDirection(value: ExternalWorkItemLink['syncDirection']) {
+  if (
+    value === 'inbound' ||
+    value === 'outbound' ||
+    value === 'bidirectional' ||
+    value === 'none'
+  ) return value
+  throw invalid('ExternalSyncDirectionInvalid', 'External sync direction is invalid.')
+}
+
+function readImportFormat(value: ImportJob['format']) {
+  if (value === 'csv' || value === 'json') return value
+  throw invalid('ImportFormatInvalid', 'Import format is invalid.')
+}
+
+function readImportMapping(value: ImportJob['mapping']) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 256) {
+    throw invalid('ImportMappingInvalid', 'Import mapping must be a non-empty array.')
+  }
+  const seenTargets = new Set<string>()
+  const mapping = value.map((field) => {
+    if (!isRecord(field)) {
+      throw invalid('ImportMappingInvalid', 'Import mapping field is invalid.')
+    }
+    const sourceField = readName(field.sourceField as string, 'Import source field')
+    const targetField = readName(field.targetField as string, 'Import target field')
+    if (seenTargets.has(targetField)) {
+      throw invalid(
+        'ImportMappingInvalid',
+        `Import target field "${targetField}" is mapped more than once.`,
+      )
+    }
+    seenTargets.add(targetField)
+    const transform = field.transform
+    if (
+      transform !== undefined &&
+      transform !== 'none' &&
+      transform !== 'trim' &&
+      transform !== 'lowercase' &&
+      transform !== 'uppercase' &&
+      transform !== 'parse-date' &&
+      transform !== 'parse-number' &&
+      transform !== 'split-comma'
+    ) {
+      throw invalid('ImportMappingInvalid', 'Import mapping transform is invalid.')
+    }
+    if (field.required !== undefined && typeof field.required !== 'boolean') {
+      throw invalid('ImportMappingInvalid', 'Import mapping required flag is invalid.')
+    }
+    return cloneJsonValue({
+      sourceField,
+      targetField,
+      ...(transform === undefined ? {} : { transform }),
+      ...(field.required === undefined ? {} : { required: field.required }),
+      ...(field.defaultValue === undefined
+        ? {}
+        : { defaultValue: cloneJsonValue(field.defaultValue) }),
+    })
+  })
+  return mapping as ImportJob['mapping']
+}
+
+function readImportJobStatus(value: ImportJob['status']) {
+  if (
+    value === 'queued' ||
+    value === 'validating' ||
+    value === 'running' ||
+    value === 'completed' ||
+    value === 'failed' ||
+    value === 'cancelled'
+  ) return value
+  throw invalid('ImportJobStatusInvalid', 'Import job status is invalid.')
+}
+
+function assertImportJobStorable(job: ImportJob) {
+  if (Buffer.byteLength(JSON.stringify(job), 'utf8') > 128 * 1024) {
+    throw new DeveloperPlatformError(
+      413,
+      'ImportJobTooLarge',
+      'Import job metadata exceeds the safe persistence limit.',
+    )
+  }
+}
+
+function assertImportTransition(
+  current: ImportJob['status'],
+  next: ImportJob['status'],
+) {
+  if (current === next) return
+  const transitions: Record<ImportJob['status'], readonly ImportJob['status'][]> = {
+    queued: ['validating', 'running', 'failed', 'cancelled'],
+    validating: ['running', 'completed', 'failed', 'cancelled'],
+    running: ['completed', 'failed', 'cancelled'],
+    completed: [],
+    failed: [],
+    cancelled: [],
+  }
+  if (!transitions[current].includes(next)) {
+    throw conflict(
+      'ImportJobTransitionInvalid',
+      `Import job cannot transition from ${current} to ${next}.`,
+    )
+  }
+}
+
+function readIdempotencyKey(value: string) {
+  const normalized = requireText(value, 'Idempotency key')
+  if (normalized.length > 256 || containsControlCharacter(normalized)) {
+    throw invalid('IdempotencyKeyInvalid', 'Idempotency key is invalid.')
+  }
+  return normalized
+}
+
+function normalizeCredentialStatus<
+  T extends {
+    status: 'active' | 'expired' | 'revoked'
+    expiresAt?: string
+  },
+>(credential: T, now: Date): T {
+  if (
+    credential.status === 'active' &&
+    credential.expiresAt &&
+    Date.parse(credential.expiresAt) <= now.getTime()
+  ) {
+    return { ...credential, status: 'expired' } as T
+  }
+  return credential
+}
+
+function readRecordValue<T>(
+  record: DeveloperPlatformRecord,
+  expectedEntryType: DeveloperPlatformEntryType,
+) {
+  if (
+    record.entryType !== expectedEntryType ||
+    record.value === null ||
+    record.value === undefined
+  ) {
+    throw persistenceInvalid(`Developer ${expectedEntryType} row is invalid.`)
+  }
+  return record.value as T
+}
+
+function readStoredRecord(value: Record<string, unknown>) {
+  if (
+    typeof value.workspaceId !== 'string' ||
+    typeof value.recordKey !== 'string' ||
+    typeof value.entryType !== 'string' ||
+    !isDeveloperPlatformEntryType(value.entryType) ||
+    !Number.isSafeInteger(value.version) ||
+    Number(value.version) <= 0 ||
+    value.value === undefined ||
+    !isOptionalSha256Digest(value.connectorCredentialDigest) ||
+    !isOptionalSha256Digest(value.connectorOAuthStateDigest) ||
+    !isOptionalNonNegativeInteger(value.connectorCredentialRevision) ||
+    !isOptionalNonNegativeInteger(value.connectorOAuthStateRevision) ||
+    !isOptionalNonNegativeInteger(value.activeLinkCount)
+  ) {
+    throw persistenceInvalid('Developer platform row is invalid.')
+  }
+  return value as DeveloperPlatformRecord
+}
+
+function isOptionalSha256Digest(value: unknown) {
+  return value === undefined ||
+    (typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value))
+}
+
+function isOptionalNonNegativeInteger(value: unknown) {
+  return value === undefined ||
+    (Number.isSafeInteger(value) && Number(value) >= 0)
+}
+
+function readWorkItemLinkFenceCount(
+  record: DeveloperPlatformRecord | undefined,
+) {
+  if (record === undefined) return 0
+  if (
+    record.entryType !== 'work-item-link-fence' ||
+    !Number.isSafeInteger(record.activeLinkCount) ||
+    Number(record.activeLinkCount) < 0
+  ) {
+    throw persistenceInvalid('Work Item external-link fence is invalid.')
+  }
+  return Number(record.activeLinkCount)
+}
+
+function isRecordExpired(record: DeveloperPlatformRecord, now: Date) {
+  return record.expiresAt !== undefined &&
+    record.expiresAt <= Math.floor(now.getTime() / 1_000)
+}
+
+function readStoredRecordLocator(
+  value: Record<string, unknown>,
+  expectedLookupKey: string,
+): DeveloperPlatformRecordLocator {
+  if (
+    typeof value.workspaceId !== 'string' ||
+    typeof value.recordKey !== 'string' ||
+    value.lookupKey !== expectedLookupKey ||
+    typeof value.lookupSortKey !== 'string'
+  ) {
+    throw persistenceInvalid('Developer platform lookup locator is invalid.')
+  }
+  return {
+    workspaceId: value.workspaceId,
+    recordKey: value.recordKey,
+    lookupKey: expectedLookupKey,
+    lookupSortKey: value.lookupSortKey,
+  }
+}
+
+function isDeveloperPlatformEntryType(value: string): value is DeveloperPlatformEntryType {
+  return value === 'api-key' ||
+    value === 'oauth-app' ||
+    value === 'oauth-token' ||
+    value === 'webhook-subscription' ||
+    value === 'webhook-delivery' ||
+    value === 'webhook-delivery-index' ||
+    value === 'connector-installation' ||
+    value === 'external-link' ||
+    value === 'external-link-claim' ||
+    value === 'work-item-link-fence' ||
+    value === 'import-job' ||
+    value === 'idempotency' ||
+    value === 'rate-limit'
+}
+
+function sortByCreatedAt<T extends { createdAt: string }>(values: readonly T[]) {
+  return [...values].sort(compareCreatedAtDescending)
+}
+
+function compareCreatedAtDescending(
+  left: { createdAt: string; id?: string },
+  right: { createdAt: string; id?: string },
+) {
+  return right.createdAt.localeCompare(left.createdAt) ||
+    String(right.id ?? '').localeCompare(String(left.id ?? ''))
+}
+
+function stableJson(value: unknown) {
+  return JSON.stringify(sortJsonValue(value))
+}
+
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJsonValue)
+  if (!isRecord(value)) return value
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, child]) => child !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, sortJsonValue(child)]),
+  )
+}
+
+function clone<T>(value: T): T {
+  return structuredClone(value)
+}
+
+function cloneJsonValue(value: unknown) {
+  try {
+    const encoded = JSON.stringify(value)
+    if (encoded === undefined) {
+      throw new Error('JSON value is undefined.')
+    }
+    return JSON.parse(encoded) as unknown
+  } catch (error) {
+    throw invalid('DeveloperJsonInvalid', 'Value must be JSON serializable.', error)
+  }
+}
+
+function estimateStoredRecordBytes(record: DeveloperPlatformRecord) {
+  return Buffer.byteLength(JSON.stringify(record), 'utf8')
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isNamedError(error: unknown, name: string) {
+  return error instanceof Error && error.name === name
+}
+
+function isTransactionConditionFailure(error: unknown) {
+  if (!isNamedError(error, 'TransactionCanceledException')) return false
+  if (!isRecord(error)) return true
+  const reasons = error.CancellationReasons
+  return !Array.isArray(reasons) ||
+    reasons.some((reason) => isRecord(reason) && reason.Code === 'ConditionalCheckFailed')
+}
+
+function createDeveloperPlatformDocumentClient() {
+  const endpoint = process.env.DYNAMODB_ENDPOINT ??
+    process.env.AWS_ENDPOINT_URL_DYNAMODB ??
+    process.env.AWS_ENDPOINT_URL
+  const client = new DynamoDBClient({
+    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
+    ...(endpoint
+      ? {
+          endpoint,
+          credentials: {
+            accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
+            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
+          },
+        }
+      : {}),
+  })
+  return DynamoDBDocumentClient.from(client, {
+    marshallOptions: { removeUndefinedValues: true },
+  })
+}
+
+function readKmsEnvelopePurpose(context: string): KmsEnvelopePurpose {
+  if (context.startsWith('mukuroji:webhook:')) return 'webhook'
+  if (context.startsWith('mukuroji:connector:')) return 'connector'
+  if (
+    context.startsWith('mukuroji:idempotency-response:') ||
+    context.startsWith('mukuroji:platform-state:') ||
+    context === WEBHOOK_CURSOR_CONTEXT
+  ) {
+    return 'platform-state'
+  }
+  throw new DeveloperPlatformError(
+    500,
+    'SecretProtectionPurposeInvalid',
+    'Secret protection context has no configured purpose.',
+  )
+}
+
+function readKmsKeyId(keyIds: KmsEnvelopeKeyIds, purpose: KmsEnvelopePurpose) {
+  const keyId = purpose === 'webhook'
+    ? keyIds.webhook
+    : purpose === 'connector'
+      ? keyIds.connector
+      : keyIds.platformState
+  if (!keyId) {
+    throw new DeveloperPlatformError(
+      500,
+      'SecretProtectorKmsKeyMissing',
+      `KMS key ID for ${purpose} secret protection is required.`,
+    )
+  }
+  return keyId
+}
+
+function createKmsEncryptionContext(
+  purpose: KmsEnvelopePurpose,
+  context: string,
+) {
+  return {
+    'mukuroji:service': 'developer-platform',
+    'mukuroji:purpose': purpose,
+    'mukuroji:context-digest': digestText(`kms-envelope-context-v1\0${context}`),
+  }
+}
+
+function createKmsEnvelopeAad(
+  purpose: KmsEnvelopePurpose,
+  keyId: string,
+  context: string,
+) {
+  return `mukuroji:kms-envelope:v1\0${purpose}\0${keyId}\0${context}`
+}
+
+function createDefaultKmsEnvelopeClient(): KmsEnvelopeClient {
+  let loadedSdk: Promise<{
+    client: { send(command: unknown): Promise<Record<string, unknown>> }
+    sdk: Record<string, new (input: Record<string, unknown>) => unknown>
+  }> | undefined
+  const loadSdk = async () => {
+    loadedSdk ??= (async () => {
+      const packageName = ['@aws-sdk', 'client-kms'].join('/')
+      const sdk = await import(packageName) as Record<string, unknown>
+      const KmsClient = sdk.KMSClient
+      if (typeof KmsClient !== 'function') throw new Error('AWS KMS client is unavailable.')
+      const client = new (
+        KmsClient as new (input: Record<string, unknown>) => {
+          send(command: unknown): Promise<Record<string, unknown>>
+        }
+      )({})
+      return {
+        client,
+        sdk: sdk as Record<string, new (input: Record<string, unknown>) => unknown>,
+      }
+    })()
+    return loadedSdk
+  }
+  return {
+    async generateDataKey(request) {
+      const { client, sdk } = await loadSdk()
+      const Command = sdk.GenerateDataKeyCommand
+      if (typeof Command !== 'function') throw new Error('GenerateDataKey is unavailable.')
+      const response = await client.send(new Command({
+        KeyId: request.keyId,
+        KeySpec: 'AES_256',
+        EncryptionContext: request.encryptionContext,
+      }))
+      if (
+        !(response.Plaintext instanceof Uint8Array) ||
+        !(response.CiphertextBlob instanceof Uint8Array)
+      ) {
+        throw new Error('GenerateDataKey returned incomplete key material.')
+      }
+      return {
+        plaintext: response.Plaintext,
+        ciphertextBlob: response.CiphertextBlob,
+      }
+    },
+    async decrypt(request) {
+      const { client, sdk } = await loadSdk()
+      const Command = sdk.DecryptCommand
+      if (typeof Command !== 'function') throw new Error('Decrypt is unavailable.')
+      const response = await client.send(new Command({
+        KeyId: request.keyId,
+        CiphertextBlob: request.ciphertextBlob,
+        EncryptionContext: request.encryptionContext,
+      }))
+      if (!(response.Plaintext instanceof Uint8Array)) {
+        throw new Error('Decrypt returned no plaintext key.')
+      }
+      return { plaintext: response.Plaintext }
+    },
+  }
+}
+
+/** Environment に応じて local AES または production KMS envelope protector を作成します。 */
+export function createDefaultSecretProtector() {
+  const configuredRawKey = process.env.DEVELOPER_PLATFORM_SECRET_PROTECTOR_KEY?.trim()
+  const keyIds = {
+    webhook: process.env.DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID?.trim(),
+    connector: process.env.DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID?.trim(),
+    platformState: process.env.DEVELOPER_PLATFORM_STATE_KMS_KEY_ID?.trim(),
+  }
+  const production = process.env.NODE_ENV === 'production' ||
+    Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME) ||
+    Boolean(process.env.AWS_EXECUTION_ENV)
+  if (production && configuredRawKey) {
+    throw new DeveloperPlatformError(
+      500,
+      'RawSecretProtectorKeyForbidden',
+      'Raw developer platform secret protector keys are forbidden in production.',
+    )
+  }
+  if (production || Object.values(keyIds).some(Boolean)) {
+    return new KmsEnvelopeSecretProtector(
+      createDefaultKmsEnvelopeClient(),
+      {
+        ...(keyIds.webhook ? { webhook: keyIds.webhook } : {}),
+        ...(keyIds.connector ? { connector: keyIds.connector } : {}),
+        ...(keyIds.platformState ? { platformState: keyIds.platformState } : {}),
+      },
+    )
+  }
+  if (configuredRawKey) return new LocalAesGcmSecretProtector(configuredRawKey)
+  return new LocalAesGcmSecretProtector(
+    'mukuroji-local-developer-platform-secret-protector-key',
+  )
+}
+
+function invalid(
+  code: string,
+  message: string,
+  cause?: unknown,
+) {
+  return new DeveloperPlatformError(
+    400,
+    code,
+    message,
+    cause === undefined ? undefined : { cause },
+  )
+}
+
+function unauthorized(code: string, message: string) {
+  return new DeveloperPlatformError(401, code, message)
+}
+
+function forbidden(code: string, message: string) {
+  return new DeveloperPlatformError(403, code, message)
+}
+
+function notFound(code: string, message: string) {
+  return new DeveloperPlatformError(404, code, message)
+}
+
+function conflict(code: string, message: string) {
+  return new DeveloperPlatformError(409, code, message)
+}
+
+function externalLinkDeletionConflict() {
+  return conflict(
+    'ExternalWorkItemLinkSyncConflict',
+    'Resolve or ignore the synchronization conflict before deleting this external link.',
+  )
+}
+
+function persistenceConflict() {
+  return new DeveloperPlatformError(
+    409,
+    'DeveloperPlatformConcurrentMutation',
+    'Developer platform resource changed. Reload and try again.',
+  )
+}
+
+function persistenceInvalid(message: string) {
+  return new DeveloperPlatformError(503, 'DeveloperPlatformDataInvalid', message)
+}
+
+function toPersistenceError(error: unknown) {
+  if (error instanceof DeveloperPlatformError) return error
+  return new DeveloperPlatformError(
+    503,
+    'DeveloperPlatformUnavailable',
+    'Developer platform storage is unavailable.',
+    { cause: error },
+  )
+}

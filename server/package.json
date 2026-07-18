@@ -3,7 +3,8 @@
   "scripts": {
     "dev": "bun run --hot src/index.ts",
     "build:lambda": "bun build src/index.ts --target node --format esm --outfile dist/lambda/index.mjs",
-    "test": "bun test --max-concurrency 1 src/index.test.ts src/workspace-access.test.ts src/audit.test.ts src/audit-integration.test.ts src/canonical-work-item.test.ts src/collaboration.test.ts src/collaboration-projection-handler.test.ts src/file-proofing.test.ts src/notification-schedule-handler.test.ts src/notifications.test.ts src/planning.test.ts src/realtime-ticket.test.ts src/work-item-configuration.test.ts src/workspace-search.test.ts scripts/backfill-audit-events.test.ts scripts/backfill-workspace-search.test.ts",
+    "build:connector-lambda": "bun build src/connector-handler.ts --target node --format esm --outfile dist/lambda/connector-handler.mjs",
+    "test": "bun test --max-concurrency 1 src/index.test.ts src/workspace-access.test.ts src/audit.test.ts src/audit-integration.test.ts src/canonical-work-item.test.ts src/collaboration.test.ts src/collaboration-projection-handler.test.ts src/connectors.test.ts src/connector-oauth.test.ts src/connector-authorization-runtime.test.ts src/connector-runtime-configuration.test.ts src/connector-sync-aws.test.ts src/connector-sync-worker.test.ts src/connector-sync-runtime.test.ts src/connector-sync-persistence.test.ts src/developer-platform.test.ts src/file-proofing.test.ts src/notification-schedule-handler.test.ts src/notifications.test.ts src/planning.test.ts src/public-api.test.ts src/realtime-ticket.test.ts src/webhook-authorization.test.ts src/webhook-delivery.test.ts src/webhook-handler.test.ts src/work-item-configuration.test.ts src/work-item-import.test.ts src/work-item-transfer.test.ts src/workspace-search.test.ts scripts/backfill-audit-events.test.ts scripts/backfill-workspace-search.test.ts",
     "audit:backfill": "bun run scripts/backfill-audit-events.ts",
     "search:backfill": "bun run scripts/backfill-workspace-search.ts"
   },
@@ -13,6 +14,7 @@
     "@aws-sdk/client-cognito-identity-provider": "^3.1057.0",
     "@aws-sdk/client-dynamodb": "^3.1057.0",
     "@aws-sdk/client-s3": "^3.1057.0",
+    "@aws-sdk/client-sqs": "^3.1057.0",
     "@aws-sdk/lib-dynamodb": "^3.1057.0",
     "@aws-sdk/s3-request-presigner": "^3.1057.0",
     "hono": "^4.12.21"

@@ -27,8 +27,10 @@ import {
 import {
   app,
   AwsCognitoClient,
+  canManageWorkItemImports,
   CognitoServiceError,
   configureApiClientsForTest,
+  createImportRowCreateIdentity,
   DynamoDbDashboardSummaryClient,
   DynamoDbProjectDirectoryClient,
   DynamoDbProjectTasksClient,
@@ -36,6 +38,7 @@ import {
   FlociCognitoClient,
   handler,
   resetApiClientsForTest,
+  toWorkItemImportWorkerError,
   WorkspaceAccessError,
   type ProjectRole,
   type WorkspaceAccessClient,
@@ -51,6 +54,87 @@ import { InMemoryPlanningClient } from './planning'
 
 afterEach(() => {
   resetApiClientsForTest()
+})
+
+test('scopes deterministic import row identities to the Workspace actor', () => {
+  const context = {
+    requestId: 'request-import-row',
+    idempotencyKey: 'import-same-client-key-row-1',
+  }
+  const input = {
+    title: 'Imported row',
+    assigneeUserId: 'assignee@example.com',
+    dueDate: '2026-07-31',
+    priority: 'medium',
+  } as const
+  const firstActor = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-1',
+    context,
+    'team-1',
+    input,
+  )
+  const firstActorRetry = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-1',
+    context,
+    'team-1',
+    input,
+  )
+  const secondActor = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-2',
+    context,
+    'team-1',
+    input,
+  )
+  const changedPayload = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-1',
+    context,
+    'team-1',
+    { ...input, title: 'Different imported row' },
+  )
+
+  expect(firstActorRetry).toEqual(firstActor)
+  expect(secondActor.issueId).not.toBe(firstActor.issueId)
+  expect(secondActor.requestDigest).not.toBe(firstActor.requestDigest)
+  expect(changedPayload.issueId).toBe(firstActor.issueId)
+  expect(changedPayload.requestDigest).not.toBe(firstActor.requestDigest)
+})
+
+test('requires current Workspace administration for queued import execution', () => {
+  expect(canManageWorkItemImports('owner')).toBe(true)
+  expect(canManageWorkItemImports('admin')).toBe(true)
+  expect(canManageWorkItemImports('member')).toBe(false)
+  expect(canManageWorkItemImports('guest')).toBe(false)
+})
+
+test('retries import configuration conflicts but terminalizes revoked access', () => {
+  expect(toWorkItemImportWorkerError(new WorkItemConfigurationError(
+    409,
+    'WorkItemConfigurationRevisionConflict',
+    'Configuration changed concurrently.',
+  ))).toMatchObject({
+    code: 'ImportConcurrentMutation',
+    retryable: true,
+  })
+  expect(toWorkItemImportWorkerError(new WorkspaceAccessError(
+    403,
+    'WorkspaceRoleDenied',
+    'Workspace management permission changed.',
+  ))).toMatchObject({
+    code: 'ImportAuthorizationRejected',
+    retryable: false,
+  })
+  expect(toWorkItemImportWorkerError(new WorkspaceAccessError(
+    409,
+    'WorkspaceAssigneeInactive',
+    'Only active Workspace members can be assigned.',
+  ))).toMatchObject({
+    code: 'ImportValidationRejected',
+    retryable: false,
+  })
 })
 
 test('authorizes Work Item file list reads and returns server capabilities', async () => {
@@ -840,6 +924,127 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
   expect(sentInputs[0]).toMatchObject({
     TableName: 'issues-table',
     ConsistentRead: true,
+  })
+})
+
+test('returns an existing deterministic import row only when its request digest matches', async () => {
+  const digest = 'a'.repeat(64)
+  const issueId = `import-${'b'.repeat(48)}`
+  const existing = {
+    schemaVersion: 1,
+    revision: 1,
+    workflowSchemaVersion: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId,
+    importRequestDigest: digest,
+    sortOrder: 10,
+    title: 'Imported once',
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'member@example.com',
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-31',
+    priority: 'medium',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T00:00:00.000Z',
+  }
+  const documentClient = {
+    async send(command: { constructor: { name: string } }) {
+      if (command.constructor.name === 'QueryCommand') return { Items: [] }
+      if (command.constructor.name === 'GetCommand') return { Item: existing }
+      const error = new Error('conditional collision') as Error & {
+        CancellationReasons: Array<{ Code: string }>
+      }
+      error.name = 'TransactionCanceledException'
+      error.CancellationReasons = [
+        { Code: 'ConditionalCheckFailed' },
+        { Code: 'None' },
+      ]
+      throw error
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const input = {
+    title: 'Imported once',
+    assigneeUserId: 'member@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    dueDate: '2026-07-31',
+    priority: 'medium',
+    idempotentIssueId: issueId,
+    idempotentRequestDigest: digest,
+  }
+
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    input,
+    'member@example.com',
+  )).resolves.toMatchObject({ issue: { id: issueId, title: 'Imported once' } })
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    { ...input, idempotentRequestDigest: 'c'.repeat(64) },
+    'member@example.com',
+  )).rejects.toMatchObject({
+    status: 409,
+    code: 'IdempotentWorkItemCreateConflict',
+  })
+})
+
+test('accepts the deterministic public API Work Item ID namespace', async () => {
+  let transactionInput: TransactWriteCommandInput | undefined
+  const documentClient = {
+    async send(command: { constructor: { name: string }; input?: TransactWriteCommandInput }) {
+      if (command.constructor.name === 'QueryCommand') return { Items: [] }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        transactionInput = command.input
+        return {}
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const issueId = `api-${'d'.repeat(48)}`
+
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    {
+      title: 'Created through the public API',
+      assigneeUserId: 'member@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      dueDate: '2026-07-31',
+      priority: 'medium',
+      idempotentIssueId: issueId,
+      idempotentRequestDigest: 'e'.repeat(64),
+    },
+    'member@example.com',
+  )).resolves.toMatchObject({ issue: { id: issueId } })
+  expect(transactionInput?.TransactItems?.[0]?.Put?.Item).toMatchObject({
+    issueId,
+    importRequestDigest: 'e'.repeat(64),
   })
 })
 
@@ -7673,6 +7878,7 @@ test('DynamoDB Team and project Work Item clients read every page without a defa
 
 test('DynamoDB Work Item client increments revision with an atomic CAS update', async () => {
   const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  let preparedResponse: unknown
   const currentIssue = {
     schemaVersion: 1,
     revision: 1,
@@ -7737,6 +7943,20 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
       expectedRevision: 1,
     },
     'demo@example.com',
+    undefined,
+    {
+      async prepare(response) {
+        preparedResponse = response
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: { entryType: 'idempotency', value: { state: 'completed' } },
+            },
+          },
+        }
+      },
+    },
   )).resolves.toMatchObject({
     issue: { schemaVersion: 1, revision: 2, workflowStatusId: 'done' },
   })
@@ -7753,6 +7973,105 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
         '#revision = :expectedRevision',
     },
   })
+  expect(Array.isArray(transactItems) ? transactItems.at(-1) : undefined).toMatchObject({
+    Put: { TableName: 'DeveloperPlatformTable' },
+  })
+  expect(preparedResponse).toMatchObject({
+    status: 200,
+    body: { id: 'wireframe', revision: 2, workflowStatusId: 'done' },
+  })
+})
+
+test('DynamoDB Work Item delete atomically stores its replay receipt', async () => {
+  const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 3,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'obsolete',
+    sortOrder: 10,
+    title: 'Obsolete',
+    assigneeUserId: 'demo@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/20',
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  let preparedResponse: unknown
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentCommands.push({ input: command.input, name: command.constructor.name })
+      if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.deleteTeamIssue(
+    'workspace-1',
+    'core-team',
+    'obsolete',
+    3,
+    'demo@example.com',
+    undefined,
+    {
+      async prepare(response) {
+        preparedResponse = response
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: { entryType: 'idempotency', value: { state: 'completed' } },
+            },
+          },
+        }
+      },
+    },
+    {
+      transactWriteItem: {
+        Put: {
+          TableName: 'DeveloperPlatformTable',
+          Item: {
+            entryType: 'work-item-link-fence',
+            activeLinkCount: 0,
+          },
+        },
+      },
+    },
+  )).resolves.toMatchObject({ issue: { id: 'obsolete', revision: 3 } })
+
+  const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
+  const transactItems = transaction?.input.TransactItems
+  expect(Array.isArray(transactItems) ? transactItems[0] : undefined).toMatchObject({
+    Delete: {
+      TableName: 'IssuesTable',
+      ExpressionAttributeValues: { ':expectedRevision': 3 },
+    },
+  })
+  expect(Array.isArray(transactItems) ? transactItems[1] : undefined).toMatchObject({
+    Put: {
+      TableName: 'DeveloperPlatformTable',
+      Item: { entryType: 'work-item-link-fence', activeLinkCount: 0 },
+    },
+  })
+  expect(Array.isArray(transactItems) ? transactItems.at(-1) : undefined).toMatchObject({
+    Put: { TableName: 'DeveloperPlatformTable' },
+  })
+  expect(preparedResponse).toEqual({ status: 204, body: null })
 })
 
 test('DynamoDB Work Item client classifies configuration conflicts from the actual transaction layout', async () => {
