@@ -24,8 +24,13 @@ import {
   rotateDeveloperApiKey,
   rotateDeveloperOAuthApp,
   rotateDeveloperWebhook,
+  shouldRetainDeveloperPlatformMutationContext,
   updateDeveloperExternalLink,
 } from '../src/developer-platform/api'
+import {
+  createMutationRequestRunner,
+  type MutationRequestContext,
+} from '../src/api/mutationHeaders'
 import {
   developerPlatformResourcesFixture,
   issuedApiKeySecretFixture,
@@ -468,6 +473,108 @@ describe('Developer Platform API', () => {
       code: 'insufficient_scope',
       message: 'The actor cannot manage API credentials.',
       status: 403,
+    } satisfies Partial<DeveloperPlatformApiError>)
+  })
+
+  test('preserves retryable Problem Details across another successful mutation', async () => {
+    const contexts: MutationRequestContext[] = [
+      {
+        correlationId: 'correlation-retryable-1',
+        idempotencyKey: 'idempotency-retryable-1',
+      },
+      {
+        correlationId: 'correlation-retryable-2',
+        idempotencyKey: 'idempotency-retryable-2',
+      },
+    ]
+    let contextIndex = 0
+    const runner = createMutationRequestRunner(() => contexts[contextIndex++]!)
+    const observedContexts: MutationRequestContext[] = []
+
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          code: 'idempotency_conflict',
+          detail: 'The credential creation is still in progress.',
+          retryable: true,
+        }),
+        {
+          headers: { 'Content-Type': 'application/problem+json' },
+          status: 409,
+        },
+      )) as typeof fetch
+
+    await expect(runner.run(
+      'api-key:create',
+      'same-input',
+      async (context) => {
+        observedContexts.push(context)
+        return createDeveloperApiKey(
+          'access-token',
+          {
+            name: 'Retryable automation',
+            scopes: ['work-items:read'],
+          },
+          context,
+        )
+      },
+      shouldRetainDeveloperPlatformMutationContext,
+    )).rejects.toMatchObject({
+      code: 'idempotency_conflict',
+      retryable: true,
+      status: 409,
+    } satisfies Partial<DeveloperPlatformApiError>)
+
+    await runner.run(
+      'webhook:rotate',
+      'other-input',
+      async (context) => {
+        expect(context).toBe(contexts[1])
+      },
+      shouldRetainDeveloperPlatformMutationContext,
+    )
+
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(issuedApiKeySecretFixture), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 201,
+      })) as typeof fetch
+
+    await runner.run(
+      'api-key:create',
+      'same-input',
+      async (context) => {
+        observedContexts.push(context)
+        return createDeveloperApiKey(
+          'access-token',
+          {
+            name: 'Retryable automation',
+            scopes: ['work-items:read'],
+          },
+          context,
+        )
+      },
+      shouldRetainDeveloperPlatformMutationContext,
+    )
+
+    expect(observedContexts).toEqual([contexts[0], contexts[0]])
+    expect(contextIndex).toBe(2)
+  })
+
+  test('treats gateway 5xx responses without Problem Details as ambiguous', async () => {
+    globalThis.fetch = (async () =>
+      new Response('upstream unavailable', { status: 503 })) as typeof fetch
+
+    await expect(createDeveloperApiKey(
+      'access-token',
+      {
+        name: 'Gateway retry',
+        scopes: ['work-items:read'],
+      },
+      mutationContext,
+    )).rejects.toMatchObject({
+      retryable: true,
+      status: 503,
     } satisfies Partial<DeveloperPlatformApiError>)
   })
 })

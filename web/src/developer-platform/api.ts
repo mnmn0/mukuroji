@@ -283,12 +283,44 @@ export class DeveloperPlatformApiError extends Error {
    */
   readonly code?: string
 
-  constructor(status: number, message: string, code?: string) {
+  /**
+   * 同じ idempotency key で安全に再試行すべき失敗かどうかです。
+   */
+  readonly retryable: boolean
+
+  /**
+   * Developer Platform API error を作成します。
+   *
+   * @param status API response の HTTP status code です。
+   * @param message ユーザーへ表示できる secret-safe message です。
+   * @param code API が返した機械判定用 error code です。
+   * @param retryable 同じ logical mutation として再試行できるかどうかです。
+   */
+  constructor(
+    status: number,
+    message: string,
+    code?: string,
+    retryable = false,
+  ) {
     super(message)
     this.name = 'DeveloperPlatformApiError'
     this.status = status
     this.code = code
+    this.retryable = retryable
   }
+}
+
+/**
+ * Developer Platform mutation の idempotency context を retry まで保持するか判定します。
+ *
+ * Transport failure と retryable な Problem Details response は、server 側で mutation が
+ * commit 済みか判別できないため同じ context を再利用します。
+ *
+ * @param error mutation request が返した error です。
+ * @returns 同じ logical mutation context を保持する場合は true です。
+ */
+export function shouldRetainDeveloperPlatformMutationContext(error: unknown) {
+  return !(error instanceof DeveloperPlatformApiError) || error.retryable
 }
 
 const developerApiBaseUrl = trimTrailingSlash(
@@ -835,6 +867,7 @@ export async function exportDeveloperWorkItems(
         errorData?.detail?.trim() ||
         defaultDeveloperApiErrorMessage,
       errorData?.code,
+      isRetryableDeveloperApiResponse(response.status, errorData),
     )
   }
 
@@ -884,6 +917,7 @@ async function requestJson<T>(
         errorData?.detail?.trim() ||
         defaultDeveloperApiErrorMessage,
       errorData?.code,
+      isRetryableDeveloperApiResponse(response.status, errorData),
     )
   }
 
@@ -892,8 +926,20 @@ async function requestJson<T>(
 
 function readErrorResponse(
   value: unknown,
-): { code?: string; detail?: string; message?: string } | undefined {
+): {
+  code?: string
+  detail?: string
+  message?: string
+  retryable?: boolean
+} | undefined {
   return typeof value === 'object' && value !== null ? value : undefined
+}
+
+function isRetryableDeveloperApiResponse(
+  status: number,
+  error: ReturnType<typeof readErrorResponse>,
+) {
+  return error?.retryable === true || status === 429 || status >= 500
 }
 
 async function readJson<T>(response: Response): Promise<T> {

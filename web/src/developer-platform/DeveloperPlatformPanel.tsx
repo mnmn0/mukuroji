@@ -27,7 +27,7 @@ import {
   createDeveloperApiKey,
   createDeveloperOAuthApp,
   createDeveloperWebhook,
-  DeveloperPlatformApiError,
+  shouldRetainDeveloperPlatformMutationContext,
   disconnectDeveloperConnector,
   dryRunDeveloperImport,
   exportDeveloperWorkItems,
@@ -470,10 +470,6 @@ const developerPlatformSWRConfig = {
   shouldRetryOnError: false,
 } as const
 
-function shouldRetainDeveloperMutationContext(error: unknown) {
-  return !(error instanceof DeveloperPlatformApiError)
-}
-
 /**
  * Developer Platform API を SWR と mutation request runner で panel へ接続します。
  */
@@ -562,7 +558,6 @@ export function DeveloperPlatformPanelContainer({
       () => getDeveloperPlatformResources(mutationSession.accessToken),
       { revalidate: false },
     )
-    mutationSession.requestRunner.discardRetainedContexts()
   }
 
   const refreshAfterMutation = async () => {
@@ -593,7 +588,7 @@ export function DeveloperPlatformPanelContainer({
       operationKey,
       fingerprint,
       request,
-      shouldRetainDeveloperMutationContext,
+      shouldRetainDeveloperPlatformMutationContext,
     )
 
     await refreshAfterMutation()
