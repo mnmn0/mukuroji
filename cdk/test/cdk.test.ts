@@ -201,6 +201,33 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
       }),
     }));
   }
+
+  expect(resources.ProjectDirectoryTable9ED01C01.Properties)
+    .toEqual(expect.objectContaining({
+      GlobalSecondaryIndexes: expect.arrayContaining([
+        expect.objectContaining({
+          IndexName: 'WebhookAuthorizationIndex',
+          KeySchema: [
+            { AttributeName: 'webhookAuthorizationKey', KeyType: 'HASH' },
+            { AttributeName: 'webhookAuthorizationSortKey', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'KEYS_ONLY' },
+        }),
+      ]),
+    }));
+  expect(resources.TeamIssuesTable189D851D.Properties)
+    .toEqual(expect.objectContaining({
+      GlobalSecondaryIndexes: expect.arrayContaining([
+        expect.objectContaining({
+          IndexName: 'TeamIssueUpdatedAtIndex',
+          KeySchema: [
+            { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
+            { AttributeName: 'updatedAt', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
+      ]),
+    }));
 });
 
 test('automation state is retained with due-schedule and execution history indexes', () => {
@@ -800,13 +827,11 @@ test('developer platform and connector runtime secrets use rotated purpose-speci
       EnableKeyRotation: true,
     });
   }
-  const developerKmsKeys = Object.values(resources).filter((resource) =>
-    (resource as { Type?: string }).Type === 'AWS::KMS::Key' &&
-    String((resource as { Properties?: { Description?: string } }).Properties?.Description)
-      .startsWith('Envelope key for developer platform')
+  const protectedKmsKeys = Object.values(resources).filter((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::KMS::Key'
   ) as Array<{ DeletionPolicy?: string; UpdateReplacePolicy?: string }>;
-  expect(developerKmsKeys).toHaveLength(3);
-  expect(developerKmsKeys.every((resource) =>
+  expect(protectedKmsKeys).toHaveLength(4);
+  expect(protectedKmsKeys.every((resource) =>
     resource.DeletionPolicy === 'Retain' &&
     resource.UpdateReplacePolicy === 'Retain'
   )).toBe(true);
@@ -1521,6 +1546,8 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
       PROJECT_DIRECTORY_TABLE_NAME: {
         Ref: 'ProjectDirectoryTable9ED01C01',
       },
+      PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
+        'WebhookAuthorizationIndex',
       WEBHOOK_DELIVERY_QUEUE_URL: {
         Ref: 'WebhookDeliveryQueue2A244492',
       },
@@ -1637,6 +1664,9 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   expect(deliveryPolicies).toContain('WorkspaceAccessTableD7C8D2C7');
   expect(deliveryPolicies).toContain('WebhookDeliveryQueue2A244492');
   expect(deliveryPolicies).toContain('dynamodb:PutItem');
+  expect(deliveryPolicies).toContain('dynamodb:UpdateItem');
+  expect(deliveryPolicies).toContain('dynamodb:DeleteItem');
+  expect(deliveryPolicies).toContain('WebhookAuthorizationIndex');
   expect(deliveryPolicies).toContain('kms:Decrypt');
   expect(deliveryPolicies).not.toContain('kms:Encrypt');
   expect(deliveryPolicies).not.toContain('kms:GenerateDataKey');
@@ -1695,6 +1725,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   );
   const queueId = findResourceId('ConnectorSyncQueue', 'AWS::SQS::Queue');
   const dlqId = findResourceId('ConnectorSyncDlq', 'AWS::SQS::Queue');
+  const pollDlqId = findResourceId('ConnectorPollDlq', 'AWS::SQS::Queue');
   const projectionFunctionId = findResourceId(
     'CollaborationProjectionFunction',
     'AWS::Lambda::Function',
@@ -1706,6 +1737,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   expect(configurationKeyId).toBeDefined();
   expect(queueId).toBeDefined();
   expect(dlqId).toBeDefined();
+  expect(pollDlqId).toBeDefined();
   expect(projectionFunctionId).toBeDefined();
   expect(workerFunctionId).toBeDefined();
   expect(pollFunctionId).toBeDefined();
@@ -1717,6 +1749,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
     !configurationKeyId ||
     !queueId ||
     !dlqId ||
+    !pollDlqId ||
     !projectionFunctionId ||
     !workerFunctionId ||
     !pollFunctionId
@@ -1748,6 +1781,13 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
     }),
   }));
   expect(resources[dlqId]).toEqual(expect.objectContaining({
+    Type: 'AWS::SQS::Queue',
+    Properties: expect.objectContaining({
+      MessageRetentionPeriod: 1209600,
+      SqsManagedSseEnabled: true,
+    }),
+  }));
+  expect(resources[pollDlqId]).toEqual(expect.objectContaining({
     Type: 'AWS::SQS::Queue',
     Properties: expect.objectContaining({
       MessageRetentionPeriod: 1209600,
@@ -1853,7 +1893,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
       Match.objectLike({
         Arn: { 'Fn::GetAtt': [pollFunctionId, 'Arn'] },
         DeadLetterConfig: {
-          Arn: { 'Fn::GetAtt': [dlqId, 'Arn'] },
+          Arn: { 'Fn::GetAtt': [pollDlqId, 'Arn'] },
         },
         RetryPolicy: {
           MaximumEventAgeInSeconds: 3600,
@@ -1907,7 +1947,13 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
 
   template.hasResourceProperties('AWS::CloudWatch::Alarm', {
     AlarmDescription:
-      'Detects connector projection, polling, or sync jobs that exhausted retries.',
+      'Detects connector projection or sync jobs that exhausted queue redrive retries.',
+    MetricName: 'ApproximateNumberOfMessagesVisible',
+    Threshold: 1,
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects scheduled connector polling invocations that exhausted EventBridge retries.',
     MetricName: 'ApproximateNumberOfMessagesVisible',
     Threshold: 1,
   });
@@ -1925,6 +1971,9 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   });
   template.hasOutput('ConnectorSyncDlqUrl', {
     Value: { Ref: dlqId },
+  });
+  template.hasOutput('ConnectorPollDlqUrl', {
+    Value: { Ref: pollDlqId },
   });
 });
 
@@ -1954,7 +2003,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 11);
+  template.resourceCountIs('AWS::SQS::Queue', 12);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,

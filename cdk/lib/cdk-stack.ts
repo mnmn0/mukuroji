@@ -355,6 +355,12 @@ function createProjectDirectoryTransactItems(tableName: string, directoryId: str
         directoryId: { S: directoryId },
         entryKey: { S: entry.entryKey },
         entryType: { S: entry.entryType },
+        webhookAuthorizationKey: { S: `WEBHOOK_ACL#RESOURCE#${directoryId}` },
+        webhookAuthorizationSortKey: {
+          S: entry.entryType === 'team'
+            ? `TEAM#${entry.teamId}`
+            : `PROJECT#${entry.projectId}`,
+        },
         teamId: { S: entry.teamId },
         teamSortOrder: { N: String(entry.teamSortOrder) },
         nameJa: { S: entry.nameJa },
@@ -379,6 +385,10 @@ function createProjectDirectoryTransactItems(tableName: string, directoryId: str
         directoryId: { S: directoryId },
         entryKey: { S: createProjectMemberEntryKey(projectId, memberKey) },
         entryType: { S: 'project-member' },
+        webhookAuthorizationKey: {
+          S: `WEBHOOK_ACL#MEMBER#${directoryId}#${memberKey}`,
+        },
+        webhookAuthorizationSortKey: { S: `PROJECT#${projectId}` },
         projectId: { S: projectId },
         memberKey: { S: memberKey },
         email: { S: email },
@@ -479,7 +489,7 @@ function createWorkspaceBootstrapTransactItems(
         entryKey: { S: createProjectMemberEntryKey(projectId, initialOwnerEmail) },
       },
       UpdateExpression:
-        'SET #entryType = if_not_exists(#entryType, :entryType), projectId = if_not_exists(projectId, :projectId), memberKey = if_not_exists(memberKey, :memberKey), email = :email, #role = if_not_exists(#role, :role), createdAt = if_not_exists(createdAt, :timestamp), updatedAt = if_not_exists(updatedAt, :timestamp)',
+        'SET #entryType = if_not_exists(#entryType, :entryType), projectId = if_not_exists(projectId, :projectId), memberKey = if_not_exists(memberKey, :memberKey), webhookAuthorizationKey = :webhookAuthorizationKey, webhookAuthorizationSortKey = :webhookAuthorizationSortKey, email = :email, #role = if_not_exists(#role, :role), createdAt = if_not_exists(createdAt, :timestamp), updatedAt = if_not_exists(updatedAt, :timestamp)',
       ConditionExpression:
         'attribute_not_exists(directoryId) OR (#entryType = :entryType AND projectId = :projectId AND memberKey = :memberKey)',
       ExpressionAttributeNames: {
@@ -490,6 +500,10 @@ function createWorkspaceBootstrapTransactItems(
         ':entryType': { S: 'project-member' },
         ':projectId': { S: projectId },
         ':memberKey': { S: initialOwnerEmail },
+        ':webhookAuthorizationKey': {
+          S: `WEBHOOK_ACL#MEMBER#${directoryId}#${initialOwnerEmail}`,
+        },
+        ':webhookAuthorizationSortKey': { S: `PROJECT#${projectId}` },
         ':email': { S: initialOwnerEmail },
         ':role': { S: 'manager' },
         ':timestamp': { S: workspaceBootstrapTimestamp },
@@ -702,6 +716,13 @@ export class CdkStack extends cdk.Stack {
     });
 
     workItemsTable.addGlobalSecondaryIndex({
+      indexName: 'TeamIssueUpdatedAtIndex',
+      partitionKey: { name: 'directoryTeamId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'updatedAt', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    workItemsTable.addGlobalSecondaryIndex({
       indexName: 'AssignedProjectIssueIndex',
       partitionKey: { name: 'directoryProjectId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'sortOrder', type: dynamodb.AttributeType.NUMBER },
@@ -849,6 +870,18 @@ export class CdkStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+    projectDirectoryTable.addGlobalSecondaryIndex({
+      indexName: 'WebhookAuthorizationIndex',
+      partitionKey: {
+        name: 'webhookAuthorizationKey',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'webhookAuthorizationSortKey',
+        type: dynamodb.AttributeType.STRING,
+      },
+      projectionType: dynamodb.ProjectionType.KEYS_ONLY,
     });
 
     const auditEventsTable = new dynamodb.Table(this, 'AuditEventsTable', {
@@ -1205,6 +1238,10 @@ export class CdkStack extends cdk.Stack {
       visibilityTimeout: cdk.Duration.minutes(90),
     });
     const connectorSyncDlq = new sqs.Queue(this, 'ConnectorSyncDlq', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(14),
+    });
+    const connectorPollDlq = new sqs.Queue(this, 'ConnectorPollDlq', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       retentionPeriod: cdk.Duration.days(14),
     });
@@ -1577,6 +1614,8 @@ export class CdkStack extends cdk.Stack {
           MUKUROJI_TEAM_ISSUES_TABLE: workItemsTable.tableName,
           MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
           PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+          PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
+            'WebhookAuthorizationIndex',
           SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
           TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
           TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
@@ -1797,6 +1836,8 @@ export class CdkStack extends cdk.Stack {
           NOTIFICATION_RETENTION_SECONDS: String(365 * 24 * 60 * 60),
           PROCESSED_AUDIT_EVENTS_TABLE_NAME: processedAuditEventsTable.tableName,
           PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+          PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
+            'WebhookAuthorizationIndex',
           REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
           SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
           MUKUROJI_RUNTIME_ROLE: 'audit-projection',
@@ -2165,6 +2206,8 @@ export class CdkStack extends cdk.Stack {
           DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID:
             developerPlatformWebhookKey.keyArn,
           PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+          PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
+            'WebhookAuthorizationIndex',
           WEBHOOK_DELIVERY_QUEUE_URL: webhookDeliveryQueue.queueUrl,
           WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         },
@@ -2188,7 +2231,11 @@ export class CdkStack extends cdk.Stack {
       ],
     }));
     webhookDeliveryFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['dynamodb:PutItem'],
+      actions: [
+        'dynamodb:DeleteItem',
+        'dynamodb:PutItem',
+        'dynamodb:UpdateItem',
+      ],
       resources: [developerPlatformTable.tableArn],
     }));
     webhookDeliveryFunction.addToRolePolicy(new iam.PolicyStatement({
@@ -2198,6 +2245,7 @@ export class CdkStack extends cdk.Stack {
       ],
       resources: [
         projectDirectoryTable.tableArn,
+        `${projectDirectoryTable.tableArn}/index/WebhookAuthorizationIndex`,
         workspaceAccessTable.tableArn,
       ],
     }));
@@ -2340,7 +2388,7 @@ export class CdkStack extends cdk.Stack {
       schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
       targets: [
         new eventsTargets.LambdaFunction(connectorPollFunction, {
-          deadLetterQueue: connectorSyncDlq,
+          deadLetterQueue: connectorPollDlq,
           maxEventAge: cdk.Duration.hours(1),
           retryAttempts: 2,
         }),
@@ -2349,11 +2397,24 @@ export class CdkStack extends cdk.Stack {
 
     new cloudwatch.Alarm(this, 'ConnectorSyncDlqAlarm', {
       alarmDescription:
-        'Detects connector projection, polling, or sync jobs that exhausted retries.',
+        'Detects connector projection or sync jobs that exhausted queue redrive retries.',
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       datapointsToAlarm: 1,
       evaluationPeriods: 1,
       metric: connectorSyncDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    new cloudwatch.Alarm(this, 'ConnectorPollDlqAlarm', {
+      alarmDescription:
+        'Detects scheduled connector polling invocations that exhausted EventBridge retries.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: connectorPollDlq.metricApproximateNumberOfMessagesVisible({
         period: cdk.Duration.minutes(5),
         statistic: 'Maximum',
       }),
@@ -2828,6 +2889,9 @@ export class CdkStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'ConnectorSyncDlqUrl', {
       value: connectorSyncDlq.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'ConnectorPollDlqUrl', {
+      value: connectorPollDlq.queueUrl,
     });
     new cdk.CfnOutput(this, 'AutomationEventDlqUrl', {
       value: automationEventDlq.queueUrl,
