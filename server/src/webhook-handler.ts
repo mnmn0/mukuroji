@@ -156,9 +156,13 @@ export async function processWebhookProjectionBatch(
   event: WebhookDynamoStreamEvent,
   dependencies: WebhookProjectionDependencies,
 ): Promise<WebhookBatchResponse> {
+  const batchDependencies = {
+    ...dependencies,
+    authorizer: dependencies.authorizer.createBatch?.() ?? dependencies.authorizer,
+  }
   const results = await Promise.all((event.Records ?? []).map(async (record) => {
     try {
-      await projectAuditRecord(record, dependencies)
+      await projectAuditRecord(record, batchDependencies)
       return undefined
     } catch (error) {
       console.error('Webhook projection failed:', readSafeErrorMessage(error))
@@ -185,9 +189,13 @@ export async function processWebhookDeliveryBatch(
   event: WebhookSqsEvent,
   dependencies: WebhookDeliveryWorkerDependencies,
 ): Promise<WebhookBatchResponse> {
+  const batchDependencies = {
+    ...dependencies,
+    authorizer: dependencies.authorizer.createBatch?.() ?? dependencies.authorizer,
+  }
   const results = await Promise.all((event.Records ?? []).map(async (record) => {
     try {
-      await processWebhookQueueRecord(record, dependencies)
+      await processWebhookQueueRecord(record, batchDependencies)
       return undefined
     } catch (error) {
       console.error('Webhook delivery failed:', readSafeErrorMessage(error))

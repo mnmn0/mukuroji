@@ -28,7 +28,9 @@ export async function queueHandler(event: ConnectorSyncSqsEvent) {
     engine: await requireConfiguredConnectorSyncEngine(),
     queue: getQueue(),
     checkpoints: getCheckpoints(),
+    inventory: getInventory(),
     maximumPollPages: 10,
+    maximumInventoryPages: 100,
   })
 }
 

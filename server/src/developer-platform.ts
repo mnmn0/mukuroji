@@ -1100,6 +1100,7 @@ export class KmsEnvelopeSecretProtector implements SecretProtector {
 /** Single-table row discriminator です。 */
 type DeveloperPlatformEntryType =
   | 'api-key'
+  | 'credential-auth'
   | 'oauth-app'
   | 'oauth-token'
   | 'webhook-subscription'
@@ -1159,6 +1160,34 @@ type DeveloperPlatformRecordLocator = {
   lookupKey: string
   /** Global secondary index sort key です。 */
   lookupSortKey: string
+}
+
+/** Strongly consistent credential 認証 row が指す domain locator です。 */
+type StoredCredentialAuthValue = {
+  /** Credential の種別です。 */
+  kind: 'api-key' | 'oauth-client' | 'oauth-token'
+  /** Credential domain row の Workspace ID です。 */
+  targetWorkspaceId: string
+  /** Credential domain row の sort key です。 */
+  targetRecordKey: string
+}
+
+/** Credential auth row の条件付き Put です。 */
+type CredentialAuthRecordWrite = {
+  /** 保存する auth row です。 */
+  record: DeveloperPlatformRecord
+  /** Auth row に適用する作成・version 条件です。 */
+  condition: PutRecordCondition
+}
+
+/** Credential auth row の条件付き Delete です。 */
+type CredentialAuthRecordDelete = {
+  /** 削除する auth row の partition key です。 */
+  workspaceId: string
+  /** 削除する auth row の sort key です。 */
+  recordKey: string
+  /** 削除対象 auth row の期待 version です。 */
+  expectedVersion: number
 }
 
 /** Webhook delivery row の非公開 value です。 */
@@ -1413,6 +1442,29 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     auditPut: AuditTransactWriteItem,
   ): Promise<boolean>
 
+  /** Credential domain/auth rows と optional receipt を原子的に保存します。 */
+  protected abstract putCredentialRecord(
+    record: DeveloperPlatformRecord,
+    condition: PutRecordCondition,
+    authWrite?: CredentialAuthRecordWrite,
+    authDelete?: CredentialAuthRecordDelete,
+    completion?: PreparedIdempotencyCompletionRecord,
+  ): Promise<boolean>
+
+  /** OAuth app 利用記録、token domain/auth rows を原子的に保存します。 */
+  protected abstract createOAuthTokenRecords(
+    appRecord: DeveloperPlatformRecord,
+    expectedAppVersion: number,
+    tokenRecord: DeveloperPlatformRecord,
+    authRecord: DeveloperPlatformRecord,
+  ): Promise<boolean>
+
+  /** Credential domain row と対応 auth row を原子的に削除します。 */
+  protected abstract deleteCredentialRecord(
+    record: DeveloperPlatformRecord,
+    authRecord?: DeveloperPlatformRecord,
+  ): Promise<boolean>
+
   /** Primary key の row を削除します。 */
   protected abstract deleteRecord(
     workspaceId: string,
@@ -1475,6 +1527,32 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       response,
     )
     return this.putRecordWithIdempotency(record, condition, completion, auditPut)
+  }
+
+  /** Credential domain/auth rows と optional idempotency receipt を保存します。 */
+  private async persistCredentialMutationRecord(
+    workspaceId: string,
+    record: DeveloperPlatformRecord,
+    condition: PutRecordCondition,
+    authWrite: CredentialAuthRecordWrite | undefined,
+    authDelete: CredentialAuthRecordDelete | undefined,
+    idempotency: IdempotencyMutationToken | undefined,
+    response: unknown,
+  ) {
+    const completion = idempotency
+      ? await this.prepareIdempotencyCompletionRecord(
+          workspaceId,
+          idempotency,
+          response,
+        )
+      : undefined
+    return this.putCredentialRecord(
+      record,
+      condition,
+      authWrite,
+      authDelete,
+      completion,
+    )
   }
 
   /** Platform lifecycle を既存 audit stream へ流す immutable outbox Put にします。 */
@@ -1628,6 +1706,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       : readFutureTimestamp(request.input.expiresAt, now, 'API key expiry')
     const id = createId('key')
     const secret = createSecret('mk_key')
+    const secretDigest = digestSecret(secret)
     const apiKey: ApiKeySummary = {
       id,
       name,
@@ -1644,15 +1723,23 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       'api-key',
       apiKey,
       {
-        lookupKey: createSecretLookupKey('APIKEY', secret),
-        secretDigest: digestSecret(secret),
+        secretDigest,
       },
     )
+    const authRecord = createCredentialAuthRecord(
+      createApiKeyAuthWorkspaceId(secretDigest),
+      'api-key',
+      record,
+      secretDigest,
+      toEpochSeconds(expiresAt),
+    )
     const result = { apiKey: clone(apiKey), secret } satisfies ApiKeySecretResult
-    if (!await this.persistMutationRecord(
+    if (!await this.persistCredentialMutationRecord(
       workspaceId,
       record,
       { ifAbsent: true },
+      { record: authRecord, condition: { ifAbsent: true } },
+      undefined,
       request.idempotency,
       { status: 201, body: result },
     )) {
@@ -1672,13 +1759,21 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       const normalized = normalizeCredentialStatus(apiKey, now)
       if (normalized !== apiKey || (
         normalized.status !== 'active' &&
-        (record.secretDigest !== undefined || record.lookupKey !== undefined)
+        record.secretDigest !== undefined
       )) {
-        await this.putRecord(withoutStoredCredential({
+        const authRecord = record.secretDigest
+          ? await this.getCredentialAuthRecord(
+              createApiKeyAuthWorkspaceId(record.secretDigest),
+              'api-key',
+              record,
+            )
+          : undefined
+        await this.putCredentialRecord(withoutStoredCredential({
           ...record,
           value: normalized,
           version: record.version + 1,
-        }, true), { expectedVersion: record.version })
+        }, true), { expectedVersion: record.version }, undefined,
+        authRecord ? createCredentialAuthDelete(authRecord) : undefined)
       }
       apiKeys.push(clone(normalized))
     }
@@ -1705,15 +1800,22 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
         current.status === 'expired' &&
         (
           current !== record.value ||
-          record.secretDigest !== undefined ||
-          record.lookupKey !== undefined
+          record.secretDigest !== undefined
         )
       ) {
-        const saved = await this.putRecord(withoutStoredCredential({
+        const authRecord = record.secretDigest
+          ? await this.getCredentialAuthRecord(
+              createApiKeyAuthWorkspaceId(record.secretDigest),
+              'api-key',
+              record,
+            )
+          : undefined
+        const saved = await this.putCredentialRecord(withoutStoredCredential({
           ...record,
           value: current,
           version: record.version + 1,
-        }, true), { expectedVersion: record.version })
+        }, true), { expectedVersion: record.version }, undefined,
+        authRecord ? createCredentialAuthDelete(authRecord) : undefined)
         if (!saved) throw persistenceConflict()
       }
       throw conflict('ApiKeyNotActive', 'Only an active API key can be rotated.')
@@ -1724,18 +1826,36 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       prefix: secret.slice(0, 14),
       lastUsedAt: undefined,
     }
+    if (!record.secretDigest) {
+      throw persistenceInvalid('API key auth digest is missing.')
+    }
+    const secretDigest = digestSecret(secret)
     const updatedRecord: DeveloperPlatformRecord = {
       ...record,
       value: apiKey,
-      lookupKey: createSecretLookupKey('APIKEY', secret),
-      secretDigest: digestSecret(secret),
+      secretDigest,
       version: record.version + 1,
     }
+    const oldAuthRecord = await this.getCredentialAuthRecord(
+      createApiKeyAuthWorkspaceId(record.secretDigest),
+      'api-key',
+      record,
+    )
+    if (!oldAuthRecord) throw persistenceInvalid('API key auth row is missing.')
+    const authRecord = createCredentialAuthRecord(
+      createApiKeyAuthWorkspaceId(secretDigest),
+      'api-key',
+      updatedRecord,
+      secretDigest,
+      apiKey.expiresAt ? toEpochSeconds(apiKey.expiresAt) : undefined,
+    )
     const result = { apiKey: clone(apiKey), secret } satisfies ApiKeySecretResult
-    const saved = await this.persistMutationRecord(
+    const saved = await this.persistCredentialMutationRecord(
       workspaceId,
       updatedRecord,
       { expectedVersion: record.version },
+      { record: authRecord, condition: { ifAbsent: true } },
+      createCredentialAuthDelete(oldAuthRecord),
       request.idempotency,
       { status: 200, body: result },
     )
@@ -1756,13 +1876,20 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     )
     const current = readRecordValue<ApiKeySummary>(record, 'api-key')
     if (current.status === 'revoked') {
-      if (record.secretDigest || record.lookupKey) {
-        const saved = await this.putRecord(
+      if (record.secretDigest) {
+        const authRecord = await this.getCredentialAuthRecord(
+          createApiKeyAuthWorkspaceId(record.secretDigest),
+          'api-key',
+          record,
+        )
+        const saved = await this.putCredentialRecord(
           withoutStoredCredential({
             ...record,
             version: record.version + 1,
           }, true),
           { expectedVersion: record.version },
+          undefined,
+          authRecord ? createCredentialAuthDelete(authRecord) : undefined,
         )
         if (!saved) throw persistenceConflict()
       }
@@ -1773,11 +1900,19 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       status: 'revoked',
       revokedAt: this.clock().toISOString(),
     }
-    const saved = await this.putRecord(withoutStoredCredential({
+    const authRecord = record.secretDigest
+      ? await this.getCredentialAuthRecord(
+          createApiKeyAuthWorkspaceId(record.secretDigest),
+          'api-key',
+          record,
+        )
+      : undefined
+    const saved = await this.putCredentialRecord(withoutStoredCredential({
       ...record,
       value: apiKey,
       version: record.version + 1,
-    }, true), { expectedVersion: record.version })
+    }, true), { expectedVersion: record.version }, undefined,
+    authRecord ? createCredentialAuthDelete(authRecord) : undefined)
     if (!saved) throw persistenceConflict()
     return clone(apiKey)
   }
@@ -1785,13 +1920,19 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
   /** API key secret を認証し、last-used を更新します。 */
   async authenticateApiKey(request: AuthenticateCredentialRequest) {
     const credential = requireText(request.credential, 'API key credential')
-    const lookupKey = createSecretLookupKey('APIKEY', credential)
-    const record = await this.getAuthoritativeRecordByLookupKey(lookupKey)
+    const credentialDigest = digestSecret(credential)
+    const resolved = await this.resolveCredentialRecord(
+      createApiKeyAuthWorkspaceId(credentialDigest),
+      'api-key',
+      'api-key',
+    )
+    const record = resolved?.record
     if (
       !record ||
-      record.entryType !== 'api-key' ||
       !record.secretDigest ||
-      !secretDigestsEqual(record.secretDigest, digestSecret(credential))
+      !resolved?.authRecord.secretDigest ||
+      !secretDigestsEqual(resolved.authRecord.secretDigest, credentialDigest) ||
+      !secretDigestsEqual(record.secretDigest, credentialDigest)
     ) {
       throw unauthorized('ApiKeyInvalid', 'API key is invalid.')
     }
@@ -1803,14 +1944,14 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     if (current.status === 'expired') {
       if (
         current !== record.value ||
-        record.secretDigest !== undefined ||
-        record.lookupKey !== undefined
+        record.secretDigest !== undefined
       ) {
-        await this.putRecord(withoutStoredCredential({
+        await this.putCredentialRecord(withoutStoredCredential({
           ...record,
           value: current,
           version: record.version + 1,
-        }, true), { expectedVersion: record.version })
+        }, true), { expectedVersion: record.version }, undefined,
+        createCredentialAuthDelete(resolved.authRecord))
       }
       throw unauthorized('ApiKeyExpired', 'API key has expired.')
     }
@@ -1849,6 +1990,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     const id = createId('oauth')
     const clientId = createPublicIdentifier('mk_oauth')
     const clientSecret = createSecret('mk_oauth_secret')
+    const clientSecretDigest = digestSecret(clientSecret)
     const oauthApp: OAuthAppSummary = {
       id,
       name,
@@ -1867,18 +2009,26 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       'oauth-app',
       oauthApp,
       {
-        lookupKey: `OAUTHCLIENT#${clientId}`,
-        secretDigest: digestSecret(clientSecret),
+        secretDigest: clientSecretDigest,
       },
+    )
+    const authRecord = createCredentialAuthRecord(
+      createOAuthClientAuthWorkspaceId(clientId),
+      'oauth-client',
+      record,
+      clientSecretDigest,
+      toEpochSeconds(expiresAt),
     )
     const result = {
       oauthApp: clone(oauthApp),
       clientSecret,
     } satisfies OAuthAppSecretResult
-    if (!await this.persistMutationRecord(
+    if (!await this.persistCredentialMutationRecord(
       workspaceId,
       record,
       { ifAbsent: true },
+      { record: authRecord, condition: { ifAbsent: true } },
+      undefined,
       request.idempotency,
       { status: 201, body: result },
     )) throw persistenceConflict()
@@ -1929,25 +2079,47 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       throw conflict('OAuthAppNotActive', 'Only an active OAuth app can be rotated.')
     }
     const clientSecret = createSecret('mk_oauth_secret')
+    const clientSecretDigest = digestSecret(clientSecret)
     const oauthApp: OAuthAppSummary = {
       ...current,
       updatedAt: this.clock().toISOString(),
       lastUsedAt: undefined,
     }
+    const currentAuthRecord = await this.getCredentialAuthRecord(
+      createOAuthClientAuthWorkspaceId(oauthApp.clientId),
+      'oauth-client',
+      record,
+    )
+    if (!currentAuthRecord) {
+      throw persistenceInvalid('OAuth client auth row is missing.')
+    }
     const updatedRecord: DeveloperPlatformRecord = {
       ...record,
       value: oauthApp,
-      secretDigest: digestSecret(clientSecret),
+      secretDigest: clientSecretDigest,
       version: record.version + 1,
     }
+    const updatedAuthRecord = createCredentialAuthRecord(
+      currentAuthRecord.workspaceId,
+      'oauth-client',
+      updatedRecord,
+      clientSecretDigest,
+      oauthApp.expiresAt ? toEpochSeconds(oauthApp.expiresAt) : undefined,
+      currentAuthRecord.version + 1,
+    )
     const result = {
       oauthApp: clone(oauthApp),
       clientSecret,
     } satisfies OAuthAppSecretResult
-    const saved = await this.persistMutationRecord(
+    const saved = await this.persistCredentialMutationRecord(
       workspaceId,
       updatedRecord,
       { expectedVersion: record.version },
+      {
+        record: updatedAuthRecord,
+        condition: { expectedVersion: currentAuthRecord.version },
+      },
+      undefined,
       request.idempotency,
       { status: 200, body: result },
     )
@@ -1988,12 +2160,19 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
   async issueOAuthToken(request: IssueOAuthTokenRequest) {
     const clientId = requireText(request.clientId, 'OAuth client ID')
     const clientSecret = requireText(request.clientSecret, 'OAuth client secret')
-    const record = await this.getAuthoritativeRecordByLookupKey(`OAUTHCLIENT#${clientId}`)
+    const clientSecretDigest = digestSecret(clientSecret)
+    const resolved = await this.resolveCredentialRecord(
+      createOAuthClientAuthWorkspaceId(clientId),
+      'oauth-client',
+      'oauth-app',
+    )
+    const record = resolved?.record
     if (
       !record ||
-      record.entryType !== 'oauth-app' ||
       !record.secretDigest ||
-      !secretDigestsEqual(record.secretDigest, digestSecret(clientSecret))
+      !resolved?.authRecord.secretDigest ||
+      !secretDigestsEqual(resolved.authRecord.secretDigest, clientSecretDigest) ||
+      !secretDigestsEqual(record.secretDigest, clientSecretDigest)
     ) {
       throw unauthorized('OAuthClientInvalid', 'OAuth client credentials are invalid.')
     }
@@ -2002,6 +2181,9 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       readRecordValue<OAuthAppSummary>(record, 'oauth-app'),
       now,
     )
+    if (oauthApp.clientId !== clientId) {
+      throw unauthorized('OAuthClientInvalid', 'OAuth client credentials are invalid.')
+    }
     if (oauthApp.status === 'expired') {
       await this.persistInactiveOAuthApp(record, oauthApp)
       throw unauthorized('OAuthAppExpired', 'OAuth app has expired.')
@@ -2038,6 +2220,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     const expiresAt = new Date(now.getTime() + expiresIn * 1_000).toISOString()
     const tokenId = createId('token')
     const accessToken = createSecret('mk_access')
+    const accessTokenDigest = digestSecret(accessToken)
     const token: StoredOAuthTokenValue = {
       id: tokenId,
       oauthAppId: oauthApp.id,
@@ -2052,13 +2235,18 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       'oauth-token',
       token,
       {
-        lookupKey: createSecretLookupKey('OAUTHTOKEN', accessToken),
-        secretDigest: digestSecret(accessToken),
+        secretDigest: accessTokenDigest,
         expiresAt: toEpochSeconds(expiresAt),
       },
     )
-    if (!await this.putRecord(tokenRecord, { ifAbsent: true })) throw persistenceConflict()
-    const appSaved = await this.putRecord({
+    const tokenAuthRecord = createCredentialAuthRecord(
+      createOAuthTokenAuthWorkspaceId(accessTokenDigest),
+      'oauth-token',
+      tokenRecord,
+      accessTokenDigest,
+      tokenRecord.expiresAt,
+    )
+    const updatedAppRecord: DeveloperPlatformRecord = {
       ...record,
       value: {
         ...oauthApp,
@@ -2066,11 +2254,14 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
         updatedAt: now.toISOString(),
       } satisfies OAuthAppSummary,
       version: record.version + 1,
-    }, { expectedVersion: record.version })
-    if (!appSaved) {
-      await this.deleteRecord(record.workspaceId, tokenRecord.recordKey)
-      throw persistenceConflict()
     }
+    const saved = await this.createOAuthTokenRecords(
+      updatedAppRecord,
+      record.version,
+      tokenRecord,
+      tokenAuthRecord,
+    )
+    if (!saved) throw persistenceConflict()
     return {
       accessToken,
       tokenType: 'Bearer',
@@ -2083,21 +2274,26 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
   /** Bearer token を認証します。 */
   async authenticateOAuthToken(request: AuthenticateCredentialRequest) {
     const credential = requireText(request.credential, 'OAuth access token')
-    const record = await this.getAuthoritativeRecordByLookupKey(
-      createSecretLookupKey('OAUTHTOKEN', credential),
+    const credentialDigest = digestSecret(credential)
+    const resolved = await this.resolveCredentialRecord(
+      createOAuthTokenAuthWorkspaceId(credentialDigest),
+      'oauth-token',
+      'oauth-token',
     )
+    const record = resolved?.record
     if (
       !record ||
-      record.entryType !== 'oauth-token' ||
       !record.secretDigest ||
-      !secretDigestsEqual(record.secretDigest, digestSecret(credential))
+      !resolved?.authRecord.secretDigest ||
+      !secretDigestsEqual(resolved.authRecord.secretDigest, credentialDigest) ||
+      !secretDigestsEqual(record.secretDigest, credentialDigest)
     ) {
       throw unauthorized('OAuthTokenInvalid', 'OAuth access token is invalid.')
     }
     const token = readRecordValue<StoredOAuthTokenValue>(record, 'oauth-token')
     const now = this.clock()
     if (Date.parse(token.expiresAt) <= now.getTime()) {
-      await this.deleteRecord(record.workspaceId, record.recordKey)
+      await this.deleteCredentialRecord(record, resolved.authRecord)
       throw unauthorized('OAuthTokenExpired', 'OAuth access token has expired.')
     }
     const appRecord = await this.getRecord(
@@ -3160,7 +3356,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
   async recoverConnector(
     request: RecoverConnectorRequest,
     concurrentMutationRetries = 0,
-  ) {
+  ): Promise<ConnectorInstallation> {
     const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
     const installationId = readIdentifier(request.installationId, 'Connector installation ID')
     const credential = requireText(request.credential, 'Connector credential')
@@ -3607,7 +3803,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     if (result === 'conflict') {
       throw conflict(
         'ExternalWorkItemLinkConflict',
-        'External resource is already linked to another Work Item.',
+        'External resource is already linked with a different target or configuration.',
       )
     }
     if (result === 'same-owner') {
@@ -3619,7 +3815,17 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
         ? await this.getRecord(workspaceId, claimValue.targetRecordKey)
         : undefined
       if (!existing) throw persistenceInvalid('External link claim has no target.')
-      return clone(readRecordValue<ExternalWorkItemLink>(existing, 'external-link'))
+      const existingLink = readRecordValue<ExternalWorkItemLink>(
+        existing,
+        'external-link',
+      )
+      if (!haveSameExternalLinkCreationFields(existingLink, link)) {
+        throw conflict(
+          'ExternalWorkItemLinkConflict',
+          'External resource is already linked with a different target or configuration.',
+        )
+      }
+      return clone(existingLink)
     }
     return clone(link)
   }
@@ -4262,19 +4468,91 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     record: DeveloperPlatformRecord,
     oauthApp: OAuthAppSummary,
   ) {
-    const saved = await this.putRecord(withoutStoredCredential({
+    const authRecord = await this.getCredentialAuthRecord(
+      createOAuthClientAuthWorkspaceId(oauthApp.clientId),
+      'oauth-client',
+      record,
+    )
+    const saved = await this.putCredentialRecord(withoutStoredCredential({
       ...record,
       value: oauthApp,
       version: record.version + 1,
-    }, false), { expectedVersion: record.version })
+    }, false), { expectedVersion: record.version }, undefined,
+    authRecord ? createCredentialAuthDelete(authRecord) : undefined)
     if (!saved) throw persistenceConflict()
     const tokens = await this.listRecords(record.workspaceId, 'OAUTHTOKEN#')
     await Promise.all(tokens.map(async (tokenRecord) => {
       const token = readRecordValue<StoredOAuthTokenValue>(tokenRecord, 'oauth-token')
       if (token.oauthAppId === oauthApp.id) {
-        await this.deleteRecord(record.workspaceId, tokenRecord.recordKey)
+        const tokenAuthRecord = tokenRecord.secretDigest
+          ? await this.getCredentialAuthRecord(
+              createOAuthTokenAuthWorkspaceId(tokenRecord.secretDigest),
+              'oauth-token',
+              tokenRecord,
+            )
+          : undefined
+        if (!await this.deleteCredentialRecord(tokenRecord, tokenAuthRecord)) {
+          throw persistenceConflict()
+        }
       }
     }))
+  }
+
+  /** Auth primary row を強整合取得し、期待 locator との対応を検証します。 */
+  private async getCredentialAuthRecord(
+    authWorkspaceId: string,
+    expectedKind: StoredCredentialAuthValue['kind'],
+    expectedTarget?: DeveloperPlatformRecord,
+  ) {
+    const authRecord = await this.getRecord(
+      authWorkspaceId,
+      CREDENTIAL_AUTH_RECORD_KEY,
+    )
+    if (!authRecord) return undefined
+    if (authRecord.entryType !== 'credential-auth') {
+      throw persistenceInvalid('Credential auth row has an invalid entry type.')
+    }
+    const auth = readRecordValue<StoredCredentialAuthValue>(
+      authRecord,
+      'credential-auth',
+    )
+    if (
+      auth.kind !== expectedKind ||
+      typeof auth.targetWorkspaceId !== 'string' ||
+      typeof auth.targetRecordKey !== 'string' ||
+      !authRecord.secretDigest ||
+      !isOptionalSha256Digest(authRecord.secretDigest) ||
+      (
+        expectedTarget &&
+        (
+          auth.targetWorkspaceId !== expectedTarget.workspaceId ||
+          auth.targetRecordKey !== expectedTarget.recordKey
+        )
+      )
+    ) {
+      throw persistenceInvalid('Credential auth row has an invalid target.')
+    }
+    return authRecord
+  }
+
+  /** Auth primary row から credential domain row を強整合解決します。 */
+  private async resolveCredentialRecord(
+    authWorkspaceId: string,
+    expectedKind: StoredCredentialAuthValue['kind'],
+    expectedEntryType: 'api-key' | 'oauth-app' | 'oauth-token',
+  ) {
+    const authRecord = await this.getCredentialAuthRecord(
+      authWorkspaceId,
+      expectedKind,
+    )
+    if (!authRecord) return undefined
+    const auth = readRecordValue<StoredCredentialAuthValue>(
+      authRecord,
+      'credential-auth',
+    )
+    const record = await this.getRecord(auth.targetWorkspaceId, auth.targetRecordKey)
+    if (!record || record.entryType !== expectedEntryType) return undefined
+    return { authRecord, record }
   }
 
   /** Lookup index を locator のみに使い、base table の強整合 row を再検証します。 */
@@ -4599,6 +4877,134 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
     return this.putRecord(record, condition)
   }
 
+  /** Credential domain/auth rows と receipt を同じ memory commit にします。 */
+  protected async putCredentialRecord(
+    record: DeveloperPlatformRecord,
+    condition: PutRecordCondition,
+    authWrite?: CredentialAuthRecordWrite,
+    authDelete?: CredentialAuthRecordDelete,
+    completion?: PreparedIdempotencyCompletionRecord,
+  ) {
+    const recordKey = createMemoryKey(record.workspaceId, record.recordKey)
+    const currentRecord = this.records.get(recordKey)
+    if (condition.ifAbsent && currentRecord) return false
+    if (
+      condition.expectedVersion !== undefined &&
+      currentRecord?.version !== condition.expectedVersion
+    ) return false
+
+    const authWriteKey = authWrite
+      ? createMemoryKey(authWrite.record.workspaceId, authWrite.record.recordKey)
+      : undefined
+    const currentAuthWrite = authWriteKey
+      ? this.records.get(authWriteKey)
+      : undefined
+    if (authWrite?.condition.ifAbsent && currentAuthWrite) return false
+    if (
+      authWrite?.condition.expectedVersion !== undefined &&
+      currentAuthWrite?.version !== authWrite.condition.expectedVersion
+    ) return false
+
+    const authDeleteKey = authDelete
+      ? createMemoryKey(authDelete.workspaceId, authDelete.recordKey)
+      : undefined
+    const currentAuthDelete = authDeleteKey
+      ? this.records.get(authDeleteKey)
+      : undefined
+    if (
+      authDelete &&
+      currentAuthDelete &&
+      (
+        currentAuthDelete.entryType !== 'credential-auth' ||
+        currentAuthDelete.version !== authDelete.expectedVersion
+      )
+    ) return false
+
+    let idempotencyKey: string | undefined
+    if (completion) {
+      idempotencyKey = createMemoryKey(
+        completion.reservedRecord.workspaceId,
+        completion.reservedRecord.recordKey,
+      )
+      const currentIdempotency = this.records.get(idempotencyKey)
+      if (
+        !currentIdempotency ||
+        currentIdempotency.version !== completion.reservedRecord.version ||
+        currentIdempotency.entryType !== 'idempotency'
+      ) return false
+      const currentValue = readRecordValue<StoredIdempotencyValue>(
+        currentIdempotency,
+        'idempotency',
+      )
+      if (
+        currentValue.state !== 'reserved' ||
+        !secretDigestsEqual(
+          currentValue.reservationDigest,
+          completion.reservationDigest,
+        ) ||
+        currentValue.requestFingerprintDigest !==
+          completion.requestFingerprintDigest
+      ) return false
+    }
+
+    this.records.set(recordKey, clone(record))
+    if (authWriteKey && authWrite) {
+      this.records.set(authWriteKey, clone(authWrite.record))
+    }
+    if (authDeleteKey) this.records.delete(authDeleteKey)
+    if (completion && idempotencyKey) {
+      this.records.set(idempotencyKey, clone(completion.completedRecord))
+    }
+    return true
+  }
+
+  /** OAuth app 利用記録、token domain/auth rows を同じ memory commit にします。 */
+  protected async createOAuthTokenRecords(
+    appRecord: DeveloperPlatformRecord,
+    expectedAppVersion: number,
+    tokenRecord: DeveloperPlatformRecord,
+    authRecord: DeveloperPlatformRecord,
+  ) {
+    const appKey = createMemoryKey(appRecord.workspaceId, appRecord.recordKey)
+    const tokenKey = createMemoryKey(tokenRecord.workspaceId, tokenRecord.recordKey)
+    const authKey = createMemoryKey(authRecord.workspaceId, authRecord.recordKey)
+    if (
+      this.records.get(appKey)?.version !== expectedAppVersion ||
+      this.records.has(tokenKey) ||
+      this.records.has(authKey)
+    ) return false
+    this.records.set(appKey, clone(appRecord))
+    this.records.set(tokenKey, clone(tokenRecord))
+    this.records.set(authKey, clone(authRecord))
+    return true
+  }
+
+  /** Credential domain row と auth row を同じ memory commit で削除します。 */
+  protected async deleteCredentialRecord(
+    record: DeveloperPlatformRecord,
+    authRecord?: DeveloperPlatformRecord,
+  ) {
+    const recordKey = createMemoryKey(record.workspaceId, record.recordKey)
+    const currentRecord = this.records.get(recordKey)
+    if (currentRecord && currentRecord.entryType !== record.entryType) return false
+    const authKey = authRecord
+      ? createMemoryKey(authRecord.workspaceId, authRecord.recordKey)
+      : undefined
+    if (authKey) {
+      const currentAuth = this.records.get(authKey)
+      if (
+        currentAuth &&
+        (
+          currentAuth.entryType !== 'credential-auth' ||
+          currentAuth.version !== authRecord?.version
+        )
+      ) return false
+    }
+    this.records.delete(recordKey)
+    if (authKey) this.records.delete(authKey)
+    return true
+  }
+
   /** Primary key の row を削除します。 */
   protected async deleteRecord(
     workspaceId: string,
@@ -4882,8 +5288,7 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
       'external-link',
     )
     const existing = readRecordValue<ExternalWorkItemLink>(target, 'external-link')
-    return existing.teamId === candidate.teamId &&
-        existing.workItemId === candidate.workItemId
+    return haveSameExternalLinkCreationFields(existing, candidate)
       ? 'same-owner'
       : 'conflict'
   }
@@ -5126,6 +5531,197 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
             },
           },
           auditPut,
+        ],
+      }))
+      return true
+    } catch (error) {
+      if (isTransactionConditionFailure(error)) return false
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** Credential domain/auth rows と receipt を DynamoDB transaction で保存します。 */
+  protected async putCredentialRecord(
+    record: DeveloperPlatformRecord,
+    condition: PutRecordCondition,
+    authWrite?: CredentialAuthRecordWrite,
+    authDelete?: CredentialAuthRecordDelete,
+    completion?: PreparedIdempotencyCompletionRecord,
+  ) {
+    const recordCondition = condition.ifAbsent
+      ? {
+          ConditionExpression:
+            'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+        }
+      : condition.expectedVersion === undefined
+        ? {}
+        : {
+            ConditionExpression: '#recordVersion = :expectedRecordVersion',
+            ExpressionAttributeNames: { '#recordVersion': 'version' },
+            ExpressionAttributeValues: {
+              ':expectedRecordVersion': condition.expectedVersion,
+            },
+          }
+    const authCondition = authWrite?.condition.ifAbsent
+      ? {
+          ConditionExpression:
+            'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+        }
+      : authWrite?.condition.expectedVersion === undefined
+        ? {}
+        : {
+            ConditionExpression:
+              '#authVersion = :expectedAuthVersion AND #entryType = :authEntryType',
+            ExpressionAttributeNames: {
+              '#authVersion': 'version',
+              '#entryType': 'entryType',
+            },
+            ExpressionAttributeValues: {
+              ':expectedAuthVersion': authWrite.condition.expectedVersion,
+              ':authEntryType': 'credential-auth',
+            },
+          }
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: record,
+              ...recordCondition,
+            },
+          },
+          ...(authWrite
+            ? [{
+                Put: {
+                  TableName: this.tableName,
+                  Item: authWrite.record,
+                  ...authCondition,
+                },
+              }]
+            : []),
+          ...(authDelete
+            ? [{
+                Delete: {
+                  TableName: this.tableName,
+                  Key: {
+                    workspaceId: authDelete.workspaceId,
+                    recordKey: authDelete.recordKey,
+                  },
+                  ConditionExpression:
+                    'attribute_not_exists(workspaceId) OR ' +
+                    '(#authVersion = :expectedAuthVersion AND ' +
+                    '#entryType = :authEntryType)',
+                  ExpressionAttributeNames: {
+                    '#authVersion': 'version',
+                    '#entryType': 'entryType',
+                  },
+                  ExpressionAttributeValues: {
+                    ':expectedAuthVersion': authDelete.expectedVersion,
+                    ':authEntryType': 'credential-auth',
+                  },
+                },
+              }]
+            : []),
+          ...(completion
+            ? [createIdempotencyCompletionTransactWriteItem(
+                this.tableName,
+                completion,
+              )]
+            : []),
+        ],
+      }))
+      return true
+    } catch (error) {
+      if (isTransactionConditionFailure(error)) return false
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** OAuth app 利用記録、token domain/auth rows を一 transaction で保存します。 */
+  protected async createOAuthTokenRecords(
+    appRecord: DeveloperPlatformRecord,
+    expectedAppVersion: number,
+    tokenRecord: DeveloperPlatformRecord,
+    authRecord: DeveloperPlatformRecord,
+  ) {
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: appRecord,
+              ConditionExpression: '#recordVersion = :expectedRecordVersion',
+              ExpressionAttributeNames: { '#recordVersion': 'version' },
+              ExpressionAttributeValues: {
+                ':expectedRecordVersion': expectedAppVersion,
+              },
+            },
+          },
+          ...[tokenRecord, authRecord].map((record) => ({
+            Put: {
+              TableName: this.tableName,
+              Item: record,
+              ConditionExpression:
+                'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+            },
+          })),
+        ],
+      }))
+      return true
+    } catch (error) {
+      if (isTransactionConditionFailure(error)) return false
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** Credential domain/auth rows を一 transaction で削除します。 */
+  protected async deleteCredentialRecord(
+    record: DeveloperPlatformRecord,
+    authRecord?: DeveloperPlatformRecord,
+  ) {
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Delete: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: record.workspaceId,
+                recordKey: record.recordKey,
+              },
+              ConditionExpression:
+                'attribute_not_exists(workspaceId) OR #entryType = :recordEntryType',
+              ExpressionAttributeNames: { '#entryType': 'entryType' },
+              ExpressionAttributeValues: {
+                ':recordEntryType': record.entryType,
+              },
+            },
+          },
+          ...(authRecord
+            ? [{
+                Delete: {
+                  TableName: this.tableName,
+                  Key: {
+                    workspaceId: authRecord.workspaceId,
+                    recordKey: authRecord.recordKey,
+                  },
+                  ConditionExpression:
+                    'attribute_not_exists(workspaceId) OR ' +
+                    '(#authVersion = :expectedAuthVersion AND ' +
+                    '#entryType = :authEntryType)',
+                  ExpressionAttributeNames: {
+                    '#authVersion': 'version',
+                    '#entryType': 'entryType',
+                  },
+                  ExpressionAttributeValues: {
+                    ':expectedAuthVersion': authRecord.version,
+                    ':authEntryType': 'credential-auth',
+                  },
+                },
+              }]
+            : []),
         ],
       }))
       return true
@@ -5646,8 +6242,7 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
       'external-link',
     )
     const existing = readRecordValue<ExternalWorkItemLink>(target, 'external-link')
-    return existing.teamId === candidate.teamId &&
-        existing.workItemId === candidate.workItemId
+    return haveSameExternalLinkCreationFields(existing, candidate)
       ? 'same-owner'
       : 'conflict'
   }
@@ -5655,6 +6250,9 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
 
 /** Webhook cursor ciphertext の authenticated context です。 */
 const WEBHOOK_CURSOR_CONTEXT = 'mukuroji-developer-platform:webhook-cursor:v1'
+
+/** Strongly consistent credential auth row の固定 sort key です。 */
+const CREDENTIAL_AUTH_RECORD_KEY = 'CREDENTIAL'
 
 /** Secret-free row 作成時の optional storage fields です。 */
 type CreateRecordOptions = {
@@ -5729,6 +6327,65 @@ function createOAuthAppRecordKey(id: string) {
 
 function createOAuthTokenRecordKey(id: string) {
   return `OAUTHTOKEN#${id}`
+}
+
+function createApiKeyAuthWorkspaceId(secretDigest: string) {
+  return `CREDENTIALAUTH#APIKEY#${secretDigest}`
+}
+
+function createOAuthClientAuthWorkspaceId(clientId: string) {
+  return `CREDENTIALAUTH#OAUTHCLIENT#${digestText(clientId)}`
+}
+
+function createOAuthTokenAuthWorkspaceId(secretDigest: string) {
+  return `CREDENTIALAUTH#OAUTHTOKEN#${secretDigest}`
+}
+
+function createCredentialAuthRecord(
+  authWorkspaceId: string,
+  kind: StoredCredentialAuthValue['kind'],
+  target: DeveloperPlatformRecord,
+  secretDigest: string,
+  expiresAt?: number,
+  version = 1,
+): DeveloperPlatformRecord {
+  return {
+    workspaceId: authWorkspaceId,
+    recordKey: CREDENTIAL_AUTH_RECORD_KEY,
+    entryType: 'credential-auth',
+    value: {
+      kind,
+      targetWorkspaceId: target.workspaceId,
+      targetRecordKey: target.recordKey,
+    } satisfies StoredCredentialAuthValue,
+    secretDigest,
+    ...(expiresAt === undefined ? {} : { expiresAt }),
+    version,
+  }
+}
+
+function createCredentialAuthDelete(
+  authRecord: DeveloperPlatformRecord,
+): CredentialAuthRecordDelete {
+  return {
+    workspaceId: authRecord.workspaceId,
+    recordKey: authRecord.recordKey,
+    expectedVersion: authRecord.version,
+  }
+}
+
+function haveSameExternalLinkCreationFields(
+  existing: ExternalWorkItemLink,
+  candidate: ExternalWorkItemLink,
+) {
+  return existing.teamId === candidate.teamId &&
+    existing.workItemId === candidate.workItemId &&
+    existing.installationId === candidate.installationId &&
+    existing.resourceType === candidate.resourceType &&
+    existing.externalId === candidate.externalId &&
+    existing.externalUrl === candidate.externalUrl &&
+    existing.displayKey === candidate.displayKey &&
+    existing.syncDirection === candidate.syncDirection
 }
 
 function createWebhookRecordKey(id: string) {
@@ -5929,10 +6586,6 @@ function createPublicIdentifier(prefix: string) {
 
 function createSecret(prefix: string) {
   return `${prefix}_${randomBytes(32).toString('base64url')}`
-}
-
-function createSecretLookupKey(type: 'APIKEY' | 'OAUTHTOKEN', secret: string) {
-  return `${type}#${digestSecret(secret)}`
 }
 
 function createDeterministicDeliveryId(subscriptionId: string, eventId: string) {
@@ -6724,6 +7377,7 @@ function readStoredRecordLocator(
 
 function isDeveloperPlatformEntryType(value: string): value is DeveloperPlatformEntryType {
   return value === 'api-key' ||
+    value === 'credential-auth' ||
     value === 'oauth-app' ||
     value === 'oauth-token' ||
     value === 'webhook-subscription' ||

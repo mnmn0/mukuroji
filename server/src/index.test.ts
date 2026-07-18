@@ -8040,6 +8040,7 @@ test('rejects Work Item aggregate Team fan-out beyond the hard cap before item r
   }))
   const calls = configureFakeProjectClients(true, {
     additionalTeams,
+    directoryId: 'workspace-export',
     projectAccesses: [
       { projectId: 'refero', role: 'manager' },
       ...additionalTeams.flatMap((team) =>
@@ -8057,6 +8058,60 @@ test('rejects Work Item aggregate Team fan-out beyond the hard cap before item r
   expect(calls.issueReads).toEqual([])
   expect(calls.taskReads).toEqual([])
   expect(calls.projectIssueReads).toEqual([])
+})
+
+test('exports all accessible Work Items beyond aggregate Team and item hard caps', async () => {
+  const additionalTeams = Array.from({ length: 20 }, (_, teamIndex) => ({
+    id: `export-team-${teamIndex}`,
+    name: `Export Team ${teamIndex}`,
+    projects: [{
+      id: `export-project-${teamIndex}`,
+      name: `Export Project ${teamIndex}`,
+      tone: 'blue' as const,
+    }],
+  }))
+  const calls = configureFakeProjectClients(true, {
+    additionalTeams,
+    projectAccesses: [
+      { projectId: 'refero', role: 'manager' },
+      ...additionalTeams.flatMap((team) =>
+        team.projects.map((project) => ({
+          projectId: project.id,
+          role: 'manager' as const,
+        }))
+      ),
+    ],
+    teamIssueCount: 11,
+    unassignedIssue: true,
+  })
+  configureApiClientsForTest({
+    developerPlatform: {
+      async consumeRateLimit() {
+        return {
+          allowed: true,
+          limit: 120,
+          remaining: 119,
+          resetAt: '2026-07-18T00:01:00.000Z',
+        }
+      },
+    } as never,
+  })
+
+  const response = await app.request('/api/developer/exports?format=json', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(response.headers.get('Content-Disposition')).toContain(
+    'attachment; filename="mukuroji-work-items-',
+  )
+  const body = await response.json() as {
+    workItems: Array<{ id: string; teamId: string }>
+  }
+  expect(body.workItems).toHaveLength(231)
+  expect(new Set(body.workItems.map((workItem) => workItem.teamId))).toHaveLength(21)
+  expect(calls.issueReads).toHaveLength(21)
+  expect(calls.issueReads.every((read) => read.limit === undefined)).toBe(true)
 })
 
 test('filters canonical Work Items for authorization before enforcing the response limit', async () => {
@@ -12431,6 +12486,8 @@ function configureFakeProjectClients(
   options: {
     /** Cognito user pagination fake が page ごとに返す user ID と token です。 */
     cognitoUserPages?: Array<{ userIds: string[]; nextToken?: string }>
+    /** Cognito principal へ設定する明示的な Workspace directory ID です。 */
+    directoryId?: string
     /** Cognito user 一覧 fake が返す次 page token です。 */
     cognitoUsersNextToken?: string
     profileError?: Error
@@ -12679,6 +12736,12 @@ function configureFakeProjectClients(
               Name: 'email',
               Value: 'Demo@Example.com',
             },
+            ...(options.directoryId
+              ? [{
+                  Name: 'custom:directory_id',
+                  Value: options.directoryId,
+                }]
+              : []),
           ],
         }
       },

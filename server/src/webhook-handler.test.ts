@@ -21,6 +21,7 @@ test('projects one deterministic secret-free delivery from a pending audit event
   await createSubscription(platform)
   const queued: WebhookQueueMessage[] = []
   const event = createWorkItemAuditEvent(now)
+  let batchAuthorizerCreations = 0
 
   const response = await processWebhookProjectionBatch({
     Records: [{
@@ -32,11 +33,20 @@ test('projects one deterministic secret-free delivery from a pending audit event
     }],
   }, {
     developerPlatform: platform,
-    authorizer: { canDeliver: async () => true },
+    authorizer: {
+      async canDeliver() {
+        throw new Error('The unscoped authorizer must not be used for a Lambda batch.')
+      },
+      createBatch() {
+        batchAuthorizerCreations += 1
+        return { canDeliver: async () => true }
+      },
+    },
     queue: createRecordingQueue(queued),
   })
 
   expect(response).toEqual({ batchItemFailures: [] })
+  expect(batchAuthorizerCreations).toBe(1)
   expect(queued).toHaveLength(1)
   expect(queued[0]).toEqual({
     workspaceId: 'workspace-1',
@@ -92,12 +102,21 @@ test('records a successful signed HTTP attempt in the delivery log', async () =>
   const now = new Date('2026-07-18T00:00:00.000Z')
   const fixture = await createDeliveryFixture(() => now)
   let deliveredPayload = ''
+  let batchAuthorizerCreations = 0
 
   const response = await processWebhookDeliveryBatch({
     Records: [createSqsRecord(fixture.deliveryId)],
   }, {
     developerPlatform: fixture.platform,
-    authorizer: { canDeliver: async () => true },
+    authorizer: {
+      async canDeliver() {
+        throw new Error('The unscoped authorizer must not be used for a Lambda batch.')
+      },
+      createBatch() {
+        batchAuthorizerCreations += 1
+        return { canDeliver: async () => true }
+      },
+    },
     queue: createRecordingQueue([]),
     now: () => now,
     random: () => 0.5,
@@ -109,6 +128,7 @@ test('records a successful signed HTTP attempt in the delivery log', async () =>
   })
 
   expect(response).toEqual({ batchItemFailures: [] })
+  expect(batchAuthorizerCreations).toBe(1)
   expect(deliveredPayload).toContain('work-item.created')
   const page = await fixture.platform.listWebhookDeliveries({ workspaceId: 'workspace-1' })
   expect(page.deliveries[0]).toMatchObject({

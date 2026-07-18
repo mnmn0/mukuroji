@@ -18,6 +18,26 @@ export interface WebhookSubscriptionAuthorizer {
     teamId: string,
     projectId?: string,
   ): Promise<boolean>
+  /** 1 Lambda batch 内だけ ACL snapshot を共有する authorizer を返します。 */
+  createBatch?(): WebhookSubscriptionAuthorizer
+}
+
+/** 1 Lambda batch 内でのみ共有する ACL read-through cache です。 */
+type WebhookAuthorizationBatchCache = {
+  /** Workspace ごとの索引化済み Project directory snapshot です。 */
+  directorySnapshots: Map<string, Promise<WebhookAuthorizationDirectorySnapshot>>
+  /** Workspace user ごとの active membership snapshot です。 */
+  activeMembers: Map<string, ReturnType<WorkspaceAccessClient['getActiveMember']>>
+}
+
+/** Project directory を一度だけ走査して構築する ACL 索引です。 */
+type WebhookAuthorizationDirectorySnapshot = {
+  /** Archive されていない Team ID です。 */
+  activeTeamIds: Set<string>
+  /** Team ごとの archive されていない Project ID です。 */
+  activeProjectIdsByTeam: Map<string, Set<string>>
+  /** Webhook delivery を参照できる member ごとの Project ID です。 */
+  accessibleProjectIdsByMember: Map<string, Set<string>>
 }
 
 /** Project directory の current ACL を使う production authorizer です。 */
@@ -52,45 +72,73 @@ implements WebhookSubscriptionAuthorizer {
     teamIdValue: string,
     projectIdValue?: string,
   ) {
-    const workspaceId = readIdentifier(workspaceIdValue, 'Webhook Workspace ID')
-    const teamId = readIdentifier(teamIdValue, 'Webhook Team ID')
-    if (!subscription.teamIds.includes(teamId)) return false
-    const member = await this.workspaceAccess.getActiveMember(
-      workspaceId,
-      subscription.createdByUserId,
-    )
-    if (!member) return false
-    const rows = await this.readDirectoryRows(workspaceId)
-    const teamIsActive = rows.some((row) =>
-      row.entryType === 'team' &&
-      row.teamId === teamId &&
-      row.archivedAt === undefined
-    )
-    if (!teamIsActive) return false
-    const projectId = projectIdValue === undefined
-      ? undefined
-      : readIdentifier(projectIdValue, 'Webhook Project ID')
-    const activeProjectIds = new Set(rows
-      .filter((row) =>
-        row.entryType === 'project' &&
-        row.teamId === teamId &&
-        row.archivedAt === undefined &&
-        typeof row.projectId === 'string' &&
-        (projectId === undefined || row.projectId === projectId)
-      )
-      .map((row) => row.projectId as string))
-    if (projectId !== undefined && !activeProjectIds.has(projectId)) return false
-    return rows.some((row) =>
-      row.entryType === 'project-member' &&
-      row.memberKey === member.memberKey &&
-      typeof row.projectId === 'string' &&
-      activeProjectIds.has(row.projectId) &&
-      (row.role === 'viewer' || row.role === 'member' || row.role === 'manager')
+    return await this.canDeliverWithCache(
+      workspaceIdValue,
+      subscription,
+      teamIdValue,
+      projectIdValue,
     )
   }
 
-  private async readDirectoryRows(workspaceId: string) {
-    const rows: ProjectDirectoryAuthorizationRow[] = []
+  /** 同じ Lambda batch の subscription 判定で directory/member read を再利用します。 */
+  createBatch(): WebhookSubscriptionAuthorizer {
+    const cache: WebhookAuthorizationBatchCache = {
+      directorySnapshots: new Map(),
+      activeMembers: new Map(),
+    }
+    return {
+      canDeliver: async (workspaceId, subscription, teamId, projectId) =>
+        await this.canDeliverWithCache(
+          workspaceId,
+          subscription,
+          teamId,
+          projectId,
+          cache,
+        ),
+    }
+  }
+
+  private async canDeliverWithCache(
+    workspaceIdValue: string,
+    subscription: WebhookSubscription,
+    teamIdValue: string,
+    projectIdValue?: string,
+    cache?: WebhookAuthorizationBatchCache,
+  ) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Webhook Workspace ID')
+    const teamId = readIdentifier(teamIdValue, 'Webhook Team ID')
+    if (!subscription.teamIds.includes(teamId)) return false
+    const memberCacheKey = `${workspaceId}\0${subscription.createdByUserId}`
+    const memberPromise = cache?.activeMembers.get(memberCacheKey) ??
+      this.workspaceAccess.getActiveMember(workspaceId, subscription.createdByUserId)
+    cache?.activeMembers.set(memberCacheKey, memberPromise)
+    const member = await memberPromise
+    if (!member) return false
+    const snapshotPromise = cache?.directorySnapshots.get(workspaceId) ??
+      this.readDirectorySnapshot(workspaceId)
+    cache?.directorySnapshots.set(workspaceId, snapshotPromise)
+    const snapshot = await snapshotPromise
+    if (!snapshot.activeTeamIds.has(teamId)) return false
+    const projectId = projectIdValue === undefined
+      ? undefined
+      : readIdentifier(projectIdValue, 'Webhook Project ID')
+    const activeProjectIds = snapshot.activeProjectIdsByTeam.get(teamId)
+    if (!activeProjectIds) return false
+    if (projectId !== undefined && !activeProjectIds.has(projectId)) return false
+    const accessibleProjectIds = snapshot.accessibleProjectIdsByMember.get(
+      member.memberKey,
+    )
+    if (!accessibleProjectIds) return false
+    if (projectId !== undefined) return accessibleProjectIds.has(projectId)
+    return setsOverlap(activeProjectIds, accessibleProjectIds)
+  }
+
+  private async readDirectorySnapshot(workspaceId: string) {
+    const snapshot: WebhookAuthorizationDirectorySnapshot = {
+      activeTeamIds: new Set(),
+      activeProjectIdsByTeam: new Map(),
+      accessibleProjectIdsByMember: new Map(),
+    }
     let exclusiveStartKey: Record<string, unknown> | undefined
     do {
       const response = await this.documentClient.send(new QueryCommand({
@@ -100,13 +148,12 @@ implements WebhookSubscriptionAuthorizer {
         ConsistentRead: true,
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       }))
-      rows.push(...(response.Items ?? []).map(readAuthorizationRow))
-      if (rows.length > 10_000) {
-        throw new TypeError('Project directory authorization read limit was exceeded.')
+      for (const item of response.Items ?? []) {
+        indexAuthorizationRow(snapshot, readAuthorizationRow(item))
       }
       exclusiveStartKey = response.LastEvaluatedKey
     } while (exclusiveStartKey)
-    return rows
+    return snapshot
   }
 }
 
@@ -135,6 +182,57 @@ function readAuthorizationRow(value: Record<string, unknown>) {
     ...(typeof value.role === 'string' ? { role: value.role } : {}),
     ...(typeof value.archivedAt === 'string' ? { archivedAt: value.archivedAt } : {}),
   } satisfies ProjectDirectoryAuthorizationRow
+}
+
+function indexAuthorizationRow(
+  snapshot: WebhookAuthorizationDirectorySnapshot,
+  row: ProjectDirectoryAuthorizationRow,
+) {
+  if (
+    row.entryType === 'team' &&
+    row.teamId !== undefined &&
+    row.archivedAt === undefined
+  ) {
+    snapshot.activeTeamIds.add(row.teamId)
+    return
+  }
+  if (
+    row.entryType === 'project' &&
+    row.teamId !== undefined &&
+    row.projectId !== undefined &&
+    row.archivedAt === undefined
+  ) {
+    addToSetMap(snapshot.activeProjectIdsByTeam, row.teamId, row.projectId)
+    return
+  }
+  if (
+    row.entryType === 'project-member' &&
+    row.projectId !== undefined &&
+    row.memberKey !== undefined &&
+    (row.role === 'viewer' || row.role === 'member' || row.role === 'manager')
+  ) {
+    addToSetMap(
+      snapshot.accessibleProjectIdsByMember,
+      row.memberKey,
+      row.projectId,
+    )
+  }
+}
+
+function addToSetMap(map: Map<string, Set<string>>, key: string, value: string) {
+  const values = map.get(key) ?? new Set<string>()
+  values.add(value)
+  map.set(key, values)
+}
+
+function setsOverlap(left: ReadonlySet<string>, right: ReadonlySet<string>) {
+  const [smaller, larger] = left.size <= right.size
+    ? [left, right]
+    : [right, left]
+  for (const value of smaller) {
+    if (larger.has(value)) return true
+  }
+  return false
 }
 
 function createDocumentClient() {

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   TransactWriteCommand,
+  type TransactWriteCommandInput,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
 import type { ApiProblem, WebhookEventEnvelope } from '@mukuroji/contracts'
@@ -220,6 +221,26 @@ function createMemoryDocumentClient() {
                   Delete.ExpressionAttributeValues?.[':claimEntryType'] ||
                 currentValue?.targetRecordKey !== expectedTarget
             }
+            const expectedAuthVersion =
+              Delete.ExpressionAttributeValues?.[':expectedAuthVersion']
+            if (expectedAuthVersion !== undefined) {
+              return current !== undefined &&
+                (
+                  current.version !== expectedAuthVersion ||
+                  current.entryType !==
+                    Delete.ExpressionAttributeValues?.[':authEntryType']
+                )
+            }
+            const recordEntryType =
+              Delete.ExpressionAttributeValues?.[':recordEntryType']
+            if (recordEntryType !== undefined) {
+              return current !== undefined && current.entryType !== recordEntryType
+            }
+            const expectedRecordVersion =
+              Delete.ExpressionAttributeValues?.[':expectedRecordVersion']
+            if (expectedRecordVersion !== undefined) {
+              return current?.version !== expectedRecordVersion
+            }
             const expectedVersion =
               Delete.ExpressionAttributeValues?.[':expectedVersion']
             if (expectedVersion !== undefined) {
@@ -242,6 +263,12 @@ function createMemoryDocumentClient() {
           if (Put.ConditionExpression?.startsWith('#recordVersion =')) {
             return current?.version !==
               Put.ExpressionAttributeValues?.[':expectedRecordVersion']
+          }
+          if (Put.ConditionExpression?.startsWith('#authVersion =')) {
+            return current?.version !==
+                Put.ExpressionAttributeValues?.[':expectedAuthVersion'] ||
+              current?.entryType !==
+                Put.ExpressionAttributeValues?.[':authEntryType']
           }
           if (Put.ConditionExpression?.startsWith('#linkVersion =')) {
             return current?.version !==
@@ -498,7 +525,7 @@ describe('developer credential lifecycle', () => {
 })
 
 describe('DynamoDB developer platform persistence', () => {
-  test('uses workspaceId/recordKey, lookupKey, ciphertext, digest, and no raw secret', async () => {
+  test('uses strongly consistent credential auth rows, ciphertext, and no raw secret', async () => {
     const clock = createClock()
     const memory = createMemoryDocumentClient()
     const client = new DynamoDbDeveloperPlatformClient(
@@ -513,35 +540,51 @@ describe('DynamoDB developer platform persistence', () => {
       createdByUserId: 'user-dynamo',
       input: { name: 'Dynamo key', scopes: ['work-items:read'] },
     })
+    memory.commands.splice(0)
     await expect(client.authenticateApiKey({ credential: apiKey.secret }))
       .resolves.toMatchObject({ workspaceId: 'workspace-dynamo' })
-    const originalApiKeyRow = [...memory.items.values()]
+    expect(memory.commands.some(({ name }) => name === 'QueryCommand')).toBe(false)
+    expect(
+      memory.commands
+        .filter(({ name }) => name === 'GetCommand')
+        .every(({ input }) => input.ConsistentRead === true),
+    ).toBe(true)
+    const storedApiKeyRow = [...memory.items.values()]
       .find((row) => row.entryType === 'api-key')
-    const originalLookupKey = originalApiKeyRow?.lookupKey
-    const originalLookupSortKey = originalApiKeyRow?.lookupSortKey
-    const originalRecordKey = originalApiKeyRow?.recordKey
-    if (
-      typeof originalLookupKey !== 'string' ||
-      typeof originalLookupSortKey !== 'string' ||
-      typeof originalRecordKey !== 'string'
-    ) {
-      throw new Error('Original API key locator was not stored.')
+    const storedAuthRow = [...memory.items.values()]
+      .find((row) =>
+        row.entryType === 'credential-auth' &&
+        (row.value as { kind?: string }).kind === 'api-key'
+      )
+    if (!storedApiKeyRow || !storedAuthRow) {
+      throw new Error('API key domain/auth rows were not stored.')
     }
+    const originalApiKeyRow = structuredClone(storedApiKeyRow)
+    const originalAuthRow = structuredClone(storedAuthRow)
+    expect(originalAuthRow).toMatchObject({
+      workspaceId: expect.stringMatching(/^CREDENTIALAUTH#APIKEY#[a-f0-9]{64}$/),
+      recordKey: 'CREDENTIAL',
+      secretDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      value: {
+        kind: 'api-key',
+        targetWorkspaceId: 'workspace-dynamo',
+        targetRecordKey: originalApiKeyRow.recordKey,
+      },
+    })
     const rotatedApiKey = await client.rotateApiKey({
       workspaceId: 'workspace-dynamo',
       apiKeyId: apiKey.apiKey.id,
     })
-    memory.items.set('stale-api-key-locator', {
-      workspaceId: 'workspace-dynamo',
-      recordKey: originalRecordKey,
-      lookupKey: originalLookupKey,
-      lookupSortKey: originalLookupSortKey,
-    })
+    expect(
+      [...memory.items.values()].some((row) =>
+        row.workspaceId === originalAuthRow.workspaceId &&
+        row.recordKey === originalAuthRow.recordKey
+      ),
+    ).toBe(false)
     await expect(client.authenticateApiKey({ credential: apiKey.secret }))
       .rejects.toMatchObject({ status: 401, code: 'ApiKeyInvalid' })
     await expect(client.authenticateApiKey({ credential: rotatedApiKey.secret }))
       .resolves.toMatchObject({ workspaceId: 'workspace-dynamo' })
-    memory.items.delete('stale-api-key-locator')
     const oauthApp = await client.createOAuthApp({
       workspaceId: 'workspace-dynamo',
       createdByUserId: 'user-dynamo',
@@ -551,11 +594,60 @@ describe('DynamoDB developer platform persistence', () => {
         scopes: ['work-items:read'],
       },
     })
+    memory.commands.splice(0)
     const oauthToken = await client.issueOAuthToken({
       clientId: oauthApp.oauthApp.clientId,
       clientSecret: oauthApp.clientSecret,
       expiresInSeconds: 300,
     })
+    expect(memory.commands.some(({ name }) => name === 'QueryCommand')).toBe(false)
+    const tokenIssueTransaction = memory.commands.find(
+      ({ name }) => name === 'TransactWriteCommand',
+    )
+    const tokenIssueWrites = tokenIssueTransaction?.input.TransactItems as
+      | Array<{ Put?: { Item?: { entryType?: string } } }>
+      | undefined
+    expect(
+      tokenIssueWrites?.map((item) => item.Put?.Item?.entryType),
+    ).toEqual(['oauth-app', 'oauth-token', 'credential-auth'])
+    memory.commands.splice(0)
+    await expect(client.authenticateOAuthToken({
+      credential: oauthToken.accessToken,
+    })).resolves.toMatchObject({
+      workspaceId: 'workspace-dynamo',
+      oauthAppId: oauthApp.oauthApp.id,
+    })
+    expect(memory.commands.some(({ name }) => name === 'QueryCommand')).toBe(false)
+    memory.commands.splice(0)
+    const rotatedOAuthApp = await client.rotateOAuthClientSecret({
+      workspaceId: 'workspace-dynamo',
+      oauthAppId: oauthApp.oauthApp.id,
+    })
+    const oauthRotationTransaction = memory.commands.find(
+      ({ name }) => name === 'TransactWriteCommand',
+    )
+    expect(oauthRotationTransaction?.input.TransactItems).toHaveLength(2)
+    const oauthRotationWrites = oauthRotationTransaction?.input.TransactItems as
+      | Array<{
+          Put?: { Item?: { entryType?: string }; ConditionExpression?: string }
+        }>
+      | undefined
+    expect(
+      oauthRotationWrites?.[1]?.Put,
+    ).toMatchObject({
+      Item: { entryType: 'credential-auth' },
+      ConditionExpression:
+        '#authVersion = :expectedAuthVersion AND #entryType = :authEntryType',
+    })
+    await expect(client.issueOAuthToken({
+      clientId: oauthApp.oauthApp.clientId,
+      clientSecret: oauthApp.clientSecret,
+    })).rejects.toMatchObject({ status: 401, code: 'OAuthClientInvalid' })
+    await expect(client.issueOAuthToken({
+      clientId: oauthApp.oauthApp.clientId,
+      clientSecret: rotatedOAuthApp.clientSecret,
+      expiresInSeconds: 300,
+    })).resolves.toMatchObject({ tokenType: 'Bearer' })
     const webhook = await client.createWebhookSubscription({
       workspaceId: 'workspace-dynamo',
       createdByUserId: 'user-dynamo',
@@ -677,13 +769,18 @@ describe('DynamoDB developer platform persistence', () => {
         ExpressionAttributeValues?: Record<string, unknown>
       }
     }> | undefined
-    expect(atomicWrites).toHaveLength(2)
+    expect(atomicWrites).toHaveLength(3)
     expect(atomicWrites?.[0]?.Put).toMatchObject({
       Item: { entryType: 'api-key' },
       ConditionExpression:
         'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
     })
     expect(atomicWrites?.[1]?.Put).toMatchObject({
+      Item: { entryType: 'credential-auth' },
+      ConditionExpression:
+        'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+    })
+    expect(atomicWrites?.[2]?.Put).toMatchObject({
       Item: {
         entryType: 'idempotency',
         value: {
@@ -697,10 +794,10 @@ describe('DynamoDB developer platform persistence', () => {
         ':reserved': 'reserved',
       },
     })
-    expect(atomicWrites?.[1]?.Put?.ConditionExpression).toContain(
+    expect(atomicWrites?.[2]?.Put?.ConditionExpression).toContain(
       '#value.#reservationDigest = :reservationDigest',
     )
-    expect(atomicWrites?.[1]?.Put?.ConditionExpression).toContain(
+    expect(atomicWrites?.[2]?.Put?.ConditionExpression).toContain(
       '#value.#requestFingerprintDigest = :requestFingerprintDigest',
     )
     await expect(client.reserveIdempotency(atomicRequest)).resolves.toEqual({
@@ -709,14 +806,15 @@ describe('DynamoDB developer platform persistence', () => {
     })
 
     const rows = [...memory.items.values()]
-    expect(rows.every((row) =>
-      row.workspaceId === 'workspace-dynamo' && typeof row.recordKey === 'string'
+    expect(rows.every((row) => typeof row.recordKey === 'string')).toBe(true)
+    expect(rows.filter((row) => row.entryType !== 'credential-auth').every((row) =>
+      row.workspaceId === 'workspace-dynamo'
     )).toBe(true)
     const apiKeyRow = rows.find((row) => row.entryType === 'api-key')
     expect(apiKeyRow).toMatchObject({
-      lookupKey: expect.stringMatching(/^APIKEY#[a-f0-9]{64}$/),
       secretDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
     })
+    expect(apiKeyRow).not.toHaveProperty('lookupKey')
     expect(apiKeyRow).not.toHaveProperty('expiresAt')
     const tokenRow = rows.find((row) => row.entryType === 'oauth-token')
     expect(tokenRow).toMatchObject({
@@ -735,6 +833,7 @@ describe('DynamoDB developer platform persistence', () => {
     expect(serialized).not.toContain(atomicApiKey.secret)
     expect(serialized).not.toContain(rotatedApiKey.secret)
     expect(serialized).not.toContain(oauthApp.clientSecret)
+    expect(serialized).not.toContain(rotatedOAuthApp.clientSecret)
     expect(serialized).not.toContain(oauthToken.accessToken)
     expect(serialized).not.toContain(webhook.signingSecret)
     expect(serialized).not.toContain('dynamo-connector-secret')
@@ -867,7 +966,8 @@ describe('DynamoDB developer platform persistence', () => {
       // Domain write と receipt を一度だけ commit し、handler response loss を再現します。
       await memory.documentClient.send(new TransactWriteCommand({
         TransactItems: [
-          mutation.domainWrite,
+          mutation.domainWrite as unknown as
+            NonNullable<TransactWriteCommandInput['TransactItems']>[number],
           completion.transactWriteItem,
         ],
       }))
@@ -2343,23 +2443,45 @@ describe('connectors, links, and imports', () => {
         credential: 'credential-1',
       },
     })
-    const createLink = (teamId: string, workItemId: string) =>
+    const linkInput: Omit<
+      Parameters<
+        InMemoryDeveloperPlatformClient['createExternalWorkItemLink']
+      >[0]['input'],
+      'teamId' | 'workItemId'
+    > = {
+      installationId: firstInstallation.id,
+      resourceType: 'issue',
+      externalId: 'issue-42',
+      externalUrl: 'https://github.example.test/org/repo/issues/42',
+      displayKey: '#42',
+      syncDirection: 'bidirectional',
+    }
+    const createLink = (
+      teamId: string,
+      workItemId: string,
+      overrides: Partial<typeof linkInput> = {},
+    ) =>
       client.createExternalWorkItemLink({
         workspaceId: 'workspace-1',
         input: {
           teamId,
           workItemId,
-          installationId: firstInstallation.id,
-          resourceType: 'issue',
-          externalId: 'issue-42',
-          externalUrl: 'https://github.example.test/org/repo/issues/42',
-          displayKey: '#42',
-          syncDirection: 'bidirectional',
+          ...linkInput,
+          ...overrides,
         },
       })
     const first = await createLink('team-1', 'work-item-1')
     const idempotent = await createLink('team-1', 'work-item-1')
     expect(idempotent.id).toBe(first.id)
+    await expect(createLink('team-1', 'work-item-1', {
+      externalUrl: 'https://github.example.test/org/repo/issues/42-renamed',
+    })).rejects.toMatchObject({ status: 409, code: 'ExternalWorkItemLinkConflict' })
+    await expect(createLink('team-1', 'work-item-1', {
+      displayKey: 'ISSUE-42',
+    })).rejects.toMatchObject({ status: 409, code: 'ExternalWorkItemLinkConflict' })
+    await expect(createLink('team-1', 'work-item-1', {
+      syncDirection: 'outbound',
+    })).rejects.toMatchObject({ status: 409, code: 'ExternalWorkItemLinkConflict' })
     await expect(createLink('team-2', 'work-item-1'))
       .rejects.toMatchObject({ status: 409, code: 'ExternalWorkItemLinkConflict' })
     await expect(createLink('team-1', 'work-item-2'))
@@ -2511,6 +2633,92 @@ describe('connectors, links, and imports', () => {
       teamId: 'team-1',
       workItemId: 'work-item-after-delete',
     })
+  })
+
+  test('revalidates a same-owner link after a concurrent configuration update', async () => {
+    const memory = createMemoryDocumentClient()
+    let raceTargetKey: string | undefined
+    let targetReads = 0
+    let raceEnabled = false
+    const documentClient = {
+      async send(command: {
+        input: Record<string, unknown>
+        constructor: { name: string }
+      }) {
+        const key = command.input.Key as
+          | { workspaceId?: unknown; recordKey?: unknown }
+          | undefined
+        if (
+          raceEnabled &&
+          command.constructor.name === 'GetCommand' &&
+          key?.recordKey === raceTargetKey
+        ) {
+          targetReads += 1
+          if (targetReads === 2) {
+            const mapKey = `${String(key.workspaceId)}\0${String(key.recordKey)}`
+            const current = memory.items.get(mapKey)
+            if (!current) throw new Error('Concurrent external link row is missing.')
+            memory.items.set(mapKey, {
+              ...structuredClone(current),
+              value: {
+                ...(current.value as Record<string, unknown>),
+                syncDirection: 'outbound',
+                syncStatus: 'pending',
+              },
+              version: Number(current.version) + 1,
+            })
+          }
+        }
+        return await (
+          memory.documentClient as unknown as {
+            send(value: typeof command): Promise<unknown>
+          }
+        ).send(command)
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbDeveloperPlatformClient(
+      'DeveloperPlatformTable',
+      documentClient,
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(8)),
+      () => new Date(START),
+      'LookupKeyIndex',
+    )
+    const installation = await client.installConnector({
+      workspaceId: 'workspace-link-race',
+      installedByUserId: 'user-link-race',
+      input: {
+        category: 'source-control',
+        provider: 'github',
+        name: 'GitHub race',
+        scopes: ['issues:read'],
+        credential: 'credential-link-race',
+      },
+    })
+    const input = {
+      teamId: 'team-link-race',
+      workItemId: 'work-item-link-race',
+      installationId: installation.id,
+      resourceType: 'issue' as const,
+      externalId: 'issue-link-race',
+      externalUrl: 'https://github.example.test/org/repo/issues/link-race',
+      displayKey: 'RACE-1',
+      syncDirection: 'bidirectional' as const,
+    }
+    const first = await client.createExternalWorkItemLink({
+      workspaceId: 'workspace-link-race',
+      input,
+    })
+    raceTargetKey = `EXTERNALLINK#${first.id}`
+    raceEnabled = true
+
+    await expect(client.createExternalWorkItemLink({
+      workspaceId: 'workspace-link-race',
+      input,
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'ExternalWorkItemLinkConflict',
+    })
+    expect(targetReads).toBe(2)
   })
 
   test('blocks unlink while an external Work Item link has an open sync conflict', async () => {

@@ -67,11 +67,20 @@ Secret JSON は string value の object とし、次の key だけを許可し�
 
 - `MUKUROJI_CONNECTOR_PROVIDERS_JSON`
 - `CONNECTOR_OAUTH_STATE_SIGNING_SECRET`
+- `CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON`
 - `CONNECTOR_SYNC_ORIGIN_SIGNING_SECRET`
 - `CONNECTOR_REAUTHORIZATION_RETURN_URL`
 - provider client secret 用の `MUKUROJI_CONNECTOR_<NAME>` key
 
-`MUKUROJI_CONNECTOR_PROVIDERS_JSON` 自体は JSON array を文字列化した値です。各 provider entry の `clientSecretEnvironmentVariable` は同じ secret object 内の `MUKUROJI_CONNECTOR_<NAME>` を参照させます。Signing secret はそれぞれ独立した十分に長い random value を使います。更新後は API と connector worker の新しい cold start で反映されるため、設定確認用の再認証を行い、`ConnectorSyncDlqUrl`、queue age alarm、provider 側 callback error を監視します。CloudFormation parameter は `{}` のまま維持し、通常 deploy で手動更新した current secret version を戻さないでください。
+`MUKUROJI_CONNECTOR_PROVIDERS_JSON` 自体は JSON array を文字列化した値です。各 provider entry の `clientSecretEnvironmentVariable` は同じ secret object 内の `MUKUROJI_CONNECTOR_<NAME>` を参照させます。Signing secret はそれぞれ独立した十分に長い random value を使います。Warm runtime も約1分の TTL 後に secret を再取得するため、更新は cold start を待たずに反映されます。
+
+OAuth state signing key は、warm runtime の旧・新 keyring が混在しても相互検証できるよう次の順序で rotation します。
+
+1. 旧 key を `CONNECTOR_OAUTH_STATE_SIGNING_SECRET` に維持したまま、新 key を JSON array 文字列の `CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON` へ verification-only key として追加します。
+2. Cache TTL（現在は約1分）と secret 伝播の猶予を待ち、すべての warm runtime が新 key を検証できる状態にします。
+3. 新 key を `CONNECTOR_OAUTH_STATE_SIGNING_SECRET` へ昇格し、旧 key を `CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON` に残します。旧 runtime が cache TTL 中に発行した state も完了できるよう、昇格後は旧 key を state TTL（現在は10分）に cache TTL と伝播猶予を加えた期間以上保持してから削除します。
+
+更新後は設定確認用の再認証を行い、`ConnectorSyncDlqUrl`、queue age alarm、provider 側 callback error を監視します。CloudFormation parameter は `{}` のまま維持し、通常 deploy で手動更新した current secret version を戻さないでください。
 
 ## File storage security and retention
 

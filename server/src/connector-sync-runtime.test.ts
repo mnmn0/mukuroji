@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import type { ExternalWorkItemLink } from '@mukuroji/contracts'
 import {
   InMemoryDeveloperPlatformClient,
   LocalAesGcmSecretProtector,
@@ -64,17 +65,18 @@ function createAdapter(
 }
 
 async function createRuntimeFixture(adapter = createAdapter()) {
+  let currentTime = NOW
   const platform = new InMemoryDeveloperPlatformClient(
     new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
-    () => NOW,
+    () => currentTime,
   )
   const installation = await platform.installConnector({
     workspaceId: 'workspace-1',
     installedByUserId: 'installer-1',
     input: {
-      category: 'source-control',
-      provider: 'github',
-      name: 'Engineering GitHub',
+      category: adapter.definition.category,
+      provider: adapter.definition.id,
+      name: `Engineering ${adapter.definition.name}`,
       scopes: ['repo'],
       externalAccountId: 'account-1',
       credential: serializeConnectorCredential({
@@ -161,7 +163,7 @@ async function createRuntimeFixture(adapter = createAdapter()) {
     persistence,
     health,
     originSigningSecret: ORIGIN_SIGNING_SECRET,
-    clock: () => NOW,
+    clock: () => currentTime,
   })
   return {
     platform,
@@ -174,6 +176,9 @@ async function createRuntimeFixture(adapter = createAdapter()) {
     health,
     authorizations,
     healthEvents,
+    setCurrentTime: (value: Date) => {
+      currentTime = value
+    },
     getWorkItem: () => structuredClone(workItem),
     setWorkItem: (next: ConnectorWorkItemSnapshot) => {
       workItem = structuredClone(next)
@@ -237,6 +242,73 @@ describe('ConnectorSyncEngine', () => {
       linkId: fixture.link.id,
       reason: 'duplicate',
     })
+  })
+
+  test('does not heal a user-requested pending resync from an old duplicate event', async () => {
+    const fixture = await createRuntimeFixture()
+    const input = {
+      workspaceId: 'workspace-1',
+      link: fixture.link,
+      eventId: 'event-before-user-update',
+      record: externalRecord(),
+    }
+    await fixture.engine.processInbound(input)
+    fixture.setCurrentTime(new Date('2026-07-18T00:01:00.000Z'))
+    const pending = await fixture.platform.updateExternalWorkItemLink({
+      workspaceId: 'workspace-1',
+      teamId: fixture.link.teamId,
+      workItemId: fixture.link.workItemId,
+      linkId: fixture.link.id,
+      updatedByUserId: 'user-1',
+      input: { syncDirection: 'inbound' },
+    })
+    expect(pending).toMatchObject({
+      syncDirection: 'inbound',
+      syncStatus: 'pending',
+      updatedAt: '2026-07-18T00:01:00.000Z',
+    })
+    const restoredStatuses: Array<ExternalWorkItemLink['syncStatus']> = []
+    const setLinkStatus = fixture.persistence.setLinkStatus.bind(fixture.persistence)
+    fixture.persistence.setLinkStatus = async (
+      workspaceId: string,
+      linkId: string,
+      status: ExternalWorkItemLink['syncStatus'],
+    ) => {
+      restoredStatuses.push(status)
+      return setLinkStatus(workspaceId, linkId, status)
+    }
+
+    await expect(fixture.engine.processInbound(input)).resolves.toEqual({
+      kind: 'skipped',
+      linkId: fixture.link.id,
+      reason: 'duplicate',
+    })
+    expect(restoredStatuses).toEqual([])
+    await expect(fixture.platform.listExternalWorkItemLinks({
+      workspaceId: 'workspace-1',
+    })).resolves.toEqual([
+      expect.objectContaining({ syncStatus: 'pending' }),
+    ])
+  })
+
+  test('resolves GitLab sync adapters from the built-in connector catalog', async () => {
+    const gitLab = BUILT_IN_CONNECTOR_CATALOG.find(
+      (definition) => definition.id === 'gitlab',
+    )
+    if (!gitLab) throw new Error('GitLab connector definition is required.')
+    const fixture = await createRuntimeFixture(createAdapter({
+      definition: gitLab,
+    }))
+
+    await expect(fixture.engine.processOutbound({
+      workspaceId: 'workspace-1',
+      link: fixture.link,
+      operationId: 'gitlab-outbound',
+    })).resolves.toMatchObject({
+      kind: 'synced',
+      linkId: fixture.link.id,
+    })
+    expect(fixture.installation.provider).toBe('gitlab')
   })
 
   test('pushes outbound changes with a stable loop guard and commits sync state', async () => {

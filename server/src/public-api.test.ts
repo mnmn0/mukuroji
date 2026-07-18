@@ -132,6 +132,7 @@ function createTestRouter(input: {
   managementPrincipal?: DeveloperManagementPrincipal
   platform?: InMemoryDeveloperPlatformClient
   now?: () => Date
+  queueWebhookDelivery?: (workspaceId: string, deliveryId: string) => Promise<void>
 } = {}) {
   const platform = input.platform ?? new InMemoryDeveloperPlatformClient(
     new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
@@ -145,6 +146,9 @@ function createTestRouter(input: {
     cursorSecret: 'public-api-test-cursor-secret-at-least-32-bytes',
     createRequestId: () => 'request-public-api-test',
     now: input.now ?? (() => new Date(NOW)),
+    ...(input.queueWebhookDelivery
+      ? { queueWebhookDelivery: input.queueWebhookDelivery }
+      : {}),
     ...(input.connectorAuthorization
       ? { connectorAuthorization: input.connectorAuthorization }
       : {}),
@@ -330,6 +334,86 @@ describe('public API router', () => {
       expect(response.status).toBe(400)
       expect(await response.json()).toMatchObject({ code: 'invalid_request' })
     }
+  })
+
+  test('keeps keyset pages stable when a live collection receives a newer item', async () => {
+    const workItemAt = (id: string, hour: number) => ({
+      ...createWorkItem(id),
+      createdAt: `2026-07-18T0${hour}:00:00.000Z`,
+      updatedAt: `2026-07-18T0${hour}:00:00.000Z`,
+    })
+    let items = [
+      workItemAt('work-item-a', 4),
+      workItemAt('work-item-b', 3),
+      workItemAt('work-item-c', 2),
+      workItemAt('work-item-d', 1),
+    ]
+    const workItems = createDefaultWorkItemService({
+      async list() {
+        return structuredClone(items)
+      },
+    })
+    const { platform, router } = createTestRouter({ workItems })
+    const apiKey = await createApiKey(platform, ['work-items:read'])
+    const requestPage = (cursor?: string) => router.request(
+      `http://localhost/v1/work-items?teamId=team-1&limit=2${
+        cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''
+      }`,
+      { headers: { Authorization: `Bearer ${apiKey.secret}` } },
+    )
+
+    const first = await requestPage()
+    const firstBody = await first.json() as {
+      items: CanonicalWorkItem[]
+      nextCursor: string
+    }
+    items = [workItemAt('work-item-new', 5), ...items]
+    const second = await requestPage(firstBody.nextCursor)
+    const secondBody = await second.json() as {
+      items: CanonicalWorkItem[]
+      hasMore: boolean
+    }
+
+    expect(firstBody.items.map((item) => item.id)).toEqual(['work-item-a', 'work-item-b'])
+    expect(secondBody.items.map((item) => item.id)).toEqual(['work-item-c', 'work-item-d'])
+    expect(secondBody.hasMore).toBe(false)
+  })
+
+  test('rejects normalized impossible dates while accepting leap and month-end dates', async () => {
+    const receivedDueDates: string[] = []
+    const workItems = createDefaultWorkItemService({
+      async create(_credential, input) {
+        receivedDueDates.push(input.dueDate)
+        return { ...createWorkItem(), dueDate: input.dueDate }
+      },
+    })
+    const { platform, router } = createTestRouter({ workItems })
+    const apiKey = await createApiKey(platform, ['work-items:write'])
+    const request = (dueDate: string) => router.request('http://localhost/v1/work-items', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey.secret}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': `create-${dueDate}`,
+      },
+      body: JSON.stringify({
+        teamId: 'team-1',
+        title: 'Date validation',
+        assigneeUserId: 'user-1',
+        dueDate,
+        priority: 'medium',
+      }),
+    })
+
+    for (const impossible of ['2026-02-29', '2026-02-31', '2026-04-31']) {
+      const response = await request(impossible)
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ code: 'validation_failed' })
+    }
+    for (const valid of ['2024-02-29', '2026-04-30']) {
+      expect((await request(valid)).status).toBe(201)
+    }
+    expect(receivedDueDates).toEqual(['2024-02-29', '2026-04-30'])
   })
 
   test('does not silently ignore cursors on advertised management lists', async () => {
@@ -1127,6 +1211,155 @@ describe('public API router', () => {
     expect(response.status).toBe(403)
     expect(authorizedTeamIds).toEqual(['team-allowed', 'team-denied'])
     expect(await platform.listWebhookSubscriptions('workspace-1')).toEqual([])
+  })
+
+  test('prevents another administrator from rotating creator-owned credentials', async () => {
+    const { platform } = createTestRouter()
+    const apiKey = await createApiKey(platform, ['work-items:read'])
+    const oauthApp = await platform.createOAuthApp({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: {
+        name: 'Creator service',
+        grantTypes: ['client_credentials'],
+        scopes: ['work-items:read'],
+      },
+    })
+    const otherAdmin = {
+      ...managementPrincipal,
+      userId: 'user-2',
+    }
+    const { router } = createTestRouter({ platform, managementPrincipal: otherAdmin })
+    const rotate = (path: string, idempotencyKey: string) => router.request(
+      `http://localhost${path}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer session-token',
+          'Idempotency-Key': idempotencyKey,
+        },
+      },
+    )
+
+    const apiKeyResponse = await rotate(
+      `/developer/api-keys/${apiKey.apiKey.id}/rotate`,
+      'other-admin-api-key-rotate',
+    )
+    const oauthResponse = await rotate(
+      `/developer/oauth-apps/${oauthApp.oauthApp.id}/rotate-secret`,
+      'other-admin-oauth-rotate',
+    )
+
+    for (const response of [apiKeyResponse, oauthResponse]) {
+      expect(response.status).toBe(403)
+      expect(await response.json()).toMatchObject({ code: 'forbidden' })
+    }
+    await expect(platform.authenticateApiKey({ credential: apiKey.secret }))
+      .resolves.toMatchObject({ subjectUserId: 'user-1' })
+    await expect(platform.issueOAuthToken({
+      clientId: oauthApp.oauthApp.clientId,
+      clientSecret: oauthApp.clientSecret,
+    })).resolves.toMatchObject({ tokenType: 'Bearer' })
+  })
+
+  test('keeps webhook mutation and replay authority with its creator and current Teams', async () => {
+    const { platform } = createTestRouter()
+    const created = await platform.createWebhookSubscription({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: {
+        name: 'Creator webhook',
+        url: 'https://hooks.example.test/original',
+        teamIds: ['team-1'],
+        eventTypes: ['work-item.updated'],
+      },
+    })
+    const deliveries = await platform.enqueueWebhookEvent({
+      workspaceId: 'workspace-1',
+      authorizedSubscriptionIds: [created.subscription.id],
+      event: {
+        id: 'event-webhook-security',
+        type: 'work-item.updated',
+        apiVersion: '2026-07-01',
+        occurredAt: NOW.toISOString(),
+        workspaceId: 'workspace-1',
+        data: { metadata: { teamId: 'team-1' }, workItemId: 'work-item-1' },
+      },
+    })
+    const queued: string[] = []
+    const requestMutation = (
+      router: ReturnType<typeof createTestRouter>['router'],
+      path: string,
+      idempotencyKey: string,
+      body?: Record<string, unknown>,
+      method = 'POST',
+    ) => router.request(`http://localhost${path}`, {
+      method,
+      headers: {
+        Authorization: 'Bearer session-token',
+        'Idempotency-Key': idempotencyKey,
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    })
+    const otherAdminRouter = createTestRouter({
+      platform,
+      managementPrincipal: { ...managementPrincipal, userId: 'user-2' },
+      queueWebhookDelivery: async (_workspaceId, deliveryId) => {
+        queued.push(deliveryId)
+      },
+    }).router
+    const paths = [
+      [
+        `/developer/webhook-subscriptions/${created.subscription.id}`,
+        'other-admin-webhook-update',
+        { url: 'https://attacker.example.test/exfiltrate' },
+        'PATCH',
+      ],
+      [
+        `/developer/webhook-subscriptions/${created.subscription.id}/rotate-secret`,
+        'other-admin-webhook-rotate',
+      ],
+      [
+        `/developer/webhook-deliveries/${deliveries[0]!.id}/replay`,
+        'other-admin-webhook-replay',
+      ],
+    ] as const
+    for (const [path, key, body, method] of paths) {
+      const response = await requestMutation(otherAdminRouter, path, key, body, method)
+      expect(response.status).toBe(403)
+      expect(await response.json()).toMatchObject({ code: 'forbidden' })
+    }
+    expect(queued).toEqual([])
+    expect((await platform.listWebhookSubscriptions('workspace-1'))[0]?.url)
+      .toBe('https://hooks.example.test/original')
+
+    const authorizedTeamChecks: string[][] = []
+    const ownerRouter = createTestRouter({
+      platform,
+      workItems: createDefaultWorkItemService({
+        async authorizeWebhookTeams(_principal, teamIds) {
+          authorizedTeamChecks.push([...teamIds])
+          throw new PublicApiServiceError(403, 'forbidden', 'Team access is required.')
+        },
+      }),
+      queueWebhookDelivery: async (_workspaceId, deliveryId) => {
+        queued.push(deliveryId)
+      },
+    }).router
+    for (const [path, key, body, method] of paths) {
+      const response = await requestMutation(
+        ownerRouter,
+        path,
+        key.replace('other-admin', 'owner-no-team'),
+        body,
+        method,
+      )
+      expect(response.status).toBe(403)
+      expect(await response.json()).toMatchObject({ code: 'forbidden' })
+    }
+    expect(authorizedTeamChecks).toEqual([['team-1'], ['team-1'], ['team-1']])
+    expect(queued).toEqual([])
   })
 
   test('rate-limits invalid OAuth client attempts and never permits caching token responses', async () => {

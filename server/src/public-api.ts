@@ -453,7 +453,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     const filters = readWorkItemFilters(c)
     const allItems = await dependencies.workItems.list(credential, filters)
-    return c.json(createSignedOffsetPage(
+    return c.json(createSignedKeysetPage(
       c,
       dependencies,
       {
@@ -541,7 +541,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       teamId,
       workItemId,
     })
-    return c.json(createSignedOffsetPage(
+    return c.json(createSignedKeysetPage(
       c,
       dependencies,
       {
@@ -651,7 +651,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/api-keys', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageCredentials')
     const apiKeys = await platform.listApiKeys(principal.workspaceId)
-    return c.json(createSignedOffsetPage(
+    return c.json(createSignedKeysetPage(
       c,
       dependencies,
       managementCursorScope(principal, '/developer/api-keys'),
@@ -672,6 +672,9 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.post('/developer/api-keys/:apiKeyId/rotate', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageCredentials')
     const apiKeyId = readRouteId(c.req.param('apiKeyId'), 'API key ID')
+    const apiKey = (await platform.listApiKeys(principal.workspaceId))
+      .find((candidate) => candidate.id === apiKeyId)
+    requireResourceCreator(apiKey, principal.userId, 'API key')
     return executeManagementIdempotentJson(
       c,
       dependencies,
@@ -726,7 +729,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/oauth-apps', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageCredentials')
     const oauthApps = await platform.listOAuthApps(principal.workspaceId)
-    return c.json(createSignedOffsetPage(
+    return c.json(createSignedKeysetPage(
       c,
       dependencies,
       managementCursorScope(principal, '/developer/oauth-apps'),
@@ -747,6 +750,9 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.post('/developer/oauth-apps/:oauthAppId/rotate-secret', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageCredentials')
     const oauthAppId = readRouteId(c.req.param('oauthAppId'), 'OAuth app ID')
+    const oauthApp = (await platform.listOAuthApps(principal.workspaceId))
+      .find((candidate) => candidate.id === oauthAppId)
+    requireResourceCreator(oauthApp, principal.userId, 'OAuth app')
     return executeManagementIdempotentJson(
       c,
       dependencies,
@@ -784,7 +790,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/webhook-subscriptions', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageWebhooks')
     const subscriptions = await platform.listWebhookSubscriptions(principal.workspaceId)
-    return c.json(createSignedOffsetPage(
+    return c.json(createSignedKeysetPage(
       c,
       dependencies,
       managementCursorScope(principal, '/developer/webhook-subscriptions'),
@@ -839,6 +845,12 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       'Webhook subscription ID',
     )
     const input = readUpdateWebhookSubscriptionInput(await readJson(c))
+    const subscription = await requireWebhookSubscriptionCreator(
+      platform,
+      principal,
+      subscriptionId,
+    )
+    await dependencies.workItems.authorizeWebhookTeams(principal, subscription.teamIds)
     if (input.url) await assertSafeWebhookUrl(input.url)
     return executeManagementIdempotentJson(
       c,
@@ -860,6 +872,12 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.post('/developer/webhook-subscriptions/:subscriptionId/rotate-secret', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageWebhooks')
     const subscriptionId = readRouteId(c.req.param('subscriptionId'), 'Webhook subscription ID')
+    const subscription = await requireWebhookSubscriptionCreator(
+      platform,
+      principal,
+      subscriptionId,
+    )
+    await dependencies.workItems.authorizeWebhookTeams(principal, subscription.teamIds)
     return executeManagementIdempotentJson(
       c,
       dependencies,
@@ -947,6 +965,16 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       readIdempotencyKey(c.req.header('Idempotency-Key'))
       throw unavailableManagementMutation('Webhook replay queue')
     }
+    const requestedDelivery = await platform.getWebhookDelivery({
+      workspaceId: principal.workspaceId,
+      deliveryId,
+    })
+    const subscription = await requireWebhookSubscriptionCreator(
+      platform,
+      principal,
+      requestedDelivery.subscriptionId,
+    )
+    await dependencies.workItems.authorizeWebhookTeams(principal, subscription.teamIds)
     return executeManagementIdempotentJson(
       c,
       dependencies,
@@ -1016,7 +1044,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const filteredInstallations = status === undefined
       ? installations
       : installations.filter((installation) => installation.status === status)
-    return c.json(createSignedOffsetPage(
+    return c.json(createSignedKeysetPage(
       c,
       dependencies,
       managementCursorScope(
@@ -1159,7 +1187,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       workItemId,
       ...(installationId ? { installationId } : {}),
     })
-    return c.json(createSignedOffsetPage(
+    return c.json(createSignedKeysetPage(
       c,
       dependencies,
       managementCursorScope(
@@ -1347,7 +1375,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/imports', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canImport')
     const imports = await listAuthorizedImportJobs(platform, dependencies.workItems, principal)
-    return c.json(createSignedOffsetPage(
+    return c.json(createSignedKeysetPage(
       c,
       dependencies,
       managementCursorScope(principal, '/developer/imports'),
@@ -2505,10 +2533,18 @@ function readIdentifier(value: unknown, label: string) {
 }
 
 function readIsoDate(value: unknown, label: string) {
+  if (typeof value !== 'string') {
+    throw new PublicApiServiceError(400, 'validation_failed', `${label} must be an ISO date.`)
+  }
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value)
+  const parsed = match ? new Date(`${value}T00:00:00.000Z`) : undefined
   if (
-    typeof value !== 'string' ||
-    !/^\d{4}-\d{2}-\d{2}$/u.test(value) ||
-    Number.isNaN(Date.parse(`${value}T00:00:00.000Z`))
+    !match ||
+    !parsed ||
+    Number.isNaN(parsed.getTime()) ||
+    parsed.getUTCFullYear() !== Number(match[1]) ||
+    parsed.getUTCMonth() + 1 !== Number(match[2]) ||
+    parsed.getUTCDate() !== Number(match[3])
   ) {
     throw new PublicApiServiceError(400, 'validation_failed', `${label} must be an ISO date.`)
   }
@@ -2820,6 +2856,38 @@ function createFilterFingerprint(filters: Record<string, string | number | undef
   return createHash('sha256').update(stableStringify(filters)).digest('base64url')
 }
 
+function requireResourceCreator<T extends { createdByUserId: string }>(
+  resource: T | undefined,
+  actorUserId: string,
+  label: string,
+) {
+  if (!resource) {
+    throw new PublicApiServiceError(404, 'not_found', `${label} was not found.`)
+  }
+  if (resource.createdByUserId !== actorUserId) {
+    throw new PublicApiServiceError(
+      403,
+      'forbidden',
+      `Only the ${label} creator can perform this operation.`,
+    )
+  }
+  return resource
+}
+
+async function requireWebhookSubscriptionCreator(
+  platform: DeveloperPlatformClient,
+  principal: DeveloperManagementPrincipal,
+  subscriptionId: string,
+) {
+  const subscription = (await platform.listWebhookSubscriptions(principal.workspaceId))
+    .find((candidate) => candidate.id === subscriptionId)
+  return requireResourceCreator(
+    subscription,
+    principal.userId,
+    'Webhook subscription',
+  )
+}
+
 function managementCursorScope(
   principal: DeveloperManagementPrincipal,
   resource: string,
@@ -2833,7 +2901,7 @@ function managementCursorScope(
   }
 }
 
-function createSignedOffsetPage<T extends { id: string }>(
+function createSignedKeysetPage<T extends { id: string }>(
   c: Context,
   dependencies: PublicApiDependencies,
   scope: {
@@ -2854,31 +2922,40 @@ function createSignedOffsetPage<T extends { id: string }>(
         resource: scope.resource,
         fingerprint,
         limit,
-        kind: 'offset',
+        kind: 'keyset',
       }, dependencies.now?.() ?? new Date())
     : undefined
-  const offset = cursor?.offset ?? 0
   const ordered = [...values].sort((left, right) =>
     getTimestamp(right).localeCompare(getTimestamp(left)) ||
     right.id.localeCompare(left.id)
   )
-  const items = ordered.slice(offset, offset + limit)
-  const nextOffset = offset + items.length
-  const hasMore = nextOffset < ordered.length
+  const eligible = cursor
+    ? ordered.filter((value) =>
+        getTimestamp(value).localeCompare(cursor.positionTimestamp!) < 0 ||
+        (
+          getTimestamp(value) === cursor.positionTimestamp &&
+          value.id.localeCompare(cursor.positionId!) < 0
+        )
+      )
+    : ordered
+  const items = eligible.slice(0, limit)
+  const hasMore = items.length < eligible.length
+  const lastItem = items.at(-1)
   return {
     items,
     hasMore,
-    ...(hasMore
+    ...(hasMore && lastItem
       ? {
           nextCursor: createCursor(dependencies.cursorSecret, {
-            version: 2,
-            kind: 'offset',
+            version: 3,
+            kind: 'keyset',
             workspaceId: scope.workspaceId,
             actorId: scope.actorId,
             resource: scope.resource,
             fingerprint,
             limit,
-            offset: nextOffset,
+            positionTimestamp: getTimestamp(lastItem),
+            positionId: lastItem.id,
             expiresAt: Math.floor(
               (dependencies.now?.() ?? new Date()).getTime() / 1_000,
             ) + PUBLIC_API_CURSOR_TTL_SECONDS,
@@ -2938,7 +3015,7 @@ async function createSignedContinuationPage<T extends { id: string }>(
     ...(page.nextContinuation
       ? {
           nextCursor: createCursor(dependencies.cursorSecret, {
-            version: 2,
+            version: 3,
             kind: 'continuation',
             workspaceId: scope.workspaceId,
             actorId: scope.actorId,
@@ -2958,9 +3035,9 @@ async function createSignedContinuationPage<T extends { id: string }>(
 /** Public/management list cursor の署名 payload です。 */
 type SignedCursor = {
   /** Cursor schema version です。 */
-  version: 2
-  /** Offset page または downstream continuation の cursor 種別です。 */
-  kind: 'offset' | 'continuation'
+  version: 3
+  /** Keyset page または downstream continuation の cursor 種別です。 */
+  kind: 'keyset' | 'continuation'
   /** Cursor を束縛する Workspace ID です。 */
   workspaceId: string
   /** Cursor を束縛する credential または management user ID です。 */
@@ -2971,8 +3048,10 @@ type SignedCursor = {
   fingerprint: string
   /** Cursor を発行した page limit です。 */
   limit: number
-  /** 次 page の array offset です。 */
-  offset?: number
+  /** 次 page の直前にある resource の timestamp です。 */
+  positionTimestamp?: string
+  /** 次 page の直前にある resource ID です。 */
+  positionId?: string
   /** Downstream store が発行した opaque continuation です。 */
   continuation?: string
   /** Cursor を利用できる期限の Unix epoch seconds です。 */
@@ -3007,7 +3086,7 @@ function readCursor(
   }
   const value = requireRecord(parsed, 'Cursor is invalid.')
   if (
-    value.version !== 2 ||
+    value.version !== 3 ||
     value.kind !== scope.kind ||
     value.workspaceId !== scope.workspaceId ||
     value.actorId !== scope.actorId ||
@@ -3017,17 +3096,22 @@ function readCursor(
     !Number.isSafeInteger(value.expiresAt) ||
     (value.expiresAt as number) <= Math.floor(now.getTime() / 1_000) ||
     (
-      scope.kind === 'offset' &&
+      scope.kind === 'keyset' &&
       (
-        !Number.isSafeInteger(value.offset) ||
-        (value.offset as number) < 0 ||
+        typeof value.positionTimestamp !== 'string' ||
+        value.positionTimestamp.length === 0 ||
+        value.positionTimestamp.length > 128 ||
+        typeof value.positionId !== 'string' ||
+        value.positionId.length === 0 ||
+        value.positionId.length > 512 ||
         value.continuation !== undefined
       )
     ) ||
     (
       scope.kind === 'continuation' &&
       (
-        value.offset !== undefined ||
+        value.positionTimestamp !== undefined ||
+        value.positionId !== undefined ||
         typeof value.continuation !== 'string' ||
         value.continuation.length === 0 ||
         value.continuation.length > 8_192

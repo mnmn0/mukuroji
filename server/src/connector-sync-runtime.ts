@@ -13,6 +13,7 @@ import {
   type DeveloperPlatformClient,
 } from './developer-platform'
 import {
+  BUILT_IN_CONNECTOR_CATALOG,
   ConnectorRegistry,
   createConnectorOriginMarker,
   decideConnectorInboundSync,
@@ -462,18 +463,6 @@ export class ConnectorSyncEngine {
       actualWorkItemRevision: workItem.revision,
       originSigningSecret: this.originSigningSecret,
     })
-    if (
-      decision.kind === 'duplicate' &&
-      link.syncStatus !== 'synced' &&
-      persisted?.lastSyncedAt
-    ) {
-      await this.persistence.setLinkStatus(
-        input.workspaceId,
-        link.id,
-        'synced',
-        persisted.lastSyncedAt,
-      )
-    }
     if (decision.kind === 'duplicate' || decision.kind === 'self-origin' ||
       decision.kind === 'stale') {
       return { kind: 'skipped', linkId: link.id, reason: decision.kind }
@@ -1459,15 +1448,11 @@ function isConnectorCredentialCasConflict(error: unknown) {
 }
 
 function readSupportedProvider(provider: ConnectorInstallation['provider']) {
-  if (
-    provider === 'github' ||
-    provider === 'slack' ||
-    provider === 'gmail' ||
-    provider === 'google-calendar' ||
-    provider === 'google-drive'
-  ) {
-    return provider
-  }
+  const definition = BUILT_IN_CONNECTOR_CATALOG.find(
+    (candidate) =>
+      candidate.id === provider && candidate.category === 'source-control',
+  )
+  if (definition) return definition.id
   throw new ConnectorRuntimeError(
     'ConnectorProviderUnsupported',
     'Connector provider is not configured in this runtime.',

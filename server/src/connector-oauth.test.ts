@@ -452,6 +452,69 @@ describe('ConnectorOAuthStateManager', () => {
     })
   })
 
+  test('accepts in-flight states in both directions during staged key rotation', async () => {
+    const store = new InMemoryConnectorOAuthStateStore()
+    const protector = {
+      async protect(plaintext: string) {
+        return Buffer.from(plaintext).toString('base64url')
+      },
+      async unprotect(ciphertext: string) {
+        return Buffer.from(ciphertext, 'base64url').toString('utf8')
+      },
+    }
+    const previousSigningSecret =
+      'previous-state-signing-secret-with-more-than-thirty-two-bytes'
+    const currentSigningSecret =
+      'current-state-signing-secret-with-more-than-thirty-two-bytes'
+    const preloadedPreviousManager = new ConnectorOAuthStateManager({
+      store,
+      protector,
+      signingSecret: previousSigningSecret,
+      previousSigningSecrets: [currentSigningSecret],
+      clock: () => NOW,
+    })
+    const previousState = await preloadedPreviousManager.create({
+      kind: 'install',
+      workspaceId: 'workspace-1',
+      userId: 'user-1',
+      provider: 'github',
+      name: 'Engineering GitHub',
+      scopes: ['repo'],
+      returnUrl: '/settings/developer',
+      redirectUri: 'https://app.test/callback',
+    })
+    const rotatedManager = new ConnectorOAuthStateManager({
+      store,
+      protector,
+      signingSecret: currentSigningSecret,
+      previousSigningSecrets: [previousSigningSecret],
+      clock: () => NOW,
+    })
+    const currentState = await rotatedManager.create({
+      kind: 'install',
+      workspaceId: 'workspace-1',
+      userId: 'user-1',
+      provider: 'gitlab',
+      name: 'Engineering GitLab',
+      scopes: ['api'],
+      returnUrl: '/settings/developer',
+      redirectUri: 'https://app.test/callback',
+    })
+
+    await expect(rotatedManager.consume(previousState.state)).resolves.toMatchObject({
+      workspaceId: 'workspace-1',
+      userId: 'user-1',
+      provider: 'github',
+    })
+    await expect(
+      preloadedPreviousManager.consume(currentState.state),
+    ).resolves.toMatchObject({
+      workspaceId: 'workspace-1',
+      userId: 'user-1',
+      provider: 'gitlab',
+    })
+  })
+
   test('reuses the same encrypted state and PKCE challenge for an idempotent operation', async () => {
     let protectCalls = 0
     const manager = new ConnectorOAuthStateManager({

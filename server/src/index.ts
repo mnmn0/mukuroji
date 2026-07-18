@@ -241,7 +241,10 @@ import {
   ConnectorRuntimeError,
   createOAuthConnectorRegistryFromEnvironment,
 } from './connector-oauth'
-import { loadConnectorRuntimeEnvironment } from './connector-runtime-configuration'
+import {
+  createConnectorRuntimeCache,
+  loadConnectorRuntimeEnvironment,
+} from './connector-runtime-configuration'
 import {
   ConnectorOAuthStateManager,
   createDynamoDbConnectorOAuthStateStoreFromEnvironment,
@@ -10474,6 +10477,46 @@ async function readAccessibleWorkItems(
   return { workItems: [...workItemsById.values()] }
 }
 
+/**
+ * Export 専用に、一覧画面の Team/item hard cap を使わず全 accessible partition を走査します。
+ *
+ * `DynamoDbTeamIssuesClient.getTeamIssues` は各 Team partition の LastEvaluatedKey を内部で
+ * 最終 page まで辿ります。ここでは Team を一つずつ処理し、無制限な並列 Query を避けます。
+ */
+async function readAccessibleWorkItemsForExport(
+  principal: ProjectPrincipal,
+): Promise<TeamIssueResponseItem[]> {
+  const directory = await projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
+  const projectAccesses = principal.isSystemAdmin
+    ? undefined
+    : await projectDirectory.getProjectAccessList(principal.directoryId, principal.userKey)
+  const workItems: TeamIssueResponseItem[] = []
+
+  for (const team of directory.teams) {
+    const context: TeamPermissionContext | undefined = principal.isSystemAdmin
+      ? { team, directory }
+      : (() => {
+          const teamProjectIds = new Set(team.projects.map((project) => project.id))
+          const teamProjectAccesses = (projectAccesses ?? []).filter((access) =>
+            teamProjectIds.has(access.projectId)
+          )
+          return teamProjectAccesses.some((access) => projectAccessAllows(access, 'viewer'))
+            ? { team, directory, projectAccesses: teamProjectAccesses }
+            : undefined
+        })()
+    if (!context) continue
+
+    const response = await teamIssues.getTeamIssues(
+      principal.directoryId,
+      team.id,
+      { consistentRead: true },
+    )
+    workItems.push(...filterAccessibleTeamIssues(response.issues, principal, context))
+  }
+
+  return workItems
+}
+
 async function readPlanningWorkItemState(
   principal: ProjectPrincipal,
 ): Promise<PlanningWorkItemState> {
@@ -17476,7 +17519,7 @@ function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       requireWorkspaceBusinessWrite(principal)
       return createWorkItemExport(
         format,
-        (await readAccessibleWorkItems(principal)).workItems,
+        await readAccessibleWorkItemsForExport(principal),
       )
     },
   }
@@ -17489,9 +17532,6 @@ type ConnectorRuntimeBundle = {
   /** Provider と canonical Work Item の双方向 sync engine です。 */
   syncEngine: ConnectorSyncEngine
 }
-
-/** Cold start 中に一度だけ共有する connector runtime 初期化 promise です。 */
-let connectorRuntimeBundlePromise: Promise<ConnectorRuntimeBundle | undefined> | undefined
 
 /** Canonical Work Item service を connector worker の current-RBAC/CAS boundary へ適合します。 */
 function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
@@ -17786,6 +17826,9 @@ function createConfiguredConnectorRuntime(
     store: createDynamoDbConnectorOAuthStateStoreFromEnvironment(environment),
     protector: createDefaultSecretProtector(),
     signingSecret,
+    previousSigningSecrets: readConnectorOAuthStatePreviousSigningSecrets(
+      environment.CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON,
+    ),
   })
   const persistence = createDynamoDbConnectorSyncPersistenceFromEnvironment()
   let authorization: ConnectorAuthorizationRuntime | undefined
@@ -17820,6 +17863,28 @@ function createConfiguredConnectorRuntime(
   return { authorization, syncEngine }
 }
 
+/** OAuth state key rotation の grace period に使う旧 secret JSON array を検証します。 */
+function readConnectorOAuthStatePreviousSigningSecrets(
+  value: string | undefined,
+) {
+  if (!value?.trim()) return []
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length > 3 ||
+      parsed.some((secret) => typeof secret !== 'string' || !secret.trim())
+    ) {
+      throw new TypeError()
+    }
+    return parsed.map((secret) => secret.trim())
+  } catch {
+    throw new TypeError(
+      'CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON must be a JSON array of up to three non-empty strings.',
+    )
+  }
+}
+
 /** Empty configuration で connector routes を fail-closed に保ちます。 */
 function hasConfiguredConnectorProviders(value: string | undefined) {
   if (!value) return false
@@ -17831,11 +17896,20 @@ function hasConfiguredConnectorProviders(value: string | undefined) {
   }
 }
 
-/** Secrets Manager-backed connector runtime を cold start ごとに一度だけ構築します。 */
+/**
+ * Warm Lambda invocation 間で成功値を短時間共有し、一時障害後は bounded backoff で再取得します。
+ */
+const connectorRuntimeBundleCache = createConnectorRuntimeCache({
+  async load() {
+    return createConfiguredConnectorRuntime(
+      await loadConnectorRuntimeEnvironment(),
+    )
+  },
+})
+
+/** Secrets Manager-backed connector runtime を TTL と bounded retry 付きで構築します。 */
 async function getConfiguredConnectorRuntimeBundle() {
-  connectorRuntimeBundlePromise ??= loadConnectorRuntimeEnvironment()
-    .then(createConfiguredConnectorRuntime)
-  return connectorRuntimeBundlePromise
+  return connectorRuntimeBundleCache.get()
 }
 
 /** 設定済み OAuth runtime を返し、未設定なら secret-free error で fail-closed にします。 */
@@ -18505,6 +18579,7 @@ export function configureApiClientsForTest(clients: {
  * Server test 後に外部 service client を実装 client に戻します。
  */
 export function resetApiClientsForTest() {
+  connectorRuntimeBundleCache.clear()
   cognito = createCognitoClient()
   dashboardSummary = new DynamoDbDashboardSummaryClient()
   projectTasks = new DynamoDbProjectTasksClient()

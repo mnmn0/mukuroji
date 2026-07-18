@@ -50,9 +50,104 @@ test('fails closed after the creator loses project access or the Team is archive
     .toBe(false)
 })
 
-function createAuthorizer(rows: Record<string, unknown>[]) {
+test('reuses the current ACL snapshot within one Lambda batch', async () => {
+  const calls = { directoryReads: 0, memberReads: 0 }
+  const authorizer = createAuthorizer([
+    { entryType: 'team', teamId: 'team-1' },
+    { entryType: 'project', teamId: 'team-1', projectId: 'project-1' },
+    {
+      entryType: 'project-member',
+      projectId: 'project-1',
+      memberKey: 'creator-1',
+      role: 'member',
+    },
+  ], calls)
+  const batch = authorizer.createBatch()
+
+  expect(batch).toBeDefined()
+  await expect(Promise.all([
+    batch!.canDeliver('workspace-1', createSubscription(), 'team-1'),
+    batch!.canDeliver(
+      'workspace-1',
+      { ...createSubscription(), id: 'webhook-2' },
+      'team-1',
+    ),
+  ])).resolves.toEqual([true, true])
+  expect(calls).toEqual({ directoryReads: 1, memberReads: 1 })
+})
+
+test('does not fail closed solely because a directory contains more than 10,000 rows', async () => {
+  const calls = { directoryReads: 0, memberReads: 0 }
+  const fillerRows = Array.from({ length: 10_001 }, () => ({ entryType: 'other' }))
+  const authorizer = createAuthorizer([
+    ...fillerRows,
+    { entryType: 'team', teamId: 'team-1' },
+    { entryType: 'project', teamId: 'team-1', projectId: 'project-1' },
+    {
+      entryType: 'project-member',
+      projectId: 'project-1',
+      memberKey: 'creator-1',
+      role: 'viewer',
+    },
+  ], calls)
+  const batch = authorizer.createBatch()
+
+  await expect(Promise.all([
+    batch!.canDeliver('workspace-1', createSubscription(), 'team-1'),
+    batch!.canDeliver(
+      'workspace-1',
+      { ...createSubscription(), id: 'webhook-large-2' },
+      'team-1',
+      'project-1',
+    ),
+  ])).resolves.toEqual([true, true])
+  expect(calls).toEqual({ directoryReads: 1, memberReads: 1 })
+})
+
+test('uses the indexed Team, Project, and member relationships without cross-Team access', async () => {
+  const authorizer = createAuthorizer([
+    { entryType: 'team', teamId: 'team-1' },
+    { entryType: 'team', teamId: 'team-2' },
+    { entryType: 'project', teamId: 'team-1', projectId: 'project-1' },
+    { entryType: 'project', teamId: 'team-2', projectId: 'project-2' },
+    {
+      entryType: 'project-member',
+      projectId: 'project-2',
+      memberKey: 'creator-1',
+      role: 'manager',
+    },
+    {
+      entryType: 'project-member',
+      projectId: 'project-1',
+      memberKey: 'creator-1',
+      role: 'removed',
+    },
+  ])
+  const subscription = {
+    ...createSubscription(),
+    teamIds: ['team-1', 'team-2'],
+  }
+
+  await expect(authorizer.canDeliver(
+    'workspace-1',
+    subscription,
+    'team-1',
+  )).resolves.toBe(false)
+  await expect(authorizer.canDeliver(
+    'workspace-1',
+    subscription,
+    'team-2',
+    'project-2',
+  )).resolves.toBe(true)
+})
+
+function createAuthorizer(
+  rows: Record<string, unknown>[],
+  calls?: { directoryReads: number; memberReads: number },
+) {
   const workspaceAccess = {
     async getActiveMember() {
+      if (calls) calls.memberReads += 1
       return {
         id: 'member-1',
         memberKey: 'creator-1',
@@ -67,6 +162,7 @@ function createAuthorizer(rows: Record<string, unknown>[]) {
   } as unknown as WorkspaceAccessClient
   const documentClient = {
     async send() {
+      if (calls) calls.directoryReads += 1
       return { Items: rows }
     },
   } as unknown as DynamoDBDocumentClient

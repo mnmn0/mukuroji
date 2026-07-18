@@ -58,11 +58,22 @@ export type ConnectorPollMessage = {
   resourceType: ConnectorWorkItemResourceType
 }
 
+/** Global external-link inventory の走査を durable queue から再開する message です。 */
+export type ConnectorPollInventoryMessage = {
+  /** Queue payload schema version です。 */
+  version: typeof CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION
+  /** Inventory continuation message discriminator です。 */
+  kind: 'poll-inventory'
+  /** Secret-free global inventory の opaque continuation cursor です。 */
+  cursor: string
+}
+
 /** Connector sync worker が受け付ける versioned secret-free payload です。 */
 export type ConnectorSyncQueueMessage =
   | ConnectorWorkItemChangedMessage
   | ConnectorOutboundMessage
   | ConnectorPollMessage
+  | ConnectorPollInventoryMessage
 
 /** Connector sync queue への書き込み境界です。 */
 export interface ConnectorSyncQueue {
@@ -154,8 +165,12 @@ export type ConnectorSyncWorkerDependencies = {
   queue: ConnectorSyncQueue
   /** Provider cursor を secret-free queue の外で保持する store です。 */
   checkpoints: ConnectorPollCheckpointStore
+  /** Inventory continuation message を処理する global secret-free inventory です。 */
+  inventory?: ConnectorPollInventory
   /** 1 poll message で読む provider page 上限です。 */
   maximumPollPages?: number
+  /** 1 inventory continuation message で読む global inventory page 上限です。 */
+  maximumInventoryPages?: number
 }
 
 /** Global schedule inventory が返す secret-free poll target です。 */
@@ -189,6 +204,8 @@ export interface ConnectorPollInventory {
 
 /** EventBridge などから受ける connector poll schedule input です。 */
 export type ConnectorPollScheduleEvent = {
+  /** Durable continuation job が引き継いだ global inventory cursor です。 */
+  cursor?: string
   /** 1 invocation で列挙する global inventory page 上限です。 */
   maximumPages?: number
 }
@@ -209,6 +226,8 @@ export type ConnectorPollScheduleResult = {
   pages: number
   /** 重複排除後に enqueue した poll target 数です。 */
   enqueued: number
+  /** Page 上限後の continuation job を durable queue へ保存したかです。 */
+  continuationQueued: boolean
 }
 
 /** DynamoDB Streams image の必要最小 AttributeValue 表現です。 */
@@ -340,6 +359,21 @@ export async function processConnectorSyncMessage(
     await processCurrentOutboundLink(normalized, dependencies)
     return
   }
+  if (normalized.kind === 'poll-inventory') {
+    if (!dependencies.inventory) {
+      throw new TypeError('Connector poll inventory is not configured.')
+    }
+    await scheduleConnectorPollInventory({
+      cursor: normalized.cursor,
+      ...(dependencies.maximumInventoryPages === undefined
+        ? {}
+        : { maximumPages: dependencies.maximumInventoryPages }),
+    }, {
+      inventory: dependencies.inventory,
+      queue: dependencies.queue,
+    })
+    return
+  }
   await pollCurrentInstallation(normalized, dependencies)
 }
 
@@ -355,8 +389,10 @@ export async function scheduleConnectorPollInventory(
     'Connector poll inventory page limit',
   )
   const enqueuedTargets = new Set<string>()
-  const visitedCursors = new Set<string>()
-  let cursor: string | undefined
+  let cursor = event.cursor === undefined
+    ? undefined
+    : readProviderCursor(event.cursor, 'Connector poll inventory cursor')
+  const visitedCursors = new Set(cursor ? [cursor] : [])
   let pages = 0
   while (pages < maximumPages) {
     const page = await dependencies.inventory.listPollTargets(cursor)
@@ -369,6 +405,9 @@ export async function scheduleConnectorPollInventory(
         installationId: target.installationId,
         resourceType: target.resourceType,
       })
+      if (message.kind !== 'poll') {
+        throw new TypeError('Connector poll inventory produced an invalid target.')
+      }
       const targetKey = createPollTargetKey(message)
       if (enqueuedTargets.has(targetKey)) return []
       enqueuedTargets.add(targetKey)
@@ -376,7 +415,11 @@ export async function scheduleConnectorPollInventory(
     })
     await Promise.all(messages.map((message) => dependencies.queue.enqueue(message)))
     if (page.nextCursor === undefined) {
-      return { pages, enqueued: enqueuedTargets.size }
+      return {
+        pages,
+        enqueued: enqueuedTargets.size,
+        continuationQueued: false,
+      }
     }
     const nextCursor = readProviderCursor(page.nextCursor, 'Connector poll inventory cursor')
     if (nextCursor === cursor || visitedCursors.has(nextCursor)) {
@@ -385,7 +428,19 @@ export async function scheduleConnectorPollInventory(
     visitedCursors.add(nextCursor)
     cursor = nextCursor
   }
-  throw new RangeError('Connector poll inventory exceeded its page limit.')
+  if (!cursor) {
+    throw new TypeError('Connector poll inventory continuation cursor is missing.')
+  }
+  await dependencies.queue.enqueue({
+    version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+    kind: 'poll-inventory',
+    cursor,
+  })
+  return {
+    pages,
+    enqueued: enqueuedTargets.size,
+    continuationQueued: true,
+  }
 }
 
 /** Outbound retries で固定する deterministic operation ID を作成します。 */
@@ -611,6 +666,14 @@ function normalizeQueueMessage(value: unknown): ConnectorSyncQueueMessage {
       workspaceId: readIdentifier(value.workspaceId, 'Workspace ID'),
       installationId: readIdentifier(value.installationId, 'Connector installation ID'),
       resourceType: readResourceType(value.resourceType),
+    }
+  }
+  if (value.kind === 'poll-inventory') {
+    assertExactKeys(value, ['version', 'kind', 'cursor'])
+    return {
+      version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+      kind: 'poll-inventory',
+      cursor: readProviderCursor(value.cursor, 'Connector poll inventory cursor'),
     }
   }
   throw new TypeError('Connector sync queue message kind is unsupported.')

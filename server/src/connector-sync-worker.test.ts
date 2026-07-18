@@ -19,6 +19,7 @@ import {
   type ConnectorPollCheckpoint,
   type ConnectorPollCheckpointKey,
   type ConnectorPollCheckpointStore,
+  type ConnectorPollInventory,
   type ConnectorSyncDynamoAttributeValue,
   type ConnectorSyncQueueMessage,
   type ConnectorSyncWorkerDependencies,
@@ -252,7 +253,11 @@ test('enumerates a global secret-free inventory without requiring workspace inpu
     },
   })
 
-  expect(result).toEqual({ pages: 2, enqueued: 2 })
+  expect(result).toEqual({
+    pages: 2,
+    enqueued: 2,
+    continuationQueued: false,
+  })
   expect(cursors).toEqual([undefined, 'inventory-page-2'])
   expect(queued).toEqual([
     {
@@ -272,9 +277,74 @@ test('enumerates a global secret-free inventory without requiring workspace inpu
   ])
 })
 
+test('continues a capped global inventory scan through a durable queue job', async () => {
+  const cursors: Array<string | undefined> = []
+  const inventory: ConnectorPollInventory = {
+    async listPollTargets(cursor) {
+      cursors.push(cursor)
+      if (!cursor) {
+        return {
+          targets: [{
+            workspaceId: 'workspace-1',
+            installationId: 'installation-1',
+            resourceType: 'issue',
+          }],
+          nextCursor: 'inventory-page-2',
+        }
+      }
+      return {
+        targets: [{
+          workspaceId: 'workspace-2',
+          installationId: 'installation-2',
+          resourceType: 'merge-request',
+        }],
+      }
+    },
+  }
+  const fixture = createWorkerFixture({ inventory })
+
+  await expect(scheduleConnectorPollInventory({ maximumPages: 1 }, {
+    inventory,
+    queue: fixture.dependencies.queue,
+  })).resolves.toEqual({
+    pages: 1,
+    enqueued: 1,
+    continuationQueued: true,
+  })
+  expect(fixture.queued).toEqual([
+    {
+      version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+      kind: 'poll',
+      workspaceId: 'workspace-1',
+      installationId: 'installation-1',
+      resourceType: 'issue',
+    },
+    {
+      version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+      kind: 'poll-inventory',
+      cursor: 'inventory-page-2',
+    },
+  ])
+
+  const continuation = fixture.queued[1]
+  if (continuation?.kind !== 'poll-inventory') {
+    throw new Error('Expected durable inventory continuation.')
+  }
+  await processConnectorSyncMessage(continuation, fixture.dependencies)
+  expect(cursors).toEqual([undefined, 'inventory-page-2'])
+  expect(fixture.queued[2]).toEqual({
+    version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+    kind: 'poll',
+    workspaceId: 'workspace-2',
+    installationId: 'installation-2',
+    resourceType: 'merge-request',
+  })
+})
+
 function createWorkerFixture(options: {
   checkpoint?: ConnectorPollCheckpoint
   pollCursors?: Array<string | undefined>
+  inventory?: ConnectorPollInventory
 } = {}) {
   const links: ExternalWorkItemLink[] = [createLink()]
   const installations: ConnectorInstallation[] = [createInstallation()]
@@ -348,6 +418,7 @@ function createWorkerFixture(options: {
       },
     },
     checkpoints,
+    ...(options.inventory ? { inventory: options.inventory } : {}),
   }
   return {
     dependencies,

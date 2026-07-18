@@ -122,6 +122,8 @@ export type ConnectorOAuthStateManagerOptions = {
   protector: SecretProtector
   /** State token の HMAC secret です。 */
   signingSecret: string
+  /** Key rotation 中に既存 state token の検証だけへ使う旧 HMAC secrets です。 */
+  previousSigningSecrets?: readonly string[]
   /** Flow lifetime 秒数です。 */
   ttlSeconds?: number
   /** Expiry 判定に使う clock です。 */
@@ -138,6 +140,8 @@ export class ConnectorOAuthStateManager {
   private readonly protector: SecretProtector
   /** State token の HMAC secret です。 */
   private readonly signingSecret: Buffer
+  /** Current key と rotation grace period 中の旧 key を含む検証用 secrets です。 */
+  private readonly verificationSigningSecrets: readonly Buffer[]
   /** Flow lifetime 秒数です。 */
   private readonly ttlSeconds: number
   /** Expiry 判定に使う clock です。 */
@@ -150,10 +154,23 @@ export class ConnectorOAuthStateManager {
     this.store = options.store
     this.protector = options.protector
     this.signingSecret = Buffer.from(options.signingSecret, 'utf8')
-    if (this.signingSecret.byteLength < 32) {
+    const previousSigningSecrets = options.previousSigningSecrets ?? []
+    if (previousSigningSecrets.length > 3) {
       throw new ConnectorRuntimeError(
         'ConnectorOAuthStateSecretInvalid',
-        'Connector OAuth state signing secret must be at least 32 bytes.',
+        'Connector OAuth state cannot retain more than three previous signing secrets.',
+      )
+    }
+    this.verificationSigningSecrets = [
+      this.signingSecret,
+      ...previousSigningSecrets.map((secret) => Buffer.from(secret, 'utf8')),
+    ].filter((secret, index, secrets) =>
+      secrets.findIndex((candidate) => candidate.equals(secret)) === index
+    )
+    if (this.verificationSigningSecrets.some((secret) => secret.byteLength < 32)) {
+      throw new ConnectorRuntimeError(
+        'ConnectorOAuthStateSecretInvalid',
+        'Connector OAuth state signing secrets must be at least 32 bytes.',
       )
     }
     this.ttlSeconds = options.ttlSeconds ?? CONNECTOR_OAUTH_STATE_TTL_SECONDS
@@ -289,7 +306,10 @@ export class ConnectorOAuthStateManager {
 
   /** Signed state を検証し、暗号化 flow を一度だけ consume します。 */
   async consume(state: string): Promise<ConnectorOAuthFlow> {
-    const token = parseAndVerifyStateToken(state, this.signingSecret)
+    const token = parseAndVerifyStateToken(
+      state,
+      this.verificationSigningSecrets,
+    )
     const nowEpochSeconds = Math.floor(this.clock().getTime() / 1_000)
     if (token.expiresAtEpochSeconds < nowEpochSeconds) {
       throw new ConnectorRuntimeError(
@@ -518,7 +538,10 @@ function matchesFlowInput(
     JSON.stringify(flow.scopes) === JSON.stringify([...new Set(input.scopes)].sort())
 }
 
-function parseAndVerifyStateToken(value: string, signingSecret: Buffer) {
+function parseAndVerifyStateToken(
+  value: string,
+  signingSecrets: readonly Buffer[],
+) {
   const parts = value.split('.')
   if (parts.length !== 4 || parts[0] !== 'v1') {
     throw new ConnectorRuntimeError(
@@ -540,11 +563,17 @@ function parseAndVerifyStateToken(value: string, signingSecret: Buffer) {
       'Connector OAuth state token is invalid.',
     )
   }
-  const expected = createHmac('sha256', signingSecret)
-    .update(`v1.${stateId}.${expiresAtEpochSeconds}`)
-    .digest()
   const actual = Buffer.from(signature, 'base64url')
-  if (actual.byteLength !== expected.byteLength || !timingSafeEqual(actual, expected)) {
+  let validSignature = false
+  for (const signingSecret of signingSecrets) {
+    const expected = createHmac('sha256', signingSecret)
+      .update(`v1.${stateId}.${expiresAtEpochSeconds}`)
+      .digest()
+    const matches = actual.byteLength === expected.byteLength &&
+      timingSafeEqual(actual, expected)
+    validSignature = matches || validSignature
+  }
+  if (!validSignature) {
     throw new ConnectorRuntimeError(
       'ConnectorOAuthStateInvalid',
       'Connector OAuth state signature is invalid.',
