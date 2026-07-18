@@ -1,6 +1,6 @@
 # mukuroji AWS deployment
 
-この CDK stack は shared Hono handler を Node.js 22 Lambda に bundle し、Lambda Function URL と API Gateway HTTP API の両方へ接続します。DynamoDB table、private file bucket、GuardDuty malware scan、CORS / IAM、外部 Cognito 設定、Workspace bootstrap も同じ stack で管理します。
+この CDK stack は shared Hono handler を Node.js 22 Lambda に bundle し、Lambda Function URL と API Gateway HTTP API の両方へ接続します。DynamoDB table、request intake の email ingestion boundary、private file bucket、GuardDuty malware scan、CORS / IAM、外部 Cognito 設定、Workspace bootstrap も同じ stack で管理します。
 
 コマンドは repository root から実行してください。AWS account を変更する `deploy`、Cognito 更新、data migration / recovery は、対象 account・region と `cdk diff` を確認してから実行します。
 
@@ -17,6 +17,9 @@
 | `TaskApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
 | `ConnectorRuntimeConfiguration` | no | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
+| `RequestRateLimitPerHour` | no | public request capability ごとの1時間あたり submit 上限。既定値は 10、範囲は 1–10000 です。 |
+| `RequestEmailWebhookSecret` | yes | email adapter から渡される envelope の署名検証に使う 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
+| `RequestTokenHashSecret` | yes | public form / reply capability token を保存前に hash する 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
 | `FileRetentionDays` | no | soft delete 後の metadata と S3 noncurrent version の保持日数。既定値は 30 日です。live current object の有効期限ではありません。 |
 | `FileUploadUrlTtlSeconds` | no | direct upload URL の有効秒数。既定値 600、範囲 60–3600 秒です。bucket policy もこの上限より古い upload 署名を拒否します。 |
 | `FileDownloadUrlTtlSeconds` | no | malware scan 済み file の download URL 有効秒数。既定値 300、範囲 60–3600 秒です。bucket policy もこの上限より古い download 署名を拒否します。 |
@@ -33,6 +36,8 @@
 - `TeamIssuesTableName`（`WorkItemsTableName` と同じ table を指す互換 output）
 - `WorkItemConfigurationTableName`（workflow、custom field、relation graph の scope store）
 - `PlanningTableName`（cycle、goal、milestone、roadmap、portfolio の計画 store）
+- `RequestIntakeTableName`（form version、link capability、submission、queue、reply thread の scope store）
+- `RequestEmailIngestionFunctionName`, `RequestEmailIngestionDlqUrl`
 - `ProjectDirectoryTableName`, `TeamIssueEventsTableName`
 - `FileProofingTableName`, `FileBucketName`, `FileMalwareProtectionPlanId`
 - `NotificationsTableName`, `CollaborationProjectionDlqUrl`, `NotificationScheduleDlqUrl`
@@ -99,6 +104,18 @@ File body は API request body に通さず、認証・認可済み API が発�
 
 GuardDuty plan の作成は Malware Protection for S3 の利用条件と課金対象です。deploy 前の `cdk diff` で `AWS::GuardDuty::MalwareProtectionPlan`、専用 IAM role、S3 bucket policy を確認してください。scan result が `THREATS_FOUND`、`UNSUPPORTED`、`ACCESS_DENIED`、`FAILED` または tag 未設定の間は download できない fail-closed contract です。
 
+## Request intake and email boundary
+
+`RequestIntakeTable` は `scopeKey` / `recordKey` を primary key とし、queue projection には `RequestQueueIndex` の `queueKey` / `queueRecordKey` を使います。Table は `PAY_PER_REQUEST`、PITR、`Retain` を有効にし、期限付き link、365日保持の reply capability、rate-limit bucket などの transient row だけを epoch seconds の `expiresAt` TTL で失効させます。Form version と submission の正本を TTL で暗黙削除しないでください。
+
+Shared API Lambda は `REQUEST_INTAKE_TABLE_NAME`、`REQUEST_QUEUE_INDEX_NAME`、`REQUEST_RATE_LIMIT_PER_HOUR` と token hash secret parameter を environment から受け取り、request state、canonical Work Item、audit event を同じ DynamoDB transaction で更新できます。Email webhook secret は dedicated ingestion Lambda だけに渡します。Attachment body は新しい public bucket を作らず、既存の private `FileBucket` と GuardDuty scan boundary を利用します。外部 response に Workspace / Team / Project / workflow / IAM 情報を含めず、opaque capability token の hash だけを table に保存します。
+
+`RequestEmailIngestionFunction` は public HTTP URL、API Gateway route、SES receipt rule をこの stack では持ちません。Email provider / SES adapter は署名付きの正規化 envelope を作り、明示的に `lambda:InvokeFunction` を許可された principal からこの Lambda を非同期 invoke してください。Lambda は `RequestEmailWebhookSecret` で envelope を検証し、`RequestTokenHashSecret` で reply capability を解決します。Execution role は `RequestIntakeTable` への direct `GetItem` と、`dynamodb:EnclosingOperation=TransactWriteItems` 条件付き `PutItem`、failure destination の `GetQueueAttributes` / `GetQueueUrl` / `SendMessage` だけを持ちます。非同期 retry を2回使い、最終失敗は14日保持・stack rollback 時 Retain の encrypted DLQへ送られます。Visible message と `DestinationDeliveryFailures` は別々の alarm で検出します。Alarm action は環境共通の監視 stack から設定してください。
+
+`RequestEmailWebhookSecret` は adapter と Lambda の両方で同じ値を設定し、log、output、request metadata に残さないでください。`RequestTokenHashSecret` の rotation は未失効の public form / reply link を無効化するため、通常 deploy と分け、active capability の再発行を含む手順として実施します。`NoEcho` は CloudFormation 表示を抑止しますが、secret の command history や Lambda environment への露出を防ぐものではないため、値は CI/CD の secret store から渡してください。
+
+DLQ の envelope は署名 timestamp が5分で失効するため、そのまま redrive しません。Operator は失敗原因を解消した後、保存済み envelope の内容と `Message-ID` を変更せず、新しい timestamp で adapter 側から再署名して `RequestEmailIngestionFunction` を invokeし、成功を確認してから元 message を削除します。同じ `Message-ID` は request table の receipt で冪等化されます。
+
 ## Fresh deployment
 
 ### 1. Cognito と値を準備する
@@ -115,6 +132,8 @@ export MUKUROJI_WORKSPACE_DIRECTORY_ID=<workspace-directory-id>
 export MUKUROJI_INITIAL_OWNER_EMAIL=<lowercase-owner@example.com>
 export MUKUROJI_INITIAL_OWNER_USERNAME=<cognito-username>
 export MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY="$(openssl rand -hex 32)"
+export MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET=<at-least-32-random-characters>
+export MUKUROJI_REQUEST_TOKEN_HASH_SECRET=<different-at-least-32-random-characters>
 
 bash scripts/prepare-workspace-cognito.sh
 ```
@@ -159,6 +178,8 @@ bun --filter cdk cdk diff CdkStack \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
+  --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
+  --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
   --parameters TaskApiAllowedOrigins=https://app.example.com
 
 bun --filter cdk cdk deploy CdkStack \
@@ -168,6 +189,8 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
+  --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
+  --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
   --parameters TaskApiAllowedOrigins=https://app.example.com \
   --outputs-file /tmp/mukuroji-cdk-outputs.json
 ```
@@ -293,7 +316,9 @@ Table は `PAY_PER_REQUEST`、`Retain`、PITR enabled で作成します。deplo
 
 ## Rollback
 
-code / infrastructure rollback は、原則として直前に成功した revision を同じ 5 parameters で deploy します。現行 stack に存在する retained resource を rollback template から削除しないでください。DynamoDB table は `Retain` で、PITR も有効ですが、stack から外れた resource は自動で再接続されません。Cognito custom schema は rollback しても残ります。
+code / infrastructure rollback は、原則として直前に成功した revision を同じ必須 parameters（request intake 用の2 secretを含む）で deploy します。現行 stack に存在する retained resource を rollback template から削除しないでください。DynamoDB table は `Retain` で、PITR も有効ですが、stack から外れた resource は自動で再接続されません。Cognito custom schema は rollback しても残ります。
+
+`RequestIntakeTable` または email DLQ を初めて追加した deploy から、それらを知らない旧 template へ直接 rollback しないでください。先に forward-fix revision で API/email ingestion を無効化し、retained resource と output を template に残したまま application code を戻します。どうしても旧 template を使う場合は resource import 用 template と logical ID を準備し、CloudFormation から外れた retained resource を放置した状態で同名 resource を再作成しません。
 
 Workspace migration の切替後に戻す場合:
 
@@ -328,7 +353,8 @@ aws dynamodb wait table-exists \
 - Function URL の edge auth は `NONE` ですが、Hono API が Cognito Bearer token の issuer / client / token use を検証します。
 - Function URL、HTTP API、Hono CORS は同じ `TaskApiAllowedOrigins` に揃えます。本番で local default を使いません。
 - Lambda IAM は stack table、`workspaces/` file object prefix、指定 user pool に限定します。API role に bucket-wide `ListBucket` は付与しません。
-- stack が管理するすべての DynamoDB table は `Retain` + PITR enabled です。FileProofing table は `expiresAt`、Work Item configuration table は `expiresAtEpochSeconds` TTL も有効です。
+- Email ingestion Lambda は HTTP route を持たず、Request Intake table と failure DLQ 以外の data-plane 権限を持ちません。
+- stack が管理するすべての DynamoDB table は `Retain` + PITR enabled です。FileProofing / Request Intake table は `expiresAt`、Work Item configuration table は `expiresAtEpochSeconds` TTL も有効です。
 - File bucket は public access を遮断し、TLS / SSE-S3 / versioning / `Retain` / malware tag-based download deny を有効にします。
 - Lambda は `server/src/index.ts` を deploy 時に bundle します。旧 inline Lambda copy はありません。
 

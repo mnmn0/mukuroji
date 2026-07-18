@@ -27,7 +27,7 @@ server は既定で `http://localhost:4566` の Floci Cognito / DynamoDB に接�
 host userからも読み込めます。Workspace access mutationに必要な固定HMAC keyはこのfileへ複製せず、
 API writerとbackfillの両方がowner-onlyのroot `.env`から同じ値を読み込みます。
 
-health check は `GET http://localhost:3000/api/health` です。`POST /api/auth/login` 以外の application API は、Cognito access token を `Authorization: Bearer <token>` で受け取ります。
+health check は `GET http://localhost:3000/api/health` です。Public Request Form / requester reply と `POST /api/auth/login` 以外の application API は、Cognito access token を `Authorization: Bearer <token>` で受け取ります。
 
 ## API path contract
 
@@ -47,6 +47,8 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 - `/api/teams/{teamId}/issues/{issueId}/collaboration`, `/comments`, `/watch`, `/presence`
 - `/api/projects/{projectId}/tasks`, `/issues`, `/members`, `/users`, `/watch`
 - `/api/notifications`, `/api/notifications/unread-count`, `/api/notification-preferences`
+- `/api/request-forms`, `/api/request-queue`, `/api/request-submissions/{submissionId}`
+- `/api/request-intake/{token}`, `GET /api/request-threads/{threadToken}`, `/api/request-threads/{threadToken}/replies`
 
 The local API reads DynamoDB through `DYNAMODB_ENDPOINT`, `AWS_ENDPOINT_URL_DYNAMODB`, or `AWS_ENDPOINT_URL`.
 Default local table names are:
@@ -65,6 +67,12 @@ Default local table names are:
 - `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64桁の小文字hex固定key>`（`openssl rand -hex 32` などで生成し、API と backfill で共有して通常は rotation しない）
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID=workspace#mukuroji-local`
 - `MUKUROJI_WORKSPACE_ACCESS_TABLE=mukuroji-workspace-access-local`
+- `REQUEST_INTAKE_TABLE_NAME=mukuroji-request-intake-local`
+- `REQUEST_QUEUE_INDEX_NAME=RequestQueueIndex`
+- `REQUEST_RATE_LIMIT_PER_HOUR=10`
+- `MUKUROJI_REQUEST_TRUSTED_PROXY_ADDRESSES=<comma-separated proxy addresses>`（Bun server で列挙した transport source から到達した場合だけ `X-Forwarded-For` を rate-limit key に使用。未設定時は転送headerを信頼しない）
+- `REQUEST_TOKEN_HASH_SECRET=<32文字以上のsecret>`（Lambda では必須）
+- `REQUEST_EMAIL_WEBHOOK_SECRET=<32文字以上のsecret>`（専用 email ingestion Lambda で必須）
 
 Project directory rows are scoped by the authenticated Cognito user's Workspace claims.
 The local Floci seed writes `workspace#mukuroji-local` to both `custom:directory_id` and

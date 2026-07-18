@@ -44,7 +44,14 @@ describe('canonical Work Item validation', () => {
     delete unassigned.directoryProjectId
 
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem())).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ sourceRequestId: 'req_20260716_example' })))
+      .toBe(true)
     expect(isCanonicalWorkItemRecord(unassigned)).toBe(true)
+  })
+
+  test('rejects an invalid request source reference', () => {
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ sourceRequestId: '' }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ sourceRequestId: 42 }))).toBe(false)
   })
 
   test('rejects legacy and response-only fields', () => {
