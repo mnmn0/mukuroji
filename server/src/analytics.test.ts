@@ -25,6 +25,7 @@ import {
   createAnalyticsCsv,
   createAnalyticsPermissionScopeHash,
   createAnalyticsPdf,
+  createAnalyticsScheduleShard,
   createAnalyticsSnapshot,
   normalizeAnalyticsExportLocale,
   queryAnalyticsEvidence,
@@ -166,6 +167,7 @@ function createDynamoDocumentClient() {
   const rows = new Map<string, Record<string, unknown>>()
   const commands: unknown[] = []
   let queryLastEvaluatedKey: Record<string, unknown> | undefined
+  let queryPageSize: number | undefined
   let nextTransactionError: unknown
   const keyOf = (key: Record<string, unknown>) =>
     `${String(key.workspaceId)}\u0000${String(key.recordKey)}`
@@ -264,10 +266,44 @@ function createDynamoDocumentClient() {
         ) return false
         return true
       })
-      const lastEvaluatedKey = queryLastEvaluatedKey
+      const sortAttribute = command.input.IndexName === undefined
+        ? 'recordKey'
+        : 'nextDeliveryAtRecordKey'
+      items.sort((left, right) =>
+        String(left[sortAttribute]).localeCompare(String(right[sortAttribute]))
+      )
+      if (command.input.ScanIndexForward === false) items.reverse()
+      const exclusiveStartIndex = command.input.ExclusiveStartKey === undefined
+        ? -1
+        : items.findIndex((item) =>
+            keyOf(item) === keyOf(command.input.ExclusiveStartKey!)
+          )
+      const remainingItems = items.slice(exclusiveStartIndex + 1)
+      const requestedLimit = command.input.Limit ?? Number.POSITIVE_INFINITY
+      const pageLimit = Math.min(
+        requestedLimit,
+        queryPageSize ?? Number.POSITIVE_INFINITY,
+      )
+      const limitedItems = remainingItems.slice(0, pageLimit)
+      const lastItem = limitedItems.at(-1)
+      const naturalLastEvaluatedKey =
+        lastItem !== undefined &&
+          limitedItems.length < remainingItems.length
+          ? {
+              workspaceId: lastItem.workspaceId,
+              recordKey: lastItem.recordKey,
+              ...(command.input.IndexName === undefined
+                ? {}
+                : {
+                    scheduleShard: lastItem.scheduleShard,
+                    nextDeliveryAtRecordKey: lastItem.nextDeliveryAtRecordKey,
+                  }),
+            }
+          : undefined
+      const lastEvaluatedKey = queryLastEvaluatedKey ?? naturalLastEvaluatedKey
       queryLastEvaluatedKey = undefined
       return {
-        Items: items,
+        Items: limitedItems,
         ...(lastEvaluatedKey === undefined ? {} : { LastEvaluatedKey: lastEvaluatedKey }),
       }
     }
@@ -279,6 +315,9 @@ function createDynamoDocumentClient() {
     commands,
     setQueryLastEvaluatedKey(value: Record<string, unknown>) {
       queryLastEvaluatedKey = value
+    },
+    setQueryPageSize(value: number) {
+      queryPageSize = value
     },
     setNextTransactionError(error: unknown) {
       nextTransactionError = error
@@ -1206,6 +1245,20 @@ describe('Analytics export', () => {
 })
 
 describe('Analytics scheduling', () => {
+  test('distributes reports deterministically across schedule partitions', () => {
+    const reportIds = Array.from({ length: 128 }, (_, index) => `report-${index}`)
+    const shards = reportIds.map((reportId) =>
+      createAnalyticsScheduleShard('workspace-1', reportId)
+    )
+
+    expect(new Set(shards).size).toBeGreaterThan(8)
+    expect(shards.every((shard) => /^schedule-(?:0\d|1[0-5])$/u.test(shard)))
+      .toBeTrue()
+    expect(reportIds.map((reportId) =>
+      createAnalyticsScheduleShard('workspace-1', reportId)
+    )).toEqual(shards)
+  })
+
   test('resolves DST gaps/folds and clamps monthly schedules to short months', () => {
     const daily = {
       enabled: true,
@@ -1339,7 +1392,7 @@ describe('Analytics repository', () => {
       () => new Date('2026-01-08T00:00:00.000Z'),
     )
     await repository.createReport('workspace-1', 'member-1', createReportInput({
-      id: 'later',
+      id: 'later-0',
       schedule: {
         enabled: true,
         frequency: 'daily',
@@ -1350,7 +1403,7 @@ describe('Analytics repository', () => {
       },
     }))
     await repository.createReport('workspace-1', 'member-1', createReportInput({
-      id: 'earlier',
+      id: 'earlier-22',
       schedule: {
         enabled: true,
         frequency: 'daily',
@@ -1361,12 +1414,23 @@ describe('Analytics repository', () => {
         nextRunAt: '2026-01-08T08:00:00.000Z',
       },
     }))
-    const due = await repository.listDueReports('2026-01-08T09:00:00.000Z', 10)
-    expect(due.reports.map((report) => report.id)).toEqual(['earlier', 'later'])
+    const scheduleShard = createAnalyticsScheduleShard('workspace-1', 'later-0')
+    expect(scheduleShard).toBe(
+      createAnalyticsScheduleShard('workspace-1', 'earlier-22'),
+    )
+    const due = await repository.listDueReports(
+      scheduleShard,
+      '2026-01-08T09:00:00.000Z',
+      10,
+    )
+    expect(due.reports.map((report) => report.id)).toEqual([
+      'earlier-22',
+      'later-0',
+    ])
 
     const receipt = {
       workspaceId: 'workspace-1',
-      reportId: 'earlier',
+      reportId: 'earlier-22',
       occurrenceKey: '2026-01-08T08:00:00.000Z',
       reportRevision: 1,
       format: 'pdf' as const,
@@ -1385,6 +1449,158 @@ describe('Analytics repository', () => {
       ...receipt,
       snapshotId: 'different',
     })).rejects.toMatchObject({ code: 'AnalyticsDeliveryConflict' })
+  })
+
+  test('continues due pages by key when processed reports leave the due set', async () => {
+    const repository = new InMemoryAnalyticsRepository(
+      () => new Date('2026-01-08T00:00:00.000Z'),
+    )
+    const reportIds = ['candidate-5', 'candidate-6', 'candidate-8']
+    const scheduleShard = createAnalyticsScheduleShard('workspace-1', reportIds[0]!)
+    expect(reportIds.every((reportId) =>
+      createAnalyticsScheduleShard('workspace-1', reportId) === scheduleShard
+    )).toBeTrue()
+    for (const id of reportIds) {
+      await repository.createReport('workspace-1', 'member-1', createReportInput({
+        id,
+        schedule: {
+          enabled: true,
+          frequency: 'daily',
+          timeZone: 'UTC',
+          localTime: '08:00',
+          recipientMemberKeys: ['member-1'],
+          format: 'pdf',
+          nextRunAt: '2026-01-08T08:00:00.000Z',
+        },
+      }))
+    }
+
+    const firstPage = await repository.listDueReports(
+      scheduleShard,
+      '2026-01-08T09:00:00.000Z',
+      2,
+    )
+    expect(firstPage.reports.map((report) => report.id)).toEqual(reportIds.slice(0, 2))
+    expect(firstPage.nextCursor).toBeDefined()
+    for (const report of firstPage.reports) {
+      await repository.updateReport(report.workspaceId, report.id, {
+        expectedRevision: report.revision,
+        schedule: {
+          ...report.schedule!,
+          localTime: '10:00',
+        },
+      })
+    }
+
+    const secondPage = await repository.listDueReports(
+      scheduleShard,
+      '2026-01-08T09:00:00.000Z',
+      2,
+      firstPage.nextCursor,
+    )
+    expect(secondPage.reports.map((report) => report.id)).toEqual([reportIds[2]])
+    expect(secondPage.nextCursor).toBeUndefined()
+  })
+
+  test('accepts generated due cursors containing long valid Workspace IDs', async () => {
+    const workspaceId = `workspace-${'w'.repeat(390)}`
+    const reportIdsByShard = new Map<string, string[]>()
+    for (let index = 0; index < 100; index += 1) {
+      const reportId = `long-cursor-report-${index}`
+      const shard = createAnalyticsScheduleShard(workspaceId, reportId)
+      const reportIds = reportIdsByShard.get(shard) ?? []
+      reportIds.push(reportId)
+      reportIdsByShard.set(shard, reportIds)
+    }
+    const entry = [...reportIdsByShard.entries()].find(([, reportIds]) =>
+      reportIds.length >= 2
+    )
+    expect(entry).toBeDefined()
+    const [scheduleShard, reportIds] = entry!
+    const selectedReportIds = reportIds.slice(0, 2).sort()
+    const repository = new InMemoryAnalyticsRepository(
+      () => new Date('2026-01-08T00:00:00.000Z'),
+    )
+    for (const id of selectedReportIds) {
+      await repository.createReport(workspaceId, 'member-1', createReportInput({
+        id,
+        schedule: {
+          enabled: true,
+          frequency: 'daily',
+          timeZone: 'UTC',
+          localTime: '08:00',
+          recipientMemberKeys: ['member-1'],
+          format: 'pdf',
+          nextRunAt: '2026-01-08T08:00:00.000Z',
+        },
+      }))
+    }
+
+    const firstPage = await repository.listDueReports(
+      scheduleShard,
+      '2026-01-08T09:00:00.000Z',
+      1,
+    )
+    expect(firstPage.nextCursor?.length).toBeGreaterThan(512)
+    const secondPage = await repository.listDueReports(
+      scheduleShard,
+      '2026-01-08T09:00:00.000Z',
+      1,
+      firstPage.nextCursor,
+    )
+
+    expect(secondPage.reports.map((report) => report.id)).toEqual(
+      selectedReportIds.slice(1),
+    )
+  })
+
+  test('limits snapshot history in the DynamoDB query before deserializing payloads', async () => {
+    const query = createQuery(createReportInput().widgets)
+    const snapshot = createTestAnalyticsSnapshot({ workItems: [], events: [], query })
+    const records = Array.from({ length: 101 }, (_, index) => ({
+      id: `snapshot-${String(index).padStart(3, '0')}`,
+      workspaceId: 'workspace-1',
+      reportId: 'report-1',
+      reportRevision: 1,
+      createdByMemberKey: 'member-1',
+      createdAt: new Date(Date.UTC(2026, 0, 8, 9, 0, index)).toISOString(),
+      query,
+      snapshot,
+    } satisfies AnalyticsSnapshotRecord))
+    const memory = new InMemoryAnalyticsRepository()
+    const fake = createDynamoDocumentClient()
+    const dynamo = new DynamoDbAnalyticsRepository('analytics-table', fake.client)
+    for (const record of records) {
+      await memory.putSnapshot(record)
+      await dynamo.putSnapshot(record)
+    }
+
+    const expectedIds = records.slice(1).reverse().map((record) => record.id)
+    fake.setQueryPageSize(17)
+    expect((await memory.listSnapshots('workspace-1', 'report-1'))
+      .map((record) => record.id)).toEqual(expectedIds)
+    expect((await dynamo.listSnapshots('workspace-1', 'report-1'))
+      .map((record) => record.id)).toEqual(expectedIds)
+    const snapshotQueries = fake.commands.filter((command) =>
+      command instanceof QueryCommand &&
+      command.input.ExpressionAttributeValues?.[':recordPrefix'] ===
+        'SNAPSHOT#report-1#'
+    ) as QueryCommand[]
+    expect(snapshotQueries.map((command) => command.input.Limit))
+      .toEqual([100, 83, 66, 49, 32, 15])
+    expect(snapshotQueries.every((command) =>
+      command.input.ConsistentRead === true &&
+      command.input.ScanIndexForward === false
+    )).toBeTrue()
+    expect(snapshotQueries[0]?.input.ExpressionAttributeValues?.[':recordPrefix'])
+      .toBe('SNAPSHOT#report-1#')
+    const latestClaim = [...fake.rows.values()].find((row) =>
+      row.entryType === 'analytics-snapshot-id' &&
+      row.snapshotId === 'snapshot-100'
+    )
+    expect(latestClaim?.snapshotRecordKey).toBe(
+      'SNAPSHOT#report-1#2026-01-08T09:01:40.000Z#snapshot-100',
+    )
   })
 
   test('uses DynamoDB CAS, due GSI cursors, and first-write-wins immutable rows', async () => {
@@ -1411,7 +1627,8 @@ describe('Analytics repository', () => {
     const reportRow = [...fake.rows.values()].find(
       (row) => row.entryType === 'analytics-report',
     )!
-    expect(reportRow.scheduleShard).toBe('schedule')
+    const scheduleShard = createAnalyticsScheduleShard(report.workspaceId, report.id)
+    expect(reportRow.scheduleShard).toBe(scheduleShard)
     expect(reportRow.nextDeliveryAtRecordKey).toBe(
       '2026-01-08T09:00:00.000Z#workspace-1#report-1',
     )
@@ -1435,10 +1652,11 @@ describe('Analytics repository', () => {
     fake.setQueryLastEvaluatedKey({
       workspaceId: 'workspace-1',
       recordKey: 'REPORT#report-1',
-      scheduleShard: 'schedule',
+      scheduleShard,
       nextDeliveryAtRecordKey: reportRow.nextDeliveryAtRecordKey,
     })
     const firstDuePage = await repository.listDueReports(
+      scheduleShard,
       '2026-01-08T09:00:00.000Z',
       1,
     )
@@ -1451,6 +1669,7 @@ describe('Analytics repository', () => {
       '2026-01-08T09:00:00.000Z#\u{10FFFF}',
     )
     await repository.listDueReports(
+      scheduleShard,
       '2026-01-08T09:00:00.000Z',
       1,
       firstDuePage.nextCursor,

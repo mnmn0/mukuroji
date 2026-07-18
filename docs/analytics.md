@@ -20,6 +20,8 @@ dashboard、saved report、immutable snapshot、drill-down、CSV/PDF export、fo
 Ad-hoc query は filter、widget、`asOf`、IANA timezone を受け取ります。Saved report ID を指定した
 query は保存済み filter、widget、timezone を使い、request body の同名値で report definition を
 上書きしません。保存済み forecast baseline も report definition の一部として再利用します。
+Report snapshot の作成時も保存済み definition を必ず使い、request body で上書きできるのは
+実行時点を固定する `asOf` だけです。
 Evidence、snapshot、export でも現在の認可を読み直し、以前は見えていた
 Work Item が権限変更や削除で見えなくなった場合、その値や件数を返しません。
 
@@ -36,6 +38,10 @@ Engine は canonical row から `asOf` より後の event を巻き戻してか�
 現在のcanonical rowが別の参照可能なProjectへ移動済みでも、そのfactとevidenceを除外します。
 Project access rowはcurrent active directory Projectとの積集合で評価し、削除済みProjectを指す
 stale access rowをallowlistとして信頼しません。
+Canonical row と entity index の audit history は同時には更新されないため、API は同じ cutoff
+に対して canonical state を前後で強整合 readし、Work Item とProject allowlistのfingerprintが
+一致し、各latest revisionのupdate eventが到達済みであることを確認します。不整合は有界回数だけ
+再試行し、揃わない場合は部分的なsnapshotを返さず`503`でfail-closedにします。
 
 1 query の上限は Team partition 100件、1 partition 10,000 Work Item、現在参照可能な Work Item
 合計10,000件、canonicalとlegacy raw IDを合わせたentity timeline 500件、全timelineを通じた
@@ -54,6 +60,8 @@ Snapshot 作成時は実行した正規化済み query、report revision、metri
 permission scope hash を保存します。一覧は新しい順に最大100件を返し、export と一覧のどちらも
 current accessible Work Item keyとactive readable Project ID集合を含むpermission scope hashを
 再検証します。
+Snapshot の作成日時をDynamoDB sort keyへ含め、強整合の逆順queryへ`Limit: 100`を指定するため、
+一覧APIは長期運用で蓄積したpayload全件を読み込んでから切り詰めません。
 現在のscopeが変わったsnapshotは再集計せず非表示、または`403`にします。
 
 Filterとgroup-byのTeam、Project、assignee、status、custom field、archive状態は、いずれも
@@ -143,6 +151,10 @@ Schedule runner は recipient が active Workspace member で、report と対象
 1つの immutable snapshot を共有し、recipientごとに決定的な receipt を保存して重複を排除します。
 APIと同様、recipientのProject accessはactive directoryとの積集合に限定し、`asOf` stateが
 current allowlist外のfactをscheduled snapshotへ含めません。
+
+Due index はWorkspace/reportの安定hashで16個のpartitionへ分散し、runnerは全partitionを走査します。
+各partitionのpaginationは`nextRunAt/workspaceId/reportId`のexclusive keysetを使うため、処理済み
+reportの`nextRunAt`が進んでdue集合から消えても、同じinvocationの後続pageを飛ばしません。
 
 現行の delivery boundary は immutable snapshot と in-app receipt の durable 保存です。CSV/PDF
 artifact renderer はその前に実行する副作用のない検証処理であり、外部送信やユーザー状態の変更を

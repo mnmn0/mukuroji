@@ -44,6 +44,9 @@ const SNAPSHOT_ID_RECORD_PREFIX = 'SNAPSHOT_ID#'
 const DELIVERY_RECORD_PREFIX = 'DELIVERY#'
 const DEFAULT_EVIDENCE_LIMIT = 50
 const MAX_EVIDENCE_LIMIT = 200
+const MAX_SNAPSHOT_LIST_LIMIT = 100
+const MAX_STORAGE_CURSOR_LENGTH = 16_384
+const MAX_DUE_CURSOR_BOUNDARY_LENGTH = 2_048
 const MAX_REPORTS_PER_WORKSPACE = 1_000
 const DEFAULT_SLA_TARGET_HOURS = 72
 const MILLISECONDS_PER_HOUR = 60 * 60 * 1_000
@@ -163,11 +166,34 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
   }),
 })
 
-/** Analytics schedule GSI の固定 partition value です。 */
-export const ANALYTICS_SCHEDULE_SHARD = 'schedule'
+/** Analytics schedule GSI を分散する固定 shard 数です。 */
+export const ANALYTICS_SCHEDULE_SHARD_COUNT = 16
 
 /** Analytics schedule の due report query に使う既定 GSI 名です。 */
 export const ANALYTICS_SCHEDULE_DUE_INDEX_NAME = 'ScheduleDueIndex'
+
+/**
+ * Workspace/report を ScheduleDueIndex の安定した shard へ割り当てます。
+ *
+ * @param workspaceId - Workspace ID です。
+ * @param reportId - Analytics report ID です。
+ * @returns `schedule-00` から `schedule-15` の shard key です。
+ */
+export function createAnalyticsScheduleShard(
+  workspaceId: string,
+  reportId: string,
+) {
+  const digest = createHash('sha256')
+    .update(
+      `${readIdentifier(workspaceId, 'Workspace ID')}\0${
+        readIdentifier(reportId, 'Analytics report ID')
+      }`,
+    )
+    .digest()
+  return `schedule-${
+    String(digest[0]! % ANALYTICS_SCHEDULE_SHARD_COUNT).padStart(2, '0')
+  }`
+}
 
 /** Analytics domain と persistence の stable error です。 */
 export class AnalyticsError extends Error {
@@ -239,7 +265,7 @@ export type AnalyticsDeliveryReceipt = {
 export type AnalyticsDueReportPage = {
   /** `asOf` 以前に実行期限を迎えた report です。 */
   reports: AnalyticsReport[]
-  /** 続きがある場合の opaque cursor です。 */
+  /** 返却済み report が due 集合から消えても継続できる exclusive keyset cursor です。 */
   nextCursor?: string
 }
 
@@ -275,10 +301,19 @@ export type AnalyticsRepository = {
   putSnapshot(record: AnalyticsSnapshotRecord): Promise<AnalyticsSnapshotRecord>
   /** 保存済み immutable snapshot を返します。 */
   getSnapshot(workspaceId: string, snapshotId: string): Promise<AnalyticsSnapshotRecord | undefined>
-  /** Report に紐づく immutable snapshot を作成日時順で返します。 */
-  listSnapshots(workspaceId: string, reportId: string): Promise<AnalyticsSnapshotRecord[]>
-  /** 実行期限を迎えた schedule 付き report を返します。 */
-  listDueReports(asOf: string, limit: number, cursor?: string): Promise<AnalyticsDueReportPage>
+  /** Report に紐づく最新の immutable snapshot を作成日時順で上限件数まで返します。 */
+  listSnapshots(
+    workspaceId: string,
+    reportId: string,
+    limit?: number,
+  ): Promise<AnalyticsSnapshotRecord[]>
+  /** 指定 shard で実行期限を迎えた schedule 付き report を keyset page で返します。 */
+  listDueReports(
+    scheduleShard: string,
+    asOf: string,
+    limit: number,
+    cursor?: string,
+  ): Promise<AnalyticsDueReportPage>
   /** Schedule occurrence ごとの delivery receipt を idempotent に保存します。 */
   putDeliveryReceipt(record: AnalyticsDeliveryReceipt): Promise<AnalyticsDeliveryReceiptResult>
 }
@@ -486,7 +521,7 @@ type StoredAnalyticsReport = AnalyticsReport & {
   /** DynamoDB sort key です。 */
   recordKey: string
   /** Enabled schedule の GSI partition です。 */
-  scheduleShard?: typeof ANALYTICS_SCHEDULE_SHARD
+  scheduleShard?: string
   /** Enabled schedule の GSI sort key です。 */
   nextDeliveryAtRecordKey?: string
 }
@@ -2537,42 +2572,75 @@ export class InMemoryAnalyticsRepository implements AnalyticsRepository {
     return snapshot === undefined ? undefined : structuredClone(snapshot)
   }
 
-  /** Report に紐づく immutable snapshot を作成日時順で返します。 */
-  async listSnapshots(workspaceId: string, reportId: string) {
+  /** Report に紐づく最新の immutable snapshot を作成日時順で上限件数まで返します。 */
+  async listSnapshots(
+    workspaceId: string,
+    reportId: string,
+    limit = MAX_SNAPSHOT_LIST_LIMIT,
+  ) {
     const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
     const normalizedReportId = readIdentifier(reportId, 'Analytics report ID')
+    const normalizedLimit = readPositiveInteger(
+      limit,
+      'Analytics snapshot list limit',
+      MAX_SNAPSHOT_LIST_LIMIT,
+    )
     return [...this.snapshots.values()]
       .filter((snapshot) =>
         snapshot.workspaceId === normalizedWorkspaceId &&
         snapshot.reportId === normalizedReportId
       )
       .sort(compareSnapshots)
+      .slice(0, normalizedLimit)
       .map((snapshot) => structuredClone(snapshot))
   }
 
-  /** 実行期限を迎えた schedule 付き report を返します。 */
-  async listDueReports(asOf: string, limit: number, cursor?: string) {
+  /** 指定 shard で実行期限を迎えた schedule 付き report を keyset page で返します。 */
+  async listDueReports(
+    scheduleShard: string,
+    asOf: string,
+    limit: number,
+    cursor?: string,
+  ) {
+    const normalizedScheduleShard = readAnalyticsScheduleShard(scheduleShard)
     const normalizedAsOf = normalizeIsoTimestamp(asOf, 'Analytics schedule as-of time')
     const normalizedLimit = readPositiveInteger(limit, 'Analytics schedule limit', 200)
+    const scopeHash = hashCanonical({
+      scheduleShard: normalizedScheduleShard,
+      asOf: normalizedAsOf,
+    })
+    const exclusiveStartKey = cursor ? parseStorageCursor(cursor, scopeHash) : undefined
+    const boundary = exclusiveStartKey === undefined
+      ? undefined
+      : readAnalyticsDueCursorBoundary(exclusiveStartKey)
     const candidates = [...this.reports.values()]
       .filter((report) =>
         report.schedule?.enabled === true &&
         report.schedule.nextRunAt !== undefined &&
-        report.schedule.nextRunAt <= normalizedAsOf
+        report.schedule.nextRunAt <= normalizedAsOf &&
+        createAnalyticsScheduleShard(report.workspaceId, report.id) ===
+          normalizedScheduleShard
       )
       .sort((left, right) =>
-        left.schedule!.nextRunAt!.localeCompare(right.schedule!.nextRunAt!) ||
-        left.workspaceId.localeCompare(right.workspaceId) ||
-        left.id.localeCompare(right.id)
+        createAnalyticsDueReportBoundary(left).localeCompare(
+          createAnalyticsDueReportBoundary(right),
+        )
       )
-    const scopeHash = hashCanonical({ asOf: normalizedAsOf })
-    const offset = cursor ? parseAnalyticsEvidenceCursor(cursor, scopeHash) : 0
-    const page = candidates.slice(offset, offset + normalizedLimit)
-    const nextOffset = offset + page.length
+      .filter((report) =>
+        boundary === undefined ||
+        createAnalyticsDueReportBoundary(report) > boundary
+      )
+    const page = candidates.slice(0, normalizedLimit)
+    const hasNextPage = candidates.length > page.length
+    const lastReport = page.at(-1)
     return {
       reports: page.map((report) => structuredClone(report)),
-      ...(nextOffset < candidates.length
-        ? { nextCursor: createAnalyticsEvidenceCursor(scopeHash, nextOffset) }
+      ...(hasNextPage && lastReport !== undefined
+        ? {
+            nextCursor: createStorageCursor(scopeHash, {
+              nextDeliveryAtRecordKey: createAnalyticsDueReportBoundary(lastReport),
+            }),
+          }
         : {}),
     }
   }
@@ -2802,27 +2870,61 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
     return undefined
   }
 
-  /** Report に紐づく immutable snapshot を作成日時順で返します。 */
-  async listSnapshots(workspaceId: string, reportId: string) {
+  /** Report に紐づく最新の immutable snapshot をDB側で上限指定して返します。 */
+  async listSnapshots(
+    workspaceId: string,
+    reportId: string,
+    limit = MAX_SNAPSHOT_LIST_LIMIT,
+  ) {
     const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
     const normalizedReportId = readIdentifier(reportId, 'Analytics report ID')
-    const items = await this.queryWorkspacePrefix(
-      normalizedWorkspaceId,
-      createSnapshotReportPrefix(normalizedReportId),
-      10_000,
+    const normalizedLimit = readPositiveInteger(
+      limit,
+      'Analytics snapshot list limit',
+      MAX_SNAPSHOT_LIST_LIMIT,
     )
-    return items
-      .filter(isStoredAnalyticsSnapshot)
-      .map(readStoredSnapshot)
-      .sort(compareSnapshots)
+    const snapshots: AnalyticsSnapshotRecord[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression:
+          'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)',
+        ExpressionAttributeValues: {
+          ':workspaceId': normalizedWorkspaceId,
+          ':recordPrefix': createSnapshotReportPrefix(normalizedReportId),
+        },
+        ExclusiveStartKey: exclusiveStartKey,
+        ConsistentRead: true,
+        Limit: normalizedLimit - snapshots.length,
+        ScanIndexForward: false,
+      }))
+      snapshots.push(
+        ...(response.Items ?? [])
+          .filter(isStoredAnalyticsSnapshot)
+          .map(readStoredSnapshot),
+      )
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (
+      snapshots.length < normalizedLimit &&
+      exclusiveStartKey !== undefined
+    )
+    return snapshots
   }
 
-  /** 実行期限を迎えた schedule 付き report を返します。 */
-  async listDueReports(asOf: string, limit: number, cursor?: string) {
+  /** 指定 shard で実行期限を迎えた schedule 付き report を keyset page で返します。 */
+  async listDueReports(
+    scheduleShard: string,
+    asOf: string,
+    limit: number,
+    cursor?: string,
+  ) {
+    const normalizedScheduleShard = readAnalyticsScheduleShard(scheduleShard)
     const normalizedAsOf = normalizeIsoTimestamp(asOf, 'Analytics schedule as-of time')
     const normalizedLimit = readPositiveInteger(limit, 'Analytics schedule limit', 200)
     const scopeHash = hashCanonical({
       indexName: this.scheduleDueIndexName,
+      scheduleShard: normalizedScheduleShard,
       asOf: normalizedAsOf,
     })
     const exclusiveStartKey = cursor ? parseStorageCursor(cursor, scopeHash) : undefined
@@ -2832,7 +2934,7 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
       KeyConditionExpression:
         'scheduleShard = :scheduleShard AND nextDeliveryAtRecordKey <= :upperBound',
       ExpressionAttributeValues: {
-        ':scheduleShard': ANALYTICS_SCHEDULE_SHARD,
+        ':scheduleShard': normalizedScheduleShard,
         ':upperBound': `${normalizedAsOf}#\u{10FFFF}`,
       },
       ExclusiveStartKey: exclusiveStartKey,
@@ -3279,7 +3381,9 @@ function createStoredReport(report: AnalyticsReport): StoredAnalyticsReport {
     ...structuredClone(report),
     entryType: 'analytics-report',
     recordKey: createReportRecordKey(report.id),
-    ...(scheduled ? { scheduleShard: ANALYTICS_SCHEDULE_SHARD } : {}),
+    ...(scheduled
+      ? { scheduleShard: createAnalyticsScheduleShard(report.workspaceId, report.id) }
+      : {}),
     ...(scheduled
       ? {
           nextDeliveryAtRecordKey: createAnalyticsNextDeliveryAtRecordKey(
@@ -3419,7 +3523,60 @@ function createSnapshotIdClaimRecordKey(snapshotId: string) {
 
 function createSnapshotRecordKey(record: AnalyticsSnapshotRecord) {
   const reportPart = record.reportId === undefined ? '~adhoc' : encodeURIComponent(record.reportId)
-  return `${SNAPSHOT_RECORD_PREFIX}${reportPart}#${encodeURIComponent(record.id)}`
+  const createdAt = new Date(
+    normalizeIsoTimestamp(record.createdAt, 'Analytics snapshot creation time'),
+  ).toISOString()
+  return `${
+    SNAPSHOT_RECORD_PREFIX
+  }${reportPart}#${createdAt}#${encodeURIComponent(record.id)}`
+}
+
+/** Schedule shard key を既知の有限 partition 集合へ正規化します。 */
+function readAnalyticsScheduleShard(value: unknown) {
+  const shard = readIdentifier(value, 'Analytics schedule shard')
+  const index = Number(shard.slice('schedule-'.length))
+  if (
+    !shard.startsWith('schedule-') ||
+    !Number.isInteger(index) ||
+    index < 0 ||
+    index >= ANALYTICS_SCHEDULE_SHARD_COUNT ||
+    shard !== `schedule-${String(index).padStart(2, '0')}`
+  ) {
+    throw invalid(
+      'AnalyticsScheduleShardInvalid',
+      'Analytics schedule shard is invalid.',
+    )
+  }
+  return shard
+}
+
+/** In-memory due page の exclusive boundary を report から返します。 */
+function createAnalyticsDueReportBoundary(report: AnalyticsReport) {
+  if (report.schedule?.nextRunAt === undefined) {
+    throw persistenceInvalid('Due Analytics report is missing its next run time.')
+  }
+  return createAnalyticsNextDeliveryAtRecordKey(
+    report.schedule.nextRunAt,
+    report.workspaceId,
+    report.id,
+  )
+}
+
+/** In-memory due cursor の exclusive boundary を検証して返します。 */
+function readAnalyticsDueCursorBoundary(key: Record<string, unknown>) {
+  const boundary = key.nextDeliveryAtRecordKey
+  if (
+    typeof boundary !== 'string' ||
+    boundary.length === 0 ||
+    boundary.length > MAX_DUE_CURSOR_BOUNDARY_LENGTH ||
+    hasAnalyticsControlCharacter(boundary)
+  ) {
+    throw invalid(
+      'AnalyticsCursorInvalid',
+      'Analytics continuation cursor is invalid.',
+    )
+  }
+  return boundary
 }
 
 function createStorageCursor(scopeHash: string, key: Record<string, unknown>) {
@@ -3435,7 +3592,7 @@ function parseStorageCursor(cursor: string, scopeHash: string) {
   let parsed: unknown
   try {
     parsed = JSON.parse(
-      Buffer.from(readIdentifier(cursor, 'Analytics storage cursor'), 'base64url').toString('utf8'),
+      Buffer.from(readAnalyticsStorageCursor(cursor), 'base64url').toString('utf8'),
     )
   } catch {
     throw invalid('AnalyticsCursorInvalid', 'Analytics continuation cursor is invalid.')
@@ -3452,6 +3609,30 @@ function parseStorageCursor(cursor: string, scopeHash: string) {
     )
   }
   return parsed.key
+}
+
+/** Base64url storage cursor を専用の安全上限で検証します。 */
+function readAnalyticsStorageCursor(value: unknown) {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > MAX_STORAGE_CURSOR_LENGTH ||
+    !/^[A-Za-z0-9_-]+$/u.test(value)
+  ) {
+    throw invalid(
+      'AnalyticsCursorInvalid',
+      'Analytics continuation cursor is invalid.',
+    )
+  }
+  return value
+}
+
+/** Cursor text に ASCII control character が含まれるかを返します。 */
+function hasAnalyticsControlCharacter(value: string) {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0)!
+    return codePoint <= 31 || codePoint === 127
+  })
 }
 
 function normalizeIsoTimestamp(value: unknown, label: string) {
@@ -3752,7 +3933,7 @@ function compareReports(left: AnalyticsReport, right: AnalyticsReport) {
 }
 
 function compareSnapshots(left: AnalyticsSnapshotRecord, right: AnalyticsSnapshotRecord) {
-  return right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id)
+  return right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
 }
 
 function snapshotsEquivalent(

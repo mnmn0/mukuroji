@@ -15,6 +15,7 @@ import {
   getConfiguredDynamoDbEndpoint,
 } from './audit'
 import {
+  ANALYTICS_SCHEDULE_SHARD_COUNT,
   AnalyticsError,
   type AnalyticsDeliveryReceipt,
   type AnalyticsRepository,
@@ -343,26 +344,42 @@ export async function processAnalyticsSchedule(
     skippedRecipients: 0,
   }
   const failures: unknown[] = []
-  let cursor: string | undefined
   let pageCount = 0
+  const shardStates = Array.from(
+    { length: ANALYTICS_SCHEDULE_SHARD_COUNT },
+    (_, shardIndex) => ({
+      scheduleShard: `schedule-${String(shardIndex).padStart(2, '0')}`,
+      active: true,
+      cursor: undefined as string | undefined,
+    }),
+  )
 
-  do {
-    if (pageCount >= ANALYTICS_SCHEDULE_MAX_PAGES) {
+  while (shardStates.some((state) => state.active)) {
+    const activeStates = shardStates.filter((state) => state.active)
+    const pages = await Promise.all(activeStates.map(async (state) => ({
+      state,
+      page: await dependencies.repository.listDueReports(
+        state.scheduleShard,
+        now.toISOString(),
+        ANALYTICS_SCHEDULE_PAGE_SIZE,
+        state.cursor,
+      ),
+    })))
+    const traversedPageCount = pages.filter(({ page }) =>
+      page.reports.length > 0 || page.nextCursor !== undefined
+    ).length
+    if (pageCount + traversedPageCount > ANALYTICS_SCHEDULE_MAX_PAGES) {
       throw new AnalyticsError(
         413,
         'AnalyticsScheduleLimitExceeded',
         'Analytics schedule due reports exceed the safe processing limit.',
       )
     }
-    const page = await dependencies.repository.listDueReports(
-      now.toISOString(),
-      ANALYTICS_SCHEDULE_PAGE_SIZE,
-      cursor,
-    )
-    pageCount += 1
-    aggregate.dueReports += page.reports.length
+    pageCount += traversedPageCount
+    const reports = pages.flatMap(({ page }) => page.reports)
+    aggregate.dueReports += reports.length
     const results = await processAnalyticsScheduleReportBatch(
-      page.reports,
+      reports,
       now,
       dependencies,
     )
@@ -376,8 +393,11 @@ export async function processAnalyticsSchedule(
       aggregate.receiptsCreated += result.value.receiptsCreated
       aggregate.skippedRecipients += result.value.skippedRecipients
     }
-    cursor = page.nextCursor
-  } while (cursor)
+    for (const { state, page } of pages) {
+      state.cursor = page.nextCursor
+      state.active = page.nextCursor !== undefined
+    }
+  }
 
   if (failures.length > 0) {
     throw new AggregateError(

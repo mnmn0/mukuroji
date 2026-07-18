@@ -14,6 +14,8 @@ import {
 import {
   AnalyticsError,
   type AnalyticsDeliveryReceipt,
+  type AnalyticsRepository,
+  createAnalyticsScheduleShard,
   createAnalyticsSnapshot,
   InMemoryAnalyticsRepository,
 } from './analytics'
@@ -1523,6 +1525,71 @@ test('processes due reports with a bounded worker pool and preserves every settl
   expect([...attemptedReportIds].sort()).toEqual([...reportIds].sort())
   expect(activeWorkers).toBe(0)
 }, 15_000)
+
+test('processes every due report when a shard spans multiple mutating pages', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const reportIds: string[] = []
+  for (let index = 0; reportIds.length < 101; index += 1) {
+    const reportId = `paged-report-${index}`
+    if (createAnalyticsScheduleShard('workspace-1', reportId) === 'schedule-00') {
+      reportIds.push(reportId)
+    }
+  }
+  for (const reportId of reportIds) {
+    await createScheduledReport(
+      repository,
+      [`${reportId}@example.com`],
+      reportId,
+    )
+  }
+  const attemptedReportIds: string[] = []
+
+  const result = await processAnalyticsSchedule(NOW, {
+    repository,
+    async render(input) {
+      attemptedReportIds.push(input.report.id)
+      return createRenderedSnapshot(input.report, input.recipientMemberKey)
+    },
+    renderArtifact: async () => {},
+  })
+
+  expect(result).toMatchObject({
+    dueReports: 101,
+    processedReports: 101,
+    receiptsCreated: 101,
+    snapshotsStored: 101,
+  })
+  expect([...attemptedReportIds].sort()).toEqual([...reportIds].sort())
+  for (const reportId of reportIds) {
+    const report = await repository.getReport('workspace-1', reportId)
+    expect(report?.schedule?.nextRunAt).toBe('2026-07-19T08:00:00.000Z')
+  }
+}, 15_000)
+
+test('bounds empty due pages that keep returning continuation cursors', async () => {
+  let continuedPageReads = 0
+  const repository = {
+    async listDueReports(scheduleShard: string) {
+      if (scheduleShard !== 'schedule-00') return { reports: [] }
+      continuedPageReads += 1
+      return {
+        reports: [],
+        nextCursor: `empty-page-${continuedPageReads}`,
+      }
+    },
+  } as unknown as AnalyticsRepository
+
+  await expect(processAnalyticsSchedule(NOW, {
+    repository,
+    async render() {
+      throw new Error('Empty due pages must not invoke the renderer.')
+    },
+    renderArtifact: async () => {},
+  })).rejects.toMatchObject({
+    code: 'AnalyticsScheduleLimitExceeded',
+  })
+  expect(continuedPageReads).toBe(101)
+})
 
 test('rejects an invalid EventBridge timestamp', () => {
   expect(() => resolveAnalyticsScheduleProcessingTime({
