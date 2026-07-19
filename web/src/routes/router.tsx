@@ -15,6 +15,7 @@ import { SearchPage } from '../search/SearchPage'
 import { PublicRequestFormPage } from '../requests/PublicRequestFormPage'
 import { RequestIntakePage } from '../requests/RequestIntakePage'
 import { EnterpriseSsoCallbackPage } from '../pages/EnterpriseSsoCallbackPage'
+import { ReportsPage } from '../pages/ReportsPage'
 import { SecurityRecoveryPage } from '../pages/SecurityRecoveryPage'
 
 /**
@@ -82,7 +83,7 @@ export const appRoutes: RouteObject[] = [
       },
       {
         path: '/reports',
-        element: <WorkspacePage view="reports" />,
+        element: <ReportsPage />,
       },
       {
         path: '/help',

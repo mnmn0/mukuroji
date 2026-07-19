@@ -98,3 +98,9 @@ describe('Enterprise security path', () => {
     ).toBe('/security/recovery')
   })
 })
+
+describe('Analytics report path', () => {
+  test('registers the dedicated reports route', () => {
+    expect(matchRoutes(appRoutes, '/reports')?.at(-1)?.route.path).toBe('/reports')
+  })
+})
