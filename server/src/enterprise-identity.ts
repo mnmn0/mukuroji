@@ -49,7 +49,9 @@ import {
   createMutationAuditEventPut,
   type MutationAuditContext,
 } from './audit'
-import type { EnterpriseScimGroupJobReference } from './enterprise-scim-group-job-handler'
+import type {
+  EnterpriseScimGroupJobReference,
+} from './enterprise-scim-group-job-reference'
 
 /**
  * Enterprise identity domain の safe API error です。

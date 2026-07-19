@@ -3,21 +3,16 @@ import type {
   DynamoStreamEvent,
   DynamoStreamRecord,
 } from './collaboration-projection-handler'
+import type {
+  EnterpriseScimGroupJobReference,
+} from './enterprise-scim-group-job-reference'
+
+export type {
+  EnterpriseScimGroupJobReference,
+} from './enterprise-scim-group-job-reference'
 
 const ENTERPRISE_SCIM_GROUP_JOB_ENTRY_TYPE = 'enterprise-scim-group-job'
 const ENTERPRISE_SCIM_GROUP_JOB_RECORD_KEY_PREFIX = 'SCIM_GROUP_JOB#'
-
-/**
- * Enterprise SCIM group reconciliation job の immutable stream reference です。
- */
-export type EnterpriseScimGroupJobReference = {
-  /** Job が属する canonical Workspace ID です。 */
-  workspaceId: string
-  /** State 内の reconciliation job を識別する immutable ID です。 */
-  jobId: string
-  /** Stale stream event を除外する monotonically increasing job revision です。 */
-  revision: number
-}
 
 /**
  * Enterprise SCIM group reconciliation job processor の dependency です。

@@ -1056,6 +1056,16 @@ type WorkspacePrincipal = ProjectPrincipal & {
 }
 
 /**
+ * Enterprise security route の current permission set を検証済みの principal です。
+ */
+type EnterpriseSecurityPrincipal = WorkspacePrincipal & {
+  /**
+   * Current Enterprise security route で有効な permission です。
+   */
+  enterprisePermissions: EnterprisePermissionId[]
+}
+
+/**
  * Workspace principal authentication の例外的な route 境界です。
  */
 type WorkspaceAuthenticationOptions = {
@@ -4212,7 +4222,7 @@ app.get('/api/enterprise/security', async (c) => {
 /** SAML/OIDC identity provider を保存または SSO enforcement を更新します。 */
 app.put('/api/enterprise/security/identity-provider', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const auditContext = createWorkspaceMutationContext(c, principal, body)
     const snapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
@@ -4327,7 +4337,7 @@ app.put('/api/enterprise/security/identity-provider', async (c) => {
 /** Managed domain claim と一回限り DNS verification value を作成します。 */
 app.post('/api/enterprise/security/domains', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const domainName = readEnterpriseText(body?.domain, 'Domain').toLowerCase()
     const requestIdempotencyKey =
@@ -4391,7 +4401,7 @@ app.post('/api/enterprise/security/domains', async (c) => {
 /** DNS TXT challenge を確認して domain claim を verified にします。 */
 app.post('/api/enterprise/security/domains/:domain/verify', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const snapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
     const domain = snapshot.domains.find((candidate) =>
@@ -4442,7 +4452,7 @@ app.post('/api/enterprise/security/domains/:domain/verify', async (c) => {
 /** IP allowlist 保存前に現在の caller が締め出されるかを preview します。 */
 app.post('/api/enterprise/security/policy/preview', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const snapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
     const current = snapshot.policy ??
@@ -4473,7 +4483,7 @@ app.post('/api/enterprise/security/policy/preview', async (c) => {
 /** MFA/session/reauthentication/IP/guest security policy を更新します。 */
 app.put('/api/enterprise/security/policy', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const snapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
     const current = snapshot.policy ??
@@ -4582,7 +4592,7 @@ app.put('/api/enterprise/security/policy', async (c) => {
 /** SCIM bearer token を rotate して raw token を一回だけ返します。 */
 app.post('/api/enterprise/security/scim/token', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const requestIdempotencyKey =
       c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()
@@ -4643,7 +4653,7 @@ app.post('/api/enterprise/security/scim/token', async (c) => {
 /** Provisioning dry-run impact preview を返します。 */
 app.post('/api/enterprise/security/provisioning/preview', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const snapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
     const preview = await enterpriseIdentity.previewProvisioning({
@@ -4664,7 +4674,7 @@ app.post('/api/enterprise/security/provisioning/preview', async (c) => {
 /** 確認済み provisioning preview を Workspace access state へ適用します。 */
 app.post('/api/enterprise/security/provisioning/reconcile', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const previewId = readEnterpriseText(body?.previewId, 'Preview ID')
     const preview = await enterpriseIdentity.getProvisioningPreview(
@@ -4758,7 +4768,7 @@ app.get('/api/enterprise/security/provisioning/logs', async (c) => {
 /** Failed provisioning operation を retry します。 */
 app.post('/api/enterprise/security/provisioning/logs/:runId/retry', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const run = await enterpriseIdentity.retryProvisioning(
       principal.directoryId,
       c.req.param('runId'),
@@ -4794,15 +4804,15 @@ app.post('/api/enterprise/security/provisioning/logs/:runId/retry', async (c) =>
 /** Custom role を作成します。 */
 app.post('/api/enterprise/security/roles', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const requestIdempotencyKey =
       c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()
-    const roleId = `custom:${createEnterpriseIdempotentResourceId(
+    const roleId: EnterpriseCustomRole['roleId'] = `custom:${createEnterpriseIdempotentResourceId(
       'role',
       principal.directoryId,
       requestIdempotencyKey,
-    )}` as EnterpriseRoleId
+    )}`
     const name = readEnterpriseText(body?.name, 'Role name')
     const description = typeof body?.description === 'string'
       ? body.description.trim()
@@ -4860,7 +4870,7 @@ app.post('/api/enterprise/security/roles', async (c) => {
 /** Custom role 更新・削除前の assignment impact と確認 token を返します。 */
 app.post('/api/enterprise/security/roles/:roleId/impact', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const snapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
     const role = snapshot.customRoles.find((candidate) =>
@@ -4900,7 +4910,7 @@ app.post('/api/enterprise/security/roles/:roleId/impact', async (c) => {
 /** Custom role permission set を optimistic revision 付きで更新します。 */
 app.put('/api/enterprise/security/roles/:roleId', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const snapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
     const existing = snapshot.customRoles.find((role) =>
@@ -4959,7 +4969,7 @@ app.put('/api/enterprise/security/roles/:roleId', async (c) => {
 /** 未使用 custom role を削除します。 */
 app.delete('/api/enterprise/security/roles/:roleId', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const snapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
     const role = snapshot.customRoles.find((candidate) =>
@@ -5012,7 +5022,7 @@ app.delete('/api/enterprise/security/roles/:roleId', async (c) => {
 /** Directory group → scoped role mapping を作成します。 */
 app.post('/api/enterprise/security/group-mappings', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const snapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
     const requestIdempotencyKey =
@@ -5125,7 +5135,7 @@ app.post('/api/enterprise/security/group-mappings', async (c) => {
 /** Directory group mapping の scope と role を optimistic revision 付きで更新します。 */
 app.put('/api/enterprise/security/group-mappings/:mappingId', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const snapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
     const existing = snapshot.groupMappings.find((mapping) =>
@@ -5218,7 +5228,7 @@ app.put('/api/enterprise/security/group-mappings/:mappingId', async (c) => {
 /** Directory group mapping を削除します。 */
 app.delete('/api/enterprise/security/group-mappings/:mappingId', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     await enterpriseIdentity.deleteGroupMapping(
       principal.directoryId,
@@ -5235,7 +5245,7 @@ app.delete('/api/enterprise/security/group-mappings/:mappingId', async (c) => {
 /** Service account と一回限り credential を作成します。 */
 app.post('/api/enterprise/security/service-accounts', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const snapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
     const roleId = readEnterpriseRoleId(body?.roleId)
@@ -5322,7 +5332,7 @@ app.post('/api/enterprise/security/service-accounts', async (c) => {
 /** Service account credential を rotate して一回だけ返します。 */
 app.post('/api/enterprise/security/service-accounts/:accountId/rotate', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const snapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
     const account = snapshot.serviceAccounts.find((candidate) =>
@@ -5365,7 +5375,7 @@ app.post('/api/enterprise/security/service-accounts/:accountId/rotate', async (c
 /** Service account と全 credential を revoke します。 */
 app.post('/api/enterprise/security/service-accounts/:accountId/revoke', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const snapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
     const account = snapshot.serviceAccounts.find((candidate) =>
@@ -5394,7 +5404,7 @@ app.post('/api/enterprise/security/service-accounts/:accountId/revoke', async (c
 /** MFA enrollment 済み member を break-glass administrator として事前登録します。 */
 app.post('/api/enterprise/security/break-glass/accounts', async (c) => {
   try {
-    const principal = await requireEnterpriseSecurityPrincipal(c, true)
+    const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const email = readWorkspaceEmail(body?.email)
     const member = (await workspaceAccess.listActiveMembers(principal.directoryId))
@@ -14593,7 +14603,9 @@ function resolveEnterpriseClientIp(c: Context) {
   )
 }
 
-async function requireEnterpriseSecurityPrincipal(c: Context, _manage = false) {
+async function requireEnterpriseSecurityPrincipal(
+  c: Context,
+): Promise<EnterpriseSecurityPrincipal> {
   const accessToken = readBearerAccessToken(c)
   if (!accessToken) {
     throw new EnterpriseIdentityError(
@@ -14603,7 +14615,17 @@ async function requireEnterpriseSecurityPrincipal(c: Context, _manage = false) {
     )
   }
   const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-  return principal
+  if (principal.enterprisePermissions === undefined) {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspacePermissionDenied',
+      'Enterprise permission is required for this operation.',
+    )
+  }
+  return {
+    ...principal,
+    enterprisePermissions: principal.enterprisePermissions,
+  }
 }
 
 function toEnterpriseIdentityErrorResponse(c: Context, error: unknown) {
@@ -14655,7 +14677,7 @@ function readEnterpriseIdentityProviderInput(
   workspaceId: string,
   body: Record<string, unknown> | undefined,
   existing: EnterpriseIdentityProvider | undefined,
-) {
+): EnterpriseIdentityProvider {
   const nowIso = new Date().toISOString()
   const providerId = existing?.providerId ?? crypto.randomUUID()
   const status = 'draft'
@@ -14702,8 +14724,9 @@ function readEnterpriseIdentityProviderInput(
 
 function enterpriseIdentityProviderMatchesInput(
   provider: EnterpriseIdentityProvider,
-  body: Record<string, unknown>,
+  body: Record<string, unknown> | undefined,
 ) {
+  if (!body) return false
   if (
     provider.cognitoProviderName !== getEnv('COGNITO_ENTERPRISE_IDP_NAME')?.trim() ||
     body.protocol !== provider.kind ||

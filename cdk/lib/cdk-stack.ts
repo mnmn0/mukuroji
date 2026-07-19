@@ -1960,6 +1960,7 @@ export class CdkStack extends cdk.Stack {
       'EnterpriseScimGroupJobDlq',
       {
         encryption: sqs.QueueEncryption.SQS_MANAGED,
+        enforceSSL: true,
         retentionPeriod: cdk.Duration.days(14),
       },
     );
@@ -2089,6 +2090,7 @@ export class CdkStack extends cdk.Stack {
       'EnterpriseIdentityMaintenanceDlq',
       {
         encryption: sqs.QueueEncryption.SQS_MANAGED,
+        enforceSSL: true,
         retentionPeriod: cdk.Duration.days(14),
       },
     );

@@ -6340,7 +6340,7 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         throw new DocumentError(409, 'DocumentTreeCycle', 'The requested parent would create a cycle.')
       }
       seen.add(current.documentId)
-      const nextParent =
+      const nextParent: StoredDocumentItem | undefined =
         current.document.parentId === undefined
           ? undefined
           : await this.getDocumentRow(

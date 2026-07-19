@@ -70,6 +70,42 @@ function serializeAwsSdkCall(value: unknown): string {
     .join('');
 }
 
+/**
+ * 指定した SQS queue が非 TLS request を resource policy で拒否することを検証します。
+ */
+function expectQueueRequiresSsl(template: Template, logicalIdPrefix: string) {
+  const queueEntry = Object.entries(template.findResources('AWS::SQS::Queue'))
+    .find(([logicalId]) => logicalId.startsWith(logicalIdPrefix));
+  expect(queueEntry).toBeDefined();
+  if (!queueEntry) {
+    throw new Error(`${logicalIdPrefix} was not synthesized.`);
+  }
+  const [queueId] = queueEntry;
+  const queuePolicy = Object.values(template.findResources('AWS::SQS::QueuePolicy'))
+    .find((resource) => JSON.stringify(resource.Properties?.Queues).includes(queueId));
+
+  expect(queuePolicy).toEqual(expect.objectContaining({
+    Properties: expect.objectContaining({
+      PolicyDocument: expect.objectContaining({
+        Statement: expect.arrayContaining([
+          expect.objectContaining({
+            Action: 'sqs:*',
+            Condition: {
+              Bool: {
+                'aws:SecureTransport': 'false',
+              },
+            },
+            Effect: 'Deny',
+            Principal: { AWS: '*' },
+            Resource: { 'Fn::GetAtt': [queueId, 'Arn'] },
+          }),
+        ]),
+      }),
+      Queues: expect.arrayContaining([{ Ref: queueId }]),
+    }),
+  }));
+}
+
 const synthesizedTemplate = createTemplate();
 
 test('fresh deployment requires explicit Cognito workspace and runtime secrets parameters', () => {
@@ -426,6 +462,7 @@ test('enterprise identity CONTROL stream runs bounded asynchronous maintenance',
     AlarmDescription:
       'Detects enterprise identity compaction or generation retirement failures.',
   });
+  expectQueueRequiresSsl(template, 'EnterpriseIdentityMaintenanceDlq');
   template.hasOutput('EnterpriseIdentityMaintenanceDlqUrl', {});
 });
 
@@ -621,6 +658,7 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
     AlarmDescription:
       'Detects failed asynchronous enterprise SCIM group reconciliation jobs.',
   });
+  expectQueueRequiresSsl(template, 'EnterpriseScimGroupJobDlq');
   template.hasOutput('EnterpriseScimGroupJobFunctionName', {});
   template.hasOutput('EnterpriseScimGroupJobDlqUrl', {});
 });
