@@ -70,7 +70,7 @@ import {
   getDocumentCommentThread,
   getDocumentCollection,
   getNextDocumentCollectionPage,
-  getDocumentBacklinks,
+  getDocumentBacklinksBatch,
   getDocumentComments,
   getDocumentPresence,
   getDocumentShares,
@@ -121,6 +121,7 @@ import {
 } from './modalFocus'
 import {
   applyDocumentOperationsLocally,
+  changesDocumentBacklinks,
   createDocumentMutationQueue,
   createDefaultDocumentTitle,
   createDocumentOperationId,
@@ -128,7 +129,9 @@ import {
   DocumentOperationChunkSaveError,
   isDocumentTitleCommitCurrent,
   isDocumentTitleDirty,
+  resolveDocumentMutationRevision,
   resolvePendingPublicShareCreateRequest,
+  refreshDocumentOperationCachesAfterFailure,
   runAfterSavingDocumentDraft,
   saveAllPendingDocumentChanges,
   saveDocumentOperationChunks,
@@ -154,7 +157,6 @@ const apiSWRConfig = {
 const documentPresenceRefreshInterval = 4_000
 const documentPresenceHeartbeatInterval = 12_000
 const documentAutosaveDelay = 550
-const documentBacklinkRequestConcurrency = 4
 
 /**
  * DocumentScreen が描画する API-backed data です。
@@ -678,8 +680,11 @@ export function DocumentPage() {
   const backlinkTargets = useMemo(
     () => deduplicateDocumentRelationTargets(
       selectedDocument?.relations ?? [],
+      selectedDocument?.kind === 'whiteboard'
+        ? selectedDocument.whiteboard.objects
+        : [],
     ),
-    [selectedDocument?.relations],
+    [selectedDocument],
   )
   const isBacklinkContextOpen =
     contextPanelSelection[0] === contextInstanceKey &&
@@ -700,38 +705,14 @@ export function DocumentPage() {
     mutate: mutateBacklinks,
   } = useSWR(
     backlinksKey,
-    async ([, token]) => {
-      const pages = await mapWithBoundedConcurrency(
-        backlinkTargets,
-        documentBacklinkRequestConcurrency,
-        (target) =>
-          getDocumentBacklinks(
-            token,
-            target.kind,
-            readRelationTargetId(target),
-          ),
-      )
-      return {
-        backlinks: [
-          ...new Map(
-            pages
-              .flatMap(({ backlinks }) => backlinks)
-              .map((backlink) => [
-                `${backlink.documentId}:${backlink.relation.id}`,
-                backlink,
-              ]),
-          ).values(),
-        ],
-        pending: pages.flatMap((page, index) =>
-          page.nextCursor && backlinkTargets[index]
-            ? [{
-                cursor: page.nextCursor,
-                target: backlinkTargets[index],
-              }]
-            : [],
-        ),
-      }
-    },
+    ([, token]) =>
+      getDocumentBacklinksBatch(
+        token,
+        backlinkTargets.map((target) => ({
+          targetType: target.kind,
+          targetId: readRelationTargetId(target),
+        })),
+      ),
     apiSWRConfig,
   )
   const backlinks =
@@ -789,32 +770,16 @@ export function DocumentPage() {
         if (!current || current.pending.length === 0) {
           return current
         }
-        const pages = await mapWithBoundedConcurrency(
+        const next = await getDocumentBacklinksBatch(
+          accessToken,
           current.pending,
-          documentBacklinkRequestConcurrency,
-          async ({ cursor, target }) => ({
-            page: await getDocumentBacklinks(
-              accessToken,
-              target.kind,
-              readRelationTargetId(target),
-              cursor,
-            ),
-            target,
-          }),
         )
         return {
           backlinks: mergeBacklinks(
             current.backlinks,
-            pages.flatMap(({ page }) => page.backlinks),
+            next.backlinks,
           ),
-          pending: pages.flatMap(({ page, target }) =>
-            page.nextCursor
-              ? [{
-                  cursor: page.nextCursor,
-                  target,
-                }]
-              : [],
-          ),
+          pending: next.pending,
         }
       },
       { revalidate: false },
@@ -1047,6 +1012,9 @@ export function DocumentPage() {
         selectedId === documentId
           ? mutateSelectedDocument(updated, { revalidate: false })
           : Promise.resolve(),
+        input.title !== undefined && selectedId === documentId
+          ? mutateBacklinks()
+          : Promise.resolve(),
       ])
       return updated
     })
@@ -1061,34 +1029,61 @@ export function DocumentPage() {
       throw new Error('Missing access token.')
     }
     return enqueueDocumentMutation(async () => {
-      const saved = await saveDocumentOperationChunks(
-        operations,
-        expectedRevision,
-        (revision, chunk) => {
-          const input = {
-            baseRevision: revision,
-            clientId: presenceClientId,
-            operations: chunk,
-          }
-          return applyDocumentOperationsWithConflictAwareness(
-            accessToken,
-            selectedId,
-            input,
-            (candidateInput) =>
-              mutationRunner.run(
-                `document:operations:${selectedId}`,
-                JSON.stringify(candidateInput),
-                (context) =>
-                  applyDocumentOperations(
-                    accessToken,
-                    selectedId,
-                    candidateInput,
-                    context,
-                  ),
-              ),
+      let saved: DocumentOperationSaveResult | undefined
+      try {
+        saved = await saveDocumentOperationChunks(
+          operations,
+          expectedRevision,
+          (revision, chunk) => {
+            const input = {
+              baseRevision: revision,
+              clientId: presenceClientId,
+              operations: chunk,
+            }
+            return applyDocumentOperationsWithConflictAwareness(
+              accessToken,
+              selectedId,
+              input,
+              (candidateInput) =>
+                mutationRunner.run(
+                  `document:operations:${selectedId}`,
+                  JSON.stringify(candidateInput),
+                  (context) =>
+                    applyDocumentOperations(
+                      accessToken,
+                      selectedId,
+                      candidateInput,
+                      context,
+                    ),
+                ),
+            )
+          },
+        )
+      } catch (error) {
+        if (error instanceof DocumentOperationChunkSaveError) {
+          await refreshDocumentOperationCachesAfterFailure(
+            error,
+            operations,
+            {
+              refreshDocuments: () => mutateDocuments(),
+              refreshVersions: () => mutateVersions(),
+              ...(selectedId === documentId
+                ? {
+                    refreshSelectedDocument: (document?: DocumentRecord) =>
+                      document
+                        ? mutateSelectedDocument(
+                            document,
+                            { revalidate: true },
+                          )
+                        : mutateSelectedDocument(),
+                  }
+                : {}),
+              refreshBacklinks: () => mutateBacklinks(),
+            },
           )
-        },
-      )
+        }
+        throw error
+      }
       if (!saved) {
         throw new Error('Document operation batch was empty.')
       }
@@ -1096,7 +1091,13 @@ export function DocumentPage() {
       if (selectedId === documentId) {
         await mutateSelectedDocument(updated, { revalidate: false })
       }
-      await Promise.all([mutateDocuments(), mutateVersions()])
+      await Promise.all([
+        mutateDocuments(),
+        mutateVersions(),
+        changesDocumentBacklinks(operations)
+          ? mutateBacklinks()
+          : Promise.resolve(),
+      ])
       return saved
     })
   }
@@ -1295,6 +1296,9 @@ export function DocumentPage() {
         mutateVersions(),
         selectedId === documentId
           ? mutateSelectedDocument(restored, { revalidate: false })
+          : Promise.resolve(),
+        selectedId === documentId
+          ? mutateBacklinks()
           : Promise.resolve(),
       ])
       return restored
@@ -1609,6 +1613,7 @@ export function DocumentScreen({
     if (!(await ensureDraftSaved())) {
       throw new Error(t('documents.editor.saveBeforeActionError'))
     }
+    return draftGuardRef.current?.getCommittedRevision?.()
   }, [ensureDraftSaved, t])
 
   const handleUnsavedStateChange = useCallback(
@@ -1779,8 +1784,14 @@ export function DocumentScreen({
           onExport={
             selectedDocument?.capabilities.canExport &&
             actions.exportDocument
-              ? (format) =>
-                  actions.exportDocument!(selectedDocument.id, format)
+              ? async (format) => {
+                  await runGuardedAction(() =>
+                    actions.exportDocument!(
+                      selectedDocument.id,
+                      format,
+                    ),
+                  )
+                }
               : undefined
           }
           onExportMenuOpenChange={setIsExportMenuOpen}
@@ -2041,6 +2052,7 @@ export function DocumentScreen({
                           anchor,
                           parentCommentId,
                         ) => {
+                          await requireSavedDraft()
                           await actions.createComment!(selectedDocument.id, {
                             anchor,
                             body,
@@ -2074,10 +2086,14 @@ export function DocumentScreen({
                     selectedDocument.capabilities.canEdit &&
                     actions.applyOperations
                       ? async (relationId) => {
-                          await requireSavedDraft()
+                          const flushedRevision =
+                            await requireSavedDraft()
                           await actions.applyOperations!(
                             selectedDocument.id,
-                            selectedDocument.revision,
+                            resolveDocumentMutationRevision(
+                              selectedDocument.revision,
+                              flushedRevision,
+                            ),
                             [{
                               operationId: createDocumentOperationId(),
                               relationId,
@@ -2113,10 +2129,14 @@ export function DocumentScreen({
                     selectedDocument.capabilities.canEdit &&
                     actions.applyOperations
                       ? async (relation: DocumentRelation) => {
-                          await requireSavedDraft()
+                          const flushedRevision =
+                            await requireSavedDraft()
                           await actions.applyOperations!(
                             selectedDocument.id,
-                            selectedDocument.revision,
+                            resolveDocumentMutationRevision(
+                              selectedDocument.revision,
+                              flushedRevision,
+                            ),
                             [{
                               operationId: createDocumentOperationId(),
                               relation,
@@ -2609,6 +2629,7 @@ function DocumentWorkspace({
         activeTitleCommitRef.current !== undefined ||
         saveStatusRef.current === 'conflict' ||
         saveStatusRef.current === 'error',
+      getCommittedRevision: () => revisionRef.current,
       savePendingChanges,
     }
     onDraftGuardChange(guard)
@@ -3111,35 +3132,6 @@ function DocumentHeader({
       </div>
     </header>
   )
-}
-
-/**
- * API 呼び出しを入力順のまま指定並列数以内で実行します。
- */
-async function mapWithBoundedConcurrency<Input, Output>(
-  values: readonly Input[],
-  concurrency: number,
-  mapper: (value: Input, index: number) => Promise<Output>,
-): Promise<Output[]> {
-  const results: Output[] = []
-  let nextIndex = 0
-  const workerCount = Math.min(
-    Math.max(1, Math.trunc(concurrency)),
-    values.length,
-  )
-  const workers = Array.from(
-    { length: workerCount },
-    async () => {
-      while (nextIndex < values.length) {
-        const index = nextIndex
-        nextIndex += 1
-        results[index] = await mapper(values[index]!, index)
-      }
-    },
-  )
-
-  await Promise.all(workers)
-  return results
 }
 
 function readRelationTargetId(

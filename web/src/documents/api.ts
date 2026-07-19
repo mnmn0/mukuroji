@@ -162,6 +162,38 @@ export type DocumentBacklinksResponse = {
 }
 
 /**
+ * Batched backlink read の一 target と継続 cursor です。
+ */
+export type DocumentBacklinkBatchTarget = {
+  /**
+   * Relation target 種別です。
+   */
+  targetType: 'work-item' | 'project' | 'goal'
+  /**
+   * Relation target の canonical ID です。
+   */
+  targetId: string
+  /**
+   * この target の次 page を読む opaque cursor です。
+   */
+  cursor?: string
+}
+
+/**
+ * 複数 target を request 全体の read budget 内で取得した結果です。
+ */
+export type DocumentBacklinksBatchResponse = {
+  /**
+   * 現在 batch で閲覧可能だった backlinks です。
+   */
+  backlinks: DocumentBacklink[]
+  /**
+   * 次 batch で継続する target/cursor です。
+   */
+  pending: DocumentBacklinkBatchTarget[]
+}
+
+/**
  * Documents API が失敗したときの例外です。
  */
 export class DocumentsApiError extends Error {
@@ -889,6 +921,27 @@ export async function getDocumentBacklinks(
     { signal },
   )
   return value as DocumentBacklinksResponse
+}
+
+/**
+ * 複数の relation target を一つの bounded backlink request で取得します。
+ */
+export async function getDocumentBacklinksBatch(
+  accessToken: string,
+  targets: readonly DocumentBacklinkBatchTarget[],
+  signal?: AbortSignal,
+) {
+  const value = await requestJson(
+    `${documentsApiBaseUrl}/document-backlinks/batch`,
+    accessToken,
+    {
+      body: JSON.stringify({ targets }),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+      signal,
+    },
+  )
+  return value as DocumentBacklinksBatchResponse
 }
 
 /**

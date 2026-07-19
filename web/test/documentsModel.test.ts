@@ -8,11 +8,14 @@ import {
 import {
   applyDocumentOperationsLocally,
   buildDocumentTree,
+  changesDocumentBacklinks,
   createDocumentMutationQueue,
   deduplicateDocumentRelationTargets,
   DocumentOperationChunkSaveError,
   isDocumentTitleCommitCurrent,
   isDocumentTitleDirty,
+  refreshDocumentOperationCachesAfterFailure,
+  resolveDocumentMutationRevision,
   resolvePendingPublicShareCreateRequest,
   resolveSafeEmbedUrl,
   runAfterSavingDocumentDraft,
@@ -101,6 +104,120 @@ describe('Document backlink target collection', () => {
         projectId: 'refero',
       },
     ])
+  })
+
+  test('includes Whiteboard Work Item cards and deduplicates explicit targets', () => {
+    expect(
+      deduplicateDocumentRelationTargets(
+        [{
+          id: 'relation-work-item',
+          target: {
+            kind: 'work-item',
+            workItemId: 'team/core/issue/launch',
+          },
+        }],
+        [{
+          bounds: {
+            height: 100,
+            width: 180,
+            x: 0,
+            y: 0,
+          },
+          id: 'work-item-card-1',
+          type: 'work-item',
+          workItemId: 'team/core/issue/launch',
+          zIndex: 1,
+        }, {
+          bounds: {
+            height: 100,
+            width: 180,
+            x: 200,
+            y: 0,
+          },
+          id: 'work-item-card-2',
+          type: 'work-item',
+          workItemId: 'team/core/issue/follow-up',
+          zIndex: 2,
+        }],
+      ),
+    ).toEqual([
+      {
+        kind: 'work-item',
+        workItemId: 'team/core/issue/launch',
+      },
+      {
+        kind: 'work-item',
+        workItemId: 'team/core/issue/follow-up',
+      },
+    ])
+  })
+
+  test('identifies every operation that can change explicit or system backlinks', () => {
+    expect(changesDocumentBacklinks([{
+      type: 'upsert-relation',
+      operationId: 'relation-upsert',
+      relation: {
+        id: 'relation-1',
+        source: { kind: 'document' },
+        target: {
+          kind: 'goal',
+          goalId: 'goal-1',
+        },
+        createdByUserId: 'member-1',
+        createdAt: '2026-07-19T00:00:00.000Z',
+      },
+    }])).toBe(true)
+    expect(changesDocumentBacklinks([{
+      type: 'delete-relation',
+      operationId: 'relation-delete',
+      relationId: 'relation-1',
+    }])).toBe(true)
+    const workItemObject = {
+      bounds: {
+        height: 100,
+        width: 180,
+        x: 0,
+        y: 0,
+      },
+      id: 'work-item-card',
+      type: 'work-item' as const,
+      workItemId: 'team/core/issue/launch',
+      zIndex: 1,
+    }
+    const systemBacklinkOperations = [{
+      object: workItemObject,
+      operationId: 'object-insert',
+      type: 'insert-object',
+    }, {
+      object: {
+        ...workItemObject,
+        workItemId: 'team/core/issue/follow-up',
+      },
+      objectId: workItemObject.id,
+      operationId: 'object-update',
+      type: 'update-object',
+    }, {
+      objectId: workItemObject.id,
+      operationId: 'object-delete',
+      type: 'delete-object',
+    }, {
+      blockId: 'block-with-relation',
+      operationId: 'block-delete',
+      type: 'delete-block',
+    }] satisfies DocumentOperation[]
+    for (const operation of systemBacklinkOperations) {
+      expect(changesDocumentBacklinks([operation])).toBe(true)
+    }
+    expect(changesDocumentBacklinks([{
+      type: 'update-block',
+      operationId: 'block-update',
+      blockId: 'block-1',
+      block: {
+        id: 'block-1',
+        type: 'paragraph',
+        text: 'Unrelated edit',
+      },
+    }])).toBe(false)
   })
 })
 
@@ -291,6 +408,59 @@ describe('Document operation chunk saving', () => {
       'operation-4',
     )
   })
+
+  test('refreshes every affected cache after a partial operation save', async () => {
+    const lastSavedDocument = {
+      ...documentRecordFixture,
+      revision: 8,
+    }
+    const error = new DocumentOperationChunkSaveError(
+      new Error('network failure'),
+      [{
+        blockId: 'block-with-relation',
+        operationId: 'delete-related-block',
+        type: 'delete-block',
+      }],
+      {
+        committedRevision: 8,
+        document: lastSavedDocument,
+      },
+    )
+    const events: string[] = []
+    let selectedDocument: typeof lastSavedDocument | undefined
+
+    await refreshDocumentOperationCachesAfterFailure(
+      error,
+      [
+        ...operations.slice(0, 4),
+        ...error.remainingOperations,
+      ],
+      {
+        refreshBacklinks: async () => {
+          events.push('backlinks')
+        },
+        refreshDocuments: async () => {
+          events.push('documents')
+          throw new Error('collection refresh failed')
+        },
+        refreshSelectedDocument: async (document) => {
+          events.push('selected')
+          selectedDocument = document
+        },
+        refreshVersions: async () => {
+          events.push('versions')
+        },
+      },
+    )
+
+    expect(events.sort()).toEqual([
+      'backlinks',
+      'documents',
+      'selected',
+      'versions',
+    ])
+    expect(selectedDocument?.revision).toBe(8)
+  })
 })
 
 describe('Document mutation and navigation guards', () => {
@@ -362,6 +532,12 @@ describe('Document mutation and navigation guards', () => {
   test('does not adopt a title response after newer input', () => {
     expect(isDocumentTitleCommitCurrent(3, 3)).toBe(true)
     expect(isDocumentTitleCommitCurrent(3, 4)).toBe(false)
+  })
+
+  test('uses the revision produced by draft flush for the next mutation', () => {
+    expect(resolveDocumentMutationRevision(7, 9)).toBe(9)
+    expect(resolveDocumentMutationRevision(10, 9)).toBe(10)
+    expect(resolveDocumentMutationRevision(7)).toBe(7)
   })
 
   test('keeps a reverted title dirty while another title is committing', () => {

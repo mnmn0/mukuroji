@@ -3,6 +3,7 @@ import {
   applyDocumentOperations,
   applyDocumentOperationsWithConflictAwareness,
   deleteDocumentShare,
+  getDocumentBacklinksBatch,
   getDocumentCollection,
   getNextDocumentCollectionPage,
   getDocumentShares,
@@ -143,6 +144,60 @@ describe('Canonical Documents API requests', () => {
       versions: [documentVersionFixtures[1]],
     })
     expect(requests).toHaveLength(2)
+  })
+
+  test('loads multiple backlink targets through one bounded batch request', async () => {
+    let capturedRequest: Request | undefined
+    globalThis.fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      capturedRequest = createRequest(input, init)
+      return Response.json({
+        backlinks: [],
+        pending: [{
+          targetType: 'goal',
+          targetId: 'goal-1',
+          cursor: 'next-goal-page',
+        }],
+      })
+    }) as typeof fetch
+
+    const response = await getDocumentBacklinksBatch(
+      'access-token',
+      [
+        {
+          targetType: 'goal',
+          targetId: 'goal-1',
+        },
+        {
+          targetType: 'project',
+          targetId: 'project-1',
+        },
+      ],
+    )
+
+    expect(capturedRequest?.method).toBe('POST')
+    expect(
+      new URL(capturedRequest!.url).pathname,
+    ).toEndWith('/document-backlinks/batch')
+    expect(await capturedRequest?.json()).toEqual({
+      targets: [
+        {
+          targetType: 'goal',
+          targetId: 'goal-1',
+        },
+        {
+          targetType: 'project',
+          targetId: 'project-1',
+        },
+      ],
+    })
+    expect(response.pending).toEqual([{
+      targetType: 'goal',
+      targetId: 'goal-1',
+      cursor: 'next-goal-page',
+    }])
   })
 
   test('sends baseRevision, clientId, idempotent operations then reloads detail', async () => {

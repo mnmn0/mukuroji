@@ -50,6 +50,10 @@ export type DocumentDraftSaveGuard = {
    */
   hasUnsavedChanges: () => boolean
   /**
+   * Editor が最後に server へ確定した Document revision を返します。
+   */
+  getCommittedRevision?: () => number
+  /**
    * Pending title/operation を保存し、安全に後続操作へ進めるか返します。
    */
   savePendingChanges: () => Promise<boolean>
@@ -272,6 +276,23 @@ export function isDocumentTitleDirty(
 }
 
 /**
+ * Cache 側と draft flush 側のうち新しい Document revision を後続 mutation に使います。
+ *
+ * @param cachedRevision - 呼び出し元 render が保持する Document revision です。
+ * @param flushedRevision - Draft guard が保存後に保持する Document revision です。
+ * @returns 後続 mutation が基準にする最新 revision です。
+ */
+export function resolveDocumentMutationRevision(
+  cachedRevision: number,
+  flushedRevision?: number,
+) {
+  return Math.max(
+    cachedRevision,
+    flushedRevision ?? cachedRevision,
+  )
+}
+
+/**
  * Title commit と operation flush の途中で追加された変更も含め、pending
  * 状態が空になるまで single-flight save を繰り返します。
  *
@@ -358,6 +379,50 @@ export async function saveDocumentOperationChunks(
   }
 
   return lastSavedResult
+}
+
+/**
+ * Operation chunk failure 後に、部分成功または response loss を含む server state を
+ * cache へ再反映します。
+ *
+ * @param error - Partial save 情報を保持する operation error です。
+ * @param operations - 保存を試みた全 operation です。
+ * @param callbacks - Detail、collection、version、backlink cache の更新 callback です。
+ */
+export async function refreshDocumentOperationCachesAfterFailure(
+  error: DocumentOperationChunkSaveError,
+  operations: readonly DocumentOperation[],
+  callbacks: {
+    refreshSelectedDocument?: (
+      document?: DocumentRecord,
+    ) => Promise<unknown>
+    refreshDocuments: () => Promise<unknown>
+    refreshVersions: () => Promise<unknown>
+    refreshBacklinks?: () => Promise<unknown>
+  },
+) {
+  const refreshes = [
+    Promise.resolve().then(callbacks.refreshDocuments),
+    Promise.resolve().then(callbacks.refreshVersions),
+  ]
+  if (callbacks.refreshSelectedDocument) {
+    refreshes.push(
+      Promise.resolve().then(() =>
+        callbacks.refreshSelectedDocument!(
+          error.lastSavedDocument,
+        )
+      ),
+    )
+  }
+  if (
+    callbacks.refreshBacklinks &&
+    changesDocumentBacklinks(operations)
+  ) {
+    refreshes.push(
+      Promise.resolve().then(callbacks.refreshBacklinks),
+    )
+  }
+  await Promise.allSettled(refreshes)
 }
 
 /**
@@ -460,18 +525,32 @@ export function buildDocumentTree(
 }
 
 /**
- * Relation 一覧から同じ target を最初の出現順で一つにまとめます。
+ * Explicit relation と Whiteboard Work Item card から同じ target を最初の
+ * 出現順で一つにまとめます。
  *
  * @param relations - Document に保存された relation 一覧です。
+ * @param whiteboardObjects - Whiteboard に保存された object 一覧です。
  * @returns Backlink API を一度ずつ呼ぶ canonical target 一覧です。
  */
 export function deduplicateDocumentRelationTargets(
   relations: readonly DocumentRelation[],
+  whiteboardObjects: readonly WhiteboardObject[] = [],
 ): DocumentRelation['target'][] {
   const targets = new Map<string, DocumentRelation['target']>()
 
-  for (const relation of relations) {
-    const target = relation.target
+  const candidates: DocumentRelation['target'][] = [
+    ...relations.map(({ target }) => target),
+    ...whiteboardObjects.flatMap(
+      (object): DocumentRelation['target'][] =>
+        object.type === 'work-item'
+          ? [{
+              kind: 'work-item',
+              workItemId: object.workItemId,
+            }]
+          : [],
+    ),
+  ]
+  for (const target of candidates) {
     const key =
       target.kind === 'work-item'
         ? `work-item:${target.workItemId}`
@@ -484,6 +563,26 @@ export function deduplicateDocumentRelationTargets(
   }
 
   return [...targets.values()]
+}
+
+/**
+ * Operation batch が explicit/system backlink index を変更し得るか判定します。
+ *
+ * @param operations - 保存する canonical Document operations です。
+ * @returns Relation、Work Item card、relation source の変更を含む場合は true です。
+ */
+export function changesDocumentBacklinks(
+  operations: readonly DocumentOperation[],
+): boolean {
+  return operations.some(
+    ({ type }) =>
+      type === 'upsert-relation' ||
+      type === 'delete-relation' ||
+      type === 'insert-object' ||
+      type === 'update-object' ||
+      type === 'delete-object' ||
+      type === 'delete-block',
+  )
 }
 
 /**
