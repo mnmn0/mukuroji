@@ -730,6 +730,21 @@ export class CdkStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    const analyticsTable = new dynamodb.Table(this, 'AnalyticsTable', {
+      partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    analyticsTable.addGlobalSecondaryIndex({
+      indexName: 'ScheduleDueIndex',
+      partitionKey: { name: 'scheduleShard', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'nextDeliveryAtRecordKey', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+    });
+
     const requestIntakeTable = new dynamodb.Table(this, 'RequestIntakeTable', {
       partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
@@ -1082,6 +1097,8 @@ export class CdkStack extends cdk.Stack {
       },
       environment: {
         ALLOWED_ORIGINS: taskApiAllowedOrigins.valueAsString,
+        ANALYTICS_SCHEDULE_INDEX_NAME: 'ScheduleDueIndex',
+        ANALYTICS_TABLE_NAME: analyticsTable.tableName,
         AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX: automationInboundWebhookSecretPrefix,
         AUTOMATION_TABLE_NAME: automationTable.tableName,
         AUTOMATION_WEBHOOK_SECRET_PREFIX: automationWebhookSecretPrefix,
@@ -1243,6 +1260,7 @@ export class CdkStack extends cdk.Stack {
           collaborationTable.tableArn,
           fileProofingTable.tableArn,
           workspaceSearchTable.tableArn,
+          analyticsTable.tableArn,
         ],
       })],
     });
@@ -1263,9 +1281,23 @@ export class CdkStack extends cdk.Stack {
         resources: [planningTable.tableArn],
       })],
     });
+    const apiAnalyticsDataPolicy = new iam.Policy(this, 'ApiAnalyticsDataPolicy', {
+      statements: [new iam.PolicyStatement({
+        actions: [
+          'dynamodb:DeleteItem',
+          'dynamodb:DescribeTable',
+          'dynamodb:GetItem',
+          'dynamodb:PutItem',
+          'dynamodb:Query',
+          'dynamodb:UpdateItem',
+        ],
+        resources: [analyticsTable.tableArn],
+      })],
+    });
     apiFunction.role.attachInlinePolicy(apiAutomationDataPolicy);
     apiFunction.role.attachInlinePolicy(apiWorkItemConfigurationDataPolicy);
     apiFunction.role.attachInlinePolicy(apiPlanningDataPolicy);
+    apiFunction.role.attachInlinePolicy(apiAnalyticsDataPolicy);
     apiFunction.role.attachInlinePolicy(apiRequestIntakeDataPolicy);
     apiFunction.role.attachInlinePolicy(apiTransactWritePolicy);
     apiFunction.role.attachInlinePolicy(new iam.Policy(this, 'ApiAutomationWebhookSecretPolicy', {
@@ -1780,6 +1812,107 @@ export class CdkStack extends cdk.Stack {
       targets: [new eventsTargets.LambdaFunction(automationScheduleFunction)],
     });
 
+    const analyticsScheduleDlq = new sqs.Queue(this, 'AnalyticsScheduleDlq', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(14),
+    });
+    const analyticsScheduleFunction = new lambdaNodejs.NodejsFunction(
+      this,
+      'AnalyticsScheduleFunction',
+      {
+        entry: path.join(__dirname, '../../server/src/analytics-schedule-handler.ts'),
+        handler: 'handler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+        projectRoot: path.join(__dirname, '../..'),
+        timeout: cdk.Duration.minutes(5),
+        memorySize: 512,
+        description:
+          'Creates permission-safe in-app analytics snapshot delivery receipts on deterministic schedule occurrences.',
+        onFailure: new lambdaDestinations.SqsDestination(analyticsScheduleDlq),
+        retryAttempts: 2,
+        bundling: {
+          bundleAwsSDK: true,
+          minify: true,
+          sourceMap: true,
+          target: 'node22',
+        },
+        environment: {
+          ANALYTICS_SCHEDULE_INDEX_NAME: 'ScheduleDueIndex',
+          ANALYTICS_TABLE_NAME: analyticsTable.tableName,
+          AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
+          COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
+          COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+          MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
+          MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
+          SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+          WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
+        },
+      },
+    );
+    analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem', 'dynamodb:PutItem'],
+      resources: [analyticsTable.tableArn],
+    }));
+    analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:Query'],
+      resources: [`${analyticsTable.tableArn}/index/ScheduleDueIndex`],
+    }));
+    analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:TransactWriteItems'],
+      resources: [analyticsTable.tableArn],
+    }));
+    analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['cognito-idp:AdminListGroupsForUser'],
+      resources: [cognitoUserPoolArn],
+    }));
+    analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:Query'],
+      resources: [`${auditEventsTable.tableArn}/index/EntityOccurredAtIndex`],
+    }));
+    analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:Query'],
+      resources: [projectDirectoryTable.tableArn, workItemsTable.tableArn],
+    }));
+    analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem'],
+      resources: [workspaceAccessTable.tableArn],
+    }));
+
+    new cloudwatch.Alarm(this, 'AnalyticsScheduleDlqAlarm', {
+      alarmDescription:
+        'Detects analytics snapshot delivery failures after asynchronous retries.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: analyticsScheduleDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    new cloudwatch.Alarm(this, 'AnalyticsScheduleDestinationFailureAlarm', {
+      alarmDescription:
+        'Detects failures while Lambda delivers analytics schedule failures to the DLQ.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: analyticsScheduleFunction.metric('DestinationDeliveryFailures', {
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    new events.Rule(this, 'AnalyticsScheduleRule', {
+      description: 'Checks due saved analytics reports every five minutes.',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+      targets: [new eventsTargets.LambdaFunction(analyticsScheduleFunction)],
+    });
+
     const notificationScheduleDlq = new sqs.Queue(this, 'NotificationScheduleDlq', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       retentionPeriod: cdk.Duration.days(14),
@@ -2165,6 +2298,9 @@ export class CdkStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'PlanningTableName', {
       value: planningTable.tableName,
     });
+    new cdk.CfnOutput(this, 'AnalyticsTableName', {
+      value: analyticsTable.tableName,
+    });
     new cdk.CfnOutput(this, 'RequestIntakeTableName', {
       value: requestIntakeTable.tableName,
     });
@@ -2211,6 +2347,9 @@ export class CdkStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'AutomationScheduleDlqUrl', {
       value: automationScheduleDlq.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'AnalyticsScheduleDlqUrl', {
+      value: analyticsScheduleDlq.queueUrl,
     });
     new cdk.CfnOutput(this, 'NotificationScheduleDlqUrl', {
       value: notificationScheduleDlq.queueUrl,
