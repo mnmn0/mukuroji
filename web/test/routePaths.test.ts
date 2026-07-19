@@ -88,3 +88,9 @@ describe('Request intake paths', () => {
     )
   })
 })
+
+describe('Analytics report path', () => {
+  test('registers the dedicated reports route', () => {
+    expect(matchRoutes(appRoutes, '/reports')?.at(-1)?.route.path).toBe('/reports')
+  })
+})

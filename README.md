@@ -64,8 +64,11 @@ HMAC key は owner-only の root `.env` だけに保持します。関連する 
 
 同じ ready hook で DynamoDB table `mukuroji-dashboard-local`,
 `mukuroji-project-tasks-v2-local`, `mukuroji-project-directory-local`,
-`mukuroji-workspace-access-local`, `mukuroji-workspace-search-local` も作成し、ダッシュボード集計、Refero のタスク、
+`mukuroji-workspace-access-local`, `mukuroji-workspace-search-local`,
+`mukuroji-analytics-local` も作成し、ダッシュボード集計、Refero のタスク、
 サイドバー用チーム/プロジェクト階層、Workspace metadata/member を投入します。
+Analytics table は保存済みレポート、immutable snapshot、定期配信 receipt を保持し、
+`ScheduleDueIndex` で配信対象を取得できる本番同等の key schema を使います。
 チーム/プロジェクト階層は `workspace#mukuroji-local` partition に seed され、タスク API はその directory に含まれる project だけを返します。
 Workspace access table では `demo@example.com` を active owner、既存の project user を
 active member、`viewer@example.com` を active guest として初回だけ seed します。
@@ -79,7 +82,7 @@ bun run floci:up
 bun run floci:deploy-backend
 ```
 
-`floci:deploy-backend` は `server/src/index.ts` を Node.js 22 Lambda 用に bundle し、Floci の REST API Gateway から Lambda に proxy します。React から Lambda 経由 API を呼ぶ場合は、生成された `.floci/generated/backend.env` の `VITE_API_BASE_URL` を使います。Deploy script は確定した REST API URL を `AUTOMATION_INBOUND_WEBHOOK_BASE_URL` として Lambda にも渡すため、管理 API が返す signed inbound webhook URL は sender から到達可能な同じ API を指します。Lambda adapter は `/teams/projects` のような直下パスと `/api/teams/projects` の両方を同じ Hono route へ正規化します。
+`floci:deploy-backend` は `server/src/index.ts` を Node.js 22 Lambda 用に bundle し、Floci の REST API Gateway から Lambda に proxy します。React から Lambda 経由 API を呼ぶ場合は、生成された `.floci/generated/backend.env` の `VITE_API_BASE_URL` を使います。Deploy script は ready hook が生成した `ANALYTICS_TABLE_NAME` と `ANALYTICS_SCHEDULE_INDEX_NAME` を Lambda に渡します。また、確定した REST API URL を `AUTOMATION_INBOUND_WEBHOOK_BASE_URL` として Lambda にも渡すため、管理 API が返す signed inbound webhook URL は sender から到達可能な同じ API を指します。Lambda adapter は `/teams/projects` のような直下パスと `/api/teams/projects` の両方を同じ Hono route へ正規化します。
 
 停止:
 
@@ -140,6 +143,8 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_COLLABORATION_TABLE` / `COLLABORATION_TABLE_NAME`: comment thread、reaction、watcher、presence を保存する DynamoDB table 名。未指定時は `mukuroji-collaboration-local`
 - `MUKUROJI_DOCUMENTS_TABLE` / `DOCUMENTS_TABLE_NAME`: Document tree、version、comment、presence、share、backlink を保存する DynamoDB table 名。未指定時は `mukuroji-documents-local`
 - `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`: Workspace search document、saved view、ユーザー別 view preference を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-search-local`
+- `ANALYTICS_TABLE_NAME`: 保存済みレポート、immutable snapshot、定期配信 receipt を保存する DynamoDB table 名。未指定時は `mukuroji-analytics-local`
+- `ANALYTICS_SCHEDULE_INDEX_NAME`: 定期配信対象の取得に使う `scheduleShard` / `nextDeliveryAtRecordKey` GSI 名。未指定時は `ScheduleDueIndex`
 - `MUKUROJI_NOTIFICATIONS_TABLE` / `NOTIFICATIONS_TABLE_NAME`: ユーザー別の durable notification timeline と配信設定を保存する DynamoDB table 名。未指定時は `mukuroji-notifications-local`
 - `PLANNING_TABLE_NAME`: Cycle、Milestone、Release、Phase、Goal/OKR、Initiative、Roadmap、Portfolio の Planning entity と、Dependency、Work Item link を保存する DynamoDB table 名。未指定時は `mukuroji-planning-local`
 - `NOTIFICATIONS_STATUS_INDEX_NAME`: unread/read/archive/snooze ごとの timeline query に使う GSI 名。未指定時は `RecipientStatusIndex`
@@ -164,8 +169,14 @@ API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/tea
 `/api/projects/{projectId}/tasks`, `/api/search`, `/api/saved-views`, `/api/audit/events`,
 `/api/notifications`, `/api/documents`, `/api/automation/rules`, `/api/automation/templates`,
 `/api/automation/inbound-webhooks`, `/api/recurring-work`,
-`/api/automation/executions`, `/api/bulk-operations`, `/api/planning` で DynamoDB を読みます。ローカルでは Vite proxy により、
+`/api/automation/executions`, `/api/bulk-operations`, `/api/planning`,
+`/api/analytics/query`, `/api/analytics/evidence`, `/api/analytics/reports`,
+`/api/analytics/reports/{reportId}/snapshots`, `/api/analytics/export`
+で DynamoDB を読み書きします。ローカルでは Vite proxy により、
 Web から `/api` を呼ぶだけで Floci 上の DynamoDB データを取得できます。
+
+Analytics の権限、snapshot、schedule、forecast の契約は
+[`docs/analytics.md`](docs/analytics.md) を参照してください。
 
 Inbound webhook の管理 API は Workspace 管理者専用です。`/api/automation/inbound-webhooks` 以下で作成、pause/resume、rotate、revoke を行い、public sender は発行された `/api/automation/inbound-webhooks/{opaqueEndpointId}` へ署名済み JSON を POST します。Signing secret は create/rotate response で一度だけ返し、応答消失時の同一 key による recovery も 24 時間で失効します。Delivery idempotency receipt は、365 日保持する audit outbox の deterministic event ID 衝突期間を覆うため 400 日保持します。`provisioning` が完了しない場合は管理者が revoke して abort できますが、rotate 途中の abort も endpoint を終端失効させるため、Rule と sender を新しい endpoint へ再設定する必要があります。Revoke は durable cleanup intent を残し、即時削除後も schedule Lambda が inbound-only `DeleteSecret` 権限で 5 分間隔に recovery window 24 時間とその後の 5 分間の grace が終わるまで secret 削除を再試行し、期限直前に開始済みの late provisioning write も回収します。
 

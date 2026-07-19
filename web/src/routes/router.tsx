@@ -17,6 +17,7 @@ import { RequestIntakePage } from '../requests/RequestIntakePage'
 import { DocumentPage } from '../documents/DocumentPage'
 import { SharedDocumentPage } from '../documents/SharedDocumentPage'
 import { GoalDocumentsPage } from '../pages/GoalDocumentsPage'
+import { ReportsPage } from '../pages/ReportsPage'
 
 /**
  * アプリケーション全体の画面ルーティング定義です。
@@ -83,7 +84,7 @@ export const appRoutes: RouteObject[] = [
       },
       {
         path: '/reports',
-        element: <WorkspacePage view="reports" />,
+        element: <ReportsPage />,
       },
       {
         path: '/help',

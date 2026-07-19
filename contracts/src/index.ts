@@ -4080,3 +4080,8 @@ export type DownloadDocumentExportResponse = {
 export type ExportDocumentResponse =
   | InlineDocumentExportResponse
   | DownloadDocumentExportResponse
+
+/**
+ * Analytics report、snapshot、metric API の公開契約です。
+ */
+export * from './analytics'
