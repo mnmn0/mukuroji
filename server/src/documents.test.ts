@@ -113,6 +113,219 @@ test('keeps a pure conditional transaction cancellation as a semantic conflict',
   })
 })
 
+test('retries transaction conflicts in every bounded document mutation loop', async () => {
+  const memory = createMemoryDocumentClient()
+  seedOwnerAuthorization(memory)
+  const client = createClient(memory)
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerShareAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Retryable transaction conflicts',
+    blocks: [{
+      id: 'block-1',
+      type: 'paragraph',
+      text: 'Before',
+    }],
+  })
+  let injectedFailures = 0
+  const failNextTransaction = (
+    cancellationReasonCodes: readonly string[],
+  ) => {
+    memory.beforeTransaction(() => {
+      injectedFailures += 1
+      throw transactionCancellationError(
+        cancellationReasonCodes,
+      )
+    })
+  }
+
+  failNextTransaction([
+    'None',
+    'TransactionConflict',
+  ])
+  await expect(client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    input: {
+      baseRevision: document.revision,
+      clientId: 'editor-1',
+      operations: [{
+        operationId:
+          'retryable-transaction-operation',
+        type: 'update-block',
+        blockId: 'block-1',
+        block: {
+          id: 'block-1',
+          type: 'paragraph',
+          text: 'After',
+        },
+      }],
+    },
+  })).resolves.toMatchObject({
+    documentId: document.id,
+    revision: 2,
+  })
+
+  failNextTransaction([
+    'ConditionalCheckFailed',
+    'TransactionConflict',
+  ])
+  await expect(client.updatePreference({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    favorite: true,
+  })).resolves.toMatchObject({
+    documentId: document.id,
+    favorite: true,
+  })
+
+  failNextTransaction([
+    'TransactionConflict',
+    'None',
+  ])
+  await expect(client.createPublicShare({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    expiresAt: '2026-07-19T00:00:00.000Z',
+    idempotencyKey:
+      'retryable-transaction-share',
+  })).resolves.toMatchObject({
+    share: {
+      documentId: document.id,
+    },
+  })
+  expect(injectedFailures).toBe(3)
+})
+
+test('returns a storage failure after transaction conflict retries are exhausted', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Transaction conflict exhaustion',
+    blocks: [{
+      id: 'block-1',
+      type: 'paragraph',
+      text: 'Before',
+    }],
+  })
+  let attempts = 0
+  const rejectTransaction = () => {
+    attempts += 1
+    memory.beforeTransaction(
+      rejectTransaction,
+    )
+    throw transactionCancellationError([
+      'None',
+      'TransactionConflict',
+    ])
+  }
+  memory.beforeTransaction(
+    rejectTransaction,
+  )
+
+  await expect(client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: document.revision,
+      clientId: 'editor-1',
+      operations: [{
+        operationId:
+          'transaction-conflict-exhaustion',
+        type: 'update-block',
+        blockId: 'block-1',
+        block: {
+          id: 'block-1',
+          type: 'paragraph',
+          text: 'After',
+        },
+      }],
+    },
+  })).rejects.toMatchObject({
+    status: 503,
+    code: 'DocumentsStoreError',
+  })
+  expect(attempts).toBe(6)
+})
+
+test('does not retry transaction conflicts mixed with non-retryable reasons', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Non-retryable transaction cancellation',
+    blocks: [{
+      id: 'block-1',
+      type: 'paragraph',
+      text: 'Before',
+    }],
+  })
+  const reasonSets = [
+    [
+      'TransactionConflict',
+      'ValidationError',
+    ],
+    [
+      'TransactionConflict',
+      'ProvisionedThroughputExceeded',
+    ],
+    [
+      'TransactionConflict',
+      'UnexpectedReason',
+    ],
+  ] as const
+
+  for (
+    const [index, cancellationReasonCodes] of
+      reasonSets.entries()
+  ) {
+    let attempts = 0
+    memory.beforeTransaction(() => {
+      attempts += 1
+      throw transactionCancellationError(
+        cancellationReasonCodes,
+      )
+    })
+    await expect(client.applyOperations({
+      workspaceId: 'workspace-1',
+      documentId: document.id,
+      access: ownerAccess,
+      input: {
+        baseRevision: document.revision,
+        clientId: 'editor-1',
+        operations: [{
+          operationId:
+            `non-retryable-cancellation-${index}`,
+          type: 'update-block',
+          blockId: 'block-1',
+          block: {
+            id: 'block-1',
+            type: 'paragraph',
+            text: 'After',
+          },
+        }],
+      },
+    })).rejects.toMatchObject({
+      status: 503,
+      code: 'DocumentsStoreError',
+    })
+    expect(attempts).toBe(1)
+  }
+})
+
 test('merges stale-base operations on independent elements and rejects a same-element conflict atomically', () => {
   const document = createPage()
   const first = reduceDocumentOperations({

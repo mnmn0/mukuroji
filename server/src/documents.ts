@@ -3791,7 +3791,12 @@ export class DynamoDbDocumentsClient implements DocumentClient {
           updatedAt: reduced.document.updatedAt,
         }
       } catch (error) {
-        if (isConditionalFailure(error)) {
+        const retryableTransactionConflict =
+          isRetryableTransactionConflict(error)
+        if (
+          isConditionalFailure(error) ||
+          retryableTransactionConflict
+        ) {
           if (
             !await this.authorizationGuardsMatch(
               mutationAuthorizationGuards,
@@ -3822,6 +3827,9 @@ export class DynamoDbDocumentsClient implements DocumentClient {
               DOCUMENT_CONDITIONAL_RETRY_LIMIT
           ) {
             continue
+          }
+          if (retryableTransactionConflict) {
+            throw normalizeDynamoError(error)
           }
           throw new DocumentError(
             409,
@@ -4137,7 +4145,12 @@ export class DynamoDbDocumentsClient implements DocumentClient {
           document: node,
         }
       } catch (error) {
-        if (isConditionalFailure(error)) {
+        const retryableTransactionConflict =
+          isRetryableTransactionConflict(error)
+        if (
+          isConditionalFailure(error) ||
+          retryableTransactionConflict
+        ) {
           if (
             !await this.authorizationGuardsMatch(
               mutationAuthorizationGuards,
@@ -4154,6 +4167,9 @@ export class DynamoDbDocumentsClient implements DocumentClient {
               DOCUMENT_CONDITIONAL_RETRY_LIMIT
           ) {
             continue
+          }
+          if (retryableTransactionConflict) {
+            throw normalizeDynamoError(error)
           }
           throw new DocumentError(
             409,
@@ -5317,7 +5333,12 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         )
         return { share, token }
       } catch (error) {
-        if (!isConditionalFailure(error)) {
+        const retryableTransactionConflict =
+          isRetryableTransactionConflict(error)
+        if (
+          !isConditionalFailure(error) &&
+          !retryableTransactionConflict
+        ) {
           throw normalizeDynamoError(error)
         }
         await this.verifyAuthorizationGuard(
@@ -5386,6 +5407,9 @@ export class DynamoDbDocumentsClient implements DocumentClient {
             DOCUMENT_CONDITIONAL_RETRY_LIMIT
         ) {
           continue
+        }
+        if (retryableTransactionConflict) {
+          throw normalizeDynamoError(error)
         }
         throw new DocumentError(
           409,
@@ -9504,6 +9528,38 @@ function isConditionalFailure(error: unknown): boolean {
   return codes.every((code) => typeof code === 'string') &&
     failures.length > 0 &&
     failures.every((code) => code === 'ConditionalCheckFailed')
+}
+
+/**
+ * Retry loop が安全に再実行できる DynamoDB transaction conflict か判定します。
+ *
+ * `None` は未失敗 action として、`ConditionalCheckFailed` は次の attempt で再評価
+ * できる既知の競合として許可します。validation、throughput、unknown code が混在する
+ * cancellation は storage failure のまま fail closed にします。
+ */
+function isRetryableTransactionConflict(error: unknown): boolean {
+  if (
+    !isRecord(error) ||
+    error.name !== 'TransactionCanceledException'
+  ) {
+    return false
+  }
+  const reasons = error.CancellationReasons
+  if (!Array.isArray(reasons) || reasons.length === 0) {
+    return false
+  }
+  const codes = reasons.map((reason) =>
+    isRecord(reason) && typeof reason.Code === 'string'
+      ? reason.Code
+      : undefined
+  )
+  const failures = codes.filter((code) => code !== 'None')
+  return codes.every((code) => typeof code === 'string') &&
+    failures.includes('TransactionConflict') &&
+    failures.every((code) =>
+      code === 'ConditionalCheckFailed' ||
+      code === 'TransactionConflict'
+    )
 }
 
 function isResourceNotFound(error: unknown): boolean {
