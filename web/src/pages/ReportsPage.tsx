@@ -2,7 +2,6 @@ import type {
   AnalyticsEvidenceInput,
   AnalyticsEvidenceResponse,
   AnalyticsFilter,
-  AnalyticsQueryInput,
   AnalyticsReport,
   AnalyticsSchedule,
   AnalyticsWidget,
@@ -51,7 +50,6 @@ import {
   getAnalyticsEvidence,
   getAnalyticsReports,
   getAnalyticsSnapshots,
-  queryAnalytics,
   updateAnalyticsReport,
 } from '../analytics/api'
 import { shouldClearAnalyticsAuthSession } from '../analytics/authError'
@@ -60,7 +58,9 @@ import {
   getDefaultAnalyticsTimeZone,
 } from '../analytics/defaults'
 import { AnalyticsWorkbench } from '../analytics/AnalyticsWorkbench'
+import { createAnalyticsLiveQueryRunner } from '../analytics/liveQuery'
 import {
+  createAnalyticsQueryInput,
   createDefaultAnalyticsFilter,
   parseAnalyticsRouteState,
   serializeAnalyticsRouteState,
@@ -91,6 +91,7 @@ export function ReportsPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
+  const [liveQueryRunner] = useState(() => createAnalyticsLiveQueryRunner())
   const [session] = useState<AuthSession | null>(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [initialTimeZone] = useState(() => getDefaultAnalyticsTimeZone())
@@ -213,22 +214,11 @@ export function ReportsPage() {
   const displayedTimeZone = selectedSnapshotRecord?.query.timeZone ??
     routeState.timezone
   const displayedWidgets = selectedSnapshotRecord?.query.widgets ?? widgets
-  const queryInput = useMemo(() => ({
-    asOf: routeState.asOf ?? queryAsOf,
-    filter: routeState.filter,
-    ...(routeState.forecastBaseline
-      ? { forecastBaseline: routeState.forecastBaseline }
-      : {}),
-    timeZone: routeState.timezone,
-    widgets,
-  } satisfies AnalyticsQueryInput), [
+  const queryInput = useMemo(() => createAnalyticsQueryInput(
+    routeState,
     queryAsOf,
-    routeState.asOf,
-    routeState.filter,
-    routeState.forecastBaseline,
-    routeState.timezone,
     widgets,
-  ])
+  ), [queryAsOf, routeState, widgets])
   const shouldRunLiveQuery = Boolean(
     accessToken &&
     user &&
@@ -237,9 +227,12 @@ export function ReportsPage() {
     (selectedReport || hasStartedAdHoc) &&
     !routeState.snapshotId,
   )
-  const queryKey = shouldRunLiveQuery && accessToken
-    ? ['analytics-query', accessToken, JSON.stringify(queryInput)] as const
-    : null
+  const queryKey = useMemo(
+    () => shouldRunLiveQuery && accessToken
+      ? ['analytics-query', accessToken, JSON.stringify(queryInput)] as const
+      : null,
+    [accessToken, queryInput, shouldRunLiveQuery],
+  )
   const {
     data: liveSnapshot,
     error: queryError,
@@ -248,7 +241,7 @@ export function ReportsPage() {
   } = useSWR(
     queryKey,
     ([, token, serializedQuery]) =>
-      queryAnalytics(token, JSON.parse(serializedQuery) as AnalyticsQueryInput),
+      liveQueryRunner.run(token, serializedQuery),
     apiSWRConfig,
   )
   const snapshot = selectedSnapshotRecord?.snapshot ?? liveSnapshot
@@ -274,7 +267,14 @@ export function ReportsPage() {
 
   useEffect(() => () => {
     evidenceRequest.current?.abort()
-  }, [])
+    liveQueryRunner.abort()
+  }, [liveQueryRunner])
+
+  useEffect(() => {
+    if (!queryKey) {
+      liveQueryRunner.abort()
+    }
+  }, [liveQueryRunner, queryKey])
 
   useEffect(() => {
     if (!session) {

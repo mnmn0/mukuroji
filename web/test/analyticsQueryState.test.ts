@@ -54,10 +54,10 @@ describe('Analytics report URL state', () => {
       'UTC',
     )
 
-    expect(state.filter.customFields).toEqual([])
+    expect(state.filter.customFields).toBeUndefined()
   })
 
-  test('treats omitted version-one filters as explicit empty values', () => {
+  test('keeps omitted version-one dimension filters undefined', () => {
     const fallback = {
       assigneeUserIds: ['owner@example.com'],
       customFields: [{
@@ -87,19 +87,47 @@ describe('Analytics report URL state', () => {
     )
 
     expect(state.filter).toEqual({
-      assigneeUserIds: [],
-      customFields: [],
       includeArchived: false,
       period: {
         from: '2026-07-01T00:00:00.000Z',
         to: '2026-07-31T23:59:59.999Z',
       },
-      projectIds: [],
-      statusCategories: [],
-      teamIds: [],
     })
     expect(state.forecastBaseline).toBeUndefined()
     expect(state.timezone).toBe('UTC')
+  })
+
+  test('round-trips explicit empty dimension allowlists as match-none', () => {
+    const source = {
+      builder: false,
+      filter: {
+        assigneeUserIds: [],
+        includeArchived: false,
+        period: {
+          from: '2026-07-01T00:00:00.000Z',
+          to: '2026-07-31T23:59:59.999Z',
+        },
+        projectIds: [],
+        statusCategories: [],
+        teamIds: [],
+      },
+      timezone: 'UTC',
+    }
+    const canonical = serializeAnalyticsRouteState(source)
+    const restored = parseAnalyticsRouteState(
+      canonical,
+      createDefaultAnalyticsFilter(),
+      'Asia/Tokyo',
+    )
+
+    expect(canonical.getAll('team')).toEqual([''])
+    expect(canonical.getAll('project')).toEqual([''])
+    expect(canonical.getAll('assignee')).toEqual([''])
+    expect(canonical.getAll('status')).toEqual([''])
+    expect(restored.filter.teamIds).toEqual([])
+    expect(restored.filter.projectIds).toEqual([])
+    expect(restored.filter.assigneeUserIds).toEqual([])
+    expect(restored.filter.statusCategories).toEqual([])
   })
 
   test('uses a saved report fallback only for an unversioned legacy URL', () => {

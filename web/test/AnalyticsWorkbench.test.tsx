@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { AnalyticsWorkbench } from '../src/analytics/AnalyticsWorkbench'
+import { parseAnalyticsCustomFieldDraftValue } from '../src/analytics/filterDraft'
 import {
   analyticsEvidenceFixture,
   analyticsFilterFixture,
@@ -24,6 +25,15 @@ const baseProps = {
 }
 
 describe('AnalyticsWorkbench', () => {
+  test('preserves typed custom-field values while editing filter drafts', () => {
+    expect(parseAnalyticsCustomFieldDraftValue('12.5', 'greater-than')).toBe(12.5)
+    expect(parseAnalyticsCustomFieldDraftValue('invalid', 'less-than')).toBeUndefined()
+    expect(parseAnalyticsCustomFieldDraftValue('false', 'equals', true)).toBeFalse()
+    expect(
+      parseAnalyticsCustomFieldDraftValue('urgent, blocked', 'contains', ['urgent']),
+    ).toEqual(['urgent', 'blocked'])
+  })
+
   test('renders KPI, dependency-free charts, table fallback, forecast, and provenance', () => {
     const html = renderToStaticMarkup(
       <AnalyticsWorkbench
@@ -76,6 +86,62 @@ describe('AnalyticsWorkbench', () => {
 
     expect(html).toMatch(/data-testid="analytics-bar-0"[^>]*x="138"/u)
     expect(html).toMatch(/data-testid="analytics-bar-1"[^>]*x="430"/u)
+  })
+
+  test('renders null chart values as gaps instead of zero-valued marks', () => {
+    const result = {
+      ...analyticsSnapshotFixture.widgets.find(
+        (widget) => widget.widgetId === 'chart-throughput',
+      )!,
+      series: [
+        {
+          from: '2026-07-01T00:00:00.000Z',
+          sampleSize: 3,
+          to: '2026-07-01T23:59:59.999Z',
+          value: 3,
+        },
+        {
+          from: '2026-07-02T00:00:00.000Z',
+          sampleSize: 0,
+          to: '2026-07-02T23:59:59.999Z',
+          value: null,
+        },
+        {
+          from: '2026-07-03T00:00:00.000Z',
+          sampleSize: 5,
+          to: '2026-07-03T23:59:59.999Z',
+          value: 5,
+        },
+      ],
+    }
+    const widget = analyticsWidgetFixtures.find(
+      (candidate) => candidate.id === 'chart-throughput',
+    )!
+    const lineHtml = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        snapshot={{ ...analyticsSnapshotFixture, widgets: [result] }}
+        widgets={[{ ...widget, visualization: 'line' }]}
+      />,
+    )
+    const barHtml = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        snapshot={{ ...analyticsSnapshotFixture, widgets: [result] }}
+        widgets={[{ ...widget, visualization: 'bar' }]}
+      />,
+    )
+
+    expect(lineHtml).toContain('data-testid="analytics-line-segment-0"')
+    expect(lineHtml).toContain('data-testid="analytics-line-segment-1"')
+    expect(lineHtml).toContain('data-testid="analytics-line-point-0"')
+    expect(lineHtml).not.toContain('data-testid="analytics-line-point-1"')
+    expect(lineHtml).toContain('data-testid="analytics-line-point-2"')
+    expect(barHtml).toContain('data-testid="analytics-bar-0"')
+    expect(barHtml).not.toContain('data-testid="analytics-bar-1"')
+    expect(barHtml).toContain('data-testid="analytics-bar-missing-1"')
+    expect(barHtml).toContain('data-testid="analytics-bar-2"')
+    expect(lineHtml).toContain('>Unavailable</td>')
   })
 
   test('renders the report builder palette and every widget editor', () => {
@@ -334,5 +400,67 @@ describe('AnalyticsWorkbench', () => {
     expect(html).toContain('Target completion date')
     expect(html).toContain('value="2026-07-01"')
     expect(html).toContain('value="2026-08-15"')
+  })
+
+  test('shows every selected dimension and custom-field filter without collapsing arrays', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        filter={{
+          ...analyticsFilterFixture,
+          assigneeUserIds: ['owner@example.com', 'reviewer@example.com'],
+          customFields: [
+            {
+              fieldId: 'impact',
+              operator: 'not-equals',
+              value: 'low',
+            },
+            {
+              fieldId: 'launch-date',
+              operator: 'is-empty',
+            },
+          ],
+          projectIds: ['refero', 'brand-refresh'],
+          statusCategories: ['started', 'completed'],
+          teamIds: ['core-team', 'design-team'],
+        }}
+      />,
+    )
+
+    for (const value of [
+      'core-team',
+      'design-team',
+      'refero',
+      'brand-refresh',
+      'started',
+      'completed',
+    ]) {
+      expect(html).toContain(`type="checkbox" checked="" value="${value}"`)
+    }
+    expect(html).toContain('value="owner@example.com, reviewer@example.com"')
+    expect(html).toContain('data-testid="analytics-custom-field-filter-0"')
+    expect(html).toContain('data-testid="analytics-custom-field-filter-1"')
+    expect(html).toContain('value="impact"')
+    expect(html).toContain('value="launch-date"')
+    expect(html).toContain('value="not-equals" selected=""')
+    expect(html).toContain('value="is-empty" selected=""')
+  })
+
+  test('distinguishes explicit match-none allowlists from omitted all-values filters', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        filter={{
+          ...analyticsFilterFixture,
+          projectIds: [],
+          statusCategories: [],
+          teamIds: [],
+        }}
+      />,
+    )
+
+    expect(html).toContain('No teams')
+    expect(html).toContain('No projects')
+    expect(html).toContain('No statuses')
   })
 })

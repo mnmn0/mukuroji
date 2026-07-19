@@ -126,17 +126,42 @@ export async function getAnalyticsReports(
   accessToken: string,
   signal?: AbortSignal,
 ) {
-  const response = await requestJson<unknown>(
-    `${analyticsApiBaseUrl}/analytics/reports`,
-    accessToken,
-    { signal },
-  )
-  const record = asRecord(response)
+  const reports: AnalyticsReport[] = []
+  const seenCursors = new Set<string>()
+  let cursor: string | undefined
+  let pageCount = 0
+
+  do {
+    const search = new URLSearchParams({ limit: '200' })
+    if (cursor !== undefined) search.set('cursor', cursor)
+    const response = await requestJson<unknown>(
+      `${analyticsApiBaseUrl}/analytics/reports?${search.toString()}`,
+      accessToken,
+      { signal },
+    )
+    const record = asRecord(response)
+    reports.push(...(
+      Array.isArray(record.reports)
+        ? record.reports as AnalyticsReport[]
+        : []
+    ))
+    const nextCursor = typeof record.nextCursor === 'string' &&
+        record.nextCursor.trim()
+      ? record.nextCursor
+      : undefined
+    pageCount += 1
+    if (pageCount > 6 || reports.length > 1_000) {
+      throw new TypeError('Analytics report pagination exceeded its safe limit.')
+    }
+    if (nextCursor !== undefined && seenCursors.has(nextCursor)) {
+      throw new TypeError('Analytics report pagination cursor repeated.')
+    }
+    if (nextCursor !== undefined) seenCursors.add(nextCursor)
+    cursor = nextCursor
+  } while (cursor !== undefined)
 
   return {
-    reports: Array.isArray(record.reports)
-      ? record.reports as AnalyticsReport[]
-      : [],
+    reports,
   } satisfies AnalyticsReportListResponse
 }
 

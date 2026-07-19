@@ -1,4 +1,5 @@
 import type {
+  AnalyticsCustomFieldFilter,
   AnalyticsDateRange,
   AnalyticsEvidenceInput,
   AnalyticsEvidenceItem,
@@ -13,7 +14,13 @@ import type {
   AnalyticsWidgetResult,
   CreateAnalyticsReportInput,
 } from '@mukuroji/contracts'
-import { useMemo, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import {
   createTranslator,
   type Locale,
@@ -22,6 +29,10 @@ import {
 import { useModalFocus } from '../components/useModalFocus'
 import type { ProjectDirectoryTeam } from '../projects/api'
 import type { AnalyticsExportFormat } from './api'
+import {
+  analyticsCustomFieldOperatorUsesNumericValue,
+  parseAnalyticsCustomFieldDraftValue,
+} from './filterDraft'
 import {
   analyticsCalendarDateBoundaryToInstant,
   formatAnalyticsCalendarDate,
@@ -213,6 +224,18 @@ const statusCategories = [
   'completed',
   'canceled',
 ] as const
+
+const customFieldOperators = [
+  'equals',
+  'not-equals',
+  'contains',
+  'greater-than',
+  'greater-than-or-equal',
+  'less-than',
+  'less-than-or-equal',
+  'is-empty',
+  'is-not-empty',
+] as const satisfies readonly AnalyticsCustomFieldFilter['operator'][]
 
 const metricLabelKeys: Record<AnalyticsMetricKey, MessageKey> = {
   throughput: 'analytics.metric.throughput',
@@ -749,20 +772,40 @@ function AnalyticsFilterToolbar({
   teams: ProjectDirectoryTeam[]
   timeZone: string
 }) {
-  const selectedTeamId = filter.teamIds?.[0] ?? ''
-  const projects = uniqueProjects(
-    selectedTeamId
-      ? teams.filter((team) => team.id === selectedTeamId)
-      : teams,
+  const projects = uniqueProjects(teams)
+  const teamOptions = includeSelectedFilterOptions(
+    teams.map((team) => ({ label: team.name, value: team.id })),
+    filter.teamIds,
   )
-  const customField = filter.customFields?.[0]
-  const customFieldExpression = customField
-    ? `${customField.fieldId}=${String(customField.value ?? '')}`
-    : ''
+  const projectOptions = includeSelectedFilterOptions(
+    projects.map((project) => ({ label: project.name, value: project.id })),
+    filter.projectIds,
+  )
+  const statusOptions = includeSelectedFilterOptions(
+    statusCategories.map((category) => ({
+      label: t(`workItems.statusCategory.${category}`),
+      value: category,
+    })),
+    filter.statusCategories,
+  )
+  const assigneeDraft = useDebouncedDraft(
+    filter.assigneeUserIds?.join(', ') ?? '',
+    (value) => onFilterChange?.({
+      ...filter,
+      assigneeUserIds: splitValues(value),
+    }),
+  )
+  const timeZoneDraft = useDebouncedDraft(
+    timeZone,
+    (value) => {
+      const normalized = value.trim()
+      if (normalized) onTimeZoneChange?.(normalized)
+    },
+  )
 
   return (
     <section className="sticky top-0 z-20 border-b border-[var(--workbench-border)] bg-white/95 px-[clamp(20px,3vw,34px)] py-3 shadow-[0_5px_18px_rgba(23,32,29,0.06)] backdrop-blur" data-testid="analytics-filter-toolbar">
-      <div className="grid grid-cols-[repeat(2,minmax(150px,1fr))_repeat(4,minmax(140px,1fr))] items-end gap-3 max-[1280px]:grid-cols-3 max-[760px]:grid-cols-1">
+      <div className="grid grid-cols-[repeat(2,minmax(150px,1fr))_repeat(4,minmax(140px,1fr))] items-start gap-3 max-[1280px]:grid-cols-3 max-[760px]:grid-cols-1">
         <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
           {t('analytics.filter.from')}
           <input
@@ -807,83 +850,66 @@ function AnalyticsFilterToolbar({
             }}
           />
         </label>
-        <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-          {t('analytics.filter.team')}
-          <select
-            className="workbench-input min-h-10 px-3"
-            value={selectedTeamId}
-            onChange={(event) => onFilterChange?.({
-              ...filter,
-              projectIds: undefined,
-              teamIds: event.target.value ? [event.target.value] : undefined,
-            })}
-          >
-            <option value="">{t('analytics.filter.allTeams')}</option>
-            {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
-          </select>
-        </label>
-        <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-          {t('analytics.filter.project')}
-          <select
-            className="workbench-input min-h-10 px-3"
-            value={filter.projectIds?.[0] ?? ''}
-            onChange={(event) => onFilterChange?.({
-              ...filter,
-              projectIds: event.target.value ? [event.target.value] : undefined,
-            })}
-          >
-            <option value="">{t('analytics.filter.allProjects')}</option>
-            {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-          </select>
-        </label>
+        <AnalyticsMultiSelectFilter
+          allLabel={t('analytics.filter.allTeams')}
+          label={t('analytics.filter.team')}
+          noneLabel={t('analytics.filter.noTeams')}
+          options={teamOptions}
+          selectedValues={filter.teamIds}
+          testId="analytics-team-filter"
+          onChange={(teamIds) => onFilterChange?.({ ...filter, teamIds })}
+        />
+        <AnalyticsMultiSelectFilter
+          allLabel={t('analytics.filter.allProjects')}
+          label={t('analytics.filter.project')}
+          noneLabel={t('analytics.filter.noProjects')}
+          options={projectOptions}
+          selectedValues={filter.projectIds}
+          testId="analytics-project-filter"
+          onChange={(projectIds) => onFilterChange?.({ ...filter, projectIds })}
+        />
         <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
           {t('analytics.filter.assignee')}
           <input
             className="workbench-input min-h-10 px-3"
             placeholder={t('analytics.filter.assigneePlaceholder')}
-            value={filter.assigneeUserIds?.join(', ') ?? ''}
-            onChange={(event) => onFilterChange?.({
-              ...filter,
-              assigneeUserIds: splitValues(event.target.value),
-            })}
+            value={assigneeDraft.value}
+            onBlur={assigneeDraft.flush}
+            onChange={(event) => assigneeDraft.update(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                assigneeDraft.flush()
+              }
+            }}
           />
         </label>
-        <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-          {t('analytics.filter.status')}
-          <select
-            className="workbench-input min-h-10 px-3"
-            value={filter.statusCategories?.[0] ?? ''}
-            onChange={(event) => onFilterChange?.({
-              ...filter,
-              statusCategories: event.target.value ? [event.target.value] : undefined,
-            })}
-          >
-            <option value="">{t('analytics.filter.allStatuses')}</option>
-            {statusCategories.map((category) => (
-              <option key={category} value={category}>
-                {t(`workItems.statusCategory.${category}`)}
-              </option>
-            ))}
-          </select>
-        </label>
+        <AnalyticsMultiSelectFilter
+          allLabel={t('analytics.filter.allStatuses')}
+          label={t('analytics.filter.status')}
+          noneLabel={t('analytics.filter.noStatuses')}
+          options={statusOptions}
+          selectedValues={filter.statusCategories}
+          testId="analytics-status-filter"
+          onChange={(statusCategories) =>
+            onFilterChange?.({ ...filter, statusCategories })}
+        />
       </div>
       <details className="mt-3">
         <summary className="w-fit cursor-pointer text-xs font-semibold text-[var(--workbench-primary)]">
           {t('analytics.filter.advanced')}
         </summary>
         <div className="mt-3 grid grid-cols-[repeat(4,minmax(170px,1fr))_auto] items-end gap-3 max-[1180px]:grid-cols-2 max-[760px]:grid-cols-1">
-          <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-            {t('analytics.filter.customField')}
-            <input
-              className="workbench-input min-h-10 px-3"
-              placeholder={t('analytics.filter.customFieldPlaceholder')}
-              value={customFieldExpression}
-              onChange={(event) => onFilterChange?.({
+          <div className="col-span-full">
+            <AnalyticsCustomFieldFilters
+              filters={filter.customFields}
+              t={t}
+              onChange={(customFields) => onFilterChange?.({
                 ...filter,
-                customFields: parseCustomFieldExpression(event.target.value),
+                customFields,
               })}
             />
-          </label>
+          </div>
           <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('analytics.filter.baselineFrom')}
             <input
@@ -936,8 +962,15 @@ function AnalyticsFilterToolbar({
             {t('analytics.filter.timeZone')}
             <input
               className="workbench-input min-h-10 px-3"
-              value={timeZone}
-              onChange={(event) => onTimeZoneChange?.(event.target.value)}
+              value={timeZoneDraft.value}
+              onBlur={timeZoneDraft.flush}
+              onChange={(event) => timeZoneDraft.update(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  timeZoneDraft.flush()
+                }
+              }}
             />
           </label>
           <label className="flex min-h-10 cursor-pointer items-center gap-3 rounded-lg border border-[var(--workbench-border)] bg-white px-3 text-sm font-semibold text-[var(--workbench-text)]">
@@ -955,6 +988,321 @@ function AnalyticsFilterToolbar({
         </div>
       </details>
     </section>
+  )
+}
+
+function AnalyticsMultiSelectFilter({
+  allLabel,
+  label,
+  noneLabel,
+  onChange,
+  options,
+  selectedValues,
+  testId,
+}: {
+  allLabel: string
+  label: string
+  noneLabel: string
+  onChange: (values: string[] | undefined) => void
+  options: Array<{ label: string; value: string }>
+  selectedValues?: string[]
+  testId: string
+}) {
+  const selected = new Set(selectedValues ?? [])
+  const hasExplicitEmptySelection = selectedValues !== undefined &&
+    selectedValues.length === 0
+  const selectionLabel = options
+    .filter((option) => selected.has(option.value))
+    .map((option) => option.label)
+    .join(', ')
+
+  return (
+    <fieldset className="grid min-w-0 gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+      <legend>{label}</legend>
+      <div
+        className="workbench-input grid max-h-28 min-h-10 gap-1 overflow-y-auto p-2"
+        data-testid={testId}
+      >
+        {options.map((option) => (
+          <label
+            className="flex min-w-0 cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm font-medium text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]"
+            key={option.value}
+          >
+            <input
+              checked={selected.has(option.value)}
+              className="h-4 w-4 shrink-0 accent-[var(--workbench-primary)]"
+              type="checkbox"
+              value={option.value}
+              onChange={(event) => {
+                const nextValues = event.target.checked
+                  ? [...selected, option.value]
+                  : [...selected].filter((value) => value !== option.value)
+                onChange(nextValues.length > 0 ? nextValues : undefined)
+              }}
+            />
+            <span className="truncate">{option.label}</span>
+          </label>
+        ))}
+        {options.length === 0 ? (
+          <span className="px-1 py-0.5 text-xs font-medium">{allLabel}</span>
+        ) : null}
+      </div>
+      <span
+        className="truncate text-[11px] font-medium text-[var(--workbench-muted-soft)]"
+        title={hasExplicitEmptySelection
+          ? noneLabel
+          : selected.size === 0
+            ? allLabel
+            : selectionLabel}
+      >
+        {hasExplicitEmptySelection
+          ? noneLabel
+          : selected.size === 0
+            ? allLabel
+            : selectionLabel}
+      </span>
+    </fieldset>
+  )
+}
+
+function AnalyticsCustomFieldFilters({
+  filters = [],
+  onChange,
+  t,
+}: {
+  filters?: AnalyticsCustomFieldFilter[]
+  onChange: (filters: AnalyticsCustomFieldFilter[] | undefined) => void
+  t: ReturnType<typeof createTranslator>
+}) {
+  const [newFieldId, setNewFieldId] = useState('')
+  const [newOperator, setNewOperator] = useState<
+    AnalyticsCustomFieldFilter['operator']
+  >('equals')
+  const [newValue, setNewValue] = useState('')
+  const newOperatorNeedsValue = customFieldOperatorNeedsValue(newOperator)
+  const parsedNewValue = newOperatorNeedsValue
+    ? parseAnalyticsCustomFieldDraftValue(newValue, newOperator)
+    : undefined
+  const newValueIsValid = !newOperatorNeedsValue ||
+    parsedNewValue !== undefined
+
+  return (
+    <section className="grid gap-2" data-testid="analytics-custom-field-filters">
+      <h3 className="text-xs font-semibold text-[var(--workbench-muted)]">
+        {t('analytics.filter.customField')}
+      </h3>
+      {filters.length > 0 ? (
+        <div className="grid gap-2">
+          {filters.map((customFilter, index) => (
+            <AnalyticsCustomFieldFilterRow
+              customFilter={customFilter}
+              index={index}
+              key={`${index}:${customFilter.fieldId}:${customFilter.operator}`}
+              t={t}
+              onChange={(nextFilter) => onChange(
+                filters.map((candidate, candidateIndex) =>
+                  candidateIndex === index ? nextFilter : candidate),
+              )}
+              onRemove={() => {
+                const nextFilters = filters.filter(
+                  (_, candidateIndex) => candidateIndex !== index,
+                )
+                onChange(nextFilters.length > 0 ? nextFilters : undefined)
+              }}
+            />
+          ))}
+        </div>
+      ) : (
+        <p className="rounded-md border border-dashed border-[var(--workbench-border)] px-3 py-2 text-xs font-medium text-[var(--workbench-muted-soft)]">
+          {t('analytics.filter.customFieldEmpty')}
+        </p>
+      )}
+      <form
+        className="grid grid-cols-[minmax(140px,1fr)_minmax(170px,1fr)_minmax(140px,1fr)_auto] items-end gap-2 max-[900px]:grid-cols-2 max-[600px]:grid-cols-1"
+        onSubmit={(event) => {
+          event.preventDefault()
+          const fieldId = newFieldId.trim()
+          if (!fieldId || !newValueIsValid) return
+          const nextFilter: AnalyticsCustomFieldFilter = {
+            fieldId,
+            operator: newOperator,
+            ...(newOperatorNeedsValue ? { value: parsedNewValue } : {}),
+          }
+          onChange([...filters, nextFilter])
+          setNewFieldId('')
+          setNewOperator('equals')
+          setNewValue('')
+        }}
+      >
+        <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+          {t('analytics.filter.customFieldId')}
+          <input
+            className="workbench-input min-h-10 px-3"
+            placeholder={t('analytics.filter.customFieldIdPlaceholder')}
+            value={newFieldId}
+            onChange={(event) => setNewFieldId(event.target.value)}
+          />
+        </label>
+        <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+          {t('analytics.filter.customFieldOperator')}
+          <select
+            className="workbench-input min-h-10 px-3"
+            value={newOperator}
+            onChange={(event) => setNewOperator(
+              event.target.value as AnalyticsCustomFieldFilter['operator'],
+            )}
+          >
+            {customFieldOperators.map((operator) => (
+              <option key={operator} value={operator}>
+                {t(`analytics.filter.operator.${operator}`)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+          {t('analytics.filter.customFieldValue')}
+          <input
+            className="workbench-input min-h-10 px-3 disabled:bg-[var(--workbench-surface-muted)]"
+            disabled={!newOperatorNeedsValue}
+            inputMode={analyticsCustomFieldOperatorUsesNumericValue(newOperator)
+              ? 'decimal'
+              : undefined}
+            value={newOperatorNeedsValue ? newValue : ''}
+            onChange={(event) => setNewValue(event.target.value)}
+          />
+        </label>
+        <button
+          className="workbench-button-secondary min-h-10 px-3 disabled:opacity-50"
+          disabled={!newFieldId.trim() || !newValueIsValid}
+          type="submit"
+        >
+          {t('analytics.filter.customFieldAdd')}
+        </button>
+      </form>
+    </section>
+  )
+}
+
+function AnalyticsCustomFieldFilterRow({
+  customFilter,
+  index,
+  onChange,
+  onRemove,
+  t,
+}: {
+  customFilter: AnalyticsCustomFieldFilter
+  index: number
+  onChange: (filter: AnalyticsCustomFieldFilter) => void
+  onRemove: () => void
+  t: ReturnType<typeof createTranslator>
+}) {
+  const fieldIdDraft = useDebouncedDraft(
+    customFilter.fieldId,
+    (value) => {
+      const fieldId = value.trim()
+      if (fieldId) onChange({ ...customFilter, fieldId })
+    },
+  )
+  const valueDraft = useDebouncedDraft(
+    formatCustomFieldFilterValue(customFilter.value),
+    (value) => {
+      const parsedValue = parseAnalyticsCustomFieldDraftValue(
+        value,
+        customFilter.operator,
+        customFilter.value,
+      )
+      if (parsedValue !== undefined) {
+        onChange({ ...customFilter, value: parsedValue })
+      }
+    },
+  )
+  const operatorNeedsValue = customFieldOperatorNeedsValue(
+    customFilter.operator,
+  )
+
+  return (
+    <div
+      className="grid grid-cols-[minmax(140px,1fr)_minmax(170px,1fr)_minmax(140px,1fr)_auto] items-end gap-2 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-2 max-[900px]:grid-cols-2 max-[600px]:grid-cols-1"
+      data-testid={`analytics-custom-field-filter-${index}`}
+    >
+      <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+        {t('analytics.filter.customFieldId')}
+        <input
+          className="workbench-input min-h-10 px-3"
+          value={fieldIdDraft.value}
+          onBlur={fieldIdDraft.flush}
+          onChange={(event) => fieldIdDraft.update(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              fieldIdDraft.flush()
+            }
+          }}
+        />
+      </label>
+      <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+        {t('analytics.filter.customFieldOperator')}
+        <select
+          className="workbench-input min-h-10 px-3"
+          value={customFilter.operator}
+          onChange={(event) => {
+            const operator = event.target
+              .value as AnalyticsCustomFieldFilter['operator']
+            const parsedValue = parseAnalyticsCustomFieldDraftValue(
+              formatCustomFieldFilterValue(customFilter.value),
+              operator,
+              customFilter.value,
+            )
+            onChange({
+              fieldId: customFilter.fieldId,
+              operator,
+              ...(customFieldOperatorNeedsValue(operator)
+                ? { value: parsedValue ?? customFilter.value ?? '' }
+                : {}),
+            })
+          }}
+        >
+          {customFieldOperators.map((operator) => (
+            <option key={operator} value={operator}>
+              {t(`analytics.filter.operator.${operator}`)}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+        {t('analytics.filter.customFieldValue')}
+        <input
+          aria-invalid={operatorNeedsValue &&
+            parseAnalyticsCustomFieldDraftValue(
+              valueDraft.value,
+              customFilter.operator,
+              customFilter.value,
+            ) === undefined}
+          className="workbench-input min-h-10 px-3 disabled:bg-[var(--workbench-surface-muted)]"
+          disabled={!operatorNeedsValue}
+          inputMode={analyticsCustomFieldOperatorUsesNumericValue(customFilter.operator)
+            ? 'decimal'
+            : undefined}
+          value={operatorNeedsValue ? valueDraft.value : ''}
+          onBlur={valueDraft.flush}
+          onChange={(event) => valueDraft.update(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              valueDraft.flush()
+            }
+          }}
+        />
+      </label>
+      <button
+        aria-label={t('analytics.filter.customFieldRemove')}
+        className="grid h-10 w-10 place-items-center rounded-md border border-red-200 bg-white text-lg font-semibold text-red-700"
+        type="button"
+        onClick={onRemove}
+      >
+        ×
+      </button>
+    </div>
   )
 }
 
@@ -1113,6 +1461,33 @@ function AnalyticsWidgetEditor({
   const customFieldId = widget.groupBy?.dimension === 'custom-field'
     ? widget.groupBy.customFieldId
     : ''
+  const titleDraft = useDebouncedDraft(
+    widget.title,
+    (title) => onChange({ ...widget, title }),
+  )
+  const customFieldIdDraft = useDebouncedDraft(
+    customFieldId,
+    (value) => {
+      const normalized = value.trim()
+      if (!normalized) return
+      onChange({
+        ...widget,
+        groupBy: {
+          customFieldId: normalized,
+          dimension: 'custom-field',
+        },
+      })
+    },
+  )
+  const slaTargetDraft = useDebouncedDraft(
+    String(widget.slaTargetHours ?? 24),
+    (value) => {
+      const slaTargetHours = Number(value)
+      if (Number.isFinite(slaTargetHours) && slaTargetHours > 0) {
+        onChange({ ...widget, slaTargetHours })
+      }
+    },
+  )
 
   return (
     <section className="rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-3">
@@ -1126,7 +1501,18 @@ function AnalyticsWidgetEditor({
       </div>
       <label className="mt-3 grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
         {t('analytics.builder.widgetTitle')}
-        <input className="workbench-input min-h-9 px-2" value={widget.title} onChange={(event) => onChange({ ...widget, title: event.target.value })} />
+        <input
+          className="workbench-input min-h-9 px-2"
+          value={titleDraft.value}
+          onBlur={titleDraft.flush}
+          onChange={(event) => titleDraft.update(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              titleDraft.flush()
+            }
+          }}
+        />
       </label>
       <label className="mt-2 grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
         {t('analytics.builder.metric')}
@@ -1189,14 +1575,15 @@ function AnalyticsWidgetEditor({
             className="workbench-input min-h-9 px-2"
             placeholder={t('analytics.builder.customFieldIdPlaceholder')}
             required
-            value={customFieldId}
-            onChange={(event) => onChange({
-              ...widget,
-              groupBy: {
-                customFieldId: event.target.value,
-                dimension: 'custom-field',
-              },
-            })}
+            value={customFieldIdDraft.value}
+            onBlur={customFieldIdDraft.flush}
+            onChange={(event) => customFieldIdDraft.update(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                customFieldIdDraft.flush()
+              }
+            }}
           />
         </label>
       ) : null}
@@ -1207,11 +1594,15 @@ function AnalyticsWidgetEditor({
             className="workbench-input min-h-9 px-2"
             min="1"
             type="number"
-            value={widget.slaTargetHours ?? 24}
-            onChange={(event) => onChange({
-              ...widget,
-              slaTargetHours: Number(event.target.value) || 24,
-            })}
+            value={slaTargetDraft.value}
+            onBlur={slaTargetDraft.flush}
+            onChange={(event) => slaTargetDraft.update(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                slaTargetDraft.flush()
+              }
+            }}
           />
         </label>
       ) : null}
@@ -1355,7 +1746,8 @@ function AccessibleChart({
   unit: AnalyticsWidgetResult['definition']['unit']
   visualization: 'bar' | 'line'
 }) {
-  const values = points.map((point) => point.value ?? 0)
+  const values = points.flatMap((point) =>
+    isDrawableChartValue(point.value) ? [point.value] : [])
   const maximum = Math.max(...values, 1)
   const width = 640
   const height = 220
@@ -1365,16 +1757,27 @@ function AccessibleChart({
   const barSlotWidth = chartWidth / Math.max(points.length, 1)
   const coordinates = points.map((point, index) => ({
     ...point,
+    index,
     x: visualization === 'bar'
       ? padding + barSlotWidth * (index + 0.5)
       : padding + (points.length === 1
           ? chartWidth / 2
           : index * chartWidth / (points.length - 1)),
-    y: padding + chartHeight - ((point.value ?? 0) / maximum) * chartHeight,
+    y: isDrawableChartValue(point.value)
+      ? padding + chartHeight - (point.value / maximum) * chartHeight
+      : undefined,
   }))
-  const path = coordinates.map((point, index) =>
-    `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`,
-  ).join(' ')
+  const linePaths: string[] = []
+  let currentLinePath = ''
+  for (const point of coordinates) {
+    if (point.y === undefined) {
+      if (currentLinePath) linePaths.push(currentLinePath)
+      currentLinePath = ''
+      continue
+    }
+    currentLinePath += `${currentLinePath ? ' L' : 'M'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`
+  }
+  if (currentLinePath) linePaths.push(currentLinePath)
 
   return (
     <div>
@@ -1395,24 +1798,72 @@ function AccessibleChart({
           {visualization === 'bar'
             ? coordinates.map((point, index) => {
                 const barWidth = Math.max(6, Math.min(72, barSlotWidth * 0.58))
+                if (point.y === undefined) {
+                  const markerRadius = Math.min(7, barWidth / 3)
+                  const markerY = padding + chartHeight - 5
+                  return (
+                    <g
+                      aria-hidden="true"
+                      data-testid={`analytics-bar-missing-${index}`}
+                      key={`${point.label}-${index}`}
+                      stroke="#78837f"
+                      strokeLinecap="round"
+                      strokeWidth="2"
+                    >
+                      <line
+                        x1={point.x - markerRadius}
+                        x2={point.x + markerRadius}
+                        y1={markerY - markerRadius}
+                        y2={markerY + markerRadius}
+                      />
+                      <line
+                        x1={point.x - markerRadius}
+                        x2={point.x + markerRadius}
+                        y1={markerY + markerRadius}
+                        y2={markerY - markerRadius}
+                      />
+                    </g>
+                  )
+                }
+                const barHeight = Math.max(2, padding + chartHeight - point.y)
                 return (
                   <rect
                     data-testid={`analytics-bar-${index}`}
                     fill="#0f766e"
-                    height={padding + chartHeight - point.y}
+                    height={barHeight}
                     key={`${point.label}-${index}`}
                     rx="4"
                     width={barWidth}
                     x={point.x - barWidth / 2}
-                    y={point.y}
+                    y={padding + chartHeight - barHeight}
                   />
                 )
               })
             : (
               <>
-                <path d={path} fill="none" stroke="#0f766e" strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" />
-                {coordinates.map((point, index) => (
-                  <circle cx={point.x} cy={point.y} fill="#ffffff" key={`${point.label}-${index}`} r="5" stroke="#0f766e" strokeWidth="3" />
+                {linePaths.map((path, index) => (
+                  <path
+                    d={path}
+                    data-testid={`analytics-line-segment-${index}`}
+                    fill="none"
+                    key={path}
+                    stroke="#0f766e"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="4"
+                  />
+                ))}
+                {coordinates.map((point) => point.y === undefined ? null : (
+                  <circle
+                    cx={point.x}
+                    cy={point.y}
+                    data-testid={`analytics-line-point-${point.index}`}
+                    fill="#ffffff"
+                    key={`${point.label}-${point.index}`}
+                    r="5"
+                    stroke="#0f766e"
+                    strokeWidth="3"
+                  />
                 ))}
               </>
             )}
@@ -1451,6 +1902,10 @@ function AccessibleChart({
       </details>
     </div>
   )
+}
+
+function isDrawableChartValue(value: number | null): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
 }
 
 function AnalyticsTable({
@@ -2013,16 +2468,71 @@ function splitValues(value: string) {
   return values.length > 0 ? values : undefined
 }
 
-function parseCustomFieldExpression(value: string) {
-  const [fieldId, ...rest] = value.split('=')
-  const normalizedFieldId = fieldId?.trim()
-  if (!normalizedFieldId) return undefined
+function customFieldOperatorNeedsValue(
+  operator: AnalyticsCustomFieldFilter['operator'],
+) {
+  return operator !== 'is-empty' && operator !== 'is-not-empty'
+}
 
-  return [{
-    fieldId: normalizedFieldId,
-    operator: 'equals' as const,
-    value: rest.join('=').trim(),
-  }]
+function formatCustomFieldFilterValue(
+  value: AnalyticsCustomFieldFilter['value'],
+) {
+  return Array.isArray(value) ? value.join(', ') : String(value ?? '')
+}
+
+function useDebouncedDraft(
+  sourceValue: string,
+  onCommit: (value: string) => void,
+  delayMilliseconds = 400,
+) {
+  const [value, setValue] = useState(sourceValue)
+  const valueRef = useRef(sourceValue)
+  const isDirtyRef = useRef(false)
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const commitRef = useRef(onCommit)
+
+  useEffect(() => {
+    commitRef.current = onCommit
+  }, [onCommit])
+
+  useEffect(() => {
+    if (!isDirtyRef.current) {
+      valueRef.current = sourceValue
+      setValue(sourceValue)
+    }
+  }, [sourceValue])
+
+  useEffect(() => () => {
+    if (timeoutRef.current !== undefined) {
+      clearTimeout(timeoutRef.current)
+    }
+  }, [])
+
+  const flush = useCallback(() => {
+    if (!isDirtyRef.current) return
+    if (timeoutRef.current !== undefined) {
+      clearTimeout(timeoutRef.current)
+      timeoutRef.current = undefined
+    }
+    isDirtyRef.current = false
+    commitRef.current(valueRef.current)
+  }, [])
+
+  const update = useCallback((nextValue: string) => {
+    if (timeoutRef.current !== undefined) {
+      clearTimeout(timeoutRef.current)
+    }
+    valueRef.current = nextValue
+    isDirtyRef.current = true
+    setValue(nextValue)
+    timeoutRef.current = setTimeout(() => {
+      timeoutRef.current = undefined
+      isDirtyRef.current = false
+      commitRef.current(nextValue)
+    }, delayMilliseconds)
+  }, [delayMilliseconds])
+
+  return { flush, update, value }
 }
 
 function uniqueProjects(teams: readonly ProjectDirectoryTeam[]) {
@@ -2035,6 +2545,21 @@ function uniqueProjects(teams: readonly ProjectDirectoryTeam[]) {
     }
   }
   return [...projects.values()]
+}
+
+function includeSelectedFilterOptions(
+  options: Array<{ label: string; value: string }>,
+  selectedValues?: readonly string[],
+) {
+  const nextOptions = [...options]
+  const knownValues = new Set(options.map((option) => option.value))
+  for (const value of selectedValues ?? []) {
+    if (!knownValues.has(value)) {
+      nextOptions.push({ label: value, value })
+      knownValues.add(value)
+    }
+  }
+  return nextOptions
 }
 
 function moveItem<T>(items: readonly T[], from: number, to: number) {

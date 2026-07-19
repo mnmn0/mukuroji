@@ -1,6 +1,8 @@
 import type {
   AnalyticsDateRange,
   AnalyticsFilter,
+  AnalyticsQueryInput,
+  AnalyticsWidget,
 } from '@mukuroji/contracts'
 import {
   analyticsCalendarDateBoundaryToInstant,
@@ -69,7 +71,7 @@ export function parseAnalyticsRouteState(
   const to = readValue(searchParams, 'to') ??
     readString(fallbackPeriod.to) ??
     ''
-  const filter = {
+  const filter = omitUndefinedValues({
     ...fallback,
     period: { from, to },
     teamIds: readRepeatedOrFallback(searchParams, 'team', fallback.teamIds),
@@ -88,7 +90,7 @@ export function parseAnalyticsRouteState(
     includeArchived: searchParams.has('archived')
       ? searchParams.get('archived') === '1'
       : fallback.includeArchived === true,
-  } as unknown as AnalyticsFilter
+  }) as unknown as AnalyticsFilter
   const baselineFrom = readValue(searchParams, 'baselineFrom') ??
     (usesLegacyFallback ? fallbackForecastBaseline?.from : undefined)
   const baselineTo = readValue(searchParams, 'baselineTo') ??
@@ -108,6 +110,30 @@ export function parseAnalyticsRouteState(
     snapshotId: readValue(searchParams, 'snapshot'),
     timezone: readValue(searchParams, 'timezone') ??
       (usesLegacyFallback ? fallbackTimezone : 'UTC'),
+  }
+}
+
+/**
+ * Reports page の route state と widget 定義から API query input を生成します。
+ *
+ * @param state - URL から復元した analytics route state です。
+ * @param fallbackAsOf - URL に `asOf` がない場合の live query 基準日時です。
+ * @param widgets - Report または ad-hoc builder の widget 定義です。
+ * @returns `queryAnalytics` に渡す再現可能な query input です。
+ */
+export function createAnalyticsQueryInput(
+  state: AnalyticsRouteState,
+  fallbackAsOf: string,
+  widgets: AnalyticsWidget[],
+): AnalyticsQueryInput {
+  return {
+    asOf: state.asOf ?? fallbackAsOf,
+    filter: state.filter,
+    ...(state.forecastBaseline
+      ? { forecastBaseline: state.forecastBaseline }
+      : {}),
+    timeZone: state.timezone,
+    widgets,
   }
 }
 
@@ -132,10 +158,10 @@ export function serializeAnalyticsRouteState(state: AnalyticsRouteState) {
   }
   setValue(searchParams, 'from', readString(period.from))
   setValue(searchParams, 'to', readString(period.to))
-  appendValues(searchParams, 'team', readStringArray(filter.teamIds))
-  appendValues(searchParams, 'project', readStringArray(filter.projectIds))
-  appendValues(searchParams, 'assignee', readStringArray(filter.assigneeUserIds))
-  appendValues(searchParams, 'status', readStringArray(filter.statusCategories))
+  appendFilterValues(searchParams, 'team', filter.teamIds)
+  appendFilterValues(searchParams, 'project', filter.projectIds)
+  appendFilterValues(searchParams, 'assignee', filter.assigneeUserIds)
+  appendFilterValues(searchParams, 'status', filter.statusCategories)
 
   for (const customField of readUnknownArray(filter.customFields)) {
     searchParams.append('customField', stableStringify(customField))
@@ -211,17 +237,17 @@ function readRepeatedOrFallback(
   key: string,
   fallback: unknown,
 ) {
-  return searchParams.has(key)
-    ? readRepeated(searchParams, key)
-    : readStringArray(fallback)
+  if (searchParams.has(key)) return readRepeated(searchParams, key)
+  return Array.isArray(fallback) ? readStringArray(fallback) : undefined
 }
 
 function readCustomFields(searchParams: URLSearchParams, fallback: unknown) {
   if (!searchParams.has('customField')) {
-    return readUnknownArray(fallback)
+    const values = readUnknownArray(fallback)
+    return values.length > 0 ? values : undefined
   }
 
-  return searchParams.getAll('customField').flatMap((value) => {
+  const values = searchParams.getAll('customField').flatMap((value) => {
     try {
       const parsed: unknown = JSON.parse(value)
       return typeof parsed === 'object' && parsed !== null ? [parsed] : []
@@ -229,12 +255,27 @@ function readCustomFields(searchParams: URLSearchParams, fallback: unknown) {
       return []
     }
   })
+  return values.length > 0 ? values : undefined
 }
 
 function appendValues(searchParams: URLSearchParams, key: string, values: string[]) {
   for (const value of [...new Set(values)].sort()) {
     searchParams.append(key, value)
   }
+}
+
+function appendFilterValues(
+  searchParams: URLSearchParams,
+  key: string,
+  value: unknown,
+) {
+  if (!Array.isArray(value)) return
+  const values = readStringArray(value)
+  if (values.length === 0) {
+    searchParams.append(key, '')
+    return
+  }
+  appendValues(searchParams, key, values)
 }
 
 function readRepeated(searchParams: URLSearchParams, key: string) {
@@ -295,4 +336,10 @@ function readStringArray(value: unknown) {
 
 function readUnknownArray(value: unknown) {
   return Array.isArray(value) ? value : []
+}
+
+function omitUndefinedValues(value: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined),
+  )
 }

@@ -16,6 +16,11 @@ import {
   analyticsSnapshotFixture,
   analyticsWidgetFixtures,
 } from '../src/analytics/fixtures'
+import {
+  createAnalyticsQueryInput,
+  parseAnalyticsRouteState,
+  serializeAnalyticsRouteState,
+} from '../src/analytics/queryState'
 
 const originalFetch = globalThis.fetch
 const mutationContext = {
@@ -64,6 +69,85 @@ describe('Analytics API', () => {
     })
   })
 
+  test('keeps omitted report URL dimensions omitted in the query API body', async () => {
+    const requests = installFetchRecorder(() => ({
+      snapshot: analyticsSnapshotFixture,
+    }))
+    const fallback = {
+      ...analyticsFilterFixture,
+      assigneeUserIds: ['owner@example.com'],
+      projectIds: ['refero'],
+      statusCategories: ['started'],
+      teamIds: ['core-team'],
+    }
+    const routeState = parseAnalyticsRouteState(
+      new URLSearchParams(
+        'v=1&from=2026-07-01T00%3A00%3A00.000Z&to=2026-07-31T23%3A59%3A59.999Z&timezone=UTC',
+      ),
+      fallback,
+      'Asia/Tokyo',
+    )
+
+    await queryAnalytics(
+      'access-token',
+      createAnalyticsQueryInput(
+        routeState,
+        '2026-07-31T23:59:59.999Z',
+        analyticsWidgetFixtures,
+      ),
+    )
+
+    const body = JSON.parse(String(requests[0]?.init.body)) as AnalyticsQueryInput
+    expect(body.filter).toEqual({
+      includeArchived: false,
+      period: {
+        from: '2026-07-01T00:00:00.000Z',
+        to: '2026-07-31T23:59:59.999Z',
+      },
+    })
+    expect(body.filter.teamIds).toBeUndefined()
+    expect(body.filter.projectIds).toBeUndefined()
+    expect(body.filter.assigneeUserIds).toBeUndefined()
+    expect(body.filter.statusCategories).toBeUndefined()
+  })
+
+  test('keeps explicit empty URL allowlists as match-none in the query API body', async () => {
+    const requests = installFetchRecorder(() => ({
+      snapshot: analyticsSnapshotFixture,
+    }))
+    const searchParams = serializeAnalyticsRouteState({
+      builder: false,
+      filter: {
+        assigneeUserIds: [],
+        period: analyticsFilterFixture.period,
+        projectIds: [],
+        statusCategories: [],
+        teamIds: [],
+      },
+      timezone: 'UTC',
+    })
+    const routeState = parseAnalyticsRouteState(
+      searchParams,
+      analyticsFilterFixture,
+      'Asia/Tokyo',
+    )
+
+    await queryAnalytics(
+      'access-token',
+      createAnalyticsQueryInput(
+        routeState,
+        '2026-07-31T23:59:59.999Z',
+        analyticsWidgetFixtures,
+      ),
+    )
+
+    const body = JSON.parse(String(requests[0]?.init.body)) as AnalyticsQueryInput
+    expect(body.filter.teamIds).toEqual([])
+    expect(body.filter.projectIds).toEqual([])
+    expect(body.filter.assigneeUserIds).toEqual([])
+    expect(body.filter.statusCategories).toEqual([])
+  })
+
   test('lists reports and sends stable mutation headers through the report lifecycle', async () => {
     const report = analyticsReportFixtures[0]
     const requests = installFetchRecorder((url, init) => {
@@ -106,7 +190,7 @@ describe('Analytics API', () => {
     )
 
     expect(requests.map((request) => [request.init.method, request.url])).toEqual([
-      [undefined, '/api/analytics/reports'],
+      [undefined, '/api/analytics/reports?limit=200'],
       ['POST', '/api/analytics/reports'],
       ['PATCH', '/api/analytics/reports/delivery%2Fhealth'],
       ['DELETE', '/api/analytics/reports/delivery%2Fhealth'],
@@ -125,6 +209,24 @@ describe('Analytics API', () => {
     expect(JSON.parse(String(requests[3]?.init.body))).toEqual({
       expectedRevision: 8,
     })
+  })
+
+  test('collects every cursor page from the report list API', async () => {
+    const firstReport = analyticsReportFixtures[0]!
+    const secondReport = { ...firstReport, id: 'second-report', name: 'Second report' }
+    const requests = installFetchRecorder((url) =>
+      url.includes('cursor=page-1')
+        ? { reports: [secondReport] }
+        : { reports: [firstReport], nextCursor: 'page-1' }
+    )
+
+    await expect(getAnalyticsReports('access-token')).resolves.toEqual({
+      reports: [firstReport, secondReport],
+    })
+    expect(requests.map(({ url }) => url)).toEqual([
+      '/api/analytics/reports?limit=200',
+      '/api/analytics/reports?limit=200&cursor=page-1',
+    ])
   })
 
   test('returns a browser artifact using the export filename header', async () => {

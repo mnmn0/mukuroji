@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import type { AnalyticsFilter } from '@mukuroji/contracts'
 import { AnalyticsWorkbench } from '../analytics/AnalyticsWorkbench'
 import {
   analyticsEvidenceFixture,
@@ -20,6 +21,25 @@ const customFieldGroupingWidgets = analyticsWidgetFixtures.map((widget) =>
         },
       }
     : widget)
+
+const multipleFilters = {
+  ...analyticsFilterFixture,
+  assigneeUserIds: ['owner@example.com', 'reviewer@example.com'],
+  customFields: [
+    {
+      fieldId: 'impact',
+      operator: 'not-equals' as const,
+      value: 'low',
+    },
+    {
+      fieldId: 'launch-date',
+      operator: 'is-empty' as const,
+    },
+  ],
+  projectIds: ['refero', 'brand-refresh'],
+  statusCategories: ['started', 'completed'],
+  teamIds: ['core-team', 'design-team'],
+} satisfies AnalyticsFilter
 
 /**
  * Analytics report workbench の Storybook meta です。
@@ -93,6 +113,15 @@ export const CustomFieldGrouping: Story = {
   args: {
     builder: true,
     widgets: customFieldGroupingWidgets,
+  },
+}
+
+/**
+ * 複数の dimension と custom field 条件を同時編集する filter state です。
+ */
+export const MultipleFilters: Story = {
+  args: {
+    filter: multipleFilters,
   },
 }
 
