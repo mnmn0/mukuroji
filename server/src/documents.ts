@@ -5,6 +5,10 @@ import {
   randomUUID,
 } from 'node:crypto'
 import {
+  gunzipSync,
+  gzipSync,
+} from 'node:zlib'
+import {
   CreateTableCommand,
   DescribeTableCommand,
   DynamoDBClient,
@@ -60,6 +64,14 @@ import {
   getConfiguredAuditTableName,
   type MutationAuditContext,
 } from './audit'
+import {
+  DOCUMENT_AUTHORIZATION_REVISION_KEY,
+  createDocumentAuthorizationRevisionPut,
+  type DocumentAuthorizationRevisionGuard,
+} from './document-authorization'
+import {
+  createDocumentWorkspaceSearchBody,
+} from './workspace-search'
 
 /** DynamoDB item の 400 KB 上限に余裕を持たせた Document item 上限です。 */
 export const DOCUMENT_MAX_ITEM_BYTES = 350_000
@@ -276,6 +288,65 @@ export type GetDocumentRequest = {
 }
 
 /**
+ * 一つの Workspace search request 内で compact ACL row reads を共有する context です。
+ */
+export type DocumentSearchAccessReadContext = {
+  /**
+   * Workspace/Document key ごとの raw DynamoDB row promise です。
+   *
+   * @internal
+   */
+  readonly rows: Map<
+    string,
+    Promise<Record<string, unknown> | undefined>
+  >
+}
+
+/**
+ * Workspace search request 単位の compact ACL read context を作成します。
+ *
+ * @returns 同じ request 内の候補と ancestor が共有する空の read cache です。
+ */
+export function createDocumentSearchAccessReadContext(
+): DocumentSearchAccessReadContext {
+  return {
+    rows: new Map(),
+  }
+}
+
+/**
+ * Workspace search が compact ACL projection を検証する input です。
+ */
+export type ResolveDocumentSearchAccessRequest = {
+  /** Canonical Workspace ID です。 */
+  workspaceId: string
+  /** 検索候補の Document ID です。 */
+  documentId: string
+  /** 現在 viewer の認可 snapshot です。 */
+  access: DocumentAccessContext
+  /** Search index に保存された canonical revision です。 */
+  expectedRevision: number
+  /** Search index に保存された canonical updatedAt です。 */
+  expectedUpdatedAt: string
+  /** 同じ search request 内で candidate/ancestor reads を共有する context です。 */
+  readContext?: DocumentSearchAccessReadContext
+}
+
+/**
+ * Compact ACL projection で検証済みの検索 access です。
+ */
+export type ResolvedDocumentSearchAccess = {
+  /** 現在の Workspace または Project scope です。 */
+  scope: DocumentScope
+  /** 検証した canonical Document revision です。 */
+  revision: number
+  /** 検証した canonical Document updatedAt です。 */
+  updatedAt: string
+  /** Canonical revision と同じ transaction で保存した省略なしの検索本文です。 */
+  body: string
+}
+
+/**
  * 新しい Document を作成する store input です。
  */
 export type CreateDocumentRequest = {
@@ -301,10 +372,16 @@ export type CreateDocumentRequest = {
   whiteboard?: WhiteboardContent
   /** 初期 domain relations です。 */
   relations?: DocumentRelation[]
+  /** Relation target 検証を source revision へ束縛する transaction guards です。 */
+  relationTargetAuthorizationGuards?: readonly DocumentAuthorizationGenerationGuard[]
   /** Client retry を同じ Document ID へ束縛する key です。 */
   idempotencyKey?: string
   /** Materialized content ではなく caller intent を束縛する内部 fingerprint です。 */
   idempotencyFingerprint?: string
+  /**
+   * Private ACL の member validation 前に読み込んだ authorization generation です。
+   */
+  expectedAuthorizationRevision?: number
 }
 
 /**
@@ -329,6 +406,10 @@ export type UpdateDocumentRequest = {
   scope?: DocumentScope
   /** 更新後の permission 設定です。 */
   permission?: DocumentPermission
+  /**
+   * Private ACL の member validation 前に読み込んだ authorization generation です。
+   */
+  expectedAuthorizationRevision?: number
 }
 
 /**
@@ -343,7 +424,30 @@ export type ApplyDocumentOperationsRequest = {
   access: DocumentAccessContext
   /** Client が送信した atomic operation batch です。 */
   input: ApplyDocumentOperationsInput
+  /** Relation target 検証を source revision へ束縛する transaction guards です。 */
+  relationTargetAuthorizationGuards?: readonly DocumentAuthorizationGenerationGuard[]
+  /**
+   * API preflight で未確定として source validation した operation IDs です。
+   */
+  validatedPendingOperationIds?: readonly string[]
 }
+
+/**
+ * API validation 前に operation receipts を解決した結果です。
+ */
+export type PrepareDocumentOperationsResponse =
+  | {
+      /** 全 operation が確定済みの場合に返す replay response です。 */
+      replay: ApplyDocumentOperationsResponse
+      /** Replay では pending input を返しません。 */
+      pendingInput?: never
+    }
+  | {
+      /** Pending operation がある場合は replay response を返しません。 */
+      replay?: never
+      /** Canonical/source validation を実行する未確定 operation だけの input です。 */
+      pendingInput: ApplyDocumentOperationsInput
+    }
 
 /**
  * Document version history を取得する store input です。
@@ -381,7 +485,10 @@ export type RestoreDocumentVersionRequest = {
    */
   validateRelationTargets: (
     targets: readonly DocumentRelationTarget[],
-  ) => Promise<void>
+  ) => Promise<
+    | readonly DocumentAuthorizationGenerationGuard[]
+    | void
+  >
 }
 
 /**
@@ -442,6 +549,8 @@ export type ChangeDocumentArchiveStateRequest = {
   access: DocumentAccessContext
   /** Restore 時に付け替える parent ID です。 */
   parentId?: string | null
+  /** Relation target 検証を source revision へ束縛する transaction guards です。 */
+  relationTargetAuthorizationGuards?: readonly DocumentAuthorizationGenerationGuard[]
 }
 
 /**
@@ -464,6 +573,10 @@ export type InstantiateDocumentTemplateRequest = {
   position?: string
   /** 作成する page の permission 設定です。 */
   permission?: DocumentPermission
+  /**
+   * Private ACL の member validation 前に読み込んだ authorization generation です。
+   */
+  expectedAuthorizationRevision?: number
   /** Client retry を同じ page へ束縛する key です。 */
   idempotencyKey?: string
 }
@@ -812,6 +925,54 @@ type StoredDocumentItem = {
 }
 
 /**
+ * Workspace search の認可再検証に使う compact Document row です。
+ */
+type StoredDocumentSearchAccessItem = {
+  /** Canonical Workspace partition key です。 */
+  workspaceId: string
+  /** `SEARCH_ACCESS#<encodedDocumentId>` 形式の sort key です。 */
+  recordKey: string
+  /** Row discriminator です。 */
+  entryType: 'document-search-access'
+  /** Public Document ID です。 */
+  documentId: string
+  /** Tree 上の direct parent folder ID です。 */
+  parentId?: string
+  /** Workspace または Project scope です。 */
+  scope: DocumentScope
+  /** Access 判定に必要な canonical ACL です。 */
+  permission: DocumentPermission
+  /** Archive 済みの場合の timestamp です。 */
+  archivedAt?: string
+  /** Canonical Document revision です。 */
+  revision: number
+  /** Canonical Document updatedAt です。 */
+  updatedAt: string
+}
+
+/**
+ * Workspace search の current-source 全文照合に使う圧縮 body row です。
+ */
+type StoredDocumentSearchBodyItem = {
+  /** Canonical Workspace partition key です。 */
+  workspaceId: string
+  /** `SEARCH_BODY#<encodedDocumentId>` 形式の sort key です。 */
+  recordKey: string
+  /** Row discriminator です。 */
+  entryType: 'document-search-body'
+  /** Public Document ID です。 */
+  documentId: string
+  /** Body の圧縮方式です。 */
+  bodyEncoding: 'gzip'
+  /** UTF-8 全文を gzip 圧縮した DynamoDB binary です。 */
+  bodyGzip: Uint8Array
+  /** Canonical Document revision です。 */
+  revision: number
+  /** Canonical Document updatedAt です。 */
+  updatedAt: string
+}
+
+/**
  * Workspace 内の tree topology mutation を直列化する revision row です。
  */
 type StoredDocumentTreeRevisionItem = {
@@ -824,6 +985,22 @@ type StoredDocumentTreeRevisionItem = {
   /** Topology mutation ごとに増加する revision です。 */
   revision: number
   /** 最後に topology を変更した timestamp です。 */
+  updatedAt: string
+}
+
+/**
+ * Workspace member lifecycle と Document ACL mutation を直列化する generation row です。
+ */
+type StoredDocumentAuthorizationRevisionItem = {
+  /** Canonical Workspace partition key です。 */
+  workspaceId: string
+  /** Authorization revision 固定 sort key です。 */
+  recordKey: typeof DOCUMENT_AUTHORIZATION_REVISION_KEY
+  /** Row discriminator です。 */
+  entryType: 'document-authorization-revision'
+  /** Private ACL mutation ごとに増加する revision です。 */
+  revision: number
+  /** 最後に ACL を変更した timestamp です。 */
   updatedAt: string
 }
 
@@ -1222,19 +1399,45 @@ type DocumentRelationDiff = {
 }
 
 /**
+ * Workspace member の manager eligibility を変更する前に検証する Document snapshot です。
+ */
+export type DocumentManagerLifecycleSnapshot = {
+  /** Snapshot と member mutation を直列化する Document ACL generation です。 */
+  authorizationRevision: number
+  /** 対象 member 以外に active/non-guest manager がいない最初の private Document ID です。 */
+  blockingDocumentId?: string
+}
+
+/**
  * Documents store の公開契約です。
  */
 export interface DocumentClient {
+  /** 現在の Document ACL generation を consistent read で返します。 */
+  getAuthorizationRevision(workspaceId: string): Promise<number>
+  /** Member downgrade 前に private Document の manager 継続性を検証します。 */
+  getManagerLifecycleSnapshot(
+    workspaceId: string,
+    memberKey: string,
+    eligibleManagerMemberKeys: readonly string[],
+  ): Promise<DocumentManagerLifecycleSnapshot>
   /** Permission-filtered Document tree を page 取得します。 */
   list(input: ListDocumentsRequest): Promise<DocumentTreeResponse>
   /** 一つの permission-filtered Document detail を取得します。 */
   get(input: GetDocumentRequest): Promise<DocumentDetail>
+  /** Workspace search 候補を compact ACL projection で再検証します。 */
+  resolveSearchAccess(
+    input: ResolveDocumentSearchAccessRequest,
+  ): Promise<ResolvedDocumentSearchAccess | undefined>
   /** 新しい Document と revision 1 snapshot を作成します。 */
   create(input: CreateDocumentRequest): Promise<DocumentDetail>
   /** Document metadata を revision 条件付きで更新します。 */
   update(input: UpdateDocumentRequest): Promise<DocumentDetail>
   /** Element-level operations を競合検出と idempotency 付きで適用します。 */
   applyOperations(input: ApplyDocumentOperationsRequest): Promise<ApplyDocumentOperationsResponse>
+  /** API validation 前に operation receipts と未確定 operation を解決します。 */
+  prepareOperations(
+    input: ApplyDocumentOperationsRequest,
+  ): Promise<PrepareDocumentOperationsResponse>
   /** Immutable version history を page 取得します。 */
   listVersions(input: ListDocumentVersionsRequest): Promise<DocumentVersionsResponse>
   /** 過去 version snapshot を新しい revision として復元します。 */
@@ -2389,6 +2592,156 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       getConfiguredAuditTableName()
   }
 
+  /** 現在の Document ACL generation を consistent read で返します。 */
+  async getAuthorizationRevision(
+    workspaceId: string,
+  ): Promise<number> {
+    await this.ensureTable()
+    assertIdentifier(workspaceId, 'workspaceId')
+    const result = await this.client.send(
+      new GetCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId,
+          recordKey:
+            DOCUMENT_AUTHORIZATION_REVISION_KEY,
+        },
+        ConsistentRead: true,
+      }),
+    )
+    if (result.Item === undefined) return 0
+    const item =
+      result.Item as
+        StoredDocumentAuthorizationRevisionItem
+    if (
+      item.entryType !==
+        'document-authorization-revision' ||
+      !Number.isSafeInteger(item.revision) ||
+      item.revision < 1
+    ) {
+      throw new DocumentError(
+        503,
+        'InvalidDocumentAuthorizationRevision',
+        'Document authorization data is invalid.',
+      )
+    }
+    return item.revision
+  }
+
+  /** Member downgrade 前に private Document の manager 継続性を検証します。 */
+  async getManagerLifecycleSnapshot(
+    workspaceId: string,
+    memberKey: string,
+    eligibleManagerMemberKeys: readonly string[],
+  ): Promise<DocumentManagerLifecycleSnapshot> {
+    await this.ensureTable()
+    assertIdentifier(workspaceId, 'workspaceId')
+    assertIdentifier(memberKey, 'memberKey')
+    const targetMemberKey =
+      normalizeDocumentManagerMemberKey(memberKey)
+    const eligibleManagers = new Set(
+      eligibleManagerMemberKeys.map(
+        normalizeDocumentManagerMemberKey,
+      ),
+    )
+
+    for (
+      let attempt = 0;
+      attempt < DOCUMENT_CONDITIONAL_RETRY_LIMIT;
+      attempt += 1
+    ) {
+      const authorizationRevision =
+        await this.getAuthorizationRevision(workspaceId)
+      let blockingDocumentId:
+        | string
+        | undefined
+      let exclusiveStartKey:
+        | Record<string, unknown>
+        | undefined
+      do {
+        const result = await this.client.send(
+          new QueryCommand({
+            TableName: this.tableName,
+            KeyConditionExpression:
+              'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+            ExpressionAttributeValues: {
+              ':workspaceId': workspaceId,
+              ':prefix': 'SEARCH_ACCESS#',
+            },
+            ExclusiveStartKey: exclusiveStartKey,
+            ConsistentRead: true,
+          }),
+        )
+        for (const raw of result.Items ?? []) {
+          const documentId =
+            typeof raw.documentId === 'string'
+              ? raw.documentId
+              : undefined
+          const row =
+            documentId === undefined
+              ? undefined
+              : readDocumentSearchAccessItem(
+                  raw,
+                  workspaceId,
+                  documentId,
+                )
+          if (row === undefined) {
+            throw new DocumentError(
+              503,
+              'InvalidDocumentSearchAccessProjection',
+              'Document authorization data is invalid.',
+            )
+          }
+          const permission = row.permission
+          if (permission.mode !== 'private') continue
+          const managerKeys = permission.memberGrants
+            .filter(({ role }) => role === 'manager')
+            .map(({ memberKey: managerMemberKey }) =>
+              normalizeDocumentManagerMemberKey(
+                managerMemberKey,
+              )
+            )
+          if (!managerKeys.includes(targetMemberKey)) {
+            continue
+          }
+          const hasEligibleReplacement =
+            managerKeys.some(
+              (managerMemberKey) =>
+                managerMemberKey !== targetMemberKey &&
+                eligibleManagers.has(managerMemberKey),
+            )
+          if (!hasEligibleReplacement) {
+            blockingDocumentId = row.documentId
+            break
+          }
+        }
+        if (blockingDocumentId !== undefined) {
+          break
+        }
+        exclusiveStartKey =
+          result.LastEvaluatedKey
+      } while (exclusiveStartKey !== undefined)
+
+      if (
+        await this.getAuthorizationRevision(workspaceId) ===
+          authorizationRevision
+      ) {
+        return {
+          authorizationRevision,
+          ...(blockingDocumentId === undefined
+            ? {}
+            : { blockingDocumentId }),
+        }
+      }
+    }
+
+    throw new DocumentError(
+      409,
+      'DocumentAuthorizationConflict',
+      'Document permissions changed while validating the Workspace member.',
+    )
+  }
+
   /** Permission-filtered Document tree を page 取得します。 */
   async list(input: ListDocumentsRequest): Promise<DocumentTreeResponse> {
     await this.ensureTable()
@@ -2525,6 +2878,118 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     return document
   }
 
+  /** Workspace search 候補を compact ACL projection で再検証します。 */
+  async resolveSearchAccess(
+    input: ResolveDocumentSearchAccessRequest,
+  ): Promise<
+    ResolvedDocumentSearchAccess | undefined
+  > {
+    await this.ensureTable()
+    assertIdentifier(
+      input.workspaceId,
+      'workspaceId',
+    )
+    assertIdentifier(
+      input.documentId,
+      'documentId',
+    )
+    if (
+      !Number.isSafeInteger(
+        input.expectedRevision,
+      ) ||
+      input.expectedRevision < 1 ||
+      typeof input.expectedUpdatedAt !==
+        'string' ||
+      !Number.isFinite(
+        Date.parse(input.expectedUpdatedAt),
+      )
+    ) {
+      return undefined
+    }
+    const row =
+      await this.getDocumentSearchAccessRow(
+        input.workspaceId,
+        input.documentId,
+        input.readContext,
+      )
+    if (
+      row === undefined ||
+      row.revision !==
+        input.expectedRevision ||
+      row.updatedAt !==
+        input.expectedUpdatedAt ||
+      row.archivedAt !== undefined
+    ) {
+      return undefined
+    }
+
+    const ancestors:
+      StoredDocumentSearchAccessItem[] = []
+    const seen = new Set([row.documentId])
+    let parentId = row.parentId
+    while (parentId !== undefined) {
+      if (
+        seen.has(parentId) ||
+        ancestors.length >=
+          DOCUMENT_MAX_TREE_DEPTH
+      ) {
+        return undefined
+      }
+      seen.add(parentId)
+      const parent =
+        await this.getDocumentSearchAccessRow(
+          input.workspaceId,
+          parentId,
+          input.readContext,
+        )
+      if (
+        parent === undefined ||
+        parent.archivedAt !== undefined ||
+        !scopesEqual(
+          row.scope,
+          parent.scope,
+        )
+      ) {
+        return undefined
+      }
+      ancestors.push(parent)
+      parentId = parent.parentId
+    }
+
+    const capabilities =
+      this.resolveStoredDocumentCapabilities(
+        row,
+        input.access,
+        ancestors,
+      )
+    if (!capabilities.canView) {
+      return undefined
+    }
+    const bodyRow =
+      await this.getDocumentSearchBodyRow(
+        input.workspaceId,
+        input.documentId,
+      )
+    if (
+      bodyRow === undefined ||
+      bodyRow.revision !== row.revision ||
+      bodyRow.updatedAt !== row.updatedAt
+    ) {
+      return undefined
+    }
+    const body =
+      decompressDocumentSearchBody(bodyRow)
+    if (body === undefined) {
+      return undefined
+    }
+    return {
+      scope: structuredClone(row.scope),
+      revision: row.revision,
+      updatedAt: row.updatedAt,
+      body,
+    }
+  }
+
   /** 新しい Document と revision 1 snapshot を作成します。 */
   async create(input: CreateDocumentRequest): Promise<DocumentDetail> {
     await this.ensureTable()
@@ -2564,6 +3029,20 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       },
       input.access.memberKey,
     )
+    const authorizationMutationGuard =
+      permission.mode === 'private'
+        ? await this.createAuthorizationMutationGuard(
+            input.workspaceId,
+            input.expectedAuthorizationRevision,
+          )
+        : undefined
+    const mutationAuthorizationGuards =
+      mergeAuthorizationGuards(
+        input.relationTargetAuthorizationGuards,
+        authorizationMutationGuard === undefined
+          ? undefined
+          : input.access.authorizationGuards,
+      )
     const base = {
       schemaVersion: DOCUMENT_SCHEMA_VERSION,
       id: documentId,
@@ -2637,6 +3116,18 @@ export class DynamoDbDocumentsClient implements DocumentClient {
           ConditionExpression: 'attribute_not_exists(workspaceId)',
         },
       },
+      documentSearchAccessPut(
+        this.tableName,
+        input.workspaceId,
+        document,
+        true,
+      ),
+      documentSearchBodyPut(
+        this.tableName,
+        input.workspaceId,
+        document,
+        true,
+      ),
       ...versionPutActions(
         this.tableName,
         createVersionItems(
@@ -2670,6 +3161,18 @@ export class DynamoDbDocumentsClient implements DocumentClient {
               treeMutationGuard,
             ),
           ]),
+      ...(authorizationMutationGuard === undefined
+        ? []
+        : [
+            createDocumentAuthorizationRevisionPut(
+              this.tableName,
+              input.workspaceId,
+              authorizationMutationGuard,
+            ),
+          ]),
+      ...authorizationGuardConditionChecks(
+        mutationAuthorizationGuards,
+      ),
     ]
     assertTransactionSize(createActions)
     try {
@@ -2678,6 +3181,29 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       }))
     } catch (error) {
       if (!isConditionalFailure(error)) throw normalizeDynamoError(error)
+      if (
+        !await this.authorizationGuardsMatch(
+          mutationAuthorizationGuards,
+        )
+      ) {
+        throw new DocumentError(
+          409,
+          'DocumentAuthorizationChanged',
+          'Document authorization changed while creating the Document.',
+        )
+      }
+      if (
+        authorizationMutationGuard !== undefined &&
+        await this.getAuthorizationRevision(
+          input.workspaceId,
+        ) !== authorizationMutationGuard.expectedRevision
+      ) {
+        throw new DocumentError(
+          409,
+          'DocumentAuthorizationConflict',
+          'Document permissions changed concurrently.',
+        )
+      }
       if (
         treeMutationGuard !== undefined &&
         (await this.getDocumentTreeRevision(input.workspaceId)) !==
@@ -2736,6 +3262,27 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       requireCapability(projected.capabilities.canManagePermissions, 'DocumentPermissionDenied')
       validatePermission(normalizedPermission ?? input.permission)
     }
+    const permissionAffectsAuthorization =
+      normalizedPermission !== undefined &&
+      stableStringify(normalizedPermission) !==
+        stableStringify(row.document.permission) &&
+      (
+        normalizedPermission.mode === 'private' ||
+        row.document.permission.mode === 'private'
+      )
+    const authorizationMutationGuard =
+      permissionAffectsAuthorization
+        ? await this.createAuthorizationMutationGuard(
+            input.workspaceId,
+            input.expectedAuthorizationRevision,
+          )
+        : undefined
+    const mutationAuthorizationGuards =
+      authorizationMutationGuard === undefined
+        ? undefined
+        : mergeAuthorizationGuards(
+            input.access.authorizationGuards,
+          )
     const nextScope = input.scope ?? row.document.scope
     const nextParentId = input.parentId === null
       ? undefined
@@ -2802,8 +3349,40 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       'edit',
       undefined,
       treeMutationGuard,
+      authorizationMutationGuard,
+      mutationAuthorizationGuards,
     )
     return this.projectDocument(input.workspaceId, next, input.access)
+  }
+
+  /** API validation 前に operation receipts と未確定 operation を解決します。 */
+  async prepareOperations(
+    input: ApplyDocumentOperationsRequest,
+  ): Promise<PrepareDocumentOperationsResponse> {
+    await this.ensureTable()
+    validateApplyOperationsRequest(input)
+    const row = await this.requireMutableDocument(
+      input.workspaceId,
+      input.documentId,
+      input.access,
+      'edit',
+    )
+    const receipts = await this.readOperationReceipts(input)
+    if (receipts.pending.length > 0) {
+      return {
+        pendingInput: {
+          ...input.input,
+          operations: receipts.pending,
+        },
+      }
+    }
+    return {
+      replay: createOperationReplayResponse(
+        row,
+        input.input.operations,
+        receipts.accepted,
+      ),
+    }
   }
 
   /** Element-level operations を競合検出と idempotency 付きで適用します。 */
@@ -2811,21 +3390,7 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     input: ApplyDocumentOperationsRequest,
   ): Promise<ApplyDocumentOperationsResponse> {
     await this.ensureTable()
-    if (
-      !isRecord(input) ||
-      !isRecord(input.input) ||
-      !Array.isArray(input.input.operations)
-    ) {
-      throw invalidPayload('Document operations input is invalid.')
-    }
-    assertIdentifier(input.input.clientId, 'clientId')
-    if (
-      input.input.operations.length === 0 ||
-      input.input.operations.length > DOCUMENT_MAX_OPERATION_COUNT
-    ) {
-      throw new DocumentError(400, 'InvalidDocumentOperationCount', 'The operation count is invalid.')
-    }
-
+    validateApplyOperationsRequest(input)
     for (let attempt = 0; attempt < DOCUMENT_CONDITIONAL_RETRY_LIMIT; attempt += 1) {
       const row = await this.requireMutableDocument(
         input.workspaceId,
@@ -2840,47 +3405,39 @@ export class DynamoDbDocumentsClient implements DocumentClient {
           'baseRevision is newer than the current document revision.',
         )
       }
-      const pending: DocumentOperation[] = []
-      const acceptedReceipts: StoredOperationReceipt[] = []
-      for (const operation of input.input.operations) {
-        const operationFingerprint = fingerprint(operation)
-        const receipt = await this.getOperationReceipt(
-          input.workspaceId,
-          input.documentId,
-          operation.operationId,
-        )
-        if (receipt === undefined) {
-          pending.push(operation)
-          continue
-        }
+      const {
+        pending,
+        accepted: acceptedReceipts,
+      } = await this.readOperationReceipts(input)
+      if (
+        input.validatedPendingOperationIds !==
+          undefined
+      ) {
+        const validatedPendingOperationIds =
+          new Set(
+            input.validatedPendingOperationIds,
+          )
         if (
-          receipt.fingerprint !== operationFingerprint ||
-          receipt.clientId !== input.input.clientId
+          pending.some(
+            ({ operationId }) =>
+              !validatedPendingOperationIds.has(
+                operationId,
+              ),
+          )
         ) {
           throw new DocumentError(
             409,
-            'DocumentOperationIdempotencyConflict',
-            `operationId "${operation.operationId}" was already used with different input.`,
+            'DocumentOperationPreflightChanged',
+            'An operation receipt changed after validation. Retry the operation batch.',
           )
         }
-        acceptedReceipts.push(receipt)
       }
       if (pending.length === 0) {
-        const replayRevision = Math.min(
-          ...acceptedReceipts.map(({ revision }) => revision),
+        return createOperationReplayResponse(
+          row,
+          input.input.operations,
+          acceptedReceipts,
         )
-        const replayUpdatedAt =
-          acceptedReceipts
-            .map(({ createdAt }) => createdAt)
-            .sort()
-            .at(-1) ??
-          row.document.updatedAt
-        return {
-          documentId: row.documentId,
-          revision: replayRevision,
-          appliedOperationIds: input.input.operations.map(({ operationId }) => operationId),
-          updatedAt: replayUpdatedAt,
-        }
       }
       const conflictFloorRevision =
         row.operationConflictFloorRevision ?? 1
@@ -2967,6 +3524,16 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       }))
       const actions = [
         currentDocumentPut(this.tableName, nextRow, row.revision),
+        documentSearchAccessPut(
+          this.tableName,
+          input.workspaceId,
+          reduced.document,
+        ),
+        documentSearchBodyPut(
+          this.tableName,
+          input.workspaceId,
+          reduced.document,
+        ),
         ...versionPutActions(
           this.tableName,
           createVersionItems(
@@ -2984,6 +3551,9 @@ export class DynamoDbDocumentsClient implements DocumentClient {
           ),
         ),
         ...receiptActions,
+        ...authorizationGuardConditionChecks(
+          input.relationTargetAuthorizationGuards,
+        ),
         ...backlinkDiffActions(
           this.tableName,
           input.workspaceId,
@@ -3001,7 +3571,25 @@ export class DynamoDbDocumentsClient implements DocumentClient {
           updatedAt: reduced.document.updatedAt,
         }
       } catch (error) {
-        if (isConditionalFailure(error) && attempt + 1 < DOCUMENT_CONDITIONAL_RETRY_LIMIT) continue
+        if (isConditionalFailure(error)) {
+          if (
+            !await this.authorizationGuardsMatch(
+              input.relationTargetAuthorizationGuards,
+            )
+          ) {
+            throw new DocumentError(
+              409,
+              'DocumentAuthorizationChanged',
+              'A relation target changed while applying Document operations.',
+            )
+          }
+          if (
+            attempt + 1 <
+              DOCUMENT_CONDITIONAL_RETRY_LIMIT
+          ) {
+            continue
+          }
+        }
         throw normalizeDynamoError(error)
       }
     }
@@ -3096,9 +3684,12 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     next.revision = row.revision + 1
     next.updatedAt = this.now().toISOString()
     next.updatedByUserId = input.access.memberKey
-    await input.validateRelationTargets(
-      collectDocumentRelationTargets(next),
-    )
+    const relationTargetAuthorizationGuards =
+      (
+        await input.validateRelationTargets(
+          collectDocumentRelationTargets(next),
+        )
+      ) ?? []
     if (next.parentId !== undefined) {
       await this.validateParent(
         input.workspaceId,
@@ -3124,6 +3715,9 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       elementRevisions,
       'restore',
       `Restored ${versionItem.version.id}`,
+      undefined,
+      undefined,
+      relationTargetAuthorizationGuards,
     )
     return this.projectDocument(input.workspaceId, next, input.access)
   }
@@ -3441,6 +4035,8 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       'restore',
       'Restored archived document',
       treeMutationGuard,
+      undefined,
+      input.relationTargetAuthorizationGuards,
     )
     return this.projectDocument(input.workspaceId, next, input.access)
   }
@@ -3529,6 +4125,8 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       relations: [],
       idempotencyKey: input.idempotencyKey,
       idempotencyFingerprint: requestFingerprint,
+      expectedAuthorizationRevision:
+        input.expectedAuthorizationRevision,
     })
   }
 
@@ -4292,16 +4890,32 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       input.access,
       true,
     )
-    const result = await this.client.send(new QueryCommand({
-      TableName: this.tableName,
-      KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
-      ExpressionAttributeValues: {
-        ':workspaceId': input.workspaceId,
-        ':prefix': `SHARE#${encodeKeyPart(input.documentId)}#`,
-      },
-      ConsistentRead: true,
-    }))
-    return (result.Items ?? []).map(stripShareStorageFields)
+    const shares: StoredDocumentPublicShare[] = []
+    let exclusiveStartKey:
+      | Record<string, unknown>
+      | undefined
+    do {
+      const result =
+        await this.client.send(new QueryCommand({
+          TableName: this.tableName,
+          KeyConditionExpression:
+            'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+          ExpressionAttributeValues: {
+            ':workspaceId': input.workspaceId,
+            ':prefix': `SHARE#${encodeKeyPart(input.documentId)}#`,
+          },
+          ExclusiveStartKey: exclusiveStartKey,
+          ConsistentRead: true,
+        }))
+      shares.push(
+        ...(result.Items ?? []).map(
+          stripShareStorageFields,
+        ),
+      )
+      exclusiveStartKey =
+        result.LastEvaluatedKey
+    } while (exclusiveStartKey !== undefined)
+    return shares
   }
 
   /** Public share を revoke します。 */
@@ -4695,6 +5309,62 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     return result.Item as StoredDocumentItem | undefined
   }
 
+  private async getDocumentSearchAccessRow(
+    workspaceId: string,
+    documentId: string,
+    context?: DocumentSearchAccessReadContext,
+  ): Promise<
+    StoredDocumentSearchAccessItem | undefined
+  > {
+    const cacheKey =
+      `${workspaceId}\0${documentId}`
+    let read = context?.rows.get(cacheKey)
+    if (read === undefined) {
+      read = this.client.send(new GetCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId,
+          recordKey:
+            documentSearchAccessKey(
+              documentId,
+            ),
+        },
+        ConsistentRead: true,
+      })).then((result) => result.Item)
+      context?.rows.set(cacheKey, read)
+    }
+    return readDocumentSearchAccessItem(
+      await read,
+      workspaceId,
+      documentId,
+    )
+  }
+
+  private async getDocumentSearchBodyRow(
+    workspaceId: string,
+    documentId: string,
+  ): Promise<
+    StoredDocumentSearchBodyItem | undefined
+  > {
+    const result =
+      await this.client.send(new GetCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId,
+          recordKey:
+            documentSearchBodyKey(
+              documentId,
+            ),
+        },
+        ConsistentRead: true,
+      }))
+    return readDocumentSearchBodyItem(
+      result.Item,
+      workspaceId,
+      documentId,
+    )
+  }
+
   private async getCachedDocumentRow(
     workspaceId: string,
     documentId: string,
@@ -4817,6 +5487,28 @@ export class DynamoDbDocumentsClient implements DocumentClient {
   ): Promise<void> {
     const guards =
       requireAuthorizationGuards(access)
+    if (
+      !await this.authorizationGuardsMatch(
+        guards,
+      )
+    ) {
+      throw new DocumentError(
+        409,
+        'DocumentAuthorizationChanged',
+        'Authorization changed while creating the public share; authenticate again and retry.',
+      )
+    }
+  }
+
+  private async authorizationGuardsMatch(
+    input:
+      | readonly DocumentAuthorizationGenerationGuard[]
+      | undefined,
+  ): Promise<boolean> {
+    const guards = (input ?? []).map(
+      validateAuthorizationGuard,
+    )
+    if (guards.length === 0) return true
     const results = await Promise.all(
       guards.map((guard) =>
         this.client.send(
@@ -4828,21 +5520,13 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         )
       ),
     )
-    if (
-      results.some(
-        (result, index) =>
-          !authorizationGuardMatches(
-            result.Item,
-            guards[index]!,
-          ),
-      )
-    ) {
-      throw new DocumentError(
-        409,
-        'DocumentAuthorizationChanged',
-        'Authorization changed while creating the public share; authenticate again and retry.',
-      )
-    }
+    return results.every(
+      (result, index) =>
+        authorizationGuardMatches(
+          result.Item,
+          guards[index]!,
+        ),
+    )
   }
 
   private async projectDocument(
@@ -5139,6 +5823,42 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     return read
   }
 
+  private async readOperationReceipts(
+    input: ApplyDocumentOperationsRequest,
+  ): Promise<{
+    pending: DocumentOperation[]
+    accepted: StoredOperationReceipt[]
+  }> {
+    const pending: DocumentOperation[] = []
+    const accepted: StoredOperationReceipt[] = []
+    for (const operation of input.input.operations) {
+      const operationFingerprint =
+        fingerprint(operation)
+      const receipt = await this.getOperationReceipt(
+        input.workspaceId,
+        input.documentId,
+        operation.operationId,
+      )
+      if (receipt === undefined) {
+        pending.push(operation)
+        continue
+      }
+      if (
+        receipt.fingerprint !==
+          operationFingerprint ||
+        receipt.clientId !== input.input.clientId
+      ) {
+        throw new DocumentError(
+          409,
+          'DocumentOperationIdempotencyConflict',
+          `operationId "${operation.operationId}" was already used with different input.`,
+        )
+      }
+      accepted.push(receipt)
+    }
+    return { pending, accepted }
+  }
+
   private async getOperationReceipt(
     workspaceId: string,
     documentId: string,
@@ -5190,6 +5910,29 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     return {
       expectedRevision:
         await this.getDocumentTreeRevision(workspaceId),
+      updatedAt: this.now().toISOString(),
+    }
+  }
+
+  private async createAuthorizationMutationGuard(
+    workspaceId: string,
+    expectedRevision?: number,
+  ): Promise<DocumentAuthorizationRevisionGuard> {
+    const revision =
+      expectedRevision ??
+      await this.getAuthorizationRevision(workspaceId)
+    if (
+      !Number.isSafeInteger(revision) ||
+      revision < 0
+    ) {
+      throw new DocumentError(
+        400,
+        'InvalidDocumentAuthorizationRevision',
+        'Document authorization revision must be a non-negative safe integer.',
+      )
+    }
+    return {
+      expectedRevision: revision,
       updatedAt: this.now().toISOString(),
     }
   }
@@ -5327,32 +6070,48 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         baseSnapshot,
       )
     }
-    const deltaResult = await this.client.send(new QueryCommand({
-      TableName: this.tableName,
-      KeyConditionExpression:
-        'workspaceId = :workspaceId AND recordKey BETWEEN :startKey AND :endKey',
-      ExpressionAttributeValues: {
-        ':workspaceId': workspaceId,
-        ':startKey': versionDeltaKey(
-          documentId,
-          baseSnapshot.version.revision + 1,
+    const deltas:
+      StoredDocumentVersionDeltaItem[] =
+        []
+    let exclusiveStartKey:
+      | Record<string, unknown>
+      | undefined
+    do {
+      const deltaResult =
+        await this.client.send(new QueryCommand({
+          TableName: this.tableName,
+          KeyConditionExpression:
+            'workspaceId = :workspaceId AND recordKey BETWEEN :startKey AND :endKey',
+          ExpressionAttributeValues: {
+            ':workspaceId': workspaceId,
+            ':startKey': versionDeltaKey(
+              documentId,
+              baseSnapshot.version.revision +
+                1,
+            ),
+            ':endKey': versionDeltaKey(
+              documentId,
+              targetRevision,
+            ),
+          },
+          ExclusiveStartKey:
+            exclusiveStartKey,
+          ScanIndexForward: true,
+          ConsistentRead: true,
+        }))
+      deltas.push(
+        ...(deltaResult.Items ?? []).map(
+          (item) =>
+            item as StoredDocumentVersionDeltaItem,
         ),
-        ':endKey': versionDeltaKey(
-          documentId,
-          targetRevision,
-        ),
-      },
-      ScanIndexForward: true,
-      ConsistentRead: true,
-    }))
+      )
+      exclusiveStartKey =
+        deltaResult.LastEvaluatedKey
+    } while (exclusiveStartKey !== undefined)
     let reconstructed = structuredClone(
       baseSnapshot,
     )
-    const deltas = (deltaResult.Items ?? [])
-      .map(
-        (item) =>
-          item as StoredDocumentVersionDeltaItem,
-      )
+    const retainedDeltas = deltas
       .filter(
         (item) =>
           item.expiresAtEpoch === undefined ||
@@ -5369,7 +6128,7 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       revision <= targetRevision;
       revision += 1
     ) {
-      const delta = deltas.find(
+      const delta = retainedDeltas.find(
         (candidate) =>
           candidate.version.revision === revision,
       )
@@ -5459,6 +6218,8 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     reason: DocumentVersion['reason'],
     summary?: string,
     treeMutationGuard?: DocumentTreeMutationGuard,
+    authorizationMutationGuard?: DocumentAuthorizationRevisionGuard,
+    relationTargetAuthorizationGuards?: readonly DocumentAuthorizationGenerationGuard[],
   ): Promise<void> {
     const createsVersionSnapshot =
       reason === 'restore' ||
@@ -5490,6 +6251,16 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     )
     const actions: NonNullable<TransactWriteCommandInput['TransactItems']> = [
       currentDocumentPut(this.tableName, next, current.revision),
+      documentSearchAccessPut(
+        this.tableName,
+        workspaceId,
+        nextDocument,
+      ),
+      documentSearchBodyPut(
+        this.tableName,
+        workspaceId,
+        nextDocument,
+      ),
       ...versionPutActions(
         this.tableName,
         createVersionItems(
@@ -5526,6 +6297,18 @@ export class DynamoDbDocumentsClient implements DocumentClient {
               treeMutationGuard,
             ),
           ]),
+      ...(authorizationMutationGuard === undefined
+        ? []
+        : [
+            createDocumentAuthorizationRevisionPut(
+              this.tableName,
+              workspaceId,
+              authorizationMutationGuard,
+            ),
+          ]),
+      ...authorizationGuardConditionChecks(
+        relationTargetAuthorizationGuards,
+      ),
     ]
     assertTransactionSize(actions)
     try {
@@ -5534,11 +6317,42 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       }))
     } catch (error) {
       if (isConditionalFailure(error)) {
+        if (
+          !await this.authorizationGuardsMatch(
+            relationTargetAuthorizationGuards,
+          )
+        ) {
+          throw new DocumentError(
+            409,
+            'DocumentAuthorizationChanged',
+            'Document authorization changed while committing the mutation.',
+          )
+        }
+        if (
+          authorizationMutationGuard !== undefined &&
+          await this.getAuthorizationRevision(
+            workspaceId,
+          ) !==
+            authorizationMutationGuard.expectedRevision
+        ) {
+          throw new DocumentError(
+            409,
+            'DocumentAuthorizationConflict',
+            'Document permissions changed concurrently.',
+          )
+        }
         throw new DocumentError(409, 'DocumentRevisionConflict', 'The document changed concurrently.')
       }
       throw normalizeDynamoError(error)
     }
   }
+}
+
+function normalizeDocumentManagerMemberKey(
+  memberKey: string,
+): string {
+  assertIdentifier(memberKey, 'memberKey')
+  return memberKey.trim().toLowerCase()
 }
 
 function assertIdentifier(value: string, field: string): void {
@@ -5940,6 +6754,18 @@ function documentKey(documentId: string): string {
   return `DOCUMENT#${documentId}`
 }
 
+function documentSearchAccessKey(
+  documentId: string,
+): string {
+  return `SEARCH_ACCESS#${encodeKeyPart(documentId)}`
+}
+
+function documentSearchBodyKey(
+  documentId: string,
+): string {
+  return `SEARCH_BODY#${encodeKeyPart(documentId)}`
+}
+
 function documentTreeRevisionKey(): 'DOCUMENT_TREE_REVISION' {
   return 'DOCUMENT_TREE_REVISION'
 }
@@ -6294,6 +7120,82 @@ function createVersionItems(
   }
 }
 
+function validateApplyOperationsRequest(
+  input: ApplyDocumentOperationsRequest,
+): void {
+  if (
+    !isRecord(input) ||
+    !isRecord(input.input) ||
+    !Array.isArray(input.input.operations)
+  ) {
+    throw invalidPayload(
+      'Document operations input is invalid.',
+    )
+  }
+  if (
+    input.validatedPendingOperationIds !==
+      undefined &&
+    (
+      !Array.isArray(
+        input.validatedPendingOperationIds,
+      ) ||
+      new Set(
+        input.validatedPendingOperationIds,
+      ).size !==
+        input.validatedPendingOperationIds.length ||
+      input.validatedPendingOperationIds.some(
+        (operationId) =>
+          typeof operationId !== 'string' ||
+          !input.input.operations.some(
+            (operation) =>
+              operation.operationId ===
+                operationId,
+          ),
+      )
+    )
+  ) {
+    throw invalidPayload(
+      'Validated pending operation IDs are invalid.',
+    )
+  }
+  assertIdentifier(input.input.clientId, 'clientId')
+  if (
+    input.input.operations.length === 0 ||
+    input.input.operations.length >
+      DOCUMENT_MAX_OPERATION_COUNT
+  ) {
+    throw new DocumentError(
+      400,
+      'InvalidDocumentOperationCount',
+      'The operation count is invalid.',
+    )
+  }
+}
+
+function createOperationReplayResponse(
+  row: StoredDocumentItem,
+  operations: readonly DocumentOperation[],
+  receipts: readonly StoredOperationReceipt[],
+): ApplyDocumentOperationsResponse {
+  const revision = Math.max(
+    ...receipts.map((receipt) => receipt.revision),
+  )
+  const updatedAt =
+    receipts
+      .map((receipt) => receipt.createdAt)
+      .sort()
+      .at(-1) ??
+    row.document.updatedAt
+  return {
+    documentId: row.documentId,
+    revision,
+    appliedOperationIds: operations.map(
+      ({ operationId }) => operationId,
+    ),
+    updatedAt,
+  }
+}
+
 function currentDocumentPut(
   tableName: string,
   item: StoredDocumentItem,
@@ -6307,6 +7209,195 @@ function currentDocumentPut(
       ConditionExpression: 'revision = :expectedRevision',
       ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
     },
+  }
+}
+
+function documentSearchAccessPut(
+  tableName: string,
+  workspaceId: string,
+  document: DocumentDetail,
+  requireAbsent = false,
+): NonNullable<
+  TransactWriteCommandInput['TransactItems']
+>[number] {
+  const item:
+    StoredDocumentSearchAccessItem = {
+      workspaceId,
+      recordKey:
+        documentSearchAccessKey(
+          document.id,
+        ),
+      entryType: 'document-search-access',
+      documentId: document.id,
+      ...(document.parentId === undefined
+        ? {}
+        : { parentId: document.parentId }),
+      scope: structuredClone(document.scope),
+      permission: structuredClone(
+        document.permission,
+      ),
+      ...(document.archivedAt === undefined
+        ? {}
+        : {
+            archivedAt:
+              document.archivedAt,
+          }),
+      revision: document.revision,
+      updatedAt: document.updatedAt,
+    }
+  assertDynamoItemSize(item)
+  return {
+    Put: {
+      TableName: tableName,
+      Item: item,
+      ...(requireAbsent
+        ? {
+            ConditionExpression:
+              'attribute_not_exists(workspaceId)',
+          }
+        : {}),
+    },
+  }
+}
+
+function documentSearchBodyPut(
+  tableName: string,
+  workspaceId: string,
+  document: DocumentDetail,
+  requireAbsent = false,
+): NonNullable<
+  TransactWriteCommandInput['TransactItems']
+>[number] {
+  const item:
+    StoredDocumentSearchBodyItem = {
+      workspaceId,
+      recordKey:
+        documentSearchBodyKey(
+          document.id,
+        ),
+      entryType: 'document-search-body',
+      documentId: document.id,
+      bodyEncoding: 'gzip',
+      bodyGzip: gzipSync(
+        createDocumentWorkspaceSearchBody(
+          document,
+        ),
+      ),
+      revision: document.revision,
+      updatedAt: document.updatedAt,
+    }
+  assertDocumentSearchBodyItemSize(item)
+  return {
+    Put: {
+      TableName: tableName,
+      Item: item,
+      ...(requireAbsent
+        ? {
+            ConditionExpression:
+              'attribute_not_exists(workspaceId)',
+          }
+        : {}),
+    },
+  }
+}
+
+function readDocumentSearchAccessItem(
+  value: Record<string, unknown> | undefined,
+  workspaceId: string,
+  documentId: string,
+): StoredDocumentSearchAccessItem | undefined {
+  if (
+    !isRecord(value) ||
+    value.workspaceId !== workspaceId ||
+    value.recordKey !==
+      documentSearchAccessKey(documentId) ||
+    value.entryType !==
+      'document-search-access' ||
+    value.documentId !== documentId ||
+    (
+      value.parentId !== undefined &&
+      (
+        typeof value.parentId !== 'string' ||
+        value.parentId.length === 0
+      )
+    ) ||
+    !Number.isSafeInteger(value.revision) ||
+    Number(value.revision) < 1 ||
+    typeof value.updatedAt !== 'string' ||
+    !Number.isFinite(
+      Date.parse(value.updatedAt),
+    ) ||
+    (
+      value.archivedAt !== undefined &&
+      (
+        typeof value.archivedAt !== 'string' ||
+        !Number.isFinite(
+          Date.parse(value.archivedAt),
+        )
+      )
+    )
+  ) {
+    return undefined
+  }
+  try {
+    validateScope(
+      value.scope as DocumentScope,
+    )
+    validatePermission(
+      value.permission as DocumentPermission,
+    )
+  } catch {
+    return undefined
+  }
+  return value as StoredDocumentSearchAccessItem
+}
+
+function readDocumentSearchBodyItem(
+  value: Record<string, unknown> | undefined,
+  workspaceId: string,
+  documentId: string,
+): StoredDocumentSearchBodyItem | undefined {
+  if (
+    !isRecord(value) ||
+    value.workspaceId !== workspaceId ||
+    value.recordKey !==
+      documentSearchBodyKey(documentId) ||
+    value.entryType !==
+      'document-search-body' ||
+    value.documentId !== documentId ||
+    value.bodyEncoding !== 'gzip' ||
+    !(value.bodyGzip instanceof Uint8Array) ||
+    value.bodyGzip.byteLength === 0 ||
+    value.bodyGzip.byteLength > 380_000 ||
+    !Number.isSafeInteger(value.revision) ||
+    Number(value.revision) < 1 ||
+    typeof value.updatedAt !== 'string' ||
+    !Number.isFinite(
+      Date.parse(value.updatedAt),
+    )
+  ) {
+    return undefined
+  }
+  return value as StoredDocumentSearchBodyItem
+}
+
+function decompressDocumentSearchBody(
+  item: StoredDocumentSearchBodyItem,
+): string | undefined {
+  try {
+    const bytes = gunzipSync(
+      item.bodyGzip,
+      {
+        maxOutputLength:
+          DOCUMENT_MAX_ITEM_BYTES,
+      },
+    )
+    const body = bytes.toString('utf8')
+    return Buffer.from(body, 'utf8').equals(bytes)
+      ? body
+      : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -6344,6 +7435,56 @@ function requireAuthorizationGuards(
   return access.authorizationGuards.map(
     validateAuthorizationGuard,
   )
+}
+
+function authorizationGuardConditionChecks(
+  guards:
+    | readonly DocumentAuthorizationGenerationGuard[]
+    | undefined,
+): NonNullable<
+  TransactWriteCommandInput['TransactItems']
+> {
+  return (guards ?? []).map((guard) =>
+    authorizationGuardConditionCheck(
+      validateAuthorizationGuard(guard),
+    )
+  )
+}
+
+function mergeAuthorizationGuards(
+  ...groups: Array<
+    | readonly DocumentAuthorizationGenerationGuard[]
+    | undefined
+  >
+): readonly DocumentAuthorizationGenerationGuard[] {
+  const merged = new Map<
+    string,
+    DocumentAuthorizationGenerationGuard
+  >()
+  for (const group of groups) {
+    for (const candidate of group ?? []) {
+      const guard =
+        validateAuthorizationGuard(candidate)
+      const key =
+        `${guard.tableName}\0${stableStringify(
+          guard.key,
+        )}`
+      const existing = merged.get(key)
+      if (
+        existing !== undefined &&
+        stableStringify(existing) !==
+          stableStringify(guard)
+      ) {
+        throw new DocumentError(
+          409,
+          'DocumentAuthorizationChanged',
+          'Authorization changed while validating the Document mutation.',
+        )
+      }
+      merged.set(key, guard)
+    }
+  }
+  return [...merged.values()]
 }
 
 function validateAuthorizationGuard(
@@ -6889,6 +8030,31 @@ function assertDynamoItemSize(item: unknown): void {
       'DocumentDynamoItemTooLarge',
       'The document cannot fit safely within the DynamoDB 400 KB item limit.',
       { itemBytes, maxItemBytes: 380_000 },
+    )
+  }
+}
+
+function assertDocumentSearchBodyItemSize(
+  item: StoredDocumentSearchBodyItem,
+): void {
+  const itemBytes =
+    item.bodyGzip.byteLength +
+    Buffer.byteLength(
+      JSON.stringify({
+        ...item,
+        bodyGzip: undefined,
+      }),
+      'utf8',
+    )
+  if (itemBytes > 380_000) {
+    throw new DocumentError(
+      413,
+      'DocumentDynamoItemTooLarge',
+      'The compressed Document search body cannot fit safely within the DynamoDB 400 KB item limit.',
+      {
+        itemBytes,
+        maxItemBytes: 380_000,
+      },
     )
   }
 }

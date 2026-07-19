@@ -206,6 +206,65 @@ test('bounds permission member validation concurrency', async () => {
   expect(maximumActiveLookups).toBeLessThanOrEqual(8)
 })
 
+test('binds private Document creation to the ACL generation read before member validation', async () => {
+  let receivedExpectedRevision:
+    | number
+    | undefined
+  let memberValidated = false
+  const app = createTestApp(
+    createDocumentClient({
+      async getAuthorizationRevision() {
+        expect(memberValidated).toBeFalse()
+        return 7
+      },
+      async create(input) {
+        receivedExpectedRevision =
+          input.expectedAuthorizationRevision
+        return pageDocument
+      },
+    }),
+    {
+      async getActiveMember(
+        _workspaceId,
+        memberKey,
+      ) {
+        memberValidated = true
+        return {
+          memberKey,
+          email: memberKey,
+        }
+      },
+    },
+  )
+
+  const response = await app.request(
+    '/api/documents',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        kind: 'page',
+        scope: { type: 'workspace' },
+        title: 'Private generation',
+        blocks: [],
+        permission: {
+          mode: 'private',
+          memberGrants: [{
+            memberKey: 'owner@example.com',
+            role: 'manager',
+          }],
+        },
+      }),
+    },
+  )
+
+  expect(response.status).toBe(201)
+  expect(receivedExpectedRevision).toBe(7)
+})
+
 test('rejects oversized grants and relation targets without downstream reads', async () => {
   let memberLookups = 0
   let targetValidationCalls = 0
@@ -576,6 +635,160 @@ test('forwards every authenticated authorization generation guard', async () => 
   expect(receivedGenerations).toEqual([7, 11])
 })
 
+test('batches backlink targets behind one bounded source-read budget', async () => {
+  const calls: Array<{
+    targetKind: string
+    targetId: string
+    limit?: number
+    cursor?: string
+  }> = []
+  const app = createTestApp(createDocumentClient({
+    async listBacklinks(input) {
+      calls.push({
+        targetKind: input.targetKind,
+        targetId: input.targetId,
+        limit: input.limit,
+        cursor: input.cursor,
+      })
+      return {
+        backlinks: [{
+          documentId: `source-${input.targetId}`,
+          documentTitle: `Source ${input.targetId}`,
+          relation: {
+            id: `relation-${input.targetId}`,
+            source: { kind: 'document' },
+            target: input.targetKind === 'goal'
+              ? {
+                  kind: 'goal',
+                  goalId: input.targetId,
+                }
+              : input.targetKind === 'project'
+                ? {
+                    kind: 'project',
+                    projectId: input.targetId,
+                  }
+                : {
+                    kind: 'work-item',
+                    workItemId: input.targetId,
+                  },
+            createdByUserId: 'owner@example.com',
+            createdAt: '2026-07-19T00:00:00.000Z',
+          },
+        }],
+        ...(input.targetId === 'goal-1'
+          ? { nextCursor: 'next-goal-page' }
+          : {}),
+      }
+    },
+  }))
+
+  const response = await app.request(
+    '/api/document-backlinks/batch',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        targets: [
+          {
+            targetType: 'goal',
+            targetId: 'goal-1',
+          },
+          {
+            targetType: 'project',
+            targetId: 'project-1',
+          },
+          {
+            targetType: 'work-item',
+            targetId: 'team/team-a/issue/issue-1',
+          },
+        ],
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(calls).toEqual([
+    {
+      targetKind: 'goal',
+      targetId: 'goal-1',
+      limit: 15,
+      cursor: undefined,
+    },
+    {
+      targetKind: 'project',
+      targetId: 'project-1',
+      limit: 15,
+      cursor: undefined,
+    },
+    {
+      targetKind: 'work-item',
+      targetId: 'team/team-a/issue/issue-1',
+      limit: 15,
+      cursor: undefined,
+    },
+  ])
+  expect(await response.json()).toMatchObject({
+    backlinks: [
+      { documentId: 'source-goal-1' },
+      { documentId: 'source-project-1' },
+      {
+        documentId:
+          'source-team/team-a/issue/issue-1',
+      },
+    ],
+    pending: [
+      {
+        targetType: 'goal',
+        targetId: 'goal-1',
+        cursor: 'next-goal-page',
+      },
+    ],
+  })
+  expect(
+    calls.reduce(
+      (total, call) =>
+        total + (call.limit ?? 0),
+      0,
+    ),
+  ).toBeLessThanOrEqual(45)
+})
+
+test('rejects an oversized backlink batch before source reads', async () => {
+  let calls = 0
+  const app = createTestApp(createDocumentClient({
+    async listBacklinks() {
+      calls += 1
+      return { backlinks: [] }
+    },
+  }))
+
+  const response = await app.request(
+    '/api/document-backlinks/batch',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        targets: Array.from(
+          { length: 46 },
+          (_, index) => ({
+            targetType: 'goal',
+            targetId: `goal-${index}`,
+          }),
+        ),
+      }),
+    },
+  )
+
+  expect(response.status).toBe(413)
+  expect(calls).toBe(0)
+})
+
 test('validates relation targets before applying document operations', async () => {
   let applyCalls = 0
   const app = createTestApp(
@@ -634,6 +847,295 @@ test('validates relation targets before applying document operations', async () 
 
   expect(response.status).toBe(403)
   expect(applyCalls).toBe(0)
+})
+
+test('replays committed operations before canonical and Goal source validation', async () => {
+  let canonicalReads = 0
+  let applyCalls = 0
+  let relationTargetReads = 0
+  const replayResults = {
+    'insert-response-lost': {
+      revision: 2,
+      updatedAt:
+        '2026-07-18T00:01:00.000Z',
+    },
+    'delete-response-lost': {
+      revision: 3,
+      updatedAt:
+        '2026-07-18T00:02:00.000Z',
+    },
+    'goal-response-lost': {
+      revision: 4,
+      updatedAt:
+        '2026-07-18T00:03:00.000Z',
+    },
+  } as const
+  const app = createTestApp(
+    createDocumentClient({
+      async prepareOperations(input) {
+        const operation =
+          input.input.operations[0]
+        const replay =
+          operation === undefined
+            ? undefined
+            : replayResults[
+                operation.operationId as
+                  keyof typeof replayResults
+              ]
+        if (replay === undefined) {
+          return {
+            pendingInput: input.input,
+          }
+        }
+        return {
+          replay: {
+            documentId: input.documentId,
+            revision: replay.revision,
+            appliedOperationIds:
+              input.input.operations.map(
+                ({ operationId }) =>
+                  operationId,
+              ),
+            updatedAt: replay.updatedAt,
+          },
+        }
+      },
+      async get() {
+        canonicalReads += 1
+        throw new Error(
+          'A receipt replay must not revalidate current canonical state.',
+        )
+      },
+      async applyOperations() {
+        applyCalls += 1
+        throw new Error(
+          'A receipt replay must not reapply the operation.',
+        )
+      },
+    }),
+    {
+      async validateRelationTargets() {
+        relationTargetReads += 1
+        throw new Error(
+          'A receipt replay must not revalidate changed Goal state.',
+        )
+      },
+    },
+  )
+  const requests = [
+    {
+      baseRevision: 1,
+      clientId: 'editor-1',
+      operations: [{
+        operationId: 'insert-response-lost',
+        type: 'insert-block',
+        index: 1,
+        block: {
+          id: 'inserted-block',
+          type: 'paragraph',
+          text: 'Already inserted.',
+        },
+      }],
+    },
+    {
+      baseRevision: 2,
+      clientId: 'editor-1',
+      operations: [{
+        operationId: 'delete-response-lost',
+        type: 'delete-block',
+        blockId: 'inserted-block',
+      }],
+    },
+    {
+      baseRevision: 3,
+      clientId: 'editor-1',
+      operations: [{
+        operationId:
+          'goal-response-lost',
+        type: 'upsert-relation',
+        relation: {
+          id: 'goal-relation',
+          source: { kind: 'document' },
+          target: {
+            kind: 'goal',
+            goalId: 'goal-now-archived',
+          },
+          createdByUserId:
+            'owner@example.com',
+          createdAt:
+            '2026-07-18T00:03:00.000Z',
+        },
+      }],
+    },
+  ]
+
+  const responses = await Promise.all(
+    requests.map((body) =>
+      app.request(
+        '/api/documents/document-1/operations',
+        {
+          method: 'POST',
+          headers: {
+            Authorization:
+              'Bearer test-token',
+            'Content-Type':
+              'application/json',
+          },
+          body: JSON.stringify(body),
+        },
+      )
+    ),
+  )
+
+  expect(
+    responses.map(({ status }) => status),
+  ).toEqual([200, 200, 200])
+  expect(await responses[0]?.json()).toEqual({
+    documentId: 'document-1',
+    revision: 2,
+    appliedOperationIds: [
+      'insert-response-lost',
+    ],
+    updatedAt:
+      '2026-07-18T00:01:00.000Z',
+  })
+  expect(await responses[1]?.json()).toEqual({
+    documentId: 'document-1',
+    revision: 3,
+    appliedOperationIds: [
+      'delete-response-lost',
+    ],
+    updatedAt:
+      '2026-07-18T00:02:00.000Z',
+  })
+  expect(await responses[2]?.json()).toEqual({
+    documentId: 'document-1',
+    revision: 4,
+    appliedOperationIds: [
+      'goal-response-lost',
+    ],
+    updatedAt:
+      '2026-07-18T00:03:00.000Z',
+  })
+  expect(canonicalReads).toBe(0)
+  expect(applyCalls).toBe(0)
+  expect(relationTargetReads).toBe(0)
+})
+
+test('validates only pending operations in a mixed receipt batch', async () => {
+  const current: DocumentDetail = {
+    ...pageDocument,
+    revision: 2,
+    blocks: [
+      ...pageDocument.blocks,
+      {
+        id: 'already-inserted',
+        type: 'paragraph',
+        text: 'Committed before response loss.',
+      },
+    ],
+  }
+  let appliedOperationIds: string[] = []
+  let validatedPendingOperationIds:
+    readonly string[] | undefined
+  const app = createTestApp(
+    createDocumentClient({
+      async prepareOperations(input) {
+        expect(
+          input.input.operations.map(
+            ({ operationId }) =>
+              operationId,
+          ),
+        ).toEqual([
+          'already-committed-insert',
+          'pending-delete',
+        ])
+        return {
+          pendingInput: {
+            ...input.input,
+            operations: [
+              input.input.operations[1]!,
+            ],
+          },
+        }
+      },
+      async get() {
+        return current
+      },
+      async applyOperations(input) {
+        appliedOperationIds =
+          input.input.operations.map(
+            ({ operationId }) =>
+              operationId,
+          )
+        validatedPendingOperationIds =
+          input.validatedPendingOperationIds
+        return {
+          documentId: input.documentId,
+          revision: 3,
+          appliedOperationIds,
+          updatedAt:
+            '2026-07-18T00:03:00.000Z',
+        }
+      },
+    }),
+  )
+
+  const response = await app.request(
+    '/api/documents/document-1/operations',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        baseRevision: 1,
+        clientId: 'editor-1',
+        operations: [
+          {
+            operationId:
+              'already-committed-insert',
+            type: 'insert-block',
+            index: 1,
+            block: {
+              id: 'already-inserted',
+              type: 'paragraph',
+              text:
+                'Committed before response loss.',
+            },
+          },
+          {
+            operationId:
+              'pending-delete',
+            type: 'delete-block',
+            blockId: 'block-1',
+          },
+        ],
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    documentId: 'document-1',
+    revision: 3,
+    appliedOperationIds: [
+      'already-committed-insert',
+      'pending-delete',
+    ],
+    updatedAt:
+      '2026-07-18T00:03:00.000Z',
+  })
+  expect(appliedOperationIds).toEqual([
+    'already-committed-insert',
+    'pending-delete',
+  ])
+  expect(
+    validatedPendingOperationIds,
+  ).toEqual([
+    'pending-delete',
+  ])
 })
 
 test('revalidates every restored snapshot target before committing the restore', async () => {
@@ -1338,7 +1840,13 @@ test('exports a public document only when the current token permits it', async (
 
 test('revokes member shares with the canonical discriminated request body', async () => {
   let remainingMemberKeys: string[] = []
+  let receivedExpectedAuthorizationRevision:
+    | number
+    | undefined
   const app = createTestApp(createDocumentClient({
+    async getAuthorizationRevision() {
+      return 19
+    },
     async get() {
       return {
         ...pageDocument,
@@ -1353,6 +1861,8 @@ test('revokes member shares with the canonical discriminated request body', asyn
     },
     async update(input) {
       remainingMemberKeys = input.permission?.memberGrants.map(({ memberKey }) => memberKey) ?? []
+      receivedExpectedAuthorizationRevision =
+        input.expectedAuthorizationRevision
       return pageDocument
     },
   }))
@@ -1368,6 +1878,51 @@ test('revokes member shares with the canonical discriminated request body', asyn
 
   expect(response.status).toBe(200)
   expect(remainingMemberKeys).toEqual(['owner@example.com'])
+  expect(
+    receivedExpectedAuthorizationRevision,
+  ).toBe(19)
+})
+
+test('binds active member share validation to the private ACL generation', async () => {
+  let receivedExpectedAuthorizationRevision:
+    | number
+    | undefined
+  const app = createTestApp(
+    createDocumentClient({
+      async getAuthorizationRevision() {
+        return 27
+      },
+      async get() {
+        return pageDocument
+      },
+      async update(input) {
+        receivedExpectedAuthorizationRevision =
+          input.expectedAuthorizationRevision
+        return pageDocument
+      },
+    }),
+  )
+
+  const response = await app.request(
+    '/api/documents/document-1/shares',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: 'member',
+        memberKey: 'guest@example.com',
+        role: 'viewer',
+      }),
+    },
+  )
+
+  expect(response.status).toBe(201)
+  expect(
+    receivedExpectedAuthorizationRevision,
+  ).toBe(27)
 })
 
 test('forwards the mutation idempotency key when creating a public share', async () => {
@@ -1434,7 +1989,14 @@ function createTestApp(
 }
 
 function createDocumentClient(overrides: Partial<DocumentClient>): DocumentClient {
-  return new Proxy(overrides as DocumentClient, {
+  const client = {
+    getAuthorizationRevision: async () => 0,
+    prepareOperations: async (input) => ({
+      pendingInput: input.input,
+    }),
+    ...overrides,
+  } as DocumentClient
+  return new Proxy(client, {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver)
       if (value !== undefined) return value

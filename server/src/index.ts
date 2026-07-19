@@ -162,7 +162,6 @@ import {
 } from './notifications'
 import {
   createCommentWorkspaceSearchDocument,
-  createDocumentWorkspaceSearchSourceDocument,
   createDocumentWorkspaceSearchDocument,
   DynamoDbWorkspaceSearchClient,
   WorkspaceSearchError,
@@ -243,10 +242,13 @@ import {
   type PlanningWorkItemState,
 } from './planning'
 import {
+  createDocumentSearchAccessReadContext,
   DocumentError,
   DynamoDbDocumentsClient,
   type DocumentAccessContext,
+  type DocumentAuthorizationGenerationGuard,
   type DocumentClient,
+  type DocumentManagerLifecycleSnapshot,
   type DocumentProjectRole,
 } from './documents'
 import {
@@ -2275,8 +2277,6 @@ const documentProjectRolesCacheTtlMs = 1_000
 const DOCUMENT_AUTHORIZATION_SNAPSHOT_RETRY_LIMIT = 3
 /** Relation target の source read を同時実行する最大数です。 */
 const DOCUMENT_RELATION_TARGET_VALIDATION_CONCURRENCY = 8
-/** 一回の Workspace search で許可する full Document source read 数です。 */
-const WORKSPACE_SEARCH_DOCUMENT_SOURCE_READ_LIMIT = 30
 const projectDirectoryIdPrefix = 'user#'
 const defaultAllowedOrigins = [
   'http://localhost:5173',
@@ -2775,6 +2775,13 @@ app.patch('/api/workspace/members/:memberKey', async (c) => {
     } else {
       expectedPlanningRevision = (await planning.getAuthorizationState(principal.directoryId)).revision
     }
+    const expectedDocumentAuthorizationRevision =
+      status === 'deactivated' || role === 'guest'
+        ? await requireWorkspaceMemberRetainsPrivateDocumentManagers(
+            principal.directoryId,
+            memberKey,
+          )
+        : undefined
 
     const member = await workspaceAccess.updateMember(
       principal.directoryId,
@@ -2785,6 +2792,11 @@ app.patch('/api/workspace/members/:memberKey', async (c) => {
         status,
         expectedVersion,
         expectedPlanningRevision,
+        ...(expectedDocumentAuthorizationRevision === undefined
+          ? {}
+          : {
+              expectedDocumentAuthorizationRevision,
+            }),
       },
       auditContext,
     )
@@ -4847,8 +4859,8 @@ app.get('/api/search', async (c) => {
     const context = await createWorkspaceSearchContext(principal)
     const filters = readWorkspaceSearchFilters(c.req.query('filters'))
     const scopeCache = new Map<string, Promise<TeamIssueDetailResponse | undefined>>()
-    let remainingDocumentSourceReads =
-      WORKSPACE_SEARCH_DOCUMENT_SOURCE_READ_LIMIT
+    const documentSearchReadContext =
+      createDocumentSearchAccessReadContext()
 
     return c.json(await workspaceSearch.search({
       workspaceId: principal.directoryId,
@@ -4868,16 +4880,7 @@ app.get('/api/search', async (c) => {
           document,
           context,
           scopeCache,
-          () => {
-            if (remainingDocumentSourceReads <= 0) {
-              throw new WorkspaceSearchError(
-                503,
-                'WorkspaceSearchReadBudgetExceeded',
-                'Search matched too many Documents. Narrow the filters and try again.',
-              )
-            }
-            remainingDocumentSourceReads -= 1
-          },
+          documentSearchReadContext,
         )
       },
     }))
@@ -8814,20 +8817,10 @@ async function createDocumentApiPrincipal(
         },
       },
       {
-        tableName: getConfiguredPlanningTableName(),
-        key: {
-          workspaceId: principal.directoryId,
-          recordKey: 'META',
-        },
-        generationAttribute: 'revision',
-        expectedGeneration: planningRevision,
-        requiredAttributes: {
-          entryType: 'planning-meta',
-          schemaVersion: PLANNING_SCHEMA_VERSION,
-        },
-        ...(planningRevision === 0
-          ? { allowMissingWhenExpectedZero: true }
-          : {}),
+        ...createPlanningAuthorizationGuard(
+          principal.directoryId,
+          planningRevision,
+        ),
       },
     ],
     projectRoles,
@@ -8915,6 +8908,28 @@ function getConfiguredWorkspaceAccessTableName() {
 function getConfiguredPlanningTableName() {
   return getEnv('PLANNING_TABLE_NAME') ??
     'mukuroji-planning-local'
+}
+
+function createPlanningAuthorizationGuard(
+  workspaceId: string,
+  revision: number,
+): DocumentAuthorizationGenerationGuard {
+  return {
+    tableName: getConfiguredPlanningTableName(),
+    key: {
+      workspaceId,
+      recordKey: 'META',
+    },
+    generationAttribute: 'revision',
+    expectedGeneration: revision,
+    requiredAttributes: {
+      entryType: 'planning-meta',
+      schemaVersion: PLANNING_SCHEMA_VERSION,
+    },
+    ...(revision === 0
+      ? { allowMissingWhenExpectedZero: true }
+      : {}),
+  }
 }
 
 async function validateDocumentRelationTargets(
@@ -9079,6 +9094,14 @@ async function validateDocumentRelationTargets(
       }
     }))
   }
+  return planningAuthorizationState === undefined
+    ? undefined
+    : [
+        createPlanningAuthorizationGuard(
+          principal.workspaceId,
+          planningAuthorizationState.revision,
+        ),
+      ]
 }
 
 function readBearerAccessToken(c: Context) {
@@ -9749,34 +9772,50 @@ async function resolveCurrentWorkspaceSearchScope(
   document: WorkspaceSearchDocument,
   context: WorkspaceSearchContext,
   scopeCache: Map<string, Promise<TeamIssueDetailResponse | undefined>>,
-  consumeDocumentSourceRead: () => void,
+  documentSearchReadContext: ReturnType<
+    typeof createDocumentSearchAccessReadContext
+  >,
 ) {
   if (document.entityType === 'document') {
-    consumeDocumentSourceRead()
-    try {
-      const currentDocument = await documents.get({
+    if (
+      document.sourceRevision === undefined ||
+      document.updatedAt === undefined
+    ) {
+      return undefined
+    }
+    const currentAccess =
+      await documents.resolveSearchAccess({
         workspaceId,
         documentId: document.entityId,
         access: context.documentAccess,
+        expectedRevision:
+          document.sourceRevision,
+        expectedUpdatedAt:
+          document.updatedAt,
+        readContext:
+          documentSearchReadContext,
       })
-      return {
-        ...(currentDocument.scope.type === 'project'
-          ? { projectId: currentDocument.scope.projectId }
-          : {}),
-        permissionVerified: true,
-        currentDocument: createDocumentWorkspaceSearchSourceDocument(
-          workspaceId,
-          currentDocument,
-        ),
-      }
-    } catch (error) {
-      if (
-        error instanceof DocumentError &&
-        (error.status === 403 || error.status === 404)
-      ) {
-        return undefined
-      }
-      throw error
+    if (currentAccess === undefined) {
+      return undefined
+    }
+    const currentDocument = {
+      ...document,
+    }
+    if (currentAccess.body.length > 0) {
+      currentDocument.body =
+        currentAccess.body
+    } else {
+      delete currentDocument.body
+    }
+    return {
+      ...(currentAccess.scope.type === 'project'
+        ? {
+            projectId:
+              currentAccess.scope.projectId,
+          }
+        : {}),
+      permissionVerified: true,
+      currentDocument,
     }
   }
 
@@ -10089,6 +10128,68 @@ async function requireWorkspaceMemberHasNoOwnedPlanningEntities(
     )
   }
   return authorizationState.revision
+}
+
+async function requireWorkspaceMemberRetainsPrivateDocumentManagers(
+  directoryId: string,
+  memberKey: string,
+) {
+  for (
+    let attempt = 0;
+    attempt < DOCUMENT_AUTHORIZATION_SNAPSHOT_RETRY_LIMIT;
+    attempt += 1
+  ) {
+    let snapshot: DocumentManagerLifecycleSnapshot
+    try {
+      const expectedAuthorizationRevision =
+        await documents.getAuthorizationRevision(
+          directoryId,
+        )
+      const eligibleManagerMemberKeys =
+        (
+          await workspaceAccess.listActiveMembers(
+            directoryId,
+          )
+        )
+          .filter(({ role }) => role !== 'guest')
+          .map((member) => member.memberKey)
+      snapshot =
+        await documents.getManagerLifecycleSnapshot(
+          directoryId,
+          memberKey,
+          eligibleManagerMemberKeys,
+        )
+      if (
+        snapshot.authorizationRevision !==
+          expectedAuthorizationRevision
+      ) {
+        continue
+      }
+    } catch (error) {
+      if (error instanceof DocumentError) {
+        throw new WorkspaceAccessError(
+          error.status,
+          error.code,
+          error.message,
+          { cause: error },
+        )
+      }
+      throw error
+    }
+    if (snapshot.blockingDocumentId !== undefined) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceMemberManagesPrivateDocuments',
+        'Transfer private Document manager access before deactivating this member or changing them to guest.',
+      )
+    }
+    return snapshot.authorizationRevision
+  }
+  throw new WorkspaceAccessError(
+    409,
+    'DocumentAuthorizationChanged',
+    'Document permissions changed. Reload and try again.',
+  )
 }
 
 async function requirePlanningTeamScopeIsUnused(directoryId: string, teamId: string) {

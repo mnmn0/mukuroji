@@ -5226,6 +5226,18 @@ test('returns owner and admin Workspace capabilities from the API source of trut
 
 test('serializes Workspace role updates with the Planning revision', async () => {
   const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({
+    documents: {
+      async getAuthorizationRevision() {
+        return 5
+      },
+      async getManagerLifecycleSnapshot() {
+        return {
+          authorizationRevision: 5,
+        }
+      },
+    } as unknown as DocumentClient,
+  })
 
   const response = await app.request('/api/workspace/members/sato%40example.com', {
     method: 'PATCH',
@@ -5238,6 +5250,7 @@ test('serializes Workspace role updates with the Planning revision', async () =>
 
   expect(response.status).toBe(200)
   expect(calls.workspaceMemberUpdates).toEqual([{
+    expectedDocumentAuthorizationRevision: 5,
     expectedPlanningRevision: 0,
     memberKey: 'sato@example.com',
     role: 'guest',
@@ -5258,7 +5271,29 @@ test('forwards stable Workspace mutation audit headers and actor context to the 
     updatedAt: '2026-07-11T00:00:00.000Z',
   }
   configureApiClientsForTest({
+    documents: {
+      async getAuthorizationRevision() {
+        return 8
+      },
+      async getManagerLifecycleSnapshot() {
+        return {
+          authorizationRevision: 8,
+        }
+      },
+    } as unknown as DocumentClient,
     workspaceAccess: {
+      async listActiveMembers() {
+        return [
+          owner,
+          {
+            ...owner,
+            id: 'sato@example.com',
+            memberKey: 'sato@example.com',
+            email: 'sato@example.com',
+            role: 'member' as const,
+          },
+        ]
+      },
       async getActiveMember() {
         return owner
       },
@@ -5359,6 +5394,200 @@ test('rejects deactivating a Workspace member who owns an active Planning entity
   expect(await response.json()).toEqual({
     message: 'Transfer or archive all owned Planning entities before deactivating this member.',
   })
+})
+
+test('rejects changing the only active non-guest manager of a private Document to guest', async () => {
+  const calls = configureFakeProjectClients(true)
+  let eligibleManagerMemberKeys:
+    | readonly string[]
+    | undefined
+  configureApiClientsForTest({
+    documents: {
+      async getAuthorizationRevision() {
+        return 12
+      },
+      async getManagerLifecycleSnapshot(
+        _workspaceId,
+        _memberKey,
+        eligibleManagers,
+      ) {
+        eligibleManagerMemberKeys =
+          eligibleManagers
+        return {
+          authorizationRevision: 12,
+          blockingDocumentId:
+            'private-document-1',
+        }
+      },
+    } as unknown as DocumentClient,
+  })
+
+  const response = await app.request(
+    '/api/workspace/members/sato%40example.com',
+    {
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        expectedVersion: 1,
+        role: 'guest',
+      }),
+    },
+  )
+
+  const responseBody =
+    await response.json()
+  expect(responseBody).toEqual({
+    message:
+      'Transfer private Document manager access before deactivating this member or changing them to guest.',
+  })
+  expect(response.status).toBe(409)
+  expect(eligibleManagerMemberKeys).toContain(
+    'sato@example.com',
+  )
+  expect(calls.workspaceMemberUpdates).toEqual([])
+})
+
+test('binds member deactivation after private Document manager transfer to its ACL generation', async () => {
+  const calls = configureFakeProjectClients(true, {
+    projectAccesses: [],
+  })
+  configureApiClientsForTest({
+    documents: {
+      async getAuthorizationRevision() {
+        return 13
+      },
+      async getManagerLifecycleSnapshot() {
+        return {
+          authorizationRevision: 13,
+        }
+      },
+    } as unknown as DocumentClient,
+  })
+
+  const response = await app.request(
+    '/api/workspace/members/sato%40example.com',
+    {
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        expectedVersion: 1,
+        status: 'deactivated',
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(calls.workspaceMemberUpdates).toEqual([{
+    expectedDocumentAuthorizationRevision: 13,
+    expectedPlanningRevision: 0,
+    memberKey: 'sato@example.com',
+    status: 'deactivated',
+  }])
+})
+
+test('retries private Document manager validation when eligibility changes before the ACL snapshot', async () => {
+  configureFakeProjectClients(true)
+  let authorizationRevisionReads = 0
+  let lifecycleSnapshotReads = 0
+  let memberUpdateCalls = 0
+  const createActiveMember = (
+    memberKey: string,
+    role: WorkspaceRole,
+  ) => ({
+    id: memberKey,
+    memberKey,
+    email: memberKey,
+    role,
+    status: 'active' as const,
+    version: 1,
+    createdAt:
+      '2026-07-11T00:00:00.000Z',
+    updatedAt:
+      '2026-07-11T00:00:00.000Z',
+  })
+  const owner = createActiveMember(
+    'demo@example.com',
+    'owner',
+  )
+  const target = createActiveMember(
+    'sato@example.com',
+    'member',
+  )
+  configureApiClientsForTest({
+    documents: {
+      async getAuthorizationRevision() {
+        authorizationRevisionReads += 1
+        return authorizationRevisionReads === 1
+          ? 20
+          : 21
+      },
+      async getManagerLifecycleSnapshot() {
+        lifecycleSnapshotReads += 1
+        return {
+          authorizationRevision: 21,
+          ...(lifecycleSnapshotReads === 1
+            ? {}
+            : {
+                blockingDocumentId:
+                  'private-document-after-race',
+              }),
+        }
+      },
+    } as unknown as DocumentClient,
+    workspaceAccess: {
+      async getActiveMember(
+        _workspaceId,
+        memberKey,
+      ) {
+        return memberKey ===
+          owner.memberKey
+          ? owner
+          : memberKey ===
+              target.memberKey
+            ? target
+            : undefined
+      },
+      async listActiveMembers() {
+        return [owner, target]
+      },
+      async updateMember() {
+        memberUpdateCalls += 1
+        return target
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request(
+    '/api/workspace/members/sato%40example.com',
+    {
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        expectedVersion: 1,
+        role: 'guest',
+      }),
+    },
+  )
+
+  const responseBody =
+    await response.json()
+  expect(responseBody).toEqual({
+    message:
+      'Transfer private Document manager access before deactivating this member or changing them to guest.',
+  })
+  expect(response.status).toBe(409)
+  expect(authorizationRevisionReads).toBe(2)
+  expect(lifecycleSnapshotReads).toBe(2)
+  expect(memberUpdateCalls).toBe(0)
 })
 
 test('resends credentials when inviting an existing unconfirmed Workspace identity', async () => {
@@ -11632,31 +11861,66 @@ test('search endpoint parses filters and revalidates comment scope against curre
   expect(resolvedProjectId).toBe('refero')
 })
 
-test('bounds full Document source reads for one Workspace search request', async () => {
+test('resolves later Document search hits with compact access reads beyond thirty candidates', async () => {
   configureFakeProjectClients(true)
-  let documentReads = 0
+  let compactAccessReads = 0
+  let fullDocumentReads = 0
+  let laterHitResolved = false
+  const readContexts = new Set<unknown>()
+  const fullBody =
+    `${'x'.repeat(20_001)}tail-keyword`
   configureApiClientsForTest({
     documents: {
       async get() {
-        documentReads += 1
-        throw new DocumentError(
-          404,
-          'DocumentNotFound',
-          'Document was not found.',
+        fullDocumentReads += 1
+        throw new Error(
+          'Workspace search must not read full Documents.',
         )
+      },
+      async resolveSearchAccess(input) {
+        compactAccessReads += 1
+        readContexts.add(input.readContext)
+        return input.documentId === 'document-39'
+          ? {
+              scope: { type: 'workspace' },
+              revision: 1,
+              updatedAt:
+                '2026-07-18T00:00:00.000Z',
+              body: fullBody,
+            }
+          : undefined
       },
     } as unknown as DocumentClient,
     workspaceSearch: {
       async search(input) {
-        await Promise.all(Array.from({ length: 40 }, (_, index) =>
-          input.resolveCurrentScope?.(createWorkspaceSearchDocument({
-            workspaceId: input.workspaceId,
-            entityType: 'document',
-            entityId: `document-${index}`,
-            title: `Document ${index}`,
-            url: `/documents/document-${index}`,
-          }))
-        ))
+        const resolutions =
+          await Promise.all(
+            Array.from(
+              { length: 40 },
+              (_, index) =>
+                input.resolveCurrentScope?.(
+                  createWorkspaceSearchDocument({
+                    workspaceId:
+                      input.workspaceId,
+                    entityType: 'document',
+                    entityId:
+                      `document-${index}`,
+                    title:
+                      `Document ${index}`,
+                    url:
+                      `/documents/document-${index}`,
+                    updatedAt:
+                      '2026-07-18T00:00:00.000Z',
+                    sourceRevision: 1,
+                  }),
+                ),
+            ),
+          )
+        laterHitResolved =
+          resolutions.at(-1)?.permissionVerified ===
+            true &&
+          resolutions.at(-1)?.currentDocument
+            ?.body === fullBody
         return { schemaVersion: 1, results: [] }
       },
     } as unknown as WorkspaceSearchClient,
@@ -11666,23 +11930,30 @@ test('bounds full Document source reads for one Workspace search request', async
     headers: { Authorization: 'Bearer test-token' },
   })
 
-  expect(response.status).toBe(503)
-  expect(await response.json()).toEqual({
-    code: 'WorkspaceSearchReadBudgetExceeded',
-    message: 'Search matched too many Documents. Narrow the filters and try again.',
-  })
-  expect(documentReads).toBe(30)
+  expect(response.status).toBe(200)
+  expect(compactAccessReads).toBe(40)
+  expect(fullDocumentReads).toBe(0)
+  expect(readContexts.size).toBe(1)
+  expect([...readContexts][0]).toBeDefined()
+  expect(laterHitResolved).toBeTrue()
 })
 
-test('skips Document source reads when Workspace search filters exclude Documents', async () => {
+test('skips Document access reads when Workspace search filters exclude Documents', async () => {
   configureFakeProjectClients(true)
-  let documentReads = 0
+  let compactAccessReads = 0
+  let fullDocumentReads = 0
   let excludedDocuments = 0
   configureApiClientsForTest({
     documents: {
       async get() {
-        documentReads += 1
+        fullDocumentReads += 1
         throw new Error('Comment-only search must not read a Document source.')
+      },
+      async resolveSearchAccess() {
+        compactAccessReads += 1
+        throw new Error(
+          'Comment-only search must not read Document access.',
+        )
       },
     } as unknown as DocumentClient,
     workspaceSearch: {
@@ -11708,7 +11979,8 @@ test('skips Document source reads when Workspace search filters exclude Document
   })
 
   expect(response.status).toBe(200)
-  expect(documentReads).toBe(0)
+  expect(compactAccessReads).toBe(0)
+  expect(fullDocumentReads).toBe(0)
   expect(excludedDocuments).toBe(31)
 })
 
@@ -11844,6 +12116,10 @@ test('rejects missing, non-Goal, archived, and invisible Planning Goal relation 
     ],
   })
   let applyCalls = 0
+  let receivedGoalAuthorizationGuards:
+    Parameters<
+      DocumentClient['applyOperations']
+    >[0]['relationTargetAuthorizationGuards']
   const editableDocument = {
     schemaVersion: 1,
     id: 'document-1',
@@ -11878,6 +12154,8 @@ test('rejects missing, non-Goal, archived, and invisible Planning Goal relation 
       },
       async applyOperations(input) {
         applyCalls += 1
+        receivedGoalAuthorizationGuards =
+          input.relationTargetAuthorizationGuards
         return {
           documentId: input.documentId,
           revision: 2,
@@ -11980,6 +12258,24 @@ test('rejects missing, non-Goal, archived, and invisible Planning Goal relation 
   })
   expect(active.status).toBe(200)
   expect(applyCalls).toBe(1)
+  expect(
+    receivedGoalAuthorizationGuards,
+  ).toEqual([{
+    tableName:
+      process.env.PLANNING_TABLE_NAME ??
+      'mukuroji-planning-local',
+    key: {
+      workspaceId:
+        'user#demo@example.com',
+      recordKey: 'META',
+    },
+    generationAttribute: 'revision',
+    expectedGeneration: 2,
+    requiredAttributes: {
+      entryType: 'planning-meta',
+      schemaVersion: 1,
+    },
+  }])
 })
 
 test('revalidates archived Planning Goal targets before restoring a Document version', async () => {
@@ -13017,6 +13313,7 @@ function configureFakeProjectClients(
     workspaceInvitationResends: [] as string[],
     workspaceMutationAuditContexts: [] as ObservedWorkspaceMutationAuditContext[],
     workspaceMemberUpdates: [] as Array<{
+      expectedDocumentAuthorizationRevision?: number
       expectedPlanningRevision: number
       memberKey: string
       role?: WorkspaceRole
@@ -13609,6 +13906,12 @@ function configureFakeProjectClients(
       async updateMember(_workspaceId, _actorMemberKey, memberKey, input, auditContext) {
         calls.workspaceMutationAuditContexts.push({ stage: 'updateMember', context: auditContext })
         calls.workspaceMemberUpdates.push({
+          ...(input.expectedDocumentAuthorizationRevision === undefined
+            ? {}
+            : {
+                expectedDocumentAuthorizationRevision:
+                  input.expectedDocumentAuthorizationRevision,
+              }),
           expectedPlanningRevision: input.expectedPlanningRevision,
           memberKey,
           ...(input.role === undefined ? {} : { role: input.role }),

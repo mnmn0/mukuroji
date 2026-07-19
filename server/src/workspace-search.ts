@@ -115,6 +115,8 @@ export type WorkspaceSearchDocument = {
   createdAt?: string
   /** Entity の最終更新日時です。 */
   updatedAt?: string
+  /** Canonical source と検索投影の同期を検証する revision です。 */
+  sourceRevision?: number
 }
 
 /**
@@ -481,6 +483,20 @@ export function createWorkspaceSearchDocument(
   copyOptionalText(document, input, 'status', 256)
   copyOptionalText(document, input, 'createdAt', 128)
   copyOptionalText(document, input, 'updatedAt', 128)
+  if (input.sourceRevision !== undefined) {
+    if (
+      !Number.isSafeInteger(input.sourceRevision) ||
+      input.sourceRevision <= 0
+    ) {
+      throw new WorkspaceSearchError(
+        400,
+        'InvalidSearchDocument',
+        'Search document source revision must be a positive integer.',
+      )
+    }
+    document.sourceRevision =
+      input.sourceRevision
+  }
   const dueDate = optionalText(input.dueDate, 'Search document dueDate', 128)
   if (dueDate) document.dueDate = canonicalizeSearchDate(dueDate)
 
@@ -571,7 +587,7 @@ export function createDocumentWorkspaceSearchDocument(
   workspaceId: string,
   document: DocumentDetail,
 ) {
-  const body = createDocumentSearchBody(document).slice(
+  const body = createDocumentWorkspaceSearchBody(document).slice(
     0,
     WORKSPACE_SEARCH_STORED_BODY_MAX_LENGTH,
   )
@@ -585,9 +601,10 @@ export function createDocumentWorkspaceSearchDocument(
 /**
  * Canonical Document の全文を current-source 検索用の一時 projection へ変換します。
  *
- * DynamoDB に永続化する projection は
+ * Search table に永続化する projection は
  * {@link createDocumentWorkspaceSearchDocument} を使います。この関数が返す全文本文は
- * source-of-truth ACL の検証後に memory 上で照合し、検索 table へ保存しません。
+ * source-of-truth ACL の検証後に memory 上で照合し、Search table へは保存しません。
+ * Documents store は canonical mutation と同時に同じ本文を圧縮 projection へ保存します。
  *
  * @param workspaceId - Document を保持する canonical Workspace ID です。
  * @param document - ACL 検証済みの current Document detail です。
@@ -597,7 +614,7 @@ export function createDocumentWorkspaceSearchSourceDocument(
   workspaceId: string,
   document: DocumentDetail,
 ) {
-  const body = createDocumentSearchBody(document)
+  const body = createDocumentWorkspaceSearchBody(document)
   const storedProjection = createDocumentWorkspaceSearchProjection(
     workspaceId,
     document,
@@ -606,6 +623,18 @@ export function createDocumentWorkspaceSearchSourceDocument(
   return body
     ? { ...storedProjection, body }
     : storedProjection
+}
+
+/**
+ * Canonical Document から省略しない Workspace search 本文を生成します。
+ *
+ * @param document - Source of truth の Document detail です。
+ * @returns Rich text または Whiteboard text を連結した全文検索本文です。
+ */
+export function createDocumentWorkspaceSearchBody(
+  document: DocumentDetail,
+): string {
+  return createDocumentSearchBody(document)
 }
 
 function createDocumentWorkspaceSearchProjection(
@@ -635,6 +664,7 @@ function createDocumentWorkspaceSearchProjection(
     ...(relationIds.length > 0 ? { relationIds } : {}),
     createdAt: document.createdAt,
     updatedAt: document.updatedAt,
+    sourceRevision: document.revision,
   })
 }
 
@@ -906,7 +936,15 @@ export class DynamoDbWorkspaceSearchClient {
           batch,
           WORKSPACE_SEARCH_SCOPE_CONCURRENCY,
           async ({ document: storedDocument }) => {
-            if (!storedDocument) return undefined
+            if (
+              !storedDocument ||
+              !matchesImmutableWorkspaceSearchFilters(
+                storedDocument,
+                filters,
+              )
+            ) {
+              return undefined
+            }
             const resolvedScope = input.resolveCurrentScope
               ? await input.resolveCurrentScope(storedDocument)
               : {
@@ -1593,6 +1631,44 @@ function matchesWorkspaceSearchFilters(
       document.body,
     ].filter(Boolean).join('\n'))
     if (!splitKeyword(filters.keyword).every((term) => haystack.includes(term))) return false
+  }
+  return true
+}
+
+function matchesImmutableWorkspaceSearchFilters(
+  document: WorkspaceSearchDocument,
+  filters: WorkspaceSearchFilters,
+) {
+  if (
+    filters.entityTypes?.length &&
+    !filters.entityTypes.includes(
+      document.entityType,
+    )
+  ) {
+    return false
+  }
+  if (
+    filters.creatorUserIds?.length &&
+    (
+      !document.creatorUserId ||
+      !filters.creatorUserIds.includes(
+        document.creatorUserId,
+      )
+    )
+  ) {
+    return false
+  }
+  if (
+    filters.date?.field === 'createdAt'
+  ) {
+    return Boolean(
+      document.createdAt &&
+      matchesSearchDateRange(
+        document.createdAt,
+        filters.date.from,
+        filters.date.to,
+      ),
+    )
   }
   return true
 }

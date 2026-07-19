@@ -59,6 +59,22 @@ export const DOCUMENT_API_MAX_MEMBER_GRANT_COUNT = 100
 /** Member source-of-truth read の最大同時実行数です。 */
 const DOCUMENT_API_VALIDATION_CONCURRENCY = 8
 
+/** 一つの batched backlink request で評価する row の最大件数です。 */
+const DOCUMENT_API_BACKLINK_BATCH_READ_LIMIT =
+  DOCUMENT_MAX_BACKLINK_COUNT
+
+/**
+ * Batched backlink query の検証済み target です。
+ */
+type ParsedDocumentBacklinkBatchTarget = {
+  /** Relation target 種別です。 */
+  targetType: 'work-item' | 'project' | 'goal'
+  /** Relation target の canonical ID です。 */
+  targetId: string
+  /** この target の次 page を読む opaque cursor です。 */
+  cursor?: string
+}
+
 /**
  * Document API が認証層から受け取る active Workspace principal です。
  */
@@ -137,7 +153,10 @@ export type DocumentApiDependencies = {
   validateRelationTargets: (
     principal: DocumentApiPrincipal,
     targets: readonly DocumentRelationTarget[],
-  ) => Promise<void>
+  ) => Promise<
+    | readonly DocumentAuthorizationGenerationGuard[]
+    | void
+  >
   /**
    * Search index に current Document projection を best-effort 保存します。
    */
@@ -206,18 +225,23 @@ export function registerDocumentApiRoutes(
       const input = parseCreateDocumentInput(await readJson<unknown>(c))
       requireDocumentCreateCapability(principal, input.scope)
       const relationTargets = readCreateDocumentRelationTargets(input)
+      let expectedAuthorizationRevision:
+        | number
+        | undefined
       if (input.permission) {
-        await validatePermissionMembers(
-          dependencies,
-          principal.workspaceId,
-          input.permission.memberGrants.map(({ memberKey }) => memberKey),
-        )
+        expectedAuthorizationRevision =
+          await validatePermissionMembers(
+            dependencies,
+            principal.workspaceId,
+            input.permission.memberGrants.map(({ memberKey }) => memberKey),
+          )
       }
-      await validateDocumentRelationTargets(
-        dependencies,
-        principal,
-        relationTargets,
-      )
+      const relationTargetAuthorizationGuards =
+        await validateDocumentRelationTargets(
+          dependencies,
+          principal,
+          relationTargets,
+        )
       const idempotencyKey = c.req.header('Idempotency-Key')?.trim() || undefined
       const document = input.kind === 'page' && input.templateId
         ? await dependencies.getClient().instantiateTemplate({
@@ -229,6 +253,11 @@ export function registerDocumentApiRoutes(
             title: input.title,
             ...(input.position ? { position: input.position } : {}),
             ...(input.permission ? { permission: input.permission } : {}),
+            ...(expectedAuthorizationRevision === undefined
+              ? {}
+              : {
+                  expectedAuthorizationRevision,
+                }),
             ...(idempotencyKey ? { idempotencyKey } : {}),
           })
         : await dependencies.getClient().create({
@@ -240,10 +269,20 @@ export function registerDocumentApiRoutes(
             title: input.title,
             ...(input.position ? { position: input.position } : {}),
             ...(input.permission ? { permission: input.permission } : {}),
+            ...(expectedAuthorizationRevision === undefined
+              ? {}
+              : {
+                  expectedAuthorizationRevision,
+                }),
             ...((input.kind === 'page' || input.kind === 'template')
               ? { blocks: input.blocks }
               : {}),
             ...(input.kind === 'whiteboard' ? { whiteboard: input.whiteboard } : {}),
+            ...(relationTargetAuthorizationGuards.length === 0
+              ? {}
+              : {
+                  relationTargetAuthorizationGuards,
+                }),
             ...(idempotencyKey ? { idempotencyKey } : {}),
           })
       await upsertSearchDocumentBestEffort(dependencies, principal.workspaceId, document)
@@ -267,6 +306,9 @@ export function registerDocumentApiRoutes(
     return withDocumentPrincipal(c, dependencies, async (principal, access) => {
       const input = parseUpdateDocumentInput(await readJson<unknown>(c))
       const documentId = readRequiredDocumentId(c)
+      let expectedAuthorizationRevision:
+        | number
+        | undefined
       if (input.permission) {
         const current = await dependencies.getClient().get({
           workspaceId: principal.workspaceId,
@@ -279,11 +321,12 @@ export function registerDocumentApiRoutes(
           'DocumentPermissionDenied',
         )
         requireCurrentDocumentRevision(current, input.expectedRevision)
-        await validatePermissionMembers(
-          dependencies,
-          principal.workspaceId,
-          input.permission.memberGrants.map(({ memberKey }) => memberKey),
-        )
+        expectedAuthorizationRevision =
+          await validatePermissionMembers(
+            dependencies,
+            principal.workspaceId,
+            input.permission.memberGrants.map(({ memberKey }) => memberKey),
+          )
       }
       const document = await dependencies.getClient().update({
         workspaceId: principal.workspaceId,
@@ -295,6 +338,11 @@ export function registerDocumentApiRoutes(
         ...(typeof input?.position === 'string' ? { position: input.position } : {}),
         ...(input?.scope ? { scope: input.scope } : {}),
         ...(input?.permission ? { permission: input.permission } : {}),
+        ...(expectedAuthorizationRevision === undefined
+          ? {}
+          : {
+              expectedAuthorizationRevision,
+            }),
       })
       await upsertSearchDocumentBestEffort(dependencies, principal.workspaceId, document)
       return c.json({ document })
@@ -304,9 +352,28 @@ export function registerDocumentApiRoutes(
   app.post('/api/documents/:documentId/operations', async (c) => {
     return withDocumentPrincipal(c, dependencies, async (principal, access) => {
       const input = parseDocumentOperationsInput(await readJson<unknown>(c))
-      const relationTargets = readOperationRelationTargets(input)
       const documentId = readRequiredDocumentId(c)
-      const current = await dependencies.getClient().get({
+      const request = {
+        workspaceId: principal.workspaceId,
+        documentId,
+        access,
+        input,
+      }
+      const client = dependencies.getClient()
+      const preparation =
+        await client.prepareOperations?.(
+          request,
+        )
+      if (preparation?.replay !== undefined) {
+        return c.json(preparation.replay)
+      }
+      const pendingInput =
+        preparation?.pendingInput ?? input
+      const relationTargets =
+        readOperationRelationTargets(
+          pendingInput,
+        )
+      const current = await client.get({
         workspaceId: principal.workspaceId,
         documentId,
         access,
@@ -318,21 +385,33 @@ export function registerDocumentApiRoutes(
       )
       validateDocumentOperationPayload(
         current,
-        input,
+        pendingInput,
         principal.memberKey,
       )
-      await validateDocumentRelationTargets(
-        dependencies,
-        principal,
-        relationTargets,
-      )
-      const result = await dependencies.getClient().applyOperations({
-        workspaceId: principal.workspaceId,
-        documentId,
-        access,
-        input,
+      const relationTargetAuthorizationGuards =
+        await validateDocumentRelationTargets(
+          dependencies,
+          principal,
+          relationTargets,
+        )
+      const result = await client.applyOperations({
+        ...request,
+        ...(preparation?.pendingInput === undefined
+          ? {}
+          : {
+              validatedPendingOperationIds:
+                pendingInput.operations.map(
+                  ({ operationId }) =>
+                    operationId,
+                ),
+            }),
+        ...(relationTargetAuthorizationGuards.length === 0
+          ? {}
+          : {
+              relationTargetAuthorizationGuards,
+            }),
       })
-      const document = await dependencies.getClient().get({
+      const document = await client.get({
         workspaceId: principal.workspaceId,
         documentId,
         access,
@@ -374,17 +453,23 @@ export function registerDocumentApiRoutes(
         'DocumentRestoreDenied',
       )
       requireCurrentDocumentRevision(archived, expectedRevision)
-      await validateDocumentRelationTargets(
-        dependencies,
-        principal,
-        readStoredDocumentRelationTargets(archived),
-      )
+      const relationTargetAuthorizationGuards =
+        await validateDocumentRelationTargets(
+          dependencies,
+          principal,
+          readStoredDocumentRelationTargets(archived),
+        )
       const document = await dependencies.getClient().restoreArchived({
         workspaceId: principal.workspaceId,
         documentId,
         access,
         expectedRevision,
         ...(input?.parentId !== undefined ? { parentId: input.parentId } : {}),
+        ...(relationTargetAuthorizationGuards.length === 0
+          ? {}
+          : {
+              relationTargetAuthorizationGuards,
+            }),
       })
       await upsertSearchDocumentBestEffort(dependencies, principal.workspaceId, document)
       return c.json({ document: toDocumentNode(document) })
@@ -423,12 +508,16 @@ export function registerDocumentApiRoutes(
         validateDocumentPermission(body.permission)
       }
       requireDocumentCreateCapability(principal, body.scope)
+      let expectedAuthorizationRevision:
+        | number
+        | undefined
       if (body.permission !== undefined) {
-        await validatePermissionMembers(
-          dependencies,
-          principal.workspaceId,
-          body.permission.memberGrants.map(({ memberKey }) => memberKey),
-        )
+        expectedAuthorizationRevision =
+          await validatePermissionMembers(
+            dependencies,
+            principal.workspaceId,
+            body.permission.memberGrants.map(({ memberKey }) => memberKey),
+          )
       }
       const document = await dependencies.getClient().instantiateTemplate({
         workspaceId: principal.workspaceId,
@@ -439,6 +528,11 @@ export function registerDocumentApiRoutes(
         ...(body.title ? { title: body.title } : {}),
         ...(body.position ? { position: body.position } : {}),
         ...(body.permission ? { permission: body.permission } : {}),
+        ...(expectedAuthorizationRevision === undefined
+          ? {}
+          : {
+              expectedAuthorizationRevision,
+            }),
         ...(c.req.header('Idempotency-Key')
           ? { idempotencyKey: c.req.header('Idempotency-Key') }
           : {}),
@@ -683,6 +777,12 @@ export function registerDocumentApiRoutes(
       const input = parseCreateDocumentShareInput(await readJson<unknown>(c))
       const documentId = readRequiredDocumentId(c)
       if (input.type === 'member') {
+        const expectedAuthorizationRevision =
+          await dependencies
+            .getClient()
+            .getAuthorizationRevision(
+              principal.workspaceId,
+            )
         const member = await dependencies.getActiveMember(
           principal.workspaceId,
           input.memberKey,
@@ -715,6 +815,7 @@ export function registerDocumentApiRoutes(
             ...document.permission,
             memberGrants,
           },
+          expectedAuthorizationRevision,
         })
         await upsertSearchDocumentBestEffort(dependencies, principal.workspaceId, updated)
         return c.json({
@@ -752,6 +853,12 @@ export function registerDocumentApiRoutes(
       const documentId = readRequiredDocumentId(c)
       const input = parseRevokeDocumentShareInput(await readJson<unknown>(c))
       if (input.type === 'member') {
+        const expectedAuthorizationRevision =
+          await dependencies
+            .getClient()
+            .getAuthorizationRevision(
+              principal.workspaceId,
+            )
         const document = await dependencies.getClient().get({
           workspaceId: principal.workspaceId,
           documentId,
@@ -769,6 +876,7 @@ export function registerDocumentApiRoutes(
               (grant) => grant.memberKey !== input.memberKey,
             ),
           },
+          expectedAuthorizationRevision,
         })
         await upsertSearchDocumentBestEffort(dependencies, principal.workspaceId, updated)
       } else {
@@ -839,6 +947,76 @@ export function registerDocumentApiRoutes(
         ...(result.nextCursor === undefined
           ? {}
           : { nextCursor: result.nextCursor }),
+      })
+    })
+  })
+
+  app.post('/api/document-backlinks/batch', async (c) => {
+    return withDocumentPrincipal(c, dependencies, async (principal, access) => {
+      const targets = parseDocumentBacklinkBatchTargets(
+        await readJson<unknown>(c),
+      )
+      const backlinks = new Map<string, DocumentBacklink>()
+      const continuations: typeof targets = []
+      const untouched: typeof targets = []
+      let remainingReadBudget =
+        DOCUMENT_API_BACKLINK_BATCH_READ_LIMIT
+
+      for (
+        let index = 0;
+        index < targets.length;
+        index += 1
+      ) {
+        const target = targets[index]!
+        if (remainingReadBudget === 0) {
+          untouched.push(...targets.slice(index))
+          break
+        }
+        const remainingTargetCount =
+          targets.length - index
+        const limit = Math.min(
+          20,
+          Math.max(
+            1,
+            Math.floor(
+              remainingReadBudget /
+                remainingTargetCount,
+            ),
+          ),
+        )
+        const page = await dependencies.getClient().listBacklinks({
+          workspaceId: principal.workspaceId,
+          targetKind: target.targetType,
+          targetId: target.targetId,
+          access,
+          limit,
+          ...(target.cursor === undefined
+            ? {}
+            : { cursor: target.cursor }),
+        })
+        remainingReadBudget -= limit
+        for (const backlink of page.backlinks) {
+          backlinks.set(
+            `${backlink.documentId}\0${backlink.relation.id}`,
+            backlink,
+          )
+        }
+        if (page.nextCursor !== undefined) {
+          continuations.push({
+            ...target,
+            cursor: page.nextCursor,
+          })
+        }
+      }
+
+      return c.json({
+        backlinks: [...backlinks.values()].map(
+          toDocumentBacklinkResponse,
+        ),
+        pending: [
+          ...untouched,
+          ...continuations,
+        ],
       })
     })
   })
@@ -1910,6 +2088,79 @@ function readOptionalDocumentBacklinkCursor(
   return value
 }
 
+function parseDocumentBacklinkBatchTargets(
+  value: unknown,
+): ParsedDocumentBacklinkBatchTarget[] {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.targets) ||
+    value.targets.length === 0
+  ) {
+    throw new DocumentError(
+      400,
+      'InvalidDocumentBacklinkBatch',
+      'At least one backlink target is required.',
+    )
+  }
+  if (
+    value.targets.length >
+      DOCUMENT_MAX_BACKLINK_COUNT
+  ) {
+    throw new DocumentError(
+      413,
+      'DocumentBacklinkTargetLimitExceeded',
+      `A backlink batch can contain at most ${DOCUMENT_MAX_BACKLINK_COUNT} targets.`,
+    )
+  }
+
+  const unique = new Map<
+    string,
+    ParsedDocumentBacklinkBatchTarget
+  >()
+  for (const candidate of value.targets) {
+    if (
+      !isRecord(candidate) ||
+      (
+        candidate.targetType !== 'work-item' &&
+        candidate.targetType !== 'project' &&
+        candidate.targetType !== 'goal'
+      ) ||
+      typeof candidate.targetId !== 'string' ||
+      candidate.targetId.length === 0 ||
+      candidate.targetId.length > 500 ||
+      candidate.targetId !== candidate.targetId.trim() ||
+      /\p{Cc}/u.test(candidate.targetId) ||
+      (
+        candidate.cursor !== undefined &&
+        (
+          typeof candidate.cursor !== 'string' ||
+          candidate.cursor.length === 0 ||
+          candidate.cursor.length > 4_096 ||
+          !/^[A-Za-z0-9_-]+$/u.test(candidate.cursor)
+        )
+      )
+    ) {
+      throw new DocumentError(
+        400,
+        'InvalidDocumentBacklinkBatch',
+        'A backlink batch target is invalid.',
+      )
+    }
+    const target: ParsedDocumentBacklinkBatchTarget = {
+      targetType: candidate.targetType,
+      targetId: candidate.targetId,
+      ...(candidate.cursor === undefined
+        ? {}
+        : { cursor: candidate.cursor }),
+    }
+    unique.set(
+      `${target.targetType}\0${target.targetId}\0${target.cursor ?? ''}`,
+      target,
+    )
+  }
+  return [...unique.values()]
+}
+
 function readOptionalDocumentRootCommentId(c: Context): string | undefined {
   const values = c.req.queries('rootCommentId')
   if (values === undefined) return undefined
@@ -2150,6 +2401,10 @@ async function validatePermissionMembers(
   workspaceId: string,
   memberKeys: readonly string[],
 ) {
+  const expectedAuthorizationRevision =
+    await dependencies
+      .getClient()
+      .getAuthorizationRevision(workspaceId)
   const uniqueMemberKeys = [...new Set(memberKeys)]
   if (
     !await everyActiveDocumentMember(
@@ -2164,6 +2419,7 @@ async function validatePermissionMembers(
       'Every Document grant must reference an active Workspace member.',
     )
   }
+  return expectedAuthorizationRevision
 }
 
 async function everyActiveDocumentMember(
@@ -2192,9 +2448,11 @@ async function validateDocumentRelationTargets(
   dependencies: DocumentApiDependencies,
   principal: DocumentApiPrincipal,
   targets: readonly DocumentRelationTarget[],
-) {
+): Promise<
+  readonly DocumentAuthorizationGenerationGuard[]
+> {
   if (targets.length === 0) {
-    return
+    return []
   }
   const uniqueTargets = [
     ...new Map(
@@ -2209,10 +2467,12 @@ async function validateDocumentRelationTargets(
     ).values(),
   ]
   requireDocumentRelationTargetLimit(uniqueTargets)
-  await dependencies.validateRelationTargets(
+  return (
+    await dependencies.validateRelationTargets(
     principal,
     uniqueTargets,
-  )
+    )
+  ) ?? []
 }
 
 function requireDocumentRelationTargetLimit(

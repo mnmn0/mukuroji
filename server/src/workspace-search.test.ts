@@ -187,6 +187,7 @@ test('projects rich Document content and backlinks into the Workspace search sch
   expect(document).toMatchObject({
     entityType: 'document',
     entityId: 'document-1',
+    sourceRevision: 3,
     projectId: 'project-1',
     body: 'Release plan\nConfirm rollback owner',
     relationIds: ['work-item:issue-1'],
@@ -442,6 +443,129 @@ test('resolves current scopes with bounded concurrency and preserves result orde
   expect(response.results.map((result) => result.id)).toEqual(
     documents.map((document) => document.entityId),
   )
+})
+
+test('prefilters immutable entity types before current access resolution', async () => {
+  const excludedDocuments = Array.from(
+    { length: 40 },
+    (_, index) =>
+      createWorkspaceSearchDocument({
+        workspaceId: 'workspace-1',
+        entityType: 'document',
+        entityId: `document-${index}`,
+        title: `Document ${index}`,
+        url: `/documents/document-${index}`,
+        creatorUserId: 'author@example.com',
+        createdAt:
+          '2026-07-18T00:00:00.000Z',
+        updatedAt:
+          '2026-07-18T00:00:00.000Z',
+        sourceRevision: 1,
+      }),
+  )
+  const includedComment =
+    createWorkspaceSearchDocument({
+      workspaceId: 'workspace-1',
+      entityType: 'comment',
+      entityId:
+        'team/core/issue/issue-1/comment/comment-1',
+      parentId:
+        'team/core/issue/issue-1',
+      title: 'Matching comment',
+      url:
+        '/teams/core/issues?issueId=issue-1&commentId=comment-1',
+      teamId: 'core',
+    })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([
+      ...excludedDocuments,
+      includedComment,
+    ]),
+    {} as DynamoDBClient,
+    false,
+  )
+  let resolverCalls = 0
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    filters: {
+      entityTypes: ['comment'],
+    },
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set<string>(),
+      teamIds: new Set(['core']),
+    },
+    resolveCurrentScope: async (document) => {
+      resolverCalls += 1
+      return {
+        teamId: document.teamId,
+      }
+    },
+  })
+
+  expect(resolverCalls).toBe(1)
+  expect(response.results.map(({ id }) => id))
+    .toEqual([includedComment.entityId])
+})
+
+test('continues Document access resolution beyond thirty denied candidates', async () => {
+  const documents = Array.from(
+    { length: 40 },
+    (_, index) =>
+      createWorkspaceSearchDocument({
+        workspaceId: 'workspace-1',
+        entityType: 'document',
+        entityId:
+          `document-${String(index).padStart(2, '0')}`,
+        title: `Document ${index}`,
+        url: `/documents/document-${index}`,
+        updatedAt:
+          '2026-07-18T00:00:00.000Z',
+        sourceRevision: 1,
+      }),
+  ).sort((left, right) =>
+    left.recordKey.localeCompare(
+      right.recordKey,
+    )
+  )
+  const laterDocument = documents.at(-1)
+  if (laterDocument === undefined) {
+    throw new Error(
+      'Expected a later search document.',
+    )
+  }
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient(documents),
+    {} as DynamoDBClient,
+    false,
+  )
+  let resolverCalls = 0
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    limit: 1,
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set<string>(),
+      teamIds: new Set<string>(),
+    },
+    resolveCurrentScope: async (document) => {
+      resolverCalls += 1
+      return document.entityId ===
+        laterDocument.entityId
+        ? { permissionVerified: true }
+        : undefined
+    },
+  })
+
+  expect(resolverCalls).toBe(40)
+  expect(response.results.map(({ id }) => id))
+    .toEqual([laterDocument.entityId])
 })
 
 test('stops source-of-truth resolution after a small result page is full', async () => {
