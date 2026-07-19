@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { expect, test } from 'bun:test'
 import {
   type AnalyticsQueryInput,
@@ -1240,7 +1239,7 @@ test('skips inactive recipients without reading directory, Work Item, or audit d
   expect((await repository.getReport(report.workspaceId, report.id))?.revision).toBe(2)
 })
 
-test('retries a partial recipient failure without duplicating snapshots or receipts', async () => {
+test('retries a partial recipient failure across an ACL change without poisoning receipts', async () => {
   const repository = new InMemoryAnalyticsRepository(() => NOW)
   const report = await createScheduledReport(
     repository,
@@ -1255,6 +1254,7 @@ test('retries a partial recipient failure without duplicating snapshots or recei
   }
   const renderedArtifacts: AnalyticsScheduleArtifactInput[] = []
   let failSecondRecipient = true
+  let authorizationVersion = 'before-change'
   const dependencies = {
     repository,
     async render(input: {
@@ -1270,7 +1270,12 @@ test('retries a partial recipient failure without duplicating snapshots or recei
           'Recipient data is temporarily unavailable.',
         )
       }
-      return createRenderedSnapshot(input.report, input.recipientMemberKey)
+      return createRenderedSnapshot(
+        input.report,
+        input.recipientMemberKey,
+        SCHEDULED_FOR,
+        new Set([`project-${authorizationVersion}`]),
+      )
     },
     async renderArtifact(input: AnalyticsScheduleArtifactInput) {
       renderedArtifacts.push(input)
@@ -1284,33 +1289,155 @@ test('retries a partial recipient failure without duplicating snapshots or recei
   expect(createdReceipts).toHaveLength(1)
 
   failSecondRecipient = false
+  authorizationVersion = 'after-change'
   const retried = await processDueAnalyticsReport(report, NOW, dependencies)
 
   expect(retried).toMatchObject({
     processed: true,
     receiptsCreated: 1,
-    snapshotsStored: 2,
+    snapshotsStored: 1,
   })
   expect(createdReceipts).toHaveLength(2)
   expect(new Set(createdReceipts.map((receipt) => receipt.occurrenceKey)).size).toBe(2)
-  expect(new Set(createdReceipts.map((receipt) => receipt.snapshotId)).size).toBe(1)
+  expect(new Set(createdReceipts.map((receipt) => receipt.snapshotId)).size).toBe(2)
   const snapshots = await repository.listSnapshots(report.workspaceId, report.id)
-  expect(snapshots).toHaveLength(1)
+  expect(snapshots).toHaveLength(2)
   expect(snapshots[0]?.createdByMemberKey).toBe(report.ownerMemberKey)
-  expect(renderedArtifacts).toHaveLength(3)
+  expect(renderedArtifacts).toHaveLength(2)
   const advanced = await repository.getReport(report.workspaceId, report.id)
   expect(advanced?.revision).toBe(2)
   expect(advanced?.schedule?.nextRunAt).toBe('2026-07-19T08:00:00.000Z')
+}, 15_000)
+
+test('restarts a partially delivered occurrence under a new semantic report definition', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(
+    repository,
+    ['first@example.com', 'second@example.com'],
+  )
+  const originalPutReceipt = repository.putDeliveryReceipt.bind(repository)
+  const createdOccurrenceKeys: string[] = []
+  repository.putDeliveryReceipt = async (receipt) => {
+    const result = await originalPutReceipt(receipt)
+    if (result.created) createdOccurrenceKeys.push(result.receipt.occurrenceKey)
+    return result
+  }
+  const renderedRevisions: number[] = []
+  let failSecondRecipient = true
+  const dependencies = {
+    repository,
+    async render(input: {
+      report: AnalyticsReport
+      recipientMemberKey: string
+      scheduledFor: string
+      historyReadAt: string
+    }) {
+      renderedRevisions.push(input.report.revision)
+      if (input.recipientMemberKey === 'second@example.com' && failSecondRecipient) {
+        throw new AnalyticsError(
+          503,
+          'AnalyticsRecipientReadUnavailable',
+          'Recipient data is temporarily unavailable.',
+        )
+      }
+      return createRenderedSnapshot(input.report, input.recipientMemberKey)
+    },
+    renderArtifact: async () => {},
+  }
+
+  await expect(processDueAnalyticsReport(report, NOW, dependencies)).rejects.toMatchObject({
+    code: 'AnalyticsRecipientReadUnavailable',
+  })
+  const edited = await repository.updateReport(report.workspaceId, report.id, {
+    expectedRevision: report.revision,
+    filter: {
+      period: {
+        from: '2026-07-08T00:00:00.000Z',
+        to: '2026-07-31T23:59:59.999Z',
+      },
+    },
+  })
+  failSecondRecipient = false
+
+  const retried = await processDueAnalyticsReport(edited, NOW, dependencies)
+
+  expect(retried).toMatchObject({
+    processed: true,
+    receiptsCreated: 2,
+    snapshotsStored: 2,
+  })
+  expect(renderedRevisions).toEqual([1, 1, 2, 2])
+  expect(new Set(createdOccurrenceKeys).size).toBe(3)
+  expect(await repository.listSnapshots(report.workspaceId, report.id)).toHaveLength(2)
+  const advanced = await repository.getReport(report.workspaceId, report.id)
+  expect(advanced?.revision).toBe(3)
+  expect(advanced?.schedule?.nextRunAt).toBe('2026-07-19T08:00:00.000Z')
+}, 15_000)
+
+test('resumes after durable recipient checkpoints instead of restarting from the first recipient', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(
+    repository,
+    ['first@example.com', 'second@example.com', 'third@example.com'],
+  )
+  const renderedRecipients: string[] = []
+  let failThirdRecipient = true
+  const dependencies = {
+    repository,
+    async render(input: {
+      report: AnalyticsReport
+      recipientMemberKey: string
+      scheduledFor: string
+      historyReadAt: string
+    }) {
+      renderedRecipients.push(input.recipientMemberKey)
+      if (input.recipientMemberKey === 'third@example.com' && failThirdRecipient) {
+        throw new AnalyticsError(
+          503,
+          'AnalyticsRecipientReadUnavailable',
+          'Recipient data is temporarily unavailable.',
+        )
+      }
+      return createRenderedSnapshot(input.report, input.recipientMemberKey)
+    },
+    renderArtifact: async () => {},
+  }
+
+  await expect(processDueAnalyticsReport(report, NOW, dependencies)).rejects.toMatchObject({
+    code: 'AnalyticsRecipientReadUnavailable',
+  })
+  expect(renderedRecipients).toEqual([
+    'first@example.com',
+    'second@example.com',
+    'third@example.com',
+  ])
+
+  failThirdRecipient = false
+  const retried = await processDueAnalyticsReport(report, NOW, dependencies)
+
+  expect(renderedRecipients).toEqual([
+    'first@example.com',
+    'second@example.com',
+    'third@example.com',
+    'third@example.com',
+  ])
+  expect(retried).toMatchObject({
+    processed: true,
+    receiptsCreated: 1,
+    snapshotsStored: 1,
+  })
+  expect((await repository.getReport(report.workspaceId, report.id))?.schedule?.nextRunAt)
+    .toBe('2026-07-19T08:00:00.000Z')
 }, 15_000)
 
 test('advances the delivered occurrence after an unrelated report edit wins the first CAS', async () => {
   const repository = new InMemoryAnalyticsRepository(() => NOW)
   const report = await createScheduledReport(repository, ['recipient@example.com'])
   const originalUpdate = repository.updateReport.bind(repository)
-  let raced = false
+  let didRace = false
   repository.updateReport = async (workspaceId, reportId, input) => {
-    if (!raced) {
-      raced = true
+    if (!didRace) {
+      didRace = true
       await originalUpdate(workspaceId, reportId, {
         expectedRevision: input.expectedRevision,
         name: 'Edited during delivery',
@@ -1337,6 +1464,61 @@ test('advances the delivered occurrence after an unrelated report edit wins the 
   expect(current?.name).toBe('Edited during delivery')
   expect(current?.revision).toBe(3)
   expect(current?.schedule?.nextRunAt).toBe('2026-07-19T08:00:00.000Z')
+}, 10_000)
+
+test('reprocesses the occurrence when a semantic report edit wins the first CAS', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const originalUpdate = repository.updateReport.bind(repository)
+  let raced = false
+  repository.updateReport = async (workspaceId, reportId, input) => {
+    if (!raced) {
+      raced = true
+      await originalUpdate(workspaceId, reportId, {
+        expectedRevision: input.expectedRevision,
+        filter: {
+          period: {
+            from: '2026-07-08T00:00:00.000Z',
+            to: '2026-07-31T23:59:59.999Z',
+          },
+        },
+      })
+      throw new AnalyticsError(
+        409,
+        'AnalyticsRevisionConflict',
+        'Analytics report changed. Reload and try again.',
+      )
+    }
+    return await originalUpdate(workspaceId, reportId, input)
+  }
+  const renderedRevisions: number[] = []
+  const dependencies = {
+    repository,
+    async render(input: {
+      report: AnalyticsReport
+      recipientMemberKey: string
+      scheduledFor: string
+      historyReadAt: string
+    }) {
+      renderedRevisions.push(input.report.revision)
+      return createRenderedSnapshot(input.report, input.recipientMemberKey)
+    },
+    renderArtifact: async () => {},
+  }
+
+  await processDueAnalyticsReport(report, NOW, dependencies)
+
+  const currentAfterRace = await repository.getReport(report.workspaceId, report.id)
+  expect(currentAfterRace?.revision).toBe(2)
+  expect(currentAfterRace?.schedule?.nextRunAt).toBe(SCHEDULED_FOR)
+
+  await processDueAnalyticsReport(currentAfterRace!, NOW, dependencies)
+
+  expect(renderedRevisions).toEqual([1, 2])
+  const advanced = await repository.getReport(report.workspaceId, report.id)
+  expect(advanced?.revision).toBe(3)
+  expect(advanced?.schedule?.nextRunAt).toBe('2026-07-19T08:00:00.000Z')
+  expect(await repository.listSnapshots(report.workspaceId, report.id)).toHaveLength(2)
 }, 10_000)
 
 test('does not overwrite a schedule cursor changed by a concurrent edit', async () => {
@@ -1455,14 +1637,10 @@ test('fails closed when an occurrence receipt has a different immutable payload'
   const repository = new InMemoryAnalyticsRepository(() => NOW)
   const recipientMemberKey = 'recipient@example.com'
   const report = await createScheduledReport(repository, [recipientMemberKey])
-  const recipientHash = createHash('sha256')
-    .update(recipientMemberKey)
-    .digest('hex')
-    .slice(0, 24)
-  await repository.putDeliveryReceipt({
-    workspaceId: report.workspaceId,
-    reportId: report.id,
-    occurrenceKey: `${SCHEDULED_FOR}#${recipientHash}`,
+  repository.getDeliveryReceipt = async (workspaceId, reportId, occurrenceKey) => ({
+    workspaceId,
+    reportId,
+    occurrenceKey,
     reportRevision: report.revision,
     format: 'csv',
     snapshotId: 'different-snapshot',
@@ -1479,6 +1657,45 @@ test('fails closed when an occurrence receipt has a different immutable payload'
   })).rejects.toMatchObject({ code: 'AnalyticsDeliveryConflict' })
 
   expect((await repository.getReport(report.workspaceId, report.id))?.revision).toBe(1)
+})
+
+test('fails closed when a receipt checkpoint identity does not match its lookup key', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const recipientMemberKey = 'recipient@example.com'
+  const report = await createScheduledReport(repository, [recipientMemberKey])
+  repository.getDeliveryReceipt = async (workspaceId, reportId, occurrenceKey) => ({
+    workspaceId,
+    reportId,
+    occurrenceKey: `${occurrenceKey}#corrupt`,
+    reportRevision: report.revision,
+    format: 'csv',
+    snapshotId: 'different-snapshot',
+    recipientMemberKeys: [recipientMemberKey],
+    createdAt: SCHEDULED_FOR,
+  })
+
+  await expect(processDueAnalyticsReport(report, NOW, {
+    repository,
+    async render(input) {
+      return createRenderedSnapshot(input.report, input.recipientMemberKey)
+    },
+    renderArtifact: async () => {},
+  })).rejects.toMatchObject({ code: 'AnalyticsDeliveryConflict' })
+
+  expect((await repository.getReport(report.workspaceId, report.id))?.revision).toBe(1)
+})
+
+test('rejects schedules whose recipient list exceeds the processing limit', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const recipients = Array.from(
+    { length: 101 },
+    (_, index) => `recipient-${index}@example.com`,
+  )
+
+  await expect(createScheduledReport(repository, recipients)).rejects.toMatchObject({
+    code: 'AnalyticsScheduleRecipientLimitExceeded',
+    status: 413,
+  })
 })
 
 test('processes due reports with a bounded worker pool and preserves every settlement', async () => {
@@ -1643,6 +1860,7 @@ function createRenderedSnapshot(
   report: AnalyticsReport,
   recipientMemberKey: string,
   scheduledFor = SCHEDULED_FOR,
+  authorizedProjectIds: ReadonlySet<string> = new Set(),
 ) {
   const query = createReportQuery(report, scheduledFor)
   return {
@@ -1656,7 +1874,7 @@ function createRenderedSnapshot(
       workItems: [],
       events: [],
       query,
-      authorizedProjectIds: new Set(),
+      authorizedProjectIds,
     }),
   }
 }

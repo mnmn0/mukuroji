@@ -21,14 +21,23 @@ import {
   AnalyticsError,
   DynamoDbAnalyticsRepository,
   InMemoryAnalyticsRepository,
+  MAX_ANALYTICS_GENERATED_POINTS,
+  MAX_ANALYTICS_REPORTS_PER_WORKSPACE,
+  MAX_ANALYTICS_SNAPSHOT_RECORD_SERIALIZED_BYTES,
+  MAX_ANALYTICS_TABLE_PREVIEW_ROWS,
   calculateAnalyticsNextRunAt,
+  compareDynamoDbStringSortKeys,
   createAnalyticsCsv,
+  createAnalyticsNextDeliveryAtRecordKey,
   createAnalyticsPermissionScopeHash,
   createAnalyticsPdf,
   createAnalyticsScheduleShard,
   createAnalyticsSnapshot,
+  normalizeAnalyticsEvidenceInput,
   normalizeAnalyticsExportLocale,
+  normalizeAnalyticsQueryInput,
   queryAnalyticsEvidence,
+  validateAnalyticsSnapshotRecordSize,
 } from './analytics'
 import {
   AUDIT_SCHEMA_VERSION,
@@ -204,27 +213,71 @@ function createDynamoDocumentClient() {
         nextTransactionError = undefined
         throw error
       }
-      const writes = (command.input.TransactItems ?? []).flatMap((item) =>
-        item.Put === undefined ? [] : [item.Put]
-      )
-      for (const write of writes) {
-        const item = write.Item!
+      const transactionItems = command.input.TransactItems ?? []
+      const cancellationReasons = transactionItems.map((item) => {
         if (
-          write.ConditionExpression?.includes('attribute_not_exists') &&
-          rows.has(keyOf(item))
-        ) {
-          throw Object.assign(new Error('transaction canceled'), {
-            name: 'TransactionCanceledException',
-            CancellationReasons: [
-              { Code: 'ConditionalCheckFailed' },
-              { Code: 'None' },
-            ],
-          })
+          item.Put?.ConditionExpression?.includes('attribute_not_exists') &&
+          rows.has(keyOf(item.Put.Item!))
+        ) return { Code: 'ConditionalCheckFailed' }
+        if (item.Update !== undefined) {
+          const current = rows.get(keyOf(item.Update.Key!))
+          const values = item.Update.ExpressionAttributeValues ?? {}
+          const reportCount = typeof current?.reportCount === 'number'
+            ? current.reportCount
+            : undefined
+          if (
+            typeof values[':maximum'] === 'number' &&
+            reportCount !== undefined &&
+            reportCount >= values[':maximum']
+          ) return { Code: 'ConditionalCheckFailed' }
+          if (
+            typeof values[':zero'] === 'number' &&
+            (reportCount === undefined || reportCount <= values[':zero'])
+          ) return { Code: 'ConditionalCheckFailed' }
         }
+        if (item.Delete !== undefined) {
+          const current = rows.get(keyOf(item.Delete.Key!))
+          const expectedRevision =
+            item.Delete.ExpressionAttributeValues?.[':expectedRevision']
+          if (!current || current.revision !== expectedRevision) {
+            return { Code: 'ConditionalCheckFailed' }
+          }
+        }
+        return { Code: 'None' }
+      })
+      if (cancellationReasons.some((reason) =>
+        reason.Code === 'ConditionalCheckFailed'
+      )) {
+        throw Object.assign(new Error('transaction canceled'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: cancellationReasons,
+        })
       }
-      for (const write of writes) {
-        const item = write.Item!
-        rows.set(keyOf(item), structuredClone(item))
+      for (const transactionItem of transactionItems) {
+        if (transactionItem.Put !== undefined) {
+          const item = transactionItem.Put.Item!
+          rows.set(keyOf(item), structuredClone(item))
+        }
+        if (transactionItem.Update !== undefined) {
+          const key = transactionItem.Update.Key!
+          const values = transactionItem.Update.ExpressionAttributeValues ?? {}
+          const current = rows.get(keyOf(key)) ?? structuredClone(key)
+          if (typeof values[':entryType'] === 'string') {
+            current.entryType = values[':entryType']
+          }
+          const delta = typeof values[':increment'] === 'number'
+            ? values[':increment']
+            : typeof values[':decrement'] === 'number'
+              ? values[':decrement']
+              : 0
+          current.reportCount =
+            (typeof current.reportCount === 'number' ? current.reportCount : 0) +
+            delta
+          rows.set(keyOf(key), current)
+        }
+        if (transactionItem.Delete !== undefined) {
+          rows.delete(keyOf(transactionItem.Delete.Key!))
+        }
       }
       return {}
     }
@@ -261,7 +314,10 @@ function createDynamoDocumentClient() {
           (
             item.scheduleShard !== values[':scheduleShard'] ||
             typeof item.nextDeliveryAtRecordKey !== 'string' ||
-            item.nextDeliveryAtRecordKey > upperBound
+            compareDynamoDbStringSortKeys(
+                item.nextDeliveryAtRecordKey,
+                String(upperBound),
+              ) > 0
           )
         ) return false
         return true
@@ -270,7 +326,10 @@ function createDynamoDocumentClient() {
         ? 'recordKey'
         : 'nextDeliveryAtRecordKey'
       items.sort((left, right) =>
-        String(left[sortAttribute]).localeCompare(String(right[sortAttribute]))
+        compareDynamoDbStringSortKeys(
+          String(left[sortAttribute]),
+          String(right[sortAttribute]),
+        )
       )
       if (command.input.ScanIndexForward === false) items.reverse()
       const exclusiveStartIndex = command.input.ExclusiveStartKey === undefined
@@ -303,7 +362,14 @@ function createDynamoDocumentClient() {
       const lastEvaluatedKey = queryLastEvaluatedKey ?? naturalLastEvaluatedKey
       queryLastEvaluatedKey = undefined
       return {
-        Items: limitedItems,
+        Items: command.input.IndexName === undefined
+          ? limitedItems
+          : limitedItems.map((item) => ({
+              workspaceId: item.workspaceId,
+              recordKey: item.recordKey,
+              scheduleShard: item.scheduleShard,
+              nextDeliveryAtRecordKey: item.nextDeliveryAtRecordKey,
+            })),
         ...(lastEvaluatedKey === undefined ? {} : { LastEvaluatedKey: lastEvaluatedKey }),
       }
     }
@@ -1092,6 +1158,107 @@ describe('Analytics metric engine', () => {
     expect(first).not.toBe(accessChanged)
     expect(snapshot.permissionScopeHash).toBe(first)
   })
+
+  test('normalizes query and evidence inputs without evaluating a snapshot', () => {
+    const normalizedQuery = normalizeAnalyticsQueryInput(createQuery([], {
+      filter: {
+        period: {
+          from: period.from,
+          to: '2026-01-08T00:00:00.000Z',
+        },
+        teamIds: [' core ', 'core'],
+      },
+      asOf: period.to,
+    }))
+    const normalizedEvidence = normalizeAnalyticsEvidenceInput({
+      metric: 'throughput',
+      filter: {
+        period,
+        projectIds: [' project-1 ', 'project-1'],
+      },
+      asOf: period.to,
+      timeZone: 'UTC',
+    })
+
+    expect(normalizedQuery.filter.period.to).toBe(period.to)
+    expect(normalizedQuery.filter.teamIds).toEqual(['core'])
+    expect(normalizedEvidence.filter.projectIds).toEqual(['project-1'])
+    expect(normalizedEvidence.limit).toBe(50)
+  })
+
+  test('rejects excessive periods and generated calendar points before data evaluation', () => {
+    expect(() => normalizeAnalyticsQueryInput(createQuery([], {
+      filter: {
+        period: {
+          from: '2026-01-01T00:00:00.000Z',
+          to: '2027-01-03T00:00:00.000Z',
+        },
+      },
+      asOf: '2027-01-03T00:00:00.000Z',
+    }))).toThrow(expect.objectContaining({
+      code: 'AnalyticsQueryPeriodLimitExceeded',
+      status: 413,
+    }))
+
+    const charts = Array.from({ length: 50 }, (_, index) => ({
+      id: `daily-${index}`,
+      title: `Daily ${index}`,
+      type: 'chart' as const,
+      metric: 'throughput' as const,
+      groupBy: { dimension: 'day' as const },
+    }))
+    expect(MAX_ANALYTICS_GENERATED_POINTS).toBe(10_000)
+    expect(() => normalizeAnalyticsQueryInput(createQuery(charts, {
+      filter: {
+        period: {
+          from: '2026-01-01T00:00:00.000Z',
+          to: '2026-06-30T00:00:00.000Z',
+        },
+      },
+      asOf: '2026-06-30T00:00:00.000Z',
+    }))).toThrow(expect.objectContaining({
+      code: 'AnalyticsQueryPointLimitExceeded',
+      status: 413,
+    }))
+  })
+
+  test('stores only bounded table previews while evidence remains paged', () => {
+    const workItems = Array.from(
+      { length: MAX_ANALYTICS_TABLE_PREVIEW_ROWS + 25 },
+      (_, index) => createWorkItem(`preview-${String(index).padStart(3, '0')}`),
+    )
+    const events = workItems.map((item, index) =>
+      createAuditEvent(
+        `preview-completed-${index}`,
+        item,
+        '2026-01-06T00:00:00.000Z',
+        [{ field: 'statusCategory', before: 'started', after: 'completed' }],
+      )
+    )
+    const query = createQuery([{
+      id: 'preview',
+      title: 'Preview',
+      type: 'table',
+      metric: 'throughput',
+    }])
+    const snapshot = createTestAnalyticsSnapshot({ workItems, events, query })
+    const evidence = queryTestAnalyticsEvidence({
+      workItems,
+      events,
+      evidence: {
+        metric: 'throughput',
+        filter: query.filter,
+        asOf: query.asOf,
+        timeZone: query.timeZone,
+        limit: 200,
+      },
+    })
+
+    expect(snapshot.widgets[0]?.rows).toHaveLength(MAX_ANALYTICS_TABLE_PREVIEW_ROWS)
+    expect(snapshot.evidenceCount).toBe(workItems.length)
+    expect(evidence.items).toHaveLength(workItems.length)
+    expect(evidence.nextCursor).toBeUndefined()
+  })
 })
 
 describe('Analytics export', () => {
@@ -1322,6 +1489,100 @@ describe('Analytics repository', () => {
     expect(created.id).toBe('Report_1-safe')
   })
 
+  test('paginates report rows and enforces the in-memory Workspace quota', async () => {
+    const repository = new InMemoryAnalyticsRepository()
+    for (let index = 0; index < MAX_ANALYTICS_REPORTS_PER_WORKSPACE; index += 1) {
+      await repository.createReport(
+        'workspace-quota',
+        'member-1',
+        createReportInput({
+          id: `report-${String(index).padStart(4, '0')}`,
+        }),
+      )
+    }
+    await expect(repository.createReport(
+      'workspace-quota',
+      'member-1',
+      createReportInput({ id: 'report-over-quota' }),
+    )).rejects.toMatchObject({
+      code: 'AnalyticsReportQuotaExceeded',
+      status: 409,
+    })
+
+    const reportIds: string[] = []
+    let cursor: string | undefined
+    do {
+      const page = await repository.listReports(
+        'workspace-quota',
+        137,
+        cursor,
+      )
+      reportIds.push(...page.reports.map((report) => report.id))
+      cursor = page.nextCursor
+    } while (cursor !== undefined)
+    expect(reportIds).toHaveLength(MAX_ANALYTICS_REPORTS_PER_WORKSPACE)
+    expect(new Set(reportIds).size).toBe(MAX_ANALYTICS_REPORTS_PER_WORKSPACE)
+    expect(reportIds[0]).toBe('report-0000')
+    expect(reportIds.at(-1)).toBe('report-0999')
+
+    await repository.deleteReport('workspace-quota', 'report-0000', 1)
+    await expect(repository.createReport(
+      'workspace-quota',
+      'member-1',
+      createReportInput({ id: 'report-replacement' }),
+    )).resolves.toMatchObject({ id: 'report-replacement' })
+  })
+
+  test('uses one DynamoDB transaction for report quota and uniqueness', async () => {
+    const fake = createDynamoDocumentClient()
+    const repository = new DynamoDbAnalyticsRepository('analytics-table', fake.client)
+    const first = await repository.createReport(
+      'workspace-quota',
+      'member-1',
+      createReportInput({ id: 'first' }),
+    )
+    await repository.createReport(
+      'workspace-quota',
+      'member-1',
+      createReportInput({ id: 'second' }),
+    )
+    const counter = [...fake.rows.values()].find((row) =>
+      row.entryType === 'analytics-report-counter'
+    )
+    expect(counter?.reportCount).toBe(2)
+    const firstPage = await repository.listReports('workspace-quota', 1)
+    const secondPage = await repository.listReports(
+      'workspace-quota',
+      1,
+      firstPage.nextCursor,
+    )
+    expect(firstPage.reports.map((report) => report.id)).toEqual(['first'])
+    expect(firstPage.nextCursor).toBeDefined()
+    expect(secondPage.reports.map((report) => report.id)).toEqual(['second'])
+    expect(secondPage.nextCursor).toBeUndefined()
+    counter!.reportCount = MAX_ANALYTICS_REPORTS_PER_WORKSPACE
+
+    await expect(repository.createReport(
+      'workspace-quota',
+      'member-1',
+      createReportInput({ id: 'over-quota' }),
+    )).rejects.toMatchObject({
+      code: 'AnalyticsReportQuotaExceeded',
+      status: 409,
+    })
+    expect([...fake.rows.values()].some((row) => row.id === 'over-quota')).toBeFalse()
+
+    counter!.reportCount = 2
+    await repository.deleteReport(first.workspaceId, first.id, first.revision)
+    expect(counter?.reportCount).toBe(1)
+    await expect(repository.createReport(
+      'workspace-quota',
+      'member-1',
+      createReportInput({ id: 'replacement' }),
+    )).resolves.toMatchObject({ id: 'replacement' })
+    expect(counter?.reportCount).toBe(2)
+  })
+
   test('enforces report revisions and immutable snapshot payloads', async () => {
     const repository = new InMemoryAnalyticsRepository(
       () => new Date('2026-01-08T00:00:00.000Z'),
@@ -1387,6 +1648,56 @@ describe('Analytics repository', () => {
     })).rejects.toMatchObject({ code: 'AnalyticsSnapshotQueryMismatch' })
   })
 
+  test('rejects oversized serialized snapshot records before persistence', async () => {
+    const largeValue = '界'.repeat(60_000)
+    const query = createQuery([], {
+      filter: {
+        period,
+        customFields: [{
+          fieldId: 'large-value',
+          operator: 'equals',
+          value: largeValue,
+        }],
+      },
+    })
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [],
+      events: [],
+      query,
+    })
+    const record: AnalyticsSnapshotRecord = {
+      id: 'oversized',
+      workspaceId: 'workspace-1',
+      createdByMemberKey: 'member-1',
+      createdAt: period.to,
+      query,
+      snapshot,
+    }
+
+    expect(Buffer.byteLength(JSON.stringify(record), 'utf8'))
+      .toBeGreaterThan(MAX_ANALYTICS_SNAPSHOT_RECORD_SERIALIZED_BYTES)
+    expect(() => validateAnalyticsSnapshotRecordSize(record)).toThrow(
+      expect.objectContaining({
+        code: 'AnalyticsSnapshotRecordTooLarge',
+        status: 413,
+      }),
+    )
+    await expect(new InMemoryAnalyticsRepository().putSnapshot(record))
+      .rejects.toMatchObject({
+        code: 'AnalyticsSnapshotRecordTooLarge',
+        status: 413,
+      })
+    const fake = createDynamoDocumentClient()
+    await expect(
+      new DynamoDbAnalyticsRepository('analytics-table', fake.client)
+        .putSnapshot(record),
+    ).rejects.toMatchObject({
+      code: 'AnalyticsSnapshotRecordTooLarge',
+      status: 413,
+    })
+    expect(fake.commands).toHaveLength(0)
+  })
+
   test('orders due schedules and stores occurrence receipts idempotently', async () => {
     const repository = new InMemoryAnalyticsRepository(
       () => new Date('2026-01-08T00:00:00.000Z'),
@@ -1445,6 +1756,16 @@ describe('Analytics repository', () => {
     })
     expect(retried.created).toBeFalse()
     expect(retried.receipt.createdAt).toBe(receipt.createdAt)
+    expect(await repository.getDeliveryReceipt(
+      receipt.workspaceId,
+      receipt.reportId,
+      receipt.occurrenceKey,
+    )).toEqual(receipt)
+    expect(await repository.getDeliveryReceipt(
+      receipt.workspaceId,
+      receipt.reportId,
+      'missing-occurrence',
+    )).toBeUndefined()
     await expect(repository.putDeliveryReceipt({
       ...receipt,
       snapshotId: 'different',
@@ -1482,11 +1803,13 @@ describe('Analytics repository', () => {
     )
     expect(firstPage.reports.map((report) => report.id)).toEqual(reportIds.slice(0, 2))
     expect(firstPage.nextCursor).toBeDefined()
-    for (const report of firstPage.reports) {
-      await repository.updateReport(report.workspaceId, report.id, {
-        expectedRevision: report.revision,
+    for (const reference of firstPage.reports) {
+      const report = await repository.getReport(reference.workspaceId, reference.id)
+      expect(report).toBeDefined()
+      await repository.updateReport(reference.workspaceId, reference.id, {
+        expectedRevision: report!.revision,
         schedule: {
-          ...report.schedule!,
+          ...report!.schedule!,
           localTime: '10:00',
         },
       })
@@ -1552,6 +1875,129 @@ describe('Analytics repository', () => {
     expect(secondPage.reports.map((report) => report.id)).toEqual(
       selectedReportIds.slice(1),
     )
+  })
+
+  test('matches DynamoDB UTF-8 ordering for non-ASCII due cursor boundaries', async () => {
+    const firstWorkspaceId = 'workspace-\uE000'
+    const secondWorkspaceId = 'workspace-\u{10000}'
+    expect(compareDynamoDbStringSortKeys(firstWorkspaceId, secondWorkspaceId))
+      .toBeLessThan(0)
+
+    const firstIdsByShard = new Map<string, string>()
+    for (let index = 0; index < 64; index += 1) {
+      const id = `first-${index}`
+      const shard = createAnalyticsScheduleShard(firstWorkspaceId, id)
+      if (!firstIdsByShard.has(shard)) firstIdsByShard.set(shard, id)
+    }
+    let matching: { shard: string; firstId: string; secondId: string } | undefined
+    for (let index = 0; index < 64 && matching === undefined; index += 1) {
+      const secondId = `second-${index}`
+      const shard = createAnalyticsScheduleShard(secondWorkspaceId, secondId)
+      const firstId = firstIdsByShard.get(shard)
+      if (firstId !== undefined) matching = { shard, firstId, secondId }
+    }
+    expect(matching).toBeDefined()
+
+    const nextRunAt = '2026-01-08T08:00:00.000Z'
+    const definitions = [{
+      workspaceId: firstWorkspaceId,
+      id: matching!.firstId,
+    }, {
+      workspaceId: secondWorkspaceId,
+      id: matching!.secondId,
+    }]
+    const expectedIds = [...definitions]
+      .sort((left, right) =>
+        compareDynamoDbStringSortKeys(
+          createAnalyticsNextDeliveryAtRecordKey(
+            nextRunAt,
+            left.workspaceId,
+            left.id,
+          ),
+          createAnalyticsNextDeliveryAtRecordKey(
+            nextRunAt,
+            right.workspaceId,
+            right.id,
+          ),
+        )
+      )
+      .map((definition) => definition.id)
+    const fake = createDynamoDocumentClient()
+    const repositories = [
+      new InMemoryAnalyticsRepository(),
+      new DynamoDbAnalyticsRepository('analytics-table', fake.client),
+    ]
+    for (const repository of repositories) {
+      for (const definition of definitions) {
+        await repository.createReport(
+          definition.workspaceId,
+          'member-1',
+          createReportInput({
+            id: definition.id,
+            schedule: {
+              enabled: true,
+              frequency: 'daily',
+              timeZone: 'UTC',
+              localTime: '08:00',
+              recipientMemberKeys: ['member-1'],
+              format: 'pdf',
+              nextRunAt,
+            },
+          }),
+        )
+      }
+      const firstPage = await repository.listDueReports(
+        matching!.shard,
+        '2026-01-08T09:00:00.000Z',
+        1,
+      )
+      const secondPage = await repository.listDueReports(
+        matching!.shard,
+        '2026-01-08T09:00:00.000Z',
+        1,
+        firstPage.nextCursor,
+      )
+      const references = [...firstPage.reports, ...secondPage.reports]
+      expect(references.map((reference) => reference.id)).toEqual(expectedIds)
+      expect(references.every((reference) =>
+        Object.keys(reference).sort().join(',') === 'id,workspaceId'
+      )).toBeTrue()
+    }
+  })
+
+  test('orders equal-time snapshots by their DynamoDB record keys', async () => {
+    const query = createQuery([])
+    const snapshot = createTestAnalyticsSnapshot({ workItems: [], events: [], query })
+    const records = ['snapshot-\uE000', 'snapshot-\u{10000}'].map((id) => ({
+      id,
+      workspaceId: 'workspace-1',
+      reportId: 'report-1',
+      reportRevision: 1,
+      createdByMemberKey: 'member-1',
+      createdAt: '2026-01-08T09:00:00.000Z',
+      query,
+      snapshot,
+    } satisfies AnalyticsSnapshotRecord))
+    const expectedIds = [...records]
+      .sort((left, right) =>
+        compareDynamoDbStringSortKeys(
+          encodeURIComponent(right.id),
+          encodeURIComponent(left.id),
+        )
+      )
+      .map((record) => record.id)
+    const memory = new InMemoryAnalyticsRepository()
+    const fake = createDynamoDocumentClient()
+    const dynamo = new DynamoDbAnalyticsRepository('analytics-table', fake.client)
+    for (const record of records) {
+      await memory.putSnapshot(record)
+      await dynamo.putSnapshot(record)
+    }
+
+    expect((await memory.listSnapshots('workspace-1', 'report-1'))
+      .map((record) => record.id)).toEqual(expectedIds)
+    expect((await dynamo.listSnapshots('workspace-1', 'report-1'))
+      .map((record) => record.id)).toEqual(expectedIds)
   })
 
   test('limits snapshot history in the DynamoDB query before deserializing payloads', async () => {
@@ -1632,8 +2078,16 @@ describe('Analytics repository', () => {
     expect(reportRow.nextDeliveryAtRecordKey).toBe(
       '2026-01-08T09:00:00.000Z#workspace-1#report-1',
     )
-    const createPut = fake.commands.find((command) => command instanceof PutCommand) as PutCommand
-    expect(createPut.input.ConditionExpression).toContain('attribute_not_exists')
+    const createTransaction = fake.commands.find((command) =>
+      command instanceof TransactWriteCommand &&
+      command.input.TransactItems?.some((item) =>
+        item.Put?.Item?.entryType === 'analytics-report'
+      )
+    ) as TransactWriteCommand
+    expect(createTransaction.input.TransactItems?.[0]?.Update?.ConditionExpression)
+      .toContain('#reportCount < :maximum')
+    expect(createTransaction.input.TransactItems?.[1]?.Put?.ConditionExpression)
+      .toContain('attribute_not_exists')
 
     const updated = await repository.updateReport('workspace-1', report.id, {
       expectedRevision: 1,
@@ -1666,7 +2120,7 @@ describe('Analytics repository', () => {
       .find((command) => command instanceof QueryCommand) as QueryCommand
     expect(firstDueQuery.input.IndexName).toBe('ScheduleDueIndex')
     expect(firstDueQuery.input.ExpressionAttributeValues?.[':upperBound']).toBe(
-      '2026-01-08T09:00:00.000Z#\u{10FFFF}',
+      '2026-01-08T09:00:00.000Z$',
     )
     await repository.listDueReports(
       scheduleShard,
@@ -1716,6 +2170,18 @@ describe('Analytics repository', () => {
     })
     expect(receiptRetry.created).toBeFalse()
     expect(receiptRetry.receipt.createdAt).toBe(receipt.createdAt)
+    expect(await repository.getDeliveryReceipt(
+      receipt.workspaceId,
+      receipt.reportId,
+      receipt.occurrenceKey,
+    )).toEqual(receipt)
+    const receiptGet = [...fake.commands]
+      .reverse()
+      .find((command) =>
+        command instanceof GetCommand &&
+        String(command.input.Key?.recordKey).startsWith('DELIVERY#')
+      ) as GetCommand
+    expect(receiptGet.input.ConsistentRead).toBeTrue()
   })
 
   test('does not misclassify operational transaction cancellations as snapshot conflicts', async () => {

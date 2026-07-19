@@ -15,9 +15,11 @@ import {
   getConfiguredDynamoDbEndpoint,
 } from './audit'
 import {
+  ANALYTICS_SCHEDULE_RECIPIENT_LIMIT,
   ANALYTICS_SCHEDULE_SHARD_COUNT,
   AnalyticsError,
   type AnalyticsDeliveryReceipt,
+  type AnalyticsDueReportReference,
   type AnalyticsRepository,
   calculateAnalyticsNextRunAt,
   createAnalyticsCsv,
@@ -410,7 +412,7 @@ export async function processAnalyticsSchedule(
 
 /** Due report page を固定数 worker で処理し、各 report の成否をすべて保持します。 */
 async function processAnalyticsScheduleReportBatch(
-  reports: readonly AnalyticsReport[],
+  reports: readonly AnalyticsDueReportReference[],
   now: Date,
   dependencies: AnalyticsScheduleDependencies,
 ): Promise<PromiseSettledResult<AnalyticsScheduledReportResult>[]> {
@@ -442,7 +444,7 @@ async function processAnalyticsScheduleReportBatch(
 
 /** 一つの current report occurrence を recipient ごとに配信し、CAS で次回へ進めます。 */
 export async function processDueAnalyticsReport(
-  indexedReport: AnalyticsReport,
+  indexedReport: AnalyticsDueReportReference,
   now: Date,
   dependencies: AnalyticsScheduleDependencies,
 ): Promise<AnalyticsScheduledReportResult> {
@@ -461,6 +463,13 @@ export async function processDueAnalyticsReport(
   }
 
   const scheduledFor = schedule.nextRunAt
+  if (schedule.recipientMemberKeys.length > ANALYTICS_SCHEDULE_RECIPIENT_LIMIT) {
+    throw new AnalyticsError(
+      413,
+      'AnalyticsScheduleRecipientLimitExceeded',
+      'Analytics schedule recipients exceed the safe processing limit.',
+    )
+  }
   const result: AnalyticsScheduledReportResult = {
     processed: true,
     snapshotsStored: 0,
@@ -469,6 +478,22 @@ export async function processDueAnalyticsReport(
   }
 
   for (const recipientMemberKey of schedule.recipientMemberKeys) {
+    const occurrenceKey = createAnalyticsScheduleOccurrenceKey(
+      current,
+      scheduledFor,
+      recipientMemberKey,
+    )
+    if (
+      await hasCompletedAnalyticsScheduleDelivery(
+        current,
+        scheduledFor,
+        recipientMemberKey,
+        occurrenceKey,
+        dependencies.repository,
+      )
+    ) {
+      continue
+    }
     const rendered = await dependencies.render({
       report: current,
       recipientMemberKey,
@@ -493,10 +518,7 @@ export async function processDueAnalyticsReport(
     const receipt: AnalyticsDeliveryReceipt = {
       workspaceId: current.workspaceId,
       reportId: current.id,
-      occurrenceKey: createAnalyticsScheduleOccurrenceKey(
-        scheduledFor,
-        recipientMemberKey,
-      ),
+      occurrenceKey,
       reportRevision: current.revision,
       format: schedule.format,
       snapshotId: snapshotRecord.id,
@@ -506,9 +528,26 @@ export async function processDueAnalyticsReport(
     await dependencies.renderArtifact({ snapshotRecord, receipt })
     await dependencies.repository.putSnapshot(snapshotRecord)
     result.snapshotsStored += 1
-    const receiptResult = await dependencies.repository.putDeliveryReceipt(receipt)
-    if (receiptResult.created) {
-      result.receiptsCreated += 1
+    try {
+      const receiptResult = await dependencies.repository.putDeliveryReceipt(receipt)
+      if (receiptResult.created) {
+        result.receiptsCreated += 1
+      }
+    } catch (error) {
+      if (
+        error instanceof AnalyticsError &&
+        error.code === 'AnalyticsDeliveryConflict' &&
+        await hasCompletedAnalyticsScheduleDelivery(
+          current,
+          scheduledFor,
+          recipientMemberKey,
+          occurrenceKey,
+          dependencies.repository,
+        )
+      ) {
+        continue
+      }
+      throw error
     }
   }
 
@@ -526,8 +565,7 @@ export async function processDueAnalyticsReport(
       throw error
     }
     await advanceRacedAnalyticsScheduleOccurrence(
-      current.workspaceId,
-      current.id,
+      current,
       scheduledFor,
       dependencies.repository,
     )
@@ -537,17 +575,21 @@ export async function processDueAnalyticsReport(
 }
 
 /**
- * Delivery 後の無関係な report edit race では current revision を再取得して bounded CAS
- * し、schedule cursor 自体が変更済みならその mutation を尊重して no-op にします。
+ * Delivery 後の無関係な report edit race だけを current revision で bounded CAS します。
+ *
+ * @remarks Semantic configuration または schedule cursor が変更済みなら、新 definition
+ * を次の invocation が同じ occurrence で処理できるよう no-op にします。
  */
 async function advanceRacedAnalyticsScheduleOccurrence(
-  workspaceId: string,
-  reportId: string,
+  deliveredReport: AnalyticsReport,
   scheduledFor: string,
   repository: AnalyticsRepository,
 ) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const raced = await repository.getReport(workspaceId, reportId)
+    const raced = await repository.getReport(
+      deliveredReport.workspaceId,
+      deliveredReport.id,
+    )
     if (
       !raced?.schedule?.enabled ||
       raced.schedule.nextRunAt === undefined ||
@@ -555,14 +597,24 @@ async function advanceRacedAnalyticsScheduleOccurrence(
     ) {
       return
     }
+    if (
+      createAnalyticsDeliveryDefinitionHash(raced) !==
+        createAnalyticsDeliveryDefinitionHash(deliveredReport)
+    ) {
+      return
+    }
     try {
-      await repository.updateReport(workspaceId, reportId, {
-        expectedRevision: raced.revision,
-        schedule: {
-          ...raced.schedule,
-          nextRunAt: getNextAnalyticsScheduleOccurrence(raced, scheduledFor),
+      await repository.updateReport(
+        deliveredReport.workspaceId,
+        deliveredReport.id,
+        {
+          expectedRevision: raced.revision,
+          schedule: {
+            ...raced.schedule,
+            nextRunAt: getNextAnalyticsScheduleOccurrence(raced, scheduledFor),
+          },
         },
-      })
+      )
       return
     } catch (error) {
       if (!(error instanceof AnalyticsError) || error.code !== 'AnalyticsRevisionConflict') {
@@ -1257,16 +1309,100 @@ function createScheduledAnalyticsSnapshotId(
   return `scheduled_${digest.slice(0, 48)}`
 }
 
+/** Report revision に依存しない delivery semantic configuration hash を返します。 */
+function createAnalyticsDeliveryDefinitionHash(report: AnalyticsReport) {
+  const schedule = report.schedule
+  return createHash('sha256')
+    .update(stableAnalyticsScheduleStringify({
+      schemaVersion: report.schemaVersion,
+      workspaceId: report.workspaceId,
+      reportId: report.id,
+      ownerMemberKey: report.ownerMemberKey,
+      visibility: report.visibility,
+      teamId: report.teamId,
+      timeZone: report.timeZone,
+      filter: report.filter,
+      forecastBaseline: report.forecastBaseline,
+      widgets: report.widgets,
+      schedule: schedule === undefined
+        ? undefined
+        : {
+            enabled: schedule.enabled,
+            frequency: schedule.frequency,
+            timeZone: schedule.timeZone,
+            localTime: schedule.localTime,
+            dayOfWeek: schedule.dayOfWeek,
+            dayOfMonth: schedule.dayOfMonth,
+            recipientMemberKeys: schedule.recipientMemberKeys,
+            format: schedule.format,
+          },
+    }))
+    .digest('hex')
+}
+
 /** Recipient ごとの deterministic occurrence receipt key を返します。 */
 function createAnalyticsScheduleOccurrenceKey(
+  report: AnalyticsReport,
   scheduledFor: string,
   recipientMemberKey: string,
 ) {
+  const definitionHash = createAnalyticsDeliveryDefinitionHash(report).slice(0, 32)
   const recipientHash = createHash('sha256')
     .update(recipientMemberKey)
     .digest('hex')
     .slice(0, 24)
-  return `${scheduledFor}#${recipientHash}`
+  return `${scheduledFor}#${definitionHash}#${recipientHash}`
+}
+
+/** Durable receipt と snapshot が recipient の完了 checkpoint を構成するか検証します。 */
+async function hasCompletedAnalyticsScheduleDelivery(
+  report: AnalyticsReport,
+  scheduledFor: string,
+  recipientMemberKey: string,
+  occurrenceKey: string,
+  repository: AnalyticsRepository,
+) {
+  const receipt = await repository.getDeliveryReceipt(
+    report.workspaceId,
+    report.id,
+    occurrenceKey,
+  )
+  if (receipt === undefined) return false
+  if (
+    receipt.workspaceId !== report.workspaceId ||
+    receipt.reportId !== report.id ||
+    receipt.occurrenceKey !== occurrenceKey ||
+    receipt.createdAt !== scheduledFor ||
+    receipt.recipientMemberKeys.length !== 1 ||
+    receipt.recipientMemberKeys[0] !== recipientMemberKey
+  ) {
+    throw analyticsDeliveryCheckpointConflict()
+  }
+  const snapshot = await repository.getSnapshot(
+    receipt.workspaceId,
+    receipt.snapshotId,
+  )
+  if (
+    snapshot === undefined ||
+    snapshot.workspaceId !== receipt.workspaceId ||
+    snapshot.reportId !== receipt.reportId ||
+    snapshot.id !== receipt.snapshotId ||
+    snapshot.reportRevision !== receipt.reportRevision ||
+    snapshot.createdAt !== scheduledFor ||
+    snapshot.query.asOf !== scheduledFor
+  ) {
+    throw analyticsDeliveryCheckpointConflict()
+  }
+  return true
+}
+
+/** 不整合な durable delivery checkpoint を fail-closed で拒否します。 */
+function analyticsDeliveryCheckpointConflict() {
+  return new AnalyticsError(
+    409,
+    'AnalyticsDeliveryConflict',
+    'Analytics delivery checkpoint does not match its immutable occurrence.',
+  )
 }
 
 /** Analytics schedule を recurring helper へ変換し、次の UTC occurrence を返します。 */

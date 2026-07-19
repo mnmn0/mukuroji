@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto'
 import {
-  DeleteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -23,7 +22,6 @@ import {
   type AnalyticsMetricKey,
   type AnalyticsQueryInput,
   type AnalyticsReport,
-  type AnalyticsReportListResponse,
   type AnalyticsSchedule,
   type AnalyticsSeriesPoint,
   type AnalyticsSnapshot,
@@ -44,10 +42,13 @@ const SNAPSHOT_ID_RECORD_PREFIX = 'SNAPSHOT_ID#'
 const DELIVERY_RECORD_PREFIX = 'DELIVERY#'
 const DEFAULT_EVIDENCE_LIMIT = 50
 const MAX_EVIDENCE_LIMIT = 200
+const MAX_EVIDENCE_CURSOR_LENGTH = 1_024
+const DEFAULT_REPORT_LIST_LIMIT = 100
+const MAX_REPORT_LIST_LIMIT = 200
 const MAX_SNAPSHOT_LIST_LIMIT = 100
 const MAX_STORAGE_CURSOR_LENGTH = 16_384
 const MAX_DUE_CURSOR_BOUNDARY_LENGTH = 2_048
-const MAX_REPORTS_PER_WORKSPACE = 1_000
+const REPORT_COUNT_RECORD_KEY = 'META#REPORT_COUNT'
 const DEFAULT_SLA_TARGET_HOURS = 72
 const MILLISECONDS_PER_HOUR = 60 * 60 * 1_000
 const MILLISECONDS_PER_DAY = 24 * MILLISECONDS_PER_HOUR
@@ -59,6 +60,25 @@ const localDateFormatterCache = new Map<string, Intl.DateTimeFormat>()
 const PDF_LINES_PER_PAGE = 36
 const PDF_JAPANESE_FONT_NAME =
   `${createPdfFontSubsetTag(analyticsPdfFont.bytes)}+NotoSansJP-Thin`
+
+/** 一つの Workspace に保存できる Analytics report の最大件数です。 */
+export const MAX_ANALYTICS_REPORTS_PER_WORKSPACE = 1_000
+
+/** Analytics query が対象にできる実効期間の最大日数です。 */
+export const MAX_ANALYTICS_QUERY_PERIOD_DAYS = 366
+
+/** 一つの Analytics query が生成できる calendar point の最大総数です。 */
+export const MAX_ANALYTICS_GENERATED_POINTS = 10_000
+
+/** Table widget の snapshot に含める evidence preview 行の最大件数です。 */
+export const MAX_ANALYTICS_TABLE_PREVIEW_ROWS = 50
+
+/** Live Analytics snapshot の UTF-8 JSON byte 上限です。 */
+export const MAX_ANALYTICS_SNAPSHOT_SERIALIZED_BYTES = 256 * 1_024
+
+/** DynamoDBへ保存する snapshot row の安全な UTF-8 JSON byte 上限です。 */
+export const MAX_ANALYTICS_SNAPSHOT_RECORD_SERIALIZED_BYTES = 350 * 1_024
+
 const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
   en: Object.freeze({
     csvHeaders: Object.freeze([
@@ -169,6 +189,9 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
 /** Analytics schedule GSI を分散する固定 shard 数です。 */
 export const ANALYTICS_SCHEDULE_SHARD_COUNT = 16
 
+/** 一つの Analytics schedule に保存できる recipient 数の上限です。 */
+export const ANALYTICS_SCHEDULE_RECIPIENT_LIMIT = 100
+
 /** Analytics schedule の due report query に使う既定 GSI 名です。 */
 export const ANALYTICS_SCHEDULE_DUE_INDEX_NAME = 'ScheduleDueIndex'
 
@@ -193,6 +216,17 @@ export function createAnalyticsScheduleShard(
   return `schedule-${
     String(digest[0]! % ANALYTICS_SCHEDULE_SHARD_COUNT).padStart(2, '0')
   }`
+}
+
+/**
+ * DynamoDB String sort key と同じ UTF-8 byte order で文字列を比較します。
+ *
+ * @param left - 左辺の sort key です。
+ * @param right - 右辺の sort key です。
+ * @returns 左辺が先なら負、同一なら0、後なら正の値です。
+ */
+export function compareDynamoDbStringSortKeys(left: string, right: string) {
+  return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))
 }
 
 /** Analytics domain と persistence の stable error です。 */
@@ -261,11 +295,27 @@ export type AnalyticsDeliveryReceipt = {
   createdAt: string
 }
 
+/** Due report を強整合 read するための最小参照です。 */
+export type AnalyticsDueReportReference = {
+  /** Report を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Workspace 内の report ID です。 */
+  id: string
+}
+
 /** Due report query の page です。 */
 export type AnalyticsDueReportPage = {
   /** `asOf` 以前に実行期限を迎えた report です。 */
-  reports: AnalyticsReport[]
+  reports: AnalyticsDueReportReference[]
   /** 返却済み report が due 集合から消えても継続できる exclusive keyset cursor です。 */
+  nextCursor?: string
+}
+
+/** Analytics report repository list の cursor page です。 */
+export type AnalyticsReportPage = {
+  /** Stable DynamoDB sort key 順の report です。 */
+  reports: AnalyticsReport[]
+  /** 続きがある場合の scope-bound opaque cursor です。 */
   nextCursor?: string
 }
 
@@ -279,8 +329,12 @@ export type AnalyticsDeliveryReceiptResult = {
 
 /** Analytics report と immutable snapshot を保存する repository です。 */
 export type AnalyticsRepository = {
-  /** Workspace report 一覧を返します。ACL は API 境界で別途適用します。 */
-  listReports(workspaceId: string): Promise<AnalyticsReportListResponse>
+  /** Workspace report 一覧を cursor page で返します。ACL は API 境界で別途適用します。 */
+  listReports(
+    workspaceId: string,
+    limit?: number,
+    cursor?: string,
+  ): Promise<AnalyticsReportPage>
   /** Workspace 内の report を返します。 */
   getReport(workspaceId: string, reportId: string): Promise<AnalyticsReport | undefined>
   /** 新しい report を revision 1 で保存します。 */
@@ -316,6 +370,12 @@ export type AnalyticsRepository = {
   ): Promise<AnalyticsDueReportPage>
   /** Schedule occurrence ごとの delivery receipt を idempotent に保存します。 */
   putDeliveryReceipt(record: AnalyticsDeliveryReceipt): Promise<AnalyticsDeliveryReceiptResult>
+  /** Schedule occurrence ごとの delivery receipt を強整合 read で返します。 */
+  getDeliveryReceipt(
+    workspaceId: string,
+    reportId: string,
+    occurrenceKey: string,
+  ): Promise<AnalyticsDeliveryReceipt | undefined>
 }
 
 /** DynamoDB Analytics repository の設定です。 */
@@ -677,7 +737,9 @@ export function parseAnalyticsEvidenceCursor(cursor: string, scopeHash: string) 
   const normalizedScopeHash = readIdentifier(scopeHash, 'Analytics evidence scope hash')
   let value: unknown
   try {
-    value = JSON.parse(Buffer.from(readIdentifier(cursor, 'Analytics evidence cursor'), 'base64url').toString('utf8'))
+    value = JSON.parse(
+      Buffer.from(readAnalyticsEvidenceCursor(cursor), 'base64url').toString('utf8'),
+    )
   } catch {
     throw invalid('AnalyticsEvidenceCursorInvalid', 'Analytics evidence cursor is invalid.')
   }
@@ -692,6 +754,71 @@ export function parseAnalyticsEvidenceCursor(cursor: string, scopeHash: string) 
     throw invalid('AnalyticsEvidenceCursorInvalid', 'Analytics evidence cursor does not match this query.')
   }
   return value.offset
+}
+
+/**
+ * Analytics query をデータ読取なしで正規化し、計算量上限を検証します。
+ *
+ * @param query - Client または保存済み report から得た query です。
+ * @returns ACL read と最終計算の両方で再利用する canonical query です。
+ */
+export function normalizeAnalyticsQueryInput(
+  query: AnalyticsQueryInput,
+): AnalyticsQueryInput {
+  return structuredClone(normalizeAnalyticsQuery(query).query)
+}
+
+/**
+ * Evidence input をデータ読取なしで正規化し、queryとpage上限を検証します。
+ *
+ * @remarks
+ * Cursor の permission scope 整合性は、認可済み Work Item 集合が確定した後に
+ * `queryAnalyticsEvidence` が検証します。
+ *
+ * @param evidence - Client から得た evidence query です。
+ * @returns ACL read と最終計算の両方で再利用する canonical evidence input です。
+ */
+export function normalizeAnalyticsEvidenceInput(
+  evidence: AnalyticsEvidenceInput,
+): AnalyticsEvidenceInput {
+  if (!isRecord(evidence)) {
+    throw invalid('AnalyticsEvidenceInvalid', 'Analytics evidence input must be an object.')
+  }
+  const metric = readMetricKey(evidence.metric)
+  const slaTargetHours = evidence.slaTargetHours === undefined
+    ? undefined
+    : readPositiveNumber(evidence.slaTargetHours, 'Analytics SLA target hours')
+  const normalizedQuery = normalizeAnalyticsQueryInput({
+    filter: evidence.filter as AnalyticsFilter,
+    widgets: [{
+      id: 'evidence',
+      title: 'Evidence',
+      type: 'table',
+      metric,
+      ...(slaTargetHours === undefined ? {} : { slaTargetHours }),
+    }],
+    asOf: evidence.asOf as string,
+    timeZone: evidence.timeZone as string,
+  })
+  const limit = evidence.limit === undefined
+    ? DEFAULT_EVIDENCE_LIMIT
+    : readPositiveInteger(
+        evidence.limit,
+        'Analytics evidence limit',
+        MAX_EVIDENCE_LIMIT,
+      )
+  const cursor = evidence.cursor === undefined
+    ? undefined
+    : readAnalyticsEvidenceCursor(evidence.cursor)
+  return {
+    metric,
+    filter: normalizedQuery.filter,
+    asOf: normalizedQuery.asOf,
+    timeZone: normalizedQuery.timeZone,
+    ...(slaTargetHours === undefined ? {} : { slaTargetHours }),
+    limit,
+    ...(cursor === undefined ? {} : { cursor }),
+  }
 }
 
 /**
@@ -744,7 +871,7 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
     authorizedProjectIds,
   )
 
-  return {
+  const snapshot: AnalyticsSnapshot = {
     schemaVersion: ANALYTICS_SCHEMA_VERSION,
     asOf: normalized.query.asOf,
     timeZone: normalized.query.timeZone,
@@ -756,6 +883,8 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
     forecast: createForecast(facts, normalized),
     generatedAt: normalized.query.asOf,
   }
+  validateAnalyticsSnapshotSize(snapshot)
+  return snapshot
 }
 
 /**
@@ -767,19 +896,20 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
 export function queryAnalyticsEvidence(
   input: AnalyticsEvidenceEngineInput,
 ): AnalyticsEvidenceResponse {
+  const evidence = normalizeAnalyticsEvidenceInput(input.evidence)
   const query: AnalyticsQueryInput = {
-    filter: input.evidence.filter,
+    filter: evidence.filter,
     widgets: [{
       id: 'evidence',
       title: 'Evidence',
       type: 'table',
-      metric: input.evidence.metric,
-      ...(input.evidence.slaTargetHours === undefined
+      metric: evidence.metric,
+      ...(evidence.slaTargetHours === undefined
         ? {}
-        : { slaTargetHours: input.evidence.slaTargetHours }),
+        : { slaTargetHours: evidence.slaTargetHours }),
     }],
-    asOf: input.evidence.asOf,
-    timeZone: input.evidence.timeZone,
+    asOf: evidence.asOf,
+    timeZone: evidence.timeZone,
   }
   const normalized = normalizeAnalyticsQuery(query)
   const authorizedProjectIds = normalizeAuthorizedProjectIds(input.authorizedProjectIds)
@@ -791,34 +921,32 @@ export function queryAnalyticsEvidence(
     authorizedProjectIds,
   )
   const computation = calculateMetric(
-    input.evidence.metric,
+    evidence.metric,
     facts,
     normalized,
     normalized.periodFrom,
     normalized.periodTo,
     normalized.asOf,
-    input.evidence.slaTargetHours,
+    evidence.slaTargetHours,
   )
   const items = dedupeEvidence(computation.evidence)
     .sort(compareEvidence)
   const scopeHash = hashCanonical({
-    metric: input.evidence.metric,
+    metric: evidence.metric,
     filter: normalized.query.filter,
     asOf: normalized.query.asOf,
     timeZone: normalized.query.timeZone,
-    slaTargetHours: input.evidence.slaTargetHours,
+    slaTargetHours: evidence.slaTargetHours,
     permissionScopeHash: createAnalyticsPermissionScopeHash(
       input.workItems,
       normalized.asOf,
       authorizedProjectIds,
     ),
   })
-  const offset = input.evidence.cursor
-    ? parseAnalyticsEvidenceCursor(input.evidence.cursor, scopeHash)
+  const offset = evidence.cursor
+    ? parseAnalyticsEvidenceCursor(evidence.cursor, scopeHash)
     : 0
-  const limit = input.evidence.limit === undefined
-    ? DEFAULT_EVIDENCE_LIMIT
-    : readPositiveInteger(input.evidence.limit, 'Analytics evidence limit', MAX_EVIDENCE_LIMIT)
+  const limit = evidence.limit ?? DEFAULT_EVIDENCE_LIMIT
   const page = items.slice(offset, offset + limit)
   const nextOffset = offset + page.length
 
@@ -1059,7 +1187,7 @@ function normalizeAnalyticsQuery(query: AnalyticsQueryInput): NormalizedAnalytic
   const forecastBaseline = query.forecastBaseline === undefined
     ? undefined
     : normalizeDateRange(query.forecastBaseline, 'Analytics forecast baseline')
-  return {
+  const normalized: NormalizedAnalyticsQuery = {
     query: {
       filter,
       widgets,
@@ -1070,6 +1198,63 @@ function normalizeAnalyticsQuery(query: AnalyticsQueryInput): NormalizedAnalytic
     periodFrom,
     periodTo,
     asOf: asOfMilliseconds,
+  }
+  validateAnalyticsQueryComplexity(normalized)
+  return normalized
+}
+
+/** Query の実効期間と生成 calendar point 数をデータ読取前に検証します。 */
+function validateAnalyticsQueryComplexity(normalized: NormalizedAnalyticsQuery) {
+  const effectivePeriodMilliseconds = normalized.periodTo - normalized.periodFrom
+  if (
+    effectivePeriodMilliseconds >
+      MAX_ANALYTICS_QUERY_PERIOD_DAYS * MILLISECONDS_PER_DAY
+  ) {
+    throw new AnalyticsError(
+      413,
+      'AnalyticsQueryPeriodLimitExceeded',
+      `Analytics query period cannot exceed ${MAX_ANALYTICS_QUERY_PERIOD_DAYS} days.`,
+    )
+  }
+
+  const bucketCounts = new Map<'day' | 'week' | 'month', number>()
+  const countBuckets = (granularity: 'day' | 'week' | 'month') => {
+    const current = bucketCounts.get(granularity)
+    if (current !== undefined) return current
+    const count = createCalendarBuckets(
+      normalized.periodFrom,
+      normalized.periodTo,
+      normalized.query.timeZone,
+      granularity,
+    ).length
+    bucketCounts.set(granularity, count)
+    return count
+  }
+
+  let generatedPoints = countBuckets('day')
+  for (const widget of normalized.query.widgets) {
+    const calendarGranularity =
+      widget.groupBy?.dimension === 'week' ||
+        widget.groupBy?.dimension === 'month'
+        ? widget.groupBy.dimension
+        : 'day'
+    const calendarGroup = widget.groupBy === undefined ||
+      widget.groupBy.dimension === 'day' ||
+      widget.groupBy.dimension === 'week' ||
+      widget.groupBy.dimension === 'month'
+    if (widget.type === 'chart' && calendarGroup) {
+      generatedPoints += countBuckets(calendarGranularity)
+    }
+    if (widget.groupBy !== undefined && calendarGroup) {
+      generatedPoints += countBuckets(calendarGranularity)
+    }
+    if (generatedPoints > MAX_ANALYTICS_GENERATED_POINTS) {
+      throw new AnalyticsError(
+        413,
+        'AnalyticsQueryPointLimitExceeded',
+        `Analytics query cannot generate more than ${MAX_ANALYTICS_GENERATED_POINTS} calendar points.`,
+      )
+    }
   }
 }
 
@@ -1658,7 +1843,7 @@ function createWidgetResult(
       )
   const evidence = dedupeEvidence(total.evidence).sort(compareEvidence)
   const rows: AnalyticsTableRow[] = widget.type === 'table'
-    ? evidence.map((item) => ({
+    ? evidence.slice(0, MAX_ANALYTICS_TABLE_PREVIEW_ROWS).map((item) => ({
         id: item.id,
         label: item.title,
         values: {
@@ -2333,6 +2518,50 @@ function compareEvidence(left: AnalyticsEvidenceItem, right: AnalyticsEvidenceIt
     left.id.localeCompare(right.id)
 }
 
+/** Live snapshot の serialized response size を安全上限内に制限します。 */
+function validateAnalyticsSnapshotSize(snapshot: AnalyticsSnapshot) {
+  validateSerializedAnalyticsSize(
+    snapshot,
+    MAX_ANALYTICS_SNAPSHOT_SERIALIZED_BYTES,
+    'AnalyticsSnapshotTooLarge',
+    'Analytics snapshot exceeds the serialized response size limit.',
+  )
+}
+
+/**
+ * 永続化する snapshot row の serialized size を DynamoDB 上限より手前で検証します。
+ *
+ * @param record - 永続化予定の immutable snapshot record です。
+ */
+export function validateAnalyticsSnapshotRecordSize(
+  record: AnalyticsSnapshotRecord,
+): void {
+  validateSerializedAnalyticsSize(
+    createStoredSnapshot(record),
+    MAX_ANALYTICS_SNAPSHOT_RECORD_SERIALIZED_BYTES,
+    'AnalyticsSnapshotRecordTooLarge',
+    'Analytics snapshot record exceeds the persistence size limit.',
+  )
+}
+
+/** JSON value の UTF-8 byte size を上限と比較します。 */
+function validateSerializedAnalyticsSize(
+  value: unknown,
+  maximumBytes: number,
+  code: string,
+  message: string,
+) {
+  let serialized: string
+  try {
+    serialized = JSON.stringify(value)
+  } catch {
+    throw invalid('AnalyticsSnapshotInvalid', 'Analytics snapshot must be JSON serializable.')
+  }
+  if (Buffer.byteLength(serialized, 'utf8') > maximumBytes) {
+    throw new AnalyticsError(413, code, message)
+  }
+}
+
 function normalizeSnapshot(snapshot: AnalyticsSnapshot) {
   if (!isRecord(snapshot) || snapshot.schemaVersion !== ANALYTICS_SCHEMA_VERSION) {
     throw invalid('AnalyticsSnapshotInvalid', 'Analytics snapshot schema is invalid.')
@@ -2346,7 +2575,9 @@ function normalizeSnapshot(snapshot: AnalyticsSnapshot) {
   if (!Array.isArray(snapshot.widgets) || !isRecord(snapshot.forecast)) {
     throw invalid('AnalyticsSnapshotInvalid', 'Analytics snapshot payload is invalid.')
   }
-  return structuredClone(snapshot)
+  const normalized = structuredClone(snapshot)
+  validateAnalyticsSnapshotSize(normalized)
+  return normalized
 }
 
 function escapeCsvValue(value: string | number | boolean | null | undefined) {
@@ -2498,14 +2729,47 @@ export class InMemoryAnalyticsRepository implements AnalyticsRepository {
     this.now = now
   }
 
-  /** Workspace report 一覧を返します。 */
-  async listReports(workspaceId: string): Promise<AnalyticsReportListResponse> {
+  /** Workspace report 一覧を stable keyset page で返します。 */
+  async listReports(
+    workspaceId: string,
+    limit = DEFAULT_REPORT_LIST_LIMIT,
+    cursor?: string,
+  ): Promise<AnalyticsReportPage> {
     const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
+    const normalizedLimit = readPositiveInteger(
+      limit,
+      'Analytics report list limit',
+      MAX_REPORT_LIST_LIMIT,
+    )
+    const scopeHash = createAnalyticsReportListScopeHash(normalizedWorkspaceId)
+    const exclusiveStartKey = cursor ? parseStorageCursor(cursor, scopeHash) : undefined
+    const boundary = exclusiveStartKey === undefined
+      ? undefined
+      : readAnalyticsReportCursorBoundary(exclusiveStartKey, normalizedWorkspaceId)
+    const candidates = [...this.reports.values()]
+      .filter((report) => report.workspaceId === normalizedWorkspaceId)
+      .sort((left, right) =>
+        compareDynamoDbStringSortKeys(
+          createReportRecordKey(left.id),
+          createReportRecordKey(right.id),
+        )
+      )
+      .filter((report) =>
+        boundary === undefined ||
+        compareDynamoDbStringSortKeys(createReportRecordKey(report.id), boundary) > 0
+      )
+    const page = candidates.slice(0, normalizedLimit)
+    const lastReport = page.at(-1)
     return {
-      reports: [...this.reports.values()]
-        .filter((report) => report.workspaceId === normalizedWorkspaceId)
-        .sort(compareReports)
-        .map((report) => structuredClone(report)),
+      reports: page.map((report) => structuredClone(report)),
+      ...(candidates.length > page.length && lastReport !== undefined
+        ? {
+            nextCursor: createStorageCursor(scopeHash, {
+              workspaceId: normalizedWorkspaceId,
+              recordKey: createReportRecordKey(lastReport.id),
+            }),
+          }
+        : {}),
     }
   }
 
@@ -2525,6 +2789,12 @@ export class InMemoryAnalyticsRepository implements AnalyticsRepository {
     const key = reportMapKey(report.workspaceId, report.id)
     if (this.reports.has(key)) {
       throw conflict('AnalyticsReportAlreadyExists', 'Analytics report already exists.')
+    }
+    const reportCount = [...this.reports.values()].filter((candidate) =>
+      candidate.workspaceId === report.workspaceId
+    ).length
+    if (reportCount >= MAX_ANALYTICS_REPORTS_PER_WORKSPACE) {
+      throw reportQuotaExceeded()
     }
     this.reports.set(key, structuredClone(report))
     return structuredClone(report)
@@ -2622,19 +2892,26 @@ export class InMemoryAnalyticsRepository implements AnalyticsRepository {
           normalizedScheduleShard
       )
       .sort((left, right) =>
-        createAnalyticsDueReportBoundary(left).localeCompare(
+        compareDynamoDbStringSortKeys(
+          createAnalyticsDueReportBoundary(left),
           createAnalyticsDueReportBoundary(right),
         )
       )
       .filter((report) =>
         boundary === undefined ||
-        createAnalyticsDueReportBoundary(report) > boundary
+        compareDynamoDbStringSortKeys(
+          createAnalyticsDueReportBoundary(report),
+          boundary,
+        ) > 0
       )
     const page = candidates.slice(0, normalizedLimit)
     const hasNextPage = candidates.length > page.length
     const lastReport = page.at(-1)
     return {
-      reports: page.map((report) => structuredClone(report)),
+      reports: page.map((report) => ({
+        workspaceId: report.workspaceId,
+        id: report.id,
+      })),
       ...(hasNextPage && lastReport !== undefined
         ? {
             nextCursor: createStorageCursor(scopeHash, {
@@ -2660,6 +2937,18 @@ export class InMemoryAnalyticsRepository implements AnalyticsRepository {
     }
     this.receipts.set(key, structuredClone(normalized))
     return { created: true, receipt: structuredClone(normalized) }
+  }
+
+  /** Schedule occurrence ごとの delivery receipt を返します。 */
+  async getDeliveryReceipt(
+    workspaceId: string,
+    reportId: string,
+    occurrenceKey: string,
+  ) {
+    const receipt = this.receipts.get(
+      deliveryMapKey(workspaceId, reportId, occurrenceKey),
+    )
+    return receipt === undefined ? undefined : structuredClone(receipt)
   }
 }
 
@@ -2693,19 +2982,55 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
       options.scheduleDueIndexName ?? ANALYTICS_SCHEDULE_DUE_INDEX_NAME
   }
 
-  /** Workspace report 一覧を返します。 */
-  async listReports(workspaceId: string): Promise<AnalyticsReportListResponse> {
+  /** Workspace report 一覧をDB側で上限指定した stable keyset page で返します。 */
+  async listReports(
+    workspaceId: string,
+    limit = DEFAULT_REPORT_LIST_LIMIT,
+    cursor?: string,
+  ): Promise<AnalyticsReportPage> {
     const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
-    const items = await this.queryWorkspacePrefix(
-      normalizedWorkspaceId,
-      REPORT_RECORD_PREFIX,
-      MAX_REPORTS_PER_WORKSPACE,
+    const normalizedLimit = readPositiveInteger(
+      limit,
+      'Analytics report list limit',
+      MAX_REPORT_LIST_LIMIT,
     )
+    const scopeHash = createAnalyticsReportListScopeHash(normalizedWorkspaceId)
+    const parsedStartKey = cursor ? parseStorageCursor(cursor, scopeHash) : undefined
+    const exclusiveStartKey = parsedStartKey === undefined
+      ? undefined
+      : {
+          workspaceId: normalizedWorkspaceId,
+          recordKey: readAnalyticsReportCursorBoundary(
+            parsedStartKey,
+            normalizedWorkspaceId,
+          ),
+        }
+    const response = await this.documentClient.send(new QueryCommand({
+      TableName: this.tableName,
+      KeyConditionExpression:
+        'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)',
+      ExpressionAttributeValues: {
+        ':workspaceId': normalizedWorkspaceId,
+        ':recordPrefix': REPORT_RECORD_PREFIX,
+      },
+      ExclusiveStartKey: exclusiveStartKey,
+      ConsistentRead: true,
+      Limit: normalizedLimit,
+      ScanIndexForward: true,
+    }))
     return {
-      reports: items
-        .filter(isStoredAnalyticsReport)
-        .map(readStoredReport)
-        .sort(compareReports),
+      reports: (response.Items ?? []).map(readStoredReport),
+      ...(response.LastEvaluatedKey === undefined
+        ? {}
+        : {
+            nextCursor: createStorageCursor(
+              scopeHash,
+              normalizeAnalyticsReportLastEvaluatedKey(
+                response.LastEvaluatedKey,
+                normalizedWorkspaceId,
+              ),
+            ),
+          }),
     }
   }
 
@@ -2732,14 +3057,47 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
   ) {
     const report = createReportDefinition(workspaceId, ownerMemberKey, input, this.now())
     try {
-      await this.documentClient.send(new PutCommand({
-        TableName: this.tableName,
-        Item: createStoredReport(report),
-        ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [{
+          Update: {
+            TableName: this.tableName,
+            Key: {
+              workspaceId: report.workspaceId,
+              recordKey: REPORT_COUNT_RECORD_KEY,
+            },
+            UpdateExpression:
+              'SET #entryType = if_not_exists(#entryType, :entryType) ' +
+              'ADD #reportCount :increment',
+            ConditionExpression:
+              'attribute_not_exists(#reportCount) OR #reportCount < :maximum',
+            ExpressionAttributeNames: {
+              '#entryType': 'entryType',
+              '#reportCount': 'reportCount',
+            },
+            ExpressionAttributeValues: {
+              ':entryType': 'analytics-report-counter',
+              ':increment': 1,
+              ':maximum': MAX_ANALYTICS_REPORTS_PER_WORKSPACE,
+            },
+          },
+        }, {
+          Put: {
+            TableName: this.tableName,
+            Item: createStoredReport(report),
+            ConditionExpression:
+              'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+          },
+        }],
       }))
     } catch (error) {
-      if (isNamedError(error, 'ConditionalCheckFailedException')) {
-        throw conflict('AnalyticsReportAlreadyExists', 'Analytics report already exists.')
+      if (
+        isConditionalTransactionCancellation(error) ||
+        isNamedError(error, 'ConditionalCheckFailedException')
+      ) {
+        if (await this.getReport(report.workspaceId, report.id)) {
+          throw conflict('AnalyticsReportAlreadyExists', 'Analytics report already exists.')
+        }
+        throw reportQuotaExceeded()
       }
       throw persistenceError(error)
     }
@@ -2776,18 +3134,40 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
     if (!current) throw reportNotFound()
     requireExpectedRevision(expectedRevision, current.revision)
     try {
-      await this.documentClient.send(new DeleteCommand({
-        TableName: this.tableName,
-        Key: {
-          workspaceId: current.workspaceId,
-          recordKey: createReportRecordKey(current.id),
-        },
-        ConditionExpression: '#revision = :expectedRevision',
-        ExpressionAttributeNames: { '#revision': 'revision' },
-        ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [{
+          Delete: {
+            TableName: this.tableName,
+            Key: {
+              workspaceId: current.workspaceId,
+              recordKey: createReportRecordKey(current.id),
+            },
+            ConditionExpression: '#revision = :expectedRevision',
+            ExpressionAttributeNames: { '#revision': 'revision' },
+            ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+          },
+        }, {
+          Update: {
+            TableName: this.tableName,
+            Key: {
+              workspaceId: current.workspaceId,
+              recordKey: REPORT_COUNT_RECORD_KEY,
+            },
+            UpdateExpression: 'ADD #reportCount :decrement',
+            ConditionExpression: '#reportCount > :zero',
+            ExpressionAttributeNames: { '#reportCount': 'reportCount' },
+            ExpressionAttributeValues: {
+              ':decrement': -1,
+              ':zero': 0,
+            },
+          },
+        }],
       }))
     } catch (error) {
-      if (isNamedError(error, 'ConditionalCheckFailedException')) throw revisionConflict()
+      if (
+        isConditionalTransactionCancellation(error) ||
+        isNamedError(error, 'ConditionalCheckFailedException')
+      ) throw revisionConflict()
       throw persistenceError(error)
     }
   }
@@ -2935,16 +3315,14 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
         'scheduleShard = :scheduleShard AND nextDeliveryAtRecordKey <= :upperBound',
       ExpressionAttributeValues: {
         ':scheduleShard': normalizedScheduleShard,
-        ':upperBound': `${normalizedAsOf}#\u{10FFFF}`,
+        ':upperBound': createAnalyticsDueUpperBound(normalizedAsOf),
       },
       ExclusiveStartKey: exclusiveStartKey,
       Limit: normalizedLimit,
       ScanIndexForward: true,
     }))
     return {
-      reports: (response.Items ?? [])
-        .filter(isStoredAnalyticsReport)
-        .map(readStoredReport),
+      reports: (response.Items ?? []).map(readStoredDueReportReference),
       ...(response.LastEvaluatedKey === undefined
         ? {}
         : { nextCursor: createStorageCursor(scopeHash, response.LastEvaluatedKey) }),
@@ -2982,37 +3360,35 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
     }
   }
 
-  /** Workspace partition の prefix rows を上限まで読み込みます。 */
-  private async queryWorkspacePrefix(
+  /** Schedule occurrence ごとの delivery receipt を強整合 read で返します。 */
+  async getDeliveryReceipt(
     workspaceId: string,
-    recordPrefix: string,
-    maximum: number,
+    reportId: string,
+    occurrenceKey: string,
   ) {
-    const items: Record<string, unknown>[] = []
-    let exclusiveStartKey: Record<string, unknown> | undefined
-    do {
-      const response = await this.documentClient.send(new QueryCommand({
-        TableName: this.tableName,
-        KeyConditionExpression:
-          'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)',
-        ExpressionAttributeValues: {
-          ':workspaceId': workspaceId,
-          ':recordPrefix': recordPrefix,
-        },
-        ExclusiveStartKey: exclusiveStartKey,
-        ConsistentRead: true,
-      }))
-      items.push(...(response.Items ?? []))
-      if (items.length > maximum) {
-        throw new AnalyticsError(
-          413,
-          'AnalyticsReadLimitExceeded',
-          'Analytics repository read limit exceeded.',
-        )
-      }
-      exclusiveStartKey = response.LastEvaluatedKey
-    } while (exclusiveStartKey)
-    return items
+    const normalizedWorkspaceId = readIdentifier(
+      workspaceId,
+      'Analytics delivery Workspace ID',
+    )
+    const normalizedReportId = readIdentifier(reportId, 'Analytics delivery report ID')
+    const normalizedOccurrenceKey = readIdentifier(
+      occurrenceKey,
+      'Analytics delivery occurrence key',
+    )
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        workspaceId: normalizedWorkspaceId,
+        recordKey: createAnalyticsDeliveryRecordKey(
+          normalizedReportId,
+          normalizedOccurrenceKey,
+        ),
+      },
+      ConsistentRead: true,
+    }))
+    return response.Item === undefined
+      ? undefined
+      : readStoredDeliveryReceipt(response.Item)
   }
 }
 
@@ -3210,6 +3586,13 @@ function normalizeSchedule(
   if (recipientMemberKeys.length === 0) {
     throw invalid('AnalyticsScheduleInvalid', 'Analytics schedule requires a recipient.')
   }
+  if (recipientMemberKeys.length > ANALYTICS_SCHEDULE_RECIPIENT_LIMIT) {
+    throw new AnalyticsError(
+      413,
+      'AnalyticsScheduleRecipientLimitExceeded',
+      'Analytics schedule recipients exceed the safe processing limit.',
+    )
+  }
   if (value.format !== 'csv' && value.format !== 'pdf') {
     throw invalid('AnalyticsScheduleInvalid', 'Analytics schedule format is invalid.')
   }
@@ -3270,7 +3653,7 @@ function normalizeSnapshotRecord(record: AnalyticsSnapshotRecord): AnalyticsSnap
       'Analytics snapshot report ID and revision must be specified together.',
     )
   }
-  return {
+  const normalized: AnalyticsSnapshotRecord = {
     id: readIdentifier(record.id, 'Analytics snapshot ID'),
     workspaceId: readIdentifier(record.workspaceId, 'Analytics snapshot Workspace ID'),
     ...(reportId === undefined ? {} : { reportId }),
@@ -3283,6 +3666,8 @@ function normalizeSnapshotRecord(record: AnalyticsSnapshotRecord): AnalyticsSnap
     query,
     snapshot,
   }
+  validateAnalyticsSnapshotRecordSize(normalized)
+  return normalized
 }
 
 function validateSnapshotQueryAlignment(
@@ -3433,6 +3818,24 @@ function readStoredReport(value: Record<string, unknown>) {
   return normalizeStoredReport(value)
 }
 
+/** KEYS_ONLY due GSI row から強整合read用の最小report参照を復元します。 */
+function readStoredDueReportReference(value: Record<string, unknown>) {
+  if (
+    !isRecord(value) ||
+    typeof value.workspaceId !== 'string' ||
+    typeof value.recordKey !== 'string'
+  ) {
+    throw persistenceInvalid('Stored due Analytics report reference is invalid.')
+  }
+  return {
+    workspaceId: readIdentifier(
+      value.workspaceId,
+      'Stored due Analytics report Workspace ID',
+    ),
+    id: parseReportRecordKey(value.recordKey),
+  }
+}
+
 function readStoredSnapshot(value: Record<string, unknown>) {
   if (!isStoredAnalyticsSnapshot(value)) {
     throw persistenceInvalid('Stored Analytics snapshot row is invalid.')
@@ -3509,6 +3912,26 @@ function createReportRecordKey(reportId: string) {
   return `${REPORT_RECORD_PREFIX}${encodeURIComponent(readIdentifier(reportId, 'Analytics report ID'))}`
 }
 
+/** DynamoDB report record key をcanonical report IDへ復元します。 */
+function parseReportRecordKey(recordKey: string) {
+  if (!recordKey.startsWith(REPORT_RECORD_PREFIX)) {
+    throw persistenceInvalid('Stored Analytics report key is invalid.')
+  }
+  let reportId: string
+  try {
+    reportId = decodeURIComponent(recordKey.slice(REPORT_RECORD_PREFIX.length))
+  } catch {
+    throw persistenceInvalid('Stored Analytics report key is invalid.')
+  }
+  if (!ROUTE_SAFE_REPORT_ID_PATTERN.test(reportId)) {
+    throw persistenceInvalid('Stored Analytics report key is invalid.')
+  }
+  if (createReportRecordKey(reportId) !== recordKey) {
+    throw persistenceInvalid('Stored Analytics report key is not canonical.')
+  }
+  return reportId
+}
+
 function createSnapshotReportPrefix(reportId: string) {
   return `${SNAPSHOT_RECORD_PREFIX}${encodeURIComponent(
     readIdentifier(reportId, 'Analytics report ID'),
@@ -3562,6 +3985,11 @@ function createAnalyticsDueReportBoundary(report: AnalyticsReport) {
   )
 }
 
+/** `#` で始まる任意の occurrence suffix を含む exclusive-safe 上限です。 */
+function createAnalyticsDueUpperBound(asOf: string) {
+  return `${asOf}$`
+}
+
 /** In-memory due cursor の exclusive boundary を検証して返します。 */
 function readAnalyticsDueCursorBoundary(key: Record<string, unknown>) {
   const boundary = key.nextDeliveryAtRecordKey
@@ -3577,6 +4005,51 @@ function readAnalyticsDueCursorBoundary(key: Record<string, unknown>) {
     )
   }
   return boundary
+}
+
+/** Report list cursor を現在の Workspace queryへ束ねるhashを返します。 */
+function createAnalyticsReportListScopeHash(workspaceId: string) {
+  return hashCanonical({
+    workspaceId,
+    recordPrefix: REPORT_RECORD_PREFIX,
+  })
+}
+
+/** Report list cursor のexclusive record keyを検証して返します。 */
+function readAnalyticsReportCursorBoundary(
+  key: Record<string, unknown>,
+  workspaceId: string,
+) {
+  if (
+    key.workspaceId !== workspaceId ||
+    typeof key.recordKey !== 'string' ||
+    key.recordKey.length > MAX_DUE_CURSOR_BOUNDARY_LENGTH
+  ) {
+    throw invalid(
+      'AnalyticsCursorInvalid',
+      'Analytics report continuation cursor is invalid.',
+    )
+  }
+  try {
+    parseReportRecordKey(key.recordKey)
+  } catch {
+    throw invalid(
+      'AnalyticsCursorInvalid',
+      'Analytics report continuation cursor is invalid.',
+    )
+  }
+  return key.recordKey
+}
+
+/** DynamoDB report page の LastEvaluatedKey をcursor用の最小keyへ正規化します。 */
+function normalizeAnalyticsReportLastEvaluatedKey(
+  key: Record<string, unknown>,
+  workspaceId: string,
+) {
+  return {
+    workspaceId,
+    recordKey: readAnalyticsReportCursorBoundary(key, workspaceId),
+  }
 }
 
 function createStorageCursor(scopeHash: string, key: Record<string, unknown>) {
@@ -3609,6 +4082,22 @@ function parseStorageCursor(cursor: string, scopeHash: string) {
     )
   }
   return parsed.key
+}
+
+/** Base64url evidence cursor をデータ読取前に安全上限まで検証します。 */
+function readAnalyticsEvidenceCursor(value: unknown) {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > MAX_EVIDENCE_CURSOR_LENGTH ||
+    !/^[A-Za-z0-9_-]+$/u.test(value)
+  ) {
+    throw invalid(
+      'AnalyticsEvidenceCursorInvalid',
+      'Analytics evidence cursor is invalid.',
+    )
+  }
+  return value
 }
 
 /** Base64url storage cursor を専用の安全上限で検証します。 */
@@ -3928,12 +4417,11 @@ function compareAuditEvents(left: AuditEventV1, right: AuditEventV1) {
     left.eventId.localeCompare(right.eventId)
 }
 
-function compareReports(left: AnalyticsReport, right: AnalyticsReport) {
-  return right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id)
-}
-
 function compareSnapshots(left: AnalyticsSnapshotRecord, right: AnalyticsSnapshotRecord) {
-  return right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
+  return compareDynamoDbStringSortKeys(
+    createSnapshotRecordKey(right),
+    createSnapshotRecordKey(left),
+  )
 }
 
 function snapshotsEquivalent(
@@ -3994,6 +4482,14 @@ function deliveryConflict() {
 
 function reportNotFound() {
   return new AnalyticsError(404, 'AnalyticsReportNotFound', 'Analytics report was not found.')
+}
+
+function reportQuotaExceeded() {
+  return new AnalyticsError(
+    409,
+    'AnalyticsReportQuotaExceeded',
+    `Analytics Workspace cannot contain more than ${MAX_ANALYTICS_REPORTS_PER_WORKSPACE} reports.`,
+  )
 }
 
 function persistenceInvalid(message: string) {

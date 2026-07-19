@@ -17,6 +17,10 @@ dashboard、saved report、immutable snapshot、drill-down、CSV/PDF export、fo
 - `PATCH|DELETE /api/analytics/reports/{reportId}`
 - `GET|POST /api/analytics/reports/{reportId}/snapshots`
 
+`GET /api/analytics/reports` は `limit`（1〜200）とWorkspaceに束縛されたopaqueな`cursor`で
+ページングします。WorkspaceごとのSaved reportは最大1,000件で、並行作成時もDynamoDB transaction
+で上限を超えないようにします。
+
 Ad-hoc query は filter、widget、`asOf`、IANA timezone を受け取ります。Saved report ID を指定した
 query は保存済み filter、widget、timezone を使い、request body の同名値で report definition を
 上書きしません。保存済み forecast baseline も report definition の一部として再利用します。
@@ -56,6 +60,10 @@ Work Item storeのpartition分割またはscoped indexが必要です。
 無関係なWorkspace eventはこの上限を消費しません。対象Work Item自体の履歴が上限を超える場合は、
 report scopeを狭めるか、履歴の保持・集約方針を見直す必要があります。
 
+正規化後の集計期間は最大366 local calendar day、全widgetが生成するcalendar bucket / pointの
+合計は10,000件までです。これらの上限は認可対象データを読み始める前に検証し、過大なqueryは
+`413`で拒否します。
+
 Snapshot 作成時は実行した正規化済み query、report revision、metric contract version、
 permission scope hash を保存します。一覧は新しい順に最大100件を返し、export と一覧のどちらも
 current accessible Work Item keyとactive readable Project ID集合を含むpermission scope hashを
@@ -63,6 +71,9 @@ current accessible Work Item keyとactive readable Project ID集合を含むperm
 Snapshot の作成日時をDynamoDB sort keyへ含め、強整合の逆順queryへ`Limit: 100`を指定するため、
 一覧APIは長期運用で蓄積したpayload全件を読み込んでから切り詰めません。
 現在のscopeが変わったsnapshotは再集計せず非表示、または`403`にします。
+Table widgetのsnapshot previewは先頭50行までに制限し、全明細はページングされたevidence APIで
+取得します。live responseのJSONは256 KiB、DynamoDBへ保存するsnapshot recordは350 KiBを上限とし、
+超過時は部分データを保存せず`413`で拒否します。
 
 Filterとgroup-byのTeam、Project、assignee、status、custom field、archive状態は、いずれも
 `asOf`へ復元したstate dimensionで評価します。Throughput、cycle/lead time、scope changeなどの
@@ -151,6 +162,11 @@ Schedule runner は recipient が active Workspace member で、report と対象
 1つの immutable snapshot を共有し、recipientごとに決定的な receipt を保存して重複を排除します。
 APIと同様、recipientのProject accessはactive directoryとの積集合に限定し、`asOf` stateが
 current allowlist外のfactをscheduled snapshotへ含めません。
+1 reportのrecipientは最大100人です。Runnerはrender前に既存のreceiptとsnapshotを強整合で確認し、
+途中失敗後のretryでは保存済みcheckpointから未完了recipientだけを処理します。配信対象・schedule・
+queryなどの意味が変わるreport editはoccurrence definitionを変更するため、旧definitionの処理は
+新しいschedule cursorを進めません。表示名など配信の意味を変えないeditは同じoccurrenceとして
+安全にcursorを進められます。
 
 Due index はWorkspace/reportの安定hashで16個のpartitionへ分散し、runnerは全partitionを走査します。
 各partitionのpaginationは`nextRunAt/workspaceId/reportId`のexclusive keysetを使うため、処理済み

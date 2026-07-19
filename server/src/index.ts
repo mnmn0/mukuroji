@@ -254,7 +254,9 @@ import {
   createAnalyticsPermissionScopeHash,
   createAnalyticsPdf,
   createAnalyticsSnapshot,
+  normalizeAnalyticsEvidenceInput,
   normalizeAnalyticsExportLocale,
+  normalizeAnalyticsQueryInput,
   queryAnalyticsEvidence,
   type AnalyticsRepository,
 } from './analytics'
@@ -2934,11 +2936,18 @@ app.get('/api/analytics/reports', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     const context = await createWorkspaceSearchContext(principal)
-    const response = await analytics.listReports(principal.directoryId)
+    const response = await analytics.listReports(
+      principal.directoryId,
+      readAnalyticsReportListLimit(c.req.query('limit')),
+      readAnalyticsReportListCursor(c.req.query('cursor')),
+    )
     return c.json({
       reports: response.reports.filter((report) =>
         canReadAnalyticsReport(principal, context, report)
       ),
+      ...(response.nextCursor === undefined
+        ? {}
+        : { nextCursor: response.nextCursor }),
     })
   } catch (error) {
     return toAnalyticsErrorResponse(c, error)
@@ -7057,14 +7066,13 @@ async function executeAnalyticsQuery(
   principal: WorkspacePrincipal,
   query: AnalyticsQueryInput,
 ): Promise<AnalyticsSnapshot> {
-  createAnalyticsSnapshot({
-    workItems: [],
-    events: [],
-    query,
-    authorizedProjectIds: new Set(),
-  })
-  const authorized = await readAuthorizedAnalyticsData(principal, query.filter, query.asOf)
-  return createAnalyticsSnapshot({ ...authorized, query })
+  const normalizedQuery = normalizeAnalyticsQueryInput(query)
+  const authorized = await readAuthorizedAnalyticsData(
+    principal,
+    normalizedQuery.filter,
+    normalizedQuery.asOf,
+  )
+  return createAnalyticsSnapshot({ ...authorized, query: normalizedQuery })
 }
 
 /** Evidence query を事前検証し、current ACL の Work Item/event だけで再実行します。 */
@@ -7072,18 +7080,13 @@ async function executeAnalyticsEvidenceQuery(
   principal: WorkspacePrincipal,
   evidence: AnalyticsEvidenceInput,
 ) {
-  queryAnalyticsEvidence({
-    workItems: [],
-    events: [],
-    evidence,
-    authorizedProjectIds: new Set(),
-  })
+  const normalizedEvidence = normalizeAnalyticsEvidenceInput(evidence)
   const authorized = await readAuthorizedAnalyticsData(
     principal,
-    evidence.filter,
-    evidence.asOf,
+    normalizedEvidence.filter,
+    normalizedEvidence.asOf,
   )
-  return queryAnalyticsEvidence({ ...authorized, evidence })
+  return queryAnalyticsEvidence({ ...authorized, evidence: normalizedEvidence })
 }
 
 /**
@@ -7481,12 +7484,7 @@ async function readCurrentAnalyticsPermissionScopeHash(
   query: AnalyticsQueryInput,
   cache = new Map<string, ReturnType<typeof readAccessibleAnalyticsWorkItems>>(),
 ) {
-  const normalized = createAnalyticsSnapshot({
-    workItems: [],
-    events: [],
-    query,
-    authorizedProjectIds: new Set(),
-  })
+  const normalized = normalizeAnalyticsQueryInput(query)
   const cacheKey = JSON.stringify({
     teamIds: normalized.filter.teamIds ?? null,
     projectIds: normalized.filter.projectIds ?? null,
@@ -7660,6 +7658,34 @@ function readAnalyticsIdentifier(value: unknown, label: string) {
     throw new AnalyticsError(400, 'InvalidAnalyticsInput', `${label} is invalid.`)
   }
   return value
+}
+
+/** Analytics report list の page size を API 上限内に制限します。 */
+function readAnalyticsReportListLimit(value: string | undefined) {
+  if (value === undefined) return 200
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 200) {
+    throw new AnalyticsError(
+      400,
+      'InvalidAnalyticsInput',
+      'Analytics report list limit must be an integer between 1 and 200.',
+    )
+  }
+  return parsed
+}
+
+/** Analytics report list の opaque cursor を空白なしの bounded token として返します。 */
+function readAnalyticsReportListCursor(value: string | undefined) {
+  if (value === undefined) return undefined
+  const cursor = value.trim()
+  if (!cursor || cursor.length > 16_384) {
+    throw new AnalyticsError(
+      400,
+      'InvalidAnalyticsInput',
+      'Analytics report list cursor is invalid.',
+    )
+  }
+  return cursor
 }
 
 /** Report mutation の positive optimistic revision を検証します。 */

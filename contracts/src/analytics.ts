@@ -160,6 +160,8 @@ export type AnalyticsReport = {
 export type AnalyticsReportListResponse = {
   /** Caller が認可済みの report 一覧です。 */
   reports: AnalyticsReport[]
+  /** 続きがある場合の Workspace-bound opaque cursor です。 */
+  nextCursor?: string
 }
 
 /** Analytics report 作成 API の入力です。 */

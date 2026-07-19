@@ -128,6 +128,36 @@ test('keeps Analytics queries independent from the 200-item aggregate list limit
   expect(new Set(auditQueries.map((query) => query.entityId)).size).toBe(500)
 })
 
+test('uses the canonical Analytics filter for query and evidence ACL reads', async () => {
+  const calls = configureFakeProjectClients(true, { teamIssueCount: 0 })
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  query.filter.teamIds = [' core-team ']
+
+  const queryResponse = await analyticsApiRequest('/api/analytics/query', query)
+  const evidenceResponse = await analyticsApiRequest('/api/analytics/evidence', {
+    metric: 'wip',
+    filter: query.filter,
+    asOf: query.asOf,
+    timeZone: query.timeZone,
+  })
+
+  expect(queryResponse.status).toBe(200)
+  expect(evidenceResponse.status).toBe(200)
+  expect(calls.issueReads).toHaveLength(4)
+  expect(calls.issueReads.every(({ teamId }) => teamId === 'core-team')).toBe(true)
+})
+
 test('fails before audit reads when Analytics identity fan-out exceeds the API cap', async () => {
   configureFakeProjectClients(true, { teamIssueCount: 251 })
   let auditReads = 0
@@ -314,6 +344,48 @@ test('requires authentication and enforces Team report viewer/manager ACLs', asy
   expect(await managerWrite.json()).toMatchObject({
     report: { name: 'Manager edit', revision: 2 },
   })
+})
+
+test('paginates Analytics reports with a Workspace-bound cursor', async () => {
+  const repository = new InMemoryAnalyticsRepository()
+  const query = createAnalyticsQueryInput()
+  for (const id of ['alpha-report', 'beta-report']) {
+    await repository.createReport('user#demo@example.com', 'demo@example.com', {
+      id,
+      name: id,
+      visibility: 'personal',
+      timeZone: query.timeZone,
+      filter: query.filter,
+      widgets: query.widgets,
+    })
+  }
+  configureFakeProjectClients(true)
+  configureApiClientsForTest({ analytics: repository })
+
+  const first = await app.request('/api/analytics/reports?limit=1', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(first.status).toBe(200)
+  const firstPage = await first.json() as {
+    reports: Array<{ id: string }>
+    nextCursor?: string
+  }
+  expect(firstPage.reports.map(({ id }) => id)).toEqual(['alpha-report'])
+  expect(firstPage.nextCursor).toBeString()
+
+  const second = await app.request(
+    `/api/analytics/reports?limit=1&cursor=${encodeURIComponent(firstPage.nextCursor!)}`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(second.status).toBe(200)
+  expect(await second.json()).toMatchObject({
+    reports: [{ id: 'beta-report' }],
+  })
+
+  const invalid = await app.request('/api/analytics/reports?limit=201', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(invalid.status).toBe(400)
 })
 
 test('fails closed instead of returning a partial Analytics aggregate above its safe cap', async () => {
