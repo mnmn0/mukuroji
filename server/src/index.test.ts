@@ -6,6 +6,7 @@ import type { DynamoDBDocumentClient, TransactWriteCommandInput } from '@aws-sdk
 import {
   AUTOMATION_SCHEMA_VERSION,
   type AnalyticsQueryInput,
+  type AnalyticsSnapshotListResponse,
   type AnalyticsSnapshotRecord,
   type AutomationTemplate,
   type AutomationTemplateApplication,
@@ -78,6 +79,7 @@ import {
 import { InMemoryPlanningClient } from './planning'
 import type { RequestIntakeClient } from './request-intake'
 import {
+  createAnalyticsSnapshotListCursor,
   InMemoryAnalyticsRepository,
 } from './analytics'
 
@@ -904,7 +906,10 @@ test('excludes historical Project state outside current ACL and invalidates its 
     { headers: { Authorization: 'Bearer test-token' } },
   )
   expect(hiddenSnapshots.status).toBe(200)
-  expect(await hiddenSnapshots.json()).toEqual({ snapshots: [] })
+  expect(await hiddenSnapshots.json()).toEqual({
+    snapshots: [],
+    inspectedCount: 1,
+  })
   const deniedExport = await analyticsApiRequest('/api/analytics/export', {
     snapshotId: createdSnapshotBody.snapshotRecord.id,
     format: 'csv',
@@ -914,6 +919,242 @@ test('excludes historical Project state outside current ACL and invalidates its 
     code: 'AnalyticsSnapshotScopeChanged',
   })
 })
+
+test('continues snapshot ACL filtering past hidden rows with a bounded inspection cursor', async () => {
+  const repository = new InMemoryAnalyticsRepository(
+    () => new Date('2026-07-18T08:00:00.000Z'),
+  )
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  configureApiClientsForTest({
+    analytics: repository,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  await repository.createReport('user#demo@example.com', 'demo@example.com', {
+    id: 'snapshot-pagination-report',
+    name: 'Snapshot pagination report',
+    visibility: 'personal',
+    timeZone: query.timeZone,
+    filter: query.filter,
+    widgets: query.widgets,
+  })
+  const created = await analyticsApiRequest(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots',
+    query,
+  )
+  expect(created.status).toBe(201)
+  const visibleRecord = (await created.json() as {
+    snapshotRecord: AnalyticsSnapshotRecord
+  }).snapshotRecord
+  const hiddenRecords = Array.from({ length: 1_000 }, (_, offset) => {
+    const index = offset + 1
+    return {
+      ...visibleRecord,
+      id: `hidden-${String(index).padStart(4, '0')}`,
+      createdAt: new Date(
+        Date.parse(visibleRecord.createdAt) + index * 1_000,
+      ).toISOString(),
+      snapshot: {
+        ...visibleRecord.snapshot,
+        permissionScopeHash: '0'.repeat(64),
+      },
+    } satisfies AnalyticsSnapshotRecord
+  })
+  const visibleRecords = hiddenRecords.map((record) => ({
+    ...record,
+    snapshot: {
+      ...record.snapshot,
+      permissionScopeHash: visibleRecord.snapshot.permissionScopeHash,
+    },
+  }))
+  let snapshotHistory: AnalyticsSnapshotRecord[] = []
+  let repositoryPhysicalPageSize: number | undefined
+  const snapshotCursorOffsets = new Map<string, number>()
+  const snapshotPageLimits: number[] = []
+  const setSnapshotHistory = (records: AnalyticsSnapshotRecord[]) => {
+    snapshotHistory = records
+    snapshotCursorOffsets.clear()
+    for (const [index, record] of snapshotHistory.entries()) {
+      snapshotCursorOffsets.set(
+        createAnalyticsSnapshotListCursor(
+          visibleRecord.workspaceId,
+          visibleRecord.reportId!,
+          record,
+        ),
+        index + 1,
+      )
+    }
+    snapshotPageLimits.length = 0
+    repositoryPhysicalPageSize = undefined
+  }
+  repository.listSnapshots = async (workspaceId, reportId, limit = 100, cursor) => {
+    snapshotPageLimits.push(limit)
+    const offset = cursor === undefined ? 0 : snapshotCursorOffsets.get(cursor)
+    if (offset === undefined) {
+      throw new TypeError('Snapshot cursor scope mismatch.')
+    }
+    const effectiveLimit = Math.min(
+      limit,
+      repositoryPhysicalPageSize ?? limit,
+    )
+    const snapshots = snapshotHistory.slice(offset, offset + effectiveLimit)
+    const nextOffset = offset + snapshots.length
+    const lastSnapshot = snapshots.at(-1)
+    return {
+      snapshots,
+      ...(nextOffset < snapshotHistory.length && lastSnapshot !== undefined
+        ? {
+            nextCursor: createAnalyticsSnapshotListCursor(
+              workspaceId,
+              reportId,
+              lastSnapshot,
+            ),
+          }
+        : {}),
+    }
+  }
+
+  setSnapshotHistory([...hiddenRecords.slice(0, 100).reverse(), visibleRecord])
+  const pastFirstStoragePage = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(pastFirstStoragePage.status).toBe(200)
+  expect(await pastFirstStoragePage.json()).toEqual({
+    snapshots: [visibleRecord],
+    inspectedCount: 101,
+  } satisfies AnalyticsSnapshotListResponse)
+  expect(snapshotPageLimits).toEqual([100, 100])
+
+  setSnapshotHistory([...hiddenRecords].reverse().concat(visibleRecord))
+  const inspectionLimited = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(inspectionLimited.status).toBe(200)
+  const inspectionLimitedBody =
+    await inspectionLimited.json() as AnalyticsSnapshotListResponse
+  expect(inspectionLimitedBody).toMatchObject({
+    snapshots: [],
+    inspectedCount: 1_000,
+  })
+  expect(inspectionLimitedBody.nextCursor).toBeDefined()
+  expect(snapshotPageLimits).toEqual(Array.from({ length: 10 }, () => 100))
+
+  snapshotPageLimits.length = 0
+  const continued = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots?' +
+      `cursor=${encodeURIComponent(inspectionLimitedBody.nextCursor!)}`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(continued.status).toBe(200)
+  expect(await continued.json()).toEqual({
+    snapshots: [visibleRecord],
+    inspectedCount: 1,
+  } satisfies AnalyticsSnapshotListResponse)
+  expect(snapshotPageLimits).toEqual([100])
+
+  setSnapshotHistory([
+    ...visibleRecords.slice(0, 99),
+    ...hiddenRecords.slice(99, 999),
+    visibleRecords[999]!,
+  ])
+  const sparseVisiblePage = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(sparseVisiblePage.status).toBe(200)
+  expect(await sparseVisiblePage.json()).toEqual({
+    snapshots: [
+      ...visibleRecords.slice(0, 99),
+      visibleRecords[999]!,
+    ],
+    inspectedCount: 1_000,
+  } satisfies AnalyticsSnapshotListResponse)
+  expect(snapshotPageLimits).toEqual(Array.from({ length: 10 }, () => 100))
+
+  setSnapshotHistory([
+    ...visibleRecords.slice(0, 99),
+    hiddenRecords[99]!,
+    ...visibleRecords.slice(100, 201),
+  ])
+  const partialPage = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(partialPage.status).toBe(200)
+  const partialPageBody = await partialPage.json() as AnalyticsSnapshotListResponse
+  expect(partialPageBody).toEqual({
+    snapshots: [
+      ...visibleRecords.slice(0, 99),
+      visibleRecords[100]!,
+    ],
+    inspectedCount: 101,
+    nextCursor: createAnalyticsSnapshotListCursor(
+      visibleRecord.workspaceId,
+      visibleRecord.reportId!,
+      visibleRecords[100]!,
+    ),
+  } satisfies AnalyticsSnapshotListResponse)
+  expect(snapshotPageLimits).toEqual([100, 100])
+
+  snapshotPageLimits.length = 0
+  const partialPageContinuation = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots?' +
+      `cursor=${encodeURIComponent(partialPageBody.nextCursor!)}`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(partialPageContinuation.status).toBe(200)
+  expect(await partialPageContinuation.json()).toEqual({
+    snapshots: visibleRecords.slice(101, 201),
+    inspectedCount: 100,
+  } satisfies AnalyticsSnapshotListResponse)
+  expect(snapshotPageLimits).toEqual([100])
+
+  setSnapshotHistory([...hiddenRecords.slice(0, 12), visibleRecord])
+  repositoryPhysicalPageSize = 1
+  const readLimited = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(readLimited.status).toBe(200)
+  const readLimitedBody = await readLimited.json() as AnalyticsSnapshotListResponse
+  expect(readLimitedBody).toMatchObject({
+    snapshots: [],
+    inspectedCount: 10,
+  })
+  expect(readLimitedBody.nextCursor).toBeDefined()
+  expect(snapshotPageLimits).toEqual(Array.from({ length: 10 }, () => 100))
+
+  snapshotPageLimits.length = 0
+  const readLimitedContinuation = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots?' +
+      `cursor=${encodeURIComponent(readLimitedBody.nextCursor!)}`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(readLimitedContinuation.status).toBe(200)
+  expect(await readLimitedContinuation.json()).toEqual({
+    snapshots: [visibleRecord],
+    inspectedCount: 3,
+  } satisfies AnalyticsSnapshotListResponse)
+  expect(snapshotPageLimits).toEqual([100, 100, 100])
+
+  const invalidCursor = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots?cursor=%24',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(invalidCursor.status).toBe(400)
+  expect(await invalidCursor.json()).toMatchObject({
+    code: 'InvalidAnalyticsInput',
+  })
+}, 15_000)
 
 test('preserves report-bound snapshot queries, saved baselines, and server-owned schedule cursors', async () => {
   const repository = new InMemoryAnalyticsRepository(
@@ -1069,7 +1310,10 @@ test('preserves report-bound snapshot queries, saved baselines, and server-owned
     { headers: { Authorization: 'Bearer test-token' } },
   )
   expect(hiddenSnapshots.status).toBe(200)
-  expect(await hiddenSnapshots.json()).toEqual({ snapshots: [] })
+  expect(await hiddenSnapshots.json()).toEqual({
+    snapshots: [],
+    inspectedCount: 1,
+  })
   const deniedExport = await analyticsApiRequest('/api/analytics/export', {
     snapshotId: snapshotBody.snapshotRecord.id,
     format: 'csv',

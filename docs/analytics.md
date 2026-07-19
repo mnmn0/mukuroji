@@ -65,11 +65,20 @@ report scopeを狭めるか、履歴の保持・集約方針を見直す必要�
 `413`で拒否します。
 
 Snapshot 作成時は実行した正規化済み query、report revision、metric contract version、
-permission scope hash を保存します。一覧は新しい順に最大100件を返し、export と一覧のどちらも
-current accessible Work Item keyとactive readable Project ID集合を含むpermission scope hashを
-再検証します。
-Snapshot の作成日時をDynamoDB sort keyへ含め、強整合の逆順queryへ`Limit: 100`を指定するため、
-一覧APIは長期運用で蓄積したpayload全件を読み込んでから切り詰めません。
+permission scope hash を保存します。一覧は新しい順にcurrent ACL検証済みsnapshotを1 response
+あたり最大100件返し、export と一覧のどちらもcurrent accessible Work Item keyとactive readable
+Project ID集合を含むpermission scope hashを再検証します。
+Snapshot の作成日時をDynamoDB sort keyへ含め、repositoryは強整合の逆順queryを最大100件の
+scope-bound cursor pageとして返します。APIはrepository pageへACL post-filterを適用し、閲覧可能な
+100件、保存行の末尾、または1 responseあたり1,000件の検査上限へ達するまで読み進めます。
+各repository readは残りの閲覧可能件数にかかわらず最大100件で行い、DynamoDBの1 MB response
+上限などで1 pageが100件未満になっても、1 API responseで直列実行するrepository readを最大10回に
+制限します。10回のread後も保存行が残る場合は`nextCursor`を返します。閲覧可能100件へpage途中で
+達した場合は最後に検査したrecordの直後を`nextCursor`にし、同じpageからまだ検査していない
+snapshotを次responseで再開します。
+Responseの`inspectedCount`はそのresponseでACL検査した保存record数です。返却上限または検査上限へ
+達した時点で保存行が残る場合は`nextCursor`を返し、clientは同じWorkspace/reportの`cursor` query
+parameterとして継続できます。これにより長期運用で蓄積したpayload全件を一度に読み込みません。
 現在のscopeが変わったsnapshotは再集計せず非表示、または`403`にします。
 Table widgetのsnapshot previewは先頭50行までに制限し、全明細はページングされたevidence APIで
 取得します。live responseのJSONは256 KiB、DynamoDBへ保存するsnapshot recordは350 KiBを上限とし、

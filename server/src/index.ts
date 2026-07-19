@@ -36,6 +36,8 @@ import {
   type AnalyticsQueryInput,
   type AnalyticsReport,
   type AnalyticsSnapshot,
+  type AnalyticsSnapshotListResponse,
+  type AnalyticsSnapshotRecord,
   type CreateAnalyticsReportInput,
   type AutomationAction,
   type AutomationExecutionStatus,
@@ -254,6 +256,7 @@ import {
   createAnalyticsPermissionScopeHash,
   createAnalyticsPdf,
   createAnalyticsSnapshot,
+  createAnalyticsSnapshotListCursor,
   normalizeAnalyticsEvidenceInput,
   normalizeAnalyticsExportLocale,
   normalizeAnalyticsQueryInput,
@@ -1216,8 +1219,12 @@ const ANALYTICS_WORK_ITEM_PARTITION_COUNT_LIMIT = 100
 const ANALYTICS_WORK_ITEM_PARTITION_SCAN_LIMIT = 10_000
 /** Canonical Work Item と audit history を揃える最大 read barrier 試行回数です。 */
 const ANALYTICS_READ_BARRIER_MAX_ATTEMPTS = 3
-/** Analytics snapshot 一覧で current ACL を再検証する最大 record 数です。 */
+/** Analytics snapshot 一覧で一度に返す current ACL 検証済み record の最大数です。 */
 const ANALYTICS_SNAPSHOT_LIST_LIMIT = 100
+/** Analytics snapshot 一覧の一 response で current ACL を検査する最大保存 record 数です。 */
+const ANALYTICS_SNAPSHOT_ACL_INSPECTION_LIMIT = 1_000
+/** Analytics snapshot 一覧の一 response で直列実行するrepository readの最大数です。 */
+const ANALYTICS_SNAPSHOT_REPOSITORY_PAGE_LIMIT = 10
 /** Relation target の強整合 detail read を同時実行する最大数です。 */
 const WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY = 8
 
@@ -3046,25 +3053,83 @@ app.get('/api/analytics/reports/:reportId/snapshots', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     const reportId = readAnalyticsIdentifier(c.req.param('reportId'), 'Analytics report ID')
     const report = await requireAnalyticsReport(principal, reportId)
-    const snapshots = await analytics.listSnapshots(
-      principal.directoryId,
-      report.id,
-      ANALYTICS_SNAPSHOT_LIST_LIMIT,
-    )
-    const visibleSnapshots = []
+    const visibleSnapshots: AnalyticsSnapshotRecord[] = []
     const scopeCache =
       new Map<string, ReturnType<typeof readAccessibleAnalyticsWorkItems>>()
-    for (const record of snapshots) {
-      const currentPermissionScopeHash = await readCurrentAnalyticsPermissionScopeHash(
-        principal,
-        record.query,
-        scopeCache,
+    const permissionScopeHashCache = new Map<string, Promise<string>>()
+    const seenCursors = new Set<string>()
+    let inspectedCount = 0
+    let repositoryPageCount = 0
+    let nextCursor = readAnalyticsSnapshotListCursor(c.req.query('cursor'))
+    if (nextCursor !== undefined) seenCursors.add(nextCursor)
+    do {
+      const pageCursor = nextCursor
+      const page = await analytics.listSnapshots(
+        principal.directoryId,
+        report.id,
+        Math.min(
+          ANALYTICS_SNAPSHOT_LIST_LIMIT,
+          ANALYTICS_SNAPSHOT_ACL_INSPECTION_LIMIT - inspectedCount,
+        ),
+        pageCursor,
       )
-      if (currentPermissionScopeHash === record.snapshot.permissionScopeHash) {
-        visibleSnapshots.push(record)
+      repositoryPageCount += 1
+      let resumeCursor = page.nextCursor
+      for (const [recordIndex, record] of page.snapshots.entries()) {
+        inspectedCount += 1
+        const queryCacheKey = record.snapshot.queryHash
+        let pendingPermissionScopeHash = permissionScopeHashCache.get(queryCacheKey)
+        if (!pendingPermissionScopeHash) {
+          pendingPermissionScopeHash = readCurrentAnalyticsPermissionScopeHash(
+            principal,
+            record.query,
+            scopeCache,
+          )
+          permissionScopeHashCache.set(queryCacheKey, pendingPermissionScopeHash)
+        }
+        const currentPermissionScopeHash = await pendingPermissionScopeHash
+        if (currentPermissionScopeHash === record.snapshot.permissionScopeHash) {
+          visibleSnapshots.push(record)
+          if (visibleSnapshots.length === ANALYTICS_SNAPSHOT_LIST_LIMIT) {
+            resumeCursor = recordIndex < page.snapshots.length - 1
+              ? createAnalyticsSnapshotListCursor(
+                  principal.directoryId,
+                  report.id,
+                  record,
+                )
+              : page.nextCursor
+            break
+          }
+        }
       }
-    }
-    return c.json({ snapshots: visibleSnapshots })
+      nextCursor = resumeCursor
+      if (
+        nextCursor !== undefined &&
+        (
+          page.snapshots.length === 0 ||
+          nextCursor === pageCursor ||
+          seenCursors.has(nextCursor)
+        )
+      ) {
+        throw new AnalyticsError(
+          500,
+          'AnalyticsSnapshotPaginationInvalid',
+          'Analytics snapshot pagination did not make progress.',
+        )
+      }
+      if (nextCursor !== undefined) seenCursors.add(nextCursor)
+    } while (
+      visibleSnapshots.length < ANALYTICS_SNAPSHOT_LIST_LIMIT &&
+      inspectedCount < ANALYTICS_SNAPSHOT_ACL_INSPECTION_LIMIT &&
+      repositoryPageCount < ANALYTICS_SNAPSHOT_REPOSITORY_PAGE_LIMIT &&
+      nextCursor !== undefined
+    )
+    const response = {
+      snapshots: visibleSnapshots,
+      inspectedCount,
+      ...(nextCursor === undefined ? {} : { nextCursor }),
+    } satisfies AnalyticsSnapshotListResponse
+    return c.json(response)
   } catch (error) {
     return toAnalyticsErrorResponse(c, error)
   }
@@ -7683,6 +7748,24 @@ function readAnalyticsReportListCursor(value: string | undefined) {
       400,
       'InvalidAnalyticsInput',
       'Analytics report list cursor is invalid.',
+    )
+  }
+  return cursor
+}
+
+/** Analytics snapshot list の opaque cursor を data read 前に検証します。 */
+function readAnalyticsSnapshotListCursor(value: string | undefined) {
+  if (value === undefined) return undefined
+  const cursor = value.trim()
+  if (
+    !cursor ||
+    cursor.length > 16_384 ||
+    !/^[A-Za-z0-9_-]+$/u.test(cursor)
+  ) {
+    throw new AnalyticsError(
+      400,
+      'InvalidAnalyticsInput',
+      'Analytics snapshot list cursor is invalid.',
     )
   }
   return cursor

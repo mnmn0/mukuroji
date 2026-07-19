@@ -1300,7 +1300,7 @@ test('retries a partial recipient failure across an ACL change without poisoning
   expect(createdReceipts).toHaveLength(2)
   expect(new Set(createdReceipts.map((receipt) => receipt.occurrenceKey)).size).toBe(2)
   expect(new Set(createdReceipts.map((receipt) => receipt.snapshotId)).size).toBe(2)
-  const snapshots = await repository.listSnapshots(report.workspaceId, report.id)
+  const { snapshots } = await repository.listSnapshots(report.workspaceId, report.id)
   expect(snapshots).toHaveLength(2)
   expect(snapshots[0]?.createdByMemberKey).toBe(report.ownerMemberKey)
   expect(renderedArtifacts).toHaveLength(2)
@@ -1368,7 +1368,8 @@ test('restarts a partially delivered occurrence under a new semantic report defi
   })
   expect(renderedRevisions).toEqual([1, 1, 2, 2])
   expect(new Set(createdOccurrenceKeys).size).toBe(3)
-  expect(await repository.listSnapshots(report.workspaceId, report.id)).toHaveLength(2)
+  expect((await repository.listSnapshots(report.workspaceId, report.id)).snapshots)
+    .toHaveLength(2)
   const advanced = await repository.getReport(report.workspaceId, report.id)
   expect(advanced?.revision).toBe(3)
   expect(advanced?.schedule?.nextRunAt).toBe('2026-07-19T08:00:00.000Z')
@@ -1518,7 +1519,8 @@ test('reprocesses the occurrence when a semantic report edit wins the first CAS'
   const advanced = await repository.getReport(report.workspaceId, report.id)
   expect(advanced?.revision).toBe(3)
   expect(advanced?.schedule?.nextRunAt).toBe('2026-07-19T08:00:00.000Z')
-  expect(await repository.listSnapshots(report.workspaceId, report.id)).toHaveLength(2)
+  expect((await repository.listSnapshots(report.workspaceId, report.id)).snapshots)
+    .toHaveLength(2)
 }, 10_000)
 
 test('does not overwrite a schedule cursor changed by a concurrent edit', async () => {

@@ -319,6 +319,14 @@ export type AnalyticsReportPage = {
   nextCursor?: string
 }
 
+/** Analytics snapshot repository list の cursor page です。 */
+export type AnalyticsSnapshotPage = {
+  /** Stable DynamoDB sort key の降順で返す immutable snapshot です。 */
+  snapshots: AnalyticsSnapshotRecord[]
+  /** 続きがある場合の Workspace/report-bound opaque cursor です。 */
+  nextCursor?: string
+}
+
 /** Delivery receipt の idempotent put result です。 */
 export type AnalyticsDeliveryReceiptResult = {
   /** この呼び出しが新しい receipt を作成したかどうかです。 */
@@ -355,12 +363,13 @@ export type AnalyticsRepository = {
   putSnapshot(record: AnalyticsSnapshotRecord): Promise<AnalyticsSnapshotRecord>
   /** 保存済み immutable snapshot を返します。 */
   getSnapshot(workspaceId: string, snapshotId: string): Promise<AnalyticsSnapshotRecord | undefined>
-  /** Report に紐づく最新の immutable snapshot を作成日時順で上限件数まで返します。 */
+  /** Report に紐づく immutable snapshot を作成日時の降順で cursor page 化します。 */
   listSnapshots(
     workspaceId: string,
     reportId: string,
     limit?: number,
-  ): Promise<AnalyticsSnapshotRecord[]>
+    cursor?: string,
+  ): Promise<AnalyticsSnapshotPage>
   /** 指定 shard で実行期限を迎えた schedule 付き report を keyset page で返します。 */
   listDueReports(
     scheduleShard: string,
@@ -2842,12 +2851,13 @@ export class InMemoryAnalyticsRepository implements AnalyticsRepository {
     return snapshot === undefined ? undefined : structuredClone(snapshot)
   }
 
-  /** Report に紐づく最新の immutable snapshot を作成日時順で上限件数まで返します。 */
+  /** Report に紐づく immutable snapshot を stable keyset page で返します。 */
   async listSnapshots(
     workspaceId: string,
     reportId: string,
     limit = MAX_SNAPSHOT_LIST_LIMIT,
-  ) {
+    cursor?: string,
+  ): Promise<AnalyticsSnapshotPage> {
     const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
     const normalizedReportId = readIdentifier(reportId, 'Analytics report ID')
     const normalizedLimit = readPositiveInteger(
@@ -2855,14 +2865,42 @@ export class InMemoryAnalyticsRepository implements AnalyticsRepository {
       'Analytics snapshot list limit',
       MAX_SNAPSHOT_LIST_LIMIT,
     )
-    return [...this.snapshots.values()]
+    const scopeHash = createAnalyticsSnapshotListScopeHash(
+      normalizedWorkspaceId,
+      normalizedReportId,
+    )
+    const exclusiveStartKey = cursor ? parseStorageCursor(cursor, scopeHash) : undefined
+    const boundary = exclusiveStartKey === undefined
+      ? undefined
+      : readAnalyticsSnapshotCursorBoundary(
+          exclusiveStartKey,
+          normalizedWorkspaceId,
+          normalizedReportId,
+        )
+    const candidates = [...this.snapshots.values()]
       .filter((snapshot) =>
         snapshot.workspaceId === normalizedWorkspaceId &&
         snapshot.reportId === normalizedReportId
       )
       .sort(compareSnapshots)
-      .slice(0, normalizedLimit)
-      .map((snapshot) => structuredClone(snapshot))
+      .filter((snapshot) =>
+        boundary === undefined ||
+        compareDynamoDbStringSortKeys(createSnapshotRecordKey(snapshot), boundary) < 0
+      )
+    const page = candidates.slice(0, normalizedLimit)
+    const lastSnapshot = page.at(-1)
+    return {
+      snapshots: page.map((snapshot) => structuredClone(snapshot)),
+      ...(candidates.length > page.length && lastSnapshot !== undefined
+        ? {
+            nextCursor: createAnalyticsSnapshotListCursor(
+              normalizedWorkspaceId,
+              normalizedReportId,
+              lastSnapshot,
+            ),
+          }
+        : {}),
+    }
   }
 
   /** 指定 shard で実行期限を迎えた schedule 付き report を keyset page で返します。 */
@@ -3250,12 +3288,13 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
     return undefined
   }
 
-  /** Report に紐づく最新の immutable snapshot をDB側で上限指定して返します。 */
+  /** Report に紐づく immutable snapshot をDB側の stable keyset page で返します。 */
   async listSnapshots(
     workspaceId: string,
     reportId: string,
     limit = MAX_SNAPSHOT_LIST_LIMIT,
-  ) {
+    cursor?: string,
+  ): Promise<AnalyticsSnapshotPage> {
     const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
     const normalizedReportId = readIdentifier(reportId, 'Analytics report ID')
     const normalizedLimit = readPositiveInteger(
@@ -3263,33 +3302,49 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
       'Analytics snapshot list limit',
       MAX_SNAPSHOT_LIST_LIMIT,
     )
-    const snapshots: AnalyticsSnapshotRecord[] = []
-    let exclusiveStartKey: Record<string, unknown> | undefined
-    do {
-      const response = await this.documentClient.send(new QueryCommand({
-        TableName: this.tableName,
-        KeyConditionExpression:
-          'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)',
-        ExpressionAttributeValues: {
-          ':workspaceId': normalizedWorkspaceId,
-          ':recordPrefix': createSnapshotReportPrefix(normalizedReportId),
-        },
-        ExclusiveStartKey: exclusiveStartKey,
-        ConsistentRead: true,
-        Limit: normalizedLimit - snapshots.length,
-        ScanIndexForward: false,
-      }))
-      snapshots.push(
-        ...(response.Items ?? [])
-          .filter(isStoredAnalyticsSnapshot)
-          .map(readStoredSnapshot),
-      )
-      exclusiveStartKey = response.LastEvaluatedKey
-    } while (
-      snapshots.length < normalizedLimit &&
-      exclusiveStartKey !== undefined
+    const scopeHash = createAnalyticsSnapshotListScopeHash(
+      normalizedWorkspaceId,
+      normalizedReportId,
     )
-    return snapshots
+    const parsedStartKey = cursor ? parseStorageCursor(cursor, scopeHash) : undefined
+    const exclusiveStartKey = parsedStartKey === undefined
+      ? undefined
+      : {
+          workspaceId: normalizedWorkspaceId,
+          recordKey: readAnalyticsSnapshotCursorBoundary(
+            parsedStartKey,
+            normalizedWorkspaceId,
+            normalizedReportId,
+          ),
+        }
+    const response = await this.documentClient.send(new QueryCommand({
+      TableName: this.tableName,
+      KeyConditionExpression:
+        'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)',
+      ExpressionAttributeValues: {
+        ':workspaceId': normalizedWorkspaceId,
+        ':recordPrefix': createSnapshotReportPrefix(normalizedReportId),
+      },
+      ExclusiveStartKey: exclusiveStartKey,
+      ConsistentRead: true,
+      Limit: normalizedLimit,
+      ScanIndexForward: false,
+    }))
+    return {
+      snapshots: (response.Items ?? []).map(readStoredSnapshot),
+      ...(response.LastEvaluatedKey === undefined
+        ? {}
+        : {
+            nextCursor: createStorageCursor(
+              scopeHash,
+              normalizeAnalyticsSnapshotLastEvaluatedKey(
+                response.LastEvaluatedKey,
+                normalizedWorkspaceId,
+                normalizedReportId,
+              ),
+            ),
+          }),
+    }
   }
 
   /** 指定 shard で実行期限を迎えた schedule 付き report を keyset page で返します。 */
@@ -4015,6 +4070,54 @@ function createAnalyticsReportListScopeHash(workspaceId: string) {
   })
 }
 
+/** Snapshot list cursor を現在の Workspace/report queryへ束ねるhashを返します。 */
+function createAnalyticsSnapshotListScopeHash(
+  workspaceId: string,
+  reportId: string,
+) {
+  return hashCanonical({
+    workspaceId,
+    recordPrefix: createSnapshotReportPrefix(reportId),
+  })
+}
+
+/**
+ * Snapshot list を指定recordの直後から再開するscope-bound cursorを返します。
+ *
+ * @param workspaceId - Snapshotを所有するWorkspace IDです。
+ * @param reportId - Snapshotを所有するreport IDです。
+ * @param record - Cursor境界として処理済みにするsnapshot recordです。
+ * @returns 同じWorkspace/reportだけで利用できるopaque cursorです。
+ */
+export function createAnalyticsSnapshotListCursor(
+  workspaceId: string,
+  reportId: string,
+  record: AnalyticsSnapshotRecord,
+) {
+  const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
+  const normalizedReportId = readIdentifier(reportId, 'Analytics report ID')
+  if (
+    record.workspaceId !== normalizedWorkspaceId ||
+    record.reportId !== normalizedReportId ||
+    record.id !== readIdentifier(record.id, 'Analytics snapshot ID')
+  ) {
+    throw invalid(
+      'AnalyticsCursorInvalid',
+      'Analytics snapshot continuation cursor boundary is invalid.',
+    )
+  }
+  return createStorageCursor(
+    createAnalyticsSnapshotListScopeHash(
+      normalizedWorkspaceId,
+      normalizedReportId,
+    ),
+    {
+      workspaceId: normalizedWorkspaceId,
+      recordKey: createSnapshotRecordKey(record),
+    },
+  )
+}
+
 /** Report list cursor のexclusive record keyを検証して返します。 */
 function readAnalyticsReportCursorBoundary(
   key: Record<string, unknown>,
@@ -4041,6 +4144,52 @@ function readAnalyticsReportCursorBoundary(
   return key.recordKey
 }
 
+/** Snapshot list cursor のexclusive record keyを検証して返します。 */
+function readAnalyticsSnapshotCursorBoundary(
+  key: Record<string, unknown>,
+  workspaceId: string,
+  reportId: string,
+) {
+  const recordKey = key.recordKey
+  if (
+    key.workspaceId !== workspaceId ||
+    typeof recordKey !== 'string' ||
+    recordKey.length > MAX_STORAGE_CURSOR_LENGTH
+  ) {
+    throw invalid(
+      'AnalyticsCursorInvalid',
+      'Analytics snapshot continuation cursor is invalid.',
+    )
+  }
+  const prefix = createSnapshotReportPrefix(reportId)
+  const suffix = recordKey.slice(prefix.length)
+  const separatorIndex = suffix.indexOf('#')
+  try {
+    if (!recordKey.startsWith(prefix) || separatorIndex <= 0) {
+      throw new TypeError('Snapshot cursor key does not match the report prefix.')
+    }
+    const createdAt = suffix.slice(0, separatorIndex)
+    const encodedSnapshotId = suffix.slice(separatorIndex + 1)
+    const snapshotId = decodeURIComponent(encodedSnapshotId)
+    if (
+      !encodedSnapshotId ||
+      new Date(
+          normalizeIsoTimestamp(createdAt, 'Analytics snapshot creation time'),
+        ).toISOString() !== createdAt ||
+      encodeURIComponent(readIdentifier(snapshotId, 'Analytics snapshot ID')) !==
+        encodedSnapshotId
+    ) {
+      throw new TypeError('Snapshot cursor key is not canonical.')
+    }
+  } catch {
+    throw invalid(
+      'AnalyticsCursorInvalid',
+      'Analytics snapshot continuation cursor is invalid.',
+    )
+  }
+  return recordKey
+}
+
 /** DynamoDB report page の LastEvaluatedKey をcursor用の最小keyへ正規化します。 */
 function normalizeAnalyticsReportLastEvaluatedKey(
   key: Record<string, unknown>,
@@ -4049,6 +4198,22 @@ function normalizeAnalyticsReportLastEvaluatedKey(
   return {
     workspaceId,
     recordKey: readAnalyticsReportCursorBoundary(key, workspaceId),
+  }
+}
+
+/** DynamoDB snapshot page の LastEvaluatedKey をcursor用の最小keyへ正規化します。 */
+function normalizeAnalyticsSnapshotLastEvaluatedKey(
+  key: Record<string, unknown>,
+  workspaceId: string,
+  reportId: string,
+) {
+  return {
+    workspaceId,
+    recordKey: readAnalyticsSnapshotCursorBoundary(
+      key,
+      workspaceId,
+      reportId,
+    ),
   }
 }
 

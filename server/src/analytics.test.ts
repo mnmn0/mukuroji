@@ -1630,7 +1630,8 @@ describe('Analytics repository', () => {
       createdAt: '2026-01-08T00:00:01.000Z',
     })
     expect(retried.createdAt).toBe(record.createdAt)
-    expect(await repository.listSnapshots('workspace-1', report.id)).toEqual([record])
+    expect((await repository.listSnapshots('workspace-1', report.id)).snapshots)
+      .toEqual([record])
     await expect(repository.putSnapshot({
       ...record,
       createdByMemberKey: 'different-member',
@@ -1994,13 +1995,13 @@ describe('Analytics repository', () => {
       await dynamo.putSnapshot(record)
     }
 
-    expect((await memory.listSnapshots('workspace-1', 'report-1'))
+    expect((await memory.listSnapshots('workspace-1', 'report-1')).snapshots
       .map((record) => record.id)).toEqual(expectedIds)
-    expect((await dynamo.listSnapshots('workspace-1', 'report-1'))
+    expect((await dynamo.listSnapshots('workspace-1', 'report-1')).snapshots
       .map((record) => record.id)).toEqual(expectedIds)
   })
 
-  test('limits snapshot history in the DynamoDB query before deserializing payloads', async () => {
+  test('paginates snapshot history with scoped cursors and bounded DynamoDB queries', async () => {
     const query = createQuery(createReportInput().widgets)
     const snapshot = createTestAnalyticsSnapshot({ workItems: [], events: [], query })
     const records = Array.from({ length: 101 }, (_, index) => ({
@@ -2023,17 +2024,50 @@ describe('Analytics repository', () => {
 
     const expectedIds = records.slice(1).reverse().map((record) => record.id)
     fake.setQueryPageSize(17)
-    expect((await memory.listSnapshots('workspace-1', 'report-1'))
-      .map((record) => record.id)).toEqual(expectedIds)
-    expect((await dynamo.listSnapshots('workspace-1', 'report-1'))
-      .map((record) => record.id)).toEqual(expectedIds)
+    for (const repository of [memory, dynamo]) {
+      const firstPageRecords: AnalyticsSnapshotRecord[] = []
+      let cursor: string | undefined
+      do {
+        const page = await repository.listSnapshots(
+          'workspace-1',
+          'report-1',
+          100 - firstPageRecords.length,
+          cursor,
+        )
+        firstPageRecords.push(...page.snapshots)
+        cursor = page.nextCursor
+      } while (firstPageRecords.length < 100 && cursor !== undefined)
+      expect(firstPageRecords.map((record) => record.id)).toEqual(expectedIds)
+      expect(cursor).toBeDefined()
+      const finalPage = await repository.listSnapshots(
+        'workspace-1',
+        'report-1',
+        100,
+        cursor,
+      )
+      expect(finalPage.snapshots.map((record) => record.id))
+        .toEqual(['snapshot-000'])
+      expect(finalPage.nextCursor).toBeUndefined()
+      await expect(repository.listSnapshots(
+        'workspace-1',
+        'other-report',
+        1,
+        cursor,
+      )).rejects.toMatchObject({ code: 'AnalyticsCursorInvalid' })
+      await expect(repository.listSnapshots(
+        'other-workspace',
+        'report-1',
+        1,
+        cursor,
+      )).rejects.toMatchObject({ code: 'AnalyticsCursorInvalid' })
+    }
     const snapshotQueries = fake.commands.filter((command) =>
       command instanceof QueryCommand &&
       command.input.ExpressionAttributeValues?.[':recordPrefix'] ===
         'SNAPSHOT#report-1#'
     ) as QueryCommand[]
     expect(snapshotQueries.map((command) => command.input.Limit))
-      .toEqual([100, 83, 66, 49, 32, 15])
+      .toEqual([100, 83, 66, 49, 32, 15, 100])
     expect(snapshotQueries.every((command) =>
       command.input.ConsistentRead === true &&
       command.input.ScanIndexForward === false
@@ -2047,7 +2081,7 @@ describe('Analytics repository', () => {
     expect(latestClaim?.snapshotRecordKey).toBe(
       'SNAPSHOT#report-1#2026-01-08T09:01:40.000Z#snapshot-100',
     )
-  })
+  }, 10_000)
 
   test('uses DynamoDB CAS, due GSI cursors, and first-write-wins immutable rows', async () => {
     const fake = createDynamoDocumentClient()
@@ -2151,7 +2185,8 @@ describe('Analytics repository', () => {
       createdAt: '2026-01-08T09:00:01.000Z',
     })
     expect(snapshotRetry.createdAt).toBe(record.createdAt)
-    expect(await repository.listSnapshots('workspace-1', report.id)).toEqual([record])
+    expect((await repository.listSnapshots('workspace-1', report.id)).snapshots)
+      .toEqual([record])
 
     const receipt = {
       workspaceId: 'workspace-1',
@@ -2247,8 +2282,10 @@ describe('Analytics repository', () => {
     await expect(memory.putSnapshot(second)).rejects.toMatchObject({
       code: 'AnalyticsSnapshotConflict',
     })
-    expect(await memory.listSnapshots('workspace-1', 'report-a')).toEqual([first])
-    expect(await memory.listSnapshots('workspace-1', 'report-b')).toEqual([])
+    expect((await memory.listSnapshots('workspace-1', 'report-a')).snapshots)
+      .toEqual([first])
+    expect((await memory.listSnapshots('workspace-1', 'report-b')).snapshots)
+      .toEqual([])
 
     const fake = createDynamoDocumentClient()
     const dynamo = new DynamoDbAnalyticsRepository('analytics-table', fake.client)
@@ -2256,8 +2293,10 @@ describe('Analytics repository', () => {
     await expect(dynamo.putSnapshot(second)).rejects.toMatchObject({
       code: 'AnalyticsSnapshotConflict',
     })
-    expect(await dynamo.listSnapshots('workspace-1', 'report-a')).toEqual([first])
-    expect(await dynamo.listSnapshots('workspace-1', 'report-b')).toEqual([])
+    expect((await dynamo.listSnapshots('workspace-1', 'report-a')).snapshots)
+      .toEqual([first])
+    expect((await dynamo.listSnapshots('workspace-1', 'report-b')).snapshots)
+      .toEqual([])
     expect([...fake.rows.values()].filter(
       (row) => row.entryType === 'analytics-snapshot-id',
     )).toHaveLength(1)

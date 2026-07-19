@@ -351,6 +351,16 @@ export type AnalyticsSnapshotRecord = {
   snapshot: AnalyticsSnapshot
 }
 
+/** Current ACL で再検証した immutable snapshot 一覧 API の response です。 */
+export type AnalyticsSnapshotListResponse = {
+  /** Caller の current permission scope と一致した snapshot record です。 */
+  snapshots: AnalyticsSnapshotRecord[]
+  /** この response でcurrent ACLを検査した保存済みrecord数です。0以上1,000以下です。 */
+  inspectedCount: number
+  /** 検査上限または返却上限に達し、保存済み record が残る場合の scope-bound cursor です。 */
+  nextCursor?: string
+}
+
 /** Metric から辿る Work Item/event evidence です。 */
 export type AnalyticsEvidenceItem = {
   /** Evidence を識別する stable ID です。 */
