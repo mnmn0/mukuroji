@@ -15,7 +15,7 @@
 
 ## ディレクトリ
 
-- `web/`: React + TypeScript + Vite のフロントエンド。
+- `web/`: React + TypeScript + Vite のフロントエンド。Web 固有のルールは `web/AGENTS.md` に置く。
 - `server/`: Hono + Bun のサーバー。
 - `cdk/`: AWS CDK TypeScript プロジェクト。
 - `docs/`: ドキュメント置き場。
@@ -38,36 +38,6 @@ bun run oxc:lint:github
 ```
 
 `oxc:lint:github` は GitHub Actions の annotation 向けです。CI / oxlint 設定を変更した場合は、ローカルでは通常 `bun run oxc:lint` を確認してください。
-
-## Web
-
-`web/` は React 19, React Router, Tailwind CSS, Storybook を使います。
-
-主なコマンド:
-
-```sh
-bun run web:dev
-bun run web:lint
-bun run web:build
-bun run web:storybook
-bun run web:build-storybook
-```
-
-実装方針:
-
-- 画面単位のルーティングは `web/src/routes/router.tsx` に寄せ、`App.tsx` を肥大化させない。
-- グローバル CSS は `web/src/index.css` を最小限に保ち、UI は Tailwind のユーティリティ中心で作る。
-- Storybook のカテゴリは `Application/...` と `Design System/...` を基本にする。
-- コンポーネントは Storybook で単体確認できるように Story を追加・更新する。
-- 表示文言は i18n 対応を前提にし、固定文言をコンポーネントに閉じ込めない。
-- 既存の `web/src/i18n.ts` と `createTranslator` / `createSidebarLabels` の方針に合わせる。
-- ブランド表現には `BrandMark` と `mukuroji` 表記を使う。
-
-確認:
-
-- UI 変更では少なくとも `bun run web:lint`, `bun run web:build`, `bun run web:build-storybook` を通す。
-- Storybook を起動できる場合は対象 Story をブラウザまたはスクリーンショットで確認する。
-- Storybook の出力 `storybook-static/` は生成物なのでコミットしない。
 
 ## Server
 
@@ -99,7 +69,6 @@ bun run cdk:synth
 
 作業内容に応じて必要な検証を実行し、結果をユーザーに伝えてください。
 
-- `web` の UI/Storybook 変更: `bun run web:lint`, `bun run web:build`, `bun run web:build-storybook`
 - CI / oxlint 設定の変更: `bun run oxc:lint`
 - `cdk` の変更: `bun run cdk:build`, `bun run cdk:test`
 - `server` の変更: 利用可能なスクリプトと変更内容に応じて確認
