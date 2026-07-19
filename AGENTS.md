@@ -16,7 +16,7 @@
 ## ディレクトリ
 
 - `web/`: React + TypeScript + Vite のフロントエンド。Web 固有のルールは `web/AGENTS.md` に置く。
-- `server/`: Hono + Bun のサーバー。
+- `server/`: Hono + Bun のサーバー。Server 固有のルールは `server/AGENTS.md` に置く。
 - `cdk/`: AWS CDK TypeScript プロジェクト。
 - `docs/`: ドキュメント置き場。
 
@@ -39,18 +39,6 @@ bun run oxc:lint:github
 
 `oxc:lint:github` は GitHub Actions の annotation 向けです。CI / oxlint 設定を変更した場合は、ローカルでは通常 `bun run oxc:lint` を確認してください。
 
-## Server
-
-`server/` は Hono + Bun です。
-
-主なコマンド:
-
-```sh
-bun run server:dev
-```
-
-サーバー側はまだ小さいため、追加する際はルートの責務、入力検証、レスポンス形式を明確にしてください。
-
 ## CDK
 
 `cdk/` は AWS CDK TypeScript プロジェクトです。
@@ -71,6 +59,5 @@ bun run cdk:synth
 
 - CI / oxlint 設定の変更: `bun run oxc:lint`
 - `cdk` の変更: `bun run cdk:build`, `bun run cdk:test`
-- `server` の変更: 利用可能なスクリプトと変更内容に応じて確認
 
 コミット前レビューで指摘が出た場合は、対応してから再度必要な検証を行ってください。
