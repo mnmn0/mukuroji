@@ -742,7 +742,7 @@ export class CdkStack extends cdk.Stack {
       indexName: 'ScheduleDueIndex',
       partitionKey: { name: 'scheduleShard', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'nextDeliveryAtRecordKey', type: dynamodb.AttributeType.STRING },
-      projectionType: dynamodb.ProjectionType.ALL,
+      projectionType: dynamodb.ProjectionType.KEYS_ONLY,
     });
 
     const requestIntakeTable = new dynamodb.Table(this, 'RequestIntakeTable', {
@@ -1850,7 +1850,14 @@ export class CdkStack extends cdk.Stack {
         },
       },
     );
-    analyticsTable.grantReadWriteData(analyticsScheduleFunction);
+    analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem', 'dynamodb:PutItem'],
+      resources: [analyticsTable.tableArn],
+    }));
+    analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:Query'],
+      resources: [`${analyticsTable.tableArn}/index/ScheduleDueIndex`],
+    }));
     analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
       actions: ['dynamodb:TransactWriteItems'],
       resources: [analyticsTable.tableArn],
@@ -1859,10 +1866,18 @@ export class CdkStack extends cdk.Stack {
       actions: ['cognito-idp:AdminListGroupsForUser'],
       resources: [cognitoUserPoolArn],
     }));
-    auditEventsTable.grantReadData(analyticsScheduleFunction);
-    projectDirectoryTable.grantReadData(analyticsScheduleFunction);
-    workItemsTable.grantReadData(analyticsScheduleFunction);
-    workspaceAccessTable.grantReadData(analyticsScheduleFunction);
+    analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:Query'],
+      resources: [`${auditEventsTable.tableArn}/index/EntityOccurredAtIndex`],
+    }));
+    analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:Query'],
+      resources: [projectDirectoryTable.tableArn, workItemsTable.tableArn],
+    }));
+    analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem'],
+      resources: [workspaceAccessTable.tableArn],
+    }));
 
     new cloudwatch.Alarm(this, 'AnalyticsScheduleDlqAlarm', {
       alarmDescription:

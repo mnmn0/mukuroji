@@ -269,7 +269,7 @@ test('analytics state is retained with a due-delivery index and scoped API acces
             { AttributeName: 'scheduleShard', KeyType: 'HASH' },
             { AttributeName: 'nextDeliveryAtRecordKey', KeyType: 'RANGE' },
           ],
-          Projection: { ProjectionType: 'ALL' },
+          Projection: { ProjectionType: 'KEYS_ONLY' },
         }),
       ],
       KeySchema: [
@@ -394,33 +394,54 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
       }).Properties?.PolicyDocument?.Statement;
     return Array.isArray(statements) ? statements : [];
   });
-  const sourceTableLogicalIds = [
-    auditTableLogicalId,
-    projectDirectoryTableLogicalId,
-    workItemsTableLogicalId,
-    workspaceAccessTableLogicalId,
-  ];
-  const writeActions = new Set([
+  const actionsForResource = (logicalId: string) =>
+    scheduleStatements
+      .filter((statement) =>
+        JSON.stringify(
+          (statement as { Resource?: unknown }).Resource,
+        ).includes(logicalId)
+      )
+      .flatMap((statement) => {
+        const action = (statement as { Action?: unknown }).Action;
+        return Array.isArray(action) ? action : [action];
+      })
+      .filter((action): action is string => typeof action === 'string');
+
+  expect(new Set(actionsForResource(analyticsTableLogicalId))).toEqual(new Set([
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+    'dynamodb:Query',
+    'dynamodb:TransactWriteItems',
+  ]));
+  expect(new Set(actionsForResource(auditTableLogicalId))).toEqual(
+    new Set(['dynamodb:Query']),
+  );
+  expect(new Set(actionsForResource(projectDirectoryTableLogicalId))).toEqual(
+    new Set(['dynamodb:Query']),
+  );
+  expect(new Set(actionsForResource(workItemsTableLogicalId))).toEqual(
+    new Set(['dynamodb:Query']),
+  );
+  expect(new Set(actionsForResource(workspaceAccessTableLogicalId))).toEqual(
+    new Set(['dynamodb:GetItem']),
+  );
+
+  const scheduleDynamoActions = scheduleStatements
+    .flatMap((statement) => {
+      const action = (statement as { Action?: unknown }).Action;
+      return Array.isArray(action) ? action : [action];
+    })
+    .filter((action): action is string =>
+      typeof action === 'string' && action.startsWith('dynamodb:')
+    );
+  for (const forbiddenAction of [
+    'dynamodb:BatchGetItem',
     'dynamodb:BatchWriteItem',
     'dynamodb:DeleteItem',
-    'dynamodb:PutItem',
-    'dynamodb:TransactWriteItems',
+    'dynamodb:Scan',
     'dynamodb:UpdateItem',
-  ]);
-  for (const sourceTableLogicalId of sourceTableLogicalIds) {
-    const sourceStatements = scheduleStatements.filter((statement) =>
-      JSON.stringify(
-        (statement as { Resource?: unknown }).Resource,
-      ).includes(sourceTableLogicalId)
-    );
-    expect(sourceStatements.length).toBeGreaterThan(0);
-    for (const statement of sourceStatements) {
-      const action = (statement as { Action?: unknown }).Action;
-      const actions = Array.isArray(action) ? action : [action];
-      expect(actions.some((candidate) =>
-        typeof candidate === 'string' && writeActions.has(candidate)
-      )).toBe(false);
-    }
+  ]) {
+    expect(scheduleDynamoActions).not.toContain(forbiddenAction);
   }
 
   const auditStreamMappings = Object.values(
