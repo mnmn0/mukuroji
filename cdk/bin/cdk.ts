@@ -3,6 +3,7 @@ import * as cdk from 'aws-cdk-lib';
 import { CdkStack } from '../lib/cdk-stack';
 
 const app = new cdk.App();
+// oxlint-disable-next-line awscdk/no-construct-stack-suffix -- Existing stack ID is part of the deployed resource identity.
 new CdkStack(app, 'CdkStack', {
   /* If you don't specify 'env', this stack will be environment-agnostic.
    * Account/Region-dependent features and context lookups will not work,

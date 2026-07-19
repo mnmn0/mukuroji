@@ -12,7 +12,7 @@ function createTemplate() {
       '@aws-cdk/aws-iam:minimizePolicies': true,
     },
   });
-  const stack = new CdkStack(app, 'TestStack');
+  const stack = new CdkStack(app, 'Test');
 
   return Template.fromStack(stack);
 }
