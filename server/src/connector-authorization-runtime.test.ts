@@ -58,7 +58,19 @@ function emptyConflictRuntime(
   }
 }
 
-function createRuntimeFixture() {
+function createRuntimeFixture(fixtureOptions: {
+  /** Tokenごとのprovider revoke responseを差し替えるtest hookです。 */
+  revoke?: (
+    token: string,
+    signal: AbortSignal | null | undefined,
+  ) => Response | Promise<Response>
+  /** Adapterの全token revoke deadlineです。 */
+  revocationTimeoutMilliseconds?: number
+  /** Authorization disconnect全体のprovider revoke deadlineです。 */
+  disconnectRevocationTimeoutMilliseconds?: number
+  /** Request-scoped absolute deadlineに使う単調時計です。 */
+  monotonicClock?: () => number
+} = {}) {
   let externalAccountId = 'account-1'
   const revoked: string[] = []
   const tokenRequests: URLSearchParams[] = []
@@ -80,8 +92,11 @@ function createRuntimeFixture() {
     }
     if (url.endsWith('/oauth/revoke')) {
       const body = init!.body as URLSearchParams
-      revoked.push(body.get('token')!)
-      return new Response(null, { status: 204 })
+      const token = body.get('token')!
+      revoked.push(token)
+      return fixtureOptions.revoke
+        ? await fixtureOptions.revoke(token, init?.signal)
+        : new Response(null, { status: 204 })
     }
     throw new Error(`Unexpected URL: ${url}`)
   }) as typeof fetch
@@ -128,6 +143,12 @@ function createRuntimeFixture() {
     allowedHosts: ['app.test', 'provider.test'],
     fetch: fetcher,
     clock: () => NOW,
+    ...(fixtureOptions.revocationTimeoutMilliseconds === undefined
+      ? {}
+      : {
+          revocationTimeoutMilliseconds:
+            fixtureOptions.revocationTimeoutMilliseconds,
+        }),
   }
   const protector = new LocalAesGcmSecretProtector(new Uint8Array(32).fill(3))
   const platform = new InMemoryDeveloperPlatformClient(protector, () => NOW)
@@ -150,6 +171,15 @@ function createRuntimeFixture() {
       },
     },
     conflicts: emptyConflictRuntime(),
+    ...(fixtureOptions.disconnectRevocationTimeoutMilliseconds === undefined
+      ? {}
+      : {
+          disconnectRevocationTimeoutMilliseconds:
+            fixtureOptions.disconnectRevocationTimeoutMilliseconds,
+        }),
+    ...(fixtureOptions.monotonicClock === undefined
+      ? {}
+      : { monotonicClock: fixtureOptions.monotonicClock }),
   })
   return {
     platform,
@@ -447,6 +477,71 @@ describe('ConnectorAuthorizationRuntime', () => {
     })).rejects.toMatchObject({ code: 'ConnectorDisconnected' })
   })
 
+  test('does not restart provider revoke after a CAS retry crosses the request deadline', async () => {
+    let monotonicMilliseconds = 0
+    const fixture = createRuntimeFixture({
+      disconnectRevocationTimeoutMilliseconds: 100,
+      monotonicClock: () => monotonicMilliseconds,
+    })
+    const authorization = await fixture.runtime.begin(principal, {
+      provider: 'github',
+      name: 'Engineering GitHub',
+      scopes: ['repo'],
+      returnUrl: '/settings',
+    })
+    const installed = await fixture.runtime.completeCallback({
+      code: 'disconnect-deadline-c1',
+      state: readStateFromAuthorizationUrl(authorization.authorizationUrl),
+    })
+    const updateStatus = fixture.platform.updateConnectorStatus.bind(fixture.platform)
+    const recover = fixture.platform.recoverConnector.bind(fixture.platform)
+    let concurrentReplacements = 0
+    fixture.platform.updateConnectorStatus = async (request) => {
+      if (
+        request.status === 'disconnected' &&
+        request.expectedCredential &&
+        concurrentReplacements === 0
+      ) {
+        concurrentReplacements += 1
+        await recover({
+          workspaceId: 'workspace-1',
+          installationId: installed.installation.id,
+          credential: serializeConnectorCredential({
+            accessToken: 'access-disconnect-deadline-c2',
+            refreshToken: 'refresh-disconnect-deadline-c2',
+            externalAccountId: 'account-1',
+            scopes: ['repo'],
+          }),
+        })
+        monotonicMilliseconds = 101
+      }
+      return updateStatus(request)
+    }
+
+    await expect(fixture.runtime.disconnect(
+      principal,
+      installed.installation.id,
+    )).rejects.toMatchObject({
+      code: 'ConnectorProviderTimeout',
+      retryable: true,
+    })
+    expect(concurrentReplacements).toBe(1)
+    expect(fixture.revoked).toEqual([
+      'refresh-1',
+      'access-disconnect-deadline-c1',
+    ])
+    const currentCredential = deserializeConnectorCredential(
+      await fixture.platform.readConnectorCredential({
+        workspaceId: 'workspace-1',
+        installationId: installed.installation.id,
+      }),
+    )
+    expect(currentCredential).toMatchObject({
+      accessToken: 'access-disconnect-deadline-c2',
+      refreshToken: 'refresh-disconnect-deadline-c2',
+    })
+  })
+
   test('ignores stale health results after a newer credential lifecycle wins', async () => {
     const fixture = createRuntimeFixture()
     const authorization = await fixture.runtime.begin(principal, {
@@ -556,6 +651,46 @@ describe('ConnectorAuthorizationRuntime', () => {
     })).rejects.toMatchObject({ code: 'ConnectorDisconnected' })
     expect((await fixture.platform.listConnectors('workspace-1'))[0]).toMatchObject({
       status: 'disconnected',
+    })
+  })
+
+  test('keeps the local credential retryable after a partial provider revoke', async () => {
+    const fixture = createRuntimeFixture({
+      revoke(token) {
+        return new Response(null, {
+          status: token === 'refresh-1' ? 503 : 204,
+        })
+      },
+    })
+    const authorization = await fixture.runtime.begin(principal, {
+      provider: 'github',
+      name: 'Engineering GitHub',
+      scopes: ['repo'],
+      returnUrl: '/settings/developer',
+    })
+    const installed = await fixture.runtime.completeCallback({
+      code: 'partial-revoke-code',
+      state: readStateFromAuthorizationUrl(authorization.authorizationUrl),
+    })
+
+    await expect(fixture.runtime.disconnect(
+      principal,
+      installed.installation.id,
+    )).rejects.toMatchObject({
+      code: 'ConnectorProviderUnavailable',
+      providerStatus: 503,
+      retryable: true,
+    })
+    expect(fixture.revoked).toEqual([
+      'refresh-1',
+      'access-partial-revoke-code',
+    ])
+    await expect(fixture.platform.readConnectorCredential({
+      workspaceId: 'workspace-1',
+      installationId: installed.installation.id,
+    })).resolves.toBeString()
+    expect((await fixture.platform.listConnectors('workspace-1'))[0]).toMatchObject({
+      status: 'connected',
     })
   })
 

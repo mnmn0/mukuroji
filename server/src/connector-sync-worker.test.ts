@@ -107,6 +107,30 @@ test('projects external-link changes into immediate outbound and poll locators',
   expect(JSON.stringify(queued)).not.toContain('external.test')
 })
 
+test('does not enqueue sync work for links paused by connector disconnect', async () => {
+  const queued: ConnectorSyncQueueMessage[] = []
+  const event = createConnectorDisconnectedLinkAuditEvent()
+
+  const response = await processConnectorSyncAuditProjectionBatch({
+    Records: [{
+      eventName: 'INSERT',
+      dynamodb: {
+        SequenceNumber: 'connector-disconnected-link-1',
+        NewImage: marshallRecord(event),
+      },
+    }],
+  }, {
+    queue: {
+      async enqueue(message) {
+        queued.push(message)
+      },
+    },
+  })
+
+  expect(response).toEqual({ batchItemFailures: [] })
+  expect(queued).toEqual([])
+})
+
 test('retries a durable disconnect outbox after the SQS response is lost', async () => {
   const event = createConnectorDisconnectAuditEvent()
   const record = {
@@ -298,6 +322,59 @@ test('continues disconnected link cleanup through durable ID-only jobs', async (
     cursor: 'disconnect-page-2',
   })
   expect(fixture.queued).toHaveLength(1)
+})
+
+test('processes disconnect cleanup without loading the secret-backed engine', async () => {
+  const fixture = createWorkerFixture({
+    disconnectPages: [{ paused: 1 }],
+    engineError: new Error('Secrets Manager is unavailable'),
+  })
+
+  await expect(processConnectorSyncWorkerBatch({
+    Records: [{
+      messageId: 'disconnect-without-engine',
+      body: JSON.stringify({
+        version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+        kind: 'disconnect-links',
+        workspaceId: 'workspace-1',
+        installationId: 'installation-1',
+        lifecycleRevision: 4,
+      }),
+    }],
+  }, fixture.dependencies)).resolves.toEqual({ batchItemFailures: [] })
+
+  expect(fixture.pauseCalls).toHaveLength(1)
+  expect(fixture.readEngineLoads()).toBe(0)
+})
+
+test('skips stale outbound work before loading the secret-backed engine', async () => {
+  const inactiveLinks = [
+    { syncStatus: 'paused', syncDirection: 'bidirectional' },
+    { syncStatus: 'conflict', syncDirection: 'outbound' },
+    { syncStatus: 'synced', syncDirection: 'inbound' },
+    { syncStatus: 'synced', syncDirection: 'none' },
+  ] as const
+
+  for (const inactive of inactiveLinks) {
+    const fixture = createWorkerFixture({
+      engineError: new Error('Secrets Manager is unavailable'),
+    })
+    fixture.links[0] = {
+      ...fixture.links[0]!,
+      ...inactive,
+    }
+
+    await expect(processConnectorSyncMessage({
+      version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+      kind: 'outbound',
+      workspaceId: 'workspace-1',
+      linkId: 'link-1',
+      sourceEventId: 'stale-outbound-event',
+    }, fixture.dependencies)).resolves.toBeUndefined()
+
+    expect(fixture.outboundCalls).toEqual([])
+    expect(fixture.readEngineLoads()).toBe(0)
+  }
 })
 
 test('replays a disconnect page safely when the continuation response is lost', async () => {
@@ -541,6 +618,7 @@ function createWorkerFixture(options: {
   inventory?: ConnectorPollInventory
   disconnectPages?: Array<{ paused: number; nextCursor?: string }>
   maximumDisconnectLinks?: number
+  engineError?: Error
 } = {}) {
   const links: ExternalWorkItemLink[] = [createLink()]
   const installations: ConnectorInstallation[] = [createInstallation()]
@@ -562,6 +640,7 @@ function createWorkerFixture(options: {
   const commits: CommitConnectorPollCheckpointInput[] = []
   const pollCursors = [...(options.pollCursors ?? [])]
   const disconnectPages = [...(options.disconnectPages ?? [])]
+  let engineLoads = 0
   let checkpoint = options.checkpoint
     ? structuredClone(options.checkpoint)
     : undefined
@@ -598,23 +677,27 @@ function createWorkerFixture(options: {
         return structuredClone(disconnectPages.shift() ?? { paused: 0 })
       },
     },
-    engine: {
-      async processOutbound(input) {
-        outboundCalls.push(structuredClone(input))
-        return {
-          kind: 'skipped',
-          linkId: input.link.id,
-          reason: 'duplicate',
-        }
-      },
-      async pollInstallation(input) {
-        pollCalls.push(structuredClone(input))
-        const nextCursor = pollCursors.shift()
-        return {
-          results: [],
-          ...(nextCursor ? { nextCursor } : {}),
-        }
-      },
+    async getEngine() {
+      engineLoads += 1
+      if (options.engineError) throw options.engineError
+      return {
+        async processOutbound(input) {
+          outboundCalls.push(structuredClone(input))
+          return {
+            kind: 'skipped',
+            linkId: input.link.id,
+            reason: 'duplicate',
+          }
+        },
+        async pollInstallation(input) {
+          pollCalls.push(structuredClone(input))
+          const nextCursor = pollCursors.shift()
+          return {
+            results: [],
+            ...(nextCursor ? { nextCursor } : {}),
+          }
+        },
+      }
     },
     queue: {
       async enqueue(message) {
@@ -637,6 +720,7 @@ function createWorkerFixture(options: {
     linkListCalls,
     pauseCalls,
     commits,
+    readEngineLoads: () => engineLoads,
     readCheckpoint: () => checkpoint ? structuredClone(checkpoint) : undefined,
   }
 }
@@ -763,6 +847,42 @@ function createConnectorDisconnectAuditEvent() {
       previousStatus: 'connected',
       status: 'disconnected',
       disconnectCleanupRevision: 4,
+    },
+    expiresAt: Math.floor(Date.parse(now) / 1_000) + 86_400,
+  })
+}
+
+function createConnectorDisconnectedLinkAuditEvent() {
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'connector-disconnected-link-1',
+    occurredAt: now,
+    request: {
+      method: 'EVENT',
+      path: '/developer-platform/external-link/link-1',
+      body: { transitionId: 'connector-disconnect:4' },
+    },
+    source: {
+      kind: 'system',
+      requestId: 'developer-platform-connector-disconnect-link-1',
+    },
+  })
+  return createAuditEvent({
+    context,
+    eventType: 'external-link.updated',
+    entity: { type: 'external-link', id: 'link-1' },
+    action: 'paused',
+    metadata: {
+      externalLinkId: 'link-1',
+      workItemId: 'work-item-1',
+      installationId: 'installation-1',
+      resourceType: 'issue',
+      previousSyncDirection: 'bidirectional',
+      syncDirection: 'bidirectional',
+      previousSyncStatus: 'synced',
+      syncStatus: 'paused',
+      cause: 'connector-disconnected',
     },
     expiresAt: Math.floor(Date.parse(now) / 1_000) + 86_400,
   })

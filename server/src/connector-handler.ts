@@ -25,7 +25,7 @@ let sqsClient: SQSClient | undefined
 export async function queueHandler(event: ConnectorSyncSqsEvent) {
   return processConnectorSyncWorkerBatch(event, {
     platform: getPlatform(),
-    engine: await requireConfiguredConnectorSyncEngine(),
+    getEngine: requireConfiguredConnectorSyncEngine,
     queue: getQueue(),
     checkpoints: getCheckpoints(),
     inventory: getInventory(),

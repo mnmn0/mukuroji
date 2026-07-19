@@ -14,6 +14,9 @@ import {
   type ExternalResourceType,
 } from './connectors'
 
+const defaultRevocationTimeoutMilliseconds = 5_000
+const minimumRevocationTimeoutMilliseconds = 100
+
 /** Connector HTTP response から値を読む JSON path です。 */
 export type ConnectorJsonPath = string
 
@@ -139,6 +142,8 @@ export type ConfiguredOAuthConnectorOptions = {
   clock?: () => Date
   /** Provider HTTP request の timeout ミリ秒です。 */
   requestTimeoutMilliseconds?: number
+  /** API request 内の全token revokeに共有する短いdeadlineです。 */
+  revocationTimeoutMilliseconds?: number
 }
 
 /** Authorization URL を作る provider-neutral input です。 */
@@ -151,12 +156,23 @@ export type ConnectorOAuthAuthorizationRequest = {
   scopes: readonly string[]
 }
 
+/** Authorization request全体の残りprovider revoke時間です。 */
+export type ConnectorRevocationRequest = {
+  /** 単調時計のabsolute deadlineから算出した残りミリ秒です。 */
+  timeoutMilliseconds: number
+}
+
 /** OAuth authorization と ConnectorAdapter を統合する boundary です。 */
 export interface ConnectorOAuthAdapter extends ConnectorAdapter {
   /** OAuth callback の固定 redirect URI です。 */
   readonly redirectUri: string
   /** Signed state と PKCE challenge を含む provider authorization URL を作ります。 */
   createAuthorizationUrl(input: ConnectorOAuthAuthorizationRequest): string
+  /** Request全体の残りdeadline内でprovider credentialをrevokeします。 */
+  disconnect(
+    credential: ConnectorCredential,
+    request?: ConnectorRevocationRequest,
+  ): Promise<void>
 }
 
 /** Connector runtime が外部 provider 失敗を分類する stable error です。 */
@@ -232,6 +248,8 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
   private readonly clock: () => Date
   /** Provider HTTP request timeout ミリ秒です。 */
   private readonly requestTimeoutMilliseconds: number
+  /** Local disconnect commit用の余裕を残す全token revoke deadlineです。 */
+  private readonly revocationTimeoutMilliseconds: number
 
   /** 検証済み provider configuration から adapter を作成します。 */
   constructor(options: ConfiguredOAuthConnectorOptions) {
@@ -308,6 +326,21 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
         'Connector request timeout must be between 1000 and 30000 milliseconds.',
       )
     }
+    this.revocationTimeoutMilliseconds = options.revocationTimeoutMilliseconds ??
+      Math.min(
+        this.requestTimeoutMilliseconds,
+        defaultRevocationTimeoutMilliseconds,
+      )
+    if (
+      !Number.isSafeInteger(this.revocationTimeoutMilliseconds) ||
+      this.revocationTimeoutMilliseconds < minimumRevocationTimeoutMilliseconds ||
+      this.revocationTimeoutMilliseconds > defaultRevocationTimeoutMilliseconds
+    ) {
+      throw new ConnectorRuntimeError(
+        'ConnectorRevocationTimeoutInvalid',
+        'Connector revocation timeout must be between 100 and 5000 milliseconds.',
+      )
+    }
   }
 
   /** Signed state と PKCE challenge を含む authorization URL を作ります。 */
@@ -377,7 +410,10 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
   }
 
   /** Provider 側 credential grant を revoke します。 */
-  async disconnect(credential: ConnectorCredential) {
+  async disconnect(
+    credential: ConnectorCredential,
+    request?: ConnectorRevocationRequest,
+  ) {
     if (!this.revocationEndpoint) {
       throw new ConnectorRuntimeError(
         'ConnectorRevocationUnsupported',
@@ -391,16 +427,30 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
     const refreshToken = credential.refreshToken
       ? requireNonEmpty(credential.refreshToken, 'Connector refresh token')
       : undefined
+    const requestTimeoutMilliseconds = request === undefined
+      ? this.revocationTimeoutMilliseconds
+      : readRevocationRequestTimeout(request.timeoutMilliseconds)
+    const signal = AbortSignal.timeout(Math.min(
+      this.revocationTimeoutMilliseconds,
+      requestTimeoutMilliseconds,
+    ))
+    const revocations: Promise<void>[] = []
     if (refreshToken && refreshToken !== accessToken) {
-      await this.revokeToken(refreshToken, 'refresh_token')
+      revocations.push(this.revokeToken(refreshToken, 'refresh_token', signal))
     }
-    await this.revokeToken(accessToken, 'access_token')
+    revocations.push(this.revokeToken(accessToken, 'access_token', signal))
+    const outcomes = await Promise.allSettled(revocations)
+    const failure = outcomes.find(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
+    )
+    if (failure) throw failure.reason
   }
 
-  /** Refresh/access token を個別に revoke し、成功 response だけを受理します。 */
+  /** Refresh/access token を共有deadline内で revoke し、成功 response だけを受理します。 */
   private async revokeToken(
     token: string,
     tokenTypeHint: 'refresh_token' | 'access_token',
+    signal: AbortSignal,
   ) {
     const form = new URLSearchParams({
       token: requireNonEmpty(token, 'Connector token'),
@@ -412,7 +462,7 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
       redirect: 'error',
       headers: this.createFormHeaders(),
       body: form,
-    })
+    }, signal)
     if (!response.ok) {
       throw createProviderHttpError(response.status, 'revoke credential')
     }
@@ -625,11 +675,15 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
   }
 
   /** AbortSignal timeout を強制して provider request を実行します。 */
-  private async fetchWithTimeout(input: URL | string, init: RequestInit) {
+  private async fetchWithTimeout(
+    input: URL | string,
+    init: RequestInit,
+    signal = AbortSignal.timeout(this.requestTimeoutMilliseconds),
+  ) {
     try {
       return await this.fetcher(input, {
         ...init,
-        signal: AbortSignal.timeout(this.requestTimeoutMilliseconds),
+        signal,
       })
     } catch (error) {
       if (
@@ -1257,6 +1311,16 @@ function requireNonEmpty(value: string, label: string) {
     value.includes('\0')
   ) {
     throw new ConnectorRuntimeError('ConnectorValueInvalid', `${label} is invalid.`)
+  }
+  return value
+}
+
+function readRevocationRequestTimeout(value: number) {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new ConnectorRuntimeError(
+      'ConnectorRevocationTimeoutInvalid',
+      'Connector revocation request timeout must be a positive integer.',
+    )
   }
   return value
 }

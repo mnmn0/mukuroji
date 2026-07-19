@@ -180,8 +180,8 @@ export type ConnectorSyncWorkerEngine = Pick<
 export type ConnectorSyncWorkerDependencies = {
   /** Current installation/link state を返す authoritative store です。 */
   platform: ConnectorSyncWorkerPlatform
-  /** RBAC、credential、CAS、idempotency を担う sync engine です。 */
-  engine: ConnectorSyncWorkerEngine
+  /** Provider 処理が必要な message だけで sync engine を遅延取得します。 */
+  getEngine: () => Promise<ConnectorSyncWorkerEngine>
   /** Follow-up outbound/poll message を送る durable queue です。 */
   queue: ConnectorSyncQueue
   /** Provider cursor を secret-free queue の外で保持する store です。 */
@@ -566,6 +566,10 @@ async function projectAuditRecord(
     event.eventType !== 'external-link.updated'
   ) return
   const link = readAuditExternalLinkIdentity(event)
+  if (
+    event.metadata?.cause === 'connector-disconnected' &&
+    event.metadata.syncStatus === 'paused'
+  ) return
   const messages: ConnectorSyncQueueMessage[] = []
   if (link.syncDirection === 'outbound' || link.syncDirection === 'bidirectional') {
     messages.push({
@@ -621,8 +625,17 @@ async function processCurrentOutboundLink(
     workspaceId: message.workspaceId,
     linkId: message.linkId,
   }))[0]
-  if (!link) return
-  await dependencies.engine.processOutbound({
+  if (
+    !link ||
+    link.syncStatus === 'paused' ||
+    link.syncStatus === 'conflict' ||
+    (
+      link.syncDirection !== 'outbound' &&
+      link.syncDirection !== 'bidirectional'
+    )
+  ) return
+  const engine = await dependencies.getEngine()
+  await engine.processOutbound({
     workspaceId: message.workspaceId,
     link,
     operationId: createConnectorOutboundOperationId(message),
@@ -645,7 +658,8 @@ async function pollCurrentInstallation(
   const installation = installations.find((candidate) => candidate.id === message.installationId)
   if (!installation || installation.status !== 'connected') return
   const checkpoint = normalizeCheckpoint(storedCheckpoint)
-  const result = await dependencies.engine.pollInstallation({
+  const engine = await dependencies.getEngine()
+  const result = await engine.pollInstallation({
     ...key,
     ...(checkpoint?.cursor ? { cursor: checkpoint.cursor } : {}),
     maximumPages: readPageLimit(

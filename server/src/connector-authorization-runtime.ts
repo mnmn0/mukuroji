@@ -36,6 +36,9 @@ import type {
   ConnectorSyncHealthReporter,
 } from './connector-sync-runtime'
 
+const defaultDisconnectRevocationTimeoutMilliseconds = 5_000
+const minimumDisconnectRevocationTimeoutMilliseconds = 100
+
 /** OAuth callback を current Workspace membership/RBAC で再検証する boundary です。 */
 export interface ConnectorOAuthCallbackAuthorizer {
   /** Flow actor が今も connector を管理できることを検証します。 */
@@ -102,6 +105,10 @@ export type ConnectorAuthorizationRuntimeOptions = {
   conflicts: ConnectorConflictRuntime
   /** Worker が作る reauthorization flow の戻り先です。 */
   reauthorizationReturnUrl?: string
+  /** Disconnect request全体でprovider revokeに使える最大ミリ秒です。 */
+  disconnectRevocationTimeoutMilliseconds?: number
+  /** Absolute deadlineの計算に使う単調時計です。 */
+  monotonicClock?: () => number
 }
 
 /** OAuth lifecycle、disconnect、reauth、conflict recovery を実装します。 */
@@ -119,6 +126,10 @@ export class ConnectorAuthorizationRuntime
   private readonly conflicts: ConnectorConflictRuntime
   /** Worker-initiated reauthorization flow の UI return URL です。 */
   private readonly reauthorizationReturnUrl: string
+  /** Disconnect request全体で共有するprovider revoke上限です。 */
+  private readonly disconnectRevocationTimeoutMilliseconds: number
+  /** Request-scoped absolute deadlineに使う単調時計です。 */
+  private readonly monotonicClock: () => number
 
   /** Production-wiring-ready connector authorization runtime を作成します。 */
   constructor(options: ConnectorAuthorizationRuntimeOptions) {
@@ -130,6 +141,21 @@ export class ConnectorAuthorizationRuntime
     this.reauthorizationReturnUrl = options.reauthorizationReturnUrl ??
       '/settings?developerSection=connectors'
     validateApplicationReturnUrl(this.reauthorizationReturnUrl)
+    this.disconnectRevocationTimeoutMilliseconds =
+      options.disconnectRevocationTimeoutMilliseconds ??
+        defaultDisconnectRevocationTimeoutMilliseconds
+    if (
+      !Number.isSafeInteger(this.disconnectRevocationTimeoutMilliseconds) ||
+      this.disconnectRevocationTimeoutMilliseconds <
+        minimumDisconnectRevocationTimeoutMilliseconds ||
+      this.disconnectRevocationTimeoutMilliseconds >
+        defaultDisconnectRevocationTimeoutMilliseconds
+    ) {
+      throw new TypeError(
+        'Connector disconnect revocation timeout must be between 100 and 5000 milliseconds.',
+      )
+    }
+    this.monotonicClock = options.monotonicClock ?? (() => performance.now())
   }
 
   /** New connector OAuth authorization flow を開始します。 */
@@ -189,6 +215,9 @@ export class ConnectorAuthorizationRuntime
     principal: DeveloperManagementPrincipal,
     installationId: string,
   ) {
+    const revocationDeadlineMilliseconds =
+      this.readMonotonicMilliseconds() +
+      this.disconnectRevocationTimeoutMilliseconds
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const snapshot = await this.requireInstallationSnapshot(
         principal.workspaceId,
@@ -206,6 +235,9 @@ export class ConnectorAuthorizationRuntime
           installationId,
         })
       }
+      this.requireRemainingRevocationMilliseconds(
+        revocationDeadlineMilliseconds,
+      )
       let serialized: string
       try {
         serialized = await this.platform.readConnectorCredential({
@@ -220,10 +252,14 @@ export class ConnectorAuthorizationRuntime
         throw error
       }
       const credential = deserializeConnectorCredential(serialized)
-      const adapter = this.registry.get(
+      const adapter = this.requireOAuthAdapter(
         readSupportedProvider(snapshot.installation.provider),
       )
-      await adapter.disconnect(credential)
+      await adapter.disconnect(credential, {
+        timeoutMilliseconds: this.requireRemainingRevocationMilliseconds(
+          revocationDeadlineMilliseconds,
+        ),
+      })
       try {
         await this.platform.updateConnectorStatus({
           workspaceId: principal.workspaceId,
@@ -252,6 +288,32 @@ export class ConnectorAuthorizationRuntime
       'Connector credential kept changing while disconnect was in progress.',
       { retryable: true },
     )
+  }
+
+  /** Injected monotonic clockをfiniteなミリ秒として読みます。 */
+  private readMonotonicMilliseconds() {
+    const milliseconds = this.monotonicClock()
+    if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+      throw new TypeError('Connector monotonic clock returned an invalid value.')
+    }
+    return milliseconds
+  }
+
+  /** Absolute deadlineまで残るprovider revoke予算を整数ミリ秒で返します。 */
+  private requireRemainingRevocationMilliseconds(
+    deadlineMilliseconds: number,
+  ) {
+    const remainingMilliseconds = Math.floor(
+      deadlineMilliseconds - this.readMonotonicMilliseconds(),
+    )
+    if (remainingMilliseconds < 1) {
+      throw new ConnectorRuntimeError(
+        'ConnectorProviderTimeout',
+        'Connector provider request timed out.',
+        { retryable: true },
+      )
+    }
+    return remainingMilliseconds
   }
 
   /** Durable conflict page を Workspace scope 内で返します。 */

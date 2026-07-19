@@ -319,6 +319,71 @@ describe('ConfiguredOAuthConnectorAdapter', () => {
     })
   })
 
+  test('attempts both token revocations before reporting a partial provider failure', async () => {
+    const revoked: string[] = []
+    const adapter = new ConfiguredOAuthConnectorAdapter(
+      createProviderOptions(
+        (async (_input: URL | RequestInfo, init?: RequestInit) => {
+          const body = init?.body
+          if (!(body instanceof URLSearchParams)) {
+            throw new Error('Expected a revocation form body.')
+          }
+          const token = body.get('token')!
+          revoked.push(token)
+          return new Response(null, {
+            status: token === 'refresh-token' ? 503 : 204,
+          })
+        }) as typeof fetch,
+      ),
+    )
+
+    await expect(adapter.disconnect({
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token',
+      externalAccountId: '42',
+      scopes: ['repo'],
+    })).rejects.toMatchObject({
+      code: 'ConnectorProviderUnavailable',
+      providerStatus: 503,
+      retryable: true,
+    })
+    expect(revoked).toEqual(['refresh-token', 'access-token'])
+  })
+
+  test('bounds all token revocations below the API Lambda timeout', async () => {
+    const revoked: string[] = []
+    const options = createProviderOptions(
+      (async (_input: URL | RequestInfo, init?: RequestInit) => {
+        const body = init?.body
+        if (!(body instanceof URLSearchParams)) {
+          throw new Error('Expected a revocation form body.')
+        }
+        revoked.push(body.get('token')!)
+        return await new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal
+          if (!signal) throw new Error('Expected a revocation deadline.')
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+      }) as typeof fetch,
+    )
+    options.requestTimeoutMilliseconds = 30_000
+    options.revocationTimeoutMilliseconds = 100
+    const adapter = new ConfiguredOAuthConnectorAdapter(options)
+    const startedAt = Date.now()
+
+    await expect(adapter.disconnect({
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token',
+      externalAccountId: '42',
+      scopes: ['repo'],
+    })).rejects.toMatchObject({
+      code: 'ConnectorProviderTimeout',
+      retryable: true,
+    })
+    expect(Date.now() - startedAt).toBeLessThan(1_000)
+    expect(revoked).toEqual(['refresh-token', 'access-token'])
+  })
+
   test('rejects untrusted endpoint hosts and environment secret omissions', () => {
     const options = createProviderOptions(
       (async (_input: URL | RequestInfo, _init?: RequestInit) =>
