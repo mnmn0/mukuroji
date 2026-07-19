@@ -2,6 +2,7 @@ import {
   DOCUMENT_OPERATION_BATCH_LIMIT,
   type DocumentBlock,
   type DocumentKind,
+  type DocumentRelation,
   type DocumentScope,
   type WhiteboardFrame,
 } from '@mukuroji/contracts'
@@ -456,6 +457,33 @@ export function buildDocumentTree(
   return (childrenByParentId.get(undefined) ?? []).map((document) =>
     buildBranch(document, new Set()),
   )
+}
+
+/**
+ * Relation 一覧から同じ target を最初の出現順で一つにまとめます。
+ *
+ * @param relations - Document に保存された relation 一覧です。
+ * @returns Backlink API を一度ずつ呼ぶ canonical target 一覧です。
+ */
+export function deduplicateDocumentRelationTargets(
+  relations: readonly DocumentRelation[],
+): DocumentRelation['target'][] {
+  const targets = new Map<string, DocumentRelation['target']>()
+
+  for (const relation of relations) {
+    const target = relation.target
+    const key =
+      target.kind === 'work-item'
+        ? `work-item:${target.workItemId}`
+        : target.kind === 'project'
+          ? `project:${target.projectId}`
+          : `goal:${target.goalId}`
+    if (!targets.has(key)) {
+      targets.set(key, target)
+    }
+  }
+
+  return [...targets.values()]
 }
 
 /**

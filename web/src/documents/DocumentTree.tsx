@@ -612,6 +612,8 @@ function DocumentBranch({
           if (isFolder) event.preventDefault()
         }}
         onDrop={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
           if (
             !isFolder ||
             !document.capabilities.canManagePermissions ||
@@ -621,8 +623,6 @@ function DocumentBranch({
           ) {
             return
           }
-          event.preventDefault()
-          event.stopPropagation()
           if (draggingDocument.id !== document.id) {
             onDropDocument(draggingDocument, document.id, document.scope)
           }

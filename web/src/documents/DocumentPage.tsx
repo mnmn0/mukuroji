@@ -124,6 +124,7 @@ import {
   createDocumentMutationQueue,
   createDefaultDocumentTitle,
   createDocumentOperationId,
+  deduplicateDocumentRelationTargets,
   DocumentOperationChunkSaveError,
   isDocumentTitleCommitCurrent,
   isDocumentTitleDirty,
@@ -153,6 +154,7 @@ const apiSWRConfig = {
 const documentPresenceRefreshInterval = 4_000
 const documentPresenceHeartbeatInterval = 12_000
 const documentAutosaveDelay = 550
+const documentBacklinkRequestConcurrency = 4
 
 /**
  * DocumentScreen が描画する API-backed data です。
@@ -425,6 +427,10 @@ export type DocumentScreenProps = {
    */
   initialContextTab?: DocumentContextTab
   /**
+   * Context tab の表示状態を API container へ通知する callback です。
+   */
+  onContextTabChange?: (tab?: DocumentContextTab) => void
+  /**
    * Storybook で share dialog を初期表示するかどうかです。
    */
   initialShareDialogOpen?: boolean
@@ -474,8 +480,11 @@ export function DocumentPage() {
   )
   const accessToken = session?.accessToken
   const documentId = params.documentId
+  const routeContext = searchParams.get('context')
+  const initialContextTab: DocumentContextTab | undefined =
+    routeContext === 'comments' ? 'comments' : undefined
   const focusedCommentId =
-    searchParams.get('context') === 'comments'
+    routeContext === 'comments'
       ? readOptionalDocumentCommentId(
           searchParams.get('commentId'),
         )
@@ -484,6 +493,21 @@ export function DocumentPage() {
     readOptionalDocumentCommentId(
       searchParams.get('rootCommentId'),
     ) ?? focusedCommentId
+  const contextInstanceKey =
+    `${documentId ?? 'home'}:${routeContext ?? ''}:${focusedCommentId ?? ''}`
+  const [
+    contextPanelSelection,
+    setContextPanelSelection,
+  ] = useState<
+    readonly [string, DocumentContextTab | undefined]
+  >(() => [contextInstanceKey, initialContextTab])
+  // Route transition の描画中に破棄し、古い SWR key を commit させません。
+  if (contextPanelSelection[0] !== contextInstanceKey) {
+    setContextPanelSelection([
+      contextInstanceKey,
+      initialContextTab,
+    ])
+  }
   const t = useMemo(() => createTranslator(locale), [locale])
   const currentUserKey = accessToken
     ? (['current-user', accessToken] as const)
@@ -651,11 +675,19 @@ export function DocumentPage() {
     ([, token, selectedId]) => getDocumentShares(token, selectedId),
     apiSWRConfig,
   )
-  const backlinkTargets = selectedDocument?.relations.map(
-    (relation) => relation.target,
-  ) ?? []
+  const backlinkTargets = useMemo(
+    () => deduplicateDocumentRelationTargets(
+      selectedDocument?.relations ?? [],
+    ),
+    [selectedDocument?.relations],
+  )
+  const isBacklinkContextOpen =
+    contextPanelSelection[0] === contextInstanceKey &&
+    contextPanelSelection[1] === 'backlinks'
   const backlinksKey =
-    accessToken && backlinkTargets.length > 0
+    accessToken &&
+    isBacklinkContextOpen &&
+    backlinkTargets.length > 0
       ? ([
           'document-backlinks',
           accessToken,
@@ -669,14 +701,15 @@ export function DocumentPage() {
   } = useSWR(
     backlinksKey,
     async ([, token]) => {
-      const pages = await Promise.all(
-        backlinkTargets.map((target) =>
+      const pages = await mapWithBoundedConcurrency(
+        backlinkTargets,
+        documentBacklinkRequestConcurrency,
+        (target) =>
           getDocumentBacklinks(
             token,
             target.kind,
             readRelationTargetId(target),
           ),
-        ),
       )
       return {
         backlinks: [
@@ -756,8 +789,10 @@ export function DocumentPage() {
         if (!current || current.pending.length === 0) {
           return current
         }
-        const pages = await Promise.all(
-          current.pending.map(async ({ cursor, target }) => ({
+        const pages = await mapWithBoundedConcurrency(
+          current.pending,
+          documentBacklinkRequestConcurrency,
+          async ({ cursor, target }) => ({
             page: await getDocumentBacklinks(
               accessToken,
               target.kind,
@@ -765,7 +800,7 @@ export function DocumentPage() {
               cursor,
             ),
             target,
-          })),
+          }),
         )
         return {
           backlinks: mergeBacklinks(
@@ -1402,7 +1437,7 @@ export function DocumentPage() {
 
   return (
     <DocumentScreen
-      key={`${documentId ?? 'home'}:${searchParams.get('context') ?? ''}:${focusedCommentId ?? ''}`}
+      key={contextInstanceKey}
       actions={{
         applyOperations: handleApplyOperations,
         archiveDocument: handleArchiveDocument,
@@ -1466,9 +1501,7 @@ export function DocumentPage() {
       errorMessage={errorMessage}
       inboxCount={inboxCount}
       initialContextTab={
-        searchParams.get('context') === 'comments'
-          ? 'comments'
-          : undefined
+        initialContextTab
       }
       isContextLoading={
         isCommentsLoading ||
@@ -1479,6 +1512,12 @@ export function DocumentPage() {
       }
       isLoading={isLoading}
       locale={locale}
+      onContextTabChange={(tab) =>
+        setContextPanelSelection([
+          contextInstanceKey,
+          tab,
+        ])
+      }
       onNavigationGuardChange={handleNavigationGuardChange}
       userInitial={userInitial}
       userLabel={userLabel}
@@ -1499,6 +1538,7 @@ export function DocumentScreen({
   isContextLoading = false,
   isLoading = false,
   locale,
+  onContextTabChange,
   onNavigationGuardChange,
   userInitial,
   userLabel,
@@ -1633,12 +1673,20 @@ export function DocumentScreen({
     treeDrawerPreviousFocusRef.current?.focus()
   }
 
+  const changeContextTab = useCallback(
+    (tab?: DocumentContextTab) => {
+      setContextTab(tab)
+      onContextTabChange?.(tab)
+    },
+    [onContextTabChange],
+  )
+
   const openContext = (
     tab: DocumentContextTab,
     anchorId?: string,
   ) => {
     setDefaultCommentAnchorId(anchorId)
-    setContextTab(tab)
+    changeContextTab(tab)
   }
 
   const selectDocument = (selectedId: string) =>
@@ -1963,7 +2011,7 @@ export function DocumentScreen({
               <button
                 aria-label={t('documents.context.close')}
                 className="fixed inset-0 z-40 bg-slate-950/35 min-[1280px]:hidden"
-                onClick={() => setContextTab(undefined)}
+                onClick={() => changeContextTab(undefined)}
                 type="button"
               />
               <div className="fixed inset-y-0 right-0 z-50 max-w-[calc(100vw-24px)] shadow-2xl min-[1280px]:static min-[1280px]:z-auto min-[1280px]:shadow-none">
@@ -1983,7 +2031,7 @@ export function DocumentScreen({
                   modal={isContextModal}
                   t={t}
                   versions={data.versions}
-                  onClose={() => setContextTab(undefined)}
+                  onClose={() => changeContextTab(undefined)}
                   onCreateComment={
                     selectedDocument.capabilities.canComment &&
                     actions.createComment
@@ -2078,7 +2126,7 @@ export function DocumentScreen({
                         }
                       : undefined
                   }
-                  onTabChange={setContextTab}
+                  onTabChange={changeContextTab}
                 />
               </div>
             </>
@@ -3063,6 +3111,35 @@ function DocumentHeader({
       </div>
     </header>
   )
+}
+
+/**
+ * API 呼び出しを入力順のまま指定並列数以内で実行します。
+ */
+async function mapWithBoundedConcurrency<Input, Output>(
+  values: readonly Input[],
+  concurrency: number,
+  mapper: (value: Input, index: number) => Promise<Output>,
+): Promise<Output[]> {
+  const results: Output[] = []
+  let nextIndex = 0
+  const workerCount = Math.min(
+    Math.max(1, Math.trunc(concurrency)),
+    values.length,
+  )
+  const workers = Array.from(
+    { length: workerCount },
+    async () => {
+      while (nextIndex < values.length) {
+        const index = nextIndex
+        nextIndex += 1
+        results[index] = await mapper(values[index]!, index)
+      }
+    },
+  )
+
+  await Promise.all(workers)
+  return results
 }
 
 function readRelationTargetId(

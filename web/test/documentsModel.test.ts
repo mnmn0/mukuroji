@@ -9,6 +9,7 @@ import {
   applyDocumentOperationsLocally,
   buildDocumentTree,
   createDocumentMutationQueue,
+  deduplicateDocumentRelationTargets,
   DocumentOperationChunkSaveError,
   isDocumentTitleCommitCurrent,
   isDocumentTitleDirty,
@@ -60,6 +61,45 @@ describe('Document tree model', () => {
     expect(branches.map((branch) => branch.document.id).sort()).toEqual([
       'cycle-a',
       'cycle-b',
+    ])
+  })
+})
+
+describe('Document backlink target collection', () => {
+  test('deduplicates canonical targets before backlink requests', () => {
+    expect(
+      deduplicateDocumentRelationTargets([
+        {
+          id: 'relation-work-item-1',
+          target: {
+            kind: 'work-item',
+            workItemId: 'team:core-team:issue:launch-review',
+          },
+        },
+        {
+          id: 'relation-work-item-2',
+          target: {
+            kind: 'work-item',
+            workItemId: 'team:core-team:issue:launch-review',
+          },
+        },
+        {
+          id: 'relation-project',
+          target: {
+            kind: 'project',
+            projectId: 'refero',
+          },
+        },
+      ]),
+    ).toEqual([
+      {
+        kind: 'work-item',
+        workItemId: 'team:core-team:issue:launch-review',
+      },
+      {
+        kind: 'project',
+        projectId: 'refero',
+      },
     ])
   })
 })
