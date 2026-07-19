@@ -7,6 +7,7 @@
       "devDependencies": {
         "@playwright/test": "^1.60.0",
         "oxlint": "^1.70.0",
+        "oxlint-plugin-awscdk": "^0.1.3",
       },
     },
     "cdk": {
@@ -23,7 +24,6 @@
         "aws-cdk": "2.1124.0",
         "esbuild": "^0.27.7",
         "jest": "^30",
-        "oxlint-plugin-awscdk": "^0.1.3",
         "ts-jest": "^29",
         "ts-node": "^10.9.2",
         "typescript": "~5.9.3",
