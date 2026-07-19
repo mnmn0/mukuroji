@@ -2,16 +2,19 @@ import { expect, test } from 'bun:test'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   isCompleteHandler,
+  processWebhookActiveLocatorRollbackPage,
   processWebhookAuthorizationBackfillEvent,
   processWebhookAuthorizationBackfillPage,
   processWebhookAuthorizationBackfillPages,
+  startWebhookActiveLocatorRollback,
   startWebhookAuthorizationBackfill,
 } from './webhook-authorization-backfill-handler'
 
 const backfillStartedAt = new Date('2026-07-18T00:00:00.000Z')
-const afterWriterDrain = new Date('2026-07-18T00:00:31.000Z')
+const afterWriterDrain = new Date('2026-07-18T00:01:01.000Z')
+const afterLocatorCleanupDrain = new Date('2026-07-18T00:02:02.000Z')
 
-test('accepts the replaced v1 custom resource delete without v2 validation', async () => {
+test('accepts the replaced v1 custom resource delete without v3 validation', async () => {
   await expect(isCompleteHandler({
     RequestType: 'Delete',
     ResourceProperties: { MigrationVersion: 'v1' },
@@ -65,21 +68,23 @@ test('waits for pre-deploy writers to drain before starting the first scan', asy
     fake.client,
     'ProjectDirectory',
     backfillStartedAt,
+    'DeveloperPlatform',
   )
 
   const waiting = await processWebhookAuthorizationBackfillPage(
     fake.client,
     'ProjectDirectory',
     'WebhookAuthorizationIndex',
-    new Date('2026-07-18T00:00:29.999Z'),
+    new Date('2026-07-18T00:00:59.999Z'),
+    'DeveloperPlatform',
   )
   expect(waiting).toMatchObject({
     isComplete: false,
     madeProgress: false,
     checkpoint: {
-      phase: 'projection',
+      phase: 'active-locators',
       revision: 0,
-      writerDrainUntil: '2026-07-18T00:00:30.000Z',
+      writerDrainUntil: '2026-07-18T00:01:00.000Z',
     },
   })
   expect(fake.scanCalls()).toBe(0)
@@ -89,11 +94,458 @@ test('waits for pre-deploy writers to drain before starting the first scan', asy
     'ProjectDirectory',
     'WebhookAuthorizationIndex',
     afterWriterDrain,
+    'DeveloperPlatform',
   )).resolves.toMatchObject({
     madeProgress: true,
-    checkpoint: { revision: 1 },
+    checkpoint: {
+      phase: 'legacy-locator-cleanup',
+      revision: 1,
+      writerDrainUntil: '2026-07-18T00:02:01.000Z',
+    },
   })
   expect(fake.scanCalls()).toBe(1)
+  await expect(processWebhookAuthorizationBackfillPage(
+    fake.client,
+    'ProjectDirectory',
+    'WebhookAuthorizationIndex',
+    new Date('2026-07-18T00:02:00.999Z'),
+    'DeveloperPlatform',
+  )).resolves.toMatchObject({
+    madeProgress: false,
+    checkpoint: { phase: 'legacy-locator-cleanup', revision: 1 },
+  })
+  expect(fake.scanCalls()).toBe(1)
+})
+
+test('refreshes the writer drain when resuming an orphaned cutover marker', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const marker = {
+    workspaceId: 'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3',
+    recordKey: 'STATE',
+    entryType: 'webhook-active-locator-migration',
+    value: {
+      migrationVersion: 'v3',
+      state: 'cutover',
+      writerDrainUntil: '2026-07-18T00:01:00.000Z',
+    },
+    version: 7,
+  }
+  rows.set(createKey(marker), marker)
+  const fake = createDocumentClient(rows, 10)
+
+  await startWebhookAuthorizationBackfill(
+    fake.client,
+    'ProjectDirectory',
+    new Date('2026-07-18T04:00:00.000Z'),
+    'DeveloperPlatform',
+  )
+
+  expect(rows.get(createKey(marker))).toMatchObject({
+    value: {
+      state: 'cutover',
+      writerDrainUntil: '2026-07-18T04:01:00.000Z',
+    },
+    version: 8,
+  })
+  expect(rows.get(
+    'WEBHOOK_AUTHORIZATION_BACKFILL#v3\0CHECKPOINT',
+  )).toMatchObject({
+    phase: 'active-locators',
+    revision: 0,
+    writerDrainUntil: '2026-07-18T04:01:00.000Z',
+  })
+})
+
+test('backfills primary active locators before completing the legacy fallback boundary', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const subscription = {
+    workspaceId: 'workspace-webhook-migration',
+    recordKey: 'WEBHOOK#webhook-retained',
+    entryType: 'webhook-subscription',
+    value: {
+      id: 'webhook-retained',
+      createdAt: '2026-07-01T00:00:00.000Z',
+      status: 'active',
+      name: 'Retained',
+    },
+    lookupKey: 'WEBHOOK#ACTIVE#workspace-webhook-migration',
+    lookupSortKey:
+      '2026-07-01T00:00:00.000Z#webhook-retained',
+    version: 4,
+  }
+  rows.set(createKey(subscription), subscription)
+  const fake = createDocumentClient(rows, 10)
+  await startWebhookAuthorizationBackfill(
+    fake.client,
+    'ProjectDirectory',
+    backfillStartedAt,
+    'DeveloperPlatform',
+  )
+
+  const cutover = await processWebhookAuthorizationBackfillPage(
+    fake.client,
+    'ProjectDirectory',
+    'WebhookAuthorizationIndex',
+    afterWriterDrain,
+    'DeveloperPlatform',
+  )
+
+  expect(cutover).toMatchObject({
+    madeProgress: true,
+    checkpoint: {
+      phase: 'legacy-locator-cleanup',
+      activeLocatorsReconciled: 1,
+      legacyLookupsRemoved: 0,
+    },
+  })
+  expect(rows.get(createKey(subscription))).toMatchObject({
+    lookupKey: 'WEBHOOK#ACTIVE#workspace-webhook-migration',
+  })
+  expect(rows.get(
+    'workspace-webhook-migration\0' +
+      'WEBHOOKACTIVE#2026-07-01T00:00:00.000Z#webhook-retained',
+  )).toMatchObject({
+    entryType: 'webhook-active-subscription',
+    value: { targetRecordKey: 'WEBHOOK#webhook-retained' },
+  })
+  expect(rows.get(
+    'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3\0STATE',
+  )).toMatchObject({
+    value: { migrationVersion: 'v3', state: 'complete' },
+    version: 3,
+  })
+  const cleanup = await processWebhookAuthorizationBackfillPage(
+    fake.client,
+    'ProjectDirectory',
+    'WebhookAuthorizationIndex',
+    afterLocatorCleanupDrain,
+    'DeveloperPlatform',
+  )
+  expect(cleanup).toMatchObject({
+    madeProgress: true,
+    checkpoint: {
+      phase: 'projection',
+      activeLocatorsReconciled: 1,
+      legacyLookupsRemoved: 1,
+    },
+  })
+  expect(rows.get(createKey(subscription))).not.toHaveProperty('lookupKey')
+  expect(fake.scanLimits()).toEqual([1_000, 1_000])
+})
+
+test('restores legacy active locators before a v3 rollback completes', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const active = {
+    workspaceId: 'workspace-rollback',
+    recordKey: 'WEBHOOK#webhook-active',
+    entryType: 'webhook-subscription',
+    value: {
+      id: 'webhook-active',
+      createdAt: '2026-07-01T00:00:00.000Z',
+      status: 'active',
+    },
+    version: 5,
+  }
+  const paused = {
+    workspaceId: 'workspace-rollback',
+    recordKey: 'WEBHOOK#webhook-paused',
+    entryType: 'webhook-subscription',
+    value: {
+      id: 'webhook-paused',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      status: 'paused',
+    },
+    lookupKey: 'WEBHOOK#ACTIVE#workspace-rollback',
+    lookupSortKey: '2026-07-02T00:00:00.000Z#webhook-paused',
+    version: 3,
+  }
+  const marker = {
+    workspaceId: 'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3',
+    recordKey: 'STATE',
+    entryType: 'webhook-active-locator-migration',
+    value: {
+      migrationVersion: 'v3',
+      state: 'complete',
+      writerDrainUntil: '2026-07-18T00:01:00.000Z',
+    },
+    version: 2,
+  }
+  const forwardCheckpoint = {
+    directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL#v3',
+    entryKey: 'CHECKPOINT',
+    entryType: 'webhook-authorization-backfill-checkpoint',
+    migrationVersion: 'v3',
+    writerDrainUntil: '2026-07-18T00:02:00.000Z',
+    phase: 'projection',
+    revision: 4,
+    sourceRowsUpdated: 0,
+    sourceRowsVerified: 0,
+    grantsWritten: 0,
+    grantsDeleted: 0,
+    cleanupLocatorsWritten: 0,
+    activeLocatorsReconciled: 2,
+    legacyLookupsRemoved: 1,
+  }
+  for (const row of [active, paused, marker, forwardCheckpoint]) {
+    rows.set(createKey(row), row)
+  }
+  const fake = createDocumentClient(rows, 10)
+
+  await expect(startWebhookActiveLocatorRollback(
+    fake.client,
+    'ProjectDirectory',
+    'DeveloperPlatform',
+    new Date('2026-07-18T03:00:00.000Z'),
+  )).resolves.toBe(true)
+  expect(rows.get(createKey(marker))).toMatchObject({
+    value: {
+      state: 'rollback',
+      rollbackDrainUntil: '2026-07-18T03:01:00.000Z',
+    },
+    version: 3,
+  })
+  expect(rows.has(createKey(forwardCheckpoint))).toBe(false)
+
+  await expect(processWebhookActiveLocatorRollbackPage(
+    fake.client,
+    'ProjectDirectory',
+    'DeveloperPlatform',
+    new Date('2026-07-18T03:00:59.999Z'),
+  )).resolves.toMatchObject({
+    isComplete: false,
+    madeProgress: false,
+  })
+  expect(fake.scanCalls()).toBe(0)
+
+  await expect(processWebhookActiveLocatorRollbackPage(
+    fake.client,
+    'ProjectDirectory',
+    'DeveloperPlatform',
+    new Date('2026-07-18T03:01:01.000Z'),
+  )).resolves.toMatchObject({
+    isComplete: true,
+    madeProgress: true,
+    checkpoint: { legacyLookupsReconciled: 2 },
+  })
+  expect(rows.get(createKey(active))).toMatchObject({
+    lookupKey: 'WEBHOOK#ACTIVE#workspace-rollback',
+    lookupSortKey: '2026-07-01T00:00:00.000Z#webhook-active',
+  })
+  expect(rows.get(createKey(paused))).not.toHaveProperty('lookupKey')
+  expect(rows.has(createKey(marker))).toBe(false)
+  expect(rows.has(
+    'WEBHOOK_ACTIVE_LOCATOR_ROLLBACK#v3\0CHECKPOINT',
+  )).toBe(false)
+})
+
+test('retries rollback start when cutover completion wins the marker CAS', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const marker = {
+    workspaceId: 'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3',
+    recordKey: 'STATE',
+    entryType: 'webhook-active-locator-migration',
+    value: {
+      migrationVersion: 'v3',
+      state: 'cutover',
+      writerDrainUntil: '2026-07-18T00:01:00.000Z',
+    },
+    version: 1,
+  }
+  rows.set(createKey(marker), marker)
+  const fake = createDocumentClient(rows, 10)
+  fake.completeMarkerBeforeNextRollbackStart()
+
+  await expect(startWebhookActiveLocatorRollback(
+    fake.client,
+    'ProjectDirectory',
+    'DeveloperPlatform',
+    new Date('2026-07-18T03:00:00.000Z'),
+  )).resolves.toBe(true)
+  expect(rows.get(createKey(marker))).toMatchObject({
+    value: {
+      state: 'rollback',
+      rollbackDrainUntil: '2026-07-18T03:01:00.000Z',
+    },
+    version: 3,
+  })
+  expect(fake.updateCalls()).toBe(2)
+})
+
+test('fences an in-flight forward cleanup after rollback starts', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const subscription = {
+    workspaceId: 'workspace-forward-fence',
+    recordKey: 'WEBHOOK#webhook-forward-fence',
+    entryType: 'webhook-subscription',
+    value: {
+      id: 'webhook-forward-fence',
+      createdAt: '2026-07-01T00:00:00.000Z',
+      status: 'active',
+    },
+    lookupKey: 'WEBHOOK#ACTIVE#workspace-forward-fence',
+    lookupSortKey:
+      '2026-07-01T00:00:00.000Z#webhook-forward-fence',
+    version: 2,
+  }
+  for (const row of [
+    subscription,
+    {
+      workspaceId: 'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3',
+      recordKey: 'STATE',
+      entryType: 'webhook-active-locator-migration',
+      value: {
+        migrationVersion: 'v3',
+        state: 'rollback',
+        writerDrainUntil: '2026-07-18T00:01:00.000Z',
+        rollbackDrainUntil: '2026-07-18T00:03:00.000Z',
+      },
+      version: 3,
+    },
+    {
+      directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL#v3',
+      entryKey: 'CHECKPOINT',
+      entryType: 'webhook-authorization-backfill-checkpoint',
+      migrationVersion: 'v3',
+      writerDrainUntil: '2026-07-18T00:02:00.000Z',
+      phase: 'legacy-locator-cleanup',
+      revision: 1,
+      sourceRowsUpdated: 0,
+      sourceRowsVerified: 0,
+      grantsWritten: 0,
+      grantsDeleted: 0,
+      cleanupLocatorsWritten: 0,
+      activeLocatorsReconciled: 1,
+      legacyLookupsRemoved: 0,
+    },
+  ]) {
+    rows.set(createKey(row), row)
+  }
+  const fake = createDocumentClient(rows, 10)
+
+  await expect(processWebhookAuthorizationBackfillPage(
+    fake.client,
+    'ProjectDirectory',
+    'WebhookAuthorizationIndex',
+    new Date('2026-07-18T00:02:01.000Z'),
+    'DeveloperPlatform',
+  )).resolves.toMatchObject({
+    isComplete: false,
+    madeProgress: false,
+    checkpoint: {
+      phase: 'legacy-locator-cleanup',
+      revision: 1,
+    },
+  })
+  expect(rows.get(createKey(subscription))).toHaveProperty(
+    'lookupKey',
+    'WEBHOOK#ACTIVE#workspace-forward-fence',
+  )
+})
+
+test('fails closed on a malformed Webhook subscription migration source', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const malformed = {
+    workspaceId: 'workspace-malformed-webhook',
+    recordKey: 'WEBHOOK#webhook-malformed',
+    entryType: 'webhook-subscription',
+    value: {
+      id: 'webhook-malformed',
+      status: 'active',
+    },
+    lookupKey: 'WEBHOOK#ACTIVE#workspace-malformed-webhook',
+    lookupSortKey:
+      '2026-07-01T00:00:00.000Z#webhook-malformed',
+    version: 1,
+  }
+  rows.set(createKey(malformed), malformed)
+  const fake = createDocumentClient(rows, 10)
+  await startWebhookAuthorizationBackfill(
+    fake.client,
+    'ProjectDirectory',
+    backfillStartedAt,
+    'DeveloperPlatform',
+  )
+
+  await expect(processWebhookAuthorizationBackfillPage(
+    fake.client,
+    'ProjectDirectory',
+    'WebhookAuthorizationIndex',
+    afterWriterDrain,
+    'DeveloperPlatform',
+  )).rejects.toThrow(
+    'Webhook active locator migration source row is invalid.',
+  )
+
+  expect(rows.get(
+    'WEBHOOK_AUTHORIZATION_BACKFILL#v3\0CHECKPOINT',
+  )).toMatchObject({
+    phase: 'active-locators',
+    revision: 0,
+  })
+  expect(rows.get(
+    'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3\0STATE',
+  )).toMatchObject({
+    value: { state: 'cutover' },
+  })
+  expect(fake.scanLimits()).toEqual([1_000])
+})
+
+test('reconciles an active locator across a concurrent delivery health update', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const subscription = {
+    workspaceId: 'workspace-webhook-health-race',
+    recordKey: 'WEBHOOK#webhook-health-race',
+    entryType: 'webhook-subscription',
+    value: {
+      id: 'webhook-health-race',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      status: 'active',
+      failureCount: 0,
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    },
+    lookupKey: 'WEBHOOK#ACTIVE#workspace-webhook-health-race',
+    lookupSortKey:
+      '2026-07-02T00:00:00.000Z#webhook-health-race',
+    version: 4,
+  }
+  rows.set(createKey(subscription), subscription)
+  const fake = createDocumentClient(rows, 10)
+  await startWebhookAuthorizationBackfill(
+    fake.client,
+    'ProjectDirectory',
+    backfillStartedAt,
+    'DeveloperPlatform',
+  )
+  fake.advanceWebhookSubscriptionHealthBeforeNextReconcile()
+
+  await expect(processWebhookAuthorizationBackfillPage(
+    fake.client,
+    'ProjectDirectory',
+    'WebhookAuthorizationIndex',
+    afterWriterDrain,
+    'DeveloperPlatform',
+  )).resolves.toMatchObject({
+    madeProgress: true,
+    checkpoint: {
+      phase: 'legacy-locator-cleanup',
+      activeLocatorsReconciled: 1,
+    },
+  })
+  expect(rows.get(createKey(subscription))).toMatchObject({
+    version: 5,
+    value: {
+      failureCount: 1,
+      updatedAt: '2026-07-18T00:00:30.000Z',
+    },
+  })
+  expect(rows.get(createKey(subscription))).toHaveProperty(
+    'lookupKey',
+    'WEBHOOK#ACTIVE#workspace-webhook-health-race',
+  )
+  expect(rows.has(
+    'workspace-webhook-health-race\0' +
+      'WEBHOOKACTIVE#2026-07-02T00:00:00.000Z#webhook-health-race',
+  )).toBe(true)
 })
 
 test('resumes pagewise, waits for the GSI, and skips archived member grants', async () => {
@@ -167,19 +619,42 @@ test('resumes pagewise, waits for the GSI, and skips archived member grants', as
     fake.client,
     'ProjectDirectory',
     backfillStartedAt,
+    'DeveloperPlatform',
   )
   await startWebhookAuthorizationBackfill(
     fake.client,
     'ProjectDirectory',
     backfillStartedAt,
+    'DeveloperPlatform',
   )
 
-  fake.failNextCheckpointWrite()
   await expect(processWebhookAuthorizationBackfillPage(
     fake.client,
     'ProjectDirectory',
     'WebhookAuthorizationIndex',
     afterWriterDrain,
+    'DeveloperPlatform',
+  )).resolves.toMatchObject({
+    madeProgress: true,
+    checkpoint: { phase: 'legacy-locator-cleanup' },
+  })
+  await expect(processWebhookAuthorizationBackfillPage(
+    fake.client,
+    'ProjectDirectory',
+    'WebhookAuthorizationIndex',
+    afterLocatorCleanupDrain,
+    'DeveloperPlatform',
+  )).resolves.toMatchObject({
+    madeProgress: true,
+    checkpoint: { phase: 'projection' },
+  })
+  fake.failNextCheckpointWrite()
+  await expect(processWebhookAuthorizationBackfillPage(
+    fake.client,
+    'ProjectDirectory',
+    'WebhookAuthorizationIndex',
+    afterLocatorCleanupDrain,
+    'DeveloperPlatform',
   )).rejects.toThrow('interrupted after page writes')
 
   const scansBeforeBatch = fake.scanCalls()
@@ -190,7 +665,8 @@ test('resumes pagewise, waits for the GSI, and skips archived member grants', as
     {
       maxPages: 2,
       canProcessNextPage: () => true,
-      now: () => afterWriterDrain,
+      now: () => afterLocatorCleanupDrain,
+      developerPlatformTableName: 'DeveloperPlatform',
     },
   )
   expect(fake.scanCalls() - scansBeforeBatch).toBe(2)
@@ -200,7 +676,8 @@ test('resumes pagewise, waits for the GSI, and skips archived member grants', as
       fake.client,
       'ProjectDirectory',
       'WebhookAuthorizationIndex',
-      afterWriterDrain,
+      afterLocatorCleanupDrain,
+      'DeveloperPlatform',
     )
   }
   expect(progress.checkpoint.phase).toBe('verification')
@@ -214,7 +691,8 @@ test('resumes pagewise, waits for the GSI, and skips archived member grants', as
     {
       maxPages: 100,
       canProcessNextPage: () => true,
-      now: () => afterWriterDrain,
+      now: () => afterLocatorCleanupDrain,
+      developerPlatformTableName: 'DeveloperPlatform',
     },
   )
   expect(fake.scanCalls() - scansBeforeGsiRetry).toBe(1)
@@ -231,7 +709,8 @@ test('resumes pagewise, waits for the GSI, and skips archived member grants', as
       fake.client,
       'ProjectDirectory',
       'WebhookAuthorizationIndex',
-      afterWriterDrain,
+      afterLocatorCleanupDrain,
+      'DeveloperPlatform',
     )
   }
   expect(progress.checkpoint.phase).toBe('grant-cleanup')
@@ -269,7 +748,8 @@ test('resumes pagewise, waits for the GSI, and skips archived member grants', as
         fake.client,
         'ProjectDirectory',
         'WebhookAuthorizationIndex',
-        afterWriterDrain,
+        afterLocatorCleanupDrain,
+        'DeveloperPlatform',
       )
     } catch (error) {
       expect(error).toMatchObject({ name: 'ConditionalCheckFailedException' })
@@ -277,6 +757,8 @@ test('resumes pagewise, waits for the GSI, and skips archived member grants', as
     }
   }
   expect(malformedRepairRaceRejected).toBe(true)
+  expect(fake.scanLimits()).toContain(50)
+  expect(fake.scanLimits().at(-1)).toBe(1_000)
   expect(rows.has(activeGrantKey)).toBe(true)
   expect(fake.repairedSourceCondition()).toMatchObject({
     ConditionExpression:
@@ -297,7 +779,8 @@ test('resumes pagewise, waits for the GSI, and skips archived member grants', as
         fake.client,
         'ProjectDirectory',
         'WebhookAuthorizationIndex',
-        afterWriterDrain,
+        afterLocatorCleanupDrain,
+        'DeveloperPlatform',
       )
     } catch (error) {
       expect(error).toMatchObject({ name: 'ConditionalCheckFailedException' })
@@ -315,7 +798,8 @@ test('resumes pagewise, waits for the GSI, and skips archived member grants', as
       {
         maxPages: 2,
         canProcessNextPage: () => true,
-        now: () => afterWriterDrain,
+        now: () => afterLocatorCleanupDrain,
+        developerPlatformTableName: 'DeveloperPlatform',
       },
     )
   }
@@ -381,7 +865,8 @@ test('resumes pagewise, waits for the GSI, and skips archived member grants', as
     fake.client,
     'ProjectDirectory',
     'WebhookAuthorizationIndex',
-    afterWriterDrain,
+    afterLocatorCleanupDrain,
+    'DeveloperPlatform',
   )).resolves.toMatchObject({ isComplete: true })
   expect(fake.scanCalls()).toBe(scansAtCompletion)
 })
@@ -402,8 +887,24 @@ test('stops a multi-page invocation when its time budget is exhausted', async ()
     fake.client,
     'ProjectDirectory',
     backfillStartedAt,
+    'DeveloperPlatform',
+  )
+  await processWebhookAuthorizationBackfillPage(
+    fake.client,
+    'ProjectDirectory',
+    'WebhookAuthorizationIndex',
+    afterWriterDrain,
+    'DeveloperPlatform',
+  )
+  await processWebhookAuthorizationBackfillPage(
+    fake.client,
+    'ProjectDirectory',
+    'WebhookAuthorizationIndex',
+    afterLocatorCleanupDrain,
+    'DeveloperPlatform',
   )
 
+  const scansBeforeBudgetedPage = fake.scanCalls()
   const progress = await processWebhookAuthorizationBackfillPages(
     fake.client,
     'ProjectDirectory',
@@ -411,7 +912,8 @@ test('stops a multi-page invocation when its time budget is exhausted', async ()
     {
       maxPages: 100,
       canProcessNextPage: () => false,
-      now: () => afterWriterDrain,
+      now: () => afterLocatorCleanupDrain,
+      developerPlatformTableName: 'DeveloperPlatform',
     },
   )
 
@@ -419,10 +921,10 @@ test('stops a multi-page invocation when its time budget is exhausted', async ()
   expect(progress.madeProgress).toBe(true)
   expect(progress.checkpoint).toMatchObject({
     phase: 'projection',
-    revision: 1,
+    revision: 3,
     sourceRowsUpdated: 2,
   })
-  expect(fake.scanCalls()).toBe(1)
+  expect(fake.scanCalls() - scansBeforeBudgetedPage).toBe(1)
 })
 
 function createDocumentClient(
@@ -431,6 +933,8 @@ function createDocumentClient(
 ) {
   const visibleGsiKeys = new Set<string>()
   let checkpointWriteFailure = false
+  let advanceWebhookSubscriptionHealth = false
+  let completeMarkerBeforeRollbackStart = false
   let replaceGrantBeforeDelete = false
   let sourceRepairBeforeDelete: {
     grantKey: string
@@ -442,6 +946,7 @@ function createDocumentClient(
     ExpressionAttributeValues?: Record<string, unknown>
   } | undefined
   let scans = 0
+  const scanLimits: number[] = []
   let updates = 0
   const client = {
     async send(command: {
@@ -450,50 +955,117 @@ function createDocumentClient(
     }) {
       if (command.constructor.name === 'ScanCommand') {
         scans += 1
-        const values = [...rows.values()].sort(compareRows)
-        const startKey = command.input.ExclusiveStartKey as {
-          directoryId?: string
-          entryKey?: string
-        } | undefined
+        scanLimits.push(Number(command.input.Limit))
+        const developerPlatform =
+          command.input.TableName === 'DeveloperPlatform'
+        const values = [...rows.values()]
+          .filter((row) =>
+            developerPlatform
+              ? typeof row.workspaceId === 'string'
+              : typeof row.directoryId === 'string'
+          )
+          .sort(compareRows)
+        const startKey = command.input.ExclusiveStartKey as
+          | Record<string, unknown>
+          | undefined
         const startIndex = startKey
-          ? values.findIndex((row) =>
-              row.directoryId === startKey.directoryId &&
-              row.entryKey === startKey.entryKey
-            ) + 1
+          ? values.findIndex((row) => createKey(row) === createKey(startKey)) + 1
           : 0
         const page = values.slice(startIndex, startIndex + pageSize)
         return {
           Items: page,
           ...(startIndex + page.length < values.length && page.at(-1)
             ? {
-                LastEvaluatedKey: {
-                  directoryId: page.at(-1)!.directoryId,
-                  entryKey: page.at(-1)!.entryKey,
-                },
+                LastEvaluatedKey: createPrimaryKey(page.at(-1)!),
               }
             : {}),
         }
       }
       if (command.constructor.name === 'GetCommand') {
-        const key = command.input.Key as {
-          directoryId: string
-          entryKey: string
-        }
-        return { Item: rows.get(`${key.directoryId}\0${key.entryKey}`) }
+        const key = command.input.Key as Record<string, unknown>
+        return { Item: rows.get(createKey(key)) }
       }
       if (command.constructor.name === 'UpdateCommand') {
         updates += 1
-        const key = command.input.Key as {
-          directoryId: string
-          entryKey: string
+        const key = command.input.Key as Record<string, string>
+        const values = command.input.ExpressionAttributeValues as
+          Record<string, unknown>
+        const stored = rows.get(createKey(key))
+        if (
+          key.workspaceId === 'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3'
+        ) {
+          const markerValue = stored?.value as
+            | Record<string, unknown>
+            | undefined
+          if (
+            completeMarkerBeforeRollbackStart &&
+            stored &&
+            markerValue
+          ) {
+            completeMarkerBeforeRollbackStart = false
+            markerValue.state = 'complete'
+            stored.version = Number(stored.version) + 1
+          }
+          if (
+            !stored ||
+            !markerValue ||
+            stored.entryType !== values[':entryType'] ||
+            stored.version !== values[':expectedVersion'] ||
+            markerValue.migrationVersion !== values[':migrationVersion'] ||
+            markerValue.state !== values[':expectedState']
+          ) throw conditionalFailure()
+          markerValue.state = values[':rollback']
+          markerValue.rollbackDrainUntil = values[':rollbackDrainUntil']
+          stored.version = Number(stored.version) + 1
+          return {}
         }
-        const values = command.input.ExpressionAttributeValues as Record<string, string>
-        const stored = rows.get(`${key.directoryId}\0${key.entryKey}`)
+        if (key.workspaceId !== undefined) {
+          const storedValue = stored?.value as
+            | Record<string, unknown>
+            | undefined
+          if (
+            !stored ||
+            !storedValue ||
+            stored.entryType !== values[':entryType'] ||
+            storedValue.id !== values[':id'] ||
+            storedValue?.createdAt !== values[':createdAt'] ||
+            storedValue?.status !== values[':status'] ||
+            (
+              values[':observedLookupKey'] === undefined
+                ? stored.lookupKey !== undefined
+                : stored.lookupKey !== values[':observedLookupKey']
+            ) ||
+            (
+              values[':observedLookupSortKey'] === undefined
+                ? stored.lookupSortKey !== undefined
+                : stored.lookupSortKey !== values[':observedLookupSortKey']
+            ) ||
+            (
+              values[':expiresAt'] === undefined
+                ? stored.expiresAt !== undefined
+                : stored.expiresAt !== values[':expiresAt']
+            )
+          ) throw conditionalFailure()
+          if (command.input.UpdateExpression ===
+            'REMOVE lookupKey, lookupSortKey') {
+            delete stored.lookupKey
+            delete stored.lookupSortKey
+          } else {
+            stored.lookupKey = values[':lookupKey']
+            stored.lookupSortKey = values[':lookupSortKey']
+          }
+          return {}
+        }
         if (!stored || stored.entryType !== values[':entryType']) {
           throw conditionalFailure()
         }
         stored.webhookAuthorizationKey = values[':authorizationKey']
         stored.webhookAuthorizationSortKey = values[':authorizationSortKey']
+        return {}
+      }
+      if (command.constructor.name === 'DeleteCommand') {
+        const key = command.input.Key as Record<string, unknown>
+        rows.delete(createKey(key))
         return {}
       }
       if (command.constructor.name === 'QueryCommand') {
@@ -541,6 +1113,14 @@ function createDocumentClient(
           return {}
         }
         if (
+          command.input.ConditionExpression ===
+            'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)'
+        ) {
+          if (rows.has(key)) throw conditionalFailure()
+          rows.set(key, item)
+          return {}
+        }
+        if (
           typeof command.input.ConditionExpression === 'string' &&
           command.input.ConditionExpression.includes('#revision')
         ) {
@@ -566,24 +1146,135 @@ function createDocumentClient(
       if (command.constructor.name === 'TransactWriteCommand') {
         const transactItems = command.input.TransactItems as Array<{
           ConditionCheck?: {
-            Key: { directoryId: string; entryKey: string }
+            Key: Record<string, unknown>
             ConditionExpression: string
             ExpressionAttributeNames?: Record<string, string>
             ExpressionAttributeValues?: Record<string, unknown>
           }
           Delete?: {
-            Key: { directoryId: string; entryKey: string }
+            Key: Record<string, unknown>
             ConditionExpression?: string
             ExpressionAttributeValues?: Record<string, unknown>
           }
-          Put?: { Item: Record<string, unknown> }
+          Put?: {
+            Item: Record<string, unknown>
+            ConditionExpression?: string
+            ExpressionAttributeValues?: Record<string, unknown>
+          }
+          Update?: {
+            Key: Record<string, unknown>
+            UpdateExpression: string
+            ConditionExpression?: string
+            ExpressionAttributeValues?: Record<string, unknown>
+          }
         }>
+        if (advanceWebhookSubscriptionHealth) {
+          const subscriptionMutation = transactItems
+            .map((item) => item.Update ?? item.ConditionCheck)
+            .find((mutation) =>
+              mutation?.Key.workspaceId !== undefined &&
+              mutation.Key.workspaceId !==
+                'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3'
+            )
+          if (subscriptionMutation) {
+            advanceWebhookSubscriptionHealth = false
+            const existing = rows.get(createKey(subscriptionMutation.Key))!
+            const value = existing.value as Record<string, unknown>
+            existing.value = {
+              ...value,
+              failureCount: Number(value.failureCount ?? 0) + 1,
+              updatedAt: '2026-07-18T00:00:30.000Z',
+            }
+            existing.version = Number(existing.version) + 1
+          }
+        }
+        for (const item of transactItems) {
+          if (
+            item.Put?.ConditionExpression ===
+              'attribute_not_exists(directoryId)' &&
+            rows.has(createKey(item.Put.Item))
+          ) {
+            throw transactionFailure()
+          }
+          if (
+            item.Put?.ConditionExpression?.includes('#revision')
+          ) {
+            if (checkpointWriteFailure) {
+              checkpointWriteFailure = false
+              throw new Error('interrupted after page writes')
+            }
+            const existing = rows.get(createKey(item.Put.Item))
+            const values = item.Put.ExpressionAttributeValues ?? {}
+            if (
+              !existing ||
+              existing.entryType !== values[':entryType'] ||
+              existing.revision !== values[':expectedRevision']
+            ) throw transactionFailure()
+          }
+          if (item.Update?.Key.workspaceId ===
+            'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3') {
+            const existing = rows.get(createKey(item.Update.Key))
+            const value = existing?.value as
+              | Record<string, unknown>
+              | undefined
+            const values = item.Update.ExpressionAttributeValues ?? {}
+            if (
+              existing?.entryType !== 'webhook-active-locator-migration' ||
+              value?.migrationVersion !== 'v3' ||
+              value.state !== 'cutover' ||
+              (
+                values[':expectedVersion'] !== undefined &&
+                existing.version !== values[':expectedVersion']
+              )
+            ) throw transactionFailure()
+          }
+          if (
+            (item.Update ?? item.ConditionCheck)?.Key.workspaceId !== undefined &&
+            (item.Update ?? item.ConditionCheck)!.Key.workspaceId !==
+              'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3'
+          ) {
+            const subscriptionMutation = (item.Update ??
+              item.ConditionCheck)!
+            const existing = rows.get(createKey(subscriptionMutation.Key))
+            const values =
+              subscriptionMutation.ExpressionAttributeValues ?? {}
+            const value = existing?.value as
+              | Record<string, unknown>
+              | undefined
+            if (
+              !existing ||
+              !value ||
+              existing.entryType !== values[':entryType'] ||
+              (
+                ':version' in values &&
+                existing.version !== values[':version']
+              ) ||
+              value.id !== values[':id'] ||
+              value?.createdAt !== values[':createdAt'] ||
+              value?.status !== values[':status'] ||
+              (
+                values[':lookupKey'] === undefined
+                  ? existing.lookupKey !== undefined
+                  : existing.lookupKey !== values[':lookupKey']
+              ) ||
+              (
+                values[':lookupSortKey'] === undefined
+                  ? existing.lookupSortKey !== undefined
+                  : existing.lookupSortKey !== values[':lookupSortKey']
+              ) ||
+              (
+                values[':expiresAt'] === undefined
+                  ? existing.expiresAt !== undefined
+                  : existing.expiresAt !== values[':expiresAt']
+              )
+            ) throw transactionFailure()
+          }
+        }
         if (sourceRepairBeforeDelete) {
           const repair = sourceRepairBeforeDelete
           const targetsGrant = transactItems.some((item) =>
             item.Delete &&
-            `${item.Delete.Key.directoryId}\0${item.Delete.Key.entryKey}` ===
-              repair.grantKey
+            createKey(item.Delete.Key) === repair.grantKey
           )
           if (targetsGrant) {
             sourceRepairBeforeDelete = undefined
@@ -606,15 +1297,17 @@ function createDocumentClient(
         if (
           replaceGrantBeforeDelete &&
           transactItems.some((item) =>
-            item.Delete?.Key.directoryId.startsWith('WEBHOOK_TEAM_GRANT#')
+            String(item.Delete?.Key.directoryId ?? '')
+              .startsWith('WEBHOOK_TEAM_GRANT#')
           )
         ) {
           replaceGrantBeforeDelete = false
           const grantDelete = transactItems.find((item) =>
-            item.Delete?.Key.directoryId.startsWith('WEBHOOK_TEAM_GRANT#')
+            String(item.Delete?.Key.directoryId ?? '')
+              .startsWith('WEBHOOK_TEAM_GRANT#')
           )!.Delete!
           const replacement = rows.get(
-            `${grantDelete.Key.directoryId}\0${grantDelete.Key.entryKey}`,
+            createKey(grantDelete.Key),
           )
           if (replacement) {
             replacement.projectSourceEntryKey = 'PROJECT#replacement-after-read'
@@ -622,9 +1315,26 @@ function createDocumentClient(
         }
         for (const item of transactItems) {
           if (!item.ConditionCheck) continue
-          const source = rows.get(
-            `${item.ConditionCheck.Key.directoryId}\0${item.ConditionCheck.Key.entryKey}`,
-          )
+          const source = rows.get(createKey(item.ConditionCheck.Key))
+          if (
+            item.ConditionCheck.Key.workspaceId ===
+              'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3'
+          ) {
+            const values =
+              item.ConditionCheck.ExpressionAttributeValues ?? {}
+            const markerValue = source?.value as
+              | Record<string, unknown>
+              | undefined
+            if (
+              !source ||
+              !markerValue ||
+              source.entryType !== values[':migrationEntryType'] ||
+              markerValue.migrationVersion !== values[':migrationVersion'] ||
+              markerValue.state !== values[':migrationState']
+            ) throw transactionFailure()
+            continue
+          }
+          if (item.ConditionCheck.Key.workspaceId !== undefined) continue
           if (item.ConditionCheck.ConditionExpression ===
             'attribute_not_exists(directoryId)') {
             if (source) throw conditionalFailure()
@@ -634,7 +1344,8 @@ function createDocumentClient(
           if (item.ConditionCheck.ConditionExpression.includes(
             'attribute_not_exists(archivedAt)',
           ) && (
-            source?.entryType !== values[':entryType'] ||
+            !source ||
+            source.entryType !== values[':entryType'] ||
             source.archivedAt !== undefined
           )) {
             throw conditionalFailure()
@@ -652,10 +1363,35 @@ function createDocumentClient(
         }
         for (const item of transactItems) {
           if (!item.Delete?.ConditionExpression) continue
-          const current = rows.get(
-            `${item.Delete.Key.directoryId}\0${item.Delete.Key.entryKey}`,
-          )
+          const current = rows.get(createKey(item.Delete.Key))
           const values = item.Delete.ExpressionAttributeValues ?? {}
+          if (
+            item.Delete.Key.workspaceId ===
+              'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3'
+          ) {
+            const markerValue = current?.value as
+              | Record<string, unknown>
+              | undefined
+            if (
+              !current ||
+              !markerValue ||
+              current.entryType !== values[':migrationEntryType'] ||
+              markerValue.migrationVersion !== values[':migrationVersion'] ||
+              markerValue.state !== values[':rollback']
+            ) throw transactionFailure()
+            continue
+          }
+          if (
+            item.Delete.Key.directoryId ===
+              'WEBHOOK_ACTIVE_LOCATOR_ROLLBACK#v3'
+          ) {
+            if (
+              !current ||
+              current.entryType !== values[':checkpointEntryType'] ||
+              current.revision !== values[':revision']
+            ) throw transactionFailure()
+            continue
+          }
           for (const [placeholder, expected] of Object.entries(values)) {
             const field = placeholder === ':entryType'
               ? 'entryType'
@@ -665,11 +1401,32 @@ function createDocumentClient(
         }
         for (const item of transactItems) {
           if (item.Delete) {
-            rows.delete(
-              `${item.Delete.Key.directoryId}\0${item.Delete.Key.entryKey}`,
-            )
+            rows.delete(createKey(item.Delete.Key))
           }
           if (item.Put) rows.set(createKey(item.Put.Item), item.Put.Item)
+          if (item.Update?.Key.workspaceId ===
+            'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3') {
+            const existing = rows.get(createKey(item.Update.Key))!
+            const value = existing.value as Record<string, unknown>
+            const values = item.Update.ExpressionAttributeValues ?? {}
+            if (
+              item.Update.UpdateExpression.includes('#writerDrainUntil')
+            ) {
+              value.writerDrainUntil = values[':writerDrainUntil']
+            } else {
+              value.state = 'complete'
+            }
+            existing.version = Number(existing.version) + 1
+          }
+          if (
+            item.Update?.Key.workspaceId !== undefined &&
+            item.Update.Key.workspaceId !==
+              'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3'
+          ) {
+            const existing = rows.get(createKey(item.Update.Key))!
+            delete existing.lookupKey
+            delete existing.lookupSortKey
+          }
         }
         return {}
       }
@@ -680,6 +1437,12 @@ function createDocumentClient(
     client,
     failNextCheckpointWrite() {
       checkpointWriteFailure = true
+    },
+    advanceWebhookSubscriptionHealthBeforeNextReconcile() {
+      advanceWebhookSubscriptionHealth = true
+    },
+    completeMarkerBeforeNextRollbackStart() {
+      completeMarkerBeforeRollbackStart = true
     },
     replaceGrantBeforeNextDelete() {
       replaceGrantBeforeDelete = true
@@ -704,6 +1467,9 @@ function createDocumentClient(
     scanCalls() {
       return scans
     },
+    scanLimits() {
+      return [...scanLimits]
+    },
     updateCalls() {
       return updates
     },
@@ -711,7 +1477,27 @@ function createDocumentClient(
 }
 
 function createKey(row: Record<string, unknown>) {
-  return `${row.directoryId}\0${row.entryKey}`
+  if (
+    typeof row.directoryId === 'string' &&
+    typeof row.entryKey === 'string'
+  ) return `${row.directoryId}\0${row.entryKey}`
+  if (
+    typeof row.workspaceId === 'string' &&
+    typeof row.recordKey === 'string'
+  ) return `${row.workspaceId}\0${row.recordKey}`
+  throw new TypeError('Test row key is invalid.')
+}
+
+function createPrimaryKey(row: Record<string, unknown>) {
+  return typeof row.directoryId === 'string'
+    ? {
+        directoryId: row.directoryId,
+        entryKey: row.entryKey,
+      }
+    : {
+        workspaceId: row.workspaceId,
+        recordKey: row.recordKey,
+      }
 }
 
 function compareRows(
@@ -724,5 +1510,11 @@ function compareRows(
 function conditionalFailure() {
   return Object.assign(new Error('Conditional update failed.'), {
     name: 'ConditionalCheckFailedException',
+  })
+}
+
+function transactionFailure() {
+  return Object.assign(new Error('Transaction condition failed.'), {
+    name: 'TransactionCanceledException',
   })
 }

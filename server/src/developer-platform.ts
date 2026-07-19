@@ -120,6 +120,23 @@ export const WEBHOOK_SIGNATURE_TOLERANCE_SECONDS = 5 * 60
 /** DynamoDB の lookupKey GSI 既定名です。 */
 export const DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME = 'LookupKeyIndex'
 
+/** Active Webhook locator migration の永続状態です。 */
+export type WebhookActiveLocatorMigrationState =
+  | 'pending'
+  | 'cutover'
+  | 'complete'
+
+/** Active Webhook locator migration row の partition key です。 */
+const WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID =
+  'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3'
+
+/** Active Webhook locator migration row の sort key です。 */
+const WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY = 'STATE'
+
+/** Active Webhook locator migration row の discriminator です。 */
+const WEBHOOK_ACTIVE_LOCATOR_MIGRATION_ENTRY_TYPE =
+  'webhook-active-locator-migration'
+
 /** External link installation index が受け付ける resource 種別です。 */
 const EXTERNAL_LINK_RESOURCE_TYPES = [
   'issue',
@@ -1657,6 +1674,10 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     request: QueryLookupIndexRequest,
   ): Promise<QueryLookupIndexResult>
 
+  /** Active Webhook locator migration の強整合な状態を返します。 */
+  protected abstract readWebhookActiveLocatorMigrationState():
+    Promise<WebhookActiveLocatorMigrationState>
+
   /** Row を作成または条件付き置換します。 */
   protected abstract putRecord(
     record: DeveloperPlatformRecord,
@@ -2608,6 +2629,20 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     } satisfies AuthenticatedDeveloperCredential
   }
 
+  /**
+   * Migration state に合わせて active subscription のlegacy/primary投影を準備します。
+   */
+  protected async prepareWebhookSubscriptionStorageRecord(
+    record: DeveloperPlatformRecord,
+    subscription: WebhookSubscription,
+  ) {
+    const migrationState =
+      await this.readWebhookActiveLocatorMigrationState()
+    return migrationState !== 'complete' && subscription.status === 'active'
+      ? addLegacyActiveWebhookProjection(record, subscription)
+      : removeLegacyActiveWebhookProjection(record)
+  }
+
   /** Webhook subscription を作成し、signing secret を一度だけ返します。 */
   async createWebhookSubscription(request: CreateWebhookSubscriptionRequest) {
     const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
@@ -2645,12 +2680,15 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       secret,
       createWebhookSecretContext(workspaceId, id),
     )
-    const record = createRecord(
-      workspaceId,
-      createWebhookRecordKey(id),
-      'webhook-subscription',
+    const record = await this.prepareWebhookSubscriptionStorageRecord(
+      createRecord(
+        workspaceId,
+        createWebhookRecordKey(id),
+        'webhook-subscription',
+        subscription,
+        { secretCiphertext },
+      ),
       subscription,
-      { secretCiphertext },
     )
     const result = {
       subscription: clone(subscription),
@@ -2700,20 +2738,32 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       WEBHOOK_PROJECTION_PAGE_MAX_LIMIT,
       'Webhook subscription page limit',
     )
+    const migrationState = request.cursor === undefined
+      ? await this.readWebhookActiveLocatorMigrationState()
+      : undefined
     let cursor = request.cursor === undefined
-      ? {
-          version: 1,
-          phase: 'legacy',
-          workspaceId,
-          lookupKey: createActiveWebhookSubscriptionLookupKey(workspaceId),
-        } satisfies ActiveWebhookSubscriptionCursor
+      ? migrationState === 'complete'
+        ? {
+            version: 1,
+            phase: 'primary',
+            workspaceId,
+          } satisfies ActiveWebhookSubscriptionCursor
+        : {
+            version: 1,
+            phase: 'legacy',
+            workspaceId,
+            lookupKey: createActiveWebhookSubscriptionLookupKey(workspaceId),
+          } satisfies ActiveWebhookSubscriptionCursor
       : decodeActiveWebhookSubscriptionCursor(request.cursor, workspaceId)
     if (cursor.phase === 'legacy') {
+      const legacyCursor = cursor
       const page = await this.queryLookupIndex({
-        lookupKey: cursor.lookupKey,
+        lookupKey: legacyCursor.lookupKey,
         limit,
         scanIndexForward: true,
-        ...(cursor.locator ? { exclusiveStartKey: cursor.locator } : {}),
+        ...(legacyCursor.locator
+          ? { exclusiveStartKey: legacyCursor.locator }
+          : {}),
       })
       const subscriptions = (await mapWithConcurrency(
         page.locators,
@@ -2722,7 +2772,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
           const record = await this.getRecord(locator.workspaceId, locator.recordKey)
           if (
             record?.entryType !== 'webhook-subscription' ||
-            record.lookupKey !== cursor.lookupKey ||
+            record.lookupKey !== legacyCursor.lookupKey ||
             record.lookupSortKey !== locator.lookupSortKey ||
             isRecordExpired(record, this.clock())
           ) return undefined
@@ -2745,7 +2795,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
         return {
           subscriptions,
           nextCursor: encodeActiveWebhookSubscriptionCursor({
-            ...cursor,
+            ...legacyCursor,
             locator: page.lastEvaluatedKey,
           }),
         }
@@ -2835,14 +2885,15 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       secret,
       createWebhookSecretContext(workspaceId, subscriptionId),
     )
-    const updatedRecord: DeveloperPlatformRecord = {
-      ...record,
-      value: subscription,
-      secretCiphertext,
-      version: record.version + 1,
-    }
-    delete updatedRecord.lookupKey
-    delete updatedRecord.lookupSortKey
+    const updatedRecord = await this.prepareWebhookSubscriptionStorageRecord(
+      {
+        ...record,
+        value: subscription,
+        secretCiphertext,
+        version: record.version + 1,
+      },
+      subscription,
+    )
     const result = {
       subscription: clone(subscription),
       signingSecret: secret,
@@ -2904,13 +2955,14 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       status,
       updatedAt: this.clock().toISOString(),
     }
-    const updatedRecord: DeveloperPlatformRecord = {
-      ...record,
-      value: subscription,
-      version: record.version + 1,
-    }
-    delete updatedRecord.lookupKey
-    delete updatedRecord.lookupSortKey
+    const updatedRecord = await this.prepareWebhookSubscriptionStorageRecord(
+      {
+        ...record,
+        value: subscription,
+        version: record.version + 1,
+      },
+      subscription,
+    )
     if (status === 'disabled') {
       delete updatedRecord.secretCiphertext
       updatedRecord.expiresAt = record.expiresAt ??
@@ -5593,12 +5645,19 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
 export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient {
   /** Workspace と recordKey で分離した永続化 row です。 */
   private readonly records = new Map<string, DeveloperPlatformRecord>()
+  /** Test が再現する Active Webhook locator migration 状態です。 */
+  private readonly webhookActiveLocatorMigrationState:
+    WebhookActiveLocatorMigrationState
 
   constructor(
     secretProtector: SecretProtector = new LocalAesGcmSecretProtector(),
     clock: () => Date = () => new Date(),
+    webhookActiveLocatorMigrationState:
+      WebhookActiveLocatorMigrationState = 'complete',
   ) {
     super(secretProtector, clock)
+    this.webhookActiveLocatorMigrationState =
+      webhookActiveLocatorMigrationState
   }
 
   /** Primary key で row を取得します。 */
@@ -5686,6 +5745,11 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
         ? { lastEvaluatedKey: locators.at(-1)! }
         : {}),
     } satisfies QueryLookupIndexResult
+  }
+
+  /** Test に設定された Active Webhook locator migration 状態を返します。 */
+  protected async readWebhookActiveLocatorMigrationState() {
+    return this.webhookActiveLocatorMigrationState
   }
 
   /** Row を作成または条件付き置換します。 */
@@ -5972,7 +6036,6 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
     expectedVersion: number,
     completion?: PreparedIdempotencyCompletionRecord,
   ) {
-    const currentRecord = removeLegacyActiveWebhookProjection(record)
     const recordKey = createMemoryKey(record.workspaceId, record.recordKey)
     const current = this.records.get(recordKey)
     if (
@@ -5990,7 +6053,7 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
       }
     }
     const subscription = readRecordValue<WebhookSubscription>(
-      currentRecord,
+      record,
       'webhook-subscription',
     )
     const locator = createActiveWebhookSubscriptionRecord(
@@ -5998,7 +6061,7 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
       subscription,
     )
     const locatorKey = createMemoryKey(locator.workspaceId, locator.recordKey)
-    this.records.set(recordKey, clone(currentRecord))
+    this.records.set(recordKey, clone(record))
     if (subscription.status === 'active') {
       this.records.set(locatorKey, locator)
     } else {
@@ -6602,6 +6665,24 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
     }
   }
 
+  /** Migration marker を強整合取得して active locator の移行状態を返します。 */
+  protected async readWebhookActiveLocatorMigrationState() {
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID,
+          recordKey: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY,
+        },
+        ConsistentRead: true,
+      }))
+      return readStoredWebhookActiveLocatorMigrationState(response.Item)
+    } catch (error) {
+      if (error instanceof DeveloperPlatformError) throw error
+      throw toPersistenceError(error)
+    }
+  }
+
   /** Workspace partition の prefix rows を全 page 取得します。 */
   protected async listRecords(workspaceId: string, recordKeyPrefix: string) {
     const records: DeveloperPlatformRecord[] = []
@@ -7181,9 +7262,8 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
     expectedVersion: number,
     completion?: PreparedIdempotencyCompletionRecord,
   ) {
-    const currentRecord = removeLegacyActiveWebhookProjection(record)
     const subscription = readRecordValue<WebhookSubscription>(
-      currentRecord,
+      record,
       'webhook-subscription',
     )
     const locator = createActiveWebhookSubscriptionRecord(
@@ -7196,7 +7276,7 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
           {
             Put: {
               TableName: this.tableName,
-              Item: currentRecord,
+              Item: record,
               ConditionExpression:
                 '#recordVersion = :expectedRecordVersion AND ' +
                 '#entryType = :subscriptionEntryType',
@@ -8110,6 +8190,17 @@ function createActiveWebhookSubscriptionRecord(
       targetRecordKey: createWebhookRecordKey(subscription.id),
     } satisfies StoredActiveWebhookSubscriptionValue,
   )
+}
+
+function addLegacyActiveWebhookProjection(
+  record: DeveloperPlatformRecord,
+  subscription: WebhookSubscription,
+) {
+  return {
+    ...record,
+    lookupKey: createActiveWebhookSubscriptionLookupKey(record.workspaceId),
+    lookupSortKey: `${subscription.createdAt}#${subscription.id}`,
+  } satisfies DeveloperPlatformRecord
 }
 
 function removeLegacyActiveWebhookProjection(
@@ -9427,6 +9518,34 @@ function readStoredRecord(value: Record<string, unknown>) {
     throw persistenceInvalid('Developer platform row is invalid.')
   }
   return value as DeveloperPlatformRecord
+}
+
+function readStoredWebhookActiveLocatorMigrationState(
+  value: Record<string, unknown> | undefined,
+): WebhookActiveLocatorMigrationState {
+  if (value === undefined) return 'pending'
+  const storedValue = value.value
+  if (
+    value.workspaceId !== WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID ||
+    value.recordKey !== WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY ||
+    value.entryType !== WEBHOOK_ACTIVE_LOCATOR_MIGRATION_ENTRY_TYPE ||
+    !Number.isSafeInteger(value.version) ||
+    Number(value.version) < 1 ||
+    !isRecord(storedValue) ||
+    storedValue.migrationVersion !== 'v3' ||
+    (
+      storedValue.state !== 'cutover' &&
+      storedValue.state !== 'complete' &&
+      storedValue.state !== 'rollback'
+    )
+  ) {
+    throw persistenceInvalid(
+      'Webhook active locator migration row is invalid.',
+    )
+  }
+  return storedValue.state === 'rollback'
+    ? 'pending'
+    : storedValue.state
 }
 
 function isOptionalSha256Digest(value: unknown) {

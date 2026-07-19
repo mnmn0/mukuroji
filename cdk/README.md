@@ -103,6 +103,227 @@ previous の両方で origin marker の検証が成功することを確認し�
 
 更新後は設定確認用の再認証を行い、`ConnectorSyncDlqUrl`、`ConnectorPollDlqUrl`、queue age alarm、provider 側 callback error を監視します。CloudFormation parameter は `{}` のまま維持し、通常 deploy で手動更新した current secret version を戻さないでください。
 
+## Connector disconnect recovery
+
+Connector disconnect は `AuditEventsTable` の pending outbox から共有
+`CollaborationProjectionFunction` が ID-only の `disconnect-links` job を
+`ConnectorSyncQueue` へ送り、worker が bounded page ごとに external link を
+`paused` へ変更します。共有 projection、connector queue のどちらでも retry
+上限に達した場合に備え、`CollaborationProjectionDlq` と
+`ConnectorSyncDlq` の visible message alarm を監視してください。
+
+`CollaborationProjectionDlq` は collaboration、Webhook、connector の共有 DLQ
+です。message を `ConnectorSyncQueue` へ直接送らず、次の順序で元の Audit
+stream batch を共有 projection へ再投入します。
+
+1. 対象 account、region、stack と alarm 発生時刻を確認し、原因となった
+   downstream dependency、権限、設定を先に修正します。
+2. `CollaborationProjectionDlqUrl` から message を1件だけ長い visibility
+   timeout で受信し、削除せず保全します。DynamoDB Streams event source
+   mapping が SQS destination へ保存する Body は
+   `DDBStreamBatchInfo` を含む failure metadata だけで、元の
+   `Records` は含みません。
+3. DynamoDB Streams の record 保持期間である24時間以内に、
+   `DDBStreamBatchInfo` の stream ARN、shard ID、開始・終了 sequence number
+   を使って元の batch を取得します。`DescribeStream` で対象 shard と
+   `NEW_IMAGE` view を確認し、`AT_SEQUENCE_NUMBER` の shard iterator から
+   `GetRecords` を繰り返します。終了 sequence number と
+   `batchSize` の両方が一致しない場合は再投入もDLQ messageの削除も行いません。
+   24時間を過ぎて record を取得できない場合もmessageを削除せず、AuditEvents
+   base tableから対象eventを特定する別の承認済み復旧作業へエスカレーション
+   します。
+4. 復元した `Records` 内の
+   `connector.status.updated` event が
+   `metadata.adapter=developer-platform`、
+   `metadata.status=disconnected`、`outboxStatus=pending` であることを確認します。
+   別用途の record が同じ batch に含まれる場合も record を切り出さず、
+   共有 projection 全体へ同じ batch を渡します。
+5. Stack resource から `CollaborationProjectionFunction` の physical name を
+   取得し、復元した batch を同期 invoke します。応答の
+   `batchItemFailures` が空であることを確認します。重複 invoke は downstream
+   の event ID と disconnect lifecycle revision で冪等化されます。
+6. `ConnectorSyncQueue` へ `disconnect-links` が到達し、対象 installation の
+   external link がすべて `paused`、installation row の
+   `connectorDisconnectCleanupRevision` が削除済みになったことを確認してから、
+   元の共有 DLQ message を receipt handle で削除します。失敗または確認不能時は
+   message を削除せず、visibility timeout 後に再調査します。
+
+```sh
+set -euo pipefail
+
+export STACK_NAME=CdkStack
+export COLLABORATION_PROJECTION_DLQ_URL="$(aws cloudformation describe-stacks \
+  --region "$AWS_REGION" \
+  --stack-name "$STACK_NAME" \
+  --query "Stacks[0].Outputs[?OutputKey=='CollaborationProjectionDlqUrl'].OutputValue | [0]" \
+  --output text)"
+export COLLABORATION_PROJECTION_FUNCTION_NAME="$(aws cloudformation list-stack-resources \
+  --region "$AWS_REGION" \
+  --stack-name "$STACK_NAME" \
+  --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function' && starts_with(LogicalResourceId, 'CollaborationProjectionFunction')].PhysicalResourceId | [0]" \
+  --output text)"
+
+aws sqs receive-message \
+  --region "$AWS_REGION" \
+  --queue-url "$COLLABORATION_PROJECTION_DLQ_URL" \
+  --max-number-of-messages 1 \
+  --wait-time-seconds 10 \
+  --visibility-timeout 900 \
+  > collaboration-projection-dlq-message.json
+
+jq -e '
+  .Messages as $messages |
+  ($messages | length) == 1 and
+  (($messages[0].ReceiptHandle | type) == "string") and
+  (
+    ($messages[0].Body | fromjson) as $failure |
+    ($failure.DDBStreamBatchInfo | type) == "object" and
+    ($failure.DDBStreamBatchInfo.streamArn | type) == "string" and
+    ($failure.DDBStreamBatchInfo.shardId | type) == "string" and
+    ($failure.DDBStreamBatchInfo.startSequenceNumber | type) == "string" and
+    ($failure.DDBStreamBatchInfo.endSequenceNumber | type) == "string" and
+    ($failure.DDBStreamBatchInfo.batchSize | type) == "number"
+  )
+' collaboration-projection-dlq-message.json
+
+export AUDIT_STREAM_ARN="$(jq -r \
+  '.Messages[0].Body | fromjson | .DDBStreamBatchInfo.streamArn' \
+  collaboration-projection-dlq-message.json)"
+export AUDIT_SHARD_ID="$(jq -r \
+  '.Messages[0].Body | fromjson | .DDBStreamBatchInfo.shardId' \
+  collaboration-projection-dlq-message.json)"
+export AUDIT_START_SEQUENCE_NUMBER="$(jq -r \
+  '.Messages[0].Body | fromjson | .DDBStreamBatchInfo.startSequenceNumber' \
+  collaboration-projection-dlq-message.json)"
+export AUDIT_END_SEQUENCE_NUMBER="$(jq -r \
+  '.Messages[0].Body | fromjson | .DDBStreamBatchInfo.endSequenceNumber' \
+  collaboration-projection-dlq-message.json)"
+export AUDIT_EXPECTED_BATCH_SIZE="$(jq -r \
+  '.Messages[0].Body | fromjson | .DDBStreamBatchInfo.batchSize' \
+  collaboration-projection-dlq-message.json)"
+
+aws dynamodbstreams describe-stream \
+  --region "$AWS_REGION" \
+  --stream-arn "$AUDIT_STREAM_ARN" \
+  > collaboration-projection-stream.json
+jq -e --arg shardId "$AUDIT_SHARD_ID" '
+  .StreamDescription.StreamStatus == "ENABLED" and
+  .StreamDescription.StreamViewType == "NEW_IMAGE" and
+  any(.StreamDescription.Shards[]?; .ShardId == $shardId)
+' collaboration-projection-stream.json
+
+export AUDIT_SHARD_ITERATOR="$(aws dynamodbstreams get-shard-iterator \
+  --region "$AWS_REGION" \
+  --stream-arn "$AUDIT_STREAM_ARN" \
+  --shard-id "$AUDIT_SHARD_ID" \
+  --shard-iterator-type AT_SEQUENCE_NUMBER \
+  --sequence-number "$AUDIT_START_SEQUENCE_NUMBER" \
+  --query ShardIterator \
+  --output text)"
+test "$AUDIT_SHARD_ITERATOR" != "None"
+
+jq -n '{Records: []}' > collaboration-projection-replay.json
+export AUDIT_STREAM_READ_ATTEMPTS=0
+while [ "$AUDIT_STREAM_READ_ATTEMPTS" -lt 120 ]; do
+  aws dynamodbstreams get-records \
+    --region "$AWS_REGION" \
+    --shard-iterator "$AUDIT_SHARD_ITERATOR" \
+    --limit 1000 \
+    > collaboration-projection-stream-page.json
+
+  jq \
+    --arg start "$AUDIT_START_SEQUENCE_NUMBER" \
+    --arg end "$AUDIT_END_SEQUENCE_NUMBER" '
+    def decimal_compare($left; $right):
+      if ($left | length) < ($right | length) then -1
+      elif ($left | length) > ($right | length) then 1
+      elif $left < $right then -1
+      elif $left > $right then 1
+      else 0
+      end;
+    {
+      Records: [
+        .Records[]? |
+        .dynamodb.SequenceNumber as $sequence |
+        select(($sequence | type) == "string") |
+        select(
+          decimal_compare($sequence; $start) >= 0 and
+          decimal_compare($sequence; $end) <= 0
+        )
+      ]
+    }
+  ' collaboration-projection-stream-page.json \
+    > collaboration-projection-selected-page.json
+  jq -s \
+    '{Records: (.[0].Records + .[1].Records)}' \
+    collaboration-projection-replay.json \
+    collaboration-projection-selected-page.json \
+    > collaboration-projection-replay-next.json
+  mv collaboration-projection-replay-next.json \
+    collaboration-projection-replay.json
+
+  if jq -e --arg end "$AUDIT_END_SEQUENCE_NUMBER" '
+    any(.Records[]?; .dynamodb.SequenceNumber == $end)
+  ' collaboration-projection-stream-page.json; then
+    break
+  fi
+  export AUDIT_SHARD_ITERATOR="$(jq -r \
+    '.NextShardIterator // empty' \
+    collaboration-projection-stream-page.json)"
+  test -n "$AUDIT_SHARD_ITERATOR"
+  export AUDIT_STREAM_READ_ATTEMPTS=$((AUDIT_STREAM_READ_ATTEMPTS + 1))
+  sleep 1
+done
+
+jq -e \
+  --arg end "$AUDIT_END_SEQUENCE_NUMBER" \
+  --argjson expected "$AUDIT_EXPECTED_BATCH_SIZE" '
+  (.Records | length) == $expected and
+  any(.Records[]?; .dynamodb.SequenceNumber == $end)
+' collaboration-projection-replay.json
+jq -e '
+  any(
+    .Records[];
+    .eventName == "INSERT" and
+    .dynamodb.NewImage.eventType.S == "connector.status.updated" and
+    .dynamodb.NewImage.metadata.M.adapter.S == "developer-platform" and
+    .dynamodb.NewImage.metadata.M.status.S == "disconnected" and
+    .dynamodb.NewImage.outboxStatus.S == "pending"
+  )
+' collaboration-projection-replay.json
+
+aws lambda invoke \
+  --region "$AWS_REGION" \
+  --function-name "$COLLABORATION_PROJECTION_FUNCTION_NAME" \
+  --cli-binary-format raw-in-base64-out \
+  --payload fileb://collaboration-projection-replay.json \
+  collaboration-projection-replay-response.json
+jq -e '.batchItemFailures == []' collaboration-projection-replay-response.json
+
+export COLLABORATION_PROJECTION_DLQ_RECEIPT_HANDLE="$(jq -r \
+  '.Messages[0].ReceiptHandle' \
+  collaboration-projection-dlq-message.json)"
+# external link と cleanup marker の確認が完了した後だけ実行します。
+aws sqs delete-message \
+  --region "$AWS_REGION" \
+  --queue-url "$COLLABORATION_PROJECTION_DLQ_URL" \
+  --receipt-handle "$COLLABORATION_PROJECTION_DLQ_RECEIPT_HANDLE"
+```
+
+`ConnectorSyncDlq` に `disconnect-links` がある場合は、共有 projection を
+再実行しません。原因修正後、DLQ message の body が version 1 の
+`disconnect-links` で、必須の version、kind、対象 Workspace、installation、
+lifecycle revision と、任意の `updatedByUserId` / continuation `cursor` 以外を
+含まないことを確認します。secret や credential が含まれていないことも
+確認し、その同じ body を `ConnectorSyncQueueUrl` へ送ります。
+送信成功を確認してから元 message を削除します。古い lifecycle revision の
+job は現在の installation を変更せず終了し、同じ page の重複は既に
+`paused` の link を変更しません。DLQ 全体の一括 redrive は他の outbound /
+poll job も再実行するため、対象と影響を棚卸しせず実施しないでください。
+
+運用ファイルには Workspace ID や audit metadata が含まれます。権限を限定した
+作業領域で扱い、復旧と記録が完了したら安全に削除してください。
+
 ## File storage security and retention
 
 File body は API request body に通さず、認証・認可済み API が発行する短命 URL で `workspaces/<workspaceId>/...` の object key へ直接 upload / download します。client が任意の bucket key を指定する方式ではありません。
@@ -276,6 +497,16 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 
 Webhook ACL v2 upgrade は新しい transaction writer の更新後に開始し、checkpoint に記録した30秒の drain window が終わるまで retained row の scan を開始しません。これにより、更新前に開始した API invocation が cleanup locator なしの grant を backfill cursor 通過後に書き込むことを防ぎます。
+
+Webhook active locator v3 upgrade は API、projection、delivery の
+dual-read / dual-write 対応を先に更新します。Custom resource は60秒 drain後に
+primary locator を全件整合し、primary-only 境界を永続 marker で確定します。
+さらに compatibility writer を60秒 drainしてから legacy GSI projection を
+全件除去します。Stack update が rollback する場合は、Custom resource の
+Delete が marker を rollback 状態へfenceし、active subscription のlegacy
+projectionを全件復元してから旧 Lambda への依存逆順rollbackを許可します。
+この逆移行に失敗した stack で custom resource をskipして
+`continue-update-rollback`しないでください。
 
 通知 upgrade では `NotificationsTable` に `RecipientStatusIndex` が追加されます。deploy 前に GSI backfill の所要時間と table throttling を確認し、deploy 後は `CollaborationProjectionDlqUrl` と `NotificationScheduleDlqUrl` の滞留、Inbox の unread count を監視してください。期限 schedule は UTC date-only で1時間ごとに走査し、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として非同期 retry され、最終失敗は schedule DLQ に保存されます。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。
 

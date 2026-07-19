@@ -1436,6 +1436,25 @@ test('audit stream projects all downstream deliveries with one combined consumer
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
   });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects audit projection records that exhausted collaboration, Webhook, or connector stream retries.',
+    ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+    DatapointsToAlarm: 1,
+    Dimensions: [{
+      Name: 'QueueName',
+      Value: {
+        'Fn::GetAtt': ['CollaborationProjectionDlqAF6DB4E6', 'QueueName'],
+      },
+    }],
+    EvaluationPeriods: 1,
+    MetricName: 'ApproximateNumberOfMessagesVisible',
+    Namespace: 'AWS/SQS',
+    Period: 300,
+    Statistic: 'Maximum',
+    Threshold: 1,
+    TreatMissingData: 'notBreaching',
+  });
   template.hasResourceProperties('AWS::IAM::Policy', {
     PolicyDocument: {
       Statement: Match.arrayWith([
@@ -1567,9 +1586,13 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
     Environment: deliveryEnvironment,
   });
   template.hasResourceProperties('AWS::Lambda::Function', {
-    Description: 'Starts the writer drain and resumable Webhook ACL backfill.',
+    Description:
+      'Starts the API, projection, and delivery drain before Webhook backfill.',
     Environment: {
       Variables: {
+        DEVELOPER_PLATFORM_TABLE_NAME: {
+          Ref: 'DeveloperPlatformTable772E085C',
+        },
         PROJECT_DIRECTORY_TABLE_NAME: {
           Ref: 'ProjectDirectoryTable9ED01C01',
         },
@@ -1584,9 +1607,12 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   });
   template.hasResourceProperties('AWS::Lambda::Function', {
     Description:
-      'Waits for writer drain and processes checkpointed Webhook ACL pages.',
+      'Drains old Webhook runtimes and processes checkpointed migration pages.',
     Environment: {
       Variables: {
+        DEVELOPER_PLATFORM_TABLE_NAME: {
+          Ref: 'DeveloperPlatformTable772E085C',
+        },
         PROJECT_DIRECTORY_TABLE_NAME: {
           Ref: 'ProjectDirectoryTable9ED01C01',
         },
@@ -1601,18 +1627,20 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   });
   const backfillEntry = Object.entries(resources).find(([, resource]) =>
     (resource as { Properties?: { MigrationVersion?: string } })
-      .Properties?.MigrationVersion === 'v2'
+      .Properties?.MigrationVersion === 'v3'
   );
   expect(backfillEntry?.[0]).toBe('WebhookAuthorizationBackfill');
   expect(backfillEntry?.[1]).toEqual(expect.objectContaining({
     Type: 'AWS::CloudFormation::CustomResource',
     DependsOn: expect.arrayContaining([
+      'CollaborationProjectionFunction1AAC5764',
       'ListProjectTasksFunction2134AF4A',
+      'WebhookDeliveryFunctionEA305509',
     ]),
   }));
-  expect(resources.WebhookDeliveryFunctionEA305509.DependsOn).toEqual(
-    expect.arrayContaining(['WebhookAuthorizationBackfill']),
-  );
+  expect(
+    resources.WebhookDeliveryFunctionEA305509.DependsOn ?? [],
+  ).not.toContain('WebhookAuthorizationBackfill');
   for (const rolePrefix of [
     'WebhookAuthorizationBackfillFunctionServiceRole',
     'WebhookAuthorizationBackfillProgressFunctionServiceRole',
@@ -1640,9 +1668,14 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
     expect(statements).toContainEqual(expect.objectContaining({
       Effect: 'Allow',
       Action: 'dynamodb:TransactWriteItems',
-      Resource: {
-        'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'],
-      },
+      Resource: expect.arrayContaining([
+        {
+          'Fn::GetAtt': ['DeveloperPlatformTable772E085C', 'Arn'],
+        },
+        {
+          'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'],
+        },
+      ]),
     }));
   }
   template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {

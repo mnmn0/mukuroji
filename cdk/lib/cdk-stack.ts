@@ -1973,6 +1973,19 @@ export class CdkStack extends cdk.Stack {
         onFailure: new lambdaEventSources.SqsDlq(collaborationProjectionDlq),
       }),
     );
+    new cloudwatch.Alarm(this, 'CollaborationProjectionDlqAlarm', {
+      alarmDescription:
+        'Detects audit projection records that exhausted collaboration, Webhook, or connector stream retries.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: collaborationProjectionDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
     auditEventsTable.grantStreamRead(collaborationProjectionFunction);
     collaborationTable.grantReadData(collaborationProjectionFunction);
     notificationsTable.grantReadWriteData(collaborationProjectionFunction);
@@ -2309,7 +2322,7 @@ export class CdkStack extends cdk.Stack {
         timeout: cdk.Duration.seconds(30),
         memorySize: 512,
         description:
-          'Starts the writer drain and resumable Webhook ACL backfill.',
+          'Starts the API, projection, and delivery drain before Webhook backfill.',
         bundling: {
           bundleAwsSDK: true,
           minify: true,
@@ -2317,6 +2330,7 @@ export class CdkStack extends cdk.Stack {
           target: 'node22',
         },
         environment: {
+          DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
           PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
           PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
             'WebhookAuthorizationIndex',
@@ -2324,6 +2338,9 @@ export class CdkStack extends cdk.Stack {
       },
     );
     projectDirectoryTable.grantReadWriteData(webhookAuthorizationBackfillFunction);
+    developerPlatformTable.grantReadWriteData(
+      webhookAuthorizationBackfillFunction,
+    );
     const webhookAuthorizationBackfillProgressFunction =
       new lambdaNodejs.NodejsFunction(
         this,
@@ -2340,7 +2357,7 @@ export class CdkStack extends cdk.Stack {
           timeout: cdk.Duration.minutes(5),
           memorySize: 1024,
           description:
-            'Waits for writer drain and processes checkpointed Webhook ACL pages.',
+            'Drains old Webhook runtimes and processes checkpointed migration pages.',
           bundling: {
             bundleAwsSDK: true,
             minify: true,
@@ -2348,6 +2365,7 @@ export class CdkStack extends cdk.Stack {
             target: 'node22',
           },
           environment: {
+            DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
             PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
             PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
               'WebhookAuthorizationIndex',
@@ -2357,13 +2375,19 @@ export class CdkStack extends cdk.Stack {
     projectDirectoryTable.grantReadWriteData(
       webhookAuthorizationBackfillProgressFunction,
     );
+    developerPlatformTable.grantReadWriteData(
+      webhookAuthorizationBackfillProgressFunction,
+    );
     for (const backfillFunction of [
       webhookAuthorizationBackfillFunction,
       webhookAuthorizationBackfillProgressFunction,
     ]) {
       backfillFunction.addToRolePolicy(new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
-        resources: [projectDirectoryTable.tableArn],
+        resources: [
+          developerPlatformTable.tableArn,
+          projectDirectoryTable.tableArn,
+        ],
       }));
     }
     const webhookAuthorizationBackfillProvider = new customResources.Provider(
@@ -2382,15 +2406,12 @@ export class CdkStack extends cdk.Stack {
       {
         serviceToken: webhookAuthorizationBackfillProvider.serviceToken,
         properties: {
-          MigrationVersion: 'v2',
+          DeveloperPlatformTableName: developerPlatformTable.tableName,
+          MigrationVersion: 'v3',
           ProjectDirectoryTableName: projectDirectoryTable.tableName,
         },
       },
     );
-    // Deploy the transactionally maintained writer first. The v2 checkpoint
-    // then drains pre-deploy invocations before scanning retained rows, and
-    // the new reader is enabled only after the migration succeeds.
-    webhookAuthorizationBackfill.node.addDependency(apiFunction);
 
     const webhookDeliveryFunction = new lambdaNodejs.NodejsFunction(
       this,
@@ -2422,7 +2443,15 @@ export class CdkStack extends cdk.Stack {
         },
       },
     );
-    webhookDeliveryFunction.node.addDependency(webhookAuthorizationBackfill);
+    // First deploy the compatibility writer and dual-read consumers. The v3
+    // resource drains old runtimes, backfills primary locators, cuts over,
+    // drains compatibility writes, and only then removes legacy lookup keys.
+    // Its Delete path reverses the locator migration before dependency rollback.
+    webhookAuthorizationBackfill.node.addDependency(
+      apiFunction,
+      collaborationProjectionFunction,
+      webhookDeliveryFunction,
+    );
 
     webhookDeliveryFunction.addEventSource(
       new lambdaEventSources.SqsEventSource(webhookDeliveryQueue, {

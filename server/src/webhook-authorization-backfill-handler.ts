@@ -74,8 +74,37 @@ type WebhookAuthorizationGrantRow = {
   webhookAuthorizationSortKey: string
 }
 
+/** Legacy GSI から primary locator へ移行する Webhook subscription row です。 */
+type WebhookActiveLocatorSourceRow = {
+  /** Workspace partition key です。 */
+  workspaceId: string
+  /** Subscription base row の sort key です。 */
+  recordKey: string
+  /** Subscription row discriminator です。 */
+  entryType: 'webhook-subscription'
+  /** Subscription の migration に必要な最小 domain value です。 */
+  value: {
+    /** Webhook subscription ID です。 */
+    id: string
+    /** Stable locator ordering timestamp です。 */
+    createdAt: string
+    /** Active locator の有無を決めるstatusです。 */
+    status: 'active' | 'paused' | 'disabled'
+  }
+  /** Legacy GSI partition key です。 */
+  lookupKey?: string
+  /** Legacy GSI sort key です。 */
+  lookupSortKey?: string
+  /** DynamoDB TTL epoch seconds です。 */
+  expiresAt?: number
+  /** Concurrent mutation を検出するrow revisionです。 */
+  version: number
+}
+
 /** Backfill の永続 checkpoint が示す処理段階です。 */
 type WebhookAuthorizationBackfillPhase =
+  | 'active-locators'
+  | 'legacy-locator-cleanup'
   | 'projection'
   | 'verification'
   | 'grants'
@@ -113,6 +142,40 @@ type WebhookAuthorizationBackfillCheckpoint = {
   grantsDeleted: number
   /** Active grantへ補完したcleanup locator数です。 */
   cleanupLocatorsWritten: number
+  /** Primary active locator を整合させたsubscription数です。 */
+  activeLocatorsReconciled: number
+  /** Base row から除去したlegacy lookup数です。 */
+  legacyLookupsRemoved: number
+}
+
+/** Rollback 時の legacy active locator 復元 checkpoint です。 */
+type WebhookActiveLocatorRollbackCheckpoint = {
+  /** 通常 directory partition から隔離した partition key です。 */
+  directoryId: string
+  /** Checkpoint sort key です。 */
+  entryKey: string
+  /** Rollback checkpoint discriminator です。 */
+  entryType: 'webhook-active-locator-rollback-checkpoint'
+  /** Schema migration version です。 */
+  migrationVersion: typeof WEBHOOK_AUTHORIZATION_BACKFILL_VERSION
+  /** Primary-only writer invocation が終了するまで待機する日時です。 */
+  writerDrainUntil: string
+  /** Compare-and-swap に使う revision です。 */
+  revision: number
+  /** 現在の Scan 再開位置です。 */
+  scanCursor?: WebhookAuthorizationBackfillCursor
+  /** Legacy locator を整合させた subscription 数です。 */
+  legacyLookupsReconciled: number
+}
+
+/** Rollback の1回の progress Lambda 実行結果です。 */
+type WebhookActiveLocatorRollbackProgress = {
+  /** Rollback が完了したかどうかです。 */
+  isComplete: boolean
+  /** Checkpoint がこの page で前進したかどうかです。 */
+  madeProgress: boolean
+  /** 完了前の永続 checkpoint です。 */
+  checkpoint?: WebhookActiveLocatorRollbackCheckpoint
 }
 
 /** CloudFormation Provider が渡す custom resource event です。 */
@@ -148,6 +211,8 @@ export type WebhookAuthorizationBackfillBatchOptions = {
   canProcessNextPage: () => boolean
   /** Writer drain と各pageの判定時刻を返すclockです。 */
   now?: () => Date
+  /** Active Webhook locatorを移行するDeveloper platform table名です。 */
+  developerPlatformTableName?: string
 }
 
 /** Lambda の残り実行時間を参照する最小 context contract です。 */
@@ -160,16 +225,22 @@ type WebhookAuthorizationBackfillLambdaContext = {
 const WEBHOOK_AUTHORIZATION_BACKFILL_CONCURRENCY = 16
 /** 1回の progress Lambda が処理する最大 Scan item 数です。 */
 const WEBHOOK_AUTHORIZATION_BACKFILL_PAGE_SIZE = 50
+/** 疎な migration row を全表走査する1 pageの最大item数です。 */
+const WEBHOOK_AUTHORIZATION_SPARSE_SCAN_PAGE_SIZE = 1_000
 /** 1回の progress Lambda invocation が処理する最大 page 数です。 */
 const WEBHOOK_AUTHORIZATION_BACKFILL_MAX_PAGES_PER_INVOCATION = 100
 /** 次の page を開始せず checkpoint を返す残り実行時間です。 */
 const WEBHOOK_AUTHORIZATION_BACKFILL_TIME_RESERVE_MILLISECONDS = 30_000
 /** GSI の反映確認と locator 読み取りに使う1 page の上限です。 */
 const WEBHOOK_AUTHORIZATION_QUERY_PAGE_SIZE = 50
-/** 新writer deploy前に開始したAPI invocationをdrainする待機秒数です。 */
-const WEBHOOK_AUTHORIZATION_WRITER_DRAIN_SECONDS = 30
+/** 旧API/projection/delivery invocationをdrainする待機秒数です。 */
+const WEBHOOK_AUTHORIZATION_WRITER_DRAIN_SECONDS = 60
+/** Rollback marker のCAS競合を同一request内で再試行する上限です。 */
+const WEBHOOK_ACTIVE_LOCATOR_ROLLBACK_START_MAX_ATTEMPTS = 4
+/** Forward checkpoint 初期化のCAS競合を同一request内で再試行する上限です。 */
+const WEBHOOK_AUTHORIZATION_BACKFILL_START_MAX_ATTEMPTS = 4
 /** Backfill schema version です。 */
-const WEBHOOK_AUTHORIZATION_BACKFILL_VERSION = 'v2'
+const WEBHOOK_AUTHORIZATION_BACKFILL_VERSION = 'v3'
 /** CloudFormation resource の安定 physical ID です。 */
 const WEBHOOK_AUTHORIZATION_BACKFILL_PHYSICAL_ID =
   `webhook-authorization-projection-backfill-${WEBHOOK_AUTHORIZATION_BACKFILL_VERSION}`
@@ -178,24 +249,115 @@ const WEBHOOK_AUTHORIZATION_BACKFILL_CHECKPOINT_DIRECTORY_ID =
   `WEBHOOK_AUTHORIZATION_BACKFILL#${WEBHOOK_AUTHORIZATION_BACKFILL_VERSION}`
 /** Checkpoint sort key です。 */
 const WEBHOOK_AUTHORIZATION_BACKFILL_CHECKPOINT_ENTRY_KEY = 'CHECKPOINT'
+/** Rollback checkpoint を隔離する partition key です。 */
+const WEBHOOK_ACTIVE_LOCATOR_ROLLBACK_CHECKPOINT_DIRECTORY_ID =
+  `WEBHOOK_ACTIVE_LOCATOR_ROLLBACK#${WEBHOOK_AUTHORIZATION_BACKFILL_VERSION}`
 /** Webhook authorization sparse GSI の既定名です。 */
 const DEFAULT_WEBHOOK_AUTHORIZATION_INDEX_NAME = 'WebhookAuthorizationIndex'
+/** Active Webhook locator migration row の partition key です。 */
+const WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID =
+  'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3'
+/** Active Webhook locator migration row の sort key です。 */
+const WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY = 'STATE'
+/** Active Webhook locator migration row の discriminator です。 */
+const WEBHOOK_ACTIVE_LOCATOR_MIGRATION_ENTRY_TYPE =
+  'webhook-active-locator-migration'
 
 /** Backfill checkpoint を未作成の場合だけ冪等初期化します。 */
 export async function startWebhookAuthorizationBackfill(
   documentClient: DynamoDBDocumentClient,
   tableName: string,
   now = new Date(),
+  developerPlatformTableName = tableName,
 ) {
-  try {
-    await documentClient.send(new PutCommand({
-      TableName: tableName,
-      Item: createInitialCheckpoint(now),
-      ConditionExpression: 'attribute_not_exists(directoryId)',
-    }))
-  } catch (error) {
-    if (!isConditionalCheckFailure(error)) throw error
+  const startedAt = readDate(now, 'Backfill start time')
+  let lastConditionalFailure: unknown
+  for (
+    let attempt = 0;
+    attempt < WEBHOOK_AUTHORIZATION_BACKFILL_START_MAX_ATTEMPTS;
+    attempt += 1
+  ) {
+    if (await readOptionalCheckpoint(documentClient, tableName)) return
+    const activeLocatorMigration = await ensureWebhookActiveLocatorCutover(
+      documentClient,
+      developerPlatformTableName,
+      startedAt,
+    )
+    const checkpoint = createInitialCheckpoint(
+      startedAt,
+      undefined,
+      activeLocatorMigration.state === 'complete'
+        ? 'legacy-locator-cleanup'
+        : 'active-locators',
+    )
+    try {
+      if (activeLocatorMigration.state === 'complete') {
+        await documentClient.send(new PutCommand({
+          TableName: tableName,
+          Item: checkpoint,
+          ConditionExpression: 'attribute_not_exists(directoryId)',
+        }))
+      } else {
+        await documentClient.send(new TransactWriteCommand({
+          TransactItems: [
+            {
+              Update: {
+                TableName: developerPlatformTableName,
+                Key: {
+                  workspaceId: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID,
+                  recordKey: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY,
+                },
+                UpdateExpression:
+                  'SET #value.#writerDrainUntil = :writerDrainUntil, ' +
+                  '#version = #version + :one',
+                ConditionExpression:
+                  '#entryType = :migrationEntryType AND ' +
+                  '#value.#migrationVersion = :migrationVersion AND ' +
+                  '#value.#state = :cutover AND #version = :expectedVersion',
+                ExpressionAttributeNames: {
+                  '#entryType': 'entryType',
+                  '#value': 'value',
+                  '#writerDrainUntil': 'writerDrainUntil',
+                  '#migrationVersion': 'migrationVersion',
+                  '#state': 'state',
+                  '#version': 'version',
+                },
+                ExpressionAttributeValues: {
+                  ':migrationEntryType':
+                    WEBHOOK_ACTIVE_LOCATOR_MIGRATION_ENTRY_TYPE,
+                  ':migrationVersion':
+                    WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
+                  ':cutover': 'cutover',
+                  ':expectedVersion': activeLocatorMigration.version,
+                  ':writerDrainUntil': checkpoint.writerDrainUntil,
+                  ':one': 1,
+                },
+              },
+            },
+            {
+              Put: {
+                TableName: tableName,
+                Item: checkpoint,
+                ConditionExpression: 'attribute_not_exists(directoryId)',
+              },
+            },
+          ],
+        }))
+      }
+      return
+    } catch (error) {
+      if (
+        !isConditionalCheckFailure(error) &&
+        (
+          !isRecord(error) ||
+          error.name !== 'TransactionCanceledException'
+        )
+      ) throw error
+      lastConditionalFailure = error
+    }
   }
+  throw lastConditionalFailure ??
+    new Error('Webhook authorization backfill could not start.')
 }
 
 /**
@@ -209,6 +371,7 @@ export async function processWebhookAuthorizationBackfillPage(
   tableName: string,
   authorizationIndexName = DEFAULT_WEBHOOK_AUTHORIZATION_INDEX_NAME,
   now = new Date(),
+  developerPlatformTableName = tableName,
 ): Promise<WebhookAuthorizationBackfillProgress> {
   const current = await readCheckpoint(documentClient, tableName)
   if (current.phase === 'complete') {
@@ -218,19 +381,42 @@ export async function processWebhookAuthorizationBackfillPage(
     return { isComplete: false, madeProgress: false, checkpoint: current }
   }
 
+  const activeLocatorPhase =
+    current.phase === 'active-locators' ||
+    current.phase === 'legacy-locator-cleanup'
+  const sparseScanPhase = activeLocatorPhase ||
+    current.phase === 'grant-cleanup'
   const response = await documentClient.send(new ScanCommand({
-    TableName: tableName,
+    TableName: activeLocatorPhase ? developerPlatformTableName : tableName,
     ConsistentRead: true,
-    Limit: WEBHOOK_AUTHORIZATION_BACKFILL_PAGE_SIZE,
-    ProjectionExpression:
-      'directoryId, entryKey, #entryType, workspaceId, teamId, projectId, ' +
-      'memberKey, #role, archivedAt, sourceEntryKey, teamSourceEntryKey, ' +
-      'projectSourceEntryKey, webhookAuthorizationKey, ' +
-      'webhookAuthorizationSortKey',
-    ExpressionAttributeNames: {
-      '#entryType': 'entryType',
-      '#role': 'role',
-    },
+    Limit: sparseScanPhase
+      ? WEBHOOK_AUTHORIZATION_SPARSE_SCAN_PAGE_SIZE
+      : WEBHOOK_AUTHORIZATION_BACKFILL_PAGE_SIZE,
+    ProjectionExpression: activeLocatorPhase
+      ? 'workspaceId, recordKey, #entryType, #value, lookupKey, ' +
+        'lookupSortKey, expiresAt, #version'
+      : 'directoryId, entryKey, #entryType, workspaceId, teamId, projectId, ' +
+        'memberKey, #role, archivedAt, sourceEntryKey, teamSourceEntryKey, ' +
+        'projectSourceEntryKey, webhookAuthorizationKey, ' +
+        'webhookAuthorizationSortKey',
+    ...(activeLocatorPhase
+      ? {
+          FilterExpression: '#entryType = :subscriptionEntryType',
+          ExpressionAttributeNames: {
+            '#entryType': 'entryType',
+            '#value': 'value',
+            '#version': 'version',
+          },
+          ExpressionAttributeValues: {
+            ':subscriptionEntryType': 'webhook-subscription',
+          },
+        }
+      : {
+          ExpressionAttributeNames: {
+            '#entryType': 'entryType',
+            '#role': 'role',
+          },
+        }),
     ...(current.scanCursor
       ? { ExclusiveStartKey: current.scanCursor }
       : {}),
@@ -245,8 +431,38 @@ export async function processWebhookAuthorizationBackfillPage(
   let grantsWritten = 0
   let grantsDeleted = 0
   let cleanupLocatorsWritten = 0
+  let activeLocatorsReconciled = 0
+  let legacyLookupsRemoved = 0
 
-  if (current.phase === 'projection') {
+  if (activeLocatorPhase) {
+    const activeRows = (response.Items ?? []).flatMap((value) => {
+      const row = readWebhookActiveLocatorSourceRow(value)
+      return row ? [row] : []
+    })
+    const results: Array<'reconciled' | 'retry'> = []
+    await runBounded(activeRows.map((row) => async () => {
+      const result = await reconcileWebhookActiveLocator(
+        documentClient,
+        developerPlatformTableName,
+        row,
+        now,
+        current.phase === 'legacy-locator-cleanup',
+      )
+      results.push(result.status)
+      if (current.phase === 'active-locators') {
+        activeLocatorsReconciled += result.reconciled
+      } else {
+        legacyLookupsRemoved += result.legacyLookupRemoved
+      }
+    }), WEBHOOK_AUTHORIZATION_BACKFILL_CONCURRENCY)
+    if (results.includes('retry')) {
+      return {
+        isComplete: false,
+        madeProgress: false,
+        checkpoint: current,
+      }
+    }
+  } else if (current.phase === 'projection') {
     await runBounded(rows.map((row) => async () => {
       if (await updateSourceProjection(documentClient, tableName, row)) {
         sourceRowsUpdated += 1
@@ -308,7 +524,7 @@ export async function processWebhookAuthorizationBackfillPage(
     }), WEBHOOK_AUTHORIZATION_BACKFILL_CONCURRENCY)
   }
 
-  const next = createNextCheckpoint(
+  const createdNext = createNextCheckpoint(
     current,
     response.LastEvaluatedKey,
     {
@@ -317,13 +533,29 @@ export async function processWebhookAuthorizationBackfillPage(
       grantsWritten,
       grantsDeleted,
       cleanupLocatorsWritten,
+      activeLocatorsReconciled,
+      legacyLookupsRemoved,
     },
   )
+  const completesLocatorCutover =
+    current.phase === 'active-locators' &&
+    createdNext.phase === 'legacy-locator-cleanup'
+  const next = completesLocatorCutover
+    ? {
+        ...createdNext,
+        writerDrainUntil: new Date(
+          readDate(now, 'Backfill clock').getTime() +
+            WEBHOOK_AUTHORIZATION_WRITER_DRAIN_SECONDS * 1_000,
+        ).toISOString(),
+      }
+    : createdNext
   const persisted = await persistCheckpoint(
     documentClient,
     tableName,
+    developerPlatformTableName,
     current.revision,
     next,
+    completesLocatorCutover,
   )
   if (!persisted) {
     const checkpoint = await readCheckpoint(documentClient, tableName)
@@ -364,6 +596,7 @@ export async function processWebhookAuthorizationBackfillPages(
     tableName,
     authorizationIndexName,
     options.now?.() ?? new Date(),
+    options.developerPlatformTableName ?? tableName,
   )
   for (
     let pagesProcessed = 1;
@@ -378,6 +611,7 @@ export async function processWebhookAuthorizationBackfillPages(
       tableName,
       authorizationIndexName,
       options.now?.() ?? new Date(),
+      options.developerPlatformTableName ?? tableName,
     )
   }
   return result
@@ -386,10 +620,13 @@ export async function processWebhookAuthorizationBackfillPages(
 /** CloudFormation custom resource onEvent entrypoint です。 */
 export async function handler(event: WebhookAuthorizationBackfillEvent) {
   const tableName = readRequiredEnvironment('PROJECT_DIRECTORY_TABLE_NAME')
+  const developerPlatformTableName =
+    readRequiredEnvironment('DEVELOPER_PLATFORM_TABLE_NAME')
   return await processWebhookAuthorizationBackfillEvent(
     event,
     createDocumentClient(),
     tableName,
+    developerPlatformTableName,
   )
 }
 
@@ -398,9 +635,23 @@ export async function processWebhookAuthorizationBackfillEvent(
   event: WebhookAuthorizationBackfillEvent,
   documentClient: DynamoDBDocumentClient,
   tableName: string,
+  developerPlatformTableName = tableName,
 ) {
   if (event.RequestType === 'Delete') {
     const deletingVersion = readKnownDeletingMigrationVersion(event)
+    if (deletingVersion === WEBHOOK_AUTHORIZATION_BACKFILL_VERSION) {
+      const rollbackRequired = await startWebhookActiveLocatorRollback(
+        documentClient,
+        tableName,
+        developerPlatformTableName,
+      )
+      return {
+        ...(event.PhysicalResourceId
+          ? { PhysicalResourceId: event.PhysicalResourceId }
+          : {}),
+        ...(!rollbackRequired ? { SkipMigration: true } : {}),
+      }
+    }
     if (deletingVersion) {
       await deleteCheckpoint(documentClient, tableName, deletingVersion)
     }
@@ -412,7 +663,12 @@ export async function processWebhookAuthorizationBackfillEvent(
     }
   }
   readMigrationVersion(event)
-  await startWebhookAuthorizationBackfill(documentClient, tableName)
+  await startWebhookAuthorizationBackfill(
+    documentClient,
+    tableName,
+    new Date(),
+    developerPlatformTableName,
+  )
   return {
     PhysicalResourceId: WEBHOOK_AUTHORIZATION_BACKFILL_PHYSICAL_ID,
   }
@@ -423,13 +679,52 @@ export async function isCompleteHandler(
   event: WebhookAuthorizationBackfillEvent,
   context?: WebhookAuthorizationBackfillLambdaContext,
 ) {
-  if (event.SkipMigration || event.RequestType === 'Delete') {
+  if (event.SkipMigration) {
     return { IsComplete: true }
+  }
+  if (event.RequestType === 'Delete') {
+    if (
+      readKnownDeletingMigrationVersion(event) !==
+        WEBHOOK_AUTHORIZATION_BACKFILL_VERSION
+    ) {
+      return { IsComplete: true }
+    }
+    const tableName = readRequiredEnvironment('PROJECT_DIRECTORY_TABLE_NAME')
+    const developerPlatformTableName =
+      readRequiredEnvironment('DEVELOPER_PLATFORM_TABLE_NAME')
+    const result = await processWebhookActiveLocatorRollbackPages(
+      createDocumentClient(),
+      tableName,
+      developerPlatformTableName,
+      {
+        maxPages: WEBHOOK_AUTHORIZATION_BACKFILL_MAX_PAGES_PER_INVOCATION,
+        canProcessNextPage: () =>
+          !context ||
+          context.getRemainingTimeInMillis() >
+            WEBHOOK_AUTHORIZATION_BACKFILL_TIME_RESERVE_MILLISECONDS,
+      },
+    )
+    return result.isComplete
+      ? {
+          IsComplete: true,
+          Data: {
+            LegacyLookupsReconciled:
+              result.checkpoint?.legacyLookupsReconciled ?? 0,
+          },
+        }
+      : { IsComplete: false }
   }
   readMigrationVersion(event)
   const tableName = readRequiredEnvironment('PROJECT_DIRECTORY_TABLE_NAME')
+  const developerPlatformTableName =
+    readRequiredEnvironment('DEVELOPER_PLATFORM_TABLE_NAME')
   const documentClient = createDocumentClient()
-  await startWebhookAuthorizationBackfill(documentClient, tableName)
+  await startWebhookAuthorizationBackfill(
+    documentClient,
+    tableName,
+    new Date(),
+    developerPlatformTableName,
+  )
   const result = await processWebhookAuthorizationBackfillPages(
     documentClient,
     tableName,
@@ -441,6 +736,7 @@ export async function isCompleteHandler(
         !context ||
         context.getRemainingTimeInMillis() >
           WEBHOOK_AUTHORIZATION_BACKFILL_TIME_RESERVE_MILLISECONDS,
+      developerPlatformTableName,
     },
   )
   return result.isComplete
@@ -453,6 +749,10 @@ export async function isCompleteHandler(
           GrantsDeleted: result.checkpoint.grantsDeleted,
           CleanupLocatorsWritten:
             result.checkpoint.cleanupLocatorsWritten,
+          ActiveLocatorsReconciled:
+            result.checkpoint.activeLocatorsReconciled,
+          LegacyLookupsRemoved:
+            result.checkpoint.legacyLookupsRemoved,
         },
       }
     : { IsComplete: false }
@@ -461,7 +761,10 @@ export async function isCompleteHandler(
 async function deleteCheckpoint(
   documentClient: DynamoDBDocumentClient,
   tableName: string,
-  migrationVersion: 'v1' | typeof WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
+  migrationVersion:
+    | 'v1'
+    | 'v2'
+    | typeof WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
 ) {
   await documentClient.send(new DeleteCommand({
     TableName: tableName,
@@ -472,27 +775,647 @@ async function deleteCheckpoint(
   }))
 }
 
-function createInitialCheckpoint(now: Date): WebhookAuthorizationBackfillCheckpoint {
+/** v3 rollback の marker と durable checkpoint を冪等に初期化します。 */
+export async function startWebhookActiveLocatorRollback(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+  developerPlatformTableName: string,
+  now = new Date(),
+) {
+  const markerKey = {
+    workspaceId: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID,
+    recordKey: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY,
+  }
+  const current = await documentClient.send(new GetCommand({
+    TableName: developerPlatformTableName,
+    Key: markerKey,
+    ConsistentRead: true,
+  }))
+  if (!current.Item) {
+    await deleteCheckpoint(
+      documentClient,
+      tableName,
+      WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
+    )
+    await deleteWebhookActiveLocatorRollbackCheckpoint(
+      documentClient,
+      tableName,
+    )
+    return false
+  }
+
+  let migration = readWebhookActiveLocatorMigrationDrain(current.Item)
+  const requestedRollbackDrainUntil = new Date(
+    readDate(now, 'Rollback start time').getTime() +
+      WEBHOOK_AUTHORIZATION_WRITER_DRAIN_SECONDS * 1_000,
+  ).toISOString()
+  let lastConditionalFailure: unknown
+  for (
+    let attempt = 0;
+    migration.state !== 'rollback' &&
+    attempt < WEBHOOK_ACTIVE_LOCATOR_ROLLBACK_START_MAX_ATTEMPTS;
+    attempt += 1
+  ) {
+    try {
+      await documentClient.send(new UpdateCommand({
+        TableName: developerPlatformTableName,
+        Key: markerKey,
+        UpdateExpression:
+          'SET #value.#state = :rollback, ' +
+          '#value.#rollbackDrainUntil = :rollbackDrainUntil, ' +
+          '#version = #version + :one',
+        ConditionExpression:
+          '#entryType = :entryType AND #version = :expectedVersion AND ' +
+          '#value.#migrationVersion = :migrationVersion AND ' +
+          '#value.#state = :expectedState',
+        ExpressionAttributeNames: {
+          '#entryType': 'entryType',
+          '#value': 'value',
+          '#state': 'state',
+          '#rollbackDrainUntil': 'rollbackDrainUntil',
+          '#migrationVersion': 'migrationVersion',
+          '#version': 'version',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': WEBHOOK_ACTIVE_LOCATOR_MIGRATION_ENTRY_TYPE,
+          ':expectedVersion': migration.version,
+          ':migrationVersion': WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
+          ':expectedState': migration.state,
+          ':rollback': 'rollback',
+          ':rollbackDrainUntil': requestedRollbackDrainUntil,
+          ':one': 1,
+        },
+      }))
+      migration = {
+        ...migration,
+        state: 'rollback',
+        version: migration.version + 1,
+        rollbackDrainUntil: requestedRollbackDrainUntil,
+      }
+    } catch (error) {
+      if (!isConditionalCheckFailure(error)) throw error
+      lastConditionalFailure = error
+      const raced = await documentClient.send(new GetCommand({
+        TableName: developerPlatformTableName,
+        Key: markerKey,
+        ConsistentRead: true,
+      }))
+      if (!raced.Item) {
+        await deleteCheckpoint(
+          documentClient,
+          tableName,
+          WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
+        )
+        return false
+      }
+      migration = readWebhookActiveLocatorMigrationDrain(raced.Item)
+    }
+  }
+  if (migration.state !== 'rollback') {
+    throw lastConditionalFailure ??
+      new Error('Webhook active locator rollback could not start.')
+  }
+
+  const rollbackDrainUntil = migration.rollbackDrainUntil
+  if (!rollbackDrainUntil) {
+    throw new TypeError('Webhook active locator rollback deadline is missing.')
+  }
+  await ensureWebhookActiveLocatorRollbackCheckpoint(
+    documentClient,
+    tableName,
+    rollbackDrainUntil,
+  )
+  await deleteCheckpoint(
+    documentClient,
+    tableName,
+    WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
+  )
+  return true
+}
+
+/** v3 rollback を1 page処理し、旧 GSI reader 用 locator を復元します。 */
+export async function processWebhookActiveLocatorRollbackPage(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+  developerPlatformTableName: string,
+  now = new Date(),
+): Promise<WebhookActiveLocatorRollbackProgress> {
+  const current = await readOptionalWebhookActiveLocatorRollbackCheckpoint(
+    documentClient,
+    tableName,
+  )
+  if (!current) {
+    const marker = await documentClient.send(new GetCommand({
+      TableName: developerPlatformTableName,
+      Key: {
+        workspaceId: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID,
+        recordKey: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY,
+      },
+      ConsistentRead: true,
+    }))
+    if (!marker.Item) {
+      return { isComplete: true, madeProgress: false }
+    }
+    const migration = readWebhookActiveLocatorMigrationDrain(marker.Item)
+    if (migration.state !== 'rollback') {
+      throw new TypeError(
+        'Webhook active locator rollback checkpoint is missing.',
+      )
+    }
+    const rollbackDrainUntil = migration.rollbackDrainUntil
+    if (!rollbackDrainUntil) {
+      throw new TypeError(
+        'Webhook active locator rollback deadline is missing.',
+      )
+    }
+    await ensureWebhookActiveLocatorRollbackCheckpoint(
+      documentClient,
+      tableName,
+      rollbackDrainUntil,
+    )
+    return await processWebhookActiveLocatorRollbackPage(
+      documentClient,
+      tableName,
+      developerPlatformTableName,
+      now,
+    )
+  }
+  if (
+    Date.parse(current.writerDrainUntil) >
+      readDate(now, 'Rollback clock').getTime()
+  ) {
+    return {
+      isComplete: false,
+      madeProgress: false,
+      checkpoint: current,
+    }
+  }
+
+  const response = await documentClient.send(new ScanCommand({
+    TableName: developerPlatformTableName,
+    ConsistentRead: true,
+    Limit: WEBHOOK_AUTHORIZATION_SPARSE_SCAN_PAGE_SIZE,
+    ProjectionExpression:
+      'workspaceId, recordKey, #entryType, #value, lookupKey, ' +
+      'lookupSortKey, expiresAt, #version',
+    FilterExpression: '#entryType = :subscriptionEntryType',
+    ExpressionAttributeNames: {
+      '#entryType': 'entryType',
+      '#value': 'value',
+      '#version': 'version',
+    },
+    ExpressionAttributeValues: {
+      ':subscriptionEntryType': 'webhook-subscription',
+    },
+    ...(current.scanCursor
+      ? { ExclusiveStartKey: current.scanCursor }
+      : {}),
+  }))
+  const rows = (response.Items ?? []).flatMap((value) => {
+    const row = readWebhookActiveLocatorSourceRow(value)
+    return row ? [row] : []
+  })
+  const results: Array<'reconciled' | 'retry'> = []
+  await runBounded(rows.map((row) => async () => {
+    results.push(await reconcileWebhookLegacyActiveLocator(
+      documentClient,
+      developerPlatformTableName,
+      row,
+      now,
+    ))
+  }), WEBHOOK_AUTHORIZATION_BACKFILL_CONCURRENCY)
+  if (results.includes('retry')) {
+    return {
+      isComplete: false,
+      madeProgress: false,
+      checkpoint: current,
+    }
+  }
+
+  const next = {
+    ...current,
+    revision: current.revision + 1,
+    ...(response.LastEvaluatedKey
+      ? { scanCursor: response.LastEvaluatedKey }
+      : {}),
+    ...(!response.LastEvaluatedKey && current.scanCursor
+      ? { scanCursor: undefined }
+      : {}),
+    legacyLookupsReconciled:
+      current.legacyLookupsReconciled + rows.length,
+  } satisfies WebhookActiveLocatorRollbackCheckpoint
+  if (response.LastEvaluatedKey) {
+    const persisted = await persistWebhookActiveLocatorRollbackCheckpoint(
+      documentClient,
+      tableName,
+      current.revision,
+      next,
+    )
+    if (!persisted) {
+      const checkpoint =
+        await readOptionalWebhookActiveLocatorRollbackCheckpoint(
+          documentClient,
+          tableName,
+        )
+      return checkpoint
+        ? {
+            isComplete: false,
+            madeProgress: checkpoint.revision !== current.revision,
+            checkpoint,
+          }
+        : { isComplete: true, madeProgress: true }
+    }
+    return { isComplete: false, madeProgress: true, checkpoint: next }
+  }
+
+  const completed = await completeWebhookActiveLocatorRollback(
+    documentClient,
+    tableName,
+    developerPlatformTableName,
+    current,
+  )
+  return completed
+    ? { isComplete: true, madeProgress: true, checkpoint: next }
+    : { isComplete: false, madeProgress: false, checkpoint: current }
+}
+
+/** v3 rollback をtime budget内で複数page処理します。 */
+export async function processWebhookActiveLocatorRollbackPages(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+  developerPlatformTableName: string,
+  options: WebhookAuthorizationBackfillBatchOptions,
+): Promise<WebhookActiveLocatorRollbackProgress> {
+  if (
+    !Number.isSafeInteger(options.maxPages) ||
+    options.maxPages < 1 ||
+    options.maxPages > WEBHOOK_AUTHORIZATION_BACKFILL_MAX_PAGES_PER_INVOCATION
+  ) {
+    throw new TypeError('Webhook active locator rollback max pages is invalid.')
+  }
+  let result = await processWebhookActiveLocatorRollbackPage(
+    documentClient,
+    tableName,
+    developerPlatformTableName,
+    options.now?.() ?? new Date(),
+  )
+  for (
+    let pagesProcessed = 1;
+    pagesProcessed < options.maxPages &&
+    !result.isComplete &&
+    result.madeProgress &&
+    options.canProcessNextPage();
+    pagesProcessed += 1
+  ) {
+    result = await processWebhookActiveLocatorRollbackPage(
+      documentClient,
+      tableName,
+      developerPlatformTableName,
+      options.now?.() ?? new Date(),
+    )
+  }
+  return result
+}
+
+async function ensureWebhookActiveLocatorRollbackCheckpoint(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+  writerDrainUntil: string,
+) {
+  try {
+    await documentClient.send(new PutCommand({
+      TableName: tableName,
+      Item: {
+        directoryId:
+          WEBHOOK_ACTIVE_LOCATOR_ROLLBACK_CHECKPOINT_DIRECTORY_ID,
+        entryKey: WEBHOOK_AUTHORIZATION_BACKFILL_CHECKPOINT_ENTRY_KEY,
+        entryType: 'webhook-active-locator-rollback-checkpoint',
+        migrationVersion: WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
+        writerDrainUntil,
+        revision: 0,
+        legacyLookupsReconciled: 0,
+      } satisfies WebhookActiveLocatorRollbackCheckpoint,
+      ConditionExpression: 'attribute_not_exists(directoryId)',
+    }))
+  } catch (error) {
+    if (!isConditionalCheckFailure(error)) throw error
+  }
+}
+
+async function readOptionalWebhookActiveLocatorRollbackCheckpoint(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+) {
+  const response = await documentClient.send(new GetCommand({
+    TableName: tableName,
+    Key: {
+      directoryId: WEBHOOK_ACTIVE_LOCATOR_ROLLBACK_CHECKPOINT_DIRECTORY_ID,
+      entryKey: WEBHOOK_AUTHORIZATION_BACKFILL_CHECKPOINT_ENTRY_KEY,
+    },
+    ConsistentRead: true,
+  }))
+  const value = response.Item
+  if (!value) return undefined
+  if (
+    value.directoryId !==
+      WEBHOOK_ACTIVE_LOCATOR_ROLLBACK_CHECKPOINT_DIRECTORY_ID ||
+    value.entryKey !== WEBHOOK_AUTHORIZATION_BACKFILL_CHECKPOINT_ENTRY_KEY ||
+    value.entryType !== 'webhook-active-locator-rollback-checkpoint' ||
+    value.migrationVersion !== WEBHOOK_AUTHORIZATION_BACKFILL_VERSION ||
+    typeof value.writerDrainUntil !== 'string' ||
+    !Number.isFinite(Date.parse(value.writerDrainUntil)) ||
+    !Number.isSafeInteger(value.revision) ||
+    Number(value.revision) < 0 ||
+    !Number.isSafeInteger(value.legacyLookupsReconciled) ||
+    Number(value.legacyLookupsReconciled) < 0 ||
+    (
+      value.scanCursor !== undefined &&
+      !isRecord(value.scanCursor)
+    )
+  ) {
+    throw new TypeError(
+      'Webhook active locator rollback checkpoint is invalid.',
+    )
+  }
+  return value as WebhookActiveLocatorRollbackCheckpoint
+}
+
+async function persistWebhookActiveLocatorRollbackCheckpoint(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+  expectedRevision: number,
+  next: WebhookActiveLocatorRollbackCheckpoint,
+) {
+  try {
+    await documentClient.send(new PutCommand({
+      TableName: tableName,
+      Item: next,
+      ConditionExpression:
+        '#entryType = :entryType AND #revision = :expectedRevision',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#revision': 'revision',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'webhook-active-locator-rollback-checkpoint',
+        ':expectedRevision': expectedRevision,
+      },
+    }))
+    return true
+  } catch (error) {
+    if (isConditionalCheckFailure(error)) return false
+    throw error
+  }
+}
+
+async function completeWebhookActiveLocatorRollback(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+  developerPlatformTableName: string,
+  checkpoint: WebhookActiveLocatorRollbackCheckpoint,
+) {
+  try {
+    await documentClient.send(new TransactWriteCommand({
+      TransactItems: [
+        {
+          Delete: {
+            TableName: developerPlatformTableName,
+            Key: {
+              workspaceId: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID,
+              recordKey: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY,
+            },
+            ConditionExpression:
+              '#entryType = :migrationEntryType AND ' +
+              '#value.#migrationVersion = :migrationVersion AND ' +
+              '#value.#state = :rollback',
+            ExpressionAttributeNames: {
+              '#entryType': 'entryType',
+              '#value': 'value',
+              '#migrationVersion': 'migrationVersion',
+              '#state': 'state',
+            },
+            ExpressionAttributeValues: {
+              ':migrationEntryType':
+                WEBHOOK_ACTIVE_LOCATOR_MIGRATION_ENTRY_TYPE,
+              ':migrationVersion': WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
+              ':rollback': 'rollback',
+            },
+          },
+        },
+        {
+          Delete: {
+            TableName: tableName,
+            Key: {
+              directoryId:
+                WEBHOOK_ACTIVE_LOCATOR_ROLLBACK_CHECKPOINT_DIRECTORY_ID,
+              entryKey: WEBHOOK_AUTHORIZATION_BACKFILL_CHECKPOINT_ENTRY_KEY,
+            },
+            ConditionExpression:
+              '#entryType = :checkpointEntryType AND #revision = :revision',
+            ExpressionAttributeNames: {
+              '#entryType': 'entryType',
+              '#revision': 'revision',
+            },
+            ExpressionAttributeValues: {
+              ':checkpointEntryType':
+                'webhook-active-locator-rollback-checkpoint',
+              ':revision': checkpoint.revision,
+            },
+          },
+        },
+      ],
+    }))
+    return true
+  } catch (error) {
+    if (
+      !isRecord(error) ||
+      error.name !== 'TransactionCanceledException'
+    ) throw error
+    const [marker, rollbackCheckpoint] = await Promise.all([
+      documentClient.send(new GetCommand({
+        TableName: developerPlatformTableName,
+        Key: {
+          workspaceId: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID,
+          recordKey: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY,
+        },
+        ConsistentRead: true,
+      })),
+      readOptionalWebhookActiveLocatorRollbackCheckpoint(
+        documentClient,
+        tableName,
+      ),
+    ])
+    if (!marker.Item && !rollbackCheckpoint) return true
+    if (!marker.Item || !rollbackCheckpoint) {
+      throw new TypeError(
+        'Webhook active locator rollback state is inconsistent.',
+      )
+    }
+    return false
+  }
+}
+
+async function deleteWebhookActiveLocatorRollbackCheckpoint(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+) {
+  await documentClient.send(new DeleteCommand({
+    TableName: tableName,
+    Key: {
+      directoryId: WEBHOOK_ACTIVE_LOCATOR_ROLLBACK_CHECKPOINT_DIRECTORY_ID,
+      entryKey: WEBHOOK_AUTHORIZATION_BACKFILL_CHECKPOINT_ENTRY_KEY,
+    },
+  }))
+}
+
+async function ensureWebhookActiveLocatorCutover(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+  now: Date,
+) {
+  const current = await documentClient.send(new GetCommand({
+    TableName: tableName,
+    Key: {
+      workspaceId: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID,
+      recordKey: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY,
+    },
+    ConsistentRead: true,
+  }))
+  if (current.Item) {
+    const migration = readWebhookActiveLocatorMigrationDrain(current.Item)
+    if (migration.state === 'rollback') {
+      throw new TypeError(
+        'Webhook active locator rollback is still in progress.',
+      )
+    }
+    return migration
+  }
+  const startedAt = readDate(now, 'Backfill start time')
+  const writerDrainUntil = new Date(
+    startedAt.getTime() + WEBHOOK_AUTHORIZATION_WRITER_DRAIN_SECONDS * 1_000,
+  ).toISOString()
+  try {
+    await documentClient.send(new PutCommand({
+      TableName: tableName,
+      Item: {
+        workspaceId: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID,
+        recordKey: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY,
+        entryType: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_ENTRY_TYPE,
+        value: {
+          migrationVersion: WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
+          state: 'cutover',
+          writerDrainUntil,
+        },
+        version: 1,
+      },
+      ConditionExpression:
+        'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+    }))
+    return {
+      state: 'cutover' as const,
+      writerDrainUntil,
+      version: 1,
+    }
+  } catch (error) {
+    if (!isConditionalCheckFailure(error)) throw error
+    const raced = await documentClient.send(new GetCommand({
+      TableName: tableName,
+      Key: {
+        workspaceId: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID,
+        recordKey: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY,
+      },
+      ConsistentRead: true,
+    }))
+    if (!raced.Item) throw error
+    const migration = readWebhookActiveLocatorMigrationDrain(raced.Item)
+    if (migration.state === 'rollback') {
+      throw new TypeError(
+        'Webhook active locator rollback is still in progress.',
+      )
+    }
+    return migration
+  }
+}
+
+function readWebhookActiveLocatorMigrationDrain(
+  item: Record<string, unknown>,
+) {
+  const value = item.value
+  if (
+    item.workspaceId !== WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID ||
+    item.recordKey !== WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY ||
+    item.entryType !== WEBHOOK_ACTIVE_LOCATOR_MIGRATION_ENTRY_TYPE ||
+    !Number.isSafeInteger(item.version) ||
+    Number(item.version) < 1 ||
+    !isRecord(value) ||
+    value.migrationVersion !== WEBHOOK_AUTHORIZATION_BACKFILL_VERSION ||
+    (
+      value.state !== 'cutover' &&
+      value.state !== 'complete' &&
+      value.state !== 'rollback'
+    ) ||
+    typeof value.writerDrainUntil !== 'string' ||
+    !Number.isFinite(Date.parse(value.writerDrainUntil)) ||
+    (
+      value.state === 'rollback' &&
+      (
+        typeof value.rollbackDrainUntil !== 'string' ||
+        !Number.isFinite(Date.parse(value.rollbackDrainUntil))
+      )
+    )
+  ) {
+    throw new TypeError('Webhook active locator migration row is invalid.')
+  }
+  return {
+    state: value.state,
+    writerDrainUntil: value.writerDrainUntil,
+    version: Number(item.version),
+    ...(value.state === 'rollback'
+      ? { rollbackDrainUntil: value.rollbackDrainUntil as string }
+      : {}),
+  } as const
+}
+
+function createInitialCheckpoint(
+  now: Date,
+  writerDrainUntil?: string,
+  initialPhase:
+    | 'active-locators'
+    | 'legacy-locator-cleanup' = 'active-locators',
+): WebhookAuthorizationBackfillCheckpoint {
   const startedAt = readDate(now, 'Backfill start time')
   return {
     directoryId: WEBHOOK_AUTHORIZATION_BACKFILL_CHECKPOINT_DIRECTORY_ID,
     entryKey: WEBHOOK_AUTHORIZATION_BACKFILL_CHECKPOINT_ENTRY_KEY,
     entryType: 'webhook-authorization-backfill-checkpoint',
     migrationVersion: WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
-    writerDrainUntil: new Date(
+    writerDrainUntil: writerDrainUntil ?? new Date(
       startedAt.getTime() + WEBHOOK_AUTHORIZATION_WRITER_DRAIN_SECONDS * 1_000,
     ).toISOString(),
-    phase: 'projection',
+    phase: initialPhase,
     revision: 0,
     sourceRowsUpdated: 0,
     sourceRowsVerified: 0,
     grantsWritten: 0,
     grantsDeleted: 0,
     cleanupLocatorsWritten: 0,
+    activeLocatorsReconciled: 0,
+    legacyLookupsRemoved: 0,
   }
 }
 
 async function readCheckpoint(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+) {
+  const checkpoint = await readOptionalCheckpoint(documentClient, tableName)
+  if (!checkpoint) {
+    throw new TypeError('Webhook authorization backfill checkpoint is invalid.')
+  }
+  return checkpoint
+}
+
+async function readOptionalCheckpoint(
   documentClient: DynamoDBDocumentClient,
   tableName: string,
 ) {
@@ -505,8 +1428,8 @@ async function readCheckpoint(
     ConsistentRead: true,
   }))
   const value = response.Item
+  if (!value) return undefined
   if (
-    !value ||
     value.directoryId !== WEBHOOK_AUTHORIZATION_BACKFILL_CHECKPOINT_DIRECTORY_ID ||
     value.entryKey !== WEBHOOK_AUTHORIZATION_BACKFILL_CHECKPOINT_ENTRY_KEY ||
     value.entryType !== 'webhook-authorization-backfill-checkpoint' ||
@@ -514,6 +1437,8 @@ async function readCheckpoint(
     typeof value.writerDrainUntil !== 'string' ||
     !Number.isFinite(Date.parse(value.writerDrainUntil)) ||
     (
+      value.phase !== 'active-locators' &&
+      value.phase !== 'legacy-locator-cleanup' &&
       value.phase !== 'projection' &&
       value.phase !== 'verification' &&
       value.phase !== 'grants' &&
@@ -527,6 +1452,8 @@ async function readCheckpoint(
     !Number.isSafeInteger(value.grantsWritten) ||
     !Number.isSafeInteger(value.grantsDeleted) ||
     !Number.isSafeInteger(value.cleanupLocatorsWritten) ||
+    !Number.isSafeInteger(value.activeLocatorsReconciled) ||
+    !Number.isSafeInteger(value.legacyLookupsRemoved) ||
     (
       value.scanCursor !== undefined &&
       !isRecord(value.scanCursor)
@@ -546,17 +1473,23 @@ function createNextCheckpoint(
     grantsWritten: number
     grantsDeleted: number
     cleanupLocatorsWritten: number
+    activeLocatorsReconciled: number
+    legacyLookupsRemoved: number
   },
 ) {
   const nextPhase = lastEvaluatedKey
     ? current.phase
-    : current.phase === 'projection'
-      ? 'verification'
-      : current.phase === 'verification'
-        ? 'grants'
-        : current.phase === 'grants'
-          ? 'grant-cleanup'
-          : 'complete'
+    : current.phase === 'active-locators'
+      ? 'legacy-locator-cleanup'
+      : current.phase === 'legacy-locator-cleanup'
+        ? 'projection'
+      : current.phase === 'projection'
+        ? 'verification'
+        : current.phase === 'verification'
+          ? 'grants'
+          : current.phase === 'grants'
+            ? 'grant-cleanup'
+            : 'complete'
   return {
     ...current,
     phase: nextPhase,
@@ -571,17 +1504,23 @@ function createNextCheckpoint(
     grantsDeleted: current.grantsDeleted + increments.grantsDeleted,
     cleanupLocatorsWritten:
       current.cleanupLocatorsWritten + increments.cleanupLocatorsWritten,
+    activeLocatorsReconciled:
+      current.activeLocatorsReconciled + increments.activeLocatorsReconciled,
+    legacyLookupsRemoved:
+      current.legacyLookupsRemoved + increments.legacyLookupsRemoved,
   } satisfies WebhookAuthorizationBackfillCheckpoint
 }
 
 async function persistCheckpoint(
   documentClient: DynamoDBDocumentClient,
   tableName: string,
+  developerPlatformTableName: string,
   expectedRevision: number,
   next: WebhookAuthorizationBackfillCheckpoint,
+  completeActiveLocatorMigration: boolean,
 ) {
   try {
-    await documentClient.send(new PutCommand({
+    const checkpointPut = {
       TableName: tableName,
       Item: next,
       ConditionExpression:
@@ -594,10 +1533,334 @@ async function persistCheckpoint(
         ':entryType': 'webhook-authorization-backfill-checkpoint',
         ':expectedRevision': expectedRevision,
       },
-    }))
+    }
+    if (completeActiveLocatorMigration) {
+      await documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          { Put: checkpointPut },
+          {
+            Update: {
+              TableName: developerPlatformTableName,
+              Key: {
+                workspaceId: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID,
+                recordKey: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY,
+              },
+              UpdateExpression:
+                'SET #value.#state = :complete, #version = #version + :one',
+              ConditionExpression:
+                '#entryType = :migrationEntryType AND ' +
+                '#value.#migrationVersion = :migrationVersion AND ' +
+                '#value.#state = :cutover',
+              ExpressionAttributeNames: {
+                '#entryType': 'entryType',
+                '#value': 'value',
+                '#state': 'state',
+                '#migrationVersion': 'migrationVersion',
+                '#version': 'version',
+              },
+              ExpressionAttributeValues: {
+                ':migrationEntryType':
+                  WEBHOOK_ACTIVE_LOCATOR_MIGRATION_ENTRY_TYPE,
+                ':migrationVersion':
+                  WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
+                ':cutover': 'cutover',
+                ':complete': 'complete',
+                ':one': 1,
+              },
+            },
+          },
+        ],
+      }))
+    } else {
+      await documentClient.send(new PutCommand(checkpointPut))
+    }
     return true
   } catch (error) {
-    if (isConditionalCheckFailure(error)) return false
+    if (
+      isConditionalCheckFailure(error) ||
+      (
+        isRecord(error) &&
+        error.name === 'TransactionCanceledException'
+      )
+    ) return false
+    throw error
+  }
+}
+
+function readWebhookActiveLocatorSourceRow(
+  value: Record<string, unknown>,
+): WebhookActiveLocatorSourceRow | undefined {
+  if (value.entryType !== 'webhook-subscription') return undefined
+  const subscription = value.value
+  if (
+    typeof value.workspaceId !== 'string' ||
+    typeof value.recordKey !== 'string' ||
+    !isRecord(subscription) ||
+    typeof subscription.id !== 'string' ||
+    subscription.id.length === 0 ||
+    value.recordKey !== `WEBHOOK#${subscription.id}` ||
+    typeof subscription.createdAt !== 'string' ||
+    !Number.isFinite(Date.parse(subscription.createdAt)) ||
+    (
+      subscription.status !== 'active' &&
+      subscription.status !== 'paused' &&
+      subscription.status !== 'disabled'
+    ) ||
+    (
+      value.lookupKey !== undefined &&
+      typeof value.lookupKey !== 'string'
+    ) ||
+    (
+      value.lookupSortKey !== undefined &&
+      typeof value.lookupSortKey !== 'string'
+    ) ||
+    (
+      value.expiresAt !== undefined &&
+      (
+        !Number.isSafeInteger(value.expiresAt) ||
+        Number(value.expiresAt) <= 0
+      )
+    ) ||
+    !Number.isSafeInteger(value.version) ||
+    Number(value.version) <= 0
+  ) {
+    throw new TypeError(
+      'Webhook active locator migration source row is invalid.',
+    )
+  }
+  return {
+    workspaceId: value.workspaceId,
+    recordKey: value.recordKey,
+    entryType: 'webhook-subscription',
+    value: subscription as WebhookActiveLocatorSourceRow['value'],
+    ...(value.lookupKey === undefined
+      ? {}
+      : { lookupKey: value.lookupKey }),
+    ...(value.lookupSortKey === undefined
+      ? {}
+      : { lookupSortKey: value.lookupSortKey }),
+    ...(value.expiresAt === undefined
+      ? {}
+      : { expiresAt: Number(value.expiresAt) }),
+    version: Number(value.version),
+  }
+}
+
+async function reconcileWebhookActiveLocator(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+  row: WebhookActiveLocatorSourceRow,
+  now: Date,
+  removeLegacyLookup: boolean,
+) {
+  const active = row.value.status === 'active' &&
+    (
+      row.expiresAt === undefined ||
+      row.expiresAt > Math.floor(readDate(now, 'Backfill clock').getTime() / 1_000)
+    )
+  const locatorKey = {
+    workspaceId: row.workspaceId,
+    recordKey:
+      `WEBHOOKACTIVE#${row.value.createdAt}#${row.value.id}`,
+  }
+  const conditionParts = [
+    '#entryType = :entryType',
+    '#value.#id = :id',
+    '#value.#createdAt = :createdAt',
+    '#value.#status = :status',
+    row.lookupKey === undefined
+      ? 'attribute_not_exists(lookupKey)'
+      : 'lookupKey = :lookupKey',
+    row.lookupSortKey === undefined
+      ? 'attribute_not_exists(lookupSortKey)'
+      : 'lookupSortKey = :lookupSortKey',
+    row.expiresAt === undefined
+      ? 'attribute_not_exists(expiresAt)'
+      : 'expiresAt = :expiresAt',
+  ]
+  const baseRowCondition = {
+    TableName: tableName,
+    Key: {
+      workspaceId: row.workspaceId,
+      recordKey: row.recordKey,
+    },
+    ConditionExpression: conditionParts.join(' AND '),
+    ExpressionAttributeNames: {
+      '#entryType': 'entryType',
+      '#value': 'value',
+      '#id': 'id',
+      '#createdAt': 'createdAt',
+      '#status': 'status',
+    },
+    ExpressionAttributeValues: {
+      ':entryType': 'webhook-subscription',
+      ':id': row.value.id,
+      ':createdAt': row.value.createdAt,
+      ':status': row.value.status,
+      ...(row.lookupKey === undefined
+        ? {}
+        : { ':lookupKey': row.lookupKey }),
+      ...(row.lookupSortKey === undefined
+        ? {}
+        : { ':lookupSortKey': row.lookupSortKey }),
+      ...(row.expiresAt === undefined
+        ? {}
+        : { ':expiresAt': row.expiresAt }),
+    },
+  }
+  try {
+    await documentClient.send(new TransactWriteCommand({
+      TransactItems: [
+        {
+          ConditionCheck: {
+            TableName: tableName,
+            Key: {
+              workspaceId: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID,
+              recordKey: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY,
+            },
+            ConditionExpression:
+              '#entryType = :migrationEntryType AND ' +
+              '#value.#migrationVersion = :migrationVersion AND ' +
+              '#value.#state = :migrationState',
+            ExpressionAttributeNames: {
+              '#entryType': 'entryType',
+              '#value': 'value',
+              '#migrationVersion': 'migrationVersion',
+              '#state': 'state',
+            },
+            ExpressionAttributeValues: {
+              ':migrationEntryType':
+                WEBHOOK_ACTIVE_LOCATOR_MIGRATION_ENTRY_TYPE,
+              ':migrationVersion': WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
+              ':migrationState': removeLegacyLookup
+                ? 'complete'
+                : 'cutover',
+            },
+          },
+        },
+        removeLegacyLookup
+          ? {
+              Update: {
+                ...baseRowCondition,
+                UpdateExpression: 'REMOVE lookupKey, lookupSortKey',
+              },
+            }
+          : { ConditionCheck: baseRowCondition },
+        active
+          ? {
+              Put: {
+                TableName: tableName,
+                Item: {
+                  ...locatorKey,
+                  entryType: 'webhook-active-subscription',
+                  value: { targetRecordKey: row.recordKey },
+                  version: 1,
+                },
+              },
+            }
+          : {
+              Delete: {
+                TableName: tableName,
+                Key: locatorKey,
+              },
+            },
+      ],
+    }))
+    return {
+      status: 'reconciled' as const,
+      reconciled: 1,
+      legacyLookupRemoved:
+        removeLegacyLookup &&
+          (row.lookupKey !== undefined || row.lookupSortKey !== undefined)
+          ? 1
+          : 0,
+    }
+  } catch (error) {
+    if (
+      isRecord(error) &&
+      error.name === 'TransactionCanceledException'
+    ) {
+      return {
+        status: 'retry' as const,
+        reconciled: 0,
+        legacyLookupRemoved: 0,
+      }
+    }
+    throw error
+  }
+}
+
+async function reconcileWebhookLegacyActiveLocator(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+  row: WebhookActiveLocatorSourceRow,
+  now: Date,
+) {
+  const active = row.value.status === 'active' &&
+    (
+      row.expiresAt === undefined ||
+      row.expiresAt >
+        Math.floor(readDate(now, 'Rollback clock').getTime() / 1_000)
+    )
+  const conditionParts = [
+    '#entryType = :entryType',
+    '#value.#id = :id',
+    '#value.#createdAt = :createdAt',
+    '#value.#status = :status',
+    row.lookupKey === undefined
+      ? 'attribute_not_exists(lookupKey)'
+      : 'lookupKey = :observedLookupKey',
+    row.lookupSortKey === undefined
+      ? 'attribute_not_exists(lookupSortKey)'
+      : 'lookupSortKey = :observedLookupSortKey',
+    row.expiresAt === undefined
+      ? 'attribute_not_exists(expiresAt)'
+      : 'expiresAt = :expiresAt',
+  ]
+  try {
+    await documentClient.send(new UpdateCommand({
+      TableName: tableName,
+      Key: {
+        workspaceId: row.workspaceId,
+        recordKey: row.recordKey,
+      },
+      UpdateExpression: active
+        ? 'SET lookupKey = :lookupKey, lookupSortKey = :lookupSortKey'
+        : 'REMOVE lookupKey, lookupSortKey',
+      ConditionExpression: conditionParts.join(' AND '),
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#value': 'value',
+        '#id': 'id',
+        '#createdAt': 'createdAt',
+        '#status': 'status',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'webhook-subscription',
+        ':id': row.value.id,
+        ':createdAt': row.value.createdAt,
+        ':status': row.value.status,
+        ...(row.lookupKey === undefined
+          ? {}
+          : { ':observedLookupKey': row.lookupKey }),
+        ...(row.lookupSortKey === undefined
+          ? {}
+          : { ':observedLookupSortKey': row.lookupSortKey }),
+        ...(row.expiresAt === undefined
+          ? {}
+          : { ':expiresAt': row.expiresAt }),
+        ...(active
+          ? {
+              ':lookupKey': `WEBHOOK#ACTIVE#${row.workspaceId}`,
+              ':lookupSortKey':
+                `${row.value.createdAt}#${row.value.id}`,
+            }
+          : {}),
+      },
+    }))
+    return 'reconciled' as const
+  } catch (error) {
+    if (isConditionalCheckFailure(error)) return 'retry' as const
     throw error
   }
 }
@@ -1272,9 +2535,15 @@ function readMigrationVersion(event: WebhookAuthorizationBackfillEvent) {
 
 function readKnownDeletingMigrationVersion(
   event: WebhookAuthorizationBackfillEvent,
-): 'v1' | typeof WEBHOOK_AUTHORIZATION_BACKFILL_VERSION | undefined {
+):
+  | 'v1'
+  | 'v2'
+  | typeof WEBHOOK_AUTHORIZATION_BACKFILL_VERSION
+  | undefined {
   const version = event.ResourceProperties?.MigrationVersion
-  return version === 'v1' || version === WEBHOOK_AUTHORIZATION_BACKFILL_VERSION
+  return version === 'v1' ||
+      version === 'v2' ||
+      version === WEBHOOK_AUTHORIZATION_BACKFILL_VERSION
     ? version
     : undefined
 }
