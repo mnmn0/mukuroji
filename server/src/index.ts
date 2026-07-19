@@ -849,6 +849,21 @@ type ProjectCreatorContext = {
   workspaceMemberVersion: number
 }
 
+/** Project role mutation と直列化する Workspace member generation です。 */
+type WorkspaceMemberAuthorizationGeneration =
+  | {
+    /** 読み込み時点で Workspace member row が存在することを表します。 */
+    exists: true
+    /** 読み込み時点の member version です。 */
+    version: number
+    /** 読み込み時点の lifecycle status です。 */
+    status: WorkspaceMemberStatus
+  }
+  | {
+    /** 読み込み時点で Workspace member row が存在しないことを表します。 */
+    exists: false
+  }
+
 /**
  * dashboard summary の集計対象を権限で絞り込むための user context です。
  */
@@ -2161,6 +2176,7 @@ type ProjectDirectoryClient = {
     projectId: string,
     memberKey: string,
     auditContext?: MutationAuditContext,
+    expectedWorkspaceMemberGeneration?: WorkspaceMemberAuthorizationGeneration,
   ): Promise<RemoveProjectMemberResponse>
   /**
    * DynamoDB にチームを作成します。
@@ -2245,10 +2261,22 @@ let automationInboundWebhookSecrets: AutomationInboundWebhookSecretStore
 let planning: PlanningClient
 let requestIntake: RequestIntakeClient
 const documentProjectRolesCache = new Map<string, {
+  /** Cache entry の失効時刻です。 */
   expiresAt: number
+  /** Role snapshot と同時に確認した Workspace member version です。 */
+  workspaceMemberVersion: number
+  /** Active Project hierarchy を直列化する Planning revision です。 */
+  planningRevision: number
+  /** Project role read の共有中または解決済み promise です。 */
   value: Promise<Record<string, DocumentProjectRole>>
 }>()
 const documentProjectRolesCacheTtlMs = 1_000
+/** Cross-table authorization snapshot を安定化する再読込回数です。 */
+const DOCUMENT_AUTHORIZATION_SNAPSHOT_RETRY_LIMIT = 3
+/** Relation target の source read を同時実行する最大数です。 */
+const DOCUMENT_RELATION_TARGET_VALIDATION_CONCURRENCY = 8
+/** 一回の Workspace search で許可する full Document source read 数です。 */
+const WORKSPACE_SEARCH_DOCUMENT_SOURCE_READ_LIMIT = 30
 const projectDirectoryIdPrefix = 'user#'
 const defaultAllowedOrigins = [
   'http://localhost:5173',
@@ -4819,6 +4847,8 @@ app.get('/api/search', async (c) => {
     const context = await createWorkspaceSearchContext(principal)
     const filters = readWorkspaceSearchFilters(c.req.query('filters'))
     const scopeCache = new Map<string, Promise<TeamIssueDetailResponse | undefined>>()
+    let remainingDocumentSourceReads =
+      WORKSPACE_SEARCH_DOCUMENT_SOURCE_READ_LIMIT
 
     return c.json(await workspaceSearch.search({
       workspaceId: principal.directoryId,
@@ -4826,12 +4856,30 @@ app.get('/api/search', async (c) => {
       limit: readOptionalPositiveQueryInteger(c.req.query('limit'), 'Search limit'),
       cursor: c.req.query('cursor'),
       access: context.searchAccess,
-      resolveCurrentScope: (document) => resolveCurrentWorkspaceSearchScope(
-        principal.directoryId,
-        document,
-        context,
-        scopeCache,
-      ),
+      resolveCurrentScope: (document) => {
+        if (
+          filters.entityTypes?.length &&
+          !filters.entityTypes.includes(document.entityType)
+        ) {
+          return Promise.resolve(undefined)
+        }
+        return resolveCurrentWorkspaceSearchScope(
+          principal.directoryId,
+          document,
+          context,
+          scopeCache,
+          () => {
+            if (remainingDocumentSourceReads <= 0) {
+              throw new WorkspaceSearchError(
+                503,
+                'WorkspaceSearchReadBudgetExceeded',
+                'Search matched too many Documents. Narrow the filters and try again.',
+              )
+            }
+            remainingDocumentSourceReads -= 1
+          },
+        )
+      },
     }))
   } catch (error) {
     return toWorkspaceSearchErrorResponse(c, error)
@@ -5115,6 +5163,10 @@ app.delete('/api/projects/:projectId/members/:memberKey', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken)
     requireWorkspaceBusinessWrite(principal)
     await requireProjectPermission(principal, projectId, 'manager')
+    const targetWorkspaceMember = await workspaceAccess.getMember(
+      principal.directoryId,
+      memberKey,
+    )
 
     return c.json(
       await projectDirectory.removeProjectMember(
@@ -5122,6 +5174,13 @@ app.delete('/api/projects/:projectId/members/:memberKey', async (c) => {
         projectId,
         memberKey,
         createApiMutationContext(c, principal, { projectId, memberKey }),
+        targetWorkspaceMember === undefined
+          ? { exists: false }
+          : {
+              exists: true,
+              version: targetWorkspaceMember.version,
+              status: targetWorkspaceMember.status,
+            },
       ),
     )
   } catch (error) {
@@ -8725,10 +8784,10 @@ async function createDocumentApiPrincipal(
   accessToken: string,
 ): Promise<DocumentApiPrincipal> {
   const principal = await authenticateWorkspacePrincipal(accessToken)
-  const projectRoles = await getCachedDocumentProjectRoles(
-    principal.directoryId,
-    principal.userKey,
-  )
+  const {
+    planningRevision,
+    projectRoles,
+  } = await readDocumentAuthorizationSnapshot(principal)
 
   return {
     workspaceId: principal.directoryId,
@@ -8739,18 +8798,92 @@ async function createDocumentApiPrincipal(
       principal.userKey,
     workspaceRole: principal.workspaceRole,
     isSystemAdmin: principal.isSystemAdmin,
+    authorizationGuards: [
+      {
+        tableName: getConfiguredWorkspaceAccessTableName(),
+        key: {
+          workspaceId: principal.directoryId,
+          recordKey:
+            `MEMBER#${normalizeProjectMemberKey(principal.userKey)}`,
+        },
+        generationAttribute: 'version',
+        expectedGeneration: principal.workspaceMember.version,
+        requiredAttributes: {
+          entryType: 'workspace-member',
+          status: 'active',
+        },
+      },
+      {
+        tableName: getConfiguredPlanningTableName(),
+        key: {
+          workspaceId: principal.directoryId,
+          recordKey: 'META',
+        },
+        generationAttribute: 'revision',
+        expectedGeneration: planningRevision,
+        requiredAttributes: {
+          entryType: 'planning-meta',
+          schemaVersion: PLANNING_SCHEMA_VERSION,
+        },
+        ...(planningRevision === 0
+          ? { allowMissingWhenExpectedZero: true }
+          : {}),
+      },
+    ],
     projectRoles,
   }
+}
+
+async function readDocumentAuthorizationSnapshot(
+  principal: WorkspacePrincipal,
+) {
+  for (
+    let attempt = 0;
+    attempt < DOCUMENT_AUTHORIZATION_SNAPSHOT_RETRY_LIMIT;
+    attempt += 1
+  ) {
+    const planningRevision = await planning.getAuthorizationRevision(
+      principal.directoryId,
+    )
+    const projectRoles = await getCachedDocumentProjectRoles(
+      principal.directoryId,
+      principal.userKey,
+      principal.workspaceMember.version,
+      planningRevision,
+    )
+    if (
+      await planning.getAuthorizationRevision(
+        principal.directoryId,
+      ) === planningRevision
+    ) {
+      return { planningRevision, projectRoles }
+    }
+  }
+  throw new DocumentError(
+    409,
+    'DocumentAuthorizationChanged',
+    'Document authorization changed. Reload and try again.',
+  )
 }
 
 async function getCachedDocumentProjectRoles(
   workspaceId: string,
   memberKey: string,
+  workspaceMemberVersion: number,
+  planningRevision: number,
 ) {
   const cacheKey = `${workspaceId}\0${memberKey}`
   const now = Date.now()
   const cached = documentProjectRolesCache.get(cacheKey)
-  if (cached && cached.expiresAt > now) return cached.value
+  if (
+    cached &&
+    cached.expiresAt > now &&
+    cached.workspaceMemberVersion === workspaceMemberVersion &&
+    cached.planningRevision === planningRevision
+  ) {
+    return cached.value
+  }
+  if (cached) documentProjectRolesCache.delete(cacheKey)
   const value = projectDirectory.getProjectAccessList(
     workspaceId,
     memberKey,
@@ -8766,112 +8899,186 @@ async function getCachedDocumentProjectRoles(
   })
   documentProjectRolesCache.set(cacheKey, {
     expiresAt: now + documentProjectRolesCacheTtlMs,
+    workspaceMemberVersion,
+    planningRevision,
     value,
   })
   return value
+}
+
+function getConfiguredWorkspaceAccessTableName() {
+  return getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
+    getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
+    'mukuroji-workspace-access-local'
+}
+
+function getConfiguredPlanningTableName() {
+  return getEnv('PLANNING_TABLE_NAME') ??
+    'mukuroji-planning-local'
 }
 
 async function validateDocumentRelationTargets(
   principal: DocumentApiPrincipal,
   targets: readonly DocumentRelationTarget[],
 ) {
-  const directory = await projectDirectory.getProjectDirectory(
-    principal.workspaceId,
-    'ja',
-    true,
-  )
-  await Promise.all(targets.map(async (target) => {
-    if (target.kind === 'goal') {
-      return
-    }
-    if (target.kind === 'project') {
-      const exists = directory.teams.some((team) =>
-        team.projects.some((project) =>
-          project.id === target.projectId
+  const [directory, planningAuthorizationState] = await Promise.all([
+    projectDirectory.getProjectDirectory(
+      principal.workspaceId,
+      'ja',
+      true,
+    ),
+    targets.some((target) => target.kind === 'goal')
+      ? planning.getAuthorizationState(principal.workspaceId)
+      : undefined,
+  ])
+  for (
+    let offset = 0;
+    offset < targets.length;
+    offset += DOCUMENT_RELATION_TARGET_VALIDATION_CONCURRENCY
+  ) {
+    await Promise.all(targets.slice(
+      offset,
+      offset + DOCUMENT_RELATION_TARGET_VALIDATION_CONCURRENCY,
+    ).map(async (target) => {
+      if (target.kind === 'goal') {
+        const entity = planningAuthorizationState?.entities.find(
+          (candidate) =>
+            candidate.id === target.goalId &&
+            candidate.type === 'goal' &&
+            candidate.archivedAt === undefined,
         )
-      )
-      if (!exists) {
+        if (!entity) {
+          throw new DocumentError(
+            400,
+            'InvalidDocumentRelationTarget',
+            'The related Goal was not found.',
+          )
+        }
+        const team = entity.teamId === undefined
+          ? undefined
+          : directory.teams.find((candidate) => candidate.id === entity.teamId)
+        const projectTeam = entity.projectId === undefined
+          ? undefined
+          : directory.teams.find((candidate) =>
+              (entity.teamId === undefined || candidate.id === entity.teamId) &&
+              candidate.projects.some((project) => project.id === entity.projectId)
+            )
+        if (
+          (entity.teamId !== undefined && team === undefined) ||
+          (entity.projectId !== undefined && projectTeam === undefined)
+        ) {
+          throw new DocumentError(
+            400,
+            'InvalidDocumentRelationTarget',
+            'The related Goal was not found.',
+          )
+        }
+        const visible = principal.isSystemAdmin ||
+          (entity.projectId !== undefined
+            ? principal.projectRoles[entity.projectId] !== undefined
+            : team !== undefined
+              ? team.projects.some(
+                  (project) => principal.projectRoles[project.id] !== undefined,
+                )
+              : true)
+        if (!visible) {
+          throw new DocumentError(
+            403,
+            'DocumentRelationTargetDenied',
+            'The related Goal is not visible.',
+          )
+        }
+        return
+      }
+      if (target.kind === 'project') {
+        const exists = directory.teams.some((team) =>
+          team.projects.some((project) =>
+            project.id === target.projectId
+          )
+        )
+        if (!exists) {
+          throw new DocumentError(
+            400,
+            'InvalidDocumentRelationTarget',
+            'The related Project was not found.',
+          )
+        }
+        if (
+          !principal.isSystemAdmin &&
+          principal.projectRoles[target.projectId] === undefined
+        ) {
+          throw new DocumentError(
+            403,
+            'DocumentRelationTargetDenied',
+            'The related Project is not visible.',
+          )
+        }
+        return
+      }
+      const parsed = parseSearchWorkItemEntityId(target.workItemId)
+      if (!parsed) {
         throw new DocumentError(
           400,
           'InvalidDocumentRelationTarget',
-          'The related Project was not found.',
+          'Work Item targets must use team/<teamId>/issue/<issueId>.',
+        )
+      }
+      const team = directory.teams.find(
+        (candidate) => candidate.id === parsed.teamId,
+      )
+      if (!team) {
+        throw new DocumentError(
+          400,
+          'InvalidDocumentRelationTarget',
+          'The related Team was not found.',
         )
       }
       if (
         !principal.isSystemAdmin &&
-        principal.projectRoles[target.projectId] === undefined
+        !team.projects.some(
+          (project) =>
+            principal.projectRoles[project.id] !== undefined,
+        )
       ) {
         throw new DocumentError(
           403,
           'DocumentRelationTargetDenied',
-          'The related Project is not visible.',
+          'The related Work Item is not visible.',
         )
       }
-      return
-    }
-    const parsed = parseSearchWorkItemEntityId(target.workItemId)
-    if (!parsed) {
-      throw new DocumentError(
-        400,
-        'InvalidDocumentRelationTarget',
-        'Work Item targets must use team/<teamId>/issue/<issueId>.',
-      )
-    }
-    const team = directory.teams.find(
-      (candidate) => candidate.id === parsed.teamId,
-    )
-    if (!team) {
-      throw new DocumentError(
-        400,
-        'InvalidDocumentRelationTarget',
-        'The related Team was not found.',
-      )
-    }
-    if (
-      !principal.isSystemAdmin &&
-      !team.projects.some(
-        (project) =>
-          principal.projectRoles[project.id] !== undefined,
-      )
-    ) {
-      throw new DocumentError(
-        403,
-        'DocumentRelationTargetDenied',
-        'The related Work Item is not visible.',
-      )
-    }
-    let detail: TeamIssueDetailResponse
-    try {
-      detail = await teamIssues.getTeamIssueDetail(
-        principal.workspaceId,
-        parsed.teamId,
-        parsed.issueId,
-        { consistentIssueRead: true, eventLimit: 0 },
-      )
-    } catch (error) {
-      if (isTeamIssueNotFoundError(error)) {
+      let detail: TeamIssueDetailResponse
+      try {
+        detail = await teamIssues.getTeamIssueDetail(
+          principal.workspaceId,
+          parsed.teamId,
+          parsed.issueId,
+          { consistentIssueRead: true, eventLimit: 0 },
+        )
+      } catch (error) {
+        if (isTeamIssueNotFoundError(error)) {
+          throw new DocumentError(
+            400,
+            'InvalidDocumentRelationTarget',
+            'The related Work Item was not found.',
+          )
+        }
+        throw error
+      }
+      if (
+        detail.issue.assignedProjectId &&
+        !principal.isSystemAdmin &&
+        principal.projectRoles[
+          detail.issue.assignedProjectId
+        ] === undefined
+      ) {
         throw new DocumentError(
-          400,
-          'InvalidDocumentRelationTarget',
-          'The related Work Item was not found.',
+          403,
+          'DocumentRelationTargetDenied',
+          'The related Work Item is not visible.',
         )
       }
-      throw error
-    }
-    if (
-      detail.issue.assignedProjectId &&
-      !principal.isSystemAdmin &&
-      principal.projectRoles[
-        detail.issue.assignedProjectId
-      ] === undefined
-    ) {
-      throw new DocumentError(
-        403,
-        'DocumentRelationTargetDenied',
-        'The related Work Item is not visible.',
-      )
-    }
-  }))
+    }))
+  }
 }
 
 function readBearerAccessToken(c: Context) {
@@ -9542,8 +9749,10 @@ async function resolveCurrentWorkspaceSearchScope(
   document: WorkspaceSearchDocument,
   context: WorkspaceSearchContext,
   scopeCache: Map<string, Promise<TeamIssueDetailResponse | undefined>>,
+  consumeDocumentSourceRead: () => void,
 ) {
   if (document.entityType === 'document') {
+    consumeDocumentSourceRead()
     try {
       const currentDocument = await documents.get({
         workspaceId,
@@ -14202,10 +14411,12 @@ export class DynamoDbProjectDirectoryClient {
     projectId: string,
     memberKey: string,
     auditContext?: MutationAuditContext,
+    expectedWorkspaceMemberGeneration?: WorkspaceMemberAuthorizationGeneration,
   ) {
     await this.ensureLocalAuditTable()
     const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
     let managerGuarded = false
+    let workspaceAuthorizationGuardIndex: number | undefined
 
     try {
       const items = await this.readValidDirectoryItems(directoryId, true)
@@ -14256,8 +14467,17 @@ export class DynamoDbProjectDirectoryClient {
           ':expectedRole': member.role,
         },
       }
+      const workspaceAuthorizationItem = expectedWorkspaceMemberGeneration === undefined
+        ? undefined
+        : this.createWorkspaceMemberAuthorizationTransactionItem(
+            directoryId,
+            normalizedMemberKey,
+            expectedWorkspaceMemberGeneration,
+            removedAt,
+          )
 
       if (guardManager) {
+        workspaceAuthorizationGuardIndex = workspaceAuthorizationItem === undefined ? undefined : 2
         await this.documentClient.send(
           new TransactWriteCommand({
             TransactItems: [
@@ -14267,19 +14487,34 @@ export class DynamoDbProjectDirectoryClient {
               {
                 Delete: memberDelete,
               },
+              ...(workspaceAuthorizationItem === undefined ? [] : [workspaceAuthorizationItem]),
               ...(auditPut ? [auditPut] : []),
             ],
           }),
         )
       } else {
         if (auditPut) {
+          workspaceAuthorizationGuardIndex = workspaceAuthorizationItem === undefined ? undefined : 1
           await this.documentClient.send(
             new TransactWriteCommand({
               TransactItems: [
                 {
                   Delete: memberDelete,
                 },
+                ...(workspaceAuthorizationItem === undefined ? [] : [workspaceAuthorizationItem]),
                 auditPut,
+              ],
+            }),
+          )
+        } else if (workspaceAuthorizationItem !== undefined) {
+          workspaceAuthorizationGuardIndex = 1
+          await this.documentClient.send(
+            new TransactWriteCommand({
+              TransactItems: [
+                {
+                  Delete: memberDelete,
+                },
+                workspaceAuthorizationItem,
               ],
             }),
           )
@@ -14297,6 +14532,17 @@ export class DynamoDbProjectDirectoryClient {
         memberId: normalizedMemberKey,
       } satisfies RemoveProjectMemberResponse
     } catch (error) {
+      if (
+        workspaceAuthorizationGuardIndex !== undefined &&
+        expectedWorkspaceMemberGeneration !== undefined &&
+        isTransactionConditionalFailureAt(error, workspaceAuthorizationGuardIndex)
+      ) {
+        await this.requireUnchangedWorkspaceMemberGeneration(
+          directoryId,
+          normalizedMemberKey,
+          expectedWorkspaceMemberGeneration,
+        )
+      }
       if (
         (managerGuarded && (
           isTransactionConditionalFailureAt(error, 0) ||
@@ -15146,6 +15392,71 @@ export class DynamoDbProjectDirectoryClient {
     }
   }
 
+  /**
+   * Project role 削除を Workspace member row の存在世代と直列化します。
+   */
+  private createWorkspaceMemberAuthorizationTransactionItem(
+    workspaceId: string,
+    memberKey: string,
+    expected: WorkspaceMemberAuthorizationGeneration,
+    updatedAt: string,
+  ) {
+    if (!expected.exists) {
+      return {
+        ConditionCheck: {
+          TableName: this.workspaceAccessTableName,
+          Key: {
+            workspaceId,
+            recordKey: `MEMBER#${normalizeProjectMemberKey(memberKey)}`,
+          },
+          ConditionExpression: 'attribute_not_exists(workspaceId)',
+        },
+      }
+    }
+
+    return {
+      Update: this.createWorkspaceMemberVersionUpdate(
+        workspaceId,
+        memberKey,
+        expected,
+        updatedAt,
+      ),
+    }
+  }
+
+  /**
+   * Project role 削除と同時に現在 lifecycle の Workspace member version を進めます。
+   */
+  private createWorkspaceMemberVersionUpdate(
+    workspaceId: string,
+    memberKey: string,
+    expected: Extract<WorkspaceMemberAuthorizationGeneration, { exists: true }>,
+    updatedAt: string,
+  ) {
+    return {
+      TableName: this.workspaceAccessTableName,
+      Key: {
+        workspaceId,
+        recordKey: `MEMBER#${normalizeProjectMemberKey(memberKey)}`,
+      },
+      UpdateExpression: 'SET updatedAt = :updatedAt ADD #version :one',
+      ConditionExpression:
+        '#entryType = :memberEntryType AND #status = :expectedStatus AND #version = :expectedVersion',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#status': 'status',
+        '#version': 'version',
+      },
+      ExpressionAttributeValues: {
+        ':memberEntryType': 'workspace-member',
+        ':expectedStatus': expected.status,
+        ':expectedVersion': expected.version,
+        ':updatedAt': updatedAt,
+        ':one': 1,
+      },
+    }
+  }
+
   /** transaction cancel 後に対象 Workspace member の active/version を再確認します。 */
   private async requireUnchangedActiveWorkspaceMember(
     workspaceId: string,
@@ -15171,6 +15482,47 @@ export class DynamoDbProjectDirectoryClient {
     }
 
     if (item.version !== expectedVersion) {
+      throw new ProjectDataError(
+        409,
+        'WorkspaceMemberVersionConflict',
+        'Workspace member changed. Reload and try again.',
+      )
+    }
+  }
+
+  /** transaction cancel 後に対象 Workspace member generation を再確認します。 */
+  private async requireUnchangedWorkspaceMemberGeneration(
+    workspaceId: string,
+    memberKey: string,
+    expected: WorkspaceMemberAuthorizationGeneration,
+  ) {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.workspaceAccessTableName,
+      Key: {
+        workspaceId,
+        recordKey: `MEMBER#${normalizeProjectMemberKey(memberKey)}`,
+      },
+      ConsistentRead: true,
+    }))
+    const item = response.Item
+
+    if (!expected.exists) {
+      if (item !== undefined) {
+        throw new ProjectDataError(
+          409,
+          'WorkspaceMemberVersionConflict',
+          'Workspace member changed. Reload and try again.',
+        )
+      }
+
+      return
+    }
+
+    if (
+      item?.entryType !== 'workspace-member' ||
+      item.status !== expected.status ||
+      item.version !== expected.version
+    ) {
       throw new ProjectDataError(
         409,
         'WorkspaceMemberVersionConflict',

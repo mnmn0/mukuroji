@@ -39,6 +39,7 @@ import {
   type DocumentPresenceSelection,
   type DocumentPublicShare,
   type DocumentRelation,
+  type DocumentRelationTarget,
   type DocumentScope,
   type DocumentTreeResponse,
   type DocumentVersion,
@@ -100,6 +101,19 @@ export const DOCUMENT_PUBLIC_SHARE_TOKEN_BYTES = 32
 /** Public share の最大有効日数です。 */
 export const DOCUMENT_PUBLIC_SHARE_MAX_DAYS = 365
 
+/** Full version snapshot を必ず作成する最大 revision 間隔です。 */
+export const DOCUMENT_VERSION_SNAPSHOT_INTERVAL = 20
+
+/** Full version snapshot を必ず作成する最大経過時間です。 */
+export const DOCUMENT_VERSION_SNAPSHOT_MAX_AGE_MS =
+  24 * 60 * 60 * 1_000
+
+/** Version metadata/delta を保持する日数です。 */
+export const DOCUMENT_VERSION_RETENTION_DAYS = 180
+
+/** Operation idempotency receipt を保持する日数です。 */
+export const DOCUMENT_OPERATION_RECEIPT_RETENTION_DAYS = 30
+
 /**
  * 一つの Document から transactionally index できる backlink 数です。
  *
@@ -138,8 +152,20 @@ const DOCUMENT_MAX_TABLE_COLUMNS = 50
 /** Table block の最大 row 数です。 */
 const DOCUMENT_MAX_TABLE_ROWS = 200
 
+/** DynamoDB TTL epoch を計算する一日の秒数です。 */
+const SECONDS_PER_DAY = 24 * 60 * 60
+
 /** Version revision を DynamoDB sort key に埋め込む幅です。 */
 const DOCUMENT_VERSION_REVISION_WIDTH = 12
+
+/** Canonical Whiteboard bounds が許可する field names です。 */
+const WHITEBOARD_BOUND_FIELDS = new Set([
+  'x',
+  'y',
+  'width',
+  'height',
+  'rotation',
+])
 
 /** 空の Whiteboard content です。 */
 const EMPTY_WHITEBOARD_CONTENT: WhiteboardContent = {
@@ -184,6 +210,35 @@ export type DocumentAccessContext = {
   projectRoles?: Readonly<Record<string, DocumentProjectRole>>
   /** Cognito group を現在確認済みの system administrator かどうかです。 */
   isSystemAdmin?: boolean
+  /**
+   * Workspace membership と Project role を包含する authorization generation です。
+   *
+   * Public share の作成 transaction で source-of-truth row を condition check
+   * するため、共有可能な API principal は必ず設定します。
+   */
+  authorizationGuards?: readonly DocumentAuthorizationGenerationGuard[]
+}
+
+/**
+ * 外部 authorization source の generation をDynamoDB transactionへ束縛します。
+ */
+export type DocumentAuthorizationGenerationGuard = {
+  /** Authorization source row が保存されている DynamoDB table 名です。 */
+  tableName: string
+  /** Authorization source row の完全な primary key です。 */
+  key: Readonly<
+    Record<string, string | undefined>
+  >
+  /** 単調増加 generation を保持する属性名です。 */
+  generationAttribute: string
+  /** Principal 解決時に読み込んだ generation です。 */
+  expectedGeneration: string | number
+  /** Generation 0 の未初期化 source rowを許可するかどうかです。 */
+  allowMissingWhenExpectedZero?: boolean
+  /** Active status など同時に一致を要求する scalar attributes です。 */
+  requiredAttributes?: Readonly<
+    Record<string, string | number | boolean>
+  >
 }
 
 /**
@@ -407,6 +462,8 @@ export type InstantiateDocumentTemplateRequest = {
   title?: string
   /** 作成する page の position です。 */
   position?: string
+  /** 作成する page の permission 設定です。 */
+  permission?: DocumentPermission
   /** Client retry を同じ page へ束縛する key です。 */
   idempotencyKey?: string
 }
@@ -742,6 +799,12 @@ type StoredDocumentItem = {
   elementRevisions: Record<string, number>
   /** Compacted tombstone より古い operation を拒否する revision floor です。 */
   operationConflictFloorRevision?: number
+  /** Archive ごとに増加し、過去の public bearer token を永久失効させます。 */
+  publicShareEpoch?: number
+  /** 最後に full version snapshot を保存した revision です。 */
+  lastVersionSnapshotRevision?: number
+  /** 最後に full version snapshot を保存した ISO timestamp です。 */
+  lastVersionSnapshotAt?: string
   /** Idempotent create retry key の hash です。 */
   createIdempotencyKeyHash?: string
   /** 同じ create retry key の payload fingerprint です。 */
@@ -791,6 +854,16 @@ type DocumentProjectionContext = {
 }
 
 /**
+ * Public share mutation authorization を transactionへ束縛する read snapshot です。
+ */
+type DocumentShareAuthorizationSnapshot = {
+  /** Share 対象の current Document row です。 */
+  documentRow: StoredDocumentItem
+  /** 直近の親から root へ向かう ancestor rows です。 */
+  ancestorRows: StoredDocumentItem[]
+}
+
+/**
  * 親 folder ごとに direct child を列挙する compact index row です。
  */
 type StoredDocumentChildIndexItem = {
@@ -824,6 +897,8 @@ type StoredDocumentVersionItem = {
   entryType: 'document-version'
   /** Version metadata です。 */
   version: DocumentVersion
+  /** DynamoDB TTL epoch seconds です。 */
+  expiresAtEpoch: number
 }
 
 /**
@@ -842,6 +917,32 @@ type StoredDocumentVersionSnapshotItem = {
   document: DocumentDetail
   /** Snapshot 時点の element revision map です。 */
   elementRevisions: Record<string, number>
+  /** Delta retention より長く base snapshot を残す DynamoDB TTL epoch seconds です。 */
+  expiresAtEpoch: number
+}
+
+/**
+ * Full snapshot 間の revision を復元する compact delta row です。
+ */
+type StoredDocumentVersionDeltaItem = {
+  /** Canonical Workspace partition key です。 */
+  workspaceId: string
+  /** `VERSION_DELTA#<documentId>#<revision>` 形式の sort key です。 */
+  recordKey: string
+  /** Row discriminator です。 */
+  entryType: 'document-version-delta'
+  /** Delta が生成する version metadata です。 */
+  version: DocumentVersion
+  /** Delta 適用前の直前 revision です。 */
+  baseRevision: number
+  /** Operation mutation の場合に replay する canonical operations です。 */
+  operations?: readonly DocumentOperation[]
+  /** Metadata mutation の場合に置換する top-level fields です。 */
+  changedFields?: Record<string, unknown>
+  /** Metadata mutation の場合に削除する top-level field names です。 */
+  removedFields?: string[]
+  /** DynamoDB TTL epoch seconds です。 */
+  expiresAtEpoch: number
 }
 
 /**
@@ -866,6 +967,8 @@ type StoredOperationReceipt = {
   revision: number
   /** Receipt 作成日時です。 */
   createdAt: string
+  /** DynamoDB TTL epoch seconds です。 */
+  expiresAtEpoch: number
 }
 
 /**
@@ -980,6 +1083,8 @@ type StoredDocumentShareItem = StoredDocumentPublicShare & {
   createIdempotencyKeyHash?: string
   /** 同じ key を異なる入力へ再利用させない fingerprint です。 */
   createRequestFingerprint?: string
+  /** Share 作成時点の Document/ancestor archive epoch lineage です。 */
+  documentShareEpochs: Record<string, number>
 }
 
 /**
@@ -1000,6 +1105,8 @@ type StoredPublicLinkItem = {
   shareId: string
   /** Share expiry の ISO timestamp です。 */
   expiresAt: string
+  /** Link 作成時点の Document/ancestor archive epoch lineage です。 */
+  documentShareEpochs: Record<string, number>
   /** DynamoDB TTL epoch seconds です。 */
   expiresAtEpoch: number
 }
@@ -1364,42 +1471,11 @@ export function renderDocumentExport(
   format: DocumentExportFormat,
 ): RenderedDocumentExport {
   validateDocumentPayload(document)
-  const safeBaseName = sanitizeFileName(document.title || document.id)
-  if (format === 'json') {
-    return {
-      format,
-      contentType: 'application/json; charset=utf-8',
-      fileName: `${safeBaseName}.json`,
-      content: `${JSON.stringify(document, null, 2)}\n`,
-    }
-  }
-  if (format === 'svg') {
-    if (document.kind !== 'whiteboard') {
-      throw new DocumentError(400, 'UnsupportedDocumentExport', 'SVG export is only available for whiteboards.')
-    }
-    return {
-      format,
-      contentType: 'image/svg+xml; charset=utf-8',
-      fileName: `${safeBaseName}.svg`,
-      content: renderWhiteboardSvg(document),
-    }
-  }
-  if (document.kind !== 'page' && document.kind !== 'template') {
-    throw new DocumentError(
-      400,
-      'UnsupportedDocumentExport',
-      `${format.toUpperCase()} export is only available for pages and templates.`,
-    )
-  }
-  if (format === 'markdown') {
-    return {
-      format,
-      contentType: 'text/markdown; charset=utf-8',
-      fileName: `${safeBaseName}.md`,
-      content: renderMarkdown(document.title, document.blocks),
-    }
-  }
-  throw new DocumentError(400, 'UnsupportedDocumentExport', `Unsupported export format: ${String(format)}.`)
+  return renderDocumentArtifact(
+    document,
+    format,
+    document.id,
+  )
 }
 
 /**
@@ -1409,7 +1485,21 @@ export function renderPublicDocumentExport(
   document: PublicDocument,
   format: DocumentExportFormat,
 ): RenderedDocumentExport {
-  const safeBaseName = sanitizeFileName(document.title || 'document')
+  return renderDocumentArtifact(
+    document,
+    format,
+    'document',
+  )
+}
+
+function renderDocumentArtifact(
+  document: DocumentDetail | PublicDocument,
+  format: DocumentExportFormat,
+  fallbackFileName: string,
+): RenderedDocumentExport {
+  const safeBaseName = sanitizeFileName(
+    document.title || fallbackFileName,
+  )
   if (format === 'json') {
     return {
       format,
@@ -1788,7 +1878,12 @@ function validateBlock(block: DocumentBlock): void {
       return
     case 'code':
       assertText(block.code, 'block.code', DOCUMENT_MAX_TEXT_LENGTH, true)
-      if (block.language !== undefined) assertText(block.language, 'block.language', 100, true)
+      if (block.language !== undefined) {
+        assertCodeFenceInfoString(
+          block.language,
+          'block.language',
+        )
+      }
       return
     case 'checklist': {
       if (!Array.isArray(block.items)) {
@@ -1800,6 +1895,13 @@ function validateBlock(block: DocumentBlock): void {
         assertIdentifier(item.id, 'block.items[].id')
         assertUniqueId(itemIds, item.id, 'checklist item')
         assertText(item.text, 'block.items[].text', DOCUMENT_MAX_TEXT_LENGTH, true)
+        if (typeof item.checked !== 'boolean') {
+          throw new DocumentError(
+            400,
+            'InvalidDocumentBlock',
+            'Checklist item checked must be a boolean.',
+          )
+        }
         if (item.assigneeMemberKey !== undefined) {
           assertIdentifier(item.assigneeMemberKey, 'block.items[].assigneeMemberKey')
         }
@@ -1812,6 +1914,13 @@ function validateBlock(block: DocumentBlock): void {
       if (block.provider !== undefined) assertText(block.provider, 'block.provider', 100, true)
       return
     case 'diagram':
+      if (block.format !== 'mermaid' && block.format !== 'text') {
+        throw new DocumentError(
+          400,
+          'InvalidDocumentBlock',
+          'Diagram format must be mermaid or text.',
+        )
+      }
       assertText(block.source, 'block.source', DOCUMENT_MAX_TEXT_LENGTH, true)
       return
     default:
@@ -1868,8 +1977,27 @@ function validateWhiteboardObject(object: WhiteboardObject): void {
   }
   if (object.type === 'note' || object.type === 'text') {
     assertText(object.text, 'whiteboard.object.text', DOCUMENT_MAX_TEXT_LENGTH, true)
-  } else if (object.type === 'shape' && object.text !== undefined) {
-    assertText(object.text, 'whiteboard.object.text', DOCUMENT_MAX_TEXT_LENGTH, true)
+  } else if (object.type === 'shape') {
+    if (
+      object.shape !== 'rectangle' &&
+      object.shape !== 'ellipse' &&
+      object.shape !== 'diamond' &&
+      object.shape !== 'triangle'
+    ) {
+      throw new DocumentError(
+        400,
+        'InvalidWhiteboardObject',
+        'Whiteboard shape is invalid.',
+      )
+    }
+    if (object.text !== undefined) {
+      assertText(
+        object.text,
+        'whiteboard.object.text',
+        DOCUMENT_MAX_TEXT_LENGTH,
+        true,
+      )
+    }
   } else if (object.type === 'work-item') {
     assertCanonicalWorkItemId(
       object.workItemId,
@@ -1899,6 +2027,20 @@ function validateConnector(connector: WhiteboardConnector, objectIds: ReadonlySe
   assertIdentifier(connector.id, 'whiteboard.connector.id')
   for (const endpoint of [connector.from, connector.to]) {
     assertIdentifier(endpoint.objectId, 'whiteboard.connector.objectId')
+    if (
+      endpoint.anchor !== undefined &&
+      endpoint.anchor !== 'top' &&
+      endpoint.anchor !== 'right' &&
+      endpoint.anchor !== 'bottom' &&
+      endpoint.anchor !== 'left' &&
+      endpoint.anchor !== 'center'
+    ) {
+      throw new DocumentError(
+        400,
+        'InvalidWhiteboardConnector',
+        'Whiteboard connector anchor is invalid.',
+      )
+    }
     if (!objectIds.has(endpoint.objectId)) {
       throw new DocumentError(
         400,
@@ -1909,6 +2051,17 @@ function validateConnector(connector: WhiteboardConnector, objectIds: ReadonlySe
   }
   if (connector.label !== undefined) {
     assertText(connector.label, 'whiteboard.connector.label', DOCUMENT_MAX_TEXT_LENGTH, true)
+  }
+  if (
+    connector.lineStyle !== undefined &&
+    connector.lineStyle !== 'solid' &&
+    connector.lineStyle !== 'dashed'
+  ) {
+    throw new DocumentError(
+      400,
+      'InvalidWhiteboardConnector',
+      'Whiteboard connector lineStyle is invalid.',
+    )
   }
 }
 
@@ -1935,10 +2088,36 @@ function validateFrame(frame: WhiteboardFrame, objectIds: ReadonlySet<string>): 
 
 function validateBounds(bounds: WhiteboardObject['bounds']): void {
   if (!isRecord(bounds)) throw invalidPayload('Whiteboard bounds are invalid.')
-  for (const [name, value] of Object.entries(bounds)) {
+  if (
+    Object.keys(bounds).some(
+      (field) =>
+        !WHITEBOARD_BOUND_FIELDS.has(field),
+    )
+  ) {
+    throw new DocumentError(
+      400,
+      'InvalidWhiteboardBounds',
+      'Whiteboard bounds contain an unsupported field.',
+    )
+  }
+  for (const name of ['x', 'y', 'width', 'height'] as const) {
+    const value = bounds[name]
     if (typeof value !== 'number' || !Number.isFinite(value)) {
       throw new DocumentError(400, 'InvalidWhiteboardBounds', `${name} must be a finite number.`)
     }
+  }
+  if (
+    bounds.rotation !== undefined &&
+    (
+      typeof bounds.rotation !== 'number' ||
+      !Number.isFinite(bounds.rotation)
+    )
+  ) {
+    throw new DocumentError(
+      400,
+      'InvalidWhiteboardBounds',
+      'rotation must be a finite number.',
+    )
   }
   if (bounds.width <= 0 || bounds.height <= 0) {
     throw new DocumentError(400, 'InvalidWhiteboardBounds', 'Whiteboard width and height must be positive.')
@@ -2030,7 +2209,12 @@ function renderMarkdown(title: string, blocks: readonly DocumentBlock[]): string
         break
       }
       case 'code':
-        parts.push(`\`\`\`${block.language ?? ''}\n${block.code.replaceAll('```', '`\\`\\`')}\n\`\`\``)
+        parts.push(
+          renderMarkdownCodeFence(
+            block.code,
+            block.language,
+          ),
+        )
         break
       case 'checklist':
         parts.push(
@@ -2043,10 +2227,36 @@ function renderMarkdown(title: string, blocks: readonly DocumentBlock[]): string
         parts.push(`[${escapeMarkdownText(block.title ?? block.url)}](${escapeMarkdownUrl(block.url)})`)
         break
       case 'diagram':
-        parts.push(`\`\`\`${block.format}\n${block.source.replaceAll('```', '`\\`\\`')}\n\`\`\``)
+        parts.push(
+          renderMarkdownCodeFence(
+            block.source,
+            block.format,
+          ),
+        )
     }
   }
   return `${parts.join('\n\n')}\n`
+}
+
+function renderMarkdownCodeFence(
+  source: string,
+  infoString?: string,
+): string {
+  const longestBacktickRun = Math.max(
+    0,
+    ...[...source.matchAll(/`+/gu)].map(
+      ([run]) => run.length,
+    ),
+  )
+  const fence = '`'.repeat(
+    Math.max(3, longestBacktickRun + 1),
+  )
+  const safeInfoString =
+    infoString !== undefined &&
+      isSafeCodeFenceInfoString(infoString)
+      ? infoString
+      : ''
+  return `${fence}${safeInfoString}\n${source}\n${fence}`
 }
 
 function renderWhiteboardSvg(
@@ -2412,6 +2622,9 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       document,
       elementRevisions: initialElementRevisions(document, 1),
       operationConflictFloorRevision: 1,
+      publicShareEpoch: 0,
+      lastVersionSnapshotRevision: 1,
+      lastVersionSnapshotAt: document.updatedAt,
       createIdempotencyKeyHash: idempotencyHash,
       createRequestFingerprint: requestFingerprint,
     }
@@ -2701,6 +2914,11 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         reduced.elementRevisions,
         conflictFloorRevision,
       )
+      const createsVersionSnapshot =
+        shouldCreateVersionSnapshot(
+          row,
+          reduced.document,
+        )
       const nextRow: StoredDocumentItem = {
         ...row,
         revision: nextRevision,
@@ -2708,6 +2926,14 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         elementRevisions: compactedHistory.elementRevisions,
         operationConflictFloorRevision:
           compactedHistory.operationConflictFloorRevision,
+        ...(createsVersionSnapshot
+          ? {
+              lastVersionSnapshotRevision:
+                nextRevision,
+              lastVersionSnapshotAt:
+                reduced.document.updatedAt,
+            }
+          : {}),
       }
       const relationDiff = diffRelations(
         backlinkRelations(row.document),
@@ -2726,8 +2952,17 @@ export class DynamoDbDocumentsClient implements DocumentClient {
             fingerprint: fingerprint(operation),
             revision: nextRevision,
             createdAt: now.toISOString(),
+            expiresAtEpoch:
+              Math.floor(now.getTime() / 1_000) +
+              DOCUMENT_OPERATION_RECEIPT_RETENTION_DAYS *
+                SECONDS_PER_DAY,
           } satisfies StoredOperationReceipt,
-          ConditionExpression: 'attribute_not_exists(workspaceId)',
+          ConditionExpression:
+            'attribute_not_exists(workspaceId) OR expiresAtEpoch <= :operationReceiptNowEpoch',
+          ExpressionAttributeValues: {
+            ':operationReceiptNowEpoch':
+              Math.floor(now.getTime() / 1_000),
+          },
         },
       }))
       const actions = [
@@ -2739,6 +2974,13 @@ export class DynamoDbDocumentsClient implements DocumentClient {
             reduced.document,
             compactedHistory.elementRevisions,
             'edit',
+            undefined,
+            {
+              previousDocument: row.document,
+              operations: reducerOperations,
+              forceSnapshot:
+                createsVersionSnapshot,
+            },
           ),
         ),
         ...receiptActions,
@@ -2793,9 +3035,20 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       ScanIndexForward: false,
       ConsistentRead: true,
     }))
-    const versions = (result.Items ?? []).map(
-      (item) => (item as StoredDocumentVersionItem).version,
+    const nowEpoch = Math.floor(
+      this.now().getTime() / 1_000,
     )
+    const versions = (result.Items ?? [])
+      .map(
+        (item) =>
+          item as StoredDocumentVersionItem,
+      )
+      .filter(
+        (item) =>
+          item.expiresAtEpoch === undefined ||
+          item.expiresAtEpoch > nowEpoch,
+      )
+      .map(({ version }) => version)
     const lastKey = result.LastEvaluatedKey?.recordKey
     return {
       versions,
@@ -3130,7 +3383,11 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     incrementDocument(next, input.access.memberKey, this.now())
     await this.commitMutation(
       input.workspaceId,
-      row,
+      {
+        ...row,
+        publicShareEpoch:
+          (row.publicShareEpoch ?? 0) + 1,
+      },
       next,
       row.elementRevisions,
       'edit',
@@ -3193,6 +3450,13 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     input: InstantiateDocumentTemplateRequest,
   ): Promise<DocumentDetail> {
     await this.ensureTable()
+    const permission = normalizePermissionForActor(
+      input.permission ?? {
+        mode: 'inherit',
+        memberGrants: [],
+      },
+      input.access.memberKey,
+    )
     const requestFingerprint = fingerprint({
       operation: 'instantiate-template',
       templateId: input.templateId,
@@ -3200,6 +3464,7 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       parentId: input.parentId,
       title: input.title,
       position: input.position,
+      permission,
       actorMemberKey: input.access.memberKey,
     })
     if (input.idempotencyKey !== undefined) {
@@ -3259,10 +3524,7 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       parentId: input.parentId,
       title: input.title ?? template.title,
       position: input.position,
-      permission: {
-        mode: 'inherit',
-        memberGrants: [],
-      },
+      permission,
       blocks,
       relations: [],
       idempotencyKey: input.idempotencyKey,
@@ -3812,12 +4074,8 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     input: CreateDocumentPublicShareRequest,
   ): Promise<CreatedDocumentPublicShare> {
     await this.ensureTable()
-    const document = await this.get({
-      workspaceId: input.workspaceId,
-      documentId: input.documentId,
-      access: input.access,
-    })
-    requireCapability(document.capabilities.canShare, 'DocumentShareDenied')
+    const authorizationGuards =
+      requireAuthorizationGuards(input.access)
     const expiresAt = parseShareExpiry(input.expiresAt, this.now())
     if (input.idempotencyKey !== undefined) {
       assertText(input.idempotencyKey, 'idempotencyKey', 500, false)
@@ -3854,33 +4112,59 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       createdAt: now,
     }
     const expiresAtEpoch = Math.floor(expiresAt.getTime() / 1_000)
-    const shareItem: StoredDocumentShareItem = {
-      ...share,
-      workspaceId: input.workspaceId,
-      recordKey: shareKey(input.documentId, shareId),
-      entryType: 'document-share',
-      tokenHash,
-      expiresAtEpoch,
-      ...(idempotencyHash === undefined
-        ? {}
-        : {
-            createIdempotencyKeyHash: idempotencyHash,
-            createRequestFingerprint: requestFingerprint,
-          }),
-    }
-    const linkItem: StoredPublicLinkItem = {
-      workspaceId: publicPartitionKey(tokenHash),
-      recordKey: 'LINK',
-      entryType: 'document-public-link',
-      targetWorkspaceId: input.workspaceId,
-      documentId: input.documentId,
-      shareId,
-      expiresAt: share.expiresAt,
-      expiresAtEpoch,
-    }
-    try {
-      await this.client.send(new TransactWriteCommand({
-        TransactItems: [
+    for (
+      let attempt = 0;
+      attempt <
+        DOCUMENT_CONDITIONAL_RETRY_LIMIT;
+      attempt += 1
+    ) {
+      const authorization =
+        await this.requireShareAuthorization(
+          input.workspaceId,
+          input.documentId,
+          input.access,
+          false,
+        )
+      const documentShareEpochs =
+        documentShareEpochLineage(
+          authorization,
+        )
+      const shareItem: StoredDocumentShareItem = {
+        ...share,
+        workspaceId: input.workspaceId,
+        recordKey: shareKey(
+          input.documentId,
+          shareId,
+        ),
+        entryType: 'document-share',
+        tokenHash,
+        expiresAtEpoch,
+        documentShareEpochs,
+        ...(idempotencyHash === undefined
+          ? {}
+          : {
+              createIdempotencyKeyHash:
+                idempotencyHash,
+              createRequestFingerprint:
+                requestFingerprint,
+            }),
+      }
+      const linkItem: StoredPublicLinkItem = {
+        workspaceId:
+          publicPartitionKey(tokenHash),
+        recordKey: 'LINK',
+        entryType: 'document-public-link',
+        targetWorkspaceId:
+          input.workspaceId,
+        documentId: input.documentId,
+        shareId,
+        expiresAt: share.expiresAt,
+        documentShareEpochs,
+        expiresAtEpoch,
+      }
+      const actions: NonNullable<
+        TransactWriteCommandInput['TransactItems']
+      > = [
           {
             Put: {
               TableName: this.tableName,
@@ -3895,41 +4179,106 @@ export class DynamoDbDocumentsClient implements DocumentClient {
               ConditionExpression: 'attribute_not_exists(workspaceId)',
             },
           },
-        ],
-      }))
-    } catch (error) {
-      if (isConditionalFailure(error) && idempotencyHash !== undefined) {
-        const existing = await this.client.send(new GetCommand({
-          TableName: this.tableName,
-          Key: {
-            workspaceId: input.workspaceId,
-            recordKey: shareKey(input.documentId, shareId),
-          },
-          ConsistentRead: true,
-        }))
-        const stored = existing.Item as
-          | StoredDocumentShareItem
-          | undefined
-        if (
-          stored !== undefined &&
-          stored.createIdempotencyKeyHash === idempotencyHash &&
-          stored.createRequestFingerprint === requestFingerprint &&
-          stored.tokenHash === tokenHash
-        ) {
-          return {
-            share: stripShareStorageFields(stored),
-            token,
+          ...documentAuthorizationConditionChecks(
+            this.tableName,
+            input.workspaceId,
+            authorization,
+          ),
+          ...authorizationGuards.map(
+            authorizationGuardConditionCheck,
+          ),
+        ]
+      assertTransactionSize(actions)
+      try {
+        await this.client.send(
+          new TransactWriteCommand({
+            TransactItems: actions,
+          }),
+        )
+        return { share, token }
+      } catch (error) {
+        if (!isConditionalFailure(error)) {
+          throw normalizeDynamoError(error)
+        }
+        await this.verifyAuthorizationGuard(
+          input.access,
+        )
+        const latestAuthorization =
+          await this.requireShareAuthorization(
+            input.workspaceId,
+            input.documentId,
+            input.access,
+            false,
+          )
+        if (idempotencyHash !== undefined) {
+          const existing =
+            await this.client.send(
+              new GetCommand({
+                TableName: this.tableName,
+                Key: {
+                  workspaceId:
+                    input.workspaceId,
+                  recordKey: shareKey(
+                    input.documentId,
+                    shareId,
+                  ),
+                },
+                ConsistentRead: true,
+              }),
+            )
+          const stored = existing.Item as
+            | StoredDocumentShareItem
+            | undefined
+          if (
+            stored !== undefined &&
+            stored.createIdempotencyKeyHash ===
+              idempotencyHash &&
+            stored.createRequestFingerprint ===
+              requestFingerprint &&
+            stored.tokenHash === tokenHash &&
+            stableStringify(
+              stored.documentShareEpochs,
+            ) ===
+              stableStringify(
+                documentShareEpochLineage(
+                  latestAuthorization,
+                ),
+              )
+          ) {
+            return {
+              share:
+                stripShareStorageFields(
+                  stored,
+                ),
+              token,
+            }
           }
+          if (stored !== undefined) {
+            throw new DocumentError(
+              409,
+              'DocumentShareIdempotencyConflict',
+              'The idempotency key has already been used with different input or before the document was archived.',
+            )
+          }
+        }
+        if (
+          attempt + 1 <
+            DOCUMENT_CONDITIONAL_RETRY_LIMIT
+        ) {
+          continue
         }
         throw new DocumentError(
           409,
-          'DocumentShareIdempotencyConflict',
-          'The idempotency key has already been used with different input.',
+          'DocumentShareConcurrentUpdate',
+          'Document authorization changed too frequently; retry the request.',
         )
       }
-      throw normalizeDynamoError(error)
     }
-    return { share, token }
+    throw new DocumentError(
+      409,
+      'DocumentShareConcurrentUpdate',
+      'Document authorization changed too frequently; retry the request.',
+    )
   }
 
   /** Document の public shares を返します。 */
@@ -3937,13 +4286,12 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     input: DocumentPublicShareRequest,
   ): Promise<StoredDocumentPublicShare[]> {
     await this.ensureTable()
-    const document = await this.get({
-      workspaceId: input.workspaceId,
-      documentId: input.documentId,
-      access: input.access,
-      includeArchived: true,
-    })
-    requireCapability(document.capabilities.canShare, 'DocumentShareDenied')
+    await this.requireShareAuthorization(
+      input.workspaceId,
+      input.documentId,
+      input.access,
+      true,
+    )
     const result = await this.client.send(new QueryCommand({
       TableName: this.tableName,
       KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
@@ -3964,13 +4312,13 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     if (input.shareId === undefined) {
       throw new DocumentError(400, 'DocumentShareIdRequired', 'shareId is required.')
     }
-    const document = await this.get({
-      workspaceId: input.workspaceId,
-      documentId: input.documentId,
-      access: input.access,
-      includeArchived: true,
-    })
-    requireCapability(document.capabilities.canShare, 'DocumentShareDenied')
+    const authorization =
+      await this.requireShareAuthorization(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        true,
+      )
     const result = await this.client.send(new GetCommand({
       TableName: this.tableName,
       Key: {
@@ -3987,8 +4335,9 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       revokedAt: this.now().toISOString(),
     }
     try {
-      await this.client.send(new TransactWriteCommand({
-        TransactItems: [
+      const actions: NonNullable<
+        TransactWriteCommandInput['TransactItems']
+      > = [
           {
             Put: {
               TableName: this.tableName,
@@ -4005,10 +4354,44 @@ export class DynamoDbDocumentsClient implements DocumentClient {
               },
             },
           },
-        ],
-      }))
+          ...documentAuthorizationConditionChecks(
+            this.tableName,
+            input.workspaceId,
+            authorization,
+          ),
+          ...(input.access.authorizationGuards === undefined
+            ? []
+            : input.access.authorizationGuards.map(
+                (guard) =>
+                  authorizationGuardConditionCheck(
+                    validateAuthorizationGuard(
+                      guard,
+                    ),
+                  ),
+              )),
+        ]
+      assertTransactionSize(actions)
+      await this.client.send(
+        new TransactWriteCommand({
+          TransactItems: actions,
+        }),
+      )
     } catch (error) {
       if (isConditionalFailure(error)) {
+        if (
+          input.access.authorizationGuards !==
+          undefined
+        ) {
+          await this.verifyAuthorizationGuard(
+            input.access,
+          )
+        }
+        await this.requireShareAuthorization(
+          input.workspaceId,
+          input.documentId,
+          input.access,
+          true,
+        )
         const latest = await this.client.send(new GetCommand({
           TableName: this.tableName,
           Key: {
@@ -4017,7 +4400,21 @@ export class DynamoDbDocumentsClient implements DocumentClient {
           },
           ConsistentRead: true,
         }))
-        if (latest.Item !== undefined) return stripShareStorageFields(latest.Item)
+        if (
+          latest.Item !== undefined &&
+          (
+            latest.Item as StoredDocumentShareItem
+          ).revokedAt !== undefined
+        ) {
+          return stripShareStorageFields(
+            latest.Item,
+          )
+        }
+        throw new DocumentError(
+          409,
+          'DocumentShareAuthorizationConflict',
+          'Document authorization changed while revoking the public share.',
+        )
       }
       throw normalizeDynamoError(error)
     }
@@ -4059,8 +4456,40 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       throw publicShareNotFound()
     }
     const row = await this.getDocumentRow(lookup.targetWorkspaceId, lookup.documentId)
-    if (row === undefined || row.document.archivedAt !== undefined) throw publicShareNotFound()
-    if (await this.hasArchivedAncestor(lookup.targetWorkspaceId, row.document)) {
+    if (
+      row === undefined ||
+      row.document.archivedAt !== undefined
+    ) {
+      throw publicShareNotFound()
+    }
+    const ancestorRows =
+      await this.loadAncestorRows(
+        lookup.targetWorkspaceId,
+        row.document,
+      )
+    if (
+      ancestorRows.some(
+        ({ document }) =>
+          document.archivedAt !== undefined,
+      )
+    ) {
+      throw publicShareNotFound()
+    }
+    const currentShareEpochs =
+      documentShareEpochLineage({
+        documentRow: row,
+        ancestorRows,
+      })
+    if (
+      stableStringify(
+        lookup.documentShareEpochs,
+      ) !==
+        stableStringify(currentShareEpochs) ||
+      stableStringify(
+        storedShare.documentShareEpochs,
+      ) !==
+        stableStringify(currentShareEpochs)
+    ) {
       throw publicShareNotFound()
     }
     const document = structuredClone(row.document)
@@ -4170,14 +4599,46 @@ export class DynamoDbDocumentsClient implements DocumentClient {
 
   /** Document を安全な text format へ export します。 */
   async exportDocument(input: ExportDocumentRequest): Promise<RenderedDocumentExport> {
-    const document = await this.get({
-      workspaceId: input.workspaceId,
-      documentId: input.documentId,
-      access: input.access,
-      includeArchived: true,
-    })
-    requireCapability(document.capabilities.canExport, 'DocumentExportDenied')
-    return renderDocumentExport(document, input.format)
+    const row = await this.getRequiredDocumentRow(
+      input.workspaceId,
+      input.documentId,
+    )
+    const projectionContext: DocumentProjectionContext = {
+      documentRows: new Map([
+        [row.documentId, Promise.resolve(row)],
+      ]),
+      preferences: new Map(),
+    }
+    const ancestors = await this.loadAncestors(
+      input.workspaceId,
+      row.document,
+      projectionContext,
+    )
+    if (
+      ancestors.some(
+        (ancestor) =>
+          ancestor.archivedAt !== undefined,
+      )
+    ) {
+      throw documentNotFound()
+    }
+    const projected = await this.projectDocument(
+      input.workspaceId,
+      row.document,
+      input.access,
+      projectionContext,
+      ancestors,
+    )
+    requireCapability(
+      projected.capabilities.canExport,
+      'DocumentExportDenied',
+    )
+    validateDocumentPayload(row.document)
+    return renderDocumentArtifact(
+      projected,
+      input.format,
+      projected.id,
+    )
   }
 
   private async ensureTable(): Promise<void> {
@@ -4296,6 +4757,92 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       'DocumentEditDenied',
     )
     return row
+  }
+
+  private async requireShareAuthorization(
+    workspaceId: string,
+    documentId: string,
+    access: DocumentAccessContext,
+    allowArchived: boolean,
+  ): Promise<DocumentShareAuthorizationSnapshot> {
+    const documentRow =
+      await this.getRequiredDocumentRow(
+        workspaceId,
+        documentId,
+      )
+    const ancestorRows =
+      await this.loadAncestorRows(
+        workspaceId,
+        documentRow.document,
+      )
+    const hasArchivedDocument =
+      documentRow.document.archivedAt !== undefined ||
+      ancestorRows.some(
+        ({ document }) =>
+          document.archivedAt !== undefined,
+      )
+    if (hasArchivedDocument && !allowArchived) {
+      throw documentNotFound()
+    }
+    const documentSubject =
+      archivedNeutralAccessSubject(
+        documentRow.document,
+        allowArchived,
+      )
+    const ancestorSubjects =
+      ancestorRows.map(({ document }) =>
+        archivedNeutralAccessSubject(
+          document,
+          allowArchived,
+        )
+      )
+    const capabilities =
+      this.resolveStoredDocumentCapabilities(
+        documentSubject,
+        access,
+        ancestorSubjects,
+      )
+    requireCapability(
+      capabilities.canShare,
+      'DocumentShareDenied',
+    )
+    return {
+      documentRow,
+      ancestorRows,
+    }
+  }
+
+  private async verifyAuthorizationGuard(
+    access: DocumentAccessContext,
+  ): Promise<void> {
+    const guards =
+      requireAuthorizationGuards(access)
+    const results = await Promise.all(
+      guards.map((guard) =>
+        this.client.send(
+          new GetCommand({
+            TableName: guard.tableName,
+            Key: { ...guard.key },
+            ConsistentRead: true,
+          }),
+        )
+      ),
+    )
+    if (
+      results.some(
+        (result, index) =>
+          !authorizationGuardMatches(
+            result.Item,
+            guards[index]!,
+          ),
+      )
+    ) {
+      throw new DocumentError(
+        409,
+        'DocumentAuthorizationChanged',
+        'Authorization changed while creating the public share; authenticate again and retry.',
+      )
+    }
   }
 
   private async projectDocument(
@@ -4452,6 +4999,38 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     return ancestors
   }
 
+  private async loadAncestorRows(
+    workspaceId: string,
+    document: DocumentDetail,
+  ): Promise<StoredDocumentItem[]> {
+    const ancestors: StoredDocumentItem[] = []
+    const seen = new Set([document.id])
+    let parentId = document.parentId
+    while (parentId !== undefined) {
+      if (
+        seen.has(parentId) ||
+        ancestors.length >=
+          DOCUMENT_MAX_TREE_DEPTH
+      ) {
+        throw new DocumentError(
+          409,
+          'InvalidDocumentTree',
+          'The stored document tree contains a cycle or is too deep.',
+        )
+      }
+      seen.add(parentId)
+      const parent =
+        await this.getDocumentRow(
+          workspaceId,
+          parentId,
+        )
+      if (parent === undefined) break
+      ancestors.push(parent)
+      parentId = parent.document.parentId
+    }
+    return ancestors
+  }
+
   private async hasArchivedAncestor(
     workspaceId: string,
     document: DocumentDetail,
@@ -4573,7 +5152,19 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       },
       ConsistentRead: true,
     }))
-    return result.Item as StoredOperationReceipt | undefined
+    const receipt =
+      result.Item as
+        | StoredOperationReceipt
+        | undefined
+    if (
+      receipt !== undefined &&
+      receipt.expiresAtEpoch !== undefined &&
+      receipt.expiresAtEpoch <=
+        Math.floor(this.now().getTime() / 1_000)
+    ) {
+      return undefined
+    }
+    return receipt
   }
 
   private async getDocumentTreeRevision(
@@ -4608,79 +5199,202 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     documentId: string,
     versionId: string,
   ): Promise<StoredDocumentVersionSnapshotItem> {
+    const nowEpoch = Math.floor(
+      this.now().getTime() / 1_000,
+    )
     const numericRevision = parseVersionRevision(
       documentId,
       versionId,
     )
+    let metadata:
+      | StoredDocumentVersionItem
+      | undefined
     if (numericRevision !== undefined) {
-      const [metadataResult, snapshotResult] =
-        await Promise.all([
-          this.client.send(new GetCommand({
-            TableName: this.tableName,
-            Key: {
-              workspaceId,
-              recordKey: versionKey(
-                documentId,
-                numericRevision,
-              ),
-            },
-            ConsistentRead: true,
-          })),
-          this.client.send(new GetCommand({
-            TableName: this.tableName,
-            Key: {
-              workspaceId,
-              recordKey: versionSnapshotKey(
-                documentId,
-                numericRevision,
-              ),
-            },
-            ConsistentRead: true,
-          })),
-        ])
+      const metadataResult =
+        await this.client.send(new GetCommand({
+          TableName: this.tableName,
+          Key: {
+            workspaceId,
+            recordKey: versionKey(
+              documentId,
+              numericRevision,
+            ),
+          },
+          ConsistentRead: true,
+        }))
+      metadata =
+        metadataResult.Item as
+          | StoredDocumentVersionItem
+          | undefined
       if (
-        metadataResult.Item !== undefined &&
-        snapshotResult.Item !== undefined
+        metadata !== undefined &&
+        metadata.expiresAtEpoch !== undefined &&
+        metadata.expiresAtEpoch <= nowEpoch
       ) {
-        return combineVersionSnapshot(
-          metadataResult.Item as StoredDocumentVersionItem,
-          snapshotResult.Item as StoredDocumentVersionSnapshotItem,
-        )
+        metadata = undefined
       }
     }
-    const result = await this.client.send(new QueryCommand({
+    if (metadata === undefined) {
+      const result = await this.client.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':prefix': `VERSION#${documentId}#`,
+        },
+        ConsistentRead: true,
+      }))
+      metadata = (result.Items ?? [])
+        .map(
+          (item) =>
+            item as StoredDocumentVersionItem,
+        )
+        .find(
+          (item) =>
+            item.version.id === versionId &&
+            (
+              item.expiresAtEpoch === undefined ||
+              item.expiresAtEpoch > nowEpoch
+            ),
+        )
+    }
+    if (metadata === undefined) {
+      throw new DocumentError(404, 'DocumentVersionNotFound', 'Document version was not found.')
+    }
+    const targetRevision = metadata.version.revision
+    const exactSnapshotResult =
+      await this.client.send(new GetCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId,
+          recordKey: versionSnapshotKey(
+            documentId,
+            targetRevision,
+          ),
+        },
+        ConsistentRead: true,
+      }))
+    const exactSnapshot =
+      exactSnapshotResult.Item as
+        | StoredDocumentVersionSnapshotItem
+        | undefined
+    if (
+      exactSnapshot !== undefined &&
+      (
+        exactSnapshot.expiresAtEpoch === undefined ||
+        exactSnapshot.expiresAtEpoch > nowEpoch
+      )
+    ) {
+      return combineVersionSnapshot(
+        metadata,
+        exactSnapshot,
+      )
+    }
+    const snapshotPrefix =
+      `VERSION_SNAPSHOT#${encodeKeyPart(documentId)}#`
+    const snapshotResult = await this.client.send(new QueryCommand({
       TableName: this.tableName,
-      KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+      KeyConditionExpression:
+        'workspaceId = :workspaceId AND recordKey BETWEEN :startKey AND :endKey',
       ExpressionAttributeValues: {
         ':workspaceId': workspaceId,
-        ':prefix': `VERSION#${documentId}#`,
-      },
-      ConsistentRead: true,
-    }))
-    const found = (result.Items ?? [])
-      .map((item) => item as StoredDocumentVersionItem)
-      .find(({ version }) => version.id === versionId)
-    if (found === undefined) {
-      throw new DocumentError(404, 'DocumentVersionNotFound', 'Document version was not found.')
-    }
-    const snapshotResult = await this.client.send(new GetCommand({
-      TableName: this.tableName,
-      Key: {
-        workspaceId,
-        recordKey: versionSnapshotKey(
+        ':startKey': snapshotPrefix,
+        ':endKey': versionSnapshotKey(
           documentId,
-          found.version.revision,
+          targetRevision,
         ),
       },
+      ScanIndexForward: false,
+      Limit: 1,
       ConsistentRead: true,
     }))
-    if (snapshotResult.Item === undefined) {
+    const baseSnapshot =
+      snapshotResult.Items?.[0] as
+        | StoredDocumentVersionSnapshotItem
+        | undefined
+    if (
+      baseSnapshot === undefined ||
+      (
+        baseSnapshot.expiresAtEpoch !== undefined &&
+        baseSnapshot.expiresAtEpoch <= nowEpoch
+      )
+    ) {
       throw new DocumentError(404, 'DocumentVersionNotFound', 'Document version was not found.')
     }
-    return combineVersionSnapshot(
-      found,
-      snapshotResult.Item as StoredDocumentVersionSnapshotItem,
+    if (baseSnapshot.version.revision === targetRevision) {
+      return combineVersionSnapshot(
+        metadata,
+        baseSnapshot,
+      )
+    }
+    const deltaResult = await this.client.send(new QueryCommand({
+      TableName: this.tableName,
+      KeyConditionExpression:
+        'workspaceId = :workspaceId AND recordKey BETWEEN :startKey AND :endKey',
+      ExpressionAttributeValues: {
+        ':workspaceId': workspaceId,
+        ':startKey': versionDeltaKey(
+          documentId,
+          baseSnapshot.version.revision + 1,
+        ),
+        ':endKey': versionDeltaKey(
+          documentId,
+          targetRevision,
+        ),
+      },
+      ScanIndexForward: true,
+      ConsistentRead: true,
+    }))
+    let reconstructed = structuredClone(
+      baseSnapshot,
     )
+    const deltas = (deltaResult.Items ?? [])
+      .map(
+        (item) =>
+          item as StoredDocumentVersionDeltaItem,
+      )
+      .filter(
+        (item) =>
+          item.expiresAtEpoch === undefined ||
+          item.expiresAtEpoch > nowEpoch,
+      )
+      .sort(
+        (left, right) =>
+          left.version.revision -
+          right.version.revision,
+      )
+    for (
+      let revision =
+        baseSnapshot.version.revision + 1;
+      revision <= targetRevision;
+      revision += 1
+    ) {
+      const delta = deltas.find(
+        (candidate) =>
+          candidate.version.revision === revision,
+      )
+      if (delta === undefined) {
+        throw new DocumentError(
+          404,
+          'DocumentVersionNotFound',
+          'Document version retention data is incomplete.',
+        )
+      }
+      reconstructed =
+        applyStoredVersionDelta(
+          reconstructed,
+          delta,
+        )
+    }
+    return {
+      ...reconstructed,
+      recordKey: versionSnapshotKey(
+        documentId,
+        targetRevision,
+      ),
+      version: metadata.version,
+      expiresAtEpoch: metadata.expiresAtEpoch,
+    }
   }
 
   private async findStoredComment(
@@ -4746,6 +5460,12 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     summary?: string,
     treeMutationGuard?: DocumentTreeMutationGuard,
   ): Promise<void> {
+    const createsVersionSnapshot =
+      reason === 'restore' ||
+      shouldCreateVersionSnapshot(
+        current,
+        nextDocument,
+      )
     const next: StoredDocumentItem = {
       ...current,
       revision: nextDocument.revision,
@@ -4755,6 +5475,14 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         elementRevisions,
         current.operationConflictFloorRevision ?? 1,
       ),
+      ...(createsVersionSnapshot
+        ? {
+            lastVersionSnapshotRevision:
+              nextDocument.revision,
+            lastVersionSnapshotAt:
+              nextDocument.updatedAt,
+          }
+        : {}),
     }
     const relationDiff = diffRelations(
       backlinkRelations(current.document),
@@ -4770,6 +5498,11 @@ export class DynamoDbDocumentsClient implements DocumentClient {
           next.elementRevisions,
           reason,
           summary,
+          {
+            previousDocument: current.document,
+            forceSnapshot:
+              createsVersionSnapshot,
+          },
         ),
       ),
       ...documentChildIndexMutationActions(
@@ -4838,6 +5571,26 @@ function assertText(
   }
 }
 
+function assertCodeFenceInfoString(
+  value: string,
+  field: string,
+): void {
+  if (
+    typeof value !== 'string' ||
+    !isSafeCodeFenceInfoString(value)
+  ) {
+    throw new DocumentError(
+      400,
+      'InvalidDocumentCodeLanguage',
+      `${field} must be a single safe language identifier.`,
+    )
+  }
+}
+
+function isSafeCodeFenceInfoString(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9_+.-]{0,99}$/u.test(value)
+}
+
 function assertIsoTimestamp(value: string, field: string): void {
   if (
     typeof value !== 'string' ||
@@ -4855,6 +5608,16 @@ function latestIsoTimestamp(
   if (left === undefined) return right
   if (right === undefined) return left
   return left >= right ? left : right
+}
+
+function retentionEpoch(
+  createdAt: string,
+  retentionDays: number,
+): number {
+  return (
+    Math.floor(Date.parse(createdAt) / 1_000) +
+    retentionDays * SECONDS_PER_DAY
+  )
 }
 
 function assertUniqueId(values: Set<string>, id: string, type: string): void {
@@ -5369,18 +6132,58 @@ function compactElementRevisionHistory(
   }
 }
 
+function shouldCreateVersionSnapshot(
+  current: StoredDocumentItem,
+  nextDocument: DocumentDetail,
+): boolean {
+  if (
+    current.lastVersionSnapshotRevision === undefined ||
+    current.lastVersionSnapshotAt === undefined
+  ) {
+    return true
+  }
+  return (
+    nextDocument.revision -
+      current.lastVersionSnapshotRevision >=
+      DOCUMENT_VERSION_SNAPSHOT_INTERVAL ||
+    Date.parse(nextDocument.updatedAt) -
+      Date.parse(current.lastVersionSnapshotAt) >=
+      DOCUMENT_VERSION_SNAPSHOT_MAX_AGE_MS
+  )
+}
+
+/**
+ * Version row を full snapshot または compact delta として保存する設定です。
+ */
+type CreateVersionItemsOptions = {
+  /** Delta の直前にある canonical snapshot です。 */
+  previousDocument?: DocumentDetail
+  /** Operation mutation を再構築する canonical operation batch です。 */
+  operations?: readonly DocumentOperation[]
+  /** Revision/time interval にかかわらず full snapshot を保存します。 */
+  forceSnapshot?: boolean
+}
+
+/**
+ * 一つの version mutation が transactionへ追加する rows です。
+ */
+type CreatedVersionItems = {
+  /** Version list 用の compact metadata row です。 */
+  metadata: StoredDocumentVersionItem
+  /** 定期 compaction point となる full snapshot row です。 */
+  snapshot?: StoredDocumentVersionSnapshotItem
+  /** Full snapshot 間を復元する compact delta row です。 */
+  delta?: StoredDocumentVersionDeltaItem
+}
+
 function createVersionItems(
   workspaceId: string,
   document: DocumentDetail,
   elementRevisions: Record<string, number>,
   reason: DocumentVersion['reason'],
   summary?: string,
-): {
-  /** Version list 用の compact metadata row です。 */
-  metadata: StoredDocumentVersionItem
-  /** Restore 用の immutable snapshot row です。 */
-  snapshot: StoredDocumentVersionSnapshotItem
-} {
+  options: CreateVersionItemsOptions = {},
+): CreatedVersionItems {
   const version: DocumentVersion = {
     schemaVersion: DOCUMENT_SCHEMA_VERSION,
     id: `${document.id}:${document.revision}`,
@@ -5393,20 +6196,100 @@ function createVersionItems(
     createdByUserId: document.updatedByUserId,
     createdAt: document.updatedAt,
   }
+  const expiresAtEpoch =
+    retentionEpoch(
+      document.updatedAt,
+      DOCUMENT_VERSION_RETENTION_DAYS,
+    )
+  const metadata: StoredDocumentVersionItem = {
+    workspaceId,
+    recordKey: versionKey(document.id, document.revision),
+    entryType: 'document-version',
+    version,
+    expiresAtEpoch,
+  }
+  if (
+    options.forceSnapshot === true ||
+    options.previousDocument === undefined
+  ) {
+    return {
+      metadata,
+      snapshot: {
+        workspaceId,
+        recordKey: versionSnapshotKey(document.id, document.revision),
+        entryType: 'document-version-snapshot',
+        version,
+        document: structuredClone(document),
+        elementRevisions: { ...elementRevisions },
+        expiresAtEpoch:
+          expiresAtEpoch +
+          Math.ceil(
+            DOCUMENT_VERSION_SNAPSHOT_MAX_AGE_MS /
+              1_000,
+          ),
+      },
+    }
+  }
+  const changedFields: Record<string, unknown> = {}
+  const removedFields: string[] = []
+  const operationManagedFields = new Set(
+    options.operations === undefined
+      ? []
+      : ['blocks', 'whiteboard', 'relations'],
+  )
+  for (const [field, value] of Object.entries(document)) {
+    if (
+      field === 'revision' ||
+      operationManagedFields.has(field)
+    ) {
+      continue
+    }
+    const previousValue =
+      (options.previousDocument as unknown as Record<
+        string,
+        unknown
+      >)[field]
+    if (
+      stableStringify(previousValue) !==
+      stableStringify(value)
+    ) {
+      changedFields[field] = structuredClone(value)
+    }
+  }
+  for (const field of Object.keys(options.previousDocument)) {
+    if (
+      field !== 'revision' &&
+      !operationManagedFields.has(field) &&
+      !(field in document)
+    ) {
+      removedFields.push(field)
+    }
+  }
   return {
-    metadata: {
+    metadata,
+    delta: {
       workspaceId,
-      recordKey: versionKey(document.id, document.revision),
-      entryType: 'document-version',
+      recordKey: versionDeltaKey(
+        document.id,
+        document.revision,
+      ),
+      entryType: 'document-version-delta',
       version,
-    },
-    snapshot: {
-      workspaceId,
-      recordKey: versionSnapshotKey(document.id, document.revision),
-      entryType: 'document-version-snapshot',
-      version,
-      document: structuredClone(document),
-      elementRevisions: { ...elementRevisions },
+      baseRevision: options.previousDocument.revision,
+      ...(options.operations === undefined
+        ? {}
+        : {
+            operations: structuredClone(
+              options.operations,
+            ),
+          }),
+      ...(Object.keys(changedFields).length === 0
+        ? {}
+        : { changedFields }),
+      ...(removedFields.length === 0
+        ? {}
+        : { removedFields }),
+      expiresAtEpoch,
     },
   }
 }
@@ -5425,6 +6308,256 @@ function currentDocumentPut(
       ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
     },
   }
+}
+
+function archivedNeutralAccessSubject(
+  document: DocumentAccessSubject,
+  ignoreArchived: boolean,
+): DocumentAccessSubject {
+  return {
+    scope: structuredClone(document.scope),
+    permission: structuredClone(
+      document.permission,
+    ),
+    ...(
+      ignoreArchived ||
+      document.archivedAt === undefined
+        ? {}
+        : { archivedAt: document.archivedAt }
+    ),
+  }
+}
+
+function requireAuthorizationGuards(
+  access: DocumentAccessContext,
+): readonly DocumentAuthorizationGenerationGuard[] {
+  if (
+    access.authorizationGuards === undefined ||
+    access.authorizationGuards.length === 0
+  ) {
+    throw new DocumentError(
+      503,
+      'DocumentAuthorizationGuardRequired',
+      'Public share creation requires a current authorization generation.',
+    )
+  }
+  return access.authorizationGuards.map(
+    validateAuthorizationGuard,
+  )
+}
+
+function validateAuthorizationGuard(
+  guard: DocumentAuthorizationGenerationGuard,
+): DocumentAuthorizationGenerationGuard {
+  if (
+    !isRecord(guard) ||
+    typeof guard.tableName !== 'string' ||
+    !/^[A-Za-z0-9_.-]{3,255}$/u.test(
+      guard.tableName,
+    ) ||
+    !isRecord(guard.key) ||
+    Object.keys(guard.key).length === 0 ||
+    Object.values(guard.key).some(
+      (value) =>
+        typeof value !== 'string' ||
+        value.length === 0,
+    ) ||
+    typeof guard.generationAttribute !==
+      'string' ||
+    !/^[A-Za-z][A-Za-z0-9_]*$/u.test(
+      guard.generationAttribute,
+    ) ||
+    (
+      typeof guard.expectedGeneration !==
+        'string' &&
+      (
+        typeof guard.expectedGeneration !==
+          'number' ||
+        !Number.isSafeInteger(
+          guard.expectedGeneration,
+        )
+      )
+    ) ||
+    (
+      typeof guard.expectedGeneration ===
+        'string' &&
+      guard.expectedGeneration.length === 0
+    ) ||
+    (
+      guard.allowMissingWhenExpectedZero !==
+        undefined &&
+      (
+        guard.allowMissingWhenExpectedZero !==
+          true ||
+        guard.expectedGeneration !== 0
+      )
+    ) ||
+    (
+      guard.requiredAttributes !== undefined &&
+      (
+        !isRecord(
+          guard.requiredAttributes,
+        ) ||
+        Object.entries(
+          guard.requiredAttributes,
+        ).some(
+          ([attribute, value]) =>
+            !/^[A-Za-z][A-Za-z0-9_]*$/u.test(
+              attribute,
+            ) ||
+            attribute ===
+              guard.generationAttribute ||
+            (
+              typeof value !== 'string' &&
+              typeof value !== 'number' &&
+              typeof value !== 'boolean'
+            ) ||
+            (
+              typeof value === 'number' &&
+              !Number.isFinite(value)
+            )
+        )
+      )
+    )
+  ) {
+    throw new DocumentError(
+      500,
+      'InvalidDocumentAuthorizationGuard',
+      'The authorization generation guard is invalid.',
+    )
+  }
+  return guard
+}
+
+function authorizationGuardExpectedAttributes(
+  guard: DocumentAuthorizationGenerationGuard,
+): Record<string, string | number | boolean> {
+  return {
+    [guard.generationAttribute]:
+      guard.expectedGeneration,
+    ...guard.requiredAttributes,
+  }
+}
+
+function authorizationGuardMatches(
+  item: Record<string, unknown> | undefined,
+  guard: DocumentAuthorizationGenerationGuard,
+): boolean {
+  if (item === undefined) {
+    return (
+      guard.allowMissingWhenExpectedZero ===
+        true &&
+      guard.expectedGeneration === 0
+    )
+  }
+  return Object.entries(
+    authorizationGuardExpectedAttributes(guard),
+  ).every(
+    ([attribute, expected]) =>
+      item[attribute] === expected,
+  )
+}
+
+function authorizationGuardConditionCheck(
+  guard: DocumentAuthorizationGenerationGuard,
+): NonNullable<
+  TransactWriteCommandInput['TransactItems']
+>[number] {
+  const expectedAttributes =
+    authorizationGuardExpectedAttributes(guard)
+  const entries = Object.entries(
+    expectedAttributes,
+  ).sort(([left], [right]) =>
+    left.localeCompare(right)
+  )
+  const expressionAttributeNames =
+    Object.fromEntries(
+      entries.map(([attribute], index) => [
+        `#authorization${index}`,
+        attribute,
+      ]),
+    )
+  const expressionAttributeValues =
+    Object.fromEntries(
+      entries.map(([, value], index) => [
+        `:authorization${index}`,
+        value,
+      ]),
+    )
+  const expectedExpression = entries
+    .map(
+      (_entry, index) =>
+        `#authorization${index} = :authorization${index}`,
+    )
+    .join(' AND ')
+  const missingKeyAttribute =
+    Object.keys(guard.key).sort()[0]
+  if (
+    guard.allowMissingWhenExpectedZero ===
+      true &&
+    missingKeyAttribute !== undefined
+  ) {
+    expressionAttributeNames
+      ['#authorizationKey'] =
+        missingKeyAttribute
+  }
+  return {
+    ConditionCheck: {
+      TableName: guard.tableName,
+      Key: { ...guard.key },
+      ConditionExpression:
+        guard.allowMissingWhenExpectedZero ===
+          true
+          ? `(attribute_not_exists(#authorizationKey) OR (${expectedExpression}))`
+          : expectedExpression,
+      ExpressionAttributeNames:
+        expressionAttributeNames,
+      ExpressionAttributeValues:
+        expressionAttributeValues,
+    },
+  }
+}
+
+function documentAuthorizationConditionChecks(
+  tableName: string,
+  workspaceId: string,
+  authorization: DocumentShareAuthorizationSnapshot,
+): NonNullable<
+  TransactWriteCommandInput['TransactItems']
+> {
+  return [
+    authorization.documentRow,
+    ...authorization.ancestorRows,
+  ].map((row) => ({
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        workspaceId,
+        recordKey: documentKey(
+          row.documentId,
+        ),
+      },
+      ConditionExpression:
+        'revision = :expectedRevision',
+      ExpressionAttributeValues: {
+        ':expectedRevision': row.revision,
+      },
+    },
+  }))
+}
+
+function documentShareEpochLineage(
+  authorization: DocumentShareAuthorizationSnapshot,
+): Record<string, number> {
+  return Object.fromEntries(
+    [
+      authorization.documentRow,
+      ...authorization.ancestorRows,
+    ].map((row) => [
+      row.documentId,
+      row.publicShareEpoch ?? 0,
+    ]),
+  )
 }
 
 function documentChildIndexPut(
@@ -5534,11 +6667,23 @@ function documentTreeRevisionPut(
 
 function versionPutActions(
   tableName: string,
-  items: ReturnType<typeof createVersionItems>,
+  items: CreatedVersionItems,
 ): NonNullable<TransactWriteCommandInput['TransactItems']> {
-  assertDynamoItemSize(items.metadata)
-  assertDynamoItemSize(items.snapshot)
-  return [items.metadata, items.snapshot].map((item) => ({
+  const rows = [
+    items.metadata,
+    items.snapshot,
+    items.delta,
+  ].filter(
+    (
+      item,
+    ): item is
+      | StoredDocumentVersionItem
+      | StoredDocumentVersionSnapshotItem
+      | StoredDocumentVersionDeltaItem =>
+      item !== undefined,
+  )
+  for (const row of rows) assertDynamoItemSize(row)
+  return rows.map((item) => ({
     Put: {
       TableName: tableName,
       Item: item,
@@ -5550,6 +6695,15 @@ function versionPutActions(
 
 function versionSnapshotKey(documentId: string, revision: number): string {
   return `VERSION_SNAPSHOT#${encodeKeyPart(documentId)}#${revision
+    .toString()
+    .padStart(DOCUMENT_VERSION_REVISION_WIDTH, '0')}`
+}
+
+function versionDeltaKey(
+  documentId: string,
+  revision: number,
+): string {
+  return `VERSION_DELTA#${encodeKeyPart(documentId)}#${revision
     .toString()
     .padStart(DOCUMENT_VERSION_REVISION_WIDTH, '0')}`
 }
@@ -5586,6 +6740,71 @@ function combineVersionSnapshot(
   return {
     ...snapshot,
     version: metadata.version,
+  }
+}
+
+function applyStoredVersionDelta(
+  base: StoredDocumentVersionSnapshotItem,
+  delta: StoredDocumentVersionDeltaItem,
+): StoredDocumentVersionSnapshotItem {
+  if (
+    delta.baseRevision !== base.document.revision ||
+    delta.version.documentId !==
+      base.document.id ||
+    delta.version.revision !==
+      delta.baseRevision + 1
+  ) {
+    throw new DocumentError(
+      500,
+      'DocumentVersionCorrupt',
+      'Document version delta chain is invalid.',
+    )
+  }
+  let document = structuredClone(base.document)
+  let elementRevisions = {
+    ...base.elementRevisions,
+  }
+  if (delta.operations !== undefined) {
+    const reduced = reduceDocumentOperations({
+      document,
+      elementRevisions,
+      baseRevision: document.revision,
+      nextRevision: delta.version.revision,
+      operations: delta.operations,
+    })
+    document = reduced.document
+    elementRevisions =
+      reduced.elementRevisions
+  } else {
+    document.revision =
+      delta.version.revision
+  }
+  const mutableDocument =
+    document as unknown as Record<string, unknown>
+  for (
+    const [field, value] of Object.entries(
+      delta.changedFields ?? {},
+    )
+  ) {
+    mutableDocument[field] =
+      structuredClone(value)
+  }
+  for (const field of delta.removedFields ?? []) {
+    delete mutableDocument[field]
+  }
+  document.revision = delta.version.revision
+  validateDocumentPayload(document)
+  return {
+    workspaceId: delta.workspaceId,
+    recordKey: versionSnapshotKey(
+      document.id,
+      document.revision,
+    ),
+    entryType: 'document-version-snapshot',
+    version: delta.version,
+    document,
+    elementRevisions,
+    expiresAtEpoch: delta.expiresAtEpoch,
   }
 }
 
@@ -5979,6 +7198,7 @@ function stripShareStorageFields(item: Record<string, unknown>): StoredDocumentP
     entryType: _entryType,
     tokenHash: _tokenHash,
     expiresAtEpoch: _expiresAtEpoch,
+    documentShareEpochs: _documentShareEpochs,
     createIdempotencyKeyHash: _createIdempotencyKeyHash,
     createRequestFingerprint: _createRequestFingerprint,
     ...share

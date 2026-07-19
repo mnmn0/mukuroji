@@ -4,6 +4,7 @@ import type {
   DocumentDetail,
   DocumentOperation,
   DocumentRelationTarget,
+  PublicDocument,
 } from '@mukuroji/contracts'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { createMutationAuditContext } from './audit'
@@ -12,12 +13,30 @@ import {
   DynamoDbDocumentsClient,
   reduceDocumentOperations,
   renderDocumentExport,
+  renderPublicDocumentExport,
   validateDocumentPayload,
 } from './documents'
 
 const ownerAccess = {
   memberKey: 'owner@example.com',
   workspaceRole: 'owner',
+} as const
+
+const ownerShareAccess = {
+  ...ownerAccess,
+  authorizationGuards: [{
+    tableName: 'workspace-access-table',
+    key: {
+      workspaceId: 'workspace-1',
+      recordKey: 'MEMBER#owner@example.com',
+    },
+    generationAttribute: 'version',
+    expectedGeneration: 1,
+    requiredAttributes: {
+      entryType: 'workspace-member',
+      status: 'active',
+    },
+  }],
 } as const
 
 test('merges stale-base operations on independent elements and rejects a same-element conflict atomically', () => {
@@ -313,6 +332,83 @@ test('stores operation receipts for idempotent retry and rejects operation ID re
   })
 })
 
+test('reuses an operation ID after its retained receipt has logically expired', async () => {
+  const memory = createMemoryDocumentClient()
+  let now = new Date('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => now)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Expired operation receipt',
+    blocks: [{
+      id: 'block-a',
+      type: 'paragraph',
+      text: 'A1',
+    }],
+  })
+
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-block',
+        operationId: 'reusable-operation',
+        blockId: 'block-a',
+        block: {
+          id: 'block-a',
+          type: 'paragraph',
+          text: 'A2',
+        },
+      }],
+    },
+  })
+
+  now = new Date('2026-08-18T00:00:00.000Z')
+  const reused = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 2,
+      clientId: 'editor-2',
+      operations: [{
+        type: 'update-block',
+        operationId: 'reusable-operation',
+        blockId: 'block-a',
+        block: {
+          id: 'block-a',
+          type: 'paragraph',
+          text: 'A3',
+        },
+      }],
+    },
+  })
+
+  expect(reused.revision).toBe(3)
+  expect(
+    memory.items().filter(
+      ({ entryType }) =>
+        entryType === 'document-operation',
+    ),
+  ).toEqual([
+    expect.objectContaining({
+      clientId: 'editor-2',
+      operationId: 'reusable-operation',
+      revision: 3,
+      createdAt: now.toISOString(),
+      expiresAtEpoch:
+        Math.floor(now.getTime() / 1_000) +
+        30 * 24 * 60 * 60,
+    }),
+  ])
+})
+
 test('compacts deleted element revisions while rejecting bases older than the conflict floor', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)
@@ -471,6 +567,139 @@ test('creates an immutable version for every mutation and restores an old snapsh
     { revision: 2, reason: 'edit' },
     { revision: 1, reason: 'create' },
   ])
+})
+
+test('stores operation deltas with retention and periodically compacts them into restorable snapshots', async () => {
+  const memory = createMemoryDocumentClient()
+  let currentTime =
+    new Date('2026-07-18T00:00:00.000Z')
+  const client = createClient(
+    memory,
+    () => currentTime,
+  )
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Compact versions',
+    blocks: [{
+      id: 'block-a',
+      type: 'paragraph',
+      text: 'original',
+    }],
+  })
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-block',
+        operationId: 'operation-1',
+        blockId: 'block-a',
+        block: {
+          id: 'block-a',
+          type: 'paragraph',
+          text: 'edited',
+        },
+      }],
+    },
+  })
+
+  expect(
+    memory.items().filter(
+      ({ entryType }) =>
+        entryType ===
+          'document-version-snapshot',
+    ),
+  ).toHaveLength(1)
+  expect(
+    memory.items().filter(
+      ({ entryType }) =>
+        entryType === 'document-version-delta',
+    ),
+  ).toEqual([
+    expect.objectContaining({
+      baseRevision: 1,
+      expiresAtEpoch:
+        expect.any(Number),
+      version: expect.objectContaining({
+        revision: 2,
+      }),
+      operations: [
+        expect.objectContaining({
+          operationId: 'operation-1',
+        }),
+      ],
+    }),
+  ])
+  expect(
+    memory.items().find(
+      ({ entryType }) =>
+        entryType === 'document-operation',
+    ),
+  ).toEqual(expect.objectContaining({
+    expiresAtEpoch: expect.any(Number),
+  }))
+
+  currentTime =
+    new Date('2026-07-19T01:00:00.000Z')
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 2,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-block',
+        operationId: 'operation-2',
+        blockId: 'block-a',
+        block: {
+          id: 'block-a',
+          type: 'paragraph',
+          text: 'edited later',
+        },
+      }],
+    },
+  })
+  expect(
+    memory.items()
+      .filter(
+        ({ entryType }) =>
+          entryType ===
+            'document-version-snapshot',
+      )
+      .map(
+        ({ version }) =>
+          (
+            version as {
+              revision: number
+            }
+          ).revision,
+      )
+      .sort(),
+  ).toEqual([1, 3])
+
+  const restored = await client.restoreVersion({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    versionId: `${created.id}:2`,
+    expectedRevision: 3,
+    validateRelationTargets:
+      async () => undefined,
+  })
+  expect(restored).toMatchObject({
+    revision: 4,
+    blocks: [{
+      id: 'block-a',
+      text: 'edited',
+    }],
+  })
 })
 
 test('revalidates relation and Whiteboard Work Item targets before restoring a snapshot', async () => {
@@ -750,6 +979,14 @@ test('reuses deterministic cloned block IDs when template instantiation is retri
     templateId: template.id,
     access: ownerAccess,
     scope: { type: 'workspace' as const },
+    permission: {
+      mode: 'private' as const,
+      memberGrants: [{
+        memberKey:
+          'page-viewer@example.com',
+        role: 'viewer' as const,
+      }],
+    },
     idempotencyKey: 'instantiate-template-request-1',
   }
 
@@ -766,8 +1003,18 @@ test('reuses deterministic cloned block IDs when template instantiation is retri
   expect(retried).toEqual(created)
   expect(created.kind).toBe('page')
   expect(created.permission).toEqual({
-    mode: 'inherit',
-    memberGrants: [],
+    mode: 'private',
+    memberGrants: [
+      {
+        memberKey:
+          'page-viewer@example.com',
+        role: 'viewer',
+      },
+      {
+        memberKey: ownerAccess.memberKey,
+        role: 'manager',
+      },
+    ],
   })
   expect(
     created.kind === 'page' ? created.blocks[0]?.id : undefined,
@@ -777,6 +1024,18 @@ test('reuses deterministic cloned block IDs when template instantiation is retri
       ({ entryType }) => entryType === 'document',
     ),
   ).toHaveLength(2)
+  await expect(
+    client.instantiateTemplate({
+      ...input,
+      permission: {
+        mode: 'inherit',
+        memberGrants: [],
+      },
+    }),
+  ).rejects.toMatchObject({
+    code: 'DocumentCreateIdempotencyConflict',
+    status: 409,
+  })
 })
 
 test('does not reveal an idempotent create result after the actor loses private access', async () => {
@@ -1357,11 +1616,12 @@ test('indexes Whiteboard work-item cards as transactional backlinks', async () =
 
 test('hashes public tokens at rest, carries allowExport, and checks expiry synchronously', async () => {
   const memory = createMemoryDocumentClient()
+  seedOwnerAuthorization(memory)
   let currentTime = new Date('2026-07-18T00:00:00.000Z')
   const client = createClient(memory, () => currentTime)
   const created = await client.create({
     workspaceId: 'workspace-1',
-    access: ownerAccess,
+    access: ownerShareAccess,
     kind: 'page',
     scope: { type: 'workspace' },
     title: 'Shared',
@@ -1370,7 +1630,7 @@ test('hashes public tokens at rest, carries allowExport, and checks expiry synch
   const result = await client.createPublicShare({
     workspaceId: 'workspace-1',
     documentId: created.id,
-    access: ownerAccess,
+    access: ownerShareAccess,
     expiresAt: '2026-07-19T00:00:00.000Z',
     allowExport: true,
     idempotencyKey: 'public-share-request-1',
@@ -1378,7 +1638,7 @@ test('hashes public tokens at rest, carries allowExport, and checks expiry synch
   const retried = await client.createPublicShare({
     workspaceId: 'workspace-1',
     documentId: created.id,
-    access: ownerAccess,
+    access: ownerShareAccess,
     expiresAt: '2026-07-19T00:00:00.000Z',
     allowExport: true,
     idempotencyKey: 'public-share-request-1',
@@ -1417,7 +1677,7 @@ test('hashes public tokens at rest, carries allowExport, and checks expiry synch
   await expect(client.createPublicShare({
     workspaceId: 'workspace-1',
     documentId: created.id,
-    access: ownerAccess,
+    access: ownerShareAccess,
     expiresAt: '2026-07-19T00:00:00.000Z',
     allowExport: false,
     idempotencyKey: 'public-share-request-1',
@@ -1430,6 +1690,171 @@ test('hashes public tokens at rest, carries allowExport, and checks expiry synch
   await expect(client.resolvePublicShare(result.token)).rejects.toMatchObject({
     code: 'DocumentPublicShareNotFound',
     status: 404,
+  })
+})
+
+test('permanently invalidates descendant public links across ancestor archive and permits archived revocation', async () => {
+  const memory = createMemoryDocumentClient()
+  seedOwnerAuthorization(memory)
+  const client = createClient(memory)
+  const folder = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'folder',
+    scope: { type: 'workspace' },
+    title: 'Shared folder',
+  })
+  const child = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    parentId: folder.id,
+    title: 'Shared child',
+    blocks: [{
+      id: 'block-a',
+      type: 'paragraph',
+      text: 'shared',
+    }],
+  })
+  const retained = await client.createPublicShare({
+    workspaceId: 'workspace-1',
+    documentId: child.id,
+    access: ownerShareAccess,
+    expiresAt: '2026-07-19T00:00:00.000Z',
+    idempotencyKey: 'ancestor-archive-retained',
+  })
+  const revoked = await client.createPublicShare({
+    workspaceId: 'workspace-1',
+    documentId: child.id,
+    access: ownerShareAccess,
+    expiresAt: '2026-07-19T00:00:00.000Z',
+    idempotencyKey: 'ancestor-archive-revoked',
+  })
+
+  const archived = await client.archive({
+    workspaceId: 'workspace-1',
+    documentId: folder.id,
+    access: ownerAccess,
+    expectedRevision: 1,
+  })
+  await expect(
+    client.resolvePublicShare(retained.token),
+  ).rejects.toMatchObject({
+    code: 'DocumentPublicShareNotFound',
+    status: 404,
+  })
+  expect(
+    await client.listPublicShares({
+      workspaceId: 'workspace-1',
+      documentId: child.id,
+      access: ownerShareAccess,
+    }),
+  ).toHaveLength(2)
+  expect(
+    await client.revokePublicShare({
+      workspaceId: 'workspace-1',
+      documentId: child.id,
+      shareId: revoked.share.id,
+      access: ownerShareAccess,
+    }),
+  ).toMatchObject({
+    id: revoked.share.id,
+    revokedAt: expect.any(String),
+  })
+
+  await client.restoreArchived({
+    workspaceId: 'workspace-1',
+    documentId: folder.id,
+    access: ownerAccess,
+    expectedRevision: archived.revision,
+  })
+  await expect(
+    client.resolvePublicShare(retained.token),
+  ).rejects.toMatchObject({
+    code: 'DocumentPublicShareNotFound',
+    status: 404,
+  })
+  const replacement =
+    await client.createPublicShare({
+      workspaceId: 'workspace-1',
+      documentId: child.id,
+      access: ownerShareAccess,
+      expiresAt:
+        '2026-07-19T00:00:00.000Z',
+      idempotencyKey:
+        'ancestor-archive-replacement',
+    })
+  expect(
+    await client.resolvePublicShare(
+      replacement.token,
+    ),
+  ).toMatchObject({
+    document: { id: child.id },
+  })
+})
+
+test('condition-checks authorization generations in the public share transaction', async () => {
+  const memory = createMemoryDocumentClient()
+  seedOwnerAuthorization(memory)
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Authorization race',
+    blocks: [],
+  })
+  memory.beforeTransaction(() => {
+    seedOwnerAuthorization(memory, 2)
+  })
+
+  await expect(client.createPublicShare({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerShareAccess,
+    expiresAt: '2026-07-19T00:00:00.000Z',
+  })).rejects.toMatchObject({
+    code: 'DocumentAuthorizationChanged',
+    status: 409,
+  })
+  expect(
+    memory.items().filter(
+      ({ entryType }) =>
+        entryType === 'document-share' ||
+        entryType ===
+          'document-public-link',
+    ),
+  ).toEqual([])
+
+  const refreshedAccess = {
+    ...ownerAccess,
+    authorizationGuards: [
+      {
+        ...ownerShareAccess
+          .authorizationGuards[0],
+        expectedGeneration: 2,
+      },
+      {
+        tableName: 'planning-table',
+        key: {
+          directoryId: 'workspace-1',
+          recordKey: 'META',
+        },
+        generationAttribute: 'revision',
+        expectedGeneration: 0,
+        allowMissingWhenExpectedZero: true,
+      },
+    ],
+  } as const
+  expect(await client.createPublicShare({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: refreshedAccess,
+    expiresAt: '2026-07-19T00:00:00.000Z',
+  })).toMatchObject({
+    share: { documentId: created.id },
   })
 })
 
@@ -2135,6 +2560,54 @@ test('reads recent Documents from the newest-first index', async () => {
   ).toHaveLength(3)
 })
 
+test('exports a private canonical document through a redacted viewer projection', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const viewerAccess = {
+    memberKey: 'viewer@example.com',
+    workspaceRole: 'member' as const,
+  }
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Private export',
+    permission: {
+      mode: 'private',
+      memberGrants: [{
+        memberKey: viewerAccess.memberKey,
+        role: 'viewer',
+      }],
+    },
+    blocks: [{
+      id: 'block-a',
+      type: 'paragraph',
+      text: 'viewer content',
+    }],
+  })
+
+  const rendered = await client.exportDocument({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: viewerAccess,
+    format: 'json',
+  })
+  expect(
+    JSON.parse(rendered.content),
+  ).toMatchObject({
+    id: created.id,
+    permission: {
+      mode: 'private',
+      memberGrants: [],
+    },
+    blocks: [{
+      id: 'block-a',
+      text: 'viewer content',
+    }],
+  })
+})
+
 test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloads', () => {
   const page = createPage({
     title: 'Export / document',
@@ -2154,6 +2627,62 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
   expect(markdown.content).toContain('\\<script\\>alert(1)\\</script\\>')
   expect(markdown.content).toContain('A\\|B')
   expect(JSON.parse(json.content)).toMatchObject({ id: page.id, revision: 1 })
+
+  const fencedCode = renderDocumentExport(
+    createPage({
+      blocks: [{
+        id: 'block-code',
+        type: 'code',
+        language: 'typescript',
+        code:
+          'const marker = "```"\n```\n<img src=x onerror=alert(1)>',
+      }],
+    }),
+    'markdown',
+  )
+  expect(fencedCode.content).toContain(
+    '````typescript\n',
+  )
+  expect(fencedCode.content).toContain(
+    '\n````\n',
+  )
+  expect(() =>
+    validateDocumentPayload(createPage({
+      blocks: [{
+        id: 'block-code',
+        type: 'code',
+        language:
+          'typescript\n```\n<img src=x onerror=alert(1)>',
+        code: 'unsafe info string',
+      }],
+    }))
+  ).toThrow(expect.objectContaining({
+    code: 'InvalidDocumentCodeLanguage',
+  }))
+
+  const legacyPublicPage: PublicDocument = {
+    kind: 'page',
+    title: 'Legacy public page',
+    updatedAt: '2026-07-18T00:00:00.000Z',
+    blocks: [{
+      id: 'block-code',
+      type: 'code',
+      language:
+        'typescript\n```\n<img src=x onerror=alert(1)>',
+      code: 'legacy ``` source',
+    }],
+  }
+  const legacyPublicMarkdown =
+    renderPublicDocumentExport(
+      legacyPublicPage,
+      'markdown',
+    )
+  expect(legacyPublicMarkdown.content).toContain(
+    '````\nlegacy ``` source\n````',
+  )
+  expect(legacyPublicMarkdown.content).not.toContain(
+    '<img src=x onerror=alert(1)>',
+  )
 
   const whiteboard = createWhiteboard()
   const svg = renderDocumentExport(whiteboard, 'svg')
@@ -2177,6 +2706,93 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
       url: 'javascript:alert(1)',
     }],
   }))).toThrow(expect.objectContaining({ code: 'InvalidDocumentUrl' }))
+
+  const missingBounds = createWhiteboard()
+  missingBounds.whiteboard.objects[0]!.bounds =
+    {} as typeof missingBounds.whiteboard.objects[0]['bounds']
+  expect(() =>
+    validateDocumentPayload(missingBounds)
+  ).toThrow(expect.objectContaining({
+    code: 'InvalidWhiteboardBounds',
+  }))
+
+  const invalidChecklist = createPage({
+    blocks: [{
+      id: 'block-checklist',
+      type: 'checklist',
+      items: [{
+        id: 'item-a',
+        text: 'unchecked',
+        checked:
+          undefined as unknown as boolean,
+      }],
+    }],
+  })
+  expect(() =>
+    validateDocumentPayload(invalidChecklist)
+  ).toThrow(expect.objectContaining({
+    code: 'InvalidDocumentBlock',
+  }))
+
+  const invalidDiagram = createPage({
+    blocks: [{
+      id: 'block-diagram',
+      type: 'diagram',
+      format:
+        'html' as unknown as 'text',
+      source: 'unsafe',
+    }],
+  })
+  expect(() =>
+    validateDocumentPayload(invalidDiagram)
+  ).toThrow(expect.objectContaining({
+    code: 'InvalidDocumentBlock',
+  }))
+
+  const invalidShape = createWhiteboard()
+  invalidShape.whiteboard.objects = [{
+    id: 'shape-a',
+    type: 'shape',
+    shape:
+      'hexagon' as unknown as 'rectangle',
+    bounds: {
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 100,
+    },
+    zIndex: 1,
+  }]
+  expect(() =>
+    validateDocumentPayload(invalidShape)
+  ).toThrow(expect.objectContaining({
+    code: 'InvalidWhiteboardObject',
+  }))
+
+  const invalidConnector = createWhiteboard()
+  invalidConnector.whiteboard.connectors = [{
+    id: 'connector-a',
+    from: {
+      objectId: 'object-1',
+      anchor:
+        'diagonal' as unknown as 'top',
+    },
+    to: { objectId: 'object-1' },
+    lineStyle:
+      'dotted' as unknown as 'solid',
+  }]
+  expect(() =>
+    validateDocumentPayload(invalidConnector)
+  ).toThrow(expect.objectContaining({
+    code: 'InvalidWhiteboardConnector',
+  }))
+  invalidConnector.whiteboard.connectors[0]!.from =
+    { objectId: 'object-1' }
+  expect(() =>
+    validateDocumentPayload(invalidConnector)
+  ).toThrow(expect.objectContaining({
+    code: 'InvalidWhiteboardConnector',
+  }))
 
   const oversized = createPage({
     blocks: [{
@@ -2284,8 +2900,26 @@ function createClient(
   })
 }
 
+function seedOwnerAuthorization(
+  memory: ReturnType<
+    typeof createMemoryDocumentClient
+  >,
+  version = 1,
+): void {
+  memory.put({
+    workspaceId: 'workspace-1',
+    recordKey: 'MEMBER#owner@example.com',
+    entryType: 'workspace-member',
+    status: 'active',
+    version,
+  })
+}
+
 function createMemoryDocumentClient() {
   const stored = new Map<string, Record<string, unknown>>()
+  let beforeNextTransaction:
+    | (() => void)
+    | undefined
   const client = {
     async send(command: { input: Record<string, unknown> }) {
       const input = command.input
@@ -2293,6 +2927,10 @@ function createMemoryDocumentClient() {
         | Array<Record<string, Record<string, unknown>>>
         | undefined
       if (transaction !== undefined) {
+        const beforeTransaction =
+          beforeNextTransaction
+        beforeNextTransaction = undefined
+        beforeTransaction?.()
         const pending = new Map(
           [...stored].map(([key, item]) => [key, structuredClone(item)]),
         )
@@ -2321,14 +2959,41 @@ function createMemoryDocumentClient() {
       if (typeof input.KeyConditionExpression === 'string') {
         const values = input.ExpressionAttributeValues as Record<string, unknown>
         const workspaceId = values[':workspaceId']
-        const prefix = String(values[':prefix'] ?? '')
         const start = (input.ExclusiveStartKey as { recordKey?: string } | undefined)?.recordKey
         let matches = [...stored.values()]
           .filter(
             (candidate) =>
-              candidate.workspaceId === workspaceId &&
-              String(candidate.recordKey).startsWith(prefix),
+              candidate.workspaceId ===
+                workspaceId,
           )
+        if (
+          input.KeyConditionExpression.includes(
+            'BETWEEN',
+          )
+        ) {
+          const startKey = String(
+            values[':startKey'],
+          )
+          const endKey = String(
+            values[':endKey'],
+          )
+          matches = matches.filter(
+            ({ recordKey }) =>
+              String(recordKey) >= startKey &&
+              String(recordKey) <= endKey,
+          )
+        } else {
+          const prefix = String(
+            values[':prefix'] ?? '',
+          )
+          matches = matches.filter(
+            ({ recordKey }) =>
+              String(recordKey).startsWith(
+                prefix,
+              ),
+          )
+        }
+        matches = matches
           .sort((left, right) => String(left.recordKey).localeCompare(String(right.recordKey)))
         if (input.ScanIndexForward === false) matches.reverse()
         if (start !== undefined) {
@@ -2362,6 +3027,11 @@ function createMemoryDocumentClient() {
         structuredClone(item),
       )
     },
+    beforeTransaction: (
+      callback: () => void,
+    ) => {
+      beforeNextTransaction = callback
+    },
   }
 }
 
@@ -2391,6 +3061,17 @@ function matchesCondition(
   const condition = operation.ConditionExpression
   if (typeof condition !== 'string') return true
   if (condition === 'attribute_not_exists(workspaceId)') return current === undefined
+  if (
+    condition ===
+    'attribute_not_exists(workspaceId) OR expiresAtEpoch <= :operationReceiptNowEpoch'
+  ) {
+    const values = operation.ExpressionAttributeValues as Record<string, unknown>
+    return (
+      current === undefined ||
+      Number(current.expiresAtEpoch) <=
+        Number(values[':operationReceiptNowEpoch'])
+    )
+  }
   if (condition === 'attribute_not_exists(preferenceRevision)') {
     return current?.preferenceRevision === undefined
   }
@@ -2424,11 +3105,40 @@ function matchesCondition(
   ) {
     return (
       current?.resolved === values[':unresolved'] &&
-      current.updatedAt === values[':parentUpdatedAt']
+      current?.updatedAt === values[':parentUpdatedAt']
     )
   }
   if (condition === 'clientId = :clientId') {
     return current?.clientId === values[':clientId']
+  }
+  if (condition.includes('#authorization')) {
+    const names =
+      operation.ExpressionAttributeNames as
+        | Record<string, string>
+        | undefined
+    const valueEntries =
+      operation.ExpressionAttributeValues as
+        | Record<string, unknown>
+        | undefined
+    if (names === undefined || valueEntries === undefined) {
+      return false
+    }
+    if (
+      condition.includes(
+        'attribute_not_exists(#authorizationKey)',
+      ) &&
+      current === undefined
+    ) {
+      return true
+    }
+    return [
+      ...condition.matchAll(
+        /(#authorization\d+) = (:authorization\d+)/gu,
+      ),
+    ].every(([, name, value]) =>
+      current?.[names[name!]] ===
+        valueEntries[value!]
+    )
   }
   throw new Error(`Unsupported condition: ${condition}`)
 }

@@ -7,6 +7,7 @@ import type {
 } from '@mukuroji/contracts'
 import { Hono } from 'hono'
 import {
+  DOCUMENT_API_MAX_BODY_BYTES,
   registerDocumentApiRoutes,
   type DocumentApiDependencies,
 } from './document-api'
@@ -109,10 +110,479 @@ test('rejects malformed create, nested operation, presence, and share inputs as 
   expect(calls).toBe(0)
 })
 
+test('rejects malformed whiteboard create input before relation target validation', async () => {
+  let createCalls = 0
+  let targetValidationCalls = 0
+  const app = createTestApp(
+    createDocumentClient({
+      async create() {
+        createCalls += 1
+        return pageDocument
+      },
+    }),
+    {
+      async validateRelationTargets() {
+        targetValidationCalls += 1
+      },
+    },
+  )
+  const malformedWhiteboards = [
+    undefined,
+    {},
+    {
+      objects: [null],
+      connectors: [],
+      frames: [],
+    },
+  ]
+
+  for (const whiteboard of malformedWhiteboards) {
+    const response = await app.request('/api/documents', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        kind: 'whiteboard',
+        scope: { type: 'workspace' },
+        title: 'Invalid whiteboard',
+        ...(whiteboard === undefined ? {} : { whiteboard }),
+      }),
+    })
+
+    expect(response.status).toBe(400)
+  }
+  expect(targetValidationCalls).toBe(0)
+  expect(createCalls).toBe(0)
+})
+
+test('bounds permission member validation concurrency', async () => {
+  let activeLookups = 0
+  let maximumActiveLookups = 0
+  const memberGrants = Array.from({ length: 24 }, (_, index) => ({
+    memberKey: `member-${index}@example.com`,
+    role: 'viewer' as const,
+  }))
+  const app = createTestApp(
+    createDocumentClient({
+      async create() {
+        return pageDocument
+      },
+    }),
+    {
+      async getActiveMember(_workspaceId, memberKey) {
+        activeLookups += 1
+        maximumActiveLookups = Math.max(maximumActiveLookups, activeLookups)
+        await Promise.resolve()
+        activeLookups -= 1
+        return {
+          memberKey,
+          email: memberKey,
+        }
+      },
+    },
+  )
+
+  const response = await app.request('/api/documents', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      kind: 'page',
+      scope: { type: 'workspace' },
+      title: 'Bounded member validation',
+      blocks: [],
+      permission: {
+        mode: 'inherit',
+        memberGrants,
+      },
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(maximumActiveLookups).toBeLessThanOrEqual(8)
+})
+
+test('rejects oversized grants and relation targets without downstream reads', async () => {
+  let memberLookups = 0
+  let targetValidationCalls = 0
+  let createCalls = 0
+  const app = createTestApp(
+    createDocumentClient({
+      async create() {
+        createCalls += 1
+        return pageDocument
+      },
+    }),
+    {
+      async getActiveMember() {
+        memberLookups += 1
+        return undefined
+      },
+      async validateRelationTargets() {
+        targetValidationCalls += 1
+      },
+    },
+  )
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const bodyResponse = await app.request('/api/documents', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      kind: 'page',
+      scope: { type: 'workspace' },
+      title: 'x'.repeat(DOCUMENT_API_MAX_BODY_BYTES),
+      blocks: [],
+    }),
+  })
+  expect(bodyResponse.status).toBe(413)
+
+  const grantResponse = await app.request('/api/documents', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      kind: 'page',
+      scope: { type: 'workspace' },
+      title: 'Too many grants',
+      blocks: [],
+      permission: {
+        mode: 'inherit',
+        memberGrants: Array.from({ length: 101 }, (_, index) => ({
+          memberKey: `member-${index}@example.com`,
+          role: 'viewer',
+        })),
+      },
+    }),
+  })
+  expect(grantResponse.status).toBe(413)
+
+  const targetResponse = await app.request('/api/documents', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      kind: 'whiteboard',
+      scope: { type: 'workspace' },
+      title: 'Too many targets',
+      whiteboard: {
+        objects: Array.from({ length: 46 }, (_, index) => ({
+          id: `object-${index}`,
+          type: 'work-item',
+          workItemId: `team/team-a/issue/issue-${index}`,
+          bounds: { x: index * 10, y: 0, width: 100, height: 100 },
+          zIndex: index,
+        })),
+        connectors: [],
+        frames: [],
+      },
+    }),
+  })
+  expect(targetResponse.status).toBe(413)
+  expect(memberLookups).toBe(0)
+  expect(targetValidationCalls).toBe(0)
+  expect(createCalls).toBe(0)
+})
+
+test('rejects an operation that exceeds the final target limit before target reads', async () => {
+  let targetValidationCalls = 0
+  let applyCalls = 0
+  const current = {
+    ...pageDocument,
+    kind: 'whiteboard',
+    whiteboard: {
+      objects: Array.from({ length: 45 }, (_, index) => ({
+        id: `object-${index}`,
+        type: 'work-item' as const,
+        workItemId: `team/team-a/issue/issue-${index}`,
+        bounds: { x: index * 10, y: 0, width: 100, height: 100 },
+        zIndex: index,
+      })),
+      connectors: [],
+      frames: [],
+    },
+  } as DocumentDetail
+  const app = createTestApp(
+    createDocumentClient({
+      async get() {
+        return current
+      },
+      async applyOperations() {
+        applyCalls += 1
+        throw new Error('must not be called')
+      },
+    }),
+    {
+      async validateRelationTargets() {
+        targetValidationCalls += 1
+      },
+    },
+  )
+
+  const response = await app.request(
+    '/api/documents/document-1/operations',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        baseRevision: 1,
+        clientId: 'editor-1',
+        operations: [{
+          operationId: 'operation-1',
+          type: 'insert-object',
+          object: {
+            id: 'object-45',
+            type: 'work-item',
+            workItemId: 'team/team-a/issue/issue-45',
+            bounds: { x: 450, y: 0, width: 100, height: 100 },
+            zIndex: 45,
+          },
+        }],
+      }),
+    },
+  )
+
+  expect(response.status).toBe(413)
+  expect(targetValidationCalls).toBe(0)
+  expect(applyCalls).toBe(0)
+})
+
+test('checks mutation capabilities before member or relation target reads', async () => {
+  let memberLookups = 0
+  let targetValidationCalls = 0
+  let mutationCalls = 0
+  const readOnlyDocument: DocumentDetail = {
+    ...pageDocument,
+    capabilities: {
+      ...pageDocument.capabilities,
+      canEdit: false,
+      canManagePermissions: false,
+    },
+  }
+  const app = createTestApp(
+    createDocumentClient({
+      async get() {
+        return readOnlyDocument
+      },
+      async update() {
+        mutationCalls += 1
+        return pageDocument
+      },
+      async applyOperations() {
+        mutationCalls += 1
+        throw new Error('must not be called')
+      },
+    }),
+    {
+      async getActiveMember() {
+        memberLookups += 1
+        return undefined
+      },
+      async validateRelationTargets() {
+        targetValidationCalls += 1
+      },
+    },
+  )
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+
+  const permissionResponse = await app.request(
+    '/api/documents/document-1',
+    {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({
+        expectedRevision: 1,
+        permission: {
+          mode: 'inherit',
+          memberGrants: [{
+            memberKey: 'another-member@example.com',
+            role: 'viewer',
+          }],
+        },
+      }),
+    },
+  )
+  expect(permissionResponse.status).toBe(403)
+
+  const operationResponse = await app.request(
+    '/api/documents/document-1/operations',
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        baseRevision: 1,
+        clientId: 'editor-1',
+        operations: [{
+          operationId: 'operation-1',
+          type: 'upsert-relation',
+          relation: {
+            id: 'relation-1',
+            source: { kind: 'document' },
+            target: {
+              kind: 'work-item',
+              workItemId: 'team/team-a/issue/issue-1',
+            },
+            createdByUserId: 'owner@example.com',
+            createdAt: '2026-07-18T00:00:00.000Z',
+          },
+        }],
+      }),
+    },
+  )
+  expect(operationResponse.status).toBe(403)
+  expect(memberLookups).toBe(0)
+  expect(targetValidationCalls).toBe(0)
+  expect(mutationCalls).toBe(0)
+})
+
+test('rejects guest document creation before grant and target reads', async () => {
+  let downstreamReads = 0
+  let createCalls = 0
+  const app = createTestApp(
+    createDocumentClient({
+      async create() {
+        createCalls += 1
+        return pageDocument
+      },
+    }),
+    {
+      authenticate: async () => ({
+        workspaceId: 'workspace-1',
+        memberKey: 'guest@example.com',
+        displayName: 'Guest',
+        workspaceRole: 'guest',
+        isSystemAdmin: false,
+        projectRoles: {},
+      }),
+      async getActiveMember() {
+        downstreamReads += 1
+        return undefined
+      },
+      async validateRelationTargets() {
+        downstreamReads += 1
+      },
+    },
+  )
+
+  const response = await app.request('/api/documents', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      kind: 'whiteboard',
+      scope: { type: 'workspace' },
+      title: 'Guest payload',
+      permission: {
+        mode: 'inherit',
+        memberGrants: [{
+          memberKey: 'member@example.com',
+          role: 'viewer',
+        }],
+      },
+      whiteboard: {
+        objects: [{
+          id: 'object-1',
+          type: 'work-item',
+          workItemId: 'team/team-a/issue/issue-1',
+          bounds: { x: 0, y: 0, width: 100, height: 100 },
+          zIndex: 0,
+        }],
+        connectors: [],
+        frames: [],
+      },
+    }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(downstreamReads).toBe(0)
+  expect(createCalls).toBe(0)
+})
+
+test('forwards every authenticated authorization generation guard', async () => {
+  let receivedGenerations: Array<string | number> = []
+  const app = createTestApp(
+    createDocumentClient({
+      async create(input) {
+        receivedGenerations =
+          input.access.authorizationGuards?.map(
+            ({ expectedGeneration }) => expectedGeneration,
+          ) ?? []
+        return pageDocument
+      },
+    }),
+    {
+      authenticate: async () => ({
+        workspaceId: 'workspace-1',
+        memberKey: 'owner@example.com',
+        displayName: 'Owner',
+        workspaceRole: 'owner',
+        isSystemAdmin: false,
+        projectRoles: {},
+        authorizationGuards: [
+          {
+            tableName: 'workspace-access',
+            key: {
+              directoryId: 'workspace-1',
+              memberKey: 'owner@example.com',
+            },
+            generationAttribute: 'version',
+            expectedGeneration: 7,
+            requiredAttributes: {
+              entryType: 'workspace-member',
+              status: 'active',
+            },
+          },
+          {
+            tableName: 'planning',
+            key: {
+              workspaceId: 'workspace-1',
+              recordKey: 'META',
+            },
+            generationAttribute: 'revision',
+            expectedGeneration: 11,
+          },
+        ],
+      }),
+    },
+  )
+
+  const response = await app.request('/api/documents', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      kind: 'page',
+      scope: { type: 'workspace' },
+      title: 'Guarded create',
+      blocks: [],
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(receivedGenerations).toEqual([7, 11])
+})
+
 test('validates relation targets before applying document operations', async () => {
   let applyCalls = 0
   const app = createTestApp(
     createDocumentClient({
+      async get() {
+        return pageDocument
+      },
       async applyOperations() {
         applyCalls += 1
         throw new Error('Target validation must run first.')
@@ -209,6 +679,147 @@ test('revalidates every restored snapshot target before committing the restore',
   expect(response.status).toBe(200)
   expect(validatedTargets).toEqual(expectedTargets)
   expect(committed).toBeTrue()
+})
+
+test('revalidates archived document targets before restoring the document', async () => {
+  let restoreCalls = 0
+  let validatedTargets: readonly DocumentRelationTarget[] = []
+  const archivedDocument: DocumentDetail = {
+    ...pageDocument,
+    archivedAt: '2026-07-18T01:00:00.000Z',
+    relations: [{
+      id: 'goal-relation-1',
+      source: { kind: 'document' },
+      target: { kind: 'goal', goalId: 'goal-1' },
+      createdByUserId: 'owner@example.com',
+      createdAt: '2026-07-18T00:00:00.000Z',
+    }],
+    capabilities: {
+      ...pageDocument.capabilities,
+      canEdit: false,
+      canArchive: false,
+      canRestore: true,
+    },
+  }
+  const app = createTestApp(
+    createDocumentClient({
+      async get() {
+        return archivedDocument
+      },
+      async restoreArchived() {
+        restoreCalls += 1
+        return pageDocument
+      },
+    }),
+    {
+      async validateRelationTargets(_principal, targets) {
+        validatedTargets = targets
+        throw new DocumentError(
+          403,
+          'DocumentRelationTargetDenied',
+          'The related Goal is not visible.',
+        )
+      },
+    },
+  )
+
+  const response = await app.request(
+    '/api/documents/document-1/restore',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ expectedRevision: 1 }),
+    },
+  )
+
+  expect(response.status).toBe(403)
+  expect(validatedTargets).toEqual([{
+    kind: 'goal',
+    goalId: 'goal-1',
+  }])
+  expect(restoreCalls).toBe(0)
+})
+
+test('validates and forwards template instance permissions', async () => {
+  let instantiateCalls = 0
+  let receivedMemberKeys: string[] = []
+  const app = createTestApp(createDocumentClient({
+    async instantiateTemplate(input) {
+      instantiateCalls += 1
+      receivedMemberKeys =
+        input.permission?.memberGrants.map(({ memberKey }) => memberKey) ?? []
+      return pageDocument
+    },
+  }))
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const created = await app.request(
+    '/api/documents/template-1/instantiate',
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        scope: { type: 'workspace' },
+        permission: {
+          mode: 'private',
+          memberGrants: [{
+            memberKey: 'manager@example.com',
+            role: 'manager',
+          }],
+        },
+      }),
+    },
+  )
+
+  expect(created.status).toBe(201)
+  expect(receivedMemberKeys).toEqual(['manager@example.com'])
+
+  const createdThroughGenericRoute = await app.request(
+    '/api/documents',
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        kind: 'page',
+        templateId: 'template-1',
+        scope: { type: 'workspace' },
+        title: 'Private template instance',
+        blocks: [],
+        permission: {
+          mode: 'private',
+          memberGrants: [{
+            memberKey: 'manager@example.com',
+            role: 'manager',
+          }],
+        },
+      }),
+    },
+  )
+
+  expect(createdThroughGenericRoute.status).toBe(201)
+  expect(receivedMemberKeys).toEqual(['manager@example.com'])
+
+  const malformed = await app.request(
+    '/api/documents/template-1/instantiate',
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        scope: { type: 'workspace' },
+        permission: {
+          mode: 'private',
+          memberGrants: 'manager@example.com',
+        },
+      }),
+    },
+  )
+  expect(malformed.status).toBe(400)
+  expect(instantiateCalls).toBe(2)
 })
 
 test('preserves comment anchors and mention ranges at the HTTP boundary', async () => {

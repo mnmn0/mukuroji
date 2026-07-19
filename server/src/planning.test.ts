@@ -154,6 +154,14 @@ describe('planning domain', () => {
       EMPTY_WORK_ITEMS,
     )
     expect(created.planning.revision).toBe(1)
+    expect(await client.getAuthorizationRevision('workspace-1')).toBe(1)
+    expect(await client.getAuthorizationState('workspace-1')).toMatchObject({
+      revision: 1,
+      entities: [{
+        id: 'portfolio-1',
+        type: 'portfolio',
+      }],
+    })
 
     await expect(client.create(
       'workspace-1',
@@ -1082,6 +1090,55 @@ describe('planning domain', () => {
 })
 
 describe('planning persistence', () => {
+  test('reads the authorization revision from only the strong META row', async () => {
+    const commands: Array<{
+      /** AWS SDK command class name. */
+      name: string
+      /** AWS SDK command input. */
+      input: Record<string, unknown>
+    }> = []
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
+      }) {
+        commands.push({
+          name: command.constructor.name,
+          input: command.input,
+        })
+        return {
+          Item: {
+            workspaceId: 'workspace-1',
+            recordKey: 'META',
+            entryType: 'planning-meta',
+            schemaVersion: 1,
+            revision: 7,
+            updatedAt: NOW.toISOString(),
+          },
+        }
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => NOW,
+    )
+
+    expect(await client.getAuthorizationRevision('workspace-1')).toBe(7)
+    expect(commands).toEqual([{
+      name: 'GetCommand',
+      input: expect.objectContaining({
+        TableName: 'PlanningTable',
+        Key: { workspaceId: 'workspace-1', recordKey: 'META' },
+        ConsistentRead: true,
+      }),
+    }])
+  })
+
   test('writes META revision CAS and changed rows in one DynamoDB transaction', async () => {
     const commands: Array<{
       /** AWS SDK command class name. */

@@ -7,6 +7,7 @@ import type {
   DocumentBlock,
   DocumentDetail,
   DocumentMemberGrant,
+  DocumentPermission,
   DocumentRelationTarget,
   DocumentScope,
   ExportDocumentResponse,
@@ -24,6 +25,7 @@ import type {
   WhiteboardContent,
   WhiteboardObjectStyle,
 } from '@mukuroji/contracts'
+import { DOCUMENT_SCHEMA_VERSION } from '@mukuroji/contracts'
 import { randomUUID } from 'node:crypto'
 import type { Context, Hono } from 'hono'
 import {
@@ -33,14 +35,29 @@ import {
 import {
   DOCUMENT_BACKLINK_MAX_PAGE_LIMIT,
   DOCUMENT_COMMENT_MAX_PAGE_LIMIT,
+  DOCUMENT_MAX_BACKLINK_COUNT,
+  DOCUMENT_MAX_ITEM_BYTES,
+  DOCUMENT_MAX_OPERATION_COUNT,
   DocumentError,
+  reduceDocumentOperations,
   renderPublicDocumentExport,
+  validateDocumentPayload,
   type DocumentAccessContext,
+  type DocumentAuthorizationGenerationGuard,
   type DocumentBacklink,
   type DocumentClient,
   type DocumentProjectRole,
   type CreateDocumentCommentRequest,
 } from './documents'
+
+/** Document API が一 request で受け付ける JSON body の最大 byte 数です。 */
+export const DOCUMENT_API_MAX_BODY_BYTES = DOCUMENT_MAX_ITEM_BYTES
+
+/** 一つの Document permission に指定できる member grant の最大件数です。 */
+export const DOCUMENT_API_MAX_MEMBER_GRANT_COUNT = 100
+
+/** Member source-of-truth read の最大同時実行数です。 */
+const DOCUMENT_API_VALIDATION_CONCURRENCY = 8
 
 /**
  * Document API が認証層から受け取る active Workspace principal です。
@@ -66,6 +83,10 @@ export type DocumentApiPrincipal = {
    * System administrator の break-glass access を持つかどうかです。
    */
   isSystemAdmin: boolean
+  /**
+   * Mutation transaction を認証時の authorization generations へ束縛する guards です。
+   */
+  authorizationGuards?: readonly DocumentAuthorizationGenerationGuard[]
   /**
    * Source of truth から取得した Project role map です。
    */
@@ -183,6 +204,8 @@ export function registerDocumentApiRoutes(
   app.post('/api/documents', async (c) => {
     return withDocumentPrincipal(c, dependencies, async (principal, access) => {
       const input = parseCreateDocumentInput(await readJson<unknown>(c))
+      requireDocumentCreateCapability(principal, input.scope)
+      const relationTargets = readCreateDocumentRelationTargets(input)
       if (input.permission) {
         await validatePermissionMembers(
           dependencies,
@@ -193,16 +216,7 @@ export function registerDocumentApiRoutes(
       await validateDocumentRelationTargets(
         dependencies,
         principal,
-        input.kind === 'whiteboard'
-          ? input.whiteboard.objects.flatMap((object) =>
-              object.type === 'work-item'
-                ? [{
-                    kind: 'work-item' as const,
-                    workItemId: object.workItemId,
-                  }]
-                : []
-            )
-          : [],
+        relationTargets,
       )
       const idempotencyKey = c.req.header('Idempotency-Key')?.trim() || undefined
       const document = input.kind === 'page' && input.templateId
@@ -214,6 +228,7 @@ export function registerDocumentApiRoutes(
             ...(input.parentId ? { parentId: input.parentId } : {}),
             title: input.title,
             ...(input.position ? { position: input.position } : {}),
+            ...(input.permission ? { permission: input.permission } : {}),
             ...(idempotencyKey ? { idempotencyKey } : {}),
           })
         : await dependencies.getClient().create({
@@ -251,7 +266,19 @@ export function registerDocumentApiRoutes(
   app.patch('/api/documents/:documentId', async (c) => {
     return withDocumentPrincipal(c, dependencies, async (principal, access) => {
       const input = parseUpdateDocumentInput(await readJson<unknown>(c))
+      const documentId = readRequiredDocumentId(c)
       if (input.permission) {
+        const current = await dependencies.getClient().get({
+          workspaceId: principal.workspaceId,
+          documentId,
+          access,
+          includeArchived: true,
+        })
+        requireDocumentCapability(
+          current.capabilities.canManagePermissions,
+          'DocumentPermissionDenied',
+        )
+        requireCurrentDocumentRevision(current, input.expectedRevision)
         await validatePermissionMembers(
           dependencies,
           principal.workspaceId,
@@ -260,7 +287,7 @@ export function registerDocumentApiRoutes(
       }
       const document = await dependencies.getClient().update({
         workspaceId: principal.workspaceId,
-        documentId: readRequiredDocumentId(c),
+        documentId,
         access,
         expectedRevision: readExpectedRevision(input?.expectedRevision),
         ...(typeof input?.title === 'string' ? { title: input.title } : {}),
@@ -277,27 +304,28 @@ export function registerDocumentApiRoutes(
   app.post('/api/documents/:documentId/operations', async (c) => {
     return withDocumentPrincipal(c, dependencies, async (principal, access) => {
       const input = parseDocumentOperationsInput(await readJson<unknown>(c))
+      const relationTargets = readOperationRelationTargets(input)
+      const documentId = readRequiredDocumentId(c)
+      const current = await dependencies.getClient().get({
+        workspaceId: principal.workspaceId,
+        documentId,
+        access,
+        includeArchived: true,
+      })
+      requireDocumentCapability(
+        current.capabilities.canEdit,
+        'DocumentEditDenied',
+      )
+      validateDocumentOperationPayload(
+        current,
+        input,
+        principal.memberKey,
+      )
       await validateDocumentRelationTargets(
         dependencies,
         principal,
-        input.operations.flatMap((operation): DocumentRelationTarget[] => {
-          if (operation.type === 'upsert-relation') {
-            return [operation.relation.target]
-          }
-          if (
-            (operation.type === 'insert-object' ||
-              operation.type === 'update-object') &&
-            operation.object.type === 'work-item'
-          ) {
-            return [{
-              kind: 'work-item',
-              workItemId: operation.object.workItemId,
-            }]
-          }
-          return []
-        }),
+        relationTargets,
       )
-      const documentId = readRequiredDocumentId(c)
       const result = await dependencies.getClient().applyOperations({
         workspaceId: principal.workspaceId,
         documentId,
@@ -333,11 +361,29 @@ export function registerDocumentApiRoutes(
   app.post('/api/documents/:documentId/restore', async (c) => {
     return withDocumentPrincipal(c, dependencies, async (principal, access) => {
       const input = await readJson<RestoreArchivedDocumentInput>(c)
+      const expectedRevision = readExpectedRevision(input?.expectedRevision)
+      const documentId = readRequiredDocumentId(c)
+      const archived = await dependencies.getClient().get({
+        workspaceId: principal.workspaceId,
+        documentId,
+        access,
+        includeArchived: true,
+      })
+      requireDocumentCapability(
+        archived.capabilities.canRestore,
+        'DocumentRestoreDenied',
+      )
+      requireCurrentDocumentRevision(archived, expectedRevision)
+      await validateDocumentRelationTargets(
+        dependencies,
+        principal,
+        readStoredDocumentRelationTargets(archived),
+      )
       const document = await dependencies.getClient().restoreArchived({
         workspaceId: principal.workspaceId,
-        documentId: readRequiredDocumentId(c),
+        documentId,
         access,
-        expectedRevision: readExpectedRevision(input?.expectedRevision),
+        expectedRevision,
         ...(input?.parentId !== undefined ? { parentId: input.parentId } : {}),
       })
       await upsertSearchDocumentBestEffort(dependencies, principal.workspaceId, document)
@@ -364,9 +410,25 @@ export function registerDocumentApiRoutes(
          * 作成する page の position です。
          */
         position?: string
+        /**
+         * 作成する page の permission 設定です。
+         */
+        permission?: DocumentPermission
       }>(c)
       if (!body?.scope) {
         throw new DocumentError(400, 'InvalidDocumentScope', 'Template scope is required.')
+      }
+      validateDocumentScope(body.scope)
+      if (body.permission !== undefined) {
+        validateDocumentPermission(body.permission)
+      }
+      requireDocumentCreateCapability(principal, body.scope)
+      if (body.permission !== undefined) {
+        await validatePermissionMembers(
+          dependencies,
+          principal.workspaceId,
+          body.permission.memberGrants.map(({ memberKey }) => memberKey),
+        )
       }
       const document = await dependencies.getClient().instantiateTemplate({
         workspaceId: principal.workspaceId,
@@ -376,6 +438,7 @@ export function registerDocumentApiRoutes(
         ...(body.parentId ? { parentId: body.parentId } : {}),
         ...(body.title ? { title: body.title } : {}),
         ...(body.position ? { position: body.position } : {}),
+        ...(body.permission ? { permission: body.permission } : {}),
         ...(c.req.header('Idempotency-Key')
           ? { idempotencyKey: c.req.header('Idempotency-Key') }
           : {}),
@@ -912,6 +975,9 @@ function toDocumentAccessContext(principal: DocumentApiPrincipal) {
     workspaceRole: principal.workspaceRole,
     isSystemAdmin: principal.isSystemAdmin,
     projectRoles: principal.projectRoles,
+    ...(principal.authorizationGuards === undefined
+      ? {}
+      : { authorizationGuards: principal.authorizationGuards }),
   } as DocumentAccessContext
 }
 
@@ -973,14 +1039,49 @@ function readBearerAccessToken(c: Context) {
 }
 
 async function readJson<T>(c: Context): Promise<T | undefined> {
+  const contentLength = c.req.header('Content-Length')
+  if (
+    contentLength !== undefined &&
+    /^\d+$/u.test(contentLength) &&
+    Number(contentLength) > DOCUMENT_API_MAX_BODY_BYTES
+  ) {
+    throw documentRequestBodyTooLarge()
+  }
+
   try {
-    return await c.req.json<T>()
+    const stream = c.req.raw.body
+    if (stream === null) return undefined
+    const reader = stream.getReader()
+    const decoder = new TextDecoder()
+    let byteLength = 0
+    let body = ''
+    while (true) {
+      const result = await reader.read()
+      if (result.done) break
+      byteLength += result.value.byteLength
+      if (byteLength > DOCUMENT_API_MAX_BODY_BYTES) {
+        await reader.cancel()
+        throw documentRequestBodyTooLarge()
+      }
+      body += decoder.decode(result.value, { stream: true })
+    }
+    body += decoder.decode()
+    if (body.length === 0) return undefined
+    return JSON.parse(body) as T
   } catch (error) {
-    if (c.req.header('Content-Length') === '0') return undefined
+    if (error instanceof DocumentError) throw error
     throw new DocumentError(400, 'InvalidDocumentJson', 'Request body must be valid JSON.', undefined, {
       cause: error,
     })
   }
+}
+
+function documentRequestBodyTooLarge() {
+  return new DocumentError(
+    413,
+    'DocumentRequestBodyTooLarge',
+    `Request body must be at most ${DOCUMENT_API_MAX_BODY_BYTES} bytes.`,
+  )
 }
 
 function parseCreateDocumentInput(value: unknown): CreateDocumentInput {
@@ -1007,19 +1108,131 @@ function parseCreateDocumentInput(value: unknown): CreateDocumentInput {
   }
   if (
     (input.kind === 'page' || input.kind === 'template') &&
-    input.blocks !== undefined &&
     !Array.isArray(input.blocks)
   ) {
     throw new DocumentError(400, 'InvalidDocumentBlocks', 'Document blocks must be an array.')
   }
   if (
     input.kind === 'whiteboard' &&
-    input.whiteboard !== undefined &&
     !isRecord(input.whiteboard)
   ) {
     throw new DocumentError(400, 'InvalidDocumentWhiteboard', 'Whiteboard content is invalid.')
   }
-  return input as unknown as CreateDocumentInput
+  const parsed = input as unknown as CreateDocumentInput
+  validateCreateDocumentPayload(parsed)
+  return parsed
+}
+
+function validateCreateDocumentPayload(input: CreateDocumentInput): void {
+  const inputPermission = input.permission ?? {
+    mode: 'inherit' as const,
+    memberGrants: [],
+  }
+  const permission = inputPermission.mode === 'private'
+    ? {
+        ...inputPermission,
+        memberGrants: [
+          ...inputPermission.memberGrants.filter(
+            ({ memberKey }) => memberKey !== 'document-input-validation',
+          ),
+          {
+            memberKey: 'document-input-validation',
+            role: 'manager' as const,
+          },
+        ],
+      }
+    : inputPermission
+  const base = {
+    schemaVersion: DOCUMENT_SCHEMA_VERSION,
+    id: 'document-input-validation',
+    scope: input.scope,
+    ...(input.parentId === undefined ? {} : { parentId: input.parentId }),
+    title: input.title,
+    position: input.position ?? 'document-input-validation',
+    revision: 1,
+    permission,
+    relations: [],
+    favorite: false,
+    capabilities: {
+      canView: false,
+      canEdit: false,
+      canComment: false,
+      canShare: false,
+      canManagePermissions: false,
+      canArchive: false,
+      canRestore: false,
+      canExport: false,
+    },
+    createdByUserId: 'document-input-validation',
+    updatedByUserId: 'document-input-validation',
+    createdAt: '2000-01-01T00:00:00.000Z',
+    updatedAt: '2000-01-01T00:00:00.000Z',
+  }
+  let document: DocumentDetail
+  switch (input.kind) {
+    case 'folder':
+      document = {
+        ...base,
+        kind: 'folder',
+        childCount: 0,
+      }
+      break
+    case 'page':
+    case 'template':
+      document = {
+        ...base,
+        kind: input.kind,
+        blocks: input.blocks,
+      }
+      break
+    case 'whiteboard':
+      document = {
+        ...base,
+        kind: 'whiteboard',
+        whiteboard: input.whiteboard,
+      }
+  }
+  validateDocumentPayload(document)
+}
+
+function readCreateDocumentRelationTargets(
+  input: CreateDocumentInput,
+): DocumentRelationTarget[] {
+  const targets = input.kind === 'whiteboard'
+    ? input.whiteboard.objects.flatMap((object): DocumentRelationTarget[] =>
+        object.type === 'work-item'
+          ? [{
+              kind: 'work-item',
+              workItemId: object.workItemId,
+            }]
+          : []
+      )
+    : []
+  requireDocumentRelationTargetLimit(targets)
+  return targets
+}
+
+function readStoredDocumentRelationTargets(
+  document: DocumentDetail,
+): DocumentRelationTarget[] {
+  const targets = [
+    ...document.relations.map(({ target }) =>
+      readDocumentRelationTarget(target)
+    ),
+    ...(document.kind === 'whiteboard'
+      ? document.whiteboard.objects.flatMap(
+          (object): DocumentRelationTarget[] =>
+            object.type === 'work-item'
+              ? [{
+                  kind: 'work-item',
+                  workItemId: object.workItemId,
+                }]
+              : [],
+        )
+      : []),
+  ]
+  requireDocumentRelationTargetLimit(targets)
+  return targets
 }
 
 function parseUpdateDocumentInput(value: unknown): UpdateDocumentInput {
@@ -1054,12 +1267,12 @@ function parseDocumentOperationsInput(value: unknown): ApplyDocumentOperationsIn
   if (
     !Array.isArray(input.operations) ||
     input.operations.length === 0 ||
-    input.operations.length > 50
+    input.operations.length > DOCUMENT_MAX_OPERATION_COUNT
   ) {
     throw new DocumentError(
       400,
       'InvalidDocumentOperations',
-      'Operations must contain between 1 and 50 entries.',
+      `Operations must contain between 1 and ${DOCUMENT_MAX_OPERATION_COUNT} entries.`,
     )
   }
   const allowedTypes = new Set([
@@ -1090,6 +1303,120 @@ function parseDocumentOperationsInput(value: unknown): ApplyDocumentOperationsIn
     validateDocumentOperationShape(operation)
   }
   return input as unknown as ApplyDocumentOperationsInput
+}
+
+function readOperationRelationTargets(
+  input: ApplyDocumentOperationsInput,
+): DocumentRelationTarget[] {
+  const targets = input.operations.flatMap((operation): DocumentRelationTarget[] => {
+    if (operation.type === 'upsert-relation') {
+      return [readDocumentRelationTarget(operation.relation.target)]
+    }
+    if (
+      (operation.type === 'insert-object' ||
+        operation.type === 'update-object') &&
+      operation.object.type === 'work-item'
+    ) {
+      requireNonEmptyString(
+        operation.object.workItemId,
+        'InvalidDocumentRelationTarget',
+        'Work Item target ID is required.',
+      )
+      return [{
+        kind: 'work-item',
+        workItemId: operation.object.workItemId,
+      }]
+    }
+    return []
+  })
+  requireDocumentRelationTargetLimit(targets)
+  return targets
+}
+
+function validateDocumentOperationPayload(
+  current: DocumentDetail,
+  input: ApplyDocumentOperationsInput,
+  actorMemberKey: string,
+): void {
+  const validationDocument = structuredClone(current)
+  validationDocument.favorite = false
+  delete validationDocument.lastOpenedAt
+  validationDocument.capabilities = {
+    canView: false,
+    canEdit: false,
+    canComment: false,
+    canShare: false,
+    canManagePermissions: false,
+    canArchive: false,
+    canRestore: false,
+    canExport: false,
+  }
+  if (
+    validationDocument.permission.mode === 'private' &&
+    !validationDocument.permission.memberGrants.some(
+      ({ role }) => role === 'manager',
+    )
+  ) {
+    validationDocument.permission.memberGrants.push({
+      memberKey: actorMemberKey,
+      role: 'manager',
+    })
+  }
+  reduceDocumentOperations({
+    document: validationDocument,
+    elementRevisions: {},
+    baseRevision: input.baseRevision,
+    nextRevision: current.revision + 1,
+    operations: input.operations,
+  })
+}
+
+function readDocumentRelationTarget(value: unknown): DocumentRelationTarget {
+  if (!isRecord(value)) {
+    throw new DocumentError(
+      400,
+      'InvalidDocumentRelationTarget',
+      'Document relation target is invalid.',
+    )
+  }
+  if (value.kind === 'work-item') {
+    requireNonEmptyString(
+      value.workItemId,
+      'InvalidDocumentRelationTarget',
+      'Work Item target ID is required.',
+    )
+    return {
+      kind: 'work-item',
+      workItemId: value.workItemId,
+    }
+  }
+  if (value.kind === 'project') {
+    requireNonEmptyString(
+      value.projectId,
+      'InvalidDocumentRelationTarget',
+      'Project target ID is required.',
+    )
+    return {
+      kind: 'project',
+      projectId: value.projectId,
+    }
+  }
+  if (value.kind === 'goal') {
+    requireNonEmptyString(
+      value.goalId,
+      'InvalidDocumentRelationTarget',
+      'Goal target ID is required.',
+    )
+    return {
+      kind: 'goal',
+      goalId: value.goalId,
+    }
+  }
+  throw new DocumentError(
+    400,
+    'InvalidDocumentRelationTarget',
+    'Document relation target kind is invalid.',
+  )
 }
 
 function validateDocumentOperationShape(operation: Record<string, unknown>): void {
@@ -1317,6 +1644,59 @@ function validateDocumentScope(value: unknown): asserts value is DocumentScope {
   throw new DocumentError(400, 'InvalidDocumentScope', 'Document scope is invalid.')
 }
 
+function requireDocumentCreateCapability(
+  principal: DocumentApiPrincipal,
+  scope: DocumentScope,
+): void {
+  if (
+    principal.isSystemAdmin ||
+    principal.workspaceRole === 'owner' ||
+    principal.workspaceRole === 'admin'
+  ) {
+    return
+  }
+  if (
+    principal.workspaceRole !== 'guest' &&
+    (
+      scope.type === 'workspace' ||
+      principal.projectRoles[scope.projectId] === 'manager' ||
+      principal.projectRoles[scope.projectId] === 'member'
+    )
+  ) {
+    return
+  }
+  throw new DocumentError(
+    403,
+    'DocumentCreateDenied',
+    'You do not have permission to create a Document in this scope.',
+  )
+}
+
+function requireDocumentCapability(allowed: boolean, code: string): void {
+  if (allowed) return
+  throw new DocumentError(
+    403,
+    code,
+    'You do not have permission to perform this action.',
+  )
+}
+
+function requireCurrentDocumentRevision(
+  document: DocumentDetail,
+  expectedRevision: number,
+): void {
+  if (document.revision === expectedRevision) return
+  throw new DocumentError(
+    409,
+    'DocumentRevisionConflict',
+    'The document changed after it was read.',
+    {
+      expectedRevision,
+      actualRevision: document.revision,
+    },
+  )
+}
+
 function validateDocumentPermission(value: unknown): void {
   if (
     !isRecord(value) ||
@@ -1324,6 +1704,13 @@ function validateDocumentPermission(value: unknown): void {
     !Array.isArray(value.memberGrants)
   ) {
     throw new DocumentError(400, 'InvalidDocumentPermission', 'Document permission is invalid.')
+  }
+  if (value.memberGrants.length > DOCUMENT_API_MAX_MEMBER_GRANT_COUNT) {
+    throw new DocumentError(
+      413,
+      'DocumentPermissionGrantLimitExceeded',
+      `A Document permission can contain at most ${DOCUMENT_API_MAX_MEMBER_GRANT_COUNT} member grants.`,
+    )
   }
   const memberKeys = new Set<string>()
   for (const grant of value.memberGrants) {
@@ -1749,10 +2136,7 @@ async function validateMentionMembers(
   input: CreateDocumentCommentInput,
 ) {
   const memberKeys = [...new Set(input.mentions.map((mention) => mention.userId))]
-  const members = await Promise.all(
-    memberKeys.map((memberKey) => dependencies.getActiveMember(workspaceId, memberKey)),
-  )
-  if (members.some((member) => !member)) {
+  if (!await everyActiveDocumentMember(dependencies, workspaceId, memberKeys)) {
     throw new DocumentError(
       400,
       'InvalidDocumentMention',
@@ -1767,18 +2151,41 @@ async function validatePermissionMembers(
   memberKeys: readonly string[],
 ) {
   const uniqueMemberKeys = [...new Set(memberKeys)]
-  const members = await Promise.all(
-    uniqueMemberKeys.map((memberKey) =>
-      dependencies.getActiveMember(workspaceId, memberKey)
-    ),
-  )
-  if (members.some((member) => !member)) {
+  if (
+    !await everyActiveDocumentMember(
+      dependencies,
+      workspaceId,
+      uniqueMemberKeys,
+    )
+  ) {
     throw new DocumentError(
       400,
       'InvalidDocumentPermissionMember',
       'Every Document grant must reference an active Workspace member.',
     )
   }
+}
+
+async function everyActiveDocumentMember(
+  dependencies: DocumentApiDependencies,
+  workspaceId: string,
+  memberKeys: readonly string[],
+): Promise<boolean> {
+  for (
+    let offset = 0;
+    offset < memberKeys.length;
+    offset += DOCUMENT_API_VALIDATION_CONCURRENCY
+  ) {
+    const members = await Promise.all(
+      memberKeys
+        .slice(offset, offset + DOCUMENT_API_VALIDATION_CONCURRENCY)
+        .map((memberKey) =>
+          dependencies.getActiveMember(workspaceId, memberKey)
+        ),
+    )
+    if (members.some((member) => member === undefined)) return false
+  }
+  return true
 }
 
 async function validateDocumentRelationTargets(
@@ -1801,9 +2208,30 @@ async function validateDocumentRelationTargets(
       ]),
     ).values(),
   ]
+  requireDocumentRelationTargetLimit(uniqueTargets)
   await dependencies.validateRelationTargets(
     principal,
     uniqueTargets,
+  )
+}
+
+function requireDocumentRelationTargetLimit(
+  targets: readonly DocumentRelationTarget[],
+): void {
+  const uniqueTargetKeys = new Set(
+    targets.map((target) =>
+      target.kind === 'work-item'
+        ? `work-item:${target.workItemId}`
+        : target.kind === 'project'
+          ? `project:${target.projectId}`
+          : `goal:${target.goalId}`
+    ),
+  )
+  if (uniqueTargetKeys.size <= DOCUMENT_MAX_BACKLINK_COUNT) return
+  throw new DocumentError(
+    413,
+    'DocumentRelationTargetLimitExceeded',
+    `A Document request can validate at most ${DOCUMENT_MAX_BACKLINK_COUNT} relation targets.`,
   )
 }
 

@@ -78,6 +78,8 @@ export type PlanningWorkItemState = {
 export type PlanningEntityAuthorizationReference = {
   /** Planning entity ID です。 */
   id: string
+  /** Relation target 種別を current entity source で検証する型です。 */
+  type: PlanningEntityType
   /** Active owner の Workspace member key です。 */
   ownerMemberKey: string
   /** 任意の Team scope です。 */
@@ -102,6 +104,8 @@ export type PlanningAuthorizationState = {
 export type PlanningClient = {
   /** Workspace planning snapshot を返します。 */
   get(workspaceId: string, workItemState: PlanningWorkItemState): Promise<PlanningSnapshot>
+  /** 外部 authorization transaction を束縛する global revision を返します。 */
+  getAuthorizationRevision(workspaceId: string): Promise<number>
   /** 認可用に read-time filtering 前の Work Item link を返します。 */
   getWorkItemLinkForAuthorization(
     workspaceId: string,
@@ -253,6 +257,12 @@ abstract class BasePlanningClient implements PlanningClient {
     return createPlanningSnapshot(state, workItemState)
   }
 
+  /** 外部 authorization transaction を束縛する global revision を返します。 */
+  async getAuthorizationRevision(workspaceId: string) {
+    const state = await this.readState(readIdentifier(workspaceId, 'Workspace ID'))
+    return state.revision
+  }
+
   /** Read-time filtering 前の Work Item link を認可判定だけに返します。 */
   async getWorkItemLinkForAuthorization(
     workspaceId: string,
@@ -275,6 +285,7 @@ abstract class BasePlanningClient implements PlanningClient {
       revision: state.revision,
       entities: state.entities.map((entity) => ({
         id: entity.id,
+        type: entity.type,
         ownerMemberKey: entity.ownerMemberKey,
         ...(entity.teamId === undefined ? {} : { teamId: entity.teamId }),
         ...(entity.projectId === undefined ? {} : { projectId: entity.projectId }),
@@ -853,6 +864,14 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       throw persistenceInvalid('Planning rows exist without metadata.')
     }
     return readPlanningRows(items, before, workspaceId)
+  }
+
+  /** META row だけを強整合 read して authorization revision を返します。 */
+  override async getAuthorizationRevision(workspaceId: string) {
+    await this.ensureTable()
+    return (await this.readMeta(
+      readIdentifier(workspaceId, 'Workspace ID'),
+    )).revision
   }
 
   /** Global META revision の CAS と row 差分を一つの transaction で保存します。 */
