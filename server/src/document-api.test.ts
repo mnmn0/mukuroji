@@ -12,6 +12,7 @@ import {
   type DocumentApiDependencies,
 } from './document-api'
 import {
+  DOCUMENT_MAX_BACKLINK_COUNT,
   DocumentError,
   type DocumentClient,
 } from './documents'
@@ -380,13 +381,20 @@ test('rejects oversized grants and relation targets without downstream reads', a
       scope: { type: 'workspace' },
       title: 'Too many targets',
       whiteboard: {
-        objects: Array.from({ length: 46 }, (_, index) => ({
-          id: `object-${index}`,
-          type: 'work-item',
-          workItemId: `team/team-a/issue/issue-${index}`,
-          bounds: { x: index * 10, y: 0, width: 100, height: 100 },
-          zIndex: index,
-        })),
+        objects: Array.from(
+          {
+            length:
+              DOCUMENT_MAX_BACKLINK_COUNT +
+              1,
+          },
+          (_, index) => ({
+            id: `object-${index}`,
+            type: 'work-item',
+            workItemId: `team/team-a/issue/issue-${index}`,
+            bounds: { x: index * 10, y: 0, width: 100, height: 100 },
+            zIndex: index,
+          }),
+        ),
         connectors: [],
         frames: [],
       },
@@ -405,13 +413,19 @@ test('rejects an operation that exceeds the final target limit before target rea
     ...pageDocument,
     kind: 'whiteboard',
     whiteboard: {
-      objects: Array.from({ length: 45 }, (_, index) => ({
-        id: `object-${index}`,
-        type: 'work-item' as const,
-        workItemId: `team/team-a/issue/issue-${index}`,
-        bounds: { x: index * 10, y: 0, width: 100, height: 100 },
-        zIndex: index,
-      })),
+      objects: Array.from(
+        {
+          length:
+            DOCUMENT_MAX_BACKLINK_COUNT,
+        },
+        (_, index) => ({
+          id: `object-${index}`,
+          type: 'work-item' as const,
+          workItemId: `team/team-a/issue/issue-${index}`,
+          bounds: { x: index * 10, y: 0, width: 100, height: 100 },
+          zIndex: index,
+        }),
+      ),
       connectors: [],
       frames: [],
     },
@@ -448,11 +462,21 @@ test('rejects an operation that exceeds the final target limit before target rea
           operationId: 'operation-1',
           type: 'insert-object',
           object: {
-            id: 'object-45',
+            id:
+              `object-${DOCUMENT_MAX_BACKLINK_COUNT}`,
             type: 'work-item',
-            workItemId: 'team/team-a/issue/issue-45',
-            bounds: { x: 450, y: 0, width: 100, height: 100 },
-            zIndex: 45,
+            workItemId:
+              `team/team-a/issue/issue-${DOCUMENT_MAX_BACKLINK_COUNT}`,
+            bounds: {
+              x:
+                DOCUMENT_MAX_BACKLINK_COUNT *
+                10,
+              y: 0,
+              width: 100,
+              height: 100,
+            },
+            zIndex:
+              DOCUMENT_MAX_BACKLINK_COUNT,
           },
         }],
       }),
@@ -765,19 +789,19 @@ test('batches backlink targets behind one bounded source-read budget', async () 
     {
       targetKind: 'goal',
       targetId: 'goal-1',
-      limit: 15,
+      limit: 4,
       cursor: undefined,
     },
     {
       targetKind: 'project',
       targetId: 'project-1',
-      limit: 15,
+      limit: 5,
       cursor: undefined,
     },
     {
       targetKind: 'work-item',
       targetId: 'team/team-a/issue/issue-1',
-      limit: 15,
+      limit: 5,
       cursor: undefined,
     },
   ])
@@ -804,7 +828,9 @@ test('batches backlink targets behind one bounded source-read budget', async () 
         total + (call.limit ?? 0),
       0,
     ),
-  ).toBeLessThanOrEqual(45)
+  ).toBeLessThanOrEqual(
+    DOCUMENT_MAX_BACKLINK_COUNT,
+  )
 })
 
 test('rejects an oversized backlink batch before source reads', async () => {
@@ -826,7 +852,11 @@ test('rejects an oversized backlink batch before source reads', async () => {
       },
       body: JSON.stringify({
         targets: Array.from(
-          { length: 46 },
+          {
+            length:
+              DOCUMENT_MAX_BACKLINK_COUNT +
+              1,
+          },
           (_, index) => ({
             targetType: 'goal',
             targetId: `goal-${index}`,

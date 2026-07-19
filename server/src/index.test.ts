@@ -46,11 +46,15 @@ import {
 import {
   app,
   AwsCognitoClient,
+  canManageWorkItemImports,
   CognitoServiceError,
   configureApiClientsForTest,
+  createCanonicalPublicWorkItemService,
+  createImportRowCreateIdentity,
   createAutomationActionExecutor,
   createBulkItemMutationIdempotencyKey,
   requireBulkOperationOwner,
+  readConnectorSyncOriginPreviousSigningSecrets,
   resolveRequestClientKey,
   toBulkOperationResponse,
   DynamoDbDashboardSummaryClient,
@@ -60,6 +64,7 @@ import {
   FlociCognitoClient,
   handler,
   resetApiClientsForTest,
+  toWorkItemImportWorkerError,
   WorkspaceAccessError,
   type ProjectRole,
   type WorkspaceAccessClient,
@@ -91,6 +96,10 @@ import {
   resolveEnterpriseDirectoryPrincipal,
 } from './enterprise-identity'
 import {
+  InMemoryDeveloperPlatformClient,
+  type ApiScope,
+} from './developer-platform'
+import {
   createEnterpriseScimGroupJobWorkerHandler,
 } from './enterprise-scim-group-job-worker-handler'
 import {
@@ -108,9 +117,610 @@ const enterpriseScimGroupJobProcessors = new WeakMap<
   InMemoryEnterpriseIdentityClient,
   EnterpriseScimGroupJobProcessor
 >()
+const HEADLESS_DEVELOPER_WORKSPACE_ID = 'workspace-headless'
 
 afterEach(() => {
   resetApiClientsForTest()
+})
+
+test('validates previous connector origin signing secrets for production rotation', () => {
+  const first = 'previous-origin-signing-secret-number-one'
+  const second = 'previous-origin-signing-secret-number-two'
+  expect(readConnectorSyncOriginPreviousSigningSecrets(
+    JSON.stringify([`  ${first}  `, second]),
+  )).toEqual([first, second])
+  expect(readConnectorSyncOriginPreviousSigningSecrets(undefined)).toEqual([])
+  for (const invalid of [
+    'not-json',
+    '{}',
+    JSON.stringify(['short']),
+    JSON.stringify([first, second, first, second]),
+  ]) {
+    expect(() => readConnectorSyncOriginPreviousSigningSecrets(invalid))
+      .toThrow(
+        'CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON must be a JSON array of up to three strings containing at least 32 bytes.',
+      )
+  }
+})
+
+test('scopes deterministic import row identities to the Workspace actor', () => {
+  const context = {
+    requestId: 'request-import-row',
+    idempotencyKey: 'import-same-client-key-row-1',
+  }
+  const input = {
+    title: 'Imported row',
+    assigneeUserId: 'assignee@example.com',
+    dueDate: '2026-07-31',
+    priority: 'medium',
+  } as const
+  const firstActor = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-1',
+    context,
+    'team-1',
+    input,
+  )
+  const firstActorRetry = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-1',
+    context,
+    'team-1',
+    input,
+  )
+  const secondActor = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-2',
+    context,
+    'team-1',
+    input,
+  )
+  const changedPayload = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-1',
+    context,
+    'team-1',
+    { ...input, title: 'Different imported row' },
+  )
+
+  expect(firstActorRetry).toEqual(firstActor)
+  expect(secondActor.issueId).not.toBe(firstActor.issueId)
+  expect(secondActor.requestDigest).not.toBe(firstActor.requestDigest)
+  expect(changedPayload.issueId).toBe(firstActor.issueId)
+  expect(changedPayload.requestDigest).not.toBe(firstActor.requestDigest)
+})
+
+test('requires current Workspace administration for queued import execution', () => {
+  expect(canManageWorkItemImports('owner')).toBe(true)
+  expect(canManageWorkItemImports('admin')).toBe(true)
+  expect(canManageWorkItemImports('member')).toBe(false)
+  expect(canManageWorkItemImports('guest')).toBe(false)
+})
+
+test('retries import configuration conflicts but terminalizes revoked access', () => {
+  expect(toWorkItemImportWorkerError(new WorkItemConfigurationError(
+    409,
+    'WorkItemConfigurationRevisionConflict',
+    'Configuration changed concurrently.',
+  ))).toMatchObject({
+    code: 'ImportConcurrentMutation',
+    retryable: true,
+  })
+  expect(toWorkItemImportWorkerError(new WorkspaceAccessError(
+    403,
+    'WorkspaceRoleDenied',
+    'Workspace management permission changed.',
+  ))).toMatchObject({
+    code: 'ImportAuthorizationRejected',
+    retryable: false,
+  })
+  expect(toWorkItemImportWorkerError(new WorkspaceAccessError(
+    409,
+    'WorkspaceAssigneeInactive',
+    'Only active Workspace members can be assigned.',
+  ))).toMatchObject({
+    code: 'ImportValidationRejected',
+    retryable: false,
+  })
+})
+
+test('denies headless API credentials after an applied SCIM deprovision', async () => {
+  const calls = configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const workspaceId = HEADLESS_DEVELOPER_WORKSPACE_ID
+  const identity = new InMemoryEnterpriseIdentityClient()
+  await putHeadlessEnterpriseIdentityProvider(identity, workspaceId)
+  const user = await putAppliedHeadlessScimUser(identity, workspaceId)
+  const deactivated = await identity.deactivateScimUser(
+    workspaceId,
+    'headless-idp',
+    user.userId,
+    'headless-user-deactivated',
+  )
+  if (!deactivated) throw new Error('Expected the headless SCIM user to be deactivated.')
+  await identity.markScimUserApplied(
+    workspaceId,
+    deactivated.userId,
+    deactivated.version,
+  )
+  const secret = await configureHeadlessDeveloperCredential(
+    identity,
+    ['work-items:read'],
+  )
+
+  const response = await app.request(
+    'http://localhost/api/v1/work-items?teamId=core-team',
+    { headers: { Authorization: `Bearer ${secret}` } },
+  )
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'forbidden' })
+  expect(calls.publicIssuePageReads).toHaveLength(0)
+})
+
+test('applies compatible custom SCIM group roles to only their headless Project scope', async () => {
+  const calls = configureFakeProjectClients(false, {
+    workspaceRole: 'owner',
+    projectAccesses: [],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+    detailAssignedProjectIds: {
+      'refero-work-item': 'refero',
+      'private-work-item': 'private-project',
+    },
+  })
+  const workspaceId = HEADLESS_DEVELOPER_WORKSPACE_ID
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const now = '2026-07-20T00:00:00.000Z'
+  await putHeadlessEnterpriseIdentityProvider(identity, workspaceId)
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:headless-project-writer',
+    name: 'Headless Project writer',
+    permissions: ['work-items.read', 'work-items.write'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  const user = await putAppliedHeadlessScimUser(identity, workspaceId)
+  const group = await identity.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'headless-idp',
+    externalId: 'headless-project-writers',
+    displayName: 'Headless Project writers',
+    active: true,
+    memberUserIds: [user.userId],
+    idempotencyKey: 'headless-project-writers-created',
+  })
+  await identity.markScimGroupApplied(
+    workspaceId,
+    group.groupId,
+    group.version,
+  )
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: 'headless-project-writer-mapping',
+    identityProviderId: 'headless-idp',
+    directoryGroupId: group.groupId,
+    roleId: 'custom:headless-project-writer',
+    scope: { workspaceId, kind: 'project', targetId: 'refero' },
+    enabled: true,
+    priority: 0,
+    revision: 1,
+    updatedAt: now,
+  })
+  const secret = await configureHeadlessDeveloperCredential(
+    identity,
+    ['work-items:read', 'work-items:write'],
+  )
+
+  const allowedRead = await requestHeadlessWorkItem(
+    secret,
+    'refero-work-item',
+  )
+  const deniedRead = await requestHeadlessWorkItem(
+    secret,
+    'private-work-item',
+  )
+  const allowedWrite = await createHeadlessWorkItem(
+    secret,
+    'refero',
+    'headless-project-write-allowed',
+  )
+  const deniedWrite = await createHeadlessWorkItem(
+    secret,
+    'private-project',
+    'headless-project-write-denied',
+  )
+
+  expect(allowedRead.status).toBe(200)
+  expect(deniedRead.status).toBe(403)
+  expect(allowedWrite.status).toBe(201)
+  expect(deniedWrite.status).toBe(403)
+  expect(calls.issueCreates.map((call) => call.assignedProjectId)).toEqual(['refero'])
+})
+
+test('suppresses legacy headless Project ACLs for directory-managed members', async () => {
+  const calls = configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const workspaceId = HEADLESS_DEVELOPER_WORKSPACE_ID
+  const identity = new InMemoryEnterpriseIdentityClient()
+  await putHeadlessEnterpriseIdentityProvider(identity, workspaceId)
+  await putAppliedHeadlessScimUser(identity, workspaceId)
+  const secret = await configureHeadlessDeveloperCredential(
+    identity,
+    ['work-items:read'],
+  )
+
+  const response = await requestHeadlessWorkItem(
+    secret,
+    'onboarding-friction',
+  )
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'forbidden' })
+  expect(calls.issueDetails).toHaveLength(0)
+})
+
+test('applies the Enterprise external ceiling to headless read and write operations', async () => {
+  const calls = configureFakeProjectClients(true, { workspaceRole: 'member' })
+  const workspaceId = HEADLESS_DEVELOPER_WORKSPACE_ID
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const now = '2026-07-20T00:00:00.000Z'
+  await identity.putVerifiedDomain({
+    workspaceId,
+    domainId: 'managed-company-domain',
+    domain: 'company.example',
+    status: 'verified',
+    revision: 1,
+    verificationRecordName: '_mukuroji-challenge.company.example',
+    verifiedAt: now,
+    enforceSso: false,
+    createdAt: now,
+    updatedAt: now,
+  })
+  await identity.putSecurityPolicy({
+    workspaceId,
+    loginMode: 'password-or-sso',
+    mfaRequirement: 'required',
+    sessionLifetimeMinutes: 480,
+    idleTimeoutMinutes: 60,
+    reauthenticationIntervalMinutes: 120,
+    sensitiveActionReauthenticationMinutes: 15,
+    ipAllowlistMode: 'all-users',
+    ipAllowlist: ['203.0.113.0/24'],
+    externalAccess: {
+      allowGuests: true,
+      allowExternalCollaborators: true,
+      requireMfa: true,
+      maximumSessionLifetimeMinutes: 120,
+      allowedGuestDomains: [],
+      permissionCeiling: ['workspace.read', 'projects.read', 'work-items.read'],
+    },
+    revision: 1,
+    updatedAt: now,
+    updatedBy: 'owner@example.com',
+  })
+  const secret = await configureHeadlessDeveloperCredential(
+    identity,
+    ['work-items:read', 'work-items:write'],
+  )
+
+  const allowedRead = await requestHeadlessWorkItem(
+    secret,
+    'onboarding-friction',
+  )
+  const deniedWrite = await createHeadlessWorkItem(
+    secret,
+    'refero',
+    'headless-external-write-denied',
+  )
+
+  expect(allowedRead.status).toBe(200)
+  expect(deniedWrite.status).toBe(403)
+  expect(await deniedWrite.json()).toMatchObject({ code: 'forbidden' })
+  expect(calls.issueCreates).toHaveLength(0)
+})
+
+test('uses current Cognito groups for direct Enterprise group assignments', async () => {
+  for (const [cognitoUserGroups, expectedStatus] of [
+    [['cognito-project-writers'], 200],
+    [[], 403],
+  ] as const) {
+    const calls = configureFakeProjectClients(false, {
+      workspaceRole: 'member',
+      projectAccesses: [],
+      cognitoUserGroups: [...cognitoUserGroups],
+    })
+    const workspaceId = HEADLESS_DEVELOPER_WORKSPACE_ID
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = '2026-07-20T00:00:00.000Z'
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:cognito-project-reader',
+      name: 'Cognito Project reader',
+      permissions: ['work-items.read'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    const identityWithDirectGroupAssignment = new Proxy(identity, {
+      get(target, property) {
+        if (property === 'getSnapshot') {
+          return async (requestedWorkspaceId: string) => ({
+            ...await target.getSnapshot(requestedWorkspaceId),
+            roleAssignments: [{
+              workspaceId,
+              assignmentId: 'cognito-project-reader-assignment',
+              principalKind: 'directory-group' as const,
+              principalId: 'cognito-project-writers',
+              roleId: 'custom:cognito-project-reader' as const,
+              scope: {
+                workspaceId,
+                kind: 'project' as const,
+                targetId: 'refero',
+              },
+              source: 'direct' as const,
+            }],
+          })
+        }
+        const value = Reflect.get(target, property, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    const platform = new InMemoryDeveloperPlatformClient()
+    const apiKey = await platform.createApiKey({
+      workspaceId,
+      createdByUserId: 'demo@example.com',
+      input: {
+        name: 'Direct Cognito group assignment key',
+        scopes: ['work-items:read'],
+        expiresAt: '2027-07-20T00:00:00.000Z',
+      },
+    })
+    configureApiClientsForTest({
+      developerPlatform: platform,
+      enterpriseIdentity: identityWithDirectGroupAssignment,
+    })
+
+    const response = await requestHeadlessWorkItem(
+      apiKey.secret,
+      'onboarding-friction',
+    )
+
+    expect(response.status).toBe(expectedStatus)
+    expect(calls.issueDetails).toHaveLength(expectedStatus === 200 ? 1 : 0)
+  }
+})
+
+test('fails closed before Work Item reads when current Cognito groups are unavailable', async () => {
+  const calls = configureFakeProjectClients(true, {
+    workspaceRole: 'owner',
+    cognitoUserGroupsError: new CognitoServiceError(
+      503,
+      'CognitoGroupsUnavailable',
+      'Current Cognito groups are unavailable.',
+    ),
+  })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const secret = await configureHeadlessDeveloperCredential(
+    identity,
+    ['work-items:read'],
+  )
+
+  const response = await requestHeadlessWorkItem(
+    secret,
+    'onboarding-friction',
+  )
+
+  expect(response.status).toBe(503)
+  expect(calls.issueDetails).toHaveLength(0)
+})
+
+test('replays a completed Work Item delete using current Team write access after the item is gone', async () => {
+  const calls = configureFakeProjectClients(true, {
+    role: 'member',
+    workspaceRole: 'member',
+  })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const secret = await configureHeadlessDeveloperCredential(
+    identity,
+    ['work-items:delete'],
+  )
+  configureApiClientsForTest({
+    documents: {
+      async prepareWorkItemDeletionFenceTransactWrite() {
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DocumentsTable',
+              Item: {
+                entryType: 'work-item-document-backlink-fence',
+                activeBacklinkCount: 0,
+              },
+            },
+          },
+        }
+      },
+    } as unknown as DocumentClient,
+  })
+  const request = () => app.request(
+    'http://localhost/api/v1/work-items/onboarding-friction?teamId=core-team',
+    {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'headless-delete-replay',
+      },
+      body: JSON.stringify({ expectedRevision: 1 }),
+    },
+  )
+
+  const first = await request()
+  const replay = await request()
+
+  expect(first.status).toBe(204)
+  expect(replay.status).toBe(204)
+  expect(replay.headers.get('Idempotency-Replayed')).toBe('true')
+  expect(calls.issueDeletes).toHaveLength(1)
+  expect(calls.issueDetails).toHaveLength(1)
+})
+
+test('wires external and Document deletion fences through the canonical Public Work Item service', async () => {
+  const externalFence = {
+    Put: {
+      TableName: 'DeveloperPlatformTable',
+      Item: { entryType: 'work-item-link-fence', activeLinkCount: 0 },
+    },
+  }
+  const documentFence = {
+    Put: {
+      TableName: 'DocumentsTable',
+      Item: {
+        entryType: 'work-item-document-backlink-fence',
+        activeBacklinkCount: 0,
+      },
+    },
+  }
+  const externalFenceRequests: Array<Record<string, string>> = []
+  const documentFenceRequests: Array<Record<string, string>> = []
+  const deleteTransactions: Array<{
+    authorizationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
+    deletionFences: ReadonlyArray<{
+      kind: string
+      transactWriteItem: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+    }>
+    issueId: string
+  }> = []
+  let hasExternalLinks = false
+  const calls = configureFakeProjectClients(true, {
+    role: 'member',
+    workspaceRole: 'member',
+    issueDeleteHook(input) {
+      deleteTransactions.push(input)
+    },
+  })
+  configureApiClientsForTest({
+    developerPlatform: {
+      async listExternalWorkItemLinks(_input) {
+        return hasExternalLinks ? [{}] : []
+      },
+      async prepareWorkItemDeletionFenceTransactWrite(input) {
+        externalFenceRequests.push(input)
+        return { transactWriteItem: externalFence }
+      },
+    } as never,
+    documents: {
+      async prepareWorkItemDeletionFenceTransactWrite(input) {
+        documentFenceRequests.push(input)
+        return { transactWriteItem: documentFence }
+      },
+    } as unknown as DocumentClient,
+    planning: new InMemoryPlanningClient(),
+  })
+  const service = createCanonicalPublicWorkItemService()
+  const credential = {
+    kind: 'api-key' as const,
+    workspaceId: 'user#demo@example.com',
+    credentialId: 'api-key-1',
+    subjectUserId: 'demo@example.com',
+    scopes: ['work-items:delete' as const],
+  }
+  const mutationContext = {
+    requestId: 'delete-request-1',
+    idempotencyKey: 'delete-idempotency-1',
+  }
+
+  const deletedWorkItem = await service.delete(
+    credential,
+    'core-team',
+    'wiring-delete',
+    1,
+    mutationContext,
+  )
+  expect(deletedWorkItem).toMatchObject({ id: 'wiring-delete' })
+
+  expect(externalFenceRequests).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    teamId: 'core-team',
+    workItemId: 'wiring-delete',
+  }])
+  expect(documentFenceRequests).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    workItemId: 'team/core-team/issue/wiring-delete',
+  }])
+  expect(deleteTransactions).toHaveLength(1)
+  expect(deleteTransactions[0]?.deletionFences).toEqual([
+    { kind: 'external-links', transactWriteItem: externalFence },
+    { kind: 'document-backlinks', transactWriteItem: documentFence },
+  ])
+  expect(deleteTransactions[0]?.authorizationConditionChecks).not.toHaveLength(0)
+
+  hasExternalLinks = true
+  await expect(service.delete(
+    credential,
+    'core-team',
+    'precheck-conflict',
+    1,
+    {
+      requestId: 'delete-request-2',
+      idempotencyKey: 'delete-idempotency-2',
+    },
+  )).rejects.toMatchObject({
+    code: 'conflict',
+    status: 409,
+  })
+  expect(calls.issueDeletes).toHaveLength(1)
+  expect(deleteTransactions).toHaveLength(1)
+  expect(externalFenceRequests).toHaveLength(1)
+  expect(documentFenceRequests).toHaveLength(1)
+})
+
+test('binds public Work Item writes to Workspace, Planning, and Enterprise authorization snapshots', async () => {
+  await withTestEnvironment({
+    ENTERPRISE_IDENTITY_TABLE_NAME: 'EnterpriseIdentityTable',
+    PLANNING_TABLE_NAME: 'PlanningTable',
+    WORKSPACE_ACCESS_TABLE_NAME: 'WorkspaceAccessTable',
+  }, async () => {
+    let authorizationChecks:
+      | NonNullable<TransactWriteCommandInput['TransactItems']>
+      | undefined
+    configureFakeProjectClients(true, {
+      role: 'member',
+      workspaceRole: 'member',
+      issueCreateHook(input) {
+        authorizationChecks = input.authorizationConditionChecks as
+          NonNullable<TransactWriteCommandInput['TransactItems']>
+        throw new WorkspaceAccessError(
+          409,
+          'WorkItemAuthorizationChanged',
+          'Authorization changed between validation and commit.',
+        )
+      },
+    })
+    const secret = await configureHeadlessDeveloperCredential(
+      new InMemoryEnterpriseIdentityClient(),
+      ['work-items:write'],
+    )
+
+    const response = await createHeadlessWorkItem(
+      secret,
+      'refero',
+      'authorization-snapshot-race',
+    )
+
+    expect(response.status).toBe(409)
+    expect(authorizationChecks?.map((item) =>
+      item.ConditionCheck?.TableName
+    )).toEqual([
+      'WorkspaceAccessTable',
+      'PlanningTable',
+      'EnterpriseIdentityTable',
+    ])
+  })
 })
 
 test('keeps Analytics queries independent from the 200-item aggregate list limit', async () => {
@@ -3888,6 +4498,213 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
   })
 })
 
+test('pages Public Work Items with a bounded updated-at GSI query and LastEvaluatedKey', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const createStoredIssue = (issueId: string, updatedAt: string) => ({
+    schemaVersion: 1,
+    revision: 1,
+    workflowSchemaVersion: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#project-1',
+    teamId: 'core-team',
+    assignedProjectId: 'project-1',
+    issueId,
+    sortOrder: 1,
+    title: `Issue ${issueId}`,
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'member@example.com',
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-31',
+    priority: 'medium',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt,
+  })
+  const firstKey = {
+    directoryTeamId: 'workspace-1#team#core-team',
+    updatedAt: '2026-07-18T02:00:00.000Z',
+    issueId: 'issue-2',
+  }
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return command.input.ExclusiveStartKey
+        ? { Items: [createStoredIssue('issue-1', '2026-07-18T01:00:00.000Z')] }
+        : {
+            Items: [createStoredIssue('issue-2', '2026-07-18T02:00:00.000Z')],
+            LastEvaluatedKey: firstKey,
+          }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const first = await client.getPublicWorkItemPage('workspace-1', 'core-team', {
+    limit: 1,
+    updatedAfter: '2026-07-18T00:00:00.000Z',
+    accessibleProjectIds: ['project-1'],
+  })
+  const second = await client.getPublicWorkItemPage('workspace-1', 'core-team', {
+    limit: 1,
+    cursor: first.nextCursor,
+    updatedAfter: '2026-07-18T00:00:00.000Z',
+    accessibleProjectIds: ['project-1'],
+  })
+  await client.getPublicWorkItemPage('workspace-1', 'core-team', {
+    limit: 1,
+    accessibleProjectIds: ['project-1'],
+  })
+
+  expect(first.issues.map((issue) => issue.id)).toEqual(['issue-2'])
+  expect(first.nextCursor).toBeString()
+  expect(second.issues.map((issue) => issue.id)).toEqual(['issue-1'])
+  expect(second.nextCursor).toBeUndefined()
+  expect(sentInputs[0]).toMatchObject({
+    TableName: 'issues-table',
+    IndexName: 'TeamIssueUpdatedAtIndex',
+    KeyConditionExpression:
+      '#directoryTeamId = :directoryTeamId AND #updatedAt > :updatedAfter',
+    Limit: 1,
+    ScanIndexForward: false,
+  })
+  expect(sentInputs[1]?.ExclusiveStartKey).toEqual(firstKey)
+  expect(sentInputs[2]).toMatchObject({
+    KeyConditionExpression: '#directoryTeamId = :directoryTeamId',
+    ExpressionAttributeNames: expect.not.objectContaining({
+      '#updatedAt': 'updatedAt',
+    }),
+  })
+})
+
+test('returns an existing deterministic import row only when its request digest matches', async () => {
+  const digest = 'a'.repeat(64)
+  const issueId = `import-${'b'.repeat(48)}`
+  const existing = {
+    schemaVersion: 1,
+    revision: 1,
+    workflowSchemaVersion: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId,
+    importRequestDigest: digest,
+    sortOrder: 10,
+    title: 'Imported once',
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'member@example.com',
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-31',
+    priority: 'medium',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T00:00:00.000Z',
+  }
+  const documentClient = {
+    async send(command: { constructor: { name: string } }) {
+      if (command.constructor.name === 'QueryCommand') return { Items: [] }
+      if (command.constructor.name === 'GetCommand') return { Item: existing }
+      const error = new Error('conditional collision') as Error & {
+        CancellationReasons: Array<{ Code: string }>
+      }
+      error.name = 'TransactionCanceledException'
+      error.CancellationReasons = [
+        { Code: 'ConditionalCheckFailed' },
+        { Code: 'None' },
+      ]
+      throw error
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const input = {
+    title: 'Imported once',
+    assigneeUserId: 'member@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    dueDate: '2026-07-31',
+    priority: 'medium',
+    idempotentIssueId: issueId,
+    idempotentRequestDigest: digest,
+  }
+
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    input,
+    'member@example.com',
+  )).resolves.toMatchObject({ issue: { id: issueId, title: 'Imported once' } })
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    { ...input, idempotentRequestDigest: 'c'.repeat(64) },
+    'member@example.com',
+  )).rejects.toMatchObject({
+    status: 409,
+    code: 'IdempotentWorkItemCreateConflict',
+  })
+})
+
+test('accepts the deterministic public API Work Item ID namespace', async () => {
+  let transactionInput: TransactWriteCommandInput | undefined
+  const documentClient = {
+    async send(command: { constructor: { name: string }; input?: TransactWriteCommandInput }) {
+      if (command.constructor.name === 'QueryCommand') return { Items: [] }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        transactionInput = command.input
+        return {}
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const issueId = `api-${'d'.repeat(48)}`
+
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    {
+      title: 'Created through the public API',
+      assigneeUserId: 'member@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      dueDate: '2026-07-31',
+      priority: 'medium',
+      idempotentIssueId: issueId,
+      idempotentRequestDigest: 'e'.repeat(64),
+    },
+    'member@example.com',
+  )).resolves.toMatchObject({ issue: { id: issueId } })
+  expect(transactionInput?.TransactItems?.[0]?.Put?.Item).toMatchObject({
+    issueId,
+    importRequestDigest: 'e'.repeat(64),
+  })
+})
+
 test('rejects a status-only canonical row instead of upcasting workflow fields', async () => {
   const documentClient = {
     async send() {
@@ -6658,6 +7475,9 @@ test('keeps legacy revoke in manual cleanup without mutating Cognito', async () 
       async isSystemAdmin() {
         return false
       },
+      async getUserGroups() {
+        return []
+      },
       async deleteWorkspaceUser() {
         cognitoCleanupCalls += 1
         return 'deleted'
@@ -7553,6 +8373,71 @@ test('returns Cognito groups and system admin status for the current user', asyn
   expect(await response.json()).toMatchObject({
     groups: ['mukuroji-system-admins'],
     isSystemAdmin: true,
+  })
+})
+
+test('reads every AWS Cognito group page and deduplicates current membership', async () => {
+  const requestedTokens: Array<string | undefined> = []
+  const sdkClient = {
+    async send(command: { input: { NextToken?: string } }) {
+      requestedTokens.push(command.input.NextToken)
+      return command.input.NextToken
+        ? {
+            Groups: [
+              { GroupName: 'project-writers' },
+              { GroupName: 'workspace-readers' },
+            ],
+          }
+        : {
+            Groups: [
+              { GroupName: 'workspace-readers' },
+              { GroupName: 'shared-group' },
+            ],
+            NextToken: 'groups-page-2',
+          }
+    },
+  } as unknown as CognitoIdentityProviderClient
+  const client = new AwsCognitoClient(
+    sdkClient,
+    'ap-northeast-1_mukuroji',
+    'mukuroji-client',
+  )
+
+  await expect(client.getUserGroups('demo@example.com')).resolves.toEqual([
+    'workspace-readers',
+    'shared-group',
+    'project-writers',
+  ])
+  expect(requestedTokens).toEqual([undefined, 'groups-page-2'])
+})
+
+test('reads every Floci Cognito group page for current membership', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'local-client',
+    COGNITO_USER_POOL_ID: 'us-east-1_local',
+  }, async () => {
+    const originalFetch = globalThis.fetch
+    const requestedTokens: Array<unknown> = []
+    globalThis.fetch = (async (_input, init) => {
+      const payload = JSON.parse(String(init?.body)) as Record<string, unknown>
+      requestedTokens.push(payload.NextToken)
+      return Response.json(payload.NextToken
+        ? { Groups: [{ GroupName: 'project-writers' }] }
+        : {
+            Groups: [{ GroupName: 'workspace-readers' }],
+            NextToken: 'groups-page-2',
+          })
+    }) as typeof fetch
+    try {
+      const client = new FlociCognitoClient('http://localhost:4566')
+      await expect(client.getUserGroups('demo@example.com')).resolves.toEqual([
+        'workspace-readers',
+        'project-writers',
+      ])
+      expect(requestedTokens).toEqual([undefined, 'groups-page-2'])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })
 
@@ -9360,6 +10245,9 @@ test('drops ownership and cleanup provenance when reinvite finds a replacement C
       async isSystemAdmin() {
         return false
       },
+      async getUserGroups() {
+        return []
+      },
       async findWorkspaceUser() {
         return {
           profile: {
@@ -9531,6 +10419,9 @@ test('forwards one mutation audit context through every invitation resend stage'
       },
       async isSystemAdmin() {
         return false
+      },
+      async getUserGroups() {
+        return []
       },
       async findWorkspaceUser() {
         return undefined
@@ -11174,6 +12065,8 @@ test('DynamoDB directory client validates and ignores workspace bootstrap rows f
       directoryId: 'workspace#production',
       entryType: 'team',
       teamId: 'new-team',
+      webhookAuthorizationKey: 'WEBHOOK_ACL#RESOURCE#workspace#production',
+      webhookAuthorizationSortKey: 'TEAM#new-team',
     },
   })
 })
@@ -11251,6 +12144,9 @@ test('DynamoDB directory client creates duplicate named teams with a unique id s
       teamId: '新規チーム-2',
       teamSortOrder: 20,
       entryKey: '000020#000000#TEAM#新規チーム-2',
+      webhookAuthorizationKey:
+        'WEBHOOK_ACL#RESOURCE#user#demo@example.com',
+      webhookAuthorizationSortKey: 'TEAM#新規チーム-2',
     },
     ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
   })
@@ -11341,6 +12237,9 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
             projectId: '新規プロジェクト-2',
             projectSortOrder: 20,
             entryKey: '000010#000020#PROJECT#新規プロジェクト-2',
+            webhookAuthorizationKey:
+              'WEBHOOK_ACL#RESOURCE#user#demo@example.com',
+            webhookAuthorizationSortKey: 'PROJECT#新規プロジェクト-2',
           },
           ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
         },
@@ -11356,6 +12255,9 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
             memberKey: 'demo@example.com',
             email: 'demo@example.com',
             role: 'manager',
+            webhookAuthorizationKey:
+              'WEBHOOK_ACL#MEMBER#user#demo@example.com#demo@example.com',
+            webhookAuthorizationSortKey: 'PROJECT#新規プロジェクト-2',
           },
           ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
         },
@@ -11380,6 +12282,49 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
             ':active': 'active',
             ':expectedVersion': 1,
             ':one': 1,
+          },
+        },
+      },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#新規プロジェクト-2',
+            entryType: 'webhook-team-grant',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: '新規プロジェクト-2',
+            memberKey: 'demo@example.com',
+            sourceEntryKey:
+              'PROJECT_MEMBER#新規プロジェクト-2#demo@example.com',
+            teamSourceEntryKey: '000010#000000#TEAM#core-team',
+            projectSourceEntryKey:
+              '000010#000020#PROJECT#新規プロジェクト-2',
+            webhookAuthorizationKey:
+              'WEBHOOK_ACL#TEAM_MEMBER#user#demo@example.com#core-team#demo@example.com',
+            webhookAuthorizationSortKey: 'PROJECT#新規プロジェクト-2',
+          },
+        },
+      },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey:
+              'PROJECT#新規プロジェクト-2#MEMBER#demo@example.com',
+            entryType: 'webhook-team-grant-cleanup',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: '新規プロジェクト-2',
+            memberKey: 'demo@example.com',
+            grantDirectoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            grantEntryKey:
+              'TEAM#core-team#PROJECT#新規プロジェクト-2',
           },
         },
       },
@@ -11514,6 +12459,13 @@ test('DynamoDB directory client initializes a missing local table before creatin
               { AttributeName: 'directoryId', KeyType: 'HASH' },
               { AttributeName: 'entryKey', KeyType: 'RANGE' },
             ],
+            GlobalSecondaryIndexes: [{
+              IndexName: 'WebhookAuthorizationIndex',
+              KeySchema: [
+                { AttributeName: 'webhookAuthorizationKey', KeyType: 'HASH' },
+                { AttributeName: 'webhookAuthorizationSortKey', KeyType: 'RANGE' },
+              ],
+            }],
             TableStatus: 'ACTIVE',
           },
         }
@@ -11810,6 +12762,7 @@ test('rejects Work Item aggregate Team fan-out beyond the hard cap before item r
   }))
   const calls = configureFakeProjectClients(true, {
     additionalTeams,
+    directoryId: 'workspace-export',
     projectAccesses: [
       { projectId: 'refero', role: 'manager' },
       ...additionalTeams.flatMap((team) =>
@@ -11827,6 +12780,101 @@ test('rejects Work Item aggregate Team fan-out beyond the hard cap before item r
   expect(calls.issueReads).toEqual([])
   expect(calls.taskReads).toEqual([])
   expect(calls.projectIssueReads).toEqual([])
+})
+
+test('allows current system administrators to select an active Webhook Team', async () => {
+  const calls = configureFakeProjectClients(false, {
+    systemAdminMemberKeys: ['demo@example.com'],
+    workspaceRole: 'owner',
+  })
+  const service = createCanonicalPublicWorkItemService()
+
+  await expect(service.authorizeWebhookTeams({
+    workspaceId: 'user#demo@example.com',
+    userId: 'demo@example.com',
+    capabilities: {
+      canManageCredentials: true,
+      canManageWebhooks: true,
+      canManageIntegrations: true,
+      canImport: true,
+      canExport: true,
+    },
+  }, ['core-team'])).resolves.toBeUndefined()
+  expect(calls.accessChecks).toContainEqual({
+    directoryId: 'user#demo@example.com',
+    projectId: '*',
+  })
+  expect(calls.directoryReads).toContainEqual({
+    directoryId: 'user#demo@example.com',
+    locale: 'ja',
+    consistentRead: true,
+  })
+})
+
+test('pages all accessible Work Items beyond aggregate Team and item hard caps', async () => {
+  const additionalTeams = Array.from({ length: 20 }, (_, teamIndex) => ({
+    id: `export-team-${teamIndex}`,
+    name: `Export Team ${teamIndex}`,
+    projects: [{
+      id: `export-project-${teamIndex}`,
+      name: `Export Project ${teamIndex}`,
+      tone: 'blue' as const,
+    }],
+  }))
+  const calls = configureFakeProjectClients(true, {
+    additionalTeams,
+    projectAccesses: [
+      { projectId: 'refero', role: 'manager' },
+      ...additionalTeams.flatMap((team) =>
+        team.projects.map((project) => ({
+          projectId: project.id,
+          role: 'manager' as const,
+        }))
+      ),
+    ],
+    teamIssueCount: 11,
+    unassignedIssue: true,
+  })
+  configureApiClientsForTest({
+    developerPlatform: {
+      async consumeRateLimit() {
+        return {
+          allowed: true,
+          limit: 120,
+          remaining: 119,
+          resetAt: '2026-07-18T00:01:00.000Z',
+        }
+      },
+    } as never,
+  })
+
+  const workItems: Array<{ id: string; teamId: string }> = []
+  let cursor: string | undefined
+  let pageCount = 0
+  do {
+    const query = new URLSearchParams({ format: 'json', limit: '50' })
+    if (cursor) query.set('cursor', cursor)
+    const response = await app.request(`/api/developer/exports?${query}`, {
+      headers: { Authorization: 'Bearer test-token' },
+    })
+    expect(response.status).toBe(200)
+    const body = await response.json() as {
+      items: Array<{ id: string; teamId: string }>
+      hasMore: boolean
+      nextCursor?: string
+    }
+    workItems.push(...body.items)
+    cursor = body.nextCursor
+    expect(body.hasMore).toBe(cursor !== undefined)
+    pageCount += 1
+  } while (cursor)
+
+  expect(workItems).toHaveLength(231)
+  expect(new Set(workItems.map((workItem) => workItem.teamId))).toHaveLength(21)
+  expect(pageCount).toBe(21)
+  expect(calls.publicIssuePageReads).toHaveLength(21)
+  expect(calls.publicIssuePageReads.every((read) => read.limit === 50)).toBe(true)
+  expect(calls.issueReads).toEqual([])
 })
 
 test('filters canonical Work Items for authorization before enforcing the response limit', async () => {
@@ -13802,6 +14850,19 @@ test('binds Enterprise Analytics report writes to Team and Workspace visibility 
     configureApiClientsForTest({
       enterpriseIdentity: identity,
       analytics: analyticsRepository,
+      developerPlatform: {
+        async consumeRateLimit() {
+          return {
+            allowed: true,
+            limit: 120,
+            remaining: 119,
+            resetAt: '2026-07-18T00:01:00.000Z',
+          }
+        },
+        async listApiKeys() {
+          return []
+        },
+      } as never,
     })
     const authorization = `Bearer ${createAccessToken([], {
       client_id: 'mukuroji-main-client',
@@ -13825,6 +14886,15 @@ test('binds Enterprise Analytics report writes to Team and Workspace visibility 
         },
         body: JSON.stringify(analyticsQuery),
       })
+
+    const workspaceMemberDeveloperAccess = await app.request(
+      '/api/developer/api-keys',
+      { headers: { Authorization: authorization } },
+    )
+    expect(workspaceMemberDeveloperAccess.status).toBe(403)
+    expect(await workspaceMemberDeveloperAccess.json()).toMatchObject({
+      code: 'forbidden',
+    })
 
     const workspaceMemberSharedWrite = await patchReport(
       sharedReport.id,
@@ -13989,6 +15059,20 @@ test('binds Enterprise Analytics report writes to Team and Workspace visibility 
     expect(customWorkspaceManagerWrite.status).toBe(200)
     expect(await customWorkspaceManagerWrite.json()).toMatchObject({
       report: { name: 'Custom Workspace Manager edit', revision: 2 },
+    })
+    const customWorkspaceManagerDeveloperAccess = await app.request(
+      '/api/developer/api-keys',
+      { headers: { Authorization: authorization } },
+    )
+    expect({
+      status: customWorkspaceManagerDeveloperAccess.status,
+      body: await customWorkspaceManagerDeveloperAccess.json(),
+    }).toMatchObject({
+      status: 200,
+      body: {
+        items: [],
+        hasMore: false,
+      },
     })
     const customWorkspaceManagerSnapshot = await createSnapshot(sharedReport.id)
     expect(customWorkspaceManagerSnapshot.status).toBe(403)
@@ -15431,6 +16515,7 @@ test('DynamoDB Work Item comment idempotent replay returns comment and activity'
 
 test('DynamoDB Work Item client increments revision with an atomic CAS update', async () => {
   const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  let preparedResponse: unknown
   const currentIssue = {
     schemaVersion: 1,
     revision: 1,
@@ -15495,6 +16580,20 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
       expectedRevision: 1,
     },
     'demo@example.com',
+    undefined,
+    {
+      async prepare(response) {
+        preparedResponse = response
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: { entryType: 'idempotency', value: { state: 'completed' } },
+            },
+          },
+        }
+      },
+    },
   )).resolves.toMatchObject({
     issue: { schemaVersion: 1, revision: 2, workflowStatusId: 'done' },
   })
@@ -15511,6 +16610,129 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
         '#revision = :expectedRevision',
     },
   })
+  expect(Array.isArray(transactItems) ? transactItems.at(-1) : undefined).toMatchObject({
+    Put: { TableName: 'DeveloperPlatformTable' },
+  })
+  expect(preparedResponse).toMatchObject({
+    status: 200,
+    body: { id: 'wireframe', revision: 2, workflowStatusId: 'done' },
+  })
+})
+
+test('DynamoDB Work Item delete atomically stores its replay receipt', async () => {
+  const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 3,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'obsolete',
+    sortOrder: 10,
+    title: 'Obsolete',
+    assigneeUserId: 'demo@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/20',
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  let preparedResponse: unknown
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentCommands.push({ input: command.input, name: command.constructor.name })
+      if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.deleteTeamIssue(
+    'workspace-1',
+    'core-team',
+    'obsolete',
+    3,
+    'demo@example.com',
+    undefined,
+    {
+      async prepare(response) {
+        preparedResponse = response
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: { entryType: 'idempotency', value: { state: 'completed' } },
+            },
+          },
+        }
+      },
+    },
+    [
+      {
+        kind: 'external-links',
+        transactWriteItem: {
+          Put: {
+            TableName: 'DeveloperPlatformTable',
+            Item: {
+              entryType: 'work-item-link-fence',
+              activeLinkCount: 0,
+            },
+          },
+        },
+      },
+      {
+        kind: 'document-backlinks',
+        transactWriteItem: {
+          Put: {
+            TableName: 'DocumentsTable',
+            Item: {
+              entryType: 'work-item-document-backlink-fence',
+              activeBacklinkCount: 0,
+            },
+          },
+        },
+      },
+    ],
+  )).resolves.toMatchObject({ issue: { id: 'obsolete', revision: 3 } })
+
+  const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
+  const transactItems = transaction?.input.TransactItems
+  expect(Array.isArray(transactItems) ? transactItems[0] : undefined).toMatchObject({
+    Delete: {
+      TableName: 'IssuesTable',
+      ExpressionAttributeValues: { ':expectedRevision': 3 },
+    },
+  })
+  expect(Array.isArray(transactItems) ? transactItems[1] : undefined).toMatchObject({
+    Put: {
+      TableName: 'DeveloperPlatformTable',
+      Item: { entryType: 'work-item-link-fence', activeLinkCount: 0 },
+    },
+  })
+  expect(Array.isArray(transactItems) ? transactItems[2] : undefined).toMatchObject({
+    Put: {
+      TableName: 'DocumentsTable',
+      Item: {
+        entryType: 'work-item-document-backlink-fence',
+        activeBacklinkCount: 0,
+      },
+    },
+  })
+  expect(Array.isArray(transactItems) ? transactItems.at(-1) : undefined).toMatchObject({
+    Put: { TableName: 'DeveloperPlatformTable' },
+  })
+  expect(preparedResponse).toEqual({ status: 204, body: null })
 })
 
 test('DynamoDB Work Item client classifies configuration conflicts from the actual transaction layout', async () => {
@@ -15636,6 +16858,410 @@ test('DynamoDB Work Item client classifies configuration conflicts from the actu
       expect(configurationConditionIndex).toBe(auditEnabled ? 3 : 2)
     }
   }
+})
+
+test('DynamoDB Work Item mutations classify authorization snapshot races separately', async () => {
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#refero',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    issueId: 'authorization-race',
+    sortOrder: 10,
+    title: 'Authorization race',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/20',
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const authorizationConditionChecks: NonNullable<
+    TransactWriteCommandInput['TransactItems']
+  > = [{
+    ConditionCheck: {
+      TableName: 'WorkspaceAccessTable',
+      Key: {
+        workspaceId: 'workspace-1',
+        recordKey: 'MEMBER#demo@example.com',
+      },
+      ConditionExpression: '#version = :expectedVersion',
+      ExpressionAttributeNames: { '#version': 'version' },
+      ExpressionAttributeValues: { ':expectedVersion': 1 },
+    },
+  }]
+
+  for (const operation of ['create', 'update'] as const) {
+    let authorizationConditionIndex = -1
+    const documentClient = {
+      async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+        if (command.constructor.name === 'QueryCommand') return { Items: [] }
+        if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+        if (command.constructor.name === 'TransactWriteCommand') {
+          const transactItems = command.input.TransactItems as Array<{
+            ConditionCheck?: { TableName?: string }
+          }>
+          authorizationConditionIndex = transactItems.findIndex((item) =>
+            item.ConditionCheck?.TableName === 'WorkspaceAccessTable'
+          )
+          const error = new Error('Transaction was canceled.')
+          error.name = 'TransactionCanceledException'
+          Object.assign(error, {
+            CancellationReasons: transactItems.map((_, index) => ({
+              Code: index === authorizationConditionIndex
+                ? 'ConditionalCheckFailed'
+                : 'None',
+            })),
+          })
+          throw error
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbTeamIssuesClient(
+      'IssuesTable',
+      'IssueEventsTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+    )
+    const mutation = operation === 'create'
+      ? client.createTeamIssue(
+          'workspace-1',
+          'core-team',
+          {
+            title: 'New Work Item',
+            assigneeUserId: 'sato@example.com',
+            workflowSchemaVersion: 1,
+            workflowStatusId: 'todo',
+            statusCategory: 'unstarted',
+            customFieldValues: {},
+            dueDate: '2026/07/20',
+            priority: 'medium',
+            authorizationConditionChecks,
+          },
+          'demo@example.com',
+        )
+      : client.updateTeamIssue(
+          'workspace-1',
+          'core-team',
+          'authorization-race',
+          {
+            workflowSchemaVersion: 1,
+            workflowStatusId: 'done',
+            statusCategory: 'completed',
+            customFieldValues: {},
+            expectedRevision: 1,
+            authorizationConditionChecks,
+          },
+          'demo@example.com',
+        )
+
+    await expect(mutation).rejects.toMatchObject({
+      code: 'WorkItemAuthorizationChanged',
+      status: 409,
+    })
+    expect(authorizationConditionIndex).toBe(2)
+  }
+
+  let deleteAuthorizationConditionIndex = -1
+  const deleteDocumentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const transactItems = command.input.TransactItems as Array<{
+          ConditionCheck?: { TableName?: string }
+        }>
+        deleteAuthorizationConditionIndex = transactItems.findIndex((item) =>
+          item.ConditionCheck?.TableName === 'WorkspaceAccessTable'
+        )
+        const error = new Error('Transaction was canceled.')
+        error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: transactItems.map((_, index) => ({
+            Code: index === deleteAuthorizationConditionIndex
+              ? 'ConditionalCheckFailed'
+              : 'None',
+          })),
+        })
+        throw error
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const deleteClient = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    deleteDocumentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  await expect(deleteClient.deleteTeamIssue(
+    'workspace-1',
+    'core-team',
+    'authorization-race',
+    1,
+    'demo@example.com',
+    undefined,
+    undefined,
+    [
+      {
+        kind: 'external-links',
+        transactWriteItem: {
+          Put: { TableName: 'DeveloperPlatformTable', Item: { activeLinkCount: 0 } },
+        },
+      },
+      {
+        kind: 'document-backlinks',
+        transactWriteItem: {
+          Put: { TableName: 'DocumentsTable', Item: { activeBacklinkCount: 0 } },
+        },
+      },
+    ],
+    authorizationConditionChecks,
+  )).rejects.toMatchObject({
+    code: 'WorkItemAuthorizationChanged',
+    status: 409,
+  })
+  expect(deleteAuthorizationConditionIndex).toBe(3)
+})
+
+test('DynamoDB Work Item delete distinguishes external-link and Document-backlink races', async () => {
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'deletion-fence-race',
+    sortOrder: 10,
+    title: 'Deletion fence race',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/20',
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const fences = [
+    {
+      kind: 'external-links' as const,
+      transactWriteItem: {
+        Put: { TableName: 'DeveloperPlatformTable', Item: { activeLinkCount: 0 } },
+      },
+    },
+    {
+      kind: 'document-backlinks' as const,
+      transactWriteItem: {
+        Put: { TableName: 'DocumentsTable', Item: { activeBacklinkCount: 0 } },
+      },
+    },
+  ]
+  for (const [failedIndex, expectedCode] of [
+    [1, 'ExternalWorkItemLinkConflict'],
+    [2, 'WorkItemDocumentBacklinkConflict'],
+  ] as const) {
+    const documentClient = {
+      async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+        if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+        if (command.constructor.name === 'TransactWriteCommand') {
+          const transactItems =
+            command.input.TransactItems as NonNullable<TransactWriteCommandInput['TransactItems']>
+          const error = new Error('Transaction was canceled.')
+          error.name = 'TransactionCanceledException'
+          Object.assign(error, {
+            CancellationReasons: transactItems.map((_, index) => ({
+              Code: index === failedIndex ? 'ConditionalCheckFailed' : 'None',
+            })),
+          })
+          throw error
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbTeamIssuesClient(
+      'IssuesTable',
+      'IssueEventsTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+    )
+
+    await expect(client.deleteTeamIssue(
+      'workspace-1',
+      'core-team',
+      'deletion-fence-race',
+      1,
+      'demo@example.com',
+      undefined,
+      undefined,
+      fences,
+    )).rejects.toMatchObject({
+      code: expectedCode,
+      status: 409,
+    })
+  }
+})
+
+test('DynamoDB Work Item delete maps unclassified transaction cancellations to a retryable error', async () => {
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'unclassified-cancellation',
+    sortOrder: 10,
+    title: 'Unclassified cancellation',
+    assigneeUserId: 'demo@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/20',
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+
+  for (const cancellationReasons of [
+    undefined,
+    [],
+    [{ Code: 'TransactionConflict' }],
+  ]) {
+    const documentClient = {
+      async send(command: { constructor: { name: string } }) {
+        if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+        if (command.constructor.name === 'TransactWriteCommand') {
+          const error = Object.assign(new Error('Transaction was canceled.'), {
+            name: 'TransactionCanceledException',
+            $metadata: { httpStatusCode: 400 },
+          })
+          if (cancellationReasons !== undefined) {
+            Object.assign(error, { CancellationReasons: cancellationReasons })
+          }
+          throw error
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbTeamIssuesClient(
+      'IssuesTable',
+      'IssueEventsTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+    )
+
+    await expect(client.deleteTeamIssue(
+      'workspace-1',
+      'core-team',
+      'unclassified-cancellation',
+      1,
+      'demo@example.com',
+    )).rejects.toMatchObject({
+      code: 'WorkItemDeletionTransactionUnavailable',
+      status: 503,
+    })
+  }
+})
+
+test('DynamoDB Work Item delete prioritizes authorization failure over deletion fences', async () => {
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'multiple-condition-failures',
+    sortOrder: 10,
+    title: 'Multiple condition failures',
+    assigneeUserId: 'demo@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/20',
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const transactItems =
+          command.input.TransactItems as NonNullable<TransactWriteCommandInput['TransactItems']>
+        const authorizationIndex = transactItems.findIndex((item) =>
+          item.ConditionCheck?.TableName === 'WorkspaceAccessTable'
+        )
+        throw Object.assign(new Error('Transaction was canceled.'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: transactItems.map((_, index) => ({
+            Code: index === 1 || index === authorizationIndex
+              ? 'ConditionalCheckFailed'
+              : 'None',
+          })),
+        })
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.deleteTeamIssue(
+    'workspace-1',
+    'core-team',
+    'multiple-condition-failures',
+    1,
+    'demo@example.com',
+    undefined,
+    undefined,
+    [{
+      kind: 'external-links',
+      transactWriteItem: {
+        Put: {
+          TableName: 'DeveloperPlatformTable',
+          Item: { activeLinkCount: 0 },
+        },
+      },
+    }],
+    [{
+      ConditionCheck: {
+        TableName: 'WorkspaceAccessTable',
+        Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#demo@example.com' },
+        ConditionExpression: '#version = :expectedVersion',
+        ExpressionAttributeNames: { '#version': 'version' },
+        ExpressionAttributeValues: { ':expectedVersion': 1 },
+      },
+    }],
+  )).rejects.toMatchObject({
+    code: 'WorkItemAuthorizationChanged',
+    status: 409,
+  })
 })
 
 test('DynamoDB Work Item update emits render-ready notification candidates', async () => {
@@ -16047,6 +17673,35 @@ test('DynamoDB directory client reads project access consistently for Workspace 
       ConsistentRead: true,
     }),
   ])
+})
+
+test('DynamoDB directory client excludes archived member roles from access', async () => {
+  const items = createProjectMemberFixtureItems()
+  const member = items.find((item) =>
+    item.entryType === 'project-member' &&
+    item.memberKey === 'demo@example.com'
+  )
+  Object.assign(member!, {
+    archivedAt: '2026-07-18T00:00:00.000Z',
+  })
+  const documentClient = {
+    async send() {
+      return { Items: items }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(
+    client.getProjectAccessList('user#demo@example.com', 'demo@example.com'),
+  ).resolves.toEqual([{ projectId: 'refero', role: undefined }])
+  await expect(
+    client.getProjectMembers('user#demo@example.com', 'refero'),
+  ).resolves.toEqual({
+    projectId: 'refero',
+    members: [
+      expect.objectContaining({ id: 'zmanager@example.com' }),
+    ],
+  })
 })
 
 test('DynamoDB directory client reads every page from the user partition', async () => {
@@ -16617,6 +18272,67 @@ test('DynamoDB directory client manages project member roles', async () => {
           },
         },
       },
+      {
+        ConditionCheck: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000000#TEAM#core-team',
+          },
+          ConditionExpression:
+            '#entryType = :teamEntryType AND attribute_not_exists(archivedAt)',
+        },
+      },
+      {
+        ConditionCheck: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000010#PROJECT#refero',
+          },
+          ConditionExpression:
+            '#entryType = :projectEntryType AND attribute_not_exists(archivedAt)',
+        },
+      },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#sato@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#refero',
+            entryType: 'webhook-team-grant',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: 'refero',
+            memberKey: 'sato@example.com',
+            sourceEntryKey: 'PROJECT_MEMBER#refero#sato@example.com',
+            teamSourceEntryKey: '000010#000000#TEAM#core-team',
+            projectSourceEntryKey: '000010#000010#PROJECT#refero',
+            webhookAuthorizationKey:
+              'WEBHOOK_ACL#TEAM_MEMBER#user#demo@example.com#core-team#sato@example.com',
+            webhookAuthorizationSortKey: 'PROJECT#refero',
+          },
+        },
+      },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#sato@example.com',
+            entryType: 'webhook-team-grant-cleanup',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: 'refero',
+            memberKey: 'sato@example.com',
+            grantDirectoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#sato@example.com',
+            grantEntryKey: 'TEAM#core-team#PROJECT#refero',
+          },
+        },
+      },
     ],
   })
   expect(sentInputs[5]).toMatchObject({
@@ -16673,9 +18389,63 @@ test('DynamoDB directory client manages project member roles', async () => {
           },
         },
       },
+      {
+        Delete: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#refero',
+          },
+        },
+      },
+      {
+        Delete: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#demo@example.com',
+          },
+        },
+      },
     ],
   })
   expect(sentInputs[4]).toMatchObject({ ConsistentRead: true })
+})
+
+test('DynamoDB directory client rejects membership grant fan-out above 100 actions', async () => {
+  const atLimit = createSharedProjectCapacityClient(24)
+  await expect(atLimit.client.updateProjectMember(
+    'workspace-1',
+    'shared-project',
+    'viewer@example.com',
+    {
+      email: 'viewer@example.com',
+      role: 'viewer',
+    },
+    1,
+  )).resolves.toMatchObject({
+    member: { id: 'viewer@example.com' },
+  })
+  expect(atLimit.transactions).toHaveLength(1)
+  expect(atLimit.transactions[0]?.TransactItems).toHaveLength(98)
+
+  const aboveLimit = createSharedProjectCapacityClient(25)
+  await expect(aboveLimit.client.updateProjectMember(
+    'workspace-1',
+    'shared-project',
+    'viewer@example.com',
+    {
+      email: 'viewer@example.com',
+      role: 'viewer',
+    },
+    1,
+  )).rejects.toMatchObject({
+    code: 'ProjectMembershipTransactionTooLarge',
+    status: 409,
+  })
+  expect(aboveLimit.transactions).toEqual([])
 })
 
 test('DynamoDB directory client rejects a concurrent Workspace member creation during role removal', async () => {
@@ -16747,6 +18517,26 @@ test('DynamoDB directory client rejects a concurrent Workspace member creation d
             recordKey: 'MEMBER#demo@example.com',
           },
           ConditionExpression: 'attribute_not_exists(workspaceId)',
+        },
+      },
+      {
+        Delete: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#refero',
+          },
+        },
+      },
+      {
+        Delete: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#demo@example.com',
+          },
         },
       },
     ],
@@ -16943,6 +18733,24 @@ test('DynamoDB directory client treats manager guard transaction cancellation as
           },
         },
       },
+      {
+        Delete: {
+          Key: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#refero',
+          },
+        },
+      },
+      {
+        Delete: {
+          Key: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#demo@example.com',
+          },
+        },
+      },
     ],
   })
   expect(sentInputs).toHaveLength(3)
@@ -17110,6 +18918,59 @@ test('DynamoDB directory client treats manager downgrade transaction cancellatio
           },
           ExpressionAttributeValues: {
             ':expectedVersion': 1,
+          },
+        },
+      },
+      {
+        ConditionCheck: {
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000000#TEAM#core-team',
+          },
+        },
+      },
+      {
+        ConditionCheck: {
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000010#PROJECT#refero',
+          },
+        },
+      },
+      {
+        Put: {
+          Item: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#refero',
+            entryType: 'webhook-team-grant',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: 'refero',
+            memberKey: 'demo@example.com',
+            sourceEntryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+            teamSourceEntryKey: '000010#000000#TEAM#core-team',
+            projectSourceEntryKey: '000010#000010#PROJECT#refero',
+            webhookAuthorizationKey:
+              'WEBHOOK_ACL#TEAM_MEMBER#user#demo@example.com#core-team#demo@example.com',
+            webhookAuthorizationSortKey: 'PROJECT#refero',
+          },
+        },
+      },
+      {
+        Put: {
+          Item: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#demo@example.com',
+            entryType: 'webhook-team-grant-cleanup',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: 'refero',
+            memberKey: 'demo@example.com',
+            grantDirectoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            grantEntryKey: 'TEAM#core-team#PROJECT#refero',
           },
         },
       },
@@ -17816,7 +19677,7 @@ test('validates Document relation target reads with bounded concurrency', async 
     documents: {
       async restoreVersion(input) {
         await input.validateRelationTargets(
-          Array.from({ length: 17 }, (_, index) => ({
+          Array.from({ length: 14 }, (_, index) => ({
             kind: 'work-item',
             workItemId:
               `team/core-team/issue/target-${index}`,
@@ -18271,6 +20132,74 @@ function createProjectMemberFixtureItems(
         ]
       : []),
   ]
+}
+
+function createSharedProjectCapacityClient(teamCount: number) {
+  const transactions: Array<Record<string, unknown>> = []
+  const directoryItems = [
+    ...Array.from({ length: teamCount }, (_, index) => {
+      const sortOrder = index + 1
+      const teamId = `team-${sortOrder}`
+      return [
+        {
+          directoryId: 'workspace-1',
+          entryKey: `${String(sortOrder).padStart(6, '0')}#000000#TEAM#${teamId}`,
+          entryType: 'team',
+          teamId,
+          teamSortOrder: sortOrder,
+          nameJa: `Team ${sortOrder}`,
+          nameEn: `Team ${sortOrder}`,
+          expanded: true,
+        },
+        {
+          directoryId: 'workspace-1',
+          entryKey:
+            `${String(sortOrder).padStart(6, '0')}#000010#PROJECT#shared-project`,
+          entryType: 'project',
+          teamId,
+          teamSortOrder: sortOrder,
+          projectId: 'shared-project',
+          projectSortOrder: 10,
+          nameJa: 'Shared project',
+          nameEn: 'Shared project',
+          tone: 'blue',
+        },
+      ]
+    }).flat(),
+    {
+      directoryId: 'workspace-1',
+      entryKey: 'PROJECT_MEMBER#shared-project#viewer@example.com',
+      entryType: 'project-member',
+      projectId: 'shared-project',
+      memberKey: 'viewer@example.com',
+      email: 'viewer@example.com',
+      role: 'member',
+      createdAt: '2026-07-18T00:00:00.000Z',
+      updatedAt: '2026-07-18T00:00:00.000Z',
+    },
+  ]
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      if ('KeyConditionExpression' in command.input) {
+        return { Items: directoryItems }
+      }
+      if ('TransactItems' in command.input) {
+        transactions.push(command.input)
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  return {
+    client: new DynamoDbProjectDirectoryClient(
+      'DirectoryTable',
+      documentClient,
+      undefined,
+      false,
+      undefined,
+      'WorkspaceAccessTable',
+    ),
+    transactions,
+  }
 }
 
 function createDirectoryMutationAuditContext() {
@@ -18736,11 +20665,118 @@ function createHistoricalAnalyticsWorkItemEvent(workItem: CanonicalWorkItem) {
   }
 }
 
+async function putHeadlessEnterpriseIdentityProvider(
+  identity: InMemoryEnterpriseIdentityClient,
+  workspaceId: string,
+) {
+  const now = '2026-07-20T00:00:00.000Z'
+  await identity.putIdentityProvider({
+    workspaceId,
+    providerId: 'headless-idp',
+    kind: 'oidc',
+    displayName: 'Headless identity provider',
+    cognitoProviderName: 'HeadlessEnterpriseOidc',
+    status: 'active',
+    revision: 1,
+    issuer: 'https://idp.example.com',
+    clientId: 'headless-enterprise-client',
+    authorizationEndpoint: 'https://idp.example.com/authorize',
+    tokenEndpoint: 'https://idp.example.com/token',
+    jwksUri: 'https://idp.example.com/jwks',
+    scopes: ['openid', 'email'],
+    createdAt: now,
+    updatedAt: now,
+    lastTestedAt: now,
+  })
+}
+
+async function putAppliedHeadlessScimUser(
+  identity: InMemoryEnterpriseIdentityClient,
+  workspaceId: string,
+) {
+  const user = await identity.upsertScimUser({
+    workspaceId,
+    identityProviderId: 'headless-idp',
+    externalId: 'headless-demo-user',
+    userName: 'demo@example.com',
+    emails: ['demo@example.com'],
+    active: true,
+    linkedMemberKey: 'demo@example.com',
+    idempotencyKey: 'headless-demo-user-created',
+  })
+  const desired = (await identity.getSnapshot(workspaceId)).scimUsers.find((candidate) =>
+    candidate.userId === user.userId
+  )
+  if (!desired) throw new Error('Expected the headless SCIM user to exist.')
+  return identity.markScimUserApplied(
+    workspaceId,
+    desired.userId,
+    desired.version,
+  )
+}
+
+async function configureHeadlessDeveloperCredential(
+  identity: InMemoryEnterpriseIdentityClient,
+  scopes: ApiScope[],
+) {
+  const workspaceId = HEADLESS_DEVELOPER_WORKSPACE_ID
+  const platform = new InMemoryDeveloperPlatformClient()
+  const apiKey = await platform.createApiKey({
+    workspaceId,
+    createdByUserId: 'demo@example.com',
+    input: {
+      name: 'Headless Enterprise RBAC test key',
+      scopes,
+      expiresAt: '2027-07-20T00:00:00.000Z',
+    },
+  })
+  configureApiClientsForTest({
+    developerPlatform: platform,
+    enterpriseIdentity: identity,
+  })
+  return apiKey.secret
+}
+
+function requestHeadlessWorkItem(
+  secret: string,
+  workItemId: string,
+) {
+  return app.request(
+    `http://localhost/api/v1/work-items/${encodeURIComponent(workItemId)}?teamId=core-team`,
+    { headers: { Authorization: `Bearer ${secret}` } },
+  )
+}
+
+function createHeadlessWorkItem(
+  secret: string,
+  assignedProjectId: string,
+  idempotencyKey: string,
+) {
+  return app.request('http://localhost/api/v1/work-items', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${secret}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': idempotencyKey,
+    },
+    body: JSON.stringify({
+      teamId: 'core-team',
+      title: 'Headless Enterprise Work Item',
+      assigneeUserId: 'sato@example.com',
+      assignedProjectId,
+      dueDate: '2026-07-31',
+      priority: 'medium',
+    }),
+  })
+}
+
 function configureFakeProjectClients(
   hasProjectAccess: boolean,
   options: {
     /** Cognito user pagination fake が page ごとに返す user ID と token です。 */
     cognitoUserPages?: Array<{ userIds: string[]; nextToken?: string }>
+    /** Cognito principal へ設定する明示的な Workspace directory ID です。 */
+    directoryId?: string
     /** Cognito user 一覧 fake が返す次 page token です。 */
     cognitoUsersNextToken?: string
     profileError?: Error
@@ -18771,6 +20807,10 @@ function configureFakeProjectClients(
     passwordAuthTokens?: boolean
     projectAccesses?: Array<{ projectId: string; role?: ProjectRole }>
     role?: ProjectRole
+    /** Cognito current group membership fake が返す group 名です。 */
+    cognitoUserGroups?: string[]
+    /** Cognito current group membership の取得障害です。 */
+    cognitoUserGroupsError?: Error
     systemAdminMemberKeys?: string[]
     taskAssigneeUserId?: string
     /** Notification 認可で再取得する Work Item の現在 assigned Project ID です。 */
@@ -18799,6 +20839,22 @@ function configureFakeProjectClients(
       input: Record<string, unknown>,
       completionTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
     ) => Promise<void> | void
+    /** Canonical Work Item create transaction 直前の競合を再現する hook です。 */
+    issueCreateHook?: (input: Record<string, unknown>) => Promise<void> | void
+    /** Canonical Work Item delete の transaction 配線を観測する hook です。 */
+    issueDeleteHook?: (input: {
+      /** Authorization generation checks です。 */
+      authorizationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
+      /** Named deletion fences です。 */
+      deletionFences: ReadonlyArray<{
+        /** Fence の競合分類名です。 */
+        kind: string
+        /** 同じ transaction へ渡す DynamoDB action です。 */
+        transactWriteItem: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+      }>
+      /** Delete 対象 Work Item ID です。 */
+      issueId: string
+    }) => Promise<void> | void
     teamProjects?: Array<{ id: string; name: string; tone: 'blue' | 'purple' | 'green' | 'yellow' }>
     /** owner Team ambiguity を再現する追加 Team です。 */
     additionalTeams?: Array<{
@@ -18900,9 +20956,21 @@ function configureFakeProjectClients(
       }
     }>,
     issueReads: [] as Array<{ directoryId: string; limit?: number; teamId: string }>,
+    publicIssuePageReads: [] as Array<{
+      directoryId: string
+      teamId: string
+      limit: number
+      cursor?: string
+    }>,
     issueUpdates: [] as Array<{
       actorUserId: string
       assignedProjectId?: unknown
+      directoryId: string
+      issueId: string
+      teamId: string
+    }>,
+    issueDeletes: [] as Array<{
+      actorUserId: string
       directoryId: string
       issueId: string
       teamId: string
@@ -18937,6 +21005,7 @@ function configureFakeProjectClients(
     name?: string
     role: WorkspaceRole
   }>()
+  const deletedIssueIds = new Set<string>()
   const createWorkspaceMember = (memberKey: string) => ({
     id: memberKey,
     memberKey,
@@ -18952,6 +21021,32 @@ function configureFakeProjectClients(
     createdAt: '2026-07-11T00:00:00.000Z',
     updatedAt: '2026-07-11T00:00:00.000Z',
   })
+  const createFakeTeamIssues = (teamId: string) =>
+    Array.from({ length: options.teamIssueCount ?? 1 }, (_, index) => ({
+      schemaVersion: 1 as const,
+      revision: 1,
+      id: index === 0 ? 'onboarding-friction' : `work-item-${index}`,
+      teamId,
+      assignedProjectId: index < (options.inaccessibleTeamIssueCount ?? 0)
+        ? 'private-project'
+        : options.unassignedIssue ? undefined : 'refero',
+      title: index === 0
+        ? '初回オンボーディングの離脱要因を減らす'
+        : `Work Item ${index}`,
+      description: '初回体験の摩擦を下げる。',
+      assigneeUserId: 'sato@example.com',
+      creatorMemberKey: 'demo@example.com',
+      workflowSchemaVersion: 1 as const,
+      workflowStatusId: 'in-progress',
+      statusCategory: 'started' as const,
+      customFieldValues: {},
+      relationIds: [],
+      dueDate: '2026/06/18',
+      priority: 'high' as const,
+      createdAt: '2026-06-08T00:00:00.000Z',
+      updatedAt: '2026-06-08T00:00:00.000Z',
+      source: 'dynamodb' as const,
+    }))
 
   configureApiClientsForTest({
     collaboration: createCollaborationStub({
@@ -19035,6 +21130,12 @@ function configureFakeProjectClients(
               Name: 'email',
               Value: 'Demo@Example.com',
             },
+            ...(options.directoryId
+              ? [{
+                  Name: 'custom:directory_id',
+                  Value: options.directoryId,
+                }]
+              : []),
           ],
         }
       },
@@ -19065,6 +21166,15 @@ function configureFakeProjectClients(
       },
       async isSystemAdmin(userId) {
         return options.systemAdminMemberKeys?.includes(userId.toLowerCase()) ?? false
+      },
+      async getUserGroups(userId) {
+        if (options.cognitoUserGroupsError) throw options.cognitoUserGroupsError
+        return [
+          ...(options.cognitoUserGroups ?? []),
+          ...(options.systemAdminMemberKeys?.includes(userId.toLowerCase())
+            ? ['mukuroji-system-admins']
+            : []),
+        ]
       },
       async describeEnterpriseIdentityProvider(providerName) {
         calls.cognitoIdentityProviderDescriptions.push(providerName)
@@ -19624,34 +21734,21 @@ function configureFakeProjectClients(
           ...(readOptions?.limit === undefined ? {} : { limit: readOptions.limit }),
         })
 
-        const issues = Array.from({ length: options.teamIssueCount ?? 1 }, (_, index) => ({
-            schemaVersion: 1 as const,
-            revision: 1,
-            id: index === 0 ? 'onboarding-friction' : `work-item-${index}`,
-            teamId,
-            assignedProjectId: index < (options.inaccessibleTeamIssueCount ?? 0)
-              ? 'private-project'
-              : options.unassignedIssue ? undefined : 'refero',
-            title: index === 0
-              ? '初回オンボーディングの離脱要因を減らす'
-              : `Work Item ${index}`,
-            description: '初回体験の摩擦を下げる。',
-            assigneeUserId: 'sato@example.com',
-            creatorMemberKey: 'demo@example.com',
-            workflowSchemaVersion: 1 as const,
-            workflowStatusId: 'in-progress',
-            statusCategory: 'started' as const,
-            customFieldValues: {},
-            relationIds: [],
-            dueDate: '2026/06/18',
-            priority: 'high' as const,
-            createdAt: '2026-06-08T00:00:00.000Z',
-            updatedAt: '2026-06-08T00:00:00.000Z',
-            source: 'dynamodb' as const,
-          }))
+        const issues = createFakeTeamIssues(teamId)
         return {
           teamId,
           issues: readOptions?.limit === undefined ? issues : issues.slice(0, readOptions.limit),
+        }
+      },
+      async getPublicWorkItemPage(directoryId, teamId, readOptions) {
+        calls.publicIssuePageReads.push({
+          directoryId,
+          teamId,
+          limit: readOptions.limit,
+          ...(readOptions.cursor ? { cursor: readOptions.cursor } : {}),
+        })
+        return {
+          issues: createFakeTeamIssues(teamId).slice(0, readOptions.limit),
         }
       },
       async getProjectIssues(directoryId, projectId, readOptions) {
@@ -19723,7 +21820,11 @@ function configureFakeProjectClients(
           throw options.detailReadError
         }
 
-        if (issueId === 'wireframe' || options.detailMissingIssueIds?.includes(issueId)) {
+        if (
+          issueId === 'wireframe' ||
+          deletedIssueIds.has(issueId) ||
+          options.detailMissingIssueIds?.includes(issueId)
+        ) {
           throw {
             status: 404,
             code: 'TeamIssueNotFound',
@@ -19783,6 +21884,7 @@ function configureFakeProjectClients(
         }
       },
       async createTeamIssue(directoryId, teamId, input, actorUserId) {
+        await options.issueCreateHook?.(input as Record<string, unknown>)
         calls.issueCreates.push({
           actorUserId,
           assignedProjectId: input.assignedProjectId,
@@ -19868,6 +21970,31 @@ function configureFakeProjectClients(
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: '2026-06-08T02:00:00.000Z',
             source: 'dynamodb',
+          },
+        }
+      },
+      async deleteTeamIssue(
+        directoryId,
+        teamId,
+        issueId,
+        _expectedRevision,
+        actorUserId,
+        _auditContext,
+        _idempotency,
+        deletionFences = [],
+        authorizationConditionChecks = [],
+      ) {
+        await options.issueDeleteHook?.({
+          authorizationConditionChecks,
+          deletionFences,
+          issueId,
+        })
+        calls.issueDeletes.push({ actorUserId, directoryId, issueId, teamId })
+        deletedIssueIds.add(issueId)
+        return {
+          issue: {
+            ...createFakeTeamIssues(teamId)[0]!,
+            id: issueId,
           },
         }
       },

@@ -6,9 +6,13 @@ import type {
   DocumentRelationTarget,
   PublicDocument,
 } from '@mukuroji/contracts'
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import {
+  TransactWriteCommand,
+  type DynamoDBDocumentClient,
+} from '@aws-sdk/lib-dynamodb'
 import { createMutationAuditContext } from './audit'
 import {
+  DOCUMENT_MAX_BACKLINK_COUNT,
   DOCUMENT_MAX_ITEM_BYTES,
   createDocumentSearchAccessReadContext,
   DynamoDbDocumentsClient,
@@ -2133,6 +2137,682 @@ test('indexes Whiteboard work-item cards as transactional backlinks', async () =
     backlinks: [],
     nextCursor: undefined,
   })
+})
+
+test('coalesces Work Item backlink counts, retains archived links, and tombstones only after unlink', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId =
+    'team/team-a/issue/work-item-fenced'
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Fenced backlinks',
+    blocks: [],
+    relations: [
+      createWorkItemRelation(
+        'relation-a',
+        workItemId,
+      ),
+      createWorkItemRelation(
+        'relation-b',
+        workItemId,
+      ),
+    ],
+  })
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      workItemId,
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 2,
+    version: 1,
+  })
+
+  const archived = await client.archive({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    expectedRevision: created.revision,
+  })
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      workItemId,
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 2,
+    version: 1,
+  })
+  const restored =
+    await client.restoreArchived({
+      workspaceId: 'workspace-1',
+      documentId: created.id,
+      access: ownerAccess,
+      expectedRevision: archived.revision,
+    })
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: restored.revision,
+      clientId: 'editor-1',
+      operations: [
+        {
+          type: 'delete-relation',
+          operationId: 'unlink-a',
+          relationId: 'relation-a',
+        },
+        {
+          type: 'delete-relation',
+          operationId: 'unlink-b',
+          relationId: 'relation-b',
+        },
+      ],
+    },
+  })
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      workItemId,
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 0,
+    version: 2,
+  })
+
+  const deletionFence =
+    await client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId,
+      })
+  await memory.client.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        deletionFence.transactWriteItem,
+      ],
+    }),
+  )
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      workItemId,
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 0,
+    version: 3,
+    deletedAt:
+      '2026-07-18T00:00:00.000Z',
+  })
+
+  await expect(client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Late backlink',
+    blocks: [],
+    relations: [
+      createWorkItemRelation(
+        'late-relation',
+        workItemId,
+      ),
+    ],
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'DocumentRelationTargetDeleted',
+  })
+})
+
+test('requires a canonical Work Item ID when preparing a deletion fence', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+
+  await expect(
+    client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId: 'issue-1',
+      }),
+  ).rejects.toMatchObject({
+    status: 400,
+    code: 'InvalidDocumentRelationTarget',
+  })
+  expect(memory.readKeys()).toEqual([])
+})
+
+test('classifies a deletion tombstone that wins a create fence race for non-idempotent and idempotent creates', async () => {
+  for (
+    const idempotencyKey of [
+      undefined,
+      'idempotent-create-race',
+    ]
+  ) {
+    const memory =
+      createMemoryDocumentClient()
+    const client = createClient(memory)
+    const workItemId =
+      `team/team-a/issue/create-race-${idempotencyKey ?? 'random'}`
+    const deletionFence =
+      await client
+        .prepareWorkItemDeletionFenceTransactWrite({
+          workspaceId: 'workspace-1',
+          workItemId,
+        })
+    const tombstone =
+      getPreparedFencePutItem(
+        deletionFence,
+      )
+    memory.beforeTransaction(() => {
+      memory.put(tombstone)
+    })
+
+    await expect(client.create({
+      workspaceId: 'workspace-1',
+      access: ownerAccess,
+      kind: 'page',
+      scope: { type: 'workspace' },
+      title: 'Racing create',
+      blocks: [],
+      relations: [
+        createWorkItemRelation(
+          'racing-relation',
+          workItemId,
+        ),
+      ],
+      ...(idempotencyKey === undefined
+        ? {}
+        : { idempotencyKey }),
+    })).rejects.toMatchObject({
+      status: 409,
+      code:
+        'DocumentRelationTargetDeleted',
+    })
+    expect(
+      memory.items().filter(
+        ({ entryType }) =>
+          entryType === 'document',
+      ),
+    ).toEqual([])
+  }
+})
+
+test('classifies a deletion tombstone that wins an operation backlink fence race', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId =
+    'team/team-a/issue/operation-race'
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Operation race',
+    blocks: [],
+  })
+  const deletionFence =
+    await client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId,
+      })
+  const tombstone =
+    getPreparedFencePutItem(
+      deletionFence,
+    )
+  memory.beforeTransaction(() => {
+    memory.put(tombstone)
+  })
+
+  await expect(client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: document.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'upsert-relation',
+        operationId: 'add-racing-relation',
+        relation:
+          createWorkItemRelation(
+            'operation-racing-relation',
+            workItemId,
+          ),
+      }],
+    },
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'DocumentRelationTargetDeleted',
+  })
+  await expect(client.get({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+  })).resolves.toMatchObject({
+    revision: document.revision,
+    relations: [],
+  })
+})
+
+test('classifies a deletion tombstone that wins a version restore backlink fence race', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId =
+    'team/team-a/issue/restore-race'
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Restore race',
+    blocks: [],
+    relations: [
+      createWorkItemRelation(
+        'restore-racing-relation',
+        workItemId,
+      ),
+    ],
+  })
+  const unlinked =
+    await client.applyOperations({
+      workspaceId: 'workspace-1',
+      documentId: document.id,
+      access: ownerAccess,
+      input: {
+        baseRevision: document.revision,
+        clientId: 'editor-1',
+        operations: [{
+          type: 'delete-relation',
+          operationId:
+            'unlink-before-restore',
+          relationId:
+            'restore-racing-relation',
+        }],
+      },
+    })
+  const deletionFence =
+    await client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId,
+      })
+  const tombstone =
+    getPreparedFencePutItem(
+      deletionFence,
+    )
+  memory.beforeTransaction(() => {
+    memory.put(tombstone)
+  })
+
+  await expect(client.restoreVersion({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    versionId: '1',
+    expectedRevision: unlinked.revision,
+    access: ownerAccess,
+    validateRelationTargets:
+      async () => [],
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'DocumentRelationTargetDeleted',
+  })
+  await expect(client.get({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+  })).resolves.toMatchObject({
+    revision: unlinked.revision,
+    relations: [],
+  })
+})
+
+test('fails closed for legacy backlinks without a fence and bootstraps the exact count while unlinking', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId =
+    'team/team-a/issue/legacy-backlink'
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Legacy backlink',
+    blocks: [],
+    relations: [
+      createWorkItemRelation(
+        'legacy-relation-a',
+        workItemId,
+      ),
+      createWorkItemRelation(
+        'legacy-relation-b',
+        workItemId,
+      ),
+      createWorkItemRelation(
+        'legacy-relation-c',
+        workItemId,
+      ),
+    ],
+  })
+  const fence =
+    findWorkItemBacklinkTargetFence(
+      memory,
+      workItemId,
+    )
+  expect(fence).toBeDefined()
+  memory.remove(
+    'workspace-1',
+    String(fence?.recordKey),
+  )
+  memory.setQueryPageSize(1)
+
+  await expect(
+    client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId,
+      }),
+  ).rejects.toMatchObject({
+    status: 409,
+    code: 'WorkItemDocumentBacklinkConflict',
+    details: {
+      activeBacklinkCount: 3,
+    },
+  })
+
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: created.revision,
+      clientId: 'editor-1',
+      operations: [
+        {
+          type: 'delete-relation',
+          operationId: 'unlink-legacy-a',
+          relationId: 'legacy-relation-a',
+        },
+        {
+          type: 'delete-relation',
+          operationId: 'unlink-legacy-b',
+          relationId: 'legacy-relation-b',
+        },
+        {
+          type: 'delete-relation',
+          operationId: 'unlink-legacy-c',
+          relationId: 'legacy-relation-c',
+        },
+      ],
+    },
+  })
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      workItemId,
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 0,
+    version: 1,
+  })
+  await expect(
+    client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId,
+      }),
+  ).resolves.toHaveProperty(
+    'transactWriteItem.Put',
+  )
+})
+
+test('serializes concurrent legacy bootstrap puts and reports the losing deletion as a backlink conflict on retry', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId =
+    'team/team-a/issue/concurrent-backlink'
+  const staleDeletionFence =
+    await client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId,
+      })
+
+  await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Concurrent backlink',
+    blocks: [],
+    relations: [
+      createWorkItemRelation(
+        'concurrent-relation',
+        workItemId,
+      ),
+    ],
+  })
+  await expect(
+    memory.client.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          staleDeletionFence
+            .transactWriteItem,
+        ],
+      }),
+    ),
+  ).rejects.toMatchObject({
+    name: 'TransactionCanceledException',
+  })
+  await expect(
+    client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId,
+      }),
+  ).rejects.toMatchObject({
+    status: 409,
+    code: 'WorkItemDocumentBacklinkConflict',
+  })
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      workItemId,
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 1,
+    version: 1,
+  })
+})
+
+test('keeps deepest-tree full backlink replacement within 100 actions and rejects the next relation before writing', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const authorizationGuards =
+    Array.from(
+      { length: 3 },
+      (_value, index) => ({
+        tableName:
+          `authorization-table-${index}`,
+        key: {
+          workspaceId: 'workspace-1',
+          recordKey: `AUTH#${index}`,
+        },
+        generationAttribute: 'version',
+        expectedGeneration: 1,
+        requiredAttributes: {
+          entryType: 'authorization-row',
+        },
+      } as const),
+    )
+  for (
+    const [index, guard] of
+      authorizationGuards.entries()
+  ) {
+    memory.put({
+      workspaceId: 'workspace-1',
+      recordKey: `AUTH#${index}`,
+      entryType: 'authorization-row',
+      version: 1,
+      guardTableName: guard.tableName,
+    })
+  }
+  const deepestAccess = {
+    ...ownerAccess,
+    authorizationGuards,
+  }
+  let parentId: string | undefined
+  for (
+    let depth = 0;
+    depth < 32;
+    depth += 1
+  ) {
+    const folder = await client.create({
+      workspaceId: 'workspace-1',
+      access: deepestAccess,
+      kind: 'folder',
+      scope: { type: 'workspace' },
+      ...(parentId === undefined
+        ? {}
+        : { parentId }),
+      title: `Folder ${depth}`,
+    })
+    parentId = folder.id
+  }
+  const initialRelations = Array.from(
+    {
+      length:
+        DOCUMENT_MAX_BACKLINK_COUNT,
+    },
+    (_value, index) =>
+      createWorkItemRelation(
+        `relation-${index}`,
+        `team/team-a/issue/old-${index}`,
+      ),
+  )
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: deepestAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    parentId,
+    title: 'Maximum backlinks',
+    blocks: [],
+    relations: initialRelations,
+  })
+  let revision = document.revision
+  for (
+    let offset = 0;
+    offset <
+      DOCUMENT_MAX_BACKLINK_COUNT;
+    offset += 4
+  ) {
+    const operations =
+      initialRelations
+        .slice(offset, offset + 4)
+        .map(
+          (
+            relation,
+            relationOffset,
+          ) => ({
+            type:
+              'upsert-relation' as const,
+            operationId:
+              `replace-${offset + relationOffset}`,
+            relation: {
+              ...relation,
+              target: {
+                kind:
+                  'work-item' as const,
+                workItemId:
+                  `team/team-a/issue/new-${offset + relationOffset}`,
+              },
+            },
+          }),
+        )
+    const response =
+      await client.applyOperations({
+        workspaceId: 'workspace-1',
+        documentId: document.id,
+        access: deepestAccess,
+        input: {
+          baseRevision: revision,
+          clientId: 'editor-1',
+          operations,
+        },
+      })
+    revision = response.revision
+  }
+
+  await client.restoreVersion({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    versionId: '1',
+    expectedRevision: revision,
+    access: deepestAccess,
+    validateRelationTargets:
+      async () => [],
+  })
+  expect(
+    memory
+      .transactionActionCounts()
+      .at(-1),
+  ).toBe(97)
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      'team/team-a/issue/old-0',
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 1,
+  })
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      'team/team-a/issue/new-0',
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 0,
+  })
+
+  const transactionCount =
+    memory
+      .transactionActionCounts()
+      .length
+  await expect(client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Too many backlinks',
+    blocks: [],
+    relations: Array.from(
+      {
+        length:
+          DOCUMENT_MAX_BACKLINK_COUNT +
+          1,
+      },
+      (_value, index) =>
+        createWorkItemRelation(
+          `too-many-${index}`,
+          `team/team-a/issue/too-many-${index}`,
+        ),
+    ),
+  })).rejects.toMatchObject({
+    status: 413,
+    code:
+      'DocumentBacklinkLimitExceeded',
+  })
+  expect(
+    memory
+      .transactionActionCounts()
+      .length,
+  ).toBe(transactionCount)
 })
 
 test('hashes public tokens at rest, carries allowExport, and checks expiry synchronously', async () => {
@@ -4897,8 +5577,60 @@ function createGoalRelation(
   }
 }
 
+function createWorkItemRelation(
+  relationId: string,
+  workItemId: string,
+): DocumentDetail['relations'][number] {
+  return {
+    id: relationId,
+    source: { kind: 'document' },
+    target: {
+      kind: 'work-item',
+      workItemId,
+    },
+    createdByUserId: 'owner@example.com',
+    createdAt:
+      '2026-07-18T00:00:00.000Z',
+  }
+}
+
+function findWorkItemBacklinkTargetFence(
+  memory: ReturnType<
+    typeof createMemoryDocumentClient
+  >,
+  workItemId: string,
+): Record<string, unknown> | undefined {
+  return memory.items().find(
+    (item) =>
+      item.entryType ===
+        'document-backlink-target-fence' &&
+      item.targetKind === 'work-item' &&
+      item.targetId === workItemId,
+  )
+}
+
+function getPreparedFencePutItem(
+  prepared: Awaited<
+    ReturnType<
+      DynamoDbDocumentsClient[
+        'prepareWorkItemDeletionFenceTransactWrite'
+      ]
+    >
+  >,
+): Record<string, unknown> {
+  const item =
+    prepared.transactWriteItem.Put?.Item
+  if (item === undefined) {
+    throw new Error(
+      'Expected a prepared fence Put.',
+    )
+  }
+  return item
+}
+
 function createMemoryDocumentClient() {
   const stored = new Map<string, Record<string, unknown>>()
+  const transactionActionCounts: number[] = []
   const readKeys:
     Array<{
       workspaceId?: string
@@ -4916,6 +5648,9 @@ function createMemoryDocumentClient() {
         | Array<Record<string, Record<string, unknown>>>
         | undefined
       if (transaction !== undefined) {
+        transactionActionCounts.push(
+          transaction.length,
+        )
         const beforeTransaction =
           beforeNextTransaction
         beforeNextTransaction = undefined
@@ -5016,6 +5751,8 @@ function createMemoryDocumentClient() {
   return {
     client,
     items: () => [...stored.values()].map((item) => structuredClone(item)),
+    transactionActionCounts: () =>
+      [...transactionActionCounts],
     readKeys: () =>
       structuredClone(readKeys),
     clearReadKeys: () => {
@@ -5025,6 +5762,14 @@ function createMemoryDocumentClient() {
       stored.set(
         memoryKey(item.workspaceId, item.recordKey),
         structuredClone(item),
+      )
+    },
+    remove: (
+      workspaceId: string,
+      recordKey: string,
+    ) => {
+      stored.delete(
+        memoryKey(workspaceId, recordKey),
       )
     },
     setQueryPageSize: (pageSize: number) => {
@@ -5120,6 +5865,44 @@ function matchesCondition(
   }
   if (condition === 'clientId = :clientId') {
     return current?.clientId === values[':clientId']
+  }
+  if (
+    condition.includes(
+      '#entryType = :entryType',
+    ) &&
+    condition.includes(
+      'targetKind = :targetKind',
+    ) &&
+    condition.includes(
+      'targetId = :targetId',
+    ) &&
+    condition.includes(
+      '#version = :expectedVersion',
+    )
+  ) {
+    const expectedCount =
+      values[':expectedCount'] ??
+      values[':zero']
+    return (
+      current?.entryType ===
+        values[':entryType'] &&
+      current?.schemaVersion ===
+        values[':schemaVersion'] &&
+      current?.targetKind ===
+        values[':targetKind'] &&
+      current?.targetId ===
+        values[':targetId'] &&
+      current?.activeBacklinkCount ===
+        expectedCount &&
+      current?.version ===
+        values[':expectedVersion'] &&
+      (
+        !condition.includes(
+          'attribute_not_exists(deletedAt)',
+        ) ||
+        current?.deletedAt === undefined
+      )
+    )
   }
   if (condition.includes('#authorization')) {
     const names =
