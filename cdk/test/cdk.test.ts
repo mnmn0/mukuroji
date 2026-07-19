@@ -176,6 +176,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
     'TeamIssueEventsTableDD2B0F96',
     'ProjectDirectoryTable9ED01C01',
     'ListProjectTasksFunction2134AF4A',
+    'DocumentsTable7E808EE5',
     'WorkItemCollaborationTableFDECF217',
     'WorkspaceSearchTable2575AD6B',
     'NotificationsTable76DCFC6C',
@@ -188,7 +189,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(18);
+  expect(Object.keys(tables)).toHaveLength(19);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -591,6 +592,13 @@ test('shared server handler is bundled as a Lambda asset with production environ
         },
         COLLABORATION_TABLE_NAME: {
           Ref: 'WorkItemCollaborationTableFDECF217',
+        },
+        DOCUMENTS_TABLE_NAME: {
+          Ref: 'DocumentsTable7E808EE5',
+        },
+        DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET: Match.anyValue(),
+        MUKUROJI_DOCUMENTS_TABLE: {
+          Ref: 'DocumentsTable7E808EE5',
         },
         NOTIFICATIONS_TABLE_NAME: {
           Ref: 'NotificationsTable76DCFC6C',
@@ -1117,6 +1125,9 @@ test('Function URL and API Gateway invoke the same Lambda handler', () => {
     Value: { Ref: 'PlanningTable2A0D4CC5' },
   });
   template.hasOutput('RequestIntakeTableName', {});
+  template.hasOutput('DocumentsTableName', {
+    Value: { Ref: 'DocumentsTable7E808EE5' },
+  });
 });
 
 test('Work Item configuration uses a retained scope and record key table', () => {
@@ -1714,6 +1725,40 @@ test('workspace search persists documents views and preferences in one retained 
   });
 
   const resource = template.toJSON().Resources.WorkspaceSearchTable2575AD6B;
+
+  expect(resource).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+  }));
+  expect(resource.Properties.GlobalSecondaryIndexes).toBeUndefined();
+});
+
+test('documents use one retained workspace-partitioned table with expiry support', () => {
+  const template = synthesizedTemplate;
+
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    AttributeDefinitions: [
+      { AttributeName: 'workspaceId', AttributeType: 'S' },
+      { AttributeName: 'recordKey', AttributeType: 'S' },
+    ],
+    BillingMode: 'PAY_PER_REQUEST',
+    KeySchema: [
+      { AttributeName: 'workspaceId', KeyType: 'HASH' },
+      { AttributeName: 'recordKey', KeyType: 'RANGE' },
+    ],
+    PointInTimeRecoverySpecification: {
+      PointInTimeRecoveryEnabled: true,
+    },
+    SSESpecification: {
+      SSEEnabled: true,
+    },
+    TimeToLiveSpecification: {
+      AttributeName: 'expiresAtEpoch',
+      Enabled: true,
+    },
+  });
+
+  const resource = template.toJSON().Resources.DocumentsTable7E808EE5;
 
   expect(resource).toEqual(expect.objectContaining({
     DeletionPolicy: 'Retain',
@@ -3239,6 +3284,8 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     ]),
   }));
   expect(JSON.stringify(transactStatement)).not.toContain(developerPlatformTableId);
+  expect(JSON.stringify(transactStatement)).not.toContain('DocumentsTable7E808EE5');
+  expect(serializedApiPolicies).toContain('DocumentsTable7E808EE5');
   expect(serializedApiPolicies).toContain('WorkspaceSearchTable2575AD6B');
   expect(serializedApiPolicies).toContain('kms:Decrypt');
   expect(serializedApiPolicies).toContain('kms:GenerateDataKey');
@@ -3415,6 +3462,22 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   ]) {
     expect(requestIntakeActions).not.toContain(forbiddenAction);
   }
+
+  const documentsStatements = statements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes('DocumentsTable7E808EE5')
+  );
+  const documentsActions = documentsStatements.flatMap((statement) =>
+    Array.isArray(statement.Action) ? statement.Action : [statement.Action]
+  );
+
+  expect(documentsActions).toEqual(expect.arrayContaining([
+    'dynamodb:DeleteItem',
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+    'dynamodb:Query',
+    'dynamodb:UpdateItem',
+  ]));
+  expect(documentsActions).not.toContain('dynamodb:TransactWriteItems');
 
   const legacyTaskStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('ProjectTasksTableE21F6637')

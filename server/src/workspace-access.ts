@@ -23,6 +23,9 @@ import {
   type MutationAuditContext,
   type MutationAuditEventInput,
 } from './audit'
+import {
+  createDocumentAuthorizationRevisionPut,
+} from './document-authorization'
 
 const INVITATION_ACCEPTANCE_LOCK_MS = 5 * 60_000
 const INVITATION_PROVISIONING_LEASE_MS = 5 * 60_000
@@ -238,6 +241,10 @@ export type UpdateWorkspaceMemberInput = {
   expectedVersion: number
   /** Planning 認可 snapshot と直列化する Workspace graph revision です。 */
   expectedPlanningRevision: number
+  /**
+   * Private Document manager 検証時に読み込んだ ACL generation です。
+   */
+  expectedDocumentAuthorizationRevision?: number
 }
 
 /** Workspace access domain error です。 */
@@ -400,6 +407,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   private readonly clock: () => Date
   /** Member の role / status 更新と直列化する Planning table 名です。 */
   private readonly planningTableName: string
+  /** Member manager eligibility 更新と直列化する Documents table 名です。 */
+  private readonly documentsTableName: string
   /** immutable audit event を保存する DynamoDB table 名です。 */
   private readonly auditTableName?: string
   /** Workspace/member/invitation の公開 audit ID を導出する固定 HMAC key です。 */
@@ -422,6 +431,10 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     auditPseudonymKey: string | undefined = readEnvironment(
       'MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY',
     ),
+    documentsTableName =
+      readEnvironment('DOCUMENTS_TABLE_NAME') ??
+      readEnvironment('MUKUROJI_DOCUMENTS_TABLE') ??
+      'mukuroji-documents-local',
   ) {
     this.tableName = tableName
     this.dynamoDbClient = dynamoDbClient
@@ -431,6 +444,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     this.bootstrapLocalTable = bootstrapLocalTable
     this.clock = clock
     this.planningTableName = planningTableName
+    this.documentsTableName = documentsTableName
     this.auditTableName = auditTableName ?? undefined
     this.auditPseudonymKey = auditPseudonymKey || undefined
   }
@@ -1411,6 +1425,26 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     const willBeActiveOwner = nextRole === 'owner' && nextStatus === 'active'
     const ownerCountDelta = Number(willBeActiveOwner) - Number(wasActiveOwner)
     const nowIso = this.clock().toISOString()
+    const changesDocumentAuthorization =
+      target.status === 'active' &&
+      (
+        nextStatus !== 'active' ||
+        (
+          target.role !== 'guest' &&
+          nextRole === 'guest'
+        )
+      )
+    const documentAuthorizationGuard =
+      changesDocumentAuthorization
+        ? {
+            expectedRevision:
+              requireDocumentAuthorizationRevision(
+                input
+                  .expectedDocumentAuthorizationRevision,
+              ),
+            updatedAt: nowIso,
+          }
+        : undefined
     const becameDeactivated = target.status !== 'deactivated' && nextStatus === 'deactivated'
     const nextMember = {
       ...target,
@@ -1513,6 +1547,22 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       nowIso,
     ))
 
+    const documentAuthorizationItemIndex =
+      documentAuthorizationGuard !== undefined
+        ? transactItems.length
+        : undefined
+    if (
+      documentAuthorizationItemIndex !== undefined
+    ) {
+      transactItems.push(
+        createDocumentAuthorizationRevisionPut(
+          this.documentsTableName,
+          normalizedWorkspaceId,
+          documentAuthorizationGuard,
+        ),
+      )
+    }
+
     if (memberAuditPut) {
       transactItems.push(memberAuditPut)
     }
@@ -1531,6 +1581,21 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
             409,
             'PlanningRevisionConflict',
             'Planning changed. Reload and try again.',
+            { cause: error },
+          )
+        }
+
+        if (
+          documentAuthorizationItemIndex !== undefined &&
+          isTransactionConditionalFailureAt(
+            error,
+            documentAuthorizationItemIndex,
+          )
+        ) {
+          throw new WorkspaceAccessError(
+            409,
+            'DocumentAuthorizationRevisionConflict',
+            'Document permissions changed. Reload and try again.',
             { cause: error },
           )
         }
@@ -2451,6 +2516,23 @@ function createPlanningRevisionMutation(
           }),
     },
   }
+}
+
+function requireDocumentAuthorizationRevision(
+  value: number | undefined,
+): number {
+  if (
+    value === undefined ||
+    !Number.isSafeInteger(value) ||
+    value < 0
+  ) {
+    throw new WorkspaceAccessError(
+      400,
+      'InvalidDocumentAuthorizationRevision',
+      'Document authorization revision is required when removing Document manager eligibility.',
+    )
+  }
+  return value
 }
 
 function isTransactionConditionalFailureAt(error: unknown, index: number) {

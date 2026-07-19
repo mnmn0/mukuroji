@@ -8,6 +8,7 @@ export const workspaceNavPaths: Record<SidebarNavId, string> = {
   'my-tasks': '/my-tasks',
   inbox: '/inbox',
   requests: '/requests',
+  documents: '/documents',
   dashboard: '/dashboard',
   planning: '/planning/timeline',
   reports: '/reports',
@@ -92,6 +93,85 @@ export function createRequestsPath(view: RequestsView = 'queue', selectedId?: st
  */
 export function createPublicRequestPath(linkToken: string) {
   return `/request/${encodeURIComponent(linkToken)}`
+}
+
+/**
+ * Documents home または指定 Document の application URL を生成します。
+ *
+ * @param documentId - 開く任意の Document ID です。
+ * @param projectId - Home の初期 Project scope に使う任意の Project ID です。
+ * @returns Documents home または Document detail URL です。
+ */
+export function createDocumentPath(
+  documentId?: string,
+  projectId?: string,
+) {
+  const path = documentId
+    ? `/documents/${encodeURIComponent(documentId)}`
+    : '/documents'
+
+  if (!projectId) {
+    return path
+  }
+
+  const searchParams = new URLSearchParams({ projectId })
+  return `${path}?${searchParams.toString()}`
+}
+
+/**
+ * Expiring public share token の read-only URL を生成します。
+ *
+ * @param shareToken - API が発行した opaque public share token です。
+ * @returns Public Document route URL です。
+ */
+export function createSharedDocumentPath(shareToken: string) {
+  return `/share/documents/${encodeURIComponent(shareToken)}`
+}
+
+/**
+ * Scope 情報を持たない Work Item ID を実在する Workspace search で開く URL
+ * を生成します。
+ *
+ * @param workItemId - 検索対象の canonical Work Item ID です。
+ * @returns Work Item に限定した Workspace search URL です。
+ */
+export function createWorkItemSearchPath(workItemId: string) {
+  const canonicalParts = workItemId.split('/')
+  if (
+    canonicalParts.length === 4 &&
+    canonicalParts[0] === 'team' &&
+    canonicalParts[1] &&
+    canonicalParts[2] === 'issue' &&
+    canonicalParts[3]
+  ) {
+    return createTeamIssuesPath(
+      canonicalParts[1],
+      canonicalParts[3],
+    )
+  }
+  const searchParams = new URLSearchParams({
+    q: workItemId,
+    type: 'work-item',
+  })
+  return `/search?${searchParams.toString()}`
+}
+
+/**
+ * Project ID を permission-aware Workspace search で開く URL を生成します。
+ */
+export function createProjectSearchPath(projectId: string) {
+  const searchParams = new URLSearchParams({
+    q: projectId,
+    type: 'project',
+  })
+  return `/search?${searchParams.toString()}`
+}
+
+/**
+ * Goal と関連 Documents を開く URL を生成します。
+ */
+export function createGoalDocumentsPath(goalId: string) {
+  return `/goals/${encodeURIComponent(goalId)}/documents`
 }
 
 /**

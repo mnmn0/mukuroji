@@ -15,8 +15,9 @@
   意図なく変更しない。変更するとリソース置換やデータ消失につながる可能性がある。
 - 変更前に対象スタックのリソース、依存関係、環境差分を確認する。
 - AWS アカウントへ影響する操作は、ユーザーの明示的な依頼なしに実行しない。
-- 依存関係の変更は CDK workspace の `package.json` に記録し、lockfile はルートの
-  `bun.lock` に集約する。`cdk/` 配下に lockfile を作らない。
+- CDK の実行時・ビルド時依存は CDK workspace の `package.json` に記録し、リポジトリ共通の
+  開発ツールはルートの `package.json` に記録する。lockfile はルートの `bun.lock` に集約し、
+  `cdk/` 配下に lockfile を作らない。
 
 ## コマンド
 
@@ -167,7 +168,7 @@ AWS CDK L2/L1 constructs
 
 ## Oxlint / oxlint-plugin-awscdk
 
-- `oxlint-plugin-awscdk` は CDK workspace の開発依存です。リポジトリ直下の
+- `oxlint-plugin-awscdk` はリポジトリルートの開発依存です。リポジトリ直下の
   `.oxlintrc.json` で `cdk/**/*.ts` にだけ plugin の recommended ルールを適用します。
 - plugin は experimental で、ルール・preset・config shape が将来変更される可能性があります。
   更新時は lockfile の差分とルール変更を確認し、`oxc:lint`、build、test、synth を実行する。

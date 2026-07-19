@@ -151,6 +151,7 @@ import {
   resolveWorkflowStatusCategory,
   resolveWorkflowStatusDefinition,
 } from '../work-items/workItemDisplay'
+import { RelatedDocuments } from '../documents/RelatedDocuments'
 
 const taskTabs = ['table', 'board', 'gantt', 'calendar', 'file', 'permissions'] as const
 const taskPriorities = ['high', 'medium', 'low'] as const
@@ -280,6 +281,10 @@ type ProjectTaskStatusColumn = {
 type TaskScreenProps = {
   /** Bulk operation request に含める現在の Workspace ID です。 */
   workspaceId?: string
+  /**
+   * Related Documents を取得する access token です。
+   */
+  accessToken?: string
   /**
    * 表示 locale です。
    */
@@ -1280,6 +1285,7 @@ export function TaskPage() {
     <TaskScreen
       workspaceId={workspaceId}
       configurationErrorMessage={configurationErrorMessage}
+      accessToken={accessToken}
       isLoading={isLoading}
       isRelationCandidatesLoading={Boolean(relationCandidatesKey && isRelationCandidatesLoading)}
       locale={locale}
@@ -1358,6 +1364,7 @@ export function TaskPage() {
  */
 export function TaskScreen({
   workspaceId = '',
+  accessToken,
   locale,
   projectId,
   userInitial,
@@ -1808,6 +1815,12 @@ export function TaskScreen({
                 workspaceMembers={workspaceMembers}
               />
             ) : null}
+            <RelatedDocuments
+              accessToken={accessToken}
+              t={t}
+              targetId={projectId}
+              targetKind="project"
+            />
             <div
               aria-labelledby={createTaskTabId(activeTab)}
               className={`grid min-h-full ${activeTab === 'permissions' || activeTab === 'file' ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_minmax(360px,440px)] max-[1180px]:grid-cols-1'}`}
@@ -1903,6 +1916,7 @@ export function TaskScreen({
               />
               {activeTab === 'permissions' || activeTab === 'file' ? null : (
                 <TaskDetailPane
+                  accessToken={accessToken}
                   assigneeOptions={assigneeOptions}
                   artifacts={artifacts}
                   collaboration={collaboration}
@@ -3229,6 +3243,7 @@ function TaskBoard({
 }
 
 function TaskDetailPane({
+  accessToken,
   assigneeOptions,
   artifacts,
   collaboration,
@@ -3251,6 +3266,7 @@ function TaskDetailPane({
   task,
   workspaceMembers,
 }: {
+  accessToken?: string
   assigneeOptions: ProjectMember[]
   artifacts?: FileArtifactsController
   collaboration?: IssueCollaborationController
@@ -3547,6 +3563,16 @@ function TaskDetailPane({
           relations={relations}
         />
       </div>
+      <RelatedDocuments
+        accessToken={accessToken}
+        t={t}
+        targetId={
+          task.teamId
+            ? `team/${task.teamId}/issue/${task.id}`
+            : undefined
+        }
+        targetKind="work-item"
+      />
       {collaboration ? (
         <IssueCollaborationPanel
           artifacts={artifacts}

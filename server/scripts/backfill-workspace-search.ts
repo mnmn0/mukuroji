@@ -6,12 +6,15 @@ import {
   ScanCommand,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  type DocumentDetail,
   type SearchCustomFieldValue,
   type SearchEntityType,
 } from '@mukuroji/contracts'
 import { isCanonicalWorkItemRecord } from '../src/canonical-work-item'
+import { validateDocumentPayload } from '../src/documents'
 import {
   createCommentWorkspaceSearchDocument,
+  createDocumentWorkspaceSearchDocument,
   createProjectWorkspaceSearchDocument,
   createTeamWorkspaceSearchDocument,
   createWorkItemWorkspaceSearchDocument,
@@ -21,7 +24,7 @@ import {
 } from '../src/workspace-search'
 
 const scanPageSize = 100
-const sourceNames = ['project-directory', 'work-items', 'collaboration'] as const
+const sourceNames = ['project-directory', 'work-items', 'collaboration', 'documents'] as const
 
 /**
  * Workspace search backfill が読み取る source table 名です。
@@ -66,6 +69,10 @@ type TableNames = {
    * Work Item comment を保存する collaboration table 名です。
    */
   collaboration: string
+  /**
+   * Canonical Document current row を保存する table 名です。
+   */
+  documents: string
   /**
    * Search document の投影先 table 名です。
    */
@@ -261,12 +268,12 @@ function printHelp() {
 Options:
   --dry-run                 Scan and map source rows without changing the search table.
   --limit <count>           Maximum source rows scanned in this run.
-  --source <name>           Run only project-directory, work-items, or collaboration.
+  --source <name>           Run only project-directory, work-items, collaboration, or documents.
   --help, -h                Show this help.
 
 Required production environment:
   PROJECT_DIRECTORY_TABLE_NAME, WORK_ITEMS_TABLE_NAME, COLLABORATION_TABLE_NAME,
-  WORKSPACE_SEARCH_TABLE_NAME
+  DOCUMENTS_TABLE_NAME, WORKSPACE_SEARCH_TABLE_NAME
 
 For a local endpoint, repository-local default table names are used when omitted.
 Write runs create the local Workspace search table when it is missing. Re-running
@@ -316,6 +323,11 @@ function resolveTableNames(endpoint: string | undefined): TableNames {
     collaboration: resolveTableName(
       ['MUKUROJI_COLLABORATION_TABLE', 'COLLABORATION_TABLE_NAME'],
       'mukuroji-collaboration-local',
+      allowLocalDefaults,
+    ),
+    documents: resolveTableName(
+      ['MUKUROJI_DOCUMENTS_TABLE', 'DOCUMENTS_TABLE_NAME'],
+      'mukuroji-documents-local',
       allowLocalDefaults,
     ),
     workspaceSearch: resolveTableName(
@@ -387,6 +399,11 @@ function createSourceDefinitions(tables: TableNames): SourceDefinition[] {
       name: 'collaboration',
       tableName: tables.collaboration,
       mapItem: mapCollaborationItem,
+    },
+    {
+      name: 'documents',
+      tableName: tables.documents,
+      mapItem: mapDocumentItem,
     },
   ]
 }
@@ -462,6 +479,7 @@ function createCounters(): Record<SourceName, BackfillCounters> {
     'project-directory': { scanned: 0, projected: 0, deleted: 0, skipped: 0 },
     'work-items': { scanned: 0, projected: 0, deleted: 0, skipped: 0 },
     collaboration: { scanned: 0, projected: 0, deleted: 0, skipped: 0 },
+    documents: { scanned: 0, projected: 0, deleted: 0, skipped: 0 },
   }
 }
 
@@ -700,6 +718,59 @@ export function mapCollaborationItem(
   }
 }
 
+/**
+ * Canonical current Document row を search document の put/delete 操作へ変換します。
+ *
+ * Version、receipt、comment など同じ single-table 内の派生 row と、key/snapshot が一致しない
+ * malformed row は fail closed で skip します。
+ */
+export function mapDocumentItem(
+  item: Record<string, unknown>,
+): SearchProjectionOperation | undefined {
+  const workspaceId = readRequiredString(item.workspaceId)
+  const documentId = readRequiredString(item.documentId)
+  const revision = readPositiveInteger(item.revision)
+
+  if (
+    item.entryType !== 'document' ||
+    !workspaceId ||
+    !documentId ||
+    item.recordKey !== `DOCUMENT#${documentId}` ||
+    !revision ||
+    !isRecord(item.document)
+  ) {
+    return undefined
+  }
+
+  const document = item.document as DocumentDetail
+
+  if (
+    document.id !== documentId ||
+    document.revision !== revision ||
+    (
+      document.archivedAt !== undefined &&
+      !isCanonicalIsoTimestamp(document.archivedAt)
+    )
+  ) {
+    return undefined
+  }
+
+  try {
+    validateDocumentPayload(document)
+  } catch {
+    return undefined
+  }
+
+  if (document.archivedAt) {
+    return createDeleteOperation(workspaceId, 'document', document.id)
+  }
+
+  return {
+    action: 'put',
+    document: createDocumentWorkspaceSearchDocument(workspaceId, document),
+  }
+}
+
 function createDeleteOperation(
   workspaceId: string,
   entityType: SearchEntityType,
@@ -807,6 +878,20 @@ function readRequiredString(value: unknown) {
 
 function readOptionalString(value: unknown) {
   return typeof value === 'string' && value.trim() ? value : undefined
+}
+
+function readPositiveInteger(value: unknown) {
+  return Number.isSafeInteger(value) && (value as number) > 0 ? value as number : undefined
+}
+
+function isCanonicalIsoTimestamp(value: unknown) {
+  if (typeof value !== 'string') return false
+
+  try {
+    return new Date(value).toISOString() === value
+  } catch {
+    return false
+  }
 }
 
 function isCanonicalTeamDirectoryItem(item: Record<string, unknown>, workspaceId: string) {

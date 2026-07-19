@@ -8,12 +8,14 @@ import {
   ScanCommand,
   type ScanCommandInput,
 } from '@aws-sdk/lib-dynamodb'
+import type { DocumentDetail } from '@mukuroji/contracts'
 import {
   createWorkspaceSearchDocument,
   createWorkspaceSearchDocumentRecordKey,
 } from '../src/workspace-search'
 import {
   mapCollaborationItem,
+  mapDocumentItem,
   mapProjectDirectoryItem,
   mapWorkItem,
   parseWorkItemCollaborationEntityKey,
@@ -44,6 +46,64 @@ function mapRunnerItem(item: Record<string, unknown>) {
       url: `/teams/core-team/issues?issueId=${encodeURIComponent(id)}`,
       teamId: 'core-team',
     }),
+  }
+}
+
+function createDocumentRow(
+  documentOverrides: Partial<Extract<DocumentDetail, { kind: 'page' }>> = {},
+  rowOverrides: Record<string, unknown> = {},
+) {
+  const document: Extract<DocumentDetail, { kind: 'page' }> = {
+    schemaVersion: 1,
+    id: 'document-1',
+    kind: 'page',
+    scope: { type: 'project', projectId: 'project-1' },
+    title: 'Launch plan',
+    position: 'a0',
+    revision: 3,
+    permission: { mode: 'inherit', memberGrants: [] },
+    relations: [{
+      id: 'relation-1',
+      source: { kind: 'block', blockId: 'block-1' },
+      target: { kind: 'work-item', workItemId: 'team/core/issue/launch' },
+      createdByUserId: 'owner@example.com',
+      createdAt: '2026-07-18T00:00:00.000Z',
+    }],
+    favorite: false,
+    capabilities: {
+      canView: false,
+      canEdit: false,
+      canComment: false,
+      canShare: false,
+      canManagePermissions: false,
+      canArchive: false,
+      canRestore: false,
+      canExport: false,
+    },
+    createdByUserId: 'owner@example.com',
+    updatedByUserId: 'editor@example.com',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T01:00:00.000Z',
+    blocks: [
+      { id: 'block-1', type: 'heading', level: 1, text: 'Launch checklist' },
+      {
+        id: 'block-2',
+        type: 'checklist',
+        items: [{ id: 'item-1', text: 'Verify production', checked: false }],
+      },
+    ],
+    ...structuredClone(documentOverrides),
+  }
+
+  return {
+    workspaceId: 'workspace#mukuroji',
+    recordKey: `DOCUMENT#${document.id}`,
+    entryType: 'document',
+    documentId: document.id,
+    revision: document.revision,
+    document,
+    elementRevisions: {},
+    ...rowOverrides,
   }
 }
 
@@ -356,9 +416,116 @@ describe('Workspace search backfill mapping', () => {
       'workspace#mukuroji#work-item#team/core-team/issue/release/check',
     )).toBeUndefined()
   })
+
+  test('projects current Document rows with searchable content and deterministic keys', () => {
+    const first = mapDocumentItem(createDocumentRow())
+    const second = mapDocumentItem(createDocumentRow())
+
+    if (first?.action !== 'put' || second?.action !== 'put') {
+      throw new Error('Expected current Document search projections.')
+    }
+
+    expect(first).toEqual(second)
+    expect(first.document).toEqual(expect.objectContaining({
+      workspaceId: 'workspace#mukuroji',
+      recordKey: createWorkspaceSearchDocumentRecordKey('document', 'document-1'),
+      entityType: 'document',
+      entityId: 'document-1',
+      title: 'Launch plan',
+      subtitle: 'page',
+      body: 'Launch checklist\nVerify production',
+      projectId: 'project-1',
+      status: 'active',
+      relationIds: ['work-item:team/core/issue/launch'],
+    }))
+  })
+
+  test('deletes archived Document projections with the same deterministic key', () => {
+    const archived = mapDocumentItem(createDocumentRow({
+      archivedAt: '2026-07-18T02:00:00.000Z',
+    }))
+
+    expect(archived).toEqual({
+      action: 'delete',
+      workspaceId: 'workspace#mukuroji',
+      recordKey: createWorkspaceSearchDocumentRecordKey('document', 'document-1'),
+      entityType: 'document',
+      entityId: 'document-1',
+    })
+  })
+
+  test('skips Document version rows and malformed current snapshots', () => {
+    expect(mapDocumentItem(createDocumentRow({}, {
+      entryType: 'document-version',
+      recordKey: 'VERSION#document-1#3',
+    }))).toBeUndefined()
+    expect(mapDocumentItem(createDocumentRow({}, {
+      recordKey: 'DOCUMENT#another-document',
+    }))).toBeUndefined()
+    expect(mapDocumentItem(createDocumentRow({}, {
+      revision: 4,
+    }))).toBeUndefined()
+    expect(mapDocumentItem(createDocumentRow({
+      archivedAt: 'not-an-iso-timestamp',
+    }))).toBeUndefined()
+    expect(mapDocumentItem(createDocumentRow({
+      blocks: [
+        { id: 'duplicate', type: 'paragraph', text: 'First' },
+        { id: 'duplicate', type: 'paragraph', text: 'Second' },
+      ],
+    }))).toBeUndefined()
+  })
 })
 
 describe('Workspace search backfill runner', () => {
+  test('documents source preserves dry-run, skip, and run limit behavior', async () => {
+    const scanInputs: ScanCommandInput[] = []
+    const infoSpy = spyOn(console, 'info').mockImplementation(() => {})
+    const documentClient = {
+      async send(command: unknown) {
+        if (!(command instanceof ScanCommand)) {
+          throw new Error('Document dry-run attempted to mutate the target table.')
+        }
+
+        scanInputs.push(command.input)
+        return {
+          Items: [
+            createDocumentRow(),
+            createDocumentRow({}, {
+              entryType: 'document-version',
+              recordKey: 'VERSION#document-1#3',
+            }),
+          ],
+          ScannedCount: 2,
+          LastEvaluatedKey: { cursor: 'not-followed-after-limit' },
+        }
+      },
+    } as unknown as DynamoDBDocumentClient
+
+    try {
+      const counters = await runBackfill(
+        documentClient,
+        [{ name: 'documents', tableName: 'DocumentsTable', mapItem: mapDocumentItem }],
+        'WorkspaceSearchTable',
+        { dryRun: true, help: false, limit: 2 },
+      )
+
+      expect(scanInputs).toEqual([expect.objectContaining({
+        TableName: 'DocumentsTable',
+        Limit: 2,
+      })])
+      expect(counters.documents).toEqual({
+        scanned: 2,
+        projected: 1,
+        deleted: 0,
+        skipped: 1,
+      })
+      expect(infoSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
   test('dry-run follows scan cursors without writing or exceeding the run limit', async () => {
     const scanInputs: ScanCommandInput[] = []
     const infoSpy = spyOn(console, 'info').mockImplementation(() => {})

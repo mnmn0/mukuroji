@@ -12,7 +12,7 @@
   "overrides": [
     {
       "files": ["cdk/**/*.ts", "cdk/**/*.tsx"],
-      "jsPlugins": ["./cdk/node_modules/oxlint-plugin-awscdk"],
+      "jsPlugins": ["oxlint-plugin-awscdk"],
       "rules": {
         "awscdk/construct-constructor-property": "error",
         "awscdk/no-construct-in-interface": "error",

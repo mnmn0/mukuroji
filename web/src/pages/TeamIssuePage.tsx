@@ -116,6 +116,7 @@ import {
   resolveWorkflowStatusCategory,
   resolveWorkflowStatusDefinition,
 } from '../work-items/workItemDisplay'
+import { RelatedDocuments } from '../documents/RelatedDocuments'
 
 const issuePriorities = ['high', 'medium', 'low'] as const satisfies readonly TaskPriority[]
 const emptyTeams: ProjectDirectoryTeam[] = []
@@ -138,6 +139,10 @@ const issueViewPanelId = 'team-issue-view-panel'
  * チーム所有 Issue 画面を描画する props です。
  */
 type TeamIssueScreenProps = {
+  /**
+   * Related Documents を取得する access token です。
+   */
+  accessToken?: string
   /**
    * 表示 locale です。
    */
@@ -630,6 +635,7 @@ export function TeamIssuePage() {
 
   return (
     <TeamIssueScreen
+      accessToken={accessToken}
       assigneeOptions={assigneeOptions}
       artifacts={artifacts}
       collaboration={collaboration}
@@ -678,6 +684,7 @@ export function TeamIssuePage() {
  * チーム所有 Issue の管理 UI を描画する Storybook 兼用 screen です。
  */
 export function TeamIssueScreen({
+  accessToken,
   assigneeOptions = [],
   artifacts,
   canManageExternalLinks = false,
@@ -1020,6 +1027,7 @@ export function TeamIssueScreen({
                 </div>
               </section>
               <IssueDetailPane
+                accessToken={accessToken}
                 assigneeOptions={assigneeOptions}
                 artifacts={artifacts}
                 canManageExternalLinks={canManageExternalLinks}
@@ -1514,6 +1522,7 @@ function IssueBoard({
 }
 
 function IssueDetailPane({
+  accessToken,
   assigneeOptions,
   artifacts,
   canManageExternalLinks,
@@ -1536,6 +1545,7 @@ function IssueDetailPane({
   t,
   workspaceMembers,
 }: {
+  accessToken?: string
   assigneeOptions: ProjectMember[]
   artifacts?: FileArtifactsController
   canManageExternalLinks: boolean
@@ -1568,6 +1578,7 @@ function IssueDetailPane({
 
   return (
     <IssueDetailContent
+      accessToken={accessToken}
       assigneeOptions={assigneeOptions}
       artifacts={artifacts}
       canManageExternalLinks={canManageExternalLinks}
@@ -1595,6 +1606,7 @@ function IssueDetailPane({
 }
 
 function IssueDetailContent({
+  accessToken,
   assigneeOptions,
   artifacts,
   canManageExternalLinks,
@@ -1617,6 +1629,8 @@ function IssueDetailContent({
   t,
   workspaceMembers,
 }: {
+  /** Related Documents を取得する access token です。 */
+  accessToken?: string
   /** 担当者 selector の候補です。 */
   assigneeOptions: ProjectMember[]
   /** 選択中 Issue の file/version/annotation/approval controller です。 */
@@ -1871,6 +1885,12 @@ function IssueDetailContent({
           relations={relations}
         />
       </div>
+      <RelatedDocuments
+        accessToken={accessToken}
+        t={t}
+        targetId={`team/${issue.teamId}/issue/${issue.id}`}
+        targetKind="work-item"
+      />
       {collaboration ? (
         <IssueCollaborationPanel
           artifacts={artifacts}

@@ -36,6 +36,7 @@
 - `TeamIssuesTableName`（`WorkItemsTableName` と同じ table を指す互換 output）
 - `WorkItemConfigurationTableName`（workflow、custom field、relation graph の scope store）
 - `PlanningTableName`（cycle、goal、milestone、roadmap、portfolio の計画 store）
+- `DocumentsTableName`（document、whiteboard、share、comment の workspace store）
 - `AnalyticsTableName`（report、immutable snapshot、scheduled delivery receipt の store）
 - `RequestIntakeTableName`（form version、link capability、submission、queue、reply thread の scope store）
 - `RequestEmailIngestionFunctionName`, `RequestEmailIngestionDlqUrl`

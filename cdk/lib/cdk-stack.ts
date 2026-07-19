@@ -1074,6 +1074,31 @@ export class CdkStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    const documentsTable = new dynamodb.Table(this, 'DocumentsTable', {
+      partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      timeToLiveAttribute: 'expiresAtEpoch',
+    });
+    const documentPublicShareTokenSecret = new secretsmanager.Secret(
+      this,
+      'DocumentPublicShareTokenSecret',
+      {
+        description:
+          'Server-only HMAC key for idempotent mukuroji public document links.',
+        generateSecretString: {
+          excludePunctuation: true,
+          passwordLength: 64,
+        },
+      },
+    );
+    documentPublicShareTokenSecret.applyRemovalPolicy(
+      cdk.RemovalPolicy.RETAIN,
+    );
+
     const collaborationTable = new dynamodb.Table(this, 'WorkItemCollaborationTable', {
       partitionKey: { name: 'entityKey', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
@@ -1460,6 +1485,9 @@ export class CdkStack extends cdk.Stack {
         AUTOMATION_TABLE_NAME: automationTable.tableName,
         AUTOMATION_WEBHOOK_SECRET_PREFIX: automationWebhookSecretPrefix,
         COLLABORATION_TABLE_NAME: collaborationTable.tableName,
+        DOCUMENTS_TABLE_NAME: documentsTable.tableName,
+        DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET:
+          documentPublicShareTokenSecret.secretValue.unsafeUnwrap(),
         COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
         CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN:
@@ -1485,6 +1513,7 @@ export class CdkStack extends cdk.Stack {
         MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
         MUKUROJI_TEAM_ISSUES_TABLE: workItemsTable.tableName,
+        MUKUROJI_DOCUMENTS_TABLE: documentsTable.tableName,
         MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
         MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
         MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:
@@ -1561,6 +1590,7 @@ export class CdkStack extends cdk.Stack {
     projectDirectoryTable.grants.readWriteData(apiFunction);
     auditEventsTable.grants.readWriteData(apiFunction);
     workspaceAccessTable.grants.readWriteData(apiFunction);
+    documentsTable.grants.readWriteData(apiFunction);
     collaborationTable.grants.readWriteData(apiFunction);
     fileProofingTable.grants.readWriteData(apiFunction);
     notificationsTable.grants.readWriteData(apiFunction);
@@ -3351,6 +3381,7 @@ export class CdkStack extends cdk.Stack {
       value: processedAuditEventsTable.tableName,
     });
     new cdk.CfnOutput(this, 'WorkspaceAccessTableName', { value: workspaceAccessTable.tableName });
+    new cdk.CfnOutput(this, 'DocumentsTableName', { value: documentsTable.tableName });
     new cdk.CfnOutput(this, 'WorkItemCollaborationTableName', {
       value: collaborationTable.tableName,
     });
