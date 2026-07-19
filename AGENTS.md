@@ -35,9 +35,16 @@ Oxc / oxlint はリポジトリルートで設定します。
 ```sh
 bun run oxc:lint
 bun run oxc:lint:github
+bun run typecheck:contracts
+bun run typecheck:server
+bun run dependencies:check
+bun run knip:check
 ```
 
 `oxc:lint:github` は GitHub Actions の annotation 向けです。CI / oxlint 設定を変更した場合は、ローカルでは通常 `bun run oxc:lint` を確認してください。
+
+`typecheck:server` は server の本番コード、`typecheck:contracts` は共有 contract の型検査です。
+`dependencies:check` は workspace 間の循環依存・禁止依存を、`knip:check` は未使用ファイル・依存を検査します。
 
 ## CDK
 

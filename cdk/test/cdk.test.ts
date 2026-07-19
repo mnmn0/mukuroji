@@ -1,6 +1,8 @@
 import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import { AwsSolutionsChecks } from 'cdk-nag';
 import { expect, test } from '@jest/globals';
+import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
 import { CdkStack } from '../lib/cdk-stack';
 
 /**
@@ -14,7 +16,9 @@ function createTemplate() {
       '@aws-cdk/aws-s3:serverAccessLogsUseBucketPolicy': true,
     },
   });
+  cdk.Validations.of(app).addPlugins(new AwsSolutionsChecks(app));
   const stack = new CdkStack(app, 'Test');
+  acknowledgeKnownNagFindings(stack);
 
   return Template.fromStack(stack);
 }
