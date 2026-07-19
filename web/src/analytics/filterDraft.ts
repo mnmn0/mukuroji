@@ -48,6 +48,31 @@ export function parseAnalyticsCustomFieldDraftValue(
   return value
 }
 
+/**
+ * Multi-select filter のcheckbox操作を明示allowlistへ反映します。
+ *
+ * `undefined`は全件、空配列はmatch-noneを表すため、最後の選択解除でも空配列を
+ * 維持します。
+ *
+ * @param selectedValues - 操作前の明示allowlistです。
+ * @param value - 操作対象のdimension値です。
+ * @param checked - 操作後のcheckbox状態です。
+ * @returns 操作後の明示allowlistです。
+ */
+export function updateAnalyticsMultiSelectValues<T extends string>(
+  selectedValues: readonly T[] | undefined,
+  value: T,
+  checked: boolean,
+): T[] {
+  const nextValues = new Set(selectedValues ?? [])
+  if (checked) {
+    nextValues.add(value)
+  } else {
+    nextValues.delete(value)
+  }
+  return [...nextValues]
+}
+
 function splitAnalyticsCustomFieldDraftValues(value: string) {
   return [...new Set(
     value.split(',').map((item) => item.trim()).filter(Boolean),

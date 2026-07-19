@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import type { AnalyticsFilter } from '@mukuroji/contracts'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import { AnalyticsWorkbench } from '../analytics/AnalyticsWorkbench'
 import {
   analyticsEvidenceFixture,
@@ -122,6 +123,40 @@ export const CustomFieldGrouping: Story = {
 export const MultipleFilters: Story = {
   args: {
     filter: multipleFilters,
+  },
+}
+
+/**
+ * Checkboxのmatch-noneと明示的な全件操作をcallbackまで検証します。
+ */
+export const FilterSelectionSemantics: Story = {
+  args: {
+    filter: analyticsFilterFixture,
+    onFilterChange: fn(),
+  },
+  play: async ({ args, canvasElement, step }) => {
+    const canvas = within(canvasElement)
+    const teamFilter = within(canvas.getByTestId('analytics-team-filter'))
+
+    await step('最後のTeam checkbox解除は空allowlistを渡す', async () => {
+      await userEvent.click(
+        teamFilter.getByRole('checkbox', { name: 'コアチーム' }),
+      )
+      await expect(args.onFilterChange).toHaveBeenLastCalledWith({
+        ...analyticsFilterFixture,
+        teamIds: [],
+      })
+    })
+
+    await step('明示的なすべてボタンだけがallowlistを省略する', async () => {
+      await userEvent.click(
+        teamFilter.getByTestId('analytics-team-filter-all'),
+      )
+      await expect(args.onFilterChange).toHaveBeenLastCalledWith({
+        ...analyticsFilterFixture,
+        teamIds: undefined,
+      })
+    })
   },
 }
 

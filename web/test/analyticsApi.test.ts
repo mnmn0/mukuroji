@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import type { AnalyticsQueryInput } from '@mukuroji/contracts'
 import {
+  collectAnalyticsSnapshotPages,
   createAnalyticsReport,
   createAnalyticsExportInput,
   deleteAnalyticsReport,
   exportAnalytics,
   getAnalyticsEvidence,
   getAnalyticsReports,
+  getAnalyticsSnapshots,
   queryAnalytics,
   updateAnalyticsReport,
 } from '../src/analytics/api'
@@ -14,8 +16,10 @@ import {
   analyticsFilterFixture,
   analyticsReportFixtures,
   analyticsSnapshotFixture,
+  analyticsSnapshotRecordFixture,
   analyticsWidgetFixtures,
 } from '../src/analytics/fixtures'
+import { updateAnalyticsMultiSelectValues } from '../src/analytics/filterDraft'
 import {
   createAnalyticsQueryInput,
   parseAnalyticsRouteState,
@@ -111,18 +115,33 @@ describe('Analytics API', () => {
     expect(body.filter.statusCategories).toBeUndefined()
   })
 
-  test('keeps explicit empty URL allowlists as match-none in the query API body', async () => {
+  test('keeps last-checkbox removals as match-none from URL through query API body', async () => {
     const requests = installFetchRecorder(() => ({
       snapshot: analyticsSnapshotFixture,
     }))
+    const teamIds = updateAnalyticsMultiSelectValues(
+      ['core-team'],
+      'core-team',
+      false,
+    )
+    const projectIds = updateAnalyticsMultiSelectValues(
+      ['refero'],
+      'refero',
+      false,
+    )
+    const statusCategories = updateAnalyticsMultiSelectValues(
+      ['started'],
+      'started',
+      false,
+    )
     const searchParams = serializeAnalyticsRouteState({
       builder: false,
       filter: {
         assigneeUserIds: [],
         period: analyticsFilterFixture.period,
-        projectIds: [],
-        statusCategories: [],
-        teamIds: [],
+        projectIds,
+        statusCategories,
+        teamIds,
       },
       timezone: 'UTC',
     })
@@ -142,6 +161,9 @@ describe('Analytics API', () => {
     )
 
     const body = JSON.parse(String(requests[0]?.init.body)) as AnalyticsQueryInput
+    expect(searchParams.getAll('team')).toEqual([''])
+    expect(searchParams.getAll('project')).toEqual([''])
+    expect(searchParams.getAll('status')).toEqual([''])
     expect(body.filter.teamIds).toEqual([])
     expect(body.filter.projectIds).toEqual([])
     expect(body.filter.assigneeUserIds).toEqual([])
@@ -227,6 +249,37 @@ describe('Analytics API', () => {
       '/api/analytics/reports?limit=200',
       '/api/analytics/reports?limit=200&cursor=page-1',
     ])
+  })
+
+  test('retains snapshot page metadata, forwards its cursor, and deduplicates records', async () => {
+    const olderSnapshot = {
+      ...analyticsSnapshotRecordFixture,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      id: 'snapshot-older',
+    }
+    const response = {
+      inspectedCount: 8,
+      nextCursor: 'older+/=',
+      snapshots: [analyticsSnapshotRecordFixture, olderSnapshot],
+    }
+    const requests = installFetchRecorder(() => response)
+
+    await expect(getAnalyticsSnapshots(
+      'access-token',
+      'delivery/health',
+      'page+/=',
+    )).resolves.toEqual(response)
+    expect(requests[0]?.url).toBe(
+      '/api/analytics/reports/delivery%2Fhealth/snapshots?cursor=page%2B%2F%3D',
+    )
+    expect(collectAnalyticsSnapshotPages([
+      {
+        inspectedCount: 2,
+        nextCursor: 'page+/=',
+        snapshots: [analyticsSnapshotRecordFixture],
+      },
+      response,
+    ])).toEqual([analyticsSnapshotRecordFixture, olderSnapshot])
   })
 
   test('returns a browser artifact using the export filename header', async () => {

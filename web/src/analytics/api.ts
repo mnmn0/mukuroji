@@ -6,6 +6,7 @@ import type {
   AnalyticsReport,
   AnalyticsReportListResponse,
   AnalyticsSnapshot,
+  AnalyticsSnapshotListResponse,
   AnalyticsSnapshotRecord,
   CreateAnalyticsReportInput,
   UpdateAnalyticsReportInput,
@@ -258,26 +259,56 @@ export async function deleteAnalyticsReport(
  *
  * @param accessToken - Authorization header に使う access token です。
  * @param reportId - Snapshot を所有する report ID です。
+ * @param cursor - より古い snapshot page を指す opaque cursor です。
  * @param signal - Request を中断する AbortSignal です。
- * @returns 新しい順の snapshot record です。
+ * @returns 新しい順の snapshot record と検査件数、次 cursor です。
  */
 export async function getAnalyticsSnapshots(
   accessToken: string,
   reportId: string,
+  cursor?: string,
   signal?: AbortSignal,
 ) {
+  const search = new URLSearchParams()
+  if (cursor !== undefined) search.set('cursor', cursor)
   const response = await requestJson<unknown>(
-    `${createReportPath(reportId)}/snapshots`,
+    `${createReportPath(reportId)}/snapshots${
+      search.size > 0 ? `?${search.toString()}` : ''
+    }`,
     accessToken,
     { signal },
   )
   const record = asRecord(response)
 
-  return Array.isArray(record.snapshots)
-    ? record.snapshots as AnalyticsSnapshotRecord[]
-    : Array.isArray(response)
-      ? response as AnalyticsSnapshotRecord[]
-      : []
+  return {
+    inspectedCount: typeof record.inspectedCount === 'number'
+      ? record.inspectedCount
+      : 0,
+    snapshots: Array.isArray(record.snapshots)
+      ? record.snapshots as AnalyticsSnapshotRecord[]
+      : [],
+    ...(typeof record.nextCursor === 'string' && record.nextCursor.trim()
+      ? { nextCursor: record.nextCursor }
+      : {}),
+  } satisfies AnalyticsSnapshotListResponse
+}
+
+/**
+ * Cursor page の snapshot をAPI順のままIDで重複排除します。
+ *
+ * @param pages - 新しいpageから順に読み込まれたsnapshot responseです。
+ * @returns 最初に現れたrecordを保持したsnapshot一覧です。
+ */
+export function collectAnalyticsSnapshotPages(
+  pages: readonly AnalyticsSnapshotListResponse[],
+) {
+  const snapshots = new Map<string, AnalyticsSnapshotRecord>()
+  for (const page of pages) {
+    for (const snapshot of page.snapshots) {
+      if (!snapshots.has(snapshot.id)) snapshots.set(snapshot.id, snapshot)
+    }
+  }
+  return [...snapshots.values()]
 }
 
 /**

@@ -4,6 +4,7 @@ import type {
   AnalyticsFilter,
   AnalyticsReport,
   AnalyticsSchedule,
+  AnalyticsSnapshotListResponse,
   AnalyticsWidget,
   CreateAnalyticsReportInput,
 } from '@mukuroji/contracts'
@@ -16,6 +17,7 @@ import {
 } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 import useSWR from 'swr'
+import useSWRInfinite from 'swr/infinite'
 import {
   createMutationRequestRunner,
   type MutationRequestContext,
@@ -42,6 +44,7 @@ import {
 } from '../i18n'
 import {
   AnalyticsApiError,
+  collectAnalyticsSnapshotPages,
   createAnalyticsExportInput,
   createAnalyticsReport,
   createAnalyticsSnapshot,
@@ -66,6 +69,7 @@ import {
   serializeAnalyticsRouteState,
   type AnalyticsRouteState,
 } from '../analytics/queryState'
+import { resolveAnalyticsSnapshotAutoPagination } from '../analytics/snapshotPagination'
 import {
   getProjectDirectory,
   type ProjectDirectoryTeam,
@@ -190,19 +194,55 @@ export function ReportsPage() {
     setSearchParams(serializeAnalyticsRouteState(nextState), { replace })
   }, [setSearchParams])
 
-  const snapshotsKey = accessToken && selectedReport
-    ? ['analytics-snapshots', accessToken, selectedReport.id] as const
-    : null
   const {
-    data: snapshots = [],
+    data: snapshotPages,
     error: snapshotsError,
     isLoading: isSnapshotsLoading,
     mutate: mutateSnapshots,
-  } = useSWR(
-    snapshotsKey,
-    ([, token, reportId]) => getAnalyticsSnapshots(token, reportId),
+    setSize: setSnapshotPageCount,
+    size: snapshotPageCount,
+  } = useSWRInfinite(
+    (
+      pageIndex,
+      previousPage: AnalyticsSnapshotListResponse | null,
+    ) => {
+      if (!accessToken || !selectedReport) return null
+      if (pageIndex > 0 && !previousPage?.nextCursor) return null
+      return [
+        'analytics-snapshots',
+        accessToken,
+        selectedReport.id,
+        pageIndex === 0 ? '' : previousPage?.nextCursor ?? '',
+      ] as const
+    },
+    ([, token, reportId, cursor]) =>
+      getAnalyticsSnapshots(token, reportId, cursor || undefined),
     apiSWRConfig,
   )
+  const snapshots = useMemo(
+    () => collectAnalyticsSnapshotPages(snapshotPages ?? []),
+    [snapshotPages],
+  )
+  const snapshotNextCursor = snapshotPages?.at(-1)?.nextCursor
+  const snapshotCursorRepeated = snapshotNextCursor !== undefined &&
+    Boolean(snapshotPages?.slice(0, -1).some(
+      (page) => page.nextCursor === snapshotNextCursor,
+    ))
+  const hasMoreSnapshots = snapshotNextCursor !== undefined &&
+    !snapshotCursorRepeated
+  const isLoadingMoreSnapshots = isSnapshotsLoading || (
+    snapshotPageCount > 0 &&
+    snapshotPages !== undefined &&
+    snapshotPages[snapshotPageCount - 1] === undefined
+  )
+  const snapshotAutoPagination = resolveAnalyticsSnapshotAutoPagination(
+    snapshotPages,
+    routeState.snapshotId,
+    snapshotPageCount,
+  )
+  const snapshotPaginationGuardError = snapshotCursorRepeated
+    ? new TypeError('Analytics snapshot pagination exceeded its safe bounds.')
+    : undefined
   const selectedSnapshotRecord = snapshots.find(
     (record) => record.id === routeState.snapshotId,
   )
@@ -249,6 +289,7 @@ export function ReportsPage() {
     reportsError ??
     projectDirectoryError ??
     snapshotsError ??
+    snapshotPaginationGuardError ??
     queryError
   const loadErrorMessage = loadError
     ? resolveAnalyticsErrorMessage(loadError, t, 'load')
@@ -257,8 +298,30 @@ export function ReportsPage() {
     isCurrentUserLoading ||
     Boolean(projectDirectoryKey && isProjectDirectoryLoading) ||
     Boolean(reportsKey && isReportsLoading) ||
-    Boolean(routeState.snapshotId && snapshotsKey && isSnapshotsLoading) ||
+    Boolean(
+      routeState.snapshotId &&
+      (
+        isSnapshotsLoading ||
+        isLoadingMoreSnapshots ||
+        snapshotAutoPagination === 'load-next-page'
+      )
+    ) ||
     Boolean(queryKey && isQueryLoading)
+
+  useEffect(() => {
+    if (
+      snapshotAutoPagination !== 'load-next-page' ||
+      isLoadingMoreSnapshots
+    ) {
+      return
+    }
+    void setSnapshotPageCount(snapshotPageCount + 1)
+  }, [
+    isLoadingMoreSnapshots,
+    setSnapshotPageCount,
+    snapshotAutoPagination,
+    snapshotPageCount,
+  ])
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -506,10 +569,23 @@ export function ReportsPage() {
     )
     if (!record) return
     await mutateSnapshots(
-      (current) => [
-        record,
-        ...(current ?? []).filter((item) => item.id !== record.id),
-      ],
+      (currentPages) => {
+        const pages = currentPages ?? []
+        const firstPage = pages[0]
+        const updatedFirstPage = {
+          inspectedCount: firstPage?.inspectedCount ?? 0,
+          snapshots: [
+            record,
+            ...(firstPage?.snapshots ?? []).filter(
+              (item) => item.id !== record.id,
+            ),
+          ],
+          ...(firstPage?.nextCursor === undefined
+            ? {}
+            : { nextCursor: firstPage.nextCursor }),
+        }
+        return [updatedFirstPage, ...pages.slice(1)]
+      },
       { revalidate: false },
     )
     commitRouteState({
@@ -694,6 +770,8 @@ export function ReportsPage() {
           selectedSnapshotId={routeState.snapshotId}
           snapshot={snapshot}
           snapshots={snapshots}
+          hasMoreSnapshots={hasMoreSnapshots}
+          isLoadingMoreSnapshots={isLoadingMoreSnapshots}
           teams={teams}
           timeZone={displayedTimeZone}
           widgets={displayedWidgets}
@@ -727,6 +805,11 @@ export function ReportsPage() {
           onForecastBaselineChange={(forecastBaseline) =>
             refreshQuery({ forecastBaseline })}
           onLoadMoreEvidence={loadMoreEvidence}
+          onLoadMoreSnapshots={() => {
+            if (!hasMoreSnapshots || isLoadingMoreSnapshots) return
+            resetFeedback()
+            void setSnapshotPageCount(snapshotPageCount + 1)
+          }}
           onOpenEvidence={(input) => void openEvidence(input)}
           onOpenWorkItem={(item) => navigate(
             createTeamIssuesPath(item.teamId, item.workItemId),

@@ -32,6 +32,7 @@ import type { AnalyticsExportFormat } from './api'
 import {
   analyticsCustomFieldOperatorUsesNumericValue,
   parseAnalyticsCustomFieldDraftValue,
+  updateAnalyticsMultiSelectValues,
 } from './filterDraft'
 import {
   analyticsCalendarDateBoundaryToInstant,
@@ -82,6 +83,14 @@ export type AnalyticsWorkbenchProps = {
    * Viewer で表示中の snapshot record ID です。
    */
   selectedSnapshotId?: string
+  /**
+   * より古い snapshot page が残っているかどうかです。
+   */
+  hasMoreSnapshots?: boolean
+  /**
+   * より古い snapshot page の読み込み中表示です。
+   */
+  isLoadingMoreSnapshots?: boolean
   /**
    * Drill-down drawer に表示する evidence page です。
    */
@@ -162,6 +171,10 @@ export type AnalyticsWorkbenchProps = {
    * Live query または保存済み snapshot を切り替える callback です。
    */
   onSelectSnapshot?: (snapshotId?: string) => void
+  /**
+   * より古い snapshot page を一つ読み込む callback です。
+   */
+  onLoadMoreSnapshots?: () => void
   /**
    * 現在 URL を共有するときの callback です。
    */
@@ -287,10 +300,12 @@ export function AnalyticsWorkbench({
   snapshot,
   snapshots = [],
   selectedSnapshotId,
+  hasMoreSnapshots = false,
   evidence,
   evidenceMetric,
   teams,
   isLoading = false,
+  isLoadingMoreSnapshots = false,
   isEvidenceLoading = false,
   errorMessage,
   noticeMessage,
@@ -307,6 +322,7 @@ export function AnalyticsWorkbench({
   onDeleteReport,
   onCreateSnapshot,
   onSelectSnapshot,
+  onLoadMoreSnapshots,
   onShare,
   onExport,
   onOpenEvidence,
@@ -435,28 +451,45 @@ export function AnalyticsWorkbench({
         <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 flex-wrap items-center gap-3">
             <SnapshotMetadata locale={locale} snapshot={snapshot} t={t} />
-            {selectedReport && snapshots.length > 0 ? (
-              <label className="flex items-center gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
-                {t('analytics.snapshot.label')}
-                <select
-                  className="workbench-input min-h-9 max-w-[240px] px-2 text-xs"
-                  value={selectedSnapshotId ?? ''}
-                  onChange={(event) =>
-                    onSelectSnapshot?.(event.target.value || undefined)}
-                >
-                  <option value="">{t('analytics.snapshot.live')}</option>
-                  {snapshots.map((record) => (
-                    <option key={record.id} value={record.id}>
-                      {formatDateTime(
-                        record.createdAt,
-                        locale,
-                        record.snapshot.timeZone,
-                      )}
-                      {' · '}r{record.reportRevision ?? '—'}
-                    </option>
-                  ))}
-                </select>
-              </label>
+            {selectedReport && (snapshots.length > 0 || hasMoreSnapshots) ? (
+              <div className="flex flex-wrap items-center gap-2">
+                {snapshots.length > 0 ? (
+                  <label className="flex items-center gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+                    {t('analytics.snapshot.label')}
+                    <select
+                      className="workbench-input min-h-9 max-w-[240px] px-2 text-xs"
+                      value={selectedSnapshotId ?? ''}
+                      onChange={(event) =>
+                        onSelectSnapshot?.(event.target.value || undefined)}
+                    >
+                      <option value="">{t('analytics.snapshot.live')}</option>
+                      {snapshots.map((record) => (
+                        <option key={record.id} value={record.id}>
+                          {formatDateTime(
+                            record.createdAt,
+                            locale,
+                            record.snapshot.timeZone,
+                          )}
+                          {' · '}r{record.reportRevision ?? '—'}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                {hasMoreSnapshots ? (
+                  <button
+                    className="workbench-button-secondary min-h-8 px-2.5 text-xs disabled:cursor-wait disabled:opacity-60"
+                    data-testid="analytics-snapshot-load-older"
+                    disabled={isLoadingMoreSnapshots || !onLoadMoreSnapshots}
+                    type="button"
+                    onClick={onLoadMoreSnapshots}
+                  >
+                    {t(isLoadingMoreSnapshots
+                      ? 'analytics.snapshot.loadingOlder'
+                      : 'analytics.snapshot.loadOlder')}
+                  </button>
+                ) : null}
+              </div>
             ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-2" role="group" aria-label={t('analytics.actions')}>
@@ -1023,6 +1056,19 @@ function AnalyticsMultiSelectFilter({
         className="workbench-input grid max-h-28 min-h-10 gap-1 overflow-y-auto p-2"
         data-testid={testId}
       >
+        <button
+          aria-pressed={selectedValues === undefined}
+          className={`mb-1 min-h-7 rounded px-2 py-1 text-left text-xs font-semibold transition ${
+            selectedValues === undefined
+              ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]'
+              : 'text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'
+          }`}
+          data-testid={`${testId}-all`}
+          type="button"
+          onClick={() => onChange(undefined)}
+        >
+          {allLabel}
+        </button>
         {options.map((option) => (
           <label
             className="flex min-w-0 cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm font-medium text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]"
@@ -1034,18 +1080,16 @@ function AnalyticsMultiSelectFilter({
               type="checkbox"
               value={option.value}
               onChange={(event) => {
-                const nextValues = event.target.checked
-                  ? [...selected, option.value]
-                  : [...selected].filter((value) => value !== option.value)
-                onChange(nextValues.length > 0 ? nextValues : undefined)
+                onChange(updateAnalyticsMultiSelectValues(
+                  selectedValues,
+                  option.value,
+                  event.target.checked,
+                ))
               }}
             />
             <span className="truncate">{option.label}</span>
           </label>
         ))}
-        {options.length === 0 ? (
-          <span className="px-1 py-0.5 text-xs font-medium">{allLabel}</span>
-        ) : null}
       </div>
       <span
         className="truncate text-[11px] font-medium text-[var(--workbench-muted-soft)]"

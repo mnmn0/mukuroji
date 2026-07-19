@@ -462,5 +462,50 @@ describe('AnalyticsWorkbench', () => {
     expect(html).toContain('No teams')
     expect(html).toContain('No projects')
     expect(html).toContain('No statuses')
+    expect(html).toContain('data-testid="analytics-team-filter-all"')
+    expect(html).toContain('data-testid="analytics-project-filter-all"')
+    expect(html).toContain('data-testid="analytics-status-filter-all"')
+    expect(html).toContain('aria-pressed="false"')
+  })
+
+  test('marks explicit all-values controls as active for omitted dimension filters', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        filter={{
+          period: analyticsFilterFixture.period,
+        }}
+      />,
+    )
+
+    expect(html.match(/aria-pressed="true"/gu)?.length).toBe(3)
+    expect(html).toContain('All teams')
+    expect(html).toContain('All projects')
+    expect(html).toContain('All statuses')
+  })
+
+  test('offers an explicit older-snapshot page action after an empty visible page', () => {
+    const availableHtml = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        hasMoreSnapshots
+        snapshots={[]}
+        onLoadMoreSnapshots={() => undefined}
+      />,
+    )
+    const loadingHtml = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        hasMoreSnapshots
+        isLoadingMoreSnapshots
+        snapshots={[]}
+        onLoadMoreSnapshots={() => undefined}
+      />,
+    )
+
+    expect(availableHtml).toContain('data-testid="analytics-snapshot-load-older"')
+    expect(availableHtml).toContain('Load older snapshots')
+    expect(loadingHtml).toContain('disabled=""')
+    expect(loadingHtml).toContain('Loading…')
   })
 })
