@@ -187,7 +187,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(17);
+  expect(Object.keys(tables)).toHaveLength(18);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -277,6 +277,219 @@ test('automation state is retained with due-schedule and execution history index
     }),
   }));
   template.hasOutput('AutomationTableName', {});
+});
+
+test('analytics state is retained with a due-delivery index and scoped API access', () => {
+  const template = synthesizedTemplate;
+  const analyticsTableLogicalId = template.toJSON().Outputs.AnalyticsTableName?.Value?.Ref;
+
+  expect(typeof analyticsTableLogicalId).toBe('string');
+  if (typeof analyticsTableLogicalId !== 'string') {
+    throw new Error('Analytics table output does not reference a table.');
+  }
+
+  const analyticsTable = template.toJSON().Resources[analyticsTableLogicalId];
+
+  expect(analyticsTable).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+    Properties: expect.objectContaining({
+      AttributeDefinitions: expect.arrayContaining([
+        { AttributeName: 'workspaceId', AttributeType: 'S' },
+        { AttributeName: 'recordKey', AttributeType: 'S' },
+        { AttributeName: 'scheduleShard', AttributeType: 'S' },
+        { AttributeName: 'nextDeliveryAtRecordKey', AttributeType: 'S' },
+      ]),
+      BillingMode: 'PAY_PER_REQUEST',
+      GlobalSecondaryIndexes: [
+        expect.objectContaining({
+          IndexName: 'ScheduleDueIndex',
+          KeySchema: [
+            { AttributeName: 'scheduleShard', KeyType: 'HASH' },
+            { AttributeName: 'nextDeliveryAtRecordKey', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'KEYS_ONLY' },
+        }),
+      ],
+      KeySchema: [
+        { AttributeName: 'workspaceId', KeyType: 'HASH' },
+        { AttributeName: 'recordKey', KeyType: 'RANGE' },
+      ],
+      PointInTimeRecoverySpecification: {
+        PointInTimeRecoveryEnabled: true,
+      },
+    }),
+  }));
+
+  const apiFunction = template.toJSON().Resources.ListProjectTasksFunction2134AF4A;
+  expect(apiFunction.Properties.Environment.Variables).toEqual(expect.objectContaining({
+    ANALYTICS_SCHEDULE_INDEX_NAME: 'ScheduleDueIndex',
+    ANALYTICS_TABLE_NAME: { Ref: analyticsTableLogicalId },
+  }));
+
+  const apiAnalyticsPolicy = Object.entries(template.toJSON().Resources)
+    .find(([logicalId, resource]) =>
+      logicalId.startsWith('ApiAnalyticsDataPolicy') &&
+      (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
+    )?.[1];
+  expect(JSON.stringify(apiAnalyticsPolicy)).toContain(analyticsTableLogicalId);
+
+  const apiTransactWritePolicy = Object.entries(template.toJSON().Resources)
+    .find(([logicalId, resource]) =>
+      logicalId.startsWith('ApiTransactWritePolicy') &&
+      (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
+    )?.[1];
+  expect(JSON.stringify(apiTransactWritePolicy)).toContain('dynamodb:TransactWriteItems');
+  expect(JSON.stringify(apiTransactWritePolicy)).toContain(analyticsTableLogicalId);
+});
+
+test('analytics scheduled delivery reauthorizes source data without consuming the audit stream', () => {
+  const template = synthesizedTemplate;
+  const resources = template.toJSON().Resources;
+  const analyticsTableLogicalId = template.toJSON().Outputs.AnalyticsTableName?.Value?.Ref;
+  const auditTableLogicalId = template.toJSON().Outputs.AuditEventsTableName?.Value?.Ref;
+  const projectDirectoryTableLogicalId =
+    template.toJSON().Outputs.ProjectDirectoryTableName?.Value?.Ref;
+  const workItemsTableLogicalId = template.toJSON().Outputs.WorkItemsTableName?.Value?.Ref;
+  const workspaceAccessTableLogicalId =
+    template.toJSON().Outputs.WorkspaceAccessTableName?.Value?.Ref;
+
+  expect(typeof analyticsTableLogicalId).toBe('string');
+  expect(typeof auditTableLogicalId).toBe('string');
+  expect(typeof projectDirectoryTableLogicalId).toBe('string');
+  expect(typeof workItemsTableLogicalId).toBe('string');
+  expect(typeof workspaceAccessTableLogicalId).toBe('string');
+  if (
+    typeof analyticsTableLogicalId !== 'string' ||
+    typeof auditTableLogicalId !== 'string' ||
+    typeof projectDirectoryTableLogicalId !== 'string' ||
+    typeof workItemsTableLogicalId !== 'string' ||
+    typeof workspaceAccessTableLogicalId !== 'string'
+  ) {
+    throw new Error('Analytics schedule data table outputs must reference tables.');
+  }
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description:
+      'Creates permission-safe in-app analytics snapshot delivery receipts on deterministic schedule occurrences.',
+    Environment: {
+      Variables: Match.objectLike({
+        ANALYTICS_SCHEDULE_INDEX_NAME: 'ScheduleDueIndex',
+        ANALYTICS_TABLE_NAME: { Ref: analyticsTableLogicalId },
+        AUDIT_EVENTS_TABLE_NAME: { Ref: auditTableLogicalId },
+        COGNITO_CLIENT_ID: { Ref: 'CognitoUserPoolClientId' },
+        COGNITO_USER_POOL_ID: { Ref: 'CognitoUserPoolId' },
+        MUKUROJI_PROJECT_DIRECTORY_TABLE: { Ref: projectDirectoryTableLogicalId },
+        MUKUROJI_WORK_ITEMS_TABLE: { Ref: workItemsTableLogicalId },
+        SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
+        WORKSPACE_ACCESS_TABLE_NAME: { Ref: workspaceAccessTableLogicalId },
+      }),
+    },
+    Handler: 'index.handler',
+    Runtime: 'nodejs22.x',
+  });
+  template.hasResourceProperties('AWS::Events::Rule', {
+    Description: 'Checks due saved analytics reports every five minutes.',
+    ScheduleExpression: 'rate(5 minutes)',
+    State: 'ENABLED',
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription: 'Detects analytics snapshot delivery failures after asynchronous retries.',
+    MetricName: 'ApproximateNumberOfMessagesVisible',
+    Namespace: 'AWS/SQS',
+    Threshold: 1,
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects failures while Lambda delivers analytics schedule failures to the DLQ.',
+    MetricName: 'DestinationDeliveryFailures',
+    Namespace: 'AWS/Lambda',
+    Threshold: 1,
+    TreatMissingData: 'notBreaching',
+  });
+  template.hasOutput('AnalyticsScheduleDlqUrl', {});
+
+  const schedulePolicies = Object.entries(resources)
+    .filter(([logicalId, resource]) =>
+      logicalId.startsWith('AnalyticsScheduleFunctionServiceRole') &&
+      (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
+    )
+    .map(([, resource]) => resource);
+  const serializedSchedulePolicies = JSON.stringify(schedulePolicies);
+
+  expect(serializedSchedulePolicies).toContain(analyticsTableLogicalId);
+  expect(serializedSchedulePolicies).toContain(auditTableLogicalId);
+  expect(serializedSchedulePolicies).toContain(projectDirectoryTableLogicalId);
+  expect(serializedSchedulePolicies).toContain(workItemsTableLogicalId);
+  expect(serializedSchedulePolicies).toContain(workspaceAccessTableLogicalId);
+  expect(serializedSchedulePolicies).toContain('CognitoUserPoolId');
+  expect(serializedSchedulePolicies).toContain('cognito-idp:AdminListGroupsForUser');
+  expect(serializedSchedulePolicies).toContain('dynamodb:TransactWriteItems');
+
+  const scheduleStatements = schedulePolicies.flatMap((policy) => {
+    const statements =
+      (policy as {
+        Properties?: { PolicyDocument?: { Statement?: unknown } }
+      }).Properties?.PolicyDocument?.Statement;
+    return Array.isArray(statements) ? statements : [];
+  });
+  const actionsForResource = (logicalId: string) =>
+    scheduleStatements
+      .filter((statement) =>
+        JSON.stringify(
+          (statement as { Resource?: unknown }).Resource,
+        ).includes(logicalId)
+      )
+      .flatMap((statement) => {
+        const action = (statement as { Action?: unknown }).Action;
+        return Array.isArray(action) ? action : [action];
+      })
+      .filter((action): action is string => typeof action === 'string');
+
+  expect(new Set(actionsForResource(analyticsTableLogicalId))).toEqual(new Set([
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+    'dynamodb:Query',
+    'dynamodb:TransactWriteItems',
+  ]));
+  expect(new Set(actionsForResource(auditTableLogicalId))).toEqual(
+    new Set(['dynamodb:Query']),
+  );
+  expect(new Set(actionsForResource(projectDirectoryTableLogicalId))).toEqual(
+    new Set(['dynamodb:Query']),
+  );
+  expect(new Set(actionsForResource(workItemsTableLogicalId))).toEqual(
+    new Set(['dynamodb:Query']),
+  );
+  expect(new Set(actionsForResource(workspaceAccessTableLogicalId))).toEqual(
+    new Set(['dynamodb:GetItem']),
+  );
+
+  const scheduleDynamoActions = scheduleStatements
+    .flatMap((statement) => {
+      const action = (statement as { Action?: unknown }).Action;
+      return Array.isArray(action) ? action : [action];
+    })
+    .filter((action): action is string =>
+      typeof action === 'string' && action.startsWith('dynamodb:')
+    );
+  for (const forbiddenAction of [
+    'dynamodb:BatchGetItem',
+    'dynamodb:BatchWriteItem',
+    'dynamodb:DeleteItem',
+    'dynamodb:Scan',
+    'dynamodb:UpdateItem',
+  ]) {
+    expect(scheduleDynamoActions).not.toContain(forbiddenAction);
+  }
+
+  const auditStreamMappings = Object.values(
+    template.findResources('AWS::Lambda::EventSourceMapping'),
+  ).filter((resource) =>
+    JSON.stringify(resource).includes(auditTableLogicalId)
+  );
+
+  expect(auditStreamMappings).toHaveLength(2);
 });
 
 test('file proofing metadata uses a retained point-in-time recoverable table', () => {
@@ -2141,7 +2354,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 12);
+  template.resourceCountIs('AWS::SQS::Queue', 13);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,

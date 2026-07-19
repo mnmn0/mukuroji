@@ -1742,6 +1742,11 @@ export type PlanningMutationResponse = {
 }
 
 /**
+ * Analytics report、snapshot、metric API の公開契約です。
+ */
+export * from './analytics'
+
+/**
  * Public API と developer platform の共有 contract です。
  */
 export * from './developer-platform'

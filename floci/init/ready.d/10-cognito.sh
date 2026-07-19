@@ -20,6 +20,8 @@ TEAM_ISSUES_TABLE="$WORK_ITEMS_TABLE"
 TEAM_ISSUE_EVENTS_TABLE="${MUKUROJI_TEAM_ISSUE_EVENTS_TABLE:-mukuroji-team-issue-events-local}"
 COLLABORATION_TABLE="${MUKUROJI_COLLABORATION_TABLE:-${COLLABORATION_TABLE_NAME:-mukuroji-collaboration-local}}"
 WORKSPACE_SEARCH_TABLE="${MUKUROJI_WORKSPACE_SEARCH_TABLE:-${WORKSPACE_SEARCH_TABLE_NAME:-mukuroji-workspace-search-local}}"
+ANALYTICS_TABLE="${ANALYTICS_TABLE_NAME:-mukuroji-analytics-local}"
+ANALYTICS_SCHEDULE_INDEX="${ANALYTICS_SCHEDULE_INDEX_NAME:-ScheduleDueIndex}"
 NOTIFICATIONS_TABLE="${MUKUROJI_NOTIFICATIONS_TABLE:-${NOTIFICATIONS_TABLE_NAME:-mukuroji-notifications-local}}"
 REALTIME_SESSIONS_TABLE="${MUKUROJI_REALTIME_SESSIONS_TABLE:-${REALTIME_SESSIONS_TABLE_NAME:-mukuroji-realtime-sessions-local}}"
 AUDIT_EVENTS_TABLE="${MUKUROJI_AUDIT_EVENTS_TABLE:-${AUDIT_EVENTS_TABLE_NAME:-mukuroji-audit-events}}"
@@ -572,6 +574,66 @@ fi
 
 aws_local dynamodb wait table-exists --table-name "$WORKSPACE_SEARCH_TABLE"
 
+if ! aws_local dynamodb describe-table --table-name "$ANALYTICS_TABLE" >/dev/null 2>&1; then
+  aws_local dynamodb create-table \
+    --table-name "$ANALYTICS_TABLE" \
+    --attribute-definitions \
+      AttributeName=workspaceId,AttributeType=S \
+      AttributeName=recordKey,AttributeType=S \
+      AttributeName=scheduleShard,AttributeType=S \
+      AttributeName=nextDeliveryAtRecordKey,AttributeType=S \
+    --key-schema \
+      AttributeName=workspaceId,KeyType=HASH \
+      AttributeName=recordKey,KeyType=RANGE \
+    --global-secondary-indexes "[
+      {
+        \"IndexName\": \"$ANALYTICS_SCHEDULE_INDEX\",
+        \"KeySchema\": [
+          {\"AttributeName\": \"scheduleShard\", \"KeyType\": \"HASH\"},
+          {\"AttributeName\": \"nextDeliveryAtRecordKey\", \"KeyType\": \"RANGE\"}
+        ],
+        \"Projection\": {\"ProjectionType\": \"ALL\"}
+      }
+    ]" \
+    --billing-mode PAY_PER_REQUEST \
+    >/dev/null
+fi
+
+aws_local dynamodb wait table-exists --table-name "$ANALYTICS_TABLE"
+
+read_analytics_table_schema() {
+  aws_local dynamodb describe-table \
+    --table-name "$ANALYTICS_TABLE" \
+    --query "$1" \
+    --output text
+}
+
+ANALYTICS_TABLE_BILLING_MODE="$(read_analytics_table_schema 'Table.BillingModeSummary.BillingMode')"
+ANALYTICS_TABLE_PARTITION_KEY="$(read_analytics_table_schema "Table.KeySchema[?KeyType=='HASH'].AttributeName | [0]")"
+ANALYTICS_TABLE_SORT_KEY="$(read_analytics_table_schema "Table.KeySchema[?KeyType=='RANGE'].AttributeName | [0]")"
+ANALYTICS_TABLE_PARTITION_KEY_TYPE="$(read_analytics_table_schema "Table.AttributeDefinitions[?AttributeName=='workspaceId'].AttributeType | [0]")"
+ANALYTICS_TABLE_SORT_KEY_TYPE="$(read_analytics_table_schema "Table.AttributeDefinitions[?AttributeName=='recordKey'].AttributeType | [0]")"
+ANALYTICS_INDEX_PARTITION_KEY="$(read_analytics_table_schema "Table.GlobalSecondaryIndexes[?IndexName=='$ANALYTICS_SCHEDULE_INDEX'] | [0].KeySchema[?KeyType=='HASH'].AttributeName | [0]")"
+ANALYTICS_INDEX_SORT_KEY="$(read_analytics_table_schema "Table.GlobalSecondaryIndexes[?IndexName=='$ANALYTICS_SCHEDULE_INDEX'] | [0].KeySchema[?KeyType=='RANGE'].AttributeName | [0]")"
+ANALYTICS_INDEX_PARTITION_KEY_TYPE="$(read_analytics_table_schema "Table.AttributeDefinitions[?AttributeName=='scheduleShard'].AttributeType | [0]")"
+ANALYTICS_INDEX_SORT_KEY_TYPE="$(read_analytics_table_schema "Table.AttributeDefinitions[?AttributeName=='nextDeliveryAtRecordKey'].AttributeType | [0]")"
+ANALYTICS_INDEX_PROJECTION_TYPE="$(read_analytics_table_schema "Table.GlobalSecondaryIndexes[?IndexName=='$ANALYTICS_SCHEDULE_INDEX'] | [0].Projection.ProjectionType")"
+
+if [ "$ANALYTICS_TABLE_BILLING_MODE" != "PAY_PER_REQUEST" ] ||
+  [ "$ANALYTICS_TABLE_PARTITION_KEY" != "workspaceId" ] ||
+  [ "$ANALYTICS_TABLE_SORT_KEY" != "recordKey" ] ||
+  [ "$ANALYTICS_TABLE_PARTITION_KEY_TYPE" != "S" ] ||
+  [ "$ANALYTICS_TABLE_SORT_KEY_TYPE" != "S" ] ||
+  [ "$ANALYTICS_INDEX_PARTITION_KEY" != "scheduleShard" ] ||
+  [ "$ANALYTICS_INDEX_SORT_KEY" != "nextDeliveryAtRecordKey" ] ||
+  [ "$ANALYTICS_INDEX_PARTITION_KEY_TYPE" != "S" ] ||
+  [ "$ANALYTICS_INDEX_SORT_KEY_TYPE" != "S" ] ||
+  [ "$ANALYTICS_INDEX_PROJECTION_TYPE" != "ALL" ]; then
+  echo "Existing Analytics table schema does not match the local API contract: table=$ANALYTICS_TABLE index=$ANALYTICS_SCHEDULE_INDEX" >&2
+  echo "Actual: billingMode=$ANALYTICS_TABLE_BILLING_MODE primaryKey=$ANALYTICS_TABLE_PARTITION_KEY($ANALYTICS_TABLE_PARTITION_KEY_TYPE)/$ANALYTICS_TABLE_SORT_KEY($ANALYTICS_TABLE_SORT_KEY_TYPE) indexKey=$ANALYTICS_INDEX_PARTITION_KEY($ANALYTICS_INDEX_PARTITION_KEY_TYPE)/$ANALYTICS_INDEX_SORT_KEY($ANALYTICS_INDEX_SORT_KEY_TYPE) projection=$ANALYTICS_INDEX_PROJECTION_TYPE" >&2
+  exit 1
+fi
+
 WORKSPACE_SEED_CREATED_AT="2026-07-11T00:00:00.000Z"
 
 ensure_workspace_record() {
@@ -734,6 +796,8 @@ MUKUROJI_COLLABORATION_TABLE=$COLLABORATION_TABLE
 COLLABORATION_TABLE_NAME=$COLLABORATION_TABLE
 MUKUROJI_WORKSPACE_SEARCH_TABLE=$WORKSPACE_SEARCH_TABLE
 WORKSPACE_SEARCH_TABLE_NAME=$WORKSPACE_SEARCH_TABLE
+ANALYTICS_TABLE_NAME=$ANALYTICS_TABLE
+ANALYTICS_SCHEDULE_INDEX_NAME=$ANALYTICS_SCHEDULE_INDEX
 MUKUROJI_NOTIFICATIONS_TABLE=$NOTIFICATIONS_TABLE
 NOTIFICATIONS_TABLE_NAME=$NOTIFICATIONS_TABLE
 MUKUROJI_REALTIME_SESSIONS_TABLE=$REALTIME_SESSIONS_TABLE
@@ -758,3 +822,4 @@ echo "mukuroji DynamoDB ready: table=$PROJECT_DIRECTORY_TABLE workspaceDirectory
 echo "mukuroji audit configured: table=$AUDIT_EVENTS_TABLE retentionDays=$AUDIT_RETENTION_DAYS"
 echo "mukuroji DynamoDB ready: table=$WORKSPACE_ACCESS_TABLE workspace=$WORKSPACE_DIRECTORY_ID"
 echo "mukuroji DynamoDB ready: table=$WORKSPACE_SEARCH_TABLE searchAndSavedViews=ready"
+echo "mukuroji DynamoDB ready: table=$ANALYTICS_TABLE scheduleIndex=$ANALYTICS_SCHEDULE_INDEX"
