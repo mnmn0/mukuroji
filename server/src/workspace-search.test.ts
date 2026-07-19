@@ -9,10 +9,13 @@ import {
   DynamoDbWorkspaceSearchClient,
   WorkspaceSearchError,
   createCommentWorkspaceSearchDocument,
+  createDocumentWorkspaceSearchSourceDocument,
+  createDocumentWorkspaceSearchDocument,
   createWorkItemWorkspaceSearchDocument,
   createWorkspaceSearchDocument,
   ensureLocalWorkspaceSearchTable,
   migrateSavedWorkspaceView,
+  WORKSPACE_SEARCH_STORED_BODY_MAX_LENGTH,
 } from './workspace-search'
 
 test('keeps the unprocessed DynamoDB page behind the opaque search cursor', async () => {
@@ -139,6 +142,135 @@ test('normalizes realtime and backfill Work Item and comment projection fields c
   })
 })
 
+test('projects rich Document content and backlinks into the Workspace search schema', () => {
+  const document = createDocumentWorkspaceSearchDocument('workspace-1', {
+    schemaVersion: 1,
+    id: 'document-1',
+    kind: 'page',
+    scope: { type: 'project', projectId: 'project-1' },
+    title: 'Launch brief',
+    position: 'a0',
+    revision: 3,
+    permission: { mode: 'inherit', memberGrants: [] },
+    relations: [{
+      id: 'relation-1',
+      source: { kind: 'block', blockId: 'block-1' },
+      target: { kind: 'work-item', workItemId: 'issue-1' },
+      createdByUserId: 'author@example.com',
+      createdAt: '2026-07-18T00:00:00.000Z',
+    }],
+    favorite: false,
+    capabilities: {
+      canView: true,
+      canEdit: true,
+      canComment: true,
+      canShare: true,
+      canManagePermissions: true,
+      canArchive: true,
+      canRestore: false,
+      canExport: true,
+    },
+    createdByUserId: 'author@example.com',
+    updatedByUserId: 'author@example.com',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T01:00:00.000Z',
+    blocks: [
+      { id: 'block-1', type: 'heading', level: 1, text: 'Release plan' },
+      {
+        id: 'block-2',
+        type: 'checklist',
+        items: [{ id: 'item-1', text: 'Confirm rollback owner', checked: false }],
+      },
+    ],
+  })
+
+  expect(document).toMatchObject({
+    entityType: 'document',
+    entityId: 'document-1',
+    sourceRevision: 3,
+    projectId: 'project-1',
+    body: 'Release plan\nConfirm rollback owner',
+    relationIds: ['work-item:issue-1'],
+    customFields: {
+      documentKind: 'page',
+      permissionMode: 'inherit',
+    },
+    url: '/documents/document-1',
+  })
+})
+
+test('searches the full current Document while keeping its DynamoDB projection bounded', async () => {
+  const tailToken = 'tail-only-search-token'
+  const longText = `${'x'.repeat(
+    WORKSPACE_SEARCH_STORED_BODY_MAX_LENGTH + 100,
+  )}${tailToken}`
+  const source = {
+    schemaVersion: 1 as const,
+    id: 'long-document',
+    kind: 'page' as const,
+    scope: { type: 'workspace' as const },
+    title: 'Long document',
+    position: 'a0',
+    revision: 1,
+    permission: { mode: 'inherit' as const, memberGrants: [] },
+    relations: [],
+    favorite: false,
+    capabilities: {
+      canView: true,
+      canEdit: true,
+      canComment: true,
+      canShare: true,
+      canManagePermissions: true,
+      canArchive: true,
+      canRestore: false,
+      canExport: true,
+    },
+    createdByUserId: 'author@example.com',
+    updatedByUserId: 'author@example.com',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T00:00:00.000Z',
+    blocks: [{ id: 'block-1', type: 'paragraph' as const, text: longText }],
+  }
+  const stored = createDocumentWorkspaceSearchDocument(
+    'workspace-1',
+    source,
+  )
+  const current = createDocumentWorkspaceSearchSourceDocument(
+    'workspace-1',
+    source,
+  )
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([stored]),
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set<string>(),
+      teamIds: new Set<string>(),
+    },
+    filters: { keyword: tailToken },
+    resolveCurrentScope: async () => ({
+      permissionVerified: true,
+      currentDocument: current,
+    }),
+  })
+
+  expect(stored.body).toHaveLength(
+    WORKSPACE_SEARCH_STORED_BODY_MAX_LENGTH,
+  )
+  expect(stored.body).not.toContain(tailToken)
+  expect(current.body).toBe(longText)
+  expect(response.results.map(({ id }) => id)).toEqual([
+    'long-document',
+  ])
+})
+
 test('applies current resolved scope before RBAC and composite project filters', async () => {
   const comment = createWorkspaceSearchDocument({
     workspaceId: 'workspace-1',
@@ -197,6 +329,49 @@ test('applies current resolved scope before RBAC and composite project filters',
   expect(response.results[0]?.highlights).toEqual(expect.arrayContaining([
     expect.objectContaining({ field: 'body' }),
   ]))
+})
+
+test('requires a source-of-truth permission decision for Workspace-scoped documents', async () => {
+  const document = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'document',
+    entityId: 'document-1',
+    title: 'Private strategy',
+    body: 'Confidential workspace notes',
+    url: '/documents/document-1',
+  })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([document]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const input = {
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set<string>(),
+      teamIds: new Set<string>(),
+    },
+  }
+
+  const withoutResolver = await client.search(input)
+  const denied = await client.search({
+    ...input,
+    resolveCurrentScope: async () => undefined,
+  })
+  const allowed = await client.search({
+    ...input,
+    resolveCurrentScope: async () => ({
+      permissionVerified: true,
+      currentDocument: document,
+    }),
+  })
+
+  expect(withoutResolver.results).toEqual([])
+  expect(denied.results).toEqual([])
+  expect(allowed.results.map((result) => result.id)).toEqual(['document-1'])
 })
 
 test('fails closed for a stale search document even for a system administrator', async () => {
@@ -268,6 +443,170 @@ test('resolves current scopes with bounded concurrency and preserves result orde
   expect(response.results.map((result) => result.id)).toEqual(
     documents.map((document) => document.entityId),
   )
+})
+
+test('prefilters immutable entity types before current access resolution', async () => {
+  const excludedDocuments = Array.from(
+    { length: 40 },
+    (_, index) =>
+      createWorkspaceSearchDocument({
+        workspaceId: 'workspace-1',
+        entityType: 'document',
+        entityId: `document-${index}`,
+        title: `Document ${index}`,
+        url: `/documents/document-${index}`,
+        creatorUserId: 'author@example.com',
+        createdAt:
+          '2026-07-18T00:00:00.000Z',
+        updatedAt:
+          '2026-07-18T00:00:00.000Z',
+        sourceRevision: 1,
+      }),
+  )
+  const includedComment =
+    createWorkspaceSearchDocument({
+      workspaceId: 'workspace-1',
+      entityType: 'comment',
+      entityId:
+        'team/core/issue/issue-1/comment/comment-1',
+      parentId:
+        'team/core/issue/issue-1',
+      title: 'Matching comment',
+      url:
+        '/teams/core/issues?issueId=issue-1&commentId=comment-1',
+      teamId: 'core',
+    })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([
+      ...excludedDocuments,
+      includedComment,
+    ]),
+    {} as DynamoDBClient,
+    false,
+  )
+  let resolverCalls = 0
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    filters: {
+      entityTypes: ['comment'],
+    },
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set<string>(),
+      teamIds: new Set(['core']),
+    },
+    resolveCurrentScope: async (document) => {
+      resolverCalls += 1
+      return {
+        teamId: document.teamId,
+      }
+    },
+  })
+
+  expect(resolverCalls).toBe(1)
+  expect(response.results.map(({ id }) => id))
+    .toEqual([includedComment.entityId])
+})
+
+test('continues Document access resolution beyond thirty denied candidates', async () => {
+  const documents = Array.from(
+    { length: 40 },
+    (_, index) =>
+      createWorkspaceSearchDocument({
+        workspaceId: 'workspace-1',
+        entityType: 'document',
+        entityId:
+          `document-${String(index).padStart(2, '0')}`,
+        title: `Document ${index}`,
+        url: `/documents/document-${index}`,
+        updatedAt:
+          '2026-07-18T00:00:00.000Z',
+        sourceRevision: 1,
+      }),
+  ).sort((left, right) =>
+    left.recordKey.localeCompare(
+      right.recordKey,
+    )
+  )
+  const laterDocument = documents.at(-1)
+  if (laterDocument === undefined) {
+    throw new Error(
+      'Expected a later search document.',
+    )
+  }
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient(documents),
+    {} as DynamoDBClient,
+    false,
+  )
+  let resolverCalls = 0
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    limit: 1,
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set<string>(),
+      teamIds: new Set<string>(),
+    },
+    resolveCurrentScope: async (document) => {
+      resolverCalls += 1
+      return document.entityId ===
+        laterDocument.entityId
+        ? { permissionVerified: true }
+        : undefined
+    },
+  })
+
+  expect(resolverCalls).toBe(40)
+  expect(response.results.map(({ id }) => id))
+    .toEqual([laterDocument.entityId])
+})
+
+test('stops source-of-truth resolution after a small result page is full', async () => {
+  const documents = Array.from(
+    { length: 100 },
+    (_, index) => createWorkspaceSearchDocument({
+      workspaceId: 'workspace-1',
+      entityType: 'work-item',
+      entityId:
+        `team/core/issue/issue-${String(index).padStart(3, '0')}`,
+      title: `Issue ${index}`,
+      url: `/teams/core/issues?issueId=issue-${index}`,
+      teamId: 'core',
+    }),
+  )
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient(documents),
+    {} as DynamoDBClient,
+    false,
+  )
+  let resolverCalls = 0
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    limit: 1,
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set(),
+      teamIds: new Set(['core']),
+    },
+    resolveCurrentScope: async () => {
+      resolverCalls += 1
+      return { teamId: 'core' }
+    },
+  })
+
+  expect(response.results).toHaveLength(1)
+  expect(resolverCalls).toBeLessThanOrEqual(10)
+  expect(response.nextCursor).toBeString()
 })
 
 test('keeps unread saved views from advancing the cursor past unprocessed rows', async () => {

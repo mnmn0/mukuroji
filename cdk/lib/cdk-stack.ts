@@ -13,6 +13,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaDestinations from 'aws-cdk-lib/aws-lambda-destinations';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
@@ -818,6 +819,30 @@ export class CdkStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    const documentsTable = new dynamodb.Table(this, 'DocumentsTable', {
+      partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      timeToLiveAttribute: 'expiresAtEpoch',
+    });
+    const documentPublicShareTokenSecret = new secretsmanager.Secret(
+      this,
+      'DocumentPublicShareTokenSecret',
+      {
+        description:
+          'Server-only HMAC key for idempotent mukuroji public document links.',
+        generateSecretString: {
+          excludePunctuation: true,
+          passwordLength: 64,
+        },
+      },
+    );
+    documentPublicShareTokenSecret.applyRemovalPolicy(
+      cdk.RemovalPolicy.RETAIN,
+    );
+
     const collaborationTable = new dynamodb.Table(this, 'WorkItemCollaborationTable', {
       partitionKey: { name: 'entityKey', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
@@ -1103,6 +1128,9 @@ export class CdkStack extends cdk.Stack {
         AUTOMATION_TABLE_NAME: automationTable.tableName,
         AUTOMATION_WEBHOOK_SECRET_PREFIX: automationWebhookSecretPrefix,
         COLLABORATION_TABLE_NAME: collaborationTable.tableName,
+        DOCUMENTS_TABLE_NAME: documentsTable.tableName,
+        DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET:
+          documentPublicShareTokenSecret.secretValue.unsafeUnwrap(),
         COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
@@ -1118,6 +1146,7 @@ export class CdkStack extends cdk.Stack {
         MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
         MUKUROJI_TEAM_ISSUES_TABLE: workItemsTable.tableName,
+        MUKUROJI_DOCUMENTS_TABLE: documentsTable.tableName,
         MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
         MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
         MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:
@@ -1185,17 +1214,18 @@ export class CdkStack extends cdk.Stack {
       },
     }));
 
-    legacyTasksTable.grantReadData(apiFunction);
-    workItemsTable.grantReadWriteData(apiFunction);
-    teamIssueEventsTable.grantReadWriteData(apiFunction);
-    projectDirectoryTable.grantReadWriteData(apiFunction);
-    auditEventsTable.grantReadWriteData(apiFunction);
-    workspaceAccessTable.grantReadWriteData(apiFunction);
-    collaborationTable.grantReadWriteData(apiFunction);
-    fileProofingTable.grantReadWriteData(apiFunction);
-    notificationsTable.grantReadWriteData(apiFunction);
-    workspaceSearchTable.grantReadWriteData(apiFunction);
-    realtimeSessionsTable.grantWriteData(apiFunction);
+    legacyTasksTable.grants.readData(apiFunction);
+    workItemsTable.grants.readWriteData(apiFunction);
+    teamIssueEventsTable.grants.readWriteData(apiFunction);
+    projectDirectoryTable.grants.readWriteData(apiFunction);
+    auditEventsTable.grants.readWriteData(apiFunction);
+    workspaceAccessTable.grants.readWriteData(apiFunction);
+    documentsTable.grants.readWriteData(apiFunction);
+    collaborationTable.grants.readWriteData(apiFunction);
+    fileProofingTable.grants.readWriteData(apiFunction);
+    notificationsTable.grants.readWriteData(apiFunction);
+    workspaceSearchTable.grants.readWriteData(apiFunction);
+    realtimeSessionsTable.grants.writeData(apiFunction);
     const apiAutomationDataPolicy = new iam.Policy(
       this,
       'ApiAutomationDataPolicy',
@@ -1257,6 +1287,7 @@ export class CdkStack extends cdk.Stack {
           projectDirectoryTable.tableArn,
           auditEventsTable.tableArn,
           workspaceAccessTable.tableArn,
+          documentsTable.tableArn,
           collaborationTable.tableArn,
           fileProofingTable.tableArn,
           workspaceSearchTable.tableArn,
@@ -1437,10 +1468,10 @@ export class CdkStack extends cdk.Stack {
       },
     );
 
-    realtimeSessionsTable.grantReadWriteData(realtimeFunction);
-    projectDirectoryTable.grantReadData(realtimeFunction);
-    workItemsTable.grantReadData(realtimeFunction);
-    workspaceAccessTable.grantReadData(realtimeFunction);
+    realtimeSessionsTable.grants.readWriteData(realtimeFunction);
+    projectDirectoryTable.grants.readData(realtimeFunction);
+    workItemsTable.grants.readData(realtimeFunction);
+    workspaceAccessTable.grants.readData(realtimeFunction);
     realtimeFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
@@ -1510,13 +1541,13 @@ export class CdkStack extends cdk.Stack {
       }),
     );
     auditEventsTable.grantStreamRead(collaborationProjectionFunction);
-    collaborationTable.grantReadData(collaborationProjectionFunction);
-    notificationsTable.grantReadWriteData(collaborationProjectionFunction);
-    processedAuditEventsTable.grantReadWriteData(collaborationProjectionFunction);
-    projectDirectoryTable.grantReadData(collaborationProjectionFunction);
-    realtimeSessionsTable.grantReadWriteData(collaborationProjectionFunction);
-    workItemsTable.grantReadData(collaborationProjectionFunction);
-    workspaceAccessTable.grantReadData(collaborationProjectionFunction);
+    collaborationTable.grants.readData(collaborationProjectionFunction);
+    notificationsTable.grants.readWriteData(collaborationProjectionFunction);
+    processedAuditEventsTable.grants.readWriteData(collaborationProjectionFunction);
+    projectDirectoryTable.grants.readData(collaborationProjectionFunction);
+    realtimeSessionsTable.grants.readWriteData(collaborationProjectionFunction);
+    workItemsTable.grants.readData(collaborationProjectionFunction);
+    workspaceAccessTable.grants.readData(collaborationProjectionFunction);
     collaborationProjectionFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:GetItem', 'dynamodb:Query'],
@@ -1628,15 +1659,15 @@ export class CdkStack extends cdk.Stack {
       }),
     );
     auditEventsTable.grantStreamRead(automationEventFunction);
-    automationTable.grantReadWriteData(automationEventFunction);
-    auditEventsTable.grantReadWriteData(automationEventFunction);
-    fileProofingTable.grantReadWriteData(automationEventFunction);
-    projectDirectoryTable.grantReadData(automationEventFunction);
-    teamIssueEventsTable.grantReadWriteData(automationEventFunction);
-    workItemsTable.grantReadWriteData(automationEventFunction);
-    workspaceSearchTable.grantReadWriteData(automationEventFunction);
-    workItemConfigurationTable.grantReadData(automationEventFunction);
-    workspaceAccessTable.grantReadData(automationEventFunction);
+    automationTable.grants.readWriteData(automationEventFunction);
+    auditEventsTable.grants.readWriteData(automationEventFunction);
+    fileProofingTable.grants.readWriteData(automationEventFunction);
+    projectDirectoryTable.grants.readData(automationEventFunction);
+    teamIssueEventsTable.grants.readWriteData(automationEventFunction);
+    workItemsTable.grants.readWriteData(automationEventFunction);
+    workspaceSearchTable.grants.readWriteData(automationEventFunction);
+    workItemConfigurationTable.grants.readData(automationEventFunction);
+    workspaceAccessTable.grants.readData(automationEventFunction);
     if (!automationEventFunction.role) {
       throw new Error('Automation event Lambda execution role was not created.');
     }
@@ -1736,15 +1767,15 @@ export class CdkStack extends cdk.Stack {
         },
       },
     );
-    automationTable.grantReadWriteData(automationScheduleFunction);
-    auditEventsTable.grantReadWriteData(automationScheduleFunction);
-    fileProofingTable.grantReadWriteData(automationScheduleFunction);
-    projectDirectoryTable.grantReadData(automationScheduleFunction);
-    teamIssueEventsTable.grantReadWriteData(automationScheduleFunction);
-    workItemsTable.grantReadWriteData(automationScheduleFunction);
-    workspaceSearchTable.grantReadWriteData(automationScheduleFunction);
-    workItemConfigurationTable.grantReadData(automationScheduleFunction);
-    workspaceAccessTable.grantReadData(automationScheduleFunction);
+    automationTable.grants.readWriteData(automationScheduleFunction);
+    auditEventsTable.grants.readWriteData(automationScheduleFunction);
+    fileProofingTable.grants.readWriteData(automationScheduleFunction);
+    projectDirectoryTable.grants.readData(automationScheduleFunction);
+    teamIssueEventsTable.grants.readWriteData(automationScheduleFunction);
+    workItemsTable.grants.readWriteData(automationScheduleFunction);
+    workspaceSearchTable.grants.readWriteData(automationScheduleFunction);
+    workItemConfigurationTable.grants.readData(automationScheduleFunction);
+    workspaceAccessTable.grants.readData(automationScheduleFunction);
     if (!automationScheduleFunction.role) {
       throw new Error('Automation schedule Lambda execution role was not created.');
     }
@@ -1946,8 +1977,8 @@ export class CdkStack extends cdk.Stack {
         },
       },
     );
-    workItemsTable.grantReadData(notificationScheduleFunction);
-    auditEventsTable.grantWriteData(notificationScheduleFunction);
+    workItemsTable.grants.readData(notificationScheduleFunction);
+    auditEventsTable.grants.writeData(notificationScheduleFunction);
 
     new cloudwatch.Alarm(this, 'NotificationScheduleDlqAlarm', {
       alarmDescription:
@@ -2317,6 +2348,7 @@ export class CdkStack extends cdk.Stack {
       value: processedAuditEventsTable.tableName,
     });
     new cdk.CfnOutput(this, 'WorkspaceAccessTableName', { value: workspaceAccessTable.tableName });
+    new cdk.CfnOutput(this, 'DocumentsTableName', { value: documentsTable.tableName });
     new cdk.CfnOutput(this, 'WorkItemCollaborationTableName', {
       value: collaborationTable.tableName,
     });
