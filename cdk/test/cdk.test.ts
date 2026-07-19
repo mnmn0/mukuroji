@@ -8,7 +8,7 @@ import { CdkStack } from '../lib/cdk-stack';
  */
 function createTemplate() {
   const app = new cdk.App();
-  const stack = new CdkStack(app, 'TestStack');
+  const stack = new CdkStack(app, 'Test');
 
   return Template.fromStack(stack);
 }

@@ -35,6 +35,6 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",
-    "oxlint": "^1.69.0"
+    "oxlint": "^1.70.0"
   }
 }
