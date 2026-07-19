@@ -13,6 +13,12 @@
     "floci:down": "docker compose down",
     "oxc:lint": "oxlint .",
     "oxc:lint:github": "oxlint . --format=github",
+    "typecheck:contracts": "tsc -p contracts/tsconfig.json --noEmit --pretty false",
+    "typecheck:server": "tsc -p server/tsconfig.typecheck.json --noEmit --pretty false",
+    "typecheck": "bun run typecheck:contracts && bun run typecheck:server && bun run web:build && bun run cdk:build",
+    "dependencies:check": "depcruise --validate --output-type err server/src web/src cdk/lib cdk/bin contracts/src",
+    "knip:check": "knip --reporter compact --include files,dependencies,unlisted,binaries,unresolved,catalog",
+    "cdk:nag": "bun --filter cdk nag",
     "web:dev": "bun --filter web dev",
     "web:lint": "bun --filter web lint",
     "web:test": "bun --filter web test",
@@ -35,7 +41,10 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",
+    "dependency-cruiser": "^18.1.0",
+    "knip": "^6.27.0",
     "oxlint": "^1.70.0",
-    "oxlint-plugin-awscdk": "^0.1.3"
+    "oxlint-plugin-awscdk": "^0.1.3",
+    "typescript": "^6.0.3"
   }
 }

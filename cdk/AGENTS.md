@@ -27,12 +27,14 @@
 bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
+bun run cdk:nag
 bun run oxc:lint
 ```
 
 - `cdk:build`: CDK TypeScript の型チェック・コンパイル。
 - `cdk:test`: Jest による Construct / Stack テスト。
 - `cdk:synth`: CloudFormation template の合成。生成物の差分を確認する。
+- `cdk:nag`: `cdk-nag` の AWS Solutions ルールで合成対象のセキュリティ指摘を検査する。
 - `oxc:lint`: ルートの Oxlint を実行する。`cdk/**/*.ts` には
   `oxlint-plugin-awscdk` の推奨ルールが適用される。
 - `cdk.out/` は生成物であり、コミットしない。

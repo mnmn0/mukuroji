@@ -1,0 +1,32 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignore": [
+    "**/*.d.ts",
+    "**/*.js",
+    "cdk.out/**",
+    "coverage/**",
+    "dist/**",
+    "storybook-static/**",
+    "web/dist/**",
+    "web/storybook-static/**",
+    "web/src/work-items/index.ts"
+  ],
+  "workspaces": {
+    ".": {
+      "entry": ["playwright.config.ts", "scripts/**/*.ts"]
+    },
+    "contracts": {
+      "entry": ["src/index.ts"]
+    },
+    "web": {
+      "entry": ["src/main.tsx", "vite.config.ts", "src/**/*.stories.tsx"]
+    },
+    "server": {
+      "entry": ["src/index.ts", "src/*-handler.ts", "scripts/**/*.ts"]
+    },
+    "cdk": {
+      "entry": ["bin/cdk.ts", "scripts/cdk-nag.ts", "test/**/*.test.ts", "lib/cdk-stack.ts"],
+      "ignoreDependencies": ["esbuild"]
+    }
+  }
+}

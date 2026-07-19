@@ -2056,6 +2056,7 @@ export class CdkStack extends cdk.Stack {
 
     const collaborationProjectionDlq = new sqs.Queue(this, 'CollaborationProjectionDlq', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
       retentionPeriod: cdk.Duration.days(14),
     });
     const collaborationProjectionFunction = new lambdaNodejs.NodejsFunction(
@@ -2192,6 +2193,7 @@ export class CdkStack extends cdk.Stack {
 
     const automationEventDlq = new sqs.Queue(this, 'AutomationEventDlq', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
       retentionPeriod: cdk.Duration.days(14),
     });
     const automationEventFunction = new lambdaNodejs.NodejsFunction(
@@ -2309,6 +2311,7 @@ export class CdkStack extends cdk.Stack {
 
     const automationScheduleDlq = new sqs.Queue(this, 'AutomationScheduleDlq', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
       retentionPeriod: cdk.Duration.days(14),
     });
     const automationScheduleFunction = new lambdaNodejs.NodejsFunction(
@@ -2863,6 +2866,7 @@ export class CdkStack extends cdk.Stack {
 
     const analyticsScheduleDlq = new sqs.Queue(this, 'AnalyticsScheduleDlq', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
       retentionPeriod: cdk.Duration.days(14),
     });
     const analyticsScheduleFunction = new lambdaNodejs.NodejsFunction(
@@ -2964,6 +2968,7 @@ export class CdkStack extends cdk.Stack {
 
     const notificationScheduleDlq = new sqs.Queue(this, 'NotificationScheduleDlq', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
       retentionPeriod: cdk.Duration.days(14),
     });
     const notificationScheduleFunction = new lambdaNodejs.NodejsFunction(
@@ -3020,6 +3025,7 @@ export class CdkStack extends cdk.Stack {
 
     const requestEmailIngestionDlq = new sqs.Queue(this, 'RequestEmailIngestionDlq', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       retentionPeriod: cdk.Duration.days(14),
     });
