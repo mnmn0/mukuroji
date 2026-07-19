@@ -105,6 +105,29 @@ previous の両方で origin marker の検証が成功することを確認し�
 
 更新後は設定確認用の再認証を行い、`ConnectorSyncDlqUrl`、`ConnectorPollDlqUrl`、queue age alarm、provider 側 callback error を監視します。CloudFormation parameter は `{}` のまま維持し、通常 deploy で手動更新した current secret version を戻さないでください。
 
+## Connector poll DLQ recovery
+
+`ConnectorPollDlq` は自動 redrive consumer を持たない、operator inspection 用の
+共有 failure sink です。EventBridge が poll Lambda を invoke できなかった場合と、
+invoke 後の Lambda が非同期 retry を使い切った場合の両方を保持するため、
+message をそのまま Function や EventBridge へ再投入しないでください。
+
+- EventBridge delivery failure は元の scheduled event が body に入り、
+  `ERROR_CODE`、`ERROR_MESSAGE`、`RULE_ARN`、`TARGET_ARN` などが SQS message
+  attribute に入ります。
+- Lambda async failure は body の `requestContext`、`requestPayload`、
+  `responseContext`、`responsePayload` で識別します。
+
+Alarm 発生時は account、region、stack、message attribute と body を保全し、
+EventBridge の invoke 権限、Lambda runtime error、Developer Platform table、
+Connector sync queue の状態を先に修正します。その後
+`ConnectorPollFunction` を空の event `{}` で同期 invokeし、成功と
+`ConnectorSyncQueue` への bounded job enqueue を確認します。Poll は global
+inventory と checkpoint により冪等に再開できるため、次の定期実行が成功したことも
+確認してから元 message を receipt handle で削除します。形式が上記どちらにも一致
+しない message や原因を確認できない message は削除せず、運用責任者へ
+エスカレーションします。
+
 ## Connector disconnect recovery
 
 Connector disconnect は `AuditEventsTable` の pending outbox から共有

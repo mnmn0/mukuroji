@@ -14,6 +14,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaDestinations from 'aws-cdk-lib/aws-lambda-destinations';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
@@ -69,6 +70,26 @@ const ownerProjectIds = ['refero', 'product-roadmap', 'shared-launch', 'brand-re
  * 冪等 bootstrap row に使用する決定的な timestamp です。
  */
 const workspaceBootstrapTimestamp = '2026-07-11T00:00:00.000Z';
+
+/**
+ * KMS grant を developer platform の envelope encryption context に限定します。
+ */
+function restrictKmsGrantToDeveloperPlatformPurpose(
+  grant: iam.Grant,
+  purpose: 'connector' | 'platform-state' | 'webhook',
+) {
+  for (const statement of [
+    ...grant.principalStatements,
+    ...grant.resourceStatements,
+  ]) {
+    statement.addConditions({
+      StringEquals: {
+        'kms:EncryptionContext:mukuroji:purpose': purpose,
+        'kms:EncryptionContext:mukuroji:service': 'developer-platform',
+      },
+    });
+  }
+}
 
 /**
  * Workspace access table の初期 metadata と owner を作成する transaction payload です。
@@ -892,6 +913,7 @@ export class CdkStack extends cdk.Stack {
       partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       timeToLiveAttribute: 'expiresAt',
@@ -1151,6 +1173,23 @@ export class CdkStack extends cdk.Stack {
       versioned: true,
     });
 
+    const workItemImportAccessLogsBucket = new s3.Bucket(
+      this,
+      'WorkItemImportAccessLogsBucket',
+      {
+        blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+        encryption: s3.BucketEncryption.S3_MANAGED,
+        enforceSSL: true,
+        lifecycleRules: [{
+          expiration: cdk.Duration.days(90),
+          id: 'ExpireImportAccessLogs',
+          noncurrentVersionExpiration: cdk.Duration.days(90),
+        }],
+        objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        versioned: true,
+      },
+    );
     const workItemImportBucket = new s3.Bucket(this, 'WorkItemImportBucket', {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
@@ -1172,6 +1211,8 @@ export class CdkStack extends cdk.Stack {
       ],
       objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+      serverAccessLogsBucket: workItemImportAccessLogsBucket,
+      serverAccessLogsPrefix: 'work-item-import/',
       versioned: true,
     });
 
@@ -1340,6 +1381,8 @@ export class CdkStack extends cdk.Stack {
 
     const webhookDeliveryDlq = new sqs.Queue(this, 'WebhookDeliveryDlq', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
       retentionPeriod: cdk.Duration.days(14),
     });
     const webhookDeliveryQueue = new sqs.Queue(this, 'WebhookDeliveryQueue', {
@@ -1348,11 +1391,15 @@ export class CdkStack extends cdk.Stack {
         queue: webhookDeliveryDlq,
       },
       encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
       retentionPeriod: cdk.Duration.days(14),
-      visibilityTimeout: cdk.Duration.minutes(2),
+      visibilityTimeout: cdk.Duration.minutes(3),
     });
     const workItemImportDlq = new sqs.Queue(this, 'WorkItemImportDlq', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
       retentionPeriod: cdk.Duration.days(14),
     });
     const workItemImportQueue = new sqs.Queue(this, 'WorkItemImportQueue', {
@@ -1361,15 +1408,21 @@ export class CdkStack extends cdk.Stack {
         queue: workItemImportDlq,
       },
       encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
       retentionPeriod: cdk.Duration.days(14),
       visibilityTimeout: cdk.Duration.minutes(90),
     });
     const connectorSyncDlq = new sqs.Queue(this, 'ConnectorSyncDlq', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
       retentionPeriod: cdk.Duration.days(14),
     });
     const connectorPollDlq = new sqs.Queue(this, 'ConnectorPollDlq', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
       retentionPeriod: cdk.Duration.days(14),
     });
     const connectorSyncQueue = new sqs.Queue(this, 'ConnectorSyncQueue', {
@@ -1378,8 +1431,10 @@ export class CdkStack extends cdk.Stack {
         queue: connectorSyncDlq,
       },
       encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
       retentionPeriod: cdk.Duration.days(14),
-      visibilityTimeout: cdk.Duration.minutes(6),
+      visibilityTimeout: cdk.Duration.minutes(30),
     });
 
     const apiFunction = new lambdaNodejs.NodejsFunction(this, 'ListProjectTasksFunction', {
@@ -1500,17 +1555,17 @@ export class CdkStack extends cdk.Stack {
       },
     }));
 
-    legacyTasksTable.grantReadData(apiFunction);
-    workItemsTable.grantReadWriteData(apiFunction);
-    teamIssueEventsTable.grantReadWriteData(apiFunction);
-    projectDirectoryTable.grantReadWriteData(apiFunction);
-    auditEventsTable.grantReadWriteData(apiFunction);
-    workspaceAccessTable.grantReadWriteData(apiFunction);
-    collaborationTable.grantReadWriteData(apiFunction);
-    fileProofingTable.grantReadWriteData(apiFunction);
-    notificationsTable.grantReadWriteData(apiFunction);
-    workspaceSearchTable.grantReadWriteData(apiFunction);
-    realtimeSessionsTable.grantWriteData(apiFunction);
+    legacyTasksTable.grants.readData(apiFunction);
+    workItemsTable.grants.readWriteData(apiFunction);
+    teamIssueEventsTable.grants.readWriteData(apiFunction);
+    projectDirectoryTable.grants.readWriteData(apiFunction);
+    auditEventsTable.grants.readWriteData(apiFunction);
+    workspaceAccessTable.grants.readWriteData(apiFunction);
+    collaborationTable.grants.readWriteData(apiFunction);
+    fileProofingTable.grants.readWriteData(apiFunction);
+    notificationsTable.grants.readWriteData(apiFunction);
+    workspaceSearchTable.grants.readWriteData(apiFunction);
+    realtimeSessionsTable.grants.writeData(apiFunction);
     const apiAutomationDataPolicy = new iam.Policy(
       this,
       'ApiAutomationDataPolicy',
@@ -1575,7 +1630,6 @@ export class CdkStack extends cdk.Stack {
           collaborationTable.tableArn,
           fileProofingTable.tableArn,
           workspaceSearchTable.tableArn,
-          developerPlatformTable.tableArn,
           analyticsTable.tableArn,
         ],
       })],
@@ -1587,15 +1641,19 @@ export class CdkStack extends cdk.Stack {
         statements: [
           new iam.PolicyStatement({
             actions: [
+              'dynamodb:ConditionCheckItem',
               'dynamodb:DeleteItem',
               'dynamodb:GetItem',
               'dynamodb:PutItem',
               'dynamodb:Query',
               'dynamodb:UpdateItem',
             ],
+            resources: [developerPlatformTable.tableArn],
+          }),
+          new iam.PolicyStatement({
+            actions: ['dynamodb:Query'],
             resources: [
-              developerPlatformTable.tableArn,
-              `${developerPlatformTable.tableArn}/index/*`,
+              `${developerPlatformTable.tableArn}/index/LookupKeyIndex`,
             ],
           }),
           new iam.PolicyStatement({
@@ -1615,19 +1673,41 @@ export class CdkStack extends cdk.Stack {
       this,
       'ApiDeveloperPlatformKmsPolicy',
       {
-        statements: [new iam.PolicyStatement({
-          actions: [
-            'kms:Decrypt',
-            'kms:Encrypt',
-            'kms:GenerateDataKey*',
-            'kms:ReEncrypt*',
-          ],
-          resources: [
-            developerPlatformWebhookKey.keyArn,
-            developerPlatformConnectorKey.keyArn,
-            developerPlatformStateKey.keyArn,
-          ],
-        })],
+        statements: [
+          new iam.PolicyStatement({
+            actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
+            resources: [developerPlatformWebhookKey.keyArn],
+            conditions: {
+              StringEquals: {
+                'kms:EncryptionContext:mukuroji:purpose': 'webhook',
+                'kms:EncryptionContext:mukuroji:service':
+                  'developer-platform',
+              },
+            },
+          }),
+          new iam.PolicyStatement({
+            actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
+            resources: [developerPlatformConnectorKey.keyArn],
+            conditions: {
+              StringEquals: {
+                'kms:EncryptionContext:mukuroji:purpose': 'connector',
+                'kms:EncryptionContext:mukuroji:service':
+                  'developer-platform',
+              },
+            },
+          }),
+          new iam.PolicyStatement({
+            actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
+            resources: [developerPlatformStateKey.keyArn],
+            conditions: {
+              StringEquals: {
+                'kms:EncryptionContext:mukuroji:purpose': 'platform-state',
+                'kms:EncryptionContext:mukuroji:service':
+                  'developer-platform',
+              },
+            },
+          }),
+        ],
       },
     ));
     const apiPlanningDataPolicy = new iam.Policy(this, 'ApiPlanningDataPolicy', {
@@ -1728,6 +1808,14 @@ export class CdkStack extends cdk.Stack {
       }),
     );
 
+    const workItemImportLogGroup = new logs.LogGroup(
+      this,
+      'WorkItemImportLogGroup',
+      {
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        retention: logs.RetentionDays.THREE_MONTHS,
+      },
+    );
     const workItemImportFunction = new lambdaNodejs.NodejsFunction(
       this,
       'WorkItemImportFunction',
@@ -1740,6 +1828,7 @@ export class CdkStack extends cdk.Stack {
         timeout: cdk.Duration.minutes(15),
         memorySize: 1024,
         description: 'Processes durable Work Item imports with resumable row receipts.',
+        logGroup: workItemImportLogGroup,
         bundling: {
           bundleAwsSDK: true,
           minify: true,
@@ -1778,25 +1867,15 @@ export class CdkStack extends cdk.Stack {
         reportBatchItemFailures: true,
       }),
     );
-    workItemImportQueue.grantConsumeMessages(workItemImportFunction);
-    developerPlatformTable.grantReadWriteData(workItemImportFunction);
-    workItemsTable.grantReadWriteData(workItemImportFunction);
-    teamIssueEventsTable.grantReadWriteData(workItemImportFunction);
-    auditEventsTable.grantReadWriteData(workItemImportFunction);
-    projectDirectoryTable.grantReadData(workItemImportFunction);
-    workspaceAccessTable.grantReadData(workItemImportFunction);
-    workItemConfigurationTable.grantReadData(workItemImportFunction);
-    workspaceSearchTable.grantReadWriteData(workItemImportFunction);
-    workItemImportFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['dynamodb:TransactWriteItems'],
-      resources: [
-        auditEventsTable.tableArn,
-        developerPlatformTable.tableArn,
-        teamIssueEventsTable.tableArn,
-        workItemConfigurationTable.tableArn,
-        workItemsTable.tableArn,
-      ],
-    }));
+    workItemImportQueue.grants.consumeMessages(workItemImportFunction);
+    developerPlatformTable.grants.readWriteData(workItemImportFunction);
+    workItemsTable.grants.readWriteData(workItemImportFunction);
+    teamIssueEventsTable.grants.readWriteData(workItemImportFunction);
+    auditEventsTable.grants.readWriteData(workItemImportFunction);
+    projectDirectoryTable.grants.readData(workItemImportFunction);
+    workspaceAccessTable.grants.readData(workItemImportFunction);
+    workItemConfigurationTable.grants.readData(workItemImportFunction);
+    workspaceSearchTable.grants.readWriteData(workItemImportFunction);
     workItemImportFunction.addToRolePolicy(new iam.PolicyStatement({
       actions: [
         's3:DeleteObjectVersion',
@@ -1925,10 +2004,10 @@ export class CdkStack extends cdk.Stack {
       },
     );
 
-    realtimeSessionsTable.grantReadWriteData(realtimeFunction);
-    projectDirectoryTable.grantReadData(realtimeFunction);
-    workItemsTable.grantReadData(realtimeFunction);
-    workspaceAccessTable.grantReadData(realtimeFunction);
+    realtimeSessionsTable.grants.readWriteData(realtimeFunction);
+    projectDirectoryTable.grants.readData(realtimeFunction);
+    workItemsTable.grants.readData(realtimeFunction);
+    workspaceAccessTable.grants.readData(realtimeFunction);
     realtimeFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
@@ -1972,8 +2051,6 @@ export class CdkStack extends cdk.Stack {
           COLLABORATION_TABLE_NAME: collaborationTable.tableName,
           CONNECTOR_SYNC_QUEUE_URL: connectorSyncQueue.queueUrl,
           COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
-          DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
-          DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
           FILE_BUCKET_NAME: fileBucket.bucketName,
           FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
           NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
@@ -2019,13 +2096,13 @@ export class CdkStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     auditEventsTable.grantStreamRead(collaborationProjectionFunction);
-    collaborationTable.grantReadData(collaborationProjectionFunction);
-    notificationsTable.grantReadWriteData(collaborationProjectionFunction);
-    processedAuditEventsTable.grantReadWriteData(collaborationProjectionFunction);
-    projectDirectoryTable.grantReadData(collaborationProjectionFunction);
-    realtimeSessionsTable.grantReadWriteData(collaborationProjectionFunction);
-    workItemsTable.grantReadData(collaborationProjectionFunction);
-    workspaceAccessTable.grantReadData(collaborationProjectionFunction);
+    collaborationTable.grants.readData(collaborationProjectionFunction);
+    notificationsTable.grants.readWriteData(collaborationProjectionFunction);
+    processedAuditEventsTable.grants.readWriteData(collaborationProjectionFunction);
+    projectDirectoryTable.grants.readData(collaborationProjectionFunction);
+    realtimeSessionsTable.grants.readWriteData(collaborationProjectionFunction);
+    workItemsTable.grants.readData(collaborationProjectionFunction);
+    workspaceAccessTable.grants.readData(collaborationProjectionFunction);
     collaborationProjectionFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:GetItem', 'dynamodb:Query'],
@@ -2070,20 +2147,7 @@ export class CdkStack extends cdk.Stack {
     collaborationProjectionFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['dynamodb:TransactWriteItems'],
-        resources: [
-          developerPlatformTable.tableArn,
-          notificationsTable.tableArn,
-          processedAuditEventsTable.tableArn,
-        ],
-      }),
-    );
-    collaborationProjectionFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['dynamodb:GetItem', 'dynamodb:Query'],
-        resources: [
-          developerPlatformTable.tableArn,
-          `${developerPlatformTable.tableArn}/index/LookupKeyIndex`,
-        ],
+        resources: [notificationsTable.tableArn, processedAuditEventsTable.tableArn],
       }),
     );
     collaborationProjectionFunction.addToRolePolicy(
@@ -2092,8 +2156,8 @@ export class CdkStack extends cdk.Stack {
         resources: [cognitoUserPoolArn],
       }),
     );
-    connectorSyncQueue.grantSendMessages(collaborationProjectionFunction);
-    webhookDeliveryQueue.grantSendMessages(collaborationProjectionFunction);
+    connectorSyncQueue.grants.sendMessages(collaborationProjectionFunction);
+    webhookDeliveryQueue.grants.sendMessages(collaborationProjectionFunction);
     realtimeWebSocketStage.grantManagementApiAccess(collaborationProjectionFunction);
 
     const automationEventDlq = new sqs.Queue(this, 'AutomationEventDlq', {
@@ -2153,15 +2217,15 @@ export class CdkStack extends cdk.Stack {
       }),
     );
     auditEventsTable.grantStreamRead(automationEventFunction);
-    automationTable.grantReadWriteData(automationEventFunction);
-    auditEventsTable.grantReadWriteData(automationEventFunction);
-    fileProofingTable.grantReadWriteData(automationEventFunction);
-    projectDirectoryTable.grantReadData(automationEventFunction);
-    teamIssueEventsTable.grantReadWriteData(automationEventFunction);
-    workItemsTable.grantReadWriteData(automationEventFunction);
-    workspaceSearchTable.grantReadWriteData(automationEventFunction);
-    workItemConfigurationTable.grantReadData(automationEventFunction);
-    workspaceAccessTable.grantReadData(automationEventFunction);
+    automationTable.grants.readWriteData(automationEventFunction);
+    auditEventsTable.grants.readWriteData(automationEventFunction);
+    fileProofingTable.grants.readWriteData(automationEventFunction);
+    projectDirectoryTable.grants.readData(automationEventFunction);
+    teamIssueEventsTable.grants.readWriteData(automationEventFunction);
+    workItemsTable.grants.readWriteData(automationEventFunction);
+    workspaceSearchTable.grants.readWriteData(automationEventFunction);
+    workItemConfigurationTable.grants.readData(automationEventFunction);
+    workspaceAccessTable.grants.readData(automationEventFunction);
     if (!automationEventFunction.role) {
       throw new Error('Automation event Lambda execution role was not created.');
     }
@@ -2262,15 +2326,15 @@ export class CdkStack extends cdk.Stack {
         },
       },
     );
-    automationTable.grantReadWriteData(automationScheduleFunction);
-    auditEventsTable.grantReadWriteData(automationScheduleFunction);
-    fileProofingTable.grantReadWriteData(automationScheduleFunction);
-    projectDirectoryTable.grantReadData(automationScheduleFunction);
-    teamIssueEventsTable.grantReadWriteData(automationScheduleFunction);
-    workItemsTable.grantReadWriteData(automationScheduleFunction);
-    workspaceSearchTable.grantReadWriteData(automationScheduleFunction);
-    workItemConfigurationTable.grantReadData(automationScheduleFunction);
-    workspaceAccessTable.grantReadData(automationScheduleFunction);
+    automationTable.grants.readWriteData(automationScheduleFunction);
+    auditEventsTable.grants.readWriteData(automationScheduleFunction);
+    fileProofingTable.grants.readWriteData(automationScheduleFunction);
+    projectDirectoryTable.grants.readData(automationScheduleFunction);
+    teamIssueEventsTable.grants.readWriteData(automationScheduleFunction);
+    workItemsTable.grants.readWriteData(automationScheduleFunction);
+    workspaceSearchTable.grants.readWriteData(automationScheduleFunction);
+    workItemConfigurationTable.grants.readData(automationScheduleFunction);
+    workspaceAccessTable.grants.readData(automationScheduleFunction);
     if (!automationScheduleFunction.role) {
       throw new Error('Automation schedule Lambda execution role was not created.');
     }
@@ -2339,6 +2403,14 @@ export class CdkStack extends cdk.Stack {
       targets: [new eventsTargets.LambdaFunction(automationScheduleFunction)],
     });
 
+    const webhookAuthorizationBackfillLogGroup = new logs.LogGroup(
+      this,
+      'WebhookAuthorizationBackfillLogGroup',
+      {
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        retention: logs.RetentionDays.THREE_MONTHS,
+      },
+    );
     const webhookAuthorizationBackfillFunction = new lambdaNodejs.NodejsFunction(
       this,
       'WebhookAuthorizationBackfillFunction',
@@ -2355,6 +2427,7 @@ export class CdkStack extends cdk.Stack {
         memorySize: 512,
         description:
           'Starts the API, projection, and delivery drain before Webhook backfill.',
+        logGroup: webhookAuthorizationBackfillLogGroup,
         bundling: {
           bundleAwsSDK: true,
           minify: true,
@@ -2369,9 +2442,17 @@ export class CdkStack extends cdk.Stack {
         },
       },
     );
-    projectDirectoryTable.grantReadWriteData(webhookAuthorizationBackfillFunction);
-    developerPlatformTable.grantReadWriteData(
+    projectDirectoryTable.grants.readWriteData(webhookAuthorizationBackfillFunction);
+    developerPlatformTable.grants.readWriteData(
       webhookAuthorizationBackfillFunction,
+    );
+    const webhookAuthorizationBackfillProgressLogGroup = new logs.LogGroup(
+      this,
+      'WebhookAuthorizationBackfillProgressLogGroup',
+      {
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        retention: logs.RetentionDays.THREE_MONTHS,
+      },
     );
     const webhookAuthorizationBackfillProgressFunction =
       new lambdaNodejs.NodejsFunction(
@@ -2390,6 +2471,7 @@ export class CdkStack extends cdk.Stack {
           memorySize: 1024,
           description:
             'Drains old Webhook runtimes and processes checkpointed migration pages.',
+          logGroup: webhookAuthorizationBackfillProgressLogGroup,
           bundling: {
             bundleAwsSDK: true,
             minify: true,
@@ -2404,30 +2486,27 @@ export class CdkStack extends cdk.Stack {
           },
         },
       );
-    projectDirectoryTable.grantReadWriteData(
+    projectDirectoryTable.grants.readWriteData(
       webhookAuthorizationBackfillProgressFunction,
     );
-    developerPlatformTable.grantReadWriteData(
+    developerPlatformTable.grants.readWriteData(
       webhookAuthorizationBackfillProgressFunction,
     );
-    for (const backfillFunction of [
-      webhookAuthorizationBackfillFunction,
-      webhookAuthorizationBackfillProgressFunction,
-    ]) {
-      backfillFunction.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['dynamodb:TransactWriteItems'],
-        resources: [
-          developerPlatformTable.tableArn,
-          projectDirectoryTable.tableArn,
-        ],
-      }));
-    }
+    const webhookAuthorizationBackfillProviderLogGroup = new logs.LogGroup(
+      this,
+      'WebhookAuthorizationBackfillProviderLogGroup',
+      {
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        retention: logs.RetentionDays.THREE_MONTHS,
+      },
+    );
     const webhookAuthorizationBackfillProvider = new customResources.Provider(
       this,
       'WebhookAuthorizationBackfillProvider',
       {
         onEventHandler: webhookAuthorizationBackfillFunction,
         isCompleteHandler: webhookAuthorizationBackfillProgressFunction,
+        logGroup: webhookAuthorizationBackfillProviderLogGroup,
         queryInterval: cdk.Duration.seconds(1),
         totalTimeout: cdk.Duration.hours(1),
       },
@@ -2445,6 +2524,14 @@ export class CdkStack extends cdk.Stack {
       },
     );
 
+    const webhookDeliveryLogGroup = new logs.LogGroup(
+      this,
+      'WebhookDeliveryLogGroup',
+      {
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        retention: logs.RetentionDays.THREE_MONTHS,
+      },
+    );
     const webhookDeliveryFunction = new lambdaNodejs.NodejsFunction(
       this,
       'WebhookDeliveryFunction',
@@ -2457,6 +2544,7 @@ export class CdkStack extends cdk.Stack {
         timeout: cdk.Duration.seconds(30),
         memorySize: 512,
         description: 'Delivers signed Webhooks from the durable SQS queue.',
+        logGroup: webhookDeliveryLogGroup,
         bundling: {
           bundleAwsSDK: true,
           minify: true,
@@ -2492,42 +2580,39 @@ export class CdkStack extends cdk.Stack {
       }),
     );
     webhookDeliveryFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: [
-        'dynamodb:GetItem',
-        'dynamodb:Query',
-      ],
+      actions: ['dynamodb:GetItem'],
       resources: [
+        auditEventsTable.tableArn,
         developerPlatformTable.tableArn,
+        projectDirectoryTable.tableArn,
+        workspaceAccessTable.tableArn,
+      ],
+    }));
+    webhookDeliveryFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:Query'],
+      resources: [
         `${developerPlatformTable.tableArn}/index/LookupKeyIndex`,
+        projectDirectoryTable.tableArn,
       ],
     }));
     webhookDeliveryFunction.addToRolePolicy(new iam.PolicyStatement({
       actions: [
         'dynamodb:DeleteItem',
         'dynamodb:PutItem',
-        'dynamodb:TransactWriteItems',
         'dynamodb:UpdateItem',
       ],
       resources: [developerPlatformTable.tableArn],
     }));
     webhookDeliveryFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: [
-        'dynamodb:GetItem',
-        'dynamodb:Query',
-      ],
-      resources: [
-        projectDirectoryTable.tableArn,
-        workspaceAccessTable.tableArn,
-      ],
-    }));
-    webhookDeliveryFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['dynamodb:TransactWriteItems'],
+      actions: ['dynamodb:DeleteItem'],
       resources: [projectDirectoryTable.tableArn],
     }));
-    developerPlatformWebhookKey.grantDecrypt(webhookDeliveryFunction);
-    auditEventsTable.grantReadData(webhookDeliveryFunction);
-    webhookDeliveryQueue.grantConsumeMessages(webhookDeliveryFunction);
-    webhookDeliveryQueue.grantSendMessages(webhookDeliveryFunction);
+    restrictKmsGrantToDeveloperPlatformPurpose(
+      developerPlatformWebhookKey.grants.decrypt(webhookDeliveryFunction),
+      'webhook',
+    );
+    webhookDeliveryQueue.grants.consumeMessages(webhookDeliveryFunction);
+    webhookDeliveryQueue.grants.sendMessages(webhookDeliveryFunction);
 
     new cloudwatch.Alarm(this, 'WebhookDeliveryDlqAlarm', {
       alarmDescription:
@@ -2543,6 +2628,14 @@ export class CdkStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
+    const connectorSyncLogGroup = new logs.LogGroup(
+      this,
+      'ConnectorSyncLogGroup',
+      {
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        retention: logs.RetentionDays.THREE_MONTHS,
+      },
+    );
     const connectorSyncFunction = new lambdaNodejs.NodejsFunction(
       this,
       'ConnectorSyncFunction',
@@ -2556,6 +2649,7 @@ export class CdkStack extends cdk.Stack {
         memorySize: 1024,
         description:
           'Processes provider-neutral connector synchronization jobs with current Work Item RBAC.',
+        logGroup: connectorSyncLogGroup,
         bundling: {
           bundleAwsSDK: true,
           minify: true,
@@ -2598,30 +2692,33 @@ export class CdkStack extends cdk.Stack {
         reportBatchItemFailures: true,
       }),
     );
-    connectorSyncQueue.grantConsumeMessages(connectorSyncFunction);
-    connectorSyncQueue.grantSendMessages(connectorSyncFunction);
+    connectorSyncQueue.grants.consumeMessages(connectorSyncFunction);
+    connectorSyncQueue.grants.sendMessages(connectorSyncFunction);
     connectorRuntimeSecret.grantRead(connectorSyncFunction);
-    developerPlatformTable.grantReadWriteData(connectorSyncFunction);
-    workItemsTable.grantReadWriteData(connectorSyncFunction);
-    teamIssueEventsTable.grantReadWriteData(connectorSyncFunction);
-    auditEventsTable.grantReadWriteData(connectorSyncFunction);
-    projectDirectoryTable.grantReadData(connectorSyncFunction);
-    workspaceAccessTable.grantReadData(connectorSyncFunction);
-    workItemConfigurationTable.grantReadData(connectorSyncFunction);
-    workspaceSearchTable.grantReadWriteData(connectorSyncFunction);
-    developerPlatformConnectorKey.grantEncryptDecrypt(connectorSyncFunction);
-    developerPlatformStateKey.grantEncryptDecrypt(connectorSyncFunction);
-    connectorSyncFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['dynamodb:TransactWriteItems'],
-      resources: [
-        auditEventsTable.tableArn,
-        developerPlatformTable.tableArn,
-        teamIssueEventsTable.tableArn,
-        workItemConfigurationTable.tableArn,
-        workItemsTable.tableArn,
-        workspaceSearchTable.tableArn,
-      ],
-    }));
+    developerPlatformTable.grants.readWriteData(connectorSyncFunction);
+    workItemsTable.grants.readWriteData(connectorSyncFunction);
+    teamIssueEventsTable.grants.readWriteData(connectorSyncFunction);
+    auditEventsTable.grants.readWriteData(connectorSyncFunction);
+    projectDirectoryTable.grants.readData(connectorSyncFunction);
+    workspaceAccessTable.grants.readData(connectorSyncFunction);
+    workItemConfigurationTable.grants.readData(connectorSyncFunction);
+    workspaceSearchTable.grants.readWriteData(connectorSyncFunction);
+    restrictKmsGrantToDeveloperPlatformPurpose(
+      developerPlatformConnectorKey.grants.actions(
+        connectorSyncFunction,
+        'kms:Decrypt',
+        'kms:GenerateDataKey',
+      ),
+      'connector',
+    );
+    restrictKmsGrantToDeveloperPlatformPurpose(
+      developerPlatformStateKey.grants.actions(
+        connectorSyncFunction,
+        'kms:Decrypt',
+        'kms:GenerateDataKey',
+      ),
+      'platform-state',
+    );
     connectorSyncFunction.addToRolePolicy(new iam.PolicyStatement({
       actions: [
         'cognito-idp:AdminGetUser',
@@ -2630,6 +2727,14 @@ export class CdkStack extends cdk.Stack {
       resources: [cognitoUserPoolArn],
     }));
 
+    const connectorPollLogGroup = new logs.LogGroup(
+      this,
+      'ConnectorPollLogGroup',
+      {
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        retention: logs.RetentionDays.THREE_MONTHS,
+      },
+    );
     const connectorPollFunction = new lambdaNodejs.NodejsFunction(
       this,
       'ConnectorPollFunction',
@@ -2642,6 +2747,7 @@ export class CdkStack extends cdk.Stack {
         timeout: cdk.Duration.minutes(2),
         memorySize: 512,
         description: 'Schedules bounded polling jobs for connected provider installations.',
+        logGroup: connectorPollLogGroup,
         onFailure: new lambdaDestinations.SqsDestination(connectorPollDlq),
         retryAttempts: 2,
         bundling: {
@@ -2658,13 +2764,22 @@ export class CdkStack extends cdk.Stack {
         },
       },
     );
-    developerPlatformTable.grantReadData(connectorPollFunction);
     connectorPollFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['dynamodb:DeleteItem'],
+      actions: [
+        'dynamodb:DeleteItem',
+        'dynamodb:GetItem',
+      ],
       resources: [developerPlatformTable.tableArn],
     }));
-    connectorSyncQueue.grantSendMessages(connectorPollFunction);
+    connectorPollFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:Query'],
+      resources: [`${developerPlatformTable.tableArn}/index/LookupKeyIndex`],
+    }));
+    connectorSyncQueue.grants.sendMessages(connectorPollFunction);
 
+    // EventBridge delivery failures and exhausted Lambda async invocations share this
+    // operator-inspected DLQ. It has no automatic consumer, so both envelope formats
+    // remain intact for diagnosis and the alarm below covers either failure path.
     new events.Rule(this, 'ConnectorPollRule', {
       description: 'Schedules bounded connector polling for providers without push events.',
       schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
@@ -2850,8 +2965,8 @@ export class CdkStack extends cdk.Stack {
         },
       },
     );
-    workItemsTable.grantReadData(notificationScheduleFunction);
-    auditEventsTable.grantWriteData(notificationScheduleFunction);
+    workItemsTable.grants.readData(notificationScheduleFunction);
+    auditEventsTable.grants.writeData(notificationScheduleFunction);
 
     new cloudwatch.Alarm(this, 'NotificationScheduleDlqAlarm', {
       alarmDescription:
