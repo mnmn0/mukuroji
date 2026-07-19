@@ -48,6 +48,7 @@
 - `NotificationsTableName`, `CollaborationProjectionDlqUrl`, `NotificationScheduleDlqUrl`
 - `AuditEventsTableName`, `ProcessedAuditEventsTableName`
 - `EnterpriseIdentityMaintenanceDlqUrl`
+- `EnterpriseScimGroupJobFunctionName`, `EnterpriseScimGroupJobDlqUrl`
 - `EnterpriseIdentityTableName`（Workspace generation/`CONTROL` checkpoint、global domain claim、SSO/policy/role、SCIM projection、provisioning run の store。Enterprise Identity 専用 GSI は持ちません）
 - `WorkItemCollaborationTableName`, `RealtimeSessionsTableName`, `RealtimeWebSocketUrl`
 - `WorkspaceSearchTableName`（検索文書、saved view、ユーザー別 view preference）
@@ -359,6 +360,11 @@ aws dynamodb wait table-exists \
 - Function URL、HTTP API、Hono CORS は同じ `TaskApiAllowedOrigins` に揃えます。本番で local default を使いません。
 - Lambda IAM は stack table、`workspaces/` file object prefix、指定 user pool に限定します。API role に bucket-wide `ListBucket` は付与しません。
 - Email ingestion Lambda は HTTP route を持たず、Request Intake table と failure DLQ 以外の data-plane 権限を持ちません。
+- Enterprise SCIM group reconciliation は API Lambda と concurrency を共有しない専用 Lambda で実行します。
+  Worker は60秒 timeout、reserved concurrency 5、batch size 1で既存DLQへ失敗を送り、API Lambda は
+  Stream権限を持たず15秒 timeoutを維持します。Worker IAMはEnterprise Identity/Workspace Access/
+  Planning/Audit/Project Directoryの必要なGet/Query/transaction操作と、指定Cognito user poolの
+  enable/disable/global sign-outに限定します。
 - stack が管理するすべての DynamoDB table は `Retain` + PITR enabled です。Enterprise Identity
   table は deletion protection と `expiresAt` TTL を有効にし、Workspace partition と
   conditional domain claim で一意性を保ちます。Entity delta を generation ごとに staging し、
@@ -371,7 +377,9 @@ aws dynamodb wait table-exists \
   Request Intake table は `expiresAt`、Work Item configuration table は
   `expiresAtEpochSeconds` TTL も有効です。
 - File bucket は public access を遮断し、TLS / SSE-S3 / versioning / `Retain` / malware tag-based download deny を有効にします。
-- Lambda は `server/src/index.ts` を deploy 時に bundle します。旧 inline Lambda copy はありません。
+- API Lambda は `server/src/index.ts`、SCIM group worker は
+  `server/src/enterprise-scim-group-job-worker-handler.ts` を deploy 時に個別bundleします。旧 inline
+  Lambda copy はありません。
 
 ## Commands
 

@@ -3224,7 +3224,9 @@ function SecurityPrivilegedTab({
   onRequestRevokeServiceAccount: (account: EnterpriseServiceAccount) => void
   onRotateServiceAccount?: (account: EnterpriseServiceAccount) => Promise<void>
 }) {
-  const canManage = snapshot.capabilities.canManagePrivilegedAccess
+  const canManageServiceAccounts =
+    snapshot.capabilities.canManagePrivilegedAccess
+  const canManageBreakGlass = snapshot.capabilities.canManageBreakGlass
   const defaultServiceAccountScope =
     scopeOptions.find((scope) => scope.type === 'workspace') ??
     scopeOptions[0]
@@ -3279,7 +3281,7 @@ function SecurityPrivilegedTab({
     event.preventDefault()
 
     if (
-      !canManage ||
+      !canManageServiceAccounts ||
       !serviceAccountName.trim() ||
       !selectedServiceAccountRoleId ||
       !selectedServiceAccountScope ||
@@ -3319,7 +3321,7 @@ function SecurityPrivilegedTab({
     event.preventDefault()
     const email = breakGlassEmail.trim().toLowerCase()
 
-    if (!canManage || !email || !onRegisterBreakGlass || isBusy) {
+    if (!canManageBreakGlass || !email || !onRegisterBreakGlass || isBusy) {
       return
     }
 
@@ -3333,14 +3335,16 @@ function SecurityPrivilegedTab({
 
   return (
     <div className="grid gap-5" data-testid="security-privileged">
-      {!canManage ? <ReadOnlyNotice t={t} /> : null}
+      {!canManageServiceAccounts && !canManageBreakGlass
+        ? <ReadOnlyNotice t={t} />
+        : null}
 
       <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
         <PanelSectionHeader
           description={t('security.privileged.serviceAccountsDescription')}
           title={t('security.privileged.serviceAccountsTitle')}
         />
-        {canManage ? (
+        {canManageServiceAccounts ? (
           <form
             className="grid grid-cols-2 items-end gap-3 border-t border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-4 max-[760px]:grid-cols-1"
             onSubmit={(event) => void handleCreateServiceAccount(event)}
@@ -3545,7 +3549,7 @@ function SecurityPrivilegedTab({
                     )}
                   </p>
                 </div>
-                {canManage && account.status === 'active' ? (
+                {canManageServiceAccounts && account.status === 'active' ? (
                   <div className="flex flex-wrap justify-end gap-2 max-[600px]:justify-start">
                     <button
                       aria-label={`${t('security.privileged.rotateCredential')}: ${account.name}`}
@@ -3591,7 +3595,7 @@ function SecurityPrivilegedTab({
           description={t('security.privileged.breakGlassDescription')}
           title={t('security.privileged.breakGlassTitle')}
         />
-        {canManage ? (
+        {canManageBreakGlass ? (
           <form
             className="flex min-w-0 flex-wrap items-end gap-3 border-t border-amber-200 bg-amber-50 p-4"
             onSubmit={(event) => void handleRegisterBreakGlass(event)}
@@ -3668,7 +3672,7 @@ function SecurityPrivilegedTab({
                     : t('security.value.never'),
                 )}
               </p>
-              {canManage && administrator.status === 'active' ? (
+              {canManageBreakGlass && administrator.status === 'active' ? (
                 <button
                   aria-label={`${t('security.privileged.deactivate')}: ${administrator.email}`}
                   className="workbench-button-secondary min-h-9 px-3 text-red-700 disabled:cursor-not-allowed disabled:opacity-55"

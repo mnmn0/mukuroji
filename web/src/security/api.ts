@@ -31,8 +31,10 @@ export type EnterpriseSecurityCapabilities = {
   canManageRoles: boolean
   /** MFA、session、IP policy を変更できるかどうかです。 */
   canManageSessions: boolean
-  /** Service account と break-glass administrator を変更できるかどうかです。 */
+  /** Service account を変更できるかどうかです。 */
   canManagePrivilegedAccess: boolean
+  /** Break-glass administrator を変更できるかどうかです。 */
+  canManageBreakGlass: boolean
 }
 
 /**
@@ -1312,8 +1314,7 @@ function parseEnterpriseSecuritySnapshot(data: unknown) {
         typeof domain.verificationRecordName === 'string' &&
         Boolean(domain.verificationRecordName),
     ) ||
-    !isRecord(data.scim) ||
-    typeof data.scim.identityProviderId !== 'string' ||
+    !isEnterpriseScimConfiguration(data.scim) ||
     !Array.isArray(data.mappings) ||
     !data.mappings.every(
       (mapping) =>
@@ -1384,9 +1385,11 @@ function parseEnterpriseScimTokenResponse(
 ): EnterpriseScimTokenResponse {
   if (
     !isRecord(data) ||
-    !isRecord(data.scim) ||
+    !isEnterpriseScimConfiguration(data.scim) ||
     typeof data.token !== 'string' ||
-    !data.token
+    !data.token ||
+    data.scim.tokenLastFour === undefined ||
+    data.scim.tokenLastFour !== data.token.slice(-4)
   ) {
     throw createMalformedResponseError()
   }
@@ -1594,7 +1597,38 @@ function isEnterpriseSecurityCapabilities(
     'canManageRoles',
     'canManageSessions',
     'canManagePrivilegedAccess',
+    'canManageBreakGlass',
   ].every((capability) => typeof value[capability] === 'boolean')
+}
+
+function isEnterpriseScimConfiguration(
+  value: unknown,
+): value is EnterpriseScimConfiguration {
+  return (
+    isRecord(value) &&
+    typeof value.identityProviderId === 'string' &&
+    (
+      value.status === 'disabled' ||
+      value.status === 'ready' ||
+      value.status === 'syncing' ||
+      value.status === 'error'
+    ) &&
+    typeof value.endpointUrl === 'string' &&
+    Number.isSafeInteger(value.tokenGeneration) &&
+    Number(value.tokenGeneration) >= 0 &&
+    (
+      value.tokenLastFour === undefined ||
+      typeof value.tokenLastFour === 'string' &&
+        /^[A-Za-z0-9_-]{4}$/.test(value.tokenLastFour)
+    ) &&
+    (
+      value.lastSyncAt === undefined ||
+      typeof value.lastSyncAt === 'string' &&
+        Number.isFinite(Date.parse(value.lastSyncAt))
+    ) &&
+    Number.isSafeInteger(value.version) &&
+    Number(value.version) >= 0
+  )
 }
 
 function isEnterpriseSsoPrerequisites(

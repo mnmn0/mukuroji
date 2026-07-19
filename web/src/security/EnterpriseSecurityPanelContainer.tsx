@@ -223,6 +223,8 @@ export function EnterpriseSecurityPanelContainer({
   const canManageSessions = snapshot?.capabilities.canManageSessions ?? false
   const canManagePrivilegedAccess =
     snapshot?.capabilities.canManagePrivilegedAccess ?? false
+  const canManageBreakGlass =
+    snapshot?.capabilities.canManageBreakGlass ?? false
   const mutationAuthorizationError =
     authorizationFailure?.accessToken === mutationSession.accessToken
       ? authorizationFailure.error
@@ -341,13 +343,15 @@ export function EnterpriseSecurityPanelContainer({
       loadErrorActionLabel={
         requiresFreshAuthentication
           ? t('security.action.signInAgain')
-          : undefined
+          : isIpDenied
+            ? t('security.action.recoverAccess')
+            : undefined
       }
       loadErrorMessage={
         requiresFreshAuthentication
           ? t('security.error.authenticationRequired')
           : isIpDenied
-            ? t('security.error.ipDenied')
+            ? t('security.error.ipDeniedRecovery')
             : mutationAuthorizationError
               ? t('security.error.forbidden')
           : error
@@ -363,10 +367,12 @@ export function EnterpriseSecurityPanelContainer({
       onLoadErrorAction={
         requiresFreshAuthentication
           ? redirectToFreshEnterpriseAuthentication
-          : undefined
+          : isIpDenied
+            ? redirectToEnterpriseRecovery
+            : undefined
       }
       onRegisterBreakGlass={
-        canManagePrivilegedAccess
+        canManageBreakGlass
           ? (input) =>
               runMutation('break-glass:register', input, (context) =>
                 registerEnterpriseBreakGlassAdministrator(
@@ -378,7 +384,7 @@ export function EnterpriseSecurityPanelContainer({
           : undefined
       }
       onTestBreakGlass={
-        canManagePrivilegedAccess
+        canManageBreakGlass
           ? () =>
               runMutation('break-glass:test', {}, (context) =>
                 testEnterpriseBreakGlassAccess(
@@ -450,7 +456,7 @@ export function EnterpriseSecurityPanelContainer({
           : undefined
       }
       onDeactivateBreakGlass={
-        canManagePrivilegedAccess
+        canManageBreakGlass
           ? (administrator) =>
               runMutation(
                 `break-glass:deactivate:${administrator.id}`,
@@ -734,6 +740,14 @@ function redirectToFreshEnterpriseAuthentication() {
 
   const returnTo = `/settings/security${window.location.search}`
   window.location.assign(`/login?returnTo=${encodeURIComponent(returnTo)}`)
+}
+
+function redirectToEnterpriseRecovery() {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.location.assign('/security/recovery')
 }
 
 function readEnterpriseSecurityErrorMessage(

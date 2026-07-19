@@ -72,7 +72,16 @@ test('maps provider, domain, role, and provisioning state to the security UI con
       identityProviderId: 'idp-1',
       credentialId: 'credential-1',
       label: 'Okta',
+      tokenLastFour: 'A7xQ',
       createdAt: '2026-07-18T00:00:00.000Z',
+    }, {
+      workspaceId: 'workspace-1',
+      identityProviderId: 'idp-1',
+      credentialId: 'credential-2',
+      label: 'Revoked Okta token',
+      tokenLastFour: 'R3vk',
+      createdAt: '2026-07-19T00:00:00.000Z',
+      revokedAt: '2026-07-19T01:00:00.000Z',
     }],
     serviceAccounts: [],
     breakGlassAccounts: [],
@@ -84,6 +93,10 @@ test('maps provider, domain, role, and provisioning state to the security UI con
     snapshot,
     'https://api.example.com/api/scim/v2/workspace-1',
   )).toMatchObject({
+    capabilities: {
+      canManageBreakGlass: true,
+      canManagePrivilegedAccess: true,
+    },
     identityProvider: {
       status: 'verified',
       protocol: 'oidc',
@@ -95,7 +108,8 @@ test('maps provider, domain, role, and provisioning state to the security UI con
     scim: {
       status: 'ready',
       endpointUrl: 'https://api.example.com/api/scim/v2/workspace-1',
-      tokenGeneration: 1,
+      tokenGeneration: 2,
+      tokenLastFour: 'A7xQ',
     },
     roles: expect.arrayContaining([
       expect.objectContaining({
@@ -104,4 +118,15 @@ test('maps provider, domain, role, and provisioning state to the security UI con
       }),
     ]),
   })
+
+  const serviceAccountManagerView = toEnterpriseSecuritySnapshotView(
+    snapshot,
+    'https://api.example.com/api/scim/v2/workspace-1',
+    ['service-accounts.manage'],
+  )
+  expect(serviceAccountManagerView.capabilities).toMatchObject({
+    canManageBreakGlass: false,
+    canManagePrivilegedAccess: true,
+  })
+  expect(serviceAccountManagerView.scim).not.toHaveProperty('tokenLastFour')
 })

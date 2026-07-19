@@ -195,6 +195,12 @@ export function toEnterpriseSecuritySnapshotView(
     credential.revokedAt === undefined &&
     (credential.expiresAt === undefined || Date.parse(credential.expiresAt) > Date.now())
   )
+  const currentActiveScimCredential = activeScimCredentials
+    .toSorted((left, right) =>
+      left.createdAt.localeCompare(right.createdAt) ||
+      left.credentialId.localeCompare(right.credentialId)
+    )
+    .at(-1)
   const groupByProviderAndId = new Map(
     snapshot.scimGroups.flatMap((group) => [
       [`${group.identityProviderId}\0${group.groupId}`, group] as const,
@@ -304,6 +310,7 @@ export function toEnterpriseSecuritySnapshotView(
       canManageSessions: effectivePermissions.includes('security.manage'),
       canManagePrivilegedAccess: effectivePermissions.includes('service-accounts.manage') ||
         effectivePermissions.includes('security.manage'),
+      canManageBreakGlass: effectivePermissions.includes('security.manage'),
     },
     assignableRoleIds: {
       groupMappings: {
@@ -370,6 +377,11 @@ export function toEnterpriseSecuritySnapshotView(
             credential.identityProviderId === provider?.providerId
           ).length
         : 0,
+      ...(canReadIdentity &&
+          currentActiveScimCredential &&
+          /^[A-Za-z0-9_-]{4}$/.test(currentActiveScimCredential.tokenLastFour)
+        ? { tokenLastFour: currentActiveScimCredential.tokenLastFour }
+        : {}),
       lastSyncAt: (canReadIdentity
         ? snapshot.scimUsers.filter((user) =>
             user.identityProviderId === provider?.providerId

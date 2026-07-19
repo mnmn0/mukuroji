@@ -112,7 +112,10 @@ HMAC-SHA-256(
 同じ digest namespace を共有しないよう domain separation します。比較には constant-time
 comparison を使います。Raw token は作成・rotate response と後述の短い recovery response にだけ含め、
 snapshot・audit・log には含めません。HMAC secret と完全な digest は response・audit・log の
-いずれにも含めません。
+いずれにも含めません。SCIM credential metadata には管理画面で現在の IdP 設定と照合するため
+raw token の末尾4文字だけを `tokenLastFour` として保存します。Enterprise security snapshot は
+active provider の有効な最新 credential に保存されたこの suffix だけを返し、raw token や digest
+から再構成しません。
 
 Service account の作成・rotate と SCIM token rotate は、entity、operation generation、
 `Idempotency-Key` に束縛した次の HMAC から one-time token を決定的に導出します。
@@ -226,9 +229,15 @@ SCIM bearer token の発行・rotate は
 `POST /api/enterprise/security/scim/token` で行います。Response の raw token は通常一回だけ表示し、
 同じ idempotency request の応答消失時だけ前述の10分 window 内で回復できます。
 
-SCIM user/group の POST/PUT/PATCH/DELETE は desired version を保存した後、その request 内で
+SCIM user の POST/PUT/PATCH/DELETE は desired version を保存した後、その request 内で
 Workspace access/Cognito へ適用して `appliedVersion` を進めます。外部 side effect が失敗した場合は
 desired version が先行したまま残り、後述の provisioning preview/reconcile で差分を確認・回復できます。
+
+SCIM group の POST/PUT/PATCH/DELETE は desired state と durable reconciliation job を同じ
+DynamoDB transaction で保存して `202 Accepted` を返します。Enterprise Identity table の Stream を
+読む専用 Lambda が旧・新 member の和集合を5 userずつ処理し、apply/settle phase と revision CAS で
+checkpoint します。`workspace:guest` group mapping の作成・更新・削除も、変更前後の対象 group job を
+同じ transaction で enqueue/restartし、HTTP request 内では member を再適用しません。
 
 ## Roles and group mappings
 

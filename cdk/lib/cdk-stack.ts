@@ -1155,7 +1155,7 @@ export class CdkStack extends cdk.Stack {
       runtime: lambda.Runtime.NODEJS_22_X,
       depsLockFilePath: path.join(__dirname, '../../bun.lock'),
       projectRoot: path.join(__dirname, '../..'),
-      timeout: cdk.Duration.seconds(60),
+      timeout: cdk.Duration.seconds(15),
       memorySize: 512,
       description: 'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.',
       bundling: {
@@ -1446,7 +1446,82 @@ export class CdkStack extends cdk.Stack {
         retentionPeriod: cdk.Duration.days(14),
       },
     );
-    apiFunction.addEventSource(
+    const enterpriseScimGroupJobFunction = new lambdaNodejs.NodejsFunction(
+      this,
+      'EnterpriseScimGroupJobFunction',
+      {
+        entry: path.join(
+          __dirname,
+          '../../server/src/enterprise-scim-group-job-worker-handler.ts',
+        ),
+        handler: 'handler',
+        runtime: lambda.Runtime.NODEJS_22_X,
+        depsLockFilePath: path.join(__dirname, '../../bun.lock'),
+        projectRoot: path.join(__dirname, '../..'),
+        timeout: cdk.Duration.seconds(60),
+        memorySize: 512,
+        reservedConcurrentExecutions: 5,
+        description:
+          'Dedicated bounded worker for asynchronous enterprise SCIM group reconciliation.',
+        bundling: {
+          bundleAwsSDK: true,
+          minify: true,
+          sourceMap: true,
+          target: 'node22',
+        },
+        environment: {
+          AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
+          AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
+          COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+          ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
+          ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET:
+            enterpriseIdentityTokenHashSecret.valueAsString,
+          MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:
+            workspaceAuditPseudonymKey.valueAsString,
+          PLANNING_TABLE_NAME: planningTable.tableName,
+          PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+          WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
+        },
+      },
+    );
+    enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'dynamodb:BatchWriteItem',
+        'dynamodb:GetItem',
+        'dynamodb:Query',
+      ],
+      resources: [enterpriseIdentityTable.tableArn],
+    }));
+    enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+      resources: [planningTable.tableArn],
+    }));
+    enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem'],
+      resources: [workspaceAccessTable.tableArn],
+    }));
+    enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:Query'],
+      resources: [projectDirectoryTable.tableArn],
+    }));
+    enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:TransactWriteItems'],
+      resources: [
+        auditEventsTable.tableArn,
+        enterpriseIdentityTable.tableArn,
+        planningTable.tableArn,
+        workspaceAccessTable.tableArn,
+      ],
+    }));
+    enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'cognito-idp:AdminDisableUser',
+        'cognito-idp:AdminEnableUser',
+        'cognito-idp:AdminUserGlobalSignOut',
+      ],
+      resources: [cognitoUserPoolArn],
+    }));
+    enterpriseScimGroupJobFunction.addEventSource(
       new lambdaEventSources.DynamoEventSource(enterpriseIdentityTable, {
         startingPosition: lambda.StartingPosition.TRIM_HORIZON,
         batchSize: 1,
@@ -1470,7 +1545,7 @@ export class CdkStack extends cdk.Stack {
         onFailure: new lambdaEventSources.SqsDlq(enterpriseScimGroupJobDlq),
       }),
     );
-    enterpriseIdentityTable.grantStreamRead(apiFunction);
+    enterpriseIdentityTable.grantStreamRead(enterpriseScimGroupJobFunction);
     new cloudwatch.Alarm(this, 'EnterpriseScimGroupJobDlqAlarm', {
       alarmDescription:
         'Detects failed asynchronous enterprise SCIM group reconciliation jobs.',
@@ -2469,6 +2544,9 @@ export class CdkStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'EnterpriseIdentityMaintenanceDlqUrl', {
       value: enterpriseIdentityMaintenanceDlq.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'EnterpriseScimGroupJobFunctionName', {
+      value: enterpriseScimGroupJobFunction.functionName,
     });
     new cdk.CfnOutput(this, 'EnterpriseScimGroupJobDlqUrl', {
       value: enterpriseScimGroupJobDlq.queueUrl,

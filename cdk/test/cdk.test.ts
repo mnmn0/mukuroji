@@ -373,8 +373,10 @@ test('enterprise identity CONTROL stream runs bounded asynchronous maintenance',
   expect(serializedPolicies).toContain('dynamodb:PutItem');
   expect(serializedPolicies).toContain('dynamodb:Query');
   expect(serializedPolicies).toContain('dynamodb:UpdateItem');
+  expect(serializedPolicies).not.toContain('dynamodb:DeleteItem');
   expect(serializedPolicies).not.toContain('dynamodb:Scan');
   expect(serializedPolicies).not.toContain('secretsmanager:');
+  expect(serializedPolicies).not.toContain('dynamodb:TransactWriteItems');
   template.hasResourceProperties('AWS::CloudWatch::Alarm', {
     AlarmDescription:
       'Detects enterprise identity compaction or generation retirement failures.',
@@ -382,17 +384,48 @@ test('enterprise identity CONTROL stream runs bounded asynchronous maintenance',
   template.hasOutput('EnterpriseIdentityMaintenanceDlqUrl', {});
 });
 
-test('enterprise SCIM group jobs run asynchronously through the shared API handler', () => {
+test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
   const tableLogicalId = template.toJSON().Outputs.EnterpriseIdentityTableName?.Value?.Ref;
   const functionEntry = Object.entries(resources).find(([, resource]) =>
     (resource as { Properties?: { Description?: string } }).Properties?.Description ===
-      'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.'
+      'Dedicated bounded worker for asynchronous enterprise SCIM group reconciliation.'
   );
 
   expect(functionEntry).toBeDefined();
-  const [functionLogicalId, apiFunction] = functionEntry!;
+  const [functionLogicalId, workerFunction] = functionEntry!;
+  expect(workerFunction).toEqual(expect.objectContaining({
+    Properties: expect.objectContaining({
+      Handler: 'index.handler',
+      MemorySize: 512,
+      ReservedConcurrentExecutions: 5,
+      Runtime: 'nodejs22.x',
+      Timeout: 60,
+      Environment: {
+        Variables: expect.objectContaining({
+          AUDIT_EVENTS_TABLE_NAME: {
+            Ref: 'AuditEventsTable0723963E',
+          },
+          COGNITO_USER_POOL_ID: {
+            Ref: 'CognitoUserPoolId',
+          },
+          ENTERPRISE_IDENTITY_TABLE_NAME: {
+            Ref: String(tableLogicalId),
+          },
+          PLANNING_TABLE_NAME: {
+            Ref: 'PlanningTable2A0D4CC5',
+          },
+          PROJECT_DIRECTORY_TABLE_NAME: {
+            Ref: 'ProjectDirectoryTable9ED01C01',
+          },
+          WORKSPACE_ACCESS_TABLE_NAME: {
+            Ref: 'WorkspaceAccessTableD7C8D2C7',
+          },
+        }),
+      },
+    }),
+  }));
   const eventSource = Object.values(resources).find((resource) =>
     (resource as { Type?: string }).Type === 'AWS::Lambda::EventSourceMapping' &&
     JSON.stringify(resource).includes(functionLogicalId) &&
@@ -421,7 +454,7 @@ test('enterprise SCIM group jobs run asynchronously through the shared API handl
     .toContain('EnterpriseScimGroupJobDlq');
 
   const functionRoleLogicalId = (
-    (apiFunction as {
+    (workerFunction as {
       Properties?: { Role?: { 'Fn::GetAtt'?: string[] } }
     }).Properties?.Role?.['Fn::GetAtt'] ?? []
   )[0];
@@ -436,10 +469,64 @@ test('enterprise SCIM group jobs run asynchronously through the shared API handl
   expect(serializedPolicies).toContain('dynamodb:GetRecords');
   expect(serializedPolicies).toContain('dynamodb:GetShardIterator');
   expect(serializedPolicies).toContain('dynamodb:ListStreams');
+  expect(serializedPolicies).toContain('sqs:SendMessage');
+  expect(serializedPolicies).toContain('dynamodb:BatchWriteItem');
+  expect(serializedPolicies).toContain('dynamodb:GetItem');
+  expect(serializedPolicies).toContain('dynamodb:Query');
+  expect(serializedPolicies).toContain('dynamodb:TransactWriteItems');
+  expect(serializedPolicies).toContain('cognito-idp:AdminDisableUser');
+  expect(serializedPolicies).toContain('cognito-idp:AdminEnableUser');
+  expect(serializedPolicies).toContain('cognito-idp:AdminUserGlobalSignOut');
+  expect(serializedPolicies).toContain('EnterpriseIdentityTable');
+  expect(serializedPolicies).toContain('WorkspaceAccessTable');
+  expect(serializedPolicies).toContain('PlanningTable');
+  expect(serializedPolicies).toContain('AuditEventsTable');
+  expect(serializedPolicies).toContain('ProjectDirectoryTable');
+  expect(serializedPolicies).toContain('EnterpriseScimGroupJobDlq');
+  expect(serializedPolicies).not.toContain('TeamIssuesTable');
+  expect(serializedPolicies).not.toContain('dynamodb:Scan');
+  expect(serializedPolicies).not.toContain('secretsmanager:');
+
+  const apiFunction = resources.ListProjectTasksFunction2134AF4A;
+  expect(apiFunction.Properties.Timeout).toBe(15);
+  const apiFunctionRoleLogicalId = (
+    (apiFunction as {
+      Properties?: { Role?: { 'Fn::GetAtt'?: string[] } }
+    }).Properties?.Role?.['Fn::GetAtt'] ?? []
+  )[0];
+  const apiRolePolicies = Object.values(resources).filter((resource) =>
+    ['AWS::IAM::ManagedPolicy', 'AWS::IAM::Policy'].includes(
+      (resource as { Type?: string }).Type ?? '',
+    ) &&
+    JSON.stringify(resource).includes(String(apiFunctionRoleLogicalId))
+  );
+  const serializedApiPolicies = JSON.stringify(apiRolePolicies);
+  expect(serializedApiPolicies).not.toContain('dynamodb:DescribeStream');
+  expect(serializedApiPolicies).not.toContain('dynamodb:ListStreams');
+  expect(serializedApiPolicies).not.toContain('EnterpriseScimGroupJobDlq');
+  const apiEnterpriseStreamStatement = apiRolePolicies
+    .flatMap((resource) =>
+      (resource as {
+        Properties?: {
+          PolicyDocument?: { Statement?: Record<string, unknown>[] }
+        }
+      }).Properties?.PolicyDocument?.Statement ?? []
+    )
+    .find((statement) =>
+      JSON.stringify(statement.Action).includes('dynamodb:GetRecords') &&
+      JSON.stringify(statement.Resource).includes('EnterpriseIdentityTable')
+    );
+  expect(apiEnterpriseStreamStatement).toBeUndefined();
+  expect(Object.values(resources).some((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::Lambda::EventSourceMapping' &&
+    JSON.stringify(resource).includes('ListProjectTasksFunction2134AF4A') &&
+    JSON.stringify(resource).includes('enterprise-scim-group-job')
+  )).toBe(false);
   template.hasResourceProperties('AWS::CloudWatch::Alarm', {
     AlarmDescription:
       'Detects failed asynchronous enterprise SCIM group reconciliation jobs.',
   });
+  template.hasOutput('EnterpriseScimGroupJobFunctionName', {});
   template.hasOutput('EnterpriseScimGroupJobDlqUrl', {});
 });
 
@@ -485,7 +572,7 @@ test('shared server handler is bundled as a Lambda asset with production environ
     Description: 'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.',
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
-    Timeout: 60,
+    Timeout: 15,
     Environment: {
       Variables: Match.objectLike({
         AUTOMATION_INBOUND_WEBHOOK_BASE_URL: Match.anyValue(),
@@ -2069,11 +2156,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:AdminUserGlobalSignOut');
   expect(JSON.stringify(cognitoStatement)).toContain('CognitoUserPoolId');
   const wildcardStatements = statements.filter((statement) => statement.Resource === '*');
-  expect(wildcardStatements).toEqual([{
-    Action: 'dynamodb:ListStreams',
-    Effect: 'Allow',
-    Resource: '*',
-  }]);
+  expect(wildcardStatements).toEqual([]);
   expect(serializedApiPolicies).not.toContain('"Action":"s3:*"');
   expect(JSON.stringify(cognitoStatement)).not.toContain('"Resource":"*"');
 });

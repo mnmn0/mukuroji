@@ -234,15 +234,8 @@ import {
   type EnterpriseCognitoFederationBinding,
   type EnterpriseIdentityClient,
   type EnterprisePrincipalContext,
-  type EnterpriseScimGroupJobApplyInput,
 } from './enterprise-identity'
 import { createEnterpriseCognitoInspectionCache } from './enterprise-cognito-inspection-cache'
-import {
-  isEnterpriseScimGroupJobStreamEvent,
-  processEnterpriseScimGroupJobBatch,
-  type EnterpriseScimGroupJobReference,
-  type EnterpriseScimGroupJobStreamEvent,
-} from './enterprise-scim-group-job-handler'
 import {
   createDefaultEnterpriseSecurityPolicy,
   toEnterpriseSecuritySnapshotView,
@@ -2537,14 +2530,12 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'POST',
     pathPattern: '/api/enterprise/security/break-glass/deactivate',
-    permission: 'service-accounts.manage',
-    alternativePermissions: ['security.manage'],
+    permission: 'security.manage',
   },
   {
     method: '*',
     pathPattern: '/api/enterprise/security/break-glass/accounts*',
-    permission: 'service-accounts.manage',
-    alternativePermissions: ['security.manage'],
+    permission: 'security.manage',
   },
   {
     method: 'GET',
@@ -4591,11 +4582,6 @@ app.post('/api/enterprise/security/group-mappings', async (c) => {
           'Group mapping idempotency key was already used with a different payload.',
         )
       }
-      await applyEnterpriseWorkspaceGuestMappingImpact(
-        c,
-        principal.directoryId,
-        [receiptMapping],
-      )
       return c.json({
         mapping: {
           id: receiptMapping.mappingId,
@@ -4638,11 +4624,6 @@ app.post('/api/enterprise/security/group-mappings', async (c) => {
       revision: 1,
       updatedAt: new Date().toISOString(),
     }, createWorkspaceMutationContext(c, principal, body, requestIdempotencyKey))
-    await applyEnterpriseWorkspaceGuestMappingImpact(
-      c,
-      principal.directoryId,
-      [mapping],
-    )
     return c.json({
       mapping: {
         id: mapping.mappingId,
@@ -4736,11 +4717,6 @@ app.put('/api/enterprise/security/group-mappings/:mappingId', async (c) => {
       revision: existing.revision + 1,
       updatedAt: new Date().toISOString(),
     }, createWorkspaceMutationContext(c, principal, body))
-    await applyEnterpriseWorkspaceGuestMappingImpact(
-      c,
-      principal.directoryId,
-      [existing, mapping],
-    )
     return c.json({
       mapping: {
         id: mapping.mappingId,
@@ -4766,23 +4742,12 @@ app.delete('/api/enterprise/security/group-mappings/:mappingId', async (c) => {
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c, true)
     const body = await readJson<Record<string, unknown>>(c.req)
-    const snapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
-    const existing = snapshot.groupMappings.find((mapping) =>
-      mapping.mappingId === c.req.param('mappingId')
-    )
     await enterpriseIdentity.deleteGroupMapping(
       principal.directoryId,
       c.req.param('mappingId'),
       readEnterpriseInteger(body?.expectedVersion, 'Expected version', 1),
       createWorkspaceMutationContext(c, principal, body),
     )
-    if (existing) {
-      await applyEnterpriseWorkspaceGuestMappingImpact(
-        c,
-        principal.directoryId,
-        [existing],
-      )
-    }
     return c.body(null, 204)
   } catch (error) {
     return toEnterpriseIdentityBoundaryErrorResponse(c, error)
@@ -4972,16 +4937,7 @@ app.post('/api/enterprise/security/break-glass/accounts', async (c) => {
       )
     }
     const snapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
-    if (snapshot.domains.some((domain) =>
-      domain.status === 'verified' &&
-      domain.domain === normalizeEnterpriseEmailDomain(email)
-    )) {
-      throw new EnterpriseIdentityError(
-        409,
-        'EnterpriseBreakGlassRecoveryDomainManaged',
-        'Break-glass recovery must use an account outside every managed domain.',
-      )
-    }
+    requireEnterpriseBreakGlassRecoveryDomainUnmanaged(snapshot, email)
     const requestIdempotencyKey =
       c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()
     const accountId = createEnterpriseIdempotentResourceId(
@@ -5059,16 +5015,7 @@ app.post('/api/enterprise/security/break-glass/test', async (c) => {
         'A pre-registered active break-glass account was not found for this member.',
       )
     }
-    if (snapshot.domains.some((domain) =>
-      domain.status === 'verified' &&
-      domain.domain === normalizeEnterpriseEmailDomain(account.email)
-    )) {
-      throw new EnterpriseIdentityError(
-        409,
-        'EnterpriseBreakGlassRecoveryDomainManaged',
-        'Break-glass recovery must use an account outside every managed domain.',
-      )
-    }
+    requireEnterpriseBreakGlassRecoveryDomainUnmanaged(snapshot, account.email)
     await requireEnterpriseMfa(principal.directoryId, accessToken)
     requireEnterpriseRecentAuthentication(
       accessToken,
@@ -5133,18 +5080,35 @@ app.post('/api/enterprise/security/break-glass/activate', async (c) => {
       body?.reason ?? c.req.header('X-Break-Glass-Reason'),
       'Break-glass reason',
     )
+    const activationSnapshot = await enterpriseIdentity.getSnapshot(principal.directoryId)
+    const activationAccount = activationSnapshot.breakGlassAccounts.find((candidate) =>
+      candidate.accountId === account.accountId &&
+      candidate.linkedMemberKey === principal.userKey &&
+      candidate.status === 'active'
+    )
+    if (!activationAccount) {
+      throw new EnterpriseIdentityError(
+        403,
+        'EnterpriseBreakGlassDenied',
+        'A pre-registered active break-glass account was not found for this member.',
+      )
+    }
+    requireEnterpriseBreakGlassRecoveryDomainUnmanaged(
+      activationSnapshot,
+      activationAccount.email,
+    )
     const durationMinutes = body?.durationMinutes === undefined
-      ? Math.min(15, account.maximumActivationMinutes)
+      ? Math.min(15, activationAccount.maximumActivationMinutes)
       : readEnterpriseInteger(body.durationMinutes, 'Activation duration', 1)
     const activation = await enterpriseIdentity.activateBreakGlass(
       principal.directoryId,
-      account.accountId,
+      activationAccount.accountId,
       principal.userKey,
       createEnterpriseAuthenticationSessionId(accessToken),
       reason,
       durationMinutes,
       createWorkspaceMutationContext(c, principal, {
-        accountId: account.accountId,
+        accountId: activationAccount.accountId,
         durationMinutes,
         reason,
       }),
@@ -13892,6 +13856,22 @@ function isEnterpriseSsoRecoveryAccountReady(
     )
 }
 
+function requireEnterpriseBreakGlassRecoveryDomainUnmanaged(
+  snapshot: EnterpriseIdentitySnapshot,
+  email: string,
+) {
+  if (snapshot.domains.some((domain) =>
+    domain.status === 'verified' &&
+    domain.domain === normalizeEnterpriseEmailDomain(email)
+  )) {
+    throw new EnterpriseIdentityError(
+      409,
+      'EnterpriseBreakGlassRecoveryDomainManaged',
+      'Break-glass recovery must use an account outside every managed domain.',
+    )
+  }
+}
+
 async function requireEnterpriseMfa(workspaceId: string, accessToken: string) {
   const claims = decodeJwtPayload<CognitoAccessTokenClaims>(accessToken)
   const sessionId = createHash('sha256').update(accessToken).digest('base64url')
@@ -14014,16 +13994,13 @@ async function applyEnterpriseScimUserState(
   user: EnterpriseScimUser,
   auditContext: MutationAuditContext,
   desiredGroupOverlays: readonly EnterpriseScimGroup[] = [],
-  snapshotOverride?: EnterpriseIdentitySnapshot,
-  checkpointAppliedVersion = true,
 ) {
   const memberKey = user.linkedMemberKey ??
     user.emails[0]?.trim().toLowerCase() ??
     user.userName.trim().toLowerCase()
   const existing = await workspaceAccess.getMember(user.workspaceId, memberKey)
   if (user.active) {
-    const snapshot = snapshotOverride ??
-      await enterpriseIdentity.getSnapshot(user.workspaceId)
+    const snapshot = await enterpriseIdentity.getSnapshot(user.workspaceId)
     const workspaceRole = resolveEnterpriseScimWorkspaceRole(
       snapshot,
       user,
@@ -14065,14 +14042,12 @@ async function applyEnterpriseScimUserState(
     await cognito.disableWorkspaceUser?.(memberKey)
     await cognito.globallySignOutWorkspaceUser?.(memberKey)
   }
-  if (checkpointAppliedVersion) {
-    await enterpriseIdentity.markScimUserApplied(
-      user.workspaceId,
-      user.userId,
-      user.version,
-      auditContext,
-    )
-  }
+  await enterpriseIdentity.markScimUserApplied(
+    user.workspaceId,
+    user.userId,
+    user.version,
+    auditContext,
+  )
 }
 
 async function requireEnterpriseScimDeprovisionAllowed(
@@ -14133,37 +14108,6 @@ function resolveEnterpriseScimWorkspaceRole(
     .map((mapping) => mapping.roleId)
   if (roles.includes('workspace:guest')) return 'guest' as const
   return 'member' as const
-}
-
-async function applyEnterpriseWorkspaceGuestMappingImpact(
-  c: Context,
-  workspaceId: string,
-  changedMappings: EnterpriseIdentitySnapshot['groupMappings'],
-) {
-  const affectedMappings = changedMappings.filter((mapping) =>
-    mapping.scope.kind === 'workspace' && mapping.roleId === 'workspace:guest'
-  )
-  if (affectedMappings.length === 0) return
-  const snapshot = await enterpriseIdentity.getSnapshot(workspaceId)
-  const affectedGroups = snapshot.scimGroups.filter((group) =>
-    group.active &&
-    group.appliedVersion >= group.version &&
-    affectedMappings.some((mapping) =>
-      mapping.identityProviderId === group.identityProviderId &&
-      (
-        mapping.directoryGroupId === group.groupId ||
-        mapping.directoryGroupId === group.externalId
-      )
-    )
-  )
-  for (const user of snapshot.scimUsers) {
-    if (!user.active || user.appliedVersion < user.version) continue
-    if (!affectedGroups.some((group) =>
-      group.identityProviderId === user.identityProviderId &&
-      group.memberUserIds.includes(user.userId)
-    )) continue
-    await applyEnterpriseScimUser(c, user)
-  }
 }
 
 async function requireEnterpriseScimWorkspace(c: Context) {
@@ -14535,88 +14479,6 @@ function createEnterpriseScimMutationContext(
     body,
     `${requestIdempotencyKey}:${bodyFingerprint}`,
     'service',
-  )
-}
-
-function createEnterpriseScimGroupJobCheckpointContext(
-  reference: EnterpriseScimGroupJobReference,
-) {
-  const operationId = `${reference.jobId}:${reference.revision}`
-  return createMutationAuditContext({
-    workspaceId: reference.workspaceId,
-    actor: {
-      id: `scim-group-job:${reference.jobId}`,
-      kind: 'service',
-      displayName: 'SCIM group reconciliation worker',
-    },
-    idempotencyKey: operationId,
-    request: {
-      method: 'DYNAMODB_STREAM',
-      path: '/internal/enterprise/scim/group-jobs',
-      body: reference,
-    },
-    source: {
-      kind: 'system',
-      requestId: operationId,
-      method: 'DYNAMODB_STREAM',
-      route: '/internal/enterprise/scim/group-jobs',
-    },
-  })
-}
-
-function createEnterpriseScimGroupJobUserContext(
-  input: EnterpriseScimGroupJobApplyInput,
-) {
-  const operationId = `${
-    input.reference.jobId
-  }:${input.reference.revision}:${input.snapshotRevision}:${
-    input.user.userId
-  }:${input.user.version}`
-  return createMutationAuditContext({
-    workspaceId: input.reference.workspaceId,
-    actor: {
-      id: `scim-directory:${input.group.identityProviderId}`,
-      kind: 'service',
-      displayName: `SCIM directory (${input.group.identityProviderId})`,
-    },
-    idempotencyKey: operationId,
-    occurredAt: input.jobUpdatedAt,
-    request: {
-      method: 'DYNAMODB_STREAM',
-      path: '/internal/enterprise/scim/group-jobs/users',
-      body: {
-        groupId: input.group.groupId,
-        groupVersion: input.group.version,
-        phase: input.phase,
-        snapshotRevision: input.snapshotRevision,
-        userId: input.user.userId,
-        userVersion: input.user.version,
-      },
-    },
-    source: {
-      kind: 'system',
-      requestId: operationId,
-      method: 'DYNAMODB_STREAM',
-      route: '/internal/enterprise/scim/group-jobs/users',
-    },
-  })
-}
-
-async function applyEnterpriseScimGroupJob(
-  reference: EnterpriseScimGroupJobReference,
-) {
-  return await enterpriseIdentity.processScimGroupJob(
-    reference,
-    async (input) => {
-      await applyEnterpriseScimUserState(
-        input.user,
-        createEnterpriseScimGroupJobUserContext(input),
-        [input.group],
-        input.snapshot,
-        false,
-      )
-    },
-    createEnterpriseScimGroupJobCheckpointContext(reference),
   )
 }
 
@@ -24166,20 +24028,11 @@ export function resetApiClientsForTest() {
  */
 const lambdaHandler = handle(app)
 
-/**
- * DynamoDB job stream を先に分岐し、HTTP event を同じ Hono route へ渡す Lambda handler です。
- */
+/** HTTP event を Hono route へ渡す API 専用 Lambda handler です。 */
 export const handler = (
-  event: LambdaEvent | EnterpriseScimGroupJobStreamEvent,
+  event: LambdaEvent,
   lambdaContext?: LambdaContext,
-) => {
-  if (isEnterpriseScimGroupJobStreamEvent(event)) {
-    return processEnterpriseScimGroupJobBatch(event, {
-      processJob: applyEnterpriseScimGroupJob,
-    })
-  }
-  return lambdaHandler(normalizeLambdaApiEvent(event), lambdaContext)
-}
+) => lambdaHandler(normalizeLambdaApiEvent(event), lambdaContext)
 
 /**
  * Bun のローカル開発サーバー entrypoint です。

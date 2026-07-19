@@ -44,6 +44,7 @@ describe('enterprise security API', () => {
     const snapshot = await getEnterpriseSecuritySnapshot('access-token')
 
     expect(snapshot.provisioningLogs).toEqual([])
+    expect(snapshot.scim.tokenLastFour).toBe('A7xQ')
     expect(requests[0]?.url).toBe('/api/enterprise/security')
     expect(requests[0]?.init.headers).toMatchObject({
       Authorization: 'Bearer access-token',
@@ -115,11 +116,26 @@ describe('enterprise security API', () => {
     ).rejects.toBeInstanceOf(EnterpriseSecurityApiError)
   })
 
+  test('rejects an unsafe SCIM token suffix in the aggregate snapshot', async () => {
+    installFetchRecorder({
+      ...enterpriseSecuritySnapshotFixture,
+      scim: {
+        ...enterpriseSecuritySnapshotFixture.scim,
+        tokenLastFour: 'too-long',
+      },
+    })
+
+    await expect(
+      getEnterpriseSecuritySnapshot('access-token'),
+    ).rejects.toBeInstanceOf(EnterpriseSecurityApiError)
+  })
+
   test('loads section-limited aggregate snapshots without a separate log request', async () => {
     const sectionCapabilities = [
       {
         ...enterpriseSecuritySnapshotFixture.capabilities,
         canManageAccess: true,
+        canManageBreakGlass: false,
         canManageIdentity: false,
         canManageMappings: true,
         canManagePrivilegedAccess: false,
@@ -135,6 +151,7 @@ describe('enterprise security API', () => {
       {
         ...enterpriseSecuritySnapshotFixture.capabilities,
         canManageAccess: false,
+        canManageBreakGlass: false,
         canManageIdentity: false,
         canManageMappings: false,
         canManagePrivilegedAccess: true,
@@ -234,6 +251,25 @@ describe('enterprise security API', () => {
   test('rejects malformed one-time credential responses without exposing a token', async () => {
     installFetchRecorder({
       scim: enterpriseSecuritySnapshotFixture.scim,
+    })
+
+    await expect(
+      rotateEnterpriseScimToken(
+        'access-token',
+        enterpriseSecuritySnapshotFixture.scim.version,
+        enterpriseSecuritySnapshotFixture.scim.identityProviderId,
+        mutationContext,
+      ),
+    ).rejects.toBeInstanceOf(EnterpriseSecurityApiError)
+  })
+
+  test('rejects a SCIM rotate response whose safe suffix does not match the token', async () => {
+    installFetchRecorder({
+      ...enterpriseScimTokenResponseFixture,
+      scim: {
+        ...enterpriseScimTokenResponseFixture.scim,
+        tokenLastFour: 'nope',
+      },
     })
 
     await expect(

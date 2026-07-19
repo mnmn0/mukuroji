@@ -202,7 +202,11 @@ export function RequestIntakePage() {
     ],
     `${location.pathname}${location.search}${location.hash}`,
   )
-  const isLoading = !session || isCurrentUserLoading || Boolean(user && isProjectDirectoryLoading)
+  const isLoading =
+    !session ||
+    isCurrentUserLoading ||
+    Boolean(user && isProjectDirectoryLoading) ||
+    Boolean(currentUserError && currentUserErrorAction?.kind !== 'stay')
 
   useEffect(() => {
     document.documentElement.lang = locale

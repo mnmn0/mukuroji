@@ -13,7 +13,7 @@ function createJobRecord(
     eventSource: 'aws:dynamodb',
     eventName,
     dynamodb: {
-      SequenceNumber: `sequence-${eventName.toLowerCase()}`,
+      SequenceNumber: `sequence-${eventName.toLowerCase()}` as string | undefined,
       NewImage: {
         scopeKey: { S: 'WORKSPACE#workspace-1' },
         recordKey: { S: 'SCIM_GROUP_JOB#job-1' },

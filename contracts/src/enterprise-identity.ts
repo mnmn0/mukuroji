@@ -771,6 +771,10 @@ export type EnterpriseScimCredential = {
    */
   label: string
   /**
+   * Credential 照合用に保存する bearer token の末尾4文字です。
+   */
+  tokenLastFour: string
+  /**
    * Credential 発行日時です。
    */
   createdAt: string

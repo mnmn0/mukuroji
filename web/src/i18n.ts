@@ -2062,6 +2062,7 @@ const dictionaries = {
     'security.action.copy': 'コピー',
     'security.action.copied': 'コピー済み',
     'security.action.signInAgain': '本人確認をやり直す',
+    'security.action.recoverAccess': '復旧アクセスへ進む',
     'security.error.load': 'Enterprise セキュリティ設定を読み込めませんでした。',
     'security.error.stale':
       '表示中の内容は古い可能性があります。更新操作を行う前に再読み込みしてください。',
@@ -2070,6 +2071,8 @@ const dictionaries = {
       'セッションの有効期限、MFA、または再認証ポリシーにより、もう一度本人確認が必要です。安全のため一時的な認証情報は画面から消去されました。',
     'security.error.ipDenied':
       '現在のネットワークは Workspace の IP 許可リストに含まれていません。承認済みネットワークへ切り替えてから再読み込みしてください。',
+    'security.error.ipDeniedRecovery':
+      '現在のネットワークは Workspace の IP 許可リストに含まれていません。承認済みネットワークへ切り替えるか、事前登録済みの緊急管理者は復旧アクセスへ進んでください。',
     'security.error.conflict':
       '別の管理者が設定を更新しました。最新状態を確認してから再実行してください。',
     'security.error.invalid': '入力内容を確認してから再実行してください。',
@@ -4502,6 +4505,7 @@ const dictionaries = {
     'security.action.copy': 'Copy',
     'security.action.copied': 'Copied',
     'security.action.signInAgain': 'Verify identity again',
+    'security.action.recoverAccess': 'Continue to recovery',
     'security.error.load': 'Could not load enterprise security settings.',
     'security.error.stale':
       'The displayed state may be stale. Refresh before making changes.',
@@ -4510,6 +4514,8 @@ const dictionaries = {
       'Your session expiry, MFA, or reauthentication policy requires identity verification again. Temporary credentials were cleared from this screen for safety.',
     'security.error.ipDenied':
       'Your current network is not in the Workspace IP allowlist. Switch to an approved network, then reload.',
+    'security.error.ipDeniedRecovery':
+      'Your current network is not in the Workspace IP allowlist. Switch to an approved network, or continue to recovery as a pre-registered emergency administrator.',
     'security.error.conflict':
       'Another administrator updated these settings. Refresh and try again.',
     'security.error.invalid': 'Review the input and try again.',

@@ -53,6 +53,7 @@ export const enterpriseSecuritySnapshotFixture = {
   ],
   capabilities: {
     canManageAccess: true,
+    canManageBreakGlass: true,
     canManageIdentity: true,
     canManageMappings: true,
     canManagePrivilegedAccess: true,
@@ -370,7 +371,7 @@ export const enterpriseScimTokenResponseFixture = {
   scim: {
     ...enterpriseSecuritySnapshotFixture.scim,
     tokenGeneration: 4,
-    tokenLastFour: 'N3wT',
+    tokenLastFour: 'oken',
     version: 4,
   },
   token: 'scim_storybook_one_time_token',

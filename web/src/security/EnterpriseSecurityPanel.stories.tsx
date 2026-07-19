@@ -31,6 +31,7 @@ const readOnlySnapshot = {
   ...enterpriseSecuritySnapshotFixture,
   capabilities: {
     canManageAccess: false,
+    canManageBreakGlass: false,
     canManageIdentity: false,
     canManageMappings: false,
     canManagePrivilegedAccess: false,
@@ -216,6 +217,22 @@ export const PrivilegedAccess: Story = {
   },
 }
 
+/** Service account は管理できる一方、break-glass 操作は表示しない権限境界です。 */
+export const ServiceAccountOnlyManager: Story = {
+  args: {
+    initialTab: 'privileged',
+    locale: 'en',
+    snapshot: {
+      ...enterpriseSecuritySnapshotFixture,
+      capabilities: {
+        ...enterpriseSecuritySnapshotFixture.capabilities,
+        canManageBreakGlass: false,
+        canManagePrivilegedAccess: true,
+      },
+    },
+  },
+}
+
 /** Project scope、短期 credential、source CIDR を監査できる service account です。 */
 export const ProjectScopedServiceAccount: Story = {
   args: {
@@ -264,6 +281,18 @@ export const LoadError: Story = {
   args: {
     loadErrorMessage: 'Enterprise security settings could not be loaded.',
     locale: 'en',
+    snapshot: undefined,
+  },
+}
+
+/** IP allowlist 拒否後に再読込ではなく recovery へ誘導する状態です。 */
+export const IpDeniedRecovery: Story = {
+  args: {
+    loadErrorActionLabel: 'Continue to recovery',
+    loadErrorMessage:
+      'Your current network is not in the Workspace IP allowlist. Switch to an approved network, or continue to recovery as a pre-registered emergency administrator.',
+    locale: 'en',
+    onLoadErrorAction: async () => undefined,
     snapshot: undefined,
   },
 }

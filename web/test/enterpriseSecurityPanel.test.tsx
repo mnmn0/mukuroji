@@ -41,6 +41,7 @@ describe('EnterpriseSecurityPanel', () => {
     const downgradedBoundary =
       createEnterpriseSecurityCapabilityBoundary({
         ...enterpriseSecuritySnapshotFixture.capabilities,
+        canManageBreakGlass: false,
         canManageIdentity: false,
         canManagePrivilegedAccess: false,
         canManageProvisioning: false,
@@ -178,6 +179,7 @@ describe('EnterpriseSecurityPanel', () => {
       breakGlassAdministrators: [],
       capabilities: {
         ...enterpriseSecuritySnapshotFixture.capabilities,
+        canManageBreakGlass: false,
         canManagePrivilegedAccess: false,
         canViewPrivileged: false,
       },
@@ -315,6 +317,7 @@ describe('EnterpriseSecurityPanel', () => {
       ...enterpriseSecuritySnapshotFixture,
       capabilities: {
         canManageAccess: false,
+        canManageBreakGlass: false,
         canManageIdentity: false,
         canManageMappings: false,
         canManagePrivilegedAccess: false,
@@ -343,6 +346,31 @@ describe('EnterpriseSecurityPanel', () => {
     expect(html).not.toContain('>Admin</span>')
     expect(html).not.toContain('data-testid="security-mapping-form"')
     expect(html).toContain('disabled=""')
+  })
+
+  test('keeps break-glass controls hidden for service-account-only managers', () => {
+    const snapshot = {
+      ...enterpriseSecuritySnapshotFixture,
+      capabilities: {
+        ...enterpriseSecuritySnapshotFixture.capabilities,
+        canManageBreakGlass: false,
+        canManagePrivilegedAccess: true,
+      },
+    }
+    const html = renderToStaticMarkup(
+      <EnterpriseSecurityPanel
+        initialTab="privileged"
+        locale="en"
+        scopeOptions={scopeOptions}
+        snapshot={snapshot}
+      />,
+    )
+
+    expect(html).toContain('Create account')
+    expect(html).not.toContain('These settings are read-only')
+    expect(html).not.toContain('Register administrator')
+    expect(html).not.toContain('Test current recovery access')
+    expect(html).not.toContain('>Deactivate</button>')
   })
 
   test('hides unauthorized sections instead of rendering redacted defaults', () => {
@@ -489,5 +517,20 @@ describe('EnterpriseSecurityPanel', () => {
     expect(html).toContain('Your session requires identity verification.')
     expect(html).toContain('Verify identity again')
     expect(html).not.toContain('Retry loading')
+  })
+
+  test('renders a dedicated recovery action for IP-denied sessions', () => {
+    const html = renderToStaticMarkup(
+      <EnterpriseSecurityPanel
+        loadErrorActionLabel="Continue to recovery"
+        loadErrorMessage="Your current network is not approved."
+        locale="en"
+        scopeOptions={scopeOptions}
+      />,
+    )
+
+    expect(html).toContain('Your current network is not approved.')
+    expect(html).toContain('Continue to recovery')
+    expect(html).not.toContain('Reload')
   })
 })

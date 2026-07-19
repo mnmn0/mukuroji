@@ -397,7 +397,10 @@ test('issues one-time SCIM credentials, authenticates by digest, and revokes imm
 
   expect(issued.token).toStartWith('msc_')
   expect(issued.credential.identityProviderId).toBe('idp-1')
+  expect(issued.credential.tokenLastFour).toBe(issued.token.slice(-4))
   expect(JSON.stringify(await client.getSnapshot(workspaceId))).not.toContain(issued.token)
+  expect((await client.getSnapshot(workspaceId)).scimCredentials[0]?.tokenLastFour)
+    .toBe(issued.token.slice(-4))
   expect(await client.authenticateScimToken(workspaceId, issued.token))
     .toEqual(issued.credential)
   await client.revokeScimToken(workspaceId, issued.credential.credentialId)
@@ -522,6 +525,17 @@ test('domain-separates idempotent one-time credentials by Workspace authority', 
     'shared-idempotency-key',
     'shared-request-fingerprint',
   )
+  const firstReplay = await client.rotateScimToken(
+    workspaceId,
+    'idp-1',
+    'Directory',
+    0,
+    'shared-idempotency-key',
+    'shared-request-fingerprint',
+  )
+  expect(firstReplay).toEqual(first)
+  expect(first.credential.tokenLastFour).toBe(first.token.slice(-4))
+  expect(second.credential.tokenLastFour).toBe(second.token.slice(-4))
   expect(first.token).not.toBe(second.token)
   expect(await client.authenticateScimToken(secondWorkspaceId, first.token)).toBeUndefined()
 })
@@ -992,7 +1006,9 @@ test('restarts pending apply and settle pages when guest mappings change', async
   if (restartedApplyPage.status !== 'continued') {
     throw new Error('Expected the restarted apply page to continue.')
   }
-  expect(restartedApplyPage.processedUserIds).toHaveLength(5)
+  expect(restartedApplyPage.processedUserIds).toEqual(
+    firstApplyPage.processedUserIds,
+  )
   const applyCompleted = await client.processScimGroupJob(
     restartedApplyPage.nextReference,
     async (input) => {
@@ -1037,7 +1053,160 @@ test('restarts pending apply and settle pages when guest mappings change', async
     },
   )
   expect(restartedSettlePage.status).toBe('continued')
-  expect(restartedSettlePage.processedUserIds).toHaveLength(5)
+  expect(restartedSettlePage.processedUserIds).toEqual(
+    firstSettlePage.processedUserIds,
+  )
+})
+
+test('enqueues applied group jobs for guest mapping create, retarget, and delete', async () => {
+  const client = new InMemoryEnterpriseIdentityClient(tokenSecret, () => now)
+  await client.putIdentityProvider(createActiveProvider('idp-job-mapping-applied'))
+  const users = await createScimUsers(
+    client,
+    'idp-job-mapping-applied',
+    2,
+    'job-mapping-applied-user',
+  )
+  const [firstUser, secondUser] = users
+  if (!firstUser || !secondUser) {
+    throw new Error('Expected two SCIM mapping users.')
+  }
+  const firstGroup = await client.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'idp-job-mapping-applied',
+    externalId: 'job-mapping-applied-external',
+    displayName: 'First applied mapping group',
+    active: true,
+    memberUserIds: [firstUser.userId],
+    idempotencyKey: 'job-mapping-applied-first-group',
+  })
+  const secondGroup = await client.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'idp-job-mapping-applied',
+    externalId: 'job-mapping-applied-second-external',
+    displayName: 'Second applied mapping group',
+    active: true,
+    memberUserIds: [secondUser.userId],
+    idempotencyKey: 'job-mapping-applied-second-group',
+  })
+  const drainJob = async (groupId: string) => {
+    let reference = await client.getScimGroupJobReference(workspaceId, groupId)
+    if (!reference) throw new Error('Expected a pending SCIM group job.')
+    while (reference) {
+      const result = await client.processScimGroupJob(
+        reference,
+        async () => undefined,
+      )
+      if (result.status === 'stale') {
+        throw new Error('Expected a current SCIM group job reference.')
+      }
+      reference = result.status === 'continued'
+        ? result.nextReference
+        : undefined
+    }
+  }
+  await drainJob(firstGroup.groupId)
+  await drainJob(secondGroup.groupId)
+
+  const mapping = {
+    workspaceId,
+    mappingId: 'applied-job-mapping',
+    identityProviderId: 'idp-job-mapping-applied',
+    directoryGroupId: firstGroup.externalId,
+    roleId: 'workspace:guest',
+    scope: { workspaceId, kind: 'workspace' as const },
+    enabled: true,
+    priority: 0,
+    revision: 1,
+    updatedAt: now.toISOString(),
+  }
+  await client.putGroupMapping(mapping)
+  const createReference = await client.getScimGroupJobReference(
+    workspaceId,
+    firstGroup.groupId,
+  )
+  if (!createReference) {
+    throw new Error('Expected externalId mapping to enqueue an applied group job.')
+  }
+  const createCallbacks: Array<{ phase: string; userId: string }> = []
+  expect(await client.processScimGroupJob(
+    createReference,
+    async (input) => {
+      createCallbacks.push({
+        phase: input.phase,
+        userId: input.user.userId,
+      })
+    },
+  )).toMatchObject({ status: 'completed' })
+  expect(createCallbacks).toEqual([{
+    phase: 'settle',
+    userId: firstUser.userId,
+  }])
+
+  const retargetedMapping = {
+    ...mapping,
+    directoryGroupId: secondGroup.groupId,
+    revision: 2,
+  }
+  await client.putGroupMapping(retargetedMapping)
+  const firstRetargetReference = await client.getScimGroupJobReference(
+    workspaceId,
+    firstGroup.groupId,
+  )
+  const secondRetargetReference = await client.getScimGroupJobReference(
+    workspaceId,
+    secondGroup.groupId,
+  )
+  expect(firstRetargetReference).toBeDefined()
+  expect(secondRetargetReference).toBeDefined()
+  await expect(client.putGroupMapping(retargetedMapping)).rejects.toMatchObject({
+    code: 'EnterpriseGroupMappingConflict',
+  })
+  expect(await client.getScimGroupJobReference(
+    workspaceId,
+    firstGroup.groupId,
+  )).toEqual(firstRetargetReference)
+  expect(await client.getScimGroupJobReference(
+    workspaceId,
+    secondGroup.groupId,
+  )).toEqual(secondRetargetReference)
+
+  const retargetedUserIds: string[] = []
+  for (const reference of [firstRetargetReference, secondRetargetReference]) {
+    if (!reference) throw new Error('Expected both retargeted group jobs.')
+    expect(await client.processScimGroupJob(
+      reference,
+      async (input) => {
+        expect(input.phase).toBe('settle')
+        retargetedUserIds.push(input.user.userId)
+      },
+    )).toMatchObject({ status: 'completed' })
+  }
+  expect(retargetedUserIds.sort()).toEqual(
+    users.map((user) => user.userId).sort(),
+  )
+
+  await client.deleteGroupMapping(workspaceId, mapping.mappingId, 2)
+  expect(await client.getScimGroupJobReference(
+    workspaceId,
+    firstGroup.groupId,
+  )).toBeUndefined()
+  const deleteReference = await client.getScimGroupJobReference(
+    workspaceId,
+    secondGroup.groupId,
+  )
+  if (!deleteReference) {
+    throw new Error('Expected mapping deletion to enqueue its previous group.')
+  }
+  const deletedMappingUserIds: string[] = []
+  expect(await client.processScimGroupJob(
+    deleteReference,
+    async (input) => {
+      expect(input.phase).toBe('settle')
+      deletedMappingUserIds.push(input.user.userId)
+    },
+  )).toMatchObject({ status: 'completed' })
+  expect(deletedMappingUserIds).toEqual([secondUser.userId])
 })
 
 test('allows only one running provisioning run per Workspace', async () => {
@@ -1162,6 +1331,59 @@ test('does not enforce SSO before provider and domain prerequisites are active',
     createdAt: now.toISOString(),
     updatedAt: now.toISOString(),
   })).rejects.toMatchObject({ code: 'EnterpriseSsoPrerequisiteMissing' })
+})
+
+test('rejects break-glass activation when its recovery domain becomes managed', async () => {
+  const client = new InMemoryEnterpriseIdentityClient(tokenSecret, () => now)
+  await client.putBreakGlassAccount({
+    workspaceId,
+    accountId: 'break-glass-1',
+    linkedMemberKey: 'recovery-user',
+    email: 'recovery@outside.example',
+    status: 'active',
+    requireMfa: true,
+    maximumActivationMinutes: 15,
+    mfaVerifiedAt: now.toISOString(),
+    revision: 1,
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+  })
+
+  const routeSnapshot = await client.getSnapshot(workspaceId)
+  expect(routeSnapshot.domains).toEqual([])
+  await client.putVerifiedDomain({
+    workspaceId,
+    domainId: 'outside-example',
+    domain: 'outside.example',
+    status: 'verified',
+    revision: 1,
+    verificationRecordName: '_mukuroji.outside.example',
+    verifiedAt: now.toISOString(),
+    enforceSso: false,
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+  })
+
+  await expect(client.activateBreakGlass(
+    workspaceId,
+    'break-glass-1',
+    'recovery-user',
+    'authentication-session',
+    'Recover access',
+    15,
+  )).rejects.toMatchObject({
+    code: 'EnterpriseBreakGlassRecoveryDomainManaged',
+    status: 409,
+  })
+  expect(await client.getActiveBreakGlassActivation(
+    workspaceId,
+    'recovery-user',
+    'authentication-session',
+  )).toBeUndefined()
+  const persistedAccount = (await client.getSnapshot(workspaceId))
+    .breakGlassAccounts[0]
+  expect(persistedAccount?.revision).toBe(1)
+  expect(persistedAccount?.lastTestedAt).toBeUndefined()
 })
 
 test('claims and releases domains atomically with in-memory state', async () => {
@@ -1384,6 +1606,60 @@ test('atomically writes reference-only SCIM job rows through apply and settle co
   expect(await client.getScimGroupJobReference(workspaceId, group.groupId))
     .toBeUndefined()
 
+  await client.putGroupMapping({
+    workspaceId,
+    mappingId: 'job-storage-mapping',
+    identityProviderId: group.identityProviderId,
+    directoryGroupId: group.externalId,
+    roleId: 'workspace:guest',
+    scope: { workspaceId, kind: 'workspace' },
+    enabled: true,
+    priority: 0,
+    revision: 1,
+    updatedAt: now.toISOString(),
+  })
+  const mappingReference = await client.getScimGroupJobReference(
+    workspaceId,
+    group.groupId,
+  )
+  if (!mappingReference) {
+    throw new Error('Expected mapping mutation to persist a group job.')
+  }
+  const mappingItems = harness.transactions.at(-1)?.TransactItems as
+    Array<Record<string, unknown>>
+  expect(mappingItems[0]).toHaveProperty('Put.Item.recordKey', 'CONTROL')
+  expect(mappingItems.some((item) =>
+    (item.Put as {
+      Item?: { jobId?: string; revision?: number }
+    } | undefined)?.Item?.jobId === mappingReference.jobId &&
+    (item.Put as {
+      Item?: { revision?: number }
+    } | undefined)?.Item?.revision === mappingReference.revision
+  )).toBe(true)
+  const mappingPhases: string[] = []
+  expect(await client.processScimGroupJob(
+    mappingReference,
+    async (input) => {
+      mappingPhases.push(input.phase)
+    },
+  )).toMatchObject({ status: 'continued' })
+  const mappingSettleReference = await client.getScimGroupJobReference(
+    workspaceId,
+    group.groupId,
+  )
+  if (!mappingSettleReference) {
+    throw new Error('Expected the multi-page mapping job to continue.')
+  }
+  expect(await client.processScimGroupJob(
+    mappingSettleReference,
+    async (input) => {
+      mappingPhases.push(input.phase)
+    },
+  )).toMatchObject({ status: 'completed' })
+  expect(mappingPhases).toEqual(
+    Array.from({ length: users.length }, () => 'settle'),
+  )
+
   const recreatedGroup = await client.upsertScimGroup({
     workspaceId,
     groupId: group.groupId,
@@ -1507,9 +1783,17 @@ test('queries provider-scoped SCIM pages and authentication from direct projecti
   })
 
   expect(authentication).toMatchObject({
-    credential: { identityProviderId: 'idp-direct-a' },
+    credential: {
+      identityProviderId: 'idp-direct-a',
+      tokenLastFour: credential.token.slice(-4),
+    },
     provider: { providerId: 'idp-direct-a' },
   })
+  const persistedState = JSON.stringify([...harness.items.values()])
+  expect(persistedState).not.toContain(credential.token)
+  expect(persistedState).toContain(
+    `"tokenLastFour":"${credential.token.slice(-4)}"`,
+  )
   expect(secondPage).toMatchObject({
     totalResults: 2,
     startIndex: 2,

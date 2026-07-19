@@ -16,6 +16,7 @@ import {
   createWorkspaceMemberAuditEntityId,
   DynamoDbAuditEventsClient,
   ensureLocalAuditEventsTable,
+  getConfiguredAuditRetentionDays,
   getConfiguredAuditTableName,
   getConfiguredDynamoDbEndpoint,
   readWorkspaceAuditPseudonymKey,
@@ -31,6 +32,38 @@ test('calculates audit expiry from the historical event occurrence time', () => 
   expect(calculateAuditExpiresAt(occurredAt, 30)).toBe(
     Math.floor(Date.parse(occurredAt) / 1000) + 30 * 86_400,
   )
+})
+
+test('treats blank audit retention environment values as unset', () => {
+  const originalMukurojiRetentionDays = process.env.MUKUROJI_AUDIT_RETENTION_DAYS
+  const originalRetentionDays = process.env.AUDIT_RETENTION_DAYS
+
+  try {
+    process.env.MUKUROJI_AUDIT_RETENTION_DAYS = ' '
+    process.env.AUDIT_RETENTION_DAYS = ''
+    expect(getConfiguredAuditRetentionDays()).toBe(2555)
+
+    process.env.AUDIT_RETENTION_DAYS = '365'
+    expect(getConfiguredAuditRetentionDays()).toBe(365)
+
+    for (const invalidValue of ['invalid', '0', '-1']) {
+      process.env.MUKUROJI_AUDIT_RETENTION_DAYS = invalidValue
+      expect(() => getConfiguredAuditRetentionDays()).toThrow(
+        'Audit retention days must be a positive number.',
+      )
+    }
+  } finally {
+    if (originalMukurojiRetentionDays === undefined) {
+      delete process.env.MUKUROJI_AUDIT_RETENTION_DAYS
+    } else {
+      process.env.MUKUROJI_AUDIT_RETENTION_DAYS = originalMukurojiRetentionDays
+    }
+    if (originalRetentionDays === undefined) {
+      delete process.env.AUDIT_RETENTION_DAYS
+    } else {
+      process.env.AUDIT_RETENTION_DAYS = originalRetentionDays
+    }
+  }
 })
 
 test('allows an omitted expiry only for an unknown-time backfill event', () => {

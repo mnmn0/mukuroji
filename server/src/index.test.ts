@@ -82,6 +82,20 @@ import {
   InMemoryEnterpriseIdentityClient,
   resolveEnterpriseDirectoryPrincipal,
 } from './enterprise-identity'
+import {
+  createEnterpriseScimGroupJobWorkerHandler,
+} from './enterprise-scim-group-job-worker-handler'
+import {
+  createEnterpriseScimGroupJobProcessor,
+} from './enterprise-scim-group-job-worker'
+import type {
+  EnterpriseScimGroupJobProcessor,
+} from './enterprise-scim-group-job-handler'
+
+const enterpriseScimGroupJobProcessors = new WeakMap<
+  InMemoryEnterpriseIdentityClient,
+  EnterpriseScimGroupJobProcessor
+>()
 
 afterEach(() => {
   resetApiClientsForTest()
@@ -3059,8 +3073,16 @@ test('binds a route-issued SCIM credential to the active Cognito provider', asyn
       },
     })
     expect(body.token).toStartWith('msc_')
+    expect(body.scim.tokenLastFour).toBe(body.token.slice(-4))
     expect(await identity.authenticateScimToken(workspaceId, body.token))
       .toMatchObject({ identityProviderId: 'idp-1' })
+
+    const snapshotResponse = await app.request('/api/enterprise/security', {
+      headers: { Authorization: 'Bearer test-token' },
+    })
+    expect(snapshotResponse.status).toBe(200)
+    expect((await snapshotResponse.json()).scim.tokenLastFour)
+      .toBe(body.token.slice(-4))
   })
 })
 
@@ -3653,7 +3675,39 @@ test('reconciles workspace guest roles for SCIM membership and mapping changes',
     )
     expect(mappingResponse.status).toBe(201)
     const mapping = (await mappingResponse.json()).mapping
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+    expect(await scenario.identity.getScimGroupJobReference(
+      workspaceId,
+      group.id,
+    )).toBeDefined()
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
     expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+    const replayMappingResponse = await app.request(
+      '/api/enterprise/security/group-mappings',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'workspace-guest-mapping',
+        },
+        body: JSON.stringify({
+          identityProviderId: 'idp-guest-role',
+          directoryGroupId: group.id,
+          scopeType: 'workspace',
+          roleId: 'workspace:guest',
+        }),
+      },
+    )
+    expect(replayMappingResponse.status).toBe(200)
+    expect(await scenario.identity.getScimGroupJobReference(
+      workspaceId,
+      group.id,
+    )).toBeUndefined()
 
     const removeMemberResponse = await app.request(
       `${scimBaseUrl}/Groups/${group.id}`,
@@ -3773,6 +3827,16 @@ test('reconciles workspace guest roles for SCIM membership and mapping changes',
       },
     )
     expect(memberMappingResponse.status).toBe(200)
+    expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+    expect(await scenario.identity.getScimGroupJobReference(
+      workspaceId,
+      group.id,
+    )).toBeDefined()
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
     expect(scenario.members.get('managed@example.com')?.role).toBe('member')
 
     const guestMappingResponse = await app.request(
@@ -3792,6 +3856,16 @@ test('reconciles workspace guest roles for SCIM membership and mapping changes',
       },
     )
     expect(guestMappingResponse.status).toBe(200)
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+    expect(await scenario.identity.getScimGroupJobReference(
+      workspaceId,
+      group.id,
+    )).toBeDefined()
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
     expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
 
     const deleteMappingResponse = await app.request(
@@ -3806,6 +3880,16 @@ test('reconciles workspace guest roles for SCIM membership and mapping changes',
       },
     )
     expect(deleteMappingResponse.status).toBe(204)
+    expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+    expect(await scenario.identity.getScimGroupJobReference(
+      workspaceId,
+      group.id,
+    )).toBeDefined()
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
     expect(scenario.members.get('managed@example.com')?.role).toBe('member')
 
     const deleteGroupResponse = await app.request(
@@ -3918,6 +4002,11 @@ test('settles interleaved multi-page SCIM group jobs to the final guest role', a
         },
       )
       expect(mappingResponse.status).toBe(201)
+      await drainEnterpriseScimGroupJob(
+        scenario.identity,
+        workspaceId,
+        group.id,
+      )
     }
     expect(users.every((user) =>
       scenario.members.get(user.userName)?.role === 'guest'
@@ -4182,7 +4271,10 @@ test('changes group job audit identity when a callback loses its state checkpoin
       }],
     }
 
-    expect(await handler(streamEvent)).toEqual({
+    const workerHandler = createEnterpriseScimGroupJobWorkerHandler(
+      requireEnterpriseScimGroupJobProcessor(scenario.identity),
+    )
+    expect(await workerHandler(streamEvent)).toEqual({
       batchItemFailures: [{
         itemIdentifier: `sequence-${reference.revision}`,
       }],
@@ -4193,7 +4285,7 @@ test('changes group job audit identity when a callback loses its state checkpoin
     )).toEqual(reference)
     expect(scenario.reconcileAuditContexts).toHaveLength(1)
 
-    expect(await handler(streamEvent)).toEqual({ batchItemFailures: [] })
+    expect(await workerHandler(streamEvent)).toEqual({ batchItemFailures: [] })
     expect(scenario.reconcileAuditContexts).toHaveLength(2)
     expect(scenario.reconcileAuditContexts[1]?.idempotencyKeyHash)
       .not.toBe(scenario.reconcileAuditContexts[0]?.idempotencyKeyHash)
@@ -11384,6 +11476,28 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
     revision: 1,
     updatedAt: now,
   })
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:service-account-manager',
+    name: 'Service account manager',
+    permissions: ['service-accounts.manage'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: 'service-account-manager-mapping',
+    identityProviderId: 'idp-project-role',
+    directoryGroupId: group.groupId,
+    roleId: 'custom:service-account-manager',
+    scope: { workspaceId, kind: 'workspace' },
+    enabled: true,
+    priority: 4,
+    revision: 1,
+    updatedAt: now,
+  })
   configureApiClientsForTest({
     enterpriseIdentity: identity,
     planning: new InMemoryPlanningClient(),
@@ -11455,6 +11569,31 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
       body: JSON.stringify({ expectedRevision: 1 }),
     },
   )
+  const breakGlassAccountResponse = await app.request(
+    '/api/enterprise/security/break-glass/accounts',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ email: 'demo@example.com' }),
+    },
+  )
+  const breakGlassDeactivateResponse = await app.request(
+    '/api/enterprise/security/break-glass/deactivate',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        administratorId: 'recovery-demo',
+        expectedVersion: 1,
+      }),
+    },
+  )
 
   expect(allowed.status).toBe(200)
   expect(denied.status).toBe(403)
@@ -11463,6 +11602,14 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
   expect(projectUserCandidatesResponse.status).toBe(403)
   expect(planningCreateResponse.status).toBe(201)
   expect(planningArchiveResponse.status).toBe(403)
+  expect(breakGlassAccountResponse.status).toBe(403)
+  expect(await breakGlassAccountResponse.json()).toMatchObject({
+    code: 'WorkspacePermissionDenied',
+  })
+  expect(breakGlassDeactivateResponse.status).toBe(403)
+  expect(await breakGlassDeactivateResponse.json()).toMatchObject({
+    code: 'WorkspacePermissionDenied',
+  })
   expect(await directoryResponse.json()).toEqual({
     teams: [{
       id: 'core-team',
@@ -11801,10 +11948,26 @@ test('uses an active break-glass elevation to repair an IP allowlist lockout', a
     breakGlassAuditContext = auditContext
     return putSecurityPolicy(policy, auditContext)
   }
+  let verifyRecoveryDomainDuringMfa = false
   configureApiClientsForTest({
     enterpriseIdentity: identity,
     enterpriseSessionActivity: {
       async getAuthenticationMethods() {
+        if (verifyRecoveryDomainDuringMfa) {
+          verifyRecoveryDomainDuringMfa = false
+          await identity.putVerifiedDomain({
+            workspaceId,
+            domainId: 'outside-example',
+            domain: 'outside.example',
+            status: 'verified',
+            revision: 1,
+            verificationRecordName: '_mukuroji-challenge.outside.example',
+            verifiedAt: now,
+            enforceSso: false,
+            createdAt: now,
+            updatedAt: now,
+          })
+        }
         return ['software_token_mfa']
       },
       async recordAuthenticationAssurance() {
@@ -11886,6 +12049,32 @@ test('uses an active break-glass elevation to repair an IP allowlist lockout', a
     correlationId: activationBody.activation.id,
   })
   expect((await identity.getSnapshot(workspaceId)).policy?.ipAllowlist).toEqual([])
+
+  verifyRecoveryDomainDuringMfa = true
+  const managedDomainActivation = await app.request(
+    '/api/enterprise/security/break-glass/activate',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${alternateAccessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        reason: 'Attempt recovery after domain verification',
+        durationMinutes: 15,
+      }),
+    },
+  )
+  expect(managedDomainActivation.status).toBe(409)
+  expect(await managedDomainActivation.json()).toMatchObject({
+    code: 'EnterpriseBreakGlassRecoveryDomainManaged',
+    message: 'Break-glass recovery must use an account outside every managed domain.',
+  })
+  expect(await identity.getActiveBreakGlassActivation(
+    workspaceId,
+    'demo@example.com',
+    createHash('sha256').update(alternateAccessToken).digest('base64url'),
+  )).toBeUndefined()
 })
 
 test('updates a team-owned issue after team access is confirmed', async () => {
@@ -16381,7 +16570,10 @@ async function processEnterpriseScimGroupJobPage(
     groupId,
   )
   if (!reference) return false
-  const result = await handler({
+  const workerHandler = createEnterpriseScimGroupJobWorkerHandler(
+    requireEnterpriseScimGroupJobProcessor(identity),
+  )
+  const result = await workerHandler({
     Records: [{
       eventSource: 'aws:dynamodb',
       eventName,
@@ -16400,6 +16592,16 @@ async function processEnterpriseScimGroupJobPage(
   })
   expect(result).toEqual({ batchItemFailures: [] })
   return true
+}
+
+function requireEnterpriseScimGroupJobProcessor(
+  identity: InMemoryEnterpriseIdentityClient,
+) {
+  const processor = enterpriseScimGroupJobProcessors.get(identity)
+  if (!processor) {
+    throw new Error('Enterprise SCIM group job test processor is not configured.')
+  }
+  return processor
 }
 
 async function withTestEnvironment(
@@ -16486,63 +16688,118 @@ async function configureEnterpriseScimGuestRoleScenario(workspaceId: string) {
   const reconcileAuditContexts: MutationAuditContext[] = []
   let reconcileFailures = 0
   let afterNextDirectoryReconcile: (() => Promise<void>) | undefined
+  const planningClient = new InMemoryPlanningClient()
+  const workspaceAccessClient = {
+    async getMember(_workspaceId: string, memberKey: string) {
+      return members.get(memberKey)
+    },
+    async getActiveMember(_workspaceId: string, memberKey: string) {
+      const member = members.get(memberKey)
+      return member?.status === 'active' ? member : undefined
+    },
+    async listActiveMembers() {
+      return [...members.values()].filter((member) => member.status === 'active')
+    },
+    async reconcileDirectoryMember(
+      _workspaceId: string,
+      input: Parameters<
+        NonNullable<WorkspaceAccessClient['reconcileDirectoryMember']>
+      >[1],
+      auditContext?: MutationAuditContext,
+    ) {
+      if (reconcileFailures > 0) {
+        reconcileFailures -= 1
+        throw new WorkspaceAccessError(
+          503,
+          'WorkspaceDirectoryReconcileUnavailable',
+          'Directory reconciliation is temporarily unavailable.',
+        )
+      }
+      const existing = members.get(input.memberKey)
+      if (
+        input.expectedVersion !== undefined &&
+        existing?.version !== input.expectedVersion
+      ) {
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceMemberVersionConflict',
+          'Workspace member changed.',
+        )
+      }
+      const member: WorkspaceMember = {
+        id: input.memberKey,
+        memberKey: input.memberKey,
+        email: input.email,
+        name: input.name,
+        role: input.role,
+        status: 'active',
+        provisioningSource: 'directory',
+        externalIdentityId: input.externalIdentityId,
+        version: (existing?.version ?? 0) + 1,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      }
+      members.set(input.memberKey, member)
+      reconciledRoles.push(member.role)
+      if (auditContext) reconcileAuditContexts.push(auditContext)
+      const afterReconcile = afterNextDirectoryReconcile
+      afterNextDirectoryReconcile = undefined
+      await afterReconcile?.()
+      return member
+    },
+    async deprovisionDirectoryMember(
+      _workspaceId: string,
+      memberKey: string,
+      _input: Parameters<
+        NonNullable<WorkspaceAccessClient['deprovisionDirectoryMember']>
+      >[2],
+      auditContext?: MutationAuditContext,
+    ) {
+      const existing = members.get(memberKey)
+      if (!existing) return undefined
+      const member = {
+        ...existing,
+        status: 'deactivated' as const,
+        version: existing.version + 1,
+        updatedAt: now,
+      }
+      members.set(memberKey, member)
+      if (auditContext) reconcileAuditContexts.push(auditContext)
+      return member
+    },
+  } as unknown as WorkspaceAccessClient
   configureApiClientsForTest({
     enterpriseIdentity: identity,
-    planning: new InMemoryPlanningClient(),
-    workspaceAccess: {
-      async getMember(_workspaceId: string, memberKey: string) {
-        return members.get(memberKey)
-      },
-      async getActiveMember(_workspaceId: string, memberKey: string) {
-        const member = members.get(memberKey)
-        return member?.status === 'active' ? member : undefined
-      },
-      async listActiveMembers() {
-        return [...members.values()].filter((member) => member.status === 'active')
-      },
-      async reconcileDirectoryMember(_workspaceId, input, auditContext) {
-        if (reconcileFailures > 0) {
-          reconcileFailures -= 1
-          throw new WorkspaceAccessError(
-            503,
-            'WorkspaceDirectoryReconcileUnavailable',
-            'Directory reconciliation is temporarily unavailable.',
-          )
-        }
-        const existing = members.get(input.memberKey)
-        if (
-          input.expectedVersion !== undefined &&
-          existing?.version !== input.expectedVersion
-        ) {
-          throw new WorkspaceAccessError(
-            409,
-            'WorkspaceMemberVersionConflict',
-            'Workspace member changed.',
-          )
-        }
-        const member: WorkspaceMember = {
-          id: input.memberKey,
-          memberKey: input.memberKey,
-          email: input.email,
-          name: input.name,
-          role: input.role,
-          status: 'active',
-          provisioningSource: 'directory',
-          externalIdentityId: input.externalIdentityId,
-          version: (existing?.version ?? 0) + 1,
-          createdAt: existing?.createdAt ?? now,
-          updatedAt: now,
-        }
-        members.set(input.memberKey, member)
-        reconciledRoles.push(member.role)
-        if (auditContext) reconcileAuditContexts.push(auditContext)
-        const afterReconcile = afterNextDirectoryReconcile
-        afterNextDirectoryReconcile = undefined
-        await afterReconcile?.()
-        return member
-      },
-    } as unknown as WorkspaceAccessClient,
+    planning: planningClient,
+    workspaceAccess: workspaceAccessClient,
   })
+  enterpriseScimGroupJobProcessors.set(
+    identity,
+    createEnterpriseScimGroupJobProcessor({
+      enterpriseIdentity: identity,
+      planning: planningClient,
+      workspaceAccess: workspaceAccessClient as Required<Pick<
+        WorkspaceAccessClient,
+        'deprovisionDirectoryMember' | 'getMember' | 'reconcileDirectoryMember'
+      >>,
+      projectManagerGuard: {
+        async hasManagedProject() {
+          return false
+        },
+      },
+      cognito: {
+        async disableWorkspaceUser() {
+          return undefined
+        },
+        async enableWorkspaceUser() {
+          return undefined
+        },
+        async globallySignOutWorkspaceUser() {
+          return undefined
+        },
+      },
+    }),
+  )
   return {
     identity,
     members,

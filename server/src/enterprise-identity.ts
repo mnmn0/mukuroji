@@ -1852,7 +1852,7 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityClient {
       upsertBy(state.groupMappings, mapping, (candidate) =>
         candidate.mappingId === mapping.mappingId
       )
-      restartPendingEnterpriseScimGroupJobsForMappingChanges(
+      enqueueEnterpriseScimGroupJobsForMappingChanges(
         state,
         [existing, mapping],
         mapping.updatedAt,
@@ -1897,7 +1897,7 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityClient {
       state.roleAssignments = state.roleAssignments.filter((assignment) =>
         assignment.mappingId !== mappingId
       )
-      restartPendingEnterpriseScimGroupJobsForMappingChanges(
+      enqueueEnterpriseScimGroupJobsForMappingChanges(
         state,
         [mapping],
         this.clock().toISOString(),
@@ -1921,6 +1921,7 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityClient {
       identityProviderId: normalizedProviderId,
       credentialId: crypto.randomUUID(),
       label: requireText(label, 'SCIM credential label'),
+      tokenLastFour: token.slice(-4),
       createdAt,
       ...(expiresAt ? { expiresAt: normalizeTimestamp(expiresAt, 'Credential expiry') } : {}),
     }
@@ -2069,6 +2070,7 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityClient {
         identityProviderId: normalizedProviderId,
         credentialId,
         label: requireText(label, 'SCIM credential label'),
+        tokenLastFour: token.slice(-4),
         createdAt,
       }
       for (const existing of providerCredentials) {
@@ -3642,6 +3644,7 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityClient {
           'Active break-glass account was not found for this member.',
         )
       }
+      requireUnmanagedEnterpriseBreakGlassRecoveryDomain(state, account.email)
       if (
         !Number.isSafeInteger(durationMinutes) ||
         durationMinutes < 1 ||
@@ -5019,7 +5022,7 @@ function enqueueEnterpriseScimGroupJob(
   upsertBy(state.scimGroupJobs, job, (candidate) => candidate.jobId === jobId)
 }
 
-function restartPendingEnterpriseScimGroupJobsForMappingChanges(
+function enqueueEnterpriseScimGroupJobsForMappingChanges(
   state: EnterpriseIdentityState,
   mappings: ReadonlyArray<EnterpriseDirectoryGroupMapping | undefined>,
   updatedAt: string,
@@ -5028,26 +5031,46 @@ function restartPendingEnterpriseScimGroupJobsForMappingChanges(
     mapping,
   ): mapping is EnterpriseDirectoryGroupMapping =>
     mapping !== undefined &&
+    mapping.enabled &&
     mapping.scope.kind === 'workspace' &&
     mapping.roleId === 'workspace:guest'
   )
   if (affectedMappings.length === 0) return
-  for (const job of state.scimGroupJobs) {
-    const group = state.scimGroups.find((candidate) =>
-      candidate.groupId === job.groupId &&
-      affectedMappings.some((mapping) =>
-        mapping.identityProviderId === candidate.identityProviderId &&
-        (
-          mapping.directoryGroupId === candidate.groupId ||
-          mapping.directoryGroupId === candidate.externalId
-        )
-      )
+  const affectedGroups = new Map<string, EnterpriseScimGroup>()
+  for (const mapping of affectedMappings) {
+    const groupIdMatch = state.scimGroups.find((group) =>
+      group.identityProviderId === mapping.identityProviderId &&
+      group.groupId === mapping.directoryGroupId
     )
-    if (!group) continue
-    job.phase = group.appliedVersion >= job.groupVersion ? 'settle' : 'apply'
-    job.cursor = 0
-    job.revision = state.storageRevision + 1
-    job.updatedAt = updatedAt
+    if (groupIdMatch) affectedGroups.set(groupIdMatch.groupId, groupIdMatch)
+    const externalIdMatches = state.scimGroups.filter((group) =>
+      group.identityProviderId === mapping.identityProviderId &&
+      group.externalId === mapping.directoryGroupId
+    )
+    if (externalIdMatches.length > 1) throw invalidEnterpriseIdentityState()
+    const externalIdMatch = externalIdMatches[0]
+    if (externalIdMatch) {
+      affectedGroups.set(externalIdMatch.groupId, externalIdMatch)
+    }
+  }
+  for (const group of affectedGroups.values()) {
+    const existingJob = state.scimGroupJobs.find((job) =>
+      job.groupId === group.groupId
+    )
+    if (!existingJob && !group.active) {
+      continue
+    }
+    enqueueEnterpriseScimGroupJob(
+      state,
+      group,
+      existingJob?.targetUserIds ?? group.memberUserIds,
+      updatedAt,
+    )
+    const enqueuedJob = state.scimGroupJobs.find((job) =>
+      job.groupId === group.groupId
+    )
+    if (!enqueuedJob) throw invalidEnterpriseIdentityState()
+    enqueuedJob.phase = group.appliedVersion >= group.version ? 'settle' : 'apply'
   }
 }
 
@@ -6892,6 +6915,22 @@ function isEnterpriseSsoRecoveryAccountReady(
     !state.domains.some((domain) =>
       domain.status === 'verified' && domain.domain === emailDomain
     )
+}
+
+function requireUnmanagedEnterpriseBreakGlassRecoveryDomain(
+  state: EnterpriseIdentityState,
+  email: string,
+) {
+  const emailDomain = normalizeEmailDomain(email)
+  if (state.domains.some((domain) =>
+    domain.status === 'verified' && domain.domain === emailDomain
+  )) {
+    throw new EnterpriseIdentityError(
+      409,
+      'EnterpriseBreakGlassRecoveryDomainManaged',
+      'Break-glass recovery must use an account outside every managed domain.',
+    )
+  }
 }
 
 function normalizeEmails(values: string[]) {
