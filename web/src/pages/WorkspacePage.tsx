@@ -6,7 +6,7 @@ import type {
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
-import { Link, useNavigate, useParams } from 'react-router'
+import { Link, useLocation, useNavigate, useParams } from 'react-router'
 import useSWR from 'swr'
 import {
   canManageWorkspaceStructure,
@@ -44,6 +44,8 @@ import {
   useNotificationPreferences,
   useUnreadNotificationCount,
 } from '../notifications/useNotifications'
+import { DeveloperPlatformPanelContainer } from '../developer-platform/DeveloperPlatformPanel'
+import { createDeveloperPlatformLabels } from '../developer-platform/labels'
 import {
   getWorkspaceWorkItems,
   TeamIssuesApiError,
@@ -2451,6 +2453,43 @@ function SettingsView({
   teams: ProjectDirectoryTeam[]
   userLabel: string
 }) {
+  const location = useLocation()
+  const developerPlatformLabels = useMemo(
+    () => createDeveloperPlatformLabels(locale),
+    [locale],
+  )
+  const developerImportTeamOptions = useMemo(
+    () => teams.map((team) => ({
+      value: team.id,
+      label: team.name,
+      description: team.id,
+    })),
+    [teams],
+  )
+  const developerImportProjectOptions = useMemo(() => {
+    return teams.flatMap((team) =>
+      team.projects.map((project) => ({
+        value: project.id,
+        label: project.name,
+        description: team.name,
+        teamId: team.id,
+      })),
+    )
+  }, [teams])
+  const developerDateTimeFormatter = useMemo(
+    () => new Intl.DateTimeFormat(locale === 'ja' ? 'ja-JP' : 'en-US', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }),
+    [locale],
+  )
+  const developerInitialSection = useMemo(
+    () => new URLSearchParams(location.search).get('developerSection') === 'connectors'
+      ? 'connectors' as const
+      : undefined,
+    [location.search],
+  )
+
   return (
     <div className="grid gap-5">
       <section className="workbench-panel overflow-hidden">
@@ -2535,6 +2574,17 @@ function SettingsView({
 
       {accessToken ? (
         <WorkspaceAccessPanelContainer accessToken={accessToken} locale={locale} />
+      ) : null}
+
+      {accessToken ? (
+        <DeveloperPlatformPanelContainer
+          accessToken={accessToken}
+          formatDateTime={(value) => developerDateTimeFormatter.format(new Date(value))}
+          initialSection={developerInitialSection}
+          importProjectOptions={developerImportProjectOptions}
+          importTeamOptions={developerImportTeamOptions}
+          labels={developerPlatformLabels}
+        />
       ) : null}
 
       {accessToken ? (

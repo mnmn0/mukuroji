@@ -4085,3 +4085,13 @@ export type ExportDocumentResponse =
  * Analytics report、snapshot、metric API の公開契約です。
  */
 export * from './analytics'
+
+/**
+ * Public API と developer platform の共有 contract です。
+ */
+export * from './developer-platform'
+
+/**
+ * Public API の OpenAPI 3.1 document です。
+ */
+export * from './openapi'

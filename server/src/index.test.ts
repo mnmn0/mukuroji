@@ -43,11 +43,14 @@ import {
 import {
   app,
   AwsCognitoClient,
+  canManageWorkItemImports,
   CognitoServiceError,
   configureApiClientsForTest,
+  createImportRowCreateIdentity,
   createAutomationActionExecutor,
   createBulkItemMutationIdempotencyKey,
   requireBulkOperationOwner,
+  readConnectorSyncOriginPreviousSigningSecrets,
   resolveRequestClientKey,
   toBulkOperationResponse,
   DynamoDbDashboardSummaryClient,
@@ -57,6 +60,7 @@ import {
   FlociCognitoClient,
   handler,
   resetApiClientsForTest,
+  toWorkItemImportWorkerError,
   WorkspaceAccessError,
   type ProjectRole,
   type WorkspaceAccessClient,
@@ -87,6 +91,107 @@ import {
 
 afterEach(() => {
   resetApiClientsForTest()
+})
+
+test('validates previous connector origin signing secrets for production rotation', () => {
+  const first = 'previous-origin-signing-secret-number-one'
+  const second = 'previous-origin-signing-secret-number-two'
+  expect(readConnectorSyncOriginPreviousSigningSecrets(
+    JSON.stringify([`  ${first}  `, second]),
+  )).toEqual([first, second])
+  expect(readConnectorSyncOriginPreviousSigningSecrets(undefined)).toEqual([])
+  for (const invalid of [
+    'not-json',
+    '{}',
+    JSON.stringify(['short']),
+    JSON.stringify([first, second, first, second]),
+  ]) {
+    expect(() => readConnectorSyncOriginPreviousSigningSecrets(invalid))
+      .toThrow(
+        'CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON must be a JSON array of up to three strings containing at least 32 bytes.',
+      )
+  }
+})
+
+test('scopes deterministic import row identities to the Workspace actor', () => {
+  const context = {
+    requestId: 'request-import-row',
+    idempotencyKey: 'import-same-client-key-row-1',
+  }
+  const input = {
+    title: 'Imported row',
+    assigneeUserId: 'assignee@example.com',
+    dueDate: '2026-07-31',
+    priority: 'medium',
+  } as const
+  const firstActor = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-1',
+    context,
+    'team-1',
+    input,
+  )
+  const firstActorRetry = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-1',
+    context,
+    'team-1',
+    input,
+  )
+  const secondActor = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-2',
+    context,
+    'team-1',
+    input,
+  )
+  const changedPayload = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-1',
+    context,
+    'team-1',
+    { ...input, title: 'Different imported row' },
+  )
+
+  expect(firstActorRetry).toEqual(firstActor)
+  expect(secondActor.issueId).not.toBe(firstActor.issueId)
+  expect(secondActor.requestDigest).not.toBe(firstActor.requestDigest)
+  expect(changedPayload.issueId).toBe(firstActor.issueId)
+  expect(changedPayload.requestDigest).not.toBe(firstActor.requestDigest)
+})
+
+test('requires current Workspace administration for queued import execution', () => {
+  expect(canManageWorkItemImports('owner')).toBe(true)
+  expect(canManageWorkItemImports('admin')).toBe(true)
+  expect(canManageWorkItemImports('member')).toBe(false)
+  expect(canManageWorkItemImports('guest')).toBe(false)
+})
+
+test('retries import configuration conflicts but terminalizes revoked access', () => {
+  expect(toWorkItemImportWorkerError(new WorkItemConfigurationError(
+    409,
+    'WorkItemConfigurationRevisionConflict',
+    'Configuration changed concurrently.',
+  ))).toMatchObject({
+    code: 'ImportConcurrentMutation',
+    retryable: true,
+  })
+  expect(toWorkItemImportWorkerError(new WorkspaceAccessError(
+    403,
+    'WorkspaceRoleDenied',
+    'Workspace management permission changed.',
+  ))).toMatchObject({
+    code: 'ImportAuthorizationRejected',
+    retryable: false,
+  })
+  expect(toWorkItemImportWorkerError(new WorkspaceAccessError(
+    409,
+    'WorkspaceAssigneeInactive',
+    'Only active Workspace members can be assigned.',
+  ))).toMatchObject({
+    code: 'ImportValidationRejected',
+    retryable: false,
+  })
 })
 
 test('keeps Analytics queries independent from the 200-item aggregate list limit', async () => {
@@ -3861,6 +3966,213 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
   expect(sentInputs[0]).toMatchObject({
     TableName: 'issues-table',
     ConsistentRead: true,
+  })
+})
+
+test('pages Public Work Items with a bounded updated-at GSI query and LastEvaluatedKey', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const createStoredIssue = (issueId: string, updatedAt: string) => ({
+    schemaVersion: 1,
+    revision: 1,
+    workflowSchemaVersion: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#project-1',
+    teamId: 'core-team',
+    assignedProjectId: 'project-1',
+    issueId,
+    sortOrder: 1,
+    title: `Issue ${issueId}`,
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'member@example.com',
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-31',
+    priority: 'medium',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt,
+  })
+  const firstKey = {
+    directoryTeamId: 'workspace-1#team#core-team',
+    updatedAt: '2026-07-18T02:00:00.000Z',
+    issueId: 'issue-2',
+  }
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return command.input.ExclusiveStartKey
+        ? { Items: [createStoredIssue('issue-1', '2026-07-18T01:00:00.000Z')] }
+        : {
+            Items: [createStoredIssue('issue-2', '2026-07-18T02:00:00.000Z')],
+            LastEvaluatedKey: firstKey,
+          }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const first = await client.getPublicWorkItemPage('workspace-1', 'core-team', {
+    limit: 1,
+    updatedAfter: '2026-07-18T00:00:00.000Z',
+    accessibleProjectIds: ['project-1'],
+  })
+  const second = await client.getPublicWorkItemPage('workspace-1', 'core-team', {
+    limit: 1,
+    cursor: first.nextCursor,
+    updatedAfter: '2026-07-18T00:00:00.000Z',
+    accessibleProjectIds: ['project-1'],
+  })
+  await client.getPublicWorkItemPage('workspace-1', 'core-team', {
+    limit: 1,
+    accessibleProjectIds: ['project-1'],
+  })
+
+  expect(first.issues.map((issue) => issue.id)).toEqual(['issue-2'])
+  expect(first.nextCursor).toBeString()
+  expect(second.issues.map((issue) => issue.id)).toEqual(['issue-1'])
+  expect(second.nextCursor).toBeUndefined()
+  expect(sentInputs[0]).toMatchObject({
+    TableName: 'issues-table',
+    IndexName: 'TeamIssueUpdatedAtIndex',
+    KeyConditionExpression:
+      '#directoryTeamId = :directoryTeamId AND #updatedAt > :updatedAfter',
+    Limit: 1,
+    ScanIndexForward: false,
+  })
+  expect(sentInputs[1]?.ExclusiveStartKey).toEqual(firstKey)
+  expect(sentInputs[2]).toMatchObject({
+    KeyConditionExpression: '#directoryTeamId = :directoryTeamId',
+    ExpressionAttributeNames: expect.not.objectContaining({
+      '#updatedAt': 'updatedAt',
+    }),
+  })
+})
+
+test('returns an existing deterministic import row only when its request digest matches', async () => {
+  const digest = 'a'.repeat(64)
+  const issueId = `import-${'b'.repeat(48)}`
+  const existing = {
+    schemaVersion: 1,
+    revision: 1,
+    workflowSchemaVersion: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId,
+    importRequestDigest: digest,
+    sortOrder: 10,
+    title: 'Imported once',
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'member@example.com',
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-31',
+    priority: 'medium',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T00:00:00.000Z',
+  }
+  const documentClient = {
+    async send(command: { constructor: { name: string } }) {
+      if (command.constructor.name === 'QueryCommand') return { Items: [] }
+      if (command.constructor.name === 'GetCommand') return { Item: existing }
+      const error = new Error('conditional collision') as Error & {
+        CancellationReasons: Array<{ Code: string }>
+      }
+      error.name = 'TransactionCanceledException'
+      error.CancellationReasons = [
+        { Code: 'ConditionalCheckFailed' },
+        { Code: 'None' },
+      ]
+      throw error
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const input = {
+    title: 'Imported once',
+    assigneeUserId: 'member@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    dueDate: '2026-07-31',
+    priority: 'medium',
+    idempotentIssueId: issueId,
+    idempotentRequestDigest: digest,
+  }
+
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    input,
+    'member@example.com',
+  )).resolves.toMatchObject({ issue: { id: issueId, title: 'Imported once' } })
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    { ...input, idempotentRequestDigest: 'c'.repeat(64) },
+    'member@example.com',
+  )).rejects.toMatchObject({
+    status: 409,
+    code: 'IdempotentWorkItemCreateConflict',
+  })
+})
+
+test('accepts the deterministic public API Work Item ID namespace', async () => {
+  let transactionInput: TransactWriteCommandInput | undefined
+  const documentClient = {
+    async send(command: { constructor: { name: string }; input?: TransactWriteCommandInput }) {
+      if (command.constructor.name === 'QueryCommand') return { Items: [] }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        transactionInput = command.input
+        return {}
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const issueId = `api-${'d'.repeat(48)}`
+
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    {
+      title: 'Created through the public API',
+      assigneeUserId: 'member@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      dueDate: '2026-07-31',
+      priority: 'medium',
+      idempotentIssueId: issueId,
+      idempotentRequestDigest: 'e'.repeat(64),
+    },
+    'member@example.com',
+  )).resolves.toMatchObject({ issue: { id: issueId } })
+  expect(transactionInput?.TransactItems?.[0]?.Put?.Item).toMatchObject({
+    issueId,
+    importRequestDigest: 'e'.repeat(64),
   })
 })
 
@@ -8890,6 +9202,8 @@ test('DynamoDB directory client validates and ignores workspace bootstrap rows f
       directoryId: 'workspace#production',
       entryType: 'team',
       teamId: 'new-team',
+      webhookAuthorizationKey: 'WEBHOOK_ACL#RESOURCE#workspace#production',
+      webhookAuthorizationSortKey: 'TEAM#new-team',
     },
   })
 })
@@ -8967,6 +9281,9 @@ test('DynamoDB directory client creates duplicate named teams with a unique id s
       teamId: '新規チーム-2',
       teamSortOrder: 20,
       entryKey: '000020#000000#TEAM#新規チーム-2',
+      webhookAuthorizationKey:
+        'WEBHOOK_ACL#RESOURCE#user#demo@example.com',
+      webhookAuthorizationSortKey: 'TEAM#新規チーム-2',
     },
     ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
   })
@@ -9057,6 +9374,9 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
             projectId: '新規プロジェクト-2',
             projectSortOrder: 20,
             entryKey: '000010#000020#PROJECT#新規プロジェクト-2',
+            webhookAuthorizationKey:
+              'WEBHOOK_ACL#RESOURCE#user#demo@example.com',
+            webhookAuthorizationSortKey: 'PROJECT#新規プロジェクト-2',
           },
           ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
         },
@@ -9072,6 +9392,9 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
             memberKey: 'demo@example.com',
             email: 'demo@example.com',
             role: 'manager',
+            webhookAuthorizationKey:
+              'WEBHOOK_ACL#MEMBER#user#demo@example.com#demo@example.com',
+            webhookAuthorizationSortKey: 'PROJECT#新規プロジェクト-2',
           },
           ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
         },
@@ -9096,6 +9419,49 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
             ':active': 'active',
             ':expectedVersion': 1,
             ':one': 1,
+          },
+        },
+      },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#新規プロジェクト-2',
+            entryType: 'webhook-team-grant',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: '新規プロジェクト-2',
+            memberKey: 'demo@example.com',
+            sourceEntryKey:
+              'PROJECT_MEMBER#新規プロジェクト-2#demo@example.com',
+            teamSourceEntryKey: '000010#000000#TEAM#core-team',
+            projectSourceEntryKey:
+              '000010#000020#PROJECT#新規プロジェクト-2',
+            webhookAuthorizationKey:
+              'WEBHOOK_ACL#TEAM_MEMBER#user#demo@example.com#core-team#demo@example.com',
+            webhookAuthorizationSortKey: 'PROJECT#新規プロジェクト-2',
+          },
+        },
+      },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey:
+              'PROJECT#新規プロジェクト-2#MEMBER#demo@example.com',
+            entryType: 'webhook-team-grant-cleanup',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: '新規プロジェクト-2',
+            memberKey: 'demo@example.com',
+            grantDirectoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            grantEntryKey:
+              'TEAM#core-team#PROJECT#新規プロジェクト-2',
           },
         },
       },
@@ -9230,6 +9596,13 @@ test('DynamoDB directory client initializes a missing local table before creatin
               { AttributeName: 'directoryId', KeyType: 'HASH' },
               { AttributeName: 'entryKey', KeyType: 'RANGE' },
             ],
+            GlobalSecondaryIndexes: [{
+              IndexName: 'WebhookAuthorizationIndex',
+              KeySchema: [
+                { AttributeName: 'webhookAuthorizationKey', KeyType: 'HASH' },
+                { AttributeName: 'webhookAuthorizationSortKey', KeyType: 'RANGE' },
+              ],
+            }],
             TableStatus: 'ACTIVE',
           },
         }
@@ -9526,6 +9899,7 @@ test('rejects Work Item aggregate Team fan-out beyond the hard cap before item r
   }))
   const calls = configureFakeProjectClients(true, {
     additionalTeams,
+    directoryId: 'workspace-export',
     projectAccesses: [
       { projectId: 'refero', role: 'manager' },
       ...additionalTeams.flatMap((team) =>
@@ -9543,6 +9917,122 @@ test('rejects Work Item aggregate Team fan-out beyond the hard cap before item r
   expect(calls.issueReads).toEqual([])
   expect(calls.taskReads).toEqual([])
   expect(calls.projectIssueReads).toEqual([])
+})
+
+test('requires a current Team Project role for system administrators creating Webhooks', async () => {
+  const calls = configureFakeProjectClients(false, {
+    systemAdminMemberKeys: ['demo@example.com'],
+    workspaceRole: 'owner',
+  })
+  configureApiClientsForTest({
+    developerPlatform: {
+      async consumeRateLimit() {
+        return {
+          allowed: true,
+          limit: 120,
+          remaining: 119,
+          resetAt: '2026-07-18T00:01:00.000Z',
+        }
+      },
+    } as never,
+  })
+
+  const response = await app.request('/api/developer/webhook-subscriptions', {
+    method: 'POST',
+    headers: {
+      Authorization:
+        `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'system-admin-without-project-role',
+    },
+    body: JSON.stringify({
+      name: 'System admin webhook',
+      url: 'https://hooks.example.test/work-items',
+      teamIds: ['core-team'],
+      eventTypes: ['work-item.updated'],
+    }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({
+    code: 'forbidden',
+    detail: 'User "demo@example.com" cannot access team "core-team".',
+  })
+  expect(calls.accessChecks).toContainEqual({
+    directoryId: 'user#demo@example.com',
+    projectId: '*',
+  })
+  expect(calls.directoryReads).toContainEqual({
+    directoryId: 'user#demo@example.com',
+    locale: 'ja',
+    consistentRead: true,
+  })
+})
+
+test('pages all accessible Work Items beyond aggregate Team and item hard caps', async () => {
+  const additionalTeams = Array.from({ length: 20 }, (_, teamIndex) => ({
+    id: `export-team-${teamIndex}`,
+    name: `Export Team ${teamIndex}`,
+    projects: [{
+      id: `export-project-${teamIndex}`,
+      name: `Export Project ${teamIndex}`,
+      tone: 'blue' as const,
+    }],
+  }))
+  const calls = configureFakeProjectClients(true, {
+    additionalTeams,
+    projectAccesses: [
+      { projectId: 'refero', role: 'manager' },
+      ...additionalTeams.flatMap((team) =>
+        team.projects.map((project) => ({
+          projectId: project.id,
+          role: 'manager' as const,
+        }))
+      ),
+    ],
+    teamIssueCount: 11,
+    unassignedIssue: true,
+  })
+  configureApiClientsForTest({
+    developerPlatform: {
+      async consumeRateLimit() {
+        return {
+          allowed: true,
+          limit: 120,
+          remaining: 119,
+          resetAt: '2026-07-18T00:01:00.000Z',
+        }
+      },
+    } as never,
+  })
+
+  const workItems: Array<{ id: string; teamId: string }> = []
+  let cursor: string | undefined
+  let pageCount = 0
+  do {
+    const query = new URLSearchParams({ format: 'json', limit: '50' })
+    if (cursor) query.set('cursor', cursor)
+    const response = await app.request(`/api/developer/exports?${query}`, {
+      headers: { Authorization: 'Bearer test-token' },
+    })
+    expect(response.status).toBe(200)
+    const body = await response.json() as {
+      items: Array<{ id: string; teamId: string }>
+      hasMore: boolean
+      nextCursor?: string
+    }
+    workItems.push(...body.items)
+    cursor = body.nextCursor
+    expect(body.hasMore).toBe(cursor !== undefined)
+    pageCount += 1
+  } while (cursor)
+
+  expect(workItems).toHaveLength(231)
+  expect(new Set(workItems.map((workItem) => workItem.teamId))).toHaveLength(21)
+  expect(pageCount).toBe(21)
+  expect(calls.publicIssuePageReads).toHaveLength(21)
+  expect(calls.publicIssuePageReads.every((read) => read.limit === 50)).toBe(true)
+  expect(calls.issueReads).toEqual([])
 })
 
 test('filters canonical Work Items for authorization before enforcing the response limit', async () => {
@@ -11294,6 +11784,7 @@ test('DynamoDB Work Item comment idempotent replay returns comment and activity'
 
 test('DynamoDB Work Item client increments revision with an atomic CAS update', async () => {
   const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  let preparedResponse: unknown
   const currentIssue = {
     schemaVersion: 1,
     revision: 1,
@@ -11358,6 +11849,20 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
       expectedRevision: 1,
     },
     'demo@example.com',
+    undefined,
+    {
+      async prepare(response) {
+        preparedResponse = response
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: { entryType: 'idempotency', value: { state: 'completed' } },
+            },
+          },
+        }
+      },
+    },
   )).resolves.toMatchObject({
     issue: { schemaVersion: 1, revision: 2, workflowStatusId: 'done' },
   })
@@ -11374,6 +11879,105 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
         '#revision = :expectedRevision',
     },
   })
+  expect(Array.isArray(transactItems) ? transactItems.at(-1) : undefined).toMatchObject({
+    Put: { TableName: 'DeveloperPlatformTable' },
+  })
+  expect(preparedResponse).toMatchObject({
+    status: 200,
+    body: { id: 'wireframe', revision: 2, workflowStatusId: 'done' },
+  })
+})
+
+test('DynamoDB Work Item delete atomically stores its replay receipt', async () => {
+  const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 3,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'obsolete',
+    sortOrder: 10,
+    title: 'Obsolete',
+    assigneeUserId: 'demo@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/20',
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  let preparedResponse: unknown
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentCommands.push({ input: command.input, name: command.constructor.name })
+      if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.deleteTeamIssue(
+    'workspace-1',
+    'core-team',
+    'obsolete',
+    3,
+    'demo@example.com',
+    undefined,
+    {
+      async prepare(response) {
+        preparedResponse = response
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: { entryType: 'idempotency', value: { state: 'completed' } },
+            },
+          },
+        }
+      },
+    },
+    {
+      transactWriteItem: {
+        Put: {
+          TableName: 'DeveloperPlatformTable',
+          Item: {
+            entryType: 'work-item-link-fence',
+            activeLinkCount: 0,
+          },
+        },
+      },
+    },
+  )).resolves.toMatchObject({ issue: { id: 'obsolete', revision: 3 } })
+
+  const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
+  const transactItems = transaction?.input.TransactItems
+  expect(Array.isArray(transactItems) ? transactItems[0] : undefined).toMatchObject({
+    Delete: {
+      TableName: 'IssuesTable',
+      ExpressionAttributeValues: { ':expectedRevision': 3 },
+    },
+  })
+  expect(Array.isArray(transactItems) ? transactItems[1] : undefined).toMatchObject({
+    Put: {
+      TableName: 'DeveloperPlatformTable',
+      Item: { entryType: 'work-item-link-fence', activeLinkCount: 0 },
+    },
+  })
+  expect(Array.isArray(transactItems) ? transactItems.at(-1) : undefined).toMatchObject({
+    Put: { TableName: 'DeveloperPlatformTable' },
+  })
+  expect(preparedResponse).toEqual({ status: 204, body: null })
 })
 
 test('DynamoDB Work Item client classifies configuration conflicts from the actual transaction layout', async () => {
@@ -11891,6 +12495,35 @@ test('DynamoDB directory client reads project access consistently for Workspace 
       ConsistentRead: true,
     }),
   ])
+})
+
+test('DynamoDB directory client excludes archived member roles from access', async () => {
+  const items = createProjectMemberFixtureItems()
+  const member = items.find((item) =>
+    item.entryType === 'project-member' &&
+    item.memberKey === 'demo@example.com'
+  )
+  Object.assign(member!, {
+    archivedAt: '2026-07-18T00:00:00.000Z',
+  })
+  const documentClient = {
+    async send() {
+      return { Items: items }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(
+    client.getProjectAccessList('user#demo@example.com', 'demo@example.com'),
+  ).resolves.toEqual([{ projectId: 'refero', role: undefined }])
+  await expect(
+    client.getProjectMembers('user#demo@example.com', 'refero'),
+  ).resolves.toEqual({
+    projectId: 'refero',
+    members: [
+      expect.objectContaining({ id: 'zmanager@example.com' }),
+    ],
+  })
 })
 
 test('DynamoDB directory client reads every page from the user partition', async () => {
@@ -12461,6 +13094,67 @@ test('DynamoDB directory client manages project member roles', async () => {
           },
         },
       },
+      {
+        ConditionCheck: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000000#TEAM#core-team',
+          },
+          ConditionExpression:
+            '#entryType = :teamEntryType AND attribute_not_exists(archivedAt)',
+        },
+      },
+      {
+        ConditionCheck: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000010#PROJECT#refero',
+          },
+          ConditionExpression:
+            '#entryType = :projectEntryType AND attribute_not_exists(archivedAt)',
+        },
+      },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#sato@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#refero',
+            entryType: 'webhook-team-grant',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: 'refero',
+            memberKey: 'sato@example.com',
+            sourceEntryKey: 'PROJECT_MEMBER#refero#sato@example.com',
+            teamSourceEntryKey: '000010#000000#TEAM#core-team',
+            projectSourceEntryKey: '000010#000010#PROJECT#refero',
+            webhookAuthorizationKey:
+              'WEBHOOK_ACL#TEAM_MEMBER#user#demo@example.com#core-team#sato@example.com',
+            webhookAuthorizationSortKey: 'PROJECT#refero',
+          },
+        },
+      },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#sato@example.com',
+            entryType: 'webhook-team-grant-cleanup',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: 'refero',
+            memberKey: 'sato@example.com',
+            grantDirectoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#sato@example.com',
+            grantEntryKey: 'TEAM#core-team#PROJECT#refero',
+          },
+        },
+      },
     ],
   })
   expect(sentInputs[5]).toMatchObject({
@@ -12517,9 +13211,63 @@ test('DynamoDB directory client manages project member roles', async () => {
           },
         },
       },
+      {
+        Delete: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#refero',
+          },
+        },
+      },
+      {
+        Delete: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#demo@example.com',
+          },
+        },
+      },
     ],
   })
   expect(sentInputs[4]).toMatchObject({ ConsistentRead: true })
+})
+
+test('DynamoDB directory client rejects membership grant fan-out above 100 actions', async () => {
+  const atLimit = createSharedProjectCapacityClient(24)
+  await expect(atLimit.client.updateProjectMember(
+    'workspace-1',
+    'shared-project',
+    'viewer@example.com',
+    {
+      email: 'viewer@example.com',
+      role: 'viewer',
+    },
+    1,
+  )).resolves.toMatchObject({
+    member: { id: 'viewer@example.com' },
+  })
+  expect(atLimit.transactions).toHaveLength(1)
+  expect(atLimit.transactions[0]?.TransactItems).toHaveLength(98)
+
+  const aboveLimit = createSharedProjectCapacityClient(25)
+  await expect(aboveLimit.client.updateProjectMember(
+    'workspace-1',
+    'shared-project',
+    'viewer@example.com',
+    {
+      email: 'viewer@example.com',
+      role: 'viewer',
+    },
+    1,
+  )).rejects.toMatchObject({
+    code: 'ProjectMembershipTransactionTooLarge',
+    status: 409,
+  })
+  expect(aboveLimit.transactions).toEqual([])
 })
 
 test('DynamoDB directory client rejects a concurrent Workspace member creation during role removal', async () => {
@@ -12591,6 +13339,26 @@ test('DynamoDB directory client rejects a concurrent Workspace member creation d
             recordKey: 'MEMBER#demo@example.com',
           },
           ConditionExpression: 'attribute_not_exists(workspaceId)',
+        },
+      },
+      {
+        Delete: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#refero',
+          },
+        },
+      },
+      {
+        Delete: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#demo@example.com',
+          },
         },
       },
     ],
@@ -12787,6 +13555,24 @@ test('DynamoDB directory client treats manager guard transaction cancellation as
           },
         },
       },
+      {
+        Delete: {
+          Key: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#refero',
+          },
+        },
+      },
+      {
+        Delete: {
+          Key: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#demo@example.com',
+          },
+        },
+      },
     ],
   })
   expect(sentInputs).toHaveLength(3)
@@ -12954,6 +13740,59 @@ test('DynamoDB directory client treats manager downgrade transaction cancellatio
           },
           ExpressionAttributeValues: {
             ':expectedVersion': 1,
+          },
+        },
+      },
+      {
+        ConditionCheck: {
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000000#TEAM#core-team',
+          },
+        },
+      },
+      {
+        ConditionCheck: {
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000010#PROJECT#refero',
+          },
+        },
+      },
+      {
+        Put: {
+          Item: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#refero',
+            entryType: 'webhook-team-grant',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: 'refero',
+            memberKey: 'demo@example.com',
+            sourceEntryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+            teamSourceEntryKey: '000010#000000#TEAM#core-team',
+            projectSourceEntryKey: '000010#000010#PROJECT#refero',
+            webhookAuthorizationKey:
+              'WEBHOOK_ACL#TEAM_MEMBER#user#demo@example.com#core-team#demo@example.com',
+            webhookAuthorizationSortKey: 'PROJECT#refero',
+          },
+        },
+      },
+      {
+        Put: {
+          Item: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#demo@example.com',
+            entryType: 'webhook-team-grant-cleanup',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: 'refero',
+            memberKey: 'demo@example.com',
+            grantDirectoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            grantEntryKey: 'TEAM#core-team#PROJECT#refero',
           },
         },
       },
@@ -14117,6 +14956,74 @@ function createProjectMemberFixtureItems(
   ]
 }
 
+function createSharedProjectCapacityClient(teamCount: number) {
+  const transactions: Array<Record<string, unknown>> = []
+  const directoryItems = [
+    ...Array.from({ length: teamCount }, (_, index) => {
+      const sortOrder = index + 1
+      const teamId = `team-${sortOrder}`
+      return [
+        {
+          directoryId: 'workspace-1',
+          entryKey: `${String(sortOrder).padStart(6, '0')}#000000#TEAM#${teamId}`,
+          entryType: 'team',
+          teamId,
+          teamSortOrder: sortOrder,
+          nameJa: `Team ${sortOrder}`,
+          nameEn: `Team ${sortOrder}`,
+          expanded: true,
+        },
+        {
+          directoryId: 'workspace-1',
+          entryKey:
+            `${String(sortOrder).padStart(6, '0')}#000010#PROJECT#shared-project`,
+          entryType: 'project',
+          teamId,
+          teamSortOrder: sortOrder,
+          projectId: 'shared-project',
+          projectSortOrder: 10,
+          nameJa: 'Shared project',
+          nameEn: 'Shared project',
+          tone: 'blue',
+        },
+      ]
+    }).flat(),
+    {
+      directoryId: 'workspace-1',
+      entryKey: 'PROJECT_MEMBER#shared-project#viewer@example.com',
+      entryType: 'project-member',
+      projectId: 'shared-project',
+      memberKey: 'viewer@example.com',
+      email: 'viewer@example.com',
+      role: 'member',
+      createdAt: '2026-07-18T00:00:00.000Z',
+      updatedAt: '2026-07-18T00:00:00.000Z',
+    },
+  ]
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      if ('KeyConditionExpression' in command.input) {
+        return { Items: directoryItems }
+      }
+      if ('TransactItems' in command.input) {
+        transactions.push(command.input)
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  return {
+    client: new DynamoDbProjectDirectoryClient(
+      'DirectoryTable',
+      documentClient,
+      undefined,
+      false,
+      undefined,
+      'WorkspaceAccessTable',
+    ),
+    transactions,
+  }
+}
+
 function createDirectoryMutationAuditContext() {
   return createMutationAuditContext({
     workspaceId: 'user#demo@example.com',
@@ -14585,6 +15492,8 @@ function configureFakeProjectClients(
   options: {
     /** Cognito user pagination fake が page ごとに返す user ID と token です。 */
     cognitoUserPages?: Array<{ userIds: string[]; nextToken?: string }>
+    /** Cognito principal へ設定する明示的な Workspace directory ID です。 */
+    directoryId?: string
     /** Cognito user 一覧 fake が返す次 page token です。 */
     cognitoUsersNextToken?: string
     profileError?: Error
@@ -14724,6 +15633,12 @@ function configureFakeProjectClients(
       }
     }>,
     issueReads: [] as Array<{ directoryId: string; limit?: number; teamId: string }>,
+    publicIssuePageReads: [] as Array<{
+      directoryId: string
+      teamId: string
+      limit: number
+      cursor?: string
+    }>,
     issueUpdates: [] as Array<{
       actorUserId: string
       assignedProjectId?: unknown
@@ -14770,6 +15685,32 @@ function configureFakeProjectClients(
     createdAt: '2026-07-11T00:00:00.000Z',
     updatedAt: '2026-07-11T00:00:00.000Z',
   })
+  const createFakeTeamIssues = (teamId: string) =>
+    Array.from({ length: options.teamIssueCount ?? 1 }, (_, index) => ({
+      schemaVersion: 1 as const,
+      revision: 1,
+      id: index === 0 ? 'onboarding-friction' : `work-item-${index}`,
+      teamId,
+      assignedProjectId: index < (options.inaccessibleTeamIssueCount ?? 0)
+        ? 'private-project'
+        : options.unassignedIssue ? undefined : 'refero',
+      title: index === 0
+        ? '初回オンボーディングの離脱要因を減らす'
+        : `Work Item ${index}`,
+      description: '初回体験の摩擦を下げる。',
+      assigneeUserId: 'sato@example.com',
+      creatorMemberKey: 'demo@example.com',
+      workflowSchemaVersion: 1 as const,
+      workflowStatusId: 'in-progress',
+      statusCategory: 'started' as const,
+      customFieldValues: {},
+      relationIds: [],
+      dueDate: '2026/06/18',
+      priority: 'high' as const,
+      createdAt: '2026-06-08T00:00:00.000Z',
+      updatedAt: '2026-06-08T00:00:00.000Z',
+      source: 'dynamodb' as const,
+    }))
 
   configureApiClientsForTest({
     collaboration: createCollaborationStub({
@@ -14834,6 +15775,12 @@ function configureFakeProjectClients(
               Name: 'email',
               Value: 'Demo@Example.com',
             },
+            ...(options.directoryId
+              ? [{
+                  Name: 'custom:directory_id',
+                  Value: options.directoryId,
+                }]
+              : []),
           ],
         }
       },
@@ -15389,34 +16336,21 @@ function configureFakeProjectClients(
           ...(readOptions?.limit === undefined ? {} : { limit: readOptions.limit }),
         })
 
-        const issues = Array.from({ length: options.teamIssueCount ?? 1 }, (_, index) => ({
-            schemaVersion: 1 as const,
-            revision: 1,
-            id: index === 0 ? 'onboarding-friction' : `work-item-${index}`,
-            teamId,
-            assignedProjectId: index < (options.inaccessibleTeamIssueCount ?? 0)
-              ? 'private-project'
-              : options.unassignedIssue ? undefined : 'refero',
-            title: index === 0
-              ? '初回オンボーディングの離脱要因を減らす'
-              : `Work Item ${index}`,
-            description: '初回体験の摩擦を下げる。',
-            assigneeUserId: 'sato@example.com',
-            creatorMemberKey: 'demo@example.com',
-            workflowSchemaVersion: 1 as const,
-            workflowStatusId: 'in-progress',
-            statusCategory: 'started' as const,
-            customFieldValues: {},
-            relationIds: [],
-            dueDate: '2026/06/18',
-            priority: 'high' as const,
-            createdAt: '2026-06-08T00:00:00.000Z',
-            updatedAt: '2026-06-08T00:00:00.000Z',
-            source: 'dynamodb' as const,
-          }))
+        const issues = createFakeTeamIssues(teamId)
         return {
           teamId,
           issues: readOptions?.limit === undefined ? issues : issues.slice(0, readOptions.limit),
+        }
+      },
+      async getPublicWorkItemPage(directoryId, teamId, readOptions) {
+        calls.publicIssuePageReads.push({
+          directoryId,
+          teamId,
+          limit: readOptions.limit,
+          ...(readOptions.cursor ? { cursor: readOptions.cursor } : {}),
+        })
+        return {
+          issues: createFakeTeamIssues(teamId).slice(0, readOptions.limit),
         }
       },
       async getProjectIssues(directoryId, projectId, readOptions) {

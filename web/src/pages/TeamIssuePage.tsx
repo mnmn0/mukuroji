@@ -81,6 +81,7 @@ import {
   deleteWorkItemRelation,
   getWorkItemConfiguration,
 } from '../work-items/api'
+import { WorkItemExternalLinksPanelContainer } from '../work-items/WorkItemExternalLinksPanel'
 import {
   createDefaultCustomFieldValues,
   isCustomFieldApplicable,
@@ -190,6 +191,14 @@ type TeamIssueScreenProps = {
    * 現在の Workspace member key です。
    */
   currentWorkspaceMemberKey?: string
+  /**
+   * External link read API の Bearer token です。
+   */
+  externalLinksAccessToken?: string
+  /**
+   * External link の作成、更新、解除が許可されているかどうかです。
+   */
+  canManageExternalLinks?: boolean
   /**
    * notification deep link から focus する comment ID です。
    */
@@ -630,9 +639,11 @@ export function TeamIssuePage() {
       assigneeOptions={assigneeOptions}
       artifacts={artifacts}
       collaboration={collaboration}
+      canManageExternalLinks={canManageStructure}
       configurationErrorMessage={configurationErrorMessage}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}
+      externalLinksAccessToken={accessToken}
       defaultCreateIssueOpen={isCreateIssueRequested}
       focusedCommentId={focusedCommentId}
       focusedRootCommentId={focusedRootCommentId}
@@ -676,11 +687,13 @@ export function TeamIssueScreen({
   accessToken,
   assigneeOptions = [],
   artifacts,
+  canManageExternalLinks = false,
   collaboration,
   configurationErrorMessage,
   currentWorkspaceMemberKey,
   defaultCreateIssueOpen = false,
   detailErrorMessage,
+  externalLinksAccessToken,
   focusedCommentId,
   focusedRootCommentId,
   inboxCount = 0,
@@ -1017,10 +1030,12 @@ export function TeamIssueScreen({
                 accessToken={accessToken}
                 assigneeOptions={assigneeOptions}
                 artifacts={artifacts}
+                canManageExternalLinks={canManageExternalLinks}
                 collaboration={collaboration}
                 configuration={configuration}
                 currentWorkspaceMemberKey={currentWorkspaceMemberKey}
                 detailErrorMessage={detailErrorMessage ?? detailErrorMessageLocal}
+                externalLinksAccessToken={externalLinksAccessToken}
                 focusedCommentId={focusedCommentId}
                 focusedRootCommentId={focusedRootCommentId}
                 issue={selectedIssue}
@@ -1510,10 +1525,12 @@ function IssueDetailPane({
   accessToken,
   assigneeOptions,
   artifacts,
+  canManageExternalLinks,
   collaboration,
   configuration,
   currentWorkspaceMemberKey,
   detailErrorMessage,
+  externalLinksAccessToken,
   focusedCommentId,
   focusedRootCommentId,
   issue,
@@ -1531,10 +1548,12 @@ function IssueDetailPane({
   accessToken?: string
   assigneeOptions: ProjectMember[]
   artifacts?: FileArtifactsController
+  canManageExternalLinks: boolean
   collaboration?: IssueCollaborationController
   configuration?: WorkItemConfiguration
   currentWorkspaceMemberKey?: string
   detailErrorMessage?: string
+  externalLinksAccessToken?: string
   focusedCommentId?: string
   focusedRootCommentId?: string
   issue?: TeamIssue
@@ -1562,10 +1581,12 @@ function IssueDetailPane({
       accessToken={accessToken}
       assigneeOptions={assigneeOptions}
       artifacts={artifacts}
+      canManageExternalLinks={canManageExternalLinks}
       collaboration={collaboration}
       configuration={configuration}
       currentWorkspaceMemberKey={currentWorkspaceMemberKey}
       detailErrorMessage={detailErrorMessage}
+      externalLinksAccessToken={externalLinksAccessToken}
       focusedCommentId={focusedCommentId}
       focusedRootCommentId={focusedRootCommentId}
       issue={issue}
@@ -1588,10 +1609,12 @@ function IssueDetailContent({
   accessToken,
   assigneeOptions,
   artifacts,
+  canManageExternalLinks,
   collaboration,
   configuration,
   currentWorkspaceMemberKey,
   detailErrorMessage,
+  externalLinksAccessToken,
   focusedCommentId,
   focusedRootCommentId,
   issue,
@@ -1612,6 +1635,8 @@ function IssueDetailContent({
   assigneeOptions: ProjectMember[]
   /** 選択中 Issue の file/version/annotation/approval controller です。 */
   artifacts?: FileArtifactsController
+  /** External link の作成、更新、解除が許可されているかどうかです。 */
+  canManageExternalLinks: boolean
   /** 選択中 Issue の discussion controller です。 */
   collaboration?: IssueCollaborationController
   /** 選択中 Issue に適用する configuration です。 */
@@ -1620,6 +1645,8 @@ function IssueDetailContent({
   currentWorkspaceMemberKey?: string
   /** Detail mutation error の表示文言です。 */
   detailErrorMessage?: string
+  /** External link management API の Bearer token です。 */
+  externalLinksAccessToken?: string
   /** notification deep link から focus する comment ID です。 */
   focusedCommentId?: string
   /** notification deep link の reply が属する root comment ID です。 */
@@ -1828,6 +1855,15 @@ function IssueDetailContent({
           currentMemberKey={currentWorkspaceMemberKey}
           locale={locale}
           members={workspaceMembers}
+        />
+      ) : null}
+      {externalLinksAccessToken ? (
+        <WorkItemExternalLinksPanelContainer
+          accessToken={externalLinksAccessToken}
+          canManage={canManageExternalLinks}
+          locale={locale}
+          teamId={issue.teamId}
+          workItemId={issue.id}
         />
       ) : null}
       <div className="border-t border-[var(--workbench-border)] px-6 py-6">

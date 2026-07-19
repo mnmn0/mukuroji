@@ -16,6 +16,7 @@
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
 | `TaskApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
+| `ConnectorRuntimeConfiguration` | no | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
 | `RequestRateLimitPerHour` | no | public request capability ごとの1時間あたり submit 上限。既定値は 10、範囲は 1–10000 です。 |
 | `RequestEmailWebhookSecret` | yes | email adapter から渡される envelope の署名検証に使う 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
 | `RequestTokenHashSecret` | yes | public form / reply capability token を保存前に hash する 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
@@ -35,6 +36,7 @@
 - `TeamIssuesTableName`（`WorkItemsTableName` と同じ table を指す互換 output）
 - `WorkItemConfigurationTableName`（workflow、custom field、relation graph の scope store）
 - `PlanningTableName`（cycle、goal、milestone、roadmap、portfolio の計画 store）
+- `DocumentsTableName`（document、whiteboard、share、comment の workspace store）
 - `AnalyticsTableName`（report、immutable snapshot、scheduled delivery receipt の store）
 - `RequestIntakeTableName`（form version、link capability、submission、queue、reply thread の scope store）
 - `RequestEmailIngestionFunctionName`, `RequestEmailIngestionDlqUrl`
@@ -45,9 +47,308 @@
 - `AuditEventsTableName`, `ProcessedAuditEventsTableName`
 - `WorkItemCollaborationTableName`, `RealtimeSessionsTableName`, `RealtimeWebSocketUrl`
 - `WorkspaceSearchTableName`（検索文書、saved view、ユーザー別 view preference）
+- `DeveloperPlatformTableName`, `DeveloperPlatformLookupIndexName`
+- `WebhookDeliveryQueueUrl`, `WebhookDeliveryDlqUrl`
+- `WorkItemImportBucketName`, `WorkItemImportQueueUrl`, `WorkItemImportDlqUrl`
+- `ConnectorRuntimeSecretArn`, `ConnectorSyncQueueUrl`, `ConnectorSyncDlqUrl`, `ConnectorPollDlqUrl`
 - `WorkspaceDirectoryId`
 
 Function URL と API Gateway は同じ Lambda を呼びます。いずれも `<base>/teams/projects` と `<base>/api/teams/projects` を同じ canonical `/api` route へ正規化します。
+
+## Connector runtime configuration
+
+Stack は provider 設定と signing secret 用の Secrets Manager secret を `{}` で作成し、専用の rotation-enabled KMS key で暗号化します。Secret の read 権限は OAuth callback を扱う API Lambda と provider 呼び出しを行う connector queue worker に限定します。Audit stream projection と scheduled poller は secret を読まず、secret-free な sync job ID だけを SQS へ送ります。
+
+Production credential を CloudFormation parameter、Lambda environment、repository、`cdk diff`、shell history に含めないでください。初回 deploy 後に `ConnectorRuntimeSecretArn` output を取得し、権限を限定した作業端末から reviewed JSON file を新しい secret version として保存します。
+
+```sh
+export CONNECTOR_RUNTIME_SECRET_ARN="$(aws cloudformation describe-stacks \
+  --region "$AWS_REGION" \
+  --stack-name CdkStack \
+  --query "Stacks[0].Outputs[?OutputKey=='ConnectorRuntimeSecretArn'].OutputValue | [0]" \
+  --output text)"
+
+aws secretsmanager put-secret-value \
+  --region "$AWS_REGION" \
+  --secret-id "$CONNECTOR_RUNTIME_SECRET_ARN" \
+  --secret-string file://connector-runtime.production.json
+```
+
+Secret JSON は string value の object とし、次の key だけを許可します。
+
+- `MUKUROJI_CONNECTOR_PROVIDERS_JSON`
+- `CONNECTOR_OAUTH_STATE_SIGNING_SECRET`
+- `CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON`
+- `CONNECTOR_SYNC_ORIGIN_SIGNING_SECRET`
+- `CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON`
+- `CONNECTOR_REAUTHORIZATION_RETURN_URL`
+- provider client secret 用の `MUKUROJI_CONNECTOR_<NAME>` key
+
+`MUKUROJI_CONNECTOR_PROVIDERS_JSON` 自体は JSON array を文字列化した値です。各 provider entry の `clientSecretEnvironmentVariable` は同じ secret object 内の `MUKUROJI_CONNECTOR_<NAME>` を参照させます。Signing secret はそれぞれ独立した十分に長い random value を使います。Warm runtime も約1分の TTL 後に secret を再取得するため、更新は cold start を待たずに反映されます。
+
+OAuth state signing key は、warm runtime の旧・新 keyring が混在しても相互検証できるよう次の順序で rotation します。
+
+1. 旧 key を `CONNECTOR_OAUTH_STATE_SIGNING_SECRET` に維持したまま、新 key を JSON array 文字列の `CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON` へ verification-only key として追加します。
+2. Cache TTL（現在は約1分）と secret 伝播の猶予を待ち、すべての warm runtime が新 key を検証できる状態にします。
+3. 新 key を `CONNECTOR_OAUTH_STATE_SIGNING_SECRET` へ昇格し、旧 key を `CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON` に残します。旧 runtime が cache TTL 中に発行した state も完了できるよう、昇格後は旧 key を state TTL（現在は10分）に cache TTL と伝播猶予を加えた期間以上保持してから削除します。
+
+Connector origin signing key も current key だけを直接置換せず、未消費の
+outbound origin marker と warm runtime をまたいで検証できるよう二段階で
+rotation します。`CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON` は
+32-byte 以上の secret を最大3件持つ JSON array 文字列です。
+
+1. 旧 key を `CONNECTOR_SYNC_ORIGIN_SIGNING_SECRET` に維持したまま、新 key を `CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON` へ verification-only key として追加します。Cache TTL（現在は約1分）と secret 伝播の猶予を待ち、すべての warm runtime が旧・新の両 key を検証できる状態にします。
+2. 新 key を `CONNECTOR_SYNC_ORIGIN_SIGNING_SECRET` へ昇格し、旧 key を `CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON` に残します。旧 key で署名済みの outbound operation が provider から返却される grace period、cache TTL、provider の webhook retry window がすべて経過し、Connector sync/poll queue と DLQ に旧 operation が残っていないことを確認してから旧 key を削除します。
+
+各段階は別の secret version として反映し、次の段階へ進む前に current /
+previous の両方で origin marker の検証が成功することを確認してください。
+未消費 marker が残っている間は旧 key を削除しません。
+
+更新後は設定確認用の再認証を行い、`ConnectorSyncDlqUrl`、`ConnectorPollDlqUrl`、queue age alarm、provider 側 callback error を監視します。CloudFormation parameter は `{}` のまま維持し、通常 deploy で手動更新した current secret version を戻さないでください。
+
+## Connector poll DLQ recovery
+
+`ConnectorPollDlq` は自動 redrive consumer を持たない、operator inspection 用の
+共有 failure sink です。EventBridge が poll Lambda を invoke できなかった場合と、
+invoke 後の Lambda が非同期 retry を使い切った場合の両方を保持するため、
+message をそのまま Function や EventBridge へ再投入しないでください。
+
+- EventBridge delivery failure は元の scheduled event が body に入り、
+  `ERROR_CODE`、`ERROR_MESSAGE`、`RULE_ARN`、`TARGET_ARN` などが SQS message
+  attribute に入ります。
+- Lambda async failure は body の `requestContext`、`requestPayload`、
+  `responseContext`、`responsePayload` で識別します。
+
+Alarm 発生時は account、region、stack、message attribute と body を保全し、
+EventBridge の invoke 権限、Lambda runtime error、Developer Platform table、
+Connector sync queue の状態を先に修正します。その後
+`ConnectorPollFunction` を空の event `{}` で同期 invokeし、成功と
+`ConnectorSyncQueue` への bounded job enqueue を確認します。Poll は global
+inventory と checkpoint により冪等に再開できるため、次の定期実行が成功したことも
+確認してから元 message を receipt handle で削除します。形式が上記どちらにも一致
+しない message や原因を確認できない message は削除せず、運用責任者へ
+エスカレーションします。
+
+## Connector disconnect recovery
+
+Connector disconnect は `AuditEventsTable` の pending outbox から共有
+`CollaborationProjectionFunction` が ID-only の `disconnect-links` job を
+`ConnectorSyncQueue` へ送り、worker が bounded page ごとに external link を
+`paused` へ変更します。共有 projection、connector queue のどちらでも retry
+上限に達した場合に備え、`CollaborationProjectionDlq` と
+`ConnectorSyncDlq` の visible message alarm を監視してください。
+
+`CollaborationProjectionDlq` は collaboration、Webhook、connector の共有 DLQ
+です。message を `ConnectorSyncQueue` へ直接送らず、次の順序で元の Audit
+stream batch を共有 projection へ再投入します。
+
+1. 対象 account、region、stack と alarm 発生時刻を確認し、原因となった
+   downstream dependency、権限、設定を先に修正します。
+2. `CollaborationProjectionDlqUrl` から message を1件だけ長い visibility
+   timeout で受信し、削除せず保全します。DynamoDB Streams event source
+   mapping が SQS destination へ保存する Body は
+   `DDBStreamBatchInfo` を含む failure metadata だけで、元の
+   `Records` は含みません。
+3. DynamoDB Streams の record 保持期間である24時間以内に、
+   `DDBStreamBatchInfo` の stream ARN、shard ID、開始・終了 sequence number
+   を使って元の batch を取得します。`DescribeStream` で対象 shard と
+   `NEW_IMAGE` view を確認し、`AT_SEQUENCE_NUMBER` の shard iterator から
+   `GetRecords` を繰り返します。終了 sequence number と
+   `batchSize` の両方が一致しない場合は再投入もDLQ messageの削除も行いません。
+   24時間を過ぎて record を取得できない場合もmessageを削除せず、AuditEvents
+   base tableから対象eventを特定する別の承認済み復旧作業へエスカレーション
+   します。
+4. 復元した `Records` 内の
+   `connector.status.updated` event が
+   `metadata.adapter=developer-platform`、
+   `metadata.status=disconnected`、`outboxStatus=pending` であることを確認します。
+   別用途の record が同じ batch に含まれる場合も record を切り出さず、
+   共有 projection 全体へ同じ batch を渡します。
+5. Stack resource から `CollaborationProjectionFunction` の physical name を
+   取得し、復元した batch を同期 invoke します。応答の
+   `batchItemFailures` が空であることを確認します。重複 invoke は downstream
+   の event ID と disconnect lifecycle revision で冪等化されます。
+6. `ConnectorSyncQueue` へ `disconnect-links` が到達し、対象 installation の
+   external link がすべて `paused`、installation row の
+   `connectorDisconnectCleanupRevision` が削除済みになったことを確認してから、
+   元の共有 DLQ message を receipt handle で削除します。失敗または確認不能時は
+   message を削除せず、visibility timeout 後に再調査します。
+
+```sh
+set -euo pipefail
+
+export STACK_NAME=CdkStack
+export COLLABORATION_PROJECTION_DLQ_URL="$(aws cloudformation describe-stacks \
+  --region "$AWS_REGION" \
+  --stack-name "$STACK_NAME" \
+  --query "Stacks[0].Outputs[?OutputKey=='CollaborationProjectionDlqUrl'].OutputValue | [0]" \
+  --output text)"
+export COLLABORATION_PROJECTION_FUNCTION_NAME="$(aws cloudformation list-stack-resources \
+  --region "$AWS_REGION" \
+  --stack-name "$STACK_NAME" \
+  --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function' && starts_with(LogicalResourceId, 'CollaborationProjectionFunction')].PhysicalResourceId | [0]" \
+  --output text)"
+
+aws sqs receive-message \
+  --region "$AWS_REGION" \
+  --queue-url "$COLLABORATION_PROJECTION_DLQ_URL" \
+  --max-number-of-messages 1 \
+  --wait-time-seconds 10 \
+  --visibility-timeout 900 \
+  > collaboration-projection-dlq-message.json
+
+jq -e '
+  .Messages as $messages |
+  ($messages | length) == 1 and
+  (($messages[0].ReceiptHandle | type) == "string") and
+  (
+    ($messages[0].Body | fromjson) as $failure |
+    ($failure.DDBStreamBatchInfo | type) == "object" and
+    ($failure.DDBStreamBatchInfo.streamArn | type) == "string" and
+    ($failure.DDBStreamBatchInfo.shardId | type) == "string" and
+    ($failure.DDBStreamBatchInfo.startSequenceNumber | type) == "string" and
+    ($failure.DDBStreamBatchInfo.endSequenceNumber | type) == "string" and
+    ($failure.DDBStreamBatchInfo.batchSize | type) == "number"
+  )
+' collaboration-projection-dlq-message.json
+
+export AUDIT_STREAM_ARN="$(jq -r \
+  '.Messages[0].Body | fromjson | .DDBStreamBatchInfo.streamArn' \
+  collaboration-projection-dlq-message.json)"
+export AUDIT_SHARD_ID="$(jq -r \
+  '.Messages[0].Body | fromjson | .DDBStreamBatchInfo.shardId' \
+  collaboration-projection-dlq-message.json)"
+export AUDIT_START_SEQUENCE_NUMBER="$(jq -r \
+  '.Messages[0].Body | fromjson | .DDBStreamBatchInfo.startSequenceNumber' \
+  collaboration-projection-dlq-message.json)"
+export AUDIT_END_SEQUENCE_NUMBER="$(jq -r \
+  '.Messages[0].Body | fromjson | .DDBStreamBatchInfo.endSequenceNumber' \
+  collaboration-projection-dlq-message.json)"
+export AUDIT_EXPECTED_BATCH_SIZE="$(jq -r \
+  '.Messages[0].Body | fromjson | .DDBStreamBatchInfo.batchSize' \
+  collaboration-projection-dlq-message.json)"
+
+aws dynamodbstreams describe-stream \
+  --region "$AWS_REGION" \
+  --stream-arn "$AUDIT_STREAM_ARN" \
+  > collaboration-projection-stream.json
+jq -e --arg shardId "$AUDIT_SHARD_ID" '
+  .StreamDescription.StreamStatus == "ENABLED" and
+  .StreamDescription.StreamViewType == "NEW_IMAGE" and
+  any(.StreamDescription.Shards[]?; .ShardId == $shardId)
+' collaboration-projection-stream.json
+
+export AUDIT_SHARD_ITERATOR="$(aws dynamodbstreams get-shard-iterator \
+  --region "$AWS_REGION" \
+  --stream-arn "$AUDIT_STREAM_ARN" \
+  --shard-id "$AUDIT_SHARD_ID" \
+  --shard-iterator-type AT_SEQUENCE_NUMBER \
+  --sequence-number "$AUDIT_START_SEQUENCE_NUMBER" \
+  --query ShardIterator \
+  --output text)"
+test "$AUDIT_SHARD_ITERATOR" != "None"
+
+jq -n '{Records: []}' > collaboration-projection-replay.json
+export AUDIT_STREAM_READ_ATTEMPTS=0
+while [ "$AUDIT_STREAM_READ_ATTEMPTS" -lt 120 ]; do
+  aws dynamodbstreams get-records \
+    --region "$AWS_REGION" \
+    --shard-iterator "$AUDIT_SHARD_ITERATOR" \
+    --limit 1000 \
+    > collaboration-projection-stream-page.json
+
+  jq \
+    --arg start "$AUDIT_START_SEQUENCE_NUMBER" \
+    --arg end "$AUDIT_END_SEQUENCE_NUMBER" '
+    def decimal_compare($left; $right):
+      if ($left | length) < ($right | length) then -1
+      elif ($left | length) > ($right | length) then 1
+      elif $left < $right then -1
+      elif $left > $right then 1
+      else 0
+      end;
+    {
+      Records: [
+        .Records[]? |
+        .dynamodb.SequenceNumber as $sequence |
+        select(($sequence | type) == "string") |
+        select(
+          decimal_compare($sequence; $start) >= 0 and
+          decimal_compare($sequence; $end) <= 0
+        )
+      ]
+    }
+  ' collaboration-projection-stream-page.json \
+    > collaboration-projection-selected-page.json
+  jq -s \
+    '{Records: (.[0].Records + .[1].Records)}' \
+    collaboration-projection-replay.json \
+    collaboration-projection-selected-page.json \
+    > collaboration-projection-replay-next.json
+  mv collaboration-projection-replay-next.json \
+    collaboration-projection-replay.json
+
+  if jq -e --arg end "$AUDIT_END_SEQUENCE_NUMBER" '
+    any(.Records[]?; .dynamodb.SequenceNumber == $end)
+  ' collaboration-projection-stream-page.json; then
+    break
+  fi
+  export AUDIT_SHARD_ITERATOR="$(jq -r \
+    '.NextShardIterator // empty' \
+    collaboration-projection-stream-page.json)"
+  test -n "$AUDIT_SHARD_ITERATOR"
+  export AUDIT_STREAM_READ_ATTEMPTS=$((AUDIT_STREAM_READ_ATTEMPTS + 1))
+  sleep 1
+done
+
+jq -e \
+  --arg end "$AUDIT_END_SEQUENCE_NUMBER" \
+  --argjson expected "$AUDIT_EXPECTED_BATCH_SIZE" '
+  (.Records | length) == $expected and
+  any(.Records[]?; .dynamodb.SequenceNumber == $end)
+' collaboration-projection-replay.json
+jq -e '
+  any(
+    .Records[];
+    .eventName == "INSERT" and
+    .dynamodb.NewImage.eventType.S == "connector.status.updated" and
+    .dynamodb.NewImage.metadata.M.adapter.S == "developer-platform" and
+    .dynamodb.NewImage.metadata.M.status.S == "disconnected" and
+    .dynamodb.NewImage.outboxStatus.S == "pending"
+  )
+' collaboration-projection-replay.json
+
+aws lambda invoke \
+  --region "$AWS_REGION" \
+  --function-name "$COLLABORATION_PROJECTION_FUNCTION_NAME" \
+  --cli-binary-format raw-in-base64-out \
+  --payload fileb://collaboration-projection-replay.json \
+  collaboration-projection-replay-response.json
+jq -e '.batchItemFailures == []' collaboration-projection-replay-response.json
+
+export COLLABORATION_PROJECTION_DLQ_RECEIPT_HANDLE="$(jq -r \
+  '.Messages[0].ReceiptHandle' \
+  collaboration-projection-dlq-message.json)"
+# external link と cleanup marker の確認が完了した後だけ実行します。
+aws sqs delete-message \
+  --region "$AWS_REGION" \
+  --queue-url "$COLLABORATION_PROJECTION_DLQ_URL" \
+  --receipt-handle "$COLLABORATION_PROJECTION_DLQ_RECEIPT_HANDLE"
+```
+
+`ConnectorSyncDlq` に `disconnect-links` がある場合は、共有 projection を
+再実行しません。原因修正後、DLQ message の body が version 1 の
+`disconnect-links` で、必須の version、kind、対象 Workspace、installation、
+lifecycle revision と、任意の `updatedByUserId` / continuation `cursor` 以外を
+含まないことを確認します。secret や credential が含まれていないことも
+確認し、その同じ body を `ConnectorSyncQueueUrl` へ送ります。
+送信成功を確認してから元 message を削除します。古い lifecycle revision の
+job は現在の installation を変更せず終了し、同じ page の重複は既に
+`paused` の link を変更しません。DLQ 全体の一括 redrive は他の outbound /
+poll job も再実行するため、対象と影響を棚卸しせず実施しないでください。
+
+運用ファイルには Workspace ID や audit metadata が含まれます。権限を限定した
+作業領域で扱い、復旧と記録が完了したら安全に削除してください。
 
 ## File storage security and retention
 
@@ -220,6 +521,18 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
 6. deploy 後に `validate-workspace-bootstrap.sh` と Function URL / API Gateway の 4 経路を確認する。
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
+
+Webhook ACL v2 upgrade は新しい transaction writer の更新後に開始し、checkpoint に記録した30秒の drain window が終わるまで retained row の scan を開始しません。これにより、更新前に開始した API invocation が cleanup locator なしの grant を backfill cursor 通過後に書き込むことを防ぎます。
+
+Webhook active locator v3 upgrade は API、projection、delivery の
+dual-read / dual-write 対応を先に更新します。Custom resource は60秒 drain後に
+primary locator を全件整合し、primary-only 境界を永続 marker で確定します。
+さらに compatibility writer を60秒 drainしてから legacy GSI projection を
+全件除去します。Stack update が rollback する場合は、Custom resource の
+Delete が marker を rollback 状態へfenceし、active subscription のlegacy
+projectionを全件復元してから旧 Lambda への依存逆順rollbackを許可します。
+この逆移行に失敗した stack で custom resource をskipして
+`continue-update-rollback`しないでください。
 
 通知 upgrade では `NotificationsTable` に `RecipientStatusIndex` が追加されます。deploy 前に GSI backfill の所要時間と table throttling を確認し、deploy 後は `CollaborationProjectionDlqUrl` と `NotificationScheduleDlqUrl` の滞留、Inbox の unread count を監視してください。期限 schedule は UTC date-only で1時間ごとに走査し、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として非同期 retry され、最終失敗は schedule DLQ に保存されます。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。
 

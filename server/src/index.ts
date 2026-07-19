@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   AdminCreateUserCommand,
   AdminDeleteUserAttributesCommand,
@@ -20,7 +20,6 @@ import {
 } from '@aws-sdk/client-dynamodb'
 import {
   DynamoDBDocumentClient,
-  DeleteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -28,6 +27,7 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  PUBLIC_API_OPENAPI_DOCUMENT,
   PLANNING_SCHEMA_VERSION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
@@ -48,7 +48,9 @@ import {
   type BulkOperationPreview,
   type BulkOperationRequest,
   type ApprovalSummary,
+  type ApiProblem,
   type CanonicalWorkItem,
+  type CreateWorkItemInput,
   type CreatePlanningDependencyInput,
   type CreatePlanningEntityInput,
   type CreateSavedWorkspaceViewInput,
@@ -75,6 +77,9 @@ import {
   type PlanningWorkItemLinkInput,
   type PlanningWorkItemSummary,
   type ResolvedWorkItemConfiguration,
+  type ImportDryRunReport,
+  type ImportReport,
+  type ImportRowError,
   type UpdateAutomationRuleInput,
   type UpdateAutomationTemplateInput,
   type UpdateAnalyticsReportInput,
@@ -250,6 +255,87 @@ import {
   type PlanningClient,
   type PlanningWorkItemState,
 } from './planning'
+import {
+  createDefaultSecretProtector,
+  DynamoDbDeveloperPlatformClient,
+  type AuthenticatedDeveloperCredential,
+  type DeveloperPlatformClient,
+  type IdempotencyCompletionTransactWrite,
+  type IdempotencyMutationToken,
+  type WorkItemDeletionFenceTransactWrite,
+} from './developer-platform'
+import {
+  ConnectorAuthorizationRuntime,
+  createConnectorConflictRuntime,
+  type ConnectorOAuthCallbackAuthorizer,
+} from './connector-authorization-runtime'
+import {
+  ConnectorRuntimeError,
+  createOAuthConnectorRegistryFromEnvironment,
+} from './connector-oauth'
+import {
+  createConnectorRuntimeCache,
+  loadConnectorRuntimeEnvironment,
+} from './connector-runtime-configuration'
+import {
+  ConnectorOAuthStateManager,
+  createDynamoDbConnectorOAuthStateStoreFromEnvironment,
+} from './connector-oauth-state'
+import { createDynamoDbConnectorSyncPersistenceFromEnvironment } from './connector-sync-persistence'
+import {
+  ConnectorSyncEngine,
+  type ConnectorSyncHealthReporter,
+  type ConnectorWorkItemGateway,
+  type ConnectorWorkItemSnapshot,
+} from './connector-sync-runtime'
+import {
+  createPublicApiRouter,
+  PUBLIC_API_MAX_PAGE_SIZE,
+  PublicApiServiceError,
+  type ConnectorAuthorizationService,
+  type DeveloperManagementPrincipal,
+  type PublicApiDependencies,
+  type PublicImportSourceInput,
+  type PublicMutationContext,
+  type PublicWorkItemService,
+} from './public-api'
+import {
+  previewWorkItemImport,
+  WorkItemTransferError,
+} from './work-item-transfer'
+import { allowsWebhookTeamAccess } from './webhook-authorization'
+import {
+  createWebhookMemberAuthorizationKey,
+  createWebhookGrantCleanupDirectoryId,
+  createWebhookGrantCleanupEntryKey,
+  createWebhookGrantCleanupItem,
+  createWebhookProjectAuthorizationSortKey,
+  createWebhookResourceAuthorizationKey,
+  createWebhookTeamAuthorizationSortKey,
+  createWebhookTeamGrantDirectoryId,
+  createWebhookTeamGrantEntryKey,
+  createWebhookTeamGrantItem,
+} from './webhook-authorization-projection'
+import { queueWebhookDeliveryMessage } from './webhook-handler'
+import {
+  createDefaultWorkItemImportExecutionStore,
+  createDefaultWorkItemImportQueue,
+  createDefaultWorkItemImportSourceStore,
+} from './work-item-import-aws'
+import {
+  WorkItemImportError,
+  createStoredWorkItemImportReport,
+  createWorkItemImportJobId,
+  processWorkItemImportBatch,
+  requestWorkItemImportCancellation,
+  stageWorkItemImport,
+  type WorkItemImportExecution,
+  type WorkItemImportExecutionStore,
+  type WorkItemImportQueue,
+  type WorkItemImportSourceStore,
+  type WorkItemImportSqsEvent,
+  type WorkItemImportWorkerDependencies,
+} from './work-item-import'
 import {
   createDocumentSearchAccessReadContext,
   DocumentError,
@@ -1074,6 +1160,10 @@ type TeamIssueItem = {
    */
   issueId: string
   /**
+   * 冪等作成時に payload 一致を検証する digest です。
+   */
+  importRequestDigest?: string
+  /**
    * チーム内の表示順です。
    */
   sortOrder: number
@@ -1217,6 +1307,48 @@ type WorkItemListReadOptions = {
   consistentRead?: boolean
   /** Archive 済み Work Item を内部管理 read に含めます。 */
   includeArchived?: boolean
+}
+
+/** Public Work Item の DynamoDB-backed bounded page read options です。 */
+type PublicWorkItemPageReadOptions = {
+  /** DynamoDB が一度の Query で評価する最大 item 数です。 */
+  limit: number
+  /** 前 page の LastEvaluatedKey を表す opaque cursor です。 */
+  cursor?: string
+  /** 指定 Project に割り当てられた Work Item だけを返します。 */
+  assignedProjectId?: string
+  /** 指定 assignee の Work Item だけを返します。 */
+  assigneeUserId?: string
+  /** 指定 workflow status の Work Item だけを返します。 */
+  workflowStatusId?: string
+  /** この timestamp より新しく更新された Work Item だけを返します。 */
+  updatedAfter?: string
+  /** Current RBAC で参照できる assigned Project IDs です。 */
+  accessibleProjectIds?: readonly string[]
+}
+
+/** TeamIssueUpdatedAtIndex の page cursor payload です。 */
+type PublicWorkItemPageCursor = {
+  /** Cursor schema version です。 */
+  version: 1
+  /** Cursor を束縛する Team partition key です。 */
+  directoryTeamId: string
+  /** GSI sort key の更新 timestamp です。 */
+  updatedAt: string
+  /** Base table sort key の Work Item ID です。 */
+  issueId: string
+}
+
+/** Workspace 横断 export の Team/page continuation です。 */
+type WorkItemExportContinuation = {
+  /** Continuation schema version です。 */
+  version: 1
+  /** 次に読む Team ID です。 */
+  teamId: string
+  /** Accessible Team 順序を current RBAC directory snapshot に束縛する digest です。 */
+  teamSetDigest: string
+  /** Team 内の次 Work Item page cursor です。 */
+  workItemCursor?: string
 }
 
 /**
@@ -1405,6 +1537,10 @@ type CreateTeamIssueRequestBody = {
   statusCategory?: unknown
   /** API handler が definition の同時変更を検出するために付与する ConditionCheck です。 */
   configurationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>
+  /** Import worker または public API の冪等作成で固定する Work Item ID です。 */
+  idempotentIssueId?: string
+  /** 既存 row と同一 request か検証する SHA-256 digest です。 */
+  idempotentRequestDigest?: string
 }
 
 /** Trusted request conversion handler が Work Item transactionへ追加する narrow projection です。 */
@@ -1619,6 +1755,14 @@ type ProjectDirectoryTeamItem = {
    */
   entryType: 'team'
   /**
+   * Webhook authorization GSI の resource partition key です。
+   */
+  webhookAuthorizationKey?: string
+  /**
+   * Webhook authorization GSI の Team sort key です。
+   */
+  webhookAuthorizationSortKey?: string
+  /**
    * 所属チーム ID です。
    */
   teamId: string
@@ -1660,6 +1804,14 @@ type ProjectDirectoryProjectItem = {
    * item 種別です。
    */
   entryType: 'project'
+  /**
+   * Webhook authorization GSI の resource partition key です。
+   */
+  webhookAuthorizationKey?: string
+  /**
+   * Webhook authorization GSI の Project sort key です。
+   */
+  webhookAuthorizationSortKey?: string
   /**
    * 所属チーム ID です。
    */
@@ -1711,6 +1863,14 @@ type ProjectMemberItem = {
    */
   entryType: 'project-member'
   /**
+   * Webhook authorization GSI の member partition key です。
+   */
+  webhookAuthorizationKey?: string
+  /**
+   * Webhook authorization GSI の Project sort key です。
+   */
+  webhookAuthorizationSortKey?: string
+  /**
    * 所属プロジェクト ID です。
    */
   projectId: string
@@ -1738,12 +1898,26 @@ type ProjectMemberItem = {
    * member item の更新日時です。
    */
   updatedAt: string
+  /**
+   * Retain 済み旧 row が論理削除されている場合の timestamp です。
+   */
+  archivedAt?: string
 }
 
 /**
  * DynamoDB に保存する team/project/member directory item です。
  */
 type ProjectDirectoryItem = ProjectDirectoryTeamItem | ProjectDirectoryProjectItem | ProjectMemberItem
+
+/** Webhook grant から強整合確認する Team / Project source locator です。 */
+type ProjectWebhookGrantSource = {
+  /** Grant が対象にする Team ID です。 */
+  teamId: string
+  /** Team source row の base-table sort key です。 */
+  teamSourceEntryKey: string
+  /** Project source row の base-table sort key です。 */
+  projectSourceEntryKey: string
+}
 
 /**
  * サイドバーに表示するプロジェクト行です。
@@ -2082,6 +2256,14 @@ type ProjectTasksClient = {
   ): Promise<ProjectTasksResponse>
 }
 
+/** Work Item domain write と public response receipt を同じ transaction に追加する境界です。 */
+type WorkItemIdempotencyTransaction = {
+  /** Exact HTTP response を encrypted receipt transaction item に変換します。 */
+  prepare(
+    response: { /** HTTP status です。 */ status: 200 | 204; /** Replay body です。 */ body: unknown },
+  ): Promise<IdempotencyCompletionTransactWrite | undefined>
+}
+
 /**
  * API handler から利用する team issue client の最小 interface です。
  */
@@ -2132,7 +2314,21 @@ type TeamIssuesClient = {
     input: UpdateTeamIssueRequestBody,
     actorUserId: string,
     auditContext?: MutationAuditContext,
+    idempotency?: WorkItemIdempotencyTransaction,
   ): Promise<UpdateTeamIssueResponse>
+  /**
+   * DynamoDB の canonical Work Item を revision 条件付きで削除します。
+   */
+  deleteTeamIssue?(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    expectedRevision: number,
+    actorUserId: string,
+    auditContext?: MutationAuditContext,
+    idempotency?: WorkItemIdempotencyTransaction,
+    deletionFence?: WorkItemDeletionFenceTransactWrite,
+  ): Promise<{ issue: TeamIssueResponseItem }>
   /**
    * DynamoDB に team issue コメントを追加します。
    */
@@ -2312,6 +2508,11 @@ let workItemConfigurations: WorkItemConfigurationClient
 let automation: AutomationClient
 let automationInboundWebhookSecrets: AutomationInboundWebhookSecretStore
 let planning: PlanningClient
+let developerPlatform: DeveloperPlatformClient
+let publicWorkItems: PublicWorkItemService
+let workItemImportExecutions: WorkItemImportExecutionStore
+let workItemImportSources: WorkItemImportSourceStore
+let workItemImportQueue: WorkItemImportQueue
 let requestIntake: RequestIntakeClient
 const documentProjectRolesCache = new Map<string, {
   /** Cache entry の失効時刻です。 */
@@ -2342,13 +2543,21 @@ const projectRoleWeights = {
   member: 2,
   manager: 3,
 } as const satisfies Record<ProjectRole, number>
+/** DynamoDB TransactWriteItems が受け付ける action 数の上限です。 */
+const DYNAMODB_TRANSACTION_MAX_ACTIONS = 100
 
 app.use(
   '/api/*',
   cors({
     origin: (origin) => getAllowedOrigins().includes(origin) ? origin : undefined,
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key', 'X-Correlation-Id'],
+    allowHeaders: [
+      'Authorization',
+      'Content-Type',
+      'Idempotency-Key',
+      'X-Correlation-Id',
+      'X-Request-Id',
+    ],
     exposeHeaders: ['X-Audit-Truncated', 'X-Audit-Next-Cursor'],
   }),
 )
@@ -11918,6 +12127,43 @@ async function requireTeamPermission(
   )
 }
 
+async function requireWebhookTeamPermission(
+  principal: ProjectPrincipal,
+  teamId: string,
+) {
+  const directory = await projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    'ja',
+    true,
+  )
+  const team = directory.teams.find((candidate) => candidate.id === teamId)
+
+  if (!team) {
+    throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+  }
+
+  const teamProjectIds = new Set(team.projects.map((project) => project.id))
+  const projectAccesses = (await projectDirectory.getProjectAccessList(
+    principal.directoryId,
+    principal.userKey,
+  )).filter((projectAccess) => teamProjectIds.has(projectAccess.projectId))
+  if (allowsWebhookTeamAccess({
+    activeWorkspaceMember: true,
+    activeTeam: true,
+    hasActiveProjectRole: projectAccesses.some((projectAccess) =>
+      projectAccessAllows(projectAccess, 'viewer')
+    ),
+  })) {
+    return
+  }
+
+  throw new ProjectDataError(
+    403,
+    'ProjectAccessDenied',
+    `User "${principal.userKey}" cannot access team "${teamId}".`,
+  )
+}
+
 async function loadAuthorizedTeamIssue(
   principal: WorkspacePrincipal,
   teamId: string,
@@ -12779,6 +13025,109 @@ async function readAccessibleWorkItems(
   return { workItems: [...workItemsById.values()] }
 }
 
+/** Export を一つの Team/GSI Query に制限し、次 page の store continuation を返します。 */
+async function readAccessibleWorkItemExportPage(
+  principal: ProjectPrincipal,
+  continuation: string | undefined,
+  limit: number,
+) {
+  const directory = await projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
+  const projectAccesses = principal.isSystemAdmin
+    ? undefined
+    : await projectDirectory.getProjectAccessList(principal.directoryId, principal.userKey)
+  const contexts = directory.teams.flatMap((team) => {
+    if (principal.isSystemAdmin) {
+      return [{ team, directory } satisfies TeamPermissionContext]
+    }
+    const teamProjectIds = new Set(team.projects.map((project) => project.id))
+    const teamProjectAccesses = (projectAccesses ?? []).filter((access) =>
+      teamProjectIds.has(access.projectId) && projectAccessAllows(access, 'viewer')
+    )
+    return teamProjectAccesses.length > 0
+      ? [{ team, directory, projectAccesses: teamProjectAccesses } satisfies TeamPermissionContext]
+      : []
+  })
+  if (contexts.length === 0) return { items: [], hasMore: false }
+
+  const teamSetDigest = createHash('sha256')
+    .update(contexts.map((context) => context.team.id).join('\0'))
+    .digest('base64url')
+  const decoded = decodeWorkItemExportContinuation(
+    continuation,
+    teamSetDigest,
+  )
+  const teamIndex = decoded
+    ? contexts.findIndex((context) => context.team.id === decoded.teamId)
+    : 0
+  if (teamIndex < 0) {
+    throw new PublicApiServiceError(
+      400,
+      'invalid_request',
+      'Export cursor no longer matches the accessible Team set.',
+    )
+  }
+  const context = contexts[teamIndex]!
+  const accessibleProjectIds = principal.isSystemAdmin
+    ? undefined
+    : (context.projectAccesses ?? []).map((access) => access.projectId)
+  const page = await teamIssues.getPublicWorkItemPage(
+    principal.directoryId,
+    context.team.id,
+    {
+      limit,
+      ...(decoded?.workItemCursor ? { cursor: decoded.workItemCursor } : {}),
+      ...(accessibleProjectIds ? { accessibleProjectIds } : {}),
+    },
+  )
+  const nextTeam = page.nextCursor ? context : contexts[teamIndex + 1]
+  const nextContinuation = nextTeam
+    ? encodeWorkItemExportContinuation({
+        version: 1,
+        teamId: nextTeam.team.id,
+        teamSetDigest,
+        ...(page.nextCursor ? { workItemCursor: page.nextCursor } : {}),
+      })
+    : undefined
+  return {
+    items: page.issues,
+    hasMore: nextContinuation !== undefined,
+    ...(nextContinuation ? { nextContinuation } : {}),
+  }
+}
+
+function encodeWorkItemExportContinuation(value: WorkItemExportContinuation) {
+  return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
+}
+
+function decodeWorkItemExportContinuation(
+  value: string | undefined,
+  teamSetDigest: string,
+) {
+  if (!value) return undefined
+  try {
+    const decoded = JSON.parse(
+      Buffer.from(value, 'base64url').toString('utf8'),
+    ) as Partial<WorkItemExportContinuation>
+    if (
+      decoded.version !== 1 ||
+      decoded.teamSetDigest !== teamSetDigest ||
+      typeof decoded.teamId !== 'string' ||
+      !decoded.teamId ||
+      (decoded.workItemCursor !== undefined &&
+        (typeof decoded.workItemCursor !== 'string' || !decoded.workItemCursor))
+    ) {
+      throw new TypeError('Invalid export continuation.')
+    }
+    return decoded as WorkItemExportContinuation
+  } catch {
+    throw new PublicApiServiceError(
+      400,
+      'invalid_request',
+      'Export cursor is invalid.',
+    )
+  }
+}
+
 /**
  * Analytics filter の Team/Project scope を read 前に適用し、current ACL の canonical
  * Work Item を通常一覧とは独立した安全上限まで返します。
@@ -12933,6 +13282,17 @@ function normalizeWorkItemListReadLimit(value: number | undefined) {
   }
 
   return Math.max(0, Math.floor(value))
+}
+
+function normalizePublicWorkItemPageLimit(value: number) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > PUBLIC_API_MAX_PAGE_SIZE) {
+    throw new ProjectDataError(
+      400,
+      'InvalidWorkItemPageLimit',
+      `Work Item page limit must be between 1 and ${PUBLIC_API_MAX_PAGE_SIZE}.`,
+    )
+  }
+  return value
 }
 
 function createWorkItemListProbeLimit(limit: number | undefined) {
@@ -14519,6 +14879,108 @@ export class DynamoDbTeamIssuesClient {
   }
 
   /**
+   * UpdatedAt GSI を一度だけ Query し、Public API 用の bounded Work Item page を返します。
+   */
+  async getPublicWorkItemPage(
+    directoryId: string,
+    teamId: string,
+    options: PublicWorkItemPageReadOptions,
+  ) {
+    await this.ensureLocalTables()
+    const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
+    const limit = normalizePublicWorkItemPageLimit(options.limit)
+    const exclusiveStartKey = decodePublicWorkItemPageCursor(
+      options.cursor,
+      directoryTeamId,
+    )
+    const expressionAttributeNames: Record<string, string> = {
+      '#directoryTeamId': 'directoryTeamId',
+      '#archivedAt': 'archivedAt',
+    }
+    const expressionAttributeValues: Record<string, unknown> = {
+      ':directoryTeamId': directoryTeamId,
+    }
+    const filterExpressions = ['attribute_not_exists(#archivedAt)']
+
+    if (options.assignedProjectId) {
+      expressionAttributeNames['#assignedProjectId'] = 'assignedProjectId'
+      expressionAttributeValues[':assignedProjectId'] = options.assignedProjectId
+      filterExpressions.push('#assignedProjectId = :assignedProjectId')
+    } else if (
+      options.accessibleProjectIds &&
+      options.accessibleProjectIds.length <= 90
+    ) {
+      expressionAttributeNames['#assignedProjectId'] = 'assignedProjectId'
+      const accessiblePlaceholders = options.accessibleProjectIds.map((projectId, index) => {
+        const placeholder = `:accessibleProject${index}`
+        expressionAttributeValues[placeholder] = projectId
+        return placeholder
+      })
+      filterExpressions.push(
+        accessiblePlaceholders.length > 0
+          ? `(attribute_not_exists(#assignedProjectId) OR #assignedProjectId IN (${accessiblePlaceholders.join(', ')}))`
+          : 'attribute_not_exists(#assignedProjectId)',
+      )
+    }
+    if (options.assigneeUserId) {
+      expressionAttributeNames['#assigneeUserId'] = 'assigneeUserId'
+      expressionAttributeValues[':assigneeUserId'] = options.assigneeUserId
+      filterExpressions.push('#assigneeUserId = :assigneeUserId')
+    }
+    if (options.workflowStatusId) {
+      expressionAttributeNames['#workflowStatusId'] = 'workflowStatusId'
+      expressionAttributeValues[':workflowStatusId'] = options.workflowStatusId
+      filterExpressions.push('#workflowStatusId = :workflowStatusId')
+    }
+    if (options.updatedAfter) {
+      expressionAttributeNames['#updatedAt'] = 'updatedAt'
+      expressionAttributeValues[':updatedAfter'] = options.updatedAfter
+    }
+
+    try {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.issueTableName,
+        IndexName: 'TeamIssueUpdatedAtIndex',
+        KeyConditionExpression: options.updatedAfter
+          ? '#directoryTeamId = :directoryTeamId AND #updatedAt > :updatedAfter'
+          : '#directoryTeamId = :directoryTeamId',
+        FilterExpression: filterExpressions.join(' AND '),
+        ExpressionAttributeNames: expressionAttributeNames,
+        ExpressionAttributeValues: expressionAttributeValues,
+        ExclusiveStartKey: exclusiveStartKey,
+        ScanIndexForward: false,
+        Limit: limit,
+      }))
+      const accessibleProjectIds = options.accessibleProjectIds &&
+          options.accessibleProjectIds.length > 90
+        ? new Set(options.accessibleProjectIds)
+        : undefined
+      const issues = (response.Items ?? [])
+        .map(toTeamIssueItem)
+        .filter((item) =>
+          !accessibleProjectIds ||
+          !item.assignedProjectId ||
+          accessibleProjectIds.has(item.assignedProjectId)
+        )
+        .map(toTeamIssueResponseItem)
+      return {
+        issues,
+        ...(response.LastEvaluatedKey
+          ? {
+              nextCursor: encodePublicWorkItemPageCursor(
+                response.LastEvaluatedKey,
+                directoryTeamId,
+              ),
+            }
+          : {}),
+      }
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
    * DynamoDB から指定 project ID にアサインされた Issue 一覧を取得します。
    */
   async getProjectIssues(
@@ -14611,10 +15073,43 @@ export class DynamoDbTeamIssuesClient {
     const workflowStatusId = readWorkflowStatusId(input.workflowStatusId)
     const statusCategory = readWorkflowStatusCategory(input.statusCategory)
     const customFieldValues = readCustomFieldValues(input.customFieldValues)
+    const idempotentIssueId = input.idempotentIssueId === undefined
+      ? undefined
+      : readRequiredString(
+          input.idempotentIssueId,
+          'Idempotent Work Item ID is required.',
+        )
+    const idempotentRequestDigest = input.idempotentRequestDigest === undefined
+      ? undefined
+      : readRequiredString(
+          input.idempotentRequestDigest,
+          'Idempotent request digest is required.',
+        )
+    if (
+      (idempotentIssueId === undefined) !==
+        (idempotentRequestDigest === undefined) ||
+      (idempotentIssueId !== undefined &&
+        !/^(?:api|import)-[a-f0-9]{48}$/u.test(idempotentIssueId)) ||
+      (idempotentRequestDigest !== undefined &&
+        !/^[a-f0-9]{64}$/u.test(idempotentRequestDigest))
+    ) {
+      throw new ProjectDataError(
+        400,
+        'InvalidIdempotentWorkItemCreate',
+        'Idempotent Work Item create metadata is invalid.',
+      )
+    }
     const sourceRequestId = requestConversion
       ? readSourceRequestId(requestConversion.submissionId)
       : undefined
     const idempotencyResourceId = readIdempotencyResourceId(input.idempotencyResourceId)
+    if (idempotentIssueId !== undefined && idempotencyResourceId !== undefined) {
+      throw new ProjectDataError(
+        400,
+        'InvalidIdempotentWorkItemCreate',
+        'Only one Work Item create idempotency mechanism may be used.',
+      )
+    }
     const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
     const now = new Date().toISOString()
 
@@ -14632,7 +15127,7 @@ export class DynamoDbTeamIssuesClient {
         return { issue: existingSourceIssue } satisfies CreateTeamIssueResponse
       }
 
-      const issueId = idempotencyResourceId ?? (
+      const issueId = idempotentIssueId ?? idempotencyResourceId ?? (
         sourceRequestId
           ? createUniqueResourceId(
               `request-${sourceRequestId}`,
@@ -14650,6 +15145,7 @@ export class DynamoDbTeamIssuesClient {
         directoryTeamId,
         teamId,
         issueId,
+        ...(idempotentRequestDigest ? { importRequestDigest: idempotentRequestDigest } : {}),
         sortOrder: (currentIssues.issues.length + 1) * 10,
         title,
         assigneeUserId,
@@ -14771,6 +15267,28 @@ export class DynamoDbTeamIssuesClient {
         isAwsNamedError(error, 'TransactionCanceledException') &&
         hasTransactionConditionalFailure(error)
       ) {
+        if (idempotentIssueId && idempotentRequestDigest) {
+          try {
+            const existing = await this.getRequiredTeamIssueItem(
+              directoryId,
+              teamId,
+              idempotentIssueId,
+              true,
+            )
+            if (existing.importRequestDigest === idempotentRequestDigest) {
+              return {
+                issue: toTeamIssueResponseItem(existing),
+              } satisfies CreateTeamIssueResponse
+            }
+            throw new ProjectDataError(
+              409,
+              'IdempotentWorkItemCreateConflict',
+              'The deterministic Work Item ID belongs to another request.',
+            )
+          } catch (readError) {
+            if (!isTeamIssueNotFoundError(readError)) throw readError
+          }
+        }
         if (sourceRequestId) {
           const currentIssues = await this.getTeamIssues(
             directoryId,
@@ -14828,6 +15346,7 @@ export class DynamoDbTeamIssuesClient {
     input: UpdateTeamIssueRequestBody,
     actorUserId: string,
     auditContext?: MutationAuditContext,
+    idempotency?: WorkItemIdempotencyTransaction,
   ) {
     await this.ensureLocalTables()
     let auditPut: ReturnType<typeof createMutationAuditEventPut> = undefined
@@ -15024,6 +15543,10 @@ export class DynamoDbTeamIssuesClient {
         },
       })
       const configurationConditionChecks = input.configurationConditionChecks ?? []
+      const idempotencyCompletion = await idempotency?.prepare({
+        status: 200,
+        body: toTeamIssueResponseItem(afterIssue),
+      })
       await this.documentClient.send(
         new TransactWriteCommand({
           TransactItems: [
@@ -15051,15 +15574,15 @@ export class DynamoDbTeamIssuesClient {
             },
             ...(auditPut ? [auditPut] : []),
             ...configurationConditionChecks,
+            ...(idempotencyCompletion
+              ? [idempotencyCompletion.transactWriteItem]
+              : []),
           ],
         }),
       )
-      const issue = toTeamIssueResponseItem(
-        await this.getRequiredTeamIssueItem(directoryId, teamId, issueId, true),
-      )
 
       return {
-        issue,
+        issue: toTeamIssueResponseItem(afterIssue),
       } satisfies UpdateTeamIssueResponse
     } catch (error) {
       if (isAwsNamedError(error, 'ConditionalCheckFailedException')) {
@@ -15112,6 +15635,123 @@ export class DynamoDbTeamIssuesClient {
       }
 
       if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * DynamoDB の canonical Work Item を revision 条件付きで削除し、同じ transaction に
+   * immutable audit event を保存します。
+   */
+  async deleteTeamIssue(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    expectedRevision: number,
+    actorUserId: string,
+    auditContext?: MutationAuditContext,
+    idempotency?: WorkItemIdempotencyTransaction,
+    deletionFence?: WorkItemDeletionFenceTransactWrite,
+  ) {
+    await this.ensureLocalTables()
+    const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
+    const beforeIssue = await this.getRequiredTeamIssueItem(directoryId, teamId, issueId, true)
+
+    if (beforeIssue.revision !== expectedRevision) {
+      throw createWorkItemRevisionConflictError()
+    }
+
+    const occurredAt = new Date().toISOString()
+    const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
+      directoryId,
+      eventType: 'work-item.deleted',
+      entityType: 'work-item',
+      entityId: createTeamIssueAuditEntityId(teamId, issueId),
+      action: 'deleted',
+      occurredAt,
+      summary: 'Work Item was deleted.',
+      changes: createAuditFieldChanges(beforeIssue, undefined, [
+        'title',
+        'description',
+        'assignedProjectId',
+        'assigneeUserId',
+        'workflowStatusId',
+        'statusCategory',
+        'customFieldValues',
+        'dueDate',
+        'priority',
+      ]),
+      metadata: {
+        adapter: 'canonical-work-item',
+        actorMemberKey: actorUserId,
+        teamId,
+        issueId,
+        projectId: beforeIssue.assignedProjectId,
+        notificationTitle: beforeIssue.title,
+        beforeRevision: expectedRevision,
+      },
+    })
+    const idempotencyCompletion = await idempotency?.prepare({
+      status: 204,
+      body: null,
+    })
+
+    try {
+      await this.documentClient.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Delete: {
+                TableName: this.issueTableName,
+                Key: { directoryTeamId, issueId },
+                ConditionExpression:
+                  'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #revision = :expectedRevision',
+                ExpressionAttributeNames: { '#revision': 'revision' },
+                ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+              },
+            },
+            ...(deletionFence ? [deletionFence.transactWriteItem] : []),
+            ...(auditPut ? [auditPut] : []),
+            ...(idempotencyCompletion
+              ? [idempotencyCompletion.transactWriteItem]
+              : []),
+          ],
+        }),
+      )
+
+      return { issue: toTeamIssueResponseItem(beforeIssue) }
+    } catch (error) {
+      if (deletionFence && isTransactionConditionalFailureAt(error, 1)) {
+        throw new ProjectDataError(
+          409,
+          'ExternalWorkItemLinkConflict',
+          'Unlink all external resources before deleting this Work Item.',
+        )
+      }
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        try {
+          const latestIssue = await this.getRequiredTeamIssueItem(
+            directoryId,
+            teamId,
+            issueId,
+            true,
+          )
+          if (latestIssue.revision !== expectedRevision) {
+            throw createWorkItemRevisionConflictError()
+          }
+        } catch (readError) {
+          if (readError instanceof ProjectDataError) {
+            throw readError
+          }
+          throw toProjectDataError(readError)
+        }
         throw createProjectDataConflictError()
       }
 
@@ -15624,7 +16264,11 @@ export class DynamoDbProjectDirectoryClient {
       const items = await this.readValidDirectoryItems(directoryId)
       this.requireActiveProject(items, projectId)
       const members = items
-        .filter((item) => item.entryType === 'project-member' && item.projectId === projectId)
+        .filter((item): item is ProjectMemberItem =>
+          item.entryType === 'project-member' &&
+          item.projectId === projectId &&
+          isActiveDirectoryItem(item)
+        )
         .sort(compareProjectMemberItems)
         .map(toProjectMemberResponseItem)
 
@@ -15663,10 +16307,12 @@ export class DynamoDbProjectDirectoryClient {
     try {
       const items = await this.readValidDirectoryItems(directoryId, true)
       this.requireActiveProject(items, projectId)
-      const existingMember = items.find((item) =>
+      const projectGrantSources = getActiveProjectGrantSources(items, projectId)
+      const existingMember = items.find((item): item is ProjectMemberItem =>
         item.entryType === 'project-member' &&
         item.projectId === projectId &&
-        item.memberKey === normalizedMemberKey,
+        item.memberKey === normalizedMemberKey &&
+        isActiveDirectoryItem(item),
       )
       existingMemberExpected = existingMember !== undefined
 
@@ -15683,6 +16329,11 @@ export class DynamoDbProjectDirectoryClient {
         directoryId,
         entryKey: createProjectMemberEntryKey(projectId, normalizedMemberKey),
         entryType: 'project-member',
+        webhookAuthorizationKey: createWebhookMemberAuthorizationKey(
+          directoryId,
+          normalizedMemberKey,
+        ),
+        webhookAuthorizationSortKey: createWebhookProjectAuthorizationSortKey(projectId),
         projectId,
         memberKey: normalizedMemberKey,
         email,
@@ -15735,8 +16386,18 @@ export class DynamoDbProjectDirectoryClient {
             updatedAt,
           ),
         },
+        ...projectGrantSources.flatMap((source) =>
+          createWebhookTeamGrantTransactItems(
+            this.tableName,
+            directoryId,
+            projectId,
+            normalizedMemberKey,
+            source,
+          )
+        ),
         ...(auditPut ? [auditPut] : []),
       )
+      requireDynamoDbTransactionCapacity(transactItems)
       const workspaceUpdateIndex = guardManager ? 2 : 1
 
       try {
@@ -15814,10 +16475,12 @@ export class DynamoDbProjectDirectoryClient {
     try {
       const items = await this.readValidDirectoryItems(directoryId, true)
       this.requireActiveProject(items, projectId)
-      const member = items.find((item) =>
+      const projectTeamIds = getProjectTeamIds(items, projectId)
+      const member = items.find((item): item is ProjectMemberItem =>
         item.entryType === 'project-member' &&
         item.projectId === projectId &&
-        item.memberKey === normalizedMemberKey,
+        item.memberKey === normalizedMemberKey &&
+        isActiveDirectoryItem(item),
       )
 
       if (!member) {
@@ -15860,6 +16523,20 @@ export class DynamoDbProjectDirectoryClient {
           ':expectedRole': member.role,
         },
       }
+      const grantDeletes = projectTeamIds.map((teamId) => {
+        return {
+          Delete: {
+            TableName: this.tableName,
+            Key: {
+              directoryId: createWebhookTeamGrantDirectoryId(
+                directoryId,
+                normalizedMemberKey,
+              ),
+              entryKey: createWebhookTeamGrantEntryKey(teamId, projectId),
+            },
+          },
+        }
+      })
       const workspaceAuthorizationItem = expectedWorkspaceMemberGeneration === undefined
         ? undefined
         : this.createWorkspaceMemberAuthorizationTransactionItem(
@@ -15868,57 +16545,48 @@ export class DynamoDbProjectDirectoryClient {
             expectedWorkspaceMemberGeneration,
             removedAt,
           )
+      const cleanupLocatorDeletes = projectTeamIds.map((teamId) => ({
+        Delete: {
+          TableName: this.tableName,
+          Key: {
+            directoryId: createWebhookGrantCleanupDirectoryId(
+              directoryId,
+              teamId,
+            ),
+            entryKey: createWebhookGrantCleanupEntryKey(
+              projectId,
+              normalizedMemberKey,
+            ),
+          },
+        },
+      }))
 
-      if (guardManager) {
-        workspaceAuthorizationGuardIndex = workspaceAuthorizationItem === undefined ? undefined : 2
-        await this.documentClient.send(
-          new TransactWriteCommand({
-            TransactItems: [
-              {
-                ConditionCheck: this.createProjectManagerConditionCheck(directoryId, guardManager.entryKey),
-              },
-              {
-                Delete: memberDelete,
-              },
-              ...(workspaceAuthorizationItem === undefined ? [] : [workspaceAuthorizationItem]),
-              ...(auditPut ? [auditPut] : []),
-            ],
-          }),
-        )
-      } else {
-        if (auditPut) {
-          workspaceAuthorizationGuardIndex = workspaceAuthorizationItem === undefined ? undefined : 1
-          await this.documentClient.send(
-            new TransactWriteCommand({
-              TransactItems: [
-                {
-                  Delete: memberDelete,
-                },
-                ...(workspaceAuthorizationItem === undefined ? [] : [workspaceAuthorizationItem]),
-                auditPut,
-              ],
-            }),
-          )
-        } else if (workspaceAuthorizationItem !== undefined) {
-          workspaceAuthorizationGuardIndex = 1
-          await this.documentClient.send(
-            new TransactWriteCommand({
-              TransactItems: [
-                {
-                  Delete: memberDelete,
-                },
-                workspaceAuthorizationItem,
-              ],
-            }),
-          )
-        } else {
-          await this.documentClient.send(
-            new DeleteCommand({
-              ...memberDelete,
-            }),
-          )
-        }
-      }
+      const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+        ...(guardManager
+          ? [{
+              ConditionCheck: this.createProjectManagerConditionCheck(
+                directoryId,
+                guardManager.entryKey,
+              ),
+            }]
+          : []),
+        {
+          Delete: memberDelete,
+        },
+        ...(workspaceAuthorizationItem === undefined ? [] : [workspaceAuthorizationItem]),
+        ...grantDeletes,
+        ...cleanupLocatorDeletes,
+        ...(auditPut ? [auditPut] : []),
+      ]
+      workspaceAuthorizationGuardIndex = workspaceAuthorizationItem === undefined
+        ? undefined
+        : guardManager
+          ? 2
+          : 1
+      requireDynamoDbTransactionCapacity(transactItems)
+      await this.documentClient.send(
+        new TransactWriteCommand({ TransactItems: transactItems }),
+      )
 
       return {
         projectId,
@@ -15989,6 +16657,8 @@ export class DynamoDbProjectDirectoryClient {
         directoryId,
         entryKey: createTeamEntryKey(teamSortOrder, teamId),
         entryType: 'team',
+        webhookAuthorizationKey: createWebhookResourceAuthorizationKey(directoryId),
+        webhookAuthorizationSortKey: createWebhookTeamAuthorizationSortKey(teamId),
         teamId,
         teamSortOrder,
         nameJa: names.nameJa,
@@ -16151,20 +16821,26 @@ export class DynamoDbProjectDirectoryClient {
       const projectId = idempotencyResourceId ?? createUniqueResourceId(
         names.nameJa,
         items
-          .filter((item) => item.entryType === 'project')
+          .filter((item): item is ProjectDirectoryProjectItem =>
+            item.entryType === 'project'
+          )
           .flatMap((item) => (item.projectId ? [item.projectId] : [])),
       )
       const projectSortOrder =
         Math.max(
           0,
           ...items
-            .filter((item) => item.entryType === 'project' && item.teamId === teamId)
+            .filter((item): item is ProjectDirectoryProjectItem =>
+              item.entryType === 'project' && item.teamId === teamId
+            )
             .map((item) => item.projectSortOrder ?? 0),
         ) + 10
       const item: ProjectDirectoryItem = {
         directoryId,
         entryKey: createProjectEntryKey(team.teamSortOrder, projectSortOrder, projectId),
         entryType: 'project',
+        webhookAuthorizationKey: createWebhookResourceAuthorizationKey(directoryId),
+        webhookAuthorizationSortKey: createWebhookProjectAuthorizationSortKey(projectId),
         teamId,
         teamSortOrder: team.teamSortOrder,
         nameJa: names.nameJa,
@@ -16178,6 +16854,11 @@ export class DynamoDbProjectDirectoryClient {
         directoryId,
         entryKey: createProjectMemberEntryKey(projectId, creatorMemberKey),
         entryType: 'project-member',
+        webhookAuthorizationKey: createWebhookMemberAuthorizationKey(
+          directoryId,
+          creatorMemberKey,
+        ),
+        webhookAuthorizationSortKey: createWebhookProjectAuthorizationSortKey(projectId),
         projectId,
         memberKey: creatorMemberKey,
         email: creatorMemberKey,
@@ -16187,54 +16868,78 @@ export class DynamoDbProjectDirectoryClient {
       }
 
       try {
-        await this.documentClient.send(
-          new TransactWriteCommand({
-            TransactItems: [
-              {
-                ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey),
-              },
-              {
-                Put: {
-                  TableName: this.tableName,
-                  Item: item,
-                  ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
-                },
-              },
-              {
-                Put: {
-                  TableName: this.tableName,
-                  Item: creatorMemberItem,
-                  ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
-                },
-              },
-              {
-                Update: this.createActiveWorkspaceMemberVersionUpdate(
-                  directoryId,
-                  creatorMemberKey,
-                  creator.workspaceMemberVersion,
-                  updatedAt,
-                ),
-              },
-              ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
-                directoryId,
-                eventType: 'project.created',
-                entityType: 'project',
-                entityId: projectId,
-                action: 'created',
-                occurredAt: updatedAt,
-                changes: createAuditFieldChanges(undefined, {
-                  projectId,
-                  teamId,
-                  name: names.nameJa,
-                  tone,
-                  creatorMemberKey,
-                  creatorRole: 'manager',
-                }),
-                metadata: { kind: 'project', projectId, teamId },
+        const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+          {
+            ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey),
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: item,
+              ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+            },
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: creatorMemberItem,
+              ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+            },
+          },
+          {
+            Update: this.createActiveWorkspaceMemberVersionUpdate(
+              directoryId,
+              creatorMemberKey,
+              creator.workspaceMemberVersion,
+              updatedAt,
+            ),
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: createWebhookTeamGrantItem({
+                workspaceId: directoryId,
+                teamId,
+                projectId,
+                memberKey: creatorMemberKey,
+                teamSourceEntryKey: team.entryKey,
+                projectSourceEntryKey: item.entryKey,
               }),
-              ...completionTransactItems,
-            ],
+            },
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: createWebhookGrantCleanupItem({
+                workspaceId: directoryId,
+                teamId,
+                projectId,
+                memberKey: creatorMemberKey,
+              }),
+            },
+          },
+          ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+            directoryId,
+            eventType: 'project.created',
+            entityType: 'project',
+            entityId: projectId,
+            action: 'created',
+            occurredAt: updatedAt,
+            changes: createAuditFieldChanges(undefined, {
+              projectId,
+              teamId,
+              name: names.nameJa,
+              tone,
+              creatorMemberKey,
+              creatorRole: 'manager',
+            }),
+            metadata: { kind: 'project', projectId, teamId },
           }),
+          ...completionTransactItems,
+        ]
+        requireDynamoDbTransactionCapacity(transactItems)
+        await this.documentClient.send(
+          new TransactWriteCommand({ TransactItems: transactItems }),
         )
       } catch (error) {
         if (isTransactionConditionalFailureAt(error, 3)) {
@@ -16551,7 +17256,8 @@ export class DynamoDbProjectDirectoryClient {
       item.entryType === 'project-member' &&
       item.projectId === projectId &&
       item.memberKey !== memberKey &&
-      item.role === 'manager',
+      item.role === 'manager' &&
+      isActiveDirectoryItem(item),
     )
   }
 
@@ -16661,10 +17367,11 @@ export class DynamoDbProjectDirectoryClient {
   ): Promise<never> {
     const items = await this.readValidDirectoryItems(directoryId, true)
     this.requireActiveProject(items, projectId)
-    const member = items.find((item) =>
+    const member = items.find((item): item is ProjectMemberItem =>
       item.entryType === 'project-member' &&
       item.projectId === projectId &&
-      item.memberKey === memberKey,
+      item.memberKey === memberKey &&
+      isActiveDirectoryItem(item),
     )
 
     if (existingMemberExpected && !member) {
@@ -16693,10 +17400,11 @@ export class DynamoDbProjectDirectoryClient {
   ): Promise<never> {
     const items = await this.readValidDirectoryItems(directoryId, true)
     this.requireActiveProject(items, projectId)
-    const member = items.find((item) =>
+    const member = items.find((item): item is ProjectMemberItem =>
       item.entryType === 'project-member' &&
       item.projectId === projectId &&
-      item.memberKey === memberKey,
+      item.memberKey === memberKey &&
+      isActiveDirectoryItem(item),
     )
 
     if (!member) {
@@ -17373,6 +18081,7 @@ async function ensureLocalTeamIssuesTable(
           { AttributeName: 'issueId', AttributeType: 'S' },
           { AttributeName: 'sortOrder', AttributeType: 'N' },
           { AttributeName: 'directoryProjectId', AttributeType: 'S' },
+          { AttributeName: 'updatedAt', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
@@ -17392,6 +18101,14 @@ async function ensureLocalTeamIssuesTable(
             KeySchema: [
               { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
               { AttributeName: 'sortOrder', KeyType: 'RANGE' },
+            ],
+            Projection: { ProjectionType: 'ALL' },
+          },
+          {
+            IndexName: 'TeamIssueUpdatedAtIndex',
+            KeySchema: [
+              { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
+              { AttributeName: 'updatedAt', KeyType: 'RANGE' },
             ],
             Projection: { ProjectionType: 'ALL' },
           },
@@ -17474,11 +18191,21 @@ async function ensureLocalProjectDirectoryTable(
         AttributeDefinitions: [
           { AttributeName: 'directoryId', AttributeType: 'S' },
           { AttributeName: 'entryKey', AttributeType: 'S' },
+          { AttributeName: 'webhookAuthorizationKey', AttributeType: 'S' },
+          { AttributeName: 'webhookAuthorizationSortKey', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'directoryId', KeyType: 'HASH' },
           { AttributeName: 'entryKey', KeyType: 'RANGE' },
         ],
+        GlobalSecondaryIndexes: [{
+          IndexName: 'WebhookAuthorizationIndex',
+          KeySchema: [
+            { AttributeName: 'webhookAuthorizationKey', KeyType: 'HASH' },
+            { AttributeName: 'webhookAuthorizationSortKey', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'KEYS_ONLY' },
+        }],
         BillingMode: 'PAY_PER_REQUEST',
       }),
     isProjectDirectoryTableDescription,
@@ -17598,6 +18325,15 @@ function isTeamIssuesTableDescription(table: TableDescription | undefined) {
           ['sortOrder', 'RANGE'],
         ]),
       ),
+    ) &&
+    Boolean(
+      table?.GlobalSecondaryIndexes?.some((index) =>
+        index.IndexName === 'TeamIssueUpdatedAtIndex' &&
+        hasKeySchema(index, [
+          ['directoryTeamId', 'HASH'],
+          ['updatedAt', 'RANGE'],
+        ]),
+      ),
     )
   )
 }
@@ -17613,7 +18349,13 @@ function isProjectDirectoryTableDescription(table: TableDescription | undefined)
   return hasKeySchema(table, [
     ['directoryId', 'HASH'],
     ['entryKey', 'RANGE'],
-  ])
+  ]) && table?.GlobalSecondaryIndexes?.some((index) =>
+    index.IndexName === 'WebhookAuthorizationIndex' &&
+    hasKeySchema(index, [
+      ['webhookAuthorizationKey', 'HASH'],
+      ['webhookAuthorizationSortKey', 'RANGE'],
+    ])
+  ) === true
 }
 
 function hasKeySchema(
@@ -17686,6 +18428,19 @@ function resolveConfigurationConditionStartIndex(
   auditPut: ReturnType<typeof createMutationAuditEventPut>,
 ) {
   return precedingItemCount + (auditPut === undefined ? 0 : 1)
+}
+
+function requireDynamoDbTransactionCapacity(
+  transactItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
+) {
+  if (transactItems.length > DYNAMODB_TRANSACTION_MAX_ACTIONS) {
+    throw new ProjectDataError(
+      409,
+      'ProjectMembershipTransactionTooLarge',
+      `Project membership would require ${transactItems.length} atomic writes; ` +
+        `the supported maximum is ${DYNAMODB_TRANSACTION_MAX_ACTIONS}.`,
+    )
+  }
 }
 
 function createProjectDataConflictError() {
@@ -17942,7 +18697,7 @@ function toProjectDirectoryResponse(
 ): ProjectDirectoryTeamResponse[] {
   const teams: ProjectDirectoryTeamResponse[] = []
   const teamById = new Map<string, ProjectDirectoryTeamResponse>()
-  const projectItems: ProjectDirectoryItem[] = []
+  const projectItems: ProjectDirectoryProjectItem[] = []
 
   for (const value of readProjectDirectoryItems(values, directoryId)) {
     if (value.entryType === 'project-member') {
@@ -18004,13 +18759,17 @@ function toProjectMemberResponseItem(item: ProjectMemberItem): ProjectMemberResp
 function toProjectAccessEntries(items: ProjectDirectoryItem[], memberKey: string) {
   const activeTeamIds = new Set(
     items
-      .filter((item) => item.entryType === 'team' && isActiveDirectoryItem(item))
+      .filter((item): item is ProjectDirectoryTeamItem =>
+        item.entryType === 'team' && isActiveDirectoryItem(item)
+      )
       .map((item) => item.teamId),
   )
   const roleByProjectId = new Map(
     items
-      .filter((item) => {
-        return item.entryType === 'project-member' && item.memberKey === memberKey
+      .filter((item): item is ProjectMemberItem => {
+        return item.entryType === 'project-member' &&
+          item.memberKey === memberKey &&
+          item.archivedAt === undefined
       })
       .map((item) => [item.projectId, item.role] as const),
   )
@@ -18037,6 +18796,110 @@ function toProjectAccessEntries(items: ProjectDirectoryItem[], memberKey: string
   return accessEntries
 }
 
+function getProjectTeamIds(
+  items: ProjectDirectoryItem[],
+  projectId: string,
+) {
+  return [...new Set(items
+    .filter((item): item is ProjectDirectoryProjectItem =>
+      item.entryType === 'project' &&
+      item.projectId === projectId
+    )
+    .map((item) => item.teamId))]
+}
+
+function getActiveProjectGrantSources(
+  items: ProjectDirectoryItem[],
+  projectId: string,
+) {
+  const activeTeams = new Map(
+    items
+      .filter((item): item is ProjectDirectoryTeamItem =>
+        item.entryType === 'team' && isActiveDirectoryItem(item)
+      )
+      .map((item) => [item.teamId, item] as const),
+  )
+  const sourcesByTeamId = new Map<string, ProjectWebhookGrantSource>()
+  for (const item of items) {
+    if (
+      item.entryType !== 'project' ||
+      item.projectId !== projectId ||
+      !isActiveDirectoryItem(item)
+    ) {
+      continue
+    }
+    const team = activeTeams.get(item.teamId)
+    if (!team || sourcesByTeamId.has(item.teamId)) continue
+    sourcesByTeamId.set(item.teamId, {
+      teamId: item.teamId,
+      teamSourceEntryKey: team.entryKey,
+      projectSourceEntryKey: item.entryKey,
+    })
+  }
+  return [...sourcesByTeamId.values()]
+}
+
+function createWebhookTeamGrantTransactItems(
+  tableName: string,
+  workspaceId: string,
+  projectId: string,
+  memberKey: string,
+  source: ProjectWebhookGrantSource,
+): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  return [
+    {
+      ConditionCheck: {
+        TableName: tableName,
+        Key: {
+          directoryId: workspaceId,
+          entryKey: source.teamSourceEntryKey,
+        },
+        ConditionExpression:
+          '#entryType = :teamEntryType AND attribute_not_exists(archivedAt)',
+        ExpressionAttributeNames: { '#entryType': 'entryType' },
+        ExpressionAttributeValues: { ':teamEntryType': 'team' },
+      },
+    },
+    {
+      ConditionCheck: {
+        TableName: tableName,
+        Key: {
+          directoryId: workspaceId,
+          entryKey: source.projectSourceEntryKey,
+        },
+        ConditionExpression:
+          '#entryType = :projectEntryType AND attribute_not_exists(archivedAt)',
+        ExpressionAttributeNames: { '#entryType': 'entryType' },
+        ExpressionAttributeValues: { ':projectEntryType': 'project' },
+      },
+    },
+    {
+      Put: {
+        TableName: tableName,
+        Item: createWebhookTeamGrantItem({
+          workspaceId,
+          teamId: source.teamId,
+          projectId,
+          memberKey,
+          teamSourceEntryKey: source.teamSourceEntryKey,
+          projectSourceEntryKey: source.projectSourceEntryKey,
+        }),
+      },
+    },
+    {
+      Put: {
+        TableName: tableName,
+        Item: createWebhookGrantCleanupItem({
+          workspaceId,
+          teamId: source.teamId,
+          projectId,
+          memberKey,
+        }),
+      },
+    },
+  ]
+}
+
 function compareProjectMemberItems(first: ProjectMemberItem, second: ProjectMemberItem) {
   const roleDelta = projectRoleWeights[second.role] - projectRoleWeights[first.role]
 
@@ -18054,7 +18917,7 @@ function localizedName(item: ProjectDirectoryTeamItem | ProjectDirectoryProjectI
   return locale === 'en' ? item.nameEn || item.nameJa : item.nameJa || item.nameEn
 }
 
-function isActiveDirectoryItem(item: ProjectDirectoryTeamItem | ProjectDirectoryProjectItem) {
+function isActiveDirectoryItem(item: { archivedAt?: string }) {
   return item.archivedAt === undefined
 }
 
@@ -18171,7 +19034,8 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
       (value.name === undefined || typeof value.name === 'string') &&
       isProjectRole(value.role) &&
       typeof value.createdAt === 'string' &&
-      typeof value.updatedAt === 'string'
+      typeof value.updatedAt === 'string' &&
+      (value.archivedAt === undefined || typeof value.archivedAt === 'string')
     )
   }
 
@@ -19147,6 +20011,63 @@ function createDirectoryTeamIssueId(directoryId: string, teamId: string, issueId
   return `${createDirectoryTeamId(directoryId, teamId)}#issue#${issueId}`
 }
 
+/** Public Work Item page の DynamoDB key を store-local cursor に変換します。 */
+function encodePublicWorkItemPageCursor(
+  key: Record<string, unknown>,
+  directoryTeamId: string,
+) {
+  const updatedAt = typeof key.updatedAt === 'string' ? key.updatedAt : undefined
+  const issueId = typeof key.issueId === 'string' ? key.issueId : undefined
+  if (key.directoryTeamId !== directoryTeamId || !updatedAt || !issueId) {
+    throw new ProjectDataError(
+      503,
+      'InvalidWorkItemPageCursor',
+      'Work Item page did not include a valid continuation key.',
+    )
+  }
+  const cursor: PublicWorkItemPageCursor = {
+    version: 1,
+    directoryTeamId,
+    updatedAt,
+    issueId,
+  }
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+/** Public Work Item store cursor を検証し DynamoDB key に戻します。 */
+function decodePublicWorkItemPageCursor(
+  value: string | undefined,
+  directoryTeamId: string,
+) {
+  if (!value) return undefined
+  try {
+    const cursor = JSON.parse(
+      Buffer.from(value, 'base64url').toString('utf8'),
+    ) as Partial<PublicWorkItemPageCursor>
+    if (
+      cursor.version !== 1 ||
+      cursor.directoryTeamId !== directoryTeamId ||
+      typeof cursor.updatedAt !== 'string' ||
+      !Number.isFinite(Date.parse(cursor.updatedAt)) ||
+      typeof cursor.issueId !== 'string' ||
+      !cursor.issueId
+    ) {
+      throw new TypeError('Invalid cursor payload.')
+    }
+    return {
+      directoryTeamId,
+      updatedAt: cursor.updatedAt,
+      issueId: cursor.issueId,
+    }
+  } catch {
+    throw new ProjectDataError(
+      400,
+      'InvalidWorkItemPageCursor',
+      'Work Item page cursor is invalid.',
+    )
+  }
+}
+
 /** Team Issue event の DynamoDB key を scope-bound opaque cursor に変換します。 */
 function encodeTeamIssueEventCursor(
   directoryTeamIssueId: string,
@@ -19388,6 +20309,1578 @@ function normalizeApiRequestPath(path: string) {
   return `/api${path.startsWith('/') ? path : `/${path}`}`
 }
 
+function createForwardingClient<TClient extends object>(resolve: () => TClient): TClient {
+  return new Proxy({} as TClient, {
+    get(_target, property) {
+      const client = resolve()
+      const value = Reflect.get(client, property)
+      return typeof value === 'function' ? value.bind(client) : value
+    },
+  })
+}
+
+async function authenticateDeveloperManagement(
+  authorization: string,
+): Promise<DeveloperManagementPrincipal> {
+  const accessToken = authorization.match(/^Bearer\s+(.+)$/iu)?.[1]?.trim()
+  if (!accessToken) {
+    throw new PublicApiServiceError(
+      401,
+      'authentication_required',
+      'A Cognito Bearer token is required.',
+    )
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken)
+  const canAdminister = principal.workspaceRole === 'owner' ||
+    principal.workspaceRole === 'admin'
+  return {
+    workspaceId: principal.directoryId,
+    userId: principal.userKey,
+    capabilities: {
+      canManageCredentials: canAdminister,
+      canManageWebhooks: canAdminister,
+      canManageIntegrations: canAdminister,
+      canImport: canAdminister,
+      canExport: canAdminister,
+    },
+  }
+}
+
+async function resolveDeveloperCredentialPrincipal(
+  credential: AuthenticatedDeveloperCredential,
+): Promise<WorkspacePrincipal> {
+  const member = await workspaceAccess.getActiveMember(
+    credential.workspaceId,
+    credential.subjectUserId,
+  )
+  if (!member) {
+    throw new PublicApiServiceError(
+      403,
+      'forbidden',
+      'The credential owner is not an active Workspace member.',
+    )
+  }
+  return {
+    directoryId: credential.workspaceId,
+    userKey: member.memberKey,
+    actorId: member.id,
+    isSystemAdmin: await cognito.isSystemAdmin(member.memberKey),
+    groups: [],
+    workspaceMember: member,
+    workspaceRole: member.role,
+    workspaceMemberStatus: member.status,
+  }
+}
+
+async function resolveDeveloperManagementPrincipal(
+  principal: DeveloperManagementPrincipal,
+): Promise<WorkspacePrincipal> {
+  return resolveDeveloperCredentialPrincipal({
+    kind: 'oauth-token',
+    workspaceId: principal.workspaceId,
+    credentialId: `session:${principal.userId}`,
+    subjectUserId: principal.userId,
+    scopes: [],
+  })
+}
+
+function createPublicMutationAuditContext(
+  principal: WorkspacePrincipal,
+  context: PublicMutationContext,
+  request: {
+    method: string
+    path: string
+    body: unknown
+    query?: Record<string, string>
+  },
+): MutationAuditContext {
+  return createMutationAuditContext({
+    workspaceId: principal.directoryId,
+    actor: {
+      id: principal.actorId,
+      kind: 'user',
+      displayName: principal.userKey,
+    },
+    idempotencyKey: context.idempotencyKey,
+    ...(context.correlationId ? { correlationId: context.correlationId } : {}),
+    request,
+    source: {
+      kind: 'api',
+      requestId: context.requestId,
+      method: request.method,
+      route: request.path,
+    },
+  })
+}
+
+function createWorkItemIdempotencyTransaction(
+  workspaceId: string,
+  token: IdempotencyMutationToken | undefined,
+): WorkItemIdempotencyTransaction | undefined {
+  if (!token || !developerPlatform.prepareIdempotencyCompletionTransactWrite) {
+    return undefined
+  }
+  return {
+    async prepare(response) {
+      return developerPlatform.prepareIdempotencyCompletionTransactWrite?.({
+        workspaceId,
+        credentialId: token.credentialId,
+        idempotencyKey: token.idempotencyKey,
+        requestFingerprint: token.requestFingerprint,
+        reservationId: token.reservationId,
+        response,
+      })
+    },
+  }
+}
+
+/**
+ * Canonical Work Item を一度だけ materialize する identity です。
+ */
+export type IdempotentWorkItemCreate = {
+  /** Request identity と payload から決まる deterministic Work Item ID です。 */
+  issueId: string
+  /** Team、row payload、idempotency identity の SHA-256 digest です。 */
+  requestDigest: string
+}
+
+async function createCanonicalPublicWorkItem(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  input: CreateWorkItemInput,
+  context: PublicMutationContext,
+  requestPath: string,
+  idempotentCreate?: IdempotentWorkItemCreate,
+) {
+  requireWorkspaceBusinessWrite(principal)
+  const permission = await requireTeamPermission(principal, teamId, 'member')
+  const body = normalizeTeamIssueInput(input, permission.team)
+  requireAssignedProjectPermission(
+    principal,
+    permission,
+    readAssignedProjectId(body.assignedProjectId),
+    'member',
+  )
+  const resolvedConfiguration = await workItemConfigurations.getTeamConfiguration(
+    principal.directoryId,
+    teamId,
+  )
+  const configuredBody = await prepareConfiguredCreateWorkItem(
+    principal.directoryId,
+    teamId,
+    body,
+    resolvedConfiguration,
+  )
+  const assigneeUserId = readTeamIssueAssigneeUserId(configuredBody)
+  await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
+  const response = await teamIssues.createTeamIssue(
+    principal.directoryId,
+    teamId,
+    {
+      ...configuredBody,
+      assigneeUserId,
+      ...(idempotentCreate
+        ? {
+            idempotentIssueId: idempotentCreate.issueId,
+            idempotentRequestDigest: idempotentCreate.requestDigest,
+          }
+        : {}),
+    },
+    principal.userKey,
+    createPublicMutationAuditContext(principal, context, {
+      method: 'POST',
+      path: requestPath,
+      body: { teamId, ...input },
+    }),
+  )
+  await projectWorkItemSearchDocumentBestEffort(
+    principal.directoryId,
+    response.issue,
+    'Public Work Item creation',
+    [],
+  )
+  return response.issue
+}
+
+function createCanonicalPublicWorkItemService(): PublicWorkItemService {
+  return {
+    async list(credential, filters, continuation, limit) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential)
+      const teamId = typeof filters.teamId === 'string' ? filters.teamId : ''
+      if (!teamId) {
+        throw new PublicApiServiceError(400, 'invalid_request', 'teamId is required.')
+      }
+      const permission = await requireTeamPermission(principal, teamId, 'viewer')
+      const assignedProjectId = typeof filters.assignedProjectId === 'string'
+        ? filters.assignedProjectId
+        : undefined
+      const accessibleProjectIds = principal.isSystemAdmin
+        ? undefined
+        : (permission.projectAccesses ?? [])
+            .filter((access) => projectAccessAllows(access, 'viewer'))
+            .map((access) => access.projectId)
+      if (
+        assignedProjectId &&
+        accessibleProjectIds &&
+        !accessibleProjectIds.includes(assignedProjectId)
+      ) {
+        return { items: [], hasMore: false }
+      }
+      const page = await teamIssues.getPublicWorkItemPage(
+        principal.directoryId,
+        teamId,
+        {
+          limit,
+          ...(continuation ? { cursor: continuation } : {}),
+          ...(assignedProjectId ? { assignedProjectId } : {}),
+          ...(typeof filters.assigneeUserId === 'string'
+            ? { assigneeUserId: filters.assigneeUserId }
+            : {}),
+          ...(typeof filters.workflowStatusId === 'string'
+            ? { workflowStatusId: filters.workflowStatusId }
+            : {}),
+          ...(typeof filters.updatedAfter === 'string'
+            ? { updatedAfter: filters.updatedAfter }
+            : {}),
+          ...(accessibleProjectIds ? { accessibleProjectIds } : {}),
+        },
+      )
+      return {
+        items: page.issues,
+        hasMore: page.nextCursor !== undefined,
+        ...(page.nextCursor ? { nextContinuation: page.nextCursor } : {}),
+      }
+    },
+
+    async get(credential, teamId, workItemId) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential)
+      return (await loadAuthorizedTeamIssue(
+        principal,
+        teamId,
+        workItemId,
+        'viewer',
+      )).detail.issue
+    },
+
+    async create(credential, input, context) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential)
+      const { teamId, ...workItemInput } = input
+      return createCanonicalPublicWorkItem(
+        principal,
+        teamId,
+        workItemInput,
+        context,
+        '/api/v1/work-items',
+        createPublicApiWorkItemCreateIdentity(
+          credential.workspaceId,
+          credential.credentialId,
+          context,
+          teamId,
+          workItemInput,
+        ),
+      )
+    },
+
+    async update(
+      credential,
+      teamId,
+      workItemId,
+      input,
+      mutationContext,
+      idempotency,
+    ) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential)
+      requireWorkspaceBusinessWrite(principal)
+      const permission = await requireTeamPermission(principal, teamId, 'member')
+      const body = normalizeTeamIssueInput(input, permission.team)
+      const expectedRevision = readWorkItemExpectedRevision(body.expectedRevision)
+      const detail = await teamIssues.getTeamIssueDetail(
+        principal.directoryId,
+        teamId,
+        workItemId,
+        { consistentIssueRead: true, eventLimit: 0 },
+      )
+      requireAssignedProjectPermission(
+        principal,
+        permission,
+        detail.issue.assignedProjectId,
+        'member',
+      )
+      requireAssignedProjectPermission(
+        principal,
+        permission,
+        readAssignedProjectId(body.assignedProjectId),
+        'member',
+      )
+      const resolvedConfiguration = await workItemConfigurations.getTeamConfiguration(
+        principal.directoryId,
+        teamId,
+      )
+      const configuredBody = await prepareConfiguredUpdateWorkItem(
+        principal.directoryId,
+        teamId,
+        detail.issue,
+        body,
+        resolvedConfiguration,
+      )
+      if ('assigneeUserId' in configuredBody) {
+        await requireActiveWorkspaceAssignee(
+          principal.directoryId,
+          readTeamIssueAssigneeUserId(configuredBody),
+        )
+      }
+      const response = await teamIssues.updateTeamIssue(
+        principal.directoryId,
+        teamId,
+        workItemId,
+        { ...configuredBody, expectedRevision },
+        principal.userKey,
+        createPublicMutationAuditContext(principal, mutationContext, {
+          method: 'PATCH',
+          path: `/api/v1/work-items/${encodeURIComponent(workItemId)}`,
+          query: { teamId },
+          body: input,
+        }),
+        createWorkItemIdempotencyTransaction(
+          principal.directoryId,
+          idempotency,
+        ),
+      )
+      await projectWorkItemSearchDocumentBestEffort(
+        principal.directoryId,
+        response.issue,
+        'Public Work Item update',
+      )
+      return response.issue
+    },
+
+    async delete(
+      credential,
+      teamId,
+      workItemId,
+      expectedRevision,
+      mutationContext,
+      idempotency,
+    ) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential)
+      requireWorkspaceBusinessWrite(principal)
+      await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+      const externalLinks = await developerPlatform.listExternalWorkItemLinks({
+        workspaceId: principal.directoryId,
+        teamId,
+        workItemId,
+      })
+      if (externalLinks.length > 0) {
+        throw new PublicApiServiceError(
+          409,
+          'conflict',
+          'Unlink all external resources before deleting this Work Item.',
+        )
+      }
+      if (!teamIssues.deleteTeamIssue) {
+        throw new PublicApiServiceError(
+          503,
+          'temporarily_unavailable',
+          'Canonical Work Item deletion is not configured.',
+          true,
+        )
+      }
+      const response = await teamIssues.deleteTeamIssue(
+        principal.directoryId,
+        teamId,
+        workItemId,
+        expectedRevision,
+        principal.userKey,
+        createPublicMutationAuditContext(principal, mutationContext, {
+          method: 'DELETE',
+          path: `/api/v1/work-items/${encodeURIComponent(workItemId)}`,
+          query: { teamId },
+          body: { expectedRevision },
+        }),
+        createWorkItemIdempotencyTransaction(
+          principal.directoryId,
+          idempotency,
+        ),
+        await developerPlatform.prepareWorkItemDeletionFenceTransactWrite?.({
+          workspaceId: principal.directoryId,
+          teamId,
+          workItemId,
+        }),
+      )
+      await deleteWorkspaceSearchDocumentBestEffort(
+        principal.directoryId,
+        'work-item',
+        createTeamIssueAuditEntityId(teamId, workItemId),
+        'Public Work Item deletion',
+      )
+      return response.issue
+    },
+
+    async authorizeExternalLink(credential, teamId, workItemId, write) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential)
+      if (write) requireWorkspaceBusinessWrite(principal)
+      await loadAuthorizedTeamIssue(
+        principal,
+        teamId,
+        workItemId,
+        write ? 'member' : 'viewer',
+      )
+    },
+
+    async authorizeWebhookTeams(managementPrincipal, teamIds) {
+      const principal = await resolveDeveloperManagementPrincipal(managementPrincipal)
+      requireWorkspaceBusinessWrite(principal)
+      for (const teamId of teamIds) {
+        await requireWebhookTeamPermission(principal, teamId)
+      }
+    },
+
+    async dryRunImport(managementPrincipal, input) {
+      const principal = await resolveDeveloperManagementPrincipal(managementPrincipal)
+      requireWorkspaceBusinessWrite(principal)
+      await requirePublicImportPermission(principal, input)
+      return (await validatePublicImport(principal, input)).report
+    },
+
+    async commitImport(managementPrincipal, dryRunJobId, input, mutationContext) {
+      const principal = await resolveDeveloperManagementPrincipal(managementPrincipal)
+      requireWorkspaceBusinessWrite(principal)
+      if (dryRunJobId) {
+        const dryRunJob = (await developerPlatform.listImportJobs(principal.directoryId))
+          .find((job) => job.id === dryRunJobId)
+        if (
+          !dryRunJob ||
+          dryRunJob.createdByUserId !== principal.userKey ||
+          !dryRunJob.dryRun
+        ) {
+          throw new PublicApiServiceError(404, 'not_found', 'Import dry-run job was not found.')
+        }
+        if (dryRunJob.status !== 'completed' || (dryRunJob.report?.invalidRows ?? 1) > 0) {
+          throw new PublicApiServiceError(
+            409,
+            'conflict',
+            'Import dry-run must complete without invalid rows before commit.',
+          )
+        }
+        if (!matchesImportJobInput(dryRunJob, input)) {
+          throw new PublicApiServiceError(
+            409,
+            'conflict',
+            'Import metadata differs from the dry-run. Run validation again.',
+          )
+        }
+      }
+      await requirePublicImportPermission(principal, input)
+      const jobId = createWorkItemImportJobId(
+        principal.directoryId,
+        principal.userKey,
+        mutationContext.idempotencyKey,
+      )
+      const job = await developerPlatform.createImportJob({
+        workspaceId: principal.directoryId,
+        createdByUserId: principal.userKey,
+        jobId,
+        input: {
+          format: input.format,
+          teamId: input.teamId,
+          ...(input.assignedProjectId
+            ? { assignedProjectId: input.assignedProjectId }
+            : {}),
+          mapping: input.mapping,
+          dryRun: false,
+        },
+      })
+      if (job.status === 'completed') return job
+      if (job.status === 'failed' || job.status === 'cancelled') {
+        throw new PublicApiServiceError(
+          409,
+          'conflict',
+          'The deterministic import job is already in a terminal state.',
+        )
+      }
+      try {
+        await stageWorkItemImport({
+          jobId: job.id,
+          workspaceId: principal.directoryId,
+          createdByUserId: principal.userKey,
+          teamId: input.teamId,
+          ...(input.assignedProjectId
+            ? { assignedProjectId: input.assignedProjectId }
+            : {}),
+          format: input.format,
+          sourceContent: input.source.content,
+          mapping: input.mapping,
+          requestFingerprint: createHash('sha256')
+            .update(`management-import-v1\n${mutationContext.idempotencyKey}`)
+            .digest('hex'),
+        }, {
+          executions: workItemImportExecutions,
+          sources: workItemImportSources,
+          queue: workItemImportQueue,
+          now: () => new Date(),
+        })
+        return job
+      } catch (error) {
+        if (!(error instanceof WorkItemImportError && error.retryable)) {
+          await failImportJobBestEffort(principal.directoryId, job.id, error)
+        }
+        throw error
+      }
+    },
+
+    async authorizeImportJob(managementPrincipal, job, write) {
+      const principal = await resolveDeveloperManagementPrincipal(managementPrincipal)
+      requireWorkspaceBusinessWrite(principal)
+      if (job.createdByUserId !== principal.userKey) {
+        throw new PublicApiServiceError(404, 'not_found', 'Import job was not found.')
+      }
+      const permission = await requireTeamPermission(
+        principal,
+        job.teamId,
+        write ? 'member' : 'viewer',
+      )
+      requireAssignedProjectPermission(
+        principal,
+        permission,
+        job.assignedProjectId,
+        write ? 'member' : 'viewer',
+      )
+    },
+
+    async cancelImport(managementPrincipal, job) {
+      const principal = await resolveDeveloperManagementPrincipal(managementPrincipal)
+      requireWorkspaceBusinessWrite(principal)
+      if (job.createdByUserId !== principal.userKey) {
+        throw new PublicApiServiceError(404, 'not_found', 'Import job was not found.')
+      }
+      const permission = await requireTeamPermission(principal, job.teamId, 'member')
+      requireAssignedProjectPermission(
+        principal,
+        permission,
+        job.assignedProjectId,
+        'member',
+      )
+      if (job.status === 'cancelled') return job
+      if (job.status === 'completed' || job.status === 'failed') {
+        throw new PublicApiServiceError(
+          409,
+          'conflict',
+          'Only a queued or running import can be cancelled.',
+        )
+      }
+      await requestWorkItemImportCancellation(
+        principal.directoryId,
+        job.id,
+        {
+          executions: workItemImportExecutions,
+          sources: workItemImportSources,
+          jobs: createWorkItemImportJobLifecycle(),
+          now: () => new Date(),
+        },
+      )
+      return requireImportJob(principal.directoryId, job.id)
+    },
+
+    async export(managementPrincipal, _format, continuation, limit) {
+      const principal = await resolveDeveloperManagementPrincipal(managementPrincipal)
+      requireWorkspaceBusinessWrite(principal)
+      return readAccessibleWorkItemExportPage(
+        principal,
+        continuation,
+        limit,
+      )
+    },
+  }
+}
+
+/** Production connector runtime の API/worker 共有 components です。 */
+type ConnectorRuntimeBundle = {
+  /** OAuth lifecycle と conflict recovery の API boundary です。 */
+  authorization: ConnectorAuthorizationRuntime
+  /** Provider と canonical Work Item の双方向 sync engine です。 */
+  syncEngine: ConnectorSyncEngine
+}
+
+/** Canonical Work Item service を connector worker の current-RBAC/CAS boundary へ適合します。 */
+function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
+  return {
+    async authorize(workspaceId, actorUserId, teamId, workItemId, write) {
+      try {
+        const principal = await resolveConnectorActorPrincipal(workspaceId, actorUserId)
+        if (write) requireWorkspaceBusinessWrite(principal)
+        await loadAuthorizedTeamIssue(
+          principal,
+          teamId,
+          workItemId,
+          write ? 'member' : 'viewer',
+        )
+      } catch (error) {
+        if (
+          (error instanceof PublicApiServiceError || error instanceof ProjectDataError) &&
+          (error.status === 403 || error.status === 404)
+        ) {
+          throw new ConnectorRuntimeError(
+            'ConnectorWorkItemAccessDenied',
+            'The connector actor cannot access this Work Item.',
+          )
+        }
+        throw error
+      }
+    },
+
+    async get(workspaceId, teamId, workItemId) {
+      const detail = await teamIssues.getTeamIssueDetail(
+        workspaceId,
+        teamId,
+        workItemId,
+        { consistentIssueRead: true, eventLimit: 0 },
+      )
+      return toConnectorWorkItemSnapshot(detail.issue)
+    },
+
+    async applyExternal(input) {
+      const principal = await resolveConnectorActorPrincipal(
+        input.workspaceId,
+        input.actorUserId,
+      )
+      requireWorkspaceBusinessWrite(principal)
+      const permission = await requireTeamPermission(principal, input.teamId, 'member')
+      const requestFingerprint = createHash('sha256')
+        .update(stableDigestStringify({
+          version: 1,
+          workspaceId: input.workspaceId,
+          teamId: input.teamId,
+          workItemId: input.workItemId,
+          actorUserId: input.actorUserId,
+          expectedRevision: input.expectedRevision,
+          patch: input.patch,
+        }))
+        .digest('hex')
+      const credentialId = `connector-sync:${createHash('sha256')
+        .update(`${input.workspaceId}\0${input.actorUserId}`)
+        .digest('hex')
+        .slice(0, 48)}`
+      const reservationRequest = {
+        workspaceId: input.workspaceId,
+        credentialId,
+        idempotencyKey: input.operationId,
+        requestFingerprint,
+      }
+      const reservation = await developerPlatform.reserveIdempotency(reservationRequest)
+      if (reservation.status === 'replay') {
+        return {
+          kind: 'applied',
+          workItem: readConnectorWorkItemReplay(
+            reservation.response,
+            input.teamId,
+            input.workItemId,
+          ),
+        }
+      }
+      if (reservation.status === 'in-progress') {
+        throw new ConnectorRuntimeError(
+          'ConnectorWorkItemMutationInProgress',
+          'The same connector Work Item mutation is still in progress.',
+          { retryable: true },
+        )
+      }
+      const completionRequest = {
+        ...reservationRequest,
+        reservationId: reservation.reservationId,
+      }
+      try {
+        const detail = await teamIssues.getTeamIssueDetail(
+          input.workspaceId,
+          input.teamId,
+          input.workItemId,
+          { consistentIssueRead: true, eventLimit: 0 },
+        )
+        requireAssignedProjectPermission(
+          principal,
+          permission,
+          detail.issue.assignedProjectId,
+          'member',
+        )
+        if (detail.issue.revision !== input.expectedRevision) {
+          await developerPlatform.releaseIdempotency(completionRequest)
+          return {
+            kind: 'conflict',
+            workItem: toConnectorWorkItemSnapshot(detail.issue),
+          }
+        }
+        const body = normalizeTeamIssueInput({
+          expectedRevision: input.expectedRevision,
+          ...(input.patch.title !== undefined ? { title: input.patch.title } : {}),
+          ...(input.patch.description !== undefined
+            ? { description: input.patch.description }
+            : {}),
+          ...(input.patch.status !== undefined
+            ? { workflowStatusId: input.patch.status }
+            : {}),
+        }, permission.team)
+        const configuration = await workItemConfigurations.getTeamConfiguration(
+          input.workspaceId,
+          input.teamId,
+        )
+        const configuredBody = await prepareConfiguredUpdateWorkItem(
+          input.workspaceId,
+          input.teamId,
+          detail.issue,
+          body,
+          configuration,
+        )
+        const idempotencyTransaction: WorkItemIdempotencyTransaction | undefined =
+          developerPlatform.prepareIdempotencyCompletionTransactWrite
+            ? {
+                async prepare(response) {
+                  return developerPlatform.prepareIdempotencyCompletionTransactWrite?.({
+                    ...completionRequest,
+                    response,
+                  })
+                },
+              }
+            : undefined
+        const response = await teamIssues.updateTeamIssue(
+          input.workspaceId,
+          input.teamId,
+          input.workItemId,
+          configuredBody,
+          principal.userKey,
+          createMutationAuditContext({
+            workspaceId: input.workspaceId,
+            actor: {
+              id: principal.actorId,
+              kind: 'user',
+              displayName: principal.userKey,
+            },
+            idempotencyKey: input.operationId,
+            request: {
+              method: 'SYNC',
+              path: `/connector-sync/work-items/${input.workItemId}`,
+              body: input.patch,
+            },
+            source: {
+              kind: 'system',
+              requestId: `connector-sync-${createHash('sha256')
+                .update(input.operationId)
+                .digest('hex')
+                .slice(0, 24)}`,
+            },
+          }),
+          idempotencyTransaction,
+        )
+        await developerPlatform.completeIdempotency({
+          ...completionRequest,
+          response: { status: 200, body: response.issue },
+        })
+        await projectWorkItemSearchDocumentBestEffort(
+          input.workspaceId,
+          response.issue,
+          'Connector Work Item synchronization',
+        )
+        return {
+          kind: 'applied',
+          workItem: toConnectorWorkItemSnapshot(response.issue),
+        }
+      } catch (error) {
+        await developerPlatform.releaseIdempotency(completionRequest).catch(() => undefined)
+        if (error instanceof ProjectDataError && error.code === 'WorkItemRevisionConflict') {
+          const latest = await teamIssues.getTeamIssueDetail(
+            input.workspaceId,
+            input.teamId,
+            input.workItemId,
+            { consistentIssueRead: true, eventLimit: 0 },
+          )
+          return {
+            kind: 'conflict',
+            workItem: toConnectorWorkItemSnapshot(latest.issue),
+          }
+        }
+        throw error
+      }
+    },
+  }
+}
+
+/** Connector actor の current Workspace membership を解決します。 */
+function resolveConnectorActorPrincipal(workspaceId: string, actorUserId: string) {
+  return resolveDeveloperCredentialPrincipal({
+    kind: 'oauth-token',
+    workspaceId,
+    credentialId: `connector-actor:${createHash('sha256')
+      .update(actorUserId)
+      .digest('hex')
+      .slice(0, 48)}`,
+    subjectUserId: actorUserId,
+    scopes: [],
+  })
+}
+
+/** Canonical response を provider-neutral connector snapshot へ変換します。 */
+function toConnectorWorkItemSnapshot(
+  issue: TeamIssueResponseItem,
+): ConnectorWorkItemSnapshot {
+  return {
+    id: issue.id,
+    teamId: issue.teamId,
+    revision: issue.revision,
+    title: issue.title,
+    ...(issue.description ? { description: issue.description } : {}),
+    status: issue.workflowStatusId,
+  }
+}
+
+/** Encrypted idempotency receipt から tenant/resource-bound snapshot を復元します。 */
+function readConnectorWorkItemReplay(
+  value: unknown,
+  teamId: string,
+  workItemId: string,
+) {
+  if (!isRecord(value) || value.status !== 200 || value.body === undefined) {
+    throw new ConnectorRuntimeError(
+      'ConnectorWorkItemReceiptInvalid',
+      'Connector Work Item idempotency receipt is invalid.',
+    )
+  }
+  const issue = toTeamIssueResponseItem(value.body)
+  if (issue.teamId !== teamId || issue.id !== workItemId) {
+    throw new ConnectorRuntimeError(
+      'ConnectorWorkItemReceiptInvalid',
+      'Connector Work Item idempotency receipt belongs to another resource.',
+    )
+  }
+  return toConnectorWorkItemSnapshot(issue)
+}
+
+/** Current membership と integration 管理権限を OAuth callback 時に再評価します。 */
+function createConnectorOAuthCallbackAuthorizer(): ConnectorOAuthCallbackAuthorizer {
+  return {
+    async authorize(workspaceId, userId) {
+      const principal = await resolveConnectorActorPrincipal(workspaceId, userId)
+      requireWorkspaceBusinessWrite(principal)
+      if (principal.workspaceRole !== 'owner' && principal.workspaceRole !== 'admin') {
+        throw new PublicApiServiceError(
+          403,
+          'forbidden',
+          'Current Workspace administrator access is required to connect providers.',
+        )
+      }
+    },
+  }
+}
+
+/** Environment に provider がある場合だけ production connector runtime を構築します。 */
+function createConfiguredConnectorRuntime(
+  environment: NodeJS.ProcessEnv,
+): ConnectorRuntimeBundle | undefined {
+  const encodedConfiguration = environment.MUKUROJI_CONNECTOR_PROVIDERS_JSON?.trim()
+  if (!hasConfiguredConnectorProviders(encodedConfiguration)) return undefined
+  const registry = createOAuthConnectorRegistryFromEnvironment({
+    environment,
+  })
+  const signingSecret = environment.CONNECTOR_OAUTH_STATE_SIGNING_SECRET?.trim()
+  if (!signingSecret) {
+    throw new TypeError(
+      'CONNECTOR_OAUTH_STATE_SIGNING_SECRET is required when connectors are configured.',
+    )
+  }
+  const originSigningSecret = environment.CONNECTOR_SYNC_ORIGIN_SIGNING_SECRET?.trim()
+  if (!originSigningSecret) {
+    throw new TypeError(
+      'CONNECTOR_SYNC_ORIGIN_SIGNING_SECRET is required when connectors are configured.',
+    )
+  }
+  const state = new ConnectorOAuthStateManager({
+    store: createDynamoDbConnectorOAuthStateStoreFromEnvironment(environment),
+    protector: createDefaultSecretProtector(),
+    signingSecret,
+    previousSigningSecrets: readConnectorOAuthStatePreviousSigningSecrets(
+      environment.CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON,
+    ),
+  })
+  const persistence = createDynamoDbConnectorSyncPersistenceFromEnvironment(environment)
+  let authorization: ConnectorAuthorizationRuntime | undefined
+  const health = createForwardingClient<ConnectorSyncHealthReporter>(() => {
+    if (!authorization) {
+      throw new ConnectorRuntimeError(
+        'ConnectorRuntimeUnavailable',
+        'Connector authorization runtime is not initialized.',
+        { retryable: true },
+      )
+    }
+    return authorization
+  })
+  const syncEngine = new ConnectorSyncEngine({
+    platform: createForwardingClient(() => developerPlatform),
+    registry,
+    workItems: createCanonicalConnectorWorkItemGateway(),
+    persistence,
+    health,
+    originSigningSecret,
+    previousOriginSigningSecrets: readConnectorSyncOriginPreviousSigningSecrets(
+      environment.CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON,
+    ),
+  })
+  authorization = new ConnectorAuthorizationRuntime({
+    platform: createForwardingClient(() => developerPlatform),
+    registry,
+    state,
+    callbackAuthorizer: createConnectorOAuthCallbackAuthorizer(),
+    conflicts: createConnectorConflictRuntime(syncEngine),
+    reauthorizationReturnUrl:
+      environment.CONNECTOR_REAUTHORIZATION_RETURN_URL?.trim() ??
+        '/settings?developerSection=connectors',
+  })
+  return { authorization, syncEngine }
+}
+
+/** OAuth state key rotation の grace period に使う旧 secret JSON array を検証します。 */
+function readConnectorOAuthStatePreviousSigningSecrets(
+  value: string | undefined,
+) {
+  if (!value?.trim()) return []
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length > 3 ||
+      parsed.some((secret) => typeof secret !== 'string' || !secret.trim())
+    ) {
+      throw new TypeError()
+    }
+    return parsed.map((secret) => secret.trim())
+  } catch {
+    throw new TypeError(
+      'CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON must be a JSON array of up to three non-empty strings.',
+    )
+  }
+}
+
+/** Connector origin marker key rotation 用の旧 secret JSON array を検証します。 */
+export function readConnectorSyncOriginPreviousSigningSecrets(
+  value: string | undefined,
+) {
+  if (!value?.trim()) return []
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!Array.isArray(parsed) || parsed.length > 3) throw new TypeError()
+    const secrets = parsed.map((secret) => {
+      if (typeof secret !== 'string') throw new TypeError()
+      return secret.trim()
+    })
+    if (secrets.some((secret) => Buffer.byteLength(secret, 'utf8') < 32)) {
+      throw new TypeError()
+    }
+    return secrets
+  } catch {
+    throw new TypeError(
+      'CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON must be a JSON array of up to three strings containing at least 32 bytes.',
+    )
+  }
+}
+
+/** Empty configuration で connector routes を fail-closed に保ちます。 */
+function hasConfiguredConnectorProviders(value: string | undefined) {
+  if (!value) return false
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return !Array.isArray(parsed) || parsed.length > 0
+  } catch {
+    return true
+  }
+}
+
+/**
+ * Warm Lambda invocation 間で成功値を短時間共有し、一時障害後は bounded backoff で再取得します。
+ */
+const connectorRuntimeBundleCache = createConnectorRuntimeCache({
+  async load() {
+    return createConfiguredConnectorRuntime(
+      await loadConnectorRuntimeEnvironment(),
+    )
+  },
+})
+
+/** Secrets Manager-backed connector runtime を TTL と bounded retry 付きで構築します。 */
+async function getConfiguredConnectorRuntimeBundle() {
+  return connectorRuntimeBundleCache.get()
+}
+
+/** 設定済み OAuth runtime を返し、未設定なら secret-free error で fail-closed にします。 */
+async function requireConfiguredConnectorAuthorization() {
+  const runtime = await getConfiguredConnectorRuntimeBundle()
+  if (!runtime) {
+    throw new ConnectorRuntimeError(
+      'ConnectorRuntimeUnavailable',
+      'Connector provider authorization is not configured.',
+      { retryable: true },
+    )
+  }
+  return runtime.authorization
+}
+
+/** Connector worker entrypoint へ設定済み sync engine を遅延提供します。 */
+export async function requireConfiguredConnectorSyncEngine() {
+  const runtime = await getConfiguredConnectorRuntimeBundle()
+  if (!runtime) {
+    throw new ConnectorRuntimeError(
+      'ConnectorRuntimeUnavailable',
+      'Connector synchronization is not configured.',
+      { retryable: true },
+    )
+  }
+  return runtime.syncEngine
+}
+
+/** Public router が module-load secret read なしで利用する OAuth runtime proxy です。 */
+const lazyConnectorAuthorization: ConnectorAuthorizationService = {
+  async begin(principal, input, operationId) {
+    return (await requireConfiguredConnectorAuthorization())
+      .begin(principal, input, operationId)
+  },
+  async completeCallback(input) {
+    return (await requireConfiguredConnectorAuthorization()).completeCallback(input)
+  },
+  async abortCallback(input) {
+    return (await requireConfiguredConnectorAuthorization()).abortCallback(input)
+  },
+  async reauthorize(principal, installationId, operationId) {
+    return (await requireConfiguredConnectorAuthorization())
+      .reauthorize(principal, installationId, operationId)
+  },
+  async disconnect(principal, installationId) {
+    return (await requireConfiguredConnectorAuthorization())
+      .disconnect(principal, installationId)
+  },
+  async listConflicts(principal, input) {
+    return (await requireConfiguredConnectorAuthorization())
+      .listConflicts(principal, input)
+  },
+  async resolveConflict(principal, conflictId, input) {
+    return (await requireConfiguredConnectorAuthorization())
+      .resolveConflict(principal, conflictId, input)
+  },
+}
+
+async function requirePublicImportPermission(
+  principal: WorkspacePrincipal,
+  input: PublicImportSourceInput,
+) {
+  const permission = await requireTeamPermission(principal, input.teamId, 'member')
+  requireAssignedProjectPermission(
+    principal,
+    permission,
+    input.assignedProjectId,
+    'member',
+  )
+  return permission
+}
+
+async function validatePublicImport(
+  principal: WorkspacePrincipal,
+  input: PublicImportSourceInput,
+) {
+  const permission = await requirePublicImportPermission(principal, input)
+  const configuration = await workItemConfigurations.getTeamConfiguration(
+    principal.directoryId,
+    input.teamId,
+  )
+  const preview = previewWorkItemImport(
+    input.format,
+    input.source.content,
+    input.mapping,
+  )
+  const errorsByRow = new Map<number, ImportRowError[]>(
+    preview.rows.map((row) => [row.row, [...row.errors]]),
+  )
+  const mappedByRow = new Map<number, Record<string, unknown>>()
+  const validInputs: Array<{ row: number; input: CreateWorkItemInput }> = []
+  const assigneeValidations = new Map<
+    string,
+    ReturnType<typeof requireActiveWorkspaceAssignee>
+  >()
+  for (const row of preview.rows) {
+    if (!row.input) continue
+    const candidate: CreateWorkItemInput = {
+      ...row.input,
+      ...(row.input.assignedProjectId === undefined && input.assignedProjectId
+        ? { assignedProjectId: input.assignedProjectId }
+        : {}),
+    }
+    mappedByRow.set(row.row, { ...candidate })
+    try {
+      const normalized = normalizeTeamIssueInput(candidate, permission.team)
+      requireAssignedProjectPermission(
+        principal,
+        permission,
+        readAssignedProjectId(normalized.assignedProjectId),
+        'member',
+      )
+      const configured = await prepareConfiguredCreateWorkItem(
+        principal.directoryId,
+        input.teamId,
+        normalized,
+        configuration,
+      )
+      const assigneeUserId = readTeamIssueAssigneeUserId(configured)
+      let assigneeValidation = assigneeValidations.get(assigneeUserId)
+      if (!assigneeValidation) {
+        assigneeValidation = requireActiveWorkspaceAssignee(
+          principal.directoryId,
+          assigneeUserId,
+        )
+        assigneeValidations.set(assigneeUserId, assigneeValidation)
+      }
+      await assigneeValidation
+      validInputs.push({ row: row.row, input: candidate })
+    } catch (error) {
+      const rowError = toImportRowError(error, row.row)
+      if (!rowError) throw error
+      errorsByRow.get(row.row)?.push(rowError)
+    }
+  }
+  const errors = [...errorsByRow.values()].flat()
+  const invalidRowIds = new Set(errors.map((error) => error.row))
+  const report: ImportDryRunReport = {
+    valid: invalidRowIds.size === 0,
+    totalRows: preview.totalRows,
+    validRows: preview.totalRows - invalidRowIds.size,
+    invalidRows: invalidRowIds.size,
+    errors,
+    sample: preview.rows.slice(0, 20).map((row) => {
+      const rowErrors = errorsByRow.get(row.row) ?? []
+      return {
+        row: row.row,
+        input: {},
+        mapped: mappedByRow.get(row.row) ?? {},
+        valid: rowErrors.length === 0,
+        errors: rowErrors,
+      }
+    }),
+  }
+  return {
+    report,
+    validInputs: validInputs.filter((row) => !invalidRowIds.has(row.row)),
+  }
+}
+
+async function requireImportJob(workspaceId: string, jobId: string) {
+  const job = (await developerPlatform.listImportJobs(workspaceId))
+    .find((candidate) => candidate.id === jobId)
+  if (!job) {
+    throw new WorkItemImportError('ImportJobNotFound', 'Import job was not found.')
+  }
+  return job
+}
+
+function createWorkItemImportJobLifecycle() {
+  return {
+    async markRunning(execution: WorkItemImportExecution) {
+      const job = await requireImportJob(execution.workspaceId, execution.jobId)
+      if (job.status === 'running' || job.status === 'completed') return
+      if (job.status !== 'queued') {
+        throw new WorkItemImportError(
+          'ImportJobTerminal',
+          'Import job cannot be started from its current state.',
+        )
+      }
+      await developerPlatform.updateImportJob({
+        workspaceId: execution.workspaceId,
+        jobId: execution.jobId,
+        status: 'running',
+      })
+    },
+
+    async markCompleted(
+      execution: WorkItemImportExecution,
+      report: ImportReport,
+    ) {
+      const job = await requireImportJob(execution.workspaceId, execution.jobId)
+      if (job.status === 'completed') return
+      if (job.status !== 'running') {
+        throw new WorkItemImportError(
+          'ImportJobTerminal',
+          'Import job cannot be completed from its current state.',
+        )
+      }
+      await developerPlatform.updateImportJob({
+        workspaceId: execution.workspaceId,
+        jobId: execution.jobId,
+        status: 'completed',
+        report: createStoredWorkItemImportReport(report),
+      })
+    },
+
+    async markFailed(
+      execution: WorkItemImportExecution,
+      problem: ApiProblem,
+      report?: ImportReport,
+    ) {
+      const job = await requireImportJob(execution.workspaceId, execution.jobId)
+      if (job.status === 'failed' || job.status === 'completed' || job.status === 'cancelled') {
+        return
+      }
+      await developerPlatform.updateImportJob({
+        workspaceId: execution.workspaceId,
+        jobId: execution.jobId,
+        status: 'failed',
+        ...(report ? { report: createStoredWorkItemImportReport(report) } : {}),
+        error: problem,
+      })
+    },
+
+    async markCancelled(execution: WorkItemImportExecution) {
+      const job = await requireImportJob(execution.workspaceId, execution.jobId)
+      if (job.status === 'cancelled' || job.status === 'completed' || job.status === 'failed') {
+        return
+      }
+      await developerPlatform.updateImportJob({
+        workspaceId: execution.workspaceId,
+        jobId: execution.jobId,
+        status: 'cancelled',
+      })
+    },
+  }
+}
+
+async function resolveWorkItemImportPrincipal(execution: WorkItemImportExecution) {
+  return resolveDeveloperManagementPrincipal({
+    workspaceId: execution.workspaceId,
+    userId: execution.createdByUserId,
+    capabilities: {
+      canManageCredentials: false,
+      canManageWebhooks: false,
+      canManageIntegrations: false,
+      canImport: true,
+      canExport: false,
+    },
+  })
+}
+
+/** Current Workspace role が management import を開始・継続できるか判定します。 */
+export function canManageWorkItemImports(role: WorkspaceRole) {
+  return role === 'owner' || role === 'admin'
+}
+
+async function authorizeWorkItemImportExecution(execution: WorkItemImportExecution) {
+  try {
+    const principal = await resolveWorkItemImportPrincipal(execution)
+    if (!canManageWorkItemImports(principal.workspaceRole)) {
+      throw new WorkItemImportError(
+        'ImportManagementAccessRevoked',
+        'Import management access is no longer available.',
+      )
+    }
+    requireWorkspaceBusinessWrite(principal)
+    const permission = await requireTeamPermission(principal, execution.teamId, 'member')
+    requireAssignedProjectPermission(
+      principal,
+      permission,
+      execution.assignedProjectId,
+      'member',
+    )
+  } catch (error) {
+    throw toWorkItemImportWorkerError(error)
+  }
+}
+
+/** Worker error を retryable concurrency と terminal authorization/validation に分類します。 */
+export function toWorkItemImportWorkerError(error: unknown): unknown {
+  if (error instanceof WorkItemImportError) return error
+  const mapped = mapPublicApiAdapterError(error)
+  if (!mapped || mapped.retryable || mapped.status >= 500) return error
+  const errorCode = error && typeof error === 'object' && 'code' in error &&
+      typeof error.code === 'string'
+    ? error.code
+    : undefined
+  if (
+    mapped.status === 409 &&
+    (errorCode === 'WorkItemConfigurationRevisionConflict' ||
+      errorCode === 'ConditionalCheckFailedException')
+  ) {
+    return new WorkItemImportError(
+      'ImportConcurrentMutation',
+      'Import encountered a concurrent state change and will retry.',
+      true,
+    )
+  }
+  if (mapped.status === 401 || mapped.status === 403 || mapped.status === 404) {
+    return new WorkItemImportError(
+      'ImportAuthorizationRejected',
+      'Import is no longer authorized by current Workspace, Team, or Project access.',
+    )
+  }
+  return new WorkItemImportError(
+    'ImportValidationRejected',
+    'Import source no longer passes current validation.',
+  )
+}
+
+function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDependencies {
+  return {
+    executions: workItemImportExecutions,
+    sources: workItemImportSources,
+    jobs: createWorkItemImportJobLifecycle(),
+    authorize: authorizeWorkItemImportExecution,
+    async validate(execution, sourceContent) {
+      try {
+        const principal = await resolveWorkItemImportPrincipal(execution)
+        const validation = await validatePublicImport(principal, {
+          format: execution.format,
+          source: {
+            fileName: execution.format === 'csv' ? 'import.csv' : 'import.json',
+            mediaType: execution.format === 'csv' ? 'text/csv' : 'application/json',
+            content: sourceContent,
+          },
+          teamId: execution.teamId,
+          ...(execution.assignedProjectId
+            ? { assignedProjectId: execution.assignedProjectId }
+            : {}),
+          mapping: execution.mapping,
+        })
+        return { report: validation.report, rows: validation.validInputs }
+      } catch (error) {
+        throw toWorkItemImportWorkerError(error)
+      }
+    },
+    async createWorkItem(request) {
+      try {
+        const principal = await resolveWorkItemImportPrincipal(request.execution)
+        await createCanonicalPublicWorkItem(
+          principal,
+          request.execution.teamId,
+          request.input,
+          {
+            requestId: `import-worker-${createHash('sha256')
+              .update(request.execution.jobId)
+              .digest('hex')
+              .slice(0, 20)}`,
+            idempotencyKey: request.idempotencyKey,
+            correlationId: request.execution.jobId,
+          },
+          '/api/developer/imports',
+          {
+            issueId: request.workItemId,
+            requestDigest: request.requestDigest,
+          },
+        )
+      } catch (error) {
+        throw toWorkItemImportWorkerError(error)
+      }
+    },
+    now: () => new Date(),
+    createLeaseOwner: randomUUID,
+  }
+}
+
+function toImportRowError(error: unknown, row: number): ImportRowError | undefined {
+  if (
+    error instanceof ProjectDataError ||
+    error instanceof WorkspaceAccessError ||
+    error instanceof WorkItemConfigurationError ||
+    error instanceof CognitoServiceError
+  ) {
+    if (error.status >= 500) return undefined
+    return { row, code: error.code, message: error.message }
+  }
+  return undefined
+}
+
+function matchesImportJobInput(
+  job: Awaited<ReturnType<DeveloperPlatformClient['listImportJobs']>>[number],
+  input: PublicImportSourceInput,
+) {
+  return job.format === input.format &&
+    job.teamId === input.teamId &&
+    job.assignedProjectId === input.assignedProjectId &&
+    JSON.stringify(job.mapping) === JSON.stringify(input.mapping)
+}
+
+/**
+ * Actor-scoped import row identity と payload digest を作成します。
+ */
+export function createImportRowCreateIdentity(
+  workspaceId: string,
+  actorUserId: string,
+  context: PublicMutationContext,
+  teamId: string,
+  input: CreateWorkItemInput,
+): IdempotentWorkItemCreate {
+  const identityDigest = createHash('sha256')
+    .update(`${workspaceId}\n${actorUserId}\n${context.idempotencyKey}\n${teamId}`)
+    .digest('hex')
+  const requestDigest = createHash('sha256')
+    .update(
+      `${workspaceId}\n${actorUserId}\n${context.idempotencyKey}\n` +
+        `${teamId}\n${stableDigestStringify(input)}`,
+    )
+    .digest('hex')
+  return {
+    issueId: `import-${identityDigest.slice(0, 48)}`,
+    requestDigest,
+  }
+}
+
+function createPublicApiWorkItemCreateIdentity(
+  workspaceId: string,
+  credentialId: string,
+  context: PublicMutationContext,
+  teamId: string,
+  input: CreateWorkItemInput,
+): IdempotentWorkItemCreate {
+  const requestIdentity =
+    `${workspaceId}\n${credentialId}\n${context.idempotencyKey}\n${teamId}`
+  const identityDigest = createHash('sha256')
+    .update(`public-work-item-v1\n${requestIdentity}`)
+    .digest('hex')
+  const requestDigest = createHash('sha256')
+    .update(
+      `public-work-item-v1\n${requestIdentity}\n${stableDigestStringify(input)}`,
+    )
+    .digest('hex')
+  return {
+    issueId: `api-${identityDigest.slice(0, 48)}`,
+    requestDigest,
+  }
+}
+
+function stableDigestStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableDigestStringify).join(',')}]`
+  }
+  if (typeof value === 'object' && value !== null) {
+    return `{${Object.entries(value)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableDigestStringify(entry)}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+async function failImportJobBestEffort(
+  workspaceId: string,
+  jobId: string,
+  error: unknown,
+) {
+  try {
+    await developerPlatform.updateImportJob({
+      workspaceId,
+      jobId,
+      status: 'failed',
+      error: toImportApiProblem(error),
+    })
+  } catch (updateError) {
+    const failure = mapPublicApiAdapterError(updateError)
+    console.error('Failed to persist import job failure.', {
+      code: failure?.code ?? 'internal_error',
+      status: failure?.status ?? 500,
+    })
+  }
+}
+
+function toImportApiProblem(error: unknown): ApiProblem {
+  const mapped = mapPublicApiAdapterError(error)
+  const normalized = mapped ?? new PublicApiServiceError(
+    500,
+    'internal_error',
+    'Import failed unexpectedly.',
+    true,
+  )
+  return {
+    type: `https://docs.mukuroji.app/problems/${normalized.code}`,
+    title: normalized.code,
+    status: normalized.status,
+    code: normalized.code,
+    detail: normalized.message,
+    requestId: 'import-job',
+    retryable: normalized.retryable,
+  }
+}
+
+function mapPublicApiAdapterError(error: unknown) {
+  if (error instanceof PublicApiServiceError) return error
+  if (error instanceof ConnectorRuntimeError) {
+    const status = error.providerStatus === 429
+      ? 429
+      : error.retryable
+        ? 503
+        : error.authorizationRequired
+          ? 409
+          : error.code.includes('NotFound')
+            ? 404
+            : error.code.includes('Conflict') ||
+                error.code.includes('Changed') ||
+                error.code.includes('Mismatch') ||
+                error.code.includes('Consumed')
+              ? 409
+              : 400
+    const code = status === 429
+      ? 'rate_limited'
+      : status === 503
+        ? 'temporarily_unavailable'
+        : status === 404
+          ? 'not_found'
+          : status === 409
+            ? 'conflict'
+            : 'validation_failed'
+    return new PublicApiServiceError(status, code, error.message, error.retryable)
+  }
+  if (error instanceof WorkItemImportError) {
+    return new PublicApiServiceError(
+      error.retryable ? 503 : 409,
+      error.retryable ? 'temporarily_unavailable' : 'conflict',
+      error.retryable
+        ? 'Import could not be queued because a durable dependency is temporarily unavailable.'
+        : error.message,
+      error.retryable,
+    )
+  }
+  if (error instanceof WorkItemTransferError) {
+    return new PublicApiServiceError(
+      error.status,
+      error.status >= 500 ? 'temporarily_unavailable' : 'validation_failed',
+      error.message,
+      error.status >= 500,
+    )
+  }
+  if (
+    error instanceof ProjectDataError ||
+    error instanceof WorkspaceAccessError ||
+    error instanceof WorkItemConfigurationError ||
+    error instanceof CognitoServiceError
+  ) {
+    const code = error.status === 401
+      ? 'invalid_credentials'
+      : error.status === 403
+        ? 'forbidden'
+        : error.status === 404
+          ? 'not_found'
+          : error.status === 409
+            ? 'conflict'
+            : error.status >= 500
+              ? 'temporarily_unavailable'
+              : 'validation_failed'
+    return new PublicApiServiceError(error.status, code, error.message, error.status >= 500)
+  }
+  return undefined
+}
+
+function getPublicApiCursorSecret() {
+  const configured = getEnv('PUBLIC_API_CURSOR_SECRET') ??
+    getEnv('MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY')
+  if (configured && Buffer.byteLength(configured, 'utf8') >= 32) {
+    return configured
+  }
+  const production = process.env.NODE_ENV === 'production' ||
+    Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME) ||
+    Boolean(process.env.AWS_EXECUTION_ENV)
+  if (production) {
+    throw new TypeError('A 32-byte Public API cursor signing secret is required.')
+  }
+  return 'mukuroji-local-public-api-cursor-signing-secret'
+}
+
 cognito = createCognitoClient()
 dashboardSummary = new DynamoDbDashboardSummaryClient()
 projectTasks = new DynamoDbProjectTasksClient()
@@ -19406,8 +21899,27 @@ workItemConfigurations = createWorkItemConfigurationClient()
 automation = createAutomationClient()
 automationInboundWebhookSecrets = new SecretsManagerAutomationInboundWebhookSecretStore()
 planning = createPlanningClient()
-requestIntake = createDefaultRequestIntakeClient()
+developerPlatform = new DynamoDbDeveloperPlatformClient()
+workItemImportExecutions = createDefaultWorkItemImportExecutionStore()
+workItemImportSources = createDefaultWorkItemImportSourceStore()
+workItemImportQueue = createDefaultWorkItemImportQueue()
+publicWorkItems = createCanonicalPublicWorkItemService()
 analytics = createAnalyticsRepository()
+
+if (!getEnv('MUKUROJI_RUNTIME_ROLE')) {
+  requestIntake = createDefaultRequestIntakeClient()
+  const publicApiDependencies: PublicApiDependencies = {
+    developerPlatform: createForwardingClient(() => developerPlatform),
+    authenticateManagement: authenticateDeveloperManagement,
+    workItems: createForwardingClient(() => publicWorkItems),
+    openApiDocument: PUBLIC_API_OPENAPI_DOCUMENT as unknown as Record<string, unknown>,
+    cursorSecret: getPublicApiCursorSecret(),
+    queueWebhookDelivery: queueWebhookDeliveryMessage,
+    connectorAuthorization: lazyConnectorAuthorization,
+    mapError: mapPublicApiAdapterError,
+  }
+  app.route('/api', createPublicApiRouter(publicApiDependencies))
+}
 
 /**
  * Server test で外部 service client を差し替えます。
@@ -19430,6 +21942,11 @@ export function configureApiClientsForTest(clients: {
   automation?: AutomationClient
   automationInboundWebhookSecrets?: AutomationInboundWebhookSecretStore
   planning?: PlanningClient
+  developerPlatform?: DeveloperPlatformClient
+  publicWorkItems?: PublicWorkItemService
+  workItemImportExecutions?: WorkItemImportExecutionStore
+  workItemImportSources?: WorkItemImportSourceStore
+  workItemImportQueue?: WorkItemImportQueue
   requestIntake?: RequestIntakeClient
   analytics?: AnalyticsRepository
 }) {
@@ -19453,6 +21970,11 @@ export function configureApiClientsForTest(clients: {
   automationInboundWebhookSecrets = clients.automationInboundWebhookSecrets ??
     automationInboundWebhookSecrets
   planning = clients.planning ?? planning
+  developerPlatform = clients.developerPlatform ?? developerPlatform
+  publicWorkItems = clients.publicWorkItems ?? publicWorkItems
+  workItemImportExecutions = clients.workItemImportExecutions ?? workItemImportExecutions
+  workItemImportSources = clients.workItemImportSources ?? workItemImportSources
+  workItemImportQueue = clients.workItemImportQueue ?? workItemImportQueue
   requestIntake = clients.requestIntake ?? requestIntake
   analytics = clients.analytics ?? analytics
 }
@@ -19461,6 +21983,7 @@ export function configureApiClientsForTest(clients: {
  * Server test 後に外部 service client を実装 client に戻します。
  */
 export function resetApiClientsForTest() {
+  connectorRuntimeBundleCache.clear()
   documentProjectRolesCache.clear()
   cognito = createCognitoClient()
   dashboardSummary = new DynamoDbDashboardSummaryClient()
@@ -19480,6 +22003,11 @@ export function resetApiClientsForTest() {
   automation = createAutomationClient()
   automationInboundWebhookSecrets = new SecretsManagerAutomationInboundWebhookSecretStore()
   planning = new InMemoryPlanningClient()
+  developerPlatform = new DynamoDbDeveloperPlatformClient()
+  workItemImportExecutions = createDefaultWorkItemImportExecutionStore()
+  workItemImportSources = createDefaultWorkItemImportSourceStore()
+  workItemImportQueue = createDefaultWorkItemImportQueue()
+  publicWorkItems = createCanonicalPublicWorkItemService()
   requestIntake = createDefaultRequestIntakeClient()
   analytics = new InMemoryAnalyticsRepository()
 }
@@ -19494,6 +22022,11 @@ const lambdaHandler = handle(app)
  */
 export const handler = (event: LambdaEvent, lambdaContext?: LambdaContext) => {
   return lambdaHandler(normalizeLambdaApiEvent(event), lambdaContext)
+}
+
+/** Durable Work Item import SQS batch を current RBAC で処理します。 */
+export async function workItemImportHandler(event: WorkItemImportSqsEvent) {
+  return processWorkItemImportBatch(event, createWorkItemImportWorkerDependencies())
 }
 
 /**
