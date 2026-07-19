@@ -29,6 +29,7 @@ import {
 } from './collaboration-projection-handler'
 import {
   capRealtimeSessionExpiry,
+  createCachedRealtimeCognitoProviderBindingReader,
   evaluateRealtimeEnterpriseAccess,
   hasActiveRealtimeResourceScope,
   hasCurrentRealtimeEnterpriseSsoAssurance,
@@ -991,6 +992,40 @@ describe('collaboration projection pure helpers', () => {
       canWrite: false,
       workspaceRoleSuppressed: true,
     })
+  })
+
+  test('realtime shares raw Cognito provider reads only within the short cache TTL', async () => {
+    let currentTime = 0
+    let reads = 0
+    const readBinding = createCachedRealtimeCognitoProviderBindingReader(
+      async (providerName) => {
+        reads += 1
+        return {
+          providerName,
+          providerType: 'OIDC',
+          providerDetails: {
+            oidc_issuer: 'https://idp.example.com',
+            client_id: 'enterprise-client',
+          },
+        }
+      },
+      () => currentTime,
+    )
+
+    const [first, second] = await Promise.all([
+      readBinding('EnterpriseOidc'),
+      readBinding('EnterpriseOidc'),
+    ])
+    expect(first).toEqual(second)
+    expect(reads).toBe(1)
+
+    currentTime = 29_999
+    await readBinding('EnterpriseOidc')
+    expect(reads).toBe(1)
+
+    currentTime = 30_000
+    await readBinding('EnterpriseOidc')
+    expect(reads).toBe(2)
   })
 
   test('realtime SSO assurance rejects password and stale provider-revision tickets', () => {

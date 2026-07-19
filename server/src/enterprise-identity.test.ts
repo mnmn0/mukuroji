@@ -11,6 +11,7 @@ import { createMutationAuditContext } from './audit'
 import {
   DynamoDbEnterpriseIdentityClient,
   DynamoDbEnterpriseIdentityMaintenanceClient,
+  type EnterpriseScimGroupJobApplyInput,
   InMemoryEnterpriseIdentityClient,
   assertEnterpriseCognitoFederationBinding,
   assertEnterpriseCognitoProviderBinding,
@@ -49,6 +50,27 @@ function createActiveProvider(
   } satisfies EnterpriseIdentityProvider
 }
 
+async function createScimUsers(
+  client: InMemoryEnterpriseIdentityClient | DynamoDbEnterpriseIdentityClient,
+  providerId: string,
+  count: number,
+  prefix: string,
+) {
+  const users = []
+  for (let index = 0; index < count; index += 1) {
+    users.push(await client.upsertScimUser({
+      workspaceId,
+      identityProviderId: providerId,
+      externalId: `${prefix}-${index}`,
+      userName: `${prefix}-${index}@example.com`,
+      emails: [`${prefix}-${index}@example.com`],
+      active: true,
+      idempotencyKey: `${prefix}-${index}`,
+    }))
+  }
+  return users
+}
+
 function enterpriseItemKey(item: Record<string, unknown>) {
   return `${String(item.scopeKey)}\0${String(item.recordKey)}`
 }
@@ -69,13 +91,41 @@ function createDynamoHarness() {
         queries.push(structuredClone(input))
         const values = input.ExpressionAttributeValues as Record<string, unknown>
         const scopeKey = values[':scopeKey']
-        return {
-          Items: [...items.values()]
-            .filter((item) => item.scopeKey === scopeKey)
-            .sort((left, right) =>
-              String(left.recordKey).localeCompare(String(right.recordKey))
+        const recordPrefix = values[':recordPrefix']
+        const exclusiveStartKey = input.ExclusiveStartKey as
+          | Record<string, unknown>
+          | undefined
+        const limit = typeof input.Limit === 'number'
+          ? input.Limit
+          : Number.POSITIVE_INFINITY
+        const matchingItems = [...items.values()]
+          .filter((item) =>
+            item.scopeKey === scopeKey &&
+            (
+              typeof recordPrefix !== 'string' ||
+              String(item.recordKey).startsWith(recordPrefix)
             )
-            .map((item) => structuredClone(item)),
+          )
+          .sort((left, right) =>
+            String(left.recordKey).localeCompare(String(right.recordKey))
+          )
+        const startOffset = exclusiveStartKey
+          ? matchingItems.findIndex((item) =>
+              enterpriseItemKey(item) === enterpriseItemKey(exclusiveStartKey)
+            ) + 1
+          : 0
+        const pageItems = matchingItems.slice(startOffset, startOffset + limit)
+        const hasNextPage = startOffset + pageItems.length < matchingItems.length
+        return {
+          Items: pageItems.map((item) => structuredClone(item)),
+          ...(hasNextPage && pageItems.length > 0
+            ? {
+                LastEvaluatedKey: {
+                  scopeKey: pageItems.at(-1)?.scopeKey,
+                  recordKey: pageItems.at(-1)?.recordKey,
+                },
+              }
+            : {}),
         }
       }
       if (commandName === 'GetCommand') {
@@ -553,6 +603,443 @@ test('converges repeated SCIM user and provisioning requests idempotently', asyn
   expect(await client.reconcileProvisioning(runInput)).toEqual(finalized)
 })
 
+test('processes SCIM group jobs in sequential five-user apply and settle pages', async () => {
+  const client = new InMemoryEnterpriseIdentityClient(tokenSecret, () => now)
+  await client.putIdentityProvider(createActiveProvider('idp-job-pages'))
+  const users = await createScimUsers(
+    client,
+    'idp-job-pages',
+    7,
+    'job-page-user',
+  )
+  const groupInput = {
+    workspaceId,
+    identityProviderId: 'idp-job-pages',
+    externalId: 'job-page-group',
+    displayName: 'Job page group',
+    active: true,
+    memberUserIds: users.map((user) => user.userId),
+    idempotencyKey: 'job-page-group',
+  }
+  const group = await client.upsertScimGroup(groupInput)
+  const firstReference = await client.getScimGroupJobReference(
+    workspaceId,
+    group.groupId,
+  )
+  expect(firstReference).toBeDefined()
+  expect(await client.upsertScimGroup(groupInput)).toEqual(group)
+  expect(await client.getScimGroupJobReference(workspaceId, group.groupId))
+    .toEqual(firstReference)
+  expect(await client.getSnapshot(workspaceId)).not.toHaveProperty('scimGroupJobs')
+
+  let activeCallbacks = 0
+  let maximumActiveCallbacks = 0
+  const appliedPhases: string[] = []
+  const appliedUserIds: string[] = []
+  const applyUser = async (input: EnterpriseScimGroupJobApplyInput) => {
+    activeCallbacks += 1
+    maximumActiveCallbacks = Math.max(maximumActiveCallbacks, activeCallbacks)
+    appliedPhases.push(input.phase)
+    appliedUserIds.push(input.user.userId)
+    await Promise.resolve()
+    activeCallbacks -= 1
+  }
+  if (!firstReference) throw new Error('Expected a pending SCIM group job.')
+
+  const firstPage = await client.processScimGroupJob(firstReference, applyUser)
+  expect(firstPage.status).toBe('continued')
+  expect(firstPage.processedUserIds).toHaveLength(5)
+  expect(maximumActiveCallbacks).toBe(1)
+  expect(appliedPhases).toEqual(Array.from({ length: 5 }, () => 'apply'))
+  expect((await client.getSnapshot(workspaceId)).scimGroups[0]).toMatchObject({
+    version: 1,
+    appliedVersion: 0,
+  })
+
+  const staleCallbackCount = appliedUserIds.length
+  expect(await client.processScimGroupJob(firstReference, applyUser)).toEqual({
+    status: 'stale',
+  })
+  expect(appliedUserIds).toHaveLength(staleCallbackCount)
+
+  if (firstPage.status !== 'continued') {
+    throw new Error('Expected the apply phase to continue.')
+  }
+  const applyCompleted = await client.processScimGroupJob(
+    firstPage.nextReference,
+    applyUser,
+  )
+  expect(applyCompleted.status).toBe('continued')
+  expect(applyCompleted.processedUserIds).toHaveLength(2)
+  expect((await client.getSnapshot(workspaceId)).scimGroups[0]).toMatchObject({
+    version: 1,
+    appliedVersion: 1,
+  })
+
+  if (applyCompleted.status !== 'continued') {
+    throw new Error('Expected the settle phase to start.')
+  }
+  const firstSettlePage = await client.processScimGroupJob(
+    applyCompleted.nextReference,
+    applyUser,
+  )
+  expect(firstSettlePage.status).toBe('continued')
+  expect(firstSettlePage.processedUserIds).toHaveLength(5)
+  if (firstSettlePage.status !== 'continued') {
+    throw new Error('Expected the settle phase to continue.')
+  }
+  const completed = await client.processScimGroupJob(
+    firstSettlePage.nextReference,
+    applyUser,
+  )
+  expect(completed.status).toBe('completed')
+  expect(completed.processedUserIds).toHaveLength(2)
+  expect(appliedPhases).toEqual([
+    ...Array.from({ length: 7 }, () => 'apply'),
+    ...Array.from({ length: 7 }, () => 'settle'),
+  ])
+  expect(await client.getScimGroupJobReference(workspaceId, group.groupId))
+    .toBeUndefined()
+  expect(await client.processScimGroupJob(
+    firstSettlePage.nextReference,
+    applyUser,
+  )).toEqual({ status: 'stale' })
+})
+
+test('retries a failed SCIM group page without advancing its durable reference', async () => {
+  const client = new InMemoryEnterpriseIdentityClient(tokenSecret, () => now)
+  await client.putIdentityProvider(createActiveProvider('idp-job-retry'))
+  const users = await createScimUsers(
+    client,
+    'idp-job-retry',
+    3,
+    'job-retry-user',
+  )
+  const group = await client.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'idp-job-retry',
+    externalId: 'job-retry-group',
+    displayName: 'Job retry group',
+    active: true,
+    memberUserIds: users.map((user) => user.userId),
+    idempotencyKey: 'job-retry-group',
+  })
+  const reference = await client.getScimGroupJobReference(
+    workspaceId,
+    group.groupId,
+  )
+  if (!reference) throw new Error('Expected a pending SCIM group job.')
+  let callbackCount = 0
+  await expect(client.processScimGroupJob(reference, async () => {
+    callbackCount += 1
+    if (callbackCount === 2) throw new Error('Injected user apply failure')
+  })).rejects.toThrow('Injected user apply failure')
+  expect(callbackCount).toBe(2)
+  expect(await client.getScimGroupJobReference(workspaceId, group.groupId))
+    .toEqual(reference)
+  expect((await client.getSnapshot(workspaceId)).scimGroups[0]).toMatchObject({
+    version: 1,
+    appliedVersion: 0,
+  })
+
+  const retried = await client.processScimGroupJob(reference, async () => undefined)
+  expect(retried.status).toBe('continued')
+  const nextReference = await client.getScimGroupJobReference(
+    workspaceId,
+    group.groupId,
+  )
+  expect(nextReference).toBeDefined()
+  await client.markScimGroupApplied(workspaceId, group.groupId, group.version)
+  expect(await client.getScimGroupJobReference(workspaceId, group.groupId))
+    .toEqual(nextReference)
+  if (!nextReference) throw new Error('Expected a continued SCIM group job.')
+  expect(await client.processScimGroupJob(
+    nextReference,
+    async () => undefined,
+  )).toMatchObject({ status: 'completed' })
+  expect(await client.getScimGroupJobReference(workspaceId, group.groupId))
+    .toBeUndefined()
+})
+
+test('keeps removed group members in provisioning preview until the durable job settles', async () => {
+  const client = new InMemoryEnterpriseIdentityClient(tokenSecret, () => now)
+  await client.putIdentityProvider(createActiveProvider('idp-job-preview'))
+  const user = await client.upsertScimUser({
+    workspaceId,
+    identityProviderId: 'idp-job-preview',
+    externalId: 'job-preview-user',
+    userName: 'job-preview-user@example.com',
+    emails: ['job-preview-user@example.com'],
+    active: true,
+    idempotencyKey: 'job-preview-user',
+  })
+  const group = await client.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'idp-job-preview',
+    externalId: 'job-preview-group',
+    displayName: 'Job preview group',
+    active: true,
+    memberUserIds: [user.userId],
+    idempotencyKey: 'job-preview-group',
+  })
+  const initialReference = await client.getScimGroupJobReference(
+    workspaceId,
+    group.groupId,
+  )
+  if (!initialReference) throw new Error('Expected the initial group job.')
+  const initialApply = await client.processScimGroupJob(
+    initialReference,
+    async () => undefined,
+  )
+  if (initialApply.status !== 'continued') {
+    throw new Error('Expected the initial settle phase.')
+  }
+  await expect(client.processScimGroupJob(
+    initialApply.nextReference,
+    async () => undefined,
+  )).resolves.toMatchObject({ status: 'completed' })
+
+  const updatedGroup = await client.upsertScimGroup({
+    workspaceId,
+    groupId: group.groupId,
+    identityProviderId: group.identityProviderId,
+    externalId: group.externalId,
+    displayName: group.displayName,
+    active: true,
+    memberUserIds: [],
+    idempotencyKey: 'job-preview-group-remove-user',
+  })
+  const pendingReference = await client.getScimGroupJobReference(
+    workspaceId,
+    updatedGroup.groupId,
+  )
+  if (!pendingReference) throw new Error('Expected the removal group job.')
+  const preview = await client.previewProvisioning({
+    workspaceId,
+    source: 'directory-reconciliation',
+    idempotencyKey: 'job-preview-after-removal',
+  })
+  expect(preview.changes.find((change) =>
+    change.entityType === 'user' && change.entityId === user.userId
+  )).toMatchObject({ action: 'update' })
+
+  await client.markScimGroupApplied(
+    workspaceId,
+    updatedGroup.groupId,
+    updatedGroup.version,
+  )
+  expect(await client.getScimGroupJobReference(
+    workspaceId,
+    updatedGroup.groupId,
+  )).toEqual(pendingReference)
+  const removalApply = await client.processScimGroupJob(
+    pendingReference,
+    async () => undefined,
+  )
+  if (removalApply.status !== 'continued') {
+    throw new Error('Expected the removal settle phase.')
+  }
+  await expect(client.processScimGroupJob(
+    removalApply.nextReference,
+    async () => undefined,
+  )).resolves.toMatchObject({ status: 'completed' })
+  expect(await client.getScimGroupJobReference(
+    workspaceId,
+    updatedGroup.groupId,
+  )).toBeUndefined()
+})
+
+test('atomically rejects a SCIM group target union above the durable backlog cap', async () => {
+  const client = new InMemoryEnterpriseIdentityClient(tokenSecret, () => now)
+  await client.putIdentityProvider(createActiveProvider('idp-job-backlog'))
+  const state = (client as unknown as {
+    states: Map<string, {
+      scimUsers: EnterpriseIdentitySnapshot['scimUsers']
+    }>
+  }).states.get(workspaceId)
+  if (!state) throw new Error('Expected seeded enterprise identity state.')
+  state.scimUsers.push(...Array.from({ length: 2_001 }, (_, index) => ({
+    workspaceId,
+    userId: `backlog-user-${index}`,
+    externalId: `backlog-user-${index}`,
+    identityProviderId: 'idp-job-backlog',
+    userName: `backlog-user-${index}@example.com`,
+    emails: [`backlog-user-${index}@example.com`],
+    active: true,
+    groupIds: [],
+    version: 1,
+    appliedVersion: 1,
+    appliedAt: now.toISOString(),
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+  })))
+  const firstMembers = Array.from(
+    { length: 1_000 },
+    (_, index) => `backlog-user-${index}`,
+  )
+  const secondMembers = Array.from(
+    { length: 1_000 },
+    (_, index) => `backlog-user-${index + 1_000}`,
+  )
+  const first = await client.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'idp-job-backlog',
+    externalId: 'backlog-group',
+    displayName: 'Backlog group',
+    active: true,
+    memberUserIds: firstMembers,
+    idempotencyKey: 'backlog-group-a',
+  })
+  const second = await client.upsertScimGroup({
+    workspaceId,
+    groupId: first.groupId,
+    identityProviderId: 'idp-job-backlog',
+    externalId: first.externalId,
+    displayName: first.displayName,
+    active: true,
+    memberUserIds: secondMembers,
+    idempotencyKey: 'backlog-group-b',
+  })
+  const referenceBeforeOverflow = await client.getScimGroupJobReference(
+    workspaceId,
+    first.groupId,
+  )
+
+  await expect(client.upsertScimGroup({
+    workspaceId,
+    groupId: first.groupId,
+    identityProviderId: 'idp-job-backlog',
+    externalId: first.externalId,
+    displayName: first.displayName,
+    active: true,
+    memberUserIds: ['backlog-user-2000'],
+    idempotencyKey: 'backlog-group-c',
+  })).rejects.toMatchObject({
+    status: 429,
+    code: 'EnterpriseScimGroupJobBacklogExceeded',
+    retryable: true,
+  })
+  expect((await client.getSnapshot(workspaceId)).scimGroups[0]).toEqual(second)
+  expect(await client.getScimGroupJobReference(workspaceId, first.groupId))
+    .toEqual(referenceBeforeOverflow)
+})
+
+test('restarts pending apply and settle pages when guest mappings change', async () => {
+  const client = new InMemoryEnterpriseIdentityClient(tokenSecret, () => now)
+  await client.putIdentityProvider(createActiveProvider('idp-job-mapping'))
+  const users = await createScimUsers(
+    client,
+    'idp-job-mapping',
+    6,
+    'job-mapping-user',
+  )
+  const group = await client.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'idp-job-mapping',
+    externalId: 'job-mapping-group',
+    displayName: 'Job mapping group',
+    active: true,
+    memberUserIds: users.map((user) => user.userId),
+    idempotencyKey: 'job-mapping-group',
+  })
+  const initialReference = await client.getScimGroupJobReference(
+    workspaceId,
+    group.groupId,
+  )
+  if (!initialReference) throw new Error('Expected a pending SCIM group job.')
+  const firstApplyPage = await client.processScimGroupJob(
+    initialReference,
+    async () => undefined,
+  )
+  if (firstApplyPage.status !== 'continued') {
+    throw new Error('Expected the first apply page to continue.')
+  }
+
+  await client.putGroupMapping({
+    workspaceId,
+    mappingId: 'job-mapping',
+    identityProviderId: 'idp-job-mapping',
+    directoryGroupId: group.groupId,
+    roleId: 'workspace:guest',
+    scope: { workspaceId, kind: 'workspace' },
+    enabled: true,
+    priority: 0,
+    revision: 1,
+    updatedAt: now.toISOString(),
+  })
+  const restartedApplyReference = await client.getScimGroupJobReference(
+    workspaceId,
+    group.groupId,
+  )
+  if (!restartedApplyReference) {
+    throw new Error('Expected the mapping change to retain the job.')
+  }
+  expect(restartedApplyReference.revision).toBeGreaterThan(
+    firstApplyPage.nextReference.revision,
+  )
+  expect(await client.processScimGroupJob(
+    firstApplyPage.nextReference,
+    async () => {
+      throw new Error('A mapping-stale apply reference must not run.')
+    },
+  )).toEqual({ status: 'stale' })
+  const restartedApplyPage = await client.processScimGroupJob(
+    restartedApplyReference,
+    async (input) => {
+      expect(input.phase).toBe('apply')
+    },
+  )
+  if (restartedApplyPage.status !== 'continued') {
+    throw new Error('Expected the restarted apply page to continue.')
+  }
+  expect(restartedApplyPage.processedUserIds).toHaveLength(5)
+  const applyCompleted = await client.processScimGroupJob(
+    restartedApplyPage.nextReference,
+    async (input) => {
+      expect(input.phase).toBe('apply')
+    },
+  )
+  if (applyCompleted.status !== 'continued') {
+    throw new Error('Expected the job to enter its settle phase.')
+  }
+  const firstSettlePage = await client.processScimGroupJob(
+    applyCompleted.nextReference,
+    async (input) => {
+      expect(input.phase).toBe('settle')
+    },
+  )
+  if (firstSettlePage.status !== 'continued') {
+    throw new Error('Expected the first settle page to continue.')
+  }
+  expect(firstSettlePage.processedUserIds).toHaveLength(5)
+
+  await client.deleteGroupMapping(workspaceId, 'job-mapping', 1)
+  const restartedSettleReference = await client.getScimGroupJobReference(
+    workspaceId,
+    group.groupId,
+  )
+  if (!restartedSettleReference) {
+    throw new Error('Expected mapping deletion to retain the settle job.')
+  }
+  expect(restartedSettleReference.revision).toBeGreaterThan(
+    firstSettlePage.nextReference.revision,
+  )
+  expect(await client.processScimGroupJob(
+    firstSettlePage.nextReference,
+    async () => {
+      throw new Error('A mapping-stale settle reference must not run.')
+    },
+  )).toEqual({ status: 'stale' })
+  const restartedSettlePage = await client.processScimGroupJob(
+    restartedSettleReference,
+    async (input) => {
+      expect(input.phase).toBe('settle')
+    },
+  )
+  expect(restartedSettlePage.status).toBe('continued')
+  expect(restartedSettlePage.processedUserIds).toHaveLength(5)
+})
+
 test('allows only one running provisioning run per Workspace', async () => {
   const client = new InMemoryEnterpriseIdentityClient(tokenSecret, () => now)
   await client.putIdentityProvider(createActiveProvider('idp-1'))
@@ -772,6 +1259,622 @@ test('stages versioned state before atomically checkpointing domain claims and C
   expect(renameItems.some((item) =>
     (item.Put as { Item?: { recordKey?: string } } | undefined)?.Item?.recordKey === 'CONTROL'
   )).toBe(true)
+})
+
+test('atomically writes reference-only SCIM job rows through apply and settle continuation', async () => {
+  const harness = createDynamoHarness()
+  const client = new DynamoDbEnterpriseIdentityClient(
+    'enterprise-identity',
+    tokenSecret,
+    harness.documentClient as never,
+    undefined,
+    () => now,
+  )
+  await client.putIdentityProvider(createActiveProvider('idp-job-storage'))
+  const users = await createScimUsers(
+    client,
+    'idp-job-storage',
+    6,
+    'job-storage-user',
+  )
+  const group = await client.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'idp-job-storage',
+    externalId: 'job-storage-group',
+    displayName: 'Job storage group',
+    active: true,
+    memberUserIds: users.map((user) => user.userId),
+    idempotencyKey: 'job-storage-group',
+  })
+  const initialReference = await client.getScimGroupJobReference(
+    workspaceId,
+    group.groupId,
+  )
+  if (!initialReference) throw new Error('Expected a pending SCIM group job.')
+  const initialItems = harness.transactions.at(-1)?.TransactItems as
+    | Array<Record<string, unknown>>
+    | undefined
+  if (!initialItems) throw new Error('Expected the group transaction.')
+  const initialControlIndex = initialItems.findIndex((item) =>
+    (item.Put as { Item?: { recordKey?: string } } | undefined)
+      ?.Item?.recordKey === 'CONTROL'
+  )
+  const initialJobIndex = initialItems.findIndex((item) =>
+    (item.Put as { Item?: { entryType?: string } } | undefined)
+      ?.Item?.entryType === 'enterprise-scim-group-job'
+  )
+  expect(initialControlIndex).toBe(0)
+  expect(initialJobIndex).toBeGreaterThan(initialControlIndex)
+  const initialJobPut = initialItems[initialJobIndex]?.Put as
+    | { Item?: Record<string, unknown> }
+    | undefined
+  expect(initialJobPut?.Item).toEqual({
+    scopeKey: `WORKSPACE#${workspaceId}`,
+    recordKey: `SCIM_GROUP_JOB#${initialReference.jobId}`,
+    entryType: 'enterprise-scim-group-job',
+    workspaceId,
+    jobId: initialReference.jobId,
+    revision: initialReference.revision,
+  })
+
+  const firstPage = await client.processScimGroupJob(
+    initialReference,
+    async (input) => {
+      expect(input.phase).toBe('apply')
+    },
+  )
+  if (firstPage.status !== 'continued') {
+    throw new Error('Expected the first apply page to continue.')
+  }
+  expect(firstPage.processedUserIds).toHaveLength(5)
+  const applyCompleted = await client.processScimGroupJob(
+    firstPage.nextReference,
+    async (input) => {
+      expect(input.phase).toBe('apply')
+    },
+  )
+  if (applyCompleted.status !== 'continued') {
+    throw new Error('Expected the completed apply phase to continue settling.')
+  }
+  expect(applyCompleted.processedUserIds).toHaveLength(1)
+  expect((await client.getSnapshot(workspaceId)).scimGroups[0]).toMatchObject({
+    version: 1,
+    appliedVersion: 1,
+  })
+  const applyCheckpointItems = harness.transactions.at(-1)?.TransactItems as
+    Array<Record<string, unknown>>
+  const applyCheckpointJob = applyCheckpointItems.find((item) =>
+    (item.Put as { Item?: { entryType?: string } } | undefined)
+      ?.Item?.entryType === 'enterprise-scim-group-job'
+  )
+  const applyCheckpointPut = applyCheckpointJob?.Put as
+    | { Item?: { revision?: number } }
+    | undefined
+  expect(applyCheckpointPut?.Item?.revision).toBe(
+    applyCompleted.nextReference.revision,
+  )
+
+  const firstSettlePage = await client.processScimGroupJob(
+    applyCompleted.nextReference,
+    async (input) => {
+      expect(input.phase).toBe('settle')
+    },
+  )
+  if (firstSettlePage.status !== 'continued') {
+    throw new Error('Expected the first settle page to continue.')
+  }
+  expect(firstSettlePage.processedUserIds).toHaveLength(5)
+  const finalReference = firstSettlePage.nextReference
+  const completed = await client.processScimGroupJob(
+    finalReference,
+    async (input) => {
+      expect(input.phase).toBe('settle')
+    },
+  )
+  expect(completed.status).toBe('completed')
+  const completionItems = harness.transactions.at(-1)?.TransactItems as
+    Array<Record<string, unknown>>
+  expect(completionItems[0]).toHaveProperty('Put.Item.recordKey', 'CONTROL')
+  expect(completionItems.some((item) =>
+    (item.Delete as {
+      Key?: { recordKey?: string }
+    } | undefined)?.Key?.recordKey ===
+      `SCIM_GROUP_JOB#${initialReference.jobId}`
+  )).toBe(true)
+  expect(await client.getScimGroupJobReference(workspaceId, group.groupId))
+    .toBeUndefined()
+
+  const recreatedGroup = await client.upsertScimGroup({
+    workspaceId,
+    groupId: group.groupId,
+    identityProviderId: group.identityProviderId,
+    externalId: group.externalId,
+    displayName: 'Recreated job group',
+    active: true,
+    memberUserIds: group.memberUserIds,
+    idempotencyKey: 'job-storage-group-recreated',
+  })
+  const recreatedReference = await client.getScimGroupJobReference(
+    workspaceId,
+    recreatedGroup.groupId,
+  )
+  expect(recreatedReference?.jobId).toBe(initialReference.jobId)
+  expect(recreatedReference?.revision).toBeGreaterThan(finalReference.revision)
+  expect(await client.processScimGroupJob(
+    finalReference,
+    async () => {
+      throw new Error('An ABA-stale job reference must not run.')
+    },
+  )).toEqual({ status: 'stale' })
+})
+
+test('queries provider-scoped SCIM pages and authentication from direct projections', async () => {
+  const harness = createDynamoHarness()
+  const client = new DynamoDbEnterpriseIdentityClient(
+    'enterprise-identity',
+    tokenSecret,
+    harness.documentClient as never,
+    undefined,
+    () => now,
+  )
+  await client.putIdentityProvider(createActiveProvider('idp-direct-a'))
+  await client.putIdentityProvider(createActiveProvider('idp-direct-b'))
+  const credential = await client.issueScimToken(
+    workspaceId,
+    'idp-direct-a',
+    'Direct query credential',
+  )
+  const first = await client.upsertScimUser({
+    workspaceId,
+    identityProviderId: 'idp-direct-a',
+    externalId: 'direct-user-a',
+    userName: 'alpha@example.com',
+    displayName: 'Shared display name',
+    emails: ['alpha@example.com'],
+    active: true,
+    idempotencyKey: 'direct-user-a',
+  })
+  const second = await client.upsertScimUser({
+    workspaceId,
+    identityProviderId: 'idp-direct-a',
+    externalId: 'direct-user-b',
+    userName: 'beta@example.com',
+    displayName: 'Shared display name',
+    emails: ['beta@example.com'],
+    active: true,
+    idempotencyKey: 'direct-user-b',
+  })
+  await client.upsertScimUser({
+    workspaceId,
+    identityProviderId: 'idp-direct-b',
+    externalId: 'direct-user-a',
+    userName: 'other-provider@example.com',
+    emails: ['other-provider@example.com'],
+    active: true,
+    idempotencyKey: 'direct-user-other-provider',
+  })
+  const group = await client.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'idp-direct-a',
+    externalId: 'direct-group',
+    displayName: 'Direct group',
+    active: true,
+    memberUserIds: [first.userId, second.userId],
+    idempotencyKey: 'direct-group',
+  })
+
+  harness.resetQueries()
+  const authentication = await client.authenticateScimWorkspace(
+    workspaceId,
+    credential.token,
+  )
+  const sortedUserIds = [first.userId, second.userId].sort()
+  const secondPage = await client.listScimUsers({
+    workspaceId,
+    identityProviderId: 'idp-direct-a',
+    startIndex: 2,
+    count: 1,
+  })
+  const filteredUsers = await client.listScimUsers({
+    workspaceId,
+    identityProviderId: 'idp-direct-a',
+    startIndex: 1,
+    count: 200,
+    filter: {
+      field: 'displayName',
+      value: 'SHARED DISPLAY NAME',
+    },
+  })
+  const filteredGroups = await client.listScimGroups({
+    workspaceId,
+    identityProviderId: 'idp-direct-a',
+    startIndex: 1,
+    count: 20,
+    filter: {
+      field: 'externalId',
+      value: 'direct-group',
+    },
+  })
+  const caseChangedExternalGroups = await client.listScimGroups({
+    workspaceId,
+    identityProviderId: 'idp-direct-a',
+    startIndex: 1,
+    count: 20,
+    filter: {
+      field: 'externalId',
+      value: 'DIRECT-GROUP',
+    },
+  })
+
+  expect(authentication).toMatchObject({
+    credential: { identityProviderId: 'idp-direct-a' },
+    provider: { providerId: 'idp-direct-a' },
+  })
+  expect(secondPage).toMatchObject({
+    totalResults: 2,
+    startIndex: 2,
+    resources: [{ userId: sortedUserIds[1] }],
+  })
+  expect(filteredUsers.resources.map((user) => user.userId).sort()).toEqual(
+    sortedUserIds,
+  )
+  expect(filteredUsers.totalResults).toBe(2)
+  expect(filteredGroups).toMatchObject({
+    totalResults: 1,
+    resources: [{
+      groupId: group.groupId,
+      memberUserIds: [first.userId, second.userId],
+    }],
+  })
+  expect(caseChangedExternalGroups).toMatchObject({
+    totalResults: 0,
+    resources: [],
+  })
+  await expect(client.listScimGroups({
+    workspaceId,
+    identityProviderId: 'idp-direct-a',
+    startIndex: 1,
+    count: 21,
+  })).rejects.toMatchObject({
+    status: 400,
+    code: 'EnterpriseScimPaginationInvalid',
+  })
+  expect(harness.queries.length).toBeGreaterThanOrEqual(4)
+  expect(harness.queries.every((query) => {
+    const values = query.ExpressionAttributeValues as Record<string, unknown>
+    return !String(values[':scopeKey']).startsWith('WORKSPACE_STATE#')
+  })).toBe(true)
+  expect(harness.queries.some((query) => {
+    const values = query.ExpressionAttributeValues as Record<string, unknown>
+    return String(values[':scopeKey']).startsWith('SCIM_LOOKUP#')
+  })).toBe(true)
+})
+
+test('deletes empty direct SCIM lookup partitions after resource attributes change', async () => {
+  const harness = createDynamoHarness()
+  const client = new DynamoDbEnterpriseIdentityClient(
+    'enterprise-identity',
+    tokenSecret,
+    harness.documentClient as never,
+    undefined,
+    () => now,
+  )
+  await client.putIdentityProvider(createActiveProvider('idp-direct-retired'))
+  const user = await client.upsertScimUser({
+    workspaceId,
+    identityProviderId: 'idp-direct-retired',
+    externalId: 'retired-external-id',
+    userName: 'retired-user@example.com',
+    displayName: 'Retired display name',
+    emails: ['retired-user@example.com'],
+    active: true,
+    idempotencyKey: 'direct-retired-user',
+  })
+  const retiredScopeKeys = new Set(
+    [...harness.items.values()]
+      .filter((item) =>
+        item.entryType === 'enterprise-scim-lookup' &&
+        item.resourceId === user.userId
+      )
+      .map((item) => String(item.scopeKey)),
+  )
+  expect(retiredScopeKeys.size).toBe(3)
+  for (const scopeKey of retiredScopeKeys) {
+    expect([...harness.items.values()].filter((item) =>
+      item.scopeKey === scopeKey
+    ).map((item) => item.recordKey).sort()).toEqual([
+      'META',
+      `RESOURCE#${user.userId}`,
+    ])
+  }
+
+  await client.upsertScimUser({
+    workspaceId,
+    userId: user.userId,
+    identityProviderId: user.identityProviderId,
+    externalId: 'current-external-id',
+    userName: 'current-user@example.com',
+    displayName: 'Current display name',
+    emails: user.emails,
+    active: true,
+    idempotencyKey: 'direct-retired-user-update',
+  })
+
+  expect([...harness.items.values()].filter((item) =>
+    retiredScopeKeys.has(String(item.scopeKey))
+  )).toEqual([])
+  for (const filter of [
+    { field: 'externalId' as const, value: 'retired-external-id' },
+    { field: 'userName' as const, value: 'retired-user@example.com' },
+    { field: 'displayName' as const, value: 'Retired display name' },
+  ]) {
+    await expect(client.listScimUsers({
+      workspaceId,
+      identityProviderId: user.identityProviderId,
+      startIndex: 1,
+      count: 100,
+      filter,
+    })).resolves.toMatchObject({
+      totalResults: 0,
+      resources: [],
+    })
+  }
+})
+
+test('enforces SCIM resource and collection limits before state persistence', async () => {
+  const client = new InMemoryEnterpriseIdentityClient(
+    tokenSecret,
+    () => now,
+    { maximumUsers: 1, maximumGroups: 1 },
+  )
+  await client.putIdentityProvider(createActiveProvider('idp-limits'))
+  const user = await client.upsertScimUser({
+    workspaceId,
+    identityProviderId: 'idp-limits',
+    externalId: 'limited-user',
+    userName: 'limited@example.com',
+    emails: ['limited@example.com'],
+    active: true,
+    idempotencyKey: 'limited-user',
+  })
+  await expect(client.upsertScimUser({
+    workspaceId,
+    identityProviderId: 'idp-limits',
+    externalId: 'overflow-user',
+    userName: 'overflow@example.com',
+    emails: ['overflow@example.com'],
+    active: true,
+    idempotencyKey: 'overflow-user',
+  })).rejects.toMatchObject({
+    status: 413,
+    code: 'EnterpriseScimUserLimitExceeded',
+  })
+  await expect(client.upsertScimUser({
+    workspaceId,
+    userId: user.userId,
+    identityProviderId: 'idp-limits',
+    externalId: user.externalId,
+    userName: user.userName,
+    displayName: 'Updated at the cap',
+    emails: user.emails,
+    active: true,
+    idempotencyKey: 'limited-user-update',
+  })).resolves.toMatchObject({ displayName: 'Updated at the cap' })
+
+  const group = await client.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'idp-limits',
+    externalId: 'limited-group',
+    displayName: 'Limited group',
+    active: true,
+    memberUserIds: [user.userId],
+    idempotencyKey: 'limited-group',
+  })
+  await expect(client.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'idp-limits',
+    externalId: 'overflow-group',
+    displayName: 'Overflow group',
+    active: true,
+    memberUserIds: [],
+    idempotencyKey: 'overflow-group',
+  })).rejects.toMatchObject({
+    status: 413,
+    code: 'EnterpriseScimGroupLimitExceeded',
+  })
+  await expect(client.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'idp-limits',
+    externalId: 'oversized-members',
+    displayName: 'Oversized members',
+    active: true,
+    memberUserIds: Array.from({ length: 1_001 }, () => user.userId),
+    idempotencyKey: 'oversized-members',
+  })).rejects.toMatchObject({
+    status: 413,
+    code: 'EnterpriseScimGroupMemberLimitExceeded',
+  })
+  await expect(client.upsertScimUser({
+    workspaceId,
+    userId: user.userId,
+    identityProviderId: 'idp-limits',
+    externalId: user.externalId,
+    userName: user.userName,
+    emails: Array.from(
+      { length: 11 },
+      (_, index) => `limited-${index}@example.com`,
+    ),
+    active: true,
+    idempotencyKey: 'oversized-emails',
+  })).rejects.toMatchObject({
+    status: 413,
+    code: 'EnterpriseScimUserEmailLimitExceeded',
+  })
+  await expect(client.upsertScimUser({
+    workspaceId,
+    identityProviderId: 'idp-limits',
+    externalId: 'u'.repeat(257),
+    userName: 'bounded@example.com',
+    emails: ['bounded@example.com'],
+    active: true,
+    idempotencyKey: 'oversized-user-external-id',
+  })).rejects.toMatchObject({
+    status: 400,
+    code: 'EnterpriseScimTextLimitExceeded',
+  })
+  await expect(client.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'idp-limits',
+    externalId: 'bounded-group',
+    displayName: 'g'.repeat(257),
+    active: true,
+    memberUserIds: [],
+    idempotencyKey: 'oversized-group-display-name',
+  })).rejects.toMatchObject({
+    status: 400,
+    code: 'EnterpriseScimTextLimitExceeded',
+  })
+  await expect(client.upsertScimUser({
+    workspaceId,
+    userId: user.userId,
+    identityProviderId: 'idp-limits',
+    externalId: user.externalId,
+    userName: user.userName,
+    emails: user.emails,
+    active: true,
+    idempotencyKey: `${'i'.repeat(256)} `,
+  })).rejects.toMatchObject({
+    status: 400,
+    code: 'EnterpriseScimTextLimitExceeded',
+  })
+  await expect(client.deactivateScimUser(
+    workspaceId,
+    'idp-limits',
+    `${user.userId}${' '.repeat(129)}`,
+    'bounded-user-deactivate',
+  )).rejects.toMatchObject({
+    status: 400,
+    code: 'EnterpriseScimTextLimitExceeded',
+  })
+  await expect(client.deactivateScimGroup(
+    workspaceId,
+    'idp-limits',
+    group.groupId,
+    `${'i'.repeat(256)} `,
+  )).rejects.toMatchObject({
+    status: 400,
+    code: 'EnterpriseScimTextLimitExceeded',
+  })
+})
+
+test('caps active SCIM credentials per identity provider', async () => {
+  const client = new InMemoryEnterpriseIdentityClient(tokenSecret, () => now)
+  await client.putIdentityProvider(createActiveProvider('idp-credential-cap'))
+  for (let index = 0; index < 10; index += 1) {
+    await client.issueScimToken(
+      workspaceId,
+      'idp-credential-cap',
+      `Credential ${index}`,
+    )
+  }
+  await expect(client.issueScimToken(
+    workspaceId,
+    'idp-credential-cap',
+    'Overflow credential',
+  )).rejects.toMatchObject({
+    status: 413,
+    code: 'EnterpriseScimCredentialLimitExceeded',
+  })
+})
+
+test('caps active SCIM credentials across a Workspace while allowing replacement', async () => {
+  const client = new InMemoryEnterpriseIdentityClient(tokenSecret, () => now)
+  const providerIds = Array.from(
+    { length: 6 },
+    (_, index) => `idp-workspace-credential-cap-${index}`,
+  )
+  for (const providerId of providerIds) {
+    await client.putIdentityProvider(createActiveProvider(providerId))
+  }
+  for (const providerId of providerIds.slice(0, 5)) {
+    for (let index = 0; index < 10; index += 1) {
+      await client.issueScimToken(
+        workspaceId,
+        providerId,
+        `${providerId} credential ${index}`,
+      )
+    }
+  }
+  await expect(client.issueScimToken(
+    workspaceId,
+    providerIds[5]!,
+    'Overflow Workspace credential',
+  )).rejects.toMatchObject({
+    status: 413,
+    code: 'EnterpriseScimWorkspaceCredentialLimitExceeded',
+  })
+  await expect(client.rotateScimToken(
+    workspaceId,
+    providerIds[5]!,
+    'Overflow rotation',
+    0,
+    'overflow-workspace-rotation',
+    'overflow-workspace-rotation',
+  )).rejects.toMatchObject({
+    status: 413,
+    code: 'EnterpriseScimWorkspaceCredentialLimitExceeded',
+  })
+  await expect(client.rotateScimToken(
+    workspaceId,
+    providerIds[0]!,
+    'Replacement rotation',
+    10,
+    'replacement-workspace-rotation',
+    'replacement-workspace-rotation',
+  )).resolves.toMatchObject({
+    credential: { identityProviderId: providerIds[0] },
+  })
+})
+
+test('hashes long provider IDs in direct SCIM authentication record keys', async () => {
+  const harness = createDynamoHarness()
+  const client = new DynamoDbEnterpriseIdentityClient(
+    'enterprise-identity',
+    tokenSecret,
+    harness.documentClient as never,
+    undefined,
+    () => now,
+  )
+  const longProviderId = 'provider-'.repeat(150)
+  await client.putIdentityProvider({
+    ...createActiveProvider('bounded-provider'),
+    providerId: longProviderId,
+    displayName: 'Long provider ID',
+    cognitoProviderName: 'LongProvider',
+  })
+  const authProviderItems = harness.transactions.flatMap((transaction) =>
+    (transaction.TransactItems as Array<Record<string, unknown>>)
+      .map((operation) =>
+        (operation.Put as { Item?: Record<string, unknown> } | undefined)?.Item
+      )
+      .filter((item) => item?.entryType === 'enterprise-scim-auth-provider')
+  )
+  expect(authProviderItems).toHaveLength(1)
+  expect(String(authProviderItems[0]?.recordKey)).toStartWith('PROVIDER#')
+  expect(Buffer.byteLength(String(authProviderItems[0]?.recordKey), 'utf8'))
+    .toBeLessThan(1_024)
+  expect(String(authProviderItems[0]?.recordKey)).not.toContain(longProviderId)
+
+  const issued = await client.issueScimToken(
+    workspaceId,
+    longProviderId,
+    'Long provider credential',
+  )
+  expect(await client.authenticateScimWorkspace(workspaceId, issued.token))
+    .toMatchObject({
+      provider: { providerId: longProviderId },
+      credential: { identityProviderId: longProviderId },
+    })
 })
 
 test('rejects an active generation with a missing manifest record', async () => {
@@ -1023,7 +2126,7 @@ test('fails closed when a physical TTL appears on an active generation', async (
   })
 })
 
-test('keeps large SCIM group deltas hidden across partial writes and concurrent checkpoints', async () => {
+test('stores large SCIM group memberships as one bounded resource projection', async () => {
   const harness = createDynamoHarness()
   const client = new DynamoDbEnterpriseIdentityClient(
     'enterprise-identity',
@@ -1056,30 +2159,22 @@ test('keeps large SCIM group deltas hidden across partial writes and concurrent 
     idempotencyKey: 'large-group-create',
   }
 
-  const generationCountBeforeFailure = [...harness.items.values()].filter((item) =>
-    item.entryType === 'enterprise-identity-generation'
-  ).length
-  harness.rejectBatchWritesAfter(2)
-  await expect(client.upsertScimGroup(largeGroupInput)).rejects.toMatchObject({
-    code: 'EnterpriseIdentityUnavailable',
-  })
-  const partiallyStagedGenerations = [...harness.items.values()].filter((item) =>
-    item.entryType === 'enterprise-identity-generation'
-  ).length
-  expect(partiallyStagedGenerations).toBeGreaterThan(generationCountBeforeFailure)
-  await expect(client.getSnapshot(workspaceId)).resolves.toMatchObject({
-    scimGroups: [],
-  })
-
-  harness.resumeBatchWrites()
   const groupBatchStart = harness.batchWrites.length
   await client.upsertScimGroup(largeGroupInput)
-  expect(harness.batchWrites.length - groupBatchStart).toBeGreaterThan(4)
+  expect(harness.batchWrites.length - groupBatchStart).toBe(1)
   const afterLargeGroup = await client.getSnapshot(workspaceId)
   expect(afterLargeGroup.scimGroups[0]?.memberUserIds).toHaveLength(60)
   expect(afterLargeGroup.scimUsers.every((user) =>
-    user.groupIds.includes(afterLargeGroup.scimGroups[0]!.groupId)
+    user.groupIds.length === 0
   )).toBe(true)
+  const directGroupProjection = [...harness.items.values()].find((item) =>
+    item.entryType === 'enterprise-scim-resource' &&
+    item.resourceKind === 'group'
+  )
+  const directGroupResource = directGroupProjection?.resource as
+    | { memberUserIds?: string[] }
+    | undefined
+  expect(directGroupResource?.memberUserIds).toHaveLength(60)
 
   await Promise.all([
     client.upsertScimGroup({
@@ -1097,7 +2192,7 @@ test('keeps large SCIM group deltas hidden across partial writes and concurrent 
   ])
   const afterConflictRetry = await client.getSnapshot(workspaceId)
   expect(afterConflictRetry.scimGroups).toHaveLength(3)
-  expect(afterConflictRetry.scimUsers.every((user) => user.groupIds.length === 3)).toBe(true)
+  expect(afterConflictRetry.scimUsers.every((user) => user.groupIds.length === 0)).toBe(true)
   expect(harness.transactions.every((transaction) =>
     (transaction.TransactItems as Array<Record<string, unknown>>).length <= 100
   )).toBe(true)
@@ -1625,6 +2720,13 @@ test('grants directory mappings only from applied state on a ready provider', ()
     resolveEnterpriseDirectoryPrincipal(snapshot, 'member@example.com', [])
       .compatibleGroupMappings,
   ).toHaveLength(1)
+
+  snapshot.scimGroups[0]!.memberUserIds = []
+  expect(
+    resolveEnterpriseDirectoryPrincipal(snapshot, 'member@example.com', [])
+      .compatibleGroupMappings,
+  ).toEqual([])
+  snapshot.scimGroups[0]!.memberUserIds = ['directory-user-1']
 
   snapshot.identityProviders[0] = { ...provider, status: 'draft', lastTestedAt: undefined }
   expect(resolveEnterpriseDirectoryPrincipal(snapshot, 'member@example.com', []))

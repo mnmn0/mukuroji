@@ -209,6 +209,15 @@ import {
   type RequestLinkResolution,
 } from './request-intake'
 import {
+  ENTERPRISE_SCIM_DISPLAY_NAME_MAX_BYTES,
+  ENTERPRISE_SCIM_EXTERNAL_ID_MAX_BYTES,
+  ENTERPRISE_SCIM_GROUP_MEMBER_LIMIT,
+  ENTERPRISE_SCIM_GROUP_PAGE_LIMIT,
+  ENTERPRISE_SCIM_IDEMPOTENCY_KEY_MAX_BYTES,
+  ENTERPRISE_SCIM_MEMBER_ID_MAX_BYTES,
+  ENTERPRISE_SCIM_RESOURCE_ID_MAX_BYTES,
+  ENTERPRISE_SCIM_USER_EMAIL_LIMIT,
+  ENTERPRISE_SCIM_USER_IDENTIFIER_MAX_BYTES,
   EnterpriseIdentityError,
   assertEnterpriseCognitoFederationBinding,
   assertEnterpriseCognitoProviderBinding,
@@ -225,7 +234,15 @@ import {
   type EnterpriseCognitoFederationBinding,
   type EnterpriseIdentityClient,
   type EnterprisePrincipalContext,
+  type EnterpriseScimGroupJobApplyInput,
 } from './enterprise-identity'
+import { createEnterpriseCognitoInspectionCache } from './enterprise-cognito-inspection-cache'
+import {
+  isEnterpriseScimGroupJobStreamEvent,
+  processEnterpriseScimGroupJobBatch,
+  type EnterpriseScimGroupJobReference,
+  type EnterpriseScimGroupJobStreamEvent,
+} from './enterprise-scim-group-job-handler'
 import {
   createDefaultEnterpriseSecurityPolicy,
   toEnterpriseSecuritySnapshotView,
@@ -2455,6 +2472,9 @@ type EnterpriseIdentityProviderConnectionTester = (
   provider: EnterpriseIdentityProvider,
 ) => Promise<EnterpriseIdentityProvider>
 
+/** Cognito binding inspection を live read するか短期 cache から読むかを指定します。 */
+type EnterpriseCognitoInspectionMode = 'cached' | 'fresh'
+
 /**
  * Lambda handler、Bun dev server、server test で共有する Hono app です。
  */
@@ -2481,6 +2501,10 @@ let enterpriseIdentity: EnterpriseIdentityClient
 let enterpriseSessionActivity: EnterpriseSessionActivityClient
 let enterpriseIdentityProviderConnectionTester: EnterpriseIdentityProviderConnectionTester =
   testEnterpriseIdentityProviderConnection
+const enterpriseCognitoFederationBindingCache =
+  createEnterpriseCognitoInspectionCache<EnterpriseCognitoFederationBinding>()
+const enterpriseCognitoSsoAppClientBindingCache =
+  createEnterpriseCognitoInspectionCache<EnterpriseCognitoSsoAppClientBinding>()
 const projectDirectoryIdPrefix = 'user#'
 const defaultAllowedOrigins = [
   'http://localhost:5173',
@@ -2803,7 +2827,7 @@ app.get('/api/auth/sso/discovery', async (c) => {
       discovery.provider,
       requireEnterpriseCognitoProviderName(),
     )
-    await assertEnterpriseCognitoFederationProvider(discovery.provider)
+    await assertEnterpriseCognitoFederationProvider(discovery.provider, 'cached')
     return c.json({
       ssoRequired: true,
       loginMode: 'sso-for-claimed-domains' as const,
@@ -5231,18 +5255,19 @@ app.get('/api/scim/v2/:workspaceId/ServiceProviderConfig', async (c) => {
 app.get('/api/scim/v2/:workspaceId/Users', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
-    const snapshot = await enterpriseIdentity.getSnapshot(workspaceId)
-    const filteredResources = filterScimResources(
-      snapshot.scimUsers.filter((user) =>
-        user.identityProviderId === credential.identityProviderId
+    const pagination = readScimPagination(c)
+    const page = await enterpriseIdentity.listScimUsers({
+      workspaceId,
+      identityProviderId: credential.identityProviderId,
+      ...pagination,
+      ...readScimEqualityFilter(
+        c.req.query('filter'),
+        ['externalId', 'userName', 'displayName'],
       ),
-      c.req.query('filter'),
-      (user, field) => field === 'externalId' ? user.externalId : user.userName,
-    )
-    const page = paginateScimResources(c, filteredResources)
+    })
     return toScimJson(c, {
       schemas: ['urn:ietf:params:scim:api:messages:2.0:ListResponse'],
-      totalResults: filteredResources.length,
+      totalResults: page.totalResults,
       startIndex: page.startIndex,
       itemsPerPage: page.resources.length,
       Resources: page.resources.map(toScimUserResource),
@@ -5256,7 +5281,7 @@ app.get('/api/scim/v2/:workspaceId/Users', async (c) => {
 app.post('/api/scim/v2/:workspaceId/Users', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
-    const body = await readJson<Record<string, unknown>>(c.req)
+    const body = await readScimJson(c)
     const snapshot = await enterpriseIdentity.getSnapshot(workspaceId)
     const input = readEnterpriseScimUserInput(
       c,
@@ -5297,9 +5322,10 @@ app.post('/api/scim/v2/:workspaceId/Users', async (c) => {
 app.get('/api/scim/v2/:workspaceId/Users/:userId', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
+    const userId = readScimResourceId(c.req.param('userId'), 'user')
     const snapshot = await enterpriseIdentity.getSnapshot(workspaceId)
     const user = snapshot.scimUsers.find((candidate) =>
-      candidate.userId === c.req.param('userId') &&
+      candidate.userId === userId &&
       candidate.identityProviderId === credential.identityProviderId
     )
     if (!user) {
@@ -5316,10 +5342,11 @@ app.get('/api/scim/v2/:workspaceId/Users/:userId', async (c) => {
 app.on(['PUT', 'PATCH'], '/api/scim/v2/:workspaceId/Users/:userId', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
-    const body = await readJson<Record<string, unknown>>(c.req)
+    const userId = readScimResourceId(c.req.param('userId'), 'user')
+    const body = await readScimJson(c)
     const snapshot = await enterpriseIdentity.getSnapshot(workspaceId)
     const existing = snapshot.scimUsers.find((candidate) =>
-      candidate.userId === c.req.param('userId') &&
+      candidate.userId === userId &&
       candidate.identityProviderId === credential.identityProviderId
     )
     if (!existing) {
@@ -5368,9 +5395,10 @@ app.on(['PUT', 'PATCH'], '/api/scim/v2/:workspaceId/Users/:userId', async (c) =>
 app.delete('/api/scim/v2/:workspaceId/Users/:userId', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
+    const userId = readScimResourceId(c.req.param('userId'), 'user')
     const snapshot = await enterpriseIdentity.getSnapshot(workspaceId)
     const existing = snapshot.scimUsers.find((candidate) =>
-      candidate.userId === c.req.param('userId') &&
+      candidate.userId === userId &&
       candidate.identityProviderId === credential.identityProviderId
     )
     if (!existing) {
@@ -5391,13 +5419,13 @@ app.delete('/api/scim/v2/:workspaceId/Users/:userId', async (c) => {
     const user = await enterpriseIdentity.deactivateScimUser(
       workspaceId,
       credential.identityProviderId,
-      c.req.param('userId'),
-      readScimIdempotencyKey(c, `delete-user:${c.req.param('userId')}`),
+      userId,
+      readScimIdempotencyKey(c, `delete-user:${userId}`),
       createEnterpriseScimMutationContext(
         c,
         workspaceId,
         credential.identityProviderId,
-        { userId: c.req.param('userId') },
+        { userId },
       ),
     )
     if (user) await applyEnterpriseScimUser(c, user)
@@ -5411,18 +5439,22 @@ app.delete('/api/scim/v2/:workspaceId/Users/:userId', async (c) => {
 app.get('/api/scim/v2/:workspaceId/Groups', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
-    const snapshot = await enterpriseIdentity.getSnapshot(workspaceId)
-    const filteredResources = filterScimResources(
-      snapshot.scimGroups.filter((group) =>
-        group.identityProviderId === credential.identityProviderId
-      ),
-      c.req.query('filter'),
-      (group, field) => field === 'externalId' ? group.externalId : group.displayName,
+    const pagination = readScimPagination(
+      c,
+      ENTERPRISE_SCIM_GROUP_PAGE_LIMIT,
     )
-    const page = paginateScimResources(c, filteredResources)
+    const page = await enterpriseIdentity.listScimGroups({
+      workspaceId,
+      identityProviderId: credential.identityProviderId,
+      ...pagination,
+      ...readScimEqualityFilter(
+        c.req.query('filter'),
+        ['externalId', 'displayName'],
+      ),
+    })
     return toScimJson(c, {
       schemas: ['urn:ietf:params:scim:api:messages:2.0:ListResponse'],
-      totalResults: filteredResources.length,
+      totalResults: page.totalResults,
       startIndex: page.startIndex,
       itemsPerPage: page.resources.length,
       Resources: page.resources.map(toScimGroupResource),
@@ -5436,7 +5468,7 @@ app.get('/api/scim/v2/:workspaceId/Groups', async (c) => {
 app.post('/api/scim/v2/:workspaceId/Groups', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
-    const body = await readJson<Record<string, unknown>>(c.req)
+    const body = await readScimJson(c)
     const input = readEnterpriseScimGroupInput(
       c,
       workspaceId,
@@ -5452,8 +5484,14 @@ app.post('/api/scim/v2/:workspaceId/Groups', async (c) => {
         body,
       ),
     )
-    await applyEnterpriseScimGroupMembers(c, workspaceId, group)
-    c.status(201)
+    c.status(202)
+    c.header('Retry-After', '1')
+    c.header('Location', new URL(
+      `/api/scim/v2/${encodeURIComponent(workspaceId)}/Groups/${
+        encodeURIComponent(group.groupId)
+      }`,
+      c.req.url,
+    ).toString())
     setScimEtag(c, group.version)
     return toScimJson(c, toScimGroupResource(group))
   } catch (error) {
@@ -5465,9 +5503,10 @@ app.post('/api/scim/v2/:workspaceId/Groups', async (c) => {
 app.get('/api/scim/v2/:workspaceId/Groups/:groupId', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
+    const groupId = readScimResourceId(c.req.param('groupId'), 'group')
     const snapshot = await enterpriseIdentity.getSnapshot(workspaceId)
     const group = snapshot.scimGroups.find((candidate) =>
-      candidate.groupId === c.req.param('groupId') &&
+      candidate.groupId === groupId &&
       candidate.identityProviderId === credential.identityProviderId
     )
     if (!group) {
@@ -5484,10 +5523,11 @@ app.get('/api/scim/v2/:workspaceId/Groups/:groupId', async (c) => {
 app.on(['PUT', 'PATCH'], '/api/scim/v2/:workspaceId/Groups/:groupId', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
-    const body = await readJson<Record<string, unknown>>(c.req)
+    const groupId = readScimResourceId(c.req.param('groupId'), 'group')
+    const body = await readScimJson(c)
     const snapshot = await enterpriseIdentity.getSnapshot(workspaceId)
     const existing = snapshot.scimGroups.find((candidate) =>
-      candidate.groupId === c.req.param('groupId') &&
+      candidate.groupId === groupId &&
       candidate.identityProviderId === credential.identityProviderId
     )
     if (!existing) {
@@ -5515,7 +5555,8 @@ app.on(['PUT', 'PATCH'], '/api/scim/v2/:workspaceId/Groups/:groupId', async (c) 
         body,
       ),
     )
-    await applyEnterpriseScimGroupMembers(c, workspaceId, group)
+    c.status(202)
+    c.header('Retry-After', '1')
     setScimEtag(c, group.version)
     return toScimJson(c, toScimGroupResource(group))
   } catch (error) {
@@ -5527,9 +5568,10 @@ app.on(['PUT', 'PATCH'], '/api/scim/v2/:workspaceId/Groups/:groupId', async (c) 
 app.delete('/api/scim/v2/:workspaceId/Groups/:groupId', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
+    const groupId = readScimResourceId(c.req.param('groupId'), 'group')
     const snapshot = await enterpriseIdentity.getSnapshot(workspaceId)
     const existing = snapshot.scimGroups.find((candidate) =>
-      candidate.groupId === c.req.param('groupId') &&
+      candidate.groupId === groupId &&
       candidate.identityProviderId === credential.identityProviderId
     )
     if (!existing) {
@@ -5540,20 +5582,20 @@ app.delete('/api/scim/v2/:workspaceId/Groups/:groupId', async (c) => {
       )
     }
     requireScimIfMatch(c, existing.version)
-    const group = await enterpriseIdentity.deactivateScimGroup(
+    await enterpriseIdentity.deactivateScimGroup(
       workspaceId,
       credential.identityProviderId,
-      c.req.param('groupId'),
-      readScimIdempotencyKey(c, `delete-group:${c.req.param('groupId')}`),
+      groupId,
+      readScimIdempotencyKey(c, `delete-group:${groupId}`),
       createEnterpriseScimMutationContext(
         c,
         workspaceId,
         credential.identityProviderId,
-        { groupId: c.req.param('groupId') },
+        { groupId },
       ),
     )
-    if (group) await applyEnterpriseScimGroupMembers(c, workspaceId, group)
-    return c.body(null, 204)
+    c.header('Retry-After', '1')
+    return c.body(null, 202)
   } catch (error) {
     return toScimErrorResponse(c, error)
   }
@@ -13057,6 +13099,7 @@ async function testEnterpriseIdentityProviderConnection(
 
 async function assertEnterpriseCognitoFederationProvider(
   provider: EnterpriseIdentityProvider,
+  inspectionMode: EnterpriseCognitoInspectionMode = 'fresh',
 ) {
   if (!cognito.describeEnterpriseIdentityProvider) {
     throw new EnterpriseIdentityError(
@@ -13067,9 +13110,15 @@ async function assertEnterpriseCognitoFederationProvider(
   }
   let binding: EnterpriseCognitoFederationBinding
   try {
-    binding = await cognito.describeEnterpriseIdentityProvider(
+    const cacheKey = `${getEnv('COGNITO_USER_POOL_ID')?.trim() ?? ''}\0${
+      provider.cognitoProviderName
+    }`
+    const loadBinding = () => cognito.describeEnterpriseIdentityProvider!(
       provider.cognitoProviderName,
     )
+    binding = inspectionMode === 'cached'
+      ? await enterpriseCognitoFederationBindingCache.read(cacheKey, loadBinding)
+      : await enterpriseCognitoFederationBindingCache.refresh(cacheKey, loadBinding)
   } catch (error) {
     throw new EnterpriseIdentityError(
       409,
@@ -13088,6 +13137,7 @@ async function assertEnterpriseCognitoFederationProvider(
 
 async function assertEnterpriseCognitoSsoAppClient(
   provider: EnterpriseIdentityProvider,
+  inspectionMode: EnterpriseCognitoInspectionMode = 'fresh',
 ) {
   const configuration = requireEnterpriseCognitoSsoAppClientConfiguration()
   if (!cognito.describeEnterpriseSsoAppClient) {
@@ -13099,7 +13149,15 @@ async function assertEnterpriseCognitoSsoAppClient(
   }
   let binding: EnterpriseCognitoSsoAppClientBinding
   try {
-    binding = await cognito.describeEnterpriseSsoAppClient(configuration.clientId)
+    const cacheKey = `${getEnv('COGNITO_USER_POOL_ID')?.trim() ?? ''}\0${
+      configuration.clientId
+    }`
+    const loadBinding = () => cognito.describeEnterpriseSsoAppClient!(
+      configuration.clientId,
+    )
+    binding = inspectionMode === 'cached'
+      ? await enterpriseCognitoSsoAppClientBindingCache.read(cacheKey, loadBinding)
+      : await enterpriseCognitoSsoAppClientBindingCache.refresh(cacheKey, loadBinding)
   } catch (error) {
     throw new EnterpriseIdentityError(
       503,
@@ -13171,8 +13229,8 @@ async function assertEnterpriseRuntimeCognitoProviders(
       candidate.providerId === providerId
     )
     assertEnterpriseIdentityProviderReady(provider)
-    await assertEnterpriseCognitoFederationProvider(provider)
-    await assertEnterpriseCognitoSsoAppClient(provider)
+    await assertEnterpriseCognitoFederationProvider(provider, 'cached')
+    await assertEnterpriseCognitoSsoAppClient(provider, 'cached')
   }
 }
 
@@ -13936,22 +13994,36 @@ async function applyEnterpriseScimUser(
   user: EnterpriseScimUser,
   desiredGroupOverlays: readonly EnterpriseScimGroup[] = [],
 ) {
+  return await applyEnterpriseScimUserState(
+    user,
+    createEnterpriseScimMutationContext(
+      c,
+      user.workspaceId,
+      user.identityProviderId,
+      {
+        externalId: user.externalId,
+        userId: user.userId,
+        active: user.active,
+      },
+    ),
+    desiredGroupOverlays,
+  )
+}
+
+async function applyEnterpriseScimUserState(
+  user: EnterpriseScimUser,
+  auditContext: MutationAuditContext,
+  desiredGroupOverlays: readonly EnterpriseScimGroup[] = [],
+  snapshotOverride?: EnterpriseIdentitySnapshot,
+  checkpointAppliedVersion = true,
+) {
   const memberKey = user.linkedMemberKey ??
     user.emails[0]?.trim().toLowerCase() ??
     user.userName.trim().toLowerCase()
   const existing = await workspaceAccess.getMember(user.workspaceId, memberKey)
-  const auditContext = createEnterpriseScimMutationContext(
-    c,
-    user.workspaceId,
-    user.identityProviderId,
-    {
-      externalId: user.externalId,
-      userId: user.userId,
-      active: user.active,
-    },
-  )
   if (user.active) {
-    const snapshot = await enterpriseIdentity.getSnapshot(user.workspaceId)
+    const snapshot = snapshotOverride ??
+      await enterpriseIdentity.getSnapshot(user.workspaceId)
     const workspaceRole = resolveEnterpriseScimWorkspaceRole(
       snapshot,
       user,
@@ -13974,46 +14046,33 @@ async function applyEnterpriseScimUser(
       expectedPlanningRevision,
     }, auditContext)
     await cognito.enableWorkspaceUser?.(memberKey)
+  } else if (existing) {
+    await requireWorkspaceMemberHasNoManagedProjects(user.workspaceId, memberKey)
+    const expectedPlanningRevision = await requireWorkspaceMemberHasNoOwnedPlanningEntities(
+      user.workspaceId,
+      memberKey,
+    )
+    await workspaceAccess.deprovisionDirectoryMember?.(
+      user.workspaceId,
+      memberKey,
+      {
+        externalIdentityId: user.userId,
+        expectedVersion: existing.version,
+        expectedPlanningRevision,
+      },
+      auditContext,
+    )
+    await cognito.disableWorkspaceUser?.(memberKey)
+    await cognito.globallySignOutWorkspaceUser?.(memberKey)
+  }
+  if (checkpointAppliedVersion) {
     await enterpriseIdentity.markScimUserApplied(
       user.workspaceId,
       user.userId,
       user.version,
       auditContext,
     )
-    return
   }
-  if (!existing) {
-    await enterpriseIdentity.markScimUserApplied(
-      user.workspaceId,
-      user.userId,
-      user.version,
-      auditContext,
-    )
-    return
-  }
-  await requireWorkspaceMemberHasNoManagedProjects(user.workspaceId, memberKey)
-  const expectedPlanningRevision = await requireWorkspaceMemberHasNoOwnedPlanningEntities(
-    user.workspaceId,
-    memberKey,
-  )
-  await workspaceAccess.deprovisionDirectoryMember?.(
-    user.workspaceId,
-    memberKey,
-    {
-      externalIdentityId: user.userId,
-      expectedVersion: existing.version,
-      expectedPlanningRevision,
-    },
-    auditContext,
-  )
-  await cognito.disableWorkspaceUser?.(memberKey)
-  await cognito.globallySignOutWorkspaceUser?.(memberKey)
-  await enterpriseIdentity.markScimUserApplied(
-    user.workspaceId,
-    user.userId,
-    user.version,
-    auditContext,
-  )
 }
 
 async function requireEnterpriseScimDeprovisionAllowed(
@@ -14061,10 +14120,7 @@ function resolveEnterpriseScimWorkspaceRole(
         group.appliedVersion >= group.version
       ) &&
       group.identityProviderId === user.identityProviderId &&
-      (
-        user.groupIds.includes(group.groupId) ||
-        group.memberUserIds.includes(user.userId)
-      )
+      group.memberUserIds.includes(user.userId)
     )
     .flatMap((group) => [group.groupId, group.externalId])
   const roles = snapshot.groupMappings
@@ -14104,10 +14160,7 @@ async function applyEnterpriseWorkspaceGuestMappingImpact(
     if (!user.active || user.appliedVersion < user.version) continue
     if (!affectedGroups.some((group) =>
       group.identityProviderId === user.identityProviderId &&
-      (
-        user.groupIds.includes(group.groupId) ||
-        group.memberUserIds.includes(user.userId)
-      )
+      group.memberUserIds.includes(user.userId)
     )) continue
     await applyEnterpriseScimUser(c, user)
   }
@@ -14116,27 +14169,100 @@ async function applyEnterpriseWorkspaceGuestMappingImpact(
 async function requireEnterpriseScimWorkspace(c: Context) {
   const workspaceId = readEnterpriseText(c.req.param('workspaceId'), 'Workspace ID')
   const token = readBearerAccessToken(c)
-  const credential = token
-    ? await enterpriseIdentity.authenticateScimToken(workspaceId, token)
+  const authentication = token
+    ? await enterpriseIdentity.authenticateScimWorkspace(workspaceId, token)
     : undefined
-  if (!credential) {
+  if (!authentication) {
     throw new EnterpriseIdentityError(
       401,
       'EnterpriseScimAuthenticationFailed',
       'SCIM bearer credential is invalid or revoked.',
     )
   }
-  const snapshot = await enterpriseIdentity.getSnapshot(workspaceId)
-  const provider = snapshot.identityProviders.find((candidate) =>
-    candidate.providerId === credential.identityProviderId
-  )
+  const { credential, provider } = authentication
   assertEnterpriseIdentityProviderReady(provider)
   assertEnterpriseCognitoProviderBinding(
     provider,
     requireEnterpriseCognitoProviderName(),
   )
-  await assertEnterpriseCognitoFederationProvider(provider)
+  await assertEnterpriseCognitoFederationProvider(provider, 'cached')
   return { workspaceId, credential }
+}
+
+/** 一つの SCIM mutation request に許可する decoded JSON byte 数です。 */
+const SCIM_REQUEST_BODY_MAX_BYTES = 512 * 1024
+
+/** 一つの SCIM PATCH request に許可する operation 数です。 */
+const SCIM_PATCH_OPERATION_LIMIT = 100
+
+/** SCIM equality filter に許可する UTF-8 byte 数です。 */
+const SCIM_FILTER_MAX_BYTES = 512
+
+async function readScimJson(c: Context) {
+  const contentLength = c.req.header('Content-Length')
+  if (contentLength !== undefined) {
+    if (!/^(?:0|[1-9]\d*)$/u.test(contentLength)) {
+      throw new EnterpriseIdentityError(
+        400,
+        'EnterpriseScimPayloadInvalid',
+        'SCIM Content-Length must be a non-negative integer.',
+      )
+    }
+    const parsedContentLength = Number(contentLength)
+    if (!Number.isSafeInteger(parsedContentLength)) {
+      throw new EnterpriseIdentityError(
+        400,
+        'EnterpriseScimPayloadInvalid',
+        'SCIM Content-Length is invalid.',
+      )
+    }
+    if (parsedContentLength > SCIM_REQUEST_BODY_MAX_BYTES) {
+      throwScimPayloadTooLarge()
+    }
+  }
+  let bytes: ArrayBuffer
+  try {
+    bytes = await c.req.arrayBuffer()
+  } catch {
+    throw new EnterpriseIdentityError(
+      400,
+      'EnterpriseScimPayloadInvalid',
+      'A valid SCIM JSON object request body is required.',
+    )
+  }
+  if (bytes.byteLength > SCIM_REQUEST_BODY_MAX_BYTES) {
+    throwScimPayloadTooLarge()
+  }
+  try {
+    const value = JSON.parse(
+      new TextDecoder('utf-8', { fatal: true }).decode(bytes),
+    ) as unknown
+    if (!isRecord(value)) {
+      throw new EnterpriseIdentityError(
+        400,
+        'EnterpriseScimPayloadInvalid',
+        'A SCIM JSON object request body is required.',
+      )
+    }
+    return value
+  } catch (error) {
+    if (error instanceof EnterpriseIdentityError) throw error
+    throw new EnterpriseIdentityError(
+      400,
+      'EnterpriseScimPayloadInvalid',
+      'A valid SCIM JSON object request body is required.',
+    )
+  }
+}
+
+function throwScimPayloadTooLarge(): never {
+  throw new EnterpriseIdentityError(
+    413,
+    'EnterpriseScimPayloadTooLarge',
+    `SCIM request bodies cannot exceed ${
+      SCIM_REQUEST_BODY_MAX_BYTES
+    } bytes.`,
+  )
 }
 
 function readEnterpriseScimUserInput(
@@ -14153,15 +14279,47 @@ function readEnterpriseScimUserInput(
       'SCIM user was not found.',
     )
   }
-  const emails = Array.isArray(body.emails)
-    ? body.emails
+  if (
+    Array.isArray(body.emails) &&
+    body.emails.length > ENTERPRISE_SCIM_USER_EMAIL_LIMIT
+  ) {
+    throw new EnterpriseIdentityError(
+      413,
+      'EnterpriseScimUserEmailLimitExceeded',
+      `A SCIM user can contain at most ${
+        ENTERPRISE_SCIM_USER_EMAIL_LIMIT
+      } email addresses.`,
+    )
+  }
+  const hasEmails = Object.hasOwn(body, 'emails')
+  if (hasEmails && !Array.isArray(body.emails)) {
+    throw new EnterpriseIdentityError(
+      400,
+      'EnterpriseScimEmailInvalid',
+      'SCIM emails must be an array with at least one valid email.',
+    )
+  }
+  const emails = hasEmails
+    ? (body.emails as unknown[])
         .map((entry) => isRecord(entry) && typeof entry.value === 'string'
-          ? entry.value.trim().toLowerCase()
+          ? readScimBoundedText(
+            entry.value,
+            'SCIM email',
+            ENTERPRISE_SCIM_USER_IDENTIFIER_MAX_BYTES,
+            false,
+          )?.toLowerCase()
           : undefined)
         .filter((value): value is string => Boolean(value))
     : existing?.emails ?? []
-  const userName = typeof body.userName === 'string'
-    ? body.userName
+  if (hasEmails && emails.length === 0) {
+    throw new EnterpriseIdentityError(
+      400,
+      'EnterpriseScimEmailInvalid',
+      'SCIM user requires at least one valid email.',
+    )
+  }
+  const userName = Object.hasOwn(body, 'userName')
+    ? typeof body.userName === 'string' ? body.userName : undefined
     : existing?.userName
   if (!userName) {
     throw new EnterpriseIdentityError(
@@ -14170,28 +14328,49 @@ function readEnterpriseScimUserInput(
       'SCIM userName is required.',
     )
   }
-  const externalId = typeof body.externalId === 'string'
-    ? body.externalId
-    : existing?.externalId ?? userName
+  const boundedUserName = readScimBoundedText(
+    userName,
+    'SCIM userName',
+    ENTERPRISE_SCIM_USER_IDENTIFIER_MAX_BYTES,
+  )
+  const externalId = Object.hasOwn(body, 'externalId')
+    ? typeof body.externalId === 'string' ? body.externalId : boundedUserName
+    : existing?.externalId ?? boundedUserName
+  const boundedExternalId = readScimBoundedText(
+    externalId,
+    'SCIM user externalId',
+    ENTERPRISE_SCIM_EXTERNAL_ID_MAX_BYTES,
+  )
+  const displayName = Object.hasOwn(body, 'displayName')
+    ? typeof body.displayName === 'string' ? body.displayName : undefined
+    : Object.hasOwn(body, 'name')
+      ? isRecord(body.name) && typeof body.name.formatted === 'string'
+        ? body.name.formatted
+        : undefined
+      : existing?.displayName
+  const boundedDisplayName = displayName === undefined
+    ? undefined
+    : readScimBoundedText(
+      displayName,
+      'SCIM user displayName',
+      ENTERPRISE_SCIM_DISPLAY_NAME_MAX_BYTES,
+      false,
+    )
   return {
     workspaceId,
     userId: existing?.userId,
-    externalId,
+    externalId: boundedExternalId,
     identityProviderId,
-    userName,
-    displayName: typeof body.displayName === 'string'
-      ? body.displayName
-      : isRecord(body.name) && typeof body.name.formatted === 'string'
-        ? body.name.formatted
-        : existing?.displayName,
-    emails: emails.length > 0 ? emails : [userName],
+    userName: boundedUserName,
+    displayName: boundedDisplayName,
+    emails: emails.length > 0 ? emails : [boundedUserName],
     active: body.active === undefined ? existing?.active ?? true : body.active === true,
     linkedMemberKey: existing?.linkedMemberKey ??
-      (emails[0] ?? userName).trim().toLowerCase(),
+      (emails[0] ?? boundedUserName).trim().toLowerCase(),
     groupIds: existing?.groupIds ?? [],
     idempotencyKey: readScimIdempotencyKey(
       c,
-      `user:${externalId}:${JSON.stringify(body)}`,
+      `user:${boundedExternalId}:${JSON.stringify(body)}`,
     ),
   }
 }
@@ -14210,8 +14389,8 @@ function readEnterpriseScimGroupInput(
       'SCIM group was not found.',
     )
   }
-  const displayName = typeof body.displayName === 'string'
-    ? body.displayName
+  const displayName = Object.hasOwn(body, 'displayName')
+    ? typeof body.displayName === 'string' ? body.displayName : undefined
     : existing?.displayName
   if (!displayName) {
     throw new EnterpriseIdentityError(
@@ -14220,34 +14399,121 @@ function readEnterpriseScimGroupInput(
       'SCIM group displayName is required.',
     )
   }
-  const externalId = typeof body.externalId === 'string'
-    ? body.externalId
-    : existing?.externalId ?? displayName
-  const memberUserIds = Array.isArray(body.members)
-    ? body.members
-        .map((entry) => isRecord(entry) && typeof entry.value === 'string'
-          ? entry.value
-          : undefined)
-        .filter((value): value is string => Boolean(value))
+  const boundedDisplayName = readScimBoundedText(
+    displayName,
+    'SCIM group displayName',
+    ENTERPRISE_SCIM_DISPLAY_NAME_MAX_BYTES,
+  )
+  const externalId = Object.hasOwn(body, 'externalId')
+    ? typeof body.externalId === 'string' ? body.externalId : boundedDisplayName
+    : existing?.externalId ?? boundedDisplayName
+  const boundedExternalId = readScimBoundedText(
+    externalId,
+    'SCIM group externalId',
+    ENTERPRISE_SCIM_EXTERNAL_ID_MAX_BYTES,
+  )
+  if (
+    Array.isArray(body.members) &&
+    body.members.length > ENTERPRISE_SCIM_GROUP_MEMBER_LIMIT
+  ) {
+    throw new EnterpriseIdentityError(
+      413,
+      'EnterpriseScimGroupMemberLimitExceeded',
+      `A SCIM group can contain at most ${
+        ENTERPRISE_SCIM_GROUP_MEMBER_LIMIT
+      } members.`,
+    )
+  }
+  const hasMembers = Object.hasOwn(body, 'members')
+  if (hasMembers && !Array.isArray(body.members)) {
+    throw new EnterpriseIdentityError(
+      400,
+      'EnterpriseScimGroupMemberInvalid',
+      'SCIM group members must be an array.',
+    )
+  }
+  const memberUserIds = hasMembers
+    ? (body.members as unknown[]).map(readScimGroupMemberId)
     : existing?.memberUserIds
   return {
     workspaceId,
     groupId: existing?.groupId,
-    externalId,
+    externalId: boundedExternalId,
     identityProviderId,
-    displayName,
+    displayName: boundedDisplayName,
     active: body.active === undefined ? existing?.active ?? true : body.active === true,
     memberUserIds,
     idempotencyKey: readScimIdempotencyKey(
       c,
-      `group:${externalId}:${JSON.stringify(body)}`,
+      `group:${boundedExternalId}:${JSON.stringify(body)}`,
     ),
   }
 }
 
+function readScimBoundedText(
+  value: string,
+  label: string,
+  maximumBytes: number,
+  required = true,
+) {
+  const normalized = value.trim()
+  if (
+    (required && normalized.length === 0) ||
+    Buffer.byteLength(normalized, 'utf8') > maximumBytes
+  ) {
+    throw new EnterpriseIdentityError(
+      400,
+      'EnterpriseScimTextLimitExceeded',
+      `${label} must contain ${
+        required ? 'between 1 and ' : 'at most '
+      }${maximumBytes} UTF-8 bytes.`,
+    )
+  }
+  return normalized
+}
+
+function readScimGroupMemberId(entry: unknown) {
+  if (!isRecord(entry) || typeof entry.value !== 'string') {
+    throw new EnterpriseIdentityError(
+      400,
+      'EnterpriseScimGroupMemberInvalid',
+      'Every SCIM group member requires a string value.',
+    )
+  }
+  const value = entry.value.trim()
+  if (
+    value.length === 0 ||
+    Buffer.byteLength(value, 'utf8') > ENTERPRISE_SCIM_MEMBER_ID_MAX_BYTES
+  ) {
+    throw new EnterpriseIdentityError(
+      400,
+      'EnterpriseScimGroupMemberInvalid',
+      `SCIM member IDs must contain at most ${
+        ENTERPRISE_SCIM_MEMBER_ID_MAX_BYTES
+      } UTF-8 bytes.`,
+    )
+  }
+  return value
+}
+
+function readScimResourceId(value: string, resourceType: 'user' | 'group') {
+  return readScimBoundedText(
+    value,
+    `SCIM ${resourceType} ID`,
+    ENTERPRISE_SCIM_RESOURCE_ID_MAX_BYTES,
+  )
+}
+
 function readScimIdempotencyKey(c: Context, fallbackSeed: string) {
-  return c.req.header('Idempotency-Key')?.trim() ||
-    createHash('sha256').update(fallbackSeed).digest('hex')
+  const provided = c.req.header('Idempotency-Key')
+  if (provided !== undefined && provided.trim().length > 0) {
+    return readScimBoundedText(
+      provided,
+      'SCIM Idempotency-Key',
+      ENTERPRISE_SCIM_IDEMPOTENCY_KEY_MAX_BYTES,
+    )
+  }
+  return createHash('sha256').update(fallbackSeed).digest('hex')
 }
 
 function createEnterpriseScimMutationContext(
@@ -14272,24 +14538,85 @@ function createEnterpriseScimMutationContext(
   )
 }
 
-async function applyEnterpriseScimGroupMembers(
-  c: Context,
-  workspaceId: string,
-  group: EnterpriseScimGroup,
+function createEnterpriseScimGroupJobCheckpointContext(
+  reference: EnterpriseScimGroupJobReference,
 ) {
-  const snapshot = await enterpriseIdentity.getSnapshot(workspaceId)
-  for (const user of snapshot.scimUsers) {
-    if (user.identityProviderId !== group.identityProviderId) continue
-    await applyEnterpriseScimUser(c, user, [group])
-  }
-  await enterpriseIdentity.markScimGroupApplied(
-    workspaceId,
-    group.groupId,
-    group.version,
-    createEnterpriseScimMutationContext(c, workspaceId, group.identityProviderId, {
-      groupId: group.groupId,
-      desiredVersion: group.version,
-    }),
+  const operationId = `${reference.jobId}:${reference.revision}`
+  return createMutationAuditContext({
+    workspaceId: reference.workspaceId,
+    actor: {
+      id: `scim-group-job:${reference.jobId}`,
+      kind: 'service',
+      displayName: 'SCIM group reconciliation worker',
+    },
+    idempotencyKey: operationId,
+    request: {
+      method: 'DYNAMODB_STREAM',
+      path: '/internal/enterprise/scim/group-jobs',
+      body: reference,
+    },
+    source: {
+      kind: 'system',
+      requestId: operationId,
+      method: 'DYNAMODB_STREAM',
+      route: '/internal/enterprise/scim/group-jobs',
+    },
+  })
+}
+
+function createEnterpriseScimGroupJobUserContext(
+  input: EnterpriseScimGroupJobApplyInput,
+) {
+  const operationId = `${
+    input.reference.jobId
+  }:${input.reference.revision}:${input.snapshotRevision}:${
+    input.user.userId
+  }:${input.user.version}`
+  return createMutationAuditContext({
+    workspaceId: input.reference.workspaceId,
+    actor: {
+      id: `scim-directory:${input.group.identityProviderId}`,
+      kind: 'service',
+      displayName: `SCIM directory (${input.group.identityProviderId})`,
+    },
+    idempotencyKey: operationId,
+    occurredAt: input.jobUpdatedAt,
+    request: {
+      method: 'DYNAMODB_STREAM',
+      path: '/internal/enterprise/scim/group-jobs/users',
+      body: {
+        groupId: input.group.groupId,
+        groupVersion: input.group.version,
+        phase: input.phase,
+        snapshotRevision: input.snapshotRevision,
+        userId: input.user.userId,
+        userVersion: input.user.version,
+      },
+    },
+    source: {
+      kind: 'system',
+      requestId: operationId,
+      method: 'DYNAMODB_STREAM',
+      route: '/internal/enterprise/scim/group-jobs/users',
+    },
+  })
+}
+
+async function applyEnterpriseScimGroupJob(
+  reference: EnterpriseScimGroupJobReference,
+) {
+  return await enterpriseIdentity.processScimGroupJob(
+    reference,
+    async (input) => {
+      await applyEnterpriseScimUserState(
+        input.user,
+        createEnterpriseScimGroupJobUserContext(input),
+        [input.group],
+        input.snapshot,
+        false,
+      )
+    },
+    createEnterpriseScimGroupJobCheckpointContext(reference),
   )
 }
 
@@ -14306,7 +14633,6 @@ function toScimUserResource(user: EnterpriseScimUser) {
       primary: index === 0,
       type: 'work',
     })),
-    groups: user.groupIds.map((value) => ({ value })),
     meta: {
       resourceType: 'User',
       created: user.createdAt,
@@ -14333,34 +14659,54 @@ function toScimGroupResource(group: EnterpriseScimGroup) {
   }
 }
 
-function filterScimResources<T>(
-  resources: T[],
+function readScimEqualityFilter<
+  Field extends 'externalId' | 'userName' | 'displayName',
+>(
   filter: string | undefined,
-  readValue: (resource: T, field: 'externalId' | 'userName' | 'displayName') => string,
+  allowedFields: readonly Field[],
 ) {
-  if (!filter) return resources
-  const match = filter.match(
-    /^\s*(externalId|userName|displayName)\s+eq\s+"([^"]+)"\s*$/iu,
-  )
-  if (!match) {
+  if (!filter) return {}
+  if (Buffer.byteLength(filter, 'utf8') > SCIM_FILTER_MAX_BYTES) {
     throw new EnterpriseIdentityError(
       400,
       'EnterpriseScimFilterInvalid',
-      'Only externalId, userName, or displayName equality filters are supported.',
+      `SCIM filters cannot exceed ${SCIM_FILTER_MAX_BYTES} UTF-8 bytes.`,
     )
   }
-  const field = match[1] as 'externalId' | 'userName' | 'displayName'
-  const expected = match[2]
-  return resources.filter((resource) => readValue(resource, field) === expected)
+  const match = filter.match(
+    /^\s*(externalId|userName|displayName)\s+eq\s+"([^"]+)"\s*$/iu,
+  )
+  const canonicalField = match
+    ? allowedFields.find((field) =>
+      field.toLowerCase() === match[1]!.toLowerCase()
+    )
+    : undefined
+  if (!match || !canonicalField) {
+    throw new EnterpriseIdentityError(
+      400,
+      'EnterpriseScimFilterInvalid',
+      `Only ${allowedFields.join(', ')} equality filters are supported.`,
+    )
+  }
+  return {
+    filter: {
+      field: canonicalField,
+      value: match[2]!,
+    },
+  }
 }
 
-function paginateScimResources<T>(c: Context, resources: T[]) {
+function readScimPagination(c: Context, maximumCount = 200) {
   const startIndex = readScimPaginationInteger(c.req.query('startIndex'), 1, 'startIndex')
-  const requestedCount = readScimPaginationInteger(c.req.query('count'), 100, 'count', true)
-  const count = Math.min(requestedCount, 200)
+  const requestedCount = readScimPaginationInteger(
+    c.req.query('count'),
+    Math.min(100, maximumCount),
+    'count',
+    true,
+  )
   return {
     startIndex,
-    resources: resources.slice(startIndex - 1, startIndex - 1 + count),
+    count: Math.min(requestedCount, maximumCount),
   }
 }
 
@@ -14390,6 +14736,15 @@ function applyScimPatch(
   current: Record<string, unknown>,
 ) {
   if (!Array.isArray(body.Operations)) return { ...current, ...body }
+  if (body.Operations.length > SCIM_PATCH_OPERATION_LIMIT) {
+    throw new EnterpriseIdentityError(
+      413,
+      'EnterpriseScimPatchOperationLimitExceeded',
+      `A SCIM PATCH request can contain at most ${
+        SCIM_PATCH_OPERATION_LIMIT
+      } operations.`,
+    )
+  }
   const next = structuredClone(current)
   for (const operation of body.Operations) {
     if (!isRecord(operation) || typeof operation.op !== 'string') {
@@ -14409,6 +14764,7 @@ function applyScimPatch(
     }
     if (!operation.path && isRecord(operation.value) && op !== 'remove') {
       Object.assign(next, operation.value)
+      assertScimPatchArrayLimits(next)
       continue
     }
     if (typeof operation.path !== 'string') {
@@ -14429,10 +14785,14 @@ function applyScimPatch(
           'Filtered member paths only support remove operations.',
         )
       }
+      const filteredMemberId = readScimGroupMemberId({
+        value: filteredMembers[1],
+      })
       const members = Array.isArray(next.members) ? next.members : []
       next.members = members.filter((member) =>
-        !isRecord(member) || member.value !== filteredMembers[1]
+        !isRecord(member) || member.value !== filteredMemberId
       )
+      assertScimPatchArrayLimits(next)
       continue
     }
     if (operation.path.includes('[')) {
@@ -14443,26 +14803,75 @@ function applyScimPatch(
       )
     }
     const path = operation.path
-    if (!Object.hasOwn(next, path)) {
+    const canonicalPath = Object.keys(next).find((candidate) =>
+      candidate.toLowerCase() === path.toLowerCase()
+    )
+    if (!canonicalPath) {
       throw new EnterpriseIdentityError(
         400,
         'EnterpriseScimPatchInvalid',
         `Unsupported SCIM PATCH path: ${path}.`,
       )
     }
+    const currentValue = next[canonicalPath]
     if (op === 'remove') {
-      delete next[path]
-    } else if (
-      op === 'add' &&
-      Array.isArray(next[path]) &&
-      Array.isArray(operation.value)
-    ) {
-      next[path] = [...next[path], ...operation.value]
+      next[canonicalPath] = Array.isArray(currentValue) ? [] : null
+    } else if (Array.isArray(currentValue)) {
+      if (op === 'add') {
+        const appendedValues = Array.isArray(operation.value)
+          ? operation.value
+          : [operation.value]
+        if (appendedValues.some((value) => !isRecord(value))) {
+          throw new EnterpriseIdentityError(
+            400,
+            'EnterpriseScimPatchInvalid',
+            `SCIM PATCH ${canonicalPath} values must be complex objects.`,
+          )
+        }
+        next[canonicalPath] = [...currentValue, ...appendedValues]
+      } else {
+        if (!Array.isArray(operation.value)) {
+          throw new EnterpriseIdentityError(
+            400,
+            'EnterpriseScimPatchInvalid',
+            `SCIM PATCH ${canonicalPath} replacement must be an array.`,
+          )
+        }
+        next[canonicalPath] = operation.value
+      }
     } else {
-      next[path] = operation.value
+      next[canonicalPath] = operation.value
     }
+    assertScimPatchArrayLimits(next)
   }
   return next
+}
+
+function assertScimPatchArrayLimits(value: Record<string, unknown>) {
+  if (
+    Array.isArray(value.members) &&
+    value.members.length > ENTERPRISE_SCIM_GROUP_MEMBER_LIMIT
+  ) {
+    throw new EnterpriseIdentityError(
+      413,
+      'EnterpriseScimGroupMemberLimitExceeded',
+      `A SCIM group can contain at most ${
+        ENTERPRISE_SCIM_GROUP_MEMBER_LIMIT
+      } members.`,
+    )
+  }
+  if (
+    Array.isArray(value.emails) &&
+    value.emails.length > ENTERPRISE_SCIM_USER_EMAIL_LIMIT
+  ) {
+    throw new EnterpriseIdentityError(
+      413,
+      'EnterpriseScimUserEmailLimitExceeded',
+      `A SCIM user can contain at most ${
+        ENTERPRISE_SCIM_USER_EMAIL_LIMIT
+      } email addresses.`,
+    )
+  }
 }
 
 function setScimEtag(c: Context, version: number) {
@@ -14502,7 +14911,9 @@ function toScimErrorResponse(c: Context, error: unknown) {
       status === 404 ||
       status === 409 ||
       status === 412 ||
-      status === 429
+      status === 413 ||
+      status === 429 ||
+      status === 503
       ? status
       : 500,
   )
@@ -23691,6 +24102,10 @@ export function configureApiClientsForTest(clients: {
   /** Enterprise identity provider の metadata 接続検証を test double に差し替えます。 */
   enterpriseIdentityProviderConnectionTester?: EnterpriseIdentityProviderConnectionTester
 }) {
+  if (clients.cognito) {
+    enterpriseCognitoFederationBindingCache.clear()
+    enterpriseCognitoSsoAppClientBindingCache.clear()
+  }
   cognito = clients.cognito ?? cognito
   dashboardSummary = clients.dashboardSummary ?? dashboardSummary
   projectTasks = clients.projectTasks ?? projectTasks
@@ -23721,6 +24136,8 @@ export function configureApiClientsForTest(clients: {
  * Server test 後に外部 service client を実装 client に戻します。
  */
 export function resetApiClientsForTest() {
+  enterpriseCognitoFederationBindingCache.clear()
+  enterpriseCognitoSsoAppClientBindingCache.clear()
   cognito = createCognitoClient()
   dashboardSummary = new DynamoDbDashboardSummaryClient()
   projectTasks = new DynamoDbProjectTasksClient()
@@ -23750,9 +24167,17 @@ export function resetApiClientsForTest() {
 const lambdaHandler = handle(app)
 
 /**
- * Function URL 直下と `/api` prefix 付き event を同じ Hono route へ渡す Lambda handler です。
+ * DynamoDB job stream を先に分岐し、HTTP event を同じ Hono route へ渡す Lambda handler です。
  */
-export const handler = (event: LambdaEvent, lambdaContext?: LambdaContext) => {
+export const handler = (
+  event: LambdaEvent | EnterpriseScimGroupJobStreamEvent,
+  lambdaContext?: LambdaContext,
+) => {
+  if (isEnterpriseScimGroupJobStreamEvent(event)) {
+    return processEnterpriseScimGroupJobBatch(event, {
+      processJob: applyEnterpriseScimGroupJob,
+    })
+  }
   return lambdaHandler(normalizeLambdaApiEvent(event), lambdaContext)
 }
 

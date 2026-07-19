@@ -382,6 +382,67 @@ test('enterprise identity CONTROL stream runs bounded asynchronous maintenance',
   template.hasOutput('EnterpriseIdentityMaintenanceDlqUrl', {});
 });
 
+test('enterprise SCIM group jobs run asynchronously through the shared API handler', () => {
+  const template = synthesizedTemplate;
+  const resources = template.toJSON().Resources;
+  const tableLogicalId = template.toJSON().Outputs.EnterpriseIdentityTableName?.Value?.Ref;
+  const functionEntry = Object.entries(resources).find(([, resource]) =>
+    (resource as { Properties?: { Description?: string } }).Properties?.Description ===
+      'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.'
+  );
+
+  expect(functionEntry).toBeDefined();
+  const [functionLogicalId, apiFunction] = functionEntry!;
+  const eventSource = Object.values(resources).find((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::Lambda::EventSourceMapping' &&
+    JSON.stringify(resource).includes(functionLogicalId) &&
+    JSON.stringify(resource).includes('enterprise-scim-group-job')
+  ) as { Properties?: Record<string, unknown> } | undefined;
+
+  expect(eventSource?.Properties).toEqual(expect.objectContaining({
+    BatchSize: 1,
+    BisectBatchOnFunctionError: true,
+    FunctionResponseTypes: ['ReportBatchItemFailures'],
+    MaximumRetryAttempts: 10,
+    ParallelizationFactor: 1,
+    StartingPosition: 'TRIM_HORIZON',
+  }));
+  expect(JSON.stringify(eventSource?.Properties?.FilterCriteria))
+    .toContain('enterprise-scim-group-job');
+  expect(JSON.stringify(eventSource?.Properties?.FilterCriteria))
+    .toContain('SCIM_GROUP_JOB#');
+  expect(JSON.stringify(eventSource?.Properties?.FilterCriteria))
+    .toContain('INSERT');
+  expect(JSON.stringify(eventSource?.Properties?.FilterCriteria))
+    .toContain('MODIFY');
+  expect(JSON.stringify(eventSource?.Properties?.EventSourceArn))
+    .toContain(String(tableLogicalId));
+  expect(JSON.stringify(eventSource?.Properties?.DestinationConfig))
+    .toContain('EnterpriseScimGroupJobDlq');
+
+  const functionRoleLogicalId = (
+    (apiFunction as {
+      Properties?: { Role?: { 'Fn::GetAtt'?: string[] } }
+    }).Properties?.Role?.['Fn::GetAtt'] ?? []
+  )[0];
+  const rolePolicies = Object.values(resources).filter((resource) =>
+    ['AWS::IAM::ManagedPolicy', 'AWS::IAM::Policy'].includes(
+      (resource as { Type?: string }).Type ?? '',
+    ) &&
+    JSON.stringify(resource).includes(String(functionRoleLogicalId))
+  );
+  const serializedPolicies = JSON.stringify(rolePolicies);
+  expect(serializedPolicies).toContain('dynamodb:DescribeStream');
+  expect(serializedPolicies).toContain('dynamodb:GetRecords');
+  expect(serializedPolicies).toContain('dynamodb:GetShardIterator');
+  expect(serializedPolicies).toContain('dynamodb:ListStreams');
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects failed asynchronous enterprise SCIM group reconciliation jobs.',
+  });
+  template.hasOutput('EnterpriseScimGroupJobDlqUrl', {});
+});
+
 test('file proofing metadata uses a retained point-in-time recoverable table', () => {
   const template = synthesizedTemplate;
   const fileProofingTableEntry = Object.entries(template.findResources('AWS::DynamoDB::Table'))
@@ -424,6 +485,7 @@ test('shared server handler is bundled as a Lambda asset with production environ
     Description: 'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.',
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
+    Timeout: 60,
     Environment: {
       Variables: Match.objectLike({
         AUTOMATION_INBOUND_WEBHOOK_BASE_URL: Match.anyValue(),
@@ -1406,7 +1468,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 6);
+  template.resourceCountIs('AWS::SQS::Queue', 7);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -1765,7 +1827,13 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   }
   const apiPolicies = Object.values(resources)
     .filter((resource) => {
-      if ((resource as { Type?: string }).Type !== 'AWS::IAM::Policy') return false;
+      if (
+        !['AWS::IAM::ManagedPolicy', 'AWS::IAM::Policy'].includes(
+          (resource as { Type?: string }).Type ?? '',
+        )
+      ) {
+        return false;
+      }
       const roles = (resource as { Properties?: { Roles?: unknown[] } }).Properties?.Roles ?? [];
       return roles.some((role) =>
         (role as { Ref?: string }).Ref === apiRoleLogicalId
@@ -1824,8 +1892,9 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   const enterpriseIdentityStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes(String(enterpriseIdentityTableLogicalId))
   );
-  const cognitoPolicy = Object.values(template.toJSON().Resources).find((resource) =>
-    JSON.stringify(resource).includes('cognito-idp:AdminGetUser')
+  const cognitoStatement = statements.find((statement) =>
+    (Array.isArray(statement.Action) ? statement.Action : [statement.Action])
+      .includes('cognito-idp:AdminGetUser')
   );
 
   expect(transactStatement).toEqual(expect.objectContaining({
@@ -1991,17 +2060,22 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   ]) {
     expect(legacyTaskActions).not.toContain(writeAction);
   }
-  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:ListUsers');
-  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:DescribeIdentityProvider');
-  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:DescribeUserPoolClient');
-  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:AdminDeleteUserAttributes');
-  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:AdminDisableUser');
-  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:AdminEnableUser');
-  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:AdminUserGlobalSignOut');
-  expect(JSON.stringify(cognitoPolicy)).toContain('CognitoUserPoolId');
-  expect(serializedApiPolicies).not.toContain('"Resource":"*"');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:ListUsers');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:DescribeIdentityProvider');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:DescribeUserPoolClient');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:AdminDeleteUserAttributes');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:AdminDisableUser');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:AdminEnableUser');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:AdminUserGlobalSignOut');
+  expect(JSON.stringify(cognitoStatement)).toContain('CognitoUserPoolId');
+  const wildcardStatements = statements.filter((statement) => statement.Resource === '*');
+  expect(wildcardStatements).toEqual([{
+    Action: 'dynamodb:ListStreams',
+    Effect: 'Allow',
+    Resource: '*',
+  }]);
   expect(serializedApiPolicies).not.toContain('"Action":"s3:*"');
-  expect(JSON.stringify(cognitoPolicy)).not.toContain('"Resource":"*"');
+  expect(JSON.stringify(cognitoStatement)).not.toContain('"Resource":"*"');
 });
 
 test('external Cognito client and initial owner attributes are validated on create and update', () => {

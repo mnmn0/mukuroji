@@ -37,6 +37,7 @@ import {
   type EnterpriseIdentityReadClient,
   type EnterprisePrincipalContext,
 } from './enterprise-identity'
+import { createEnterpriseCognitoInspectionCache } from './enterprise-cognito-inspection-cache'
 import { createEnterpriseSsoAuthenticationMethod } from './enterprise-sso'
 
 /**
@@ -188,6 +189,25 @@ export type RealtimeCognitoGroupPageReader = (
 export type RealtimeCognitoProviderBindingReader = (
   providerName: string,
 ) => Promise<EnterpriseCognitoFederationBinding>
+
+/**
+ * Realtime authorization 用 Cognito provider reader に短期 raw-binding cache を追加します。
+ *
+ * @remarks
+ * Cache hit 後も caller が current enterprise provider に対する binding validation を実行します。
+ */
+export function createCachedRealtimeCognitoProviderBindingReader(
+  readBinding: RealtimeCognitoProviderBindingReader,
+  now: () => number = Date.now,
+): RealtimeCognitoProviderBindingReader {
+  const cache = createEnterpriseCognitoInspectionCache<EnterpriseCognitoFederationBinding>({
+    now,
+  })
+  return (providerName) => cache.read(
+    providerName,
+    () => readBinding(providerName),
+  )
+}
 
 /**
  * Enterprise evaluator が認識する Workspace member role です。
@@ -1282,7 +1302,7 @@ async function readCurrentRealtimeCognitoGroups(username: string) {
   return [...new Set(groups)]
 }
 
-async function readRealtimeCognitoProviderBinding(providerName: string) {
+async function readUncachedRealtimeCognitoProviderBinding(providerName: string) {
   const response = await cognitoClient.send(new DescribeIdentityProviderCommand({
     UserPoolId: requireEnv('COGNITO_USER_POOL_ID'),
     ProviderName: providerName,
@@ -1300,6 +1320,11 @@ async function readRealtimeCognitoProviderBinding(providerName: string) {
     ),
   }
 }
+
+const readRealtimeCognitoProviderBinding =
+  createCachedRealtimeCognitoProviderBindingReader(
+    readUncachedRealtimeCognitoProviderBinding,
+  )
 
 async function readRealtimeDirectory(workspaceId: string) {
   const items: RealtimeAuthorizationDirectoryItem[] = []

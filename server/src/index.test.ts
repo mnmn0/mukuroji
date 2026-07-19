@@ -22,6 +22,7 @@ import {
   createAuditEvent,
   createMutationAuditContext,
   type AuditEventV1,
+  type MutationAuditContext,
 } from './audit'
 import { CollaborationError, type CollaborationClient } from './collaboration'
 import type { NotificationClient, NotificationItem } from './notifications'
@@ -77,6 +78,7 @@ import {
 import { InMemoryPlanningClient } from './planning'
 import type { RequestIntakeClient } from './request-intake'
 import {
+  EnterpriseIdentityError,
   InMemoryEnterpriseIdentityClient,
   resolveEnterpriseDirectoryPrincipal,
 } from './enterprise-identity'
@@ -3066,7 +3068,7 @@ test('scopes SCIM collection reads to the credential identity provider', async (
   await withTestEnvironment({
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
   }, async () => {
-    configureFakeProjectClients(true)
+    const calls = configureFakeProjectClients(true)
     const workspaceId = 'workspace-scim-provider-scope'
     const identity = new InMemoryEnterpriseIdentityClient()
     const now = new Date().toISOString()
@@ -3118,6 +3120,17 @@ test('scopes SCIM collection reads to the credential identity provider', async (
       active: true,
       idempotencyKey: 'create-shared-user',
     })
+    for (let index = 0; index < 21; index += 1) {
+      await identity.upsertScimGroup({
+        workspaceId,
+        identityProviderId: 'idp-a',
+        externalId: `paged-group-${index}`,
+        displayName: `Paged group ${index}`,
+        active: true,
+        memberUserIds: [],
+        idempotencyKey: `paged-group-${index}`,
+      })
+    }
     configureApiClientsForTest({ enterpriseIdentity: identity })
 
     const responseA = await app.request(
@@ -3128,14 +3141,69 @@ test('scopes SCIM collection reads to the credential identity provider', async (
       `/api/scim/v2/${workspaceId}/Users`,
       { headers: { Authorization: `Bearer ${credentialB.token}` } },
     )
+    const caseFoldedUserName = await app.request(
+      `/api/scim/v2/${workspaceId}/Users?filter=${
+        encodeURIComponent('UsErNaMe eq "A@EXAMPLE.COM"')
+      }`,
+      { headers: { Authorization: `Bearer ${credentialA.token}` } },
+    )
+    const boundedGroups = await app.request(
+      `/api/scim/v2/${workspaceId}/Groups?count=200`,
+      { headers: { Authorization: `Bearer ${credentialA.token}` } },
+    )
+    const serviceProviderConfig = await app.request(
+      `/api/scim/v2/${workspaceId}/ServiceProviderConfig`,
+      { headers: { Authorization: `Bearer ${credentialA.token}` } },
+    )
 
     expect(responseA.status).toBe(200)
     expect(responseB.status).toBe(200)
-    expect(await responseA.json()).toMatchObject({
+    expect(caseFoldedUserName.status).toBe(200)
+    expect(await caseFoldedUserName.json()).toMatchObject({
+      totalResults: 1,
+      Resources: [{ id: userA.userId }],
+    })
+    expect(boundedGroups.status).toBe(200)
+    expect(await boundedGroups.json()).toMatchObject({
+      totalResults: 21,
+      itemsPerPage: 20,
+    })
+    expect(serviceProviderConfig.status).toBe(200)
+    expect(await serviceProviderConfig.json()).toMatchObject({
+      filter: { supported: true, maxResults: 200 },
+    })
+    const responseABody = await responseA.json()
+    expect(responseABody).toMatchObject({
       totalResults: 1,
       Resources: [{ id: userA.userId, externalId: 'shared-user' }],
     })
+    expect(responseABody.Resources[0]).not.toHaveProperty('groups')
     expect((await responseB.json()).Resources[0].id).not.toBe(userA.userId)
+    expect(calls.cognitoIdentityProviderDescriptions).toEqual(['EnterpriseOidc'])
+
+    const unavailableIdentity = new Proxy(identity, {
+      get(target, property) {
+        if (property === 'listScimUsers') {
+          return async () => {
+            throw new EnterpriseIdentityError(
+              503,
+              'EnterpriseScimProjectionUnavailable',
+              'SCIM projection is temporarily unavailable.',
+              true,
+            )
+          }
+        }
+        const value = Reflect.get(target, property)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    configureApiClientsForTest({ enterpriseIdentity: unavailableIdentity })
+    const unavailable = await app.request(
+      `/api/scim/v2/${workspaceId}/Users`,
+      { headers: { Authorization: `Bearer ${credentialA.token}` } },
+    )
+    expect(unavailable.status).toBe(503)
+    expect(await unavailable.json()).toMatchObject({ status: '503' })
 
     configureFakeProjectClients(true, {
       cognitoProviderDetails: {
@@ -3149,6 +3217,174 @@ test('scopes SCIM collection reads to the credential identity provider', async (
       { headers: { Authorization: `Bearer ${credentialA.token}` } },
     )
     expect(drifted.status).toBe(409)
+  })
+})
+
+test('rejects oversized or structurally unbounded SCIM inputs before mutation', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    const workspaceId = 'workspace-scim-input-limits'
+    const scenario = await configureEnterpriseScimGuestRoleScenario(workspaceId)
+    const scimBaseUrl = `/api/scim/v2/${encodeURIComponent(workspaceId)}`
+    const headers = {
+      Authorization: `Bearer ${scenario.scimToken}`,
+      'Content-Type': 'application/scim+json',
+    }
+    const oversizedHeader = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'Content-Length': String(512 * 1024 + 1),
+      },
+      body: '{}',
+    })
+    const oversizedBody = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ padding: 'x'.repeat(512 * 1024) }),
+    })
+    const malformedBody = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers,
+      body: '{',
+    })
+    const nonObjectBody = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers,
+      body: '[]',
+    })
+    const excessiveEmails = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        externalId: 'too-many-emails',
+        userName: 'too-many-emails@example.com',
+        emails: Array.from(
+          { length: 11 },
+          (_, index) => ({ value: `email-${index}@example.com` }),
+        ),
+        active: true,
+      }),
+    })
+    const excessiveMembers = await app.request(`${scimBaseUrl}/Groups`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        externalId: 'too-many-members',
+        displayName: 'Too many members',
+        members: Array.from(
+          { length: 1_001 },
+          (_, index) => ({ value: `member-${index}` }),
+        ),
+        active: true,
+      }),
+    })
+    const oversizedMemberId = await app.request(`${scimBaseUrl}/Groups`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        externalId: 'oversized-member-id',
+        displayName: 'Oversized member ID',
+        members: [{ value: 'm'.repeat(129) }],
+        active: true,
+      }),
+    })
+    const oversizedUserName = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        externalId: 'oversized-user-name',
+        userName: 'u'.repeat(321),
+        emails: [{ value: 'bounded@example.com' }],
+        active: true,
+      }),
+    })
+    const oversizedGroupDisplayName = await app.request(`${scimBaseUrl}/Groups`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        externalId: 'oversized-group-display-name',
+        displayName: 'g'.repeat(257),
+        members: [],
+        active: true,
+      }),
+    })
+    const oversizedResourceId = await app.request(
+      `${scimBaseUrl}/Users/${'r'.repeat(129)}`,
+      { headers },
+    )
+    const oversizedIdempotencyKey = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'Idempotency-Key': 'k'.repeat(257),
+      },
+      body: JSON.stringify({
+        externalId: 'oversized-idempotency-key',
+        userName: 'bounded@example.com',
+        emails: [{ value: 'bounded@example.com' }],
+        active: true,
+      }),
+    })
+    const groupResponse = await app.request(`${scimBaseUrl}/Groups`, {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'Idempotency-Key': 'bounded-patch-group',
+      },
+      body: JSON.stringify({
+        externalId: 'bounded-patch-group',
+        displayName: 'Bounded patch group',
+        members: [],
+        active: true,
+      }),
+    })
+    const group = await groupResponse.json()
+    const excessivePatchOperations = await app.request(
+      `${scimBaseUrl}/Groups/${encodeURIComponent(group.id)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...headers,
+          'If-Match': 'W/"1"',
+        },
+        body: JSON.stringify({
+          Operations: Array.from(
+            { length: 101 },
+            () => ({
+              op: 'replace',
+              path: 'displayName',
+              value: 'Repeated update',
+            }),
+          ),
+        }),
+      },
+    )
+    const oversizedFilter = await app.request(
+      `${scimBaseUrl}/Users?filter=${
+        encodeURIComponent(`externalId eq "${'f'.repeat(513)}"`)
+      }`,
+      { headers },
+    )
+
+    expect(oversizedHeader.status).toBe(413)
+    expect(await oversizedHeader.json()).toMatchObject({ status: '413' })
+    expect(oversizedBody.status).toBe(413)
+    expect(await oversizedBody.json()).toMatchObject({ status: '413' })
+    expect(malformedBody.status).toBe(400)
+    expect(nonObjectBody.status).toBe(400)
+    expect(excessiveEmails.status).toBe(413)
+    expect(excessiveMembers.status).toBe(413)
+    expect(oversizedMemberId.status).toBe(400)
+    expect(oversizedUserName.status).toBe(400)
+    expect(oversizedGroupDisplayName.status).toBe(400)
+    expect(oversizedResourceId.status).toBe(400)
+    expect(oversizedIdempotencyKey.status).toBe(400)
+    expect(groupResponse.status).toBe(202)
+    expect(groupResponse.headers.get('Retry-After')).toBe('1')
+    expect(excessivePatchOperations.status).toBe(413)
+    expect(oversizedFilter.status).toBe(400)
   })
 })
 
@@ -3316,12 +3552,68 @@ test('reconciles workspace guest roles for SCIM membership and mapping changes',
       body: JSON.stringify({
         externalId: 'managed-user',
         userName: 'managed@example.com',
+        displayName: 'Managed user',
         emails: [{ value: 'managed@example.com', primary: true }],
         active: true,
       }),
     })
     expect(userResponse.status).toBe(201)
     const user = await userResponse.json()
+    const removeDisplayNameResponse = await app.request(
+      `${scimBaseUrl}/Users/${user.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'remove-managed-user-display-name',
+          'If-Match': 'W/"1"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'remove',
+            path: 'DisplayName',
+          }],
+        }),
+      },
+    )
+    expect(removeDisplayNameResponse.status).toBe(200)
+    expect(await removeDisplayNameResponse.json()).not.toHaveProperty('displayName')
+    const removeRequiredUserNameResponse = await app.request(
+      `${scimBaseUrl}/Users/${user.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'remove-managed-user-name',
+          'If-Match': 'W/"2"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'remove',
+            path: 'UserName',
+          }],
+        }),
+      },
+    )
+    expect(removeRequiredUserNameResponse.status).toBe(400)
+    const removeRequiredEmailsResponse = await app.request(
+      `${scimBaseUrl}/Users/${user.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'remove-managed-user-emails',
+          'If-Match': 'W/"2"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'remove',
+            path: 'Emails',
+          }],
+        }),
+      },
+    )
+    expect(removeRequiredEmailsResponse.status).toBe(400)
     const groupResponse = await app.request(`${scimBaseUrl}/Groups`, {
       method: 'POST',
       headers: { ...scimHeaders, 'Idempotency-Key': 'guest-role-group' },
@@ -3332,9 +3624,15 @@ test('reconciles workspace guest roles for SCIM membership and mapping changes',
         active: true,
       }),
     })
-    expect(groupResponse.status).toBe(201)
+    expect(groupResponse.status).toBe(202)
+    expect(groupResponse.headers.get('Retry-After')).toBe('1')
     const group = await groupResponse.json()
     expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
 
     const mappingResponse = await app.request(
       '/api/enterprise/security/group-mappings',
@@ -3369,12 +3667,19 @@ test('reconciles workspace guest roles for SCIM membership and mapping changes',
         body: JSON.stringify({
           Operations: [{
             op: 'remove',
-            path: `members[value eq "${user.id}"]`,
+            path: 'MeMbErS',
           }],
         }),
       },
     )
-    expect(removeMemberResponse.status).toBe(200)
+    expect(removeMemberResponse.status).toBe(202)
+    expect(removeMemberResponse.headers.get('Retry-After')).toBe('1')
+    expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
     expect(scenario.members.get('managed@example.com')?.role).toBe('member')
 
     const addMemberResponse = await app.request(
@@ -3389,14 +3694,67 @@ test('reconciles workspace guest roles for SCIM membership and mapping changes',
         body: JSON.stringify({
           Operations: [{
             op: 'add',
-            path: 'members',
-            value: [{ value: user.id }],
+            path: 'MEMBERS',
+            value: { value: user.id },
           }],
         }),
       },
     )
-    expect(addMemberResponse.status).toBe(200)
+    expect(addMemberResponse.status).toBe(202)
+    expect(addMemberResponse.headers.get('Retry-After')).toBe('1')
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
     expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+
+    const renameGroupResponse = await app.request(
+      `${scimBaseUrl}/Groups/${group.id}`,
+      {
+        method: 'PUT',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'rename-workspace-guests',
+          'If-Match': 'W/"3"',
+        },
+        body: JSON.stringify({
+          displayName: 'Renamed workspace guests',
+          members: [{ value: user.id }],
+          active: true,
+        }),
+      },
+    )
+    expect(renameGroupResponse.status).toBe(202)
+    expect(renameGroupResponse.headers.get('Retry-After')).toBe('1')
+    expect(await renameGroupResponse.json()).toMatchObject({
+      displayName: 'Renamed workspace guests',
+      members: [{ value: user.id }],
+    })
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
+    const removeRequiredGroupNameResponse = await app.request(
+      `${scimBaseUrl}/Groups/${group.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'remove-workspace-guest-name',
+          'If-Match': 'W/"4"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'remove',
+            path: 'DisplayName',
+          }],
+        }),
+      },
+    )
+    expect(removeRequiredGroupNameResponse.status).toBe(400)
 
     const memberMappingResponse = await app.request(
       `/api/enterprise/security/group-mappings/${mapping.id}`,
@@ -3449,6 +3807,403 @@ test('reconciles workspace guest roles for SCIM membership and mapping changes',
     )
     expect(deleteMappingResponse.status).toBe(204)
     expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+
+    const deleteGroupResponse = await app.request(
+      `${scimBaseUrl}/Groups/${group.id}`,
+      {
+        method: 'DELETE',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'delete-workspace-guests',
+          'If-Match': 'W/"4"',
+        },
+      },
+    )
+    expect(deleteGroupResponse.status).toBe(202)
+    expect(deleteGroupResponse.headers.get('Retry-After')).toBe('1')
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
+    expect(
+      (await scenario.identity.getSnapshot(workspaceId)).scimGroups.find(
+        (candidate) => candidate.groupId === group.id,
+      ),
+    ).toMatchObject({
+      active: false,
+      appliedVersion: 5,
+      version: 5,
+    })
+  })
+})
+
+test('settles interleaved multi-page SCIM group jobs to the final guest role', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    const workspaceId = 'user#demo@example.com'
+    const scenario = await configureEnterpriseScimGuestRoleScenario(workspaceId)
+    const scimBaseUrl = `/api/scim/v2/${encodeURIComponent(workspaceId)}`
+    const scimHeaders = {
+      Authorization: `Bearer ${scenario.scimToken}`,
+      'Content-Type': 'application/scim+json',
+    }
+    const users = []
+    for (let index = 0; index < 6; index += 1) {
+      const email = `interleaved-user-${index}@example.com`
+      const response = await app.request(`${scimBaseUrl}/Users`, {
+        method: 'POST',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': `interleaved-user-${index}`,
+        },
+        body: JSON.stringify({
+          externalId: `interleaved-user-${index}`,
+          userName: email,
+          emails: [{ value: email, primary: true }],
+          active: true,
+        }),
+      })
+      expect(response.status).toBe(201)
+      users.push(await response.json())
+    }
+    const createGroup = async (suffix: string) => {
+      const response = await app.request(`${scimBaseUrl}/Groups`, {
+        method: 'POST',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': `interleaved-group-${suffix}`,
+        },
+        body: JSON.stringify({
+          externalId: `interleaved-group-${suffix}`,
+          displayName: `Interleaved group ${suffix}`,
+          members: users.map((user) => ({ value: user.id })),
+          active: true,
+        }),
+      })
+      expect(response.status).toBe(202)
+      expect(response.headers.get('Retry-After')).toBe('1')
+      return await response.json()
+    }
+    const firstGroup = await createGroup('a')
+    const secondGroup = await createGroup('b')
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      firstGroup.id,
+    )
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      secondGroup.id,
+    )
+
+    for (const [index, group] of [firstGroup, secondGroup].entries()) {
+      const mappingResponse = await app.request(
+        '/api/enterprise/security/group-mappings',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer test-token',
+            'Content-Type': 'application/json',
+            'Idempotency-Key': `interleaved-mapping-${index}`,
+          },
+          body: JSON.stringify({
+            identityProviderId: 'idp-guest-role',
+            directoryGroupId: group.id,
+            scopeType: 'workspace',
+            roleId: 'workspace:guest',
+          }),
+        },
+      )
+      expect(mappingResponse.status).toBe(201)
+    }
+    expect(users.every((user) =>
+      scenario.members.get(user.userName)?.role === 'guest'
+    )).toBe(true)
+
+    const updateFirstGroup = await app.request(
+      `${scimBaseUrl}/Groups/${firstGroup.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'interleaved-update-a',
+          'If-Match': 'W/"1"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'replace',
+            path: 'displayName',
+            value: 'Updated interleaved group A',
+          }],
+        }),
+      },
+    )
+    expect(updateFirstGroup.status).toBe(202)
+    expect(updateFirstGroup.headers.get('Retry-After')).toBe('1')
+    const removeSecondGroupMembers = await app.request(
+      `${scimBaseUrl}/Groups/${secondGroup.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'interleaved-remove-b',
+          'If-Match': 'W/"1"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'remove',
+            path: 'members',
+          }],
+        }),
+      },
+    )
+    expect(removeSecondGroupMembers.status).toBe(202)
+    expect(removeSecondGroupMembers.headers.get('Retry-After')).toBe('1')
+    expect(await processEnterpriseScimGroupJobPage(
+      scenario.identity,
+      workspaceId,
+      firstGroup.id,
+      'INSERT',
+    )).toBe(true)
+    expect(await processEnterpriseScimGroupJobPage(
+      scenario.identity,
+      workspaceId,
+      secondGroup.id,
+      'INSERT',
+    )).toBe(true)
+
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      firstGroup.id,
+    )
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      secondGroup.id,
+    )
+    expect(users.every((user) =>
+      scenario.members.get(user.userName)?.role === 'guest'
+    )).toBe(true)
+  })
+})
+
+test('settles a user mutation that races after an early SCIM group page', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    const workspaceId = 'user#demo@example.com'
+    const scenario = await configureEnterpriseScimGuestRoleScenario(workspaceId)
+    const scimBaseUrl = `/api/scim/v2/${encodeURIComponent(workspaceId)}`
+    const scimHeaders = {
+      Authorization: `Bearer ${scenario.scimToken}`,
+      'Content-Type': 'application/scim+json',
+    }
+    const users = []
+    for (let index = 0; index < 6; index += 1) {
+      const email = `settle-race-user-${index}@example.com`
+      const response = await app.request(`${scimBaseUrl}/Users`, {
+        method: 'POST',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': `settle-race-user-${index}`,
+        },
+        body: JSON.stringify({
+          externalId: `settle-race-user-${index}`,
+          userName: email,
+          emails: [{ value: email, primary: true }],
+          active: true,
+        }),
+      })
+      expect(response.status).toBe(201)
+      users.push(await response.json())
+    }
+    const groupResponse = await app.request(`${scimBaseUrl}/Groups`, {
+      method: 'POST',
+      headers: {
+        ...scimHeaders,
+        'Idempotency-Key': 'settle-race-group',
+      },
+      body: JSON.stringify({
+        externalId: 'settle-race-group',
+        displayName: 'Settle race group',
+        members: users.map((user) => ({ value: user.id })),
+        active: true,
+      }),
+    })
+    expect(groupResponse.status).toBe(202)
+    const group = await groupResponse.json()
+    const mappingResponse = await app.request(
+      '/api/enterprise/security/group-mappings',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'settle-race-mapping',
+        },
+        body: JSON.stringify({
+          identityProviderId: 'idp-guest-role',
+          directoryGroupId: group.id,
+          scopeType: 'workspace',
+          roleId: 'workspace:guest',
+        }),
+      },
+    )
+    expect(mappingResponse.status).toBe(201)
+    expect(users.every((user) =>
+      scenario.members.get(user.userName)?.role === 'member'
+    )).toBe(true)
+
+    expect(await processEnterpriseScimGroupJobPage(
+      scenario.identity,
+      workspaceId,
+      group.id,
+      'MODIFY',
+    )).toBe(true)
+    const earlyPageUser = users.find((user) =>
+      scenario.members.get(user.userName)?.role === 'guest'
+    )
+    if (!earlyPageUser) {
+      throw new Error('Expected a user reconciled by the early group page.')
+    }
+    const userPatchResponse = await app.request(
+      `${scimBaseUrl}/Users/${earlyPageUser.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'settle-race-user-patch',
+          'If-Match': 'W/"1"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'replace',
+            path: 'displayName',
+            value: 'Updated during group reconciliation',
+          }],
+        }),
+      },
+    )
+    expect(userPatchResponse.status).toBe(200)
+    expect(scenario.members.get(earlyPageUser.userName)?.role).toBe('member')
+
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
+    expect(scenario.members.get(earlyPageUser.userName)?.role).toBe('guest')
+  })
+})
+
+test('changes group job audit identity when a callback loses its state checkpoint race', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    const workspaceId = 'user#demo@example.com'
+    const scenario = await configureEnterpriseScimGuestRoleScenario(workspaceId)
+    const scimBaseUrl = `/api/scim/v2/${encodeURIComponent(workspaceId)}`
+    const scimHeaders = {
+      Authorization: `Bearer ${scenario.scimToken}`,
+      'Content-Type': 'application/scim+json',
+    }
+    const userResponse = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers: {
+        ...scimHeaders,
+        'Idempotency-Key': 'checkpoint-race-user',
+      },
+      body: JSON.stringify({
+        externalId: 'checkpoint-race-user',
+        userName: 'managed@example.com',
+        emails: [{ value: 'managed@example.com', primary: true }],
+        active: true,
+      }),
+    })
+    expect(userResponse.status).toBe(201)
+    const user = await userResponse.json()
+    const groupResponse = await app.request(`${scimBaseUrl}/Groups`, {
+      method: 'POST',
+      headers: {
+        ...scimHeaders,
+        'Idempotency-Key': 'checkpoint-race-group',
+      },
+      body: JSON.stringify({
+        externalId: 'checkpoint-race-group',
+        displayName: 'Checkpoint race group',
+        members: [{ value: user.id }],
+        active: true,
+      }),
+    })
+    expect(groupResponse.status).toBe(202)
+    const group = await groupResponse.json()
+    const reference = await scenario.identity.getScimGroupJobReference(
+      workspaceId,
+      group.id,
+    )
+    if (!reference) throw new Error('Expected a pending group job.')
+    const desiredUser = (await scenario.identity.getSnapshot(workspaceId))
+      .scimUsers.find((candidate) => candidate.userId === user.id)
+    if (!desiredUser) throw new Error('Expected the desired SCIM user.')
+    scenario.reconcileAuditContexts.length = 0
+    scenario.setAfterNextDirectoryReconcile(async () => {
+      await scenario.identity.upsertScimUser({
+        workspaceId,
+        userId: desiredUser.userId,
+        identityProviderId: desiredUser.identityProviderId,
+        externalId: desiredUser.externalId,
+        userName: desiredUser.userName,
+        displayName: 'Changed during callback checkpoint',
+        emails: desiredUser.emails,
+        active: desiredUser.active,
+        linkedMemberKey: desiredUser.linkedMemberKey,
+        idempotencyKey: 'checkpoint-race-user-update',
+      })
+    })
+    const streamEvent = {
+      Records: [{
+        eventSource: 'aws:dynamodb',
+        eventName: 'INSERT',
+        dynamodb: {
+          SequenceNumber: `sequence-${reference.revision}`,
+          NewImage: {
+            scopeKey: { S: `WORKSPACE#${workspaceId}` },
+            recordKey: { S: `SCIM_GROUP_JOB#${reference.jobId}` },
+            entryType: { S: 'enterprise-scim-group-job' },
+            workspaceId: { S: workspaceId },
+            jobId: { S: reference.jobId },
+            revision: { N: String(reference.revision) },
+          },
+        },
+      }],
+    }
+
+    expect(await handler(streamEvent)).toEqual({
+      batchItemFailures: [{
+        itemIdentifier: `sequence-${reference.revision}`,
+      }],
+    })
+    expect(await scenario.identity.getScimGroupJobReference(
+      workspaceId,
+      group.id,
+    )).toEqual(reference)
+    expect(scenario.reconcileAuditContexts).toHaveLength(1)
+
+    expect(await handler(streamEvent)).toEqual({ batchItemFailures: [] })
+    expect(scenario.reconcileAuditContexts).toHaveLength(2)
+    expect(scenario.reconcileAuditContexts[1]?.idempotencyKeyHash)
+      .not.toBe(scenario.reconcileAuditContexts[0]?.idempotencyKeyHash)
+    expect(scenario.reconcileAuditContexts[1]?.requestFingerprint)
+      .not.toBe(scenario.reconcileAuditContexts[0]?.requestFingerprint)
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
   })
 })
 
@@ -5439,7 +6194,7 @@ test('requires server-attested SSO for a user in an enforced domain', async () =
     COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
     COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
   }, async () => {
-    configureFakeProjectClients(true)
+    const calls = configureFakeProjectClients(true)
     const workspaceId = 'user#demo@example.com'
     const providerId = 'idp-enforced'
     const providerRevision = 1
@@ -5521,6 +6276,12 @@ test('requires server-attested SSO for a user in an enforced domain', async () =
       identityProviderId: providerId,
     })
 
+    const discoveries = await Promise.all([
+      app.request('/api/auth/sso/discovery?email=demo%40example.com'),
+      app.request('/api/auth/sso/discovery?email=demo%40example.com'),
+    ])
+    expect(discoveries.map((response) => response.status)).toEqual([200, 200])
+
     const forgedClaim = await requestCurrentUser(mainAccessToken)
     expect(forgedClaim.status).toBe(403)
     expect(await forgedClaim.json()).toEqual({
@@ -5543,6 +6304,8 @@ test('requires server-attested SSO for a user in an enforced domain', async () =
     expect(await staleProviderRevision.json()).toMatchObject({
       code: 'EnterpriseSsoSessionRequired',
     })
+    expect(calls.cognitoIdentityProviderDescriptions).toEqual(['EnterpriseOidc'])
+    expect(calls.cognitoSsoAppClientDescriptions).toEqual(['mukuroji-sso-client'])
   })
 })
 
@@ -5557,7 +6320,7 @@ test('binds SSO exchange assurance to the signed provider revision', async () =>
     COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
     ENTERPRISE_SSO_STATE_SECRET: '0123456789abcdef0123456789abcdef',
   }, async () => {
-    configureFakeProjectClients(true)
+    const calls = configureFakeProjectClients(true)
     const workspaceId = 'user#demo@example.com'
     const providerId = 'idp-enforced'
     const identity = new InMemoryEnterpriseIdentityClient()
@@ -5711,6 +6474,8 @@ test('binds SSO exchange assurance to the signed provider revision', async () =>
         'upstream-mfa',
         expectedSsoMethod,
       ]])
+      expect(calls.cognitoIdentityProviderDescriptions).toHaveLength(3)
+      expect(calls.cognitoSsoAppClientDescriptions).toHaveLength(3)
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -14475,6 +15240,8 @@ function configureFakeProjectClients(
   let workspaceReconcileFailures = options.workspaceReconcileFailures ?? 0
   const calls = {
     accessChecks: [] as Array<{ directoryId: string; projectId: string }>,
+    cognitoIdentityProviderDescriptions: [] as string[],
+    cognitoSsoAppClientDescriptions: [] as string[],
     directoryReads: [] as Array<{
       directoryId: string
       locale: string
@@ -14700,6 +15467,7 @@ function configureFakeProjectClients(
         return options.systemAdminMemberKeys?.includes(userId.toLowerCase()) ?? false
       },
       async describeEnterpriseIdentityProvider(providerName) {
+        calls.cognitoIdentityProviderDescriptions.push(providerName)
         return {
           providerName,
           providerType: 'OIDC',
@@ -14710,6 +15478,7 @@ function configureFakeProjectClients(
         }
       },
       async describeEnterpriseSsoAppClient(clientId) {
+        calls.cognitoSsoAppClientDescriptions.push(clientId)
         return {
           clientId,
           hasClientSecret: options.cognitoSsoClientDetails?.hasClientSecret ?? false,
@@ -15583,6 +16352,56 @@ function createLambdaHttpEvent(rawPath: string, accessToken: string) {
   } satisfies Extract<LambdaEvent, { rawPath: string }>
 }
 
+async function drainEnterpriseScimGroupJob(
+  identity: InMemoryEnterpriseIdentityClient,
+  workspaceId: string,
+  groupId: string,
+) {
+  let eventName: 'INSERT' | 'MODIFY' = 'INSERT'
+  for (let page = 0; page < 1_000; page += 1) {
+    if (!await processEnterpriseScimGroupJobPage(
+      identity,
+      workspaceId,
+      groupId,
+      eventName,
+    )) return
+    eventName = 'MODIFY'
+  }
+  throw new Error('SCIM group reconciliation exceeded the test page limit.')
+}
+
+async function processEnterpriseScimGroupJobPage(
+  identity: InMemoryEnterpriseIdentityClient,
+  workspaceId: string,
+  groupId: string,
+  eventName: 'INSERT' | 'MODIFY' = 'MODIFY',
+) {
+  const reference = await identity.getScimGroupJobReference(
+    workspaceId,
+    groupId,
+  )
+  if (!reference) return false
+  const result = await handler({
+    Records: [{
+      eventSource: 'aws:dynamodb',
+      eventName,
+      dynamodb: {
+        SequenceNumber: `sequence-${reference.revision}`,
+        NewImage: {
+          scopeKey: { S: `WORKSPACE#${workspaceId}` },
+          recordKey: { S: `SCIM_GROUP_JOB#${reference.jobId}` },
+          entryType: { S: 'enterprise-scim-group-job' },
+          workspaceId: { S: workspaceId },
+          jobId: { S: reference.jobId },
+          revision: { N: String(reference.revision) },
+        },
+      },
+    }],
+  })
+  expect(result).toEqual({ batchItemFailures: [] })
+  return true
+}
+
 async function withTestEnvironment(
   values: Record<string, string | undefined>,
   callback: () => Promise<void>,
@@ -15664,7 +16483,9 @@ async function configureEnterpriseScimGuestRoleScenario(workspaceId: string) {
     }],
   ])
   const reconciledRoles: WorkspaceRole[] = []
+  const reconcileAuditContexts: MutationAuditContext[] = []
   let reconcileFailures = 0
+  let afterNextDirectoryReconcile: (() => Promise<void>) | undefined
   configureApiClientsForTest({
     enterpriseIdentity: identity,
     planning: new InMemoryPlanningClient(),
@@ -15679,7 +16500,7 @@ async function configureEnterpriseScimGuestRoleScenario(workspaceId: string) {
       async listActiveMembers() {
         return [...members.values()].filter((member) => member.status === 'active')
       },
-      async reconcileDirectoryMember(_workspaceId, input) {
+      async reconcileDirectoryMember(_workspaceId, input, auditContext) {
         if (reconcileFailures > 0) {
           reconcileFailures -= 1
           throw new WorkspaceAccessError(
@@ -15714,6 +16535,10 @@ async function configureEnterpriseScimGuestRoleScenario(workspaceId: string) {
         }
         members.set(input.memberKey, member)
         reconciledRoles.push(member.role)
+        if (auditContext) reconcileAuditContexts.push(auditContext)
+        const afterReconcile = afterNextDirectoryReconcile
+        afterNextDirectoryReconcile = undefined
+        await afterReconcile?.()
         return member
       },
     } as unknown as WorkspaceAccessClient,
@@ -15721,8 +16546,12 @@ async function configureEnterpriseScimGuestRoleScenario(workspaceId: string) {
   return {
     identity,
     members,
+    reconcileAuditContexts,
     reconciledRoles,
     scimToken,
+    setAfterNextDirectoryReconcile(callback: () => Promise<void>) {
+      afterNextDirectoryReconcile = callback
+    },
     setReconcileFailures(value: number) {
       reconcileFailures = value
     },

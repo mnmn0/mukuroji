@@ -1155,7 +1155,7 @@ export class CdkStack extends cdk.Stack {
       runtime: lambda.Runtime.NODEJS_22_X,
       depsLockFilePath: path.join(__dirname, '../../bun.lock'),
       projectRoot: path.join(__dirname, '../..'),
-      timeout: cdk.Duration.seconds(15),
+      timeout: cdk.Duration.seconds(60),
       memorySize: 512,
       description: 'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.',
       bundling: {
@@ -1437,6 +1437,53 @@ export class CdkStack extends cdk.Stack {
         resources: [cognitoUserPoolArn],
       }),
     );
+
+    const enterpriseScimGroupJobDlq = new sqs.Queue(
+      this,
+      'EnterpriseScimGroupJobDlq',
+      {
+        encryption: sqs.QueueEncryption.SQS_MANAGED,
+        retentionPeriod: cdk.Duration.days(14),
+      },
+    );
+    apiFunction.addEventSource(
+      new lambdaEventSources.DynamoEventSource(enterpriseIdentityTable, {
+        startingPosition: lambda.StartingPosition.TRIM_HORIZON,
+        batchSize: 1,
+        bisectBatchOnError: true,
+        parallelizationFactor: 1,
+        retryAttempts: 10,
+        reportBatchItemFailures: true,
+        filters: [lambda.FilterCriteria.filter({
+          eventName: lambda.FilterRule.or('INSERT', 'MODIFY'),
+          dynamodb: {
+            NewImage: {
+              entryType: {
+                S: lambda.FilterRule.isEqual('enterprise-scim-group-job'),
+              },
+              recordKey: {
+                S: lambda.FilterRule.beginsWith('SCIM_GROUP_JOB#'),
+              },
+            },
+          },
+        })],
+        onFailure: new lambdaEventSources.SqsDlq(enterpriseScimGroupJobDlq),
+      }),
+    );
+    enterpriseIdentityTable.grantStreamRead(apiFunction);
+    new cloudwatch.Alarm(this, 'EnterpriseScimGroupJobDlqAlarm', {
+      alarmDescription:
+        'Detects failed asynchronous enterprise SCIM group reconciliation jobs.',
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: enterpriseScimGroupJobDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
 
     const enterpriseIdentityMaintenanceDlq = new sqs.Queue(
       this,
@@ -2422,6 +2469,9 @@ export class CdkStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'EnterpriseIdentityMaintenanceDlqUrl', {
       value: enterpriseIdentityMaintenanceDlq.queueUrl,
+    });
+    new cdk.CfnOutput(this, 'EnterpriseScimGroupJobDlqUrl', {
+      value: enterpriseScimGroupJobDlq.queueUrl,
     });
     new cdk.CfnOutput(this, 'AutomationEventDlqUrl', {
       value: automationEventDlq.queueUrl,
