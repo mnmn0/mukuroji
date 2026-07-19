@@ -244,10 +244,14 @@ export function canManageWorkspaceStructure(user?: CurrentUser | null) {
 }
 
 /**
- * 現在の Workspace role が Issue、タスク、コメント、project member を更新できるか判定します。
+ * Active な Workspace membership と role が Issue、タスク、コメント、
+ * project member を更新できるか判定します。
  */
 export function canMutateWorkspaceContent(user?: CurrentUser | null) {
-  return user?.workspaceRole !== undefined && user.workspaceRole !== 'guest'
+  return (
+    user?.workspaceMemberStatus === 'active' &&
+    user.workspaceRole !== 'guest'
+  )
 }
 
 /**

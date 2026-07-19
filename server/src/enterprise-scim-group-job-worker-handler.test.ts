@@ -110,6 +110,21 @@ function createDependencies(
           updatedAt: now,
         }
       },
+      async listActiveMembers() {
+        return [{
+          id: 'managed@example.com',
+          memberKey: 'managed@example.com',
+          email: 'managed@example.com',
+          name: 'Managed User',
+          role: 'member' as const,
+          status: 'active' as const,
+          provisioningSource: 'directory' as const,
+          externalIdentityId: 'user-1',
+          version: 5,
+          createdAt: now,
+          updatedAt: now,
+        }]
+      },
       async reconcileDirectoryMember(
         _workspaceId: string,
         input: unknown,
@@ -126,6 +141,16 @@ function createDependencies(
       ) {
         calls.deprovisioned.push({ input, auditContext })
         return undefined
+      },
+    },
+    documents: {
+      async getAuthorizationRevision() {
+        return 13
+      },
+      async getManagerLifecycleSnapshot() {
+        return {
+          authorizationRevision: 13,
+        }
       },
     },
     planning: {
@@ -169,6 +194,7 @@ test('applies an active group member with guest role, revision fence, audit, and
       externalIdentityId: 'user-1',
       expectedVersion: 5,
       expectedPlanningRevision: 11,
+      expectedDocumentAuthorizationRevision: 13,
     },
     auditContext: {
       workspaceId: 'workspace-1',
@@ -220,9 +246,52 @@ test('guards inactive users before deprovisioning and signs out only after succe
     allowed.dependencies,
   )
   expect(allowed.calls.deprovisioned).toHaveLength(1)
+  expect(allowed.calls.deprovisioned[0]).toMatchObject({
+    input: {
+      expectedDocumentAuthorizationRevision: 13,
+    },
+  })
   expect(allowed.calls.disabled).toEqual(['managed@example.com'])
   expect(allowed.calls.signedOut).toEqual(['managed@example.com'])
 })
+
+for (
+  const lifecycleCase of [
+    { name: 'active member guest downgrade', active: true },
+    { name: 'inactive member deprovision', active: false },
+  ] as const
+) {
+  test(`blocks ${lifecycleCase.name} before Workspace and Cognito mutations when a private Document would lose its manager`, async () => {
+    const blocked = createDependencies({
+      documents: {
+        async getAuthorizationRevision() {
+          return 13
+        },
+        async getManagerLifecycleSnapshot() {
+          return {
+            authorizationRevision: 13,
+            blockingDocumentId: 'private-document-1',
+          }
+        },
+      },
+    })
+
+    await expect(
+      applyEnterpriseScimGroupJobUser(
+        createApplyInput(lifecycleCase.active),
+        blocked.dependencies,
+      ),
+    ).rejects.toMatchObject({
+      code: 'WorkspaceMemberManagesPrivateDocuments',
+      status: 409,
+    })
+    expect(blocked.calls.reconciled).toEqual([])
+    expect(blocked.calls.deprovisioned).toEqual([])
+    expect(blocked.calls.enabled).toEqual([])
+    expect(blocked.calls.disabled).toEqual([])
+    expect(blocked.calls.signedOut).toEqual([])
+  })
+}
 
 test('dedicated stream handler invokes the injected bounded processor', async () => {
   const references: unknown[] = []

@@ -10,6 +10,7 @@ import {
   QueryCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { createEnterpriseIdentityClient } from './enterprise-identity'
+import { DynamoDbDocumentsClient } from './documents'
 import {
   processEnterpriseScimGroupJobBatch,
   type EnterpriseScimGroupJobProcessor,
@@ -167,6 +168,7 @@ export function createDefaultEnterpriseScimGroupJobProcessor() {
   return createEnterpriseScimGroupJobProcessor({
     enterpriseIdentity: createEnterpriseIdentityClient(),
     workspaceAccess: new DynamoDbWorkspaceAccessClient(),
+    documents: new DynamoDbDocumentsClient(),
     planning: new DynamoDbPlanningClient(),
     projectManagerGuard: new DynamoDbEnterpriseScimProjectManagerGuard(),
     cognito: new AwsEnterpriseScimGroupJobCognitoClient(),

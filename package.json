@@ -35,6 +35,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",
-    "oxlint": "^1.69.0"
+    "oxlint": "^1.70.0",
+    "oxlint-plugin-awscdk": "^0.1.3"
   }
 }

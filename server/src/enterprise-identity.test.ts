@@ -3042,3 +3042,49 @@ test('grants directory mappings only from applied state on a ready provider', ()
       compatibleGroupMappings: [],
     })
 })
+
+test('keeps pending inactive SCIM desired state provisioned until it is applied', () => {
+  const provider = createActiveProvider('idp-1')
+  const snapshot: EnterpriseIdentitySnapshot = {
+    workspaceId,
+    identityProviders: [provider],
+    domains: [],
+    customRoles: [],
+    groupMappings: [],
+    roleAssignments: [],
+    scimUsers: [{
+      workspaceId,
+      userId: 'directory-user-1',
+      externalId: 'external-user-1',
+      identityProviderId: provider.providerId,
+      userName: 'member@example.com',
+      emails: ['member@example.com'],
+      active: false,
+      linkedMemberKey: 'member@example.com',
+      groupIds: [],
+      version: 2,
+      appliedVersion: 1,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    }],
+    scimGroups: [],
+    scimCredentials: [],
+    serviceAccounts: [],
+    breakGlassAccounts: [],
+    provisioningRuns: [],
+    provisioningLogs: [],
+  }
+
+  expect(resolveEnterpriseDirectoryPrincipal(snapshot, 'member@example.com', []))
+    .toMatchObject({
+      directoryManaged: true,
+      deprovisioned: false,
+    })
+
+  snapshot.scimUsers[0]!.appliedVersion = 2
+  expect(resolveEnterpriseDirectoryPrincipal(snapshot, 'member@example.com', []))
+    .toMatchObject({
+      directoryManaged: true,
+      deprovisioned: true,
+    })
+})

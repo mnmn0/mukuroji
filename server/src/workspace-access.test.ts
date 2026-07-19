@@ -1300,6 +1300,7 @@ test('serializes member deactivation with the Planning graph revision', async ()
     status: 'deactivated',
     expectedVersion: target.version,
     expectedPlanningRevision: 7,
+    expectedDocumentAuthorizationRevision: 3,
   })
 
   expect(transactionInputs[0]).toMatchObject({
@@ -1318,6 +1319,93 @@ test('serializes member deactivation with the Planning graph revision', async ()
           },
           ConditionExpression: '#revision = :expectedPlanningRevision',
           ExpressionAttributeValues: { ':expectedPlanningRevision': 7 },
+        },
+      },
+      {
+        Put: {
+          TableName: 'mukuroji-documents-local',
+          Item: {
+            workspaceId,
+            recordKey:
+              'DOCUMENT_AUTHORIZATION_REVISION',
+            revision: 4,
+          },
+          ConditionExpression:
+            'revision = :expectedDocumentAuthorizationRevision',
+        },
+      },
+    ],
+  })
+})
+
+test('increments the Document authorization generation when deactivating a guest', async () => {
+  const actor = createWorkspaceMember(
+    'demo@example.com',
+  )
+  const target = createWorkspaceMember(
+    'guest@example.com',
+    'guest',
+  )
+  const transactionInputs:
+    Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (
+        command.constructor.name ===
+        'GetCommand'
+      ) {
+        const key = command.input.Key as {
+          recordKey?: string
+        }
+        return {
+          Item: toMemberItem(
+            key.recordKey?.includes(
+                'guest@example.com',
+              )
+              ? target
+              : actor,
+          ),
+        }
+      }
+      transactionInputs.push(command.input)
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+  )
+
+  await client.updateMember(
+    workspaceId,
+    actor.memberKey,
+    target.memberKey,
+    {
+      status: 'deactivated',
+      expectedVersion: target.version,
+      expectedPlanningRevision: 7,
+      expectedDocumentAuthorizationRevision: 3,
+    },
+  )
+
+  expect(
+    transactionInputs[0],
+  ).toMatchObject({
+    TransactItems: [
+      {},
+      {},
+      {},
+      {
+        Put: {
+          TableName:
+            'mukuroji-documents-local',
+          Item: {
+            workspaceId,
+            recordKey:
+              'DOCUMENT_AUTHORIZATION_REVISION',
+            revision: 4,
+          },
         },
       },
     ],
@@ -1355,9 +1443,64 @@ test('classifies a Planning revision race during member deactivation', async () 
     status: 'deactivated',
     expectedVersion: target.version,
     expectedPlanningRevision: 7,
+    expectedDocumentAuthorizationRevision: 3,
   })).rejects.toMatchObject({
     status: 409,
     code: 'PlanningRevisionConflict',
+  })
+})
+
+test('classifies a private Document ACL race during member deactivation', async () => {
+  const actor = createWorkspaceMember('demo@example.com')
+  const target = createWorkspaceMember(
+    'member@example.com',
+    'member',
+  )
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key as {
+          recordKey?: string
+        }
+        return {
+          Item: toMemberItem(
+            key.recordKey?.includes(
+                'member@example.com',
+              )
+              ? target
+              : actor,
+          ),
+        }
+      }
+      throw createConditionalTransactionError(
+        4,
+        3,
+      )
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    null,
+    undefined,
+    'DocumentsTable',
+  )
+
+  await expect(client.updateMember(
+    workspaceId,
+    actor.memberKey,
+    target.memberKey,
+    {
+      status: 'deactivated',
+      expectedVersion: target.version,
+      expectedPlanningRevision: 7,
+      expectedDocumentAuthorizationRevision: 11,
+    },
+  )).rejects.toMatchObject({
+    status: 409,
+    code:
+      'DocumentAuthorizationRevisionConflict',
   })
 })
 
@@ -1388,6 +1531,7 @@ test('preserves mixed Planning cancellation reasons as an infrastructure failure
     status: 'deactivated',
     expectedVersion: target.version,
     expectedPlanningRevision: 7,
+    expectedDocumentAuthorizationRevision: 3,
   })).rejects.toMatchObject({
     status: 502,
     code: 'WorkspaceAccessUnavailable',
@@ -1449,6 +1593,7 @@ test('classifies concurrent member updates through optimistic version checks', a
     role: 'guest',
     expectedVersion: 1,
     expectedPlanningRevision: 0,
+    expectedDocumentAuthorizationRevision: 0,
   })).rejects.toMatchObject({
     status: 409,
     code: 'WorkspaceVersionConflict',
@@ -1479,6 +1624,7 @@ test('preserves non-conditional transaction cancellations as infrastructure fail
     role: 'guest',
     expectedVersion: 1,
     expectedPlanningRevision: 0,
+    expectedDocumentAuthorizationRevision: 0,
   })).rejects.toMatchObject({
     status: 502,
     code: 'WorkspaceAccessUnavailable',
@@ -1833,13 +1979,31 @@ test('writes member role changes and their safe field diff atomically', async ()
     workspaceId,
     actor.memberKey,
     target.memberKey,
-    { role: 'guest', expectedVersion: 1, expectedPlanningRevision: 0 },
+    {
+      role: 'guest',
+      expectedVersion: 1,
+      expectedPlanningRevision: 0,
+      expectedDocumentAuthorizationRevision: 0,
+    },
     createAuditContext('change-role'),
   )
 
   const transactItems = inputs[0]?.TransactItems as Array<Record<string, unknown>>
-  expect(transactItems).toHaveLength(4)
+  expect(transactItems).toHaveLength(5)
   expect(transactItems[3]).toMatchObject({
+    Put: {
+      TableName: 'mukuroji-documents-local',
+      Item: {
+        workspaceId,
+        recordKey:
+          'DOCUMENT_AUTHORIZATION_REVISION',
+        revision: 1,
+      },
+      ConditionExpression:
+        'attribute_not_exists(workspaceId)',
+    },
+  })
+  expect(transactItems[4]).toMatchObject({
     Put: {
       TableName: 'AuditTable',
       Item: {
@@ -2270,6 +2434,7 @@ test('deprovisions a directory member atomically with the Planning revision and 
       externalIdentityId: target.externalIdentityId,
       expectedVersion: target.version,
       expectedPlanningRevision: 9,
+      expectedDocumentAuthorizationRevision: 3,
     },
     createAuditContext('directory-deprovision'),
   )
@@ -2296,6 +2461,25 @@ test('deprovisions a directory member atomically with the Planning revision and 
           Item: {
             recordKey: 'META',
             revision: 10,
+          },
+        },
+      },
+      {
+        Put: {
+          TableName: 'mukuroji-documents-local',
+          Item: {
+            workspaceId,
+            recordKey:
+              'DOCUMENT_AUTHORIZATION_REVISION',
+            entryType:
+              'document-authorization-revision',
+            revision: 4,
+            updatedAt: now.toISOString(),
+          },
+          ConditionExpression:
+            'revision = :expectedDocumentAuthorizationRevision',
+          ExpressionAttributeValues: {
+            ':expectedDocumentAuthorizationRevision': 3,
           },
         },
       },
@@ -2361,6 +2545,7 @@ test('directory deprovisioning cannot silently adopt a manual member', async () 
       externalIdentityId: 'scim-manual',
       expectedVersion: manualMember.version,
       expectedPlanningRevision: 0,
+      expectedDocumentAuthorizationRevision: 0,
     },
   )).rejects.toMatchObject({
     status: 409,

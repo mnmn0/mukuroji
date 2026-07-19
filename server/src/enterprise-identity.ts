@@ -871,17 +871,21 @@ const builtInRolePermissions = {
     permission !== 'security.read'
   ),
   'team:manager': ['teams.read', 'teams.write', 'teams.manage', 'projects.read', 'projects.write',
-    'projects.manage', 'work-items.read', 'work-items.write', 'files.read', 'files.write',
-    'files.approve', 'planning.read', 'planning.write', 'planning.manage'] as EnterprisePermissionId[],
-  'team:member': ['teams.read', 'teams.write', 'projects.read', 'projects.write', 'work-items.read',
-    'work-items.write', 'files.read', 'files.write', 'planning.read'] as EnterprisePermissionId[],
-  'project:manager': ['projects.read', 'projects.write', 'projects.manage', 'work-items.read',
-    'work-items.write', 'files.read', 'files.write', 'files.approve', 'planning.read',
+    'projects.manage', 'work-items.read', 'work-items.write', 'documents.read', 'documents.write',
+    'documents.manage', 'files.read', 'files.write', 'files.approve', 'planning.read',
     'planning.write', 'planning.manage'] as EnterprisePermissionId[],
+  'team:member': ['teams.read', 'teams.write', 'projects.read', 'projects.write', 'work-items.read',
+    'work-items.write', 'documents.read', 'documents.write', 'files.read', 'files.write',
+    'planning.read'] as EnterprisePermissionId[],
+  'project:manager': ['projects.read', 'projects.write', 'projects.manage', 'work-items.read',
+    'work-items.write', 'documents.read', 'documents.write', 'documents.manage', 'files.read',
+    'files.write', 'files.approve', 'planning.read', 'planning.write',
+    'planning.manage'] as EnterprisePermissionId[],
   'project:member': ['projects.read', 'projects.write', 'work-items.read', 'work-items.write',
-    'files.read', 'files.write', 'planning.read'] as EnterprisePermissionId[],
-  'project:viewer': ['projects.read', 'work-items.read', 'files.read', 'planning.read'] as
+    'documents.read', 'documents.write', 'files.read', 'files.write', 'planning.read'] as
     EnterprisePermissionId[],
+  'project:viewer': ['projects.read', 'work-items.read', 'documents.read', 'files.read',
+    'planning.read'] as EnterprisePermissionId[],
 } as const
 
 /**
@@ -1034,7 +1038,10 @@ export function resolveEnterpriseDirectoryPrincipal(
       assignment.mappingId !== undefined && compatibleMappingIds.has(assignment.mappingId)
     ),
     deprovisioned: linkedScimUsers.length > 0 &&
-      linkedScimUsers.every((candidate) => !candidate.active),
+      linkedScimUsers.every((candidate) =>
+        !candidate.active &&
+        candidate.appliedVersion >= candidate.version
+      ),
   }
 }
 
@@ -5200,7 +5207,10 @@ function toPublicSnapshot(state: EnterpriseIdentityState): EnterpriseIdentitySna
     idempotencyExpiresAt: _idempotencyExpiresAt,
     ...snapshot
   } = structuredClone(state)
-  return snapshot
+  return {
+    ...snapshot,
+    controlRevision: state.storageRevision,
+  }
 }
 
 function getEnterpriseDomainClaimChanges(

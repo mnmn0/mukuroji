@@ -15,6 +15,9 @@ import { SearchPage } from '../search/SearchPage'
 import { PublicRequestFormPage } from '../requests/PublicRequestFormPage'
 import { RequestIntakePage } from '../requests/RequestIntakePage'
 import { EnterpriseSsoCallbackPage } from '../pages/EnterpriseSsoCallbackPage'
+import { DocumentPage } from '../documents/DocumentPage'
+import { SharedDocumentPage } from '../documents/SharedDocumentPage'
+import { GoalDocumentsPage } from '../pages/GoalDocumentsPage'
 import { ReportsPage } from '../pages/ReportsPage'
 import { SecurityRecoveryPage } from '../pages/SecurityRecoveryPage'
 
@@ -82,6 +85,18 @@ export const appRoutes: RouteObject[] = [
         element: <PlanningPage />,
       },
       {
+        path: '/documents',
+        element: <DocumentPage />,
+      },
+      {
+        path: '/documents/:documentId',
+        element: <DocumentPage />,
+      },
+      {
+        path: '/goals/:goalId/documents',
+        element: <GoalDocumentsPage />,
+      },
+      {
         path: '/reports',
         element: <ReportsPage />,
       },
@@ -138,6 +153,10 @@ export const appRoutes: RouteObject[] = [
   {
     path: '/support',
     element: <SupportPage />,
+  },
+  {
+    path: '/share/documents/:shareToken',
+    element: <SharedDocumentPage />,
   },
   {
     path: '*',

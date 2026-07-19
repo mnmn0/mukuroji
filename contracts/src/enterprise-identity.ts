@@ -20,6 +20,9 @@ export const ENTERPRISE_PERMISSION_IDS = [
   'projects.manage',
   'work-items.read',
   'work-items.write',
+  'documents.read',
+  'documents.write',
+  'documents.manage',
   'files.read',
   'files.write',
   'files.approve',
@@ -1238,6 +1241,10 @@ export type EnterpriseIdentitySnapshot = {
    * Snapshot 対象 Workspace ID です。
    */
   workspaceId: string
+  /**
+   * Enterprise CONTROL row の optimistic concurrency revision です。
+   */
+  controlRevision?: number
   /**
    * Current security policy です。
    */

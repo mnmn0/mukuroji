@@ -11,6 +11,10 @@ import type {
   EnterpriseIdentityClient,
   EnterpriseScimGroupJobApplyInput,
 } from './enterprise-identity'
+import {
+  requirePrivateDocumentManagerContinuity,
+} from './document-manager-lifecycle'
+import type { DocumentClient } from './documents'
 import type {
   EnterpriseScimGroupJobProcessor,
   EnterpriseScimGroupJobReference,
@@ -35,8 +39,17 @@ export type EnterpriseScimGroupJobIdentityClient = Pick<
  */
 export type EnterpriseScimGroupJobWorkspaceAccessClient = Required<Pick<
   WorkspaceAccessClient,
-  'deprovisionDirectoryMember' | 'getMember' | 'reconcileDirectoryMember'
+  'deprovisionDirectoryMember' | 'getMember' | 'listActiveMembers' |
+    'reconcileDirectoryMember'
 >>
+
+/**
+ * SCIM group worker が利用する private Document manager guard client です。
+ */
+export type EnterpriseScimGroupJobDocumentClient = Pick<
+  DocumentClient,
+  'getAuthorizationRevision' | 'getManagerLifecycleSnapshot'
+>
 
 /**
  * SCIM group worker が利用する Planning client の最小契約です。
@@ -76,6 +89,8 @@ export type EnterpriseScimGroupJobWorkerDependencies = {
   enterpriseIdentity: EnterpriseScimGroupJobIdentityClient
   /** Workspace member を directory authority から収束させます。 */
   workspaceAccess: EnterpriseScimGroupJobWorkspaceAccessClient
+  /** Private Document manager 継続性と ACL generation を読みます。 */
+  documents: EnterpriseScimGroupJobDocumentClient
   /** Planning owner guard と revision fence を読み取ります。 */
   planning: EnterpriseScimGroupJobPlanningClient
   /** Active Project manager role の有無を確認します。 */
@@ -134,6 +149,16 @@ export async function applyEnterpriseScimGroupJobUser(
     const expectedPlanningRevision = (
       await dependencies.planning.getAuthorizationState(user.workspaceId)
     ).revision
+    const expectedDocumentAuthorizationRevision =
+      existing?.status === 'active' &&
+        existing.role !== 'guest' &&
+        workspaceRole === 'guest'
+        ? await requirePrivateDocumentManagerContinuity(
+            dependencies,
+            user.workspaceId,
+            memberKey,
+          )
+        : undefined
     await dependencies.workspaceAccess.reconcileDirectoryMember(
       user.workspaceId,
       {
@@ -144,6 +169,9 @@ export async function applyEnterpriseScimGroupJobUser(
         externalIdentityId: user.userId,
         expectedVersion: existing?.version,
         expectedPlanningRevision,
+        ...(expectedDocumentAuthorizationRevision === undefined
+          ? {}
+          : { expectedDocumentAuthorizationRevision }),
       },
       auditContext,
     )
@@ -178,6 +206,12 @@ export async function applyEnterpriseScimGroupJobUser(
       'Transfer or archive all owned Planning entities before deactivating this member.',
     )
   }
+  const expectedDocumentAuthorizationRevision =
+    await requirePrivateDocumentManagerContinuity(
+      dependencies,
+      user.workspaceId,
+      memberKey,
+    )
   await dependencies.workspaceAccess.deprovisionDirectoryMember(
     user.workspaceId,
     memberKey,
@@ -185,6 +219,7 @@ export async function applyEnterpriseScimGroupJobUser(
       externalIdentityId: user.userId,
       expectedVersion: existing.version,
       expectedPlanningRevision: authorizationState.revision,
+      expectedDocumentAuthorizationRevision,
     },
     auditContext,
   )
