@@ -77,6 +77,7 @@ Secret JSON は string value の object とし、次の key だけを許可し�
 - `CONNECTOR_OAUTH_STATE_SIGNING_SECRET`
 - `CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON`
 - `CONNECTOR_SYNC_ORIGIN_SIGNING_SECRET`
+- `CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON`
 - `CONNECTOR_REAUTHORIZATION_RETURN_URL`
 - provider client secret 用の `MUKUROJI_CONNECTOR_<NAME>` key
 
@@ -87,6 +88,18 @@ OAuth state signing key は、warm runtime の旧・新 keyring が混在して�
 1. 旧 key を `CONNECTOR_OAUTH_STATE_SIGNING_SECRET` に維持したまま、新 key を JSON array 文字列の `CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON` へ verification-only key として追加します。
 2. Cache TTL（現在は約1分）と secret 伝播の猶予を待ち、すべての warm runtime が新 key を検証できる状態にします。
 3. 新 key を `CONNECTOR_OAUTH_STATE_SIGNING_SECRET` へ昇格し、旧 key を `CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON` に残します。旧 runtime が cache TTL 中に発行した state も完了できるよう、昇格後は旧 key を state TTL（現在は10分）に cache TTL と伝播猶予を加えた期間以上保持してから削除します。
+
+Connector origin signing key も current key だけを直接置換せず、未消費の
+outbound origin marker と warm runtime をまたいで検証できるよう二段階で
+rotation します。`CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON` は
+32-byte 以上の secret を最大3件持つ JSON array 文字列です。
+
+1. 旧 key を `CONNECTOR_SYNC_ORIGIN_SIGNING_SECRET` に維持したまま、新 key を `CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON` へ verification-only key として追加します。Cache TTL（現在は約1分）と secret 伝播の猶予を待ち、すべての warm runtime が旧・新の両 key を検証できる状態にします。
+2. 新 key を `CONNECTOR_SYNC_ORIGIN_SIGNING_SECRET` へ昇格し、旧 key を `CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON` に残します。旧 key で署名済みの outbound operation が provider から返却される grace period、cache TTL、provider の webhook retry window がすべて経過し、Connector sync/poll queue と DLQ に旧 operation が残っていないことを確認してから旧 key を削除します。
+
+各段階は別の secret version として反映し、次の段階へ進む前に current /
+previous の両方で origin marker の検証が成功することを確認してください。
+未消費 marker が残っている間は旧 key を削除しません。
 
 更新後は設定確認用の再認証を行い、`ConnectorSyncDlqUrl`、`ConnectorPollDlqUrl`、queue age alarm、provider 側 callback error を監視します。CloudFormation parameter は `{}` のまま維持し、通常 deploy で手動更新した current secret version を戻さないでください。
 
@@ -261,6 +274,8 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
 6. deploy 後に `validate-workspace-bootstrap.sh` と Function URL / API Gateway の 4 経路を確認する。
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
+
+Webhook ACL v2 upgrade は新しい transaction writer の更新後に開始し、checkpoint に記録した30秒の drain window が終わるまで retained row の scan を開始しません。これにより、更新前に開始した API invocation が cleanup locator なしの grant を backfill cursor 通過後に書き込むことを防ぎます。
 
 通知 upgrade では `NotificationsTable` に `RecipientStatusIndex` が追加されます。deploy 前に GSI backfill の所要時間と table throttling を確認し、deploy 後は `CollaborationProjectionDlqUrl` と `NotificationScheduleDlqUrl` の滞留、Inbox の unread count を監視してください。期限 schedule は UTC date-only で1時間ごとに走査し、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として非同期 retry され、最終失敗は schedule DLQ に保存されます。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。
 
