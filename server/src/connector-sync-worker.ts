@@ -531,10 +531,24 @@ async function projectAuditRecord(
   const stored = unmarshalDynamoMap(record.dynamodb.NewImage)
   if (stored.outboxStatus !== 'pending') return
   const event = upcastAuditEvent(stored)
-  if (
-    event.outboxStatus !== 'pending' ||
-    isConnectorSyncOrigin(event)
-  ) return
+  if (event.outboxStatus !== 'pending') return
+  if (event.eventType === 'connector.status.updated') {
+    const disconnect = readAuditConnectorDisconnectIdentity(event)
+    if (disconnect) {
+      await dependencies.queue.enqueue({
+        version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+        kind: 'disconnect-links',
+        workspaceId: event.workspaceId,
+        installationId: disconnect.installationId,
+        lifecycleRevision: disconnect.lifecycleRevision,
+        ...(event.actor.kind === 'user'
+          ? { updatedByUserId: readIdentifier(event.actor.id, 'Audit actor User ID') }
+          : {}),
+      })
+    }
+    return
+  }
+  if (isConnectorSyncOrigin(event)) return
   if (event.eventType === 'work-item.updated') {
     const identity = readAuditWorkItemIdentity(event)
     await dependencies.queue.enqueue({
@@ -768,6 +782,27 @@ function readAuditExternalLinkIdentity(event: AuditEventV1) {
     syncDirection !== 'none'
   ) throw new TypeError('Audit connector sync direction is invalid.')
   return { linkId, installationId, resourceType, syncDirection }
+}
+
+function readAuditConnectorDisconnectIdentity(event: AuditEventV1) {
+  const metadata = event.metadata
+  if (
+    metadata?.adapter !== 'developer-platform' ||
+    metadata.status !== 'disconnected'
+  ) return undefined
+  if (event.entity.type !== 'connector-installation') {
+    throw new TypeError('Connector disconnect audit entity type is invalid.')
+  }
+  return {
+    installationId: readIdentifier(
+      event.entity.id,
+      'Audit connector installation ID',
+    ),
+    lifecycleRevision: readPositiveInteger(
+      metadata.disconnectCleanupRevision,
+      'Audit connector disconnect cleanup revision',
+    ),
+  }
 }
 
 function isConnectorSyncOrigin(event: AuditEventV1) {

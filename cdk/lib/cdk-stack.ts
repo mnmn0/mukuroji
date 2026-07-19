@@ -297,7 +297,7 @@ function createProjectMemberEntryKey(projectId: string, memberKey: string) {
 /**
  * Team-only Webhook ACL を直接引く materialized grant の Put を作成します。
  */
-function createWebhookTeamGrantPut(
+function createWebhookTeamGrantPuts(
   tableName: string,
   workspaceId: string,
   teamId: string,
@@ -306,29 +306,51 @@ function createWebhookTeamGrantPut(
   teamSourceEntryKey: string,
   projectSourceEntryKey: string,
 ) {
-  return {
-    Put: {
-      TableName: tableName,
-      Item: {
-        directoryId: { S: `WEBHOOK_TEAM_GRANT#${workspaceId}#${memberKey}` },
-        entryKey: { S: `TEAM#${teamId}#PROJECT#${projectId}` },
-        entryType: { S: 'webhook-team-grant' },
-        workspaceId: { S: workspaceId },
-        teamId: { S: teamId },
-        projectId: { S: projectId },
-        memberKey: { S: memberKey },
-        sourceEntryKey: {
-          S: createProjectMemberEntryKey(projectId, memberKey),
+  return [
+    {
+      Put: {
+        TableName: tableName,
+        Item: {
+          directoryId: { S: `WEBHOOK_TEAM_GRANT#${workspaceId}#${memberKey}` },
+          entryKey: { S: `TEAM#${teamId}#PROJECT#${projectId}` },
+          entryType: { S: 'webhook-team-grant' },
+          workspaceId: { S: workspaceId },
+          teamId: { S: teamId },
+          projectId: { S: projectId },
+          memberKey: { S: memberKey },
+          sourceEntryKey: {
+            S: createProjectMemberEntryKey(projectId, memberKey),
+          },
+          teamSourceEntryKey: { S: teamSourceEntryKey },
+          projectSourceEntryKey: { S: projectSourceEntryKey },
+          webhookAuthorizationKey: {
+            S: `WEBHOOK_ACL#TEAM_MEMBER#${workspaceId}#${teamId}#${memberKey}`,
+          },
+          webhookAuthorizationSortKey: { S: `PROJECT#${projectId}` },
         },
-        teamSourceEntryKey: { S: teamSourceEntryKey },
-        projectSourceEntryKey: { S: projectSourceEntryKey },
-        webhookAuthorizationKey: {
-          S: `WEBHOOK_ACL#TEAM_MEMBER#${workspaceId}#${teamId}#${memberKey}`,
-        },
-        webhookAuthorizationSortKey: { S: `PROJECT#${projectId}` },
       },
     },
-  };
+    {
+      Put: {
+        TableName: tableName,
+        Item: {
+          directoryId: {
+            S: `WEBHOOK_GRANT_CLEANUP#${workspaceId}#${teamId}`,
+          },
+          entryKey: { S: `PROJECT#${projectId}#MEMBER#${memberKey}` },
+          entryType: { S: 'webhook-team-grant-cleanup' },
+          workspaceId: { S: workspaceId },
+          teamId: { S: teamId },
+          projectId: { S: projectId },
+          memberKey: { S: memberKey },
+          grantDirectoryId: {
+            S: `WEBHOOK_TEAM_GRANT#${workspaceId}#${memberKey}`,
+          },
+          grantEntryKey: { S: `TEAM#${teamId}#PROJECT#${projectId}` },
+        },
+      },
+    },
+  ];
 }
 
 /**
@@ -454,8 +476,8 @@ function createProjectDirectoryTransactItems(tableName: string, directoryId: str
       .filter((entry) =>
         entry.entryType === 'project' && entry.projectId === projectId
       )
-      .map((entry) =>
-        createWebhookTeamGrantPut(
+      .flatMap((entry) =>
+        createWebhookTeamGrantPuts(
           tableName,
           directoryId,
           entry.teamId,
@@ -582,8 +604,8 @@ function createWorkspaceBootstrapTransactItems(
       .filter((entry) =>
         entry.entryType === 'project' && entry.projectId === projectId
       )
-      .map((entry) =>
-        createWebhookTeamGrantPut(
+      .flatMap((entry) =>
+        createWebhookTeamGrantPuts(
           tableName,
           directoryId,
           entry.teamId,
@@ -1370,7 +1392,6 @@ export class CdkStack extends cdk.Stack {
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
         CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN:
           connectorRuntimeSecret.secretArn,
-        CONNECTOR_SYNC_QUEUE_URL: connectorSyncQueue.queueUrl,
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
         DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID:
@@ -1562,7 +1583,6 @@ export class CdkStack extends cdk.Stack {
           new iam.PolicyStatement({
             actions: ['sqs:SendMessage'],
             resources: [
-              connectorSyncQueue.queueArn,
               webhookDeliveryQueue.queueArn,
               workItemImportQueue.queueArn,
             ],
@@ -2289,7 +2309,7 @@ export class CdkStack extends cdk.Stack {
         timeout: cdk.Duration.seconds(30),
         memorySize: 512,
         description:
-          'Starts the resumable Webhook ACL backfill before delivery reads are enabled.',
+          'Starts the writer drain and resumable Webhook ACL backfill.',
         bundling: {
           bundleAwsSDK: true,
           minify: true,
@@ -2320,7 +2340,7 @@ export class CdkStack extends cdk.Stack {
           timeout: cdk.Duration.minutes(5),
           memorySize: 1024,
           description:
-            'Processes one checkpointed page of the retained Webhook ACL backfill.',
+            'Waits for writer drain and processes checkpointed Webhook ACL pages.',
           bundling: {
             bundleAwsSDK: true,
             minify: true,
@@ -2337,6 +2357,15 @@ export class CdkStack extends cdk.Stack {
     projectDirectoryTable.grantReadWriteData(
       webhookAuthorizationBackfillProgressFunction,
     );
+    for (const backfillFunction of [
+      webhookAuthorizationBackfillFunction,
+      webhookAuthorizationBackfillProgressFunction,
+    ]) {
+      backfillFunction.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:TransactWriteItems'],
+        resources: [projectDirectoryTable.tableArn],
+      }));
+    }
     const webhookAuthorizationBackfillProvider = new customResources.Provider(
       this,
       'WebhookAuthorizationBackfillProvider',
@@ -2353,13 +2382,14 @@ export class CdkStack extends cdk.Stack {
       {
         serviceToken: webhookAuthorizationBackfillProvider.serviceToken,
         properties: {
-          MigrationVersion: 'v1',
+          MigrationVersion: 'v2',
           ProjectDirectoryTableName: projectDirectoryTable.tableName,
         },
       },
     );
-    // Deploy the transactionally maintained writer before backfilling retained
-    // rows, then enable the new reader only after the migration succeeds.
+    // Deploy the transactionally maintained writer first. The v2 checkpoint
+    // then drains pre-deploy invocations before scanning retained rows, and
+    // the new reader is enabled only after the migration succeeds.
     webhookAuthorizationBackfill.node.addDependency(apiFunction);
 
     const webhookDeliveryFunction = new lambdaNodejs.NodejsFunction(
@@ -2428,6 +2458,10 @@ export class CdkStack extends cdk.Stack {
         projectDirectoryTable.tableArn,
         workspaceAccessTable.tableArn,
       ],
+    }));
+    webhookDeliveryFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:TransactWriteItems'],
+      resources: [projectDirectoryTable.tableArn],
     }));
     developerPlatformWebhookKey.grantDecrypt(webhookDeliveryFunction);
     auditEventsTable.grantReadData(webhookDeliveryFunction);

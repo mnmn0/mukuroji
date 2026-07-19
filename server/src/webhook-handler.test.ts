@@ -11,7 +11,10 @@ import {
 import {
   DynamoDbWebhookAuditEventReader,
   DynamoDbWebhookDeliveryClaimStore,
+  DynamoDbWebhookGrantCleanupStore,
+  DynamoDbWebhookProjectionStateStore,
   WEBHOOK_PROJECTION_CONCURRENCY,
+  WEBHOOK_PROJECTION_LEASE_SECONDS,
   WEBHOOK_PROJECTION_PAGE_SIZE,
   processWebhookDeliveryBatch,
   processWebhookProjectionBatch,
@@ -19,6 +22,7 @@ import {
   type WebhookDeliveryQueue,
   type WebhookDynamoAttributeValue,
   type WebhookQueueMessage,
+  type WebhookProjectionStateStore,
 } from './webhook-handler'
 
 test('queues an ID-only durable projection locator from a pending audit event', async () => {
@@ -47,6 +51,31 @@ test('queues an ID-only durable projection locator from a pending audit event', 
   })
   expect(JSON.stringify(queued)).not.toContain('mk_webhook_')
   expect(JSON.stringify(queued)).not.toContain('metadata')
+})
+
+test('queues an ID-only grant cleanup job from a Project archive outbox event', async () => {
+  const queued: WebhookQueueMessage[] = []
+  const event = createProjectArchiveAuditEvent(
+    new Date('2026-07-18T00:00:00.000Z'),
+  )
+  await expect(processWebhookProjectionBatch({
+    Records: [{
+      eventName: 'INSERT',
+      dynamodb: {
+        SequenceNumber: 'archive-101',
+        NewImage: marshallRecord(event),
+      },
+    }],
+  }, {
+    queue: createRecordingQueue(queued),
+  })).resolves.toEqual({ batchItemFailures: [] })
+  expect(queued).toEqual([{
+    kind: 'grant-cleanup',
+    workspaceId: 'workspace-1',
+    archiveEventId: event.eventId,
+    teamId: 'team-1',
+    projectId: 'project-1',
+  }])
 })
 
 test('projects one bounded subscription page and queues a durable continuation', async () => {
@@ -104,6 +133,7 @@ test('projects one bounded subscription page and queues a durable continuation',
         return subscription.id !== deniedSubscriptionId
       },
     },
+    projections: createMemoryProjectionStore(),
     queue: createRecordingQueue(queued),
     claims: createMemoryClaimStore(),
     now: () => now,
@@ -134,6 +164,292 @@ test('projects one bounded subscription page and queues a durable continuation',
   })
   const deliveries = await platform.listWebhookDeliveries({ workspaceId: 'workspace-1' })
   expect(deliveries.deliveries).toHaveLength(12)
+})
+
+test('does not expand a projection page chain after duplicate messages and send response loss', async () => {
+  let now = new Date('2026-07-18T00:00:00.000Z')
+  const platform = createPlatform(() => now)
+  const subscription = await createSubscription(platform)
+  const pageRequests: Array<string | undefined> = []
+  platform.listActiveWebhookSubscriptionsPage = async (request) => {
+    pageRequests.push(request.cursor)
+    return request.cursor
+      ? { subscriptions: [] }
+      : {
+          subscriptions: [subscription.subscription],
+          nextCursor: 'subscription-page-2',
+        }
+  }
+  const durableState = createMemoryProjectionStore()
+  let loseFirstMarkResponse = true
+  const projections: WebhookProjectionStateStore = {
+    tryClaim: durableState.tryClaim,
+    complete: durableState.complete,
+    tryClaimContinuation: durableState.tryClaimContinuation,
+    async markContinuationEnqueued(request) {
+      if (loseFirstMarkResponse) {
+        loseFirstMarkResponse = false
+        throw new Error('DynamoDB response was lost after the SQS send.')
+      }
+      return await durableState.markContinuationEnqueued(request)
+    },
+  }
+  const queued: WebhookQueueMessage[] = []
+  const event = createWorkItemAuditEvent(now)
+  const dependencies = {
+    auditEvents: { getEvent: async () => event },
+    developerPlatform: platform,
+    authorizer: { canDeliver: async () => true },
+    projections,
+    queue: createRecordingQueue(queued),
+    claims: createMemoryClaimStore(),
+    now: () => now,
+    random: () => 0.5,
+    async deliver() {
+      throw new Error('Projection must not perform HTTP delivery.')
+    },
+  }
+
+  await expect(processWebhookDeliveryBatch({
+    Records: [createProjectionSqsRecord(event.eventId, 'root-first')],
+  }, dependencies)).resolves.toEqual({
+    batchItemFailures: [{ itemIdentifier: 'root-first' }],
+  })
+  await expect(processWebhookDeliveryBatch({
+    Records: [createProjectionSqsRecord(event.eventId, 'root-concurrent-duplicate')],
+  }, dependencies)).resolves.toEqual({ batchItemFailures: [] })
+  expect(queued.filter((message) =>
+    message.kind === 'projection' && message.cursor === 'subscription-page-2'
+  )).toHaveLength(1)
+
+  now = new Date('2026-07-18T00:02:01.000Z')
+  await expect(processWebhookDeliveryBatch({
+    Records: [createProjectionSqsRecord(event.eventId, 'root-retry')],
+  }, dependencies)).resolves.toEqual({ batchItemFailures: [] })
+  const continuations = queued.filter((message) =>
+    message.kind === 'projection' && message.cursor === 'subscription-page-2'
+  )
+  expect(continuations).toHaveLength(2)
+
+  await processWebhookDeliveryBatch({
+    Records: [
+      createProjectionSqsRecord(
+        event.eventId,
+        'page-2-first',
+        'subscription-page-2',
+      ),
+    ],
+  }, dependencies)
+  await processWebhookDeliveryBatch({
+    Records: [
+      createProjectionSqsRecord(
+        event.eventId,
+        'page-2-duplicate',
+        'subscription-page-2',
+      ),
+    ],
+  }, dependencies)
+
+  expect(pageRequests).toEqual([undefined, 'subscription-page-2'])
+  expect(queued.filter((message) =>
+    message.kind === 'projection' && message.cursor !== 'subscription-page-2'
+  )).toEqual([])
+})
+
+test('serializes concurrent projection continuation senders across a multi-page chain', async () => {
+  const now = new Date('2026-07-18T00:00:00.000Z')
+  const event = createWorkItemAuditEvent(now)
+  const projections = createMemoryProjectionStore()
+  const rootClaim = {
+    workspaceId: 'workspace-1',
+    eventId: event.eventId,
+    leaseOwner: 'seed-root-page',
+    now: now.toISOString(),
+    leaseExpiresAt: '2026-07-18T00:01:30.000Z',
+  }
+  await expect(projections.tryClaim(rootClaim)).resolves.toEqual({
+    status: 'claimed',
+  })
+  await expect(projections.complete({
+    ...rootClaim,
+    nextCursor: 'subscription-page-2',
+  })).resolves.toBe(true)
+
+  const platform = createPlatform(() => now)
+  const pageRequests: Array<string | undefined> = []
+  platform.listActiveWebhookSubscriptionsPage = async (request) => {
+    pageRequests.push(request.cursor)
+    return {
+      subscriptions: [],
+      ...(request.cursor === 'subscription-page-2'
+        ? { nextCursor: 'subscription-page-3' }
+        : {}),
+    }
+  }
+  const queued: WebhookQueueMessage[] = []
+  const dependencies = {
+    auditEvents: { getEvent: async () => event },
+    developerPlatform: platform,
+    authorizer: { canDeliver: async () => true },
+    projections,
+    queue: createRecordingQueue(queued),
+    claims: createMemoryClaimStore(),
+    now: () => now,
+    random: () => 0.5,
+    async deliver() {
+      throw new Error('Projection must not perform HTTP delivery.')
+    },
+  }
+  const duplicateResponse = await processWebhookDeliveryBatch({
+    Records: Array.from({ length: 8 }, (_, index) =>
+      createProjectionSqsRecord(event.eventId, `root-duplicate-${String(index)}`)
+    ),
+  }, dependencies)
+  expect(duplicateResponse).toEqual({ batchItemFailures: [] })
+  expect(queued.filter((message) =>
+    message.kind === 'projection' && message.cursor === 'subscription-page-2'
+  )).toHaveLength(1)
+
+  await expect(processWebhookDeliveryBatch({
+    Records: [
+      createProjectionSqsRecord(
+        event.eventId,
+        'page-2',
+        'subscription-page-2',
+      ),
+    ],
+  }, dependencies)).resolves.toEqual({ batchItemFailures: [] })
+  expect(pageRequests).toEqual(['subscription-page-2'])
+  expect(queued.filter((message) =>
+    message.kind === 'projection' && message.cursor === 'subscription-page-3'
+  )).toHaveLength(1)
+})
+
+test('serializes concurrent grant cleanup continuation senders across pages', async () => {
+  const now = new Date('2026-07-18T00:00:00.000Z')
+  const archiveEventId = 'archive-event-1'
+  const projections = createMemoryProjectionStore()
+  const rootClaim = {
+    workspaceId: 'workspace-1',
+    eventId: archiveEventId,
+    leaseOwner: 'seed-cleanup-root-page',
+    now: now.toISOString(),
+    leaseExpiresAt: '2026-07-18T00:01:30.000Z',
+  }
+  await expect(projections.tryClaim(rootClaim)).resolves.toEqual({
+    status: 'claimed',
+  })
+  await expect(projections.complete({
+    ...rootClaim,
+    nextCursor: 'cleanup-page-2',
+  })).resolves.toBe(true)
+
+  const queued: WebhookQueueMessage[] = []
+  const cleanupRequests: Array<string | undefined> = []
+  const dependencies = {
+    auditEvents: createMissingAuditReader(),
+    developerPlatform: createPlatform(() => now),
+    authorizer: { canDeliver: async () => true },
+    projections,
+    grantCleanup: {
+      async deletePage(request: { cursor?: string }) {
+        cleanupRequests.push(request.cursor)
+        return request.cursor === 'cleanup-page-2'
+          ? { nextCursor: 'cleanup-page-3' }
+          : {}
+      },
+    },
+    queue: createRecordingQueue(queued),
+    claims: createMemoryClaimStore(),
+    now: () => now,
+    random: () => 0.5,
+    async deliver() {
+      throw new Error('Grant cleanup must not perform HTTP delivery.')
+    },
+  }
+  const duplicateResponse = await processWebhookDeliveryBatch({
+    Records: Array.from({ length: 8 }, (_, index) =>
+      createGrantCleanupSqsRecord(
+        archiveEventId,
+        `cleanup-root-duplicate-${String(index)}`,
+      )
+    ),
+  }, dependencies)
+  expect(duplicateResponse).toEqual({ batchItemFailures: [] })
+  expect(queued.filter((message) =>
+    message.kind === 'grant-cleanup' && message.cursor === 'cleanup-page-2'
+  )).toHaveLength(1)
+
+  await expect(processWebhookDeliveryBatch({
+    Records: [
+      createGrantCleanupSqsRecord(
+        archiveEventId,
+        'cleanup-page-2',
+        'cleanup-page-2',
+      ),
+    ],
+  }, dependencies)).resolves.toEqual({ batchItemFailures: [] })
+  expect(cleanupRequests).toEqual(['cleanup-page-2'])
+  expect(queued.filter((message) =>
+    message.kind === 'grant-cleanup' && message.cursor === 'cleanup-page-3'
+  )).toHaveLength(1)
+})
+
+test('uses a projection lease shorter than queue visibility and reclaims it after expiry', async () => {
+  expect(WEBHOOK_PROJECTION_LEASE_SECONDS).toBe(90)
+  expect(WEBHOOK_PROJECTION_LEASE_SECONDS).toBeLessThan(120)
+  expect(WEBHOOK_PROJECTION_LEASE_SECONDS).toBeGreaterThan(30)
+  let state: Record<string, unknown> | undefined
+  const documentClient = {
+    async send(command: {
+      constructor: { name: string }
+      input: Record<string, unknown>
+    }) {
+      if (command.constructor.name === 'GetCommand') return { Item: state }
+      const values = command.input.ExpressionAttributeValues as Record<string, unknown>
+      if (
+        state &&
+        Date.parse(String(state.leaseExpiresAt)) >= Date.parse(String(values[':now']))
+      ) {
+        throw Object.assign(new Error('lease active'), {
+          name: 'ConditionalCheckFailedException',
+        })
+      }
+      state = {
+        entryType: values[':entryType'],
+        eventId: values[':eventId'],
+        cursorDigest: values[':cursorDigest'],
+        status: values[':processing'],
+        leaseOwner: values[':leaseOwner'],
+        leaseExpiresAt: values[':leaseExpiresAt'],
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const store = new DynamoDbWebhookProjectionStateStore(
+    documentClient,
+    'developer-platform-test',
+  )
+  const request = {
+    workspaceId: 'workspace-1',
+    eventId: 'event-lease',
+    leaseOwner: 'worker-1',
+    now: '2026-07-18T00:00:00.000Z',
+    leaseExpiresAt: '2026-07-18T00:01:30.000Z',
+  }
+  await expect(store.tryClaim(request)).resolves.toEqual({ status: 'claimed' })
+  await expect(store.tryClaim({
+    ...request,
+    leaseOwner: 'worker-2',
+    now: '2026-07-18T00:00:30.000Z',
+    leaseExpiresAt: '2026-07-18T00:02:00.000Z',
+  })).resolves.toEqual({ status: 'busy' })
+  await expect(store.tryClaim({
+    ...request,
+    leaseOwner: 'worker-3',
+    now: '2026-07-18T00:01:31.000Z',
+    leaseExpiresAt: '2026-07-18T00:03:01.000Z',
+  })).resolves.toEqual({ status: 'claimed' })
 })
 
 test('records a successful signed HTTP attempt in the delivery log', async () => {
@@ -291,6 +607,101 @@ test('uses an expiring conditional DynamoDB row for delivery claims', async () =
     Key: {
       workspaceId: 'workspace-1',
       recordKey: 'WEBHOOKDELIVERYCLAIM#delivery-1',
+    },
+  })
+})
+
+test('strongly pages Project cleanup locators and deletes each grant pair transactionally', async () => {
+  const commands: Array<{
+    constructor: { name: string }
+    input: Record<string, unknown>
+  }> = []
+  const locator = {
+    directoryId: 'WEBHOOK_GRANT_CLEANUP#workspace-1#team-1',
+    entryKey: 'PROJECT#project-1#MEMBER#creator-1',
+    entryType: 'webhook-team-grant-cleanup',
+    workspaceId: 'workspace-1',
+    teamId: 'team-1',
+    projectId: 'project-1',
+    memberKey: 'creator-1',
+    grantDirectoryId: 'WEBHOOK_TEAM_GRANT#workspace-1#creator-1',
+    grantEntryKey: 'TEAM#team-1#PROJECT#project-1',
+  }
+  let firstPage = true
+  const documentClient = {
+    async send(command: {
+      constructor: { name: string }
+      input: Record<string, unknown>
+    }) {
+      commands.push(command)
+      if (command.constructor.name !== 'QueryCommand') return {}
+      if (!firstPage) return { Items: [] }
+      firstPage = false
+      return {
+        Items: [locator],
+        LastEvaluatedKey: {
+          directoryId: locator.directoryId,
+          entryKey: locator.entryKey,
+        },
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const store = new DynamoDbWebhookGrantCleanupStore(
+    documentClient,
+    'project-directory-test',
+  )
+  const first = await store.deletePage({
+    workspaceId: 'workspace-1',
+    teamId: 'team-1',
+    projectId: 'project-1',
+    limit: 25,
+  })
+  expect(first.nextCursor).toBeDefined()
+  expect(commands[0]?.input).toMatchObject({
+    ConsistentRead: true,
+    KeyConditionExpression:
+      'directoryId = :directoryId AND begins_with(entryKey, :entryKeyPrefix)',
+    ExpressionAttributeValues: {
+      ':directoryId': locator.directoryId,
+      ':entryKeyPrefix': 'PROJECT#project-1#MEMBER#',
+    },
+    Limit: 25,
+  })
+  expect(commands[1]?.input).toMatchObject({
+    TransactItems: [
+      {
+        Delete: {
+          Key: {
+            directoryId: locator.grantDirectoryId,
+            entryKey: locator.grantEntryKey,
+          },
+        },
+      },
+      {
+        Delete: {
+          Key: {
+            directoryId: locator.directoryId,
+            entryKey: locator.entryKey,
+          },
+          ConditionExpression: expect.stringContaining(
+            'grantDirectoryId = :grantDirectoryId',
+          ),
+        },
+      },
+    ],
+  })
+  await expect(store.deletePage({
+    workspaceId: 'workspace-1',
+    teamId: 'team-1',
+    projectId: 'project-1',
+    cursor: first.nextCursor,
+    limit: 25,
+  })).resolves.toEqual({})
+  expect(commands[2]?.input).toMatchObject({
+    ConsistentRead: true,
+    ExclusiveStartKey: {
+      directoryId: locator.directoryId,
+      entryKey: locator.entryKey,
     },
   })
 })
@@ -513,6 +924,33 @@ function createWorkItemAuditEvent(now: Date) {
   })
 }
 
+function createProjectArchiveAuditEvent(now: Date) {
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'user-1', kind: 'user' },
+    idempotencyKey: 'archive-project-1',
+    request: {
+      method: 'DELETE',
+      path: '/api/project-directory/teams/team-1/projects/project-1',
+    },
+    source: { kind: 'api', requestId: 'archive-project-1' },
+    occurredAt: now.toISOString(),
+  })
+  return createAuditEvent({
+    context,
+    eventType: 'project.archived',
+    entity: { type: 'project', id: 'project-1' },
+    action: 'archived',
+    metadata: {
+      kind: 'project',
+      teamId: 'team-1',
+      projectId: 'project-1',
+    },
+    outboxStatus: 'pending',
+    expiresAt: Math.floor(now.getTime() / 1_000) + 86_400,
+  })
+}
+
 function createRecordingQueue(messages: WebhookQueueMessage[]): WebhookDeliveryQueue {
   return {
     async enqueue(message) {
@@ -536,6 +974,65 @@ function createMemoryClaimStore(): WebhookDeliveryClaimStore {
   }
 }
 
+function createMemoryProjectionStore(): WebhookProjectionStateStore {
+  const pages = new Map<string, {
+    nextCursor?: string
+    continuationEnqueued: boolean
+    continuationLeaseOwner?: string
+    continuationLeaseExpiresAt?: string
+  }>()
+  const activeLeases = new Map<string, string>()
+  const keyFor = (request: { eventId: string; cursor?: string }) =>
+    `${request.eventId}\0${request.cursor ?? ''}`
+  return {
+    async tryClaim(request) {
+      const key = keyFor(request)
+      const completed = pages.get(key)
+      if (completed) return { status: 'completed', ...completed }
+      if (activeLeases.has(key)) return { status: 'busy' }
+      activeLeases.set(key, request.leaseOwner)
+      return { status: 'claimed' }
+    },
+    async complete(request) {
+      const key = keyFor(request)
+      if (activeLeases.get(key) !== request.leaseOwner) return false
+      activeLeases.delete(key)
+      pages.set(key, {
+        ...(request.nextCursor ? { nextCursor: request.nextCursor } : {}),
+        continuationEnqueued: !request.nextCursor,
+      })
+      return true
+    },
+    async tryClaimContinuation(request) {
+      const page = pages.get(keyFor(request))
+      if (
+        !page ||
+        page.nextCursor !== request.nextCursor ||
+        page.continuationEnqueued ||
+        (
+          page.continuationLeaseExpiresAt &&
+          Date.parse(page.continuationLeaseExpiresAt) >= Date.parse(request.now)
+        )
+      ) return false
+      page.continuationLeaseOwner = request.leaseOwner
+      page.continuationLeaseExpiresAt = request.leaseExpiresAt
+      return true
+    },
+    async markContinuationEnqueued(request) {
+      const page = pages.get(keyFor(request))
+      if (
+        !page ||
+        page.nextCursor !== request.nextCursor ||
+        page.continuationLeaseOwner !== request.leaseOwner
+      ) return false
+      page.continuationEnqueued = true
+      delete page.continuationLeaseOwner
+      delete page.continuationLeaseExpiresAt
+      return true
+    },
+  }
+}
+
 function createMissingAuditReader() {
   return { getEvent: async () => undefined }
 }
@@ -547,10 +1044,37 @@ function createSqsRecord(deliveryId: string, messageId = 'message-1') {
   }
 }
 
-function createProjectionSqsRecord(eventId: string, messageId = 'projection-message-1') {
+function createProjectionSqsRecord(
+  eventId: string,
+  messageId = 'projection-message-1',
+  cursor?: string,
+) {
   return {
     messageId,
-    body: JSON.stringify({ kind: 'projection', workspaceId: 'workspace-1', eventId }),
+    body: JSON.stringify({
+      kind: 'projection',
+      workspaceId: 'workspace-1',
+      eventId,
+      ...(cursor ? { cursor } : {}),
+    }),
+  }
+}
+
+function createGrantCleanupSqsRecord(
+  archiveEventId: string,
+  messageId: string,
+  cursor?: string,
+) {
+  return {
+    messageId,
+    body: JSON.stringify({
+      kind: 'grant-cleanup',
+      workspaceId: 'workspace-1',
+      archiveEventId,
+      teamId: 'team-1',
+      projectId: 'project-1',
+      ...(cursor ? { cursor } : {}),
+    }),
   }
 }
 

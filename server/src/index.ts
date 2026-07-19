@@ -26,7 +26,6 @@ import {
   TransactWriteCommand,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
-import { SQSClient } from '@aws-sdk/client-sqs'
 import {
   PUBLIC_API_OPENAPI_DOCUMENT,
   PLANNING_SCHEMA_VERSION,
@@ -279,10 +278,6 @@ import {
   type ConnectorWorkItemSnapshot,
 } from './connector-sync-runtime'
 import {
-  CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
-  SqsConnectorSyncQueue,
-} from './connector-sync-worker'
-import {
   createPublicApiRouter,
   PUBLIC_API_MAX_PAGE_SIZE,
   PublicApiServiceError,
@@ -300,6 +295,9 @@ import {
 import { allowsWebhookTeamAccess } from './webhook-authorization'
 import {
   createWebhookMemberAuthorizationKey,
+  createWebhookGrantCleanupDirectoryId,
+  createWebhookGrantCleanupEntryKey,
+  createWebhookGrantCleanupItem,
   createWebhookProjectAuthorizationSortKey,
   createWebhookResourceAuthorizationKey,
   createWebhookTeamAuthorizationSortKey,
@@ -14510,19 +14508,15 @@ export class DynamoDbProjectDirectoryClient {
             updatedAt,
           ),
         },
-        ...projectGrantSources.map((source) => ({
-          Put: {
-            TableName: this.tableName,
-            Item: createWebhookTeamGrantItem({
-              workspaceId: directoryId,
-              teamId: source.teamId,
-              projectId,
-              memberKey: normalizedMemberKey,
-              teamSourceEntryKey: source.teamSourceEntryKey,
-              projectSourceEntryKey: source.projectSourceEntryKey,
-            }),
-          },
-        })),
+        ...projectGrantSources.flatMap((source) =>
+          createWebhookTeamGrantTransactItems(
+            this.tableName,
+            directoryId,
+            projectId,
+            normalizedMemberKey,
+            source,
+          )
+        ),
         ...(auditPut ? [auditPut] : []),
       )
       requireDynamoDbTransactionCapacity(transactItems)
@@ -14663,6 +14657,21 @@ export class DynamoDbProjectDirectoryClient {
           },
         }
       })
+      const cleanupLocatorDeletes = projectTeamIds.map((teamId) => ({
+        Delete: {
+          TableName: this.tableName,
+          Key: {
+            directoryId: createWebhookGrantCleanupDirectoryId(
+              directoryId,
+              teamId,
+            ),
+            entryKey: createWebhookGrantCleanupEntryKey(
+              projectId,
+              normalizedMemberKey,
+            ),
+          },
+        },
+      }))
 
       const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
         ...(guardManager
@@ -14677,6 +14686,7 @@ export class DynamoDbProjectDirectoryClient {
           Delete: memberDelete,
         },
         ...grantDeletes,
+        ...cleanupLocatorDeletes,
         ...(auditPut ? [auditPut] : []),
       ]
       requireDynamoDbTransactionCapacity(transactItems)
@@ -14989,6 +14999,17 @@ export class DynamoDbProjectDirectoryClient {
                 memberKey: creatorMemberKey,
                 teamSourceEntryKey: team.entryKey,
                 projectSourceEntryKey: item.entryKey,
+              }),
+            },
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: createWebhookGrantCleanupItem({
+                workspaceId: directoryId,
+                teamId,
+                projectId,
+                memberKey: creatorMemberKey,
               }),
             },
           },
@@ -16793,6 +16814,67 @@ function getActiveProjectGrantSources(
     })
   }
   return [...sourcesByTeamId.values()]
+}
+
+function createWebhookTeamGrantTransactItems(
+  tableName: string,
+  workspaceId: string,
+  projectId: string,
+  memberKey: string,
+  source: ProjectWebhookGrantSource,
+): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  return [
+    {
+      ConditionCheck: {
+        TableName: tableName,
+        Key: {
+          directoryId: workspaceId,
+          entryKey: source.teamSourceEntryKey,
+        },
+        ConditionExpression:
+          '#entryType = :teamEntryType AND attribute_not_exists(archivedAt)',
+        ExpressionAttributeNames: { '#entryType': 'entryType' },
+        ExpressionAttributeValues: { ':teamEntryType': 'team' },
+      },
+    },
+    {
+      ConditionCheck: {
+        TableName: tableName,
+        Key: {
+          directoryId: workspaceId,
+          entryKey: source.projectSourceEntryKey,
+        },
+        ConditionExpression:
+          '#entryType = :projectEntryType AND attribute_not_exists(archivedAt)',
+        ExpressionAttributeNames: { '#entryType': 'entryType' },
+        ExpressionAttributeValues: { ':projectEntryType': 'project' },
+      },
+    },
+    {
+      Put: {
+        TableName: tableName,
+        Item: createWebhookTeamGrantItem({
+          workspaceId,
+          teamId: source.teamId,
+          projectId,
+          memberKey,
+          teamSourceEntryKey: source.teamSourceEntryKey,
+          projectSourceEntryKey: source.projectSourceEntryKey,
+        }),
+      },
+    },
+    {
+      Put: {
+        TableName: tableName,
+        Item: createWebhookGrantCleanupItem({
+          workspaceId,
+          teamId: source.teamId,
+          projectId,
+          memberKey,
+        }),
+      },
+    },
+  ]
 }
 
 function compareProjectMemberItems(first: ProjectMemberItem, second: ProjectMemberItem) {
@@ -19257,57 +19339,6 @@ const lazyConnectorAuthorization: ConnectorAuthorizationService = {
   },
 }
 
-let publicConnectorSyncQueue: SqsConnectorSyncQueue | undefined
-let publicConnectorSyncSqsClient: SQSClient | undefined
-
-function getPublicConnectorSyncQueue() {
-  if (publicConnectorSyncQueue) return publicConnectorSyncQueue
-  const queueUrl = getEnv('CONNECTOR_SYNC_QUEUE_URL')
-  if (!queueUrl) {
-    throw new ConnectorRuntimeError(
-      'ConnectorSyncQueueUnavailable',
-      'Connector synchronization queue is not configured.',
-      { retryable: true },
-    )
-  }
-  const endpoint = getEnv('SQS_ENDPOINT') ??
-    getEnv('AWS_ENDPOINT_URL_SQS') ??
-    getEnv('AWS_ENDPOINT_URL')
-  publicConnectorSyncSqsClient ??= new SQSClient({
-    region: getEnv('AWS_REGION') ?? getEnv('AWS_DEFAULT_REGION') ?? 'ap-northeast-1',
-    ...(endpoint
-      ? {
-          endpoint,
-          credentials: {
-            accessKeyId: getEnv('AWS_ACCESS_KEY_ID') ?? 'test',
-            secretAccessKey: getEnv('AWS_SECRET_ACCESS_KEY') ?? 'test',
-          },
-        }
-      : {}),
-  })
-  publicConnectorSyncQueue = new SqsConnectorSyncQueue(
-    publicConnectorSyncSqsClient,
-    queueUrl,
-  )
-  return publicConnectorSyncQueue
-}
-
-async function queueConnectorDisconnectMessage(input: {
-  workspaceId: string
-  installationId: string
-  lifecycleRevision: number
-  updatedByUserId: string
-}) {
-  await getPublicConnectorSyncQueue().enqueue({
-    version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
-    kind: 'disconnect-links',
-    workspaceId: input.workspaceId,
-    installationId: input.installationId,
-    lifecycleRevision: input.lifecycleRevision,
-    updatedByUserId: input.updatedByUserId,
-  })
-}
-
 async function requirePublicImportPermission(
   principal: WorkspacePrincipal,
   input: PublicImportSourceInput,
@@ -19860,7 +19891,6 @@ if (!getEnv('MUKUROJI_RUNTIME_ROLE')) {
     cursorSecret: getPublicApiCursorSecret(),
     queueWebhookDelivery: queueWebhookDeliveryMessage,
     connectorAuthorization: lazyConnectorAuthorization,
-    queueConnectorDisconnect: queueConnectorDisconnectMessage,
     mapError: mapPublicApiAdapterError,
   }
   app.route('/api', createPublicApiRouter(publicApiDependencies))

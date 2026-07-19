@@ -1567,8 +1567,7 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
     Environment: deliveryEnvironment,
   });
   template.hasResourceProperties('AWS::Lambda::Function', {
-    Description:
-      'Starts the resumable Webhook ACL backfill before delivery reads are enabled.',
+    Description: 'Starts the writer drain and resumable Webhook ACL backfill.',
     Environment: {
       Variables: {
         PROJECT_DIRECTORY_TABLE_NAME: {
@@ -1585,7 +1584,7 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   });
   template.hasResourceProperties('AWS::Lambda::Function', {
     Description:
-      'Processes one checkpointed page of the retained Webhook ACL backfill.',
+      'Waits for writer drain and processes checkpointed Webhook ACL pages.',
     Environment: {
       Variables: {
         PROJECT_DIRECTORY_TABLE_NAME: {
@@ -1602,7 +1601,7 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   });
   const backfillEntry = Object.entries(resources).find(([, resource]) =>
     (resource as { Properties?: { MigrationVersion?: string } })
-      .Properties?.MigrationVersion === 'v1'
+      .Properties?.MigrationVersion === 'v2'
   );
   expect(backfillEntry?.[0]).toBe('WebhookAuthorizationBackfill');
   expect(backfillEntry?.[1]).toEqual(expect.objectContaining({
@@ -1614,6 +1613,38 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   expect(resources.WebhookDeliveryFunctionEA305509.DependsOn).toEqual(
     expect.arrayContaining(['WebhookAuthorizationBackfill']),
   );
+  for (const rolePrefix of [
+    'WebhookAuthorizationBackfillFunctionServiceRole',
+    'WebhookAuthorizationBackfillProgressFunctionServiceRole',
+  ]) {
+    const roleId = Object.entries(resources).find(([logicalId, resource]) =>
+      logicalId.startsWith(rolePrefix) &&
+      (resource as { Type?: string }).Type === 'AWS::IAM::Role'
+    )?.[0];
+    const policies = Object.values(resources).filter((resource) => {
+      if (!roleId || (resource as { Type?: string }).Type !== 'AWS::IAM::Policy') {
+        return false;
+      }
+      const roles =
+        (resource as { Properties?: { Roles?: Array<{ Ref?: string }> } })
+          .Properties?.Roles ?? [];
+      return roles.some((role) => role.Ref === roleId);
+    });
+    const statements = policies.flatMap((policy) =>
+      (policy as {
+        Properties?: {
+          PolicyDocument?: { Statement?: Array<Record<string, unknown>> };
+        };
+      }).Properties?.PolicyDocument?.Statement ?? []
+    );
+    expect(statements).toContainEqual(expect.objectContaining({
+      Effect: 'Allow',
+      Action: 'dynamodb:TransactWriteItems',
+      Resource: {
+        'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'],
+      },
+    }));
+  }
   template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
     BatchSize: 10,
     EventSourceArn: {
@@ -1714,6 +1745,20 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   expect(deliveryPolicies).toContain('dynamodb:UpdateItem');
   expect(deliveryPolicies).toContain('dynamodb:DeleteItem');
   expect(deliveryPolicies).not.toContain('WebhookAuthorizationIndex');
+  const deliveryStatements = policiesForRole(deliveryRoleId).flatMap((policy) =>
+    (policy as {
+      Properties?: {
+        PolicyDocument?: { Statement?: Array<Record<string, unknown>> };
+      };
+    }).Properties?.PolicyDocument?.Statement ?? []
+  );
+  expect(deliveryStatements).toContainEqual(expect.objectContaining({
+    Effect: 'Allow',
+    Action: 'dynamodb:TransactWriteItems',
+    Resource: {
+      'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'],
+    },
+  }));
   expect(deliveryPolicies).toContain('kms:Decrypt');
   expect(deliveryPolicies).not.toContain('kms:Encrypt');
   expect(deliveryPolicies).not.toContain('kms:GenerateDataKey');
@@ -1924,7 +1969,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
       'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.'
   ) as { Properties: { Environment: { Variables: Record<string, unknown> } } };
   expect(apiFunction.Properties.Environment.Variables)
-    .toHaveProperty('CONNECTOR_SYNC_QUEUE_URL', { Ref: queueId });
+    .not.toHaveProperty('CONNECTOR_SYNC_QUEUE_URL');
 
   template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
     BatchSize: 1,
@@ -2643,9 +2688,6 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Effect: 'Allow',
     Resource: [
       {
-        'Fn::GetAtt': [connectorSyncQueueLogicalId, 'Arn'],
-      },
-      {
         'Fn::GetAtt': ['WebhookDeliveryQueue2A244492', 'Arn'],
       },
       {
@@ -2653,7 +2695,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
       },
     ],
   }));
-  expect(serializedApiPolicies).toContain(connectorSyncQueueLogicalId);
+  expect(serializedApiPolicies).not.toContain(connectorSyncQueueLogicalId);
   for (const forbiddenAction of [
     'dynamodb:BatchGetItem',
     'dynamodb:BatchWriteItem',
@@ -2761,9 +2803,12 @@ test('workspace metadata owner alias and project manager rows are idempotently b
   expect(createPayload.match(/":role":\{"S":"manager"\}/g)).toHaveLength(4);
   expect(createPayload.match(/":timestamp":\{"S":"2026-07-11T00:00:00.000Z"\}/g)).toHaveLength(5);
   expect(createPayload.match(/"Update"/g)).toHaveLength(7);
-  expect(createPayload.match(/"Put"/g)).toHaveLength(5);
+  expect(createPayload.match(/"Put"/g)).toHaveLength(10);
   expect(createPayload.match(/"entryType":\{"S":"webhook-team-grant"\}/g))
     .toHaveLength(5);
+  expect(createPayload.match(
+    /"entryType":\{"S":"webhook-team-grant-cleanup"\}/g,
+  )).toHaveLength(5);
   expect(createPayload.match(/"teamSourceEntryKey"/g)).toHaveLength(5);
   expect(createPayload.match(/"projectSourceEntryKey"/g)).toHaveLength(5);
   expect(createPayload).toContain(

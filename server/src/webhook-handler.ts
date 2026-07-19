@@ -1,9 +1,11 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import {
   DeleteCommand,
   DynamoDBDocumentClient,
   GetCommand,
+  QueryCommand,
+  TransactWriteCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs'
@@ -36,6 +38,11 @@ import {
   DynamoDbWebhookSubscriptionAuthorizer,
   type WebhookSubscriptionAuthorizer,
 } from './webhook-authorization'
+import {
+  createWebhookGrantCleanupDirectoryId,
+  createWebhookGrantCleanupEntryKeyPrefix,
+  createWebhookGrantCleanupItem,
+} from './webhook-authorization-projection'
 
 /** SQS が1 message に設定できる最大 delay 秒です。 */
 export const WEBHOOK_QUEUE_MAX_DELAY_SECONDS = 15 * 60
@@ -48,6 +55,15 @@ export const WEBHOOK_PROJECTION_PAGE_SIZE = 50
 
 /** Webhook projection が同時に実行する認可・永続化・enqueue の最大件数です。 */
 export const WEBHOOK_PROJECTION_CONCURRENCY = 10
+
+/** Projection page worker の durable lease 秒数です。 */
+export const WEBHOOK_PROJECTION_LEASE_SECONDS = 90
+
+/** 完了済み projection page state の保持秒数です。 */
+export const WEBHOOK_PROJECTION_STATE_RETENTION_SECONDS = 15 * 24 * 60 * 60
+
+/** 1 cleanup messageで削除するgrant locator最大件数です。 */
+export const WEBHOOK_GRANT_CLEANUP_PAGE_SIZE = 25
 
 /** DynamoDB Streams image に含まれる AttributeValue の必要最小表現です。 */
 export type WebhookDynamoAttributeValue = {
@@ -124,10 +140,27 @@ export type WebhookProjectionQueueMessage = {
   cursor?: string
 }
 
+/** Archived Team/Project のmaterialized Webhook grantsを削除するmessageです。 */
+export type WebhookGrantCleanupQueueMessage = {
+  /** Message の用途を識別する discriminator です。 */
+  kind: 'grant-cleanup'
+  /** Archived resource が属するWorkspace IDです。 */
+  workspaceId: string
+  /** Archive transitionを一意に識別するAudit event IDです。 */
+  archiveEventId: string
+  /** Archived Team IDです。 */
+  teamId: string
+  /** Project archiveの場合に限定するProject IDです。 */
+  projectId?: string
+  /** 次に読むcleanup locator pageのopaque cursorです。 */
+  cursor?: string
+}
+
 /** Webhook queue に載せる secret-free message です。 */
 export type WebhookQueueMessage =
   | WebhookDeliveryQueueMessage
   | WebhookProjectionQueueMessage
+  | WebhookGrantCleanupQueueMessage
 
 /** Webhook delivery queue への書き込み境界です。 */
 export interface WebhookDeliveryQueue {
@@ -139,6 +172,89 @@ export interface WebhookDeliveryQueue {
 export interface WebhookAuditEventReader {
   /** Workspace-bound ID で Audit event を返します。 */
   getEvent(workspaceId: string, eventId: string): Promise<AuditEventV1 | undefined>
+}
+
+/** Webhook projection page claim の入力です。 */
+export type WebhookProjectionClaimRequest = {
+  /** Audit event が属する Workspace ID です。 */
+  workspaceId: string
+  /** Projection 対象 Audit event ID です。 */
+  eventId: string
+  /** このpageを一意に識別するsubscription cursorです。 */
+  cursor?: string
+  /** Current worker owner token です。 */
+  leaseOwner: string
+  /** Claim 判定時刻です。 */
+  now: string
+  /** Claim の失効日時です。 */
+  leaseExpiresAt: string
+}
+
+/** Webhook projection page 完了入力です。 */
+export type WebhookProjectionCompletionRequest = WebhookProjectionClaimRequest & {
+  /** 次pageが存在する場合のsubscription cursorです。 */
+  nextCursor?: string
+}
+
+/** Projection page claim の永続状態です。 */
+export type WebhookProjectionClaimResult =
+  | {
+      /** Current worker がpageを処理できます。 */
+      status: 'claimed'
+    }
+  | {
+      /** 別workerのleaseが有効です。 */
+      status: 'busy'
+    }
+  | {
+      /** Page処理は完了済みです。 */
+      status: 'completed'
+      /** Durable state に保存済みの次cursorです。 */
+      nextCursor?: string
+      /** 次page enqueue の確認が永続化済みかどうかです。 */
+      continuationEnqueued: boolean
+    }
+
+/** `(eventId,cursor)` ごとの durable projection state 境界です。 */
+export interface WebhookProjectionStateStore {
+  /** Missing/expired page lease をcurrent workerが取得します。 */
+  tryClaim(request: WebhookProjectionClaimRequest): Promise<WebhookProjectionClaimResult>
+  /** Current ownerだけがpageをcompletedへ進めます。 */
+  complete(request: WebhookProjectionCompletionRequest): Promise<boolean>
+  /** Pending continuation send leaseをcurrent workerが一度だけ取得します。 */
+  tryClaimContinuation(
+    request: WebhookProjectionCompletionRequest,
+  ): Promise<boolean>
+  /** Current pageの次message enqueue確認を一度だけ保存します。 */
+  markContinuationEnqueued(
+    request: WebhookProjectionCompletionRequest,
+  ): Promise<boolean>
+}
+
+/** Archived resource grant cleanup page requestです。 */
+export type WebhookGrantCleanupPageRequest = {
+  /** Archived resource が属するWorkspace IDです。 */
+  workspaceId: string
+  /** Archived Team IDです。 */
+  teamId: string
+  /** Project archiveの場合に限定するProject IDです。 */
+  projectId?: string
+  /** 前pageが返したopaque cursorです。 */
+  cursor?: string
+  /** 1 page の最大locator数です。 */
+  limit: number
+}
+
+/** Archived resource grant cleanup page resultです。 */
+export type WebhookGrantCleanupPage = {
+  /** 次pageが存在する場合のopaque cursorです。 */
+  nextCursor?: string
+}
+
+/** Project directory のgrant/cleanup locator削除境界です。 */
+export interface WebhookGrantCleanupStore {
+  /** Strong queryしたlocatorをbounded transactionで削除します。 */
+  deletePage(request: WebhookGrantCleanupPageRequest): Promise<WebhookGrantCleanupPage>
 }
 
 /** Webhook delivery の durable claim 入力です。 */
@@ -177,6 +293,10 @@ export type WebhookDeliveryWorkerDependencies = {
   developerPlatform: DeveloperPlatformClient
   /** Retry/replay 時にも subscription 作成者の current ACL を再検証します。 */
   authorizer: WebhookSubscriptionAuthorizer
+  /** Projection page のleaseとcontinuation checkpointです。 */
+  projections?: WebhookProjectionStateStore
+  /** Archived Team/Project のgrant locator cleanup境界です。 */
+  grantCleanup?: WebhookGrantCleanupStore
   /** HTTP worker へ delivery locator を渡す queue です。 */
   queue: WebhookDeliveryQueue
   /** Delivery ID ごとの durable HTTP attempt claim です。 */
@@ -209,6 +329,8 @@ let defaultQueue: WebhookDeliveryQueue | undefined
 let defaultSqsClient: SQSClient | undefined
 let defaultWebhookDeliveryClaimStore: WebhookDeliveryClaimStore | undefined
 let defaultWebhookAuditEventReader: WebhookAuditEventReader | undefined
+let defaultWebhookProjectionStateStore: WebhookProjectionStateStore | undefined
+let defaultWebhookGrantCleanupStore: WebhookGrantCleanupStore | undefined
 
 /**
  * AuditEventsTable の pending insert を durable projection queue へ渡します。
@@ -248,6 +370,8 @@ export async function deliveryHandler(event: WebhookSqsEvent): Promise<WebhookBa
     auditEvents: getDefaultWebhookAuditEventReader(),
     developerPlatform: getDefaultDeveloperPlatform(),
     authorizer: getDefaultWebhookAuthorizer(),
+    projections: getDefaultWebhookProjectionStateStore(),
+    grantCleanup: getDefaultWebhookGrantCleanupStore(),
     queue: getDefaultWebhookQueue(),
     claims: getDefaultWebhookDeliveryClaimStore(),
     deliver: deliverPreparedWebhook,
@@ -299,7 +423,18 @@ async function projectAuditRecord(
   const stored = unmarshalDynamoMap(record.dynamodb.NewImage)
   if (stored.outboxStatus !== 'pending') return
   const event = upcastAuditEvent(stored)
-  if (event.outboxStatus !== 'pending' || !isWebhookEventType(event.eventType)) return
+  if (event.outboxStatus !== 'pending') return
+  const cleanupScope = readWebhookGrantCleanupScope(event)
+  if (cleanupScope) {
+    await dependencies.queue.enqueue({
+      kind: 'grant-cleanup',
+      workspaceId: event.workspaceId,
+      archiveEventId: event.eventId,
+      ...cleanupScope,
+    })
+    return
+  }
+  if (!isWebhookEventType(event.eventType)) return
   await dependencies.queue.enqueue({
     kind: 'projection',
     workspaceId: event.workspaceId,
@@ -311,6 +446,35 @@ async function processWebhookProjectionMessage(
   message: WebhookProjectionQueueMessage,
   dependencies: WebhookDeliveryWorkerDependencies,
 ) {
+  if (!dependencies.projections) {
+    throw new TypeError('Webhook projection state store is required.')
+  }
+  const claimTime = dependencies.now()
+  const claimRequest: WebhookProjectionClaimRequest = {
+    workspaceId: message.workspaceId,
+    eventId: message.eventId,
+    ...(message.cursor ? { cursor: message.cursor } : {}),
+    leaseOwner: randomUUID(),
+    now: claimTime.toISOString(),
+    leaseExpiresAt: new Date(
+      claimTime.getTime() + WEBHOOK_PROJECTION_LEASE_SECONDS * 1_000,
+    ).toISOString(),
+  }
+  const claim = await dependencies.projections.tryClaim(claimRequest)
+  if (claim.status === 'busy') {
+    throw new Error('Webhook projection page lease is still active.')
+  }
+  if (claim.status === 'completed') {
+    if (claim.nextCursor && !claim.continuationEnqueued) {
+      await enqueueWebhookProjectionContinuation(
+        claimRequest,
+        claim.nextCursor,
+        dependencies,
+      )
+    }
+    return
+  }
+
   const event = await dependencies.auditEvents.getEvent(message.workspaceId, message.eventId)
   if (
     !event ||
@@ -318,7 +482,12 @@ async function processWebhookProjectionMessage(
     event.eventId !== message.eventId ||
     event.outboxStatus !== 'pending' ||
     !isWebhookEventType(event.eventType)
-  ) return
+  ) {
+    if (!await dependencies.projections.complete(claimRequest)) {
+      throw new Error('Webhook projection lease was lost.')
+    }
+    return
+  }
 
   const envelope: WebhookEventEnvelope = {
     id: event.eventId,
@@ -329,7 +498,12 @@ async function processWebhookProjectionMessage(
     data: toAuditEventView(event),
   }
   const resourceScope = readWebhookEventResourceScope(envelope)
-  if (!resourceScope) return
+  if (!resourceScope) {
+    if (!await dependencies.projections.complete(claimRequest)) {
+      throw new Error('Webhook projection lease was lost.')
+    }
+    return
+  }
 
   const page = await dependencies.developerPlatform.listActiveWebhookSubscriptionsPage({
     workspaceId: event.workspaceId,
@@ -374,13 +548,40 @@ async function processWebhookProjectionMessage(
     )
   }
 
+  const completion = {
+    ...claimRequest,
+    ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+  }
+  if (!await dependencies.projections.complete(completion)) {
+    throw new Error('Webhook projection lease was lost.')
+  }
   if (page.nextCursor) {
-    await dependencies.queue.enqueue({
-      kind: 'projection',
-      workspaceId: event.workspaceId,
-      eventId: event.eventId,
-      cursor: page.nextCursor,
-    })
+    await enqueueWebhookProjectionContinuation(
+      claimRequest,
+      page.nextCursor,
+      dependencies,
+    )
+  }
+}
+
+async function enqueueWebhookProjectionContinuation(
+  claim: WebhookProjectionClaimRequest,
+  nextCursor: string,
+  dependencies: WebhookDeliveryWorkerDependencies,
+) {
+  const completion = {
+    ...claim,
+    nextCursor,
+  }
+  if (!await dependencies.projections!.tryClaimContinuation(completion)) return
+  await dependencies.queue.enqueue({
+    kind: 'projection',
+    workspaceId: claim.workspaceId,
+    eventId: claim.eventId,
+    cursor: nextCursor,
+  })
+  if (!await dependencies.projections!.markContinuationEnqueued(completion)) {
+    throw new Error('Webhook projection continuation lease was lost.')
   }
 }
 
@@ -401,6 +602,10 @@ async function processWebhookQueueRecord(
   const message = readWebhookQueueMessage(record.body)
   if (message.kind === 'projection') {
     await processWebhookProjectionMessage(message, dependencies)
+    return
+  }
+  if (message.kind === 'grant-cleanup') {
+    await processWebhookGrantCleanupMessage(message, dependencies)
     return
   }
   const now = dependencies.now()
@@ -425,6 +630,83 @@ async function processWebhookQueueRecord(
     completed = true
   } finally {
     if (completed || !attemptStarted) await dependencies.claims.release(claim)
+  }
+}
+
+async function processWebhookGrantCleanupMessage(
+  message: WebhookGrantCleanupQueueMessage,
+  dependencies: WebhookDeliveryWorkerDependencies,
+) {
+  if (!dependencies.projections || !dependencies.grantCleanup) {
+    throw new TypeError('Webhook grant cleanup dependencies are required.')
+  }
+  const now = dependencies.now()
+  const claimRequest: WebhookProjectionClaimRequest = {
+    workspaceId: message.workspaceId,
+    eventId: message.archiveEventId,
+    ...(message.cursor ? { cursor: message.cursor } : {}),
+    leaseOwner: randomUUID(),
+    now: now.toISOString(),
+    leaseExpiresAt: new Date(
+      now.getTime() + WEBHOOK_PROJECTION_LEASE_SECONDS * 1_000,
+    ).toISOString(),
+  }
+  const claim = await dependencies.projections.tryClaim(claimRequest)
+  if (claim.status === 'busy') {
+    throw new Error('Webhook grant cleanup page lease is still active.')
+  }
+  if (claim.status === 'completed') {
+    if (claim.nextCursor && !claim.continuationEnqueued) {
+      await enqueueWebhookGrantCleanupContinuation(
+        message,
+        claimRequest,
+        claim.nextCursor,
+        dependencies,
+      )
+    }
+    return
+  }
+  const page = await dependencies.grantCleanup.deletePage({
+    workspaceId: message.workspaceId,
+    teamId: message.teamId,
+    ...(message.projectId ? { projectId: message.projectId } : {}),
+    ...(message.cursor ? { cursor: message.cursor } : {}),
+    limit: WEBHOOK_GRANT_CLEANUP_PAGE_SIZE,
+  })
+  const completion = {
+    ...claimRequest,
+    ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+  }
+  if (!await dependencies.projections.complete(completion)) {
+    throw new Error('Webhook grant cleanup lease was lost.')
+  }
+  if (page.nextCursor) {
+    await enqueueWebhookGrantCleanupContinuation(
+      message,
+      claimRequest,
+      page.nextCursor,
+      dependencies,
+    )
+  }
+}
+
+async function enqueueWebhookGrantCleanupContinuation(
+  message: WebhookGrantCleanupQueueMessage,
+  claim: WebhookProjectionClaimRequest,
+  nextCursor: string,
+  dependencies: WebhookDeliveryWorkerDependencies,
+) {
+  const completion = {
+    ...claim,
+    nextCursor,
+  }
+  if (!await dependencies.projections!.tryClaimContinuation(completion)) return
+  await dependencies.queue.enqueue({
+    ...message,
+    cursor: nextCursor,
+  })
+  if (!await dependencies.projections!.markContinuationEnqueued(completion)) {
+    throw new Error('Webhook grant cleanup continuation lease was lost.')
   }
 }
 
@@ -649,9 +931,358 @@ implements WebhookDeliveryClaimStore {
   }
 }
 
+/** Developer platform table で projection page のleaseと完了状態を保持します。 */
+export class DynamoDbWebhookProjectionStateStore
+implements WebhookProjectionStateStore {
+  /** DynamoDB DocumentClient です。 */
+  private readonly documentClient: DynamoDBDocumentClient
+  /** Projection state row を保存するDeveloper platform table名です。 */
+  private readonly tableName: string
+
+  /** DynamoDB-backed projection state store を作成します。 */
+  constructor(
+    documentClient: DynamoDBDocumentClient = createWebhookDocumentClient(),
+    tableName = readWebhookClaimTableName(),
+  ) {
+    this.documentClient = documentClient
+    this.tableName = readIdentifier(tableName, 'Developer platform table name')
+  }
+
+  /** Missing/expired page lease だけをcurrent workerが取得します。 */
+  async tryClaim(request: WebhookProjectionClaimRequest) {
+    const normalized = readWebhookProjectionClaimRequest(request)
+    const cursorDigest = createWebhookProjectionCursorDigest(normalized.cursor)
+    const key = createWebhookProjectionStateKey(normalized)
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: key,
+        UpdateExpression:
+          'SET #entryType = :entryType, eventId = :eventId, ' +
+          'cursorDigest = :cursorDigest, #status = :processing, ' +
+          'leaseOwner = :leaseOwner, leaseExpiresAt = :leaseExpiresAt, ' +
+          'updatedAt = :now, expiresAt = :expiresAt',
+        ConditionExpression:
+          'attribute_not_exists(workspaceId) OR ' +
+          '(#entryType = :entryType AND eventId = :eventId AND ' +
+          'cursorDigest = :cursorDigest AND #status = :processing AND ' +
+          'leaseExpiresAt < :now)',
+        ExpressionAttributeNames: {
+          '#entryType': 'entryType',
+          '#status': 'status',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'webhook-projection-state',
+          ':eventId': normalized.eventId,
+          ':cursorDigest': cursorDigest,
+          ':processing': 'processing',
+          ':leaseOwner': normalized.leaseOwner,
+          ':leaseExpiresAt': normalized.leaseExpiresAt,
+          ':now': normalized.now,
+          ':expiresAt': Math.floor(
+            Date.parse(normalized.leaseExpiresAt) / 1_000,
+          ) + WEBHOOK_PROJECTION_STATE_RETENTION_SECONDS,
+        },
+      }))
+      return { status: 'claimed' } as const
+    } catch (error) {
+      if (readErrorName(error) !== 'ConditionalCheckFailedException') throw error
+    }
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: key,
+      ConsistentRead: true,
+    }))
+    return readWebhookProjectionClaimResult(
+      response.Item,
+      normalized.eventId,
+      cursorDigest,
+    )
+  }
+
+  /** Current lease ownerだけがpageとnext cursorをcompletedへ進めます。 */
+  async complete(request: WebhookProjectionCompletionRequest) {
+    const normalized = readWebhookProjectionCompletionRequest(request)
+    const cursorDigest = createWebhookProjectionCursorDigest(normalized.cursor)
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: createWebhookProjectionStateKey(normalized),
+        UpdateExpression: normalized.nextCursor
+          ? 'SET #status = :completed, nextCursor = :nextCursor, ' +
+            'continuationEnqueued = :notEnqueued, updatedAt = :now, ' +
+            'expiresAt = :expiresAt ' +
+            'REMOVE leaseOwner, leaseExpiresAt, continuationLeaseOwner, ' +
+            'continuationLeaseExpiresAt'
+          : 'SET #status = :completed, continuationEnqueued = :enqueued, ' +
+            'updatedAt = :now, expiresAt = :expiresAt ' +
+            'REMOVE leaseOwner, leaseExpiresAt, nextCursor, ' +
+            'continuationLeaseOwner, continuationLeaseExpiresAt',
+        ConditionExpression:
+          '#entryType = :entryType AND eventId = :eventId AND ' +
+          'cursorDigest = :cursorDigest AND #status = :processing AND ' +
+          'leaseOwner = :leaseOwner',
+        ExpressionAttributeNames: {
+          '#entryType': 'entryType',
+          '#status': 'status',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'webhook-projection-state',
+          ':eventId': normalized.eventId,
+          ':cursorDigest': cursorDigest,
+          ':processing': 'processing',
+          ':completed': 'completed',
+          ':leaseOwner': normalized.leaseOwner,
+          ':now': normalized.now,
+          ':expiresAt': Math.floor(Date.parse(normalized.now) / 1_000) +
+            WEBHOOK_PROJECTION_STATE_RETENTION_SECONDS,
+          ':enqueued': true,
+          ...(normalized.nextCursor
+            ? { ':nextCursor': normalized.nextCursor, ':notEnqueued': false }
+            : {}),
+        },
+      }))
+      return true
+    } catch (error) {
+      if (readErrorName(error) === 'ConditionalCheckFailedException') return false
+      throw error
+    }
+  }
+
+  /** Completed pageのpending continuation send leaseを条件付きで取得します。 */
+  async tryClaimContinuation(request: WebhookProjectionCompletionRequest) {
+    const normalized = readWebhookProjectionCompletionRequest(request)
+    if (!normalized.nextCursor) {
+      throw new TypeError('Webhook projection continuation cursor is required.')
+    }
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: createWebhookProjectionStateKey(normalized),
+        UpdateExpression:
+          'SET continuationLeaseOwner = :leaseOwner, ' +
+          'continuationLeaseExpiresAt = :leaseExpiresAt, updatedAt = :now',
+        ConditionExpression:
+          '#entryType = :entryType AND eventId = :eventId AND ' +
+          'cursorDigest = :cursorDigest AND #status = :completed AND ' +
+          'nextCursor = :nextCursor AND continuationEnqueued = :notEnqueued AND ' +
+          '(attribute_not_exists(continuationLeaseExpiresAt) OR ' +
+          'continuationLeaseExpiresAt < :now)',
+        ExpressionAttributeNames: {
+          '#entryType': 'entryType',
+          '#status': 'status',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'webhook-projection-state',
+          ':eventId': normalized.eventId,
+          ':cursorDigest': createWebhookProjectionCursorDigest(normalized.cursor),
+          ':completed': 'completed',
+          ':nextCursor': normalized.nextCursor,
+          ':notEnqueued': false,
+          ':leaseOwner': normalized.leaseOwner,
+          ':leaseExpiresAt': normalized.leaseExpiresAt,
+          ':now': normalized.now,
+        },
+      }))
+      return true
+    } catch (error) {
+      if (readErrorName(error) === 'ConditionalCheckFailedException') return false
+      throw error
+    }
+  }
+
+  /** Current continuation lease ownerだけがenqueue確認を保存します。 */
+  async markContinuationEnqueued(request: WebhookProjectionCompletionRequest) {
+    const normalized = readWebhookProjectionCompletionRequest(request)
+    if (!normalized.nextCursor) {
+      throw new TypeError('Webhook projection continuation cursor is required.')
+    }
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: createWebhookProjectionStateKey(normalized),
+        UpdateExpression:
+          'SET continuationEnqueued = :enqueued, updatedAt = :now ' +
+          'REMOVE continuationLeaseOwner, continuationLeaseExpiresAt',
+        ConditionExpression:
+          '#entryType = :entryType AND eventId = :eventId AND ' +
+          'cursorDigest = :cursorDigest AND #status = :completed AND ' +
+          'nextCursor = :nextCursor AND continuationEnqueued = :notEnqueued AND ' +
+          'continuationLeaseOwner = :leaseOwner',
+        ExpressionAttributeNames: {
+          '#entryType': 'entryType',
+          '#status': 'status',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'webhook-projection-state',
+          ':eventId': normalized.eventId,
+          ':cursorDigest': createWebhookProjectionCursorDigest(normalized.cursor),
+          ':completed': 'completed',
+          ':nextCursor': normalized.nextCursor,
+          ':notEnqueued': false,
+          ':enqueued': true,
+          ':leaseOwner': normalized.leaseOwner,
+          ':now': normalized.now,
+        },
+      }))
+      return true
+    } catch (error) {
+      if (readErrorName(error) === 'ConditionalCheckFailedException') return false
+      throw error
+    }
+  }
+}
+
+/** Project directory に保存したgrant cleanup locatorです。 */
+type WebhookGrantCleanupLocator = {
+  /** Locator partition keyです。 */
+  directoryId: string
+  /** Locator sort keyです。 */
+  entryKey: string
+  /** Locator discriminatorです。 */
+  entryType: 'webhook-team-grant-cleanup'
+  /** Grantが属するWorkspace IDです。 */
+  workspaceId: string
+  /** Grantが属するTeam IDです。 */
+  teamId: string
+  /** Grantが属するProject IDです。 */
+  projectId: string
+  /** Grant subject member keyです。 */
+  memberKey: string
+  /** 削除対象grant partition keyです。 */
+  grantDirectoryId: string
+  /** 削除対象grant sort keyです。 */
+  grantEntryKey: string
+}
+
+/** Primary-key locatorを使ってarchived resource grantsをbounded削除します。 */
+export class DynamoDbWebhookGrantCleanupStore
+implements WebhookGrantCleanupStore {
+  /** DynamoDB DocumentClient です。 */
+  private readonly documentClient: DynamoDBDocumentClient
+  /** Project directory table名です。 */
+  private readonly tableName: string
+
+  /** DynamoDB-backed cleanup storeを作成します。 */
+  constructor(
+    documentClient: DynamoDBDocumentClient = createWebhookDocumentClient(),
+    tableName = readWebhookProjectDirectoryTableName(),
+  ) {
+    this.documentClient = documentClient
+    this.tableName = readIdentifier(tableName, 'Project directory table name')
+  }
+
+  /** Locatorをstrong queryし、grantとのpairをtransactionalに削除します。 */
+  async deletePage(request: WebhookGrantCleanupPageRequest) {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const teamId = readIdentifier(request.teamId, 'Webhook Team ID')
+    const projectId = request.projectId === undefined
+      ? undefined
+      : readIdentifier(request.projectId, 'Webhook Project ID')
+    if (
+      !Number.isSafeInteger(request.limit) ||
+      request.limit < 1 ||
+      request.limit > WEBHOOK_GRANT_CLEANUP_PAGE_SIZE
+    ) {
+      throw new TypeError('Webhook grant cleanup page limit is invalid.')
+    }
+    const directoryId = createWebhookGrantCleanupDirectoryId(workspaceId, teamId)
+    const entryKeyPrefix = projectId
+      ? createWebhookGrantCleanupEntryKeyPrefix(projectId)
+      : undefined
+    const exclusiveStartKey = request.cursor
+      ? decodeWebhookGrantCleanupCursor(
+          request.cursor,
+          directoryId,
+          entryKeyPrefix,
+        )
+      : undefined
+    const response = await this.documentClient.send(new QueryCommand({
+      TableName: this.tableName,
+      KeyConditionExpression: entryKeyPrefix
+        ? 'directoryId = :directoryId AND begins_with(entryKey, :entryKeyPrefix)'
+        : 'directoryId = :directoryId',
+      ExpressionAttributeValues: {
+        ':directoryId': directoryId,
+        ...(entryKeyPrefix ? { ':entryKeyPrefix': entryKeyPrefix } : {}),
+      },
+      ConsistentRead: true,
+      Limit: request.limit,
+      ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+    }))
+    const locators = (response.Items ?? []).map((value) =>
+      readWebhookGrantCleanupLocator(
+        value,
+        workspaceId,
+        teamId,
+        projectId,
+      )
+    )
+    if (locators.length > 0) {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: locators.flatMap((locator) => [
+          {
+            Delete: {
+              TableName: this.tableName,
+              Key: {
+                directoryId: locator.grantDirectoryId,
+                entryKey: locator.grantEntryKey,
+              },
+            },
+          },
+          {
+            Delete: {
+              TableName: this.tableName,
+              Key: {
+                directoryId: locator.directoryId,
+                entryKey: locator.entryKey,
+              },
+              ConditionExpression:
+                '#entryType = :entryType AND workspaceId = :workspaceId AND ' +
+                'teamId = :teamId AND projectId = :projectId AND ' +
+                'memberKey = :memberKey AND ' +
+                'grantDirectoryId = :grantDirectoryId AND ' +
+                'grantEntryKey = :grantEntryKey',
+              ExpressionAttributeNames: { '#entryType': 'entryType' },
+              ExpressionAttributeValues: {
+                ':entryType': 'webhook-team-grant-cleanup',
+                ':workspaceId': locator.workspaceId,
+                ':teamId': locator.teamId,
+                ':projectId': locator.projectId,
+                ':memberKey': locator.memberKey,
+                ':grantDirectoryId': locator.grantDirectoryId,
+                ':grantEntryKey': locator.grantEntryKey,
+              },
+            },
+          },
+        ]),
+      }))
+    }
+    return response.LastEvaluatedKey
+      ? {
+          nextCursor: encodeWebhookGrantCleanupCursor(
+            response.LastEvaluatedKey,
+            directoryId,
+            entryKeyPrefix,
+          ),
+        }
+      : {}
+  }
+}
+
 function getDefaultDeveloperPlatform() {
   defaultDeveloperPlatform ??= new DynamoDbDeveloperPlatformClient()
   return defaultDeveloperPlatform
+}
+
+function getDefaultWebhookProjectionStateStore() {
+  defaultWebhookProjectionStateStore ??= new DynamoDbWebhookProjectionStateStore()
+  return defaultWebhookProjectionStateStore
+}
+
+function getDefaultWebhookGrantCleanupStore() {
+  defaultWebhookGrantCleanupStore ??= new DynamoDbWebhookGrantCleanupStore()
+  return defaultWebhookGrantCleanupStore
 }
 
 function getDefaultWebhookDeliveryClaimStore() {
@@ -760,6 +1391,19 @@ function readWebhookClaimTableName() {
   return 'mukuroji-developer-platform-local'
 }
 
+function readWebhookProjectDirectoryTableName() {
+  const configured = process.env.PROJECT_DIRECTORY_TABLE_NAME?.trim()
+  if (configured) return configured
+  if (
+    process.env.NODE_ENV === 'production' ||
+    Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME?.trim()) ||
+    Boolean(process.env.AWS_EXECUTION_ENV?.trim())
+  ) {
+    throw new TypeError('Project directory table name is required in production.')
+  }
+  return 'mukuroji-project-directory-local'
+}
+
 function readWebhookDeliveryClaimRequest(
   request: WebhookDeliveryClaimRequest,
 ): WebhookDeliveryClaimRequest {
@@ -778,6 +1422,95 @@ function readWebhookDeliveryClaimRequest(
     now,
     leaseExpiresAt,
   }
+}
+
+function readWebhookProjectionClaimRequest(
+  request: WebhookProjectionClaimRequest,
+): WebhookProjectionClaimRequest {
+  const now = readTimestamp(request.now, 'Webhook projection claim time')
+  const leaseExpiresAt = readTimestamp(
+    request.leaseExpiresAt,
+    'Webhook projection claim expiry',
+  )
+  if (Date.parse(leaseExpiresAt) <= Date.parse(now)) {
+    throw new TypeError(
+      'Webhook projection claim expiry must be after its claim time.',
+    )
+  }
+  return {
+    workspaceId: readIdentifier(request.workspaceId, 'Workspace ID'),
+    eventId: readIdentifier(request.eventId, 'Audit event ID'),
+    ...(request.cursor === undefined
+      ? {}
+      : { cursor: readOpaqueCursor(request.cursor) }),
+    leaseOwner: readIdentifier(request.leaseOwner, 'Webhook projection claim owner'),
+    now,
+    leaseExpiresAt,
+  }
+}
+
+function readWebhookProjectionCompletionRequest(
+  request: WebhookProjectionCompletionRequest,
+): WebhookProjectionCompletionRequest {
+  return {
+    ...readWebhookProjectionClaimRequest(request),
+    ...(request.nextCursor === undefined
+      ? {}
+      : { nextCursor: readOpaqueCursor(request.nextCursor) }),
+  }
+}
+
+function createWebhookProjectionCursorDigest(cursor: string | undefined) {
+  return createHash('sha256')
+    .update(cursor ?? 'FIRST_PAGE', 'utf8')
+    .digest('hex')
+}
+
+function createWebhookProjectionStateKey(
+  request: Pick<WebhookProjectionClaimRequest, 'workspaceId' | 'eventId' | 'cursor'>,
+) {
+  const pageDigest = createHash('sha256')
+    .update(`${request.eventId}\0${request.cursor ?? 'FIRST_PAGE'}`, 'utf8')
+    .digest('hex')
+  return {
+    workspaceId: request.workspaceId,
+    recordKey: `WEBHOOKPROJECTION#${pageDigest}`,
+  }
+}
+
+function readWebhookProjectionClaimResult(
+  value: Record<string, unknown> | undefined,
+  eventId: string,
+  cursorDigest: string,
+): WebhookProjectionClaimResult {
+  if (
+    !value ||
+    value.entryType !== 'webhook-projection-state' ||
+    value.eventId !== eventId ||
+    value.cursorDigest !== cursorDigest
+  ) {
+    throw new TypeError('Webhook projection state is invalid.')
+  }
+  if (value.status === 'processing' && typeof value.leaseExpiresAt === 'string') {
+    return { status: 'busy' }
+  }
+  if (
+    value.status === 'completed' &&
+    typeof value.continuationEnqueued === 'boolean' &&
+    (
+      value.nextCursor === undefined ||
+      typeof value.nextCursor === 'string'
+    )
+  ) {
+    return {
+      status: 'completed',
+      ...(typeof value.nextCursor === 'string'
+        ? { nextCursor: readOpaqueCursor(value.nextCursor) }
+        : {}),
+      continuationEnqueued: value.continuationEnqueued,
+    }
+  }
+  throw new TypeError('Webhook projection state is invalid.')
 }
 
 function createWebhookDeliveryClaimRecordKey(deliveryId: string) {
@@ -825,6 +1558,20 @@ function readWebhookQueueMessage(body: string | undefined): WebhookQueueMessage 
         : { cursor: readOpaqueCursor(value.cursor) }),
     }
   }
+  if (value.kind === 'grant-cleanup') {
+    return {
+      kind: 'grant-cleanup',
+      workspaceId,
+      archiveEventId: readIdentifier(value.archiveEventId, 'Audit event ID'),
+      teamId: readIdentifier(value.teamId, 'Webhook Team ID'),
+      ...(value.projectId === undefined
+        ? {}
+        : { projectId: readIdentifier(value.projectId, 'Webhook Project ID') }),
+      ...(value.cursor === undefined
+        ? {}
+        : { cursor: readOpaqueCursor(value.cursor) }),
+    }
+  }
   throw new TypeError('Webhook queue message kind is invalid.')
 }
 
@@ -835,6 +1582,25 @@ function createSerializedWebhookQueueMessage(message: WebhookQueueMessage) {
       kind: message.kind,
       workspaceId,
       deliveryId: readIdentifier(message.deliveryId, 'Webhook delivery ID'),
+    }
+  }
+  if (message.kind === 'grant-cleanup') {
+    return {
+      kind: message.kind,
+      workspaceId,
+      archiveEventId: readIdentifier(message.archiveEventId, 'Audit event ID'),
+      teamId: readIdentifier(message.teamId, 'Webhook Team ID'),
+      ...(message.projectId === undefined
+        ? {}
+        : {
+            projectId: readIdentifier(
+              message.projectId,
+              'Webhook Project ID',
+            ),
+          }),
+      ...(message.cursor === undefined
+        ? {}
+        : { cursor: readOpaqueCursor(message.cursor) }),
     }
   }
   return {
@@ -876,6 +1642,109 @@ function readWebhookEventResourceScope(event: WebhookEventEnvelope) {
     : undefined
   if (projectId !== undefined && (!projectId || projectId.length > 200)) return undefined
   return { teamId, ...(projectId ? { projectId } : {}) }
+}
+
+function readWebhookGrantCleanupScope(event: AuditEventV1) {
+  if (event.eventType !== 'project.archived' || !isRecord(event.metadata)) {
+    return undefined
+  }
+  const teamId = readIdentifier(event.metadata.teamId, 'Webhook Team ID')
+  if (event.metadata.kind === 'team') return { teamId }
+  if (event.metadata.kind === 'project') {
+    return {
+      teamId,
+      projectId: readIdentifier(event.metadata.projectId, 'Webhook Project ID'),
+    }
+  }
+  return undefined
+}
+
+function readWebhookGrantCleanupLocator(
+  value: Record<string, unknown>,
+  workspaceId: string,
+  teamId: string,
+  expectedProjectId?: string,
+): WebhookGrantCleanupLocator {
+  if (
+    value.entryType !== 'webhook-team-grant-cleanup' ||
+    typeof value.projectId !== 'string' ||
+    typeof value.memberKey !== 'string'
+  ) {
+    throw new TypeError('Webhook grant cleanup locator is invalid.')
+  }
+  const expected = createWebhookGrantCleanupItem({
+    workspaceId,
+    teamId,
+    projectId: value.projectId,
+    memberKey: value.memberKey,
+  })
+  if (
+    (expectedProjectId !== undefined && value.projectId !== expectedProjectId) ||
+    Object.entries(expected).some(([key, expectedValue]) =>
+      value[key] !== expectedValue
+    )
+  ) {
+    throw new TypeError('Webhook grant cleanup locator is invalid.')
+  }
+  return expected
+}
+
+function encodeWebhookGrantCleanupCursor(
+  value: Record<string, unknown>,
+  expectedDirectoryId: string,
+  expectedEntryKeyPrefix?: string,
+) {
+  if (
+    value.directoryId !== expectedDirectoryId ||
+    typeof value.entryKey !== 'string' ||
+    (
+      expectedEntryKeyPrefix !== undefined &&
+      !value.entryKey.startsWith(expectedEntryKeyPrefix)
+    )
+  ) {
+    throw new TypeError('Webhook grant cleanup cursor is invalid.')
+  }
+  return Buffer.from(JSON.stringify({
+    version: 1,
+    directoryId: expectedDirectoryId,
+    entryKey: value.entryKey,
+    ...(expectedEntryKeyPrefix
+      ? { entryKeyPrefix: expectedEntryKeyPrefix }
+      : {}),
+  }), 'utf8').toString('base64url')
+}
+
+function decodeWebhookGrantCleanupCursor(
+  value: string,
+  expectedDirectoryId: string,
+  expectedEntryKeyPrefix?: string,
+) {
+  try {
+    const encoded = readOpaqueCursor(value)
+    const decoded = JSON.parse(
+      Buffer.from(encoded, 'base64url').toString('utf8'),
+    ) as unknown
+    if (
+      !isRecord(decoded) ||
+      decoded.version !== 1 ||
+      decoded.directoryId !== expectedDirectoryId ||
+      typeof decoded.entryKey !== 'string' ||
+      decoded.entryKeyPrefix !== expectedEntryKeyPrefix ||
+      (
+        expectedEntryKeyPrefix !== undefined &&
+        !decoded.entryKey.startsWith(expectedEntryKeyPrefix)
+      ) ||
+      Buffer.from(JSON.stringify(decoded), 'utf8').toString('base64url') !== encoded
+    ) {
+      throw new Error('invalid')
+    }
+    return {
+      directoryId: expectedDirectoryId,
+      entryKey: decoded.entryKey,
+    }
+  } catch {
+    throw new TypeError('Webhook grant cleanup cursor is invalid.')
+  }
 }
 
 function readPreparedWebhookEvent(payload: string): WebhookEventEnvelope {

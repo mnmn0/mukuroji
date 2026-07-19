@@ -132,14 +132,6 @@ function createTestRouter(input: {
   platform?: InMemoryDeveloperPlatformClient
   now?: () => Date
   queueWebhookDelivery?: (workspaceId: string, deliveryId: string) => Promise<void>
-  queueConnectorDisconnect?: (
-    input: {
-      workspaceId: string
-      installationId: string
-      lifecycleRevision: number
-      updatedByUserId: string
-    },
-  ) => Promise<void>
 } = {}) {
   const platform = input.platform ?? new InMemoryDeveloperPlatformClient(
     new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
@@ -156,7 +148,6 @@ function createTestRouter(input: {
     ...(input.queueWebhookDelivery
       ? { queueWebhookDelivery: input.queueWebhookDelivery }
       : {}),
-    queueConnectorDisconnect: input.queueConnectorDisconnect ?? (async () => {}),
     ...(input.connectorAuthorization
       ? { connectorAuthorization: input.connectorAuthorization }
       : {}),
@@ -1130,7 +1121,6 @@ describe('public API router', () => {
   test('retains the local connector credential when provider disconnect fails', async () => {
     let disconnectAttempts = 0
     let disconnectPlatform: InMemoryDeveloperPlatformClient | undefined
-    let queuedDisconnects = 0
     const connectorAuthorization: ConnectorAuthorizationService = {
       async begin() {
         throw new Error('not used')
@@ -1167,12 +1157,7 @@ describe('public API router', () => {
         throw new Error('not used')
       },
     }
-    const { platform, router } = createTestRouter({
-      connectorAuthorization,
-      queueConnectorDisconnect: async () => {
-        queuedDisconnects += 1
-      },
-    })
+    const { platform, router } = createTestRouter({ connectorAuthorization })
     disconnectPlatform = platform
     const installation = await platform.installConnector({
       workspaceId: 'workspace-1',
@@ -1212,7 +1197,6 @@ describe('public API router', () => {
     const retry = await request()
     expect(retry.status).toBe(200)
     expect(disconnectAttempts).toBe(2)
-    expect(queuedDisconnects).toBe(1)
     await expect(platform.readConnectorCredential({
       workspaceId: 'workspace-1',
       installationId: installation.id,
@@ -1222,11 +1206,9 @@ describe('public API router', () => {
     )
   })
 
-  test('retries durable connector cleanup enqueue after local disconnect succeeds', async () => {
+  test('recovers when the disconnect response is lost after durable local commit', async () => {
     let platform: InMemoryDeveloperPlatformClient | undefined
     let disconnectCalls = 0
-    let queueCalls = 0
-    const queuedLifecycleRevisions: number[] = []
     const connectorAuthorization: ConnectorAuthorizationService = {
       async begin() {
         throw new Error('not used')
@@ -1249,6 +1231,7 @@ describe('public API router', () => {
             installationId,
             status: 'disconnected',
           })
+          throw new Error('disconnect response was lost after commit')
         }
         return platform.readConnectorLifecycleSnapshot({
           workspaceId: 'workspace-1',
@@ -1262,14 +1245,7 @@ describe('public API router', () => {
         throw new Error('not used')
       },
     }
-    const fixture = createTestRouter({
-      connectorAuthorization,
-      queueConnectorDisconnect: async (input) => {
-        queueCalls += 1
-        queuedLifecycleRevisions.push(input.lifecycleRevision)
-        if (queueCalls === 1) throw new Error('SQS is temporarily unavailable')
-      },
-    })
+    const fixture = createTestRouter({ connectorAuthorization })
     platform = fixture.platform
     const installation = await platform.installConnector({
       workspaceId: 'workspace-1',
@@ -1297,7 +1273,7 @@ describe('public API router', () => {
     expect(failed.status).toBe(503)
     expect(await failed.json()).toMatchObject({
       code: 'temporarily_unavailable',
-      detail: 'Connector cleanup was not queued. Retry the same operation to recover safely.',
+      detail: 'Connector disconnect did not finish. Retry the same operation to recover safely.',
       retryable: true,
     })
     expect(await platform.listConnectors('workspace-1')).toContainEqual(
@@ -1307,15 +1283,11 @@ describe('public API router', () => {
     const recovered = await request()
     expect(recovered.status).toBe(200)
     expect(disconnectCalls).toBe(2)
-    expect(queueCalls).toBe(2)
     const snapshot = await platform.readConnectorLifecycleSnapshot({
       workspaceId: 'workspace-1',
       installationId: installation.id,
     })
-    expect(queuedLifecycleRevisions).toEqual([
-      snapshot.disconnectCleanupRevision,
-      snapshot.disconnectCleanupRevision,
-    ])
+    expect(snapshot.disconnectCleanupRevision).toBe(snapshot.lifecycleRevision)
   })
 
   test('authorizes every webhook Team selector before storing a subscription', async () => {

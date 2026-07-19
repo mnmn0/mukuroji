@@ -1722,17 +1722,22 @@ describe('webhook subscription and delivery', () => {
       ({ name }) => name === 'TransactWriteCommand',
     )
     const disableWrites = disableTransaction?.input.TransactItems as Array<{
+      Delete?: { Key?: Record<string, unknown> }
       Put?: { Item?: Record<string, unknown> }
       Update?: { UpdateExpression?: string }
     }> | undefined
-    expect(disableWrites).toHaveLength(3)
+    expect(disableWrites).toHaveLength(4)
     expect(disableWrites?.[0]?.Put?.Item).toMatchObject({
       entryType: 'webhook-subscription',
       value: { status: 'disabled' },
     })
     expect(disableWrites?.[1]?.Update?.UpdateExpression)
       .toContain('subscriptionCount - :one')
-    expect(disableWrites?.[2]?.Put?.Item).toMatchObject({
+    expect(disableWrites?.[2]?.Delete?.Key).toMatchObject({
+      workspaceId: 'workspace-dynamo-quota',
+      recordKey: expect.stringMatching(/^WEBHOOKACTIVE#/u),
+    })
+    expect(disableWrites?.[3]?.Put?.Item).toMatchObject({
       entryType: 'idempotency',
       value: { state: 'completed' },
     })
@@ -1985,6 +1990,44 @@ describe('webhook subscription and delivery', () => {
     expect(recoveredRecord).toMatchObject({
       connectorOAuthStateRevision: 2,
       connectorCredentialRevision: 2,
+    })
+
+    memory.commands.splice(0)
+    await client.updateConnectorStatus({
+      workspaceId: 'workspace-connector-audit',
+      installationId: installation.id,
+      status: 'disconnected',
+      updatedByUserId: 'user-connector-audit',
+    })
+    const disconnectTransaction = memory.commands.find(
+      ({ name }) => name === 'TransactWriteCommand',
+    )
+    const disconnectWrites = disconnectTransaction?.input.TransactItems as Array<{
+      Put?: { TableName?: string; Item?: Record<string, unknown> }
+    }>
+    expect(disconnectWrites).toHaveLength(2)
+    const disconnectedInstallation = disconnectWrites[0]?.Put?.Item
+    const disconnectRevision = disconnectedInstallation?.version
+    expect(disconnectedInstallation).toMatchObject({
+      connectorDisconnectCleanupRevision: disconnectRevision,
+      value: {
+        id: installation.id,
+        status: 'disconnected',
+      },
+    })
+    expect(disconnectWrites[1]?.Put).toMatchObject({
+      TableName: 'AuditEventsTable',
+      Item: {
+        eventType: 'connector.status.updated',
+        entity: { type: 'connector-installation', id: installation.id },
+        actor: { id: 'user-connector-audit', kind: 'user' },
+        metadata: {
+          adapter: 'developer-platform',
+          previousStatus: 'connected',
+          status: 'disconnected',
+          disconnectCleanupRevision: disconnectRevision,
+        },
+      },
     })
   })
 
@@ -2254,6 +2297,64 @@ describe('webhook subscription and delivery', () => {
       subscriptionId: created.subscription.id,
       status: 'active',
     })).rejects.toMatchObject({ status: 409, code: 'WebhookSubscriptionDisabled' })
+  })
+
+  test('reads retained legacy active subscriptions after primary locators without duplicates', async () => {
+    const { client } = createClient()
+    const retained = await client.createWebhookSubscription({
+      workspaceId: 'workspace-legacy-webhook',
+      createdByUserId: 'user-1',
+      input: {
+        name: 'Retained subscription',
+        url: 'https://hooks.example.test/retained',
+        teamIds: ['team-1'],
+        eventTypes: ['work-item.updated'],
+        scopes: ['work-items:read'],
+      },
+    })
+    const storage = client as unknown as {
+      records: Map<string, Record<string, unknown>>
+    }
+    const subscriptionKey =
+      `workspace-legacy-webhook\0WEBHOOK#${retained.subscription.id}`
+    const activeLocatorKey = [...storage.records.keys()].find((key) =>
+      key.startsWith('workspace-legacy-webhook\0WEBHOOKACTIVE#')
+    )
+    if (!activeLocatorKey) throw new Error('Active locator was not created.')
+    storage.records.delete(activeLocatorKey)
+    Object.assign(storage.records.get(subscriptionKey)!, {
+      lookupKey: 'WEBHOOK#ACTIVE#workspace-legacy-webhook',
+      lookupSortKey:
+        `${retained.subscription.createdAt}#${retained.subscription.id}`,
+    })
+
+    const primary = await client.listActiveWebhookSubscriptionsPage({
+      workspaceId: 'workspace-legacy-webhook',
+      limit: 50,
+    })
+    expect(primary.subscriptions).toEqual([retained.subscription])
+    expect(primary.nextCursor).toBeDefined()
+    const migratedPrimary = await client.listActiveWebhookSubscriptionsPage({
+      workspaceId: 'workspace-legacy-webhook',
+      limit: 50,
+      cursor: primary.nextCursor,
+    })
+    expect(migratedPrimary).toEqual({ subscriptions: [] })
+
+    const restoredLocator = {
+      workspaceId: 'workspace-legacy-webhook',
+      recordKey: activeLocatorKey.split('\0')[1],
+      entryType: 'webhook-active-subscription',
+      value: { targetRecordKey: `WEBHOOK#${retained.subscription.id}` },
+      version: 1,
+    }
+    storage.records.set(activeLocatorKey, restoredLocator)
+    const current = await client.listActiveWebhookSubscriptionsPage({
+      workspaceId: 'workspace-legacy-webhook',
+      limit: 50,
+    })
+    expect(current.subscriptions).toEqual([retained.subscription])
+    expect(current.nextCursor).toBeUndefined()
   })
 
   test('enqueues deterministically, prepares signed payload, records retries, and replays', async () => {

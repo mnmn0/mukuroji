@@ -436,22 +436,44 @@ seed_webhook_team_grant() {
   member_key="$3"
   team_source_entry_key="$4"
   project_source_entry_key="$5"
-  aws_local dynamodb put-item \
-    --table-name "$PROJECT_DIRECTORY_TABLE" \
-    --item "{
-      \"directoryId\": {\"S\": \"WEBHOOK_TEAM_GRANT#$PROJECT_DIRECTORY_ID#$member_key\"},
-      \"entryKey\": {\"S\": \"TEAM#$team_id#PROJECT#$project_id\"},
-      \"entryType\": {\"S\": \"webhook-team-grant\"},
-      \"workspaceId\": {\"S\": \"$PROJECT_DIRECTORY_ID\"},
-      \"teamId\": {\"S\": \"$team_id\"},
-      \"projectId\": {\"S\": \"$project_id\"},
-      \"memberKey\": {\"S\": \"$member_key\"},
-      \"sourceEntryKey\": {\"S\": \"PROJECT_MEMBER#$project_id#$member_key\"},
-      \"teamSourceEntryKey\": {\"S\": \"$team_source_entry_key\"},
-      \"projectSourceEntryKey\": {\"S\": \"$project_source_entry_key\"},
-      \"webhookAuthorizationKey\": {\"S\": \"WEBHOOK_ACL#TEAM_MEMBER#$PROJECT_DIRECTORY_ID#$team_id#$member_key\"},
-      \"webhookAuthorizationSortKey\": {\"S\": \"PROJECT#$project_id\"}
-    }" \
+  aws_local dynamodb transact-write-items \
+    --transact-items "[
+      {
+        \"Put\": {
+          \"TableName\": \"$PROJECT_DIRECTORY_TABLE\",
+          \"Item\": {
+            \"directoryId\": {\"S\": \"WEBHOOK_TEAM_GRANT#$PROJECT_DIRECTORY_ID#$member_key\"},
+            \"entryKey\": {\"S\": \"TEAM#$team_id#PROJECT#$project_id\"},
+            \"entryType\": {\"S\": \"webhook-team-grant\"},
+            \"workspaceId\": {\"S\": \"$PROJECT_DIRECTORY_ID\"},
+            \"teamId\": {\"S\": \"$team_id\"},
+            \"projectId\": {\"S\": \"$project_id\"},
+            \"memberKey\": {\"S\": \"$member_key\"},
+            \"sourceEntryKey\": {\"S\": \"PROJECT_MEMBER#$project_id#$member_key\"},
+            \"teamSourceEntryKey\": {\"S\": \"$team_source_entry_key\"},
+            \"projectSourceEntryKey\": {\"S\": \"$project_source_entry_key\"},
+            \"webhookAuthorizationKey\": {\"S\": \"WEBHOOK_ACL#TEAM_MEMBER#$PROJECT_DIRECTORY_ID#$team_id#$member_key\"},
+            \"webhookAuthorizationSortKey\": {\"S\": \"PROJECT#$project_id\"}
+          }
+        }
+      },
+      {
+        \"Put\": {
+          \"TableName\": \"$PROJECT_DIRECTORY_TABLE\",
+          \"Item\": {
+            \"directoryId\": {\"S\": \"WEBHOOK_GRANT_CLEANUP#$PROJECT_DIRECTORY_ID#$team_id\"},
+            \"entryKey\": {\"S\": \"PROJECT#$project_id#MEMBER#$member_key\"},
+            \"entryType\": {\"S\": \"webhook-team-grant-cleanup\"},
+            \"workspaceId\": {\"S\": \"$PROJECT_DIRECTORY_ID\"},
+            \"teamId\": {\"S\": \"$team_id\"},
+            \"projectId\": {\"S\": \"$project_id\"},
+            \"memberKey\": {\"S\": \"$member_key\"},
+            \"grantDirectoryId\": {\"S\": \"WEBHOOK_TEAM_GRANT#$PROJECT_DIRECTORY_ID#$member_key\"},
+            \"grantEntryKey\": {\"S\": \"TEAM#$team_id#PROJECT#$project_id\"}
+          }
+        }
+      }
+    ]" \
     >/dev/null
 }
 

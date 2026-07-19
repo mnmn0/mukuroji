@@ -1253,6 +1253,7 @@ type DeveloperPlatformEntryType =
   | 'oauth-app'
   | 'oauth-token'
   | 'webhook-subscription'
+  | 'webhook-active-subscription'
   | 'webhook-subscription-quota'
   | 'webhook-delivery'
   | 'webhook-delivery-index'
@@ -1335,6 +1336,37 @@ type StoredCredentialAuthValue = {
   /** Credential domain row の sort key です。 */
   targetRecordKey: string
 }
+
+/** Active Webhook subscription locator の secret-free value です。 */
+type StoredActiveWebhookSubscriptionValue = {
+  /** Current subscription base row の sort key です。 */
+  targetRecordKey: string
+}
+
+/** Active Webhook locator migration中の内部cursorです。 */
+type ActiveWebhookSubscriptionCursor =
+  | {
+      /** Cursor schema versionです。 */
+      version: 1
+      /** Primary locator query phaseです。 */
+      phase: 'primary'
+      /** Tenant bindingです。 */
+      workspaceId: string
+      /** Primary queryの排他的開始sort keyです。 */
+      recordKey?: string
+    }
+  | {
+      /** Cursor schema versionです。 */
+      version: 1
+      /** Retain済みGSI rowだけを読むmigration fallback phaseです。 */
+      phase: 'legacy'
+      /** Tenant bindingです。 */
+      workspaceId: string
+      /** Legacy GSI partition keyです。 */
+      lookupKey: string
+      /** GSI queryの排他的開始locatorです。 */
+      locator?: DeveloperPlatformRecordLocator
+    }
 
 /** Credential auth row の条件付き Put です。 */
 type CredentialAuthRecordWrite = {
@@ -1681,6 +1713,13 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     record: DeveloperPlatformRecord,
     completion?: PreparedIdempotencyCompletionRecord,
   ): Promise<'created' | 'quota-exceeded' | 'conflict'>
+
+  /** Webhook subscription と active locator、optional receipt を原子的に保存します。 */
+  protected abstract putWebhookSubscriptionRecord(
+    record: DeveloperPlatformRecord,
+    expectedVersion: number,
+    completion?: PreparedIdempotencyCompletionRecord,
+  ): Promise<boolean>
 
   /** Webhook subscription の無効化と Workspace quota 解放を原子的に保存します。 */
   protected abstract disableWebhookSubscriptionRecord(
@@ -2611,10 +2650,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       createWebhookRecordKey(id),
       'webhook-subscription',
       subscription,
-      {
-        secretCiphertext,
-        ...createActiveWebhookSubscriptionProjection(workspaceId, subscription),
-      },
+      { secretCiphertext },
     )
     const result = {
       subscription: clone(subscription),
@@ -2654,7 +2690,7 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
     )
   }
 
-  /** Active sparse projection を bounded page 取得し、base row を強整合再検証します。 */
+  /** Primary-key active locator を強整合の bounded page で取得します。 */
   async listActiveWebhookSubscriptionsPage(
     request: ListActiveWebhookSubscriptionsPageRequest,
   ): Promise<ActiveWebhookSubscriptionsPage> {
@@ -2664,43 +2700,111 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       WEBHOOK_PROJECTION_PAGE_MAX_LIMIT,
       'Webhook subscription page limit',
     )
-    const lookupKey = createActiveWebhookSubscriptionLookupKey(workspaceId)
-    const exclusiveStartKey = request.cursor === undefined
-      ? undefined
-      : decodeInternalLookupCursor(
-          request.cursor,
-          lookupKey,
-          'Webhook subscription cursor',
-        )
-    const page = await this.queryLookupIndex({
-      lookupKey,
+    let cursor = request.cursor === undefined
+      ? {
+          version: 1,
+          phase: 'legacy',
+          workspaceId,
+          lookupKey: createActiveWebhookSubscriptionLookupKey(workspaceId),
+        } satisfies ActiveWebhookSubscriptionCursor
+      : decodeActiveWebhookSubscriptionCursor(request.cursor, workspaceId)
+    if (cursor.phase === 'legacy') {
+      const page = await this.queryLookupIndex({
+        lookupKey: cursor.lookupKey,
+        limit,
+        scanIndexForward: true,
+        ...(cursor.locator ? { exclusiveStartKey: cursor.locator } : {}),
+      })
+      const subscriptions = (await mapWithConcurrency(
+        page.locators,
+        WEBHOOK_ENQUEUE_CONCURRENCY,
+        async (locator) => {
+          const record = await this.getRecord(locator.workspaceId, locator.recordKey)
+          if (
+            record?.entryType !== 'webhook-subscription' ||
+            record.lookupKey !== cursor.lookupKey ||
+            record.lookupSortKey !== locator.lookupSortKey ||
+            isRecordExpired(record, this.clock())
+          ) return undefined
+          const subscription = readRecordValue<WebhookSubscription>(
+            record,
+            'webhook-subscription',
+          )
+          if (subscription.status !== 'active') return undefined
+          const primaryLocator = await this.getRecord(
+            workspaceId,
+            createActiveWebhookSubscriptionRecordKey(subscription),
+          )
+          if (primaryLocator?.entryType === 'webhook-active-subscription') {
+            return undefined
+          }
+          return clone(subscription)
+        },
+      )).filter(isDefined)
+      if (page.lastEvaluatedKey) {
+        return {
+          subscriptions,
+          nextCursor: encodeActiveWebhookSubscriptionCursor({
+            ...cursor,
+            locator: page.lastEvaluatedKey,
+          }),
+        }
+      }
+      const primaryCursor = {
+        version: 1,
+        phase: 'primary',
+        workspaceId,
+      } satisfies ActiveWebhookSubscriptionCursor
+      if (subscriptions.length > 0) {
+        return {
+          subscriptions,
+          nextCursor: encodeActiveWebhookSubscriptionCursor(primaryCursor),
+        }
+      }
+      cursor = primaryCursor
+    }
+    const locatorPrefix = createActiveWebhookSubscriptionRecordKeyPrefix()
+    const page = await this.listRecordsPage(
+      workspaceId,
+      locatorPrefix,
       limit,
-      scanIndexForward: true,
-      ...(exclusiveStartKey ? { exclusiveStartKey } : {}),
-    })
+      cursor.recordKey,
+    )
     const subscriptions = (await mapWithConcurrency(
-      page.locators,
+      page.records,
       WEBHOOK_ENQUEUE_CONCURRENCY,
       async (locator) => {
-        const record = await this.getRecord(locator.workspaceId, locator.recordKey)
+        if (locator.entryType !== 'webhook-active-subscription') return undefined
+        const value = readRecordValue<StoredActiveWebhookSubscriptionValue>(
+          locator,
+          'webhook-active-subscription',
+        )
+        const record = await this.getRecord(workspaceId, value.targetRecordKey)
         if (
           record?.entryType !== 'webhook-subscription' ||
-          record.lookupKey !== lookupKey ||
-          record.lookupSortKey !== locator.lookupSortKey
+          isRecordExpired(record, this.clock())
         ) return undefined
         const subscription = readRecordValue<WebhookSubscription>(
           record,
           'webhook-subscription',
         )
-        if (subscription.status !== 'active') return undefined
+        if (
+          subscription.status !== 'active' ||
+          locator.recordKey !== createActiveWebhookSubscriptionRecordKey(subscription) ||
+          value.targetRecordKey !== createWebhookRecordKey(subscription.id)
+        ) return undefined
         return clone(subscription)
       },
     )).filter(isDefined)
+    const nextCursor = page.nextRecordKey
+      ? encodeActiveWebhookSubscriptionCursor({
+          ...cursor,
+          recordKey: page.nextRecordKey,
+        })
+      : undefined
     return {
       subscriptions,
-      ...(page.lastEvaluatedKey
-        ? { nextCursor: encodeInternalLookupCursor(page.lastEvaluatedKey) }
-        : {}),
+      ...(nextCursor ? { nextCursor } : {}),
     }
   }
 
@@ -2737,16 +2841,23 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       secretCiphertext,
       version: record.version + 1,
     }
+    delete updatedRecord.lookupKey
+    delete updatedRecord.lookupSortKey
     const result = {
       subscription: clone(subscription),
       signingSecret: secret,
     } satisfies WebhookSecretResult
-    const saved = await this.persistMutationRecord(
-      workspaceId,
+    const completion = request.idempotency
+      ? await this.prepareIdempotencyCompletionRecord(
+          workspaceId,
+          request.idempotency,
+          { status: 200, body: result },
+        )
+      : undefined
+    const saved = await this.putWebhookSubscriptionRecord(
       updatedRecord,
-      { expectedVersion: record.version },
-      request.idempotency,
-      { status: 200, body: result },
+      record.version,
+      completion,
     )
     if (!saved) throw persistenceConflict()
     return result
@@ -2798,15 +2909,8 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
       value: subscription,
       version: record.version + 1,
     }
-    if (status === 'active') {
-      Object.assign(
-        updatedRecord,
-        createActiveWebhookSubscriptionProjection(workspaceId, subscription),
-      )
-    } else {
-      delete updatedRecord.lookupKey
-      delete updatedRecord.lookupSortKey
-    }
+    delete updatedRecord.lookupKey
+    delete updatedRecord.lookupSortKey
     if (status === 'disabled') {
       delete updatedRecord.secretCiphertext
       updatedRecord.expiresAt = record.expiresAt ??
@@ -2826,12 +2930,16 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
               )
             : undefined,
         )
-      : await this.persistMutationRecord(
-          workspaceId,
+      : await this.putWebhookSubscriptionRecord(
           updatedRecord,
-          { expectedVersion: record.version },
-          request.idempotency,
-          response,
+          record.version,
+          request.idempotency
+            ? await this.prepareIdempotencyCompletionRecord(
+                workspaceId,
+                request.idempotency,
+                response,
+              )
+            : undefined,
         )
     if (!saved) throw persistenceConflict()
     return clone(subscription)
@@ -3683,6 +3791,9 @@ abstract class BaseDeveloperPlatformClient implements DeveloperPlatformClient {
         status,
         oauthStateRevision: nextOAuthStateRevision,
         credentialRemoved: removesCredential,
+        ...(status === 'disconnected'
+          ? { disconnectCleanupRevision: updatedRecord.version }
+          : {}),
       },
     })
     const saved = auditPut
@@ -5837,10 +5948,66 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
       version: (quotaRecord?.version ?? 0) + 1,
     })
     this.records.set(recordKey, clone(record))
+    const subscription = readRecordValue<WebhookSubscription>(
+      record,
+      'webhook-subscription',
+    )
+    const activeLocator = createActiveWebhookSubscriptionRecord(
+      record.workspaceId,
+      subscription,
+    )
+    this.records.set(
+      createMemoryKey(activeLocator.workspaceId, activeLocator.recordKey),
+      activeLocator,
+    )
     if (completion && completionKey) {
       this.records.set(completionKey, clone(completion.completedRecord))
     }
     return 'created'
+  }
+
+  /** Subscription と active locator、optional receipt を同じ memory commit にします。 */
+  protected async putWebhookSubscriptionRecord(
+    record: DeveloperPlatformRecord,
+    expectedVersion: number,
+    completion?: PreparedIdempotencyCompletionRecord,
+  ) {
+    const currentRecord = removeLegacyActiveWebhookProjection(record)
+    const recordKey = createMemoryKey(record.workspaceId, record.recordKey)
+    const current = this.records.get(recordKey)
+    if (
+      current?.entryType !== 'webhook-subscription' ||
+      current.version !== expectedVersion
+    ) return false
+    let completionKey: string | undefined
+    if (completion) {
+      completionKey = createMemoryKey(
+        completion.reservedRecord.workspaceId,
+        completion.reservedRecord.recordKey,
+      )
+      if (!isCurrentIdempotencyReservation(this.records.get(completionKey), completion)) {
+        return false
+      }
+    }
+    const subscription = readRecordValue<WebhookSubscription>(
+      currentRecord,
+      'webhook-subscription',
+    )
+    const locator = createActiveWebhookSubscriptionRecord(
+      record.workspaceId,
+      subscription,
+    )
+    const locatorKey = createMemoryKey(locator.workspaceId, locator.recordKey)
+    this.records.set(recordKey, clone(currentRecord))
+    if (subscription.status === 'active') {
+      this.records.set(locatorKey, locator)
+    } else {
+      this.records.delete(locatorKey)
+    }
+    if (completion && completionKey) {
+      this.records.set(completionKey, clone(completion.completedRecord))
+    }
+    return true
   }
 
   /** Webhook subscription の無効化と quota 解放を同じ memory commit にします。 */
@@ -5888,6 +6055,14 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
     }
 
     this.records.set(recordKey, clone(record))
+    const subscription = readRecordValue<WebhookSubscription>(
+      record,
+      'webhook-subscription',
+    )
+    this.records.delete(createMemoryKey(
+      record.workspaceId,
+      createActiveWebhookSubscriptionRecordKey(subscription),
+    ))
     this.records.set(quotaKey, {
       ...quotaRecord,
       subscriptionCount: (quotaRecord.subscriptionCount ?? 0) - 1,
@@ -6969,6 +7144,20 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
                 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
             },
           },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: createActiveWebhookSubscriptionRecord(
+                record.workspaceId,
+                readRecordValue<WebhookSubscription>(
+                  record,
+                  'webhook-subscription',
+                ),
+              ),
+              ConditionExpression:
+                'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+            },
+          },
           ...(completion
             ? [createIdempotencyCompletionTransactWriteItem(this.tableName, completion)]
             : []),
@@ -6983,6 +7172,69 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
         (quotaRecord.subscriptionCount ?? 0) >= WEBHOOK_SUBSCRIPTION_LIMIT
       ) return 'quota-exceeded'
       return 'conflict'
+    }
+  }
+
+  /** Subscription と active locator、optional receipt を同じ transaction にします。 */
+  protected async putWebhookSubscriptionRecord(
+    record: DeveloperPlatformRecord,
+    expectedVersion: number,
+    completion?: PreparedIdempotencyCompletionRecord,
+  ) {
+    const currentRecord = removeLegacyActiveWebhookProjection(record)
+    const subscription = readRecordValue<WebhookSubscription>(
+      currentRecord,
+      'webhook-subscription',
+    )
+    const locator = createActiveWebhookSubscriptionRecord(
+      record.workspaceId,
+      subscription,
+    )
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: currentRecord,
+              ConditionExpression:
+                '#recordVersion = :expectedRecordVersion AND ' +
+                '#entryType = :subscriptionEntryType',
+              ExpressionAttributeNames: {
+                '#recordVersion': 'version',
+                '#entryType': 'entryType',
+              },
+              ExpressionAttributeValues: {
+                ':expectedRecordVersion': expectedVersion,
+                ':subscriptionEntryType': 'webhook-subscription',
+              },
+            },
+          },
+          subscription.status === 'active'
+            ? {
+                Put: {
+                  TableName: this.tableName,
+                  Item: locator,
+                },
+              }
+            : {
+                Delete: {
+                  TableName: this.tableName,
+                  Key: {
+                    workspaceId: locator.workspaceId,
+                    recordKey: locator.recordKey,
+                  },
+                },
+              },
+          ...(completion
+            ? [createIdempotencyCompletionTransactWriteItem(this.tableName, completion)]
+            : []),
+        ],
+      }))
+      return true
+    } catch (error) {
+      if (isTransactionConditionFailure(error)) return false
+      throw toPersistenceError(error)
     }
   }
 
@@ -7035,6 +7287,20 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
                 ':entryType': 'webhook-subscription-quota',
                 ':limit': WEBHOOK_SUBSCRIPTION_LIMIT,
                 ':one': 1,
+              },
+            },
+          },
+          {
+            Delete: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: record.workspaceId,
+                recordKey: createActiveWebhookSubscriptionRecordKey(
+                  readRecordValue<WebhookSubscription>(
+                    record,
+                    'webhook-subscription',
+                  ),
+                ),
               },
             },
           },
@@ -7822,14 +8088,37 @@ function createActiveWebhookSubscriptionLookupKey(workspaceId: string) {
   return `WEBHOOK#ACTIVE#${workspaceId}`
 }
 
-function createActiveWebhookSubscriptionProjection(
+function createActiveWebhookSubscriptionRecordKeyPrefix() {
+  return 'WEBHOOKACTIVE#'
+}
+
+function createActiveWebhookSubscriptionRecordKey(
+  subscription: WebhookSubscription,
+) {
+  return `${createActiveWebhookSubscriptionRecordKeyPrefix()}${subscription.createdAt}#${subscription.id}`
+}
+
+function createActiveWebhookSubscriptionRecord(
   workspaceId: string,
   subscription: WebhookSubscription,
-): CreateRecordOptions {
-  return {
-    lookupKey: createActiveWebhookSubscriptionLookupKey(workspaceId),
-    lookupSortKey: `${subscription.createdAt}#${subscription.id}`,
-  }
+) {
+  return createRecord(
+    workspaceId,
+    createActiveWebhookSubscriptionRecordKey(subscription),
+    'webhook-active-subscription',
+    {
+      targetRecordKey: createWebhookRecordKey(subscription.id),
+    } satisfies StoredActiveWebhookSubscriptionValue,
+  )
+}
+
+function removeLegacyActiveWebhookProjection(
+  record: DeveloperPlatformRecord,
+) {
+  const current = { ...record }
+  delete current.lookupKey
+  delete current.lookupSortKey
+  return current
 }
 
 function createWebhookSubscriptionQuotaRecordKey() {
@@ -8225,6 +8514,21 @@ function createMemoryKey(workspaceId: string, recordKey: string) {
   return `${workspaceId}\0${recordKey}`
 }
 
+function isCurrentIdempotencyReservation(
+  record: DeveloperPlatformRecord | undefined,
+  completion: PreparedIdempotencyCompletionRecord,
+) {
+  if (
+    !record ||
+    record.version !== completion.reservedRecord.version ||
+    record.entryType !== 'idempotency'
+  ) return false
+  const value = readRecordValue<StoredIdempotencyValue>(record, 'idempotency')
+  return value.state === 'reserved' &&
+    secretDigestsEqual(value.reservationDigest, completion.reservationDigest) &&
+    value.requestFingerprintDigest === completion.requestFingerprintDigest
+}
+
 function createId(prefix: string) {
   return `${prefix}_${randomUUID().replaceAll('-', '')}`
 }
@@ -8509,34 +8813,84 @@ function readBoundedLimit(value: number, maximum: number, label: string) {
   return readPositiveInteger(value, label, maximum)
 }
 
-function encodeInternalLookupCursor(locator: DeveloperPlatformRecordLocator) {
-  return Buffer.from(JSON.stringify(locator), 'utf8').toString('base64url')
+function encodeActiveWebhookSubscriptionCursor(
+  cursor: ActiveWebhookSubscriptionCursor,
+) {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
 }
 
-function decodeInternalLookupCursor(
+function decodeActiveWebhookSubscriptionCursor(
   value: string,
-  expectedLookupKey: string,
-  label: string,
-) {
+  expectedWorkspaceId: string,
+): ActiveWebhookSubscriptionCursor {
   try {
+    const encoded = requireText(value, 'Webhook subscription cursor')
     const parsed = JSON.parse(
-      Buffer.from(requireText(value, label), 'base64url').toString('utf8'),
+      Buffer.from(encoded, 'base64url').toString('utf8'),
     ) as unknown
     if (
       !isRecord(parsed) ||
-      typeof parsed.workspaceId !== 'string' ||
-      typeof parsed.recordKey !== 'string' ||
-      parsed.lookupKey !== expectedLookupKey ||
-      typeof parsed.lookupSortKey !== 'string'
+      parsed.version !== 1 ||
+      parsed.workspaceId !== expectedWorkspaceId ||
+      Buffer.from(JSON.stringify(parsed), 'utf8').toString('base64url') !== encoded
+    ) throw new Error('invalid')
+    if (
+      parsed.phase === 'primary' &&
+      (
+        parsed.recordKey === undefined ||
+        (
+          typeof parsed.recordKey === 'string' &&
+          parsed.recordKey.startsWith(
+            createActiveWebhookSubscriptionRecordKeyPrefix(),
+          )
+        )
+      )
+    ) {
+      return {
+        version: 1,
+        phase: 'primary',
+        workspaceId: expectedWorkspaceId,
+        ...(typeof parsed.recordKey === 'string'
+          ? { recordKey: parsed.recordKey }
+          : {}),
+      }
+    }
+    const lookupKey = createActiveWebhookSubscriptionLookupKey(expectedWorkspaceId)
+    if (
+      parsed.phase !== 'legacy' ||
+      parsed.lookupKey !== lookupKey ||
+      (
+        parsed.locator !== undefined &&
+        (
+          !isRecord(parsed.locator) ||
+          parsed.locator.workspaceId !== expectedWorkspaceId ||
+          typeof parsed.locator.recordKey !== 'string' ||
+          parsed.locator.lookupKey !== lookupKey ||
+          typeof parsed.locator.lookupSortKey !== 'string'
+        )
+      )
     ) throw new Error('invalid')
     return {
-      workspaceId: parsed.workspaceId,
-      recordKey: parsed.recordKey,
-      lookupKey: expectedLookupKey,
-      lookupSortKey: parsed.lookupSortKey,
-    } satisfies DeveloperPlatformRecordLocator
+      version: 1,
+      phase: 'legacy',
+      workspaceId: expectedWorkspaceId,
+      lookupKey,
+      ...(parsed.locator
+        ? {
+            locator: {
+              workspaceId: expectedWorkspaceId,
+              recordKey: parsed.locator.recordKey,
+              lookupKey,
+              lookupSortKey: parsed.locator.lookupSortKey,
+            },
+          }
+        : {}),
+    }
   } catch {
-    throw invalid('DeveloperCursorInvalid', `${label} is invalid.`)
+    throw invalid(
+      'DeveloperCursorInvalid',
+      'Webhook subscription cursor is invalid.',
+    )
   }
 }
 
@@ -9144,6 +9498,7 @@ function isDeveloperPlatformEntryType(value: string): value is DeveloperPlatform
     value === 'oauth-app' ||
     value === 'oauth-token' ||
     value === 'webhook-subscription' ||
+    value === 'webhook-active-subscription' ||
     value === 'webhook-subscription-quota' ||
     value === 'webhook-delivery' ||
     value === 'webhook-delivery-index' ||

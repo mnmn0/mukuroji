@@ -107,6 +107,58 @@ test('projects external-link changes into immediate outbound and poll locators',
   expect(JSON.stringify(queued)).not.toContain('external.test')
 })
 
+test('retries a durable disconnect outbox after the SQS response is lost', async () => {
+  const event = createConnectorDisconnectAuditEvent()
+  const record = {
+    eventName: 'INSERT',
+    dynamodb: {
+      SequenceNumber: 'connector-disconnect-1',
+      NewImage: marshallRecord(event),
+    },
+  }
+  const queued: ConnectorSyncQueueMessage[] = []
+  let loseFirstResponse = true
+  const dependencies = {
+    queue: {
+      async enqueue(message: ConnectorSyncQueueMessage) {
+        queued.push(structuredClone(message))
+        if (loseFirstResponse) {
+          loseFirstResponse = false
+          throw new Error('SQS response was lost after accepting the message')
+        }
+      },
+    },
+  }
+
+  await expect(processConnectorSyncAuditProjectionBatch({
+    Records: [record],
+  }, dependencies)).resolves.toEqual({
+    batchItemFailures: [{ itemIdentifier: 'connector-disconnect-1' }],
+  })
+  await expect(processConnectorSyncAuditProjectionBatch({
+    Records: [record],
+  }, dependencies)).resolves.toEqual({ batchItemFailures: [] })
+
+  expect(queued).toEqual([
+    {
+      version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+      kind: 'disconnect-links',
+      workspaceId: 'workspace-1',
+      installationId: 'installation-1',
+      lifecycleRevision: 4,
+      updatedByUserId: 'actor-1',
+    },
+    {
+      version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+      kind: 'disconnect-links',
+      workspaceId: 'workspace-1',
+      installationId: 'installation-1',
+      lifecycleRevision: 4,
+      updatedByUserId: 'actor-1',
+    },
+  ])
+})
+
 test('reloads links before outbound work and reuses a stable operation ID', async () => {
   const fixture = createWorkerFixture()
   const changedMessage = {
@@ -246,6 +298,88 @@ test('continues disconnected link cleanup through durable ID-only jobs', async (
     cursor: 'disconnect-page-2',
   })
   expect(fixture.queued).toHaveLength(1)
+})
+
+test('replays a disconnect page safely when the continuation response is lost', async () => {
+  const fixture = createWorkerFixture({
+    disconnectPages: [
+      { paused: 2, nextCursor: 'disconnect-page-2' },
+      { paused: 0, nextCursor: 'disconnect-page-2' },
+      { paused: 1 },
+      { paused: 0 },
+    ],
+    maximumDisconnectLinks: 2,
+  })
+  const message = {
+    version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+    kind: 'disconnect-links',
+    workspaceId: 'workspace-1',
+    installationId: 'installation-1',
+    lifecycleRevision: 4,
+  } as const
+  const originalQueue = fixture.dependencies.queue
+  let loseFirstResponse = true
+  const retryingDependencies: ConnectorSyncWorkerDependencies = {
+    ...fixture.dependencies,
+    queue: {
+      async enqueue(nextMessage) {
+        await originalQueue.enqueue(nextMessage)
+        if (loseFirstResponse) {
+          loseFirstResponse = false
+          throw new Error('SQS continuation response was lost')
+        }
+      },
+    },
+  }
+  const record = {
+    messageId: 'disconnect-page-1',
+    body: JSON.stringify(message),
+  }
+
+  await expect(processConnectorSyncWorkerBatch({
+    Records: [record],
+  }, retryingDependencies)).resolves.toEqual({
+    batchItemFailures: [{ itemIdentifier: 'disconnect-page-1' }],
+  })
+  await expect(processConnectorSyncWorkerBatch({
+    Records: [record],
+  }, retryingDependencies)).resolves.toEqual({ batchItemFailures: [] })
+  expect(fixture.queued).toEqual([
+    { ...message, cursor: 'disconnect-page-2' },
+    { ...message, cursor: 'disconnect-page-2' },
+  ])
+
+  await processConnectorSyncMessage(fixture.queued[0]!, fixture.dependencies)
+  await processConnectorSyncMessage(fixture.queued[1]!, fixture.dependencies)
+  expect(fixture.pauseCalls).toEqual([
+    {
+      workspaceId: 'workspace-1',
+      installationId: 'installation-1',
+      expectedLifecycleRevision: 4,
+      limit: 2,
+    },
+    {
+      workspaceId: 'workspace-1',
+      installationId: 'installation-1',
+      expectedLifecycleRevision: 4,
+      limit: 2,
+    },
+    {
+      workspaceId: 'workspace-1',
+      installationId: 'installation-1',
+      expectedLifecycleRevision: 4,
+      limit: 2,
+      cursor: 'disconnect-page-2',
+    },
+    {
+      workspaceId: 'workspace-1',
+      installationId: 'installation-1',
+      expectedLifecycleRevision: 4,
+      limit: 2,
+      cursor: 'disconnect-page-2',
+    },
+  ])
+  expect(fixture.queued).toHaveLength(2)
 })
 
 test('returns partial SQS failures and rejects payload fields that could carry secrets', async () => {
@@ -598,6 +732,37 @@ function createExternalLinkAuditEvent() {
       installationId: 'installation-1',
       resourceType: 'issue',
       syncDirection: 'bidirectional',
+    },
+    expiresAt: Math.floor(Date.parse(now) / 1_000) + 86_400,
+  })
+}
+
+function createConnectorDisconnectAuditEvent() {
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'connector-disconnect-installation-1-revision-4',
+    occurredAt: now,
+    request: {
+      method: 'EVENT',
+      path: '/developer-platform/connector-installation/installation-1',
+      body: { transitionId: 'status:4:1' },
+    },
+    source: {
+      kind: 'system',
+      requestId: 'developer-platform-disconnect-1',
+    },
+  })
+  return createAuditEvent({
+    context,
+    eventType: 'connector.status.updated',
+    entity: { type: 'connector-installation', id: 'installation-1' },
+    action: 'status-updated',
+    metadata: {
+      adapter: 'developer-platform',
+      previousStatus: 'connected',
+      status: 'disconnected',
+      disconnectCleanupRevision: 4,
     },
     expiresAt: Math.floor(Date.parse(now) / 1_000) + 86_400,
   })

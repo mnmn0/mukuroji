@@ -7926,6 +7926,26 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
           },
         },
       },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey:
+              'PROJECT#新規プロジェクト-2#MEMBER#demo@example.com',
+            entryType: 'webhook-team-grant-cleanup',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: '新規プロジェクト-2',
+            memberKey: 'demo@example.com',
+            grantDirectoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            grantEntryKey:
+              'TEAM#core-team#PROJECT#新規プロジェクト-2',
+          },
+        },
+      },
     ],
   })
 })
@@ -11550,6 +11570,28 @@ test('DynamoDB directory client manages project member roles', async () => {
         },
       },
       {
+        ConditionCheck: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000000#TEAM#core-team',
+          },
+          ConditionExpression:
+            '#entryType = :teamEntryType AND attribute_not_exists(archivedAt)',
+        },
+      },
+      {
+        ConditionCheck: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000010#PROJECT#refero',
+          },
+          ConditionExpression:
+            '#entryType = :projectEntryType AND attribute_not_exists(archivedAt)',
+        },
+      },
+      {
         Put: {
           TableName: 'DirectoryTable',
           Item: {
@@ -11567,6 +11609,24 @@ test('DynamoDB directory client manages project member roles', async () => {
             webhookAuthorizationKey:
               'WEBHOOK_ACL#TEAM_MEMBER#user#demo@example.com#core-team#sato@example.com',
             webhookAuthorizationSortKey: 'PROJECT#refero',
+          },
+        },
+      },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#sato@example.com',
+            entryType: 'webhook-team-grant-cleanup',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: 'refero',
+            memberKey: 'sato@example.com',
+            grantDirectoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#sato@example.com',
+            grantEntryKey: 'TEAM#core-team#PROJECT#refero',
           },
         },
       },
@@ -11619,13 +11679,23 @@ test('DynamoDB directory client manages project member roles', async () => {
           },
         },
       },
+      {
+        Delete: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#demo@example.com',
+          },
+        },
+      },
     ],
   })
   expect(sentInputs[4]).toMatchObject({ ConsistentRead: true })
 })
 
 test('DynamoDB directory client rejects membership grant fan-out above 100 actions', async () => {
-  const atLimit = createSharedProjectCapacityClient(98)
+  const atLimit = createSharedProjectCapacityClient(24)
   await expect(atLimit.client.updateProjectMember(
     'workspace-1',
     'shared-project',
@@ -11639,9 +11709,9 @@ test('DynamoDB directory client rejects membership grant fan-out above 100 actio
     member: { id: 'viewer@example.com' },
   })
   expect(atLimit.transactions).toHaveLength(1)
-  expect(atLimit.transactions[0]?.TransactItems).toHaveLength(100)
+  expect(atLimit.transactions[0]?.TransactItems).toHaveLength(98)
 
-  const aboveLimit = createSharedProjectCapacityClient(99)
+  const aboveLimit = createSharedProjectCapacityClient(25)
   await expect(aboveLimit.client.updateProjectMember(
     'workspace-1',
     'shared-project',
@@ -11853,6 +11923,15 @@ test('DynamoDB directory client treats manager guard transaction cancellation as
           },
         },
       },
+      {
+        Delete: {
+          Key: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#demo@example.com',
+          },
+        },
+      },
     ],
   })
   expect(sentInputs).toHaveLength(3)
@@ -12024,6 +12103,22 @@ test('DynamoDB directory client treats manager downgrade transaction cancellatio
         },
       },
       {
+        ConditionCheck: {
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000000#TEAM#core-team',
+          },
+        },
+      },
+      {
+        ConditionCheck: {
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000010#PROJECT#refero',
+          },
+        },
+      },
+      {
         Put: {
           Item: {
             directoryId:
@@ -12040,6 +12135,23 @@ test('DynamoDB directory client treats manager downgrade transaction cancellatio
             webhookAuthorizationKey:
               'WEBHOOK_ACL#TEAM_MEMBER#user#demo@example.com#core-team#demo@example.com',
             webhookAuthorizationSortKey: 'PROJECT#refero',
+          },
+        },
+      },
+      {
+        Put: {
+          Item: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#demo@example.com',
+            entryType: 'webhook-team-grant-cleanup',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: 'refero',
+            memberKey: 'demo@example.com',
+            grantDirectoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            grantEntryKey: 'TEAM#core-team#PROJECT#refero',
           },
         },
       },

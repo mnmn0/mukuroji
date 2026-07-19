@@ -59,6 +59,27 @@ export function createWebhookTeamGrantEntryKey(
   return `${createWebhookTeamGrantEntryKeyPrefix(teamId)}${projectId}`
 }
 
+/** Archived Team/Project grant cleanup locator 専用 partition key を作成します。 */
+export function createWebhookGrantCleanupDirectoryId(
+  workspaceId: string,
+  teamId: string,
+) {
+  return `WEBHOOK_GRANT_CLEANUP#${workspaceId}#${teamId}`
+}
+
+/** Project 単位でpage取得できるcleanup locator sort key prefixを作成します。 */
+export function createWebhookGrantCleanupEntryKeyPrefix(projectId: string) {
+  return `PROJECT#${projectId}#MEMBER#`
+}
+
+/** Grant cleanup locator のbase-table sort keyを作成します。 */
+export function createWebhookGrantCleanupEntryKey(
+  projectId: string,
+  memberKey: string,
+) {
+  return `${createWebhookGrantCleanupEntryKeyPrefix(projectId)}${memberKey}`
+}
+
 /** Team-only Webhook ACL を直接引く materialized grant row を作成します。 */
 export function createWebhookTeamGrantItem(input: {
   /** Workspace ID です。 */
@@ -99,5 +120,41 @@ export function createWebhookTeamGrantItem(input: {
     ),
     webhookAuthorizationSortKey:
       createWebhookProjectAuthorizationSortKey(input.projectId),
+  } as const
+}
+
+/** Archived Team/Projectからgrantをbounded削除するlocator rowを作成します。 */
+export function createWebhookGrantCleanupItem(input: {
+  /** Workspace ID です。 */
+  workspaceId: string
+  /** Team ID です。 */
+  teamId: string
+  /** Project ID です。 */
+  projectId: string
+  /** Project member key です。 */
+  memberKey: string
+}) {
+  return {
+    directoryId: createWebhookGrantCleanupDirectoryId(
+      input.workspaceId,
+      input.teamId,
+    ),
+    entryKey: createWebhookGrantCleanupEntryKey(
+      input.projectId,
+      input.memberKey,
+    ),
+    entryType: 'webhook-team-grant-cleanup',
+    workspaceId: input.workspaceId,
+    teamId: input.teamId,
+    projectId: input.projectId,
+    memberKey: input.memberKey,
+    grantDirectoryId: createWebhookTeamGrantDirectoryId(
+      input.workspaceId,
+      input.memberKey,
+    ),
+    grantEntryKey: createWebhookTeamGrantEntryKey(
+      input.teamId,
+      input.projectId,
+    ),
   } as const
 }
