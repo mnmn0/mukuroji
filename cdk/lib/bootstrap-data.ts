@@ -49,7 +49,7 @@ export function createWorkspaceAccessTransactItems(
   workspaceId: string,
   initialOwnerEmail: string,
 ) {
-  const createdAt = '2026-07-11T00:00:00.000Z';
+  const createdAt = workspaceBootstrapTimestamp;
 
   return [
     {
@@ -110,7 +110,7 @@ export function createWorkspaceAccessTransactItems(
  * CDK demo data が参照する Workspace member を既存 role/status を上書きせず seed します。
  */
 export function createWorkspaceDemoMemberTransactItems(tableName: string, workspaceId: string) {
-  const createdAt = '2026-07-11T00:00:00.000Z';
+  const createdAt = workspaceBootstrapTimestamp;
   const members = [
     ['sato@example.com', '佐藤 花子', 'member'],
     ['suzuki@example.com', '鈴木 太郎', 'member'],
