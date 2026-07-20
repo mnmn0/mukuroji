@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { requestSubmissionFixture } from '../src/requests/fixtures'
-import { normalizeRequestSubmission } from '../src/requests/model'
-import { RequestQueue } from '../src/requests/RequestQueue'
+import { normalizeRequestSubmission } from '../src/requests/model/requestForm'
+import { RequestQueue } from '../src/requests/ui/RequestQueue'
 
 describe('RequestQueue', () => {
   test('renders historical select labels and exposes a focusable detail control', () => {

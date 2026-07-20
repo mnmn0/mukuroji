@@ -9,7 +9,7 @@ import {
   canUpdatePlanningWorkItemLink,
   createPlanningAccessSnapshot,
   filterManageablePlanningScopeTeams,
-} from '../src/planning/permissions'
+} from '../src/planning/model/permissions'
 
 const memberUser: CurrentUser = {
   username: 'member@example.com',

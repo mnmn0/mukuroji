@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { AnalyticsWorkbench } from '../src/analytics/AnalyticsWorkbench'
-import { parseAnalyticsCustomFieldDraftValue } from '../src/analytics/filterDraft'
+import { AnalyticsWorkbench } from '../src/analytics/ui/AnalyticsWorkbench'
+import { parseAnalyticsCustomFieldDraftValue } from '../src/analytics/model/filterDraft'
 import {
   analyticsEvidenceFixture,
   analyticsFilterFixture,

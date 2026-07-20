@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   getRequestFormEditorInstanceKey,
-} from '../src/requests/editorState'
+} from '../src/requests/model/editorState'
 import { requestFormFixture } from '../src/requests/fixtures'
 
 describe('request form editor state', () => {

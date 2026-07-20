@@ -4,11 +4,11 @@ import type {
   DocumentRelation,
 } from '@mukuroji/contracts'
 import { documentRecordFixture } from '../src/documents/fixtures'
-import { applyDocumentOperationsLocally } from '../src/documents/model'
+import { applyDocumentOperationsLocally } from '../src/documents/model/document'
 import {
   createCanonicalWorkItemId,
   parseCanonicalWorkItemId,
-} from '../src/documents/relations'
+} from '../src/documents/model/relations'
 
 describe('Canonical Work Item relation IDs', () => {
   test('round-trips Team and Issue IDs and rejects ambiguous raw IDs', () => {

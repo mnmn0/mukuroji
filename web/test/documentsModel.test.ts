@@ -23,7 +23,7 @@ import {
   saveDocumentOperationChunks,
   shouldAdoptIncomingDocument,
   shouldScheduleDocumentAutosave,
-} from '../src/documents/model'
+} from '../src/documents/model/document'
 
 describe('Document tree model', () => {
   test('builds scoped recursive branches in lexical position order', () => {

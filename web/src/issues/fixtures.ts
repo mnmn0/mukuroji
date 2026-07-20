@@ -9,7 +9,7 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
 import type { WorkspaceMember } from '../workspace/api'
-import type { IssueCollaborationController } from './useIssueCollaboration'
+import type { IssueCollaborationController } from './mutations/useIssueCollaboration'
 
 /**
  * TeamIssuePage の Storybook と E2E で共有する Issue fixture です。

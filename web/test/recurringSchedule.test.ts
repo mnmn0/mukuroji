@@ -5,7 +5,7 @@ import {
   dayOfMonthFromLocalDate,
   isRecurringCadenceConfigurationValid,
   weekdayFromLocalDate,
-} from '../src/automation/recurringSchedule'
+} from '../src/automation/model/recurringSchedule'
 
 const baseInput = {
   catchUpPolicy: 'latest' as const,

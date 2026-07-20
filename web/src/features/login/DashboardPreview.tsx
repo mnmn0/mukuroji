@@ -1,5 +1,5 @@
-import { BrandMark } from '../../components/BrandMark'
-import { createTranslator } from '../../i18n'
+import { BrandMark } from '../../shared/ui/BrandMark'
+import { createTranslator } from '../../shared/i18n/i18n'
 
 const panelCardClass =
   'rounded-lg border border-[var(--workbench-border)] bg-white shadow-[0_1px_2px_rgba(23,32,29,0.04)]'

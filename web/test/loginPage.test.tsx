@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { ReactNode } from 'react'
 import { createMemoryRouter, RouterProvider } from 'react-router'
-import { LoginPage } from '../src/pages/LoginPage'
+import { LoginPage } from '../src/pages/auth/LoginPage'
 
 describe('LoginPage', () => {
   test('collects email before rendering a password field', () => {

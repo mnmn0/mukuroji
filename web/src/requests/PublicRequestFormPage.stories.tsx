@@ -5,7 +5,7 @@ import {
   publicRequestFormFixture,
   requestSubmissionReceiptFixture,
 } from './fixtures'
-import { normalizePublicRequestForm } from './model'
+import { normalizePublicRequestForm } from './model/requestForm'
 import {
   PublicRequestFormScreen,
   type PublicRequestFormScreenProps,

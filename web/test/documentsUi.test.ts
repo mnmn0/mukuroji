@@ -3,7 +3,7 @@ import { whiteboardRecordFixture } from '../src/documents/fixtures'
 import {
   moveWhiteboardObjectWithinCanvas,
   resolveDocumentMoveErrorKey,
-} from '../src/documents/ui'
+} from '../src/documents/model/whiteboardGeometry'
 
 describe('Document move feedback', () => {
   test('distinguishes permission denial from a general move failure', () => {

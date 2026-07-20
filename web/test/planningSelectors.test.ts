@@ -5,7 +5,7 @@ import {
   createPlanningEntityDetailKey,
   isPlanningWorkItemLinkCandidate,
   resolvePlanningCycleRolloverTargets,
-} from '../src/planning/selectors'
+} from '../src/planning/model/selectors'
 
 describe('planning selectors', () => {
   test('remounts detail forms across entity IDs while preserving one entity snapshot identity', () => {

@@ -3,8 +3,8 @@ import type { InboxNotification } from '../src/notifications/api'
 import {
   createSnoozedUntil,
   groupNotificationsByDate,
-} from '../src/notifications/presentation'
-import { mergeNotifications } from '../src/notifications/useNotifications'
+} from '../src/notifications/model/presentation'
+import { mergeNotifications } from '../src/notifications/mutations/useNotifications'
 
 describe('notification presentation', () => {
   test('groups cursor-ordered notifications by local day without reordering them', () => {

@@ -3,7 +3,7 @@ import {
   enterpriseSecurityTabs,
   readEnterpriseSecurityTab,
   resolveEnterpriseSecurityTabTarget,
-} from '../src/security/tabs'
+} from '../src/security/model/tabs'
 
 describe('enterprise security tabs', () => {
   test('accepts supported URL state and falls back to overview', () => {

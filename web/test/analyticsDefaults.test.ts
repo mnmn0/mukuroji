@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createDefaultAnalyticsWidgets } from '../src/analytics/defaults'
+import { createDefaultAnalyticsWidgets } from '../src/analytics/model/defaults'
 
 describe('Analytics default widgets', () => {
   test('localizes metric titles while preserving chart and table semantics', () => {

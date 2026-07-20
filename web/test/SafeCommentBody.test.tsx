@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { SafeCommentBody } from '../src/issues/SafeCommentBody'
+import { SafeCommentBody } from '../src/issues/ui/SafeCommentBody'
 
 describe('SafeCommentBody', () => {
   test('renders GFM code, links, and checklists without executable HTML or unsafe URLs', () => {

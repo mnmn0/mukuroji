@@ -7,8 +7,8 @@ import {
   createRequestsPath,
   createTeamIssuesPath,
   createWorkItemSearchPath,
-} from '../src/routes/paths'
-import { appRoutes } from '../src/routes/router'
+} from '../src/shared/routing/paths'
+import { appRoutes } from '../src/app/router'
 
 describe('Work Item detail paths', () => {
   test('keeps assigned Work Items scoped by project, team, and issue', () => {

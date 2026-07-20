@@ -3,11 +3,11 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import {
   AutomationRuleEditor,
   AutomationTemplateEditor,
-} from '../src/automation/AutomationEditors'
+} from '../src/automation/ui/AutomationEditors'
 import {
   createDefaultAutomationWorkflowTemplatePayload,
   parseAutomationTemplatePayload,
-} from '../src/automation/editorValidation'
+} from '../src/automation/model/editorValidation'
 
 describe('Automation editors', () => {
   test('keeps valid schedule time fields valid when only the cadence is invalid', () => {

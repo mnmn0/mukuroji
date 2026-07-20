@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
-import { createSearchStatusOptions } from '../src/search/statusOptions'
+import { createSearchStatusOptions } from '../src/search/model/statusOptions'
 
 describe('Workspace search status options', () => {
   test('uses configured dynamic statuses and merges names for a shared status ID', () => {

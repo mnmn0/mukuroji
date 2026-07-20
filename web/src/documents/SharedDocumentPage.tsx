@@ -1,22 +1,21 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { DocumentExportFormat } from '@mukuroji/contracts'
 import { Link, useParams } from 'react-router'
-import useSWR from 'swr'
-import { BrandMark } from '../components/BrandMark'
+import { BrandMark } from '../shared/ui/BrandMark'
 import {
   createTranslator,
   getInitialLocale,
   localeOptions,
   setLocalePreference,
   type Locale,
-} from '../i18n'
+} from '../shared/i18n/i18n'
 import {
   exportPublicDocument,
-  getPublicDocument,
   type PublicDocument,
 } from './api'
-import { DocumentReadOnlyContent } from './DocumentEditor'
-import { WhiteboardReadOnly } from './WhiteboardCanvas'
+import { usePublicDocument } from './queries/useDocumentQueries'
+import { DocumentReadOnlyContent } from './ui/DocumentEditor'
+import { WhiteboardReadOnly } from './ui/WhiteboardCanvas'
 
 /**
  * SharedDocumentScreen の props です。
@@ -63,13 +62,7 @@ export function SharedDocumentPage() {
     data: publicDocument,
     error,
     isLoading,
-  } = useSWR(
-    token ? ['public-document', token] : null,
-    ([, shareToken]) => getPublicDocument(shareToken),
-    {
-      shouldRetryOnError: false,
-    },
-  )
+  } = usePublicDocument(token)
 
   const handleExport = async (format: DocumentExportFormat) => {
     const result = await exportPublicDocument(token, format)

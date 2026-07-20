@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { SearchViewLayout, WorkspaceSearchResult } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { SearchResultCollection } from '../src/search/SearchResultCollection'
+import { SearchResultCollection } from '../src/search/ui/SearchResultCollection'
 
 const tableLayout = {
   columns: ['title'],

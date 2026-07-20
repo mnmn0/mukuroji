@@ -19,15 +19,14 @@ import {
   useParams,
   useSearchParams,
 } from 'react-router'
-import useSWR from 'swr'
 import {
   createMutationRequestContext,
   createMutationRequestRunner,
-} from '../api/mutationHeaders'
+} from '../shared/api/mutationHeaders'
 import {
   canMutateWorkspaceContent,
-  getCurrentUser,
 } from '../auth/api'
+import { useCurrentUser } from '../auth/queries/useCurrentUser'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import {
   MobileSidebarButton,
@@ -35,26 +34,24 @@ import {
   Sidebar,
   type SidebarNavId,
   type SidebarTeamViewId,
-} from '../components/sidebar'
-import { useWorkspaceCommandMenu } from '../commands/WorkspaceCommandMenuContext'
+} from '../shared/ui/sidebar'
+import { useWorkspaceCommandMenu } from '../commands/ui/WorkspaceCommandMenuContext'
 import {
   createSidebarLabels,
   createTranslator,
   getInitialLocale,
   type Locale,
   type MessageKey,
-} from '../i18n'
-import { useUnreadNotificationCount } from '../notifications/useNotifications'
-import {
-  getProjectDirectory,
-  type ProjectDirectoryTeam,
-} from '../projects/api'
+} from '../shared/i18n/i18n'
+import { useUnreadNotificationCount } from '../notifications/mutations/useNotifications'
+import type { ProjectDirectoryTeam } from '../projects/api'
+import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
 import {
   createDocumentPath,
   createProjectIssuesPath,
   createTeamViewPath,
   workspaceNavPaths,
-} from '../routes/paths'
+} from '../shared/routing/paths'
 import {
   applyDocumentOperations,
   applyDocumentOperationsWithConflictAwareness,
@@ -67,13 +64,10 @@ import {
   exportDocument,
   favoriteDocument,
   getDocument,
-  getDocumentCommentThread,
   getDocumentCollection,
   getNextDocumentCollectionPage,
   getDocumentBacklinksBatch,
   getDocumentComments,
-  getDocumentPresence,
-  getDocumentShares,
   getDocumentVersions,
   instantiateDocument,
   markDocumentRecent,
@@ -103,22 +97,32 @@ import {
   type WhiteboardObject,
 } from './api'
 import {
+  useDocument,
+  useDocumentBacklinksBatch,
+  useDocumentCollection,
+  useDocumentComments,
+  useDocumentCommentThread,
+  useDocumentPresence,
+  useDocumentShares,
+  useDocumentVersions,
+} from './queries/useDocumentQueries'
+import {
   DocumentContextPanel,
   type DocumentContextTab,
-} from './DocumentContextPanel'
-import { DocumentEditor } from './DocumentEditor'
-import { DocumentHome } from './DocumentHome'
+} from './ui/DocumentContextPanel'
+import { DocumentEditor } from './ui/DocumentEditor'
+import { DocumentHome } from './ui/DocumentHome'
 import {
   DocumentShareDialog,
   type CreateDocumentShareDraftInput,
-} from './DocumentShareDialog'
+} from './ui/DocumentShareDialog'
 import {
   DocumentTree,
-} from './DocumentTree'
+} from './ui/DocumentTree'
 import {
   focusFirstModalElement,
   trapModalFocus,
-} from './modalFocus'
+} from './ui/modalFocus'
 import {
   applyDocumentOperationsLocally,
   changesDocumentBacklinks,
@@ -140,8 +144,8 @@ import {
   type DocumentDraftSaveGuard,
   type PendingPublicShareCreateRequest,
   type DocumentSaveStatus,
-} from './model'
-import { WhiteboardCanvas } from './WhiteboardCanvas'
+} from './model/document'
+import { WhiteboardCanvas } from './ui/WhiteboardCanvas'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyDocuments: DocumentSummary[] = []
@@ -150,10 +154,6 @@ const emptyVersions: DocumentVersion[] = []
 const emptyPresence: DocumentPresence[] = []
 const emptyShares: DocumentShare[] = []
 const emptyBacklinks: DocumentBacklink[] = []
-const apiSWRConfig = {
-  dedupingInterval: 5_000,
-  shouldRetryOnError: false,
-} as const
 const documentPresenceRefreshInterval = 4_000
 const documentPresenceHeartbeatInterval = 12_000
 const documentAutosaveDelay = 550
@@ -511,81 +511,46 @@ export function DocumentPage() {
     ])
   }
   const t = useMemo(() => createTranslator(locale), [locale])
-  const currentUserKey = accessToken
-    ? (['current-user', accessToken] as const)
-    : null
   const {
     data: user,
     error: currentUserError,
     isLoading: isCurrentUserLoading,
-  } = useSWR(
-    currentUserKey,
-    ([, token]) => getCurrentUser(token),
-    apiSWRConfig,
-  )
-  const directoryKey =
-    accessToken && user && !currentUserError
-      ? (['project-directory', accessToken, locale] as const)
-      : null
+  } = useCurrentUser(accessToken)
   const {
     data: teams = emptyTeams,
     error: directoryError,
     isLoading: isDirectoryLoading,
-  } = useSWR(
-    directoryKey,
-    ([, token, currentLocale]) =>
-      getProjectDirectory(token, currentLocale),
-    apiSWRConfig,
-  )
-  const documentsKey =
-    accessToken && user && !currentUserError
-      ? (['documents', accessToken] as const)
-      : null
+  } = useProjectDirectory({
+    accessToken,
+    enabled: Boolean(user && !currentUserError),
+    locale,
+  })
   const {
     data: collection,
     error: documentsError,
     isLoading: isDocumentsLoading,
     mutate: mutateDocuments,
-  } = useSWR(
-    documentsKey,
-    ([, token]) => getDocumentCollection(token),
-    apiSWRConfig,
+  } = useDocumentCollection(
+    accessToken,
+    Boolean(user && !currentUserError),
   )
-  const detailKey =
-    accessToken && user && !currentUserError && documentId
-      ? (['document', accessToken, documentId] as const)
-      : null
   const {
     data: selectedDocument,
     error: detailError,
     isLoading: isDetailLoading,
     mutate: mutateSelectedDocument,
-  } = useSWR(
-    detailKey,
-    ([, token, selectedId]) => getDocument(token, selectedId),
-    {
-      ...apiSWRConfig,
-      refreshInterval: 3_500,
-      refreshWhenHidden: false,
-    },
+  } = useDocument(
+    accessToken,
+    documentId,
+    Boolean(user && !currentUserError),
   )
-  const commentsKey =
-    accessToken && selectedDocument
-      ? (['document-comments', accessToken, selectedDocument.id] as const)
-      : null
   const {
     data: latestCommentsPage,
     isLoading: isCommentsLoading,
     mutate: mutateComments,
-  } = useSWR(
-    commentsKey,
-    ([, token, selectedId]) =>
-      getDocumentComments(token, selectedId),
-    {
-      ...apiSWRConfig,
-      refreshInterval: 4_000,
-      refreshWhenHidden: false,
-    },
+  } = useDocumentComments(
+    accessToken,
+    selectedDocument?.id,
   )
   const [
     olderComments,
@@ -599,32 +564,14 @@ export function DocumentPage() {
     olderCommentsDocumentId,
     setOlderCommentsDocumentId,
   ] = useState<string>()
-  const focusedThreadKey =
-    accessToken &&
-    selectedDocument &&
-    focusedCommentId &&
-    focusedRootCommentId
-      ? ([
-          'document-comment-thread',
-          accessToken,
-          selectedDocument.id,
-          focusedRootCommentId,
-          focusedCommentId,
-        ] as const)
-      : null
   const {
     data: focusedThreadComments = emptyComments,
     isLoading: isFocusedThreadLoading,
-  } = useSWR(
-    focusedThreadKey,
-    ([, token, selectedId, rootId, targetId]) =>
-      getDocumentCommentThread(
-        token,
-        selectedId,
-        rootId,
-        targetId,
-      ),
-    apiSWRConfig,
+  } = useDocumentCommentThread(
+    accessToken,
+    selectedDocument?.id,
+    focusedRootCommentId,
+    focusedCommentId,
   )
   const comments = mergeById(
     mergeById(
@@ -635,47 +582,28 @@ export function DocumentPage() {
     ),
     focusedThreadComments,
   )
-  const versionsKey =
-    accessToken && selectedDocument
-      ? (['document-versions', accessToken, selectedDocument.id] as const)
-      : null
   const {
     data: versionsPage,
     isLoading: isVersionsLoading,
     mutate: mutateVersions,
-  } = useSWR(
-    versionsKey,
-    ([, token, selectedId]) => getDocumentVersions(token, selectedId),
-    apiSWRConfig,
+  } = useDocumentVersions(
+    accessToken,
+    selectedDocument?.id,
   )
   const versions =
     versionsPage?.versions ?? emptyVersions
-  const presenceKey =
-    accessToken && selectedDocument
-      ? (['document-presence', accessToken, selectedDocument.id] as const)
-      : null
-  const { data: presence = emptyPresence, mutate: mutatePresence } = useSWR(
-    presenceKey,
-    ([, token, selectedId]) => getDocumentPresence(token, selectedId),
-    {
-      ...apiSWRConfig,
-      dedupingInterval: 1_000,
-      refreshInterval: documentPresenceRefreshInterval,
-      refreshWhenHidden: false,
-    },
+  const { data: presence = emptyPresence, mutate: mutatePresence } = useDocumentPresence(
+    accessToken,
+    selectedDocument?.id,
+    documentPresenceRefreshInterval,
   )
-  const sharesKey =
-    accessToken && selectedDocument
-      ? (['document-shares', accessToken, selectedDocument.id] as const)
-      : null
   const {
     data: shares = emptyShares,
     isLoading: isSharesLoading,
     mutate: mutateShares,
-  } = useSWR(
-    sharesKey,
-    ([, token, selectedId]) => getDocumentShares(token, selectedId),
-    apiSWRConfig,
+  } = useDocumentShares(
+    accessToken,
+    selectedDocument?.id,
   )
   const backlinkTargets = useMemo(
     () => deduplicateDocumentRelationTargets(
@@ -689,31 +617,14 @@ export function DocumentPage() {
   const isBacklinkContextOpen =
     contextPanelSelection[0] === contextInstanceKey &&
     contextPanelSelection[1] === 'backlinks'
-  const backlinksKey =
-    accessToken &&
-    isBacklinkContextOpen &&
-    backlinkTargets.length > 0
-      ? ([
-          'document-backlinks',
-          accessToken,
-          JSON.stringify(backlinkTargets),
-        ] as const)
-      : null
   const {
     data: backlinkCollection,
     isLoading: isBacklinksLoading,
     mutate: mutateBacklinks,
-  } = useSWR(
-    backlinksKey,
-    ([, token]) =>
-      getDocumentBacklinksBatch(
-        token,
-        backlinkTargets.map((target) => ({
-          targetType: target.kind,
-          targetId: readRelationTargetId(target),
-        })),
-      ),
-    apiSWRConfig,
+  } = useDocumentBacklinksBatch(
+    accessToken,
+    backlinkTargets,
+    isBacklinkContextOpen,
   )
   const backlinks =
     backlinkCollection?.backlinks ?? emptyBacklinks
@@ -3132,19 +3043,6 @@ function DocumentHeader({
       </div>
     </header>
   )
-}
-
-function readRelationTargetId(
-  target: DocumentRelation['target'],
-): string {
-  switch (target.kind) {
-    case 'work-item':
-      return target.workItemId
-    case 'project':
-      return target.projectId
-    case 'goal':
-      return target.goalId
-  }
 }
 
 function readOptionalDocumentCommentId(

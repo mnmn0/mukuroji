@@ -4,10 +4,10 @@ import type {
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { WorkItemConfigurationPanel } from '../src/work-items/WorkItemConfigurationPanel'
-import { WorkItemFieldsEditor } from '../src/work-items/WorkItemFieldsEditor'
+import { WorkItemConfigurationPanel } from '../src/work-items/ui/WorkItemConfigurationPanel'
+import { WorkItemFieldsEditor } from '../src/work-items/ui/WorkItemFieldsEditor'
 import { workspaceWorkItemConfigurationFixture } from '../src/work-items/fixtures'
-import { normalizeWorkItemConfigurationForSave } from '../src/work-items/workItemConfigurationEditor'
+import { normalizeWorkItemConfigurationForSave } from '../src/work-items/model/workItemConfigurationEditor'
 
 describe('Work Item editors', () => {
   test('keeps label and input IDs distinct for every valid custom field ID', () => {

@@ -3,20 +3,20 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import {
   AutomationManagementPanel,
   AutomationTemplateApplicationEditor,
-} from '../src/automation/AutomationManagementPanel'
-import { createTranslator } from '../src/i18n'
+} from '../src/automation/ui/AutomationManagementPanel'
+import { createTranslator } from '../src/shared/i18n/i18n'
 import { loadAutomationManagementData } from '../src/automation/managementData'
 import {
   AutomationInboundWebhooksPanel,
   AutomationWebhookSecretNotice,
-} from '../src/automation/AutomationInboundWebhooksPanel'
-import { reduceAutomationWebhookSecret } from '../src/automation/webhookSecretState'
+} from '../src/automation/ui/AutomationInboundWebhooksPanel'
+import { reduceAutomationWebhookSecret } from '../src/automation/model/webhookSecretState'
 import {
   AutomationRuleEditor,
   AutomationTemplateEditor,
   AutomationTemplateUpdateEditor,
-} from '../src/automation/AutomationEditors'
-import { createMutationRequestRunner } from '../src/api/mutationHeaders'
+} from '../src/automation/ui/AutomationEditors'
+import { createMutationRequestRunner } from '../src/shared/api/mutationHeaders'
 import {
   createAutomationTemplateEditorInput,
   createAutomationConditions,
@@ -28,11 +28,11 @@ import {
   isAutomationTriggerConfigurationValid,
   isAutomationWorkflowTemplatePayloadValid,
   parseAutomationTemplatePayload,
-} from '../src/automation/editorValidation'
-import { submitAutomationEditorCreate } from '../src/automation/editorSubmission'
-import { runAutomationManagementMutation } from '../src/automation/mutation'
-import { resolveAutomationManagementTabTarget } from '../src/automation/tabs'
-import { refreshAutomationTemplateApplication } from '../src/automation/templateApplicationRefresh'
+} from '../src/automation/model/editorValidation'
+import { submitAutomationEditorCreate } from '../src/automation/model/editorSubmission'
+import { runAutomationManagementMutation } from '../src/automation/mutations/runAutomationManagementMutation'
+import { resolveAutomationManagementTabTarget } from '../src/automation/model/tabs'
+import { refreshAutomationTemplateApplication } from '../src/automation/model/templateApplicationRefresh'
 import {
   activeAutomationRuleFixture,
   activeInboundWebhookEndpointFixture,

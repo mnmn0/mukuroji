@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   analyticsCalendarDateBoundaryToInstant,
   formatAnalyticsCalendarDate,
-} from '../src/analytics/timeZone'
+} from '../src/analytics/model/timeZone'
 
 describe('Analytics calendar date boundaries', () => {
   test('converts an Asia/Tokyo local day to inclusive UTC instants', () => {
