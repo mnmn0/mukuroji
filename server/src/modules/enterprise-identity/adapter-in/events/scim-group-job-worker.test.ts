@@ -8,8 +8,10 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import type { EnterpriseScimGroupJobApplyInput } from '../../enterprise-identity'
 import {
   createEnterpriseScimGroupJobWorkerHandler,
-  DynamoDbEnterpriseScimProjectManagerGuard,
 } from './scim-group-job-worker'
+import {
+  DynamoDbEnterpriseScimProjectManagerGuard,
+} from '../../adapter-out/dynamodb/enterprise-scim-project-manager-guard'
 import {
   applyEnterpriseScimGroupJobUser,
   createEnterpriseScimGroupJobProcessor,

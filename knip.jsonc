@@ -22,7 +22,11 @@
       "entry": ["src/main.tsx", "vite.config.ts", "src/**/*.stories.tsx"]
     },
     "server": {
-      "entry": ["src/handlers/*.ts", "scripts/**/*.ts"]
+      "entry": [
+        "src/handlers/*.ts",
+        "src/modules/*/index.ts",
+        "scripts/**/*.ts"
+      ]
     },
     "cdk": {
       "entry": ["bin/cdk.ts", "scripts/cdk-nag.ts", "test/**/*.test.ts", "lib/cdk-stack.ts"],

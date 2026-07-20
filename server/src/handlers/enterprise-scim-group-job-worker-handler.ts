@@ -1,6 +1,7 @@
-import { DynamoDbDocumentsClient } from '../modules/documents/documents'
 import {
-  createDefaultEnterpriseScimGroupJobProcessor,
+  createEnterpriseScimGroupJobWorkerProcessor,
+} from '../app/composition/enterprise-scim-group-job-worker'
+import {
   type EnterpriseScimGroupJobWorkerHandler,
 } from '../modules/enterprise-identity/adapter-in/events/scim-group-job-worker'
 import {
@@ -16,9 +17,7 @@ let defaultProcessor: EnterpriseScimGroupJobProcessor | undefined
  * AWS Lambda にデプロイする Enterprise SCIM group job 専用 handler です。
  */
 export const handler: EnterpriseScimGroupJobWorkerHandler = async (event) => {
-  defaultProcessor ??= createDefaultEnterpriseScimGroupJobProcessor(
-    new DynamoDbDocumentsClient(),
-  )
+  defaultProcessor ??= createEnterpriseScimGroupJobWorkerProcessor()
   return await processEnterpriseScimGroupJobBatch(event, defaultProcessor)
 }
 

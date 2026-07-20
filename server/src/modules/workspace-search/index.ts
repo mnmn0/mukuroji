@@ -1,2 +1,26 @@
 /** Workspace Search module public application and domain surface. */
-export * from './workspace-search'
+export {
+  WorkspaceSearchError,
+  createCommentWorkspaceSearchDocument,
+  createDocumentWorkspaceSearchBody,
+  createDocumentWorkspaceSearchDocument,
+  createDocumentWorkspaceSearchSourceDocument,
+  createProjectWorkspaceSearchDocument,
+  createSavedWorkspaceViewRecordKey,
+  createTeamWorkspaceSearchDocument,
+  createWorkItemWorkspaceSearchDocument,
+  createWorkspaceSearchDocument,
+  createWorkspaceSearchDocumentRecordKey,
+  ensureLocalWorkspaceSearchTable,
+  migrateSavedWorkspaceView,
+  type CreateSavedWorkspaceViewRequest,
+  type DeleteSavedWorkspaceViewRequest,
+  type ListSavedWorkspaceViewsInput,
+  type SavedViewAccessScope,
+  type UpdateSavedWorkspaceViewRequest,
+  type WorkspaceSearchAccessScope,
+  type WorkspaceSearchClient,
+  type WorkspaceSearchDocument,
+  type WorkspaceSearchQueryInput,
+  type WorkspaceSearchResolvedScope,
+} from './workspace-search'

@@ -1,2 +1,8 @@
 /** Planning module public application and domain surface. */
-export * from './planning'
+export {
+  PlanningError,
+  type PlanningAuthorizationState,
+  type PlanningClient,
+  type PlanningEntityAuthorizationReference,
+  type PlanningWorkItemState,
+} from './planning'
