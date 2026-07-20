@@ -1,6 +1,6 @@
 import { WORK_ITEM_SCHEMA_VERSION } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { TaskScreen } from './TaskPage'
+import { TaskScreen } from '../tasks'
 import type { TeamIssueDetail } from '../issues/api'
 import {
   collaborationWorkspaceMemberFixtures,

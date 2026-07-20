@@ -7,7 +7,7 @@ import {
 } from '../notifications/fixtures'
 import { projectDirectoryFixtures } from '../projects/fixtures'
 import { referoTaskFixtures } from '../tasks/fixtures'
-import { WorkspaceScreen } from './WorkspacePage'
+import { WorkspaceScreen } from '../workspace'
 
 const storySummary: DashboardSummary = {
   projects: 9,
