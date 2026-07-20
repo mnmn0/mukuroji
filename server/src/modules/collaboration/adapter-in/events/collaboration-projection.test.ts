@@ -375,7 +375,10 @@ describe('collaboration projection pure helpers', () => {
           },
         },
       }],
-    }, dependencies)
+    }, {
+      deletedFileCleanup: dependencies,
+      realtime: { async publish() {} },
+    })
 
     expect(response).toEqual({
       batchItemFailures: [{ itemIdentifier: 'stream-sequence-1' }],

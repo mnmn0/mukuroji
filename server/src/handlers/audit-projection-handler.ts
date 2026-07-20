@@ -3,7 +3,7 @@ import {
 } from '../modules/audit/adapter-in/events/audit-projection'
 import {
   handler as processCollaborationProjection,
-} from '../modules/collaboration/adapter-in/events/collaboration-projection'
+} from './collaboration-projection-handler'
 import {
   createProductionWebhookProjectionHandler,
 } from '../app/composition/webhook'

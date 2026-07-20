@@ -26,3 +26,6 @@ export {
   type UpdateWatcherInput,
   type WorkItemCollaborationScope,
 } from './collaboration'
+export type {
+  CollaborationRealtimePublisher,
+} from './application/ports/realtime-publisher'

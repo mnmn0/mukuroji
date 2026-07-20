@@ -18,10 +18,9 @@ import {
   type Tag,
 } from '@aws-sdk/client-s3'
 import { isCanonicalWorkItemRecord } from '../../../work-items'
-import {
-  listScopeConnections,
-  postRealtimeMessage,
-} from '../../../realtime'
+import type {
+  CollaborationRealtimePublisher,
+} from '../../application/ports/realtime-publisher'
 import {
   NOTIFICATION_PREFERENCES_KEY,
   createNotificationDeliveryPlan,
@@ -137,6 +136,14 @@ export interface DeletedFileCleanupDependencies {
   ): Promise<void>
 }
 
+/** Collaboration projection batch の外部依存です。 */
+export interface CollaborationProjectionDependencies {
+  /** Durable file delete cleanup を実行する port です。 */
+  deletedFileCleanup: DeletedFileCleanupDependencies
+  /** Realtime invalidation を配送する port です。 */
+  realtime: CollaborationRealtimePublisher
+}
+
 /**
  * ProjectDirectoryTable から permission projection に使う row です。
  */
@@ -233,25 +240,18 @@ const s3Client = new S3Client({ region: getAwsRegion() })
 const projectionConsumerName = 'collaboration-projection-v1'
 
 /**
- * AuditEventsTable の pending outbox records を通知と realtime invalidation に projection します。
- */
-export async function handler(event: DynamoStreamEvent): Promise<BatchResponse> {
-  return processCollaborationProjectionBatch(event, defaultDeletedFileCleanupDependencies)
-}
-
-/**
  * Audit stream batch を処理し、cleanup 失敗を record 単位の retry response に変換します。
  */
 export async function processCollaborationProjectionBatch(
   event: DynamoStreamEvent,
-  deletedFileCleanupDependencies: DeletedFileCleanupDependencies,
+  dependencies: CollaborationProjectionDependencies,
 ): Promise<BatchResponse> {
   const records = event.Records ?? []
   const currentSystemAdminCache = new Map<string, Promise<boolean>>()
   const results = await Promise.all(
     records.map(async (record) => {
       try {
-        await processRecord(record, currentSystemAdminCache, deletedFileCleanupDependencies)
+        await processRecord(record, currentSystemAdminCache, dependencies)
         return undefined
       } catch (error) {
         console.error('Collaboration projection failed:', error)
@@ -268,7 +268,7 @@ export async function processCollaborationProjectionBatch(
 async function processRecord(
   record: DynamoStreamRecord,
   currentSystemAdminCache: Map<string, Promise<boolean>>,
-  deletedFileCleanupDependencies: DeletedFileCleanupDependencies,
+  dependencies: CollaborationProjectionDependencies,
 ) {
   if (record.eventName !== 'INSERT' || !record.dynamodb?.NewImage) {
     return
@@ -280,7 +280,7 @@ async function processRecord(
     return
   }
 
-  await cleanupDeletedFileProjection(event, deletedFileCleanupDependencies)
+  await cleanupDeletedFileProjection(event, dependencies.deletedFileCleanup)
 
   if (event.outboxStatus !== 'pending' || await isProjectionProcessed(event.eventId)) {
     return
@@ -329,7 +329,7 @@ async function processRecord(
   await Promise.all(
     eligibleCandidates.map((candidate) => projectNotification(authorizationEvent, candidate)),
   )
-  await publishRealtimeInvalidation(event)
+  await publishRealtimeInvalidation(event, dependencies.realtime)
   await markProjectionProcessed(event.eventId)
 }
 
@@ -538,6 +538,11 @@ const defaultDeletedFileCleanupDependencies: DeletedFileCleanupDependencies = {
   },
 }
 
+/** Production AWS adapter を使う durable file cleanup dependencies を返します。 */
+export function createDefaultDeletedFileCleanupDependencies(): DeletedFileCleanupDependencies {
+  return defaultDeletedFileCleanupDependencies
+}
+
 function readDeletedFileMetadataKey(item: Record<string, unknown>): DeletedFileMetadataKey {
   const scopeKey = readString(item.scopeKey)
   const recordKey = readString(item.recordKey)
@@ -702,32 +707,23 @@ async function projectNotification(
   }
 }
 
-async function publishRealtimeInvalidation(event: AuditProjectionEvent) {
+async function publishRealtimeInvalidation(
+  event: AuditProjectionEvent,
+  realtime: CollaborationRealtimePublisher,
+) {
   if (!event.scopeKey) {
     return
   }
 
-  const callbackEndpoint = process.env.WEBSOCKET_CALLBACK_ENDPOINT?.trim()
-
-  if (!callbackEndpoint) {
-    return
-  }
-
-  const connections = await listScopeConnections(event.scopeKey)
-
-  await Promise.all(
-    connections.map((connection) =>
-      postRealtimeMessage(callbackEndpoint, connection.connectionId, {
-        type: 'collaboration.invalidated',
-        eventId: event.eventId,
-        eventType: event.eventType,
-        scopeKey: event.scopeKey,
-        entityId: event.entityId,
-        targetId: event.targetId,
-        occurredAt: event.occurredAt,
-      }),
-    ),
-  )
+  await realtime.publish(event.scopeKey, {
+    type: 'collaboration.invalidated',
+    eventId: event.eventId,
+    eventType: event.eventType,
+    scopeKey: event.scopeKey,
+    entityId: event.entityId,
+    targetId: event.targetId,
+    occurredAt: event.occurredAt,
+  })
 }
 
 /**
