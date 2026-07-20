@@ -9,6 +9,7 @@ import {
   type WorkspaceSearchResult,
 } from '@mukuroji/contracts'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
+import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 
 const authSession = {
   accessToken: 'test-access-token',
@@ -88,6 +89,20 @@ async function mockAuthenticatedSearchPage(page: Page) {
   await page.route('**/api/teams/projects**', async (route) => {
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
     await route.fulfill({ json: { teams: projectDirectoryFixtures } })
+  })
+
+  await page.route('**/api/teams/*/work-item-configuration', async (route) => {
+    const teamId = decodeURIComponent(
+      new URL(route.request().url()).pathname.split('/')[3] ?? '',
+    )
+    await route.fulfill({
+      json: {
+        configuration: {
+          ...structuredClone(teamWorkItemConfigurationFixture),
+          scopeId: teamId,
+        },
+      },
+    })
   })
 
   await page.route(/.*\/api\/search(?:\?.*)?$/, async (route) => {
