@@ -122,6 +122,12 @@ case "$INITIAL_OWNER_USERNAME" in
     ;;
 esac
 
+# AWS CLI v1 follows http(s) string parameters by default. Use an ephemeral
+# config so Cognito callback URLs are sent as values instead of being fetched.
+AWS_CONFIG_FILE="${TMPDIR:-/tmp}/mukuroji-floci-aws-config"
+export AWS_CONFIG_FILE
+aws configure set cli_follow_urlparam false
+
 aws_local() {
   aws --endpoint-url "$ENDPOINT_URL" "$@"
 }
@@ -161,6 +167,17 @@ text_list_is_exact() {
   done
 
   [ "$actual_count" -eq "$#" ]
+}
+
+text_list_is_absent_or_exact() {
+  values_text="$1"
+  shift
+
+  if [ -z "$values_text" ] || [ "$values_text" = "None" ]; then
+    return 0
+  fi
+
+  text_list_is_exact "$values_text" "$@"
 }
 
 if ! aws_local cognito-idp describe-user-pool --user-pool-id "$POOL_ID" >/dev/null 2>&1; then
@@ -325,12 +342,15 @@ SSO_CLIENT_CALLBACKS="$(aws_local cognito-idp describe-user-pool-client \
   --query UserPoolClient.CallbackURLs \
   --output text)"
 
-if ! text_list_is_exact "$SSO_CLIENT_EXPLICIT_FLOWS" ALLOW_REFRESH_TOKEN_AUTH ||
-  ! text_list_is_exact "$SSO_CLIENT_PROVIDERS" "$SSO_SUPPORTED_PROVIDER" ||
+# Floci 1.5.20 omits explicit auth flows, providers, and callback URLs from
+# DescribeUserPoolClient. Validate them when exposed and always validate the
+# OAuth settings that the emulator persists.
+if ! text_list_is_absent_or_exact "$SSO_CLIENT_EXPLICIT_FLOWS" ALLOW_REFRESH_TOKEN_AUTH ||
+  ! text_list_is_absent_or_exact "$SSO_CLIENT_PROVIDERS" "$SSO_SUPPORTED_PROVIDER" ||
   [ "$SSO_CLIENT_OAUTH_ENABLED" != "True" ] ||
   ! text_list_is_exact "$SSO_CLIENT_OAUTH_FLOWS" code ||
   ! text_list_is_exact "$SSO_CLIENT_OAUTH_SCOPES" openid email profile ||
-  ! text_list_is_exact "$SSO_CLIENT_CALLBACKS" "$SSO_REDIRECT_URI"; then
+  ! text_list_is_absent_or_exact "$SSO_CLIENT_CALLBACKS" "$SSO_REDIRECT_URI"; then
   echo "Cognito SSO app client does not match the isolated code-flow contract." >&2
   exit 1
 fi
