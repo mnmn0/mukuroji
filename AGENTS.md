@@ -20,6 +20,7 @@
 
 - `web/`: React + TypeScript + Vite のフロントエンド。Web 固有のルールは `web/AGENTS.md` に置く。
 - `server/`: Hono + Bun のサーバー。Server 固有のルールは `server/AGENTS.md` に置く。
+- `contracts/`: Web / Server / CDK で共有する TypeScript の契約。公開面は `contracts/src/index.ts` に集約する。
 - `cdk/`: AWS CDK TypeScript プロジェクト。
 - `docs/`: ドキュメント置き場。
 
@@ -49,6 +50,20 @@ bun run knip:check
 `typecheck:server` は server の本番コード、`typecheck:contracts` は共有 contract の型検査です。
 `dependencies:check` は workspace 間の循環依存・禁止依存を、`knip:check` は未使用ファイル・依存を検査します。
 
+### `dependencies:check` / `knip:check` の修正方針
+
+- 循環依存は ignore で回避せず、型・定数・純粋関数を所有する下位モジュールへ移して依存方向を揃える。
+- `index.ts` などの公開用 barrel を、同じ領域の内部モジュールから逆参照しない。内部では具体的な sibling module を参照する。
+- Knip の未使用ファイルは `rg` とエントリポイントを確認し、不要な旧実装なら削除し、実際に必要なエントリポイントなら設定へ明示する。
+- ignore / exclude の追加は、生成物や外部から呼ばれるエントリポイントなど、静的解析で追跡できない明確な理由がある場合に限定する。
+
+## Contracts
+
+- `contracts/src/index.ts` はパッケージ外部向けの公開用 barrel とし、契約の実体は `contracts/src/<domain>.ts` に置いて re-export する。
+- `contracts/src/<domain>.ts` から `./index` を import しない。契約同士の依存は、所有元となる具体的な domain module を直接参照する。
+- 汎用的な `types.ts` や `types/` に集約せず、型を所有するドメイン名のファイルへ配置する。
+- Contracts を変更した場合は、少なくとも `bun run typecheck:contracts` と `bun run dependencies:check` を確認する。
+
 ## CDK
 
 `cdk/` は AWS CDK TypeScript プロジェクトです。
@@ -61,6 +76,8 @@ bun run cdk:test
 bun run cdk:synth
 ```
 
+TypeScript のコンパイル生成物は `cdk/dist/` に出力し、ソースファイルと同じ場所へ `.js` / `.d.ts` を生成しないでください。隣接する生成物はモジュール解決や Knip の解析対象を曖昧にします。`dist/` と `cdk.out/` は生成物として追跡しません。
+
 インフラ変更では `bun run cdk:build` と `bun run cdk:test` を通し、可能なら `bun run cdk:synth` で合成結果を確認してください。デプロイや AWS アカウントへ影響する操作はユーザーの明示確認を取ってください。
 
 ## コミット前チェック
@@ -68,6 +85,8 @@ bun run cdk:synth
 作業内容に応じて必要な検証を実行し、結果をユーザーに伝えてください。
 
 - CI / oxlint 設定の変更: `bun run oxc:lint`
+- Contracts の変更: `bun run typecheck:contracts`, `bun run dependencies:check`
+- ファイル配置・公開境界・エントリポイントの変更: `bun run dependencies:check`, `bun run knip:check`
 - `cdk` の変更: `bun run cdk:build`, `bun run cdk:test`
 
 コミット前レビューで指摘が出た場合は、対応してから再度必要な検証を行ってください。

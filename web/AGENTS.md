@@ -183,6 +183,17 @@ Storybook story を置きます。
 
 依存方向は `pages → ui → model` を基本とし、`model/` から React component へ逆依存させません。
 
+### 型の配置
+
+領域直下の `types.ts` や汎用的な `types/` フォルダは作らず、型を所有する責務と同じ module に
+置きます。
+
+- Component props と表示専用型は、対応する `ui/` module に置く
+- 業務状態、selector、入力正規化で共有する型は、対象概念の `model/<concept>.ts` に置く
+- Endpoint 専用 request / response 型は、所有する `api/<resource>.ts` に置く
+- Web と Server が共有する契約型は、`contracts/src/<domain>.ts` に置く
+- 循環を避けるために型を別 module へ移す場合も、`types.ts` ではなく型が表す概念で命名する
+
 ## API と SWR の分離
 
 HTTP 通信の実装と、React/SWR による取得状態・キャッシュ管理を分離します。詳細は [`docs/frontend-data-access.md`](../docs/frontend-data-access.md) を参照してください。
