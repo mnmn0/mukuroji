@@ -75,6 +75,40 @@ test('reads soft-deleted comment snapshots consistently for search revalidation'
   ])
 })
 
+test('accepts only saved non-deleted comments as file attachment targets', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    const commentId = String((input.Key as { recordKey?: string } | undefined)?.recordKey ?? '')
+      .replace('COMMENT#', '')
+    if (commentId === 'missing') {
+      return {}
+    }
+    return {
+      Item: {
+        entityKey,
+        recordKey: `COMMENT#${commentId}`,
+        entryType: 'comment',
+        id: commentId,
+        rootCommentId: commentId,
+        authorMemberKey: 'author@example.com',
+        bodyMarkdown: commentId === 'deleted' ? '' : 'Current comment',
+        version: commentId === 'deleted' ? 2 : 1,
+        mentionMemberKeys: [],
+        createdAt: '2026-07-12T00:00:00.000Z',
+        updatedAt: '2026-07-12T00:01:00.000Z',
+        ...(commentId === 'deleted'
+          ? { deletedAt: '2026-07-12T00:01:00.000Z' }
+          : {}),
+      },
+    }
+  })
+
+  expect(await client.hasAttachableComment(entityKey, 'current')).toBe(true)
+  expect(await client.hasAttachableComment(entityKey, 'deleted')).toBe(false)
+  expect(await client.hasAttachableComment(entityKey, 'missing')).toBe(false)
+})
+
 test('pages root comments newest-first and binds cursors to their entity scope', async () => {
   const discussionQueries: Array<Record<string, unknown>> = []
   const client = createClient(async (command) => {

@@ -24,6 +24,7 @@ function createNotificationRow(overrides: Record<string, unknown> = {}) {
     notificationId: 'evt-1',
     eventId: 'evt-1',
     eventType: 'comment.replied',
+    entityId: 'team/core/issue/notification-foundations',
     actorLabel: 'Author Example',
     title: 'Notification foundations',
     summary: 'A reply mentioned you.',
@@ -192,6 +193,7 @@ describe('notification store', () => {
     expect(page.notifications).toHaveLength(1)
     expect(page.notifications[0]).toMatchObject({
       eventId: 'evt-1',
+      entityId: 'team/core/issue/notification-foundations',
       state: 'unread',
       title: 'Notification foundations',
       actorLabel: 'Author Example',

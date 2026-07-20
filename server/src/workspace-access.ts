@@ -12,12 +12,67 @@ import {
   TransactWriteCommand,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
+import { PLANNING_SCHEMA_VERSION } from '@mukuroji/contracts'
+import {
+  createAuditFieldChanges,
+  createMutationAuditEventPut,
+  createWorkspaceInvitationAuditEntityId,
+  createWorkspaceMemberAuditEntityId,
+  ensureLocalAuditEventsTable,
+  getConfiguredAuditTableName,
+  type MutationAuditContext,
+  type MutationAuditEventInput,
+} from './audit'
+import {
+  createDocumentAuthorizationRevisionPut,
+} from './document-authorization'
+
+const INVITATION_ACCEPTANCE_LOCK_MS = 5 * 60_000
+const INVITATION_PROVISIONING_LEASE_MS = 5 * 60_000
+const WORKSPACE_IDENTITY_LIFECYCLE_VERSION = 2
+const MANUAL_COGNITO_CLEANUP_MESSAGE =
+  'Manual Cognito cleanup is required. After removing the user or Workspace claims in Cognito, retry revocation to verify completion.'
+const WORKSPACE_INVITATION_AUDIT_FIELDS = [
+  'email',
+  'name',
+  'role',
+  'status',
+  'deliveryStatus',
+  'identityOwnership',
+  'directoryClaimCleanupRequired',
+  'identityCleanupCompleted',
+  'identityCleanupManualRequired',
+  'identityMutationAttempted',
+  'acceptanceLockExpiresAt',
+  'expiresAt',
+  'lastSentAt',
+  'acceptedAt',
+  'failureMessage',
+] as const
+const WORKSPACE_MEMBER_AUDIT_FIELDS = [
+  'email',
+  'name',
+  'role',
+  'status',
+  'provisioningSource',
+  'externalIdentityId',
+  'deactivatedAt',
+] as const
+const WORKSPACE_AUDIT_REDACT_FIELDS = [
+  'email',
+  'name',
+  'externalIdentityId',
+  'failureMessage',
+] as const
 
 /** Workspace 全体で付与する member role です。 */
 export type WorkspaceRole = 'owner' | 'admin' | 'member' | 'guest'
 
 /** Workspace member の利用状態です。 */
 export type WorkspaceMemberStatus = 'active' | 'deactivated'
+
+/** Workspace membership を管理する authority です。 */
+export type WorkspaceMemberProvisioningSource = 'manual' | 'directory'
 
 /** Workspace invitation の lifecycle 状態です。 */
 export type WorkspaceInvitationStatus =
@@ -48,6 +103,10 @@ export type WorkspaceMember = {
   role: WorkspaceRole
   /** Workspace へのアクセス状態です。 */
   status: WorkspaceMemberStatus
+  /** Membership が手動管理か directory 管理かを示します。 */
+  provisioningSource?: WorkspaceMemberProvisioningSource
+  /** Directory provider 側の immutable identity ID です。 */
+  externalIdentityId?: string
   /** 同時更新検知に使用する version です。 */
   version: number
   /** membership 作成日時の ISO 8601 timestamp です。 */
@@ -74,6 +133,22 @@ export type WorkspaceInvitation = {
   deliveryStatus: WorkspaceInvitationDeliveryStatus
   /** Cognito identity の provisioning ownership です。 */
   identityOwnership: WorkspaceIdentityOwnership
+  /** Cognito identity cleanup provenance schema の version です。 */
+  identityLifecycleVersion?: number
+  /** cleanup 対象を同じ Cognito identity に限定する安定 ID です。 */
+  cognitoIdentityId?: string
+  /** cleanup API に渡す大文字小文字を保持した Cognito username です。 */
+  cognitoUsername?: string
+  /** この invitation が Cognito の Workspace directory claim を追加したかどうかです。 */
+  directoryClaimCleanupRequired?: boolean
+  /** revoke に伴う Cognito cleanup が完了したかどうかです。 */
+  identityCleanupCompleted?: boolean
+  /** stable identity 情報がない旧 invitation で手動 Cognito cleanup が必要かどうかです。 */
+  identityCleanupManualRequired?: boolean
+  /** stable pair を得る前に Cognito identity mutation を開始したかどうかです。 */
+  identityMutationAttempted?: boolean
+  /** password challenge と revoke を直列化する acceptance lock の期限です。 */
+  acceptanceLockExpiresAt?: string
   /** invitation の同時更新検知に使用する version です。 */
   version: number
   /** invitation の有効期限を表す ISO 8601 timestamp です。 */
@@ -84,6 +159,8 @@ export type WorkspaceInvitation = {
   updatedAt: string
   /** 招待メール最終送信日時の ISO 8601 timestamp です。 */
   lastSentAt?: string
+  /** Invitation を membership へ収束させた日時です。 */
+  acceptedAt?: string
   /** 配信または provisioning 失敗時の安全な表示メッセージです。 */
   failureMessage?: string
 }
@@ -138,6 +215,12 @@ export type MarkWorkspaceInvitationDeliveryInput = {
   deliveryStatus: WorkspaceInvitationDeliveryStatus
   /** Cognito identity の ownership 判定です。 */
   identityOwnership: WorkspaceIdentityOwnership
+  /** provisioning した Cognito identity の安定 ID です。 */
+  cognitoIdentityId?: string
+  /** provisioning した Cognito identity の大文字小文字を保持した username です。 */
+  cognitoUsername?: string
+  /** revoke 時にこの invitation が追加した directory claim を削除するかどうかです。 */
+  directoryClaimCleanupRequired?: boolean
   /** 読み込み時点の invitation version です。 */
   expectedVersion: number
   /** 外部へ安全に表示できる失敗理由です。 */
@@ -170,6 +253,46 @@ export type UpdateWorkspaceMemberInput = {
   status?: WorkspaceMemberStatus
   /** 読み込み時点の member version です。 */
   expectedVersion: number
+  /** Planning 認可 snapshot と直列化する Workspace graph revision です。 */
+  expectedPlanningRevision: number
+  /**
+   * Private Document manager 検証時に読み込んだ ACL generation です。
+   */
+  expectedDocumentAuthorizationRevision?: number
+}
+
+/** Directory reconciliation で member を作成または収束させる入力です。 */
+export type ReconcileDirectoryWorkspaceMemberInput = {
+  /** Workspace 内で既存参照が使う immutable member key です。 */
+  memberKey: string
+  /** Directory が管理する現在のメールアドレスです。 */
+  email: string
+  /** Directory が管理する任意の表示名です。 */
+  name?: string
+  /** Directory mapping が付与する built-in Workspace role です。 */
+  role: Exclude<WorkspaceRole, 'owner'>
+  /** Directory provider 側の immutable identity ID です。 */
+  externalIdentityId: string
+  /** Existing member を更新する場合の optimistic version です。 */
+  expectedVersion?: number
+  /** Access graph と直列化する Planning revision です。 */
+  expectedPlanningRevision: number
+  /**
+   * Guest downgrade 時に private Document manager 検証へ束縛する ACL generation です。
+   */
+  expectedDocumentAuthorizationRevision?: number
+}
+
+/** Directory reconciliation で member を停止する入力です。 */
+export type DeprovisionDirectoryWorkspaceMemberInput = {
+  /** Directory provider 側の immutable identity ID です。 */
+  externalIdentityId: string
+  /** 読み込み時点の member version です。 */
+  expectedVersion: number
+  /** Access graph と直列化する Planning revision です。 */
+  expectedPlanningRevision: number
+  /** Private Document manager 検証へ束縛する ACL generation です。 */
+  expectedDocumentAuthorizationRevision: number
 }
 
 /** Workspace access domain error です。 */
@@ -203,26 +326,76 @@ export interface WorkspaceAccessClient {
     actorMemberKey: string,
     input: CreateWorkspaceInvitationInput,
     expiresInDays?: number,
+    auditContext?: MutationAuditContext,
   ): Promise<WorkspaceInvitation>
   /** 指定 invitation を取得します。 */
   getInvitation(workspaceId: string, invitationId: string): Promise<WorkspaceInvitation | undefined>
+  /** password challenge 前に invitation acceptance lock を取得します。 */
+  acquireInvitationAcceptanceLock(
+    workspaceId: string,
+    invitationId: string,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceInvitation | undefined>
+  /** password challenge 終了後に invitation acceptance lock を解除します。 */
+  releaseInvitationAcceptanceLock(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceInvitation>
+  /** Cognito mutation の開始を stable identity pair とともに write-ahead 記録します。 */
+  markInvitationIdentityMutationStarted(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+    cognitoIdentityId?: string,
+    cognitoUsername?: string,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceInvitation>
+  /** Cognito 更新前に directory claim の補償責務を version 条件付きで記録します。 */
+  markInvitationDirectoryClaimCleanupRequired(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+    cognitoIdentityId: string,
+    cognitoUsername: string,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceInvitation>
   /** Cognito provisioning と invitation 配信の結果を記録します。 */
   markInvitationDelivery(
     workspaceId: string,
     invitationId: string,
     input: MarkWorkspaceInvitationDeliveryInput,
+    auditContext?: MutationAuditContext,
   ): Promise<WorkspaceInvitation>
   /** revoked invitation の Cognito cleanup 失敗を version 条件付きで記録します。 */
   markInvitationCleanupFailure(
     workspaceId: string,
     invitationId: string,
     input: MarkWorkspaceInvitationCleanupFailureInput,
+    auditContext?: MutationAuditContext,
   ): Promise<WorkspaceInvitation>
-  /** Cognito cleanup 成功後に revoked invitation の retry marker を消します。 */
+  /** 自動 cleanup できない revoked invitation を手動確認待ちとして記録します。 */
+  markInvitationManualCleanupRequired(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceInvitation>
+  /** Cognito cleanup 成功後に retry marker と directory claim の補償責務を消します。 */
   clearInvitationCleanupFailure(
     workspaceId: string,
     invitationId: string,
     expectedVersion: number,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceInvitation>
+  /** 手動 Cognito cleanup の完了を管理権限と version 付きで確認します。 */
+  acknowledgeInvitationManualCleanup(
+    workspaceId: string,
+    actorMemberKey: string,
+    invitationId: string,
+    expectedVersion: number,
+    auditContext?: MutationAuditContext,
   ): Promise<WorkspaceInvitation>
   /** invitation を再送処理前の provisioning 状態へ遷移させます。 */
   prepareResend(
@@ -230,12 +403,14 @@ export interface WorkspaceAccessClient {
     actorMemberKey: string,
     invitationId: string,
     expiresInDays?: number,
+    auditContext?: MutationAuditContext,
   ): Promise<WorkspaceInvitation>
   /** invitation を取り消します。 */
   revokeInvitation(
     workspaceId: string,
     actorMemberKey: string,
     invitationId: string,
+    auditContext?: MutationAuditContext,
   ): Promise<WorkspaceInvitation>
   /** expired / revoked invitation を新しい招待処理へ遷移させます。 */
   prepareReinvite(
@@ -243,11 +418,13 @@ export interface WorkspaceAccessClient {
     actorMemberKey: string,
     invitationId: string,
     expiresInDays?: number,
+    auditContext?: MutationAuditContext,
   ): Promise<WorkspaceInvitation>
   /** 認証済み identity の invitation 受諾と active membership 作成を原子的に行います。 */
   reconcileAuthenticatedMember(
     workspaceId: string,
     input: ReconcileAuthenticatedWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
   ): Promise<WorkspaceMember>
   /** actor の権限を検証し、target member を version 付きで更新します。 */
   updateMember(
@@ -255,7 +432,21 @@ export interface WorkspaceAccessClient {
     actorMemberKey: string,
     targetMemberKey: string,
     input: UpdateWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
   ): Promise<WorkspaceMember>
+  /** Directory authority から owner 以外の member を冪等に作成または更新します。 */
+  reconcileDirectoryMember?(
+    workspaceId: string,
+    input: ReconcileDirectoryWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceMember>
+  /** Directory authority から owner 以外の member を冪等に停止します。 */
+  deprovisionDirectoryMember?(
+    workspaceId: string,
+    targetMemberKey: string,
+    input: DeprovisionDirectoryWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceMember | undefined>
 }
 
 /** `workspace-created` identity だけが補償処理で安全に削除できることを判定します。 */
@@ -275,6 +466,14 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   private readonly bootstrapLocalTable: boolean
   /** timestamp を生成する clock です。 */
   private readonly clock: () => Date
+  /** Member の role / status 更新と直列化する Planning table 名です。 */
+  private readonly planningTableName: string
+  /** Member manager eligibility 更新と直列化する Documents table 名です。 */
+  private readonly documentsTableName: string
+  /** immutable audit event を保存する DynamoDB table 名です。 */
+  private readonly auditTableName?: string
+  /** Workspace/member/invitation の公開 audit ID を導出する固定 HMAC key です。 */
+  private readonly auditPseudonymKey?: string
   /** 進行中または完了済みの local table 初期化です。 */
   private localTableInitializer?: Promise<void>
 
@@ -286,6 +485,17 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     dynamoDbClient = createDynamoDbClient(),
     bootstrapLocalTable = false,
     clock: () => Date = () => new Date(),
+    planningTableName = readEnvironment('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',
+    auditTableName: string | null | undefined = documentClient === undefined
+      ? getConfiguredAuditTableName() ?? 'mukuroji-audit-events'
+      : undefined,
+    auditPseudonymKey: string | undefined = readEnvironment(
+      'MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY',
+    ),
+    documentsTableName =
+      readEnvironment('DOCUMENTS_TABLE_NAME') ??
+      readEnvironment('MUKUROJI_DOCUMENTS_TABLE') ??
+      'mukuroji-documents-local',
   ) {
     this.tableName = tableName
     this.dynamoDbClient = dynamoDbClient
@@ -294,6 +504,10 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     })
     this.bootstrapLocalTable = bootstrapLocalTable
     this.clock = clock
+    this.planningTableName = planningTableName
+    this.documentsTableName = documentsTableName
+    this.auditTableName = auditTableName ?? undefined
+    this.auditPseudonymKey = auditPseudonymKey || undefined
   }
 
   /** 指定 member を consistent read で取得します。 */
@@ -352,6 +566,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     actorMemberKey: string,
     input: CreateWorkspaceInvitationInput,
     expiresInDays = 7,
+    auditContext?: MutationAuditContext,
   ) {
     const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
     const actor = await this.requireActiveActor(normalizedWorkspaceId, actorMemberKey)
@@ -377,11 +592,22 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       status: 'provisioning',
       deliveryStatus: 'pending',
       identityOwnership: 'ambiguous',
+      identityLifecycleVersion: WORKSPACE_IDENTITY_LIFECYCLE_VERSION,
       version: 1,
       expiresAt: addDays(now, expiresInDays).toISOString(),
       createdAt: nowIso,
       updatedAt: nowIso,
     }
+
+    const auditPut = this.createInvitationAuditPut(
+      normalizedWorkspaceId,
+      undefined,
+      invitation,
+      auditContext,
+      'invitation.created',
+      'created',
+      0,
+    )
 
     try {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: [
@@ -400,12 +626,16 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
             ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
           },
         },
+        ...(auditPut ? [auditPut] : []),
       ] }))
     } catch (error) {
-      if (isAwsError(error, 'TransactionCanceledException')) {
+      if (
+        isConditionalTransactionCancellation(error) &&
+        [0, 1, 2].some((index) => isTransactionConditionalFailureAt(error, index))
+      ) {
         await this.classifyCreateInvitationConflict(normalizedWorkspaceId, actor.memberKey, invitation)
       }
-      throw error
+      throw toWorkspaceAccessError(error)
     }
 
     return invitation
@@ -425,15 +655,202 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     return response.Item ? toWorkspaceInvitation(response.Item, this.clock()) : undefined
   }
 
+  /** password challenge 前に invitation acceptance lock を取得します。 */
+  async acquireInvitationAcceptanceLock(
+    workspaceId: string,
+    invitationId: string,
+    auditContext?: MutationAuditContext,
+  ) {
+    const invitation = await this.getInvitation(workspaceId, invitationId)
+
+    if (!invitation) {
+      return undefined
+    }
+
+    if (!isInvitationAcceptable(invitation)) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationNotAcceptable',
+        'The Workspace invitation cannot be accepted in its current state.',
+      )
+    }
+
+    const now = this.clock()
+
+    if (hasActiveInvitationAcceptanceLock(invitation, now)) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationAcceptanceInProgress',
+        'Workspace invitation acceptance is already in progress.',
+      )
+    }
+
+    return this.updateInvitation(
+      workspaceId,
+      invitation,
+      invitation.version,
+      {
+        acceptanceLockExpiresAt: new Date(
+          now.getTime() + INVITATION_ACCEPTANCE_LOCK_MS,
+        ).toISOString(),
+      },
+      ['pending', 'provisioning', 'delivery-failed'],
+      auditContext,
+      'invitation.acceptance-lock-acquired',
+      'acceptance-lock-acquired',
+      0,
+    )
+  }
+
+  /** password challenge 終了後に invitation acceptance lock を解除します。 */
+  async releaseInvitationAcceptanceLock(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+    auditContext?: MutationAuditContext,
+  ) {
+    const invitation = await this.requireInvitation(workspaceId, invitationId)
+
+    if (invitation.status === 'accepted') {
+      return invitation
+    }
+
+    return this.updateInvitation(
+      workspaceId,
+      invitation,
+      expectedVersion,
+      { acceptanceLockExpiresAt: undefined },
+      ['pending', 'provisioning', 'delivery-failed'],
+      auditContext,
+      'invitation.acceptance-lock-released',
+      'acceptance-lock-released',
+      3,
+    )
+  }
+
+  /** Cognito mutation の開始を stable identity pair とともに write-ahead 記録します。 */
+  async markInvitationIdentityMutationStarted(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+    cognitoIdentityId?: string,
+    cognitoUsername?: string,
+    auditContext?: MutationAuditContext,
+  ) {
+    const invitation = await this.requireInvitation(workspaceId, invitationId)
+    const normalizedCognitoIdentityId = cognitoIdentityId?.trim() || undefined
+    const normalizedCognitoUsername = cognitoUsername?.trim() || undefined
+
+    if (Boolean(normalizedCognitoIdentityId) !== Boolean(normalizedCognitoUsername)) {
+      throw new WorkspaceAccessError(
+        503,
+        'WorkspaceIdentityUnavailable',
+        'Cognito identity metadata is unavailable.',
+      )
+    }
+
+    const preservesInvitationIdentity = normalizedCognitoIdentityId !== undefined &&
+      normalizedCognitoIdentityId === invitation.cognitoIdentityId
+
+    return this.updateInvitation(
+      workspaceId,
+      invitation,
+      expectedVersion,
+      {
+        identityOwnership: preservesInvitationIdentity
+          ? invitation.identityOwnership
+          : 'ambiguous',
+        cognitoIdentityId: normalizedCognitoIdentityId,
+        cognitoUsername: normalizedCognitoUsername,
+        directoryClaimCleanupRequired: preservesInvitationIdentity
+          ? invitation.directoryClaimCleanupRequired
+          : undefined,
+        identityMutationAttempted: true,
+      },
+      ['provisioning'],
+      auditContext,
+      'invitation.identity-mutation-started',
+      'identity-mutation-started',
+      1,
+    )
+  }
+
+  /** Cognito 更新前に directory claim の補償責務を version 条件付きで記録します。 */
+  async markInvitationDirectoryClaimCleanupRequired(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+    cognitoIdentityId: string,
+    cognitoUsername: string,
+    auditContext?: MutationAuditContext,
+  ) {
+    const invitation = await this.requireInvitation(workspaceId, invitationId)
+    const normalizedCognitoIdentityId = normalizeRequired(
+      cognitoIdentityId,
+      'Cognito identity ID',
+    )
+    const normalizedCognitoUsername = normalizeRequired(cognitoUsername, 'Cognito username')
+
+    if (invitation.status !== 'provisioning' || invitation.version !== expectedVersion) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceVersionConflict',
+        'Workspace invitation changed. Reload and try again.',
+      )
+    }
+
+    if (
+      invitation.directoryClaimCleanupRequired &&
+      invitation.cognitoIdentityId === normalizedCognitoIdentityId &&
+      invitation.cognitoUsername === normalizedCognitoUsername
+    ) {
+      return invitation
+    }
+
+    return this.updateInvitation(
+      workspaceId,
+      invitation,
+      expectedVersion,
+      {
+        cognitoIdentityId: normalizedCognitoIdentityId,
+        cognitoUsername: normalizedCognitoUsername,
+        directoryClaimCleanupRequired: true,
+        identityOwnership: invitation.cognitoIdentityId === normalizedCognitoIdentityId
+          ? invitation.identityOwnership
+          : 'ambiguous',
+      },
+      ['provisioning'],
+      auditContext,
+      'invitation.directory-claim-cleanup-required',
+      'directory-claim-cleanup-required',
+      2,
+    )
+  }
+
   /** Cognito provisioning と invitation 配信の結果を記録します。 */
   async markInvitationDelivery(
     workspaceId: string,
     invitationId: string,
     input: MarkWorkspaceInvitationDeliveryInput,
+    auditContext?: MutationAuditContext,
   ) {
     const invitation = await this.requireInvitation(workspaceId, invitationId)
     const succeeded = input.deliveryStatus === 'sent' || input.deliveryStatus === 'not-required'
     const now = this.clock()
+    const preservesInvitationIdentity = input.cognitoIdentityId === undefined ||
+      input.cognitoIdentityId === invitation.cognitoIdentityId
+    const cognitoIdentityId = input.cognitoIdentityId ?? invitation.cognitoIdentityId
+    const cognitoUsername = input.cognitoUsername ?? (
+      preservesInvitationIdentity ? invitation.cognitoUsername : undefined
+    )
+
+    if (Boolean(cognitoIdentityId) !== Boolean(cognitoUsername)) {
+      throw new WorkspaceAccessError(
+        503,
+        'WorkspaceIdentityUnavailable',
+        'Cognito identity metadata is unavailable.',
+      )
+    }
 
     return this.updateInvitation(
       workspaceId,
@@ -443,11 +860,27 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         status: succeeded ? 'pending' : 'delivery-failed',
         deliveryStatus: input.deliveryStatus,
         identityOwnership: input.identityOwnership,
+        cognitoIdentityId,
+        cognitoUsername,
+        directoryClaimCleanupRequired: (
+          (preservesInvitationIdentity && invitation.directoryClaimCleanupRequired === true) ||
+          input.directoryClaimCleanupRequired === true
+        )
+          ? true
+          : undefined,
+        identityCleanupManualRequired: undefined,
+        identityMutationAttempted: succeeded
+          ? undefined
+          : invitation.identityMutationAttempted,
         failureMessage: succeeded ? undefined : input.failureMessage ?? 'Invitation delivery failed.',
         lastSentAt: input.deliveryStatus === 'sent' ? now.toISOString() : invitation.lastSentAt,
         expiresAt: addDays(now, 7).toISOString(),
       },
       ['provisioning', 'delivery-failed', 'pending'],
+      auditContext,
+      'invitation.delivery-updated',
+      'delivery-updated',
+      3,
     )
   }
 
@@ -456,6 +889,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     workspaceId: string,
     invitationId: string,
     input: MarkWorkspaceInvitationCleanupFailureInput,
+    auditContext?: MutationAuditContext,
   ) {
     const invitation = await this.requireInvitation(workspaceId, invitationId)
 
@@ -477,14 +911,62 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         failureMessage: input.failureMessage,
       },
       ['revoked'],
+      auditContext,
+      'invitation.cleanup-failed',
+      'cleanup-failed',
+      1,
     )
   }
 
-  /** Cognito cleanup 成功後に revoked invitation の retry marker を消します。 */
+  /** 自動 cleanup できない revoked invitation を手動確認待ちとして記録します。 */
+  async markInvitationManualCleanupRequired(
+    workspaceId: string,
+    invitationId: string,
+    expectedVersion: number,
+    auditContext?: MutationAuditContext,
+  ) {
+    const invitation = await this.requireInvitation(workspaceId, invitationId)
+
+    if (invitation.status !== 'revoked') {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationNotRevoked',
+        'Only a revoked invitation can require manual Cognito cleanup.',
+      )
+    }
+
+    if (
+      invitation.identityCleanupManualRequired === true &&
+      invitation.failureMessage === MANUAL_COGNITO_CLEANUP_MESSAGE
+    ) {
+      return invitation
+    }
+
+    return this.updateInvitation(
+      workspaceId,
+      invitation,
+      expectedVersion,
+      {
+        status: 'revoked',
+        deliveryStatus: 'not-required',
+        identityCleanupCompleted: undefined,
+        identityCleanupManualRequired: true,
+        failureMessage: MANUAL_COGNITO_CLEANUP_MESSAGE,
+      },
+      ['revoked'],
+      auditContext,
+      'invitation.cleanup-manual-required',
+      'cleanup-manual-required',
+      2,
+    )
+  }
+
+  /** Cognito cleanup 成功後に retry marker と directory claim の補償責務を消します。 */
   async clearInvitationCleanupFailure(
     workspaceId: string,
     invitationId: string,
     expectedVersion: number,
+    auditContext?: MutationAuditContext,
   ) {
     const invitation = await this.requireInvitation(workspaceId, invitationId)
 
@@ -503,9 +985,68 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       {
         status: 'revoked',
         deliveryStatus: 'not-required',
+        directoryClaimCleanupRequired: undefined,
+        identityCleanupCompleted: true,
+        identityCleanupManualRequired: undefined,
+        identityMutationAttempted: undefined,
         failureMessage: undefined,
       },
       ['revoked'],
+      auditContext,
+      'invitation.cleanup-completed',
+      'cleanup-completed',
+      3,
+    )
+  }
+
+  /** 手動 Cognito cleanup の完了を管理権限と version 付きで確認します。 */
+  async acknowledgeInvitationManualCleanup(
+    workspaceId: string,
+    actorMemberKey: string,
+    invitationId: string,
+    expectedVersion: number,
+    auditContext?: MutationAuditContext,
+  ) {
+    const actor = await this.requireActiveActor(workspaceId, actorMemberKey)
+    const invitation = await this.requireInvitation(workspaceId, invitationId)
+    assertCanManageRole(actor, invitation.role)
+
+    if (
+      invitation.status !== 'revoked' ||
+      invitation.identityCleanupManualRequired !== true
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationManualCleanupNotRequired',
+        'This invitation is not waiting for manual Cognito cleanup.',
+      )
+    }
+
+    if (invitation.version !== expectedVersion) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceVersionConflict',
+        'Workspace invitation changed. Reload and try again.',
+      )
+    }
+
+    return this.updateInvitationWithActor(
+      workspaceId,
+      actor,
+      invitation,
+      {
+        status: 'revoked',
+        deliveryStatus: 'not-required',
+        directoryClaimCleanupRequired: undefined,
+        identityCleanupCompleted: true,
+        identityCleanupManualRequired: undefined,
+        identityMutationAttempted: undefined,
+        failureMessage: undefined,
+      },
+      auditContext,
+      'invitation.cleanup-acknowledged',
+      'cleanup-acknowledged',
+      0,
     )
   }
 
@@ -515,12 +1056,32 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     actorMemberKey: string,
     invitationId: string,
     expiresInDays = 7,
+    auditContext?: MutationAuditContext,
   ) {
     const actor = await this.requireActiveActor(workspaceId, actorMemberKey)
     const invitation = await this.requireInvitation(workspaceId, invitationId)
     assertCanManageRole(actor, invitation.role)
 
-    if (invitation.status === 'revoked' || invitation.status === 'accepted') {
+    if (hasActiveInvitationAcceptanceLock(invitation, this.clock())) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationAcceptanceInProgress',
+        'An invitation cannot be resent while acceptance is in progress.',
+      )
+    }
+
+    if (
+      invitation.identityCleanupManualRequired === true ||
+      requiresManualLegacyIdentityCleanup(invitation)
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationManualCleanupRequired',
+        'Manual Cognito cleanup must complete before this invitation can be resent.',
+      )
+    }
+
+    if (invitation.status !== 'pending' && invitation.status !== 'delivery-failed') {
       throw new WorkspaceAccessError(
         409,
         'WorkspaceInvitationNotResendable',
@@ -536,16 +1097,46 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         status: 'provisioning',
         deliveryStatus: 'pending',
         failureMessage: undefined,
+        acceptanceLockExpiresAt: undefined,
+        identityMutationAttempted: undefined,
         expiresAt: addDays(this.clock(), expiresInDays).toISOString(),
       },
+      auditContext,
+      'invitation.resend-started',
+      'resend-started',
+      0,
     )
   }
 
   /** invitation を取り消します。 */
-  async revokeInvitation(workspaceId: string, actorMemberKey: string, invitationId: string) {
+  async revokeInvitation(
+    workspaceId: string,
+    actorMemberKey: string,
+    invitationId: string,
+    auditContext?: MutationAuditContext,
+  ) {
     const actor = await this.requireActiveActor(workspaceId, actorMemberKey)
     const invitation = await this.requireInvitation(workspaceId, invitationId)
     assertCanManageRole(actor, invitation.role)
+
+    if (hasActiveInvitationAcceptanceLock(invitation, this.clock())) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationAcceptanceInProgress',
+        'An invitation cannot be revoked while acceptance is in progress.',
+      )
+    }
+
+    if (
+      invitation.status === 'provisioning' &&
+      hasActiveInvitationProvisioningLease(invitation, this.clock())
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationProvisioning',
+        'An invitation cannot be revoked while Cognito provisioning is in progress.',
+      )
+    }
 
     if (invitation.status === 'accepted') {
       throw new WorkspaceAccessError(
@@ -555,16 +1146,55 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       )
     }
 
-    const cleanupPendingMessage = invitation.identityOwnership === 'workspace-created'
-      ? invitation.failureMessage ?? 'Cognito cleanup is pending and can be retried safely.'
-      : undefined
+    if (invitation.status === 'revoked' && invitation.identityCleanupCompleted) {
+      return invitation
+    }
+
+    if (invitation.status === 'revoked' && invitation.identityCleanupManualRequired === true) {
+      return invitation
+    }
+
+    const identityCleanupManualRequired = invitation.identityCleanupManualRequired === true ||
+      requiresManualLegacyIdentityCleanup(invitation)
+
+    if (
+      invitation.status === 'revoked' &&
+      !invitation.failureMessage &&
+      !identityCleanupManualRequired
+    ) {
+      return invitation
+    }
+    const cleanupPendingMessage = identityCleanupManualRequired
+      ? MANUAL_COGNITO_CLEANUP_MESSAGE
+      : (
+          invitation.identityOwnership === 'workspace-created' ||
+          invitation.directoryClaimCleanupRequired === true
+        )
+        ? invitation.failureMessage ?? 'Cognito cleanup is pending and can be retried safely.'
+        : undefined
+    const nextIdentityCleanupManualRequired = identityCleanupManualRequired || undefined
+
+    if (
+      invitation.status === 'revoked' &&
+      invitation.identityCleanupManualRequired === nextIdentityCleanupManualRequired &&
+      invitation.failureMessage === cleanupPendingMessage
+    ) {
+      return invitation
+    }
 
     if (invitation.status === 'revoked') {
       return this.updateInvitationWithActor(
         workspaceId,
         actor,
         invitation,
-        { failureMessage: cleanupPendingMessage },
+        {
+          identityCleanupManualRequired: nextIdentityCleanupManualRequired,
+          failureMessage: cleanupPendingMessage,
+        },
+        auditContext,
+        'invitation.revoked',
+        'revoked',
+        0,
       )
     }
 
@@ -575,8 +1205,14 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       {
         status: 'revoked',
         deliveryStatus: 'not-required',
+        acceptanceLockExpiresAt: undefined,
+        identityCleanupManualRequired: nextIdentityCleanupManualRequired,
         failureMessage: cleanupPendingMessage,
       },
+      auditContext,
+      'invitation.revoked',
+      'revoked',
+      0,
     )
   }
 
@@ -586,10 +1222,19 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     actorMemberKey: string,
     invitationId: string,
     expiresInDays = 7,
+    auditContext?: MutationAuditContext,
   ) {
     const actor = await this.requireActiveActor(workspaceId, actorMemberKey)
     const invitation = await this.requireInvitation(workspaceId, invitationId)
     assertCanManageRole(actor, invitation.role)
+
+    if (hasActiveInvitationAcceptanceLock(invitation, this.clock())) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationAcceptanceInProgress',
+        'An invitation cannot be recreated while acceptance is in progress.',
+      )
+    }
 
     if (invitation.status !== 'expired' && invitation.status !== 'revoked') {
       throw new WorkspaceAccessError(
@@ -600,8 +1245,22 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
 
     if (
+      invitation.identityCleanupManualRequired === true ||
+      requiresManualLegacyIdentityCleanup(invitation)
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceInvitationManualCleanupRequired',
+        'Manual Cognito cleanup must complete before this invitation can be recreated.',
+      )
+    }
+
+    if (
       invitation.status === 'revoked' &&
-      invitation.identityOwnership === 'workspace-created' &&
+      (
+        invitation.identityOwnership === 'workspace-created' ||
+        invitation.directoryClaimCleanupRequired === true
+      ) &&
       invitation.failureMessage
     ) {
       throw new WorkspaceAccessError(
@@ -618,10 +1277,29 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       {
         status: 'provisioning',
         deliveryStatus: 'pending',
-        identityOwnership: 'ambiguous',
+        identityOwnership: invitation.status === 'revoked'
+          ? 'ambiguous'
+          : invitation.identityOwnership,
+        cognitoIdentityId: invitation.status === 'revoked'
+          ? undefined
+          : invitation.cognitoIdentityId,
+        cognitoUsername: invitation.status === 'revoked'
+          ? undefined
+          : invitation.cognitoUsername,
+        directoryClaimCleanupRequired: invitation.status === 'revoked'
+          ? undefined
+          : invitation.directoryClaimCleanupRequired,
+        identityCleanupCompleted: undefined,
+        identityCleanupManualRequired: undefined,
+        identityMutationAttempted: undefined,
+        acceptanceLockExpiresAt: undefined,
         failureMessage: undefined,
         expiresAt: addDays(this.clock(), expiresInDays).toISOString(),
       },
+      auditContext,
+      'invitation.reinvite-started',
+      'reinvite-started',
+      0,
     )
   }
 
@@ -629,6 +1307,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   async reconcileAuthenticatedMember(
     workspaceId: string,
     input: ReconcileAuthenticatedWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
   ) {
     const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
     const memberKey = normalizeMemberKey(input.memberKey)
@@ -665,6 +1344,41 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       createdAt: nowIso,
       updatedAt: nowIso,
     }
+    const acceptedInvitation: WorkspaceInvitation = {
+      ...invitation,
+      status: 'accepted',
+      deliveryStatus: 'not-required',
+      acceptanceLockExpiresAt: undefined,
+      acceptedAt: nowIso,
+      failureMessage: undefined,
+      version: invitation.version + 1,
+      updatedAt: nowIso,
+    }
+    const memberAuditPut = this.createWorkspaceAuditPut(auditContext, {
+      directoryId: normalizedWorkspaceId,
+      eventType: 'member.created',
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, member.memberKey),
+      action: 'created',
+      occurredAt: nowIso,
+      changes: createAuditFieldChanges(
+        undefined,
+        member,
+        WORKSPACE_MEMBER_AUDIT_FIELDS,
+        WORKSPACE_AUDIT_REDACT_FIELDS,
+      ),
+      metadata: { kind: 'workspace-member' },
+      sequence: 1,
+    })
+    const invitationAuditPut = this.createInvitationAuditPut(
+      normalizedWorkspaceId,
+      invitation,
+      acceptedInvitation,
+      auditContext,
+      'invitation.accepted',
+      'accepted',
+      2,
+    )
     const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
       {
         Put: {
@@ -681,7 +1395,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
             recordKey: createInvitationRecordKey(invitation.id),
           },
           UpdateExpression:
-            'SET #status = :accepted, deliveryStatus = :notRequired, acceptedAt = :now, updatedAt = :now, version = version + :one REMOVE failureMessage',
+            'SET #status = :accepted, deliveryStatus = :notRequired, acceptedAt = :now, updatedAt = :now, version = version + :one REMOVE failureMessage, acceptanceLockExpiresAt',
           ConditionExpression:
             'version = :expectedVersion AND #status IN (:pending, :provisioning, :deliveryFailed) AND expiresAt > :now',
           ExpressionAttributeNames: { '#status': 'status' },
@@ -702,12 +1416,22 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     if (member.role === 'owner') {
       transactItems.push({ Update: createOwnerCountUpdate(this.tableName, normalizedWorkspaceId, 1, nowIso) })
     }
+    const aggregateItemCount = transactItems.length
+
+    transactItems.push(
+      ...(memberAuditPut ? [memberAuditPut] : []),
+      ...(invitationAuditPut ? [invitationAuditPut] : []),
+    )
 
     try {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
       return member
     } catch (error) {
-      if (isAwsError(error, 'TransactionCanceledException')) {
+      if (
+        isConditionalTransactionCancellation(error) &&
+        Array.from({ length: aggregateItemCount }, (_, index) => index)
+          .some((index) => isTransactionConditionalFailureAt(error, index))
+      ) {
         const reconciledMember = await this.getActiveMember(normalizedWorkspaceId, memberKey)
 
         if (reconciledMember) {
@@ -732,6 +1456,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     actorMemberKey: string,
     targetMemberKey: string,
     input: UpdateWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
   ) {
     const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
     const actor = await this.requireActiveActor(normalizedWorkspaceId, actorMemberKey)
@@ -761,12 +1486,84 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     const willBeActiveOwner = nextRole === 'owner' && nextStatus === 'active'
     const ownerCountDelta = Number(willBeActiveOwner) - Number(wasActiveOwner)
     const nowIso = this.clock().toISOString()
+    const changesDocumentAuthorization =
+      target.status === 'active' &&
+      (
+        nextStatus !== 'active' ||
+        (
+          target.role !== 'guest' &&
+          nextRole === 'guest'
+        )
+      )
+    const documentAuthorizationGuard =
+      changesDocumentAuthorization
+        ? {
+            expectedRevision:
+              requireDocumentAuthorizationRevision(
+                input
+                  .expectedDocumentAuthorizationRevision,
+              ),
+            updatedAt: nowIso,
+          }
+        : undefined
+    const becameDeactivated = target.status !== 'deactivated' && nextStatus === 'deactivated'
+    const nextMember = {
+      ...target,
+      role: nextRole,
+      status: nextStatus,
+      version: target.version + 1,
+      updatedAt: nowIso,
+      deactivatedAt: becameDeactivated
+        ? nowIso
+        : nextStatus === 'deactivated'
+          ? target.deactivatedAt
+          : undefined,
+    } satisfies WorkspaceMember
+    const roleChanged = nextRole !== target.role
+    const statusChanged = nextStatus !== target.status
+
+    if (!roleChanged && !statusChanged) {
+      if (target.version !== input.expectedVersion) {
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceVersionConflict',
+          'Workspace member changed. Reload and try again.',
+        )
+      }
+
+      return target
+    }
+
+    const memberEventType = roleChanged && !statusChanged
+      ? 'member.role-changed'
+      : statusChanged && !roleChanged
+        ? nextStatus === 'deactivated' ? 'member.deactivated' : 'member.reactivated'
+        : 'member.updated'
+    const memberAction = memberEventType.slice('member.'.length)
+    const memberAuditPut = this.createWorkspaceAuditPut(auditContext, {
+      directoryId: normalizedWorkspaceId,
+      eventType: memberEventType,
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, target.memberKey),
+      action: memberAction,
+      occurredAt: nowIso,
+      changes: createAuditFieldChanges(
+        target,
+        nextMember,
+        WORKSPACE_MEMBER_AUDIT_FIELDS,
+        WORKSPACE_AUDIT_REDACT_FIELDS,
+      ),
+      metadata: { kind: 'workspace-member' },
+      sequence: 0,
+    })
     const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = []
+    const actorConditionIndex = actor.memberKey !== target.memberKey ? 0 : undefined
 
     if (actor.memberKey !== target.memberKey) {
       transactItems.push(this.actorCondition(normalizedWorkspaceId, actor))
     }
 
+    const memberUpdateIndex = transactItems.length
     transactItems.push({
       Update: {
         TableName: this.tableName,
@@ -774,9 +1571,11 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           workspaceId: normalizedWorkspaceId,
           recordKey: createMemberRecordKey(target.memberKey),
         },
-        UpdateExpression: nextStatus === 'deactivated'
+        UpdateExpression: becameDeactivated
           ? 'SET #role = :role, #status = :status, updatedAt = :now, deactivatedAt = :now, version = version + :one'
-          : 'SET #role = :role, #status = :status, updatedAt = :now, version = version + :one REMOVE deactivatedAt',
+          : nextStatus === 'deactivated'
+            ? 'SET #role = :role, #status = :status, updatedAt = :now, version = version + :one'
+            : 'SET #role = :role, #status = :status, updatedAt = :now, version = version + :one REMOVE deactivatedAt',
         ConditionExpression: 'attribute_exists(workspaceId) AND version = :expectedVersion',
         ExpressionAttributeNames: { '#role': 'role', '#status': 'status' },
         ExpressionAttributeValues: {
@@ -789,7 +1588,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       },
     })
 
-    if (ownerCountDelta !== 0) {
+    const ownerGuardIndex = ownerCountDelta !== 0 ? transactItems.length : undefined
+    if (ownerGuardIndex !== undefined) {
       transactItems.push({
         Update: createOwnerCountUpdate(
           this.tableName,
@@ -800,24 +1600,537 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       })
     }
 
+    const planningRevisionItemIndex = transactItems.length
+    transactItems.push(createPlanningRevisionMutation(
+      this.planningTableName,
+      normalizedWorkspaceId,
+      input.expectedPlanningRevision,
+      nowIso,
+    ))
+
+    const documentAuthorizationItemIndex =
+      documentAuthorizationGuard !== undefined
+        ? transactItems.length
+        : undefined
+    if (
+      documentAuthorizationItemIndex !== undefined
+    ) {
+      transactItems.push(
+        createDocumentAuthorizationRevisionPut(
+          this.documentsTableName,
+          normalizedWorkspaceId,
+          documentAuthorizationGuard,
+        ),
+      )
+    }
+
+    if (memberAuditPut) {
+      transactItems.push(memberAuditPut)
+    }
+
     try {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
-      return {
-        ...target,
-        role: nextRole,
-        status: nextStatus,
-        version: target.version + 1,
-        updatedAt: nowIso,
-        deactivatedAt: nextStatus === 'deactivated' ? nowIso : undefined,
-      } satisfies WorkspaceMember
+      return nextMember
     } catch (error) {
       if (isAwsError(error, 'TransactionCanceledException')) {
-        await this.classifyMemberUpdateConflict(
+        if (!isConditionalTransactionCancellation(error)) {
+          throw toWorkspaceAccessError(error)
+        }
+
+        if (isTransactionConditionalFailureAt(error, planningRevisionItemIndex)) {
+          throw new WorkspaceAccessError(
+            409,
+            'PlanningRevisionConflict',
+            'Planning changed. Reload and try again.',
+            { cause: error },
+          )
+        }
+
+        if (
+          documentAuthorizationItemIndex !== undefined &&
+          isTransactionConditionalFailureAt(
+            error,
+            documentAuthorizationItemIndex,
+          )
+        ) {
+          throw new WorkspaceAccessError(
+            409,
+            'DocumentAuthorizationRevisionConflict',
+            'Document permissions changed. Reload and try again.',
+            { cause: error },
+          )
+        }
+
+        const aggregateConditionFailed =
+          (actorConditionIndex !== undefined &&
+            isTransactionConditionalFailureAt(error, actorConditionIndex)) ||
+          isTransactionConditionalFailureAt(error, memberUpdateIndex) ||
+          (ownerGuardIndex !== undefined &&
+            isTransactionConditionalFailureAt(error, ownerGuardIndex))
+
+        if (aggregateConditionFailed) {
+          await this.classifyMemberUpdateConflict(
+            normalizedWorkspaceId,
+            actor,
+            target,
+            input.expectedVersion,
+            ownerCountDelta < 0 && ownerGuardIndex !== undefined &&
+              isTransactionConditionalFailureAt(error, ownerGuardIndex),
+          )
+        }
+      }
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /** Directory authority から owner 以外の member を冪等に作成または更新します。 */
+  async reconcileDirectoryMember(
+    workspaceId: string,
+    input: ReconcileDirectoryWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
+  ) {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const memberKey = normalizeMemberKey(input.memberKey)
+    const email = normalizeEmail(input.email)
+    const externalIdentityId = normalizeRequired(
+      input.externalIdentityId,
+      'External identity ID',
+    )
+    const role = requireWorkspaceRole(input.role)
+
+    if (role === 'owner') {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceDirectoryOwnerProtected',
+        'Directory provisioning cannot create or manage a Workspace owner.',
+      )
+    }
+
+    const existing = await this.getMember(normalizedWorkspaceId, memberKey)
+    const nowIso = this.clock().toISOString()
+
+    if (!existing) {
+      const member = {
+        id: memberKey,
+        memberKey,
+        email,
+        name: normalizeOptional(input.name),
+        role,
+        status: 'active',
+        provisioningSource: 'directory',
+        externalIdentityId,
+        version: 1,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      } satisfies WorkspaceMember
+      const auditPut = this.createWorkspaceAuditPut(auditContext, {
+        directoryId: normalizedWorkspaceId,
+        eventType: 'member.directory-provisioned',
+        entityType: 'member',
+        entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, member.memberKey),
+        action: 'directory-provisioned',
+        occurredAt: nowIso,
+        changes: createAuditFieldChanges(
+          undefined,
+          member,
+          WORKSPACE_MEMBER_AUDIT_FIELDS,
+          WORKSPACE_AUDIT_REDACT_FIELDS,
+        ),
+        metadata: { kind: 'workspace-member', source: 'directory' },
+        sequence: 20,
+      })
+      const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
+        Put: {
+          TableName: this.tableName,
+          Item: toMemberItem(normalizedWorkspaceId, member),
+          ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+        },
+      }, createPlanningRevisionMutation(
+        this.planningTableName,
+        normalizedWorkspaceId,
+        input.expectedPlanningRevision,
+        nowIso,
+      )]
+      if (auditPut) transactItems.push(auditPut)
+
+      try {
+        await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+        return member
+      } catch (error) {
+        if (isConditionalTransactionCancellation(error)) {
+          if (isTransactionConditionalFailureAt(error, 1)) {
+            throw new WorkspaceAccessError(
+              409,
+              'PlanningRevisionConflict',
+              'Planning changed. Reload and try again.',
+              { cause: error },
+            )
+          }
+          const racedMember = await this.getMember(normalizedWorkspaceId, memberKey)
+          if (
+            racedMember?.externalIdentityId === externalIdentityId &&
+            racedMember.provisioningSource === 'directory' &&
+            racedMember.email === email &&
+            racedMember.name === normalizeOptional(input.name) &&
+            racedMember.role === role &&
+            racedMember.status === 'active'
+          ) {
+            return racedMember
+          }
+          throw new WorkspaceAccessError(
+            409,
+            'WorkspaceDirectoryIdentityConflict',
+            'Workspace member is already linked to another provisioning authority.',
+            { cause: error },
+          )
+        }
+        throw toWorkspaceAccessError(error)
+      }
+    }
+
+    if (existing.role === 'owner') {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceDirectoryOwnerProtected',
+        'Directory provisioning cannot create or manage a Workspace owner.',
+      )
+    }
+    if (
+      existing.provisioningSource !== 'directory' ||
+      existing.externalIdentityId !== externalIdentityId
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceDirectoryIdentityConflict',
+        'Workspace member is not managed by this directory identity.',
+      )
+    }
+
+    const nextMember = {
+      ...existing,
+      email,
+      name: normalizeOptional(input.name),
+      role,
+      status: 'active',
+      provisioningSource: 'directory',
+      externalIdentityId,
+      deactivatedAt: undefined,
+      version: existing.version + 1,
+      updatedAt: nowIso,
+    } satisfies WorkspaceMember
+    const changed = existing.email !== nextMember.email ||
+      existing.name !== nextMember.name ||
+      existing.role !== nextMember.role ||
+      existing.status !== nextMember.status ||
+      existing.provisioningSource !== nextMember.provisioningSource ||
+      existing.externalIdentityId !== nextMember.externalIdentityId
+
+    if (!changed) return existing
+    const changesDocumentAuthorization =
+      existing.status === 'active' &&
+      existing.role !== 'guest' &&
+      role === 'guest'
+    const documentAuthorizationRevision =
+      changesDocumentAuthorization
+        ? requireDocumentAuthorizationRevision(
+            input.expectedDocumentAuthorizationRevision,
+          )
+        : undefined
+    if (
+      input.expectedVersion !== undefined &&
+      existing.version !== input.expectedVersion
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceVersionConflict',
+        'Workspace member changed. Reload and try again.',
+      )
+    }
+    if (
+      !Number.isSafeInteger(input.expectedPlanningRevision) ||
+      input.expectedPlanningRevision < 0
+    ) {
+      throw new WorkspaceAccessError(
+        400,
+        'InvalidPlanningRevision',
+        'Planning expected revision is required for directory reconciliation.',
+      )
+    }
+
+    const auditPut = this.createWorkspaceAuditPut(auditContext, {
+      directoryId: normalizedWorkspaceId,
+      eventType: existing.status === 'deactivated'
+        ? 'member.directory-reactivated'
+        : 'member.directory-reconciled',
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, existing.memberKey),
+      action: existing.status === 'deactivated'
+        ? 'directory-reactivated'
+        : 'directory-reconciled',
+      occurredAt: nowIso,
+      changes: createAuditFieldChanges(
+        existing,
+        nextMember,
+        WORKSPACE_MEMBER_AUDIT_FIELDS,
+        WORKSPACE_AUDIT_REDACT_FIELDS,
+      ),
+      metadata: { kind: 'workspace-member', source: 'directory' },
+      sequence: 20,
+    })
+    const updateExpressions = [
+      'email = :email',
+      '#role = :role',
+      '#status = :active',
+      'provisioningSource = :directory',
+      'externalIdentityId = :externalIdentityId',
+      'updatedAt = :now',
+      'version = version + :one',
+    ]
+    const removeExpressions = ['deactivatedAt']
+    const name = normalizeOptional(input.name)
+    if (name) {
+      updateExpressions.push('#name = :name')
+    } else {
+      removeExpressions.push('#name')
+    }
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
+      Update: {
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalizedWorkspaceId,
+          recordKey: createMemberRecordKey(memberKey),
+        },
+        UpdateExpression:
+          `SET ${updateExpressions.join(', ')} REMOVE ${removeExpressions.join(', ')}`,
+        ConditionExpression:
+          'version = :expectedVersion AND #role <> :owner AND provisioningSource = :directory AND externalIdentityId = :externalIdentityId',
+        ExpressionAttributeNames: {
+          '#name': 'name',
+          '#role': 'role',
+          '#status': 'status',
+        },
+        ExpressionAttributeValues: {
+          ':active': 'active',
+          ':directory': 'directory',
+          ':email': email,
+          ':externalIdentityId': externalIdentityId,
+          ':name': name,
+          ':now': nowIso,
+          ':one': 1,
+          ':owner': 'owner',
+          ':role': role,
+          ':expectedVersion': existing.version,
+        },
+      },
+    }, createPlanningRevisionMutation(
+      this.planningTableName,
+      normalizedWorkspaceId,
+      input.expectedPlanningRevision,
+      nowIso,
+    )]
+    const documentAuthorizationItemIndex =
+      documentAuthorizationRevision === undefined
+        ? undefined
+        : transactItems.length
+    if (documentAuthorizationRevision !== undefined) {
+      transactItems.push(
+        createDocumentAuthorizationRevisionPut(
+          this.documentsTableName,
           normalizedWorkspaceId,
-          actor,
-          target,
-          input.expectedVersion,
-          ownerCountDelta,
+          {
+            expectedRevision:
+              documentAuthorizationRevision,
+            updatedAt: nowIso,
+          },
+        ),
+      )
+    }
+    if (auditPut) transactItems.push(auditPut)
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+      return nextMember
+    } catch (error) {
+      if (isConditionalTransactionCancellation(error)) {
+        if (isTransactionConditionalFailureAt(error, 1)) {
+          throw new WorkspaceAccessError(
+            409,
+            'PlanningRevisionConflict',
+            'Planning changed. Reload and try again.',
+            { cause: error },
+          )
+        }
+        if (
+          documentAuthorizationItemIndex !== undefined &&
+          isTransactionConditionalFailureAt(
+            error,
+            documentAuthorizationItemIndex,
+          )
+        ) {
+          throw new WorkspaceAccessError(
+            409,
+            'DocumentAuthorizationRevisionConflict',
+            'Document permissions changed. Reload and try again.',
+            { cause: error },
+          )
+        }
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceDirectoryReconcileConflict',
+          'Workspace member changed while directory state was being reconciled.',
+          { cause: error },
+        )
+      }
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /** Directory authority から owner 以外の member を冪等に停止します。 */
+  async deprovisionDirectoryMember(
+    workspaceId: string,
+    targetMemberKey: string,
+    input: DeprovisionDirectoryWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
+  ) {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const memberKey = normalizeMemberKey(targetMemberKey)
+    const externalIdentityId = normalizeRequired(
+      input.externalIdentityId,
+      'External identity ID',
+    )
+    const existing = await this.getMember(normalizedWorkspaceId, memberKey)
+
+    if (!existing) return undefined
+    if (existing.role === 'owner') {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceDirectoryOwnerProtected',
+        'Directory provisioning cannot deactivate a Workspace owner.',
+      )
+    }
+    if (
+      existing.provisioningSource !== 'directory' ||
+      existing.externalIdentityId !== externalIdentityId
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceDirectoryIdentityConflict',
+        'Workspace member is not managed by this directory identity.',
+      )
+    }
+    if (existing.status === 'deactivated') return existing
+    if (existing.version !== input.expectedVersion) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceVersionConflict',
+        'Workspace member changed. Reload and try again.',
+      )
+    }
+    const documentAuthorizationRevision =
+      requireDocumentAuthorizationRevision(
+        input.expectedDocumentAuthorizationRevision,
+      )
+
+    const nowIso = this.clock().toISOString()
+    const nextMember = {
+      ...existing,
+      status: 'deactivated',
+      provisioningSource: 'directory',
+      externalIdentityId,
+      version: existing.version + 1,
+      updatedAt: nowIso,
+      deactivatedAt: nowIso,
+    } satisfies WorkspaceMember
+    const auditPut = this.createWorkspaceAuditPut(auditContext, {
+      directoryId: normalizedWorkspaceId,
+      eventType: 'member.directory-deprovisioned',
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, existing.memberKey),
+      action: 'directory-deprovisioned',
+      occurredAt: nowIso,
+      changes: createAuditFieldChanges(
+        existing,
+        nextMember,
+        WORKSPACE_MEMBER_AUDIT_FIELDS,
+        WORKSPACE_AUDIT_REDACT_FIELDS,
+      ),
+      metadata: { kind: 'workspace-member', source: 'directory' },
+      sequence: 20,
+    })
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
+      Update: {
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalizedWorkspaceId,
+          recordKey: createMemberRecordKey(memberKey),
+        },
+        UpdateExpression:
+          'SET #status = :deactivated, provisioningSource = :directory, externalIdentityId = :externalIdentityId, updatedAt = :now, deactivatedAt = :now, version = version + :one',
+        ConditionExpression:
+          'version = :expectedVersion AND #role <> :owner AND provisioningSource = :directory AND externalIdentityId = :externalIdentityId',
+        ExpressionAttributeNames: { '#role': 'role', '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':deactivated': 'deactivated',
+          ':directory': 'directory',
+          ':externalIdentityId': externalIdentityId,
+          ':now': nowIso,
+          ':one': 1,
+          ':owner': 'owner',
+          ':expectedVersion': input.expectedVersion,
+        },
+      },
+    }, createPlanningRevisionMutation(
+      this.planningTableName,
+      normalizedWorkspaceId,
+      input.expectedPlanningRevision,
+      nowIso,
+    )]
+    const documentAuthorizationItemIndex =
+      transactItems.length
+    transactItems.push(
+      createDocumentAuthorizationRevisionPut(
+        this.documentsTableName,
+        normalizedWorkspaceId,
+        {
+          expectedRevision:
+            documentAuthorizationRevision,
+          updatedAt: nowIso,
+        },
+      ),
+    )
+    if (auditPut) transactItems.push(auditPut)
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+      return nextMember
+    } catch (error) {
+      if (isConditionalTransactionCancellation(error)) {
+        if (isTransactionConditionalFailureAt(error, 1)) {
+          throw new WorkspaceAccessError(
+            409,
+            'PlanningRevisionConflict',
+            'Planning changed. Reload and try again.',
+            { cause: error },
+          )
+        }
+        if (
+          isTransactionConditionalFailureAt(
+            error,
+            documentAuthorizationItemIndex,
+          )
+        ) {
+          throw new WorkspaceAccessError(
+            409,
+            'DocumentAuthorizationRevisionConflict',
+            'Document permissions changed. Reload and try again.',
+            { cause: error },
+          )
+        }
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceDirectoryDeprovisionConflict',
+          'Workspace member changed while directory access was being removed.',
+          { cause: error },
         )
       }
       throw toWorkspaceAccessError(error)
@@ -866,15 +2179,124 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
   }
 
+  /** invitation の before/after から allowlist 済み audit Put を作成します。 */
+  private createInvitationAuditPut(
+    workspaceId: string,
+    before: WorkspaceInvitation | undefined,
+    after: WorkspaceInvitation,
+    auditContext: MutationAuditContext | undefined,
+    eventType: string,
+    action: string,
+    sequence: number,
+  ) {
+    return this.createWorkspaceAuditPut(auditContext, {
+      directoryId: workspaceId,
+      eventType,
+      entityType: 'invitation',
+      entityId: this.createInvitationAuditEntityId(workspaceId, after.id),
+      action,
+      occurredAt: after.updatedAt,
+      changes: createAuditFieldChanges(
+        before,
+        after,
+        WORKSPACE_INVITATION_AUDIT_FIELDS,
+        WORKSPACE_AUDIT_REDACT_FIELDS,
+      ),
+      metadata: { kind: 'workspace-invitation' },
+      sequence,
+    })
+  }
+
+  /** Audit 設定時に context を必須化し、条件付き event Put を作成します。 */
+  private createWorkspaceAuditPut(
+    auditContext: MutationAuditContext | undefined,
+    input: MutationAuditEventInput,
+  ) {
+    if (!this.auditTableName) {
+      return undefined
+    }
+
+    if (!auditContext) {
+      throw new WorkspaceAccessError(
+        500,
+        'WorkspaceAuditContextMissing',
+        'Workspace mutation audit context is required.',
+      )
+    }
+
+    if (auditContext.workspaceId !== input.directoryId) {
+      throw new WorkspaceAccessError(
+        500,
+        'WorkspaceAuditContextMismatch',
+        'Workspace mutation audit context does not match the target Workspace.',
+      )
+    }
+
+    return createMutationAuditEventPut(this.auditTableName, auditContext, input)
+  }
+
+  /** Workspace member の公開 audit ID を固定 HMAC key から導出します。 */
+  private createMemberAuditEntityId(workspaceId: string, memberId: string) {
+    return this.createAuditEntityId((pseudonymKey) =>
+      createWorkspaceMemberAuditEntityId(workspaceId, memberId, pseudonymKey)
+    )
+  }
+
+  /** Workspace invitation の公開 audit ID を固定 HMAC key から導出します。 */
+  private createInvitationAuditEntityId(workspaceId: string, invitationId: string) {
+    return this.createAuditEntityId((pseudonymKey) =>
+      createWorkspaceInvitationAuditEntityId(workspaceId, invitationId, pseudonymKey)
+    )
+  }
+
+  /** Audit 無効時は未使用 placeholder を返し、有効時は key 設定を fail-closed で検証します。 */
+  private createAuditEntityId(createId: (pseudonymKey: string) => string) {
+    if (!this.auditTableName) {
+      return 'audit-disabled'
+    }
+
+    if (!this.auditPseudonymKey) {
+      throw new WorkspaceAccessError(
+        500,
+        'WorkspaceAuditPseudonymKeyMissing',
+        'Workspace audit pseudonym key is required.',
+      )
+    }
+
+    try {
+      return createId(this.auditPseudonymKey)
+    } catch (error) {
+      throw new WorkspaceAccessError(
+        500,
+        'WorkspaceAuditPseudonymKeyInvalid',
+        'Workspace audit pseudonym key is invalid.',
+        { cause: error },
+      )
+    }
+  }
+
   /** actor guard と invitation update を同一 transaction で実行します。 */
   private async updateInvitationWithActor(
     workspaceId: string,
     actor: WorkspaceMember,
     invitation: WorkspaceInvitation,
     changes: Partial<WorkspaceInvitation>,
+    auditContext: MutationAuditContext | undefined,
+    eventType: string,
+    action: string,
+    sequence: number,
   ) {
     const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
     const nextInvitation = applyInvitationChanges(invitation, changes, this.clock())
+    const auditPut = this.createInvitationAuditPut(
+      normalizedWorkspaceId,
+      invitation,
+      nextInvitation,
+      auditContext,
+      eventType,
+      action,
+      sequence,
+    )
 
     try {
       await this.documentClient.send(new TransactWriteCommand({
@@ -888,28 +2310,47 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
               ExpressionAttributeValues: { ':expectedVersion': invitation.version },
             },
           },
+          ...(auditPut ? [auditPut] : []),
         ],
       }))
       return nextInvitation
     } catch (error) {
-      if (isAwsError(error, 'TransactionCanceledException')) {
-        const latestActor = await this.getActiveMember(normalizedWorkspaceId, actor.memberKey)
+      if (isConditionalTransactionCancellation(error)) {
+        if (isTransactionConditionalFailureAt(error, 0)) {
+          const latestActor = await this.getActiveMember(normalizedWorkspaceId, actor.memberKey)
 
-        if (!latestActor || latestActor.version !== actor.version || latestActor.role !== actor.role) {
+          if (!latestActor || latestActor.version !== actor.version || latestActor.role !== actor.role) {
+            throw new WorkspaceAccessError(
+              403,
+              'WorkspaceRoleDenied',
+              'Workspace management permission changed.',
+              { cause: error },
+            )
+          }
+        }
+
+        if (isTransactionConditionalFailureAt(error, 1)) {
+          const latestInvitation = await this.getInvitation(
+            normalizedWorkspaceId,
+            invitation.id,
+          )
+
+          if (!latestInvitation) {
+            throw new WorkspaceAccessError(
+              404,
+              'WorkspaceInvitationNotFound',
+              'Workspace invitation was not found.',
+              { cause: error },
+            )
+          }
+
           throw new WorkspaceAccessError(
-            403,
-            'WorkspaceRoleDenied',
-            'Workspace management permission changed.',
+            409,
+            'WorkspaceVersionConflict',
+            'Workspace invitation changed. Reload and try again.',
             { cause: error },
           )
         }
-
-        throw new WorkspaceAccessError(
-          409,
-          'WorkspaceVersionConflict',
-          'Workspace invitation changed. Reload and try again.',
-          { cause: error },
-        )
       }
 
       throw toWorkspaceAccessError(error)
@@ -923,8 +2364,13 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     expectedVersion: number,
     changes: Partial<WorkspaceInvitation>,
     allowedStatuses?: WorkspaceInvitationStatus[],
+    auditContext?: MutationAuditContext,
+    eventType = 'invitation.updated',
+    action = 'updated',
+    sequence = 0,
   ) {
     const nextInvitation = applyInvitationChanges(invitation, changes, this.clock())
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
     const expressionAttributeValues: Record<string, unknown> = {
       ':expectedVersion': expectedVersion,
     }
@@ -939,17 +2385,40 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       conditionExpression += ` AND #status IN (${placeholders.join(', ')})`
     }
 
+    const statePut = {
+      TableName: this.tableName,
+      Item: toInvitationItem(normalizedWorkspaceId, nextInvitation),
+      ConditionExpression: conditionExpression,
+      ...(allowedStatuses?.length ? { ExpressionAttributeNames: { '#status': 'status' } } : {}),
+      ExpressionAttributeValues: expressionAttributeValues,
+    }
+    const auditPut = this.createInvitationAuditPut(
+      normalizedWorkspaceId,
+      invitation,
+      nextInvitation,
+      auditContext,
+      eventType,
+      action,
+      sequence,
+    )
+
     try {
-      await this.documentClient.send(new PutCommand({
-        TableName: this.tableName,
-        Item: toInvitationItem(normalizeRequired(workspaceId, 'Workspace ID'), nextInvitation),
-        ConditionExpression: conditionExpression,
-        ...(allowedStatuses?.length ? { ExpressionAttributeNames: { '#status': 'status' } } : {}),
-        ExpressionAttributeValues: expressionAttributeValues,
-      }))
+      if (auditPut) {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [{ Put: statePut }, auditPut],
+        }))
+      } else {
+        await this.documentClient.send(new PutCommand(statePut))
+      }
       return nextInvitation
     } catch (error) {
-      if (isAwsError(error, 'ConditionalCheckFailedException')) {
+      if (
+        isAwsError(error, 'ConditionalCheckFailedException') ||
+        (
+          isConditionalTransactionCancellation(error) &&
+          isTransactionConditionalFailureAt(error, 0)
+        )
+      ) {
         const latest = await this.getInvitation(workspaceId, invitation.id)
 
         if (!latest) {
@@ -1007,7 +2476,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     actor: WorkspaceMember,
     target: WorkspaceMember,
     expectedVersion: number,
-    ownerCountDelta: number,
+    ownerGuardFailed: boolean,
   ): Promise<never> {
     if (actor.memberKey === target.memberKey) {
       const latestSelf = await this.getMember(workspaceId, target.memberKey)
@@ -1024,7 +2493,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         )
       }
 
-      if (ownerCountDelta < 0) {
+      if (ownerGuardFailed) {
         throw new WorkspaceAccessError(
           409,
           'WorkspaceLastOwner',
@@ -1059,7 +2528,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       )
     }
 
-    if (ownerCountDelta < 0) {
+    if (ownerGuardFailed) {
       throw new WorkspaceAccessError(
         409,
         'WorkspaceLastOwner',
@@ -1101,13 +2570,18 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     return items
   }
 
-  /** ローカル実行時に任意で Workspace access table を作成します。 */
+  /** ローカル実行時に Workspace access と audit table を任意で作成します。 */
   private async ensureLocalTable() {
     if (!this.bootstrapLocalTable) {
       return
     }
 
-    this.localTableInitializer ??= ensureWorkspaceAccessTable(this.tableName, this.dynamoDbClient)
+    this.localTableInitializer ??= Promise.all([
+      ensureWorkspaceAccessTable(this.tableName, this.dynamoDbClient),
+      ...(this.auditTableName
+        ? [ensureLocalAuditEventsTable(this.auditTableName, this.dynamoDbClient)]
+        : []),
+    ]).then(() => undefined)
     await this.localTableInitializer
   }
 }
@@ -1244,6 +2718,25 @@ function isInvitationAcceptable(invitation: WorkspaceInvitation) {
     invitation.status === 'delivery-failed'
 }
 
+function hasActiveInvitationAcceptanceLock(invitation: WorkspaceInvitation, now: Date) {
+  return typeof invitation.acceptanceLockExpiresAt === 'string' &&
+    Date.parse(invitation.acceptanceLockExpiresAt) > now.getTime()
+}
+
+function hasActiveInvitationProvisioningLease(invitation: WorkspaceInvitation, now: Date) {
+  const updatedAt = Date.parse(invitation.updatedAt)
+  return Number.isFinite(updatedAt) &&
+    updatedAt + INVITATION_PROVISIONING_LEASE_MS > now.getTime()
+}
+
+function requiresManualLegacyIdentityCleanup(invitation: WorkspaceInvitation) {
+  const stablePairMissing = !invitation.cognitoIdentityId || !invitation.cognitoUsername
+  return stablePairMissing && (
+    invitation.identityLifecycleVersion !== WORKSPACE_IDENTITY_LIFECYCLE_VERSION ||
+    invitation.identityMutationAttempted === true
+  )
+}
+
 function compareWorkspaceMembers(left: WorkspaceMember, right: WorkspaceMember) {
   const roleDelta = workspaceRoleWeight(right.role) - workspaceRoleWeight(left.role)
   return roleDelta || (left.name ?? left.email).localeCompare(right.name ?? right.email, 'ja')
@@ -1292,6 +2785,15 @@ function toWorkspaceMember(value: unknown): WorkspaceMember {
     name: typeof value.name === 'string' ? value.name : undefined,
     role,
     status,
+    provisioningSource: value.provisioningSource === 'directory'
+      ? 'directory'
+      : value.provisioningSource === 'manual'
+        ? 'manual'
+        : undefined,
+    externalIdentityId: typeof value.externalIdentityId === 'string' &&
+        value.externalIdentityId.trim()
+      ? value.externalIdentityId.trim()
+      : undefined,
     version: value.version,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
@@ -1334,11 +2836,36 @@ function toWorkspaceInvitation(value: unknown, now: Date): WorkspaceInvitation {
     status: effectiveStatus,
     deliveryStatus,
     identityOwnership,
+    ...(value.identityLifecycleVersion === WORKSPACE_IDENTITY_LIFECYCLE_VERSION
+      ? { identityLifecycleVersion: WORKSPACE_IDENTITY_LIFECYCLE_VERSION }
+      : {}),
+    ...(typeof value.cognitoIdentityId === 'string' && value.cognitoIdentityId.trim()
+      ? { cognitoIdentityId: value.cognitoIdentityId.trim() }
+      : {}),
+    ...(typeof value.cognitoUsername === 'string' && value.cognitoUsername.trim()
+      ? { cognitoUsername: value.cognitoUsername.trim() }
+      : {}),
+    ...(value.directoryClaimCleanupRequired === true
+      ? { directoryClaimCleanupRequired: true }
+      : {}),
+    ...(value.identityCleanupCompleted === true
+      ? { identityCleanupCompleted: true }
+      : {}),
+    ...(value.identityCleanupManualRequired === true
+      ? { identityCleanupManualRequired: true }
+      : {}),
+    ...(value.identityMutationAttempted === true
+      ? { identityMutationAttempted: true }
+      : {}),
+    ...(typeof value.acceptanceLockExpiresAt === 'string'
+      ? { acceptanceLockExpiresAt: value.acceptanceLockExpiresAt }
+      : {}),
     version: value.version,
     expiresAt: value.expiresAt,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
     lastSentAt: typeof value.lastSentAt === 'string' ? value.lastSentAt : undefined,
+    acceptedAt: typeof value.acceptedAt === 'string' ? value.acceptedAt : undefined,
     failureMessage: typeof value.failureMessage === 'string' ? value.failureMessage : undefined,
   }
 }
@@ -1389,6 +2916,8 @@ function toMemberItem(
     ...(member.name ? { name: member.name } : {}),
     role: member.role,
     status: member.status,
+    ...(member.provisioningSource ? { provisioningSource: member.provisioningSource } : {}),
+    ...(member.externalIdentityId ? { externalIdentityId: member.externalIdentityId } : {}),
     version: member.version,
     createdAt: member.createdAt,
     updatedAt: member.updatedAt,
@@ -1409,11 +2938,32 @@ function toInvitationItem(workspaceId: string, invitation: WorkspaceInvitation) 
     status: invitation.status,
     deliveryStatus: invitation.deliveryStatus,
     identityOwnership: invitation.identityOwnership,
+    ...(invitation.identityLifecycleVersion === WORKSPACE_IDENTITY_LIFECYCLE_VERSION
+      ? { identityLifecycleVersion: WORKSPACE_IDENTITY_LIFECYCLE_VERSION }
+      : {}),
+    ...(invitation.cognitoIdentityId ? { cognitoIdentityId: invitation.cognitoIdentityId } : {}),
+    ...(invitation.cognitoUsername ? { cognitoUsername: invitation.cognitoUsername } : {}),
+    ...(invitation.directoryClaimCleanupRequired
+      ? { directoryClaimCleanupRequired: true }
+      : {}),
+    ...(invitation.identityCleanupCompleted
+      ? { identityCleanupCompleted: true }
+      : {}),
+    ...(invitation.identityCleanupManualRequired
+      ? { identityCleanupManualRequired: true }
+      : {}),
+    ...(invitation.identityMutationAttempted
+      ? { identityMutationAttempted: true }
+      : {}),
+    ...(invitation.acceptanceLockExpiresAt
+      ? { acceptanceLockExpiresAt: invitation.acceptanceLockExpiresAt }
+      : {}),
     version: invitation.version,
     expiresAt: invitation.expiresAt,
     createdAt: invitation.createdAt,
     updatedAt: invitation.updatedAt,
     ...(invitation.lastSentAt ? { lastSentAt: invitation.lastSentAt } : {}),
+    ...(invitation.acceptedAt ? { acceptedAt: invitation.acceptedAt } : {}),
     ...(invitation.failureMessage ? { failureMessage: invitation.failureMessage } : {}),
   }
 }
@@ -1456,12 +3006,92 @@ function createOwnerCountUpdate(
   }
 }
 
+function createPlanningRevisionMutation(
+  tableName: string,
+  workspaceId: string,
+  expectedRevision: number,
+  nowIso: string,
+) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    throw new WorkspaceAccessError(
+      400,
+      'InvalidPlanningRevision',
+      'Planning revision must be a non-negative safe integer.',
+    )
+  }
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        workspaceId,
+        recordKey: 'META',
+        entryType: 'planning-meta',
+        schemaVersion: PLANNING_SCHEMA_VERSION,
+        revision: expectedRevision + 1,
+        updatedAt: nowIso,
+      },
+      ...(expectedRevision === 0
+        ? {
+            ConditionExpression:
+              'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+          }
+        : {
+            ConditionExpression: '#revision = :expectedPlanningRevision',
+            ExpressionAttributeNames: { '#revision': 'revision' },
+            ExpressionAttributeValues: { ':expectedPlanningRevision': expectedRevision },
+          }),
+    },
+  }
+}
+
+function requireDocumentAuthorizationRevision(
+  value: number | undefined,
+): number {
+  if (
+    value === undefined ||
+    !Number.isSafeInteger(value) ||
+    value < 0
+  ) {
+    throw new WorkspaceAccessError(
+      400,
+      'InvalidDocumentAuthorizationRevision',
+      'Document authorization revision is required when removing Document manager eligibility.',
+    )
+  }
+  return value
+}
+
+function isTransactionConditionalFailureAt(error: unknown, index: number) {
+  if (!isRecord(error) || !Array.isArray(error.CancellationReasons)) return false
+  const reason = error.CancellationReasons[index]
+  return isRecord(reason) && reason.Code === 'ConditionalCheckFailed'
+}
+
 function invalidWorkspaceDataError() {
   return new WorkspaceAccessError(503, 'InvalidWorkspaceAccessData', 'Workspace access data is invalid.')
 }
 
 function isAwsError(error: unknown, name: string) {
   return error instanceof Error && error.name === name
+}
+
+function isConditionalTransactionCancellation(error: unknown) {
+  if (!isAwsError(error, 'TransactionCanceledException')) {
+    return false
+  }
+
+  const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons
+
+  if (!Array.isArray(reasons) || reasons.length === 0) {
+    return false
+  }
+
+  const reasonCodes = reasons.map((reason) => reason.Code)
+  const failureCodes = reasonCodes.filter((code) => code !== 'None')
+
+  return reasonCodes.every((code) => typeof code === 'string') &&
+    failureCodes.length > 0 &&
+    failureCodes.every((code) => code === 'ConditionalCheckFailed')
 }
 
 function toWorkspaceAccessError(error: unknown) {
@@ -1478,7 +3108,7 @@ function toWorkspaceAccessError(error: unknown) {
     )
   }
 
-  if (isAwsError(error, 'ConditionalCheckFailedException') || isAwsError(error, 'TransactionCanceledException')) {
+  if (isAwsError(error, 'ConditionalCheckFailedException') || isConditionalTransactionCancellation(error)) {
     return new WorkspaceAccessError(
       409,
       'WorkspaceTransactionConflict',

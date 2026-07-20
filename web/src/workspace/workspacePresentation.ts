@@ -15,6 +15,7 @@ import type {
   TaskPriority,
   TaskStatus,
 } from '../tasks/api'
+import { resolveProjectTaskStatus } from '../tasks/api'
 import type {
   TeamMemberRow,
   TeamProjectMemberAccess,
@@ -31,8 +32,9 @@ function findActiveTeam(teams: ProjectDirectoryTeam[], activeTeamId?: string) {
   return teams[0]
 }
 
-function isLegacyWorkspaceTask(task: ProjectTask) {
-  return task.source === 'legacy'
+function isLegacyWorkspaceTask(_task: ProjectTask) {
+  void _task
+  return false
 }
 
 function uniqueProjectIds(teams: ProjectDirectoryTeam[]) {
@@ -71,10 +73,10 @@ function updateWorkspaceTaskStatus<TTask extends ProjectTask>(
 
   return tasks.map((task): TTask =>
     createWorkspaceTaskKey(task) === targetTaskKey &&
-    (expectedCurrentStatus === undefined || task.status === expectedCurrentStatus)
+    (expectedCurrentStatus === undefined || resolveProjectTaskStatus(task) === expectedCurrentStatus)
       ? {
           ...task,
-          status,
+          workflowStatusId: status,
         }
       : task,
   )
@@ -124,24 +126,26 @@ function createDashboardSummary(
 ): DashboardSummary {
   return {
     projects: uniqueProjectIds(teams).length,
-    tasks: tasks.filter((task) => task.status !== 'done').length,
-    blocked: tasks.filter((task) => task.priority === 'high' && task.status !== 'done').length,
+    tasks: tasks.filter((task) => resolveProjectTaskStatus(task) !== 'done').length,
+    blocked: tasks.filter((task) => task.priority === 'high' && resolveProjectTaskStatus(task) !== 'done').length,
     updatedAt: new Date().toISOString(),
     source: 'dynamodb',
   }
 }
 
-function resolveTaskTitle(task: ProjectTask, t: (key: MessageKey) => string) {
-  return resolveWorkItemTitle(task, t)
+function resolveTaskTitle(task: ProjectTask, _t: (key: MessageKey) => string) {
+  void _t
+  return resolveWorkItemTitle(task)
 }
 
-function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) {
-  return resolveWorkItemAssignee(task, t)
+function resolveTaskAssignee(task: ProjectTask, _t: (key: MessageKey) => string) {
+  void _t
+  return resolveWorkItemAssignee(task)
 }
 
 function createActionQueueTasks(tasks: ProjectTask[]) {
   return [...tasks]
-    .filter((task) => task.status !== 'done')
+    .filter((task) => resolveProjectTaskStatus(task) !== 'done')
     .sort((firstTask, secondTask) => {
       const firstScore = calculateWorkspaceActionScore(firstTask)
       const secondScore = calculateWorkspaceActionScore(secondTask)
@@ -158,7 +162,7 @@ function createInboxTasks(tasks: ProjectTask[]) {
   return createActionQueueTasks(tasks)
     .filter((task) =>
       task.priority === 'high' ||
-      task.status === 'review' ||
+      resolveProjectTaskStatus(task) === 'review' ||
       isWorkspaceTaskOverdue(task),
     )
 }
@@ -184,7 +188,7 @@ function normalizeWorkspaceSearchText(value?: string) {
 function calculateWorkspaceActionScore(task: ProjectTask) {
   return (isWorkspaceTaskOverdue(task) ? 8 : 0) +
     (task.priority === 'high' ? 5 : task.priority === 'medium' ? 2 : 0) +
-    (task.status === 'review' ? 4 : task.status === 'in-progress' ? 1 : 0)
+    (resolveProjectTaskStatus(task) === 'review' ? 4 : resolveProjectTaskStatus(task) === 'in-progress' ? 1 : 0)
 }
 
 function isOpenableWorkspaceTask(task: ProjectTask) {
@@ -194,7 +198,7 @@ function isOpenableWorkspaceTask(task: ProjectTask) {
 function isWorkspaceTaskOverdue(task: ProjectTask) {
   const dueDate = parseWorkspaceTaskDueDate(task.dueDate)
 
-  if (task.status === 'done' || !dueDate) {
+  if (resolveProjectTaskStatus(task) === 'done' || !dueDate) {
     return false
   }
 
@@ -226,15 +230,15 @@ function calculateProjectProgress(tasks: ProjectTask[]) {
     return 0
   }
 
-  return Math.round((tasks.filter((task) => task.status === 'done').length / tasks.length) * 100)
+  return Math.round((tasks.filter((task) => resolveProjectTaskStatus(task) === 'done').length / tasks.length) * 100)
 }
 
 function resolvePortfolioRiskKey(tasks: ProjectTask[]): MessageKey {
-  if (tasks.some((task) => task.priority === 'high' && task.status !== 'done')) {
+  if (tasks.some((task) => task.priority === 'high' && resolveProjectTaskStatus(task) !== 'done')) {
     return 'workspace.risk.watch'
   }
 
-  if (tasks.every((task) => task.status === 'done')) {
+  if (tasks.every((task) => resolveProjectTaskStatus(task) === 'done')) {
     return 'workspace.risk.low'
   }
 
@@ -245,9 +249,9 @@ function createReportProjectRows(teams: ProjectDirectoryTeam[], tasks: ProjectTa
   return teams
     .flatMap((team) => team.projects.map((project) => {
       const projectTasks = filterTasksByTeamProjectIds(tasks, [project.id], team.id)
-      const openTaskCount = projectTasks.filter((task) => task.status !== 'done').length
-      const doneTaskCount = projectTasks.filter((task) => task.status === 'done').length
-      const reviewTaskCount = projectTasks.filter((task) => task.status === 'review').length
+      const openTaskCount = projectTasks.filter((task) => resolveProjectTaskStatus(task) !== 'done').length
+      const doneTaskCount = projectTasks.filter((task) => resolveProjectTaskStatus(task) === 'done').length
+      const reviewTaskCount = projectTasks.filter((task) => resolveProjectTaskStatus(task) === 'review').length
       const attentionTaskCount = createInboxTasks(projectTasks).length
 
       return {
@@ -367,9 +371,9 @@ function createTeamProjectSummaries(
       memberCount: memberIds.size,
       name: project.name,
       nextTask: createActionQueueTasks(projectTasks)[0],
-      openTaskCount: projectTasks.filter((task) => task.status !== 'done').length,
+      openTaskCount: projectTasks.filter((task) => resolveProjectTaskStatus(task) !== 'done').length,
       progress: calculateProjectProgress(projectTasks),
-      reviewTaskCount: projectTasks.filter((task) => task.status === 'review').length,
+      reviewTaskCount: projectTasks.filter((task) => resolveProjectTaskStatus(task) === 'review').length,
     }
   })
 }
@@ -430,7 +434,7 @@ function createTeamMemberRows(
   return Array.from(rowsByMemberId.values())
     .map((row) => {
       const memberTasks = tasksByMemberId.get(row.id) ?? []
-      const openTasks = memberTasks.filter((task) => task.status !== 'done')
+      const openTasks = memberTasks.filter((task) => resolveProjectTaskStatus(task) !== 'done')
       const openTaskCount = openTasks.length
       const nextDueDate = openTasks
         .map((task) => task.dueDate)
@@ -448,7 +452,7 @@ function createTeamMemberRows(
               (projectOrder.get(secondProject.projectId) ?? Number.MAX_SAFE_INTEGER) ||
             firstProject.projectName.localeCompare(secondProject.projectName),
         ),
-        reviewTaskCount: memberTasks.filter((task) => task.status === 'review').length,
+        reviewTaskCount: memberTasks.filter((task) => resolveProjectTaskStatus(task) === 'review').length,
         taskCount: memberTasks.length,
       }
     })
@@ -543,7 +547,7 @@ function getProjectMemberRoleWeight(role?: ProjectMemberRole) {
 }
 
 function isAttentionWorkspaceTask(task: ProjectTask) {
-  return task.status !== 'done' && (task.priority === 'high' || isWorkspaceTaskOverdue(task))
+  return resolveProjectTaskStatus(task) !== 'done' && (task.priority === 'high' || isWorkspaceTaskOverdue(task))
 }
 
 function formatTeamText(value: string, teamName?: string) {

@@ -25,7 +25,7 @@ import type {
   ProjectUser,
   UpdateProjectMemberInput,
 } from '../projects/api'
-import type { CreateProjectTaskInput, ProjectTask } from './api'
+import { resolveProjectTaskStatus, type CreateProjectTaskInput, type ProjectTask } from './api'
 import type { WorkspaceMember } from '../workspace/api'
 import { useWorkspaceCommandMenu } from '../commands/WorkspaceCommandMenuContext'
 import {
@@ -388,7 +388,7 @@ export function TaskScreen({
   const visibleTasks = useMemo(
     () => {
       const filteredTasks = tasks.filter((task) => {
-        const matchesStatus = statusFilter === 'all' || task.status === statusFilter
+        const matchesStatus = statusFilter === 'all' || resolveProjectTaskStatus(task) === statusFilter
         const matchesAssignee = assigneeFilter === 'all' || resolveTaskAssigneeFilterValue(task, t) === assigneeFilter
         const matchesPriority = priorityFilter === 'all' || task.priority === priorityFilter
         const matchesDueDate = matchesTaskDueDateFilter(task, dueDateFilter)
@@ -405,7 +405,7 @@ export function TaskScreen({
         return [
           resolveTaskTitle(task, t),
           resolveTaskAssignee(task, t),
-          t(`tasks.status.${task.status}`),
+          t(`tasks.status.${resolveProjectTaskStatus(task)}`),
           t(`tasks.priority.${task.priority}`),
           task.dueDate,
         ].some((value) => value.toLowerCase().includes(normalizedQuery))
@@ -673,8 +673,8 @@ function TaskHeader({
   teamName: string
   userInitial: string
 }) {
-  const openTaskCount = tasks.filter((task) => task.status !== 'done').length
-  const reviewTaskCount = tasks.filter((task) => task.status === 'review').length
+  const openTaskCount = tasks.filter((task) => resolveProjectTaskStatus(task) !== 'done').length
+  const reviewTaskCount = tasks.filter((task) => resolveProjectTaskStatus(task) === 'review').length
   const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: TaskTab) => {
     const tabIndex = taskTabs.indexOf(tab)
     let nextTabIndex: number | undefined

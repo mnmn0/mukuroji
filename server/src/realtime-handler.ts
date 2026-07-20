@@ -6,6 +6,7 @@ import {
 import {
   AdminListGroupsForUserCommand,
   CognitoIdentityProviderClient,
+  DescribeIdentityProviderCommand,
 } from '@aws-sdk/client-cognito-identity-provider'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import {
@@ -16,6 +17,28 @@ import {
   TransactWriteCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
+import type {
+  EnterpriseIdentitySnapshot,
+  EnterprisePermissionId,
+  EnterpriseSecurityPolicy,
+} from '@mukuroji/contracts'
+import {
+  isCanonicalWorkItemRecord,
+  type CanonicalWorkItemRecord,
+} from './canonical-work-item'
+import {
+  DynamoDbEnterpriseIdentityReadClient,
+  assertEnterpriseCognitoFederationBinding,
+  assertEnterpriseIdentityProviderReady,
+  evaluateEnterpriseAccess,
+  resolveEnterpriseDirectoryPrincipal,
+  validateEnterpriseSession,
+  type EnterpriseCognitoFederationBinding,
+  type EnterpriseIdentityReadClient,
+  type EnterprisePrincipalContext,
+} from './enterprise-identity'
+import { createEnterpriseCognitoInspectionCache } from './enterprise-cognito-inspection-cache'
+import { createEnterpriseSsoAuthenticationMethod } from './enterprise-sso'
 
 /**
  * API Gateway WebSocket event の request context です。
@@ -29,6 +52,11 @@ type WebSocketRequestContext = {
   domainName?: string
   /** callback endpoint の stage name です。 */
   stage?: string
+  /** API Gateway が検証済み transport source として渡す接続情報です。 */
+  identity?: {
+    /** WebSocket client の source IP です。 */
+    sourceIp?: string
+  }
 }
 
 /**
@@ -91,6 +119,16 @@ export type RealtimeSessionItem = {
   expiresAt: number
   /** Ticket 発行時の権限 snapshot を利用できる絶対期限です。 */
   authorizationExpiresAt: number
+  /** Cognito session が認証を完了した epoch seconds です。 */
+  authenticatedAt: number
+  /** Cognito access token が失効する epoch seconds です。 */
+  tokenExpiresAt: number
+  /** Access token を plaintext 保存せず session-bound elevation に使う SHA-256 digest です。 */
+  authenticationSessionId: string
+  /** Ticket 発行時に検証した authentication method 一覧です。 */
+  authenticationMethods: string[]
+  /** Current IP allowlist を評価する trusted client IP です。 */
+  clientIp: string
 }
 
 /** Realtime scope の再認可に使う ProjectDirectory row です。 */
@@ -110,14 +148,7 @@ export type RealtimeAuthorizationDirectoryItem = {
 }
 
 /** Realtime session の現在 scope を確認する TeamIssues row です。 */
-export type RealtimeWorkItemRecord = {
-  /** Workspace/team 複合 partition key です。 */
-  directoryTeamId?: string
-  /** Work Item ID です。 */
-  issueId?: string
-  /** 現在の assigned project ID です。 */
-  assignedProjectId?: string
-}
+export type RealtimeWorkItemRecord = CanonicalWorkItemRecord
 
 /**
  * `$default` route で受け付ける realtime message です。
@@ -154,12 +185,95 @@ export type RealtimeCognitoGroupPageReader = (
   nextToken?: string,
 ) => Promise<RealtimeCognitoGroupPage>
 
+/** Cognito federation provider の実設定を遅延取得する reader です。 */
+export type RealtimeCognitoProviderBindingReader = (
+  providerName: string,
+) => Promise<EnterpriseCognitoFederationBinding>
+
+/**
+ * Realtime authorization 用 Cognito provider reader に短期 raw-binding cache を追加します。
+ *
+ * @remarks
+ * Cache hit 後も caller が current enterprise provider に対する binding validation を実行します。
+ */
+export function createCachedRealtimeCognitoProviderBindingReader(
+  readBinding: RealtimeCognitoProviderBindingReader,
+  now: () => number = Date.now,
+): RealtimeCognitoProviderBindingReader {
+  const cache = createEnterpriseCognitoInspectionCache<EnterpriseCognitoFederationBinding>({
+    now,
+  })
+  return (providerName) => cache.read(
+    providerName,
+    () => readBinding(providerName),
+  )
+}
+
+/**
+ * Enterprise evaluator が認識する Workspace member role です。
+ */
+export type RealtimeWorkspaceRole = 'owner' | 'admin' | 'member' | 'guest'
+
+/**
+ * Realtime read/write を current enterprise state で評価する入力です。
+ */
+export type EvaluateRealtimeEnterpriseAccessInput = {
+  /** Current enterprise identity/security snapshot です。 */
+  snapshot: EnterpriseIdentitySnapshot
+  /** Realtime session の member key です。 */
+  memberKey: string
+  /** Current Workspace access row の email です。 */
+  memberEmail: string
+  /** Current Workspace access row の role です。 */
+  workspaceRole: RealtimeWorkspaceRole
+  /** Cognito から強整合に近い形で再取得した current group names です。 */
+  cognitoGroupIds: string[]
+  /** Ticket 上の system-admin flag が current Cognito groups でも確認済みかどうかです。 */
+  currentSystemAdministrator: boolean
+  /** Current break-glass activation が存在するかどうかです。 */
+  breakGlass: boolean
+  /** Authoritative enterprise grant がない場合に使う legacy project read ACL です。 */
+  legacyReadAllowed: boolean
+  /** Authoritative enterprise grant がない場合に使う legacy project write ACL です。 */
+  legacyWriteAllowed: boolean
+  /** Work Item を所有する Team ID です。 */
+  teamId: string
+  /** Assigned Project がある場合の Project ID です。 */
+  projectId?: string
+}
+
+/**
+ * Current enterprise state を反映した realtime authorization result です。
+ */
+export type RealtimeEnterpriseAccess = {
+  /** Realtime scope の購読を継続できるかどうかです。 */
+  allowed: boolean
+  /** Typing event を送信できるかどうかです。 */
+  canWrite: boolean
+  /** Current Cognito token から取得した directory group IDs です。 */
+  directoryGroupIds: string[]
+  /** Guest または verified domain 外の principal かどうかです。 */
+  external: boolean
+  /** Workspace scope の authoritative mapping により legacy role を抑制したかどうかです。 */
+  workspaceRoleSuppressed: boolean
+}
+
 const dynamoDbClient = new DynamoDBClient({ region: getAwsRegion() })
 const cognitoClient = new CognitoIdentityProviderClient({ region: getAwsRegion() })
 const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
   marshallOptions: { removeUndefinedValues: true },
 })
 const managementApiClients = new Map<string, ApiGatewayManagementApiClient>()
+let enterpriseIdentityClient: EnterpriseIdentityReadClient | undefined
+const defaultExternalPermissionCeiling = [
+  'workspace.read',
+  'members.read',
+  'teams.read',
+  'projects.read',
+  'work-items.read',
+  'files.read',
+  'planning.read',
+] satisfies EnterprisePermissionId[]
 
 /**
  * 生の one-time ticket を DynamoDB key に保存できる固定長 digest へ変換します。
@@ -189,6 +303,293 @@ export async function hasCurrentRealtimeSystemAdminMembership(
   } while (nextToken)
 
   return false
+}
+
+/**
+ * Realtime principal が依存する provider と Cognito の実 provider が一致するか返します。
+ */
+export async function hasValidRealtimeCognitoProviderBindings(
+  snapshot: EnterpriseIdentitySnapshot,
+  memberKey: string,
+  memberEmail: string,
+  configuredProviderName: string,
+  readBinding: RealtimeCognitoProviderBindingReader,
+) {
+  const normalizedMemberKey = normalizeMemberKey(memberKey)
+  const providerIds = new Set(
+    snapshot.scimUsers
+      .filter((user) =>
+        user.active &&
+        user.appliedVersion >= user.version &&
+        normalizeMemberKey(user.linkedMemberKey ?? '') === normalizedMemberKey
+      )
+      .map((user) => user.identityProviderId),
+  )
+  const memberDomain = normalizeEmailDomain(memberEmail)
+  for (const domain of snapshot.domains) {
+    if (
+      domain.status !== 'verified' ||
+      !domain.enforceSso ||
+      domain.domain.trim().toLowerCase() !== memberDomain
+    ) continue
+    if (!domain.identityProviderId) return false
+    providerIds.add(domain.identityProviderId)
+  }
+  if (providerIds.size === 0) return true
+
+  try {
+    for (const providerId of providerIds) {
+      const provider = snapshot.identityProviders.find((candidate) =>
+        candidate.providerId === providerId
+      )
+      assertEnterpriseIdentityProviderReady(provider)
+      assertEnterpriseCognitoFederationBinding(
+        provider,
+        configuredProviderName,
+        await readBinding(provider.cognitoProviderName),
+      )
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Current verified/enforced domain が要求する provider revision marker を ticket が持つか返します。
+ */
+export function hasCurrentRealtimeEnterpriseSsoAssurance(
+  snapshot: EnterpriseIdentitySnapshot,
+  memberEmail: string,
+  authenticationMethods: readonly string[],
+) {
+  const memberDomain = normalizeEmailDomain(memberEmail)
+  const methods = new Set(authenticationMethods)
+
+  return snapshot.domains
+    .filter((domain) =>
+      domain.status === 'verified' &&
+      domain.enforceSso &&
+      domain.domain.trim().toLowerCase() === memberDomain
+    )
+    .every((domain) => {
+      if (!domain.identityProviderId) return false
+      const provider = snapshot.identityProviders.find((candidate) =>
+        candidate.providerId === domain.identityProviderId
+      )
+      if (!provider) return false
+      try {
+        return methods.has(createEnterpriseSsoAuthenticationMethod(
+          provider.providerId,
+          provider.revision,
+        ))
+      } catch {
+        return false
+      }
+    })
+}
+
+/**
+ * Current SCIM/Cognito groups、custom roles、authoritative mappings、external ceiling を統合し、
+ * authoritative enterprise authorization または legacy project ACL のどちらかを選択します。
+ */
+export function evaluateRealtimeEnterpriseAccess(
+  input: EvaluateRealtimeEnterpriseAccessInput,
+): RealtimeEnterpriseAccess {
+  const memberKey = normalizeMemberKey(input.memberKey)
+  const memberDomain = normalizeEmailDomain(input.memberEmail)
+  const directoryPrincipal = resolveEnterpriseDirectoryPrincipal(
+    input.snapshot,
+    memberKey,
+    input.cognitoGroupIds,
+  )
+  const {
+    compatibleGroupMappings,
+    compatibleRoleAssignments,
+    directoryGroupIds,
+    directoryGroupMemberships,
+  } = directoryPrincipal
+  const verifiedDomains = input.snapshot.domains.filter((domain) =>
+    domain.status === 'verified'
+  )
+  const managedDomain = verifiedDomains.length === 0 || verifiedDomains.some((domain) =>
+    domain.domain.trim().toLowerCase() === memberDomain
+  )
+  const external = input.workspaceRole === 'guest' || !managedDomain
+  const recoveryAccount = input.snapshot.breakGlassAccounts.some((account) =>
+    account.status === 'active' &&
+    normalizeMemberKey(account.linkedMemberKey) === memberKey
+  )
+  const externalPolicy = input.snapshot.policy?.externalAccess
+  const guestDenied = input.workspaceRole === 'guest' && externalPolicy !== undefined &&
+    (
+      !externalPolicy.allowGuests ||
+      externalPolicy.allowedGuestDomains.length > 0 &&
+        !externalPolicy.allowedGuestDomains.some((domain) =>
+          domain.trim().toLowerCase() === memberDomain
+        )
+    )
+  const collaboratorDenied =
+    input.workspaceRole !== 'guest' &&
+    !managedDomain &&
+    externalPolicy?.allowExternalCollaborators === false &&
+    !recoveryAccount
+  const workspaceRoleSuppressed = directoryPrincipal.directoryManaged ||
+    compatibleRoleAssignments.some((assignment) =>
+      assignment.principalKind === 'member' &&
+        normalizeMemberKey(assignment.principalId) === memberKey ||
+      assignment.principalKind === 'directory-group' &&
+      (
+        assignment.source === 'directory-mapping' ||
+        directoryGroupIds.includes(assignment.principalId)
+      )
+    ) || compatibleGroupMappings.some((mapping) => mapping.enabled)
+  const permissionCeiling = external && !input.breakGlass
+    ? input.snapshot.policy?.externalAccess.permissionCeiling ??
+      defaultExternalPermissionCeiling
+    : undefined
+  const principal = {
+    kind: input.breakGlass ? 'break-glass' : 'member',
+    principalId: memberKey,
+    directoryGroupIds,
+    directoryGroupMemberships,
+    workspaceRole: input.workspaceRole,
+    includeWorkspaceRolePermissions: !workspaceRoleSuppressed,
+    systemAdministrator: input.currentSystemAdministrator,
+    ...(permissionCeiling ? { permissionCeiling } : {}),
+  } satisfies EnterprisePrincipalContext
+  const resource = input.projectId
+    ? {
+        workspaceId: input.snapshot.workspaceId,
+        kind: 'project' as const,
+        targetId: input.projectId,
+        parentTeamId: input.teamId,
+      }
+    : {
+        workspaceId: input.snapshot.workspaceId,
+        kind: 'team' as const,
+        targetId: input.teamId,
+      }
+  const readAccess = evaluateEnterpriseAccess({
+    permission: 'work-items.read',
+    principal,
+    assignments: compatibleRoleAssignments,
+    customRoles: input.snapshot.customRoles,
+    groupMappings: compatibleGroupMappings,
+    resource,
+  })
+  const writeAccess = evaluateEnterpriseAccess({
+    permission: 'work-items.write',
+    principal,
+    assignments: compatibleRoleAssignments,
+    customRoles: input.snapshot.customRoles,
+    groupMappings: compatibleGroupMappings,
+    resource,
+  })
+  const enterpriseBoundaryDenied =
+    guestDenied || collaboratorDenied || directoryPrincipal.deprovisioned
+  const enterpriseAuthorizationAuthoritative = workspaceRoleSuppressed ||
+    input.currentSystemAdministrator || input.breakGlass
+  const ceilingAllowsRead = permissionCeiling === undefined ||
+    permissionCeiling.includes('work-items.read')
+  const ceilingAllowsWrite = permissionCeiling === undefined ||
+    permissionCeiling.includes('work-items.write')
+  const allowed =
+    !enterpriseBoundaryDenied &&
+    ceilingAllowsRead &&
+    (
+      enterpriseAuthorizationAuthoritative
+        ? readAccess.allowed
+        : input.legacyReadAllowed
+    )
+
+  return {
+    allowed,
+    canWrite:
+      allowed &&
+      ceilingAllowsWrite &&
+      (
+        enterpriseAuthorizationAuthoritative
+          ? writeAccess.allowed
+          : input.legacyWriteAllowed
+      ),
+    directoryGroupIds,
+    external,
+    workspaceRoleSuppressed,
+  }
+}
+
+/**
+ * Current policy の absolute/idle/re-authentication deadline を realtime session age に適用します。
+ *
+ * @remarks
+ * Ticket 発行側は access-token expiry と authentication age でも
+ * `authorizationExpiresAt` を短くする必要があります。この check は policy reduction 後に
+ * 既存 connection が古い deadline を使い続けることを防ぐ defense-in-depth です。
+ */
+export function isRealtimeEnterpriseSessionFresh(
+  policy: EnterpriseSecurityPolicy | undefined,
+  session: Pick<
+    RealtimeSessionItem,
+    | 'authenticationMethods'
+    | 'authenticatedAt'
+    | 'authorizationExpiresAt'
+    | 'clientIp'
+    | 'connectedAt'
+    | 'createdAt'
+    | 'lastSeenAt'
+    | 'tokenExpiresAt'
+  >,
+  external: boolean,
+  privileged: boolean,
+  breakGlass: boolean,
+  nowEpochSeconds = currentEpochSeconds(),
+) {
+  if (
+    session.authorizationExpiresAt <= nowEpochSeconds ||
+    session.tokenExpiresAt <= nowEpochSeconds
+  ) return false
+  if (!policy) return true
+  const createdAt = parseRealtimeTimestamp(session.createdAt ?? session.connectedAt)
+  const lastSeenAt = parseRealtimeTimestamp(
+    session.lastSeenAt ?? session.connectedAt ?? session.createdAt,
+  )
+  if (
+    createdAt === undefined ||
+    lastSeenAt === undefined ||
+    createdAt > nowEpochSeconds ||
+    lastSeenAt > nowEpochSeconds
+  ) {
+    return false
+  }
+  const absoluteLifetimeMinutes = external
+    ? Math.min(
+        policy.sessionLifetimeMinutes,
+        policy.externalAccess.maximumSessionLifetimeMinutes,
+      )
+    : policy.sessionLifetimeMinutes
+  const sessionValidation = validateEnterpriseSession(policy, {
+    authenticatedAt: session.authenticatedAt,
+    now: nowEpochSeconds,
+    authenticationMethods: session.authenticationMethods,
+    clientIp: session.clientIp,
+    privileged,
+    external,
+    breakGlass,
+  })
+  if (!sessionValidation.valid) return false
+  const reauthenticationMinutes = privileged
+    ? policy.sensitiveActionReauthenticationMinutes
+    : policy.reauthenticationIntervalMinutes
+  const maximumConnectionAgeSeconds = Math.min(
+    absoluteLifetimeMinutes,
+    reauthenticationMinutes,
+  ) * 60
+  const maximumIdleAgeSeconds = policy.idleTimeoutMinutes * 60
+  return (
+    nowEpochSeconds - createdAt <= maximumConnectionAgeSeconds &&
+    nowEpochSeconds - lastSeenAt <= maximumIdleAgeSeconds
+  )
 }
 
 /**
@@ -222,10 +623,18 @@ export async function listScopeConnections(scopeKey: string) {
   } while (exclusiveStartKey)
 
   const directoryCache = new Map<string, Promise<RealtimeAuthorizationDirectoryItem[]>>()
-  const systemAdminCache = new Map<string, Promise<boolean>>()
+  const cognitoGroupCache = new Map<string, Promise<string[]>>()
+  const enterpriseSnapshotCache = new Map<string, Promise<EnterpriseIdentitySnapshot>>()
+  const breakGlassCache = new Map<string, Promise<boolean>>()
   const authorizedConnections = await Promise.all(
     connections.map(async (connection) => {
-      if (await isRealtimeSessionAuthorized(connection, directoryCache, systemAdminCache)) {
+      if (await isRealtimeSessionAuthorized(
+        connection,
+        directoryCache,
+        cognitoGroupCache,
+        enterpriseSnapshotCache,
+        breakGlassCache,
+      )) {
         return connection
       }
 
@@ -376,10 +785,17 @@ async function connect(event: WebSocketEvent, connectionId: string): Promise<Web
                 systemAdmin: ticket.systemAdmin,
                 canWrite: ticket.canWrite,
                 scopeKey: ticket.ticketScopeKey,
+                createdAt: ticket.createdAt ?? now.toISOString(),
                 connectedAt: now.toISOString(),
                 lastSeenAt: now.toISOString(),
                 expiresAt,
                 authorizationExpiresAt: ticket.authorizationExpiresAt,
+                authenticatedAt: ticket.authenticatedAt,
+                tokenExpiresAt: ticket.tokenExpiresAt,
+                authenticationSessionId: ticket.authenticationSessionId,
+                authenticationMethods: ticket.authenticationMethods,
+                clientIp:
+                  event.requestContext?.identity?.sourceIp?.trim() || ticket.clientIp,
               } satisfies RealtimeSessionItem,
               ConditionExpression: 'attribute_not_exists(connectionId)',
             },
@@ -577,7 +993,14 @@ function toRealtimeSessionItem(value: unknown): RealtimeSessionItem | undefined 
     typeof item.systemAdmin !== 'boolean' ||
     typeof item.canWrite !== 'boolean' ||
     typeof item.expiresAt !== 'number' ||
-    typeof item.authorizationExpiresAt !== 'number'
+    typeof item.authorizationExpiresAt !== 'number' ||
+    typeof item.authenticatedAt !== 'number' ||
+    typeof item.tokenExpiresAt !== 'number' ||
+    typeof item.authenticationSessionId !== 'string' ||
+    !item.authenticationSessionId ||
+    !Array.isArray(item.authenticationMethods) ||
+    item.authenticationMethods.some((method) => typeof method !== 'string') ||
+    typeof item.clientIp !== 'string'
   ) {
     return undefined
   }
@@ -593,6 +1016,11 @@ function toRealtimeSessionItem(value: unknown): RealtimeSessionItem | undefined 
     canWrite: item.canWrite,
     expiresAt: item.expiresAt,
     authorizationExpiresAt: item.authorizationExpiresAt,
+    authenticatedAt: item.authenticatedAt,
+    tokenExpiresAt: item.tokenExpiresAt,
+    authenticationSessionId: item.authenticationSessionId,
+    authenticationMethods: item.authenticationMethods as string[],
+    clientIp: item.clientIp,
     ...(typeof item.projectId === 'string' ? { projectId: item.projectId } : {}),
     ...(typeof item.ticketScopeKey === 'string' ? { ticketScopeKey: item.ticketScopeKey } : {}),
     ...(typeof item.scopeKey === 'string' ? { scopeKey: item.scopeKey } : {}),
@@ -609,12 +1037,42 @@ export function hasRealtimeDirectoryAccess(
   session: Pick<RealtimeSessionItem, 'memberKey' | 'projectId' | 'systemAdmin' | 'teamId'>,
   items: RealtimeAuthorizationDirectoryItem[],
 ) {
+  return hasActiveRealtimeResourceScope(session, items) &&
+    hasRealtimeLegacyDirectoryAccess(session, items)
+}
+
+/** Realtime session が参照する Team/Project が archive されず存在するかを判定します。 */
+export function hasActiveRealtimeResourceScope(
+  session: Pick<RealtimeSessionItem, 'projectId' | 'teamId'>,
+  items: RealtimeAuthorizationDirectoryItem[],
+) {
   const activeTeam = items.some((item) =>
     item.entryType === 'team' && item.teamId === session.teamId && !item.archivedAt
   )
 
   if (!activeTeam) {
     return false
+  }
+
+  if (!session.projectId) {
+    return true
+  }
+
+  return items.some((item) =>
+    item.entryType === 'project' &&
+    item.teamId === session.teamId &&
+    item.projectId === session.projectId &&
+    !item.archivedAt
+  )
+}
+
+/** Authoritative enterprise grant がない principal の legacy Project ACL を判定します。 */
+export function hasRealtimeLegacyDirectoryAccess(
+  session: Pick<RealtimeSessionItem, 'memberKey' | 'projectId' | 'systemAdmin' | 'teamId'>,
+  items: RealtimeAuthorizationDirectoryItem[],
+) {
+  if (session.systemAdmin) {
+    return true
   }
 
   const activeProjects = items.filter((item) =>
@@ -629,11 +1087,7 @@ export function hasRealtimeDirectoryAccess(
       return false
     }
 
-    return session.systemAdmin || hasViewerProjectRole(items, session.projectId, session.memberKey)
-  }
-
-  if (session.systemAdmin) {
-    return true
+    return hasViewerProjectRole(items, session.projectId, session.memberKey)
   }
 
   return activeProjects.some((project) =>
@@ -677,9 +1131,9 @@ export function hasRealtimeDirectoryWriteAccess(
 /** Session 発行後も Work Item が同じ team/project scope にあるかを判定します。 */
 export function hasCurrentRealtimeWorkItemScope(
   session: Pick<RealtimeSessionItem, 'issueId' | 'projectId' | 'teamId' | 'workspaceId'>,
-  item: RealtimeWorkItemRecord | undefined,
+  item: unknown,
 ) {
-  if (!item ||
+  if (!isCanonicalWorkItemRecord(item) ||
     item.directoryTeamId !== `${session.workspaceId}#team#${session.teamId}` ||
     item.issueId !== session.issueId) {
     return false
@@ -691,7 +1145,9 @@ export function hasCurrentRealtimeWorkItemScope(
 async function isRealtimeSessionAuthorized(
   session: RealtimeSessionItem,
   directoryCache = new Map<string, Promise<RealtimeAuthorizationDirectoryItem[]>>(),
-  systemAdminCache = new Map<string, Promise<boolean>>(),
+  cognitoGroupCache = new Map<string, Promise<string[]>>(),
+  enterpriseSnapshotCache = new Map<string, Promise<EnterpriseIdentitySnapshot>>(),
+  breakGlassCache = new Map<string, Promise<boolean>>(),
 ) {
   const memberKey = normalizeMemberKey(session.memberKey)
   const memberResult = await documentClient.send(new GetCommand({
@@ -713,16 +1169,18 @@ async function isRealtimeSessionAuthorized(
     return false
   }
 
-  if (session.systemAdmin) {
-    const username = readOptionalString(member.username) ?? readOptionalString(member.email) ?? memberKey
-    let currentSystemAdmin = systemAdminCache.get(username)
-    if (!currentSystemAdmin) {
-      currentSystemAdmin = readCurrentRealtimeSystemAdmin(username)
-      systemAdminCache.set(username, currentSystemAdmin)
-    }
-    if (!await currentSystemAdmin) {
-      return false
-    }
+  const memberEmail = readOptionalString(member.email) ?? memberKey
+  const username = readOptionalString(member.username) ?? memberEmail
+  let cognitoGroupsPromise = cognitoGroupCache.get(username)
+  if (!cognitoGroupsPromise) {
+    cognitoGroupsPromise = readCurrentRealtimeCognitoGroups(username)
+    cognitoGroupCache.set(username, cognitoGroupsPromise)
+  }
+  const cognitoGroupIds = await cognitoGroupsPromise
+  const currentSystemAdministrator = session.systemAdmin &&
+    hasConfiguredRealtimeSystemAdminGroup(cognitoGroupIds)
+  if (session.systemAdmin && !currentSystemAdministrator) {
+    return false
   }
 
   const workItemResult = await documentClient.send(new GetCommand({
@@ -746,39 +1204,127 @@ async function isRealtimeSessionAuthorized(
   }
 
   const directoryItems = await directoryPromise
-  if (!hasRealtimeDirectoryAccess(session, directoryItems)) {
+  if (!hasActiveRealtimeResourceScope(session, directoryItems)) {
     return false
   }
+  const legacyReadAllowed = hasRealtimeLegacyDirectoryAccess(session, directoryItems)
 
-  session.canWrite = hasRealtimeDirectoryWriteAccess(session, directoryItems, member.role)
-  return true
+  let snapshotPromise = enterpriseSnapshotCache.get(session.workspaceId)
+  if (!snapshotPromise) {
+    snapshotPromise = getEnterpriseIdentityClient().getSnapshot(session.workspaceId)
+    enterpriseSnapshotCache.set(session.workspaceId, snapshotPromise)
+  }
+  const snapshot = await snapshotPromise
+  const breakGlassKey =
+    `${session.workspaceId}\0${memberKey}\0${session.authenticationSessionId}`
+  let breakGlassPromise = breakGlassCache.get(breakGlassKey)
+  if (!breakGlassPromise) {
+    const registeredRecoveryAccount = snapshot.breakGlassAccounts.some((account) =>
+      account.status === 'active' &&
+      normalizeMemberKey(account.linkedMemberKey) === memberKey
+    )
+    breakGlassPromise = registeredRecoveryAccount
+      ? getEnterpriseIdentityClient()
+        .getActiveBreakGlassActivation(
+          session.workspaceId,
+          memberKey,
+          session.authenticationSessionId,
+        )
+        .then((activation) => activation !== undefined)
+      : Promise.resolve(false)
+    breakGlassCache.set(breakGlassKey, breakGlassPromise)
+  }
+  const workspaceRole = readRealtimeWorkspaceRole(member.role)
+  if (!workspaceRole) return false
+  const breakGlass = await breakGlassPromise
+  if (!breakGlass) {
+    if (!hasCurrentRealtimeEnterpriseSsoAssurance(
+      snapshot,
+      memberEmail,
+      session.authenticationMethods,
+    )) return false
+    if (!await hasValidRealtimeCognitoProviderBindings(
+      snapshot,
+      memberKey,
+      memberEmail,
+      process.env.COGNITO_ENTERPRISE_IDP_NAME?.trim() ?? '',
+      readRealtimeCognitoProviderBinding,
+    )) return false
+  }
+  const authorization = evaluateRealtimeEnterpriseAccess({
+    snapshot,
+    memberKey,
+    memberEmail,
+    workspaceRole,
+    cognitoGroupIds,
+    currentSystemAdministrator,
+    breakGlass,
+    legacyReadAllowed,
+    legacyWriteAllowed: hasRealtimeDirectoryWriteAccess(
+      session,
+      directoryItems,
+      workspaceRole,
+    ),
+    teamId: session.teamId,
+    ...(session.projectId ? { projectId: session.projectId } : {}),
+  })
+  session.canWrite = authorization.canWrite
+  return authorization.allowed && isRealtimeEnterpriseSessionFresh(
+    snapshot.policy,
+    session,
+    authorization.external,
+    currentSystemAdministrator || breakGlass,
+    breakGlass,
+  )
 }
 
-async function readCurrentRealtimeSystemAdmin(username: string) {
+async function readCurrentRealtimeCognitoGroups(username: string) {
+  const groups: string[] = []
+  let nextToken: string | undefined
   try {
-    return await hasCurrentRealtimeSystemAdminMembership(
-      requireEnv('SYSTEM_ADMIN_GROUPS').split(','),
-      async (nextToken) => {
-        const response = await cognitoClient.send(new AdminListGroupsForUserCommand({
-          UserPoolId: requireEnv('COGNITO_USER_POOL_ID'),
-          Username: username,
-          ...(nextToken ? { NextToken: nextToken } : {}),
-        }))
-        return {
-          groupNames: (response.Groups ?? [])
-            .map((group) => group.GroupName)
-            .filter((groupName): groupName is string => typeof groupName === 'string'),
-          ...(response.NextToken ? { nextToken: response.NextToken } : {}),
-        }
-      },
-    )
+    do {
+      const response = await cognitoClient.send(new AdminListGroupsForUserCommand({
+        UserPoolId: requireEnv('COGNITO_USER_POOL_ID'),
+        Username: username,
+        ...(nextToken ? { NextToken: nextToken } : {}),
+      }))
+      groups.push(...(response.Groups ?? [])
+        .map((group) => group.GroupName)
+        .filter((groupName): groupName is string => typeof groupName === 'string'))
+      nextToken = response.NextToken?.trim() || undefined
+    } while (nextToken)
   } catch (error) {
     if (isAwsNamedError(error, 'UserNotFoundException')) {
-      return false
+      return []
     }
     throw error
   }
+  return [...new Set(groups)]
 }
+
+async function readUncachedRealtimeCognitoProviderBinding(providerName: string) {
+  const response = await cognitoClient.send(new DescribeIdentityProviderCommand({
+    UserPoolId: requireEnv('COGNITO_USER_POOL_ID'),
+    ProviderName: providerName,
+  }))
+  const provider = response.IdentityProvider
+  if (!provider?.ProviderName || !provider.ProviderType) {
+    throw new Error('Cognito identity provider response is incomplete.')
+  }
+  return {
+    providerName: provider.ProviderName,
+    providerType: provider.ProviderType,
+    providerDetails: Object.fromEntries(
+      Object.entries(provider.ProviderDetails ?? {})
+        .filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+    ),
+  }
+}
+
+const readRealtimeCognitoProviderBinding =
+  createCachedRealtimeCognitoProviderBindingReader(
+    readUncachedRealtimeCognitoProviderBinding,
+  )
 
 async function readRealtimeDirectory(workspaceId: string) {
   const items: RealtimeAuthorizationDirectoryItem[] = []
@@ -860,6 +1406,37 @@ function normalizeMemberKey(value: string) {
   return value.trim().toLowerCase()
 }
 
+function normalizeEmailDomain(value: string) {
+  const atIndex = value.lastIndexOf('@')
+  return atIndex > 0 ? value.slice(atIndex + 1).trim().toLowerCase() : ''
+}
+
+function readRealtimeWorkspaceRole(value: unknown): RealtimeWorkspaceRole | undefined {
+  return value === 'owner' ||
+      value === 'admin' ||
+      value === 'member' ||
+      value === 'guest'
+    ? value
+    : undefined
+}
+
+function hasConfiguredRealtimeSystemAdminGroup(groupIds: readonly string[]) {
+  const configuredGroups = new Set(
+    requireEnv('SYSTEM_ADMIN_GROUPS').split(',').map((group) => group.trim()).filter(Boolean),
+  )
+  return groupIds.some((groupId) => configuredGroups.has(groupId))
+}
+
+function getEnterpriseIdentityClient() {
+  if (!enterpriseIdentityClient) {
+    enterpriseIdentityClient = new DynamoDbEnterpriseIdentityReadClient(
+      requireEnv('ENTERPRISE_IDENTITY_TABLE_NAME'),
+      documentClient,
+    )
+  }
+  return enterpriseIdentityClient
+}
+
 function readOptionalString(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
@@ -870,6 +1447,14 @@ function isDefined<T>(value: T | undefined): value is T {
 
 function currentEpochSeconds() {
   return Math.floor(Date.now() / 1_000)
+}
+
+function parseRealtimeTimestamp(value: string | undefined) {
+  if (!value) return undefined
+  const milliseconds = Date.parse(value)
+  return Number.isFinite(milliseconds)
+    ? Math.floor(milliseconds / 1_000)
+    : undefined
 }
 
 function getAwsRegion() {

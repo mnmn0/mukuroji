@@ -1,4 +1,7 @@
-import { WORK_ITEM_SCHEMA_VERSION } from '@mukuroji/contracts'
+import {
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEMA_VERSION,
+} from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import type { DashboardSummary } from '../auth/api'
 import {
@@ -7,7 +10,11 @@ import {
 } from '../notifications/fixtures'
 import { projectDirectoryFixtures } from '../projects/fixtures'
 import { referoTaskFixtures } from '../tasks/fixtures'
-import { WorkspaceScreen } from '../workspace'
+import {
+  inheritedWorkItemConfigurationFixture,
+  workItemCustomFieldValueFixture,
+} from '../work-items/fixtures'
+import { WorkspaceScreen } from './WorkspacePage'
 
 const storySummary: DashboardSummary = {
   projects: 9,
@@ -21,8 +28,12 @@ const storyWorkspaceTasks = [
   ...referoTaskFixtures.map((task) => ({
     ...task,
     assignedProjectId: 'refero',
-    source: 'legacy' as const,
     teamId: 'core-team',
+    workflowStatusId: task.workflowStatusId === 'todo'
+      ? 'ready'
+      : task.workflowStatusId === 'in-progress'
+        ? 'active'
+        : task.workflowStatusId,
   })),
   {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
@@ -30,14 +41,21 @@ const storyWorkspaceTasks = [
     assigneeEmail: 'demo@example.com',
     assigneeName: 'Demo User',
     assigneeUserId: 'demo@example.com',
+    creatorMemberKey: 'demo@example.com',
     dueDate: '2026/06/07',
     id: 'roadmap-risk',
     priority: 'high',
     assignedProjectId: 'product-roadmap',
     source: 'dynamodb' as const,
-    status: 'review',
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    workflowStatusId: 'review',
+    statusCategory: 'started',
+    customFieldValues: workItemCustomFieldValueFixture,
+    relationIds: [],
     teamId: 'core-team',
     title: 'ロードマップの依存リスクを確認',
+    createdAt: '2026-06-08T00:00:00.000Z',
+    updatedAt: '2026-06-08T00:00:00.000Z',
   },
   {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
@@ -45,14 +63,29 @@ const storyWorkspaceTasks = [
     assigneeEmail: 'suzuki@example.com',
     assigneeName: '鈴木 大輔',
     assigneeUserId: 'suzuki@example.com',
+    creatorMemberKey: 'suzuki@example.com',
     dueDate: '2026/06/10',
     id: 'launch-approval',
     priority: 'medium',
     assignedProjectId: 'shared-launch',
     source: 'dynamodb' as const,
-    status: 'todo',
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    workflowStatusId: 'ready',
+    statusCategory: 'unstarted',
+    customFieldValues: workItemCustomFieldValueFixture,
+    relationIds: [],
     teamId: 'core-team',
     title: '共通ローンチの承認導線を確認',
+    createdAt: '2026-06-08T00:00:00.000Z',
+    updatedAt: '2026-06-08T00:00:00.000Z',
+    approvalSummary: {
+      approvedCount: 0,
+      changesRequestedCount: 1,
+      nextDueAt: '2026-07-15T14:59:59.000Z',
+      overdueCount: 1,
+      pendingCount: 2,
+      rejectedCount: 0,
+    },
   },
 ] satisfies Parameters<typeof WorkspaceScreen>[0]['tasks']
 
@@ -136,6 +169,10 @@ const defaultArgs = {
   notificationPreferences: notificationPreferencesControllerFixture,
   teamProjectMembers: storyTeamProjectMembers,
   teams: projectDirectoryFixtures,
+  workItemConfigurationsByTeam: {
+    'core-team': inheritedWorkItemConfigurationFixture,
+    marketing: inheritedWorkItemConfigurationFixture,
+  },
   onCreateProject: async () => undefined,
   onCreateTeam: async () => undefined,
   onFontSizePreferenceChange: () => undefined,
@@ -147,18 +184,36 @@ const defaultArgs = {
   view: 'home',
 } satisfies Partial<Parameters<typeof WorkspaceScreen>[0]>
 
+const crowdedWorkflowStatuses = [
+  { id: 'ready', category: 'unstarted' },
+  { id: 'active', category: 'started' },
+  { id: 'review', category: 'started' },
+  { id: 'done', category: 'completed' },
+] as const
+
 const crowdedTasks = Array.from({ length: 18 }, (_, index) => {
   const baseTask = referoTaskFixtures[index % referoTaskFixtures.length]
+  const workflowStatus = crowdedWorkflowStatuses[index % crowdedWorkflowStatuses.length]!
 
   return {
-    ...baseTask,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: baseTask.revision,
     id: `${baseTask.id}-${index + 1}`,
+    teamId: index % 2 === 0 ? 'core-team' : 'marketing',
     title: `${index + 1}. ${index % 2 === 0 ? '長い名前の依存関係レビューと承認待ちタスク' : 'Design QA / release queue follow-up'} ${index + 1}`,
-    status: (['todo', 'in-progress', 'review', 'done'] as const)[index % 4],
+    assigneeUserId: index % 2 === 0 ? 'demo@example.com' : 'suzuki@example.com',
+    creatorMemberKey: index % 2 === 0 ? 'demo@example.com' : 'suzuki@example.com',
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    workflowStatusId: workflowStatus.id,
+    statusCategory: workflowStatus.category,
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: baseTask.dueDate,
     priority: (['high', 'medium', 'low'] as const)[index % 3],
     assignedProjectId: index % 2 === 0 ? 'refero' : 'brand-refresh',
+    createdAt: '2026-06-08T00:00:00.000Z',
+    updatedAt: '2026-06-08T00:00:00.000Z',
     source: 'dynamodb' as const,
-    teamId: index % 2 === 0 ? 'core-team' : 'marketing',
   }
 })
 

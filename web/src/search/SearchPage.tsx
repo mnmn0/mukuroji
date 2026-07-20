@@ -1,6 +1,7 @@
 import {
   SAVED_VIEW_SCHEMA_VERSION,
   type CreateSavedWorkspaceViewInput,
+  type ResolvedWorkItemConfiguration,
   type SavedViewVisibility,
   type SavedWorkspaceView,
   type SearchCustomFieldFilter,
@@ -12,10 +13,11 @@ import {
   type WorkspaceSearchResult,
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router'
+import { useLocation, useNavigate, useSearchParams } from 'react-router'
 import useSWR from 'swr'
 import { createMutationRequestRunner } from '../api/mutationHeaders'
 import { getCurrentUser } from '../auth/api'
+import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import {
   MobileSidebarButton,
@@ -38,6 +40,7 @@ import {
   createTeamViewPath,
   workspaceNavPaths,
 } from '../routes/paths'
+import { getWorkItemConfiguration } from '../work-items/api'
 import {
   createSavedWorkspaceView,
   deleteSavedWorkspaceView,
@@ -64,6 +67,7 @@ import {
   type SearchRouteState,
 } from './queryState'
 import { SearchResultCollection } from './SearchResultCollection'
+import { createSearchStatusOptions, type SearchStatusOption } from './statusOptions'
 
 /**
  * Saved view作成フォームの入力stateです。
@@ -89,7 +93,6 @@ type SavedViewDraft = {
 
 const searchEntityTypes = ['work-item', 'project', 'team', 'comment', 'file', 'document'] as const satisfies readonly SearchEntityType[]
 const searchLayoutModes = ['table', 'board', 'calendar', 'timeline'] as const satisfies readonly SearchViewLayoutMode[]
-const workItemStatuses = ['todo', 'in-progress', 'review', 'done'] as const
 const searchCustomFieldOperators = [
   'equals',
   'not-equals',
@@ -104,6 +107,7 @@ const searchCustomFieldOperators = [
 const savedViewVisibilities = ['personal', 'team', 'shared'] as const satisfies readonly SavedViewVisibility[]
 const selectableColumns = ['type', 'status', 'assignee', 'creator', 'project', 'team', 'dueDate', 'updatedAt'] as const
 const emptyTeams: ProjectDirectoryTeam[] = []
+const emptyResolvedWorkItemConfigurations: Record<string, ResolvedWorkItemConfiguration> = {}
 const apiSWRConfig = {
   dedupingInterval: 10_000,
   shouldRetryOnError: false,
@@ -113,6 +117,7 @@ const apiSWRConfig = {
  * Permission-aware Workspace search、saved view、cursor paginationを提供する画面です。
  */
 export function SearchPage() {
+  const location = useLocation()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
@@ -125,6 +130,7 @@ export function SearchPage() {
   const [nextPageLoadingSignature, setNextPageLoadingSignature] = useState<string | undefined>()
   const [searchErrorMessage, setSearchErrorMessage] = useState<string | undefined>()
   const [savedViewErrorMessage, setSavedViewErrorMessage] = useState<string | undefined>()
+  const [authenticatedApiError, setAuthenticatedApiError] = useState<unknown>()
   const [isSavedViewFormOpen, setIsSavedViewFormOpen] = useState(false)
   const [savedViewDraft, setSavedViewDraft] = useState<SavedViewDraft>({
     description: '',
@@ -150,12 +156,30 @@ export function SearchPage() {
     : null
   const {
     data: teams = emptyTeams,
+    error: projectDirectoryError,
     isLoading: isProjectDirectoryLoading,
   } = useSWR(
     projectDirectoryKey,
     ([, token, currentLocale]) => getProjectDirectory(token, currentLocale),
     apiSWRConfig,
   )
+  const teamIdsSignature = JSON.stringify(teams.map((team) => team.id).sort())
+  const workItemConfigurationsKey = accessToken && user && !currentUserError && !isProjectDirectoryLoading
+    ? (['search-work-item-configurations', accessToken, teamIdsSignature] as const)
+    : null
+  const {
+    data: workItemConfigurationLoadResult,
+    error: workItemConfigurationsError,
+  } = useSWR(
+    workItemConfigurationsKey,
+    ([, token, serializedTeamIds]) => loadSearchWorkItemConfigurations(
+      token,
+      readSerializedTeamIds(serializedTeamIds),
+    ),
+    apiSWRConfig,
+  )
+  const workItemConfigurationsByTeam = workItemConfigurationLoadResult?.configurationsByTeam ??
+    emptyResolvedWorkItemConfigurations
   const savedViewsKey = accessToken && user && !currentUserError
     ? (['saved-workspace-views', accessToken] as const)
     : null
@@ -183,9 +207,34 @@ export function SearchPage() {
   const canManageSharedViews = Boolean(
     user && (user.isSystemAdmin || user.workspaceRole === 'owner' || user.workspaceRole === 'admin'),
   )
+  const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
+    currentUserError,
+    [
+      projectDirectoryError,
+      workItemConfigurationsError,
+      ...(workItemConfigurationLoadResult?.errors ?? []),
+      savedViewsError,
+      authenticatedApiError,
+    ],
+    `${location.pathname}${location.search}${location.hash}`,
+  )
   const isLoading = !session || isCurrentUserLoading || Boolean(user && isProjectDirectoryLoading)
   const userLabel = user?.attributes.email ?? user?.attributes.name ?? user?.username ?? t('workspace.user.fallback')
   const userInitial = userLabel.trim().charAt(0).toUpperCase() || 'M'
+  const statusOptions = useMemo(() => createSearchStatusOptions(
+    workItemConfigurationsByTeam,
+    [
+      ...getSearchStatuses(routeState.filters),
+      ...results.flatMap((result) => result.status ? [result.status] : []),
+    ],
+  ), [results, routeState.filters, workItemConfigurationsByTeam])
+  const statusLabels = useMemo(
+    () => Object.fromEntries(statusOptions.map((status) => [status.id, status.label])),
+    [statusOptions],
+  )
+  const visibleSearchErrorMessage = currentUserErrorAction?.kind === 'stay'
+    ? t('search.error')
+    : searchErrorMessage
 
   useEffect(() => {
     activeRouteSignatureRef.current = routeSignature
@@ -209,11 +258,17 @@ export function SearchPage() {
   }, [navigate, session])
 
   useEffect(() => {
-    if (currentUserError) {
-      clearAuthSession()
-      navigate('/', { replace: true })
+    if (currentUserErrorAction?.redirectTo) {
+      if (currentUserErrorAction.clearSession) {
+        clearAuthSession()
+      }
+      navigate(currentUserErrorAction.redirectTo, { replace: true })
     }
-  }, [currentUserError, navigate])
+  }, [
+    currentUserErrorAction?.clearSession,
+    currentUserErrorAction?.redirectTo,
+    navigate,
+  ])
 
   useEffect(() => {
     if (!accessToken || !user || currentUserError) {
@@ -224,6 +279,7 @@ export function SearchPage() {
     const timeoutId = window.setTimeout(() => {
       setIsSearchLoading(true)
       setSearchErrorMessage(undefined)
+      setAuthenticatedApiError(undefined)
       void searchWorkspace(accessToken, routeState.filters, {
         limit: 30,
         signal: abortController.signal,
@@ -234,6 +290,7 @@ export function SearchPage() {
         })
         .catch((error: unknown) => {
           if (!abortController.signal.aborted) {
+            setAuthenticatedApiError(() => error)
             setResults([])
             setNextCursor(undefined)
             setSearchErrorMessage(error instanceof Error ? error.message : t('search.error'))
@@ -314,6 +371,7 @@ export function SearchPage() {
     nextPageAbortControllerRef.current = abortController
     setNextPageLoadingSignature(requestRouteSignature)
     setSearchErrorMessage(undefined)
+    setAuthenticatedApiError(undefined)
     try {
       const response = await searchWorkspace(accessToken, routeState.filters, {
         cursor: nextCursor,
@@ -329,6 +387,7 @@ export function SearchPage() {
       setNextCursor(response.nextCursor)
     } catch (error) {
       if (!abortController.signal.aborted && activeRouteSignatureRef.current === requestRouteSignature) {
+        setAuthenticatedApiError(() => error)
         setSearchErrorMessage(error instanceof Error ? error.message : t('search.error'))
       }
     } finally {
@@ -349,6 +408,7 @@ export function SearchPage() {
     }
 
     setSavedViewErrorMessage(undefined)
+    setAuthenticatedApiError(undefined)
     const input = {
       description: savedViewDraft.description.trim() || undefined,
       filters: routeState.filters,
@@ -374,6 +434,7 @@ export function SearchPage() {
         savedViewId: view.id,
       })
     } catch (error) {
+      setAuthenticatedApiError(() => error)
       setSavedViewErrorMessage(error instanceof Error ? error.message : t('search.error'))
     }
   }
@@ -384,6 +445,7 @@ export function SearchPage() {
     }
 
     setSavedViewErrorMessage(undefined)
+    setAuthenticatedApiError(undefined)
     const input = {
       expectedRevision: view.revision,
       ...patch,
@@ -397,6 +459,7 @@ export function SearchPage() {
       )
       await mutateSavedViews()
     } catch (error) {
+      setAuthenticatedApiError(() => error)
       setSavedViewErrorMessage(error instanceof Error ? error.message : t('search.error'))
     }
   }
@@ -407,6 +470,7 @@ export function SearchPage() {
     }
 
     setSavedViewErrorMessage(undefined)
+    setAuthenticatedApiError(undefined)
     try {
       await mutationRequestRunner.run(
         `saved-view:delete:${view.id}`,
@@ -419,6 +483,7 @@ export function SearchPage() {
         commitRouteState({ ...routeState, savedViewId: undefined })
       }
     } catch (error) {
+      setAuthenticatedApiError(() => error)
       setSavedViewErrorMessage(error instanceof Error ? error.message : t('search.error'))
     }
   }
@@ -549,6 +614,7 @@ export function SearchPage() {
                   key={getSearchDateField(routeState.filters)}
                   routeState={routeState}
                   selectedSavedView={selectedSavedView}
+                  statusOptions={statusOptions}
                   t={t}
                   onFiltersChange={updateFilters}
                   onLayoutChange={updateLayout}
@@ -574,9 +640,11 @@ export function SearchPage() {
                     </span>
                   ) : null}
                 </div>
-                {searchErrorMessage ? (
+                {visibleSearchErrorMessage ? (
                   <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
-                    {t('search.error')} {searchErrorMessage}
+                    {currentUserErrorAction?.kind === 'stay'
+                      ? visibleSearchErrorMessage
+                      : `${t('search.error')} ${visibleSearchErrorMessage}`}
                   </p>
                 ) : null}
                 {isSearchLoading ? (
@@ -587,8 +655,9 @@ export function SearchPage() {
                     locale={locale}
                     onNavigate={navigate}
                     results={results}
+                    statusLabels={statusLabels}
                   />
-                ) : !searchErrorMessage ? (
+                ) : !visibleSearchErrorMessage ? (
                   <section className="workbench-panel px-6 py-14 text-center">
                     <h2 className="text-base font-semibold text-[var(--workbench-text)]">{t('search.emptyTitle')}</h2>
                     <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">{t('search.emptyDescription')}</p>
@@ -619,6 +688,7 @@ function SearchToolbar({
   onUpdateSelectedView,
   routeState,
   selectedSavedView,
+  statusOptions,
   t,
 }: {
   onFiltersChange: (patch: Record<string, unknown>) => void
@@ -626,6 +696,7 @@ function SearchToolbar({
   onUpdateSelectedView?: () => void
   routeState: SearchRouteState
   selectedSavedView?: SavedWorkspaceView
+  statusOptions: readonly SearchStatusOption[]
   t: (key: MessageKey) => string
 }) {
   const entityTypes = getSearchEntityTypes(routeState.filters)
@@ -676,12 +747,12 @@ function SearchToolbar({
           <div className="grid gap-2">
             <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{t('search.filters.status')}</span>
             <div className="flex flex-wrap gap-2">
-              {workItemStatuses.map((status) => (
+              {statusOptions.map((status) => (
                 <ToggleChip
-                  active={statuses.includes(status)}
-                  key={status}
-                  label={t(`tasks.status.${status}`)}
-                  onToggle={() => onFiltersChange({ statuses: toggleValue(statuses, status) })}
+                  active={statuses.includes(status.id)}
+                  key={status.id}
+                  label={status.label}
+                  onToggle={() => onFiltersChange({ statuses: toggleValue(statuses, status.id) })}
                 />
               ))}
             </div>
@@ -1256,6 +1327,38 @@ function hasExplicitSearchState(searchParams: URLSearchParams) {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {}
+}
+
+async function loadSearchWorkItemConfigurations(
+  accessToken: string,
+  teamIds: readonly string[],
+) {
+  const results = await Promise.allSettled(teamIds.map(async (teamId) => ({
+    configuration: await getWorkItemConfiguration(accessToken, { kind: 'team', teamId }),
+    teamId,
+  })))
+
+  return {
+    configurationsByTeam: Object.fromEntries(results.flatMap((result) =>
+      result.status === 'fulfilled'
+        ? [[result.value.teamId, result.value.configuration]]
+        : [],
+    )) as Record<string, ResolvedWorkItemConfiguration>,
+    errors: results.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : []
+    ),
+  }
+}
+
+function readSerializedTeamIds(value: string) {
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return Array.isArray(parsed) && parsed.every((teamId) => typeof teamId === 'string')
+      ? parsed
+      : []
+  } catch {
+    return []
+  }
 }
 
 function formatSavedViewMigrationWarnings(view: SavedWorkspaceView) {

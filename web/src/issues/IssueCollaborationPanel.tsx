@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../i18n'
 import type { WorkspaceMember } from '../workspace/api'
+import type { FileArtifactsController } from '../files/useFileArtifacts'
 import type {
   CreateTeamIssueCommentInput,
   TeamIssueActivityEvent,
@@ -34,7 +35,11 @@ export type IssueCollaborationPanelProps = {
    */
   controller: IssueCollaborationController
   /**
-   * legacy Work Item などで comment が使えない理由です。
+   * 保存済み comment の file 添付と表示に使う controller です。
+   */
+  artifacts?: FileArtifactsController
+  /**
+   * 権限不足などで comment が使えない理由です。
    */
   readOnlyMessage?: string
   /**
@@ -55,6 +60,7 @@ export type IssueCollaborationPanelProps = {
  * comment thread、mention、reaction、watcher、presence をひとつにまとめた共同作業パネルです。
  */
 export function IssueCollaborationPanel({
+  artifacts,
   className = '',
   controller,
   currentMemberKey,
@@ -316,6 +322,7 @@ export function IssueCollaborationPanel({
                 </div>
               ) : null}
               <CommentCard
+                artifacts={artifacts}
                 comment={thread.root}
                 controller={controller}
                 deleteConfirmationId={deleteConfirmationId}
@@ -336,6 +343,7 @@ export function IssueCollaborationPanel({
                 <div className="ml-5 border-l-2 border-[#c6e8e3] bg-[#fbfcfd]">
                   {thread.replies.map((reply) => (
                     <CommentCard
+                      artifacts={artifacts}
                       comment={reply}
                       controller={controller}
                       deleteConfirmationId={deleteConfirmationId}
@@ -461,6 +469,10 @@ type CommentThread = {
  */
 type CommentCardProps = {
   /**
+   * Comment file attachment を読み書きする controller です。
+   */
+  artifacts?: FileArtifactsController
+  /**
    * 表示する comment です。
    */
   comment: TeamIssueComment
@@ -527,6 +539,7 @@ type CommentCardProps = {
 }
 
 function CommentCard({
+  artifacts,
   comment,
   controller,
   deleteConfirmationId,
@@ -629,6 +642,14 @@ function CommentCard({
           ) : (
             <SafeCommentBody bodyMarkdown={bodyMarkdown} className="mt-2" />
           )}
+
+          {!comment.deletedAt && artifacts ? (
+            <CommentFileAttachments
+              artifacts={artifacts}
+              comment={comment}
+              t={t}
+            />
+          ) : null}
 
           {!isEditing ? (
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -765,6 +786,108 @@ function CommentCard({
       </div>
     </div>
   )
+}
+
+function CommentFileAttachments({
+  artifacts,
+  comment,
+  t,
+}: {
+  artifacts: FileArtifactsController
+  comment: TeamIssueComment
+  t: (key: MessageKey) => string
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [guestAccess, setGuestAccess] = useState(false)
+  const files = artifacts.files.filter((file) =>
+    file.targetType === 'comment' && file.targetId === comment.id && !file.deletedAt
+  )
+  const canAttach = artifacts.capabilities.canUpload && comment.source !== 'legacy'
+  const canGrantGuestAccess = canAttach && artifacts.capabilities.canGrantGuestAccess
+
+  return files.length > 0 || canAttach ? (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5" data-testid={`comment-files-${comment.id}`}>
+      {files.map((file) => {
+        const availableVersion = file.versions.find((version) => version.scanStatus === 'available')
+
+        return (
+          <button
+            className="inline-flex min-h-7 max-w-full items-center gap-1.5 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-2 text-[0.68rem] font-semibold text-[var(--workbench-text)] disabled:opacity-50"
+            disabled={!file.capabilities.canDownload || !availableVersion}
+            key={file.id}
+            onClick={() => {
+              if (!availableVersion) {
+                return
+              }
+
+              void artifacts.getVersionAccess(file, availableVersion, 'attachment').then((access) => {
+                if (!access) {
+                  return
+                }
+
+                const link = document.createElement('a')
+                link.href = access.url
+                link.download = availableVersion.fileName
+                link.rel = 'noopener noreferrer'
+                link.click()
+              })
+            }}
+            type="button"
+          >
+            <span aria-hidden="true">↗</span>
+            <span className="truncate">{file.name}</span>
+            <span className="text-[var(--workbench-muted)]">v{availableVersion?.number ?? file.currentVersion.number}</span>
+          </button>
+        )
+      })}
+      {canAttach ? (
+        <>
+          {canGrantGuestAccess ? (
+            <label
+              className="inline-flex min-h-7 items-center gap-1.5 rounded-md border border-[var(--workbench-border)] bg-white px-2 text-[0.68rem] font-semibold text-[var(--workbench-muted)]"
+              htmlFor={`comment-guest-access-${comment.id}`}
+            >
+              <input
+                checked={guestAccess}
+                className="h-3.5 w-3.5 accent-[var(--workbench-primary)]"
+                id={`comment-guest-access-${comment.id}`}
+                onChange={(event) => setGuestAccess(event.target.checked)}
+                type="checkbox"
+              />
+              {t('files.guestAccess')}
+            </label>
+          ) : null}
+          <button
+            aria-controls={`comment-file-input-${comment.id}`}
+            className="min-h-7 rounded-md px-2 text-[0.68rem] font-semibold text-[var(--workbench-primary)] hover:bg-[#e5f7f4] disabled:opacity-50"
+            disabled={artifacts.isMutating}
+            onClick={() => inputRef.current?.click()}
+            type="button"
+          >
+            + {t('files.comment.attach')}
+          </button>
+          <input
+            aria-label={t('files.comment.attach')}
+            data-testid={`comment-file-input-${comment.id}`}
+            disabled={artifacts.isMutating}
+            hidden
+            id={`comment-file-input-${comment.id}`}
+            multiple
+            onChange={(event) => {
+              const selectedFiles = Array.from(event.target.files ?? [])
+              event.target.value = ''
+              void artifacts.uploadFiles(selectedFiles, {
+                commentId: comment.id,
+                guestAccess: canGrantGuestAccess ? guestAccess : false,
+              })
+            }}
+            ref={inputRef}
+            type="file"
+          />
+        </>
+      ) : null}
+    </div>
+  ) : null
 }
 
 /**
@@ -1267,6 +1390,19 @@ const activityLabelKeys: Record<string, MessageKey> = {
   'watch.unsubscribed': 'collaboration.activity.watchUnsubscribed',
   'work-item.created': 'collaboration.activity.workItemCreated',
   'work-item.updated': 'collaboration.activity.workItemUpdated',
+  'file.created': 'collaboration.activity.fileCreated',
+  'file.version-created': 'collaboration.activity.fileVersionCreated',
+  'file.upload-completed': 'collaboration.activity.fileUploadCompleted',
+  'file.deleted': 'collaboration.activity.fileDeleted',
+  'file.download-accessed': 'collaboration.activity.fileDownloaded',
+  'file.preview-accessed': 'collaboration.activity.filePreviewed',
+  'annotation.created': 'collaboration.activity.annotationCreated',
+  'approval.requested': 'collaboration.activity.approvalRequested',
+  'approval.approved': 'collaboration.activity.approvalApproved',
+  'approval.completed': 'collaboration.activity.approvalCompleted',
+  'approval.cancelled': 'collaboration.activity.approvalCancelled',
+  'approval.rejected': 'collaboration.activity.approvalRejected',
+  'approval.changes-requested': 'collaboration.activity.approvalChangesRequested',
 }
 
 function formatActivityLabel(
@@ -1314,6 +1450,46 @@ function inferActivityLabelKey(eventType: string): MessageKey | undefined {
     return normalizedType.includes('unsubscribe') || normalizedType.includes('remove')
       ? 'collaboration.activity.watchUnsubscribed'
       : 'collaboration.activity.watchSubscribed'
+  }
+
+  if (normalizedType.includes('file')) {
+    if (normalizedType.includes('download')) {
+      return 'collaboration.activity.fileDownloaded'
+    }
+
+    if (normalizedType.includes('preview')) {
+      return 'collaboration.activity.filePreviewed'
+    }
+
+    if (normalizedType.includes('delete')) {
+      return 'collaboration.activity.fileDeleted'
+    }
+
+    if (normalizedType.includes('upload') && normalizedType.includes('complete')) {
+      return 'collaboration.activity.fileUploadCompleted'
+    }
+
+    return normalizedType.includes('version')
+      ? 'collaboration.activity.fileVersionCreated'
+      : 'collaboration.activity.fileCreated'
+  }
+
+  if (normalizedType.includes('annotation')) {
+    return 'collaboration.activity.annotationCreated'
+  }
+
+  if (normalizedType.includes('approval')) {
+    if (normalizedType.includes('reject')) {
+      return 'collaboration.activity.approvalRejected'
+    }
+
+    if (normalizedType.includes('change')) {
+      return 'collaboration.activity.approvalChangesRequested'
+    }
+
+    return normalizedType.includes('request')
+      ? 'collaboration.activity.approvalRequested'
+      : 'collaboration.activity.approvalApproved'
   }
 
   return undefined

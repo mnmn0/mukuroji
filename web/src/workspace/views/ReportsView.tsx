@@ -6,6 +6,7 @@ import type {
   TaskPriority,
   TaskStatus,
 } from '../../tasks/api'
+import { resolveProjectTaskStatus } from '../../tasks/api'
 import { workspacePresentation } from '../workspacePresentation'
 import {
   MetricCard,
@@ -35,7 +36,7 @@ export function ReportsView({
 }) {
   const [projectSearchQuery, setProjectSearchQuery] = useState('')
   const [showAttentionOnly, setShowAttentionOnly] = useState(false)
-  const openTasks = tasks.filter((task) => task.status !== 'done')
+  const openTasks = tasks.filter((task) => resolveProjectTaskStatus(task) !== 'done')
   const attentionTasks = useMemo(
     () => workspacePresentation.createInboxTasks(tasks),
     [tasks],
@@ -54,7 +55,7 @@ export function ReportsView({
       workspacePresentation.normalizeWorkspaceSearchText(`${project.name} ${project.teamName}`).includes(normalizedProjectSearchQuery)
   })
   const statusItems = reportStatusOrder.map((status) => ({
-    count: tasks.filter((task) => task.status === status).length,
+    count: tasks.filter((task) => resolveProjectTaskStatus(task) === status).length,
     id: status,
     label: t(`tasks.status.${status}`),
   }))

@@ -64,7 +64,10 @@ export type SidebarNavId =
   | 'home'
   | 'my-tasks'
   | 'inbox'
+  | 'requests'
+  | 'documents'
   | 'dashboard'
+  | 'planning'
   | 'reports'
   | 'help'
   | 'settings'
@@ -319,8 +322,9 @@ export type SidebarProps = {
   activeProjectId?: string
   /**
    * 制御された現在のプロジェクトが選択されたチーム ID です。
+   * 複数 Team を横断する aggregate 表示では null を指定します。
    */
-  activeProjectTeamId?: string
+  activeProjectTeamId?: string | null
   /**
    * 非制御時に初期選択するプロジェクト ID です。
    */
@@ -454,7 +458,10 @@ const mainNavItems: MainNavItem[] = [
   { id: 'home', icon: HomeIcon },
   { id: 'my-tasks', icon: CheckCircleIcon },
   { id: 'inbox', icon: BellIcon },
+  { id: 'requests', icon: PanelIcon },
+  { id: 'documents', icon: DocumentIcon },
   { id: 'dashboard', icon: DashboardIcon },
+  { id: 'planning', icon: PlanningIcon },
   { id: 'reports', icon: ReportIcon },
 ]
 
@@ -521,7 +528,10 @@ const defaultLabels: SidebarLabels = {
     home: 'ホーム',
     'my-tasks': 'マイタスク',
     inbox: '受信箱',
+    requests: 'リクエスト',
+    documents: 'ドキュメント',
     dashboard: 'ダッシュボード',
+    planning: 'プランニング',
     reports: 'レポート',
     help: 'ヘルプ',
     settings: '設定',
@@ -670,12 +680,17 @@ export function Sidebar({
 
   const isCollapsed = controlledCollapsed ?? internalCollapsed
   const activeProjectId = controlledActiveProjectId ?? internalActiveProjectId
-  const activeProjectTeamId = controlledActiveProjectTeamId ?? internalActiveProjectTeamId
-  const projectTeamId = activeProjectId
+  const activeProjectTeamId = controlledActiveProjectTeamId !== undefined
+    ? controlledActiveProjectTeamId
+    : internalActiveProjectTeamId
+  const isAggregateProjectScope = Boolean(activeProjectId) && activeProjectTeamId === null
+  const projectTeamId = activeProjectId && !isAggregateProjectScope
     ? activeProjectTeamId ?? findProjectTeamId(teams, activeProjectId)
     : undefined
   const activeTeamViewId = controlledActiveTeamViewId ?? internalActiveTeamViewId
-  const activeTeamId = controlledActiveTeamId ?? projectTeamId ?? internalActiveTeamId
+  const activeTeamId = controlledActiveTeamId ?? (
+    isAggregateProjectScope ? undefined : projectTeamId ?? internalActiveTeamId
+  )
   const activeNavId =
     activeProjectId || activeTeamId || activeTeamViewId
       ? undefined
@@ -1750,7 +1765,7 @@ function TeamGroup({
   activeTeamId?: string
   activeTeamViewId?: SidebarTeamViewId
   activeProjectId?: string
-  activeProjectTeamId?: string
+  activeProjectTeamId?: string | null
   projectTeamId?: string
   labels: SidebarLabels
   collapsed: boolean
@@ -1767,7 +1782,11 @@ function TeamGroup({
   const isCurrentTeam = isTeamActive && !activeProjectId && !activeTeamViewId
 
   return (
-    <div>
+    <div
+      data-project-ancestor={isProjectAncestor ? 'true' : 'false'}
+      data-team-active={isTeamActive ? 'true' : 'false'}
+      data-testid={`sidebar-team-${team.id}`}
+    >
       <div className="relative">
         {isTeamActive || isProjectAncestor ? (
           <span className="absolute inset-y-0 left-0 w-1 rounded-full bg-teal-400" aria-hidden="true" />
@@ -2099,6 +2118,17 @@ function BellIcon({ className }: SidebarIconProps) {
   )
 }
 
+function DocumentIcon({ className }: SidebarIconProps) {
+  return (
+    <SvgBase className={className}>
+      <path d="M6 3h9l3 3v15H6z" />
+      <path d="M15 3v4h4" />
+      <path d="M9 11h6" />
+      <path d="M9 15h6" />
+    </SvgBase>
+  )
+}
+
 function DashboardIcon({ className }: SidebarIconProps) {
   return (
     <SvgBase className={className}>
@@ -2107,6 +2137,22 @@ function DashboardIcon({ className }: SidebarIconProps) {
       <path d="M16 20v-8" />
       <path d="M22 20H2" />
       <path d="M20 20V8" />
+    </SvgBase>
+  )
+}
+
+function PlanningIcon({ className }: SidebarIconProps) {
+  return (
+    <SvgBase className={className}>
+      <path d="M4 6h6" />
+      <path d="M14 6h6" />
+      <path d="M8 6v12" />
+      <path d="M8 10h8" />
+      <path d="M16 10v8" />
+      <circle cx="8" cy="6" r="2" />
+      <circle cx="16" cy="10" r="2" />
+      <circle cx="8" cy="18" r="2" />
+      <circle cx="16" cy="18" r="2" />
     </SvgBase>
   )
 }

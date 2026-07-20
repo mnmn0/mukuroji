@@ -1,26 +1,364 @@
-# AGENTS.md
+# Web の開発ガイド
 
-このファイルは `web/` 配下の作業に適用します。共通ルールはリポジトリルートの `AGENTS.md` に従ってください。
+このファイルは `web/` 配下の作業に適用します。リポジトリ全体の方針はルートの `AGENTS.md` に従い、このファイルでは React/TypeScript/Vite のフロントエンド固有のルールを定めます。
 
-## 責務境界
+## 技術スタックとコマンド
 
-- `src/pages/` は route parameter、認証、data fetch、mutation、navigation を組み立てる薄い container とする。
-- 画面の描画責務は `src/<domain>/` に置き、複数の view、modal、form を持つ場合は同一 domain の `components/` または `views/` に分割する。
-- filter、sort、集計、format などの React に依存しない処理は `presentation.ts` などの明示的な module に分離し、`test/` から直接検証できる形にする。
-- domain の public component と type は小さな entry module から再 export し、route や Story が内部構成へ依存しないようにする。
-- 表示文言は `src/i18n` から供給する。component 内に locale 固定の fallback 文言を追加しない。
-- Story は描画対象 component を直接確認できるようにし、カテゴリは `Application/...` または `Design System/...` に揃える。
-- E2E で共有する route stub、fixture、assertion helper は `e2e/support/` に置く。
-
-## 検証
-
-UI や画面構成を変更した場合は次を実行します。
+`web/` は React 19、React Router、Tailwind CSS、SWR、Storybook を使います。
 
 ```sh
-bun run web:test
+bun run web:dev
+bun run web:lint
+bun run web:build
+bun run web:storybook
+bun run web:build-storybook
+```
+
+UI 変更では、少なくとも次を確認します。
+
+```sh
 bun run web:lint
 bun run web:build
 bun run web:build-storybook
 ```
 
-対象画面を起動できる場合は Storybook または E2E でも確認し、`storybook-static/` はコミットしません。
+Storybook を起動できる場合は対象 Story をブラウザまたはスクリーンショットで確認します。`storybook-static/` は生成物なのでコミットしません。
+
+## ディレクトリ構造
+
+新しいコードは、URL、業務機能、業務データ、共通処理の責務が分かる場所に置きます。
+
+```text
+web/src/
+├── app/
+│   ├── App.tsx
+│   ├── router.tsx
+│   ├── layouts/
+│   └── providers/
+├── pages/
+│   ├── auth/
+│   ├── workspace/
+│   └── public/
+├── features/
+├── entities/
+├── shared/
+├── assets/                 # 現行の web/src/assets
+└── index.css
+```
+
+### `app/`
+
+アプリケーションの起動、Router、Provider、アプリケーション全体のレイアウトを置きます。
+
+- `App.tsx` は Router/Provider の組み立てに留める
+- ルーティング定義は `app/router.tsx` または既存の `routes/router.tsx` に集約する
+- 認証済み Workspace、公開ページなど、複数画面で共有するレイアウトを置く
+- 業務 API の取得や画面固有の状態を置かない
+
+### `pages/`
+
+URL に対応する画面の組み立てを置きます。
+
+- ページは route parameter の解決、feature の組み立て、画面遷移に集中する
+- 大量の `fetch`、`useSWR`、フォーム状態、業務計算をページに集めない
+- ページ同士で直接 import しない
+- 認証、Workspace、公開ページなど、画面の利用境界が分かるサブディレクトリを使う
+
+既存の `pages/TaskPage.tsx` や `pages/WorkspacePage.tsx` を移行する場合も、まず画面コンテナと feature を分け、その後にサブディレクトリへ移動する。
+
+### `features/`
+
+ユーザーが行う業務操作や、複数の entity を組み合わせる機能を置きます。
+
+例:
+
+```text
+features/
+├── request-intake/
+├── automation-management/
+├── issue-collaboration/
+├── bulk-operations/
+└── work-item-configuration/
+```
+
+feature の内部は、必要な範囲で次の構成にします。
+
+```text
+features/request-intake/
+├── api/
+├── queries/
+├── mutations/
+├── model/
+├── ui/
+└── fixtures.ts
+```
+
+feature から別 feature のページや内部 UI を直接 import しません。共有が必要な場合は entity、`shared/ui`、または共通の model/API へ責務を移します。
+
+### `entities/`
+
+Project、Team、User、Work Item、File、Notification など、業務データ単位の API、表示、業務ロジックを置きます。
+
+```text
+entities/work-item/
+├── api/
+├── queries/
+├── mutations/
+├── model/
+├── ui/
+└── fixtures.ts
+```
+
+Entity は feature や page に依存しません。複数の feature から再利用される業務データの取得・変換・表示部品は、まず entity への配置を検討します。
+
+### `shared/`
+
+特定の業務領域に依存しない処理だけを置きます。
+
+```text
+shared/
+├── api/
+├── ui/
+├── i18n/
+├── routing/
+└── lib/
+```
+
+- `shared/api/`: fetch、JSON、header、mutation context などの通信基盤
+- `shared/ui/`: 業務知識を持たない汎用 UI
+- `shared/i18n/`: 翻訳の共通型、辞書の読み込み、locale 管理
+- `shared/routing/`: 業務領域に依存しない routing helper
+- `shared/lib/`: 業務領域に依存しない小さなライブラリ関数
+
+`shared/` から `pages`、`features`、`entities` を import しません。アプリケーションの画像などは現行の `web/src/assets/` に置き、`shared/assets/` は新設しません。所有者が不明な `utils`、`services`、`hooks` フォルダも新設しないでください。
+
+### 既存の業務領域フォルダ
+
+現在の `automation/`、`files/`、`issues/`、`notifications/`、`planning/`、`projects/`、`requests/`、`work-items/` などは、段階移行の間は利用して構いません。
+
+既存領域へ新しいコードを追加する場合は、可能なら次の責務分割を先に適用します。
+
+```text
+<area>/
+├── api/
+├── queries/
+├── mutations/
+├── model/
+├── ui/
+└── fixtures.ts
+```
+
+全ファイルを一度に `features` / `entities` へ移動する大規模変更は避け、対象画面や API の変更に合わせて移行します。
+
+## API と SWR の分離
+
+HTTP 通信の実装と、React/SWR による取得状態・キャッシュ管理を分離します。詳細は [`docs/frontend-data-access.md`](../docs/frontend-data-access.md) を参照してください。
+
+### `api/`
+
+`api/` は HTTP 通信を担当します。
+
+- URL、method、header、body の組み立て
+- `fetch` の実行
+- JSON の読み取りと response の変換
+- API 固有エラーの変換
+- 呼び出し側から渡された access token や mutation context の利用
+
+`api/` から `react`、`react-router`、`swr` を import しません。`useSWR`、React state、SWR key、ページ遷移、トースト表示、`getAuthSession()` の直接参照も行いません。
+
+API 関数は可能な限り認証情報や locale などを明示的な引数で受け取ります。共通の通信処理は `shared/api/` に置きます。
+
+### `queries/`
+
+`queries/` は `useSWR` を使う参照用 wrapper を置きます。
+
+- SWR key は query wrapper が所有する
+- 条件付き取得は `null` key で表現する
+- API 関数への引数を wrapper 内で渡す
+- loading、error、data、mutate を画面に適した形へ整理する
+- polling、deduplication、retry の設定を必要な領域で管理する
+
+ページから `useSWR` を直接呼ばず、`useProjectDirectory`、`usePlanningSnapshot` のような業務上意味のある hook を利用します。
+
+### `mutations/`
+
+`mutations/` は更新 API と更新後の cache 整合性をまとめる場所です。
+
+- 更新後に複数の cache を再検証する
+- optimistic update を行う
+- revision conflict などを画面向け状態へ変換する
+- 複数画面で同じ更新処理を共有する
+
+単純なフォーム送信で cache 更新が不要なら、feature 内の mutation/controller から API 関数を直接呼んでも構いません。ページや汎用 UI から直接 API を呼ばないでください。`useSWRMutation` を使うか、API 関数と `mutate` を組み合わせるかは、cache 更新の必要性と処理の複雑さで決めます。
+
+依存方向は次の通りです。
+
+```text
+pages / ui
+    ↓
+queries / mutations
+    ↓
+api
+    ↓
+shared/api
+```
+
+## 状態の所有場所
+
+状態の種類ごとに、最も近い適切な所有者を一つだけ決めます。
+
+```text
+API 由来の server state  → SWR の query/mutation
+URL に持つ状態          → React Router の path/search params
+一時的な UI 状態        → useState
+フォーム入力             → フォームを所有する feature/UI
+派生値                  → render 中の計算
+高コストな派生値         → 必要な場合だけ useMemo
+```
+
+同じ値を URL、SWR、`useState` など複数の場所へ重複して保持しません。状態を別の状態から同期するためだけの state と `useEffect` も作りません。
+
+新しい Context や global store を追加する前に、URL、SWR、親コンポーネントの state、feature の state で表現できないかを確認します。Context/store は、複数の離れた子孫が共有し、Context/store に置く意味がある安定した UI 状態に限って使います。server state の置き場所として Context/store を使いません。
+
+## 依存境界
+
+業務コードの依存方向は次の通りです。
+
+```text
+app
+ ↓
+pages
+ ↓
+features
+ ↓
+entities
+ ↓
+shared
+```
+
+次の依存を作りません。
+
+- `shared` から `pages`、`features`、`entities` を import する
+- `entities` から `features` や `pages` を import する
+- feature から別 feature の page や内部 UI を直接 import する
+- page から別 page を import する
+- 業務領域の内部実装を、無関係な領域から直接参照する
+
+ページは feature、entity、shared を組み立ててよいですが、業務操作や複雑な取得処理は feature の public な入口を通します。共有が必要な内部実装は、entity、`shared/ui`、または共通の model/API へ責務を移します。
+
+## ページと feature の責務
+
+ページは次の処理に集中します。
+
+- route parameter の解決
+- query/mutation hook の呼び出し
+- feature の組み立て
+- 画面遷移
+- ページ全体の loading/error 境界
+
+次の処理をページへ集めません。
+
+- 大量の `fetch` や `useSWR`
+- 複数業務領域にまたがる業務計算
+- 複雑なフォーム状態と入力変換
+- 同じ画面以外でも利用する更新処理
+
+既存の `pages/TaskPage.tsx` や `pages/WorkspacePage.tsx` を変更する場合は、まず画面コンテナと feature を分けます。行数だけを機械的な基準にせず、責務が複数になった時点で分割します。
+
+## 非同期画面の状態
+
+API や query/mutation を使う画面・feature は、次の状態を設計してから実装します。
+
+- loading: 初回取得中の表示
+- error: 再試行や利用者への案内を含む失敗表示
+- empty: 正常取得できたが対象がない場合の表示
+- permission denied: 認証済みだが権限がない場合に必要な表示
+- success: データがある場合の表示
+
+error を空データとして扱ったり、例外を握りつぶしたりしません。再試行可能な query では、再取得の入口を画面上に用意します。mutation では成功、失敗、競合、処理中の二重送信防止を設計します。
+
+## API 型と画面モデル
+
+- API request/response は、可能なら `@mukuroji/contracts` の共有型を利用する
+- Web 側で同じ API DTO を再定義しない
+- API response の transport 変換と validation は `api/` で行い、表示用ラベル、整形、並び順、集計、権限による表示可否は `model/` または feature で行う
+- 複雑な画面へ raw API response をそのまま渡さない
+- UI コンポーネントは、API の transport details や DynamoDB/HTTP の都合を知らない
+
+通信処理と表示都合の変換を一つの API 関数へ詰め込みません。
+
+## React の状態と `useEffect`
+
+`useEffect` は原則として新しく追加しません。React の render とイベント処理で表現できる状態を、Effect で後から同期しないでください。
+
+次の用途では `useEffect` を使いません。
+
+- props や state から計算できる値の保持
+- state の初期値やリセット処理
+- ユーザー操作への反応
+- API の取得や再取得
+- フォーム入力の検証・整形
+- コンポーネント間の値の受け渡し
+
+代わりに、次を優先します。
+
+- render 中の計算、必要なら `useMemo`
+- event handler 内の処理
+- `key` を変えた再マウントによる state のリセット
+- SWR の query/mutation wrapper
+- 親子コンポーネント間の props、または適切な状態の所有者
+
+例外として、DOM API、browser API、購読、タイマーなど React の外部システムとの同期が必要な場合は `useEffect` を使えます。その場合も次を満たします。
+
+- Effect が本当に外部システムとの同期を必要としている
+- dependency array が同期対象を正確に表している
+- 購読、イベント listener、タイマーなどは cleanup する
+- 既存の query hook や event handler で表現できないことを確認している
+
+既存コードの `useEffect` は直ちに全て移行しません。ただし、新規コードでは原則追加せず、既存コンポーネントを変更するときは不要な Effect の削減を検討します。`useLayoutEffect` も同じ原則で扱います。
+
+## UI と Storybook
+
+- UI の表示文言は i18n 対応を前提にする
+- 固定文言をコンポーネントに閉じ込めない
+- グローバル CSS は `web/src/index.css` を最小限に保ち、UI は Tailwind のユーティリティを中心に実装する
+- 既存の `web/src/i18n.ts` と `createTranslator` / `createSidebarLabels` の方針に合わせる
+- 画面に表示する文言は i18n key を使い、key は `tasks.*`、`requests.*` のように業務領域の namespace を付ける
+- ブランド表現には `BrandMark` と `mukuroji` 表記を使う
+- Storybook のカテゴリは `Application/...` と `Design System/...` を基本にする
+- コンポーネントを追加・変更したら、単体確認できる Story を追加・更新する
+- Storybook 用 fixture と本番 API の取得処理を同じファイルへ混在させない
+- インタラクティブな UI は semantic HTML を優先し、label、focus、keyboard 操作、適切な accessible name を用意する
+- ARIA 属性は native HTML semantics で表現できない場合に限って追加し、role と keyboard 操作をセットで実装する
+
+## テスト
+
+- API 関数は React を起動せずにテストする
+- API response、エラー、入力変換は `api/` のテストで確認する
+- query/mutation hook は必要な場合だけ SWR provider と組み合わせてテストする
+- 画面テストでは、可能なら API fixture または query wrapper の境界を使い、実際の HTTP 通信を発生させない
+- unit test は対象コードの近く、または既存の `web/test/` の構成に合わせる
+- e2e test は `web/e2e/` に置く
+
+## TypeScript
+
+- exported 宣言には TSDoc を付ける
+- export 有無にかかわらず `type` / `interface` は宣言本体と各プロパティに TSDoc を付ける
+- `class` は宣言本体とメンバー変数に TSDoc を付ける
+- API response と request input は、可能なら `@mukuroji/contracts` の共有型を利用する
+- `any` は新規コードで使わない。外部入力や未知の API response は `unknown` から型を絞り込む
+- 型アサーションは境界に限定し、検証なしに `as` で API response を信頼しない
+- `useMemo` は高コストな計算または参照安定性が必要な場合だけ使い、通常の値の計算を隠すために使わない
+
+## 移行方針
+
+既存コードを整理するときは、次の順番を基本とします。
+
+1. 対象ページから fetch と `useSWR` の組み合わせを洗い出す
+2. fetch 関数を業務領域の `api/` へ分離する
+3. `useSWR` と SWR key を `queries/` へ移す
+4. ページから直接 API と SWR key を参照しないようにする
+5. cache 更新が複数箇所に及ぶ場合だけ `mutations/` へ移す
+6. API、query/mutation、画面の順にテストを移す
+
+最初の移行対象には、複数ページで利用されている `getProjectDirectory` とその `useSWR` 呼び出しを選びます。

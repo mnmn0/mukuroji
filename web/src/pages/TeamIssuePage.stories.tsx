@@ -1,3 +1,4 @@
+import type { WorkItemRelation } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, within } from 'storybook/test'
 import { TeamIssueScreen } from './TeamIssuePage'
@@ -6,8 +7,14 @@ import {
   issueCollaborationControllerFixture,
   teamIssueFixtures,
 } from '../issues/fixtures'
+import type { TeamIssue } from '../issues/api'
 import type { ProjectMember } from '../projects/api'
 import { projectDirectoryFixtures } from '../projects/fixtures'
+import { fileArtifactsControllerFixture } from '../files/fixtures'
+import {
+  teamWorkItemConfigurationFixture,
+  workItemCustomFieldValueFixture,
+} from '../work-items/fixtures'
 
 const assigneeOptions: ProjectMember[] = [
   {
@@ -28,20 +35,58 @@ const assigneeOptions: ProjectMember[] = [
   },
 ]
 
-const legacyIssues = teamIssueFixtures.map((issue) => ({
-  ...issue,
-  source: 'legacy' as const,
-}))
+const configuredIssues = [
+  {
+    ...teamIssueFixtures[0]!,
+    workflowSchemaVersion: teamWorkItemConfigurationFixture.schemaVersion,
+    workflowStatusId: 'active',
+    statusCategory: 'started',
+    customFieldValues: workItemCustomFieldValueFixture,
+  },
+  {
+    ...teamIssueFixtures[1]!,
+    workflowSchemaVersion: teamWorkItemConfigurationFixture.schemaVersion,
+    workflowStatusId: 'ready',
+    statusCategory: 'unstarted',
+    customFieldValues: workItemCustomFieldValueFixture,
+  },
+  {
+    ...teamIssueFixtures[1]!,
+    id: 'release-readiness',
+    title: 'リリース準備の判断材料を揃える',
+    workflowSchemaVersion: teamWorkItemConfigurationFixture.schemaVersion,
+    workflowStatusId: 'backlog',
+    statusCategory: 'backlog',
+    customFieldValues: workItemCustomFieldValueFixture,
+  },
+] satisfies Extract<TeamIssue, { source: 'dynamodb' }>[]
+
+const storyRelations = [
+  {
+    sourceWorkItemId: 'onboarding-friction',
+    targetWorkItemId: 'billing-copy',
+    type: 'blocks',
+    createdAt: '2026-07-12T08:12:00.000Z',
+  },
+] satisfies readonly WorkItemRelation[]
 
 const crowdedIssues = Array.from({ length: 20 }, (_, index) => {
-  const baseIssue = teamIssueFixtures[index % teamIssueFixtures.length]
+  const baseIssue = configuredIssues[index % configuredIssues.length]!
+  const workflowStatus = [
+    { id: 'ready', category: 'unstarted' },
+    { id: 'active', category: 'started' },
+    { id: 'review', category: 'started' },
+    { id: 'done', category: 'completed' },
+  ] as const
+  const selectedStatus = workflowStatus[index % workflowStatus.length]!
 
   return {
     ...baseIssue,
     id: `${baseIssue.id}-crowded-${index + 1}`,
     title: `${index + 1}. ${index % 2 === 0 ? '長い Issue 名の依存関係と担当者確認を完了する' : 'Operational backlog triage with release note follow-up'} ${index + 1}`,
     assignedProjectId: index % 2 === 0 ? 'refero' : 'brand-refresh',
-    status: (['todo', 'in-progress', 'review', 'done'] as const)[index % 4],
+    workflowStatusId: selectedStatus.id,
+    statusCategory: selectedStatus.category,
     priority: (['high', 'medium', 'low'] as const)[index % 3],
   }
 })
@@ -55,12 +100,17 @@ const meta = {
   args: {
     locale: 'ja',
     assigneeOptions,
+    artifacts: fileArtifactsControllerFixture,
     collaboration: issueCollaborationControllerFixture,
     currentWorkspaceMemberKey: 'demo@example.com',
-    issues: teamIssueFixtures,
+    issues: configuredIssues,
+    relations: storyRelations,
+    resolvedConfiguration: { configuration: teamWorkItemConfigurationFixture },
+    onAddRelation: async () => undefined,
     onCreateIssue: async () => undefined,
     onCreateProject: async () => undefined,
     onCreateTeam: async () => undefined,
+    onDeleteRelation: async () => undefined,
     onUpdateIssue: async () => undefined,
     selectedIssueId: 'onboarding-friction',
     teamId: 'core-team',
@@ -128,16 +178,6 @@ export const Board: Story = {
 export const CreateOpen: Story = {
   args: {
     defaultCreateIssueOpen: true,
-  },
-}
-
-/**
- * legacy Issue の読み取り専用詳細です。
- */
-export const LegacyReadOnly: Story = {
-  args: {
-    issues: legacyIssues,
-    selectedIssueId: 'onboarding-friction',
   },
 }
 

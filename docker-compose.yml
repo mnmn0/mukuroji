@@ -8,7 +8,12 @@ services:
       FLOCI_HOSTNAME: floci
       FLOCI_STORAGE_MODE: persistent
       FLOCI_STORAGE_PERSISTENT_PATH: /app/data
+      COGNITO_ENTERPRISE_IDP_NAME: "${COGNITO_ENTERPRISE_IDP_NAME:-}"
+      COGNITO_HOSTED_UI_DOMAIN: "${COGNITO_HOSTED_UI_DOMAIN:-}"
+      COGNITO_SSO_USER_POOL_CLIENT_NAME: "${COGNITO_SSO_USER_POOL_CLIENT_NAME:-mukuroji-sso-local}"
+      COGNITO_SSO_REDIRECT_URI: "${COGNITO_SSO_REDIRECT_URI:-http://localhost:5173/auth/sso/callback}"
       MUKUROJI_PUBLIC_FLOCI_ENDPOINT: "http://localhost:${FLOCI_PORT:-4566}"
+      MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: "${MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:?Set a stable 64-character lowercase hexadecimal key in the host environment or .env}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - floci-data:/app/data

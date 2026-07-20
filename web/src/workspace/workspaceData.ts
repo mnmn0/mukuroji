@@ -53,21 +53,13 @@ async function updateWorkspaceTaskRemote(
   status: TaskStatus,
   mutationContext: MutationRequestContext,
 ) {
-  if (task.source === 'legacy') {
-    return task
-  }
-
-  if (task.source !== 'dynamodb') {
-    return task
-  }
-
   return updateTeamIssue(
     task.teamId,
     task.id,
     accessToken,
     {
       expectedRevision: task.revision,
-      status,
+      workflowStatusId: status,
     },
     mutationContext,
   )

@@ -8,9 +8,11 @@ import {
   type KeyboardEvent,
   type RefObject,
 } from 'react'
-import useSWR from 'swr'
+import useSWR, { useSWRConfig } from 'swr'
+import { createMutationRequestRunner } from '../api/mutationHeaders'
 import { createTranslator, type Locale, type MessageKey } from '../i18n'
 import {
+  acknowledgeWorkspaceInvitationCleanup,
   createWorkspaceInvitation,
   getWorkspaceAccess,
   reinviteWorkspaceInvitation,
@@ -27,6 +29,10 @@ import {
   type WorkspaceMemberStatus,
   type WorkspaceRole,
 } from './api'
+
+function shouldRetainWorkspaceMutationContext(error: unknown) {
+  return !(error instanceof WorkspaceAccessApiError)
+}
 
 /**
  * Workspace access API と管理パネルを接続する container の props です。
@@ -66,6 +72,13 @@ type WorkspaceAccessPanelProps = {
    * invitation 作成 callback です。
    */
   onInvite?: (input: CreateWorkspaceInvitationInput) => Promise<void>
+  /**
+   * 手動 Cognito cleanup の完了確認 callback です。
+   */
+  onAcknowledgeInvitationCleanup?: (
+    invitationId: string,
+    expectedVersion: number,
+  ) => Promise<void>
   /**
    * invitation 再送 callback です。
    */
@@ -135,7 +148,7 @@ type WorkspaceAccessAction =
       /**
        * invitation に対して実行する action です。
        */
-      action: 'resend' | 'revoke' | 'reinvite'
+      action: 'resend' | 'revoke' | 'reinvite' | 'acknowledgeCleanup'
     }
 
 /**
@@ -221,12 +234,19 @@ export function WorkspaceAccessPanelContainer({
   locale,
 }: WorkspaceAccessPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const accessKey = accessToken ? (['workspace-access', accessToken] as const) : null
+  const { mutate: mutateCache } = useSWRConfig()
+  const mutationSession = useMemo(() => ({
+    accessToken,
+    requestRunner: createMutationRequestRunner(),
+  }), [accessToken])
+  const mutationRequestRunner = mutationSession.requestRunner
+  const accessKey = mutationSession.accessToken
+    ? (['workspace-access', mutationSession.accessToken] as const)
+    : null
   const {
     data: access,
     error,
     isLoading,
-    mutate,
   } = useSWR(
     accessKey,
     ([, token]) => getWorkspaceAccess(token),
@@ -234,34 +254,104 @@ export function WorkspaceAccessPanelContainer({
   )
 
   const refresh = async () => {
-    await mutate()
+    if (!accessKey) {
+      return
+    }
+
+    // bound mutate は最新の hook key を参照するため、開始時 token の key を明示して
+    // 旧 session の snapshot が token 切り替え後の cache を上書きしないようにします。
+    await mutateCache(
+      accessKey,
+      () => getWorkspaceAccess(mutationSession.accessToken),
+      { revalidate: false },
+    )
+    mutationRequestRunner.discardRetainedContexts()
+  }
+
+  const retryLoad = async () => {
+    try {
+      await refresh()
+    } catch {
+      // SWR が保持する既存の load error を表示したまま、click handler の
+      // unhandled rejection だけを抑止します。
+    }
+  }
+
+  const createInvitationMutationFingerprint = (invitationId: string) => {
+    const invitation = access?.invitations.find((item) => item.id === invitationId)
+
+    return JSON.stringify({
+      invitationId,
+      status: invitation?.status,
+      version: invitation?.version,
+    })
   }
 
   return (
     <WorkspaceAccessPanel
       access={access}
       isLoading={isLoading}
+      key={mutationSession.accessToken}
       loadErrorMessage={error ? t('workspace.access.error.load') : undefined}
       locale={locale}
+      onAcknowledgeInvitationCleanup={async (invitationId, expectedVersion) => {
+        await mutationRequestRunner.run(
+          `workspace-invitation:acknowledge-cleanup:${invitationId}`,
+          JSON.stringify({ expectedVersion }),
+          (context) => acknowledgeWorkspaceInvitationCleanup(
+            accessToken,
+            invitationId,
+            expectedVersion,
+            context,
+          ),
+          shouldRetainWorkspaceMutationContext,
+        )
+        await refresh()
+      }}
       onInvite={async (input) => {
-        await createWorkspaceInvitation(accessToken, input)
+        await mutationRequestRunner.run(
+          'workspace-invitation:create',
+          JSON.stringify(input),
+          (context) => createWorkspaceInvitation(accessToken, input, context),
+          shouldRetainWorkspaceMutationContext,
+        )
         await refresh()
       }}
       onReinviteInvitation={async (invitationId) => {
-        await reinviteWorkspaceInvitation(accessToken, invitationId)
+        await mutationRequestRunner.run(
+          `workspace-invitation:reinvite:${invitationId}`,
+          createInvitationMutationFingerprint(invitationId),
+          (context) => reinviteWorkspaceInvitation(accessToken, invitationId, context),
+          shouldRetainWorkspaceMutationContext,
+        )
         await refresh()
       }}
       onResendInvitation={async (invitationId) => {
-        await resendWorkspaceInvitation(accessToken, invitationId)
+        await mutationRequestRunner.run(
+          `workspace-invitation:resend:${invitationId}`,
+          createInvitationMutationFingerprint(invitationId),
+          (context) => resendWorkspaceInvitation(accessToken, invitationId, context),
+          shouldRetainWorkspaceMutationContext,
+        )
         await refresh()
       }}
-      onRetry={refresh}
+      onRetry={retryLoad}
       onRevokeInvitation={async (invitationId) => {
-        await revokeWorkspaceInvitation(accessToken, invitationId)
+        await mutationRequestRunner.run(
+          `workspace-invitation:revoke:${invitationId}`,
+          createInvitationMutationFingerprint(invitationId),
+          (context) => revokeWorkspaceInvitation(accessToken, invitationId, context),
+          shouldRetainWorkspaceMutationContext,
+        )
         await refresh()
       }}
       onUpdateMember={async (memberKey, input) => {
-        await updateWorkspaceMember(accessToken, memberKey, input)
+        await mutationRequestRunner.run(
+          `workspace-member:update:${memberKey}`,
+          JSON.stringify(input),
+          (context) => updateWorkspaceMember(accessToken, memberKey, input, context),
+          shouldRetainWorkspaceMutationContext,
+        )
         await refresh()
       }}
     />
@@ -276,6 +366,7 @@ export function WorkspaceAccessPanel({
   isLoading = false,
   loadErrorMessage,
   locale,
+  onAcknowledgeInvitationCleanup,
   onInvite,
   onReinviteInvitation,
   onResendInvitation,
@@ -389,6 +480,14 @@ export function WorkspaceAccessPanel({
         await onResendInvitation?.(action.invitation.id)
       } else if (action.action === 'revoke') {
         await onRevokeInvitation?.(action.invitation.id)
+      } else if (action.action === 'acknowledgeCleanup') {
+        const latestInvitation = access.invitations.find(
+          (invitation) => invitation.id === action.invitation.id,
+        ) ?? action.invitation
+        await onAcknowledgeInvitationCleanup?.(
+          latestInvitation.id,
+          latestInvitation.version,
+        )
       } else {
         await onReinviteInvitation?.(action.invitation.id)
       }
@@ -992,8 +1091,11 @@ function canManageWorkspaceInvitation(
 }
 
 function getInvitationActions(invitation: WorkspaceInvitation) {
+  if (invitation.status === 'provisioning') {
+    return ['revoke'] as const
+  }
+
   if (
-    invitation.status === 'provisioning' ||
     invitation.status === 'pending' ||
     invitation.status === 'delivery-failed'
   ) {
@@ -1001,6 +1103,10 @@ function getInvitationActions(invitation: WorkspaceInvitation) {
   }
 
   if (invitation.status === 'revoked' && invitation.failureMessage) {
+    if (invitation.identityCleanupManualRequired) {
+      return ['revoke', 'acknowledgeCleanup'] as const
+    }
+
     return ['revoke'] as const
   }
 
@@ -1048,7 +1154,7 @@ function createWorkspaceAccessActionCopy(
     confirmLabel: t(`workspace.access.action.${action.action}`),
     description: t(`workspace.access.dialog.${action.action}Description`)
       .replace('{email}', action.invitation.email),
-    destructive: action.action === 'revoke',
+    destructive: action.action === 'revoke' || action.action === 'acknowledgeCleanup',
     title: t(`workspace.access.dialog.${action.action}Title`),
   }
 }
@@ -1103,6 +1209,10 @@ function resolveWorkspaceAccessErrorMessage(
   t: (key: MessageKey) => string,
 ) {
   if (error instanceof WorkspaceAccessApiError) {
+    if (error.code === 'CognitoUserDisabled') {
+      return t('workspace.access.error.cognitoUserDisabled')
+    }
+
     if (error.status === 409) {
       return t('workspace.access.error.conflict')
     }

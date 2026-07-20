@@ -2,7 +2,7 @@ import type { MessageKey } from '../i18n'
 import type { TeamIssue } from '../issues/api'
 import { resolveWorkItemAssignee, resolveWorkItemTitle } from '../issues/workItemDisplay'
 import type { ProjectMember } from '../projects/api'
-import type { ProjectTask } from './api'
+import { resolveProjectTaskStatus, type ProjectTask } from './api'
 import type { AssigneeFilter, DueDateFilter, TaskSortOrder } from './taskViewTypes'
 
 /**
@@ -23,7 +23,7 @@ type AssigneeFilterOption = {
 export function isTaskOverdue(task: ProjectTask) {
   const dueDate = parseTaskDueDate(task.dueDate)
 
-  if (task.status === 'done' || !dueDate) {
+  if (resolveProjectTaskStatus(task) === 'done' || !dueDate) {
     return false
   }
 
@@ -100,7 +100,7 @@ export function matchesTaskDueDateFilter(task: ProjectTask, filter: DueDateFilte
     return !dueDate
   }
 
-  if (task.status === 'done' || !dueDate) {
+  if (resolveProjectTaskStatus(task) === 'done' || !dueDate) {
     return false
   }
 
@@ -159,18 +159,21 @@ export function formatDateInputValue(value: string) {
 }
 
 /** タスクの表示タイトルを翻訳関数から解決します。 */
-export function resolveTaskTitle(task: ProjectTask, t: (key: MessageKey) => string) {
-  return resolveWorkItemTitle(task, t)
+export function resolveTaskTitle(task: ProjectTask, _t: (key: MessageKey) => string) {
+  void _t
+  return resolveWorkItemTitle(task)
 }
 
 /** タスクの担当者表示名を翻訳関数から解決します。 */
-export function resolveTaskAssignee(task: ProjectTask, t: (key: MessageKey) => string) {
-  return resolveWorkItemAssignee(task, t)
+export function resolveTaskAssignee(task: ProjectTask, _t: (key: MessageKey) => string) {
+  void _t
+  return resolveWorkItemAssignee(task)
 }
 
 /** Team Issue の表示タイトルを翻訳関数から解決します。 */
-export function resolveTeamIssueTitle(issue: TeamIssue, t: (key: MessageKey) => string) {
-  return resolveWorkItemTitle(issue, t)
+export function resolveTeamIssueTitle(issue: TeamIssue, _t: (key: MessageKey) => string) {
+  void _t
+  return resolveWorkItemTitle(issue)
 }
 
 /** Project member を select option 用の表示名へ整形します。 */

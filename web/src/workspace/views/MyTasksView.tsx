@@ -1,6 +1,6 @@
 import { useState, type DragEvent } from 'react'
 import type { MessageKey } from '../../i18n'
-import type { ProjectTask, TaskStatus } from '../../tasks/api'
+import { resolveProjectTaskStatus, type ProjectTask, type TaskStatus } from '../../tasks/api'
 import { workspacePresentation } from '../workspacePresentation'
 import {
   CompactTaskCard,
@@ -31,7 +31,7 @@ export function MyTasksView({
   const canMoveTasks = Boolean(onMoveTaskStatus)
 
   const moveTaskToStatus = (task: ProjectTask, status: TaskStatus) => {
-    if (!onMoveTaskStatus || task.status === status || workspacePresentation.isLegacyWorkspaceTask(task)) {
+    if (!onMoveTaskStatus || resolveProjectTaskStatus(task) === status || workspacePresentation.isLegacyWorkspaceTask(task)) {
       return
     }
 
@@ -121,7 +121,7 @@ export function MyTasksView({
         data-testid="my-tasks-kanban"
       >
         {myTaskKanbanStatuses.map((status) => {
-          const columnTasks = tasks.filter((task) => task.status === status)
+          const columnTasks = tasks.filter((task) => resolveProjectTaskStatus(task) === status)
           const isDropTarget = dropTargetStatus === status
 
           return (

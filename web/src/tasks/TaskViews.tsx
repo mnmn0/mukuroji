@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { ChevronIcon } from '../components/icons'
 import type { MessageKey } from '../i18n'
-import type { ProjectTask, TaskPriority, TaskStatus } from './api'
+import { resolveProjectTaskStatus, type ProjectTask, type TaskPriority, type TaskStatus } from './api'
 import { FlagIcon, PlusIcon } from './TaskIcons'
 import {
   createTaskCalendarDays,
@@ -198,7 +198,7 @@ export function TaskBoard({
         titleKey={viewLabelKeys.board}
       />
       {taskStatuses.map((status) => {
-        const statusTasks = tasks.filter((task) => task.status === status)
+        const statusTasks = tasks.filter((task) => resolveProjectTaskStatus(task) === status)
 
         return (
           <div
@@ -278,7 +278,7 @@ export function TaskGantt({ t, tasks }: { t: (key: MessageKey) => string; tasks:
                 </p>
               </div>
               <div className="flex flex-wrap items-center justify-end gap-2 max-[640px]:justify-start">
-                <TaskStatusBadge status={task.status} t={t} />
+                <TaskStatusBadge status={resolveProjectTaskStatus(task)} t={t} />
                 <span className="text-xs font-semibold text-[#5f6874]">
                   {task.dueDate
                     ? t('tasks.gantt.window').replace('{date}', task.dueDate)
@@ -389,7 +389,7 @@ export function TaskFileList({ t, tasks }: { t: (key: MessageKey) => string; tas
                 <td className="px-4 py-3 text-[#5f6874]">{task.dueDate}</td>
                 <td className="px-4 py-3">
                   <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">
-                    {t(`tasks.status.${task.status}`)}
+                    {t(`tasks.status.${resolveProjectTaskStatus(task)}`)}
                   </span>
                 </td>
               </tr>
@@ -466,8 +466,8 @@ export function TaskPriorityBadge({
 /** タスクの進捗サマリーをヘッダー向けに描画します。 */
 export function SummaryCard({ t, tasks }: { t: (key: MessageKey) => string; tasks: ProjectTask[] }) {
   const totalCount = tasks.length
-  const doneCount = tasks.filter((task) => task.status === 'done').length
-  const inProgressCount = tasks.filter((task) => task.status === 'in-progress').length
+  const doneCount = tasks.filter((task) => resolveProjectTaskStatus(task) === 'done').length
+  const inProgressCount = tasks.filter((task) => resolveProjectTaskStatus(task) === 'in-progress').length
   const completionRate = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0
   const projectMetrics: ProjectMetric[] = [
     {
@@ -627,13 +627,13 @@ function TaskRow({
       </td>
       <td className="truncate px-3 py-2.5 text-[#505967]">{resolveTaskAssignee(task, t)}</td>
       <td className="px-3 py-2.5">
-        <span className={statusClasses[task.status]}>
-          {t(`tasks.status.${task.status}`)}
+        <span className={statusClasses[resolveProjectTaskStatus(task)]}>
+          {t(`tasks.status.${resolveProjectTaskStatus(task)}`)}
         </span>
       </td>
       <td
         className={`whitespace-nowrap px-3 py-2.5 ${
-          task.status === 'done' ? 'text-[#8f99a8] line-through' : isOverdue ? 'text-red-700' : 'text-[#505967]'
+          resolveProjectTaskStatus(task) === 'done' ? 'text-[#8f99a8] line-through' : isOverdue ? 'text-red-700' : 'text-[#505967]'
         }`}
       >
         {task.dueDate}

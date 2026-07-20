@@ -5,6 +5,7 @@ import type {
   TaskPriority,
   TaskStatus,
 } from '../../tasks/api'
+import { resolveProjectTaskStatus } from '../../tasks/api'
 import { workspacePresentation } from '../workspacePresentation'
 
 const myTaskKanbanStatuses = ['todo', 'in-progress', 'review', 'done'] as const satisfies readonly TaskStatus[]
@@ -109,7 +110,7 @@ export function TaskListRow({
         <p className="truncate text-sm font-semibold text-[var(--workbench-text)]">{workspacePresentation.resolveTaskTitle(task, t)}</p>
         <p className="mt-1 text-[var(--workbench-muted)]">{workspacePresentation.resolveTaskAssignee(task, t)}</p>
       </div>
-      <StatusPill status={task.status} t={t} />
+      <StatusPill status={resolveProjectTaskStatus(task)} t={t} />
       <span className="text-[var(--workbench-muted)]">{task.dueDate}</span>
       <span className="workbench-badge justify-self-end max-[900px]:justify-self-start">
         {t('workspace.action.openTask')}
@@ -176,7 +177,7 @@ export function CompactTaskCard({
       )}
       <p className="mt-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{task.dueDate}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <StatusPill status={task.status} t={t} />
+        <StatusPill status={resolveProjectTaskStatus(task)} t={t} />
         <PriorityPill priority={task.priority} t={t} />
       </div>
       {onStatusChange ? (
@@ -185,7 +186,7 @@ export function CompactTaskCard({
           className="workbench-input mt-3 h-9 w-full px-3 text-xs disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
           data-testid={testId ? `${testId}-status-select` : undefined}
           disabled={isMoving}
-          value={task.status}
+          value={resolveProjectTaskStatus(task)}
           onChange={(event) => {
             const nextStatus = workspacePresentation.readMyTaskKanbanStatus(event.target.value)
 

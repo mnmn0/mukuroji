@@ -7,10 +7,171 @@ export const workspaceNavPaths: Record<SidebarNavId, string> = {
   home: '/home',
   'my-tasks': '/my-tasks',
   inbox: '/inbox',
+  requests: '/requests',
+  documents: '/documents',
   dashboard: '/dashboard',
+  planning: '/planning/timeline',
   reports: '/reports',
   help: '/help',
   settings: '/settings',
+}
+
+/**
+ * Planning 画面で切り替える表示です。
+ */
+export type PlanningViewId = 'timeline' | 'roadmap' | 'portfolio'
+
+const planningViewIds: readonly PlanningViewId[] = ['timeline', 'roadmap', 'portfolio']
+
+/**
+ * Arrow / Home / End key で移動する Planning view tab を返します。
+ *
+ * @param currentView - 現在 focus されている Planning view です。
+ * @param key - Keyboard event の key です。
+ * @returns キーに対応する view。対象外の key では undefined です。
+ */
+export function resolvePlanningViewTabTarget(currentView: PlanningViewId, key: string) {
+  const currentIndex = planningViewIds.indexOf(currentView)
+  if (key === 'ArrowRight') {
+    return planningViewIds[(currentIndex + 1) % planningViewIds.length]
+  }
+  if (key === 'ArrowLeft') {
+    return planningViewIds[(currentIndex - 1 + planningViewIds.length) % planningViewIds.length]
+  }
+  if (key === 'Home') return planningViewIds[0]
+  if (key === 'End') return planningViewIds.at(-1)
+  return undefined
+}
+
+/**
+ * Planning view と任意の選択 entity に対応する URL を生成します。
+ *
+ * @param viewId - 表示する Planning view です。
+ * @param entityId - 詳細を開く任意の Planning entity ID です。
+ * @returns Planning 画面の same-origin path です。
+ */
+export function createPlanningPath(viewId: PlanningViewId, entityId?: string) {
+  const path = `/planning/${viewId}`
+  return entityId
+    ? `${path}?entityId=${encodeURIComponent(entityId)}`
+    : path
+}
+
+/**
+ * Requests workbench で表示できる tab です。
+ */
+export type RequestsView = 'queue' | 'forms'
+
+/**
+ * Requests workbench の URL を生成します。
+ *
+ * @param view - 表示する queue または forms tab です。
+ * @param selectedId - Queue では submission ID、forms では form ID です。
+ * @returns URL state を query に保持した application path です。
+ */
+export function createRequestsPath(view: RequestsView = 'queue', selectedId?: string) {
+  const searchParams = new URLSearchParams()
+
+  if (view !== 'queue') {
+    searchParams.set('view', view)
+  }
+
+  if (selectedId) {
+    searchParams.set(view === 'forms' ? 'formId' : 'submissionId', selectedId)
+  }
+
+  const query = searchParams.toString()
+
+  return `/requests${query ? `?${query}` : ''}`
+}
+
+/**
+ * Opaque link token から公開 request form の URL を生成します。
+ *
+ * @param linkToken - Request link 発行 API が返す opaque token です。
+ * @returns URL encoded token を含む公開 path です。
+ */
+export function createPublicRequestPath(linkToken: string) {
+  return `/request/${encodeURIComponent(linkToken)}`
+}
+
+/**
+ * Documents home または指定 Document の application URL を生成します。
+ *
+ * @param documentId - 開く任意の Document ID です。
+ * @param projectId - Home の初期 Project scope に使う任意の Project ID です。
+ * @returns Documents home または Document detail URL です。
+ */
+export function createDocumentPath(
+  documentId?: string,
+  projectId?: string,
+) {
+  const path = documentId
+    ? `/documents/${encodeURIComponent(documentId)}`
+    : '/documents'
+
+  if (!projectId) {
+    return path
+  }
+
+  const searchParams = new URLSearchParams({ projectId })
+  return `${path}?${searchParams.toString()}`
+}
+
+/**
+ * Expiring public share token の read-only URL を生成します。
+ *
+ * @param shareToken - API が発行した opaque public share token です。
+ * @returns Public Document route URL です。
+ */
+export function createSharedDocumentPath(shareToken: string) {
+  return `/share/documents/${encodeURIComponent(shareToken)}`
+}
+
+/**
+ * Scope 情報を持たない Work Item ID を実在する Workspace search で開く URL
+ * を生成します。
+ *
+ * @param workItemId - 検索対象の canonical Work Item ID です。
+ * @returns Work Item に限定した Workspace search URL です。
+ */
+export function createWorkItemSearchPath(workItemId: string) {
+  const canonicalParts = workItemId.split('/')
+  if (
+    canonicalParts.length === 4 &&
+    canonicalParts[0] === 'team' &&
+    canonicalParts[1] &&
+    canonicalParts[2] === 'issue' &&
+    canonicalParts[3]
+  ) {
+    return createTeamIssuesPath(
+      canonicalParts[1],
+      canonicalParts[3],
+    )
+  }
+  const searchParams = new URLSearchParams({
+    q: workItemId,
+    type: 'work-item',
+  })
+  return `/search?${searchParams.toString()}`
+}
+
+/**
+ * Project ID を permission-aware Workspace search で開く URL を生成します。
+ */
+export function createProjectSearchPath(projectId: string) {
+  const searchParams = new URLSearchParams({
+    q: projectId,
+    type: 'project',
+  })
+  return `/search?${searchParams.toString()}`
+}
+
+/**
+ * Goal と関連 Documents を開く URL を生成します。
+ */
+export function createGoalDocumentsPath(goalId: string) {
+  return `/goals/${encodeURIComponent(goalId)}/documents`
 }
 
 /**

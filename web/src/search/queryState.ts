@@ -42,7 +42,7 @@ const searchEntityTypes = [
 ] as const satisfies readonly SearchEntityType[]
 
 const searchLayoutModes = ['table', 'board', 'calendar', 'timeline'] as const satisfies readonly SearchViewLayoutMode[]
-const workItemStatuses = ['todo', 'in-progress', 'review', 'done'] as const
+const workflowStatusIdPattern = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/i
 const searchCustomFieldOperators = [
   'equals',
   'not-equals',
@@ -70,7 +70,7 @@ export function parseSearchRouteState(searchParams: URLSearchParams): SearchRout
   }
 
   const entityTypes = readRepeatedValues(searchParams, 'type', isSearchEntityType)
-  const statuses = readRepeatedValues(searchParams, 'status', isWorkItemStatus)
+  const statuses = readWorkflowStatusIds(searchParams.getAll('status'))
   const customFields = searchParams
     .getAll('customField')
     .map(parseCustomFieldFilter)
@@ -127,7 +127,7 @@ export function serializeSearchRouteState(state: SearchRouteState) {
   searchParams.set('v', String(SEARCH_SCHEMA_VERSION))
   setOptionalValue(searchParams, 'q', readString(filters.keyword))
   appendValues(searchParams, 'type', readStringArray(filters.entityTypes))
-  appendValues(searchParams, 'status', readStringArray(filters.statuses))
+  appendValues(searchParams, 'status', readWorkflowStatusIds(filters.statuses))
   appendValues(searchParams, 'assignee', readStringArray(filters.assigneeUserIds))
   appendValues(searchParams, 'creator', readStringArray(filters.creatorUserIds))
   appendValues(searchParams, 'team', readStringArray(filters.teamIds))
@@ -229,7 +229,7 @@ export function getSearchEntityTypes(filters: WorkspaceSearchFilters) {
  * URL state から選択中 status を読み取ります。
  */
 export function getSearchStatuses(filters: WorkspaceSearchFilters) {
-  return readStringArray(asRecord(filters).statuses).filter(isWorkItemStatus)
+  return readWorkflowStatusIds(asRecord(filters).statuses)
 }
 
 /**
@@ -343,10 +343,6 @@ function isSearchEntityType(value: string): value is SearchEntityType {
   return searchEntityTypes.some((type) => type === value)
 }
 
-function isWorkItemStatus(value: string): value is (typeof workItemStatuses)[number] {
-  return workItemStatuses.some((status) => status === value)
-}
-
 function parseSort(values: readonly string[]) {
   const sort = values.flatMap((value) => value.split(',')).flatMap((value) => {
     const directionSeparatorIndex = value.lastIndexOf(':')
@@ -417,6 +413,12 @@ function readStringArray(value: unknown) {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string' && Boolean(item))
     : []
+}
+
+function readWorkflowStatusIds(value: unknown) {
+  return [...new Set(readStringArray(value)
+    .map((item) => item.trim())
+    .filter((item) => workflowStatusIdPattern.test(item)))]
 }
 
 function readUnknownArray(value: unknown) {

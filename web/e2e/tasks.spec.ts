@@ -1,6 +1,17 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
-import { WORK_ITEM_SCHEMA_VERSION } from '@mukuroji/contracts'
+import {
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEMA_VERSION,
+  type ApprovalRequest,
+  type CustomFieldValue,
+  type FileAnnotation,
+  type FileAttachment,
+  type FileVersion,
+  type WorkItemConfiguration,
+  type WorkItemRelation,
+  type WorkItemRelationType,
+} from '@mukuroji/contracts'
 import { readFile } from 'node:fs/promises'
 import type { TeamIssue, TeamIssueActivity, TeamIssueComment } from '../src/issues/api'
 import type { InboxNotification, NotificationPreferences } from '../src/notifications/api'
@@ -9,6 +20,10 @@ import type { ProjectDirectoryTeam, ProjectMember, ProjectMemberRole, ProjectUse
 import type { ProjectTask } from '../src/tasks/api'
 import type { WorkspaceAccess } from '../src/workspace/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
+import {
+  teamWorkItemConfigurationFixture,
+  workspaceWorkItemConfigurationFixture,
+} from '../src/work-items/fixtures'
 
 const authSession = {
   accessToken: 'test-access-token',
@@ -19,6 +34,49 @@ const authSession = {
 const workItemConflictMessage =
   '別のメンバーが先に更新しました。最新の内容を確認してから、もう一度保存してください。'
 const notificationFixtureNow = new Date('2026-07-12T12:00:00.000Z')
+
+const defaultWorkItemConfiguration = {
+  scopeType: 'workspace',
+  scopeId: 'workspace-demo',
+  schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  revision: 1,
+  updatedAt: '2026-07-12T00:00:00.000Z',
+  workflow: {
+    id: 'default-workflow',
+    name: 'Default workflow',
+    initialStatusId: 'todo',
+    statuses: [
+      { id: 'todo', name: '未着手', category: 'unstarted', sortOrder: 0 },
+      { id: 'in-progress', name: '進行中', category: 'started', sortOrder: 1 },
+      { id: 'review', name: 'レビュー', category: 'started', sortOrder: 2 },
+      { id: 'done', name: '完了', category: 'completed', sortOrder: 3 },
+    ],
+    transitions: [
+      { fromStatusId: 'todo', toStatusId: 'in-progress' },
+      { fromStatusId: 'todo', toStatusId: 'review' },
+      { fromStatusId: 'todo', toStatusId: 'done' },
+      { fromStatusId: 'in-progress', toStatusId: 'todo' },
+      { fromStatusId: 'in-progress', toStatusId: 'review' },
+      { fromStatusId: 'in-progress', toStatusId: 'done' },
+      { fromStatusId: 'review', toStatusId: 'todo' },
+      { fromStatusId: 'review', toStatusId: 'in-progress' },
+      { fromStatusId: 'review', toStatusId: 'done' },
+      { fromStatusId: 'done', toStatusId: 'todo' },
+      { fromStatusId: 'done', toStatusId: 'in-progress' },
+      { fromStatusId: 'done', toStatusId: 'review' },
+    ],
+  },
+  customFields: [],
+} satisfies WorkItemConfiguration
+
+const reciprocalWorkItemRelationTypes = {
+  parent: 'child',
+  child: 'parent',
+  blocks: 'blockedBy',
+  blockedBy: 'blocks',
+  related: 'related',
+  duplicate: 'duplicate',
+} as const satisfies Record<WorkItemRelationType, WorkItemRelationType>
 
 /**
  * API stub が受けた request 数です。
@@ -104,6 +162,22 @@ type MockRequestCounts = {
    * タスク状態更新 API の request 数です。
    */
   taskStatusUpdates: number
+  /**
+   * Work Item configuration 取得 API の request 数です。
+   */
+  workItemConfigurationReads: number
+  /**
+   * Work Item configuration 保存 API の request 数です。
+   */
+  workItemConfigurationWrites: number
+  /**
+   * Work Item relation 作成 API の request 数です。
+   */
+  workItemRelationCreates: number
+  /**
+   * Work Item relation 削除 API の request 数です。
+   */
+  workItemRelationDeletes: number
 }
 
 const mockRequestCountsByPage = new WeakMap<Page, MockRequestCounts>()
@@ -114,14 +188,21 @@ const mockRequestCountsByPage = new WeakMap<Page, MockRequestCounts>()
  * @param page - API route を差し替える Playwright page です。
  * @param username - username と email に使う識別子です。
  * @param name - 画面に表示するユーザー名です。
+ * @param workspaceId - ユーザーの Workspace ID です。
  */
-async function mockCurrentUser(page: Page, username: string, name: string) {
+async function mockCurrentUser(
+  page: Page,
+  username: string,
+  name: string,
+  workspaceId?: string,
+) {
   await page.unroute('**/api/auth/me')
   await page.route('**/api/auth/me', async (route) => {
     await route.fulfill({
       json: {
         username,
         attributes: {
+          'custom:workspace_id': workspaceId,
           email: username,
           name,
         },
@@ -139,6 +220,14 @@ async function mockCurrentUser(page: Page, username: string, name: string) {
  */
 type MockAuthenticatedTaskPageOptions = {
   /**
+   * Team ID ごとに Sidebar の初期展開状態を上書きする値です。
+   */
+  teamExpandedById?: Partial<Record<string, boolean>>
+  /**
+   * Team と Project ID ごとに directory 表示名を上書きする値です。
+   */
+  projectNamesByTeam?: Partial<Record<string, Partial<Record<string, string>>>>
+  /**
    * チーム Issue API が初期状態として返す保存済み Issue 一覧です。
    */
   teamIssuesByTeam?: Partial<Record<string, TeamIssue[]>>
@@ -154,18 +243,34 @@ type MockAuthenticatedTaskPageOptions = {
    * Notification preferences API が初期状態として返す設定です。
    */
   notificationPreferences?: NotificationPreferences
+  /**
+   * Workspace scope で取得・保存する Work Item configuration です。
+   */
+  workspaceWorkItemConfiguration?: WorkItemConfiguration
+  /**
+   * Team scope の override として取得・保存する configuration です。
+   */
+  teamWorkItemConfigurations?: Partial<Record<string, WorkItemConfiguration>>
+  /**
+   * Work Item configuration 取得を 500 にする Team ID です。
+   */
+  failedWorkItemConfigurationTeamIds?: readonly string[]
+  /**
+   * `teamId\0issueId` ごとの初期 Work Item relation です。
+   */
+  workItemRelationsByIssue?: Partial<Record<string, readonly WorkItemRelation[]>>
 }
 
 /**
  * 認証済みタスク画面を開くため、localStorage に session を注入し、
- * `/api/auth/me` と `/api/projects/refero/tasks` を stub します。
+ * `/api/auth/me` と canonical Work Item API を stub します。
  */
 async function mockAuthenticatedTaskPage(
   page: Page,
   taskResponse = referoTaskFixtures,
   onTaskStatusUpdate?: (
     taskId: string,
-    status: ProjectTask['status'],
+    workflowStatusId: string,
   ) => Promise<'fail' | undefined> | 'fail' | undefined,
   options: MockAuthenticatedTaskPageOptions = {},
 ) {
@@ -190,11 +295,28 @@ async function mockAuthenticatedTaskPage(
     issueComments: 0,
     taskCreates: 0,
     taskStatusUpdates: 0,
+    workItemConfigurationReads: 0,
+    workItemConfigurationWrites: 0,
+    workItemRelationCreates: 0,
+    workItemRelationDeletes: 0,
   }
   const projectDirectory: ProjectDirectoryTeam[] = projectDirectoryFixtures.map((team) => ({
     ...team,
-    projects: [...team.projects],
+    expanded: options.teamExpandedById?.[team.id] ?? team.expanded,
+    projects: team.projects.map((project) => ({ ...project })),
   }))
+  for (const [teamId, projectNames] of Object.entries(options.projectNamesByTeam ?? {})) {
+    const team = projectDirectory.find((candidate) => candidate.id === teamId)
+
+    if (!team || !projectNames) {
+      continue
+    }
+
+    team.projects = team.projects.map((project) => ({
+      ...project,
+      name: projectNames[project.id] ?? project.name,
+    }))
+  }
   const taskResponsesByProject: Record<string, ProjectTask[]> = {
     refero: taskResponse.map((task) => ({ ...task })),
     'product-roadmap': [],
@@ -206,6 +328,9 @@ async function mockAuthenticatedTaskPage(
     'design-team': [...(options.teamIssuesByTeam?.['design-team'] ?? [])],
   }
   const pendingRevisionConflictIssueKeys = new Set(options.revisionConflictIssueKeys ?? [])
+  const failedWorkItemConfigurationTeamIds = new Set(
+    options.failedWorkItemConfigurationTeamIds ?? [],
+  )
   const issueCommentsByIssue: Record<string, TeamIssueComment[]> = {}
   const issueActivityByIssue: Record<string, TeamIssueActivity[]> = {}
   let notifications = (options.notifications ?? createDefaultNotifications()).map((notification) => ({
@@ -215,6 +340,26 @@ async function mockAuthenticatedTaskPage(
   let notificationPreferences = cloneNotificationPreferences(
     options.notificationPreferences ?? createDefaultNotificationPreferences(),
   )
+  let workspaceWorkItemConfiguration = structuredClone(
+    options.workspaceWorkItemConfiguration ?? defaultWorkItemConfiguration,
+  )
+  const teamWorkItemConfigurations: Partial<Record<string, WorkItemConfiguration>> =
+    Object.fromEntries(
+      Object.entries(options.teamWorkItemConfigurations ?? {}).map(([teamId, configuration]) => [
+        teamId,
+        structuredClone(configuration),
+      ]),
+    )
+  const workItemRelationsByIssue: Record<string, WorkItemRelation[]> = Object.fromEntries(
+    Object.entries(options.workItemRelationsByIssue ?? {}).map(([issueKey, relations]) => [
+      issueKey,
+      structuredClone([...(relations ?? [])]),
+    ]),
+  )
+  const relationGraphRevisionByTeam: Record<string, number> = {
+    'core-team': 1,
+    'design-team': 1,
+  }
   const projectMembersByProject: Record<string, ProjectMember[]> = {
     refero: [
       {
@@ -399,6 +544,87 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({ json: workspaceAccess })
   })
 
+  await page.route('**/api/work-item-configuration', async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    if (route.request().method() === 'GET') {
+      requestCounts.workItemConfigurationReads += 1
+      await route.fulfill({
+        json: {
+          configuration: structuredClone(workspaceWorkItemConfiguration),
+        },
+      })
+      return
+    }
+
+    if (route.request().method() === 'PUT') {
+      requestCounts.workItemConfigurationWrites += 1
+      const body = route.request().postDataJSON() as WorkItemConfiguration
+
+      workspaceWorkItemConfiguration = {
+        ...structuredClone(body),
+        scopeType: 'workspace',
+        scopeId: workspaceWorkItemConfiguration.scopeId,
+        revision: body.revision + 1,
+        updatedAt: '2026-07-12T12:00:00.000Z',
+      }
+      await route.fulfill({
+        json: {
+          configuration: structuredClone(workspaceWorkItemConfiguration),
+        },
+      })
+      return
+    }
+
+    await route.fallback()
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/work-item-configuration$/, async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    const teamId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[3] ?? '')
+    const teamConfiguration = teamWorkItemConfigurations[teamId]
+
+    if (route.request().method() === 'GET') {
+      requestCounts.workItemConfigurationReads += 1
+      if (failedWorkItemConfigurationTeamIds.has(teamId)) {
+        await route.fulfill({ json: { message: 'configuration unavailable' }, status: 500 })
+        return
+      }
+      await route.fulfill({
+        json: teamConfiguration
+          ? { configuration: structuredClone(teamConfiguration) }
+          : {
+              configuration: structuredClone(workspaceWorkItemConfiguration),
+              inheritedFrom: 'workspace',
+            },
+      })
+      return
+    }
+
+    if (route.request().method() === 'PUT') {
+      requestCounts.workItemConfigurationWrites += 1
+      const body = route.request().postDataJSON() as WorkItemConfiguration
+      const savedConfiguration = {
+        ...structuredClone(body),
+        scopeType: 'team',
+        scopeId: teamId,
+        revision: body.revision + 1,
+        updatedAt: '2026-07-12T12:00:00.000Z',
+      } satisfies WorkItemConfiguration
+
+      teamWorkItemConfigurations[teamId] = savedConfiguration
+      await route.fulfill({
+        json: {
+          configuration: structuredClone(savedConfiguration),
+        },
+      })
+      return
+    }
+
+    await route.fallback()
+  })
+
   await page.route('**/api/teams/projects**', async (route) => {
     requestCounts.projectDirectory += 1
 
@@ -529,92 +755,12 @@ async function mockAuthenticatedTaskPage(
     recordProjectTaskRequest(requestCounts, 'refero')
 
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
-
-    if (route.request().method() === 'POST') {
-      requestCounts.taskCreates += 1
-      const body = route.request().postDataJSON() as {
-        assigneeUserId?: string
-        dueDate?: string
-        priority?: ProjectTask['priority']
-        status?: ProjectTask['status']
-        title?: string
-      }
-      const assigneeUser = projectUsers.find((user) => user.id === body.assigneeUserId)
-      const task = {
-        schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-        revision: 1,
-        id: 'new-task',
-        teamId: 'core-team',
-        assignedProjectId: 'refero',
-        title: body.title ?? '新規タスク',
-        assigneeUserId: assigneeUser?.id ?? 'sato@example.com',
-        assigneeEmail: assigneeUser?.email ?? 'sato@example.com',
-        assigneeName: assigneeUser?.name ?? '佐藤 花子',
-        status: body.status ?? 'todo',
-        dueDate: body.dueDate ?? '2026/06/20',
-        priority: body.priority ?? 'medium',
-        source: 'legacy',
-      } satisfies ProjectTask
-
-      taskResponsesByProject.refero.push(task)
-
-      await route.fulfill({
-        status: 201,
-        json: {
-          task,
-        },
-      })
-      return
-    }
+    expect(route.request().method()).toBe('GET')
 
     await route.fulfill({
       json: {
         projectId: 'refero',
-        tasks: taskResponsesByProject.refero,
-      },
-    })
-  })
-
-  await page.route(/.*\/api\/projects\/refero\/tasks\/[^/]+$/, async (route) => {
-    if (route.request().method() !== 'PATCH') {
-      await route.fallback()
-      return
-    }
-
-    requestCounts.taskStatusUpdates += 1
-    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
-
-    const taskId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[5] ?? '')
-    const body = route.request().postDataJSON() as { status?: ProjectTask['status'] }
-    const status = body.status ?? 'todo'
-    const task = taskResponsesByProject.refero.find((candidate) => candidate.id === taskId)
-    const updateResult = await onTaskStatusUpdate?.(taskId, status)
-
-    if (updateResult === 'fail') {
-      await route.fulfill({
-        status: 500,
-        json: {
-          message: 'tasks.error.loading',
-        },
-      })
-      return
-    }
-
-    if (!task) {
-      await route.fulfill({
-        status: 404,
-        json: {
-          message: 'Task was not found.',
-        },
-      })
-      return
-    }
-
-    task.status = status
-
-    await route.fulfill({
-      json: {
-        task,
+        tasks: [],
       },
     })
   })
@@ -626,9 +772,7 @@ async function mockAuthenticatedTaskPage(
 
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
-    const legacyIssues = (taskResponsesByProject[projectId] ?? []).map((task) =>
-      toIssueFromTask(task, 'core-team', projectId),
-    )
+    const projectIssues = taskResponsesByProject[projectId] ?? []
     const assignedIssues = Object.values(teamIssuesByTeam)
       .flat()
       .filter((issue) => issue.assignedProjectId === projectId)
@@ -636,7 +780,7 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({
       json: {
         projectId,
-        issues: [...legacyIssues, ...assignedIssues],
+        issues: [...projectIssues, ...assignedIssues],
       },
     })
   })
@@ -645,15 +789,11 @@ async function mockAuthenticatedTaskPage(
     requestCounts.workspaceWorkItems += 1
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
-    const legacyWorkItems = Object.entries(taskResponsesByProject).flatMap(
-      ([projectId, projectTasks]) => projectTasks.map((task) =>
-        toIssueFromTask(task, task.teamId, projectId),
-      ),
-    )
+    const projectWorkItems = Object.values(taskResponsesByProject).flat()
 
     await route.fulfill({
       json: {
-        workItems: [...legacyWorkItems, ...Object.values(teamIssuesByTeam).flat()],
+        workItems: [...projectWorkItems, ...Object.values(teamIssuesByTeam).flat()],
       },
     })
   })
@@ -806,13 +946,19 @@ async function mockAuthenticatedTaskPage(
       const body = route.request().postDataJSON() as {
         assignedProjectId?: string
         assigneeUserId?: string
+        customFieldValues?: Record<string, CustomFieldValue>
         description?: string
         dueDate?: string
         priority?: TeamIssue['priority']
-        status?: TeamIssue['status']
         title?: string
+        workflowStatusId?: string
       }
+      expect(body).not.toHaveProperty('status')
       const assigneeUser = projectUsers.find((user) => user.id === body.assigneeUserId)
+      const configuration = teamWorkItemConfigurations[teamId] ?? workspaceWorkItemConfiguration
+      const workflowStatus = configuration.workflow.statuses.find(
+        (status) => status.id === body.workflowStatusId,
+      )
       const issue = {
         schemaVersion: WORK_ITEM_SCHEMA_VERSION,
         revision: 1,
@@ -822,9 +968,16 @@ async function mockAuthenticatedTaskPage(
         title: body.title ?? '新規 Issue',
         description: body.description,
         assigneeUserId: assigneeUser?.id ?? 'sato@example.com',
+        creatorMemberKey: 'demo@example.com',
         assigneeEmail: assigneeUser?.email ?? 'sato@example.com',
         assigneeName: assigneeUser?.name ?? '佐藤 花子',
-        status: body.status ?? 'todo',
+        workflowStatusId: workflowStatus?.id ?? configuration.workflow.initialStatusId,
+        statusCategory: workflowStatus?.category ?? configuration.workflow.statuses.find(
+          (status) => status.id === configuration.workflow.initialStatusId,
+        )!.category,
+        workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        customFieldValues: structuredClone(body.customFieldValues ?? {}),
+        relationIds: [],
         dueDate: body.dueDate ?? '2026/06/20',
         priority: body.priority ?? 'medium',
         createdAt: '2026-06-08T00:00:00.000Z',
@@ -844,16 +997,14 @@ async function mockAuthenticatedTaskPage(
     }
 
     requestCounts.issueReads += 1
-    const legacyIssues = projects.flatMap((project) =>
-      (taskResponsesByProject[project.id] ?? []).map((task) =>
-        toIssueFromTask(task, teamId, project.id),
-      ),
+    const projectIssues = projects.flatMap((project) =>
+      (taskResponsesByProject[project.id] ?? []).filter((issue) => issue.teamId === teamId),
     )
 
     await route.fulfill({
       json: {
         teamId,
-        issues: [...legacyIssues, ...(teamIssuesByTeam[teamId] ?? [])],
+        issues: [...projectIssues, ...(teamIssuesByTeam[teamId] ?? [])],
       },
     })
   })
@@ -862,7 +1013,10 @@ async function mockAuthenticatedTaskPage(
     const pathSegments = new URL(route.request().url()).pathname.split('/')
     const teamId = decodeURIComponent(pathSegments[3] ?? '')
     const issueId = decodeURIComponent(pathSegments[5] ?? '')
-    const issue = findTeamIssue(teamIssuesByTeam, taskResponsesByProject, projectDirectory, teamId, issueId)
+    const issue = findTeamIssue(teamIssuesByTeam, teamId, issueId)
+      ?? Object.values(taskResponsesByProject)
+        .flat()
+        .find((candidate) => candidate.teamId === teamId && candidate.id === issueId)
 
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
@@ -878,31 +1032,23 @@ async function mockAuthenticatedTaskPage(
 
     if (route.request().method() === 'PATCH') {
       requestCounts.issueUpdates += 1
-      if (issue.source === 'legacy') {
-        await route.fulfill({
-          status: 409,
-          json: {
-            message: 'Legacy task issues are read-only.',
-          },
-        })
-        return
-      }
-
       const body = route.request().postDataJSON() as Partial<TeamIssue> & {
         assignedProjectId?: string | null
         expectedRevision?: number
       }
+      expect(body).not.toHaveProperty('status')
       const { expectedRevision, ...patch } = body
 
       expect(expectedRevision).toBe(issue.revision)
       const conflictIssueKey = createIssueCollaborationKey(teamId, issueId)
 
       if (pendingRevisionConflictIssueKeys.delete(conflictIssueKey)) {
-        replaceStoredTeamIssue(teamIssuesByTeam, teamId, {
+        replaceStoredWorkItem(taskResponsesByProject, teamIssuesByTeam, teamId, {
           ...issue,
           description: '別のメンバーが更新した最新内容です。',
           revision: issue.revision + 1,
-          status: 'review',
+          statusCategory: 'started',
+          workflowStatusId: 'review',
           updatedAt: '2026-06-08T02:30:00.000Z',
         })
         await route.fulfill({
@@ -915,8 +1061,8 @@ async function mockAuthenticatedTaskPage(
         return
       }
 
-      const updateResult = body.status
-        ? await onTaskStatusUpdate?.(issueId, body.status)
+      const updateResult = body.workflowStatusId
+        ? await onTaskStatusUpdate?.(issueId, body.workflowStatusId)
         : undefined
 
       if (updateResult === 'fail') {
@@ -929,16 +1075,21 @@ async function mockAuthenticatedTaskPage(
         return
       }
 
+      const updatedWorkflowStatus = (
+        teamWorkItemConfigurations[teamId] ?? workspaceWorkItemConfiguration
+      ).workflow.statuses.find((status) => status.id === body.workflowStatusId)
       const updatedIssue = {
         ...issue,
         ...patch,
         assignedProjectId: body.assignedProjectId === null
           ? undefined
           : body.assignedProjectId ?? issue.assignedProjectId,
+        statusCategory: updatedWorkflowStatus?.category ?? issue.statusCategory,
+        workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
         revision: issue.revision + 1,
         updatedAt: '2026-06-08T02:00:00.000Z',
       } satisfies TeamIssue
-      replaceStoredTeamIssue(teamIssuesByTeam, teamId, updatedIssue)
+      replaceStoredWorkItem(taskResponsesByProject, teamIssuesByTeam, teamId, updatedIssue)
 
       await route.fulfill({
         json: {
@@ -947,6 +1098,9 @@ async function mockAuthenticatedTaskPage(
       })
       return
     }
+
+    const teamConfiguration = teamWorkItemConfigurations[teamId]
+    const collaborationKey = createIssueCollaborationKey(teamId, issueId)
 
     await route.fulfill({
       json: {
@@ -968,9 +1122,161 @@ async function mockAuthenticatedTaskPage(
             createdAt: '2026-06-08T00:00:00.000Z',
           },
         ],
+        resolvedConfiguration: teamConfiguration
+          ? { configuration: structuredClone(teamConfiguration) }
+          : {
+              configuration: structuredClone(workspaceWorkItemConfiguration),
+              inheritedFrom: 'workspace',
+            },
+        relations: structuredClone(workItemRelationsByIssue[collaborationKey] ?? []),
+        relationGraphRevision: relationGraphRevisionByTeam[teamId] ?? 0,
       },
     })
   })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/files$/, async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    await route.fulfill({
+      status: 200,
+      json: {
+        approvals: [],
+        capabilities: { canRequestApproval: true, canUpload: true },
+        files: [],
+      },
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/relations$/, async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.fallback()
+      return
+    }
+
+    requestCounts.workItemRelationCreates += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    const pathSegments = new URL(route.request().url()).pathname.split('/')
+    const teamId = decodeURIComponent(pathSegments[3] ?? '')
+    const sourceWorkItemId = decodeURIComponent(pathSegments[5] ?? '')
+    const body = route.request().postDataJSON() as {
+      expectedGraphRevision?: number
+      targetWorkItemId?: string
+      type?: WorkItemRelationType
+    }
+    const targetWorkItemId = body.targetWorkItemId ?? ''
+    const relationType = body.type ?? 'related'
+    const currentGraphRevision = relationGraphRevisionByTeam[teamId] ?? 0
+
+    expect(body.expectedGraphRevision).toBe(currentGraphRevision)
+
+    const relation = {
+      sourceWorkItemId,
+      targetWorkItemId,
+      type: relationType,
+      createdAt: '2026-07-12T12:30:00.000Z',
+    } satisfies WorkItemRelation
+    const reciprocalRelation = {
+      sourceWorkItemId: targetWorkItemId,
+      targetWorkItemId: sourceWorkItemId,
+      type: reciprocalWorkItemRelationTypes[relationType],
+      createdAt: relation.createdAt,
+    } satisfies WorkItemRelation
+    const sourceKey = createIssueCollaborationKey(teamId, sourceWorkItemId)
+    const targetKey = createIssueCollaborationKey(teamId, targetWorkItemId)
+
+    workItemRelationsByIssue[sourceKey] = [
+      ...(workItemRelationsByIssue[sourceKey] ?? []).filter(
+        (candidate) =>
+          candidate.type !== relation.type || candidate.targetWorkItemId !== targetWorkItemId,
+      ),
+      relation,
+    ]
+    workItemRelationsByIssue[targetKey] = [
+      ...(workItemRelationsByIssue[targetKey] ?? []).filter(
+        (candidate) =>
+          candidate.type !== reciprocalRelation.type ||
+          candidate.targetWorkItemId !== sourceWorkItemId,
+      ),
+      reciprocalRelation,
+    ]
+    relationGraphRevisionByTeam[teamId] = currentGraphRevision + 1
+
+    await route.fulfill({
+      status: 201,
+      json: {
+        relation,
+        reciprocalRelation,
+        graphRevision: relationGraphRevisionByTeam[teamId],
+      },
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/projects\/[^/]+\/files$/, async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    await route.fulfill({
+      status: 200,
+      json: {
+        approvals: [],
+        capabilities: { canRequestApproval: false, canUpload: true },
+        files: [],
+      },
+    })
+  })
+
+  await page.route(
+    /.*\/api\/teams\/[^/]+\/issues\/[^/]+\/relations\/[^/]+\/[^/]+$/,
+    async (route) => {
+      if (route.request().method() !== 'DELETE') {
+        await route.fallback()
+        return
+      }
+
+      requestCounts.workItemRelationDeletes += 1
+      expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+      const pathSegments = new URL(route.request().url()).pathname.split('/')
+      const teamId = decodeURIComponent(pathSegments[3] ?? '')
+      const sourceWorkItemId = decodeURIComponent(pathSegments[5] ?? '')
+      const targetWorkItemId = decodeURIComponent(pathSegments[7] ?? '')
+      const relationType = decodeURIComponent(pathSegments[8] ?? '') as WorkItemRelationType
+      const body = route.request().postDataJSON() as { expectedGraphRevision?: number }
+      const currentGraphRevision = relationGraphRevisionByTeam[teamId] ?? 0
+
+      expect(body.expectedGraphRevision).toBe(currentGraphRevision)
+
+      const relation = {
+        sourceWorkItemId,
+        targetWorkItemId,
+        type: relationType,
+      } satisfies WorkItemRelation
+      const reciprocalRelation = {
+        sourceWorkItemId: targetWorkItemId,
+        targetWorkItemId: sourceWorkItemId,
+        type: reciprocalWorkItemRelationTypes[relationType],
+      } satisfies WorkItemRelation
+      const sourceKey = createIssueCollaborationKey(teamId, sourceWorkItemId)
+      const targetKey = createIssueCollaborationKey(teamId, targetWorkItemId)
+
+      workItemRelationsByIssue[sourceKey] = (workItemRelationsByIssue[sourceKey] ?? []).filter(
+        (candidate) =>
+          candidate.type !== relation.type || candidate.targetWorkItemId !== targetWorkItemId,
+      )
+      workItemRelationsByIssue[targetKey] = (workItemRelationsByIssue[targetKey] ?? []).filter(
+        (candidate) =>
+          candidate.type !== reciprocalRelation.type ||
+          candidate.targetWorkItemId !== sourceWorkItemId,
+      )
+      relationGraphRevisionByTeam[teamId] = currentGraphRevision + 1
+
+      await route.fulfill({
+        json: {
+          relation,
+          reciprocalRelation,
+          graphRevision: relationGraphRevisionByTeam[teamId],
+        },
+      })
+    },
+  )
 
   await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/collaboration(?:\?.*)?$/, async (route) => {
     const pathSegments = new URL(route.request().url()).pathname.split('/')
@@ -1189,7 +1495,7 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({
       json: {
         projectId: 'product-roadmap',
-        tasks: taskResponsesByProject['product-roadmap'],
+        tasks: [],
       },
     })
   })
@@ -1202,7 +1508,7 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({
       json: {
         projectId: 'brand-refresh',
-        tasks: taskResponsesByProject['brand-refresh'],
+        tasks: [],
       },
     })
   })
@@ -1215,7 +1521,7 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({
       json: {
         projectId: 'shared-launch',
-        tasks: taskResponsesByProject['shared-launch'],
+        tasks: [],
       },
     })
   })
@@ -1228,7 +1534,7 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({
       json: {
         projectId: 'new-project',
-        tasks: taskResponsesByProject['new-project'] ?? [],
+        tasks: [],
       },
     })
   })
@@ -1452,63 +1758,18 @@ async function readDesktopAppShellState(page: Page) {
   })
 }
 
-function resolveLegacyTaskAssignee(task: ProjectTask) {
-  const assigneeByKey = {
-    'tasks.assignee.sato': {
-      id: 'sato@example.com',
-      email: 'sato@example.com',
-      name: '佐藤 花子',
-    },
-    'tasks.assignee.suzuki': {
-      id: 'suzuki@example.com',
-      email: 'suzuki@example.com',
-      name: '鈴木 大輔',
-    },
-    'tasks.assignee.tanaka': {
-      id: 'tanaka@example.com',
-      email: 'tanaka@example.com',
-      name: '田中 美咲',
-    },
-    'tasks.assignee.yamamoto': {
-      id: 'yamamoto@example.com',
-      email: 'yamamoto@example.com',
-      name: '山本 健太',
-    },
-  } as const
+function createStoredTeamIssue(
+  overrides: Partial<TeamIssue> & Pick<TeamIssue, 'id' | 'title'>,
+): TeamIssue {
+  const workflowStatusId = overrides.workflowStatusId ?? 'todo'
+  const statusCategory = overrides.statusCategory ?? (
+    workflowStatusId === 'done'
+      ? 'completed'
+      : workflowStatusId === 'in-progress' || workflowStatusId === 'review'
+        ? 'started'
+        : 'unstarted'
+  )
 
-  return task.assigneeKey && task.assigneeKey in assigneeByKey
-    ? assigneeByKey[task.assigneeKey as keyof typeof assigneeByKey]
-    : {
-        id: task.assigneeUserId ?? task.assignee ?? 'sato@example.com',
-        email: task.assigneeEmail,
-        name: task.assigneeName,
-      }
-}
-
-function toIssueFromTask(task: ProjectTask, teamId: string, assignedProjectId: string): TeamIssue {
-  const assignee = resolveLegacyTaskAssignee(task)
-
-  return {
-    schemaVersion: task.schemaVersion,
-    revision: task.revision,
-    id: task.id,
-    teamId,
-    assignedProjectId,
-    titleKey: task.titleKey,
-    title: task.title,
-    assigneeUserId: assignee.id,
-    assigneeEmail: assignee.email,
-    assigneeName: assignee.name,
-    status: task.status,
-    dueDate: task.dueDate,
-    priority: task.priority,
-    createdAt: '2026-06-08T00:00:00.000Z',
-    updatedAt: '2026-06-08T00:00:00.000Z',
-    source: 'legacy',
-  }
-}
-
-function createStoredTeamIssue(overrides: Partial<TeamIssue> & Pick<TeamIssue, 'id' | 'status' | 'title'>): TeamIssue {
   return {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
@@ -1516,13 +1777,19 @@ function createStoredTeamIssue(overrides: Partial<TeamIssue> & Pick<TeamIssue, '
     assignedProjectId: 'refero',
     description: 'My Tasks の移動操作を検証する Issue です。',
     assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'sato@example.com',
     assigneeEmail: 'sato@example.com',
     assigneeName: '佐藤 花子',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/22',
     priority: 'medium',
     createdAt: '2026-06-08T00:00:00.000Z',
     updatedAt: '2026-06-08T00:00:00.000Z',
     source: 'dynamodb',
+    statusCategory,
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    workflowStatusId,
     ...overrides,
   }
 }
@@ -1545,28 +1812,10 @@ function createIssueCollaborationKey(teamId: string, issueId: string) {
 
 function findTeamIssue(
   teamIssuesByTeam: Record<string, TeamIssue[]>,
-  taskResponsesByProject: Record<string, ProjectTask[]>,
-  projectDirectory: ProjectDirectoryTeam[],
   teamId: string,
   issueId: string,
 ) {
-  const issue = teamIssuesByTeam[teamId]?.find((candidate) => candidate.id === issueId)
-
-  if (issue) {
-    return issue
-  }
-
-  const team = projectDirectory.find((candidate) => candidate.id === teamId)
-
-  for (const project of team?.projects ?? []) {
-    const task = taskResponsesByProject[project.id]?.find((candidate) => candidate.id === issueId)
-
-    if (task) {
-      return toIssueFromTask(task, teamId, project.id)
-    }
-  }
-
-  return undefined
+  return teamIssuesByTeam[teamId]?.find((candidate) => candidate.id === issueId)
 }
 
 /**
@@ -1593,6 +1842,49 @@ function replaceStoredTeamIssue(
 }
 
 /**
+ * E2E mock の canonical Work Item を保存元の project または Team store で更新します。
+ *
+ * @param taskResponsesByProject - project ごとの canonical Work Item mock です。
+ * @param teamIssuesByTeam - Team ごとの canonical Work Item mock です。
+ * @param teamId - 更新対象の Team ID です。
+ * @param issue - 保存する最新 Work Item です。
+ */
+function replaceStoredWorkItem(
+  taskResponsesByProject: Record<string, ProjectTask[]>,
+  teamIssuesByTeam: Record<string, TeamIssue[]>,
+  teamId: string,
+  issue: TeamIssue,
+) {
+  for (const [projectId, projectIssues] of Object.entries(taskResponsesByProject)) {
+    const issueIndex = projectIssues.findIndex(
+      (candidate) => candidate.teamId === teamId && candidate.id === issue.id,
+    )
+
+    if (issueIndex < 0) {
+      continue
+    }
+
+    if (issue.assignedProjectId === projectId) {
+      projectIssues[issueIndex] = issue
+      return
+    }
+
+    projectIssues.splice(issueIndex, 1)
+    if (issue.assignedProjectId) {
+      taskResponsesByProject[issue.assignedProjectId] = [
+        ...(taskResponsesByProject[issue.assignedProjectId] ?? []),
+        issue,
+      ]
+    } else {
+      replaceStoredTeamIssue(teamIssuesByTeam, teamId, issue)
+    }
+    return
+  }
+
+  replaceStoredTeamIssue(teamIssuesByTeam, teamId, issue)
+}
+
+/**
  * チーム Issue 作成フォームと詳細ペインが同じカラム内に収まっていることを検証します。
  *
  * @param page - レイアウト検証対象の Playwright page です。
@@ -1614,7 +1906,9 @@ async function expectTeamIssueLayoutToStayInsideColumns(page: Page) {
 
     const detailRect = detailPane.getBoundingClientRect()
     const formControls = Array.from(createForm.querySelectorAll('input, select, textarea, button'))
-    const detailControls = Array.from(detailPane.querySelectorAll('input, select, textarea, button'))
+    const detailControls = Array.from(
+      detailPane.querySelectorAll<HTMLElement>('input, select, textarea, button'),
+    ).filter((element) => element.getClientRects().length > 0)
     const formOverflows = formControls.flatMap((element) => {
       const rect = element.getBoundingClientRect()
 
@@ -1626,7 +1920,7 @@ async function expectTeamIssueLayoutToStayInsideColumns(page: Page) {
       const rect = element.getBoundingClientRect()
 
       return rect.left < detailRect.left - 1 || rect.right > detailRect.right + 1
-        ? [`${element.tagName.toLowerCase()} ${Math.round(rect.left)}-${Math.round(rect.right)} outside ${Math.round(detailRect.left)}-${Math.round(detailRect.right)}`]
+        ? [`${element.tagName.toLowerCase()} "${element.getAttribute('aria-label') ?? element.textContent?.trim() ?? ''}" ${Math.round(rect.left)}-${Math.round(rect.right)} outside ${Math.round(detailRect.left)}-${Math.round(detailRect.right)}`]
         : []
     })
 
@@ -1659,7 +1953,9 @@ async function expectTaskSplitPaneLayoutToStayInsideColumns(page: Page) {
 
     const detailRect = detailPane.getBoundingClientRect()
     const formControls = Array.from(createForm.querySelectorAll('input, select, textarea, button'))
-    const detailControls = Array.from(detailPane.querySelectorAll('input, select, textarea, button'))
+    const detailControls = Array.from(
+      detailPane.querySelectorAll<HTMLElement>('input, select, textarea, button'),
+    ).filter((element) => element.getClientRects().length > 0)
     const formOverflows = formControls.flatMap((element) => {
       const rect = element.getBoundingClientRect()
 
@@ -1671,7 +1967,7 @@ async function expectTaskSplitPaneLayoutToStayInsideColumns(page: Page) {
       const rect = element.getBoundingClientRect()
 
       return rect.left < detailRect.left - 1 || rect.right > detailRect.right + 1
-        ? [`${element.tagName.toLowerCase()} ${Math.round(rect.left)}-${Math.round(rect.right)} outside ${Math.round(detailRect.left)}-${Math.round(detailRect.right)}`]
+        ? [`${element.tagName.toLowerCase()} "${element.getAttribute('aria-label') ?? element.textContent?.trim() ?? ''}" ${Math.round(rect.left)}-${Math.round(rect.right)} outside ${Math.round(detailRect.left)}-${Math.round(detailRect.right)}`]
         : []
     })
 
@@ -1752,6 +2048,19 @@ test.describe('authenticated task page', () => {
     )
   })
 
+  test('プロジェクト切り替え時に bulk 選択を引き継がない', async ({ page }) => {
+    await mockCurrentUser(page, 'demo@example.com', 'Demo User', 'workspace-demo')
+    await page.goto('/projects/refero/issues?teamId=core-team')
+
+    await page.getByRole('checkbox', { name: 'SEO キーワードリサーチ' }).check()
+    await expect(page.getByTestId('bulk-selected-count')).toHaveText('1件を選択中')
+
+    await page.getByRole('button', { name: 'ブランド刷新', exact: true }).click()
+
+    await expect(page).toHaveURL('/projects/brand-refresh/issues?teamId=design-team')
+    await expect(page.getByTestId('bulk-selected-count')).toHaveText('0件を選択中')
+  })
+
   test('Issue toolbar で検索、ステータス絞り込み、テーブル/ボード切替が動作する', async ({ page }) => {
     await page.goto('/teams/core-team/issues')
 
@@ -1776,7 +2085,213 @@ test.describe('authenticated task page', () => {
     await boardViewButton.click()
 
     await expect(boardViewButton).toHaveAttribute('aria-pressed', 'true')
-    await expect(page.getByText('ブランドガイドラインの更新')).toBeVisible()
+    await expect(
+      page.getByRole('region', { name: 'ボード' }).getByText('ブランドガイドラインの更新'),
+    ).toBeVisible()
+  })
+
+  test('Issue #21: 動的 workflow status と custom field で Team Issue を作成・表示できる', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamWorkItemConfigurations: {
+        'core-team': teamWorkItemConfigurationFixture,
+      },
+    })
+    await page.goto('/teams/core-team/issues')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('button', { name: '新規 Issue' }).click()
+    const createIssueForm = page.getByTestId('create-issue-form')
+
+    await createIssueForm.locator('input[name="title"]').fill('Configurable delivery')
+    await createIssueForm.locator('select[name="assignedProjectId"]').selectOption('refero')
+    await createIssueForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
+    await createIssueForm.locator('select[name="workflowStatusId"]').selectOption('active')
+    await createIssueForm.getByLabel('Customer impact').fill(
+      'Enterprise-customer-impact',
+    )
+    await createIssueForm.getByLabel('Story points').fill('8')
+    await createIssueForm.getByLabel('Budget').fill('1200000')
+    await createIssueForm.getByRole('button', { name: 'Issue を作成' }).click()
+
+    const issueRow = page.getByTestId('issue-row-configurable-delivery').locator('..').locator('..')
+
+    await expect(issueRow).toContainText('In progress')
+    await expect(issueRow).toContainText(
+      'Customer impact: Enterprise-customer-impact',
+    )
+    await expect(issueRow).toContainText('Story points: 8')
+    await page.getByTestId('team-issues-category-filter').selectOption('started')
+    await expect(issueRow).toBeVisible()
+    await page.getByTestId('team-issues-custom-field-filter').selectOption('customer-impact')
+    await page.locator('#team-issues-custom-field-value-filter').fill('enterprise-customer')
+    await expect(issueRow).toBeVisible()
+    await page.locator('#team-issues-custom-field-value-filter').fill('does-not-match')
+    await expect(issueRow).toBeHidden()
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=configurable-delivery')
+    await page.getByTestId('project-tasks-category-filter').selectOption('started')
+    await page.getByTestId('project-tasks-custom-field-filter').selectOption('story-points')
+    await page.locator('#project-tasks-custom-field-value-filter').fill('8')
+    await expect(page.getByTestId('task-row-configurable-delivery')).toBeVisible()
+    await page.locator('#project-tasks-custom-field-value-filter').fill('5')
+    await expect(page.getByTestId('task-row-configurable-delivery')).toBeHidden()
+    await page.getByRole('button', { name: 'ブランド刷新', exact: true }).click()
+    await expect(page).toHaveURL('/projects/brand-refresh/issues?teamId=design-team')
+    await expect(page.getByTestId('project-tasks-custom-field-filter')).toHaveValue('')
+    await expect(page.getByTestId('tasks-empty')).toBeVisible()
+    expect(requestCounts.issueCreates).toBe(1)
+    expect(requestCounts.workItemConfigurationReads).toBeGreaterThan(0)
+  })
+
+  test('Issue #21: configuration 取得失敗時はエラーを表示し更新を無効化する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      failedWorkItemConfigurationTeamIds: ['core-team'],
+      teamIssuesByTeam: {
+        'core-team': [createStoredTeamIssue({
+          id: 'configuration-failure',
+          title: 'Configuration failure',
+          workflowStatusId: 'in-progress',
+        })],
+      },
+    })
+    await page.goto('/teams/core-team/issues?issueId=configuration-failure')
+
+    await expect(page.getByRole('alert')).toContainText(
+      'Work Item 設定を取得できませんでした。',
+    )
+    await expect(page.getByRole('button', { name: '新規 Issue' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '変更を保存' })).toBeDisabled()
+  })
+
+  test('Issue #21: Team 内 Work Item relation を追加・解除できる', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            id: 'relation-source',
+            title: 'Relation source',
+            workflowStatusId: 'in-progress',
+          }),
+          createStoredTeamIssue({
+            assignedProjectId: 'product-roadmap',
+            id: 'relation-target',
+            title: 'Relation target',
+            workflowStatusId: 'todo',
+          }),
+        ],
+      },
+      workItemRelationsByIssue: {
+        [createIssueCollaborationKey('core-team', 'relation-source')]: [
+          {
+            sourceWorkItemId: 'relation-source',
+            targetWorkItemId: 'wireframe',
+            type: 'blocks',
+            createdAt: '2026-07-12T08:00:00.000Z',
+          },
+        ],
+      },
+    })
+    await page.goto('/teams/core-team/issues?issueId=relation-source')
+    const requestCounts = getMockRequestCounts(page)
+    const relationEditor = page.getByTestId('work-item-relations-editor')
+    const relationTypeSelect = relationEditor.getByRole('combobox', { name: '関係', exact: true })
+
+    await expect(relationEditor).toBeVisible()
+    await relationTypeSelect.selectOption('blocks')
+    await expect(
+      relationEditor.getByLabel('対象 Work Item').locator('option[value="wireframe"]'),
+    ).toHaveCount(0)
+    await relationTypeSelect.selectOption('related')
+    await expect(
+      relationEditor.getByLabel('対象 Work Item').locator('option[value="wireframe"]'),
+    ).toHaveCount(1)
+    await relationEditor.getByLabel('対象 Work Item').selectOption('relation-target')
+    await relationEditor.getByRole('button', { name: '関係を追加' }).click()
+
+    const relationRow = page.getByTestId('work-item-relation-related-relation-target')
+
+    await expect(relationRow).toContainText('関連')
+    await expect(relationRow).toContainText('Relation target')
+    await expect.poll(() => requestCounts.workItemRelationCreates).toBe(1)
+
+    await relationRow.getByRole('button', { name: 'Relation target との関係を解除' }).click()
+
+    await expect(relationRow).toHaveCount(0)
+    await expect(page.getByTestId('work-item-relation-blocks-wireframe')).toBeVisible()
+    await expect.poll(() => requestCounts.workItemRelationDeletes).toBe(1)
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=relation-source')
+    await expect(
+      page.getByTestId('work-item-relations-editor').getByLabel('対象 Work Item'),
+    ).toHaveValue('relation-target')
+  })
+
+  test('Issue #21: 設定画面で Team scope を選び configuration override を保存できる', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workspaceWorkItemConfiguration: workspaceWorkItemConfigurationFixture,
+    })
+    await page.goto('/settings')
+    const requestCounts = getMockRequestCounts(page)
+    const configurationPanel = page.getByTestId('work-item-configuration-panel')
+
+    await expect(configurationPanel).toBeVisible()
+    await page.getByTestId('work-item-configuration-scope').selectOption('team:core-team')
+    await expect(page.getByTestId('work-item-configuration-inherited')).toContainText(
+      'Workspace の設定を継承しています。',
+    )
+
+    await configurationPanel.getByLabel('ワークフロー名').fill('Core team delivery')
+    const riskOptionRows = configurationPanel.locator(
+      '[data-testid^="custom-field-option-risk-level-"]',
+    )
+
+    await configurationPanel
+      .getByTestId('custom-field-option-risk-level-high')
+      .getByRole('button', { name: 'High を上へ移動' })
+      .click()
+    await expect(riskOptionRows).toHaveCount(3)
+    await expect(riskOptionRows.nth(1)).toHaveAttribute(
+      'data-testid',
+      'custom-field-option-risk-level-high',
+    )
+    await configurationPanel
+      .getByTestId('workflow-status-backlog')
+      .getByRole('button', { name: 'Backlog を削除' })
+      .click()
+    await configurationPanel
+      .getByTestId('custom-field-definition-target-date')
+      .getByRole('button', { name: 'Target date を削除' })
+      .click()
+    const saveRequestPromise = page.waitForRequest((request) =>
+      request.method() === 'PUT' &&
+      new URL(request.url()).pathname.endsWith(
+        '/api/teams/core-team/work-item-configuration',
+      ),
+    )
+
+    await configurationPanel.getByRole('button', { name: '設定を保存' }).click()
+
+    const savedConfiguration = (await saveRequestPromise).postDataJSON() as WorkItemConfiguration
+
+    expect(savedConfiguration.workflow.initialStatusId).toBe('ready')
+    expect(savedConfiguration.workflow.statuses.map((status) => status.sortOrder)).toEqual(
+      savedConfiguration.workflow.statuses.map((_, index) => index),
+    )
+    expect(savedConfiguration.workflow.transitions.every((transition) =>
+      transition.fromStatusId !== 'backlog' && transition.toStatusId !== 'backlog',
+    )).toBe(true)
+    expect(savedConfiguration.customFields.map((field) => field.sortOrder)).toEqual(
+      savedConfiguration.customFields.map((_, index) => index),
+    )
+    await expect.poll(() => requestCounts.workItemConfigurationWrites).toBe(1)
+    await expect(page.getByTestId('work-item-configuration-inherited')).toHaveCount(0)
+    await expect(configurationPanel.getByLabel('ワークフロー名')).toHaveValue(
+      'Core team delivery',
+    )
+    await expect(configurationPanel.getByTestId('workflow-status-backlog')).toHaveCount(0)
+    await expect(
+      configurationPanel.getByTestId('custom-field-definition-target-date'),
+    ).toHaveCount(0)
+    await expect(configurationPanel.getByTestId('custom-field-option-risk-level-high')).toBeVisible()
   })
 
   test('Task 詳細は競合後の revision 再取得後も競合メッセージを維持する', async ({ page }) => {
@@ -1789,7 +2304,7 @@ test.describe('authenticated task page', () => {
           createStoredTeamIssue({
             id: issueId,
             title: 'Task 競合確認',
-            status: 'todo',
+            workflowStatusId: 'todo',
           }),
         ],
       },
@@ -1799,12 +2314,12 @@ test.describe('authenticated task page', () => {
     const detailPane = page.getByTestId('task-detail-pane')
 
     await expect(detailPane.getByRole('button', { name: '変更を保存' })).toBeEnabled()
-    await detailPane.locator('select[name="status"]').selectOption('done')
+    await detailPane.locator('select[name="workflowStatusId"]').selectOption('done')
     await detailPane.getByRole('button', { name: '変更を保存' }).click()
 
     await expect.poll(() => requestCounts.issueUpdates).toBe(1)
     await expect.poll(() => requestCounts.projectTasks.refero).toBeGreaterThanOrEqual(2)
-    await expect(detailPane.locator('select[name="status"]')).toHaveValue('review')
+    await expect(detailPane.locator('select[name="workflowStatusId"]')).toHaveValue('review')
     await expect(detailPane.locator('textarea[name="description"]')).toHaveValue(
       '別のメンバーが更新した最新内容です。',
     )
@@ -1821,7 +2336,7 @@ test.describe('authenticated task page', () => {
           createStoredTeamIssue({
             id: issueId,
             title: 'Team Issue 競合確認',
-            status: 'todo',
+            workflowStatusId: 'todo',
           }),
         ],
       },
@@ -1830,7 +2345,7 @@ test.describe('authenticated task page', () => {
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByTestId(`issue-row-${issueId}`).click()
-    const statusSelect = page.locator('aside select[name="status"]')
+    const statusSelect = page.locator('aside select[name="workflowStatusId"]')
     const description = page.locator('aside textarea[name="description"]')
 
     await expect(page.getByRole('button', { name: '変更を保存' })).toBeEnabled()
@@ -1848,8 +2363,11 @@ test.describe('authenticated task page', () => {
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
     const requestCounts = getMockRequestCounts(page)
 
-    await expect(page.getByTestId('task-detail-pane')).toContainText('新しいランディングページのワイヤーフレーム作成')
-    await expect(page.getByText('旧タスク由来または詳細 API に接続されていない行にはコメントを追加できません。')).toBeVisible()
+    const initialDetailPane = page.getByTestId('task-detail-pane')
+
+    await expect(initialDetailPane).toContainText('新しいランディングページのワイヤーフレーム作成')
+    await expect(initialDetailPane.getByRole('button', { name: '変更を保存' })).toBeEnabled()
+    await expect(page.getByRole('button', { name: 'コメントを追加' })).toBeVisible()
 
     await page.getByRole('button', { name: '担当者' }).click()
     await page.getByRole('menuitemradio', { name: '佐藤 花子' }).click()
@@ -1902,15 +2420,20 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-detail-pane')).toContainText('Execution detail check')
     await expect(page.getByRole('button', { name: '変更を保存' })).toBeEnabled()
     await expect(page.getByTestId('task-detail-pane').locator('textarea[name="description"]')).toHaveValue('詳細説明を保持します。')
-    await page.getByTestId('task-detail-pane').locator('select[name="status"]').selectOption('review')
+    await page.locator('textarea[name="body"]').fill('保存中も残すコメント下書き')
+    await page.getByTestId('task-detail-pane').locator('select[name="workflowStatusId"]').selectOption('review')
     await page.getByRole('button', { name: '変更を保存' }).click()
     await expect(page.getByTestId('task-detail-pane').locator('textarea[name="description"]')).toHaveValue('詳細説明を保持します。')
+    await expect(page.locator('textarea[name="body"]')).toHaveValue(
+      '保存中も残すコメント下書き',
+    )
+    await page.locator('textarea[name="body"]').fill('')
 
     await page.getByTestId('task-row-seo-research').getByRole('button').click()
 
     await expect(page).toHaveURL(/issueId=seo-research/)
     await expect(page.getByTestId('task-detail-pane')).toContainText('SEO キーワードリサーチ')
-    await expect(page.getByRole('button', { name: '変更を保存' })).toBeDisabled()
+    await expect(page.getByRole('button', { name: '変更を保存' })).toBeEnabled()
 
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=execution-detail-check')
 
@@ -2097,10 +2620,8 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('issue-row-wireframe')).toBeVisible()
 
     await page.getByTestId('issue-row-wireframe').click()
-    await expect(page.getByText('旧タスク由来の Issue は参照専用です。')).toBeVisible()
-    await expect(page.getByRole('button', { name: '変更を保存' })).toBeDisabled()
-    await expect(page.getByText('旧タスク由来の Issue にはコメントを追加できません。')).toBeVisible()
-    await expect(page.getByRole('button', { name: 'コメントを追加' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '変更を保存' })).toBeEnabled()
+    await expect(page.getByRole('button', { name: 'コメントを追加' })).toBeVisible()
     expect(requestCounts.issueUpdates).toBe(0)
 
     await page.getByRole('button', { name: '新規 Issue' }).click()
@@ -2132,7 +2653,545 @@ test.describe('authenticated task page', () => {
 
     await page.goto('/projects/refero/issues?teamId=core-team')
 
-    await expect(page.getByText('割当待ち Issue')).toBeVisible()
+    await expect(page.getByTestId('task-row-割当待ち-issue')).toContainText('割当待ち Issue')
+  })
+
+  test('成果物を API body 経由せず upload し、annotation と approval を保存できる', async ({ page }) => {
+    const proofingIssue = createStoredTeamIssue({
+      assignedProjectId: 'refero',
+      id: 'proofing-issue',
+      source: 'dynamodb',
+      teamId: 'core-team',
+      title: '成果物レビュー',
+    })
+    const files: FileAttachment[] = []
+    const approvals: ApprovalRequest[] = []
+    const annotations: FileAnnotation[] = []
+    let objectPutCount = 0
+    let startAnnotationSave: (() => void) | undefined
+    let releaseAnnotationSave: (() => void) | undefined
+    const annotationSaveStarted = new Promise<void>((resolve) => {
+      startAnnotationSave = resolve
+    })
+    const annotationSaveHold = new Promise<void>((resolve) => {
+      releaseAnnotationSave = resolve
+    })
+    let startPreviewAccess: (() => void) | undefined
+    let releasePreviewAccess: (() => void) | undefined
+    const previewAccessStarted = new Promise<void>((resolve) => {
+      startPreviewAccess = resolve
+    })
+    const previewAccessHold = new Promise<void>((resolve) => {
+      releasePreviewAccess = resolve
+    })
+    let previewAccessRequestCount = 0
+    let workItemUploadSessionCount = 0
+    const version: FileVersion = {
+      contentType: 'image/png',
+      createdAt: '2026-07-12T03:00:00.000Z',
+      createdByMemberKey: 'demo@example.com',
+      fileName: 'proof.png',
+      id: 'version-proof-1',
+      number: 1,
+      previewKind: 'image',
+      scanStatus: 'pending',
+      sizeBytes: 5,
+    }
+    const blockedVersion: FileVersion = {
+      ...version,
+      createdAt: '2026-07-12T03:05:00.000Z',
+      fileName: 'proof-blocked.png',
+      id: 'version-proof-blocked',
+      number: 2,
+      scanStatus: 'blocked',
+    }
+    const file: FileAttachment = {
+      capabilities: {
+        canAnnotate: true,
+        canDelete: true,
+        canDownload: true,
+        canRequestApproval: true,
+        canUploadVersion: true,
+      },
+      createdAt: '2026-07-12T03:00:00.000Z',
+      currentVersion: version,
+      id: 'file-proof-1',
+      name: 'proof.png',
+      targetId: proofingIssue.id,
+      targetType: 'work-item',
+      updatedAt: '2026-07-12T03:00:00.000Z',
+      versionCount: 1,
+      versions: [version],
+    }
+    const failedUploadVersion: FileVersion = {
+      ...version,
+      fileName: 'later-failure.png',
+      id: 'version-upload-failure',
+      scanStatus: 'pending',
+    }
+    const failedUploadFile: FileAttachment = {
+      ...file,
+      currentVersion: failedUploadVersion,
+      id: 'file-upload-failure',
+      name: failedUploadVersion.fileName,
+      versions: [failedUploadVersion],
+    }
+    const commentVersion: FileVersion = {
+      ...version,
+      fileName: 'comment-proof.png',
+      id: 'version-comment-proof-1',
+    }
+    const commentFile: FileAttachment = {
+      ...file,
+      currentVersion: commentVersion,
+      id: 'file-comment-proof-1',
+      name: 'comment-proof.png',
+      targetId: 'comment-1',
+      targetType: 'comment',
+      versions: [commentVersion],
+    }
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: { 'core-team': [proofingIssue] },
+    })
+
+    await page.route('**/api/teams/core-team/issues/proofing-issue/files', async (route) => {
+      await route.fulfill({
+        status: 200,
+        json: {
+          approvals,
+          capabilities: { canGrantGuestAccess: true, canRequestApproval: true, canUpload: true },
+          files,
+        },
+      })
+    })
+    await page.route('**/api/teams/core-team/issues/proofing-issue/files/uploads', async (route) => {
+      workItemUploadSessionCount += 1
+      if (workItemUploadSessionCount > 1) {
+        files.push(failedUploadFile)
+        await route.fulfill({
+          status: 200,
+          json: {
+            file: failedUploadFile,
+            upload: {
+              expiresAt: '2026-07-12T04:00:00.000Z',
+              headers: { 'Content-Type': 'image/png' },
+              maxSizeBytes: 1_000,
+              method: 'PUT',
+              url: '/mock-object/failed-upload',
+            },
+            version: failedUploadVersion,
+          },
+        })
+        return
+      }
+
+      await route.fulfill({
+        status: 200,
+        json: {
+          file,
+          upload: {
+            expiresAt: '2026-07-12T04:00:00.000Z',
+            headers: { 'Content-Type': 'image/png' },
+            maxSizeBytes: 1_000,
+            method: 'PUT',
+            url: '/mock-object/proof-upload',
+          },
+          version,
+        },
+      })
+    })
+    await page.route('**/mock-object/proof-upload', async (route) => {
+      expect(route.request().method()).toBe('PUT')
+      expect(route.request().headers()).not.toHaveProperty('authorization')
+      objectPutCount += 1
+      await route.fulfill({ status: 200, body: '' })
+    })
+    await page.route('**/mock-object/failed-upload', async (route) => {
+      expect(route.request().method()).toBe('PUT')
+      await route.fulfill({ status: 500, body: 'Object upload failed.' })
+    })
+    await page.route(
+      '**/api/teams/core-team/issues/proofing-issue/comments/comment-1/files/uploads',
+      async (route) => {
+        expect(route.request().postDataJSON()).toMatchObject({ guestAccess: true })
+        await route.fulfill({
+          status: 200,
+          json: {
+            file: commentFile,
+            upload: {
+              expiresAt: '2026-07-12T04:00:00.000Z',
+              headers: { 'Content-Type': 'image/png' },
+              maxSizeBytes: 1_000,
+              method: 'PUT',
+              url: '/mock-object/comment-proof-upload',
+            },
+            version: commentVersion,
+          },
+        })
+      },
+    )
+    await page.route('**/mock-object/comment-proof-upload', async (route) => {
+      expect(route.request().method()).toBe('PUT')
+      expect(route.request().headers()).not.toHaveProperty('authorization')
+      objectPutCount += 1
+      await route.fulfill({ status: 200, body: '' })
+    })
+    await page.route(
+      '**/api/teams/core-team/issues/proofing-issue/files/file-proof-1/versions/version-proof-1/complete',
+      async (route) => {
+        const availableVersion = { ...version, scanStatus: 'available' as const }
+        file.currentVersion = availableVersion
+        file.versionCount = 2
+        file.versions = [availableVersion, blockedVersion]
+        if (!files.some((candidate) => candidate.id === file.id)) {
+          files.push(file)
+        }
+        await route.fulfill({ status: 200, json: { file, version: availableVersion } })
+      },
+    )
+    await page.route(
+      '**/api/teams/core-team/issues/proofing-issue/files/file-comment-proof-1/versions/version-comment-proof-1/complete',
+      async (route) => {
+        const availableVersion = { ...commentVersion, scanStatus: 'available' as const }
+        commentFile.currentVersion = availableVersion
+        commentFile.versions = [availableVersion]
+        if (!files.some((candidate) => candidate.id === commentFile.id)) {
+          files.push(commentFile)
+        }
+        await route.fulfill({ status: 200, json: { file: commentFile, version: availableVersion } })
+      },
+    )
+    await page.route(
+      /.*\/api\/teams\/core-team\/issues\/proofing-issue\/files\/file-proof-1\/versions\/version-proof-1\/access\?.*/,
+      async (route) => {
+        previewAccessRequestCount += 1
+        if (previewAccessRequestCount === 1) {
+          startPreviewAccess?.()
+          await previewAccessHold
+        }
+        await route.fulfill({
+          status: 200,
+          json: { expiresAt: '2026-07-12T04:00:00.000Z', url: '/mock-preview/proof.svg' },
+        })
+      },
+    )
+    await page.route('**/mock-preview/proof.svg', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'image/svg+xml',
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450"><rect width="800" height="450" fill="#d9f8ed"/></svg>',
+      })
+    })
+    await page.route(
+      '**/api/teams/core-team/issues/proofing-issue/files/file-proof-1/versions/version-proof-1/annotations',
+      async (route) => {
+        if (route.request().method() === 'POST') {
+          if (annotations.length > 0) {
+            await route.fulfill({ status: 500, json: { message: 'Annotation save failed.' } })
+            return
+          }
+
+          startAnnotationSave?.()
+          await annotationSaveHold
+          const body = route.request().postDataJSON() as {
+            anchor: FileAnnotation['anchor']
+            bodyMarkdown: string
+          }
+          const annotation = {
+            anchor: body.anchor,
+            authorMemberKey: 'demo@example.com',
+            bodyMarkdown: body.bodyMarkdown,
+            capabilities: { canResolve: true },
+            createdAt: '2026-07-12T03:10:00.000Z',
+            fileId: file.id,
+            id: 'annotation-proof-1',
+            versionId: version.id,
+          } satisfies FileAnnotation
+          annotations.push(annotation)
+          await route.fulfill({ status: 200, json: { annotation } })
+          return
+        }
+
+        await route.fulfill({ status: 200, json: { annotations } })
+      },
+    )
+    await page.route('**/api/teams/core-team/issues/proofing-issue/approvals', async (route) => {
+      const body = route.request().postDataJSON() as {
+        dueAt: string
+        fileId: string
+        reviewerMemberKeys: string[]
+        versionId: string
+      }
+      const approval = {
+        capabilities: { canCancel: false, canDecide: true },
+        createdAt: '2026-07-12T03:20:00.000Z',
+        dueAt: body.dueAt,
+        fileId: body.fileId,
+        id: `approval-proof-${approvals.length + 1}`,
+        subjectType: 'file-version' as const,
+        requestedByMemberKey: 'demo@example.com',
+        requestedByKind: 'member' as const,
+        reviewers: body.reviewerMemberKeys.map((memberKey) => ({ memberKey, status: 'pending' as const })),
+        revision: 1,
+        status: 'pending' as const,
+        updatedAt: '2026-07-12T03:20:00.000Z',
+        versionId: body.versionId,
+      } satisfies ApprovalRequest
+      approvals.push(approval)
+      await route.fulfill({ status: 200, json: { approval } })
+    })
+    await page.route(
+      /.*\/api\/teams\/core-team\/issues\/proofing-issue\/approvals\/approval-proof-\d+\/decisions$/,
+      async (route) => {
+        const approvalId = route.request().url().match(/\/approvals\/([^/]+)\/decisions$/)?.[1]
+        const approvalIndex = approvals.findIndex((approval) => approval.id === approvalId)
+        const current = approvals[approvalIndex]
+        if (!current || approvalIndex < 0) {
+          await route.fulfill({ status: 404, json: { message: 'Approval not found.' } })
+          return
+        }
+
+        const body = route.request().postDataJSON() as {
+          decision?: string
+          expectedRevision?: number
+        }
+
+        expect(body.decision).toBe('approve')
+        expect(body.expectedRevision).toBe(current.revision)
+
+        approvals[approvalIndex] = {
+          ...current,
+          completedAt: '2026-07-12T03:30:00.000Z',
+          reviewers: current.reviewers.map((reviewer) => ({
+            ...reviewer,
+            decidedAt: '2026-07-12T03:30:00.000Z',
+            status: 'approved',
+          })),
+          revision: 2,
+          status: 'approved',
+          updatedAt: '2026-07-12T03:30:00.000Z',
+        }
+        await route.fulfill({ status: 200, json: { approval: approvals[approvalIndex] } })
+      },
+    )
+    await page.route(
+      /.*\/api\/teams\/core-team\/issues\/proofing-issue\/approvals\/approval-proof-\d+\/cancel$/,
+      async (route) => {
+        const approvalId = route.request().url().match(/\/approvals\/([^/]+)\/cancel$/)?.[1]
+        const approvalIndex = approvals.findIndex((approval) => approval.id === approvalId)
+        const current = approvals[approvalIndex]
+        const body = route.request().postDataJSON() as { expectedRevision: number }
+        if (!current || approvalIndex < 0) {
+          await route.fulfill({ status: 404, json: { message: 'Approval not found.' } })
+          return
+        }
+
+        expect(body.expectedRevision).toBe(current.revision)
+        approvals[approvalIndex] = {
+          ...current,
+          completedAt: '2026-07-12T03:25:00.000Z',
+          revision: current.revision + 1,
+          status: 'cancelled',
+          updatedAt: '2026-07-12T03:25:00.000Z',
+        }
+        await route.fulfill({ status: 200, json: { approval: approvals[approvalIndex] } })
+      },
+    )
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=proofing-issue')
+    await page.getByTestId('file-upload-input').setInputFiles([
+      {
+        buffer: Buffer.from('proof'),
+        mimeType: 'image/png',
+        name: 'proof.png',
+      },
+      {
+        buffer: Buffer.from('later failure'),
+        mimeType: 'image/png',
+        name: 'later-failure.png',
+      },
+    ])
+
+    await expect.poll(() => objectPutCount).toBe(1)
+    await expect(page.getByTestId('file-row-file-proof-1')).toContainText('利用可能')
+    await expect(page.getByTestId('file-row-file-upload-failure')).toContainText('later-failure.png')
+    await page.getByTestId('comment-files-comment-1').getByLabel('Guest 閲覧を許可').check()
+    await page.getByTestId('comment-file-input-comment-1').setInputFiles({
+      buffer: Buffer.from('comment proof'),
+      mimeType: 'image/png',
+      name: 'comment-proof.png',
+    })
+    await expect.poll(() => objectPutCount).toBe(2)
+    await expect(page.getByTestId('comment-files-comment-1')).toContainText('comment-proof.png')
+    await page.getByTestId('file-row-file-proof-1').getByRole('button', { name: 'プレビュー' }).click()
+    await expect(page.getByTestId('file-preview-dialog')).toBeVisible()
+    await previewAccessStarted
+    await page.locator('#file-preview-version').selectOption(blockedVersion.id)
+    await expect(page.getByTestId('file-preview-dialog')).toContainText('ブロック済み')
+    releasePreviewAccess?.()
+    await page.locator('#file-preview-version').selectOption(version.id)
+    await expect(page.getByTestId('file-preview-canvas')).toBeVisible()
+    await page.getByRole('button', { name: '位置を指定' }).click()
+    await page.getByTestId('file-preview-canvas').click({ position: { x: 180, y: 120 } })
+    await page.getByLabel('レビューコメント').fill('CTA の位置を確認してください。')
+    await page.getByRole('button', { name: 'Annotation を追加' }).click()
+    await annotationSaveStarted
+    await expect(page.locator('#file-preview-version')).toBeDisabled()
+    await expect(page.getByRole('button', { name: '位置指定中' })).toBeDisabled()
+    await expect(page.getByLabel('レビューコメント')).toBeDisabled()
+    releaseAnnotationSave?.()
+    await expect(page.getByTestId('file-preview-dialog')).toContainText('CTA の位置を確認してください。')
+    await expect(page.locator('#file-preview-version')).toBeEnabled()
+
+    await page.getByRole('button', { name: '位置を指定' }).click()
+    await page.getByTestId('file-preview-canvas').click({ position: { x: 240, y: 160 } })
+    await page.getByLabel('レビューコメント').fill('保存失敗を表示します。')
+    await page.getByRole('button', { name: 'Annotation を追加' }).click()
+    await expect(page.getByTestId('file-preview-dialog').getByRole('alert')).toContainText(
+      'ファイル操作を完了できませんでした。',
+    )
+    await expect(page.locator('#file-preview-version')).toBeEnabled()
+    await page.getByRole('button', { name: 'Preview を閉じる' }).click()
+
+    await page.getByRole('button', { name: '承認を依頼' }).click()
+    await page.getByTestId('approval-request-form').getByText('Demo User').click()
+    const firstDueAtInput = page.getByTestId('approval-request-form').locator('input[name="dueAt"]')
+    const localToday = await page.evaluate(() => {
+      const today = new Date()
+      const year = today.getFullYear()
+      const month = String(today.getMonth() + 1).padStart(2, '0')
+      const day = String(today.getDate()).padStart(2, '0')
+
+      return `${year}-${month}-${day}`
+    })
+
+    await expect(firstDueAtInput).toHaveAttribute('min', localToday)
+    await firstDueAtInput.fill('2099-12-31')
+    await page.getByRole('button', { name: 'Request を作成' }).click()
+    await expect(page.getByTestId('approval-approval-proof-1')).toBeVisible()
+    await page.getByTestId('approval-approval-proof-1').getByRole('button', { name: 'Request をキャンセル' }).click()
+    await expect(page.getByTestId('approval-approval-proof-1')).toContainText('キャンセル済み')
+
+    await page.getByRole('button', { name: '承認を依頼' }).click()
+    await page.getByTestId('approval-request-form').getByText('Demo User').click()
+    await page.getByTestId('approval-request-form').locator('input[name="dueAt"]').fill('2099-12-31')
+    await page.getByRole('button', { name: 'Request を作成' }).click()
+    await expect(page.getByTestId('approval-approval-proof-2')).toBeVisible()
+    const secondApproval = page.getByTestId('approval-approval-proof-2')
+
+    await expect(secondApproval.locator('textarea')).toHaveAttribute('maxlength', '2000')
+    await secondApproval.getByRole('button', { name: '承認' }).click()
+    await expect(page.getByTestId('approval-approval-proof-2')).toContainText('承認済み')
+  })
+
+  test('Issue 切替後は以前の file mutation 結果と panel state を引き継がない', async ({ page }) => {
+    const firstIssue = createStoredTeamIssue({
+      assignedProjectId: 'refero',
+      id: 'file-scope-first',
+      source: 'dynamodb',
+      teamId: 'core-team',
+      title: '切替前成果物',
+    })
+    const secondIssue = createStoredTeamIssue({
+      assignedProjectId: 'refero',
+      id: 'file-scope-second',
+      source: 'dynamodb',
+      teamId: 'core-team',
+      title: '切替後成果物',
+    })
+    const version = {
+      contentType: 'image/png',
+      createdAt: '2026-07-12T04:00:00.000Z',
+      createdByMemberKey: 'demo@example.com',
+      fileName: 'scope-first.png',
+      id: 'version-scope-first',
+      number: 1,
+      previewKind: 'image',
+      scanStatus: 'available',
+      sizeBytes: 120,
+    } satisfies FileVersion
+    const file = {
+      capabilities: {
+        canAnnotate: true,
+        canDelete: true,
+        canDownload: true,
+        canRequestApproval: true,
+        canUploadVersion: true,
+      },
+      createdAt: '2026-07-12T04:00:00.000Z',
+      currentVersion: version,
+      id: 'file-scope-first',
+      name: 'scope-first.png',
+      targetId: firstIssue.id,
+      targetType: 'work-item',
+      updatedAt: '2026-07-12T04:00:00.000Z',
+      versionCount: 1,
+      versions: [version],
+    } satisfies FileAttachment
+    let startStaleAccess: (() => void) | undefined
+    let releaseStaleAccess: (() => void) | undefined
+    let staleAccessCompleted = false
+    const staleAccessStarted = new Promise<void>((resolve) => {
+      startStaleAccess = resolve
+    })
+    const staleAccessHold = new Promise<void>((resolve) => {
+      releaseStaleAccess = resolve
+    })
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: { 'core-team': [firstIssue, secondIssue] },
+    })
+    await page.route('**/api/teams/core-team/issues/file-scope-first/files', async (route) => {
+      await route.fulfill({
+        status: 200,
+        json: {
+          approvals: [],
+          capabilities: { canGrantGuestAccess: true, canRequestApproval: true, canUpload: true },
+          files: [file],
+        },
+      })
+    })
+    await page.route('**/api/teams/core-team/issues/file-scope-second/files', async (route) => {
+      await route.fulfill({
+        status: 200,
+        json: {
+          approvals: [],
+          capabilities: { canGrantGuestAccess: true, canRequestApproval: true, canUpload: true },
+          files: [],
+        },
+      })
+    })
+    await page.route(
+      /.*\/api\/teams\/core-team\/issues\/file-scope-first\/files\/file-scope-first\/versions\/version-scope-first\/access\?.*/,
+      async (route) => {
+        startStaleAccess?.()
+        await staleAccessHold
+        staleAccessCompleted = true
+        await route.fulfill({
+          status: 409,
+          json: { code: 'FileRevisionConflict', message: 'Stale file scope.' },
+        })
+      },
+    )
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=file-scope-first')
+    const firstPanel = page.getByTestId('issue-artifacts-panel')
+    await expect(firstPanel.getByText('scope-first.png')).toBeVisible()
+    await firstPanel.getByLabel('Guest 閲覧を許可').check()
+    await firstPanel.getByRole('button', { name: 'ダウンロード' }).click()
+    await staleAccessStarted
+
+    await page.getByTestId('task-row-file-scope-second').getByRole('button').click()
+    await expect(page).toHaveURL(/issueId=file-scope-second/)
+    const secondPanel = page.getByTestId('issue-artifacts-panel')
+    await expect(secondPanel.getByText('scope-first.png')).toHaveCount(0)
+    await expect(secondPanel.getByTestId('file-upload-input')).toBeAttached()
+    await expect(secondPanel.getByLabel('Guest 閲覧を許可')).not.toBeChecked()
+
+    releaseStaleAccess?.()
+    await expect.poll(() => staleAccessCompleted).toBe(true)
+    await expect(secondPanel.getByText('別の操作で状態が変わりました。最新の表示を確認してください。')).toHaveCount(0)
   })
 
   test('サイドバーからマイタスクへ移動するとタスクをカンバンで表示する', async ({ page }) => {
@@ -2144,12 +3203,12 @@ test.describe('authenticated task page', () => {
 
     await expect(page).toHaveURL('/my-tasks')
     await expect(page.getByTestId('my-tasks-kanban')).toBeVisible()
-    await expect(page.getByTestId('my-tasks-column-todo')).toContainText('未着手')
-    await expect(page.getByTestId('my-tasks-column-in-progress')).toContainText('進行中')
-    await expect(page.getByTestId('my-tasks-column-review')).toContainText('レビュー中')
-    await expect(page.getByTestId('my-tasks-column-done')).toContainText('完了')
+    await expect(page.getByTestId('my-tasks-column-core-team-todo')).toContainText('未着手')
+    await expect(page.getByTestId('my-tasks-column-core-team-in-progress')).toContainText('進行中')
+    await expect(page.getByTestId('my-tasks-column-core-team-review')).toContainText('レビュー')
+    await expect(page.getByTestId('my-tasks-column-core-team-done')).toContainText('完了')
     await expect(
-      page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
+      page.getByTestId('my-tasks-column-core-team-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
     ).toBeVisible()
     await expect(
       page.getByTestId('my-tasks-card-refero-seo-research'),
@@ -2160,14 +3219,14 @@ test.describe('authenticated task page', () => {
     await expect(
       page.getByTestId('my-tasks-card-refero-brand-guideline-status-select'),
     ).toHaveCount(0)
-    const legacyWireframeCard = page.getByTestId('my-tasks-card-refero-wireframe')
+    const wireframeCard = page.getByTestId('my-tasks-card-refero-wireframe')
 
     await expect(
       page.getByTestId('my-tasks-card-refero-wireframe-status-select'),
-    ).toHaveCount(0)
-    await expect(legacyWireframeCard).toHaveAttribute('draggable', 'false')
+    ).toBeVisible()
+    await expect(wireframeCard).toHaveAttribute('draggable', 'true')
     await expect(
-      page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
+      page.getByTestId('my-tasks-column-core-team-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
     ).toBeVisible()
     const boardGeometry = await page.getByTestId('my-tasks-kanban').evaluate((element) => {
       const columnRects = Array.from(element.children).map((column) => column.getBoundingClientRect())
@@ -2181,6 +3240,117 @@ test.describe('authenticated task page', () => {
     expect(boardGeometry.hasOverlap).toBe(false)
     expect(boardGeometry.isScrollable).toBe(true)
     expect(requestCounts.taskStatusUpdates).toBe(0)
+  })
+
+  test('Team configuration 取得失敗中も canonical My Task を明示的な列へ保持する', async ({
+    page,
+  }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      failedWorkItemConfigurationTeamIds: ['core-team'],
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            id: 'configuration-unavailable-task',
+            title: '設定取得失敗中の担当タスク',
+            workflowStatusId: 'active',
+          }),
+        ],
+      },
+    })
+    await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
+
+    await page.goto('/my-tasks')
+
+    const unavailableColumn = page.getByTestId('my-tasks-configuration-unavailable-column')
+    const taskCard = page.getByTestId('my-tasks-card-refero-configuration-unavailable-task')
+
+    await expect(page.getByTestId('my-tasks-configuration-error')).toContainText(
+      'Work Item 設定を取得できませんでした。',
+    )
+    await expect(unavailableColumn).toBeVisible()
+    await expect(unavailableColumn.getByText('設定取得失敗中の担当タスク')).toBeVisible()
+    await expect(taskCard).toHaveAttribute('draggable', 'false')
+    await expect(
+      page.getByTestId('my-tasks-card-refero-configuration-unavailable-task-status-select'),
+    ).toHaveCount(0)
+
+    const readsBeforeRetry = getMockRequestCounts(page).workItemConfigurationReads
+    await page.getByTestId('my-tasks-configuration-error').getByRole('button', {
+      name: '再読み込み',
+    }).click()
+    await expect.poll(() => getMockRequestCounts(page).workItemConfigurationReads).toBeGreaterThan(
+      readsBeforeRetry,
+    )
+    await expect(taskCard).toBeVisible()
+  })
+
+  test('My Tasks は取得済み Work Item がない Team の configuration を要求しない', async ({
+    page,
+  }) => {
+    const requestedConfigurationTeamIds: string[] = []
+
+    page.on('request', (request) => {
+      const match = new URL(request.url()).pathname.match(
+        /^\/api\/teams\/([^/]+)\/work-item-configuration$/,
+      )
+
+      if (match?.[1]) {
+        requestedConfigurationTeamIds.push(decodeURIComponent(match[1]))
+      }
+    })
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      failedWorkItemConfigurationTeamIds: ['design-team'],
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            id: 'accessible-team-task',
+            title: '閲覧可能な Team の担当タスク',
+            workflowStatusId: 'todo',
+          }),
+        ],
+      },
+    })
+    await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
+
+    await page.goto('/my-tasks')
+
+    await expect(page.getByTestId('my-tasks-card-refero-accessible-team-task')).toBeVisible()
+    await expect.poll(() => Array.from(new Set(requestedConfigurationTeamIds))).toEqual([
+      'core-team',
+    ])
+    await expect(page.getByTestId('my-tasks-configuration-error')).toHaveCount(0)
+  })
+
+  test('My Tasks は複数 Team の同名 workflow 列を Team 名で区別する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, [], undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            id: 'core-team-task',
+            title: 'コアチームの担当タスク',
+          }),
+        ],
+        'design-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'brand-refresh',
+            id: 'design-team-task',
+            teamId: 'design-team',
+            title: 'デザインチームの担当タスク',
+          }),
+        ],
+      },
+    })
+    await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
+
+    await page.goto('/my-tasks')
+
+    const coreColumn = page.getByTestId('my-tasks-column-core-team-todo')
+    const designColumn = page.getByTestId('my-tasks-column-design-team-todo')
+
+    await expect(coreColumn).toContainText('コアチーム · 未着手')
+    await expect(designColumn).toContainText('デザインチーム · 未着手')
+    await expect(coreColumn.getByText('コアチームの担当タスク')).toBeVisible()
+    await expect(designColumn.getByText('デザインチームの担当タスク')).toBeVisible()
   })
 
   test('プロジェクト画面の権限タブでメンバーのロールを変更できる', async ({ page }) => {
@@ -2344,7 +3514,7 @@ test.describe('authenticated task page', () => {
             description: 'core team detail',
             assignedProjectId: 'shared-launch',
             teamId: 'core-team',
-            status: 'in-progress',
+            workflowStatusId: 'in-progress',
           }),
         ],
         'design-team': [
@@ -2354,7 +3524,7 @@ test.describe('authenticated task page', () => {
             description: 'design team detail',
             assignedProjectId: 'shared-launch',
             teamId: 'design-team',
-            status: 'review',
+            workflowStatusId: 'review',
           }),
         ],
       },
@@ -2372,6 +3542,484 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-detail-pane').locator('textarea[name="description"]')).toHaveValue('core team detail')
   })
 
+  test('teamId のない曖昧な issueId deep-link は Team Issue 詳細 API を呼ばず aggregate URL へ戻す', async ({
+    page,
+  }) => {
+    const teamScopedIssueRequestPaths: string[] = []
+
+    page.on('request', (request) => {
+      const pathname = new URL(request.url()).pathname
+
+      if (/^\/api\/teams\/(?:core-team|design-team)\/issues(?:\/|$)/.test(pathname)) {
+        teamScopedIssueRequestPaths.push(pathname)
+      }
+    })
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            description: 'core ambiguous detail',
+            id: 'ambiguous-issue',
+            workflowStatusId: 'in-progress',
+            teamId: 'core-team',
+            title: 'Core ambiguous issue',
+          }),
+        ],
+        'design-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            description: 'design ambiguous detail',
+            id: 'ambiguous-issue',
+            workflowStatusId: 'review',
+            teamId: 'design-team',
+            title: 'Design ambiguous issue',
+          }),
+        ],
+      },
+    })
+
+    await page.goto('/projects/shared-launch/issues?issueId=ambiguous-issue')
+
+    await expect(page).toHaveURL('/projects/shared-launch/issues')
+    await expect(page.getByTestId('task-row-ambiguous-issue')).toHaveCount(2)
+    await expect(page.getByRole('button', { name: 'Core ambiguous issue' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Design ambiguous issue' })).toBeVisible()
+    expect(teamScopedIssueRequestPaths).toEqual([])
+
+    await page.getByRole('button', { name: 'Design ambiguous issue' }).click()
+
+    await expect(page).toHaveURL(
+      '/projects/shared-launch/issues?teamId=design-team&issueId=ambiguous-issue',
+    )
+    await expect(
+      page.getByTestId('task-detail-pane').locator('textarea[name="description"]'),
+    ).toHaveValue('design ambiguous detail')
+    expect(
+      teamScopedIssueRequestPaths.some((path) =>
+        path === '/api/teams/design-team/issues/ambiguous-issue',
+      ),
+    ).toBe(true)
+    expect(
+      teamScopedIssueRequestPaths.some((path) => path.startsWith('/api/teams/core-team/issues')),
+    ).toBe(false)
+  })
+
+  test('teamId のない共有 Project URL は全 Team の Issue を保持する', async ({ page }) => {
+    const requestedConfigurationTeamIds: string[] = []
+
+    page.on('request', (request) => {
+      const match = new URL(request.url()).pathname.match(
+        /^\/api\/teams\/([^/]+)\/work-item-configuration$/,
+      )
+
+      if (match?.[1]) {
+        requestedConfigurationTeamIds.push(decodeURIComponent(match[1]))
+      }
+    })
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      projectNamesByTeam: {
+        'core-team': { 'shared-launch': 'Core shared launch' },
+        'design-team': { 'shared-launch': 'Design shared launch' },
+      },
+      teamExpandedById: {
+        'core-team': false,
+        'design-team': false,
+      },
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'core-shared-issue',
+            teamId: 'core-team',
+            title: 'Core shared issue',
+          }),
+        ],
+        'design-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'design-shared-issue',
+            teamId: 'design-team',
+            title: 'Design shared issue',
+          }),
+        ],
+      },
+    })
+
+    await page.goto('/projects/shared-launch/issues')
+
+    await expect(page.getByTestId('task-row-core-shared-issue')).toBeVisible()
+    await expect(page.getByTestId('task-row-design-shared-issue')).toBeVisible()
+    await expect(page.getByTestId('tasks-heading')).toHaveText('shared-launch')
+    await expect(page.getByLabel('プロジェクトのパンくずリスト')).toContainText(
+      'プロジェクト',
+    )
+    await expect(page.getByLabel('プロジェクトのパンくずリスト')).not.toContainText(
+      'コアチーム',
+    )
+    const coreTeamGroup = page.getByTestId('sidebar-team-core-team').first()
+    const designTeamGroup = page.getByTestId('sidebar-team-design-team').first()
+    const coreTeamButton = coreTeamGroup.getByRole('button', {
+      name: 'コアチーム',
+      exact: true,
+    })
+    const designTeamButton = designTeamGroup.getByRole('button', {
+      name: 'デザインチーム',
+      exact: true,
+    })
+
+    await expect(coreTeamGroup).toHaveAttribute('data-project-ancestor', 'false')
+    await expect(coreTeamGroup).toHaveAttribute('data-team-active', 'false')
+    await expect(designTeamGroup).toHaveAttribute('data-project-ancestor', 'false')
+    await expect(designTeamGroup).toHaveAttribute('data-team-active', 'false')
+    await expect(coreTeamButton).toHaveAttribute('aria-expanded', 'false')
+    await expect(designTeamButton).toHaveAttribute('aria-expanded', 'false')
+    await expect(coreTeamButton).not.toHaveClass(/bg-white\/8|bg-teal-500\/20/)
+    await expect(designTeamButton).not.toHaveClass(/bg-white\/8|bg-teal-500\/20/)
+    await expect(coreTeamGroup.locator(':scope > div.relative > span.absolute')).toHaveCount(0)
+    await expect(designTeamGroup.locator(':scope > div.relative > span.absolute')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '新規タスク' })).toHaveCount(0)
+    await expect.poll(() => [...new Set(requestedConfigurationTeamIds)].sort()).toEqual([
+      'core-team',
+      'design-team',
+    ])
+  })
+
+  test('共有 Project の一部 Team configuration 取得失敗を明示し Work Item を保持する', async ({
+    page,
+  }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      failedWorkItemConfigurationTeamIds: ['core-team'],
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'core-configuration-unavailable',
+            teamId: 'core-team',
+            title: 'Core configuration unavailable',
+            workflowStatusId: 'core-active',
+          }),
+        ],
+        'design-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'design-configuration-available',
+            teamId: 'design-team',
+            title: 'Design configuration available',
+            workflowStatusId: 'todo',
+          }),
+        ],
+      },
+    })
+
+    await page.goto('/projects/shared-launch/issues')
+
+    await expect(page.getByTestId('task-row-core-configuration-unavailable')).toBeVisible()
+    await expect(page.getByTestId('task-row-design-configuration-available')).toBeVisible()
+    await expect(page.getByTestId('project-configuration-error')).toContainText(
+      'Work Item 設定を取得できませんでした。',
+    )
+
+    await page.getByRole('tab', { name: 'ボード', exact: true }).click()
+    const unavailableColumn = page.getByTestId('project-task-configuration-unavailable-column')
+
+    await expect(unavailableColumn).toContainText('Core configuration unavailable')
+    await expect(page.getByTestId('project-task-column-design-team-todo')).toContainText(
+      'Design configuration available',
+    )
+  })
+
+  test('共有 Project は別 Team の configuration 取得失敗で正常な Work Item の更新を無効化しない', async ({
+    page,
+  }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      failedWorkItemConfigurationTeamIds: ['core-team'],
+      teamIssuesByTeam: {
+        'core-team': [],
+        'design-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'design-editable-with-partial-failure',
+            teamId: 'design-team',
+            title: 'Design remains editable',
+            workflowStatusId: 'todo',
+          }),
+        ],
+      },
+    })
+
+    await page.goto('/projects/shared-launch/issues')
+
+    const detailPane = page.getByTestId('task-detail-pane')
+
+    await expect(detailPane).toContainText('Design remains editable')
+    await expect(detailPane.locator('select[name="assignedProjectId"]')).toHaveValue(
+      'shared-launch',
+    )
+    await expect(detailPane.getByRole('button', { name: '変更を保存' })).toBeEnabled()
+
+    const updateRequestPromise = page.waitForRequest((request) =>
+      request.method() === 'PATCH' &&
+      new URL(request.url()).pathname ===
+        '/api/teams/design-team/issues/design-editable-with-partial-failure',
+    )
+
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+
+    const updateBody = (await updateRequestPromise).postDataJSON() as {
+      assignedProjectId?: string | null
+    }
+
+    expect(updateBody.assignedProjectId).toBe('shared-launch')
+  })
+
+  test('共有 Project の選択状態は Team-local な同一 Work Item ID を区別する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'same-local-id',
+            teamId: 'core-team',
+            title: 'Core same local ID',
+          }),
+        ],
+        'design-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'same-local-id',
+            teamId: 'design-team',
+            title: 'Design same local ID',
+          }),
+        ],
+      },
+    })
+
+    await page.goto('/projects/shared-launch/issues')
+
+    const duplicateRows = page.getByTestId('task-row-same-local-id')
+    const coreRow = duplicateRows.filter({ hasText: 'Core same local ID' })
+    const designRow = duplicateRows.filter({ hasText: 'Design same local ID' })
+
+    await coreRow.getByRole('checkbox', { name: 'Core same local ID' }).check()
+
+    await expect(coreRow).toHaveAttribute('data-selected', 'true')
+    await expect(designRow).toHaveAttribute('data-selected', 'false')
+  })
+
+  test('共有 Project はタスクがない Team の workflow 列も表示する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, [], undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'core-only-shared-issue',
+            title: 'Core only shared issue',
+          }),
+        ],
+      },
+    })
+
+    await page.goto('/projects/shared-launch/issues')
+    await page.getByRole('tab', { name: 'ボード', exact: true }).click()
+
+    await expect(page.getByTestId('project-task-column-core-team-todo')).toContainText(
+      'コアチーム · 未着手',
+    )
+    const emptyDesignColumn = page.getByTestId('project-task-column-design-team-todo')
+
+    await expect(emptyDesignColumn).toContainText('デザインチーム · 未着手')
+    await expect(emptyDesignColumn).toContainText('この状態のタスクはありません。')
+  })
+
+  test('teamId のない共有 Project deep-link は選択 Issue の Team 設定と関連候補だけを詳細へ適用する', async ({
+    page,
+  }) => {
+    const coreConfiguration = {
+      ...teamWorkItemConfigurationFixture,
+      scopeId: 'core-team',
+      workflow: {
+        ...teamWorkItemConfigurationFixture.workflow,
+        id: 'core-shared-workflow',
+        initialStatusId: 'core-active',
+        statuses: [
+          { id: 'core-active', name: 'Core configured', category: 'started', sortOrder: 0 },
+        ],
+        transitions: [],
+      },
+      customFields: [
+        {
+          id: 'core-context',
+          name: 'Core-only field',
+          type: 'text',
+          sortOrder: 0,
+          required: false,
+        },
+      ],
+    } satisfies WorkItemConfiguration
+    const designConfiguration = {
+      ...teamWorkItemConfigurationFixture,
+      scopeId: 'design-team',
+      workflow: {
+        ...teamWorkItemConfigurationFixture.workflow,
+        id: 'design-shared-workflow',
+        initialStatusId: 'design-active',
+        statuses: [
+          { id: 'design-active', name: 'Design configured', category: 'started', sortOrder: 0 },
+        ],
+        transitions: [],
+      },
+      customFields: [
+        {
+          id: 'design-context',
+          name: 'Design-only field',
+          type: 'text',
+          sortOrder: 0,
+          required: false,
+        },
+      ],
+    } satisfies WorkItemConfiguration
+    const requestedConfigurationTeamIds: string[] = []
+    const requestedIssueListTeamIds: string[] = []
+
+    page.on('request', (request) => {
+      const pathname = new URL(request.url()).pathname
+      const configurationMatch = pathname.match(
+        /^\/api\/teams\/([^/]+)\/work-item-configuration$/,
+      )
+      const issueListMatch = pathname.match(/^\/api\/teams\/([^/]+)\/issues$/)
+
+      if (configurationMatch?.[1]) {
+        requestedConfigurationTeamIds.push(decodeURIComponent(configurationMatch[1]))
+      }
+      if (issueListMatch?.[1]) {
+        requestedIssueListTeamIds.push(decodeURIComponent(issueListMatch[1]))
+      }
+    })
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      projectNamesByTeam: {
+        'core-team': { 'shared-launch': 'Core shared launch' },
+        'design-team': { 'shared-launch': 'Design shared launch' },
+      },
+      teamExpandedById: {
+        'core-team': false,
+        'design-team': false,
+      },
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            customFieldValues: { 'core-context': 'Core list value' },
+            id: 'core-shared-issue',
+            statusCategory: 'started',
+            teamId: 'core-team',
+            title: 'Core shared issue',
+            workflowStatusId: 'core-active',
+          }),
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'core-relation-candidate',
+            teamId: 'core-team',
+            title: 'Core relation candidate',
+            workflowStatusId: 'core-active',
+          }),
+        ],
+        'design-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            customFieldValues: { 'design-context': 'Design detail value' },
+            description: 'design team selected detail',
+            id: 'design-selected-issue',
+            statusCategory: 'started',
+            teamId: 'design-team',
+            title: 'Design selected issue',
+            workflowStatusId: 'design-active',
+          }),
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'design-relation-candidate',
+            teamId: 'design-team',
+            title: 'Design relation candidate',
+            workflowStatusId: 'design-active',
+          }),
+        ],
+      },
+      teamWorkItemConfigurations: {
+        'core-team': coreConfiguration,
+        'design-team': designConfiguration,
+      },
+    })
+
+    await page.goto('/projects/shared-launch/issues?issueId=design-selected-issue')
+
+    const coreRow = page.getByTestId('task-row-core-shared-issue')
+    const designRow = page.getByTestId('task-row-design-selected-issue')
+    const detailPane = page.getByTestId('task-detail-pane')
+
+    await expect(coreRow).toBeVisible()
+    await expect(designRow).toBeVisible()
+    await expect(page.getByTestId('tasks-heading')).toHaveText('Design shared launch')
+    const breadcrumb = page.getByLabel('プロジェクトのパンくずリスト')
+
+    await expect(breadcrumb).toContainText('デザインチーム')
+    await expect(breadcrumb).toContainText('Design shared launch')
+    await expect(page.getByTestId('sidebar-team-core-team').first()).toHaveAttribute(
+      'data-project-ancestor',
+      'false',
+    )
+    await expect(page.getByTestId('sidebar-team-design-team').first()).toHaveAttribute(
+      'data-project-ancestor',
+      'true',
+    )
+    await expect(
+      page.getByTestId('sidebar-team-design-team').first().getByRole('button', {
+        name: 'デザインチーム',
+        exact: true,
+      }),
+    ).toHaveAttribute('aria-expanded', 'true')
+    await expect(coreRow).toContainText('Core configured')
+    await expect(designRow).toContainText('Design configured')
+    await expect(detailPane.locator('textarea[name="description"]')).toHaveValue(
+      'design team selected detail',
+    )
+    await expect(detailPane.locator('select[name="workflowStatusId"]')).toHaveValue(
+      'design-active',
+    )
+    await expect(detailPane.getByText('Design-only field')).toBeVisible()
+    await expect(detailPane.getByText('Core-only field')).toHaveCount(0)
+    await expect(detailPane.getByLabel('対象 Work Item').locator('option')).toHaveText([
+      'Design relation candidate',
+    ])
+    await expect.poll(() => [...new Set(requestedConfigurationTeamIds)].sort()).toEqual([
+      'core-team',
+      'design-team',
+    ])
+    await expect.poll(() => [...new Set(requestedIssueListTeamIds)]).toEqual([
+      'design-team',
+    ])
+
+    const statusFilterButton = page.getByRole('button', { name: 'ステータス', exact: true })
+
+    await statusFilterButton.click()
+    await expect(page.getByRole('menuitemradio', {
+      name: 'コアチーム · Core configured',
+    })).toBeVisible()
+    await expect(page.getByRole('menuitemradio', {
+      name: 'デザインチーム · Design configured',
+    })).toBeVisible()
+    await statusFilterButton.click()
+    await page.getByRole('tab', { name: 'ボード', exact: true }).click()
+    await expect(page.getByTestId('project-task-column-core-team-core-active')).toContainText(
+      'Core configured',
+    )
+    await expect(page.getByTestId('project-task-column-design-team-design-active')).toContainText(
+      'Design configured',
+    )
+  })
+
   test('未割り当て Work Item を My Tasks と通知 Inbox から Team 詳細へ開ける', async ({ page }) => {
     const issueId = 'unassigned-work-item'
     const issueDescription = '未割り当て Work Item の詳細です。'
@@ -2387,7 +4035,7 @@ test.describe('authenticated task page', () => {
             description: issueDescription,
             id: issueId,
             priority: 'high',
-            status: 'review',
+            workflowStatusId: 'review',
             title: '未割り当て Work Item',
           }),
         ],
@@ -2440,7 +4088,7 @@ test.describe('authenticated task page', () => {
             title: 'コアチームだけの共通ローンチ確認',
             assignedProjectId: 'shared-launch',
             priority: 'high',
-            status: 'review',
+            workflowStatusId: 'review',
             teamId: 'core-team',
           }),
         ],
@@ -2566,7 +4214,7 @@ test.describe('authenticated task page', () => {
         'core-team': [
           createStoredTeamIssue({
             id: issueId,
-            status: 'in-progress',
+            workflowStatusId: 'in-progress',
             title: '通知のコメント確認',
           }),
         ],
@@ -2655,7 +4303,7 @@ test.describe('authenticated task page', () => {
             assigneeEmail: 'demo@example.com',
             assigneeName: 'Demo User',
             teamId: 'core-team',
-            status: 'in-progress',
+            workflowStatusId: 'in-progress',
           }),
         ],
         'design-team': [
@@ -2664,7 +4312,7 @@ test.describe('authenticated task page', () => {
             title: '重複 Issue',
             assignedProjectId: 'shared-launch',
             teamId: 'design-team',
-            status: 'review',
+            workflowStatusId: 'review',
           }),
         ],
       },
@@ -2708,6 +4356,95 @@ test.describe('authenticated task page', () => {
     )
   })
 
+  test('approval summary を受信箱の要確認理由とレポート集計へ反映する', async ({ page }) => {
+    const approvalIssue = createStoredTeamIssue({
+      approvalSummary: {
+        approvedCount: 0,
+        changesRequestedCount: 1,
+        nextDueAt: '2026-07-15T14:59:59.000Z',
+        overdueCount: 1,
+        pendingCount: 2,
+        rejectedCount: 0,
+      },
+      assignedProjectId: 'refero',
+      dueDate: '2099/12/31',
+      id: 'approval-proof',
+      priority: 'low',
+      workflowStatusId: 'todo',
+      teamId: 'core-team',
+      title: '承認待ち成果物',
+    })
+    const historicalDecisionIssue = createStoredTeamIssue({
+      approvalSummary: {
+        approvedCount: 1,
+        changesRequestedCount: 1,
+        overdueCount: 0,
+        pendingCount: 0,
+        rejectedCount: 1,
+      },
+      assignedProjectId: 'refero',
+      dueDate: '2099/12/31',
+      id: 'approval-history-only',
+      priority: 'low',
+      workflowStatusId: 'todo',
+      teamId: 'core-team',
+      title: '過去の承認判断だけがある成果物',
+    })
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: { 'core-team': [approvalIssue, historicalDecisionIssue] },
+    })
+
+    await page.goto('/inbox')
+    const approvalRow = page.getByTestId('inbox-task-core-team-refero-approval-proof')
+
+    await expect(approvalRow).toBeVisible()
+    await expect(page.getByTestId('inbox-task-core-team-refero-approval-history-only')).toHaveCount(0)
+    await expect(approvalRow).toContainText('Approval 期限超過')
+    await page.getByTestId('inbox-filter-approval').click()
+    await expect(approvalRow).toBeVisible()
+
+    await page.goto('/reports')
+    await expect(page.getByTestId('reports-metric-pending-approvals').locator('p').last()).toHaveText('2')
+    await expect(page.getByTestId('reports-metric-overdue-approvals').locator('p').last()).toHaveText('1')
+    await expect(page.getByTestId('reports-project-core-team-refero')).toContainText('2')
+  })
+
+  test('started category の進行中 task を review 件数と理由へ混入させない', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, [], undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            dueDate: '2099/12/31',
+            id: 'ordinary-in-progress',
+            priority: 'low',
+            title: '通常の進行中タスク',
+            workflowStatusId: 'in-progress',
+          }),
+          createStoredTeamIssue({
+            dueDate: '2099/12/31',
+            id: 'actual-review',
+            priority: 'low',
+            title: 'レビュー中タスク',
+            workflowStatusId: 'review',
+          }),
+        ],
+      },
+    })
+
+    await page.goto('/inbox')
+
+    await expect(page.getByTestId('inbox-task-core-team-refero-actual-review')).toContainText(
+      'レビュー待ち',
+    )
+    await expect(page.getByTestId('inbox-task-core-team-refero-ordinary-in-progress')).toHaveCount(0)
+
+    await page.goto('/reports')
+    await expect(
+      page.getByTestId('reports-project-core-team-refero').getByRole('cell').nth(4),
+    ).toHaveText('1')
+  })
+
   test('レポートでプロジェクト健全性を絞り込み CSV 出力できる', async ({ page }) => {
     await page.goto('/reports')
 
@@ -2747,6 +4484,51 @@ test.describe('authenticated task page', () => {
 
     await expect(page.getByTestId('reports-project-core-team-refero')).toBeVisible()
     await expect(page.getByTestId('reports-project-core-team-product-roadmap')).toHaveCount(0)
+  })
+
+  test('Issue #21: レポートの custom field は project scope 外の Work Item を除外する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      failedWorkItemConfigurationTeamIds: ['design-team'],
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'refero',
+            customFieldValues: { budget: 1_200_000 },
+            id: 'scoped-budget',
+            title: 'Scoped budget',
+            workflowStatusId: 'in-progress',
+          }),
+          createStoredTeamIssue({
+            assignedProjectId: 'product-roadmap',
+            customFieldValues: { budget: 2_400_000 },
+            id: 'out-of-scope-budget',
+            title: 'Out of scope budget',
+            workflowStatusId: 'todo',
+          }),
+        ],
+        'design-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'brand-refresh',
+            id: 'design-configuration-unavailable-report-task',
+            teamId: 'design-team',
+            title: 'Design configuration unavailable report task',
+          }),
+        ],
+      },
+      teamWorkItemConfigurations: {
+        'core-team': teamWorkItemConfigurationFixture,
+      },
+    })
+    await page.goto('/reports')
+
+    await expect(page.getByRole('alert')).toContainText(
+      '一部 Team の Work Item 設定を取得できないため',
+    )
+    await page.getByTestId('reports-custom-field-filter').selectOption('core-team:budget')
+    await expect(page.getByTestId('reports-project-core-team-refero')).toBeVisible()
+    await expect(
+      page.getByTestId('reports-project-core-team-product-roadmap').getByRole('cell').nth(3),
+    ).toHaveText('0')
   })
 
   test('設定画面でフォントサイズを変更して保存できる', async ({ page }) => {
@@ -3032,13 +4814,13 @@ test('マイタスクの片方の移動が失敗しても別 Issue の成功済�
         createStoredTeamIssue({
           id: 'onboarding-friction',
           title: '初回オンボーディングの離脱要因を減らす',
-          status: 'in-progress',
+          workflowStatusId: 'in-progress',
           priority: 'high',
         }),
         createStoredTeamIssue({
           id: 'billing-copy',
           title: '料金導線の説明不足を解消する',
-          status: 'todo',
+          workflowStatusId: 'todo',
         }),
       ],
     },
@@ -3057,20 +4839,20 @@ test('マイタスクの片方の移動が失敗しても別 Issue の成功済�
     .getByTestId('my-tasks-card-refero-billing-copy-status-select')
     .selectOption('done')
   await expect(
-    page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-billing-copy'),
+    page.getByTestId('my-tasks-column-core-team-done').getByTestId('my-tasks-card-refero-billing-copy'),
   ).toBeVisible()
 
   releaseOnboardingFailure()
 
   await expect(page.getByTestId('my-tasks-move-error')).toBeVisible()
   await expect(
-    page.getByTestId('my-tasks-column-in-progress').getByTestId('my-tasks-card-refero-onboarding-friction'),
+    page.getByTestId('my-tasks-column-core-team-in-progress').getByTestId('my-tasks-card-refero-onboarding-friction'),
   ).toBeVisible()
   await expect(
-    page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-billing-copy'),
+    page.getByTestId('my-tasks-column-core-team-done').getByTestId('my-tasks-card-refero-billing-copy'),
   ).toBeVisible()
   await expect(
-    page.getByTestId('my-tasks-column-todo').getByTestId('my-tasks-card-refero-billing-copy'),
+    page.getByTestId('my-tasks-column-core-team-todo').getByTestId('my-tasks-card-refero-billing-copy'),
   ).toHaveCount(0)
   expect(getMockRequestCounts(page).issueUpdates).toBe(2)
   expect(getMockRequestCounts(page).taskStatusUpdates).toBe(0)
@@ -3100,7 +4882,7 @@ test('マイタスクでは同一 Issue の移動中に追加移動を開始で�
         createStoredTeamIssue({
           id: 'onboarding-friction',
           title: '初回オンボーディングの離脱要因を減らす',
-          status: 'in-progress',
+          workflowStatusId: 'in-progress',
           priority: 'high',
         }),
       ],
@@ -3116,7 +4898,7 @@ test('マイタスクでは同一 Issue の移動中に追加移動を開始で�
     .selectOption('done')
   await onboardingDoneUpdateStarted
   await expect(
-    page.getByTestId('my-tasks-column-done').getByTestId('my-tasks-card-refero-onboarding-friction'),
+    page.getByTestId('my-tasks-column-core-team-done').getByTestId('my-tasks-card-refero-onboarding-friction'),
   ).toBeVisible()
   await expect(
     page.getByTestId('my-tasks-card-refero-onboarding-friction-status-select'),

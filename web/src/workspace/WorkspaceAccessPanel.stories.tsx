@@ -140,6 +140,7 @@ const attentionAccess = {
       expiresAt: '2026-07-16T02:00:00.000Z',
       failureMessage: 'The Cognito identity cleanup could not be completed.',
       id: 'invitation-revoked-cleanup-failed',
+      identityCleanupManualRequired: true,
       identityOwnership: 'workspace-created',
       lastSentAt: '2026-07-09T02:01:00.000Z',
       name: 'Cleanup Retry',
@@ -155,6 +156,7 @@ const meta = {
   args: {
     access: standardAccess,
     locale: 'ja',
+    onAcknowledgeInvitationCleanup: async () => undefined,
     onInvite: async () => undefined,
     onReinviteInvitation: async () => undefined,
     onResendInvitation: async () => undefined,

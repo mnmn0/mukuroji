@@ -333,6 +333,8 @@ export type PresenceLeaveInput = {
 export interface CollaborationClient {
   /** Root comments または replies を page 取得します。 */
   getThread(input: GetCollaborationThreadInput): Promise<CollaborationThreadPage>
+  /** File 添付先として保存済み・未削除の comment が存在するか確認します。 */
+  hasAttachableComment(entityKey: string, commentId: string): Promise<boolean>
   /** Comment の current snapshot を consistent read します。 */
   getCommentSnapshot(
     input: GetCollaborationCommentSnapshotInput,
@@ -559,11 +561,17 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     } satisfies CollaborationThreadPage
   }
 
+  /** File 添付先として保存済み・未削除の comment が存在するか確認します。 */
+  async hasAttachableComment(entityKey: string, commentId: string) {
+    const comment = await this.getCommentSnapshot({ entityKey, commentId })
+    return Boolean(comment && !comment.deletedAt)
+  }
+
   /** Comment の current snapshot を consistent read します。 */
   async getCommentSnapshot(input: GetCollaborationCommentSnapshotInput) {
     await this.ensureLocalTable()
     return this.getStoredComment(
-      requireText(input.entityKey, 'Collaboration entity key'),
+      requireIdentifier(input.entityKey, 'Collaboration entity key'),
       requireIdentifier(input.commentId, 'Comment ID'),
     )
   }

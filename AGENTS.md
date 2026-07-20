@@ -15,13 +15,10 @@
 
 ## ディレクトリ
 
-- `web/`: React + TypeScript + Vite のフロントエンド。
-- `server/`: Hono + Bun のサーバー。
-- `contracts/`: Web / Server 間で共有する副作用のない TypeScript contract。
+- `web/`: React + TypeScript + Vite のフロントエンド。Web 固有のルールは `web/AGENTS.md` に置く。
+- `server/`: Hono + Bun のサーバー。Server 固有のルールは `server/AGENTS.md` に置く。
 - `cdk/`: AWS CDK TypeScript プロジェクト。
 - `docs/`: ドキュメント置き場。
-- `scripts/`: ローカル環境の準備、seed、確認用スクリプト。
-- `floci/`: ローカル AWS 互換環境の初期化と backend deploy 補助。
 
 このリポジトリは Bun workspaces です。依存管理はルートで行い、lockfile はルートの `bun.lock` に集約します。各パッケージ配下に `bun.lock` を追加しないでください。
 
@@ -38,52 +35,16 @@ Oxc / oxlint はリポジトリルートで設定します。
 ```sh
 bun run oxc:lint
 bun run oxc:lint:github
+bun run typecheck:contracts
+bun run typecheck:server
+bun run dependencies:check
+bun run knip:check
 ```
 
 `oxc:lint:github` は GitHub Actions の annotation 向けです。CI / oxlint 設定を変更した場合は、ローカルでは通常 `bun run oxc:lint` を確認してください。
 
-## Web
-
-`web/` は React 19, React Router, Tailwind CSS, Storybook を使います。
-
-主なコマンド:
-
-```sh
-bun run web:dev
-bun run web:lint
-bun run web:test
-bun run web:build
-bun run web:storybook
-bun run web:build-storybook
-```
-
-実装方針:
-
-- 画面単位のルーティングは `web/src/routes/router.tsx` に寄せ、`App.tsx` を肥大化させない。
-- グローバル CSS は `web/src/index.css` を最小限に保ち、UI は Tailwind のユーティリティ中心で作る。
-- Storybook のカテゴリは `Application/...` と `Design System/...` を基本にする。
-- コンポーネントは Storybook で単体確認できるように Story を追加・更新する。
-- 表示文言は i18n 対応を前提にし、固定文言をコンポーネントに閉じ込めない。
-- 既存の `web/src/i18n` と `createTranslator` / `createSidebarLabels` の方針に合わせる。
-- ブランド表現には `BrandMark` と `mukuroji` 表記を使う。
-
-確認:
-
-- UI 変更では少なくとも `bun run web:lint`, `bun run web:build`, `bun run web:build-storybook` を通す。
-- Storybook を起動できる場合は対象 Story をブラウザまたはスクリーンショットで確認する。
-- Storybook の出力 `storybook-static/` は生成物なのでコミットしない。
-
-## Server
-
-`server/` は Hono + Bun です。詳細な責務境界と検証方法は `server/AGENTS.md` に従ってください。
-
-主なコマンド:
-
-```sh
-bun run server:dev
-bun run server:test
-bun run server:build:lambda
-```
+`typecheck:server` は server の本番コード、`typecheck:contracts` は共有 contract の型検査です。
+`dependencies:check` は workspace 間の循環依存・禁止依存を、`knip:check` は未使用ファイル・依存を検査します。
 
 ## CDK
 
@@ -103,9 +64,7 @@ bun run cdk:synth
 
 作業内容に応じて必要な検証を実行し、結果をユーザーに伝えてください。
 
-- `web` の UI/Storybook 変更: `bun run web:test`, `bun run web:lint`, `bun run web:build`, `bun run web:build-storybook`
 - CI / oxlint 設定の変更: `bun run oxc:lint`
 - `cdk` の変更: `bun run cdk:build`, `bun run cdk:test`
-- `server` の変更: `bun run server:test`, `bun run server:build:lambda`
 
 コミット前レビューで指摘が出た場合は、対応してから再度必要な検証を行ってください。

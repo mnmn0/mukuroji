@@ -1,4 +1,4 @@
-import { createBrowserRouter } from 'react-router'
+import { Navigate, createBrowserRouter, type RouteObject } from 'react-router'
 import { ForgotPasswordPage } from '../pages/ForgotPasswordPage'
 import { LoginPage } from '../pages/LoginPage'
 import { NotFoundPage } from '../pages/NotFoundPage'
@@ -8,17 +8,38 @@ import { TaskPage } from '../pages/TaskPage'
 import { TeamIssuePage } from '../pages/TeamIssuePage'
 import { TermsPage } from '../pages/TermsPage'
 import { WorkspacePage } from '../pages/WorkspacePage'
+import { PlanningPage } from '../pages/PlanningPage'
 import { ProjectTasksRedirect } from './ProjectTasksRedirect'
 import { WorkspaceCommandMenuLayout } from '../commands/WorkspaceCommandMenu'
 import { SearchPage } from '../search/SearchPage'
+import { PublicRequestFormPage } from '../requests/PublicRequestFormPage'
+import { RequestIntakePage } from '../requests/RequestIntakePage'
+import { EnterpriseSsoCallbackPage } from '../pages/EnterpriseSsoCallbackPage'
+import { DocumentPage } from '../documents/DocumentPage'
+import { SharedDocumentPage } from '../documents/SharedDocumentPage'
+import { GoalDocumentsPage } from '../pages/GoalDocumentsPage'
+import { ReportsPage } from '../pages/ReportsPage'
+import { SecurityRecoveryPage } from '../pages/SecurityRecoveryPage'
 
 /**
  * アプリケーション全体の画面ルーティング定義です。
  */
-export const router = createBrowserRouter([
+export const appRoutes: RouteObject[] = [
   {
     path: '/',
     element: <LoginPage />,
+  },
+  {
+    path: '/login',
+    element: <LoginPage />,
+  },
+  {
+    path: '/auth/sso/callback',
+    element: <EnterpriseSsoCallbackPage />,
+  },
+  {
+    path: '/security/recovery',
+    element: <SecurityRecoveryPage />,
   },
   {
     element: <WorkspaceCommandMenuLayout />,
@@ -40,12 +61,44 @@ export const router = createBrowserRouter([
         element: <WorkspacePage view="inbox" />,
       },
       {
+        path: '/requests',
+        element: <RequestIntakePage />,
+      },
+      {
         path: '/search',
         element: <SearchPage />,
       },
       {
+        path: '/planning',
+        element: <Navigate replace to="/planning/timeline" />,
+      },
+      {
+        path: '/planning/timeline',
+        element: <PlanningPage />,
+      },
+      {
+        path: '/planning/roadmap',
+        element: <PlanningPage />,
+      },
+      {
+        path: '/planning/portfolio',
+        element: <PlanningPage />,
+      },
+      {
+        path: '/documents',
+        element: <DocumentPage />,
+      },
+      {
+        path: '/documents/:documentId',
+        element: <DocumentPage />,
+      },
+      {
+        path: '/goals/:goalId/documents',
+        element: <GoalDocumentsPage />,
+      },
+      {
         path: '/reports',
-        element: <WorkspacePage view="reports" />,
+        element: <ReportsPage />,
       },
       {
         path: '/help',
@@ -54,6 +107,10 @@ export const router = createBrowserRouter([
       {
         path: '/settings',
         element: <WorkspacePage view="settings" />,
+      },
+      {
+        path: '/settings/security',
+        element: <WorkspacePage view="enterprise-security" />,
       },
       {
         path: '/teams/:teamId/overview',
@@ -78,6 +135,10 @@ export const router = createBrowserRouter([
     ],
   },
   {
+    path: '/request/:linkToken',
+    element: <PublicRequestFormPage />,
+  },
+  {
     path: '/forgot-password',
     element: <ForgotPasswordPage />,
   },
@@ -94,7 +155,20 @@ export const router = createBrowserRouter([
     element: <SupportPage />,
   },
   {
+    path: '/share/documents/:shareToken',
+    element: <SharedDocumentPage />,
+  },
+  {
     path: '*',
     element: <NotFoundPage />,
   },
-])
+]
+
+/**
+ * Browser history を利用する application router を作成します。
+ *
+ * @returns App で利用する browser router です。
+ */
+export function createAppRouter() {
+  return createBrowserRouter(appRoutes)
+}

@@ -12,6 +12,7 @@ import type {
 } from './api'
 import type { WorkspaceMember } from '../workspace/api'
 import { TaskPriorityBadge } from './TaskViews'
+import { resolveProjectTaskStatus } from './api'
 import {
   formatDateInputValue,
   formatProjectMemberOption,
@@ -68,7 +69,7 @@ export function CreateTaskPanel({
             title,
             assigneeUserId,
             dueDate,
-            status,
+            workflowStatusId: status,
             priority,
           })
         }}
@@ -251,7 +252,7 @@ export function TaskDetailPane({
   const title = issue ? resolveTeamIssueTitle(issue, t) : resolveTaskTitle(task, t)
   const assigneeUserId = issue?.assigneeUserId ?? task.assigneeUserId ?? ''
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === assigneeUserId)
-  const assigneeLabel = issue ? resolveWorkItemAssignee(issue, t) : resolveTaskAssignee(task, t)
+  const assigneeLabel = issue ? resolveWorkItemAssignee(issue) : resolveTaskAssignee(task, t)
   const dueDate = issue?.dueDate ?? task.dueDate
   const assignedProjectId = issue?.assignedProjectId ?? task.assignedProjectId ?? ''
 
@@ -278,7 +279,7 @@ export function TaskDetailPane({
             description: String(formData.get('description') ?? '').trim(),
             dueDate: String(formData.get('dueDate') ?? '').replaceAll('-', '/'),
             priority: resolveTaskPriority(formData.get('priority')),
-            status: resolveTaskStatus(formData.get('status')),
+            workflowStatusId: resolveTaskStatus(formData.get('status')),
             title: String(formData.get('title') ?? '').trim(),
           }
 
@@ -352,7 +353,7 @@ export function TaskDetailPane({
               {t('tasks.column.status')}
               <select
                 className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={issue?.status ?? task.status}
+                defaultValue={issue ? resolveProjectTaskStatus(issue) : resolveProjectTaskStatus(task)}
                 name="status"
               >
                 {taskStatuses.map((status) => (
@@ -406,7 +407,6 @@ export function TaskDetailPane({
           focusedRootCommentId={focusedRootCommentId}
           locale={locale}
           members={workspaceMembers}
-          readOnlyMessage={task.source === 'legacy' ? t('tasks.comment.readOnly') : undefined}
         />
       ) : null}
     </aside>

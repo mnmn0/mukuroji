@@ -6,12 +6,15 @@ import {
   ScanCommand,
 } from '@aws-sdk/lib-dynamodb'
 import {
-  WORK_ITEM_SCHEMA_VERSION,
+  type DocumentDetail,
   type SearchCustomFieldValue,
   type SearchEntityType,
 } from '@mukuroji/contracts'
+import { isCanonicalWorkItemRecord } from '../src/canonical-work-item'
+import { validateDocumentPayload } from '../src/documents'
 import {
   createCommentWorkspaceSearchDocument,
+  createDocumentWorkspaceSearchDocument,
   createProjectWorkspaceSearchDocument,
   createTeamWorkspaceSearchDocument,
   createWorkItemWorkspaceSearchDocument,
@@ -21,7 +24,7 @@ import {
 } from '../src/workspace-search'
 
 const scanPageSize = 100
-const sourceNames = ['project-directory', 'work-items', 'collaboration'] as const
+const sourceNames = ['project-directory', 'work-items', 'collaboration', 'documents'] as const
 
 /**
  * Workspace search backfill が読み取る source table 名です。
@@ -66,6 +69,10 @@ type TableNames = {
    * Work Item comment を保存する collaboration table 名です。
    */
   collaboration: string
+  /**
+   * Canonical Document current row を保存する table 名です。
+   */
+  documents: string
   /**
    * Search document の投影先 table 名です。
    */
@@ -261,12 +268,12 @@ function printHelp() {
 Options:
   --dry-run                 Scan and map source rows without changing the search table.
   --limit <count>           Maximum source rows scanned in this run.
-  --source <name>           Run only project-directory, work-items, or collaboration.
+  --source <name>           Run only project-directory, work-items, collaboration, or documents.
   --help, -h                Show this help.
 
 Required production environment:
   PROJECT_DIRECTORY_TABLE_NAME, WORK_ITEMS_TABLE_NAME, COLLABORATION_TABLE_NAME,
-  WORKSPACE_SEARCH_TABLE_NAME
+  DOCUMENTS_TABLE_NAME, WORKSPACE_SEARCH_TABLE_NAME
 
 For a local endpoint, repository-local default table names are used when omitted.
 Write runs create the local Workspace search table when it is missing. Re-running
@@ -316,6 +323,11 @@ function resolveTableNames(endpoint: string | undefined): TableNames {
     collaboration: resolveTableName(
       ['MUKUROJI_COLLABORATION_TABLE', 'COLLABORATION_TABLE_NAME'],
       'mukuroji-collaboration-local',
+      allowLocalDefaults,
+    ),
+    documents: resolveTableName(
+      ['MUKUROJI_DOCUMENTS_TABLE', 'DOCUMENTS_TABLE_NAME'],
+      'mukuroji-documents-local',
       allowLocalDefaults,
     ),
     workspaceSearch: resolveTableName(
@@ -387,6 +399,11 @@ function createSourceDefinitions(tables: TableNames): SourceDefinition[] {
       name: 'collaboration',
       tableName: tables.collaboration,
       mapItem: mapCollaborationItem,
+    },
+    {
+      name: 'documents',
+      tableName: tables.documents,
+      mapItem: mapDocumentItem,
     },
   ]
 }
@@ -462,6 +479,7 @@ function createCounters(): Record<SourceName, BackfillCounters> {
     'project-directory': { scanned: 0, projected: 0, deleted: 0, skipped: 0 },
     'work-items': { scanned: 0, projected: 0, deleted: 0, skipped: 0 },
     collaboration: { scanned: 0, projected: 0, deleted: 0, skipped: 0 },
+    documents: { scanned: 0, projected: 0, deleted: 0, skipped: 0 },
   }
 }
 
@@ -606,7 +624,7 @@ function mapProjectDirectoryItemRow(
  * Canonical Work Item row を Team scope を保持した search document 操作へ変換します。
  */
 export function mapWorkItem(item: Record<string, unknown>): SearchProjectionOperation | undefined {
-  if (!isCanonicalWorkItem(item)) {
+  if (!isCanonicalWorkItemRecord(item)) {
     return undefined
   }
 
@@ -624,8 +642,12 @@ export function mapWorkItem(item: Record<string, unknown>): SearchProjectionOper
     return createDeleteOperation(workspaceId, 'work-item', entityId)
   }
 
-  const title = readOptionalString(item.title) ?? readOptionalString(item.titleKey) ?? issueId
+  const title = readRequiredString(item.title)
   const projectId = readOptionalString(item.assignedProjectId)
+
+  if (!title) {
+    return undefined
+  }
 
   return {
     action: 'put',
@@ -637,10 +659,10 @@ export function mapWorkItem(item: Record<string, unknown>): SearchProjectionOper
       body: readOptionalString(item.description),
       projectId,
       assigneeUserId: readOptionalString(item.assigneeUserId),
-      creatorUserId: readOptionalString(item.creatorMemberKey),
-      status: readOptionalString(item.status),
-      customFields: readCustomFields(item.customFields),
-      relationIds: readStringArray(item.relationIds),
+      creatorUserId: readRequiredString(item.creatorMemberKey),
+      status: readRequiredString(item.workflowStatusId),
+      customFields: readCanonicalCustomFieldValues(item.customFieldValues),
+      relationIds: item.relationIds as string[],
       dueDate: readOptionalString(item.dueDate),
       createdAt: readOptionalString(item.createdAt),
       updatedAt: readOptionalString(item.updatedAt),
@@ -693,6 +715,59 @@ export function mapCollaborationItem(
       createdAt: readOptionalString(item.createdAt),
       updatedAt: readOptionalString(item.updatedAt) ?? readOptionalString(item.createdAt),
     }),
+  }
+}
+
+/**
+ * Canonical current Document row を search document の put/delete 操作へ変換します。
+ *
+ * Version、receipt、comment など同じ single-table 内の派生 row と、key/snapshot が一致しない
+ * malformed row は fail closed で skip します。
+ */
+export function mapDocumentItem(
+  item: Record<string, unknown>,
+): SearchProjectionOperation | undefined {
+  const workspaceId = readRequiredString(item.workspaceId)
+  const documentId = readRequiredString(item.documentId)
+  const revision = readPositiveInteger(item.revision)
+
+  if (
+    item.entryType !== 'document' ||
+    !workspaceId ||
+    !documentId ||
+    item.recordKey !== `DOCUMENT#${documentId}` ||
+    !revision ||
+    !isRecord(item.document)
+  ) {
+    return undefined
+  }
+
+  const document = item.document as DocumentDetail
+
+  if (
+    document.id !== documentId ||
+    document.revision !== revision ||
+    (
+      document.archivedAt !== undefined &&
+      !isCanonicalIsoTimestamp(document.archivedAt)
+    )
+  ) {
+    return undefined
+  }
+
+  try {
+    validateDocumentPayload(document)
+  } catch {
+    return undefined
+  }
+
+  if (document.archivedAt) {
+    return createDeleteOperation(workspaceId, 'document', document.id)
+  }
+
+  return {
+    action: 'put',
+    document: createDocumentWorkspaceSearchDocument(workspaceId, document),
   }
 }
 
@@ -772,42 +847,29 @@ function readLocalizedTitle(item: Record<string, unknown>) {
   return { title, subtitle }
 }
 
-function readCustomFields(value: unknown): Record<string, SearchCustomFieldValue> | undefined {
-  if (!isRecord(value)) {
+function readCanonicalCustomFieldValues(
+  value: unknown,
+): Record<string, SearchCustomFieldValue> | undefined {
+  if (!isCanonicalCustomFieldValueRecord(value)) {
     return undefined
   }
 
-  const result: Record<string, SearchCustomFieldValue> = {}
-
-  for (const [fieldId, fieldValue] of Object.entries(value)) {
-    if (!fieldId.trim() || !isSearchCustomFieldValue(fieldValue)) {
-      continue
-    }
-
-    result[fieldId] = fieldValue
-  }
-
-  return Object.keys(result).length > 0 ? result : undefined
+  return Object.keys(value).length > 0 ? value : undefined
 }
 
-function isSearchCustomFieldValue(value: unknown): value is SearchCustomFieldValue {
-  return value === null ||
-    typeof value === 'string' ||
+function isCanonicalCustomFieldValue(value: unknown): value is SearchCustomFieldValue {
+  return typeof value === 'string' ||
     typeof value === 'number' && Number.isFinite(value) ||
     typeof value === 'boolean' ||
     Array.isArray(value) && value.every((entry) => typeof entry === 'string')
 }
 
-function readStringArray(value: unknown) {
-  if (!Array.isArray(value)) {
-    return undefined
-  }
-
-  const entries = [...new Set(value.flatMap((entry) =>
-    typeof entry === 'string' && entry.trim() ? [entry.trim()] : [],
-  ))]
-
-  return entries.length > 0 ? entries : undefined
+function isCanonicalCustomFieldValueRecord(
+  value: unknown,
+): value is Record<string, SearchCustomFieldValue> {
+  return isRecord(value) && Object.entries(value).every(
+    ([fieldId, fieldValue]) => fieldId.trim() && isCanonicalCustomFieldValue(fieldValue),
+  )
 }
 
 function readRequiredString(value: unknown) {
@@ -820,6 +882,16 @@ function readOptionalString(value: unknown) {
 
 function readPositiveInteger(value: unknown) {
   return Number.isSafeInteger(value) && (value as number) > 0 ? value as number : undefined
+}
+
+function isCanonicalIsoTimestamp(value: unknown) {
+  if (typeof value !== 'string') return false
+
+  try {
+    return new Date(value).toISOString() === value
+  } catch {
+    return false
+  }
 }
 
 function isCanonicalTeamDirectoryItem(item: Record<string, unknown>, workspaceId: string) {
@@ -848,32 +920,6 @@ function isCanonicalProjectDirectoryItem(item: Record<string, unknown>, workspac
     (item.archivedAt === undefined || typeof item.archivedAt === 'string')
 }
 
-function isCanonicalWorkItem(item: Record<string, unknown>) {
-  return item.schemaVersion === WORK_ITEM_SCHEMA_VERSION &&
-    Boolean(readPositiveInteger(item.revision)) &&
-    typeof item.directoryId === 'string' &&
-    typeof item.teamId === 'string' &&
-    item.directoryTeamId === `${item.directoryId}#team#${item.teamId}` &&
-    typeof item.issueId === 'string' &&
-    typeof item.sortOrder === 'number' &&
-    (typeof item.title === 'string' || typeof item.titleKey === 'string') &&
-    (item.description === undefined || typeof item.description === 'string') &&
-    typeof item.assigneeUserId === 'string' &&
-    (item.creatorMemberKey === undefined || typeof item.creatorMemberKey === 'string') &&
-    isWorkItemStatus(item.status) &&
-    typeof item.dueDate === 'string' &&
-    isWorkItemPriority(item.priority) &&
-    typeof item.createdAt === 'string' &&
-    typeof item.updatedAt === 'string' &&
-    (
-      item.assignedProjectId === undefined ||
-      (
-        typeof item.assignedProjectId === 'string' &&
-        item.directoryProjectId === `${item.directoryId}#project#${item.assignedProjectId}`
-      )
-    )
-}
-
 function isCanonicalCollaborationComment(item: Record<string, unknown>) {
   return item.entryType === 'comment' &&
     typeof item.entityKey === 'string' &&
@@ -889,14 +935,6 @@ function isCanonicalCollaborationComment(item: Record<string, unknown>) {
 
 function isProjectTone(value: unknown) {
   return value === 'blue' || value === 'purple' || value === 'green' || value === 'yellow'
-}
-
-function isWorkItemStatus(value: unknown) {
-  return value === 'todo' || value === 'in-progress' || value === 'review' || value === 'done'
-}
-
-function isWorkItemPriority(value: unknown) {
-  return value === 'high' || value === 'medium' || value === 'low'
 }
 
 function readEnvironment(name: string) {

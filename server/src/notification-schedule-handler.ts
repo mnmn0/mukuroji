@@ -11,6 +11,7 @@ import {
   createMutationAuditContext,
   getConfiguredDynamoDbEndpoint,
 } from './audit'
+import { isCanonicalWorkItemRecord } from './canonical-work-item'
 
 /** 期限通知 schedule が生成する通知理由です。 */
 export type ScheduledNotificationReason = 'due' | 'overdue'
@@ -176,31 +177,6 @@ export async function runNotificationSchedule(
       TableName: workItemsTableName,
       ConsistentRead: true,
       Limit: scanPageSize,
-      ProjectionExpression: [
-        '#directoryId',
-        '#teamId',
-        '#issueId',
-        '#title',
-        '#titleKey',
-        '#assigneeUserId',
-        '#status',
-        '#dueDate',
-        '#assignedProjectId',
-      ].join(', '),
-      FilterExpression:
-        'attribute_exists(#assigneeUserId) AND attribute_exists(#dueDate) AND #status <> :done',
-      ExpressionAttributeNames: {
-        '#directoryId': 'directoryId',
-        '#teamId': 'teamId',
-        '#issueId': 'issueId',
-        '#title': 'title',
-        '#titleKey': 'titleKey',
-        '#assigneeUserId': 'assigneeUserId',
-        '#status': 'status',
-        '#dueDate': 'dueDate',
-        '#assignedProjectId': 'assignedProjectId',
-      },
-      ExpressionAttributeValues: { ':done': 'done' },
       ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
     }))
 
@@ -286,20 +262,16 @@ function createScheduledNotificationCandidate(
   item: Record<string, unknown>,
   today: string,
 ): ScheduledNotificationCandidate | undefined {
-  const workspaceId = readText(item.directoryId)
-  const teamId = readText(item.teamId)
-  const issueId = readText(item.issueId)
-  const assigneeMemberKey = readText(item.assigneeUserId)?.toLowerCase()
-  const status = readText(item.status)
+  if (!isCanonicalWorkItemRecord(item)) {
+    return undefined
+  }
+
+  const assigneeMemberKey = item.assigneeUserId.toLowerCase()
   const dueDate = parseUtcDateOnly(item.dueDate)
 
   if (
-    !workspaceId ||
-    !teamId ||
-    !issueId ||
     !assigneeMemberKey ||
-    !status ||
-    status === 'done' ||
+    !isActiveWorkflowStatusCategory(item.statusCategory) ||
     !dueDate ||
     dueDate > today
   ) {
@@ -307,17 +279,20 @@ function createScheduledNotificationCandidate(
   }
 
   return {
-    workspaceId,
-    teamId,
-    issueId,
+    workspaceId: item.directoryId,
+    teamId: item.teamId,
+    issueId: item.issueId,
     assigneeMemberKey,
-    ...(readText(item.assignedProjectId)
-      ? { projectId: readText(item.assignedProjectId) }
-      : {}),
-    title: readText(item.title) ?? readText(item.titleKey) ?? issueId,
+    ...(item.assignedProjectId ? { projectId: item.assignedProjectId } : {}),
+    title: item.title,
     dueDate,
     reason: dueDate === today ? 'due' : 'overdue',
   }
+}
+
+/** 期限通知の対象となる非終端 workflow category か判定します。 */
+function isActiveWorkflowStatusCategory(value: string | undefined) {
+  return value === 'backlog' || value === 'unstarted' || value === 'started'
 }
 
 function createScheduledNotificationAuditEvent(

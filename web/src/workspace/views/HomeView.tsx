@@ -1,7 +1,7 @@
 import type { DashboardSummary } from '../../auth/api'
 import type { MessageKey } from '../../i18n'
 import type { ProjectDirectoryTeam } from '../../projects/api'
-import type { ProjectTask } from '../../tasks/api'
+import { resolveProjectTaskStatus, type ProjectTask } from '../../tasks/api'
 import { workspacePresentation } from '../workspacePresentation'
 import {
   MetricCard,
@@ -68,7 +68,7 @@ export function HomeView({
               >
                 <p className="text-sm font-semibold text-[var(--workbench-text)]">{workspacePresentation.resolveTaskTitle(task, t)}</p>
                 <p className="mt-1 text-sm font-medium leading-6 text-[var(--workbench-muted)]">
-                  {workspacePresentation.resolveTaskAssignee(task, t)} / {t(`tasks.status.${task.status}`)} / {task.dueDate}
+                  {workspacePresentation.resolveTaskAssignee(task, t)} / {t(`tasks.status.${resolveProjectTaskStatus(task)}`)} / {task.dueDate}
                 </p>
               </button>
             ))}

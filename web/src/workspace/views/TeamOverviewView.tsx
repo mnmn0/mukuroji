@@ -1,6 +1,6 @@
 import type { MessageKey } from '../../i18n'
 import type { ProjectDirectoryTeam } from '../../projects/api'
-import type { ProjectTask } from '../../tasks/api'
+import { resolveProjectTaskStatus, type ProjectTask } from '../../tasks/api'
 import { workspacePresentation } from '../workspacePresentation'
 import type { TeamProjectMemberAccess } from '../workspaceTypes'
 import {
@@ -51,7 +51,7 @@ export function TeamOverviewView({
         <MetricCard
           label={t('workspace.metric.openTasks')}
           testId="team-overview-open-tasks"
-          value={teamTasks.filter((task) => task.status !== 'done').length}
+          value={teamTasks.filter((task) => resolveProjectTaskStatus(task) !== 'done').length}
           tone="emerald"
         />
         <MetricCard
@@ -155,7 +155,7 @@ export function TeamOverviewView({
                           {workspacePresentation.resolveTaskTitle(project.nextTask, t)}
                         </span>
                         <span className="text-xs font-semibold text-[var(--workbench-muted)]">
-                          {project.nextTask.dueDate} / {t(`tasks.status.${project.nextTask.status}`)}
+                          {project.nextTask.dueDate} / {t(`tasks.status.${resolveProjectTaskStatus(project.nextTask)}`)}
                         </span>
                       </button>
                     ) : (

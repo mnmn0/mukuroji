@@ -1,9 +1,35 @@
+import { createHash, createHmac } from 'node:crypto'
 import { afterEach, expect, test } from 'bun:test'
 import type { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import type { DynamoDBDocumentClient, TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
+import {
+  AUTOMATION_SCHEMA_VERSION,
+  type AnalyticsQueryInput,
+  type AnalyticsSnapshot,
+  type AnalyticsSnapshotListResponse,
+  type AnalyticsSnapshotRecord,
+  type AutomationTemplate,
+  type AutomationTemplateApplication,
+  type AutomationTemplateApplicationResult,
+  type BulkOperation,
+  type ApprovalRequest,
+  type BulkOperationRequest,
+  type CustomFieldValue,
+  type DocumentDetail,
+  type PlanningMutationResponse,
+  type PlanningSnapshot,
+  type WorkItemConfiguration,
+  type CanonicalWorkItem,
+} from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
-import { createAuditEvent, createMutationAuditContext } from './audit'
+import {
+  calculateAuditExpiresAt,
+  createAuditEvent,
+  createMutationAuditContext,
+  type AuditEventV1,
+  type MutationAuditContext,
+} from './audit'
 import { CollaborationError, type CollaborationClient } from './collaboration'
 import type { NotificationClient, NotificationItem } from './notifications'
 import {
@@ -13,24 +39,4412 @@ import {
   type WorkspaceSearchResolvedScope,
 } from './workspace-search'
 import {
+  FileProofingError,
+  type FileProofingActor,
+  type FileProofingClient,
+} from './file-proofing'
+import {
   app,
   AwsCognitoClient,
+  canManageWorkItemImports,
   CognitoServiceError,
   configureApiClientsForTest,
+  createCanonicalPublicWorkItemService,
+  createImportRowCreateIdentity,
+  createAutomationActionExecutor,
+  createBulkItemMutationIdempotencyKey,
+  requireBulkOperationOwner,
+  readConnectorSyncOriginPreviousSigningSecrets,
+  resolveRequestClientKey,
+  toBulkOperationResponse,
   DynamoDbDashboardSummaryClient,
   DynamoDbProjectDirectoryClient,
   DynamoDbProjectTasksClient,
   DynamoDbTeamIssuesClient,
+  FlociCognitoClient,
   handler,
   resetApiClientsForTest,
+  toWorkItemImportWorkerError,
   WorkspaceAccessError,
   type ProjectRole,
+  type WorkspaceAccessClient,
+  type WorkspaceMember,
   type WorkspaceMemberStatus,
   type WorkspaceRole,
 } from './index'
+import {
+  AutomationError,
+  toAutomationInboundWebhookEndpoint,
+  type AutomationActionExecutionContext,
+  type AutomationClient,
+  type AutomationInboundWebhookEndpointRecord,
+  type AutomationInboundWebhookProvisioning,
+} from './automation'
+import type { AutomationInboundWebhookSecretStore } from './automation-inbound-webhook'
+import {
+  DEFAULT_WORK_ITEM_CONFIGURATION,
+  WorkItemConfigurationError,
+  type WorkItemConfigurationClient,
+} from './work-item-configuration'
+import { resolveDocumentCapabilities } from './document-access'
+import { DocumentError, type DocumentClient } from './documents'
+import { InMemoryPlanningClient, type PlanningClient } from './planning'
+import type { RequestIntakeClient } from './request-intake'
+import {
+  EnterpriseIdentityError,
+  InMemoryEnterpriseIdentityClient,
+  resolveEnterpriseDirectoryPrincipal,
+} from './enterprise-identity'
+import {
+  InMemoryDeveloperPlatformClient,
+  type ApiScope,
+} from './developer-platform'
+import {
+  createEnterpriseScimGroupJobWorkerHandler,
+} from './enterprise-scim-group-job-worker-handler'
+import {
+  createEnterpriseScimGroupJobProcessor,
+} from './enterprise-scim-group-job-worker'
+import type {
+  EnterpriseScimGroupJobProcessor,
+} from './enterprise-scim-group-job-handler'
+import {
+  createAnalyticsSnapshotListCursor,
+  InMemoryAnalyticsRepository,
+} from './analytics'
+
+const enterpriseScimGroupJobProcessors = new WeakMap<
+  InMemoryEnterpriseIdentityClient,
+  EnterpriseScimGroupJobProcessor
+>()
+const HEADLESS_DEVELOPER_WORKSPACE_ID = 'workspace-headless'
 
 afterEach(() => {
   resetApiClientsForTest()
+})
+
+test('validates previous connector origin signing secrets for production rotation', () => {
+  const first = 'previous-origin-signing-secret-number-one'
+  const second = 'previous-origin-signing-secret-number-two'
+  expect(readConnectorSyncOriginPreviousSigningSecrets(
+    JSON.stringify([`  ${first}  `, second]),
+  )).toEqual([first, second])
+  expect(readConnectorSyncOriginPreviousSigningSecrets(undefined)).toEqual([])
+  for (const invalid of [
+    'not-json',
+    '{}',
+    JSON.stringify(['short']),
+    JSON.stringify([first, second, first, second]),
+  ]) {
+    expect(() => readConnectorSyncOriginPreviousSigningSecrets(invalid))
+      .toThrow(
+        'CONNECTOR_SYNC_ORIGIN_PREVIOUS_SIGNING_SECRETS_JSON must be a JSON array of up to three strings containing at least 32 bytes.',
+      )
+  }
+})
+
+test('scopes deterministic import row identities to the Workspace actor', () => {
+  const context = {
+    requestId: 'request-import-row',
+    idempotencyKey: 'import-same-client-key-row-1',
+  }
+  const input = {
+    title: 'Imported row',
+    assigneeUserId: 'assignee@example.com',
+    dueDate: '2026-07-31',
+    priority: 'medium',
+  } as const
+  const firstActor = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-1',
+    context,
+    'team-1',
+    input,
+  )
+  const firstActorRetry = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-1',
+    context,
+    'team-1',
+    input,
+  )
+  const secondActor = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-2',
+    context,
+    'team-1',
+    input,
+  )
+  const changedPayload = createImportRowCreateIdentity(
+    'workspace-1',
+    'user-1',
+    context,
+    'team-1',
+    { ...input, title: 'Different imported row' },
+  )
+
+  expect(firstActorRetry).toEqual(firstActor)
+  expect(secondActor.issueId).not.toBe(firstActor.issueId)
+  expect(secondActor.requestDigest).not.toBe(firstActor.requestDigest)
+  expect(changedPayload.issueId).toBe(firstActor.issueId)
+  expect(changedPayload.requestDigest).not.toBe(firstActor.requestDigest)
+})
+
+test('requires current Workspace administration for queued import execution', () => {
+  expect(canManageWorkItemImports('owner')).toBe(true)
+  expect(canManageWorkItemImports('admin')).toBe(true)
+  expect(canManageWorkItemImports('member')).toBe(false)
+  expect(canManageWorkItemImports('guest')).toBe(false)
+})
+
+test('retries import configuration conflicts but terminalizes revoked access', () => {
+  expect(toWorkItemImportWorkerError(new WorkItemConfigurationError(
+    409,
+    'WorkItemConfigurationRevisionConflict',
+    'Configuration changed concurrently.',
+  ))).toMatchObject({
+    code: 'ImportConcurrentMutation',
+    retryable: true,
+  })
+  expect(toWorkItemImportWorkerError(new WorkspaceAccessError(
+    403,
+    'WorkspaceRoleDenied',
+    'Workspace management permission changed.',
+  ))).toMatchObject({
+    code: 'ImportAuthorizationRejected',
+    retryable: false,
+  })
+  expect(toWorkItemImportWorkerError(new WorkspaceAccessError(
+    409,
+    'WorkspaceAssigneeInactive',
+    'Only active Workspace members can be assigned.',
+  ))).toMatchObject({
+    code: 'ImportValidationRejected',
+    retryable: false,
+  })
+})
+
+test('denies headless API credentials after an applied SCIM deprovision', async () => {
+  const calls = configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const workspaceId = HEADLESS_DEVELOPER_WORKSPACE_ID
+  const identity = new InMemoryEnterpriseIdentityClient()
+  await putHeadlessEnterpriseIdentityProvider(identity, workspaceId)
+  const user = await putAppliedHeadlessScimUser(identity, workspaceId)
+  const deactivated = await identity.deactivateScimUser(
+    workspaceId,
+    'headless-idp',
+    user.userId,
+    'headless-user-deactivated',
+  )
+  if (!deactivated) throw new Error('Expected the headless SCIM user to be deactivated.')
+  await identity.markScimUserApplied(
+    workspaceId,
+    deactivated.userId,
+    deactivated.version,
+  )
+  const secret = await configureHeadlessDeveloperCredential(
+    identity,
+    ['work-items:read'],
+  )
+
+  const response = await app.request(
+    'http://localhost/api/v1/work-items?teamId=core-team',
+    { headers: { Authorization: `Bearer ${secret}` } },
+  )
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'forbidden' })
+  expect(calls.publicIssuePageReads).toHaveLength(0)
+})
+
+test('applies compatible custom SCIM group roles to only their headless Project scope', async () => {
+  const calls = configureFakeProjectClients(false, {
+    workspaceRole: 'owner',
+    projectAccesses: [],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+    detailAssignedProjectIds: {
+      'refero-work-item': 'refero',
+      'private-work-item': 'private-project',
+    },
+  })
+  const workspaceId = HEADLESS_DEVELOPER_WORKSPACE_ID
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const now = '2026-07-20T00:00:00.000Z'
+  await putHeadlessEnterpriseIdentityProvider(identity, workspaceId)
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:headless-project-writer',
+    name: 'Headless Project writer',
+    permissions: ['work-items.read', 'work-items.write'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  const user = await putAppliedHeadlessScimUser(identity, workspaceId)
+  const group = await identity.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'headless-idp',
+    externalId: 'headless-project-writers',
+    displayName: 'Headless Project writers',
+    active: true,
+    memberUserIds: [user.userId],
+    idempotencyKey: 'headless-project-writers-created',
+  })
+  await identity.markScimGroupApplied(
+    workspaceId,
+    group.groupId,
+    group.version,
+  )
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: 'headless-project-writer-mapping',
+    identityProviderId: 'headless-idp',
+    directoryGroupId: group.groupId,
+    roleId: 'custom:headless-project-writer',
+    scope: { workspaceId, kind: 'project', targetId: 'refero' },
+    enabled: true,
+    priority: 0,
+    revision: 1,
+    updatedAt: now,
+  })
+  const secret = await configureHeadlessDeveloperCredential(
+    identity,
+    ['work-items:read', 'work-items:write'],
+  )
+
+  const allowedRead = await requestHeadlessWorkItem(
+    secret,
+    'refero-work-item',
+  )
+  const deniedRead = await requestHeadlessWorkItem(
+    secret,
+    'private-work-item',
+  )
+  const allowedWrite = await createHeadlessWorkItem(
+    secret,
+    'refero',
+    'headless-project-write-allowed',
+  )
+  const deniedWrite = await createHeadlessWorkItem(
+    secret,
+    'private-project',
+    'headless-project-write-denied',
+  )
+
+  expect(allowedRead.status).toBe(200)
+  expect(deniedRead.status).toBe(403)
+  expect(allowedWrite.status).toBe(201)
+  expect(deniedWrite.status).toBe(403)
+  expect(calls.issueCreates.map((call) => call.assignedProjectId)).toEqual(['refero'])
+})
+
+test('suppresses legacy headless Project ACLs for directory-managed members', async () => {
+  const calls = configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const workspaceId = HEADLESS_DEVELOPER_WORKSPACE_ID
+  const identity = new InMemoryEnterpriseIdentityClient()
+  await putHeadlessEnterpriseIdentityProvider(identity, workspaceId)
+  await putAppliedHeadlessScimUser(identity, workspaceId)
+  const secret = await configureHeadlessDeveloperCredential(
+    identity,
+    ['work-items:read'],
+  )
+
+  const response = await requestHeadlessWorkItem(
+    secret,
+    'onboarding-friction',
+  )
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'forbidden' })
+  expect(calls.issueDetails).toHaveLength(0)
+})
+
+test('applies the Enterprise external ceiling to headless read and write operations', async () => {
+  const calls = configureFakeProjectClients(true, { workspaceRole: 'member' })
+  const workspaceId = HEADLESS_DEVELOPER_WORKSPACE_ID
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const now = '2026-07-20T00:00:00.000Z'
+  await identity.putVerifiedDomain({
+    workspaceId,
+    domainId: 'managed-company-domain',
+    domain: 'company.example',
+    status: 'verified',
+    revision: 1,
+    verificationRecordName: '_mukuroji-challenge.company.example',
+    verifiedAt: now,
+    enforceSso: false,
+    createdAt: now,
+    updatedAt: now,
+  })
+  await identity.putSecurityPolicy({
+    workspaceId,
+    loginMode: 'password-or-sso',
+    mfaRequirement: 'required',
+    sessionLifetimeMinutes: 480,
+    idleTimeoutMinutes: 60,
+    reauthenticationIntervalMinutes: 120,
+    sensitiveActionReauthenticationMinutes: 15,
+    ipAllowlistMode: 'all-users',
+    ipAllowlist: ['203.0.113.0/24'],
+    externalAccess: {
+      allowGuests: true,
+      allowExternalCollaborators: true,
+      requireMfa: true,
+      maximumSessionLifetimeMinutes: 120,
+      allowedGuestDomains: [],
+      permissionCeiling: ['workspace.read', 'projects.read', 'work-items.read'],
+    },
+    revision: 1,
+    updatedAt: now,
+    updatedBy: 'owner@example.com',
+  })
+  const secret = await configureHeadlessDeveloperCredential(
+    identity,
+    ['work-items:read', 'work-items:write'],
+  )
+
+  const allowedRead = await requestHeadlessWorkItem(
+    secret,
+    'onboarding-friction',
+  )
+  const deniedWrite = await createHeadlessWorkItem(
+    secret,
+    'refero',
+    'headless-external-write-denied',
+  )
+
+  expect(allowedRead.status).toBe(200)
+  expect(deniedWrite.status).toBe(403)
+  expect(await deniedWrite.json()).toMatchObject({ code: 'forbidden' })
+  expect(calls.issueCreates).toHaveLength(0)
+})
+
+test('uses current Cognito groups for direct Enterprise group assignments', async () => {
+  for (const [cognitoUserGroups, expectedStatus] of [
+    [['cognito-project-writers'], 200],
+    [[], 403],
+  ] as const) {
+    const calls = configureFakeProjectClients(false, {
+      workspaceRole: 'member',
+      projectAccesses: [],
+      cognitoUserGroups: [...cognitoUserGroups],
+    })
+    const workspaceId = HEADLESS_DEVELOPER_WORKSPACE_ID
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = '2026-07-20T00:00:00.000Z'
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:cognito-project-reader',
+      name: 'Cognito Project reader',
+      permissions: ['work-items.read'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    const identityWithDirectGroupAssignment = new Proxy(identity, {
+      get(target, property) {
+        if (property === 'getSnapshot') {
+          return async (requestedWorkspaceId: string) => ({
+            ...await target.getSnapshot(requestedWorkspaceId),
+            roleAssignments: [{
+              workspaceId,
+              assignmentId: 'cognito-project-reader-assignment',
+              principalKind: 'directory-group' as const,
+              principalId: 'cognito-project-writers',
+              roleId: 'custom:cognito-project-reader' as const,
+              scope: {
+                workspaceId,
+                kind: 'project' as const,
+                targetId: 'refero',
+              },
+              source: 'direct' as const,
+            }],
+          })
+        }
+        const value = Reflect.get(target, property, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    const platform = new InMemoryDeveloperPlatformClient()
+    const apiKey = await platform.createApiKey({
+      workspaceId,
+      createdByUserId: 'demo@example.com',
+      input: {
+        name: 'Direct Cognito group assignment key',
+        scopes: ['work-items:read'],
+        expiresAt: '2027-07-20T00:00:00.000Z',
+      },
+    })
+    configureApiClientsForTest({
+      developerPlatform: platform,
+      enterpriseIdentity: identityWithDirectGroupAssignment,
+    })
+
+    const response = await requestHeadlessWorkItem(
+      apiKey.secret,
+      'onboarding-friction',
+    )
+
+    expect(response.status).toBe(expectedStatus)
+    expect(calls.issueDetails).toHaveLength(expectedStatus === 200 ? 1 : 0)
+  }
+})
+
+test('fails closed before Work Item reads when current Cognito groups are unavailable', async () => {
+  const calls = configureFakeProjectClients(true, {
+    workspaceRole: 'owner',
+    cognitoUserGroupsError: new CognitoServiceError(
+      503,
+      'CognitoGroupsUnavailable',
+      'Current Cognito groups are unavailable.',
+    ),
+  })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const secret = await configureHeadlessDeveloperCredential(
+    identity,
+    ['work-items:read'],
+  )
+
+  const response = await requestHeadlessWorkItem(
+    secret,
+    'onboarding-friction',
+  )
+
+  expect(response.status).toBe(503)
+  expect(calls.issueDetails).toHaveLength(0)
+})
+
+test('replays a completed Work Item delete using current Team write access after the item is gone', async () => {
+  const calls = configureFakeProjectClients(true, {
+    role: 'member',
+    workspaceRole: 'member',
+  })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const secret = await configureHeadlessDeveloperCredential(
+    identity,
+    ['work-items:delete'],
+  )
+  configureApiClientsForTest({
+    documents: {
+      async prepareWorkItemDeletionFenceTransactWrite() {
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DocumentsTable',
+              Item: {
+                entryType: 'work-item-document-backlink-fence',
+                activeBacklinkCount: 0,
+              },
+            },
+          },
+        }
+      },
+    } as unknown as DocumentClient,
+  })
+  const request = () => app.request(
+    'http://localhost/api/v1/work-items/onboarding-friction?teamId=core-team',
+    {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'headless-delete-replay',
+      },
+      body: JSON.stringify({ expectedRevision: 1 }),
+    },
+  )
+
+  const first = await request()
+  const replay = await request()
+
+  expect(first.status).toBe(204)
+  expect(replay.status).toBe(204)
+  expect(replay.headers.get('Idempotency-Replayed')).toBe('true')
+  expect(calls.issueDeletes).toHaveLength(1)
+  expect(calls.issueDetails).toHaveLength(1)
+})
+
+test('wires external and Document deletion fences through the canonical Public Work Item service', async () => {
+  const externalFence = {
+    Put: {
+      TableName: 'DeveloperPlatformTable',
+      Item: { entryType: 'work-item-link-fence', activeLinkCount: 0 },
+    },
+  }
+  const documentFence = {
+    Put: {
+      TableName: 'DocumentsTable',
+      Item: {
+        entryType: 'work-item-document-backlink-fence',
+        activeBacklinkCount: 0,
+      },
+    },
+  }
+  const externalFenceRequests: Array<Record<string, string>> = []
+  const documentFenceRequests: Array<Record<string, string>> = []
+  const deleteTransactions: Array<{
+    authorizationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
+    deletionFences: ReadonlyArray<{
+      kind: string
+      transactWriteItem: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+    }>
+    issueId: string
+  }> = []
+  let hasExternalLinks = false
+  const calls = configureFakeProjectClients(true, {
+    role: 'member',
+    workspaceRole: 'member',
+    issueDeleteHook(input) {
+      deleteTransactions.push(input)
+    },
+  })
+  configureApiClientsForTest({
+    developerPlatform: {
+      async listExternalWorkItemLinks(_input) {
+        return hasExternalLinks ? [{}] : []
+      },
+      async prepareWorkItemDeletionFenceTransactWrite(input) {
+        externalFenceRequests.push(input)
+        return { transactWriteItem: externalFence }
+      },
+    } as never,
+    documents: {
+      async prepareWorkItemDeletionFenceTransactWrite(input) {
+        documentFenceRequests.push(input)
+        return { transactWriteItem: documentFence }
+      },
+    } as unknown as DocumentClient,
+    planning: new InMemoryPlanningClient(),
+  })
+  const service = createCanonicalPublicWorkItemService()
+  const credential = {
+    kind: 'api-key' as const,
+    workspaceId: 'user#demo@example.com',
+    credentialId: 'api-key-1',
+    subjectUserId: 'demo@example.com',
+    scopes: ['work-items:delete' as const],
+  }
+  const mutationContext = {
+    requestId: 'delete-request-1',
+    idempotencyKey: 'delete-idempotency-1',
+  }
+
+  const deletedWorkItem = await service.delete(
+    credential,
+    'core-team',
+    'wiring-delete',
+    1,
+    mutationContext,
+  )
+  expect(deletedWorkItem).toMatchObject({ id: 'wiring-delete' })
+
+  expect(externalFenceRequests).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    teamId: 'core-team',
+    workItemId: 'wiring-delete',
+  }])
+  expect(documentFenceRequests).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    workItemId: 'team/core-team/issue/wiring-delete',
+  }])
+  expect(deleteTransactions).toHaveLength(1)
+  expect(deleteTransactions[0]?.deletionFences).toEqual([
+    { kind: 'external-links', transactWriteItem: externalFence },
+    { kind: 'document-backlinks', transactWriteItem: documentFence },
+  ])
+  expect(deleteTransactions[0]?.authorizationConditionChecks).not.toHaveLength(0)
+
+  hasExternalLinks = true
+  await expect(service.delete(
+    credential,
+    'core-team',
+    'precheck-conflict',
+    1,
+    {
+      requestId: 'delete-request-2',
+      idempotencyKey: 'delete-idempotency-2',
+    },
+  )).rejects.toMatchObject({
+    code: 'conflict',
+    status: 409,
+  })
+  expect(calls.issueDeletes).toHaveLength(1)
+  expect(deleteTransactions).toHaveLength(1)
+  expect(externalFenceRequests).toHaveLength(1)
+  expect(documentFenceRequests).toHaveLength(1)
+})
+
+test('binds public Work Item writes to Workspace, Planning, and Enterprise authorization snapshots', async () => {
+  await withTestEnvironment({
+    ENTERPRISE_IDENTITY_TABLE_NAME: 'EnterpriseIdentityTable',
+    PLANNING_TABLE_NAME: 'PlanningTable',
+    WORKSPACE_ACCESS_TABLE_NAME: 'WorkspaceAccessTable',
+  }, async () => {
+    let authorizationChecks:
+      | NonNullable<TransactWriteCommandInput['TransactItems']>
+      | undefined
+    configureFakeProjectClients(true, {
+      role: 'member',
+      workspaceRole: 'member',
+      issueCreateHook(input) {
+        authorizationChecks = input.authorizationConditionChecks as
+          NonNullable<TransactWriteCommandInput['TransactItems']>
+        throw new WorkspaceAccessError(
+          409,
+          'WorkItemAuthorizationChanged',
+          'Authorization changed between validation and commit.',
+        )
+      },
+    })
+    const secret = await configureHeadlessDeveloperCredential(
+      new InMemoryEnterpriseIdentityClient(),
+      ['work-items:write'],
+    )
+
+    const response = await createHeadlessWorkItem(
+      secret,
+      'refero',
+      'authorization-snapshot-race',
+    )
+
+    expect(response.status).toBe(409)
+    expect(authorizationChecks?.map((item) =>
+      item.ConditionCheck?.TableName
+    )).toEqual([
+      'WorkspaceAccessTable',
+      'PlanningTable',
+      'EnterpriseIdentityTable',
+    ])
+  })
+})
+
+test('keeps Analytics queries independent from the 200-item aggregate list limit', async () => {
+  const calls = configureFakeProjectClients(true, { teamIssueCount: 250 })
+  const auditQueries: Array<Record<string, unknown>> = []
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        auditQueries.push(input)
+        return { events: [] }
+      },
+    },
+  })
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...createAnalyticsQueryInput(),
+    filter: {
+      ...createAnalyticsQueryInput().filter,
+      teamIds: ['core-team'],
+    },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as {
+    snapshot: { widgets: Array<{ sampleSize: number; value: number | null }> }
+  }
+  expect(body.snapshot.widgets[0]).toMatchObject({ sampleSize: 250, value: 250 })
+  expect(calls.issueReads).toContainEqual({
+    directoryId: 'user#demo@example.com',
+    limit: 10_001,
+    teamId: 'core-team',
+  })
+  expect(auditQueries).toHaveLength(500)
+  expect(auditQueries.every((query) =>
+    query.direction === 'ascending' &&
+    query.entityType === 'work-item' &&
+    typeof query.entityId === 'string'
+  )).toBe(true)
+  expect(new Set(auditQueries.map((query) => query.entityId)).size).toBe(500)
+})
+
+test('uses the canonical Analytics filter for query and evidence ACL reads', async () => {
+  const calls = configureFakeProjectClients(true, { teamIssueCount: 0 })
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  query.filter.teamIds = [' core-team ']
+
+  const queryResponse = await analyticsApiRequest('/api/analytics/query', query)
+  const evidenceResponse = await analyticsApiRequest('/api/analytics/evidence', {
+    metric: 'wip',
+    filter: query.filter,
+    asOf: query.asOf,
+    timeZone: query.timeZone,
+  })
+
+  expect(queryResponse.status).toBe(200)
+  expect(evidenceResponse.status).toBe(200)
+  expect(calls.issueReads).toHaveLength(4)
+  expect(calls.issueReads.every(({ teamId }) => teamId === 'core-team')).toBe(true)
+})
+
+test('fails before audit reads when Analytics identity fan-out exceeds the API cap', async () => {
+  configureFakeProjectClients(true, { teamIssueCount: 251 })
+  let auditReads = 0
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        auditReads += 1
+        return { events: [] }
+      },
+    },
+  })
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...createAnalyticsQueryInput(),
+    filter: {
+      ...createAnalyticsQueryInput().filter,
+      teamIds: ['core-team'],
+    },
+  })
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toMatchObject({
+    code: 'AnalyticsHistoryLimitExceeded',
+  })
+  expect(auditReads).toBe(0)
+})
+
+test('bounds shared Analytics page reads even when paginated raw events are rejected', async () => {
+  configureFakeProjectClients(true, { teamIssueCount: 6 })
+  let auditReads = 0
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        auditReads += 1
+        if (input.entityId?.startsWith('team/')) {
+          return { events: [] }
+        }
+        const event = createAnalyticsAuditEvent(
+          'work-item',
+          input.entityId ?? 'missing-entity',
+          '2026-07-17T12:00:00.000Z',
+        )
+        return {
+          events: [{
+            ...event,
+            entity: {
+              type: 'work-item',
+              id: 'conflicting-raw-entity',
+            },
+          }],
+          nextCursor: `page-${auditReads}`,
+        }
+      },
+    },
+  })
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...createAnalyticsQueryInput(),
+    filter: {
+      ...createAnalyticsQueryInput().filter,
+      teamIds: ['core-team'],
+    },
+  })
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toMatchObject({
+    code: 'AnalyticsHistoryLimitExceeded',
+  })
+  expect(auditReads).toBe(500)
+})
+
+test('counts rejected raw events toward the shared Analytics read budget', async () => {
+  configureFakeProjectClients(true, { teamIssueCount: 2 })
+  let rawAuditReads = 0
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        if (input.entityId?.startsWith('team/')) {
+          return { events: [] }
+        }
+        rawAuditReads += 1
+        const event = createAnalyticsAuditEvent(
+          'work-item',
+          input.entityId ?? 'missing-entity',
+          '2026-07-17T12:00:00.000Z',
+        )
+        const rejectedEvent = {
+          ...event,
+          entity: {
+            type: 'work-item',
+            id: 'conflicting-raw-entity',
+          },
+        }
+        return {
+          events: Array<ReturnType<typeof createAnalyticsAuditEvent>>(100)
+            .fill(rejectedEvent),
+          nextCursor: `raw-page-${rawAuditReads}`,
+        }
+      },
+    },
+  })
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...createAnalyticsQueryInput(),
+    filter: {
+      ...createAnalyticsQueryInput().filter,
+      teamIds: ['core-team'],
+    },
+  })
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toMatchObject({
+    code: 'AnalyticsHistoryLimitExceeded',
+  })
+  expect(rawAuditReads).toBeGreaterThanOrEqual(101)
+  expect(rawAuditReads).toBeLessThanOrEqual(102)
+})
+
+test('requires authentication and enforces Team report viewer/manager ACLs', async () => {
+  const unauthenticated = await app.request('/api/analytics/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(createAnalyticsQueryInput()),
+  })
+  expect(unauthenticated.status).toBe(401)
+
+  const repository = new InMemoryAnalyticsRepository()
+  await repository.createReport('user#demo@example.com', 'demo@example.com', {
+    id: 'team-report',
+    name: 'Team report',
+    visibility: 'team',
+    teamId: 'core-team',
+    timeZone: 'UTC',
+    filter: createAnalyticsQueryInput().filter,
+    widgets: createAnalyticsQueryInput().widgets,
+  })
+  configureFakeProjectClients(false, { workspaceRole: 'member' })
+  configureApiClientsForTest({ analytics: repository })
+  const hidden = await app.request('/api/analytics/reports', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(hidden.status).toBe(200)
+  expect(await hidden.json()).toEqual({ reports: [] })
+  const deniedQuery = await analyticsApiRequest('/api/analytics/query', {
+    reportId: 'team-report',
+    asOf: createAnalyticsQueryInput().asOf,
+  })
+  expect(deniedQuery.status).toBe(403)
+
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  const visible = await app.request('/api/analytics/reports', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(visible.status).toBe(200)
+  expect(await visible.json()).toMatchObject({
+    reports: [expect.objectContaining({ id: 'team-report' })],
+  })
+  const viewerWrite = await analyticsApiRequest(
+    '/api/analytics/reports/team-report',
+    { expectedRevision: 1, name: 'Viewer edit' },
+    'PATCH',
+  )
+  expect(viewerWrite.status).toBe(403)
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const managerWrite = await analyticsApiRequest(
+    '/api/analytics/reports/team-report',
+    { expectedRevision: 1, name: 'Manager edit' },
+    'PATCH',
+  )
+  expect(managerWrite.status).toBe(200)
+  expect(await managerWrite.json()).toMatchObject({
+    report: { name: 'Manager edit', revision: 2 },
+  })
+})
+
+test('paginates Analytics reports with a Workspace-bound cursor', async () => {
+  const repository = new InMemoryAnalyticsRepository()
+  const query = createAnalyticsQueryInput()
+  for (const id of ['alpha-report', 'beta-report']) {
+    await repository.createReport('user#demo@example.com', 'demo@example.com', {
+      id,
+      name: id,
+      visibility: 'personal',
+      timeZone: query.timeZone,
+      filter: query.filter,
+      widgets: query.widgets,
+    })
+  }
+  configureFakeProjectClients(true)
+  configureApiClientsForTest({ analytics: repository })
+
+  const first = await app.request('/api/analytics/reports?limit=1', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(first.status).toBe(200)
+  const firstPage = await first.json() as {
+    reports: Array<{ id: string }>
+    nextCursor?: string
+  }
+  expect(firstPage.reports.map(({ id }) => id)).toEqual(['alpha-report'])
+  expect(firstPage.nextCursor).toBeString()
+
+  const second = await app.request(
+    `/api/analytics/reports?limit=1&cursor=${encodeURIComponent(firstPage.nextCursor!)}`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(second.status).toBe(200)
+  expect(await second.json()).toMatchObject({
+    reports: [{ id: 'beta-report' }],
+  })
+
+  const invalid = await app.request('/api/analytics/reports?limit=201', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(invalid.status).toBe(400)
+})
+
+test('fails closed instead of returning a partial Analytics aggregate above its safe cap', async () => {
+  configureFakeProjectClients(true, { teamIssueCount: 10_001 })
+  let auditReads = 0
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        auditReads += 1
+        return { events: [] }
+      },
+    },
+  })
+
+  const response = await analyticsApiRequest(
+    '/api/analytics/query',
+    createAnalyticsQueryInput(),
+  )
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toMatchObject({
+    code: 'AnalyticsWorkItemLimitExceeded',
+  })
+  expect(auditReads).toBe(0)
+}, 10_000)
+
+test('filters inaccessible Work Items and unrelated audit pages before Analytics execution', async () => {
+  configureFakeProjectClients(true, {
+    inaccessibleTeamIssueCount: 1,
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+    teamIssueCount: 2,
+  })
+  const auditQueries: Array<Record<string, unknown>> = []
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        auditQueries.push(input)
+        return input.entityId === 'team/core-team/issue/work-item-1' && !input.cursor
+          ? {
+              events: [createAnalyticsAuditEvent(
+                'workspace-member',
+                'private-member',
+                '2026-07-10T00:00:00.000Z',
+              )],
+              nextCursor: 'next-page',
+            }
+          : { events: [] }
+      },
+    },
+  })
+
+  const response = await analyticsApiRequest(
+    '/api/analytics/query',
+    createAnalyticsQueryInput(),
+  )
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as {
+    snapshot: { widgets: Array<{ sampleSize: number; value: number | null }> }
+  }
+  expect(body.snapshot.widgets[0]).toMatchObject({ sampleSize: 1, value: 1 })
+  expect(auditQueries).toHaveLength(3)
+  expect(auditQueries.every((query) =>
+    query.entityType === 'work-item' &&
+    (
+      query.entityId === 'team/core-team/issue/work-item-1' ||
+      query.entityId === 'work-item-1'
+    )
+  )).toBe(true)
+})
+
+test('retries Analytics history reads until the latest canonical revision reaches the entity GSI', async () => {
+  const current = createHistoricalAnalyticsWorkItem()
+  const latestEvent = createHistoricalAnalyticsWorkItemEvent(current)
+  const canonicalEntityId = `team/${current.teamId}/issue/${current.id}`
+  let canonicalReads = 0
+  let workItemReads = 0
+  configureFakeProjectClients(true, {
+    projectAccesses: [
+      { projectId: 'project-before', role: 'viewer' },
+      { projectId: 'project-after', role: 'viewer' },
+    ],
+    teamProjects: [
+      { id: 'project-before', name: 'Before', tone: 'blue' },
+      { id: 'project-after', name: 'After', tone: 'green' },
+    ],
+  })
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    teamIssues: {
+      async getTeamIssues(_workspaceId, teamId) {
+        workItemReads += 1
+        return { teamId, issues: [current] }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+    >,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        if (input.entityId !== canonicalEntityId) return { events: [] }
+        canonicalReads += 1
+        return canonicalReads === 1
+          ? { events: [] }
+          : { events: [latestEvent] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  query.asOf = '2026-07-16T12:00:00.000Z'
+
+  const response = await analyticsApiRequest('/api/analytics/query', query)
+
+  expect(response.status).toBe(200)
+  expect(canonicalReads).toBe(2)
+  expect(workItemReads).toBe(3)
+})
+
+test('fails closed when Analytics history never reaches the latest canonical revision', async () => {
+  const current = createHistoricalAnalyticsWorkItem()
+  let workItemReads = 0
+  configureFakeProjectClients(true, {
+    projectAccesses: [
+      { projectId: 'project-before', role: 'viewer' },
+      { projectId: 'project-after', role: 'viewer' },
+    ],
+    teamProjects: [
+      { id: 'project-before', name: 'Before', tone: 'blue' },
+      { id: 'project-after', name: 'After', tone: 'green' },
+    ],
+  })
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    teamIssues: {
+      async getTeamIssues(_workspaceId, teamId) {
+        workItemReads += 1
+        return { teamId, issues: [current] }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+    >,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+
+  const response = await analyticsApiRequest(
+    '/api/analytics/query',
+    createAnalyticsQueryInput(),
+  )
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toMatchObject({
+    code: 'AnalyticsReadBarrierUnavailable',
+  })
+  expect(workItemReads).toBe(4)
+})
+
+test('rewinds post-asOf status, project, and archive changes from current authorized state', async () => {
+  const current = createHistoricalAnalyticsWorkItem()
+  const futureEvent = createHistoricalAnalyticsWorkItemEvent(current)
+  const includeArchivedReads: boolean[] = []
+  const auditUpperBounds: string[] = []
+  configureFakeProjectClients(true, {
+    projectAccesses: [
+      { projectId: 'project-before', role: 'viewer' },
+      { projectId: 'project-after', role: 'viewer' },
+    ],
+    teamProjects: [
+      { id: 'project-before', name: 'Before', tone: 'blue' },
+      { id: 'project-after', name: 'After', tone: 'green' },
+    ],
+  })
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    teamIssues: {
+      async getTeamIssues(_workspaceId, teamId, options) {
+        includeArchivedReads.push(options?.includeArchived === true)
+        return { teamId, issues: [current] }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+    >,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        auditUpperBounds.push(input.to ?? '')
+        return Date.parse(input.to ?? '') >= Date.parse(futureEvent.occurredAt)
+          ? { events: [futureEvent] }
+          : { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  query.asOf = '2026-07-16T12:00:00.000Z'
+  query.filter.projectIds = ['project-before']
+
+  const response = await analyticsApiRequest('/api/analytics/query', query)
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as {
+    snapshot: { widgets: Array<{ sampleSize: number; value: number | null }> }
+  }
+  expect(body.snapshot.widgets[0]).toMatchObject({ sampleSize: 1, value: 1 })
+  expect(includeArchivedReads).toEqual([true, true])
+  expect(auditUpperBounds).toHaveLength(2)
+  expect(auditUpperBounds.every((upperBound) =>
+    Date.parse(upperBound) > Date.parse(futureEvent.occurredAt)
+  )).toBe(true)
+})
+
+test('reads resolvable legacy raw Work Item audit identities through entity scope', async () => {
+  const current = createHistoricalAnalyticsWorkItem()
+  const futureEvent = createHistoricalAnalyticsWorkItemEvent(current)
+  const rawEntityId = current.id
+  const legacyEvent = {
+    ...futureEvent,
+    entity: { type: 'work-item' as const, id: rawEntityId },
+    entityId: rawEntityId,
+    entityKey: `user#demo@example.com#work-item#${rawEntityId}`,
+    target: { type: 'work-item' as const, id: rawEntityId },
+    targetId: rawEntityId,
+    targetKey: `user#demo@example.com#work-item#${rawEntityId}`,
+    metadata: {
+      ...futureEvent.metadata,
+      teamId: current.teamId,
+      issueId: current.id,
+    },
+  }
+  const auditQueries: Array<Record<string, unknown>> = []
+  configureFakeProjectClients(true, {
+    projectAccesses: [
+      { projectId: 'project-before', role: 'viewer' },
+      { projectId: 'project-after', role: 'viewer' },
+    ],
+    teamProjects: [
+      { id: 'project-before', name: 'Before', tone: 'blue' },
+      { id: 'project-after', name: 'After', tone: 'green' },
+    ],
+  })
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    teamIssues: {
+      async getTeamIssues(_workspaceId, teamId) {
+        return { teamId, issues: [current] }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+    >,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        auditQueries.push(input)
+        return input.entityId === rawEntityId
+          ? { events: [legacyEvent] }
+          : { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  query.asOf = '2026-07-16T12:00:00.000Z'
+  query.filter.projectIds = ['project-before']
+
+  const response = await analyticsApiRequest('/api/analytics/query', query)
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    snapshot: {
+      widgets: [{
+        metric: 'wip',
+        sampleSize: 1,
+        value: 1,
+      }],
+    },
+  })
+  expect(auditQueries.map((input) => input.entityId).sort()).toEqual([
+    rawEntityId,
+    `team/${current.teamId}/issue/${current.id}`,
+  ].sort())
+})
+
+test('rejects legacy raw Work Item events whose identity sources disagree', async () => {
+  const current = createHistoricalAnalyticsWorkItem()
+  const futureEvent = createHistoricalAnalyticsWorkItemEvent(current)
+  const rawEntityId = current.id
+  const rawIdentityFields = {
+    entity: { type: 'work-item' as const, id: rawEntityId },
+    entityId: rawEntityId,
+    entityKey: `user#demo@example.com#work-item#${rawEntityId}`,
+    target: { type: 'work-item' as const, id: rawEntityId },
+    targetId: rawEntityId,
+    targetKey: `user#demo@example.com#work-item#${rawEntityId}`,
+    metadata: {
+      ...futureEvent.metadata,
+      teamId: current.teamId,
+      issueId: current.id,
+    },
+  }
+  const conflictingTarget = {
+    ...futureEvent,
+    ...rawIdentityFields,
+    eventId: `${futureEvent.eventId}-target-conflict`,
+    target: {
+      type: 'work-item' as const,
+      id: `team/inaccessible-team/issue/${rawEntityId}`,
+    },
+    targetId: `team/inaccessible-team/issue/${rawEntityId}`,
+  }
+  const conflictingMetadata = {
+    ...futureEvent,
+    ...rawIdentityFields,
+    eventId: `${futureEvent.eventId}-metadata-conflict`,
+    metadata: {
+      ...rawIdentityFields.metadata,
+      workItemId: 'different-item',
+    },
+  }
+  const conflictingEntity = {
+    ...futureEvent,
+    ...rawIdentityFields,
+    eventId: `${futureEvent.eventId}-entity-conflict`,
+    entity: { type: 'work-item' as const, id: 'different-item' },
+  }
+  const nonWorkItemTarget = {
+    ...futureEvent,
+    ...rawIdentityFields,
+    eventId: `${futureEvent.eventId}-target-type-conflict`,
+    target: { type: 'project' as const, id: rawEntityId },
+    targetType: 'project' as const,
+    targetId: rawEntityId,
+  }
+  configureFakeProjectClients(true, {
+    projectAccesses: [
+      { projectId: 'project-before', role: 'viewer' },
+      { projectId: 'project-after', role: 'viewer' },
+    ],
+    teamProjects: [
+      { id: 'project-before', name: 'Before', tone: 'blue' },
+      { id: 'project-after', name: 'After', tone: 'green' },
+    ],
+  })
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    teamIssues: {
+      async getTeamIssues(_workspaceId, teamId) {
+        return { teamId, issues: [current] }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+    >,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        return input.entityId === rawEntityId
+          ? {
+              events: [
+                conflictingTarget,
+                conflictingMetadata,
+                conflictingEntity,
+                nonWorkItemTarget,
+              ],
+            }
+          : {
+              events: [{
+                ...futureEvent,
+                changes: [],
+              }],
+            }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  query.asOf = '2026-07-16T12:00:00.000Z'
+  query.filter.projectIds = ['project-before']
+
+  const response = await analyticsApiRequest('/api/analytics/query', query)
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    snapshot: {
+      widgets: [{
+        metric: 'wip',
+        sampleSize: 0,
+        value: 0,
+      }],
+    },
+  })
+})
+
+test('excludes historical Project state outside current ACL and invalidates its snapshots', async () => {
+  const repository = new InMemoryAnalyticsRepository()
+  const current = createHistoricalAnalyticsWorkItem()
+  const futureEvent = createHistoricalAnalyticsWorkItemEvent(current)
+  const projectDefinitions = [
+    { id: 'project-before', name: 'Before', tone: 'blue' as const },
+    { id: 'project-after', name: 'After', tone: 'green' as const },
+  ]
+  const configureHistoricalAccess = (
+    projectIds: string[],
+    activeProjectIds = ['project-before', 'project-after'],
+  ) => {
+    configureFakeProjectClients(true, {
+      workspaceRole: 'owner',
+      projectAccesses: projectIds.map((projectId) => ({
+        projectId,
+        role: 'viewer' as const,
+      })),
+      teamProjects: projectDefinitions.filter((project) =>
+        activeProjectIds.includes(project.id)
+      ),
+    })
+    configureApiClientsForTest({
+      analytics: repository,
+      teamIssues: {
+        async getTeamIssues(_workspaceId, teamId) {
+          return { teamId, issues: [current] }
+        },
+      } as unknown as NonNullable<
+        Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+      >,
+      auditEvents: {
+        async getEvent() {
+          return undefined
+        },
+        async query() {
+          return { events: [futureEvent] }
+        },
+      },
+    })
+  }
+  const query = createAnalyticsQueryInput()
+  query.asOf = '2026-07-16T12:00:00.000Z'
+
+  configureHistoricalAccess(['project-after'])
+  const excludedQuery = await analyticsApiRequest('/api/analytics/query', query)
+  expect(excludedQuery.status).toBe(200)
+  expect(await excludedQuery.json()).toMatchObject({
+    snapshot: {
+      widgets: [{
+        metric: 'wip',
+        sampleSize: 0,
+        value: 0,
+      }],
+    },
+  })
+  const excludedEvidence = await analyticsApiRequest('/api/analytics/evidence', {
+    metric: 'wip',
+    filter: query.filter,
+    asOf: query.asOf,
+    timeZone: query.timeZone,
+  })
+  expect(excludedEvidence.status).toBe(200)
+  expect(await excludedEvidence.json()).toMatchObject({ items: [] })
+
+  configureHistoricalAccess(
+    ['project-before', 'project-after'],
+    ['project-after'],
+  )
+  const staleAccessQuery = await analyticsApiRequest('/api/analytics/query', query)
+  expect(staleAccessQuery.status).toBe(200)
+  expect(await staleAccessQuery.json()).toMatchObject({
+    snapshot: {
+      widgets: [{
+        sampleSize: 0,
+        value: 0,
+      }],
+    },
+  })
+
+  configureHistoricalAccess(['project-before', 'project-after'])
+  await repository.createReport('user#demo@example.com', 'demo@example.com', {
+    id: 'historical-scope-report',
+    name: 'Historical scope report',
+    visibility: 'personal',
+    timeZone: query.timeZone,
+    filter: query.filter,
+    widgets: query.widgets,
+  })
+  const createdSnapshot = await analyticsApiRequest(
+    '/api/analytics/reports/historical-scope-report/snapshots',
+    query,
+  )
+  expect(createdSnapshot.status).toBe(201)
+  const createdSnapshotBody = await createdSnapshot.json() as {
+    snapshotRecord: AnalyticsSnapshotRecord
+  }
+  expect(createdSnapshotBody.snapshotRecord.snapshot.widgets[0]).toMatchObject({
+    sampleSize: 1,
+    value: 1,
+  })
+
+  configureHistoricalAccess(['project-after'])
+  const hiddenSnapshots = await app.request(
+    '/api/analytics/reports/historical-scope-report/snapshots',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(hiddenSnapshots.status).toBe(200)
+  expect(await hiddenSnapshots.json()).toEqual({
+    snapshots: [],
+    inspectedCount: 1,
+  })
+  const deniedExport = await analyticsApiRequest('/api/analytics/export', {
+    snapshotId: createdSnapshotBody.snapshotRecord.id,
+    format: 'csv',
+  })
+  expect(deniedExport.status).toBe(403)
+  expect(await deniedExport.json()).toMatchObject({
+    code: 'AnalyticsSnapshotScopeChanged',
+  })
+})
+
+test('continues snapshot ACL filtering past hidden rows with a bounded inspection cursor', async () => {
+  const repository = new InMemoryAnalyticsRepository(
+    () => new Date('2026-07-18T08:00:00.000Z'),
+  )
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  configureApiClientsForTest({
+    analytics: repository,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  await repository.createReport('user#demo@example.com', 'demo@example.com', {
+    id: 'snapshot-pagination-report',
+    name: 'Snapshot pagination report',
+    visibility: 'personal',
+    timeZone: query.timeZone,
+    filter: query.filter,
+    widgets: query.widgets,
+  })
+  const created = await analyticsApiRequest(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots',
+    query,
+  )
+  expect(created.status).toBe(201)
+  const visibleRecord = (await created.json() as {
+    snapshotRecord: AnalyticsSnapshotRecord
+  }).snapshotRecord
+  const hiddenRecords = Array.from({ length: 1_000 }, (_, offset) => {
+    const index = offset + 1
+    return {
+      ...visibleRecord,
+      id: `hidden-${String(index).padStart(4, '0')}`,
+      createdAt: new Date(
+        Date.parse(visibleRecord.createdAt) + index * 1_000,
+      ).toISOString(),
+      snapshot: {
+        ...visibleRecord.snapshot,
+        permissionScopeHash: '0'.repeat(64),
+      },
+    } satisfies AnalyticsSnapshotRecord
+  })
+  const visibleRecords = hiddenRecords.map((record) => ({
+    ...record,
+    snapshot: {
+      ...record.snapshot,
+      permissionScopeHash: visibleRecord.snapshot.permissionScopeHash,
+    },
+  }))
+  let snapshotHistory: AnalyticsSnapshotRecord[] = []
+  let repositoryPhysicalPageSize: number | undefined
+  const snapshotCursorOffsets = new Map<string, number>()
+  const snapshotPageLimits: number[] = []
+  const setSnapshotHistory = (records: AnalyticsSnapshotRecord[]) => {
+    snapshotHistory = records
+    snapshotCursorOffsets.clear()
+    for (const [index, record] of snapshotHistory.entries()) {
+      snapshotCursorOffsets.set(
+        createAnalyticsSnapshotListCursor(
+          visibleRecord.workspaceId,
+          visibleRecord.reportId!,
+          record,
+        ),
+        index + 1,
+      )
+    }
+    snapshotPageLimits.length = 0
+    repositoryPhysicalPageSize = undefined
+  }
+  repository.listSnapshots = async (workspaceId, reportId, limit = 100, cursor) => {
+    snapshotPageLimits.push(limit)
+    const offset = cursor === undefined ? 0 : snapshotCursorOffsets.get(cursor)
+    if (offset === undefined) {
+      throw new TypeError('Snapshot cursor scope mismatch.')
+    }
+    const effectiveLimit = Math.min(
+      limit,
+      repositoryPhysicalPageSize ?? limit,
+    )
+    const snapshots = snapshotHistory.slice(offset, offset + effectiveLimit)
+    const nextOffset = offset + snapshots.length
+    const lastSnapshot = snapshots.at(-1)
+    return {
+      snapshots,
+      ...(nextOffset < snapshotHistory.length && lastSnapshot !== undefined
+        ? {
+            nextCursor: createAnalyticsSnapshotListCursor(
+              workspaceId,
+              reportId,
+              lastSnapshot,
+            ),
+          }
+        : {}),
+    }
+  }
+
+  setSnapshotHistory([...hiddenRecords.slice(0, 100).reverse(), visibleRecord])
+  const pastFirstStoragePage = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(pastFirstStoragePage.status).toBe(200)
+  expect(await pastFirstStoragePage.json()).toEqual({
+    snapshots: [visibleRecord],
+    inspectedCount: 101,
+  } satisfies AnalyticsSnapshotListResponse)
+  expect(snapshotPageLimits).toEqual([100, 100])
+
+  setSnapshotHistory([...hiddenRecords].reverse().concat(visibleRecord))
+  const inspectionLimited = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(inspectionLimited.status).toBe(200)
+  const inspectionLimitedBody =
+    await inspectionLimited.json() as AnalyticsSnapshotListResponse
+  expect(inspectionLimitedBody).toMatchObject({
+    snapshots: [],
+    inspectedCount: 1_000,
+  })
+  expect(inspectionLimitedBody.nextCursor).toBeDefined()
+  expect(snapshotPageLimits).toEqual(Array.from({ length: 10 }, () => 100))
+
+  snapshotPageLimits.length = 0
+  const continued = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots?' +
+      `cursor=${encodeURIComponent(inspectionLimitedBody.nextCursor!)}`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(continued.status).toBe(200)
+  expect(await continued.json()).toEqual({
+    snapshots: [visibleRecord],
+    inspectedCount: 1,
+  } satisfies AnalyticsSnapshotListResponse)
+  expect(snapshotPageLimits).toEqual([100])
+
+  setSnapshotHistory([
+    ...visibleRecords.slice(0, 99),
+    ...hiddenRecords.slice(99, 999),
+    visibleRecords[999]!,
+  ])
+  const sparseVisiblePage = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(sparseVisiblePage.status).toBe(200)
+  expect(await sparseVisiblePage.json()).toEqual({
+    snapshots: [
+      ...visibleRecords.slice(0, 99),
+      visibleRecords[999]!,
+    ],
+    inspectedCount: 1_000,
+  } satisfies AnalyticsSnapshotListResponse)
+  expect(snapshotPageLimits).toEqual(Array.from({ length: 10 }, () => 100))
+
+  setSnapshotHistory([
+    ...visibleRecords.slice(0, 99),
+    hiddenRecords[99]!,
+    ...visibleRecords.slice(100, 201),
+  ])
+  const partialPage = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(partialPage.status).toBe(200)
+  const partialPageBody = await partialPage.json() as AnalyticsSnapshotListResponse
+  expect(partialPageBody).toEqual({
+    snapshots: [
+      ...visibleRecords.slice(0, 99),
+      visibleRecords[100]!,
+    ],
+    inspectedCount: 101,
+    nextCursor: createAnalyticsSnapshotListCursor(
+      visibleRecord.workspaceId,
+      visibleRecord.reportId!,
+      visibleRecords[100]!,
+    ),
+  } satisfies AnalyticsSnapshotListResponse)
+  expect(snapshotPageLimits).toEqual([100, 100])
+
+  snapshotPageLimits.length = 0
+  const partialPageContinuation = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots?' +
+      `cursor=${encodeURIComponent(partialPageBody.nextCursor!)}`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(partialPageContinuation.status).toBe(200)
+  expect(await partialPageContinuation.json()).toEqual({
+    snapshots: visibleRecords.slice(101, 201),
+    inspectedCount: 100,
+  } satisfies AnalyticsSnapshotListResponse)
+  expect(snapshotPageLimits).toEqual([100])
+
+  setSnapshotHistory([...hiddenRecords.slice(0, 12), visibleRecord])
+  repositoryPhysicalPageSize = 1
+  const readLimited = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(readLimited.status).toBe(200)
+  const readLimitedBody = await readLimited.json() as AnalyticsSnapshotListResponse
+  expect(readLimitedBody).toMatchObject({
+    snapshots: [],
+    inspectedCount: 10,
+  })
+  expect(readLimitedBody.nextCursor).toBeDefined()
+  expect(snapshotPageLimits).toEqual(Array.from({ length: 10 }, () => 100))
+
+  snapshotPageLimits.length = 0
+  const readLimitedContinuation = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots?' +
+      `cursor=${encodeURIComponent(readLimitedBody.nextCursor!)}`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(readLimitedContinuation.status).toBe(200)
+  expect(await readLimitedContinuation.json()).toEqual({
+    snapshots: [visibleRecord],
+    inspectedCount: 3,
+  } satisfies AnalyticsSnapshotListResponse)
+  expect(snapshotPageLimits).toEqual([100, 100, 100])
+
+  const invalidCursor = await app.request(
+    '/api/analytics/reports/snapshot-pagination-report/snapshots?cursor=%24',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(invalidCursor.status).toBe(400)
+  expect(await invalidCursor.json()).toMatchObject({
+    code: 'InvalidAnalyticsInput',
+  })
+}, 15_000)
+
+test('preserves report-bound snapshot queries, saved baselines, and server-owned schedule cursors', async () => {
+  const repository = new InMemoryAnalyticsRepository(
+    () => new Date('2026-07-18T08:00:00.000Z'),
+  )
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  configureApiClientsForTest({
+    analytics: repository,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const createInput = {
+    id: 'analytics-api-report',
+    name: 'Analytics API report',
+    visibility: 'personal',
+    timeZone: 'UTC',
+    filter: createAnalyticsQueryInput().filter,
+    forecastBaseline: {
+      from: '2026-08-01T00:00:00.000Z',
+      to: '2026-08-31T23:59:59.999Z',
+    },
+    widgets: createAnalyticsQueryInput().widgets,
+    schedule: {
+      enabled: true,
+      frequency: 'daily',
+      timeZone: 'UTC',
+      localTime: '09:00',
+      recipientMemberKeys: ['demo@example.com'],
+      format: 'csv',
+      nextRunAt: '2099-01-01T00:00:00.000Z',
+    },
+  }
+  const createdResponse = await analyticsApiRequest(
+    '/api/analytics/reports',
+    createInput,
+  )
+  expect(createdResponse.status).toBe(201)
+  const created = await createdResponse.json() as {
+    report: {
+      revision: number
+      forecastBaseline?: { from: string; to: string }
+      schedule?: { nextRunAt?: string }
+    }
+  }
+  expect(created.report.forecastBaseline).toEqual(createInput.forecastBaseline)
+  expect(created.report.schedule?.nextRunAt).toBe('2026-07-18T09:00:00.000Z')
+
+  const savedQueryResponse = await analyticsApiRequest('/api/analytics/query', {
+    reportId: createInput.id,
+    asOf: '2026-07-18T08:30:00.000Z',
+    forecastBaseline: {
+      from: '2099-01-01T00:00:00.000Z',
+      to: '2099-01-31T23:59:59.999Z',
+    },
+  })
+  expect(savedQueryResponse.status).toBe(200)
+  expect(await savedQueryResponse.json()).toMatchObject({
+    snapshot: {
+      forecast: {
+        baseline: createInput.forecastBaseline,
+      },
+    },
+  })
+
+  const sameScheduleResponse = await analyticsApiRequest(
+    `/api/analytics/reports/${createInput.id}`,
+    {
+      expectedRevision: 1,
+      name: 'Renamed report',
+      schedule: {
+        ...createInput.schedule,
+        nextRunAt: '2000-01-01T00:00:00.000Z',
+      },
+    },
+    'PATCH',
+  )
+  expect(sameScheduleResponse.status).toBe(200)
+  const sameSchedule = await sameScheduleResponse.json() as {
+    report: { revision: number; schedule?: { nextRunAt?: string } }
+  }
+  expect(sameSchedule.report.revision).toBe(2)
+  expect(sameSchedule.report.schedule?.nextRunAt).toBe('2026-07-18T09:00:00.000Z')
+
+  const changedScheduleResponse = await analyticsApiRequest(
+    `/api/analytics/reports/${createInput.id}`,
+    {
+      expectedRevision: 2,
+      schedule: {
+        ...createInput.schedule,
+        localTime: '10:00',
+        nextRunAt: '2099-01-01T00:00:00.000Z',
+      },
+    },
+    'PATCH',
+  )
+  expect(changedScheduleResponse.status).toBe(200)
+  const changedSchedule = await changedScheduleResponse.json() as {
+    report: { revision: number; schedule?: { nextRunAt?: string } }
+  }
+  expect(changedSchedule.report.revision).toBe(3)
+  expect(changedSchedule.report.schedule?.nextRunAt).toBe('2026-07-18T10:00:00.000Z')
+
+  const inlineQuery = {
+    ...createAnalyticsQueryInput(),
+    filter: {
+      ...createAnalyticsQueryInput().filter,
+      teamIds: ['core-team'],
+    },
+    forecastBaseline: {
+      from: '2026-09-01T00:00:00.000Z',
+      to: '2026-09-30T23:59:59.999Z',
+    },
+    timeZone: 'Asia/Tokyo',
+    widgets: [{
+      id: 'inline-wip',
+      type: 'metric',
+      title: 'Inline WIP',
+      metric: 'wip',
+    }],
+  } satisfies AnalyticsQueryInput
+  const snapshotResponse = await analyticsApiRequest(
+    `/api/analytics/reports/${createInput.id}/snapshots`,
+    inlineQuery,
+  )
+  expect(snapshotResponse.status).toBe(201)
+  const snapshotBody = await snapshotResponse.json() as {
+    snapshotRecord: AnalyticsSnapshotRecord
+  }
+  expect(snapshotBody.snapshotRecord.query).toEqual({
+    filter: {
+      ...createInput.filter,
+      period: {
+        ...createInput.filter.period,
+        to: inlineQuery.asOf,
+      },
+    },
+    widgets: createInput.widgets,
+    asOf: inlineQuery.asOf,
+    timeZone: createInput.timeZone,
+    forecastBaseline: createInput.forecastBaseline,
+  })
+  expect(snapshotBody.snapshotRecord.reportRevision).toBe(3)
+
+  configureFakeProjectClients(false, { workspaceRole: 'owner' })
+  const hiddenSnapshots = await app.request(
+    `/api/analytics/reports/${createInput.id}/snapshots`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(hiddenSnapshots.status).toBe(200)
+  expect(await hiddenSnapshots.json()).toEqual({
+    snapshots: [],
+    inspectedCount: 1,
+  })
+  const deniedExport = await analyticsApiRequest('/api/analytics/export', {
+    snapshotId: snapshotBody.snapshotRecord.id,
+    format: 'csv',
+  })
+  expect(deniedExport.status).toBe(403)
+  expect(await deniedExport.json()).toMatchObject({
+    code: 'AnalyticsSnapshotScopeChanged',
+  })
+
+  const stalePatch = await analyticsApiRequest(
+    `/api/analytics/reports/${createInput.id}`,
+    { expectedRevision: 1, name: 'Stale edit' },
+    'PATCH',
+  )
+  expect(stalePatch.status).toBe(409)
+  expect(await stalePatch.json()).toMatchObject({ code: 'AnalyticsRevisionConflict' })
+})
+
+test('returns current-ACL evidence and CSV exports from Analytics endpoints', async () => {
+  configureFakeProjectClients(true)
+  configureApiClientsForTest({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  const evidence = await analyticsApiRequest('/api/analytics/evidence', {
+    metric: 'wip',
+    filter: query.filter,
+    asOf: query.asOf,
+    timeZone: query.timeZone,
+  })
+  expect(evidence.status).toBe(200)
+  expect(await evidence.json()).toMatchObject({
+    items: [expect.objectContaining({ workItemId: 'onboarding-friction' })],
+  })
+
+  const exported = await analyticsApiRequest('/api/analytics/export', {
+    query,
+    format: 'csv',
+    locale: 'ja-JP',
+  })
+  expect(exported.status).toBe(200)
+  expect(exported.headers.get('Content-Type')).toBe('text/csv; charset=utf-8')
+  expect(await exported.text()).toContain('ウィジェットID,指標キー,指標,値')
+})
+
+test('passes execution status into persistence pagination and rejects unknown statuses', async () => {
+  configureFakeProjectClients(true)
+  const queries: Array<Parameters<AutomationClient['listExecutions']>[0]> = []
+  configureApiClientsForTest({
+    automation: {
+      async listExecutions(query: Parameters<AutomationClient['listExecutions']>[0]) {
+        queries.push(query)
+        return { executions: [] }
+      },
+    } as unknown as AutomationClient,
+  })
+
+  const response = await app.request(
+    '/api/automation/executions?status=failed&limit=25&cursor=cursor-1',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(response.status).toBe(200)
+  expect(queries).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    ruleId: undefined,
+    status: 'failed',
+    cursor: 'cursor-1',
+    limit: 25,
+  }])
+
+  const invalid = await app.request(
+    '/api/automation/executions?status=unknown',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(invalid.status).toBe(400)
+  expect(await invalid.json()).toMatchObject({ code: 'InvalidAutomationQuery' })
+  expect(queries).toHaveLength(1)
+})
+
+test('preserves FileProofingError status and code in Automation API responses', async () => {
+  configureFakeProjectClients(true)
+  configureApiClientsForTest({
+    automation: {
+      async listRules() {
+        throw new FileProofingError(
+          409,
+          'ApprovalRevisionConflict',
+          'Approval changed. Reload and try again.',
+        )
+      },
+    } as unknown as AutomationClient,
+  })
+
+  const response = await app.request('/api/automation/rules', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'ApprovalRevisionConflict',
+    message: 'Approval changed. Reload and try again.',
+  })
+})
+
+test('derives stable and item-scoped audit idempotency keys for bulk apply', () => {
+  const request = {
+    workspaceId: 'workspace-1',
+    action: { type: 'move', targetProjectId: 'project-2' },
+    items: [
+      { teamId: 'team-1', workItemId: 'item-1', expectedRevision: 4 },
+      { teamId: 'team-1', workItemId: 'item-2', expectedRevision: 7 },
+    ],
+  } satisfies BulkOperationRequest
+
+  const first = createBulkItemMutationIdempotencyKey(request, 0, 'apply', 'owner@example.com')
+
+  expect(first).toBe(createBulkItemMutationIdempotencyKey(
+    structuredClone(request),
+    0,
+    'apply',
+    'owner@example.com',
+  ))
+  expect(first).not.toBe(createBulkItemMutationIdempotencyKey(
+    request,
+    1,
+    'apply',
+    'owner@example.com',
+  ))
+  expect(first).not.toBe(createBulkItemMutationIdempotencyKey(
+    request,
+    0,
+    'apply',
+    'other@example.com',
+  ))
+  expect(first).toMatch(/^bulk_[a-f0-9]{64}$/)
+})
+
+test('enforces Bulk operation ownership and redacts durable undo snapshots', () => {
+  const operation: BulkOperation = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'bulk-owner-test',
+    workspaceId: 'workspace-1',
+    actorMemberKey: 'owner@example.com',
+    revision: 3,
+    status: 'succeeded',
+    action: { type: 'move', targetProjectId: 'project-2' },
+    items: [{
+      teamId: 'team-1',
+      workItemId: 'item-1',
+      expectedRevision: 4,
+      resultingRevision: 5,
+      status: 'succeeded',
+      retryable: false,
+      undoable: true,
+      undoPayload: { assignedProjectId: 'project-1' },
+    }],
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:00:01.000Z',
+  }
+
+  expect(() => requireBulkOperationOwner(operation, 'owner@example.com')).not.toThrow()
+  expect(() => requireBulkOperationOwner(operation, 'other@example.com')).toThrow()
+  try {
+    requireBulkOperationOwner(operation, 'other@example.com')
+  } catch (error) {
+    expect(error).toMatchObject({ code: 'BulkOperationForbidden', status: 403 })
+  }
+  expect(toBulkOperationResponse(operation).items[0]).not.toHaveProperty('undoPayload')
+  expect(operation.items[0]?.undoPayload).toEqual({ assignedProjectId: 'project-1' })
+})
+
+test('does not recover a Bulk apply from a competing actor state without its audit proof', async () => {
+  configureFakeProjectClients(true)
+  const originalIssue = createBulkRecoveryIssue()
+  const competingIssue = {
+    ...originalIssue,
+    revision: 2,
+    title: 'Bulk title',
+    updatedAt: '2026-07-16T00:01:00.000Z',
+  }
+  const automationFake = createBulkOperationAutomationFake()
+  let detailReads = 0
+  let updateCalls = 0
+  let auditProofReads = 0
+  configureApiClientsForTest({
+    automation: automationFake.client,
+    teamIssues: {
+      async getTeamIssueDetail() {
+        detailReads += 1
+        return {
+          issue: structuredClone(detailReads <= 2 ? originalIssue : competingIssue),
+          comments: [],
+          activity: [],
+        }
+      },
+      async updateTeamIssue() {
+        updateCalls += 1
+        throw new Error('The competing write must be detected before this update.')
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+    >,
+    auditEvents: {
+      async getEvent() {
+        auditProofReads += 1
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const request = {
+    action: { type: 'edit', patch: { title: 'Bulk title' } },
+    items: [{
+      teamId: originalIssue.teamId,
+      workItemId: originalIssue.id,
+      expectedRevision: originalIssue.revision,
+    }],
+  }
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const previewResponse = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request),
+  })
+  expect(previewResponse.status).toBe(200)
+  const preview = await previewResponse.json() as { operationToken: string }
+
+  const applyResponse = await app.request('/api/bulk-operations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...request, operationToken: preview.operationToken }),
+  })
+  expect(applyResponse.status).toBe(201)
+  expect(await applyResponse.json()).toMatchObject({
+    status: 'failed',
+    items: [{
+      status: 'failed',
+      errorCode: 'WorkItemRevisionConflict',
+      retryable: false,
+      undoable: false,
+    }],
+  })
+  expect(detailReads).toBe(4)
+  expect(auditProofReads).toBe(1)
+  expect(updateCalls).toBe(0)
+})
+
+test('does not recover a Bulk undo from a competing actor state without its audit proof', async () => {
+  configureFakeProjectClients(true)
+  const currentIssue = {
+    ...createBulkRecoveryIssue(),
+    revision: 3,
+    updatedAt: '2026-07-16T00:02:00.000Z',
+  }
+  const operation: BulkOperation = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'bulk-undo-competing-actor',
+    workspaceId: 'user#demo@example.com',
+    actorMemberKey: 'demo@example.com',
+    revision: 1,
+    status: 'succeeded',
+    action: { type: 'edit', patch: { title: 'Bulk title' } },
+    items: [{
+      teamId: currentIssue.teamId,
+      workItemId: currentIssue.id,
+      expectedRevision: 1,
+      resultingRevision: 2,
+      status: 'succeeded',
+      retryable: false,
+      undoable: true,
+      undoPayload: { title: originalBulkRecoveryTitle },
+    }],
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:01:00.000Z',
+  }
+  const automationFake = createBulkOperationAutomationFake(operation)
+  let detailReads = 0
+  let updateCalls = 0
+  let auditProofReads = 0
+  configureApiClientsForTest({
+    automation: automationFake.client,
+    teamIssues: {
+      async getTeamIssueDetail() {
+        detailReads += 1
+        return {
+          issue: structuredClone(currentIssue),
+          comments: [],
+          activity: [],
+        }
+      },
+      async updateTeamIssue() {
+        updateCalls += 1
+        throw new Error('The competing undo state must be detected before this update.')
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+    >,
+    auditEvents: {
+      async getEvent() {
+        auditProofReads += 1
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+
+  const response = await app.request(`/api/bulk-operations/${operation.id}/undo`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+  })
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    status: 'partial',
+    items: [{
+      status: 'failed',
+      errorCode: 'WorkItemRevisionConflict',
+      resultingRevision: 2,
+      retryable: false,
+    }],
+  })
+  expect(detailReads).toBe(2)
+  expect(auditProofReads).toBe(1)
+  expect(updateCalls).toBe(0)
+})
+
+test('recovers Bulk apply and undo response loss only from their matching audit proofs', async () => {
+  configureFakeProjectClients(true)
+  let currentIssue = createBulkRecoveryIssue()
+  const auditProofs = new Map<string, ReturnType<typeof createAuditEvent>>()
+  const auditProofReads: string[] = []
+  const mutationContexts: Parameters<typeof createAuditEvent>[0]['context'][] = []
+  const automationFake = createBulkOperationAutomationFake()
+  let updateCalls = 0
+  configureApiClientsForTest({
+    automation: automationFake.client,
+    teamIssues: {
+      async getTeamIssueDetail() {
+        return {
+          issue: structuredClone(currentIssue),
+          comments: [],
+          activity: [],
+        }
+      },
+      async updateTeamIssue(
+        directoryId,
+        teamId,
+        issueId,
+        input,
+        actorUserId,
+        auditContext,
+      ) {
+        if (!auditContext) throw new Error('Bulk mutation audit context is required.')
+        updateCalls += 1
+        mutationContexts.push(auditContext)
+        const beforeRevision = currentIssue.revision
+        const afterRevision = beforeRevision + 1
+        currentIssue = {
+          ...currentIssue,
+          revision: afterRevision,
+          title: typeof input.title === 'string' ? input.title : currentIssue.title,
+          updatedAt: `2026-07-16T00:0${updateCalls}:00.000Z`,
+        }
+        const event = createAuditEvent({
+          context: auditContext,
+          expiresAt: calculateAuditExpiresAt(auditContext.occurredAt, 365),
+          eventType: 'work-item.updated',
+          entity: { type: 'work-item', id: `team/${teamId}/issue/${issueId}` },
+          action: 'updated',
+          metadata: {
+            adapter: 'canonical-work-item',
+            actorMemberKey: actorUserId,
+            teamId,
+            issueId,
+            beforeRevision,
+            afterRevision,
+          },
+        })
+        expect(directoryId).toBe('user#demo@example.com')
+        expect(input.expectedRevision).toBe(beforeRevision)
+        auditProofs.set(event.eventId, event)
+        throw new AutomationError(
+          503,
+          'BulkMutationResponseLost',
+          'The mutation committed but its response was lost.',
+          true,
+        )
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+    >,
+    auditEvents: {
+      async getEvent(workspaceId, eventId) {
+        expect(workspaceId).toBe('user#demo@example.com')
+        auditProofReads.push(eventId)
+        return auditProofs.get(eventId)
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const request = {
+    action: { type: 'edit', patch: { title: 'Bulk title' } },
+    items: [{
+      teamId: currentIssue.teamId,
+      workItemId: currentIssue.id,
+      expectedRevision: currentIssue.revision,
+    }],
+  }
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const previewResponse = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request),
+  })
+  expect(previewResponse.status).toBe(200)
+  const preview = await previewResponse.json() as { operationToken: string }
+  const applyResponse = await app.request('/api/bulk-operations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...request, operationToken: preview.operationToken }),
+  })
+  expect(applyResponse.status).toBe(201)
+  const applied = await applyResponse.json() as BulkOperation
+  expect(applied).toMatchObject({
+    status: 'succeeded',
+    items: [{
+      status: 'succeeded',
+      resultingRevision: 2,
+      retryable: false,
+      undoable: true,
+    }],
+  })
+  expect(currentIssue).toMatchObject({ revision: 2, title: 'Bulk title' })
+
+  const undoResponse = await app.request(`/api/bulk-operations/${applied.id}/undo`, {
+    method: 'POST',
+    headers,
+  })
+  expect(undoResponse.status).toBe(200)
+  expect(await undoResponse.json()).toMatchObject({
+    status: 'undone',
+    items: [{
+      status: 'undone',
+      resultingRevision: 3,
+      retryable: false,
+      undoable: false,
+    }],
+  })
+  expect(currentIssue).toMatchObject({
+    revision: 3,
+    title: originalBulkRecoveryTitle,
+  })
+  expect(updateCalls).toBe(2)
+  expect(auditProofReads).toHaveLength(2)
+  expect(new Set(auditProofReads).size).toBe(2)
+  expect(mutationContexts).toHaveLength(2)
+  expect(mutationContexts[0]?.requestFingerprint).not.toBe('')
+  expect(mutationContexts[1]?.requestFingerprint).not.toBe('')
+})
+
+const originalBulkRecoveryTitle = 'Initial title'
+
+function createBulkRecoveryIssue() {
+  return {
+    schemaVersion: 1,
+    revision: 1,
+    id: 'onboarding-friction',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    title: originalBulkRecoveryTitle,
+    description: 'Initial description',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'in-progress',
+    statusCategory: 'started',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/31',
+    priority: 'high',
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:00:00.000Z',
+    source: 'dynamodb',
+  }
+}
+
+function createBulkOperationAutomationFake(initialOperation?: BulkOperation) {
+  let storedOperation = initialOperation ? structuredClone(initialOperation) : undefined
+  return {
+    client: {
+      async getBulkOperation(_workspaceId: string, operationId: string) {
+        return storedOperation?.id === operationId
+          ? structuredClone(storedOperation)
+          : undefined
+      },
+      async createBulkOperation(operation: BulkOperation) {
+        if (storedOperation) return false
+        storedOperation = structuredClone(operation)
+        return true
+      },
+      async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
+        if (!storedOperation || storedOperation.revision !== expectedRevision) {
+          throw new AutomationError(
+            409,
+            'BulkOperationRevisionConflict',
+            'Bulk operation was modified concurrently.',
+          )
+        }
+        storedOperation = structuredClone(operation)
+      },
+    } as unknown as AutomationClient,
+  }
+}
+
+function createInboundWebhookEndpointRecord(
+  overrides: Partial<AutomationInboundWebhookEndpointRecord> = {},
+): AutomationInboundWebhookEndpointRecord {
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'webhook-1',
+    workspaceId: 'user#demo@example.com',
+    opaqueEndpointId: 'A'.repeat(43),
+    name: 'Build events',
+    status: 'active',
+    version: 1,
+    secretGeneration: 1,
+    revision: 2,
+    endpointUrl: `https://api.example.com/api/automation/inbound-webhooks/${'A'.repeat(43)}`,
+    secretId: `mukuroji/automation-inbound-webhooks/${'b'.repeat(64)}/webhook-1`,
+    secretVersionId: 'c'.repeat(64),
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:00:01.000Z',
+    ...overrides,
+  }
+}
+
+function createInboundWebhookProvisioning(
+  endpoint: AutomationInboundWebhookEndpointRecord,
+  kind: 'create' | 'rotate',
+): AutomationInboundWebhookProvisioning {
+  const operationId = `inbound_operation_${kind}_${'d'.repeat(32)}`
+  return {
+    endpoint: {
+      ...endpoint,
+      status: 'provisioning',
+      provisioningOperationId: operationId,
+      provisioningTargetStatus: 'active',
+    },
+    operation: {
+      id: operationId,
+      workspaceId: endpoint.workspaceId,
+      actorId: 'demo@example.com',
+      kind,
+      endpointId: endpoint.id,
+      requestFingerprint: 'e'.repeat(64),
+      status: 'provisioning',
+      targetStatus: 'active',
+      endpointVersion: endpoint.version,
+      endpointRevision: endpoint.revision,
+      secretGeneration: endpoint.secretGeneration,
+      secretId: endpoint.secretId,
+      secretVersionId: endpoint.secretVersionId,
+      createdAt: '2026-07-16T00:00:00.000Z',
+      updatedAt: '2026-07-16T00:00:00.000Z',
+      recoveryExpiresAt: '2099-07-17T00:00:00.000Z',
+    },
+  }
+}
+
+test('accepts an unauthenticated signed inbound webhook without exposing secret material', async () => {
+  const previousAuditTable = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+  process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditTable'
+  try {
+    let resolvedEndpoint = createInboundWebhookEndpointRecord()
+    let deliveryInput: Parameters<AutomationClient['recordInboundWebhookDelivery']>[1] | undefined
+    const signingSecret = Buffer.from('server-issued-secret', 'utf8')
+    const secretReads: unknown[] = []
+    configureApiClientsForTest({
+      automation: {
+        async resolveInboundWebhookEndpoint() {
+          return structuredClone(resolvedEndpoint)
+        },
+        async recordInboundWebhookDelivery(_endpoint, input) {
+          deliveryInput = input
+          return { eventId: input.eventId, replayed: false }
+        },
+      } as unknown as AutomationClient,
+      automationInboundWebhookSecrets: {
+        async provision() {
+          throw new Error('Public delivery must not provision a secret.')
+        },
+        async get(reference) {
+          secretReads.push(structuredClone(reference))
+          return signingSecret
+        },
+        async delete() {
+          throw new Error('Public delivery must not delete a secret.')
+        },
+      },
+    })
+    const rawBody = '{\n  "message": "deploy", "nested": { "value": 1 }\n}\n'
+    const timestamp = String(Math.floor(Date.now() / 1_000))
+    const signature = `sha256=${createHmac('sha256', signingSecret)
+      .update(`${timestamp}.`, 'utf8')
+      .update(rawBody, 'utf8')
+      .digest('hex')}`
+    const request = () => app.request(
+      `/api/automation/inbound-webhooks/${resolvedEndpoint.opaqueEndpointId}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Idempotency-Key': 'sender-delivery-1',
+          'X-Mukuroji-Signature': signature,
+          'X-Mukuroji-Timestamp': timestamp,
+        },
+        body: rawBody,
+      },
+    )
+
+    const response = await request()
+    expect(response.status).toBe(202)
+    expect(await response.json()).toEqual({ eventId: deliveryInput?.eventId })
+    expect(secretReads).toEqual([expect.objectContaining({
+      secretId: resolvedEndpoint.secretId,
+      secretVersionId: resolvedEndpoint.secretVersionId,
+      secretGeneration: resolvedEndpoint.secretGeneration,
+    })])
+    expect(deliveryInput).toMatchObject({
+      idempotencyKey: 'sender-delivery-1',
+      signatureTimestamp: timestamp,
+      auditTransactItem: { Put: { TableName: 'AuditTable' } },
+    })
+    expect(JSON.stringify(deliveryInput)).not.toContain('server-issued-secret')
+    expect(JSON.stringify(deliveryInput)).not.toContain(signature)
+    expect(deliveryInput?.bodyFingerprint).toMatch(/^[a-f0-9]{64}$/)
+
+    resolvedEndpoint = { ...resolvedEndpoint, status: 'paused' }
+    expect((await request()).status).toBe(423)
+    resolvedEndpoint = { ...resolvedEndpoint, status: 'provisioning' }
+    expect((await request()).status).toBe(404)
+  } finally {
+    if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+    else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previousAuditTable
+  }
+})
+
+test('maps inbound webhook public validation failures without Cognito authentication', async () => {
+  const endpoint = createInboundWebhookEndpointRecord()
+  configureApiClientsForTest({
+    automation: {
+      async resolveInboundWebhookEndpoint(opaqueEndpointId) {
+        return opaqueEndpointId === endpoint.opaqueEndpointId ? endpoint : undefined
+      },
+    } as unknown as AutomationClient,
+  })
+  const baseUrl = `/api/automation/inbound-webhooks/${endpoint.opaqueEndpointId}`
+  expect((await app.request(baseUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain', 'Idempotency-Key': 'delivery-1' },
+    body: '{}',
+  })).status).toBe(415)
+  expect((await app.request(baseUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })).status).toBe(400)
+  expect((await app.request(`/api/automation/inbound-webhooks/${'Z'.repeat(43)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'delivery-1' },
+    body: '{}',
+  })).status).toBe(404)
+})
+
+test('returns plaintext inbound secrets only from create/rotate and redacts durable endpoints', async () => {
+  configureFakeProjectClients(true)
+  let current = createInboundWebhookEndpointRecord({
+    status: 'provisioning',
+    revision: 1,
+    provisioningOperationId: `inbound_operation_create_${'d'.repeat(32)}`,
+    provisioningTargetStatus: 'active',
+  })
+  let deletedSecrets = 0
+  const createProvisioning = createInboundWebhookProvisioning(current, 'create')
+  const secretStore: AutomationInboundWebhookSecretStore = {
+    async provision(reference) {
+      return `one-time-secret-generation-${reference.secretGeneration}`
+    },
+    async get() {
+      throw new Error('Admin routes must not read delivery secrets.')
+    },
+    async delete() {
+      deletedSecrets += 1
+    },
+  }
+  configureApiClientsForTest({
+    automation: {
+      async listInboundWebhookEndpoints() {
+        return [toAutomationInboundWebhookEndpoint(current)]
+      },
+      async getInboundWebhookEndpoint() {
+        return toAutomationInboundWebhookEndpoint(current)
+      },
+      async reserveCreateInboundWebhookEndpoint() {
+        return structuredClone(createProvisioning)
+      },
+      async reserveRotateInboundWebhookEndpoint() {
+        const rotated = createInboundWebhookEndpointRecord({
+          ...current,
+          status: 'provisioning',
+          version: current.version + 1,
+          revision: current.revision + 1,
+          secretGeneration: current.secretGeneration + 1,
+          secretVersionId: 'f'.repeat(64),
+        })
+        return createInboundWebhookProvisioning(rotated, 'rotate')
+      },
+      async completeInboundWebhookProvisioning(provisioning) {
+        current = {
+          ...provisioning.endpoint,
+          status: provisioning.operation.targetStatus,
+          revision: provisioning.endpoint.revision + 1,
+        }
+        delete current.provisioningOperationId
+        delete current.provisioningTargetStatus
+        return structuredClone(current)
+      },
+      async revokeInboundWebhookEndpoint() {
+        current = {
+          ...current,
+          status: 'revoked',
+          version: current.version + 1,
+          revision: current.revision + 1,
+          revokedAt: new Date().toISOString(),
+        }
+        return structuredClone(current)
+      },
+    } as unknown as AutomationClient,
+    automationInboundWebhookSecrets: secretStore,
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+    'Idempotency-Key': 'admin-operation-1',
+  }
+  const createdResponse = await app.request('/api/automation/inbound-webhooks', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ name: 'Build events' }),
+  })
+  expect(createdResponse.status).toBe(201)
+  const created = await createdResponse.json() as Record<string, unknown>
+  expect(created.signingSecret).toBe('one-time-secret-generation-1')
+  expect(created.endpoint).not.toHaveProperty('secretId')
+  expect(created.endpoint).not.toHaveProperty('secretVersionId')
+
+  const getResponse = await app.request(`/api/automation/inbound-webhooks/${current.id}`, {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(getResponse.status).toBe(200)
+  expect(await getResponse.json()).not.toHaveProperty('signingSecret')
+  const listResponse = await app.request('/api/automation/inbound-webhooks', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(await listResponse.json()).not.toHaveProperty('signingSecret')
+
+  const rotateResponse = await app.request(
+    `/api/automation/inbound-webhooks/${current.id}/rotate`,
+    {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': 'admin-rotate-1' },
+      body: JSON.stringify({ expectedRevision: current.revision }),
+    },
+  )
+  expect(rotateResponse.status).toBe(200)
+  const rotated = await rotateResponse.json() as Record<string, unknown>
+  expect(rotated.signingSecret).toBe('one-time-secret-generation-2')
+  expect(rotated.endpoint).not.toHaveProperty('secretId')
+
+  const revokeResponse = await app.request(`/api/automation/inbound-webhooks/${current.id}`, {
+    method: 'DELETE',
+    headers,
+    body: JSON.stringify({ expectedRevision: current.revision }),
+  })
+  expect(revokeResponse.status).toBe(200)
+  expect(await revokeResponse.json()).not.toHaveProperty('signingSecret')
+  expect(deletedSecrets).toBe(1)
+})
+
+test('compensates a late secret provision after an administrator aborts provisioning', async () => {
+  configureFakeProjectClients(true)
+  const provisioning = createInboundWebhookProvisioning(
+    createInboundWebhookEndpointRecord({ status: 'provisioning', revision: 1 }),
+    'create',
+  )
+  let deletedSecrets = 0
+  let provisionFails = false
+  configureApiClientsForTest({
+    automation: {
+      async reserveCreateInboundWebhookEndpoint() {
+        return provisioning
+      },
+      async completeInboundWebhookProvisioning() {
+        throw new AutomationError(
+          409,
+          'AutomationInboundWebhookLifecycleConflict',
+          'Endpoint was revoked while the secret write was in flight.',
+        )
+      },
+      async getInboundWebhookEndpoint() {
+        return toAutomationInboundWebhookEndpoint({
+          ...provisioning.endpoint,
+          status: 'revoked',
+          revokedAt: new Date().toISOString(),
+          provisioningOperationId: undefined,
+          provisioningTargetStatus: undefined,
+        })
+      },
+    } as unknown as AutomationClient,
+    automationInboundWebhookSecrets: {
+      async provision() {
+        if (provisionFails) {
+          throw new AutomationError(
+            503,
+            'AutomationInboundWebhookSecretUnavailable',
+            'Secret write response and recovery read were unavailable.',
+            true,
+          )
+        }
+        return 'late-secret'
+      },
+      async get() {
+        throw new Error('Unexpected get.')
+      },
+      async delete() {
+        deletedSecrets += 1
+      },
+    },
+  })
+  const response = await app.request('/api/automation/inbound-webhooks', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'late-provision',
+    },
+    body: JSON.stringify({ name: 'Aborted endpoint' }),
+  })
+  expect(response.status).toBe(409)
+  expect(deletedSecrets).toBe(1)
+
+  provisionFails = true
+  const lostWriteResponse = await app.request('/api/automation/inbound-webhooks', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'late-provision',
+    },
+    body: JSON.stringify({ name: 'Aborted endpoint' }),
+  })
+  expect(lostWriteResponse.status).toBe(503)
+  expect(deletedSecrets).toBe(2)
+})
+
+test('recovers an automation Work Item update only from its deterministic audit proof', async () => {
+  const runResponseLoss = async (withAuditProof: boolean) => {
+    configureFakeProjectClients(true, {
+      teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+    })
+    let currentIssue = createBulkRecoveryIssue()
+    let auditProof: ReturnType<typeof createAuditEvent> | undefined
+    let auditProofReads = 0
+    configureApiClientsForTest({
+      teamIssues: {
+        async getTeamIssueDetail() {
+          return {
+            issue: structuredClone(currentIssue),
+            comments: [],
+            activity: [],
+          }
+        },
+        async updateTeamIssue(
+          _directoryId,
+          teamId,
+          issueId,
+          input,
+          actorUserId,
+          auditContext,
+        ) {
+          if (!auditContext) throw new Error('Automation mutation audit context is required.')
+          const beforeRevision = currentIssue.revision
+          const afterRevision = beforeRevision + 1
+          currentIssue = {
+            ...currentIssue,
+            revision: afterRevision,
+            title: String(input.title),
+            updatedAt: '2026-07-16T00:01:00.000Z',
+          }
+          const event = createAuditEvent({
+            context: auditContext,
+            expiresAt: calculateAuditExpiresAt(auditContext.occurredAt, 365),
+            eventType: 'work-item.updated',
+            entity: { type: 'work-item', id: `team/${teamId}/issue/${issueId}` },
+            action: 'updated',
+            metadata: {
+              adapter: 'canonical-work-item',
+              actorMemberKey: actorUserId,
+              teamId,
+              issueId,
+              beforeRevision,
+              afterRevision,
+            },
+          })
+          if (withAuditProof) auditProof = event
+          throw new AutomationError(
+            503,
+            'AutomationMutationResponseLost',
+            'The mutation committed but its response was lost.',
+            true,
+          )
+        },
+      } as unknown as NonNullable<
+        Parameters<typeof configureApiClientsForTest>[0]['teamIssues']
+      >,
+      auditEvents: {
+        async getEvent(workspaceId, eventId) {
+          auditProofReads += 1
+          expect(workspaceId).toBe('workspace-1')
+          return auditProof?.eventId === eventId ? auditProof : undefined
+        },
+        async query() {
+          return { events: [] }
+        },
+      },
+    })
+    const context = {
+      execution: {
+        schemaVersion: AUTOMATION_SCHEMA_VERSION,
+        id: `automation-update-${withAuditProof ? 'proved' : 'unproved'}`,
+        workspaceId: 'workspace-1',
+        ruleId: 'rule-1',
+        ruleVersion: 1,
+        triggerEventId: 'event-1',
+        status: 'running',
+        attempts: 1,
+        actions: [],
+        startedAt: '2026-07-16T00:00:00.000Z',
+        retryable: false,
+      },
+      event: {
+        eventId: 'event-1',
+        eventType: 'work-item.updated',
+        workspaceId: 'workspace-1',
+        occurredAt: '2026-07-16T00:00:00.000Z',
+        changes: [],
+        metadata: { teamId: 'core-team', issueId: currentIssue.id },
+      },
+      actionIndex: 0,
+      idempotencyKey: `automation-update-${withAuditProof ? 'proved' : 'unproved'}:action:0000`,
+    } satisfies AutomationActionExecutionContext
+    const execution = createAutomationActionExecutor().execute({
+      type: 'update',
+      patch: { title: 'Automation title' },
+    }, context)
+
+    if (withAuditProof) {
+      await expect(execution).resolves.toBeUndefined()
+    } else {
+      await expect(execution).rejects.toMatchObject({
+        code: 'AutomationMutationResponseLost',
+        status: 503,
+      })
+    }
+    expect(auditProofReads).toBe(1)
+  }
+
+  await runResponseLoss(false)
+  await runResponseLoss(true)
+})
+
+test('fails closed when automation targets a Project outside the owner Team', async () => {
+  const calls = configureFakeProjectClients(true, {
+    teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+  })
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-project-guard',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 1,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'issue-1' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-project-guard:action:0000',
+  } satisfies AutomationActionExecutionContext
+  const executor = createAutomationActionExecutor()
+
+  await expect(executor.execute({ type: 'move', targetProjectId: 'other-team-project' }, context))
+    .rejects.toMatchObject({ code: 'InvalidProjectWrite', status: 400 })
+  await expect(executor.execute({
+    type: 'create',
+    values: {
+      teamId: 'core-team',
+      title: 'Invalid project create',
+      assignedProjectId: 'other-team-project',
+    },
+  }, context)).rejects.toMatchObject({ code: 'InvalidProjectWrite', status: 400 })
+  expect(calls.issueUpdates).toHaveLength(0)
+  expect(calls.issueCreates).toHaveLength(0)
+})
+
+test('fails closed before an automation comment targets a removed Team', async () => {
+  const calls = configureFakeProjectClients(true)
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-comment-team-guard',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 1,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'removed-team', issueId: 'issue-1' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-comment-team-guard:action:0000',
+  } satisfies AutomationActionExecutionContext
+
+  await expect(createAutomationActionExecutor().execute({
+    type: 'comment',
+    body: 'This must not be written.',
+  }, context)).rejects.toMatchObject({ code: 'AutomationTeamUnavailable', status: 409 })
+  expect(calls.issueComments).toHaveLength(0)
+})
+
+test('rejects removed recurring-work Teams on create and update before saving a definition', async () => {
+  configureFakeProjectClients(true)
+  let updateCalls = 0
+  configureApiClientsForTest({
+    automation: {
+      async getRecurringWork() {
+        return {
+          schemaVersion: AUTOMATION_SCHEMA_VERSION,
+          id: 'recurring-1',
+          workspaceId: 'user#demo@example.com',
+          teamId: 'core-team',
+          name: 'Daily triage',
+          enabled: true,
+          version: 1,
+          revision: 1,
+          templateId: 'template-1',
+          templateVersion: 1,
+          schedule: {
+            frequency: 'daily',
+            interval: 1,
+            timeZone: 'UTC',
+            localTime: '09:00',
+            startDate: '2026-07-16',
+            catchUpPolicy: 'latest',
+          },
+          nextRunAt: '2026-07-17T09:00:00.000Z',
+          createdAt: '2026-07-16T00:00:00.000Z',
+          updatedAt: '2026-07-16T00:00:00.000Z',
+        }
+      },
+      async updateRecurringWork() {
+        updateCalls += 1
+        throw new Error('Removed Team must be rejected first.')
+      },
+    } as unknown as AutomationClient,
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const createResponse = await app.request('/api/recurring-work', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      name: 'Daily triage',
+      teamId: 'removed-team',
+      enabled: true,
+      templateId: 'template-1',
+      schedule: {
+        frequency: 'daily',
+        interval: 1,
+        timeZone: 'UTC',
+        localTime: '09:00',
+        startDate: '2026-07-16',
+        catchUpPolicy: 'latest',
+      },
+    }),
+  })
+  const updateResponse = await app.request('/api/recurring-work/recurring-1', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ expectedRevision: 1, teamId: 'removed-team' }),
+  })
+
+  expect(createResponse.status).toBe(409)
+  expect(await createResponse.json()).toMatchObject({ code: 'AutomationTeamUnavailable' })
+  expect(updateResponse.status).toBe(409)
+  expect(await updateResponse.json()).toMatchObject({ code: 'AutomationTeamUnavailable' })
+  expect(updateCalls).toBe(0)
+})
+
+test('recovers a Project template application from atomic receipt success without duplicate creation', async () => {
+  const now = '2026-07-16T00:00:00.000Z'
+  const template: AutomationTemplate = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'template-project-1',
+    workspaceId: 'user#demo@example.com',
+    kind: 'project',
+    name: 'Incident response Project',
+    enabled: true,
+    version: 1,
+    revision: 1,
+    payload: { nameJa: '障害対応', nameEn: 'Incident response', tone: 'purple' },
+    createdAt: now,
+    updatedAt: now,
+  }
+  let application: AutomationTemplateApplication = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'application_project_1',
+    workspaceId: template.workspaceId,
+    actorId: 'demo@example.com',
+    templateId: template.id,
+    templateVersion: template.version,
+    kind: 'project',
+    target: { kind: 'project', teamId: 'core-team' },
+    status: 'pending',
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
+  let createCalls = 0
+  let templateVersionReads = 0
+  configureFakeProjectClients(true, {
+    async projectCreateHook(input, completionTransactItems) {
+      createCalls += 1
+      expect(input.idempotencyResourceId).toBe(application.id)
+      expect(completionTransactItems).toHaveLength(1)
+      const result = completionTransactItems[0]?.Update?.ExpressionAttributeValues?.[':result'] as
+        | AutomationTemplateApplicationResult
+        | undefined
+      application = {
+        ...application,
+        status: 'succeeded',
+        revision: application.revision + 1,
+        result,
+        runnerLeaseExpiresAt: undefined,
+        updatedAt: '2026-07-16T00:00:01.000Z',
+      }
+      throw new Error('The atomic Project transaction committed but its response was lost.')
+    },
+  })
+  configureApiClientsForTest({
+    automation: {
+      async reserveTemplateApplication() {
+        return structuredClone(application)
+      },
+      async claimTemplateApplication(candidate, _claimNow, leaseExpiresAt) {
+        if (candidate.status !== 'pending' || application.revision !== candidate.revision) return undefined
+        application = {
+          ...application,
+          status: 'running',
+          revision: application.revision + 1,
+          runnerLeaseExpiresAt: leaseExpiresAt,
+          updatedAt: now,
+        }
+        return structuredClone(application)
+      },
+      createTemplateApplicationCompletionTransactItem(candidate, result) {
+        return {
+          Update: {
+            TableName: 'AutomationTable',
+            Key: { scopeKey: candidate.workspaceId, recordKey: candidate.id },
+            UpdateExpression: 'SET #status = :succeeded, #result = :result',
+            ExpressionAttributeValues: { ':result': result, ':succeeded': 'succeeded' },
+          },
+        }
+      },
+      async getTemplateApplication() {
+        return structuredClone(application)
+      },
+      async getTemplateVersion() {
+        templateVersionReads += 1
+        return structuredClone(template)
+      },
+    } as unknown as AutomationClient,
+  })
+  const request = () => app.request(
+    `/api/automation/templates/${template.id}/applications`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'apply-project-1',
+      },
+      body: JSON.stringify({ target: { kind: 'project', teamId: 'core-team' } }),
+    },
+  )
+
+  const first = await request()
+  const replay = await request()
+  expect(first.status).toBe(200)
+  expect(await first.json()).toMatchObject({
+    status: 'succeeded',
+    result: {
+      kind: 'project',
+      projectId: application.id,
+      teamId: 'core-team',
+      name: '障害対応',
+    },
+  })
+  expect(replay.status).toBe(200)
+  expect(await replay.json()).toMatchObject({ status: 'succeeded', id: application.id })
+  expect({ createCalls, templateVersionReads }).toEqual({ createCalls: 1, templateVersionReads: 1 })
+})
+
+test('applies a Workflow template atomically while preserving custom fields and target revision', async () => {
+  configureFakeProjectClients(true)
+  const workspaceId = 'user#demo@example.com'
+  const now = '2026-07-16T00:00:00.000Z'
+  const template: AutomationTemplate = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'template-workflow-1',
+    workspaceId,
+    kind: 'workflow',
+    name: 'Delivery workflow',
+    enabled: true,
+    version: 1,
+    revision: 1,
+    payload: {
+      ...structuredClone(DEFAULT_WORK_ITEM_CONFIGURATION.workflow),
+      name: 'Delivery workflow',
+    },
+    createdAt: now,
+    updatedAt: now,
+  }
+  let application: AutomationTemplateApplication = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'application_workflow_1',
+    workspaceId,
+    actorId: 'demo@example.com',
+    templateId: template.id,
+    templateVersion: 1,
+    kind: 'workflow',
+    target: { kind: 'workflow', scopeType: 'team', scopeId: 'core-team', expectedRevision: 2 },
+    status: 'pending',
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
+  const existingConfiguration: WorkItemConfiguration = {
+    ...createTestWorkItemConfiguration('team', 'core-team', 2),
+    customFields: [{
+      id: 'customer',
+      name: 'Customer',
+      type: 'text',
+      sortOrder: 10,
+      required: false,
+    }],
+  }
+  let savedConfiguration: WorkItemConfiguration | undefined
+  let completionCount = 0
+  configureApiClientsForTest({
+    automation: {
+      async reserveTemplateApplication() {
+        return structuredClone(application)
+      },
+      async claimTemplateApplication(candidate, _claimNow, leaseExpiresAt) {
+        if (candidate.status !== 'pending') return undefined
+        application = {
+          ...application,
+          status: 'running',
+          revision: application.revision + 1,
+          runnerLeaseExpiresAt: leaseExpiresAt,
+        }
+        return structuredClone(application)
+      },
+      createTemplateApplicationCompletionTransactItem(candidate, result) {
+        return {
+          Update: {
+            TableName: 'AutomationTable',
+            Key: { scopeKey: candidate.workspaceId, recordKey: candidate.id },
+            UpdateExpression: 'SET #status = :succeeded, #result = :result',
+            ExpressionAttributeValues: { ':result': result, ':succeeded': 'succeeded' },
+          },
+        }
+      },
+      async getTemplateApplication() {
+        return structuredClone(application)
+      },
+      async getTemplateVersion() {
+        return structuredClone(template)
+      },
+    } as unknown as AutomationClient,
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration: structuredClone(existingConfiguration) }
+      },
+      async saveTeamConfiguration(
+        _savedWorkspaceId,
+        _teamId,
+        configuration,
+        usageCheck,
+        completionTransactItems = [],
+      ) {
+        await usageCheck()
+        savedConfiguration = structuredClone(configuration)
+        const result = completionTransactItems[0]?.Update?.ExpressionAttributeValues?.[':result'] as
+          | AutomationTemplateApplicationResult
+          | undefined
+        completionCount = completionTransactItems.length
+        application = {
+          ...application,
+          status: 'succeeded',
+          revision: application.revision + 1,
+          result,
+          runnerLeaseExpiresAt: undefined,
+          updatedAt: '2026-07-16T00:00:01.000Z',
+        }
+        return {
+          configuration: {
+            ...structuredClone(configuration),
+            revision: configuration.revision + 1,
+          },
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    `/api/automation/templates/${template.id}/applications`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'apply-workflow-1',
+      },
+      body: JSON.stringify({
+        target: {
+          kind: 'workflow',
+          scopeType: 'team',
+          scopeId: 'core-team',
+          expectedRevision: 2,
+        },
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    status: 'succeeded',
+    result: { kind: 'workflow', scopeType: 'team', scopeId: 'core-team', revision: 3 },
+  })
+  expect(savedConfiguration).toMatchObject({
+    revision: 2,
+    workflow: { name: 'Delivery workflow' },
+    customFields: existingConfiguration.customFields,
+  })
+  expect(completionCount).toBe(1)
+})
+
+test('retries Work Item approval with an execution-anchored deadline after response loss', async () => {
+  configureFakeProjectClients(true)
+  const approvalWrites: Array<{
+    actor: FileProofingActor
+    dueAt: string
+    requestFingerprint?: string
+    scope: { issueId?: string; projectId?: string; teamId: string; workspaceId: string }
+  }> = []
+  let loseFirstResponse = true
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createWorkItemApproval(scope, actor, input, auditContext) {
+        approvalWrites.push({
+          actor,
+          dueAt: input.dueAt,
+          requestFingerprint: auditContext?.requestFingerprint,
+          scope,
+        })
+        if (loseFirstResponse) {
+          loseFirstResponse = false
+          throw new Error('The approval committed but its response was lost.')
+        }
+        return {
+          id: 'approval-automation-1',
+          subjectType: 'work-item',
+          revision: 1,
+          status: 'pending',
+          reviewers: input.reviewerMemberKeys.map((memberKey) => ({
+            memberKey,
+            status: 'pending',
+          })),
+          dueAt: input.dueAt,
+          requestedByMemberKey: actor.memberKey,
+          requestedByKind: 'service',
+          createdAt: '2026-07-16T00:00:00.000Z',
+          updatedAt: '2026-07-16T00:00:00.000Z',
+          capabilities: { canCancel: false, canDecide: false },
+        }
+      },
+    }),
+  })
+  const execution = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'approval-response-loss',
+    workspaceId: 'workspace-1',
+    ruleId: 'rule-1',
+    ruleVersion: 1,
+    triggerEventId: 'event-1',
+    status: 'running' as const,
+    attempts: 1,
+    actions: [{
+      actionIndex: 0,
+      actionId: 'approval-response-loss:action:0000',
+      status: 'running' as const,
+      attempts: 1,
+      startedAt: '2026-07-16T02:00:00.000Z',
+    }],
+    startedAt: '2026-07-16T00:00:00.000Z',
+    retryable: false,
+  }
+  const event = {
+    eventId: 'event-1',
+    eventType: 'work-item.updated',
+    workspaceId: 'workspace-1',
+    occurredAt: '2026-07-16T00:00:00.000Z',
+    changes: [],
+    metadata: { teamId: 'core-team', issueId: 'issue-1' },
+  }
+  const action = {
+    type: 'approval' as const,
+    reviewerMemberKeys: ['Reviewer@Example.com'],
+    dueInHours: 24,
+  }
+  const executor = createAutomationActionExecutor()
+  const firstContext = {
+    execution,
+    event,
+    actionIndex: 0,
+    idempotencyKey: 'approval-response-loss:action:0000',
+  } satisfies AutomationActionExecutionContext
+
+  await expect(executor.execute(action, firstContext)).rejects.toThrow('response was lost')
+  const reloadedContext = {
+    ...firstContext,
+    execution: {
+      ...execution,
+      actions: [{
+        actionIndex: 0,
+        actionId: 'approval-response-loss:action:0000',
+        status: 'pending' as const,
+        attempts: 0,
+      }],
+    },
+  } satisfies AutomationActionExecutionContext
+  await executor.execute(action, reloadedContext)
+
+  expect(approvalWrites).toHaveLength(2)
+  expect(approvalWrites[0]).toMatchObject({
+    actor: {
+      kind: 'service',
+      memberKey: 'automation:rule-1',
+      canManage: true,
+      canWrite: true,
+    },
+    dueAt: '2026-07-17T00:00:00.000Z',
+    scope: {
+      workspaceId: 'workspace-1',
+      teamId: 'core-team',
+      issueId: 'issue-1',
+      projectId: 'refero',
+    },
+  })
+  expect(approvalWrites[1]?.dueAt).toBe(approvalWrites[0]?.dueAt)
+  expect(approvalWrites[1]?.requestFingerprint).toBe(approvalWrites[0]?.requestFingerprint)
+})
+
+test('rejects inactive automation approval reviewers before creating durable state', async () => {
+  configureFakeProjectClients(true, {
+    inactiveWorkspaceMemberKeys: ['inactive@example.com'],
+  })
+  let createCalls = 0
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createWorkItemApproval() {
+        createCalls += 1
+        throw new Error('An inactive reviewer must not reach durable approval creation.')
+      },
+    }),
+  })
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'approval-inactive-reviewer',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 1,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'issue-1' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'approval-inactive-reviewer:action:0000',
+  } satisfies AutomationActionExecutionContext
+
+  await expect(createAutomationActionExecutor().execute({
+    type: 'approval',
+    reviewerMemberKeys: ['inactive@example.com'],
+    dueInHours: 24,
+  }, context)).rejects.toMatchObject({
+    code: 'ApprovalReviewerInactive',
+    status: 409,
+  })
+  expect(createCalls).toBe(0)
+})
+
+test('does not trust forwarded request rate-limit sources without a configured proxy', async () => {
+  const clientKeys: string[] = []
+  configureApiClientsForTest({
+    requestIntake: {
+      async resolveLink() {
+        return {
+          workspaceId: 'workspace-1',
+          formId: 'form-1',
+          accessMode: 'public',
+          tokenDigest: 'link-digest',
+        }
+      },
+      async getPublicForm(_resolution, context) {
+        clientKeys.push(context.clientKey)
+        return {}
+      },
+    } as RequestIntakeClient,
+  })
+
+  for (const userAgent of ['agent-one', 'agent-two']) {
+    const response = await app.request(`/api/request-intake/${'L'.repeat(43)}`, {
+      headers: {
+        'User-Agent': userAgent,
+        'X-Forwarded-For': '203.0.113.10',
+      },
+    })
+    expect(response.status).toBe(200)
+  }
+
+  expect(clientKeys).toEqual(['transport-unavailable', 'transport-unavailable'])
+})
+
+test('uses a forwarded request rate-limit source only for a configured trusted proxy', () => {
+  expect(resolveRequestClientKey(
+    '10.0.0.8',
+    '203.0.113.10, 10.0.0.8',
+    new Set(['10.0.0.8']),
+  )).toBe('203.0.113.10')
+  expect(resolveRequestClientKey(
+    '198.51.100.20',
+    '203.0.113.10',
+    new Set(['10.0.0.8']),
+  )).toBe('198.51.100.20')
+  expect(resolveRequestClientKey(
+    undefined,
+    '203.0.113.10',
+    new Set(['10.0.0.8']),
+  )).toBe('transport-unavailable')
+})
+
+test('rejects a future Request Form publish revision before validating a stale draft', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  let publishCalls = 0
+  configureApiClientsForTest({
+    requestIntake: {
+      async getForm() {
+        return { revision: 1 }
+      },
+      async publishForm() {
+        publishCalls += 1
+        return {} as never
+      },
+    } as RequestIntakeClient,
+  })
+
+  const response = await app.request('/api/request-forms/form-1/publish', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ expectedRevision: 2 }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'RequestRevisionConflict',
+    message: 'Request resource revision changed.',
+  })
+  expect(publishCalls).toBe(0)
+})
+
+test('commits a Request conversion pointer in the same transaction as its canonical Work Item', async () => {
+  let transactionItems: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+      if (command.constructor.name === 'QueryCommand') return { Items: [] }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        transactionItems = command.input.TransactItems as Array<Record<string, unknown>>
+        return {}
+      }
+      throw new Error(`Unexpected command: ${command.constructor.name}`)
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'work-items-table',
+    'events-table',
+    documentClient,
+    { send: async () => ({}) } as unknown as DynamoDBClient,
+    false,
+  )
+
+  const response = await client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    {
+      title: 'Request-created Work Item',
+      assigneeUserId: 'member@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      dueDate: '2026/07/31',
+      priority: 'medium',
+    },
+    'admin@example.com',
+    undefined,
+    {
+      tableName: 'request-intake-table',
+      scopeKey: 'WORKSPACE#workspace-1',
+      recordKey: 'SUBMISSION#req_20260716_atomic',
+      expectedRevision: 3,
+      actorId: 'admin@example.com',
+      submissionId: 'req_20260716_atomic',
+      events: [],
+    },
+  )
+
+  expect(response.issue.sourceRequestId).toBe('req_20260716_atomic')
+  expect(transactionItems).toHaveLength(4)
+  expect(transactionItems[0]).toMatchObject({
+    Put: {
+      TableName: 'work-items-table',
+      Item: { sourceRequestId: 'req_20260716_atomic' },
+    },
+  })
+  expect(transactionItems[2]).toMatchObject({
+    Update: {
+      TableName: 'request-intake-table',
+      Key: {
+        scopeKey: 'WORKSPACE#workspace-1',
+        recordKey: 'SUBMISSION#req_20260716_atomic',
+      },
+      ConditionExpression:
+        '#revision = :expectedRevision AND (#status = :received OR #status = :triaging OR #status = :needsMoreInfo)',
+      ExpressionAttributeValues: {
+        ':expectedRevision': 3,
+        ':converted': 'converted',
+        ':workItem': {
+          teamId: 'core-team',
+          workItemId: response.issue.id,
+        },
+      },
+    },
+  })
+  expect(transactionItems[3]).toMatchObject({
+    Put: {
+      TableName: 'request-intake-table',
+      Item: {
+        entryType: 'submission-event',
+        scopeKey: 'WORKSPACE#workspace-1',
+        submissionId: 'req_20260716_atomic',
+        type: 'converted',
+        actorId: 'admin@example.com',
+      },
+      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    },
+  })
+})
+
+test('authorizes Work Item file list reads and returns server capabilities', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const reads: Array<{ actor: string; issueId?: string; teamId: string }> = []
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async list(scope, actor) {
+        reads.push({ actor: actor.memberKey, issueId: scope.issueId, teamId: scope.teamId })
+        return {
+          files: [],
+          approvals: [],
+          capabilities: {
+            canUpload: actor.canWrite,
+            canRequestApproval: actor.canWrite,
+            canGrantGuestAccess: actor.canManage,
+          },
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/files', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    files: [],
+    approvals: [],
+    capabilities: {
+      canUpload: true,
+      canRequestApproval: true,
+      canGrantGuestAccess: true,
+    },
+  })
+  expect(reads).toEqual([{
+    actor: 'demo@example.com',
+    issueId: 'issue-1',
+    teamId: 'core-team',
+  }])
+})
+
+test('creates a direct object upload session without accepting file bytes in the API body', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const creates: Array<{ contentType: string; fileName: string; sizeBytes: number }> = []
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createUpload(_scope, _actor, input) {
+        creates.push(input)
+        return createFileUploadSessionFixture()
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/files/uploads', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'upload-session-1',
+    },
+    body: JSON.stringify({
+      contentType: 'application/pdf',
+      fileName: 'proof.pdf',
+      sizeBytes: 4096,
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  const body = await response.json() as ReturnType<typeof createFileUploadSessionFixture>
+  expect(body.upload).toMatchObject({ method: 'PUT', maxSizeBytes: 2_147_483_648 })
+  expect(body.upload.url).toBe('https://objects.example.test/upload')
+  expect(creates).toEqual([{
+    contentType: 'application/pdf',
+    fileName: 'proof.pdf',
+    sizeBytes: 4096,
+  }])
+})
+
+test('does not issue file access URLs without authentication or a clean scan', async () => {
+  configureFakeProjectClients(true, { role: 'viewer' })
+  let accessCalls = 0
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createAccess() {
+        accessCalls += 1
+        throw new FileProofingError(423, 'FileScanPending', 'File scanning is still in progress.')
+      },
+    }),
+  })
+
+  const unauthenticated = await app.request(
+    '/api/teams/core-team/issues/issue-1/files/file-1/versions/version-1/access',
+  )
+  expect(unauthenticated.status).toBe(401)
+  expect(accessCalls).toBe(0)
+
+  const pending = await app.request(
+    '/api/teams/core-team/issues/issue-1/files/file-1/versions/version-1/access?disposition=inline',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(pending.status).toBe(423)
+  expect(await pending.json()).toEqual({
+    code: 'FileScanPending',
+    message: 'File scanning is still in progress.',
+  })
+  expect(accessCalls).toBe(1)
+})
+
+test('keeps guest file uploads and management read-only at the API authorization boundary', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'guest' })
+  const actors: FileProofingActor[] = []
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createUpload(_scope, actor) {
+        actors.push(actor)
+        throw new FileProofingError(403, 'FileWriteDenied', 'File write access is required.')
+      },
+    }),
+  })
+
+  const responses = await Promise.all([
+    '/api/teams/core-team/issues/issue-1/files/uploads',
+    '/api/teams/core-team/projects/refero/files/uploads',
+  ].map((path) => app.request(path, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ contentType: 'image/png', fileName: 'guest.png', sizeBytes: 10 }),
+  })))
+
+  for (const response of responses) {
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ code: 'FileWriteDenied' })
+  }
+  expect(actors).toHaveLength(2)
+  for (const actor of actors) {
+    expect(actor).toMatchObject({ guest: true, canManage: false, canWrite: false })
+  }
+})
+
+test('keeps a downgraded guest uploader from deleting files through the API', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'guest' })
+  let receivedActor: FileProofingActor | undefined
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async deleteFile(_scope, actor) {
+        receivedActor = actor
+        throw new FileProofingError(
+          403,
+          'FileDeleteDenied',
+          'File manager or uploader access is required.',
+        )
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/files/file-created-before-downgrade',
+    {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer test-token' },
+    },
+  )
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'FileDeleteDenied' })
+  expect(receivedActor).toMatchObject({ guest: true, canManage: false, canWrite: false })
+})
+
+test('rejects a read-only approval requester before reviewer or file fan-out', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'guest' })
+  let fileListCalls = 0
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async list() {
+        fileListCalls += 1
+        throw new Error('File list must not be called for a read-only requester.')
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/approvals', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      dueAt: '2099-07-20T00:00:00.000Z',
+      fileId: 'file-1',
+      reviewerMemberKeys: ['reviewer@example.com'],
+      versionId: 'version-1',
+    }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'FileWriteDenied' })
+  expect(fileListCalls).toBe(0)
+})
+
+test('returns 400 for malformed file JSON before calling the domain client', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  let createCalls = 0
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async createUpload() {
+        createCalls += 1
+        return createFileUploadSessionFixture()
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/files/uploads', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: '{',
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({ code: 'InvalidFileProofingInput' })
+  expect(createCalls).toBe(0)
+})
+
+test('rejects excessive approval reviewers before external member fan-out', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/approvals', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      dueAt: '2099-07-20T00:00:00.000Z',
+      fileId: 'file-1',
+      reviewerMemberKeys: Array.from({ length: 21 }, (_, index) => `reviewer-${index}@example.com`),
+      versionId: 'version-1',
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({ code: 'InvalidApprovalReviewers' })
+})
+
+test('validates and stores an approval completion target from the current workflow', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workflow.statuses.push({
+    id: 'approval-complete',
+    name: 'Approval complete',
+    category: 'completed',
+    sortOrder: 50,
+  })
+  configuration.workflow.transitions.push({
+    fromStatusId: 'in-progress',
+    toStatusId: 'approval-complete',
+  })
+  const receivedTransitions: Array<string | undefined> = []
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async list() {
+        const upload = createFileUploadSessionFixture()
+        return {
+          files: [upload.file],
+          approvals: [],
+          capabilities: {
+            canUpload: true,
+            canRequestApproval: true,
+            canGrantGuestAccess: true,
+          },
+        }
+      },
+      async createApproval(_scope, _actor, input) {
+        receivedTransitions.push(input.completionTransition)
+        return createApprovalRequestFixture()
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/approvals', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      dueAt: '2099-07-20T00:00:00.000Z',
+      fileId: 'file-1',
+      reviewerMemberKeys: ['sato@example.com'],
+      versionId: 'version-1',
+      completionTransition: 'approval-complete',
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(receivedTransitions).toEqual(['approval-complete'])
+})
+
+test('resolves approval completion with workflow metadata and configuration guards', async () => {
+  const calls = configureFakeProjectClients(true, {
+    role: 'member',
+    detailWorkflowStatusIds: ['in-progress', 'approval-complete'],
+    detailUpdatedAts: [
+      '2026-06-08T00:00:00.000Z',
+      '2026-07-12T02:34:56.000Z',
+    ],
+  })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team', 4)
+  configuration.workflow.statuses.push({
+    id: 'approval-complete',
+    name: 'Approval complete',
+    category: 'completed',
+    sortOrder: 50,
+  })
+  configuration.workflow.transitions.push({
+    fromStatusId: 'in-progress',
+    toStatusId: 'approval-complete',
+  })
+  const resolvedTransitions: unknown[] = []
+  const projectedDocuments: Array<Parameters<WorkspaceSearchClient['upsertDocument']>[0]> = []
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async decideApproval(_scope, _actor, _approvalId, _input, _auditContext, resolver) {
+        resolvedTransitions.push(await resolver?.('approval-complete'))
+        return createApprovalRequestFixture({
+          status: 'approved',
+          updatedAt: '2026-07-12T01:23:45.000Z',
+        })
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+    workspaceSearch: {
+      async upsertDocument(document) {
+        projectedDocuments.push(document)
+        return createWorkspaceSearchDocument(document)
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/approvals/approval-1/decisions',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ decision: 'approve', expectedRevision: 1 }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(resolvedTransitions).toHaveLength(1)
+  expect(resolvedTransitions[0]).toMatchObject({
+    workflowStatusId: 'approval-complete',
+    statusCategory: 'completed',
+    workflowSchemaVersion: 1,
+    expectedRevision: 1,
+  })
+  expect(
+    (resolvedTransitions[0] as {
+      configurationConditionChecks: TransactWriteCommandInput['TransactItems']
+    }).configurationConditionChecks,
+  ).toEqual(expect.arrayContaining([
+    expect.objectContaining({ ConditionCheck: expect.any(Object) }),
+  ]))
+  expect(projectedDocuments).toHaveLength(1)
+  expect(projectedDocuments[0]).toMatchObject({
+    entityType: 'work-item',
+    entityId: 'team/core-team/issue/issue-1',
+    status: 'approval-complete',
+    updatedAt: '2026-07-12T02:34:56.000Z',
+  })
+  expect(calls.issueDetails).toHaveLength(2)
+  expect(calls.issueDetails[1]?.readOptions).toMatchObject({
+    consistentIssueRead: true,
+    eventLimit: 0,
+  })
+})
+
+test('does not project a Work Item when an approval decision has no completion transition', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  let projectionWrites = 0
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async decideApproval() {
+        return createApprovalRequestFixture({ status: 'rejected' })
+      },
+    }),
+    workspaceSearch: {
+      async upsertDocument(document) {
+        projectionWrites += 1
+        return createWorkspaceSearchDocument(document)
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/approvals/approval-1/decisions',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ decision: 'reject', expectedRevision: 1 }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(projectionWrites).toBe(0)
+})
+
+test('keeps an approval completion successful when Work Item search projection fails', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workflow.statuses.push({
+    id: 'approval-complete',
+    name: 'Approval complete',
+    category: 'completed',
+    sortOrder: 50,
+  })
+  configuration.workflow.transitions.push({
+    fromStatusId: 'in-progress',
+    toStatusId: 'approval-complete',
+  })
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async decideApproval(_scope, _actor, _approvalId, _input, _auditContext, resolver) {
+        await resolver?.('approval-complete')
+        return createApprovalRequestFixture({ status: 'approved' })
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+    workspaceSearch: {
+      async upsertDocument() {
+        throw new Error('Search index unavailable')
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  const originalConsoleError = console.error
+  let projectionErrors = 0
+  console.error = () => {
+    projectionErrors += 1
+  }
+  try {
+    const response = await app.request(
+      '/api/teams/core-team/issues/issue-1/approvals/approval-1/decisions',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ decision: 'approve', expectedRevision: 1 }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ approval: { status: 'approved' } })
+    expect(projectionErrors).toBe(1)
+  } finally {
+    console.error = originalConsoleError
+  }
+})
+
+test('classifies a removed approval completion target as a decision conflict', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team', 5)
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async decideApproval(_scope, _actor, _approvalId, _input, _auditContext, resolver) {
+        const resolved = await resolver?.('removed-after-request')
+        if (!resolved) {
+          throw new FileProofingError(
+            409,
+            'ApprovalCompletionTransitionConflict',
+            'Approval completion workflow transition is no longer available.',
+          )
+        }
+        return createApprovalRequestFixture({ status: 'approved' })
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/approvals/approval-1/decisions',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ decision: 'approve', expectedRevision: 1 }),
+    },
+  )
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'ApprovalCompletionTransitionConflict',
+  })
+})
+
+test('cancels a pending approval through the authenticated Work Item scope', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  let receivedRevision: number | undefined
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async cancelApproval(_scope, _actor, _approvalId, input) {
+        receivedRevision = input.expectedRevision
+        return {
+          id: 'approval-1',
+          teamId: 'core-team',
+          issueId: 'issue-1',
+          subjectType: 'file-version',
+          revision: input.expectedRevision + 1,
+          fileId: 'file-1',
+          versionId: 'version-1',
+          status: 'cancelled',
+          reviewers: [{ memberKey: 'reviewer@example.com', status: 'pending' }],
+          dueAt: '2099-07-20T00:00:00.000Z',
+          requestedByMemberKey: 'demo@example.com',
+          requestedByKind: 'member',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T01:00:00.000Z',
+          completedAt: '2026-07-12T01:00:00.000Z',
+          capabilities: { canCancel: false, canDecide: false },
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/approvals/approval-1/cancel',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ expectedRevision: 3 }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(receivedRevision).toBe(3)
+  expect(await response.json()).toMatchObject({
+    approval: { id: 'approval-1', revision: 4, status: 'cancelled' },
+  })
+})
+
+test('rejects a comment attachment when the saved comment does not exist', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  let uploadCalls = 0
+  const attachmentChecks: Array<{ entityKey: string; commentId: string }> = []
+  configureApiClientsForTest({
+    collaboration: createCollaborationStub({
+      async hasAttachableComment(entityKey, commentId) {
+        attachmentChecks.push({ entityKey, commentId })
+        return false
+      },
+    }),
+    fileProofing: createFileProofingStub({
+      async createUpload() {
+        uploadCalls += 1
+        return createFileUploadSessionFixture()
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/comments/missing-comment/files/uploads',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ contentType: 'application/pdf', fileName: 'proof.pdf', sizeBytes: 10 }),
+    },
+  )
+
+  expect(response.status).toBe(404)
+  expect(await response.json()).toMatchObject({ code: 'CommentNotFound' })
+  expect(uploadCalls).toBe(0)
+  expect(attachmentChecks).toEqual([{
+    entityKey: 'user#demo@example.com#work-item#team/core-team/issue/issue-1',
+    commentId: 'missing-comment',
+  }])
+})
+
+test('filters reviewer Inbox approvals after current project access is revoked', async () => {
+  configureFakeProjectClients(false, { role: 'viewer' })
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async listReviewerApprovals() {
+        return { approvals: [{
+          id: 'approval-1',
+          teamId: 'core-team',
+          issueId: 'issue-1',
+          projectId: 'refero',
+          subjectType: 'file-version',
+          revision: 1,
+          fileId: 'file-1',
+          versionId: 'version-1',
+          status: 'pending',
+          reviewers: [{ memberKey: 'demo@example.com', status: 'pending' }],
+          dueAt: '2099-07-20T00:00:00.000Z',
+          requestedByMemberKey: 'manager@example.com',
+          requestedByKind: 'member',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+          capabilities: { canCancel: false, canDecide: true },
+        }] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/approvals/reviewer', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ approvals: [] })
+})
+
+test('continues reviewer Inbox pagination after filtering an unauthorized scope', async () => {
+  configureFakeProjectClients(true, { role: 'viewer' })
+  const cursors: Array<string | undefined> = []
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async listReviewerApprovals(_workspaceId, _actor, options) {
+        cursors.push(options?.cursor)
+        const commonApproval = {
+          subjectType: 'file-version' as const,
+          revision: 1,
+          fileId: 'file-1',
+          versionId: 'version-1',
+          status: 'pending' as const,
+          reviewers: [{ memberKey: 'demo@example.com', status: 'pending' as const }],
+          dueAt: '2099-07-20T00:00:00.000Z',
+          requestedByMemberKey: 'manager@example.com',
+          requestedByKind: 'member' as const,
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+          capabilities: { canCancel: false, canDecide: true },
+        }
+
+        return options?.cursor
+          ? {
+              approvals: [{
+                ...commonApproval,
+                id: 'approval-visible',
+                teamId: 'core-team',
+                issueId: 'issue-visible',
+                projectId: 'refero',
+              }],
+            }
+          : {
+              approvals: [{
+                ...commonApproval,
+                id: 'approval-stale',
+                teamId: 'missing-team',
+                issueId: 'issue-stale',
+                projectId: 'refero',
+              }],
+              nextCursor: 'page-2',
+            }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/approvals/reviewer?limit=1', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    approvals: [{ id: 'approval-visible' }],
+  })
+  expect(cursors).toEqual([undefined, 'page-2'])
+})
+
+test('does not hide reviewer Inbox authorization read failures as an empty page', async () => {
+  configureFakeProjectClients(true, {
+    detailReadError: Object.assign(new Error('Work Item read is unavailable.'), {
+      code: 'DynamoDbUnavailable',
+      status: 503,
+    }),
+    role: 'viewer',
+  })
+  configureApiClientsForTest({
+    fileProofing: createFileProofingStub({
+      async listReviewerApprovals() {
+        return { approvals: [{
+          id: 'approval-1',
+          teamId: 'core-team',
+          issueId: 'issue-1',
+          projectId: 'refero',
+          subjectType: 'file-version',
+          revision: 1,
+          fileId: 'file-1',
+          versionId: 'version-1',
+          status: 'pending',
+          reviewers: [{ memberKey: 'demo@example.com', status: 'pending' }],
+          dueAt: '2099-07-20T00:00:00.000Z',
+          requestedByMemberKey: 'manager@example.com',
+          requestedByKind: 'member',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+          capabilities: { canCancel: false, canDecide: true },
+        }] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/approvals/reviewer', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(502)
+  expect(await response.json()).toEqual({ message: 'File proofing data is unavailable.' })
 })
 
 test('uses a strongly consistent Work Item read for authorization-sensitive detail loads', async () => {
@@ -40,6 +4454,9 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
       sentInputs.push(command.input)
       return {
         Item: {
+          schemaVersion: 1,
+          revision: 1,
+          workflowSchemaVersion: 1,
           directoryId: 'workspace-1',
           teamId: 'core-team',
           directoryTeamId: 'workspace-1#team#core-team',
@@ -47,7 +4464,11 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
           sortOrder: 1,
           title: 'Authorization-sensitive issue',
           assigneeUserId: 'member@example.com',
-          status: 'todo',
+          creatorMemberKey: 'member@example.com',
+          workflowStatusId: 'todo',
+          statusCategory: 'unstarted',
+          customFieldValues: {},
+          relationIds: [],
           dueDate: '2026/07/12',
           priority: 'medium',
           createdAt: '2026-07-12T00:00:00.000Z',
@@ -77,10 +4498,318 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
   })
 })
 
+test('pages Public Work Items with a bounded updated-at GSI query and LastEvaluatedKey', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const createStoredIssue = (issueId: string, updatedAt: string) => ({
+    schemaVersion: 1,
+    revision: 1,
+    workflowSchemaVersion: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#project-1',
+    teamId: 'core-team',
+    assignedProjectId: 'project-1',
+    issueId,
+    sortOrder: 1,
+    title: `Issue ${issueId}`,
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'member@example.com',
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-31',
+    priority: 'medium',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt,
+  })
+  const firstKey = {
+    directoryTeamId: 'workspace-1#team#core-team',
+    updatedAt: '2026-07-18T02:00:00.000Z',
+    issueId: 'issue-2',
+  }
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return command.input.ExclusiveStartKey
+        ? { Items: [createStoredIssue('issue-1', '2026-07-18T01:00:00.000Z')] }
+        : {
+            Items: [createStoredIssue('issue-2', '2026-07-18T02:00:00.000Z')],
+            LastEvaluatedKey: firstKey,
+          }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const first = await client.getPublicWorkItemPage('workspace-1', 'core-team', {
+    limit: 1,
+    updatedAfter: '2026-07-18T00:00:00.000Z',
+    accessibleProjectIds: ['project-1'],
+  })
+  const second = await client.getPublicWorkItemPage('workspace-1', 'core-team', {
+    limit: 1,
+    cursor: first.nextCursor,
+    updatedAfter: '2026-07-18T00:00:00.000Z',
+    accessibleProjectIds: ['project-1'],
+  })
+  await client.getPublicWorkItemPage('workspace-1', 'core-team', {
+    limit: 1,
+    accessibleProjectIds: ['project-1'],
+  })
+
+  expect(first.issues.map((issue) => issue.id)).toEqual(['issue-2'])
+  expect(first.nextCursor).toBeString()
+  expect(second.issues.map((issue) => issue.id)).toEqual(['issue-1'])
+  expect(second.nextCursor).toBeUndefined()
+  expect(sentInputs[0]).toMatchObject({
+    TableName: 'issues-table',
+    IndexName: 'TeamIssueUpdatedAtIndex',
+    KeyConditionExpression:
+      '#directoryTeamId = :directoryTeamId AND #updatedAt > :updatedAfter',
+    Limit: 1,
+    ScanIndexForward: false,
+  })
+  expect(sentInputs[1]?.ExclusiveStartKey).toEqual(firstKey)
+  expect(sentInputs[2]).toMatchObject({
+    KeyConditionExpression: '#directoryTeamId = :directoryTeamId',
+    ExpressionAttributeNames: expect.not.objectContaining({
+      '#updatedAt': 'updatedAt',
+    }),
+  })
+})
+
+test('returns an existing deterministic import row only when its request digest matches', async () => {
+  const digest = 'a'.repeat(64)
+  const issueId = `import-${'b'.repeat(48)}`
+  const existing = {
+    schemaVersion: 1,
+    revision: 1,
+    workflowSchemaVersion: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId,
+    importRequestDigest: digest,
+    sortOrder: 10,
+    title: 'Imported once',
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'member@example.com',
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-31',
+    priority: 'medium',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T00:00:00.000Z',
+  }
+  const documentClient = {
+    async send(command: { constructor: { name: string } }) {
+      if (command.constructor.name === 'QueryCommand') return { Items: [] }
+      if (command.constructor.name === 'GetCommand') return { Item: existing }
+      const error = new Error('conditional collision') as Error & {
+        CancellationReasons: Array<{ Code: string }>
+      }
+      error.name = 'TransactionCanceledException'
+      error.CancellationReasons = [
+        { Code: 'ConditionalCheckFailed' },
+        { Code: 'None' },
+      ]
+      throw error
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const input = {
+    title: 'Imported once',
+    assigneeUserId: 'member@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    dueDate: '2026-07-31',
+    priority: 'medium',
+    idempotentIssueId: issueId,
+    idempotentRequestDigest: digest,
+  }
+
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    input,
+    'member@example.com',
+  )).resolves.toMatchObject({ issue: { id: issueId, title: 'Imported once' } })
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    { ...input, idempotentRequestDigest: 'c'.repeat(64) },
+    'member@example.com',
+  )).rejects.toMatchObject({
+    status: 409,
+    code: 'IdempotentWorkItemCreateConflict',
+  })
+})
+
+test('accepts the deterministic public API Work Item ID namespace', async () => {
+  let transactionInput: TransactWriteCommandInput | undefined
+  const documentClient = {
+    async send(command: { constructor: { name: string }; input?: TransactWriteCommandInput }) {
+      if (command.constructor.name === 'QueryCommand') return { Items: [] }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        transactionInput = command.input
+        return {}
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const issueId = `api-${'d'.repeat(48)}`
+
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    {
+      title: 'Created through the public API',
+      assigneeUserId: 'member@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      dueDate: '2026-07-31',
+      priority: 'medium',
+      idempotentIssueId: issueId,
+      idempotentRequestDigest: 'e'.repeat(64),
+    },
+    'member@example.com',
+  )).resolves.toMatchObject({ issue: { id: issueId } })
+  expect(transactionInput?.TransactItems?.[0]?.Put?.Item).toMatchObject({
+    issueId,
+    importRequestDigest: 'e'.repeat(64),
+  })
+})
+
+test('rejects a status-only canonical row instead of upcasting workflow fields', async () => {
+  const documentClient = {
+    async send() {
+      return {
+        Item: {
+          schemaVersion: 1,
+          revision: 1,
+          directoryId: 'workspace-1',
+          directoryTeamId: 'workspace-1#team#core-team',
+          teamId: 'core-team',
+          issueId: 'legacy-shaped-row',
+          sortOrder: 1,
+          title: 'Legacy-shaped row',
+          assigneeUserId: 'member@example.com',
+          status: 'todo',
+          dueDate: '2026/07/12',
+          priority: 'medium',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+        },
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core-team',
+    'legacy-shaped-row',
+    { eventLimit: 0 },
+  )).rejects.toMatchObject({ code: 'InvalidTeamIssue', status: 503 })
+})
+
+test('rejects legacy-only display fields on canonical rows', async () => {
+  const canonicalItem = {
+    schemaVersion: 1,
+    revision: 1,
+    workflowSchemaVersion: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'strict-row',
+    sortOrder: 1,
+    title: 'Strict row',
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'member@example.com',
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/12',
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+
+  for (const legacyField of [
+    'titleKey',
+    'assignee',
+    'assigneeKey',
+    'source',
+    'migrationSource',
+    'migrationSourceKey',
+    'relationIds',
+  ] as const) {
+    const documentClient = {
+      async send() {
+        return {
+          Item: {
+            ...canonicalItem,
+            [legacyField]: 'legacy-display-value',
+          },
+        }
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbTeamIssuesClient(
+      'issues-table',
+      'events-table',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+    )
+
+    await expect(client.getTeamIssueDetail(
+      'workspace-1',
+      'core-team',
+      'strict-row',
+      { eventLimit: 0 },
+    )).rejects.toMatchObject({ code: 'InvalidTeamIssue', status: 503 })
+  }
+})
+
 test('pages filtered legacy comments with a scope-bound opaque event cursor', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   let queryPage = 0
   const issueItem = {
+    schemaVersion: 1,
+    revision: 1,
+    workflowSchemaVersion: 1,
     directoryId: 'workspace-1',
     teamId: 'core-team',
     directoryTeamId: 'workspace-1#team#core-team',
@@ -88,7 +4817,11 @@ test('pages filtered legacy comments with a scope-bound opaque event cursor', as
     sortOrder: 1,
     title: 'Legacy comments',
     assigneeUserId: 'member@example.com',
-    status: 'todo',
+    creatorMemberKey: 'member@example.com',
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/07/12',
     priority: 'medium',
     createdAt: '2026-07-12T00:00:00.000Z',
@@ -312,6 +5045,7 @@ test('uses an explicit Floci public issuer and rejects other issuers before GetU
       AWS_LAMBDA_FUNCTION_NAME: 'mukuroji-api-test',
       COGNITO_CLIENT_ID: 'mukuroji-client',
       COGNITO_ISSUER: '  http://localhost:4567/us-east-1_mukuroji/  ',
+      COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
       COGNITO_USER_POOL_ID: 'us-east-1_mukuroji',
     },
     async () => {
@@ -333,18 +5067,27 @@ test('uses an explicit Floci public issuer and rejects other issuers before GetU
         iss: 'http://localhost:4567/us-east-1_other',
         token_use: 'access',
       })
+      const ssoAccessToken = createAccessToken([], {
+        client_id: 'mukuroji-sso-client',
+        iss: 'http://localhost:4567/us-east-1_mukuroji',
+        token_use: 'access',
+      })
 
       const validResponse = await app.request('/api/auth/me', {
         headers: { Authorization: `Bearer ${validAccessToken}` },
+      })
+      const ssoResponse = await app.request('/api/auth/me', {
+        headers: { Authorization: `Bearer ${ssoAccessToken}` },
       })
       const wrongIssuerResponse = await app.request('/api/auth/me', {
         headers: { Authorization: `Bearer ${wrongIssuerToken}` },
       })
 
       expect(validResponse.status).toBe(200)
+      expect(ssoResponse.status).toBe(200)
       expect(wrongIssuerResponse.status).toBe(401)
       expect(await wrongIssuerResponse.json()).toEqual({ message: 'Authentication failed.' })
-      expect(getUserCalls).toBe(1)
+      expect(getUserCalls).toBe(2)
     },
   )
 })
@@ -379,6 +5122,1396 @@ test('fails closed when production Cognito pool or client configuration is missi
   )
 })
 
+test('binds a route-issued SCIM credential to the active Cognito provider', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    configureFakeProjectClients(true)
+    const workspaceId = 'user#demo@example.com'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    await identity.putIdentityProvider({
+      workspaceId,
+      providerId: 'idp-1',
+      kind: 'oidc',
+      displayName: 'Enterprise OIDC',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active',
+      revision: 1,
+      issuer: 'https://idp.example.com',
+      clientId: 'enterprise-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email'],
+      createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+    })
+    configureApiClientsForTest({
+      enterpriseIdentity: identity,
+      enterpriseSessionActivity: {
+        async getAuthenticationMethods() {
+          return []
+        },
+        async recordAuthenticationAssurance() {
+          return undefined
+        },
+        async validateAndTouch(input) {
+          return [...input.authenticationMethods]
+        },
+      },
+    })
+
+    const response = await app.request('/api/enterprise/security/scim/token', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'route-scim-token',
+      },
+      body: JSON.stringify({ expectedVersion: 0 }),
+    })
+
+    expect(response.status).toBe(201)
+    const body = await response.json()
+    expect(body).toMatchObject({
+      scim: {
+        identityProviderId: 'idp-1',
+        tokenGeneration: 1,
+      },
+    })
+    expect(body.token).toStartWith('msc_')
+    expect(body.scim.tokenLastFour).toBe(body.token.slice(-4))
+    expect(await identity.authenticateScimToken(workspaceId, body.token))
+      .toMatchObject({ identityProviderId: 'idp-1' })
+
+    const snapshotResponse = await app.request('/api/enterprise/security', {
+      headers: { Authorization: 'Bearer test-token' },
+    })
+    expect(snapshotResponse.status).toBe(200)
+    expect((await snapshotResponse.json()).scim.tokenLastFour)
+      .toBe(body.token.slice(-4))
+  })
+})
+
+test('scopes SCIM collection reads to the credential identity provider', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    const calls = configureFakeProjectClients(true)
+    const workspaceId = 'workspace-scim-provider-scope'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    for (const providerId of ['idp-a', 'idp-b']) {
+      await identity.putIdentityProvider({
+        workspaceId,
+        providerId,
+        kind: 'oidc',
+        displayName: providerId,
+        cognitoProviderName: 'EnterpriseOidc',
+        status: 'active',
+        revision: 1,
+        issuer: 'https://idp.example.com',
+        clientId: 'enterprise-client',
+        authorizationEndpoint: 'https://idp.example.com/authorize',
+        tokenEndpoint: 'https://idp.example.com/token',
+        jwksUri: 'https://idp.example.com/jwks',
+        scopes: ['openid', 'email'],
+        createdAt: now,
+        updatedAt: now,
+        lastTestedAt: now,
+      })
+    }
+    const credentialA = await identity.issueScimToken(
+      workspaceId,
+      'idp-a',
+      'Provider A',
+    )
+    const credentialB = await identity.issueScimToken(
+      workspaceId,
+      'idp-b',
+      'Provider B',
+    )
+    const userA = await identity.upsertScimUser({
+      workspaceId,
+      identityProviderId: 'idp-a',
+      externalId: 'shared-user',
+      userName: 'a@example.com',
+      emails: ['a@example.com'],
+      active: true,
+      idempotencyKey: 'create-shared-user',
+    })
+    await identity.upsertScimUser({
+      workspaceId,
+      identityProviderId: 'idp-b',
+      externalId: 'shared-user',
+      userName: 'b@example.com',
+      emails: ['b@example.com'],
+      active: true,
+      idempotencyKey: 'create-shared-user',
+    })
+    for (let index = 0; index < 21; index += 1) {
+      await identity.upsertScimGroup({
+        workspaceId,
+        identityProviderId: 'idp-a',
+        externalId: `paged-group-${index}`,
+        displayName: `Paged group ${index}`,
+        active: true,
+        memberUserIds: [],
+        idempotencyKey: `paged-group-${index}`,
+      })
+    }
+    configureApiClientsForTest({ enterpriseIdentity: identity })
+
+    const responseA = await app.request(
+      `/api/scim/v2/${workspaceId}/Users`,
+      { headers: { Authorization: `Bearer ${credentialA.token}` } },
+    )
+    const responseB = await app.request(
+      `/api/scim/v2/${workspaceId}/Users`,
+      { headers: { Authorization: `Bearer ${credentialB.token}` } },
+    )
+    const caseFoldedUserName = await app.request(
+      `/api/scim/v2/${workspaceId}/Users?filter=${
+        encodeURIComponent('UsErNaMe eq "A@EXAMPLE.COM"')
+      }`,
+      { headers: { Authorization: `Bearer ${credentialA.token}` } },
+    )
+    const boundedGroups = await app.request(
+      `/api/scim/v2/${workspaceId}/Groups?count=200`,
+      { headers: { Authorization: `Bearer ${credentialA.token}` } },
+    )
+    const serviceProviderConfig = await app.request(
+      `/api/scim/v2/${workspaceId}/ServiceProviderConfig`,
+      { headers: { Authorization: `Bearer ${credentialA.token}` } },
+    )
+
+    expect(responseA.status).toBe(200)
+    expect(responseB.status).toBe(200)
+    expect(caseFoldedUserName.status).toBe(200)
+    expect(await caseFoldedUserName.json()).toMatchObject({
+      totalResults: 1,
+      Resources: [{ id: userA.userId }],
+    })
+    expect(boundedGroups.status).toBe(200)
+    expect(await boundedGroups.json()).toMatchObject({
+      totalResults: 21,
+      itemsPerPage: 20,
+    })
+    expect(serviceProviderConfig.status).toBe(200)
+    expect(await serviceProviderConfig.json()).toMatchObject({
+      filter: { supported: true, maxResults: 200 },
+    })
+    const responseABody = await responseA.json()
+    expect(responseABody).toMatchObject({
+      totalResults: 1,
+      Resources: [{ id: userA.userId, externalId: 'shared-user' }],
+    })
+    expect(responseABody.Resources[0]).not.toHaveProperty('groups')
+    expect((await responseB.json()).Resources[0].id).not.toBe(userA.userId)
+    expect(calls.cognitoIdentityProviderDescriptions).toEqual(['EnterpriseOidc'])
+
+    const unavailableIdentity = new Proxy(identity, {
+      get(target, property) {
+        if (property === 'listScimUsers') {
+          return async () => {
+            throw new EnterpriseIdentityError(
+              503,
+              'EnterpriseScimProjectionUnavailable',
+              'SCIM projection is temporarily unavailable.',
+              true,
+            )
+          }
+        }
+        const value = Reflect.get(target, property)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    configureApiClientsForTest({ enterpriseIdentity: unavailableIdentity })
+    const unavailable = await app.request(
+      `/api/scim/v2/${workspaceId}/Users`,
+      { headers: { Authorization: `Bearer ${credentialA.token}` } },
+    )
+    expect(unavailable.status).toBe(503)
+    expect(await unavailable.json()).toMatchObject({ status: '503' })
+
+    configureFakeProjectClients(true, {
+      cognitoProviderDetails: {
+        oidc_issuer: 'https://replacement.example.com',
+        client_id: 'enterprise-client',
+      },
+    })
+    configureApiClientsForTest({ enterpriseIdentity: identity })
+    const drifted = await app.request(
+      `/api/scim/v2/${workspaceId}/Users`,
+      { headers: { Authorization: `Bearer ${credentialA.token}` } },
+    )
+    expect(drifted.status).toBe(409)
+  })
+})
+
+test('rejects oversized or structurally unbounded SCIM inputs before mutation', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    const workspaceId = 'workspace-scim-input-limits'
+    const scenario = await configureEnterpriseScimGuestRoleScenario(workspaceId)
+    const scimBaseUrl = `/api/scim/v2/${encodeURIComponent(workspaceId)}`
+    const headers = {
+      Authorization: `Bearer ${scenario.scimToken}`,
+      'Content-Type': 'application/scim+json',
+    }
+    const oversizedHeader = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'Content-Length': String(512 * 1024 + 1),
+      },
+      body: '{}',
+    })
+    const oversizedBody = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ padding: 'x'.repeat(512 * 1024) }),
+    })
+    const malformedBody = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers,
+      body: '{',
+    })
+    const nonObjectBody = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers,
+      body: '[]',
+    })
+    const excessiveEmails = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        externalId: 'too-many-emails',
+        userName: 'too-many-emails@example.com',
+        emails: Array.from(
+          { length: 11 },
+          (_, index) => ({ value: `email-${index}@example.com` }),
+        ),
+        active: true,
+      }),
+    })
+    const excessiveMembers = await app.request(`${scimBaseUrl}/Groups`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        externalId: 'too-many-members',
+        displayName: 'Too many members',
+        members: Array.from(
+          { length: 1_001 },
+          (_, index) => ({ value: `member-${index}` }),
+        ),
+        active: true,
+      }),
+    })
+    const oversizedMemberId = await app.request(`${scimBaseUrl}/Groups`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        externalId: 'oversized-member-id',
+        displayName: 'Oversized member ID',
+        members: [{ value: 'm'.repeat(129) }],
+        active: true,
+      }),
+    })
+    const oversizedUserName = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        externalId: 'oversized-user-name',
+        userName: 'u'.repeat(321),
+        emails: [{ value: 'bounded@example.com' }],
+        active: true,
+      }),
+    })
+    const oversizedGroupDisplayName = await app.request(`${scimBaseUrl}/Groups`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        externalId: 'oversized-group-display-name',
+        displayName: 'g'.repeat(257),
+        members: [],
+        active: true,
+      }),
+    })
+    const oversizedResourceId = await app.request(
+      `${scimBaseUrl}/Users/${'r'.repeat(129)}`,
+      { headers },
+    )
+    const oversizedIdempotencyKey = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'Idempotency-Key': 'k'.repeat(257),
+      },
+      body: JSON.stringify({
+        externalId: 'oversized-idempotency-key',
+        userName: 'bounded@example.com',
+        emails: [{ value: 'bounded@example.com' }],
+        active: true,
+      }),
+    })
+    const groupResponse = await app.request(`${scimBaseUrl}/Groups`, {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'Idempotency-Key': 'bounded-patch-group',
+      },
+      body: JSON.stringify({
+        externalId: 'bounded-patch-group',
+        displayName: 'Bounded patch group',
+        members: [],
+        active: true,
+      }),
+    })
+    const group = await groupResponse.json()
+    const excessivePatchOperations = await app.request(
+      `${scimBaseUrl}/Groups/${encodeURIComponent(group.id)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...headers,
+          'If-Match': 'W/"1"',
+        },
+        body: JSON.stringify({
+          Operations: Array.from(
+            { length: 101 },
+            () => ({
+              op: 'replace',
+              path: 'displayName',
+              value: 'Repeated update',
+            }),
+          ),
+        }),
+      },
+    )
+    const oversizedFilter = await app.request(
+      `${scimBaseUrl}/Users?filter=${
+        encodeURIComponent(`externalId eq "${'f'.repeat(513)}"`)
+      }`,
+      { headers },
+    )
+
+    expect(oversizedHeader.status).toBe(413)
+    expect(await oversizedHeader.json()).toMatchObject({ status: '413' })
+    expect(oversizedBody.status).toBe(413)
+    expect(await oversizedBody.json()).toMatchObject({ status: '413' })
+    expect(malformedBody.status).toBe(400)
+    expect(nonObjectBody.status).toBe(400)
+    expect(excessiveEmails.status).toBe(413)
+    expect(excessiveMembers.status).toBe(413)
+    expect(oversizedMemberId.status).toBe(400)
+    expect(oversizedUserName.status).toBe(400)
+    expect(oversizedGroupDisplayName.status).toBe(400)
+    expect(oversizedResourceId.status).toBe(400)
+    expect(oversizedIdempotencyKey.status).toBe(400)
+    expect(groupResponse.status).toBe(202)
+    expect(groupResponse.headers.get('Retry-After')).toBe('1')
+    expect(excessivePatchOperations.status).toBe(413)
+    expect(oversizedFilter.status).toBe(400)
+  })
+})
+
+test('uses provider-qualified SCIM authority and never grants failed desired state', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    configureFakeProjectClients(true)
+    const workspaceId = 'workspace-scim-authority'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    const credentials = new Map<string, string>()
+    for (const providerId of ['idp-a', 'idp-b', 'idp-c']) {
+      await identity.putIdentityProvider({
+        workspaceId,
+        providerId,
+        kind: 'oidc',
+        displayName: providerId,
+        cognitoProviderName: 'EnterpriseOidc',
+        status: 'active',
+        revision: 1,
+        issuer: 'https://idp.example.com',
+        clientId: 'enterprise-client',
+        authorizationEndpoint: 'https://idp.example.com/authorize',
+        tokenEndpoint: 'https://idp.example.com/token',
+        jwksUri: 'https://idp.example.com/jwks',
+        scopes: ['openid', 'email'],
+        createdAt: now,
+        updatedAt: now,
+        lastTestedAt: now,
+      })
+      credentials.set(
+        providerId,
+        (await identity.issueScimToken(workspaceId, providerId, providerId)).token,
+      )
+    }
+
+    let currentMember: Awaited<ReturnType<WorkspaceAccessClient['getMember']>>
+    const reconciledAuthorityIds: string[] = []
+    configureApiClientsForTest({
+      enterpriseIdentity: identity,
+      workspaceAccess: {
+        async getMember(_workspaceId: string, memberKey: string) {
+          return currentMember?.memberKey === memberKey ? currentMember : undefined
+        },
+        async reconcileDirectoryMember(_workspaceId, input) {
+          reconciledAuthorityIds.push(input.externalIdentityId)
+          if (
+            currentMember?.externalIdentityId &&
+            currentMember.externalIdentityId !== input.externalIdentityId
+          ) {
+            throw new WorkspaceAccessError(
+              409,
+              'WorkspaceDirectoryIdentityConflict',
+              'Directory identity does not own this member.',
+            )
+          }
+          currentMember = {
+            id: input.memberKey,
+            memberKey: input.memberKey,
+            email: input.email,
+            name: input.name,
+            role: input.role,
+            status: 'active',
+            provisioningSource: 'directory',
+            externalIdentityId: input.externalIdentityId,
+            version: (currentMember?.version ?? 0) + 1,
+            createdAt: currentMember?.createdAt ?? now,
+            updatedAt: now,
+          }
+          return currentMember
+        },
+      } as unknown as WorkspaceAccessClient,
+    })
+
+    const postUser = (
+      providerId: string,
+      externalId: string,
+      userName: string,
+    ) => app.request(`/api/scim/v2/${workspaceId}/Users`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${credentials.get(providerId)}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': `${providerId}:${externalId}`,
+      },
+      body: JSON.stringify({
+        externalId,
+        userName,
+        emails: [{ value: 'shared-member@example.com', primary: true }],
+        active: true,
+      }),
+    })
+
+    const providerAResponse = await postUser('idp-a', 'shared-user', 'a@example.com')
+    const providerBResponse = await postUser('idp-b', 'shared-user', 'b@example.com')
+    const providerCResponse = await postUser('idp-c', 'different-user', 'c@example.com')
+    expect(providerAResponse.status).toBe(201)
+    expect(providerBResponse.status).toBe(409)
+    expect(providerCResponse.status).toBe(409)
+
+    const providerAResource = await providerAResponse.json()
+    const snapshot = await identity.getSnapshot(workspaceId)
+    const providerBUser = snapshot.scimUsers.find((user) =>
+      user.identityProviderId === 'idp-b'
+    )
+    expect(currentMember?.externalIdentityId).toBe(providerAResource.id)
+    expect(new Set(reconciledAuthorityIds)).toEqual(
+      new Set(snapshot.scimUsers.map((user) => user.userId)),
+    )
+    expect(snapshot.scimUsers.map((user) => user.userId)).not.toContain('shared-user')
+    expect(providerBUser).toMatchObject({
+      externalId: 'shared-user',
+      linkedMemberKey: 'shared-member@example.com',
+      appliedVersion: 0,
+    })
+    if (!providerBUser) throw new Error('Expected provider B desired user state.')
+
+    const providerBGroup = await identity.upsertScimGroup({
+      workspaceId,
+      identityProviderId: 'idp-b',
+      externalId: 'shared-group',
+      displayName: 'Provider B administrators',
+      active: true,
+      memberUserIds: [providerBUser.userId],
+      idempotencyKey: 'provider-b-group',
+    })
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'provider-b-admins',
+      identityProviderId: 'idp-b',
+      directoryGroupId: providerBGroup.groupId,
+      roleId: 'workspace:admin',
+      scope: { workspaceId, kind: 'workspace' },
+      enabled: true,
+      priority: 0,
+      revision: 1,
+      updatedAt: now,
+    })
+    const afterMapping = await identity.getSnapshot(workspaceId)
+    expect(
+      resolveEnterpriseDirectoryPrincipal(
+        afterMapping,
+        'shared-member@example.com',
+        [],
+      ).compatibleGroupMappings,
+    ).toEqual([])
+  })
+})
+
+test('reconciles workspace guest roles for SCIM membership and mapping changes', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    const workspaceId = 'user#demo@example.com'
+    const scenario = await configureEnterpriseScimGuestRoleScenario(workspaceId)
+    const scimBaseUrl = `/api/scim/v2/${encodeURIComponent(workspaceId)}`
+    const scimHeaders = {
+      Authorization: `Bearer ${scenario.scimToken}`,
+      'Content-Type': 'application/scim+json',
+    }
+    const userResponse = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers: { ...scimHeaders, 'Idempotency-Key': 'guest-role-user' },
+      body: JSON.stringify({
+        externalId: 'managed-user',
+        userName: 'managed@example.com',
+        displayName: 'Managed user',
+        emails: [{ value: 'managed@example.com', primary: true }],
+        active: true,
+      }),
+    })
+    expect(userResponse.status).toBe(201)
+    const user = await userResponse.json()
+    const removeDisplayNameResponse = await app.request(
+      `${scimBaseUrl}/Users/${user.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'remove-managed-user-display-name',
+          'If-Match': 'W/"1"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'remove',
+            path: 'DisplayName',
+          }],
+        }),
+      },
+    )
+    expect(removeDisplayNameResponse.status).toBe(200)
+    expect(await removeDisplayNameResponse.json()).not.toHaveProperty('displayName')
+    const removeRequiredUserNameResponse = await app.request(
+      `${scimBaseUrl}/Users/${user.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'remove-managed-user-name',
+          'If-Match': 'W/"2"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'remove',
+            path: 'UserName',
+          }],
+        }),
+      },
+    )
+    expect(removeRequiredUserNameResponse.status).toBe(400)
+    const removeRequiredEmailsResponse = await app.request(
+      `${scimBaseUrl}/Users/${user.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'remove-managed-user-emails',
+          'If-Match': 'W/"2"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'remove',
+            path: 'Emails',
+          }],
+        }),
+      },
+    )
+    expect(removeRequiredEmailsResponse.status).toBe(400)
+    const groupResponse = await app.request(`${scimBaseUrl}/Groups`, {
+      method: 'POST',
+      headers: { ...scimHeaders, 'Idempotency-Key': 'guest-role-group' },
+      body: JSON.stringify({
+        externalId: 'workspace-guests',
+        displayName: 'Workspace guests',
+        members: [{ value: user.id }],
+        active: true,
+      }),
+    })
+    expect(groupResponse.status).toBe(202)
+    expect(groupResponse.headers.get('Retry-After')).toBe('1')
+    const group = await groupResponse.json()
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
+
+    const mappingResponse = await app.request(
+      '/api/enterprise/security/group-mappings',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'workspace-guest-mapping',
+        },
+        body: JSON.stringify({
+          identityProviderId: 'idp-guest-role',
+          directoryGroupId: group.id,
+          scopeType: 'workspace',
+          roleId: 'workspace:guest',
+        }),
+      },
+    )
+    expect(mappingResponse.status).toBe(201)
+    const mapping = (await mappingResponse.json()).mapping
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+    expect(await scenario.identity.getScimGroupJobReference(
+      workspaceId,
+      group.id,
+    )).toBeDefined()
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
+    expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+    const replayMappingResponse = await app.request(
+      '/api/enterprise/security/group-mappings',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'workspace-guest-mapping',
+        },
+        body: JSON.stringify({
+          identityProviderId: 'idp-guest-role',
+          directoryGroupId: group.id,
+          scopeType: 'workspace',
+          roleId: 'workspace:guest',
+        }),
+      },
+    )
+    expect(replayMappingResponse.status).toBe(200)
+    expect(await scenario.identity.getScimGroupJobReference(
+      workspaceId,
+      group.id,
+    )).toBeUndefined()
+
+    const removeMemberResponse = await app.request(
+      `${scimBaseUrl}/Groups/${group.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'remove-workspace-guest',
+          'If-Match': 'W/"1"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'remove',
+            path: 'MeMbErS',
+          }],
+        }),
+      },
+    )
+    expect(removeMemberResponse.status).toBe(202)
+    expect(removeMemberResponse.headers.get('Retry-After')).toBe('1')
+    expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+
+    const addMemberResponse = await app.request(
+      `${scimBaseUrl}/Groups/${group.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'add-workspace-guest',
+          'If-Match': 'W/"2"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'add',
+            path: 'MEMBERS',
+            value: { value: user.id },
+          }],
+        }),
+      },
+    )
+    expect(addMemberResponse.status).toBe(202)
+    expect(addMemberResponse.headers.get('Retry-After')).toBe('1')
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
+    expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+
+    const renameGroupResponse = await app.request(
+      `${scimBaseUrl}/Groups/${group.id}`,
+      {
+        method: 'PUT',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'rename-workspace-guests',
+          'If-Match': 'W/"3"',
+        },
+        body: JSON.stringify({
+          displayName: 'Renamed workspace guests',
+          members: [{ value: user.id }],
+          active: true,
+        }),
+      },
+    )
+    expect(renameGroupResponse.status).toBe(202)
+    expect(renameGroupResponse.headers.get('Retry-After')).toBe('1')
+    expect(await renameGroupResponse.json()).toMatchObject({
+      displayName: 'Renamed workspace guests',
+      members: [{ value: user.id }],
+    })
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
+    const removeRequiredGroupNameResponse = await app.request(
+      `${scimBaseUrl}/Groups/${group.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'remove-workspace-guest-name',
+          'If-Match': 'W/"4"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'remove',
+            path: 'DisplayName',
+          }],
+        }),
+      },
+    )
+    expect(removeRequiredGroupNameResponse.status).toBe(400)
+
+    const memberMappingResponse = await app.request(
+      `/api/enterprise/security/group-mappings/${mapping.id}`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          expectedVersion: 1,
+          directoryGroupId: group.id,
+          scopeType: 'workspace',
+          roleId: 'workspace:member',
+        }),
+      },
+    )
+    expect(memberMappingResponse.status).toBe(200)
+    expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+    expect(await scenario.identity.getScimGroupJobReference(
+      workspaceId,
+      group.id,
+    )).toBeDefined()
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+
+    const guestMappingResponse = await app.request(
+      `/api/enterprise/security/group-mappings/${mapping.id}`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          expectedVersion: 2,
+          directoryGroupId: group.id,
+          scopeType: 'workspace',
+          roleId: 'workspace:guest',
+        }),
+      },
+    )
+    expect(guestMappingResponse.status).toBe(200)
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+    expect(await scenario.identity.getScimGroupJobReference(
+      workspaceId,
+      group.id,
+    )).toBeDefined()
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
+    expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+
+    const deleteMappingResponse = await app.request(
+      `/api/enterprise/security/group-mappings/${mapping.id}`,
+      {
+        method: 'DELETE',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ expectedVersion: 3 }),
+      },
+    )
+    expect(deleteMappingResponse.status).toBe(204)
+    expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+    expect(await scenario.identity.getScimGroupJobReference(
+      workspaceId,
+      group.id,
+    )).toBeDefined()
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+
+    const deleteGroupResponse = await app.request(
+      `${scimBaseUrl}/Groups/${group.id}`,
+      {
+        method: 'DELETE',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'delete-workspace-guests',
+          'If-Match': 'W/"4"',
+        },
+      },
+    )
+    expect(deleteGroupResponse.status).toBe(202)
+    expect(deleteGroupResponse.headers.get('Retry-After')).toBe('1')
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
+    expect(
+      (await scenario.identity.getSnapshot(workspaceId)).scimGroups.find(
+        (candidate) => candidate.groupId === group.id,
+      ),
+    ).toMatchObject({
+      active: false,
+      appliedVersion: 5,
+      version: 5,
+    })
+  })
+})
+
+test('settles interleaved multi-page SCIM group jobs to the final guest role', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    const workspaceId = 'user#demo@example.com'
+    const scenario = await configureEnterpriseScimGuestRoleScenario(workspaceId)
+    const scimBaseUrl = `/api/scim/v2/${encodeURIComponent(workspaceId)}`
+    const scimHeaders = {
+      Authorization: `Bearer ${scenario.scimToken}`,
+      'Content-Type': 'application/scim+json',
+    }
+    const users = []
+    for (let index = 0; index < 6; index += 1) {
+      const email = `interleaved-user-${index}@example.com`
+      const response = await app.request(`${scimBaseUrl}/Users`, {
+        method: 'POST',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': `interleaved-user-${index}`,
+        },
+        body: JSON.stringify({
+          externalId: `interleaved-user-${index}`,
+          userName: email,
+          emails: [{ value: email, primary: true }],
+          active: true,
+        }),
+      })
+      expect(response.status).toBe(201)
+      users.push(await response.json())
+    }
+    const createGroup = async (suffix: string) => {
+      const response = await app.request(`${scimBaseUrl}/Groups`, {
+        method: 'POST',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': `interleaved-group-${suffix}`,
+        },
+        body: JSON.stringify({
+          externalId: `interleaved-group-${suffix}`,
+          displayName: `Interleaved group ${suffix}`,
+          members: users.map((user) => ({ value: user.id })),
+          active: true,
+        }),
+      })
+      expect(response.status).toBe(202)
+      expect(response.headers.get('Retry-After')).toBe('1')
+      return await response.json()
+    }
+    const firstGroup = await createGroup('a')
+    const secondGroup = await createGroup('b')
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      firstGroup.id,
+    )
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      secondGroup.id,
+    )
+
+    for (const [index, group] of [firstGroup, secondGroup].entries()) {
+      const mappingResponse = await app.request(
+        '/api/enterprise/security/group-mappings',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer test-token',
+            'Content-Type': 'application/json',
+            'Idempotency-Key': `interleaved-mapping-${index}`,
+          },
+          body: JSON.stringify({
+            identityProviderId: 'idp-guest-role',
+            directoryGroupId: group.id,
+            scopeType: 'workspace',
+            roleId: 'workspace:guest',
+          }),
+        },
+      )
+      expect(mappingResponse.status).toBe(201)
+      await drainEnterpriseScimGroupJob(
+        scenario.identity,
+        workspaceId,
+        group.id,
+      )
+    }
+    expect(users.every((user) =>
+      scenario.members.get(user.userName)?.role === 'guest'
+    )).toBe(true)
+
+    const updateFirstGroup = await app.request(
+      `${scimBaseUrl}/Groups/${firstGroup.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'interleaved-update-a',
+          'If-Match': 'W/"1"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'replace',
+            path: 'displayName',
+            value: 'Updated interleaved group A',
+          }],
+        }),
+      },
+    )
+    expect(updateFirstGroup.status).toBe(202)
+    expect(updateFirstGroup.headers.get('Retry-After')).toBe('1')
+    const removeSecondGroupMembers = await app.request(
+      `${scimBaseUrl}/Groups/${secondGroup.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'interleaved-remove-b',
+          'If-Match': 'W/"1"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'remove',
+            path: 'members',
+          }],
+        }),
+      },
+    )
+    expect(removeSecondGroupMembers.status).toBe(202)
+    expect(removeSecondGroupMembers.headers.get('Retry-After')).toBe('1')
+    expect(await processEnterpriseScimGroupJobPage(
+      scenario.identity,
+      workspaceId,
+      firstGroup.id,
+      'INSERT',
+    )).toBe(true)
+    expect(await processEnterpriseScimGroupJobPage(
+      scenario.identity,
+      workspaceId,
+      secondGroup.id,
+      'INSERT',
+    )).toBe(true)
+
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      firstGroup.id,
+    )
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      secondGroup.id,
+    )
+    expect(users.every((user) =>
+      scenario.members.get(user.userName)?.role === 'guest'
+    )).toBe(true)
+  })
+})
+
+test('settles a user mutation that races after an early SCIM group page', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    const workspaceId = 'user#demo@example.com'
+    const scenario = await configureEnterpriseScimGuestRoleScenario(workspaceId)
+    const scimBaseUrl = `/api/scim/v2/${encodeURIComponent(workspaceId)}`
+    const scimHeaders = {
+      Authorization: `Bearer ${scenario.scimToken}`,
+      'Content-Type': 'application/scim+json',
+    }
+    const users = []
+    for (let index = 0; index < 6; index += 1) {
+      const email = `settle-race-user-${index}@example.com`
+      const response = await app.request(`${scimBaseUrl}/Users`, {
+        method: 'POST',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': `settle-race-user-${index}`,
+        },
+        body: JSON.stringify({
+          externalId: `settle-race-user-${index}`,
+          userName: email,
+          emails: [{ value: email, primary: true }],
+          active: true,
+        }),
+      })
+      expect(response.status).toBe(201)
+      users.push(await response.json())
+    }
+    const groupResponse = await app.request(`${scimBaseUrl}/Groups`, {
+      method: 'POST',
+      headers: {
+        ...scimHeaders,
+        'Idempotency-Key': 'settle-race-group',
+      },
+      body: JSON.stringify({
+        externalId: 'settle-race-group',
+        displayName: 'Settle race group',
+        members: users.map((user) => ({ value: user.id })),
+        active: true,
+      }),
+    })
+    expect(groupResponse.status).toBe(202)
+    const group = await groupResponse.json()
+    const mappingResponse = await app.request(
+      '/api/enterprise/security/group-mappings',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'settle-race-mapping',
+        },
+        body: JSON.stringify({
+          identityProviderId: 'idp-guest-role',
+          directoryGroupId: group.id,
+          scopeType: 'workspace',
+          roleId: 'workspace:guest',
+        }),
+      },
+    )
+    expect(mappingResponse.status).toBe(201)
+    expect(users.every((user) =>
+      scenario.members.get(user.userName)?.role === 'member'
+    )).toBe(true)
+
+    expect(await processEnterpriseScimGroupJobPage(
+      scenario.identity,
+      workspaceId,
+      group.id,
+      'MODIFY',
+    )).toBe(true)
+    const earlyPageUser = users.find((user) =>
+      scenario.members.get(user.userName)?.role === 'guest'
+    )
+    if (!earlyPageUser) {
+      throw new Error('Expected a user reconciled by the early group page.')
+    }
+    const userPatchResponse = await app.request(
+      `${scimBaseUrl}/Users/${earlyPageUser.id}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...scimHeaders,
+          'Idempotency-Key': 'settle-race-user-patch',
+          'If-Match': 'W/"1"',
+        },
+        body: JSON.stringify({
+          Operations: [{
+            op: 'replace',
+            path: 'displayName',
+            value: 'Updated during group reconciliation',
+          }],
+        }),
+      },
+    )
+    expect(userPatchResponse.status).toBe(200)
+    expect(scenario.members.get(earlyPageUser.userName)?.role).toBe('member')
+
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
+    expect(scenario.members.get(earlyPageUser.userName)?.role).toBe('guest')
+  })
+})
+
+test('changes group job audit identity when a callback loses its state checkpoint race', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    const workspaceId = 'user#demo@example.com'
+    const scenario = await configureEnterpriseScimGuestRoleScenario(workspaceId)
+    const scimBaseUrl = `/api/scim/v2/${encodeURIComponent(workspaceId)}`
+    const scimHeaders = {
+      Authorization: `Bearer ${scenario.scimToken}`,
+      'Content-Type': 'application/scim+json',
+    }
+    const userResponse = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers: {
+        ...scimHeaders,
+        'Idempotency-Key': 'checkpoint-race-user',
+      },
+      body: JSON.stringify({
+        externalId: 'checkpoint-race-user',
+        userName: 'managed@example.com',
+        emails: [{ value: 'managed@example.com', primary: true }],
+        active: true,
+      }),
+    })
+    expect(userResponse.status).toBe(201)
+    const user = await userResponse.json()
+    const groupResponse = await app.request(`${scimBaseUrl}/Groups`, {
+      method: 'POST',
+      headers: {
+        ...scimHeaders,
+        'Idempotency-Key': 'checkpoint-race-group',
+      },
+      body: JSON.stringify({
+        externalId: 'checkpoint-race-group',
+        displayName: 'Checkpoint race group',
+        members: [{ value: user.id }],
+        active: true,
+      }),
+    })
+    expect(groupResponse.status).toBe(202)
+    const group = await groupResponse.json()
+    const reference = await scenario.identity.getScimGroupJobReference(
+      workspaceId,
+      group.id,
+    )
+    if (!reference) throw new Error('Expected a pending group job.')
+    const desiredUser = (await scenario.identity.getSnapshot(workspaceId))
+      .scimUsers.find((candidate) => candidate.userId === user.id)
+    if (!desiredUser) throw new Error('Expected the desired SCIM user.')
+    scenario.reconcileAuditContexts.length = 0
+    scenario.setAfterNextDirectoryReconcile(async () => {
+      await scenario.identity.upsertScimUser({
+        workspaceId,
+        userId: desiredUser.userId,
+        identityProviderId: desiredUser.identityProviderId,
+        externalId: desiredUser.externalId,
+        userName: desiredUser.userName,
+        displayName: 'Changed during callback checkpoint',
+        emails: desiredUser.emails,
+        active: desiredUser.active,
+        linkedMemberKey: desiredUser.linkedMemberKey,
+        idempotencyKey: 'checkpoint-race-user-update',
+      })
+    })
+    const streamEvent = {
+      Records: [{
+        eventSource: 'aws:dynamodb',
+        eventName: 'INSERT',
+        dynamodb: {
+          SequenceNumber: `sequence-${reference.revision}`,
+          NewImage: {
+            scopeKey: { S: `WORKSPACE#${workspaceId}` },
+            recordKey: { S: `SCIM_GROUP_JOB#${reference.jobId}` },
+            entryType: { S: 'enterprise-scim-group-job' },
+            workspaceId: { S: workspaceId },
+            jobId: { S: reference.jobId },
+            revision: { N: String(reference.revision) },
+          },
+        },
+      }],
+    }
+
+    const workerHandler = createEnterpriseScimGroupJobWorkerHandler(
+      requireEnterpriseScimGroupJobProcessor(scenario.identity),
+    )
+    expect(await workerHandler(streamEvent)).toEqual({
+      batchItemFailures: [{
+        itemIdentifier: `sequence-${reference.revision}`,
+      }],
+    })
+    expect(await scenario.identity.getScimGroupJobReference(
+      workspaceId,
+      group.id,
+    )).toEqual(reference)
+    expect(scenario.reconcileAuditContexts).toHaveLength(1)
+
+    expect(await workerHandler(streamEvent)).toEqual({ batchItemFailures: [] })
+    expect(scenario.reconcileAuditContexts).toHaveLength(2)
+    expect(scenario.reconcileAuditContexts[1]?.idempotencyKeyHash)
+      .not.toBe(scenario.reconcileAuditContexts[0]?.idempotencyKeyHash)
+    expect(scenario.reconcileAuditContexts[1]?.requestFingerprint)
+      .not.toBe(scenario.reconcileAuditContexts[0]?.requestFingerprint)
+    await drainEnterpriseScimGroupJob(
+      scenario.identity,
+      workspaceId,
+      group.id,
+    )
+  })
+})
+
+test('retries a provisioning plan with desired guest groups before checkpointing them', async () => {
+  await withTestEnvironment({
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    const workspaceId = 'user#demo@example.com'
+    const scenario = await configureEnterpriseScimGuestRoleScenario(workspaceId)
+    const scimBaseUrl = `/api/scim/v2/${encodeURIComponent(workspaceId)}`
+    const userResponse = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${scenario.scimToken}`,
+        'Content-Type': 'application/scim+json',
+        'Idempotency-Key': 'provisioning-guest-user',
+      },
+      body: JSON.stringify({
+        externalId: 'provisioning-managed-user',
+        userName: 'managed@example.com',
+        emails: [{ value: 'managed@example.com', primary: true }],
+        active: true,
+      }),
+    })
+    expect(userResponse.status).toBe(201)
+    const user = await userResponse.json()
+    const group = await scenario.identity.upsertScimGroup({
+      workspaceId,
+      identityProviderId: 'idp-guest-role',
+      externalId: 'pending-workspace-guests',
+      displayName: 'Pending workspace guests',
+      active: true,
+      memberUserIds: [user.id],
+      idempotencyKey: 'pending-workspace-guests',
+    })
+    await scenario.identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'pending-workspace-guest-mapping',
+      identityProviderId: 'idp-guest-role',
+      directoryGroupId: group.groupId,
+      roleId: 'workspace:guest',
+      scope: { workspaceId, kind: 'workspace' },
+      enabled: true,
+      priority: 0,
+      revision: 1,
+      updatedAt: new Date().toISOString(),
+    })
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+
+    const previewResponse = await app.request(
+      '/api/enterprise/security/provisioning/preview',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'guest-provisioning-preview',
+        },
+        body: '{}',
+      },
+    )
+    expect(previewResponse.status).toBe(200)
+    const preview = (await previewResponse.json()).impact
+    scenario.setReconcileFailures(1)
+    const failedResponse = await app.request(
+      '/api/enterprise/security/provisioning/reconcile',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'guest-provisioning-run',
+        },
+        body: JSON.stringify({
+          previewId: preview.previewId,
+          previewExpiresAt: preview.expiresAt,
+        }),
+      },
+    )
+    expect(failedResponse.status).toBe(503)
+    const failedSnapshot = await scenario.identity.getSnapshot(workspaceId)
+    const failedGroup = failedSnapshot.scimGroups.find((candidate) =>
+      candidate.groupId === group.groupId
+    )
+    expect(failedGroup?.appliedVersion).toBe(0)
+    expect(scenario.members.get('managed@example.com')?.role).toBe('member')
+    const failedRun = failedSnapshot.provisioningRuns.find((run) =>
+      run.status === 'failed'
+    )
+    expect(failedRun).toBeDefined()
+    if (!failedRun) throw new Error('Expected a failed provisioning run.')
+
+    const retryResponse = await app.request(
+      `/api/enterprise/security/provisioning/logs/${failedRun.runId}/retry`,
+      {
+        method: 'POST',
+        headers: { Authorization: 'Bearer test-token' },
+      },
+    )
+    expect(retryResponse.status).toBe(200)
+    expect(scenario.members.get('managed@example.com')?.role).toBe('guest')
+    const succeededGroup = (await scenario.identity.getSnapshot(workspaceId))
+      .scimGroups.find((candidate) => candidate.groupId === group.groupId)
+    expect(succeededGroup?.appliedVersion).toBe(succeededGroup?.version)
+  })
+})
+
 test('uses AWS Cognito SDK commands and excludes users with conflicting workspace attributes', async () => {
   const commandNames: string[] = []
   const sdkClient = {
@@ -388,6 +6521,10 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
 
       if (commandName === 'InitiateAuthCommand') {
         return { AuthenticationResult: { AccessToken: 'access-token' } }
+      }
+
+      if (commandName === 'RespondToAuthChallengeCommand') {
+        return { AuthenticationResult: { AccessToken: 'challenge-access-token' } }
       }
 
       if (commandName === 'GetUserCommand') {
@@ -420,6 +6557,34 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
         }
       }
 
+      if (commandName === 'DescribeIdentityProviderCommand') {
+        return {
+          IdentityProvider: {
+            ProviderName: 'EnterpriseOidc',
+            ProviderType: 'OIDC',
+            ProviderDetails: {
+              oidc_issuer: 'https://idp.example.com',
+              client_id: 'enterprise-client',
+            },
+          },
+        }
+      }
+
+      if (commandName === 'DescribeUserPoolClientCommand') {
+        return {
+          UserPoolClient: {
+            ClientId: 'mukuroji-sso-client',
+            ClientSecret: undefined,
+            SupportedIdentityProviders: ['EnterpriseOidc'],
+            AllowedOAuthFlowsUserPoolClient: true,
+            AllowedOAuthFlows: ['code'],
+            AllowedOAuthScopes: ['openid', 'email', 'profile'],
+            CallbackURLs: ['https://app.example.com/api/auth/sso/callback'],
+            ExplicitAuthFlows: ['ALLOW_REFRESH_TOKEN_AUTH'],
+          },
+        }
+      }
+
       return {
         Username: 'valid@example.com',
         UserAttributes: [{ Name: 'email', Value: 'valid@example.com' }],
@@ -430,6 +6595,13 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
 
   await expect(client.initiatePasswordAuth('demo@example.com', 'password')).resolves.toMatchObject({
     AuthenticationResult: { AccessToken: 'access-token' },
+  })
+  await expect(client.respondToNewPasswordChallenge(
+    'demo@example.com',
+    'Permanent123!',
+    'new-password-session',
+  )).resolves.toMatchObject({
+    AuthenticationResult: { AccessToken: 'challenge-access-token' },
   })
   await expect(client.getUser('access-token')).resolves.toMatchObject({
     Username: 'demo@example.com',
@@ -442,6 +6614,7 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
         email: 'valid@example.com',
         name: undefined,
         enabled: undefined,
+        mfaConfigured: false,
         status: undefined,
       },
     ],
@@ -450,144 +6623,1341 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
   await expect(client.getUserProfile('valid@example.com')).resolves.toMatchObject({
     id: 'valid@example.com',
   })
+  await expect(client.describeEnterpriseIdentityProvider('EnterpriseOidc'))
+    .resolves.toEqual({
+      providerName: 'EnterpriseOidc',
+      providerType: 'OIDC',
+      providerDetails: {
+        oidc_issuer: 'https://idp.example.com',
+        client_id: 'enterprise-client',
+      },
+    })
+  await expect(client.describeEnterpriseSsoAppClient('mukuroji-sso-client'))
+    .resolves.toEqual({
+      clientId: 'mukuroji-sso-client',
+      hasClientSecret: false,
+      supportedIdentityProviders: ['EnterpriseOidc'],
+      allowedOAuthFlowsUserPoolClient: true,
+      allowedOAuthFlows: ['code'],
+      allowedOAuthScopes: ['openid', 'email', 'profile'],
+      explicitAuthFlows: ['ALLOW_REFRESH_TOKEN_AUTH'],
+      callbackUrls: ['https://app.example.com/api/auth/sso/callback'],
+    })
   expect(commandNames).toEqual([
     'InitiateAuthCommand',
+    'RespondToAuthChallengeCommand',
     'GetUserCommand',
     'ListUsersCommand',
     'AdminGetUserCommand',
+    'DescribeIdentityProviderCommand',
+    'DescribeUserPoolClientCommand',
   ])
 })
 
-test('keeps the AWS Cognito client contract for challenge and Workspace identity operations', async () => {
-  const commandInputs: Array<{ name: string; input: Record<string, unknown> }> = []
-  let adminGetUserCalls = 0
+test('runs the Workspace identity lifecycle through the production AWS Cognito adapter', async () => {
+  const sentCommands: Array<{ name: string; input: Record<string, unknown> }> = []
+  const adminGetAttempts = new Map<string, number>()
   const sdkClient = {
-    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+    async send(command: { input: Record<string, unknown> }) {
       const name = command.constructor.name
-      commandInputs.push({ name, input: command.input })
+      const input = command.input
+      sentCommands.push({ name, input })
 
       if (name === 'RespondToAuthChallengeCommand') {
+        return { AuthenticationResult: createFakeAuthTokenSet() }
+      }
+
+      if (name === 'GetUserCommand') {
         return {
-          AuthenticationResult: { AccessToken: 'challenge-access-token' },
-          ChallengeName: 'NEW_PASSWORD_REQUIRED',
-          Session: 'next-session',
+          Username: 'demo@example.com',
+          UserAttributes: [{ Name: 'email', Value: 'demo@example.com' }],
         }
       }
 
-      if (name === 'AdminGetUserCommand') {
-        adminGetUserCalls += 1
+      const username = typeof input.Username === 'string' ? input.Username : ''
 
-        if (adminGetUserCalls < 3) {
-          throw {
-            $metadata: { httpStatusCode: 404 },
-            message: 'User not found',
-            name: 'UserNotFoundException',
+      if (name === 'AdminGetUserCommand') {
+        const attempt = (adminGetAttempts.get(username) ?? 0) + 1
+        adminGetAttempts.set(username, attempt)
+        const userId = username.startsWith('sub-') ? username.slice(4) : username
+
+        if (
+          (username === 'new-user@example.com' && attempt <= 2) ||
+          (username === 'raced-user@example.com' && attempt <= 2)
+        ) {
+          throw createCognitoSdkTestError('UserNotFoundException', 400)
+        }
+
+        if (userId === 'missing@example.com') {
+          throw createCognitoSdkTestError('UserNotFoundException', 400)
+        }
+
+        if (username === 'existing@example.com') {
+          return {
+            Username: 'CaseSensitiveExisting',
+            UserAttributes: [
+              { Name: 'email', Value: username },
+              { Name: 'sub', Value: 'sub-existing' },
+            ],
+            Enabled: true,
+            UserStatus: 'FORCE_CHANGE_PASSWORD',
           }
         }
 
+        const directoryId = userId === 'other-workspace@example.com'
+          ? 'workspace#other'
+          : 'user#demo@example.com'
+
         return {
-          Attributes: [
-            { Name: 'email', Value: 'new@example.com' },
-            { Name: 'custom:directory_id', Value: 'workspace-1' },
+          Username: userId,
+          UserAttributes: [
+            { Name: 'email', Value: userId },
+            { Name: 'sub', Value: username.startsWith('sub-') ? username : `sub-${username}` },
+            { Name: 'custom:directory_id', Value: directoryId },
+            { Name: 'custom:workspace_id', Value: directoryId },
           ],
           Enabled: true,
           UserStatus: 'FORCE_CHANGE_PASSWORD',
-          Username: 'new@example.com',
         }
       }
 
       if (name === 'AdminCreateUserCommand') {
+        if (username === 'raced-user@example.com' && input.MessageAction !== 'RESEND') {
+          throw createCognitoSdkTestError('UsernameExistsException', 400)
+        }
+
         return {
           User: {
+            Username: username,
             Attributes: [
-              { Name: 'email', Value: 'new@example.com' },
-              { Name: 'custom:directory_id', Value: 'workspace-1' },
-              { Name: 'name', Value: 'New User' },
+              { Name: 'email', Value: username },
+              { Name: 'sub', Value: `sub-${username}` },
+              { Name: 'custom:directory_id', Value: 'user#demo@example.com' },
+              { Name: 'custom:workspace_id', Value: 'user#demo@example.com' },
             ],
             Enabled: true,
             UserStatus: 'FORCE_CHANGE_PASSWORD',
-            Username: 'new@example.com',
           },
         }
       }
 
-      if (name === 'AdminDeleteUserCommand') {
+      if (name === 'AdminDeleteUserCommand' && username === 'sub-missing@example.com') {
+        throw createCognitoSdkTestError('UserNotFoundException', 400)
+      }
+
+      if (name === 'AdminDeleteUserCommand' && username === 'sub-forbidden@example.com') {
+        throw createCognitoSdkTestError('AccessDeniedException', 403)
+      }
+
+      return {}
+    },
+  } as unknown as CognitoIdentityProviderClient
+  const client = new AwsCognitoClient(
+    sdkClient,
+    'us-east-1_mukuroji',
+    'mukuroji-client',
+  )
+  const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({ cognito: client })
+
+  const challengeResponse = await app.request('/api/auth/challenge/new-password', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      email: 'Demo@Example.com',
+      newPassword: 'Permanent123!',
+      session: 'new-password-session',
+    }),
+  })
+  expect(challengeResponse.status).toBe(200)
+  expect(await challengeResponse.json()).toMatchObject({ accessToken: 'test-token' })
+  expect(calls.workspaceReconciliations).toEqual(['demo@example.com'])
+
+  const invite = async (email: string) => {
+    const response = await app.request('/api/workspace/invitations', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ email, name: 'Invitee', role: 'member' }),
+    })
+
+    expect(response.status).toBe(201)
+    return response.json()
+  }
+
+  await expect(invite('existing@example.com')).resolves.toMatchObject({
+    invitation: {
+      directoryClaimCleanupRequired: true,
+      deliveryStatus: 'sent',
+      identityOwnership: 'pre-existing',
+    },
+  })
+  await expect(invite('new-user@example.com')).resolves.toMatchObject({
+    invitation: {
+      deliveryStatus: 'sent',
+      identityOwnership: 'workspace-created',
+    },
+  })
+  await expect(invite('raced-user@example.com')).resolves.toMatchObject({
+    invitation: {
+      deliveryStatus: 'sent',
+      identityOwnership: 'ambiguous',
+    },
+  })
+  await expect(client.provisionWorkspaceUser({
+    email: 'other-workspace@example.com',
+    directoryId: 'user#demo@example.com',
+    beforeDirectoryClaimUpdate: async () => {},
+  })).rejects.toMatchObject({
+    code: 'WorkspaceDirectoryConflict',
+    status: 409,
+  })
+
+  configureApiClientsForTest({
+    workspaceAccess: {
+      async getActiveMember(_workspaceId: string, memberKey: string) {
+        return {
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: 'owner',
+          status: 'active',
+          version: 1,
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async revokeInvitation(
+        _workspaceId: string,
+        _actorMemberKey: string,
+        invitationId: string,
+      ) {
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: 'revoked',
+          deliveryStatus: 'not-required',
+          identityOwnership: 'workspace-created',
+          identityLifecycleVersion: 2,
+          cognitoIdentityId: 'sub-new-user@example.com',
+          cognitoUsername: 'new-user@example.com',
+          failureMessage: 'Cognito cleanup is pending and can be retried safely.',
+          version: 2,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async clearInvitationCleanupFailure(
+        _workspaceId: string,
+        invitationId: string,
+        expectedVersion: number,
+      ) {
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: 'revoked',
+          deliveryStatus: 'not-required',
+          identityOwnership: 'workspace-created',
+          identityLifecycleVersion: 2,
+          cognitoIdentityId: 'sub-new-user@example.com',
+          cognitoUsername: 'new-user@example.com',
+          identityCleanupCompleted: true,
+          version: expectedVersion + 1,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+  const revokeResponse = await app.request(
+    '/api/workspace/invitations/new-user%40example.com/revoke',
+    {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token' },
+    },
+  )
+  expect(revokeResponse.status).toBe(200)
+  expect(await revokeResponse.json()).toMatchObject({
+    invitation: { identityOwnership: 'workspace-created', status: 'revoked' },
+  })
+  await expect(client.deleteWorkspaceUser({
+    userId: 'missing@example.com',
+    directoryId: 'user#demo@example.com',
+    cognitoIdentityId: 'sub-missing@example.com',
+    cognitoUsername: 'missing@example.com',
+  })).resolves.toBe('absent')
+  await expect(client.deleteWorkspaceUser({
+    userId: 'forbidden@example.com',
+    directoryId: 'user#demo@example.com',
+    cognitoIdentityId: 'sub-forbidden@example.com',
+    cognitoUsername: 'forbidden@example.com',
+  })).rejects.toMatchObject({
+    code: 'AccessDeniedException',
+    status: 403,
+  })
+
+  expect(adminGetAttempts).toEqual(new Map([
+    ['demo@example.com', 1],
+    ['existing@example.com', 1],
+    ['new-user@example.com', 2],
+    ['sub-new-user@example.com', 1],
+    ['raced-user@example.com', 3],
+    ['other-workspace@example.com', 1],
+    ['sub-missing@example.com', 1],
+    ['missing@example.com', 1],
+    ['sub-forbidden@example.com', 1],
+  ]))
+  expect(sentCommands
+    .filter(({ name }) => name !== 'GetUserCommand')
+    .map(({ name }) => name)).toEqual([
+    'AdminGetUserCommand',
+    'RespondToAuthChallengeCommand',
+    'AdminListGroupsForUserCommand',
+    'AdminGetUserCommand',
+    'AdminUpdateUserAttributesCommand',
+    'AdminCreateUserCommand',
+    'AdminListGroupsForUserCommand',
+    'AdminGetUserCommand',
+    'AdminGetUserCommand',
+    'AdminCreateUserCommand',
+    'AdminListGroupsForUserCommand',
+    'AdminGetUserCommand',
+    'AdminGetUserCommand',
+    'AdminCreateUserCommand',
+    'AdminGetUserCommand',
+    'AdminUpdateUserAttributesCommand',
+    'AdminCreateUserCommand',
+    'AdminGetUserCommand',
+    'AdminListGroupsForUserCommand',
+    'AdminGetUserCommand',
+    'AdminDeleteUserCommand',
+    'AdminGetUserCommand',
+    'AdminGetUserCommand',
+    'AdminGetUserCommand',
+    'AdminDeleteUserCommand',
+  ])
+  expect(sentCommands.find(({ name }) => name === 'RespondToAuthChallengeCommand')?.input).toEqual({
+    ChallengeName: 'NEW_PASSWORD_REQUIRED',
+    ChallengeResponses: {
+      USERNAME: 'demo@example.com',
+      NEW_PASSWORD: 'Permanent123!',
+    },
+    ClientId: 'mukuroji-client',
+    Session: 'new-password-session',
+  })
+  expect(sentCommands.filter(({ name }) =>
+    name === 'AdminGetUserCommand'
+  ).every(({ input }) => input.UserPoolId === 'us-east-1_mukuroji')).toBe(true)
+  expect(sentCommands.find(({ name, input }) =>
+    name === 'AdminUpdateUserAttributesCommand' &&
+    input.Username === 'CaseSensitiveExisting'
+  )?.input).toEqual({
+    UserPoolId: 'us-east-1_mukuroji',
+    Username: 'CaseSensitiveExisting',
+    UserAttributes: [
+      { Name: 'email', Value: 'existing@example.com' },
+      { Name: 'custom:directory_id', Value: 'user#demo@example.com' },
+      { Name: 'custom:workspace_id', Value: 'user#demo@example.com' },
+      { Name: 'name', Value: 'Invitee' },
+    ],
+  })
+  expect(sentCommands.find(({ name, input }) =>
+    name === 'AdminCreateUserCommand' &&
+    input.Username === 'new-user@example.com' &&
+    input.MessageAction === undefined
+  )?.input).toEqual({
+    UserPoolId: 'us-east-1_mukuroji',
+    Username: 'new-user@example.com',
+    DesiredDeliveryMediums: ['EMAIL'],
+    UserAttributes: [
+      { Name: 'email', Value: 'new-user@example.com' },
+      { Name: 'custom:directory_id', Value: 'user#demo@example.com' },
+      { Name: 'custom:workspace_id', Value: 'user#demo@example.com' },
+      { Name: 'name', Value: 'Invitee' },
+    ],
+  })
+  expect(sentCommands.filter(({ name, input }) =>
+    name === 'AdminCreateUserCommand' && input.MessageAction === 'RESEND'
+  ).map(({ input }) => input.Username)).toEqual([
+    'CaseSensitiveExisting',
+    'raced-user@example.com',
+  ])
+  expect(sentCommands.some(({ name, input }) =>
+    (
+      name === 'AdminUpdateUserAttributesCommand' ||
+      name === 'AdminCreateUserCommand'
+    ) && input.Username === 'other-workspace@example.com'
+  )).toBe(false)
+  expect(sentCommands.filter(({ name }) =>
+    name === 'AdminDeleteUserCommand'
+  ).map(({ input }) => input)).toEqual([
+    {
+      UserPoolId: 'us-east-1_mukuroji',
+      Username: 'sub-new-user@example.com',
+    },
+    {
+      UserPoolId: 'us-east-1_mukuroji',
+      Username: 'sub-forbidden@example.com',
+    },
+  ])
+})
+
+test('preserves confirmed Cognito identities while removing invitation-owned directory claims', async () => {
+  const sentCommands: Array<{ name: string; input: Record<string, unknown> }> = []
+  const sdkClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      const name = command.constructor.name
+      const input = command.input
+      sentCommands.push({ name, input })
+
+      if (name === 'AdminGetUserCommand') {
+        const identityId = String(input.Username)
+
+        if (identityId === 'sub-original-identity') {
+          throw createCognitoSdkTestError('UserNotFoundException', 400)
+        }
+
+        const userId = identityId.startsWith('sub-') ? identityId.slice(4) : identityId
+        const username = userId === 'confirmed@example.com'
+          ? 'CaseSensitiveConfirmed'
+          : userId === 'linked@example.com'
+            ? 'ExternalIdentity'
+            : 'OtherWorkspaceIdentity'
+        const directoryId = userId === 'other-workspace@example.com'
+          ? 'workspace#other'
+          : 'workspace#production'
+
+        return {
+          Username: username,
+          UserAttributes: [
+            { Name: 'email', Value: userId },
+            { Name: 'sub', Value: identityId },
+            { Name: 'custom:directory_id', Value: directoryId },
+            { Name: 'custom:workspace_id', Value: directoryId },
+          ],
+          Enabled: true,
+          UserStatus: 'CONFIRMED',
+        }
+      }
+
+      return {}
+    },
+  } as unknown as CognitoIdentityProviderClient
+  const client = new AwsCognitoClient(
+    sdkClient,
+    'us-east-1_mukuroji',
+    'mukuroji-client',
+  )
+
+  await expect(client.deleteWorkspaceUser({
+    userId: 'confirmed@example.com',
+    directoryId: 'workspace#production',
+    cognitoIdentityId: 'sub-confirmed@example.com',
+    cognitoUsername: 'CaseSensitiveConfirmed',
+  })).resolves.toBe('preserved')
+  await client.unlinkWorkspaceUser({
+    userId: 'confirmed@example.com',
+    directoryId: 'workspace#production',
+    cognitoIdentityId: 'sub-confirmed@example.com',
+    cognitoUsername: 'CaseSensitiveConfirmed',
+  })
+  await client.unlinkWorkspaceUser({
+    userId: 'linked@example.com',
+    directoryId: 'workspace#production',
+    cognitoIdentityId: 'sub-linked@example.com',
+    cognitoUsername: 'ExternalIdentity',
+  })
+  await expect(client.deleteWorkspaceUser({
+    userId: 'other-workspace@example.com',
+    directoryId: 'workspace#production',
+    cognitoIdentityId: 'sub-other-workspace@example.com',
+    cognitoUsername: 'OtherWorkspaceIdentity',
+  })).resolves.toBe('preserved')
+  await client.unlinkWorkspaceUser({
+    userId: 'other-workspace@example.com',
+    directoryId: 'workspace#production',
+    cognitoIdentityId: 'sub-other-workspace@example.com',
+    cognitoUsername: 'OtherWorkspaceIdentity',
+  })
+  await expect(client.deleteWorkspaceUser({
+    userId: 'replacement@example.com',
+    directoryId: 'workspace#production',
+    cognitoIdentityId: 'sub-original-identity',
+    cognitoUsername: 'OriginalIdentity',
+  })).resolves.toBe('absent')
+  await client.unlinkWorkspaceUser({
+    userId: 'replacement@example.com',
+    directoryId: 'workspace#production',
+    cognitoIdentityId: 'sub-original-identity',
+    cognitoUsername: 'OriginalIdentity',
+  })
+
+  expect(sentCommands.filter(({ name }) => name === 'AdminDeleteUserCommand')).toEqual([])
+  expect(sentCommands.filter(({ name }) =>
+    name === 'AdminDeleteUserAttributesCommand'
+  ).map(({ input }) => input)).toEqual([
+    {
+      UserPoolId: 'us-east-1_mukuroji',
+      Username: 'sub-confirmed@example.com',
+      UserAttributeNames: ['custom:directory_id', 'custom:workspace_id'],
+    },
+    {
+      UserPoolId: 'us-east-1_mukuroji',
+      Username: 'sub-linked@example.com',
+      UserAttributeNames: ['custom:directory_id', 'custom:workspace_id'],
+    },
+  ])
+})
+
+test('requires manual cleanup instead of mutating a Cognito alias after stable lookup fails', async () => {
+  const sentCommands: Array<{ name: string; input: Record<string, unknown> }> = []
+  const sdkClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      const name = command.constructor.name
+      const input = command.input
+      sentCommands.push({ name, input })
+
+      if (name !== 'AdminGetUserCommand') {
         return {}
       }
 
-      throw new Error(`Unexpected Cognito command: ${name}`)
+      if (input.Username === 'sub-alias-user') {
+        throw createCognitoSdkTestError('UserNotFoundException', 400)
+      }
+
+      if (input.Username === 'CaseSensitiveAlias') {
+        return {
+          Username: 'CaseSensitiveAlias',
+          UserAttributes: [
+            { Name: 'email', Value: 'alias@example.com' },
+            { Name: 'sub', Value: 'sub-alias-user' },
+            { Name: 'custom:directory_id', Value: 'workspace#production' },
+            { Name: 'custom:workspace_id', Value: 'workspace#production' },
+          ],
+          Enabled: true,
+          UserStatus: 'FORCE_CHANGE_PASSWORD',
+        }
+      }
+
+      throw createCognitoSdkTestError('UserNotFoundException', 400)
     },
   } as unknown as CognitoIdentityProviderClient
-  const client = new AwsCognitoClient(sdkClient, 'us-east-1_mukuroji', 'mukuroji-client')
+  const client = new AwsCognitoClient(
+    sdkClient,
+    'us-east-1_mukuroji',
+    'mukuroji-client',
+  )
+  const cleanupInput = {
+    userId: 'alias@example.com',
+    directoryId: 'workspace#production',
+    cognitoIdentityId: 'sub-alias-user',
+    cognitoUsername: 'CaseSensitiveAlias',
+  }
 
-  await expect(
-    client.respondToNewPasswordChallenge('demo@example.com', 'new-password', 'session-1'),
-  ).resolves.toMatchObject({
-    AuthenticationResult: { AccessToken: 'challenge-access-token' },
-    ChallengeName: 'NEW_PASSWORD_REQUIRED',
-    Session: 'next-session',
-  })
-  await expect(client.findWorkspaceUser('missing@example.com')).resolves.toBeUndefined()
-  await expect(client.provisionWorkspaceUser({
-    directoryId: 'workspace-1',
-    email: 'new@example.com',
-    name: 'New User',
-  })).resolves.toMatchObject({
-    deliveryStatus: 'sent',
-    identityOwnership: 'workspace-created',
-    profile: {
-      id: 'new@example.com',
-      name: 'New User',
-      status: 'FORCE_CHANGE_PASSWORD',
+  await expect(client.deleteWorkspaceUser(cleanupInput)).resolves.toBe('manual-required')
+  await expect(client.unlinkWorkspaceUser(cleanupInput)).resolves.toBe('manual-required')
+  expect(sentCommands.filter(({ name }) =>
+    name === 'AdminDeleteUserCommand' || name === 'AdminDeleteUserAttributesCommand'
+  )).toEqual([])
+})
+
+test('requires manual cleanup when a Cognito stable identity lookup is inconclusive', async () => {
+  const sentCommands: Array<{ name: string; input: Record<string, unknown> }> = []
+  const sdkClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      const name = command.constructor.name
+      const input = command.input
+      sentCommands.push({ name, input })
+
+      if (name !== 'AdminGetUserCommand') {
+        return {}
+      }
+
+      if (input.Username === 'sub-colliding-identity') {
+        return {
+          Username: 'ReplacementIdentity',
+          UserAttributes: [
+            { Name: 'email', Value: 'replacement@example.com' },
+            { Name: 'sub', Value: 'sub-replacement-identity' },
+            { Name: 'custom:directory_id', Value: 'workspace#production' },
+          ],
+          Enabled: true,
+          UserStatus: 'FORCE_CHANGE_PASSWORD',
+        }
+      }
+
+      if (input.Username === 'sub-missing-canonical-identity') {
+        throw createCognitoSdkTestError('UserNotFoundException', 400)
+      }
+
+      if (input.Username === 'MissingCanonicalIdentity') {
+        return {
+          Username: 'MissingCanonicalIdentity',
+          UserAttributes: [
+            { Name: 'email', Value: 'missing-sub@example.com' },
+            { Name: 'custom:directory_id', Value: 'workspace#production' },
+          ],
+          Enabled: true,
+          UserStatus: 'FORCE_CHANGE_PASSWORD',
+        }
+      }
+
+      throw createCognitoSdkTestError('UserNotFoundException', 400)
     },
-  })
-  await expect(client.findWorkspaceUser('new@example.com')).resolves.toMatchObject({
-    directoryId: 'workspace-1',
-    profile: { id: 'new@example.com' },
-  })
-  await expect(client.resendWorkspaceUserInvitation('new@example.com')).resolves.toBeUndefined()
-  await expect(client.deleteWorkspaceUser('new@example.com')).resolves.toBeUndefined()
+  } as unknown as CognitoIdentityProviderClient
+  const client = new AwsCognitoClient(
+    sdkClient,
+    'us-east-1_mukuroji',
+    'mukuroji-client',
+  )
+  const collidingIdentityInput = {
+    userId: 'collision@example.com',
+    directoryId: 'workspace#production',
+    cognitoIdentityId: 'sub-colliding-identity',
+    cognitoUsername: 'CollisionIdentity',
+  }
+  const missingCanonicalIdentityInput = {
+    userId: 'missing-sub@example.com',
+    directoryId: 'workspace#production',
+    cognitoIdentityId: 'sub-missing-canonical-identity',
+    cognitoUsername: 'MissingCanonicalIdentity',
+  }
 
-  expect(commandInputs.map(({ name }) => name)).toEqual([
-    'RespondToAuthChallengeCommand',
-    'AdminGetUserCommand',
-    'AdminGetUserCommand',
-    'AdminCreateUserCommand',
-    'AdminGetUserCommand',
-    'AdminCreateUserCommand',
-    'AdminDeleteUserCommand',
-  ])
-  expect(commandInputs[0]).toMatchObject({
-    input: {
-      ChallengeName: 'NEW_PASSWORD_REQUIRED',
-      ChallengeResponses: {
-        NEW_PASSWORD: 'new-password',
-        USERNAME: 'demo@example.com',
+  await expect(client.deleteWorkspaceUser(collidingIdentityInput)).resolves.toBe('manual-required')
+  await expect(client.unlinkWorkspaceUser(collidingIdentityInput)).resolves.toBe('manual-required')
+  await expect(client.deleteWorkspaceUser(missingCanonicalIdentityInput)).resolves.toBe(
+    'manual-required',
+  )
+  await expect(client.unlinkWorkspaceUser(missingCanonicalIdentityInput)).resolves.toBe(
+    'manual-required',
+  )
+  expect(sentCommands.filter(({ name }) =>
+    name === 'AdminDeleteUserCommand' || name === 'AdminDeleteUserAttributesCommand'
+  )).toEqual([])
+})
+
+test('cleans invitation-owned claims when revoking a pre-existing Cognito identity', async () => {
+  const cleanupInputs: Array<Record<string, unknown>> = []
+  const auditContexts: ObservedWorkspaceMutationAuditContext[] = []
+  let cleanupMarkerClears = 0
+  configureApiClientsForTest({
+    cognito: {
+      async getUser() {
+        return {
+          Username: 'demo@example.com',
+          UserAttributes: [{ Name: 'email', Value: 'demo@example.com' }],
+        }
       },
-      ClientId: 'mukuroji-client',
-      Session: 'session-1',
+      async unlinkWorkspaceUser(input: Record<string, unknown>) {
+        cleanupInputs.push(input)
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['cognito']
+    >,
+    workspaceAccess: {
+      async getActiveMember(_workspaceId: string, memberKey: string) {
+        return {
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: 'owner',
+          status: 'active',
+          version: 1,
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async revokeInvitation(
+        _workspaceId: string,
+        _actorMemberKey: string,
+        invitationId: string,
+        auditContext,
+      ) {
+        auditContexts.push({ stage: 'revokeInvitation', context: auditContext })
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: 'revoked',
+          deliveryStatus: 'not-required',
+          identityOwnership: 'pre-existing',
+          identityLifecycleVersion: 2,
+          cognitoIdentityId: 'sub-existing',
+          cognitoUsername: 'CaseSensitiveExisting',
+          directoryClaimCleanupRequired: true,
+          version: 2,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+          failureMessage: 'Cognito cleanup is pending and can be retried safely.',
+        }
+      },
+      async clearInvitationCleanupFailure(
+        _workspaceId: string,
+        invitationId: string,
+        expectedVersion: number,
+        auditContext,
+      ) {
+        auditContexts.push({ stage: 'clearInvitationCleanupFailure', context: auditContext })
+        cleanupMarkerClears += 1
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: 'revoked',
+          deliveryStatus: 'not-required',
+          identityOwnership: 'pre-existing',
+          identityLifecycleVersion: 2,
+          cognitoIdentityId: 'sub-existing',
+          cognitoUsername: 'CaseSensitiveExisting',
+          identityCleanupCompleted: true,
+          version: expectedVersion + 1,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request(
+    '/api/workspace/invitations/existing%40example.com/revoke',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Idempotency-Key': 'workspace-revoke-1',
+        'X-Correlation-Id': 'workspace-revoke-correlation',
+      },
     },
-    name: 'RespondToAuthChallengeCommand',
+  )
+
+  expect(response.status).toBe(200)
+  expect(cleanupInputs).toEqual([{
+    userId: 'existing@example.com',
+    directoryId: 'user#demo@example.com',
+    cognitoIdentityId: 'sub-existing',
+    cognitoUsername: 'CaseSensitiveExisting',
+  }])
+  expect(cleanupMarkerClears).toBe(1)
+  expectStableWorkspaceMutationAuditContexts(auditContexts, {
+    actorId: 'demo@example.com',
+    correlationId: 'workspace-revoke-correlation',
+    idempotencyKey: 'workspace-revoke-1',
+    method: 'POST',
+    requestBody: { invitationId: 'existing@example.com' },
+    route: '/api/workspace/invitations/existing%40example.com/revoke',
+    stages: ['revokeInvitation', 'clearInvitationCleanupFailure'],
+    workspaceId: 'user#demo@example.com',
+  })
+  const responseBody = await response.json() as { invitation: Record<string, unknown> }
+  expect(responseBody.invitation).toMatchObject({
+    identityCleanupCompleted: true,
+    identityOwnership: 'pre-existing',
+    status: 'revoked',
+  })
+  expect(responseBody.invitation.directoryClaimCleanupRequired).toBeUndefined()
+})
+
+test('persists manual cleanup when stable Cognito mutation is unavailable', async () => {
+  let manualMarkers = 0
+  let cleanupCompletions = 0
+  configureApiClientsForTest({
+    cognito: {
+      async getUser() {
+        return {
+          Username: 'demo@example.com',
+          UserAttributes: [{ Name: 'email', Value: 'demo@example.com' }],
+        }
+      },
+      async unlinkWorkspaceUser() {
+        return 'manual-required' as const
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['cognito']
+    >,
+    workspaceAccess: {
+      async getActiveMember(_workspaceId: string, memberKey: string) {
+        return {
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: 'owner',
+          status: 'active',
+          version: 1,
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async revokeInvitation(_workspaceId, _actorMemberKey, invitationId) {
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: 'revoked',
+          deliveryStatus: 'not-required',
+          identityOwnership: 'pre-existing',
+          identityLifecycleVersion: 2,
+          cognitoIdentityId: 'sub-alias-user',
+          cognitoUsername: 'CaseSensitiveAlias',
+          directoryClaimCleanupRequired: true,
+          version: 2,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+          failureMessage: 'Cognito cleanup is pending and can be retried safely.',
+        }
+      },
+      async markInvitationManualCleanupRequired(_workspaceId, invitationId, expectedVersion) {
+        manualMarkers += 1
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: 'revoked',
+          deliveryStatus: 'not-required',
+          identityOwnership: 'pre-existing',
+          identityCleanupManualRequired: true,
+          version: expectedVersion + 1,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+          failureMessage:
+            'Manual Cognito cleanup is required. After removing the user or Workspace claims in Cognito, retry revocation to verify completion.',
+        }
+      },
+      async clearInvitationCleanupFailure() {
+        cleanupCompletions += 1
+        throw new Error('Manual cleanup must not be marked complete automatically.')
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request(
+    '/api/workspace/invitations/alias%40example.com/revoke',
+    {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token' },
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(manualMarkers).toBe(1)
+  expect(cleanupCompletions).toBe(0)
+  expect(await response.json()).toMatchObject({
+    invitation: { identityCleanupManualRequired: true, status: 'revoked' },
   })
 })
 
-test('normalizes AWS Cognito SDK errors inside the Cognito module', async () => {
+test('keeps legacy revoke in manual cleanup without mutating Cognito', async () => {
+  let cognitoCleanupCalls = 0
+  let cleanupCompletions = 0
+  configureApiClientsForTest({
+    cognito: {
+      async getUser() {
+        return {
+          Username: 'demo@example.com',
+          UserAttributes: [
+            { Name: 'email', Value: 'demo@example.com' },
+            { Name: 'custom:directory_id', Value: 'user#demo@example.com' },
+            { Name: 'custom:workspace_id', Value: 'user#demo@example.com' },
+          ],
+        }
+      },
+      async isSystemAdmin() {
+        return false
+      },
+      async getUserGroups() {
+        return []
+      },
+      async deleteWorkspaceUser() {
+        cognitoCleanupCalls += 1
+        return 'deleted'
+      },
+      async unlinkWorkspaceUser() {
+        cognitoCleanupCalls += 1
+        return 'completed' as const
+      },
+      async findWorkspaceUser() {
+        return {
+          profile: {
+            id: 'legacy@example.com',
+            username: 'LegacyIdentity',
+            email: 'legacy@example.com',
+          },
+          identityId: 'sub-legacy',
+          directoryId: 'user#demo@example.com',
+        }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['cognito']
+    >,
+    workspaceAccess: {
+      async getActiveMember(_workspaceId: string, memberKey: string) {
+        return {
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: 'owner',
+          status: 'active',
+          version: 1,
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async revokeInvitation(_workspaceId, _actorMemberKey, invitationId) {
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: 'revoked',
+          deliveryStatus: 'not-required',
+          identityOwnership: 'workspace-created',
+          identityCleanupManualRequired: true,
+          version: 2,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+          failureMessage: 'Cognito cleanup is pending and can be retried safely.',
+        }
+      },
+      async clearInvitationCleanupFailure(_workspaceId, invitationId, expectedVersion) {
+        cleanupCompletions += 1
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: 'revoked',
+          deliveryStatus: 'not-required',
+          identityOwnership: 'workspace-created',
+          identityCleanupCompleted: true,
+          version: expectedVersion + 1,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async markInvitationManualCleanupRequired(_workspaceId, _invitationId, _expectedVersion) {
+        return {
+          id: 'legacy@example.com',
+          email: 'legacy@example.com',
+          role: 'member',
+          status: 'revoked',
+          deliveryStatus: 'not-required',
+          identityOwnership: 'workspace-created',
+          identityCleanupManualRequired: true,
+          version: 2,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+          failureMessage:
+            'Manual Cognito cleanup is required. After removing the user or Workspace claims in Cognito, retry revocation to verify completion.',
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request(
+    '/api/workspace/invitations/legacy%40example.com/revoke',
+    {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token' },
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(cognitoCleanupCalls).toBe(0)
+  expect(cleanupCompletions).toBe(0)
+  expect(await response.json()).toMatchObject({
+    invitation: {
+      identityCleanupManualRequired: true,
+      identityOwnership: 'workspace-created',
+      status: 'revoked',
+    },
+  })
+})
+
+test('acknowledges manual Cognito cleanup with actor and invitation version', async () => {
+  const acknowledgements: Array<Record<string, unknown>> = []
+  configureApiClientsForTest({
+    cognito: {
+      async getUser() {
+        return {
+          Username: 'demo@example.com',
+          UserAttributes: [{ Name: 'email', Value: 'demo@example.com' }],
+        }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['cognito']
+    >,
+    workspaceAccess: {
+      async getActiveMember(_workspaceId: string, memberKey: string) {
+        return {
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: 'owner',
+          status: 'active',
+          version: 1,
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async acknowledgeInvitationManualCleanup(
+        workspaceId: string,
+        actorMemberKey: string,
+        invitationId: string,
+        expectedVersion: number,
+      ) {
+        acknowledgements.push({
+          workspaceId,
+          actorMemberKey,
+          invitationId,
+          expectedVersion,
+        })
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: 'revoked',
+          deliveryStatus: 'not-required',
+          identityOwnership: 'ambiguous',
+          identityCleanupCompleted: true,
+          version: expectedVersion + 1,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request(
+    '/api/workspace/invitations/legacy%40example.com/cleanup/acknowledge',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ expectedVersion: 7 }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(acknowledgements).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    actorMemberKey: 'demo@example.com',
+    invitationId: 'legacy@example.com',
+    expectedVersion: 7,
+  }])
+  expect(await response.json()).toMatchObject({
+    invitation: { identityCleanupCompleted: true, version: 8 },
+  })
+})
+
+test('rejects disabled existing Cognito identities before mutating invitation attributes', async () => {
+  const commandNames: string[] = []
   const sdkClient = {
-    async send() {
-      throw {
-        $metadata: { httpStatusCode: 400 },
-        message: 'Invalid credentials',
-        name: 'NotAuthorizedException',
+    async send(command: { input: Record<string, unknown> }) {
+      const name = command.constructor.name
+      commandNames.push(name)
+
+      if (name === 'GetUserCommand') {
+        return {
+          Username: 'demo@example.com',
+          UserAttributes: [{ Name: 'email', Value: 'demo@example.com' }],
+        }
       }
+
+      if (name === 'AdminGetUserCommand') {
+        return {
+          Username: 'DisabledIdentity',
+          UserAttributes: [{ Name: 'email', Value: 'disabled@example.com' }],
+          Enabled: false,
+          UserStatus: 'CONFIRMED',
+        }
+      }
+
+      return {}
     },
   } as unknown as CognitoIdentityProviderClient
-  const client = new AwsCognitoClient(sdkClient, 'us-east-1_mukuroji', 'mukuroji-client')
+  const client = new AwsCognitoClient(
+    sdkClient,
+    'us-east-1_mukuroji',
+    'mukuroji-client',
+  )
+  configureFakeProjectClients(true)
+  configureApiClientsForTest({ cognito: client })
 
-  await expect(client.initiatePasswordAuth('demo@example.com', 'password')).rejects.toMatchObject({
-    code: 'NotAuthorizedException',
-    message: 'Invalid credentials',
-    status: 400,
+  const response = await app.request('/api/workspace/invitations', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ email: 'disabled@example.com', role: 'member' }),
   })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'CognitoUserDisabled',
+    message: 'The existing Cognito user is disabled. Re-enable it before sending a Workspace invitation.',
+  })
+  expect(commandNames).toEqual([
+    'GetUserCommand',
+    'AdminListGroupsForUserCommand',
+    'AdminGetUserCommand',
+  ])
+})
+
+test('rejects a disabled Cognito identity discovered after UsernameExists', async () => {
+  const commandNames: string[] = []
+  let adminGetAttempts = 0
+  const sdkClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      const name = command.constructor.name
+      commandNames.push(name)
+
+      if (name === 'AdminGetUserCommand') {
+        adminGetAttempts += 1
+
+        if (adminGetAttempts === 1) {
+          throw createCognitoSdkTestError('UserNotFoundException', 400)
+        }
+
+        return {
+          Username: 'DisabledRaceIdentity',
+          UserAttributes: [
+            { Name: 'email', Value: 'disabled-race@example.com' },
+            { Name: 'sub', Value: 'sub-disabled-race' },
+          ],
+          Enabled: false,
+          UserStatus: 'FORCE_CHANGE_PASSWORD',
+        }
+      }
+
+      if (name === 'AdminCreateUserCommand') {
+        throw createCognitoSdkTestError('UsernameExistsException', 400)
+      }
+
+      return {}
+    },
+  } as unknown as CognitoIdentityProviderClient
+  const client = new AwsCognitoClient(
+    sdkClient,
+    'us-east-1_mukuroji',
+    'mukuroji-client',
+  )
+  let cleanupMarkerCalls = 0
+
+  await expect(client.provisionWorkspaceUser({
+    email: 'disabled-race@example.com',
+    directoryId: 'workspace#production',
+    beforeDirectoryClaimUpdate: async () => {
+      cleanupMarkerCalls += 1
+    },
+  })).rejects.toMatchObject({
+    code: 'CognitoUserDisabled',
+    status: 409,
+  })
+  expect(cleanupMarkerCalls).toBe(0)
+  expect(commandNames).toEqual([
+    'AdminGetUserCommand',
+    'AdminCreateUserCommand',
+    'AdminGetUserCommand',
+  ])
+})
+
+test('keeps Floci usernames case-sensitive and rejects disabled race identities', async () => {
+  await withTestEnvironment(
+    {
+      COGNITO_CLIENT_ID: 'local-client',
+      COGNITO_USER_POOL_ID: 'us-east-1_local',
+    },
+    async () => {
+      const originalFetch = globalThis.fetch
+      const requests: Array<{ action: string; payload: Record<string, unknown> }> = []
+      let adminGetAttempts = 0
+      globalThis.fetch = (async (_input, init) => {
+        const target = new Headers(init?.headers).get('X-Amz-Target') ?? ''
+        const action = target.split('.').at(-1) ?? ''
+        const payload = JSON.parse(String(init?.body)) as Record<string, unknown>
+        requests.push({ action, payload })
+
+        if (action === 'AdminGetUser') {
+          adminGetAttempts += 1
+
+          if (adminGetAttempts === 1) {
+            return new Response(JSON.stringify({ __type: 'UserNotFoundException' }), {
+              status: 400,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          }
+
+          return new Response(JSON.stringify({
+            Username: 'DisabledFlociIdentity',
+            UserAttributes: [
+              { Name: 'email', Value: 'disabled-floci@example.com' },
+              { Name: 'sub', Value: 'sub-disabled-floci' },
+            ],
+            Enabled: false,
+            UserStatus: 'FORCE_CHANGE_PASSWORD',
+          }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+
+        if (action === 'AdminCreateUser' && payload.MessageAction !== 'RESEND') {
+          return new Response(JSON.stringify({ __type: 'UsernameExistsException' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+
+        return new Response('{}', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }) as typeof fetch
+
+      try {
+        const client = new FlociCognitoClient('http://localhost:4566')
+        await client.resendWorkspaceUserInvitation('CaseSensitiveFlociUser')
+        let cleanupMarkerCalls = 0
+
+        await expect(client.provisionWorkspaceUser({
+          email: 'disabled-floci@example.com',
+          directoryId: 'workspace#production',
+          beforeDirectoryClaimUpdate: async () => {
+            cleanupMarkerCalls += 1
+          },
+        })).rejects.toMatchObject({
+          code: 'CognitoUserDisabled',
+          status: 409,
+        })
+        expect(cleanupMarkerCalls).toBe(0)
+        expect(requests.map(({ action }) => action)).toEqual([
+          'AdminCreateUser',
+          'AdminGetUser',
+          'AdminCreateUser',
+          'AdminGetUser',
+        ])
+        expect(requests[0]?.payload).toMatchObject({
+          MessageAction: 'RESEND',
+          Username: 'CaseSensitiveFlociUser',
+        })
+        expect(requests.some(({ action }) => action === 'AdminUpdateUserAttributes')).toBe(false)
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    },
+  )
+})
+
+test('keeps Floci cleanup manual when a stable identity lookup is inconclusive', async () => {
+  await withTestEnvironment(
+    {
+      COGNITO_CLIENT_ID: 'local-client',
+      COGNITO_USER_POOL_ID: 'us-east-1_local',
+    },
+    async () => {
+      const originalFetch = globalThis.fetch
+      const requests: Array<{ action: string; payload: Record<string, unknown> }> = []
+      globalThis.fetch = (async (_input, init) => {
+        const target = new Headers(init?.headers).get('X-Amz-Target') ?? ''
+        const action = target.split('.').at(-1) ?? ''
+        const payload = JSON.parse(String(init?.body)) as Record<string, unknown>
+        requests.push({ action, payload })
+
+        if (action !== 'AdminGetUser') {
+          return new Response('{}', {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+
+        if (payload.Username === 'sub-colliding-identity') {
+          return new Response(JSON.stringify({
+            Username: 'ReplacementIdentity',
+            UserAttributes: [
+              { Name: 'email', Value: 'replacement@example.com' },
+              { Name: 'sub', Value: 'sub-replacement-identity' },
+              { Name: 'custom:directory_id', Value: 'workspace#production' },
+            ],
+            Enabled: true,
+            UserStatus: 'FORCE_CHANGE_PASSWORD',
+          }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+
+        if (payload.Username === 'MissingCanonicalIdentity') {
+          return new Response(JSON.stringify({
+            Username: 'MissingCanonicalIdentity',
+            UserAttributes: [
+              { Name: 'email', Value: 'missing-sub@example.com' },
+              { Name: 'custom:directory_id', Value: 'workspace#production' },
+            ],
+            Enabled: true,
+            UserStatus: 'FORCE_CHANGE_PASSWORD',
+          }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+
+        return new Response(JSON.stringify({ __type: 'UserNotFoundException' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }) as typeof fetch
+
+      try {
+        const client = new FlociCognitoClient('http://localhost:4566')
+        const collidingIdentityInput = {
+          userId: 'collision@example.com',
+          directoryId: 'workspace#production',
+          cognitoIdentityId: 'sub-colliding-identity',
+          cognitoUsername: 'CollisionIdentity',
+        }
+        const missingCanonicalIdentityInput = {
+          userId: 'missing-sub@example.com',
+          directoryId: 'workspace#production',
+          cognitoIdentityId: 'sub-missing-canonical-identity',
+          cognitoUsername: 'MissingCanonicalIdentity',
+        }
+
+        await expect(client.deleteWorkspaceUser(collidingIdentityInput)).resolves.toBe(
+          'manual-required',
+        )
+        await expect(client.unlinkWorkspaceUser(collidingIdentityInput)).resolves.toBe(
+          'manual-required',
+        )
+        await expect(client.deleteWorkspaceUser(missingCanonicalIdentityInput)).resolves.toBe(
+          'manual-required',
+        )
+        await expect(client.unlinkWorkspaceUser(missingCanonicalIdentityInput)).resolves.toBe(
+          'manual-required',
+        )
+        expect(requests.some(({ action }) =>
+          action === 'AdminDeleteUser' || action === 'AdminDeleteUserAttributes'
+        )).toBe(false)
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    },
+  )
 })
 
 test('keeps the Bun development Cognito default on local Floci', async () => {
@@ -989,7 +8359,9 @@ test('hides stale assignee-only notifications after Work Item reassignment', asy
 })
 
 test('returns Cognito groups and system admin status for the current user', async () => {
-  configureFakeProjectClients(true)
+  configureFakeProjectClients(true, {
+    systemAdminMemberKeys: ['demo@example.com'],
+  })
 
   const response = await app.request('/api/auth/me', {
     headers: {
@@ -1001,6 +8373,71 @@ test('returns Cognito groups and system admin status for the current user', asyn
   expect(await response.json()).toMatchObject({
     groups: ['mukuroji-system-admins'],
     isSystemAdmin: true,
+  })
+})
+
+test('reads every AWS Cognito group page and deduplicates current membership', async () => {
+  const requestedTokens: Array<string | undefined> = []
+  const sdkClient = {
+    async send(command: { input: { NextToken?: string } }) {
+      requestedTokens.push(command.input.NextToken)
+      return command.input.NextToken
+        ? {
+            Groups: [
+              { GroupName: 'project-writers' },
+              { GroupName: 'workspace-readers' },
+            ],
+          }
+        : {
+            Groups: [
+              { GroupName: 'workspace-readers' },
+              { GroupName: 'shared-group' },
+            ],
+            NextToken: 'groups-page-2',
+          }
+    },
+  } as unknown as CognitoIdentityProviderClient
+  const client = new AwsCognitoClient(
+    sdkClient,
+    'ap-northeast-1_mukuroji',
+    'mukuroji-client',
+  )
+
+  await expect(client.getUserGroups('demo@example.com')).resolves.toEqual([
+    'workspace-readers',
+    'shared-group',
+    'project-writers',
+  ])
+  expect(requestedTokens).toEqual([undefined, 'groups-page-2'])
+})
+
+test('reads every Floci Cognito group page for current membership', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'local-client',
+    COGNITO_USER_POOL_ID: 'us-east-1_local',
+  }, async () => {
+    const originalFetch = globalThis.fetch
+    const requestedTokens: Array<unknown> = []
+    globalThis.fetch = (async (_input, init) => {
+      const payload = JSON.parse(String(init?.body)) as Record<string, unknown>
+      requestedTokens.push(payload.NextToken)
+      return Response.json(payload.NextToken
+        ? { Groups: [{ GroupName: 'project-writers' }] }
+        : {
+            Groups: [{ GroupName: 'workspace-readers' }],
+            NextToken: 'groups-page-2',
+          })
+    }) as typeof fetch
+    try {
+      const client = new FlociCognitoClient('http://localhost:4566')
+      await expect(client.getUserGroups('demo@example.com')).resolves.toEqual([
+        'workspace-readers',
+        'project-writers',
+      ])
+      expect(requestedTokens).toEqual([undefined, 'groups-page-2'])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })
 
@@ -1018,6 +8455,508 @@ test('returns Workspace role and active status for the current user', async () =
   })
 })
 
+test('requires server-attested SSO for a user in an enforced domain', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
+  }, async () => {
+    const calls = configureFakeProjectClients(true)
+    const workspaceId = 'user#demo@example.com'
+    const providerId = 'idp-enforced'
+    const providerRevision = 1
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    const provider = {
+      workspaceId,
+      providerId,
+      kind: 'oidc' as const,
+      displayName: 'Enterprise SSO',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active' as const,
+      revision: providerRevision,
+      issuer: 'https://idp.example.com',
+      clientId: 'enterprise-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email'],
+      createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+    }
+    await identity.putIdentityProvider(provider)
+    const domain = {
+      workspaceId,
+      domainId: 'example-com',
+      domain: 'example.com',
+      status: 'verified' as const,
+      revision: 1,
+      verificationRecordName: '_mukuroji-challenge.example.com',
+      verifiedAt: now,
+      enforceSso: false,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await identity.putVerifiedDomain(domain)
+    const ssoAuthenticationMethod =
+      `mukuroji:enterprise-sso-provider-sha256:${
+        createHash('sha256').update(`${providerId}\0${providerRevision}`).digest('hex')
+      }`
+    let verifiedAuthenticationMethods: string[] = []
+    configureApiClientsForTest({
+      enterpriseIdentity: identity,
+      enterpriseSessionActivity: {
+        async getAuthenticationMethods() {
+          return [...verifiedAuthenticationMethods]
+        },
+        async recordAuthenticationAssurance() {
+          return undefined
+        },
+        async validateAndTouch(input) {
+          return [...input.authenticationMethods]
+        },
+      },
+    })
+    const mainAccessToken = createAccessToken([], {
+      'cognito:amr': [ssoAuthenticationMethod],
+      client_id: 'mukuroji-main-client',
+      iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+      token_use: 'access',
+    })
+    const ssoAccessToken = createAccessToken([], {
+      client_id: 'mukuroji-sso-client',
+      iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+      token_use: 'access',
+    })
+    const requestCurrentUser = (accessToken: string) => app.request('/api/auth/me', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+
+    const nonEnforced = await requestCurrentUser(mainAccessToken)
+    expect(nonEnforced.status).toBe(200)
+
+    await identity.putVerifiedDomain({
+      ...domain,
+      revision: 2,
+      enforceSso: true,
+      identityProviderId: providerId,
+    })
+
+    const discoveries = await Promise.all([
+      app.request('/api/auth/sso/discovery?email=demo%40example.com'),
+      app.request('/api/auth/sso/discovery?email=demo%40example.com'),
+    ])
+    expect(discoveries.map((response) => response.status)).toEqual([200, 200])
+
+    const forgedClaim = await requestCurrentUser(mainAccessToken)
+    expect(forgedClaim.status).toBe(403)
+    expect(await forgedClaim.json()).toEqual({
+      code: 'EnterpriseSsoSessionRequired',
+      message: 'Single sign-on is required for this Workspace account.',
+    })
+
+    verifiedAuthenticationMethods = [ssoAuthenticationMethod]
+    const wrongClient = await requestCurrentUser(mainAccessToken)
+    expect(wrongClient.status).toBe(403)
+    const serverAttested = await requestCurrentUser(ssoAccessToken)
+    expect(serverAttested.status).toBe(200)
+
+    await identity.putIdentityProvider({
+      ...provider,
+      revision: providerRevision + 1,
+    })
+    const staleProviderRevision = await requestCurrentUser(ssoAccessToken)
+    expect(staleProviderRevision.status).toBe(403)
+    expect(await staleProviderRevision.json()).toMatchObject({
+      code: 'EnterpriseSsoSessionRequired',
+    })
+    expect(calls.cognitoIdentityProviderDescriptions).toEqual(['EnterpriseOidc'])
+    expect(calls.cognitoSsoAppClientDescriptions).toEqual(['mukuroji-sso-client'])
+  })
+})
+
+test('binds SSO exchange assurance to the signed provider revision', async () => {
+  await withTestEnvironment({
+    AWS_REGION: 'ap-northeast-1',
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
+    ENTERPRISE_SSO_STATE_SECRET: '0123456789abcdef0123456789abcdef',
+  }, async () => {
+    const calls = configureFakeProjectClients(true)
+    const workspaceId = 'user#demo@example.com'
+    const providerId = 'idp-enforced'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    const provider = {
+      workspaceId,
+      providerId,
+      kind: 'oidc' as const,
+      displayName: 'Enterprise SSO',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active' as const,
+      revision: 1,
+      issuer: 'https://idp.example.com',
+      clientId: 'enterprise-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email'],
+      createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+    }
+    await identity.putIdentityProvider(provider)
+    await identity.putVerifiedDomain({
+      workspaceId,
+      domainId: 'example-com',
+      domain: 'example.com',
+      status: 'verified',
+      revision: 1,
+      verificationRecordName: '_mukuroji-challenge.example.com',
+      verifiedAt: now,
+      enforceSso: true,
+      identityProviderId: providerId,
+      createdAt: now,
+      updatedAt: now,
+    })
+    const assurances: string[][] = []
+    configureApiClientsForTest({
+      enterpriseIdentity: identity,
+      enterpriseSessionActivity: {
+        async getAuthenticationMethods() {
+          return []
+        },
+        async recordAuthenticationAssurance(input) {
+          assurances.push([...input.authenticationMethods])
+        },
+        async validateAndTouch(input) {
+          return [...input.authenticationMethods]
+        },
+      },
+    })
+    const startSso = () => app.request('/api/auth/sso/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'demo@example.com',
+        returnTo: '/workspace',
+      }),
+    })
+    const firstStart = await startSso()
+    expect(firstStart.status).toBe(200)
+    const firstStartBody = await firstStart.json()
+    let tokenNonce = new URL(firstStartBody.authorizationUrl).searchParams.get('nonce') ?? ''
+    const accessToken = createAccessToken([], {
+      'cognito:amr': [
+        'PASSWORD',
+        'mukuroji:enterprise-sso-provider-sha256:forged-access-claim',
+      ],
+      client_id: 'mukuroji-sso-client',
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
+      iat: Math.floor(Date.now() / 1_000),
+      iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+      token_use: 'access',
+    })
+    const originalFetch = globalThis.fetch
+    let tokenExchangeCalls = 0
+    globalThis.fetch = (async () => {
+      tokenExchangeCalls += 1
+      const epochSeconds = Math.floor(Date.now() / 1_000)
+      return new Response(JSON.stringify({
+        access_token: accessToken,
+        id_token: createAccessToken([], {
+          amr: [
+            'upstream-mfa',
+            'mukuroji:enterprise-sso-provider-sha256:forged-id-claim',
+          ],
+          aud: 'mukuroji-sso-client',
+          email: 'demo@example.com',
+          email_verified: true,
+          exp: epochSeconds + 3_600,
+          iat: epochSeconds,
+          iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+          nonce: tokenNonce,
+          sub: 'cognito-user-id',
+          token_use: 'id',
+        }),
+        expires_in: 3_600,
+        refresh_token: 'refresh-token',
+        token_type: 'Bearer',
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    try {
+      const updatedProviderRevision = provider.revision + 1
+      await identity.putIdentityProvider({
+        ...provider,
+        revision: updatedProviderRevision,
+      })
+      const staleExchange = await app.request('/api/auth/sso/exchange', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'authorization-code-before-provider-update',
+          codeVerifier: firstStartBody.codeVerifier,
+          state: firstStartBody.state,
+        }),
+      })
+
+      expect(staleExchange.status).toBe(409)
+      expect(await staleExchange.json()).toMatchObject({
+        code: 'EnterpriseSsoConfigurationChanged',
+      })
+      expect(tokenExchangeCalls).toBe(0)
+
+      const currentStart = await startSso()
+      expect(currentStart.status).toBe(200)
+      const currentStartBody = await currentStart.json()
+      tokenNonce = new URL(currentStartBody.authorizationUrl).searchParams.get('nonce') ?? ''
+      const currentExchange = await app.request('/api/auth/sso/exchange', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'authorization-code-after-provider-update',
+          codeVerifier: currentStartBody.codeVerifier,
+          state: currentStartBody.state,
+        }),
+      })
+
+      expect(currentExchange.status).toBe(200)
+      expect(tokenExchangeCalls).toBe(1)
+      const expectedSsoMethod = `mukuroji:enterprise-sso-provider-sha256:${
+        createHash('sha256')
+          .update(`${providerId}\0${updatedProviderRevision}`)
+          .digest('hex')
+      }`
+      expect(assurances).toEqual([[
+        'PASSWORD',
+        'upstream-mfa',
+        expectedSsoMethod,
+      ]])
+      expect(calls.cognitoIdentityProviderDescriptions).toHaveLength(3)
+      expect(calls.cognitoSsoAppClientDescriptions).toHaveLength(3)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+})
+
+test('rejects a Cognito SSO app client that can escape the enterprise IdP contract', async () => {
+  await withTestEnvironment({
+    AWS_REGION: 'ap-northeast-1',
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
+    ENTERPRISE_SSO_STATE_SECRET: '0123456789abcdef0123456789abcdef',
+  }, async () => {
+    const workspaceId = 'user#demo@example.com'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    await identity.putIdentityProvider({
+      workspaceId,
+      providerId: 'idp-enforced',
+      kind: 'oidc',
+      displayName: 'Enterprise SSO',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active',
+      revision: 1,
+      issuer: 'https://idp.example.com',
+      clientId: 'enterprise-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email'],
+      createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+    })
+    await identity.putVerifiedDomain({
+      workspaceId,
+      domainId: 'example-com',
+      domain: 'example.com',
+      status: 'verified',
+      revision: 1,
+      verificationRecordName: '_mukuroji-challenge.example.com',
+      verifiedAt: now,
+      enforceSso: true,
+      identityProviderId: 'idp-enforced',
+      createdAt: now,
+      updatedAt: now,
+    })
+    const startSso = () => app.request('/api/auth/sso/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'demo@example.com' }),
+    })
+    const invalidBindings = [
+      { supportedIdentityProviders: ['EnterpriseOidc', 'COGNITO'] },
+      { allowedOAuthFlows: ['implicit'] },
+      { allowedOAuthScopes: ['openid', 'email'] },
+      { explicitAuthFlows: ['ALLOW_USER_PASSWORD_AUTH', 'ALLOW_REFRESH_TOKEN_AUTH'] },
+      { callbackUrls: ['https://attacker.example.com/callback'] },
+      { hasClientSecret: true },
+      { allowedOAuthFlowsUserPoolClient: false },
+    ]
+
+    for (const cognitoSsoClientDetails of invalidBindings) {
+      configureFakeProjectClients(true, { cognitoSsoClientDetails })
+      configureApiClientsForTest({ enterpriseIdentity: identity })
+      const response = await startSso()
+
+      expect(response.status).toBe(503)
+      expect(await response.json()).toMatchObject({
+        code: 'EnterpriseCognitoSsoAppClientBindingInvalid',
+      })
+    }
+
+    configureFakeProjectClients(true)
+    configureApiClientsForTest({ enterpriseIdentity: identity })
+    await withTestEnvironment({
+      COGNITO_SSO_CLIENT_ID: 'mukuroji-main-client',
+    }, async () => {
+      const sharedClient = await startSso()
+      expect(sharedClient.status).toBe(503)
+      expect(await sharedClient.json()).toMatchObject({
+        code: 'EnterpriseCognitoSsoAppClientUnavailable',
+      })
+    })
+  })
+})
+
+test('preflights a tested identity provider replacement before SSO enforcement can race', async () => {
+  await withTestEnvironment({
+    AWS_REGION: 'ap-northeast-1',
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
+    ENTERPRISE_SSO_STATE_SECRET: '0123456789abcdef0123456789abcdef',
+  }, async () => {
+    const workspaceId = 'user#demo@example.com'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    await identity.putIdentityProvider({
+      workspaceId,
+      providerId: 'idp-enforced',
+      kind: 'oidc',
+      displayName: 'Existing enterprise SSO',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active',
+      revision: 1,
+      issuer: 'https://idp.example.com',
+      clientId: 'existing-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email', 'profile'],
+      createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+    })
+    await identity.putVerifiedDomain({
+      workspaceId,
+      domainId: 'managed-example',
+      domain: 'managed.example',
+      status: 'verified',
+      revision: 1,
+      verificationRecordName: '_mukuroji-challenge.managed.example',
+      verifiedAt: now,
+      enforceSso: false,
+      identityProviderId: 'idp-enforced',
+      createdAt: now,
+      updatedAt: now,
+    })
+    await identity.putVerifiedDomain({
+      workspaceId,
+      domainId: 'example-com',
+      domain: 'example.com',
+      status: 'verified',
+      revision: 1,
+      verificationRecordName: '_mukuroji-challenge.example.com',
+      verifiedAt: now,
+      enforceSso: false,
+      createdAt: now,
+      updatedAt: now,
+    })
+    configureFakeProjectClients(true, {
+      cognitoProviderDetails: {
+        oidc_issuer: 'https://replacement.example.com',
+        client_id: 'replacement-client',
+      },
+      cognitoSsoClientDetails: {
+        supportedIdentityProviders: ['EnterpriseOidc', 'COGNITO'],
+      },
+    })
+    let connectionTests = 0
+    configureApiClientsForTest({
+      enterpriseIdentity: identity,
+      async enterpriseIdentityProviderConnectionTester(provider) {
+        connectionTests += 1
+        return {
+          ...provider,
+          status: 'active',
+          lastTestedAt: now,
+        }
+      },
+    })
+    const epochSeconds = Math.floor(Date.now() / 1_000)
+    const accessToken = createAccessToken([], {
+      client_id: 'mukuroji-main-client',
+      exp: epochSeconds + 3_600,
+      iat: epochSeconds,
+      iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+      token_use: 'access',
+    })
+    expect((await identity.getSnapshot(workspaceId)).domains.some((domain) =>
+      domain.status === 'verified' && domain.enforceSso
+    )).toBe(false)
+
+    const response = await app.request('/api/enterprise/security/identity-provider', {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        protocol: 'oidc',
+        displayName: 'Replacement enterprise SSO',
+        issuer: 'https://replacement.example.com',
+        ssoUrl: 'https://replacement.example.com/authorize',
+        clientId: 'replacement-client',
+        expectedVersion: 1,
+        testConnection: true,
+      }),
+    })
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({
+      code: 'EnterpriseCognitoSsoAppClientBindingInvalid',
+    })
+    expect(connectionTests).toBe(1)
+    expect((await identity.getSnapshot(workspaceId)).identityProviders).toEqual([
+      expect.objectContaining({
+        displayName: 'Existing enterprise SSO',
+        revision: 1,
+      }),
+    ])
+  })
+})
+
 test('blocks a deactivated Workspace member before any business API read', async () => {
   const calls = configureFakeProjectClients(true, { workspaceStatus: 'deactivated' })
 
@@ -1026,14 +8965,17 @@ test('blocks a deactivated Workspace member before any business API read', async
   })
 
   expect(response.status).toBe(403)
-  expect(await response.json()).toEqual({ message: 'Workspace access is denied.' })
+  expect(await response.json()).toEqual({
+    code: 'WorkspaceAccessDenied',
+    message: 'Workspace access is denied.',
+  })
   expect(calls.directoryReads).toEqual([])
 })
 
 test('keeps guest Workspace members read-only even when they have a project role', async () => {
   const calls = configureFakeProjectClients(true, { workspaceRole: 'guest' })
 
-  const response = await app.request('/api/projects/refero/tasks', {
+  const response = await app.request('/api/teams/core-team/issues', {
     method: 'POST',
     headers: {
       Authorization: 'Bearer test-token',
@@ -1041,14 +8983,16 @@ test('keeps guest Workspace members read-only even when they have a project role
     },
     body: JSON.stringify({
       title: 'Guest must not create this task',
+      assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
       dueDate: '2026/07/20',
       priority: 'medium',
+      workflowStatusId: 'todo',
     }),
   })
 
   expect(response.status).toBe(403)
-  expect(calls.taskCreates).toEqual([])
+  expect(calls.issueCreates).toEqual([])
 })
 
 test('limits Workspace structure changes to owners and admins', async () => {
@@ -1072,7 +9016,7 @@ test('rejects inactive Workspace members as task assignment candidates', async (
     inactiveWorkspaceMemberKeys: ['sato@example.com'],
   })
 
-  const response = await app.request('/api/projects/refero/tasks', {
+  const response = await app.request('/api/teams/core-team/issues', {
     method: 'POST',
     headers: {
       Authorization: 'Bearer test-token',
@@ -1080,14 +9024,16 @@ test('rejects inactive Workspace members as task assignment candidates', async (
     },
     body: JSON.stringify({
       title: 'Inactive assignee task',
+      assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
       dueDate: '2026/07/20',
       priority: 'medium',
+      workflowStatusId: 'todo',
     }),
   })
 
   expect(response.status).toBe(409)
-  expect(calls.taskCreates).toEqual([])
+  expect(calls.issueCreates).toEqual([])
 })
 
 test('returns a NEW_PASSWORD_REQUIRED challenge without creating a session', async () => {
@@ -1106,6 +9052,212 @@ test('returns a NEW_PASSWORD_REQUIRED challenge without creating a session', asy
     session: 'new-password-session',
   })
   expect(calls.workspaceReconciliations).toEqual([])
+})
+
+test('returns a supported MFA challenge without attempting Workspace reconciliation', async () => {
+  const calls = configureFakeProjectClients(true, {
+    passwordMfaChallenge: 'SMS_MFA',
+  })
+
+  const response = await app.request('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'mfa-login@example.com', password: 'Password123!' }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    challenge: 'SMS_MFA',
+    deliveryDestination: '***-***-1234',
+    deliveryMedium: 'SMS',
+    email: 'mfa-login@example.com',
+    session: 'mfa-session',
+  })
+  expect(calls.workspaceReconciliations).toEqual([])
+})
+
+test('rechecks enforced SSO before completing password and MFA challenges', async () => {
+  const calls = configureFakeProjectClients(true, {
+    newPasswordChallengeTokens: true,
+    mfaChallengeTokens: true,
+  })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const timestamp = new Date().toISOString()
+  const provider = {
+    workspaceId: 'user#demo@example.com',
+    providerId: 'idp-enforced',
+    kind: 'oidc' as const,
+    displayName: 'Enterprise SSO',
+    cognitoProviderName: 'EnterpriseOidc',
+    status: 'active' as const,
+    revision: 1,
+    issuer: 'https://idp.example.com',
+    clientId: 'enterprise-client',
+    authorizationEndpoint: 'https://idp.example.com/authorize',
+    tokenEndpoint: 'https://idp.example.com/token',
+    jwksUri: 'https://idp.example.com/jwks',
+    scopes: ['openid', 'email'],
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    lastTestedAt: timestamp,
+  }
+  identity.discoverSso = async (email) =>
+    email.toLowerCase().endsWith('@managed.example')
+      ? {
+          provider,
+          domain: {
+            workspaceId: 'user#demo@example.com',
+            domainId: 'managed-example',
+            domain: 'managed.example',
+            status: 'verified',
+            revision: 1,
+            verificationRecordName: '_mukuroji-challenge.managed.example',
+            verifiedAt: timestamp,
+            enforceSso: true,
+            identityProviderId: provider.providerId,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          },
+        }
+      : undefined
+  configureApiClientsForTest({
+    enterpriseIdentity: identity,
+    enterpriseSessionActivity: {
+      async getAuthenticationMethods() {
+        return []
+      },
+      async recordAuthenticationAssurance() {
+        return undefined
+      },
+      async validateAndTouch(input) {
+        return [...input.authenticationMethods]
+      },
+    },
+  })
+
+  const newPassword = await app.request('/api/auth/challenge/new-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'person@managed.example',
+      newPassword: 'NewPassword123!',
+      session: 'challenge-before-enforcement',
+    }),
+  })
+  const managedMfa = await app.request('/api/auth/challenge/mfa', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'person@managed.example',
+      challenge: 'SOFTWARE_TOKEN_MFA',
+      code: '123456',
+      session: 'challenge-before-enforcement',
+    }),
+  })
+  const recoveryMfa = await app.request('/api/auth/challenge/mfa', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'recovery@outside.example',
+      challenge: 'SOFTWARE_TOKEN_MFA',
+      code: '123456',
+      session: 'local-recovery-session',
+    }),
+  })
+
+  expect(newPassword.status).toBe(409)
+  expect(await newPassword.json()).toMatchObject({ code: 'SsoRequired' })
+  expect(managedMfa.status).toBe(409)
+  expect(await managedMfa.json()).toMatchObject({ code: 'SsoRequired' })
+  expect(recoveryMfa.status).toBe(200)
+  expect(calls.mfaChallenges).toEqual([{
+    challenge: 'SOFTWARE_TOKEN_MFA',
+    code: '123456',
+    email: 'recovery@outside.example',
+    session: 'local-recovery-session',
+  }])
+})
+
+test('completes an MFA challenge and binds server-verified assurance to the access token', async () => {
+  const calls = configureFakeProjectClients(true, { mfaChallengeTokens: true })
+  const assurances: string[][] = []
+  configureApiClientsForTest({
+    enterpriseSessionActivity: {
+      async getAuthenticationMethods() {
+        return []
+      },
+      async recordAuthenticationAssurance(input) {
+        assurances.push([...input.authenticationMethods])
+      },
+      async validateAndTouch(input) {
+        return [...input.authenticationMethods]
+      },
+    },
+  })
+
+  const response = await app.request('/api/auth/challenge/mfa', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'demo@example.com',
+      challenge: 'SOFTWARE_TOKEN_MFA',
+      code: '123456',
+      session: 'mfa-session',
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({ accessToken: 'test-token' })
+  expect(calls.mfaChallenges).toEqual([{
+    challenge: 'SOFTWARE_TOKEN_MFA',
+    code: '123456',
+    email: 'demo@example.com',
+    session: 'mfa-session',
+  }])
+  expect(assurances).toEqual([['SOFTWARE_TOKEN_MFA']])
+})
+
+test('rejects malformed MFA codes before calling Cognito', async () => {
+  const calls = configureFakeProjectClients(true, { mfaChallengeTokens: true })
+
+  const response = await app.request('/api/auth/challenge/mfa', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'invalid-mfa@example.com',
+      challenge: 'SMS_OTP',
+      code: '12-ab',
+      session: 'mfa-session',
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({ code: 'InvalidMfaChallenge' })
+  expect(calls.mfaChallenges).toEqual([])
+})
+
+test('rate limits repeated MFA verification attempts by transport and email', async () => {
+  configureFakeProjectClients(true)
+  const createRequest = () => app.request('/api/auth/challenge/mfa', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'rate-limit-mfa@example.com',
+      challenge: 'EMAIL_OTP',
+      code: '123456',
+      session: 'mfa-session',
+    }),
+  })
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    expect((await createRequest()).status).toBe(409)
+  }
+  const limited = await createRequest()
+  expect(limited.status).toBe(429)
+  expect(limited.headers.get('Retry-After')).toBeTruthy()
+  expect(await limited.json()).toMatchObject({
+    code: 'AuthenticationChallengeRateLimited',
+  })
 })
 
 test('returns a stable error when a new password violates the Cognito policy', async () => {
@@ -1135,6 +9287,228 @@ test('returns a stable error when a new password violates the Cognito policy', a
   expect(calls.workspaceReconciliations).toEqual([])
 })
 
+test('holds the invitation acceptance lock across the Cognito password challenge', async () => {
+  const sequence: string[] = []
+  const auditContexts: ObservedWorkspaceMutationAuditContext[] = []
+  const invitation = {
+    id: 'invitee@example.com',
+    email: 'invitee@example.com',
+    role: 'member' as const,
+    status: 'pending' as const,
+    deliveryStatus: 'sent' as const,
+    identityOwnership: 'workspace-created' as const,
+    cognitoIdentityId: 'sub-invitee',
+    version: 2,
+    expiresAt: '2026-07-18T00:00:00.000Z',
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z',
+    acceptanceLockExpiresAt: '2026-07-11T00:01:00.000Z',
+  }
+  configureApiClientsForTest({
+    cognito: {
+      async findWorkspaceUser() {
+        sequence.push('find-user')
+        return {
+          profile: {
+            id: 'invitee@example.com',
+            username: 'InviteeIdentity',
+            email: 'invitee@example.com',
+            enabled: true,
+            status: 'FORCE_CHANGE_PASSWORD',
+          },
+          identityId: 'sub-invitee',
+          directoryId: 'workspace#production',
+        }
+      },
+      async respondToNewPasswordChallenge() {
+        sequence.push('complete-challenge')
+        return { AuthenticationResult: createFakeAuthTokenSet() }
+      },
+      async getUser() {
+        sequence.push('get-user')
+        return {
+          Username: 'InviteeIdentity',
+          UserAttributes: [
+            { Name: 'email', Value: 'invitee@example.com' },
+            { Name: 'custom:directory_id', Value: 'workspace#production' },
+            { Name: 'custom:workspace_id', Value: 'workspace#production' },
+          ],
+        }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['cognito']
+    >,
+    workspaceAccess: {
+      async getActiveMember() {
+        sequence.push('get-active-member')
+        return undefined
+      },
+      async acquireInvitationAcceptanceLock(_workspaceId, _invitationId, auditContext) {
+        sequence.push('acquire-lock')
+        auditContexts.push({ stage: 'acquireInvitationAcceptanceLock', context: auditContext })
+        return invitation
+      },
+      async releaseInvitationAcceptanceLock(
+        _workspaceId,
+        _invitationId,
+        _expectedVersion,
+        auditContext,
+      ) {
+        sequence.push('release-lock')
+        auditContexts.push({ stage: 'releaseInvitationAcceptanceLock', context: auditContext })
+        return {
+          ...invitation,
+          acceptanceLockExpiresAt: undefined,
+          version: 3,
+        }
+      },
+      async reconcileAuthenticatedMember(
+        _workspaceId: string,
+        input: { memberKey: string },
+        auditContext,
+      ) {
+        sequence.push('reconcile-member')
+        auditContexts.push({ stage: 'reconcileAuthenticatedMember', context: auditContext })
+        return {
+          id: input.memberKey,
+          memberKey: input.memberKey,
+          email: 'invitee@example.com',
+          role: 'member',
+          status: 'active',
+          version: 1,
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request('/api/auth/challenge/new-password', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-challenge-1',
+      'X-Correlation-Id': 'workspace-challenge-correlation',
+    },
+    body: JSON.stringify({
+      email: 'invitee@example.com',
+      newPassword: 'Permanent123!',
+      session: 'new-password-session',
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(sequence).toEqual([
+    'find-user',
+    'get-active-member',
+    'acquire-lock',
+    'complete-challenge',
+    'get-user',
+    'reconcile-member',
+    'release-lock',
+  ])
+  expectStableWorkspaceMutationAuditContexts(auditContexts, {
+    actorId: 'sub-invitee',
+    correlationId: 'workspace-challenge-correlation',
+    idempotencyKey: 'workspace-challenge-1',
+    method: 'POST',
+    requestBody: { email: 'invitee@example.com' },
+    route: '/api/auth/challenge/new-password',
+    stages: [
+      'acquireInvitationAcceptanceLock',
+      'reconcileAuthenticatedMember',
+      'releaseInvitationAcceptanceLock',
+    ],
+    workspaceId: 'workspace#production',
+  })
+})
+
+test('lets an active Workspace member complete a new password challenge without an invitation lock', async () => {
+  const sequence: string[] = []
+  const activeMember = {
+    id: 'member@example.com',
+    memberKey: 'member@example.com',
+    email: 'member@example.com',
+    role: 'member' as const,
+    status: 'active' as const,
+    version: 1,
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z',
+  }
+  configureApiClientsForTest({
+    cognito: {
+      async findWorkspaceUser() {
+        sequence.push('find-user')
+        return {
+          profile: {
+            id: 'member@example.com',
+            username: 'ExistingMemberIdentity',
+            email: 'member@example.com',
+            enabled: true,
+            status: 'FORCE_CHANGE_PASSWORD',
+          },
+          identityId: 'sub-existing-member',
+          directoryId: 'workspace#production',
+        }
+      },
+      async respondToNewPasswordChallenge() {
+        sequence.push('complete-challenge')
+        return { AuthenticationResult: createFakeAuthTokenSet() }
+      },
+      async getUser() {
+        sequence.push('get-user')
+        return {
+          Username: 'ExistingMemberIdentity',
+          UserAttributes: [
+            { Name: 'email', Value: 'member@example.com' },
+            { Name: 'custom:directory_id', Value: 'workspace#production' },
+            { Name: 'custom:workspace_id', Value: 'workspace#production' },
+          ],
+        }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['cognito']
+    >,
+    workspaceAccess: {
+      async getActiveMember() {
+        sequence.push('get-active-member')
+        return activeMember
+      },
+      async acquireInvitationAcceptanceLock() {
+        sequence.push('acquire-lock')
+        throw new Error('Active members must not acquire an invitation acceptance lock.')
+      },
+      async releaseInvitationAcceptanceLock() {
+        sequence.push('release-lock')
+        throw new Error('No invitation acceptance lock should be released.')
+      },
+      async reconcileAuthenticatedMember() {
+        sequence.push('reconcile-member')
+        return activeMember
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request('/api/auth/challenge/new-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'member@example.com',
+      newPassword: 'Permanent123!',
+      session: 'new-password-session',
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(sequence).toEqual([
+    'find-user',
+    'get-active-member',
+    'complete-challenge',
+    'get-user',
+    'reconcile-member',
+  ])
+})
+
 test('retries membership reconcile on normal login after password completion succeeded alone', async () => {
   const calls = configureFakeProjectClients(true, {
     newPasswordChallengeTokens: true,
@@ -1144,7 +9518,11 @@ test('retries membership reconcile on normal login after password completion suc
 
   const challengeResponse = await app.request('/api/auth/challenge/new-password', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-challenge-reconcile-1',
+      'X-Correlation-Id': 'workspace-challenge-reconcile-correlation',
+    },
     body: JSON.stringify({
       email: 'demo@example.com',
       newPassword: 'Permanent123!',
@@ -1155,7 +9533,11 @@ test('retries membership reconcile on normal login after password completion suc
 
   const loginResponse = await app.request('/api/auth/login', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-login-reconcile-1',
+      'X-Correlation-Id': 'workspace-login-reconcile-correlation',
+    },
     body: JSON.stringify({ email: 'demo@example.com', password: 'Permanent123!' }),
   })
 
@@ -1165,6 +9547,32 @@ test('retries membership reconcile on normal login after password completion suc
     'demo@example.com',
     'demo@example.com',
   ])
+  expectStableWorkspaceMutationAuditContexts(
+    calls.workspaceMutationAuditContexts.slice(0, 1),
+    {
+      actorId: 'sub-demo@example.com',
+      correlationId: 'workspace-challenge-reconcile-correlation',
+      idempotencyKey: 'workspace-challenge-reconcile-1',
+      method: 'POST',
+      requestBody: { email: 'demo@example.com' },
+      route: '/api/auth/challenge/new-password',
+      stages: ['reconcileAuthenticatedMember'],
+      workspaceId: 'user#demo@example.com',
+    },
+  )
+  expectStableWorkspaceMutationAuditContexts(
+    calls.workspaceMutationAuditContexts.slice(1),
+    {
+      actorId: 'demo@example.com',
+      correlationId: 'workspace-login-reconcile-correlation',
+      idempotencyKey: 'workspace-login-reconcile-1',
+      method: 'POST',
+      requestBody: { email: 'demo@example.com' },
+      route: '/api/auth/login',
+      stages: ['reconcileAuthenticatedMember'],
+      workspaceId: 'user#demo@example.com',
+    },
+  )
 })
 
 test('returns owner and admin Workspace capabilities from the API source of truth', async () => {
@@ -1185,6 +9593,140 @@ test('returns owner and admin Workspace capabilities from the API source of trut
   })
 })
 
+test('serializes Workspace role updates with the Planning revision', async () => {
+  const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({
+    documents: {
+      async getAuthorizationRevision() {
+        return 5
+      },
+      async getManagerLifecycleSnapshot() {
+        return {
+          authorizationRevision: 5,
+        }
+      },
+    } as unknown as DocumentClient,
+  })
+
+  const response = await app.request('/api/workspace/members/sato%40example.com', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ role: 'guest', expectedVersion: 1 }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(calls.workspaceMemberUpdates).toEqual([{
+    expectedDocumentAuthorizationRevision: 5,
+    expectedPlanningRevision: 0,
+    memberKey: 'sato@example.com',
+    role: 'guest',
+  }])
+})
+
+test('forwards stable Workspace mutation audit headers and actor context to the state client', async () => {
+  configureFakeProjectClients(true)
+  let capturedAuditContext: ReturnType<typeof createMutationAuditContext> | undefined
+  const owner = {
+    id: 'demo@example.com',
+    memberKey: 'demo@example.com',
+    email: 'demo@example.com',
+    role: 'owner' as const,
+    status: 'active' as const,
+    version: 1,
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z',
+  }
+  configureApiClientsForTest({
+    documents: {
+      async getAuthorizationRevision() {
+        return 8
+      },
+      async getManagerLifecycleSnapshot() {
+        return {
+          authorizationRevision: 8,
+        }
+      },
+    } as unknown as DocumentClient,
+    workspaceAccess: {
+      async listActiveMembers() {
+        return [
+          owner,
+          {
+            ...owner,
+            id: 'sato@example.com',
+            memberKey: 'sato@example.com',
+            email: 'sato@example.com',
+            role: 'member' as const,
+          },
+        ]
+      },
+      async getActiveMember() {
+        return owner
+      },
+      async getMember(_workspaceId: string, memberKey: string) {
+        return {
+          ...owner,
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: 'member',
+        }
+      },
+      async updateMember(
+        _workspaceId: string,
+        _actorMemberKey: string,
+        memberKey: string,
+        input: Parameters<WorkspaceAccessClient['updateMember']>[3],
+        auditContext: Parameters<WorkspaceAccessClient['updateMember']>[4],
+      ) {
+        capturedAuditContext = auditContext
+        return {
+          ...owner,
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: input.role ?? owner.role,
+          status: input.status ?? owner.status,
+          version: input.expectedVersion + 1,
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request('/api/workspace/members/sato%40example.com', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-member-role-change-1',
+      'X-Correlation-Id': 'workspace-correlation-1',
+    },
+    body: JSON.stringify({ expectedVersion: 1, role: 'guest' }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(capturedAuditContext).toMatchObject({
+    workspaceId: 'user#demo@example.com',
+    actor: {
+      id: 'demo@example.com',
+      displayName: 'demo@example.com',
+      kind: 'user',
+    },
+    correlationId: 'workspace-correlation-1',
+    source: {
+      kind: 'api',
+      method: 'PATCH',
+      route: '/api/workspace/members/sato%40example.com',
+    },
+  })
+  expect(capturedAuditContext?.idempotencyKeyHash).not.toContain(
+    'workspace-member-role-change-1',
+  )
+})
+
 test('rejects deactivating a Workspace member who still manages an active project', async () => {
   const calls = configureFakeProjectClients(true, {
     projectAccesses: [{ projectId: 'refero', role: 'manager' }],
@@ -1201,11 +9743,247 @@ test('rejects deactivating a Workspace member who still manages an active projec
 
   expect(response.status).toBe(409)
   expect(await response.json()).toEqual({
+    code: 'WorkspaceMemberManagesProjects',
     message: 'Transfer or remove all active project manager roles before deactivating this member.',
   })
   expect(calls.accessChecks).toEqual([
     { directoryId: 'user#demo@example.com', projectId: '*' },
   ])
+})
+
+test('rejects deactivating a Workspace member who owns an active Planning entity', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await planningClient.create('user#demo@example.com', {
+    ...createCyclePlanningInput('cycle-owned-by-member', 0),
+    ownerMemberKey: 'SATO@EXAMPLE.COM',
+  }, { workItems: [] })
+  configureFakeProjectClients(true, { role: 'member' })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await app.request('/api/workspace/members/sato%40example.com', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ expectedVersion: 1, status: 'deactivated' }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'WorkspaceMemberOwnsPlanningEntities',
+    message: 'Transfer or archive all owned Planning entities before deactivating this member.',
+  })
+})
+
+test('rejects changing the only active non-guest manager of a private Document to guest', async () => {
+  const calls = configureFakeProjectClients(true)
+  let eligibleManagerMemberKeys:
+    | readonly string[]
+    | undefined
+  configureApiClientsForTest({
+    documents: {
+      async getAuthorizationRevision() {
+        return 12
+      },
+      async getManagerLifecycleSnapshot(
+        _workspaceId,
+        _memberKey,
+        eligibleManagers,
+      ) {
+        eligibleManagerMemberKeys =
+          eligibleManagers
+        return {
+          authorizationRevision: 12,
+          blockingDocumentId:
+            'private-document-1',
+        }
+      },
+    } as unknown as DocumentClient,
+  })
+
+  const response = await app.request(
+    '/api/workspace/members/sato%40example.com',
+    {
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        expectedVersion: 1,
+        role: 'guest',
+      }),
+    },
+  )
+
+  const responseBody =
+    await response.json()
+  expect(responseBody).toEqual({
+    code:
+      'WorkspaceMemberManagesPrivateDocuments',
+    message:
+      'Transfer private Document manager access before deactivating this member or changing them to guest.',
+  })
+  expect(response.status).toBe(409)
+  expect(eligibleManagerMemberKeys).toContain(
+    'sato@example.com',
+  )
+  expect(calls.workspaceMemberUpdates).toEqual([])
+})
+
+test('binds member deactivation after private Document manager transfer to its ACL generation', async () => {
+  const calls = configureFakeProjectClients(true, {
+    projectAccesses: [],
+  })
+  configureApiClientsForTest({
+    documents: {
+      async getAuthorizationRevision() {
+        return 13
+      },
+      async getManagerLifecycleSnapshot() {
+        return {
+          authorizationRevision: 13,
+        }
+      },
+    } as unknown as DocumentClient,
+  })
+
+  const response = await app.request(
+    '/api/workspace/members/sato%40example.com',
+    {
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        expectedVersion: 1,
+        status: 'deactivated',
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(calls.workspaceMemberUpdates).toEqual([{
+    expectedDocumentAuthorizationRevision: 13,
+    expectedPlanningRevision: 0,
+    memberKey: 'sato@example.com',
+    status: 'deactivated',
+  }])
+})
+
+test('retries private Document manager validation when eligibility changes before the ACL snapshot', async () => {
+  configureFakeProjectClients(true)
+  let authorizationRevisionReads = 0
+  let lifecycleSnapshotReads = 0
+  let memberUpdateCalls = 0
+  const createActiveMember = (
+    memberKey: string,
+    role: WorkspaceRole,
+  ) => ({
+    id: memberKey,
+    memberKey,
+    email: memberKey,
+    role,
+    status: 'active' as const,
+    version: 1,
+    createdAt:
+      '2026-07-11T00:00:00.000Z',
+    updatedAt:
+      '2026-07-11T00:00:00.000Z',
+  })
+  const owner = createActiveMember(
+    'demo@example.com',
+    'owner',
+  )
+  const target = createActiveMember(
+    'sato@example.com',
+    'member',
+  )
+  configureApiClientsForTest({
+    documents: {
+      async getAuthorizationRevision() {
+        authorizationRevisionReads += 1
+        return authorizationRevisionReads === 1
+          ? 20
+          : 21
+      },
+      async getManagerLifecycleSnapshot() {
+        lifecycleSnapshotReads += 1
+        return {
+          authorizationRevision: 21,
+          ...(lifecycleSnapshotReads === 1
+            ? {}
+            : {
+                blockingDocumentId:
+                  'private-document-after-race',
+              }),
+        }
+      },
+    } as unknown as DocumentClient,
+    workspaceAccess: {
+      async getMember(
+        _workspaceId,
+        memberKey,
+      ) {
+        return memberKey ===
+          owner.memberKey
+          ? owner
+          : memberKey ===
+              target.memberKey
+            ? target
+            : undefined
+      },
+      async getActiveMember(
+        _workspaceId,
+        memberKey,
+      ) {
+        return memberKey ===
+          owner.memberKey
+          ? owner
+          : memberKey ===
+              target.memberKey
+            ? target
+            : undefined
+      },
+      async listActiveMembers() {
+        return [owner, target]
+      },
+      async updateMember() {
+        memberUpdateCalls += 1
+        return target
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request(
+    '/api/workspace/members/sato%40example.com',
+    {
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        expectedVersion: 1,
+        role: 'guest',
+      }),
+    },
+  )
+
+  const responseBody =
+    await response.json()
+  expect(responseBody).toEqual({
+    code:
+      'WorkspaceMemberManagesPrivateDocuments',
+    message:
+      'Transfer private Document manager access before deactivating this member or changing them to guest.',
+  })
+  expect(response.status).toBe(409)
+  expect(authorizationRevisionReads).toBe(2)
+  expect(lifecycleSnapshotReads).toBe(2)
+  expect(memberUpdateCalls).toBe(0)
 })
 
 test('resends credentials when inviting an existing unconfirmed Workspace identity', async () => {
@@ -1216,6 +9994,8 @@ test('resends credentials when inviting an existing unconfirmed Workspace identi
     headers: {
       Authorization: 'Bearer test-token',
       'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-invitation-create-1',
+      'X-Correlation-Id': 'workspace-invitation-create-correlation',
     },
     body: JSON.stringify({
       email: 'invitee@example.com',
@@ -1226,6 +10006,20 @@ test('resends credentials when inviting an existing unconfirmed Workspace identi
 
   expect(response.status).toBe(201)
   expect(calls.workspaceInvitationResends).toEqual(['invitee@example.com'])
+  expectStableWorkspaceMutationAuditContexts(calls.workspaceMutationAuditContexts, {
+    actorId: 'demo@example.com',
+    correlationId: 'workspace-invitation-create-correlation',
+    idempotencyKey: 'workspace-invitation-create-1',
+    method: 'POST',
+    requestBody: { email: 'invitee@example.com', name: 'Invitee', role: 'member' },
+    route: '/api/workspace/invitations',
+    stages: [
+      'createInvitation',
+      'markInvitationIdentityMutationStarted',
+      'markInvitationDelivery',
+    ],
+    workspaceId: 'user#demo@example.com',
+  })
   expect(await response.json()).toMatchObject({
     invitation: {
       deliveryStatus: 'sent',
@@ -1263,6 +10057,116 @@ test('records ownership when invitation provisioning creates a new Cognito ident
   })
 })
 
+test('persists created identity provenance when the successful delivery write fails', async () => {
+  configureFakeProjectClients(true, { workspaceUserMissing: true })
+  const deliveryInputs: Array<Parameters<WorkspaceAccessClient['markInvitationDelivery']>[2]> = []
+
+  configureApiClientsForTest({
+    workspaceAccess: {
+      async getActiveMember(_workspaceId: string, memberKey: string) {
+        return {
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: 'owner',
+          status: 'active',
+          version: 1,
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async createInvitation(_workspaceId, _actorMemberKey, input) {
+        return {
+          id: input.email,
+          email: input.email,
+          role: input.role,
+          status: 'provisioning',
+          deliveryStatus: 'pending',
+          identityOwnership: 'ambiguous',
+          version: 1,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async markInvitationIdentityMutationStarted(
+        _workspaceId,
+        invitationId,
+        expectedVersion,
+      ) {
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: 'provisioning',
+          deliveryStatus: 'pending',
+          identityOwnership: 'ambiguous',
+          identityLifecycleVersion: 2,
+          identityMutationAttempted: true,
+          version: expectedVersion + 1,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async markInvitationDelivery(_workspaceId, invitationId, input) {
+        deliveryInputs.push(input)
+
+        if (input.deliveryStatus !== 'failed') {
+          throw new Error('Delivery state write failed after Cognito provisioning.')
+        }
+
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: 'delivery-failed',
+          deliveryStatus: 'failed',
+          identityOwnership: input.identityOwnership,
+          cognitoIdentityId: input.cognitoIdentityId,
+          cognitoUsername: input.cognitoUsername,
+          directoryClaimCleanupRequired: input.directoryClaimCleanupRequired,
+          version: input.expectedVersion + 1,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+          failureMessage: input.failureMessage,
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request('/api/workspace/invitations', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ email: 'new-user@example.com', role: 'member' }),
+  })
+
+  expect(response.status).toBe(502)
+  expect(deliveryInputs).toEqual([
+    {
+      expectedVersion: 2,
+      identityOwnership: 'workspace-created',
+      cognitoIdentityId: 'sub-new-user@example.com',
+      cognitoUsername: 'new-user@example.com',
+      directoryClaimCleanupRequired: false,
+      deliveryStatus: 'sent',
+    },
+    {
+      expectedVersion: 2,
+      identityOwnership: 'workspace-created',
+      cognitoIdentityId: 'sub-new-user@example.com',
+      cognitoUsername: 'new-user@example.com',
+      directoryClaimCleanupRequired: undefined,
+      deliveryStatus: 'failed',
+      failureMessage: 'Invitation delivery failed.',
+    },
+  ])
+})
+
 test('keeps raced Cognito ownership ambiguous while resending temporary credentials', async () => {
   const calls = configureFakeProjectClients(true, { workspaceProvisionRace: true })
 
@@ -1271,6 +10175,8 @@ test('keeps raced Cognito ownership ambiguous while resending temporary credenti
     headers: {
       Authorization: 'Bearer test-token',
       'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-invitation-race-1',
+      'X-Correlation-Id': 'workspace-invitation-race-correlation',
     },
     body: JSON.stringify({
       email: 'raced-user@example.com',
@@ -1280,6 +10186,21 @@ test('keeps raced Cognito ownership ambiguous while resending temporary credenti
 
   expect(response.status).toBe(201)
   expect(calls.workspaceInvitationResends).toEqual(['raced-user@example.com'])
+  expectStableWorkspaceMutationAuditContexts(calls.workspaceMutationAuditContexts, {
+    actorId: 'demo@example.com',
+    correlationId: 'workspace-invitation-race-correlation',
+    idempotencyKey: 'workspace-invitation-race-1',
+    method: 'POST',
+    requestBody: { email: 'raced-user@example.com', role: 'member' },
+    route: '/api/workspace/invitations',
+    stages: [
+      'createInvitation',
+      'markInvitationIdentityMutationStarted',
+      'markInvitationDirectoryClaimCleanupRequired',
+      'markInvitationDelivery',
+    ],
+    workspaceId: 'user#demo@example.com',
+  })
   expect(await response.json()).toMatchObject({
     invitation: {
       deliveryStatus: 'sent',
@@ -1287,6 +10208,318 @@ test('keeps raced Cognito ownership ambiguous while resending temporary credenti
       identityOwnership: 'ambiguous',
       status: 'pending',
     },
+  })
+})
+
+test('drops ownership and cleanup provenance when reinvite finds a replacement Cognito identity', async () => {
+  const deliveryInputs: Array<Parameters<WorkspaceAccessClient['markInvitationDelivery']>[2]> = []
+  const auditContexts: ObservedWorkspaceMutationAuditContext[] = []
+  const resends: string[] = []
+  const preparedInvitation = {
+    id: 'replacement@example.com',
+    email: 'replacement@example.com',
+    role: 'member' as const,
+    status: 'provisioning' as const,
+    deliveryStatus: 'pending' as const,
+    identityOwnership: 'workspace-created' as const,
+    cognitoIdentityId: 'sub-original',
+    directoryClaimCleanupRequired: true,
+    version: 2,
+    expiresAt: '2026-07-18T00:00:00.000Z',
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z',
+  }
+
+  configureApiClientsForTest({
+    cognito: {
+      async getUser() {
+        return {
+          Username: 'demo@example.com',
+          UserAttributes: [
+            { Name: 'email', Value: 'demo@example.com' },
+            { Name: 'custom:directory_id', Value: 'user#demo@example.com' },
+            { Name: 'custom:workspace_id', Value: 'user#demo@example.com' },
+          ],
+        }
+      },
+      async isSystemAdmin() {
+        return false
+      },
+      async getUserGroups() {
+        return []
+      },
+      async findWorkspaceUser() {
+        return {
+          profile: {
+            id: 'replacement@example.com',
+            username: 'CaseSensitiveReplacement',
+            email: 'replacement@example.com',
+            enabled: true,
+            status: 'FORCE_CHANGE_PASSWORD',
+          },
+          identityId: 'sub-replacement',
+          directoryId: 'user#demo@example.com',
+        }
+      },
+      async provisionWorkspaceUser() {
+        return {
+          profile: {
+            id: 'replacement@example.com',
+            username: 'CaseSensitiveReplacement',
+            email: 'replacement@example.com',
+            enabled: true,
+            status: 'FORCE_CHANGE_PASSWORD',
+          },
+          cognitoIdentityId: 'sub-replacement',
+          cognitoUsername: 'CaseSensitiveReplacement',
+          identityOwnership: 'pre-existing',
+          directoryClaimCleanupRequired: false,
+          deliveryStatus: 'not-required',
+        }
+      },
+      async resendWorkspaceUserInvitation(username: string) {
+        resends.push(username)
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['cognito']
+    >,
+    workspaceAccess: {
+      async getActiveMember(_workspaceId: string, memberKey: string) {
+        return {
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: 'owner',
+          status: 'active',
+          version: 1,
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async prepareReinvite(
+        _workspaceId,
+        _actorMemberKey,
+        _invitationId,
+        _expiresInDays,
+        auditContext,
+      ) {
+        auditContexts.push({ stage: 'prepareReinvite', context: auditContext })
+        return preparedInvitation
+      },
+      async markInvitationIdentityMutationStarted(
+        _workspaceId,
+        _invitationId,
+        expectedVersion,
+        cognitoIdentityId,
+        cognitoUsername,
+        auditContext,
+      ) {
+        auditContexts.push({ stage: 'markInvitationIdentityMutationStarted', context: auditContext })
+        return {
+          ...preparedInvitation,
+          identityOwnership: 'ambiguous',
+          cognitoIdentityId,
+          cognitoUsername,
+          directoryClaimCleanupRequired: undefined,
+          identityMutationAttempted: true,
+          version: expectedVersion + 1,
+        }
+      },
+      async markInvitationDelivery(_workspaceId, _invitationId, input, auditContext) {
+        auditContexts.push({ stage: 'markInvitationDelivery', context: auditContext })
+        deliveryInputs.push(input)
+        return {
+          ...preparedInvitation,
+          status: 'pending',
+          deliveryStatus: input.deliveryStatus,
+          identityOwnership: input.identityOwnership,
+          cognitoIdentityId: input.cognitoIdentityId,
+          cognitoUsername: input.cognitoUsername,
+          directoryClaimCleanupRequired: input.directoryClaimCleanupRequired,
+          version: input.expectedVersion + 1,
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request(
+    '/api/workspace/invitations/replacement%40example.com/reinvite',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Idempotency-Key': 'workspace-reinvite-1',
+        'X-Correlation-Id': 'workspace-reinvite-correlation',
+      },
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(resends).toEqual(['CaseSensitiveReplacement'])
+  expectStableWorkspaceMutationAuditContexts(auditContexts, {
+    actorId: 'demo@example.com',
+    correlationId: 'workspace-reinvite-correlation',
+    idempotencyKey: 'workspace-reinvite-1',
+    method: 'POST',
+    requestBody: { action: 'reinvite', invitationId: 'replacement@example.com' },
+    route: '/api/workspace/invitations/replacement%40example.com/reinvite',
+    stages: [
+      'prepareReinvite',
+      'markInvitationIdentityMutationStarted',
+      'markInvitationDelivery',
+    ],
+    workspaceId: 'user#demo@example.com',
+  })
+  expect(deliveryInputs).toEqual([{
+    expectedVersion: 3,
+    identityOwnership: 'pre-existing',
+    cognitoIdentityId: 'sub-replacement',
+    cognitoUsername: 'CaseSensitiveReplacement',
+    directoryClaimCleanupRequired: false,
+    deliveryStatus: 'sent',
+  }])
+  expect(await response.json()).toMatchObject({
+    invitation: {
+      identityOwnership: 'pre-existing',
+      cognitoIdentityId: 'sub-replacement',
+      cognitoUsername: 'CaseSensitiveReplacement',
+      directoryClaimCleanupRequired: false,
+    },
+  })
+})
+
+test('forwards one mutation audit context through every invitation resend stage', async () => {
+  const auditContexts: ObservedWorkspaceMutationAuditContext[] = []
+  const preparedInvitation = {
+    id: 'resend@example.com',
+    email: 'resend@example.com',
+    role: 'member' as const,
+    status: 'provisioning' as const,
+    deliveryStatus: 'pending' as const,
+    identityOwnership: 'workspace-created' as const,
+    cognitoIdentityId: 'sub-resend',
+    cognitoUsername: 'ResendIdentity',
+    version: 2,
+    expiresAt: '2026-07-18T00:00:00.000Z',
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z',
+  }
+
+  configureApiClientsForTest({
+    cognito: {
+      async getUser() {
+        return {
+          Username: 'demo@example.com',
+          UserAttributes: [
+            { Name: 'email', Value: 'demo@example.com' },
+            { Name: 'custom:directory_id', Value: 'user#demo@example.com' },
+            { Name: 'custom:workspace_id', Value: 'user#demo@example.com' },
+          ],
+        }
+      },
+      async isSystemAdmin() {
+        return false
+      },
+      async getUserGroups() {
+        return []
+      },
+      async findWorkspaceUser() {
+        return undefined
+      },
+      async provisionWorkspaceUser() {
+        return {
+          profile: createFakeCognitoProfile('resend@example.com'),
+          cognitoIdentityId: 'sub-resend',
+          cognitoUsername: 'ResendIdentity',
+          identityOwnership: 'workspace-created' as const,
+          directoryClaimCleanupRequired: false,
+          deliveryStatus: 'sent' as const,
+        }
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof configureApiClientsForTest>[0]['cognito']
+    >,
+    workspaceAccess: {
+      async getActiveMember(_workspaceId, memberKey) {
+        return {
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: 'owner',
+          status: 'active',
+          version: 1,
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async prepareResend(
+        _workspaceId,
+        _actorMemberKey,
+        _invitationId,
+        _expiresInDays,
+        auditContext,
+      ) {
+        auditContexts.push({ stage: 'prepareResend', context: auditContext })
+        return preparedInvitation
+      },
+      async markInvitationIdentityMutationStarted(
+        _workspaceId,
+        _invitationId,
+        expectedVersion,
+        cognitoIdentityId,
+        cognitoUsername,
+        auditContext,
+      ) {
+        auditContexts.push({ stage: 'markInvitationIdentityMutationStarted', context: auditContext })
+        return {
+          ...preparedInvitation,
+          cognitoIdentityId,
+          cognitoUsername,
+          identityMutationAttempted: true,
+          version: expectedVersion + 1,
+        }
+      },
+      async markInvitationDelivery(_workspaceId, _invitationId, input, auditContext) {
+        auditContexts.push({ stage: 'markInvitationDelivery', context: auditContext })
+        return {
+          ...preparedInvitation,
+          status: 'pending',
+          deliveryStatus: input.deliveryStatus,
+          identityOwnership: input.identityOwnership,
+          cognitoIdentityId: input.cognitoIdentityId,
+          cognitoUsername: input.cognitoUsername,
+          version: input.expectedVersion + 1,
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+
+  const response = await app.request(
+    '/api/workspace/invitations/resend%40example.com/resend',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Idempotency-Key': 'workspace-resend-1',
+        'X-Correlation-Id': 'workspace-resend-correlation',
+      },
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expectStableWorkspaceMutationAuditContexts(auditContexts, {
+    actorId: 'demo@example.com',
+    correlationId: 'workspace-resend-correlation',
+    idempotencyKey: 'workspace-resend-1',
+    method: 'POST',
+    requestBody: { action: 'resend', invitationId: 'resend@example.com' },
+    route: '/api/workspace/invitations/resend%40example.com/resend',
+    stages: [
+      'prepareResend',
+      'markInvitationIdentityMutationStarted',
+      'markInvitationDelivery',
+    ],
+    workspaceId: 'user#demo@example.com',
   })
 })
 
@@ -1320,9 +10553,16 @@ test('marks a workspace audit export as truncated when the 1,000 event cap leave
   configureFakeProjectClients(true)
   const event = createFakeAuditEvent()
   let pageNumber = 0
+  const accessEvents: AuditEventV1[] = []
 
   configureApiClientsForTest({
     auditEvents: {
+      async putEvent(accessEvent) {
+        accessEvents.push(accessEvent)
+      },
+      async getEvent() {
+        return undefined
+      },
       async query(input) {
         pageNumber += 1
         expect(input.limit).toBe(100)
@@ -1350,6 +10590,17 @@ test('marks a workspace audit export as truncated when the 1,000 event cap leave
   expect(response.headers.get('X-Audit-Next-Cursor')).toBe('cursor-10')
   expect((await response.text()).trimEnd().split('\n')).toHaveLength(1_000)
   expect(pageNumber).toBe(10)
+  expect(accessEvents).toHaveLength(1)
+  expect(accessEvents[0]).toMatchObject({
+    eventType: 'audit.exported',
+    actor: { kind: 'user' },
+    entity: { type: 'audit-log', id: 'user#demo@example.com' },
+    metadata: {
+      format: 'ndjson',
+      returnedEventCount: 1_000,
+      truncated: true,
+    },
+  })
 })
 
 test('omits truncation headers when a workspace audit export reaches the final page', async () => {
@@ -1358,6 +10609,10 @@ test('omits truncation headers when a workspace audit export reaches the final p
 
   configureApiClientsForTest({
     auditEvents: {
+      async putEvent() {},
+      async getEvent() {
+        return undefined
+      },
       async query() {
         return { events: [event] }
       },
@@ -1374,6 +10629,592 @@ test('omits truncation headers when a workspace audit export reaches the final p
   expect(response.headers.get('X-Audit-Truncated')).toBeNull()
   expect(response.headers.get('X-Audit-Next-Cursor')).toBeNull()
   expect((await response.text()).trimEnd().split('\n')).toHaveLength(1)
+})
+
+test('appends an immutable audit event after viewing the workspace audit timeline', async () => {
+  configureFakeProjectClients(true)
+  const event = createFakeAuditEvent()
+  const accessEvents: AuditEventV1[] = []
+  configureApiClientsForTest({
+    auditEvents: {
+      async putEvent(accessEvent) {
+        accessEvents.push(accessEvent)
+      },
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [event] }
+      },
+    },
+  })
+
+  const response = await app.request('/api/audit/events?eventType=project.created', {
+    headers: {
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
+      'X-Request-Id': 'audit-view-request-1',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(accessEvents).toHaveLength(1)
+  expect(accessEvents[0]).toMatchObject({
+    eventType: 'audit.viewed',
+    actor: { kind: 'user' },
+    entity: { type: 'audit-log', id: 'user#demo@example.com' },
+    metadata: {
+      format: 'json',
+      returnedEventCount: 1,
+      truncated: false,
+      filtered: true,
+    },
+  })
+})
+
+test('reads and saves Workspace Work Item configuration through the authenticated scope', async () => {
+  configureFakeProjectClients(true)
+  const stored = createTestWorkItemConfiguration('workspace', 'user#demo@example.com', 3)
+  const reads: string[] = []
+  const writes: Array<{ configuration: WorkItemConfiguration; workspaceId: string }> = []
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getWorkspaceConfiguration(workspaceId) {
+        reads.push(workspaceId)
+        return { configuration: stored }
+      },
+      async saveWorkspaceConfiguration(workspaceId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        writes.push({ workspaceId, configuration })
+        return {
+          configuration: {
+            ...configuration,
+            revision: configuration.revision + 1,
+          },
+        }
+      },
+    }),
+  })
+
+  const readResponse = await app.request('/api/work-item-configuration', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const writeResponse = await app.request('/api/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(createTestWorkItemConfiguration('team', 'foreign-team', 3)),
+  })
+
+  expect(readResponse.status).toBe(200)
+  expect(await readResponse.json()).toEqual({ configuration: stored })
+  expect(writeResponse.status).toBe(200)
+  expect(await writeResponse.json()).toMatchObject({
+    configuration: {
+      scopeType: 'workspace',
+      scopeId: 'user#demo@example.com',
+      revision: 4,
+    },
+  })
+  expect(reads).toEqual(['user#demo@example.com'])
+  expect(writes).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    configuration: expect.objectContaining({
+      scopeType: 'workspace',
+      scopeId: 'user#demo@example.com',
+      revision: 3,
+    }),
+  }])
+})
+
+test('reads and saves Team Work Item configuration for a Team manager', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const stored = createTestWorkItemConfiguration('team', 'core-team', 2)
+  const reads: Array<{ teamId: string; workspaceId: string }> = []
+  const writes: Array<{
+    configuration: WorkItemConfiguration
+    teamId: string
+    workspaceId: string
+  }> = []
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration(workspaceId, teamId) {
+        reads.push({ workspaceId, teamId })
+        return { configuration: stored }
+      },
+      async saveTeamConfiguration(workspaceId, teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        writes.push({ workspaceId, teamId, configuration })
+        return {
+          configuration: {
+            ...configuration,
+            revision: configuration.revision + 1,
+          },
+        }
+      },
+    }),
+  })
+
+  const readResponse = await app.request('/api/teams/core-team/work-item-configuration', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const writeResponse = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(createTestWorkItemConfiguration('workspace', 'foreign-workspace', 2)),
+  })
+
+  expect(readResponse.status).toBe(200)
+  expect(await readResponse.json()).toEqual({ configuration: stored })
+  expect(writeResponse.status).toBe(200)
+  expect(reads).toEqual([{ workspaceId: 'user#demo@example.com', teamId: 'core-team' }])
+  expect(writes).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    teamId: 'core-team',
+    configuration: expect.objectContaining({
+      scopeType: 'team',
+      scopeId: 'core-team',
+      revision: 2,
+    }),
+  }])
+})
+
+test('denies Work Item configuration writes outside the required administration roles', async () => {
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  let writes = 0
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async saveWorkspaceConfiguration(workspaceId, configuration) {
+        writes += 1
+        return { configuration: { ...configuration, scopeId: workspaceId } }
+      },
+      async saveTeamConfiguration(_workspaceId, teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        writes += 1
+        return { configuration: { ...configuration, scopeId: teamId } }
+      },
+    }),
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+
+  const workspaceResponse = await app.request('/api/work-item-configuration', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(createTestWorkItemConfiguration('workspace', 'user#demo@example.com')),
+  })
+  const teamResponse = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(createTestWorkItemConfiguration('team', 'core-team')),
+  })
+
+  expect(workspaceResponse.status).toBe(403)
+  expect(teamResponse.status).toBe(403)
+  expect(writes).toBe(0)
+})
+
+test('rejects a configuration change that conflicts with an existing Work Item', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  let writes = 0
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async saveTeamConfiguration(_workspaceId, teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        writes += 1
+        return { configuration: { ...configuration, scopeId: teamId } }
+      },
+    }),
+  })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.customFields = [{
+    id: 'required-reviewer',
+    name: 'Required reviewer',
+    type: 'person',
+    sortOrder: 0,
+    required: true,
+  }]
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(configuration),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationInUse',
+  })
+  expect(writes).toBe(0)
+})
+
+test('rejects missing required custom fields before creating a Work Item', async () => {
+  const calls = configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.customFields = [{
+    id: 'effort',
+    name: 'Effort',
+    type: 'number',
+    sortOrder: 10,
+    required: true,
+    validation: { min: 1, max: 8 },
+  }]
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: 'Missing effort',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026/07/20',
+      priority: 'medium',
+      workflowStatusId: 'todo',
+      customFieldValues: {},
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    code: 'InvalidCustomFieldValue',
+    message: 'Custom field "effort" is required.',
+  })
+  expect(calls.issueCreates).toEqual([])
+})
+
+test('uses the configured initial workflow status when create omits legacy status', async () => {
+  const calls = configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workflow.initialStatusId = 'triage'
+  configuration.workflow.statuses.unshift({
+    id: 'triage',
+    name: 'Triage',
+    category: 'backlog',
+    sortOrder: 5,
+  })
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: 'Starts in triage',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026/07/20',
+      priority: 'medium',
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(calls.issueCreates).toContainEqual(expect.objectContaining({
+    statusCategory: 'backlog',
+    workflowStatusId: 'triage',
+  }))
+})
+
+test('rejects a disallowed configured workflow transition before updating a Work Item', async () => {
+  const calls = configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workflow.transitions = configuration.workflow.transitions.filter((transition) =>
+    !(transition.fromStatusId === 'in-progress' && transition.toStatusId === 'done')
+  )
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ workflowStatusId: 'done', expectedRevision: 1 }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'WorkflowTransitionDenied',
+    message: 'Transition from "in-progress" to "done" is not allowed.',
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('calls reciprocal relation mutations and preserves their stable conflict response', async () => {
+  configureFakeProjectClients(true)
+  const creates: Array<{ input: unknown; teamId: string; workspaceId: string }> = []
+  let deletes = 0
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async createRelation(workspaceId, teamId, input) {
+        creates.push({ workspaceId, teamId, input })
+        return {
+          relation: {
+            sourceWorkItemId: input.sourceWorkItemId,
+            targetWorkItemId: input.targetWorkItemId,
+            type: input.type,
+          },
+          reciprocalRelation: {
+            sourceWorkItemId: input.targetWorkItemId,
+            targetWorkItemId: input.sourceWorkItemId,
+            type: 'blockedBy',
+          },
+          graphRevision: input.expectedGraphRevision + 1,
+        }
+      },
+      async deleteRelation() {
+        deletes += 1
+        throw new WorkItemConfigurationError(
+          409,
+          'RelationGraphRevisionConflict',
+          'Relation graph changed. Reload and try again.',
+        )
+      },
+    }),
+  })
+
+  const createResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/relations',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: 'blocks',
+        targetWorkItemId: 'target-issue',
+        expectedGraphRevision: 4,
+      }),
+    },
+  )
+  const deleteResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/relations/target-issue/blocks',
+    {
+      method: 'DELETE',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ expectedGraphRevision: 4 }),
+    },
+  )
+
+  expect(createResponse.status).toBe(201)
+  expect(await createResponse.json()).toMatchObject({
+    relation: {
+      sourceWorkItemId: 'onboarding-friction',
+      targetWorkItemId: 'target-issue',
+      type: 'blocks',
+    },
+    reciprocalRelation: { type: 'blockedBy' },
+    graphRevision: 5,
+  })
+  expect(creates).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    teamId: 'core-team',
+    input: {
+      sourceWorkItemId: 'onboarding-friction',
+      targetWorkItemId: 'target-issue',
+      type: 'blocks',
+      expectedGraphRevision: 4,
+      sourceExpectedRevision: 1,
+      targetExpectedRevision: 1,
+      sourceAssignedProjectId: 'refero',
+      targetAssignedProjectId: 'refero',
+    },
+  }])
+  expect(deleteResponse.status).toBe(409)
+  expect(await deleteResponse.json()).toEqual({
+    code: 'RelationGraphRevisionConflict',
+    message: 'Relation graph changed. Reload and try again.',
+  })
+  expect(deletes).toBe(1)
+})
+
+test('reprojects both Work Item relation endpoints after relation creation and deletion', async () => {
+  const calls = configureFakeProjectClients(true)
+  let graphRevision = 4
+  let relations: Array<{
+    sourceWorkItemId: string
+    targetWorkItemId: string
+    type: 'blocks' | 'blockedBy'
+  }> = []
+  const projectedDocuments: Array<ReturnType<typeof createWorkspaceSearchDocument>> = []
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations(_workspaceId, _teamId, workItemId) {
+        return {
+          graphRevision,
+          relations: relations.filter((relation) => relation.sourceWorkItemId === workItemId),
+        }
+      },
+      async createRelation(_workspaceId, _teamId, input) {
+        const response = {
+          relation: {
+            sourceWorkItemId: input.sourceWorkItemId,
+            targetWorkItemId: input.targetWorkItemId,
+            type: 'blocks' as const,
+          },
+          reciprocalRelation: {
+            sourceWorkItemId: input.targetWorkItemId,
+            targetWorkItemId: input.sourceWorkItemId,
+            type: 'blockedBy' as const,
+          },
+          graphRevision: input.expectedGraphRevision + 1,
+        }
+        relations = [response.relation, response.reciprocalRelation]
+        graphRevision = response.graphRevision
+        return response
+      },
+      async deleteRelation(_workspaceId, _teamId, input) {
+        const response = {
+          relation: relations[0]!,
+          reciprocalRelation: relations[1]!,
+          graphRevision: input.expectedGraphRevision + 1,
+        }
+        relations = []
+        graphRevision = response.graphRevision
+        return response
+      },
+    }),
+    workspaceSearch: {
+      async upsertDocument(document) {
+        const projected = createWorkspaceSearchDocument(document)
+        projectedDocuments.push(projected)
+        return projected
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+
+  const createResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/relations',
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        type: 'blocks',
+        targetWorkItemId: 'target-issue',
+        expectedGraphRevision: 4,
+      }),
+    },
+  )
+  const deleteResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/relations/target-issue/blocks',
+    {
+      method: 'DELETE',
+      headers,
+      body: JSON.stringify({ expectedGraphRevision: 5 }),
+    },
+  )
+
+  expect([createResponse.status, deleteResponse.status]).toEqual([201, 200])
+  expect(projectedDocuments.slice(0, 2)).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      entityId: 'team/core-team/issue/onboarding-friction',
+      relationIds: ['blocks:target-issue'],
+    }),
+    expect.objectContaining({
+      entityId: 'team/core-team/issue/target-issue',
+      relationIds: ['blockedBy:onboarding-friction'],
+    }),
+  ]))
+  expect(projectedDocuments.slice(2)).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      entityId: 'team/core-team/issue/onboarding-friction',
+      relationIds: [],
+    }),
+    expect.objectContaining({
+      entityId: 'team/core-team/issue/target-issue',
+      relationIds: [],
+    }),
+  ]))
+  expect(calls.issueDetails).toHaveLength(8)
+  expect([2, 3, 6, 7].map((index) => calls.issueDetails[index]?.readOptions)).toEqual([
+    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, eventLimit: 0 },
+  ])
+})
+
+test('keeps a relation mutation successful when current relation projection reads fail', async () => {
+  configureFakeProjectClients(true)
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations() {
+        throw new Error('Relation graph unavailable')
+      },
+    }),
+    workspaceSearch: {
+      async upsertDocument(document) {
+        return createWorkspaceSearchDocument(document)
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  const originalConsoleError = console.error
+  let projectionErrors = 0
+  console.error = () => {
+    projectionErrors += 1
+  }
+  try {
+    const response = await app.request(
+      '/api/teams/core-team/issues/onboarding-friction/relations',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          type: 'blocks',
+          targetWorkItemId: 'target-issue',
+          expectedGraphRevision: 4,
+        }),
+      },
+    )
+
+    expect(response.status).toBe(201)
+    expect(projectionErrors).toBe(2)
+  } finally {
+    console.error = originalConsoleError
+  }
 })
 
 test('denies project tasks when the project is outside the user directory', async () => {
@@ -1393,7 +11234,7 @@ test('denies project tasks when the project is outside the user directory', asyn
   expect(calls.taskReads).toEqual([])
 })
 
-test('loads project tasks after project access is confirmed', async () => {
+test('loads only legacy project tasks after project access is confirmed', async () => {
   const calls = configureFakeProjectClients(true)
 
   const response = await app.request('/api/projects/refero/tasks', {
@@ -1405,29 +11246,21 @@ test('loads project tasks after project access is confirmed', async () => {
   expect(response.status).toBe(200)
   const body = await response.json()
   expect(body.projectId).toBe('refero')
-  expect(body.tasks.map((task: { id: string }) => task.id)).toEqual([
-    'onboarding-friction',
-    'wireframe',
-  ])
+  expect(body.tasks.map((task: { id: string }) => task.id)).toEqual(['wireframe'])
   expect(body.tasks[0]).toMatchObject({
-    schemaVersion: 1,
-    revision: 1,
-    teamId: 'core-team',
-    source: 'dynamodb',
-  })
-  expect(body.tasks[1]).toMatchObject({
-    schemaVersion: 1,
-    revision: 1,
-    teamId: 'core-team',
     source: 'legacy',
     titleKey: 'tasks.item.wireframe',
+    status: 'in-progress',
   })
+  expect(body.tasks[0]).not.toHaveProperty('workflowStatusId')
+  expect(body.tasks[0]).not.toHaveProperty('statusCategory')
   expect(calls.accessChecks).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
   expect(calls.taskReads).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
+  expect(calls.projectIssueReads).toEqual([])
 })
 
 test('lists Cognito users for project member assignment when the current user is project manager', async () => {
@@ -1547,11 +11380,8 @@ test('keeps project tasks available when Cognito assignee hydration fails', asyn
 
   expect(response.status).toBe(200)
   const body = await response.json()
-  expect(body.tasks.map((task: { id: string }) => task.id)).toEqual([
-    'onboarding-friction',
-    'wireframe',
-  ])
-  expect(body.tasks[1]).toMatchObject({
+  expect(body.tasks.map((task: { id: string }) => task.id)).toEqual(['wireframe'])
+  expect(body.tasks[0]).toMatchObject({
     id: 'wireframe',
     assigneeUserId: 'sato@example.com',
     source: 'legacy',
@@ -1864,14 +11694,38 @@ test('archives a team in the authenticated user scoped directory', async () => {
     archivedAt: '2026-06-06T00:00:00.000Z',
   })
   expect(calls.teamArchives).toEqual([
-    { directoryId: 'user#demo@example.com', teamId: 'core-team' },
+    { directoryId: 'user#demo@example.com', expectedPlanningRevision: 0, teamId: 'core-team' },
   ])
 })
 
-test('denies project task creation when the project role is viewer', async () => {
+test('rejects archiving a Team referenced by an active Planning entity', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await planningClient.create(
+    'user#demo@example.com',
+    createCyclePlanningInput('cycle-team-scope', 0),
+    { workItems: [] },
+  )
+  const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await app.request('/api/teams/core-team/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'PlanningTeamScopeInUse',
+    message:
+      'Move or archive active Planning entities and remove Work Item links before archiving this Team.',
+  })
+  expect(calls.teamArchives).toEqual([])
+})
+
+test('denies project-assigned Work Item creation when the project role is viewer', async () => {
   const calls = configureFakeProjectClients(true, { role: 'viewer' })
 
-  const response = await app.request('/api/projects/refero/tasks', {
+  const response = await app.request('/api/teams/core-team/issues', {
     method: 'POST',
     headers: {
       Authorization: 'Bearer test-token',
@@ -1879,19 +11733,20 @@ test('denies project task creation when the project role is viewer', async () =>
     },
     body: JSON.stringify({
       title: '新規タスク',
+      assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
       dueDate: '2026/06/20',
       priority: 'high',
-      status: 'todo',
+      workflowStatusId: 'todo',
     }),
   })
 
   expect(response.status).toBe(403)
   expect(await response.json()).toEqual({ message: 'Project access is denied.' })
   expect(calls.accessChecks).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+    { directoryId: 'user#demo@example.com', projectId: '*' },
   ])
-  expect(calls.taskCreates).toEqual([])
+  expect(calls.issueCreates).toEqual([])
 })
 
 test('denies project member reads when the project role is viewer', async () => {
@@ -1953,7 +11808,10 @@ test('updates a project member role when the current user is project manager', a
 })
 
 test('lets a system admin update project members without a project role', async () => {
-  const calls = configureFakeProjectClients(false, { role: undefined })
+  const calls = configureFakeProjectClients(false, {
+    role: undefined,
+    systemAdminMemberKeys: ['demo@example.com'],
+  })
 
   const response = await app.request('/api/projects/refero/members/viewer%40example.com', {
     method: 'PATCH',
@@ -2011,8 +11869,125 @@ test('archives a project under an authenticated team directory', async () => {
     archivedAt: '2026-06-06T00:00:00.000Z',
   })
   expect(calls.projectArchives).toEqual([
-    { directoryId: 'user#demo@example.com', teamId: 'core-team', projectId: 'refero' },
+    {
+      directoryId: 'user#demo@example.com',
+      expectedPlanningRevision: 0,
+      teamId: 'core-team',
+      projectId: 'refero',
+    },
   ])
+})
+
+test('does not block archive for a same-named Project scoped to another Team', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await planningClient.create(
+    'user#demo@example.com',
+    {
+      ...createCyclePlanningInput('cycle-other-team-project', 0),
+      teamId: 'other-team',
+      projectId: 'refero',
+    },
+    { workItems: [] },
+  )
+  const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({ planning: planningClient })
+
+  const projectResponse = await app.request('/api/teams/core-team/projects/refero/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const teamResponse = await app.request('/api/teams/core-team/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(projectResponse.status).toBe(200)
+  expect(teamResponse.status).toBe(200)
+  expect(calls.projectArchives).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      expectedPlanningRevision: 1,
+      teamId: 'core-team',
+      projectId: 'refero',
+    },
+  ])
+  expect(calls.teamArchives).toEqual([
+    { directoryId: 'user#demo@example.com', expectedPlanningRevision: 1, teamId: 'core-team' },
+  ])
+})
+
+test('rejects archiving a Project referenced by an active Planning entity', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await planningClient.create(
+    'user#demo@example.com',
+    createCyclePlanningInput('cycle-project-scope', 0),
+    { workItems: [] },
+  )
+  const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await app.request('/api/teams/core-team/projects/refero/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'PlanningProjectScopeInUse',
+    message:
+      'Move or archive active Planning entities and remove Work Item links before archiving this Project.',
+  })
+  expect(calls.projectArchives).toEqual([])
+})
+
+test('rejects archiving scopes referenced only by a stored Planning Work Item link', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  const workItemState = {
+    workItems: [{
+      id: 'linked-work-item',
+      revision: 1,
+      teamId: 'core-team',
+      title: 'Linked Work Item',
+      projectId: 'refero',
+      statusCategory: 'completed' as const,
+      dueDate: '2026-08-31',
+    }],
+  }
+  await planningClient.create(
+    'user#demo@example.com',
+    createCyclePlanningInput('cycle-link-scope', 0),
+    workItemState,
+  )
+  await planningClient.putWorkItemLink('user#demo@example.com', {
+    teamId: 'core-team',
+    workItemId: 'linked-work-item',
+    projectId: 'refero',
+    cycleId: 'cycle-link-scope',
+    goalIds: [],
+    expectedRevision: 1,
+  }, workItemState)
+  await planningClient.archive(
+    'user#demo@example.com',
+    'cycle-link-scope',
+    { expectedRevision: 2 },
+    workItemState,
+  )
+  const calls = configureFakeProjectClients(true)
+  configureApiClientsForTest({ planning: planningClient })
+
+  const teamResponse = await app.request('/api/teams/core-team/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const projectResponse = await app.request('/api/teams/core-team/projects/refero/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(teamResponse.status).toBe(409)
+  expect(projectResponse.status).toBe(409)
+  expect(calls.teamArchives).toEqual([])
+  expect(calls.projectArchives).toEqual([])
 })
 
 test('DynamoDB directory client validates and ignores workspace bootstrap rows for reads and writes', async () => {
@@ -2090,6 +12065,8 @@ test('DynamoDB directory client validates and ignores workspace bootstrap rows f
       directoryId: 'workspace#production',
       entryType: 'team',
       teamId: 'new-team',
+      webhookAuthorizationKey: 'WEBHOOK_ACL#RESOURCE#workspace#production',
+      webhookAuthorizationSortKey: 'TEAM#new-team',
     },
   })
 })
@@ -2167,6 +12144,9 @@ test('DynamoDB directory client creates duplicate named teams with a unique id s
       teamId: '新規チーム-2',
       teamSortOrder: 20,
       entryKey: '000020#000000#TEAM#新規チーム-2',
+      webhookAuthorizationKey:
+        'WEBHOOK_ACL#RESOURCE#user#demo@example.com',
+      webhookAuthorizationSortKey: 'TEAM#新規チーム-2',
     },
     ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
   })
@@ -2257,6 +12237,9 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
             projectId: '新規プロジェクト-2',
             projectSortOrder: 20,
             entryKey: '000010#000020#PROJECT#新規プロジェクト-2',
+            webhookAuthorizationKey:
+              'WEBHOOK_ACL#RESOURCE#user#demo@example.com',
+            webhookAuthorizationSortKey: 'PROJECT#新規プロジェクト-2',
           },
           ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
         },
@@ -2272,6 +12255,9 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
             memberKey: 'demo@example.com',
             email: 'demo@example.com',
             role: 'manager',
+            webhookAuthorizationKey:
+              'WEBHOOK_ACL#MEMBER#user#demo@example.com#demo@example.com',
+            webhookAuthorizationSortKey: 'PROJECT#新規プロジェクト-2',
           },
           ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
         },
@@ -2299,6 +12285,139 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
           },
         },
       },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#新規プロジェクト-2',
+            entryType: 'webhook-team-grant',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: '新規プロジェクト-2',
+            memberKey: 'demo@example.com',
+            sourceEntryKey:
+              'PROJECT_MEMBER#新規プロジェクト-2#demo@example.com',
+            teamSourceEntryKey: '000010#000000#TEAM#core-team',
+            projectSourceEntryKey:
+              '000010#000020#PROJECT#新規プロジェクト-2',
+            webhookAuthorizationKey:
+              'WEBHOOK_ACL#TEAM_MEMBER#user#demo@example.com#core-team#demo@example.com',
+            webhookAuthorizationSortKey: 'PROJECT#新規プロジェクト-2',
+          },
+        },
+      },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey:
+              'PROJECT#新規プロジェクト-2#MEMBER#demo@example.com',
+            entryType: 'webhook-team-grant-cleanup',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: '新規プロジェクト-2',
+            memberKey: 'demo@example.com',
+            grantDirectoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            grantEntryKey:
+              'TEAM#core-team#PROJECT#新規プロジェクト-2',
+          },
+        },
+      },
+    ],
+  })
+})
+
+test('DynamoDB directory client strongly replays a deterministic Project and keeps receipt completion atomic', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  let projectCommitted = false
+  let loseFirstResponse = true
+  const projectId = 'application_123'
+  const team = {
+    directoryId: 'workspace-1',
+    entryKey: '000010#000000#TEAM#core-team',
+    entryType: 'team',
+    teamId: 'core-team',
+    teamSortOrder: 10,
+    nameJa: 'コアチーム',
+    nameEn: 'Core Team',
+    expanded: true,
+  }
+  const project = {
+    directoryId: 'workspace-1',
+    entryKey: `000010#000010#PROJECT#${projectId}`,
+    entryType: 'project',
+    teamId: 'core-team',
+    teamSortOrder: 10,
+    projectId,
+    projectSortOrder: 10,
+    nameJa: '障害対応',
+    nameEn: 'Incident response',
+    tone: 'purple',
+  }
+  const completion = {
+    Update: {
+      TableName: 'AutomationTable',
+      Key: { scopeKey: 'workspace-1#automation', recordKey: 'TEMPLATE_APPLICATION#application_123' },
+      UpdateExpression: 'SET #status = :succeeded',
+    },
+  } satisfies NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      if ('KeyConditionExpression' in command.input) {
+        return { Items: projectCommitted ? [team, project] : [team] }
+      }
+      if (Array.isArray(command.input.TransactItems) && !projectCommitted) {
+        projectCommitted = true
+        if (loseFirstResponse) {
+          loseFirstResponse = false
+          throw Object.assign(new Error('Committed response was lost.'), { name: 'TimeoutError' })
+        }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+  )
+  const create = () => client.createProject(
+    'workspace-1',
+    'core-team',
+    {
+      idempotencyResourceId: projectId,
+      nameJa: '障害対応',
+      nameEn: 'Incident response',
+      tone: 'purple',
+    },
+    { userKey: 'demo@example.com', workspaceMemberVersion: 1 },
+    undefined,
+    [completion],
+  )
+
+  await expect(create()).rejects.toMatchObject({ status: 502, code: 'TimeoutError' })
+  await expect(create()).resolves.toEqual({
+    project: { id: projectId, name: '障害対応', tone: 'purple' },
+  })
+  const queryInputs = sentInputs.filter((input) => 'KeyConditionExpression' in input)
+  expect(queryInputs).toHaveLength(2)
+  expect(queryInputs.every((input) => input.ConsistentRead === true)).toBe(true)
+  expect(sentInputs[1]).toMatchObject({
+    TransactItems: expect.arrayContaining([completion]),
+  })
+  expect(sentInputs[3]).toMatchObject({
+    TransactItems: [
+      { ConditionCheck: { TableName: 'DirectoryTable' } },
+      completion,
     ],
   })
 })
@@ -2340,6 +12459,13 @@ test('DynamoDB directory client initializes a missing local table before creatin
               { AttributeName: 'directoryId', KeyType: 'HASH' },
               { AttributeName: 'entryKey', KeyType: 'RANGE' },
             ],
+            GlobalSecondaryIndexes: [{
+              IndexName: 'WebhookAuthorizationIndex',
+              KeySchema: [
+                { AttributeName: 'webhookAuthorizationKey', KeyType: 'HASH' },
+                { AttributeName: 'webhookAuthorizationSortKey', KeyType: 'RANGE' },
+              ],
+            }],
             TableStatus: 'ACTIVE',
           },
         }
@@ -2519,158 +12645,35 @@ test('DynamoDB task client fails fast when a local table exists with the wrong s
   expect(queryAttempts).toBe(1)
 })
 
-test('creates a project task after project access is confirmed', async () => {
+test('does not expose legacy project task mutation routes', async () => {
   const calls = configureFakeProjectClients(true)
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
 
-  const response = await app.request('/api/projects/refero/tasks', {
-    method: 'POST',
-    headers: {
-      Authorization: 'Bearer test-token',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      title: '新規タスク',
-      assigneeUserId: 'sato@example.com',
-      dueDate: '2026/06/20',
-      priority: 'high',
-      status: 'todo',
+  const [createResponse, updateResponse] = await Promise.all([
+    app.request('/api/projects/refero/tasks', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ title: '新規タスク' }),
     }),
-  })
-
-  expect(response.status).toBe(201)
-  expect(await response.json()).toEqual({
-    task: {
-      schemaVersion: 1,
-      revision: 1,
-      teamId: 'core-team',
-      source: 'dynamodb',
-      id: 'new-issue',
-      title: '新規タスク',
-      assigneeUserId: 'sato@example.com',
-      assigneeEmail: 'sato@example.com',
-      assigneeName: '佐藤 花子',
-      status: 'todo',
-      dueDate: '2026/06/20',
-      priority: 'medium',
-      createdAt: '2026-06-08T00:00:00.000Z',
-      updatedAt: '2026-06-08T00:00:00.000Z',
-    },
-  })
-  expect(calls.accessChecks).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-    { directoryId: 'user#demo@example.com', projectId: '*' },
-  ])
-  expect(calls.taskCreates).toEqual([])
-  expect(calls.issueCreates).toEqual([
-    expect.objectContaining({
-      directoryId: 'user#demo@example.com',
-      teamId: 'core-team',
-      title: '新規タスク',
+    app.request('/api/projects/refero/tasks/wireframe', {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ status: 'done' }),
     }),
   ])
-  expect(calls.userProfiles).toEqual(['sato@example.com', 'sato@example.com'])
-})
 
-test('rejects project task creation when the canonical owner Team is ambiguous', async () => {
-  const calls = configureFakeProjectClients(true, {
-    additionalTeams: [{
-      id: 'design-team',
-      name: 'デザインチーム',
-      projects: [{ id: 'refero', name: 'Refero', tone: 'purple' }],
-    }],
-  })
-
-  const response = await app.request('/api/projects/refero/tasks', {
-    method: 'POST',
-    headers: {
-      Authorization: 'Bearer test-token',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      title: '曖昧なタスク',
-      assigneeUserId: 'sato@example.com',
-      dueDate: '2026/06/20',
-      priority: 'high',
-      status: 'todo',
-    }),
-  })
-
-  expect(response.status).toBe(409)
-  expect(await response.json()).toEqual({
-    code: 'AmbiguousProjectOwnerTeam',
-    message: 'Project "refero" belongs to more than one active Team.',
-  })
+  expect(createResponse.status).toBe(404)
+  expect(updateResponse.status).toBe(404)
+  expect(calls.accessChecks).toEqual([])
   expect(calls.issueCreates).toEqual([])
-  expect(calls.taskCreates).toEqual([])
-})
-
-test('rejects legacy project task status updates through the compatibility endpoint', async () => {
-  const calls = configureFakeProjectClients(true)
-
-  const response = await app.request('/api/projects/refero/tasks/wireframe', {
-    method: 'PATCH',
-    headers: {
-      Authorization: 'Bearer test-token',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      status: 'done',
-      expectedRevision: 1,
-    }),
-  })
-
-  expect(response.status).toBe(409)
-  expect(await response.json()).toEqual({
-    code: 'LegacyProjectTaskReadOnly',
-    message: 'Legacy project tasks are read-only.',
-  })
-  expect(calls.accessChecks).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-  ])
-  expect(calls.taskReads).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-  ])
-  expect(calls.projectIssueReads).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-  ])
-  expect(calls.taskStatusUpdates).toEqual([])
-})
-
-test('updates a canonical Work Item through the project task compatibility endpoint', async () => {
-  const calls = configureFakeProjectClients(true)
-
-  const response = await app.request('/api/projects/refero/tasks/onboarding-friction', {
-    method: 'PATCH',
-    headers: {
-      Authorization: 'Bearer test-token',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ status: 'done', expectedRevision: 1 }),
-  })
-
-  expect(response.status).toBe(200)
-  expect(await response.json()).toMatchObject({
-    task: {
-      schemaVersion: 1,
-      revision: 2,
-      id: 'onboarding-friction',
-      teamId: 'core-team',
-      source: 'dynamodb',
-      status: 'done',
-    },
-  })
+  expect(calls.issueUpdates).toEqual([])
   expect(calls.taskReads).toEqual([])
-  expect(calls.taskStatusUpdates).toEqual([])
-  expect(calls.issueUpdates).toEqual([
-    expect.objectContaining({
-      directoryId: 'user#demo@example.com',
-      issueId: 'onboarding-friction',
-      teamId: 'core-team',
-    }),
-  ])
 })
 
-test('loads team-owned issues with legacy project tasks after team access is confirmed', async () => {
+test('loads only canonical team-owned Work Items after team access is confirmed', async () => {
   const calls = configureFakeProjectClients(true, { taskAssigneeUserId: 'sato@example.com' })
 
   const response = await app.request('/api/teams/core-team/issues', {
@@ -2682,29 +12685,22 @@ test('loads team-owned issues with legacy project tasks after team access is con
   expect(response.status).toBe(200)
   const body = await response.json()
   expect(body.teamId).toBe('core-team')
-  expect(body.issues).toHaveLength(2)
-  expect(body.issues[0]).toMatchObject({
-    id: 'onboarding-friction',
-    teamId: 'core-team',
-    assignedProjectId: 'refero',
-    title: '初回オンボーディングの離脱要因を減らす',
-    assigneeEmail: 'sato@example.com',
-  })
-  expect(body.issues[1]).toMatchObject({
-    id: 'wireframe',
-    teamId: 'core-team',
-    assignedProjectId: 'refero',
-    titleKey: 'tasks.item.wireframe',
-  })
+  expect(body.issues).toEqual([
+    expect.objectContaining({
+      id: 'onboarding-friction',
+      teamId: 'core-team',
+      assignedProjectId: 'refero',
+      title: '初回オンボーディングの離脱要因を減らす',
+      assigneeEmail: 'sato@example.com',
+    }),
+  ])
   expect(calls.issueReads).toEqual([
     { directoryId: 'user#demo@example.com', teamId: 'core-team' },
   ])
-  expect(calls.taskReads).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-  ])
+  expect(calls.taskReads).toEqual([])
 })
 
-test('loads all accessible canonical and legacy Work Items including unassigned items', async () => {
+test('loads all accessible canonical Work Items including unassigned items', async () => {
   const calls = configureFakeProjectClients(true, {
     taskAssigneeUserId: 'sato@example.com',
     unassignedIssue: true,
@@ -2718,7 +12714,6 @@ test('loads all accessible canonical and legacy Work Items including unassigned 
   const body = await response.json()
   expect(body.workItems.map((workItem: { id: string }) => workItem.id)).toEqual([
     'onboarding-friction',
-    'wireframe',
   ])
   expect(body.workItems[0]).toMatchObject({
     schemaVersion: 1,
@@ -2727,27 +12722,15 @@ test('loads all accessible canonical and legacy Work Items including unassigned 
     source: 'dynamodb',
   })
   expect(body.workItems[0].assignedProjectId).toBeUndefined()
-  expect(body.workItems[1]).toMatchObject({
-    schemaVersion: 1,
-    revision: 1,
-    assignedProjectId: 'refero',
-    source: 'legacy',
-  })
   expect(calls.issueReads).toEqual([
     { directoryId: 'user#demo@example.com', limit: 1001, teamId: 'core-team' },
   ])
-  expect(calls.taskReads).toEqual([
-    { directoryId: 'user#demo@example.com', limit: 1001, projectId: 'refero' },
-  ])
-  expect(calls.projectIssueReads).toEqual([
-    { directoryId: 'user#demo@example.com', limit: 1001, projectId: 'refero' },
-  ])
-  expect(calls.migrationSourceBatchReads).toEqual([])
+  expect(calls.taskReads).toEqual([])
+  expect(calls.projectIssueReads).toEqual([])
 })
 
 test('rejects an oversized Work Item aggregate instead of returning a silent partial response', async () => {
   const calls = configureFakeProjectClients(true, {
-    legacyTaskIds: [],
     teamIssueCount: 201,
   })
 
@@ -2779,6 +12762,7 @@ test('rejects Work Item aggregate Team fan-out beyond the hard cap before item r
   }))
   const calls = configureFakeProjectClients(true, {
     additionalTeams,
+    directoryId: 'workspace-export',
     projectAccesses: [
       { projectId: 'refero', role: 'manager' },
       ...additionalTeams.flatMap((team) =>
@@ -2798,35 +12782,104 @@ test('rejects Work Item aggregate Team fan-out beyond the hard cap before item r
   expect(calls.projectIssueReads).toEqual([])
 })
 
-test('rejects Work Item aggregate legacy project fan-out beyond the hard cap', async () => {
-  const teamProjects = Array.from({ length: 101 }, (_, projectIndex) => ({
-    id: `project-${projectIndex}`,
-    name: `Project ${projectIndex}`,
-    tone: 'blue' as const,
+test('allows current system administrators to select an active Webhook Team', async () => {
+  const calls = configureFakeProjectClients(false, {
+    systemAdminMemberKeys: ['demo@example.com'],
+    workspaceRole: 'owner',
+  })
+  const service = createCanonicalPublicWorkItemService()
+
+  await expect(service.authorizeWebhookTeams({
+    workspaceId: 'user#demo@example.com',
+    userId: 'demo@example.com',
+    capabilities: {
+      canManageCredentials: true,
+      canManageWebhooks: true,
+      canManageIntegrations: true,
+      canImport: true,
+      canExport: true,
+    },
+  }, ['core-team'])).resolves.toBeUndefined()
+  expect(calls.accessChecks).toContainEqual({
+    directoryId: 'user#demo@example.com',
+    projectId: '*',
+  })
+  expect(calls.directoryReads).toContainEqual({
+    directoryId: 'user#demo@example.com',
+    locale: 'ja',
+    consistentRead: true,
+  })
+})
+
+test('pages all accessible Work Items beyond aggregate Team and item hard caps', async () => {
+  const additionalTeams = Array.from({ length: 20 }, (_, teamIndex) => ({
+    id: `export-team-${teamIndex}`,
+    name: `Export Team ${teamIndex}`,
+    projects: [{
+      id: `export-project-${teamIndex}`,
+      name: `Export Project ${teamIndex}`,
+      tone: 'blue' as const,
+    }],
   }))
   const calls = configureFakeProjectClients(true, {
-    projectAccesses: teamProjects.map((project) => ({
-      projectId: project.id,
-      role: 'manager' as const,
-    })),
-    teamProjects,
+    additionalTeams,
+    projectAccesses: [
+      { projectId: 'refero', role: 'manager' },
+      ...additionalTeams.flatMap((team) =>
+        team.projects.map((project) => ({
+          projectId: project.id,
+          role: 'manager' as const,
+        }))
+      ),
+    ],
+    teamIssueCount: 11,
+    unassignedIssue: true,
+  })
+  configureApiClientsForTest({
+    developerPlatform: {
+      async consumeRateLimit() {
+        return {
+          allowed: true,
+          limit: 120,
+          remaining: 119,
+          resetAt: '2026-07-18T00:01:00.000Z',
+        }
+      },
+    } as never,
   })
 
-  const response = await app.request('/api/work-items', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
+  const workItems: Array<{ id: string; teamId: string }> = []
+  let cursor: string | undefined
+  let pageCount = 0
+  do {
+    const query = new URLSearchParams({ format: 'json', limit: '50' })
+    if (cursor) query.set('cursor', cursor)
+    const response = await app.request(`/api/developer/exports?${query}`, {
+      headers: { Authorization: 'Bearer test-token' },
+    })
+    expect(response.status).toBe(200)
+    const body = await response.json() as {
+      items: Array<{ id: string; teamId: string }>
+      hasMore: boolean
+      nextCursor?: string
+    }
+    workItems.push(...body.items)
+    cursor = body.nextCursor
+    expect(body.hasMore).toBe(cursor !== undefined)
+    pageCount += 1
+  } while (cursor)
 
-  expect(response.status).toBe(413)
-  expect(await response.json()).toMatchObject({ code: 'WorkItemListLimitExceeded' })
+  expect(workItems).toHaveLength(231)
+  expect(new Set(workItems.map((workItem) => workItem.teamId))).toHaveLength(21)
+  expect(pageCount).toBe(21)
+  expect(calls.publicIssuePageReads).toHaveLength(21)
+  expect(calls.publicIssuePageReads.every((read) => read.limit === 50)).toBe(true)
   expect(calls.issueReads).toEqual([])
-  expect(calls.taskReads).toEqual([])
-  expect(calls.projectIssueReads).toEqual([])
 })
 
 test('filters canonical Work Items for authorization before enforcing the response limit', async () => {
   const calls = configureFakeProjectClients(true, {
     inaccessibleTeamIssueCount: 200,
-    legacyTaskIds: [],
     teamIssueCount: 201,
   })
 
@@ -2847,7 +12900,6 @@ test('filters canonical Work Items for authorization before enforcing the respon
 test('rejects a canonical partition that exceeds the bounded Work Item scan budget', async () => {
   const calls = configureFakeProjectClients(true, {
     inaccessibleTeamIssueCount: 1001,
-    legacyTaskIds: [],
     teamIssueCount: 1001,
   })
 
@@ -2864,73 +12916,7 @@ test('rejects a canonical partition that exceeds the bounded Work Item scan budg
   expect(calls.projectIssueReads).toEqual([])
 })
 
-test('deduplicates bounded legacy candidates before enforcing the response limit', async () => {
-  const legacyTaskIds = Array.from({ length: 200 }, (_, index) => `legacy-${index}`)
-  configureFakeProjectClients(true, {
-    canonicalProjectIssueIds: legacyTaskIds.slice(0, 199),
-    legacyTaskIds,
-  })
-
-  const response = await app.request('/api/work-items', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.workItems.map((workItem: { id: string }) => workItem.id)).toEqual([
-    'onboarding-friction',
-    'legacy-199',
-  ])
-})
-
-test('checks canonical counterparts beyond the response limit before projecting legacy rows', async () => {
-  const canonicalProjectIssueIds = [
-    ...Array.from({ length: 220 }, (_, index) => `canonical-${index}`),
-    'late-counterpart',
-  ]
-  configureFakeProjectClients(true, {
-    canonicalProjectIssueIds,
-    legacyTaskIds: ['late-counterpart', 'unmigrated'],
-  })
-
-  const response = await app.request('/api/work-items', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.workItems.map((workItem: { id: string }) => workItem.id)).toEqual([
-    'onboarding-friction',
-    'unmigrated',
-  ])
-})
-
-test('suppresses a shared project legacy projection after migration to another owner Team', async () => {
-  configureFakeProjectClients(true, {
-    additionalTeams: [{
-      id: 'design-team',
-      name: 'デザインチーム',
-      projects: [{ id: 'refero', name: 'Refero', tone: 'purple' }],
-    }],
-    migratedLegacyOwnerTeamId: 'design-team',
-  })
-
-  const response = await app.request('/api/work-items', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.workItems.filter((workItem: { id: string }) => workItem.id === 'wireframe')).toEqual([
-    expect.objectContaining({
-      id: 'wireframe',
-      teamId: 'design-team',
-      source: 'dynamodb',
-    }),
-  ])
-})
-
-test('does not assign shared-project legacy rows to an arbitrary Team in compatibility reads', async () => {
+test('keeps shared-project legacy rows isolated to the read-only task adapter', async () => {
   const calls = configureFakeProjectClients(true, {
     additionalTeams: [{
       id: 'design-team',
@@ -2951,264 +12937,16 @@ test('does not assign shared-project legacy rows to an arbitrary Team in compati
   expect(detailResponse.status).toBe(404)
   expect(aggregateResponse.status).toBe(200)
   expect((await projectResponse.json()).tasks).toEqual([
-    expect.objectContaining({ id: 'onboarding-friction', source: 'dynamodb' }),
+    expect.objectContaining({ id: 'wireframe', source: 'legacy' }),
   ])
   expect((await teamResponse.json()).issues).toEqual([
     expect.objectContaining({ id: 'onboarding-friction', source: 'dynamodb' }),
   ])
   expect((await aggregateResponse.json()).workItems)
     .not.toContainEqual(expect.objectContaining({ id: 'wireframe' }))
-  expect(calls.taskReads).toEqual([])
-  expect(calls.migrationSourceBatchReads).toEqual([])
-})
-
-test('keeps a migrated legacy source suppressed after reassignment to an inaccessible project', async () => {
-  const calls = configureFakeProjectClients(true, {
-    additionalTeams: [{
-      id: 'design-team',
-      name: 'デザインチーム',
-      projects: [
-        { id: 'refero', name: 'Refero', tone: 'purple' },
-        { id: 'private-project', name: 'Private', tone: 'purple' },
-      ],
-    }],
-    migratedLegacyAssignedProjectId: 'private-project',
-    migratedLegacyOwnerTeamId: 'design-team',
-    migratedLegacySourceProjectId: 'refero',
-    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
-  })
-
-  const response = await app.request('/api/work-items', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.workItems.filter((workItem: { id: string }) => workItem.id === 'wireframe'))
-    .toEqual([])
-  expect(calls.issueReads).toEqual([
-    { directoryId: 'user#demo@example.com', limit: 1001, teamId: 'core-team' },
-    { directoryId: 'user#demo@example.com', limit: 1001, teamId: 'design-team' },
-  ])
-  expect(calls.projectIssueReads).toEqual([])
-  expect(calls.migrationSourceBatchReads).toEqual([])
-})
-
-test('does not suppress a legacy projection for a metadata-less same-Team canonical row', async () => {
-  const calls = configureFakeProjectClients(true, {
-    migratedLegacyAssignedProjectId: 'private-project',
-    migratedLegacyHasSourceMetadata: false,
-    migratedLegacyOwnerTeamId: 'core-team',
-    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
-    teamProjects: [
-      { id: 'refero', name: 'Refero', tone: 'blue' },
-      { id: 'private-project', name: 'Private', tone: 'purple' },
-    ],
-  })
-
-  const response = await app.request('/api/work-items', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.workItems.filter((workItem: { id: string }) => workItem.id === 'wireframe'))
-    .toEqual([
-      expect.objectContaining({
-        id: 'wireframe',
-        source: 'legacy',
-        teamId: 'core-team',
-      }),
-    ])
-  expect(calls.migrationSourceBatchReads).toEqual([])
-})
-
-test('keeps an accessible metadata-less canonical row ahead of its legacy projection', async () => {
-  const calls = configureFakeProjectClients(true, {
-    migratedLegacyHasSourceMetadata: false,
-    migratedLegacyOwnerTeamId: 'core-team',
-    migratedLegacyUnassigned: true,
-    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
-  })
-
-  const response = await app.request('/api/work-items', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.workItems.filter((workItem: { id: string }) => workItem.id === 'wireframe'))
-    .toEqual([
-      expect.objectContaining({
-        id: 'wireframe',
-        source: 'dynamodb',
-        teamId: 'core-team',
-      }),
-    ])
-  expect(calls.migrationSourceBatchReads).toEqual([])
-})
-
-test('does not let a project A migration source suppress a project B legacy task with the same ID', async () => {
-  const calls = configureFakeProjectClients(true, {
-    legacyTaskIds: ['wireframe'],
-    migratedLegacyAssignedProjectId: 'private-project',
-    migratedLegacyOwnerTeamId: 'core-team',
-    migratedLegacySourceProjectId: 'project-a',
-    projectAccesses: [{ projectId: 'project-b', role: 'manager' }],
-    teamProjects: [
-      { id: 'project-a', name: 'Project A', tone: 'blue' },
-      { id: 'project-b', name: 'Project B', tone: 'green' },
-      { id: 'private-project', name: 'Private', tone: 'purple' },
-    ],
-  })
-
-  const response = await app.request('/api/projects/project-b/tasks', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.tasks.filter((task: { id: string }) => task.id === 'wireframe')).toEqual([
-    expect.objectContaining({ id: 'wireframe', source: 'legacy' }),
-  ])
-  expect(calls.migrationSourceBatchReads).toEqual([{
-    directoryId: 'user#demo@example.com',
-    keys: [{ issueId: 'wireframe', teamId: 'core-team' }],
-  }])
-})
-
-test('maps an incomplete migration BatchGet lookup to service unavailable', async () => {
-  configureFakeProjectClients(true)
-  const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      if ('RequestItems' in command.input) {
-        return { UnprocessedKeys: command.input.RequestItems }
-      }
-
-      return { Items: [] }
-    },
-  } as unknown as DynamoDBDocumentClient
-  configureApiClientsForTest({
-    teamIssues: new DynamoDbTeamIssuesClient(
-      'WorkItemsTable',
-      'IssueEventsTable',
-      documentClient,
-      {} as DynamoDBClient,
-      false,
-      undefined,
-      async () => {},
-    ) as never,
-  })
-
-  const response = await app.request('/api/projects/refero/tasks', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(503)
-  expect(await response.json()).toEqual({
-    code: 'TeamIssueMigrationLookupIncomplete',
-    message: 'Work Item migration identity lookup could not process every key.',
-  })
-})
-
-test('suppresses reassigned migrations in project, Team, and detail compatibility reads', async () => {
-  const calls = configureFakeProjectClients(true, {
-    migratedLegacyAssignedProjectId: 'private-project',
-    migratedLegacyOwnerTeamId: 'core-team',
-    migratedLegacySourceProjectId: 'refero',
-    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
-    teamProjects: [
-      { id: 'refero', name: 'Refero', tone: 'blue' },
-      { id: 'private-project', name: 'Private', tone: 'purple' },
-    ],
-  })
-  const headers = { Authorization: 'Bearer test-token' }
-
-  const projectResponse = await app.request('/api/projects/refero/tasks', { headers })
-  const teamResponse = await app.request('/api/teams/core-team/issues', { headers })
-  const detailResponse = await app.request('/api/teams/core-team/issues/wireframe', { headers })
-
-  expect(projectResponse.status).toBe(200)
-  expect(teamResponse.status).toBe(200)
-  expect(detailResponse.status).toBe(404)
-  const projectBody = await projectResponse.json()
-  const teamBody = await teamResponse.json()
-  expect(projectBody.tasks.some((task: { id: string }) => task.id === 'wireframe')).toBe(false)
-  expect(teamBody.issues.some((issue: { id: string }) => issue.id === 'wireframe')).toBe(false)
-  expect(calls.migrationSourceBatchReads).toHaveLength(3)
-  expect(calls.migrationSourceBatchReads).toContainEqual({
-    directoryId: 'user#demo@example.com',
-    keys: [{ issueId: 'wireframe', teamId: 'core-team' }],
-  })
-})
-
-test('loads legacy project task rows as team issue detail fallback', async () => {
-  const calls = configureFakeProjectClients(true, { taskAssigneeUserId: 'sato@example.com' })
-
-  const response = await app.request('/api/teams/core-team/issues/wireframe', {
-    headers: {
-      Authorization: 'Bearer test-token',
-    },
-  })
-
-  expect(response.status).toBe(200)
-  expect(await response.json()).toMatchObject({
-    issue: {
-      id: 'wireframe',
-      teamId: 'core-team',
-      assignedProjectId: 'refero',
-      titleKey: 'tasks.item.wireframe',
-      assigneeUserId: 'sato@example.com',
-      assigneeEmail: 'sato@example.com',
-      status: 'in-progress',
-      dueDate: '2026/06/03',
-      priority: 'high',
-    },
-    comments: [],
-    activity: [],
-  })
-  expect(calls.issueDetails).toEqual([
-    {
-      directoryId: 'user#demo@example.com',
-      teamId: 'core-team',
-      issueId: 'wireframe',
-      readOptions: { consistentIssueRead: true },
-    },
-  ])
   expect(calls.taskReads).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
-})
-
-test('rejects legacy project task updates through the team Work Item endpoint', async () => {
-  const calls = configureFakeProjectClients(true, { taskAssigneeUserId: 'sato@example.com' })
-
-  const response = await app.request('/api/teams/core-team/issues/wireframe', {
-    method: 'PATCH',
-    headers: {
-      Authorization: 'Bearer test-token',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ status: 'done', expectedRevision: 1 }),
-  })
-
-  expect(response.status).toBe(409)
-  expect(await response.json()).toEqual({
-    code: 'LegacyProjectTaskReadOnly',
-    message: 'Legacy project tasks are read-only.',
-  })
-  expect(calls.issueDetails).toEqual([
-    {
-      directoryId: 'user#demo@example.com',
-      teamId: 'core-team',
-      issueId: 'wireframe',
-      readOptions: { consistentIssueRead: true, eventLimit: 0 },
-    },
-  ])
-  expect(calls.taskReads).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-  ])
-  expect(calls.issueUpdates).toEqual([])
 })
 
 test('creates a team-owned issue after team access is confirmed', async () => {
@@ -3227,7 +12965,7 @@ test('creates a team-owned issue after team access is confirmed', async () => {
       assigneeUserId: 'sato@example.com',
       dueDate: '2026/06/20',
       priority: 'medium',
-      status: 'todo',
+      workflowStatusId: 'todo',
     }),
   })
 
@@ -3242,9 +12980,14 @@ test('creates a team-owned issue after team access is confirmed', async () => {
       title: '新規 Issue',
       description: 'Issue の説明',
       assigneeUserId: 'sato@example.com',
+      creatorMemberKey: 'demo@example.com',
       assigneeEmail: 'sato@example.com',
       assigneeName: '佐藤 花子',
-      status: 'todo',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      relationIds: [],
       dueDate: '2026/06/20',
       priority: 'medium',
       createdAt: '2026-06-08T00:00:00.000Z',
@@ -3257,9 +13000,10 @@ test('creates a team-owned issue after team access is confirmed', async () => {
       actorUserId: 'demo@example.com',
       assignedProjectId: 'refero',
       directoryId: 'user#demo@example.com',
-      reservedIssueIds: ['wireframe'],
+      statusCategory: 'unstarted',
       teamId: 'core-team',
       title: '新規 Issue',
+      workflowStatusId: 'todo',
     },
   ])
 })
@@ -3334,7 +13078,7 @@ test('loads team issue detail and creates comments after team access is confirme
   const collaborationCreates: Parameters<CollaborationClient['createComment']>[0][] = []
   const collaborationComments: Awaited<ReturnType<CollaborationClient['createComment']>>[] = []
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread() {
         return {
           comments: collaborationComments,
@@ -3364,7 +13108,7 @@ test('loads team issue detail and creates comments after team access is confirme
         collaborationComments.push(comment)
         return comment
       },
-    } as CollaborationClient,
+    }),
   })
 
   const detailResponse = await app.request('/api/teams/core-team/issues/onboarding-friction', {
@@ -3455,11 +13199,158 @@ test('loads team issue detail and creates comments after team access is confirme
   })
 })
 
+test('omits relations whose target Project is outside the viewer access scope', async () => {
+  const calls = configureFakeProjectClients(true, {
+    detailAssignedProjectIds: { 'onboarding-friction': 'private-project' },
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+  })
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations() {
+        return {
+          graphRevision: 2,
+          relations: [{
+            sourceWorkItemId: 'work-item-1',
+            targetWorkItemId: 'onboarding-friction',
+            type: 'related',
+            createdAt: '2026-07-14T00:00:00.000Z',
+          }, {
+            sourceWorkItemId: 'work-item-1',
+            targetWorkItemId: 'onboarding-friction',
+            type: 'blocks',
+            createdAt: '2026-07-14T00:01:00.000Z',
+          }],
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/work-item-1', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    relations: [],
+    relationGraphRevision: 2,
+  })
+  expect(calls.issueReads).toEqual([])
+  expect(calls.issueDetails).toEqual([
+    {
+      directoryId: 'user#demo@example.com',
+      teamId: 'core-team',
+      issueId: 'work-item-1',
+      readOptions: { consistentIssueRead: true },
+    },
+    {
+      directoryId: 'user#demo@example.com',
+      teamId: 'core-team',
+      issueId: 'onboarding-friction',
+      readOptions: { consistentIssueRead: true, eventLimit: 0 },
+    },
+  ])
+})
+
+test('loads deduplicated relation targets with bounded concurrency and preserves relation order', async () => {
+  const targetWorkItemIds = Array.from({ length: 12 }, (_, index) => `target-${index}`)
+  const relations = [
+    ...targetWorkItemIds.map((targetWorkItemId, index) => ({
+      sourceWorkItemId: 'source-work-item',
+      targetWorkItemId,
+      type: 'related' as const,
+      createdAt: `2026-07-14T00:${String(index).padStart(2, '0')}:00.000Z`,
+    })),
+    {
+      sourceWorkItemId: 'source-work-item',
+      targetWorkItemId: targetWorkItemIds[0] as string,
+      type: 'blocks' as const,
+      createdAt: '2026-07-14T01:00:00.000Z',
+    },
+  ]
+  let activeTargetReads = 0
+  let maximumActiveTargetReads = 0
+  const calls = configureFakeProjectClients(true, {
+    async detailReadHook(issueId) {
+      if (!issueId.startsWith('target-')) return
+      activeTargetReads += 1
+      maximumActiveTargetReads = Math.max(maximumActiveTargetReads, activeTargetReads)
+      await Promise.resolve()
+      activeTargetReads -= 1
+    },
+  })
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations() {
+        return { graphRevision: 4, relations }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/source-work-item', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const body = await response.json() as { relations: Array<{ targetWorkItemId: string }> }
+
+  expect(response.status).toBe(200)
+  expect(maximumActiveTargetReads).toBe(8)
+  expect(calls.issueReads).toEqual([])
+  expect(
+    calls.issueDetails
+      .filter(({ issueId }) => issueId.startsWith('target-'))
+      .map(({ issueId }) => issueId),
+  ).toEqual(targetWorkItemIds)
+  expect(body.relations.map(({ targetWorkItemId }) => targetWorkItemId)).toEqual(
+    relations.map(({ targetWorkItemId }) => targetWorkItemId),
+  )
+})
+
+test('fails closed when a persisted relation target Work Item is missing', async () => {
+  const calls = configureFakeProjectClients(true, {
+    detailMissingIssueIds: ['missing-target'],
+  })
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations() {
+        return {
+          graphRevision: 3,
+          relations: [{
+            sourceWorkItemId: 'work-item-1',
+            targetWorkItemId: 'missing-target',
+            type: 'related',
+            createdAt: '2026-07-14T00:00:00.000Z',
+          }],
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/work-item-1', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toEqual({
+    code: 'WorkItemRelationInconsistent',
+    message: 'A relation target Work Item is missing.',
+  })
+  expect(calls.issueReads).toEqual([])
+  expect(calls.issueDetails.map(({ issueId, readOptions }) => ({ issueId, readOptions }))).toEqual([
+    {
+      issueId: 'work-item-1',
+      readOptions: { consistentIssueRead: true },
+    },
+    {
+      issueId: 'missing-target',
+      readOptions: { consistentIssueRead: true, eventLimit: 0 },
+    },
+  ])
+})
+
 test('returns persisted collaboration comments together with inert legacy comments and reply cursors', async () => {
   const calls = configureFakeProjectClients(true)
   const threadInputs: Parameters<CollaborationClient['getThread']>[0][] = []
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread(input) {
         threadInputs.push(input)
         const pageBase = {
@@ -3506,7 +13397,7 @@ test('returns persisted collaboration comments together with inert legacy commen
           }],
         }
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request('/api/teams/core-team/issues/onboarding-friction/collaboration', {
@@ -3552,7 +13443,7 @@ test('keeps a departed author in history while blocking deactivated member mutat
     inactiveWorkspaceMemberKeys: ['departed@example.com'],
   })
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread(input) {
         return {
           comments: input.rootCommentId
@@ -3591,7 +13482,7 @@ test('keeps a departed author in history while blocking deactivated member mutat
           reactions: [],
         }
       },
-    } as CollaborationClient,
+    }),
   })
 
   const historyResponse = await app.request(
@@ -3609,12 +13500,12 @@ test('keeps a departed author in history while blocking deactivated member mutat
   configureFakeProjectClients(true, { workspaceStatus: 'deactivated' })
   let mutationCalls = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async updateComment() {
         mutationCalls += 1
         throw new Error('A deactivated member must not reach the collaboration store.')
       },
-    } as CollaborationClient,
+    }),
   })
   const mutationResponse = await app.request(
     '/api/teams/core-team/issues/onboarding-friction/comments/departed-comment',
@@ -3647,7 +13538,7 @@ test('marks roots and replies in a resolved thread as non-replyable', async () =
     reactions: [],
   }
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread(input) {
         return {
           comments: input.rootCommentId
@@ -3669,7 +13560,7 @@ test('marks roots and replies in a resolved thread as non-replyable', async () =
           ...(input.rootCommentId ? { threadResolved: true } : {}),
         }
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request(
@@ -3690,12 +13581,12 @@ test('denies collaboration reads without Work Item viewer access', async () => {
   configureFakeProjectClients(false)
   let reads = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread() {
         reads += 1
         throw new Error('Collaboration store must not be called.')
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request('/api/teams/core-team/issues/onboarding-friction/collaboration', {
@@ -3710,12 +13601,12 @@ test('keeps guest members read-only for collaboration mutations', async () => {
   configureFakeProjectClients(true, { workspaceRole: 'guest' })
   let writes = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async createComment() {
         writes += 1
         throw new Error('Collaboration store must not be called.')
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
@@ -3735,12 +13626,12 @@ test('returns a client error when a comment mentions an inactive Workspace membe
   configureFakeProjectClients(true, { inactiveWorkspaceMemberKeys: ['inactive@example.com'] })
   let writes = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async createComment() {
         writes += 1
         throw new Error('Collaboration store must not be called.')
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
@@ -3771,7 +13662,7 @@ test('allows active system administrators to be mentioned without project member
     })
     const writes: Parameters<CollaborationClient['createComment']>[0][] = []
     configureApiClientsForTest({
-      collaboration: {
+      collaboration: createCollaborationStub({
         async createComment(input) {
           writes.push(input)
           return {
@@ -3786,7 +13677,7 @@ test('allows active system administrators to be mentioned without project member
             reactions: [],
           }
         },
-      } as CollaborationClient,
+      }),
     })
 
     const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
@@ -3811,7 +13702,7 @@ test('allows a Workspace owner with viewer access to moderate a comment', async 
   configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'owner' })
   const deletes: Parameters<CollaborationClient['deleteComment']>[0][] = []
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async deleteComment(input) {
         deletes.push(input)
         return {
@@ -3827,7 +13718,7 @@ test('allows a Workspace owner with viewer access to moderate a comment', async 
           reactions: [],
         }
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request(
@@ -3851,7 +13742,7 @@ test('allows an assigned project manager to moderate another member comment', as
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
   const deletes: Parameters<CollaborationClient['deleteComment']>[0][] = []
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async deleteComment(input) {
         deletes.push(input)
         return {
@@ -3867,7 +13758,7 @@ test('allows an assigned project manager to moderate another member comment', as
           reactions: [],
         }
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request(
@@ -3890,12 +13781,12 @@ test('denies a project viewer from deleting another member comment', async () =>
   configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
   let deletes = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async deleteComment() {
         deletes += 1
         throw new CollaborationError(403, 'CommentDeleteDenied', 'Comment delete permission is required.')
       },
-    } as CollaborationClient,
+    }),
   })
 
   const response = await app.request(
@@ -3926,7 +13817,7 @@ test('reads and changes project watcher state through the project scope', async 
     watcherCount: 3,
   }
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getWatcherState(input) {
         reads.push(input)
         return watch
@@ -3935,7 +13826,7 @@ test('reads and changes project watcher state through the project scope', async 
         writes.push(input)
         return watch
       },
-    } as CollaborationClient,
+    }),
   })
 
   const readResponse = await app.request('/api/projects/refero/watch', {
@@ -3996,7 +13887,8 @@ test('issues a one-time realtime ticket only after Work Item viewer access is co
     websocketUrl: 'wss://realtime.example.com/dev',
     expiresAt: '2026-07-12T00:01:00.000Z',
   })
-  expect(ticketInputs).toEqual([{
+  expect(ticketInputs).toHaveLength(1)
+  expect(ticketInputs[0]).toMatchObject({
     workspaceId: 'user#demo@example.com',
     memberKey: 'demo@example.com',
     teamId: 'core-team',
@@ -4005,7 +13897,1895 @@ test('issues a one-time realtime ticket only after Work Item viewer access is co
     systemAdmin: false,
     canWrite: true,
     scopeKey: 'user#demo@example.com#work-item#team/core-team/issue/onboarding-friction',
-  }])
+    authenticationSessionId: expect.any(String),
+    authenticationMethods: [],
+    clientIp: 'transport-unavailable',
+  })
+  expect(ticketInputs[0]?.authenticatedAt).toEqual(expect.any(Number))
+  expect(ticketInputs[0]?.tokenExpiresAt).toEqual(expect.any(Number))
+})
+
+test('applies a directory-mapped custom role to only its assigned Project APIs', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+  }, async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ projectId: 'private-project', role: 'manager' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+    teamIssueCount: 2,
+    inaccessibleTeamIssueCount: 1,
+  })
+  const workspaceId = 'user#demo@example.com'
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const now = new Date().toISOString()
+  await identity.putIdentityProvider({
+    workspaceId,
+    providerId: 'idp-project-role',
+    kind: 'oidc',
+    displayName: 'Project directory',
+    cognitoProviderName: 'EnterpriseOidc',
+    status: 'active',
+    revision: 1,
+    issuer: 'https://idp.example.com',
+    clientId: 'enterprise-client',
+    authorizationEndpoint: 'https://idp.example.com/authorize',
+    tokenEndpoint: 'https://idp.example.com/token',
+    jwksUri: 'https://idp.example.com/jwks',
+    scopes: ['openid', 'email'],
+    createdAt: now,
+    updatedAt: now,
+    lastTestedAt: now,
+  })
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:project-reader',
+    name: 'Project reader',
+    permissions: ['projects.read', 'work-items.read', 'automation.manage'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  const user = await identity.upsertScimUser({
+    workspaceId,
+    identityProviderId: 'idp-project-role',
+    externalId: 'demo-user',
+    userName: 'demo@example.com',
+    emails: ['demo@example.com'],
+    active: true,
+    linkedMemberKey: 'demo@example.com',
+    idempotencyKey: 'project-reader-user',
+  })
+  const group = await identity.upsertScimGroup({
+    workspaceId,
+    identityProviderId: 'idp-project-role',
+    externalId: 'project-readers',
+    displayName: 'Project readers',
+    active: true,
+    memberUserIds: [user.userId],
+    idempotencyKey: 'project-reader-group',
+  })
+  const desiredUser = (await identity.getSnapshot(workspaceId)).scimUsers.find((candidate) =>
+    candidate.userId === user.userId
+  )
+  if (!desiredUser) throw new Error('Expected the SCIM user to exist.')
+  await identity.markScimUserApplied(
+    workspaceId,
+    desiredUser.userId,
+    desiredUser.version,
+  )
+  await identity.markScimGroupApplied(
+    workspaceId,
+    group.groupId,
+    group.version,
+  )
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: 'project-reader-mapping',
+    identityProviderId: 'idp-project-role',
+    directoryGroupId: group.groupId,
+    roleId: 'custom:project-reader',
+    scope: { workspaceId, kind: 'project', targetId: 'refero' },
+    enabled: true,
+    priority: 0,
+    revision: 1,
+    updatedAt: now,
+  })
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:team-project-creator',
+    name: 'Team project creator',
+    permissions: ['projects.write'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: 'team-project-creator-mapping',
+    identityProviderId: 'idp-project-role',
+    directoryGroupId: group.groupId,
+    roleId: 'custom:team-project-creator',
+    scope: { workspaceId, kind: 'team', targetId: 'core-team' },
+    enabled: true,
+    priority: 1,
+    revision: 1,
+    updatedAt: now,
+  })
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:project-team-writer',
+    name: 'Project-scoped Team writer',
+    permissions: ['teams.write'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: 'project-team-writer-mapping',
+    identityProviderId: 'idp-project-role',
+    directoryGroupId: group.groupId,
+    roleId: 'custom:project-team-writer',
+    scope: { workspaceId, kind: 'project', targetId: 'refero' },
+    enabled: true,
+    priority: 2,
+    revision: 1,
+    updatedAt: now,
+  })
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:project-planner',
+    name: 'Project planner',
+    permissions: ['planning.read', 'planning.write', 'automation.manage'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: 'project-planner-mapping',
+    identityProviderId: 'idp-project-role',
+    directoryGroupId: group.groupId,
+    roleId: 'custom:project-planner',
+    scope: { workspaceId, kind: 'project', targetId: 'refero' },
+    enabled: true,
+    priority: 3,
+    revision: 1,
+    updatedAt: now,
+  })
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:service-account-manager',
+    name: 'Service account manager',
+    permissions: ['service-accounts.manage'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: 'service-account-manager-mapping',
+    identityProviderId: 'idp-project-role',
+    directoryGroupId: group.groupId,
+    roleId: 'custom:service-account-manager',
+    scope: { workspaceId, kind: 'workspace' },
+    enabled: true,
+    priority: 4,
+    revision: 1,
+    updatedAt: now,
+  })
+  const analyticsRepository = new InMemoryAnalyticsRepository()
+  const analyticsQuery = createAnalyticsQueryInput()
+  const analyticsReport = await analyticsRepository.createReport(
+    workspaceId,
+    'demo@example.com',
+    {
+      id: 'enterprise-project-report',
+      name: 'Enterprise Project report',
+      visibility: 'team',
+      teamId: 'core-team',
+      timeZone: analyticsQuery.timeZone,
+      filter: analyticsQuery.filter,
+      widgets: analyticsQuery.widgets,
+    },
+  )
+  const createEnterpriseDocument = (
+    id: string,
+    scope: DocumentDetail['scope'],
+  ): DocumentDetail => ({
+    schemaVersion: 1,
+    id,
+    kind: 'page',
+    scope,
+    title: id,
+    position: 'a0',
+    revision: 1,
+    permission: { mode: 'inherit', memberGrants: [] },
+    relations: [],
+    favorite: false,
+    capabilities: {
+      canView: false,
+      canEdit: false,
+      canComment: false,
+      canShare: false,
+      canManagePermissions: false,
+      canArchive: false,
+      canRestore: false,
+      canExport: false,
+    },
+    createdByUserId: 'demo@example.com',
+    updatedByUserId: 'demo@example.com',
+    createdAt: now,
+    updatedAt: now,
+    blocks: [],
+  })
+  const enterpriseDocuments = new Map([
+    [
+      'refero-document',
+      createEnterpriseDocument(
+        'refero-document',
+        { type: 'project', projectId: 'refero' },
+      ),
+    ],
+    [
+      'private-project-document',
+      createEnterpriseDocument(
+        'private-project-document',
+        { type: 'project', projectId: 'private-project' },
+      ),
+    ],
+    [
+      'workspace-document',
+      createEnterpriseDocument(
+        'workspace-document',
+        { type: 'workspace' },
+      ),
+    ],
+  ])
+  const documentAccesses: Array<
+    Parameters<DocumentClient['get']>[0]['access']
+  > = []
+  const documentSearchAccesses: Array<
+    Parameters<
+      DocumentClient['resolveSearchAccess']
+    >[0]['access']
+  > = []
+  const documentSearchVisibilities =
+    new Map<string, boolean>()
+  const resolveEnterpriseDocumentForAccess = (
+    documentId: string,
+    access:
+      Parameters<DocumentClient['get']>[0]['access'],
+  ) => {
+    const document =
+      enterpriseDocuments.get(documentId)
+    if (!document) {
+      throw new DocumentError(
+        404,
+        'DocumentNotFound',
+        'Document was not found.',
+      )
+    }
+    const capabilities =
+      resolveDocumentCapabilities({
+        principal: {
+          memberKey: access.memberKey,
+          workspaceRole:
+            access.workspaceRole,
+          isSystemAdmin:
+            access.isSystemAdmin ?? false,
+        },
+        document,
+        projectRole:
+          document.scope.type === 'project'
+            ? access.projectRoles?.[
+                document.scope.projectId
+              ] ?? access.projectRole
+            : undefined,
+        restrictToAuthorizedScopes:
+          access.restrictToAuthorizedScopes,
+        workspaceScopeRole:
+          access.workspaceScopeRole,
+      })
+    if (!capabilities.canView) {
+      throw new DocumentError(
+        404,
+        'DocumentNotFound',
+        'Document was not found.',
+      )
+    }
+    return { ...document, capabilities }
+  }
+  const documentNotifications = [
+    createNotificationItem({
+      id: 'refero-document-notification',
+      eventId:
+        'refero-document-notification-event',
+      eventType: 'document.comment.created',
+      entityId: 'refero-document',
+      reasons: ['mention'],
+      teamId: undefined,
+      projectId: undefined,
+      issueId: undefined,
+    }),
+    createNotificationItem({
+      id:
+        'private-project-document-notification',
+      eventId:
+        'private-project-document-notification-event',
+      eventType: 'document.comment.created',
+      entityId: 'private-project-document',
+      reasons: ['mention'],
+      teamId: undefined,
+      projectId: undefined,
+      issueId: undefined,
+    }),
+    createNotificationItem({
+      id: 'workspace-document-notification',
+      eventId:
+        'workspace-document-notification-event',
+      eventType: 'document.comment.created',
+      entityId: 'workspace-document',
+      reasons: ['mention'],
+      teamId: undefined,
+      projectId: undefined,
+      issueId: undefined,
+    }),
+    createNotificationItem({
+      id: 'missing-document-id-notification',
+      eventId:
+        'missing-document-id-notification-event',
+      eventType: 'document.comment.created',
+      entityId: undefined,
+      reasons: ['mention'],
+      teamId: undefined,
+      projectId: undefined,
+      issueId: undefined,
+    }),
+  ]
+  const documentNotificationProbe =
+    createNotificationVisibilityProbe(
+      documentNotifications,
+    )
+  configureApiClientsForTest({
+    enterpriseIdentity: identity,
+    planning: new InMemoryPlanningClient(),
+    analytics: analyticsRepository,
+    documents: {
+      async get(input) {
+        documentAccesses.push(input.access)
+        return resolveEnterpriseDocumentForAccess(
+          input.documentId,
+          input.access,
+        )
+      },
+      async resolveSearchAccess(input) {
+        documentSearchAccesses.push(input.access)
+        try {
+          const document =
+            resolveEnterpriseDocumentForAccess(
+              input.documentId,
+              input.access,
+            )
+          return {
+            scope: document.scope,
+            revision: document.revision,
+            updatedAt: document.updatedAt,
+            body: document.title,
+          }
+        } catch (error) {
+          if (
+            error instanceof DocumentError &&
+            (
+              error.status === 403 ||
+              error.status === 404
+            )
+          ) {
+            return undefined
+          }
+          throw error
+        }
+      },
+    } as unknown as DocumentClient,
+    notifications: documentNotificationProbe.client,
+    workspaceSearch: {
+      async upsertDocument(document) {
+        return createWorkspaceSearchDocument(
+          document,
+        )
+      },
+      async search(input) {
+        for (
+          const documentId of
+          enterpriseDocuments.keys()
+        ) {
+          const resolved =
+            await input.resolveCurrentScope?.(
+              createWorkspaceSearchDocument({
+                workspaceId:
+                  input.workspaceId,
+                entityType: 'document',
+                entityId: documentId,
+                title: documentId,
+                body: documentId,
+                url:
+                  `/documents/${documentId}`,
+                updatedAt: now,
+                sourceRevision: 1,
+              }),
+            )
+          documentSearchVisibilities.set(
+            documentId,
+            resolved?.permissionVerified === true,
+          )
+        }
+        return { schemaVersion: 1, results: [] }
+      },
+    } as unknown as WorkspaceSearchClient,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const authorization = `Bearer ${createAccessToken([], {
+    client_id: 'mukuroji-main-client',
+    token_use: 'access',
+  })}`
+
+  const allowed = await app.request('/api/projects/refero/tasks', {
+    headers: { Authorization: authorization },
+  })
+  const denied = await app.request('/api/projects/private-project/tasks', {
+    headers: { Authorization: authorization },
+  })
+  const documentsPermissionDenied = await app.request(
+    '/api/documents/refero-document',
+    { headers: { Authorization: authorization } },
+  )
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:project-document-reader',
+    name: 'Project Document reader',
+    permissions: ['documents.read'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: 'project-document-reader-mapping',
+    identityProviderId: 'idp-project-role',
+    directoryGroupId: group.groupId,
+    roleId: 'custom:project-document-reader',
+    scope: {
+      workspaceId,
+      kind: 'project',
+      targetId: 'refero',
+    },
+    enabled: true,
+    priority: 50,
+    revision: 1,
+    updatedAt: now,
+  })
+  const allowedProjectDocument = await app.request(
+    '/api/documents/refero-document',
+    { headers: { Authorization: authorization } },
+  )
+  const deniedProjectDocument = await app.request(
+    '/api/documents/private-project-document',
+    { headers: { Authorization: authorization } },
+  )
+  const deniedWorkspaceDocument = await app.request(
+    '/api/documents/workspace-document',
+    { headers: { Authorization: authorization } },
+  )
+  const documentSearchResponse = await app.request(
+    '/api/search',
+    { headers: { Authorization: authorization } },
+  )
+  const documentNotificationsResponse =
+    await app.request(
+      '/api/notifications',
+      { headers: { Authorization: authorization } },
+    )
+  const directoryResponse = await app.request('/api/teams/projects', {
+    headers: { Authorization: authorization },
+  })
+  const projectCreateResponse = await app.request('/api/teams/core-team/projects', {
+    method: 'POST',
+    headers: {
+      Authorization: authorization,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ name: 'Scoped project', tone: 'green' }),
+  })
+  const teamCreateResponse = await app.request('/api/teams', {
+    method: 'POST',
+    headers: {
+      Authorization: authorization,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ name: 'Escaped Team' }),
+  })
+  const projectUserCandidatesResponse = await app.request('/api/projects/refero/users', {
+    headers: { Authorization: authorization },
+  })
+  const planningCreateResponse = await app.request('/api/planning/entities', {
+    method: 'POST',
+    headers: {
+      Authorization: authorization,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      id: 'scoped-plan',
+      type: 'portfolio',
+      title: 'Scoped plan',
+      teamId: 'core-team',
+      projectId: 'refero',
+      ownerMemberKey: 'demo@example.com',
+      status: 'planned',
+      health: 'on-track',
+      risk: 'low',
+      progressMode: 'manual',
+      manualProgress: 0,
+      baseline: { startDate: '2026-07-01', endDate: '2026-07-31' },
+      forecast: { startDate: '2026-07-01', endDate: '2026-07-31' },
+      expectedRevision: 0,
+    }),
+  })
+  const planningArchiveResponse = await app.request(
+    '/api/planning/entities/scoped-plan/archive',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ expectedRevision: 1 }),
+    },
+  )
+  const breakGlassAccountResponse = await app.request(
+    '/api/enterprise/security/break-glass/accounts',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ email: 'demo@example.com' }),
+    },
+  )
+  const breakGlassDeactivateResponse = await app.request(
+    '/api/enterprise/security/break-glass/deactivate',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        administratorId: 'recovery-demo',
+        expectedVersion: 1,
+      }),
+    },
+  )
+  const enterpriseAnalyticsRequest = (
+    path: string,
+    body: unknown,
+    method = 'POST',
+  ) => app.request(path, {
+    method,
+    headers: {
+      Authorization: authorization,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  const analyticsQueryResponse = await enterpriseAnalyticsRequest(
+    '/api/analytics/query',
+    analyticsQuery,
+  )
+  expect(analyticsQueryResponse.status).toBe(200)
+  const analyticsQueryBody = await analyticsQueryResponse.json() as {
+    snapshot: AnalyticsSnapshot
+  }
+  expect(analyticsQueryBody.snapshot.widgets).toEqual([
+    expect.objectContaining({ sampleSize: 1, value: 1 }),
+  ])
+  const analyticsEvidenceResponse = await enterpriseAnalyticsRequest(
+    '/api/analytics/evidence',
+    {
+      metric: 'wip',
+      filter: analyticsQuery.filter,
+      asOf: analyticsQuery.asOf,
+      timeZone: analyticsQuery.timeZone,
+    },
+  )
+  const analyticsReportsResponse = await app.request('/api/analytics/reports', {
+    headers: { Authorization: authorization },
+  })
+  await analyticsRepository.putSnapshot({
+    id: 'enterprise-project-snapshot',
+    workspaceId,
+    reportId: analyticsReport.id,
+    reportRevision: analyticsReport.revision,
+    createdByMemberKey: 'demo@example.com',
+    createdAt: analyticsQuery.asOf,
+    query: analyticsQuery,
+    snapshot: analyticsQueryBody.snapshot,
+  })
+  const analyticsSnapshotsResponse = await app.request(
+    `/api/analytics/reports/${analyticsReport.id}/snapshots`,
+    { headers: { Authorization: authorization } },
+  )
+  const analyticsExportResponse = await enterpriseAnalyticsRequest(
+    '/api/analytics/export',
+    { snapshotId: 'enterprise-project-snapshot', format: 'csv' },
+  )
+  const deniedAnalyticsWrites = [
+    await enterpriseAnalyticsRequest('/api/analytics/reports', {
+      id: 'denied-enterprise-report',
+      name: 'Denied Enterprise report',
+      visibility: 'personal',
+      timeZone: analyticsQuery.timeZone,
+      filter: analyticsQuery.filter,
+      widgets: analyticsQuery.widgets,
+    }),
+    await enterpriseAnalyticsRequest(
+      `/api/analytics/reports/${analyticsReport.id}`,
+      { expectedRevision: analyticsReport.revision, name: 'Denied update' },
+      'PATCH',
+    ),
+    await enterpriseAnalyticsRequest(
+      `/api/analytics/reports/${analyticsReport.id}`,
+      { expectedRevision: analyticsReport.revision },
+      'DELETE',
+    ),
+    await enterpriseAnalyticsRequest(
+      `/api/analytics/reports/${analyticsReport.id}/snapshots`,
+      analyticsQuery,
+    ),
+  ]
+
+  expect(allowed.status).toBe(200)
+  expect(denied.status).toBe(403)
+  expect(documentsPermissionDenied.status).toBe(403)
+  expect(await documentsPermissionDenied.json())
+    .toMatchObject({
+      code: 'WorkspacePermissionDenied',
+    })
+  expect(allowedProjectDocument.status).toBe(200)
+  expect(await allowedProjectDocument.json())
+    .toMatchObject({
+      document: {
+        id: 'refero-document',
+        capabilities: {
+          canView: true,
+          canEdit: false,
+        },
+      },
+    })
+  expect(deniedProjectDocument.status).toBe(404)
+  expect(await deniedProjectDocument.json())
+    .toMatchObject({ code: 'DocumentNotFound' })
+  expect(deniedWorkspaceDocument.status).toBe(404)
+  expect(await deniedWorkspaceDocument.json())
+    .toMatchObject({ code: 'DocumentNotFound' })
+  expect(documentSearchResponse.status).toBe(200)
+  expect(documentSearchVisibilities).toEqual(
+    new Map([
+      ['refero-document', true],
+      ['private-project-document', false],
+      ['workspace-document', false],
+    ]),
+  )
+  expect(documentNotificationsResponse.status).toBe(200)
+  expect(
+    (
+      await documentNotificationsResponse.json() as {
+        notifications: NotificationItem[]
+      }
+    ).notifications.map(({ entityId }) => entityId),
+  ).toEqual(['refero-document'])
+  expect(documentNotificationProbe.visibility)
+    .toEqual(new Map([
+      ['refero-document-notification', true],
+      [
+        'private-project-document-notification',
+        false,
+      ],
+      ['workspace-document-notification', false],
+      ['missing-document-id-notification', false],
+    ]))
+  expect(documentAccesses).toHaveLength(6)
+  expect(documentSearchAccesses).toHaveLength(3)
+  for (
+    const access of [
+      ...documentAccesses,
+      ...documentSearchAccesses,
+    ]
+  ) {
+    expect(access).toMatchObject({
+      projectRoles: { refero: 'viewer' },
+      restrictToAuthorizedScopes: true,
+    })
+    expect(access.workspaceScopeRole)
+      .toBeUndefined()
+  }
+  expect(projectCreateResponse.status).toBe(201)
+  expect(teamCreateResponse.status).toBe(403)
+  expect(projectUserCandidatesResponse.status).toBe(403)
+  expect(planningCreateResponse.status).toBe(201)
+  expect(planningArchiveResponse.status).toBe(403)
+  expect(breakGlassAccountResponse.status).toBe(403)
+  expect(await breakGlassAccountResponse.json()).toMatchObject({
+    code: 'WorkspacePermissionDenied',
+  })
+  expect(breakGlassDeactivateResponse.status).toBe(403)
+  expect(await breakGlassDeactivateResponse.json()).toMatchObject({
+    code: 'WorkspacePermissionDenied',
+  })
+  expect(await directoryResponse.json()).toEqual({
+    teams: [{
+      id: 'core-team',
+      name: 'コアチーム',
+      expanded: true,
+      projects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+    }],
+  })
+  expect(analyticsEvidenceResponse.status).toBe(200)
+  expect(await analyticsEvidenceResponse.json()).toMatchObject({
+    items: [expect.objectContaining({ workItemId: 'work-item-1', projectId: 'refero' })],
+  })
+  expect(analyticsReportsResponse.status).toBe(200)
+  expect(await analyticsReportsResponse.json()).toMatchObject({
+    reports: [expect.objectContaining({ id: analyticsReport.id })],
+  })
+  expect(analyticsSnapshotsResponse.status).toBe(200)
+  expect(await analyticsSnapshotsResponse.json()).toMatchObject({
+    snapshots: [expect.objectContaining({ id: 'enterprise-project-snapshot' })],
+  })
+  expect(analyticsExportResponse.status).toBe(200)
+  expect(analyticsExportResponse.headers.get('Content-Type')).toBe('text/csv; charset=utf-8')
+  expect(deniedAnalyticsWrites.map((response) => response.status)).toEqual([
+    403,
+    403,
+    403,
+    403,
+  ])
+  for (const response of deniedAnalyticsWrites) {
+    expect(await response.json()).toMatchObject({ code: 'WorkspacePermissionDenied' })
+  }
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:project-analytics-writer',
+    name: 'Project Analytics writer',
+    permissions: ['work-items.write'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: 'project-analytics-writer-mapping',
+    identityProviderId: 'idp-project-role',
+    directoryGroupId: group.groupId,
+    roleId: 'custom:project-analytics-writer',
+    scope: { workspaceId, kind: 'project', targetId: 'refero' },
+    enabled: true,
+    priority: 5,
+    revision: 1,
+    updatedAt: now,
+  })
+  const writableReportResponse = await enterpriseAnalyticsRequest(
+    '/api/analytics/reports',
+    {
+      id: 'enterprise-writable-report',
+      name: 'Enterprise writable report',
+      visibility: 'personal',
+      timeZone: analyticsQuery.timeZone,
+      filter: analyticsQuery.filter,
+      widgets: analyticsQuery.widgets,
+    },
+  )
+  expect(writableReportResponse.status).toBe(201)
+  const writableReport = await writableReportResponse.json() as {
+    report: { id: string; revision: number }
+  }
+  const writablePatchResponse = await enterpriseAnalyticsRequest(
+    `/api/analytics/reports/${writableReport.report.id}`,
+    { expectedRevision: writableReport.report.revision, name: 'Enterprise updated report' },
+    'PATCH',
+  )
+  const writableSnapshotResponse = await enterpriseAnalyticsRequest(
+    `/api/analytics/reports/${writableReport.report.id}/snapshots`,
+    analyticsQuery,
+  )
+  const writableDeleteResponse = await enterpriseAnalyticsRequest(
+    `/api/analytics/reports/${writableReport.report.id}`,
+    { expectedRevision: writableReport.report.revision + 1 },
+    'DELETE',
+  )
+  expect(writablePatchResponse.status).toBe(200)
+  expect(writableSnapshotResponse.status).toBe(201)
+  expect(writableDeleteResponse.status).toBe(200)
+  configureFakeProjectClients(false, {
+    workspaceRole: 'member',
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+    cognitoProviderDetails: {
+      oidc_issuer: 'https://replacement.example.com',
+      client_id: 'enterprise-client',
+    },
+  })
+  configureApiClientsForTest({ enterpriseIdentity: identity })
+  const drifted = await app.request('/api/projects/refero/tasks', {
+    headers: { Authorization: authorization },
+  })
+  expect(drifted.status).toBe(403)
+  })
+})
+
+test('binds Enterprise Analytics report writes to Team and Workspace visibility scopes', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+  }, async () => {
+    configureFakeProjectClients(false, {
+      workspaceRole: 'member',
+      additionalTeams: [{
+        id: 'writer-team',
+        name: 'Writer Team',
+        projects: [],
+      }],
+    })
+    const workspaceId = 'user#demo@example.com'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    await identity.putIdentityProvider({
+      workspaceId,
+      providerId: 'idp-analytics-visibility',
+      kind: 'oidc',
+      displayName: 'Analytics visibility directory',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active',
+      revision: 1,
+      issuer: 'https://idp.example.com',
+      clientId: 'enterprise-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email'],
+      createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+    })
+    const user = await identity.upsertScimUser({
+      workspaceId,
+      identityProviderId: 'idp-analytics-visibility',
+      externalId: 'analytics-visibility-user',
+      userName: 'demo@example.com',
+      emails: ['demo@example.com'],
+      active: true,
+      linkedMemberKey: 'demo@example.com',
+      idempotencyKey: 'analytics-visibility-user',
+    })
+    const group = await identity.upsertScimGroup({
+      workspaceId,
+      identityProviderId: 'idp-analytics-visibility',
+      externalId: 'analytics-visibility-group',
+      displayName: 'Analytics visibility writers',
+      active: true,
+      memberUserIds: [user.userId],
+      idempotencyKey: 'analytics-visibility-group',
+    })
+    const desiredUser = (await identity.getSnapshot(workspaceId)).scimUsers.find((candidate) =>
+      candidate.userId === user.userId
+    )
+    if (!desiredUser) throw new Error('Expected the SCIM user to exist.')
+    await identity.markScimUserApplied(workspaceId, desiredUser.userId, desiredUser.version)
+    await identity.markScimGroupApplied(workspaceId, group.groupId, group.version)
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'analytics-workspace-member-mapping',
+      identityProviderId: 'idp-analytics-visibility',
+      directoryGroupId: group.groupId,
+      roleId: 'workspace:member',
+      scope: { workspaceId, kind: 'workspace' },
+      enabled: true,
+      priority: 0,
+      revision: 1,
+      updatedAt: now,
+    })
+
+    const analyticsRepository = new InMemoryAnalyticsRepository()
+    const analyticsQuery = createAnalyticsQueryInput()
+    const sharedReport = await analyticsRepository.createReport(
+      workspaceId,
+      'demo@example.com',
+      {
+        id: 'enterprise-shared-report',
+        name: 'Enterprise shared report',
+        visibility: 'shared',
+        timeZone: analyticsQuery.timeZone,
+        filter: analyticsQuery.filter,
+        widgets: analyticsQuery.widgets,
+      },
+    )
+    const teamReport = await analyticsRepository.createReport(
+      workspaceId,
+      'demo@example.com',
+      {
+        id: 'enterprise-team-report',
+        name: 'Enterprise Team report',
+        visibility: 'team',
+        teamId: 'core-team',
+        timeZone: analyticsQuery.timeZone,
+        filter: analyticsQuery.filter,
+        widgets: analyticsQuery.widgets,
+      },
+    )
+    configureApiClientsForTest({
+      enterpriseIdentity: identity,
+      analytics: analyticsRepository,
+      developerPlatform: {
+        async consumeRateLimit() {
+          return {
+            allowed: true,
+            limit: 120,
+            remaining: 119,
+            resetAt: '2026-07-18T00:01:00.000Z',
+          }
+        },
+        async listApiKeys() {
+          return []
+        },
+      } as never,
+    })
+    const authorization = `Bearer ${createAccessToken([], {
+      client_id: 'mukuroji-main-client',
+      token_use: 'access',
+    })}`
+    const patchReport = (reportId: string, expectedRevision: number, name: string) =>
+      app.request(`/api/analytics/reports/${reportId}`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: authorization,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ expectedRevision, name }),
+      })
+    const createSnapshot = (reportId: string) =>
+      app.request(`/api/analytics/reports/${reportId}/snapshots`, {
+        method: 'POST',
+        headers: {
+          Authorization: authorization,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(analyticsQuery),
+      })
+
+    const workspaceMemberDeveloperAccess = await app.request(
+      '/api/developer/api-keys',
+      { headers: { Authorization: authorization } },
+    )
+    expect(workspaceMemberDeveloperAccess.status).toBe(403)
+    expect(await workspaceMemberDeveloperAccess.json()).toMatchObject({
+      code: 'forbidden',
+    })
+
+    const workspaceMemberSharedWrite = await patchReport(
+      sharedReport.id,
+      sharedReport.revision,
+      'Workspace Member edit',
+    )
+    expect(workspaceMemberSharedWrite.status).toBe(403)
+    expect(await workspaceMemberSharedWrite.json()).toMatchObject({
+      code: 'AnalyticsReportForbidden',
+    })
+
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'analytics-team-manager-mapping',
+      identityProviderId: 'idp-analytics-visibility',
+      directoryGroupId: group.groupId,
+      roleId: 'team:manager',
+      scope: { workspaceId, kind: 'team', targetId: 'core-team' },
+      enabled: true,
+      priority: 1,
+      revision: 1,
+      updatedAt: now,
+    })
+    const teamManagerTeamWrite = await patchReport(
+      teamReport.id,
+      teamReport.revision,
+      'Team Manager edit',
+    )
+    expect(teamManagerTeamWrite.status).toBe(200)
+    expect(await teamManagerTeamWrite.json()).toMatchObject({
+      report: { name: 'Team Manager edit', revision: 2 },
+    })
+
+    const teamManagerSharedWrite = await patchReport(
+      sharedReport.id,
+      sharedReport.revision,
+      'Team Manager shared edit',
+    )
+    expect(teamManagerSharedWrite.status).toBe(403)
+    expect(await teamManagerSharedWrite.json()).toMatchObject({
+      code: 'AnalyticsReportForbidden',
+    })
+
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'analytics-workspace-member-mapping',
+      identityProviderId: 'idp-analytics-visibility',
+      directoryGroupId: group.groupId,
+      roleId: 'workspace:member',
+      scope: { workspaceId, kind: 'workspace' },
+      enabled: false,
+      priority: 0,
+      revision: 2,
+      updatedAt: now,
+    })
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'analytics-team-manager-mapping',
+      identityProviderId: 'idp-analytics-visibility',
+      directoryGroupId: group.groupId,
+      roleId: 'team:manager',
+      scope: { workspaceId, kind: 'team', targetId: 'core-team' },
+      enabled: false,
+      priority: 1,
+      revision: 2,
+      updatedAt: now,
+    })
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:analytics-team-manager',
+      name: 'Analytics Team manager',
+      permissions: ['teams.manage'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'analytics-custom-team-manager-mapping',
+      identityProviderId: 'idp-analytics-visibility',
+      directoryGroupId: group.groupId,
+      roleId: 'custom:analytics-team-manager',
+      scope: { workspaceId, kind: 'team', targetId: 'core-team' },
+      enabled: true,
+      priority: 2,
+      revision: 1,
+      updatedAt: now,
+    })
+    const customTeamManagerWrite = await patchReport(
+      teamReport.id,
+      teamReport.revision + 1,
+      'Custom Team Manager edit',
+    )
+    expect(customTeamManagerWrite.status).toBe(200)
+    expect(await customTeamManagerWrite.json()).toMatchObject({
+      report: { name: 'Custom Team Manager edit', revision: 3 },
+    })
+    const customTeamManagerSnapshot = await createSnapshot(teamReport.id)
+    expect(customTeamManagerSnapshot.status).toBe(403)
+    expect(await customTeamManagerSnapshot.json()).toMatchObject({
+      code: 'WorkspacePermissionDenied',
+    })
+    const missingTeamWrite = await app.request('/api/analytics/reports', {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: 'missing-team-report',
+        name: 'Missing Team report',
+        visibility: 'team',
+        teamId: 'missing-team',
+        timeZone: analyticsQuery.timeZone,
+        filter: analyticsQuery.filter,
+        widgets: analyticsQuery.widgets,
+      }),
+    })
+    expect(missingTeamWrite.status).toBe(404)
+    expect(await missingTeamWrite.json()).toEqual({ message: 'Team was not found.' })
+
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'analytics-custom-team-manager-mapping',
+      identityProviderId: 'idp-analytics-visibility',
+      directoryGroupId: group.groupId,
+      roleId: 'custom:analytics-team-manager',
+      scope: { workspaceId, kind: 'team', targetId: 'core-team' },
+      enabled: false,
+      priority: 2,
+      revision: 2,
+      updatedAt: now,
+    })
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:analytics-workspace-manager',
+      name: 'Analytics Workspace manager',
+      permissions: ['workspace.manage'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'analytics-custom-workspace-manager-mapping',
+      identityProviderId: 'idp-analytics-visibility',
+      directoryGroupId: group.groupId,
+      roleId: 'custom:analytics-workspace-manager',
+      scope: { workspaceId, kind: 'workspace' },
+      enabled: true,
+      priority: 3,
+      revision: 1,
+      updatedAt: now,
+    })
+    const customWorkspaceManagerWrite = await patchReport(
+      sharedReport.id,
+      sharedReport.revision,
+      'Custom Workspace Manager edit',
+    )
+    expect(customWorkspaceManagerWrite.status).toBe(200)
+    expect(await customWorkspaceManagerWrite.json()).toMatchObject({
+      report: { name: 'Custom Workspace Manager edit', revision: 2 },
+    })
+    const customWorkspaceManagerDeveloperAccess = await app.request(
+      '/api/developer/api-keys',
+      { headers: { Authorization: authorization } },
+    )
+    expect({
+      status: customWorkspaceManagerDeveloperAccess.status,
+      body: await customWorkspaceManagerDeveloperAccess.json(),
+    }).toMatchObject({
+      status: 200,
+      body: {
+        items: [],
+        hasMore: false,
+      },
+    })
+    const customWorkspaceManagerSnapshot = await createSnapshot(sharedReport.id)
+    expect(customWorkspaceManagerSnapshot.status).toBe(403)
+    expect(await customWorkspaceManagerSnapshot.json()).toMatchObject({
+      code: 'WorkspacePermissionDenied',
+    })
+
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'analytics-custom-workspace-manager-mapping',
+      identityProviderId: 'idp-analytics-visibility',
+      directoryGroupId: group.groupId,
+      roleId: 'custom:analytics-workspace-manager',
+      scope: { workspaceId, kind: 'workspace' },
+      enabled: false,
+      priority: 3,
+      revision: 2,
+      updatedAt: now,
+    })
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'analytics-custom-team-manager-mapping',
+      identityProviderId: 'idp-analytics-visibility',
+      directoryGroupId: group.groupId,
+      roleId: 'custom:analytics-team-manager',
+      scope: { workspaceId, kind: 'workspace' },
+      enabled: true,
+      priority: 2,
+      revision: 3,
+      updatedAt: now,
+    })
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:analytics-work-item-writer',
+      name: 'Analytics Work Item writer',
+      permissions: ['work-items.write'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'analytics-custom-work-item-writer-mapping',
+      identityProviderId: 'idp-analytics-visibility',
+      directoryGroupId: group.groupId,
+      roleId: 'custom:analytics-work-item-writer',
+      scope: { workspaceId, kind: 'team', targetId: 'writer-team' },
+      enabled: true,
+      priority: 4,
+      revision: 1,
+      updatedAt: now,
+    })
+    const mixedScopePersonalWrite = await app.request('/api/analytics/reports', {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: 'mixed-scope-personal-report',
+        name: 'Mixed scope personal report',
+        visibility: 'personal',
+        timeZone: analyticsQuery.timeZone,
+        filter: analyticsQuery.filter,
+        widgets: analyticsQuery.widgets,
+      }),
+    })
+    expect(mixedScopePersonalWrite.status).toBe(201)
+    expect(await mixedScopePersonalWrite.json()).toMatchObject({
+      report: { id: 'mixed-scope-personal-report' },
+    })
+  })
+})
+
+test('preserves an empty Team and Team-scoped Planning aggregates for a directory mapping', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+  }, async () => {
+    configureFakeProjectClients(false, {
+      workspaceRole: 'member',
+      teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+      additionalTeams: [{
+        id: 'empty-team',
+        name: 'Empty Team',
+        projects: [],
+      }],
+      unassignedIssue: true,
+    })
+    const workspaceId = 'user#demo@example.com'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    await identity.putIdentityProvider({
+      workspaceId,
+      providerId: 'idp-team-role',
+      kind: 'oidc',
+      displayName: 'Team directory',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active',
+      revision: 1,
+      issuer: 'https://idp.example.com',
+      clientId: 'enterprise-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email'],
+      createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+    })
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:empty-team-reader',
+      name: 'Empty Team reader',
+      permissions: ['teams.read', 'planning.read', 'work-items.read'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    const user = await identity.upsertScimUser({
+      workspaceId,
+      identityProviderId: 'idp-team-role',
+      externalId: 'team-reader-user',
+      userName: 'demo@example.com',
+      emails: ['demo@example.com'],
+      active: true,
+      linkedMemberKey: 'demo@example.com',
+      idempotencyKey: 'team-reader-user',
+    })
+    const group = await identity.upsertScimGroup({
+      workspaceId,
+      identityProviderId: 'idp-team-role',
+      externalId: 'empty-team-readers',
+      displayName: 'Empty Team readers',
+      active: true,
+      memberUserIds: [user.userId],
+      idempotencyKey: 'empty-team-reader-group',
+    })
+    const desiredUser = (await identity.getSnapshot(workspaceId)).scimUsers.find((candidate) =>
+      candidate.userId === user.userId
+    )
+    if (!desiredUser) throw new Error('Expected the SCIM user to exist.')
+    await identity.markScimUserApplied(workspaceId, desiredUser.userId, desiredUser.version)
+    await identity.markScimGroupApplied(workspaceId, group.groupId, group.version)
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'empty-team-reader-mapping',
+      identityProviderId: 'idp-team-role',
+      directoryGroupId: group.groupId,
+      roleId: 'custom:empty-team-reader',
+      scope: { workspaceId, kind: 'team', targetId: 'empty-team' },
+      enabled: true,
+      priority: 0,
+      revision: 1,
+      updatedAt: now,
+    })
+
+    const planningClient = new InMemoryPlanningClient()
+    const teamWorkItemState = {
+      workItems: [{
+        id: 'onboarding-friction',
+        revision: 1,
+        teamId: 'empty-team',
+        title: 'Empty Team Work Item',
+        statusCategory: 'started' as const,
+        dueDate: '2026/06/18',
+      }],
+    }
+    await planningClient.create(workspaceId, {
+      ...createCyclePlanningInput('empty-team-cycle-a', 0),
+      teamId: 'empty-team',
+      projectId: undefined,
+    }, teamWorkItemState)
+    await planningClient.create(workspaceId, {
+      ...createCyclePlanningInput('empty-team-cycle-b', 1),
+      teamId: 'empty-team',
+      projectId: undefined,
+    }, teamWorkItemState)
+    await planningClient.create(
+      workspaceId,
+      createCyclePlanningInput('private-project-cycle', 2),
+      teamWorkItemState,
+    )
+    await planningClient.createDependency(workspaceId, {
+      id: 'empty-team-dependency',
+      predecessorId: 'empty-team-cycle-a',
+      successorId: 'empty-team-cycle-b',
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 3,
+    }, teamWorkItemState)
+    await planningClient.putWorkItemLink(workspaceId, {
+      teamId: 'empty-team',
+      workItemId: 'onboarding-friction',
+      cycleId: 'empty-team-cycle-a',
+      goalIds: [],
+      expectedRevision: 4,
+    }, teamWorkItemState)
+    configureApiClientsForTest({
+      enterpriseIdentity: identity,
+      planning: planningClient,
+      analytics: new InMemoryAnalyticsRepository(),
+      auditEvents: {
+        async getEvent() {
+          return undefined
+        },
+        async query() {
+          return { events: [] }
+        },
+      },
+    })
+
+    const accessToken = createAccessToken([], {
+      client_id: 'mukuroji-main-client',
+      token_use: 'access',
+    })
+    const headers = { Authorization: `Bearer ${accessToken}` }
+    const directoryResponse = await app.request('/api/teams/projects', { headers })
+    const workItemsResponse = await app.request('/api/work-items', { headers })
+    const planningResponse = await app.request('/api/planning', { headers })
+    const emptyTeamAnalyticsQuery = {
+      ...createAnalyticsQueryInput(),
+      filter: {
+        ...createAnalyticsQueryInput().filter,
+        teamIds: ['empty-team'],
+      },
+    }
+    const analyticsQueryResponse = await app.request('/api/analytics/query', {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(emptyTeamAnalyticsQuery),
+    })
+    const analyticsEvidenceResponse = await app.request('/api/analytics/evidence', {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        metric: 'wip',
+        filter: emptyTeamAnalyticsQuery.filter,
+        asOf: emptyTeamAnalyticsQuery.asOf,
+        timeZone: emptyTeamAnalyticsQuery.timeZone,
+      }),
+    })
+
+    expect(directoryResponse.status).toBe(200)
+    expect(await directoryResponse.json()).toEqual({
+      teams: [{
+        id: 'empty-team',
+        name: 'Empty Team',
+        projects: [],
+      }],
+    })
+    expect(workItemsResponse.status).toBe(200)
+    expect(await workItemsResponse.json()).toMatchObject({
+      workItems: [{ id: 'onboarding-friction', teamId: 'empty-team' }],
+    })
+    expect(analyticsQueryResponse.status).toBe(200)
+    expect(await analyticsQueryResponse.json()).toMatchObject({
+      snapshot: {
+        widgets: [expect.objectContaining({ sampleSize: 1, value: 1 })],
+      },
+    })
+    expect(analyticsEvidenceResponse.status).toBe(200)
+    expect(await analyticsEvidenceResponse.json()).toMatchObject({
+      items: [
+        expect.objectContaining({
+          teamId: 'empty-team',
+          workItemId: 'onboarding-friction',
+        }),
+      ],
+    })
+    expect(planningResponse.status).toBe(200)
+    const planningSnapshot = await planningResponse.json() as PlanningSnapshot
+    expect(planningSnapshot.entities.map((entity) => entity.id)).toEqual([
+      'empty-team-cycle-a',
+      'empty-team-cycle-b',
+    ])
+    expect(planningSnapshot.dependencies).toEqual([
+      expect.objectContaining({ id: 'empty-team-dependency' }),
+    ])
+    expect(planningSnapshot.workItemLinks).toEqual([
+      expect.objectContaining({
+        teamId: 'empty-team',
+        workItemId: 'onboarding-friction',
+        cycleId: 'empty-team-cycle-a',
+      }),
+    ])
+    expect(planningSnapshot.workItems).toEqual([
+      expect.objectContaining({ id: 'onboarding-friction', teamId: 'empty-team' }),
+    ])
+    expect(planningSnapshot.criticalPath.entityIds).not.toContain('private-project-cycle')
+    expect(planningSnapshot.criticalPath.slackByEntityId)
+      .not.toHaveProperty('private-project-cycle')
+  })
+})
+
+test('enforces service-account Project scope before recording successful use', async () => {
+  await withTestEnvironment({
+    ENTERPRISE_IDENTITY_TABLE_NAME:
+      'EnterpriseIdentityTable',
+    MUKUROJI_WORKSPACE_DIRECTORY_ID: 'workspace-service-account',
+    PLANNING_TABLE_NAME: 'PlanningTable',
+    WORKSPACE_ACCESS_TABLE_NAME:
+      'WorkspaceAccessTable',
+  }, async () => {
+    configureFakeProjectClients(false, {
+      teamProjects: [
+        { id: 'refero', name: 'Refero', tone: 'blue' },
+        { id: 'private-project', name: 'Private', tone: 'purple' },
+      ],
+    })
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const timestamp = new Date().toISOString()
+    const issued = await identity.createServiceAccountWithToken({
+      workspaceId: 'workspace-service-account',
+      accountId: 'project-reader-service',
+      displayName: 'Project reader',
+      permissions: [
+        'projects.read',
+        'work-items.read',
+        'documents.write',
+        'service-accounts.use',
+      ],
+      roleId: 'project:member',
+      scope: {
+        workspaceId: 'workspace-service-account',
+        kind: 'project',
+        targetId: 'refero',
+      },
+      credentialLifetimeDays: 30,
+      allowedSourceCidrs: [],
+      status: 'active',
+      credentialGeneration: 0,
+      revision: 1,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }, 'create-project-reader', 'create-project-reader-fingerprint')
+    const recordServiceAccountUse = identity.recordServiceAccountUse.bind(identity)
+    let serviceAccountAuditContext:
+      Parameters<typeof identity.recordServiceAccountUse>[2]
+    identity.recordServiceAccountUse = async (workspaceId, accountId, auditContext) => {
+      serviceAccountAuditContext = auditContext
+      await recordServiceAccountUse(workspaceId, accountId, auditContext)
+    }
+    let documentAuthorizationGuards:
+      Parameters<
+        DocumentClient['update']
+      >[0]['access']['authorizationGuards']
+    let documentMutationControlRevision:
+      number | undefined
+    let documentGuardControlRevision:
+      number | undefined
+    configureApiClientsForTest({
+      documents: {
+        async update(input) {
+          documentAuthorizationGuards =
+            input.access.authorizationGuards
+          const enterpriseGuard =
+            documentAuthorizationGuards?.find(
+              ({ tableName }) =>
+                tableName ===
+                  'EnterpriseIdentityTable',
+            )
+          documentGuardControlRevision =
+            enterpriseGuard?.expectedGeneration
+          documentMutationControlRevision =
+            (
+              await identity.getSnapshot(
+                'workspace-service-account',
+              )
+            ).controlRevision
+          if (
+            documentGuardControlRevision !==
+              documentMutationControlRevision
+          ) {
+            throw new DocumentError(
+              409,
+              'DocumentAuthorizationChanged',
+              'Document authorization changed.',
+            )
+          }
+          return {
+            schemaVersion: 1,
+            id: 'refero-document',
+            kind: 'page',
+            scope: {
+              type: 'project',
+              projectId: 'refero',
+            },
+            title:
+              input.title ??
+              'Refero document',
+            position: 'a0',
+            revision: 1,
+            permission: {
+              mode: 'inherit',
+              memberGrants: [],
+            },
+            relations: [],
+            favorite: false,
+            capabilities: {
+              canView: true,
+              canEdit: false,
+              canComment: false,
+              canShare: false,
+              canManagePermissions: false,
+              canArchive: false,
+              canRestore: false,
+              canExport: true,
+            },
+            createdByUserId:
+              'project-reader-service',
+            updatedByUserId:
+              'project-reader-service',
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            blocks: [],
+          }
+        },
+      } as unknown as DocumentClient,
+      enterpriseIdentity: identity,
+    })
+    const headers = { Authorization: `Bearer ${issued.token}` }
+
+    const denied = await app.request('/api/projects/private-project/tasks', { headers })
+    expect(denied.status).toBe(403)
+    expect(
+      (await identity.getSnapshot('workspace-service-account'))
+        .serviceAccounts[0]?.lastUsedAt,
+    ).toBeUndefined()
+
+    const controlRevisionBeforeDocumentMutation =
+      (
+        await identity.getSnapshot(
+          'workspace-service-account',
+        )
+      ).controlRevision
+    const documentResponse = await app.request(
+      '/api/documents/refero-document',
+      {
+        method: 'PATCH',
+        headers: {
+          ...headers,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          expectedRevision: 1,
+          title: 'Updated by service account',
+        }),
+      },
+    )
+    expect(documentResponse.status).toBe(200)
+    expect(documentMutationControlRevision)
+      .toBe(
+        controlRevisionBeforeDocumentMutation +
+          1,
+      )
+    expect(documentGuardControlRevision)
+      .toBe(documentMutationControlRevision)
+    expect(documentAuthorizationGuards)
+      .toEqual([
+        expect.objectContaining({
+          tableName: 'PlanningTable',
+          key: {
+            workspaceId:
+              'workspace-service-account',
+            recordKey: 'META',
+          },
+        }),
+        expect.objectContaining({
+          tableName:
+            'EnterpriseIdentityTable',
+          key: {
+            scopeKey:
+              'WORKSPACE#workspace-service-account',
+            recordKey: 'CONTROL',
+          },
+        }),
+      ])
+    expect(
+      documentAuthorizationGuards?.some(
+        (guard) =>
+          guard.tableName ===
+            'WorkspaceAccessTable' ||
+          guard.key.recordKey ===
+            'MEMBER#project-reader-service',
+      ),
+    ).toBeFalse()
+
+    const allowed = await app.request('/api/projects/refero/tasks', { headers })
+    expect(allowed.status).toBe(200)
+    expect(
+      (await identity.getSnapshot('workspace-service-account'))
+        .serviceAccounts[0]?.lastUsedAt,
+    ).toEqual(expect.any(String))
+    expect(serviceAccountAuditContext).toMatchObject({
+      actor: {
+        id: 'project-reader-service',
+        kind: 'service',
+      },
+      source: {
+        kind: 'api',
+        route: '/api/projects/refero/tasks',
+      },
+    })
+  })
+})
+
+test('uses an active break-glass elevation to repair an IP allowlist lockout', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member' })
+  const workspaceId = 'user#demo@example.com'
+  const timestamp = new Date()
+  const now = timestamp.toISOString()
+  const nowSeconds = Math.floor(timestamp.getTime() / 1_000)
+  const accessToken = [
+    Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url'),
+    Buffer.from(JSON.stringify({
+      auth_time: nowSeconds,
+      iat: nowSeconds,
+      exp: nowSeconds + 3_600,
+      token_use: 'access',
+    })).toString('base64url'),
+    'test-signature',
+  ].join('.')
+  const alternateAccessToken = [
+    Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url'),
+    Buffer.from(JSON.stringify({
+      auth_time: nowSeconds,
+      iat: nowSeconds,
+      exp: nowSeconds + 3_600,
+      token_use: 'access',
+    })).toString('base64url'),
+    'alternate-test-signature',
+  ].join('.')
+  const identity = new InMemoryEnterpriseIdentityClient()
+  await identity.putSecurityPolicy({
+    workspaceId,
+    loginMode: 'password-or-sso',
+    mfaRequirement: 'required',
+    sessionLifetimeMinutes: 480,
+    idleTimeoutMinutes: 60,
+    reauthenticationIntervalMinutes: 120,
+    sensitiveActionReauthenticationMinutes: 15,
+    ipAllowlistMode: 'all-users',
+    ipAllowlist: ['203.0.113.0/24'],
+    externalAccess: {
+      allowGuests: true,
+      allowExternalCollaborators: true,
+      requireMfa: true,
+      maximumSessionLifetimeMinutes: 120,
+      allowedGuestDomains: [],
+      permissionCeiling: ['workspace.read'],
+    },
+    revision: 1,
+    updatedAt: now,
+    updatedBy: 'owner@example.com',
+  })
+  await identity.putBreakGlassAccount({
+    workspaceId,
+    accountId: 'recovery-demo',
+    linkedMemberKey: 'demo@example.com',
+    email: 'recovery@outside.example',
+    status: 'active',
+    requireMfa: true,
+    maximumActivationMinutes: 30,
+    mfaVerifiedAt: now,
+    lastTestedAt: now,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  const putSecurityPolicy = identity.putSecurityPolicy.bind(identity)
+  let breakGlassAuditContext: Parameters<typeof identity.putSecurityPolicy>[1]
+  identity.putSecurityPolicy = async (policy, auditContext) => {
+    breakGlassAuditContext = auditContext
+    return putSecurityPolicy(policy, auditContext)
+  }
+  let verifyRecoveryDomainDuringMfa = false
+  configureApiClientsForTest({
+    enterpriseIdentity: identity,
+    enterpriseSessionActivity: {
+      async getAuthenticationMethods() {
+        if (verifyRecoveryDomainDuringMfa) {
+          verifyRecoveryDomainDuringMfa = false
+          await identity.putVerifiedDomain({
+            workspaceId,
+            domainId: 'outside-example',
+            domain: 'outside.example',
+            status: 'verified',
+            revision: 1,
+            verificationRecordName: '_mukuroji-challenge.outside.example',
+            verifiedAt: now,
+            enforceSso: false,
+            createdAt: now,
+            updatedAt: now,
+          })
+        }
+        return ['software_token_mfa']
+      },
+      async recordAuthenticationAssurance() {
+        return undefined
+      },
+      async validateAndTouch(input) {
+        return [...input.authenticationMethods]
+      },
+    },
+  })
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    'Content-Type': 'application/json',
+  }
+
+  const activation = await app.request(
+    '/api/enterprise/security/break-glass/activate',
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        reason: 'Repair mistaken IP policy',
+        durationMinutes: 15,
+      }),
+    },
+  )
+  const snapshotResponse = await app.request('/api/enterprise/security', { headers })
+  const alternateSessionResponse = await app.request('/api/enterprise/security', {
+    headers: { Authorization: `Bearer ${alternateAccessToken}` },
+  })
+  const policyResponse = await app.request('/api/enterprise/security/policy', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({
+      expectedVersion: 1,
+      mfaRequired: true,
+      sessionLifetimeMinutes: 480,
+      idleTimeoutMinutes: 60,
+      reauthenticationMinutes: 120,
+      sensitiveActionReauthenticationMinutes: 15,
+      ipAllowlist: [],
+      guestsAllowed: true,
+      externalCollaboratorsAllowed: true,
+      guestSessionLifetimeMinutes: 120,
+      allowedGuestDomains: [],
+    }),
+  })
+
+  expect(activation.status).toBe(201)
+  const activationBody = await activation.clone().json() as {
+    activation: { id: string }
+  }
+  expect(snapshotResponse.status).toBe(200)
+  expect(alternateSessionResponse.status).toBe(403)
+  expect(await alternateSessionResponse.json()).toMatchObject({
+    code: 'EnterpriseSessionIpDenied',
+  })
+  expect(await identity.getActiveBreakGlassActivation(
+    workspaceId,
+    'demo@example.com',
+    createHash('sha256').update(accessToken).digest('base64url'),
+  )).toMatchObject({ accountId: 'recovery-demo' })
+  expect(await identity.getActiveBreakGlassActivation(
+    workspaceId,
+    'demo@example.com',
+    createHash('sha256').update(alternateAccessToken).digest('base64url'),
+  )).toBeUndefined()
+  expect(await snapshotResponse.json()).toMatchObject({
+    activeBreakGlassActivation: {
+      expiresAt: expect.any(String),
+    },
+  })
+  expect(policyResponse.status).toBe(200)
+  expect(breakGlassAuditContext).toMatchObject({
+    actor: {
+      id: 'demo@example.com',
+      kind: 'break-glass',
+    },
+    correlationId: activationBody.activation.id,
+  })
+  expect((await identity.getSnapshot(workspaceId)).policy?.ipAllowlist).toEqual([])
+
+  verifyRecoveryDomainDuringMfa = true
+  const managedDomainActivation = await app.request(
+    '/api/enterprise/security/break-glass/activate',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${alternateAccessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        reason: 'Attempt recovery after domain verification',
+        durationMinutes: 15,
+      }),
+    },
+  )
+  expect(managedDomainActivation.status).toBe(409)
+  expect(await managedDomainActivation.json()).toMatchObject({
+    code: 'EnterpriseBreakGlassRecoveryDomainManaged',
+    message: 'Break-glass recovery must use an account outside every managed domain.',
+  })
+  expect(await identity.getActiveBreakGlassActivation(
+    workspaceId,
+    'demo@example.com',
+    createHash('sha256').update(alternateAccessToken).digest('base64url'),
+  )).toBeUndefined()
 })
 
 test('updates a team-owned issue after team access is confirmed', async () => {
@@ -4023,7 +15803,7 @@ test('updates a team-owned issue after team access is confirmed', async () => {
       assigneeUserId: 'sato@example.com',
       dueDate: '2026/06/22',
       priority: 'low',
-      status: 'done',
+      workflowStatusId: 'done',
       expectedRevision: 1,
     }),
   })
@@ -4035,7 +15815,8 @@ test('updates a team-owned issue after team access is confirmed', async () => {
       teamId: 'core-team',
       title: '更新済み Issue',
       assigneeEmail: 'sato@example.com',
-      status: 'done',
+      workflowStatusId: 'done',
+      statusCategory: 'completed',
       dueDate: '2026/06/22',
       priority: 'low',
     },
@@ -4057,6 +15838,36 @@ test('updates a team-owned issue after team access is confirmed', async () => {
   ])
 })
 
+test('rejects internal archive fields on the public Work Item update endpoint', async () => {
+  const calls = configureFakeProjectClients(true)
+  const archiveFields = [
+    { archivedAt: '2026-07-17T00:00:00.000Z' },
+    { archivedBy: 'attacker@example.com' },
+  ]
+
+  for (const archiveField of archiveFields) {
+    const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...archiveField,
+        expectedRevision: 1,
+      }),
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      code: 'InvalidWorkItemArchiveUpdate',
+      message: 'Work Item archive fields cannot be updated through this endpoint.',
+    })
+  }
+
+  expect(calls.issueUpdates).toEqual([])
+})
+
 test('returns a stable conflict code when a Work Item revision is stale', async () => {
   configureFakeProjectClients(true)
   const currentIssue = {
@@ -4071,7 +15882,12 @@ test('returns a stable conflict code when a Work Item revision is stale', async 
     sortOrder: 10,
     title: '初回オンボーディングの離脱要因を減らす',
     assigneeUserId: 'sato@example.com',
-    status: 'in-progress',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'in-progress',
+    statusCategory: 'started',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/18',
     priority: 'high',
     createdAt: '2026-06-08T00:00:00.000Z',
@@ -4101,7 +15917,7 @@ test('returns a stable conflict code when a Work Item revision is stale', async 
       Authorization: 'Bearer test-token',
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ status: 'done', expectedRevision: 1 }),
+    body: JSON.stringify({ workflowStatusId: 'done', expectedRevision: 1 }),
   })
 
   expect(response.status).toBe(409)
@@ -4120,7 +15936,7 @@ test('requires a positive expected revision for Work Item updates', async () => 
       Authorization: 'Bearer test-token',
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ status: 'done' }),
+    body: JSON.stringify({ workflowStatusId: 'done' }),
   })
 
   expect(response.status).toBe(400)
@@ -4130,7 +15946,7 @@ test('requires a positive expected revision for Work Item updates', async () => 
   })
 })
 
-test('loads project execution issues with legacy task compatibility', async () => {
+test('loads only canonical project execution Work Items', async () => {
   const calls = configureFakeProjectClients(true, { taskAssigneeUserId: 'sato@example.com' })
 
   const response = await app.request('/api/projects/refero/issues', {
@@ -4144,14 +15960,11 @@ test('loads project execution issues with legacy task compatibility', async () =
   expect(body.projectId).toBe('refero')
   expect(body.issues.map((issue: { id: string }) => issue.id)).toEqual([
     'onboarding-friction',
-    'wireframe',
   ])
   expect(calls.projectIssueReads).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
-  expect(calls.taskReads).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-  ])
+  expect(calls.taskReads).toEqual([])
 })
 
 test('DynamoDB task client queries the scoped project partition across pages', async () => {
@@ -4207,6 +16020,7 @@ test('DynamoDB task client queries the scoped project partition across pages', a
     projectId: 'refero',
     tasks: [
       {
+        source: 'legacy',
         id: 'wireframe',
         titleKey: 'tasks.item.wireframe',
         assigneeKey: 'tasks.assignee.sato',
@@ -4215,6 +16029,7 @@ test('DynamoDB task client queries the scoped project partition across pages', a
         priority: 'high',
       },
       {
+        source: 'legacy',
         id: 'brand-guideline',
         titleKey: 'tasks.item.brandGuideline',
         assigneeKey: 'tasks.assignee.suzuki',
@@ -4251,7 +16066,7 @@ test('DynamoDB task client queries the scoped project partition across pages', a
   ])
 })
 
-test('DynamoDB Work Item list clients stop pagination at the requested read limit', async () => {
+test('DynamoDB task and Work Item list clients stop pagination at the requested read limit', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const legacyTask = {
     directoryId: 'user#demo@example.com',
@@ -4261,6 +16076,7 @@ test('DynamoDB Work Item list clients stop pagination at the requested read limi
     sortOrder: 10,
     title: 'Wireframe',
     assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
     status: 'todo',
     dueDate: '2026/06/03',
     priority: 'high',
@@ -4277,7 +16093,12 @@ test('DynamoDB Work Item list clients stop pagination at the requested read limi
     sortOrder: 10,
     title: 'Wireframe',
     assigneeUserId: 'sato@example.com',
-    status: 'todo',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/03',
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
@@ -4314,7 +16135,7 @@ test('DynamoDB Work Item list clients stop pagination at the requested read limi
   expect(sentInputs.map((input) => input.Limit)).toEqual([1, 1, 1])
 })
 
-test('DynamoDB Work Item list clients skip DynamoDB reads when limit is zero', async () => {
+test('DynamoDB task and Work Item list clients skip DynamoDB reads when limit is zero', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const documentClient = {
     async send(command: { input: Record<string, unknown> }) {
@@ -4348,6 +16169,37 @@ test('DynamoDB Work Item list clients skip DynamoDB reads when limit is zero', a
   expect(sentInputs).toEqual([])
 })
 
+test('DynamoDB Team Work Item reads can use the strongly consistent base table', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return { Items: [] }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await client.getTeamIssues('user#demo@example.com', 'core-team', {
+    consistentRead: true,
+  })
+
+  expect(sentInputs).toEqual([{
+    TableName: 'WorkItemsTable',
+    ConsistentRead: true,
+    KeyConditionExpression: 'directoryTeamId = :directoryTeamId',
+    ExpressionAttributeValues: {
+      ':directoryTeamId': 'user#demo@example.com#team#core-team',
+    },
+    ExclusiveStartKey: undefined,
+  }])
+})
+
 test('DynamoDB Team and project Work Item clients read every page without a default Limit', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const pageCounts = new Map<string, number>()
@@ -4363,7 +16215,12 @@ test('DynamoDB Team and project Work Item clients read every page without a defa
     sortOrder: 10,
     title: 'Work Item',
     assigneeUserId: 'sato@example.com',
-    status: 'todo',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/03',
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
@@ -4411,22 +16268,27 @@ test('DynamoDB Team and project Work Item clients read every page without a defa
   expect(sentInputs.every((input) => !('Limit' in input))).toBe(true)
 })
 
-test('DynamoDB aggregate Work Item reads retain only validated private migration source metadata', async () => {
-  let migrationSourceKey =
-    'user#demo@example.com#project#refero#task#wireframe'
+test('DynamoDB Work Item list limits count visible rows instead of archived rows', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const pageCounts = new Map<string, number>()
   const canonicalWorkItem = {
     schemaVersion: 1,
     revision: 1,
     directoryId: 'user#demo@example.com',
     directoryTeamId: 'user#demo@example.com#team#core-team',
-    directoryProjectId: 'user#demo@example.com#project#private-project',
+    directoryProjectId: 'user#demo@example.com#project#refero',
     teamId: 'core-team',
-    assignedProjectId: 'private-project',
-    issueId: 'wireframe',
+    assignedProjectId: 'refero',
+    issueId: 'work-item',
     sortOrder: 10,
-    title: 'Migrated Work Item',
+    title: 'Work Item',
     assigneeUserId: 'sato@example.com',
-    status: 'todo',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/03',
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
@@ -4434,8 +16296,26 @@ test('DynamoDB aggregate Work Item reads retain only validated private migration
   }
   const documentClient = {
     async send(command: { input: Record<string, unknown> }) {
-      const item = { ...canonicalWorkItem, migrationSourceKey }
-      return 'Key' in command.input ? { Item: item } : { Items: [item] }
+      sentInputs.push(command.input)
+      const indexName = String(command.input.IndexName)
+      const pageCount = (pageCounts.get(indexName) ?? 0) + 1
+      pageCounts.set(indexName, pageCount)
+      return pageCount === 1
+        ? {
+            Items: [{
+              ...canonicalWorkItem,
+              issueId: `${indexName}-archived`,
+              archivedAt: '2026-07-12T01:00:00.000Z',
+            }],
+            LastEvaluatedKey: { indexName, pageCount },
+          }
+        : {
+            Items: [{
+              ...canonicalWorkItem,
+              issueId: `${indexName}-active`,
+              sortOrder: 20,
+            }],
+          }
     },
   } as unknown as DynamoDBDocumentClient
   const client = new DynamoDbTeamIssuesClient(
@@ -4446,191 +16326,196 @@ test('DynamoDB aggregate Work Item reads retain only validated private migration
     false,
   )
 
-  const response = await client.getTeamIssuesForAggregate(
+  const teamResponse = await client.getTeamIssues(
     'user#demo@example.com',
     'core-team',
+    { limit: 1 },
   )
-
-  expect(response.migrationSourceKeys).toEqual([
-    'user#demo@example.com#project#refero#task#wireframe',
-  ])
-  expect(response.issues[0]).not.toHaveProperty('migrationSourceKey')
-
-  migrationSourceKey = 'user#demo@example.com#project#refero#task#another-item'
-  await expect(
-    client.getTeamIssuesForAggregate('user#demo@example.com', 'core-team'),
-  ).rejects.toMatchObject({ code: 'InvalidTeamIssue', status: 503 })
-
-  migrationSourceKey = 'another-workspace#project#refero#task#wireframe'
-  await expect(
-    client.getTeamIssuesForAggregate('user#demo@example.com', 'core-team'),
-  ).rejects.toMatchObject({ code: 'InvalidTeamIssue', status: 503 })
-})
-
-test('DynamoDB migration source lookup chunks strongly consistent BatchGet requests', async () => {
-  const sentInputs: Array<Record<string, unknown>> = []
-  const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      sentInputs.push(command.input)
-      return {}
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbTeamIssuesClient(
-    'WorkItemsTable',
-    'IssueEventsTable',
-    documentClient,
-    {} as DynamoDBClient,
-    false,
-  )
-
-  await expect(client.getTeamIssueMigrationSourceKeys(
+  const projectResponse = await client.getProjectIssues(
     'user#demo@example.com',
-    Array.from({ length: 101 }, (_, index) => ({
-      teamId: 'core-team',
-      issueId: `work-item-${index}`,
-    })),
-  )).resolves.toEqual(new Set())
-
-  expect(sentInputs).toHaveLength(2)
-  const tableRequests = sentInputs.map((input) =>
-    (input.RequestItems as Record<string, {
-      ConsistentRead?: boolean
-      Keys: Array<Record<string, unknown>>
-    }>).WorkItemsTable
+    'refero',
+    { limit: 1 },
   )
-  expect(tableRequests.map((request) => request.Keys.length)).toEqual([100, 1])
-  expect(tableRequests.every((request) => request.ConsistentRead === true)).toBe(true)
+
+  expect(teamResponse.issues.map((issue) => issue.id)).toEqual([
+    'TeamIssueSortOrderIndex-active',
+  ])
+  expect(projectResponse.issues.map((issue) => issue.id)).toEqual([
+    'AssignedProjectIssueIndex-active',
+  ])
+  expect(sentInputs).toHaveLength(4)
+  expect(sentInputs.map((input) => input.Limit)).toEqual([1, 1, 1, 1])
+  expect(sentInputs[1]?.ExclusiveStartKey).toEqual({
+    indexName: 'TeamIssueSortOrderIndex',
+    pageCount: 1,
+  })
+  expect(sentInputs[3]?.ExclusiveStartKey).toEqual({
+    indexName: 'AssignedProjectIssueIndex',
+    pageCount: 1,
+  })
 })
 
-test('DynamoDB migration source lookup retries UnprocessedKeys and returns exact metadata', async () => {
-  let attempt = 0
-  const retryDelays: number[] = []
-  const canonicalWorkItem = {
+test('DynamoDB Work Item creation allocates IDs and sort order across archived rows', async () => {
+  const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  const archivedWorkItem = {
     schemaVersion: 1,
     revision: 1,
     directoryId: 'user#demo@example.com',
     directoryTeamId: 'user#demo@example.com#team#core-team',
-    directoryProjectId: 'user#demo@example.com#project#private-project',
+    directoryProjectId: 'user#demo@example.com#project#refero',
     teamId: 'core-team',
-    assignedProjectId: 'private-project',
+    assignedProjectId: 'refero',
     issueId: 'wireframe',
     sortOrder: 10,
-    title: 'Migrated Work Item',
+    title: 'Wireframe',
     assigneeUserId: 'sato@example.com',
-    status: 'todo',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/03',
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
-    migrationSourceKey: 'user#demo@example.com#project#refero#task#wireframe',
+    archivedAt: '2026-07-12T01:00:00.000Z',
   }
   const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      attempt += 1
-      const requestItems = command.input.RequestItems as Record<string, {
-        Keys: Array<Record<string, unknown>>
-      }>
-      if (attempt === 1) {
-        return { UnprocessedKeys: requestItems }
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentCommands.push({ input: command.input, name: command.constructor.name })
+      if (command.constructor.name === 'QueryCommand') {
+        return { Items: [archivedWorkItem] }
       }
-
-      return { Responses: { WorkItemsTable: [canonicalWorkItem] } }
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbTeamIssuesClient(
-    'WorkItemsTable',
-    'IssueEventsTable',
-    documentClient,
-    {} as DynamoDBClient,
-    false,
-    undefined,
-    async (ms) => {
-      retryDelays.push(ms)
-    },
-    () => 0.5,
-  )
-
-  await expect(client.getTeamIssueMigrationSourceKeys(
-    'user#demo@example.com',
-    [{ teamId: 'core-team', issueId: 'wireframe' }],
-  )).resolves.toEqual(new Set([
-    'user#demo@example.com#project#refero#task#wireframe',
-  ]))
-  expect(attempt).toBe(2)
-  expect(retryDelays).toEqual([37])
-})
-
-test('DynamoDB migration source lookup fails closed when UnprocessedKeys remain', async () => {
-  let attempts = 0
-  const retryDelays: number[] = []
-  const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      attempts += 1
-      return {
-        UnprocessedKeys: command.input.RequestItems,
-      }
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbTeamIssuesClient(
-    'WorkItemsTable',
-    'IssueEventsTable',
-    documentClient,
-    {} as DynamoDBClient,
-    false,
-    undefined,
-    async (ms) => {
-      retryDelays.push(ms)
-    },
-    () => 0.5,
-  )
-
-  await expect(client.getTeamIssueMigrationSourceKeys(
-    'user#demo@example.com',
-    [{ teamId: 'core-team', issueId: 'wireframe' }],
-  )).rejects.toMatchObject({
-    code: 'TeamIssueMigrationLookupIncomplete',
-    status: 503,
-  })
-  expect(attempts).toBe(3)
-  expect(retryDelays).toEqual([37, 75])
-})
-
-test('DynamoDB legacy task client rejects mutations without sending writes', async () => {
-  const sentInputs: Array<Record<string, unknown>> = []
-  const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      sentInputs.push(command.input)
       return {}
     },
   } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbProjectTasksClient('TasksTable', documentClient)
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
 
-  await expect(
-    client.createProjectTask('user#demo@example.com', 'refero', {
-      title: '新規タスク',
-      assigneeUserId: 'suzuki@example.com',
-      status: 'todo',
-      dueDate: '2026/06/21',
-      priority: 'medium',
-    }),
-  ).rejects.toMatchObject({
-    code: 'LegacyProjectTaskReadOnly',
-    status: 409,
+  const response = await client.createTeamIssue(
+    'user#demo@example.com',
+    'core-team',
+    {
+      title: 'Wireframe',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'sato@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      dueDate: '2026/06/03',
+      priority: 'high',
+    },
+    'demo@example.com',
+  )
+
+  expect(response.issue.id).toBe('wireframe-2')
+  const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
+  const transactionItems = (transaction?.input as TransactWriteCommandInput | undefined)
+    ?.TransactItems
+  expect(transactionItems?.[0]).toMatchObject({
+    Put: {
+      Item: {
+        issueId: 'wireframe-2',
+        sortOrder: 20,
+      },
+    },
   })
-  await expect(
-    client.updateProjectTaskStatus('user#demo@example.com', 'refero', 'wireframe', {
-      status: 'done',
-      expectedRevision: 1,
-    }),
-  ).rejects.toMatchObject({
-    code: 'LegacyProjectTaskReadOnly',
-    status: 409,
+})
+
+test('DynamoDB Work Item comment idempotent replay returns comment and activity', async () => {
+  const issue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'issue-1',
+    sortOrder: 10,
+    title: 'Idempotent comments',
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'member@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/20',
+    priority: 'medium',
+    createdAt: '2026-07-17T00:00:00.000Z',
+    updatedAt: '2026-07-17T00:00:00.000Z',
+  }
+  const existingComment = {
+    directoryId: 'workspace-1',
+    teamId: 'core-team',
+    issueId: 'issue-1',
+    directoryTeamIssueId: 'workspace-1#team#core-team#issue#issue-1',
+    eventId: 'automation-comment-1',
+    eventType: 'commented',
+    actorUserId: 'automation:rule-1',
+    body: 'Already delivered',
+    summary: 'Comment was added.',
+    createdAt: '2026-07-17T00:01:00.000Z',
+  }
+  let getCount = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        getCount += 1
+        return { Item: getCount === 1 ? issue : existingComment }
+      }
+      if (command.constructor.name === 'PutCommand') {
+        const error = new Error('The comment already exists.')
+        error.name = 'ConditionalCheckFailedException'
+        throw error
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.createTeamIssueComment(
+    'workspace-1',
+    'core-team',
+    'issue-1',
+    {
+      body: 'Already delivered',
+      idempotencyEventId: 'automation-comment-1',
+    },
+    'automation:rule-1',
+  )).resolves.toEqual({
+    comment: {
+      id: 'automation-comment-1',
+      actorUserId: 'automation:rule-1',
+      body: 'Already delivered',
+      createdAt: '2026-07-17T00:01:00.000Z',
+    },
+    activity: {
+      id: 'automation-comment-1',
+      type: 'commented',
+      actorUserId: 'automation:rule-1',
+      summary: 'Comment was added.',
+      createdAt: '2026-07-17T00:01:00.000Z',
+    },
   })
-  expect(sentInputs).toEqual([])
+  expect(getCount).toBe(2)
 })
 
 test('DynamoDB Work Item client increments revision with an atomic CAS update', async () => {
   const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  let preparedResponse: unknown
   const currentIssue = {
     schemaVersion: 1,
     revision: 1,
@@ -4643,7 +16528,12 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
     sortOrder: 10,
     title: 'Wireframe',
     assigneeUserId: 'sato@example.com',
-    status: 'todo',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/03',
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
@@ -4658,7 +16548,12 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
         return {
           Item: reads === 1
             ? currentIssue
-            : { ...currentIssue, revision: 2, status: 'done' },
+            : {
+                ...currentIssue,
+                revision: 2,
+                workflowStatusId: 'done',
+                statusCategory: 'completed',
+              },
         }
       }
 
@@ -4677,10 +16572,30 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
     'user#demo@example.com',
     'core-team',
     'wireframe',
-    { status: 'done', expectedRevision: 1 },
+    {
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'done',
+      statusCategory: 'completed',
+      customFieldValues: {},
+      expectedRevision: 1,
+    },
     'demo@example.com',
+    undefined,
+    {
+      async prepare(response) {
+        preparedResponse = response
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: { entryType: 'idempotency', value: { state: 'completed' } },
+            },
+          },
+        }
+      },
+    },
   )).resolves.toMatchObject({
-    issue: { schemaVersion: 1, revision: 2, status: 'done' },
+    issue: { schemaVersion: 1, revision: 2, workflowStatusId: 'done' },
   })
   const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
   const transactItems = transaction?.input.TransactItems
@@ -4692,9 +16607,660 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
       },
       ConditionExpression:
         'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
-        '(#revision = :expectedRevision OR ' +
-        '(attribute_not_exists(#revision) AND :expectedRevision = :legacyRevision))',
+        '#revision = :expectedRevision',
     },
+  })
+  expect(Array.isArray(transactItems) ? transactItems.at(-1) : undefined).toMatchObject({
+    Put: { TableName: 'DeveloperPlatformTable' },
+  })
+  expect(preparedResponse).toMatchObject({
+    status: 200,
+    body: { id: 'wireframe', revision: 2, workflowStatusId: 'done' },
+  })
+})
+
+test('DynamoDB Work Item delete atomically stores its replay receipt', async () => {
+  const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 3,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'obsolete',
+    sortOrder: 10,
+    title: 'Obsolete',
+    assigneeUserId: 'demo@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/20',
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  let preparedResponse: unknown
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentCommands.push({ input: command.input, name: command.constructor.name })
+      if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.deleteTeamIssue(
+    'workspace-1',
+    'core-team',
+    'obsolete',
+    3,
+    'demo@example.com',
+    undefined,
+    {
+      async prepare(response) {
+        preparedResponse = response
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: { entryType: 'idempotency', value: { state: 'completed' } },
+            },
+          },
+        }
+      },
+    },
+    [
+      {
+        kind: 'external-links',
+        transactWriteItem: {
+          Put: {
+            TableName: 'DeveloperPlatformTable',
+            Item: {
+              entryType: 'work-item-link-fence',
+              activeLinkCount: 0,
+            },
+          },
+        },
+      },
+      {
+        kind: 'document-backlinks',
+        transactWriteItem: {
+          Put: {
+            TableName: 'DocumentsTable',
+            Item: {
+              entryType: 'work-item-document-backlink-fence',
+              activeBacklinkCount: 0,
+            },
+          },
+        },
+      },
+    ],
+  )).resolves.toMatchObject({ issue: { id: 'obsolete', revision: 3 } })
+
+  const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
+  const transactItems = transaction?.input.TransactItems
+  expect(Array.isArray(transactItems) ? transactItems[0] : undefined).toMatchObject({
+    Delete: {
+      TableName: 'IssuesTable',
+      ExpressionAttributeValues: { ':expectedRevision': 3 },
+    },
+  })
+  expect(Array.isArray(transactItems) ? transactItems[1] : undefined).toMatchObject({
+    Put: {
+      TableName: 'DeveloperPlatformTable',
+      Item: { entryType: 'work-item-link-fence', activeLinkCount: 0 },
+    },
+  })
+  expect(Array.isArray(transactItems) ? transactItems[2] : undefined).toMatchObject({
+    Put: {
+      TableName: 'DocumentsTable',
+      Item: {
+        entryType: 'work-item-document-backlink-fence',
+        activeBacklinkCount: 0,
+      },
+    },
+  })
+  expect(Array.isArray(transactItems) ? transactItems.at(-1) : undefined).toMatchObject({
+    Put: { TableName: 'DeveloperPlatformTable' },
+  })
+  expect(preparedResponse).toEqual({ status: 204, body: null })
+})
+
+test('DynamoDB Work Item client classifies configuration conflicts from the actual transaction layout', async () => {
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#refero',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    issueId: 'wireframe',
+    sortOrder: 10,
+    title: 'Wireframe',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/06/03',
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'demo@example.com', kind: 'user' },
+    idempotencyKey: 'configuration-conflict',
+    occurredAt: '2026-07-12T00:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/teams/core-team/issues/wireframe' },
+    source: { kind: 'api', requestId: 'configuration-conflict' },
+  })
+  const configurationConditionChecks: NonNullable<
+    TransactWriteCommandInput['TransactItems']
+  > = [{
+    ConditionCheck: {
+      TableName: 'ConfigurationTable',
+      Key: { workspaceId: 'workspace-1', scopeKey: 'WORK_ITEM_CONFIGURATION#TEAM#core-team' },
+      ConditionExpression: '#revision = :expectedRevision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':expectedRevision': 1 },
+    },
+  }]
+
+  for (const operation of ['create', 'update'] as const) {
+    for (const auditEnabled of [false, true]) {
+      let configurationConditionIndex = -1
+      const documentClient = {
+        async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+          if (command.constructor.name === 'QueryCommand') {
+            return { Items: [] }
+          }
+          if (command.constructor.name === 'GetCommand') {
+            return { Item: currentIssue }
+          }
+          if (command.constructor.name === 'TransactWriteCommand') {
+            const transactItems = command.input.TransactItems as Array<{
+              ConditionCheck?: { TableName?: string }
+            }>
+            configurationConditionIndex = transactItems.findIndex((item) =>
+              item.ConditionCheck?.TableName === 'ConfigurationTable'
+            )
+            const error = new Error('Transaction was canceled.')
+            error.name = 'TransactionCanceledException'
+            Object.assign(error, {
+              CancellationReasons: transactItems.map((_, index) => ({
+                Code: index === configurationConditionIndex ? 'ConditionalCheckFailed' : 'None',
+              })),
+            })
+            throw error
+          }
+          return {}
+        },
+      } as unknown as DynamoDBDocumentClient
+      const client = new DynamoDbTeamIssuesClient(
+        'IssuesTable',
+        'IssueEventsTable',
+        documentClient,
+        {} as DynamoDBClient,
+        false,
+        auditEnabled ? 'AuditTable' : undefined,
+      )
+      const mutation = operation === 'create'
+        ? client.createTeamIssue(
+            'workspace-1',
+            'core-team',
+            {
+              title: 'New Work Item',
+              assigneeUserId: 'sato@example.com',
+              workflowSchemaVersion: 1,
+              workflowStatusId: 'todo',
+              statusCategory: 'unstarted',
+              customFieldValues: {},
+              dueDate: '2026/07/20',
+              priority: 'medium',
+              configurationConditionChecks,
+            },
+            'demo@example.com',
+            auditEnabled ? auditContext : undefined,
+          )
+        : client.updateTeamIssue(
+            'workspace-1',
+            'core-team',
+            'wireframe',
+            {
+              workflowSchemaVersion: 1,
+              workflowStatusId: 'done',
+              statusCategory: 'completed',
+              customFieldValues: {},
+              expectedRevision: 1,
+              configurationConditionChecks,
+            },
+            'demo@example.com',
+            auditEnabled ? auditContext : undefined,
+          )
+
+      await expect(mutation).rejects.toMatchObject({
+        code: 'WorkItemConfigurationRevisionConflict',
+        status: 409,
+      })
+      expect(configurationConditionIndex).toBe(auditEnabled ? 3 : 2)
+    }
+  }
+})
+
+test('DynamoDB Work Item mutations classify authorization snapshot races separately', async () => {
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#refero',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    issueId: 'authorization-race',
+    sortOrder: 10,
+    title: 'Authorization race',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/20',
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const authorizationConditionChecks: NonNullable<
+    TransactWriteCommandInput['TransactItems']
+  > = [{
+    ConditionCheck: {
+      TableName: 'WorkspaceAccessTable',
+      Key: {
+        workspaceId: 'workspace-1',
+        recordKey: 'MEMBER#demo@example.com',
+      },
+      ConditionExpression: '#version = :expectedVersion',
+      ExpressionAttributeNames: { '#version': 'version' },
+      ExpressionAttributeValues: { ':expectedVersion': 1 },
+    },
+  }]
+
+  for (const operation of ['create', 'update'] as const) {
+    let authorizationConditionIndex = -1
+    const documentClient = {
+      async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+        if (command.constructor.name === 'QueryCommand') return { Items: [] }
+        if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+        if (command.constructor.name === 'TransactWriteCommand') {
+          const transactItems = command.input.TransactItems as Array<{
+            ConditionCheck?: { TableName?: string }
+          }>
+          authorizationConditionIndex = transactItems.findIndex((item) =>
+            item.ConditionCheck?.TableName === 'WorkspaceAccessTable'
+          )
+          const error = new Error('Transaction was canceled.')
+          error.name = 'TransactionCanceledException'
+          Object.assign(error, {
+            CancellationReasons: transactItems.map((_, index) => ({
+              Code: index === authorizationConditionIndex
+                ? 'ConditionalCheckFailed'
+                : 'None',
+            })),
+          })
+          throw error
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbTeamIssuesClient(
+      'IssuesTable',
+      'IssueEventsTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+    )
+    const mutation = operation === 'create'
+      ? client.createTeamIssue(
+          'workspace-1',
+          'core-team',
+          {
+            title: 'New Work Item',
+            assigneeUserId: 'sato@example.com',
+            workflowSchemaVersion: 1,
+            workflowStatusId: 'todo',
+            statusCategory: 'unstarted',
+            customFieldValues: {},
+            dueDate: '2026/07/20',
+            priority: 'medium',
+            authorizationConditionChecks,
+          },
+          'demo@example.com',
+        )
+      : client.updateTeamIssue(
+          'workspace-1',
+          'core-team',
+          'authorization-race',
+          {
+            workflowSchemaVersion: 1,
+            workflowStatusId: 'done',
+            statusCategory: 'completed',
+            customFieldValues: {},
+            expectedRevision: 1,
+            authorizationConditionChecks,
+          },
+          'demo@example.com',
+        )
+
+    await expect(mutation).rejects.toMatchObject({
+      code: 'WorkItemAuthorizationChanged',
+      status: 409,
+    })
+    expect(authorizationConditionIndex).toBe(2)
+  }
+
+  let deleteAuthorizationConditionIndex = -1
+  const deleteDocumentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const transactItems = command.input.TransactItems as Array<{
+          ConditionCheck?: { TableName?: string }
+        }>
+        deleteAuthorizationConditionIndex = transactItems.findIndex((item) =>
+          item.ConditionCheck?.TableName === 'WorkspaceAccessTable'
+        )
+        const error = new Error('Transaction was canceled.')
+        error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: transactItems.map((_, index) => ({
+            Code: index === deleteAuthorizationConditionIndex
+              ? 'ConditionalCheckFailed'
+              : 'None',
+          })),
+        })
+        throw error
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const deleteClient = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    deleteDocumentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  await expect(deleteClient.deleteTeamIssue(
+    'workspace-1',
+    'core-team',
+    'authorization-race',
+    1,
+    'demo@example.com',
+    undefined,
+    undefined,
+    [
+      {
+        kind: 'external-links',
+        transactWriteItem: {
+          Put: { TableName: 'DeveloperPlatformTable', Item: { activeLinkCount: 0 } },
+        },
+      },
+      {
+        kind: 'document-backlinks',
+        transactWriteItem: {
+          Put: { TableName: 'DocumentsTable', Item: { activeBacklinkCount: 0 } },
+        },
+      },
+    ],
+    authorizationConditionChecks,
+  )).rejects.toMatchObject({
+    code: 'WorkItemAuthorizationChanged',
+    status: 409,
+  })
+  expect(deleteAuthorizationConditionIndex).toBe(3)
+})
+
+test('DynamoDB Work Item delete distinguishes external-link and Document-backlink races', async () => {
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'deletion-fence-race',
+    sortOrder: 10,
+    title: 'Deletion fence race',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/20',
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const fences = [
+    {
+      kind: 'external-links' as const,
+      transactWriteItem: {
+        Put: { TableName: 'DeveloperPlatformTable', Item: { activeLinkCount: 0 } },
+      },
+    },
+    {
+      kind: 'document-backlinks' as const,
+      transactWriteItem: {
+        Put: { TableName: 'DocumentsTable', Item: { activeBacklinkCount: 0 } },
+      },
+    },
+  ]
+  for (const [failedIndex, expectedCode] of [
+    [1, 'ExternalWorkItemLinkConflict'],
+    [2, 'WorkItemDocumentBacklinkConflict'],
+  ] as const) {
+    const documentClient = {
+      async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+        if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+        if (command.constructor.name === 'TransactWriteCommand') {
+          const transactItems =
+            command.input.TransactItems as NonNullable<TransactWriteCommandInput['TransactItems']>
+          const error = new Error('Transaction was canceled.')
+          error.name = 'TransactionCanceledException'
+          Object.assign(error, {
+            CancellationReasons: transactItems.map((_, index) => ({
+              Code: index === failedIndex ? 'ConditionalCheckFailed' : 'None',
+            })),
+          })
+          throw error
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbTeamIssuesClient(
+      'IssuesTable',
+      'IssueEventsTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+    )
+
+    await expect(client.deleteTeamIssue(
+      'workspace-1',
+      'core-team',
+      'deletion-fence-race',
+      1,
+      'demo@example.com',
+      undefined,
+      undefined,
+      fences,
+    )).rejects.toMatchObject({
+      code: expectedCode,
+      status: 409,
+    })
+  }
+})
+
+test('DynamoDB Work Item delete maps unclassified transaction cancellations to a retryable error', async () => {
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'unclassified-cancellation',
+    sortOrder: 10,
+    title: 'Unclassified cancellation',
+    assigneeUserId: 'demo@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/20',
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+
+  for (const cancellationReasons of [
+    undefined,
+    [],
+    [{ Code: 'TransactionConflict' }],
+  ]) {
+    const documentClient = {
+      async send(command: { constructor: { name: string } }) {
+        if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+        if (command.constructor.name === 'TransactWriteCommand') {
+          const error = Object.assign(new Error('Transaction was canceled.'), {
+            name: 'TransactionCanceledException',
+            $metadata: { httpStatusCode: 400 },
+          })
+          if (cancellationReasons !== undefined) {
+            Object.assign(error, { CancellationReasons: cancellationReasons })
+          }
+          throw error
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbTeamIssuesClient(
+      'IssuesTable',
+      'IssueEventsTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+    )
+
+    await expect(client.deleteTeamIssue(
+      'workspace-1',
+      'core-team',
+      'unclassified-cancellation',
+      1,
+      'demo@example.com',
+    )).rejects.toMatchObject({
+      code: 'WorkItemDeletionTransactionUnavailable',
+      status: 503,
+    })
+  }
+})
+
+test('DynamoDB Work Item delete prioritizes authorization failure over deletion fences', async () => {
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'multiple-condition-failures',
+    sortOrder: 10,
+    title: 'Multiple condition failures',
+    assigneeUserId: 'demo@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/20',
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const transactItems =
+          command.input.TransactItems as NonNullable<TransactWriteCommandInput['TransactItems']>
+        const authorizationIndex = transactItems.findIndex((item) =>
+          item.ConditionCheck?.TableName === 'WorkspaceAccessTable'
+        )
+        throw Object.assign(new Error('Transaction was canceled.'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: transactItems.map((_, index) => ({
+            Code: index === 1 || index === authorizationIndex
+              ? 'ConditionalCheckFailed'
+              : 'None',
+          })),
+        })
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.deleteTeamIssue(
+    'workspace-1',
+    'core-team',
+    'multiple-condition-failures',
+    1,
+    'demo@example.com',
+    undefined,
+    undefined,
+    [{
+      kind: 'external-links',
+      transactWriteItem: {
+        Put: {
+          TableName: 'DeveloperPlatformTable',
+          Item: { activeLinkCount: 0 },
+        },
+      },
+    }],
+    [{
+      ConditionCheck: {
+        TableName: 'WorkspaceAccessTable',
+        Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#demo@example.com' },
+        ConditionExpression: '#version = :expectedVersion',
+        ExpressionAttributeNames: { '#version': 'version' },
+        ExpressionAttributeValues: { ':expectedVersion': 1 },
+      },
+    }],
+  )).rejects.toMatchObject({
+    code: 'WorkItemAuthorizationChanged',
+    status: 409,
   })
 })
 
@@ -4712,7 +17278,12 @@ test('DynamoDB Work Item update emits render-ready notification candidates', asy
     sortOrder: 10,
     title: 'Notification-ready Work Item',
     assigneeUserId: 'before@example.com',
-    status: 'todo',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/07/20',
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
@@ -4731,7 +17302,8 @@ test('DynamoDB Work Item update emits render-ready notification candidates', asy
                 ...currentIssue,
                 revision: 2,
                 assigneeUserId: 'after@example.com',
-                status: 'review',
+                workflowStatusId: 'review',
+                statusCategory: 'started',
               },
         }
       }
@@ -4762,7 +17334,10 @@ test('DynamoDB Work Item update emits render-ready notification candidates', asy
     'wireframe',
     {
       assigneeUserId: 'after@example.com',
-      status: 'review',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'review',
+      statusCategory: 'started',
+      customFieldValues: {},
       expectedRevision: 1,
     },
     'manager@example.com',
@@ -4804,9 +17379,14 @@ test('DynamoDB Work Item client classifies revision CAS transaction conditions',
     assignedProjectId: 'refero',
     issueId: 'wireframe',
     sortOrder: 10,
-    titleKey: 'tasks.item.wireframe',
+    title: 'Wireframe',
     assigneeUserId: 'sato@example.com',
-    status: 'todo',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
     dueDate: '2026/06/03',
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
@@ -4861,7 +17441,13 @@ test('DynamoDB Work Item client classifies revision CAS transaction conditions',
       'user#demo@example.com',
       'core-team',
       'wireframe',
-      { status: 'done', expectedRevision: 1 },
+      {
+        workflowSchemaVersion: 1,
+        workflowStatusId: 'done',
+        statusCategory: 'completed',
+        customFieldValues: {},
+        expectedRevision: 1,
+      },
       'demo@example.com',
       auditContext,
     )
@@ -4952,372 +17538,77 @@ test('DynamoDB Work Item client classifies revision CAS transaction conditions',
   expect(mixedReasons.sentInputs).toHaveLength(2)
 })
 
-test('DynamoDB dashboard summary client derives counts from directory and task data', async () => {
+test('DynamoDB dashboard summary client derives counts from canonical Work Items', async () => {
   const accessListReads: Array<{ directoryId: string; memberKey: string }> = []
-  const directoryReads: Array<{ directoryId: string; locale: Locale }> = []
-  const migrationSourceBatchReads: Array<Array<{ issueId: string; teamId: string }>> = []
-  const taskReads: Array<{ directoryId: string; projectId: string }> = []
+  const projectIssueReads: Array<{ directoryId: string; projectId: string }> = []
   const client = new DynamoDbDashboardSummaryClient(
     {
-      async getProjectDirectory(directoryId, locale) {
-        directoryReads.push({ directoryId, locale })
-        expect(directoryId).toBe('user#demo@example.com')
-        expect(locale).toBe('ja')
-
-        return {
-          teams: [
-            {
-              id: 'core-team',
-              name: 'コアチーム',
-              expanded: true,
-              projects: [
-                {
-                  id: 'refero',
-                  name: 'Refero',
-                  tone: 'blue',
-                },
-                {
-                  id: 'new-project',
-                  name: '新規プロジェクト',
-                  tone: 'green',
-                },
-              ],
-            },
-          ],
-        }
-      },
-      async getProjectAccess(_directoryId, projectId) {
-        return projectId === 'refero'
-          ? {
-              projectId,
-              role: 'manager' as ProjectRole,
-            }
-          : undefined
-      },
-      async getProjectAccessList(directoryId, memberKey) {
-        accessListReads.push({ directoryId, memberKey })
-
-        return [
-          {
-            projectId: 'refero',
-            role: 'manager' as ProjectRole,
-          },
-        ]
-      },
-      async hasProjectAccess() {
-        return true
-      },
-      async getProjectRole() {
-        return 'manager' as ProjectRole
-      },
-      async getProjectMembers() {
-        return {
-          projectId: 'unused',
-          members: [],
-        }
-      },
-      async updateProjectMember() {
-        return {
-          member: {
-            id: 'unused',
-            email: 'unused@example.com',
-            role: 'viewer',
-            updatedAt: '2026-06-08T00:00:00.000Z',
-          },
-        }
-      },
-      async removeProjectMember() {
-        return {
-          projectId: 'unused',
-          memberId: 'unused@example.com',
-        }
-      },
-      async createTeam() {
-        return {
-          team: {
-            id: 'unused',
-            name: 'unused',
-            projects: [],
-          },
-        }
-      },
-      async createProject() {
-        return {
-          project: {
-            id: 'unused',
-            name: 'unused',
-          },
-        }
-      },
-      async archiveTeam() {
-        return {
-          teamId: 'unused',
-          archivedAt: '2026-06-06T00:00:00.000Z',
-        }
-      },
-      async archiveProject() {
-        return {
-          teamId: 'unused',
-          projectId: 'unused',
-          archivedAt: '2026-06-06T00:00:00.000Z',
-        }
-      },
-    },
-    {
-      async getProjectTasks(directoryId, projectId) {
-        taskReads.push({ directoryId, projectId })
-
-        return {
-          projectId,
-          tasks: projectId === 'refero'
-            ? [
-                {
-                  id: 'wireframe',
-                  title: 'ワイヤーフレーム',
-                  assignee: '佐藤 花子',
-                  status: 'in-progress',
-                  dueDate: '2026/06/03',
-                  priority: 'high',
-                },
-                {
-                  id: 'archive',
-                  title: '完了済み',
-                  assignee: '鈴木 太郎',
-                  status: 'done',
-                  dueDate: '2026/06/01',
-                  priority: 'high',
-                },
-              ]
-            : [
-                {
-                  id: 'planning',
-                  title: '計画',
-                  assignee: '田中 一郎',
-                  status: 'todo',
-                  dueDate: '2026/06/12',
-                  priority: 'medium',
-                },
-              ],
-        }
-      },
-      async createProjectTask() {
-        return {
-          task: {
-            id: 'unused',
-            title: 'unused',
-            assignee: 'unused',
-            status: 'todo',
-            dueDate: '2026/06/03',
-            priority: 'medium',
-          },
-        }
-      },
-      async updateProjectTaskStatus() {
-        return {
-          task: {
-            id: 'unused',
-            title: 'unused',
-            assignee: 'unused',
-            status: 'done',
-            dueDate: '2026/06/03',
-            priority: 'medium',
-          },
-        }
-      },
-    },
-    {
-      async getProjectIssues(_directoryId: string, projectId: string) {
-        return {
-          projectId,
-          issues: [{
-            schemaVersion: 1,
-            revision: 1,
-            id: 'canonical-review',
-            teamId: 'core-team',
-            assignedProjectId: projectId,
-            title: 'Canonical review',
-            assigneeUserId: 'sato@example.com',
-            status: 'review' as const,
-            dueDate: '2026/06/10',
-            priority: 'medium' as const,
-            createdAt: '2026-06-01T00:00:00.000Z',
-            updatedAt: '2026-06-01T00:00:00.000Z',
-            source: 'dynamodb' as const,
-          }],
-        }
-      },
-      async getTeamIssueMigrationSourceKeys(
-        _directoryId: string,
-        keys: readonly { issueId: string; teamId: string }[],
-      ) {
-        migrationSourceBatchReads.push(keys.map((key) => ({ ...key })))
-
-        return new Set([
-          'user#demo@example.com#project#refero#task#wireframe',
-        ])
-      },
-    } as never,
-  )
-
-  const summary = await client.getSummary('user#demo@example.com', {
-    userKey: 'demo@example.com',
-    isSystemAdmin: false,
-  })
-
-  expect(summary.projects).toBe(1)
-  expect(summary.tasks).toBe(1)
-  expect(summary.blocked).toBe(0)
-  expect(summary.source).toBe('dynamodb')
-  expect(Date.parse(summary.updatedAt)).not.toBeNaN()
-  expect(directoryReads).toEqual([
-    { directoryId: 'user#demo@example.com', locale: 'ja' },
-  ])
-  expect(accessListReads).toEqual([
-    {
-      directoryId: 'user#demo@example.com',
-      memberKey: 'demo@example.com',
-    },
-  ])
-  expect(taskReads).toEqual([{ directoryId: 'user#demo@example.com', projectId: 'refero' }])
-  expect(migrationSourceBatchReads).toEqual([[
-    { issueId: 'wireframe', teamId: 'core-team' },
-    { issueId: 'archive', teamId: 'core-team' },
-  ]])
-})
-
-test('DynamoDB dashboard keeps same-ID legacy tasks isolated by migration source project', async () => {
-  let migrationSourceProjectId = 'project-a'
-  const client = new DynamoDbDashboardSummaryClient(
-    {
-      async getProjectDirectory(_directoryId: string, _locale: 'ja' | 'en') {
+      async getProjectDirectory() {
         return {
           teams: [{
             id: 'core-team',
             name: 'Core Team',
             expanded: true,
             projects: [
-              { id: 'project-a', name: 'Project A', tone: 'blue' as const },
-              { id: 'project-b', name: 'Project B', tone: 'green' as const },
+              { id: 'refero', name: 'Refero', tone: 'blue' as const },
+              { id: 'private', name: 'Private', tone: 'purple' as const },
             ],
           }],
         }
       },
-      async getProjectAccessList(_directoryId: string, _memberKey: string) {
-        return [{ projectId: 'project-b', role: 'viewer' as ProjectRole }]
-      },
-    } as never,
-    {
-      async getProjectTasks(_directoryId: string, projectId: string) {
-        return {
-          projectId,
-          tasks: [{
-            id: 'wireframe',
-            title: 'Wireframe',
-            assignee: '佐藤 花子',
-            status: 'in-progress' as const,
-            dueDate: '2026/06/03',
-            priority: 'high' as const,
-          }],
-        }
-      },
-    } as never,
-    {
-      async getProjectIssues(_directoryId: string, projectId: string) {
-        return { projectId, issues: [] }
-      },
-      async getTeamIssueMigrationSourceKeys(
-        directoryId: string,
-        _keys: readonly { issueId: string; teamId: string }[],
-      ) {
-        return new Set([
-          `${directoryId}#project#${migrationSourceProjectId}#task#wireframe`,
-        ])
-      },
-    } as never,
-  )
-
-  const mismatchedSourceSummary = await client.getSummary('user#demo@example.com', {
-    userKey: 'demo@example.com',
-    isSystemAdmin: false,
-  })
-  expect(mismatchedSourceSummary.tasks).toBe(1)
-  expect(mismatchedSourceSummary.blocked).toBe(1)
-
-  migrationSourceProjectId = 'project-b'
-  const exactSourceSummary = await client.getSummary('user#demo@example.com', {
-    userKey: 'demo@example.com',
-    isSystemAdmin: false,
-  })
-  expect(exactSourceSummary.tasks).toBe(0)
-  expect(exactSourceSummary.blocked).toBe(0)
-})
-
-test('DynamoDB dashboard omits legacy fallback when a project has multiple owner Teams', async () => {
-  let legacyReads = 0
-  let migrationSourceReads = 0
-  const client = new DynamoDbDashboardSummaryClient(
-    {
-      async getProjectDirectory(_directoryId: string, _locale: 'ja' | 'en') {
-        return {
-          teams: [
-            {
-              id: 'core-team',
-              name: 'Core Team',
-              expanded: true,
-              projects: [{ id: 'refero', name: 'Refero', tone: 'blue' as const }],
-            },
-            {
-              id: 'design-team',
-              name: 'Design Team',
-              expanded: true,
-              projects: [{ id: 'refero', name: 'Refero', tone: 'purple' as const }],
-            },
-          ],
-        }
-      },
-      async getProjectAccessList(_directoryId: string, _memberKey: string) {
+      async getProjectAccessList(directoryId: string, memberKey: string) {
+        accessListReads.push({ directoryId, memberKey })
         return [{ projectId: 'refero', role: 'viewer' as ProjectRole }]
       },
     } as never,
     {
-      async getProjectTasks(_directoryId: string, projectId: string) {
-        legacyReads += 1
+      async getProjectIssues(directoryId: string, projectId: string) {
+        projectIssueReads.push({ directoryId, projectId })
         return {
           projectId,
-          tasks: [{
-            id: 'wireframe',
-            title: 'Wireframe',
-            assignee: '佐藤 花子',
-            status: 'in-progress' as const,
-            dueDate: '2026/06/03',
-            priority: 'high' as const,
-          }],
+          issues: [
+            {
+              schemaVersion: 1 as const,
+              revision: 1,
+              id: 'active-high',
+              teamId: 'core-team',
+              assignedProjectId: projectId,
+              title: 'Active high priority Work Item',
+              assigneeUserId: 'sato@example.com',
+              creatorMemberKey: 'demo@example.com',
+              workflowSchemaVersion: 1 as const,
+              workflowStatusId: 'in-progress',
+              statusCategory: 'started' as const,
+              customFieldValues: {},
+              relationIds: [],
+              dueDate: '2026/07/20',
+              priority: 'high' as const,
+              createdAt: '2026-07-01T00:00:00.000Z',
+              updatedAt: '2026-07-01T00:00:00.000Z',
+              source: 'dynamodb' as const,
+            },
+            {
+              schemaVersion: 1 as const,
+              revision: 1,
+              id: 'completed-high',
+              teamId: 'core-team',
+              assignedProjectId: projectId,
+              title: 'Completed high priority Work Item',
+              assigneeUserId: 'sato@example.com',
+              creatorMemberKey: 'demo@example.com',
+              workflowSchemaVersion: 1 as const,
+              workflowStatusId: 'done',
+              statusCategory: 'completed' as const,
+              customFieldValues: {},
+              relationIds: [],
+              dueDate: '2026/07/20',
+              priority: 'high' as const,
+              createdAt: '2026-07-01T00:00:00.000Z',
+              updatedAt: '2026-07-01T00:00:00.000Z',
+              source: 'dynamodb' as const,
+            },
+          ],
         }
-      },
-    } as never,
-    {
-      async getProjectIssues(_directoryId: string, projectId: string) {
-        return {
-          projectId,
-          issues: [{
-            schemaVersion: 1 as const,
-            revision: 1,
-            id: 'canonical-review',
-            teamId: 'core-team',
-            assignedProjectId: projectId,
-            title: 'Canonical review',
-            status: 'review' as const,
-            dueDate: '2026/06/10',
-            priority: 'medium' as const,
-            createdAt: '2026-06-01T00:00:00.000Z',
-            updatedAt: '2026-06-01T00:00:00.000Z',
-            source: 'dynamodb' as const,
-          }],
-        }
-      },
-      async getTeamIssueMigrationSourceKeys() {
-        migrationSourceReads += 1
-        return new Set<string>()
       },
     } as never,
   )
@@ -5327,11 +17618,40 @@ test('DynamoDB dashboard omits legacy fallback when a project has multiple owner
     isSystemAdmin: false,
   })
 
-  expect(summary.projects).toBe(1)
-  expect(summary.tasks).toBe(1)
-  expect(summary.blocked).toBe(0)
-  expect(legacyReads).toBe(0)
-  expect(migrationSourceReads).toBe(0)
+  expect(summary).toMatchObject({
+    projects: 1,
+    tasks: 1,
+    blocked: 1,
+    source: 'dynamodb',
+  })
+  expect(Date.parse(summary.updatedAt)).not.toBeNaN()
+  expect(accessListReads).toEqual([{
+    directoryId: 'user#demo@example.com',
+    memberKey: 'demo@example.com',
+  }])
+  expect(projectIssueReads).toEqual([{
+    directoryId: 'user#demo@example.com',
+    projectId: 'refero',
+  }])
+
+  const enterpriseSummary = await client.getSummary('user#demo@example.com', {
+    userKey: 'demo@example.com',
+    isSystemAdmin: false,
+    projectAccesses: [{ projectId: 'private', role: 'viewer' }],
+  })
+  const removedMappingSummary = await client.getSummary('user#demo@example.com', {
+    userKey: 'demo@example.com',
+    isSystemAdmin: false,
+    projectAccesses: [],
+  })
+
+  expect(enterpriseSummary.projects).toBe(1)
+  expect(removedMappingSummary).toMatchObject({ projects: 0, tasks: 0, blocked: 0 })
+  expect(accessListReads).toHaveLength(1)
+  expect(projectIssueReads.at(-1)).toEqual({
+    directoryId: 'user#demo@example.com',
+    projectId: 'private',
+  })
 })
 
 test('DynamoDB directory client reads project access consistently for Workspace guards', async () => {
@@ -5353,6 +17673,35 @@ test('DynamoDB directory client reads project access consistently for Workspace 
       ConsistentRead: true,
     }),
   ])
+})
+
+test('DynamoDB directory client excludes archived member roles from access', async () => {
+  const items = createProjectMemberFixtureItems()
+  const member = items.find((item) =>
+    item.entryType === 'project-member' &&
+    item.memberKey === 'demo@example.com'
+  )
+  Object.assign(member!, {
+    archivedAt: '2026-07-18T00:00:00.000Z',
+  })
+  const documentClient = {
+    async send() {
+      return { Items: items }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(
+    client.getProjectAccessList('user#demo@example.com', 'demo@example.com'),
+  ).resolves.toEqual([{ projectId: 'refero', role: undefined }])
+  await expect(
+    client.getProjectMembers('user#demo@example.com', 'refero'),
+  ).resolves.toEqual({
+    projectId: 'refero',
+    members: [
+      expect.objectContaining({ id: 'zmanager@example.com' }),
+    ],
+  })
 })
 
 test('DynamoDB directory client reads every page from the user partition', async () => {
@@ -5595,36 +17944,177 @@ test('DynamoDB directory client archives teams and projects with conditional upd
   } as unknown as DynamoDBDocumentClient
   const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
 
-  await expect(client.archiveTeam('user#demo@example.com', 'core-team')).resolves.toEqual({
+  await expect(client.archiveTeam('user#demo@example.com', 'core-team', undefined, 0)).resolves.toEqual({
     teamId: 'core-team',
     archivedAt: expect.any(String),
   })
   await expect(
-    client.archiveProject('user#demo@example.com', 'core-team', 'refero'),
+    client.archiveProject('user#demo@example.com', 'core-team', 'refero', undefined, 1),
   ).resolves.toEqual({
     teamId: 'core-team',
     projectId: 'refero',
     archivedAt: expect.any(String),
   })
   expect(sentInputs[1]).toMatchObject({
-    TableName: 'DirectoryTable',
-    Key: {
-      directoryId: 'user#demo@example.com',
-      entryKey: '000010#000000#TEAM#core-team',
-    },
-    UpdateExpression: 'SET archivedAt = :archivedAt',
-    ConditionExpression:
-      'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+    TransactItems: [{
+      Update: {
+        TableName: 'DirectoryTable',
+        Key: {
+          directoryId: 'user#demo@example.com',
+          entryKey: '000010#000000#TEAM#core-team',
+        },
+        UpdateExpression: 'SET archivedAt = :archivedAt',
+        ConditionExpression:
+          'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+      },
+    }, {
+      Put: {
+        TableName: 'mukuroji-planning-local',
+        Item: {
+          workspaceId: 'user#demo@example.com',
+          recordKey: 'META',
+          revision: 1,
+        },
+        ConditionExpression:
+          'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+      },
+    }],
   })
   expect(sentInputs[3]).toMatchObject({
-    TableName: 'DirectoryTable',
-    Key: {
-      directoryId: 'user#demo@example.com',
-      entryKey: '000010#000010#PROJECT#refero',
+    TransactItems: [{
+      Update: {
+        TableName: 'DirectoryTable',
+        Key: {
+          directoryId: 'user#demo@example.com',
+          entryKey: '000010#000010#PROJECT#refero',
+        },
+        UpdateExpression: 'SET archivedAt = :archivedAt',
+        ConditionExpression:
+          'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+      },
+    }, {}],
+  })
+})
+
+test('serializes directory archive with the Planning graph revision', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [{
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000000#TEAM#core-team',
+            entryType: 'team',
+            teamId: 'core-team',
+            teamSortOrder: 10,
+            nameJa: 'コアチーム',
+            nameEn: 'Core Team',
+            expanded: true,
+          }],
+        }
+      }
+      return {}
     },
-    UpdateExpression: 'SET archivedAt = :archivedAt',
-    ConditionExpression:
-      'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+    'PlanningTable',
+  )
+
+  await client.archiveTeam('user#demo@example.com', 'core-team', undefined, 4)
+
+  expect(sentInputs[1]).toMatchObject({
+    TransactItems: [
+      { Update: { TableName: 'DirectoryTable' } },
+      {
+        Put: {
+          TableName: 'PlanningTable',
+          Item: {
+            workspaceId: 'user#demo@example.com',
+            recordKey: 'META',
+            entryType: 'planning-meta',
+            schemaVersion: 1,
+            revision: 5,
+          },
+          ConditionExpression: '#revision = :expectedPlanningRevision',
+          ExpressionAttributeValues: { ':expectedPlanningRevision': 4 },
+        },
+      },
+    ],
+  })
+})
+
+test('classifies a Planning revision race during directory archive', async () => {
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000010#PROJECT#refero',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'refero',
+              projectSortOrder: 10,
+              nameJa: 'Refero',
+              nameEn: 'Refero',
+              tone: 'blue',
+            },
+          ],
+        }
+      }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const error = new Error('canceled')
+        error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: [
+            { Code: 'None' },
+            { Code: 'ConditionalCheckFailed' },
+          ],
+        })
+        throw error
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+    'PlanningTable',
+  )
+
+  await expect(client.archiveProject(
+    'user#demo@example.com',
+    'core-team',
+    'refero',
+    undefined,
+    4,
+  )).rejects.toMatchObject({
+    status: 409,
+    code: 'PlanningRevisionConflict',
   })
 })
 
@@ -5739,7 +18229,13 @@ test('DynamoDB directory client manages project member roles', async () => {
     },
   })
   await expect(
-    client.removeProjectMember('user#demo@example.com', 'refero', 'demo@example.com'),
+    client.removeProjectMember(
+      'user#demo@example.com',
+      'refero',
+      'demo@example.com',
+      undefined,
+      { exists: true, version: 1, status: 'deactivated' },
+    ),
   ).resolves.toEqual({
     projectId: 'refero',
     memberId: 'demo@example.com',
@@ -5773,6 +18269,67 @@ test('DynamoDB directory client manages project member roles', async () => {
             '#entryType = :memberEntryType AND #status = :active AND #version = :expectedVersion',
           ExpressionAttributeValues: {
             ':expectedVersion': 1,
+          },
+        },
+      },
+      {
+        ConditionCheck: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000000#TEAM#core-team',
+          },
+          ConditionExpression:
+            '#entryType = :teamEntryType AND attribute_not_exists(archivedAt)',
+        },
+      },
+      {
+        ConditionCheck: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000010#PROJECT#refero',
+          },
+          ConditionExpression:
+            '#entryType = :projectEntryType AND attribute_not_exists(archivedAt)',
+        },
+      },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#sato@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#refero',
+            entryType: 'webhook-team-grant',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: 'refero',
+            memberKey: 'sato@example.com',
+            sourceEntryKey: 'PROJECT_MEMBER#refero#sato@example.com',
+            teamSourceEntryKey: '000010#000000#TEAM#core-team',
+            projectSourceEntryKey: '000010#000010#PROJECT#refero',
+            webhookAuthorizationKey:
+              'WEBHOOK_ACL#TEAM_MEMBER#user#demo@example.com#core-team#sato@example.com',
+            webhookAuthorizationSortKey: 'PROJECT#refero',
+          },
+        },
+      },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#sato@example.com',
+            entryType: 'webhook-team-grant-cleanup',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: 'refero',
+            memberKey: 'sato@example.com',
+            grantDirectoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#sato@example.com',
+            grantEntryKey: 'TEAM#core-team#PROJECT#refero',
           },
         },
       },
@@ -5815,9 +18372,179 @@ test('DynamoDB directory client manages project member roles', async () => {
           },
         },
       },
+      {
+        Update: {
+          TableName: 'WorkspaceAccessTable',
+          Key: {
+            workspaceId: 'user#demo@example.com',
+            recordKey: 'MEMBER#demo@example.com',
+          },
+          UpdateExpression: 'SET updatedAt = :updatedAt ADD #version :one',
+          ConditionExpression:
+            '#entryType = :memberEntryType AND #status = :expectedStatus AND #version = :expectedVersion',
+          ExpressionAttributeValues: {
+            ':expectedStatus': 'deactivated',
+            ':expectedVersion': 1,
+            ':one': 1,
+          },
+        },
+      },
+      {
+        Delete: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#refero',
+          },
+        },
+      },
+      {
+        Delete: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#demo@example.com',
+          },
+        },
+      },
     ],
   })
   expect(sentInputs[4]).toMatchObject({ ConsistentRead: true })
+})
+
+test('DynamoDB directory client rejects membership grant fan-out above 100 actions', async () => {
+  const atLimit = createSharedProjectCapacityClient(24)
+  await expect(atLimit.client.updateProjectMember(
+    'workspace-1',
+    'shared-project',
+    'viewer@example.com',
+    {
+      email: 'viewer@example.com',
+      role: 'viewer',
+    },
+    1,
+  )).resolves.toMatchObject({
+    member: { id: 'viewer@example.com' },
+  })
+  expect(atLimit.transactions).toHaveLength(1)
+  expect(atLimit.transactions[0]?.TransactItems).toHaveLength(98)
+
+  const aboveLimit = createSharedProjectCapacityClient(25)
+  await expect(aboveLimit.client.updateProjectMember(
+    'workspace-1',
+    'shared-project',
+    'viewer@example.com',
+    {
+      email: 'viewer@example.com',
+      role: 'viewer',
+    },
+    1,
+  )).rejects.toMatchObject({
+    code: 'ProjectMembershipTransactionTooLarge',
+    status: 409,
+  })
+  expect(aboveLimit.transactions).toEqual([])
+})
+
+test('DynamoDB directory client rejects a concurrent Workspace member creation during role removal', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: createProjectMemberFixtureItems({ targetRole: 'member' }),
+        }
+      }
+
+      if ('TransactItems' in command.input) {
+        throw Object.assign(new Error('Transaction was canceled.'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [
+            { Code: 'None' },
+            { Code: 'ConditionalCheckFailed' },
+          ],
+        })
+      }
+
+      return {
+        Item: {
+          workspaceId: 'user#demo@example.com',
+          recordKey: 'MEMBER#demo@example.com',
+          entryType: 'workspace-member',
+          status: 'active',
+          version: 1,
+        },
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+  )
+
+  await expect(
+    client.removeProjectMember(
+      'user#demo@example.com',
+      'refero',
+      'demo@example.com',
+      undefined,
+      { exists: false },
+    ),
+  ).rejects.toMatchObject({
+    code: 'WorkspaceMemberVersionConflict',
+    status: 409,
+  })
+  expect(sentInputs[1]).toMatchObject({
+    TransactItems: [
+      {
+        Delete: {
+          TableName: 'DirectoryTable',
+        },
+      },
+      {
+        ConditionCheck: {
+          TableName: 'WorkspaceAccessTable',
+          Key: {
+            workspaceId: 'user#demo@example.com',
+            recordKey: 'MEMBER#demo@example.com',
+          },
+          ConditionExpression: 'attribute_not_exists(workspaceId)',
+        },
+      },
+      {
+        Delete: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#refero',
+          },
+        },
+      },
+      {
+        Delete: {
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#demo@example.com',
+          },
+        },
+      },
+    ],
+  })
+  expect(sentInputs[2]).toMatchObject({
+    TableName: 'WorkspaceAccessTable',
+    ConsistentRead: true,
+  })
 })
 
 test('DynamoDB directory client keeps at least one project manager', async () => {
@@ -6006,6 +18733,24 @@ test('DynamoDB directory client treats manager guard transaction cancellation as
           },
         },
       },
+      {
+        Delete: {
+          Key: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#refero',
+          },
+        },
+      },
+      {
+        Delete: {
+          Key: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#demo@example.com',
+          },
+        },
+      },
     ],
   })
   expect(sentInputs).toHaveLength(3)
@@ -6173,6 +18918,59 @@ test('DynamoDB directory client treats manager downgrade transaction cancellatio
           },
           ExpressionAttributeValues: {
             ':expectedVersion': 1,
+          },
+        },
+      },
+      {
+        ConditionCheck: {
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000000#TEAM#core-team',
+          },
+        },
+      },
+      {
+        ConditionCheck: {
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: '000010#000010#PROJECT#refero',
+          },
+        },
+      },
+      {
+        Put: {
+          Item: {
+            directoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            entryKey: 'TEAM#core-team#PROJECT#refero',
+            entryType: 'webhook-team-grant',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: 'refero',
+            memberKey: 'demo@example.com',
+            sourceEntryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+            teamSourceEntryKey: '000010#000000#TEAM#core-team',
+            projectSourceEntryKey: '000010#000010#PROJECT#refero',
+            webhookAuthorizationKey:
+              'WEBHOOK_ACL#TEAM_MEMBER#user#demo@example.com#core-team#demo@example.com',
+            webhookAuthorizationSortKey: 'PROJECT#refero',
+          },
+        },
+      },
+      {
+        Put: {
+          Item: {
+            directoryId:
+              'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
+            entryKey: 'PROJECT#refero#MEMBER#demo@example.com',
+            entryType: 'webhook-team-grant-cleanup',
+            workspaceId: 'user#demo@example.com',
+            teamId: 'core-team',
+            projectId: 'refero',
+            memberKey: 'demo@example.com',
+            grantDirectoryId:
+              'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
+            grantEntryKey: 'TEAM#core-team#PROJECT#refero',
           },
         },
       },
@@ -6368,11 +19166,608 @@ test('search endpoint parses filters and revalidates comment scope against curre
   expect(resolvedProjectId).toBe('refero')
 })
 
+test('resolves later Document search hits with compact access reads beyond thirty candidates', async () => {
+  configureFakeProjectClients(true)
+  let compactAccessReads = 0
+  let fullDocumentReads = 0
+  let laterHitResolved = false
+  const readContexts = new Set<unknown>()
+  const fullBody =
+    `${'x'.repeat(20_001)}tail-keyword`
+  configureApiClientsForTest({
+    documents: {
+      async get() {
+        fullDocumentReads += 1
+        throw new Error(
+          'Workspace search must not read full Documents.',
+        )
+      },
+      async resolveSearchAccess(input) {
+        compactAccessReads += 1
+        readContexts.add(input.readContext)
+        return input.documentId === 'document-39'
+          ? {
+              scope: { type: 'workspace' },
+              revision: 1,
+              updatedAt:
+                '2026-07-18T00:00:00.000Z',
+              body: fullBody,
+            }
+          : undefined
+      },
+    } as unknown as DocumentClient,
+    workspaceSearch: {
+      async search(input) {
+        const resolutions =
+          await Promise.all(
+            Array.from(
+              { length: 40 },
+              (_, index) =>
+                input.resolveCurrentScope?.(
+                  createWorkspaceSearchDocument({
+                    workspaceId:
+                      input.workspaceId,
+                    entityType: 'document',
+                    entityId:
+                      `document-${index}`,
+                    title:
+                      `Document ${index}`,
+                    url:
+                      `/documents/document-${index}`,
+                    updatedAt:
+                      '2026-07-18T00:00:00.000Z',
+                    sourceRevision: 1,
+                  }),
+                ),
+            ),
+          )
+        laterHitResolved =
+          resolutions.at(-1)?.permissionVerified ===
+            true &&
+          resolutions.at(-1)?.currentDocument
+            ?.body === fullBody
+        return { schemaVersion: 1, results: [] }
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+
+  const response = await app.request('/api/search', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(compactAccessReads).toBe(40)
+  expect(fullDocumentReads).toBe(0)
+  expect(readContexts.size).toBe(1)
+  expect([...readContexts][0]).toBeDefined()
+  expect(laterHitResolved).toBeTrue()
+})
+
+test('skips Document access reads when Workspace search filters exclude Documents', async () => {
+  configureFakeProjectClients(true)
+  let compactAccessReads = 0
+  let fullDocumentReads = 0
+  let excludedDocuments = 0
+  configureApiClientsForTest({
+    documents: {
+      async get() {
+        fullDocumentReads += 1
+        throw new Error('Comment-only search must not read a Document source.')
+      },
+      async resolveSearchAccess() {
+        compactAccessReads += 1
+        throw new Error(
+          'Comment-only search must not read Document access.',
+        )
+      },
+    } as unknown as DocumentClient,
+    workspaceSearch: {
+      async search(input) {
+        const resolutions = await Promise.all(Array.from({ length: 31 }, (_, index) =>
+          input.resolveCurrentScope?.(createWorkspaceSearchDocument({
+            workspaceId: input.workspaceId,
+            entityType: 'document',
+            entityId: `excluded-document-${index}`,
+            title: `Excluded Document ${index}`,
+            url: `/documents/excluded-document-${index}`,
+          }))
+        ))
+        excludedDocuments = resolutions.filter((resolution) => resolution === undefined).length
+        return { schemaVersion: 1, results: [] }
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  const filters = encodeURIComponent(JSON.stringify({ entityTypes: ['comment'] }))
+
+  const response = await app.request(`/api/search?filters=${filters}`, {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(compactAccessReads).toBe(0)
+  expect(fullDocumentReads).toBe(0)
+  expect(excludedDocuments).toBe(31)
+})
+
+test('binds cached Document roles to member and Planning authorization generations', async () => {
+  configureFakeProjectClients(true)
+  let workspaceMemberVersion = 1
+  let planningRevision = 0
+  let projectRole: ProjectRole | undefined = 'manager'
+  let projectRoleReads = 0
+  let advancePlanningDuringRoleRead = false
+  const accesses: Array<
+    Parameters<DocumentClient['get']>[0]['access']
+  > = []
+  configureApiClientsForTest({
+    documents: {
+      async get(input) {
+        accesses.push(input.access)
+        throw new DocumentError(
+          404,
+          'DocumentNotFound',
+          'Document was not found.',
+        )
+      },
+    } as unknown as DocumentClient,
+    planning: {
+      async getAuthorizationRevision() {
+        return planningRevision
+      },
+    } as unknown as PlanningClient,
+    projectDirectory: {
+      async getProjectAccessList() {
+        projectRoleReads += 1
+        const roleAtRead = projectRole
+        if (advancePlanningDuringRoleRead) {
+          advancePlanningDuringRoleRead = false
+          planningRevision += 1
+          projectRole = undefined
+        }
+        return roleAtRead === undefined
+          ? []
+          : [{ projectId: 'refero', role: roleAtRead }]
+      },
+    } as unknown as Parameters<
+      typeof configureApiClientsForTest
+    >[0]['projectDirectory'],
+    workspaceAccess: {
+      async getActiveMember(_workspaceId, memberKey) {
+        return {
+          id: memberKey,
+          memberKey,
+          email: memberKey,
+          role: 'member',
+          status: 'active',
+          version: workspaceMemberVersion,
+          createdAt: '2026-07-18T00:00:00.000Z',
+          updatedAt: '2026-07-18T00:00:00.000Z',
+        }
+      },
+    } as unknown as WorkspaceAccessClient,
+  })
+  const readDocument = () => app.request(
+    '/api/documents/document-1',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect((await readDocument()).status).toBe(404)
+  expect((await readDocument()).status).toBe(404)
+  workspaceMemberVersion = 2
+  projectRole = 'viewer'
+  expect((await readDocument()).status).toBe(404)
+  planningRevision = 1
+  projectRole = undefined
+  expect((await readDocument()).status).toBe(404)
+  planningRevision = 2
+  projectRole = 'manager'
+  advancePlanningDuringRoleRead = true
+  expect((await readDocument()).status).toBe(404)
+
+  expect(projectRoleReads).toBe(5)
+  expect(accesses.map(({ projectRoles }) => projectRoles)).toEqual([
+    { refero: 'manager' },
+    { refero: 'manager' },
+    { refero: 'viewer' },
+    {},
+    {},
+  ])
+  expect(accesses[0]?.authorizationGuards).toEqual([
+    {
+      tableName:
+        process.env.MUKUROJI_WORKSPACE_ACCESS_TABLE ??
+        process.env.WORKSPACE_ACCESS_TABLE_NAME ??
+        'mukuroji-workspace-access-local',
+      key: {
+        workspaceId: 'user#demo@example.com',
+        recordKey: 'MEMBER#demo@example.com',
+      },
+      generationAttribute: 'version',
+      expectedGeneration: 1,
+      requiredAttributes: {
+        entryType: 'workspace-member',
+        status: 'active',
+      },
+    },
+    {
+      tableName:
+        process.env.PLANNING_TABLE_NAME ??
+        'mukuroji-planning-local',
+      key: {
+        workspaceId: 'user#demo@example.com',
+        recordKey: 'META',
+      },
+      generationAttribute: 'revision',
+      expectedGeneration: 0,
+      requiredAttributes: {
+        entryType: 'planning-meta',
+        schemaVersion: 1,
+      },
+      allowMissingWhenExpectedZero: true,
+    },
+  ])
+  expect(accesses[4]?.authorizationGuards?.map(
+    ({ expectedGeneration }) => expectedGeneration,
+  )).toEqual([2, 3])
+})
+
+test('rejects missing, non-Goal, archived, and invisible Planning Goal relation targets', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  let applyCalls = 0
+  let receivedGoalAuthorizationGuards:
+    Parameters<
+      DocumentClient['applyOperations']
+    >[0]['relationTargetAuthorizationGuards']
+  const editableDocument = {
+    schemaVersion: 1,
+    id: 'document-1',
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Goal relation test',
+    position: 'a0',
+    revision: 1,
+    permission: { mode: 'inherit', memberGrants: [] },
+    relations: [],
+    favorite: false,
+    capabilities: {
+      canView: true,
+      canEdit: true,
+      canComment: true,
+      canShare: true,
+      canManagePermissions: true,
+      canArchive: true,
+      canRestore: false,
+      canExport: true,
+    },
+    createdByUserId: 'demo@example.com',
+    updatedByUserId: 'demo@example.com',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T00:00:00.000Z',
+    blocks: [],
+  } satisfies DocumentDetail
+  configureApiClientsForTest({
+    documents: {
+      async get() {
+        return editableDocument
+      },
+      async applyOperations(input) {
+        applyCalls += 1
+        receivedGoalAuthorizationGuards =
+          input.relationTargetAuthorizationGuards
+        return {
+          documentId: input.documentId,
+          revision: 2,
+          appliedOperationIds: input.input.operations.map(
+            ({ operationId }) => operationId,
+          ),
+          updatedAt: '2026-07-18T00:01:00.000Z',
+        }
+      },
+    } as unknown as DocumentClient,
+    planning: {
+      async getAuthorizationRevision() {
+        return 2
+      },
+      async getAuthorizationState() {
+        return {
+          revision: 2,
+          entities: [
+            {
+              id: 'goal-archived',
+              type: 'goal',
+              ownerMemberKey: 'demo@example.com',
+              archivedAt: '2026-07-18T00:00:00.000Z',
+            },
+            {
+              id: 'goal-private',
+              type: 'goal',
+              ownerMemberKey: 'demo@example.com',
+              teamId: 'core-team',
+              projectId: 'private-project',
+            },
+            {
+              id: 'goal-active',
+              type: 'goal',
+              ownerMemberKey: 'demo@example.com',
+              teamId: 'core-team',
+              projectId: 'refero',
+            },
+            {
+              id: 'cycle-not-goal',
+              type: 'cycle',
+              ownerMemberKey: 'demo@example.com',
+              teamId: 'core-team',
+              projectId: 'refero',
+            },
+          ],
+          workItemLinks: [],
+        }
+      },
+    } as unknown as PlanningClient,
+  })
+
+  const requestGoalOperation = (goalId: string) => app.request(
+    '/api/documents/document-1/operations',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        baseRevision: 1,
+        clientId: 'editor-1',
+        operations: [{
+          operationId: `operation-${goalId}`,
+          type: 'upsert-relation',
+          relation: {
+            id: `relation-${goalId}`,
+            source: { kind: 'document' },
+            target: { kind: 'goal', goalId },
+            createdByUserId: 'demo@example.com',
+            createdAt: '2026-07-18T00:00:00.000Z',
+          },
+        }],
+      }),
+    },
+  )
+
+  const missing = await requestGoalOperation('goal-missing')
+  const nonGoal = await requestGoalOperation('cycle-not-goal')
+  const archived = await requestGoalOperation('goal-archived')
+  const invisible = await requestGoalOperation('goal-private')
+  const active = await requestGoalOperation('goal-active')
+
+  expect(missing.status).toBe(400)
+  expect(await missing.json()).toMatchObject({
+    code: 'InvalidDocumentRelationTarget',
+  })
+  expect(nonGoal.status).toBe(400)
+  expect(await nonGoal.json()).toMatchObject({
+    code: 'InvalidDocumentRelationTarget',
+  })
+  expect(archived.status).toBe(400)
+  expect(await archived.json()).toMatchObject({
+    code: 'InvalidDocumentRelationTarget',
+  })
+  expect(invisible.status).toBe(403)
+  expect(await invisible.json()).toMatchObject({
+    code: 'DocumentRelationTargetDenied',
+  })
+  expect(active.status).toBe(200)
+  expect(applyCalls).toBe(1)
+  expect(
+    receivedGoalAuthorizationGuards,
+  ).toEqual([{
+    tableName:
+      process.env.PLANNING_TABLE_NAME ??
+      'mukuroji-planning-local',
+    key: {
+      workspaceId:
+        'user#demo@example.com',
+      recordKey: 'META',
+    },
+    generationAttribute: 'revision',
+    expectedGeneration: 2,
+    requiredAttributes: {
+      entryType: 'planning-meta',
+      schemaVersion: 1,
+    },
+  }])
+})
+
+test('revalidates archived Planning Goal targets before restoring a Document version', async () => {
+  configureFakeProjectClients(true)
+  let committed = false
+  configureApiClientsForTest({
+    documents: {
+      async restoreVersion(input) {
+        await input.validateRelationTargets([{
+          kind: 'goal',
+          goalId: 'goal-archived',
+        }])
+        committed = true
+        throw new Error('Archived Goal validation must reject the restore.')
+      },
+    } as unknown as DocumentClient,
+    planning: {
+      async getAuthorizationRevision() {
+        return 1
+      },
+      async getAuthorizationState() {
+        return {
+          revision: 1,
+          entities: [{
+            id: 'goal-archived',
+            type: 'goal',
+            ownerMemberKey: 'demo@example.com',
+            archivedAt: '2026-07-18T00:00:00.000Z',
+          }],
+          workItemLinks: [],
+        }
+      },
+    } as unknown as PlanningClient,
+  })
+
+  const response = await app.request(
+    '/api/documents/document-1/versions/document-1%3A1/restore',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ expectedRevision: 2 }),
+    },
+  )
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    code: 'InvalidDocumentRelationTarget',
+  })
+  expect(committed).toBeFalse()
+})
+
+test('validates Document relation target reads with bounded concurrency', async () => {
+  let activeReads = 0
+  let maximumActiveReads = 0
+  configureFakeProjectClients(true, {
+    async detailReadHook() {
+      activeReads += 1
+      maximumActiveReads = Math.max(maximumActiveReads, activeReads)
+      await Promise.resolve()
+      activeReads -= 1
+    },
+  })
+  const editableDocument = {
+    schemaVersion: 1,
+    id: 'document-1',
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Bounded target reads',
+    position: 'a0',
+    revision: 1,
+    permission: { mode: 'inherit', memberGrants: [] },
+    relations: [],
+    favorite: false,
+    capabilities: {
+      canView: true,
+      canEdit: true,
+      canComment: true,
+      canShare: true,
+      canManagePermissions: true,
+      canArchive: true,
+      canRestore: false,
+      canExport: true,
+    },
+    createdByUserId: 'demo@example.com',
+    updatedByUserId: 'demo@example.com',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T00:00:00.000Z',
+    blocks: [],
+  } satisfies DocumentDetail
+  configureApiClientsForTest({
+    documents: {
+      async restoreVersion(input) {
+        await input.validateRelationTargets(
+          Array.from({ length: 14 }, (_, index) => ({
+            kind: 'work-item',
+            workItemId:
+              `team/core-team/issue/target-${index}`,
+          })),
+        )
+        return editableDocument
+      },
+    } as unknown as DocumentClient,
+  })
+
+  const response = await app.request(
+    '/api/documents/document-1/versions/document-1%3A1/restore',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ expectedRevision: 1 }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(maximumActiveReads).toBe(8)
+})
+
+test('search endpoint refreshes workflow, custom fields, and relations from current sources', async () => {
+  configureFakeProjectClients(true, {
+    detailCustomFieldValues: {},
+    detailWorkflowStatusId: 'active-review',
+  })
+  let resolvedScope: WorkspaceSearchResolvedScope | undefined
+  let relationFilters: string[] | undefined
+  configureApiClientsForTest({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations(_workspaceId, _teamId, workItemId) {
+        return {
+          graphRevision: 3,
+          relations: [{
+            sourceWorkItemId: workItemId,
+            targetWorkItemId: 'current-dependency',
+            type: 'blocks',
+          }],
+        }
+      },
+    }),
+    workspaceSearch: {
+      async search(input) {
+        relationFilters = input.filters.relationIds
+        resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
+          workspaceId: input.workspaceId,
+          entityType: 'work-item',
+          entityId: 'team/core-team/issue/work-item-1',
+          title: 'Stale Work Item',
+          url: '/teams/core-team/issues?issueId=work-item-1',
+          teamId: 'core-team',
+          status: 'in-progress',
+          customFields: { legacyScore: 13 },
+          relationIds: ['stale-dependency'],
+        }))
+        return { schemaVersion: 1, results: [] }
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+
+  const filters = encodeURIComponent(JSON.stringify({
+    relationIds: ['blocks:current-dependency'],
+  }))
+  const response = await app.request(`/api/search?filters=${filters}`, {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(relationFilters).toEqual(['blocks:current-dependency'])
+  expect(resolvedScope).toMatchObject({
+    teamId: 'core-team',
+    projectId: 'refero',
+    currentDocument: {
+      status: 'active-review',
+      customFields: {},
+      relationIds: ['blocks:current-dependency'],
+    },
+  })
+})
+
 test('search endpoint refreshes comment content from its current source snapshot', async () => {
   configureFakeProjectClients(true)
   let resolvedScope: WorkspaceSearchResolvedScope | undefined
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getCommentSnapshot(input) {
         return {
           id: input.commentId,
@@ -6386,7 +19781,7 @@ test('search endpoint refreshes comment content from its current source snapshot
           reactions: [],
         }
       },
-    } as CollaborationClient,
+    }),
     workspaceSearch: {
       async search(input) {
         resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
@@ -6426,7 +19821,7 @@ test('search endpoint fails closed for missing, deleted, or malformed comment so
   const resolvedScopes: Array<WorkspaceSearchResolvedScope | undefined> = []
   let snapshotReads = 0
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getCommentSnapshot(input) {
         snapshotReads += 1
         if (input.commentId === 'missing') return undefined
@@ -6443,7 +19838,7 @@ test('search endpoint fails closed for missing, deleted, or malformed comment so
           reactions: [],
         }
       },
-    } as CollaborationClient,
+    }),
     workspaceSearch: {
       async search(input) {
         for (const [commentId, parentId] of [
@@ -6739,6 +20134,74 @@ function createProjectMemberFixtureItems(
   ]
 }
 
+function createSharedProjectCapacityClient(teamCount: number) {
+  const transactions: Array<Record<string, unknown>> = []
+  const directoryItems = [
+    ...Array.from({ length: teamCount }, (_, index) => {
+      const sortOrder = index + 1
+      const teamId = `team-${sortOrder}`
+      return [
+        {
+          directoryId: 'workspace-1',
+          entryKey: `${String(sortOrder).padStart(6, '0')}#000000#TEAM#${teamId}`,
+          entryType: 'team',
+          teamId,
+          teamSortOrder: sortOrder,
+          nameJa: `Team ${sortOrder}`,
+          nameEn: `Team ${sortOrder}`,
+          expanded: true,
+        },
+        {
+          directoryId: 'workspace-1',
+          entryKey:
+            `${String(sortOrder).padStart(6, '0')}#000010#PROJECT#shared-project`,
+          entryType: 'project',
+          teamId,
+          teamSortOrder: sortOrder,
+          projectId: 'shared-project',
+          projectSortOrder: 10,
+          nameJa: 'Shared project',
+          nameEn: 'Shared project',
+          tone: 'blue',
+        },
+      ]
+    }).flat(),
+    {
+      directoryId: 'workspace-1',
+      entryKey: 'PROJECT_MEMBER#shared-project#viewer@example.com',
+      entryType: 'project-member',
+      projectId: 'shared-project',
+      memberKey: 'viewer@example.com',
+      email: 'viewer@example.com',
+      role: 'member',
+      createdAt: '2026-07-18T00:00:00.000Z',
+      updatedAt: '2026-07-18T00:00:00.000Z',
+    },
+  ]
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      if ('KeyConditionExpression' in command.input) {
+        return { Items: directoryItems }
+      }
+      if ('TransactItems' in command.input) {
+        transactions.push(command.input)
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  return {
+    client: new DynamoDbProjectDirectoryClient(
+      'DirectoryTable',
+      documentClient,
+      undefined,
+      false,
+      undefined,
+      'WorkspaceAccessTable',
+    ),
+    transactions,
+  }
+}
+
 function createDirectoryMutationAuditContext() {
   return createMutationAuditContext({
     workspaceId: 'user#demo@example.com',
@@ -6762,8 +20225,548 @@ function createFakeAuditEvent() {
 
   return createAuditEvent({
     context,
+    expiresAt: 2_000_000_000,
     eventType: 'project.updated',
     entity: { type: 'project', id: 'refero' },
+  })
+}
+
+function createFileProofingStub(
+  overrides: Partial<FileProofingClient> = {},
+): FileProofingClient {
+  const unsupported = async () => {
+    throw new Error('Unexpected file proofing client call.')
+  }
+  return {
+    list: unsupported,
+    createUpload: unsupported,
+    createVersionUpload: unsupported,
+    completeUpload: unsupported,
+    createAccess: unsupported,
+    listAnnotations: unsupported,
+    createAnnotation: unsupported,
+    deleteFile: unsupported,
+    createApproval: unsupported,
+    createWorkItemApproval: unsupported,
+    decideApproval: unsupported,
+    cancelApproval: unsupported,
+    async getApprovalSummary() {
+      return {
+        pendingCount: 0,
+        overdueCount: 0,
+        approvedCount: 0,
+        rejectedCount: 0,
+        changesRequestedCount: 0,
+      }
+    },
+    async getApprovalSummaries() {
+      return new Map()
+    },
+    listReviewerApprovals: unsupported,
+    ...overrides,
+  } as FileProofingClient
+}
+
+function createCollaborationStub(
+  overrides: Partial<CollaborationClient> = {},
+): CollaborationClient {
+  const unsupported = async () => {
+    throw new Error('Unexpected collaboration client call.')
+  }
+  return {
+    getThread: unsupported,
+    hasAttachableComment: unsupported,
+    getCommentSnapshot: unsupported,
+    createComment: unsupported,
+    updateComment: unsupported,
+    deleteComment: unsupported,
+    resolveComment: unsupported,
+    reopenComment: unsupported,
+    addReaction: unsupported,
+    removeReaction: unsupported,
+    getWatcherState: unsupported,
+    subscribe: unsupported,
+    unsubscribe: unsupported,
+    heartbeatPresence: unsupported,
+    leavePresence: unsupported,
+    ...overrides,
+  } satisfies CollaborationClient
+}
+
+function createFileUploadSessionFixture() {
+  const version = {
+    id: 'version-1',
+    number: 1,
+    fileName: 'proof.pdf',
+    contentType: 'application/pdf',
+    sizeBytes: 4096,
+    scanStatus: 'pending' as const,
+    previewKind: 'pdf' as const,
+    createdByMemberKey: 'demo@example.com',
+    createdAt: '2026-07-12T00:00:00.000Z',
+  }
+  return {
+    file: {
+      id: 'file-1',
+      name: 'proof.pdf',
+      targetType: 'work-item' as const,
+      targetId: 'issue-1',
+      versionCount: 1,
+      versions: [version],
+      currentVersion: version,
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedAt: '2026-07-12T00:00:00.000Z',
+      capabilities: {
+        canDownload: false,
+        canUploadVersion: true,
+        canDelete: true,
+        canAnnotate: true,
+        canRequestApproval: true,
+      },
+    },
+    version,
+    upload: {
+      url: 'https://objects.example.test/upload',
+      method: 'PUT' as const,
+      headers: {
+        'content-length': '4096',
+        'content-type': 'application/pdf',
+      },
+      expiresAt: '2026-07-12T00:10:00.000Z',
+      maxSizeBytes: 2_147_483_648,
+    },
+  }
+}
+
+/** Approval API route test で利用する標準 request fixture です。 */
+function createApprovalRequestFixture(
+  overrides: Partial<ApprovalRequest> = {},
+): ApprovalRequest {
+  return {
+    id: 'approval-1',
+    teamId: 'core-team',
+    issueId: 'issue-1',
+    subjectType: 'file-version',
+    revision: 1,
+    fileId: 'file-1',
+    versionId: 'version-1',
+    status: 'pending',
+    reviewers: [{ memberKey: 'sato@example.com', status: 'pending' }],
+    dueAt: '2099-07-20T00:00:00.000Z',
+    requestedByMemberKey: 'demo@example.com',
+    requestedByKind: 'member',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    capabilities: { canCancel: true, canDecide: false },
+    ...overrides,
+  }
+}
+
+/** API integration tests で利用する scope 固定済み Work Item configuration です。 */
+function createTestWorkItemConfiguration(
+  scopeType: 'workspace' | 'team',
+  scopeId: string,
+  revision = 0,
+): WorkItemConfiguration {
+  return {
+    ...structuredClone(DEFAULT_WORK_ITEM_CONFIGURATION),
+    scopeType,
+    scopeId,
+    revision,
+  }
+}
+
+/** 関心のある method だけ上書きできる Work Item configuration client fake です。 */
+function createFakeWorkItemConfigurationClient(
+  overrides: Partial<WorkItemConfigurationClient> = {},
+): WorkItemConfigurationClient {
+  const createResolved = (scopeType: 'workspace' | 'team', scopeId: string) => ({
+    configuration: createTestWorkItemConfiguration(scopeType, scopeId),
+    inheritedFrom: 'default' as const,
+  })
+  return {
+    async getWorkspaceConfiguration(workspaceId) {
+      return createResolved('workspace', workspaceId)
+    },
+    async getTeamConfiguration(_workspaceId, teamId) {
+      return createResolved('team', teamId)
+    },
+    async saveWorkspaceConfiguration(workspaceId, configuration, compatibilityCheck) {
+      await compatibilityCheck()
+      return {
+        configuration: {
+          ...configuration,
+          scopeType: 'workspace',
+          scopeId: workspaceId,
+          revision: configuration.revision + 1,
+        },
+      }
+    },
+    async saveTeamConfiguration(_workspaceId, teamId, configuration, compatibilityCheck) {
+      await compatibilityCheck()
+      return {
+        configuration: {
+          ...configuration,
+          scopeType: 'team',
+          scopeId: teamId,
+          revision: configuration.revision + 1,
+        },
+      }
+    },
+    async listRelations() {
+      return { relations: [], graphRevision: 0 }
+    },
+    async createRelation(_workspaceId, _teamId, input) {
+      return createFakeRelationMutationResponse(input)
+    },
+    async deleteRelation(_workspaceId, _teamId, input) {
+      return createFakeRelationMutationResponse(input)
+    },
+    ...overrides,
+  }
+}
+
+/** Client fake の既定 relation mutation response です。 */
+function createFakeRelationMutationResponse(
+  input: Parameters<WorkItemConfigurationClient['createRelation']>[2],
+) {
+  return {
+    relation: {
+      sourceWorkItemId: input.sourceWorkItemId,
+      targetWorkItemId: input.targetWorkItemId,
+      type: input.type,
+    },
+    reciprocalRelation: {
+      sourceWorkItemId: input.targetWorkItemId,
+      targetWorkItemId: input.sourceWorkItemId,
+      type: input.type,
+    },
+    graphRevision: input.expectedGraphRevision + 1,
+  }
+}
+
+/** Workspace mutation client で観測した audit context と呼び出し段階です。 */
+type ObservedWorkspaceMutationAuditContext = {
+  /** Context を受け取る Workspace mutation client method です。 */
+  stage: string
+  /** Method に渡された audit context です。欠落も検出するため undefined を保持します。 */
+  context: ReturnType<typeof createMutationAuditContext> | undefined
+}
+
+/** Workspace mutation audit context の決定的な期待値です。 */
+type ExpectedWorkspaceMutationAuditContext = {
+  /** Context actor の安定 ID です。 */
+  actorId: string
+  /** Request の correlation ID header です。 */
+  correlationId: string
+  /** Request の raw idempotency key header です。 */
+  idempotencyKey: string
+  /** Context fingerprint に含める canonical request body です。 */
+  requestBody: unknown
+  /** Context source の HTTP method です。 */
+  method: string
+  /** Context source と fingerprint の route path です。 */
+  route: string
+  /** Context が順番どおり渡される Workspace mutation client method です。 */
+  stages: readonly string[]
+  /** Context の canonical Workspace ID です。 */
+  workspaceId: string
+}
+
+function expectStableWorkspaceMutationAuditContexts(
+  observations: ObservedWorkspaceMutationAuditContext[],
+  expected: ExpectedWorkspaceMutationAuditContext,
+) {
+  expect(observations.map(({ stage }) => stage)).toEqual(expected.stages)
+  const first = observations[0]?.context
+
+  if (!first) {
+    throw new Error('The first Workspace mutation audit context is missing.')
+  }
+
+  const expectedContext = createMutationAuditContext({
+    workspaceId: expected.workspaceId,
+    actor: { id: expected.actorId, kind: 'user' },
+    idempotencyKey: expected.idempotencyKey,
+    correlationId: expected.correlationId,
+    occurredAt: first.occurredAt,
+    request: {
+      method: expected.method,
+      path: expected.route,
+      body: expected.requestBody,
+    },
+    source: {
+      kind: 'api',
+      method: expected.method,
+      route: expected.route,
+    },
+  })
+
+  expect(first).toMatchObject({
+    workspaceId: expected.workspaceId,
+    actor: {
+      id: expected.actorId,
+      kind: 'user',
+    },
+    correlationId: expected.correlationId,
+    source: {
+      kind: 'api',
+      method: expected.method,
+      route: expected.route,
+    },
+  })
+  expect(first.idempotencyKeyHash).toBe(expectedContext.idempotencyKeyHash)
+  expect(first.requestFingerprint).toBe(expectedContext.requestFingerprint)
+
+  for (const observation of observations) {
+    expect(observation.context).toBe(first)
+  }
+}
+
+function analyticsApiRequest(
+  path: string,
+  body: unknown,
+  method = 'POST',
+) {
+  return app.request(path, {
+    method,
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+}
+
+function createAnalyticsQueryInput(): AnalyticsQueryInput {
+  return {
+    filter: {
+      period: {
+        from: '2026-07-01T00:00:00.000Z',
+        to: '2026-07-31T23:59:59.999Z',
+      },
+    },
+    widgets: [{
+      id: 'wip',
+      type: 'metric',
+      title: 'WIP',
+      metric: 'wip',
+    }],
+    asOf: '2026-07-18T08:30:00.000Z',
+    timeZone: 'UTC',
+  }
+}
+
+function createAnalyticsAuditEvent(
+  entityType: string,
+  entityId: string,
+  occurredAt: string,
+) {
+  const context = createMutationAuditContext({
+    workspaceId: 'user#demo@example.com',
+    actor: { id: 'demo@example.com', kind: 'user' },
+    idempotencyKey: `${entityType}-${entityId}-${occurredAt}`,
+    correlationId: `correlation-${entityId}`,
+    occurredAt,
+    request: {
+      method: 'PATCH',
+      path: `/api/${entityType}/${entityId}`,
+      body: { entityId },
+    },
+    source: {
+      kind: 'api',
+      method: 'PATCH',
+      route: `/api/${entityType}/:id`,
+    },
+  })
+  return createAuditEvent({
+    context,
+    eventType: `${entityType}.updated`,
+    entity: { type: entityType, id: entityId },
+    before: { state: 'before' },
+    after: { state: 'after' },
+    expiresAt: 2_000_000_000,
+  })
+}
+
+function createHistoricalAnalyticsWorkItem(): CanonicalWorkItem {
+  return {
+    schemaVersion: 1,
+    revision: 4,
+    id: 'historical-item',
+    teamId: 'core-team',
+    assignedProjectId: 'project-after',
+    title: 'Historical item',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowStatusId: 'completed',
+    statusCategory: 'completed',
+    workflowSchemaVersion: 1,
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-31',
+    priority: 'medium',
+    createdAt: '2026-07-01T00:00:00.000Z',
+    updatedAt: '2026-07-17T12:00:00.000Z',
+    archivedAt: '2026-07-17T12:00:00.000Z',
+    archivedBy: 'demo@example.com',
+    source: 'dynamodb',
+  }
+}
+
+function createHistoricalAnalyticsWorkItemEvent(workItem: CanonicalWorkItem) {
+  const occurredAt = '2026-07-17T12:00:00.000Z'
+  const context = createMutationAuditContext({
+    workspaceId: 'user#demo@example.com',
+    actor: { id: 'demo@example.com', kind: 'user' },
+    idempotencyKey: 'historical-item-future-change',
+    correlationId: 'historical-item-correlation',
+    occurredAt,
+    request: {
+      method: 'PATCH',
+      path: `/api/teams/${workItem.teamId}/issues/${workItem.id}`,
+      body: { expectedRevision: 3 },
+    },
+    source: {
+      kind: 'api',
+      method: 'PATCH',
+      route: '/api/teams/:teamId/issues/:issueId',
+    },
+  })
+  const event = createAuditEvent({
+    context,
+    eventType: 'work-item.updated',
+    entity: {
+      type: 'work-item',
+      id: `team/${workItem.teamId}/issue/${workItem.id}`,
+    },
+    before: {
+      assignedProjectId: 'project-before',
+      archivedAt: undefined,
+      statusCategory: 'started',
+    },
+    after: {
+      assignedProjectId: workItem.assignedProjectId,
+      archivedAt: workItem.archivedAt,
+      statusCategory: workItem.statusCategory,
+    },
+    expiresAt: 2_000_000_000,
+  })
+  return {
+    ...event,
+    metadata: {
+      ...event.metadata,
+      adapter: 'canonical-work-item',
+      afterRevision: workItem.revision,
+      teamId: workItem.teamId,
+      issueId: workItem.id,
+      workItemId: workItem.id,
+    },
+  }
+}
+
+async function putHeadlessEnterpriseIdentityProvider(
+  identity: InMemoryEnterpriseIdentityClient,
+  workspaceId: string,
+) {
+  const now = '2026-07-20T00:00:00.000Z'
+  await identity.putIdentityProvider({
+    workspaceId,
+    providerId: 'headless-idp',
+    kind: 'oidc',
+    displayName: 'Headless identity provider',
+    cognitoProviderName: 'HeadlessEnterpriseOidc',
+    status: 'active',
+    revision: 1,
+    issuer: 'https://idp.example.com',
+    clientId: 'headless-enterprise-client',
+    authorizationEndpoint: 'https://idp.example.com/authorize',
+    tokenEndpoint: 'https://idp.example.com/token',
+    jwksUri: 'https://idp.example.com/jwks',
+    scopes: ['openid', 'email'],
+    createdAt: now,
+    updatedAt: now,
+    lastTestedAt: now,
+  })
+}
+
+async function putAppliedHeadlessScimUser(
+  identity: InMemoryEnterpriseIdentityClient,
+  workspaceId: string,
+) {
+  const user = await identity.upsertScimUser({
+    workspaceId,
+    identityProviderId: 'headless-idp',
+    externalId: 'headless-demo-user',
+    userName: 'demo@example.com',
+    emails: ['demo@example.com'],
+    active: true,
+    linkedMemberKey: 'demo@example.com',
+    idempotencyKey: 'headless-demo-user-created',
+  })
+  const desired = (await identity.getSnapshot(workspaceId)).scimUsers.find((candidate) =>
+    candidate.userId === user.userId
+  )
+  if (!desired) throw new Error('Expected the headless SCIM user to exist.')
+  return identity.markScimUserApplied(
+    workspaceId,
+    desired.userId,
+    desired.version,
+  )
+}
+
+async function configureHeadlessDeveloperCredential(
+  identity: InMemoryEnterpriseIdentityClient,
+  scopes: ApiScope[],
+) {
+  const workspaceId = HEADLESS_DEVELOPER_WORKSPACE_ID
+  const platform = new InMemoryDeveloperPlatformClient()
+  const apiKey = await platform.createApiKey({
+    workspaceId,
+    createdByUserId: 'demo@example.com',
+    input: {
+      name: 'Headless Enterprise RBAC test key',
+      scopes,
+      expiresAt: '2027-07-20T00:00:00.000Z',
+    },
+  })
+  configureApiClientsForTest({
+    developerPlatform: platform,
+    enterpriseIdentity: identity,
+  })
+  return apiKey.secret
+}
+
+function requestHeadlessWorkItem(
+  secret: string,
+  workItemId: string,
+) {
+  return app.request(
+    `http://localhost/api/v1/work-items/${encodeURIComponent(workItemId)}?teamId=core-team`,
+    { headers: { Authorization: `Bearer ${secret}` } },
+  )
+}
+
+function createHeadlessWorkItem(
+  secret: string,
+  assignedProjectId: string,
+  idempotencyKey: string,
+) {
+  return app.request('http://localhost/api/v1/work-items', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${secret}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': idempotencyKey,
+    },
+    body: JSON.stringify({
+      teamId: 'core-team',
+      title: 'Headless Enterprise Work Item',
+      assigneeUserId: 'sato@example.com',
+      assignedProjectId,
+      dueDate: '2026-07-31',
+      priority: 'medium',
+    }),
   })
 }
 
@@ -6772,6 +20775,8 @@ function configureFakeProjectClients(
   options: {
     /** Cognito user pagination fake が page ごとに返す user ID と token です。 */
     cognitoUserPages?: Array<{ userIds: string[]; nextToken?: string }>
+    /** Cognito principal へ設定する明示的な Workspace directory ID です。 */
+    directoryId?: string
     /** Cognito user 一覧 fake が返す次 page token です。 */
     cognitoUsersNextToken?: string
     profileError?: Error
@@ -6779,17 +20784,77 @@ function configureFakeProjectClients(
     mentionAccessDeniedMemberKeys?: string[]
     /** NEW_PASSWORD_REQUIRED challenge で Cognito が返す error です。 */
     newPasswordChallengeError?: CognitoServiceError
+    /** Cognito federation provider inspection fake が返す provider details です。 */
+    cognitoProviderDetails?: Record<string, string>
+    /** Cognito SSO app client inspection fake の既定 contract を上書きします。 */
+    cognitoSsoClientDetails?: {
+      allowedOAuthFlows?: string[]
+      allowedOAuthFlowsUserPoolClient?: boolean
+      allowedOAuthScopes?: string[]
+      callbackUrls?: string[]
+      explicitAuthFlows?: string[]
+      hasClientSecret?: boolean
+      supportedIdentityProviders?: string[]
+    }
     newPasswordChallengeTokens?: boolean
+    /** MFA challenge 応答 fake が返す Cognito error です。 */
+    mfaChallengeError?: CognitoServiceError
+    /** MFA challenge 応答 fake が token set を返すかどうかです。 */
+    mfaChallengeTokens?: boolean
+    /** Password login fake が返す MFA challenge です。 */
+    passwordMfaChallenge?: 'SOFTWARE_TOKEN_MFA' | 'SMS_MFA' | 'SMS_OTP' | 'EMAIL_OTP'
     passwordAuthChallenge?: boolean
     passwordAuthTokens?: boolean
     projectAccesses?: Array<{ projectId: string; role?: ProjectRole }>
     role?: ProjectRole
+    /** Cognito current group membership fake が返す group 名です。 */
+    cognitoUserGroups?: string[]
+    /** Cognito current group membership の取得障害です。 */
+    cognitoUserGroupsError?: Error
     systemAdminMemberKeys?: string[]
     taskAssigneeUserId?: string
     /** Notification 認可で再取得する Work Item の現在 assigned Project ID です。 */
     detailAssignedProjectId?: string
+    /** Work Item ID ごとに detail fake が返す現在 assigned Project ID です。 */
+    detailAssignedProjectIds?: Record<string, string>
     /** Notification 認可で再取得する Work Item の現在担当者です。 */
     detailAssigneeUserId?: string
+    /** Detail fake が返す現在の設定済み custom field values です。 */
+    detailCustomFieldValues?: Record<string, CustomFieldValue>
+    /** Detail fake が返す legacy search custom fields です。 */
+    /** Detail fake が TeamIssueNotFound を返す Work Item ID です。 */
+    detailMissingIssueIds?: string[]
+    /** Work Item detail read の障害を再現する error です。 */
+    detailReadError?: Error
+    /** Work Item detail read の同時実行を観測または制御する hook です。 */
+    detailReadHook?: (issueId: string) => Promise<void>
+    /** Detail fake が返す現在の設定済み workflow status ID です。 */
+    detailWorkflowStatusId?: string
+    /** Detail fake が read ごとに返す workflow status ID です。 */
+    detailWorkflowStatusIds?: string[]
+    /** Detail fake が read ごとに返す更新日時です。 */
+    detailUpdatedAts?: string[]
+    /** Project 作成 transaction と template application receipt の同時確定を再現する hook です。 */
+    projectCreateHook?: (
+      input: Record<string, unknown>,
+      completionTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    ) => Promise<void> | void
+    /** Canonical Work Item create transaction 直前の競合を再現する hook です。 */
+    issueCreateHook?: (input: Record<string, unknown>) => Promise<void> | void
+    /** Canonical Work Item delete の transaction 配線を観測する hook です。 */
+    issueDeleteHook?: (input: {
+      /** Authorization generation checks です。 */
+      authorizationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
+      /** Named deletion fences です。 */
+      deletionFences: ReadonlyArray<{
+        /** Fence の競合分類名です。 */
+        kind: string
+        /** 同じ transaction へ渡す DynamoDB action です。 */
+        transactWriteItem: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+      }>
+      /** Delete 対象 Work Item ID です。 */
+      issueId: string
+    }) => Promise<void> | void
     teamProjects?: Array<{ id: string; name: string; tone: 'blue' | 'purple' | 'green' | 'yellow' }>
     /** owner Team ambiguity を再現する追加 Team です。 */
     additionalTeams?: Array<{
@@ -6807,18 +20872,6 @@ function configureFakeProjectClients(
         tone: 'blue' | 'purple' | 'green' | 'yellow'
       }>
     }>
-    /** Legacy task と同じ ID の canonical row を所有する Team ID です。 */
-    migratedLegacyOwnerTeamId?: string
-    /** Migration 後の canonical row が現在アサインされている project ID です。 */
-    migratedLegacyAssignedProjectId?: string
-    /** Migration metadata が指す元 legacy project ID です。 */
-    migratedLegacySourceProjectId?: string
-    /** Migrated canonical fake に stable source metadata が存在するかどうかです。 */
-    migratedLegacyHasSourceMetadata?: boolean
-    /** Migrated canonical fake が project 未アサインかどうかです。 */
-    migratedLegacyUnassigned?: boolean
-    /** Legacy project task fake が返す task ID です。 */
-    legacyTaskIds?: string[]
     /** Project 別 canonical Work Item fake が返す Issue ID です。 */
     canonicalProjectIssueIds?: string[]
     /** Team Issue fake が返す canonical Work Item 数です。 */
@@ -6841,6 +20894,8 @@ function configureFakeProjectClients(
   let workspaceReconcileFailures = options.workspaceReconcileFailures ?? 0
   const calls = {
     accessChecks: [] as Array<{ directoryId: string; projectId: string }>,
+    cognitoIdentityProviderDescriptions: [] as string[],
+    cognitoSsoAppClientDescriptions: [] as string[],
     directoryReads: [] as Array<{
       directoryId: string
       locale: string
@@ -6854,11 +20909,12 @@ function configureFakeProjectClients(
       projectId: string
       role: string
     }>,
-    migrationSourceBatchReads: [] as Array<{
+    projectArchives: [] as Array<{
       directoryId: string
-      keys: Array<{ issueId: string; teamId: string }>
+      expectedPlanningRevision: number
+      teamId: string
+      projectId: string
     }>,
-    projectArchives: [] as Array<{ directoryId: string; teamId: string; projectId: string }>,
     projectCreates: [] as Array<{
       creatorUserKey: string
       directoryId: string
@@ -6871,16 +20927,21 @@ function configureFakeProjectClients(
       isSystemAdmin: boolean
       userKey: string
     }>,
-    teamArchives: [] as Array<{ directoryId: string; teamId: string }>,
+    teamArchives: [] as Array<{
+      directoryId: string
+      expectedPlanningRevision: number
+      teamId: string
+    }>,
     teamCreates: [] as Array<{ directoryId: string; name: string }>,
     issueComments: [] as Array<{ actorUserId: string; directoryId: string; issueId: string; teamId: string }>,
     issueCreates: [] as Array<{
       actorUserId: string
       assignedProjectId?: unknown
       directoryId: string
-      reservedIssueIds?: string[]
       teamId: string
       title: string
+      statusCategory?: unknown
+      workflowStatusId?: unknown
     }>,
     issueDetails: [] as Array<{
       directoryId: string
@@ -6895,6 +20956,12 @@ function configureFakeProjectClients(
       }
     }>,
     issueReads: [] as Array<{ directoryId: string; limit?: number; teamId: string }>,
+    publicIssuePageReads: [] as Array<{
+      directoryId: string
+      teamId: string
+      limit: number
+      cursor?: string
+    }>,
     issueUpdates: [] as Array<{
       actorUserId: string
       assignedProjectId?: unknown
@@ -6902,15 +20969,14 @@ function configureFakeProjectClients(
       issueId: string
       teamId: string
     }>,
-    projectIssueReads: [] as Array<{ directoryId: string; limit?: number; projectId: string }>,
-    taskCreates: [] as Array<{ directoryId: string; projectId: string; title: string }>,
-    taskReads: [] as Array<{ directoryId: string; limit?: number; projectId: string }>,
-    taskStatusUpdates: [] as Array<{
+    issueDeletes: [] as Array<{
+      actorUserId: string
       directoryId: string
-      projectId: string
-      status: string
-      taskId: string
+      issueId: string
+      teamId: string
     }>,
+    projectIssueReads: [] as Array<{ directoryId: string; limit?: number; projectId: string }>,
+    taskReads: [] as Array<{ directoryId: string; limit?: number; projectId: string }>,
     userLists: [] as Array<{
       directoryId?: string
       limit?: number
@@ -6919,8 +20985,27 @@ function configureFakeProjectClients(
     }>,
     userProfiles: [] as string[],
     workspaceInvitationResends: [] as string[],
+    workspaceMutationAuditContexts: [] as ObservedWorkspaceMutationAuditContext[],
+    workspaceMemberUpdates: [] as Array<{
+      expectedDocumentAuthorizationRevision?: number
+      expectedPlanningRevision: number
+      memberKey: string
+      role?: WorkspaceRole
+      status?: WorkspaceMemberStatus
+    }>,
     workspaceReconciliations: [] as string[],
+    mfaChallenges: [] as Array<{
+      challenge: string
+      code: string
+      email: string
+      session: string
+    }>,
   }
+  const workspaceInvitationInputs = new Map<string, {
+    name?: string
+    role: WorkspaceRole
+  }>()
+  const deletedIssueIds = new Set<string>()
   const createWorkspaceMember = (memberKey: string) => ({
     id: memberKey,
     memberKey,
@@ -6936,9 +21021,35 @@ function configureFakeProjectClients(
     createdAt: '2026-07-11T00:00:00.000Z',
     updatedAt: '2026-07-11T00:00:00.000Z',
   })
+  const createFakeTeamIssues = (teamId: string) =>
+    Array.from({ length: options.teamIssueCount ?? 1 }, (_, index) => ({
+      schemaVersion: 1 as const,
+      revision: 1,
+      id: index === 0 ? 'onboarding-friction' : `work-item-${index}`,
+      teamId,
+      assignedProjectId: index < (options.inaccessibleTeamIssueCount ?? 0)
+        ? 'private-project'
+        : options.unassignedIssue ? undefined : 'refero',
+      title: index === 0
+        ? '初回オンボーディングの離脱要因を減らす'
+        : `Work Item ${index}`,
+      description: '初回体験の摩擦を下げる。',
+      assigneeUserId: 'sato@example.com',
+      creatorMemberKey: 'demo@example.com',
+      workflowSchemaVersion: 1 as const,
+      workflowStatusId: 'in-progress',
+      statusCategory: 'started' as const,
+      customFieldValues: {},
+      relationIds: [],
+      dueDate: '2026/06/18',
+      priority: 'high' as const,
+      createdAt: '2026-06-08T00:00:00.000Z',
+      updatedAt: '2026-06-08T00:00:00.000Z',
+      source: 'dynamodb' as const,
+    }))
 
   configureApiClientsForTest({
-    collaboration: {
+    collaboration: createCollaborationStub({
       async getThread() {
         return {
           comments: [],
@@ -6965,9 +21076,20 @@ function configureFakeProjectClients(
           reactions: [],
         }
       },
-    } as CollaborationClient,
+    }),
+    enterpriseIdentity: new InMemoryEnterpriseIdentityClient(),
     cognito: {
       async initiatePasswordAuth() {
+        if (options.passwordMfaChallenge) {
+          return {
+            ChallengeName: options.passwordMfaChallenge,
+            ChallengeParameters: {
+              CODE_DELIVERY_DESTINATION: '***-***-1234',
+              CODE_DELIVERY_DELIVERY_MEDIUM: 'SMS',
+            },
+            Session: 'mfa-session',
+          }
+        }
         if (options.passwordAuthChallenge) {
           return {
             ChallengeName: 'NEW_PASSWORD_REQUIRED',
@@ -6992,6 +21114,14 @@ function configureFakeProjectClients(
 
         return {}
       },
+      async respondToMfaChallenge(email, challenge, code, session) {
+        calls.mfaChallenges.push({ email, challenge, code, session })
+        if (options.mfaChallengeError) throw options.mfaChallengeError
+        if (options.mfaChallengeTokens) {
+          return { AuthenticationResult: createFakeAuthTokenSet() }
+        }
+        return {}
+      },
       async getUser() {
         return {
           Username: 'demo@example.com',
@@ -7000,6 +21130,12 @@ function configureFakeProjectClients(
               Name: 'email',
               Value: 'Demo@Example.com',
             },
+            ...(options.directoryId
+              ? [{
+                  Name: 'custom:directory_id',
+                  Value: options.directoryId,
+                }]
+              : []),
           ],
         }
       },
@@ -7031,6 +21167,49 @@ function configureFakeProjectClients(
       async isSystemAdmin(userId) {
         return options.systemAdminMemberKeys?.includes(userId.toLowerCase()) ?? false
       },
+      async getUserGroups(userId) {
+        if (options.cognitoUserGroupsError) throw options.cognitoUserGroupsError
+        return [
+          ...(options.cognitoUserGroups ?? []),
+          ...(options.systemAdminMemberKeys?.includes(userId.toLowerCase())
+            ? ['mukuroji-system-admins']
+            : []),
+        ]
+      },
+      async describeEnterpriseIdentityProvider(providerName) {
+        calls.cognitoIdentityProviderDescriptions.push(providerName)
+        return {
+          providerName,
+          providerType: 'OIDC',
+          providerDetails: options.cognitoProviderDetails ?? {
+            oidc_issuer: 'https://idp.example.com',
+            client_id: 'enterprise-client',
+          },
+        }
+      },
+      async describeEnterpriseSsoAppClient(clientId) {
+        calls.cognitoSsoAppClientDescriptions.push(clientId)
+        return {
+          clientId,
+          hasClientSecret: options.cognitoSsoClientDetails?.hasClientSecret ?? false,
+          supportedIdentityProviders:
+            options.cognitoSsoClientDetails?.supportedIdentityProviders ?? ['EnterpriseOidc'],
+          allowedOAuthFlowsUserPoolClient:
+            options.cognitoSsoClientDetails?.allowedOAuthFlowsUserPoolClient ?? true,
+          allowedOAuthFlows:
+            options.cognitoSsoClientDetails?.allowedOAuthFlows ?? ['code'],
+          allowedOAuthScopes:
+            options.cognitoSsoClientDetails?.allowedOAuthScopes ??
+              ['openid', 'email', 'profile'],
+          explicitAuthFlows:
+            options.cognitoSsoClientDetails?.explicitAuthFlows ??
+              ['ALLOW_REFRESH_TOKEN_AUTH'],
+          callbackUrls: options.cognitoSsoClientDetails?.callbackUrls ?? [
+            Bun.env.COGNITO_SSO_REDIRECT_URI ??
+              'https://app.example.com/api/auth/sso/callback',
+          ],
+        }
+      },
       async findWorkspaceUser(userId) {
         if (options.workspaceUserMissing || options.workspaceProvisionRace) {
           return undefined
@@ -7041,32 +21220,43 @@ function configureFakeProjectClients(
             ...createFakeCognitoProfile(userId),
             status: 'FORCE_CHANGE_PASSWORD',
           },
+          identityId: `sub-${userId.toLowerCase()}`,
           directoryId: 'user#demo@example.com',
         }
       },
       async provisionWorkspaceUser(input) {
         if (options.workspaceProvisionRace) {
+          await input.beforeDirectoryClaimUpdate(`sub-${input.email}`, input.email)
           calls.workspaceInvitationResends.push(input.email)
           return {
             profile: {
               ...createFakeCognitoProfile(input.email),
               status: 'FORCE_CHANGE_PASSWORD',
             },
+            cognitoIdentityId: `sub-${input.email}`,
+            cognitoUsername: input.email,
             identityOwnership: 'ambiguous',
+            directoryClaimCleanupRequired: true,
             deliveryStatus: 'sent',
           }
         }
 
         return {
           profile: createFakeCognitoProfile(input.email),
+          cognitoIdentityId: `sub-${input.email}`,
+          cognitoUsername: input.email,
           identityOwnership: input.existingUser ? 'pre-existing' : 'workspace-created',
+          directoryClaimCleanupRequired: false,
           deliveryStatus: input.existingUser ? 'not-required' : 'sent',
         }
       },
       async resendWorkspaceUserInvitation(userId) {
         calls.workspaceInvitationResends.push(userId)
       },
-      async deleteWorkspaceUser() {},
+      async deleteWorkspaceUser() {
+        return 'deleted'
+      },
+      async unlinkWorkspaceUser() {},
     },
     dashboardSummary: {
       async getSummary(directoryId, accessContext) {
@@ -7085,6 +21275,7 @@ function configureFakeProjectClients(
         }
       },
     },
+    workItemConfigurations: createFakeWorkItemConfigurationClient(),
     projectDirectory: {
       async getProjectDirectory(directoryId, locale, consistentRead) {
         calls.directoryReads.push({
@@ -7220,32 +21411,56 @@ function configureFakeProjectClients(
           },
         }
       },
-      async createProject(directoryId, teamId, input, creator) {
+      async createProject(
+        directoryId,
+        teamId,
+        input,
+        creator,
+        _auditContext,
+        completionTransactItems = [],
+      ) {
         calls.projectCreates.push({
           creatorUserKey: creator.userKey,
           directoryId,
           name: String(input.name),
           teamId,
         })
+        await options.projectCreateHook?.(
+          input as Record<string, unknown>,
+          completionTransactItems,
+        )
 
         return {
           project: {
-            id: 'new-project',
-            name: String(input.name),
-            tone: 'green',
+            id: typeof input.idempotencyResourceId === 'string'
+              ? input.idempotencyResourceId
+              : 'new-project',
+            name: String(input.nameJa ?? input.name),
+            tone: input.tone === 'blue' ||
+                input.tone === 'purple' ||
+                input.tone === 'green' ||
+                input.tone === 'yellow'
+              ? input.tone
+              : 'green',
           },
         }
       },
-      async archiveTeam(directoryId, teamId) {
-        calls.teamArchives.push({ directoryId, teamId })
+      async archiveTeam(directoryId, teamId, _auditContext, expectedPlanningRevision) {
+        calls.teamArchives.push({ directoryId, expectedPlanningRevision, teamId })
 
         return {
           teamId,
           archivedAt: '2026-06-06T00:00:00.000Z',
         }
       },
-      async archiveProject(directoryId, teamId, projectId) {
-        calls.projectArchives.push({ directoryId, teamId, projectId })
+      async archiveProject(
+        directoryId,
+        teamId,
+        projectId,
+        _auditContext,
+        expectedPlanningRevision,
+      ) {
+        calls.projectArchives.push({ directoryId, expectedPlanningRevision, teamId, projectId })
 
         return {
           teamId,
@@ -7286,7 +21501,73 @@ function configureFakeProjectClients(
       async getInvitation() {
         return undefined
       },
-      async createInvitation(_workspaceId, _actorMemberKey, input) {
+      async acquireInvitationAcceptanceLock() {
+        return undefined
+      },
+      async releaseInvitationAcceptanceLock() {
+        throw new Error('Acceptance lock fake is not configured for this test.')
+      },
+      async markInvitationIdentityMutationStarted(
+        _workspaceId,
+        invitationId,
+        expectedVersion,
+        cognitoIdentityId,
+        cognitoUsername,
+        auditContext,
+      ) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'markInvitationIdentityMutationStarted',
+          context: auditContext,
+        })
+        return {
+          id: invitationId,
+          email: invitationId,
+          name: workspaceInvitationInputs.get(invitationId)?.name,
+          role: workspaceInvitationInputs.get(invitationId)?.role ?? 'member',
+          status: 'provisioning',
+          deliveryStatus: 'pending',
+          identityOwnership: 'ambiguous',
+          identityLifecycleVersion: 2,
+          cognitoIdentityId,
+          cognitoUsername,
+          identityMutationAttempted: true,
+          version: expectedVersion + 1,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async markInvitationDirectoryClaimCleanupRequired(
+        _workspaceId,
+        invitationId,
+        expectedVersion,
+        cognitoIdentityId,
+        cognitoUsername,
+        auditContext,
+      ) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'markInvitationDirectoryClaimCleanupRequired',
+          context: auditContext,
+        })
+        return {
+          id: invitationId,
+          email: invitationId,
+          role: 'member',
+          status: 'provisioning',
+          deliveryStatus: 'pending',
+          identityOwnership: 'ambiguous',
+          cognitoIdentityId,
+          cognitoUsername,
+          directoryClaimCleanupRequired: true,
+          version: expectedVersion + 1,
+          expiresAt: '2026-07-18T00:00:00.000Z',
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+        }
+      },
+      async createInvitation(_workspaceId, _actorMemberKey, input, _expiresInDays, auditContext) {
+        calls.workspaceMutationAuditContexts.push({ stage: 'createInvitation', context: auditContext })
+        workspaceInvitationInputs.set(input.email, { name: input.name, role: input.role })
         return {
           id: input.email,
           email: input.email,
@@ -7301,7 +21582,11 @@ function configureFakeProjectClients(
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-      async markInvitationDelivery(_workspaceId, invitationId, input) {
+      async markInvitationDelivery(_workspaceId, invitationId, input, auditContext) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'markInvitationDelivery',
+          context: auditContext,
+        })
         return {
           id: invitationId,
           email: invitationId,
@@ -7309,13 +21594,20 @@ function configureFakeProjectClients(
           status: input.deliveryStatus === 'failed' ? 'delivery-failed' : 'pending',
           deliveryStatus: input.deliveryStatus,
           identityOwnership: input.identityOwnership,
+          cognitoIdentityId: input.cognitoIdentityId,
+          cognitoUsername: input.cognitoUsername,
+          directoryClaimCleanupRequired: input.directoryClaimCleanupRequired,
           version: input.expectedVersion + 1,
           expiresAt: '2026-07-18T00:00:00.000Z',
           createdAt: '2026-07-11T00:00:00.000Z',
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-      async markInvitationCleanupFailure(_workspaceId, invitationId, input) {
+      async markInvitationCleanupFailure(_workspaceId, invitationId, input, auditContext) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'markInvitationCleanupFailure',
+          context: auditContext,
+        })
         return {
           id: invitationId,
           email: invitationId,
@@ -7330,7 +21622,16 @@ function configureFakeProjectClients(
           failureMessage: input.failureMessage,
         }
       },
-      async clearInvitationCleanupFailure(_workspaceId, invitationId, expectedVersion) {
+      async clearInvitationCleanupFailure(
+        _workspaceId,
+        invitationId,
+        expectedVersion,
+        auditContext,
+      ) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'clearInvitationCleanupFailure',
+          context: auditContext,
+        })
         return {
           id: invitationId,
           email: invitationId,
@@ -7344,6 +21645,12 @@ function configureFakeProjectClients(
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
+      async markInvitationManualCleanupRequired() {
+        throw new Error('Manual invitation cleanup fake is not configured for this test.')
+      },
+      async acknowledgeInvitationManualCleanup() {
+        throw new Error('Manual invitation cleanup acknowledgement fake is not configured for this test.')
+      },
       async prepareResend() {
         throw new Error('Invitation fake is not configured for this test.')
       },
@@ -7353,7 +21660,11 @@ function configureFakeProjectClients(
       async prepareReinvite() {
         throw new Error('Invitation fake is not configured for this test.')
       },
-      async reconcileAuthenticatedMember(_workspaceId, input) {
+      async reconcileAuthenticatedMember(_workspaceId, input, auditContext) {
+        calls.workspaceMutationAuditContexts.push({
+          stage: 'reconcileAuthenticatedMember',
+          context: auditContext,
+        })
         calls.workspaceReconciliations.push(input.memberKey)
 
         if (workspaceReconcileFailures > 0) {
@@ -7367,7 +21678,20 @@ function configureFakeProjectClients(
 
         return createWorkspaceMember(input.memberKey)
       },
-      async updateMember(_workspaceId, _actorMemberKey, memberKey, input) {
+      async updateMember(_workspaceId, _actorMemberKey, memberKey, input, auditContext) {
+        calls.workspaceMutationAuditContexts.push({ stage: 'updateMember', context: auditContext })
+        calls.workspaceMemberUpdates.push({
+          ...(input.expectedDocumentAuthorizationRevision === undefined
+            ? {}
+            : {
+                expectedDocumentAuthorizationRevision:
+                  input.expectedDocumentAuthorizationRevision,
+              }),
+          expectedPlanningRevision: input.expectedPlanningRevision,
+          memberKey,
+          ...(input.role === undefined ? {} : { role: input.role }),
+          ...(input.status === undefined ? {} : { status: input.status }),
+        })
         return {
           ...createWorkspaceMember(memberKey),
           role: input.role ?? createWorkspaceMember(memberKey).role,
@@ -7384,7 +21708,8 @@ function configureFakeProjectClients(
           ...(readOptions?.limit === undefined ? {} : { limit: readOptions.limit }),
         })
 
-        const tasks = (options.legacyTaskIds ?? ['wireframe']).map((taskId, index) => ({
+        const tasks = ['wireframe'].map((taskId, index) => ({
+          source: 'legacy' as const,
           id: taskId,
           ...(taskId === 'wireframe'
             ? { titleKey: 'tasks.item.wireframe' as const }
@@ -7400,39 +21725,6 @@ function configureFakeProjectClients(
           tasks: readOptions?.limit === undefined ? tasks : tasks.slice(0, readOptions.limit),
         }
       },
-      async createProjectTask(directoryId, projectId, input) {
-        calls.taskCreates.push({ directoryId, projectId, title: String(input.title) })
-
-        return {
-          task: {
-            id: 'new-task',
-            title: String(input.title),
-            assigneeUserId: String(input.assigneeUserId),
-            status: 'todo',
-            dueDate: String(input.dueDate),
-            priority: 'high',
-          },
-        }
-      },
-      async updateProjectTaskStatus(directoryId, projectId, taskId, input) {
-        calls.taskStatusUpdates.push({
-          directoryId,
-          projectId,
-          status: String(input.status),
-          taskId,
-        })
-
-        return {
-          task: {
-            id: taskId,
-            titleKey: 'tasks.item.wireframe',
-            assigneeKey: 'tasks.assignee.sato',
-            status: input.status === 'done' ? 'done' : 'todo',
-            dueDate: '2026/06/03',
-            priority: 'high',
-          },
-        }
-      },
     },
     teamIssues: {
       async getTeamIssues(directoryId, teamId, readOptions) {
@@ -7442,86 +21734,22 @@ function configureFakeProjectClients(
           ...(readOptions?.limit === undefined ? {} : { limit: readOptions.limit }),
         })
 
-        const issues = [
-          ...Array.from({ length: options.teamIssueCount ?? 1 }, (_, index) => ({
-            schemaVersion: 1 as const,
-            revision: 1,
-            id: index === 0 ? 'onboarding-friction' : `work-item-${index}`,
-            teamId,
-            assignedProjectId: index < (options.inaccessibleTeamIssueCount ?? 0)
-              ? 'private-project'
-              : options.unassignedIssue ? undefined : 'refero',
-            title: index === 0
-              ? '初回オンボーディングの離脱要因を減らす'
-              : `Work Item ${index}`,
-            description: '初回体験の摩擦を下げる。',
-            assigneeUserId: 'sato@example.com',
-            status: 'in-progress' as const,
-            dueDate: '2026/06/18',
-            priority: 'high' as const,
-            createdAt: '2026-06-08T00:00:00.000Z',
-            updatedAt: '2026-06-08T00:00:00.000Z',
-            source: 'dynamodb' as const,
-          })),
-          ...(options.migratedLegacyOwnerTeamId === teamId
-            ? [{
-                schemaVersion: 1 as const,
-                revision: 1,
-                id: 'wireframe',
-                teamId,
-                assignedProjectId: options.migratedLegacyUnassigned
-                  ? undefined
-                  : options.migratedLegacyAssignedProjectId ?? 'refero',
-                title: 'Migrated wireframe',
-                assigneeUserId: 'sato@example.com',
-                status: 'in-progress' as const,
-                dueDate: '2026/06/03',
-                priority: 'high' as const,
-                createdAt: '2026-06-01T00:00:00.000Z',
-                updatedAt: '2026-06-01T00:00:00.000Z',
-                source: 'dynamodb' as const,
-              }]
-            : []),
-        ]
+        const issues = createFakeTeamIssues(teamId)
         return {
           teamId,
           issues: readOptions?.limit === undefined ? issues : issues.slice(0, readOptions.limit),
         }
       },
-      async getTeamIssuesForAggregate(directoryId, teamId, readOptions) {
-        const response = await this.getTeamIssues(directoryId, teamId, readOptions)
-        const containsMigratedIssue = response.issues.some((issue) =>
-          issue.id === 'wireframe' && issue.teamId === options.migratedLegacyOwnerTeamId
-        )
-
-        return {
-          ...response,
-          migrationSourceKeys: containsMigratedIssue &&
-            options.migratedLegacyHasSourceMetadata !== false
-            ? [
-                `${directoryId}#project#${options.migratedLegacySourceProjectId ?? 'refero'}` +
-                '#task#wireframe',
-              ]
-            : [],
-        }
-      },
-      async getTeamIssueMigrationSourceKeys(directoryId, keys) {
-        const migrationSourceKey =
-          `${directoryId}#project#${options.migratedLegacySourceProjectId ?? 'refero'}` +
-          '#task#wireframe'
-        calls.migrationSourceBatchReads.push({
+      async getPublicWorkItemPage(directoryId, teamId, readOptions) {
+        calls.publicIssuePageReads.push({
           directoryId,
-          keys: keys.map((key) => ({ ...key })),
+          teamId,
+          limit: readOptions.limit,
+          ...(readOptions.cursor ? { cursor: readOptions.cursor } : {}),
         })
-
-        const containsMigratedIssue = keys.some((key) =>
-          key.teamId === options.migratedLegacyOwnerTeamId &&
-          key.issueId === 'wireframe'
-        )
-
-        return containsMigratedIssue && options.migratedLegacyHasSourceMetadata !== false
-          ? new Set([migrationSourceKey])
-          : new Set<string>()
+        return {
+          issues: createFakeTeamIssues(teamId).slice(0, readOptions.limit),
+        }
       },
       async getProjectIssues(directoryId, projectId, readOptions) {
         calls.projectIssueReads.push({
@@ -7539,7 +21767,12 @@ function configureFakeProjectClients(
               assignedProjectId: projectId,
               title: `Canonical Work Item ${index}`,
               assigneeUserId: 'sato@example.com',
-              status: 'in-progress' as const,
+              creatorMemberKey: 'demo@example.com',
+              workflowSchemaVersion: 1 as const,
+              workflowStatusId: 'in-progress',
+              statusCategory: 'started' as const,
+              customFieldValues: {},
+              relationIds: [],
               dueDate: '2026/06/18',
               priority: 'high' as const,
               createdAt: '2026-06-08T00:00:00.000Z',
@@ -7555,32 +21788,18 @@ function configureFakeProjectClients(
                 assignedProjectId: projectId,
                 title: '初回オンボーディングの離脱要因を減らす',
                 assigneeUserId: 'sato@example.com',
-                status: 'in-progress' as const,
+                creatorMemberKey: 'demo@example.com',
+                workflowSchemaVersion: 1 as const,
+                workflowStatusId: 'in-progress',
+                statusCategory: 'started' as const,
+                customFieldValues: {},
+                relationIds: [],
                 dueDate: '2026/06/18',
                 priority: 'high' as const,
                 createdAt: '2026-06-08T00:00:00.000Z',
                 updatedAt: '2026-06-08T00:00:00.000Z',
                 source: 'dynamodb' as const,
               },
-              ...(options.migratedLegacyOwnerTeamId &&
-                !options.migratedLegacyUnassigned &&
-                projectId === (options.migratedLegacyAssignedProjectId ?? 'refero')
-                ? [{
-                    schemaVersion: 1 as const,
-                    revision: 1,
-                    id: 'wireframe',
-                    teamId: options.migratedLegacyOwnerTeamId,
-                    assignedProjectId: options.migratedLegacyAssignedProjectId ?? 'refero',
-                    title: 'Migrated wireframe',
-                    assigneeUserId: 'sato@example.com',
-                    status: 'in-progress' as const,
-                    dueDate: '2026/06/03',
-                    priority: 'high' as const,
-                    createdAt: '2026-06-01T00:00:00.000Z',
-                    updatedAt: '2026-06-01T00:00:00.000Z',
-                    source: 'dynamodb' as const,
-                  }]
-                : []),
             ]
         return {
           projectId,
@@ -7588,20 +21807,33 @@ function configureFakeProjectClients(
         }
       },
       async getTeamIssueDetail(directoryId, teamId, issueId, readOptions) {
+        const detailReadIndex = calls.issueDetails.length
         calls.issueDetails.push({
           directoryId,
           teamId,
           issueId,
           ...(readOptions ? { readOptions } : {}),
         })
+        await options.detailReadHook?.(issueId)
 
-        if (issueId === 'wireframe') {
+        if (options.detailReadError) {
+          throw options.detailReadError
+        }
+
+        if (
+          issueId === 'wireframe' ||
+          deletedIssueIds.has(issueId) ||
+          options.detailMissingIssueIds?.includes(issueId)
+        ) {
           throw {
             status: 404,
             code: 'TeamIssueNotFound',
             message: 'Issue was not found.',
           }
         }
+        const workflowStatusId = options.detailWorkflowStatusIds?.[detailReadIndex] ??
+          options.detailWorkflowStatusId ??
+          'in-progress'
 
         return {
           issue: {
@@ -7609,17 +21841,27 @@ function configureFakeProjectClients(
             revision: 1,
             id: issueId,
             teamId,
-            assignedProjectId: options.unassignedIssue
-              ? undefined
-              : options.detailAssignedProjectId ?? 'refero',
+            assignedProjectId: options.detailAssignedProjectIds?.[issueId] ??
+              (options.unassignedIssue
+                ? undefined
+                : options.detailAssignedProjectId ?? 'refero'),
             title: '初回オンボーディングの離脱要因を減らす',
             description: '初回体験の摩擦を下げる。',
             assigneeUserId: options.detailAssigneeUserId ?? 'sato@example.com',
-            status: 'in-progress',
+            creatorMemberKey: 'demo@example.com',
+            workflowSchemaVersion: 1,
+            workflowStatusId,
+            statusCategory:
+              workflowStatusId === 'done' || workflowStatusId === 'approval-complete'
+                ? 'completed'
+                : 'started',
+            customFieldValues: options.detailCustomFieldValues ?? {},
+            relationIds: [],
             dueDate: '2026/06/18',
             priority: 'high',
             createdAt: '2026-06-08T00:00:00.000Z',
-            updatedAt: '2026-06-08T00:00:00.000Z',
+            updatedAt: options.detailUpdatedAts?.[detailReadIndex] ??
+              '2026-06-08T00:00:00.000Z',
             source: 'dynamodb',
           },
           comments: [
@@ -7641,14 +21883,20 @@ function configureFakeProjectClients(
           ],
         }
       },
-      async createTeamIssue(directoryId, teamId, input, actorUserId, reservedIssueIds = []) {
+      async createTeamIssue(directoryId, teamId, input, actorUserId) {
+        await options.issueCreateHook?.(input as Record<string, unknown>)
         calls.issueCreates.push({
           actorUserId,
           assignedProjectId: input.assignedProjectId,
           directoryId,
-          reservedIssueIds,
           teamId,
           title: String(input.title),
+          ...(input.statusCategory === undefined
+            ? {}
+            : { statusCategory: input.statusCategory }),
+          ...(input.workflowStatusId === undefined
+            ? {}
+            : { workflowStatusId: input.workflowStatusId }),
         })
 
         return {
@@ -7663,7 +21911,18 @@ function configureFakeProjectClients(
             title: String(input.title),
             description: typeof input.description === 'string' ? input.description : undefined,
             assigneeUserId: String(input.assigneeUserId),
-            status: 'todo',
+            creatorMemberKey: actorUserId,
+            workflowSchemaVersion: 1,
+            workflowStatusId: String(input.workflowStatusId),
+            statusCategory: input.statusCategory === 'backlog' ||
+              input.statusCategory === 'unstarted' ||
+              input.statusCategory === 'started' ||
+              input.statusCategory === 'completed' ||
+              input.statusCategory === 'canceled'
+              ? input.statusCategory
+              : 'unstarted',
+            customFieldValues: input.customFieldValues as Record<string, CustomFieldValue>,
+            relationIds: [],
             dueDate: String(input.dueDate),
             priority: 'medium',
             createdAt: '2026-06-08T00:00:00.000Z',
@@ -7692,12 +21951,50 @@ function configureFakeProjectClients(
               : undefined,
             title: typeof input.title === 'string' ? input.title : '初回オンボーディングの離脱要因を減らす',
             assigneeUserId: typeof input.assigneeUserId === 'string' ? input.assigneeUserId : 'sato@example.com',
-            status: input.status === 'done' ? 'done' : 'in-progress',
+            creatorMemberKey: 'demo@example.com',
+            workflowSchemaVersion: 1,
+            workflowStatusId: typeof input.workflowStatusId === 'string'
+              ? input.workflowStatusId
+              : 'in-progress',
+            statusCategory: input.statusCategory === 'backlog' ||
+              input.statusCategory === 'unstarted' ||
+              input.statusCategory === 'started' ||
+              input.statusCategory === 'completed' ||
+              input.statusCategory === 'canceled'
+              ? input.statusCategory
+              : 'started',
+            customFieldValues: input.customFieldValues as Record<string, CustomFieldValue>,
+            relationIds: [],
             dueDate: typeof input.dueDate === 'string' ? input.dueDate : '2026/06/18',
             priority: input.priority === 'low' ? 'low' : 'high',
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: '2026-06-08T02:00:00.000Z',
             source: 'dynamodb',
+          },
+        }
+      },
+      async deleteTeamIssue(
+        directoryId,
+        teamId,
+        issueId,
+        _expectedRevision,
+        actorUserId,
+        _auditContext,
+        _idempotency,
+        deletionFences = [],
+        authorizationConditionChecks = [],
+      ) {
+        await options.issueDeleteHook?.({
+          authorizationConditionChecks,
+          deletionFences,
+          issueId,
+        })
+        calls.issueDeletes.push({ actorUserId, directoryId, issueId, teamId })
+        deletedIssueIds.add(issueId)
+        return {
+          issue: {
+            ...createFakeTeamIssues(teamId)[0]!,
+            id: issueId,
           },
         }
       },
@@ -7788,6 +22085,69 @@ function createLambdaHttpEvent(rawPath: string, accessToken: string) {
   } satisfies Extract<LambdaEvent, { rawPath: string }>
 }
 
+async function drainEnterpriseScimGroupJob(
+  identity: InMemoryEnterpriseIdentityClient,
+  workspaceId: string,
+  groupId: string,
+) {
+  let eventName: 'INSERT' | 'MODIFY' = 'INSERT'
+  for (let page = 0; page < 1_000; page += 1) {
+    if (!await processEnterpriseScimGroupJobPage(
+      identity,
+      workspaceId,
+      groupId,
+      eventName,
+    )) return
+    eventName = 'MODIFY'
+  }
+  throw new Error('SCIM group reconciliation exceeded the test page limit.')
+}
+
+async function processEnterpriseScimGroupJobPage(
+  identity: InMemoryEnterpriseIdentityClient,
+  workspaceId: string,
+  groupId: string,
+  eventName: 'INSERT' | 'MODIFY' = 'MODIFY',
+) {
+  const reference = await identity.getScimGroupJobReference(
+    workspaceId,
+    groupId,
+  )
+  if (!reference) return false
+  const workerHandler = createEnterpriseScimGroupJobWorkerHandler(
+    requireEnterpriseScimGroupJobProcessor(identity),
+  )
+  const result = await workerHandler({
+    Records: [{
+      eventSource: 'aws:dynamodb',
+      eventName,
+      dynamodb: {
+        SequenceNumber: `sequence-${reference.revision}`,
+        NewImage: {
+          scopeKey: { S: `WORKSPACE#${workspaceId}` },
+          recordKey: { S: `SCIM_GROUP_JOB#${reference.jobId}` },
+          entryType: { S: 'enterprise-scim-group-job' },
+          workspaceId: { S: workspaceId },
+          jobId: { S: reference.jobId },
+          revision: { N: String(reference.revision) },
+        },
+      },
+    }],
+  })
+  expect(result).toEqual({ batchItemFailures: [] })
+  return true
+}
+
+function requireEnterpriseScimGroupJobProcessor(
+  identity: InMemoryEnterpriseIdentityClient,
+) {
+  const processor = enterpriseScimGroupJobProcessors.get(identity)
+  if (!processor) {
+    throw new Error('Enterprise SCIM group job test processor is not configured.')
+  }
+  return processor
+}
+
 async function withTestEnvironment(
   values: Record<string, string | undefined>,
   callback: () => Promise<void>,
@@ -7814,6 +22174,199 @@ async function withTestEnvironment(
         Bun.env[name] = value
       }
     }
+  }
+}
+
+async function configureEnterpriseScimGuestRoleScenario(workspaceId: string) {
+  configureFakeProjectClients(true)
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const now = new Date().toISOString()
+  await identity.putIdentityProvider({
+    workspaceId,
+    providerId: 'idp-guest-role',
+    kind: 'oidc',
+    displayName: 'Guest role directory',
+    cognitoProviderName: 'EnterpriseOidc',
+    status: 'active',
+    revision: 1,
+    issuer: 'https://idp.example.com',
+    clientId: 'enterprise-client',
+    authorizationEndpoint: 'https://idp.example.com/authorize',
+    tokenEndpoint: 'https://idp.example.com/token',
+    jwksUri: 'https://idp.example.com/jwks',
+    scopes: ['openid', 'email'],
+    createdAt: now,
+    updatedAt: now,
+    lastTestedAt: now,
+  })
+  const scimToken = (await identity.issueScimToken(
+    workspaceId,
+    'idp-guest-role',
+    'Guest role directory',
+  )).token
+  const members = new Map<string, WorkspaceMember>([
+    ['demo@example.com', {
+      id: 'demo@example.com',
+      memberKey: 'demo@example.com',
+      email: 'demo@example.com',
+      name: 'Demo User',
+      role: 'owner',
+      status: 'active',
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    }],
+    ['managed@example.com', {
+      id: 'managed@example.com',
+      memberKey: 'managed@example.com',
+      email: 'managed@example.com',
+      name: 'Managed User',
+      role: 'member',
+      status: 'active',
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    }],
+  ])
+  const reconciledRoles: WorkspaceRole[] = []
+  const reconcileAuditContexts: MutationAuditContext[] = []
+  let reconcileFailures = 0
+  let afterNextDirectoryReconcile: (() => Promise<void>) | undefined
+  const planningClient = new InMemoryPlanningClient()
+  const documentClient = {
+    async getAuthorizationRevision() {
+      return 0
+    },
+    async getManagerLifecycleSnapshot() {
+      return { authorizationRevision: 0 }
+    },
+  } as unknown as DocumentClient
+  const workspaceAccessClient = {
+    async getMember(_workspaceId: string, memberKey: string) {
+      return members.get(memberKey)
+    },
+    async getActiveMember(_workspaceId: string, memberKey: string) {
+      const member = members.get(memberKey)
+      return member?.status === 'active' ? member : undefined
+    },
+    async listActiveMembers() {
+      return [...members.values()].filter((member) => member.status === 'active')
+    },
+    async reconcileDirectoryMember(
+      _workspaceId: string,
+      input: Parameters<
+        NonNullable<WorkspaceAccessClient['reconcileDirectoryMember']>
+      >[1],
+      auditContext?: MutationAuditContext,
+    ) {
+      if (reconcileFailures > 0) {
+        reconcileFailures -= 1
+        throw new WorkspaceAccessError(
+          503,
+          'WorkspaceDirectoryReconcileUnavailable',
+          'Directory reconciliation is temporarily unavailable.',
+        )
+      }
+      const existing = members.get(input.memberKey)
+      if (
+        input.expectedVersion !== undefined &&
+        existing?.version !== input.expectedVersion
+      ) {
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceMemberVersionConflict',
+          'Workspace member changed.',
+        )
+      }
+      const member: WorkspaceMember = {
+        id: input.memberKey,
+        memberKey: input.memberKey,
+        email: input.email,
+        name: input.name,
+        role: input.role,
+        status: 'active',
+        provisioningSource: 'directory',
+        externalIdentityId: input.externalIdentityId,
+        version: (existing?.version ?? 0) + 1,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      }
+      members.set(input.memberKey, member)
+      reconciledRoles.push(member.role)
+      if (auditContext) reconcileAuditContexts.push(auditContext)
+      const afterReconcile = afterNextDirectoryReconcile
+      afterNextDirectoryReconcile = undefined
+      await afterReconcile?.()
+      return member
+    },
+    async deprovisionDirectoryMember(
+      _workspaceId: string,
+      memberKey: string,
+      _input: Parameters<
+        NonNullable<WorkspaceAccessClient['deprovisionDirectoryMember']>
+      >[2],
+      auditContext?: MutationAuditContext,
+    ) {
+      const existing = members.get(memberKey)
+      if (!existing) return undefined
+      const member = {
+        ...existing,
+        status: 'deactivated' as const,
+        version: existing.version + 1,
+        updatedAt: now,
+      }
+      members.set(memberKey, member)
+      if (auditContext) reconcileAuditContexts.push(auditContext)
+      return member
+    },
+  } as unknown as WorkspaceAccessClient
+  configureApiClientsForTest({
+    documents: documentClient,
+    enterpriseIdentity: identity,
+    planning: planningClient,
+    workspaceAccess: workspaceAccessClient,
+  })
+  enterpriseScimGroupJobProcessors.set(
+    identity,
+    createEnterpriseScimGroupJobProcessor({
+      documents: documentClient,
+      enterpriseIdentity: identity,
+      planning: planningClient,
+      workspaceAccess: workspaceAccessClient as Required<Pick<
+        WorkspaceAccessClient,
+        'deprovisionDirectoryMember' | 'getMember' | 'listActiveMembers' |
+          'reconcileDirectoryMember'
+      >>,
+      projectManagerGuard: {
+        async hasManagedProject() {
+          return false
+        },
+      },
+      cognito: {
+        async disableWorkspaceUser() {
+          return undefined
+        },
+        async enableWorkspaceUser() {
+          return undefined
+        },
+        async globallySignOutWorkspaceUser() {
+          return undefined
+        },
+      },
+    }),
+  )
+  return {
+    identity,
+    members,
+    reconcileAuditContexts,
+    reconciledRoles,
+    scimToken,
+    setAfterNextDirectoryReconcile(callback: () => Promise<void>) {
+      afterNextDirectoryReconcile = callback
+    },
+    setReconcileFailures(value: number) {
+      reconcileFailures = value
+    },
   }
 }
 
@@ -7844,6 +22397,15 @@ function createFakeAuthTokenSet() {
     ExpiresIn: 3600,
     TokenType: 'Bearer',
   }
+}
+
+function createCognitoSdkTestError(name: string, status: number) {
+  const error = new Error(`${name} from the Cognito SDK test double.`)
+  error.name = name
+
+  return Object.assign(error, {
+    $metadata: { httpStatusCode: status },
+  })
 }
 
 function createWorkspaceBootstrapItems() {
@@ -7883,3 +22445,783 @@ function createAccessToken(groups: string[] = [], claims: Record<string, unknown
 
   return `header.${payload}.signature`
 }
+
+function planningApiRequest(path: string, method = 'GET', body?: unknown) {
+  return app.request(path, {
+    method,
+    headers: {
+      Authorization: 'Bearer test-token',
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  })
+}
+
+function createCyclePlanningInput(id: string, expectedRevision: number) {
+  return {
+    id,
+    type: 'cycle' as const,
+    title: `Cycle ${id}`,
+    teamId: 'core-team',
+    projectId: 'refero',
+    ownerMemberKey: 'demo@example.com',
+    status: 'active' as const,
+    health: 'on-track' as const,
+    risk: 'low' as const,
+    progressMode: 'automatic' as const,
+    baseline: { startDate: '2026-07-01', endDate: '2026-07-14' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-07-14' },
+    cadence: { unit: 'week' as const, count: 2 },
+    capacity: 10,
+    carryOverPolicy: 'move-incomplete' as const,
+    expectedRevision,
+  }
+}
+
+async function seedPlanningWorkspaceParentAndScopedChild(
+  planningClient: InMemoryPlanningClient,
+) {
+  await planningClient.create('user#demo@example.com', {
+    ...createCyclePlanningInput('portfolio-scope-parent', 0),
+    type: 'portfolio',
+    title: 'Workspace portfolio',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planningClient.create('user#demo@example.com', {
+    ...createCyclePlanningInput('roadmap-scoped-child', 1),
+    type: 'roadmap',
+    title: 'Scoped roadmap',
+    parentId: 'portfolio-scope-parent',
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+}
+
+test('returns an authenticated empty Planning graph with accessible Work Item projections', async () => {
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: new InMemoryPlanningClient() })
+
+  const response = await planningApiRequest('/api/planning')
+
+  expect(response.status).toBe(200)
+  const planning = await response.json() as PlanningSnapshot
+  expect(planning).toMatchObject({
+    schemaVersion: 1,
+    revision: 0,
+    entities: [],
+    dependencies: [],
+    workItemLinks: [],
+  })
+  expect(planning.workItems).toEqual([
+    expect.objectContaining({
+      id: 'onboarding-friction',
+      teamId: 'core-team',
+      projectId: 'refero',
+      statusCategory: 'started',
+    }),
+  ])
+})
+
+test('lets managers build a scoped hierarchy and dependency graph', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  configureApiClientsForTest({ planning: new InMemoryPlanningClient() })
+
+  const portfolio = await planningApiRequest('/api/planning/entities', 'POST', {
+    id: 'portfolio-1',
+    type: 'portfolio',
+    title: 'Company portfolio',
+    ownerMemberKey: 'demo@example.com',
+    status: 'active',
+    health: 'on-track',
+    risk: 'low',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    expectedRevision: 0,
+  })
+  expect(portfolio.status).toBe(201)
+
+  for (const [index, id] of ['roadmap-a', 'roadmap-b'].entries()) {
+    const response = await planningApiRequest('/api/planning/entities', 'POST', {
+      id,
+      type: 'roadmap',
+      title: id,
+      parentId: 'portfolio-1',
+      teamId: 'core-team',
+      projectId: 'refero',
+      ownerMemberKey: 'demo@example.com',
+      status: 'planned',
+      health: 'on-track',
+      risk: 'low',
+      progressMode: 'automatic',
+      baseline: { startDate: '2026-07-01', endDate: '2026-07-31' },
+      forecast: { startDate: '2026-07-01', endDate: '2026-07-31' },
+      expectedRevision: index + 1,
+    })
+    expect(response.status).toBe(201)
+  }
+
+  const dependency = await planningApiRequest('/api/planning/dependencies', 'POST', {
+    id: 'dependency-1',
+    predecessorId: 'roadmap-a',
+    successorId: 'roadmap-b',
+    type: 'finish-to-start',
+    lagDays: 2,
+    expectedRevision: 3,
+  })
+
+  expect(dependency.status).toBe(201)
+  const planning = await dependency.json() as PlanningSnapshot
+  expect(planning.revision).toBe(4)
+  expect(planning.dependencies).toEqual([
+    expect.objectContaining({
+      id: 'dependency-1',
+      predecessorId: 'roadmap-a',
+      successorId: 'roadmap-b',
+    }),
+  ])
+})
+
+test('requires parent scope permission when creating a Planning child', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const parent = await planningApiRequest('/api/planning/entities', 'POST', {
+    id: 'portfolio-protected',
+    type: 'portfolio',
+    title: 'Protected Workspace portfolio',
+    ownerMemberKey: 'demo@example.com',
+    status: 'active',
+    health: 'on-track',
+    risk: 'low',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    expectedRevision: 0,
+  })
+  expect(parent.status).toBe(201)
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const child = await planningApiRequest('/api/planning/entities', 'POST', {
+    id: 'roadmap-denied',
+    type: 'roadmap',
+    title: 'Project roadmap',
+    parentId: 'portfolio-protected',
+    teamId: 'core-team',
+    projectId: 'refero',
+    ownerMemberKey: 'demo@example.com',
+    status: 'planned',
+    health: 'on-track',
+    risk: 'low',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-07-31' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-07-31' },
+    expectedRevision: 1,
+  })
+
+  expect(child.status).toBe(403)
+  const snapshot = await planningClient.get('user#demo@example.com', { workItems: [] })
+  expect(snapshot.revision).toBe(1)
+  expect(snapshot.entities.map((entity) => entity.id)).toEqual(['portfolio-protected'])
+})
+
+test('requires inherited parent permission when duplicate omits parentId', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await seedPlanningWorkspaceParentAndScopedChild(planningClient)
+  let duplicateCalls = 0
+  const duplicate = planningClient.duplicate.bind(planningClient)
+  planningClient.duplicate = async (...input) => {
+    duplicateCalls += 1
+    return duplicate(...input)
+  }
+  configureFakeProjectClients(true, {
+    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
+    workspaceRole: 'member',
+  })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities/roadmap-scoped-child/duplicate',
+    'POST',
+    { targetId: 'roadmap-denied-copy', expectedRevision: 2 },
+  )
+
+  expect(response.status).toBe(403)
+  expect(duplicateCalls).toBe(0)
+})
+
+test('requires manager permission for every active descendant before subtree move', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await seedPlanningWorkspaceParentAndScopedChild(planningClient)
+  let moveCalls = 0
+  const move = planningClient.move.bind(planningClient)
+  planningClient.move = async (...input) => {
+    moveCalls += 1
+    return move(...input)
+  }
+  configureFakeProjectClients(true, {
+    projectAccesses: [],
+    workspaceRole: 'owner',
+  })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities/portfolio-scope-parent/move',
+    'POST',
+    { expectedRevision: 2 },
+  )
+
+  expect(response.status).toBe(403)
+  expect(moveCalls).toBe(0)
+})
+
+test('denies guest Planning writes before invoking a mutation client', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'guest' })
+  const planningClient = new InMemoryPlanningClient()
+  const create = planningClient.create.bind(planningClient)
+  let createCalls = 0
+  planningClient.create = async (...input) => {
+    createCalls += 1
+    return create(...input)
+  }
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('guest-cycle', 0),
+  )
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toEqual({
+    code: 'WorkspaceRoleDenied',
+    message: 'Guest members have read-only Workspace access.',
+  })
+  expect(createCalls).toBe(0)
+})
+
+test('enforces Planning revisions and structural permissions before mutations', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: planningClient })
+  const created = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('cycle-structural', 0),
+  )
+  expect(created.status).toBe(201)
+
+  const malformedPatch = await planningApiRequest(
+    '/api/planning/entities/cycle-structural',
+    'PATCH',
+    { expectedRevision: 1 },
+  )
+  expect(malformedPatch.status).toBe(400)
+  expect(await malformedPatch.json()).toMatchObject({ code: 'PlanningPatchInvalid' })
+
+  const structuralCalls = { archive: 0, duplicate: 0, move: 0 }
+  const archive = planningClient.archive.bind(planningClient)
+  const duplicate = planningClient.duplicate.bind(planningClient)
+  const move = planningClient.move.bind(planningClient)
+  planningClient.archive = async (...input) => {
+    structuralCalls.archive += 1
+    return archive(...input)
+  }
+  planningClient.duplicate = async (...input) => {
+    structuralCalls.duplicate += 1
+    return duplicate(...input)
+  }
+  planningClient.move = async (...input) => {
+    structuralCalls.move += 1
+    return move(...input)
+  }
+
+  const futureRevision = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/archive',
+    'POST',
+    { expectedRevision: 2 },
+  )
+  expect(futureRevision.status).toBe(409)
+  expect(await futureRevision.json()).toMatchObject({ code: 'PlanningRevisionConflict' })
+  expect(structuralCalls.archive).toBe(0)
+
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  const memberArchive = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/archive',
+    'POST',
+    { expectedRevision: 1 },
+  )
+  expect(memberArchive.status).toBe(403)
+
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  const viewerDuplicate = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/duplicate',
+    'POST',
+    { targetId: 'cycle-viewer-copy', expectedRevision: 1 },
+  )
+  expect(viewerDuplicate.status).toBe(403)
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const rootMove = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/move',
+    'POST',
+    { expectedRevision: 1 },
+  )
+  expect(rootMove.status).toBe(403)
+  expect(structuralCalls).toEqual({ archive: 0, duplicate: 0, move: 0 })
+
+  const managerDuplicate = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/duplicate',
+    'POST',
+    { targetId: 'cycle-manager-copy', expectedRevision: 1 },
+  )
+  expect(managerDuplicate.status).toBe(201)
+  const duplicatedPlanning = await managerDuplicate.json() as PlanningSnapshot
+  expect(duplicatedPlanning.revision).toBe(2)
+
+  const managerMove = await planningApiRequest(
+    '/api/planning/entities/cycle-manager-copy/move',
+    'POST',
+    { teamId: 'core-team', projectId: 'refero', expectedRevision: 2 },
+  )
+  expect(managerMove.status).toBe(200)
+  const movedPlanning = await managerMove.json() as PlanningSnapshot
+  expect(movedPlanning.revision).toBe(3)
+
+  const managerArchive = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/archive',
+    'POST',
+    { expectedRevision: 3 },
+  )
+  expect(managerArchive.status).toBe(200)
+  const archivedPlanning = await managerArchive.json() as PlanningSnapshot
+  expect(archivedPlanning.revision).toBe(4)
+  expect(archivedPlanning.entities.find((entity) => entity.id === 'cycle-structural')?.archivedAt)
+    .toBeDefined()
+  expect(structuralCalls).toEqual({ archive: 1, duplicate: 1, move: 1 })
+})
+
+test('requires Workspace administration for unscoped status updates', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  configureApiClientsForTest({ planning: planningClient })
+  const created = await planningApiRequest('/api/planning/entities', 'POST', {
+    id: 'portfolio-workspace',
+    type: 'portfolio',
+    title: 'Workspace portfolio',
+    ownerMemberKey: 'demo@example.com',
+    status: 'active',
+    health: 'on-track',
+    risk: 'low',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    expectedRevision: 0,
+  })
+  expect(created.status).toBe(201)
+
+  let statusUpdateCalls = 0
+  const addStatusUpdate = planningClient.addStatusUpdate.bind(planningClient)
+  planningClient.addStatusUpdate = async (...input) => {
+    statusUpdateCalls += 1
+    return addStatusUpdate(...input)
+  }
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities/portfolio-workspace/status-updates',
+    'POST',
+    {
+      id: 'status-workspace',
+      message: 'Member must not update Workspace scope.',
+      health: 'at-risk',
+      expectedRevision: 1,
+    },
+  )
+
+  expect(response.status).toBe(403)
+  expect(statusUpdateCalls).toBe(0)
+})
+
+test('rejects an inactive Planning owner before invoking the mutation client', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  let createCalls = 0
+  const create = planningClient.create.bind(planningClient)
+  planningClient.create = async (...input) => {
+    createCalls += 1
+    return create(...input)
+  }
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'owner',
+    inactiveWorkspaceMemberKeys: ['inactive@example.com'],
+  })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest('/api/planning/entities', 'POST', {
+    id: 'portfolio-inactive-owner',
+    type: 'portfolio',
+    title: 'Invalid owner portfolio',
+    ownerMemberKey: 'inactive@example.com',
+    status: 'planned',
+    health: 'on-track',
+    risk: 'none',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    expectedRevision: 0,
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'PlanningOwnerInactive' })
+  expect(createCalls).toBe(0)
+})
+
+test('rejects duplicate when the source Planning owner became inactive', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: planningClient })
+  const created = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    {
+      ...createCyclePlanningInput('cycle-inactive-owner', 0),
+      ownerMemberKey: 'former-owner@example.com',
+    },
+  )
+  expect(created.status).toBe(201)
+
+  let duplicateCalls = 0
+  const duplicate = planningClient.duplicate.bind(planningClient)
+  planningClient.duplicate = async (...input) => {
+    duplicateCalls += 1
+    return duplicate(...input)
+  }
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    inactiveWorkspaceMemberKeys: ['former-owner@example.com'],
+  })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities/cycle-inactive-owner/duplicate',
+    'POST',
+    { targetId: 'cycle-inactive-owner-copy', expectedRevision: 1 },
+  )
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'PlanningOwnerInactive' })
+  expect(duplicateCalls).toBe(0)
+})
+
+test('lets Project members link Work Items to Workspace-scope strategic goals', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  const workspaceId = 'user#demo@example.com'
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 0),
+    id: 'portfolio-strategy',
+    type: 'portfolio',
+    title: 'Strategy portfolio',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 1),
+    id: 'roadmap-strategy',
+    type: 'roadmap',
+    title: 'Strategy roadmap',
+    parentId: 'portfolio-strategy',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 2),
+    id: 'initiative-strategy',
+    type: 'initiative',
+    title: 'Strategy initiative',
+    parentId: 'roadmap-strategy',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 3),
+    id: 'objective-strategy',
+    type: 'goal',
+    title: 'Strategy objective',
+    parentId: 'initiative-strategy',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+    goalFramework: 'objective',
+  }, { workItems: [] })
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'refero',
+      goalIds: ['objective-strategy'],
+      expectedRevision: 4,
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect((await response.json() as PlanningSnapshot).workItemLinks[0]?.goalIds)
+    .toEqual(['objective-strategy'])
+})
+
+test('requires old Planning scope permission when re-linking a moved Work Item', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  const workspaceId = 'user#demo@example.com'
+  const oldWorkItemState = {
+    workItems: [{
+      id: 'onboarding-friction',
+      revision: 1,
+      teamId: 'core-team',
+      title: 'Moved Work Item',
+      projectId: 'refero',
+      statusCategory: 'started' as const,
+      dueDate: '2026-08-31',
+    }],
+  }
+  await planningClient.create(
+    workspaceId,
+    createCyclePlanningInput('cycle-project-a', 0),
+    oldWorkItemState,
+  )
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('cycle-project-b', 1),
+    projectId: 'project-b',
+  }, oldWorkItemState)
+  await planningClient.putWorkItemLink(workspaceId, {
+    teamId: 'core-team',
+    workItemId: 'onboarding-friction',
+    projectId: 'refero',
+    cycleId: 'cycle-project-a',
+    goalIds: [],
+    expectedRevision: 2,
+  }, oldWorkItemState)
+  let putCalls = 0
+  const putWorkItemLink = planningClient.putWorkItemLink.bind(planningClient)
+  planningClient.putWorkItemLink = async (...input) => {
+    putCalls += 1
+    return putWorkItemLink(...input)
+  }
+  configureFakeProjectClients(true, {
+    detailAssignedProjectId: 'project-b',
+    projectAccesses: [{ projectId: 'project-b', role: 'member' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'project-b', name: 'Project B', tone: 'green' },
+    ],
+    workspaceRole: 'member',
+  })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'project-b',
+      cycleId: 'cycle-project-b',
+      goalIds: [],
+      expectedRevision: 3,
+    },
+  )
+
+  expect(response.status).toBe(403)
+  expect(putCalls).toBe(0)
+})
+
+test('lets Workspace owners clean up inaccessible stale Work Item links', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  const workspaceId = 'user#demo@example.com'
+  const staleWorkItemState = {
+    workItems: [{
+      id: 'missing-work-item',
+      revision: 1,
+      teamId: 'core-team',
+      title: 'Deleted later',
+      projectId: 'refero',
+      statusCategory: 'unstarted' as const,
+      dueDate: '2026-08-31',
+    }],
+  }
+  await planningClient.create(
+    workspaceId,
+    createCyclePlanningInput('cycle-stale-link', 0),
+    staleWorkItemState,
+  )
+  await planningClient.putWorkItemLink(workspaceId, {
+    teamId: 'core-team',
+    workItemId: 'missing-work-item',
+    projectId: 'refero',
+    cycleId: 'cycle-stale-link',
+    goalIds: [],
+    expectedRevision: 1,
+  }, staleWorkItemState)
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  configureApiClientsForTest({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/missing-work-item',
+    'DELETE',
+    { expectedRevision: 2 },
+  )
+
+  expect(response.status).toBe(200)
+  const planning = await response.json() as PlanningSnapshot
+  expect(planning.revision).toBe(3)
+  expect(planning.workItemLinks).toEqual([])
+})
+
+test('lets members add status updates and link accessible canonical Work Items', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: planningClient })
+  const created = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('cycle-current', 0),
+  )
+  expect(created.status).toBe(201)
+
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  const statusUpdate = await planningApiRequest(
+    '/api/planning/entities/cycle-current/status-updates',
+    'POST',
+    {
+      id: 'status-1',
+      message: 'Delivery is proceeding.',
+      health: 'on-track',
+      expectedRevision: 1,
+    },
+  )
+  expect(statusUpdate.status).toBe(201)
+  const statusPlanning = await statusUpdate.json() as PlanningSnapshot
+  expect(statusPlanning.entities[0]?.statusUpdates[0]).toMatchObject({
+    id: 'status-1',
+    authorMemberKey: 'demo@example.com',
+  })
+
+  const malformedLink = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'refero',
+      cycleId: 'cycle-current',
+      expectedRevision: 2,
+    },
+  )
+  expect(malformedLink.status).toBe(400)
+  expect(await malformedLink.json()).toMatchObject({ code: 'InvalidPlanningInput' })
+
+  const linked = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'refero',
+      cycleId: 'cycle-current',
+      goalIds: [],
+      expectedRevision: 2,
+    },
+  )
+
+  expect(linked.status).toBe(200)
+  const linkedPlanning = await linked.json() as PlanningSnapshot
+  expect(linkedPlanning.workItemLinks).toEqual([
+    expect.objectContaining({
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      cycleId: 'cycle-current',
+    }),
+  ])
+  expect(linkedPlanning.entities[0]).toMatchObject({
+    linkedWorkItemCount: 1,
+    progress: 50,
+  })
+})
+
+test('returns revision conflicts and reproducibly rolls incomplete Work Items forward', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  configureApiClientsForTest({ planning: new InMemoryPlanningClient() })
+
+  const source = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('cycle-source', 0),
+  )
+  expect(source.status).toBe(201)
+  const target = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    {
+      ...createCyclePlanningInput('cycle-target', 1),
+      baseline: { startDate: '2026-07-15', endDate: '2026-07-28' },
+      forecast: { startDate: '2026-07-15', endDate: '2026-07-28' },
+    },
+  )
+  expect(target.status).toBe(201)
+  const linked = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'refero',
+      cycleId: 'cycle-source',
+      goalIds: [],
+      expectedRevision: 2,
+    },
+  )
+  expect(linked.status).toBe(200)
+
+  const conflict = await planningApiRequest(
+    '/api/planning/cycles/cycle-source/rollover',
+    'POST',
+    { targetCycleId: 'cycle-target', expectedRevision: 2 },
+  )
+  expect(conflict.status).toBe(409)
+  expect(await conflict.json()).toMatchObject({ code: 'PlanningRevisionConflict' })
+
+  const rolledOver = await planningApiRequest(
+    '/api/planning/cycles/cycle-source/rollover',
+    'POST',
+    { targetCycleId: 'cycle-target', expectedRevision: 3 },
+  )
+  expect(rolledOver.status).toBe(200)
+  const body = await rolledOver.json() as PlanningMutationResponse
+  expect(body.movedWorkItemIds).toEqual(['onboarding-friction'])
+  expect(body.retainedWorkItemIds).toEqual([])
+  expect(body.planning.revision).toBe(4)
+  expect(body.planning.workItemLinks[0]?.cycleId).toBe('cycle-target')
+  expect(body.planning.entities.find((entity) => entity.id === 'cycle-source')?.status)
+    .toBe('completed')
+})

@@ -74,6 +74,8 @@ export type NotificationInboxController = {
    * 直近の通知 mutation に失敗したかどうかです。
    */
   hasMutationError: boolean
+  /** Shell が認証 policy error を一元処理するための raw load/mutation errors です。 */
+  sessionErrors?: readonly unknown[]
   /**
    * 実行中 mutation の通知 ID または mark-all 識別子です。
    */
@@ -144,6 +146,8 @@ export type NotificationPreferencesController = {
    * 直近の保存に失敗したかどうかです。
    */
   hasSaveError: boolean
+  /** Shell が認証 policy error を一元処理するための raw load/mutation errors です。 */
+  sessionErrors?: readonly unknown[]
   /**
    * 直近の保存が成功したかどうかです。
    */
@@ -199,7 +203,7 @@ export function useNotificationInbox(
   const [filter, setFilterState] = useState<NotificationFilter>('all')
   const [eventType, setEventTypeState] = useState<string | undefined>()
   const [pendingNotificationId, setPendingNotificationId] = useState<string | undefined>()
-  const [mutationError, setMutationError] = useState(false)
+  const [mutationError, setMutationError] = useState<unknown>()
   const isConfigured = Boolean(accessToken && enabled)
   const {
     data,
@@ -285,7 +289,7 @@ export function useNotificationInbox(
       return false
     }
 
-    setMutationError(false)
+    setMutationError(undefined)
     setPendingNotificationId(notification.id)
 
     try {
@@ -303,7 +307,7 @@ export function useNotificationInbox(
       return true
     } catch (actionError) {
       console.error('Notification action failed:', actionError)
-      setMutationError(true)
+      setMutationError(actionError)
 
       if (actionError instanceof NotificationsApiError && actionError.status === 409) {
         await refresh().catch(() => undefined)
@@ -320,7 +324,7 @@ export function useNotificationInbox(
       return false
     }
 
-    setMutationError(false)
+    setMutationError(undefined)
     setPendingNotificationId('mark-all')
 
     try {
@@ -333,7 +337,7 @@ export function useNotificationInbox(
       return true
     } catch (markAllError) {
       console.error('Mark all notifications read failed:', markAllError)
-      setMutationError(true)
+      setMutationError(markAllError)
       return false
     } finally {
       setPendingNotificationId(undefined)
@@ -342,13 +346,13 @@ export function useNotificationInbox(
 
   const setFilter = useCallback((nextFilter: NotificationFilter) => {
     setFilterState(nextFilter)
-    setMutationError(false)
+    setMutationError(undefined)
     void setSize(1)
   }, [setSize])
 
   const setEventType = useCallback((nextEventType?: string) => {
     setEventTypeState(nextEventType)
-    setMutationError(false)
+    setMutationError(undefined)
     void setSize(1)
   }, [setSize])
 
@@ -367,7 +371,7 @@ export function useNotificationInbox(
     filter,
     hasLoadError: Boolean(error),
     hasMore: Boolean(lastPage?.nextCursor),
-    hasMutationError: mutationError,
+    hasMutationError: Boolean(mutationError),
     isLoading,
     isLoadingMore,
     loadMore,
@@ -378,6 +382,7 @@ export function useNotificationInbox(
     markUnread: (notification) => runNotificationAction(notification, 'mark-unread'),
     notifications,
     pendingNotificationId,
+    sessionErrors: [error, mutationError],
     refresh,
     restore: (notification) => runNotificationAction(notification, 'restore'),
     setEventType,
@@ -401,7 +406,7 @@ export function useNotificationPreferences(
 ): NotificationPreferencesController {
   const mutationRunner = useRef(createMutationRequestRunner()).current
   const [isSaving, setIsSaving] = useState(false)
-  const [hasSaveError, setHasSaveError] = useState(false)
+  const [saveError, setSaveError] = useState<unknown>()
   const [didSave, setDidSave] = useState(false)
   const key = accessToken && enabled ? ['notification-preferences', accessToken] as const : null
   const {
@@ -425,7 +430,7 @@ export function useNotificationPreferences(
     }
 
     setDidSave(false)
-    setHasSaveError(false)
+    setSaveError(undefined)
     setIsSaving(true)
 
     try {
@@ -440,7 +445,7 @@ export function useNotificationPreferences(
       return true
     } catch (saveError) {
       console.error('Notification preferences update failed:', saveError)
-      setHasSaveError(true)
+      setSaveError(saveError)
 
       if (saveError instanceof NotificationsApiError && saveError.status === 409) {
         await mutate().catch(() => undefined)
@@ -455,7 +460,7 @@ export function useNotificationPreferences(
   return {
     didSave,
     hasLoadError: Boolean(error),
-    hasSaveError,
+    hasSaveError: Boolean(saveError),
     isLoading,
     isSaving,
     preferences,
@@ -463,6 +468,7 @@ export function useNotificationPreferences(
       await mutate()
     },
     save,
+    sessionErrors: [error, saveError],
   }
 }
 
