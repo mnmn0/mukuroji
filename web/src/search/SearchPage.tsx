@@ -20,8 +20,7 @@ import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionE
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import {
   MobileSidebarButton,
-  MobileSidebarDrawer,
-  Sidebar,
+  WorkspaceSidebar,
   type SidebarNavId,
   type SidebarTeamViewId,
 } from '../shared/ui/sidebar'
@@ -485,44 +484,19 @@ export function SearchPage() {
 
   return (
     <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
-      <Sidebar
-        className="max-[980px]:hidden"
+      <WorkspaceSidebar
         inboxCount={0}
+        isMobileOpen={isMobileSidebarOpen}
         labels={sidebarLabels}
+        mobileCloseLabel={t('sidebar.mobileClose')}
+        mobileDialogLabel={t('sidebar.mobileDialog')}
+        onMobileClose={() => setIsMobileSidebarOpen(false)}
         onOpenSearch={commandMenu.open}
         onSelectNav={selectNav}
         onSelectProject={(projectId, teamId) => navigate(createProjectIssuesPath(projectId, teamId))}
         onSelectTeamView={selectTeamView}
         teams={teams}
       />
-      <MobileSidebarDrawer
-        closeLabel={t('sidebar.mobileClose')}
-        dialogLabel={t('sidebar.mobileDialog')}
-        isOpen={isMobileSidebarOpen}
-        onClose={() => setIsMobileSidebarOpen(false)}
-      >
-        <Sidebar
-          inboxCount={0}
-          labels={sidebarLabels}
-          onOpenSearch={() => {
-            setIsMobileSidebarOpen(false)
-            commandMenu.open?.()
-          }}
-          onSelectNav={(navId) => {
-            setIsMobileSidebarOpen(false)
-            selectNav(navId)
-          }}
-          onSelectProject={(projectId, teamId) => {
-            setIsMobileSidebarOpen(false)
-            navigate(createProjectIssuesPath(projectId, teamId))
-          }}
-          onSelectTeamView={(teamId, viewId) => {
-            setIsMobileSidebarOpen(false)
-            selectTeamView(teamId, viewId)
-          }}
-          teams={teams}
-        />
-      </MobileSidebarDrawer>
 
       <section className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden">
         <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-4">

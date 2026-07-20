@@ -1,6 +1,7 @@
 export { MobileSidebarButton } from './MobileSidebarButton'
 export { MobileSidebarDrawer } from './MobileSidebarDrawer'
 export { Sidebar } from './Sidebar'
+export { WorkspaceSidebar } from './WorkspaceSidebar'
 export type {
   MobileSidebarButtonProps,
 } from './MobileSidebarButton'
@@ -18,3 +19,4 @@ export type {
   SidebarTeam,
   SidebarTeamViewId,
 } from './Sidebar'
+export type { WorkspaceSidebarProps } from './WorkspaceSidebar'

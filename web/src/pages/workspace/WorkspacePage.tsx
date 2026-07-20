@@ -19,8 +19,7 @@ import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { AutomationManagementPanelContainer } from '../../automation/ui/AutomationManagementPanelContainer'
 import {
   MobileSidebarButton,
-  MobileSidebarDrawer,
-  Sidebar,
+  WorkspaceSidebar,
   type SidebarNavId,
   type SidebarTeamViewId,
 } from '../../shared/ui/sidebar'
@@ -1027,59 +1026,26 @@ export function WorkspaceScreen({
 
   return (
     <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
-      <Sidebar
+      <WorkspaceSidebar
         activeNavId={metadata.activeNavId}
         activeTeamId={metadata.activeTeamViewId ? activeTeam?.id : undefined}
         activeTeamViewId={metadata.activeTeamViewId}
-        className="max-[980px]:hidden"
         inboxCount={inboxCount}
+        isMobileOpen={isMobileSidebarOpen}
         labels={sidebarLabels}
+        mobileCloseLabel={t('sidebar.mobileClose')}
+        mobileDialogLabel={t('sidebar.mobileDialog')}
         onArchiveProject={onArchiveProject}
         onArchiveTeam={onArchiveTeam}
         onCreateProject={onCreateProject}
         onCreateTeam={onCreateTeam}
+        onMobileClose={() => setIsMobileSidebarOpen(false)}
         onOpenSearch={commandMenu.open}
         onSelectNav={onSelectNav}
         onSelectProject={onSelectProject}
         onSelectTeamView={onSelectTeamView}
         teams={teams}
       />
-
-      <MobileSidebarDrawer
-        closeLabel={t('sidebar.mobileClose')}
-        dialogLabel={t('sidebar.mobileDialog')}
-        isOpen={isMobileSidebarOpen}
-        onClose={() => setIsMobileSidebarOpen(false)}
-      >
-        <Sidebar
-          activeNavId={metadata.activeNavId}
-          activeTeamId={metadata.activeTeamViewId ? activeTeam?.id : undefined}
-          activeTeamViewId={metadata.activeTeamViewId}
-          inboxCount={inboxCount}
-          labels={sidebarLabels}
-          onArchiveProject={onArchiveProject}
-          onArchiveTeam={onArchiveTeam}
-          onCreateProject={onCreateProject}
-          onCreateTeam={onCreateTeam}
-          onOpenSearch={() => {
-            setIsMobileSidebarOpen(false)
-            commandMenu.open?.()
-          }}
-          onSelectNav={(navId) => {
-            setIsMobileSidebarOpen(false)
-            onSelectNav?.(navId)
-          }}
-          onSelectProject={(projectId, teamId) => {
-            setIsMobileSidebarOpen(false)
-            onSelectProject?.(projectId, teamId)
-          }}
-          onSelectTeamView={(teamId, viewId) => {
-            setIsMobileSidebarOpen(false)
-            onSelectTeamView?.(teamId, viewId)
-          }}
-          teams={teams}
-        />
-      </MobileSidebarDrawer>
 
       <section className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden">
         <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-4">
