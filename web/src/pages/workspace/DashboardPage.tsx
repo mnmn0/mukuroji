@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
+import { useWorkspaceCommandMenu } from '../../commands/ui/WorkspaceCommandMenuContext'
 import {
   getCurrentUser,
   getDashboardSummary,
@@ -29,7 +30,11 @@ import { getNotificationUnreadCount } from '../../notifications/api'
 import {
   useNotificationUnreadCount,
 } from '../../notifications/queries/useNotificationUnreadCount'
-import { createProjectIssuesPath } from '../../shared/routing/paths'
+import {
+  createProjectIssuesPath,
+  createTeamViewPath,
+  workspaceNavPaths,
+} from '../../shared/routing/paths'
 
 /**
  * ダッシュボード上の小さな指標カードに渡す表示値です。
@@ -106,6 +111,7 @@ export function DashboardPage({
   const [session] = useState<AuthSession | null>(() => getSession())
   const [locale] = useState<Locale>(() => initialLocale ?? getInitialLocale())
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
+  const commandMenu = useWorkspaceCommandMenu()
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
   const accessToken = session?.accessToken
@@ -198,9 +204,13 @@ export function DashboardPage({
         mobileCloseLabel={t('sidebar.mobileClose')}
         mobileDialogLabel={t('sidebar.mobileDialog')}
         onMobileClose={() => setIsMobileSidebarOpen(false)}
+        onOpenSearch={commandMenu.open}
+        onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
         onSelectProject={(projectId, teamId) =>
           navigate(createProjectIssuesPath(projectId, teamId))
         }
+        onSelectTeamView={(teamId, viewId) =>
+          navigate(createTeamViewPath(teamId, viewId))}
         teams={teams}
       />
 

@@ -91,6 +91,25 @@ export const MobileOpen: Story = {
   },
 }
 
+/** Mobile drawer without search support. */
+export const MobileWithoutSearch: Story = {
+  args: {
+    isMobileOpen: true,
+    onOpenSearch: undefined,
+  },
+  parameters: {
+    viewport: {
+      defaultViewport: 'mobile1',
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const dialog = canvas.getByRole('dialog', { name: 'モバイルサイドバー' })
+
+    await expect(within(dialog).queryByTestId('sidebar-search-trigger')).not.toBeInTheDocument()
+  },
+}
+
 function WorkspaceSidebarStory(args: WorkspaceSidebarProps) {
   const [isMobileOpen, setIsMobileOpen] = useState(args.isMobileOpen)
 

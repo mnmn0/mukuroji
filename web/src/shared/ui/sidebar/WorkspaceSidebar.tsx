@@ -88,10 +88,12 @@ function createMobileSidebarProps(
     collapsed: undefined,
     defaultCollapsed: undefined,
     onCollapsedChange: undefined,
-    onOpenSearch: () => {
-      onMobileSelect?.()
-      sidebarProps.onOpenSearch?.()
-    },
+    onOpenSearch: sidebarProps.onOpenSearch
+      ? () => {
+          onMobileSelect?.()
+          sidebarProps.onOpenSearch?.()
+        }
+      : undefined,
     onSelectNav: wrapSelection(sidebarProps.onSelectNav),
     onSelectTeamView: wrapSelection(sidebarProps.onSelectTeamView),
     onSelectTeam: sidebarProps.onSelectTeam
