@@ -204,12 +204,12 @@ import {
 import {
   DynamoDbNotificationsClient,
   NotificationError,
-  type NotificationAction,
   type NotificationClient,
-  type NotificationFilter,
   type NotificationItem,
-  type UpdateNotificationPreferencesInput,
 } from '../modules/notifications/notifications'
+import {
+  createNotificationRouter,
+} from '../modules/notifications/adapter-in/http/notification-router'
 import {
   createCommentWorkspaceSearchDocument,
   createDocumentWorkspaceSearchDocument,
@@ -6451,113 +6451,14 @@ routeApp.post('/api/analytics/reports/:reportId/snapshots', async (c) => {
   }
 })
 
-/** Recipient の durable notification timeline を cursor 付きで返します。 */
-routeApp.get('/api/notifications', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    const isVisible = await createNotificationVisibilityFilter(principal)
-    const filter = c.req.query('filter') as NotificationFilter | undefined
-    const limitValue = c.req.query('limit')
-    const input = {
-      workspaceId: principal.directoryId,
-      memberKey: principal.userKey,
-      filter,
-      eventType: c.req.query('type')?.trim() || undefined,
-      limit: limitValue === undefined ? undefined : Number(limitValue),
-      cursor: c.req.query('cursor')?.trim() || undefined,
-      isVisible,
-    }
-    const [page, unreadCount] = await Promise.all([
-      notifications.list(input),
-      notifications.countUnread({
-        workspaceId: principal.directoryId,
-        memberKey: principal.userKey,
-        isVisible,
-      }),
-    ])
-
-    return c.json({ ...page, unreadCount })
-  } catch (error) {
-    return toNotificationErrorResponse(c, error)
-  }
-})
-
-/** Recipient の現在表示可能な unread notification 件数を返します。 */
-routeApp.get('/api/notifications/unread-count', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    const isVisible = await createNotificationVisibilityFilter(principal)
-    const unreadCount = await notifications.countUnread({
-      workspaceId: principal.directoryId,
-      memberKey: principal.userKey,
-      isVisible,
-    })
-    return c.json({ unreadCount })
-  } catch (error) {
-    return toNotificationErrorResponse(c, error)
-  }
-})
-
-/** Recipient のすべての active unread notification を read にします。 */
-routeApp.post('/api/notifications/mark-all-read', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    const isVisible = await createNotificationVisibilityFilter(principal)
-    const updatedCount = await notifications.markAllRead({
-      workspaceId: principal.directoryId,
-      memberKey: principal.userKey,
-      isVisible,
-    })
-    const unreadCount = await notifications.countUnread({
-      workspaceId: principal.directoryId,
-      memberKey: principal.userKey,
-      isVisible,
-    })
-    return c.json({ updatedCount, unreadCount })
-  } catch (error) {
-    return toNotificationErrorResponse(c, error)
-  }
-})
-
-/** Recipient の notification を read、archive、snooze state へ遷移させます。 */
-routeApp.patch('/api/notifications/:notificationId', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    const isVisible = await createNotificationVisibilityFilter(principal)
-    const body = await readJson<Record<string, unknown>>(c.req) ?? {}
-    const notification = await notifications.update({
-      workspaceId: principal.directoryId,
-      memberKey: principal.userKey,
-      notificationId: c.req.param('notificationId'),
-      action: readNotificationAction(body.action),
-      snoozedUntil: readOptionalNotificationTimestamp(body.snoozedUntil),
-      isVisible,
-    })
-    return c.json(notification)
-  } catch (error) {
-    return toNotificationErrorResponse(c, error)
-  }
-})
+routeApp.route('/', createNotificationRouter({
+  notifications,
+  authenticate: async (accessToken, context) =>
+    await authenticateWorkspacePrincipal(accessToken, undefined, context),
+  createVisibilityFilter: createNotificationVisibilityFilter,
+  mapError: toNotificationErrorResponse,
+  readJson,
+}))
 
 /** Workspace の versioned automation rules を返します。 */
 routeApp.get('/api/automation/rules', async (c) => {
@@ -7135,45 +7036,6 @@ routeApp.post('/api/bulk-operations/:operationId/undo', async (c) => {
     return c.json(toBulkOperationResponse(undone))
   } catch (error) {
     return toAutomationErrorResponse(c, error)
-  }
-})
-
-/** Recipient の notification channel、digest、quiet hours 設定を返します。 */
-routeApp.get('/api/notification-preferences', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    return c.json(await notifications.getPreferences({
-      workspaceId: principal.directoryId,
-      memberKey: principal.userKey,
-    }))
-  } catch (error) {
-    return toNotificationErrorResponse(c, error)
-  }
-})
-
-/** Recipient の notification preference を version 条件付きで保存します。 */
-routeApp.put('/api/notification-preferences', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    const body = await readJson<Record<string, unknown>>(c.req) ?? {}
-    const preferences = await notifications.savePreferences({
-      workspaceId: principal.directoryId,
-      memberKey: principal.userKey,
-      preferences: readNotificationPreferencesInput(body),
-    })
-    return c.json(preferences)
-  } catch (error) {
-    return toNotificationErrorResponse(c, error)
   }
 })
 
@@ -18458,52 +18320,6 @@ function toAutomationErrorResponse(c: Context, error: unknown) {
     ? error.status
     : 502
   return c.json({ code: error.code, message: error.message }, status)
-}
-
-function readNotificationAction(value: unknown): NotificationAction {
-  if (
-    value === 'mark-read' ||
-    value === 'mark-unread' ||
-    value === 'archive' ||
-    value === 'restore' ||
-    value === 'snooze'
-  ) {
-    return value
-  }
-  throw new NotificationError(400, 'InvalidNotificationAction', 'Notification action is invalid.')
-}
-
-function readOptionalNotificationTimestamp(value: unknown) {
-  if (value === undefined || value === null) {
-    return undefined
-  }
-  if (typeof value !== 'string' || !value.trim()) {
-    throw new NotificationError(400, 'InvalidNotificationSnooze', 'Snooze time is invalid.')
-  }
-  return value.trim()
-}
-
-function readNotificationPreferencesInput(
-  value: Record<string, unknown>,
-): UpdateNotificationPreferencesInput {
-  const channels = isRecord(value.channels) ? value.channels : {}
-  const quietHours = isRecord(value.quietHours) ? value.quietHours : {}
-
-  return {
-    version: Number(value.version),
-    channels: {
-      inApp: channels.inApp as boolean,
-      email: channels.email as boolean,
-      push: channels.push as boolean,
-    },
-    frequency: value.frequency as UpdateNotificationPreferencesInput['frequency'],
-    quietHours: {
-      enabled: quietHours.enabled as boolean,
-      start: quietHours.start as string,
-      end: quietHours.end as string,
-      timeZone: quietHours.timeZone as string,
-    },
-  }
 }
 
 const currentAssigneeNotificationReasons = new Set([
