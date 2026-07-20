@@ -72,9 +72,6 @@ import {
   type RequestFormRoutingTarget,
   type RequestSubmissionEvent,
   type RequestSubmissionActionInput,
-  type RequestRequesterReplyInput,
-  type RequestAttachmentUploadInput,
-  type SubmitRequestInput,
   type UpdateRequestFormInput,
   type CustomFieldValue,
   type CycleRolloverInput,
@@ -235,6 +232,7 @@ import {
   type RequestIntakeClient,
   type RequestLinkResolution,
 } from '../modules/request-intake/request-intake'
+import { createPublicRequestIntakeRouter } from '../modules/request-intake/adapter-in/http/public-request-intake-router'
 import {
   ENTERPRISE_SCIM_DISPLAY_NAME_MAX_BYTES,
   ENTERPRISE_SCIM_EXTERNAL_ID_MAX_BYTES,
@@ -7313,74 +7311,13 @@ for (const projectWatchMethod of ['PUT', 'DELETE'] as const) {
   })
 }
 
-/** Opaque capability link から allowlist 済み public Request Form を返します。 */
-routeApp.get('/api/request-intake/:token', async (c) => {
-  try {
-    const resolution = await requestIntake.resolveLink(c.req.param('token'))
-    await authorizeRequestLink(c, resolution)
-    return c.json(await requestIntake.getPublicForm(resolution, createRequestExternalContext(c)))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error, true)
-  }
-})
-
-/** Public/authenticated Request Form 用の direct attachment upload session を作成します。 */
-routeApp.post('/api/request-intake/:token/uploads', async (c) => {
-  try {
-    const resolution = await requestIntake.resolveLink(c.req.param('token'))
-    await authorizeRequestLink(c, resolution)
-    const body = await readJson<RequestAttachmentUploadInput>(c.req)
-    return c.json(await requestIntake.createAttachmentUpload(
-      resolution,
-      body ?? {} as RequestAttachmentUploadInput,
-      createRequestExternalContext(c),
-    ), 201)
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error, true)
-  }
-})
-
-/** Public/authenticated Request Form の回答を intake queue へ保存します。 */
-routeApp.post('/api/request-intake/:token/submissions', async (c) => {
-  try {
-    const resolution = await requestIntake.resolveLink(c.req.param('token'))
-    await authorizeRequestLink(c, resolution)
-    const body = await readJson<SubmitRequestInput>(c.req)
-    return c.json(await requestIntake.submit(
-      resolution,
-      body ?? {} as SubmitRequestInput,
-      createRequestExternalContext(c),
-    ), 201)
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error, true)
-  }
-})
-
-/** Opaque thread capability から requester 向け message だけを返します。 */
-routeApp.get('/api/request-threads/:threadToken', async (c) => {
-  try {
-    return c.json(await requestIntake.getRequesterThread(
-      c.req.param('threadToken'),
-      createRequestExternalContext(c),
-    ))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error, true)
-  }
-})
-
-/** Opaque thread capability から追加情報 reply を安全に保存します。 */
-routeApp.post('/api/request-threads/:threadToken/replies', async (c) => {
-  try {
-    const body = await readJson<RequestRequesterReplyInput>(c.req)
-    return c.json(await requestIntake.replyToThread(
-      c.req.param('threadToken'),
-      body ?? {} as RequestRequesterReplyInput,
-      createRequestExternalContext(c),
-    ), 201)
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error, true)
-  }
-})
+routeApp.route('/', createPublicRequestIntakeRouter({
+  requestIntake,
+  authorizeRequestLink,
+  createExternalContext: createRequestExternalContext,
+  mapError: (context, error) => toRequestIntakeErrorResponse(context, error, true),
+  readJson,
+}))
 
 /** Workspace admin が管理できる Request Form 一覧を返します。 */
 routeApp.get('/api/request-forms', async (c) => {
