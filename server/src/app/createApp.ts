@@ -126,6 +126,8 @@ import type { Context } from 'hono'
 import { createDependencyRuntime } from './composition/dependency-runtime'
 import { registerCommonMiddleware } from './middleware/common-middleware'
 import { createSystemRouter } from './routes/system-router'
+import { createDashboardRouter } from '../modules/analytics/adapter-in/http/dashboard-router'
+import { createAuditRouter } from '../modules/audit/adapter-in/http/audit-router'
 import { loadServerConfig } from '../infrastructure/config/server-config'
 import {
   readCognitoMfaChallengeName,
@@ -6107,46 +6109,20 @@ routeApp.delete('/api/scim/v2/:workspaceId/Groups/:groupId', async (c) => {
  * `Authorization: Bearer <accessToken>` header を要求し、Cognito で token を検証してから
  * DynamoDB の集計 item を読みます。React から Lambda/API Gateway 経由で呼ぶ想定の読み取り API です。
  */
-routeApp.get('/api/dashboard/summary', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    const projectAccesses = principal.isSystemAdmin
-      ? undefined
-      : await getEffectiveProjectAccessList(principal)
-
-    return c.json(await dashboardSummary.getSummary(principal.directoryId, {
-      userKey: principal.userKey,
-      isSystemAdmin: principal.isSystemAdmin,
-      ...(projectAccesses ? { projectAccesses } : {}),
-    }))
-  } catch (error) {
-    if (error instanceof CognitoServiceError) {
-      return toAuthErrorResponse(c, error)
-    }
-
-    return toProjectDataErrorResponse(c, error)
-  }
-})
-
-/**
- * Workspace audit event を filter と cursor 付きで page 取得する endpoint です。
- */
-routeApp.get('/api/audit/events', async (c) => {
-  return handleWorkspaceAuditRequest(c, false)
-})
-
-/**
- * Workspace audit event を NDJSON で同期 export する endpoint です。
- */
-routeApp.get('/api/audit/events/export', async (c) => {
-  return handleWorkspaceAuditRequest(c, true)
-})
+routeApp.route('/', createDashboardRouter<
+  WorkspacePrincipal,
+  ProjectAccessEntry,
+  DashboardSummaryResponse
+>({
+  authenticate: async (accessToken, context) =>
+    await authenticateWorkspacePrincipal(accessToken, undefined, context),
+  getProjectAccesses: getEffectiveProjectAccessList,
+  getSummary: (workspaceId, access) => dashboardSummary.getSummary(workspaceId, access),
+  isAuthenticationError: (error) => error instanceof CognitoServiceError,
+  mapAuthenticationError: toAuthErrorResponse,
+  mapProjectDataError: toProjectDataErrorResponse,
+}))
+routeApp.route('/', createAuditRouter(handleWorkspaceAuditRequest))
 
 /** Current ACL を先に適用して ad-hoc または saved report を集計します。 */
 routeApp.post('/api/analytics/query', async (c) => {
