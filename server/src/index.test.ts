@@ -458,6 +458,138 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
   ])
 })
 
+test('keeps the AWS Cognito client contract for challenge and Workspace identity operations', async () => {
+  const commandInputs: Array<{ name: string; input: Record<string, unknown> }> = []
+  let adminGetUserCalls = 0
+  const sdkClient = {
+    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+      const name = command.constructor.name
+      commandInputs.push({ name, input: command.input })
+
+      if (name === 'RespondToAuthChallengeCommand') {
+        return {
+          AuthenticationResult: { AccessToken: 'challenge-access-token' },
+          ChallengeName: 'NEW_PASSWORD_REQUIRED',
+          Session: 'next-session',
+        }
+      }
+
+      if (name === 'AdminGetUserCommand') {
+        adminGetUserCalls += 1
+
+        if (adminGetUserCalls < 3) {
+          throw {
+            $metadata: { httpStatusCode: 404 },
+            message: 'User not found',
+            name: 'UserNotFoundException',
+          }
+        }
+
+        return {
+          Attributes: [
+            { Name: 'email', Value: 'new@example.com' },
+            { Name: 'custom:directory_id', Value: 'workspace-1' },
+          ],
+          Enabled: true,
+          UserStatus: 'FORCE_CHANGE_PASSWORD',
+          Username: 'new@example.com',
+        }
+      }
+
+      if (name === 'AdminCreateUserCommand') {
+        return {
+          User: {
+            Attributes: [
+              { Name: 'email', Value: 'new@example.com' },
+              { Name: 'custom:directory_id', Value: 'workspace-1' },
+              { Name: 'name', Value: 'New User' },
+            ],
+            Enabled: true,
+            UserStatus: 'FORCE_CHANGE_PASSWORD',
+            Username: 'new@example.com',
+          },
+        }
+      }
+
+      if (name === 'AdminDeleteUserCommand') {
+        return {}
+      }
+
+      throw new Error(`Unexpected Cognito command: ${name}`)
+    },
+  } as unknown as CognitoIdentityProviderClient
+  const client = new AwsCognitoClient(sdkClient, 'us-east-1_mukuroji', 'mukuroji-client')
+
+  await expect(
+    client.respondToNewPasswordChallenge('demo@example.com', 'new-password', 'session-1'),
+  ).resolves.toMatchObject({
+    AuthenticationResult: { AccessToken: 'challenge-access-token' },
+    ChallengeName: 'NEW_PASSWORD_REQUIRED',
+    Session: 'next-session',
+  })
+  await expect(client.findWorkspaceUser('missing@example.com')).resolves.toBeUndefined()
+  await expect(client.provisionWorkspaceUser({
+    directoryId: 'workspace-1',
+    email: 'new@example.com',
+    name: 'New User',
+  })).resolves.toMatchObject({
+    deliveryStatus: 'sent',
+    identityOwnership: 'workspace-created',
+    profile: {
+      id: 'new@example.com',
+      name: 'New User',
+      status: 'FORCE_CHANGE_PASSWORD',
+    },
+  })
+  await expect(client.findWorkspaceUser('new@example.com')).resolves.toMatchObject({
+    directoryId: 'workspace-1',
+    profile: { id: 'new@example.com' },
+  })
+  await expect(client.resendWorkspaceUserInvitation('new@example.com')).resolves.toBeUndefined()
+  await expect(client.deleteWorkspaceUser('new@example.com')).resolves.toBeUndefined()
+
+  expect(commandInputs.map(({ name }) => name)).toEqual([
+    'RespondToAuthChallengeCommand',
+    'AdminGetUserCommand',
+    'AdminGetUserCommand',
+    'AdminCreateUserCommand',
+    'AdminGetUserCommand',
+    'AdminCreateUserCommand',
+    'AdminDeleteUserCommand',
+  ])
+  expect(commandInputs[0]).toMatchObject({
+    input: {
+      ChallengeName: 'NEW_PASSWORD_REQUIRED',
+      ChallengeResponses: {
+        NEW_PASSWORD: 'new-password',
+        USERNAME: 'demo@example.com',
+      },
+      ClientId: 'mukuroji-client',
+      Session: 'session-1',
+    },
+    name: 'RespondToAuthChallengeCommand',
+  })
+})
+
+test('normalizes AWS Cognito SDK errors inside the Cognito module', async () => {
+  const sdkClient = {
+    async send() {
+      throw {
+        $metadata: { httpStatusCode: 400 },
+        message: 'Invalid credentials',
+        name: 'NotAuthorizedException',
+      }
+    },
+  } as unknown as CognitoIdentityProviderClient
+  const client = new AwsCognitoClient(sdkClient, 'us-east-1_mukuroji', 'mukuroji-client')
+
+  await expect(client.initiatePasswordAuth('demo@example.com', 'password')).rejects.toMatchObject({
+    code: 'NotAuthorizedException',
+    message: 'Invalid credentials',
+    status: 400,
+  })
+})
+
 test('keeps the Bun development Cognito default on local Floci', async () => {
   await withTestEnvironment(
     {

@@ -93,7 +93,7 @@ export function WorkspaceBody({
           data-testid="workspace-task-partial-error"
           role="alert"
         >
-          {t('tasks.error.loading')} ({taskLoadFailedProjectIds.length})
+          {t('tasks.error.loadingCount').replace('{count}', String(taskLoadFailedProjectIds.length))}
         </p>
       ) : null}
       {view === 'home' ? (

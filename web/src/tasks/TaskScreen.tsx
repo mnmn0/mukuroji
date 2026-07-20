@@ -928,6 +928,119 @@ function TaskWorkspace({
   const sortButtonId = 'task-sort-button'
   const sortMenuId = 'task-sort-menu'
   const assigneeOptions = createAssigneeFilterOptions(allTasks, t)
+  const statusMenuRef = useRef<HTMLDivElement>(null)
+  const assigneeMenuRef = useRef<HTMLDivElement>(null)
+  const dueDateMenuRef = useRef<HTMLDivElement>(null)
+  const priorityMenuRef = useRef<HTMLDivElement>(null)
+  const sortMenuRef = useRef<HTMLDivElement>(null)
+
+  const handleMenuOpenChange = (
+    menu: 'status' | 'assignee' | 'dueDate' | 'priority' | 'sort',
+    isOpen: boolean,
+  ) => {
+    onStatusMenuOpenChange(menu === 'status' && isOpen)
+    onAssigneeMenuOpenChange(menu === 'assignee' && isOpen)
+    onDueDateMenuOpenChange(menu === 'dueDate' && isOpen)
+    onPriorityMenuOpenChange(menu === 'priority' && isOpen)
+    onSortMenuOpenChange(menu === 'sort' && isOpen)
+  }
+
+  useEffect(() => {
+    const openMenus = [
+      {
+        buttonId: statusFilterButtonId,
+        close: onStatusMenuOpenChange,
+        containerRef: statusMenuRef,
+        isOpen: isStatusMenuOpen,
+      },
+      {
+        buttonId: assigneeFilterButtonId,
+        close: onAssigneeMenuOpenChange,
+        containerRef: assigneeMenuRef,
+        isOpen: isAssigneeMenuOpen,
+      },
+      {
+        buttonId: dueDateFilterButtonId,
+        close: onDueDateMenuOpenChange,
+        containerRef: dueDateMenuRef,
+        isOpen: isDueDateMenuOpen,
+      },
+      {
+        buttonId: priorityFilterButtonId,
+        close: onPriorityMenuOpenChange,
+        containerRef: priorityMenuRef,
+        isOpen: isPriorityMenuOpen,
+      },
+      {
+        buttonId: sortButtonId,
+        close: onSortMenuOpenChange,
+        containerRef: sortMenuRef,
+        isOpen: isSortMenuOpen,
+      },
+    ].filter((menu) => menu.isOpen)
+
+    if (openMenus.length === 0) {
+      return
+    }
+
+    const focusTrigger = (menu: (typeof openMenus)[number]) => {
+      document.getElementById(menu.buttonId)?.focus()
+    }
+    const closeOpenMenus = () => {
+      openMenus.forEach((menu) => menu.close(false))
+    }
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return
+      }
+
+      event.preventDefault()
+      const focusedMenu = openMenus.find((menu) =>
+        menu.containerRef.current?.contains(document.activeElement),
+      )
+      closeOpenMenus()
+      focusTrigger(focusedMenu ?? openMenus[0])
+    }
+    const handlePointerDown = (event: globalThis.PointerEvent) => {
+      if (
+        event.target instanceof Node &&
+        openMenus.some((menu) => menu.containerRef.current?.contains(event.target as Node))
+      ) {
+        return
+      }
+
+      closeOpenMenus()
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    document.addEventListener('pointerdown', handlePointerDown)
+
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+      document.removeEventListener('pointerdown', handlePointerDown)
+    }
+  }, [
+    assigneeFilterButtonId,
+    assigneeMenuRef,
+    dueDateFilterButtonId,
+    dueDateMenuRef,
+    isAssigneeMenuOpen,
+    isDueDateMenuOpen,
+    isPriorityMenuOpen,
+    isSortMenuOpen,
+    isStatusMenuOpen,
+    onAssigneeMenuOpenChange,
+    onDueDateMenuOpenChange,
+    onPriorityMenuOpenChange,
+    onSortMenuOpenChange,
+    onStatusMenuOpenChange,
+    priorityFilterButtonId,
+    priorityMenuRef,
+    sortButtonId,
+    sortMenuRef,
+    statusFilterButtonId,
+    statusMenuRef,
+  ])
 
   if (activeTab === 'permissions') {
     return (
@@ -989,7 +1102,7 @@ function TaskWorkspace({
               onDueDateFilterChange('all')
             }}
           />
-          <div className="relative">
+          <div className="relative" ref={statusMenuRef}>
             <FilterButton
               active={statusFilter !== 'all'}
               ariaControls={statusFilterMenuId}
@@ -998,7 +1111,7 @@ function TaskWorkspace({
               icon={<StatusIcon />}
               id={statusFilterButtonId}
               label={t('tasks.filter.status')}
-              onClick={() => onStatusMenuOpenChange(!isStatusMenuOpen)}
+              onClick={() => handleMenuOpenChange('status', !isStatusMenuOpen)}
             />
             {isStatusMenuOpen ? (
               <div
@@ -1027,7 +1140,7 @@ function TaskWorkspace({
               </div>
             ) : null}
           </div>
-          <div className="relative">
+          <div className="relative" ref={assigneeMenuRef}>
             <FilterButton
               active={assigneeFilter !== 'all'}
               ariaControls={assigneeFilterMenuId}
@@ -1036,7 +1149,7 @@ function TaskWorkspace({
               icon={<AssigneeIcon />}
               id={assigneeFilterButtonId}
               label={t('tasks.filter.assignee')}
-              onClick={() => onAssigneeMenuOpenChange(!isAssigneeMenuOpen)}
+              onClick={() => handleMenuOpenChange('assignee', !isAssigneeMenuOpen)}
             />
             {isAssigneeMenuOpen ? (
               <div
@@ -1065,7 +1178,7 @@ function TaskWorkspace({
               </div>
             ) : null}
           </div>
-          <div className="relative">
+          <div className="relative" ref={dueDateMenuRef}>
             <FilterButton
               active={dueDateFilter !== 'all'}
               ariaControls={dueDateFilterMenuId}
@@ -1074,7 +1187,7 @@ function TaskWorkspace({
               icon={<CalendarIcon />}
               id={dueDateFilterButtonId}
               label={t('tasks.filter.dueDate')}
-              onClick={() => onDueDateMenuOpenChange(!isDueDateMenuOpen)}
+              onClick={() => handleMenuOpenChange('dueDate', !isDueDateMenuOpen)}
             />
             {isDueDateMenuOpen ? (
               <div
@@ -1103,7 +1216,7 @@ function TaskWorkspace({
               </div>
             ) : null}
           </div>
-          <div className="relative">
+          <div className="relative" ref={priorityMenuRef}>
             <FilterButton
               active={priorityFilter !== 'all'}
               ariaControls={priorityFilterMenuId}
@@ -1112,7 +1225,7 @@ function TaskWorkspace({
               icon={<FlagIcon />}
               id={priorityFilterButtonId}
               label={t('tasks.filter.priority')}
-              onClick={() => onPriorityMenuOpenChange(!isPriorityMenuOpen)}
+              onClick={() => handleMenuOpenChange('priority', !isPriorityMenuOpen)}
             />
             {isPriorityMenuOpen ? (
               <div
@@ -1143,7 +1256,7 @@ function TaskWorkspace({
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <div className="relative">
+          <div className="relative" ref={sortMenuRef}>
             <FilterButton
               ariaControls={sortMenuId}
               ariaExpanded={isSortMenuOpen}
@@ -1151,7 +1264,7 @@ function TaskWorkspace({
               icon={<CalendarIcon />}
               id={sortButtonId}
               label={t(resolveTaskSortOrderLabelKey(sortOrder))}
-              onClick={() => onSortMenuOpenChange(!isSortMenuOpen)}
+              onClick={() => handleMenuOpenChange('sort', !isSortMenuOpen)}
             />
             {isSortMenuOpen ? (
               <div

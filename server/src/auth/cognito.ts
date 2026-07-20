@@ -1,10 +1,14 @@
 import {
+  AdminCreateUserCommand,
+  AdminDeleteUserCommand,
   AdminGetUserCommand,
   AdminListGroupsForUserCommand,
+  AdminUpdateUserAttributesCommand,
   CognitoIdentityProviderClient,
   GetUserCommand,
   InitiateAuthCommand,
   ListUsersCommand,
+  RespondToAuthChallengeCommand,
 } from '@aws-sdk/client-cognito-identity-provider'
 import type { WorkspaceMemberStatus } from '../workspace-access'
 
@@ -493,6 +497,37 @@ export class AwsCognitoClient {
   }
 
   /**
+   * NEW_PASSWORD_REQUIRED challenge に恒久 password を応答します。
+   */
+  async respondToNewPasswordChallenge(
+    email: string,
+    newPassword: string,
+    session: string,
+  ): Promise<InitiateAuthResponse> {
+    const { clientId } = this.readRequiredConfiguration()
+
+    try {
+      const response = await this.client.send(new RespondToAuthChallengeCommand({
+        ChallengeName: 'NEW_PASSWORD_REQUIRED',
+        ChallengeResponses: {
+          USERNAME: normalizeCognitoUserId(email),
+          NEW_PASSWORD: newPassword,
+        },
+        ClientId: clientId,
+        Session: session,
+      }))
+
+      return {
+        AuthenticationResult: response.AuthenticationResult,
+        ChallengeName: response.ChallengeName,
+        Session: response.Session,
+      }
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
    * access token から Cognito ユーザー情報を取得します。
    */
   async getUser(accessToken: string): Promise<GetUserResponse> {
@@ -601,6 +636,188 @@ export class AwsCognitoClient {
       if (isCognitoUserNotFoundError(error)) {
         return false
       }
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Workspace invitation 対象の Cognito user と directory 属性を検索します。
+   */
+  async findWorkspaceUser(userId: string): Promise<CognitoWorkspaceUser | undefined> {
+    const { userPoolId } = this.readRequiredConfiguration()
+    const normalizedUserId = normalizeCognitoUserId(userId)
+
+    try {
+      const user = await this.client.send(new AdminGetUserCommand({
+        UserPoolId: userPoolId,
+        Username: normalizedUserId,
+      }))
+      const profile = toCognitoUserProfile(user)
+
+      if (!profile) {
+        throw new CognitoServiceError(
+          502,
+          'InvalidCognitoResponse',
+          `Cognito user "${normalizedUserId}" did not include a stable profile.`,
+        )
+      }
+
+      return {
+        profile,
+        directoryId: readCognitoUserDirectoryId(user),
+      }
+    } catch (error) {
+      const normalizedError = toCognitoSdkError(error)
+
+      if (isCognitoUserNotFoundError(normalizedError)) {
+        return undefined
+      }
+
+      throw normalizedError
+    }
+  }
+
+  /**
+   * invitation 対象 user を Cognito に作成または既存 identity と安全に関連付けます。
+   */
+  async provisionWorkspaceUser(
+    input: ProvisionCognitoWorkspaceUserInput,
+  ): Promise<ProvisionCognitoWorkspaceUserResult> {
+    const { userPoolId } = this.readRequiredConfiguration()
+    const email = normalizeCognitoUserId(input.email)
+    const existingUser = input.existingUser ?? await this.findWorkspaceUser(email)
+
+    if (existingUser) {
+      this.requireCompatibleWorkspaceDirectory(existingUser, input.directoryId)
+      await this.updateWorkspaceUserAttributes(email, input.directoryId, input.name)
+
+      return {
+        profile: {
+          ...existingUser.profile,
+          name: input.name?.trim() || existingUser.profile.name,
+        },
+        identityOwnership: 'pre-existing',
+        deliveryStatus: 'not-required',
+      }
+    }
+
+    try {
+      const response = await this.client.send(new AdminCreateUserCommand({
+        UserPoolId: userPoolId,
+        Username: email,
+        DesiredDeliveryMediums: ['EMAIL'],
+        UserAttributes: createWorkspaceCognitoUserAttributes(email, input.directoryId, input.name),
+      }))
+      const profile = response.User ? toCognitoUserProfile(response.User) : undefined
+
+      return {
+        profile: profile ?? {
+          id: email,
+          username: email,
+          email,
+          name: input.name?.trim() || undefined,
+          enabled: true,
+          status: 'FORCE_CHANGE_PASSWORD',
+        },
+        identityOwnership: 'workspace-created',
+        deliveryStatus: 'sent',
+      }
+    } catch (error) {
+      const normalizedError = toCognitoSdkError(error)
+
+      if (normalizedError.code !== 'UsernameExistsException') {
+        throw normalizedError
+      }
+
+      const racedUser = await this.findWorkspaceUser(email)
+
+      if (!racedUser) {
+        throw normalizedError
+      }
+
+      this.requireCompatibleWorkspaceDirectory(racedUser, input.directoryId)
+      await this.updateWorkspaceUserAttributes(email, input.directoryId, input.name)
+
+      if (racedUser.profile.status === 'FORCE_CHANGE_PASSWORD') {
+        await this.resendWorkspaceUserInvitation(racedUser.profile.username)
+      }
+
+      return {
+        profile: racedUser.profile,
+        identityOwnership: 'ambiguous',
+        deliveryStatus: racedUser.profile.status === 'FORCE_CHANGE_PASSWORD'
+          ? 'sent'
+          : 'not-required',
+      }
+    }
+  }
+
+  /**
+   * Workspace が作成した未確定 Cognito user の invitation を再送します。
+   */
+  async resendWorkspaceUserInvitation(userId: string): Promise<void> {
+    const { userPoolId } = this.readRequiredConfiguration()
+
+    try {
+      await this.client.send(new AdminCreateUserCommand({
+        UserPoolId: userPoolId,
+        Username: normalizeCognitoUserId(userId),
+        MessageAction: 'RESEND',
+        DesiredDeliveryMediums: ['EMAIL'],
+      }))
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Workspace が所有する未確定 Cognito user を削除します。
+   */
+  async deleteWorkspaceUser(userId: string): Promise<void> {
+    const { userPoolId } = this.readRequiredConfiguration()
+
+    try {
+      await this.client.send(new AdminDeleteUserCommand({
+        UserPoolId: userPoolId,
+        Username: normalizeCognitoUserId(userId),
+      }))
+    } catch (error) {
+      const normalizedError = toCognitoSdkError(error)
+
+      if (!isCognitoUserNotFoundError(normalizedError)) {
+        throw normalizedError
+      }
+    }
+  }
+
+  /**
+   * 既存 Cognito user が別 Workspace に所属していないことを検証します。
+   */
+  private requireCompatibleWorkspaceDirectory(user: CognitoWorkspaceUser, directoryId: string) {
+    if (!user.directoryId || user.directoryId === directoryId) {
+      return
+    }
+
+    throw new CognitoServiceError(
+      409,
+      'WorkspaceDirectoryConflict',
+      `Cognito user "${user.profile.id}" already belongs to another Workspace.`,
+    )
+  }
+
+  /**
+   * 既存 Cognito user に Workspace directory と表示属性を設定します。
+   */
+  private async updateWorkspaceUserAttributes(userId: string, directoryId: string, name?: string) {
+    const { userPoolId } = this.readRequiredConfiguration()
+
+    try {
+      await this.client.send(new AdminUpdateUserAttributesCommand({
+        UserPoolId: userPoolId,
+        Username: normalizeCognitoUserId(userId),
+        UserAttributes: createWorkspaceCognitoUserAttributes(userId, directoryId, name),
+      }))
+    } catch (error) {
       throw toCognitoSdkError(error)
     }
   }
@@ -1130,6 +1347,10 @@ function toCognitoSdkError(error: unknown) {
     : 'Cognito request failed.'
 
   return new CognitoServiceError(status, code, message)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {
