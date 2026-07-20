@@ -1607,23 +1607,20 @@ export function DocumentScreen({
   const selectDocument = (selectedId: string) =>
     runGuardedAction(() => actions.selectDocument(selectedId))
 
+  const runSidebarSelection = (action: () => void | Promise<void>) => {
+    void runGuardedAction(action).then((completed) => {
+      if (completed) setIsMobileSidebarOpen(false)
+    })
+  }
+
   const selectNavFromSidebar = (navId: SidebarNavId) => {
-    void runGuardedAction(() => actions.selectNav?.(navId))
-      .then((completed) => {
-        if (completed) setIsMobileSidebarOpen(false)
-      })
+    runSidebarSelection(() => actions.selectNav?.(navId))
   }
   const selectProjectFromSidebar = (projectId: string, teamId: string) => {
-    void runGuardedAction(() => actions.selectProject?.(projectId, teamId))
-      .then((completed) => {
-        if (completed) setIsMobileSidebarOpen(false)
-      })
+    runSidebarSelection(() => actions.selectProject?.(projectId, teamId))
   }
   const selectTeamViewFromSidebar = (teamId: string, viewId: SidebarTeamViewId) => {
-    void runGuardedAction(() => actions.selectTeamView?.(teamId, viewId))
-      .then((completed) => {
-        if (completed) setIsMobileSidebarOpen(false)
-      })
+    runSidebarSelection(() => actions.selectTeamView?.(teamId, viewId))
   }
 
   return (
